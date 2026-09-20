@@ -20,8 +20,17 @@ from build_volan_index import GTFS_URL, build_index  # noqa: E402
 
 UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungarian-transport)"
 HA_BASE = Path("/config/hungarian-transport")
-HA_OUT = Path("/config/www/community/bkk-stop-card/volan-index.json.gz")
 WEBHOOK_PATH = "/api/webhook/hungarian-transport-gtfs"
+
+# The index must sit next to the card JS, because the card resolves it relative
+# to its own module URL. HACS installs the card under www/community/<repo name>;
+# set HUNGARIAN_TRANSPORT_INDEX when the card is served from somewhere else.
+HA_OUT = Path(
+    os.environ.get(
+        "HUNGARIAN_TRANSPORT_INDEX",
+        "/config/www/community/hungarian-transport/volan-index.json.gz",
+    )
+)
 
 
 def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
