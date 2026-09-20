@@ -1,4 +1,4 @@
-/* crusand BKK/MAV v28 */
+/* crusand Hungarian transport v29 */
 (function defineNow() {
   const TAG = 'bkk-stop-card-r3';
   const ED = 'bkk-stop-card-r3-editor';
@@ -51,7 +51,7 @@
     }
     customElements.define(TAG, BkkStopCardR3);
   }
-  console.info('[hungarian-transport] defined v28');
+  console.info('[hungarian-transport] defined v29');
 })();
 
 /* hop + editor + shared BkkLib */
