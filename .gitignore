@@ -13,3 +13,5 @@ volanbusz_gtfs.zip
 state.json
 *.tmp
 *.log
+node_modules/
+

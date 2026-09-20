@@ -2,10 +2,11 @@
 """Daily KTI Volán + municipal GTFS check for Hungarian transport on HA OS."""
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import signal
 import sys
-import tempfile
 import urllib.error
 import urllib.request
 from email.utils import parsedate_to_datetime
@@ -14,10 +15,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_city_index import CITY_FEEDS, build_city_index  # noqa: E402
 from build_volan_index import GTFS_URL, build_index  # noqa: E402
+from gtfs_compact import UA, download_feed, download_zip  # noqa: E402
 
-UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungarian-transport)"
-HA_BASE = Path("/config/hungarian-transport")
 WEBHOOK_PATH = "/api/webhook/hungarian-transport-gtfs"
+HA_BASE = Path("/config/hungarian-transport")
 HA_WWW = Path(
     os.environ.get(
         "HUNGARIAN_TRANSPORT_WWW",
@@ -28,18 +29,24 @@ HA_WWW = Path(
 
 def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
     payload = json.dumps({"title": title, "message": message}).encode("utf-8")
-    urls = [
-        "http://127.0.0.1:8123" + WEBHOOK_PATH,
-        "http://supervisor/core" + WEBHOOK_PATH,
+    urls: list[tuple[str, dict]] = [
+        ("http://127.0.0.1:8123" + WEBHOOK_PATH, {"Content-Type": "application/json", "User-Agent": UA}),
     ]
-    for url in urls:
-        try:
-            req = urllib.request.Request(
-                url,
-                data=payload,
-                method="POST",
-                headers={"Content-Type": "application/json", "User-Agent": UA},
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if token:
+        urls.append(
+            (
+                "http://supervisor/core" + WEBHOOK_PATH,
+                {
+                    "Content-Type": "application/json",
+                    "User-Agent": UA,
+                    "Authorization": f"Bearer {token}",
+                },
             )
+        )
+    for url, headers in urls:
+        try:
+            req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
             with urllib.request.urlopen(req, timeout=10) as resp:
                 resp.read()
             return
@@ -71,6 +78,17 @@ def save_state(path: Path, state: dict) -> None:
     tmp.replace(path)
 
 
+def sweep_temps(*dirs: Path) -> None:
+    for folder in dirs:
+        if not folder.is_dir():
+            continue
+        for p in list(folder.glob("gtfs_*.zip")) + list(folder.glob("*.tmp")):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
 def headers_of(resp) -> dict:
     get = resp.headers.get
     last_modified = (get("Last-Modified") or "").strip()
@@ -90,6 +108,19 @@ def headers_of(resp) -> dict:
     }
 
 
+def merge_meta(head: dict, downloaded: dict | None, size: int | None) -> dict:
+    """Keep the HEAD fingerprint; fill gaps from the GET/file, never blank them out."""
+    out = dict(head or {})
+    for k, v in (downloaded or {}).items():
+        if v and not out.get(k):
+            out[k] = v
+    if size:
+        out["size"] = size
+        if not out.get("content_length"):
+            out["content_length"] = str(size)
+    return out
+
+
 def request(method: str, url: str):
     hdrs = {"User-Agent": UA, "Accept": "*/*", "Accept-Encoding": "identity"}
     req = urllib.request.Request(url, method=method, headers=hdrs)
@@ -106,47 +137,48 @@ def remote_meta(url: str) -> dict:
             raise
     except OSError:
         pass
-    with request("GET", url) as resp:
-        return headers_of(resp)
+    # Do not GET a 100 MB body just to read headers. Treat as unknown.
+    return {}
 
 
 def same_remote(state: dict, meta: dict) -> bool:
-    if not state:
+    if not state or not meta:
         return False
     if meta.get("etag") and state.get("etag"):
         return meta["etag"] == state["etag"]
     if meta.get("content_length") and state.get("content_length"):
-        return meta["content_length"] == state["content_length"]
+        return str(meta["content_length"]) == str(state["content_length"])
     if meta.get("last_modified") and state.get("last_modified"):
         return meta["last_modified"] == state["last_modified"]
     return False
 
 
-def download_zip(url: str, dest: Path) -> dict:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix="gtfs_", suffix=".zip", dir=str(dest.parent))
-    os.close(fd)
-    tmp = Path(tmp_name)
+def acquire_lock(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = path.open("a")
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Encoding": "identity"})
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            meta = headers_of(resp)
-            with tmp.open("wb") as out:
-                while True:
-                    chunk = resp.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    out.write(chunk)
-        tmp.replace(dest)
-        return meta
-    except Exception:
-        if tmp.exists():
-            tmp.unlink()
-        raise
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return None
+    return fh
 
 
 def main() -> int:
     base, volan_out, city_out = paths()
+    lock = acquire_lock(base / "update.lock")
+    if lock is None:
+        print("another update is running")
+        return 0
+    sweep_temps(base, volan_out.parent)
+
+    def on_signal(_signum, _frame):
+        sweep_temps(base, volan_out.parent)
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, on_signal)
+    signal.signal(signal.SIGINT, on_signal)
+
     state_path = base / "state.json"
     zip_path = base / "volanbusz_gtfs.zip"
     state = load_state(state_path)
@@ -157,70 +189,84 @@ def main() -> int:
     }
     city_state = state.get("cities") or {}
     changed: list[str] = []
+    exit_code = 0
 
     try:
-        volan_meta = remote_meta(GTFS_URL)
-    except Exception as err:
-        msg = f"error HEAD/GET {GTFS_URL}: {err}"
-        print(msg, file=sys.stderr)
-        notify(f"Volán GTFS frissítés sikertelen: {msg}")
-        return 1
-
-    volan_changed = not (same_remote(volan_state, volan_meta) and volan_out.exists())
-    if volan_changed:
         try:
-            volan_meta = download_zip(GTFS_URL, zip_path)
-            info = build_index(zip_path, volan_out)
+            volan_meta = remote_meta(GTFS_URL)
         except Exception as err:
-            msg = f"error volan rebuild: {err}"
+            msg = f"error HEAD {GTFS_URL}: {err}"
             print(msg, file=sys.stderr)
             notify(f"Volán GTFS frissítés sikertelen: {msg}")
             return 1
-        volan_state = {**volan_meta, "feed_version": info["feed_version"], "trips": info["trips"], "stops": info["stops"]}
-        changed.append(f"volan {info['feed_version'] or '?'}")
-    else:
-        print(f"unchanged volan {volan_state.get('feed_version') or '?'}")
 
-    city_need = volan_changed or not city_out.exists()
-    for feed in CITY_FEEDS:
-        try:
-            meta = remote_meta(feed["url"])
-        except Exception as err:
-            print(f"warn HEAD {feed['id']}: {err}", file=sys.stderr)
-            continue
-        prev = city_state.get(feed["id"]) or {}
-        zpath = base / feed["file"]
-        if same_remote(prev, meta) and zpath.exists():
-            city_state[feed["id"]] = {**prev, **meta}
-            continue
-        try:
-            meta = download_zip(feed["url"], zpath)
-        except Exception as err:
-            print(f"warn download {feed['id']}: {err}", file=sys.stderr)
-            continue
-        city_state[feed["id"]] = meta
-        city_need = True
+        volan_changed = not (same_remote(volan_state, volan_meta) and volan_out.exists())
+        if volan_changed:
+            try:
+                downloaded = download_zip(GTFS_URL, zip_path)
+                info = build_index(zip_path, volan_out)
+            except Exception as err:
+                msg = f"error volan rebuild: {err}"
+                print(msg, file=sys.stderr)
+                notify(f"Volán GTFS frissítés sikertelen: {msg}")
+                return 1
+            volan_state = merge_meta(
+                volan_meta,
+                downloaded,
+                zip_path.stat().st_size if zip_path.exists() else None,
+            )
+            volan_state["feed_version"] = info["feed_version"]
+            volan_state["trips"] = info["trips"]
+            volan_state["stops"] = info["stops"]
+            changed.append(f"volan {info['feed_version'] or '?'}")
+        else:
+            print(f"unchanged volan {volan_state.get('feed_version') or '?'}")
 
-    if city_need:
-        try:
-            info = build_city_index(base, city_out, zip_path if zip_path.exists() else None)
-        except Exception as err:
-            msg = f"error city rebuild: {err}"
-            print(msg, file=sys.stderr)
-            notify(f"Helyi GTFS frissítés sikertelen: {msg}")
-            return 1
-        changed.append(f"city ops={info['ops']} trips={info['trips']}")
+        city_need = volan_changed or not city_out.exists()
+        for feed in CITY_FEEDS:
+            try:
+                meta = remote_meta(feed["url"])
+            except Exception as err:
+                print(f"warn HEAD {feed['id']}: {err}", file=sys.stderr)
+                continue
+            prev = city_state.get(feed["id"]) or {}
+            zpath = base / feed["file"]
+            if same_remote(prev, meta) and zpath.exists():
+                city_state[feed["id"]] = merge_meta(meta, prev, zpath.stat().st_size)
+                continue
+            try:
+                downloaded = download_feed(feed["url"], zpath)
+            except Exception as err:
+                print(f"warn download {feed['id']}: {err}", file=sys.stderr)
+                continue
+            city_state[feed["id"]] = merge_meta(
+                meta, downloaded, zpath.stat().st_size if zpath.exists() else None
+            )
+            city_need = True
 
-    save_state(
-        state_path,
-        {
-            "volan": volan_state,
-            "cities": city_state,
-            "index": str(volan_out),
-            "city_index": str(city_out),
-        },
-    )
+        if city_need:
+            try:
+                info = build_city_index(base, city_out, zip_path if zip_path.exists() else None)
+                changed.append(f"city ops={info['ops']} trips={info['trips']}")
+            except Exception as err:
+                msg = f"error city rebuild: {err}"
+                print(msg, file=sys.stderr)
+                notify(f"Helyi GTFS frissítés sikertelen: {msg}")
+                exit_code = 1
+    finally:
+        save_state(
+            state_path,
+            {
+                "volan": volan_state,
+                "cities": city_state,
+                "index": str(volan_out),
+                "city_index": str(city_out),
+            },
+        )
+        lock.close()
 
+    if exit_code:
+        return exit_code
     if not changed:
         print("unchanged")
         return 0

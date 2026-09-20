@@ -1,0 +1,11 @@
+{
+  "name": "hungarian-transport",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test-i18n.mjs && node test-render.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^24.1.3"
+  }
+}

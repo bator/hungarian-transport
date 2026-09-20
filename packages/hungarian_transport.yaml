@@ -54,4 +54,4 @@ automation:
       - action: notify.admins
         data:
           title: "{{ trigger.json.title | default('Hungarian transport GTFS') }}"
-          message: "{{ trigger.json.message }}"
+          message: "{{ trigger.json.message | default('') }}"

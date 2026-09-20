@@ -6,14 +6,21 @@ import csv
 import gzip
 import io
 import json
+import os
 import re
+import tempfile
 import unicodedata
+import urllib.request
 import zipfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Iterable
 
 RoutePred = Callable[[str, str, str], bool]
+
+UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungarian-transport)"
+MAX_MEMBER = 500 * 1024 * 1024
+INDEX_SCHEMA = 27
 
 
 def parent(sid: str) -> str:
@@ -27,23 +34,17 @@ def hm(t: str | None) -> int | None:
     if not t:
         return None
     a = t.split(":")
-    return int(a[0]) * 60 + int(a[1])
+    if len(a) < 2:
+        return None
+    try:
+        return int(a[0]) * 60 + int(a[1])
+    except ValueError:
+        return None
 
 
 def stop_num(pid: str) -> str:
     m = re.search(r"(\d+)$", pid)
     return m.group(1) if m else ""
-
-
-def feed_version(z: zipfile.ZipFile) -> str:
-    try:
-        with z.open("feed_info.txt") as f:
-            rows = list(csv.DictReader(io.TextIOWrapper(f, "utf-8-sig")))
-        if rows:
-            return (rows[0].get("feed_version") or "").strip()
-    except KeyError:
-        pass
-    return ""
 
 
 def slug(text: str) -> str:
@@ -55,12 +56,90 @@ def slug(text: str) -> str:
     return folded or "local"
 
 
+def open_gtfs_zip(zpath: Path) -> zipfile.ZipFile:
+    head = zpath.read_bytes()[:4]
+    if head[:2] != b"PK":
+        raise zipfile.BadZipFile(f"{zpath} is not a zip file")
+    z = zipfile.ZipFile(zpath)
+    try:
+        for info in z.infolist():
+            if info.file_size > MAX_MEMBER:
+                raise zipfile.BadZipFile(
+                    f"{info.filename} uncompressed size {info.file_size} exceeds limit"
+                )
+    except Exception:
+        z.close()
+        raise
+    return z
+
+
+def feed_version(z: zipfile.ZipFile) -> str:
+    try:
+        rows = list(_open_csv(z, "feed_info.txt"))
+        if rows:
+            return (rows[0].get("feed_version") or "").strip()
+    except FileNotFoundError:
+        pass
+    return ""
+
+
 def _open_csv(z: zipfile.ZipFile, name: str):
     names = {n.lower(): n for n in z.namelist()}
     real = names.get(name.lower())
     if not real:
         raise FileNotFoundError(name)
-    return csv.DictReader(io.TextIOWrapper(z.open(real), "utf-8-sig"))
+    raw = z.read(real)
+    text = None
+    for enc in ("utf-8-sig", "utf-8", "cp1250", "iso-8859-2", "latin-1"):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        text = raw.decode("utf-8", errors="replace")
+    return csv.DictReader(io.StringIO(text))
+
+
+def download_zip(url: str, dest: Path) -> dict:
+    """Write url to dest via a sibling tempfile so a kill cannot leave a truncated zip."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix="gtfs_", suffix=".zip", dir=str(dest.parent))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": UA, "Accept-Encoding": "identity"},
+        )
+        with urllib.request.urlopen(req, timeout=120) as resp, tmp.open("wb") as out:
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+        if tmp.stat().st_size < 4 or tmp.read_bytes()[:2] != b"PK":
+            raise zipfile.BadZipFile(f"{url} did not return a zip")
+        tmp.replace(dest)
+        return {"size": dest.stat().st_size, "content_length": str(dest.stat().st_size)}
+    except Exception:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+
+
+def download_feed(url: str, dest: Path) -> dict:
+    """Prefer HTTPS when the published URL is still http://."""
+    candidates = [url]
+    if url.startswith("http://"):
+        candidates.insert(0, "https://" + url[len("http://") :])
+    last: Exception | None = None
+    for u in candidates:
+        try:
+            return download_zip(u, dest)
+        except Exception as err:
+            last = err
+    raise last or RuntimeError(f"download failed: {url}")
 
 
 def load_parts(
@@ -74,7 +153,30 @@ def load_parts(
     skip_agency: Callable[[str], bool] | None = None,
 ) -> list[dict]:
     """Parse one GTFS zip into one or more operator parts."""
-    z = zipfile.ZipFile(zpath)
+    with open_gtfs_zip(zpath) as z:
+        return _load_parts(
+            z,
+            include_route,
+            prefix=prefix,
+            split_agencies=split_agencies,
+            op_id=op_id,
+            op_name=op_name,
+            skip_agency=skip_agency,
+            zpath=zpath,
+        )
+
+
+def _load_parts(
+    z: zipfile.ZipFile,
+    include_route: RoutePred,
+    *,
+    prefix: str,
+    split_agencies: bool,
+    op_id: str,
+    op_name: str,
+    skip_agency: Callable[[str], bool] | None,
+    zpath: Path,
+) -> list[dict]:
     version = feed_version(z)
 
     agencies: dict[str, str] = {}
@@ -88,7 +190,9 @@ def load_parts(
     sid2p: dict[str, str] = {}
     sid2n: dict[str, str] = {}
     for row in _open_csv(z, "stops.txt"):
-        raw = row["stop_id"]
+        raw = row.get("stop_id") or ""
+        if not raw:
+            continue
         sid2p[raw] = parent(raw)
         sid2n[raw] = row.get("stop_name") or ""
 
@@ -100,7 +204,9 @@ def load_parts(
     route_agency: dict[str, str] = {}
     keep_routes: set[str] = set()
     for row in _open_csv(z, "routes.txt"):
-        rid = row["route_id"]
+        rid = row.get("route_id") or ""
+        if not rid:
+            continue
         short = (row.get("route_short_name") or "").strip() or (row.get("route_long_name") or "").strip()
         aid = row.get("agency_id") or ""
         aname = agencies.get(aid, aid or op_name)
@@ -116,7 +222,9 @@ def load_parts(
     keep_trips: set[str] = set()
     for row in _open_csv(z, "trips.txt"):
         rid = row.get("route_id") or ""
-        tid = row["trip_id"]
+        tid = row.get("trip_id") or ""
+        if not tid:
+            continue
         trips_meta[tid] = (rid, row.get("service_id") or "")
         if rid in keep_routes:
             keep_trips.add(tid)
@@ -124,6 +232,9 @@ def load_parts(
     cal: dict[str, list[str]] = {}
     try:
         for row in _open_csv(z, "calendar.txt"):
+            sid = row.get("service_id") or ""
+            if not sid:
+                continue
             days = "".join(
                 row.get(d, "0")
                 for d in (
@@ -136,7 +247,7 @@ def load_parts(
                     "sunday",
                 )
             )
-            cal[row["service_id"]] = [days, row.get("start_date") or "20200101", row.get("end_date") or "20991231"]
+            cal[sid] = [days, row.get("start_date") or "20200101", row.get("end_date") or "20991231"]
     except FileNotFoundError:
         pass
 
@@ -144,14 +255,18 @@ def load_parts(
     ex_rem: dict[str, list[str]] = defaultdict(list)
     try:
         for row in _open_csv(z, "calendar_dates.txt"):
-            sid = row["service_id"]
-            (ex_add if row.get("exception_type") == "1" else ex_rem)[sid].append(row["date"])
+            sid = row.get("service_id") or ""
+            date = row.get("date") or ""
+            if not sid or not date:
+                continue
+            if row.get("exception_type") == "1":
+                ex_add[sid].append(date)
+            elif row.get("exception_type") == "2":
+                ex_rem[sid].append(date)
     except FileNotFoundError:
         pass
 
     seqs: dict[str, list[tuple[str, int]]] = {}
-    cur = None
-    seq: list[tuple[str, int | None]] = []
 
     def flush(tid: str, items: list[tuple[str, int | None]]) -> None:
         if tid not in keep_trips or not items:
@@ -167,16 +282,34 @@ def load_parts(
         if len(pts) >= 2:
             seqs[tid] = pts
 
+    timed: list[tuple[str, int, str, int | None]] = []
     for row in _open_csv(z, "stop_times.txt"):
-        tid = row["trip_id"]
+        tid = row.get("trip_id") or ""
+        if tid not in keep_trips:
+            continue
+        try:
+            seqn = int(row["stop_sequence"]) if row.get("stop_sequence") not in (None, "") else 10**9
+        except (TypeError, ValueError):
+            seqn = 10**9
+        timed.append(
+            (
+                tid,
+                seqn,
+                row.get("stop_id") or "",
+                hm(row.get("departure_time") or row.get("arrival_time")),
+            )
+        )
+    timed.sort(key=lambda x: (x[0], x[1]))
+    cur: str | None = None
+    seq: list[tuple[str, int | None]] = []
+    for tid, _seqn, sid, m in timed:
         if cur is None:
             cur = tid
         if tid != cur:
             flush(cur, seq)
             seq = []
             cur = tid
-        if tid in keep_trips:
-            seq.append((row["stop_id"], hm(row.get("departure_time") or row.get("arrival_time"))))
+        seq.append((sid, m))
     if cur:
         flush(cur, seq)
 
@@ -249,6 +382,10 @@ def load_parts(
         if oid == "volanbusz":
             oid = "volan-helyi"
             display = "Volán helyi"
+        elif not oid.startswith("volan-"):
+            # Keep municipal ids (szeged, pecs, …) unique when Volán local
+            # agencies reuse the city name.
+            oid = "volan-" + oid
         packed = pack(oid, display, tids)
         packed["s"] = [[f"{oid}:{row[0]}", row[1], row[2]] for row in packed["s"]]
         if packed["t"]:
@@ -256,7 +393,18 @@ def load_parts(
     return parts
 
 
-def write_index(parts: list[dict], out: Path, *, with_operators: bool, schema: int = 27) -> dict:
+def existing_trips(out: Path) -> int | None:
+    if not out.exists():
+        return None
+    try:
+        with gzip.open(out, "rt", encoding="utf-8") as fh:
+            idx = json.load(fh)
+        return len(idx.get("t") or [])
+    except (OSError, json.JSONDecodeError, gzip.BadGzipFile):
+        return None
+
+
+def write_index(parts: list[dict], out: Path, *, with_operators: bool, schema: int = INDEX_SCHEMA) -> dict:
     """Merge operator parts into one gzipped compact index."""
     ops: list[tuple[str, str]] = []
     seen_op: dict[str, int] = {}
@@ -286,6 +434,11 @@ def write_index(parts: list[dict], out: Path, *, with_operators: bool, schema: i
             all_t.append([t[0] + c_off, t[1], [p + s_off for p in t[2]], t[3]])
         if part.get("feed"):
             feeds.append(f"{oid}:{part['feed']}")
+    prev = existing_trips(out)
+    if prev is not None and prev >= 50 and len(all_t) < prev * 0.5:
+        raise RuntimeError(
+            f"refusing to replace {out.name}: {len(all_t)} trips vs previous {prev}"
+        )
     idx = {
         "v": schema,
         "feed": ";".join(feeds),

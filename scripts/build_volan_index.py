@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import re
-import urllib.request
 from pathlib import Path
 
-from gtfs_compact import load_parts, write_index
+from gtfs_compact import download_feed, load_parts, write_index
 
 GTFS_URL = "https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip"
 OUT = Path("volan-index.json.gz")
@@ -24,14 +23,14 @@ def build_index(zpath: Path, out: Path) -> dict:
         op_name="Volán",
         prefix="",
     )
-    return write_index(parts, out, with_operators=False, schema=26)
+    return write_index(parts, out, with_operators=False)
 
 
 def main() -> None:
     zpath = Path("volanbusz_gtfs.zip")
     if not zpath.exists():
         print("downloading", GTFS_URL)
-        urllib.request.urlretrieve(GTFS_URL, zpath)
+        download_feed(GTFS_URL, zpath)
     info = build_index(zpath, OUT)
     print("wrote", OUT, info)
 

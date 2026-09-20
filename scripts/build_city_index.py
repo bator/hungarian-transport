@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import re
-import urllib.request
+import sys
 from pathlib import Path
 
-from gtfs_compact import load_parts, write_index
+from gtfs_compact import download_feed, load_parts, write_index
 
 VOLAN_URL = "https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip"
 OUT = Path("city-index.json.gz")
-UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungarian-transport)"
 
 # Debrecen DKV is not published as a public zip. Skip until a URL exists.
 CITY_FEEDS = [
@@ -59,52 +58,53 @@ def skip_helykozi(agency: str) -> bool:
     return "helyközi" in low or "helykozi" in low
 
 
-def download(url: str, dest: Path) -> None:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Encoding": "identity"})
-    with urllib.request.urlopen(req, timeout=120) as resp, dest.open("wb") as out:
-        while True:
-            chunk = resp.read(1024 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
-
-
 def collect_parts(base: Path, volan_zip: Path | None = None) -> list[dict]:
     parts: list[dict] = []
+    failed: list[str] = []
     for feed in CITY_FEEDS:
         zpath = base / feed["file"]
-        if not zpath.exists():
-            print("downloading", feed["id"], feed["url"])
-            download(feed["url"], zpath)
-        parts.extend(
-            load_parts(
-                zpath,
-                include_all,
-                op_id=feed["id"],
-                op_name=feed["name"],
-                prefix=f"{feed['id']}:",
+        try:
+            if not zpath.exists():
+                print("downloading", feed["id"], feed["url"])
+                download_feed(feed["url"], zpath)
+            parts.extend(
+                load_parts(
+                    zpath,
+                    include_all,
+                    op_id=feed["id"],
+                    op_name=feed["name"],
+                    prefix=f"{feed['id']}:",
+                )
             )
-        )
+        except Exception as err:
+            failed.append(feed["id"])
+            print(f"warn {feed['id']}: {err}", file=sys.stderr)
     if volan_zip and volan_zip.exists():
-        print("volan local", volan_zip)
-        parts.extend(
-            load_parts(
-                volan_zip,
-                include_volan_local,
-                split_agencies=True,
-                skip_agency=skip_helykozi,
-                prefix="",
+        try:
+            print("volan local", volan_zip)
+            parts.extend(
+                load_parts(
+                    volan_zip,
+                    include_volan_local,
+                    split_agencies=True,
+                    skip_agency=skip_helykozi,
+                    prefix="",
+                )
             )
-        )
-    return [p for p in parts if p.get("t")]
+        except Exception as err:
+            failed.append("volan-local")
+            print(f"warn volan-local: {err}", file=sys.stderr)
+    parts = [p for p in parts if p.get("t")]
+    if not parts:
+        raise RuntimeError("no city GTFS parts" + (f" ({', '.join(failed)})" if failed else ""))
+    if failed:
+        print("partial city index, skipped:", ", ".join(failed), file=sys.stderr)
+    return parts
 
 
 def build_city_index(base: Path, out: Path, volan_zip: Path | None = None) -> dict:
     parts = collect_parts(base, volan_zip)
-    if not parts:
-        raise RuntimeError("no city GTFS parts")
-    return write_index(parts, out, with_operators=True, schema=27)
+    return write_index(parts, out, with_operators=True)
 
 
 def main() -> None:
@@ -112,7 +112,7 @@ def main() -> None:
     volan = Path("volanbusz_gtfs.zip")
     if not volan.exists():
         print("downloading", VOLAN_URL)
-        download(VOLAN_URL, volan)
+        download_feed(VOLAN_URL, volan)
     info = build_city_index(base, OUT, volan)
     print("wrote", OUT, info)
 

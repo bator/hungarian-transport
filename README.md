@@ -3,26 +3,24 @@
 [![hacs][hacs-badge]][hacs-url]
 [![release][release-badge]][release-url]
 
-Home Assistant dashboard card for **BKK**, **MÁV**, **Volán** and other
-Hungarian city operators (Miskolc, Pécs, Szeged, Szombathely, plus Volán
-local networks such as Sopron or Eger).
+Home Assistant dashboard card for **BKK**, **MÁV**, **Volán** and Hungarian
+city operators (Miskolc, Pécs, Szeged, Szombathely, plus Volán local networks
+such as Sopron or Eger).
 
-Pick an origin and a destination, and the card lists the next departures between
+Pick an origin and a destination. The card lists the next departures between
 those two stops. City and rail traffic in Budapest come from the live BKK FUTÁR
-API. Long-distance coaches and local services outside Budapest come from official
-GTFS feeds.
+API. Long-distance coaches and local services outside Budapest come from
+official GTFS feeds, shipped next to the card as compact gzip indexes.
 
 The editor and the card are available in **Hungarian and English**. By default
-they follow the Home Assistant user's language; you can also pin one explicitly.
-
-![Hungarian transport card](images/screenshot.png)
+they follow the Home Assistant user's language; you can pin one explicitly.
 
 ## Install
 
 ### HACS
 
-1. HACS → Frontend → ⋮ → Custom repositories → add this repository with
-   category **Dashboard**.
+1. HACS → Frontend → ⋮ → Custom repositories → add
+   `https://github.com/bator/hungarian-transport` with category **Dashboard**.
 2. Download **Hungarian transport**.
 3. HACS adds the Lovelace resource automatically. If you manage resources by
    hand, add:
@@ -32,26 +30,40 @@ they follow the Home Assistant user's language; you can also pin one explicitly.
    type: module
    ```
 
-   `type: module` is required — the card resolves its own asset paths from the
-   module URL.
+   `type: module` is required — the card resolves `volan-index.json.gz` and
+   `city-index.json.gz` from the module URL.
+
+A HACS download is a GitHub **release zip** (`hungarian-transport.zip`). It
+contains the card **and** both GTFS indexes. The default branch is not a
+working install by itself.
 
 ### Manual
 
-Copy `hungarian-transport.js` to `/config/www/hungarian-transport/` and add the
-matching `/local/hungarian-transport/hungarian-transport.js` resource.
+Copy `hungarian-transport.js`, `volan-index.json.gz` and `city-index.json.gz`
+into `/config/www/hungarian-transport/` and add the matching
+`/local/hungarian-transport/hungarian-transport.js` resource (`type: module`).
+
+Build the indexes first:
+
+```bash
+python3 scripts/build_volan_index.py
+python3 scripts/build_city_index.py
+```
 
 ## Setup
 
-Add the **Hungarian transport** card from the card picker (`custom:hungarian-transport-card`).
-Older dashboards that still use `custom:bkk-stop-card-r3` keep working as an alias.
+Add the **Hungarian transport** card from the card picker
+(`custom:hungarian-transport-card`). Older dashboards that still use
+`custom:bkk-stop-card-r3` keep working as an alias.
 
-The editor asks for a BKK Open Data API key, which is free after a short sign-up:
+BKK and MÁV modes need a BKK Open Data API key, free after a short sign-up:
 <https://opendata.bkk.hu/data-sources>
 
-The key is stored in the card configuration. If another Hungarian transport card
-on the same dashboard already has one, the editor reuses it. When the key works,
-the editor hides the field; it only reappears if the key is missing or FUTÁR
-rejects it. Volán and Helyi modes do not need a key.
+The key is stored in the card configuration. If another Hungarian transport
+card on the same dashboard already has one, the editor reuses it. When the
+key works, the editor hides the field and shows a **Change** link; the field
+reappears if the key is missing or FUTÁR rejects it. Volán and Helyi modes
+do not need a key.
 
 Live vehicle positions and delays come from BKK FUTÁR (BKK and MÁV modes).
 No other Hungarian operator publishes a public, key-based realtime API, so
@@ -77,6 +89,7 @@ Volán long-distance and Helyi city services stay on the official static GTFS.
 | `refresh` | number | `45` | Seconds between departure refreshes, minimum 15 |
 | `volanIndex` | string | next to the card | URL of `volan-index.json.gz` |
 | `cityIndex` | string | next to the card | URL of `city-index.json.gz` |
+| `favorites` | list | national hubs | Optional `{ id, name }` chips in the editor |
 
 ### Example
 
@@ -106,32 +119,36 @@ reaches.
 Debrecen DKV does not publish a public GTFS zip, so it is not in the city
 picker until a URL exists.
 
-## Volán long-distance coaches
+## Keeping the GTFS indexes current
 
-FUTÁR only covers coaches near Budapest, so long-distance Volán departures come
-from the KTI GTFS feed, pre-built into a compact `volan-index.json.gz`.
+HACS installs the indexes that were built when the GitHub release was cut.
+A weekly GitHub Action publishes a patch release when the feeds move.
 
-Place that file next to the card JS. The card fetches it with `cache: 'no-store'`
-and a daily cache-buster, so Home Assistant's 31-day `/local/` cache cannot pin
-an old feed.
+To rebuild them yourself on Home Assistant OS:
 
-```bash
-python3 scripts/build_volan_index.py
-python3 scripts/build_city_index.py
-```
+1. Copy `scripts/*.py` and `scripts/run_update.sh` to `/config/hungarian-transport/`.
+2. Copy `packages/hungarian_transport.yaml` into a Home Assistant package
+   directory (`packages: !include_dir_named packages`).
+3. Restart Home Assistant. The automation runs at 04:30 Europe/Budapest and
+   five minutes after a core start. It HEADs the KTI zip and the municipal
+   feeds, rebuilds only when the fingerprint changed, and writes
+   `volan-index.json.gz` / `city-index.json.gz` atomically into
+   `/config/www/community/hungarian-transport/`.
 
-`city-index.json.gz` sits next to the card JS as well. The daily job
-(`scripts/update_volan_index.py`) HEADs the KTI zip **and** the municipal
-feeds, rebuilds both indexes when something changed, and atomically replaces
-the files.
+Set `HUNGARIAN_TRANSPORT_WWW` if you installed the card somewhere else.
+Point `notify.admins` at whatever notifier you use, or drop that automation.
 
-To keep it current, `scripts/update_volan_index.py` HEADs the KTI zip, rebuilds
-only when it changed, and atomically replaces the index. `packages/hungarian_transport.yaml`
-runs it daily at 04:30 Europe/Budapest and 5 minutes after a core start.
-
-Note that there is no direct coach between, for example, Székesfehérvár
+There is no direct coach between, for example, Székesfehérvár
 autóbusz-állomás and Kelenföld — such services terminate at Népliget. The card
 reflects the official GTFS, so it will not invent a connection.
+
+## Credits
+
+- [BKK Open Data / FUTÁR](https://opendata.bkk.hu/) for Budapest city and rail
+  realtime.
+- [KTI](https://gtfs.kti.hu/) for the national Volán GTFS.
+- Municipal GTFS: MVK (Miskolc), Tüke Busz (Pécs), SZKT (Szeged), Blaguss
+  (Szombathely).
 
 ## License
 
