@@ -137,6 +137,11 @@ const I18N = {
     colArrival: '\u00e9rkez\u00e9s',
     colExpected: 'v\u00e1rhat\u00f3',
     colTravel: 'menetid\u0151',
+    rowsEmpty: 'Nincs k\u00f6zelg\u0151 indul\u00e1s.',
+    rowsWaiting: 'Add meg a forr\u00e1s \u00e9s a c\u00e9l meg\u00e1ll\u00f3t.',
+    tipWheelchair: 'Akad\u00e1lymentes',
+    tipBike: 'Ker\u00e9kp\u00e1r sz\u00e1ll\u00edthat\u00f3',
+    tipDelay: (n) => `${n} perc k\u00e9s\u00e9s`,
     mode: {
       bkk: {
         stop: 'Forr\u00e1s meg\u00e1ll\u00f3',
@@ -210,6 +215,11 @@ const I18N = {
     colArrival: 'in',
     colExpected: 'expected',
     colTravel: 'travel',
+    rowsEmpty: 'No upcoming departure.',
+    rowsWaiting: 'Pick an origin and a destination stop.',
+    tipWheelchair: 'Step-free access',
+    tipBike: 'Bikes allowed',
+    tipDelay: (n) => `${n} min late`,
     mode: {
       bkk: {
         stop: 'Origin stop',
@@ -247,6 +257,27 @@ const I18N = {
     },
   },
 };
+
+const VEHICLE_ICONS = {
+  RAIL: 'mdi:train',
+  TRAIN: 'mdi:train',
+  RAILWAY: 'mdi:train',
+  SUBURBAN_RAILWAY: 'mdi:train',
+  TRAM: 'mdi:tram',
+  SUBWAY: 'mdi:subway-variant',
+  METRO: 'mdi:subway-variant',
+  TROLLEYBUS: 'mdi:bus-electric',
+  FERRY: 'mdi:ferry',
+  COACH: 'mdi:bus-side',
+  BUS: 'mdi:bus',
+};
+
+function vehicleIcon(type) {
+  const key = String(type || '').toUpperCase();
+  if (VEHICLE_ICONS[key]) return VEHICLE_ICONS[key];
+  if (key.indexOf('SUBURBAN') >= 0) return VEHICLE_ICONS.RAIL;
+  return VEHICLE_ICONS.BUS;
+}
 
 /* Errors thrown deep in BkkLib carry a translation key so the display site can
    render them in the language the card is configured for. */
@@ -1676,6 +1707,8 @@ class BKKHopCard extends HTMLElement {
     this._hass = null;
     this._tripCache = {};
     this._inner = null;
+    this._builtin = null;
+    this._errorText = '';
     this._vehicles = [];
     this._entityId = 'sensor.bkk_hop_' + Math.random().toString(36).slice(2, 10);
   }
@@ -1716,12 +1749,19 @@ class BKKHopCard extends HTMLElement {
   }
 
   set hass(hass) {
+    const first = !this._hass;
     this._hass = hass;
-    this._pushHass();
+    // r2 reads everything off hass, the built-in rows only need a repaint once
+    // hass lands, so "auto" language can resolve.
+    if (this._inner) this._pushHass();
+    else if (first) this._paintBuiltin();
     if (!this._config.apiKey) this._fillKey();
   }
 
-  getCardSize() { return 1; }
+  getCardSize() {
+    if (this._inner) return 1;
+    return 1 + Math.min((this._vehicles || []).length, 8);
+  }
 
   disconnectedCallback() {
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
@@ -1729,23 +1769,27 @@ class BKKHopCard extends HTMLElement {
 
   _showErr(err) {
     const msg = errText(this._lang(), err);
-    this._vehicles = [{
-      in: '',
-      type: 'RAIL',
-      routeid: '?',
-      headsign: msg,
-      attime: '',
-      predicted_attime: '',
-      wheelchair: 'False',
-      bikesAllowed: false,
-      color: '888888',
-      textcolor: 'FFFFFF',
-    }];
-    this._pushHass();
-    const root = this.shadowRoot;
-    if (root && !this._inner) {
-      root.innerHTML = '<ha-card><div style="padding:12px;font-size:12px">' + BkkLib.esc(msg) + '</div></ha-card>';
+    this._errorText = msg;
+    if (this._inner) {
+      // r2 draws rows, not errors, so surface the message as a single row.
+      this._vehicles = [{
+        in: '',
+        type: 'RAIL',
+        routeid: '?',
+        headsign: msg,
+        attime: '',
+        predicted_attime: '',
+        wheelchair: 'False',
+        bikesAllowed: false,
+        color: '888888',
+        textcolor: 'FFFFFF',
+      }];
+      this._pushHass();
+      return;
     }
+    this._vehicles = [];
+    if (!this._builtin) this._renderBuiltin();
+    this._paintBuiltin();
   }
 
   async _fillKey() {
@@ -1789,10 +1833,22 @@ class BKKHopCard extends HTMLElement {
   }
 
   _pushHass() {
-    if (!this._inner) return;
-    try {
-      this._inner.hass = this._fakeHass();
-    } catch (_e) { /* r2 not ready */ }
+    if (this._inner) {
+      try {
+        this._inner.hass = this._fakeHass();
+      } catch (_e) { /* r2 not ready */ }
+      return;
+    }
+    this._paintBuiltin();
+  }
+
+  /* The card can hand its rows to bkk-stop-card-r2 when that element happens to
+     be loaded, which keeps existing dashboards looking the same. On its own it
+     draws the rows itself. */
+  _useR2() {
+    const pref = (this._config || {}).renderer || 'auto';
+    if (pref === 'builtin') return false;
+    return !!customElements.get('bkk-stop-card-r2');
   }
 
   _mountR2() {
@@ -1801,6 +1857,7 @@ class BKKHopCard extends HTMLElement {
     if (!root) return false;
     const tag = 'bkk-stop-card-r2';
     if (!customElements.get(tag)) return false;
+    this._builtin = null;
     while (root.firstChild) root.removeChild(root.firstChild);
     this._inner = document.createElement(tag);
     root.appendChild(this._inner);
@@ -1819,31 +1876,144 @@ class BKKHopCard extends HTMLElement {
     }
     if (!this._vehicles) this._vehicles = [];
     if (!this._tripCache) this._tripCache = {};
-    if (this._mountR2()) return;
+    if (this._useR2() && this._mountR2()) return;
+    this._renderBuiltin();
+    if ((this._config || {}).renderer === 'builtin') return;
+    // Resource load order is not guaranteed; adopt r2 if it registers later.
+    customElements.whenDefined('bkk-stop-card-r2').then(() => {
+      if (!this.isConnected || this._inner || !this._useR2()) return;
+      this._mountR2();
+    });
+  }
+
+  _renderBuiltin() {
     const root = this.shadowRoot;
     if (!root) return;
-    if (!root.querySelector('.wait')) {
-      while (root.firstChild) root.removeChild(root.firstChild);
-      const card = document.createElement('ha-card');
-      card.className = 'wait';
-      card.innerHTML = '<div style="padding:12px;font-size:12px">Hungarian transport</div>';
-      root.appendChild(card);
+    this._inner = null;
+    while (root.firstChild) root.removeChild(root.firstChild);
+    const style = document.createElement('style');
+    style.textContent = `
+      ha-card { padding: 12px 14px 10px; }
+      .head { font-weight: 600; margin-bottom: 8px; }
+      .msg { color: var(--secondary-text-color); font-size: 13px; padding: 4px 0 6px; }
+      .msg.err { color: var(--error-color, #e66); }
+      table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+      th {
+        font-size: 10px; font-weight: 500; text-transform: uppercase;
+        letter-spacing: 0.04em; color: var(--secondary-text-color);
+        text-align: right; padding: 0 4px 4px;
+      }
+      th.route, th.dest { text-align: left; }
+      td { padding: 5px 4px; font-size: 13px; font-variant-numeric: tabular-nums; }
+      tbody tr + tr td { border-top: 1px solid var(--divider-color); }
+      /* Percentages so the row adapts to however wide the card ends up. */
+      th.route, td.route { width: 18%; }
+      th.eta, td.eta { width: 16%; }
+      th.clock, td.clock { width: 15%; }
+      th.travel, td.travel { width: 15%; }
+      .badge {
+        display: inline-flex; align-items: center; gap: 3px;
+        border-radius: 5px; padding: 1px 5px 1px 3px;
+        font-weight: 700; font-size: 12px; line-height: 1.5;
+        max-width: 100%; box-sizing: border-box;
+        white-space: nowrap; overflow: hidden;
+      }
+      .badge ha-icon { --mdc-icon-size: 15px; width: 15px; height: 15px; flex: 0 0 auto; }
+      td.dest { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      td.dest ha-icon {
+        --mdc-icon-size: 14px; width: 14px; height: 14px;
+        color: var(--secondary-text-color); margin-left: 4px;
+      }
+      td.eta, td.clock, td.travel { text-align: right; }
+      td.eta { font-weight: 700; }
+      td.travel { color: var(--secondary-text-color); }
+      .late { color: var(--warning-color, #e5a50a); }
+      .delay { font-size: 11px; margin-left: 3px; }
+    `;
+    const card = document.createElement('ha-card');
+    const header = document.createElement('div');
+    header.className = 'head';
+    header.textContent = this._header();
+    const body = document.createElement('div');
+    card.appendChild(header);
+    card.appendChild(body);
+    root.appendChild(style);
+    root.appendChild(card);
+    this._builtin = body;
+    this._paintBuiltin();
+  }
+
+  _paintBuiltin() {
+    const host = this._builtin;
+    if (!host) return;
+    const lang = this._lang();
+    const cfg = this._config || {};
+    if (this._errorText) {
+      host.innerHTML = `<div class="msg err">${BkkLib.esc(this._errorText)}</div>`;
+      return;
     }
-    customElements.whenDefined('bkk-stop-card-r2').then(() => {
-      if (!this.isConnected) return;
-      this._inner = null;
-      this._mountR2();
-      this._pushHass();
-    });
+    const rows = this._vehicles || [];
+    if (!rows.length) {
+      const key = (cfg.stopId && cfg.destKey) ? 'rowsEmpty' : 'rowsWaiting';
+      host.innerHTML = `<div class="msg">${BkkLib.esc(t(lang, key))}</div>`;
+      return;
+    }
+    host.innerHTML = `
+      <table>
+        <thead><tr>
+          <th class="route"></th>
+          <th class="dest"></th>
+          <th class="eta">${BkkLib.esc(t(lang, 'colArrival'))}</th>
+          <th class="clock">${BkkLib.esc(t(lang, 'colExpected'))}</th>
+          <th class="travel">${BkkLib.esc(t(lang, 'colTravel'))}</th>
+        </tr></thead>
+        <tbody>${rows.map((v) => this._rowHtml(v, lang)).join('')}</tbody>
+      </table>
+    `;
+  }
+
+  _rowHtml(v, lang) {
+    const esc = BkkLib.esc;
+    const mins = Number(v.in);
+    const countdown = Number.isFinite(mins)
+      ? (mins <= 0 ? t(lang, 'now') : t(lang, 'minutes', mins))
+      : '';
+    const delayMin = Math.round(Number(v.delay || 0) / 60);
+    const late = delayMin >= 1;
+    const tips = [];
+    if (v.wheelchair === 'True' || v.wheelchair === true) {
+      tips.push(`<ha-icon icon="mdi:wheelchair-accessibility" title="${esc(t(lang, 'tipWheelchair'))}"></ha-icon>`);
+    }
+    if (v.bikesAllowed) {
+      tips.push(`<ha-icon icon="mdi:bicycle" title="${esc(t(lang, 'tipBike'))}"></ha-icon>`);
+    }
+    const delayTip = late ? esc(t(lang, 'tipDelay', delayMin)) : '';
+    return `
+      <tr>
+        <td class="route">
+          <span class="badge" style="background:#${esc(v.color || '4477aa')};color:#${esc(v.textcolor || 'ffffff')}">
+            <ha-icon icon="${esc(vehicleIcon(v.type))}"></ha-icon>${esc(v.routeid || '')}
+          </span>
+        </td>
+        <td class="dest" title="${esc(v.headsign || '')}">${esc(v.headsign || '')}${tips.join('')}</td>
+        <td class="eta${late ? ' late' : ''}">${esc(countdown)}</td>
+        <td class="clock${late ? ' late' : ''}" title="${delayTip}">${esc(v.predicted_attime || v.attime || '')}${
+      late ? `<span class="delay">+${delayMin}</span>` : ''
+    }</td>
+        <td class="travel">${v.travelMin ? esc(t(lang, 'minutes', v.travelMin)) : ''}</td>
+      </tr>
+    `;
   }
 
   async _reload() {
     const cfg = this._config || {};
     if (cfg.volanIndex) setVolanIndexUrl(cfg.volanIndex);
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
-    this._mountR2();
+    if (this._useR2()) this._mountR2();
+    else if (!this._builtin) this._renderBuiltin();
     const ready = cfg.stopId && cfg.destKey && (cfg.apiKey || BkkLib.mode(cfg) === 'volan');
     if (!ready) {
+      this._errorText = '';
       this._vehicles = [];
       this._pushHass();
       return;
@@ -1862,7 +2032,8 @@ class BKKHopCard extends HTMLElement {
         let vehicles = (rows || []).map((r) => BkkLib.asSensorVehicle(r, cfg.destName, lang));
         vehicles = BkkLib.mergeSensorExtras(this._hass, vehicles);
         this._vehicles = vehicles;
-        if (!this._inner) this._mountR2();
+        this._errorText = '';
+        if (!this._inner && this._useR2()) this._mountR2();
         this._pushHass();
       } catch (err) {
         this._showErr(err);
