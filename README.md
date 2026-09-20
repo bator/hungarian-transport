@@ -12,7 +12,7 @@ long-distance coaches from the official KTI Volán GTFS feed.
 The editor and the card are available in **Hungarian and English**. By default
 they follow the Home Assistant user's language; you can also pin one explicitly.
 
-![Hungarian transport card](images/screenshot.png)
+![Hungarian transport card in Hungarian and English, light and dark theme](images/screenshot.png)
 
 ## Install
 
@@ -63,6 +63,20 @@ on the same dashboard already has one, the editor reuses it.
 | `volan` | bool | `false` | Volán mode: long-distance coaches |
 | `refresh` | number | `45` | Seconds between departure refreshes, minimum 15 |
 | `volanIndex` | string | next to the card | URL of `volan-index.json.gz` |
+| `renderer` | string | `auto` | `auto` or `builtin`. See below. |
+
+## Rendering
+
+The card draws the departure rows itself, so it needs nothing besides this
+repository. The route badge uses the operator's official colour, the *expected*
+column turns amber and gains a `+minutes` suffix when the vehicle is running
+late, and step-free access and bicycle carriage are marked with an icon next to
+the destination.
+
+If the `bkk-stop-card-r2` element happens to be registered — a locally modified
+[bkk-stop-card](https://github.com/amaximus/bkk-stop-card) variant — the card
+hands its rows to that element instead, which keeps older dashboards looking
+unchanged. Set `renderer: builtin` to always use the built-in rows.
 
 ### Example
 
