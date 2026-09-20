@@ -1,4 +1,5 @@
-/* crusand Hungarian transport v29 */
+const CARD_VERSION = '1.0.0';
+
 (function defineNow() {
   const TAG = 'bkk-stop-card-r3';
   const ED = 'bkk-stop-card-r3-editor';
@@ -51,7 +52,9 @@
     }
     customElements.define(TAG, BkkStopCardR3);
   }
-  console.info('[hungarian-transport] defined v29');
+  console.info(`%c HUNGARIAN-TRANSPORT %c ${CARD_VERSION} `,
+    'color:#fff;background:#0f6fc6;font-weight:700',
+    'color:#0f6fc6;background:#fff;font-weight:700');
 })();
 
 /* hop + editor + shared BkkLib */
@@ -59,15 +62,10 @@ const BKK_PLANNER_TAG = 'bkk-stop-card-plan';
 const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
 
 const BKK_FAVORITES = [
-  { id: 'BKK_F02847', name: 'Miskolci utca / Cs\u00f6m\u00f6ri \u00fat' },
-  { id: 'BKK_011754', name: 'R\u00e1kospatak utca / Cs\u00f6m\u00f6ri \u00fat' },
   { id: 'BKK_F01159', name: 'Keleti p\u00e1lyaudvar M' },
   { id: 'BKK_056233', name: 'Keleti p\u00e1lyaudvar' },
   { id: 'BKK_056216', name: 'Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s' },
-  { id: 'BKK_F03151', name: 'F\u0151 t\u00e9r' },
   { id: 'BKK_F02731', name: 'Zugl\u00f3 vas\u00fat\u00e1llom\u00e1s' },
-  { id: 'BKK_F01506', name: 'Mester utca / K\u00f6nyves K\u00e1lm\u00e1n k\u00f6r\u00fat' },
-  { id: 'BKK_F01428', name: 'Tim\u00f3t utca' },
 ];
 const MAV_FAVORITES = [
   { id: 'BKK_005501024', name: 'Budapest-Kelenf\u00f6ld' },
@@ -82,12 +80,206 @@ const VOLAN_FAVORITES = [
   { id: 'AREA_CS665201_99', name: 'Duna\u00fajv\u00e1ros, aut\u00f3busz-\u00e1llom\u00e1s' },
   { id: 'volan_669685_99', name: 'Tatab\u00e1nya, aut\u00f3busz-\u00e1llom\u00e1s' },
 ];
+const FAVORITES = BKK_FAVORITES.concat(MAV_FAVORITES);
+
+/* Assets live next to this module, so the card works from /hacsfiles/, /local/
+   or wherever the Lovelace resource points. Requires `type: module`. */
+const ASSET_BASE = new URL('.', import.meta.url).href;
+let VOLAN_INDEX_OVERRIDE = '';
+
+function setVolanIndexUrl(url) {
+  VOLAN_INDEX_OVERRIDE = String(url || '');
+}
+
 function volanIndexUrl() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
-  return `/local/community/bkk-stop-card/volan-index.json.gz?v=${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+  const day = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+  const base = VOLAN_INDEX_OVERRIDE || new URL('volan-index.json.gz', ASSET_BASE).href;
+  return `${base}${base.includes('?') ? '&' : '?'}v=${day}`;
 }
-const FAVORITES = BKK_FAVORITES.concat(MAV_FAVORITES);
+
+const I18N = {
+  hu: {
+    langAuto: 'Automatikus (Home Assistant nyelve)',
+    langHu: 'Magyar',
+    langEn: 'English',
+    langLabel: 'Nyelv',
+    apiKeyLabel: 'BKK API kulcs',
+    apiKeyPlaceholder: 'UUID a BKK Open Dat\u00e1b\u00f3l',
+    apiKeyHint: 'Ingyenes kulcs, egyszer\u0171 regisztr\u00e1ci\u00f3 ut\u00e1n:',
+    nameLabel: 'N\u00e9v (opcion\u00e1lis)',
+    namePlaceholder: 'Hungarian transport',
+    destLoading: 'El\u00e9rhet\u0151 c\u00e9lok bet\u00f6lt\u00e9se...',
+    noDirectKelenfold: (list) => 'Nincs k\u00f6zvetlen Vol\u00e1n Kelenf\u00f6ldre. Budapesti c\u00e9lok: ' + list + '.',
+    platformShort: (p) => `v\u00e1g.${p}`,
+    minutes: (n) => `${n} perc`,
+    now: 'most',
+    errNoApiKey: 'Hi\u00e1nyzik az apiKey a k\u00e1rtya be\u00e1ll\u00edt\u00e1s\u00e1b\u00f3l.',
+    errVolanHttp: (status) => `Vol\u00e1n menetrend HTTP ${status}`,
+    errVolanGunzip: 'A b\u00f6ng\u00e9sz\u0151 nem tudja kicsomagolni a Vol\u00e1n menetrendet.',
+    plannerTitle: 'BKK \u00fatvonal',
+    plannerStep1: '1. Meg\u00e1ll\u00f3',
+    plannerStep2: '2. J\u00e1rm\u0171',
+    plannerStep3: '3. Meddig',
+    plannerDepartures: 'Indul\u00e1sok',
+    plannerSearchPlaceholder: 'Utca, meg\u00e1ll\u00f3...',
+    plannerReset: '\u00daj',
+    plannerMultiHint: 'T\u00f6bbet is v\u00e1laszthatsz. Ekkor csak a k\u00f6z\u00f6s meg\u00e1ll\u00f3k maradnak.',
+    plannerPickVehicleFirst: 'El\u0151bb v\u00e1lassz j\u00e1rm\u0171vet',
+    plannerPickAll: 'V\u00e1lassz meg\u00e1ll\u00f3t, j\u00e1rm\u0171vet \u00e9s c\u00e9lt.',
+    plannerLoading: 'Bet\u00f6lt\u00e9s...',
+    plannerNoSharedStop: 'Nincs k\u00f6z\u00f6s meg\u00e1ll\u00f3',
+    plannerNoSharedLater: 'Ezeknek a j\u00e1ratoknak nincs k\u00f6z\u00f6s k\u00e9s\u0151bbi meg\u00e1ll\u00f3ja.',
+    plannerPickDest: 'V\u00e1lassz c\u00e9lt...',
+    plannerNoRoutes: 'Nincs indul\u00f3 j\u00e1rat ebben a meg\u00e1ll\u00f3ban.',
+    plannerNoDepartures: 'Nincs k\u00f6zelg\u0151 indul\u00e1s a v\u00e1lasztott j\u00e1ratokkal.',
+    colArrival: '\u00e9rkez\u00e9s',
+    colExpected: 'v\u00e1rhat\u00f3',
+    colTravel: 'menetid\u0151',
+    mode: {
+      bkk: {
+        stop: 'Forr\u00e1s meg\u00e1ll\u00f3',
+        dest: 'C\u00e9l meg\u00e1ll\u00f3',
+        hint: 'Add meg a forr\u00e1s \u00e9s a c\u00e9l meg\u00e1ll\u00f3t. Az \u00f6sszes BKK j\u00e1rat megjelenik k\u00f6z\u00f6tt\u00fck.',
+        originPh: 'Keres\u00e9s, pl. Bosny\u00e1k t\u00e9r, \u00c1rp\u00e1d h\u00edd',
+        destPh: 'Keres\u00e9s a forr\u00e1sb\u00f3l el\u00e9rhet\u0151 meg\u00e1ll\u00f3k k\u00f6z\u00f6tt',
+        empty: 'Nincs BKK meg\u00e1ll\u00f3 erre a keres\u00e9sre.',
+        destEmpty: 'Err\u0151l a meg\u00e1ll\u00f3r\u00f3l nincs j\u00e1rat erre a c\u00e9lra.',
+        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
+        destNone: 'Nincs el\u00e9rhet\u0151 BKK c\u00e9l ebb\u0151l a forr\u00e1sb\u00f3l.',
+      },
+      mav: {
+        stop: 'Forr\u00e1s \u00e1llom\u00e1s',
+        dest: 'C\u00e9l \u00e1llom\u00e1s',
+        hint: 'Add meg a forr\u00e1s \u00e9s a c\u00e9l \u00e1llom\u00e1st. Az \u00f6sszes vonat megjelenik k\u00f6z\u00f6tt\u00fck.',
+        originPh: 'Keres\u00e9s, pl. Kelenf\u00f6ld, Sz\u00e9kesfeh\u00e9rv\u00e1r',
+        destPh: 'Keres\u00e9s a forr\u00e1sb\u00f3l el\u00e9rhet\u0151 \u00e1llom\u00e1sok k\u00f6z\u00f6tt',
+        empty: 'Nincs M\u00c1V \u00e1llom\u00e1s erre a keres\u00e9sre.',
+        destEmpty: 'Err\u0151l az \u00e1llom\u00e1sr\u00f3l nincs vonat erre a c\u00e9lra.',
+        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s \u00e1llom\u00e1st.',
+        destNone: 'Nincs el\u00e9rhet\u0151 M\u00c1V c\u00e9l\u00e1llom\u00e1s ebb\u0151l a forr\u00e1sb\u00f3l.',
+      },
+      volan: {
+        stop: 'Forr\u00e1s meg\u00e1ll\u00f3',
+        dest: 'C\u00e9l meg\u00e1ll\u00f3',
+        hint: 'Add meg a forr\u00e1s \u00e9s a c\u00e9l Vol\u00e1n meg\u00e1ll\u00f3t. Az \u00f6sszes busz megjelenik k\u00f6z\u00f6tt\u00fck.',
+        originPh: 'Keres\u00e9s, pl. N\u00e9pliget, Sz\u00e9kesfeh\u00e9rv\u00e1r aut\u00f3busz-\u00e1llom\u00e1s',
+        destPh: 'Keres\u00e9s a forr\u00e1sb\u00f3l el\u00e9rhet\u0151 Vol\u00e1n meg\u00e1ll\u00f3k k\u00f6z\u00f6tt',
+        empty: 'Nincs Vol\u00e1n meg\u00e1ll\u00f3 erre a keres\u00e9sre.',
+        destEmpty: 'Err\u0151l a meg\u00e1ll\u00f3r\u00f3l nincs k\u00f6zvetlen Vol\u00e1n erre a c\u00e9lra.',
+        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
+        destNone: 'Nincs el\u00e9rhet\u0151 Vol\u00e1n c\u00e9l ebb\u0151l a forr\u00e1sb\u00f3l.',
+      },
+    },
+  },
+  en: {
+    langAuto: 'Automatic (Home Assistant language)',
+    langHu: 'Magyar',
+    langEn: 'English',
+    langLabel: 'Language',
+    apiKeyLabel: 'BKK API key',
+    apiKeyPlaceholder: 'UUID from BKK Open Data',
+    apiKeyHint: 'Free key, after a quick sign-up:',
+    nameLabel: 'Name (optional)',
+    namePlaceholder: 'Hungarian transport',
+    destLoading: 'Loading reachable destinations...',
+    noDirectKelenfold: (list) => 'No direct coach to Kelenf\u00f6ld. Budapest destinations: ' + list + '.',
+    platformShort: (p) => `pl.${p}`,
+    minutes: (n) => `${n} min`,
+    now: 'now',
+    errNoApiKey: 'The apiKey is missing from the card configuration.',
+    errVolanHttp: (status) => `Vol\u00e1n timetable HTTP ${status}`,
+    errVolanGunzip: 'This browser cannot decompress the Vol\u00e1n timetable.',
+    plannerTitle: 'BKK route',
+    plannerStep1: '1. Stop',
+    plannerStep2: '2. Vehicle',
+    plannerStep3: '3. Destination',
+    plannerDepartures: 'Departures',
+    plannerSearchPlaceholder: 'Street, stop...',
+    plannerReset: 'Reset',
+    plannerMultiHint: 'You can pick several. Only stops shared by all of them are kept.',
+    plannerPickVehicleFirst: 'Pick a vehicle first',
+    plannerPickAll: 'Pick a stop, a vehicle and a destination.',
+    plannerLoading: 'Loading...',
+    plannerNoSharedStop: 'No shared stop',
+    plannerNoSharedLater: 'These routes share no later stop.',
+    plannerPickDest: 'Pick a destination...',
+    plannerNoRoutes: 'No departures from this stop.',
+    plannerNoDepartures: 'No upcoming departure on the selected routes.',
+    colArrival: 'in',
+    colExpected: 'expected',
+    colTravel: 'travel',
+    mode: {
+      bkk: {
+        stop: 'Origin stop',
+        dest: 'Destination stop',
+        hint: 'Pick an origin and a destination stop. Every BKK service between them is listed.',
+        originPh: 'Search, e.g. Bosny\u00e1k t\u00e9r, \u00c1rp\u00e1d h\u00edd',
+        destPh: 'Search among the stops reachable from the origin',
+        empty: 'No BKK stop matches this search.',
+        destEmpty: 'No service from this stop to that destination.',
+        destNeedOrigin: 'Pick an origin stop first.',
+        destNone: 'No BKK destination is reachable from this origin.',
+      },
+      mav: {
+        stop: 'Origin station',
+        dest: 'Destination station',
+        hint: 'Pick an origin and a destination station. Every train between them is listed.',
+        originPh: 'Search, e.g. Kelenf\u00f6ld, Sz\u00e9kesfeh\u00e9rv\u00e1r',
+        destPh: 'Search among the stations reachable from the origin',
+        empty: 'No M\u00c1V station matches this search.',
+        destEmpty: 'No train from this station to that destination.',
+        destNeedOrigin: 'Pick an origin station first.',
+        destNone: 'No M\u00c1V destination is reachable from this origin.',
+      },
+      volan: {
+        stop: 'Origin stop',
+        dest: 'Destination stop',
+        hint: 'Pick an origin and a destination Vol\u00e1n stop. Every coach between them is listed.',
+        originPh: 'Search, e.g. N\u00e9pliget, Sz\u00e9kesfeh\u00e9rv\u00e1r aut\u00f3busz-\u00e1llom\u00e1s',
+        destPh: 'Search among the Vol\u00e1n stops reachable from the origin',
+        empty: 'No Vol\u00e1n stop matches this search.',
+        destEmpty: 'No direct coach from this stop to that destination.',
+        destNeedOrigin: 'Pick an origin stop first.',
+        destNone: 'No Vol\u00e1n destination is reachable from this origin.',
+      },
+    },
+  },
+};
+
+/* Errors thrown deep in BkkLib carry a translation key so the display site can
+   render them in the language the card is configured for. */
+function codedError(key, arg) {
+  const err = new Error(String(I18N.hu[key] instanceof Function ? I18N.hu[key](arg) : I18N.hu[key]));
+  err.i18nKey = key;
+  err.i18nArg = arg;
+  return err;
+}
+
+function resolveLang(pref, hass) {
+  if (pref === 'hu' || pref === 'en') return pref;
+  const raw = (hass && hass.language)
+    || (typeof navigator !== 'undefined' ? navigator.language : '')
+    || 'hu';
+  return String(raw).toLowerCase().startsWith('hu') ? 'hu' : 'en';
+}
+
+function t(lang, key, arg) {
+  const dict = I18N[lang] || I18N.hu;
+  const value = dict[key] !== undefined ? dict[key] : I18N.hu[key];
+  return typeof value === 'function' ? value(arg) : value;
+}
+
+function modeCopy(lang, mode) {
+  const dict = I18N[lang] || I18N.hu;
+  return dict.mode[mode] || dict.mode.bkk;
+}
+
+function errText(lang, err) {
+  if (err && err.i18nKey) return t(lang, err.i18nKey, err.i18nArg);
+  return (err && err.message) ? err.message : String(err);
+}
 
 class BKKPlannerCard extends HTMLElement {
   constructor() {
@@ -118,8 +310,18 @@ class BKKPlannerCard extends HTMLElement {
     this._renderShell();
   }
 
-  set hass(_hass) {
-    if (!this._root) this._renderShell();
+  set hass(hass) {
+    const first = !this._hass;
+    this._hass = hass;
+    if (!this._root) { this._renderShell(); return; }
+    // "auto" resolves against hass.language; re-render only while nothing is picked.
+    if (first && !this._stop && this._lang() !== resolveLang(this._config.language, null)) {
+      this._renderShell();
+    }
+  }
+
+  _lang() {
+    return resolveLang((this._config || {}).language, this._hass);
   }
 
   getCardSize() {
@@ -180,30 +382,32 @@ class BKKPlannerCard extends HTMLElement {
     const card = document.createElement('ha-card');
     const wrap = document.createElement('div');
     wrap.className = 'wrap';
+    const lang = this._lang();
+    const tr = (key) => this._esc(t(lang, key));
     wrap.innerHTML = `
-      <div class="title">${this._esc(this._config.name || 'BKK \u00fatvonal')}</div>
+      <div class="title">${this._esc(this._config.name || t(lang, 'plannerTitle'))}</div>
       <div class="step">
-        <div class="label">1. Meg\u00e1ll\u00f3</div>
+        <div class="label">${tr('plannerStep1')}</div>
         <div class="row">
-          <input id="q" type="search" placeholder="Utca, meg\u00e1ll\u00f3...">
-          <button class="clear" id="reset" type="button">\u00daj</button>
+          <input id="q" type="search" placeholder="${tr('plannerSearchPlaceholder')}">
+          <button class="clear" id="reset" type="button">${tr('plannerReset')}</button>
         </div>
         <div class="chips" id="fav"></div>
         <div class="picked" id="stopPicked"></div>
         <div class="list" id="hits"></div>
       </div>
       <div class="step">
-        <div class="label">2. J\u00e1rm\u0171</div>
-        <div class="hint">T\u00f6bbet is v\u00e1laszthatsz. Ekkor csak a k\u00f6z\u00f6s meg\u00e1ll\u00f3k maradnak.</div>
+        <div class="label">${tr('plannerStep2')}</div>
+        <div class="hint">${tr('plannerMultiHint')}</div>
         <div class="chips" id="routes"></div>
       </div>
       <div class="step">
-        <div class="label">3. Meddig</div>
-        <select id="dest" disabled><option value="">El\u0151bb v\u00e1lassz j\u00e1rm\u0171vet</option></select>
+        <div class="label">${tr('plannerStep3')}</div>
+        <select id="dest" disabled><option value="">${tr('plannerPickVehicleFirst')}</option></select>
       </div>
       <div class="step">
-        <div class="label">Indul\u00e1sok</div>
-        <div id="table" class="muted">V\u00e1lassz meg\u00e1ll\u00f3t, j\u00e1rm\u0171vet \u00e9s c\u00e9lt.</div>
+        <div class="label">${tr('plannerDepartures')}</div>
+        <div id="table" class="muted">${tr('plannerPickAll')}</div>
       </div>
       <div class="err" id="err"></div>
     `;
@@ -261,9 +465,10 @@ class BKKPlannerCard extends HTMLElement {
     this._el('hits').innerHTML = '';
     this._el('stopPicked').textContent = '';
     this._el('routes').innerHTML = '';
-    this._el('dest').innerHTML = '<option value="">El\u0151bb v\u00e1lassz j\u00e1rm\u0171vet</option>';
+    const lang = this._lang();
+    this._el('dest').innerHTML = `<option value="">${this._esc(t(lang, 'plannerPickVehicleFirst'))}</option>`;
     this._el('dest').disabled = true;
-    this._el('table').innerHTML = 'V\u00e1lassz meg\u00e1ll\u00f3t, j\u00e1rm\u0171vet \u00e9s c\u00e9lt.';
+    this._el('table').textContent = t(lang, 'plannerPickAll');
     this._el('err').textContent = '';
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
   }
@@ -271,7 +476,7 @@ class BKKPlannerCard extends HTMLElement {
   _error(msg) { this._el('err').textContent = msg || ''; }
 
   async _bkk(path, params) {
-    if (!this._apiKey) throw new Error('Hi\u00e1nyzik az apiKey a k\u00e1rtya be\u00e1ll\u00edt\u00e1s\u00e1b\u00f3l.');
+    if (!this._apiKey) throw codedError('errNoApiKey');
     const q = new URLSearchParams(Object.assign({
       key: this._apiKey, version: '4', appVersion: 'apiary-1.0',
     }, params));
@@ -342,7 +547,7 @@ class BKKPlannerCard extends HTMLElement {
         });
       });
     } catch (err) {
-      this._error(err.message || String(err));
+      this._error(errText(this._lang(), err));
     }
   }
 
@@ -353,7 +558,7 @@ class BKKPlannerCard extends HTMLElement {
     this._el('q').value = stop.label || stop.name;
     this._el('hits').innerHTML = '';
     this._el('stopPicked').textContent = stop.label || stop.name;
-    this._el('routes').innerHTML = '<span class="muted">Bet\u00f6lt\u00e9s...</span>';
+    this._el('routes').innerHTML = '<span class="muted">' + this._esc(t(this._lang(), 'plannerLoading')) + '</span>';
     this._el('dest').disabled = true;
     try {
       this._error('');
@@ -361,7 +566,7 @@ class BKKPlannerCard extends HTMLElement {
       this._paintRoutes();
       await this._refreshDests();
     } catch (err) {
-      this._error(err.message || String(err));
+      this._error(errText(this._lang(), err));
     }
   }
 
@@ -400,7 +605,7 @@ class BKKPlannerCard extends HTMLElement {
     const box = this._el('routes');
     box.innerHTML = '';
     if (!this._routes.length) {
-      box.innerHTML = '<span class="muted">Nincs indul\u00f3 j\u00e1rat ebben a meg\u00e1ll\u00f3ban.</span>';
+      box.innerHTML = '<span class="muted">' + this._esc(t(this._lang(), 'plannerNoRoutes')) + '</span>';
       return;
     }
     this._routes.forEach((rt) => {
@@ -523,14 +728,16 @@ class BKKPlannerCard extends HTMLElement {
 
   async _refreshDests() {
     const sel = this._el('dest');
+    const lang = this._lang();
+    const opt = (key) => `<option value="">${this._esc(t(lang, key))}</option>`;
     this._dest = null;
     if (!this._selected.size) {
-      sel.innerHTML = '<option value="">El\u0151bb v\u00e1lassz j\u00e1rm\u0171vet</option>';
+      sel.innerHTML = opt('plannerPickVehicleFirst');
       sel.disabled = true;
-      this._el('table').innerHTML = 'V\u00e1lassz meg\u00e1ll\u00f3t, j\u00e1rm\u0171vet \u00e9s c\u00e9lt.';
+      this._el('table').textContent = t(lang, 'plannerPickAll');
       return;
     }
-    sel.innerHTML = '<option value="">Bet\u00f6lt\u00e9s...</option>';
+    sel.innerHTML = opt('plannerLoading');
     const lists = [];
     for (const rid of this._selected) {
       lists.push(await this._remainingNames(rid));
@@ -543,20 +750,20 @@ class BKKPlannerCard extends HTMLElement {
     this._dests = this._uniqueByName(common);
     common = this._dests;
     if (!common.length) {
-      sel.innerHTML = '<option value="">Nincs k\u00f6z\u00f6s meg\u00e1ll\u00f3</option>';
+      sel.innerHTML = opt('plannerNoSharedStop');
       sel.disabled = true;
-      this._el('table').innerHTML = 'Ezeknek a j\u00e1ratoknak nincs k\u00f6z\u00f6s k\u00e9s\u0151bbi meg\u00e1ll\u00f3ja.';
+      this._el('table').textContent = t(lang, 'plannerNoSharedLater');
       return;
     }
     sel.disabled = false;
-    sel.innerHTML = '<option value="">V\u00e1lassz c\u00e9lt...</option>' + common.map((d) => (
+    sel.innerHTML = opt('plannerPickDest') + common.map((d) => (
       `<option value="${this._esc(d.key)}">${this._esc(d.name)}</option>`
     )).join('');
   }
 
   async _loadDepartures() {
     if (!this._stop || !this._dest || !this._selected.size) return;
-    this._el('table').innerHTML = '<span class="muted">Bet\u00f6lt\u00e9s...</span>';
+    this._el('table').innerHTML = '<span class="muted">' + this._esc(t(this._lang(), 'plannerLoading')) + '</span>';
     try {
       this._error('');
       const data = await this._bkk('arrivals-and-departures-for-stop.json', {
@@ -599,7 +806,7 @@ class BKKPlannerCard extends HTMLElement {
       if (this._poll) clearInterval(this._poll);
       this._poll = setInterval(() => this._loadDepartures(), 45000);
     } catch (err) {
-      this._error(err.message || String(err));
+      this._error(errText(this._lang(), err));
     }
   }
 
@@ -631,24 +838,26 @@ class BKKPlannerCard extends HTMLElement {
 
   _inMin(ts) {
     if (!ts) return '';
+    const lang = this._lang();
     const m = Math.round((ts * 1000 - Date.now()) / 60000);
-    if (m < 0) return 'most';
-    return `${m} perc`;
+    if (m < 0) return t(lang, 'now');
+    return t(lang, 'minutes', m);
   }
 
   _paintTable() {
     const box = this._el('table');
+    const lang = this._lang();
     if (!this._rows.length) {
-      box.innerHTML = 'Nincs k\u00f6zelg\u0151 indul\u00e1s a v\u00e1lasztott j\u00e1ratokkal.';
+      box.textContent = t(lang, 'plannerNoDepartures');
       return;
     }
     box.innerHTML = `
       <table>
         <thead><tr>
           <th></th><th></th>
-          <th>\u00e9rkez\u00e9s</th>
-          <th>v\u00e1rhat\u00f3</th>
-          <th>menetid\u0151</th>
+          <th>${this._esc(t(lang, 'colArrival'))}</th>
+          <th>${this._esc(t(lang, 'colExpected'))}</th>
+          <th>${this._esc(t(lang, 'colTravel'))}</th>
         </tr></thead>
         <tbody>
           ${this._rows.map((r) => `
@@ -657,7 +866,7 @@ class BKKPlannerCard extends HTMLElement {
               <td>${this._esc(this._dest.name)}</td>
               <td>${this._esc(this._inMin(r.dep))}</td>
               <td>${this._esc(this._hm(r.dep))}</td>
-              <td class="muted">${r.travel ? `${r.travel} perc` : ''}</td>
+              <td class="muted">${r.travel ? this._esc(t(lang, 'minutes', r.travel)) : ''}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -812,7 +1021,7 @@ const BkkLib = {
     return hit.name;
   },
   async fetch(apiKey, path, params) {
-    if (!apiKey) throw new Error('Hi\u00e1nyzik az apiKey a k\u00e1rtya be\u00e1ll\u00edt\u00e1s\u00e1b\u00f3l.');
+    if (!apiKey) throw codedError('errNoApiKey');
     const q = new URLSearchParams(Object.assign({
       key: apiKey, version: '4', appVersion: 'apiary-1.0',
     }, params));
@@ -852,9 +1061,13 @@ const BkkLib = {
     });
     return acc;
   },
-  async stealApiKey(hass) {
+  /* A dashboard usually holds several of these cards. Reuse the key already
+     configured on a sibling card instead of asking for it again. Only the
+     default dashboard and the one being viewed are inspected. */
+  async apiKeyFromDashboard(hass) {
     if (!hass || !hass.connection) return '';
-    const paths = [null, 'dashboard-banana', 'bkk-blanka'];
+    const paths = [null];
+    if (hass.panelUrl && paths.indexOf(hass.panelUrl) < 0) paths.push(hass.panelUrl);
     for (let i = 0; i < paths.length; i++) {
       try {
         const msg = { type: 'lovelace/config' };
@@ -862,7 +1075,7 @@ const BkkLib = {
         const cfg = await hass.connection.sendMessagePromise(msg);
         const keys = BkkLib.findApiKey(cfg);
         if (keys.length) return keys[0];
-      } catch (_e) { /* try next dashboard */ }
+      } catch (_e) { /* not a Lovelace dashboard, or no access */ }
     }
     return '';
   },
@@ -871,13 +1084,13 @@ const BkkLib = {
     if (BkkLib._volanIdxP) return BkkLib._volanIdxP;
     BkkLib._volanIdxP = (async () => {
       const res = await fetch(volanIndexUrl(), { cache: 'no-store' });
-      if (!res.ok) throw new Error('Vol\u00e1n menetrend HTTP ' + res.status);
+      if (!res.ok) throw codedError('errVolanHttp', res.status);
       const buf = await res.arrayBuffer();
       const u8 = new Uint8Array(buf);
       let text = '';
       if (u8.length >= 2 && u8[0] === 0x1f && u8[1] === 0x8b) {
         if (typeof DecompressionStream !== 'function') {
-          throw new Error('A b\u00f6ng\u00e9sz\u0151 nem tudja kicsomagolni a Vol\u00e1n menetrendet.');
+          throw codedError('errVolanGunzip');
         }
         const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
         text = await new Response(stream).text();
@@ -1398,15 +1611,16 @@ const BkkLib = {
     return rows;
   },
 
-  asSensorVehicle(r, destName) {
+  asSensorVehicle(r, destName, lang) {
     const dep = r.dep;
     const mins = dep ? Math.max(0, Math.round((dep * 1000 - Date.now()) / 60000)) : 0;
     let type = String(r.rawType || r.vehicle || 'BUS').toUpperCase();
     if (type.indexOf('SUBURBAN') >= 0 || type === 'TRAIN' || type === 'RAILWAY') type = 'RAIL';
     const plat = r.platform ? String(r.platform) : '';
     let head = String(r.head || destName || '').trim();
-    if (plat && !/(?:\u00b7\s*)?v\u00e1g\.\S+/i.test(head)) {
-      head = head ? `${head} \u00b7 v\u00e1g.${plat}` : `v\u00e1g.${plat}`;
+    if (plat && !/(?:\u00b7\s*)?(?:v\u00e1g|pl)\.\S+/i.test(head)) {
+      const label = t(lang || 'hu', 'platformShort', plat);
+      head = head ? `${head} \u00b7 ${label}` : label;
     }
     return {
       in: String(mins),
@@ -1476,7 +1690,12 @@ class BKKHopCard extends HTMLElement {
       destName: '',
       mav: false,
       volan: false,
+      language: 'auto',
     };
+  }
+
+  _lang() {
+    return resolveLang((this._config || {}).language, this._hass);
   }
 
   setConfig(config) {
@@ -1509,7 +1728,7 @@ class BKKHopCard extends HTMLElement {
   }
 
   _showErr(err) {
-    const msg = err && err.message ? err.message : String(err);
+    const msg = errText(this._lang(), err);
     this._vehicles = [{
       in: '',
       type: 'RAIL',
@@ -1530,7 +1749,7 @@ class BKKHopCard extends HTMLElement {
   }
 
   async _fillKey() {
-    const key = await BkkLib.stealApiKey(this._hass);
+    const key = await BkkLib.apiKeyFromDashboard(this._hass);
     if (!key || this._config.apiKey) return;
     this._config = Object.assign({}, this._config, { apiKey: key });
     this._reload();
@@ -1620,6 +1839,7 @@ class BKKHopCard extends HTMLElement {
 
   async _reload() {
     const cfg = this._config || {};
+    if (cfg.volanIndex) setVolanIndexUrl(cfg.volanIndex);
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     this._mountR2();
     const ready = cfg.stopId && cfg.destKey && (cfg.apiKey || BkkLib.mode(cfg) === 'volan');
@@ -1638,7 +1858,8 @@ class BKKHopCard extends HTMLElement {
             mode: BkkLib.mode(cfg),
           },
         );
-        let vehicles = (rows || []).map((r) => BkkLib.asSensorVehicle(r, cfg.destName));
+        const lang = this._lang();
+        let vehicles = (rows || []).map((r) => BkkLib.asSensorVehicle(r, cfg.destName, lang));
         vehicles = BkkLib.mergeSensorExtras(this._hass, vehicles);
         this._vehicles = vehicles;
         if (!this._inner) this._mountR2();
@@ -1648,7 +1869,9 @@ class BKKHopCard extends HTMLElement {
       }
     };
     await run();
-    this._poll = setInterval(run, 45000);
+    if (!this.isConnected) return;
+    const every = Math.max(15, Number(cfg.refresh || 45)) * 1000;
+    this._poll = setInterval(run, every);
   }
 }
 
@@ -1673,7 +1896,10 @@ class BKKHopCardEditor extends HTMLElement {
     if (!this._cache) this._cache = {};
     if (!this._dests) this._dests = [];
     if (!this._destRoutes) this._destRoutes = {};
+    if (this._config.volanIndex) setVolanIndexUrl(this._config.volanIndex);
     if (!this._built) this._build();
+    this._syncLang();
+    this._syncTexts();
     this._syncName();
     this._syncStopLabel();
     this._syncDestLabel();
@@ -1685,9 +1911,17 @@ class BKKHopCardEditor extends HTMLElement {
   }
 
   set hass(hass) {
+    const first = !this._hass;
     this._hass = hass;
+    // "auto" resolves against hass.language, which is only known once hass lands.
+    if (first && this._built && this._lang() !== resolveLang(this._config.language, null)) {
+      this._syncTexts();
+      this._syncMode();
+    }
     if (!this._config.apiKey && !this._loadingKey) this._fillKey();
   }
+
+  _lang() { return resolveLang(this._config.language, this._hass); }
 
   _mode() { return BkkLib.mode(this._config); }
 
@@ -1735,14 +1969,22 @@ class BKKHopCardEditor extends HTMLElement {
       </style>
       <div class="card-config">
         <div class="f">
-          <label>BKK API kulcs</label>
-          <input id="apiKey" type="text" autocomplete="off" placeholder="UUID a BKK Open Dat\u00e1b\u00f3l">
-          <div class="hint">Ingyenes kulcs, egyszer\u0171 regisztr\u00e1ci\u00f3 ut\u00e1n:
+          <label id="lblLang"></label>
+          <select id="lang">
+            <option value="auto"></option>
+            <option value="hu"></option>
+            <option value="en"></option>
+          </select>
+        </div>
+        <div class="f">
+          <label id="lblApiKey"></label>
+          <input id="apiKey" type="text" autocomplete="off">
+          <div class="hint"><span id="hintApiKey"></span>
             <a href="https://opendata.bkk.hu/data-sources" target="_blank" rel="noopener">opendata.bkk.hu/data-sources</a>
           </div>
         </div>
         <div class="f">
-          <label>N\u00e9v (opcion\u00e1lis)</label>
+          <label id="lblName"></label>
           <input id="name" type="text" placeholder="Hungarian transport">
         </div>
         <div class="f">
@@ -1750,24 +1992,30 @@ class BKKHopCardEditor extends HTMLElement {
             <label class="switch"><input id="mav" type="checkbox"> M\u00c1V</label>
             <label class="switch"><input id="volan" type="checkbox"> Vol\u00e1n</label>
           </div>
-          <div class="hint" id="modeHint">Add meg a forr\u00e1s \u00e9s a c\u00e9l meg\u00e1ll\u00f3t. Az \u00f6sszes j\u00e1rat megjelenik k\u00f6z\u00f6tt\u00fck.</div>
+          <div class="hint" id="modeHint"></div>
         </div>
         <div class="f">
-          <label id="lblStop">Forr\u00e1s meg\u00e1ll\u00f3</label>
-          <input id="q" type="search" placeholder="Keres\u00e9s, pl. Bosny\u00e1k t\u00e9r, \u00c1rp\u00e1d h\u00edd">
+          <label id="lblStop"></label>
+          <input id="q" type="search">
           <div class="chips" id="fav"></div>
           <div class="picked" id="stopPicked"></div>
           <div class="list" id="hits"></div>
         </div>
         <div class="f">
-          <label id="lblDest">C\u00e9l meg\u00e1ll\u00f3</label>
-          <input id="dq" type="search" placeholder="Keres\u00e9s, pl. Keleti p\u00e1lyaudvar">
+          <label id="lblDest"></label>
+          <input id="dq" type="search">
           <div class="picked" id="destPicked"></div>
           <div class="list" id="destHits"></div>
         </div>
         <div class="err" id="err"></div>
       </div>
     `;
+    this._el('lang').addEventListener('change', (ev) => {
+      this._emit({ language: ev.target.value });
+      this._syncTexts();
+      this._syncMode();
+      this._paintDestHits(this._el('dq') ? this._el('dq').value.trim() : '');
+    });
     this._el('name').addEventListener('input', (ev) => {
       this._emit({ name: ev.target.value });
     });
@@ -1823,43 +2071,37 @@ class BKKHopCardEditor extends HTMLElement {
   }
 
   _modeCopy(mode) {
-    if (mode === 'mav') {
-      return {
-        stop: 'Forr\u00e1s \u00e1llom\u00e1s',
-        dest: 'C\u00e9l \u00e1llom\u00e1s',
-        hint: 'Add meg a forr\u00e1s \u00e9s a c\u00e9l \u00e1llom\u00e1st. Az \u00f6sszes vonat megjelenik k\u00f6z\u00f6tt\u00fck.',
-        originPh: 'Keres\u00e9s, pl. Kelenf\u00f6ld, Sz\u00e9kesfeh\u00e9rv\u00e1r',
-        destPh: 'Keres\u00e9s a forr\u00e1sb\u00f3l el\u00e9rhet\u0151 \u00e1llom\u00e1sok k\u00f6z\u00f6tt',
-        empty: 'Nincs M\u00c1V \u00e1llom\u00e1s erre a keres\u00e9sre.',
-        destEmpty: 'Err\u0151l az \u00e1llom\u00e1sr\u00f3l nincs vonat erre a c\u00e9lra.',
-        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s \u00e1llom\u00e1st.',
-        destNone: 'Nincs el\u00e9rhet\u0151 M\u00c1V c\u00e9l\u00e1llom\u00e1s ebb\u0151l a forr\u00e1sb\u00f3l.',
-      };
-    }
-    if (mode === 'volan') {
-      return {
-        stop: 'Forr\u00e1s meg\u00e1ll\u00f3',
-        dest: 'C\u00e9l meg\u00e1ll\u00f3',
-        hint: 'Add meg a forr\u00e1s \u00e9s a c\u00e9l Vol\u00e1n meg\u00e1ll\u00f3t. Az \u00f6sszes busz megjelenik k\u00f6z\u00f6tt\u00fck.',
-        originPh: 'Keres\u00e9s, pl. N\u00e9pliget, Sz\u00e9kesfeh\u00e9rv\u00e1r aut\u00f3busz-\u00e1llom\u00e1s',
-        destPh: 'Keres\u00e9s a forr\u00e1sb\u00f3l el\u00e9rhet\u0151 Vol\u00e1n meg\u00e1ll\u00f3k k\u00f6z\u00f6tt',
-        empty: 'Nincs Vol\u00e1n meg\u00e1ll\u00f3 erre a keres\u00e9sre.',
-        destEmpty: 'Err\u0151l a meg\u00e1ll\u00f3r\u00f3l nincs k\u00f6zvetlen Vol\u00e1n erre a c\u00e9lra.',
-        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
-        destNone: 'Nincs el\u00e9rhet\u0151 Vol\u00e1n c\u00e9l ebb\u0151l a forr\u00e1sb\u00f3l.',
-      };
-    }
-    return {
-      stop: 'Forr\u00e1s meg\u00e1ll\u00f3',
-      dest: 'C\u00e9l meg\u00e1ll\u00f3',
-      hint: 'Add meg a forr\u00e1s \u00e9s a c\u00e9l meg\u00e1ll\u00f3t. Az \u00f6sszes BKK j\u00e1rat megjelenik k\u00f6z\u00f6tt\u00fck.',
-      originPh: 'Keres\u00e9s, pl. Bosny\u00e1k t\u00e9r, \u00c1rp\u00e1d h\u00edd',
-      destPh: 'Keres\u00e9s a forr\u00e1sb\u00f3l el\u00e9rhet\u0151 meg\u00e1ll\u00f3k k\u00f6z\u00f6tt',
-      empty: 'Nincs BKK meg\u00e1ll\u00f3 erre a keres\u00e9sre.',
-      destEmpty: 'Err\u0151l a meg\u00e1ll\u00f3r\u00f3l nincs j\u00e1rat erre a c\u00e9lra.',
-      destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
-      destNone: 'Nincs el\u00e9rhet\u0151 BKK c\u00e9l ebb\u0151l a forr\u00e1sb\u00f3l.',
+    return modeCopy(this._lang(), mode);
+  }
+
+  _syncLang() {
+    const el = this._el('lang');
+    if (!el) return;
+    const lang = this._lang();
+    el.options[0].textContent = t(lang, 'langAuto');
+    el.options[1].textContent = t(lang, 'langHu');
+    el.options[2].textContent = t(lang, 'langEn');
+    const pref = (this._config.language === 'hu' || this._config.language === 'en')
+      ? this._config.language
+      : 'auto';
+    if (document.activeElement !== el) el.value = pref;
+  }
+
+  _syncTexts() {
+    const lang = this._lang();
+    this._syncLang();
+    const set = (id, text) => {
+      const el = this._el(id);
+      if (el) el.textContent = text;
     };
+    set('lblLang', t(lang, 'langLabel'));
+    set('lblApiKey', t(lang, 'apiKeyLabel'));
+    set('hintApiKey', t(lang, 'apiKeyHint'));
+    set('lblName', t(lang, 'nameLabel'));
+    const key = this._el('apiKey');
+    if (key) key.placeholder = t(lang, 'apiKeyPlaceholder');
+    const name = this._el('name');
+    if (name) name.placeholder = t(lang, 'namePlaceholder');
   }
 
   _syncMode() {
@@ -1951,7 +2193,7 @@ class BKKHopCardEditor extends HTMLElement {
   async _fillKey() {
     this._loadingKey = true;
     try {
-      const key = await BkkLib.stealApiKey(this._hass);
+      const key = await BkkLib.apiKeyFromDashboard(this._hass);
       if (key && !this._config.apiKey) this._emit({ apiKey: key });
     } finally {
       this._loadingKey = false;
@@ -1989,7 +2231,7 @@ class BKKHopCardEditor extends HTMLElement {
         });
       });
     } catch (err) {
-      this._error(err.message || String(err));
+      this._error(errText(this._lang(), err));
     }
   }
 
@@ -2002,7 +2244,7 @@ class BKKHopCardEditor extends HTMLElement {
       return;
     }
     if (this._destsLoading) {
-      box.innerHTML = '<span class="hint">El\u00e9rhet\u0151 c\u00e9lok bet\u00f6lt\u00e9se...</span>';
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
       return;
     }
     if (!this._dests.length) {
@@ -2018,8 +2260,8 @@ class BKKHopCardEditor extends HTMLElement {
       if (this._mode() === 'volan' && f.includes('kelenfold')) {
         const bp = this._dests.filter((d) => /budapest/i.test(d.name)).slice(0, 6);
         if (bp.length) {
-          msg = 'Nincs k\u00f6zvetlen Vol\u00e1n Kelenf\u00f6ldre. Budapesti c\u00e9lok: ' +
-            bp.map((d) => d.name.replace(/^Budapest,\s*/i, '')).join(', ') + '.';
+          msg = t(this._lang(), 'noDirectKelenfold',
+            bp.map((d) => d.name.replace(/^Budapest,\s*/i, '')).join(', '));
         }
       }
       box.innerHTML = '<span class="hint">' + BkkLib.esc(msg) + '</span>';
@@ -2046,7 +2288,7 @@ class BKKHopCardEditor extends HTMLElement {
     this._destsLoading = true;
     this._loadedStop = stopId;
     const box = this._el('destHits');
-    if (box) box.innerHTML = '<span class="hint">El\u00e9rhet\u0151 c\u00e9lok bet\u00f6lt\u00e9se...</span>';
+    if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
     try {
       this._error('');
       const idx = await BkkLib.reachableDests(
@@ -2067,7 +2309,7 @@ class BKKHopCardEditor extends HTMLElement {
       const dq = this._el('dq');
       this._paintDestHits(dq ? dq.value.trim() : '');
     } catch (err) {
-      this._error(err.message || String(err));
+      this._error(errText(this._lang(), err));
       if (box) box.innerHTML = '';
     } finally {
       this._destsLoading = false;
@@ -2179,7 +2421,6 @@ class BKKHopCardEditor extends HTMLElement {
       }
     });
   }
-  console.info('[hungarian-transport] impl attached');
 })();
 
 if (!customElements.get(BKK_PLANNER_TAG)) {
