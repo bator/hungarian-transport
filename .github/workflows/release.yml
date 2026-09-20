@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  schedule:
+    - cron: "30 2 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build indexes and publish zip
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve tag
+        id: ver
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "create=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          latest=$(gh release list --limit 1 --json tagName --jq '.[0].tagName // empty' || true)
+          if [ -z "$latest" ]; then
+            echo "No previous release; skip scheduled publish until v1.3.0 exists."
+            echo "create=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          ver=${latest#v}
+          major=${ver%%.*}
+          rest=${ver#*.}
+          minor=${rest%%.*}
+          patch=${rest#*.}
+          patch=${patch%%.*}
+          patch=${patch:-0}
+          next="v${major}.${minor}.$((patch + 1))"
+          echo "tag=${next}" >> "$GITHUB_OUTPUT"
+          echo "create=true" >> "$GITHUB_OUTPUT"
+          echo "Scheduled/manual patch from ${latest} -> ${next}"
+
+      - uses: actions/setup-python@v5
+        if: steps.ver.outputs.create == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Build GTFS indexes
+        if: steps.ver.outputs.create == 'true'
+        run: |
+          python3 scripts/build_volan_index.py
+          python3 scripts/build_city_index.py
+          ls -lh volan-index.json.gz city-index.json.gz hungarian-transport.js
+
+      - name: Stamp card version and pack zip
+        if: steps.ver.outputs.create == 'true'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.tag }}"
+          ver="${tag#v}"
+          sed -i "s/^const CARD_VERSION = '.*';/const CARD_VERSION = '${ver}';/" hungarian-transport.js
+          zip -9 hungarian-transport.zip hungarian-transport.js volan-index.json.gz city-index.json.gz
+          ls -lh hungarian-transport.zip
+
+      - name: Publish GitHub release
+        if: steps.ver.outputs.create == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.ver.outputs.tag }}"
+          notes="Hungarian transport ${tag#v}. Includes fresh Volán and city GTFS indexes."
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" hungarian-transport.zip --clobber
+          else
+            gh release create "$tag" hungarian-transport.zip --title "$tag" --notes "$notes"
+          fi

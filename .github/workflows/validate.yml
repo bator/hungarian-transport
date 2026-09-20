@@ -21,8 +21,8 @@ jobs:
         with:
           category: plugin
 
-  syntax:
-    name: Card syntax
+  tests:
+    name: Card and GTFS tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +30,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+          cache: npm
 
-      - name: Translation and registration smoke test
-        run: node test-i18n.mjs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install jsdom
+        run: npm ci
+
+      - name: Card tests
+        run: npm test
+
+      - name: Compact GTFS tests
+        run: python3 scripts/test_gtfs_compact.py
