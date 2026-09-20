@@ -76,13 +76,15 @@ check('platform label differs per language',
   I18N.hu.platformShort(3) === 'vág.3' && I18N.en.platformShort(3) === 'pl.3');
 check('minutes formatter', I18N.hu.minutes(7) === '7 perc' && I18N.en.minutes(7) === '7 min');
 
-check('card element registered', !!registry.get('bkk-stop-card-r3'));
+check('card element registered', !!registry.get('hungarian-transport-card'));
 check('planner element registered', !!registry.get('bkk-stop-card-plan'));
-check('editor element registered', !!registry.get('bkk-stop-card-r3-editor'));
-check('card advertised to picker', (globalThis.customCards || []).length === 2,
+check('editor element registered', !!registry.get('hungarian-transport-card-editor'));
+check('r3 alias still registered', !!registry.get('bkk-stop-card-r3'));
+check('r3 editor alias still registered', !!registry.get('bkk-stop-card-r3-editor'));
+check('card advertised to picker', (globalThis.customCards || []).some((c) => c.type === 'hungarian-transport-card'),
   JSON.stringify((globalThis.customCards || []).map((c) => c.type)));
 
-const stub = registry.get('bkk-stop-card-r3').getStubConfig();
+const stub = registry.get('hungarian-transport-card').getStubConfig();
 check('stub config carries language', stub.language === 'auto', JSON.stringify(stub));
 
 process.exit(failed ? 1 : 0);

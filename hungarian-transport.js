@@ -1,10 +1,12 @@
-const CARD_VERSION = '1.1.0';
+const CARD_VERSION = '1.2.0';
 
 (function defineNow() {
-  const TAG = 'bkk-stop-card-r3';
-  const ED = 'bkk-stop-card-r3-editor';
+  const TAG = 'hungarian-transport-card';
+  const ED = 'hungarian-transport-card-editor';
+  const TAG_ALIAS = 'bkk-stop-card-r3';
+  const ED_ALIAS = 'bkk-stop-card-r3-editor';
   if (!customElements.get(ED)) {
-    class BkkStopCardR3Editor extends HTMLElement {
+    class HungarianTransportEditor extends HTMLElement {
       constructor() {
         super();
         this._config = { routeIds: [] };
@@ -15,10 +17,13 @@ const CARD_VERSION = '1.1.0';
       setConfig(config) { this._config = Object.assign({ routeIds: [] }, config || {}); }
       set hass(hass) { this._hass = hass; }
     }
-    customElements.define(ED, BkkStopCardR3Editor);
+    customElements.define(ED, HungarianTransportEditor);
+    if (!customElements.get(ED_ALIAS)) {
+      customElements.define(ED_ALIAS, class extends HungarianTransportEditor {});
+    }
   }
   if (!customElements.get(TAG)) {
-    class BkkStopCardR3 extends HTMLElement {
+    class HungarianTransportCard extends HTMLElement {
       constructor() {
         super();
         try { if (!this.shadowRoot) this.attachShadow({ mode: 'open' }); } catch (_e) {}
@@ -50,7 +55,10 @@ const CARD_VERSION = '1.1.0';
       }
       getCardSize() { return 1; }
     }
-    customElements.define(TAG, BkkStopCardR3);
+    customElements.define(TAG, HungarianTransportCard);
+    if (!customElements.get(TAG_ALIAS)) {
+      customElements.define(TAG_ALIAS, class extends HungarianTransportCard {});
+    }
   }
   console.info(`%c HUNGARIAN-TRANSPORT %c ${CARD_VERSION} `,
     'color:#fff;background:#0f6fc6;font-weight:700',
@@ -130,6 +138,8 @@ const I18N = {
     minutes: (n) => `${n} perc`,
     now: 'most',
     errNoApiKey: 'Hi\u00e1nyzik az apiKey a k\u00e1rtya be\u00e1ll\u00edt\u00e1s\u00e1b\u00f3l.',
+    errApiKeyBad: 'A BKK API kulcs \u00e9rv\u00e9nytelen (401/403).',
+    errApiKeyProbe: 'A BKK API kulcsot nem siker\u00fclt ellen\u0151rizni.',
     errVolanHttp: (status) => `Vol\u00e1n menetrend HTTP ${status}`,
     errVolanGunzip: 'A b\u00f6ng\u00e9sz\u0151 nem tudja kicsomagolni a Vol\u00e1n menetrendet.',
     errCityHttp: (status) => `Helyi menetrend HTTP ${status}`,
@@ -218,6 +228,8 @@ const I18N = {
     minutes: (n) => `${n} min`,
     now: 'now',
     errNoApiKey: 'The apiKey is missing from the card configuration.',
+    errApiKeyBad: 'The BKK API key is invalid (401/403).',
+    errApiKeyProbe: 'Could not verify the BKK API key.',
     errVolanHttp: (status) => `Vol\u00e1n timetable HTTP ${status}`,
     errVolanGunzip: 'This browser cannot decompress the Vol\u00e1n timetable.',
     errCityHttp: (status) => `Local timetable HTTP ${status}`,
@@ -920,8 +932,10 @@ class BKKPlannerCard extends HTMLElement {
 }
 
 
-const BKK_HOP_TAG = 'bkk-stop-card-r3';
-const BKK_HOP_EDITOR = 'bkk-stop-card-r3-editor';
+const BKK_HOP_TAG = 'hungarian-transport-card';
+const BKK_HOP_EDITOR = 'hungarian-transport-card-editor';
+const BKK_HOP_TAG_ALIAS = 'bkk-stop-card-r3';
+const BKK_HOP_EDITOR_ALIAS = 'bkk-stop-card-r3-editor';
 
 const BkkLib = {
   esc(s) {
@@ -1075,6 +1089,20 @@ const BkkLib = {
     const data = await res.json();
     if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);
     return data;
+  },
+  async probeApiKey(apiKey) {
+    if (!apiKey) return { ok: false, code: 'errNoApiKey' };
+    const q = new URLSearchParams({
+      key: apiKey, version: '4', appVersion: 'apiary-1.0',
+    });
+    try {
+      const res = await fetch(`${BKK_API}/current-time.json?${q}`);
+      if (res.status === 401 || res.status === 403) return { ok: false, code: 'errApiKeyBad' };
+      if (!res.ok) return { ok: false, code: 'errApiKeyProbe' };
+      return { ok: true };
+    } catch (_err) {
+      return { ok: false, code: 'errApiKeyProbe' };
+    }
   },
   hm(ts) {
     if (!ts) return '';
@@ -1911,6 +1939,45 @@ class BKKHopCard extends HTMLElement {
     try {
       this._inner.hass = this._fakeHass();
     } catch (_e) { /* r2 not ready */ }
+    this._patchR2Tips();
+  }
+
+  _patchR2Tips() {
+    const inner = this._inner;
+    if (!inner || !inner.shadowRoot) return;
+    if (!inner._htTipPatched) {
+      inner._htTipPatched = true;
+      const style = document.createElement('style');
+      style.setAttribute('data-ht-tips', '1');
+      style.textContent = [
+        ':host { overflow: visible !important; display: block; }',
+        'ha-card, .wrap, table, tbody, td, td.bpgo { overflow: visible !important; }',
+        '.picto { width: auto !important; min-width: 0.9em; height: auto !important; }',
+        '.bubble { z-index: 1000; }',
+      ].join('\n');
+      inner.shadowRoot.appendChild(style);
+      const flip = (tip) => {
+        if (!tip || !tip.classList || !tip.classList.contains('tip')) return;
+        const card = inner.shadowRoot.querySelector('ha-card') || inner;
+        const top = tip.getBoundingClientRect().top - card.getBoundingClientRect().top;
+        if (top < 56) tip.classList.add('bubble-below');
+        else tip.classList.remove('bubble-below');
+        if (tip.querySelector('.bubble')) tip.removeAttribute('title');
+      };
+      const onOver = (ev) => {
+        const tip = ev.target && ev.target.closest && ev.target.closest('.picto.tip');
+        if (tip) flip(tip);
+      };
+      inner.shadowRoot.addEventListener('mouseover', onOver);
+      inner.shadowRoot.addEventListener('focusin', onOver);
+    }
+    inner.shadowRoot.querySelectorAll('.picto.tip').forEach((el) => {
+      if (el.querySelector('.bubble')) el.removeAttribute('title');
+      const card = inner.shadowRoot.querySelector('ha-card') || inner;
+      const top = el.getBoundingClientRect().top - card.getBoundingClientRect().top;
+      if (top < 56) el.classList.add('bubble-below');
+      else el.classList.remove('bubble-below');
+    });
   }
 
   _mountR2() {
@@ -1920,6 +1987,9 @@ class BKKHopCard extends HTMLElement {
     const tag = 'bkk-stop-card-r2';
     if (!customElements.get(tag)) return false;
     while (root.firstChild) root.removeChild(root.firstChild);
+    const hostStyle = document.createElement('style');
+    hostStyle.textContent = ':host { overflow: visible; display: block; }';
+    root.appendChild(hostStyle);
     this._inner = document.createElement(tag);
     root.appendChild(this._inner);
     this._inner.setConfig({
@@ -2009,6 +2079,8 @@ class BKKHopCardEditor extends HTMLElement {
     this._destRoutes = {};
     this._loadedStop = '';
     this._destsLoading = false;
+    this._keyOk = null;
+    this._probingKey = false;
   }
 
   setConfig(config) {
@@ -2026,6 +2098,7 @@ class BKKHopCardEditor extends HTMLElement {
     this._syncDestLabel();
     this._syncApiKey();
     this._syncMode();
+    this._probeKey();
     if (this._config.stopId && (this._config.apiKey || this._mode() === 'volan' || this._mode() === 'helyi') && this._loadedStop !== this._config.stopId) {
       this._loadDests();
     }
@@ -2040,6 +2113,7 @@ class BKKHopCardEditor extends HTMLElement {
       this._syncMode();
     }
     if (!this._config.apiKey && !this._loadingKey) this._fillKey();
+    else if (this._config.apiKey) this._probeKey();
   }
 
   _lang() { return resolveLang(this._config.language, this._hass); }
@@ -2097,7 +2171,7 @@ class BKKHopCardEditor extends HTMLElement {
             <option value="en"></option>
           </select>
         </div>
-        <div class="f">
+        <div class="f" id="apiKeyWrap">
           <label id="lblApiKey"></label>
           <input id="apiKey" type="text" autocomplete="off">
           <div class="hint"><span id="hintApiKey"></span>
@@ -2146,7 +2220,9 @@ class BKKHopCardEditor extends HTMLElement {
       this._emit({ name: ev.target.value });
     });
     this._el('apiKey').addEventListener('change', (ev) => {
+      this._keyOk = null;
       this._emit({ apiKey: ev.target.value.trim() });
+      this._probeKey();
     });
     this._el('mav').addEventListener('change', () => this._onModeToggle('mav'));
     this._el('volan').addEventListener('change', () => this._onModeToggle('volan'));
@@ -2206,9 +2282,24 @@ class BKKHopCardEditor extends HTMLElement {
   }
 
   _syncApiKey() {
+    this._syncApiKeyVisibility();
+    const wrap = this._el('apiKeyWrap');
+    const hidden = wrap && wrap.style.display === 'none';
     const el = this._el('apiKey');
     if (!el || document.activeElement === el) return;
-    el.value = this._config.apiKey || '';
+    el.value = hidden ? '' : (this._config.apiKey || '');
+  }
+
+  _syncApiKeyVisibility() {
+    const wrap = this._el('apiKeyWrap');
+    if (!wrap) return;
+    const mode = this._mode();
+    if (mode === 'volan' || mode === 'helyi') {
+      wrap.style.display = 'none';
+      return;
+    }
+    const key = (this._config.apiKey || '').trim();
+    wrap.style.display = (key && this._keyOk === true) ? 'none' : '';
   }
 
   _modeCopy(mode) {
@@ -2268,6 +2359,7 @@ class BKKHopCardEditor extends HTMLElement {
     if (q && document.activeElement !== q && !this._config.stopName) q.placeholder = copy.originPh;
     const dq = this._el('dq');
     if (dq && document.activeElement !== dq && !this._config.destName) dq.placeholder = copy.destPh;
+    this._syncApiKeyVisibility();
     this._paintFav();
   }
 
@@ -2364,9 +2456,43 @@ class BKKHopCardEditor extends HTMLElement {
     this._loadingKey = true;
     try {
       const key = await BkkLib.apiKeyFromDashboard(this._hass);
-      if (key && !this._config.apiKey) this._emit({ apiKey: key });
+      if (key && !this._config.apiKey) {
+        this._emit({ apiKey: key });
+        await this._probeKey();
+      }
     } finally {
       this._loadingKey = false;
+    }
+  }
+
+  async _probeKey() {
+    const mode = this._mode();
+    if (mode === 'volan' || mode === 'helyi') {
+      this._syncApiKey();
+      return;
+    }
+    const key = (this._config.apiKey || '').trim();
+    if (!key) {
+      this._keyOk = false;
+      this._syncApiKey();
+      return;
+    }
+    if (this._probingKey) return;
+    if (this._keyOk === true && this._probedKey === key) {
+      this._syncApiKey();
+      return;
+    }
+    this._probingKey = true;
+    this._probedKey = key;
+    try {
+      const result = await BkkLib.probeApiKey(key);
+      if ((this._config.apiKey || '').trim() !== key) return;
+      this._keyOk = !!result.ok;
+      this._syncApiKey();
+      if (!result.ok && result.code) this._error(errText(this._lang(), codedError(result.code)));
+      else if (result.ok) this._error('');
+    } finally {
+      this._probingKey = false;
     }
   }
 
@@ -2533,7 +2659,7 @@ class BKKHopCardEditor extends HTMLElement {
 
 (function attachHopImpl() {
   const Ctor = customElements.get(BKK_HOP_TAG);
-  if (!Ctor) { console.error('[bkk-stop-card-r3] missing ctor'); return; }
+  if (!Ctor) { console.error('[hungarian-transport-card] missing ctor'); return; }
   const srcProto = BKKHopCard.prototype;
   Object.getOwnPropertyNames(srcProto).forEach((name) => {
     if (name === 'constructor') return;
@@ -2572,7 +2698,7 @@ class BKKHopCardEditor extends HTMLElement {
     }
     return document.createElement(BKK_HOP_EDITOR);
   };
-  document.querySelectorAll(BKK_HOP_TAG).forEach((el) => {
+  document.querySelectorAll(BKK_HOP_TAG + ',' + BKK_HOP_TAG_ALIAS).forEach((el) => {
     if (el._config && typeof el.setConfig === 'function') {
       try { el.setConfig(el._config); } catch (_e) {}
     }
@@ -2586,7 +2712,7 @@ class BKKHopCardEditor extends HTMLElement {
       const desc = Object.getOwnPropertyDescriptor(src, name);
       if (desc) Object.defineProperty(Ed.prototype, name, desc);
     });
-    document.querySelectorAll(BKK_HOP_EDITOR).forEach((el) => {
+    document.querySelectorAll(BKK_HOP_EDITOR + ',' + BKK_HOP_EDITOR_ALIAS).forEach((el) => {
       if (el._config && typeof el.setConfig === 'function') {
         try { el.setConfig(el._config); } catch (_e) {}
       }
@@ -2603,7 +2729,7 @@ if (!window.customCards.some((c) => c.type === BKK_HOP_TAG)) {
   window.customCards.push({
     type: BKK_HOP_TAG,
     name: 'Hungarian transport',
-    description: 'BKK, M\u00c1V and Vol\u00e1n departures between two stops',
+    description: 'BKK, M\u00c1V, Vol\u00e1n and local-city departures between two stops',
     preview: false,
   });
 }

@@ -42,18 +42,26 @@ matching `/local/hungarian-transport/hungarian-transport.js` resource.
 
 ## Setup
 
-Add the **Hungarian transport** card from the card picker. The editor asks for a
-BKK Open Data API key, which is free after a short sign-up:
+Add the **Hungarian transport** card from the card picker (`custom:hungarian-transport-card`).
+Older dashboards that still use `custom:bkk-stop-card-r3` keep working as an alias.
+
+The editor asks for a BKK Open Data API key, which is free after a short sign-up:
 <https://opendata.bkk.hu/data-sources>
 
 The key is stored in the card configuration. If another Hungarian transport card
-on the same dashboard already has one, the editor reuses it.
+on the same dashboard already has one, the editor reuses it. When the key works,
+the editor hides the field; it only reappears if the key is missing or FUTÁR
+rejects it. Volán and Helyi modes do not need a key.
+
+Live vehicle positions and delays come from BKK FUTÁR (BKK and MÁV modes).
+No other Hungarian operator publishes a public, key-based realtime API, so
+Volán long-distance and Helyi city services stay on the official static GTFS.
 
 ## Options
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `type` | string | — | `custom:bkk-stop-card-r3` |
+| `type` | string | — | `custom:hungarian-transport-card` |
 | `apiKey` | string | — | BKK Open Data API key |
 | `language` | string | `auto` | `auto`, `hu` or `en`. `auto` follows the Home Assistant user's language. |
 | `name` | string | `origin → destination` | Card header |
@@ -73,7 +81,7 @@ on the same dashboard already has one, the editor reuses it.
 ### Example
 
 ```yaml
-type: custom:bkk-stop-card-r3
+type: custom:hungarian-transport-card
 apiKey: 00000000-0000-0000-0000-000000000000
 language: en
 mav: true
@@ -97,9 +105,6 @@ reaches.
 
 Debrecen DKV does not publish a public GTFS zip, so it is not in the city
 picker until a URL exists.
-
-Destination search only offers stops that a vehicle from the origin actually
-reaches.
 
 ## Volán long-distance coaches
 
