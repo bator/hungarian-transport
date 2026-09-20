@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.env.*
+secrets*
+*.pyc
+__pycache__/
+.venv/
+volan-index*.json
+volan-index*.json.gz
+volanbusz_gtfs.zip
+*.log
