@@ -3,11 +3,14 @@
 [![hacs][hacs-badge]][hacs-url]
 [![release][release-badge]][release-url]
 
-Home Assistant dashboard card for **BKK**, **MÁV** and **Volán** journeys.
+Home Assistant dashboard card for **BKK**, **MÁV**, **Volán** and other
+Hungarian city operators (Miskolc, Pécs, Szeged, Szombathely, plus Volán
+local networks such as Sopron or Eger).
 
 Pick an origin and a destination, and the card lists the next departures between
-those two stops. City and rail traffic come from the live BKK FUTÁR API, and
-long-distance coaches from the official KTI Volán GTFS feed.
+those two stops. City and rail traffic in Budapest come from the live BKK FUTÁR
+API. Long-distance coaches and local services outside Budapest come from official
+GTFS feeds.
 
 The editor and the card are available in **Hungarian and English**. By default
 they follow the Home Assistant user's language; you can also pin one explicitly.
@@ -61,8 +64,11 @@ on the same dashboard already has one, the editor reuses it.
 | `routeIds` | list | `[]` | Routes serving the destination, filled by the editor |
 | `mav` | bool | `false` | MÁV mode: rail stations and trains only |
 | `volan` | bool | `false` | Volán mode: long-distance coaches |
+| `helyi` | bool | `false` | Local-city mode (mutually exclusive with MÁV/Volán) |
+| `city` | string | — | Operator id from `city-index.json.gz` (`pecs`, `miskolc`, `sopron`, …) |
 | `refresh` | number | `45` | Seconds between departure refreshes, minimum 15 |
 | `volanIndex` | string | next to the card | URL of `volan-index.json.gz` |
+| `cityIndex` | string | next to the card | URL of `city-index.json.gz` |
 
 ### Example
 
@@ -83,7 +89,14 @@ destName: Székesfehérvár
 | --- | --- | --- |
 | (none) | BKK FUTÁR | BKK stops |
 | MÁV | BKK FUTÁR rail | MÁV stations |
-| Volán | FUTÁR local coaches + KTI GTFS | Volán stops |
+| Volán | FUTÁR local coaches + KTI GTFS | Volán long-distance stops |
+| Helyi | municipal GTFS + Volán local | stops in the chosen city |
+
+Destination search only offers stops that a vehicle from the origin actually
+reaches.
+
+Debrecen DKV does not publish a public GTFS zip, so it is not in the city
+picker until a URL exists.
 
 Destination search only offers stops that a vehicle from the origin actually
 reaches.
@@ -99,7 +112,13 @@ an old feed.
 
 ```bash
 python3 scripts/build_volan_index.py
+python3 scripts/build_city_index.py
 ```
+
+`city-index.json.gz` sits next to the card JS as well. The daily job
+(`scripts/update_volan_index.py`) HEADs the KTI zip **and** the municipal
+feeds, rebuilds both indexes when something changed, and atomically replaces
+the files.
 
 To keep it current, `scripts/update_volan_index.py` HEADs the KTI zip, rebuilds
 only when it changed, and atomically replaces the index. `packages/hungarian_transport.yaml`

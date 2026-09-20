@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.0.0';
+const CARD_VERSION = '1.1.0';
 
 (function defineNow() {
   const TAG = 'bkk-stop-card-r3';
@@ -29,7 +29,7 @@ const CARD_VERSION = '1.0.0';
         return document.createElement(ED);
       }
       static getStubConfig() {
-        return { name: '', stopId: '', stopName: '', routeIds: [], destKey: '', destName: '', mav: false, volan: false };
+        return { name: '', stopId: '', stopName: '', routeIds: [], destKey: '', destName: '', mav: false, volan: false, helyi: false, city: '' };
       }
       setConfig(config) {
         this._config = Object.assign({ routeIds: [] }, config || {});
@@ -86,17 +86,31 @@ const FAVORITES = BKK_FAVORITES.concat(MAV_FAVORITES);
    or wherever the Lovelace resource points. Requires `type: module`. */
 const ASSET_BASE = new URL('.', import.meta.url).href;
 let VOLAN_INDEX_OVERRIDE = '';
+let CITY_INDEX_OVERRIDE = '';
 
 function setVolanIndexUrl(url) {
   VOLAN_INDEX_OVERRIDE = String(url || '');
 }
 
-function volanIndexUrl() {
+function setCityIndexUrl(url) {
+  CITY_INDEX_OVERRIDE = String(url || '');
+}
+
+function dayBuster(base) {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, '0');
   const day = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
-  const base = VOLAN_INDEX_OVERRIDE || new URL('volan-index.json.gz', ASSET_BASE).href;
   return `${base}${base.includes('?') ? '&' : '?'}v=${day}`;
+}
+
+function volanIndexUrl() {
+  const base = VOLAN_INDEX_OVERRIDE || new URL('volan-index.json.gz', ASSET_BASE).href;
+  return dayBuster(base);
+}
+
+function cityIndexUrl() {
+  const base = CITY_INDEX_OVERRIDE || new URL('city-index.json.gz', ASSET_BASE).href;
+  return dayBuster(base);
 }
 
 const I18N = {
@@ -118,6 +132,10 @@ const I18N = {
     errNoApiKey: 'Hi\u00e1nyzik az apiKey a k\u00e1rtya be\u00e1ll\u00edt\u00e1s\u00e1b\u00f3l.',
     errVolanHttp: (status) => `Vol\u00e1n menetrend HTTP ${status}`,
     errVolanGunzip: 'A b\u00f6ng\u00e9sz\u0151 nem tudja kicsomagolni a Vol\u00e1n menetrendet.',
+    errCityHttp: (status) => `Helyi menetrend HTTP ${status}`,
+    errCityGunzip: 'A b\u00f6ng\u00e9sz\u0151 nem tudja kicsomagolni a helyi menetrendet.',
+    cityLabel: 'V\u00e1ros',
+    cityPlaceholder: 'V\u00e1lassz v\u00e1rost',
     plannerTitle: 'BKK \u00fatvonal',
     plannerStep1: '1. Meg\u00e1ll\u00f3',
     plannerStep2: '2. J\u00e1rm\u0171',
@@ -171,6 +189,17 @@ const I18N = {
         destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
         destNone: 'Nincs el\u00e9rhet\u0151 Vol\u00e1n c\u00e9l ebb\u0151l a forr\u00e1sb\u00f3l.',
       },
+      helyi: {
+        stop: 'Forr\u00e1s meg\u00e1ll\u00f3',
+        dest: 'C\u00e9l meg\u00e1ll\u00f3',
+        hint: 'V\u00e1lassz v\u00e1rost, majd a forr\u00e1s \u00e9s a c\u00e9l meg\u00e1ll\u00f3t. A helyi j\u00e1ratok jelennek meg k\u00f6z\u00f6tt\u00fck.',
+        originPh: 'Keres\u00e9s a v\u00e1ros meg\u00e1ll\u00f3i k\u00f6z\u00f6tt',
+        destPh: 'Keres\u00e9s a forr\u00e1sb\u00f3l el\u00e9rhet\u0151 meg\u00e1ll\u00f3k k\u00f6z\u00f6tt',
+        empty: 'Nincs meg\u00e1ll\u00f3 erre a keres\u00e9sre ebben a v\u00e1rosban.',
+        destEmpty: 'Err\u0151l a meg\u00e1ll\u00f3r\u00f3l nincs k\u00f6zvetlen j\u00e1rat erre a c\u00e9lra.',
+        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
+        destNone: 'Nincs el\u00e9rhet\u0151 c\u00e9l ebb\u0151l a forr\u00e1sb\u00f3l.',
+      },
     },
   },
   en: {
@@ -191,6 +220,10 @@ const I18N = {
     errNoApiKey: 'The apiKey is missing from the card configuration.',
     errVolanHttp: (status) => `Vol\u00e1n timetable HTTP ${status}`,
     errVolanGunzip: 'This browser cannot decompress the Vol\u00e1n timetable.',
+    errCityHttp: (status) => `Local timetable HTTP ${status}`,
+    errCityGunzip: 'This browser cannot decompress the local timetable.',
+    cityLabel: 'City',
+    cityPlaceholder: 'Pick a city',
     plannerTitle: 'BKK route',
     plannerStep1: '1. Stop',
     plannerStep2: '2. Vehicle',
@@ -243,6 +276,17 @@ const I18N = {
         destEmpty: 'No direct coach from this stop to that destination.',
         destNeedOrigin: 'Pick an origin stop first.',
         destNone: 'No Vol\u00e1n destination is reachable from this origin.',
+      },
+      helyi: {
+        stop: 'Origin stop',
+        dest: 'Destination stop',
+        hint: 'Pick a city, then an origin and a destination. Local services between them are listed.',
+        originPh: 'Search stops in this city',
+        destPh: 'Search among the stops reachable from the origin',
+        empty: 'No stop in this city matches the search.',
+        destEmpty: 'No direct service from this stop to that destination.',
+        destNeedOrigin: 'Pick an origin stop first.',
+        destNone: 'No destination is reachable from this origin.',
       },
     },
   },
@@ -974,6 +1018,7 @@ const BkkLib = {
   },
   mode(cfg) {
     if (cfg && cfg.volan) return 'volan';
+    if (cfg && cfg.helyi) return 'helyi';
     if (cfg && cfg.mav) return 'mav';
     return 'bkk';
   },
@@ -1082,45 +1127,73 @@ const BkkLib = {
   async volanIndex() {
     if (BkkLib._volanIdx) return BkkLib._volanIdx;
     if (BkkLib._volanIdxP) return BkkLib._volanIdxP;
-    BkkLib._volanIdxP = (async () => {
-      const res = await fetch(volanIndexUrl(), { cache: 'no-store' });
-      if (!res.ok) throw codedError('errVolanHttp', res.status);
-      const buf = await res.arrayBuffer();
-      const u8 = new Uint8Array(buf);
-      let text = '';
-      if (u8.length >= 2 && u8[0] === 0x1f && u8[1] === 0x8b) {
-        if (typeof DecompressionStream !== 'function') {
-          throw codedError('errVolanGunzip');
-        }
-        const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
-        text = await new Response(stream).text();
-      } else {
-        text = new TextDecoder().decode(u8);
-      }
-      const idx = JSON.parse(text);
-      idx.stops = (idx.s || []).map((row, i) => ({
-        i,
-        id: row[0],
-        name: row[1],
-        num: String(row[2] || ''),
-        key: BkkLib.norm(row[1]),
-        fold: BkkLib.fold(row[1]),
-      }));
-      idx.byNum = new Map();
-      idx.byKey = new Map();
-      idx.stops.forEach((st) => {
-        if (st.num && !idx.byNum.has(st.num)) idx.byNum.set(st.num, st);
-        if (st.key && !idx.byKey.has(st.key)) idx.byKey.set(st.key, st);
-      });
+    BkkLib._volanIdxP = BkkLib._loadGtfsIndex(volanIndexUrl(), 'errVolanHttp', 'errVolanGunzip').then((idx) => {
       BkkLib._volanIdx = idx;
       return idx;
-    })();
+    });
     try {
       return await BkkLib._volanIdxP;
     } catch (err) {
       BkkLib._volanIdxP = null;
       throw err;
     }
+  },
+  async cityIndex() {
+    if (BkkLib._cityIdx) return BkkLib._cityIdx;
+    if (BkkLib._cityIdxP) return BkkLib._cityIdxP;
+    BkkLib._cityIdxP = BkkLib._loadGtfsIndex(cityIndexUrl(), 'errCityHttp', 'errCityGunzip').then((idx) => {
+      BkkLib._cityIdx = idx;
+      return idx;
+    });
+    try {
+      return await BkkLib._cityIdxP;
+    } catch (err) {
+      BkkLib._cityIdxP = null;
+      throw err;
+    }
+  },
+  async _loadGtfsIndex(url, httpKey, gunzipKey) {
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) throw codedError(httpKey, res.status);
+    const buf = await res.arrayBuffer();
+    const u8 = new Uint8Array(buf);
+    let text = '';
+    if (u8.length >= 2 && u8[0] === 0x1f && u8[1] === 0x8b) {
+      if (typeof DecompressionStream !== 'function') throw codedError(gunzipKey);
+      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+      text = await new Response(stream).text();
+    } else {
+      text = new TextDecoder().decode(u8);
+    }
+    const idx = JSON.parse(text);
+    idx.stops = (idx.s || []).map((row, i) => ({
+      i,
+      id: row[0],
+      name: row[1],
+      num: String(row[2] || ''),
+      op: row.length > 3 ? Number(row[3]) : 0,
+      key: BkkLib.norm(row[1]),
+      fold: BkkLib.fold(row[1]),
+    }));
+    idx.ops = (idx.o || []).map((row, i) => ({ i, id: row[0], name: row[1] }));
+    idx.byNum = new Map();
+    idx.byKey = new Map();
+    idx.stops.forEach((st) => {
+      const nk = st.op + ':' + st.num;
+      const kk = st.op + ':' + st.key;
+      if (st.num && !idx.byNum.has(nk)) idx.byNum.set(nk, st);
+      if (st.key && !idx.byKey.has(kk)) idx.byKey.set(kk, st);
+    });
+    return idx;
+  },
+  opIx(idx, city) {
+    if (!idx || !city) return -1;
+    const hit = (idx.ops || []).find((o) => o.id === city);
+    return hit ? hit.i : -1;
+  },
+  cityStops(idx, opIx) {
+    if (opIx < 0) return idx.stops || [];
+    return (idx.stops || []).filter((s) => s.op === opIx);
   },
   volanDay(offset) {
     const d = new Date();
@@ -1150,17 +1223,22 @@ const BkkLib = {
     if (rem.some((x) => String(x) === ymd)) ok = false;
     return ok;
   },
-  volanMatchStop(idx, stop) {
+  volanMatchStop(idx, stop, opIx) {
     if (!idx || !stop) return null;
+    const op = (opIx == null) ? 0 : opIx;
+    const pool = opIx == null ? idx.stops : BkkLib.cityStops(idx, op);
     const num = BkkLib.stopNum(stop.id);
-    if (num && idx.byNum.has(num)) return idx.byNum.get(num);
+    if (num && idx.byNum.has(op + ':' + num)) {
+      const hit = idx.byNum.get(op + ':' + num);
+      if (opIx == null || hit.op === op) return hit;
+    }
     const key = BkkLib.norm(stop.name || '');
-    if (key && idx.byKey.has(key)) return idx.byKey.get(key);
+    if (key && idx.byKey.has(op + ':' + key)) return idx.byKey.get(op + ':' + key);
     const f = BkkLib.fold(stop.name || '');
     if (!f || f.length < 4) return null;
-    const exact = idx.stops.find((s) => s.fold === f);
+    const exact = pool.find((s) => s.fold === f);
     if (exact) return exact;
-    const hits = idx.stops.filter((s) => s.fold.indexOf(f) >= 0);
+    const hits = pool.filter((s) => s.fold.indexOf(f) >= 0);
     if (!hits.length) return null;
     hits.sort((a, b) => {
       const ah = /autobusz-allomas|palyaudvar/.test(a.fold) ? 0 : 1;
@@ -1179,9 +1257,18 @@ const BkkLib = {
   },
   async volanSearchStops(q) {
     const idx = await BkkLib.volanIndex();
+    return BkkLib.gtfsSearchStops(idx, q, null);
+  },
+  async citySearchStops(q, city) {
+    if (!city) return [];
+    const idx = await BkkLib.cityIndex();
+    return BkkLib.gtfsSearchStops(idx, q, BkkLib.opIx(idx, city));
+  },
+  gtfsSearchStops(idx, q, opIx) {
     const f = BkkLib.fold(q);
     if (!f) return [];
-    const hits = idx.stops.filter((s) => s.fold.indexOf(f) >= 0);
+    const pool = opIx == null || opIx < 0 ? idx.stops : BkkLib.cityStops(idx, opIx);
+    const hits = pool.filter((s) => s.fold.indexOf(f) >= 0);
     hits.sort((a, b) => {
       const ah = /autobusz-allomas|palyaudvar/.test(a.fold) ? 0 : 1;
       const bh = /autobusz-allomas|palyaudvar/.test(b.fold) ? 0 : 1;
@@ -1195,12 +1282,20 @@ const BkkLib = {
       id: s.id,
       name: s.name,
       label: s.name,
-      type: 'COACH',
+      type: 'BUS',
     }));
   },
   async volanReachableDests(stop) {
     const idx = await BkkLib.volanIndex();
-    const origin = BkkLib.volanMatchStop(idx, stop);
+    return BkkLib.gtfsReachableDests(idx, stop, null);
+  },
+  async cityReachableDests(stop, city) {
+    if (!city) return { dests: [], destRoutes: {} };
+    const idx = await BkkLib.cityIndex();
+    return BkkLib.gtfsReachableDests(idx, stop, BkkLib.opIx(idx, city));
+  },
+  gtfsReachableDests(idx, stop, opIx) {
+    const origin = BkkLib.volanMatchStop(idx, stop, opIx == null ? null : opIx);
     if (!origin) return { dests: [], destRoutes: {} };
     const byKey = new Map();
     const destRoutes = {};
@@ -1214,6 +1309,7 @@ const BkkLib = {
       for (let j = oidx + 1; j < ps.length; j++) {
         const st = idx.stops[ps[j]];
         if (!st || !st.key) continue;
+        if (opIx != null && st.op !== opIx) continue;
         if (!byKey.has(st.key)) byKey.set(st.key, { key: st.key, name: st.name, id: st.id });
         if (!destRoutes[st.key]) destRoutes[st.key] = [];
         if (destRoutes[st.key].indexOf(route) < 0) destRoutes[st.key].push(route);
@@ -1225,7 +1321,15 @@ const BkkLib = {
   },
   async volanDepartures(stopId, dest, originName) {
     const idx = await BkkLib.volanIndex();
-    const origin = BkkLib.volanMatchStop(idx, { id: stopId, name: originName || '' });
+    return BkkLib.gtfsDepartures(idx, stopId, dest, originName, null, '#F9AB13', '#000000', 'coach', 'COACH');
+  },
+  async cityDepartures(stopId, dest, originName, city) {
+    if (!city) return [];
+    const idx = await BkkLib.cityIndex();
+    return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), '#0F6FC6', '#ffffff', 'bus', 'BUS');
+  },
+  gtfsDepartures(idx, stopId, dest, originName, opIx, color, text, vehicle, rawType) {
+    const origin = BkkLib.volanMatchStop(idx, { id: stopId, name: originName || '' }, opIx == null ? null : opIx);
     if (!origin) return [];
     const destKey = dest && dest.key;
     const destFold = BkkLib.fold((dest && dest.name) || destKey || '');
@@ -1259,10 +1363,10 @@ const BkkLib = {
         rows.push({
           tripId: 'gtfs:' + route + ':' + day.ymd + ':' + depMin + ':' + origin.i,
           label: route,
-          color: '#F9AB13',
-          text: '#000000',
-          vehicle: 'coach',
-          rawType: 'COACH',
+          color: color,
+          text: text,
+          vehicle: vehicle,
+          rawType: rawType,
           dep: day.midnight + depMin * 60,
           sched: day.midnight + depMin * 60,
           delay: 0,
@@ -1324,12 +1428,18 @@ const BkkLib = {
     out.sort((a, b) => (a.dep || 0) - (b.dep || 0));
     return out.slice(0, 12);
   },
-  async searchStops(apiKey, q, mode) {
+  async searchStops(apiKey, q, mode, city) {
     const byId = new Map();
     if (mode === 'volan') {
       try {
         (await BkkLib.volanSearchStops(q)).forEach((s) => byId.set(s.id, s));
       } catch (_e) { /* GTFS index optional */ }
+    }
+    if (mode === 'helyi') {
+      try {
+        (await BkkLib.citySearchStops(q, city)).forEach((s) => byId.set(s.id, s));
+      } catch (_e) { /* GTFS index optional */ }
+      return BkkLib.groupStops(Array.from(byId.values())).slice(0, 20);
     }
     if (apiKey) {
       try {
@@ -1447,7 +1557,10 @@ const BkkLib = {
     });
     return names;
   },
-  async reachableDests(apiKey, cache, stop, mode) {
+  async reachableDests(apiKey, cache, stop, mode, city) {
+    if (mode === 'helyi') {
+      return BkkLib.cityReachableDests(stop, city);
+    }
     let out = { dests: [], destRoutes: {} };
     try {
       const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
@@ -1538,6 +1651,9 @@ const BkkLib = {
   async departures(apiKey, stopId, routeIds, dest, opts) {
     opts = opts || {};
     const mode = opts.mode || (opts.mav ? 'mav' : 'bkk');
+    if (mode === 'helyi') {
+      return BkkLib.cityDepartures(stopId, dest, opts.originName, opts.city);
+    }
     const cache = opts.cache || {};
     const origin = { id: stopId, name: opts.originName || '' };
     const selected = new Set(routeIds || []);
@@ -1690,6 +1806,8 @@ class BKKHopCard extends HTMLElement {
       destName: '',
       mav: false,
       volan: false,
+      helyi: false,
+      city: '',
       language: 'auto',
     };
   }
@@ -1840,9 +1958,10 @@ class BKKHopCard extends HTMLElement {
   async _reload() {
     const cfg = this._config || {};
     if (cfg.volanIndex) setVolanIndexUrl(cfg.volanIndex);
+    if (cfg.cityIndex) setCityIndexUrl(cfg.cityIndex);
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     this._mountR2();
-    const ready = cfg.stopId && cfg.destKey && (cfg.apiKey || BkkLib.mode(cfg) === 'volan');
+    const ready = cfg.stopId && cfg.destKey && (cfg.apiKey || BkkLib.mode(cfg) === 'volan' || BkkLib.mode(cfg) === 'helyi');
     if (!ready) {
       this._vehicles = [];
       this._pushHass();
@@ -1856,6 +1975,7 @@ class BKKHopCard extends HTMLElement {
             originName: cfg.stopName || '',
             cache: this._tripCache || {},
             mode: BkkLib.mode(cfg),
+            city: cfg.city || '',
           },
         );
         const lang = this._lang();
@@ -1897,6 +2017,7 @@ class BKKHopCardEditor extends HTMLElement {
     if (!this._dests) this._dests = [];
     if (!this._destRoutes) this._destRoutes = {};
     if (this._config.volanIndex) setVolanIndexUrl(this._config.volanIndex);
+    if (this._config.cityIndex) setCityIndexUrl(this._config.cityIndex);
     if (!this._built) this._build();
     this._syncLang();
     this._syncTexts();
@@ -1905,7 +2026,7 @@ class BKKHopCardEditor extends HTMLElement {
     this._syncDestLabel();
     this._syncApiKey();
     this._syncMode();
-    if (this._config.stopId && this._config.apiKey && this._loadedStop !== this._config.stopId) {
+    if (this._config.stopId && (this._config.apiKey || this._mode() === 'volan' || this._mode() === 'helyi') && this._loadedStop !== this._config.stopId) {
       this._loadDests();
     }
   }
@@ -1991,8 +2112,13 @@ class BKKHopCardEditor extends HTMLElement {
           <div class="row">
             <label class="switch"><input id="mav" type="checkbox"> M\u00c1V</label>
             <label class="switch"><input id="volan" type="checkbox"> Vol\u00e1n</label>
+            <label class="switch"><input id="helyi" type="checkbox"> Helyi</label>
           </div>
           <div class="hint" id="modeHint"></div>
+        </div>
+        <div class="f" id="cityWrap" style="display:none">
+          <label id="lblCity"></label>
+          <select id="city"></select>
         </div>
         <div class="f">
           <label id="lblStop"></label>
@@ -2024,6 +2150,21 @@ class BKKHopCardEditor extends HTMLElement {
     });
     this._el('mav').addEventListener('change', () => this._onModeToggle('mav'));
     this._el('volan').addEventListener('change', () => this._onModeToggle('volan'));
+    this._el('helyi').addEventListener('change', () => this._onModeToggle('helyi'));
+    this._el('city').addEventListener('change', (ev) => {
+      this._emit({
+        city: ev.target.value,
+        stopId: '',
+        stopName: '',
+        destKey: '',
+        destName: '',
+        routeIds: [],
+      });
+      this._dests = [];
+      this._loadedStop = '';
+      this._syncStopLabel();
+      this._syncDestLabel();
+    });
     this._el('q').addEventListener('input', () => {
       clearTimeout(this._searchTimer);
       this._searchTimer = setTimeout(() => this._search(this._el('q').value.trim(), 'origin'), 280);
@@ -2098,6 +2239,7 @@ class BKKHopCardEditor extends HTMLElement {
     set('lblApiKey', t(lang, 'apiKeyLabel'));
     set('hintApiKey', t(lang, 'apiKeyHint'));
     set('lblName', t(lang, 'nameLabel'));
+    set('lblCity', t(lang, 'cityLabel'));
     const key = this._el('apiKey');
     if (key) key.placeholder = t(lang, 'apiKeyPlaceholder');
     const name = this._el('name');
@@ -2108,8 +2250,13 @@ class BKKHopCardEditor extends HTMLElement {
     const mode = this._mode();
     const mav = this._el('mav');
     const volan = this._el('volan');
+    const helyi = this._el('helyi');
     if (mav && document.activeElement !== mav) mav.checked = mode === 'mav';
     if (volan && document.activeElement !== volan) volan.checked = mode === 'volan';
+    if (helyi && document.activeElement !== helyi) helyi.checked = mode === 'helyi';
+    const wrap = this._el('cityWrap');
+    if (wrap) wrap.style.display = mode === 'helyi' ? '' : 'none';
+    if (mode === 'helyi') this._fillCities();
     const copy = this._modeCopy(mode);
     const hint = this._el('modeHint');
     if (hint) hint.textContent = copy.hint;
@@ -2129,7 +2276,7 @@ class BKKHopCardEditor extends HTMLElement {
     if (!fav) return;
     fav.innerHTML = '';
     const mode = this._mode();
-    const list = mode === 'mav' ? MAV_FAVORITES : (mode === 'volan' ? VOLAN_FAVORITES : BKK_FAVORITES);
+    const list = mode === 'mav' ? MAV_FAVORITES : (mode === 'volan' ? VOLAN_FAVORITES : (mode === 'helyi' ? [] : BKK_FAVORITES));
     list.forEach((f) => {
       const b = document.createElement('button');
       b.className = 'chip';
@@ -2143,12 +2290,16 @@ class BKKHopCardEditor extends HTMLElement {
   _onModeToggle(which) {
     const mavOn = !!(this._el('mav') && this._el('mav').checked);
     const volanOn = !!(this._el('volan') && this._el('volan').checked);
+    const helyiOn = !!(this._el('helyi') && this._el('helyi').checked);
     let mav = mavOn;
     let volan = volanOn;
-    if (which === 'mav' && mav) volan = false;
-    if (which === 'volan' && volan) mav = false;
+    let helyi = helyiOn;
+    if (which === 'mav' && mav) { volan = false; helyi = false; }
+    if (which === 'volan' && volan) { mav = false; helyi = false; }
+    if (which === 'helyi' && helyi) { mav = false; volan = false; }
     if (this._el('mav')) this._el('mav').checked = mav;
     if (this._el('volan')) this._el('volan').checked = volan;
+    if (this._el('helyi')) this._el('helyi').checked = helyi;
     const q = this._el('q');
     const dq = this._el('dq');
     if (q) q.value = '';
@@ -2164,6 +2315,8 @@ class BKKHopCardEditor extends HTMLElement {
     this._emit({
       mav: mav,
       volan: volan,
+      helyi: helyi,
+      city: helyi ? (this._config.city || '') : '',
       routeIds: [],
       stopId: '',
       stopName: '',
@@ -2173,6 +2326,23 @@ class BKKHopCardEditor extends HTMLElement {
     this._syncMode();
     this._syncStopLabel();
     this._syncDestLabel();
+  }
+
+  async _fillCities() {
+    const sel = this._el('city');
+    if (!sel) return;
+    try {
+      const idx = await BkkLib.cityIndex();
+      const ops = (idx.ops || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'hu'));
+      const cur = this._config.city || '';
+      const ph = t(this._lang(), 'cityPlaceholder');
+      sel.innerHTML = `<option value="">${BkkLib.esc(ph)}</option>` + ops.map((o) => (
+        `<option value="${BkkLib.esc(o.id)}">${BkkLib.esc(o.name)}</option>`
+      )).join('');
+      if (cur) sel.value = cur;
+    } catch (err) {
+      this._error(errText(this._lang(), err));
+    }
   }
 
   _error(msg) {
@@ -2215,7 +2385,7 @@ class BKKHopCardEditor extends HTMLElement {
       this._error('');
       if (!this._config.apiKey) await this._fillKey();
       const mode = this._mode();
-      const hits = await BkkLib.searchStops(this._config.apiKey, q, mode);
+      const hits = await BkkLib.searchStops(this._config.apiKey, q, mode, this._config.city);
       if (!hits.length) {
         box.innerHTML = '<span class="hint">' + BkkLib.esc(this._modeCopy(mode).empty) + '</span>';
         return;
@@ -2283,7 +2453,7 @@ class BKKHopCardEditor extends HTMLElement {
 
   async _loadDests() {
     if (!this._config.stopId) return;
-    if (!this._config.apiKey && this._mode() !== 'volan') return;
+    if (!this._config.apiKey && this._mode() !== 'volan' && this._mode() !== 'helyi') return;
     const stopId = this._config.stopId;
     this._destsLoading = true;
     this._loadedStop = stopId;
@@ -2296,6 +2466,7 @@ class BKKHopCardEditor extends HTMLElement {
         this._cache,
         { id: this._config.stopId, name: this._config.stopName },
         this._mode(),
+        this._config.city,
       );
       if (this._config.stopId !== stopId) return;
       this._dests = idx.dests || [];

@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Check KTI Volán GTFS once a day and rebuild the Lovelace index if it changed.
-
-Intended to run on Home Assistant OS (python3 stdlib). Prints a one-line status
-to stdout so a shell_command automation can notify on update or failure.
-"""
+"""Daily KTI Volán + municipal GTFS check for Hungarian transport on HA OS."""
 from __future__ import annotations
 
 import json
@@ -16,25 +12,21 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from build_city_index import CITY_FEEDS, build_city_index  # noqa: E402
 from build_volan_index import GTFS_URL, build_index  # noqa: E402
 
 UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungarian-transport)"
 HA_BASE = Path("/config/hungarian-transport")
 WEBHOOK_PATH = "/api/webhook/hungarian-transport-gtfs"
-
-# The index must sit next to the card JS, because the card resolves it relative
-# to its own module URL. HACS installs the card under www/community/<repo name>;
-# set HUNGARIAN_TRANSPORT_INDEX when the card is served from somewhere else.
-HA_OUT = Path(
+HA_WWW = Path(
     os.environ.get(
-        "HUNGARIAN_TRANSPORT_INDEX",
-        "/config/www/community/hungarian-transport/volan-index.json.gz",
+        "HUNGARIAN_TRANSPORT_WWW",
+        "/config/www/community/hungarian-transport",
     )
 )
 
 
 def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
-    """HA shell_command is killed after 60s; rebuilds notify via local webhook."""
     payload = json.dumps({"title": title, "message": message}).encode("utf-8")
     urls = [
         "http://127.0.0.1:8123" + WEBHOOK_PATH,
@@ -55,13 +47,13 @@ def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
             continue
 
 
-def paths() -> tuple[Path, Path]:
+def paths() -> tuple[Path, Path, Path]:
     if HA_BASE.is_dir() or Path("/config").is_dir():
         HA_BASE.mkdir(parents=True, exist_ok=True)
-        HA_OUT.parent.mkdir(parents=True, exist_ok=True)
-        return HA_BASE, HA_OUT
+        HA_WWW.mkdir(parents=True, exist_ok=True)
+        return HA_BASE, HA_WWW / "volan-index.json.gz", HA_WWW / "city-index.json.gz"
     here = Path(__file__).resolve().parent.parent
-    return here, here / "volan-index.json.gz"
+    return here, here / "volan-index.json.gz", here / "city-index.json.gz"
 
 
 def load_state(path: Path) -> dict:
@@ -83,7 +75,6 @@ def headers_of(resp) -> dict:
     get = resp.headers.get
     last_modified = (get("Last-Modified") or "").strip()
     date = (get("Date") or "").strip()
-    # KTI sets Last-Modified to the request time, so it is not a fingerprint.
     if last_modified and date:
         try:
             lm = parsedate_to_datetime(last_modified)
@@ -99,36 +90,24 @@ def headers_of(resp) -> dict:
     }
 
 
-def request(method: str, url: str, extra: dict | None = None):
-    hdrs = {
-        "User-Agent": UA,
-        "Accept": "*/*",
-        "Accept-Encoding": "identity",
-    }
-    if extra:
-        hdrs.update(extra)
+def request(method: str, url: str):
+    hdrs = {"User-Agent": UA, "Accept": "*/*", "Accept-Encoding": "identity"}
     req = urllib.request.Request(url, method=method, headers=hdrs)
     return urllib.request.urlopen(req, timeout=60)
 
 
-def remote_meta() -> tuple[dict, bytes | None]:
-    """Return (headers, optional body). Body is set when HEAD is unavailable."""
+def remote_meta(url: str) -> dict:
     try:
-        with request("HEAD", GTFS_URL) as resp:
+        with request("HEAD", url) as resp:
             if 200 <= resp.status < 300:
-                return headers_of(resp), None
+                return headers_of(resp)
     except urllib.error.HTTPError as err:
         if err.code not in (403, 405, 501):
             raise
     except OSError:
         pass
-
-    extra = {}
-    # Fall through to a GET; caller decides whether to keep the body.
-    with request("GET", GTFS_URL, extra) as resp:
-        meta = headers_of(resp)
-        # Do not slurp 100 MB unless we already know we need it.
-        return meta, None
+    with request("GET", url) as resp:
+        return headers_of(resp)
 
 
 def same_remote(state: dict, meta: dict) -> bool:
@@ -143,16 +122,13 @@ def same_remote(state: dict, meta: dict) -> bool:
     return False
 
 
-def download_zip(dest: Path) -> dict:
+def download_zip(url: str, dest: Path) -> dict:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix="volanbusz_", suffix=".zip", dir=str(dest.parent))
+    fd, tmp_name = tempfile.mkstemp(prefix="gtfs_", suffix=".zip", dir=str(dest.parent))
     os.close(fd)
     tmp = Path(tmp_name)
     try:
-        req = urllib.request.Request(
-            GTFS_URL,
-            headers={"User-Agent": UA, "Accept-Encoding": "identity"},
-        )
+        req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Encoding": "identity"})
         with urllib.request.urlopen(req, timeout=120) as resp:
             meta = headers_of(resp)
             with tmp.open("wb") as out:
@@ -170,63 +146,87 @@ def download_zip(dest: Path) -> dict:
 
 
 def main() -> int:
-    base, out = paths()
+    base, volan_out, city_out = paths()
     state_path = base / "state.json"
     zip_path = base / "volanbusz_gtfs.zip"
     state = load_state(state_path)
+    volan_state = state.get("volan") or {
+        k: state.get(k)
+        for k in ("etag", "last_modified", "content_length", "feed_version")
+        if state.get(k)
+    }
+    city_state = state.get("cities") or {}
+    changed: list[str] = []
 
     try:
-        meta, _body = remote_meta()
+        volan_meta = remote_meta(GTFS_URL)
     except Exception as err:
         msg = f"error HEAD/GET {GTFS_URL}: {err}"
         print(msg, file=sys.stderr)
         notify(f"Volán GTFS frissítés sikertelen: {msg}")
         return 1
 
-    if same_remote(state, meta) and out.exists():
-        version = state.get("feed_version") or "?"
-        print(f"unchanged {version}")
-        return 0
-
-    try:
-        meta = download_zip(zip_path)
-        info = build_index(zip_path, out)
-    except Exception as err:
-        msg = f"error rebuild: {err}"
-        print(msg, file=sys.stderr)
-        notify(f"Volán GTFS frissítés sikertelen: {msg}")
-        return 1
-
-    previous = state.get("feed_version") or ""
-    try:
-        meta_after, _ = remote_meta()
-        if meta_after.get("last_modified") or meta_after.get("content_length"):
-            meta = meta_after
-    except Exception:
-        pass
-    new_state = {
-        **meta,
-        "feed_version": info["feed_version"],
-        "trips": info["trips"],
-        "stops": info["stops"],
-        "index_bytes": info["bytes"],
-        "index": str(out),
-    }
-    save_state(state_path, new_state)
-    try:
-        zip_path.unlink()
-    except OSError:
-        pass
-
-    version = info["feed_version"] or "?"
-    if previous and previous != version:
-        line = f"updated {previous} -> {version}"
-    elif previous == version:
-        line = f"updated {version} (same feed_version, headers changed)"
+    volan_changed = not (same_remote(volan_state, volan_meta) and volan_out.exists())
+    if volan_changed:
+        try:
+            volan_meta = download_zip(GTFS_URL, zip_path)
+            info = build_index(zip_path, volan_out)
+        except Exception as err:
+            msg = f"error volan rebuild: {err}"
+            print(msg, file=sys.stderr)
+            notify(f"Volán GTFS frissítés sikertelen: {msg}")
+            return 1
+        volan_state = {**volan_meta, "feed_version": info["feed_version"], "trips": info["trips"], "stops": info["stops"]}
+        changed.append(f"volan {info['feed_version'] or '?'}")
     else:
-        line = f"updated {version}"
+        print(f"unchanged volan {volan_state.get('feed_version') or '?'}")
+
+    city_need = volan_changed or not city_out.exists()
+    for feed in CITY_FEEDS:
+        try:
+            meta = remote_meta(feed["url"])
+        except Exception as err:
+            print(f"warn HEAD {feed['id']}: {err}", file=sys.stderr)
+            continue
+        prev = city_state.get(feed["id"]) or {}
+        zpath = base / feed["file"]
+        if same_remote(prev, meta) and zpath.exists():
+            city_state[feed["id"]] = {**prev, **meta}
+            continue
+        try:
+            meta = download_zip(feed["url"], zpath)
+        except Exception as err:
+            print(f"warn download {feed['id']}: {err}", file=sys.stderr)
+            continue
+        city_state[feed["id"]] = meta
+        city_need = True
+
+    if city_need:
+        try:
+            info = build_city_index(base, city_out, zip_path if zip_path.exists() else None)
+        except Exception as err:
+            msg = f"error city rebuild: {err}"
+            print(msg, file=sys.stderr)
+            notify(f"Helyi GTFS frissítés sikertelen: {msg}")
+            return 1
+        changed.append(f"city ops={info['ops']} trips={info['trips']}")
+
+    save_state(
+        state_path,
+        {
+            "volan": volan_state,
+            "cities": city_state,
+            "index": str(volan_out),
+            "city_index": str(city_out),
+        },
+    )
+
+    if not changed:
+        print("unchanged")
+        return 0
+    line = "updated " + "; ".join(changed)
     print(line)
-    notify(f"Új Volán menetrend: {line}")
+    notify(f"Új menetrend: {line}")
     return 0
 
 
