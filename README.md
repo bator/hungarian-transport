@@ -31,14 +31,20 @@ Load that resource as well.
    type: module
    ```
 
-3. For Volán long-distance coaches, build and deploy the GTFS index:
+3. For Volán long-distance coaches, place `volan-index.json.gz` next to the
+   card JS. The card fetches
+   `/local/community/bkk-stop-card/volan-index.json.gz?v=YYYYMMDD` with
+   `cache: 'no-store'` so Home Assistant's 31-day `/local/` cache cannot pin
+   an old feed.
+
+   On Home Assistant OS, `scripts/update_volan_index.py` runs daily at 04:30
+   Europe/Budapest (and 5 minutes after a core start). It HEADs the KTI zip,
+   rebuilds only when `Last-Modified` / `Content-Length` change, and atomically
+   replaces `volan-index.json.gz`. See `packages/hungarian_transport.yaml`.
 
    ```bash
    python3 scripts/build_volan_index.py
    ```
-
-   Place `volan-index.v26.json.gz` next to the card JS. The card fetches
-   `/local/community/bkk-stop-card/volan-index.v26.json.gz`.
 
 4. First-time editor setup asks for a BKK Open Data API key:
    https://opendata.bkk.hu/data-sources

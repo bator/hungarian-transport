@@ -82,7 +82,11 @@ const VOLAN_FAVORITES = [
   { id: 'AREA_CS665201_99', name: 'Duna\u00fajv\u00e1ros, aut\u00f3busz-\u00e1llom\u00e1s' },
   { id: 'volan_669685_99', name: 'Tatab\u00e1nya, aut\u00f3busz-\u00e1llom\u00e1s' },
 ];
-const VOLAN_INDEX_URL = '/local/community/bkk-stop-card/volan-index.v26.json.gz?v=26';
+function volanIndexUrl() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return `/local/community/bkk-stop-card/volan-index.json.gz?v=${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+}
 const FAVORITES = BKK_FAVORITES.concat(MAV_FAVORITES);
 
 class BKKPlannerCard extends HTMLElement {
@@ -866,7 +870,7 @@ const BkkLib = {
     if (BkkLib._volanIdx) return BkkLib._volanIdx;
     if (BkkLib._volanIdxP) return BkkLib._volanIdxP;
     BkkLib._volanIdxP = (async () => {
-      const res = await fetch(VOLAN_INDEX_URL);
+      const res = await fetch(volanIndexUrl(), { cache: 'no-store' });
       if (!res.ok) throw new Error('Vol\u00e1n menetrend HTTP ' + res.status);
       const buf = await res.arrayBuffer();
       const u8 = new Uint8Array(buf);

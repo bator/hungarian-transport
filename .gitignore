@@ -8,4 +8,6 @@ __pycache__/
 volan-index*.json
 volan-index*.json.gz
 volanbusz_gtfs.zip
+state.json
+*.tmp
 *.log

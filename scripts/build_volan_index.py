@@ -13,7 +13,7 @@ from collections import defaultdict
 from pathlib import Path
 
 GTFS_URL = "https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip"
-OUT = Path("volan-index.v26.json.gz")
+OUT = Path("volan-index.json.gz")
 
 
 def parent(sid: str) -> str:
@@ -35,12 +35,18 @@ def stop_num(pid: str) -> str:
     return m.group(1) if m else ""
 
 
-def main() -> None:
-    zpath = Path("volanbusz_gtfs.zip")
-    if not zpath.exists():
-        print("downloading", GTFS_URL)
-        urllib.request.urlretrieve(GTFS_URL, zpath)
+def feed_version(z: zipfile.ZipFile) -> str:
+    try:
+        with z.open("feed_info.txt") as f:
+            rows = list(csv.DictReader(io.TextIOWrapper(f, "utf-8-sig")))
+        if rows:
+            return (rows[0].get("feed_version") or "").strip()
+    except KeyError:
+        pass
+    return ""
 
+
+def build_index(zpath: Path, out: Path) -> dict:
     z = zipfile.ZipFile(zpath)
     sid2p: dict[str, str] = {}
     sid2n: dict[str, str] = {}
@@ -165,8 +171,10 @@ def main() -> None:
         add_rows.append(ex_add.get(sid, []))
         rem_rows.append(ex_rem.get(sid, []))
 
+    version = feed_version(z)
     idx = {
         "v": 26,
+        "feed": version,
         "s": [[p, pname.get(p, p), stop_num(p)] for p in parents],
         "c": cal_rows,
         "a": add_rows,
@@ -174,8 +182,24 @@ def main() -> None:
         "t": trip_rows,
     }
     raw = json.dumps(idx, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    OUT.write_bytes(gzip.compress(raw, compresslevel=9))
-    print("wrote", OUT, "trips", len(trip_rows), "stops", len(parents))
+    tmp = out.with_suffix(out.suffix + ".tmp")
+    tmp.write_bytes(gzip.compress(raw, compresslevel=9))
+    tmp.replace(out)
+    return {
+        "feed_version": version,
+        "trips": len(trip_rows),
+        "stops": len(parents),
+        "bytes": out.stat().st_size,
+    }
+
+
+def main() -> None:
+    zpath = Path("volanbusz_gtfs.zip")
+    if not zpath.exists():
+        print("downloading", GTFS_URL)
+        urllib.request.urlretrieve(GTFS_URL, zpath)
+    info = build_index(zpath, OUT)
+    print("wrote", OUT, info)
 
 
 if __name__ == "__main__":

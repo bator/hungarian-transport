@@ -1,0 +1,57 @@
+# Daily KTI Volán GTFS check for Hungarian transport.
+# HA shell_command is killed after 60s, so the job is detached; results arrive
+# via a local webhook (notify.admins, Discord forwarder picks it up).
+
+shell_command:
+  hungarian_transport_gtfs: /bin/bash /config/hungarian-transport/run_update.sh
+
+automation:
+  - id: hungarian_transport_gtfs_daily
+    alias: Hungarian transport — napi Volán GTFS
+    description: >-
+      04:30-kor (és boot után 5 perccel) ellenőrzi a KTI Volán GTFS-t.
+      Ha új a zip, újraépíti a kártya indexét.
+    mode: queued
+    max: 2
+    triggers:
+      - trigger: time
+        at: "04:30:00"
+        id: daily
+      - trigger: homeassistant
+        event: start
+        id: start
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: start
+            sequence:
+              - delay: "00:05:00"
+      - action: shell_command.hungarian_transport_gtfs
+        response_variable: gtfs
+      - if:
+          - condition: template
+            value_template: "{{ (gtfs.returncode | default(1)) | int(1) != 0 }}"
+        then:
+          - action: notify.admins
+            data:
+              title: Hungarian transport GTFS
+              message: >-
+                Volán GTFS indítás sikertelen ({{ gtfs.returncode | default('?') }}):
+                {{ (gtfs.stderr | default('')) or (gtfs.stdout | default('')) }}
+
+  - id: hungarian_transport_gtfs_notify
+    alias: Hungarian transport — Volán GTFS értesítés
+    description: Webhook a napi GTFS scripttől, ha cserélt vagy elhasalt.
+    mode: queued
+    triggers:
+      - trigger: webhook
+        allowed_methods:
+          - POST
+        local_only: true
+        webhook_id: hungarian-transport-gtfs
+    actions:
+      - action: notify.admins
+        data:
+          title: "{{ trigger.json.title | default('Hungarian transport GTFS') }}"
+          message: "{{ trigger.json.message }}"
