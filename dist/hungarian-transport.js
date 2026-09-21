@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.4';
+const CARD_VERSION = '1.4.2-rev.5';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -1881,22 +1881,16 @@ const BkkLib = {
         rows = BkkLib.mergeVolanRows(rows, extra, maxRows);
       } catch (_e) { /* ELVIRA optional; FUTÁR/GTFS rows still show */ }
     }
-    const elviraNums = new Set();
-    rows.forEach((r) => {
-      const n = BkkLib.rowTrainNumber(r);
-      if (n) elviraNums.add(n);
-    });
-    (opts.elviraRows || []).forEach((r) => {
-      const n = BkkLib.rowTrainNumber(r);
-      if (n) elviraNums.add(n);
-    });
     let candidates = [];
     let destDirected = false;
     try {
       let poles = [];
+      const poleRoutes = (destKey && (mode === 'bkk' || mode === 'mav' || mode === 'all'))
+        ? []
+        : Array.from(selected);
       try {
         poles = destKey
-          ? await BkkLib.originPoles(apiKey, cache, origin, Array.from(selected), destKey)
+          ? await BkkLib.originPoles(apiKey, cache, origin, poleRoutes, destKey)
           : [];
         destDirected = poles.length > 0;
       } catch (_e) {
@@ -1904,7 +1898,7 @@ const BkkLib = {
       }
       if (!poles.length) {
         try {
-          poles = await BkkLib.originPoles(apiKey, cache, origin, Array.from(selected));
+          poles = await BkkLib.originPoles(apiKey, cache, origin, poleRoutes);
         } catch (_e) {
           poles = [];
         }
@@ -1938,9 +1932,7 @@ const BkkLib = {
           const rid = trip.routeId;
           const rt = routes[rid] || {};
           if (!BkkLib.routeMatchesMode(rt, mode)) return;
-          const tripNum = String(trip.shortName || trip.tripShortName || '').trim().replace(/^0+/, '')
-            || BkkLib.trainNumberFromTripId(st.tripId);
-          if (!BkkLib.keepFutarCandidate(rt, selected, mode, elviraNums, tripNum)) return;
+          if (!BkkLib.keepFutarCandidate(rt, selected, mode, destKey)) return;
           const dep = st.predictedDepartureTime || st.departureTime;
           if (dep && dep > latest + 60) return;
           seenTrip.add(st.tripId);
@@ -2028,21 +2020,24 @@ const BkkLib = {
     const t = String(tripId || '');
     return !!t && !/^(elvira:|gtfs:)/.test(t);
   },
-  keepFutarCandidate(rt, selected, mode, elviraNums, tripNum) {
+  keepFutarCandidate(rt, selected, mode, destKey) {
     if (!selected || !selected.size || mode === 'volan') return true;
+    if (destKey && (mode === 'bkk' || mode === 'mav' || mode === 'all')) return true;
     const rid = (rt && rt.id) || '';
-    if (selected.has(rid)) return true;
-    if ((mode === 'mav' || mode === 'all') && tripNum && elviraNums && elviraNums.has(String(tripNum))) {
-      return true;
-    }
-    return false;
+    return selected.has(rid);
+  },
+  rowTimeKey(row) {
+    const label = String((row && row.label) || '').toUpperCase();
+    const min = Math.round(Number((row && (row.sched || row.dep)) || 0) / 60);
+    return label + '|' + min;
   },
   async futarTripIdForRow(apiKey, cache, row, stopId) {
     const tid = String((row && row.tripId) || '');
     if (BkkLib.isFutarTripId(tid)) return tid;
     const num = BkkLib.rowTrainNumber(row);
-    if (!apiKey || !stopId || !num) return '';
-    const key = 'futarTrip:' + stopId + ':' + num;
+    const wantKey = BkkLib.rowTimeKey(row);
+    if (!apiKey || !stopId || (!num && !wantKey)) return '';
+    const key = 'futarTrip:' + stopId + ':' + (num || wantKey);
     const hit = BkkLib._cached(cache, key);
     if (typeof hit === 'string') return hit;
     try {
@@ -2053,21 +2048,34 @@ const BkkLib = {
         onlyDepartures: 'true',
         includeReferences: 'true',
       });
-      const trips = (((data.data || {}).references) || {}).trips || {};
+      const refs = ((data.data || {}).references) || {};
+      const trips = refs.trips || {};
+      const routes = refs.routes || {};
       const times = (((data.data || {}).entry) || {}).stopTimes || [];
       let found = '';
+      let foundByTime = '';
       for (let i = 0; i < times.length; i++) {
         const st = times[i];
         if (!st || !st.tripId) continue;
         const trip = trips[st.tripId] || {};
+        const rt = routes[trip.routeId] || {};
         const n = String(trip.shortName || trip.tripShortName || '').trim().replace(/^0+/, '')
           || BkkLib.trainNumberFromTripId(st.tripId);
-        if (n === num) {
+        if (num && n === num) {
           found = st.tripId;
           break;
         }
+        if (!foundByTime) {
+          const label = rt.iconDisplayText || rt.shortName || '';
+          const tk = BkkLib.rowTimeKey({
+            label: label,
+            sched: st.departureTime,
+            dep: st.predictedDepartureTime || st.departureTime,
+          });
+          if (tk === wantKey) foundByTime = st.tripId;
+        }
       }
-      return BkkLib._store(cache, key, found);
+      return BkkLib._store(cache, key, found || foundByTime);
     } catch (_e) {
       return '';
     }

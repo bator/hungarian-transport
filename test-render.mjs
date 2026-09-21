@@ -340,22 +340,16 @@ check('ELVIRA Tópart takes FUTAR GPS from BKK trip id train number', (() => {
 })());
 check('FUTAR trip id from BKK_4541_108 is 4541', Lib.trainNumberFromTripId('BKK_4541_108') === '4541');
 check('elvira trip id is not a FUTAR trip', !Lib.isFutarTripId('elvira:2889849') && Lib.isFutarTripId('BKK_4541_108'));
-check('S30 FUTAR is kept when the hop omits BKK_S30 but ELVIRA listed 4541',
-  Lib.keepFutarCandidate(
-    { id: 'BKK_S30' },
-    new Set(['BKK_G43', 'BKK_Z30', 'BKK_IC', 'BKK_S']),
-    'mav',
-    new Set(['4541']),
-    '4541',
-  ));
-check('unrelated FUTAR route stays filtered',
-  !Lib.keepFutarCandidate(
-    { id: 'BKK_S10' },
-    new Set(['BKK_G43']),
-    'mav',
-    new Set(['4541']),
-    '1234',
-  ));
+check('MAV+dest keeps unlisted S30/S40/EC',
+  Lib.keepFutarCandidate({ id: 'BKK_S30' }, new Set(['BKK_G43']), 'mav', 'székesfehérvár')
+  && Lib.keepFutarCandidate({ id: 'BKK_S40' }, new Set(['BKK_G43']), 'mav', 'székesfehérvár')
+  && Lib.keepFutarCandidate({ id: 'BKK_EC' }, new Set(['BKK_G43']), 'all', 'székesfehérvár'));
+check('BKK+dest keeps a bus omitted from routeIds',
+  Lib.keepFutarCandidate({ id: 'BKK_1335' }, new Set(['BKK_0070', 'BKK_1100']), 'bkk', 'keleti'));
+check('BKK without dest still filters unselected buses',
+  !Lib.keepFutarCandidate({ id: 'BKK_1335' }, new Set(['BKK_0070']), 'bkk', ''));
+check('rowTimeKey joins label and sched minute',
+  Lib.rowTimeKey({ label: 'S30', sched: 1790020080 }) === 'S30|' + Math.round(1790020080 / 60));
 check('ELVIRA S30 takes FUTAR trip id by train number', (() => {
   const dep = Math.floor(Date.now() / 1000) + 1800;
   const merged = Lib.mergeVolanRows(
