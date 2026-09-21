@@ -1,6 +1,7 @@
-const CARD_VERSION = '1.4.0-rev.6';
+const CARD_VERSION = '1.4.0-rev.7';
 
-const BKK_PLANNER_TAG = 'bkk-stop-card-plan';
+const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
+const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
 const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
 /* Default departure look-ahead. Override per card with `minutesAfter`.
    The Kelenfold-Szekesfehervar hop lists trains past 2h, so 180 is the
@@ -232,16 +233,17 @@ const I18N = {
     cityPlaceholder: 'V\u00e1lassz v\u00e1rost',
     minutesAfterLabel: 'Menetrend el\u0151re (perc)',
     minutesAfterHint: 'H\u00e1ny percet n\u00e9zzen el\u0151re az indul\u00e1sokb\u00f3l. 30\u2013360 perc, alap\u00e9rtelmez\u00e9s 180.',
-    plannerTitle: 'BKK \u00e9s Vol\u00e1n',
-    plannerStep1: '1. Meg\u00e1ll\u00f3',
-    plannerStep2: '2. J\u00e1rm\u0171',
+    plannerTitle: 'Tervez\u0151',
+    plannerStep1: 'Forr\u00e1s',
+    plannerStep2: 'C\u00e9l',
     plannerStep3: '3. Meddig',
     plannerDepartures: 'Indul\u00e1sok',
     plannerSearchPlaceholder: 'Utca, meg\u00e1ll\u00f3, aut\u00f3busz-\u00e1llom\u00e1s...',
+    plannerDestPlaceholder: 'C\u00e9l meg\u00e1ll\u00f3 keres\u00e9se...',
     plannerReset: '\u00daj',
     plannerMultiHint: 'T\u00f6bbet is v\u00e1laszthatsz. Ekkor csak a k\u00f6z\u00f6s meg\u00e1ll\u00f3k maradnak.',
     plannerPickVehicleFirst: 'El\u0151bb v\u00e1lassz j\u00e1rm\u0171vet',
-    plannerPickAll: 'V\u00e1lassz meg\u00e1ll\u00f3t, j\u00e1rm\u0171vet \u00e9s c\u00e9lt.',
+    plannerPickAll: 'V\u00e1lassz forr\u00e1s \u00e9s c\u00e9l meg\u00e1ll\u00f3t.',
     plannerLoading: 'Bet\u00f6lt\u00e9s...',
     plannerNoSharedStop: 'Nincs k\u00f6z\u00f6s meg\u00e1ll\u00f3',
     plannerNoSharedLater: 'Ezeknek a j\u00e1ratoknak nincs k\u00f6z\u00f6s k\u00e9s\u0151bbi meg\u00e1ll\u00f3ja.',
@@ -365,16 +367,17 @@ const I18N = {
     cityPlaceholder: 'Pick a city',
     minutesAfterLabel: 'Look-ahead (minutes)',
     minutesAfterHint: 'How far ahead to list departures. 30\u2013360 minutes, default 180.',
-    plannerTitle: 'BKK and Vol\u00e1n',
-    plannerStep1: '1. Stop',
-    plannerStep2: '2. Vehicle',
+    plannerTitle: 'Planner',
+    plannerStep1: 'Origin',
+    plannerStep2: 'Destination',
     plannerStep3: '3. Destination',
     plannerDepartures: 'Departures',
     plannerSearchPlaceholder: 'Street, stop, coach station...',
+    plannerDestPlaceholder: 'Search destination stop...',
     plannerReset: 'Reset',
     plannerMultiHint: 'You can pick several. Only stops shared by all of them are kept.',
     plannerPickVehicleFirst: 'Pick a vehicle first',
-    plannerPickAll: 'Pick a stop, a vehicle and a destination.',
+    plannerPickAll: 'Pick an origin and a destination stop.',
     plannerLoading: 'Loading...',
     plannerNoSharedStop: 'No shared stop',
     plannerNoSharedLater: 'These routes share no later stop.',
@@ -466,622 +469,11 @@ function errText(lang, err) {
   return (err && err.message) ? err.message : String(err);
 }
 
-class BKKPlannerCard extends HTMLElement {
-  constructor() {
-    super();
-    this.attachShadow({ mode: 'open' });
-    this._stop = null;
-    this._routes = [];
-    this._selected = new Set();
-    this._dests = [];
-    this._dest = null;
-    this._rows = [];
-    this._searchTimer = null;
-    this._searchSeq = 0;
-    this._poll = null;
-    this._routeCache = {};
-  }
-
-  disconnectedCallback() {
-    if (this._poll) { clearInterval(this._poll); this._poll = null; }
-    if (this._searchTimer) { clearTimeout(this._searchTimer); this._searchTimer = null; }
-  }
-
-  static async getConfigElement() {
-    return null;
-  }
-
-  static getStubConfig() {
-    return { apiKey: '', name: '', language: 'auto', minutesAfter: DEFAULT_MINUTES_AFTER };
-  }
-
-  setConfig(config) {
-    if (!this.shadowRoot) {
-      try { this.attachShadow({ mode: 'open' }); } catch (_e) { /* already attached */ }
-    }
-    this._config = Object.assign({}, config || {});
-    this._apiKey = this._config.apiKey || '';
-    if (this._config.volanIndex) setVolanIndexUrl(this._config.volanIndex);
-    this._renderShell();
-  }
-
-  set hass(hass) {
-    const first = !this._hass;
-    this._hass = hass;
-    if (!this._config || !this._root) return;
-    // "auto" resolves against hass.language; re-render only while nothing is picked.
-    if (first && !this._apiKey) this._fillKey();
-    if (first && !this._stop && this._lang() !== resolveLang(this._config.language, null)) {
-      this._renderShell();
-    }
-  }
-
-  _lang() {
-    return resolveLang((this._config || {}).language, this._hass);
-  }
-
-  _minutesAfter() {
-    return clampMinutesAfter(this._config && this._config.minutesAfter);
-  }
-
-  async _fillKey() {
-    const key = await BkkLib.apiKeyFromDashboard(this._hass);
-    if (!key || this._apiKey) return;
-    this._apiKey = key;
-    this._config = Object.assign({}, this._config, { apiKey: key });
-  }
-
-  getCardSize() {
-    return 8;
-  }
-
-  _renderShell() {
-    const root = this.shadowRoot;
-    if (!root || !this._config) return;
-    while (root.firstChild) root.removeChild(root.firstChild);
-    const style = document.createElement('style');
-    style.textContent = `
-      :host { font-size: 13px; }
-      ha-card { overflow: visible; }
-      .wrap { padding: 10px 12px 12px; }
-      .title { font-weight: 700; margin-bottom: 10px; }
-      .step { margin-bottom: 12px; }
-      .label { font-size: 11px; font-weight: 700; letter-spacing: 0.03em;
-        color: var(--secondary-text-color); margin-bottom: 6px; text-transform: uppercase; }
-      .hint { font-size: 11px; color: var(--secondary-text-color); margin: 4px 0 0; }
-      input, select {
-        width: 100%; box-sizing: border-box; font: inherit;
-        background: var(--secondary-background-color, rgba(128,128,128,0.15));
-        color: var(--primary-text-color); border: 1px solid var(--divider-color);
-        border-radius: 8px; padding: 8px 10px;
-      }
-      .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
-      .chip {
-        border: 1px solid var(--divider-color); background: transparent;
-        color: var(--primary-text-color); border-radius: 999px;
-        padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px;
-      }
-      .chip.on { color: #fff; border-color: transparent; }
-      .chip:disabled { opacity: 0.4; cursor: default; }
-      .list { max-height: 180px; overflow: auto; margin-top: 6px; }
-      .hit {
-        display: block; width: 100%; text-align: left; font: inherit;
-        background: transparent; color: var(--primary-text-color);
-        border: 0; border-bottom: 1px solid var(--divider-color);
-        padding: 8px 4px; cursor: pointer;
-      }
-      .hit:hover { background: var(--secondary-background-color); }
-      .picked { font-weight: 700; margin-top: 4px; }
-      table { width: 100%; border-collapse: collapse; table-layout: fixed; margin-top: 8px; }
-      th { font-size: 10px; text-align: right; color: var(--secondary-text-color); padding: 4px; }
-      th:first-child, th:nth-child(2), td:first-child, td:nth-child(2) { text-align: left; }
-      td { padding: 6px 4px; font-variant-numeric: tabular-nums; }
-      tbody tr:nth-child(odd) { background: var(--secondary-background-color); }
-      .route { font-weight: 800; }
-      .muted { color: var(--secondary-text-color); }
-      .row { display: flex; gap: 8px; align-items: center; }
-      .row button.clear {
-        flex: 0 0 auto; border: 1px solid var(--divider-color);
-        background: transparent; color: var(--primary-text-color);
-        border-radius: 8px; padding: 8px 10px; cursor: pointer; font: inherit;
-      }
-      .err { color: var(--error-color, #e66); font-size: 12px; margin-top: 8px; }
-    `;
-    const card = document.createElement('ha-card');
-    const wrap = document.createElement('div');
-    wrap.className = 'wrap';
-    const lang = this._lang();
-    const tr = (key) => this._esc(t(lang, key));
-    wrap.innerHTML = `
-      <div class="title">${this._esc(this._config.name || t(lang, 'plannerTitle'))}</div>
-      <div class="step">
-        <div class="label">${tr('plannerStep1')}</div>
-        <div class="row">
-          <input id="q" type="search" placeholder="${tr('plannerSearchPlaceholder')}">
-          <button class="clear" id="reset" type="button">${tr('plannerReset')}</button>
-        </div>
-        <div class="chips" id="fav"></div>
-        <div class="picked" id="stopPicked"></div>
-        <div class="list" id="hits"></div>
-      </div>
-      <div class="step">
-        <div class="label">${tr('plannerStep2')}</div>
-        <div class="hint">${tr('plannerMultiHint')}</div>
-        <div class="chips" id="routes"></div>
-      </div>
-      <div class="step">
-        <div class="label">${tr('plannerStep3')}</div>
-        <select id="dest" disabled><option value="">${tr('plannerPickVehicleFirst')}</option></select>
-      </div>
-      <div class="step">
-        <div class="label">${tr('plannerDepartures')}</div>
-        <div id="table" class="muted">${tr('plannerPickAll')}</div>
-      </div>
-      <div class="err" id="err"></div>
-    `;
-    card.appendChild(wrap);
-    root.appendChild(style);
-    root.appendChild(card);
-    this._root = root;
-    this._bind();
-    this._paintFav();
-  }
-
-  _bind() {
-    const q = this._el('q');
-    q.addEventListener('input', () => {
-      clearTimeout(this._searchTimer);
-      this._searchTimer = setTimeout(() => this._search(q.value.trim()), 280);
-    });
-    this._el('reset').addEventListener('click', () => this._reset());
-    this._el('dest').addEventListener('change', (ev) => {
-      const v = ev.target.value;
-      this._dest = this._dests.find((d) => d.key === v) || null;
-      this._loadDepartures();
-    });
-  }
-
-  _el(id) { return this._root.getElementById(id); }
-
-  _esc(s) {
-    return BkkLib.esc(s);
-  }
-
-  _paintFav() {
-    const box = this._el('fav');
-    box.innerHTML = '';
-    FAVORITES.forEach((f) => {
-      const b = document.createElement('button');
-      b.className = 'chip';
-      b.type = 'button';
-      b.textContent = f.name.split(' / ')[0];
-      b.addEventListener('click', () => this._pickStop(f));
-      box.appendChild(b);
-    });
-  }
-
-  _reset() {
-    this._stop = null;
-    this._routes = [];
-    this._selected = new Set();
-    this._dests = [];
-    this._dest = null;
-    this._rows = [];
-    this._el('q').value = '';
-    this._el('hits').innerHTML = '';
-    this._el('stopPicked').textContent = '';
-    this._el('routes').innerHTML = '';
-    const lang = this._lang();
-    this._el('dest').innerHTML = `<option value="">${this._esc(t(lang, 'plannerPickVehicleFirst'))}</option>`;
-    this._el('dest').disabled = true;
-    this._el('table').textContent = t(lang, 'plannerPickAll');
-    this._el('err').textContent = '';
-    if (this._poll) { clearInterval(this._poll); this._poll = null; }
-  }
-
-  _error(msg) { this._el('err').textContent = msg || ''; }
-
-  async _bkk(path, params) {
-    if (!this._apiKey) throw codedError('errNoApiKey');
-    const q = new URLSearchParams(Object.assign({
-      key: this._apiKey, version: '4', appVersion: 'apiary-1.0',
-    }, params));
-    const res = await fetch(`${BKK_API}/${path}?${q}`);
-    if (!res.ok) throw new Error(`BKK HTTP ${res.status}`);
-    const data = await res.json();
-    if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);
-    return data;
-  }
-
-  _fold(s) {
-    return this._norm(s)
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]+/g, ' ')
-      .trim();
-  }
-
-  _aliasQueries(q) {
-    const f = this._fold(q);
-    const extra = [];
-    if (f.includes('arpad hid')) extra.push('Goncz Arpad varoskozpont');
-    if (f.includes('moszkva')) extra.push('Szell Kalman ter');
-    return extra;
-  }
-
-  _labelAliased(q, hit) {
-    const f = this._fold(q);
-    const n = this._fold(hit.name);
-    if (f.includes('arpad hid') && n === 'goncz arpad varoskozpont') {
-      return 'G\u00f6ncz \u00c1rp\u00e1d v\u00e1rosk\u00f6zpont (M3, \u00c1rp\u00e1d h\u00edd)';
-    }
-    return hit.name;
-  }
-
-  async _search(q) {
-    if (!q || q.length < 2) { this._el('hits').innerHTML = ''; return; }
-    const seq = ++this._searchSeq;
-    try {
-      this._error('');
-      if (!this._apiKey) await this._fillKey();
-      if (seq !== this._searchSeq) return;
-      const hits = await BkkLib.searchStops(this._apiKey, q, 'all');
-      if (seq !== this._searchSeq) return;
-      const box = this._el('hits');
-      box.innerHTML = hits.map((s) => (
-        `<button class="hit" type="button" data-id="${this._esc(s.id)}">${this._esc(s.label || s.name)}</button>`
-      )).join('');
-      box.querySelectorAll('.hit').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const id = btn.getAttribute('data-id');
-          const st = hits.find((h) => h.id === id);
-          this._pickStop({ id: st.id, name: st.name, label: st.label });
-        });
-      });
-    } catch (err) {
-      if (seq !== this._searchSeq) return;
-      this._error(errText(this._lang(), err));
-    }
-  }
-
-  async _pickStop(stop) {
-    this._stop = stop;
-    this._selected = new Set();
-    this._dest = null;
-    this._el('q').value = stop.label || stop.name;
-    this._el('hits').innerHTML = '';
-    this._el('stopPicked').textContent = stop.label || stop.name;
-    this._el('routes').innerHTML = '<span class="muted">' + this._esc(t(this._lang(), 'plannerLoading')) + '</span>';
-    this._el('dest').disabled = true;
-    try {
-      this._error('');
-      await this._loadRoutes();
-      this._paintRoutes();
-      await this._refreshDests();
-    } catch (err) {
-      this._error(errText(this._lang(), err));
-    }
-  }
-
-  async _loadRoutes() {
-    if (!this._apiKey) await this._fillKey();
-    const list = [];
-    const seenLabel = new Set();
-    let otpErr = null;
-    if (this._apiKey) {
-      try {
-        const data = await BkkLib.fetch(this._apiKey, 'arrivals-and-departures-for-stop.json', {
-          stopId: this._stop.id,
-          minutesAfter: String(this._minutesAfter()),
-          minutesBefore: '0',
-          onlyDepartures: 'true',
-          includeReferences: 'true',
-        });
-        const refs = (data.data || {}).references || {};
-        const routes = refs.routes || {};
-        const entry = (data.data || {}).entry || {};
-        const ids = entry.routeIds || Object.keys(routes);
-        ids.forEach((rid) => {
-          const rt = Object.assign({ id: rid }, routes[rid] || {});
-          if (!BkkLib.routeMatchesMode(rt, 'all')) return;
-          const label = rt.iconDisplayText || rt.shortName;
-          if (!label || seenLabel.has(label)) return;
-          seenLabel.add(label);
-          list.push({
-            id: rid,
-            label,
-            color: '#' + String(rt.color || '4477aa').replace('#', ''),
-            text: '#' + String(rt.textColor || 'ffffff').replace('#', ''),
-            type: rt.type || '',
-            source: 'otp',
-          });
-        });
-      } catch (err) {
-        otpErr = err;
-      }
-    }
-    try {
-      const extra = await BkkLib.volanRoutesAtStop(this._stop);
-      extra.forEach((rt) => {
-        if (seenLabel.has(rt.label)) return;
-        seenLabel.add(rt.label);
-        list.push(rt);
-      });
-    } catch (_e) { /* GTFS index optional */ }
-    if (!list.length && otpErr) throw otpErr;
-    list.sort((a, b) => a.label.localeCompare(b.label, 'hu', { numeric: true }));
-    this._routes = list;
-    this._routeCache = {};
-  }
-
-  _paintRoutes() {
-    const box = this._el('routes');
-    box.innerHTML = '';
-    if (!this._routes.length) {
-      box.innerHTML = '<span class="muted">' + this._esc(t(this._lang(), 'plannerNoRoutes')) + '</span>';
-      return;
-    }
-    this._routes.forEach((rt) => {
-      const b = document.createElement('button');
-      b.className = 'chip' + (this._selected.has(rt.id) ? ' on' : '');
-      b.type = 'button';
-      b.textContent = rt.label;
-      if (this._selected.has(rt.id)) {
-        b.style.background = rt.color;
-        b.style.color = rt.text;
-      }
-      b.addEventListener('click', async () => {
-        if (this._selected.has(rt.id)) this._selected.delete(rt.id);
-        else this._selected.add(rt.id);
-        this._paintRoutes();
-        await this._refreshDests();
-      });
-      box.appendChild(b);
-    });
-  }
-
-  _norm(name) {
-    let t = String(name || '').normalize('NFC');
-    t = t.replace(/[\u200B-\u200D\uFEFF]/g, '');
-    t = t.replace(/[\u00A0\u202F]/g, ' ');
-    t = t.trim().toLowerCase();
-    t = t.replace(/[\u2013\u2014]/g, '-');
-    t = t.replace(/\s+/g, ' ');
-    [' vas\u00fat\u00e1llom\u00e1s', ' p\u00e1lyaudvar', ' pu.'].forEach((sfx) => {
-      if (t.endsWith(sfx)) t = t.slice(0, -sfx.length).trim();
-    });
-    return t;
-  }
-
-  _isStopArea(stop) {
-    if (!stop) return false;
-    if (stop.locationType === 1) return true;
-    return /_CS/i.test(String(stop.id || ''));
-  }
-
-  _groupStops(stops) {
-    const byName = new Map();
-    (stops || []).forEach((s) => {
-      if (!s || !s.id || !s.name) return;
-      const key = this._norm(s.name);
-      if (!key) return;
-      if (!byName.has(key)) byName.set(key, []);
-      byName.get(key).push(s);
-    });
-    const hits = [];
-    byName.forEach((group) => {
-      const area = group.find((s) => this._isStopArea(s));
-      const withParent = group.find((s) => s.parentStationId);
-      const pick = area || withParent || group[0];
-      hits.push({
-        id: area ? area.id : (pick.parentStationId || pick.id),
-        name: pick.name,
-      });
-    });
-    return hits;
-  }
-
-  _uniqueByName(items) {
-    const seen = new Set();
-    const out = [];
-    (items || []).forEach((d) => {
-      const key = d.key || this._norm(d.name);
-      if (!key || seen.has(key)) return;
-      seen.add(key);
-      out.push(d);
-    });
-    return out;
-  }
-
-  async _routeStops(routeId) {
-    if (this._routeCache[routeId]) return this._routeCache[routeId];
-    const data = await this._bkk('route-details.json', {
-      routeId,
-      includeReferences: 'true',
-    });
-    const entry = (data.data || {}).entry || {};
-    const stops = ((data.data || {}).references || {}).stops || {};
-    const variants = (entry.variants || []).map((v) => ({
-      name: v.name,
-      ids: v.stopIds || [],
-    }));
-    this._routeCache[routeId] = { variants, stops };
-    return this._routeCache[routeId];
-  }
-
-  _sameStop(id, originId) {
-    if (!id || !originId) return false;
-    if (id === originId) return true;
-    const base = (s) => String(s).replace(/^BKK_/, '').split('_')[0];
-    return base(id) === base(originId);
-  }
-
-  async _remainingNames(routeId) {
-    const { variants, stops } = await this._routeStops(routeId);
-    const origin = this._stop.id;
-    const names = [];
-    const seen = new Set();
-    variants.forEach((v) => {
-      let idx = v.ids.findIndex((id) => this._sameStop(id, origin));
-      if (idx < 0) {
-        idx = v.ids.findIndex((id) => BkkLib.nameEq((stops[id] || {}).name, this._stop.name));
-      }
-      if (idx < 0) return;
-      v.ids.slice(idx + 1).forEach((id) => {
-        const raw = (stops[id] || {}).name;
-        const n = BkkLib.stationKey(raw) || this._norm(raw);
-        if (!raw || !n || seen.has(n)) return;
-        seen.add(n);
-        names.push({ key: n, name: raw, id });
-      });
-    });
-    return names;
-  }
-
-  async _refreshDests() {
-    const sel = this._el('dest');
-    const lang = this._lang();
-    const opt = (key) => `<option value="">${this._esc(t(lang, key))}</option>`;
-    this._dest = null;
-    if (!this._selected.size) {
-      sel.innerHTML = opt('plannerPickVehicleFirst');
-      sel.disabled = true;
-      this._el('table').textContent = t(lang, 'plannerPickAll');
-      return;
-    }
-    sel.innerHTML = opt('plannerLoading');
-    const lists = [];
-    for (const rid of this._selected) {
-      const rt = (this._routes || []).find((r) => r.id === rid);
-      if (rt && rt.source === 'gtfs') {
-        lists.push(await BkkLib.volanRemainingNames(this._stop, rt.label));
-      } else {
-        lists.push(await BkkLib.remainingNames(this._apiKey, this._routeCache || {}, this._stop, rid));
-      }
-    }
-    let common = lists[0] || [];
-    for (let i = 1; i < lists.length; i++) {
-      const keys = new Set(lists[i].map((x) => x.key));
-      common = common.filter((x) => keys.has(x.key));
-    }
-    this._dests = this._uniqueByName(common);
-    common = this._dests;
-    if (!common.length) {
-      sel.innerHTML = opt('plannerNoSharedStop');
-      sel.disabled = true;
-      this._el('table').textContent = t(lang, 'plannerNoSharedLater');
-      return;
-    }
-    sel.disabled = false;
-    sel.innerHTML = opt('plannerPickDest') + common.map((d) => (
-      `<option value="${this._esc(d.key)}">${this._esc(d.name)}</option>`
-    )).join('');
-  }
-
-  async _loadDepartures() {
-    if (!this._stop || !this._dest || !this._selected.size) return;
-    this._el('table').innerHTML = '<span class="muted">' + this._esc(t(this._lang(), 'plannerLoading')) + '</span>';
-    try {
-      this._error('');
-      const routeIds = [];
-      (this._routes || []).forEach((rt) => {
-        if (!this._selected.has(rt.id)) return;
-        routeIds.push(rt.id);
-        if (rt.source === 'gtfs' || BkkLib.isVolanRoute(rt)) {
-          routeIds.push('gtfs:' + rt.label);
-        }
-      });
-      const rows = await BkkLib.departures(
-        this._apiKey,
-        this._stop.id,
-        routeIds,
-        this._dest,
-        {
-          originName: this._stop.name || '',
-          cache: this._routeCache || {},
-          mode: 'all',
-          minutesAfter: this._minutesAfter(),
-        },
-      );
-      this._rows = rows || [];
-      this._paintTable();
-    } catch (err) {
-      this._error(errText(this._lang(), err));
-    } finally {
-      /* Keep polling after a failure, otherwise one hiccup freezes the card. */
-      if (this._poll) clearInterval(this._poll);
-      this._poll = setInterval(() => this._loadDepartures(), 45000);
-    }
-  }
-
-  async _travelMin(tripId, dep) {
-    if (!tripId || !this._dest) return null;
-    try {
-      const data = await this._bkk('trip-details.json', { tripId });
-      const sts = (((data.data || {}).entry) || {}).stopTimes || [];
-      const stops = (((data.data || {}).references) || {}).stops || {};
-      const destN = this._dest.key;
-      const dest = sts.find((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destN));
-      if (!dest) return null;
-      const arr = dest.predictedArrivalTime || dest.arrivalTime || dest.departureTime;
-      const from = dep;
-      if (!arr || !from) return null;
-      const mins = Math.round((arr - from) / 60);
-      return (mins >= 1 && mins <= 1440) ? mins : null;
-    } catch (_e) {
-      return null;
-    }
-  }
-
-  _hm(ts) {
-    return BkkLib.hm(ts);
-  }
-
-  _inMin(ts) {
-    if (!ts) return '';
-    const lang = this._lang();
-    const m = Math.round((ts * 1000 - Date.now()) / 60000);
-    if (m < 0) return t(lang, 'now');
-    return t(lang, 'minutes', m);
-  }
-
-  _paintTable() {
-    const box = this._el('table');
-    const lang = this._lang();
-    if (!this._rows.length) {
-      box.textContent = t(lang, 'plannerNoDepartures');
-      return;
-    }
-    box.innerHTML = `
-      <table>
-        <thead><tr>
-          <th></th><th></th>
-          <th>${this._esc(t(lang, 'colArrival'))}</th>
-          <th>${this._esc(t(lang, 'colExpected'))}</th>
-          <th>${this._esc(t(lang, 'colTravel'))}</th>
-        </tr></thead>
-        <tbody>
-          ${this._rows.map((r) => `
-            <tr>
-              <td class="route" style="color:${this._esc(r.color)}">${this._esc(r.label)}</td>
-              <td>${this._esc(this._dest.name)}</td>
-              <td>${this._esc(this._inMin(r.dep))}</td>
-              <td>${this._esc(this._hm(r.dep))}</td>
-              <td class="muted">${r.travel ? this._esc(t(lang, 'minutes', r.travel)) : ''}</td>
-            </tr>
-          `).join('')}
-        </tbody>
-      </table>
-    `;
-  }
-}
-
-
 const BKK_HOP_TAG = 'hungarian-transport-card';
 const BKK_HOP_EDITOR = 'hungarian-transport-card-editor';
 const BKK_HOP_TAG_ALIAS = 'bkk-stop-card-r3';
 const BKK_HOP_EDITOR_ALIAS = 'bkk-stop-card-r3-editor';
-const OWN_CARD_TYPES = [BKK_HOP_TAG, BKK_HOP_TAG_ALIAS, BKK_PLANNER_TAG];
+const OWN_CARD_TYPES = [BKK_HOP_TAG, BKK_HOP_TAG_ALIAS, BKK_PLANNER_TAG, BKK_PLANNER_TAG_ALIAS];
 /* Highest compact-index layout this card understands; see scripts/gtfs_compact.py. */
 const INDEX_SCHEMA = 27;
 
@@ -3163,6 +2555,10 @@ class BKKHopCard extends HTMLElement {
     if (foot) foot.textContent = this._mapFootText(row, true, true, false, this._lang());
   }
 
+  _departMode() {
+    return BkkLib.mode(this._config || {});
+  }
+
   async _reload() {
     /* Overlapping reloads (config edits, reconnects) must not leave an orphan
        interval behind, so every run is tagged with the generation that owns it. */
@@ -3172,7 +2568,8 @@ class BKKHopCard extends HTMLElement {
     if (cfg.volanIndex) setVolanIndexUrl(cfg.volanIndex);
     if (cfg.cityIndex) setCityIndexUrl(cfg.cityIndex);
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
-    const ready = cfg.stopId && cfg.destKey && (cfg.apiKey || BkkLib.mode(cfg) === 'volan' || BkkLib.mode(cfg) === 'helyi');
+    const mode = this._departMode();
+    const ready = cfg.stopId && cfg.destKey && (cfg.apiKey || mode === 'volan' || mode === 'helyi' || mode === 'all');
     if (!ready) {
       this._rows = [];
       this._loading = false;
@@ -3188,7 +2585,7 @@ class BKKHopCard extends HTMLElement {
           {
             originName: cfg.stopName || '',
             cache: this._tripCache || {},
-            mode: BkkLib.mode(cfg),
+            mode: this._departMode(),
             city: cfg.city || '',
             minutesAfter: cfg.minutesAfter,
             deferTravel: true,
@@ -3230,6 +2627,367 @@ class BKKHopCard extends HTMLElement {
     } finally {
       if (gen === this._gen) this._reloadActive = false;
     }
+  }
+}
+
+
+class BKKPlannerCard extends BKKHopCard {
+  constructor() {
+    super();
+    this._searchTimer = null;
+    this._destTimer = null;
+    this._searchSeq = 0;
+    this._destSeq = 0;
+    this._dests = [];
+    this._destRoutes = {};
+    this._destsLoading = false;
+    this._pickersMounted = false;
+  }
+
+  static async getConfigElement() {
+    return null;
+  }
+
+  static getStubConfig() {
+    return {
+      apiKey: '',
+      name: '',
+      language: 'auto',
+      minutesAfter: DEFAULT_MINUTES_AFTER,
+      stopId: '',
+      stopName: '',
+      destKey: '',
+      destName: '',
+      routeIds: [],
+    };
+  }
+
+  getCardSize() {
+    return Math.max(6, super.getCardSize() + 3);
+  }
+
+  _departMode() {
+    return 'all';
+  }
+
+  _header() {
+    const cfg = this._config || {};
+    if (cfg.stopId && cfg.destKey) {
+      return `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
+    }
+    return cfg.name || t(this._lang(), 'plannerTitle');
+  }
+
+  _render() {
+    const first = !this._painted;
+    super._render();
+    if (first) this._mountPickers();
+    else this._syncPickerLabels();
+  }
+
+  _planEl(id) {
+    return this.shadowRoot ? this.shadowRoot.getElementById(id) : null;
+  }
+
+  _mountPickers() {
+    if (this._pickersMounted || !this.shadowRoot) return;
+    const wrap = this.shadowRoot.querySelector('.wrap');
+    const head = this._elHead;
+    if (!wrap || !head) return;
+    const style = document.createElement('style');
+    style.textContent = `
+      .plan { margin-bottom: 10px; }
+      .plan .step { margin-bottom: 10px; }
+      .plan .label { font-size: 11px; font-weight: 700; letter-spacing: 0.03em;
+        color: var(--secondary-text-color); margin-bottom: 6px; text-transform: uppercase; }
+      .plan input {
+        width: 100%; box-sizing: border-box; font: inherit;
+        background: var(--secondary-background-color, rgba(128,128,128,0.15));
+        color: var(--primary-text-color); border: 1px solid var(--divider-color);
+        border-radius: 8px; padding: 8px 10px;
+      }
+      .plan .row { display: flex; gap: 8px; align-items: center; }
+      .plan .row button.clear {
+        flex: 0 0 auto; border: 1px solid var(--divider-color);
+        background: transparent; color: var(--primary-text-color);
+        border-radius: 8px; padding: 8px 10px; cursor: pointer; font: inherit;
+      }
+      .plan .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+      .plan .chip {
+        border: 1px solid var(--divider-color); background: transparent;
+        color: var(--primary-text-color); border-radius: 999px;
+        padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px;
+      }
+      .plan .list { max-height: 180px; overflow: auto; margin-top: 6px; }
+      .plan .hit {
+        display: block; width: 100%; text-align: left; font: inherit;
+        background: transparent; color: var(--primary-text-color);
+        border: 0; border-bottom: 1px solid var(--divider-color);
+        padding: 8px 4px; cursor: pointer;
+      }
+      .plan .hit:hover { background: var(--secondary-background-color); }
+      .plan .picked { font-weight: 700; margin-top: 4px; }
+      .plan .hint { font-size: 12px; color: var(--secondary-text-color); margin-top: 6px; }
+    `;
+    this.shadowRoot.appendChild(style);
+    const lang = this._lang();
+    const plan = document.createElement('div');
+    plan.className = 'plan';
+    plan.innerHTML = `
+      <div class="step">
+        <div class="label">${BkkLib.esc(t(lang, 'plannerStep1'))}</div>
+        <div class="row">
+          <input id="pq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerSearchPlaceholder'))}">
+          <button class="clear" id="preset" type="button">${BkkLib.esc(t(lang, 'plannerReset'))}</button>
+        </div>
+        <div class="chips" id="pfav"></div>
+        <div class="picked" id="pstop"></div>
+        <div class="list" id="phits"></div>
+      </div>
+      <div class="step">
+        <div class="label">${BkkLib.esc(t(lang, 'plannerStep2'))}</div>
+        <input id="pdq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerDestPlaceholder'))}">
+        <div class="picked" id="pdest"></div>
+        <div class="list" id="pdhits"></div>
+      </div>
+    `;
+    wrap.insertBefore(plan, head);
+    this._pickersMounted = true;
+    this._bindPickers();
+    this._paintFav();
+    this._syncPickerLabels();
+    this._paintDestHits('');
+  }
+
+  _bindPickers() {
+    const q = this._planEl('pq');
+    const dq = this._planEl('pdq');
+    const reset = this._planEl('preset');
+    if (q) {
+      q.addEventListener('input', () => {
+        clearTimeout(this._searchTimer);
+        this._searchTimer = setTimeout(() => this._searchOrigin(q.value.trim()), 280);
+      });
+    }
+    if (dq) {
+      dq.addEventListener('input', () => {
+        clearTimeout(this._destTimer);
+        this._destTimer = setTimeout(() => this._paintDestHits(dq.value.trim()), 280);
+      });
+      dq.addEventListener('focus', () => this._paintDestHits(dq.value.trim()));
+    }
+    if (reset) reset.addEventListener('click', () => this._resetPlan());
+  }
+
+  _paintFav() {
+    const box = this._planEl('pfav');
+    if (!box) return;
+    box.innerHTML = '';
+    FAVORITES.forEach((f) => {
+      const b = document.createElement('button');
+      b.className = 'chip';
+      b.type = 'button';
+      b.textContent = f.name.split(' / ')[0];
+      b.addEventListener('click', () => this._pickOrigin(f));
+      box.appendChild(b);
+    });
+  }
+
+  _syncPickerLabels() {
+    const cfg = this._config || {};
+    const lang = this._lang();
+    const stop = this._planEl('pstop');
+    const dest = this._planEl('pdest');
+    const q = this._planEl('pq');
+    const dq = this._planEl('pdq');
+    if (stop) stop.textContent = cfg.stopName || '';
+    if (dest) dest.textContent = cfg.destName || '';
+    if (q && document.activeElement !== q) {
+      q.placeholder = cfg.stopName || t(lang, 'plannerSearchPlaceholder');
+    }
+    if (dq && document.activeElement !== dq) {
+      dq.placeholder = cfg.destName || t(lang, 'plannerDestPlaceholder');
+    }
+    const lab1 = this.shadowRoot && this.shadowRoot.querySelector('.plan .step:first-child .label');
+    const lab2 = this.shadowRoot && this.shadowRoot.querySelector('.plan .step:nth-child(2) .label');
+    if (lab1) lab1.textContent = t(lang, 'plannerStep1');
+    if (lab2) lab2.textContent = t(lang, 'plannerStep2');
+  }
+
+  _resetPlan() {
+    this._dests = [];
+    this._destRoutes = {};
+    this._config = Object.assign({}, this._config, {
+      stopId: '',
+      stopName: '',
+      destKey: '',
+      destName: '',
+      routeIds: [],
+    });
+    this._rows = [];
+    this._rawRows = [];
+    this._err = '';
+    const q = this._planEl('pq');
+    const dq = this._planEl('pdq');
+    const hits = this._planEl('phits');
+    if (q) q.value = '';
+    if (dq) dq.value = '';
+    if (hits) hits.innerHTML = '';
+    this._syncPickerLabels();
+    this._paintDestHits('');
+    this._paint();
+  }
+
+  async _searchOrigin(q) {
+    const box = this._planEl('phits');
+    if (!box) return;
+    if (!q || q.length < 2) { box.innerHTML = ''; return; }
+    const seq = ++this._searchSeq;
+    try {
+      this._err = '';
+      if (!this._config.apiKey) await this._fillKey();
+      if (seq !== this._searchSeq) return;
+      const hits = await BkkLib.searchStops(this._config.apiKey, q, 'all');
+      if (seq !== this._searchSeq) return;
+      if (!hits.length) {
+        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'mode').bkk.empty) + '</span>';
+        return;
+      }
+      box.innerHTML = hits.map((s) => (
+        `<button class="hit" type="button" data-id="${BkkLib.esc(s.id)}">${BkkLib.esc(s.label || s.name)}</button>`
+      )).join('');
+      box.querySelectorAll('.hit').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const id = btn.getAttribute('data-id');
+          const st = hits.find((h) => h.id === id);
+          this._pickOrigin({ id: st.id, name: st.name, label: st.label });
+        });
+      });
+    } catch (err) {
+      if (seq !== this._searchSeq) return;
+      this._showErr(err);
+    }
+  }
+
+  async _pickOrigin(stop) {
+    this._config = Object.assign({}, this._config, {
+      stopId: stop.id,
+      stopName: stop.name,
+      destKey: '',
+      destName: '',
+      routeIds: [],
+    });
+    this._dests = [];
+    this._destRoutes = {};
+    this._rows = [];
+    this._rawRows = [];
+    this._err = '';
+    const q = this._planEl('pq');
+    const dq = this._planEl('pdq');
+    const hits = this._planEl('phits');
+    if (q) q.value = stop.label || stop.name;
+    if (dq) dq.value = '';
+    if (hits) hits.innerHTML = '';
+    this._syncPickerLabels();
+    this._paint();
+    await this._loadDests();
+  }
+
+  async _loadDests() {
+    const cfg = this._config || {};
+    if (!cfg.stopId) return;
+    const seq = ++this._destSeq;
+    this._destsLoading = true;
+    this._paintDestHits('');
+    try {
+      if (!cfg.apiKey) await this._fillKey();
+      const out = await BkkLib.reachableDests(
+        this._config.apiKey,
+        this._tripCache || {},
+        { id: cfg.stopId, name: cfg.stopName || '' },
+        'all',
+        '',
+      );
+      if (seq !== this._destSeq) return;
+      this._dests = (out && out.dests) || [];
+      this._destRoutes = (out && out.destRoutes) || {};
+    } catch (err) {
+      if (seq !== this._destSeq) return;
+      this._showErr(err);
+      this._dests = [];
+      this._destRoutes = {};
+    } finally {
+      if (seq === this._destSeq) {
+        this._destsLoading = false;
+        this._paintDestHits((this._planEl('pdq') || {}).value || '');
+      }
+    }
+  }
+
+  _idsForDest(key) {
+    const raw = this._destRoutes[key] || [];
+    const out = [];
+    raw.forEach((id) => {
+      if (!id) return;
+      out.push(id);
+      const s = String(id);
+      if (s.indexOf('gtfs:') !== 0 && !/^BKK_/i.test(s) && !/^volan_/i.test(s) && !/^hkir_/i.test(s)) {
+        out.push('gtfs:' + s);
+      }
+    });
+    return out;
+  }
+
+  _paintDestHits(q) {
+    const box = this._planEl('pdhits');
+    if (!box) return;
+    const lang = this._lang();
+    const cfg = this._config || {};
+    if (!cfg.stopId) {
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerPickAll')) + '</span>';
+      return;
+    }
+    if (this._destsLoading) {
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'destLoading')) + '</span>';
+      return;
+    }
+    if (!this._dests.length) {
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'mode').bkk.destNone) + '</span>';
+      return;
+    }
+    const f = BkkLib.fold(q || '');
+    const hits = f
+      ? this._dests.filter((d) => BkkLib.fold(d.name).indexOf(f) >= 0)
+      : this._dests;
+    if (!hits.length) {
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'mode').bkk.destEmpty) + '</span>';
+      return;
+    }
+    const shown = hits.slice(0, 50);
+    box.innerHTML = shown.map((d) => (
+      `<button class="hit" type="button" data-key="${BkkLib.esc(d.key)}">${BkkLib.esc(d.name)}</button>`
+    )).join('');
+    box.querySelectorAll('.hit').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const key = btn.getAttribute('data-key');
+        const d = this._dests.find((x) => x.key === key);
+        if (d) this._pickDest(d);
+      });
+    });
+  }
+
+  _pickDest(dest) {
+    this._config = Object.assign({}, this._config, {
+      destKey: dest.key,
+      destName: dest.name,
+      routeIds: this._idsForDest(dest.key),
+    });
+    const dq = this._planEl('pdq');
+    const hits = this._planEl('pdhits');
+    if (dq) dq.value = dest.name;
+    if (hits) hits.innerHTML = '';
+    this._syncPickerLabels();
+    this._reloadSafe();
   }
 }
 
@@ -3998,6 +3756,9 @@ if (!customElements.get(BKK_HOP_TAG_ALIAS)) {
 if (!customElements.get(BKK_PLANNER_TAG)) {
   customElements.define(BKK_PLANNER_TAG, BKKPlannerCard);
 }
+if (!customElements.get(BKK_PLANNER_TAG_ALIAS)) {
+  customElements.define(BKK_PLANNER_TAG_ALIAS, class extends BKKPlannerCard {});
+}
 
 console.info(`%c HUNGARIAN-TRANSPORT %c ${CARD_VERSION} `,
   'color:#fff;background:#0f6fc6;font-weight:700',
@@ -4017,8 +3778,8 @@ if (!window.customCards.some((c) => c.type === BKK_HOP_TAG)) {
 if (!window.customCards.some((c) => c.type === BKK_PLANNER_TAG)) {
   window.customCards.push({
     type: BKK_PLANNER_TAG,
-    name: 'Hungarian transport planner',
-    description: 'BKK and Vol\u00e1n: stop \u2192 vehicle(s) \u2192 shared destination',
+    name: 'Hungarian transit stop planner',
+    description: 'Pick two stops; every non-rail service between them is listed',
     preview: false,
   });
 }

@@ -77,7 +77,8 @@ check('platform label differs per language',
 check('minutes formatter', I18N.hu.minutes(7) === '7 perc' && I18N.en.minutes(7) === '7 min');
 
 check('card element registered', !!registry.get('hungarian-transport-card'));
-check('planner element registered', !!registry.get('bkk-stop-card-plan'));
+check('planner element registered', !!registry.get('hungarian-transit-stop-card-plan'));
+check('planner alias still registered', !!registry.get('bkk-stop-card-plan'));
 check('editor element registered', !!registry.get('hungarian-transport-card-editor'));
 check('r3 alias still registered', !!registry.get('bkk-stop-card-r3'));
 check('r3 editor alias still registered', !!registry.get('bkk-stop-card-r3-editor'));
