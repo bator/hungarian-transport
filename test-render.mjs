@@ -201,4 +201,26 @@ opened = 0;
 if (btn) btn.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
 check('map button click opens the map', opened >= 1, String(opened));
 
+check('all mode keeps volan coaches',
+  Lib.routeMatchesMode({ type: 'COACH', id: 'volan_1' }, 'all'));
+check('all mode keeps city buses',
+  Lib.routeMatchesMode({ type: 'BUS', id: 'BKK_0085' }, 'all'));
+check('all mode drops mav trains',
+  !Lib.routeMatchesMode({ type: 'RAIL', id: 'BKK_0055' }, 'all'));
+check('bkk mode still drops volan',
+  !Lib.routeMatchesMode({ type: 'COACH', id: 'volan_1' }, 'bkk'));
+
+const plan = document.createElement('bkk-stop-card-plan');
+document.body.appendChild(plan);
+plan.hass = { states: {}, language: 'hu' };
+plan.setConfig({ language: 'hu' });
+const planHtml = plan.shadowRoot.innerHTML;
+check('planner title includes Volan', planHtml.includes('BKK \u00e9s Vol\u00e1n'));
+check('planner favorite chips include a Volan station',
+  planHtml.includes('N\u00e9pliget') && planHtml.includes('Kelenf'));
+check('planner searches mixed BKK and Volan',
+  src.includes("searchStops(this._apiKey, q, 'all')")
+  && src.includes('volanRoutesAtStop')
+  && src.includes("mode: 'all'"));
+
 process.exit(failed ? 1 : 0);

@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.0-rev.5';
+const CARD_VERSION = '1.4.0-rev.6';
 
 const BKK_PLANNER_TAG = 'bkk-stop-card-plan';
 const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
@@ -39,7 +39,7 @@ const VOLAN_FAVORITES = [
   { id: 'hkir_773521', name: 'Budapest, N\u00e9pliget aut\u00f3busz-p\u00e1lyaudvar' },
   { id: 'volan_773538_99', name: 'Budapest, Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s' },
 ];
-const FAVORITES = BKK_FAVORITES.concat(MAV_FAVORITES);
+const FAVORITES = BKK_FAVORITES.concat(VOLAN_FAVORITES, MAV_FAVORITES);
 const DEFAULT_FAVORITES = {
   bkk: BKK_FAVORITES,
   mav: MAV_FAVORITES,
@@ -232,12 +232,12 @@ const I18N = {
     cityPlaceholder: 'V\u00e1lassz v\u00e1rost',
     minutesAfterLabel: 'Menetrend el\u0151re (perc)',
     minutesAfterHint: 'H\u00e1ny percet n\u00e9zzen el\u0151re az indul\u00e1sokb\u00f3l. 30\u2013360 perc, alap\u00e9rtelmez\u00e9s 180.',
-    plannerTitle: 'BKK \u00fatvonal',
+    plannerTitle: 'BKK \u00e9s Vol\u00e1n',
     plannerStep1: '1. Meg\u00e1ll\u00f3',
     plannerStep2: '2. J\u00e1rm\u0171',
     plannerStep3: '3. Meddig',
     plannerDepartures: 'Indul\u00e1sok',
-    plannerSearchPlaceholder: 'Utca, meg\u00e1ll\u00f3...',
+    plannerSearchPlaceholder: 'Utca, meg\u00e1ll\u00f3, aut\u00f3busz-\u00e1llom\u00e1s...',
     plannerReset: '\u00daj',
     plannerMultiHint: 'T\u00f6bbet is v\u00e1laszthatsz. Ekkor csak a k\u00f6z\u00f6s meg\u00e1ll\u00f3k maradnak.',
     plannerPickVehicleFirst: 'El\u0151bb v\u00e1lassz j\u00e1rm\u0171vet',
@@ -365,12 +365,12 @@ const I18N = {
     cityPlaceholder: 'Pick a city',
     minutesAfterLabel: 'Look-ahead (minutes)',
     minutesAfterHint: 'How far ahead to list departures. 30\u2013360 minutes, default 180.',
-    plannerTitle: 'BKK route',
+    plannerTitle: 'BKK and Vol\u00e1n',
     plannerStep1: '1. Stop',
     plannerStep2: '2. Vehicle',
     plannerStep3: '3. Destination',
     plannerDepartures: 'Departures',
-    plannerSearchPlaceholder: 'Street, stop...',
+    plannerSearchPlaceholder: 'Street, stop, coach station...',
     plannerReset: 'Reset',
     plannerMultiHint: 'You can pick several. Only stops shared by all of them are kept.',
     plannerPickVehicleFirst: 'Pick a vehicle first',
@@ -501,6 +501,7 @@ class BKKPlannerCard extends HTMLElement {
     }
     this._config = Object.assign({}, config || {});
     this._apiKey = this._config.apiKey || '';
+    if (this._config.volanIndex) setVolanIndexUrl(this._config.volanIndex);
     this._renderShell();
   }
 
@@ -509,6 +510,7 @@ class BKKPlannerCard extends HTMLElement {
     this._hass = hass;
     if (!this._config || !this._root) return;
     // "auto" resolves against hass.language; re-render only while nothing is picked.
+    if (first && !this._apiKey) this._fillKey();
     if (first && !this._stop && this._lang() !== resolveLang(this._config.language, null)) {
       this._renderShell();
     }
@@ -520,6 +522,13 @@ class BKKPlannerCard extends HTMLElement {
 
   _minutesAfter() {
     return clampMinutesAfter(this._config && this._config.minutesAfter);
+  }
+
+  async _fillKey() {
+    const key = await BkkLib.apiKeyFromDashboard(this._hass);
+    if (!key || this._apiKey) return;
+    this._apiKey = key;
+    this._config = Object.assign({}, this._config, { apiKey: key });
   }
 
   getCardSize() {
@@ -714,27 +723,10 @@ class BKKPlannerCard extends HTMLElement {
     const seq = ++this._searchSeq;
     try {
       this._error('');
-      const byId = new Map();
-      const queries = [q].concat(this._aliasQueries(q));
-      for (let i = 0; i < queries.length; i++) {
-        const data = await this._bkk('search.json', { query: queries[i] });
-        if (seq !== this._searchSeq) return;
-        const stops = (((data.data || {}).references) || {}).stops || {};
-        Object.values(stops).forEach((s) => {
-          if (s && s.id && s.name) byId.set(s.id, s);
-        });
-      }
+      if (!this._apiKey) await this._fillKey();
       if (seq !== this._searchSeq) return;
-      let hits = BkkLib.groupStops(Array.from(byId.values()));
-      hits = hits.map((h) => Object.assign({}, h, { label: this._labelAliased(q, h) }));
-      const foldedQ = this._fold(q);
-      hits.sort((a, b) => {
-        const as = (foldedQ.includes('arpad hid') && this._fold(a.name).includes('goncz arpad')) ? 0 : 1;
-        const bs = (foldedQ.includes('arpad hid') && this._fold(b.name).includes('goncz arpad')) ? 0 : 1;
-        if (as !== bs) return as - bs;
-        return (a.label || a.name).localeCompare(b.label || b.name, 'hu');
-      });
-      hits = hits.slice(0, 20);
+      const hits = await BkkLib.searchStops(this._apiKey, q, 'all');
+      if (seq !== this._searchSeq) return;
       const box = this._el('hits');
       box.innerHTML = hits.map((s) => (
         `<button class="hit" type="button" data-id="${this._esc(s.id)}">${this._esc(s.label || s.name)}</button>`
@@ -772,31 +764,51 @@ class BKKPlannerCard extends HTMLElement {
   }
 
   async _loadRoutes() {
-    const data = await this._bkk('arrivals-and-departures-for-stop.json', {
-      stopId: this._stop.id,
-      minutesAfter: String(this._minutesAfter()),
-      minutesBefore: '0',
-      onlyDepartures: 'true',
-      includeReferences: 'true',
-    });
-    const refs = (data.data || {}).references || {};
-    const routes = refs.routes || {};
-    const entry = (data.data || {}).entry || {};
-    const ids = entry.routeIds || Object.keys(routes);
+    if (!this._apiKey) await this._fillKey();
     const list = [];
-    ids.forEach((rid) => {
-      const rt = routes[rid];
-      if (!rt) return;
-      const label = rt.iconDisplayText || rt.shortName;
-      if (!label) return;
-      list.push({
-        id: rid,
-        label,
-        color: '#' + String(rt.color || '4477aa').replace('#', ''),
-        text: '#' + String(rt.textColor || 'ffffff').replace('#', ''),
-        type: rt.type || '',
+    const seenLabel = new Set();
+    let otpErr = null;
+    if (this._apiKey) {
+      try {
+        const data = await BkkLib.fetch(this._apiKey, 'arrivals-and-departures-for-stop.json', {
+          stopId: this._stop.id,
+          minutesAfter: String(this._minutesAfter()),
+          minutesBefore: '0',
+          onlyDepartures: 'true',
+          includeReferences: 'true',
+        });
+        const refs = (data.data || {}).references || {};
+        const routes = refs.routes || {};
+        const entry = (data.data || {}).entry || {};
+        const ids = entry.routeIds || Object.keys(routes);
+        ids.forEach((rid) => {
+          const rt = Object.assign({ id: rid }, routes[rid] || {});
+          if (!BkkLib.routeMatchesMode(rt, 'all')) return;
+          const label = rt.iconDisplayText || rt.shortName;
+          if (!label || seenLabel.has(label)) return;
+          seenLabel.add(label);
+          list.push({
+            id: rid,
+            label,
+            color: '#' + String(rt.color || '4477aa').replace('#', ''),
+            text: '#' + String(rt.textColor || 'ffffff').replace('#', ''),
+            type: rt.type || '',
+            source: 'otp',
+          });
+        });
+      } catch (err) {
+        otpErr = err;
+      }
+    }
+    try {
+      const extra = await BkkLib.volanRoutesAtStop(this._stop);
+      extra.forEach((rt) => {
+        if (seenLabel.has(rt.label)) return;
+        seenLabel.add(rt.label);
+        list.push(rt);
       });
-    });
+    } catch (_e) { /* GTFS index optional */ }
+    if (!list.length && otpErr) throw otpErr;
     list.sort((a, b) => a.label.localeCompare(b.label, 'hu', { numeric: true }));
     this._routes = list;
     this._routeCache = {};
@@ -940,7 +952,12 @@ class BKKPlannerCard extends HTMLElement {
     sel.innerHTML = opt('plannerLoading');
     const lists = [];
     for (const rid of this._selected) {
-      lists.push(await this._remainingNames(rid));
+      const rt = (this._routes || []).find((r) => r.id === rid);
+      if (rt && rt.source === 'gtfs') {
+        lists.push(await BkkLib.volanRemainingNames(this._stop, rt.label));
+      } else {
+        lists.push(await BkkLib.remainingNames(this._apiKey, this._routeCache || {}, this._stop, rid));
+      }
     }
     let common = lists[0] || [];
     for (let i = 1; i < lists.length; i++) {
@@ -966,15 +983,23 @@ class BKKPlannerCard extends HTMLElement {
     this._el('table').innerHTML = '<span class="muted">' + this._esc(t(this._lang(), 'plannerLoading')) + '</span>';
     try {
       this._error('');
+      const routeIds = [];
+      (this._routes || []).forEach((rt) => {
+        if (!this._selected.has(rt.id)) return;
+        routeIds.push(rt.id);
+        if (rt.source === 'gtfs' || BkkLib.isVolanRoute(rt)) {
+          routeIds.push('gtfs:' + rt.label);
+        }
+      });
       const rows = await BkkLib.departures(
         this._apiKey,
         this._stop.id,
-        Array.from(this._selected),
+        routeIds,
         this._dest,
         {
           originName: this._stop.name || '',
           cache: this._routeCache || {},
-          mode: 'bkk',
+          mode: 'all',
           minutesAfter: this._minutesAfter(),
         },
       );
@@ -1193,6 +1218,7 @@ const BkkLib = {
   routeMatchesMode(rt, mode) {
     if (mode === 'mav') return BkkLib.isMavRoute(rt);
     if (mode === 'volan') return BkkLib.isVolanRoute(rt);
+    if (mode === 'all') return !BkkLib.isMavRoute(rt);
     return !BkkLib.isMavRoute(rt) && !BkkLib.isVolanRoute(rt);
   },
   stopNum(id) {
@@ -1642,6 +1668,51 @@ const BkkLib = {
     const idx = await BkkLib.volanIndex();
     return BkkLib.gtfsSearchStops(idx, q, null);
   },
+  async volanRoutesAtStop(stop) {
+    const idx = await BkkLib.volanIndex();
+    const origin = BkkLib.volanMatchStop(idx, stop, null);
+    if (!origin) return [];
+    const seen = new Set();
+    const out = [];
+    const trips = idx.t || [];
+    for (let i = 0; i < trips.length; i++) {
+      const route = trips[i][1];
+      if (!route || seen.has(route)) continue;
+      const ps = trips[i][2] || [];
+      if (ps.indexOf(origin.i) < 0) continue;
+      seen.add(route);
+      out.push({
+        id: 'gtfs:' + route,
+        label: String(route),
+        color: '#F9AB13',
+        text: '#000000',
+        type: 'COACH',
+        source: 'gtfs',
+      });
+    }
+    out.sort((a, b) => a.label.localeCompare(b.label, 'hu', { numeric: true }));
+    return out;
+  },
+  async volanRemainingNames(stop, routeLabel) {
+    const idx = await BkkLib.volanIndex();
+    const origin = BkkLib.volanMatchStop(idx, stop, null);
+    if (!origin || !routeLabel) return [];
+    const want = String(routeLabel);
+    const byKey = new Map();
+    const trips = idx.t || [];
+    for (let i = 0; i < trips.length; i++) {
+      if (String(trips[i][1]) !== want) continue;
+      const ps = trips[i][2] || [];
+      const oidx = ps.indexOf(origin.i);
+      if (oidx < 0) continue;
+      for (let j = oidx + 1; j < ps.length; j++) {
+        const st = idx.stops[ps[j]];
+        if (!st || !st.key || byKey.has(st.key)) continue;
+        byKey.set(st.key, { key: st.key, name: st.name, id: st.id });
+      }
+    }
+    return Array.from(byKey.values());
+  },
   async citySearchStops(q, city) {
     if (!city) return [];
     const idx = await BkkLib.cityIndex();
@@ -1817,7 +1888,7 @@ const BkkLib = {
   },
   async searchStops(apiKey, q, mode, city) {
     const byId = new Map();
-    if (mode === 'volan') {
+    if (mode === 'volan' || mode === 'all') {
       try {
         (await BkkLib.volanSearchStops(q)).forEach((s) => byId.set(s.id, s));
       } catch (_e) { /* GTFS index optional */ }
@@ -1839,8 +1910,9 @@ const BkkLib = {
             if (mode === 'mav' && !BkkLib.isMavStop(s)) return;
             if (mode === 'volan' && !BkkLib.isVolanStop(s)) return;
             if (mode === 'bkk' && !BkkLib.isBkkStop(s)) return;
+            if (mode === 'all' && BkkLib.isMavStop(s)) return;
             const num = BkkLib.stopNum(s.id);
-            if (mode === 'volan' && num) {
+            if ((mode === 'volan' || mode === 'all') && num) {
               const clash = Array.from(byId.values()).find((x) => BkkLib.stopNum(x.id) === num);
               if (clash) return;
             }
@@ -1848,7 +1920,7 @@ const BkkLib = {
           });
         }
       } catch (err) {
-        if (mode !== 'volan' || !byId.size) throw err;
+        if ((mode !== 'volan' && mode !== 'all') || !byId.size) throw err;
       }
     }
     let hits = BkkLib.groupStops(Array.from(byId.values()));
@@ -2124,9 +2196,9 @@ const BkkLib = {
       dests.sort((a, b) => a.name.localeCompare(b.name, 'hu'));
       out = { dests, destRoutes };
     } catch (err) {
-      if (mode !== 'volan') throw err;
+      if (mode !== 'volan' && mode !== 'all') throw err;
     }
-    if (mode === 'volan') {
+    if (mode === 'volan' || mode === 'all') {
       try {
         out = BkkLib.mergeDestIndex(await BkkLib.volanReachableDests(stop), out);
       } catch (_e) { /* GTFS index optional */ }
@@ -2251,7 +2323,7 @@ const BkkLib = {
       });
       candidates.sort((a, b) => (a.dep || 0) - (b.dep || 0));
     } catch (err) {
-      if (mode !== 'volan') throw err;
+      if (mode !== 'volan' && mode !== 'all') throw err;
     }
     let picked = candidates;
     if (destKey && candidates.length && !destDirected) {
@@ -2274,9 +2346,12 @@ const BkkLib = {
         row.travel = await BkkLib.travelMin(apiKey, row.tripId, destKey, row.dep, origin, cache);
       }));
     }
-    if (mode === 'volan') {
+    if (mode === 'volan' || mode === 'all') {
       try {
-        const extra = await BkkLib.volanDepartures(stopId, dest, opts.originName, horizon);
+        let extra = await BkkLib.volanDepartures(stopId, dest, opts.originName, horizon);
+        if (mode === 'all' && selected.size) {
+          extra = extra.filter((row) => selected.has('gtfs:' + row.label));
+        }
         rows = BkkLib.mergeVolanRows(extra, rows);
       } catch (err) {
         if (!rows.length) throw err;
@@ -3943,7 +4018,7 @@ if (!window.customCards.some((c) => c.type === BKK_PLANNER_TAG)) {
   window.customCards.push({
     type: BKK_PLANNER_TAG,
     name: 'Hungarian transport planner',
-    description: 'Stop \u2192 vehicle(s) \u2192 shared destination',
+    description: 'BKK and Vol\u00e1n: stop \u2192 vehicle(s) \u2192 shared destination',
     preview: false,
   });
 }
