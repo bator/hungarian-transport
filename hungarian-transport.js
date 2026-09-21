@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.3.3-rev.1';
+const CARD_VERSION = '1.4.0-rev.1';
 
 const BKK_PLANNER_TAG = 'bkk-stop-card-plan';
 const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
