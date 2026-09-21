@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "rev = 1.4.1-rev.N prerelease; patch = 1.4.2 HACS; minor = 1.5.0 HACS; major = 2.0.0"
+        description: "rev = 1.4.2-rev.N prerelease (default). Do not pick patch/minor/major unless asked."
         type: choice
         options:
           - rev
