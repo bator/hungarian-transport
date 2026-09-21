@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.14';
+const CARD_VERSION = '1.4.2-rev.15';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -2321,11 +2321,7 @@ const BkkLib = {
       const pairs = [];
       indexes.forEach((idx) => {
         uniq.forEach((vehicle, vi) => {
-          const accepted = pairOk(list[idx], vehicle);
-          // #region agent log
-          fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'A',location:'applyCoachGps',message:'pair decision',data:{route:String(list[idx].label||''),vehicleRoute:String(vehicle.route||''),rowHead:String(list[idx].headsign||list[idx].head||''),vehicleHead:String(vehicle.head||''),kind:String(list[idx].vehicle||''),accepted:accepted},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
-          if (!accepted) return;
+          if (!pairOk(list[idx], vehicle)) return;
           const dep = Number(list[idx].dep || list[idx].sched || 0);
           const head = rowHead(list[idx]);
           const vehicleHead = fold(vehicle.head);
