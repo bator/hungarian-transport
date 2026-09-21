@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.6';
+const CARD_VERSION = '1.4.2-rev.7';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -1396,14 +1396,17 @@ const BkkLib = {
         prev.color = row.color;
         if (row.text) prev.text = row.text;
       }
-      const lat = Number(row.lat);
-      const lon = Number(row.lon);
-      if (Number.isFinite(lat) && Number.isFinite(lon)) {
-        prev.lat = lat;
-        prev.lon = lon;
+      const prevHasGps = Number.isFinite(Number(prev.lat)) && Number.isFinite(Number(prev.lon));
+      if (!prevHasGps) {
+        const lat = Number(row.lat);
+        const lon = Number(row.lon);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+          prev.lat = lat;
+          prev.lon = lon;
+        }
       }
       const tid = String(row.tripId || '');
-      if (tid && !/^(elvira:|gtfs:)/.test(tid)) prev.tripId = tid;
+      if (tid && !/^(elvira:|gtfs:)/.test(tid) && !prevHasGps) prev.tripId = tid;
       ['vehicleId', 'licensePlate', 'model', 'vehicleStatus', 'stopDistancePercent'].forEach((k) => {
         if ((prev[k] == null || prev[k] === '') && row[k] != null && row[k] !== '') prev[k] = row[k];
       });
@@ -2020,6 +2023,53 @@ const BkkLib = {
     const t = String(tripId || '');
     return !!t && !/^(elvira:|gtfs:)/.test(t);
   },
+  emmaTrainNumber(text) {
+    const m = String(text || '').trim().match(/^(\d+)/);
+    if (!m) return '';
+    return m[1].replace(/^0+/, '') || m[1];
+  },
+  matchEmmaVehicle(row, vehicle) {
+    if (!row || !vehicle) return false;
+    const num = BkkLib.rowTrainNumber(row);
+    const trip = vehicle.trip || {};
+    const n = BkkLib.emmaTrainNumber(trip.tripShortName || vehicle.label || '');
+    if (num && n && num === n) return true;
+    const name = String(row.label || '').trim().toUpperCase();
+    if (!name || name.length < 3 || BkkLib.genericRailLabel(name)) return false;
+    const blob = [
+      trip.tripShortName, trip.tripHeadsign,
+      (trip.route || {}).longName, (trip.route || {}).shortName, vehicle.label,
+    ].join(' ').toUpperCase();
+    if (blob.indexOf(name) < 0) return false;
+    return !num || !n || num === n;
+  },
+  applyEmmaPositions(rows, vehicles) {
+    const list = Array.isArray(rows) ? rows : [];
+    const vehs = Array.isArray(vehicles) ? vehicles : [];
+    list.forEach((row) => {
+      if (!row) return;
+      if (Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon))) return;
+      for (let i = 0; i < vehs.length; i++) {
+        const v = vehs[i];
+        if (!BkkLib.matchEmmaVehicle(row, v)) continue;
+        const lat = Number(v.lat);
+        const lon = Number(v.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+        row.lat = lat;
+        row.lon = lon;
+        if (v.heading != null) row.heading = v.heading;
+        if (v.speed != null) row.speed = v.speed;
+        break;
+      }
+    });
+    return list;
+  },
+  needsFutarMapResolve(row) {
+    const lat = Number(row && row.lat);
+    const lon = Number(row && row.lon);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return false;
+    return !BkkLib.isFutarTripId((row && row.tripId) || '');
+  },
   keepFutarCandidate(rt, selected, mode, destKey) {
     if (!selected || !selected.size || mode === 'volan') return true;
     if (destKey && (mode === 'bkk' || mode === 'mav' || mode === 'all')) return true;
@@ -2209,7 +2259,7 @@ const BkkLib = {
       lat: hasGps ? lat : null,
       lon: hasGps ? lon : null,
       hasGps: hasGps,
-      hasLocation: !gtfs && !!r.tripId,
+      hasLocation: hasGps || (!gtfs && !!r.tripId),
       vehicle: r.vehicle || '',
       vehicleId: r.vehicleId || '',
       licensePlate: r.licensePlate || '',
@@ -2821,7 +2871,7 @@ class BKKHopCard extends HTMLElement {
     this._map = map;
     setTimeout(() => map.invalidateSize(), 40);
     let details = null;
-    if (cfg.apiKey && !BkkLib.isFutarTripId(tripId)) {
+    if (cfg.apiKey && BkkLib.needsFutarMapResolve({ lat: lat, lon: lon, tripId: tripId })) {
       try {
         let extraStop = cfg.destStopId || '';
         if (!extraStop && (cfg.destName || cfg.destKey)) {

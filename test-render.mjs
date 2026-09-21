@@ -371,6 +371,57 @@ check('BALATON does not match a different-minute IC',
     {},
     { iconDisplayText: 'IC' },
   ));
+check('EMMA tripShortName 861 BALATON yields train number 861',
+  Lib.emmaTrainNumber('861 BALATON InterCity') === '861');
+check('BALATON 861 matches EMMA vehicle by train number',
+  Lib.matchEmmaVehicle(
+    { label: 'BALATON', trainNumber: '861', tripId: 'elvira:2890602' },
+    { lat: 47.229, lon: 18.668, trip: { tripShortName: '861 BALATON InterCity' } },
+  ));
+check('BAKONY 901 matches EMMA named IC by number',
+  Lib.matchEmmaVehicle(
+    { label: 'BAKONY', trainNumber: '901', tripId: 'elvira:1' },
+    { lat: 47.15, lon: 18.04, trip: { tripShortName: '901 BAKONY InterCity', route: { longName: 'IC BAKONY' } } },
+  ));
+check('BAKONY does not match a different train number',
+  !Lib.matchEmmaVehicle(
+    { label: 'BAKONY', trainNumber: '901', tripId: 'elvira:1' },
+    { lat: 47.18, lon: 18.56, trip: { tripShortName: '918 BAKONY InterCity' } },
+  ));
+check('applyEmmaPositions fills ELVIRA lat/lon from EMMA', (() => {
+  const rows = [{ label: 'BALATON', trainNumber: '861', tripId: 'elvira:2890602' }];
+  Lib.applyEmmaPositions(rows, [{
+    lat: 47.2290993, lon: 18.6682205, heading: 12,
+    trip: { tripShortName: '861 BALATON InterCity' },
+  }]);
+  return rows[0].lat === 47.2290993 && rows[0].lon === 18.6682205 && rows[0].tripId === 'elvira:2890602';
+})());
+check('ELVIRA GPS is kept over FUTAR overlay', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 900;
+  const merged = Lib.mergeVolanRows(
+    [{
+      label: 'IC', tripId: 'BKK_861_74', trainNumber: '861',
+      dep: dep, sched: dep, color: '#2E5EA8',
+      lat: 47.5, lon: 19.05,
+    }],
+    [{
+      label: 'BALATON', tripId: 'elvira:2890602', trainNumber: '861',
+      dep: dep, sched: dep, color: '#4477aa',
+      lat: 47.2290993, lon: 18.6682205,
+    }],
+    12,
+  );
+  return merged.length === 1
+    && merged[0].label === 'BALATON'
+    && merged[0].tripId === 'elvira:2890602'
+    && merged[0].lat === 47.2290993
+    && merged[0].lon === 18.6682205
+    && String(merged[0].color).replace('#', '').toUpperCase() === '2E5EA8';
+})());
+check('map skips FUTAR resolve when ELVIRA row already has GPS',
+  !Lib.needsFutarMapResolve({ tripId: 'elvira:2890602', lat: 47.229, lon: 18.668 })
+  && Lib.needsFutarMapResolve({ tripId: 'elvira:2890602' })
+  && !Lib.needsFutarMapResolve({ tripId: 'BKK_861_74', lat: null, lon: null }));
 check('ELVIRA S30 takes FUTAR trip id by train number', (() => {
   const dep = Math.floor(Date.now() / 1000) + 1800;
   const merged = Lib.mergeVolanRows(
