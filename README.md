@@ -59,6 +59,11 @@ Add the **Hungarian transport** card from the card picker
 (`custom:hungarian-transport-card`). Older dashboards that still use
 `custom:bkk-stop-card-r3` keep working as an alias.
 
+The planner companion (`custom:hungarian-transit-stop-card-plan`) is in the
+same picker and has its own visual editor. It always searches every operator
+(BKK, Volán, MÁV); there are no mode toggles. The older
+`custom:bkk-stop-card-plan` type remains an alias.
+
 BKK and MÁV modes need a BKK Open Data API key, free after a short sign-up:
 <https://opendata.bkk.hu/data-sources>
 
@@ -123,7 +128,9 @@ reaches.
 
 The companion planner card (`custom:hungarian-transit-stop-card-plan`)
 picks an origin and a destination, then lists every service between them
-(BKK, Volán and MÁV) in the same timetable layout as the hop card. The older
+(BKK, Volán and MÁV) in the same timetable layout as the hop card. Add it
+from the card picker; the visual editor and the on-card pickers both set
+look-ahead (`minutesAfter`) and can swap origin and destination. The older
 `custom:bkk-stop-card-plan` type remains registered as an alias.
 
 Debrecen DKV does not publish a public GTFS zip, so it is not in the city

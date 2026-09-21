@@ -82,11 +82,29 @@ check('planner alias still registered', !!registry.get('bkk-stop-card-plan'));
 check('editor element registered', !!registry.get('hungarian-transport-card-editor'));
 check('r3 alias still registered', !!registry.get('bkk-stop-card-r3'));
 check('r3 editor alias still registered', !!registry.get('bkk-stop-card-r3-editor'));
+check('planner editor registered', !!registry.get('hungarian-transit-stop-card-plan-editor'));
+check('planner editor alias registered', !!registry.get('bkk-stop-card-plan-editor'));
 check('card advertised to picker', (globalThis.customCards || []).some((c) => c.type === 'hungarian-transport-card'),
   JSON.stringify((globalThis.customCards || []).map((c) => c.type)));
+check('planner advertised to picker', (globalThis.customCards || []).some((c) => c.type === 'hungarian-transit-stop-card-plan'));
 
 const stub = registry.get('hungarian-transport-card').getStubConfig();
 check('stub config carries language', stub.language === 'auto', JSON.stringify(stub));
 check('stub config carries minutesAfter', stub.minutesAfter === 180, JSON.stringify(stub));
+
+const plannerStub = registry.get('hungarian-transit-stop-card-plan').getStubConfig();
+check('planner stub carries minutesAfter', plannerStub.minutesAfter === 180, JSON.stringify(plannerStub));
+check('planner stub has no empty apiKey', !Object.prototype.hasOwnProperty.call(plannerStub, 'apiKey'),
+  JSON.stringify(plannerStub));
+check('planner getConfigElement is not null',
+  typeof registry.get('hungarian-transit-stop-card-plan').getConfigElement === 'function');
+const planCfgEl = await registry.get('hungarian-transit-stop-card-plan').getConfigElement();
+check('planner getConfigElement returns editor',
+  planCfgEl && String(planCfgEl.tagName).toLowerCase() === 'hungarian-transit-stop-card-plan-editor',
+  planCfgEl && planCfgEl.tagName);
+check('en plannerStep3 is look-ahead', I18N.en.plannerStep3 === 'Look-ahead');
+check('hu plannerSwap', I18N.hu.plannerSwap === 'Csere');
+check('mode.all present in both dictionaries',
+  !!I18N.hu.mode.all && !!I18N.en.mode.all);
 
 process.exit(failed ? 1 : 0);

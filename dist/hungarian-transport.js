@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.2';
+const CARD_VERSION = '1.4.2-rev.3';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -46,6 +46,7 @@ const DEFAULT_FAVORITES = {
   mav: MAV_FAVORITES,
   volan: VOLAN_FAVORITES,
   helyi: [],
+  all: FAVORITES,
 };
 
 const VEHICLE_ICONS = {
@@ -251,7 +252,8 @@ const I18N = {
     plannerTitle: 'Tervez\u0151',
     plannerStep1: 'Forr\u00e1s',
     plannerStep2: 'C\u00e9l',
-    plannerStep3: '3. Meddig',
+    plannerStep3: 'Meddig',
+    plannerSwap: 'Csere',
     plannerDepartures: 'Indul\u00e1sok',
     plannerSearchPlaceholder: 'Utca, meg\u00e1ll\u00f3, aut\u00f3busz-\u00e1llom\u00e1s...',
     plannerDestPlaceholder: 'C\u00e9l meg\u00e1ll\u00f3 keres\u00e9se...',
@@ -279,6 +281,17 @@ const I18N = {
         destEmpty: 'Err\u0151l a meg\u00e1ll\u00f3r\u00f3l nincs j\u00e1rat erre a c\u00e9lra.',
         destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
         destNone: 'Nincs el\u00e9rhet\u0151 BKK c\u00e9l ebb\u0151l a forr\u00e1sb\u00f3l.',
+      },
+      all: {
+        stop: 'Forr\u00e1s meg\u00e1ll\u00f3',
+        dest: 'C\u00e9l meg\u00e1ll\u00f3',
+        hint: 'V\u00e1lassz forr\u00e1s \u00e9s c\u00e9l meg\u00e1ll\u00f3t. Minden BKK, Vol\u00e1n \u00e9s M\u00c1V j\u00e1rat megjelenik k\u00f6z\u00f6tt\u00fck.',
+        originPh: 'Utca, meg\u00e1ll\u00f3, aut\u00f3busz-\u00e1llom\u00e1s...',
+        destPh: 'C\u00e9l meg\u00e1ll\u00f3 keres\u00e9se...',
+        empty: 'Nincs meg\u00e1ll\u00f3 erre a keres\u00e9sre.',
+        destEmpty: 'Nincs j\u00e1rat ebb\u0151l a meg\u00e1ll\u00f3b\u00f3l oda.',
+        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
+        destNone: 'Ebb\u0151l a forr\u00e1sb\u00f3l nincs k\u00f6zvetlen c\u00e9l.',
       },
       mav: {
         stop: 'Forr\u00e1s \u00e1llom\u00e1s',
@@ -385,7 +398,8 @@ const I18N = {
     plannerTitle: 'Planner',
     plannerStep1: 'Origin',
     plannerStep2: 'Destination',
-    plannerStep3: '3. Destination',
+    plannerStep3: 'Look-ahead',
+    plannerSwap: 'Swap',
     plannerDepartures: 'Departures',
     plannerSearchPlaceholder: 'Street, stop, coach station...',
     plannerDestPlaceholder: 'Search destination stop...',
@@ -413,6 +427,17 @@ const I18N = {
         destEmpty: 'No service from this stop to that destination.',
         destNeedOrigin: 'Pick an origin stop first.',
         destNone: 'No BKK destination is reachable from this origin.',
+      },
+      all: {
+        stop: 'Origin stop',
+        dest: 'Destination stop',
+        hint: 'Pick an origin and a destination stop. Every BKK, Vol\u00e1n and M\u00c1V service between them is listed.',
+        originPh: 'Street, stop, coach station...',
+        destPh: 'Search destination stop...',
+        empty: 'No stop matches this search.',
+        destEmpty: 'No service from this stop to that destination.',
+        destNeedOrigin: 'Pick an origin stop first.',
+        destNone: 'No destination is reachable from this origin.',
       },
       mav: {
         stop: 'Origin station',
@@ -488,6 +513,8 @@ const BKK_HOP_TAG = 'hungarian-transport-card';
 const BKK_HOP_EDITOR = 'hungarian-transport-card-editor';
 const BKK_HOP_TAG_ALIAS = 'bkk-stop-card-r3';
 const BKK_HOP_EDITOR_ALIAS = 'bkk-stop-card-r3-editor';
+const BKK_PLANNER_EDITOR = 'hungarian-transit-stop-card-plan-editor';
+const BKK_PLANNER_EDITOR_ALIAS = 'bkk-stop-card-plan-editor';
 const OWN_CARD_TYPES = [BKK_HOP_TAG, BKK_HOP_TAG_ALIAS, BKK_PLANNER_TAG, BKK_PLANNER_TAG_ALIAS];
 /* Highest compact-index layout this card understands; see scripts/gtfs_compact.py. */
 const INDEX_SCHEMA = 27;
@@ -2922,12 +2949,14 @@ class BKKPlannerCard extends BKKHopCard {
   }
 
   static async getConfigElement() {
-    return null;
+    if (!customElements.get(BKK_PLANNER_EDITOR)) {
+      await customElements.whenDefined(BKK_PLANNER_EDITOR);
+    }
+    return document.createElement(BKK_PLANNER_EDITOR);
   }
 
   static getStubConfig() {
     return {
-      apiKey: '',
       name: '',
       language: 'auto',
       minutesAfter: DEFAULT_MINUTES_AFTER,
@@ -2996,6 +3025,7 @@ class BKKPlannerCard extends BKKHopCard {
         color: var(--primary-text-color); border-radius: 999px;
         padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px;
       }
+      .plan .chip.on { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
       .plan .list { max-height: 180px; overflow: auto; margin-top: 6px; }
       .plan .hit {
         display: block; width: 100%; text-align: left; font: inherit;
@@ -3016,6 +3046,7 @@ class BKKPlannerCard extends BKKHopCard {
         <div class="label">${BkkLib.esc(t(lang, 'plannerStep1'))}</div>
         <div class="row">
           <input id="pq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerSearchPlaceholder'))}">
+          <button class="clear" id="pswap" type="button">${BkkLib.esc(t(lang, 'plannerSwap'))}</button>
           <button class="clear" id="preset" type="button">${BkkLib.esc(t(lang, 'plannerReset'))}</button>
         </div>
         <div class="chips" id="pfav"></div>
@@ -3027,6 +3058,10 @@ class BKKPlannerCard extends BKKHopCard {
         <input id="pdq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerDestPlaceholder'))}">
         <div class="picked" id="pdest"></div>
         <div class="list" id="pdhits"></div>
+      </div>
+      <div class="step">
+        <div class="label">${BkkLib.esc(t(lang, 'plannerStep3'))}</div>
+        <div class="chips" id="pmin"></div>
       </div>
     `;
     wrap.insertBefore(plan, head);
@@ -3041,6 +3076,7 @@ class BKKPlannerCard extends BKKHopCard {
     const q = this._planEl('pq');
     const dq = this._planEl('pdq');
     const reset = this._planEl('preset');
+    const swap = this._planEl('pswap');
     if (q) {
       q.addEventListener('input', () => {
         clearTimeout(this._searchTimer);
@@ -3055,6 +3091,8 @@ class BKKPlannerCard extends BKKHopCard {
       dq.addEventListener('focus', () => this._searchDest(dq.value.trim()));
     }
     if (reset) reset.addEventListener('click', () => this._resetPlan());
+    if (swap) swap.addEventListener('click', () => this._swapPlan());
+    this._paintMinutesAfter();
   }
 
   _paintFav() {
@@ -3090,6 +3128,61 @@ class BKKPlannerCard extends BKKHopCard {
     const lab2 = this.shadowRoot && this.shadowRoot.querySelector('.plan .step:nth-child(2) .label');
     if (lab1) lab1.textContent = t(lang, 'plannerStep1');
     if (lab2) lab2.textContent = t(lang, 'plannerStep2');
+    const lab3 = this.shadowRoot && this.shadowRoot.querySelector('.plan .step:nth-child(3) .label');
+    if (lab3) lab3.textContent = t(lang, 'plannerStep3');
+    const swap = this._planEl('pswap');
+    const reset = this._planEl('preset');
+    if (swap) swap.textContent = t(lang, 'plannerSwap');
+    if (reset) reset.textContent = t(lang, 'plannerReset');
+    this._paintMinutesAfter();
+  }
+
+  _paintMinutesAfter() {
+    const box = this._planEl('pmin');
+    if (!box) return;
+    const current = clampMinutesAfter(this._config && this._config.minutesAfter);
+    box.innerHTML = '';
+    MINUTES_AFTER_PRESETS.forEach((n) => {
+      const b = document.createElement('button');
+      b.className = 'chip' + (n === current ? ' on' : '');
+      b.type = 'button';
+      b.textContent = String(n);
+      b.addEventListener('click', () => {
+        this._config = Object.assign({}, this._config, { minutesAfter: n });
+        this._paintMinutesAfter();
+        this._reloadSafe();
+      });
+      box.appendChild(b);
+    });
+  }
+
+  _swapPlan() {
+    const cfg = this._config || {};
+    const newOriginId = cfg.destStopId;
+    const newOriginName = cfg.destName;
+    if (!cfg.stopId || !newOriginId || !newOriginName) return;
+    this._config = Object.assign({}, cfg, {
+      stopId: newOriginId,
+      stopName: newOriginName,
+      destKey: BkkLib.stationKey(cfg.stopName || ''),
+      destName: cfg.stopName || '',
+      destStopId: cfg.stopId,
+      routeIds: [],
+    });
+    this._dests = [];
+    this._destRoutes = {};
+    this._rows = [];
+    this._rawRows = [];
+    this._err = '';
+    const q = this._planEl('pq');
+    const dq = this._planEl('pdq');
+    const hits = this._planEl('phits');
+    if (q) q.value = newOriginName;
+    if (dq) dq.value = cfg.stopName || '';
+    if (hits) hits.innerHTML = '';
+    this._syncPickerLabels();
+    this._paint();
+    this._loadDests().then(() => this._reloadSafe());
   }
 
   _resetPlan() {
@@ -3442,7 +3535,7 @@ class BKKHopCardEditor extends HTMLElement {
           <input id="name" type="text" placeholder="Hungarian transport">
         </div>
         <div class="f">
-          <div class="row">
+          <div class="row" id="modeSwitches">
             <label class="switch"><input id="mav" type="checkbox"> M\u00c1V</label>
             <label class="switch"><input id="volan" type="checkbox"> Vol\u00e1n</label>
             <label class="switch"><input id="helyi" type="checkbox"> Helyi</label>
@@ -4055,6 +4148,34 @@ class BKKHopCardEditor extends HTMLElement {
 }
 
 
+class BKKPlannerCardEditor extends BKKHopCardEditor {
+  _mode() { return 'all'; }
+
+  setConfig(config) {
+    super.setConfig(config);
+    this._hideModeControls();
+  }
+
+  _hideModeControls() {
+    const row = this._el('modeSwitches');
+    if (row) row.style.display = 'none';
+    const city = this._el('cityWrap');
+    if (city) city.style.display = 'none';
+  }
+
+  _syncMode() {
+    super._syncMode();
+    this._hideModeControls();
+    const hint = this._el('modeHint');
+    if (hint) hint.textContent = t(this._lang(), 'plannerPickAll');
+    const lblStop = this._el('lblStop');
+    if (lblStop) lblStop.textContent = t(this._lang(), 'plannerStep1');
+    const lblDest = this._el('lblDest');
+    if (lblDest) lblDest.textContent = t(this._lang(), 'plannerStep2');
+  }
+}
+
+
 /* `bkk-stop-card-r3` and its editor stay registered so dashboards written
    before the rename keep working. */
 if (!customElements.get(BKK_HOP_EDITOR)) {
@@ -4062,6 +4183,12 @@ if (!customElements.get(BKK_HOP_EDITOR)) {
 }
 if (!customElements.get(BKK_HOP_EDITOR_ALIAS)) {
   customElements.define(BKK_HOP_EDITOR_ALIAS, class extends BKKHopCardEditor {});
+}
+if (!customElements.get(BKK_PLANNER_EDITOR)) {
+  customElements.define(BKK_PLANNER_EDITOR, BKKPlannerCardEditor);
+}
+if (!customElements.get(BKK_PLANNER_EDITOR_ALIAS)) {
+  customElements.define(BKK_PLANNER_EDITOR_ALIAS, class extends BKKPlannerCardEditor {});
 }
 if (!customElements.get(BKK_HOP_TAG)) {
   customElements.define(BKK_HOP_TAG, BKKHopCard);

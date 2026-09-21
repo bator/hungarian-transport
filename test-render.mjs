@@ -218,6 +218,8 @@ const planHtml = plan.shadowRoot.innerHTML;
 check('planner title is Tervezo', planHtml.includes('Tervez\u0151'));
 check('planner has origin and destination fields',
   planHtml.includes('id="pq"') && planHtml.includes('id="pdq"') && !planHtml.includes('id="routes"'));
+check('planner has look-ahead chips', planHtml.includes('id="pmin"') && planHtml.includes('Meddig'));
+check('planner has swap button', planHtml.includes('id="pswap"') && planHtml.includes('Csere'));
 check('planner favorite chips include a Volan station',
   planHtml.includes('N\u00e9pliget'));
 check('planner favorite chips include a MAV station',
@@ -345,5 +347,53 @@ check('planner dest search prefers a 9-digit MAV id over a volan id',
       { id: 'BKK_005511387', name: 'Miskolc-Tiszai' },
     ],
   )[0].id === 'BKK_005511387');
+
+const planCfg = await customElements.get('hungarian-transit-stop-card-plan').getConfigElement();
+check('planner getConfigElement is not null', !!planCfg, String(planCfg));
+check('planner getConfigElement returns planner editor',
+  planCfg && planCfg.tagName.toLowerCase() === 'hungarian-transit-stop-card-plan-editor',
+  planCfg && planCfg.tagName);
+
+const ped = document.createElement('hungarian-transit-stop-card-plan-editor');
+document.body.appendChild(ped);
+ped.hass = { states: {}, language: 'hu' };
+ped.setConfig({ language: 'hu', minutesAfter: 90 });
+const pedHtml = ped.innerHTML;
+check('planner editor has minutesAfter', pedHtml.includes('id="minutesAfter"') && pedHtml.includes('<select'));
+check('planner editor hides mode toggles',
+  ped.querySelector('#modeSwitches') && ped.querySelector('#modeSwitches').style.display === 'none');
+check('planner editor hides city select',
+  ped.querySelector('#cityWrap') && ped.querySelector('#cityWrap').style.display === 'none');
+check('planner editor still has hidden mav checkbox', !!ped.querySelector('#mav'));
+
+const pminChips = plan.shadowRoot.querySelectorAll('#pmin .chip');
+check('planner in-card minutesAfter chips', pminChips.length === 7, String(pminChips.length));
+const chip60 = Array.from(pminChips).find((c) => c.textContent === '60');
+if (chip60) chip60.click();
+check('planner chip sets minutesAfter', plan._config.minutesAfter === 60, String(plan._config && plan._config.minutesAfter));
+
+plan._loadDests = async () => {};
+plan._reloadSafe = () => {};
+plan.setConfig({
+  language: 'hu',
+  stopId: 'BKK_A',
+  stopName: 'Keleti',
+  destKey: 'debrecen',
+  destName: 'Debrecen',
+  destStopId: 'BKK_B',
+  minutesAfter: 60,
+});
+plan._swapPlan();
+check('planner swap origin dest',
+  plan._config.stopId === 'BKK_B'
+  && plan._config.destStopId === 'BKK_A'
+  && plan._config.stopName === 'Debrecen'
+  && plan._config.destName === 'Keleti',
+  JSON.stringify({
+    stopId: plan._config.stopId,
+    destStopId: plan._config.destStopId,
+    stopName: plan._config.stopName,
+    destName: plan._config.destName,
+  }));
 
 process.exit(failed ? 1 : 0);
