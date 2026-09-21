@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.0-rev.7';
+const CARD_VERSION = '1.4.0-rev.8';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -610,7 +610,7 @@ const BkkLib = {
   routeMatchesMode(rt, mode) {
     if (mode === 'mav') return BkkLib.isMavRoute(rt);
     if (mode === 'volan') return BkkLib.isVolanRoute(rt);
-    if (mode === 'all') return !BkkLib.isMavRoute(rt);
+    if (mode === 'all') return true;
     return !BkkLib.isMavRoute(rt) && !BkkLib.isVolanRoute(rt);
   },
   stopNum(id) {
@@ -1302,9 +1302,8 @@ const BkkLib = {
             if (mode === 'mav' && !BkkLib.isMavStop(s)) return;
             if (mode === 'volan' && !BkkLib.isVolanStop(s)) return;
             if (mode === 'bkk' && !BkkLib.isBkkStop(s)) return;
-            if (mode === 'all' && BkkLib.isMavStop(s)) return;
             const num = BkkLib.stopNum(s.id);
-            if ((mode === 'volan' || mode === 'all') && num) {
+            if ((mode === 'volan' || mode === 'all') && num && BkkLib.isVolanStop(s)) {
               const clash = Array.from(byId.values()).find((x) => BkkLib.stopNum(x.id) === num);
               if (clash) return;
             }
@@ -1315,8 +1314,37 @@ const BkkLib = {
         if ((mode !== 'volan' && mode !== 'all') || !byId.size) throw err;
       }
     }
-    let hits = BkkLib.groupStops(Array.from(byId.values()));
-    hits = hits.map((h) => Object.assign({}, h, { label: BkkLib.labelAliased(q, h) }));
+    let hits;
+    if (mode === 'all') {
+      const mav = [];
+      const volan = [];
+      const rest = [];
+      Array.from(byId.values()).forEach((s) => {
+        if (BkkLib.isMavStop(s)) mav.push(s);
+        else if (BkkLib.isVolanStop(s)) volan.push(s);
+        else rest.push(s);
+      });
+      const groups = [
+        BkkLib.groupStops(rest),
+        BkkLib.groupStops(mav),
+        BkkLib.groupStops(volan),
+      ];
+      hits = [];
+      const max = Math.max(groups[0].length, groups[1].length, groups[2].length);
+      for (let i = 0; i < max; i++) {
+        groups.forEach((g) => { if (g[i]) hits.push(g[i]); });
+      }
+    } else {
+      hits = BkkLib.groupStops(Array.from(byId.values()));
+    }
+    hits = hits.map((h) => {
+      let label = BkkLib.labelAliased(q, h);
+      if (mode === 'all') {
+        if (BkkLib.isMavStop(h)) label += ' (M\u00c1V)';
+        else if (BkkLib.isVolanStop(h)) label += ' (Vol\u00e1n)';
+      }
+      return Object.assign({}, h, { label: label });
+    });
     const foldedQ = BkkLib.fold(q);
     hits.sort((a, b) => {
       const as = (foldedQ.includes('arpad hid') && BkkLib.fold(a.name).includes('goncz arpad')) ? 0 : 1;
@@ -3779,7 +3807,7 @@ if (!window.customCards.some((c) => c.type === BKK_PLANNER_TAG)) {
   window.customCards.push({
     type: BKK_PLANNER_TAG,
     name: 'Hungarian transit stop planner',
-    description: 'Pick two stops; every non-rail service between them is listed',
+    description: 'Pick two stops; every BKK, Vol\u00e1n and M\u00c1V service between them is listed',
     preview: false,
   });
 }

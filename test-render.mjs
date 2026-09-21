@@ -205,8 +205,8 @@ check('all mode keeps volan coaches',
   Lib.routeMatchesMode({ type: 'COACH', id: 'volan_1' }, 'all'));
 check('all mode keeps city buses',
   Lib.routeMatchesMode({ type: 'BUS', id: 'BKK_0085' }, 'all'));
-check('all mode drops mav trains',
-  !Lib.routeMatchesMode({ type: 'RAIL', id: 'BKK_0055' }, 'all'));
+check('all mode keeps mav trains',
+  Lib.routeMatchesMode({ type: 'RAIL', id: 'BKK_0055' }, 'all'));
 check('bkk mode still drops volan',
   !Lib.routeMatchesMode({ type: 'COACH', id: 'volan_1' }, 'bkk'));
 
@@ -220,6 +220,8 @@ check('planner has origin and destination fields',
   planHtml.includes('id="pq"') && planHtml.includes('id="pdq"') && !planHtml.includes('id="routes"'));
 check('planner favorite chips include a Volan station',
   planHtml.includes('N\u00e9pliget'));
+check('planner favorite chips include a MAV station',
+  planHtml.includes('Sz\u00e9kesfeh\u00e9rv\u00e1r') || planHtml.includes('Budapest-Kelenf'));
 check('legacy planner tag still upgrades',
   !!customElements.get('bkk-stop-card-plan'));
 

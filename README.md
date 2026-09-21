@@ -121,8 +121,8 @@ Destination search only offers stops that a vehicle from the origin actually
 reaches.
 
 The companion planner card (`custom:hungarian-transit-stop-card-plan`)
-picks an origin and a destination, then lists every non-rail service
-between them in the same timetable layout as the hop card. The older
+picks an origin and a destination, then lists every service between them
+(BKK, Volán and MÁV) in the same timetable layout as the hop card. The older
 `custom:bkk-stop-card-plan` type remains registered as an alias.
 
 Debrecen DKV does not publish a public GTFS zip, so it is not in the city
