@@ -509,6 +509,24 @@ check('planner editor still has hidden mav checkbox', !!ped.querySelector('#mav'
 
 const pminChips = plan.shadowRoot.querySelectorAll('#pmin .chip');
 check('planner in-card minutesAfter chips', pminChips.length === 8, String(pminChips.length));
+check('city stop id resolves to the szombathely operator',
+  Lib.cityOpId({
+    ops: [{ i: 3, id: 'szombathely', name: 'Szombathely — Blaguss' }],
+    stops: [{ id: 'szombathely:2171', op: 3 }],
+  }, { id: 'szombathely:2171' }) === 'szombathely');
+check('same-name city stops in both directions stay together', (() => {
+  const fold = Lib.fold('Olad');
+  const idx = {
+    stops: [
+      { i: 1, id: 'szombathely:1', op: 0, fold: fold, name: 'Olad' },
+      { i: 2, id: 'szombathely:2', op: 0, fold: fold, name: 'Olad' },
+    ],
+    byNum: new Map(),
+    byKey: new Map(),
+  };
+  const ids = Lib.cityStopIndexes(idx, { id: 'szombathely:1', name: 'Olad' }, 0);
+  return ids.indexOf(1) >= 0 && ids.indexOf(2) >= 0;
+})());
 const chip60 = Array.from(pminChips).find((c) => c.textContent === '60');
 if (chip60) chip60.click();
 check('planner chip sets minutesAfter', plan._config.minutesAfter === 60, String(plan._config && plan._config.minutesAfter));

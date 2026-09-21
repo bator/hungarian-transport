@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.10';
+const CARD_VERSION = '1.4.2-rev.11';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -1143,6 +1143,26 @@ const BkkLib = {
     if (rem.some((x) => String(x) === ymd)) ok = false;
     return ok;
   },
+  cityOpId(idx, stop) {
+    if (!idx || !stop) return '';
+    const id = String(stop.id || '');
+    const hit = (idx.stops || []).find((s) => s.id === id);
+    if (hit && idx.ops && idx.ops[hit.op]) return idx.ops[hit.op].id;
+    const colon = id.indexOf(':');
+    const prefix = colon > 0 ? id.slice(0, colon) : '';
+    const op = (idx.ops || []).find((o) => o.id === prefix);
+    return op ? op.id : '';
+  },
+  cityStopIndexes(idx, stop, opIx) {
+    const origin = BkkLib.volanMatchStop(idx, stop, opIx);
+    if (!origin) return [];
+    const pool = BkkLib.cityStops(idx, opIx);
+    const out = [];
+    pool.forEach((s) => {
+      if (s.fold === origin.fold && s.op === origin.op) out.push(s.i);
+    });
+    return out.length ? out : [origin.i];
+  },
   volanMatchStop(idx, stop, opIx) {
     if (!idx || !stop) return null;
     const op = (opIx == null) ? 0 : opIx;
@@ -1262,6 +1282,9 @@ const BkkLib = {
   gtfsReachableDests(idx, stop, opIx) {
     const origin = BkkLib.volanMatchStop(idx, stop, opIx == null ? null : opIx);
     if (!origin) return { dests: [], destRoutes: {} };
+    const indexes = opIx == null
+      ? [origin.i]
+      : BkkLib.cityStopIndexes(idx, stop, opIx);
     const byKey = new Map();
     const destRoutes = {};
     const trips = idx.t || [];
@@ -1269,7 +1292,7 @@ const BkkLib = {
       const t = trips[i];
       const route = t[1];
       const ps = t[2] || [];
-      const oidx = ps.indexOf(origin.i);
+      const oidx = ps.findIndex((p) => indexes.indexOf(p) >= 0);
       if (oidx < 0) continue;
       for (let j = oidx + 1; j < ps.length; j++) {
         const st = idx.stops[ps[j]];
@@ -1296,6 +1319,9 @@ const BkkLib = {
   gtfsDepartures(idx, stopId, dest, originName, opIx, color, text, vehicle, rawType, minutesAfter) {
     const origin = BkkLib.volanMatchStop(idx, { id: stopId, name: originName || '' }, opIx == null ? null : opIx);
     if (!origin) return [];
+    const indexes = opIx == null
+      ? [origin.i]
+      : BkkLib.cityStopIndexes(idx, { id: stopId, name: originName || '' }, opIx);
     const destKey = dest && dest.key;
     const destFold = BkkLib.fold((dest && dest.name) || destKey || '');
     const horizon = clampMinutesAfter(minutesAfter);
@@ -1321,7 +1347,7 @@ const BkkLib = {
         const route = t[1];
         const ps = t[2] || [];
         const ms = t[3] || [];
-        const oidx = ps.indexOf(origin.i);
+        const oidx = ps.findIndex((p) => indexes.indexOf(p) >= 0);
         if (oidx < 0) continue;
         const depMin = ms[oidx];
         if (depMin == null || depMin < earliest) continue;
@@ -1585,6 +1611,26 @@ const BkkLib = {
         (await BkkLib.volanSearchStops(q)).forEach((s) => byId.set(s.id, s));
       } catch (_e) { /* GTFS index optional */ }
     }
+    if (mode === 'all') {
+      try {
+        const idx = await BkkLib.cityIndex();
+        const seenFold = new Set();
+        (await BkkLib.gtfsSearchStops(idx, q, null)).forEach((s) => {
+          const opId = BkkLib.cityOpId(idx, s);
+          const op = (idx.ops || []).find((o) => o.id === opId);
+          const city = op ? String(op.name).split(' — ')[0] : '';
+          const fold = BkkLib.fold(s.name) + '|' + opId;
+          if (!opId || seenFold.has(fold)) return;
+          seenFold.add(fold);
+          byId.set(s.id, {
+            id: s.id,
+            name: s.name,
+            label: city ? (s.name + ' (' + city + ')') : s.name,
+            city: true,
+          });
+        });
+      } catch (_e) { /* city index optional */ }
+    }
     if (mode === 'helyi') {
       try {
         (await BkkLib.citySearchStops(q, city)).forEach((s) => byId.set(s.id, s));
@@ -1618,9 +1664,11 @@ const BkkLib = {
     if (mode === 'all') {
       const mav = [];
       const volan = [];
+      const city = [];
       const rest = [];
       Array.from(byId.values()).forEach((s) => {
-        if (BkkLib.isMavStop(s)) mav.push(s);
+        if (s.city) city.push(s);
+        else if (BkkLib.isMavStop(s)) mav.push(s);
         else if (BkkLib.isVolanStop(s)) volan.push(s);
         else rest.push(s);
       });
@@ -1628,9 +1676,10 @@ const BkkLib = {
         BkkLib.groupStops(rest),
         BkkLib.groupStops(mav),
         BkkLib.groupStops(volan),
+        city,
       ];
       hits = [];
-      const max = Math.max(groups[0].length, groups[1].length, groups[2].length);
+      const max = Math.max(groups[0].length, groups[1].length, groups[2].length, groups[3].length);
       for (let i = 0; i < max; i++) {
         groups.forEach((g) => { if (g[i]) hits.push(g[i]); });
       }
@@ -1924,6 +1973,13 @@ const BkkLib = {
         out = BkkLib.mergeDestIndex(await BkkLib.volanReachableDests(stop), out);
       } catch (_e) { /* GTFS index optional */ }
     }
+    if (mode === 'all') {
+      try {
+        const idx = await BkkLib.cityIndex();
+        const cityId = BkkLib.cityOpId(idx, stop);
+        if (cityId) out = BkkLib.mergeDestIndex(await BkkLib.cityReachableDests(stop, cityId), out);
+      } catch (_e) { /* city index optional */ }
+    }
     return out;
   },
   async travelMin(apiKey, tripId, destKey, dep, origin, cache) {
@@ -2100,6 +2156,16 @@ const BkkLib = {
       } catch (err) {
         if (mode !== 'all' && !rows.length) throw err;
       }
+    }
+    if (mode === 'all') {
+      try {
+        const idx = await BkkLib.cityIndex();
+        const cityId = BkkLib.cityOpId(idx, { id: stopId, name: opts.originName || '' });
+        if (cityId) {
+          const extra = await BkkLib.cityDepartures(stopId, dest, opts.originName, cityId, horizon);
+          rows = BkkLib.mergeVolanRows(extra, rows, maxRows);
+        }
+      } catch (_e) { /* city index optional */ }
     }
     return BkkLib.attachCoachGps(opts.hass, rows);
   },
