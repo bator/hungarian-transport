@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.13';
+const CARD_VERSION = '1.4.2-rev.14';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -2276,6 +2276,25 @@ const BkkLib = {
       });
     });
     const now = Number.isFinite(Number(nowSec)) ? Number(nowSec) : Math.floor(Date.now() / 1000);
+    const rowHead = (row) => fold(row.headsign || row.head);
+    const vehicleClassOk = (row, vehicle) => {
+      const route = String(vehicle.route || '').trim().toUpperCase();
+      const kind = String(row.vehicle || '').toLowerCase();
+      if (route.indexOf('SZ') === 0) return kind === 'bus';
+      if (/^\d{4}$/.test(route)) return kind === 'coach';
+      return true;
+    };
+    const pairOk = (row, vehicle) => {
+      if (!vehicleClassOk(row, vehicle)) return false;
+      const head = rowHead(row);
+      const vehicleHead = fold(vehicle.head);
+      if (head && vehicleHead && (head.indexOf(vehicleHead) >= 0 || vehicleHead.indexOf(head) >= 0)) return true;
+      if (!vehicleHead) {
+        const dep = Number(row.dep || row.sched || 0);
+        return dep > 0 && Math.abs(dep - now) <= 20 * 60;
+      }
+      return false;
+    };
     const groups = new Map();
     list.forEach((row, idx) => {
       if (!row || !/^gtfs:/.test(String(row.tripId || ''))) return;
@@ -2301,9 +2320,14 @@ const BkkLib = {
       });
       const pairs = [];
       indexes.forEach((idx) => {
-        const dep = Number(list[idx].dep || list[idx].sched || 0);
-        const head = fold(list[idx].headsign);
         uniq.forEach((vehicle, vi) => {
+          const accepted = pairOk(list[idx], vehicle);
+          // #region agent log
+          fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'A',location:'applyCoachGps',message:'pair decision',data:{route:String(list[idx].label||''),vehicleRoute:String(vehicle.route||''),rowHead:String(list[idx].headsign||list[idx].head||''),vehicleHead:String(vehicle.head||''),kind:String(list[idx].vehicle||''),accepted:accepted},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
+          if (!accepted) return;
+          const dep = Number(list[idx].dep || list[idx].sched || 0);
+          const head = rowHead(list[idx]);
           const vehicleHead = fold(vehicle.head);
           const headMatch = !!(head && vehicleHead && (head.indexOf(vehicleHead) >= 0 || vehicleHead.indexOf(head) >= 0));
           const distance = Math.abs((dep || now) - now);

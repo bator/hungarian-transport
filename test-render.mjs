@@ -428,8 +428,8 @@ check('coach route keys match SZ009 with 9',
 check('Volán 6990 GPS lands on the in-progress gtfs row only', (() => {
   const now = 1_790_000_000;
   const rows = [
-    { label: '6990', tripId: 'gtfs:6990:a', dep: now - 5 * 60, sched: now - 5 * 60 },
-    { label: '6990', tripId: 'gtfs:6990:b', dep: now + 40 * 60, sched: now + 40 * 60 },
+    { label: '6990', tripId: 'gtfs:6990:a', vehicle: 'coach', dep: now - 5 * 60, sched: now - 5 * 60 },
+    { label: '6990', tripId: 'gtfs:6990:b', vehicle: 'coach', dep: now + 40 * 60, sched: now + 40 * 60 },
   ];
   Lib.applyCoachGps(rows, [{ route: '6990', lat: 46.96, lon: 16.27, source: 'volan' }], now);
   return rows[0].lat === 46.96 && rows[0].lon === 16.27
@@ -438,29 +438,49 @@ check('Volán 6990 GPS lands on the in-progress gtfs row only', (() => {
 })());
 check('Szombathely SZ009 matches a city row labelled 9', (() => {
   const now = 1_790_000_000;
-  const rows = [{ label: '9', tripId: 'gtfs:9:a', dep: now + 4 * 60 }];
+  const rows = [{ label: '9', tripId: 'gtfs:9:a', vehicle: 'bus', dep: now + 4 * 60 }];
   Lib.applyCoachGps(rows, [{ route: 'SZ009', lat: 47.23, lon: 16.62, source: 'szombathely' }], now);
   return rows[0].lat === 47.23 && rows[0].lon === 16.62;
 })());
-check('a later Volán row still gets the only live GPS', (() => {
+check('a Volán row does not take a bus going somewhere else', (() => {
   const now = 1_790_000_000;
   const rows = [{
-    label: '4218', tripId: 'gtfs:4218:a', headsign: 'Kocsord, hídfő',
+    label: '4218', tripId: 'gtfs:4218:a', vehicle: 'coach', head: 'Kocsord, hídfő',
     dep: now + 61 * 60,
   }];
   Lib.applyCoachGps(rows, [{
     route: '4218', head: 'Mátészalka, autóbusz-állomás', lat: 47.8383, lon: 22.1182,
   }], now);
-  return rows[0].lat === 47.8383 && rows[0].lon === 22.1182;
+  return rows[0].lat == null;
 })());
-check('two live vehicles still put a dot on the row', (() => {
+check('matching headsign still gets the live GPS', (() => {
   const now = 1_790_000_000;
-  const rows = [{ label: 'SZ30Y', tripId: 'gtfs:SZ30Y:a', dep: now + 2 * 60 }];
+  const rows = [{
+    label: '4218', tripId: 'gtfs:4218:b', vehicle: 'coach', head: 'Fehérgyarmat, autóbusz-állomás',
+    dep: now + 61 * 60,
+  }];
+  Lib.applyCoachGps(rows, [{
+    route: '4218', head: 'Fehérgyarmat, autóbusz-állomás', lat: 47.84, lon: 22.12,
+  }], now);
+  return rows[0].lat === 47.84;
+})());
+check('Szombathely SZ012 does not paint a Volán route 12', (() => {
+  const now = 1_790_000_000;
+  const rows = [{ label: '12', tripId: 'gtfs:12:v', vehicle: 'coach', head: 'Valahol', dep: now + 5 * 60 }];
+  Lib.applyCoachGps(rows, [{ route: 'SZ012', head: 'Herény, Béke tér', lat: 47.23, lon: 16.62 }], now);
+  return rows[0].lat == null;
+})());
+check('an empty-head vehicle only dots a departure within 20 minutes', (() => {
+  const now = 1_790_000_000;
+  const rows = [
+    { label: '30Y', tripId: 'gtfs:30Y:soon', vehicle: 'bus', dep: now + 5 * 60 },
+    { label: '30Y', tripId: 'gtfs:30Y:later', vehicle: 'bus', dep: now + 6 * 3600 },
+  ];
   Lib.applyCoachGps(rows, [
-    { route: 'SZ30Y', lat: 47.25, lon: 16.61, tripId: 'a' },
-    { route: 'SZ30Y', lat: 47.24, lon: 16.60, tripId: 'b' },
+    { route: 'SZ30Y', lat: 47.25, lon: 16.61, tripId: 'v1' },
+    { route: 'SZ30Y', head: 'Másik vég', lat: 47.20, lon: 16.50, tripId: 'v2' },
   ], now);
-  return rows[0].lat === 47.25 || rows[0].lat === 47.24;
+  return rows[0].lat === 47.25 && rows[1].lat == null;
 })());
 check('coach GPS does not overwrite an existing train coordinate', (() => {
   const now = 1_790_000_000;
