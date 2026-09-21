@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.12';
+const CARD_VERSION = '1.4.2-rev.13';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -2263,6 +2263,8 @@ const BkkLib = {
     const list = Array.isArray(rows) ? rows : [];
     const vehs = Array.isArray(vehicles) ? vehicles : [];
     const byRoute = new Map();
+    const fold = (value) => String(value || '').toLowerCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
     vehs.forEach((vehicle) => {
       if (!vehicle) return;
       const lat = Number(vehicle.lat);
@@ -2278,26 +2280,46 @@ const BkkLib = {
     list.forEach((row, idx) => {
       if (!row || !/^gtfs:/.test(String(row.tripId || ''))) return;
       if (Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon))) return;
-      let bucket = null;
-      BkkLib.coachRouteKeys(row.label).some((key) => {
-        const hit = byRoute.get(key);
-        if (hit) bucket = hit;
-        return !!hit;
+      let key = '';
+      BkkLib.coachRouteKeys(row.label).some((candidate) => {
+        if (!byRoute.has(candidate)) return false;
+        key = candidate;
+        return true;
       });
-      if (!bucket || bucket.length !== 1) return;
-      if (!groups.has(bucket)) groups.set(bucket, []);
-      groups.get(bucket).push(idx);
+      if (!key) return;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(idx);
     });
-    groups.forEach((indexes, bucket) => {
-      const due = indexes.filter((idx) => {
-        const dep = Number(list[idx].dep || list[idx].sched || 0);
-        return dep > 0 && dep <= now + 15 * 60;
+    groups.forEach((indexes, key) => {
+      const uniq = [];
+      const seen = new Set();
+      byRoute.get(key).forEach((vehicle) => {
+        const id = String(vehicle.tripId || (vehicle.lat + ',' + vehicle.lon));
+        if (seen.has(id)) return;
+        seen.add(id);
+        uniq.push(vehicle);
       });
-      if (!due.length) return;
-      due.sort((a, b) => Number(list[b].dep || list[b].sched || 0) - Number(list[a].dep || list[a].sched || 0));
-      const row = list[due[0]];
-      row.lat = Number(bucket[0].lat);
-      row.lon = Number(bucket[0].lon);
+      const pairs = [];
+      indexes.forEach((idx) => {
+        const dep = Number(list[idx].dep || list[idx].sched || 0);
+        const head = fold(list[idx].headsign);
+        uniq.forEach((vehicle, vi) => {
+          const vehicleHead = fold(vehicle.head);
+          const headMatch = !!(head && vehicleHead && (head.indexOf(vehicleHead) >= 0 || vehicleHead.indexOf(head) >= 0));
+          const distance = Math.abs((dep || now) - now);
+          pairs.push({ idx: idx, vi: vi, score: (headMatch ? 0 : 1) * 1e12 + distance });
+        });
+      });
+      pairs.sort((a, b) => a.score - b.score);
+      const usedRow = new Set();
+      const usedVehicle = new Set();
+      pairs.forEach((pair) => {
+        if (usedRow.has(pair.idx) || usedVehicle.has(pair.vi)) return;
+        usedRow.add(pair.idx);
+        usedVehicle.add(pair.vi);
+        list[pair.idx].lat = Number(uniq[pair.vi].lat);
+        list[pair.idx].lon = Number(uniq[pair.vi].lon);
+      });
     });
     return list;
   },

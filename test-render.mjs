@@ -442,14 +442,25 @@ check('Szombathely SZ009 matches a city row labelled 9', (() => {
   Lib.applyCoachGps(rows, [{ route: 'SZ009', lat: 47.23, lon: 16.62, source: 'szombathely' }], now);
   return rows[0].lat === 47.23 && rows[0].lon === 16.62;
 })());
-check('two live vehicles on one route do not get a dot', (() => {
+check('a later Volán row still gets the only live GPS', (() => {
+  const now = 1_790_000_000;
+  const rows = [{
+    label: '4218', tripId: 'gtfs:4218:a', headsign: 'Kocsord, hídfő',
+    dep: now + 61 * 60,
+  }];
+  Lib.applyCoachGps(rows, [{
+    route: '4218', head: 'Mátészalka, autóbusz-állomás', lat: 47.8383, lon: 22.1182,
+  }], now);
+  return rows[0].lat === 47.8383 && rows[0].lon === 22.1182;
+})());
+check('two live vehicles still put a dot on the row', (() => {
   const now = 1_790_000_000;
   const rows = [{ label: 'SZ30Y', tripId: 'gtfs:SZ30Y:a', dep: now + 2 * 60 }];
   Lib.applyCoachGps(rows, [
-    { route: 'SZ30Y', lat: 47.25, lon: 16.61 },
-    { route: 'SZ30Y', lat: 47.24, lon: 16.60 },
+    { route: 'SZ30Y', lat: 47.25, lon: 16.61, tripId: 'a' },
+    { route: 'SZ30Y', lat: 47.24, lon: 16.60, tripId: 'b' },
   ], now);
-  return rows[0].lat == null;
+  return rows[0].lat === 47.25 || rows[0].lat === 47.24;
 })());
 check('coach GPS does not overwrite an existing train coordinate', (() => {
   const now = 1_790_000_000;
