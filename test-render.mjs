@@ -298,6 +298,44 @@ check('ELVIRA-only G43/Z30 get BKK badge colours', (() => {
     && String(z.text).toUpperCase().indexOf('3C3C3C') >= 0
     && String(painted.color).toUpperCase() === 'AACD46';
 })());
+check('ELVIRA named IC keeps label and takes FUTAR GPS by train number', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 900;
+  const merged = Lib.mergeVolanRows(
+    [{
+      label: 'IC', tripId: 'BKK_913_316', trainNumber: '913',
+      dep: dep + 60, sched: dep, color: '#2E5EA8', text: '#FFFFFF',
+      lat: 47.19751, lon: 18.16734,
+    }],
+    [{
+      label: 'BAKONY', tripId: 'elvira:2974501', trainNumber: '913',
+      dep: dep, sched: dep, color: '#4477aa', text: '#ffffff',
+    }],
+    12,
+  );
+  return merged.length === 1
+    && merged[0].label === 'BAKONY'
+    && merged[0].tripId === 'BKK_913_316'
+    && merged[0].lat === 47.19751
+    && merged[0].lon === 18.16734;
+})());
+check('ELVIRA Tópart takes FUTAR GPS from BKK trip id train number', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 1200;
+  const merged = Lib.mergeVolanRows(
+    [{
+      label: 'IC', tripId: 'BKK_853_87', dep: dep, sched: dep,
+      lat: 46.90843, lon: 18.05495,
+    }],
+    [{
+      label: 'TÓPART', tripId: 'elvira:2888051', trainNumber: '853',
+      dep: dep, sched: dep, color: '#4477aa',
+    }],
+    12,
+  );
+  return merged.length === 1
+    && merged[0].label === 'TÓPART'
+    && merged[0].tripId === 'BKK_853_87'
+    && merged[0].lat === 46.90843;
+})());
 check('planner dest search prefers a 9-digit MAV id over a volan id',
   Lib.destHitsForQuery(
     [],

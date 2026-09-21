@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.1';
+const CARD_VERSION = '1.4.2-rev.2';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -1348,32 +1348,57 @@ const BkkLib = {
     dests.sort((x, y) => x.name.localeCompare(y.name, 'hu'));
     return { dests, destRoutes };
   },
+  rowTrainNumber(row) {
+    const direct = String((row && row.trainNumber) || '').trim();
+    if (direct) return direct.replace(/^0+/, '') || direct;
+    return BkkLib.trainNumberFromTripId(row && row.tripId);
+  },
   mergeVolanRows(gtfs, otp, limit) {
     const out = [];
-    const seen = new Map();
-    const keyOf = (row) => `${row.label}|${Math.round(Number(row.sched || row.dep || 0) / 60)}`;
+    const byTime = new Map();
+    const byNum = new Map();
     const generic = (c) => {
       const x = String(c || '').replace('#', '').toLowerCase();
       return !x || x === '4477aa';
     };
-    const add = (row, overlayColor) => {
+    const timeOf = (row) => `${String(row.label || '').toUpperCase()}|${Math.round(Number(row.sched || row.dep || 0) / 60)}`;
+    const overlay = (prev, row) => {
+      if (!prev || !row) return;
+      if (generic(prev.color) && row.color && !generic(row.color)) {
+        prev.color = row.color;
+        if (row.text) prev.text = row.text;
+      }
+      const lat = Number(row.lat);
+      const lon = Number(row.lon);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        prev.lat = lat;
+        prev.lon = lon;
+      }
+      const tid = String(row.tripId || '');
+      if (tid && !/^(elvira:|gtfs:)/.test(tid)) prev.tripId = tid;
+      ['vehicleId', 'licensePlate', 'model', 'vehicleStatus', 'stopDistancePercent'].forEach((k) => {
+        if ((prev[k] == null || prev[k] === '') && row[k] != null && row[k] !== '') prev[k] = row[k];
+      });
+    };
+    const add = (row) => {
       if (!row) return;
-      const k = keyOf(row);
-      if (seen.has(k)) {
-        if (overlayColor) {
-          const prev = out[seen.get(k)];
-          if (prev && generic(prev.color) && row.color && !generic(row.color)) {
-            prev.color = row.color;
-            if (row.text) prev.text = row.text;
-          }
-        }
+      const n = BkkLib.rowTrainNumber(row);
+      if (n && byNum.has(n)) {
+        overlay(out[byNum.get(n)], row);
         return;
       }
-      seen.set(k, out.length);
+      const tk = timeOf(row);
+      if (byTime.has(tk)) {
+        overlay(out[byTime.get(tk)], row);
+        return;
+      }
+      const idx = out.length;
       out.push(row);
+      byTime.set(tk, idx);
+      if (n) byNum.set(n, idx);
     };
-    (otp || []).forEach((row) => add(row, false));
-    (gtfs || []).forEach((row) => add(row, true));
+    (otp || []).forEach(add);
+    (gtfs || []).forEach(add);
     out.sort((a, b) => (a.dep || 0) - (b.dep || 0));
     const cap = Number(limit);
     return out.slice(0, (Number.isFinite(cap) && cap > 0) ? cap : 12);
@@ -2686,7 +2711,8 @@ class BKKHopCard extends HTMLElement {
     this._map = map;
     setTimeout(() => map.invalidateSize(), 40);
     let details = null;
-    if (tripId && cfg.apiKey) {
+    const futarTrip = tripId && !/^(elvira:|gtfs:)/.test(tripId);
+    if (futarTrip && cfg.apiKey) {
       try {
         details = await BkkLib.tripDetails(cfg.apiKey, this._tripCache || {}, tripId);
         shape = BkkLib.decodePolyline((details && details.polyline) || '');
