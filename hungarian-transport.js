@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.0-rev.2';
+const CARD_VERSION = '1.4.0-rev.3';
 
 const BKK_PLANNER_TAG = 'bkk-stop-card-plan';
 const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
@@ -73,6 +73,7 @@ function vehicleIcon(type) {
 const ASSET_BASE = new URL('.', import.meta.url).href;
 let VOLAN_INDEX_OVERRIDE = '';
 let CITY_INDEX_OVERRIDE = '';
+let leafletPromise = null;
 
 function setVolanIndexUrl(url) {
   VOLAN_INDEX_OVERRIDE = String(url || '');
@@ -193,6 +194,30 @@ const I18N = {
     tipScheduled: (hm) => `Menetrend szerint ${hm}`,
     tipTravel: (n) => `Menetid\u0151 a c\u00e9lig: ${n} perc`,
     tipTrain: (nr) => `Vonatsz\u00e1m: ${nr}`,
+    mapOpenTip: 'T\u00e9rk\u00e9p: j\u00e1rm\u0171 az \u00fatvonalon',
+    mapClose: 'Bez\u00e1r\u00e1s',
+    mapLoadingRoute: '\u00datvonal bet\u00f6lt\u00e9se\u2026',
+    mapNoData: 'Ehhez a j\u00e1rathoz jelenleg nincs \u00e9l\u0151 poz\u00edci\u00f3 vagy \u00fatvonal.',
+    mapLeafletFail: 'A t\u00e9rk\u00e9p bet\u00f6lt\u00e9se nem siker\u00fclt.',
+    mapNoGeometry: 'A BKK nem adott vissza \u00fatvonal-geometri\u00e1t ehhez a j\u00e1rathoz.',
+    mapRouteFail: (msg) => `\u00datvonal nem t\u00f6lthet\u0151: ${msg}`,
+    mapNothingToShow: 'Nincs megjelen\u00edthet\u0151 \u00fatvonal ehhez a j\u00e1rathoz.',
+    mapFullRoute: 'Teljes \u00fatvonal',
+    mapLivePos: '\u00c9l\u0151 poz\u00edci\u00f3',
+    mapEstPos: 'Becs\u00fclt poz\u00edci\u00f3 (menetrend)',
+    mapNoGps: 'Nincs \u00e9l\u0151 GPS',
+    mapUntilStop: (n) => `Meg\u00e1ll\u00f3ig: ${n}%`,
+    mapExpected: (hm) => `V\u00e1rhat\u00f3: ${hm}`,
+    mapExpectedVs: (pair) => `V\u00e1rhat\u00f3: ${pair[0]} (menetrend ${pair[1]})`,
+    mapFootFallback: 'J\u00e1rm\u0171 a t\u00e9rk\u00e9pen',
+    mapLiveDot: '\u00c9l\u0151 poz\u00edci\u00f3',
+    mapEstDot: 'Becs\u00fclt poz\u00edci\u00f3',
+    mapTypeBus: 'Busz',
+    mapTypeTram: 'Villamos',
+    mapTypeTrolley: 'Trolibusz',
+    mapTypeSubway: 'Metr\u00f3',
+    mapTypeRail: 'Vonat',
+    mapTypeVehicle: 'J\u00e1rm\u0171',
     errNoApiKey: 'Hi\u00e1nyzik az apiKey a k\u00e1rtya be\u00e1ll\u00edt\u00e1s\u00e1b\u00f3l.',
     errApiKeyBad: 'A BKK API kulcs \u00e9rv\u00e9nytelen (401/403).',
     errApiKeyProbe: 'A BKK API kulcsot nem siker\u00fclt ellen\u0151rizni.',
@@ -302,6 +327,30 @@ const I18N = {
     tipScheduled: (hm) => `Scheduled for ${hm}`,
     tipTravel: (n) => `Travel time to destination: ${n} min`,
     tipTrain: (nr) => `Train number: ${nr}`,
+    mapOpenTip: 'Map: vehicle on its route',
+    mapClose: 'Close',
+    mapLoadingRoute: 'Loading route\u2026',
+    mapNoData: 'No live position or route is available for this trip.',
+    mapLeafletFail: 'Could not load the map.',
+    mapNoGeometry: 'BKK did not return a route shape for this trip.',
+    mapRouteFail: (msg) => `Could not load the route: ${msg}`,
+    mapNothingToShow: 'Nothing to show on the map for this trip.',
+    mapFullRoute: 'Full route',
+    mapLivePos: 'Live position',
+    mapEstPos: 'Estimated position (timetable)',
+    mapNoGps: 'No live GPS',
+    mapUntilStop: (n) => `To stop: ${n}%`,
+    mapExpected: (hm) => `Due: ${hm}`,
+    mapExpectedVs: (pair) => `Due: ${pair[0]} (scheduled ${pair[1]})`,
+    mapFootFallback: 'Vehicle on the map',
+    mapLiveDot: 'Live position',
+    mapEstDot: 'Estimated position',
+    mapTypeBus: 'Bus',
+    mapTypeTram: 'Tram',
+    mapTypeTrolley: 'Trolleybus',
+    mapTypeSubway: 'Metro',
+    mapTypeRail: 'Train',
+    mapTypeVehicle: 'Vehicle',
     errNoApiKey: 'The apiKey is missing from the card configuration.',
     errApiKeyBad: 'The BKK API key is invalid (401/403).',
     errApiKeyProbe: 'Could not verify the BKK API key.',
@@ -1265,6 +1314,146 @@ const BkkLib = {
     if (t === 'COACH' || BkkLib.isVolanRoute(rt)) return 'coach';
     return 'bus';
   },
+  vehicleLoc(veh) {
+    if (!veh || typeof veh !== 'object') return { lat: NaN, lon: NaN };
+    const loc = veh.location || {};
+    const lat = Number(loc.lat != null ? loc.lat : veh.latitude);
+    const lon = Number(loc.lon != null ? loc.lon : (veh.longitude != null ? veh.longitude : veh.lng));
+    return { lat: lat, lon: lon };
+  },
+  unixSec(ts) {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return Date.now() / 1000;
+    return n > 1e12 ? n / 1000 : n;
+  },
+  decodePolyline(encoded) {
+    if (!encoded || typeof encoded !== 'string') return [];
+    const coords = [];
+    let index = 0;
+    let lat = 0;
+    let lng = 0;
+    try {
+      while (index < encoded.length) {
+        for (let xy = 0; xy < 2; xy++) {
+          let result = 0;
+          let shift = 0;
+          let byte;
+          do {
+            byte = encoded.charCodeAt(index++) - 63;
+            result |= (byte & 0x1f) << shift;
+            shift += 5;
+          } while (byte >= 0x20);
+          const delta = (result & 1) ? ~(result >> 1) : (result >> 1);
+          if (xy === 0) lat += delta;
+          else lng += delta;
+        }
+        coords.push([lat / 1e5, lng / 1e5]);
+      }
+    } catch (_e) {
+      return [];
+    }
+    if (coords.length <= 400) return coords;
+    const out = [];
+    const step = (coords.length - 1) / 399;
+    for (let i = 0; i < 400; i++) {
+      const idx = Math.round(i * step);
+      const pt = coords[Math.min(idx, coords.length - 1)];
+      if (!out.length || out[out.length - 1][0] !== pt[0] || out[out.length - 1][1] !== pt[1]) {
+        out.push(pt);
+      }
+    }
+    const last = coords[coords.length - 1];
+    if (out[out.length - 1][0] !== last[0] || out[out.length - 1][1] !== last[1]) out.push(last);
+    return out;
+  },
+  haversineMeters(a, b) {
+    const toRad = (d) => (d * Math.PI) / 180;
+    const R = 6371000;
+    const dLat = toRad(b[0] - a[0]);
+    const dLon = toRad(b[1] - a[1]);
+    const lat1 = toRad(a[0]);
+    const lat2 = toRad(b[0]);
+    const h = Math.sin(dLat / 2) ** 2
+      + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+  },
+  pointAlongShape(shape, targetMeters) {
+    if (!Array.isArray(shape) || shape.length < 1) return null;
+    if (shape.length === 1 || !(targetMeters > 0)) return shape[0];
+    const cum = [0];
+    for (let i = 1; i < shape.length; i++) {
+      cum.push(cum[i - 1] + BkkLib.haversineMeters(shape[i - 1], shape[i]));
+    }
+    const total = cum[cum.length - 1];
+    if (!(total > 0)) return shape[0];
+    const tval = Math.max(0, Math.min(total, Number(targetMeters) || 0));
+    let i = 1;
+    while (i < cum.length && cum[i] < tval) i += 1;
+    const i1 = Math.min(i, shape.length - 1);
+    const i0 = Math.max(0, i1 - 1);
+    const seg = cum[i1] - cum[i0];
+    if (!(seg > 0)) return shape[i1];
+    const f = (tval - cum[i0]) / seg;
+    return [
+      shape[i0][0] + (shape[i1][0] - shape[i0][0]) * f,
+      shape[i0][1] + (shape[i1][1] - shape[i0][1]) * f,
+    ];
+  },
+  estimatePositionFromSchedule(shape, stopTimes, nowSec) {
+    if (!Array.isArray(shape) || shape.length < 2 || !Array.isArray(stopTimes) || stopTimes.length < 1) {
+      return null;
+    }
+    const stops = stopTimes.map((st) => {
+      const tval = st.predictedDepartureTime != null ? st.predictedDepartureTime
+        : (st.predictedArrivalTime != null ? st.predictedArrivalTime
+          : (st.departureTime != null ? st.departureTime : st.arrivalTime));
+      const dist = st.shapeDistTraveled != null ? Number(st.shapeDistTraveled) : NaN;
+      return {
+        t: tval != null ? Number(tval) : NaN,
+        dist: Number.isFinite(dist) ? dist : NaN,
+      };
+    }).filter((s) => Number.isFinite(s.t)).sort((a, b) => a.t - b.t);
+    if (!stops.length) return null;
+    const now = Number(nowSec);
+    if (!Number.isFinite(now)) return null;
+    let targetDist;
+    if (now <= stops[0].t) {
+      targetDist = Number.isFinite(stops[0].dist) ? stops[0].dist : 0;
+    } else if (now >= stops[stops.length - 1].t) {
+      const last = stops[stops.length - 1];
+      if (Number.isFinite(last.dist)) targetDist = last.dist;
+      else return shape[shape.length - 1];
+    } else {
+      let i = 0;
+      while (i < stops.length - 1 && stops[i + 1].t < now) i += 1;
+      const a = stops[i];
+      const b = stops[i + 1];
+      const span = b.t - a.t;
+      const f = span > 0 ? (now - a.t) / span : 0;
+      if (Number.isFinite(a.dist) && Number.isFinite(b.dist)) {
+        targetDist = a.dist + (b.dist - a.dist) * f;
+      } else {
+        const i0 = Math.floor((i / Math.max(1, stops.length - 1)) * (shape.length - 1));
+        const i1 = Math.floor(((i + 1) / Math.max(1, stops.length - 1)) * (shape.length - 1));
+        const p0 = shape[Math.max(0, Math.min(shape.length - 1, i0))];
+        const p1 = shape[Math.max(0, Math.min(shape.length - 1, i1))];
+        return [
+          p0[0] + (p1[0] - p0[0]) * f,
+          p0[1] + (p1[1] - p0[1]) * f,
+        ];
+      }
+    }
+    const maxOfficial = Math.max(
+      ...stops.map((s) => (Number.isFinite(s.dist) ? s.dist : 0)),
+      targetDist || 0,
+    );
+    let polyLen = 0;
+    for (let i = 1; i < shape.length; i++) {
+      polyLen += BkkLib.haversineMeters(shape[i - 1], shape[i]);
+    }
+    const scaled = maxOfficial > 0 ? (targetDist / maxOfficial) * polyLen : targetDist;
+    return BkkLib.pointAlongShape(shape, scaled);
+  },
   /* Only a key that sits on one of our own cards may be reused. A dashboard can
      hold apiKey values belonging to entirely unrelated cards, and those must
      never end up in a request to BKK. */
@@ -1827,6 +2016,9 @@ const BkkLib = {
         const packed = {
           sts: (((data.data || {}).entry) || {}).stopTimes || [],
           stops: (((data.data || {}).references) || {}).stops || {},
+          polyline: ((((data.data || {}).entry) || {}).polyline || {}).points || '',
+          vehicle: (((data.data || {}).entry) || {}).vehicle || null,
+          nowSec: BkkLib.unixSec(data.currentTime),
         };
         return BkkLib._store(cache, key, packed);
       } finally {
@@ -2025,6 +2217,8 @@ const BkkLib = {
           seenTrip.add(st.tripId);
           const fallbackColor = mode === 'volan' ? 'F9AB13' : '4477aa';
           const fallbackText = mode === 'volan' ? '000000' : 'ffffff';
+          const veh = st.vehicle || {};
+          const loc = BkkLib.vehicleLoc(veh);
           candidates.push({
             tripId: st.tripId,
             label: rt.iconDisplayText || rt.shortName || '?',
@@ -2045,6 +2239,13 @@ const BkkLib = {
             trainNumber: trip.shortName || trip.tripShortName
               || BkkLib.trainNumberFromTripId(st.tripId) || '',
             booking: !!st.mayRequireBooking,
+            lat: loc.lat,
+            lon: loc.lon,
+            vehicleId: veh.vehicleId || '',
+            licensePlate: veh.licensePlate || '',
+            model: veh.model || '',
+            vehicleStatus: veh.status || '',
+            stopDistancePercent: veh.stopDistancePercent,
           });
         });
       });
@@ -2147,6 +2348,10 @@ const BkkLib = {
       if (v.booking) row.booking = true;
       if (!row.trainNumber && v.trainNumber) row.trainNumber = String(v.trainNumber);
       if (v.bikesAllowed === true || v.bikesallowed === true) row.bikesAllowed = true;
+      if (!Number.isFinite(Number(row.lat)) && v.lat != null) {
+        row.lat = Number(v.lat);
+        row.lon = Number(v.lon);
+      }
     });
     return rows;
   },
@@ -2160,6 +2365,10 @@ const BkkLib = {
     let head = String(r.head || destName || '').trim();
     const plat = r.platform ? String(r.platform) : BkkLib.platformFromText(head);
     head = BkkLib.stripPlatform(head);
+    const lat = Number(r.lat);
+    const lon = Number(r.lon);
+    const hasGps = Number.isFinite(lat) && Number.isFinite(lon);
+    const gtfs = String(r.tripId || '').indexOf('gtfs:') === 0;
     return {
       type: type,
       icon: vehicleIcon(type),
@@ -2179,6 +2388,16 @@ const BkkLib = {
       delay: Number(r.delay || 0),
       booking: !!r.booking,
       travelMin: r.travel,
+      lat: hasGps ? lat : null,
+      lon: hasGps ? lon : null,
+      hasGps: hasGps,
+      hasLocation: !gtfs && !!r.tripId,
+      vehicle: r.vehicle || '',
+      vehicleId: r.vehicleId || '',
+      licensePlate: r.licensePlate || '',
+      model: r.model || '',
+      vehicleStatus: r.vehicleStatus || '',
+      stopDistancePercent: r.stopDistancePercent,
     };
   },
 };
@@ -2200,6 +2419,12 @@ class BKKHopCard extends HTMLElement {
     this._gen = 0;
     this._keyTried = false;
     this._reloadActive = false;
+    this._mapOverlay = null;
+    this._map = null;
+    this._mapMarker = null;
+    this._mapRoute = null;
+    this._openMapKey = null;
+    this._onMapKey = null;
   }
 
   static async getConfigElement() {
@@ -2334,6 +2559,8 @@ class BKKHopCard extends HTMLElement {
       .err { font-size: 12px; color: var(--error-color, #e66); margin-bottom: 6px; }
       .msg { font-size: 12px; color: var(--secondary-text-color); }
       table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      tr.row-clickable { cursor: pointer; }
+      tr.row-clickable:hover td { background: color-mix(in srgb, var(--primary-color) 8%, transparent); }
       tr + tr td { border-top: 1px solid var(--divider-color); }
       td { padding: 6px 3px; vertical-align: middle; }
       td.icon { width: 20px; color: var(--secondary-text-color); }
@@ -2400,6 +2627,7 @@ class BKKHopCard extends HTMLElement {
     root.appendChild(style);
     root.appendChild(card);
     this._painted = true;
+    this._elBody.addEventListener('click', (ev) => this._onRowClick(ev));
     this._paint();
     this._startTick();
   }
@@ -2423,7 +2651,7 @@ class BKKHopCard extends HTMLElement {
     const rows = this._rows || [];
     if (rows.length) {
       this._elBody.innerHTML = `<table><tbody>${
-        rows.map((r) => this._rowHtml(r, lang)).join('')
+        rows.map((r, i) => this._rowHtml(r, lang, i)).join('')
       }</tbody></table>`;
       return;
     }
@@ -2456,7 +2684,7 @@ class BKKHopCard extends HTMLElement {
     return mins <= 0 ? t(lang, 'now') : t(lang, 'minutes', mins);
   }
 
-  _rowHtml(r, lang) {
+  _rowHtml(r, lang, idx) {
     const esc = BkkLib.esc;
     const delayMin = Math.round(Number(r.delay || 0) / 60);
     let atClass = 'at';
@@ -2489,7 +2717,10 @@ class BKKHopCard extends HTMLElement {
       ? `<span class="num" title="${esc(t(lang, 'tipTrain', r.trainNumber))}">${
         esc(r.trainNumber)}</span>`
       : '';
-    return `<tr>
+    const clickable = r.hasLocation
+      ? ` class="row-clickable" data-row-index="${idx}" title="${esc(t(lang, 'mapOpenTip'))}"`
+      : '';
+    return `<tr${clickable}>
       <td class="icon"><ha-icon icon="${esc(r.icon || 'mdi:bus')}"></ha-icon></td>
       <td class="route"><span class="badge" style="${esc(this._badgeStyle(r))}">${
       esc(r.label || '?')}</span></td>
@@ -2500,6 +2731,302 @@ class BKKHopCard extends HTMLElement {
       sched ? `<span class="sched">${esc(sched)}</span>` : ''}</td>
       <td class="in">${esc(this._countdown(r.depTs, lang))}${travel}</td>
     </tr>`;
+  }
+
+  _onRowClick(ev) {
+    const tr = ev.target.closest('tr[data-row-index]');
+    if (!tr) return;
+    const idx = Number(tr.getAttribute('data-row-index'));
+    const row = (this._rows || [])[idx];
+    if (!row || !row.hasLocation) return;
+    this._openVehicleMap(row);
+  }
+
+  _mapTypeLabel(kind, lang) {
+    const k = String(kind || '').toLowerCase();
+    if (k === 'tram') return t(lang, 'mapTypeTram');
+    if (k === 'trolleybus' || k === 'trolley') return t(lang, 'mapTypeTrolley');
+    if (k === 'subway' || k === 'metro') return t(lang, 'mapTypeSubway');
+    if (k === 'rail' || k === 'train' || k === 'coach') return t(lang, 'mapTypeRail');
+    if (k === 'bus') return t(lang, 'mapTypeBus');
+    return t(lang, 'mapTypeVehicle');
+  }
+
+  _mapGlyph(kind) {
+    const k = String(kind || '').toLowerCase();
+    if (k === 'tram') return '\ud83d\ude8a';
+    if (k === 'trolleybus' || k === 'trolley') return '\ud83d\ude8e';
+    if (k === 'subway' || k === 'metro') return '\ud83d\ude87';
+    if (k === 'rail' || k === 'train' || k === 'coach') return '\ud83d\ude86';
+    if (k === 'bus') return '\ud83d\ude8c';
+    return '\ud83d\udccd';
+  }
+
+  _ensureLeaflet() {
+    if (typeof window !== 'undefined' && window.L) return Promise.resolve(window.L);
+    if (leafletPromise) return leafletPromise;
+    leafletPromise = new Promise((resolve, reject) => {
+      const cssId = 'hungarian-transport-leaflet-css';
+      if (typeof document !== 'undefined' && !document.getElementById(cssId)) {
+        const link = document.createElement('link');
+        link.id = cssId;
+        link.rel = 'stylesheet';
+        link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+        document.head.appendChild(link);
+      }
+      if (typeof window !== 'undefined' && window.L) {
+        resolve(window.L);
+        return;
+      }
+      const existing = typeof document !== 'undefined'
+        ? document.getElementById('hungarian-transport-leaflet-js') : null;
+      if (existing) {
+        existing.addEventListener('load', () => resolve(window.L));
+        existing.addEventListener('error', reject);
+        return;
+      }
+      const script = document.createElement('script');
+      script.id = 'hungarian-transport-leaflet-js';
+      script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      script.onload = () => resolve(window.L);
+      script.onerror = reject;
+      document.head.appendChild(script);
+    });
+    return leafletPromise;
+  }
+
+  _closeVehicleMap() {
+    if (this._onMapKey && typeof document !== 'undefined') {
+      document.removeEventListener('keydown', this._onMapKey);
+      this._onMapKey = null;
+    }
+    if (this._mapRoute && this._map) {
+      try { this._map.removeLayer(this._mapRoute); } catch (_e) { /* ignore */ }
+      this._mapRoute = null;
+    }
+    if (this._map) {
+      try { this._map.remove(); } catch (_e) { /* ignore */ }
+      this._map = null;
+      this._mapMarker = null;
+    }
+    if (this._mapOverlay && this._mapOverlay.parentNode) {
+      this._mapOverlay.parentNode.removeChild(this._mapOverlay);
+    }
+    this._mapOverlay = null;
+    this._openMapKey = null;
+  }
+
+  _mapKey(row) {
+    return `${row.label || ''}|${row.headsign || ''}|${row.vehicleId || row.tripId || ''}`;
+  }
+
+  _dotIcon(row, live, lang) {
+    const hex = String(row.color || '').replace('#', '');
+    const color = /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(hex) ? '#' + hex : '#2E5EA8';
+    const pulse = live ? 'ht-veh-dot-live' : 'ht-veh-dot-est';
+    const tip = live ? t(lang, 'mapLiveDot') : t(lang, 'mapEstDot');
+    return `<div class="ht-veh-dot ${pulse}" style="--bg:${BkkLib.esc(color)};" title="${BkkLib.esc(tip)}">`
+      + `<span class="ht-veh-dot-core"></span></div>`;
+  }
+
+  _mapFootText(row, hasShape, hasGps, estimated, lang) {
+    const bits = [];
+    if (hasShape) bits.push(t(lang, 'mapFullRoute'));
+    if (hasGps) bits.push(t(lang, 'mapLivePos'));
+    else if (estimated) bits.push(t(lang, 'mapEstPos'));
+    else if (hasShape) bits.push(t(lang, 'mapNoGps'));
+    if (row.stopDistancePercent != null && row.stopDistancePercent !== '') {
+      bits.push(t(lang, 'mapUntilStop', row.stopDistancePercent));
+    }
+    if (row.vehicleStatus) bits.push(String(row.vehicleStatus));
+    if (row.licensePlate) bits.push(String(row.licensePlate));
+    if (row.predicted_attime && row.attime && row.predicted_attime !== row.attime) {
+      bits.push(t(lang, 'mapExpectedVs', [row.predicted_attime, row.attime]));
+    } else if (row.predicted_attime || row.attime) {
+      bits.push(t(lang, 'mapExpected', row.predicted_attime || row.attime));
+    }
+    return bits.join(' \u00b7 ') || t(lang, 'mapFootFallback');
+  }
+
+  _showMapNotice(message) {
+    this._closeVehicleMap();
+    const overlay = document.createElement('div');
+    overlay.className = 'ht-map-overlay';
+    overlay.innerHTML = `
+      <style>
+        .ht-map-overlay{position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px}
+        .ht-map-notice{background:var(--card-background-color,#fff);padding:16px 18px;border-radius:10px;max-width:360px;font:14px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.3);color:var(--primary-text-color,#222)}
+        .ht-map-notice button{margin-top:12px;border:0;background:var(--primary-color,#03a9f4);color:#fff;padding:8px 12px;border-radius:6px;cursor:pointer}
+      </style>
+      <div class="ht-map-notice" role="dialog">${BkkLib.esc(message)}<br><button type="button">OK</button></div>
+    `;
+    document.body.appendChild(overlay);
+    this._mapOverlay = overlay;
+    const close = () => this._closeVehicleMap();
+    overlay.querySelector('button').addEventListener('click', close);
+    overlay.addEventListener('click', (ev) => { if (ev.target === overlay) close(); });
+  }
+
+  async _openVehicleMap(row) {
+    const lang = this._lang();
+    const cfg = this._config || {};
+    let lat = row.lat != null ? Number(row.lat) : NaN;
+    let lon = row.lon != null ? Number(row.lon) : NaN;
+    let hasGps = Number.isFinite(lat) && Number.isFinite(lon);
+    let shape = [];
+    let hasShape = false;
+    let positionEstimated = false;
+    const tripId = row.tripId || '';
+    if (!hasGps && !tripId) {
+      this._showMapNotice(t(lang, 'mapNoData'));
+      return;
+    }
+    this._closeVehicleMap();
+    let L;
+    try {
+      L = await this._ensureLeaflet();
+    } catch (_e) {
+      this._showMapNotice(t(lang, 'mapLeafletFail'));
+      return;
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'ht-map-overlay';
+    const sub = this._mapTypeLabel(row.vehicle || row.type, lang)
+      + (row.model ? ' \u00b7 ' + row.model : '');
+    overlay.innerHTML = `
+      <style>
+        .ht-map-overlay{position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+        .ht-map-panel{width:min(720px,100%);height:min(70vh,560px);background:var(--card-background-color,#fff);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.35);color:var(--primary-text-color,#222)}
+        .ht-map-head{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--divider-color,rgba(0,0,0,.08));font:600 14px/1.3 system-ui,sans-serif}
+        .ht-map-head .meta{flex:1;min-width:0}
+        .ht-map-head .sub{font-weight:400;font-size:12px;opacity:.75;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .ht-map-close{border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;opacity:.7;color:inherit}
+        .ht-map-canvas{flex:1;min-height:240px}
+        .ht-map-foot{padding:8px 12px;font:12px/1.35 system-ui,sans-serif;opacity:.85;border-top:1px solid var(--divider-color,rgba(0,0,0,.08))}
+        .ht-veh-dot{width:22px;height:22px;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(0,0,0,.45))}
+        .ht-veh-dot-core{width:14px;height:14px;border-radius:50%;background:var(--bg,#2E5EA8);border:2.5px solid #fff;box-sizing:border-box}
+        .ht-veh-dot-live .ht-veh-dot-core{width:16px;height:16px;box-shadow:0 0 0 3px color-mix(in srgb, var(--bg,#2E5EA8) 35%, transparent)}
+        .ht-veh-dot-est .ht-veh-dot-core{border-style:dashed;opacity:.95}
+      </style>
+      <div class="ht-map-panel" role="dialog" aria-modal="true">
+        <div class="ht-map-head">
+          <div class="meta">
+            <div>${BkkLib.esc(this._mapGlyph(row.vehicle || row.type))} ${BkkLib.esc(row.label || '')} \u2192 ${BkkLib.esc(row.headsign || '')}</div>
+            <div class="sub">${BkkLib.esc(sub)}</div>
+          </div>
+          <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, 'mapClose'))}">\u00d7</button>
+        </div>
+        <div class="ht-map-canvas"></div>
+        <div class="ht-map-foot">${BkkLib.esc(t(lang, 'mapLoadingRoute'))}</div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    this._mapOverlay = overlay;
+    this._openMapKey = this._mapKey(row);
+    this._onMapKey = (ev) => {
+      if (ev.key === 'Escape') this._closeVehicleMap();
+    };
+    document.addEventListener('keydown', this._onMapKey);
+    overlay.querySelector('.ht-map-close').addEventListener('click', () => this._closeVehicleMap());
+    overlay.addEventListener('click', (ev) => {
+      if (ev.target === overlay) this._closeVehicleMap();
+    });
+    const canvas = overlay.querySelector('.ht-map-canvas');
+    const foot = overlay.querySelector('.ht-map-foot');
+    const startLat = hasGps ? lat : 47.5;
+    const startLon = hasGps ? lon : 19.05;
+    const map = L.map(canvas, { scrollWheelZoom: true }).setView([startLat, startLon], hasGps ? 12 : 10);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+      maxZoom: 20,
+      subdomains: 'abcd',
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    }).addTo(map);
+    this._map = map;
+    setTimeout(() => map.invalidateSize(), 40);
+    let details = null;
+    if (tripId && cfg.apiKey) {
+      try {
+        details = await BkkLib.tripDetails(cfg.apiKey, this._tripCache || {}, tripId);
+        shape = BkkLib.decodePolyline((details && details.polyline) || '');
+        hasShape = shape.length >= 2;
+        if (!hasShape) foot.textContent = t(lang, 'mapNoGeometry');
+        if (!hasGps && details && details.vehicle) {
+          const loc = BkkLib.vehicleLoc(details.vehicle);
+          if (Number.isFinite(loc.lat) && Number.isFinite(loc.lon)) {
+            lat = loc.lat;
+            lon = loc.lon;
+            hasGps = true;
+          }
+        }
+      } catch (err) {
+        foot.textContent = t(lang, 'mapRouteFail', err && err.message ? err.message : err);
+      }
+    }
+    if (!this._map || this._map !== map || !this._mapOverlay) return;
+    if (!hasGps && hasShape && details) {
+      const est = BkkLib.estimatePositionFromSchedule(shape, details.sts, details.nowSec);
+      if (est && Number.isFinite(est[0]) && Number.isFinite(est[1])) {
+        lat = est[0];
+        lon = est[1];
+        positionEstimated = true;
+      }
+    }
+    const hasPosition = Number.isFinite(lat) && Number.isFinite(lon);
+    const hex = String(row.color || '').replace('#', '');
+    const routeColor = /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(hex) ? '#' + hex : '#2E5EA8';
+    if (hasShape) {
+      L.polyline(shape, {
+        color: '#1a1a1a', weight: 7, opacity: 0.45,
+        lineJoin: 'round', lineCap: 'round', interactive: false,
+      }).addTo(map);
+      this._mapRoute = L.polyline(shape, {
+        color: routeColor, weight: 5, opacity: 0.98,
+        lineJoin: 'round', lineCap: 'round',
+      }).addTo(map);
+    }
+    if (hasPosition) {
+      const icon = L.divIcon({
+        className: '',
+        html: this._dotIcon(row, hasGps && !positionEstimated, lang),
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+      });
+      this._mapMarker = L.marker([lat, lon], { icon: icon, zIndexOffset: 600 }).addTo(map);
+    }
+    foot.textContent = this._mapFootText(row, hasShape, hasGps, positionEstimated, lang);
+    setTimeout(() => {
+      map.invalidateSize();
+      if (hasShape) {
+        const bounds = L.latLngBounds(shape);
+        if (hasPosition) bounds.extend([lat, lon]);
+        map.fitBounds(bounds, { padding: [36, 36], maxZoom: 13 });
+      } else if (hasPosition) {
+        map.setView([lat, lon], 13);
+      } else {
+        foot.textContent = t(lang, 'mapNothingToShow');
+      }
+    }, 80);
+  }
+
+  _syncOpenMap() {
+    if (!this._map || !this._openMapKey || !this._mapMarker) return;
+    const row = (this._rows || []).find((r) => this._mapKey(r) === this._openMapKey);
+    if (!row || !row.hasGps || row.lat == null || row.lon == null) return;
+    const lat = Number(row.lat);
+    const lon = Number(row.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    const L = typeof window !== 'undefined' ? window.L : null;
+    this._mapMarker.setLatLng([lat, lon]);
+    if (L) {
+      this._mapMarker.setIcon(L.divIcon({
+        className: '',
+        html: this._dotIcon(row, true, this._lang()),
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+      }));
+    }
+    const foot = this._mapOverlay && this._mapOverlay.querySelector('.ht-map-foot');
+    if (foot) foot.textContent = this._mapFootText(row, true, true, false, this._lang());
   }
 
   async _reload() {
@@ -2541,6 +3068,7 @@ class BKKHopCard extends HTMLElement {
         this._err = '';
         this._loading = false;
         this._paint();
+        this._syncOpenMap();
         const origin = { id: cfg.stopId, name: cfg.stopName || '' };
         await Promise.all(this._rawRows.map(async (row) => {
           if (row.travel != null || String(row.tripId || '').indexOf('gtfs:') === 0) return;
@@ -2551,6 +3079,7 @@ class BKKHopCard extends HTMLElement {
         if (gen !== this._gen) return;
         this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
         this._paint();
+        this._syncOpenMap();
       } catch (err) {
         if (gen !== this._gen) return;
         this._loading = false;

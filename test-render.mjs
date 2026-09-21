@@ -167,4 +167,24 @@ await new Promise((r) => setTimeout(r, 80));
 check('setConfig then attach fetches once', depCalls === 1, String(depCalls));
 Lib.departures = origDep;
 
+const pts = Lib.decodePolyline('_p~iF~ps|U');
+check('decodePolyline yields coordinates',
+  Array.isArray(pts) && pts.length >= 1 && Number.isFinite(pts[0][0]) && Number.isFinite(pts[0][1]),
+  JSON.stringify(pts.slice(0, 2)));
+const loc = Lib.vehicleLoc({ location: { lat: 47.5, lon: 19.05 } });
+check('vehicleLoc reads BKK location', loc.lat === 47.5 && loc.lon === 19.05, JSON.stringify(loc));
+
+const mapped = document.createElement('hungarian-transport-card');
+document.body.appendChild(mapped);
+mapped.hass = { states: {}, language: 'hu' };
+mapped.setConfig({ language: 'hu' });
+mapped._rows = [{
+  type: 'BUS', icon: 'mdi:bus', label: '7', headsign: 'Csepel',
+  depTs: now + 120, schedTs: now + 120, attime: '10:02', predicted_attime: '10:02',
+  color: '009EE3', textcolor: 'ffffff', hasLocation: true, tripId: 'BKK_X',
+  wheelchair: false, bikesAllowed: false, booking: false, delay: 0, travelMin: null,
+}];
+mapped._paint();
+check('mapped trip rows are clickable', mapped.shadowRoot.innerHTML.includes('row-clickable'));
+
 process.exit(failed ? 1 : 0);
