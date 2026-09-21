@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.7';
+const CARD_VERSION = '1.4.2-rev.8';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -1490,6 +1490,47 @@ const BkkLib = {
       return [];
     }
   },
+  coachVehiclesFromResult(res) {
+    if (!res) return [];
+    if (Array.isArray(res.vehicles)) return res.vehicles;
+    const payload = res.response || res.service_response;
+    if (payload && Array.isArray(payload.vehicles)) return payload.vehicles;
+    return [];
+  },
+  async coachPositions(hass) {
+    if (!hass) return [];
+    try {
+      let res;
+      if (typeof hass.callService === 'function') {
+        try {
+          res = await hass.callService('bkk_stop', 'coach_positions', {}, undefined, false, true);
+        } catch (err) {
+          if (!hass.connection) throw err;
+          res = await hass.connection.sendMessagePromise({
+            type: 'call_service',
+            domain: 'bkk_stop',
+            service: 'coach_positions',
+            service_data: {},
+            return_response: true,
+          });
+        }
+      } else if (hass.connection) {
+        res = await hass.connection.sendMessagePromise({
+          type: 'call_service',
+          domain: 'bkk_stop',
+          service: 'coach_positions',
+          service_data: {},
+          return_response: true,
+        });
+      } else {
+        return [];
+      }
+      const vehicles = BkkLib.coachVehiclesFromResult(res);
+      return Array.isArray(vehicles) ? vehicles : [];
+    } catch (err) {
+      return [];
+    }
+  },
   async searchStops(apiKey, q, mode, city) {
     const byId = new Map();
     if (mode === 'volan' || mode === 'all') {
@@ -1860,7 +1901,8 @@ const BkkLib = {
     const mode = opts.mode || (opts.mav ? 'mav' : 'bkk');
     const horizon = clampMinutesAfter(opts.minutesAfter);
     if (mode === 'helyi') {
-      return BkkLib.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
+      const cityRows = await BkkLib.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
+      return BkkLib.attachCoachGps(opts.hass, cityRows);
     }
     const cache = opts.cache || {};
     const origin = { id: stopId, name: opts.originName || '' };
@@ -2012,7 +2054,7 @@ const BkkLib = {
         if (mode !== 'all' && !rows.length) throw err;
       }
     }
-    return rows;
+    return BkkLib.attachCoachGps(opts.hass, rows);
   },
 
   trainNumberFromTripId(tripId) {
@@ -2069,6 +2111,71 @@ const BkkLib = {
     const lon = Number(row && row.lon);
     if (Number.isFinite(lat) && Number.isFinite(lon)) return false;
     return !BkkLib.isFutarTripId((row && row.tripId) || '');
+  },
+  coachRouteKeys(route) {
+    const raw = String(route || '').trim().toUpperCase();
+    const keys = [];
+    const add = (value) => {
+      const key = String(value || '');
+      if (key && keys.indexOf(key) < 0) keys.push(key);
+    };
+    add(raw);
+    const body = raw.indexOf('SZ') === 0 ? raw.slice(2) : raw;
+    add(body);
+    const stripped = body.replace(/^0+/, '');
+    add(stripped);
+    if (stripped) add('SZ' + stripped);
+    return keys;
+  },
+  applyCoachGps(rows, vehicles, nowSec) {
+    const list = Array.isArray(rows) ? rows : [];
+    const vehs = Array.isArray(vehicles) ? vehicles : [];
+    const byRoute = new Map();
+    vehs.forEach((vehicle) => {
+      if (!vehicle) return;
+      const lat = Number(vehicle.lat);
+      const lon = Number(vehicle.lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+      BkkLib.coachRouteKeys(vehicle.route).forEach((key) => {
+        if (!byRoute.has(key)) byRoute.set(key, []);
+        byRoute.get(key).push(vehicle);
+      });
+    });
+    const now = Number.isFinite(Number(nowSec)) ? Number(nowSec) : Math.floor(Date.now() / 1000);
+    const groups = new Map();
+    list.forEach((row, idx) => {
+      if (!row || !/^gtfs:/.test(String(row.tripId || ''))) return;
+      if (Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon))) return;
+      let bucket = null;
+      BkkLib.coachRouteKeys(row.label).some((key) => {
+        const hit = byRoute.get(key);
+        if (hit) bucket = hit;
+        return !!hit;
+      });
+      if (!bucket || bucket.length !== 1) return;
+      if (!groups.has(bucket)) groups.set(bucket, []);
+      groups.get(bucket).push(idx);
+    });
+    groups.forEach((indexes, bucket) => {
+      const due = indexes.filter((idx) => {
+        const dep = Number(list[idx].dep || list[idx].sched || 0);
+        return dep > 0 && dep <= now + 15 * 60;
+      });
+      if (!due.length) return;
+      due.sort((a, b) => Number(list[b].dep || list[b].sched || 0) - Number(list[a].dep || list[a].sched || 0));
+      const row = list[due[0]];
+      row.lat = Number(bucket[0].lat);
+      row.lon = Number(bucket[0].lon);
+    });
+    return list;
+  },
+  async attachCoachGps(hass, rows) {
+    const list = Array.isArray(rows) ? rows : [];
+    const needs = list.some((row) => row
+      && /^gtfs:/.test(String(row.tripId || ''))
+      && !(Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon))));
+    if (!hass || !needs) return list;
+    return BkkLib.applyCoachGps(list, await BkkLib.coachPositions(hass));
   },
   keepFutarCandidate(rt, selected, mode, destKey) {
     if (!selected || !selected.size || mode === 'volan') return true;

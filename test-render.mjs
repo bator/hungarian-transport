@@ -422,6 +422,44 @@ check('map skips FUTAR resolve when ELVIRA row already has GPS',
   !Lib.needsFutarMapResolve({ tripId: 'elvira:2890602', lat: 47.229, lon: 18.668 })
   && Lib.needsFutarMapResolve({ tripId: 'elvira:2890602' })
   && !Lib.needsFutarMapResolve({ tripId: 'BKK_861_74', lat: null, lon: null }));
+check('coach route keys match SZ009 with 9',
+  Lib.coachRouteKeys('SZ009').indexOf('9') >= 0
+  && Lib.coachRouteKeys('9').indexOf('SZ9') >= 0);
+check('Volán 6990 GPS lands on the in-progress gtfs row only', (() => {
+  const now = 1_790_000_000;
+  const rows = [
+    { label: '6990', tripId: 'gtfs:6990:a', dep: now - 5 * 60, sched: now - 5 * 60 },
+    { label: '6990', tripId: 'gtfs:6990:b', dep: now + 40 * 60, sched: now + 40 * 60 },
+  ];
+  Lib.applyCoachGps(rows, [{ route: '6990', lat: 46.96, lon: 16.27, source: 'volan' }], now);
+  return rows[0].lat === 46.96 && rows[0].lon === 16.27
+    && rows[0].tripId === 'gtfs:6990:a'
+    && rows[1].lat == null;
+})());
+check('Szombathely SZ009 matches a city row labelled 9', (() => {
+  const now = 1_790_000_000;
+  const rows = [{ label: '9', tripId: 'gtfs:9:a', dep: now + 4 * 60 }];
+  Lib.applyCoachGps(rows, [{ route: 'SZ009', lat: 47.23, lon: 16.62, source: 'szombathely' }], now);
+  return rows[0].lat === 47.23 && rows[0].lon === 16.62;
+})());
+check('two live vehicles on one route do not get a dot', (() => {
+  const now = 1_790_000_000;
+  const rows = [{ label: 'SZ30Y', tripId: 'gtfs:SZ30Y:a', dep: now + 2 * 60 }];
+  Lib.applyCoachGps(rows, [
+    { route: 'SZ30Y', lat: 47.25, lon: 16.61 },
+    { route: 'SZ30Y', lat: 47.24, lon: 16.60 },
+  ], now);
+  return rows[0].lat == null;
+})());
+check('coach GPS does not overwrite an existing train coordinate', (() => {
+  const now = 1_790_000_000;
+  const rows = [{
+    label: '861', tripId: 'elvira:2890602', trainNumber: '861',
+    dep: now, lat: 47.229, lon: 18.668,
+  }];
+  Lib.applyCoachGps(rows, [{ route: '861', lat: 46.1, lon: 18.1 }], now);
+  return rows[0].lat === 47.229 && rows[0].lon === 18.668;
+})());
 check('ELVIRA S30 takes FUTAR trip id by train number', (() => {
   const dep = Math.floor(Date.now() / 1000) + 1800;
   const merged = Lib.mergeVolanRows(
