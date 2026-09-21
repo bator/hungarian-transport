@@ -103,4 +103,23 @@ en.setConfig({ language: 'en' });
 check('english locale used', en.shadowRoot.innerHTML.includes('Pick an origin'),
   en.shadowRoot.innerHTML.slice(0, 120));
 
+const editor = document.createElement('hungarian-transport-card-editor');
+document.body.appendChild(editor);
+editor.hass = { states: {}, language: 'hu' };
+editor.setConfig({ language: 'hu', minutesAfter: 90 });
+const edHtml = editor.innerHTML;
+check('editor has a minutesAfter select', edHtml.includes('id="minutesAfter"') && edHtml.includes('<select'));
+const minSel = editor.querySelector('#minutesAfter');
+check('editor select shows 90', !!(minSel && minSel.value === '90'), minSel && minSel.value);
+const chips = editor.querySelectorAll('#minutesAfterChips .chip');
+check('editor has look-ahead chips', chips.length === 7, String(chips.length));
+let emitted = null;
+editor.addEventListener('config-changed', (ev) => { emitted = ev.detail.config.minutesAfter; });
+const chip180 = editor.querySelector('#minutesAfterChips .chip[data-min="180"]');
+if (chip180) chip180.click();
+check('chip click emits minutesAfter', emitted === 180, String(emitted));
+minSel.value = '60';
+minSel.dispatchEvent(new Event('change', { bubbles: true }));
+check('select change emits minutesAfter', emitted === 60, String(emitted));
+
 process.exit(failed ? 1 : 0);

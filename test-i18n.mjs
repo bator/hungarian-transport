@@ -86,5 +86,6 @@ check('card advertised to picker', (globalThis.customCards || []).some((c) => c.
 
 const stub = registry.get('hungarian-transport-card').getStubConfig();
 check('stub config carries language', stub.language === 'auto', JSON.stringify(stub));
+check('stub config carries minutesAfter', stub.minutesAfter === 180, JSON.stringify(stub));
 
 process.exit(failed ? 1 : 0);

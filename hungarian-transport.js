@@ -1,13 +1,33 @@
-const CARD_VERSION = '1.3.1';
+const CARD_VERSION = '1.3.3-rev.1';
 
 const BKK_PLANNER_TAG = 'bkk-stop-card-plan';
 const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
+/* Default departure look-ahead. Override per card with `minutesAfter`.
+   The Kelenfold-Szekesfehervar hop lists trains past 2h, so 180 is the
+   floor that still fills travelMin on those rows. */
+const DEFAULT_MINUTES_AFTER = 180;
+const MIN_MINUTES_AFTER = 15;
+const MAX_MINUTES_AFTER = 360;
+const MINUTES_AFTER_PRESETS = [30, 60, 90, 120, 180, 240, 360];
+const DEPART_MINUTES_AFTER = String(DEFAULT_MINUTES_AFTER);
+
+function clampMinutesAfter(value) {
+  if (value == null || value === '') return DEFAULT_MINUTES_AFTER;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_MINUTES_AFTER;
+  return Math.min(MAX_MINUTES_AFTER, Math.max(MIN_MINUTES_AFTER, Math.round(n)));
+}
+
+function maxDepartureRows(horizon) {
+  return Math.min(40, Math.max(12, Math.round(clampMinutesAfter(horizon) / 2.5)));
+}
+const PLATFORM_IN_HEAD = /(?:\u00b7\s*)?(?:v\u00e1g|pl)\.(\S+)/i;
+const PLATFORM_STRIP = /\s*(?:\u00b7\s*)?(?:v\u00e1g|pl)\.\S+/gi;
 
 /* Shortcut chips in the editor: national hubs only. Override them per card with
    `favorites: [{ id, name }]` if your own stops are elsewhere. */
 const BKK_FAVORITES = [
-  { id: 'BKK_F01159', name: 'Keleti p\u00e1lyaudvar M' },
-  { id: 'BKK_056233', name: 'Keleti p\u00e1lyaudvar' },
+  { id: 'BKK_CSF01131', name: 'Keleti p\u00e1lyaudvar' },
   { id: 'BKK_056216', name: 'Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s' },
 ];
 const MAV_FAVORITES = [
@@ -159,6 +179,7 @@ const I18N = {
     destLoading: 'El\u00e9rhet\u0151 c\u00e9lok bet\u00f6lt\u00e9se...',
     destEmptySuggest: (list) => 'Nincs k\u00f6zvetlen j\u00e1rat erre a c\u00e9lra. El\u00e9rhet\u0151 c\u00e9lok: ' + list + '.',
     platformShort: (p) => `v\u00e1g.${p}`,
+    tipPlatform: (p) => `V\u00e1g\u00e1ny ${p}`,
     minutes: (n) => `${n} perc`,
     now: 'most',
     cardNoDepartures: 'Nincs k\u00f6zelg\u0151 indul\u00e1s.',
@@ -184,6 +205,8 @@ const I18N = {
     errIndexSchema: (v) => `A menetrend-index \u00fajabb (v${v}), mint amit ez a k\u00e1rtya ismer. Friss\u00edtsd a k\u00e1rty\u00e1t.`,
     cityLabel: 'V\u00e1ros',
     cityPlaceholder: 'V\u00e1lassz v\u00e1rost',
+    minutesAfterLabel: 'Menetrend el\u0151re (perc)',
+    minutesAfterHint: 'H\u00e1ny percet n\u00e9zzen el\u0151re az indul\u00e1sokb\u00f3l. 30\u2013360 perc, alap\u00e9rtelmez\u00e9s 180.',
     plannerTitle: 'BKK \u00fatvonal',
     plannerStep1: '1. Meg\u00e1ll\u00f3',
     plannerStep2: '2. J\u00e1rm\u0171',
@@ -265,6 +288,7 @@ const I18N = {
     destLoading: 'Loading reachable destinations...',
     destEmptySuggest: (list) => 'No direct service to that destination. Reachable destinations: ' + list + '.',
     platformShort: (p) => `pl.${p}`,
+    tipPlatform: (p) => `Platform ${p}`,
     minutes: (n) => `${n} min`,
     now: 'now',
     cardNoDepartures: 'No upcoming departures.',
@@ -290,6 +314,8 @@ const I18N = {
     errIndexSchema: (v) => `The timetable index is newer (v${v}) than this card understands. Please update the card.`,
     cityLabel: 'City',
     cityPlaceholder: 'Pick a city',
+    minutesAfterLabel: 'Look-ahead (minutes)',
+    minutesAfterHint: 'How far ahead to list departures. 30\u2013360 minutes, default 180.',
     plannerTitle: 'BKK route',
     plannerStep1: '1. Stop',
     plannerStep2: '2. Vehicle',
@@ -417,7 +443,7 @@ class BKKPlannerCard extends HTMLElement {
   }
 
   static getStubConfig() {
-    return { apiKey: '', name: '', language: 'auto' };
+    return { apiKey: '', name: '', language: 'auto', minutesAfter: DEFAULT_MINUTES_AFTER };
   }
 
   setConfig(config) {
@@ -441,6 +467,10 @@ class BKKPlannerCard extends HTMLElement {
 
   _lang() {
     return resolveLang((this._config || {}).language, this._hass);
+  }
+
+  _minutesAfter() {
+    return clampMinutesAfter(this._config && this._config.minutesAfter);
   }
 
   getCardSize() {
@@ -646,7 +676,7 @@ class BKKPlannerCard extends HTMLElement {
         });
       }
       if (seq !== this._searchSeq) return;
-      let hits = this._groupStops(Array.from(byId.values()));
+      let hits = BkkLib.groupStops(Array.from(byId.values()));
       hits = hits.map((h) => Object.assign({}, h, { label: this._labelAliased(q, h) }));
       const foldedQ = this._fold(q);
       hits.sort((a, b) => {
@@ -695,7 +725,7 @@ class BKKPlannerCard extends HTMLElement {
   async _loadRoutes() {
     const data = await this._bkk('arrivals-and-departures-for-stop.json', {
       stopId: this._stop.id,
-      minutesAfter: '90',
+      minutesAfter: String(this._minutesAfter()),
       minutesBefore: '0',
       onlyDepartures: 'true',
       includeReferences: 'true',
@@ -828,18 +858,17 @@ class BKKPlannerCard extends HTMLElement {
   async _remainingNames(routeId) {
     const { variants, stops } = await this._routeStops(routeId);
     const origin = this._stop.id;
-    const originN = this._norm(this._stop.name);
     const names = [];
     const seen = new Set();
     variants.forEach((v) => {
       let idx = v.ids.findIndex((id) => this._sameStop(id, origin));
       if (idx < 0) {
-        idx = v.ids.findIndex((id) => this._norm((stops[id] || {}).name) === originN);
+        idx = v.ids.findIndex((id) => BkkLib.nameEq((stops[id] || {}).name, this._stop.name));
       }
       if (idx < 0) return;
       v.ids.slice(idx + 1).forEach((id) => {
         const raw = (stops[id] || {}).name;
-        const n = this._norm(raw);
+        const n = BkkLib.stationKey(raw) || this._norm(raw);
         if (!raw || !n || seen.has(n)) return;
         seen.add(n);
         names.push({ key: n, name: raw, id });
@@ -888,42 +917,19 @@ class BKKPlannerCard extends HTMLElement {
     this._el('table').innerHTML = '<span class="muted">' + this._esc(t(this._lang(), 'plannerLoading')) + '</span>';
     try {
       this._error('');
-      const data = await this._bkk('arrivals-and-departures-for-stop.json', {
-        stopId: this._stop.id,
-        minutesAfter: '90',
-        minutesBefore: '0',
-        onlyDepartures: 'true',
-        includeReferences: 'true',
-        includeVehicleFromTrip: 'true',
-      });
-      const refs = (data.data || {}).references || {};
-      const routes = refs.routes || {};
-      const trips = refs.trips || {};
-      const times = ((data.data || {}).entry || {}).stopTimes || [];
-      const rows = [];
-      for (const st of times) {
-        const trip = trips[st.tripId] || {};
-        const rid = trip.routeId;
-        if (!this._selected.has(rid)) continue;
-        const rt = routes[rid] || {};
-        const dep = st.predictedDepartureTime || st.departureTime;
-        const sched = st.departureTime;
-        rows.push({
-          tripId: st.tripId,
-          label: rt.iconDisplayText || rt.shortName || '?',
-          color: '#' + String(rt.color || '4477aa').replace('#', ''),
-          text: '#' + String(rt.textColor || 'ffffff').replace('#', ''),
-          head: st.stopHeadsign || this._dest.name,
-          dep,
-          sched,
-          travel: null,
-        });
-        if (rows.length >= 12) break;
-      }
-      await Promise.all(rows.slice(0, 8).map(async (row) => {
-        row.travel = await this._travelMin(row.tripId, row.dep);
-      }));
-      this._rows = rows;
+      const rows = await BkkLib.departures(
+        this._apiKey,
+        this._stop.id,
+        Array.from(this._selected),
+        this._dest,
+        {
+          originName: this._stop.name || '',
+          cache: this._routeCache || {},
+          mode: 'bkk',
+          minutesAfter: this._minutesAfter(),
+        },
+      );
+      this._rows = rows || [];
       this._paintTable();
     } catch (err) {
       this._error(errText(this._lang(), err));
@@ -941,7 +947,7 @@ class BKKPlannerCard extends HTMLElement {
       const sts = (((data.data || {}).entry) || {}).stopTimes || [];
       const stops = (((data.data || {}).references) || {}).stops || {};
       const destN = this._dest.key;
-      const dest = sts.find((s) => this._norm((stops[s.stopId] || {}).name) === destN);
+      const dest = sts.find((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destN));
       if (!dest) return null;
       const arr = dest.predictedArrivalTime || dest.arrivalTime || dest.departureTime;
       const from = dep;
@@ -1023,6 +1029,30 @@ const BkkLib = {
     });
     return t;
   },
+  /* "Keleti pályaudvar M" (street) and "Keleti pályaudvar" (metro) are one place. */
+  stationKey(name) {
+    let t = String(name || '').normalize('NFC');
+    t = t.replace(/[\u200B-\u200D\uFEFF]/g, '');
+    t = t.replace(/[\u00A0\u202F]/g, ' ');
+    t = t.trim().toLowerCase();
+    t = t.replace(/[\u2013\u2014]/g, '-');
+    t = t.replace(/\s+/g, ' ');
+    if (/\sm$/i.test(t)) t = t.replace(/\sm$/i, '').trim();
+    [' vas\u00fat\u00e1llom\u00e1s', ' p\u00e1lyaudvar', ' pu.'].forEach((sfx) => {
+      if (t.endsWith(sfx)) t = t.slice(0, -sfx.length).trim();
+    });
+    return t;
+  },
+  nameEq(a, b) {
+    if (!a || !b) return false;
+    if (a === b) return true;
+    const na = BkkLib.norm(a);
+    const nb = BkkLib.norm(b);
+    if (na && nb && na === nb) return true;
+    const sa = BkkLib.stationKey(a);
+    const sb = BkkLib.stationKey(b);
+    return !!(sa && sb && sa === sb);
+  },
   fold(s) {
     return BkkLib.norm(s)
       .normalize('NFD')
@@ -1039,7 +1069,7 @@ const BkkLib = {
     const byName = new Map();
     (stops || []).forEach((s) => {
       if (!s || !s.id || !s.name) return;
-      const key = BkkLib.norm(s.name);
+      const key = BkkLib.stationKey(s.name) || BkkLib.norm(s.name);
       if (!key) return;
       if (!byName.has(key)) byName.set(key, []);
       byName.get(key).push(s);
@@ -1053,10 +1083,11 @@ const BkkLib = {
       ));
       const area = mavParent || volanArea || group.find((s) => BkkLib.isStopArea(s));
       const withParent = group.find((s) => s.parentStationId);
-      const pick = area || withParent || group[0];
+      const named = group.find((s) => !BkkLib.isMetroSuffixName(s.name)) || group[0];
+      const pick = area || withParent || named;
       hits.push({
         id: area ? area.id : (pick.parentStationId || pick.id),
-        name: pick.name,
+        name: named.name,
       });
     });
     return hits;
@@ -1085,6 +1116,12 @@ const BkkLib = {
     if (/^volan_/i.test(id) || /^AREA_CS/i.test(id) || /^hkir_/i.test(id)) return true;
     if (String(stop.type || '').toUpperCase() === 'COACH') return true;
     return false;
+  },
+  /* BKK street stops next to a metro are named "… M". The hop card and
+     commute sensors use the non-M stop (the metro / parent name). */
+  isMetroSuffixName(name) {
+    const n = String(name || '').normalize('NFC').replace(/\s+/g, ' ').trim();
+    return /\sM$/i.test(n);
   },
   isBkkStop(stop) {
     if (!stop || BkkLib.isMavStop(stop) || BkkLib.isVolanStop(stop)) return false;
@@ -1442,20 +1479,21 @@ const BkkLib = {
     dests.sort((a, b) => a.name.localeCompare(b.name, 'hu'));
     return { dests, destRoutes };
   },
-  async volanDepartures(stopId, dest, originName) {
+  async volanDepartures(stopId, dest, originName, minutesAfter) {
     const idx = await BkkLib.volanIndex();
-    return BkkLib.gtfsDepartures(idx, stopId, dest, originName, null, '#F9AB13', '#000000', 'coach', 'COACH');
+    return BkkLib.gtfsDepartures(idx, stopId, dest, originName, null, '#F9AB13', '#000000', 'coach', 'COACH', minutesAfter);
   },
-  async cityDepartures(stopId, dest, originName, city) {
+  async cityDepartures(stopId, dest, originName, city, minutesAfter) {
     if (!city) return [];
     const idx = await BkkLib.cityIndex();
-    return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), '#0F6FC6', '#ffffff', 'bus', 'BUS');
+    return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), '#0F6FC6', '#ffffff', 'bus', 'BUS', minutesAfter);
   },
-  gtfsDepartures(idx, stopId, dest, originName, opIx, color, text, vehicle, rawType) {
+  gtfsDepartures(idx, stopId, dest, originName, opIx, color, text, vehicle, rawType, minutesAfter) {
     const origin = BkkLib.volanMatchStop(idx, { id: stopId, name: originName || '' }, opIx == null ? null : opIx);
     if (!origin) return [];
     const destKey = dest && dest.key;
     const destFold = BkkLib.fold((dest && dest.name) || destKey || '');
+    const horizon = clampMinutesAfter(minutesAfter);
     const rows = [];
     const trips = idx.t || [];
     /* -1 catches yesterday's 24:xx trips, which are still tonight's buses. */
@@ -1472,6 +1510,7 @@ const BkkLib = {
         if (oidx < 0) continue;
         const depMin = ms[oidx];
         if (depMin == null || depMin < day.mins - 1) continue;
+        if (depMin > day.mins + horizon) continue;
         let didx = -1;
         if (destKey || destFold) {
           for (let j = oidx + 1; j < ps.length; j++) {
@@ -1601,33 +1640,17 @@ const BkkLib = {
     return hits.slice(0, 20);
   },
   async remainingNames(apiKey, cache, stop, routeId) {
-    if (!cache[routeId]) {
-      const data = await BkkLib.fetch(apiKey, 'route-details.json', {
-        routeId,
-        includeReferences: 'true',
-      });
-      const entry = (data.data || {}).entry || {};
-      const stops = ((data.data || {}).references || {}).stops || {};
-      const variants = (entry.variants || []).map((v) => ({
-        name: v.name,
-        ids: v.stopIds || [],
-      }));
-      BkkLib.cachePut(cache, routeId, { variants, stops });
-    }
-    const { variants, stops } = cache[routeId];
-    const origin = stop.id;
-    const originN = BkkLib.norm(stop.name);
+    const { variants, stops } = await BkkLib.loadRoutePattern(apiKey, cache, routeId);
     const names = [];
     const seen = new Set();
     variants.forEach((v) => {
-      let idx = v.ids.findIndex((id) => BkkLib.sameStop(id, origin));
-      if (idx < 0) {
-        idx = v.ids.findIndex((id) => BkkLib.norm((stops[id] || {}).name) === originN);
-      }
+      const idx = (v.ids || []).findIndex((id) => (
+        BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), stop)
+      ));
       if (idx < 0) return;
       v.ids.slice(idx + 1).forEach((id) => {
         const raw = (stops[id] || {}).name;
-        const n = BkkLib.norm(raw);
+        const n = BkkLib.stationKey(raw) || BkkLib.norm(raw);
         if (!raw || !n || seen.has(n)) return;
         seen.add(n);
         names.push({ key: n, name: raw, id });
@@ -1638,12 +1661,75 @@ const BkkLib = {
   originIndex(sts, stops, origin) {
     if (!origin) return 0;
     const oid = origin.id || origin;
-    const on = BkkLib.norm(origin.name || '');
-    let idx = (sts || []).findIndex((s) => BkkLib.sameStop(s.stopId, oid));
-    if (idx < 0 && on) {
-      idx = (sts || []).findIndex((s) => BkkLib.norm((stops[s.stopId] || {}).name) === on);
-    }
+    const on = origin.name || '';
+    const originObj = { id: oid, name: on };
+    let idx = (sts || []).findIndex((s) => (
+      BkkLib.stopMatchesOrigin(Object.assign({ id: s.stopId }, stops[s.stopId] || {}), originObj)
+    ));
     return idx;
+  },
+  stopMatchesOrigin(stop, origin) {
+    if (!stop || !origin) return false;
+    const oid = origin.id || origin;
+    const oname = origin.name || '';
+    if (stop.id && BkkLib.sameStop(stop.id, oid)) return true;
+    if (stop.parentStationId && BkkLib.sameStop(stop.parentStationId, oid)) return true;
+    if (oname && BkkLib.nameEq(stop.name, oname)) return true;
+    return false;
+  },
+  /* Parent stop-areas (BKK_CSF…) cap live departures at ~60 rows, which is
+     only ~15 min at Keleti. Query the child poles that actually serve the
+     selected routes so minutesAfter can fill. */
+  async loadRoutePattern(apiKey, cache, routeId) {
+    if (cache && cache[routeId] && cache[routeId].variants) return cache[routeId];
+    const data = await BkkLib.fetch(apiKey, 'route-details.json', {
+      routeId,
+      includeReferences: 'true',
+    });
+    const entry = (data.data || {}).entry || {};
+    const packed = {
+      variants: (entry.variants || []).map((v) => ({
+        name: v.name,
+        ids: v.stopIds || [],
+      })),
+      stops: ((data.data || {}).references || {}).stops || {},
+    };
+    return BkkLib.cachePut(cache, routeId, packed);
+  },
+  async originPoles(apiKey, cache, origin, routeIds) {
+    const poles = new Set();
+    const routes = (routeIds || []).filter(Boolean).slice(0, 32);
+    for (let i = 0; i < routes.length; i++) {
+      try {
+        const { variants, stops } = await BkkLib.loadRoutePattern(apiKey, cache, routes[i]);
+        (variants || []).forEach((v) => {
+          (v.ids || []).forEach((id) => {
+            if (BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), origin)) {
+              poles.add(id);
+            }
+          });
+        });
+      } catch (_e) { /* skip a broken route */ }
+    }
+    if (!poles.size && origin && BkkLib.isStopArea({ id: origin.id })) {
+      (await BkkLib.childStopIds(apiKey, cache, origin.id)).forEach((id) => poles.add(id));
+    }
+    if (!poles.size && origin && origin.id) poles.add(origin.id);
+    return Array.from(poles).slice(0, 16);
+  },
+  async childStopIds(apiKey, cache, parentId) {
+    const key = 'children:' + parentId;
+    if (cache && Array.isArray(cache[key])) return cache[key];
+    const data = await BkkLib.fetch(apiKey, 'schedule-for-stop.json', {
+      stopId: parentId,
+      includeReferences: 'true',
+    });
+    const stops = ((data.data || {}).references || {}).stops || {};
+    const ids = Object.values(stops)
+      .filter((s) => s && s.id && s.parentStationId === parentId)
+      .filter((s) => !/^STOP_/i.test(s.id) && !BkkLib.isMavStop(s) && !BkkLib.isVolanStop(s))
+      .map((s) => s.id);
+    return BkkLib.cachePut(cache, key, ids);
   },
   /* A dashboard left open for a day would otherwise accumulate every trip it
      ever looked at, each with its full stop list. Oldest entries go first. */
@@ -1672,7 +1758,7 @@ const BkkLib = {
       const { sts, stops } = await BkkLib.tripDetails(apiKey, cache, tripId);
       const oidx = BkkLib.originIndex(sts, stops, origin);
       if (oidx < 0) return false;
-      return sts.slice(oidx + 1).some((s) => BkkLib.norm((stops[s.stopId] || {}).name) === destKey);
+      return sts.slice(oidx + 1).some((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
     } catch (_e) {
       return false;
     }
@@ -1685,7 +1771,7 @@ const BkkLib = {
     const seen = new Set();
     sts.slice(oidx + 1).forEach((s) => {
       const raw = (stops[s.stopId] || {}).name;
-      const n = BkkLib.norm(raw);
+      const n = BkkLib.stationKey(raw) || BkkLib.norm(raw);
       if (!raw || !n || seen.has(n)) return;
       seen.add(n);
       names.push({ key: n, name: raw, id: s.stopId });
@@ -1700,7 +1786,7 @@ const BkkLib = {
     try {
       const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
         stopId: stop.id,
-        minutesAfter: '150',
+        minutesAfter: DEPART_MINUTES_AFTER,
         minutesBefore: '0',
         onlyDepartures: 'true',
         includeReferences: 'true',
@@ -1723,7 +1809,7 @@ const BkkLib = {
           seenRoute.add(rid);
           routeIds.push(rid);
         }
-        if (st.tripId && !seenTrip.has(st.tripId) && tripJobs.length < 24) {
+        if (st.tripId && !seenTrip.has(st.tripId) && tripJobs.length < 40) {
           seenTrip.add(st.tripId);
           tripJobs.push({ tripId: st.tripId, routeId: rid });
         }
@@ -1736,7 +1822,7 @@ const BkkLib = {
           return { routeId: job.routeId, names: [] };
         }
       }));
-      const fromRoutes = await Promise.all(routeIds.slice(0, 16).map(async (rid) => {
+      const fromRoutes = await Promise.all(routeIds.slice(0, 32).map(async (rid) => {
         try {
           const names = await BkkLib.remainingNames(apiKey, cache, stop, rid);
           return { routeId: rid, names };
@@ -1749,7 +1835,11 @@ const BkkLib = {
       fromTrips.concat(fromRoutes).forEach(({ routeId, names }) => {
         (names || []).forEach((n) => {
           if (!n || !n.key) return;
-          if (!byKey.has(n.key)) byKey.set(n.key, n);
+          const prev = byKey.get(n.key);
+          if (!prev) byKey.set(n.key, n);
+          else if (BkkLib.isMetroSuffixName(prev.name) && !BkkLib.isMetroSuffixName(n.name)) {
+            byKey.set(n.key, n);
+          }
           if (!destRoutes[n.key]) destRoutes[n.key] = [];
           if (routeId && destRoutes[n.key].indexOf(routeId) < 0) destRoutes[n.key].push(routeId);
         });
@@ -1773,7 +1863,7 @@ const BkkLib = {
       const { sts, stops } = await BkkLib.tripDetails(apiKey, cache || {}, tripId);
       const oidx = BkkLib.originIndex(sts, stops, origin);
       const start = oidx >= 0 ? oidx + 1 : 0;
-      const dest = sts.slice(start).find((s) => BkkLib.norm((stops[s.stopId] || {}).name) === destKey);
+      const dest = sts.slice(start).find((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
       if (!dest) return null;
       const arr = dest.predictedArrivalTime || dest.arrivalTime || dest.departureTime;
       if (!arr || !dep) return null;
@@ -1786,79 +1876,181 @@ const BkkLib = {
   async departures(apiKey, stopId, routeIds, dest, opts) {
     opts = opts || {};
     const mode = opts.mode || (opts.mav ? 'mav' : 'bkk');
+    const horizon = clampMinutesAfter(opts.minutesAfter);
     if (mode === 'helyi') {
-      return BkkLib.cityDepartures(stopId, dest, opts.originName, opts.city);
+      return BkkLib.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
     }
     const cache = opts.cache || {};
     const origin = { id: stopId, name: opts.originName || '' };
     const selected = new Set(routeIds || []);
-    const wide = mode === 'mav' || mode === 'volan' || !selected.size;
     const destKey = dest && dest.key;
+    const maxRows = maxDepartureRows(horizon);
+    const now = Math.floor(Date.now() / 1000);
+    const latest = now + horizon * 60;
     let candidates = [];
     try {
-      const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
-        stopId,
-        minutesAfter: wide ? '150' : '90',
-        minutesBefore: '0',
-        onlyDepartures: 'true',
-        includeReferences: 'true',
-        includeVehicleFromTrip: 'true',
-      });
-      const refs = (data.data || {}).references || {};
-      const routes = refs.routes || {};
-      const trips = refs.trips || {};
-      const times = ((data.data || {}).entry || {}).stopTimes || [];
-      for (let i = 0; i < times.length && candidates.length < 28; i++) {
-        const st = times[i];
-        const trip = trips[st.tripId] || {};
-        const rid = trip.routeId;
-        const rt = routes[rid] || {};
-        if (!BkkLib.routeMatchesMode(rt, mode)) continue;
-        if (selected.size && mode !== 'volan' && !selected.has(rid)) continue;
-        const stops = refs.stops || {};
-        const fallbackColor = mode === 'volan' ? 'F9AB13' : '4477aa';
-        const fallbackText = mode === 'volan' ? '000000' : 'ffffff';
-        candidates.push({
-          tripId: st.tripId,
-          label: rt.iconDisplayText || rt.shortName || '?',
-          color: '#' + String(rt.color || fallbackColor).replace('#', ''),
-          text: '#' + String(rt.textColor || fallbackText).replace('#', ''),
-          vehicle: BkkLib.vehicleKind(rt),
-          rawType: String(rt.type || 'BUS').toUpperCase(),
-          dep: st.predictedDepartureTime || st.departureTime,
-          sched: st.departureTime,
-          delay: (st.predictedDepartureTime && st.departureTime)
-            ? (st.predictedDepartureTime - st.departureTime) : 0,
-          head: trip.tripHeadsign || st.stopHeadsign || '',
-          platform: (stops[st.stopId] || {}).platformCode || '',
-          wheelchair: trip.wheelchairAccessible === 1 || trip.wheelchairAccessible === true,
-          bikesAllowed: trip.bikesAllowed === 1 || trip.bikesAllowed === true,
-          trainNumber: trip.shortName || trip.tripShortName || '',
-        });
+      let poles = [];
+      try {
+        poles = await BkkLib.originPoles(apiKey, cache, origin, Array.from(selected));
+      } catch (_e) {
+        poles = [];
       }
+      if (!poles.length) poles = [stopId];
+      const payloads = await Promise.all(poles.map(async (pid) => {
+        try {
+          return await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
+            stopId: pid,
+            minutesAfter: String(horizon),
+            minutesBefore: '0',
+            onlyDepartures: 'true',
+            includeReferences: 'true',
+            includeVehicleFromTrip: 'true',
+          });
+        } catch (_e) {
+          return null;
+        }
+      }));
+      const seenTrip = new Set();
+      payloads.forEach((data) => {
+        if (!data) return;
+        const refs = (data.data || {}).references || {};
+        const routes = refs.routes || {};
+        const trips = refs.trips || {};
+        const times = ((data.data || {}).entry || {}).stopTimes || [];
+        const stops = refs.stops || {};
+        times.forEach((st) => {
+          if (!st.tripId || seenTrip.has(st.tripId)) return;
+          const trip = trips[st.tripId] || {};
+          const rid = trip.routeId;
+          const rt = routes[rid] || {};
+          if (!BkkLib.routeMatchesMode(rt, mode)) return;
+          if (selected.size && mode !== 'volan' && !selected.has(rid)) return;
+          const dep = st.predictedDepartureTime || st.departureTime;
+          if (dep && dep > latest + 60) return;
+          seenTrip.add(st.tripId);
+          const fallbackColor = mode === 'volan' ? 'F9AB13' : '4477aa';
+          const fallbackText = mode === 'volan' ? '000000' : 'ffffff';
+          candidates.push({
+            tripId: st.tripId,
+            label: rt.iconDisplayText || rt.shortName || '?',
+            color: '#' + String(rt.color || fallbackColor).replace('#', ''),
+            text: '#' + String(rt.textColor || fallbackText).replace('#', ''),
+            vehicle: BkkLib.vehicleKind(rt),
+            rawType: String(rt.type || 'BUS').toUpperCase(),
+            dep: dep,
+            sched: st.departureTime,
+            delay: (st.predictedDepartureTime && st.departureTime)
+              ? (st.predictedDepartureTime - st.departureTime) : 0,
+            head: trip.tripHeadsign || st.stopHeadsign || '',
+            platform: (stops[st.stopId] || {}).platformCode || '',
+            wheelchair: trip.wheelchairAccessible === 1
+              || trip.wheelchairAccessible === true
+              || st.wheelchairAccessible === true,
+            bikesAllowed: trip.bikesAllowed === 1 || trip.bikesAllowed === true,
+            trainNumber: trip.shortName || trip.tripShortName
+              || BkkLib.trainNumberFromTripId(st.tripId) || '',
+            booking: !!st.mayRequireBooking,
+          });
+        });
+      });
+      candidates.sort((a, b) => (a.dep || 0) - (b.dep || 0));
     } catch (err) {
       if (mode !== 'volan') throw err;
     }
     let picked = candidates;
     if (destKey && candidates.length) {
-      const flags = await Promise.all(candidates.map((row) => (
-        BkkLib.tripGoesTo(apiKey, cache, row.tripId, origin, destKey)
-      )));
-      picked = candidates.filter((_, i) => flags[i]).slice(0, 12);
+      picked = [];
+      for (let i = 0; i < candidates.length && picked.length < maxRows; i += 16) {
+        const chunk = candidates.slice(i, i + 16);
+        const flags = await Promise.all(chunk.map((row) => (
+          BkkLib.tripGoesTo(apiKey, cache, row.tripId, origin, destKey)
+        )));
+        flags.forEach((ok, j) => { if (ok) picked.push(chunk[j]); });
+      }
+      picked = picked.slice(0, maxRows);
+    } else {
+      picked = candidates.slice(0, maxRows);
     }
-    let rows = picked.slice(0, 12).map((row) => Object.assign({ travel: null }, row));
-    await Promise.all(rows.slice(0, 8).map(async (row) => {
+    let rows = picked.map((row) => Object.assign({ travel: null }, row));
+    await Promise.all(rows.map(async (row) => {
       if (row.travel != null || String(row.tripId || '').indexOf('gtfs:') === 0) return;
       row.travel = await BkkLib.travelMin(apiKey, row.tripId, destKey, row.dep, origin, cache);
     }));
     if (mode === 'volan') {
       try {
-        const extra = await BkkLib.volanDepartures(stopId, dest, opts.originName);
+        const extra = await BkkLib.volanDepartures(stopId, dest, opts.originName, horizon);
         rows = BkkLib.mergeVolanRows(extra, rows);
       } catch (err) {
         if (!rows.length) throw err;
       }
     }
+    return rows;
+  },
+
+  trainNumberFromTripId(tripId) {
+    const m = String(tripId || '').match(/^BKK_(\d+)(?:_|$)/);
+    return m ? m[1] : '';
+  },
+  platformFromText(text) {
+    const m = String(text || '').match(PLATFORM_IN_HEAD);
+    return m ? m[1] : '';
+  },
+  stripPlatform(text) {
+    return String(text || '').replace(PLATFORM_STRIP, '').replace(/\s+/g, ' ').trim();
+  },
+  collectHassVehicles(hass) {
+    const out = [];
+    const states = (hass && hass.states) || {};
+    Object.keys(states).forEach((eid) => {
+      if (eid.indexOf('sensor.') !== 0) return;
+      const vehs = (states[eid].attributes || {}).vehicles;
+      if (!Array.isArray(vehs)) return;
+      vehs.forEach((v) => { if (v) out.push(v); });
+    });
+    return out;
+  },
+  matchHassVehicle(pool, row) {
+    const trip = String(row.tripId || '');
+    const num = String(row.trainNumber || BkkLib.trainNumberFromTripId(row.tripId) || '');
+    const hm = BkkLib.hm(row.sched || row.dep);
+    const label = String(row.label || '').toUpperCase();
+    let best = null;
+    let bestScore = 0;
+    pool.forEach((v) => {
+      let s = 0;
+      if (trip && v.tripId && String(v.tripId) === trip) s += 5;
+      if (num && v.trainNumber && String(v.trainNumber) === num) s += 3;
+      if (hm && v.attime && String(v.attime) === hm) s += 2;
+      const vr = String(v.routeid || '').toUpperCase();
+      if (label && vr && label === vr) s += 1;
+      if (s > bestScore) {
+        bestScore = s;
+        best = v;
+      }
+    });
+    if (!best) return null;
+    if (bestScore >= 5) return best;
+    if (num && bestScore >= 3) return best;
+    if (hm && label && bestScore >= 3) return best;
+    return null;
+  },
+  /* BKK has no live track or IC seat-reservation flag. Those live on the
+     bkk_stop sensors (ELVIRA). Copy them onto the same departure. */
+  enrichFromHass(hass, rows) {
+    const pool = BkkLib.collectHassVehicles(hass);
+    if (!pool.length || !rows || !rows.length) return rows;
+    rows.forEach((row) => {
+      const v = BkkLib.matchHassVehicle(pool, row);
+      if (!v) return;
+      if (!row.platform && v.platform) row.platform = String(v.platform);
+      if (!row.platform) {
+        const fromHead = BkkLib.platformFromText(v.headsign);
+        if (fromHead) row.platform = fromHead;
+      }
+      if (v.booking) row.booking = true;
+      if (!row.trainNumber && v.trainNumber) row.trainNumber = String(v.trainNumber);
+      if (v.bikesAllowed === true || v.bikesallowed === true) row.bikesAllowed = true;
+    });
     return rows;
   },
 
@@ -1868,12 +2060,9 @@ const BkkLib = {
     const dep = r.dep;
     let type = String(r.rawType || r.vehicle || 'BUS').toUpperCase();
     if (type.indexOf('SUBURBAN') >= 0 || type === 'TRAIN' || type === 'RAILWAY') type = 'RAIL';
-    const plat = r.platform ? String(r.platform) : '';
     let head = String(r.head || destName || '').trim();
-    if (plat && !/(?:\u00b7\s*)?(?:v\u00e1g|pl)\.\S+/i.test(head)) {
-      const label = t(lang || 'hu', 'platformShort', plat);
-      head = head ? `${head} \u00b7 ${label}` : label;
-    }
+    const plat = r.platform ? String(r.platform) : BkkLib.platformFromText(head);
+    head = BkkLib.stripPlatform(head);
     return {
       type: type,
       icon: vehicleIcon(type),
@@ -1888,7 +2077,7 @@ const BkkLib = {
       bikesAllowed: !!r.bikesAllowed,
       color: String(r.color || '').replace('#', ''),
       textcolor: String(r.text || '').replace('#', ''),
-      platform: plat,
+      platform: plat || '',
       trainNumber: r.trainNumber || '',
       delay: Number(r.delay || 0),
       booking: !!r.booking,
@@ -1907,6 +2096,7 @@ class BKKHopCard extends HTMLElement {
     this._hass = null;
     this._tripCache = {};
     this._rows = [];
+    this._rawRows = [];
     this._err = '';
     this._loading = false;
     this._painted = false;
@@ -1932,6 +2122,7 @@ class BKKHopCard extends HTMLElement {
       helyi: false,
       city: '',
       language: 'auto',
+      minutesAfter: DEFAULT_MINUTES_AFTER,
     };
   }
 
@@ -1962,9 +2153,16 @@ class BKKHopCard extends HTMLElement {
   }
 
   set hass(hass) {
+    const first = !this._hass;
     const langBefore = this._hass ? this._lang() : '';
     this._hass = hass;
     if (this._lang() !== langBefore) this._paint();
+    if (first && this._rawRows && this._rawRows.length) {
+      BkkLib.enrichFromHass(this._hass, this._rawRows);
+      const cfg = this._config || {};
+      this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
+      this._paint();
+    }
     this._maybeFillKey();
   }
 
@@ -2058,8 +2256,14 @@ class BKKHopCard extends HTMLElement {
         font-variant-numeric: tabular-nums; }
       .travel { display: block; font-size: 11px; font-weight: 400;
         color: var(--secondary-text-color); }
-      .pictos { display: inline-flex; gap: 4px; }
+      .pictos { display: inline-flex; gap: 4px; align-items: center; }
       .picto { position: relative; font-size: 11px; line-height: 1.2; cursor: help; }
+      .picto.booking { color: #c0392b; font-weight: 800; font-size: 11px; }
+      .plat {
+        display: inline-block; margin-right: 4px; padding: 0 5px; border-radius: 2px;
+        background: #2E5EA8; color: #fff; font-size: 11px; font-weight: 700;
+        line-height: 1.45; white-space: nowrap;
+      }
       .picto::after {
         content: attr(data-tip); position: absolute; left: 50%; top: calc(100% + 7px);
         transform: translateX(-50%); background: var(--primary-text-color, #222);
@@ -2139,8 +2343,9 @@ class BKKHopCard extends HTMLElement {
     return `background:${bg};color:${fg}`;
   }
 
-  _picto(glyph, tip) {
-    return `<span class="picto" tabindex="0" role="img" aria-label="${BkkLib.esc(tip)}"`
+  _picto(glyph, tip, cls) {
+    const extra = cls ? ` ${cls}` : '';
+    return `<span class="picto${extra}" tabindex="0" role="img" aria-label="${BkkLib.esc(tip)}"`
       + ` data-tip="${BkkLib.esc(tip)}">${BkkLib.esc(glyph)}</span>`;
   }
 
@@ -2170,7 +2375,11 @@ class BKKHopCard extends HTMLElement {
     const pictos = [];
     if (r.wheelchair) pictos.push(this._picto('\u267f', t(lang, 'tipWheelchair')));
     if (r.bikesAllowed) pictos.push(this._picto('\ud83d\udeb2', t(lang, 'tipBike')));
-    if (r.booking) pictos.push(this._picto('\ud83c\udfab', t(lang, 'tipBooking')));
+    if (r.booking) pictos.push(this._picto('H', t(lang, 'tipBooking'), 'booking'));
+    const plat = r.platform
+      ? `<span class="plat" title="${esc(t(lang, 'tipPlatform', r.platform))}">${
+        esc(r.platform)}</span>`
+      : '';
     const travel = r.travelMin
       ? `<span class="travel" title="${esc(t(lang, 'tipTravel', r.travelMin))}">${
         esc(t(lang, 'minutes', r.travelMin))}</span>`
@@ -2184,7 +2393,7 @@ class BKKHopCard extends HTMLElement {
       <td class="route"><span class="badge" style="${esc(this._badgeStyle(r))}">${
       esc(r.label || '?')}</span></td>
       <td class="dest" title="${esc(r.headsign || '')}">${esc(r.headsign || '')}${num}</td>
-      <td class="flags">${pictos.length ? `<span class="pictos">${pictos.join('')}</span>` : ''}</td>
+      <td class="flags">${plat}${pictos.length ? `<span class="pictos">${pictos.join('')}</span>` : ''}</td>
       <td class="when"><span class="${atClass}" title="${esc(atTip)}">${
       esc(r.predicted_attime || r.attime || '')}</span>${
       sched ? `<span class="sched">${esc(sched)}</span>` : ''}</td>
@@ -2217,11 +2426,14 @@ class BKKHopCard extends HTMLElement {
             cache: this._tripCache || {},
             mode: BkkLib.mode(cfg),
             city: cfg.city || '',
+            minutesAfter: cfg.minutesAfter,
           },
         );
         if (gen !== this._gen) return;
+        this._rawRows = rows || [];
+        BkkLib.enrichFromHass(this._hass, this._rawRows);
         const lang = this._lang();
-        this._rows = (rows || []).map((r) => BkkLib.asRow(r, cfg.destName, lang));
+        this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, lang));
         this._err = '';
         this._loading = false;
         this._paint();
@@ -2282,6 +2494,7 @@ class BKKHopCardEditor extends HTMLElement {
     this._syncName();
     this._syncStopLabel();
     this._syncDestLabel();
+    this._syncMinutesAfter();
     this._syncApiKey();
     this._syncMode();
     this._probeKey();
@@ -2325,10 +2538,10 @@ class BKKHopCardEditor extends HTMLElement {
         }
         .card-config .hint { font-size: 12px; color: var(--secondary-text-color); margin: 6px 0 0; }
         .card-config .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-        .card-config .chip {
-          border: 1px solid var(--divider-color); background: transparent;
-          color: var(--primary-text-color); border-radius: 999px;
-          padding: 4px 10px; cursor: pointer; font: inherit; font-size: 13px;
+        .card-config .chip.on {
+          color: var(--text-primary-color, #fff);
+          background: var(--primary-color);
+          border-color: var(--primary-color);
         }
         .card-config .hit {
           display: block; width: 100%; text-align: left; font: inherit;
@@ -2398,6 +2611,12 @@ class BKKHopCardEditor extends HTMLElement {
           <div class="picked" id="destPicked"></div>
           <div class="list" id="destHits"></div>
         </div>
+        <div class="f">
+          <label id="lblMinutesAfter"></label>
+          <select id="minutesAfter"></select>
+          <div class="chips" id="minutesAfterChips"></div>
+          <div class="hint" id="hintMinutesAfter"></div>
+        </div>
         <div class="err" id="err"></div>
       </div>
     `;
@@ -2458,18 +2677,37 @@ class BKKHopCardEditor extends HTMLElement {
     this._el('dq').addEventListener('focus', () => {
       this._search(this._el('dq').value.trim(), 'dest');
     });
+    this._el('minutesAfter').addEventListener('change', (ev) => {
+      const next = clampMinutesAfter(ev.target.value);
+      if (next === clampMinutesAfter(this._config.minutesAfter)) {
+        this._syncMinutesAfter();
+        return;
+      }
+      this._emit({ minutesAfter: next });
+    });
     this._paintFav();
   }
 
   _el(id) { return this.querySelector('#' + id); }
 
+  /* The editor lives in HA's shadow tree. document.activeElement is the host,
+     so walking only shadowRoots never reaches these light-DOM inputs. */
+  _focusedEl() {
+    try {
+      return this.querySelector(':focus');
+    } catch (_e) {
+      return null;
+    }
+  }
+
   _isEditing(el) {
     if (!el) return false;
-    let ae = document.activeElement;
-    while (ae) {
-      if (ae === el) return true;
-      ae = ae.shadowRoot ? ae.shadowRoot.activeElement : null;
-    }
+    const focused = this._focusedEl();
+    if (focused === el) return true;
+    if (focused && el.contains && el.contains(focused)) return true;
+    try {
+      if (typeof el.matches === 'function' && el.matches(':focus, :focus-within')) return true;
+    } catch (_e) { /* jsdom */ }
     return false;
   }
 
@@ -2495,6 +2733,48 @@ class BKKHopCardEditor extends HTMLElement {
     if (q && !this._isEditing(q) && this._config.destName) {
       q.placeholder = this._config.destName;
     }
+  }
+
+  _syncMinutesAfter() {
+    const cur = clampMinutesAfter(this._config.minutesAfter);
+    const sel = this._el('minutesAfter');
+    if (sel) {
+      const lang = this._lang();
+      const values = MINUTES_AFTER_PRESETS.slice();
+      if (values.indexOf(cur) < 0) values.push(cur);
+      values.sort((a, b) => a - b);
+      const sig = lang + ':' + values.join(',');
+      if (sel.dataset.opts !== sig) {
+        sel.innerHTML = values.map((n) => (
+          `<option value="${n}">${BkkLib.esc(t(lang, 'minutes', n))}</option>`
+        )).join('');
+        sel.dataset.opts = sig;
+      }
+      if (!this._isEditing(sel)) sel.value = String(cur);
+    }
+    const box = this._el('minutesAfterChips');
+    if (!box) return;
+    const signature = String(cur);
+    if (box.dataset.cur === signature && box.childElementCount) {
+      Array.from(box.children).forEach((b) => {
+        b.classList.toggle('on', Number(b.getAttribute('data-min')) === cur);
+      });
+      return;
+    }
+    box.innerHTML = '';
+    box.dataset.cur = signature;
+    MINUTES_AFTER_PRESETS.forEach((n) => {
+      const b = document.createElement('button');
+      b.className = 'chip' + (n === cur ? ' on' : '');
+      b.type = 'button';
+      b.setAttribute('data-min', String(n));
+      b.textContent = String(n);
+      b.addEventListener('click', () => {
+        if (n === clampMinutesAfter(this._config.minutesAfter)) return;
+        this._emit({ minutesAfter: n });
+      });
+      box.appendChild(b);
+    });
   }
 
   _syncApiKey() {
@@ -2555,6 +2835,9 @@ class BKKHopCardEditor extends HTMLElement {
     set('apiKeyEdit', t(lang, 'apiKeyChange'));
     set('lblName', t(lang, 'nameLabel'));
     set('lblCity', t(lang, 'cityLabel'));
+    set('lblMinutesAfter', t(lang, 'minutesAfterLabel'));
+    set('hintMinutesAfter', t(lang, 'minutesAfterHint'));
+    this._syncMinutesAfter();
     const key = this._el('apiKey');
     if (key) key.placeholder = t(lang, 'apiKeyPlaceholder');
     const name = this._el('name');
