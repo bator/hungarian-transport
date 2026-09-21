@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.5';
+const CARD_VERSION = '1.4.2-rev.6';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -1909,7 +1909,7 @@ const BkkLib = {
           return await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
             stopId: pid,
             minutesAfter: String(horizon),
-            minutesBefore: '0',
+            minutesBefore: '45',
             onlyDepartures: 'true',
             includeReferences: 'true',
             includeVehicleFromTrip: 'true',
@@ -2031,51 +2031,66 @@ const BkkLib = {
     const min = Math.round(Number((row && (row.sched || row.dep)) || 0) / 60);
     return label + '|' + min;
   },
-  async futarTripIdForRow(apiKey, cache, row, stopId) {
+  genericRailLabel(label) {
+    return /^(IC|EC|IR|EX|EN|RJX|S|SZ)$/i.test(String(label || '').trim());
+  },
+  matchFutarStopTime(row, st, trip, rt) {
+    if (!row || !st || !st.tripId) return false;
+    const num = BkkLib.rowTrainNumber(row);
+    const n = String((trip && (trip.shortName || trip.tripShortName)) || '').trim().replace(/^0+/, '')
+      || BkkLib.trainNumberFromTripId(st.tripId);
+    if (num && n && num === n) return true;
+    const rowMin = Math.round(Number(row.sched || row.dep || 0) / 60);
+    const stMin = Math.round(Number(
+      st.departureTime || st.predictedDepartureTime || st.arrivalTime || st.predictedArrivalTime || 0,
+    ) / 60);
+    if (!rowMin || !stMin || Math.abs(rowMin - stMin) > 1) return false;
+    const rl = String(row.label || '').toUpperCase();
+    const fl = String((rt && (rt.iconDisplayText || rt.shortName)) || '').toUpperCase();
+    if (rl && fl && rl === fl) return true;
+    if (rl && fl && BkkLib.genericRailLabel(rl) !== BkkLib.genericRailLabel(fl)
+        && (BkkLib.genericRailLabel(rl) || BkkLib.genericRailLabel(fl))) {
+      return true;
+    }
+    return false;
+  },
+  async futarTripIdForRow(apiKey, cache, row, stopId, extraStopId) {
     const tid = String((row && row.tripId) || '');
     if (BkkLib.isFutarTripId(tid)) return tid;
     const num = BkkLib.rowTrainNumber(row);
     const wantKey = BkkLib.rowTimeKey(row);
-    if (!apiKey || !stopId || (!num && !wantKey)) return '';
-    const key = 'futarTrip:' + stopId + ':' + (num || wantKey);
+    if (!apiKey || (!num && !wantKey)) return '';
+    const stops = [];
+    [stopId, extraStopId].forEach((id) => {
+      if (id && stops.indexOf(id) < 0) stops.push(id);
+    });
+    if (!stops.length) return '';
+    const key = 'futarTrip:' + stops.join(',') + ':' + (num || wantKey);
     const hit = BkkLib._cached(cache, key);
     if (typeof hit === 'string') return hit;
     try {
-      const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
-        stopId: stopId,
-        minutesAfter: '360',
-        minutesBefore: '60',
-        onlyDepartures: 'true',
-        includeReferences: 'true',
-      });
-      const refs = ((data.data || {}).references) || {};
-      const trips = refs.trips || {};
-      const routes = refs.routes || {};
-      const times = (((data.data || {}).entry) || {}).stopTimes || [];
-      let found = '';
-      let foundByTime = '';
-      for (let i = 0; i < times.length; i++) {
-        const st = times[i];
-        if (!st || !st.tripId) continue;
-        const trip = trips[st.tripId] || {};
-        const rt = routes[trip.routeId] || {};
-        const n = String(trip.shortName || trip.tripShortName || '').trim().replace(/^0+/, '')
-          || BkkLib.trainNumberFromTripId(st.tripId);
-        if (num && n === num) {
-          found = st.tripId;
-          break;
-        }
-        if (!foundByTime) {
-          const label = rt.iconDisplayText || rt.shortName || '';
-          const tk = BkkLib.rowTimeKey({
-            label: label,
-            sched: st.departureTime,
-            dep: st.predictedDepartureTime || st.departureTime,
-          });
-          if (tk === wantKey) foundByTime = st.tripId;
+      for (let s = 0; s < stops.length; s++) {
+        const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
+          stopId: stops[s],
+          minutesAfter: '360',
+          minutesBefore: '180',
+          includeReferences: 'true',
+          includeVehicleFromTrip: 'true',
+        });
+        const refs = ((data.data || {}).references) || {};
+        const trips = refs.trips || {};
+        const routes = refs.routes || {};
+        const times = (((data.data || {}).entry) || {}).stopTimes || [];
+        for (let i = 0; i < times.length; i++) {
+          const st = times[i];
+          const trip = trips[(st && st.tripId) || ''] || {};
+          const rt = routes[trip.routeId] || {};
+          if (BkkLib.matchFutarStopTime(row, st, trip, rt)) {
+            return BkkLib._store(cache, key, st.tripId);
+          }
         }
       }
-      return BkkLib._store(cache, key, found || foundByTime);
+      return BkkLib._store(cache, key, '');
     } catch (_e) {
       return '';
     }
@@ -2808,8 +2823,15 @@ class BKKHopCard extends HTMLElement {
     let details = null;
     if (cfg.apiKey && !BkkLib.isFutarTripId(tripId)) {
       try {
+        let extraStop = cfg.destStopId || '';
+        if (!extraStop && (cfg.destName || cfg.destKey)) {
+          const code = await BkkLib.elviraResolveCode(
+            cfg.apiKey, '', cfg.destName || cfg.destKey,
+          );
+          if (code) extraStop = /^BKK_/i.test(code) ? code : ('BKK_' + code);
+        }
         const resolved = await BkkLib.futarTripIdForRow(
-          cfg.apiKey, this._tripCache || {}, row, cfg.stopId,
+          cfg.apiKey, this._tripCache || {}, row, cfg.stopId, extraStop,
         );
         if (resolved) tripId = resolved;
       } catch (_e) { /* keep ELVIRA id; map may still estimate if details load */ }

@@ -350,6 +350,27 @@ check('BKK without dest still filters unselected buses',
   !Lib.keepFutarCandidate({ id: 'BKK_1335' }, new Set(['BKK_0070']), 'bkk', ''));
 check('rowTimeKey joins label and sched minute',
   Lib.rowTimeKey({ label: 'S30', sched: 1790020080 }) === 'S30|' + Math.round(1790020080 / 60));
+check('BALATON matches FUTAR IC 861 by train number',
+  Lib.matchFutarStopTime(
+    { label: 'BALATON', trainNumber: '861', sched: 1790015820, tripId: 'elvira:2890602' },
+    { tripId: 'BKK_861_74', departureTime: 1790015820 },
+    { shortName: null },
+    { iconDisplayText: 'IC' },
+  ));
+check('BALATON matches FUTAR IC by sched minute when labels differ',
+  Lib.matchFutarStopTime(
+    { label: 'BALATON', trainNumber: '', sched: 1790015820, tripId: 'elvira:1' },
+    { tripId: 'BKK_861_74', departureTime: 1790015820 },
+    {},
+    { iconDisplayText: 'IC' },
+  ));
+check('BALATON does not match a different-minute IC',
+  !Lib.matchFutarStopTime(
+    { label: 'BALATON', trainNumber: '861', sched: 1790015820, tripId: 'elvira:1' },
+    { tripId: 'BKK_963_313', departureTime: 1790015820 + 3600 },
+    {},
+    { iconDisplayText: 'IC' },
+  ));
 check('ELVIRA S30 takes FUTAR trip id by train number', (() => {
   const dep = Math.floor(Date.now() / 1000) + 1800;
   const merged = Lib.mergeVolanRows(
