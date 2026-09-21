@@ -122,4 +122,49 @@ minSel.value = '60';
 minSel.dispatchEvent(new Event('change', { bubbles: true }));
 check('select change emits minutesAfter', emitted === 60, String(emitted));
 
+const Lib = globalThis.HungarianTransportLib;
+check('lib is exported for tests', !!(Lib && typeof Lib.polesFromPatterns === 'function'));
+const origin = { id: 'BKK_CSF01131', name: 'Keleti p\u00e1lyaudvar' };
+const patterns = [{
+  variants: [
+    { ids: ['BKK_F01159', 'BKK_MID', 'BKK_DEST'] },
+    { ids: ['BKK_IN', 'BKK_F01314'] },
+  ],
+  stops: {
+    BKK_F01159: { id: 'BKK_F01159', name: 'Keleti p\u00e1lyaudvar', parentStationId: 'BKK_CSF01131' },
+    BKK_MID: { id: 'BKK_MID', name: 'Th\u00f6k\u00f6ly \u00fat' },
+    BKK_DEST: { id: 'BKK_DEST', name: 'R\u00e1kospatak utca / Cs\u00f6m\u00f6ri \u00fat' },
+    BKK_IN: { id: 'BKK_IN', name: 'R\u00e1kospatak utca / Cs\u00f6m\u00f6ri \u00fat' },
+    BKK_F01314: { id: 'BKK_F01314', name: 'Keleti p\u00e1lyaudvar', parentStationId: 'BKK_CSF01131' },
+  },
+}];
+const destPoles = Lib.polesFromPatterns(patterns, origin, 'r\u00e1kospatak utca / cs\u00f6m\u00f6ri \u00fat');
+check('dest poles keep only outbound', destPoles.length === 1 && destPoles[0] === 'BKK_F01159',
+  JSON.stringify(destPoles));
+const allPoles = Lib.polesFromPatterns(patterns, origin, '');
+check('undirected poles include both directions', allPoles.length === 2, JSON.stringify(allPoles));
+
+let depCalls = 0;
+const origDep = Lib.departures;
+Lib.departures = async () => {
+  depCalls += 1;
+  await new Promise((r) => setTimeout(r, 40));
+  return [];
+};
+const c2 = document.createElement('hungarian-transport-card');
+c2.hass = { states: {}, language: 'hu' };
+c2.setConfig({
+  stopId: 'BKK_CSF01131',
+  destKey: 'kelenf\u00f6ld',
+  destName: 'Kelenf\u00f6ld',
+  stopName: 'Keleti',
+  routeIds: ['BKK_5400'],
+  apiKey: 'k',
+  language: 'hu',
+});
+document.body.appendChild(c2);
+await new Promise((r) => setTimeout(r, 80));
+check('setConfig then attach fetches once', depCalls === 1, String(depCalls));
+Lib.departures = origDep;
+
 process.exit(failed ? 1 : 0);

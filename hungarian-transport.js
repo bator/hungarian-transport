@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.0-rev.1';
+const CARD_VERSION = '1.4.0-rev.2';
 
 const BKK_PLANNER_TAG = 'bkk-stop-card-plan';
 const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
@@ -1184,25 +1184,59 @@ const BkkLib = {
     }
     return hit.name;
   },
+  _mem: {},
+  _inflight: {},
+  _gateActive: 0,
+  _gateMax: 8,
+  _gateWaiters: [],
+  async _gate() {
+    if (BkkLib._gateActive < BkkLib._gateMax) {
+      BkkLib._gateActive += 1;
+      return;
+    }
+    await new Promise((resolve) => { BkkLib._gateWaiters.push(resolve); });
+  },
+  _ungate() {
+    const next = BkkLib._gateWaiters.shift();
+    if (next) next();
+    else BkkLib._gateActive = Math.max(0, BkkLib._gateActive - 1);
+  },
+  _cached(cache, key) {
+    if (BkkLib._mem[key]) return BkkLib._mem[key];
+    if (cache && cache[key]) {
+      BkkLib._mem[key] = cache[key];
+      return cache[key];
+    }
+    return undefined;
+  },
+  _store(cache, key, value) {
+    BkkLib.cachePut(BkkLib._mem, key, value);
+    if (cache && cache !== BkkLib._mem) BkkLib.cachePut(cache, key, value);
+    return value;
+  },
   async fetch(apiKey, path, params) {
     if (!apiKey) throw codedError('errNoApiKey');
+    await BkkLib._gate();
     const q = new URLSearchParams(Object.assign({
       key: apiKey, version: '4', appVersion: 'apiary-1.0',
     }, params));
     const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
     const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
-    let res;
     try {
-      res = await fetch(`${BKK_API}/${path}?${q}`, { signal: ctrl ? ctrl.signal : undefined });
-    } catch (err) {
-      throw new Error(err && err.name === 'AbortError' ? 'BKK timeout' : `BKK ${err}`);
+      let res;
+      try {
+        res = await fetch(`${BKK_API}/${path}?${q}`, { signal: ctrl ? ctrl.signal : undefined });
+      } catch (err) {
+        throw new Error(err && err.name === 'AbortError' ? 'BKK timeout' : `BKK ${err}`);
+      }
+      if (!res.ok) throw new Error(`BKK HTTP ${res.status}`);
+      const data = await res.json();
+      if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);
+      return data;
     } finally {
       if (timer) clearTimeout(timer);
+      BkkLib._ungate();
     }
-    if (!res.ok) throw new Error(`BKK HTTP ${res.status}`);
-    const data = await res.json();
-    if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);
-    return data;
   },
   async probeApiKey(apiKey) {
     if (!apiKey) return { ok: false, code: 'errNoApiKey' };
@@ -1681,55 +1715,95 @@ const BkkLib = {
      only ~15 min at Keleti. Query the child poles that actually serve the
      selected routes so minutesAfter can fill. */
   async loadRoutePattern(apiKey, cache, routeId) {
-    if (cache && cache[routeId] && cache[routeId].variants) return cache[routeId];
-    const data = await BkkLib.fetch(apiKey, 'route-details.json', {
-      routeId,
-      includeReferences: 'true',
-    });
-    const entry = (data.data || {}).entry || {};
-    const packed = {
-      variants: (entry.variants || []).map((v) => ({
-        name: v.name,
-        ids: v.stopIds || [],
-      })),
-      stops: ((data.data || {}).references || {}).stops || {},
-    };
-    return BkkLib.cachePut(cache, routeId, packed);
-  },
-  async originPoles(apiKey, cache, origin, routeIds) {
-    const poles = new Set();
-    const routes = (routeIds || []).filter(Boolean).slice(0, 32);
-    for (let i = 0; i < routes.length; i++) {
+    const hit = BkkLib._cached(cache, routeId);
+    if (hit && hit.variants) return hit;
+    if (BkkLib._inflight[routeId]) return BkkLib._inflight[routeId];
+    const p = (async () => {
       try {
-        const { variants, stops } = await BkkLib.loadRoutePattern(apiKey, cache, routes[i]);
-        (variants || []).forEach((v) => {
-          (v.ids || []).forEach((id) => {
-            if (BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), origin)) {
-              poles.add(id);
-            }
-          });
+        const data = await BkkLib.fetch(apiKey, 'route-details.json', {
+          routeId,
+          includeReferences: 'true',
         });
-      } catch (_e) { /* skip a broken route */ }
+        const entry = (data.data || {}).entry || {};
+        const packed = {
+          variants: (entry.variants || []).map((v) => ({
+            name: v.name,
+            ids: v.stopIds || [],
+          })),
+          stops: ((data.data || {}).references || {}).stops || {},
+        };
+        return BkkLib._store(cache, routeId, packed);
+      } finally {
+        delete BkkLib._inflight[routeId];
+      }
+    })();
+    BkkLib._inflight[routeId] = p;
+    return p;
+  },
+  polesFromPatterns(patterns, origin, destKey) {
+    const poles = new Set();
+    (patterns || []).forEach((pat) => {
+      if (!pat) return;
+      const variants = pat.variants || [];
+      const stops = pat.stops || {};
+      variants.forEach((v) => {
+        const ids = v.ids || [];
+        const oidx = ids.findIndex((id) => (
+          BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), origin)
+        ));
+        if (oidx < 0) return;
+        if (destKey) {
+          const hits = ids.slice(oidx + 1).some((id) => (
+            BkkLib.nameEq((stops[id] || {}).name, destKey)
+          ));
+          if (!hits) return;
+        }
+        poles.add(ids[oidx]);
+      });
+    });
+    return Array.from(poles);
+  },
+  async originPoles(apiKey, cache, origin, routeIds, destKey) {
+    const routes = (routeIds || []).filter(Boolean).slice(0, 32);
+    const patterns = await Promise.all(routes.map(async (rid) => {
+      try {
+        return await BkkLib.loadRoutePattern(apiKey, cache, rid);
+      } catch (_e) {
+        return null;
+      }
+    }));
+    const poles = new Set(BkkLib.polesFromPatterns(patterns, origin, destKey || ''));
+    if (!destKey) {
+      if (!poles.size && origin && BkkLib.isStopArea({ id: origin.id })) {
+        (await BkkLib.childStopIds(apiKey, cache, origin.id)).forEach((id) => poles.add(id));
+      }
+      if (!poles.size && origin && origin.id) poles.add(origin.id);
     }
-    if (!poles.size && origin && BkkLib.isStopArea({ id: origin.id })) {
-      (await BkkLib.childStopIds(apiKey, cache, origin.id)).forEach((id) => poles.add(id));
-    }
-    if (!poles.size && origin && origin.id) poles.add(origin.id);
     return Array.from(poles).slice(0, 16);
   },
   async childStopIds(apiKey, cache, parentId) {
     const key = 'children:' + parentId;
-    if (cache && Array.isArray(cache[key])) return cache[key];
-    const data = await BkkLib.fetch(apiKey, 'schedule-for-stop.json', {
-      stopId: parentId,
-      includeReferences: 'true',
-    });
-    const stops = ((data.data || {}).references || {}).stops || {};
-    const ids = Object.values(stops)
-      .filter((s) => s && s.id && s.parentStationId === parentId)
-      .filter((s) => !/^STOP_/i.test(s.id) && !BkkLib.isMavStop(s) && !BkkLib.isVolanStop(s))
-      .map((s) => s.id);
-    return BkkLib.cachePut(cache, key, ids);
+    const hit = BkkLib._cached(cache, key);
+    if (Array.isArray(hit)) return hit;
+    if (BkkLib._inflight[key]) return BkkLib._inflight[key];
+    const p = (async () => {
+      try {
+        const data = await BkkLib.fetch(apiKey, 'schedule-for-stop.json', {
+          stopId: parentId,
+          includeReferences: 'true',
+        });
+        const stops = ((data.data || {}).references || {}).stops || {};
+        const ids = Object.values(stops)
+          .filter((s) => s && s.id && s.parentStationId === parentId)
+          .filter((s) => !/^STOP_/i.test(s.id) && !BkkLib.isMavStop(s) && !BkkLib.isVolanStop(s))
+          .map((s) => s.id);
+        return BkkLib._store(cache, key, ids);
+      } finally {
+        delete BkkLib._inflight[key];
+      }
+    })();
+    BkkLib._inflight[key] = p;
+    return p;
   },
   /* A dashboard left open for a day would otherwise accumulate every trip it
      ever looked at, each with its full stop list. Oldest entries go first. */
@@ -1744,13 +1818,23 @@ const BkkLib = {
   },
   async tripDetails(apiKey, cache, tripId) {
     const key = 'trip:' + tripId;
-    if (cache && cache[key]) return cache[key];
-    const data = await BkkLib.fetch(apiKey, 'trip-details.json', { tripId });
-    const packed = {
-      sts: (((data.data || {}).entry) || {}).stopTimes || [],
-      stops: (((data.data || {}).references) || {}).stops || {},
-    };
-    return BkkLib.cachePut(cache, key, packed);
+    const hit = BkkLib._cached(cache, key);
+    if (hit) return hit;
+    if (BkkLib._inflight[key]) return BkkLib._inflight[key];
+    const p = (async () => {
+      try {
+        const data = await BkkLib.fetch(apiKey, 'trip-details.json', { tripId });
+        const packed = {
+          sts: (((data.data || {}).entry) || {}).stopTimes || [],
+          stops: (((data.data || {}).references) || {}).stops || {},
+        };
+        return BkkLib._store(cache, key, packed);
+      } finally {
+        delete BkkLib._inflight[key];
+      }
+    })();
+    BkkLib._inflight[key] = p;
+    return p;
   },
   async tripGoesTo(apiKey, cache, tripId, origin, destKey) {
     if (!tripId || !destKey) return false;
@@ -1888,12 +1972,23 @@ const BkkLib = {
     const now = Math.floor(Date.now() / 1000);
     const latest = now + horizon * 60;
     let candidates = [];
+    let destDirected = false;
     try {
       let poles = [];
       try {
-        poles = await BkkLib.originPoles(apiKey, cache, origin, Array.from(selected));
+        poles = destKey
+          ? await BkkLib.originPoles(apiKey, cache, origin, Array.from(selected), destKey)
+          : [];
+        destDirected = poles.length > 0;
       } catch (_e) {
         poles = [];
+      }
+      if (!poles.length) {
+        try {
+          poles = await BkkLib.originPoles(apiKey, cache, origin, Array.from(selected));
+        } catch (_e) {
+          poles = [];
+        }
       }
       if (!poles.length) poles = [stopId];
       const payloads = await Promise.all(poles.map(async (pid) => {
@@ -1958,7 +2053,7 @@ const BkkLib = {
       if (mode !== 'volan') throw err;
     }
     let picked = candidates;
-    if (destKey && candidates.length) {
+    if (destKey && candidates.length && !destDirected) {
       picked = [];
       for (let i = 0; i < candidates.length && picked.length < maxRows; i += 16) {
         const chunk = candidates.slice(i, i + 16);
@@ -1972,10 +2067,12 @@ const BkkLib = {
       picked = candidates.slice(0, maxRows);
     }
     let rows = picked.map((row) => Object.assign({ travel: null }, row));
-    await Promise.all(rows.map(async (row) => {
-      if (row.travel != null || String(row.tripId || '').indexOf('gtfs:') === 0) return;
-      row.travel = await BkkLib.travelMin(apiKey, row.tripId, destKey, row.dep, origin, cache);
-    }));
+    if (!opts.deferTravel) {
+      await Promise.all(rows.map(async (row) => {
+        if (row.travel != null || String(row.tripId || '').indexOf('gtfs:') === 0) return;
+        row.travel = await BkkLib.travelMin(apiKey, row.tripId, destKey, row.dep, origin, cache);
+      }));
+    }
     if (mode === 'volan') {
       try {
         const extra = await BkkLib.volanDepartures(stopId, dest, opts.originName, horizon);
@@ -2102,6 +2199,7 @@ class BKKHopCard extends HTMLElement {
     this._painted = false;
     this._gen = 0;
     this._keyTried = false;
+    this._reloadActive = false;
   }
 
   static async getConfigElement() {
@@ -2147,8 +2245,11 @@ class BKKHopCard extends HTMLElement {
     this._reloadSafe();
   }
 
-  /* _reload is async, so its rejections need an owner. */
+  /* _reload is async, so its rejections need an owner. Mark in-flight
+     synchronously: Home Assistant often setConfig()s then attaches in the
+     same turn, and connectedCallback must not start a second fetch. */
   _reloadSafe() {
+    this._reloadActive = true;
     Promise.resolve().then(() => this._reload()).catch((err) => this._showErr(err));
   }
 
@@ -2186,7 +2287,7 @@ class BKKHopCard extends HTMLElement {
   connectedCallback() {
     if (!this._painted) return;
     this._startTick();
-    if (!this._poll) this._reloadSafe();
+    if (!this._poll && !this._reloadActive) this._reloadSafe();
   }
 
   disconnectedCallback() {
@@ -2405,6 +2506,7 @@ class BKKHopCard extends HTMLElement {
     /* Overlapping reloads (config edits, reconnects) must not leave an orphan
        interval behind, so every run is tagged with the generation that owns it. */
     const gen = ++this._gen;
+    this._reloadActive = true;
     const cfg = this._config || {};
     if (cfg.volanIndex) setVolanIndexUrl(cfg.volanIndex);
     if (cfg.cityIndex) setCityIndexUrl(cfg.cityIndex);
@@ -2414,6 +2516,7 @@ class BKKHopCard extends HTMLElement {
       this._rows = [];
       this._loading = false;
       this._paint();
+      if (gen === this._gen) this._reloadActive = false;
       return;
     }
     const run = async () => {
@@ -2427,6 +2530,7 @@ class BKKHopCard extends HTMLElement {
             mode: BkkLib.mode(cfg),
             city: cfg.city || '',
             minutesAfter: cfg.minutesAfter,
+            deferTravel: true,
           },
         );
         if (gen !== this._gen) return;
@@ -2437,6 +2541,16 @@ class BKKHopCard extends HTMLElement {
         this._err = '';
         this._loading = false;
         this._paint();
+        const origin = { id: cfg.stopId, name: cfg.stopName || '' };
+        await Promise.all(this._rawRows.map(async (row) => {
+          if (row.travel != null || String(row.tripId || '').indexOf('gtfs:') === 0) return;
+          row.travel = await BkkLib.travelMin(
+            cfg.apiKey, row.tripId, cfg.destKey, row.dep, origin, this._tripCache || {},
+          );
+        }));
+        if (gen !== this._gen) return;
+        this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
+        this._paint();
       } catch (err) {
         if (gen !== this._gen) return;
         this._loading = false;
@@ -2445,10 +2559,14 @@ class BKKHopCard extends HTMLElement {
     };
     this._loading = !(this._rows || []).length;
     this._paint();
-    await run();
-    if (!this.isConnected || gen !== this._gen) return;
-    const every = Math.max(15, Number(cfg.refresh || 45)) * 1000;
-    this._poll = setInterval(run, every);
+    try {
+      await run();
+      if (!this.isConnected || gen !== this._gen) return;
+      const every = Math.max(15, Number(cfg.refresh || 45)) * 1000;
+      this._poll = setInterval(run, every);
+    } finally {
+      if (gen === this._gen) this._reloadActive = false;
+    }
   }
 }
 
@@ -3221,6 +3339,8 @@ if (!customElements.get(BKK_PLANNER_TAG)) {
 console.info(`%c HUNGARIAN-TRANSPORT %c ${CARD_VERSION} `,
   'color:#fff;background:#0f6fc6;font-weight:700',
   'color:#0f6fc6;background:#fff;font-weight:700');
+
+globalThis.HungarianTransportLib = BkkLib;
 
 window.customCards = window.customCards || [];
 if (!window.customCards.some((c) => c.type === BKK_HOP_TAG)) {
