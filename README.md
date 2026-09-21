@@ -12,6 +12,8 @@ those two stops. City and rail traffic in Budapest come from the live BKK FUTÁR
 API. Long-distance coaches and local services outside Budapest come from
 official GTFS feeds, shipped next to the card as compact gzip indexes.
 
+![Hungarian transport card listing S40 trains and a Volán coach from Kelenföld to Székesfehérvár](docs/card.svg)
+
 The editor and the card are available in **Hungarian and English**. By default
 they follow the Home Assistant user's language; you can pin one explicitly.
 
