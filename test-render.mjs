@@ -173,6 +173,8 @@ check('decodePolyline yields coordinates',
   JSON.stringify(pts.slice(0, 2)));
 const loc = Lib.vehicleLoc({ location: { lat: 47.5, lon: 19.05 } });
 check('vehicleLoc reads BKK location', loc.lat === 47.5 && loc.lon === 19.05, JSON.stringify(loc));
+check('basemap is OSM France without an API key',
+  src.includes('tile.openstreetmap.fr/osmfr/') && !/cartocdn|carto\.com|\?key=/.test(src));
 
 const mapped = document.createElement('hungarian-transport-card');
 document.body.appendChild(mapped);

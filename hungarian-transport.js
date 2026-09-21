@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.0-rev.4';
+const CARD_VERSION = '1.4.0-rev.5';
 
 const BKK_PLANNER_TAG = 'bkk-stop-card-plan';
 const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
@@ -2989,10 +2989,12 @@ class BKKHopCard extends HTMLElement {
     let map;
     try {
       map = L.map(canvas, { scrollWheelZoom: true }).setView([startLat, startLon], hasGps ? 12 : 10);
-      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+      /* Carto Voyager raster now watermarks every tile without an API key.
+         OSM France is a keyed-less street map that still works with Leaflet. */
+      L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
         maxZoom: 20,
-        subdomains: 'abcd',
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+        subdomains: 'abc',
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>',
       }).addTo(map);
     } catch (_e) {
       this._showMapNotice(t(lang, 'mapLeafletFail'));
