@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.8';
+const CARD_VERSION = '1.4.2-rev.9';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -8,8 +8,8 @@ const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
    floor that still fills travelMin on those rows. */
 const DEFAULT_MINUTES_AFTER = 180;
 const MIN_MINUTES_AFTER = 15;
-const MAX_MINUTES_AFTER = 360;
-const MINUTES_AFTER_PRESETS = [30, 60, 90, 120, 180, 240, 360];
+const MAX_MINUTES_AFTER = 480;
+const MINUTES_AFTER_PRESETS = [30, 60, 90, 120, 180, 240, 360, 480];
 const DEPART_MINUTES_AFTER = String(DEFAULT_MINUTES_AFTER);
 
 function clampMinutesAfter(value) {
@@ -20,7 +20,9 @@ function clampMinutesAfter(value) {
 }
 
 function maxDepartureRows(horizon) {
-  return Math.min(40, Math.max(12, Math.round(clampMinutesAfter(horizon) / 2.5)));
+  const h = clampMinutesAfter(horizon);
+  const cap = h >= 480 ? 80 : 40;
+  return Math.min(cap, Math.max(12, Math.round(h / 2.5)));
 }
 const PLATFORM_IN_HEAD = /(?:\u00b7\s*)?(?:v\u00e1g|pl)\.(\S+)/i;
 const PLATFORM_STRIP = /\s*(?:\u00b7\s*)?(?:v\u00e1g|pl)\.\S+/gi;
@@ -248,7 +250,7 @@ const I18N = {
     cityLabel: 'V\u00e1ros',
     cityPlaceholder: 'V\u00e1lassz v\u00e1rost',
     minutesAfterLabel: 'Menetrend el\u0151re (perc)',
-    minutesAfterHint: 'H\u00e1ny percet n\u00e9zzen el\u0151re az indul\u00e1sokb\u00f3l. 30\u2013360 perc, alap\u00e9rtelmez\u00e9s 180.',
+    minutesAfterHint: 'H\u00e1ny percet n\u00e9zzen el\u0151re az indul\u00e1sokb\u00f3l. 30\u2013480 perc, alap\u00e9rtelmez\u00e9s 180.',
     plannerTitle: 'Tervez\u0151',
     plannerStep1: 'Forr\u00e1s',
     plannerStep2: 'C\u00e9l',
@@ -394,7 +396,7 @@ const I18N = {
     cityLabel: 'City',
     cityPlaceholder: 'Pick a city',
     minutesAfterLabel: 'Look-ahead (minutes)',
-    minutesAfterHint: 'How far ahead to list departures. 30\u2013360 minutes, default 180.',
+    minutesAfterHint: 'How far ahead to list departures. 30\u2013480 minutes, default 180.',
     plannerTitle: 'Planner',
     plannerStep1: 'Origin',
     plannerStep2: 'Destination',
@@ -1297,12 +1299,22 @@ const BkkLib = {
     const destKey = dest && dest.key;
     const destFold = BkkLib.fold((dest && dest.name) || destKey || '');
     const horizon = clampMinutesAfter(minutesAfter);
+    const rowCap = maxDepartureRows(horizon);
     const rows = [];
     const trips = idx.t || [];
+    const todayMins = BkkLib.volanDay(0).mins;
     /* -1 catches yesterday's 24:xx trips, which are still tonight's buses. */
     const dayOffsets = [-1, 0, 1];
-    for (let n = 0; n < dayOffsets.length && rows.length < 12; n++) {
+    for (let n = 0; n < dayOffsets.length; n++) {
       const day = BkkLib.volanDay(dayOffsets[n]);
+      let earliest = day.mins - 1;
+      let latest = day.mins + horizon;
+      if (dayOffsets[n] > 0) {
+        const remain = horizon - (1440 - todayMins);
+        if (remain <= 0) continue;
+        earliest = -1;
+        latest = remain;
+      }
       for (let i = 0; i < trips.length; i++) {
         const t = trips[i];
         if (!BkkLib.volanServiceOk(idx, t[0], day.ymd, day.dow)) continue;
@@ -1312,8 +1324,8 @@ const BkkLib = {
         const oidx = ps.indexOf(origin.i);
         if (oidx < 0) continue;
         const depMin = ms[oidx];
-        if (depMin == null || depMin < day.mins - 1) continue;
-        if (depMin > day.mins + horizon) continue;
+        if (depMin == null || depMin < earliest) continue;
+        if (depMin > latest) continue;
         let didx = -1;
         if (destKey || destFold) {
           for (let j = oidx + 1; j < ps.length; j++) {
@@ -1355,7 +1367,7 @@ const BkkLib = {
       seen.add(k);
       uniq.push(row);
     });
-    return uniq.slice(0, 12);
+    return uniq.slice(0, rowCap);
   },
   mergeDestIndex(a, b) {
     const byKey = new Map();

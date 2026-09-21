@@ -112,7 +112,7 @@ check('editor has a minutesAfter select', edHtml.includes('id="minutesAfter"') &
 const minSel = editor.querySelector('#minutesAfter');
 check('editor select shows 90', !!(minSel && minSel.value === '90'), minSel && minSel.value);
 const chips = editor.querySelectorAll('#minutesAfterChips .chip');
-check('editor has look-ahead chips', chips.length === 7, String(chips.length));
+check('editor has look-ahead chips', chips.length === 8, String(chips.length));
 let emitted = null;
 editor.addEventListener('config-changed', (ev) => { emitted = ev.detail.config.minutesAfter; });
 const chip180 = editor.querySelector('#minutesAfterChips .chip[data-min="180"]');
@@ -508,7 +508,7 @@ check('planner editor hides city select',
 check('planner editor still has hidden mav checkbox', !!ped.querySelector('#mav'));
 
 const pminChips = plan.shadowRoot.querySelectorAll('#pmin .chip');
-check('planner in-card minutesAfter chips', pminChips.length === 7, String(pminChips.length));
+check('planner in-card minutesAfter chips', pminChips.length === 8, String(pminChips.length));
 const chip60 = Array.from(pminChips).find((c) => c.textContent === '60');
 if (chip60) chip60.click();
 check('planner chip sets minutesAfter', plan._config.minutesAfter === 60, String(plan._config && plan._config.minutesAfter));

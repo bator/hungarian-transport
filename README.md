@@ -95,7 +95,7 @@ Volán long-distance and Helyi city services stay on the official static GTFS.
 | `helyi` | bool | `false` | Local-city mode (mutually exclusive with MÁV/Volán) |
 | `city` | string | — | Operator id from `city-index.json.gz` (`pecs`, `miskolc`, `sopron`, …) |
 | `refresh` | number | `45` | Seconds between departure refreshes, minimum 15 |
-| `minutesAfter` | number | `180` | How many minutes ahead to list departures (15–360). The editor offers presets 30–360; YAML may use any value in range. Also applies to the planner card. |
+| `minutesAfter` | number | `180` | How many minutes ahead to list departures (15–480). The editor offers presets 30–480; YAML may use any value in range. Also applies to the planner card. |
 | `volanIndex` | string | next to the card | URL of `volan-index.json.gz` |
 | `cityIndex` | string | next to the card | URL of `city-index.json.gz` |
 | `favorites` | list | national hubs | Optional `{ id, name }` chips in the editor |
