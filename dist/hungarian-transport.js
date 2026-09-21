@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.9';
+const CARD_VERSION = '1.4.2-rev.10';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -1543,6 +1543,41 @@ const BkkLib = {
       return [];
     }
   },
+  async coachShape(hass, route, headsign) {
+    if (!hass || !route) return '';
+    const serviceData = { route: String(route), headsign: String(headsign || '') };
+    try {
+      let res;
+      if (typeof hass.callService === 'function') {
+        try {
+          res = await hass.callService('bkk_stop', 'coach_shape', serviceData, undefined, false, true);
+        } catch (err) {
+          if (!hass.connection) throw err;
+          res = await hass.connection.sendMessagePromise({
+            type: 'call_service',
+            domain: 'bkk_stop',
+            service: 'coach_shape',
+            service_data: serviceData,
+            return_response: true,
+          });
+        }
+      } else if (hass.connection) {
+        res = await hass.connection.sendMessagePromise({
+          type: 'call_service',
+          domain: 'bkk_stop',
+          service: 'coach_shape',
+          service_data: serviceData,
+          return_response: true,
+        });
+      } else {
+        return '';
+      }
+      const payload = (res && (res.response || res.service_response)) || res || {};
+      return String(payload.points || '');
+    } catch (err) {
+      return '';
+    }
+  },
   async searchStops(apiKey, q, mode, city) {
     const byId = new Map();
     if (mode === 'volan' || mode === 'all') {
@@ -2990,38 +3025,46 @@ class BKKHopCard extends HTMLElement {
     this._map = map;
     setTimeout(() => map.invalidateSize(), 40);
     let details = null;
-    if (cfg.apiKey && BkkLib.needsFutarMapResolve({ lat: lat, lon: lon, tripId: tripId })) {
+    if (!hasShape && /^gtfs:/i.test(String(row.tripId || '')) && this._hass) {
       try {
-        let extraStop = cfg.destStopId || '';
-        if (!extraStop && (cfg.destName || cfg.destKey)) {
-          const code = await BkkLib.elviraResolveCode(
-            cfg.apiKey, '', cfg.destName || cfg.destKey,
-          );
-          if (code) extraStop = /^BKK_/i.test(code) ? code : ('BKK_' + code);
-        }
-        const resolved = await BkkLib.futarTripIdForRow(
-          cfg.apiKey, this._tripCache || {}, row, cfg.stopId, extraStop,
-        );
-        if (resolved) tripId = resolved;
-      } catch (_e) { /* keep ELVIRA id; map may still estimate if details load */ }
-    }
-    const futarTrip = BkkLib.isFutarTripId(tripId);
-    if (futarTrip && cfg.apiKey) {
-      try {
-        details = await BkkLib.tripDetails(cfg.apiKey, this._tripCache || {}, tripId);
-        shape = BkkLib.decodePolyline((details && details.polyline) || '');
+        const points = await BkkLib.coachShape(this._hass, row.label, row.headsign || '');
+        shape = BkkLib.decodePolyline(points);
         hasShape = shape.length >= 2;
-        if (!hasShape) foot.textContent = t(lang, 'mapNoGeometry');
-        if (!hasGps && details && details.vehicle) {
-          const loc = BkkLib.vehicleLoc(details.vehicle);
-          if (Number.isFinite(loc.lat) && Number.isFinite(loc.lon)) {
-            lat = loc.lat;
-            lon = loc.lon;
-            hasGps = true;
+      } catch (_e) { /* timetable row still shows the live dot */ }
+    }
+    if (!hasShape && cfg.apiKey) {
+      let geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : '';
+      if (!geomTrip) {
+        try {
+          let extraStop = cfg.destStopId || '';
+          if (!extraStop && (cfg.destName || cfg.destKey)) {
+            const code = await BkkLib.elviraResolveCode(
+              cfg.apiKey, '', cfg.destName || cfg.destKey,
+            );
+            if (code) extraStop = /^BKK_/i.test(code) ? code : ('BKK_' + code);
           }
+          geomTrip = await BkkLib.futarTripIdForRow(
+            cfg.apiKey, this._tripCache || {}, row, cfg.stopId, extraStop,
+          ) || '';
+        } catch (_e) { /* keep the live dot without a line */ }
+      }
+      if (BkkLib.isFutarTripId(geomTrip)) {
+        try {
+          details = await BkkLib.tripDetails(cfg.apiKey, this._tripCache || {}, geomTrip);
+          shape = BkkLib.decodePolyline((details && details.polyline) || '');
+          hasShape = shape.length >= 2;
+          if (!hasShape) foot.textContent = t(lang, 'mapNoGeometry');
+          if (!hasGps && details && details.vehicle) {
+            const loc = BkkLib.vehicleLoc(details.vehicle);
+            if (Number.isFinite(loc.lat) && Number.isFinite(loc.lon)) {
+              lat = loc.lat;
+              lon = loc.lon;
+              hasGps = true;
+            }
+          }
+        } catch (err) {
+          foot.textContent = t(lang, 'mapRouteFail', err && err.message ? err.message : err);
         }
-      } catch (err) {
-        foot.textContent = t(lang, 'mapRouteFail', err && err.message ? err.message : err);
       }
     }
     if (!this._map || this._map !== map || !this._mapOverlay) return;
