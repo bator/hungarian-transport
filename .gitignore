@@ -5,13 +5,12 @@ secrets*
 *.pyc
 __pycache__/
 .venv/
-volan-index*.json
-volan-index*.json.gz
-city-index.json.gz
-*.zip
+/volan-index*.json
+/volan-index*.json.gz
+/city-index.json.gz
+/*.zip
 volanbusz_gtfs.zip
 state.json
 *.tmp
 *.log
 node_modules/
-

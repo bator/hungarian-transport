@@ -40,9 +40,9 @@ Object.defineProperty(globalThis, 'navigator', {
   configurable: true,
 });
 
-await import('./hungarian-transport.js');
+await import('./dist/hungarian-transport.js');
 
-const src = await (await import('node:fs/promises')).readFile('./hungarian-transport.js', 'utf8');
+const src = await (await import('node:fs/promises')).readFile('./dist/hungarian-transport.js', 'utf8');
 
 /* Compare the two dictionaries by re-evaluating just the I18N literal. */
 const start = src.indexOf('const I18N = {');

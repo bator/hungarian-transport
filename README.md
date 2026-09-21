@@ -22,7 +22,8 @@ they follow the Home Assistant user's language; you can pin one explicitly.
 ### HACS
 
 1. HACS → Frontend → ⋮ → Custom repositories → add
-   `https://github.com/bator/hungarian-transport` with category **Dashboard**.
+   `https://github.com/bator/hungarian-transport` with category **Dashboard**
+   (not Integration).
 2. Download **Hungarian transport**.
 3. HACS adds the Lovelace resource automatically. If you manage resources by
    hand, add:
@@ -35,15 +36,15 @@ they follow the Home Assistant user's language; you can pin one explicitly.
    `type: module` is required — the card resolves `volan-index.json.gz` and
    `city-index.json.gz` from the module URL.
 
-A HACS download is a GitHub **release zip** (`hungarian-transport.zip`). It
-contains the card **and** both GTFS indexes. The default branch is not a
-working install by itself.
+HACS installs everything under `dist/` (`hungarian-transport.js` plus both
+GTFS indexes). The default branch is hidden; pick a GitHub release.
 
 ### Manual
 
-Copy `hungarian-transport.js`, `volan-index.json.gz` and `city-index.json.gz`
-into `/config/www/hungarian-transport/` and add the matching
-`/local/hungarian-transport/hungarian-transport.js` resource (`type: module`).
+Copy the three files from `dist/` into `/config/www/hungarian-transport/` and
+add the matching `/local/hungarian-transport/hungarian-transport.js` resource
+(`type: module`). A GitHub release also attaches `hungarian-transport.zip`
+with the same three files.
 
 Build the indexes first:
 

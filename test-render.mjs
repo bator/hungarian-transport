@@ -12,9 +12,9 @@ for (const key of ['window', 'document', 'customElements', 'HTMLElement', 'Eleme
   globalThis[key] = dom.window[key];
 }
 
-await import('./hungarian-transport.js');
+await import('./dist/hungarian-transport.js');
 
-const src = await readFile('./hungarian-transport.js', 'utf8');
+const src = await readFile('./dist/hungarian-transport.js', 'utf8');
 
 let failed = false;
 const check = (name, ok, detail) => {
