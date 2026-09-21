@@ -9,10 +9,11 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "rev = 1.4.0-rev.N prerelease on current stable; minor = 1.5.0 HACS release; major = 2.0.0"
+        description: "rev = 1.4.1-rev.N prerelease; patch = 1.4.2 HACS; minor = 1.5.0 HACS; major = 2.0.0"
         type: choice
         options:
           - rev
+          - patch
           - minor
           - major
         default: rev
@@ -94,6 +95,8 @@ jobs:
             tag="v$((major + 1)).0.0"
           elif [ "$bump" = "minor" ]; then
             tag="v${major}.$((minor + 1)).0"
+          elif [ "$bump" = "patch" ]; then
+            tag="v${major}.${minor}.$((patch + 1))"
           else
             base="${major}.${minor}.${patch}"
             n=$(latest_rev_n "$base")

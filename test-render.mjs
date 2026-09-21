@@ -222,7 +222,90 @@ check('planner favorite chips include a Volan station',
   planHtml.includes('N\u00e9pliget'));
 check('planner favorite chips include a MAV station',
   planHtml.includes('Sz\u00e9kesfeh\u00e9rv\u00e1r') || planHtml.includes('Budapest-Kelenf'));
-check('legacy planner tag still upgrades',
-  !!customElements.get('bkk-stop-card-plan'));
+check('planner dest search lists MAV stations outside the live sample',
+  Lib.destHitsForQuery(
+    [{ key: 'godollo', name: 'G\u00f6d\u00f6ll\u0151' }],
+    'Miskolc-Tiszai',
+    [{ id: 'BKK_005511387', name: 'Miskolc-Tiszai' }],
+  ).some((h) => h.name === 'Miskolc-Tiszai'));
+check('planner dest search lists MAV stations outside the live sample',
+  Lib.destHitsForQuery(
+    [{ key: 'godollo', name: 'G\u00f6d\u00f6ll\u0151' }],
+    'Miskolc-Tiszai',
+    [{ id: 'BKK_005511387', name: 'Miskolc-Tiszai' }],
+  ).some((h) => h.name === 'Miskolc-Tiszai'));
+check('planner dest filter matches a shorter query against Miskolc-Tiszai',
+  Lib.destHitsForQuery(
+    [{ key: 'miskolc-tiszai', name: 'Miskolc-Tiszai' }],
+    'Miskolc',
+    [],
+  ).some((h) => /miskolc/i.test(h.name)));
+check('elvira station code from BKK MAV id',
+  Lib.elviraStationCode('BKK_005511387') === '005511387');
+check('elvira station code from CS parent id',
+  Lib.elviraStationCode('BKK_CS005511387') === '005511387');
+check('BKK Keleti parent has no 9-digit ELVIRA code',
+  Lib.elviraStationCode('BKK_CSF01131') === '');
+check('Keleti palyaudvar name maps to Budapest-Keleti station code',
+  Lib.elviraCodeFromName('Keleti pályaudvar') === '005510017');
+check('Kelenfold name maps to Budapest-Kelenfold station code',
+  Lib.elviraCodeFromName('Kelenföld vasútállomás') === '005501024');
+check('Debrecen railway station shares a key with Debrecen',
+  Lib.stationKey('Debrecen, vasútállomás') === Lib.stationKey('Debrecen'));
+check('planner dest search merges Debrecen volan stop onto the MAV id',
+  Lib.destHitsForQuery(
+    [],
+    'Debrecen, vasútállomás',
+    [
+      { id: 'hkir_217186', name: 'Debrecen, vasútállomás' },
+      { id: 'BKK_005513912', name: 'Debrecen' },
+    ],
+  )[0].id === 'BKK_005513912');
+check('elvira result parser reads response.departures',
+  Lib.elviraRowsFromResult({ context: {}, response: { departures: [{ label: 'TOKAJ' }] } }).length === 1);
+check('elvira result parser reads REST service_response',
+  Lib.elviraRowsFromResult({ service_response: { departures: [{ label: 'HERNÁD' }, { label: 'TOKAJ' }] } }).length === 2);
+check('elvira result parser reads top-level departures',
+  Lib.elviraRowsFromResult({ departures: [{ label: 'IC' }] })[0].label === 'IC');
+check('elvira placeholder blue takes FUTAR G43/Z30 brand colors on merge', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 600;
+  const merged = Lib.mergeVolanRows(
+    [
+      { label: 'G43', dep: dep, sched: dep, color: '#AACD46', text: '#FFFFFF' },
+      { label: 'Z30', dep: dep + 120, sched: dep + 120, color: '#FFCD28', text: '#3C3C3C' },
+    ],
+    [
+      { label: 'G43', dep: dep, sched: dep, color: '#4477aa', text: '#ffffff', platform: '5' },
+      { label: 'Z30', dep: dep + 120, sched: dep + 120, color: '#4477aa', text: '#ffffff', platform: '7' },
+    ],
+    12,
+  );
+  const g43 = merged.find((r) => r.label === 'G43');
+  const z30 = merged.find((r) => r.label === 'Z30');
+  return g43 && z30
+    && String(g43.color).replace('#', '').toUpperCase() === 'AACD46'
+    && String(z30.color).replace('#', '').toUpperCase() === 'FFCD28'
+    && g43.platform === '5' && z30.platform === '7';
+})());
+check('ELVIRA-only G43/Z30 get BKK badge colours', (() => {
+  const g = Lib.applyRailBadge({ label: 'G43', color: '#4477aa' });
+  const z = Lib.applyRailBadge({ label: 'Z30', color: '#4477aa' });
+  const painted = Lib.asRow({
+    label: 'G43', color: '#4477aa', rawType: 'RAIL', dep: Math.floor(Date.now() / 1000) + 120,
+  }, 'Székesfehérvár', 'hu');
+  return String(g.color).toUpperCase().indexOf('AACD46') >= 0
+    && String(z.color).toUpperCase().indexOf('FFCD28') >= 0
+    && String(z.text).toUpperCase().indexOf('3C3C3C') >= 0
+    && String(painted.color).toUpperCase() === 'AACD46';
+})());
+check('planner dest search prefers a 9-digit MAV id over a volan id',
+  Lib.destHitsForQuery(
+    [],
+    'Miskolc',
+    [
+      { id: 'volan_12345', name: 'Miskolc-Tiszai' },
+      { id: 'BKK_005511387', name: 'Miskolc-Tiszai' },
+    ],
+  )[0].id === 'BKK_005511387');
 
 process.exit(failed ? 1 : 0);

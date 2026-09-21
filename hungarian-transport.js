@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.0-rev.8';
+const CARD_VERSION = '1.4.1';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -68,6 +68,21 @@ function vehicleIcon(type) {
   if (key.indexOf('SUBWAY') >= 0 || key.indexOf('METRO') >= 0) return 'mdi:subway-variant';
   return 'mdi:bus';
 }
+
+/* BKK GO rail-line badge colours. ELVIRA rows have no route color (always
+   #4477aa); FUTÁR is often empty on a MÁV hop, so the label is the source. */
+const BKK_RAIL_BADGE = {
+  G43: ['AACD46', 'FFFFFF'],
+  Z30: ['FFCD28', '3C3C3C'],
+  S10: ['00AFF0', 'FFFFFF'],
+  S12: ['00AFF0', 'FFFFFF'],
+  S30: ['00AFF0', 'FFFFFF'],
+  S36: ['00AFF0', 'FFFFFF'],
+  S40: ['00AFF0', 'FFFFFF'],
+  IC: ['2E5EA8', 'FFFFFF'],
+  EC: ['2E5EA8', 'FFFFFF'],
+  S: ['2E5EA8', 'FFFFFF'],
+};
 
 /* Assets live next to this module, so the card works from /hacsfiles/, /local/
    or wherever the Lovelace resource points. Requires `type: module`. */
@@ -493,6 +508,7 @@ const BkkLib = {
     [' vas\u00fat\u00e1llom\u00e1s', ' p\u00e1lyaudvar', ' pu.'].forEach((sfx) => {
       if (t.endsWith(sfx)) t = t.slice(0, -sfx.length).trim();
     });
+    t = t.replace(/[,.;:\s]+$/g, '').trim();
     return t;
   },
   /* "Keleti pályaudvar M" (street) and "Keleti pályaudvar" (metro) are one place. */
@@ -507,6 +523,7 @@ const BkkLib = {
     [' vas\u00fat\u00e1llom\u00e1s', ' p\u00e1lyaudvar', ' pu.'].forEach((sfx) => {
       if (t.endsWith(sfx)) t = t.slice(0, -sfx.length).trim();
     });
+    t = t.replace(/[,.;:\s]+$/g, '').trim();
     return t;
   },
   nameEq(a, b) {
@@ -557,6 +574,34 @@ const BkkLib = {
       });
     });
     return hits;
+  },
+  destHitsForQuery(dests, q, extras) {
+    const f = BkkLib.fold(q || '');
+    const out = [];
+    const seen = new Map();
+    const add = (d) => {
+      if (!d || !d.name) return;
+      const key = d.key || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
+      if (!key) return;
+      const id = d.id || d.stopId || '';
+      const prev = seen.get(key);
+      if (prev) {
+        if (BkkLib.elviraStationCode(id) && !BkkLib.elviraStationCode(prev.id)) prev.id = id;
+        return;
+      }
+      const row = { key: key, name: d.name, id: id };
+      seen.set(key, row);
+      out.push(row);
+    };
+    (extras || []).forEach(add);
+    (dests || []).forEach((d) => {
+      if (f) {
+        const dn = BkkLib.fold(d.name);
+        if (dn.indexOf(f) < 0 && f.indexOf(dn) < 0) return;
+      }
+      add(d);
+    });
+    return out;
   },
   isMavRoute(rt) {
     const t = String((rt && rt.type) || '').toUpperCase();
@@ -620,6 +665,46 @@ const BkkLib = {
     const n = s.match(/(\d{5,})/);
     return n ? n[1] : '';
   },
+  elviraStationCode(id) {
+    const m = String(id || '').match(/(\d{9})/);
+    return m ? m[1] : '';
+  },
+  /* BKK street/metro parents (CSF…) sit next to MÁV stations but have no
+     9-digit ELVIRA code. Map the well-known names; searchStops fills the rest. */
+  elviraCodeFromName(name) {
+    const f = BkkLib.fold(name);
+    if (f === 'keleti' || f === 'budapest keleti') return '005510017';
+    if (f === 'kelenfold' || f === 'budapest kelenfold') return '005501024';
+    return '';
+  },
+  async elviraResolveCode(apiKey, id, name) {
+    const direct = BkkLib.elviraStationCode(id);
+    if (direct) return direct;
+    const mapped = BkkLib.elviraCodeFromName(name);
+    if (mapped) return mapped;
+    const n = String(name || '').trim();
+    if (!apiKey || !n) return '';
+    const queries = [n];
+    const key = BkkLib.stationKey(n);
+    if (key && key !== n) queries.push(key);
+    BkkLib.aliasQueries(n).forEach((q) => queries.push(q));
+    const seen = new Set();
+    for (let i = 0; i < queries.length; i++) {
+      const q = queries[i];
+      if (!q || seen.has(q)) continue;
+      seen.add(q);
+      try {
+        const hits = await BkkLib.searchStops(apiKey, q, 'mav');
+        for (let j = 0; j < hits.length; j++) {
+          const c = BkkLib.elviraStationCode(hits[j].id);
+          if (c) {
+            return c;
+          }
+        }
+      } catch (_e) { /* search is a fallback */ }
+    }
+    return '';
+  },
   sameStop(id, originId) {
     if (!id || !originId) return false;
     if (id === originId) return true;
@@ -641,6 +726,10 @@ const BkkLib = {
     const extra = [];
     if (f.includes('arpad hid')) extra.push('Goncz Arpad varoskozpont');
     if (f.includes('moszkva')) extra.push('Szell Kalman ter');
+    if (f === 'keleti' || f.indexOf('keleti ') === 0) extra.push('Budapest-Keleti');
+    if (f === 'kelenfold' || f.indexOf('kelenfold ') === 0) extra.push('Budapest-Kelenfold');
+    const key = BkkLib.stationKey(q);
+    if (key && key !== q && extra.indexOf(key) < 0) extra.push(key);
     return extra;
   },
   labelAliased(q, hit) {
@@ -1259,24 +1348,91 @@ const BkkLib = {
     dests.sort((x, y) => x.name.localeCompare(y.name, 'hu'));
     return { dests, destRoutes };
   },
-  mergeVolanRows(gtfs, otp) {
+  mergeVolanRows(gtfs, otp, limit) {
     const out = [];
-    const seen = new Set();
+    const seen = new Map();
     const keyOf = (row) => `${row.label}|${Math.round(Number(row.sched || row.dep || 0) / 60)}`;
-    (otp || []).forEach((row) => {
+    const generic = (c) => {
+      const x = String(c || '').replace('#', '').toLowerCase();
+      return !x || x === '4477aa';
+    };
+    const add = (row, overlayColor) => {
+      if (!row) return;
       const k = keyOf(row);
-      if (seen.has(k)) return;
-      seen.add(k);
+      if (seen.has(k)) {
+        if (overlayColor) {
+          const prev = out[seen.get(k)];
+          if (prev && generic(prev.color) && row.color && !generic(row.color)) {
+            prev.color = row.color;
+            if (row.text) prev.text = row.text;
+          }
+        }
+        return;
+      }
+      seen.set(k, out.length);
       out.push(row);
-    });
-    (gtfs || []).forEach((row) => {
-      const k = keyOf(row);
-      if (seen.has(k)) return;
-      seen.add(k);
-      out.push(row);
-    });
+    };
+    (otp || []).forEach((row) => add(row, false));
+    (gtfs || []).forEach((row) => add(row, true));
     out.sort((a, b) => (a.dep || 0) - (b.dep || 0));
-    return out.slice(0, 12);
+    const cap = Number(limit);
+    return out.slice(0, (Number.isFinite(cap) && cap > 0) ? cap : 12);
+  },
+  elviraRowsFromResult(res) {
+    if (!res) return [];
+    if (Array.isArray(res)) return res;
+    if (Array.isArray(res.departures)) return res.departures;
+    const payload = res.response || res.service_response;
+    if (payload && Array.isArray(payload.departures)) return payload.departures;
+    if (Array.isArray(payload)) return payload;
+    return [];
+  },
+  async elviraBetween(hass, originId, destId, minutesAfter, destName, opts) {
+    opts = opts || {};
+    let origin = BkkLib.elviraStationCode(originId);
+    let dest = BkkLib.elviraStationCode(destId);
+    if (!origin) origin = await BkkLib.elviraResolveCode(opts.apiKey, originId, opts.originName || '');
+    if (!dest) dest = await BkkLib.elviraResolveCode(opts.apiKey, destId, destName || '');
+    if (!hass || !origin || !dest || origin === dest) {
+      return [];
+    }
+    const serviceData = {
+      origin_code: origin,
+      dest_code: dest,
+      minutes_after: minutesAfter || DEFAULT_MINUTES_AFTER,
+      dest_name: destName || '',
+    };
+    try {
+      let res;
+      if (typeof hass.callService === 'function') {
+        try {
+          res = await hass.callService('bkk_stop', 'elvira_between', serviceData, undefined, false, true);
+        } catch (err) {
+          if (!hass.connection) throw err;
+          res = await hass.connection.sendMessagePromise({
+            type: 'call_service',
+            domain: 'bkk_stop',
+            service: 'elvira_between',
+            service_data: serviceData,
+            return_response: true,
+          });
+        }
+      } else if (hass.connection) {
+        res = await hass.connection.sendMessagePromise({
+          type: 'call_service',
+          domain: 'bkk_stop',
+          service: 'elvira_between',
+          service_data: serviceData,
+          return_response: true,
+        });
+      } else {
+        return [];
+      }
+      const rows = BkkLib.elviraRowsFromResult(res);
+      return Array.isArray(rows) ? rows : [];
+    } catch (err) {
+      return [];
+    }
   },
   async searchStops(apiKey, q, mode, city) {
     const byId = new Map();
@@ -1352,7 +1508,8 @@ const BkkLib = {
       if (as !== bs) return as - bs;
       return (a.label || a.name).localeCompare(b.label || b.name, 'hu');
     });
-    return hits.slice(0, 20);
+    const sliced = hits.slice(0, 20);
+    return sliced;
   },
   async remainingNames(apiKey, cache, stop, routeId) {
     const { variants, stops } = await BkkLib.loadRoutePattern(apiKey, cache, routeId);
@@ -1626,7 +1783,8 @@ const BkkLib = {
     return out;
   },
   async travelMin(apiKey, tripId, destKey, dep, origin, cache) {
-    if (!tripId || !destKey || String(tripId).indexOf('gtfs:') === 0) return null;
+    if (!tripId || !destKey || String(tripId).indexOf('gtfs:') === 0
+        || String(tripId).indexOf('elvira:') === 0) return null;
     try {
       const { sts, stops } = await BkkLib.tripDetails(apiKey, cache || {}, tripId);
       const oidx = BkkLib.originIndex(sts, stops, origin);
@@ -1655,6 +1813,21 @@ const BkkLib = {
     const maxRows = maxDepartureRows(horizon);
     const now = Math.floor(Date.now() / 1000);
     const latest = now + horizon * 60;
+    let rows = [];
+    if ((mode === 'mav' || mode === 'all') && opts.hass && !opts.skipElvira) {
+      try {
+        const destId = (dest && dest.id) || opts.destStopId || '';
+        const extra = await BkkLib.elviraBetween(
+          opts.hass,
+          stopId,
+          destId,
+          horizon,
+          (dest && dest.name) || '',
+          { apiKey: apiKey, originName: opts.originName || '' },
+        );
+        rows = BkkLib.mergeVolanRows(rows, extra, maxRows);
+      } catch (_e) { /* ELVIRA optional; FUTÁR/GTFS rows still show */ }
+    }
     let candidates = [];
     let destDirected = false;
     try {
@@ -1746,7 +1919,9 @@ const BkkLib = {
       if (mode !== 'volan' && mode !== 'all') throw err;
     }
     let picked = candidates;
-    if (destKey && candidates.length && !destDirected) {
+    /* destDirected only picks poles. A parent rail stop still lists both
+       directions, so every trip must be dest-checked when destKey is set. */
+    if (destKey && candidates.length) {
       picked = [];
       for (let i = 0; i < candidates.length && picked.length < maxRows; i += 16) {
         const chunk = candidates.slice(i, i + 16);
@@ -1759,22 +1934,23 @@ const BkkLib = {
     } else {
       picked = candidates.slice(0, maxRows);
     }
-    let rows = picked.map((row) => Object.assign({ travel: null }, row));
+    const futar = picked.map((row) => Object.assign({ travel: null }, row));
     if (!opts.deferTravel) {
-      await Promise.all(rows.map(async (row) => {
+      await Promise.all(futar.map(async (row) => {
         if (row.travel != null || String(row.tripId || '').indexOf('gtfs:') === 0) return;
         row.travel = await BkkLib.travelMin(apiKey, row.tripId, destKey, row.dep, origin, cache);
       }));
     }
+    rows = BkkLib.mergeVolanRows(futar, rows, maxRows);
     if (mode === 'volan' || mode === 'all') {
       try {
         let extra = await BkkLib.volanDepartures(stopId, dest, opts.originName, horizon);
         if (mode === 'all' && selected.size) {
           extra = extra.filter((row) => selected.has('gtfs:' + row.label));
         }
-        rows = BkkLib.mergeVolanRows(extra, rows);
+        rows = BkkLib.mergeVolanRows(extra, rows, maxRows);
       } catch (err) {
-        if (!rows.length) throw err;
+        if (mode !== 'all' && !rows.length) throw err;
       }
     }
     return rows;
@@ -1850,10 +2026,22 @@ const BkkLib = {
     });
     return rows;
   },
+  applyRailBadge(row) {
+    if (!row) return row;
+    const badge = BKK_RAIL_BADGE[String(row.label || '').toUpperCase()];
+    if (!badge) return row;
+    const cur = String(row.color || '').replace('#', '').toLowerCase();
+    if (!cur || cur === '4477aa') {
+      row.color = '#' + badge[0];
+      row.text = '#' + badge[1];
+    }
+    return row;
+  },
 
   /* One departure in the shape the card renders: display strings plus the raw
      epoch seconds, so the countdown can tick without refetching. */
   asRow(r, destName, lang) {
+    BkkLib.applyRailBadge(r);
     const dep = r.dep;
     let type = String(r.rawType || r.vehicle || 'BUS').toUpperCase();
     if (type.indexOf('SUBURBAN') >= 0 || type === 'TRAIN' || type === 'RAILWAY') type = 'RAIL';
@@ -1863,7 +2051,7 @@ const BkkLib = {
     const lat = Number(r.lat);
     const lon = Number(r.lon);
     const hasGps = Number.isFinite(lat) && Number.isFinite(lon);
-    const gtfs = String(r.tripId || '').indexOf('gtfs:') === 0;
+    const gtfs = /^(gtfs:|elvira:)/.test(String(r.tripId || ''));
     return {
       type: type,
       icon: vehicleIcon(type),
@@ -1877,7 +2065,7 @@ const BkkLib = {
       wheelchair: !!r.wheelchair,
       bikesAllowed: !!r.bikesAllowed,
       color: String(r.color || '').replace('#', ''),
-      textcolor: String(r.text || '').replace('#', ''),
+      textcolor: String(r.text || r.textcolor || '').replace('#', ''),
       platform: plat || '',
       trainNumber: r.trainNumber || '',
       delay: Number(r.delay || 0),
@@ -2608,8 +2796,33 @@ class BKKHopCard extends HTMLElement {
     const run = async () => {
       if (gen !== this._gen) return;
       try {
+        let skipElvira = false;
+        let elviraRows = [];
+        if ((mode === 'mav' || mode === 'all') && this._hass) {
+          elviraRows = await BkkLib.elviraBetween(
+            this._hass,
+            cfg.stopId,
+            cfg.destStopId || '',
+            cfg.minutesAfter,
+            cfg.destName || '',
+            { apiKey: cfg.apiKey, originName: cfg.stopName || '' },
+          );
+          if (gen !== this._gen) return;
+          if (elviraRows.length) {
+            skipElvira = true;
+            this._rawRows = elviraRows;
+            this._rows = elviraRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
+            this._err = '';
+            this._loading = false;
+            this._paint();
+          }
+        }
         const rows = await BkkLib.departures(
-          cfg.apiKey, cfg.stopId, cfg.routeIds, { key: cfg.destKey, name: cfg.destName },
+          cfg.apiKey, cfg.stopId, cfg.routeIds, {
+            key: cfg.destKey,
+            name: cfg.destName,
+            id: cfg.destStopId || '',
+          },
           {
             originName: cfg.stopName || '',
             cache: this._tripCache || {},
@@ -2617,10 +2830,18 @@ class BKKHopCard extends HTMLElement {
             city: cfg.city || '',
             minutesAfter: cfg.minutesAfter,
             deferTravel: true,
+            hass: this._hass,
+            skipElvira: skipElvira,
           },
         );
         if (gen !== this._gen) return;
-        this._rawRows = rows || [];
+        const merged = BkkLib.mergeVolanRows(
+          rows || [],
+          elviraRows,
+          maxDepartureRows(cfg.minutesAfter),
+        );
+        merged.forEach((row) => BkkLib.applyRailBadge(row));
+        this._rawRows = merged;
         BkkLib.enrichFromHass(this._hass, this._rawRows);
         const lang = this._lang();
         this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, lang));
@@ -2630,7 +2851,7 @@ class BKKHopCard extends HTMLElement {
         this._syncOpenMap();
         const origin = { id: cfg.stopId, name: cfg.stopName || '' };
         await Promise.all(this._rawRows.map(async (row) => {
-          if (row.travel != null || String(row.tripId || '').indexOf('gtfs:') === 0) return;
+          if (row.travel != null || /^(gtfs:|elvira:)/.test(String(row.tripId || ''))) return;
           row.travel = await BkkLib.travelMin(
             cfg.apiKey, row.tripId, cfg.destKey, row.dep, origin, this._tripCache || {},
           );
@@ -2666,8 +2887,10 @@ class BKKPlannerCard extends BKKHopCard {
     this._destTimer = null;
     this._searchSeq = 0;
     this._destSeq = 0;
+    this._destSearchSeq = 0;
     this._dests = [];
     this._destRoutes = {};
+    this._destHits = [];
     this._destsLoading = false;
     this._pickersMounted = false;
   }
@@ -2686,6 +2909,7 @@ class BKKPlannerCard extends BKKHopCard {
       stopName: '',
       destKey: '',
       destName: '',
+      destStopId: '',
       routeIds: [],
     };
   }
@@ -2800,9 +3024,9 @@ class BKKPlannerCard extends BKKHopCard {
     if (dq) {
       dq.addEventListener('input', () => {
         clearTimeout(this._destTimer);
-        this._destTimer = setTimeout(() => this._paintDestHits(dq.value.trim()), 280);
+        this._destTimer = setTimeout(() => this._searchDest(dq.value.trim()), 280);
       });
-      dq.addEventListener('focus', () => this._paintDestHits(dq.value.trim()));
+      dq.addEventListener('focus', () => this._searchDest(dq.value.trim()));
     }
     if (reset) reset.addEventListener('click', () => this._resetPlan());
   }
@@ -2850,6 +3074,7 @@ class BKKPlannerCard extends BKKHopCard {
       stopName: '',
       destKey: '',
       destName: '',
+      destStopId: '',
       routeIds: [],
     });
     this._rows = [];
@@ -2903,6 +3128,7 @@ class BKKPlannerCard extends BKKHopCard {
       stopName: stop.name,
       destKey: '',
       destName: '',
+      destStopId: '',
       routeIds: [],
     });
     this._dests = [];
@@ -2947,7 +3173,7 @@ class BKKPlannerCard extends BKKHopCard {
     } finally {
       if (seq === this._destSeq) {
         this._destsLoading = false;
-        this._paintDestHits((this._planEl('pdq') || {}).value || '');
+        this._searchDest((this._planEl('pdq') || {}).value || '');
       }
     }
   }
@@ -2964,6 +3190,58 @@ class BKKPlannerCard extends BKKHopCard {
       }
     });
     return out;
+  }
+
+  async _searchDest(q) {
+    const box = this._planEl('pdhits');
+    if (!box) return;
+    const lang = this._lang();
+    const cfg = this._config || {};
+    if (!cfg.stopId) {
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerPickAll')) + '</span>';
+      return;
+    }
+    if (!q || q.length < 2) {
+      this._paintDestHits(q || '');
+      return;
+    }
+    const seq = ++this._destSearchSeq;
+    try {
+      if (!this._config.apiKey) await this._fillKey();
+      const extras = await BkkLib.searchStops(this._config.apiKey, q, 'all');
+      if (seq !== this._destSearchSeq) return;
+      const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
+      if (!hits.length && this._destsLoading) {
+        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'destLoading')) + '</span>';
+        return;
+      }
+      this._renderDestHits(hits, t(lang, 'mode').bkk.destEmpty);
+    } catch (err) {
+      if (seq !== this._destSearchSeq) return;
+      this._showErr(err);
+    }
+  }
+
+  _renderDestHits(hits, emptyMsg) {
+    const box = this._planEl('pdhits');
+    if (!box) return;
+    this._destHits = hits || [];
+    if (!this._destHits.length) {
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(emptyMsg) + '</span>';
+      return;
+    }
+    const shown = this._destHits.slice(0, 20);
+    box.innerHTML = shown.map((d) => (
+      `<button class="hit" type="button" data-key="${BkkLib.esc(d.key)}" data-id="${BkkLib.esc(d.id || '')}">${BkkLib.esc(d.name)}</button>`
+    )).join('');
+    box.querySelectorAll('.hit').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const key = btn.getAttribute('data-key');
+        const id = btn.getAttribute('data-id') || '';
+        const d = (this._destHits || []).find((x) => x.key === key);
+        if (d) this._pickDest(Object.assign({}, d, { id: d.id || id }));
+      });
+    });
   }
 
   _paintDestHits(q) {
@@ -2983,31 +3261,15 @@ class BKKPlannerCard extends BKKHopCard {
       box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'mode').bkk.destNone) + '</span>';
       return;
     }
-    const f = BkkLib.fold(q || '');
-    const hits = f
-      ? this._dests.filter((d) => BkkLib.fold(d.name).indexOf(f) >= 0)
-      : this._dests;
-    if (!hits.length) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'mode').bkk.destEmpty) + '</span>';
-      return;
-    }
-    const shown = hits.slice(0, 50);
-    box.innerHTML = shown.map((d) => (
-      `<button class="hit" type="button" data-key="${BkkLib.esc(d.key)}">${BkkLib.esc(d.name)}</button>`
-    )).join('');
-    box.querySelectorAll('.hit').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const key = btn.getAttribute('data-key');
-        const d = this._dests.find((x) => x.key === key);
-        if (d) this._pickDest(d);
-      });
-    });
+    const hits = BkkLib.destHitsForQuery(this._dests, q, []);
+    this._renderDestHits(hits, t(lang, 'mode').bkk.destEmpty);
   }
 
   _pickDest(dest) {
     this._config = Object.assign({}, this._config, {
       destKey: dest.key,
       destName: dest.name,
+      destStopId: dest.id || '',
       routeIds: this._idsForDest(dest.key),
     });
     const dq = this._planEl('pdq');
