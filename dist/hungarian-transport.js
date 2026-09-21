@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.3';
+const CARD_VERSION = '1.4.2-rev.4';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -861,6 +861,7 @@ const BkkLib = {
     return n > 1e12 ? n / 1000 : n;
   },
   decodePolyline(encoded) {
+    if (encoded && typeof encoded === 'object') encoded = encoded.points || '';
     if (!encoded || typeof encoded !== 'string') return [];
     const coords = [];
     let index = 0;
@@ -1880,6 +1881,15 @@ const BkkLib = {
         rows = BkkLib.mergeVolanRows(rows, extra, maxRows);
       } catch (_e) { /* ELVIRA optional; FUTÁR/GTFS rows still show */ }
     }
+    const elviraNums = new Set();
+    rows.forEach((r) => {
+      const n = BkkLib.rowTrainNumber(r);
+      if (n) elviraNums.add(n);
+    });
+    (opts.elviraRows || []).forEach((r) => {
+      const n = BkkLib.rowTrainNumber(r);
+      if (n) elviraNums.add(n);
+    });
     let candidates = [];
     let destDirected = false;
     try {
@@ -1928,7 +1938,9 @@ const BkkLib = {
           const rid = trip.routeId;
           const rt = routes[rid] || {};
           if (!BkkLib.routeMatchesMode(rt, mode)) return;
-          if (selected.size && mode !== 'volan' && !selected.has(rid)) return;
+          const tripNum = String(trip.shortName || trip.tripShortName || '').trim().replace(/^0+/, '')
+            || BkkLib.trainNumberFromTripId(st.tripId);
+          if (!BkkLib.keepFutarCandidate(rt, selected, mode, elviraNums, tripNum)) return;
           const dep = st.predictedDepartureTime || st.departureTime;
           if (dep && dep > latest + 60) return;
           seenTrip.add(st.tripId);
@@ -2011,6 +2023,54 @@ const BkkLib = {
   trainNumberFromTripId(tripId) {
     const m = String(tripId || '').match(/^BKK_(\d+)(?:_|$)/);
     return m ? m[1] : '';
+  },
+  isFutarTripId(tripId) {
+    const t = String(tripId || '');
+    return !!t && !/^(elvira:|gtfs:)/.test(t);
+  },
+  keepFutarCandidate(rt, selected, mode, elviraNums, tripNum) {
+    if (!selected || !selected.size || mode === 'volan') return true;
+    const rid = (rt && rt.id) || '';
+    if (selected.has(rid)) return true;
+    if ((mode === 'mav' || mode === 'all') && tripNum && elviraNums && elviraNums.has(String(tripNum))) {
+      return true;
+    }
+    return false;
+  },
+  async futarTripIdForRow(apiKey, cache, row, stopId) {
+    const tid = String((row && row.tripId) || '');
+    if (BkkLib.isFutarTripId(tid)) return tid;
+    const num = BkkLib.rowTrainNumber(row);
+    if (!apiKey || !stopId || !num) return '';
+    const key = 'futarTrip:' + stopId + ':' + num;
+    const hit = BkkLib._cached(cache, key);
+    if (typeof hit === 'string') return hit;
+    try {
+      const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
+        stopId: stopId,
+        minutesAfter: '360',
+        minutesBefore: '60',
+        onlyDepartures: 'true',
+        includeReferences: 'true',
+      });
+      const trips = (((data.data || {}).references) || {}).trips || {};
+      const times = (((data.data || {}).entry) || {}).stopTimes || [];
+      let found = '';
+      for (let i = 0; i < times.length; i++) {
+        const st = times[i];
+        if (!st || !st.tripId) continue;
+        const trip = trips[st.tripId] || {};
+        const n = String(trip.shortName || trip.tripShortName || '').trim().replace(/^0+/, '')
+          || BkkLib.trainNumberFromTripId(st.tripId);
+        if (n === num) {
+          found = st.tripId;
+          break;
+        }
+      }
+      return BkkLib._store(cache, key, found);
+    } catch (_e) {
+      return '';
+    }
   },
   platformFromText(text) {
     const m = String(text || '').match(PLATFORM_IN_HEAD);
@@ -2663,7 +2723,7 @@ class BKKHopCard extends HTMLElement {
     let shape = [];
     let hasShape = false;
     let positionEstimated = false;
-    const tripId = row.tripId || '';
+    let tripId = row.tripId || '';
     if (!hasGps && !tripId) {
       this._showMapNotice(t(lang, 'mapNoData'));
       return;
@@ -2738,7 +2798,15 @@ class BKKHopCard extends HTMLElement {
     this._map = map;
     setTimeout(() => map.invalidateSize(), 40);
     let details = null;
-    const futarTrip = tripId && !/^(elvira:|gtfs:)/.test(tripId);
+    if (cfg.apiKey && !BkkLib.isFutarTripId(tripId)) {
+      try {
+        const resolved = await BkkLib.futarTripIdForRow(
+          cfg.apiKey, this._tripCache || {}, row, cfg.stopId,
+        );
+        if (resolved) tripId = resolved;
+      } catch (_e) { /* keep ELVIRA id; map may still estimate if details load */ }
+    }
+    const futarTrip = BkkLib.isFutarTripId(tripId);
     if (futarTrip && cfg.apiKey) {
       try {
         details = await BkkLib.tripDetails(cfg.apiKey, this._tripCache || {}, tripId);
@@ -2885,6 +2953,7 @@ class BKKHopCard extends HTMLElement {
             deferTravel: true,
             hass: this._hass,
             skipElvira: skipElvira,
+            elviraRows: elviraRows,
           },
         );
         if (gen !== this._gen) return;

@@ -338,6 +338,43 @@ check('ELVIRA Tópart takes FUTAR GPS from BKK trip id train number', (() => {
     && merged[0].tripId === 'BKK_853_87'
     && merged[0].lat === 46.90843;
 })());
+check('FUTAR trip id from BKK_4541_108 is 4541', Lib.trainNumberFromTripId('BKK_4541_108') === '4541');
+check('elvira trip id is not a FUTAR trip', !Lib.isFutarTripId('elvira:2889849') && Lib.isFutarTripId('BKK_4541_108'));
+check('S30 FUTAR is kept when the hop omits BKK_S30 but ELVIRA listed 4541',
+  Lib.keepFutarCandidate(
+    { id: 'BKK_S30' },
+    new Set(['BKK_G43', 'BKK_Z30', 'BKK_IC', 'BKK_S']),
+    'mav',
+    new Set(['4541']),
+    '4541',
+  ));
+check('unrelated FUTAR route stays filtered',
+  !Lib.keepFutarCandidate(
+    { id: 'BKK_S10' },
+    new Set(['BKK_G43']),
+    'mav',
+    new Set(['4541']),
+    '1234',
+  ));
+check('ELVIRA S30 takes FUTAR trip id by train number', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 1800;
+  const merged = Lib.mergeVolanRows(
+    [{
+      label: 'S30', tripId: 'BKK_4541_108', trainNumber: '4541',
+      dep: dep, sched: dep, color: '#00AFF0',
+    }],
+    [{
+      label: 'S30', tripId: 'elvira:2889849', trainNumber: '4541',
+      dep: dep, sched: dep, color: '#4477aa',
+    }],
+    12,
+  );
+  return merged.length === 1
+    && merged[0].tripId === 'BKK_4541_108'
+    && String(merged[0].color).toUpperCase().indexOf('00AFF0') >= 0;
+})());
+check('decodePolyline accepts a FUTAR polyline object',
+  Lib.decodePolyline({ points: '_p~iF~ps|U' }).length >= 1);
 check('planner dest search prefers a 9-digit MAV id over a volan id',
   Lib.destHitsForQuery(
     [],
