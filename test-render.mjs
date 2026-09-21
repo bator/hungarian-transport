@@ -75,7 +75,7 @@ card._rows = [
 card._paint();
 
 const out = html();
-check('renders one row per departure', (out.match(/<tr>/g) || []).length === 2);
+check('renders one row per departure', (out.match(/<tr[\s>]/g) || []).length === 2);
 check('route badge carries the feed colours', out.includes('background:#4477aa;color:#ffffff'));
 check('vehicle icon rendered', out.includes('mdi:train') && out.includes('mdi:bus'));
 check('delay shown as late with struck scheduled time',
@@ -91,7 +91,7 @@ check('card size grows with the rows', card.getCardSize() >= 2, String(card.getC
 card._showErr(new Error('boom'));
 const withErr = html();
 check('error keeps the rows and adds a banner',
-  withErr.includes('boom') && (withErr.match(/<tr>/g) || []).length === 2);
+  withErr.includes('boom') && (withErr.match(/<tr[\s>]/g) || []).length === 2);
 
 card.remove();
 check('timers cleared on detach', card._poll === null && card._tick === null);
@@ -186,5 +186,17 @@ mapped._rows = [{
 }];
 mapped._paint();
 check('mapped trip rows are clickable', mapped.shadowRoot.innerHTML.includes('row-clickable'));
+check('map marker button is rendered',
+  mapped.shadowRoot.innerHTML.includes('mdi:map-marker-outline')
+  && mapped.shadowRoot.innerHTML.includes('class="map-open"'));
+let opened = 0;
+mapped._openVehicleMap = () => { opened += 1; };
+const tr = mapped.shadowRoot.querySelector('tr[data-row-index]');
+if (tr) tr.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
+check('row click opens the map', opened >= 1, String(opened));
+const btn = mapped.shadowRoot.querySelector('button.map-open');
+opened = 0;
+if (btn) btn.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
+check('map button click opens the map', opened >= 1, String(opened));
 
 process.exit(failed ? 1 : 0);

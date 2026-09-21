@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.0-rev.3';
+const CARD_VERSION = '1.4.0-rev.4';
 
 const BKK_PLANNER_TAG = 'bkk-stop-card-plan';
 const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
@@ -2425,6 +2425,8 @@ class BKKHopCard extends HTMLElement {
     this._mapRoute = null;
     this._openMapKey = null;
     this._onMapKey = null;
+    this._mapClicksBound = false;
+    this._openingMap = '';
   }
 
   static async getConfigElement() {
@@ -2512,6 +2514,7 @@ class BKKHopCard extends HTMLElement {
   connectedCallback() {
     if (!this._painted) return;
     this._startTick();
+    this._bindMapClicks();
     if (!this._poll && !this._reloadActive) this._reloadSafe();
   }
 
@@ -2551,20 +2554,27 @@ class BKKHopCard extends HTMLElement {
     while (root.firstChild) root.removeChild(root.firstChild);
     const style = document.createElement('style');
     style.textContent = `
-      :host { display: block; }
-      ha-card { overflow: visible; }
+      :host { display: block; pointer-events: auto; }
+      ha-card { overflow: visible; pointer-events: auto; }
       .wrap { padding: 10px 12px 11px; }
       .head { font-weight: 700; margin-bottom: 7px; overflow: hidden;
         text-overflow: ellipsis; white-space: nowrap; }
       .err { font-size: 12px; color: var(--error-color, #e66); margin-bottom: 6px; }
       .msg { font-size: 12px; color: var(--secondary-text-color); }
-      table { width: 100%; border-collapse: collapse; font-size: 13px; }
-      tr.row-clickable { cursor: pointer; }
+      .body { pointer-events: auto; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; pointer-events: auto; }
+      tbody tr, tr.row-clickable { cursor: pointer; }
       tr.row-clickable:hover td { background: color-mix(in srgb, var(--primary-color) 8%, transparent); }
       tr + tr td { border-top: 1px solid var(--divider-color); }
       td { padding: 6px 3px; vertical-align: middle; }
       td.icon { width: 20px; color: var(--secondary-text-color); }
-      td.icon ha-icon { --mdc-icon-size: 18px; display: block; }
+      td.icon ha-icon, td.mapbtn ha-icon { --mdc-icon-size: 18px; display: block; pointer-events: none; }
+      td.mapbtn { width: 28px; color: var(--secondary-text-color); }
+      td.mapbtn .map-open {
+        appearance: none; border: 0; background: transparent; color: inherit;
+        padding: 2px; margin: 0; cursor: pointer; display: flex;
+        align-items: center; justify-content: center; pointer-events: auto;
+      }
       td.route { width: 1%; white-space: nowrap; }
       .badge { display: inline-block; min-width: 2.4em; padding: 2px 6px;
         border-radius: 6px; font-weight: 800; font-size: 12px; line-height: 1.35;
@@ -2627,7 +2637,7 @@ class BKKHopCard extends HTMLElement {
     root.appendChild(style);
     root.appendChild(card);
     this._painted = true;
-    this._elBody.addEventListener('click', (ev) => this._onRowClick(ev));
+    this._bindMapClicks();
     this._paint();
     this._startTick();
   }
@@ -2717,15 +2727,16 @@ class BKKHopCard extends HTMLElement {
       ? `<span class="num" title="${esc(t(lang, 'tipTrain', r.trainNumber))}">${
         esc(r.trainNumber)}</span>`
       : '';
-    const clickable = r.hasLocation
-      ? ` class="row-clickable" data-row-index="${idx}" title="${esc(t(lang, 'mapOpenTip'))}"`
-      : '';
+    const tip = esc(t(lang, 'mapOpenTip'));
+    const clickable = ` class="row-clickable" data-row-index="${idx}" title="${tip}"`;
+    const mapBtn = `<td class="mapbtn"><button type="button" class="map-open" aria-label="${tip}" title="${tip}"><ha-icon icon="mdi:map-marker-outline"></ha-icon></button></td>`;
     return `<tr${clickable}>
       <td class="icon"><ha-icon icon="${esc(r.icon || 'mdi:bus')}"></ha-icon></td>
       <td class="route"><span class="badge" style="${esc(this._badgeStyle(r))}">${
       esc(r.label || '?')}</span></td>
       <td class="dest" title="${esc(r.headsign || '')}">${esc(r.headsign || '')}${num}</td>
       <td class="flags">${plat}${pictos.length ? `<span class="pictos">${pictos.join('')}</span>` : ''}</td>
+      ${mapBtn}
       <td class="when"><span class="${atClass}" title="${esc(atTip)}">${
       esc(r.predicted_attime || r.attime || '')}</span>${
       sched ? `<span class="sched">${esc(sched)}</span>` : ''}</td>
@@ -2733,12 +2744,40 @@ class BKKHopCard extends HTMLElement {
     </tr>`;
   }
 
-  _onRowClick(ev) {
-    const tr = ev.target.closest('tr[data-row-index]');
-    if (!tr) return;
+  _bindMapClicks() {
+    if (this._mapClicksBound) return;
+    if (!this._elBody) return;
+    this._mapClicksBound = true;
+    const fn = (ev) => this._onRowClick(ev);
+    this._elBody.addEventListener('click', fn);
+    this.addEventListener('click', fn, true);
+  }
+
+  _rowFromClick(ev) {
+    const path = (typeof ev.composedPath === 'function') ? ev.composedPath() : [];
+    let tr = null;
+    for (let i = 0; i < path.length; i++) {
+      const n = path[i];
+      if (n && n.nodeType === 1 && n.getAttribute && n.getAttribute('data-row-index') != null
+        && (n.tagName === 'TR' || (n.classList && n.classList.contains('row-clickable')))) {
+        tr = n;
+        break;
+      }
+    }
+    if (!tr) {
+      const start = ev.target;
+      if (start && start.closest) tr = start.closest('tr[data-row-index]');
+    }
+    if (!tr) return null;
     const idx = Number(tr.getAttribute('data-row-index'));
-    const row = (this._rows || [])[idx];
-    if (!row || !row.hasLocation) return;
+    return (this._rows || [])[idx] || null;
+  }
+
+  _onRowClick(ev) {
+    const row = this._rowFromClick(ev);
+    if (!row) return;
+    ev.preventDefault();
+    ev.stopPropagation();
     this._openVehicleMap(row);
   }
 
@@ -2763,7 +2802,8 @@ class BKKHopCard extends HTMLElement {
   }
 
   _ensureLeaflet() {
-    if (typeof window !== 'undefined' && window.L) return Promise.resolve(window.L);
+    const isLeaflet = (L) => !!(L && typeof L.map === 'function' && typeof L.tileLayer === 'function' && typeof L.divIcon === 'function');
+    if (typeof window !== 'undefined' && isLeaflet(window.L)) return Promise.resolve(window.L);
     if (leafletPromise) return leafletPromise;
     leafletPromise = new Promise((resolve, reject) => {
       const cssId = 'hungarian-transport-leaflet-css';
@@ -2774,21 +2814,27 @@ class BKKHopCard extends HTMLElement {
         link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
         document.head.appendChild(link);
       }
-      if (typeof window !== 'undefined' && window.L) {
+      if (typeof window !== 'undefined' && isLeaflet(window.L)) {
         resolve(window.L);
         return;
       }
       const existing = typeof document !== 'undefined'
         ? document.getElementById('hungarian-transport-leaflet-js') : null;
       if (existing) {
-        existing.addEventListener('load', () => resolve(window.L));
+        existing.addEventListener('load', () => {
+          if (isLeaflet(window.L)) resolve(window.L);
+          else reject(new Error('leaflet'));
+        });
         existing.addEventListener('error', reject);
         return;
       }
       const script = document.createElement('script');
       script.id = 'hungarian-transport-leaflet-js';
       script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
-      script.onload = () => resolve(window.L);
+      script.onload = () => {
+        if (isLeaflet(window.L)) resolve(window.L);
+        else reject(new Error('leaflet'));
+      };
       script.onerror = reject;
       document.head.appendChild(script);
     });
@@ -2814,6 +2860,7 @@ class BKKHopCard extends HTMLElement {
     }
     this._mapOverlay = null;
     this._openMapKey = null;
+    this._openingMap = '';
   }
 
   _mapKey(row) {
@@ -2870,6 +2917,11 @@ class BKKHopCard extends HTMLElement {
   async _openVehicleMap(row) {
     const lang = this._lang();
     const cfg = this._config || {};
+    const key = this._mapKey(row);
+    if (this._openingMap === key) return;
+    if (this._mapOverlay && this._openMapKey === key) return;
+    this._closeVehicleMap();
+    this._openingMap = key;
     let lat = row.lat != null ? Number(row.lat) : NaN;
     let lon = row.lon != null ? Number(row.lon) : NaN;
     let hasGps = Number.isFinite(lat) && Number.isFinite(lon);
@@ -2881,7 +2933,6 @@ class BKKHopCard extends HTMLElement {
       this._showMapNotice(t(lang, 'mapNoData'));
       return;
     }
-    this._closeVehicleMap();
     let L;
     try {
       L = await this._ensureLeaflet();
@@ -2935,12 +2986,18 @@ class BKKHopCard extends HTMLElement {
     const foot = overlay.querySelector('.ht-map-foot');
     const startLat = hasGps ? lat : 47.5;
     const startLon = hasGps ? lon : 19.05;
-    const map = L.map(canvas, { scrollWheelZoom: true }).setView([startLat, startLon], hasGps ? 12 : 10);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-      maxZoom: 20,
-      subdomains: 'abcd',
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    }).addTo(map);
+    let map;
+    try {
+      map = L.map(canvas, { scrollWheelZoom: true }).setView([startLat, startLon], hasGps ? 12 : 10);
+      L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+        maxZoom: 20,
+        subdomains: 'abcd',
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+      }).addTo(map);
+    } catch (_e) {
+      this._showMapNotice(t(lang, 'mapLeafletFail'));
+      return;
+    }
     this._map = map;
     setTimeout(() => map.invalidateSize(), 40);
     let details = null;
