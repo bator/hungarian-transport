@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.11';
+const CARD_VERSION = '1.4.2-rev.12';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -1244,6 +1244,23 @@ const BkkLib = {
     }
     return Array.from(byKey.values());
   },
+  citySearchAll(idx, q) {
+    const f = BkkLib.fold(q);
+    if (!f || !idx) return [];
+    const best = new Map();
+    (idx.stops || []).forEach((s) => {
+      const fold = s.fold || BkkLib.fold(s.name);
+      if (!fold || fold.indexOf(f) < 0) return;
+      const op = (idx.ops || [])[s.op];
+      if (!op) return;
+      const prev = best.get(op.id);
+      const start = fold.startsWith(f) ? 0 : 1;
+      if (!prev || start < prev.start || (start === prev.start && s.name.localeCompare(prev.stop.name, 'hu') < 0)) {
+        best.set(op.id, { stop: s, start: start });
+      }
+    });
+    return Array.from(best.values()).map((row) => row.stop);
+  },
   async citySearchStops(q, city) {
     if (!city) return [];
     const idx = await BkkLib.cityIndex();
@@ -1615,7 +1632,7 @@ const BkkLib = {
       try {
         const idx = await BkkLib.cityIndex();
         const seenFold = new Set();
-        (await BkkLib.gtfsSearchStops(idx, q, null)).forEach((s) => {
+        BkkLib.citySearchAll(idx, q).forEach((s) => {
           const opId = BkkLib.cityOpId(idx, s);
           const op = (idx.ops || []).find((o) => o.id === opId);
           const city = op ? String(op.name).split(' — ')[0] : '';
@@ -1687,6 +1704,7 @@ const BkkLib = {
       hits = BkkLib.groupStops(Array.from(byId.values()));
     }
     hits = hits.map((h) => {
+      if (h.city && h.label) return h;
       let label = BkkLib.labelAliased(q, h);
       if (mode === 'all') {
         if (BkkLib.isMavStop(h)) label += ' (M\u00c1V)';
@@ -1701,8 +1719,9 @@ const BkkLib = {
       if (as !== bs) return as - bs;
       return (a.label || a.name).localeCompare(b.label || b.name, 'hu');
     });
-    const sliced = hits.slice(0, 20);
-    return sliced;
+    const cities = hits.filter((h) => h.city).slice(0, 40);
+    const other = hits.filter((h) => !h.city).slice(0, 20);
+    return cities.concat(other);
   },
   async remainingNames(apiKey, cache, stop, routeId) {
     const { variants, stops } = await BkkLib.loadRoutePattern(apiKey, cache, routeId);

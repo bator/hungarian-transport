@@ -509,6 +509,22 @@ check('planner editor still has hidden mav checkbox', !!ped.querySelector('#mav'
 
 const pminChips = plan.shadowRoot.querySelectorAll('#pmin .chip');
 check('planner in-card minutesAfter chips', pminChips.length === 8, String(pminChips.length));
+check('city search keeps one stop from each city', (() => {
+  const idx = {
+    ops: [
+      { id: 'miskolc', name: 'Miskolc — MVK' },
+      { id: 'pecs', name: 'Pécs — Tüke Busz' },
+    ],
+    stops: [
+      { op: 0, name: 'Tiszai pályaudvar', fold: Lib.fold('Tiszai pályaudvar') },
+      { op: 0, name: 'Tiszai pu. másik', fold: Lib.fold('Tiszai pu. másik') },
+      { op: 1, name: 'Tiszai tér', fold: Lib.fold('Tiszai tér') },
+    ],
+  };
+  const hits = Lib.citySearchAll(idx, 'Tiszai');
+  const ops = hits.map((s) => s.op).sort();
+  return hits.length === 2 && ops[0] === 0 && ops[1] === 1;
+})());
 check('city stop id resolves to the szombathely operator',
   Lib.cityOpId({
     ops: [{ i: 3, id: 'szombathely', name: 'Szombathely — Blaguss' }],
