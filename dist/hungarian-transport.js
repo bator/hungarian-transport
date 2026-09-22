@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.7';
+const CARD_VERSION = '1.4.4-rev.8';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -276,6 +276,10 @@ const I18N = {
     plannerLoading: 'Bet\u00f6lt\u00e9s...',
     plannerNoSharedStop: 'Nincs k\u00f6z\u00f6s meg\u00e1ll\u00f3',
     plannerNoSharedLater: 'Ezeknek a j\u00e1ratoknak nincs k\u00f6z\u00f6s k\u00e9s\u0151bbi meg\u00e1ll\u00f3ja.',
+    plannerJourneyTitle: '\u00c1tsz\u00e1ll\u00e1ssal',
+    plannerJourneySummary: (parts) => `${parts[0]} perc \u00b7 ${parts[1]} \u00e1tsz\u00e1ll\u00e1s \u00b7 ${parts[2]} perc gyalogl\u00e1s`,
+    plannerWalk: (parts) => `Gyalogl\u00e1s ${parts[0]} perc, ${parts[1]} m`,
+    plannerRide: (min) => `${min} perc`,
     plannerPickDest: 'V\u00e1lassz c\u00e9lt...',
     plannerNoRoutes: 'Nincs indul\u00f3 j\u00e1rat ebben a meg\u00e1ll\u00f3ban.',
     plannerNoDepartures: 'Nincs k\u00f6zelg\u0151 indul\u00e1s a v\u00e1lasztott j\u00e1ratokkal.',
@@ -422,6 +426,10 @@ const I18N = {
     plannerLoading: 'Loading...',
     plannerNoSharedStop: 'No shared stop',
     plannerNoSharedLater: 'These routes share no later stop.',
+    plannerJourneyTitle: 'With a transfer',
+    plannerJourneySummary: (parts) => `${parts[0]} min \u00b7 ${parts[1]} transfer \u00b7 ${parts[2]} min walking`,
+    plannerWalk: (parts) => `Walk ${parts[0]} min, ${parts[1]} m`,
+    plannerRide: (min) => `${min} min`,
     plannerPickDest: 'Pick a destination...',
     plannerNoRoutes: 'No departures from this stop.',
     plannerNoDepartures: 'No upcoming departure on the selected routes.',
@@ -879,6 +887,85 @@ const BkkLib = {
     });
     if (!last) return { count: times.length, spanMin: 0 };
     return { count: times.length, spanMin: (last - nowSec) / 60 };
+  },
+  planPlaceVertex(name, id) {
+    const label = String(name || '').replace(/::/g, ' ').trim();
+    const raw = String(id || '');
+    const m = raw.match(/^BKK_(.+)$/i);
+    if (m && label) return `${label}::BKK:${m[1]}`;
+    return '';
+  },
+  async planPlace(apiKey, stop) {
+    const name = (stop && stop.name) || '';
+    const id = (stop && stop.id) || '';
+    const vertex = BkkLib.planPlaceVertex(name, id);
+    if (vertex) return vertex;
+    const lat = Number(stop && stop.lat);
+    const lon = Number(stop && stop.lon);
+    if (name && Number.isFinite(lat) && Number.isFinite(lon)) return `${name}::${lat},${lon}`;
+    if (!apiKey || !name) return '';
+    try {
+      const data = await BkkLib.fetch(apiKey, 'search.json', { query: name }, true);
+      const stops = (((data.data || {}).references) || {}).stops || {};
+      const want = BkkLib.fold(name);
+      let best = null;
+      Object.values(stops).forEach((s) => {
+        if (!s || s.lat == null || s.lon == null) return;
+        if (id && s.id === id) best = s;
+        else if (!best && BkkLib.fold(s.name) === want) best = s;
+      });
+      if (!best) return '';
+      return `${String(name).replace(/::/g, ' ')}::${best.lat},${best.lon}`;
+    } catch (_e) {
+      return '';
+    }
+  },
+  /* FUTÁR plan-trip: itinerary duration and walkTime are seconds.
+     Each leg duration is milliseconds. */
+  journeyFromPlan(payload) {
+    const its = ((((payload || {}).data || {}).entry || {}).plan || {}).itineraries || [];
+    if (!its.length) return null;
+    let best = its[0];
+    its.forEach((it) => {
+      if (Number(it.duration || 1e15) < Number(best.duration || 1e15)) best = it;
+    });
+    const legs = (best.legs || []).map((leg) => {
+      const sec = Math.round(Number(leg.duration || 0) / 1000);
+      const walk = String(leg.mode || '').toUpperCase() === 'WALK';
+      return {
+        walk,
+        minutes: sec <= 0 ? 0 : Math.max(1, Math.round(sec / 60)),
+        meters: Math.max(0, Math.round(Number(leg.distance || 0))),
+        label: String(leg.routeShortName || ''),
+        headsign: String(leg.headsign || ''),
+        from: String((leg.from || {}).name || ''),
+        to: String((leg.to || {}).name || ''),
+      };
+    }).filter((leg) => leg.minutes > 0);
+    if (!legs.length) return null;
+    return {
+      durationMin: Math.max(1, Math.round(Number(best.duration || 0) / 60)),
+      walkMin: Math.max(0, Math.round(Number(best.walkTime || 0) / 60)),
+      transfers: Math.max(0, Number(best.transfers || 0)),
+      legs,
+    };
+  },
+  async planJourney(apiKey, origin, dest) {
+    if (!apiKey) return null;
+    const fromPlace = await BkkLib.planPlace(apiKey, origin);
+    const toPlace = await BkkLib.planPlace(apiKey, dest);
+    if (!fromPlace || !toPlace) return null;
+    try {
+      const data = await BkkLib.fetch(apiKey, 'plan-trip.json', {
+        fromPlace,
+        toPlace,
+        mode: 'TRANSIT,WALK',
+        numItineraries: '5',
+      }, true);
+      return BkkLib.journeyFromPlan(data);
+    } catch (_e) {
+      return null;
+    }
   },
   async probeApiKey(apiKey) {
     if (!apiKey) return { ok: false, code: 'errNoApiKey' };
@@ -3482,6 +3569,12 @@ class BKKHopCard extends HTMLElement {
           paintRows(list);
         };
         let startThrough = null;
+        let elviraDone = !wantElvira;
+        let throughDone = true;
+        const considerJourney = () => {
+          if (!elviraDone || !throughDone) return;
+          if (typeof this._considerJourney === 'function') this._considerJourney();
+        };
         const rows = await BkkLib.departures(
           cfg.apiKey, cfg.stopId, cfg.routeIds, {
             key: cfg.destKey,
@@ -3504,18 +3597,28 @@ class BKKHopCard extends HTMLElement {
               if (gen !== this._gen) return;
               futarFull = full || [];
               publish();
+              throughDone = true;
+              considerJourney();
             },
           },
         );
         if (gen !== this._gen) return;
+        this._journey = null;
+        this._journeyKey = '';
         earlyRows = rows || [];
         publish();
         elviraP.then((list) => {
           if (gen !== this._gen) return;
           elviraRows = list || [];
           publish();
+          elviraDone = true;
+          considerJourney();
         });
-        if (startThrough) startThrough();
+        if (startThrough) {
+          throughDone = false;
+          startThrough();
+        }
+        considerJourney();
         this._syncOpenMap();
         const origin = { id: cfg.stopId, name: cfg.stopName || '' };
         await Promise.all([
@@ -3599,6 +3702,73 @@ class BKKPlannerCard extends BKKHopCard {
 
   _departMode() {
     return 'all';
+  }
+
+  _considerJourney() {
+    if (this._journeyLoading) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const visible = (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
+    if (visible.length) {
+      if (this._journey) {
+        this._journey = null;
+        this._paint();
+      }
+      return;
+    }
+    const cfg = this._config || {};
+    if (!cfg.apiKey || !cfg.stopId || !cfg.destName) return;
+    const key = [cfg.stopId, cfg.destStopId || '', cfg.destName].join('|');
+    if (this._journeyKey === key) return;
+    const gen = this._gen;
+    this._journeyKey = key;
+    this._journeyLoading = true;
+    BkkLib.planJourney(
+      cfg.apiKey,
+      { id: cfg.stopId, name: cfg.stopName || '' },
+      { id: cfg.destStopId || '', name: cfg.destName || '' },
+    ).then((journey) => {
+      this._journeyLoading = false;
+      if (gen !== this._gen) return;
+      this._journey = journey;
+      this._paint();
+    }).catch(() => {
+      this._journeyLoading = false;
+    });
+  }
+
+  _paint() {
+    super._paint();
+    this._paintJourney();
+  }
+
+  _paintJourney() {
+    if (!this._elBody) return;
+    const prev = this._elBody.querySelector('.journey-plan');
+    if (prev) prev.remove();
+    const journey = this._journey;
+    if (!journey || !journey.legs || !journey.legs.length) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const visible = (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
+    if (visible.length) return;
+    const lang = this._lang();
+    const esc = BkkLib.esc;
+    const legs = journey.legs.map((leg) => {
+      if (leg.walk) {
+        return `<div class="j-leg j-walk"><span class="j-mode">${esc(t(lang, 'plannerWalk', [leg.minutes, leg.meters]))}</span>`
+          + `<span class="j-where">${esc(leg.from)} \u2192 ${esc(leg.to)}</span></div>`;
+      }
+      const ride = leg.label
+        ? `<span class="j-badge">${esc(leg.label)}</span>`
+        : '';
+      return `<div class="j-leg">${ride}<span class="j-where">${esc(leg.headsign || leg.to)}</span>`
+        + `<span class="j-min">${esc(t(lang, 'plannerRide', leg.minutes))}</span></div>`;
+    }).join('');
+    const box = document.createElement('div');
+    box.className = 'journey-plan';
+    box.innerHTML = `<div class="j-title">${esc(t(lang, 'plannerJourneyTitle'))}</div>`
+      + `<div class="j-sum">${esc(t(lang, 'plannerJourneySummary', [journey.durationMin, journey.transfers, journey.walkMin]))}</div>`
+      + legs;
+    this._elBody.appendChild(box);
   }
 
   _header() {
@@ -3732,6 +3902,23 @@ class BKKPlannerCard extends BKKHopCard {
         padding: 8px 10px; border-radius: 12px; background: var(--card-background-color, #fff);
       }
       .plan .picked.show { display: block; }
+      .journey-plan {
+        margin: 8px 8px 12px; padding: 12px;
+        border-radius: var(--ha-card-border-radius, 12px);
+        background: var(--secondary-background-color, rgba(127,127,127,.12));
+      }
+      .journey-plan .j-title { font-size: 12px; font-weight: 700; letter-spacing: 0.04em;
+        text-transform: uppercase; color: var(--secondary-text-color); }
+      .journey-plan .j-sum { margin: 4px 0 10px; font-size: 16px; font-weight: 700; }
+      .journey-plan .j-leg { display: flex; align-items: baseline; gap: 8px;
+        padding: 6px 0; border-top: 1px solid var(--divider-color); font-size: 14px; }
+      .journey-plan .j-where { flex: 1; min-width: 0; }
+      .journey-plan .j-min { font-weight: 700; }
+      .journey-plan .j-badge {
+        flex: 0 0 auto; border-radius: 8px; padding: 2px 8px; font-weight: 700;
+        background: var(--primary-color); color: var(--text-primary-color, #fff);
+      }
+      .journey-plan .j-walk { color: var(--secondary-text-color); }
     `;
     this.shadowRoot.appendChild(style);
     const lang = this._lang();

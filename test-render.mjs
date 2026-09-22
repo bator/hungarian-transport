@@ -162,6 +162,23 @@ check('dest poles keep only outbound', destPoles.length === 1 && destPoles[0] ==
   JSON.stringify(destPoles));
 const allPoles = Lib.polesFromPatterns(patterns, origin, '');
 check('undirected poles include both directions', allPoles.length === 2, JSON.stringify(allPoles));
+const shaped = Lib.journeyFromPlan({
+  data: { entry: { plan: { itineraries: [
+    { duration: 2000, walkTime: 400, transfers: 2, legs: [
+      { mode: 'BUS', duration: 900000, distance: 1000, routeShortName: '9', headsign: 'Hosszabb', from: { name: 'A' }, to: { name: 'B' } },
+    ] },
+    { duration: 1532, walkTime: 199, transfers: 1, legs: [
+      { mode: 'TROLLEYBUS', duration: 780000, distance: 4267, routeShortName: '81', headsign: 'Mexik\u00f3i \u00fat', from: { name: 'Miskolci' }, to: { name: 'Mexik\u00f3i' } },
+      { mode: 'WALK', duration: 78000, distance: 85, from: { name: 'Mexik\u00f3i' }, to: { name: 'Oktogon' } },
+    ] },
+  ] } } },
+});
+check('fastest itinerary is kept', shaped && shaped.durationMin === 26 && shaped.transfers === 1 && shaped.walkMin === 3,
+  JSON.stringify(shaped && { durationMin: shaped.durationMin, walkMin: shaped.walkMin }));
+check('walk leg is minutes', shaped.legs[1].walk && shaped.legs[1].minutes === 1 && shaped.legs[1].meters === 85);
+check('ride leg keeps the route number', shaped.legs[0].label === '81' && shaped.legs[0].minutes === 13);
+check('bkk id becomes a plan vertex',
+  Lib.planPlaceVertex('Keleti', 'BKK_CSF01131') === 'Keleti::BKK:CSF01131');
 
 let depCalls = 0;
 const origDep = Lib.departures;
@@ -239,6 +256,14 @@ check('planner has origin and destination fields',
   planHtml.includes('id="pq"') && planHtml.includes('id="pdq"') && !planHtml.includes('id="routes"'));
 check('planner has look-ahead chips', planHtml.includes('id="pmin"') && planHtml.includes('Meddig'));
 check('planner has swap button', planHtml.includes('id="pswap"') && planHtml.includes('Csere'));
+plan._rows = [];
+plan._loading = false;
+plan._journey = shaped;
+plan._paint();
+check('empty planner shows the transfer journey',
+  plan.shadowRoot.innerHTML.includes('\u00c1tsz\u00e1ll\u00e1ssal')
+  && plan.shadowRoot.innerHTML.includes('Gyalogl\u00e1s')
+  && plan.shadowRoot.innerHTML.includes('>81<'));
 check('planner favorite chips include a Volan station',
   planHtml.includes('N\u00e9pliget'));
 check('planner favorite chips include a MAV station',
