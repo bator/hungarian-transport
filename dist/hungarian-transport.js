@@ -1,8 +1,9 @@
-const CARD_VERSION = '1.4.4-rev.12';
+const CARD_VERSION = '1.4.4-rev.13';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
 const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
+const TRANSITOUS = 'https://api.transitous.org';
 /* Default departure look-ahead. Override per card with `minutesAfter`.
    The Kelenfold-Szekesfehervar hop lists trains past 2h, so 180 is the
    floor that still fills travelMin on those rows. */
@@ -953,6 +954,192 @@ const BkkLib = {
     if (!Number.isFinite(n) || n <= 0) return 0;
     return n >= 1e11 ? n : n * 1000;
   },
+  isoMs(value) {
+    if (value == null || value === '') return 0;
+    if (typeof value === 'number') return BkkLib.epochMs(value);
+    const n = Date.parse(String(value));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  },
+  async transitousFetch(path, params) {
+    const q = new URLSearchParams();
+    Object.keys(params || {}).forEach((key) => {
+      const val = params[key];
+      if (val == null || val === '') return;
+      q.set(key, String(val));
+    });
+    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 10000) : null;
+    try {
+      const res = await fetch(`${TRANSITOUS}${path}?${q}`, {
+        cache: 'no-store',
+        signal: ctrl ? ctrl.signal : undefined,
+        headers: { Accept: 'application/json' },
+      });
+      if (!res.ok) throw new Error(`Transitous HTTP ${res.status}`);
+      return res.json();
+    } catch (err) {
+      if (err && err.name === 'AbortError') throw new Error('Transitous timeout');
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  },
+  transitousFeedWant(id) {
+    const s = String(id || '');
+    if (/^BKK_0055/i.test(s)) return 'hu-mav_';
+    if (/^BKK_/i.test(s)) return 'hu-bkk_';
+    if (/^(volan_|AREA_CS|hkir_)/i.test(s)) return 'hu-volanbusz_';
+    if (/^miskolc:/i.test(s)) return 'hu-mvk_';
+    if (s.indexOf(':') > 0) return 'hu-';
+    return '';
+  },
+  async transitousGeocode(text) {
+    const q = String(text || '').trim();
+    if (!q) return [];
+    const data = await BkkLib.transitousFetch('/api/v1/geocode', {
+      text: q, type: 'STOP', language: 'hu',
+    });
+    return Array.isArray(data) ? data : [];
+  },
+  pickTransitousHit(hits, stop) {
+    const list = Array.isArray(hits) ? hits : [];
+    if (!list.length) return null;
+    const want = BkkLib.transitousFeedWant(stop && stop.id);
+    const wantName = (stop && stop.name) || '';
+    let best = null;
+    let bestScore = -1;
+    list.forEach((hit) => {
+      if (!hit) return;
+      const hid = String(hit.id || '');
+      const hname = hit.name || '';
+      let score = 0;
+      if (want === 'hu-mav_' && (hid.indexOf('hu-mav_') === 0 || hid.indexOf('hu-bkk_') === 0)) score += 5;
+      else if (want && hid.indexOf(want) === 0) score += 5;
+      else if (/^hu-/.test(hid)) score += 1;
+      if (/railway/i.test(hid) && want === 'hu-mav_') score += 2;
+      if (BkkLib.foldTokenMatch(wantName, hname)) score += 3;
+      if (BkkLib.fold(wantName) && BkkLib.fold(hname) === BkkLib.fold(wantName)) score += 2;
+      if (/aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(hname)) score -= 4;
+      if (score > bestScore) {
+        bestScore = score;
+        best = hit;
+      }
+    });
+    return bestScore >= 3 ? best : (list[0] || null);
+  },
+  transitousCoord(hit) {
+    if (!hit) return '';
+    const lat = Number(hit.lat);
+    const lon = Number(hit.lon);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + ',' + lon;
+    return String(hit.id || '');
+  },
+  async transitousPlace(stop) {
+    if (!stop) return '';
+    const lat = Number(stop.lat);
+    const lon = Number(stop.lon);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + ',' + lon;
+    const name = String(stop.name || '').trim();
+    if (!name) return String(stop.id || '');
+    try {
+      const hits = await BkkLib.transitousGeocode(name);
+      return BkkLib.transitousCoord(BkkLib.pickTransitousHit(hits, stop));
+    } catch (_e) {
+      return '';
+    }
+  },
+  motisLegLabel(leg) {
+    const short = String((leg && leg.routeShortName) || '').trim();
+    if (short) return short;
+    const display = String((leg && leg.displayName) || '').trim();
+    if (display) return display;
+    return String((leg && leg.tripShortName) || '').trim();
+  },
+  /* MOTIS v5: itinerary duration is seconds; leg duration is seconds;
+     startTime/endTime are ISO-8601. */
+  journeyFromMotis(payload) {
+    const its = (payload && payload.itineraries) || [];
+    if (!its.length) return null;
+    let best = its[0];
+    its.forEach((it) => {
+      if (Number(it.duration || 1e15) < Number(best.duration || 1e15)) best = it;
+    });
+    const legs = [];
+    const tripStart = BkkLib.isoMs(best.startTime);
+    let prevEnd = tripStart;
+    (best.legs || []).forEach((leg) => {
+      const walk = String(leg.mode || '').toUpperCase() === 'WALK';
+      const startMs = BkkLib.isoMs(leg.startTime);
+      const endMs = BkkLib.isoMs(leg.endTime);
+      const sec = Number(leg.duration);
+      const fromSec = Number.isFinite(sec) && sec > 0
+        ? sec
+        : (startMs && endMs ? Math.round((endMs - startMs) / 1000) : 0);
+      const minutes = fromSec <= 0 ? 0 : Math.max(1, Math.round(fromSec / 60));
+      if (minutes <= 0) return;
+      let waitMin = 0;
+      if (!walk && startMs && prevEnd) {
+        waitMin = Math.round((startMs - prevEnd) / 60000);
+        if (waitMin < 1) waitMin = 0;
+      }
+      if (endMs) prevEnd = endMs;
+      else if (startMs) prevEnd = startMs;
+      let meters = Math.max(0, Math.round(Number(leg.distance || 0)));
+      if (!meters && walk) meters = minutes * 80;
+      const row = {
+        walk,
+        minutes,
+        meters,
+        label: walk ? '' : BkkLib.motisLegLabel(leg),
+        headsign: String(leg.headsign || ''),
+        color: String(leg.routeColor || '').replace(/#/g, ''),
+        text: String(leg.routeTextColor || '').replace(/#/g, ''),
+        from: String((leg.from || {}).name || ''),
+        to: String((leg.to || {}).name || ''),
+        waitMin,
+      };
+      if (!walk) {
+        const badge = BkkLib.applyRailBadge({
+          label: row.label,
+          color: row.color || '4477AA',
+        });
+        row.color = String(badge.color || row.color).replace(/#/g, '');
+        if (badge.text) row.text = String(badge.text).replace(/#/g, '');
+      }
+      legs.push(row);
+    });
+    if (!legs.length) return null;
+    const waitMin = legs.reduce((sum, leg) => sum + (leg.waitMin || 0), 0);
+    const walkMin = legs.reduce((sum, leg) => sum + (leg.walk ? leg.minutes : 0), 0);
+    return {
+      durationMin: Math.max(1, Math.round(Number(best.duration || 0) / 60)),
+      walkMin,
+      waitMin,
+      transfers: Math.max(0, Number(best.transfers || 0)),
+      legs,
+    };
+  },
+  async transitousJourney(origin, dest) {
+    const places = await Promise.all([
+      BkkLib.transitousPlace(origin),
+      BkkLib.transitousPlace(dest),
+    ]);
+    const fromPlace = places[0];
+    const toPlace = places[1];
+    if (!fromPlace || !toPlace) return null;
+    try {
+      const data = await BkkLib.transitousFetch('/api/v5/plan', {
+        fromPlace,
+        toPlace,
+        numItineraries: '5',
+      });
+      const journey = BkkLib.journeyFromMotis(data);
+      if (journey && journey.legs.some((leg) => !leg.walk)) return journey;
+      return null;
+    } catch (_e) {
+      return null;
+    }
+  },
   /* FUTÁR plan-trip: itinerary duration and walkTime are seconds.
      Each leg duration is milliseconds. */
   journeyFromPlan(payload) {
@@ -1003,24 +1190,27 @@ const BkkLib = {
     };
   },
   async planJourney(apiKey, origin, dest, hass) {
-    if (!apiKey) return null;
     let futar = null;
-    const fromPlace = await BkkLib.planPlace(apiKey, origin);
-    const toPlace = await BkkLib.planPlace(apiKey, dest);
-    if (fromPlace && toPlace) {
-      try {
-        const data = await BkkLib.fetch(apiKey, 'plan-trip.json', {
-          fromPlace,
-          toPlace,
-          mode: 'TRANSIT,WALK',
-          numItineraries: '5',
-        }, true);
-        futar = BkkLib.journeyFromPlan(data);
-      } catch (_e) {
-        futar = null;
+    if (apiKey) {
+      const fromPlace = await BkkLib.planPlace(apiKey, origin);
+      const toPlace = await BkkLib.planPlace(apiKey, dest);
+      if (fromPlace && toPlace) {
+        try {
+          const data = await BkkLib.fetch(apiKey, 'plan-trip.json', {
+            fromPlace,
+            toPlace,
+            mode: 'TRANSIT,WALK',
+            numItineraries: '5',
+          }, true);
+          futar = BkkLib.journeyFromPlan(data);
+        } catch (_e) {
+          futar = null;
+        }
       }
     }
     if (futar && futar.legs.some((leg) => !leg.walk)) return futar;
+    const motis = await BkkLib.transitousJourney(origin, dest);
+    if (motis && motis.legs.some((leg) => !leg.walk)) return motis;
     const viaCity = await BkkLib.cityRailJourney(apiKey, hass, origin, dest);
     return viaCity || futar;
   },
@@ -4071,7 +4261,7 @@ class BKKPlannerCard extends BKKHopCard {
       return;
     }
     const cfg = this._config || {};
-    if (!cfg.apiKey || !cfg.stopId || !cfg.destName) return;
+    if (!cfg.stopId || !cfg.destName) return;
     const key = [cfg.stopId, cfg.destStopId || '', cfg.destName].join('|');
     if (this._journeyKey === key) return;
     const gen = this._gen;

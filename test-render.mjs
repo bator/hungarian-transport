@@ -183,6 +183,82 @@ check('wait is the gap after arrival',
   JSON.stringify(shaped && { first: shaped.legs[0].waitMin, next: shaped.legs[2] && shaped.legs[2].waitMin, total: shaped.waitMin }));
 check('bkk id becomes a plan vertex',
   Lib.planPlaceVertex('Keleti', 'BKK_CSF01131') === 'Keleti::BKK:CSF01131');
+const motisShaped = Lib.journeyFromMotis({
+  itineraries: [{
+    duration: 12540,
+    transfers: 3,
+    startTime: '2026-09-22T10:39:00Z',
+    endTime: '2026-09-22T14:08:00Z',
+    legs: [
+      { mode: 'WALK', duration: 60, distance: 80, from: { name: 'START' }, to: { name: 'Miskolci \u00c1llatkert' }, startTime: '2026-09-22T10:39:00Z', endTime: '2026-09-22T10:40:00Z' },
+      { mode: 'BUS', duration: 420, routeShortName: 'ZOO', from: { name: 'Miskolci \u00c1llatkert' }, to: { name: 'Fels\u0151-Majl\u00e1th' }, startTime: '2026-09-22T10:40:00Z', endTime: '2026-09-22T10:47:00Z' },
+      { mode: 'WALK', duration: 120, distance: 160, from: { name: 'Fels\u0151-Majl\u00e1th' }, to: { name: 'Fels\u0151-Majl\u00e1th' }, startTime: '2026-09-22T10:47:00Z', endTime: '2026-09-22T10:49:00Z' },
+      { mode: 'TRAM', duration: 1980, routeShortName: '1V', from: { name: 'Fels\u0151-Majl\u00e1th' }, to: { name: 'Tiszai p\u00e1lyaudvar' }, startTime: '2026-09-22T10:52:00Z', endTime: '2026-09-22T11:25:00Z' },
+      { mode: 'REGIONAL_RAIL', duration: 7920, routeShortName: '', displayName: '187 HERN\u00c1D - ZEMPL\u00c9N', from: { name: 'Miskolc-Tiszai' }, to: { name: 'Budapest-Keleti' }, startTime: '2026-09-22T11:30:00Z', endTime: '2026-09-22T13:42:00Z' },
+      { mode: 'SUBWAY', duration: 780, routeShortName: 'M4', routeColor: '4ca22f', routeTextColor: 'FFFFFF', from: { name: 'Keleti p\u00e1lyaudvar' }, to: { name: 'Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s' }, startTime: '2026-09-22T13:50:00Z', endTime: '2026-09-22T14:03:00Z' },
+    ],
+  }],
+});
+check('MOTIS fastest itinerary uses seconds',
+  motisShaped && motisShaped.durationMin === 209 && motisShaped.transfers === 3 && motisShaped.walkMin === 3,
+  JSON.stringify(motisShaped && { durationMin: motisShaped.durationMin, walkMin: motisShaped.walkMin, transfers: motisShaped.transfers }));
+check('MOTIS ZOO bus is seven minutes',
+  motisShaped.legs[1].label === 'ZOO' && motisShaped.legs[1].minutes === 7);
+check('MOTIS rail uses displayName when short name is empty',
+  motisShaped.legs[4].label === '187 HERN\u00c1D - ZEMPL\u00c9N');
+check('MOTIS M4 keeps route colour',
+  String(motisShaped.legs[5].color).toLowerCase() === '4ca22f');
+check('MOTIS wait is the gap after arrival',
+  motisShaped.legs[3].waitMin === 3 && motisShaped.legs[4].waitMin === 5
+  && motisShaped.legs[5].waitMin === 8 && motisShaped.waitMin === 16,
+  JSON.stringify(motisShaped && motisShaped.legs.map((l) => l.waitMin)));
+check('BKK id prefers a hu-bkk Transitous hit',
+  Lib.pickTransitousHit([
+    { id: 'hu-volanbusz_1', name: 'Keleti p\u00e1lyaudvar', lat: 1, lon: 1 },
+    { id: 'hu-bkk_CS056233', name: 'Keleti p\u00e1lyaudvar', lat: 47.5, lon: 19.08 },
+  ], { id: 'BKK_CSF01131', name: 'Keleti p\u00e1lyaudvar' }).id === 'hu-bkk_CS056233');
+check('Kelenf\u00f6ld MAV id prefers rail over coach station',
+  Lib.pickTransitousHit([
+    { id: 'at-Railway-x', name: 'Budapest-Kelenf\u00f6ld', lat: 47.46, lon: 19.02 },
+    { id: 'hu-volanbusz_773538', name: 'Budapest, Kelenf\u00f6ld aut.\u00e1ll.', lat: 47.46, lon: 19.02 },
+    { id: 'hu-bkk_CS056215', name: 'Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s', lat: 47.46, lon: 19.02 },
+  ], { id: 'BKK_005501024', name: 'Kelenf\u00f6ld' }).id === 'hu-bkk_CS056215');
+
+const origPlace = Lib.planPlace;
+const origFetch = Lib.fetch;
+const origMotis = Lib.transitousJourney;
+const origCityRail = Lib.cityRailJourney;
+Lib.planPlace = async () => 'Keleti::BKK:CSF01131';
+Lib.cityRailJourney = async () => null;
+let motisCalls = 0;
+Lib.transitousJourney = async () => {
+  motisCalls += 1;
+  return { durationMin: 99, walkMin: 0, waitMin: 0, transfers: 0, legs: [{ walk: false, label: 'ZOO', minutes: 7 }] };
+};
+Lib.fetch = async () => ({
+  data: { entry: { plan: { itineraries: [{
+    duration: 600, walkTime: 0, transfers: 0,
+    startTime: 1700000000000,
+    legs: [{
+      mode: 'BUS', duration: 600000, routeShortName: '7',
+      from: { name: 'A' }, to: { name: 'B' },
+      startTime: 1700000000000, endTime: 1700000600000,
+    }],
+  }] } } },
+});
+const futarFirst = await Lib.planJourney('k', { id: 'BKK_A', name: 'A' }, { id: 'BKK_B', name: 'B' });
+check('FUTAR ride skips Transitous',
+  futarFirst && futarFirst.legs[0].label === '7' && motisCalls === 0,
+  JSON.stringify({ label: futarFirst && futarFirst.legs[0] && futarFirst.legs[0].label, motisCalls }));
+Lib.fetch = async () => ({ data: { entry: { plan: { itineraries: [] } } } });
+const motisNext = await Lib.planJourney('k', { id: 'miskolc:zoo', name: 'Miskolci \u00c1llatkert' }, { id: 'BKK_005501024', name: 'Kelenf\u00f6ld' });
+check('empty FUTAR uses Transitous',
+  motisNext && motisNext.legs[0].label === 'ZOO' && motisCalls === 1,
+  JSON.stringify({ label: motisNext && motisNext.legs[0] && motisNext.legs[0].label, motisCalls }));
+Lib.planPlace = origPlace;
+Lib.fetch = origFetch;
+Lib.transitousJourney = origMotis;
+Lib.cityRailJourney = origCityRail;
 const cityIdx = {
   c: [['1111111', '20000101', '20991231']],
   ops: [{ i: 0, id: 'miskolc', name: 'Miskolc \u2014 MVK' }],
