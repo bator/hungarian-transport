@@ -666,6 +666,10 @@ check('ELVIRA Tópart takes FUTAR GPS from BKK trip id train number', (() => {
     && merged[0].lat === 46.90843;
 })());
 check('FUTAR trip id from BKK_4541_108 is 4541', Lib.trainNumberFromTripId('BKK_4541_108') === '4541');
+check('west IC BKK_8661_47 is train 866 not 8661',
+  Lib.trainNumberFromTripId('BKK_8661_47') === '866'
+  && Lib.trainNumberFromTripId('BKK_8741_47') === '874'
+  && Lib.trainNumberFromTripId('BKK_865_74') === '865');
 check('elvira trip id is not a FUTAR trip',
   !Lib.isFutarTripId('elvira:2889849') && Lib.isFutarTripId('BKK_4541_108')
   && !Lib.isFutarTripId('motis:hu-bkk_1'));
@@ -707,6 +711,29 @@ check('BALATON 861 matches EMMA vehicle by train number',
     { label: 'BALATON', trainNumber: '861', tripId: 'elvira:2890602' },
     { lat: 47.229, lon: 18.668, trip: { tripShortName: '861 BALATON InterCity' } },
   ));
+check('BALATON does not match a Balatonfured headsign',
+  !Lib.matchEmmaVehicle(
+    { label: 'BALATON', tripId: 'elvira:1' },
+    { lat: 46.9, lon: 17.8, trip: { tripShortName: '9724 szemelyvonat', tripHeadsign: 'Balatonf\u00fcred' } },
+  ));
+check('BALATON 866 merges onto FUTAR BKK_8661_47', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 900;
+  const merged = Lib.mergeVolanRows(
+    [{
+      label: 'IC', tripId: 'BKK_8661_47', trainNumber: '',
+      dep: dep, sched: dep, color: '#2E5EA8',
+    }],
+    [{
+      label: 'BALATON', tripId: 'elvira:2891044', trainNumber: '866',
+      dep: dep, sched: dep, color: '#4477aa',
+    }],
+    12,
+  );
+  return merged.length === 1
+    && merged[0].label === 'BALATON'
+    && merged[0].tripId === 'BKK_8661_47'
+    && Lib.rowTrainNumber(merged[0]) === '866';
+})());
 check('BAKONY 901 matches EMMA named IC by number',
   Lib.matchEmmaVehicle(
     { label: 'BAKONY', trainNumber: '901', tripId: 'elvira:1' },

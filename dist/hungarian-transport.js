@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.17';
+const CARD_VERSION = '1.4.4-rev.18';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -2344,6 +2344,11 @@ const BkkLib = {
         prev.color = row.color;
         if (row.text) prev.text = row.text;
       }
+      const prevLab = String(prev.label || '');
+      const rowLab = String(row.label || '');
+      if (BkkLib.genericRailLabel(prevLab) && rowLab && !BkkLib.genericRailLabel(rowLab)) {
+        prev.label = rowLab;
+      }
       const prevHasGps = Number.isFinite(Number(prev.lat)) && Number.isFinite(Number(prev.lon));
       if (!prevHasGps) {
         const lat = Number(row.lat);
@@ -3163,7 +3168,12 @@ const BkkLib = {
   },
 
   trainNumberFromTripId(tripId) {
-    const m = String(tripId || '').match(/^BKK_(\d+)(?:_|$)/);
+    const s = String(tripId || '');
+    /* West/south IC trips are BKK_8661_47 for train 866, BKK_8741_47 for 874.
+       Suburban 4xxx ids (BKK_4541_108) must keep all four digits. */
+    const ic = s.match(/^BKK_([89]\d{2})1(?:_|$)/);
+    if (ic) return ic[1];
+    const m = s.match(/^BKK_(\d+)(?:_|$)/);
     return m ? m[1] : '';
   },
   isFutarTripId(tripId) {
@@ -3187,7 +3197,8 @@ const BkkLib = {
       trip.tripShortName, trip.tripHeadsign,
       (trip.route || {}).longName, (trip.route || {}).shortName, vehicle.label,
     ].join(' ').toUpperCase();
-    if (blob.indexOf(name) < 0) return false;
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!new RegExp('(?:^|[^A-Z0-9])' + esc + '(?:[^A-Z0-9]|$)').test(blob)) return false;
     return !num || !n || num === n;
   },
   applyEmmaPositions(rows, vehicles) {
@@ -3527,7 +3538,8 @@ const BkkLib = {
       lat: hasGps ? lat : null,
       lon: hasGps ? lon : null,
       hasGps: hasGps,
-      hasLocation: hasGps || (!gtfs && !!r.tripId) || !!(shape && shape.length >= 2),
+      hasLocation: hasGps || (!gtfs && !!r.tripId) || !!(shape && shape.length >= 2)
+        || /^elvira:/i.test(String(r.tripId || '')),
       shape: shape,
       vehicle: r.vehicle || '',
       vehicleId: r.vehicleId || '',
