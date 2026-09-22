@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.5-rev.3';
+const CARD_VERSION = '1.4.5-rev.11';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -233,6 +233,7 @@ const I18N = {
     mapRouteFail: (msg) => `\u00datvonal nem t\u00f6lthet\u0151: ${msg}`,
     mapNothingToShow: 'Nincs megjelen\u00edthet\u0151 \u00fatvonal ehhez a j\u00e1rathoz.',
     mapFullRoute: 'Teljes \u00fatvonal',
+    mapBoardStop: 'Felsz\u00e1ll\u00e1s',
     mapLivePos: '\u00c9l\u0151 poz\u00edci\u00f3',
     mapEstPos: 'Becs\u00fclt poz\u00edci\u00f3 (menetrend)',
     mapNoGps: 'Nincs \u00e9l\u0151 GPS',
@@ -268,8 +269,11 @@ const I18N = {
     plannerStep3: 'Meddig',
     plannerSwap: 'Csere',
     plannerDepartures: 'Indul\u00e1sok',
-    plannerSearchPlaceholder: 'Utca, meg\u00e1ll\u00f3, aut\u00f3busz-\u00e1llom\u00e1s...',
-    plannerDestPlaceholder: 'C\u00e9l meg\u00e1ll\u00f3 keres\u00e9se...',
+    plannerSearchPlaceholder: 'Utca, h\u00e1zsz\u00e1m, v\u00e1ros, meg\u00e1ll\u00f3...',
+    plannerDestPlaceholder: 'Utca, h\u00e1zsz\u00e1m, v\u00e1ros, meg\u00e1ll\u00f3...',
+    plannerTypeDest: '\u00cdrj egy utc\u00e1t, v\u00e1rost vagy meg\u00e1ll\u00f3t.',
+    plannerAddress: 'c\u00edm',
+    plannerPlace: 'hely',
     plannerReset: '\u00daj',
     plannerMultiHint: 'T\u00f6bbet is v\u00e1laszthatsz. Ekkor csak a k\u00f6z\u00f6s meg\u00e1ll\u00f3k maradnak.',
     plannerPickVehicleFirst: 'El\u0151bb v\u00e1lassz j\u00e1rm\u0171vet',
@@ -386,6 +390,7 @@ const I18N = {
     mapRouteFail: (msg) => `Could not load the route: ${msg}`,
     mapNothingToShow: 'Nothing to show on the map for this trip.',
     mapFullRoute: 'Full route',
+    mapBoardStop: 'Boarding',
     mapLivePos: 'Live position',
     mapEstPos: 'Estimated position (timetable)',
     mapNoGps: 'No live GPS',
@@ -421,8 +426,11 @@ const I18N = {
     plannerStep3: 'Look-ahead',
     plannerSwap: 'Swap',
     plannerDepartures: 'Departures',
-    plannerSearchPlaceholder: 'Street, stop, coach station...',
-    plannerDestPlaceholder: 'Search destination stop...',
+    plannerSearchPlaceholder: 'Street, house number, city, stop...',
+    plannerDestPlaceholder: 'Street, house number, city, stop...',
+    plannerTypeDest: 'Type a street, city or stop.',
+    plannerAddress: 'address',
+    plannerPlace: 'place',
     plannerReset: 'Reset',
     plannerMultiHint: 'You can pick several. Only stops shared by all of them are kept.',
     plannerPickVehicleFirst: 'Pick a vehicle first',
@@ -651,21 +659,26 @@ const BkkLib = {
     const seen = new Map();
     const add = (d) => {
       if (!d || !d.name) return;
-      const key = d.key || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
-      if (!key) return;
       const id = d.id || d.stopId || '';
+      let key = d.key || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
+      if (!d.key && id && /^(geo:|node\/)/i.test(id)) key = key + '|' + id;
+      if (!key) return;
       const prev = seen.get(key);
       if (prev) {
         if (BkkLib.elviraStationCode(id) && !BkkLib.elviraStationCode(prev.id)) prev.id = id;
+        if (/^geo:/i.test(String(prev.id || '')) && id && !/^geo:/i.test(id)) prev.id = id;
         if (Number.isFinite(Number(d.lat)) && !Number.isFinite(Number(prev.lat))) {
           prev.lat = Number(d.lat);
           prev.lon = Number(d.lon);
         }
+        if (d.kind && !prev.kind) prev.kind = d.kind;
         return;
       }
       const row = { key: key, name: d.name, id: id };
       if (Number.isFinite(Number(d.lat))) row.lat = Number(d.lat);
       if (Number.isFinite(Number(d.lon))) row.lon = Number(d.lon);
+      if (d.kind) row.kind = d.kind;
+      if (d.label) row.label = d.label;
       seen.set(key, row);
       out.push(row);
     };
@@ -701,6 +714,7 @@ const BkkLib = {
     if (!stop) return false;
     const id = String(stop.id || '');
     if (/^volan_/i.test(id) || /^AREA_CS/i.test(id) || /^hkir_/i.test(id)) return true;
+    if (/^hu-volanbusz_/i.test(id)) return true;
     if (String(stop.type || '').toUpperCase() === 'COACH') return true;
     return false;
   },
@@ -977,11 +991,15 @@ const BkkLib = {
     });
     const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
     const timer = ctrl ? setTimeout(() => ctrl.abort(), 10000) : null;
+    const base = String(TRANSITOUS).replace(/\/$/, '');
+    const rel = String(path || '').indexOf('/') === 0 ? String(path) : ('/' + String(path || ''));
     try {
-      const res = await fetch(`${TRANSITOUS}${path}?${q}`, {
+      const res = await fetch(`${base}${rel}?${q}`, {
         cache: 'no-store',
         signal: ctrl ? ctrl.signal : undefined,
-        headers: { Accept: 'application/json' },
+        headers: {
+          Accept: 'application/json',
+        },
       });
       if (!res.ok) throw new Error(`Transitous HTTP ${res.status}`);
       return res.json();
@@ -1001,18 +1019,36 @@ const BkkLib = {
     if (s.indexOf(':') > 0) return 'hu-';
     return '';
   },
-  async transitousGeocode(text) {
+  async transitousGeocode(text, opts) {
     const q = String(text || '').trim();
     if (!q) return [];
-    const data = await BkkLib.transitousFetch('/api/v1/geocode', {
-      text: q, type: 'STOP', language: 'hu',
-    });
+    const params = { text: q, language: 'hu' };
+    const typ = opts && opts.type;
+    if (typ === 'all') {
+      /* omit type: STOP, ADDRESS and PLACE together */
+    } else {
+      params.type = typ || 'STOP';
+    }
+    const data = await BkkLib.transitousFetch('/api/v1/geocode', params);
     return Array.isArray(data) ? data : [];
   },
   transitousInHungary(hit) {
     if (!hit) return false;
     if (/^hu-/i.test(String(hit.id || ''))) return true;
-    return (hit.areas || []).some((a) => /magyarorsz/i.test((a && a.name) || ''));
+    if ((hit.areas || []).some((a) => /magyarorsz/i.test((a && a.name) || ''))) return true;
+    const lat = Number(hit.lat);
+    const lon = Number(hit.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+    return lat >= 45.7 && lat <= 48.65 && lon >= 16.05 && lon <= 22.95;
+  },
+  isPlaceStop(stop) {
+    if (!stop) return false;
+    if (/^(geo:|node\/)/i.test(String(stop.id || stop.stopId || ''))) return true;
+    const kind = String(stop.kind || stop.stopKind || '');
+    return kind === 'address' || kind === 'place';
+  },
+  allowFutarHopShape(row, hasGps) {
+    return !(BkkLib.isTrainRow(row) && hasGps);
   },
   transitousHitToStop(hit) {
     if (!hit || !hit.name) return null;
@@ -1020,35 +1056,79 @@ const BkkLib = {
     const lon = Number(hit.lon);
     const areas = hit.areas || [];
     const city = (areas.find((a) => Number(a.adminLevel) === 8) || areas.find((a) => a.unique) || {}).name || '';
+    const kindRaw = String(hit.type || '').toUpperCase();
+    const kind = kindRaw === 'ADDRESS' ? 'address' : kindRaw === 'PLACE' ? 'place' : 'stop';
+    let id = String(hit.id || '');
+    if (!id && Number.isFinite(lat) && Number.isFinite(lon)) {
+      id = 'geo:' + lat.toFixed(6) + ',' + lon.toFixed(6);
+    }
+    if (!id) return null;
     return {
-      id: String(hit.id || ''),
+      id,
       name: hit.name,
       label: city ? (hit.name + ' (' + city + ')') : hit.name,
       lat: Number.isFinite(lat) ? lat : undefined,
       lon: Number.isFinite(lon) ? lon : undefined,
+      kind,
     };
   },
-  async searchStopsTransitous(q) {
-    const hits = await BkkLib.transitousGeocode(q);
+  plannerHitLabel(s, lang) {
+    const tag = s && s.kind === 'address' ? t(lang, 'plannerAddress')
+      : s && s.kind === 'place' ? t(lang, 'plannerPlace') : '';
+    const base = (s && (s.label || s.name)) || '';
+    return tag ? (base + ' \u00b7 ' + tag) : base;
+  },
+  async searchStopsTransitous(q, opts) {
+    const hits = await BkkLib.transitousGeocode(q, opts);
     return (hits || [])
       .filter((hit) => BkkLib.transitousInHungary(hit))
       .map((hit) => BkkLib.transitousHitToStop(hit))
       .filter((s) => s && s.id)
       .slice(0, 20);
   },
-  async searchPlannerStops(apiKey, q) {
-    try {
-      const motis = await BkkLib.searchStopsTransitous(q);
-      if (motis.length) return motis;
-    } catch (_e) { /* BKK search is the fallback */ }
-    if (!apiKey) return [];
-    return BkkLib.searchStops(apiKey, q, 'all');
+  capPlannerHits(hits, n) {
+    const limit = n || 24;
+    const volan = [];
+    const rest = [];
+    (hits || []).forEach((s) => {
+      if (!s || !s.id) return;
+      if (/^(?:volan_|hkir_|AREA_CS)/i.test(String(s.id))) volan.push(s);
+      else rest.push(s);
+    });
+    const out = [];
+    const max = Math.max(volan.length, rest.length);
+    for (let i = 0; i < max && out.length < limit; i++) {
+      if (i < rest.length) out.push(rest[i]);
+      if (out.length >= limit) break;
+      if (i < volan.length) out.push(volan[i]);
+    }
+    return out;
   },
-  pickTransitousHit(hits, stop) {
+  async searchPlannerStops(apiKey, q) {
+    const byId = new Map();
+    try {
+      const motis = await BkkLib.searchStopsTransitous(q, { type: 'all' });
+      motis.forEach((s) => {
+        if (!s || !s.id || /^hu-volanbusz_/i.test(s.id)) return;
+        byId.set(s.id, s);
+      });
+      await BkkLib.addTransitousVolanStops(byId, q, motis);
+    } catch (_e) { /* GTFS / BKK still fill the list */ }
+    try {
+      (await BkkLib.searchStops(apiKey, q, 'all', '', { skipTransitousVolan: true })).forEach((s) => {
+        if (!s || !s.id || byId.has(s.id)) return;
+        byId.set(s.id, s);
+      });
+    } catch (_e) { /* Transitous hits are enough when the index is missing */ }
+    const out = BkkLib.capPlannerHits(Array.from(byId.values()), 24);
+    return out;
+  },
+  pickTransitousHit(hits, stop, kind) {
     const list = Array.isArray(hits) ? hits : [];
     if (!list.length) return null;
     const want = BkkLib.transitousFeedWant(stop && stop.id);
     const wantName = (stop && stop.name) || '';
+    kind = String(kind || '').toLowerCase();
     let best = null;
     let bestScore = -1;
     list.forEach((hit) => {
@@ -1056,10 +1136,12 @@ const BkkLib = {
       const hid = String(hit.id || '');
       const hname = hit.name || '';
       let score = 0;
-      if (want === 'hu-mav_' && (hid.indexOf('hu-mav_') === 0 || hid.indexOf('hu-bkk_') === 0)) score += 5;
+      const railWant = want === 'hu-mav_' || kind === 'rail' || kind === 'train';
+      if (railWant && (/railway/i.test(hid) || hid.indexOf('hu-mav_') === 0)) score += 8;
       else if (want && hid.indexOf(want) === 0) score += 5;
+      else if (railWant && hid.indexOf('hu-bkk_') === 0) score += 2;
       else if (/^hu-/.test(hid)) score += 1;
-      if (/railway/i.test(hid) && want === 'hu-mav_') score += 2;
+      if (/railway/i.test(hid) && railWant) score += 2;
       if (BkkLib.foldTokenMatch(wantName, hname)) score += 3;
       if (BkkLib.fold(wantName) && BkkLib.fold(hname) === BkkLib.fold(wantName)) score += 2;
       if (/aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(hname)) score -= 4;
@@ -1077,7 +1159,7 @@ const BkkLib = {
     if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + ',' + lon;
     return String(hit.id || '');
   },
-  async transitousPlace(stop) {
+  async transitousPlace(stop, kind) {
     if (!stop) return '';
     const lat = Number(stop.lat);
     const lon = Number(stop.lon);
@@ -1086,10 +1168,47 @@ const BkkLib = {
     if (!name) return String(stop.id || '');
     try {
       const hits = await BkkLib.transitousGeocode(name);
-      return BkkLib.transitousCoord(BkkLib.pickTransitousHit(hits, stop));
+      return BkkLib.transitousCoord(BkkLib.pickTransitousHit(hits, stop, kind));
     } catch (_e) {
       return '';
     }
+  },
+  async transitousStopRef(stop, kind) {
+    const name = String((stop && (stop.name || stop.key)) || '').trim();
+    const fromStop = BkkLib.finiteLatLon(stop && stop.lat, stop && stop.lon);
+    const queries = [];
+    if (name) queries.push(name);
+    let stripped = name;
+    [' vas\u00fat\u00e1llom\u00e1s', ' p\u00e1lyaudvar', ' pu.'].forEach((sfx) => {
+      const low = stripped.toLowerCase();
+      if (low.endsWith(sfx)) stripped = stripped.slice(0, -sfx.length).trim();
+    });
+    if (stripped && stripped !== name) queries.push(stripped);
+    const hits = [];
+    const seen = {};
+    for (let i = 0; i < queries.length; i += 1) {
+      try {
+        const found = await BkkLib.transitousGeocode(queries[i]);
+        (found || []).forEach((hit) => {
+          const id = hit && hit.id;
+          if (!id || seen[id]) return;
+          seen[id] = true;
+          hits.push(hit);
+        });
+      } catch (_e) { /* next query */ }
+    }
+    let hit = BkkLib.pickTransitousHit(hits, stop, kind);
+    if ((kind === 'rail' || kind === 'train') && hit && !/railway|hu-mav_/i.test(String(hit.id || ''))) {
+      const rail = hits.find((h) => /railway|hu-mav_/i.test(String((h && h.id) || '')));
+      if (rail) hit = rail;
+    }
+    const board = BkkLib.finiteLatLon(hit && hit.lat, hit && hit.lon) || fromStop;
+    return {
+      id: (hit && hit.id) || '',
+      name: (hit && hit.name) || name,
+      lat: board ? board[0] : null,
+      lon: board ? board[1] : null,
+    };
   },
   motisLegLabel(leg) {
     const short = String((leg && leg.routeShortName) || '').trim();
@@ -1119,9 +1238,12 @@ const BkkLib = {
       agencyId: id,
     }, mode || 'all');
   },
-  rowsFromMotis(payload, dest, mode, horizon) {
+  rowsFromMotis(payload, dest, mode, horizon, parseOpts) {
     const its = (payload && payload.itineraries) || [];
-    const now = Math.floor(Date.now() / 1000);
+    parseOpts = parseOpts || {};
+    const now = Number(parseOpts.now) > 0
+      ? Number(parseOpts.now)
+      : Math.floor(Date.now() / 1000);
     const h = clampMinutesAfter(horizon);
     const latest = now + h * 60;
     const destName = (dest && (dest.name || dest.key)) || '';
@@ -1135,7 +1257,7 @@ const BkkLib = {
       const startMs = BkkLib.isoMs(leg.startTime || it.startTime);
       const dep = startMs ? Math.round(startMs / 1000) : 0;
       if (!dep || dep > latest + 60) return;
-      if (!departureStillDue(dep, now)) return;
+      if (!parseOpts.keepPast && !departureStillDue(dep, now)) return;
       const endMs = BkkLib.isoMs(leg.endTime || it.endTime);
       const sec = Number(leg.duration);
       const fromSec = Number.isFinite(sec) && sec > 0
@@ -1148,11 +1270,12 @@ const BkkLib = {
       const text = String(leg.routeTextColor || '').replace(/#/g, '') || 'ffffff';
       const tripRaw = String(leg.tripId || '').trim();
       const tripId = 'motis:' + (tripRaw || (dep + ':' + label));
-      const trainNumber = rawType === 'RAIL'
+      const trainNumber = /RAIL|SUBURBAN|TRAIN/.test(rawType)
         ? BkkLib.emmaTrainNumber(leg.tripShortName || label)
         : '';
       const row = {
         tripId,
+        motisTripId: tripRaw,
         label,
         color: '#' + color,
         text: '#' + text,
@@ -1182,19 +1305,269 @@ const BkkLib = {
     const toPlace = await BkkLib.transitousPlace(dest);
     if (!fromPlace || !toPlace) return [];
     const horizon = clampMinutesAfter(opts.minutesAfter);
+    const anchor = Number(opts.anchorDep || 0);
     try {
-      const data = await BkkLib.transitousFetch('/api/v5/plan', {
+      const params = {
         fromPlace,
         toPlace,
         timetableView: 'true',
         maxTransfers: '0',
         numItineraries: String(maxDepartureRows(horizon)),
         searchWindow: String(horizon * 60),
-      });
-      return BkkLib.rowsFromMotis(data, dest, opts.mode || 'all', horizon);
+      };
+      if (opts.time) params.time = String(opts.time);
+      else if (anchor > 0) params.time = new Date(Math.max(0, anchor - 120) * 1000).toISOString();
+      const data = await BkkLib.transitousFetch('/api/v5/plan', params);
+      const parseOpts = anchor > 0 ? { now: anchor, keepPast: true } : {};
+      return BkkLib.rowsFromMotis(data, dest, opts.mode || 'all', horizon, parseOpts);
     } catch (_e) {
       return [];
     }
+  },
+  isTrainRow(row) {
+    return BkkLib.vehicleBucket(row) === 'rail';
+  },
+  vehicleBucket(row) {
+    if (!row) return '';
+    if (typeof row === 'string') {
+      const s = row.toLowerCase();
+      if (/rail|train|suburban/.test(s)) return 'rail';
+      if (/tram/.test(s)) return 'tram';
+      if (/subway|metro/.test(s)) return 'subway';
+      if (/trolley/.test(s)) return 'trolley';
+      if (/coach/.test(s)) return 'coach';
+      if (/bus/.test(s)) return 'bus';
+      return s;
+    }
+    const v = String(row.vehicle || '').toLowerCase();
+    const typ = String(row.rawType || row.type || row.mode || '').toUpperCase();
+    if (v === 'rail' || v === 'train' || /RAIL|SUBURBAN|TRAIN/.test(typ)) return 'rail';
+    if (/^elvira:/i.test(String(row.tripId || ''))) return 'rail';
+    if (v === 'tram' || typ.indexOf('TRAM') >= 0) return 'tram';
+    if (v === 'subway' || v === 'metro' || /SUBWAY|METRO/.test(typ)) return 'subway';
+    if (v === 'trolley' || v === 'trolleybus' || typ.indexOf('TROLLEY') >= 0) return 'trolley';
+    if (v === 'coach' || typ === 'COACH' || /^gtfs:/i.test(String(row.tripId || ''))) return 'coach';
+    if (v === 'bus' || typ === 'BUS') return 'bus';
+    if (BkkLib.rowTrainNumber(row) && !/bus|tram|subway|trolley|coach/i.test(v)) return 'rail';
+    return v || 'bus';
+  },
+  sameVehicleBucket(a, b) {
+    const x = BkkLib.vehicleBucket(a);
+    const y = BkkLib.vehicleBucket(b);
+    if (!x || !y) return true;
+    if (x === y) return true;
+    return (x === 'bus' && y === 'coach') || (x === 'coach' && y === 'bus');
+  },
+  motisTripIdRaw(row) {
+    const raw = String((row && (row.motisTripId || row.tripId)) || '').replace(/^motis:/i, '').trim();
+    if (!raw || /^\d+:/.test(raw)) return '';
+    return raw;
+  },
+  namedTrainAliasMatch(a, b) {
+    const aliases = { ADRIA: ['AGRAM'], AGRAM: ['ADRIA'] };
+    const tokens = (s) => String(s || '').toUpperCase()
+      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .split(/[^A-Z]+/)
+      .filter((t) => t.length >= 4 && !BkkLib.genericRailLabel(t));
+    const ta = tokens(a);
+    const tb = tokens(b);
+    for (let i = 0; i < ta.length; i += 1) {
+      const al = aliases[ta[i]] || [];
+      for (let j = 0; j < al.length; j += 1) {
+        if (tb.indexOf(al[j]) >= 0) return true;
+      }
+    }
+    return false;
+  },
+  motisLabelMatch(a, b) {
+    const la = String(a || '').trim().toUpperCase();
+    const lb = String(b || '').trim().toUpperCase();
+    if (!la || !lb) return false;
+    if (la === lb) return true;
+    if (lb.indexOf(la + ' ') === 0 || la.indexOf(lb + ' ') === 0) return true;
+    if (BkkLib.genericRailLabel(la) || BkkLib.genericRailLabel(lb)) return false;
+    const fa = BkkLib.fold(la);
+    const fb = BkkLib.fold(lb);
+    if (!fa || !fb) return false;
+    if (fa === fb) return true;
+    const esc = fa.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp('(?:^|[^a-z0-9])' + esc + '(?:[^a-z0-9]|$)').test(fb);
+  },
+  destOnMotisRow(m, dest) {
+    const want = BkkLib.fold((dest && (dest.name || dest.key)) || '');
+    if (!want) return false;
+    const names = [];
+    (m && m.nextNames || []).forEach((n) => names.push(n));
+    if (m && m.tripTo) names.push(m.tripTo);
+    return names.some((n) => {
+      if (!n) return false;
+      return BkkLib.fold(n) === want || BkkLib.foldTokenMatch(want, n);
+    });
+  },
+  rowsFromMotisStopTimes(payload) {
+    const sts = (payload && payload.stopTimes) || [];
+    return sts.map((st) => {
+      const place = (st && st.place) || {};
+      const startMs = BkkLib.isoMs(place.departure || place.scheduledDeparture);
+      const rawType = BkkLib.motisLegType(st.mode);
+      const label = String(st.displayName || st.routeShortName || st.tripShortName || '').trim();
+      const tripRaw = String((st && st.tripId) || '').trim();
+      const destName = (st.tripTo && st.tripTo.name) || '';
+      return {
+        tripId: tripRaw ? ('motis:' + tripRaw) : '',
+        motisTripId: tripRaw,
+        label,
+        vehicle: BkkLib.vehicleKind({ type: rawType, id: tripRaw }),
+        rawType,
+        dep: startMs ? Math.round(startMs / 1000) : 0,
+        sched: startMs ? Math.round(startMs / 1000) : 0,
+        head: String(st.headsign || destName || ''),
+        tripTo: destName,
+        nextNames: ((st.nextStops || []).map((p) => p && p.name).filter(Boolean)),
+        trainNumber: /RAIL|SUBURBAN|TRAIN/.test(rawType)
+          ? BkkLib.emmaTrainNumber(st.tripShortName || label)
+          : '',
+        shape: [],
+      };
+    }).filter((row) => row.motisTripId);
+  },
+  pickMotisVehicle(motis, row, dest) {
+    const list = Array.isArray(motis) ? motis : [];
+    const num = BkkLib.rowTrainNumber(row);
+    const label = String((row && row.label) || '').trim().toUpperCase();
+    const dep = Number((row && (row.dep || row.sched || row.depTs)) || 0);
+    let best = null;
+    let bestScore = -1e9;
+    let matchHow = '';
+    const usable = (m) => {
+      if (!m) return false;
+      if (!BkkLib.sameVehicleBucket(row, m)) return false;
+      const shape = BkkLib.validMapShape(m.shape);
+      return shape.length >= 2 || !!BkkLib.motisTripIdRaw(m);
+    };
+    list.forEach((m) => {
+      if (!usable(m)) return;
+      const mNum = BkkLib.rowTrainNumber(m);
+      const mLabel = String((m && m.label) || '').trim().toUpperCase();
+      const sameNum = !!(num && mNum && num === mNum);
+      const sameLabel = BkkLib.motisLabelMatch(label, mLabel);
+      const sameAlias = !!(label && (
+        BkkLib.namedTrainAliasMatch(label, mLabel)
+        || BkkLib.namedTrainAliasMatch(label, String((m && m.head) || ''))
+      ));
+      const destOn = BkkLib.destOnMotisRow(m, dest);
+      const dt = dep ? Math.abs(Number(m.dep || 0) - dep) : 0;
+      if (dep && dt > 45 * 60 && !sameNum) return;
+      const destNear = destOn && (!dep || dt <= 12 * 60);
+      if (!sameNum && !sameLabel && !sameAlias && !destNear) return;
+      const score = (sameNum ? 1000 : 0)
+        + (sameLabel ? 400 : 0)
+        + (sameAlias ? 250 : 0)
+        + (destNear ? 50 : 0)
+        - Math.min(dt, 1800) / 60;
+      if (score > bestScore) {
+        best = m;
+        bestScore = score;
+        matchHow = sameNum ? 'num' : (destOn ? 'dest' : (sameAlias ? 'alias' : (sameLabel ? 'label' : 'time')));
+      }
+    });
+    if (!best && dep) {
+      const near = list.filter((m) => usable(m) && Math.abs(Number(m.dep || 0) - dep) <= 8 * 60);
+      const toward = dest ? near.filter((m) => BkkLib.destOnMotisRow(m, dest)) : near;
+      const pool = toward.length ? toward : near;
+      if (pool.length === 1) {
+        best = pool[0];
+        matchHow = toward.length ? 'dest-time' : 'time';
+      } else if (pool.length > 1) {
+        pool.sort((a, b) => Math.abs(Number(a.dep || 0) - dep) - Math.abs(Number(b.dep || 0) - dep));
+        const gap = Math.abs(Number(pool[1].dep || 0) - dep) - Math.abs(Number(pool[0].dep || 0) - dep);
+        if (gap >= 60 || toward.length === 1) {
+          best = pool[0];
+          matchHow = toward.length ? 'dest-time' : 'time';
+        }
+      }
+    }
+    return best;
+  },
+  pickMotisHopRow(motis, row, dest) {
+    return BkkLib.pickMotisVehicle(motis, row, dest);
+  },
+  async motisTripShape(tripId) {
+    const raw = String(tripId || '').replace(/^motis:/i, '').trim();
+    if (!raw || /^\d+:/.test(raw)) return [];
+    const data = await BkkLib.transitousFetch('/api/v5/trip', {
+      tripId: raw,
+      joinInterlinedLegs: 'true',
+    });
+    const legs = (data && data.legs) || [];
+    const pts = [];
+    legs.forEach((leg) => {
+      if (String((leg && leg.mode) || '').toUpperCase() === 'WALK') return;
+      BkkLib.validMapShape(BkkLib.decodePolyline(leg && leg.legGeometry)).forEach((pt) => {
+        const last = pts[pts.length - 1];
+        if (last && last[0] === pt[0] && last[1] === pt[1]) return;
+        pts.push(pt);
+      });
+    });
+    return pts;
+  },
+  async motisShapeForHop(row, origin, dest, opts) {
+    opts = Object.assign({}, opts || {});
+    const anchor = Number((row && (row.dep || row.sched || row.depTs)) || 0);
+    if (anchor > 0) {
+      opts.anchorDep = anchor;
+      if (!opts.time) opts.time = new Date((anchor - 120) * 1000).toISOString();
+    }
+    const kind = BkkLib.vehicleBucket(row);
+    let board = BkkLib.finiteLatLon(origin && origin.lat, origin && origin.lon);
+    let hit = null;
+    let source = '';
+    let hopShape = [];
+    let fullShape = [];
+    try {
+      const ref = await BkkLib.transitousStopRef(origin, kind);
+      if (ref && BkkLib.finiteLatLon(ref.lat, ref.lon)) {
+        board = BkkLib.finiteLatLon(ref.lat, ref.lon);
+      }
+      if (ref && ref.id) {
+        const data = await BkkLib.transitousFetch('/api/v5/stoptimes', {
+          stopId: ref.id,
+          time: opts.time || undefined,
+          n: '40',
+          fetchStops: 'true',
+        });
+        if (!board && data && data.place) {
+          board = BkkLib.finiteLatLon(data.place.lat, data.place.lon);
+        }
+        const sts = BkkLib.rowsFromMotisStopTimes(data);
+        hit = BkkLib.pickMotisVehicle(sts, row, dest);
+        if (hit) source = 'stoptimes';
+      }
+    } catch (_e) { /* hop plan is the fallback */ }
+    if (!hit) {
+      const motis = await BkkLib.transitousDepartures(origin, dest, opts);
+      hit = BkkLib.pickMotisVehicle(motis, row, dest);
+      hopShape = BkkLib.validMapShape(hit && hit.shape);
+      if (hit) source = 'plan';
+    } else {
+      hopShape = BkkLib.validMapShape(hit.shape);
+    }
+    const rawId = BkkLib.motisTripIdRaw(hit);
+    if (rawId) {
+      try {
+        fullShape = await BkkLib.motisTripShape(rawId);
+      } catch (_e) {
+        fullShape = [];
+      }
+    }
+    const shape = fullShape.length >= 2 ? fullShape : hopShape;
+    return {
+      shape: shape,
+      board: board,
+      source: source,
+      hit: hit,
+      coversHead: BkkLib.motisCoversHead(hit, row),
+    };
   },
   async fillTransitousIfEmpty(rows, origin, dest, opts) {
     const list = Array.isArray(rows) ? rows : [];
@@ -1226,8 +1599,13 @@ const BkkLib = {
       const fromSec = Number.isFinite(sec) && sec > 0
         ? sec
         : (startMs && endMs ? Math.round((endMs - startMs) / 1000) : 0);
-      const minutes = fromSec <= 0 ? 0 : Math.max(1, Math.round(fromSec / 60));
-      if (minutes <= 0) return;
+      let minutes = fromSec <= 0 ? 0 : Math.max(1, Math.round(fromSec / 60));
+      let meters = Math.max(0, Math.round(Number(leg.distance || 0)));
+      if (!meters && walk) meters = minutes * 80;
+      if (minutes <= 0) {
+        if (!walk || meters < 25) return;
+        minutes = 1;
+      }
       let waitMin = 0;
       if (!walk && startMs && prevEnd) {
         waitMin = Math.round((startMs - prevEnd) / 60000);
@@ -1235,8 +1613,6 @@ const BkkLib = {
       }
       if (endMs) prevEnd = endMs;
       else if (startMs) prevEnd = startMs;
-      let meters = Math.max(0, Math.round(Number(leg.distance || 0)));
-      if (!meters && walk) meters = minutes * 80;
       const from = leg.from || {};
       const to = leg.to || {};
       const fromLat = Number(from.lat);
@@ -1281,7 +1657,7 @@ const BkkLib = {
       legs,
     };
   },
-  async transitousJourney(origin, dest) {
+  async transitousJourney(origin, dest, opts) {
     const places = await Promise.all([
       BkkLib.transitousPlace(origin),
       BkkLib.transitousPlace(dest),
@@ -1290,11 +1666,13 @@ const BkkLib = {
     const toPlace = places[1];
     if (!fromPlace || !toPlace) return null;
     try {
-      const data = await BkkLib.transitousFetch('/api/v5/plan', {
+      const planParams = {
         fromPlace,
         toPlace,
-        numItineraries: '5',
-      });
+        numItineraries: String(Math.min(12, Math.max(5, Math.round(clampMinutesAfter(opts && opts.minutesAfter) / 40)))),
+        searchWindow: String(clampMinutesAfter(opts && opts.minutesAfter) * 60),
+      };
+      const data = await BkkLib.transitousFetch('/api/v5/plan', planParams);
       const journey = BkkLib.journeyFromMotis(data);
       if (journey && journey.legs.some((leg) => !leg.walk)) return journey;
       return null;
@@ -1326,8 +1704,13 @@ const BkkLib = {
       }
       if (endMs) prevEnd = endMs;
       else if (startMs) prevEnd = startMs;
-      const minutes = sec <= 0 ? 0 : Math.max(1, Math.round(sec / 60));
-      if (minutes <= 0) return;
+      let minutes = sec <= 0 ? 0 : Math.max(1, Math.round(sec / 60));
+      let meters = Math.max(0, Math.round(Number(leg.distance || 0)));
+      if (!meters && walk) meters = minutes * 80;
+      if (minutes <= 0) {
+        if (!walk || meters < 25) return;
+        minutes = 1;
+      }
       const from = leg.from || {};
       const to = leg.to || {};
       const fromLat = Number(from.lat);
@@ -1337,7 +1720,7 @@ const BkkLib = {
       legs.push({
         walk,
         minutes,
-        meters: Math.max(0, Math.round(Number(leg.distance || 0))),
+        meters,
         label: String(leg.routeShortName || ''),
         headsign: String(leg.headsign || ''),
         color: String(leg.routeColor || '').replace(/#/g, ''),
@@ -1362,8 +1745,9 @@ const BkkLib = {
       legs,
     };
   },
-  async planJourney(apiKey, origin, dest, hass) {
-    const motis = await BkkLib.transitousJourney(origin, dest);
+  async planJourney(apiKey, origin, dest, hass, opts) {
+    opts = opts || {};
+    const motis = await BkkLib.transitousJourney(origin, dest, opts);
     if (motis && motis.legs.some((leg) => !leg.walk)) return motis;
     let futar = null;
     if (apiKey) {
@@ -1371,11 +1755,13 @@ const BkkLib = {
       const toPlace = await BkkLib.planPlace(apiKey, dest);
       if (fromPlace && toPlace) {
         try {
+          const horizon = clampMinutesAfter(opts.minutesAfter);
           const data = await BkkLib.fetch(apiKey, 'plan-trip.json', {
             fromPlace,
             toPlace,
             mode: 'TRANSIT,WALK',
-            numItineraries: '5',
+            numItineraries: String(Math.min(12, Math.max(5, Math.round(horizon / 40)))),
+            searchWindow: String(horizon * 60),
           }, true);
           futar = BkkLib.journeyFromPlan(data);
         } catch (_e) {
@@ -1754,29 +2140,86 @@ const BkkLib = {
        is 1e5. If a precision-6 payload was decoded as 1e5, lat is ~475.
        FUTÁR `{points, length}` has no precision field and must stay 1e5 —
        retrying those as 6 shrinks Hungary to ~4.7. */
+    let result = coords;
     if (coords.length && precision === 5
         && (Math.abs(coords[0][0]) > 90 || Math.abs(coords[0][1]) > 180)) {
       if (!fromObject || hadPrecision) {
         return BkkLib.decodePolyline({ points: encoded, precision: 6 });
       }
-      return [];
-    }
-    if (coords.length && (Math.abs(coords[0][0]) > 90 || Math.abs(coords[0][1]) > 180)) {
-      return [];
-    }
-    if (coords.length <= 400) return coords;
-    const out = [];
-    const step = (coords.length - 1) / 399;
-    for (let i = 0; i < 400; i++) {
-      const idx = Math.round(i * step);
-      const pt = coords[Math.min(idx, coords.length - 1)];
-      if (!out.length || out[out.length - 1][0] !== pt[0] || out[out.length - 1][1] !== pt[1]) {
-        out.push(pt);
+      result = [];
+    } else if (coords.length && (Math.abs(coords[0][0]) > 90 || Math.abs(coords[0][1]) > 180)) {
+      result = [];
+    } else if (coords.length > 2500) {
+      const out = [];
+      const step = (coords.length - 1) / 2499;
+      for (let i = 0; i < 2500; i++) {
+        const idx = Math.round(i * step);
+        const pt = coords[Math.min(idx, coords.length - 1)];
+        if (!out.length || out[out.length - 1][0] !== pt[0] || out[out.length - 1][1] !== pt[1]) {
+          out.push(pt);
+        }
       }
+      const last = coords[coords.length - 1];
+      if (out[out.length - 1][0] !== last[0] || out[out.length - 1][1] !== last[1]) out.push(last);
+      result = out;
     }
-    const last = coords[coords.length - 1];
-    if (out[out.length - 1][0] !== last[0] || out[out.length - 1][1] !== last[1]) out.push(last);
-    return out;
+    return result;
+  },
+  shapeSpanMeters(shape) {
+    const pts = BkkLib.validMapShape(shape);
+    if (pts.length < 2) return 0;
+    let minLat = 90;
+    let maxLat = -90;
+    let minLon = 180;
+    let maxLon = -180;
+    pts.forEach((p) => {
+      if (p[0] < minLat) minLat = p[0];
+      if (p[0] > maxLat) maxLat = p[0];
+      if (p[1] < minLon) minLon = p[1];
+      if (p[1] > maxLon) maxLon = p[1];
+    });
+    return BkkLib.haversineMeters([minLat, minLon], [maxLat, maxLon]);
+  },
+  pickFullerShape(a, b) {
+    const sa = BkkLib.validMapShape(a);
+    const sb = BkkLib.validMapShape(b);
+    if (sa.length < 2) return sb;
+    if (sb.length < 2) return sa;
+    return BkkLib.shapeSpanMeters(sb) > BkkLib.shapeSpanMeters(sa) ? sb : sa;
+  },
+  stitchShapes(primary, extra) {
+    const a = BkkLib.validMapShape(primary);
+    const b = BkkLib.validMapShape(extra);
+    if (a.length < 2) return b;
+    if (b.length < 2) return a;
+    const spanA = BkkLib.shapeSpanMeters(a);
+    const spanB = BkkLib.shapeSpanMeters(b);
+    if (spanB <= spanA + 1500) return spanB > spanA ? b : a;
+    const end = a[a.length - 1];
+    let best = 0;
+    let bestD = 1e15;
+    b.forEach((p, i) => {
+      const d = BkkLib.haversineMeters(p, end);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    });
+    if (bestD > 3000) return spanB > spanA ? b : a;
+    const tail = b.slice(best);
+    if (tail.length < 2) return spanB > spanA ? b : a;
+    return a.concat(tail.slice(1));
+  },
+  combineHopShapes(motisShape, futarShape, coversHead, rowShape) {
+    const motis = BkkLib.validMapShape(motisShape);
+    const futar = BkkLib.validMapShape(futarShape);
+    let combined;
+    if (motis.length >= 2 && futar.length >= 2 && coversHead === false) {
+      combined = BkkLib.pickFullerShape(BkkLib.stitchShapes(motis, futar), futar);
+    } else {
+      combined = BkkLib.pickFullerShape(motis, futar);
+    }
+    return BkkLib.pickFullerShape(combined, rowShape);
   },
   finiteLatLon(lat, lon) {
     const a = Number(lat);
@@ -1827,7 +2270,9 @@ const BkkLib = {
     const stops = (details && details.stops) || {};
     if (!sts.length || !origin) return pts;
     let oidx = BkkLib.originIndex(sts, stops, origin);
-    if (oidx < 0) return pts;
+    if (oidx < 0) {
+      return pts;
+    }
     let didx = -1;
     const destObj = dest && (dest.id || dest.key || dest.name)
       ? { id: dest.id, name: dest.key || dest.name }
@@ -1842,7 +2287,9 @@ const BkkLib = {
       }
     }
     if (didx < 0) didx = sts.length - 1;
-    if (oidx <= 0 && didx >= sts.length - 1) return pts;
+    if (oidx <= 0 && didx >= sts.length - 1) {
+      return pts;
+    }
     const d0 = Number(sts[oidx].shapeDistTraveled);
     const d1 = Number(sts[didx].shapeDistTraveled);
     if (!Number.isFinite(d0) || !Number.isFinite(d1) || d1 === d0) return pts;
@@ -1857,7 +2304,14 @@ const BkkLib = {
     if (!(polyLen > 0) || !(maxOfficial > 0)) return pts;
     const fromM = (Math.min(d0, d1) / maxOfficial) * polyLen;
     const toM = (Math.max(d0, d1) / maxOfficial) * polyLen;
-    return BkkLib.sliceShapeMeters(pts, fromM, toM);
+    const sliced = BkkLib.sliceShapeMeters(pts, fromM, toM);
+    return sliced;
+  },
+  motisCoversHead(hit, row) {
+    if (!hit) return false;
+    const raw = String((row && (row.head || row.headsign || row.tripTo)) || '').replace(PLATFORM_STRIP, '').trim();
+    if (!raw) return true;
+    return BkkLib.destOnMotisRow(hit, { name: raw, key: raw });
   },
   rideMapColor(leg) {
     const hex = String((leg && leg.color) || '').replace('#', '');
@@ -2460,7 +2914,8 @@ const BkkLib = {
         prev.lon = Number(row.lon);
       }
       const tid = String(row.tripId || '');
-      if (tid && !/^(elvira:|gtfs:)/.test(tid) && !prevHasGps) prev.tripId = tid;
+      if (BkkLib.isFutarTripId(tid)) prev.tripId = tid;
+      else if (tid && !/^(elvira:|gtfs:)/.test(tid) && !prevHasGps) prev.tripId = tid;
       if ((!Array.isArray(prev.shape) || prev.shape.length < 2)
           && Array.isArray(row.shape) && row.shape.length >= 2) {
         prev.shape = row.shape;
@@ -2638,12 +3093,85 @@ const BkkLib = {
       return '';
     }
   },
-  async searchStops(apiKey, q, mode, city) {
+  servicePayload(res) {
+    if (!res || typeof res !== 'object') return {};
+    if (Array.isArray(res.shape) || Array.isArray(res.points) || Array.isArray(res.departures)) return res;
+    const nested = res.response || res.service_response || res.result;
+    if (nested && nested !== res) return BkkLib.servicePayload(nested);
+    return res;
+  },
+  async hassService(hass, service, serviceData) {
+    if (!hass) return null;
+    if (hass.connection && typeof hass.connection.sendMessagePromise === 'function') {
+      return hass.connection.sendMessagePromise({
+        type: 'call_service',
+        domain: 'bkk_stop',
+        service: String(service),
+        service_data: serviceData || {},
+        return_response: true,
+      });
+    }
+    if (typeof hass.callService === 'function') {
+      return hass.callService('bkk_stop', service, serviceData, undefined, false, true);
+    }
+    return null;
+  },
+  async hassTripShape(hass, apiKey, tripId) {
+    if (!hass || !BkkLib.isFutarTripId(tripId) || !apiKey) return [];
+    const serviceData = { trip_id: String(tripId), api_key: String(apiKey) };
+    try {
+      const res = await BkkLib.hassService(hass, 'trip_shape', serviceData);
+      const payload = BkkLib.servicePayload(res);
+      return BkkLib.validMapShape(payload.shape || payload.points || []);
+    } catch (_e) {
+      return [];
+    }
+  },
+  async addTransitousVolanStops(byId, q, motisHits) {
+    const motis = motisHits || await BkkLib.searchStopsTransitous(q);
+    let idx = null;
+    try {
+      idx = await BkkLib.volanIndex();
+    } catch (_e) {
+      idx = null;
+    }
+    motis.forEach((s) => {
+      if (!s || !s.id || !/^hu-volanbusz_/i.test(s.id)) return;
+      let id = s.id;
+      let name = s.name || '';
+      if (idx) {
+        const hit = BkkLib.volanMatchStop(idx, { id: s.id, name: s.name }, null);
+        if (hit && hit.id) {
+          id = hit.id;
+          name = hit.name || name;
+        }
+      }
+      if (!id || byId.has(id)) return;
+      const num = BkkLib.stopNum(id) || BkkLib.stopNum(s.id);
+      if (num) {
+        const clash = Array.from(byId.values()).find((x) => BkkLib.stopNum(x.id) === num);
+        if (clash) return;
+      }
+      byId.set(id, {
+        id,
+        name,
+        label: name,
+        lat: s.lat,
+        lon: s.lon,
+      });
+    });
+  },
+  async searchStops(apiKey, q, mode, city, opts) {
     const byId = new Map();
     if (mode === 'volan' || mode === 'all') {
       try {
         (await BkkLib.volanSearchStops(q)).forEach((s) => byId.set(s.id, s));
       } catch (_e) { /* GTFS index optional */ }
+      try {
+        if (!(opts && opts.skipTransitousVolan)) {
+          await BkkLib.addTransitousVolanStops(byId, q);
+        }
+      } catch (_e) { /* Transitous names are extra coverage */ }
     }
     if (mode === 'all') {
       try {
@@ -3274,8 +3802,11 @@ const BkkLib = {
 
   trainNumberFromTripId(tripId) {
     const s = String(tripId || '');
-    /* West/south IC trips are BKK_8661_47 for train 866, BKK_8741_47 for 874.
+    /* BKK_90681_106 is train 9068 (trailing 1 on a 5-digit body).
+       West/south IC trips are BKK_8661_47 for train 866, BKK_8741_47 for 874.
        Suburban 4xxx ids (BKK_4541_108) must keep all four digits. */
+    const long = s.match(/^BKK_([89]\d{3})1(?:_|$)/);
+    if (long) return long[1];
     const ic = s.match(/^BKK_([89]\d{2})1(?:_|$)/);
     if (ic) return ic[1];
     const m = s.match(/^BKK_(\d+)(?:_|$)/);
@@ -3286,9 +3817,11 @@ const BkkLib = {
     return !!t && !/^(elvira:|gtfs:|motis:)/.test(t);
   },
   emmaTrainNumber(text) {
-    const m = String(text || '').trim().match(/^(\d+)/);
-    if (!m) return '';
-    return m[1].replace(/^0+/, '') || m[1];
+    const s = String(text || '').trim();
+    const lead = s.match(/^(\d+)/);
+    if (lead) return lead[1].replace(/^0+/, '') || lead[1];
+    const mid = s.match(/\b(\d{3,5})\b/);
+    return mid ? (mid[1].replace(/^0+/, '') || mid[1]) : '';
   },
   matchEmmaVehicle(row, vehicle) {
     if (!row || !vehicle) return false;
@@ -3572,13 +4105,16 @@ const BkkLib = {
       }
       if (v.booking) row.booking = true;
       if (!row.trainNumber && v.trainNumber) row.trainNumber = String(v.trainNumber);
+      if (v.tripId && BkkLib.isFutarTripId(v.tripId) && !BkkLib.isFutarTripId(row.tripId)) {
+        row.tripId = String(v.tripId);
+      }
       if (v.bikesAllowed === true || v.bikesallowed === true) row.bikesAllowed = true;
       if (!Number.isFinite(Number(row.lat)) && v.lat != null) {
         row.lat = Number(v.lat);
         row.lon = Number(v.lon);
       }
     });
-    BkkLib.applyEmmaPositions(rows, pool.map((v) => ({
+    BkkLib.applyEmmaPositions(rows, pool.filter((v) => !BkkLib.isFutarTripId(v && v.tripId)).map((v) => ({
       lat: v.lat,
       lon: v.lon,
       heading: v.heading,
@@ -3675,6 +4211,7 @@ class BKKHopCard extends HTMLElement {
     this._mapOverlay = null;
     this._map = null;
     this._mapMarker = null;
+    this._mapBoardMarker = null;
     this._mapRoute = null;
     this._openMapKey = null;
     this._onMapKey = null;
@@ -3932,11 +4469,15 @@ class BKKHopCard extends HTMLElement {
       }</tbody></table>`;
       return;
     }
-    let msg = '';
-    if (!cfg.stopId || !cfg.destKey) msg = t(lang, 'cardPickStops');
-    else if (this._loading) msg = t(lang, 'cardLoading');
-    else if (!this._err) msg = t(lang, 'cardNoDepartures');
+    const msg = this._emptyBodyMessage(lang, cfg);
     this._elBody.innerHTML = msg ? `<div class="msg">${BkkLib.esc(msg)}</div>` : '';
+  }
+
+  _emptyBodyMessage(lang, cfg) {
+    if (!cfg.stopId || !cfg.destKey) return t(lang, 'cardPickStops');
+    if (this._loading) return t(lang, 'cardLoading');
+    if (this._err) return '';
+    return t(lang, 'cardNoDepartures');
   }
 
   _badgeStyle(row) {
@@ -4117,6 +4658,14 @@ class BKKHopCard extends HTMLElement {
       try { this._map.removeLayer(this._mapRoute); } catch (_e) { /* ignore */ }
       this._mapRoute = null;
     }
+    if (this._mapRouteOutline && this._map) {
+      try { this._map.removeLayer(this._mapRouteOutline); } catch (_e) { /* ignore */ }
+      this._mapRouteOutline = null;
+    }
+    if (this._mapBoardMarker && this._map) {
+      try { this._map.removeLayer(this._mapBoardMarker); } catch (_e) { /* ignore */ }
+      this._mapBoardMarker = null;
+    }
     if (this._map) {
       try { this._map.remove(); } catch (_e) { /* ignore */ }
       this._map = null;
@@ -4132,6 +4681,11 @@ class BKKHopCard extends HTMLElement {
 
   _mapKey(row) {
     return `${row.label || ''}|${row.headsign || ''}|${row.vehicleId || row.tripId || ''}`;
+  }
+
+  _boardIcon(name, lang) {
+    const tip = t(lang, 'mapBoardStop') + (name ? ': ' + name : '');
+    return `<div class="ht-board-dot" title="${BkkLib.esc(tip)}"><span class="ht-board-dot-core"></span></div>`;
   }
 
   _dotIcon(row, live, lang) {
@@ -4159,19 +4713,22 @@ class BKKHopCard extends HTMLElement {
         .ht-veh-dot-core{width:14px;height:14px;border-radius:50%;background:var(--bg,#2E5EA8);border:2.5px solid #fff;box-sizing:border-box}
         .ht-veh-dot-live .ht-veh-dot-core{width:16px;height:16px;box-shadow:0 0 0 3px color-mix(in srgb, var(--bg,#2E5EA8) 35%, transparent)}
         .ht-veh-dot-est .ht-veh-dot-core{border-style:dashed;opacity:.95}
+        .ht-board-dot{width:18px;height:18px;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(0,0,0,.45))}
+        .ht-board-dot-core{width:11px;height:11px;background:var(--primary-text-color,#111);border:2px solid var(--card-background-color,#fff);box-sizing:border-box;transform:rotate(45deg)}
         .ht-map-canvas .leaflet-container{width:100%;height:100%;min-height:420px;overflow:hidden}
-        .ht-map-canvas .leaflet-pane,.ht-map-canvas .leaflet-tile,.ht-map-canvas .leaflet-marker-icon,.ht-map-canvas .leaflet-marker-shadow,.ht-map-canvas .leaflet-tile-container,.ht-map-canvas .leaflet-pane>svg,.ht-map-canvas .leaflet-pane>canvas,.ht-map-canvas .leaflet-zoom-box,.ht-map-canvas .leaflet-image-layer,.ht-map-canvas .leaflet-layer{position:absolute;left:0;top:0}
+        .ht-map-canvas .leaflet-pane,.ht-map-canvas .leaflet-tile,.ht-map-canvas .leaflet-marker-icon,.ht-map-canvas .leaflet-marker-shadow,.ht-map-canvas .leaflet-tile-container,.ht-map-canvas .leaflet-zoom-box,.ht-map-canvas .leaflet-image-layer,.ht-map-canvas .leaflet-layer{position:absolute;left:0;top:0}
+        .ht-map-canvas .leaflet-pane>svg,.ht-map-canvas .leaflet-pane>canvas{position:absolute}
         .ht-map-canvas .leaflet-container svg{max-width:none!important;max-height:none!important}
         .ht-map-canvas .leaflet-tile-pane{z-index:200}
         .ht-map-canvas .leaflet-overlay-pane{z-index:400}
         .ht-map-canvas .leaflet-marker-pane{z-index:600}
-        .ht-map-canvas .leaflet-overlay-pane svg,.ht-map-canvas .leaflet-overlay-pane canvas{position:absolute;left:0;top:0}
     `;
   }
 
-  _mapFootText(row, hasShape, hasGps, estimated, lang) {
+  _mapFootText(row, hasShape, hasGps, estimated, lang, hasBoard) {
     const bits = [];
     if (hasShape) bits.push(t(lang, 'mapFullRoute'));
+    if (hasBoard) bits.push(t(lang, 'mapBoardStop'));
     if (hasGps) bits.push(t(lang, 'mapLivePos'));
     else if (estimated) bits.push(t(lang, 'mapEstPos'));
     else if (hasShape) bits.push(t(lang, 'mapNoGps'));
@@ -4272,7 +4829,7 @@ class BKKHopCard extends HTMLElement {
     const startLon = hasGps ? lon : 19.05;
     let map;
     try {
-      map = L.map(canvas, { scrollWheelZoom: true }).setView([startLat, startLon], hasGps ? 12 : 10);
+      map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: true }).setView([startLat, startLon], hasGps ? 12 : 8);
       /* Carto Voyager raster now watermarks every tile without an API key.
          OSM France is a keyed-less street map that still works with Leaflet. */
       L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
@@ -4306,9 +4863,26 @@ class BKKHopCard extends HTMLElement {
     if (hasGps) {
       drawMarker();
       foot.textContent = this._mapFootText(row, false, true, false, lang);
-      map.setView([lat, lon], 13);
     }
-    let details = null;
+    let board = BkkLib.finiteLatLon(cfg.stopLat, cfg.stopLon);
+    let motisShape = [];
+    let motisCoversHead = true;
+    try {
+      const motisMap = await BkkLib.motisShapeForHop(
+        row,
+        { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon },
+        { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey },
+        { minutesAfter: cfg.minutesAfter, mode: 'all' },
+      );
+      motisShape = BkkLib.validMapShape(motisMap && motisMap.shape);
+      motisCoversHead = !!(motisMap && motisMap.coversHead);
+      if (motisMap && motisMap.board) {
+        const orig = BkkLib.finiteLatLon(cfg.stopLat, cfg.stopLon);
+        if (!orig || BkkLib.haversineMeters(orig, motisMap.board) <= 300) {
+          board = motisMap.board;
+        }
+      }
+    } catch (_e) { /* timetable row still shows the live dot */ }
     if (!hasShape && /^gtfs:/i.test(String(row.tripId || '')) && this._hass) {
       try {
         const points = await BkkLib.coachShape(this._hass, row.label, row.headsign || '');
@@ -4316,58 +4890,26 @@ class BKKHopCard extends HTMLElement {
         hasShape = shape.length >= 2;
       } catch (_e) { /* timetable row still shows the live dot */ }
     }
-    if (!hasShape && cfg.apiKey && !/^motis:/i.test(String(tripId || ''))) {
+    const canFutar = cfg.apiKey && (
+      !/^motis:/i.test(String(tripId || '')) || !!BkkLib.rowTrainNumber(row)
+    );
+    let futarShape = [];
+    if (canFutar) {
       let geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : '';
-      if (!geomTrip) {
-        try {
-          let extraStop = cfg.destStopId || '';
-          if (!extraStop && (cfg.destName || cfg.destKey)) {
-            const code = await BkkLib.elviraResolveCode(
-              cfg.apiKey, '', cfg.destName || cfg.destKey,
-            );
-            if (code) extraStop = /^BKK_/i.test(code) ? code : ('BKK_' + code);
-          }
-          geomTrip = await BkkLib.futarTripIdForRow(
-            cfg.apiKey, this._tripCache || {}, row, cfg.stopId, extraStop,
-          ) || '';
-        } catch (_e) { /* keep the live dot without a line */ }
+      if (!geomTrip && this._hass) {
+        const hit = BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), row);
+        if (hit && BkkLib.isFutarTripId(hit.tripId)) geomTrip = hit.tripId;
       }
       if (BkkLib.isFutarTripId(geomTrip)) {
         try {
-          details = await BkkLib.tripDetails(cfg.apiKey, this._tripCache || {}, geomTrip);
-          const fullShape = BkkLib.validMapShape(
-            BkkLib.decodePolyline((details && details.polyline) || ''),
-          );
-          if (!hasGps && details && details.vehicle) {
-            const loc = BkkLib.vehicleLoc(details.vehicle);
-            if (Number.isFinite(loc.lat) && Number.isFinite(loc.lon)
-                && Math.abs(loc.lat) <= 90 && Math.abs(loc.lon) <= 180) {
-              lat = loc.lat;
-              lon = loc.lon;
-              hasGps = true;
-            }
-          }
-          if (!hasGps && fullShape.length >= 2) {
-            const est = BkkLib.estimatePositionFromSchedule(fullShape, details.sts, details.nowSec);
-            if (est && Number.isFinite(est[0]) && Number.isFinite(est[1])) {
-              lat = est[0];
-              lon = est[1];
-              positionEstimated = true;
-            }
-          }
-          shape = BkkLib.clipShapeToHop(
-            fullShape,
-            details,
-            { id: cfg.stopId, name: cfg.stopName },
-            { id: cfg.destStopId, key: cfg.destKey, name: cfg.destName },
-          );
-          hasShape = shape.length >= 2;
-          if (!hasShape) foot.textContent = t(lang, 'mapNoGeometry');
+          futarShape = await BkkLib.hassTripShape(this._hass, cfg.apiKey, geomTrip);
         } catch (err) {
           foot.textContent = t(lang, 'mapRouteFail', err && err.message ? err.message : err);
         }
       }
     }
+    shape = BkkLib.combineHopShapes(motisShape, futarShape, motisCoversHead, row.shape);
+    hasShape = shape.length >= 2;
     if (!this._map || this._map !== map || !this._mapOverlay) {
       this._openingMap = '';
       return;
@@ -4376,30 +4918,59 @@ class BKKHopCard extends HTMLElement {
       && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
     const hex = String(row.color || '').replace('#', '');
     const routeColor = /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(hex) ? '#' + hex : '#2E5EA8';
-    if (hasShape) {
-      L.polyline(shape, {
-        color: '#1a1a1a', weight: 7, opacity: 0.45,
-        lineJoin: 'round', lineCap: 'round', interactive: false,
-      }).addTo(map);
-      this._mapRoute = L.polyline(shape, {
-        color: routeColor, weight: 5, opacity: 0.98,
-        lineJoin: 'round', lineCap: 'round',
-      }).addTo(map);
-    }
-    if (hasPosition && !this._mapMarker) drawMarker();
-    foot.textContent = this._mapFootText(row, hasShape, hasGps, positionEstimated, lang);
-    setTimeout(() => {
-      map.invalidateSize();
+    const longRoute = hasShape && BkkLib.shapeSpanMeters(shape) > 40000;
+    const routeRenderer = (typeof L.canvas === 'function')
+      ? L.canvas({ padding: longRoute ? 2 : 0.8 })
+      : undefined;
+    const lineBase = { lineJoin: 'round', lineCap: 'round', noClip: true };
+    if (routeRenderer) lineBase.renderer = routeRenderer;
+    const applyView = () => {
+      try { map.invalidateSize(); } catch (_e) { /* ignore */ }
       if (hasShape) {
         const bounds = L.latLngBounds(shape);
         if (hasPosition) bounds.extend([lat, lon]);
-        map.fitBounds(bounds, { padding: [36, 36], maxZoom: 13 });
+        if (board) bounds.extend(board);
+        map.fitBounds(bounds, { padding: [36, 36], maxZoom: 12 });
+      } else if (board && hasPosition) {
+        map.fitBounds(L.latLngBounds([board, [lat, lon]]), { padding: [36, 36], maxZoom: 12 });
+      } else if (board) {
+        map.setView(board, 13);
       } else if (hasPosition) {
         map.setView([lat, lon], 13);
-      } else {
-        foot.textContent = t(lang, 'mapNothingToShow');
       }
-    }, 80);
+      [this._mapRoute, this._mapRouteOutline].forEach((layer) => {
+        if (layer && typeof layer.redraw === 'function') {
+          try { layer.redraw(); } catch (_e) { /* ignore */ }
+        }
+      });
+    };
+    if (hasShape) {
+      this._mapRouteOutline = L.polyline(shape, Object.assign({
+        color: '#1a1a1a', weight: 7, opacity: 0.45, interactive: false,
+      }, lineBase)).addTo(map);
+      this._mapRoute = L.polyline(shape, Object.assign({
+        color: routeColor, weight: 5, opacity: 0.98,
+      }, lineBase)).addTo(map);
+    }
+    if (board) {
+      const stopIcon = L.divIcon({
+        className: '',
+        html: this._boardIcon(cfg.stopName, lang),
+        iconSize: [18, 18],
+        iconAnchor: [9, 9],
+      });
+      this._mapBoardMarker = L.marker(board, { icon: stopIcon, zIndexOffset: 500 }).addTo(map);
+    }
+    if (hasPosition && !this._mapMarker) drawMarker();
+    applyView();
+    const hasBoard = !!board;
+    foot.textContent = this._mapFootText(row, hasShape, hasGps, positionEstimated, lang, hasBoard);
+    if (!hasShape && !hasBoard && !hasPosition) {
+      foot.textContent = t(lang, 'mapNothingToShow');
+    } else if (!hasShape) {
+      foot.textContent = t(lang, 'mapNoGeometry');
+    }
+    setTimeout(applyView, 80);
     this._openingMap = '';
   }
 
@@ -4421,7 +4992,7 @@ class BKKHopCard extends HTMLElement {
       }));
     }
     const foot = this._mapOverlay && this._mapOverlay.querySelector('.ht-map-foot');
-    if (foot) foot.textContent = this._mapFootText(row, true, true, false, this._lang());
+    if (foot) foot.textContent = this._mapFootText(row, true, true, false, this._lang(), !!this._mapBoardMarker);
   }
 
   _departMode() {
@@ -4449,6 +5020,18 @@ class BKKHopCard extends HTMLElement {
     const run = async () => {
       if (gen !== this._gen) return;
       try {
+        if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
+          this._rows = [];
+          this._rawRows = [];
+          this._loading = false;
+          this._err = '';
+          this._journey = null;
+          this._journeyKey = '';
+          this._journeyLoading = false;
+          this._paint();
+          if (typeof this._considerJourney === 'function') this._considerJourney();
+          return;
+        }
         const wantElvira = (mode === 'mav' || mode === 'all') && this._hass;
         const elviraP = wantElvira
           ? BkkLib.elviraBetween(
@@ -4524,6 +5107,7 @@ class BKKHopCard extends HTMLElement {
         if (gen !== this._gen) return;
         this._journey = null;
         this._journeyKey = '';
+        this._journeyLoading = false;
         earlyRows = rows || [];
         publish();
         this._syncOpenMap();
@@ -4636,7 +5220,9 @@ class BKKPlannerCard extends BKKHopCard {
   }
 
   _considerJourney() {
-    if (this._journeyLoading) return;
+    const cfg = this._config || {};
+    const horizon = clampMinutesAfter(cfg.minutesAfter);
+    const key = [cfg.stopId, cfg.destStopId || '', cfg.destName, horizon].join('|');
     const nowSec = Math.floor(Date.now() / 1000);
     const visible = (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
     if (visible.length) {
@@ -4646,10 +5232,8 @@ class BKKPlannerCard extends BKKHopCard {
       }
       return;
     }
-    const cfg = this._config || {};
     if (!cfg.stopId || !cfg.destName) return;
-    const key = [cfg.stopId, cfg.destStopId || '', cfg.destName].join('|');
-    if (this._journeyKey === key) return;
+    if (this._journeyKey === key && (this._journeyLoading || this._journey)) return;
     const gen = this._gen;
     this._journeyKey = key;
     this._journeyLoading = true;
@@ -4658,14 +5242,22 @@ class BKKPlannerCard extends BKKHopCard {
       { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon },
       { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
       this._hass,
+      { minutesAfter: horizon },
     ).then((journey) => {
-      this._journeyLoading = false;
       if (gen !== this._gen) return;
+      this._journeyLoading = false;
       this._journey = journey;
       this._paint();
     }).catch(() => {
+      if (gen !== this._gen) return;
       this._journeyLoading = false;
     });
+  }
+
+  _emptyBodyMessage(lang, cfg) {
+    if (this._journey && this._journey.legs && this._journey.legs.length) return '';
+    if (this._journeyLoading) return t(lang, 'cardLoading');
+    return super._emptyBodyMessage(lang, cfg);
   }
 
   _paint() {
@@ -4766,7 +5358,7 @@ class BKKPlannerCard extends BKKHopCard {
     const start = segs[0].shape[0];
     let map;
     try {
-      map = L.map(canvas, { scrollWheelZoom: true }).setView(start, 12);
+      map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: true }).setView(start, 8);
       L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
         maxZoom: 20,
         subdomains: 'abc',
@@ -4781,27 +5373,26 @@ class BKKPlannerCard extends BKKHopCard {
     const resizeMap = () => { try { map.invalidateSize(); } catch (_e) { /* ignore */ } };
     requestAnimationFrame(() => { resizeMap(); requestAnimationFrame(resizeMap); });
     const allPts = [];
+    const routeRenderer = (typeof L.canvas === 'function') ? L.canvas({ padding: 0.8 }) : undefined;
+    const lineBase = { lineJoin: 'round', lineCap: 'round', noClip: true };
+    if (routeRenderer) lineBase.renderer = routeRenderer;
     segs.forEach((seg) => {
       const shape = seg.shape;
       shape.forEach((pt) => allPts.push(pt));
       if (seg.walk) {
-        L.polyline(shape, {
-          color: '#1a1a1a', weight: 5, opacity: 0.35, dashArray: '8 8',
-          lineJoin: 'round', lineCap: 'round', interactive: false,
-        }).addTo(map);
-        L.polyline(shape, {
+        L.polyline(shape, Object.assign({
+          color: '#1a1a1a', weight: 5, opacity: 0.35, dashArray: '8 8', interactive: false,
+        }, lineBase)).addTo(map);
+        L.polyline(shape, Object.assign({
           color: '#888888', weight: 3, opacity: 0.95, dashArray: '8 8',
-          lineJoin: 'round', lineCap: 'round',
-        }).addTo(map);
+        }, lineBase)).addTo(map);
       } else {
-        L.polyline(shape, {
-          color: '#1a1a1a', weight: 7, opacity: 0.45,
-          lineJoin: 'round', lineCap: 'round', interactive: false,
-        }).addTo(map);
-        L.polyline(shape, {
+        L.polyline(shape, Object.assign({
+          color: '#1a1a1a', weight: 7, opacity: 0.45, interactive: false,
+        }, lineBase)).addTo(map);
+        L.polyline(shape, Object.assign({
           color: seg.color, weight: 5, opacity: 0.98,
-          lineJoin: 'round', lineCap: 'round',
-        }).addTo(map);
+        }, lineBase)).addTo(map);
       }
     });
     const pin = (pt, fill) => {
@@ -4866,13 +5457,13 @@ class BKKPlannerCard extends BKKHopCard {
     const style = document.createElement('style');
     style.textContent = `
       ha-card.is-planner { overflow: visible; }
-      ha-card.is-planner .wrap { padding: 8px 4px 12px; }
+      ha-card.is-planner .wrap { padding: 4px 4px 8px; }
       ha-card.is-planner .head {
-        font-size: 22px; font-weight: 700; letter-spacing: -0.02em;
-        margin: 0; padding: 8px 12px 0; white-space: normal; line-height: 1.2;
+        font-size: 16px; font-weight: 700; letter-spacing: -0.02em;
+        margin: 0; padding: 4px 10px 0; white-space: normal; line-height: 1.2;
       }
       ha-card.is-planner .deps-label {
-        margin: 16px 12px 4px; font-size: 12px; font-weight: 700;
+        margin: 8px 10px 2px; font-size: 11px; font-weight: 700;
         letter-spacing: 0.04em; text-transform: uppercase;
         color: var(--secondary-text-color);
       }
@@ -4883,79 +5474,79 @@ class BKKPlannerCard extends BKKHopCard {
         min-width: 2.6em; text-align: center; border-radius: 8px;
         padding: 4px 8px; font-weight: 700;
       }
-      .plan { margin: 8px 8px 0; }
+      .plan { margin: 4px 6px 0; }
       .journey {
-        display: grid; grid-template-columns: 40px minmax(0, 1fr); column-gap: 8px;
-        padding: 14px; border-radius: var(--ha-card-border-radius, 16px);
+        display: grid; grid-template-columns: 32px minmax(0, 1fr); column-gap: 6px;
+        padding: 8px; border-radius: var(--ha-card-border-radius, 12px);
         background: var(--secondary-background-color, rgba(127,127,127,.12));
       }
-      .spine { display: flex; flex-direction: column; align-items: center; padding-top: 28px; }
-      .spine .dot { width: 14px; height: 14px; border-radius: 50%; box-sizing: border-box; flex: 0 0 auto; }
+      .spine { display: flex; flex-direction: column; align-items: center; padding-top: 18px; }
+      .spine .dot { width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; flex: 0 0 auto; }
       .spine .dot.from { background: var(--primary-color); }
-      .spine .dot.to { background: var(--card-background-color, #fff); border: 3px solid var(--primary-color); }
-      .spine .stem { width: 2px; flex: 1 1 16px; min-height: 16px; background: var(--divider-color); }
+      .spine .dot.to { background: var(--card-background-color, #fff); border: 2px solid var(--primary-color); }
+      .spine .stem { width: 2px; flex: 1 1 8px; min-height: 8px; background: var(--divider-color); }
       .spine #pswap {
-        margin: 8px 0; border: 0; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700;
-        border-radius: 999px; padding: 8px 10px;
+        margin: 4px 0; border: 0; cursor: pointer; font: inherit; font-size: 11px; font-weight: 700;
+        border-radius: 999px; padding: 4px 6px;
         background: var(--primary-color); color: var(--text-primary-color, #fff);
       }
-      .place + .place { margin-top: 14px; }
-      .plan .label { font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
-        color: var(--secondary-text-color); margin-bottom: 6px; }
+      .place + .place { margin-top: 8px; }
+      .plan .label { font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+        color: var(--secondary-text-color); margin-bottom: 3px; }
       .plan input {
-        width: 100%; box-sizing: border-box; font: inherit; font-size: 16px;
+        width: 100%; box-sizing: border-box; font: inherit; font-size: 14px;
         background: var(--card-background-color, #fff); color: var(--primary-text-color);
-        border: 1px solid var(--divider-color); border-radius: 12px; padding: 14px 14px;
+        border: 1px solid var(--divider-color); border-radius: 8px; padding: 7px 10px;
       }
       .plan input:focus { outline: 2px solid var(--primary-color); outline-offset: 1px; }
+      .plan input.compact-hide { display: none; }
       .plan .horizon {
-        display: flex; flex-direction: column; align-items: stretch; gap: 8px;
-        margin-top: 12px; padding: 10px 12px; border-radius: 16px;
-        background: var(--secondary-background-color, rgba(127,127,127,.12));
+        display: flex; flex-direction: row; align-items: center; gap: 8px;
+        margin-top: 6px; padding: 0 2px;
       }
-      .plan .horizon-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-      .plan .horizon .label { margin: 0; }
-      .plan .horizon .chips {
-        flex: none; width: 100%; margin: 0; flex-wrap: wrap; overflow: visible;
+      .plan .horizon .label { margin: 0; flex: 0 0 auto; }
+      .plan .horizon select {
+        flex: 1 1 auto; min-width: 0; box-sizing: border-box;
+        font: inherit; font-size: 13px; font-weight: 650;
+        background: var(--card-background-color, #fff); color: var(--primary-text-color);
+        border: 1px solid var(--divider-color); border-radius: 8px; padding: 5px 8px;
       }
-      .plan .horizon .chip { flex: 0 0 auto; }
       .plan #preset {
         border: 0; background: transparent; color: var(--primary-color);
-        font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; padding: 6px;
+        font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; padding: 4px 2px;
         flex: 0 0 auto;
       }
-      .plan .suggest { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+      .plan .suggest { margin-top: 4px; display: flex; flex-direction: row; flex-wrap: wrap; gap: 4px; }
       .plan .suggest.hidden { display: none; }
-      .plan .suggest-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
-      .plan .suggest-kind {
-        flex: 0 0 48px; font-size: 12px; font-weight: 700; color: var(--secondary-text-color);
-      }
-      .plan .suggest-stops { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+      .plan .suggest-row, .plan .suggest-stops { display: contents; }
+      .plan .suggest-kind { display: none; }
       .plan .suggest-stop {
-        border: 0; border-radius: 12px; cursor: pointer;
-        font: inherit; font-size: 14px; font-weight: 600; padding: 8px 12px;
+        display: inline-flex; align-items: center; gap: 3px;
+        border: 0; border-radius: 6px; cursor: pointer;
+        font: inherit; font-size: 11px; font-weight: 650; padding: 3px 7px 3px 5px;
         background: var(--card-background-color, #fff); color: var(--primary-text-color);
       }
-      .plan .suggest-row[data-kind="bkk"] .suggest-stop { box-shadow: inset 3px 0 0 var(--primary-color); }
-      .plan .suggest-row[data-kind="volan"] .suggest-stop { box-shadow: inset 3px 0 0 var(--warning-color, #f0b429); }
-      .plan .suggest-row[data-kind="mav"] .suggest-stop { box-shadow: inset 3px 0 0 var(--info-color, #03a9f4); }
-      .plan .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-      .plan .chip {
-        border: 1px solid var(--divider-color); background: transparent;
-        color: var(--primary-text-color); border-radius: 999px;
-        padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700;
+      .plan .suggest-feed {
+        font-size: 9px; font-weight: 800; letter-spacing: 0.02em; line-height: 1;
+        color: var(--primary-color);
       }
-      .plan .chip.on { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
-      .plan .list { max-height: 220px; overflow: auto; margin-top: 8px; }
+      .plan .suggest-row[data-kind="volan"] .suggest-feed { color: var(--warning-color, #f0b429); }
+      .plan .suggest-row[data-kind="mav"] .suggest-feed { color: var(--info-color, #03a9f4); }
+      .plan .suggest-row[data-kind="bkk"] .suggest-stop { box-shadow: inset 2px 0 0 var(--primary-color); }
+      .plan .suggest-row[data-kind="volan"] .suggest-stop { box-shadow: inset 2px 0 0 var(--warning-color, #f0b429); }
+      .plan .suggest-row[data-kind="mav"] .suggest-stop { box-shadow: inset 2px 0 0 var(--info-color, #03a9f4); }
+      .plan .list { max-height: 180px; overflow: auto; margin-top: 4px; }
       .plan .list:empty { display: none; }
       .plan .hit {
-        display: block; width: 100%; text-align: left; font: inherit; font-size: 15px; font-weight: 650;
+        display: block; width: 100%; text-align: left; font: inherit; font-size: 14px; font-weight: 650;
         background: var(--card-background-color, #fff); color: var(--primary-text-color);
-        border: 0; border-radius: 12px; padding: 10px 12px; cursor: pointer; margin-top: 6px;
+        border: 0; border-radius: 8px; padding: 7px 10px; cursor: pointer; margin-top: 4px;
       }
       .plan .picked {
-        display: none; margin-top: 8px; font-size: 16px; font-weight: 800; line-height: 1.25;
-        padding: 8px 10px; border-radius: 12px; background: var(--card-background-color, #fff);
+        display: none; margin-top: 4px; font: inherit; font-size: 14px; font-weight: 700; line-height: 1.25;
+        padding: 5px 8px; border: 0; border-radius: 8px; width: 100%; text-align: left;
+        background: var(--card-background-color, #fff); color: var(--primary-text-color);
+        cursor: pointer;
       }
       .plan .picked.show { display: block; }
       .journey-plan {
@@ -4997,24 +5588,22 @@ class BKKPlannerCard extends BKKHopCard {
           <div class="place">
             <div class="label" id="plab1">${BkkLib.esc(t(lang, 'plannerStep1'))}</div>
             <input id="pq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerSearchPlaceholder'))}">
-            <div class="picked" id="pstop"></div>
+            <button type="button" class="picked" id="pstop"></button>
             <div class="suggest" id="pfav"></div>
             <div class="list" id="phits"></div>
           </div>
           <div class="place">
             <div class="label" id="plab2">${BkkLib.esc(t(lang, 'plannerStep2'))}</div>
             <input id="pdq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerDestPlaceholder'))}">
-            <div class="picked" id="pdest"></div>
+            <button type="button" class="picked" id="pdest"></button>
             <div class="list" id="pdhits"></div>
           </div>
         </div>
       </div>
       <div class="horizon">
-        <div class="horizon-bar">
-          <div class="label" id="plab3">${BkkLib.esc(t(lang, 'plannerStep3'))}</div>
-          <button id="preset" type="button">${BkkLib.esc(t(lang, 'plannerReset'))}</button>
-        </div>
-        <div class="chips" id="pmin"></div>
+        <div class="label" id="plab3">${BkkLib.esc(t(lang, 'plannerStep3'))}</div>
+        <select id="pmin" aria-label="${BkkLib.esc(t(lang, 'plannerStep3'))}"></select>
+        <button id="preset" type="button">${BkkLib.esc(t(lang, 'plannerReset'))}</button>
       </div>
     `;
     wrap.insertBefore(plan, head);
@@ -5035,6 +5624,9 @@ class BKKPlannerCard extends BKKHopCard {
         clearTimeout(this._searchTimer);
         this._searchTimer = setTimeout(() => this._searchOrigin(q.value.trim()), 280);
       });
+      q.addEventListener('blur', () => {
+        if ((this._config || {}).stopName && !q.value.trim()) q.classList.add('compact-hide');
+      });
     }
     if (dq) {
       dq.addEventListener('input', () => {
@@ -5042,6 +5634,23 @@ class BKKPlannerCard extends BKKHopCard {
         this._destTimer = setTimeout(() => this._searchDest(dq.value.trim()), 280);
       });
       dq.addEventListener('focus', () => this._searchDest(dq.value.trim()));
+      dq.addEventListener('blur', () => {
+        if ((this._config || {}).destName && !dq.value.trim()) dq.classList.add('compact-hide');
+      });
+    }
+    const stop = this._planEl('pstop');
+    const dest = this._planEl('pdest');
+    if (stop && q) {
+      stop.addEventListener('click', () => {
+        q.classList.remove('compact-hide');
+        q.focus();
+      });
+    }
+    if (dest && dq) {
+      dest.addEventListener('click', () => {
+        dq.classList.remove('compact-hide');
+        dq.focus();
+      });
     }
     if (reset) reset.addEventListener('click', () => this._resetPlan());
     if (swap) swap.addEventListener('click', () => this._swapPlan());
@@ -5059,27 +5668,27 @@ class BKKPlannerCard extends BKKHopCard {
       .replace(/\s+vas\u00fat\u00e1llom\u00e1s$/, '')
       .replace(/\s+p\u00e1lyaudvar$/, '');
     [
-      ['bkk', 'BKK', BKK_FAVORITES],
-      ['volan', 'Vol\u00e1n', VOLAN_FAVORITES],
-      ['mav', 'M\u00c1V', MAV_FAVORITES],
-    ].forEach(([kind, title, list]) => {
+      ['bkk', 'B', BKK_FAVORITES],
+      ['volan', 'V', VOLAN_FAVORITES],
+      ['mav', 'M', MAV_FAVORITES],
+    ].forEach(([kind, mark, list]) => {
       const row = document.createElement('div');
       row.className = 'suggest-row';
       row.setAttribute('data-kind', kind);
-      const label = document.createElement('span');
-      label.className = 'suggest-kind';
-      label.textContent = title;
       const stops = document.createElement('span');
       stops.className = 'suggest-stops';
       list.forEach((fav) => {
         const button = document.createElement('button');
         button.type = 'button';
         button.className = 'suggest-stop';
-        button.textContent = shortName(fav.name);
+        const feed = document.createElement('span');
+        feed.className = 'suggest-feed';
+        feed.textContent = mark;
+        button.appendChild(feed);
+        button.appendChild(document.createTextNode(shortName(fav.name)));
         button.addEventListener('click', () => this._pickOrigin(fav));
         stops.appendChild(button);
       });
-      row.appendChild(label);
       row.appendChild(stops);
       box.appendChild(row);
     });
@@ -5102,11 +5711,15 @@ class BKKPlannerCard extends BKKHopCard {
       dest.textContent = cfg.destName || '';
       dest.classList.toggle('show', !!cfg.destName);
     }
-    if (q && document.activeElement !== q) {
-      q.placeholder = cfg.stopName || t(lang, 'plannerSearchPlaceholder');
+    if (q) {
+      q.placeholder = t(lang, 'plannerSearchPlaceholder');
+      const editing = document.activeElement === q || !!(q.value || '').trim();
+      q.classList.toggle('compact-hide', !!cfg.stopName && !editing);
     }
-    if (dq && document.activeElement !== dq) {
-      dq.placeholder = cfg.destName || t(lang, 'plannerDestPlaceholder');
+    if (dq) {
+      dq.placeholder = t(lang, 'plannerDestPlaceholder');
+      const editing = document.activeElement === dq || !!(dq.value || '').trim();
+      dq.classList.toggle('compact-hide', !!cfg.destName && !editing);
     }
     const lab1 = this._planEl('plab1');
     const lab2 = this._planEl('plab2');
@@ -5124,22 +5737,23 @@ class BKKPlannerCard extends BKKHopCard {
   }
 
   _paintMinutesAfter() {
-    const box = this._planEl('pmin');
-    if (!box) return;
+    const sel = this._planEl('pmin');
+    if (!sel || sel.tagName !== 'SELECT') return;
     const current = clampMinutesAfter(this._config && this._config.minutesAfter);
-    box.innerHTML = '';
-    MINUTES_AFTER_PRESETS.forEach((n) => {
-      const b = document.createElement('button');
-      b.className = 'chip' + (n === current ? ' on' : '');
-      b.type = 'button';
-      b.textContent = String(n);
-      b.addEventListener('click', () => {
+    if (!sel.options.length) {
+      MINUTES_AFTER_PRESETS.forEach((n) => {
+        const o = document.createElement('option');
+        o.value = String(n);
+        o.textContent = String(n);
+        sel.appendChild(o);
+      });
+      sel.addEventListener('change', () => {
+        const n = clampMinutesAfter(sel.value);
         this._config = Object.assign({}, this._config, { minutesAfter: n });
-        this._paintMinutesAfter();
         this._reloadSafe();
       });
-      box.appendChild(b);
-    });
+    }
+    sel.value = String(current);
   }
 
   _swapPlan() {
@@ -5152,11 +5766,13 @@ class BKKPlannerCard extends BKKHopCard {
       stopName: newOriginName,
       stopLat: cfg.destLat,
       stopLon: cfg.destLon,
+      stopKind: cfg.destKind || '',
       destKey: BkkLib.stationKey(cfg.stopName || ''),
       destName: cfg.stopName || '',
       destStopId: cfg.stopId,
       destLat: cfg.stopLat,
       destLon: cfg.stopLon,
+      destKind: cfg.stopKind || '',
       routeIds: [],
     });
     this._dests = [];
@@ -5167,8 +5783,8 @@ class BKKPlannerCard extends BKKHopCard {
     const q = this._planEl('pq');
     const dq = this._planEl('pdq');
     const hits = this._planEl('phits');
-    if (q) q.value = newOriginName;
-    if (dq) dq.value = cfg.stopName || '';
+    if (q) q.value = '';
+    if (dq) dq.value = '';
     if (hits) hits.innerHTML = '';
     this._syncPickerLabels();
     this._paint();
@@ -5181,9 +5797,11 @@ class BKKPlannerCard extends BKKHopCard {
     this._config = Object.assign({}, this._config, {
       stopId: '',
       stopName: '',
+      stopKind: '',
       destKey: '',
       destName: '',
       destStopId: '',
+      destKind: '',
       routeIds: [],
     });
     this._rows = [];
@@ -5216,13 +5834,13 @@ class BKKPlannerCard extends BKKHopCard {
         return;
       }
       box.innerHTML = hits.map((s) => (
-        `<button class="hit" type="button" data-id="${BkkLib.esc(s.id)}">${BkkLib.esc(s.label || s.name)}</button>`
+        `<button class="hit" type="button" data-id="${BkkLib.esc(s.id)}">${BkkLib.esc(BkkLib.plannerHitLabel(s, this._lang()))}</button>`
       )).join('');
       box.querySelectorAll('.hit').forEach((btn) => {
         btn.addEventListener('click', () => {
           const id = btn.getAttribute('data-id');
           const st = hits.find((h) => h.id === id);
-          this._pickOrigin({ id: st.id, name: st.name, label: st.label });
+          if (st) this._pickOrigin(st);
         });
       });
     } catch (err) {
@@ -5237,11 +5855,13 @@ class BKKPlannerCard extends BKKHopCard {
       stopName: stop.name,
       stopLat: stop.lat,
       stopLon: stop.lon,
+      stopKind: stop.kind || '',
       destKey: '',
       destName: '',
       destStopId: '',
       destLat: undefined,
       destLon: undefined,
+      destKind: '',
       routeIds: [],
     });
     this._dests = [];
@@ -5252,7 +5872,7 @@ class BKKPlannerCard extends BKKHopCard {
     const q = this._planEl('pq');
     const dq = this._planEl('pdq');
     const hits = this._planEl('phits');
-    if (q) q.value = stop.label || stop.name;
+    if (q) q.value = '';
     if (dq) dq.value = '';
     if (hits) hits.innerHTML = '';
     this._syncPickerLabels();
@@ -5268,16 +5888,23 @@ class BKKPlannerCard extends BKKHopCard {
     this._paintDestHits('');
     try {
       if (!cfg.apiKey) await this._fillKey();
-      const out = await BkkLib.reachableDests(
-        this._config.apiKey,
-        this._tripCache || {},
-        { id: cfg.stopId, name: cfg.stopName || '' },
-        'all',
-        '',
-      );
-      if (seq !== this._destSeq) return;
-      this._dests = (out && out.dests) || [];
-      this._destRoutes = (out && out.destRoutes) || {};
+      const placeOrigin = /^(geo:|node\/)/i.test(String(cfg.stopId || ''))
+        || cfg.stopKind === 'address' || cfg.stopKind === 'place';
+      if (placeOrigin) {
+        this._dests = [];
+        this._destRoutes = {};
+      } else {
+        const out = await BkkLib.reachableDests(
+          this._config.apiKey,
+          this._tripCache || {},
+          { id: cfg.stopId, name: cfg.stopName || '' },
+          'all',
+          '',
+        );
+        if (seq !== this._destSeq) return;
+        this._dests = (out && out.dests) || [];
+        this._destRoutes = (out && out.destRoutes) || {};
+      }
     } catch (err) {
       if (seq !== this._destSeq) return;
       this._showErr(err);
@@ -5345,7 +5972,7 @@ class BKKPlannerCard extends BKKHopCard {
     }
     const shown = this._destHits.slice(0, 20);
     box.innerHTML = shown.map((d) => (
-      `<button class="hit" type="button" data-key="${BkkLib.esc(d.key)}" data-id="${BkkLib.esc(d.id || '')}">${BkkLib.esc(d.name)}</button>`
+      `<button class="hit" type="button" data-key="${BkkLib.esc(d.key)}" data-id="${BkkLib.esc(d.id || '')}">${BkkLib.esc(BkkLib.plannerHitLabel(d, this._lang()))}</button>`
     )).join('');
     box.querySelectorAll('.hit').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -5371,7 +5998,7 @@ class BKKPlannerCard extends BKKHopCard {
       return;
     }
     if (!this._dests.length) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerDestPlaceholder')) + '</span>';
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerTypeDest')) + '</span>';
       return;
     }
     const hits = BkkLib.destHitsForQuery(this._dests, q, []);
@@ -5385,11 +6012,12 @@ class BKKPlannerCard extends BKKHopCard {
       destStopId: dest.id || '',
       destLat: dest.lat,
       destLon: dest.lon,
+      destKind: dest.kind || '',
       routeIds: this._idsForDest(dest.key),
     });
     const dq = this._planEl('pdq');
     const hits = this._planEl('pdhits');
-    if (dq) dq.value = dest.name;
+    if (dq) dq.value = '';
     if (hits) hits.innerHTML = '';
     this._syncPickerLabels();
     this._reloadSafe();
