@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.6';
+const CARD_VERSION = '1.4.4-rev.7';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -782,13 +782,20 @@ const BkkLib = {
   _mem: {},
   _inflight: {},
   _gateActive: 0,
-  _gateMax: 8,
+  _gateCards: 0,
   _gateWaiters: [],
   _gateFgWaiters: [],
+  _boards: new Map(),
+  _boardInflight: new Map(),
+  /* One slot pair per card on the dashboard, between 4 and 24. */
+  _gateLimit() {
+    const cards = Math.max(1, BkkLib._gateCards || 1);
+    return Math.min(24, Math.max(4, cards * 2));
+  },
   /* Foreground calls are the departure boards. They jump ahead of trip-details
      so one card finishing does not hold up the other cards on the dashboard. */
   async _gate(foreground) {
-    const busy = BkkLib._gateActive >= BkkLib._gateMax;
+    const busy = BkkLib._gateActive >= BkkLib._gateLimit();
     const fgWaiting = BkkLib._gateFgWaiters.length > 0;
     if (!busy && (foreground || !fgWaiting)) {
       BkkLib._gateActive += 1;
@@ -839,6 +846,39 @@ const BkkLib = {
       if (timer) clearTimeout(timer);
       BkkLib._ungate();
     }
+  },
+  /* Same stop and horizon is one request, shared by every card that needs it. */
+  departureBoard(apiKey, stopId, horizon) {
+    const key = String(stopId) + '|' + String(horizon);
+    const hit = BkkLib._boards.get(key);
+    if (hit && Date.now() - hit.ts < 20000) return Promise.resolve(hit.data);
+    const inflight = BkkLib._boardInflight.get(key);
+    if (inflight) return inflight;
+    const run = BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
+      stopId: String(stopId),
+      minutesAfter: String(horizon),
+      minutesBefore: '0',
+      onlyDepartures: 'true',
+      includeReferences: 'true',
+      includeVehicleFromTrip: 'true',
+    }, true).then((data) => {
+      BkkLib._boards.set(key, { ts: Date.now(), data });
+      return data;
+    }).finally(() => {
+      BkkLib._boardInflight.delete(key);
+    });
+    BkkLib._boardInflight.set(key, run);
+    return run;
+  },
+  boardSpanMin(data, nowSec) {
+    const times = ((((data || {}).data || {}).entry) || {}).stopTimes || [];
+    let last = 0;
+    times.forEach((st) => {
+      const dep = st.predictedDepartureTime || st.departureTime || 0;
+      if (dep > last) last = dep;
+    });
+    if (!last) return { count: times.length, spanMin: 0 };
+    return { count: times.length, spanMin: (last - nowSec) / 60 };
   },
   async probeApiKey(apiKey) {
     if (!apiKey) return { ok: false, code: 'errNoApiKey' };
@@ -1847,7 +1887,7 @@ const BkkLib = {
     return Array.from(poles);
   },
   async originPoles(apiKey, cache, origin, routeIds, destKey) {
-    const routes = (routeIds || []).filter(Boolean).slice(0, 32);
+    const routes = (routeIds || []).filter(Boolean);
     const patterns = await Promise.all(routes.map(async (rid) => {
       try {
         return await BkkLib.loadRoutePattern(apiKey, cache, rid);
@@ -1862,7 +1902,7 @@ const BkkLib = {
       }
       if (!poles.size && origin && origin.id) poles.add(origin.id);
     }
-    return Array.from(poles).slice(0, 16);
+    return Array.from(poles);
   },
   async childStopIds(apiKey, cache, parentId) {
     const key = 'children:' + parentId;
@@ -2096,20 +2136,56 @@ const BkkLib = {
         }
       }
       if (!poles.length) poles = [stopId];
-      const payloads = await Promise.all(poles.map(async (pid) => {
+      const loadBoards = (ids) => Promise.all(ids.map(async (pid) => {
         try {
-          return await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
-            stopId: pid,
-            minutesAfter: String(horizon),
-            minutesBefore: '0',
-            onlyDepartures: 'true',
-            includeReferences: 'true',
-            includeVehicleFromTrip: 'true',
-          }, true);
+          return await BkkLib.departureBoard(apiKey, pid, horizon);
         } catch (_e) {
           return null;
         }
       }));
+      let payloads = await loadBoards(poles);
+      const usedParentOnly = poles.length === 1 && poles[0] === stopId;
+      const span = payloads.reduce((best, data) => {
+        const cur = BkkLib.boardSpanMin(data, now);
+        return {
+          count: best.count + cur.count,
+          spanMin: Math.max(best.spanMin, cur.spanMin),
+        };
+      }, { count: 0, spanMin: 0 });
+      const capped = usedParentOnly && (span.count >= 60 || span.spanMin + 2 < horizon);
+      if (capped) {
+        const discovered = [];
+        payloads.forEach((data) => {
+          const refs = ((data && data.data || {}).references) || {};
+          const entry = ((data && data.data || {}).entry) || {};
+          const trips = refs.trips || {};
+          const routes = refs.routes || {};
+          const ids = new Set(entry.routeIds || []);
+          (entry.stopTimes || []).forEach((st) => {
+            const rid = (trips[st.tripId] || {}).routeId;
+            if (rid) ids.add(rid);
+          });
+          ids.forEach((rid) => {
+            const rt = routes[rid] || {};
+            if (!BkkLib.routeMatchesMode(rt, mode)) return;
+            if (!BkkLib.keepFutarCandidate(rt, selected, mode, destKey)) return;
+            if (discovered.indexOf(rid) < 0) discovered.push(rid);
+          });
+        });
+        if (discovered.length) {
+          let extra = [];
+          try {
+            extra = await BkkLib.originPoles(apiKey, cache, origin, discovered, destKey || '');
+          } catch (_e) {
+            extra = [];
+          }
+          const fresh = extra.filter((id) => poles.indexOf(id) < 0);
+          if (fresh.length) {
+            poles = poles.concat(fresh);
+            payloads = payloads.concat(await loadBoards(fresh));
+          }
+        }
+      }
       const seenTrip = new Set();
       payloads.forEach((data) => {
         if (!data) return;
@@ -2661,6 +2737,7 @@ class BKKHopCard extends HTMLElement {
     if (!this.shadowRoot) {
       try { this.attachShadow({ mode: 'open' }); } catch (_e) { /* already attached */ }
     }
+    this._holdGate();
     this._config = Object.assign({ routeIds: [] }, config || {});
     this._tripCache = {};
     this._err = '';
@@ -2713,7 +2790,14 @@ class BKKHopCard extends HTMLElement {
 
   /* Home Assistant re-parents cards while editing a dashboard, so the timers
      have to come back after a detach. */
+  _holdGate() {
+    if (this._gateHeld) return;
+    this._gateHeld = true;
+    BkkLib._gateCards += 1;
+  }
+
   connectedCallback() {
+    this._holdGate();
     if (!this._painted) return;
     this._startTick();
     this._bindMapClicks();
@@ -2721,6 +2805,10 @@ class BKKHopCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    if (this._gateHeld) {
+      this._gateHeld = false;
+      BkkLib._gateCards = Math.max(0, BkkLib._gateCards - 1);
+    }
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     if (this._tick) { clearInterval(this._tick); this._tick = null; }
   }
