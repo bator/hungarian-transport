@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "rev = 1.4.2-rev.N prerelease (default). Do not pick patch/minor/major unless asked."
+        description: "rev = 1.4.4-rev.N prerelease (default, next patch after HACS stable). Do not pick patch/minor/major unless asked."
         type: choice
         options:
           - rev
@@ -98,7 +98,9 @@ jobs:
           elif [ "$bump" = "patch" ]; then
             tag="v${major}.${minor}.$((patch + 1))"
           else
-            base="${major}.${minor}.${patch}"
+            # Live Lovelace is the next patch, published only as a prerelease,
+            # so HACS stable stays on the last real release.
+            base="${major}.${minor}.$((patch + 1))"
             n=$(latest_rev_n "$base")
             tag="v${base}-rev.$((n + 1))"
           fi
