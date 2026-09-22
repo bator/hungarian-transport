@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.16';
+const CARD_VERSION = '1.4.2-rev.17';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -3426,8 +3426,20 @@ class BKKPlannerCard extends BKKHopCard {
   _render() {
     const first = !this._painted;
     super._render();
+    const card = this.shadowRoot && this.shadowRoot.querySelector('ha-card');
+    if (card) card.classList.add('is-planner');
     if (first) this._mountPickers();
     else this._syncPickerLabels();
+    this._ensureDepartureCaption();
+  }
+
+  _ensureDepartureCaption() {
+    if (!this.shadowRoot || !this._elBody || this.shadowRoot.getElementById('pdeps')) return;
+    const cap = document.createElement('div');
+    cap.id = 'pdeps';
+    cap.className = 'deps-label';
+    cap.textContent = t(this._lang(), 'plannerDepartures');
+    this._elBody.parentNode.insertBefore(cap, this._elBody);
   }
 
   _planEl(id) {
@@ -3441,85 +3453,99 @@ class BKKPlannerCard extends BKKHopCard {
     if (!wrap || !head) return;
     const style = document.createElement('style');
     style.textContent = `
-      .plan {
-        margin: 0 0 12px;
-        padding: 12px;
-        border: 1px solid var(--divider-color);
-        border-radius: 16px;
-        background: color-mix(in srgb, var(--primary-color) 6%, var(--card-background-color, transparent));
+      ha-card.is-planner .head {
+        font-size: 20px; font-weight: 750; letter-spacing: -0.03em;
+        margin: 4px 2px 12px; white-space: normal; line-height: 1.25;
       }
-      .plan .step { margin-bottom: 0; }
-      .plan .step + .step { margin-top: 12px; }
-      .plan .label { font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
+      ha-card.is-planner .deps-label {
+        margin: 4px 2px 6px; font-size: 11px; font-weight: 700;
+        letter-spacing: 0.06em; text-transform: uppercase;
+        color: var(--secondary-text-color);
+      }
+      ha-card.is-planner table { font-size: 14px; }
+      ha-card.is-planner td { padding: 10px 4px; }
+      ha-card.is-planner td.route .badge { min-width: 2.4em; text-align: center; }
+      .plan { margin: 0 0 14px; }
+      .journey { display: grid; grid-template-columns: 36px minmax(0, 1fr); column-gap: 8px; }
+      .spine { display: flex; flex-direction: column; align-items: center; padding-top: 28px; }
+      .spine .dot { width: 12px; height: 12px; border-radius: 50%; box-sizing: border-box; flex: 0 0 auto; }
+      .spine .dot.from { background: var(--primary-color); }
+      .spine .dot.to { background: transparent; border: 2px solid var(--primary-color); }
+      .spine .stem { width: 2px; flex: 1 1 18px; min-height: 18px; background: var(--divider-color); }
+      .spine #pswap {
+        margin: 6px 0; border: 0; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700;
+        border-radius: 999px; padding: 6px 8px;
+        background: var(--primary-color); color: var(--text-primary-color, #fff);
+      }
+      .place + .place { margin-top: 14px; }
+      .plan .label { font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
         color: var(--secondary-text-color); margin-bottom: 6px; text-transform: uppercase; }
       .plan input {
-        width: 100%; box-sizing: border-box; font: inherit; font-size: 14px;
-        background: var(--card-background-color, #fff);
-        color: var(--primary-text-color);
-        border: 1px solid var(--divider-color);
-        border-radius: 12px; padding: 10px 12px;
-      }
-      .plan input:focus { outline: 2px solid color-mix(in srgb, var(--primary-color) 45%, transparent); outline-offset: 1px; }
-      .plan .tools { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
-      .plan .tools .spacer { flex: 1; }
-      .plan .row button.clear, .plan .tools button.clear {
-        flex: 0 0 auto; border: 1px solid var(--divider-color);
-        background: var(--card-background-color, transparent);
-        color: var(--primary-text-color);
-        border-radius: 999px; padding: 7px 12px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 650;
-      }
-      .plan #pswap { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
-      .plan .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-      .plan .chip {
-        border: 1px solid var(--divider-color);
-        background: var(--card-background-color, transparent);
-        color: var(--primary-text-color); border-radius: 999px;
-        padding: 5px 10px; cursor: pointer; font: inherit; font-size: 12px;
-      }
-      .plan .chip.on { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
-      .plan .list { max-height: 200px; overflow: auto; margin-top: 8px;
-        border-radius: 12px; background: var(--card-background-color, transparent); }
-      .plan .list:empty { display: none; }
-      .plan .hit {
-        display: block; width: 100%; text-align: left; font: inherit; font-size: 14px;
+        width: 100%; box-sizing: border-box; font: inherit; font-size: 16px;
         background: transparent; color: var(--primary-text-color);
         border: 0; border-bottom: 1px solid var(--divider-color);
-        padding: 10px 12px; cursor: pointer;
+        border-radius: 0; padding: 8px 0 10px;
+      }
+      .plan input:focus { outline: none; border-bottom-color: var(--primary-color); }
+      .plan .horizon { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
+      .plan .horizon .label { margin: 0; flex: 0 0 auto; }
+      .plan .horizon .chips { flex: 1; margin: 0; flex-wrap: nowrap; overflow-x: auto; }
+      .plan #preset {
+        border: 0; background: transparent; color: var(--secondary-text-color);
+        font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; padding: 6px;
+      }
+      .plan .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+      .plan .chip {
+        border: 1px solid var(--divider-color); background: transparent;
+        color: var(--primary-text-color); border-radius: 999px;
+        padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12px;
+      }
+      .plan .chip.on { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
+      .plan .list { max-height: 220px; overflow: auto; margin-top: 6px; }
+      .plan .list:empty { display: none; }
+      .plan .hit {
+        display: block; width: 100%; text-align: left; font: inherit; font-size: 15px;
+        background: transparent; color: var(--primary-text-color);
+        border: 0; padding: 11px 0; cursor: pointer;
+        border-bottom: 1px solid var(--divider-color);
       }
       .plan .hit:last-child { border-bottom: 0; }
-      .plan .hit:hover { background: color-mix(in srgb, var(--primary-color) 10%, transparent); }
-      .plan .picked { display: none; margin-top: 8px; font-size: 13px; font-weight: 650;
-        padding: 8px 10px; border-radius: 10px;
-        background: color-mix(in srgb, var(--primary-color) 14%, transparent); }
+      .plan .picked { display: none; margin-top: 6px; font-size: 15px; font-weight: 700; line-height: 1.3; }
       .plan .picked.show { display: block; }
-      .plan .hint { font-size: 12px; color: var(--secondary-text-color); margin-top: 6px; }
     `;
     this.shadowRoot.appendChild(style);
     const lang = this._lang();
     const plan = document.createElement('div');
     plan.className = 'plan';
     plan.innerHTML = `
-      <div class="step">
-        <div class="label" id="plab1">${BkkLib.esc(t(lang, 'plannerStep1'))}</div>
-        <input id="pq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerSearchPlaceholder'))}">
-        <div class="picked" id="pstop"></div>
-        <div class="chips" id="pfav"></div>
-        <div class="list" id="phits"></div>
+      <div class="journey">
+        <div class="spine">
+          <span class="dot from"></span>
+          <span class="stem"></span>
+          <button id="pswap" type="button">${BkkLib.esc(t(lang, 'plannerSwap'))}</button>
+          <span class="stem"></span>
+          <span class="dot to"></span>
+        </div>
+        <div class="places">
+          <div class="place">
+            <div class="label" id="plab1">${BkkLib.esc(t(lang, 'plannerStep1'))}</div>
+            <input id="pq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerSearchPlaceholder'))}">
+            <div class="picked" id="pstop"></div>
+            <div class="chips" id="pfav"></div>
+            <div class="list" id="phits"></div>
+          </div>
+          <div class="place">
+            <div class="label" id="plab2">${BkkLib.esc(t(lang, 'plannerStep2'))}</div>
+            <input id="pdq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerDestPlaceholder'))}">
+            <div class="picked" id="pdest"></div>
+            <div class="list" id="pdhits"></div>
+          </div>
+        </div>
       </div>
-      <div class="tools">
-        <button class="clear" id="pswap" type="button">${BkkLib.esc(t(lang, 'plannerSwap'))}</button>
-        <span class="spacer"></span>
-        <button class="clear" id="preset" type="button">${BkkLib.esc(t(lang, 'plannerReset'))}</button>
-      </div>
-      <div class="step">
-        <div class="label" id="plab2">${BkkLib.esc(t(lang, 'plannerStep2'))}</div>
-        <input id="pdq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerDestPlaceholder'))}">
-        <div class="picked" id="pdest"></div>
-        <div class="list" id="pdhits"></div>
-      </div>
-      <div class="step">
+      <div class="horizon">
         <div class="label" id="plab3">${BkkLib.esc(t(lang, 'plannerStep3'))}</div>
         <div class="chips" id="pmin"></div>
+        <button id="preset" type="button">${BkkLib.esc(t(lang, 'plannerReset'))}</button>
       </div>
     `;
     wrap.insertBefore(plan, head);
@@ -3594,6 +3620,8 @@ class BKKPlannerCard extends BKKHopCard {
     if (lab2) lab2.textContent = t(lang, 'plannerStep2');
     const lab3 = this._planEl('plab3');
     if (lab3) lab3.textContent = t(lang, 'plannerStep3');
+    const deps = this._planEl('pdeps');
+    if (deps) deps.textContent = t(lang, 'plannerDepartures');
     const swap = this._planEl('pswap');
     const reset = this._planEl('preset');
     if (swap) swap.textContent = t(lang, 'plannerSwap');
