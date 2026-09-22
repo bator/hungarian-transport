@@ -73,9 +73,12 @@ key works, the editor hides the field and shows a **Change** link; the field
 reappears if the key is missing or FUTÁR rejects it. Volán and Helyi modes
 do not need a key.
 
-Live vehicle positions and delays come from BKK FUTÁR (BKK and MÁV modes).
-No other Hungarian operator publishes a public, key-based realtime API, so
-Volán long-distance and Helyi city services stay on the official static GTFS.
+Live positions come from BKK FUTÁR for Budapest city and rail, from MÁV EMMA
+for trains, from utas.hu for Volán coaches, and from Szombathely GTFS-RT for
+that city's buses. Other municipal operators stay on the official static GTFS.
+Train, coach, and Szombathely dots need the companion `bkk_stop` services
+`elvira_between`, `coach_positions`, and `coach_shape` on the Home Assistant
+host. The timetable still lists without them.
 
 ## Options
 
