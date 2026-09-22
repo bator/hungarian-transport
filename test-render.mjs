@@ -71,11 +71,30 @@ card._rows = [
     delay: 0,
     travelMin: null,
   },
+  {
+    type: 'BUS',
+    icon: 'mdi:bus',
+    label: '99',
+    headsign: 'Mar elment',
+    depTs: now - 40 * 60,
+    schedTs: now - 40 * 60,
+    attime: '07:20',
+    predicted_attime: '07:20',
+    wheelchair: false,
+    bikesAllowed: false,
+    booking: false,
+    color: 'F9AB13',
+    textcolor: '000000',
+    trainNumber: '',
+    delay: 0,
+    travelMin: null,
+  },
 ];
 card._paint();
 
 const out = html();
 check('renders one row per departure', (out.match(/<tr[\s>]/g) || []).length === 2);
+check('hides a bus that already left', !out.includes('Mar elment') && !out.includes('07:20'));
 check('route badge carries the feed colours', out.includes('background:#4477aa;color:#ffffff'));
 check('vehicle icon rendered', out.includes('mdi:train') && out.includes('mdi:bus'));
 check('delay shown as late with struck scheduled time',

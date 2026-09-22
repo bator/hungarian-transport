@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.21';
+const CARD_VERSION = '1.4.2-rev.22';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -11,6 +11,16 @@ const MIN_MINUTES_AFTER = 15;
 const MAX_MINUTES_AFTER = 480;
 const MINUTES_AFTER_PRESETS = [30, 60, 90, 120, 180, 240, 360, 480];
 const DEPART_MINUTES_AFTER = String(DEFAULT_MINUTES_AFTER);
+
+/* A departure stays on the card until a minute after it was due.
+   Anything older is a bus that already left. */
+const DEPARTURE_GRACE_SEC = 60;
+
+function departureStillDue(dep, nowSec) {
+  const ts = Number(dep);
+  if (!Number.isFinite(ts) || ts <= 0) return true;
+  return ts >= (nowSec || Math.floor(Date.now() / 1000)) - DEPARTURE_GRACE_SEC;
+}
 
 function clampMinutesAfter(value) {
   if (value == null || value === '') return DEFAULT_MINUTES_AFTER;
@@ -1382,6 +1392,8 @@ const BkkLib = {
         const destStop = didx >= 0 ? idx.stops[ps[didx]] : idx.stops[ps[ps.length - 1]];
         const arrMin = didx >= 0 ? ms[didx] : null;
         const travel = (arrMin != null && arrMin >= depMin && arrMin - depMin <= 1440) ? (arrMin - depMin) : null;
+        const depTs = day.midnight + depMin * 60;
+        if (!departureStillDue(depTs)) continue;
         rows.push({
           tripId: 'gtfs:' + route + ':' + day.ymd + ':' + depMin + ':' + origin.i,
           label: route,
@@ -1389,8 +1401,8 @@ const BkkLib = {
           text: text,
           vehicle: vehicle,
           rawType: rawType,
-          dep: day.midnight + depMin * 60,
-          sched: day.midnight + depMin * 60,
+          dep: depTs,
+          sched: depTs,
           delay: 0,
           head: (dest && dest.name) || (destStop && destStop.name) || '',
           platform: '',
@@ -1467,7 +1479,7 @@ const BkkLib = {
       });
     };
     const add = (row) => {
-      if (!row) return;
+      if (!row || !departureStillDue(row.dep || row.sched)) return;
       const n = BkkLib.rowTrainNumber(row);
       if (n && byNum.has(n)) {
         overlay(out[byNum.get(n)], row);
@@ -2076,7 +2088,7 @@ const BkkLib = {
           return await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
             stopId: pid,
             minutesAfter: String(horizon),
-            minutesBefore: '45',
+            minutesBefore: '0',
             onlyDepartures: 'true',
             includeReferences: 'true',
             includeVehicleFromTrip: 'true',
@@ -2102,6 +2114,7 @@ const BkkLib = {
           if (!BkkLib.keepFutarCandidate(rt, selected, mode, destKey)) return;
           const dep = st.predictedDepartureTime || st.departureTime;
           if (dep && dep > latest + 60) return;
+          if (dep && !departureStillDue(dep, now)) return;
           seenTrip.add(st.tripId);
           const fallbackColor = mode === 'volan' ? 'F9AB13' : '4477aa';
           const fallbackText = mode === 'volan' ? '000000' : 'ffffff';
@@ -2807,7 +2820,14 @@ class BKKHopCard extends HTMLElement {
     this._elHead.textContent = this._header();
     this._elErr.textContent = this._err || '';
     this._elErr.style.display = this._err ? '' : 'none';
-    const rows = this._rows || [];
+    const nowSec = Math.floor(Date.now() / 1000);
+    const allRows = this._rows || [];
+    const rows = allRows.filter((r) => departureStillDue(r.depTs, nowSec));
+    // #region agent log
+    if (allRows.length !== rows.length) {
+      fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H7',location:'_paint',message:'dropped past departures',data:{before:allRows.length,kept:rows.length},timestamp:Date.now()})}).catch(()=>{});
+    }
+    // #endregion
     if (rows.length) {
       this._elBody.innerHTML = `<table><tbody>${
         rows.map((r, i) => this._rowHtml(r, lang, i)).join('')
