@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.18';
+const CARD_VERSION = '1.4.2-rev.19';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -3453,79 +3453,104 @@ class BKKPlannerCard extends BKKHopCard {
     if (!wrap || !head) return;
     const style = document.createElement('style');
     style.textContent = `
+      ha-card.is-planner { overflow: hidden; }
+      ha-card.is-planner .wrap { padding: 0 0 8px; }
       ha-card.is-planner .head {
-        font-size: 20px; font-weight: 750; letter-spacing: -0.03em;
-        margin: 4px 2px 12px; white-space: normal; line-height: 1.25;
+        font-size: 22px; font-weight: 800; letter-spacing: -0.04em;
+        margin: 0; padding: 14px 16px 0; white-space: normal; line-height: 1.15;
       }
       ha-card.is-planner .deps-label {
-        margin: 4px 2px 6px; font-size: 11px; font-weight: 700;
-        letter-spacing: 0.06em; text-transform: uppercase;
-        color: var(--secondary-text-color);
+        margin: 14px 16px 4px; font-size: 12px; font-weight: 800;
+        letter-spacing: 0.08em; text-transform: uppercase;
+        color: var(--primary-color);
       }
+      ha-card.is-planner .body { padding: 0 8px; }
       ha-card.is-planner table { font-size: 14px; }
-      ha-card.is-planner td { padding: 10px 4px; }
-      ha-card.is-planner td.route .badge { min-width: 2.4em; text-align: center; }
-      .plan { margin: 0 0 14px; }
-      .journey { display: grid; grid-template-columns: 36px minmax(0, 1fr); column-gap: 8px; }
-      .spine { display: flex; flex-direction: column; align-items: center; padding-top: 28px; }
-      .spine .dot { width: 12px; height: 12px; border-radius: 50%; box-sizing: border-box; flex: 0 0 auto; }
-      .spine .dot.from { background: var(--primary-color); }
-      .spine .dot.to { background: transparent; border: 2px solid var(--primary-color); }
-      .spine .stem { width: 2px; flex: 1 1 18px; min-height: 18px; background: var(--divider-color); }
+      ha-card.is-planner td { padding: 11px 6px; }
+      ha-card.is-planner tr.row-clickable td { background: color-mix(in srgb, var(--primary-color) 5%, transparent); }
+      ha-card.is-planner tr.row-clickable + tr.row-clickable td { border-top: 6px solid var(--card-background-color, #111); }
+      ha-card.is-planner td.route .badge {
+        min-width: 2.6em; text-align: center; border-radius: 8px;
+        padding: 4px 7px; font-weight: 800;
+      }
+      .plan { margin: 12px 12px 0; }
+      .journey {
+        display: grid; grid-template-columns: 44px minmax(0, 1fr); column-gap: 4px;
+        padding: 12px; border-radius: 18px;
+        background:
+          linear-gradient(160deg, color-mix(in srgb, var(--primary-color) 28%, transparent), color-mix(in srgb, #f0b429 18%, transparent) 70%);
+      }
+      .spine { display: flex; flex-direction: column; align-items: center; padding-top: 26px; }
+      .spine .dot { width: 16px; height: 16px; border-radius: 50%; box-sizing: border-box; flex: 0 0 auto; }
+      .spine .dot.from { background: #1f4e9a; box-shadow: 0 0 0 5px color-mix(in srgb, #1f4e9a 28%, transparent); }
+      .spine .dot.to { background: #f0b429; box-shadow: 0 0 0 5px color-mix(in srgb, #f0b429 35%, transparent); }
+      .spine .stem { width: 4px; flex: 1 1 16px; min-height: 16px; border-radius: 4px;
+        background: linear-gradient(#1f4e9a, #f0b429); }
       .spine #pswap {
-        margin: 6px 0; border: 0; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700;
-        border-radius: 999px; padding: 6px 8px;
-        background: var(--primary-color); color: var(--text-primary-color, #fff);
+        margin: 8px 0; border: 0; cursor: pointer; font: inherit; font-size: 12px; font-weight: 800;
+        border-radius: 999px; padding: 8px 8px;
+        background: #111; color: #fff;
+        box-shadow: 0 6px 16px rgba(0,0,0,.25);
       }
-      .place + .place { margin-top: 14px; }
-      .plan .label { font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
-        color: var(--secondary-text-color); margin-bottom: 6px; text-transform: uppercase; }
+      .place + .place { margin-top: 12px; }
+      .plan .label { font-size: 11px; font-weight: 800; letter-spacing: 0.08em;
+        color: var(--primary-text-color); margin-bottom: 6px; text-transform: uppercase; }
       .plan input {
-        width: 100%; box-sizing: border-box; font: inherit; font-size: 16px;
-        background: transparent; color: var(--primary-text-color);
-        border: 0; border-bottom: 1px solid var(--divider-color);
-        border-radius: 0; padding: 8px 0 10px;
+        width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; font-weight: 650;
+        background: var(--card-background-color, #fff); color: var(--primary-text-color);
+        border: 0; border-radius: 14px; padding: 12px 14px;
+        box-shadow: 0 8px 20px rgba(0,0,0,.12);
       }
-      .plan input:focus { outline: none; border-bottom-color: var(--primary-color); }
-      .plan .horizon { display: flex; align-items: center; gap: 10px; margin-top: 16px; }
-      .plan .horizon .label { margin: 0; flex: 0 0 auto; }
+      .plan input:focus { outline: 3px solid color-mix(in srgb, #f0b429 70%, transparent); }
+      .plan .horizon {
+        display: flex; align-items: center; gap: 8px; margin-top: 10px;
+        padding: 10px 12px; border-radius: 16px;
+        background: #16324f; color: #fff;
+      }
+      .plan .horizon .label { margin: 0; flex: 0 0 auto; color: #f0b429; }
       .plan .horizon .chips { flex: 1; margin: 0; flex-wrap: nowrap; overflow-x: auto; }
+      .plan .horizon .chip { color: #fff; border-color: rgba(255,255,255,.25); background: transparent; }
+      .plan .horizon .chip.on { background: #f0b429; color: #1c1404; border-color: transparent; }
       .plan #preset {
-        border: 0; background: transparent; color: var(--secondary-text-color);
-        font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; padding: 6px;
+        border: 0; background: transparent; color: #f0b429;
+        font: inherit; font-size: 13px; font-weight: 800; cursor: pointer; padding: 6px;
       }
-      .plan .suggest { margin-top: 10px; display: flex; flex-direction: column; gap: 2px; }
+      .plan .suggest { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
       .plan .suggest.hidden { display: none; }
-      .plan .suggest-row { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+      .plan .suggest-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
       .plan .suggest-kind {
-        flex: 0 0 42px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
-        text-transform: uppercase; color: var(--secondary-text-color);
+        flex: 0 0 46px; font-size: 11px; font-weight: 800; letter-spacing: 0.04em;
+        text-transform: uppercase;
       }
-      .plan .suggest-stops { display: flex; flex-wrap: wrap; gap: 4px 0; min-width: 0; }
+      .plan .suggest-row[data-kind="bkk"] .suggest-kind { color: #7eb0ff; }
+      .plan .suggest-row[data-kind="volan"] .suggest-kind { color: #f0b429; }
+      .plan .suggest-row[data-kind="mav"] .suggest-kind { color: #9fd0c8; }
+      .plan .suggest-stops { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
       .plan .suggest-stop {
-        border: 0; background: transparent; color: var(--primary-text-color);
-        font: inherit; font-size: 14px; padding: 2px 0; cursor: pointer;
+        border: 0; border-radius: 10px; cursor: pointer;
+        font: inherit; font-size: 13px; font-weight: 800; padding: 7px 10px;
       }
-      .plan .suggest-stop + .suggest-stop::before {
-        content: "\\00b7"; margin: 0 8px; color: var(--secondary-text-color);
-      }
+      .plan .suggest-row[data-kind="bkk"] .suggest-stop { background: #1f4e9a; color: #fff; }
+      .plan .suggest-row[data-kind="volan"] .suggest-stop { background: #f0b429; color: #1c1404; }
+      .plan .suggest-row[data-kind="mav"] .suggest-stop { background: #0e7c66; color: #fff; }
       .plan .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
       .plan .chip {
         border: 1px solid var(--divider-color); background: transparent;
         color: var(--primary-text-color); border-radius: 999px;
-        padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12px;
+        padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700;
       }
       .plan .chip.on { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
-      .plan .list { max-height: 220px; overflow: auto; margin-top: 6px; }
+      .plan .list { max-height: 220px; overflow: auto; margin-top: 8px; }
       .plan .list:empty { display: none; }
       .plan .hit {
-        display: block; width: 100%; text-align: left; font: inherit; font-size: 15px;
-        background: transparent; color: var(--primary-text-color);
-        border: 0; padding: 11px 0; cursor: pointer;
-        border-bottom: 1px solid var(--divider-color);
+        display: block; width: 100%; text-align: left; font: inherit; font-size: 15px; font-weight: 650;
+        background: var(--card-background-color, #fff); color: var(--primary-text-color);
+        border: 0; border-radius: 12px; padding: 10px 12px; cursor: pointer; margin-top: 6px;
       }
-      .plan .hit:last-child { border-bottom: 0; }
-      .plan .picked { display: none; margin-top: 6px; font-size: 15px; font-weight: 700; line-height: 1.3; }
+      .plan .picked {
+        display: none; margin-top: 8px; font-size: 16px; font-weight: 800; line-height: 1.25;
+        padding: 8px 10px; border-radius: 12px; background: var(--card-background-color, #fff);
+      }
       .plan .picked.show { display: block; }
     `;
     this.shadowRoot.appendChild(style);
@@ -3605,15 +3630,16 @@ class BKKPlannerCard extends BKKHopCard {
       .replace(/\s+vas\u00fat\u00e1llom\u00e1s$/, '')
       .replace(/\s+p\u00e1lyaudvar$/, '');
     [
-      ['BKK', BKK_FAVORITES],
-      ['Vol\u00e1n', VOLAN_FAVORITES],
-      ['M\u00c1V', MAV_FAVORITES],
-    ].forEach(([kind, list]) => {
+      ['bkk', 'BKK', BKK_FAVORITES],
+      ['volan', 'Vol\u00e1n', VOLAN_FAVORITES],
+      ['mav', 'M\u00c1V', MAV_FAVORITES],
+    ].forEach(([kind, title, list]) => {
       const row = document.createElement('div');
       row.className = 'suggest-row';
+      row.setAttribute('data-kind', kind);
       const label = document.createElement('span');
       label.className = 'suggest-kind';
-      label.textContent = kind;
+      label.textContent = title;
       const stops = document.createElement('span');
       stops.className = 'suggest-stops';
       list.forEach((fav) => {
