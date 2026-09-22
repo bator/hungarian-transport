@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.8';
+const CARD_VERSION = '1.4.4-rev.9';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -938,6 +938,8 @@ const BkkLib = {
         meters: Math.max(0, Math.round(Number(leg.distance || 0))),
         label: String(leg.routeShortName || ''),
         headsign: String(leg.headsign || ''),
+        color: String(leg.routeColor || '').replace(/#/g, ''),
+        text: String(leg.routeTextColor || '').replace(/#/g, ''),
         from: String((leg.from || {}).name || ''),
         to: String((leg.to || {}).name || ''),
       };
@@ -3758,7 +3760,7 @@ class BKKPlannerCard extends BKKHopCard {
           + `<span class="j-where">${esc(leg.from)} \u2192 ${esc(leg.to)}</span></div>`;
       }
       const ride = leg.label
-        ? `<span class="j-badge">${esc(leg.label)}</span>`
+        ? `<span class="j-badge" style="${esc(this._badgeStyle({ color: leg.color, textcolor: leg.text }))}">${esc(leg.label)}</span>`
         : '';
       return `<div class="j-leg">${ride}<span class="j-where">${esc(leg.headsign || leg.to)}</span>`
         + `<span class="j-min">${esc(t(lang, 'plannerRide', leg.minutes))}</span></div>`;
@@ -3916,7 +3918,6 @@ class BKKPlannerCard extends BKKHopCard {
       .journey-plan .j-min { font-weight: 700; }
       .journey-plan .j-badge {
         flex: 0 0 auto; border-radius: 8px; padding: 2px 8px; font-weight: 700;
-        background: var(--primary-color); color: var(--text-primary-color, #fff);
       }
       .journey-plan .j-walk { color: var(--secondary-text-color); }
     `;

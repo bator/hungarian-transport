@@ -168,7 +168,7 @@ const shaped = Lib.journeyFromPlan({
       { mode: 'BUS', duration: 900000, distance: 1000, routeShortName: '9', headsign: 'Hosszabb', from: { name: 'A' }, to: { name: 'B' } },
     ] },
     { duration: 1532, walkTime: 199, transfers: 1, legs: [
-      { mode: 'TROLLEYBUS', duration: 780000, distance: 4267, routeShortName: '81', headsign: 'Mexik\u00f3i \u00fat', from: { name: 'Miskolci' }, to: { name: 'Mexik\u00f3i' } },
+      { mode: 'TROLLEYBUS', duration: 780000, distance: 4267, routeShortName: '81', routeColor: '009EE3', routeTextColor: 'FFFFFF', headsign: 'Mexik\u00f3i \u00fat', from: { name: 'Miskolci' }, to: { name: 'Mexik\u00f3i' } },
       { mode: 'WALK', duration: 78000, distance: 85, from: { name: 'Mexik\u00f3i' }, to: { name: 'Oktogon' } },
     ] },
   ] } } },
@@ -263,7 +263,8 @@ plan._paint();
 check('empty planner shows the transfer journey',
   plan.shadowRoot.innerHTML.includes('\u00c1tsz\u00e1ll\u00e1ssal')
   && plan.shadowRoot.innerHTML.includes('Gyalogl\u00e1s')
-  && plan.shadowRoot.innerHTML.includes('>81<'));
+  && plan.shadowRoot.innerHTML.includes('>81<')
+  && plan.shadowRoot.innerHTML.includes('background:#009EE3'));
 check('planner favorite chips include a Volan station',
   planHtml.includes('N\u00e9pliget'));
 check('planner favorite chips include a MAV station',
