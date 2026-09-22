@@ -185,15 +185,20 @@ check('bkk id becomes a plan vertex',
   Lib.planPlaceVertex('Keleti', 'BKK_CSF01131') === 'Keleti::BKK:CSF01131');
 const cityIdx = {
   c: [['1111111', '20000101', '20991231']],
+  ops: [{ i: 0, id: 'miskolc', name: 'Miskolc \u2014 MVK' }],
+  byNum: new Map(),
+  byKey: new Map(),
   stops: [
-    { i: 0, op: 0, name: 'Miskolci \u00c1llatkert', fold: Lib.fold('Miskolci \u00c1llatkert') },
-    { i: 1, op: 0, name: 'Fels\u0151-Majl\u00e1th', fold: Lib.fold('Fels\u0151-Majl\u00e1th') },
-    { i: 2, op: 0, name: 'Fels\u0151-Majl\u00e1th', fold: Lib.fold('Fels\u0151-Majl\u00e1th') },
-    { i: 3, op: 0, name: 'Tiszai p\u00e1lyaudvar', fold: Lib.fold('Tiszai p\u00e1lyaudvar') },
+    { i: 0, op: 0, id: 'miskolc:zoo', name: 'Miskolci \u00c1llatkert', fold: Lib.fold('Miskolci \u00c1llatkert') },
+    { i: 1, op: 0, id: 'miskolc:fm1', name: 'Fels\u0151-Majl\u00e1th', fold: Lib.fold('Fels\u0151-Majl\u00e1th') },
+    { i: 2, op: 0, id: 'miskolc:fm2', name: 'Fels\u0151-Majl\u00e1th', fold: Lib.fold('Fels\u0151-Majl\u00e1th') },
+    { i: 3, op: 0, id: 'miskolc:tiszai', name: 'Tiszai p\u00e1lyaudvar', fold: Lib.fold('Tiszai p\u00e1lyaudvar') },
+    { i: 4, op: 0, id: 'miskolc:buza', name: 'B\u00faza t\u00e9r aut\u00f3busz-\u00e1llom\u00e1s', fold: Lib.fold('B\u00faza t\u00e9r aut\u00f3busz-\u00e1llom\u00e1s') },
   ],
   t: [
     [0, 'ZOO', [0, 1], [940, 947]],
     [0, '1', [2, 3], [100, 122]],
+    [0, '2', [0, 4], [0, 5]],
   ],
 };
 const hubPath = Lib.cityHubPath(cityIdx, cityIdx.stops[0]);
@@ -203,6 +208,15 @@ check('city feed reaches the station in two rides',
   && hubPath.edges.some((edge) => edge.walk)
   && hubPath.edges.some((edge) => edge.route === '1'),
   JSON.stringify(hubPath && { hub: hubPath.hubName, minutes: hubPath.minutes, edges: hubPath.edges.map((e) => e.route || 'walk') }));
+check('cheaper bus station is not a rail hub',
+  !Lib.isRailHubName('B\u00faza t\u00e9r aut\u00f3busz-\u00e1llom\u00e1s')
+  && Lib.isRailHubName('Tiszai p\u00e1lyaudvar')
+  && hubPath && hubPath.hubName === 'Tiszai p\u00e1lyaudvar');
+check('Tiszai tokens match Miskolc-Tiszai',
+  Lib.foldTokenMatch('tiszai palyaudvar', 'Miskolc-Tiszai')
+  && !Lib.foldTokenMatch('tiszai palyaudvar', 'Miskolc-G\u00f6m\u00f6ri'));
+check('Kelenf\u00f6ld is a rail dest, Pap\u00edrgy\u00e1r is not',
+  Lib.isRailDest({ name: 'Kelenf\u00f6ld' }) && !Lib.isRailDest({ name: 'Pap\u00edrgy\u00e1r' }));
 
 let depCalls = 0;
 const origDep = Lib.departures;
@@ -676,5 +690,98 @@ check('planner swap origin dest',
     stopName: plan._config.stopName,
     destName: plan._config.destName,
   }));
+
+const originZoo = { id: 'miskolc:zoo', name: 'Miskolci \u00c1llatkert' };
+const destKelenf = { id: 'BKK_005501024', name: 'Kelenf\u00f6ld' };
+const destTiszai = { id: 'miskolc:tiszai', name: 'Tiszai p\u00e1lyaudvar' };
+const destLocal = { id: 'miskolc:paper', name: 'Pap\u00edrgy\u00e1r' };
+const origCity = Lib.cityIndex;
+const origRide = Lib.nextCityRide;
+const origSearch = Lib.searchStops;
+const origElvira = Lib.elviraBetween;
+Lib.cityIndex = async () => cityIdx;
+Lib.nextCityRide = () => {
+  const now = Math.floor(Date.now() / 1000);
+  return { dep: now + 60, arr: now + 300 };
+};
+Lib.searchStops = async (_key, _q, mode) => {
+  if (mode !== 'mav') return [];
+  return [
+    { id: 'BKK_005510001', name: 'Miskolc-G\u00f6m\u00f6ri' },
+    { id: 'BKK_005510009', name: 'Miskolc-Tiszai' },
+  ];
+};
+Lib.elviraBetween = async () => [];
+const noRail = await Lib.cityRailJourney('k', { states: {} }, originZoo, destKelenf);
+check('cityRailJourney is null without a train', noRail == null, JSON.stringify(noRail));
+const toHub = await Lib.cityRailJourney('k', { states: {} }, originZoo, destTiszai);
+check('city legs stand when dest is the hub',
+  toHub && toHub.legs.some((leg) => leg.label === 'ZOO') && !toHub.legs.some((leg) => !leg.walk && /^(IC|EC)/.test(leg.label)),
+  JSON.stringify(toHub && toHub.legs.map((l) => l.label || (l.walk ? 'walk' : ''))));
+const destMiskolcTiszai = { id: 'BKK_005510009', name: 'Miskolc-Tiszai' };
+const destGomori = { id: 'BKK_005510001', name: 'Miskolc-G\u00f6m\u00f6ri' };
+const toMavHub = await Lib.cityRailJourney('k', { states: {} }, originZoo, destMiskolcTiszai);
+check('Miskolc-Tiszai dest is the city hub',
+  toMavHub && toMavHub.legs.some((leg) => leg.label === 'ZOO') && !toMavHub.legs.some((leg) => !leg.walk && /^(IC|EC)/.test(leg.label)),
+  JSON.stringify(toMavHub && toMavHub.legs.map((l) => l.label || (l.walk ? 'walk' : ''))));
+const gomoriMiss = await Lib.cityRailJourney('k', { states: {} }, originZoo, destGomori);
+check('G\u00f6m\u00f6ri is not the Tiszai hub', gomoriMiss == null);
+const skipLocal = await Lib.cityRailJourney('k', { states: {} }, originZoo, destLocal);
+check('cityRailJourney skips a non-rail dest', skipLocal == null);
+Lib.nextCityRide = () => null;
+const noTime = await Lib.cityRailJourney('k', { states: {} }, originZoo, destTiszai);
+check('missing nextCityRide yields null', noTime == null);
+Lib.nextCityRide = origRide;
+const rail = await Lib.railAfterCity(
+  'k', { states: {} }, 'Miskolc', hubPath, destKelenf, Math.floor(Date.now() / 1000),
+);
+check('railAfterCity is null when ELVIRA is empty', rail == null);
+Lib.elviraBetween = async () => {
+  const dep = Math.floor(Date.now() / 1000) + 20 * 60;
+  return [{ label: 'IC', trainNumber: '163', dep, travel: 120, headsign: 'Kelenf\u00f6ld' }];
+};
+const withRail = await Lib.railAfterCity(
+  'k', { states: {} }, 'Miskolc', hubPath, destKelenf, Math.floor(Date.now() / 1000),
+);
+check('railAfterCity picks Tiszai not G\u00f6m\u00f6ri',
+  withRail && withRail.train && withRail.walk.from === 'Tiszai p\u00e1lyaudvar'
+  && withRail.walk.to === 'Miskolc-Tiszai'
+  && withRail.train.color.toLowerCase() === '2e5ea8'
+  && withRail.walk.stationWalk,
+  JSON.stringify(withRail && { from: withRail.walk.from, to: withRail.walk.to, color: withRail.train.color }));
+Lib.cityIndex = origCity;
+Lib.nextCityRide = origRide;
+Lib.searchStops = origSearch;
+Lib.elviraBetween = origElvira;
+
+check('enrichFromHass fills GPS via applyEmmaPositions', (() => {
+  const rows = [{ label: 'BALATON', trainNumber: '861', tripId: 'elvira:1' }];
+  Lib.enrichFromHass({
+    states: {
+      'sensor.x': {
+        attributes: {
+          vehicles: [{ lat: 47.2, lon: 18.6, trip: { tripShortName: '861 BALATON' } }],
+        },
+      },
+    },
+  }, rows);
+  return rows[0].lat === 47.2 && rows[0].lon === 18.6;
+})());
+check('enrichFromHass keeps EMMA tripShortName over a named label', (() => {
+  const rows = [{ label: 'IC', trainNumber: '861', tripId: 'elvira:2' }];
+  Lib.enrichFromHass({
+    states: {
+      'sensor.x': {
+        attributes: {
+          vehicles: [{
+            lat: 47.3, lon: 18.7, label: 'BALATON', trainNumber: '861',
+            trip: { tripShortName: '861 BALATON' },
+          }],
+        },
+      },
+    },
+  }, rows);
+  return rows[0].lat === 47.3 && rows[0].lon === 18.7;
+})());
 
 process.exit(failed ? 1 : 0);

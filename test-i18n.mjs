@@ -104,6 +104,9 @@ check('planner getConfigElement returns editor',
   planCfgEl && planCfgEl.tagName);
 check('en plannerStep3 is look-ahead', I18N.en.plannerStep3 === 'Look-ahead');
 check('hu plannerSwap', I18N.hu.plannerSwap === 'Csere');
+check('plannerStationWalk is a formatter',
+  I18N.hu.plannerStationWalk([6, 480]).includes('vágányhoz')
+  && I18N.en.plannerStationWalk([6, 480]).includes('platform'));
 check('mode.all present in both dictionaries',
   !!I18N.hu.mode.all && !!I18N.en.mode.all);
 

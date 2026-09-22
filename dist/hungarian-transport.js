@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.11';
+const CARD_VERSION = '1.4.4-rev.12';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -280,7 +280,7 @@ const I18N = {
     plannerJourneySummary: (parts) => `${parts[0]} perc \u00b7 ${parts[1]} \u00e1tsz\u00e1ll\u00e1s \u00b7 ${parts[2]} perc gyalogl\u00e1s \u00b7 ${parts[3]} perc v\u00e1rakoz\u00e1s`,
     plannerWalk: (parts) => `Gyalogl\u00e1s ${parts[0]} perc, ${parts[1]} m`,
     plannerWait: (min) => `V\u00e1rakoz\u00e1s ${min} perc`,
-    plannerStationWalk: 'Gyalogl\u00e1s a v\u00e1g\u00e1nyhoz',
+    plannerStationWalk: (parts) => `Gyalogl\u00e1s a v\u00e1g\u00e1nyhoz ${parts[0]} perc, ${parts[1]} m`,
     plannerRide: (min) => `${min} perc`,
     plannerPickDest: 'V\u00e1lassz c\u00e9lt...',
     plannerNoRoutes: 'Nincs indul\u00f3 j\u00e1rat ebben a meg\u00e1ll\u00f3ban.',
@@ -432,7 +432,7 @@ const I18N = {
     plannerJourneySummary: (parts) => `${parts[0]} min \u00b7 ${parts[1]} transfer \u00b7 ${parts[2]} min walking \u00b7 ${parts[3]} min waiting`,
     plannerWalk: (parts) => `Walk ${parts[0]} min, ${parts[1]} m`,
     plannerWait: (min) => `Wait ${min} min`,
-    plannerStationWalk: 'Walk to the platform',
+    plannerStationWalk: (parts) => `Walk to the platform ${parts[0]} min, ${parts[1]} m`,
     plannerRide: (min) => `${min} min`,
     plannerPickDest: 'Pick a destination...',
     plannerNoRoutes: 'No departures from this stop.',
@@ -594,6 +594,22 @@ const BkkLib = {
       .replace(/[^a-z0-9]+/g, ' ')
       .trim();
   },
+  foldTokens(s) {
+    const stop = /^(a|az|es|palyaudvar|vasutallomas|allomas|pu|megallo|ter|utca|ut|varos|budapest)$/;
+    return BkkLib.fold(s).split(' ').filter((tok) => tok.length >= 4 && !stop.test(tok));
+  },
+  foldTokenMatch(a, b) {
+    const left = BkkLib.foldTokens(a);
+    const right = BkkLib.foldTokens(b);
+    if (!left.length || !right.length) return false;
+    return left.some((x) => right.some((y) => x === y || x.indexOf(y) >= 0 || y.indexOf(x) >= 0));
+  },
+  isRailHubName(name) {
+    const raw = String(name || '');
+    if (!raw) return false;
+    if (/aut[o\u00f3]busz/i.test(raw) || /vol[a\u00e1]n/i.test(raw)) return false;
+    return /p\u00e1lyaudvar|vas\u00fat\u00e1llom\u00e1s|\bpu\.?\b/i.test(raw);
+  },
   isStopArea(stop) {
     if (!stop) return false;
     if (stop.locationType === 1) return true;
@@ -727,6 +743,13 @@ const BkkLib = {
     if (f === 'keleti' || f === 'budapest keleti') return '005510017';
     if (f === 'kelenfold' || f === 'budapest kelenfold') return '005501024';
     return '';
+  },
+  isRailDest(dest) {
+    if (!dest) return false;
+    if (BkkLib.isMavStop(dest)) return true;
+    if (BkkLib.elviraStationCode(dest.id)) return true;
+    if (BkkLib.elviraCodeFromName(dest.name)) return true;
+    return BkkLib.isRailHubName(dest.name);
   },
   async elviraResolveCode(apiKey, id, name) {
     const direct = BkkLib.elviraStationCode(id);
@@ -1054,7 +1077,7 @@ const BkkLib = {
         });
       });
     });
-    const hub = (st) => /p\u00e1lyaudvar|vas\u00fat\u00e1llom\u00e1s|aut\u00f3busz-\u00e1llom\u00e1s/i.test((st && st.name) || '');
+    const hub = (st) => BkkLib.isRailHubName(st && st.name);
     const starts = [];
     stops.forEach((st) => {
       if (st && st.op === op && st.fold === originStop.fold) starts.push(st.i);
@@ -1088,13 +1111,6 @@ const BkkLib = {
             from: stops[bay] && stops[bay].name,
             to: stops[edge.to] && stops[edge.to].name,
           };
-          if (walked && !base.prev) {
-            first.prev = {
-              at: bay, prev: null, walk: true, minutes: 3,
-              from: stops[startAt] && stops[startAt].name,
-              to: stops[bay] && stops[bay].name,
-            };
-          }
           consider(first);
           board(edge.to).forEach((mid) => {
             const midWalk = mid === edge.to ? 0 : 3;
@@ -1142,6 +1158,7 @@ const BkkLib = {
     };
   },
   async cityRailJourney(apiKey, hass, origin, dest) {
+    if (!BkkLib.isRailDest(dest)) return null;
     let idx;
     try { idx = await BkkLib.cityIndex(); } catch (_e) { return null; }
     if (!idx || !idx.stops) return null;
@@ -1154,6 +1171,15 @@ const BkkLib = {
     if (!path || !path.edges.length) return null;
     const op = (idx.ops || [])[originStop.op];
     const cityName = op ? String(op.name).split(' — ')[0] : '';
+    const destFold = BkkLib.fold((dest && dest.name) || '');
+    const cityTok = new Set(BkkLib.foldTokens(cityName));
+    const destTok = BkkLib.foldTokens(destFold);
+    const hubTok = BkkLib.foldTokens(path.hubFold);
+    const destIsHub = !!(destFold && path.hubFold && (
+      destFold === path.hubFold
+      || (BkkLib.foldTokenMatch(destFold, path.hubFold)
+        && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok)))
+    ));
     let ready = Math.floor(Date.now() / 1000);
     const legs = [];
     for (let i = 0; i < path.edges.length; i++) {
@@ -1170,12 +1196,11 @@ const BkkLib = {
         continue;
       }
       const timed = BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.route, ready);
-      const dep = timed ? timed.dep : ready;
-      const arr = timed ? timed.arr : ready + edge.minutes * 60;
-      const waitMin = Math.round((dep - ready) / 60);
+      if (!timed) return null;
+      const waitMin = Math.round((timed.dep - ready) / 60);
       legs.push({
         walk: false,
-        minutes: Math.max(1, Math.round((arr - dep) / 60)),
+        minutes: Math.max(1, Math.round((timed.arr - timed.dep) / 60)),
         meters: 0,
         label: edge.route,
         headsign: edge.to,
@@ -1184,13 +1209,14 @@ const BkkLib = {
         from: edge.from,
         to: edge.to,
         waitMin: waitMin >= 1 ? waitMin : 0,
-        startMs: dep * 1000,
-        endMs: arr * 1000,
+        startMs: timed.dep * 1000,
+        endMs: timed.arr * 1000,
       });
-      ready = arr;
+      ready = timed.arr;
     }
-    const rail = await BkkLib.railAfterCity(apiKey, hass, cityName, path, dest, ready);
-    if (rail) {
+    if (!destIsHub) {
+      const rail = await BkkLib.railAfterCity(apiKey, hass, cityName, path, dest, ready);
+      if (!rail) return null;
       legs.push(rail.walk);
       legs.push(rail.train);
       ready = rail.ready;
@@ -1229,15 +1255,13 @@ const BkkLib = {
     return best;
   },
   async railAfterCity(apiKey, hass, cityName, path, dest, readySec) {
+    if (!path || !path.hubName) return null;
     const query = (cityName ? cityName + ' ' : '') + (path.hubName || '');
     let station = null;
     try {
       const hits = await BkkLib.searchStops(apiKey, query, 'mav');
-      const want = path.hubFold || '';
-      station = (hits || []).find((hit) => {
-        const fold = BkkLib.fold(hit.name || '');
-        return want && (fold.indexOf(want) >= 0 || want.indexOf(fold) >= 0);
-      }) || (hits || [])[0] || null;
+      const want = path.hubFold || path.hubName || '';
+      station = (hits || []).find((hit) => BkkLib.foldTokenMatch(want, hit.name || '')) || null;
     } catch (_e) {
       station = null;
     }
@@ -1245,7 +1269,7 @@ const BkkLib = {
     const walkStart = readySec;
     const walkEnd = readySec + 6 * 60;
     const walk = {
-      walk: true, minutes: 6, meters: 480, label: '', headsign: '',
+      walk: true, stationWalk: true, minutes: 6, meters: 480, label: '', headsign: '',
       color: '', text: '', from: path.hubName || '', to: station.name || '',
       waitMin: 0, startMs: walkStart * 1000, endMs: walkEnd * 1000,
     };
@@ -1261,14 +1285,18 @@ const BkkLib = {
           const rideMin = Number(next.travel) > 0 ? Number(next.travel) : 0;
           const arr = rideMin ? next.dep + rideMin * 60 : next.dep;
           const waitMin = Math.round((next.dep - walkEnd) / 60);
+          const badge = BkkLib.applyRailBadge({
+            label: String(next.label || next.trainNumber || ''),
+            color: '4477AA',
+          });
           train = {
             walk: false,
             minutes: rideMin || 1,
             meters: 0,
             label: String(next.label || next.trainNumber || ''),
             headsign: dest.name || '',
-            color: '4477AA',
-            text: 'FFFFFF',
+            color: String(badge.color || '4477AA').replace('#', ''),
+            text: String(badge.text || 'FFFFFF').replace('#', ''),
             from: station.name || '',
             to: dest.name || '',
             waitMin: waitMin >= 1 ? waitMin : 0,
@@ -1276,7 +1304,7 @@ const BkkLib = {
             endMs: arr * 1000,
           };
         }
-      } catch (_e) { /* city legs still stand */ }
+      } catch (_e) { /* no train → whole city→rail journey is null */ }
     }
     if (!train) return null;
     return { walk, train, ready: Math.round(train.endMs / 1000) };
@@ -3020,6 +3048,19 @@ const BkkLib = {
         row.lon = Number(v.lon);
       }
     });
+    BkkLib.applyEmmaPositions(rows, pool.map((v) => ({
+      lat: v.lat,
+      lon: v.lon,
+      heading: v.heading,
+      speed: v.speed,
+      label: v.label || v.trainNumber,
+      trip: {
+        tripShortName: String(
+          (v.trip && (v.trip.tripShortName || v.trip.shortName))
+          || v.trainNumber || v.shortName || v.label || '',
+        ),
+      },
+    })));
     return rows;
   },
   applyRailBadge(row) {
@@ -4069,7 +4110,8 @@ class BKKPlannerCard extends BKKHopCard {
     const esc = BkkLib.esc;
     const legs = journey.legs.map((leg) => {
       if (leg.walk) {
-        return `<div class="j-leg j-walk"><span class="j-mode">${esc(t(lang, 'plannerWalk', [leg.minutes, leg.meters]))}</span>`
+        const walkKey = leg.stationWalk ? 'plannerStationWalk' : 'plannerWalk';
+        return `<div class="j-leg j-walk"><span class="j-mode">${esc(t(lang, walkKey, [leg.minutes, leg.meters]))}</span>`
           + `<span class="j-where">${esc(leg.from)} \u2192 ${esc(leg.to)}</span></div>`;
       }
       const wait = leg.waitMin >= 1
