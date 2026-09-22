@@ -774,6 +774,26 @@ check('ELVIRA GPS is kept over FUTAR overlay', (() => {
     && merged[0].lon === 18.6682205
     && String(merged[0].color).replace('#', '').toUpperCase() === '2E5EA8';
 })());
+check('ELVIRA GPS still wins if FUTAR was added first', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 900;
+  const merged = Lib.mergeVolanRows(
+    [{
+      label: 'BALATON', tripId: 'elvira:2890602', trainNumber: '861',
+      dep: dep, sched: dep, color: '#4477aa',
+      lat: 47.2290993, lon: 18.6682205,
+    }],
+    [{
+      label: 'IC', tripId: 'BKK_861_74', trainNumber: '861',
+      dep: dep, sched: dep, color: '#2E5EA8',
+      lat: 47.5, lon: 19.05,
+    }],
+    12,
+  );
+  return merged.length === 1
+    && merged[0].label === 'BALATON'
+    && merged[0].lat === 47.2290993
+    && merged[0].lon === 18.6682205;
+})());
 check('map skips FUTAR resolve when ELVIRA row already has GPS',
   !Lib.needsFutarMapResolve({ tripId: 'elvira:2890602', lat: 47.229, lon: 18.668 })
   && Lib.needsFutarMapResolve({ tripId: 'elvira:2890602' })
@@ -791,6 +811,18 @@ check('Volán 6990 GPS lands on the in-progress gtfs row only', (() => {
   return rows[0].lat === 46.96 && rows[0].lon === 16.27
     && rows[0].tripId === 'gtfs:6990:a'
     && rows[1].lat == null;
+})());
+check('Volán GPS also lands on a motis hop row', (() => {
+  const now = 1_790_000_000;
+  const rows = [{
+    label: '6990', tripId: 'motis:hu-volanbusz_1', vehicle: 'coach',
+    head: 'Sz\u00e9kesfeh\u00e9rv\u00e1r', dep: now + 4 * 60,
+  }];
+  Lib.applyCoachGps(rows, [{
+    route: '6990', head: 'Sz\u00e9kesfeh\u00e9rv\u00e1r, aut\u00f3busz-\u00e1llom\u00e1s',
+    lat: 47.19, lon: 18.41,
+  }], now);
+  return rows[0].lat === 47.19 && rows[0].lon === 18.41;
 })());
 check('Szombathely SZ009 matches a city row labelled 9', (() => {
   const now = 1_790_000_000;

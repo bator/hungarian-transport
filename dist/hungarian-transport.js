@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.18';
+const CARD_VERSION = '1.4.4-rev.19';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -2350,13 +2350,11 @@ const BkkLib = {
         prev.label = rowLab;
       }
       const prevHasGps = Number.isFinite(Number(prev.lat)) && Number.isFinite(Number(prev.lon));
-      if (!prevHasGps) {
-        const lat = Number(row.lat);
-        const lon = Number(row.lon);
-        if (Number.isFinite(lat) && Number.isFinite(lon)) {
-          prev.lat = lat;
-          prev.lon = lon;
-        }
+      const rowHasGps = Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon));
+      const rowElvira = /^elvira:/i.test(String(row.tripId || ''));
+      if (rowHasGps && (!prevHasGps || rowElvira)) {
+        prev.lat = Number(row.lat);
+        prev.lon = Number(row.lon);
       }
       const tid = String(row.tripId || '');
       if (tid && !/^(elvira:|gtfs:)/.test(tid) && !prevHasGps) prev.tripId = tid;
@@ -3281,7 +3279,7 @@ const BkkLib = {
     };
     const groups = new Map();
     list.forEach((row, idx) => {
-      if (!row || !/^gtfs:/.test(String(row.tripId || ''))) return;
+      if (!row || !/^(gtfs:|motis:)/.test(String(row.tripId || ''))) return;
       if (Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon))) return;
       let key = '';
       BkkLib.coachRouteKeys(row.label).some((candidate) => {
@@ -3330,7 +3328,7 @@ const BkkLib = {
   async attachCoachGps(hass, rows) {
     const list = Array.isArray(rows) ? rows : [];
     const needs = list.some((row) => row
-      && /^gtfs:/.test(String(row.tripId || ''))
+      && /^(gtfs:|motis:)/.test(String(row.tripId || ''))
       && !(Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon))));
     if (!hass || !needs) return list;
     return BkkLib.applyCoachGps(list, await BkkLib.coachPositions(hass));
@@ -4354,7 +4352,7 @@ class BKKHopCard extends HTMLElement {
           let list = futarFull
             ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
             : earlyRows.slice();
-          list = BkkLib.mergeVolanRows(elviraRows, list, cap);
+          list = BkkLib.mergeVolanRows(list, elviraRows, cap);
           paintRows(list);
         };
         let startThrough = null;
@@ -4429,7 +4427,7 @@ class BKKHopCard extends HTMLElement {
         let merged = futarFull
           ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
           : earlyRows.slice();
-        merged = BkkLib.mergeVolanRows(elviraRows, merged, cap);
+        merged = BkkLib.mergeVolanRows(merged, elviraRows, cap);
         if (!merged.length) {
           merged = await BkkLib.fillTransitousIfEmpty(merged, origin, dest, {
             mode: this._departMode(),
