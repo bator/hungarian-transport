@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.15';
+const CARD_VERSION = '1.4.2-rev.16';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -3441,38 +3441,57 @@ class BKKPlannerCard extends BKKHopCard {
     if (!wrap || !head) return;
     const style = document.createElement('style');
     style.textContent = `
-      .plan { margin-bottom: 10px; }
-      .plan .step { margin-bottom: 10px; }
-      .plan .label { font-size: 11px; font-weight: 700; letter-spacing: 0.03em;
+      .plan {
+        margin: 0 0 12px;
+        padding: 12px;
+        border: 1px solid var(--divider-color);
+        border-radius: 16px;
+        background: color-mix(in srgb, var(--primary-color) 6%, var(--card-background-color, transparent));
+      }
+      .plan .step { margin-bottom: 0; }
+      .plan .step + .step { margin-top: 12px; }
+      .plan .label { font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
         color: var(--secondary-text-color); margin-bottom: 6px; text-transform: uppercase; }
       .plan input {
-        width: 100%; box-sizing: border-box; font: inherit;
-        background: var(--secondary-background-color, rgba(128,128,128,0.15));
-        color: var(--primary-text-color); border: 1px solid var(--divider-color);
-        border-radius: 8px; padding: 8px 10px;
+        width: 100%; box-sizing: border-box; font: inherit; font-size: 14px;
+        background: var(--card-background-color, #fff);
+        color: var(--primary-text-color);
+        border: 1px solid var(--divider-color);
+        border-radius: 12px; padding: 10px 12px;
       }
-      .plan .row { display: flex; gap: 8px; align-items: center; }
-      .plan .row button.clear {
+      .plan input:focus { outline: 2px solid color-mix(in srgb, var(--primary-color) 45%, transparent); outline-offset: 1px; }
+      .plan .tools { display: flex; gap: 8px; align-items: center; margin: 10px 0; }
+      .plan .tools .spacer { flex: 1; }
+      .plan .row button.clear, .plan .tools button.clear {
         flex: 0 0 auto; border: 1px solid var(--divider-color);
-        background: transparent; color: var(--primary-text-color);
-        border-radius: 8px; padding: 8px 10px; cursor: pointer; font: inherit;
+        background: var(--card-background-color, transparent);
+        color: var(--primary-text-color);
+        border-radius: 999px; padding: 7px 12px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 650;
       }
-      .plan .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+      .plan #pswap { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
+      .plan .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
       .plan .chip {
-        border: 1px solid var(--divider-color); background: transparent;
+        border: 1px solid var(--divider-color);
+        background: var(--card-background-color, transparent);
         color: var(--primary-text-color); border-radius: 999px;
-        padding: 4px 10px; cursor: pointer; font: inherit; font-size: 12px;
+        padding: 5px 10px; cursor: pointer; font: inherit; font-size: 12px;
       }
       .plan .chip.on { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
-      .plan .list { max-height: 180px; overflow: auto; margin-top: 6px; }
+      .plan .list { max-height: 200px; overflow: auto; margin-top: 8px;
+        border-radius: 12px; background: var(--card-background-color, transparent); }
+      .plan .list:empty { display: none; }
       .plan .hit {
-        display: block; width: 100%; text-align: left; font: inherit;
+        display: block; width: 100%; text-align: left; font: inherit; font-size: 14px;
         background: transparent; color: var(--primary-text-color);
         border: 0; border-bottom: 1px solid var(--divider-color);
-        padding: 8px 4px; cursor: pointer;
+        padding: 10px 12px; cursor: pointer;
       }
-      .plan .hit:hover { background: var(--secondary-background-color); }
-      .plan .picked { font-weight: 700; margin-top: 4px; }
+      .plan .hit:last-child { border-bottom: 0; }
+      .plan .hit:hover { background: color-mix(in srgb, var(--primary-color) 10%, transparent); }
+      .plan .picked { display: none; margin-top: 8px; font-size: 13px; font-weight: 650;
+        padding: 8px 10px; border-radius: 10px;
+        background: color-mix(in srgb, var(--primary-color) 14%, transparent); }
+      .plan .picked.show { display: block; }
       .plan .hint { font-size: 12px; color: var(--secondary-text-color); margin-top: 6px; }
     `;
     this.shadowRoot.appendChild(style);
@@ -3481,24 +3500,25 @@ class BKKPlannerCard extends BKKHopCard {
     plan.className = 'plan';
     plan.innerHTML = `
       <div class="step">
-        <div class="label">${BkkLib.esc(t(lang, 'plannerStep1'))}</div>
-        <div class="row">
-          <input id="pq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerSearchPlaceholder'))}">
-          <button class="clear" id="pswap" type="button">${BkkLib.esc(t(lang, 'plannerSwap'))}</button>
-          <button class="clear" id="preset" type="button">${BkkLib.esc(t(lang, 'plannerReset'))}</button>
-        </div>
-        <div class="chips" id="pfav"></div>
+        <div class="label" id="plab1">${BkkLib.esc(t(lang, 'plannerStep1'))}</div>
+        <input id="pq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerSearchPlaceholder'))}">
         <div class="picked" id="pstop"></div>
+        <div class="chips" id="pfav"></div>
         <div class="list" id="phits"></div>
       </div>
+      <div class="tools">
+        <button class="clear" id="pswap" type="button">${BkkLib.esc(t(lang, 'plannerSwap'))}</button>
+        <span class="spacer"></span>
+        <button class="clear" id="preset" type="button">${BkkLib.esc(t(lang, 'plannerReset'))}</button>
+      </div>
       <div class="step">
-        <div class="label">${BkkLib.esc(t(lang, 'plannerStep2'))}</div>
+        <div class="label" id="plab2">${BkkLib.esc(t(lang, 'plannerStep2'))}</div>
         <input id="pdq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerDestPlaceholder'))}">
         <div class="picked" id="pdest"></div>
         <div class="list" id="pdhits"></div>
       </div>
       <div class="step">
-        <div class="label">${BkkLib.esc(t(lang, 'plannerStep3'))}</div>
+        <div class="label" id="plab3">${BkkLib.esc(t(lang, 'plannerStep3'))}</div>
         <div class="chips" id="pmin"></div>
       </div>
     `;
@@ -3554,19 +3574,25 @@ class BKKPlannerCard extends BKKHopCard {
     const dest = this._planEl('pdest');
     const q = this._planEl('pq');
     const dq = this._planEl('pdq');
-    if (stop) stop.textContent = cfg.stopName || '';
-    if (dest) dest.textContent = cfg.destName || '';
+    if (stop) {
+      stop.textContent = cfg.stopName || '';
+      stop.classList.toggle('show', !!cfg.stopName);
+    }
+    if (dest) {
+      dest.textContent = cfg.destName || '';
+      dest.classList.toggle('show', !!cfg.destName);
+    }
     if (q && document.activeElement !== q) {
       q.placeholder = cfg.stopName || t(lang, 'plannerSearchPlaceholder');
     }
     if (dq && document.activeElement !== dq) {
       dq.placeholder = cfg.destName || t(lang, 'plannerDestPlaceholder');
     }
-    const lab1 = this.shadowRoot && this.shadowRoot.querySelector('.plan .step:first-child .label');
-    const lab2 = this.shadowRoot && this.shadowRoot.querySelector('.plan .step:nth-child(2) .label');
+    const lab1 = this._planEl('plab1');
+    const lab2 = this._planEl('plab2');
     if (lab1) lab1.textContent = t(lang, 'plannerStep1');
     if (lab2) lab2.textContent = t(lang, 'plannerStep2');
-    const lab3 = this.shadowRoot && this.shadowRoot.querySelector('.plan .step:nth-child(3) .label');
+    const lab3 = this._planEl('plab3');
     if (lab3) lab3.textContent = t(lang, 'plannerStep3');
     const swap = this._planEl('pswap');
     const reset = this._planEl('preset');
