@@ -559,6 +559,11 @@ check('planner editor still has hidden mav checkbox', !!ped.querySelector('#mav'
 
 const pminChips = plan.shadowRoot.querySelectorAll('#pmin .chip');
 check('planner in-card minutesAfter chips', pminChips.length === 8, String(pminChips.length));
+check('look-ahead chips wrap on their own row',
+  !!plan.shadowRoot.querySelector('.horizon-bar #preset')
+  && plan.shadowRoot.querySelector('.horizon > #pmin')
+  && /\.horizon \.chips \{[^}]*flex-wrap:\s*wrap/.test(src)
+  && !/\.horizon \.chips \{[^}]*overflow-x:\s*auto/.test(src));
 check('city search keeps one stop from each city', (() => {
   const idx = {
     ops: [

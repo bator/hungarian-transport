@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.22';
+const CARD_VERSION = '1.4.2-rev.23';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -3548,15 +3548,20 @@ class BKKPlannerCard extends BKKHopCard {
       }
       .plan input:focus { outline: 2px solid var(--primary-color); outline-offset: 1px; }
       .plan .horizon {
-        display: flex; align-items: center; gap: 8px; margin-top: 12px;
-        padding: 10px 12px; border-radius: 16px;
+        display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+        margin-top: 12px; padding: 10px 12px; border-radius: 16px;
         background: var(--secondary-background-color, rgba(127,127,127,.12));
       }
-      .plan .horizon .label { margin: 0; flex: 0 0 auto; }
-      .plan .horizon .chips { flex: 1; margin: 0; flex-wrap: nowrap; overflow-x: auto; }
+      .plan .horizon-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+      .plan .horizon .label { margin: 0; }
+      .plan .horizon .chips {
+        flex: none; width: 100%; margin: 0; flex-wrap: wrap; overflow: visible;
+      }
+      .plan .horizon .chip { flex: 0 0 auto; }
       .plan #preset {
         border: 0; background: transparent; color: var(--primary-color);
         font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; padding: 6px;
+        flex: 0 0 auto;
       }
       .plan .suggest { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
       .plan .suggest.hidden { display: none; }
@@ -3623,9 +3628,11 @@ class BKKPlannerCard extends BKKHopCard {
         </div>
       </div>
       <div class="horizon">
-        <div class="label" id="plab3">${BkkLib.esc(t(lang, 'plannerStep3'))}</div>
+        <div class="horizon-bar">
+          <div class="label" id="plab3">${BkkLib.esc(t(lang, 'plannerStep3'))}</div>
+          <button id="preset" type="button">${BkkLib.esc(t(lang, 'plannerReset'))}</button>
+        </div>
         <div class="chips" id="pmin"></div>
-        <button id="preset" type="button">${BkkLib.esc(t(lang, 'plannerReset'))}</button>
       </div>
     `;
     wrap.insertBefore(plan, head);
