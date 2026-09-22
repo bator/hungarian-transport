@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.4';
+const CARD_VERSION = '1.4.4-rev.5';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -784,15 +784,22 @@ const BkkLib = {
   _gateActive: 0,
   _gateMax: 8,
   _gateWaiters: [],
-  async _gate() {
-    if (BkkLib._gateActive < BkkLib._gateMax) {
+  _gateFgWaiters: [],
+  /* Foreground calls are the departure boards. They jump ahead of trip-details
+     so one card finishing does not hold up the other cards on the dashboard. */
+  async _gate(foreground) {
+    const busy = BkkLib._gateActive >= BkkLib._gateMax;
+    const fgWaiting = BkkLib._gateFgWaiters.length > 0;
+    if (!busy && (foreground || !fgWaiting)) {
       BkkLib._gateActive += 1;
       return;
     }
-    await new Promise((resolve) => { BkkLib._gateWaiters.push(resolve); });
+    await new Promise((resolve) => {
+      (foreground ? BkkLib._gateFgWaiters : BkkLib._gateWaiters).push(resolve);
+    });
   },
   _ungate() {
-    const next = BkkLib._gateWaiters.shift();
+    const next = BkkLib._gateFgWaiters.shift() || BkkLib._gateWaiters.shift();
     if (next) next();
     else BkkLib._gateActive = Math.max(0, BkkLib._gateActive - 1);
   },
@@ -809,9 +816,9 @@ const BkkLib = {
     if (cache && cache !== BkkLib._mem) BkkLib.cachePut(cache, key, value);
     return value;
   },
-  async fetch(apiKey, path, params) {
+  async fetch(apiKey, path, params, foreground) {
     if (!apiKey) throw codedError('errNoApiKey');
-    await BkkLib._gate();
+    await BkkLib._gate(!!foreground);
     const q = new URLSearchParams(Object.assign({
       key: apiKey, version: '4', appVersion: 'apiary-1.0',
     }, params));
@@ -836,7 +843,7 @@ const BkkLib = {
   async probeApiKey(apiKey) {
     if (!apiKey) return { ok: false, code: 'errNoApiKey' };
     try {
-      await BkkLib.fetch(apiKey, 'search.json', { query: '.' });
+      await BkkLib.fetch(apiKey, 'search.json', { query: '.' }, true);
       return { ok: true };
     } catch (err) {
       const msg = String(err && err.message ? err.message : err);
@@ -1564,15 +1571,31 @@ const BkkLib = {
     if (payload && Array.isArray(payload.vehicles)) return payload.vehicles;
     return [];
   },
+  _coachPosInflight: null,
+  _coachPosCache: null,
   async coachPositions(hass) {
     if (!hass) return [];
-    try {
-      let res;
-      if (typeof hass.callService === 'function') {
-        try {
-          res = await hass.callService('bkk_stop', 'coach_positions', {}, undefined, false, true);
-        } catch (err) {
-          if (!hass.connection) throw err;
+    const now = Date.now();
+    const hit = BkkLib._coachPosCache;
+    if (hit && now - hit.ts < 20000) return hit.vehicles;
+    if (BkkLib._coachPosInflight) return BkkLib._coachPosInflight;
+    const run = (async () => {
+      try {
+        let res;
+        if (typeof hass.callService === 'function') {
+          try {
+            res = await hass.callService('bkk_stop', 'coach_positions', {}, undefined, false, true);
+          } catch (err) {
+            if (!hass.connection) throw err;
+            res = await hass.connection.sendMessagePromise({
+              type: 'call_service',
+              domain: 'bkk_stop',
+              service: 'coach_positions',
+              service_data: {},
+              return_response: true,
+            });
+          }
+        } else if (hass.connection) {
           res = await hass.connection.sendMessagePromise({
             type: 'call_service',
             domain: 'bkk_stop',
@@ -1580,23 +1603,21 @@ const BkkLib = {
             service_data: {},
             return_response: true,
           });
+        } else {
+          return [];
         }
-      } else if (hass.connection) {
-        res = await hass.connection.sendMessagePromise({
-          type: 'call_service',
-          domain: 'bkk_stop',
-          service: 'coach_positions',
-          service_data: {},
-          return_response: true,
-        });
-      } else {
+        const vehicles = BkkLib.coachVehiclesFromResult(res);
+        const list = Array.isArray(vehicles) ? vehicles : [];
+        BkkLib._coachPosCache = { ts: Date.now(), vehicles: list };
+        return list;
+      } catch (err) {
         return [];
+      } finally {
+        BkkLib._coachPosInflight = null;
       }
-      const vehicles = BkkLib.coachVehiclesFromResult(res);
-      return Array.isArray(vehicles) ? vehicles : [];
-    } catch (err) {
-      return [];
-    }
+    })();
+    BkkLib._coachPosInflight = run;
+    return run;
   },
   async coachShape(hass, route, headsign) {
     if (!hass || !route) return '';
@@ -1670,7 +1691,7 @@ const BkkLib = {
       try {
         const queries = [q].concat(BkkLib.aliasQueries(q));
         for (let i = 0; i < queries.length; i++) {
-          const data = await BkkLib.fetch(apiKey, 'search.json', { query: queries[i] });
+          const data = await BkkLib.fetch(apiKey, 'search.json', { query: queries[i] }, true);
           const stops = (((data.data || {}).references) || {}).stops || {};
           Object.values(stops).forEach((s) => {
             if (!s || !s.id || !s.name) return;
@@ -1785,7 +1806,7 @@ const BkkLib = {
         const data = await BkkLib.fetch(apiKey, 'route-details.json', {
           routeId,
           includeReferences: 'true',
-        });
+        }, true);
         const entry = (data.data || {}).entry || {};
         const packed = {
           variants: (entry.variants || []).map((v) => ({
@@ -1853,7 +1874,7 @@ const BkkLib = {
         const data = await BkkLib.fetch(apiKey, 'schedule-for-stop.json', {
           stopId: parentId,
           includeReferences: 'true',
-        });
+        }, true);
         const stops = ((data.data || {}).references || {}).stops || {};
         const ids = Object.values(stops)
           .filter((s) => s && s.id && s.parentStationId === parentId)
@@ -1939,7 +1960,7 @@ const BkkLib = {
         minutesBefore: '0',
         onlyDepartures: 'true',
         includeReferences: 'true',
-      });
+      }, true);
       const refs = (data.data || {}).references || {};
       const routes = refs.routes || {};
       const trips = refs.trips || {};
@@ -2093,7 +2114,7 @@ const BkkLib = {
             onlyDepartures: 'true',
             includeReferences: 'true',
             includeVehicleFromTrip: 'true',
-          });
+          }, true);
         } catch (_e) {
           return null;
         }
