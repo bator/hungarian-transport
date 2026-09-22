@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.17';
+const CARD_VERSION = '1.4.2-rev.18';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -3494,6 +3494,21 @@ class BKKPlannerCard extends BKKHopCard {
         border: 0; background: transparent; color: var(--secondary-text-color);
         font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; padding: 6px;
       }
+      .plan .suggest { margin-top: 10px; display: flex; flex-direction: column; gap: 2px; }
+      .plan .suggest.hidden { display: none; }
+      .plan .suggest-row { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+      .plan .suggest-kind {
+        flex: 0 0 42px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--secondary-text-color);
+      }
+      .plan .suggest-stops { display: flex; flex-wrap: wrap; gap: 4px 0; min-width: 0; }
+      .plan .suggest-stop {
+        border: 0; background: transparent; color: var(--primary-text-color);
+        font: inherit; font-size: 14px; padding: 2px 0; cursor: pointer;
+      }
+      .plan .suggest-stop + .suggest-stop::before {
+        content: "\\00b7"; margin: 0 8px; color: var(--secondary-text-color);
+      }
       .plan .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
       .plan .chip {
         border: 1px solid var(--divider-color); background: transparent;
@@ -3531,7 +3546,7 @@ class BKKPlannerCard extends BKKHopCard {
             <div class="label" id="plab1">${BkkLib.esc(t(lang, 'plannerStep1'))}</div>
             <input id="pq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerSearchPlaceholder'))}">
             <div class="picked" id="pstop"></div>
-            <div class="chips" id="pfav"></div>
+            <div class="suggest" id="pfav"></div>
             <div class="list" id="phits"></div>
           </div>
           <div class="place">
@@ -3583,13 +3598,35 @@ class BKKPlannerCard extends BKKHopCard {
     const box = this._planEl('pfav');
     if (!box) return;
     box.innerHTML = '';
-    FAVORITES.forEach((f) => {
-      const b = document.createElement('button');
-      b.className = 'chip';
-      b.type = 'button';
-      b.textContent = f.name.split(' / ')[0];
-      b.addEventListener('click', () => this._pickOrigin(f));
-      box.appendChild(b);
+    const shortName = (name) => String(name || '')
+      .replace(/^Budapest,\s*/, '')
+      .replace(/^Budapest-/, '')
+      .replace(/\s+aut\u00f3busz-p\u00e1lyaudvar$/, '')
+      .replace(/\s+vas\u00fat\u00e1llom\u00e1s$/, '')
+      .replace(/\s+p\u00e1lyaudvar$/, '');
+    [
+      ['BKK', BKK_FAVORITES],
+      ['Vol\u00e1n', VOLAN_FAVORITES],
+      ['M\u00c1V', MAV_FAVORITES],
+    ].forEach(([kind, list]) => {
+      const row = document.createElement('div');
+      row.className = 'suggest-row';
+      const label = document.createElement('span');
+      label.className = 'suggest-kind';
+      label.textContent = kind;
+      const stops = document.createElement('span');
+      stops.className = 'suggest-stops';
+      list.forEach((fav) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'suggest-stop';
+        button.textContent = shortName(fav.name);
+        button.addEventListener('click', () => this._pickOrigin(fav));
+        stops.appendChild(button);
+      });
+      row.appendChild(label);
+      row.appendChild(stops);
+      box.appendChild(row);
     });
   }
 
@@ -3604,6 +3641,8 @@ class BKKPlannerCard extends BKKHopCard {
       stop.textContent = cfg.stopName || '';
       stop.classList.toggle('show', !!cfg.stopName);
     }
+    const fav = this._planEl('pfav');
+    if (fav) fav.classList.toggle('hidden', !!cfg.stopName);
     if (dest) {
       dest.textContent = cfg.destName || '';
       dest.classList.toggle('show', !!cfg.destName);
