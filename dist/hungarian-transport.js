@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.9';
+const CARD_VERSION = '1.4.4-rev.10';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -277,8 +277,9 @@ const I18N = {
     plannerNoSharedStop: 'Nincs k\u00f6z\u00f6s meg\u00e1ll\u00f3',
     plannerNoSharedLater: 'Ezeknek a j\u00e1ratoknak nincs k\u00f6z\u00f6s k\u00e9s\u0151bbi meg\u00e1ll\u00f3ja.',
     plannerJourneyTitle: '\u00c1tsz\u00e1ll\u00e1ssal',
-    plannerJourneySummary: (parts) => `${parts[0]} perc \u00b7 ${parts[1]} \u00e1tsz\u00e1ll\u00e1s \u00b7 ${parts[2]} perc gyalogl\u00e1s`,
+    plannerJourneySummary: (parts) => `${parts[0]} perc \u00b7 ${parts[1]} \u00e1tsz\u00e1ll\u00e1s \u00b7 ${parts[2]} perc gyalogl\u00e1s \u00b7 ${parts[3]} perc v\u00e1rakoz\u00e1s`,
     plannerWalk: (parts) => `Gyalogl\u00e1s ${parts[0]} perc, ${parts[1]} m`,
+    plannerWait: (min) => `V\u00e1rakoz\u00e1s ${min} perc`,
     plannerRide: (min) => `${min} perc`,
     plannerPickDest: 'V\u00e1lassz c\u00e9lt...',
     plannerNoRoutes: 'Nincs indul\u00f3 j\u00e1rat ebben a meg\u00e1ll\u00f3ban.',
@@ -427,8 +428,9 @@ const I18N = {
     plannerNoSharedStop: 'No shared stop',
     plannerNoSharedLater: 'These routes share no later stop.',
     plannerJourneyTitle: 'With a transfer',
-    plannerJourneySummary: (parts) => `${parts[0]} min \u00b7 ${parts[1]} transfer \u00b7 ${parts[2]} min walking`,
+    plannerJourneySummary: (parts) => `${parts[0]} min \u00b7 ${parts[1]} transfer \u00b7 ${parts[2]} min walking \u00b7 ${parts[3]} min waiting`,
     plannerWalk: (parts) => `Walk ${parts[0]} min, ${parts[1]} m`,
+    plannerWait: (min) => `Wait ${min} min`,
     plannerRide: (min) => `${min} min`,
     plannerPickDest: 'Pick a destination...',
     plannerNoRoutes: 'No departures from this stop.',
@@ -920,6 +922,12 @@ const BkkLib = {
       return '';
     }
   },
+  /* FUTÁR plan-trip times are epoch milliseconds. Values below 1e11 are seconds. */
+  epochMs(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    return n >= 1e11 ? n : n * 1000;
+  },
   /* FUTÁR plan-trip: itinerary duration and walkTime are seconds.
      Each leg duration is milliseconds. */
   journeyFromPlan(payload) {
@@ -929,12 +937,26 @@ const BkkLib = {
     its.forEach((it) => {
       if (Number(it.duration || 1e15) < Number(best.duration || 1e15)) best = it;
     });
-    const legs = (best.legs || []).map((leg) => {
+    const legs = [];
+    const tripStart = BkkLib.epochMs(best.startTime);
+    let prevEnd = tripStart;
+    (best.legs || []).forEach((leg) => {
       const sec = Math.round(Number(leg.duration || 0) / 1000);
       const walk = String(leg.mode || '').toUpperCase() === 'WALK';
-      return {
+      const startMs = BkkLib.epochMs(leg.startTime);
+      const endMs = BkkLib.epochMs(leg.endTime);
+      let waitMin = 0;
+      if (!walk && startMs && prevEnd) {
+        waitMin = Math.round((startMs - prevEnd) / 60000);
+        if (waitMin < 1) waitMin = 0;
+      }
+      if (endMs) prevEnd = endMs;
+      else if (startMs) prevEnd = startMs;
+      const minutes = sec <= 0 ? 0 : Math.max(1, Math.round(sec / 60));
+      if (minutes <= 0) return;
+      legs.push({
         walk,
-        minutes: sec <= 0 ? 0 : Math.max(1, Math.round(sec / 60)),
+        minutes,
         meters: Math.max(0, Math.round(Number(leg.distance || 0))),
         label: String(leg.routeShortName || ''),
         headsign: String(leg.headsign || ''),
@@ -942,12 +964,15 @@ const BkkLib = {
         text: String(leg.routeTextColor || '').replace(/#/g, ''),
         from: String((leg.from || {}).name || ''),
         to: String((leg.to || {}).name || ''),
-      };
-    }).filter((leg) => leg.minutes > 0);
+        waitMin,
+      });
+    });
     if (!legs.length) return null;
+    const waitMin = legs.reduce((sum, leg) => sum + (leg.waitMin || 0), 0);
     return {
       durationMin: Math.max(1, Math.round(Number(best.duration || 0) / 60)),
       walkMin: Math.max(0, Math.round(Number(best.walkTime || 0) / 60)),
+      waitMin,
       transfers: Math.max(0, Number(best.transfers || 0)),
       legs,
     };
@@ -3759,16 +3784,19 @@ class BKKPlannerCard extends BKKHopCard {
         return `<div class="j-leg j-walk"><span class="j-mode">${esc(t(lang, 'plannerWalk', [leg.minutes, leg.meters]))}</span>`
           + `<span class="j-where">${esc(leg.from)} \u2192 ${esc(leg.to)}</span></div>`;
       }
+      const wait = leg.waitMin >= 1
+        ? `<div class="j-leg j-wait">${esc(t(lang, 'plannerWait', leg.waitMin))}</div>`
+        : '';
       const ride = leg.label
         ? `<span class="j-badge" style="${esc(this._badgeStyle({ color: leg.color, textcolor: leg.text }))}">${esc(leg.label)}</span>`
         : '';
-      return `<div class="j-leg">${ride}<span class="j-where">${esc(leg.headsign || leg.to)}</span>`
+      return wait + `<div class="j-leg">${ride}<span class="j-where">${esc(leg.headsign || leg.to)}</span>`
         + `<span class="j-min">${esc(t(lang, 'plannerRide', leg.minutes))}</span></div>`;
     }).join('');
     const box = document.createElement('div');
     box.className = 'journey-plan';
     box.innerHTML = `<div class="j-title">${esc(t(lang, 'plannerJourneyTitle'))}</div>`
-      + `<div class="j-sum">${esc(t(lang, 'plannerJourneySummary', [journey.durationMin, journey.transfers, journey.walkMin]))}</div>`
+      + `<div class="j-sum">${esc(t(lang, 'plannerJourneySummary', [journey.durationMin, journey.transfers, journey.walkMin, journey.waitMin || 0]))}</div>`
       + legs;
     this._elBody.appendChild(box);
   }
@@ -3919,7 +3947,7 @@ class BKKPlannerCard extends BKKHopCard {
       .journey-plan .j-badge {
         flex: 0 0 auto; border-radius: 8px; padding: 2px 8px; font-weight: 700;
       }
-      .journey-plan .j-walk { color: var(--secondary-text-color); }
+      .journey-plan .j-walk, .journey-plan .j-wait { color: var(--secondary-text-color); }
     `;
     this.shadowRoot.appendChild(style);
     const lang = this._lang();

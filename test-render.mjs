@@ -167,9 +167,10 @@ const shaped = Lib.journeyFromPlan({
     { duration: 2000, walkTime: 400, transfers: 2, legs: [
       { mode: 'BUS', duration: 900000, distance: 1000, routeShortName: '9', headsign: 'Hosszabb', from: { name: 'A' }, to: { name: 'B' } },
     ] },
-    { duration: 1532, walkTime: 199, transfers: 1, legs: [
-      { mode: 'TROLLEYBUS', duration: 780000, distance: 4267, routeShortName: '81', routeColor: '009EE3', routeTextColor: 'FFFFFF', headsign: 'Mexik\u00f3i \u00fat', from: { name: 'Miskolci' }, to: { name: 'Mexik\u00f3i' } },
-      { mode: 'WALK', duration: 78000, distance: 85, from: { name: 'Mexik\u00f3i' }, to: { name: 'Oktogon' } },
+    { duration: 1532, walkTime: 199, transfers: 1, startTime: 1700000000000, legs: [
+      { mode: 'TROLLEYBUS', duration: 780000, distance: 4267, routeShortName: '81', routeColor: '009EE3', routeTextColor: 'FFFFFF', headsign: 'Mexik\u00f3i \u00fat', from: { name: 'Miskolci' }, to: { name: 'Mexik\u00f3i' }, startTime: 1700000120000, endTime: 1700000900000 },
+      { mode: 'WALK', duration: 78000, distance: 85, from: { name: 'Mexik\u00f3i' }, to: { name: 'Oktogon' }, startTime: 1700000900000, endTime: 1700000978000 },
+      { mode: 'SUBWAY', duration: 447000, distance: 2818, routeShortName: 'M1', headsign: 'V\u00f6r\u00f6smarty t\u00e9r', from: { name: 'Mexik\u00f3i' }, to: { name: 'Oktogon' }, startTime: 1700001158000, endTime: 1700001605000 },
     ] },
   ] } } },
 });
@@ -177,6 +178,9 @@ check('fastest itinerary is kept', shaped && shaped.durationMin === 26 && shaped
   JSON.stringify(shaped && { durationMin: shaped.durationMin, walkMin: shaped.walkMin }));
 check('walk leg is minutes', shaped.legs[1].walk && shaped.legs[1].minutes === 1 && shaped.legs[1].meters === 85);
 check('ride leg keeps the route number', shaped.legs[0].label === '81' && shaped.legs[0].minutes === 13);
+check('wait is the gap after arrival',
+  shaped.legs[0].waitMin === 2 && shaped.legs[2].waitMin === 3 && shaped.waitMin === 5,
+  JSON.stringify(shaped && { first: shaped.legs[0].waitMin, next: shaped.legs[2] && shaped.legs[2].waitMin, total: shaped.waitMin }));
 check('bkk id becomes a plan vertex',
   Lib.planPlaceVertex('Keleti', 'BKK_CSF01131') === 'Keleti::BKK:CSF01131');
 
@@ -264,7 +268,8 @@ check('empty planner shows the transfer journey',
   plan.shadowRoot.innerHTML.includes('\u00c1tsz\u00e1ll\u00e1ssal')
   && plan.shadowRoot.innerHTML.includes('Gyalogl\u00e1s')
   && plan.shadowRoot.innerHTML.includes('>81<')
-  && plan.shadowRoot.innerHTML.includes('background:#009EE3'));
+  && plan.shadowRoot.innerHTML.includes('background:#009EE3')
+  && plan.shadowRoot.innerHTML.includes('V\u00e1rakoz\u00e1s 2 perc'));
 check('planner favorite chips include a Volan station',
   planHtml.includes('N\u00e9pliget'));
 check('planner favorite chips include a MAV station',
