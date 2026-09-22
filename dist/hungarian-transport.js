@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.13';
+const CARD_VERSION = '1.4.4-rev.14';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -1190,6 +1190,8 @@ const BkkLib = {
     };
   },
   async planJourney(apiKey, origin, dest, hass) {
+    const motis = await BkkLib.transitousJourney(origin, dest);
+    if (motis && motis.legs.some((leg) => !leg.walk)) return motis;
     let futar = null;
     if (apiKey) {
       const fromPlace = await BkkLib.planPlace(apiKey, origin);
@@ -1209,8 +1211,6 @@ const BkkLib = {
       }
     }
     if (futar && futar.legs.some((leg) => !leg.walk)) return futar;
-    const motis = await BkkLib.transitousJourney(origin, dest);
-    if (motis && motis.legs.some((leg) => !leg.walk)) return motis;
     const viaCity = await BkkLib.cityRailJourney(apiKey, hass, origin, dest);
     return viaCity || futar;
   },

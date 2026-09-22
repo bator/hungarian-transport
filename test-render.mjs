@@ -231,30 +231,37 @@ const origCityRail = Lib.cityRailJourney;
 Lib.planPlace = async () => 'Keleti::BKK:CSF01131';
 Lib.cityRailJourney = async () => null;
 let motisCalls = 0;
+let futarCalls = 0;
 Lib.transitousJourney = async () => {
   motisCalls += 1;
   return { durationMin: 99, walkMin: 0, waitMin: 0, transfers: 0, legs: [{ walk: false, label: 'ZOO', minutes: 7 }] };
 };
-Lib.fetch = async () => ({
-  data: { entry: { plan: { itineraries: [{
-    duration: 600, walkTime: 0, transfers: 0,
-    startTime: 1700000000000,
-    legs: [{
-      mode: 'BUS', duration: 600000, routeShortName: '7',
-      from: { name: 'A' }, to: { name: 'B' },
-      startTime: 1700000000000, endTime: 1700000600000,
-    }],
-  }] } } },
-});
-const futarFirst = await Lib.planJourney('k', { id: 'BKK_A', name: 'A' }, { id: 'BKK_B', name: 'B' });
-check('FUTAR ride skips Transitous',
-  futarFirst && futarFirst.legs[0].label === '7' && motisCalls === 0,
-  JSON.stringify({ label: futarFirst && futarFirst.legs[0] && futarFirst.legs[0].label, motisCalls }));
-Lib.fetch = async () => ({ data: { entry: { plan: { itineraries: [] } } } });
-const motisNext = await Lib.planJourney('k', { id: 'miskolc:zoo', name: 'Miskolci \u00c1llatkert' }, { id: 'BKK_005501024', name: 'Kelenf\u00f6ld' });
-check('empty FUTAR uses Transitous',
-  motisNext && motisNext.legs[0].label === 'ZOO' && motisCalls === 1,
-  JSON.stringify({ label: motisNext && motisNext.legs[0] && motisNext.legs[0].label, motisCalls }));
+Lib.fetch = async () => {
+  futarCalls += 1;
+  return {
+    data: { entry: { plan: { itineraries: [{
+      duration: 600, walkTime: 0, transfers: 0,
+      startTime: 1700000000000,
+      legs: [{
+        mode: 'BUS', duration: 600000, routeShortName: '7',
+        from: { name: 'A' }, to: { name: 'B' },
+        startTime: 1700000000000, endTime: 1700000600000,
+      }],
+    }] } } },
+  };
+};
+const motisFirst = await Lib.planJourney('k', { id: 'BKK_A', name: 'A' }, { id: 'BKK_B', name: 'B' });
+check('Transitous ride skips FUTAR',
+  motisFirst && motisFirst.legs[0].label === 'ZOO' && motisCalls === 1 && futarCalls === 0,
+  JSON.stringify({ label: motisFirst && motisFirst.legs[0] && motisFirst.legs[0].label, motisCalls, futarCalls }));
+Lib.transitousJourney = async () => {
+  motisCalls += 1;
+  return null;
+};
+const futarNext = await Lib.planJourney('k', { id: 'miskolc:zoo', name: 'Miskolci \u00c1llatkert' }, { id: 'BKK_005501024', name: 'Kelenf\u00f6ld' });
+check('empty Transitous falls back to FUTAR',
+  futarNext && futarNext.legs[0].label === '7' && futarCalls === 1,
+  JSON.stringify({ label: futarNext && futarNext.legs[0] && futarNext.legs[0].label, futarCalls }));
 Lib.planPlace = origPlace;
 Lib.fetch = origFetch;
 Lib.transitousJourney = origMotis;
