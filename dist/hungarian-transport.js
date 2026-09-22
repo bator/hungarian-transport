@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.19';
+const CARD_VERSION = '1.4.2-rev.20';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -3151,6 +3151,30 @@ class BKKHopCard extends HTMLElement {
     }
     this._map = map;
     setTimeout(() => map.invalidateSize(), 40);
+    const drawMarker = () => {
+      if (!this._map || this._map !== map) return;
+      const hereLat = Number(lat);
+      const hereLon = Number(lon);
+      if (!Number.isFinite(hereLat) || !Number.isFinite(hereLon)) return;
+      if (this._mapMarker) {
+        try { this._map.removeLayer(this._mapMarker); } catch (_e) { /* ignore */ }
+      }
+      const icon = L.divIcon({
+        className: '',
+        html: this._dotIcon(row, hasGps && !positionEstimated, lang),
+        iconSize: [22, 22],
+        iconAnchor: [11, 11],
+      });
+      this._mapMarker = L.marker([hereLat, hereLon], { icon: icon, zIndexOffset: 600 }).addTo(map);
+      // #region agent log
+      fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H1',location:'_openVehicleMap',message:'marker drawn',data:{label:String(row.label||''),hasGps:!!hasGps},timestamp:Date.now()})}).catch(()=>{});
+      // #endregion
+    };
+    if (hasGps) {
+      drawMarker();
+      foot.textContent = this._mapFootText(row, false, true, false, lang);
+      map.setView([lat, lon], 13);
+    }
     let details = null;
     if (!hasShape && /^gtfs:/i.test(String(row.tripId || '')) && this._hass) {
       try {
@@ -3194,7 +3218,10 @@ class BKKHopCard extends HTMLElement {
         }
       }
     }
-    if (!this._map || this._map !== map || !this._mapOverlay) return;
+    if (!this._map || this._map !== map || !this._mapOverlay) {
+      this._openingMap = '';
+      return;
+    }
     if (!hasGps && hasShape && details) {
       const est = BkkLib.estimatePositionFromSchedule(shape, details.sts, details.nowSec);
       if (est && Number.isFinite(est[0]) && Number.isFinite(est[1])) {
@@ -3216,15 +3243,7 @@ class BKKHopCard extends HTMLElement {
         lineJoin: 'round', lineCap: 'round',
       }).addTo(map);
     }
-    if (hasPosition) {
-      const icon = L.divIcon({
-        className: '',
-        html: this._dotIcon(row, hasGps && !positionEstimated, lang),
-        iconSize: [22, 22],
-        iconAnchor: [11, 11],
-      });
-      this._mapMarker = L.marker([lat, lon], { icon: icon, zIndexOffset: 600 }).addTo(map);
-    }
+    if (hasPosition && !this._mapMarker) drawMarker();
     foot.textContent = this._mapFootText(row, hasShape, hasGps, positionEstimated, lang);
     setTimeout(() => {
       map.invalidateSize();
@@ -3238,6 +3257,7 @@ class BKKHopCard extends HTMLElement {
         foot.textContent = t(lang, 'mapNothingToShow');
       }
     }, 80);
+    this._openingMap = '';
   }
 
   _syncOpenMap() {
