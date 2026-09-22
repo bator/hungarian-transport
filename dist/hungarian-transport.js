@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.10';
+const CARD_VERSION = '1.4.4-rev.11';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -280,6 +280,7 @@ const I18N = {
     plannerJourneySummary: (parts) => `${parts[0]} perc \u00b7 ${parts[1]} \u00e1tsz\u00e1ll\u00e1s \u00b7 ${parts[2]} perc gyalogl\u00e1s \u00b7 ${parts[3]} perc v\u00e1rakoz\u00e1s`,
     plannerWalk: (parts) => `Gyalogl\u00e1s ${parts[0]} perc, ${parts[1]} m`,
     plannerWait: (min) => `V\u00e1rakoz\u00e1s ${min} perc`,
+    plannerStationWalk: 'Gyalogl\u00e1s a v\u00e1g\u00e1nyhoz',
     plannerRide: (min) => `${min} perc`,
     plannerPickDest: 'V\u00e1lassz c\u00e9lt...',
     plannerNoRoutes: 'Nincs indul\u00f3 j\u00e1rat ebben a meg\u00e1ll\u00f3ban.',
@@ -431,6 +432,7 @@ const I18N = {
     plannerJourneySummary: (parts) => `${parts[0]} min \u00b7 ${parts[1]} transfer \u00b7 ${parts[2]} min walking \u00b7 ${parts[3]} min waiting`,
     plannerWalk: (parts) => `Walk ${parts[0]} min, ${parts[1]} m`,
     plannerWait: (min) => `Wait ${min} min`,
+    plannerStationWalk: 'Walk to the platform',
     plannerRide: (min) => `${min} min`,
     plannerPickDest: 'Pick a destination...',
     plannerNoRoutes: 'No departures from this stop.',
@@ -977,22 +979,307 @@ const BkkLib = {
       legs,
     };
   },
-  async planJourney(apiKey, origin, dest) {
+  async planJourney(apiKey, origin, dest, hass) {
     if (!apiKey) return null;
+    let futar = null;
     const fromPlace = await BkkLib.planPlace(apiKey, origin);
     const toPlace = await BkkLib.planPlace(apiKey, dest);
-    if (!fromPlace || !toPlace) return null;
-    try {
-      const data = await BkkLib.fetch(apiKey, 'plan-trip.json', {
-        fromPlace,
-        toPlace,
-        mode: 'TRANSIT,WALK',
-        numItineraries: '5',
-      }, true);
-      return BkkLib.journeyFromPlan(data);
-    } catch (_e) {
-      return null;
+    if (fromPlace && toPlace) {
+      try {
+        const data = await BkkLib.fetch(apiKey, 'plan-trip.json', {
+          fromPlace,
+          toPlace,
+          mode: 'TRANSIT,WALK',
+          numItineraries: '5',
+        }, true);
+        futar = BkkLib.journeyFromPlan(data);
+      } catch (_e) {
+        futar = null;
+      }
     }
+    if (futar && futar.legs.some((leg) => !leg.walk)) return futar;
+    const viaCity = await BkkLib.cityRailJourney(apiKey, hass, origin, dest);
+    return viaCity || futar;
+  },
+  /* Local GTFS has no planner API. Ride the city feed to a station, walk
+     across, then take the next train. Same-name stops are a 3 minute walk;
+     the station bay to the platform is 6 minutes at 80 m/min. */
+  cityHubPath(idx, originStop) {
+    if (!idx || !originStop) return null;
+    const stops = idx.stops || [];
+    const op = originStop.op;
+    const day = BkkLib.volanDay(0);
+    const ride = new Map();
+    const trips = idx.t || [];
+    for (let n = 0; n < trips.length; n++) {
+      const t = trips[n];
+      const ps = t[2] || [];
+      const ms = t[3] || [];
+      if (ps.length < 2) continue;
+      const first = stops[ps[0]];
+      if (!first || first.op !== op) continue;
+      if (!BkkLib.volanServiceOk(idx, t[0], day.ymd, day.dow)) continue;
+      const span = Math.min(ps.length, 28);
+      for (let i = 0; i < span; i++) {
+        for (let j = i + 1; j < span; j++) {
+          const mins = ms[j] - ms[i];
+          if (mins < 1 || mins > 150) continue;
+          const key = ps[i] + '|' + ps[j];
+          const prev = ride.get(key);
+          if (!prev || mins < prev.ride) {
+            ride.set(key, { from: ps[i], to: ps[j], route: String(t[1]), ride: mins });
+          }
+        }
+      }
+    }
+    const rideAt = new Map();
+    ride.forEach((edge) => {
+      if (!rideAt.has(edge.from)) rideAt.set(edge.from, []);
+      rideAt.get(edge.from).push(edge);
+    });
+    const walkAt = new Map();
+    const byFold = new Map();
+    stops.forEach((st) => {
+      if (!st || st.op !== op || !st.fold) return;
+      if (!byFold.has(st.fold)) byFold.set(st.fold, []);
+      byFold.get(st.fold).push(st.i);
+    });
+    byFold.forEach((group) => {
+      if (group.length < 2 || group.length > 8) return;
+      group.forEach((from) => {
+        group.forEach((to) => {
+          if (from === to) return;
+          if (!walkAt.has(from)) walkAt.set(from, []);
+          walkAt.get(from).push(to);
+        });
+      });
+    });
+    const hub = (st) => /p\u00e1lyaudvar|vas\u00fat\u00e1llom\u00e1s|aut\u00f3busz-\u00e1llom\u00e1s/i.test((st && st.name) || '');
+    const starts = [];
+    stops.forEach((st) => {
+      if (st && st.op === op && st.fold === originStop.fold) starts.push(st.i);
+    });
+    if (!starts.length) starts.push(originStop.i);
+    const board = (at) => {
+      const ids = [at];
+      (walkAt.get(at) || []).forEach((to) => { if (ids.indexOf(to) < 0) ids.push(to); });
+      return ids;
+    };
+    let bestHub = null;
+    const consider = (state) => {
+      const here = stops[state.at];
+      if (hub(here) && state.cost > 0 && (!bestHub || state.cost < bestHub.cost)) bestHub = state;
+    };
+    starts.forEach((startAt) => {
+      board(startAt).forEach((bay) => {
+        const walked = bay === startAt ? 0 : 3;
+        const base = {
+          at: bay, rides: 0, cost: walked, prev: walked ? {
+            at: startAt, prev: null, walk: true, minutes: 3,
+            from: stops[startAt] && stops[startAt].name,
+            to: stops[bay] && stops[bay].name,
+          } : null,
+        };
+        (rideAt.get(bay) || []).forEach((edge) => {
+          const first = {
+            at: edge.to, rides: 1, cost: base.cost + edge.ride, prev: base.prev || base,
+            walk: false, route: edge.route, minutes: edge.ride,
+            fromI: edge.from, toI: edge.to,
+            from: stops[bay] && stops[bay].name,
+            to: stops[edge.to] && stops[edge.to].name,
+          };
+          if (walked && !base.prev) {
+            first.prev = {
+              at: bay, prev: null, walk: true, minutes: 3,
+              from: stops[startAt] && stops[startAt].name,
+              to: stops[bay] && stops[bay].name,
+            };
+          }
+          consider(first);
+          board(edge.to).forEach((mid) => {
+            const midWalk = mid === edge.to ? 0 : 3;
+            (rideAt.get(mid) || []).forEach((edge2) => {
+              if (edge2.route === edge.route && edge2.to === edge.to) return;
+              const secondPrev = {
+                at: mid, rides: 1, cost: first.cost + midWalk, prev: first,
+                walk: midWalk > 0, minutes: midWalk,
+                from: stops[edge.to] && stops[edge.to].name,
+                to: stops[mid] && stops[mid].name,
+              };
+              const second = {
+                at: edge2.to, rides: 2, cost: first.cost + midWalk + edge2.ride,
+                prev: midWalk ? secondPrev : first,
+                walk: false, route: edge2.route, minutes: edge2.ride,
+                fromI: edge2.from, toI: edge2.to,
+                from: stops[mid] && stops[mid].name,
+                to: stops[edge2.to] && stops[edge2.to].name,
+              };
+              consider(second);
+            });
+          });
+        });
+      });
+    });
+    if (!bestHub) return null;
+    const edges = [];
+    for (let step = bestHub; step && step.prev; step = step.prev) {
+      edges.push({
+        walk: !!step.walk,
+        route: step.route || '',
+        minutes: step.minutes,
+        fromI: step.fromI,
+        toI: step.toI,
+        from: step.from || '',
+        to: step.to || '',
+      });
+    }
+    edges.reverse();
+    return {
+      minutes: bestHub.cost,
+      hubName: stops[bestHub.at] && stops[bestHub.at].name,
+      hubFold: stops[bestHub.at] && stops[bestHub.at].fold,
+      edges,
+    };
+  },
+  async cityRailJourney(apiKey, hass, origin, dest) {
+    let idx;
+    try { idx = await BkkLib.cityIndex(); } catch (_e) { return null; }
+    if (!idx || !idx.stops) return null;
+    let originStop = (idx.stops || []).find((st) => st && st.id === origin.id);
+    if (!originStop) {
+      originStop = BkkLib.volanMatchStop(idx, { id: origin.id, name: origin.name || '' }, null);
+    }
+    if (!originStop || originStop.op == null) return null;
+    const path = BkkLib.cityHubPath(idx, originStop);
+    if (!path || !path.edges.length) return null;
+    const op = (idx.ops || [])[originStop.op];
+    const cityName = op ? String(op.name).split(' — ')[0] : '';
+    let ready = Math.floor(Date.now() / 1000);
+    const legs = [];
+    for (let i = 0; i < path.edges.length; i++) {
+      const edge = path.edges[i];
+      if (edge.walk) {
+        const startMs = ready * 1000;
+        ready += edge.minutes * 60;
+        legs.push({
+          walk: true, minutes: edge.minutes, meters: edge.minutes * 80,
+          label: '', headsign: '', color: '', text: '',
+          from: edge.from, to: edge.to, waitMin: 0,
+          startMs, endMs: ready * 1000,
+        });
+        continue;
+      }
+      const timed = BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.route, ready);
+      const dep = timed ? timed.dep : ready;
+      const arr = timed ? timed.arr : ready + edge.minutes * 60;
+      const waitMin = Math.round((dep - ready) / 60);
+      legs.push({
+        walk: false,
+        minutes: Math.max(1, Math.round((arr - dep) / 60)),
+        meters: 0,
+        label: edge.route,
+        headsign: edge.to,
+        color: '0F6FC6',
+        text: 'FFFFFF',
+        from: edge.from,
+        to: edge.to,
+        waitMin: waitMin >= 1 ? waitMin : 0,
+        startMs: dep * 1000,
+        endMs: arr * 1000,
+      });
+      ready = arr;
+    }
+    const rail = await BkkLib.railAfterCity(apiKey, hass, cityName, path, dest, ready);
+    if (rail) {
+      legs.push(rail.walk);
+      legs.push(rail.train);
+      ready = rail.ready;
+    }
+    const waitMin = legs.reduce((sum, leg) => sum + (leg.waitMin || 0), 0);
+    const walkMin = legs.reduce((sum, leg) => sum + (leg.walk ? leg.minutes : 0), 0);
+    return {
+      durationMin: Math.max(1, Math.round((ready - Math.floor(Date.now() / 1000)) / 60)),
+      walkMin,
+      waitMin,
+      transfers: Math.max(0, legs.filter((leg) => !leg.walk).length - 1),
+      legs,
+    };
+  },
+  nextCityRide(idx, fromI, toI, route, readySec) {
+    let best = null;
+    for (let off = 0; off < 2; off++) {
+      const day = BkkLib.volanDay(off);
+      const trips = idx.t || [];
+      for (let n = 0; n < trips.length; n++) {
+        const t = trips[n];
+        if (String(t[1]) !== route) continue;
+        if (!BkkLib.volanServiceOk(idx, t[0], day.ymd, day.dow)) continue;
+        const ps = t[2] || [];
+        const ms = t[3] || [];
+        const o = ps.indexOf(fromI);
+        const d = ps.indexOf(toI);
+        if (o < 0 || d <= o) continue;
+        const dep = day.midnight + ms[o] * 60;
+        if (dep < readySec - 30) continue;
+        const arr = day.midnight + ms[d] * 60;
+        if (!best || dep < best.dep) best = { dep, arr };
+      }
+      if (best) break;
+    }
+    return best;
+  },
+  async railAfterCity(apiKey, hass, cityName, path, dest, readySec) {
+    const query = (cityName ? cityName + ' ' : '') + (path.hubName || '');
+    let station = null;
+    try {
+      const hits = await BkkLib.searchStops(apiKey, query, 'mav');
+      const want = path.hubFold || '';
+      station = (hits || []).find((hit) => {
+        const fold = BkkLib.fold(hit.name || '');
+        return want && (fold.indexOf(want) >= 0 || want.indexOf(fold) >= 0);
+      }) || (hits || [])[0] || null;
+    } catch (_e) {
+      station = null;
+    }
+    if (!station || !station.id) return null;
+    const walkStart = readySec;
+    const walkEnd = readySec + 6 * 60;
+    const walk = {
+      walk: true, minutes: 6, meters: 480, label: '', headsign: '',
+      color: '', text: '', from: path.hubName || '', to: station.name || '',
+      waitMin: 0, startMs: walkStart * 1000, endMs: walkEnd * 1000,
+    };
+    let train = null;
+    if (hass && dest && dest.id) {
+      try {
+        const rows = await BkkLib.elviraBetween(
+          hass, station.id, dest.id, 480, dest.name || '', { apiKey, originName: station.name || '' },
+        );
+        const next = (rows || []).filter((row) => Number(row.dep) >= walkEnd - 30)
+          .sort((a, b) => a.dep - b.dep)[0];
+        if (next && next.dep) {
+          const rideMin = Number(next.travel) > 0 ? Number(next.travel) : 0;
+          const arr = rideMin ? next.dep + rideMin * 60 : next.dep;
+          const waitMin = Math.round((next.dep - walkEnd) / 60);
+          train = {
+            walk: false,
+            minutes: rideMin || 1,
+            meters: 0,
+            label: String(next.label || next.trainNumber || ''),
+            headsign: dest.name || '',
+            color: '4477AA',
+            text: 'FFFFFF',
+            from: station.name || '',
+            to: dest.name || '',
+            waitMin: waitMin >= 1 ? waitMin : 0,
+            startMs: next.dep * 1000,
+            endMs: arr * 1000,
+          };
+        }
+      } catch (_e) { /* city legs still stand */ }
+    }
+    if (!train) return null;
+    return { walk, train, ready: Math.round(train.endMs / 1000) };
   },
   async probeApiKey(apiKey) {
     if (!apiKey) return { ok: false, code: 'errNoApiKey' };
@@ -3753,6 +4040,7 @@ class BKKPlannerCard extends BKKHopCard {
       cfg.apiKey,
       { id: cfg.stopId, name: cfg.stopName || '' },
       { id: cfg.destStopId || '', name: cfg.destName || '' },
+      this._hass,
     ).then((journey) => {
       this._journeyLoading = false;
       if (gen !== this._gen) return;

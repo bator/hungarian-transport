@@ -183,6 +183,26 @@ check('wait is the gap after arrival',
   JSON.stringify(shaped && { first: shaped.legs[0].waitMin, next: shaped.legs[2] && shaped.legs[2].waitMin, total: shaped.waitMin }));
 check('bkk id becomes a plan vertex',
   Lib.planPlaceVertex('Keleti', 'BKK_CSF01131') === 'Keleti::BKK:CSF01131');
+const cityIdx = {
+  c: [['1111111', '20000101', '20991231']],
+  stops: [
+    { i: 0, op: 0, name: 'Miskolci \u00c1llatkert', fold: Lib.fold('Miskolci \u00c1llatkert') },
+    { i: 1, op: 0, name: 'Fels\u0151-Majl\u00e1th', fold: Lib.fold('Fels\u0151-Majl\u00e1th') },
+    { i: 2, op: 0, name: 'Fels\u0151-Majl\u00e1th', fold: Lib.fold('Fels\u0151-Majl\u00e1th') },
+    { i: 3, op: 0, name: 'Tiszai p\u00e1lyaudvar', fold: Lib.fold('Tiszai p\u00e1lyaudvar') },
+  ],
+  t: [
+    [0, 'ZOO', [0, 1], [940, 947]],
+    [0, '1', [2, 3], [100, 122]],
+  ],
+};
+const hubPath = Lib.cityHubPath(cityIdx, cityIdx.stops[0]);
+check('city feed reaches the station in two rides',
+  hubPath && hubPath.hubName === 'Tiszai p\u00e1lyaudvar'
+  && hubPath.edges.some((edge) => edge.route === 'ZOO')
+  && hubPath.edges.some((edge) => edge.walk)
+  && hubPath.edges.some((edge) => edge.route === '1'),
+  JSON.stringify(hubPath && { hub: hubPath.hubName, minutes: hubPath.minutes, edges: hubPath.edges.map((e) => e.route || 'walk') }));
 
 let depCalls = 0;
 const origDep = Lib.departures;
