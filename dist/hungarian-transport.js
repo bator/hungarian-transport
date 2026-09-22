@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.3';
+const CARD_VERSION = '1.4.4-rev.4';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -2031,7 +2031,6 @@ const BkkLib = {
     }
   },
   async departures(apiKey, stopId, routeIds, dest, opts) {
-    const departT0 = Date.now();
     opts = opts || {};
     const mode = opts.mode || (opts.mav ? 'mav' : 'bkk');
     const horizon = clampMinutesAfter(opts.minutesAfter);
@@ -2187,17 +2186,11 @@ const BkkLib = {
             flags.forEach((ok, j) => { if (ok) picked.push(chunk[j]); });
           }
           const full = asFutar(picked.slice(0, maxRows));
-          // #region agent log
-          fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H1',runId:'post-fix',location:'departures',message:'trip-details done',data:{ms:Date.now()-departT0,rows:full.length},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
           if (typeof opts.onFutarUpdate === 'function') opts.onFutarUpdate(full);
         })();
         pending.catch(() => {});
       });
     }
-    // #region agent log
-    fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H1',runId:'post-fix',location:'departures',message:'timetable ready',data:{ms:Date.now()-departT0,sure:early.length,maybe:maybe.length},timestamp:Date.now()})}).catch(()=>{});
-    // #endregion
     return early;
     })() : Promise.resolve([]);
     const gtfsTask = (async () => {
@@ -3377,7 +3370,6 @@ class BKKHopCard extends HTMLElement {
           this._paint();
         };
         const cap = maxDepartureRows(cfg.minutesAfter);
-        const reloadT0 = Date.now();
         let earlyRows = [];
         let futarFull = null;
         let elviraRows = [];
@@ -3388,9 +3380,6 @@ class BKKHopCard extends HTMLElement {
             : earlyRows.slice();
           list = BkkLib.mergeVolanRows(elviraRows, list, cap);
           paintRows(list);
-          // #region agent log
-          fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H1',runId:'post-fix',location:'_reload',message:'painted',data:{ms:Date.now()-reloadT0,rows:list.length,futarFull:!!futarFull},timestamp:Date.now()})}).catch(()=>{});
-          // #endregion
         };
         let startThrough = null;
         const rows = await BkkLib.departures(
