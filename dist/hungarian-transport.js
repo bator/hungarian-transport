@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.1';
+const CARD_VERSION = '1.4.4-rev.2';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -2031,6 +2031,7 @@ const BkkLib = {
     }
   },
   async departures(apiKey, stopId, routeIds, dest, opts) {
+    const departT0 = Date.now();
     opts = opts || {};
     const mode = opts.mode || (opts.mav ? 'mav' : 'bkk');
     const horizon = clampMinutesAfter(opts.minutesAfter);
@@ -2155,39 +2156,47 @@ const BkkLib = {
     } catch (err) {
       if (mode !== 'volan' && mode !== 'all') throw err;
     }
-    let picked = candidates;
+    let sure = [];
+    let maybe = [];
     /* A matching headsign is the destination itself, so those rows skip the
-       per-trip request. Through-routes still need trip-details. */
+       per-trip request. Through-routes still need trip-details, but that
+       check must not hold the first timetable paint. */
     const headHitsDest = (row) => !!(dest && (
       BkkLib.nameEq(row.head, dest.name) || BkkLib.nameEq(row.head, dest.key)
     ));
     if (destKey && candidates.length) {
-      const sure = [];
-      const maybe = [];
       candidates.forEach((row) => {
         if (headHitsDest(row)) sure.push(row);
         else maybe.push(row);
       });
-      picked = sure.slice(0, maxRows);
-      for (let i = 0; i < maybe.length && picked.length < maxRows; i += 16) {
-        const chunk = maybe.slice(i, i + 16);
-        const flags = await Promise.all(chunk.map((row) => (
-          BkkLib.tripGoesTo(apiKey, cache, row.tripId, origin, destKey)
-        )));
-        flags.forEach((ok, j) => { if (ok) picked.push(chunk[j]); });
-      }
-      picked = picked.slice(0, maxRows);
+      sure = sure.slice(0, maxRows);
     } else {
-      picked = candidates.slice(0, maxRows);
+      sure = candidates.slice(0, maxRows);
     }
-    const futar = picked.map((row) => Object.assign({ travel: null }, row));
-    if (!opts.deferTravel) {
-      await Promise.all(futar.map(async (row) => {
-        if (row.travel != null || String(row.tripId || '').indexOf('gtfs:') === 0) return;
-        row.travel = await BkkLib.travelMin(apiKey, row.tripId, destKey, row.dep, origin, cache);
-      }));
+    const asFutar = (list) => list.map((row) => Object.assign({ travel: null }, row));
+    const early = asFutar(sure);
+    if (destKey && maybe.length && sure.length < maxRows) {
+      const pending = (async () => {
+        const picked = sure.slice();
+        for (let i = 0; i < maybe.length && picked.length < maxRows; i += 16) {
+          const chunk = maybe.slice(i, i + 16);
+          const flags = await Promise.all(chunk.map((row) => (
+            BkkLib.tripGoesTo(apiKey, cache, row.tripId, origin, destKey)
+          )));
+          flags.forEach((ok, j) => { if (ok) picked.push(chunk[j]); });
+        }
+        const full = asFutar(picked.slice(0, maxRows));
+        // #region agent log
+        fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H1',runId:'post-fix',location:'departures',message:'trip-details done',data:{ms:Date.now()-departT0,rows:full.length},timestamp:Date.now()})}).catch(()=>{});
+        // #endregion
+        if (typeof opts.onFutarUpdate === 'function') opts.onFutarUpdate(full);
+      })();
+      pending.catch(() => {});
     }
-    return futar;
+    // #region agent log
+    fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H1',runId:'post-fix',location:'departures',message:'timetable ready',data:{ms:Date.now()-departT0,sure:early.length,maybe:maybe.length},timestamp:Date.now()})}).catch(()=>{});
+    // #endregion
+    return early;
     })() : Promise.resolve([]);
     const gtfsTask = (async () => {
       let extraVolan = [];
@@ -3343,7 +3352,6 @@ class BKKHopCard extends HTMLElement {
     const run = async () => {
       if (gen !== this._gen) return;
       try {
-        let elviraRows = [];
         const wantElvira = (mode === 'mav' || mode === 'all') && this._hass;
         const elviraP = wantElvira
           ? BkkLib.elviraBetween(
@@ -3366,6 +3374,22 @@ class BKKHopCard extends HTMLElement {
           this._loading = false;
           this._paint();
         };
+        const cap = maxDepartureRows(cfg.minutesAfter);
+        const reloadT0 = Date.now();
+        let earlyRows = [];
+        let futarFull = null;
+        let elviraRows = [];
+        const publish = () => {
+          if (gen !== this._gen) return;
+          let list = futarFull
+            ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
+            : earlyRows.slice();
+          list = BkkLib.mergeVolanRows(elviraRows, list, cap);
+          paintRows(list);
+          // #region agent log
+          fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H1',runId:'post-fix',location:'_reload',message:'painted',data:{ms:Date.now()-reloadT0,rows:list.length,futarFull:!!futarFull},timestamp:Date.now()})}).catch(()=>{});
+          // #endregion
+        };
         const rows = await BkkLib.departures(
           cfg.apiKey, cfg.stopId, cfg.routeIds, {
             key: cfg.destKey,
@@ -3383,16 +3407,17 @@ class BKKHopCard extends HTMLElement {
             hass: this._hass,
             skipElvira: true,
             onPartial: paintRows,
+            onFutarUpdate: (full) => {
+              if (gen !== this._gen) return;
+              futarFull = full || [];
+              publish();
+            },
           },
         );
         if (gen !== this._gen) return;
+        earlyRows = rows || [];
         elviraRows = await elviraP;
-        const merged = BkkLib.mergeVolanRows(
-          rows || [],
-          elviraRows,
-          maxDepartureRows(cfg.minutesAfter),
-        );
-        paintRows(merged);
+        publish();
         this._syncOpenMap();
         const origin = { id: cfg.stopId, name: cfg.stopName || '' };
         await Promise.all([
