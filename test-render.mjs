@@ -217,6 +217,98 @@ check('journeyFromMotis keeps a non-empty MOTIS shape',
   && motisShaped.legs[1].shape[0][0] > 45 && motisShaped.legs[1].shape[0][0] < 49
   && motisShaped.legs[1].fromLat === 47.5 && motisShaped.legs[1].toLon === 19.06,
   JSON.stringify(motisShaped.legs[1].shape && motisShaped.legs[1].shape.slice(0, 2)));
+const hopSoon = new Date(Date.now() + 12 * 60000).toISOString();
+const hopSooner = new Date(Date.now() + 28 * 60000).toISOString();
+const hopLater = new Date(Date.now() + 40 * 60000).toISOString();
+const hopEnd = new Date(Date.now() + 20 * 60000).toISOString();
+const hopEnd2 = new Date(Date.now() + 36 * 60000).toISOString();
+const motisBoard = Lib.rowsFromMotis({
+  itineraries: [
+    {
+      transfers: 0,
+      duration: 480,
+      startTime: hopSoon,
+      legs: [
+        { mode: 'WALK', duration: 60, startTime: hopSoon, endTime: hopSoon },
+        {
+          mode: 'BUS', duration: 420, routeShortName: 'ZOO', tripId: 'hu-bkk_zoo',
+          routeColor: '009EE3', routeTextColor: 'FFFFFF', headsign: 'Fels\u0151-Majl\u00e1th',
+          startTime: hopSoon, endTime: hopEnd,
+          legGeometry: { points: '_mdryA_`vic@_pR_pR', precision: 6 },
+        },
+      ],
+    },
+    {
+      transfers: 0,
+      duration: 480,
+      startTime: hopSooner,
+      legs: [{
+        mode: 'BUS', duration: 480, routeShortName: '1', tripId: 'hu-bkk_1',
+        startTime: hopSooner, endTime: hopEnd2, headsign: 'Kelenf\u00f6ld',
+      }],
+    },
+    {
+      transfers: 1,
+      duration: 900,
+      startTime: hopLater,
+      legs: [
+        { mode: 'BUS', duration: 300, routeShortName: 'X', startTime: hopLater, endTime: hopLater },
+        { mode: 'SUBWAY', duration: 600, routeShortName: 'M4', startTime: hopLater, endTime: hopLater },
+      ],
+    },
+  ],
+}, { name: 'Kelenf\u00f6ld' }, 'all', 180);
+check('rowsFromMotis keeps two direct hops and drops a transfer',
+  motisBoard.length === 2 && motisBoard[0].label === 'ZOO' && motisBoard[1].label === '1'
+  && motisBoard[0].dep > 1e9 && motisBoard[0].dep < 1e12
+  && motisBoard[0].tripId.indexOf('motis:') === 0
+  && Array.isArray(motisBoard[0].shape) && motisBoard[0].shape.length >= 2
+  && motisBoard[0].shape[0][0] > 45 && motisBoard[0].shape[0][0] < 49,
+  JSON.stringify(motisBoard.map((r) => ({ label: r.label, dep: r.dep, tripId: r.tripId }))));
+const mavOnly = Lib.rowsFromMotis({
+  itineraries: [{
+    transfers: 0, duration: 420, startTime: hopSoon,
+    legs: [{
+      mode: 'BUS', duration: 420, routeShortName: 'ZOO', startTime: hopSoon, endTime: hopEnd,
+    }],
+  }],
+}, { name: 'X' }, 'mav', 180);
+check('rowsFromMotis mav mode drops a bus', mavOnly.length === 0, String(mavOnly.length));
+let motisFetch = 0;
+const origMotisFetch = Lib.transitousFetch;
+const origMotisPlace = Lib.transitousPlace;
+Lib.transitousPlace = async () => '47.5,19.05';
+Lib.transitousFetch = async () => {
+  motisFetch += 1;
+  return { itineraries: [] };
+};
+const kept = await Lib.fillTransitousIfEmpty(
+  [{ label: '7', dep: Math.floor(Date.now() / 1000) + 120, sched: Math.floor(Date.now() / 1000) + 120 }],
+  { name: 'A' }, { name: 'B' }, { minutesAfter: 60, mode: 'all' },
+);
+check('fillTransitousIfEmpty skips Transitous when rows exist',
+  motisFetch === 0 && kept.length === 1 && kept[0].label === '7',
+  String(motisFetch));
+Lib.transitousFetch = async () => {
+  motisFetch += 1;
+  return {
+    itineraries: [{
+      transfers: 0, duration: 420, startTime: hopSoon,
+      legs: [{
+        mode: 'BUS', duration: 420, routeShortName: 'ZOO', tripId: 'hu-bkk_zoo',
+        startTime: hopSoon, endTime: hopEnd, headsign: 'Kelenf\u00f6ld',
+        legGeometry: { points: '_mdryA_`vic@_pR_pR', precision: 6 },
+      }],
+    }],
+  };
+};
+const filled = await Lib.fillTransitousIfEmpty([], { name: 'A' }, { name: 'B' }, { minutesAfter: 180, mode: 'all' });
+check('fillTransitousIfEmpty uses MOTIS when the board is empty',
+  motisFetch === 1 && filled.length === 1 && filled[0].label === 'ZOO'
+  && filled[0].tripId.indexOf('motis:') === 0,
+  JSON.stringify(filled.map((r) => r.label)));
+Lib.transitousFetch = origMotisFetch;
+Lib.transitousPlace = origMotisPlace;
 check('BKK id prefers a hu-bkk Transitous hit',
   Lib.pickTransitousHit([
     { id: 'hu-volanbusz_1', name: 'Keleti p\u00e1lyaudvar', lat: 1, lon: 1 },
@@ -339,6 +431,8 @@ check('Kelenf\u00f6ld is a rail dest, Pap\u00edrgy\u00e1r is not',
 
 let depCalls = 0;
 const origDep = Lib.departures;
+const origFillMotis = Lib.fillTransitousIfEmpty;
+Lib.fillTransitousIfEmpty = async (rows) => rows || [];
 Lib.departures = async () => {
   depCalls += 1;
   await new Promise((r) => setTimeout(r, 40));
@@ -359,6 +453,7 @@ document.body.appendChild(c2);
 await new Promise((r) => setTimeout(r, 80));
 check('setConfig then attach fetches once', depCalls === 1, String(depCalls));
 Lib.departures = origDep;
+Lib.fillTransitousIfEmpty = origFillMotis;
 
 const pts = Lib.decodePolyline('_p~iF~ps|U');
 check('decodePolyline yields coordinates',
@@ -571,7 +666,9 @@ check('ELVIRA Tópart takes FUTAR GPS from BKK trip id train number', (() => {
     && merged[0].lat === 46.90843;
 })());
 check('FUTAR trip id from BKK_4541_108 is 4541', Lib.trainNumberFromTripId('BKK_4541_108') === '4541');
-check('elvira trip id is not a FUTAR trip', !Lib.isFutarTripId('elvira:2889849') && Lib.isFutarTripId('BKK_4541_108'));
+check('elvira trip id is not a FUTAR trip',
+  !Lib.isFutarTripId('elvira:2889849') && Lib.isFutarTripId('BKK_4541_108')
+  && !Lib.isFutarTripId('motis:hu-bkk_1'));
 check('MAV+dest keeps unlisted S30/S40/EC',
   Lib.keepFutarCandidate({ id: 'BKK_S30' }, new Set(['BKK_G43']), 'mav', 'székesfehérvár')
   && Lib.keepFutarCandidate({ id: 'BKK_S40' }, new Set(['BKK_G43']), 'mav', 'székesfehérvár')
