@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.5-rev.1';
+const CARD_VERSION = '1.4.5-rev.2';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -1328,6 +1328,12 @@ const BkkLib = {
       else if (startMs) prevEnd = startMs;
       const minutes = sec <= 0 ? 0 : Math.max(1, Math.round(sec / 60));
       if (minutes <= 0) return;
+      const from = leg.from || {};
+      const to = leg.to || {};
+      const fromLat = Number(from.lat);
+      const fromLon = Number(from.lon);
+      const toLat = Number(to.lat);
+      const toLon = Number(to.lon);
       legs.push({
         walk,
         minutes,
@@ -1336,9 +1342,14 @@ const BkkLib = {
         headsign: String(leg.headsign || ''),
         color: String(leg.routeColor || '').replace(/#/g, ''),
         text: String(leg.routeTextColor || '').replace(/#/g, ''),
-        from: String((leg.from || {}).name || ''),
-        to: String((leg.to || {}).name || ''),
+        from: String(from.name || ''),
+        to: String(to.name || ''),
         waitMin,
+        shape: BkkLib.decodePolyline(leg.legGeometry),
+        fromLat: Number.isFinite(fromLat) ? fromLat : undefined,
+        fromLon: Number.isFinite(fromLon) ? fromLon : undefined,
+        toLat: Number.isFinite(toLat) ? toLat : undefined,
+        toLon: Number.isFinite(toLon) ? toLon : undefined,
       });
     });
     if (!legs.length) return null;
@@ -1732,6 +1743,12 @@ const BkkLib = {
       }
     } catch (_e) {
       return [];
+    }
+    /* MOTIS v5 encodes at 10**precision (usually 6). A Google/FUTÁR string
+       is 1e5. If a precision-6 payload was decoded as 1e5, lat is ~475. */
+    if (coords.length && precision === 5
+        && (Math.abs(coords[0][0]) > 90 || Math.abs(coords[0][1]) > 180)) {
+      return BkkLib.decodePolyline({ points: encoded, precision: 6 });
     }
     if (coords.length <= 400) return coords;
     const out = [];
@@ -2358,6 +2375,10 @@ const BkkLib = {
       }
       const tid = String(row.tripId || '');
       if (tid && !/^(elvira:|gtfs:)/.test(tid) && !prevHasGps) prev.tripId = tid;
+      if ((!Array.isArray(prev.shape) || prev.shape.length < 2)
+          && Array.isArray(row.shape) && row.shape.length >= 2) {
+        prev.shape = row.shape;
+      }
       ['vehicleId', 'licensePlate', 'model', 'vehicleStatus', 'stopDistancePercent'].forEach((k) => {
         if ((prev[k] == null || prev[k] === '') && row[k] != null && row[k] !== '') prev[k] = row[k];
       });
@@ -3204,7 +3225,6 @@ const BkkLib = {
     const vehs = Array.isArray(vehicles) ? vehicles : [];
     list.forEach((row) => {
       if (!row) return;
-      if (Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon))) return;
       for (let i = 0; i < vehs.length; i++) {
         const v = vehs[i];
         if (!BkkLib.matchEmmaVehicle(row, v)) continue;
@@ -4037,6 +4057,32 @@ class BKKHopCard extends HTMLElement {
       + `<span class="ht-veh-dot-core"></span></div>`;
   }
 
+  _mapChromeCss() {
+    /* Leaflet CSS from unpkg can fail to apply (CSP / referrer). Without pane
+       positioning the SVG route is laid out below the tiles and clipped. */
+    return `
+        .ht-map-overlay{position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+        .ht-map-panel{width:min(720px,100%);height:min(70vh,560px);background:var(--card-background-color,#fff);border-radius:28px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.35);color:var(--primary-text-color,#222)}
+        .ht-map-head{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--divider-color,rgba(0,0,0,.08));font:600 14px/1.3 system-ui,sans-serif}
+        .ht-map-head .meta{flex:1;min-width:0}
+        .ht-map-head .sub{font-weight:400;font-size:12px;opacity:.75;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .ht-map-close{border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;opacity:.7;color:inherit}
+        .ht-map-canvas{flex:1;height:420px;min-height:420px;position:relative}
+        .ht-map-foot{padding:8px 12px;font:12px/1.35 system-ui,sans-serif;opacity:.85;border-top:1px solid var(--divider-color,rgba(0,0,0,.08))}
+        .ht-veh-dot{width:22px;height:22px;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(0,0,0,.45))}
+        .ht-veh-dot-core{width:14px;height:14px;border-radius:50%;background:var(--bg,#2E5EA8);border:2.5px solid #fff;box-sizing:border-box}
+        .ht-veh-dot-live .ht-veh-dot-core{width:16px;height:16px;box-shadow:0 0 0 3px color-mix(in srgb, var(--bg,#2E5EA8) 35%, transparent)}
+        .ht-veh-dot-est .ht-veh-dot-core{border-style:dashed;opacity:.95}
+        .ht-map-canvas .leaflet-container{width:100%;height:100%;min-height:420px;overflow:hidden}
+        .ht-map-canvas .leaflet-pane,.ht-map-canvas .leaflet-tile,.ht-map-canvas .leaflet-marker-icon,.ht-map-canvas .leaflet-marker-shadow,.ht-map-canvas .leaflet-tile-container,.ht-map-canvas .leaflet-pane>svg,.ht-map-canvas .leaflet-pane>canvas,.ht-map-canvas .leaflet-zoom-box,.ht-map-canvas .leaflet-image-layer,.ht-map-canvas .leaflet-layer{position:absolute;left:0;top:0}
+        .ht-map-canvas .leaflet-container svg{max-width:none!important;max-height:none!important}
+        .ht-map-canvas .leaflet-tile-pane{z-index:200}
+        .ht-map-canvas .leaflet-overlay-pane{z-index:400}
+        .ht-map-canvas .leaflet-marker-pane{z-index:600}
+        .ht-map-canvas .leaflet-overlay-pane svg,.ht-map-canvas .leaflet-overlay-pane canvas{position:absolute;left:0;top:0}
+    `;
+  }
+
   _mapFootText(row, hasShape, hasGps, estimated, lang) {
     const bits = [];
     if (hasShape) bits.push(t(lang, 'mapFullRoute'));
@@ -4111,20 +4157,7 @@ class BKKHopCard extends HTMLElement {
     const sub = this._mapTypeLabel(row.vehicle || row.type, lang)
       + (row.model ? ' \u00b7 ' + row.model : '');
     overlay.innerHTML = `
-      <style>
-        .ht-map-overlay{position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
-        .ht-map-panel{width:min(720px,100%);height:min(70vh,560px);background:var(--card-background-color,#fff);border-radius:28px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.35);color:var(--primary-text-color,#222)}
-        .ht-map-head{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--divider-color,rgba(0,0,0,.08));font:600 14px/1.3 system-ui,sans-serif}
-        .ht-map-head .meta{flex:1;min-width:0}
-        .ht-map-head .sub{font-weight:400;font-size:12px;opacity:.75;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-        .ht-map-close{border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;opacity:.7;color:inherit}
-        .ht-map-canvas{flex:1;height:420px;min-height:420px}
-        .ht-map-foot{padding:8px 12px;font:12px/1.35 system-ui,sans-serif;opacity:.85;border-top:1px solid var(--divider-color,rgba(0,0,0,.08))}
-        .ht-veh-dot{width:22px;height:22px;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(0,0,0,.45))}
-        .ht-veh-dot-core{width:14px;height:14px;border-radius:50%;background:var(--bg,#2E5EA8);border:2.5px solid #fff;box-sizing:border-box}
-        .ht-veh-dot-live .ht-veh-dot-core{width:16px;height:16px;box-shadow:0 0 0 3px color-mix(in srgb, var(--bg,#2E5EA8) 35%, transparent)}
-        .ht-veh-dot-est .ht-veh-dot-core{border-style:dashed;opacity:.95}
-      </style>
+      <style>${this._mapChromeCss()}</style>
       <div class="ht-map-panel" role="dialog" aria-modal="true">
         <div class="ht-map-head">
           <div class="meta">
@@ -4613,15 +4646,7 @@ class BKKPlannerCard extends BKKHopCard {
       (this._journey && this._journey.waitMin) || 0,
     ]);
     overlay.innerHTML = `
-      <style>
-        .ht-map-overlay{position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
-        .ht-map-panel{width:min(720px,100%);height:min(70vh,560px);background:var(--card-background-color,#fff);border-radius:28px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.35);color:var(--primary-text-color,#222)}
-        .ht-map-head{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--divider-color,rgba(0,0,0,.08));font:600 14px/1.3 system-ui,sans-serif}
-        .ht-map-head .meta{flex:1;min-width:0}
-        .ht-map-close{border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;opacity:.7;color:inherit}
-        .ht-map-canvas{flex:1;height:420px;min-height:420px}
-        .ht-map-foot{padding:8px 12px;font:12px/1.35 system-ui,sans-serif;opacity:.85;border-top:1px solid var(--divider-color,rgba(0,0,0,.08))}
-      </style>
+      <style>${this._mapChromeCss()}</style>
       <div class="ht-map-panel" role="dialog" aria-modal="true">
         <div class="ht-map-head">
           <div class="meta">${BkkLib.esc(title)}</div>

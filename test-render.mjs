@@ -178,6 +178,31 @@ check('fastest itinerary is kept', shaped && shaped.durationMin === 26 && shaped
   JSON.stringify(shaped && { durationMin: shaped.durationMin, walkMin: shaped.walkMin }));
 check('walk leg is minutes', shaped.legs[1].walk && shaped.legs[1].minutes === 1 && shaped.legs[1].meters === 85);
 check('ride leg keeps the route number', shaped.legs[0].label === '81' && shaped.legs[0].minutes === 13);
+const futarGeom = Lib.journeyFromPlan({
+  data: { entry: { plan: { itineraries: [{
+    duration: 780, walkTime: 0, transfers: 0, startTime: 1700000000000,
+    legs: [{
+      mode: 'SUBWAY', duration: 780000, distance: 4000, routeShortName: 'M4',
+      routeColor: '4CA22F',
+      from: { name: 'Keleti', lat: 47.500114, lon: 19.080723 },
+      to: { name: 'Kelenfold', lat: 47.464516, lon: 19.019617 },
+      startTime: 1700000000000, endTime: 1700000780000,
+      legGeometry: { points: '_mdryA_`vic@_pR_pR', length: 2 },
+    }],
+  }] } } },
+});
+check('journeyFromPlan keeps FUTAR legGeometry and stop coords',
+  Array.isArray(futarGeom && futarGeom.legs[0].shape) && futarGeom.legs[0].shape.length >= 2
+  && futarGeom.legs[0].fromLat === 47.500114 && futarGeom.legs[0].toLon === 19.019617,
+  JSON.stringify(futarGeom && futarGeom.legs[0] && {
+    n: futarGeom.legs[0].shape && futarGeom.legs[0].shape.length,
+    first: futarGeom.legs[0].shape && futarGeom.legs[0].shape[0],
+    fromLat: futarGeom.legs[0].fromLat,
+  }));
+const futarSegs = Lib.journeyMapSegments(futarGeom, {}, {});
+check('FUTAR planner map has a Hungary segment',
+  futarSegs.length >= 1 && futarSegs[0].shape[0][0] > 45 && futarSegs[0].shape[0][0] < 49,
+  JSON.stringify(futarSegs[0] && futarSegs[0].shape.slice(0, 2)));
 check('wait is the gap after arrival',
   shaped.legs[0].waitMin === 2 && shaped.legs[2].waitMin === 3 && shaped.waitMin === 5,
   JSON.stringify(shaped && { first: shaped.legs[0].waitMin, next: shaped.legs[2] && shaped.legs[2].waitMin, total: shaped.waitMin }));
@@ -465,11 +490,19 @@ check('decodePolyline honors MOTIS precision 6 near Hungary',
   && motisPts[0][0] > 46 && motisPts[0][0] < 49
   && motisPts[0][1] > 16 && motisPts[0][1] < 23,
   JSON.stringify(motisPts.slice(0, 2)));
-const scaledWrong = Lib.decodePolyline('_mdryA_`vic@_pR_pR');
+const scaledWrong = Lib.decodePolyline('_p~iF~ps|U');
 check('string polyline still uses Google 1e5',
   Array.isArray(scaledWrong) && scaledWrong.length >= 1
-  && (scaledWrong[0][0] < 40 || scaledWrong[0][0] > 50),
+  && scaledWrong[0][0] > 38 && scaledWrong[0][0] < 39
+  && scaledWrong[0][1] < -120,
   JSON.stringify(scaledWrong.slice(0, 1)));
+check('decodePolyline retries precision 6 when 1e5 is off the globe',
+  (() => {
+    const recovered = Lib.decodePolyline('_mdryA_`vic@_pR_pR');
+    return Array.isArray(recovered) && recovered.length >= 2
+      && recovered[0][0] > 46 && recovered[0][0] < 49
+      && recovered[0][1] > 16 && recovered[0][1] < 23;
+  })());
 const loc = Lib.vehicleLoc({ location: { lat: 47.5, lon: 19.05 } });
 check('vehicleLoc reads BKK location', loc.lat === 47.5 && loc.lon === 19.05, JSON.stringify(loc));
 check('basemap is OSM France without an API key',
@@ -752,6 +785,17 @@ check('applyEmmaPositions fills ELVIRA lat/lon from EMMA', (() => {
   }]);
   return rows[0].lat === 47.2290993 && rows[0].lon === 18.6682205 && rows[0].tripId === 'elvira:2890602';
 })());
+check('applyEmmaPositions replaces an existing FUTAR pin with EMMA', (() => {
+  const rows = [{
+    label: 'BALATON', trainNumber: '861', tripId: 'elvira:2890602',
+    lat: 47.5, lon: 19.05,
+  }];
+  Lib.applyEmmaPositions(rows, [{
+    lat: 47.2290993, lon: 18.6682205,
+    trip: { tripShortName: '861 BALATON InterCity' },
+  }]);
+  return rows[0].lat === 47.2290993 && rows[0].lon === 18.6682205;
+})());
 check('ELVIRA GPS is kept over FUTAR overlay', (() => {
   const dep = Math.floor(Date.now() / 1000) + 900;
   const merged = Lib.mergeVolanRows(
@@ -798,6 +842,12 @@ check('map skips FUTAR resolve when ELVIRA row already has GPS',
   !Lib.needsFutarMapResolve({ tripId: 'elvira:2890602', lat: 47.229, lon: 18.668 })
   && Lib.needsFutarMapResolve({ tripId: 'elvira:2890602' })
   && !Lib.needsFutarMapResolve({ tripId: 'BKK_861_74', lat: null, lon: null }));
+check('map-open skips motis geometry and still loads a FUTAR polyline',
+  src.includes("!/^motis:/i.test(String(tripId || ''))")
+  && src.includes('futarTripIdForRow')
+  && /if \(!geomTrip\) \{/.test(src));
+check('map overlay CSS pins Leaflet SVG over tiles',
+  src.includes('leaflet-overlay-pane') && src.includes('max-width:none!important'));
 check('coach route keys match SZ009 with 9',
   Lib.coachRouteKeys('SZ009').indexOf('9') >= 0
   && Lib.coachRouteKeys('9').indexOf('SZ9') >= 0);
