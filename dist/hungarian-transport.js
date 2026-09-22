@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.20';
+const CARD_VERSION = '1.4.2-rev.21';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -3082,6 +3082,16 @@ class BKKHopCard extends HTMLElement {
       this._showMapNotice(t(lang, 'mapNoData'));
       return;
     }
+    // #region agent log
+    fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H2',location:'_openVehicleMap',message:'open',data:{label:String(row.label||''),hasGps:hasGps,trip:String(tripId).slice(0,32)},timestamp:Date.now()})}).catch(()=>{});
+    if (this._hass && this._hass.callService) {
+      this._hass.callService('system_log', 'write', {
+        message: 'hungarian-transport map open ' + String(row.label || '') + ' gps=' + hasGps,
+        level: 'info',
+        logger: 'hungarian-transport',
+      }).catch(() => {});
+    }
+    // #endregion
     let L;
     try {
       L = await this._ensureLeaflet();
@@ -3095,13 +3105,13 @@ class BKKHopCard extends HTMLElement {
       + (row.model ? ' \u00b7 ' + row.model : '');
     overlay.innerHTML = `
       <style>
-        .ht-map-overlay{position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
-        .ht-map-panel{width:min(720px,100%);height:min(70vh,560px);background:var(--card-background-color,#fff);border-radius:12px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.35);color:var(--primary-text-color,#222)}
+        .ht-map-overlay{position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+        .ht-map-panel{width:min(720px,100%);height:min(70vh,560px);background:var(--card-background-color,#fff);border-radius:28px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.35);color:var(--primary-text-color,#222)}
         .ht-map-head{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--divider-color,rgba(0,0,0,.08));font:600 14px/1.3 system-ui,sans-serif}
         .ht-map-head .meta{flex:1;min-width:0}
         .ht-map-head .sub{font-weight:400;font-size:12px;opacity:.75;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
         .ht-map-close{border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;opacity:.7;color:inherit}
-        .ht-map-canvas{flex:1;min-height:240px}
+        .ht-map-canvas{flex:1;height:420px;min-height:420px}
         .ht-map-foot{padding:8px 12px;font:12px/1.35 system-ui,sans-serif;opacity:.85;border-top:1px solid var(--divider-color,rgba(0,0,0,.08))}
         .ht-veh-dot{width:22px;height:22px;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(0,0,0,.45))}
         .ht-veh-dot-core{width:14px;height:14px;border-radius:50%;background:var(--bg,#2E5EA8);border:2.5px solid #fff;box-sizing:border-box}
@@ -3120,7 +3130,7 @@ class BKKHopCard extends HTMLElement {
         <div class="ht-map-foot">${BkkLib.esc(t(lang, 'mapLoadingRoute'))}</div>
       </div>
     `;
-    document.body.appendChild(overlay);
+    (document.documentElement || document.body).appendChild(overlay);
     this._mapOverlay = overlay;
     this._openMapKey = this._mapKey(row);
     this._onMapKey = (ev) => {
@@ -3150,7 +3160,8 @@ class BKKHopCard extends HTMLElement {
       return;
     }
     this._map = map;
-    setTimeout(() => map.invalidateSize(), 40);
+    const resizeMap = () => { try { map.invalidateSize(); } catch (_e) { /* ignore */ } };
+    requestAnimationFrame(() => { resizeMap(); requestAnimationFrame(resizeMap); });
     const drawMarker = () => {
       if (!this._map || this._map !== map) return;
       const hereLat = Number(lat);
@@ -3473,86 +3484,75 @@ class BKKPlannerCard extends BKKHopCard {
     if (!wrap || !head) return;
     const style = document.createElement('style');
     style.textContent = `
-      ha-card.is-planner { overflow: hidden; }
-      ha-card.is-planner .wrap { padding: 0 0 8px; }
+      ha-card.is-planner { overflow: visible; }
+      ha-card.is-planner .wrap { padding: 8px 4px 12px; }
       ha-card.is-planner .head {
-        font-size: 22px; font-weight: 800; letter-spacing: -0.04em;
-        margin: 0; padding: 14px 16px 0; white-space: normal; line-height: 1.15;
+        font-size: 22px; font-weight: 700; letter-spacing: -0.02em;
+        margin: 0; padding: 8px 12px 0; white-space: normal; line-height: 1.2;
       }
       ha-card.is-planner .deps-label {
-        margin: 14px 16px 4px; font-size: 12px; font-weight: 800;
-        letter-spacing: 0.08em; text-transform: uppercase;
-        color: var(--primary-color);
+        margin: 16px 12px 4px; font-size: 12px; font-weight: 700;
+        letter-spacing: 0.04em; text-transform: uppercase;
+        color: var(--secondary-text-color);
       }
-      ha-card.is-planner .body { padding: 0 8px; }
-      ha-card.is-planner table { font-size: 14px; }
-      ha-card.is-planner td { padding: 11px 6px; }
-      ha-card.is-planner tr.row-clickable td { background: color-mix(in srgb, var(--primary-color) 5%, transparent); }
-      ha-card.is-planner tr.row-clickable + tr.row-clickable td { border-top: 6px solid var(--card-background-color, #111); }
+      ha-card.is-planner .body { padding: 0 4px; }
+      ha-card.is-planner table { font-size: 15px; }
+      ha-card.is-planner td { padding: 12px 6px; }
       ha-card.is-planner td.route .badge {
         min-width: 2.6em; text-align: center; border-radius: 8px;
-        padding: 4px 7px; font-weight: 800;
+        padding: 4px 8px; font-weight: 700;
       }
-      .plan { margin: 12px 12px 0; }
+      .plan { margin: 8px 8px 0; }
       .journey {
-        display: grid; grid-template-columns: 44px minmax(0, 1fr); column-gap: 4px;
-        padding: 12px; border-radius: 18px;
-        background:
-          linear-gradient(160deg, color-mix(in srgb, var(--primary-color) 28%, transparent), color-mix(in srgb, #f0b429 18%, transparent) 70%);
+        display: grid; grid-template-columns: 40px minmax(0, 1fr); column-gap: 8px;
+        padding: 14px; border-radius: var(--ha-card-border-radius, 16px);
+        background: var(--secondary-background-color, rgba(127,127,127,.12));
       }
-      .spine { display: flex; flex-direction: column; align-items: center; padding-top: 26px; }
-      .spine .dot { width: 16px; height: 16px; border-radius: 50%; box-sizing: border-box; flex: 0 0 auto; }
-      .spine .dot.from { background: #1f4e9a; box-shadow: 0 0 0 5px color-mix(in srgb, #1f4e9a 28%, transparent); }
-      .spine .dot.to { background: #f0b429; box-shadow: 0 0 0 5px color-mix(in srgb, #f0b429 35%, transparent); }
-      .spine .stem { width: 4px; flex: 1 1 16px; min-height: 16px; border-radius: 4px;
-        background: linear-gradient(#1f4e9a, #f0b429); }
+      .spine { display: flex; flex-direction: column; align-items: center; padding-top: 28px; }
+      .spine .dot { width: 14px; height: 14px; border-radius: 50%; box-sizing: border-box; flex: 0 0 auto; }
+      .spine .dot.from { background: var(--primary-color); }
+      .spine .dot.to { background: var(--card-background-color, #fff); border: 3px solid var(--primary-color); }
+      .spine .stem { width: 2px; flex: 1 1 16px; min-height: 16px; background: var(--divider-color); }
       .spine #pswap {
-        margin: 8px 0; border: 0; cursor: pointer; font: inherit; font-size: 12px; font-weight: 800;
-        border-radius: 999px; padding: 8px 8px;
-        background: #111; color: #fff;
-        box-shadow: 0 6px 16px rgba(0,0,0,.25);
+        margin: 8px 0; border: 0; cursor: pointer; font: inherit; font-size: 12px; font-weight: 700;
+        border-radius: 999px; padding: 8px 10px;
+        background: var(--primary-color); color: var(--text-primary-color, #fff);
       }
-      .place + .place { margin-top: 12px; }
-      .plan .label { font-size: 11px; font-weight: 800; letter-spacing: 0.08em;
-        color: var(--primary-text-color); margin-bottom: 6px; text-transform: uppercase; }
+      .place + .place { margin-top: 14px; }
+      .plan .label { font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+        color: var(--secondary-text-color); margin-bottom: 6px; }
       .plan input {
-        width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; font-weight: 650;
+        width: 100%; box-sizing: border-box; font: inherit; font-size: 16px;
         background: var(--card-background-color, #fff); color: var(--primary-text-color);
-        border: 0; border-radius: 14px; padding: 12px 14px;
-        box-shadow: 0 8px 20px rgba(0,0,0,.12);
+        border: 1px solid var(--divider-color); border-radius: 12px; padding: 14px 14px;
       }
-      .plan input:focus { outline: 3px solid color-mix(in srgb, #f0b429 70%, transparent); }
+      .plan input:focus { outline: 2px solid var(--primary-color); outline-offset: 1px; }
       .plan .horizon {
-        display: flex; align-items: center; gap: 8px; margin-top: 10px;
+        display: flex; align-items: center; gap: 8px; margin-top: 12px;
         padding: 10px 12px; border-radius: 16px;
-        background: #16324f; color: #fff;
+        background: var(--secondary-background-color, rgba(127,127,127,.12));
       }
-      .plan .horizon .label { margin: 0; flex: 0 0 auto; color: #f0b429; }
+      .plan .horizon .label { margin: 0; flex: 0 0 auto; }
       .plan .horizon .chips { flex: 1; margin: 0; flex-wrap: nowrap; overflow-x: auto; }
-      .plan .horizon .chip { color: #fff; border-color: rgba(255,255,255,.25); background: transparent; }
-      .plan .horizon .chip.on { background: #f0b429; color: #1c1404; border-color: transparent; }
       .plan #preset {
-        border: 0; background: transparent; color: #f0b429;
-        font: inherit; font-size: 13px; font-weight: 800; cursor: pointer; padding: 6px;
+        border: 0; background: transparent; color: var(--primary-color);
+        font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; padding: 6px;
       }
-      .plan .suggest { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+      .plan .suggest { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
       .plan .suggest.hidden { display: none; }
       .plan .suggest-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
       .plan .suggest-kind {
-        flex: 0 0 46px; font-size: 11px; font-weight: 800; letter-spacing: 0.04em;
-        text-transform: uppercase;
+        flex: 0 0 48px; font-size: 12px; font-weight: 700; color: var(--secondary-text-color);
       }
-      .plan .suggest-row[data-kind="bkk"] .suggest-kind { color: #7eb0ff; }
-      .plan .suggest-row[data-kind="volan"] .suggest-kind { color: #f0b429; }
-      .plan .suggest-row[data-kind="mav"] .suggest-kind { color: #9fd0c8; }
-      .plan .suggest-stops { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+      .plan .suggest-stops { display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
       .plan .suggest-stop {
-        border: 0; border-radius: 10px; cursor: pointer;
-        font: inherit; font-size: 13px; font-weight: 800; padding: 7px 10px;
+        border: 0; border-radius: 12px; cursor: pointer;
+        font: inherit; font-size: 14px; font-weight: 600; padding: 8px 12px;
+        background: var(--card-background-color, #fff); color: var(--primary-text-color);
       }
-      .plan .suggest-row[data-kind="bkk"] .suggest-stop { background: #1f4e9a; color: #fff; }
-      .plan .suggest-row[data-kind="volan"] .suggest-stop { background: #f0b429; color: #1c1404; }
-      .plan .suggest-row[data-kind="mav"] .suggest-stop { background: #0e7c66; color: #fff; }
+      .plan .suggest-row[data-kind="bkk"] .suggest-stop { box-shadow: inset 3px 0 0 var(--primary-color); }
+      .plan .suggest-row[data-kind="volan"] .suggest-stop { box-shadow: inset 3px 0 0 var(--warning-color, #f0b429); }
+      .plan .suggest-row[data-kind="mav"] .suggest-stop { box-shadow: inset 3px 0 0 var(--info-color, #03a9f4); }
       .plan .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
       .plan .chip {
         border: 1px solid var(--divider-color); background: transparent;
