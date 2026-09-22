@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.5-rev.2';
+const CARD_VERSION = '1.4.5-rev.3';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -1713,9 +1713,15 @@ const BkkLib = {
   },
   decodePolyline(encoded) {
     let precision = 5;
+    let fromObject = false;
+    let hadPrecision = false;
     if (encoded && typeof encoded === 'object') {
+      fromObject = true;
       const p = Number(encoded.precision);
-      if (Number.isFinite(p) && p >= 4 && p <= 7) precision = p;
+      if (Number.isFinite(p) && p >= 4 && p <= 7) {
+        precision = p;
+        hadPrecision = true;
+      }
       encoded = encoded.points || '';
     }
     if (!encoded || typeof encoded !== 'string') return [];
@@ -1745,10 +1751,18 @@ const BkkLib = {
       return [];
     }
     /* MOTIS v5 encodes at 10**precision (usually 6). A Google/FUTÁR string
-       is 1e5. If a precision-6 payload was decoded as 1e5, lat is ~475. */
+       is 1e5. If a precision-6 payload was decoded as 1e5, lat is ~475.
+       FUTÁR `{points, length}` has no precision field and must stay 1e5 —
+       retrying those as 6 shrinks Hungary to ~4.7. */
     if (coords.length && precision === 5
         && (Math.abs(coords[0][0]) > 90 || Math.abs(coords[0][1]) > 180)) {
-      return BkkLib.decodePolyline({ points: encoded, precision: 6 });
+      if (!fromObject || hadPrecision) {
+        return BkkLib.decodePolyline({ points: encoded, precision: 6 });
+      }
+      return [];
+    }
+    if (coords.length && (Math.abs(coords[0][0]) > 90 || Math.abs(coords[0][1]) > 180)) {
+      return [];
     }
     if (coords.length <= 400) return coords;
     const out = [];
@@ -1767,8 +1781,83 @@ const BkkLib = {
   finiteLatLon(lat, lon) {
     const a = Number(lat);
     const b = Number(lon);
-    if (Number.isFinite(a) && Number.isFinite(b)) return [a, b];
-    return null;
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+    if (Math.abs(a) > 90 || Math.abs(b) > 180) return null;
+    return [a, b];
+  },
+  validMapShape(shape) {
+    if (!Array.isArray(shape)) return [];
+    return shape.map((pt) => {
+      if (!Array.isArray(pt) || pt.length < 2) return null;
+      return BkkLib.finiteLatLon(pt[0], pt[1]);
+    }).filter(Boolean);
+  },
+  sliceShapeMeters(shape, fromM, toM) {
+    const pts = BkkLib.validMapShape(shape);
+    if (pts.length < 2) return pts;
+    let a = Number(fromM);
+    let b = Number(toM);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) return pts;
+    if (b < a) {
+      const tmp = a;
+      a = b;
+      b = tmp;
+    }
+    const out = [];
+    const push = (pt) => {
+      if (!pt) return;
+      const last = out[out.length - 1];
+      if (last && last[0] === pt[0] && last[1] === pt[1]) return;
+      out.push(pt);
+    };
+    push(BkkLib.pointAlongShape(pts, a));
+    let dist = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const next = dist + BkkLib.haversineMeters(pts[i - 1], pts[i]);
+      if (next > a && next < b) push(pts[i]);
+      dist = next;
+    }
+    push(BkkLib.pointAlongShape(pts, b));
+    return out.length >= 2 ? out : pts;
+  },
+  clipShapeToHop(shape, details, origin, dest) {
+    const pts = BkkLib.validMapShape(shape);
+    if (pts.length < 2) return pts;
+    const sts = (details && details.sts) || [];
+    const stops = (details && details.stops) || {};
+    if (!sts.length || !origin) return pts;
+    let oidx = BkkLib.originIndex(sts, stops, origin);
+    if (oidx < 0) return pts;
+    let didx = -1;
+    const destObj = dest && (dest.id || dest.key || dest.name)
+      ? { id: dest.id, name: dest.key || dest.name }
+      : null;
+    if (destObj) {
+      for (let i = Math.max(0, oidx) + 1; i < sts.length; i++) {
+        const stop = Object.assign({ id: sts[i].stopId }, stops[sts[i].stopId] || {});
+        if (BkkLib.stopMatchesOrigin(stop, destObj)) {
+          didx = i;
+          break;
+        }
+      }
+    }
+    if (didx < 0) didx = sts.length - 1;
+    if (oidx <= 0 && didx >= sts.length - 1) return pts;
+    const d0 = Number(sts[oidx].shapeDistTraveled);
+    const d1 = Number(sts[didx].shapeDistTraveled);
+    if (!Number.isFinite(d0) || !Number.isFinite(d1) || d1 === d0) return pts;
+    let polyLen = 0;
+    for (let i = 1; i < pts.length; i++) {
+      polyLen += BkkLib.haversineMeters(pts[i - 1], pts[i]);
+    }
+    const maxOfficial = Math.max(0, ...sts.map((st) => {
+      const n = Number(st.shapeDistTraveled);
+      return Number.isFinite(n) ? n : 0;
+    }));
+    if (!(polyLen > 0) || !(maxOfficial > 0)) return pts;
+    const fromM = (Math.min(d0, d1) / maxOfficial) * polyLen;
+    const toM = (Math.max(d0, d1) / maxOfficial) * polyLen;
+    return BkkLib.sliceShapeMeters(pts, fromM, toM);
   },
   rideMapColor(leg) {
     const hex = String((leg && leg.color) || '').replace('#', '');
@@ -1788,10 +1877,7 @@ const BkkLib = {
       });
     };
     ((journey && journey.legs) || []).forEach((leg) => {
-      let shape = Array.isArray(leg.shape)
-        ? leg.shape.filter((pt) => Array.isArray(pt)
-          && Number.isFinite(pt[0]) && Number.isFinite(pt[1]))
-        : [];
+      let shape = BkkLib.validMapShape(leg.shape);
       if (shape.length < 2) {
         const a = BkkLib.finiteLatLon(leg.fromLat, leg.fromLon);
         const b = BkkLib.finiteLatLon(leg.toLat, leg.toLon);
@@ -4135,8 +4221,7 @@ class BKKHopCard extends HTMLElement {
     let shape = [];
     let hasShape = false;
     if (Array.isArray(row.shape) && row.shape.length >= 2) {
-      shape = row.shape.filter((pt) => Array.isArray(pt)
-        && Number.isFinite(pt[0]) && Number.isFinite(pt[1]));
+      shape = BkkLib.validMapShape(row.shape);
       hasShape = shape.length >= 2;
     }
     let positionEstimated = false;
@@ -4227,7 +4312,7 @@ class BKKHopCard extends HTMLElement {
     if (!hasShape && /^gtfs:/i.test(String(row.tripId || '')) && this._hass) {
       try {
         const points = await BkkLib.coachShape(this._hass, row.label, row.headsign || '');
-        shape = BkkLib.decodePolyline(points);
+        shape = BkkLib.validMapShape(BkkLib.decodePolyline(points));
         hasShape = shape.length >= 2;
       } catch (_e) { /* timetable row still shows the live dot */ }
     }
@@ -4250,17 +4335,34 @@ class BKKHopCard extends HTMLElement {
       if (BkkLib.isFutarTripId(geomTrip)) {
         try {
           details = await BkkLib.tripDetails(cfg.apiKey, this._tripCache || {}, geomTrip);
-          shape = BkkLib.decodePolyline((details && details.polyline) || '');
-          hasShape = shape.length >= 2;
-          if (!hasShape) foot.textContent = t(lang, 'mapNoGeometry');
+          const fullShape = BkkLib.validMapShape(
+            BkkLib.decodePolyline((details && details.polyline) || ''),
+          );
           if (!hasGps && details && details.vehicle) {
             const loc = BkkLib.vehicleLoc(details.vehicle);
-            if (Number.isFinite(loc.lat) && Number.isFinite(loc.lon)) {
+            if (Number.isFinite(loc.lat) && Number.isFinite(loc.lon)
+                && Math.abs(loc.lat) <= 90 && Math.abs(loc.lon) <= 180) {
               lat = loc.lat;
               lon = loc.lon;
               hasGps = true;
             }
           }
+          if (!hasGps && fullShape.length >= 2) {
+            const est = BkkLib.estimatePositionFromSchedule(fullShape, details.sts, details.nowSec);
+            if (est && Number.isFinite(est[0]) && Number.isFinite(est[1])) {
+              lat = est[0];
+              lon = est[1];
+              positionEstimated = true;
+            }
+          }
+          shape = BkkLib.clipShapeToHop(
+            fullShape,
+            details,
+            { id: cfg.stopId, name: cfg.stopName },
+            { id: cfg.destStopId, key: cfg.destKey, name: cfg.destName },
+          );
+          hasShape = shape.length >= 2;
+          if (!hasShape) foot.textContent = t(lang, 'mapNoGeometry');
         } catch (err) {
           foot.textContent = t(lang, 'mapRouteFail', err && err.message ? err.message : err);
         }
@@ -4270,15 +4372,8 @@ class BKKHopCard extends HTMLElement {
       this._openingMap = '';
       return;
     }
-    if (!hasGps && hasShape && details) {
-      const est = BkkLib.estimatePositionFromSchedule(shape, details.sts, details.nowSec);
-      if (est && Number.isFinite(est[0]) && Number.isFinite(est[1])) {
-        lat = est[0];
-        lon = est[1];
-        positionEstimated = true;
-      }
-    }
-    const hasPosition = Number.isFinite(lat) && Number.isFinite(lon);
+    const hasPosition = Number.isFinite(lat) && Number.isFinite(lon)
+      && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
     const hex = String(row.color || '').replace('#', '');
     const routeColor = /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(hex) ? '#' + hex : '#2E5EA8';
     if (hasShape) {

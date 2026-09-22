@@ -187,7 +187,7 @@ const futarGeom = Lib.journeyFromPlan({
       from: { name: 'Keleti', lat: 47.500114, lon: 19.080723 },
       to: { name: 'Kelenfold', lat: 47.464516, lon: 19.019617 },
       startTime: 1700000000000, endTime: 1700000780000,
-      legGeometry: { points: '_mdryA_`vic@_pR_pR', length: 2 },
+      legGeometry: { points: 'uj|`HoumsBl}Ez|J', length: 2 },
     }],
   }] } } },
 });
@@ -503,6 +503,21 @@ check('decodePolyline retries precision 6 when 1e5 is off the globe',
       && recovered[0][0] > 46 && recovered[0][0] < 49
       && recovered[0][1] > 16 && recovered[0][1] < 23;
   })());
+check('FUTAR {points,length} is not retried as MOTIS precision 6',
+  (() => {
+    const pts = Lib.decodePolyline({ points: '_mdryA_`vic@_pR_pR', length: 2 });
+    return !pts.length;
+  })());
+check('FUTAR Google object stays in Hungary at 1e5',
+  (() => {
+    const pts = Lib.decodePolyline({ points: 'uj|`HoumsBl}Ez|J', length: 2 });
+    return Array.isArray(pts) && pts.length >= 2
+      && pts[0][0] > 46 && pts[0][0] < 49
+      && pts[0][1] > 16 && pts[0][1] < 23;
+  })());
+check('finiteLatLon rejects off-globe MOTIS-as-1e5 coords',
+  Lib.finiteLatLon(475.18, 190.78) == null
+  && Lib.finiteLatLon(47.5, 19.05) != null);
 const loc = Lib.vehicleLoc({ location: { lat: 47.5, lon: 19.05 } });
 check('vehicleLoc reads BKK location', loc.lat === 47.5 && loc.lon === 19.05, JSON.stringify(loc));
 check('basemap is OSM France without an API key',
@@ -948,6 +963,37 @@ check('ELVIRA S30 takes FUTAR trip id by train number', (() => {
 })());
 check('decodePolyline accepts a FUTAR polyline object',
   Lib.decodePolyline({ points: '_p~iF~ps|U' }).length >= 1);
+check('clipShapeToHop drops the prefix before origin', (() => {
+  const shape = [
+    [47.463629, 19.149626],
+    [47.468643, 19.087938],
+    [47.464321, 19.020634],
+    [47.183082, 18.423996],
+  ];
+  const details = {
+    sts: [
+      { stopId: 'BKK_KK', shapeDistTraveled: 0 },
+      { stopId: 'BKK_FERENC', shapeDistTraveled: 5499 },
+      { stopId: 'BKK_005501024', shapeDistTraveled: 11301 },
+      { stopId: 'BKK_005503269', shapeDistTraveled: 74479 },
+    ],
+    stops: {
+      BKK_KK: { id: 'BKK_KK', name: 'Kőbánya-Kispest', lat: 47.463629, lon: 19.149626 },
+      BKK_FERENC: { id: 'BKK_FERENC', name: 'Ferencváros', lat: 47.468643, lon: 19.087938 },
+      BKK_005501024: { id: 'BKK_005501024', name: 'Budapest-Kelenföld', lat: 47.464321, lon: 19.020634 },
+      BKK_005503269: { id: 'BKK_005503269', name: 'Székesfehérvár', lat: 47.183082, lon: 18.423996 },
+    },
+  };
+  const clipped = Lib.clipShapeToHop(
+    shape,
+    details,
+    { id: 'BKK_005501024', name: 'Budapest-Kelenföld' },
+    { id: 'BKK_005503269', key: 'székesfehérvár', name: 'Székesfehérvár' },
+  );
+  if (!clipped || clipped.length < 2) return false;
+  const lons = clipped.map((pt) => pt[1]);
+  return Math.max(...lons) < 19.08 && clipped[0][1] < 19.05;
+})());
 check('planner dest search prefers a 9-digit MAV id over a volan id',
   Lib.destHitsForQuery(
     [],
