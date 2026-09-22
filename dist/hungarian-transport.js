@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.14';
+const CARD_VERSION = '1.4.4-rev.15';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -655,9 +655,15 @@ const BkkLib = {
       const prev = seen.get(key);
       if (prev) {
         if (BkkLib.elviraStationCode(id) && !BkkLib.elviraStationCode(prev.id)) prev.id = id;
+        if (Number.isFinite(Number(d.lat)) && !Number.isFinite(Number(prev.lat))) {
+          prev.lat = Number(d.lat);
+          prev.lon = Number(d.lon);
+        }
         return;
       }
       const row = { key: key, name: d.name, id: id };
+      if (Number.isFinite(Number(d.lat))) row.lat = Number(d.lat);
+      if (Number.isFinite(Number(d.lon))) row.lon = Number(d.lon);
       seen.set(key, row);
       out.push(row);
     };
@@ -1000,6 +1006,41 @@ const BkkLib = {
       text: q, type: 'STOP', language: 'hu',
     });
     return Array.isArray(data) ? data : [];
+  },
+  transitousInHungary(hit) {
+    if (!hit) return false;
+    if (/^hu-/i.test(String(hit.id || ''))) return true;
+    return (hit.areas || []).some((a) => /magyarorsz/i.test((a && a.name) || ''));
+  },
+  transitousHitToStop(hit) {
+    if (!hit || !hit.name) return null;
+    const lat = Number(hit.lat);
+    const lon = Number(hit.lon);
+    const areas = hit.areas || [];
+    const city = (areas.find((a) => Number(a.adminLevel) === 8) || areas.find((a) => a.unique) || {}).name || '';
+    return {
+      id: String(hit.id || ''),
+      name: hit.name,
+      label: city ? (hit.name + ' (' + city + ')') : hit.name,
+      lat: Number.isFinite(lat) ? lat : undefined,
+      lon: Number.isFinite(lon) ? lon : undefined,
+    };
+  },
+  async searchStopsTransitous(q) {
+    const hits = await BkkLib.transitousGeocode(q);
+    return (hits || [])
+      .filter((hit) => BkkLib.transitousInHungary(hit))
+      .map((hit) => BkkLib.transitousHitToStop(hit))
+      .filter((s) => s && s.id)
+      .slice(0, 20);
+  },
+  async searchPlannerStops(apiKey, q) {
+    try {
+      const motis = await BkkLib.searchStopsTransitous(q);
+      if (motis.length) return motis;
+    } catch (_e) { /* BKK search is the fallback */ }
+    if (!apiKey) return [];
+    return BkkLib.searchStops(apiKey, q, 'all');
   },
   pickTransitousHit(hits, stop) {
     const list = Array.isArray(hits) ? hits : [];
@@ -4269,8 +4310,8 @@ class BKKPlannerCard extends BKKHopCard {
     this._journeyLoading = true;
     BkkLib.planJourney(
       cfg.apiKey,
-      { id: cfg.stopId, name: cfg.stopName || '' },
-      { id: cfg.destStopId || '', name: cfg.destName || '' },
+      { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon },
+      { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
       this._hass,
     ).then((journey) => {
       this._journeyLoading = false;
@@ -4639,9 +4680,13 @@ class BKKPlannerCard extends BKKHopCard {
     this._config = Object.assign({}, cfg, {
       stopId: newOriginId,
       stopName: newOriginName,
+      stopLat: cfg.destLat,
+      stopLon: cfg.destLon,
       destKey: BkkLib.stationKey(cfg.stopName || ''),
       destName: cfg.stopName || '',
       destStopId: cfg.stopId,
+      destLat: cfg.stopLat,
+      destLon: cfg.stopLon,
       routeIds: [],
     });
     this._dests = [];
@@ -4694,10 +4739,10 @@ class BKKPlannerCard extends BKKHopCard {
       this._err = '';
       if (!this._config.apiKey) await this._fillKey();
       if (seq !== this._searchSeq) return;
-      const hits = await BkkLib.searchStops(this._config.apiKey, q, 'all');
+      const hits = await BkkLib.searchPlannerStops(this._config.apiKey, q);
       if (seq !== this._searchSeq) return;
       if (!hits.length) {
-        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'mode').bkk.empty) + '</span>';
+        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'mode').all.empty) + '</span>';
         return;
       }
       box.innerHTML = hits.map((s) => (
@@ -4720,9 +4765,13 @@ class BKKPlannerCard extends BKKHopCard {
     this._config = Object.assign({}, this._config, {
       stopId: stop.id,
       stopName: stop.name,
+      stopLat: stop.lat,
+      stopLon: stop.lon,
       destKey: '',
       destName: '',
       destStopId: '',
+      destLat: undefined,
+      destLon: undefined,
       routeIds: [],
     });
     this._dests = [];
@@ -4802,14 +4851,14 @@ class BKKPlannerCard extends BKKHopCard {
     const seq = ++this._destSearchSeq;
     try {
       if (!this._config.apiKey) await this._fillKey();
-      const extras = await BkkLib.searchStops(this._config.apiKey, q, 'all');
+      const extras = await BkkLib.searchPlannerStops(this._config.apiKey, q);
       if (seq !== this._destSearchSeq) return;
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
       if (!hits.length && this._destsLoading) {
         box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'destLoading')) + '</span>';
         return;
       }
-      this._renderDestHits(hits, t(lang, 'mode').bkk.destEmpty);
+      this._renderDestHits(hits, t(lang, 'mode').all.empty);
     } catch (err) {
       if (seq !== this._destSearchSeq) return;
       this._showErr(err);
@@ -4852,11 +4901,11 @@ class BKKPlannerCard extends BKKHopCard {
       return;
     }
     if (!this._dests.length) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'mode').bkk.destNone) + '</span>';
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerDestPlaceholder')) + '</span>';
       return;
     }
     const hits = BkkLib.destHitsForQuery(this._dests, q, []);
-    this._renderDestHits(hits, t(lang, 'mode').bkk.destEmpty);
+    this._renderDestHits(hits, t(lang, 'mode').all.destEmpty);
   }
 
   _pickDest(dest) {
@@ -4864,6 +4913,8 @@ class BKKPlannerCard extends BKKHopCard {
       destKey: dest.key,
       destName: dest.name,
       destStopId: dest.id || '',
+      destLat: dest.lat,
+      destLon: dest.lon,
       routeIds: this._idsForDest(dest.key),
     });
     const dq = this._planEl('pdq');

@@ -223,6 +223,37 @@ check('Kelenf\u00f6ld MAV id prefers rail over coach station',
     { id: 'hu-volanbusz_773538', name: 'Budapest, Kelenf\u00f6ld aut.\u00e1ll.', lat: 47.46, lon: 19.02 },
     { id: 'hu-bkk_CS056215', name: 'Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s', lat: 47.46, lon: 19.02 },
   ], { id: 'BKK_005501024', name: 'Kelenf\u00f6ld' }).id === 'hu-bkk_CS056215');
+check('Transitous keeps Hungarian stops',
+  Lib.transitousInHungary({ id: 'hu-mvk_1', name: 'X' })
+  && !Lib.transitousInHungary({ id: 'de-db_1', name: 'Berlin' }));
+const origGeo = Lib.transitousGeocode;
+const origSearchStops = Lib.searchStops;
+Lib.transitousGeocode = async () => [{
+  id: 'hu-mvk_643641', name: 'Miskolci \u00c1llatkert', lat: 48.12, lon: 20.65,
+  areas: [{ name: 'Miskolc', adminLevel: 8, unique: true }],
+}];
+const plannerHits = await Lib.searchPlannerStops('k', '\u00c1llatkert');
+check('planner search prefers Transitous',
+  plannerHits.length === 1 && plannerHits[0].id === 'hu-mvk_643641'
+  && plannerHits[0].lat === 48.12 && plannerHits[0].label.indexOf('Miskolc') >= 0,
+  JSON.stringify(plannerHits[0]));
+Lib.transitousGeocode = async () => [];
+let bkkSearch = 0;
+Lib.searchStops = async () => {
+  bkkSearch += 1;
+  return [{ id: 'BKK_X', name: 'Fallback' }];
+};
+const fallbackHits = await Lib.searchPlannerStops('k', 'zzzz');
+check('empty Transitous search falls back to BKK',
+  fallbackHits[0] && fallbackHits[0].id === 'BKK_X' && bkkSearch === 1);
+Lib.transitousGeocode = origGeo;
+Lib.searchStops = origSearchStops;
+check('dest extras keep Transitous coordinates', (() => {
+  const rows = Lib.destHitsForQuery([], 'kelen', [{
+    id: 'hu-bkk_CS056215', name: 'Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s', lat: 47.46, lon: 19.02,
+  }]);
+  return rows[0] && rows[0].lat === 47.46 && rows[0].lon === 19.02;
+})());
 
 const origPlace = Lib.planPlace;
 const origFetch = Lib.fetch;
@@ -377,6 +408,16 @@ check('planner has origin and destination fields',
   planHtml.includes('id="pq"') && planHtml.includes('id="pdq"') && !planHtml.includes('id="routes"'));
 check('planner has look-ahead chips', planHtml.includes('id="pmin"') && planHtml.includes('Meddig'));
 check('planner has swap button', planHtml.includes('id="pswap"') && planHtml.includes('Csere'));
+const origPlannerSearch = Lib.searchPlannerStops;
+Lib.searchPlannerStops = async () => [];
+plan.setConfig({ language: 'en' });
+await plan._searchOrigin('zzzzzz');
+const originHint = (plan.shadowRoot.querySelector('#phits') || {}).innerHTML || '';
+check('planner empty origin is not a BKK-only message',
+  /No stop matches this search/i.test(originHint) && !/No BKK stop/i.test(originHint),
+  originHint.slice(0, 160));
+Lib.searchPlannerStops = origPlannerSearch;
+plan.setConfig({ language: 'hu' });
 plan._rows = [];
 plan._loading = false;
 plan._journey = shaped;
