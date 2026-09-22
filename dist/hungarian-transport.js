@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.2-rev.23';
+const CARD_VERSION = '1.4.2-rev.24';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -2036,6 +2036,7 @@ const BkkLib = {
     const horizon = clampMinutesAfter(opts.minutesAfter);
     if (mode === 'helyi') {
       const cityRows = await BkkLib.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
+      if (opts.deferGps) return cityRows;
       return BkkLib.attachCoachGps(opts.hass, cityRows);
     }
     const cache = opts.cache || {};
@@ -2060,8 +2061,9 @@ const BkkLib = {
         rows = BkkLib.mergeVolanRows(rows, extra, maxRows);
       } catch (_e) { /* ELVIRA optional; FUTÁR/GTFS rows still show */ }
     }
+    const queryFutar = mode === 'bkk' || mode === 'mav' || /^BKK_/i.test(String(stopId || ''));
+    const futarTask = queryFutar ? (async () => {
     let candidates = [];
-    let destDirected = false;
     try {
       let poles = [];
       const poleRoutes = (destKey && (mode === 'bkk' || mode === 'mav' || mode === 'all'))
@@ -2071,7 +2073,6 @@ const BkkLib = {
         poles = destKey
           ? await BkkLib.originPoles(apiKey, cache, origin, poleRoutes, destKey)
           : [];
-        destDirected = poles.length > 0;
       } catch (_e) {
         poles = [];
       }
@@ -2155,12 +2156,21 @@ const BkkLib = {
       if (mode !== 'volan' && mode !== 'all') throw err;
     }
     let picked = candidates;
-    /* destDirected only picks poles. A parent rail stop still lists both
-       directions, so every trip must be dest-checked when destKey is set. */
+    /* A matching headsign is the destination itself, so those rows skip the
+       per-trip request. Through-routes still need trip-details. */
+    const headHitsDest = (row) => !!(dest && (
+      BkkLib.nameEq(row.head, dest.name) || BkkLib.nameEq(row.head, dest.key)
+    ));
     if (destKey && candidates.length) {
-      picked = [];
-      for (let i = 0; i < candidates.length && picked.length < maxRows; i += 16) {
-        const chunk = candidates.slice(i, i + 16);
+      const sure = [];
+      const maybe = [];
+      candidates.forEach((row) => {
+        if (headHitsDest(row)) sure.push(row);
+        else maybe.push(row);
+      });
+      picked = sure.slice(0, maxRows);
+      for (let i = 0; i < maybe.length && picked.length < maxRows; i += 16) {
+        const chunk = maybe.slice(i, i + 16);
         const flags = await Promise.all(chunk.map((row) => (
           BkkLib.tripGoesTo(apiKey, cache, row.tripId, origin, destKey)
         )));
@@ -2177,28 +2187,42 @@ const BkkLib = {
         row.travel = await BkkLib.travelMin(apiKey, row.tripId, destKey, row.dep, origin, cache);
       }));
     }
-    rows = BkkLib.mergeVolanRows(futar, rows, maxRows);
-    if (mode === 'volan' || mode === 'all') {
-      try {
-        let extra = await BkkLib.volanDepartures(stopId, dest, opts.originName, horizon);
-        if (mode === 'all' && selected.size) {
-          extra = extra.filter((row) => selected.has('gtfs:' + row.label));
+    return futar;
+    })() : Promise.resolve([]);
+    const gtfsTask = (async () => {
+      let extraVolan = [];
+      let extraCity = [];
+      if (mode === 'volan' || mode === 'all') {
+        try {
+          extraVolan = await BkkLib.volanDepartures(stopId, dest, opts.originName, horizon);
+          if (mode === 'all' && selected.size) {
+            extraVolan = extraVolan.filter((row) => selected.has('gtfs:' + row.label));
+          }
+        } catch (err) {
+          if (mode !== 'all') throw err;
         }
-        rows = BkkLib.mergeVolanRows(extra, rows, maxRows);
-      } catch (err) {
-        if (mode !== 'all' && !rows.length) throw err;
       }
-    }
-    if (mode === 'all') {
-      try {
-        const idx = await BkkLib.cityIndex();
-        const cityId = BkkLib.cityOpId(idx, { id: stopId, name: opts.originName || '' });
-        if (cityId) {
-          const extra = await BkkLib.cityDepartures(stopId, dest, opts.originName, cityId, horizon);
-          rows = BkkLib.mergeVolanRows(extra, rows, maxRows);
-        }
-      } catch (_e) { /* city index optional */ }
-    }
+      if (mode === 'all') {
+        try {
+          const idx = await BkkLib.cityIndex();
+          const cityId = BkkLib.cityOpId(idx, { id: stopId, name: opts.originName || '' });
+          if (cityId) {
+            extraCity = await BkkLib.cityDepartures(stopId, dest, opts.originName, cityId, horizon);
+          }
+        } catch (_e) { /* city index optional */ }
+      }
+      if ((extraVolan.length || extraCity.length) && typeof opts.onPartial === 'function') {
+        let partial = BkkLib.mergeVolanRows(extraVolan, rows, maxRows);
+        partial = BkkLib.mergeVolanRows(extraCity, partial, maxRows);
+        opts.onPartial(partial);
+      }
+      return { extraVolan, extraCity };
+    })();
+    const [futar, gtfs] = await Promise.all([futarTask, gtfsTask]);
+    rows = BkkLib.mergeVolanRows(futar, rows, maxRows);
+    rows = BkkLib.mergeVolanRows(gtfs.extraVolan, rows, maxRows);
+    rows = BkkLib.mergeVolanRows(gtfs.extraCity, rows, maxRows);
+    if (opts.deferGps) return rows;
     return BkkLib.attachCoachGps(opts.hass, rows);
   },
 
@@ -2823,11 +2847,6 @@ class BKKHopCard extends HTMLElement {
     const nowSec = Math.floor(Date.now() / 1000);
     const allRows = this._rows || [];
     const rows = allRows.filter((r) => departureStillDue(r.depTs, nowSec));
-    // #region agent log
-    if (allRows.length !== rows.length) {
-      fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H7',location:'_paint',message:'dropped past departures',data:{before:allRows.length,kept:rows.length},timestamp:Date.now()})}).catch(()=>{});
-    }
-    // #endregion
     if (rows.length) {
       this._elBody.innerHTML = `<table><tbody>${
         rows.map((r, i) => this._rowHtml(r, lang, i)).join('')
@@ -3102,16 +3121,6 @@ class BKKHopCard extends HTMLElement {
       this._showMapNotice(t(lang, 'mapNoData'));
       return;
     }
-    // #region agent log
-    fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H2',location:'_openVehicleMap',message:'open',data:{label:String(row.label||''),hasGps:hasGps,trip:String(tripId).slice(0,32)},timestamp:Date.now()})}).catch(()=>{});
-    if (this._hass && this._hass.callService) {
-      this._hass.callService('system_log', 'write', {
-        message: 'hungarian-transport map open ' + String(row.label || '') + ' gps=' + hasGps,
-        level: 'info',
-        logger: 'hungarian-transport',
-      }).catch(() => {});
-    }
-    // #endregion
     let L;
     try {
       L = await this._ensureLeaflet();
@@ -3197,9 +3206,6 @@ class BKKHopCard extends HTMLElement {
         iconAnchor: [11, 11],
       });
       this._mapMarker = L.marker([hereLat, hereLon], { icon: icon, zIndexOffset: 600 }).addTo(map);
-      // #region agent log
-      fetch('http://127.0.0.1:7868/ingest/ff549c5e-7733-4468-8c4a-b8ae9af9f79f',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'cb2134'},body:JSON.stringify({sessionId:'cb2134',hypothesisId:'H1',location:'_openVehicleMap',message:'marker drawn',data:{label:String(row.label||''),hasGps:!!hasGps},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
     };
     if (hasGps) {
       drawMarker();
@@ -3337,27 +3343,29 @@ class BKKHopCard extends HTMLElement {
     const run = async () => {
       if (gen !== this._gen) return;
       try {
-        let skipElvira = false;
         let elviraRows = [];
-        if ((mode === 'mav' || mode === 'all') && this._hass) {
-          elviraRows = await BkkLib.elviraBetween(
+        const wantElvira = (mode === 'mav' || mode === 'all') && this._hass;
+        const elviraP = wantElvira
+          ? BkkLib.elviraBetween(
             this._hass,
             cfg.stopId,
             cfg.destStopId || '',
             cfg.minutesAfter,
             cfg.destName || '',
             { apiKey: cfg.apiKey, originName: cfg.stopName || '' },
-          );
+          ).catch(() => [])
+          : Promise.resolve([]);
+        const paintRows = (list) => {
           if (gen !== this._gen) return;
-          if (elviraRows.length) {
-            skipElvira = true;
-            this._rawRows = elviraRows;
-            this._rows = elviraRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
-            this._err = '';
-            this._loading = false;
-            this._paint();
-          }
-        }
+          const merged = list || [];
+          merged.forEach((row) => BkkLib.applyRailBadge(row));
+          this._rawRows = merged;
+          BkkLib.enrichFromHass(this._hass, this._rawRows);
+          this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
+          this._err = '';
+          this._loading = false;
+          this._paint();
+        };
         const rows = await BkkLib.departures(
           cfg.apiKey, cfg.stopId, cfg.routeIds, {
             key: cfg.destKey,
@@ -3371,33 +3379,37 @@ class BKKHopCard extends HTMLElement {
             city: cfg.city || '',
             minutesAfter: cfg.minutesAfter,
             deferTravel: true,
+            deferGps: true,
             hass: this._hass,
-            skipElvira: skipElvira,
-            elviraRows: elviraRows,
+            skipElvira: true,
+            onPartial: paintRows,
           },
         );
         if (gen !== this._gen) return;
+        elviraRows = await elviraP;
         const merged = BkkLib.mergeVolanRows(
           rows || [],
           elviraRows,
           maxDepartureRows(cfg.minutesAfter),
         );
-        merged.forEach((row) => BkkLib.applyRailBadge(row));
-        this._rawRows = merged;
-        BkkLib.enrichFromHass(this._hass, this._rawRows);
-        const lang = this._lang();
-        this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, lang));
-        this._err = '';
-        this._loading = false;
-        this._paint();
+        paintRows(merged);
         this._syncOpenMap();
         const origin = { id: cfg.stopId, name: cfg.stopName || '' };
-        await Promise.all(this._rawRows.map(async (row) => {
-          if (row.travel != null || /^(gtfs:|elvira:)/.test(String(row.tripId || ''))) return;
-          row.travel = await BkkLib.travelMin(
-            cfg.apiKey, row.tripId, cfg.destKey, row.dep, origin, this._tripCache || {},
-          );
-        }));
+        await Promise.all([
+          BkkLib.attachCoachGps(this._hass, this._rawRows).then((withGps) => {
+            if (gen !== this._gen) return;
+            this._rawRows = withGps;
+            this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
+            this._paint();
+            this._syncOpenMap();
+          }),
+          Promise.all(this._rawRows.map(async (row) => {
+            if (row.travel != null || /^(gtfs:|elvira:)/.test(String(row.tripId || ''))) return;
+            row.travel = await BkkLib.travelMin(
+              cfg.apiKey, row.tripId, cfg.destKey, row.dep, origin, this._tripCache || {},
+            );
+          })),
+        ]);
         if (gen !== this._gen) return;
         this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
         this._paint();
