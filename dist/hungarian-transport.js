@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.19';
+const CARD_VERSION = '1.4.4';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
