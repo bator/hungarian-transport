@@ -191,7 +191,7 @@ const motisShaped = Lib.journeyFromMotis({
     endTime: '2026-09-22T14:08:00Z',
     legs: [
       { mode: 'WALK', duration: 60, distance: 80, from: { name: 'START' }, to: { name: 'Miskolci \u00c1llatkert' }, startTime: '2026-09-22T10:39:00Z', endTime: '2026-09-22T10:40:00Z' },
-      { mode: 'BUS', duration: 420, routeShortName: 'ZOO', from: { name: 'Miskolci \u00c1llatkert' }, to: { name: 'Fels\u0151-Majl\u00e1th' }, startTime: '2026-09-22T10:40:00Z', endTime: '2026-09-22T10:47:00Z' },
+      { mode: 'BUS', duration: 420, routeShortName: 'ZOO', from: { name: 'Miskolci \u00c1llatkert', lat: 47.5, lon: 19.05 }, to: { name: 'Fels\u0151-Majl\u00e1th', lat: 47.51, lon: 19.06 }, startTime: '2026-09-22T10:40:00Z', endTime: '2026-09-22T10:47:00Z', legGeometry: { points: '_mdryA_`vic@_pR_pR', precision: 6 } },
       { mode: 'WALK', duration: 120, distance: 160, from: { name: 'Fels\u0151-Majl\u00e1th' }, to: { name: 'Fels\u0151-Majl\u00e1th' }, startTime: '2026-09-22T10:47:00Z', endTime: '2026-09-22T10:49:00Z' },
       { mode: 'TRAM', duration: 1980, routeShortName: '1V', from: { name: 'Fels\u0151-Majl\u00e1th' }, to: { name: 'Tiszai p\u00e1lyaudvar' }, startTime: '2026-09-22T10:52:00Z', endTime: '2026-09-22T11:25:00Z' },
       { mode: 'REGIONAL_RAIL', duration: 7920, routeShortName: '', displayName: '187 HERN\u00c1D - ZEMPL\u00c9N', from: { name: 'Miskolc-Tiszai' }, to: { name: 'Budapest-Keleti' }, startTime: '2026-09-22T11:30:00Z', endTime: '2026-09-22T13:42:00Z' },
@@ -212,6 +212,11 @@ check('MOTIS wait is the gap after arrival',
   motisShaped.legs[3].waitMin === 3 && motisShaped.legs[4].waitMin === 5
   && motisShaped.legs[5].waitMin === 8 && motisShaped.waitMin === 16,
   JSON.stringify(motisShaped && motisShaped.legs.map((l) => l.waitMin)));
+check('journeyFromMotis keeps a non-empty MOTIS shape',
+  Array.isArray(motisShaped.legs[1].shape) && motisShaped.legs[1].shape.length >= 2
+  && motisShaped.legs[1].shape[0][0] > 45 && motisShaped.legs[1].shape[0][0] < 49
+  && motisShaped.legs[1].fromLat === 47.5 && motisShaped.legs[1].toLon === 19.06,
+  JSON.stringify(motisShaped.legs[1].shape && motisShaped.legs[1].shape.slice(0, 2)));
 check('BKK id prefers a hu-bkk Transitous hit',
   Lib.pickTransitousHit([
     { id: 'hu-volanbusz_1', name: 'Keleti p\u00e1lyaudvar', lat: 1, lon: 1 },
@@ -359,6 +364,17 @@ const pts = Lib.decodePolyline('_p~iF~ps|U');
 check('decodePolyline yields coordinates',
   Array.isArray(pts) && pts.length >= 1 && Number.isFinite(pts[0][0]) && Number.isFinite(pts[0][1]),
   JSON.stringify(pts.slice(0, 2)));
+const motisPts = Lib.decodePolyline({ points: '_mdryA_`vic@_pR_pR', precision: 6 });
+check('decodePolyline honors MOTIS precision 6 near Hungary',
+  Array.isArray(motisPts) && motisPts.length >= 2
+  && motisPts[0][0] > 46 && motisPts[0][0] < 49
+  && motisPts[0][1] > 16 && motisPts[0][1] < 23,
+  JSON.stringify(motisPts.slice(0, 2)));
+const scaledWrong = Lib.decodePolyline('_mdryA_`vic@_pR_pR');
+check('string polyline still uses Google 1e5',
+  Array.isArray(scaledWrong) && scaledWrong.length >= 1
+  && (scaledWrong[0][0] < 40 || scaledWrong[0][0] > 50),
+  JSON.stringify(scaledWrong.slice(0, 1)));
 const loc = Lib.vehicleLoc({ location: { lat: 47.5, lon: 19.05 } });
 check('vehicleLoc reads BKK location', loc.lat === 47.5 && loc.lon === 19.05, JSON.stringify(loc));
 check('basemap is OSM France without an API key',
@@ -428,6 +444,14 @@ check('empty planner shows the transfer journey',
   && plan.shadowRoot.innerHTML.includes('>81<')
   && plan.shadowRoot.innerHTML.includes('background:#009EE3')
   && plan.shadowRoot.innerHTML.includes('V\u00e1rakoz\u00e1s 2 perc'));
+check('empty planner journey paint includes the map button',
+  plan.shadowRoot.innerHTML.includes('id="pmap"')
+  && plan.shadowRoot.innerHTML.includes('T\u00e9rk\u00e9p'));
+let journeyMapOpened = 0;
+plan._openJourneyMap = () => { journeyMapOpened += 1; };
+const pmap = plan.shadowRoot.querySelector('#pmap');
+if (pmap) pmap.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
+check('pmap click opens the journey map', journeyMapOpened >= 1, String(journeyMapOpened));
 check('planner favorite chips include a Volan station',
   planHtml.includes('N\u00e9pliget'));
 check('planner favorite chips include a MAV station',

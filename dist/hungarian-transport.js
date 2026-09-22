@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.15';
+const CARD_VERSION = '1.4.4-rev.16';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -283,6 +283,7 @@ const I18N = {
     plannerWait: (min) => `V\u00e1rakoz\u00e1s ${min} perc`,
     plannerStationWalk: (parts) => `Gyalogl\u00e1s a v\u00e1g\u00e1nyhoz ${parts[0]} perc, ${parts[1]} m`,
     plannerRide: (min) => `${min} perc`,
+    plannerShowMap: 'T\u00e9rk\u00e9p',
     plannerPickDest: 'V\u00e1lassz c\u00e9lt...',
     plannerNoRoutes: 'Nincs indul\u00f3 j\u00e1rat ebben a meg\u00e1ll\u00f3ban.',
     plannerNoDepartures: 'Nincs k\u00f6zelg\u0151 indul\u00e1s a v\u00e1lasztott j\u00e1ratokkal.',
@@ -435,6 +436,7 @@ const I18N = {
     plannerWait: (min) => `Wait ${min} min`,
     plannerStationWalk: (parts) => `Walk to the platform ${parts[0]} min, ${parts[1]} m`,
     plannerRide: (min) => `${min} min`,
+    plannerShowMap: 'Map',
     plannerPickDest: 'Pick a destination...',
     plannerNoRoutes: 'No departures from this stop.',
     plannerNoDepartures: 'No upcoming departure on the selected routes.',
@@ -1127,6 +1129,12 @@ const BkkLib = {
       else if (startMs) prevEnd = startMs;
       let meters = Math.max(0, Math.round(Number(leg.distance || 0)));
       if (!meters && walk) meters = minutes * 80;
+      const from = leg.from || {};
+      const to = leg.to || {};
+      const fromLat = Number(from.lat);
+      const fromLon = Number(from.lon);
+      const toLat = Number(to.lat);
+      const toLon = Number(to.lon);
       const row = {
         walk,
         minutes,
@@ -1135,9 +1143,14 @@ const BkkLib = {
         headsign: String(leg.headsign || ''),
         color: String(leg.routeColor || '').replace(/#/g, ''),
         text: String(leg.routeTextColor || '').replace(/#/g, ''),
-        from: String((leg.from || {}).name || ''),
-        to: String((leg.to || {}).name || ''),
+        from: String(from.name || ''),
+        to: String(to.name || ''),
         waitMin,
+        shape: BkkLib.decodePolyline(leg.legGeometry),
+        fromLat: Number.isFinite(fromLat) ? fromLat : undefined,
+        fromLon: Number.isFinite(fromLon) ? fromLon : undefined,
+        toLat: Number.isFinite(toLat) ? toLat : undefined,
+        toLon: Number.isFinite(toLon) ? toLon : undefined,
       };
       if (!walk) {
         const badge = BkkLib.applyRailBadge({
@@ -1580,8 +1593,14 @@ const BkkLib = {
     return n > 1e12 ? n / 1000 : n;
   },
   decodePolyline(encoded) {
-    if (encoded && typeof encoded === 'object') encoded = encoded.points || '';
+    let precision = 5;
+    if (encoded && typeof encoded === 'object') {
+      const p = Number(encoded.precision);
+      if (Number.isFinite(p) && p >= 4 && p <= 7) precision = p;
+      encoded = encoded.points || '';
+    }
     if (!encoded || typeof encoded !== 'string') return [];
+    const factor = Math.pow(10, precision);
     const coords = [];
     let index = 0;
     let lat = 0;
@@ -1601,7 +1620,7 @@ const BkkLib = {
           if (xy === 0) lat += delta;
           else lng += delta;
         }
-        coords.push([lat / 1e5, lng / 1e5]);
+        coords.push([lat / factor, lng / factor]);
       }
     } catch (_e) {
       return [];
@@ -1619,6 +1638,53 @@ const BkkLib = {
     const last = coords[coords.length - 1];
     if (out[out.length - 1][0] !== last[0] || out[out.length - 1][1] !== last[1]) out.push(last);
     return out;
+  },
+  finiteLatLon(lat, lon) {
+    const a = Number(lat);
+    const b = Number(lon);
+    if (Number.isFinite(a) && Number.isFinite(b)) return [a, b];
+    return null;
+  },
+  rideMapColor(leg) {
+    const hex = String((leg && leg.color) || '').replace('#', '');
+    if (/^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(hex)) return '#' + hex;
+    return '#0F6FC6';
+  },
+  journeyMapSegments(journey, origin, dest) {
+    const segs = [];
+    const add = (shape, walk, color, from, to) => {
+      if (!Array.isArray(shape) || shape.length < 2) return;
+      segs.push({
+        walk: !!walk,
+        color: walk ? '' : (color || '#0F6FC6'),
+        shape,
+        from: from || '',
+        to: to || '',
+      });
+    };
+    ((journey && journey.legs) || []).forEach((leg) => {
+      let shape = Array.isArray(leg.shape)
+        ? leg.shape.filter((pt) => Array.isArray(pt)
+          && Number.isFinite(pt[0]) && Number.isFinite(pt[1]))
+        : [];
+      if (shape.length < 2) {
+        const a = BkkLib.finiteLatLon(leg.fromLat, leg.fromLon);
+        const b = BkkLib.finiteLatLon(leg.toLat, leg.toLon);
+        if (a && b) shape = [a, b];
+      }
+      add(shape, leg.walk, BkkLib.rideMapColor(leg), leg.from, leg.to);
+    });
+    if (segs.length) return segs;
+    const start = BkkLib.finiteLatLon(
+      origin && (origin.stopLat != null ? origin.stopLat : origin.lat),
+      origin && (origin.stopLon != null ? origin.stopLon : origin.lon),
+    );
+    const end = BkkLib.finiteLatLon(
+      dest && (dest.destLat != null ? dest.destLat : dest.lat),
+      dest && (dest.destLon != null ? dest.destLon : dest.lon),
+    );
+    if (start && end) add([start, end], false, '#0F6FC6', '', '');
+    return segs;
   },
   haversineMeters(a, b) {
     const toRad = (d) => (d * Math.PI) / 180;
@@ -4358,8 +4424,136 @@ class BKKPlannerCard extends BKKHopCard {
     box.className = 'journey-plan';
     box.innerHTML = `<div class="j-title">${esc(t(lang, 'plannerJourneyTitle'))}</div>`
       + `<div class="j-sum">${esc(t(lang, 'plannerJourneySummary', [journey.durationMin, journey.transfers, journey.walkMin, journey.waitMin || 0]))}</div>`
+      + `<button type="button" id="pmap">${esc(t(lang, 'plannerShowMap'))}</button>`
       + legs;
     this._elBody.appendChild(box);
+    const mapBtn = box.querySelector('#pmap');
+    if (mapBtn) mapBtn.addEventListener('click', () => this._openJourneyMap());
+  }
+
+  async _openJourneyMap() {
+    const lang = this._lang();
+    const cfg = this._config || {};
+    if (this._openingMap === 'journey') return;
+    if (this._mapOverlay && this._openMapKey === 'journey') return;
+    this._closeVehicleMap();
+    this._openingMap = 'journey';
+    const segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
+    if (!segs.length) {
+      this._openingMap = '';
+      this._showMapNotice(t(lang, 'mapNoData'));
+      return;
+    }
+    let L;
+    try {
+      L = await this._ensureLeaflet();
+    } catch (_e) {
+      this._openingMap = '';
+      this._showMapNotice(t(lang, 'mapLeafletFail'));
+      return;
+    }
+    const overlay = document.createElement('div');
+    overlay.className = 'ht-map-overlay';
+    const title = `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
+    const footText = t(lang, 'plannerJourneySummary', [
+      this._journey && this._journey.durationMin,
+      this._journey && this._journey.transfers,
+      this._journey && this._journey.walkMin,
+      (this._journey && this._journey.waitMin) || 0,
+    ]);
+    overlay.innerHTML = `
+      <style>
+        .ht-map-overlay{position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
+        .ht-map-panel{width:min(720px,100%);height:min(70vh,560px);background:var(--card-background-color,#fff);border-radius:28px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.35);color:var(--primary-text-color,#222)}
+        .ht-map-head{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--divider-color,rgba(0,0,0,.08));font:600 14px/1.3 system-ui,sans-serif}
+        .ht-map-head .meta{flex:1;min-width:0}
+        .ht-map-close{border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;opacity:.7;color:inherit}
+        .ht-map-canvas{flex:1;height:420px;min-height:420px}
+        .ht-map-foot{padding:8px 12px;font:12px/1.35 system-ui,sans-serif;opacity:.85;border-top:1px solid var(--divider-color,rgba(0,0,0,.08))}
+      </style>
+      <div class="ht-map-panel" role="dialog" aria-modal="true">
+        <div class="ht-map-head">
+          <div class="meta">${BkkLib.esc(title)}</div>
+          <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, 'mapClose'))}">\u00d7</button>
+        </div>
+        <div class="ht-map-canvas"></div>
+        <div class="ht-map-foot">${BkkLib.esc(footText)}</div>
+      </div>
+    `;
+    (document.documentElement || document.body).appendChild(overlay);
+    this._mapOverlay = overlay;
+    this._openMapKey = 'journey';
+    this._onMapKey = (ev) => {
+      if (ev.key === 'Escape') this._closeVehicleMap();
+    };
+    document.addEventListener('keydown', this._onMapKey);
+    overlay.querySelector('.ht-map-close').addEventListener('click', () => this._closeVehicleMap());
+    overlay.addEventListener('click', (ev) => {
+      if (ev.target === overlay) this._closeVehicleMap();
+    });
+    const canvas = overlay.querySelector('.ht-map-canvas');
+    const start = segs[0].shape[0];
+    let map;
+    try {
+      map = L.map(canvas, { scrollWheelZoom: true }).setView(start, 12);
+      L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
+        maxZoom: 20,
+        subdomains: 'abc',
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>',
+      }).addTo(map);
+    } catch (_e) {
+      this._openingMap = '';
+      this._showMapNotice(t(lang, 'mapLeafletFail'));
+      return;
+    }
+    this._map = map;
+    const resizeMap = () => { try { map.invalidateSize(); } catch (_e) { /* ignore */ } };
+    requestAnimationFrame(() => { resizeMap(); requestAnimationFrame(resizeMap); });
+    const allPts = [];
+    segs.forEach((seg) => {
+      const shape = seg.shape;
+      shape.forEach((pt) => allPts.push(pt));
+      if (seg.walk) {
+        L.polyline(shape, {
+          color: '#1a1a1a', weight: 5, opacity: 0.35, dashArray: '8 8',
+          lineJoin: 'round', lineCap: 'round', interactive: false,
+        }).addTo(map);
+        L.polyline(shape, {
+          color: '#888888', weight: 3, opacity: 0.95, dashArray: '8 8',
+          lineJoin: 'round', lineCap: 'round',
+        }).addTo(map);
+      } else {
+        L.polyline(shape, {
+          color: '#1a1a1a', weight: 7, opacity: 0.45,
+          lineJoin: 'round', lineCap: 'round', interactive: false,
+        }).addTo(map);
+        L.polyline(shape, {
+          color: seg.color, weight: 5, opacity: 0.98,
+          lineJoin: 'round', lineCap: 'round',
+        }).addTo(map);
+      }
+    });
+    const pin = (pt, fill) => {
+      if (!pt) return;
+      L.circleMarker(pt, {
+        radius: 7, color: '#fff', weight: 2, fillColor: fill, fillOpacity: 1,
+      }).addTo(map);
+    };
+    pin(segs[0].shape[0], '#0F6FC6');
+    for (let i = 0; i < segs.length - 1; i++) {
+      const shape = segs[i].shape;
+      pin(shape[shape.length - 1], '#555555');
+    }
+    const lastSeg = segs[segs.length - 1].shape;
+    pin(lastSeg[lastSeg.length - 1], '#0F6FC6');
+    setTimeout(() => {
+      if (!this._map || this._map !== map) return;
+      map.invalidateSize();
+      if (allPts.length >= 2) {
+        map.fitBounds(L.latLngBounds(allPts), { padding: [36, 36], maxZoom: 13 });
+      }
+    }, 80);
+    this._openingMap = '';
   }
 
   _header() {
@@ -4501,6 +4695,11 @@ class BKKPlannerCard extends BKKHopCard {
       .journey-plan .j-title { font-size: 12px; font-weight: 700; letter-spacing: 0.04em;
         text-transform: uppercase; color: var(--secondary-text-color); }
       .journey-plan .j-sum { margin: 4px 0 10px; font-size: 16px; font-weight: 700; }
+      .journey-plan #pmap {
+        margin: 0 0 10px; border: 0; cursor: pointer; font: inherit; font-size: 13px; font-weight: 700;
+        border-radius: 999px; padding: 8px 14px;
+        background: var(--primary-color); color: var(--text-primary-color, #fff);
+      }
       .journey-plan .j-leg { display: flex; align-items: baseline; gap: 8px;
         padding: 6px 0; border-top: 1px solid var(--divider-color); font-size: 14px; }
       .journey-plan .j-where { flex: 1; min-width: 0; }
