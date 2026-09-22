@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.4-rev.5';
+const CARD_VERSION = '1.4.4-rev.6';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -2087,19 +2087,10 @@ const BkkLib = {
     let candidates = [];
     try {
       let poles = [];
-      const poleRoutes = (destKey && (mode === 'bkk' || mode === 'mav' || mode === 'all'))
-        ? []
-        : Array.from(selected);
-      try {
-        poles = destKey
-          ? await BkkLib.originPoles(apiKey, cache, origin, poleRoutes, destKey)
-          : [];
-      } catch (_e) {
-        poles = [];
-      }
-      if (!poles.length) {
+      const poleRoutes = Array.from(selected);
+      if (poleRoutes.length) {
         try {
-          poles = await BkkLib.originPoles(apiKey, cache, origin, poleRoutes);
+          poles = await BkkLib.originPoles(apiKey, cache, origin, poleRoutes, destKey || '');
         } catch (_e) {
           poles = [];
         }
