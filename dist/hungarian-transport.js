@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.5-rev.11';
+const CARD_VERSION = '1.4.5';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -42,7 +42,7 @@ const PLATFORM_STRIP = /\s*(?:\u00b7\s*)?(?:v\u00e1g|pl)\.\S+/gi;
    `favorites: [{ id, name }]` if your own stops are elsewhere. */
 const BKK_FAVORITES = [
   { id: 'BKK_CSF01131', name: 'Keleti p\u00e1lyaudvar' },
-  { id: 'BKK_056216', name: 'Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s' },
+  { id: 'BKK_CS007896', name: 'Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s' },
 ];
 const MAV_FAVORITES = [
   { id: 'BKK_005510017', name: 'Budapest-Keleti' },
@@ -95,7 +95,7 @@ const BKK_RAIL_BADGE = {
   S40: ['00AFF0', 'FFFFFF'],
   IC: ['2E5EA8', 'FFFFFF'],
   EC: ['2E5EA8', 'FFFFFF'],
-  S: ['2E5EA8', 'FFFFFF'],
+  SZ: ['5C6B7A', 'FFFFFF'],
 };
 
 /* Assets live next to this module, so the card works from /hacsfiles/, /local/
@@ -581,8 +581,10 @@ const BkkLib = {
     t = t.trim().toLowerCase();
     t = t.replace(/[\u2013\u2014]/g, '-');
     t = t.replace(/\s+/g, ' ');
+    t = t.replace(/\s+m\+h$/i, '').trim();
+    t = t.replace(/\s+m\+$/i, '').trim();
     if (/\sm$/i.test(t)) t = t.replace(/\sm$/i, '').trim();
-    [' vas\u00fat\u00e1llom\u00e1s', ' p\u00e1lyaudvar', ' pu.'].forEach((sfx) => {
+    [' vas\u00fat\u00e1llom\u00e1s', ' p\u00e1lyaudvar', ' pu.', ' v\u00e1.', ' va.', ' pu'].forEach((sfx) => {
       if (t.endsWith(sfx)) t = t.slice(0, -sfx.length).trim();
     });
     t = t.replace(/[,.;:\s]+$/g, '').trim();
@@ -596,7 +598,13 @@ const BkkLib = {
     if (na && nb && na === nb) return true;
     const sa = BkkLib.stationKey(a);
     const sb = BkkLib.stationKey(b);
-    return !!(sa && sb && sa === sb);
+    if (sa && sb && sa === sb) return true;
+    const fa = BkkLib.fold(sa || a);
+    const fb = BkkLib.fold(sb || b);
+    if (fa && fb && fa === fb) return true;
+    const pa = BkkLib.placeNameKey({ name: a });
+    const pb = BkkLib.placeNameKey({ name: b });
+    return !!(pa && pb && pa === pb);
   },
   fold(s) {
     return BkkLib.norm(s)
@@ -637,21 +645,198 @@ const BkkLib = {
     });
     const hits = [];
     byName.forEach((group) => {
+      const bkkArea = group.find((s) => /^BKK_CS/i.test(String(s.id || '')));
       const mavParent = group.find((s) => /^BKK_0055[0-9]+$/.test(String(s.id || '')));
       const volanArea = group.find((s) => (
         /^AREA_CS/i.test(String(s.id || '')) ||
         (/^volan_/i.test(String(s.id || '')) && s.locationType === 1)
       ));
-      const area = mavParent || volanArea || group.find((s) => BkkLib.isStopArea(s));
+      const area = bkkArea || mavParent || volanArea
+        || group.find((s) => BkkLib.isStopArea(s) && !/^STOP_/i.test(String(s.id || '')));
       const withParent = group.find((s) => s.parentStationId);
       const named = group.find((s) => !BkkLib.isMetroSuffixName(s.name)) || group[0];
       const pick = area || withParent || named;
-      hits.push({
+      const hit = {
         id: area ? area.id : (pick.parentStationId || pick.id),
         name: named.name,
-      });
+      };
+      const withCoord = group.find((s) => BkkLib.finiteLatLon(s.lat, s.lon)) || pick;
+      if (BkkLib.finiteLatLon(withCoord.lat, withCoord.lon)) {
+        hit.lat = withCoord.lat;
+        hit.lon = withCoord.lon;
+      }
+      hits.push(hit);
     });
     return hits;
+  },
+  placeRestKey(rest) {
+    const t = String(rest || '').trim();
+    if (!t) return '';
+    const sk = BkkLib.stationKey(t) || BkkLib.norm(t);
+    const folded = BkkLib.fold(sk);
+    if (!folded) return '';
+    if (/^(vasutallomas|palyaudvar|pu|va)$/.test(folded.replace(/[\s.]/g, ''))) return '';
+    return sk;
+  },
+  splitCityPrefix(name) {
+    let t = String(name || '').replace(/[\u2013\u2014]/g, '-').trim();
+    t = t.replace(/\s*\(([^)]+)\)\s*$/, '').trim();
+    let m = t.match(/^([^,]+),\s*(.+)$/);
+    if (m && BkkLib.placeRestKey(m[2])) {
+      return { city: m[1].trim(), rest: m[2].trim() };
+    }
+    m = t.match(/^([^\s,]+)-(.+)$/);
+    if (m && BkkLib.placeRestKey(m[2]) && BkkLib.fold(m[1]) === 'budapest') {
+      return { city: m[1].trim(), rest: m[2].trim() };
+    }
+    return null;
+  },
+  placeNameKey(stop) {
+    const raw = String((stop && (stop.name || stop.label)) || '');
+    let t = raw.replace(/[\u2013\u2014]/g, '-').trim();
+    t = t.replace(/\s*\(([^)]+)\)\s*$/, '').trim();
+    t = t.replace(/\s+[ivxlcdm]+\.?\s*ker(?:ület|ulet)\s*$/i, '').trim();
+    let key = BkkLib.stationKey(t) || BkkLib.norm(t);
+    const split = BkkLib.splitCityPrefix(t);
+    if (split) key = BkkLib.placeRestKey(split.rest) || key;
+    let folded = BkkLib.fold(key);
+    const cityLead = folded.match(/^budapest\s+(.+)$/);
+    if (cityLead) folded = cityLead[1];
+    folded = folded.replace(/\s+(?:train|railway)\s+station$/, '').trim();
+    folded = folded.replace(/\s+(?:p\s*r|parkolo)$/, '').trim();
+    if (/^(?:(?:auto)?busz?(?:\s+|-)(?:station|allomas|palyaudvar)|aut\s*all)$/.test(folded)) {
+      folded = 'aut all';
+    } else {
+      folded = folded.replace(
+        /\s+(?:(?:auto)?busz?(?:\s+|-)(?:station|allomas|palyaudvar)|aut\s*all)$/,
+        ' aut all',
+      );
+    }
+    return folded;
+  },
+  stopCityKey(stop) {
+    const name = String((stop && stop.name) || '');
+    const split = BkkLib.splitCityPrefix(name);
+    if (split) return BkkLib.fold(split.city);
+    const label = String((stop && (stop.label || stop.name)) || '');
+    const paren = label.match(/\(([^)]+)\)\s*$/);
+    if (paren && !/^(m[\u00e1a]v|vol[\u00e1a]n)$/i.test(paren[1])) {
+      return BkkLib.fold(paren[1]);
+    }
+    return '';
+  },
+  plannerStopKey(stop) {
+    return BkkLib.stopCityKey(stop) + '|' + BkkLib.placeNameKey(stop);
+  },
+  stopIdRank(id) {
+    const s = String(id || '');
+    if (/^BKK_CS/i.test(s)) return 1;
+    if (/^BKK_0055\d{6,}$/i.test(s)) return 3;
+    if (/^BKK_/i.test(s) && s.split('_').length <= 2) return 2;
+    if (/^BKK_/i.test(s)) return 4;
+    if (/^hu-bkk_/i.test(s)) return 5;
+    if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return 6;
+    if (/^[a-z][a-z0-9]*:/i.test(s) && s.indexOf('/') < 0) return 7;
+    if (/^hu-/i.test(s)) return 8;
+    if (/^(?:geo:|node\/|way\/)/i.test(s)) return 10;
+    if (/^(?:cz-|sk-|ua-|de-|al-|at-|eu-|pl-)/i.test(s)) return 12;
+    if (/^STOP_/i.test(s)) return 20;
+    return 9;
+  },
+  stopIdFamily(stop) {
+    if (BkkLib.isPlaceStop(stop)) return 'osm';
+    const s = String((stop && stop.id) || '');
+    if (/^(?:geo:|node\/|way\/)/i.test(s)) return 'osm';
+    if (/^BKK_0055/i.test(s) || /(?:^hu-mav_|railway)/i.test(s)) return 'mav';
+    if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return 'volan';
+    if (/^(?:BKK_|hu-bkk_)/i.test(s)) return 'bkk';
+    if (/^[a-z][a-z0-9]*:/i.test(s) && s.indexOf('/') < 0) return 'city';
+    if (/^hu-/i.test(s)) return 'hu';
+    return 'other';
+  },
+  stopsTooFar(a, b) {
+    const pa = BkkLib.finiteLatLon(a && a.lat, a && a.lon);
+    const pb = BkkLib.finiteLatLon(b && b.lat, b && b.lon);
+    if (!pa || !pb) return false;
+    return BkkLib.haversineMeters(pa, pb) > 400;
+  },
+  stopsCloseEnough(a, b) {
+    const pa = BkkLib.finiteLatLon(a && a.lat, a && a.lon);
+    const pb = BkkLib.finiteLatLon(b && b.lat, b && b.lon);
+    if (!pa || !pb) return true;
+    return BkkLib.haversineMeters(pa, pb) <= 300;
+  },
+  citiesConflict(a, b) {
+    const ca = BkkLib.stopCityKey(a);
+    const cb = BkkLib.stopCityKey(b);
+    return !!(ca && cb && ca !== cb);
+  },
+  splitStopClusters(group) {
+    const clusters = [];
+    (group || []).forEach((s) => {
+      let joined = null;
+      for (let i = 0; i < clusters.length; i++) {
+        const cl = clusters[i];
+        if (cl.some((x) => BkkLib.citiesConflict(x, s))) continue;
+        const mixPlace = cl.some((x) => BkkLib.isPlaceStop(x) !== BkkLib.isPlaceStop(s));
+        const mixOp = cl.some((x) => BkkLib.stopIdFamily(x) !== BkkLib.stopIdFamily(s));
+        if (!mixPlace && !mixOp && cl.some((x) => BkkLib.stopsTooFar(x, s))) continue;
+        joined = cl;
+        break;
+      }
+      if (joined) joined.push(s);
+      else clusters.push([s]);
+    });
+    return clusters;
+  },
+  pickCollapsedStop(cluster) {
+    const list = (cluster || []).filter(Boolean);
+    if (!list.length) return null;
+    const ranked = list.slice().sort((a, b) => {
+      const ra = BkkLib.stopIdRank(a.id);
+      const rb = BkkLib.stopIdRank(b.id);
+      if (ra !== rb) return ra - rb;
+      const ac = BkkLib.finiteLatLon(a.lat, a.lon) ? 0 : 1;
+      const bc = BkkLib.finiteLatLon(b.lat, b.lon) ? 0 : 1;
+      return ac - bc;
+    });
+    const win = Object.assign({}, ranked[0]);
+    list.forEach((s) => {
+      if (!BkkLib.finiteLatLon(win.lat, win.lon) && BkkLib.finiteLatLon(s.lat, s.lon)) {
+        win.lat = s.lat;
+        win.lon = s.lon;
+      }
+      if (!win.kind && s.kind && s.kind !== 'place' && s.kind !== 'address') win.kind = s.kind;
+    });
+    const named = list.find((s) => (
+      s.name && !BkkLib.isPlaceStop(s) && !BkkLib.isMetroSuffixName(s.name)
+    )) || list.find((s) => s.name && !BkkLib.isPlaceStop(s)) || win;
+    if (named && named.name) win.name = named.name;
+    if (win.label) {
+      win.label = String(win.label).replace(/\s*\((?:M[\u00c1A]V|Vol[\u00e1a]n)\)\s*$/i, '');
+    }
+    return win;
+  },
+  collapseSameNameStops(stops) {
+    const byKey = new Map();
+    (stops || []).forEach((s) => {
+      if (!s || !s.id || !s.name) return;
+      const key = BkkLib.placeNameKey(s);
+      if (!key) return;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(s);
+    });
+    const out = [];
+    byKey.forEach((group) => {
+      BkkLib.splitStopClusters(group).forEach((cluster) => {
+        const hit = BkkLib.pickCollapsedStop(cluster);
+        if (hit) out.push(hit);
+      });
+    });
+    if (out.some((s) => !BkkLib.isPlaceStop(s))) {
+      return out.filter((s) => !BkkLib.isPlaceStop(s));
+    }
+    return out;
   },
   destHitsForQuery(dests, q, extras) {
     const f = BkkLib.fold(q || '');
@@ -660,11 +845,12 @@ const BkkLib = {
     const add = (d) => {
       if (!d || !d.name) return;
       const id = d.id || d.stopId || '';
-      let key = d.key || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
-      if (!d.key && id && /^(geo:|node\/)/i.test(id)) key = key + '|' + id;
+      let key = BkkLib.placeNameKey(d) || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
+      if (id && /^geo:/i.test(id) && String(d.kind || '') === 'address') key = key + '|' + id;
       if (!key) return;
       const prev = seen.get(key);
       if (prev) {
+        if (BkkLib.stopIdRank(id) < BkkLib.stopIdRank(prev.id)) prev.id = id;
         if (BkkLib.elviraStationCode(id) && !BkkLib.elviraStationCode(prev.id)) prev.id = id;
         if (/^geo:/i.test(String(prev.id || '')) && id && !/^geo:/i.test(id)) prev.id = id;
         if (Number.isFinite(Number(d.lat)) && !Number.isFinite(Number(prev.lat))) {
@@ -1043,7 +1229,7 @@ const BkkLib = {
   },
   isPlaceStop(stop) {
     if (!stop) return false;
-    if (/^(geo:|node\/)/i.test(String(stop.id || stop.stopId || ''))) return true;
+    if (/^(geo:|node\/|way\/)/i.test(String(stop.id || stop.stopId || ''))) return true;
     const kind = String(stop.kind || stop.stopKind || '');
     return kind === 'address' || kind === 'place';
   },
@@ -1110,7 +1296,10 @@ const BkkLib = {
       const motis = await BkkLib.searchStopsTransitous(q, { type: 'all' });
       motis.forEach((s) => {
         if (!s || !s.id || /^hu-volanbusz_/i.test(s.id)) return;
-        byId.set(s.id, s);
+        const mapped = String(s.id).replace(/^hu-bkk_/i, 'BKK_');
+        const row = mapped !== s.id ? Object.assign({}, s, { id: mapped }) : s;
+        if (byId.has(row.id)) return;
+        byId.set(row.id, row);
       });
       await BkkLib.addTransitousVolanStops(byId, q, motis);
     } catch (_e) { /* GTFS / BKK still fill the list */ }
@@ -1120,8 +1309,8 @@ const BkkLib = {
         byId.set(s.id, s);
       });
     } catch (_e) { /* Transitous hits are enough when the index is missing */ }
-    const out = BkkLib.capPlannerHits(Array.from(byId.values()), 24);
-    return out;
+    const collapsed = BkkLib.collapseSameNameStops(Array.from(byId.values()));
+    return BkkLib.capPlannerHits(collapsed, 24);
   },
   pickTransitousHit(hits, stop, kind) {
     const list = Array.isArray(hits) ? hits : [];
@@ -1458,8 +1647,13 @@ const BkkLib = {
       const destOn = BkkLib.destOnMotisRow(m, dest);
       const dt = dep ? Math.abs(Number(m.dep || 0) - dep) : 0;
       if (dep && dt > 45 * 60 && !sameNum) return;
+      const identity = sameNum || sameLabel || sameAlias;
+      if (!identity) {
+        const wantsId = !!(num || (label.length >= 3 && !BkkLib.genericRailLabel(label)));
+        if (wantsId) return;
+      }
       const destNear = destOn && (!dep || dt <= 12 * 60);
-      if (!sameNum && !sameLabel && !sameAlias && !destNear) return;
+      if (!identity && !destNear) return;
       const score = (sameNum ? 1000 : 0)
         + (sameLabel ? 400 : 0)
         + (sameAlias ? 250 : 0)
@@ -1475,10 +1669,14 @@ const BkkLib = {
       const near = list.filter((m) => usable(m) && Math.abs(Number(m.dep || 0) - dep) <= 8 * 60);
       const toward = dest ? near.filter((m) => BkkLib.destOnMotisRow(m, dest)) : near;
       const pool = toward.length ? toward : near;
+      const wantsId = !!(num || (label.length >= 3 && !BkkLib.genericRailLabel(label)));
       if (pool.length === 1) {
-        best = pool[0];
-        matchHow = toward.length ? 'dest-time' : 'time';
-      } else if (pool.length > 1) {
+        const dt0 = Math.abs(Number(pool[0].dep || 0) - dep);
+        if (!wantsId || dt0 <= 90) {
+          best = pool[0];
+          matchHow = toward.length ? 'dest-time' : 'time';
+        }
+      } else if (pool.length > 1 && !wantsId) {
         pool.sort((a, b) => Math.abs(Number(a.dep || 0) - dep) - Math.abs(Number(b.dep || 0) - dep));
         const gap = Math.abs(Number(pool[1].dep || 0) - dep) - Math.abs(Number(pool[0].dep || 0) - dep);
         if (gap >= 60 || toward.length === 1) {
@@ -1630,6 +1828,7 @@ const BkkLib = {
         from: String(from.name || ''),
         to: String(to.name || ''),
         waitMin,
+        tripId: String(leg.tripId || ''),
         shape: BkkLib.decodePolyline(leg.legGeometry),
         fromLat: Number.isFinite(fromLat) ? fromLat : undefined,
         fromLon: Number.isFinite(fromLon) ? fromLon : undefined,
@@ -1669,7 +1868,7 @@ const BkkLib = {
       const planParams = {
         fromPlace,
         toPlace,
-        numItineraries: String(Math.min(12, Math.max(5, Math.round(clampMinutesAfter(opts && opts.minutesAfter) / 40)))),
+        numItineraries: '12',
         searchWindow: String(clampMinutesAfter(opts && opts.minutesAfter) * 60),
       };
       const data = await BkkLib.transitousFetch('/api/v5/plan', planParams);
@@ -1679,6 +1878,20 @@ const BkkLib = {
     } catch (_e) {
       return null;
     }
+  },
+  /* Direct board rows hide the transfer block unless the itinerary is a
+     real transfer that arrives sooner than the fastest listed ride. */
+  journeyBeatsBoard(journey, rows) {
+    if (!journey || !Array.isArray(journey.legs)) return false;
+    const rides = journey.legs.filter((leg) => !leg.walk);
+    if (rides.length < 2) return false;
+    const dur = Number(journey.durationMin);
+    if (!Number.isFinite(dur) || dur <= 0) return false;
+    const travels = (Array.isArray(rows) ? rows : []).map((row) => Number(
+      row && (row.travelMin != null ? row.travelMin : row.travel)
+    )).filter((n) => Number.isFinite(n) && n > 0);
+    if (!travels.length) return true;
+    return dur < Math.min.apply(null, travels);
   },
   /* FUTÁR plan-trip: itinerary duration and walkTime are seconds.
      Each leg duration is milliseconds. */
@@ -1728,6 +1941,7 @@ const BkkLib = {
         from: String(from.name || ''),
         to: String(to.name || ''),
         waitMin,
+        tripId: String(leg.tripId || ''),
         shape: BkkLib.decodePolyline(leg.legGeometry),
         fromLat: Number.isFinite(fromLat) ? fromLat : undefined,
         fromLon: Number.isFinite(fromLon) ? fromLon : undefined,
@@ -1972,6 +2186,19 @@ const BkkLib = {
     }
     const waitMin = legs.reduce((sum, leg) => sum + (leg.waitMin || 0), 0);
     const walkMin = legs.reduce((sum, leg) => sum + (leg.walk ? leg.minutes : 0), 0);
+    const start = BkkLib.finiteLatLon(origin && origin.lat, origin && origin.lon);
+    const end = BkkLib.finiteLatLon(dest && dest.lat, dest && dest.lon);
+    if (start && legs[0] && legs[0].fromLat == null) {
+      legs[0].fromLat = start[0];
+      legs[0].fromLon = start[1];
+    }
+    if (end && legs.length) {
+      const last = legs[legs.length - 1];
+      if (last.toLat == null) {
+        last.toLat = end[0];
+        last.toLon = end[1];
+      }
+    }
     return {
       durationMin: Math.max(1, Math.round((ready - Math.floor(Date.now() / 1000)) / 60)),
       walkMin,
@@ -2088,9 +2315,11 @@ const BkkLib = {
   vehicleLoc(veh) {
     if (!veh || typeof veh !== 'object') return { lat: NaN, lon: NaN };
     const loc = veh.location || {};
-    const lat = Number(loc.lat != null ? loc.lat : veh.latitude);
-    const lon = Number(loc.lon != null ? loc.lon : (veh.longitude != null ? veh.longitude : veh.lng));
-    return { lat: lat, lon: lon };
+    const lat = loc.lat != null ? loc.lat : veh.latitude;
+    const lon = loc.lon != null ? loc.lon : (veh.longitude != null ? veh.longitude : veh.lng);
+    const pt = BkkLib.mapGpsLatLon(lat, lon);
+    if (!pt) return { lat: NaN, lon: NaN };
+    return { lat: pt[0], lon: pt[1] };
   },
   unixSec(ts) {
     const n = Number(ts);
@@ -2210,6 +2439,17 @@ const BkkLib = {
     if (tail.length < 2) return spanB > spanA ? b : a;
     return a.concat(tail.slice(1));
   },
+  shapeGpsGapMeters(shape, lat, lon) {
+    const gps = BkkLib.mapGpsLatLon(lat, lon);
+    const pts = BkkLib.validMapShape(shape);
+    if (!gps || pts.length < 1) return null;
+    let best = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const d = BkkLib.haversineMeters(gps, pts[i]);
+      if (d < best) best = d;
+    }
+    return best;
+  },
   combineHopShapes(motisShape, futarShape, coversHead, rowShape) {
     const motis = BkkLib.validMapShape(motisShape);
     const futar = BkkLib.validMapShape(futarShape);
@@ -2227,6 +2467,18 @@ const BkkLib = {
     if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
     if (Math.abs(a) > 90 || Math.abs(b) > 180) return null;
     return [a, b];
+  },
+  /* Live GPS for this card: drop null-island / empty 0,0 and anything
+     outside the region Hungarian services actually run in. 0.47,0.19
+     (a 1e2 mis-scale of Budapest) sits in the Gulf of Guinea. */
+  mapGpsLatLon(lat, lon) {
+    const pt = BkkLib.finiteLatLon(lat, lon);
+    if (!pt) return null;
+    const a = pt[0];
+    const b = pt[1];
+    if (Math.abs(a) < 1 && Math.abs(b) < 1) return null;
+    if (a < 42 || a > 56 || b < 8 || b > 30) return null;
+    return pt;
   },
   validMapShape(shape) {
     if (!Array.isArray(shape)) return [];
@@ -2318,7 +2570,121 @@ const BkkLib = {
     if (/^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(hex)) return '#' + hex;
     return '#0F6FC6';
   },
+  MAP_ROUTE_PALETTE: [
+    '#e53935', '#8e24aa', '#3949ab', '#00897b', '#f9a825', '#6d4c41',
+    '#d81b60', '#00acc1', '#43a047', '#fb8c00', '#5c6bc0', '#00838f',
+  ],
+  normMapHex(color) {
+    const hex = String(color || '').replace('#', '').trim();
+    if (/^[0-9a-fA-F]{3}$/.test(hex)) {
+      return ('#' + hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2]).toLowerCase();
+    }
+    if (/^[0-9a-fA-F]{6}$/.test(hex)) return ('#' + hex).toLowerCase();
+    return '';
+  },
+  mapRouteLabel(row) {
+    return String((row && (row.label || row.route || '')) || '').trim() || '?';
+  },
+  mapRouteColor(row, usedByLabel) {
+    const label = BkkLib.mapRouteLabel(row);
+    usedByLabel = usedByLabel || {};
+    if (usedByLabel[label]) return usedByLabel[label];
+    const used = {};
+    Object.keys(usedByLabel).forEach((k) => { used[String(usedByLabel[k]).toLowerCase()] = true; });
+    let color = BkkLib.normMapHex(row && row.color);
+    if (color && used[color]) color = '';
+    if (!color) {
+      const palette = BkkLib.MAP_ROUTE_PALETTE;
+      color = palette.find((c) => !used[c]) || palette[Object.keys(usedByLabel).length % palette.length];
+    }
+    usedByLabel[label] = color;
+    return color;
+  },
+  legStartPoint(leg) {
+    const sh = BkkLib.validMapShape(leg && leg.shape);
+    if (sh.length) return sh[0];
+    return BkkLib.finiteLatLon(leg && leg.fromLat, leg && leg.fromLon);
+  },
+  legEndPoint(leg) {
+    const sh = BkkLib.validMapShape(leg && leg.shape);
+    if (sh.length) return sh[sh.length - 1];
+    return BkkLib.finiteLatLon(leg && leg.toLat, leg && leg.toLon);
+  },
+  stitchJourneyLegCoords(journey) {
+    const legs = (journey && journey.legs) || [];
+    for (let i = 0; i < legs.length; i++) {
+      const leg = legs[i];
+      if (BkkLib.legStartPoint(leg) || i < 1) continue;
+      const prev = BkkLib.legEndPoint(legs[i - 1]);
+      if (!prev) continue;
+      if (leg.fromLat == null) {
+        leg.fromLat = prev[0];
+        leg.fromLon = prev[1];
+      }
+    }
+    for (let i = legs.length - 1; i >= 0; i--) {
+      const leg = legs[i];
+      if (BkkLib.legEndPoint(leg) || i >= legs.length - 1) continue;
+      const next = BkkLib.legStartPoint(legs[i + 1]);
+      if (!next) continue;
+      if (leg.toLat == null) {
+        leg.toLat = next[0];
+        leg.toLon = next[1];
+      }
+    }
+    return journey;
+  },
+  sliceShapeBetween(shape, from, to) {
+    const pts = BkkLib.validMapShape(shape);
+    if (pts.length < 2) return pts;
+    const a = BkkLib.finiteLatLon(from && from[0], from && from[1]);
+    const b = BkkLib.finiteLatLon(to && to[0], to && to[1]);
+    if (!a || !b) return pts;
+    let i0 = 0;
+    let i1 = pts.length - 1;
+    let d0 = 1e15;
+    let d1 = 1e15;
+    pts.forEach((p, i) => {
+      const da = BkkLib.haversineMeters(p, a);
+      const db = BkkLib.haversineMeters(p, b);
+      if (da < d0) {
+        d0 = da;
+        i0 = i;
+      }
+      if (db < d1) {
+        d1 = db;
+        i1 = i;
+      }
+    });
+    if (i1 < i0) {
+      const tmp = i0;
+      i0 = i1;
+      i1 = tmp;
+    }
+    const sliced = pts.slice(i0, i1 + 1);
+    return sliced.length >= 2 ? sliced : pts;
+  },
+  async fillJourneyShapes(journey) {
+    if (!journey || !Array.isArray(journey.legs)) return journey;
+    BkkLib.stitchJourneyLegCoords(journey);
+    await Promise.all(journey.legs.map(async (leg) => {
+      if (!leg || leg.walk) return;
+      if (BkkLib.validMapShape(leg.shape).length >= 2) return;
+      const tid = String(leg.tripId || '');
+      if (!tid) return;
+      try {
+        let pts = await BkkLib.motisTripShape(tid);
+        const a = BkkLib.finiteLatLon(leg.fromLat, leg.fromLon);
+        const b = BkkLib.finiteLatLon(leg.toLat, leg.toLon);
+        if (pts.length >= 2 && a && b) pts = BkkLib.sliceShapeBetween(pts, a, b);
+        if (pts.length >= 2) leg.shape = pts;
+      } catch (_e) { /* endpoint fallback in journeyMapSegments */ }
+    }));
+    BkkLib.stitchJourneyLegCoords(journey);
+    return journey;
+  },
   journeyMapSegments(journey, origin, dest) {
+    BkkLib.stitchJourneyLegCoords(journey);
     const segs = [];
     const add = (shape, walk, color, from, to) => {
       if (!Array.isArray(shape) || shape.length < 2) return;
@@ -2906,8 +3272,8 @@ const BkkLib = {
       if (BkkLib.genericRailLabel(prevLab) && rowLab && !BkkLib.genericRailLabel(rowLab)) {
         prev.label = rowLab;
       }
-      const prevHasGps = Number.isFinite(Number(prev.lat)) && Number.isFinite(Number(prev.lon));
-      const rowHasGps = Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon));
+      const prevHasGps = !!BkkLib.mapGpsLatLon(prev.lat, prev.lon);
+      const rowHasGps = !!BkkLib.mapGpsLatLon(row.lat, row.lon);
       const rowElvira = /^elvira:/i.test(String(row.tripId || ''));
       if (rowHasGps && (!prevHasGps || rowElvira)) {
         prev.lat = Number(row.lat);
@@ -2926,6 +3292,7 @@ const BkkLib = {
     };
     const add = (row) => {
       if (!row || !departureStillDue(row.dep || row.sched)) return;
+      if (BkkLib.numberedRailBadge(row)) return;
       const n = BkkLib.rowTrainNumber(row);
       if (n && byNum.has(n)) {
         overlay(out[byNum.get(n)], row);
@@ -3207,6 +3574,7 @@ const BkkLib = {
           const stops = (((data.data || {}).references) || {}).stops || {};
           Object.values(stops).forEach((s) => {
             if (!s || !s.id || !s.name) return;
+            if (/^STOP_/i.test(String(s.id))) return;
             if (mode === 'mav' && !BkkLib.isMavStop(s)) return;
             if (mode === 'volan' && !BkkLib.isVolanStop(s)) return;
             if (mode === 'bkk' && !BkkLib.isBkkStop(s)) return;
@@ -3264,6 +3632,7 @@ const BkkLib = {
       if (as !== bs) return as - bs;
       return (a.label || a.name).localeCompare(b.label || b.name, 'hu');
     });
+    if (mode === 'all') hits = BkkLib.collapseSameNameStops(hits);
     const cities = hits.filter((h) => h.city).slice(0, 40);
     const other = hits.filter((h) => !h.city).slice(0, 20);
     return cities.concat(other);
@@ -3279,7 +3648,7 @@ const BkkLib = {
       if (idx < 0) return;
       v.ids.slice(idx + 1).forEach((id) => {
         const raw = (stops[id] || {}).name;
-        const n = BkkLib.stationKey(raw) || BkkLib.norm(raw);
+        const n = BkkLib.placeNameKey({ name: raw }) || BkkLib.stationKey(raw) || BkkLib.norm(raw);
         if (!raw || !n || seen.has(n)) return;
         seen.add(n);
         names.push({ key: n, name: raw, id });
@@ -3453,7 +3822,7 @@ const BkkLib = {
     const seen = new Set();
     sts.slice(oidx + 1).forEach((s) => {
       const raw = (stops[s.stopId] || {}).name;
-      const n = BkkLib.stationKey(raw) || BkkLib.norm(raw);
+      const n = BkkLib.placeNameKey({ name: raw }) || BkkLib.stationKey(raw) || BkkLib.norm(raw);
       if (!raw || !n || seen.has(n)) return;
       seen.add(n);
       names.push({ key: n, name: raw, id: s.stopId });
@@ -3847,11 +4216,10 @@ const BkkLib = {
       for (let i = 0; i < vehs.length; i++) {
         const v = vehs[i];
         if (!BkkLib.matchEmmaVehicle(row, v)) continue;
-        const lat = Number(v.lat);
-        const lon = Number(v.lon);
-        if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
-        row.lat = lat;
-        row.lon = lon;
+        const gps = BkkLib.mapGpsLatLon(v.lat, v.lon);
+        if (!gps) continue;
+        row.lat = gps[0];
+        row.lon = gps[1];
         if (v.heading != null) row.heading = v.heading;
         if (v.speed != null) row.speed = v.speed;
         break;
@@ -3888,9 +4256,7 @@ const BkkLib = {
       .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
     vehs.forEach((vehicle) => {
       if (!vehicle) return;
-      const lat = Number(vehicle.lat);
-      const lon = Number(vehicle.lon);
-      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+      if (!BkkLib.mapGpsLatLon(vehicle.lat, vehicle.lon)) return;
       BkkLib.coachRouteKeys(vehicle.route).forEach((key) => {
         if (!byRoute.has(key)) byRoute.set(key, []);
         byRoute.get(key).push(vehicle);
@@ -3919,7 +4285,7 @@ const BkkLib = {
     const groups = new Map();
     list.forEach((row, idx) => {
       if (!row || !/^(gtfs:|motis:)/.test(String(row.tripId || ''))) return;
-      if (Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon))) return;
+      if (BkkLib.mapGpsLatLon(row.lat, row.lon)) return;
       let key = '';
       BkkLib.coachRouteKeys(row.label).some((candidate) => {
         if (!byRoute.has(candidate)) return false;
@@ -3958,8 +4324,10 @@ const BkkLib = {
         if (usedRow.has(pair.idx) || usedVehicle.has(pair.vi)) return;
         usedRow.add(pair.idx);
         usedVehicle.add(pair.vi);
-        list[pair.idx].lat = Number(uniq[pair.vi].lat);
-        list[pair.idx].lon = Number(uniq[pair.vi].lon);
+        const gps = BkkLib.mapGpsLatLon(uniq[pair.vi].lat, uniq[pair.vi].lon);
+        if (!gps) return;
+        list[pair.idx].lat = gps[0];
+        list[pair.idx].lon = gps[1];
       });
     });
     return list;
@@ -3968,7 +4336,7 @@ const BkkLib = {
     const list = Array.isArray(rows) ? rows : [];
     const needs = list.some((row) => row
       && /^(gtfs:|motis:)/.test(String(row.tripId || ''))
-      && !(Number.isFinite(Number(row.lat)) && Number.isFinite(Number(row.lon))));
+      && !BkkLib.mapGpsLatLon(row.lat, row.lon));
     if (!hass || !needs) return list;
     return BkkLib.applyCoachGps(list, await BkkLib.coachPositions(hass));
   },
@@ -3985,6 +4353,19 @@ const BkkLib = {
   },
   genericRailLabel(label) {
     return /^(IC|EC|IR|EX|EN|RJX|S|SZ)$/i.test(String(label || '').trim());
+  },
+  suburbanLineLabel(label) {
+    return /^[SGZ]\d/i.test(String(label || '').trim());
+  },
+  /* Hop boards keep branded lines (S40/G43/Z30, BAKONY, TÓPART) and
+     generic IC/EC/IR/S/SZ so named overlays can land. Drop a badge that
+     is only digits, or EX/EN plus a 4+ digit train number. */
+  numberedRailBadge(row) {
+    if (!row || !BkkLib.isTrainRow(row)) return false;
+    const label = String(row.label || '').trim();
+    if (/^\d+$/.test(label)) return true;
+    if (/^(EX|EN)$/i.test(label) && /^\d{4,}$/.test(BkkLib.rowTrainNumber(row))) return true;
+    return false;
   },
   matchFutarStopTime(row, st, trip, rt) {
     if (!row || !st || !st.tripId) return false;
@@ -4109,9 +4490,10 @@ const BkkLib = {
         row.tripId = String(v.tripId);
       }
       if (v.bikesAllowed === true || v.bikesallowed === true) row.bikesAllowed = true;
-      if (!Number.isFinite(Number(row.lat)) && v.lat != null) {
-        row.lat = Number(v.lat);
-        row.lon = Number(v.lon);
+      const incoming = BkkLib.mapGpsLatLon(v.lat, v.lon);
+      if (!BkkLib.mapGpsLatLon(row.lat, row.lon) && incoming) {
+        row.lat = incoming[0];
+        row.lon = incoming[1];
       }
     });
     BkkLib.applyEmmaPositions(rows, pool.filter((v) => !BkkLib.isFutarTripId(v && v.tripId)).map((v) => ({
@@ -4131,7 +4513,18 @@ const BkkLib = {
   },
   applyRailBadge(row) {
     if (!row) return row;
-    const badge = BKK_RAIL_BADGE[String(row.label || '').toUpperCase()];
+    let key = String(row.label || '').trim().toUpperCase().normalize('NFC');
+    if (key === 'S') {
+      row.label = 'Sz';
+      key = 'SZ';
+    }
+    let badge = BKK_RAIL_BADGE[key];
+    if (!badge && BkkLib.isTrainRow(row) && key
+        && !BkkLib.suburbanLineLabel(key)
+        && !BkkLib.genericRailLabel(key)
+        && !/^\d+$/.test(key)) {
+      badge = BKK_RAIL_BADGE.IC;
+    }
     if (!badge) return row;
     const cur = String(row.color || '').replace('#', '').toLowerCase();
     if (!cur || cur === '4477aa') {
@@ -4153,7 +4546,8 @@ const BkkLib = {
     head = BkkLib.stripPlatform(head);
     const lat = Number(r.lat);
     const lon = Number(r.lon);
-    const hasGps = Number.isFinite(lat) && Number.isFinite(lon);
+    const gps = BkkLib.mapGpsLatLon(lat, lon);
+    const hasGps = !!gps;
     const gtfs = /^(gtfs:|elvira:|motis:)/.test(String(r.tripId || ''));
     const shape = Array.isArray(r.shape) ? r.shape : undefined;
     return {
@@ -4175,8 +4569,8 @@ const BkkLib = {
       delay: Number(r.delay || 0),
       booking: !!r.booking,
       travelMin: r.travel,
-      lat: hasGps ? lat : null,
-      lon: hasGps ? lon : null,
+      lat: hasGps ? gps[0] : null,
+      lon: hasGps ? gps[1] : null,
       hasGps: hasGps,
       hasLocation: hasGps || (!gtfs && !!r.tripId) || !!(shape && shape.length >= 2)
         || /^elvira:/i.test(String(r.tripId || '')),
@@ -4313,7 +4707,15 @@ class BKKHopCard extends HTMLElement {
     if (!this._painted) return;
     this._startTick();
     this._bindMapClicks();
-    if (!this._poll && !this._reloadActive) this._reloadSafe();
+    if (!this._poll && !this._reloadActive && this._shouldReloadOnConnect()) this._reloadSafe();
+  }
+
+  _shouldPoll() {
+    return true;
+  }
+
+  _shouldReloadOnConnect() {
+    return true;
   }
 
   disconnectedCallback() {
@@ -4381,6 +4783,7 @@ class BKKHopCard extends HTMLElement {
       .badge { display: inline-block; min-width: 2.4em; padding: 2px 6px;
         border-radius: 6px; font-weight: 800; font-size: 12px; line-height: 1.35;
         text-align: center; }
+      .badge.long { font-size: 10px; padding: 2px 5px; letter-spacing: -0.02em; }
       td.dest { max-width: 0; overflow: hidden; white-space: nowrap;
         text-overflow: ellipsis; }
       .num { margin-left: 5px; font-size: 11px; color: var(--secondary-text-color); }
@@ -4540,7 +4943,7 @@ class BKKHopCard extends HTMLElement {
     const mapBtn = `<td class="mapbtn"><button type="button" class="map-open" aria-label="${tip}" title="${tip}"><ha-icon icon="mdi:map-marker-outline"></ha-icon></button></td>`;
     return `<tr${clickable}>
       <td class="icon"><ha-icon icon="${esc(r.icon || 'mdi:bus')}"></ha-icon></td>
-      <td class="route"><span class="badge" style="${esc(this._badgeStyle(r))}">${
+      <td class="route"><span class="badge${String(r.label || '').length > 4 ? ' long' : ''}" style="${esc(this._badgeStyle(r))}">${
       esc(r.label || '?')}</span></td>
       <td class="dest" title="${esc(r.headsign || '')}">${esc(r.headsign || '')}${num}</td>
       <td class="flags">${plat}${pictos.length ? `<span class="pictos">${pictos.join('')}</span>` : ''}</td>
@@ -4666,6 +5069,11 @@ class BKKHopCard extends HTMLElement {
       try { this._map.removeLayer(this._mapBoardMarker); } catch (_e) { /* ignore */ }
       this._mapBoardMarker = null;
     }
+    (this._mapRouteLayers || []).forEach((layer) => {
+      if (!this._map || !layer) return;
+      try { this._map.removeLayer(layer); } catch (_e) { /* ignore */ }
+    });
+    this._mapRouteLayers = [];
     if (this._map) {
       try { this._map.remove(); } catch (_e) { /* ignore */ }
       this._map = null;
@@ -4688,9 +5096,8 @@ class BKKHopCard extends HTMLElement {
     return `<div class="ht-board-dot" title="${BkkLib.esc(tip)}"><span class="ht-board-dot-core"></span></div>`;
   }
 
-  _dotIcon(row, live, lang) {
-    const hex = String(row.color || '').replace('#', '');
-    const color = /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(hex) ? '#' + hex : '#2E5EA8';
+  _dotIcon(row, live, lang, colorHex) {
+    const color = BkkLib.normMapHex(colorHex || (row && row.color)) || '#2E5EA8';
     const pulse = live ? 'ht-veh-dot-live' : 'ht-veh-dot-est';
     const tip = live ? t(lang, 'mapLiveDot') : t(lang, 'mapEstDot');
     return `<div class="ht-veh-dot ${pulse}" style="--bg:${BkkLib.esc(color)};" title="${BkkLib.esc(tip)}">`
@@ -4764,6 +5171,64 @@ class BKKHopCard extends HTMLElement {
     overlay.addEventListener('click', (ev) => { if (ev.target === overlay) close(); });
   }
 
+  async _loadRowMapShape(row) {
+    const cfg = this._config || {};
+    let shape = BkkLib.validMapShape(row && row.shape);
+    let board = BkkLib.finiteLatLon(cfg.stopLat, cfg.stopLon);
+    let motisShape = [];
+    let motisCoversHead = true;
+    let motisMap = null;
+    try {
+      motisMap = await BkkLib.motisShapeForHop(
+        row,
+        { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon },
+        { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey },
+        { minutesAfter: cfg.minutesAfter, mode: 'all' },
+      );
+      motisShape = BkkLib.validMapShape(motisMap && motisMap.shape);
+      motisCoversHead = !!(motisMap && motisMap.coversHead);
+      if (motisMap && motisMap.board) {
+        const orig = BkkLib.finiteLatLon(cfg.stopLat, cfg.stopLon);
+        if (!orig || BkkLib.haversineMeters(orig, motisMap.board) <= 300) {
+          board = motisMap.board;
+        }
+      }
+    } catch (_e) { /* row shape / GPS still draw */ }
+    if (shape.length < 2 && /^gtfs:/i.test(String((row && row.tripId) || '')) && this._hass) {
+      try {
+        const points = await BkkLib.coachShape(this._hass, row.label, row.headsign || '');
+        shape = BkkLib.validMapShape(BkkLib.decodePolyline(points));
+      } catch (_e) { /* FUTAR / MOTIS still fill */ }
+    }
+    const tripId = (row && row.tripId) || '';
+    const canFutar = cfg.apiKey && (
+      !/^motis:/i.test(String(tripId || '')) || !!BkkLib.rowTrainNumber(row)
+    );
+    let futarShape = [];
+    if (canFutar) {
+      let geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : '';
+      if (!geomTrip && this._hass) {
+        const hit = BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), row);
+        if (hit && BkkLib.isFutarTripId(hit.tripId)) geomTrip = hit.tripId;
+      }
+      if (BkkLib.isFutarTripId(geomTrip)) {
+        try {
+          futarShape = await BkkLib.hassTripShape(this._hass, cfg.apiKey, geomTrip);
+        } catch (_e) { /* other rows still draw */ }
+      }
+    }
+    shape = BkkLib.combineHopShapes(motisShape, futarShape, motisCoversHead, row && row.shape);
+    const motisGap = BkkLib.shapeGpsGapMeters(motisShape, row && row.lat, row && row.lon);
+    const futarGap = BkkLib.shapeGpsGapMeters(futarShape, row && row.lat, row && row.lon);
+    if (motisGap != null && futarGap != null && futarGap + 400 < motisGap && futarGap < 3000) {
+      shape = futarShape;
+    } else if (motisGap != null && motisGap > 4000 && futarShape.length >= 2
+        && (futarGap == null || futarGap < motisGap)) {
+      shape = futarShape;
+    }
+    return { shape: BkkLib.validMapShape(shape), board: board };
+  }
+
   async _openVehicleMap(row) {
     const lang = this._lang();
     const cfg = this._config || {};
@@ -4772,17 +5237,14 @@ class BKKHopCard extends HTMLElement {
     if (this._mapOverlay && this._openMapKey === key) return;
     this._closeVehicleMap();
     this._openingMap = key;
-    let lat = row.lat != null ? Number(row.lat) : NaN;
-    let lon = row.lon != null ? Number(row.lon) : NaN;
-    let hasGps = Number.isFinite(lat) && Number.isFinite(lon);
-    let shape = [];
-    let hasShape = false;
-    if (Array.isArray(row.shape) && row.shape.length >= 2) {
-      shape = BkkLib.validMapShape(row.shape);
-      hasShape = shape.length >= 2;
-    }
+    const gps0 = BkkLib.mapGpsLatLon(row.lat, row.lon);
+    let lat = gps0 ? gps0[0] : NaN;
+    let lon = gps0 ? gps0[1] : NaN;
+    let hasGps = !!gps0;
+    let shape = BkkLib.validMapShape(row.shape);
+    let hasShape = shape.length >= 2;
     let positionEstimated = false;
-    let tripId = row.tripId || '';
+    const tripId = row.tripId || '';
     if (!hasGps && !tripId && !hasShape) {
       this._showMapNotice(t(lang, 'mapNoData'));
       return;
@@ -4814,7 +5276,7 @@ class BKKHopCard extends HTMLElement {
     `;
     (document.documentElement || document.body).appendChild(overlay);
     this._mapOverlay = overlay;
-    this._openMapKey = this._mapKey(row);
+    this._openMapKey = key;
     this._onMapKey = (ev) => {
       if (ev.key === 'Escape') this._closeVehicleMap();
     };
@@ -4830,8 +5292,6 @@ class BKKHopCard extends HTMLElement {
     let map;
     try {
       map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: true }).setView([startLat, startLon], hasGps ? 12 : 8);
-      /* Carto Voyager raster now watermarks every tile without an API key.
-         OSM France is a keyed-less street map that still works with Leaflet. */
       L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
         maxZoom: 20,
         subdomains: 'abc',
@@ -4842,13 +5302,13 @@ class BKKHopCard extends HTMLElement {
       return;
     }
     this._map = map;
+    this._mapRouteLayers = [];
     const resizeMap = () => { try { map.invalidateSize(); } catch (_e) { /* ignore */ } };
     requestAnimationFrame(() => { resizeMap(); requestAnimationFrame(resizeMap); });
     const drawMarker = () => {
       if (!this._map || this._map !== map) return;
-      const hereLat = Number(lat);
-      const hereLon = Number(lon);
-      if (!Number.isFinite(hereLat) || !Number.isFinite(hereLon)) return;
+      const here = BkkLib.mapGpsLatLon(lat, lon);
+      if (!here) return;
       if (this._mapMarker) {
         try { this._map.removeLayer(this._mapMarker); } catch (_e) { /* ignore */ }
       }
@@ -4858,66 +5318,30 @@ class BKKHopCard extends HTMLElement {
         iconSize: [22, 22],
         iconAnchor: [11, 11],
       });
-      this._mapMarker = L.marker([hereLat, hereLon], { icon: icon, zIndexOffset: 600 }).addTo(map);
+      this._mapMarker = L.marker(here, { icon: icon, zIndexOffset: 600 }).addTo(map);
     };
     if (hasGps) {
       drawMarker();
       foot.textContent = this._mapFootText(row, false, true, false, lang);
     }
     let board = BkkLib.finiteLatLon(cfg.stopLat, cfg.stopLon);
-    let motisShape = [];
-    let motisCoversHead = true;
     try {
-      const motisMap = await BkkLib.motisShapeForHop(
-        row,
-        { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon },
-        { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey },
-        { minutesAfter: cfg.minutesAfter, mode: 'all' },
-      );
-      motisShape = BkkLib.validMapShape(motisMap && motisMap.shape);
-      motisCoversHead = !!(motisMap && motisMap.coversHead);
-      if (motisMap && motisMap.board) {
-        const orig = BkkLib.finiteLatLon(cfg.stopLat, cfg.stopLon);
-        if (!orig || BkkLib.haversineMeters(orig, motisMap.board) <= 300) {
-          board = motisMap.board;
-        }
-      }
+      const got = await this._loadRowMapShape(row);
+      shape = BkkLib.validMapShape(got.shape);
+      hasShape = shape.length >= 2;
+      if (got.board) board = got.board;
     } catch (_e) { /* timetable row still shows the live dot */ }
-    if (!hasShape && /^gtfs:/i.test(String(row.tripId || '')) && this._hass) {
-      try {
-        const points = await BkkLib.coachShape(this._hass, row.label, row.headsign || '');
-        shape = BkkLib.validMapShape(BkkLib.decodePolyline(points));
-        hasShape = shape.length >= 2;
-      } catch (_e) { /* timetable row still shows the live dot */ }
-    }
-    const canFutar = cfg.apiKey && (
-      !/^motis:/i.test(String(tripId || '')) || !!BkkLib.rowTrainNumber(row)
-    );
-    let futarShape = [];
-    if (canFutar) {
-      let geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : '';
-      if (!geomTrip && this._hass) {
-        const hit = BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), row);
-        if (hit && BkkLib.isFutarTripId(hit.tripId)) geomTrip = hit.tripId;
-      }
-      if (BkkLib.isFutarTripId(geomTrip)) {
-        try {
-          futarShape = await BkkLib.hassTripShape(this._hass, cfg.apiKey, geomTrip);
-        } catch (err) {
-          foot.textContent = t(lang, 'mapRouteFail', err && err.message ? err.message : err);
-        }
-      }
-    }
-    shape = BkkLib.combineHopShapes(motisShape, futarShape, motisCoversHead, row.shape);
-    hasShape = shape.length >= 2;
     if (!this._map || this._map !== map || !this._mapOverlay) {
       this._openingMap = '';
       return;
     }
-    const hasPosition = Number.isFinite(lat) && Number.isFinite(lon)
-      && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
-    const hex = String(row.color || '').replace('#', '');
-    const routeColor = /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(hex) ? '#' + hex : '#2E5EA8';
+    const pos = BkkLib.mapGpsLatLon(lat, lon);
+    const hasPosition = !!pos;
+    if (hasPosition) {
+      lat = pos[0];
+      lon = pos[1];
+    }
+    const routeColor = BkkLib.mapRouteColor(row, {});
     const longRoute = hasShape && BkkLib.shapeSpanMeters(shape) > 40000;
     const routeRenderer = (typeof L.canvas === 'function')
       ? L.canvas({ padding: longRoute ? 2 : 0.8 })
@@ -4938,19 +5362,22 @@ class BKKHopCard extends HTMLElement {
       } else if (hasPosition) {
         map.setView([lat, lon], 13);
       }
-      [this._mapRoute, this._mapRouteOutline].forEach((layer) => {
+      (this._mapRouteLayers || []).forEach((layer) => {
         if (layer && typeof layer.redraw === 'function') {
           try { layer.redraw(); } catch (_e) { /* ignore */ }
         }
       });
     };
     if (hasShape) {
-      this._mapRouteOutline = L.polyline(shape, Object.assign({
+      const outline = L.polyline(shape, Object.assign({
         color: '#1a1a1a', weight: 7, opacity: 0.45, interactive: false,
       }, lineBase)).addTo(map);
-      this._mapRoute = L.polyline(shape, Object.assign({
+      const line = L.polyline(shape, Object.assign({
         color: routeColor, weight: 5, opacity: 0.98,
       }, lineBase)).addTo(map);
+      this._mapRouteLayers.push(outline, line);
+      this._mapRouteOutline = outline;
+      this._mapRoute = line;
     }
     if (board) {
       const stopIcon = L.divIcon({
@@ -4975,24 +5402,25 @@ class BKKHopCard extends HTMLElement {
   }
 
   _syncOpenMap() {
-    if (!this._map || !this._openMapKey || !this._mapMarker) return;
+    if (!this._map || !this._openMapKey) return;
+    const lang = this._lang();
+    const L = typeof window !== 'undefined' ? window.L : null;
+    if (!this._mapMarker) return;
     const row = (this._rows || []).find((r) => this._mapKey(r) === this._openMapKey);
     if (!row || !row.hasGps || row.lat == null || row.lon == null) return;
-    const lat = Number(row.lat);
-    const lon = Number(row.lon);
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-    const L = typeof window !== 'undefined' ? window.L : null;
-    this._mapMarker.setLatLng([lat, lon]);
+    const gps = BkkLib.mapGpsLatLon(row.lat, row.lon);
+    if (!gps) return;
+    this._mapMarker.setLatLng(gps);
     if (L) {
       this._mapMarker.setIcon(L.divIcon({
         className: '',
-        html: this._dotIcon(row, true, this._lang()),
+        html: this._dotIcon(row, true, lang),
         iconSize: [22, 22],
         iconAnchor: [11, 11],
       }));
     }
     const foot = this._mapOverlay && this._mapOverlay.querySelector('.ht-map-foot');
-    if (foot) foot.textContent = this._mapFootText(row, true, true, false, this._lang(), !!this._mapBoardMarker);
+    if (foot) foot.textContent = this._mapFootText(row, true, true, false, lang, !!this._mapBoardMarker);
   }
 
   _departMode() {
@@ -5166,6 +5594,7 @@ class BKKHopCard extends HTMLElement {
     try {
       await run();
       if (!this.isConnected || gen !== this._gen) return;
+      if (!this._shouldPoll()) return;
       const every = Math.max(15, Number(cfg.refresh || 45)) * 1000;
       this._poll = setInterval(run, every);
     } finally {
@@ -5219,19 +5648,22 @@ class BKKPlannerCard extends BKKHopCard {
     return 'all';
   }
 
+  _shouldPoll() {
+    return false;
+  }
+
+  _shouldReloadOnConnect() {
+    return !(this._journey || this._journeyLoading || (this._rows && this._rows.length));
+  }
+
+  /* A full paint remounts the inline map. Leave the countdown frozen until
+     the user changes origin, destination or the look-ahead. */
+  _startTick() {}
+
   _considerJourney() {
     const cfg = this._config || {};
     const horizon = clampMinutesAfter(cfg.minutesAfter);
     const key = [cfg.stopId, cfg.destStopId || '', cfg.destName, horizon].join('|');
-    const nowSec = Math.floor(Date.now() / 1000);
-    const visible = (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
-    if (visible.length) {
-      if (this._journey) {
-        this._journey = null;
-        this._paint();
-      }
-      return;
-    }
     if (!cfg.stopId || !cfg.destName) return;
     if (this._journeyKey === key && (this._journeyLoading || this._journey)) return;
     const gen = this._gen;
@@ -5243,11 +5675,18 @@ class BKKPlannerCard extends BKKHopCard {
       { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
       this._hass,
       { minutesAfter: horizon },
-    ).then((journey) => {
+    ).then(async (journey) => {
       if (gen !== this._gen) return;
       this._journeyLoading = false;
       this._journey = journey;
       this._paint();
+      if (!journey) return;
+      try {
+        await BkkLib.fillJourneyShapes(journey);
+      } catch (_e) { /* draw the endpoint fallback */ }
+      if (gen !== this._gen) return;
+      this._journey = journey;
+      this._paintJourney();
     }).catch(() => {
       if (gen !== this._gen) return;
       this._journeyLoading = false;
@@ -5261,21 +5700,120 @@ class BKKPlannerCard extends BKKHopCard {
   }
 
   _paint() {
+    this._teardownPlannerInlineMap();
     super._paint();
     this._paintJourney();
   }
 
+  disconnectedCallback() {
+    this._teardownPlannerInlineMap();
+    super.disconnectedCallback();
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    if (!this._painted || this._plannerMap) return;
+    const host = this._elBody && this._elBody.querySelector('.journey-plan');
+    if (host && host.querySelector('#pjmap')) this._mountPlannerInlineMap(host);
+  }
+
+  _teardownPlannerInlineMap() {
+    if (this._plannerMap) {
+      try { this._plannerMap.remove(); } catch (_e) { /* ignore */ }
+      this._plannerMap = null;
+    }
+  }
+
+  _drawJourneyPolylines(L, map, segs, opts) {
+    if (!Array.isArray(segs) || !segs.length) return [];
+    opts = opts || {};
+    const clickable = !!opts.interactive;
+    const allPts = [];
+    const lineBase = { lineJoin: 'round', lineCap: 'round', noClip: true };
+    segs.forEach((seg) => {
+      const shape = seg.shape;
+      shape.forEach((pt) => allPts.push(pt));
+      if (seg.walk) {
+        L.polyline(shape, Object.assign({
+          color: '#1a1a1a', weight: 5, opacity: 0.35, dashArray: '8 8', interactive: false,
+        }, lineBase)).addTo(map);
+        L.polyline(shape, Object.assign({
+          color: '#888888', weight: 3, opacity: 0.95, dashArray: '8 8', interactive: clickable,
+        }, lineBase)).addTo(map);
+      } else {
+        L.polyline(shape, Object.assign({
+          color: '#1a1a1a', weight: 7, opacity: 0.45, interactive: false,
+        }, lineBase)).addTo(map);
+        L.polyline(shape, Object.assign({
+          color: seg.color, weight: 5, opacity: 0.98, interactive: clickable,
+        }, lineBase)).addTo(map);
+      }
+    });
+    const pin = (pt, fill) => {
+      if (!pt) return;
+      L.circleMarker(pt, {
+        radius: 7, color: '#fff', weight: 2, fillColor: fill, fillOpacity: 1,
+      }).addTo(map);
+    };
+    pin(segs[0].shape[0], '#0F6FC6');
+    for (let i = 0; i < segs.length - 1; i++) {
+      const shape = segs[i].shape;
+      pin(shape[shape.length - 1], '#555555');
+    }
+    const lastSeg = segs[segs.length - 1].shape;
+    pin(lastSeg[lastSeg.length - 1], '#0F6FC6');
+    return allPts;
+  }
+
+  _fitJourneyView(L, map, allPts, pad) {
+    if (!map || !allPts || allPts.length < 2) return;
+    const bounds = L.latLngBounds(allPts);
+    const apply = () => {
+      try {
+        map.invalidateSize();
+        map.fitBounds(bounds, { padding: [pad, pad], maxZoom: 14 });
+      } catch (_e) { /* ignore */ }
+    };
+    apply();
+    requestAnimationFrame(() => { apply(); requestAnimationFrame(apply); });
+    setTimeout(apply, 200);
+  }
+
   _paintJourney() {
     if (!this._elBody) return;
+    this._teardownPlannerInlineMap();
     const prev = this._elBody.querySelector('.journey-plan');
     if (prev) prev.remove();
-    const journey = this._journey;
-    if (!journey || !journey.legs || !journey.legs.length) return;
-    const nowSec = Math.floor(Date.now() / 1000);
-    const visible = (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
-    if (visible.length) return;
+    const cfg = this._config || {};
+    if (!cfg.stopId || !cfg.destName) return;
     const lang = this._lang();
     const esc = BkkLib.esc;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const visible = (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
+    const journey = this._journey;
+    const mapBtn = `<button type="button" id="pmap">${esc(t(lang, 'plannerShowMap'))}</button>`;
+    const bindMap = (box, useBoard) => {
+      this._elBody.insertBefore(box, this._elBody.firstChild);
+      const btn = box.querySelector('#pmap');
+      if (btn) {
+        btn.addEventListener('click', () => {
+          if (!useBoard) return this._openJourneyMap();
+          const first = visible[0];
+          if (first) return this._openVehicleMap(first);
+          this._showMapNotice(t(lang, 'mapNoData'));
+        });
+      }
+    };
+    const showJourney = !!(journey && journey.legs && journey.legs.length
+      && (!visible.length || BkkLib.journeyBeatsBoard(journey, visible)));
+    if (visible.length && !showJourney) {
+      const box = document.createElement('div');
+      box.className = 'journey-plan j-map-only';
+      box.innerHTML = mapBtn;
+      bindMap(box, true);
+      return;
+    }
+    if (!showJourney) return;
     const legs = journey.legs.map((leg) => {
       if (leg.walk) {
         const walkKey = leg.stationWalk ? 'plannerStationWalk' : 'plannerWalk';
@@ -5295,11 +5833,62 @@ class BKKPlannerCard extends BKKHopCard {
     box.className = 'journey-plan';
     box.innerHTML = `<div class="j-title">${esc(t(lang, 'plannerJourneyTitle'))}</div>`
       + `<div class="j-sum">${esc(t(lang, 'plannerJourneySummary', [journey.durationMin, journey.transfers, journey.walkMin, journey.waitMin || 0]))}</div>`
-      + `<button type="button" id="pmap">${esc(t(lang, 'plannerShowMap'))}</button>`
+      + `<div id="pjmap" class="j-map" hidden></div>`
+      + mapBtn
       + legs;
-    this._elBody.appendChild(box);
-    const mapBtn = box.querySelector('#pmap');
-    if (mapBtn) mapBtn.addEventListener('click', () => this._openJourneyMap());
+    bindMap(box, false);
+    this._mountPlannerInlineMap(box);
+  }
+
+  async _mountPlannerInlineMap(host) {
+    const el = host && host.querySelector('#pjmap');
+    if (!el) return;
+    try {
+      const cfg = this._config || {};
+      try {
+        await BkkLib.fillJourneyShapes(this._journey);
+      } catch (_e) { /* draw the endpoint fallback */ }
+      if (!el.isConnected) return;
+      const segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
+      if (!segs.length) {
+        el.hidden = true;
+        return;
+      }
+      let L;
+      try {
+        L = await this._ensureLeaflet();
+      } catch (_e) {
+        el.hidden = true;
+        return;
+      }
+      if (!el.isConnected) return;
+      this._teardownPlannerInlineMap();
+      el.hidden = false;
+      const start = segs[0].shape[0];
+      const map = L.map(el, {
+        scrollWheelZoom: false,
+        dragging: false,
+        touchZoom: false,
+        doubleClickZoom: false,
+        boxZoom: false,
+        keyboard: false,
+        preferCanvas: false,
+        attributionControl: true,
+        zoomControl: false,
+      }).setView(start, 8);
+      this._plannerMap = map;
+      L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
+        maxZoom: 20,
+        subdomains: 'abc',
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+      }).addTo(map);
+      const allPts = this._drawJourneyPolylines(L, map, segs, { interactive: false });
+      map.on('click', () => this._openJourneyMap());
+      this._fitJourneyView(L, map, allPts, 16);
+    } catch (_e) {
+      this._teardownPlannerInlineMap();
+      el.hidden = true;
+    }
   }
 
   async _openJourneyMap() {
@@ -5309,7 +5898,26 @@ class BKKPlannerCard extends BKKHopCard {
     if (this._mapOverlay && this._openMapKey === 'journey') return;
     this._closeVehicleMap();
     this._openingMap = 'journey';
-    const segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
+    try {
+      await BkkLib.fillJourneyShapes(this._journey);
+    } catch (_e) { /* draw the endpoint fallback */ }
+    let segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
+    if (!segs.length && cfg.stopId && cfg.destName) {
+      try {
+        const journey = await BkkLib.planJourney(
+          cfg.apiKey,
+          { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon },
+          { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
+          this._hass,
+          { minutesAfter: clampMinutesAfter(cfg.minutesAfter) },
+        );
+        if (journey) this._journey = journey;
+        try {
+          await BkkLib.fillJourneyShapes(this._journey);
+        } catch (_e) { /* draw the endpoint fallback */ }
+        segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
+      } catch (_e) { /* fall through to the no-geometry notice */ }
+    }
     if (!segs.length) {
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapNoData'));
@@ -5358,7 +5966,7 @@ class BKKPlannerCard extends BKKHopCard {
     const start = segs[0].shape[0];
     let map;
     try {
-      map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: true }).setView(start, 8);
+      map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView(start, 8);
       L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
         maxZoom: 20,
         subdomains: 'abc',
@@ -5370,51 +5978,8 @@ class BKKPlannerCard extends BKKHopCard {
       return;
     }
     this._map = map;
-    const resizeMap = () => { try { map.invalidateSize(); } catch (_e) { /* ignore */ } };
-    requestAnimationFrame(() => { resizeMap(); requestAnimationFrame(resizeMap); });
-    const allPts = [];
-    const routeRenderer = (typeof L.canvas === 'function') ? L.canvas({ padding: 0.8 }) : undefined;
-    const lineBase = { lineJoin: 'round', lineCap: 'round', noClip: true };
-    if (routeRenderer) lineBase.renderer = routeRenderer;
-    segs.forEach((seg) => {
-      const shape = seg.shape;
-      shape.forEach((pt) => allPts.push(pt));
-      if (seg.walk) {
-        L.polyline(shape, Object.assign({
-          color: '#1a1a1a', weight: 5, opacity: 0.35, dashArray: '8 8', interactive: false,
-        }, lineBase)).addTo(map);
-        L.polyline(shape, Object.assign({
-          color: '#888888', weight: 3, opacity: 0.95, dashArray: '8 8',
-        }, lineBase)).addTo(map);
-      } else {
-        L.polyline(shape, Object.assign({
-          color: '#1a1a1a', weight: 7, opacity: 0.45, interactive: false,
-        }, lineBase)).addTo(map);
-        L.polyline(shape, Object.assign({
-          color: seg.color, weight: 5, opacity: 0.98,
-        }, lineBase)).addTo(map);
-      }
-    });
-    const pin = (pt, fill) => {
-      if (!pt) return;
-      L.circleMarker(pt, {
-        radius: 7, color: '#fff', weight: 2, fillColor: fill, fillOpacity: 1,
-      }).addTo(map);
-    };
-    pin(segs[0].shape[0], '#0F6FC6');
-    for (let i = 0; i < segs.length - 1; i++) {
-      const shape = segs[i].shape;
-      pin(shape[shape.length - 1], '#555555');
-    }
-    const lastSeg = segs[segs.length - 1].shape;
-    pin(lastSeg[lastSeg.length - 1], '#0F6FC6');
-    setTimeout(() => {
-      if (!this._map || this._map !== map) return;
-      map.invalidateSize();
-      if (allPts.length >= 2) {
-        map.fitBounds(L.latLngBounds(allPts), { padding: [36, 36], maxZoom: 13 });
-      }
-    }, 80);
+    const allPts = this._drawJourneyPolylines(L, map, segs);
+    this._fitJourneyView(L, map, allPts, 36);
     this._openingMap = '';
   }
 
@@ -5557,11 +6122,32 @@ class BKKPlannerCard extends BKKHopCard {
       .journey-plan .j-title { font-size: 12px; font-weight: 700; letter-spacing: 0.04em;
         text-transform: uppercase; color: var(--secondary-text-color); }
       .journey-plan .j-sum { margin: 4px 0 10px; font-size: 16px; font-weight: 700; }
+      .journey-plan .j-map,
+      .journey-plan .j-map.leaflet-container {
+        height: 220px; min-height: 220px; margin: 0 0 10px; border-radius: 10px;
+        overflow: hidden; position: relative; cursor: pointer;
+        background: var(--card-background-color, #fff);
+      }
+      .journey-plan .j-map[hidden] { display: none; }
+      .journey-plan .j-map.leaflet-container,
+      .journey-plan .j-map .leaflet-container{width:100%;height:100%;min-height:220px;overflow:hidden}
+      .journey-plan .j-map .leaflet-pane,.journey-plan .j-map .leaflet-tile,.journey-plan .j-map .leaflet-marker-icon,.journey-plan .j-map .leaflet-marker-shadow,.journey-plan .j-map .leaflet-tile-container,.journey-plan .j-map .leaflet-zoom-box,.journey-plan .j-map .leaflet-image-layer,.journey-plan .j-map .leaflet-layer{position:absolute;left:0;top:0}
+      .journey-plan .j-map .leaflet-pane>svg,.journey-plan .j-map .leaflet-pane>canvas{position:absolute}
+      .journey-plan .j-map svg,.journey-plan .j-map .leaflet-container svg{max-width:none!important;max-height:none!important}
+      .journey-plan .j-map .leaflet-tile{max-width:none!important}
+      .journey-plan .j-map .leaflet-tile-pane{z-index:200}
+      .journey-plan .j-map .leaflet-overlay-pane{z-index:400}
+      .journey-plan .j-map .leaflet-marker-pane{z-index:600}
+      .journey-plan .j-map .leaflet-control-attribution{
+        font-size:10px;background:rgba(255,255,255,.72);
+      }
       .journey-plan #pmap {
         margin: 0 0 10px; border: 0; cursor: pointer; font: inherit; font-size: 13px; font-weight: 700;
         border-radius: 999px; padding: 8px 14px;
         background: var(--primary-color); color: var(--text-primary-color, #fff);
       }
+      .journey-plan.j-map-only { margin: 8px 8px 0; padding: 8px 12px; }
+      .journey-plan.j-map-only #pmap { margin: 0; }
       .journey-plan .j-leg { display: flex; align-items: baseline; gap: 8px;
         padding: 6px 0; border-top: 1px solid var(--divider-color); font-size: 14px; }
       .journey-plan .j-where { flex: 1; min-width: 0; }
@@ -5667,31 +6253,31 @@ class BKKPlannerCard extends BKKHopCard {
       .replace(/\s+aut\u00f3busz-p\u00e1lyaudvar$/, '')
       .replace(/\s+vas\u00fat\u00e1llom\u00e1s$/, '')
       .replace(/\s+p\u00e1lyaudvar$/, '');
-    [
-      ['bkk', 'B', BKK_FAVORITES],
-      ['volan', 'V', VOLAN_FAVORITES],
-      ['mav', 'M', MAV_FAVORITES],
-    ].forEach(([kind, mark, list]) => {
-      const row = document.createElement('div');
-      row.className = 'suggest-row';
-      row.setAttribute('data-kind', kind);
-      const stops = document.createElement('span');
-      stops.className = 'suggest-stops';
-      list.forEach((fav) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'suggest-stop';
-        const feed = document.createElement('span');
-        feed.className = 'suggest-feed';
-        feed.textContent = mark;
-        button.appendChild(feed);
-        button.appendChild(document.createTextNode(shortName(fav.name)));
-        button.addEventListener('click', () => this._pickOrigin(fav));
-        stops.appendChild(button);
-      });
-      row.appendChild(stops);
-      box.appendChild(row);
+    const list = BkkLib.collapseSameNameStops(
+      BKK_FAVORITES.concat(VOLAN_FAVORITES, MAV_FAVORITES),
+    );
+    const row = document.createElement('div');
+    row.className = 'suggest-row';
+    const stops = document.createElement('span');
+    stops.className = 'suggest-stops';
+    list.forEach((fav) => {
+      const id = String(fav.id || '');
+      const mark = /^BKK_0055/i.test(id) ? 'M'
+        : /^(?:volan_|hkir_|AREA_CS)/i.test(id) ? 'V'
+        : 'B';
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'suggest-stop';
+      const feed = document.createElement('span');
+      feed.className = 'suggest-feed';
+      feed.textContent = mark;
+      button.appendChild(feed);
+      button.appendChild(document.createTextNode(shortName(fav.name)));
+      button.addEventListener('click', () => this._pickOrigin(fav));
+      stops.appendChild(button);
     });
+    row.appendChild(stops);
+    box.appendChild(row);
   }
 
   _syncPickerLabels() {
@@ -6449,7 +7035,8 @@ class BKKHopCardEditor extends HTMLElement {
     const mode = this._mode();
     const custom = Array.isArray(this._config.favorites) ? this._config.favorites : null;
     const list = (custom || DEFAULT_FAVORITES[mode] || []).filter((f) => f && f.id && f.name);
-    list.forEach((f) => {
+    const shown = (!custom && mode === 'all') ? BkkLib.collapseSameNameStops(list) : list;
+    shown.forEach((f) => {
       const b = document.createElement('button');
       b.className = 'chip';
       b.type = 'button';

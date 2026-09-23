@@ -433,10 +433,13 @@ Lib.searchStops = async () => [{
   label: 'Budapest, Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s (Vol\u00e1n)',
 }];
 const mergedHits = await Lib.searchPlannerStops('k', 'Kelenf\u00f6ld');
-check('planner search does not drop Vol\u00e1n GTFS when Transitous has hits',
-  mergedHits.some((h) => h.id === 'hu-bkk_CS056215')
-  && mergedHits.some((h) => h.id === 'volan_773538_99'),
-  JSON.stringify(mergedHits.map((h) => h.id)));
+check('planner search remaps Transitous BKK onto a FUTAR id',
+  mergedHits.filter((h) => /kelenf/i.test(h.name || h.label || '')).length === 1
+  && mergedHits.some((h) => h.id === 'BKK_CS056215')
+  && !mergedHits.some((h) => h.id === 'volan_773538_99')
+  && !mergedHits.some((h) => h.id === 'hu-bkk_CS056215')
+  && Number(mergedHits.find((h) => h.id === 'BKK_CS056215').lat) === 47.46,
+  JSON.stringify(mergedHits.map((h) => ({ id: h.id, lat: h.lat }))));
 Lib.transitousGeocode = async () => [];
 let bkkSearch = 0;
 Lib.searchStops = async () => {
@@ -701,8 +704,25 @@ check('FUTAR Google object stays in Hungary at 1e5',
 check('finiteLatLon rejects off-globe MOTIS-as-1e5 coords',
   Lib.finiteLatLon(475.18, 190.78) == null
   && Lib.finiteLatLon(47.5, 19.05) != null);
+check('mapGpsLatLon drops null-island and Gulf of Guinea',
+  Lib.mapGpsLatLon(0, 0) == null
+  && Lib.mapGpsLatLon('', '') == null
+  && Lib.mapGpsLatLon(null, null) == null
+  && Lib.mapGpsLatLon(0.47, 0.19) == null
+  && Lib.mapGpsLatLon(47.5, 19.05) != null
+  && Lib.mapGpsLatLon(48.2, 16.37) != null);
 const loc = Lib.vehicleLoc({ location: { lat: 47.5, lon: 19.05 } });
 check('vehicleLoc reads BKK location', loc.lat === 47.5 && loc.lon === 19.05, JSON.stringify(loc));
+const locZero = Lib.vehicleLoc({ location: { lat: '', lon: '' } });
+check('vehicleLoc empty strings are not GPS',
+  !Number.isFinite(locZero.lat) && !Number.isFinite(locZero.lon), JSON.stringify(locZero));
+{
+  const painted = Lib.asRow({
+    label: '7', lat: 0, lon: 0, dep: Math.floor(Date.now() / 1000) + 120, rawType: 'BUS',
+  }, 'Csepel', 'hu');
+  check('asRow 0,0 is not live GPS',
+    painted.hasGps === false && painted.lat == null && painted.lon == null);
+}
 check('basemap is OSM France without an API key',
   src.includes('tile.openstreetmap.fr/osmfr/') && !/cartocdn|carto\.com|\?key=/.test(src));
 
@@ -721,15 +741,15 @@ check('mapped trip rows are clickable', mapped.shadowRoot.innerHTML.includes('ro
 check('map marker button is rendered',
   mapped.shadowRoot.innerHTML.includes('mdi:map-marker-outline')
   && mapped.shadowRoot.innerHTML.includes('class="map-open"'));
-let opened = 0;
-mapped._openVehicleMap = () => { opened += 1; };
+let vehicleOpened = 0;
+mapped._openVehicleMap = () => { vehicleOpened += 1; };
 const tr = mapped.shadowRoot.querySelector('tr[data-row-index]');
 if (tr) tr.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
-check('row click opens the map', opened >= 1, String(opened));
+check('row click opens the vehicle map', vehicleOpened === 1, String(vehicleOpened));
 const btn = mapped.shadowRoot.querySelector('button.map-open');
-opened = 0;
+vehicleOpened = 0;
 if (btn) btn.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
-check('map button click opens the map', opened >= 1, String(opened));
+check('map button click opens the vehicle map', vehicleOpened === 1, String(vehicleOpened));
 
 check('all mode keeps volan coaches',
   Lib.routeMatchesMode({ type: 'COACH', id: 'volan_1' }, 'all'));
@@ -744,6 +764,20 @@ const plan = document.createElement('hungarian-transit-stop-card-plan');
 document.body.appendChild(plan);
 plan.hass = { states: {}, language: 'hu' };
 plan.setConfig({ language: 'hu' });
+check('planner does not auto-refresh after a trip is loaded',
+  plan._shouldPoll() === false
+  && plan._tick === null
+  && card._shouldPoll() === true,
+  JSON.stringify({ planPoll: plan._shouldPoll(), planTick: plan._tick, hopPoll: card._shouldPoll() }));
+check('planner skips reconnect reload while a trip is on screen',
+  (() => {
+    plan._journey = { durationMin: 26, legs: [{ walk: false, label: 'M4' }] };
+    plan._rows = [{ label: '1' }];
+    const skip = plan._shouldReloadOnConnect() === false;
+    plan._journey = null;
+    plan._rows = [];
+    return skip && plan._shouldReloadOnConnect() === true;
+  })());
 const planHtml = plan.shadowRoot.innerHTML;
 check('planner title is Tervezo', planHtml.includes('Tervez\u0151'));
 check('planner has origin and destination fields',
@@ -768,6 +802,12 @@ plan._config = Object.assign({}, plan._config, {
 });
 plan._journey = shaped;
 plan._paint();
+let journeyMapOpened = 0;
+plan._openJourneyMap = () => { journeyMapOpened += 1; };
+{
+  const pmapNow = plan.shadowRoot.querySelector('#pmap');
+  if (pmapNow) pmapNow.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
+}
 check('empty planner shows the transfer journey',
   plan.shadowRoot.innerHTML.includes('\u00c1tsz\u00e1ll\u00e1ssal')
   && plan.shadowRoot.innerHTML.includes('Gyalogl\u00e1s')
@@ -780,25 +820,227 @@ check('empty planner does not show no-departures over a journey',
 check('empty planner journey paint includes the map button',
   plan.shadowRoot.innerHTML.includes('id="pmap"')
   && plan.shadowRoot.innerHTML.includes('T\u00e9rk\u00e9p'));
-let journeyMapOpened = 0;
-plan._openJourneyMap = () => { journeyMapOpened += 1; };
+check('empty planner transfer summary includes an inline map',
+  plan.shadowRoot.innerHTML.includes('id="pjmap"')
+  && !!plan.shadowRoot.querySelector('#pjmap')
+  && plan.shadowRoot.querySelector('#pjmap').classList.contains('j-map'));
+check('planner source mounts an inline journey map',
+  src.includes('_mountPlannerInlineMap') && src.includes('id="pjmap"'));
+check('planner tears down the inline map before wiping the body',
+  src.indexOf('this._teardownPlannerInlineMap();') < src.indexOf('super._paint();')
+  && src.includes('this._plannerMap')
+  && !/_closeVehicleMap[\s\S]{0,800}_plannerMap/.test(src));
+{
+  const noGeom = Lib.journeyMapSegments(
+    { legs: [{ walk: true, from: 'A', to: 'B', minutes: 5 }] },
+    { stopLat: 48.1, stopLon: 20.7 },
+    { destLat: 47.5, destLon: 19.04 },
+  );
+  check('city-rail journey still maps origin to dest',
+    noGeom.length === 1 && noGeom[0].shape[0][0] === 48.1 && noGeom[0].shape[1][0] === 47.5);
+}
+{
+  const twoRide = {
+    legs: [
+      {
+        walk: false, label: 'M3', color: '005CA5',
+        shape: [[47.53, 19.07], [47.49, 19.06]],
+      },
+      {
+        walk: false, label: 'M4', color: '4CA22F',
+        fromLat: 47.49, fromLon: 19.06, toLat: 47.46, toLon: 19.02,
+      },
+    ],
+  };
+  const twoSegs = Lib.journeyMapSegments(twoRide, {}, {});
+  check('two ride legs both become map segments',
+    twoSegs.length === 2
+    && twoSegs[0].shape[0][0] === 47.53
+    && twoSegs[1].shape[1][0] === 47.46
+    && twoSegs[0].color.toLowerCase() === '#005ca5'
+    && twoSegs[1].color.toLowerCase() === '#4ca22f',
+    JSON.stringify(twoSegs.map((s) => ({ n: s.shape.length, color: s.color, last: s.shape[s.shape.length - 1] }))));
+  const lats = twoSegs.flatMap((s) => s.shape.map((p) => p[0]));
+  check('two-vehicle bounds cover both rides',
+    Math.min(...lats) === 47.46 && Math.max(...lats) === 47.53);
+}
+{
+  const used = {};
+  const a = Lib.mapRouteColor({ label: '7', color: '009EE3' }, used);
+  const b = Lib.mapRouteColor({ label: '110', color: '009EE3' }, used);
+  const c = Lib.mapRouteColor({ label: '7', color: '009EE3' }, used);
+  check('same hex on two labels becomes two colors',
+    a === c && a !== b && a === '#009ee3',
+    JSON.stringify({ a, b, c }));
+}
+{
+  const click = src.slice(src.indexOf('  _onRowClick(ev)'), src.indexOf('  _mapTypeLabel'));
+  check('hop row click opens a single-vehicle map',
+    click.includes('this._openVehicleMap(row)')
+    && !click.includes('_openBoardMap'));
+}
+check('openVehicleMap is not aliased to a board overlay',
+  !/async _openVehicleMap\(row\) \{\s*return this\._openBoardMap/.test(src));
+check('combined board overlay is gone',
+  !src.includes('async _openBoardMap')
+  && !src.includes('boardMapLayers')
+  && !src.includes('_visibleMapRows')
+  && !src.includes('mapAllTrips'));
+{
+  const chained = {
+    legs: [
+      { walk: false, label: '81', fromLat: 47.50, fromLon: 19.08, toLat: 47.51, toLon: 19.09 },
+      { walk: false, label: 'M1' },
+    ],
+  };
+  Lib.stitchJourneyLegCoords(chained);
+  check('stitch copies the previous ride end onto the next leg',
+    chained.legs[1].fromLat === 47.51 && chained.legs[1].fromLon === 19.09);
+}
+{
+  const origShape = Lib.motisTripShape;
+  Lib.motisTripShape = async (id) => (
+    String(id).indexOf('m4') >= 0 ? [[47.49, 19.06], [47.464, 19.02]] : []
+  );
+  const filled = {
+    legs: [
+      { walk: false, label: 'M3', shape: [[47.53, 19.07], [47.49, 19.06]] },
+      { walk: false, label: 'M4', tripId: 'hu-bkk_m4' },
+    ],
+  };
+  await Lib.fillJourneyShapes(filled);
+  Lib.motisTripShape = origShape;
+  check('fillJourneyShapes loads the second vehicle polyline',
+    Lib.validMapShape(filled.legs[1].shape).length >= 2
+    && filled.legs[1].shape[1][0] === 47.464);
+}
+check('journey map scales to every vehicle SVG path',
+  src.includes('_fitJourneyView')
+  && src.includes('preferCanvas: false')
+  && /L\.map\(canvas, \{ scrollWheelZoom: true, preferCanvas: false \}/.test(src));
 const pmap = plan.shadowRoot.querySelector('#pmap');
 if (pmap) pmap.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
 check('pmap click opens the journey map', journeyMapOpened >= 1, String(journeyMapOpened));
+plan._rows = [{
+  type: 'BUS', icon: 'mdi:bus', label: '7', headsign: 'Csepel',
+  depTs: now + 180, schedTs: now + 180, attime: '10:03', predicted_attime: '10:03',
+  color: '009EE3', textcolor: 'ffffff', hasLocation: true, tripId: 'BKK_C007',
+  wheelchair: false, bikesAllowed: false, booking: false, delay: 0, travelMin: null,
+}];
+plan._journey = futarGeom;
+plan._paint();
+check('planner with BKK departures still has the map button',
+  plan.shadowRoot.innerHTML.includes('id="pmap"')
+  && plan.shadowRoot.innerHTML.includes('T\u00e9rk\u00e9p')
+  && plan.shadowRoot.querySelector('.j-map-only'));
+check('planner with BKK departures does not show the transfer itinerary',
+  !plan.shadowRoot.innerHTML.includes('\u00c1tsz\u00e1ll\u00e1ssal'));
+check('planner with BKK departures has no inline transfer map',
+  !plan.shadowRoot.querySelector('#pjmap'));
+journeyMapOpened = 0;
+let vehicleMapOpened = 0;
+plan._openVehicleMap = () => { vehicleMapOpened += 1; };
+const pmapBoard = plan.shadowRoot.querySelector('#pmap');
+if (pmapBoard) pmapBoard.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
+check('planner BKK-board map button opens a single-vehicle map', vehicleMapOpened === 1, String(vehicleMapOpened));
+{
+  const mixed = Lib.journeyFromMotis({
+    itineraries: [
+      {
+        duration: 2760, transfers: 0, startTime: '2026-09-23T06:02:00Z',
+        legs: [
+          { mode: 'WALK', duration: 600, from: { name: 'START' }, to: { name: 'Zugló' } },
+          { mode: 'TRAM', duration: 1920, routeShortName: '1', from: { name: 'Zugló' }, to: { name: 'Kelenföld' } },
+        ],
+      },
+      {
+        duration: 1560, transfers: 1, startTime: '2026-09-23T06:11:00Z',
+        legs: [
+          { mode: 'WALK', duration: 300, from: { name: 'START' }, to: { name: 'Bosnyák tér' } },
+          {
+            mode: 'BUS', duration: 300, routeShortName: '7E',
+            from: { name: 'Bosnyák tér' }, to: { name: 'Keleti pályaudvar M' },
+            startTime: '2026-09-23T06:11:00Z', endTime: '2026-09-23T06:16:00Z',
+          },
+          { mode: 'WALK', duration: 120, from: { name: 'Keleti pályaudvar M' }, to: { name: 'Keleti pályaudvar' } },
+          {
+            mode: 'SUBWAY', duration: 780, routeShortName: 'M4',
+            from: { name: 'Keleti pályaudvar' }, to: { name: 'Kelenföld vasútállomás' },
+            startTime: '2026-09-23T06:18:00Z', endTime: '2026-09-23T06:31:00Z',
+          },
+        ],
+      },
+    ],
+  });
+  check('MOTIS keeps 7E+M4 over the slower 1 tram',
+    mixed && mixed.durationMin === 26 && mixed.transfers === 1
+    && mixed.legs.some((leg) => !leg.walk && leg.label === 'M4'),
+    JSON.stringify(mixed && { durationMin: mixed.durationMin, labels: mixed.legs.map((l) => l.label) }));
+  check('faster metro transfer beats a 32 min direct',
+    Lib.journeyBeatsBoard(mixed, [{ label: '1', travelMin: 32 }]));
+  check('slower transfer does not replace a 20 min direct',
+    !Lib.journeyBeatsBoard(mixed, [{ label: '108E', travelMin: 20 }]));
+  check('direct-only itinerary stays off the board',
+    !Lib.journeyBeatsBoard(futarGeom, [{ label: '7', travelMin: null }]));
+}
+{
+  plan._config = Object.assign({}, plan._config, {
+    stopId: 'BKK_F02831', stopName: 'Bosnyák tér', destKey: 'kelenfold', destName: 'Kelenföld',
+  });
+  plan._rows = [{
+    type: 'TRAM', icon: 'mdi:tram', label: '1', headsign: 'Kelenföld',
+    depTs: now + 180, schedTs: now + 180, attime: '10:03', predicted_attime: '10:03',
+    color: 'FFD800', textcolor: '000000', hasLocation: true, tripId: 'BKK_1',
+    wheelchair: false, bikesAllowed: false, booking: false, delay: 0, travelMin: 32,
+  }];
+  plan._journey = {
+    durationMin: 26, walkMin: 8, waitMin: 0, transfers: 1,
+    legs: [
+      { walk: true, minutes: 5, meters: 400, from: 'Bosnyák tér', to: 'Bosnyák tér' },
+      { walk: false, label: '7E', minutes: 5, color: '009EE3', text: 'ffffff', from: 'Bosnyák tér', to: 'Keleti' },
+      { walk: true, minutes: 2, meters: 120, from: 'Keleti M', to: 'Keleti' },
+      { walk: false, label: 'M4', minutes: 13, color: '4CA22F', text: 'ffffff', from: 'Keleti', to: 'Kelenföld' },
+    ],
+  };
+  plan._paint();
+  const html = plan.shadowRoot.innerHTML;
+  check('faster metro itinerary is shown above direct board rows',
+    html.includes('\u00c1tsz\u00e1ll\u00e1ssal') && html.includes('M4') && html.includes('7E')
+    && !plan.shadowRoot.querySelector('.j-map-only'),
+    html.slice(0, 400));
+}
+check('transitous journey asks for 12 itineraries',
+  /numItineraries: '12'/.test(src));
+{
+  const planJFromBoard = [];
+  const origPJ = Lib.planJourney;
+  Lib.planJourney = async function () {
+    planJFromBoard.push(1);
+    return {
+      durationMin: 10, walkMin: 0, waitMin: 0, transfers: 0,
+      legs: [{ walk: false, minutes: 10, label: '7', from: 'A', to: 'B' }],
+    };
+  };
+  plan._journey = null;
+  plan._journeyKey = '';
+  plan._journeyLoading = false;
+  plan._considerJourney();
+  Lib.planJourney = origPJ;
+  plan._journeyKey = '';
+  plan._journeyLoading = false;
+  check('planner still plans a map journey when BKK rows exist',
+    planJFromBoard.length >= 1,
+    String(planJFromBoard.length));
+}
 check('planner favorite chips include a Volan station',
   planHtml.includes('N\u00e9pliget'));
 check('planner favorite chips include a MAV station',
   planHtml.includes('Sz\u00e9kesfeh\u00e9rv\u00e1r') || planHtml.includes('Budapest-Kelenf'));
 check('planner favorites wrap in one row with feed marks',
   plan.shadowRoot.querySelectorAll('#pfav .suggest-kind').length === 0
-  && plan.shadowRoot.querySelectorAll('#pfav .suggest-feed').length >= 7
+  && plan.shadowRoot.querySelectorAll('#pfav .suggest-feed').length >= 4
+  && plan.shadowRoot.querySelectorAll('#pfav .suggest-stop').length <= 5
   && /\.suggest \{[^}]*flex-direction:\s*row/.test(src));
-check('planner dest search lists MAV stations outside the live sample',
-  Lib.destHitsForQuery(
-    [{ key: 'godollo', name: 'G\u00f6d\u00f6ll\u0151' }],
-    'Miskolc-Tiszai',
-    [{ id: 'BKK_005511387', name: 'Miskolc-Tiszai' }],
-  ).some((h) => h.name === 'Miskolc-Tiszai'));
 check('planner dest search lists MAV stations outside the live sample',
   Lib.destHitsForQuery(
     [{ key: 'godollo', name: 'G\u00f6d\u00f6ll\u0151' }],
@@ -832,12 +1074,309 @@ check('planner dest search merges Debrecen volan stop onto the MAV id',
       { id: 'BKK_005513912', name: 'Debrecen' },
     ],
   )[0].id === 'BKK_005513912');
+check('destHitsForQuery merges hyphen MAV key onto Keleti pályaudvar', (() => {
+  const hits = Lib.destHitsForQuery(
+    [
+      { key: 'budapest-keleti', name: 'Budapest-Keleti', id: 'BKK_005510017' },
+      { key: 'keleti', name: 'Keleti pályaudvar', id: 'BKK_CSF01131' },
+    ],
+    'keleti',
+    [],
+  );
+  return hits.length === 1 && hits[0].id === 'BKK_CSF01131';
+})());
+check('nameEq matches a folded dest key to Kelenföld vasútállomás',
+  Lib.nameEq('Kelenföld vasútállomás', 'kelenfold')
+  && Lib.nameEq('Budapest-Kelenföld', 'Kelenföld vasútállomás')
+  && Lib.nameEq('Keleti pályaudvar', 'keleti')
+  && !Lib.nameEq('Blaha Lujza tér', 'Deák Ferenc tér'));
+check('destHitsForQuery merges city-prefix Kelenföld onto the short name', (() => {
+  const hits = Lib.destHitsForQuery(
+    [],
+    'Kelenföld',
+    [
+      { id: 'volan_773538_99', name: 'Budapest, Kelenföld vasútállomás' },
+      { id: 'BKK_005501024', name: 'Kelenföld vasútállomás' },
+    ],
+  );
+  return hits.length === 1 && hits[0].id === 'BKK_005501024';
+})());
+{
+  const ormezo = Lib.collapseSameNameStops([
+    { id: 'BKK_CS007896', name: 'Budapest-Kelenföld', lat: 47.4637, lon: 19.0212 },
+    { id: 'BKK_CS007896', name: 'Budapest, Kelenföld vá. (Őrmező)', lat: 47.4648, lon: 19.0182 },
+  ]);
+  check('Őrmező bay does not split Kelenföld into two hits',
+    ormezo.length === 1 && ormezo[0].id === 'BKK_CS007896',
+    JSON.stringify(ormezo.map((h) => ({ id: h.id, name: h.name }))));
+}
+check('hyphen MAV name shares a place key with Kelenföld vasútállomás',
+  Lib.placeNameKey({ name: 'Budapest-Kelenföld' }) === 'kelenfold'
+  && Lib.placeNameKey({ name: 'Kelenföld vasútállomás' }) === 'kelenfold'
+  && Lib.placeNameKey({ name: 'Budapest, Kelenföld vá. (Őrmező)' }) === 'kelenfold');
+{
+  const hyphen = Lib.collapseSameNameStops([
+    { id: 'at-Railway-x', name: 'Budapest-Kelenföld', lat: 47.4637, lon: 19.0212 },
+    { id: 'hu-bkk_CS056215', name: 'Kelenföld vasútállomás', lat: 47.4643, lon: 19.0197 },
+    { id: 'BKK_005501024', name: 'Budapest, Kelenföld vasútállomás', lat: 47.464, lon: 19.022 },
+    { id: 'BKK_CS007896', name: 'Kelenföld vasútállomás', lat: 47.4643, lon: 19.0197 },
+    { id: 'way/[1]', name: 'Budapest-Kelenföld', lat: 47.4654, lon: 19.0216, kind: 'place' },
+  ]);
+  check('Budapest-Kelenföld railway names collapse onto the BKK parent',
+    hyphen.length === 1 && hyphen[0].id === 'BKK_CS007896',
+    JSON.stringify(hyphen.map((h) => ({ id: h.id, name: h.name }))));
+}
+{
+  const keleti = Lib.collapseSameNameStops([
+    { id: 'BKK_005510017', name: 'Budapest-Keleti', lat: 47.500, lon: 19.084 },
+    { id: 'BKK_CSF01131', name: 'Keleti pályaudvar', lat: 47.500, lon: 19.084 },
+  ]);
+  check('Budapest-Keleti merges onto the BKK Keleti parent',
+    keleti.length === 1 && keleti[0].id === 'BKK_CSF01131',
+    JSON.stringify(keleti.map((h) => h.id)));
+}
+{
+  const osm = Lib.collapseSameNameStops([
+    { id: 'way/[1]', name: 'Blaha Lujza tér', lat: 47.4965, lon: 19.0700, kind: 'place' },
+    { id: 'hu-bkk_CSF01291', name: 'Blaha Lujza tér', lat: 47.4965, lon: 19.0700 },
+  ]);
+  check('OSM place does not beat a Transitous BKK stop',
+    osm.length === 1 && osm[0].id === 'hu-bkk_CSF01291',
+    JSON.stringify(osm.map((h) => h.id)));
+}
+{
+  const stopJunk = Lib.groupStops([
+    { id: 'STOP_773064_1-F01165', name: 'Blaha Lujza tér M', locationType: 1, lat: 47.4968, lon: 19.0700 },
+    { id: 'BKK_F01165', name: 'Blaha Lujza tér M', lat: 47.4968, lon: 19.0700 },
+    { id: 'BKK_CSF01116', name: 'Blaha Lujza tér', locationType: 1, lat: 47.4968, lon: 19.0700 },
+  ]);
+  check('groupStops prefers BKK parent over STOP_ area',
+    stopJunk.length === 1 && stopJunk[0].id === 'BKK_CSF01116',
+    JSON.stringify(stopJunk.map((h) => h.id)));
+}
+{
+  const collapsedStop = Lib.collapseSameNameStops([
+    { id: 'STOP_773541_2-F02192', name: 'Móricz Zsigmond körtér M', lat: 47.4778, lon: 19.047 },
+    { id: 'BKK_CS056221', name: 'Móricz Zsigmond körtér', lat: 47.4778, lon: 19.047 },
+  ]);
+  check('STOP_ id does not beat BKK CS in collapse',
+    collapsedStop.length === 1 && collapsedStop[0].id === 'BKK_CS056221',
+    JSON.stringify(collapsedStop.map((h) => h.id)));
+}
+{
+  const kind = Lib.collapseSameNameStops([
+    { id: 'BKK_CS007896', name: 'Kelenföld vasútállomás', lat: 47.464, lon: 19.02 },
+    { id: 'way/[1]', name: 'Budapest-Kelenföld', lat: 47.465, lon: 19.021, kind: 'place' },
+  ]);
+  check('OSM place kind does not stick on a BKK stop',
+    kind.length === 1 && kind[0].id === 'BKK_CS007896' && kind[0].kind !== 'place',
+    JSON.stringify(kind));
+}
+{
+  const mixed = Lib.collapseSameNameStops([
+    { id: 'volan_1', name: 'Budapest, Kelenföld aut.áll.', lat: 47.464, lon: 19.023 },
+    { id: 'BKK_005501024', name: 'Kelenföld vasútállomás', lat: 47.465, lon: 19.022 },
+  ]);
+  check('coach station and railway station stay two hits',
+    mixed.length === 2
+    && mixed.some((h) => /aut/i.test(h.name))
+    && mixed.some((h) => h.id === 'BKK_005501024'),
+    JSON.stringify(mixed.map((h) => ({ id: h.id, name: h.name }))));
+}
+{
+  const cities = Lib.collapseSameNameStops([
+    { id: 'miskolc:1', name: 'Kossuth tér', label: 'Kossuth tér (Miskolc)', lat: 48.1, lon: 20.78, city: true },
+    { id: 'pecs:1', name: 'Kossuth tér', label: 'Kossuth tér (Pécs)', lat: 46.07, lon: 18.23, city: true },
+  ]);
+  check('same stop name in two cities stays two hits',
+    cities.length === 2,
+    JSON.stringify(cities.map((h) => h.label || h.name)));
+}
+{
+  const near = Lib.collapseSameNameStops([
+    { id: 'BKK_A', name: 'Blaha Lujza tér', lat: 47.4965, lon: 19.0700 },
+    { id: 'hu-bkk_B', name: 'Blaha Lujza tér', lat: 47.4976, lon: 19.0700 },
+  ]);
+  check('same name 150m apart collapses to one hit',
+    near.length === 1 && near[0].id === 'BKK_A' && Number(near[0].lat) === 47.4965,
+    JSON.stringify(near));
+}
+{
+  const far = Lib.collapseSameNameStops([
+    { id: 'BKK_A', name: 'Kossuth Lajos utca', lat: 47.500, lon: 19.050 },
+    { id: 'BKK_B', name: 'Kossuth Lajos utca', lat: 47.518, lon: 19.050 },
+  ]);
+  check('same name 2km apart stays two hits',
+    far.length === 2,
+    JSON.stringify(far.map((h) => h.id)));
+}
+{
+  const district = Lib.collapseSameNameStops([
+    {
+      id: 'BKK_CS007896', name: 'Kelenföld vasútállomás',
+      label: 'Kelenföld vasútállomás (Budapest)', lat: 47.4637, lon: 19.0212,
+    },
+    {
+      id: 'node/[269800455]', name: 'Kelenföld',
+      label: 'Kelenföld (Budapest)', lat: 47.4652, lon: 19.0411, kind: 'place',
+    },
+  ]);
+  check('OSM district Kelenföld merges onto the railway station',
+    district.length === 1
+    && district[0].id === 'BKK_CS007896'
+    && /vasútállomás/i.test(district[0].name)
+    && district[0].kind !== 'place',
+    JSON.stringify(district.map((h) => ({ id: h.id, name: h.name, kind: h.kind }))));
+}
+check('Nyugati pu and train-station aliases share the railway key',
+  Lib.placeNameKey({ name: 'Budapest-Nyugati pu' }) === 'nyugati'
+  && Lib.placeNameKey({ name: 'Nyugati pályaudvar' }) === 'nyugati'
+  && Lib.placeNameKey({ name: 'Budapest Keleti train station' }) === 'keleti');
+check('Kőbánya-Kispest hyphen is not treated as a city prefix',
+  Lib.placeNameKey({ name: 'Kőbánya-Kispest' }) === 'kobanya kispest'
+  && Lib.placeNameKey({ name: 'Budapest, Kőbánya-Kispest' }) === 'kobanya kispest'
+  && Lib.placeNameKey({ name: 'Corvin-negyed' }) === 'corvin negyed');
+check('coach station aliases share one key',
+  Lib.placeNameKey({ name: 'Budapest, Népliget aut.áll.' }) === 'nepliget aut all'
+  && Lib.placeNameKey({ name: 'Budapest, Népliget autóbusz-pályaudvar' }) === 'nepliget aut all'
+  && Lib.placeNameKey({ name: 'Budapest Népliget bus station' }) === 'nepliget aut all'
+  && Lib.placeNameKey({ name: 'Székesfehérvár, autóbusz-állomás' }) === 'aut all');
+{
+  const nepliget = Lib.collapseSameNameStops([
+    { id: 'hu-volanbusz_hkir_773521', name: 'Budapest, Népliget autóbusz-pályaudvar', lat: 47.47447, lon: 19.09861 },
+    { id: 'al-ShowMeBus_x', name: 'Budapest Népliget bus station', lat: 47.47437, lon: 19.09855 },
+    { id: 'sk-Regiojet_S-1', name: 'Budapešť, Népliget aut.áll.', lat: 47.47451, lon: 19.09858 },
+  ]);
+  check('Népliget coach aliases collapse onto the Hungarian Volán stop',
+    nepliget.length === 1 && nepliget[0].id === 'hu-volanbusz_hkir_773521',
+    JSON.stringify(nepliget.map((h) => h.id)));
+}
+{
+  const pu = Lib.collapseSameNameStops([
+    { id: 'BKK_CSF00936', name: 'Nyugati pályaudvar', lat: 47.51077, lon: 19.05611 },
+    { id: 'sk-zsr_5500728', name: 'Budapest-Nyugati pu', lat: 47.51250, lon: 19.05893 },
+  ]);
+  check('Nyugati pu merges onto the BKK parent',
+    pu.length === 1 && pu[0].id === 'BKK_CSF00936',
+    JSON.stringify(pu.map((h) => ({ id: h.id, name: h.name }))));
+}
+{
+  const ors = Lib.collapseSameNameStops([
+    { id: 'BKK_CSF01580', name: 'Örs vezér tere', lat: 47.503586, lon: 19.137192 },
+    { id: 'BKK_008020', name: 'Örs vezér tere M+H', lat: 47.50093, lon: 19.136307 },
+  ]);
+  check('Örs vezér tere M+H merges onto the parent',
+    ors.length === 1 && ors[0].id === 'BKK_CSF01580',
+    JSON.stringify(ors.map((h) => ({ id: h.id, name: h.name }))));
+}
+{
+  const kk = Lib.collapseSameNameStops([
+    { id: 'ua-ukrzaliznytsya_5500005', name: 'Kőbánya-Kispest', lat: 47.46365, lon: 19.14967 },
+    { id: 'hu-volanbusz_hkir_773528', name: 'Budapest, Kőbánya-Kispest', lat: 47.46329, lon: 19.14758 },
+    { id: 'BKK_CSF01552', name: 'Kőbánya-Kispest', lat: 47.4634, lon: 19.1492 },
+  ]);
+  check('Kőbánya-Kispest railway names collapse onto the BKK parent',
+    kk.length === 1 && kk[0].id === 'BKK_CSF01552',
+    JSON.stringify(kk.map((h) => ({ id: h.id, name: h.name }))));
+}
+{
+  const shops = Lib.collapseSameNameStops([
+    { id: 'BKK_CS007896', name: 'Kelenföld vasútállomás', lat: 47.4637, lon: 19.0212 },
+    { id: 'node/[1]', name: 'Borháló Kelenföld', lat: 47.4507, lon: 19.0401, kind: 'place' },
+    { id: 'node/[2]', name: 'Elektro Kelenföld', lat: 47.4653, lon: 19.0246, kind: 'place' },
+  ]);
+  check('OSM shop places drop when a real stop exists',
+    shops.length === 1 && shops[0].id === 'BKK_CS007896',
+    JSON.stringify(shops.map((h) => ({ id: h.id, name: h.name }))));
+}
+{
+  const czech = Lib.collapseSameNameStops([
+    { id: 'hu-volanbusz_hkir_773538', name: 'Budapest, Kelenföld aut.áll.', lat: 47.46381, lon: 19.02275 },
+    { id: 'cz-JDF-merged_JDFS-31574', name: 'Budapest,Kelenföld aut.áll.', lat: 47.47451, lon: 19.09858 },
+  ]);
+  check('foreign coach feed merges onto the Hungarian aut.áll.',
+    czech.length === 1 && czech[0].id === 'hu-volanbusz_hkir_773538',
+    JSON.stringify(czech.map((h) => h.id)));
+}
 check('elvira result parser reads response.departures',
   Lib.elviraRowsFromResult({ context: {}, response: { departures: [{ label: 'TOKAJ' }] } }).length === 1);
 check('elvira result parser reads REST service_response',
   Lib.elviraRowsFromResult({ service_response: { departures: [{ label: 'HERNÁD' }, { label: 'TOKAJ' }] } }).length === 2);
 check('elvira result parser reads top-level departures',
   Lib.elviraRowsFromResult({ departures: [{ label: 'IC' }] })[0].label === 'IC');
+{
+  const dep = Math.floor(Date.now() / 1000) + 600;
+  const rail = (extra) => Object.assign({
+    vehicle: 'rail', rawType: 'RAIL', dep: dep, sched: dep,
+  }, extra);
+  check('numbered through express is dropped from the hop merge',
+    Lib.mergeVolanRows([], [rail({
+      label: '16907', trainNumber: '16907', booking: true, tripId: 'elvira:3640191',
+    })], 12).length === 0);
+  check('numbered through személy is dropped from the hop merge',
+    Lib.mergeVolanRows([], [rail({
+      label: '9792', trainNumber: '9792', booking: false, tripId: 'elvira:2888904',
+    })], 12).length === 0);
+  check('another numbered személy is dropped the same way',
+    Lib.mergeVolanRows([], [rail({
+      label: '9704', trainNumber: '9704', booking: false, tripId: 'elvira:2888905',
+    })], 12).length === 0);
+  check('generic EX plus a long train number is dropped',
+    Lib.mergeVolanRows([], [rail({
+      label: 'EX', trainNumber: '16907', booking: true, tripId: 'elvira:1',
+    })], 12).length === 0);
+  check('generic EN plus a long train number is dropped',
+    Lib.mergeVolanRows([], [rail({
+      label: 'EN', trainNumber: '4240', booking: true, tripId: 'elvira:2',
+    })], 12).length === 0);
+  check('generic IC keeps a named overlay slot',
+    Lib.mergeVolanRows([], [rail({
+      label: 'IC', trainNumber: '852', booking: true, tripId: 'elvira:1',
+    })], 12)[0].label === 'IC');
+  check('named IC stays on the hop',
+    Lib.mergeVolanRows([], [rail({
+      label: 'BAKONY', trainNumber: '904', booking: true, tripId: 'elvira:2931213',
+    })], 12)[0].label === 'BAKONY');
+  check('suburban Z30 stays on the hop',
+    Lib.mergeVolanRows([], [rail({
+      label: 'Z30', trainNumber: '4542', booking: false, tripId: 'elvira:2887496',
+    })], 12)[0].label === 'Z30');
+  check('city bus number is not treated as a rail badge',
+    Lib.mergeVolanRows([], [{
+      label: '7', vehicle: 'bus', dep: dep, sched: dep, tripId: 'BKK_X',
+    }], 12)[0].label === '7');
+}
+{
+  const g = Lib.applyRailBadge({
+    label: 'GÖCSEJ', color: '#4477aa', text: '#ffffff', vehicle: 'rail',
+  });
+  const t = Lib.applyRailBadge({
+    label: 'TÓPART', color: '#4477aa', text: '#ffffff', vehicle: 'rail',
+  });
+  const s = Lib.applyRailBadge({
+    label: 'S', color: '#4477aa', text: '#ffffff', vehicle: 'rail',
+  });
+  check('named IC Göcsej gets IC badge colours',
+    String(g.color).replace('#', '').toUpperCase() === '2E5EA8'
+    && String(g.text).replace('#', '').toUpperCase() === 'FFFFFF');
+  check('named IC Tópart gets IC badge colours',
+    String(t.color).replace('#', '').toUpperCase() === '2E5EA8');
+  check('generic S becomes Sz with személy colours',
+    s.label === 'Sz'
+    && String(s.color).replace('#', '').toUpperCase() === '5C6B7A');
+  {
+    const card = document.createElement('hungarian-transport-card');
+    card.setConfig({ language: 'hu' });
+    const gHtml = card._rowHtml(g, 'hu', 0);
+    const tHtml = card._rowHtml(t, 'hu', 1);
+    check('named long-distance badges use the long CSS class',
+      gHtml.includes('class="badge long"') && tHtml.includes('class="badge long"'),
+      JSON.stringify({ g: gHtml.includes('badge long'), t: tHtml.includes('badge long') }));
+  }
+  check('S40 keeps suburban cyan not IC blue',
+    String(Lib.applyRailBadge({ label: 'S40', color: '#4477aa', vehicle: 'rail' }).color)
+      .replace('#', '').toUpperCase() === '00AFF0');
+}
 check('elvira placeholder blue takes FUTAR G43/Z30 brand colors on merge', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
   const merged = Lib.mergeVolanRows(
@@ -1182,6 +1721,84 @@ check('pickMotisVehicle prefers a same-label S40 over a destOn IC', (() => {
   ], { label: 'S40', trainNumber: '4343', dep, vehicle: 'rail' }, { name: 'Székesfehérvár' });
   return hit && hit.motisTripId === 's40';
 })());
+check('pickMotisVehicle does not put Göcsej on a nearby G43', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 600;
+  const hit = Lib.pickMotisVehicle([
+    {
+      label: 'G43', dep: dep + 120, vehicle: 'rail', motisTripId: 'g43',
+      nextNames: ['Székesfehérvár'], head: 'Székesfehérvár',
+      shape: [[47.46, 19.02], [47.18, 18.42]],
+    },
+    {
+      label: 'Z30', dep: dep + 60, vehicle: 'rail', motisTripId: 'z30',
+      nextNames: ['Székesfehérvár'],
+      shape: [[47.46, 19.02], [47.18, 18.42]],
+    },
+  ], { label: 'GÖCSEJ', trainNumber: '954', dep, vehicle: 'rail' }, { name: 'Székesfehérvár' });
+  return !hit;
+})());
+check('pickMotisVehicle unique nearby G43 does not bind named IC past 90s', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 600;
+  const hit = Lib.pickMotisVehicle([
+    {
+      label: 'G43', dep: dep + 120, vehicle: 'rail', motisTripId: 'g43',
+      nextNames: ['Székesfehérvár'], head: 'Székesfehérvár',
+      shape: [[47.46, 19.02], [47.18, 18.42]],
+    },
+  ], { label: 'GÖCSEJ', trainNumber: '954', dep, vehicle: 'rail' }, { name: 'Székesfehérvár' });
+  return !hit;
+})());
+check('pickMotisVehicle still matches Göcsej by train number', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 600;
+  const hit = Lib.pickMotisVehicle([
+    {
+      label: 'G43', dep, vehicle: 'rail', motisTripId: 'g43',
+      nextNames: ['Székesfehérvár'],
+    },
+    {
+      label: 'GÖCSEJ', trainNumber: '954', dep, vehicle: 'rail', motisTripId: 'gocsej',
+      nextNames: ['Székesfehérvár', 'Szombathely'],
+    },
+  ], { label: 'GÖCSEJ', trainNumber: '954', dep, vehicle: 'rail' }, { name: 'Székesfehérvár' });
+  return hit && hit.motisTripId === 'gocsej';
+})());
+{
+  const gap = Lib.shapeGpsGapMeters(
+    [[47.18, 18.42], [47.46, 19.02]],
+    47.50, 19.55,
+  );
+  check('GPS far from a suburban hop is a large shape gap',
+    gap > 40000, String(gap));
+}
+{
+  const card = document.createElement('hungarian-transport-card');
+  card.setConfig({
+    language: 'hu', apiKey: 'x',
+    stopLat: 47.46, stopLon: 19.02,
+  });
+  card._hass = { connection: {} };
+  const origMotis = Lib.motisShapeForHop;
+  const origHass = Lib.hassTripShape;
+  const motisShape = [[47.18, 18.42], [47.46, 19.02]];
+  const futarShape = [[47.50, 19.54], [47.23, 16.62]];
+  try {
+    Lib.motisShapeForHop = async () => ({ shape: motisShape, coversHead: true });
+    Lib.hassTripShape = async () => futarShape;
+    const got = await card._loadRowMapShape({
+      label: 'GÖCSEJ', trainNumber: '954', vehicle: 'rail',
+      tripId: 'BKK_954_1', lat: 47.50, lon: 19.55,
+      shape: motisShape,
+    });
+    check('loadRowMapShape prefers FUTAR when GPS is far from MOTIS',
+      got.shape.length === 2
+      && got.shape[0][1] === 19.54
+      && got.shape[1][1] === 16.62,
+      JSON.stringify(got.shape));
+  } finally {
+    Lib.motisShapeForHop = origMotis;
+    Lib.hassTripShape = origHass;
+  }
+}
 check('pickMotisHopRow matches a bus route number', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
   const hit = Lib.pickMotisHopRow([
@@ -1231,9 +1848,18 @@ check('map overlay CSS pins Leaflet SVG over tiles',
   src.includes('leaflet-overlay-pane') && src.includes('max-width:none!important'));
 check('hop map polyline is unclipped on a canvas renderer',
   src.includes('noClip: true') && src.includes('preferCanvas: true'));
-check('hop map draws the polyline before fitBounds',
-  src.includes('this._mapRouteOutline = L.polyline')
-  && src.indexOf('this._mapRoute = L.polyline') < src.lastIndexOf('applyView();'));
+{
+  const vm = src.slice(src.indexOf('async _openVehicleMap'), src.indexOf('  _syncOpenMap()'));
+  check('hop vehicle map draws one polyline before fitBounds',
+    vm.includes('this._mapRouteLayers.push')
+    && vm.includes('L.polyline(shape')
+    && vm.indexOf('L.polyline(shape') < vm.lastIndexOf('applyView();'));
+  check('hop vehicle map loads one row, not every due trip',
+    vm.includes('_loadRowMapShape')
+    && !vm.includes('_visibleMapRows')
+    && !vm.includes('boardMapLayers')
+    && !vm.includes('mapAllTrips'));
+}
 check('hop map loads FUTAR geometry through Home Assistant',
   src.includes('hassTripShape') && src.includes("'trip_shape'"));
 {
@@ -1665,6 +2291,16 @@ const toHub = await Lib.cityRailJourney('k', { states: {} }, originZoo, destTisz
 check('city legs stand when dest is the hub',
   toHub && toHub.legs.some((leg) => leg.label === 'ZOO') && !toHub.legs.some((leg) => !leg.walk && /^(IC|EC)/.test(leg.label)),
   JSON.stringify(toHub && toHub.legs.map((l) => l.label || (l.walk ? 'walk' : ''))));
+const toHubGeo = await Lib.cityRailJourney(
+  'k', { states: {} },
+  { id: 'miskolc:zoo', name: 'Miskolci \u00c1llatkert', lat: 48.12, lon: 20.78 },
+  { id: 'miskolc:tiszai', name: 'Tiszai p\u00e1lyaudvar', lat: 48.17, lon: 20.81 },
+);
+check('cityRailJourney keeps origin dest coordinates',
+  toHubGeo && toHubGeo.legs[0].fromLat === 48.12 && toHubGeo.legs[0].fromLon === 20.78
+  && toHubGeo.legs[toHubGeo.legs.length - 1].toLat === 48.17
+  && toHubGeo.legs[toHubGeo.legs.length - 1].toLon === 20.81,
+  JSON.stringify(toHubGeo && toHubGeo.legs.map((l) => ({ from: l.fromLat, to: l.toLat }))));
 const destMiskolcTiszai = { id: 'BKK_005510009', name: 'Miskolc-Tiszai' };
 const destGomori = { id: 'BKK_005510001', name: 'Miskolc-G\u00f6m\u00f6ri' };
 const toMavHub = await Lib.cityRailJourney('k', { states: {} }, originZoo, destMiskolcTiszai);
