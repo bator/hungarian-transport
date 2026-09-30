@@ -8,6 +8,8 @@ __pycache__/
 /volan-index*.json
 /volan-index*.json.gz
 /city-index.json.gz
+/mav-index.json.gz
+dist/mav-index.json.gz
 /*.zip
 volanbusz_gtfs.zip
 state.json

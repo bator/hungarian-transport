@@ -14,8 +14,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_city_index import CITY_FEEDS, build_city_index  # noqa: E402
+from build_mav_index import build_mav_index, resolve_mav_feed  # noqa: E402
 from build_volan_index import GTFS_URL, build_index  # noqa: E402
-from gtfs_compact import UA, download_feed, download_zip  # noqa: E402
+from gtfs_compact import UA, download_feed, download_zip, feed_error, resolved_url  # noqa: E402
 
 WEBHOOK_PATH = "/api/webhook/hungarian-transport-gtfs"
 HA_BASE = Path("/config/hungarian-transport")
@@ -25,6 +26,56 @@ HA_WWW = Path(
         "/config/www/community/hungarian-transport",
     )
 )
+
+INDEX_FILES = ("volan-index.json.gz", "city-index.json.gz", "mav-index.json.gz")
+
+
+def _atomic_copy(src: Path, dest: Path) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.write_bytes(src.read_bytes())
+    tmp.replace(dest)
+
+
+def persist_index(www_path: Path, base: Path) -> None:
+    """Keep a durable copy outside the HACS community folder."""
+    if not www_path.is_file() or not base.is_dir():
+        return
+    dest = base / www_path.name
+    try:
+        if dest.resolve() == www_path.resolve():
+            return
+        _atomic_copy(www_path, dest)
+    except OSError as err:
+        print(f"warn persist {www_path.name}: {type(err).__name__}", file=sys.stderr)
+
+
+def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
+    """Copy durable indexes back if HACS wiped or shrank them."""
+    restored: list[str] = []
+    if not base.is_dir():
+        return restored
+    www.mkdir(parents=True, exist_ok=True)
+    for name in INDEX_FILES:
+        src = base / name
+        dest = www / name
+        if not src.is_file():
+            continue
+        missing = not dest.is_file()
+        smaller = False
+        if dest.is_file():
+            try:
+                smaller = dest.stat().st_size + 4096 < src.stat().st_size
+            except OSError:
+                smaller = True
+        if not (missing or smaller):
+            continue
+        try:
+            _atomic_copy(src, dest)
+            restored.append(name)
+        except OSError as err:
+            print(f"warn restore {name}: {type(err).__name__}", file=sys.stderr)
+    return restored
 
 
 def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
@@ -54,13 +105,37 @@ def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
             continue
 
 
-def paths() -> tuple[Path, Path, Path]:
+def paths() -> tuple[Path, Path, Path, Path]:
     if HA_BASE.is_dir() or Path("/config").is_dir():
         HA_BASE.mkdir(parents=True, exist_ok=True)
         HA_WWW.mkdir(parents=True, exist_ok=True)
-        return HA_BASE, HA_WWW / "volan-index.json.gz", HA_WWW / "city-index.json.gz"
+        return (
+            HA_BASE,
+            HA_WWW / "volan-index.json.gz",
+            HA_WWW / "city-index.json.gz",
+            HA_WWW / "mav-index.json.gz",
+        )
     here = Path(__file__).resolve().parent.parent
-    return here, here / "volan-index.json.gz", here / "city-index.json.gz"
+    return (
+        here,
+        here / "volan-index.json.gz",
+        here / "city-index.json.gz",
+        here / "mav-index.json.gz",
+    )
+
+
+def mav_source_newer(src: Path, out: Path) -> bool:
+    if not out.exists():
+        return True
+    try:
+        if src.is_dir():
+            times = [p.stat().st_mtime for p in src.iterdir() if p.is_file()]
+            newest = max(times) if times else 0
+        else:
+            newest = src.stat().st_mtime
+        return newest > out.stat().st_mtime
+    except OSError:
+        return True
 
 
 def load_state(path: Path) -> dict:
@@ -165,12 +240,13 @@ def acquire_lock(path: Path):
 
 
 def main() -> int:
-    base, volan_out, city_out = paths()
+    base, volan_out, city_out, mav_out = paths()
     lock = acquire_lock(base / "update.lock")
     if lock is None:
         print("another update is running")
         return 0
     sweep_temps(base, volan_out.parent)
+    restored = restore_hacs_indexes(base, volan_out.parent)
 
     def on_signal(_signum, _frame):
         sweep_temps(base, volan_out.parent)
@@ -190,6 +266,8 @@ def main() -> int:
     city_state = state.get("cities") or {}
     changed: list[str] = []
     exit_code = 0
+    if restored:
+        changed.append("restored " + ", ".join(restored))
 
     try:
         try:
@@ -218,16 +296,18 @@ def main() -> int:
             volan_state["feed_version"] = info["feed_version"]
             volan_state["trips"] = info["trips"]
             volan_state["stops"] = info["stops"]
+            persist_index(volan_out, base)
             changed.append(f"volan {info['feed_version'] or '?'}")
         else:
             print(f"unchanged volan {volan_state.get('feed_version') or '?'}")
 
         city_need = volan_changed or not city_out.exists()
         for feed in CITY_FEEDS:
+            url = resolved_url(feed)
             try:
-                meta = remote_meta(feed["url"])
+                meta = remote_meta(url)
             except Exception as err:
-                print(f"warn HEAD {feed['id']}: {err}", file=sys.stderr)
+                print(f"warn HEAD {feed_error(feed['id'], err)}", file=sys.stderr)
                 continue
             prev = city_state.get(feed["id"]) or {}
             zpath = base / feed["file"]
@@ -235,9 +315,9 @@ def main() -> int:
                 city_state[feed["id"]] = merge_meta(meta, prev, zpath.stat().st_size)
                 continue
             try:
-                downloaded = download_feed(feed["url"], zpath)
+                downloaded = download_feed(url, zpath)
             except Exception as err:
-                print(f"warn download {feed['id']}: {err}", file=sys.stderr)
+                print(f"warn download {feed_error(feed['id'], err)}", file=sys.stderr)
                 continue
             city_state[feed["id"]] = merge_meta(
                 meta, downloaded, zpath.stat().st_size if zpath.exists() else None
@@ -247,11 +327,33 @@ def main() -> int:
         if city_need:
             try:
                 info = build_city_index(base, city_out, zip_path if zip_path.exists() else None)
+                persist_index(city_out, base)
                 changed.append(f"city ops={info['ops']} trips={info['trips']}")
             except Exception as err:
                 msg = f"error city rebuild: {err}"
                 print(msg, file=sys.stderr)
                 notify(f"Helyi GTFS frissítés sikertelen: {msg}")
+                exit_code = 1
+
+        mav_src = None
+        try:
+            mav_src = resolve_mav_feed(base)
+        except FileNotFoundError:
+            mav_src = None
+        except Exception as err:
+            print(f"warn mav source: {type(err).__name__}", file=sys.stderr)
+            mav_src = None
+        if mav_src is not None and mav_source_newer(mav_src, mav_out):
+            try:
+                info = build_mav_index(mav_src, mav_out)
+                persist_index(mav_out, base)
+                changed.append(
+                    f"mav trains={info['trains']} lines={info.get('lines') or 0}"
+                )
+            except Exception as err:
+                msg = f"error mav rebuild: {err}"
+                print(msg, file=sys.stderr)
+                notify(f"MÁV GTFS frissítés sikertelen: {msg}")
                 exit_code = 1
     finally:
         save_state(
@@ -261,6 +363,7 @@ def main() -> int:
                 "cities": city_state,
                 "index": str(volan_out),
                 "city_index": str(city_out),
+                "mav_index": str(mav_out),
             },
         )
         lock.close()

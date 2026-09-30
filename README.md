@@ -38,6 +38,10 @@ they follow the Home Assistant user's language; you can pin one explicitly.
    `type: module` is required — the card resolves `volan-index.json.gz` and
    `city-index.json.gz` from the module URL.
 
+   If Lovelace is pinned to `hungarian-transport.full.js` (so a HACS refresh of
+   `hungarian-transport.js` cannot 404 the resource), keep that filename in the
+   resource list. Indexes still live in the same folder.
+
 HACS installs everything under `dist/` (`hungarian-transport.js` plus both
 GTFS indexes). The default branch is hidden; pick a GitHub release.
 
@@ -105,6 +109,7 @@ host. The timetable still lists without them.
 | `minutesAfter` | number | `180` | How many minutes ahead to list departures (15–480). The editor offers presets 30–480; YAML may use any value in range. Also applies to the planner card. |
 | `volanIndex` | string | next to the card | URL of `volan-index.json.gz` |
 | `cityIndex` | string | next to the card | URL of `city-index.json.gz` |
+| `mavIndex` | string | next to the card | URL of `mav-index.json.gz` (nationwide train lines) |
 | `favorites` | list | national hubs | Optional `{ id, name }` chips in the editor |
 
 ### Example
@@ -148,13 +153,25 @@ zip, but the calendar ended 2025-12-31, so it is not wired. Those lines now
 run as Volán / MÁV.
 
 Where the publisher has no fixed zip URL, the city index uses the public
-menetbrand `/download/<slug>` proxy (Bahart, Kaposvár, Hódmezővásárhely,
-Kiskunhalas, Székesfehérvár, Tatabánya, Várpalota).
+menetbrand `/download/<slug>` proxy (Kaposvár, Hódmezővásárhely,
+Kiskunhalas, Székesfehérvár, Tatabánya, Várpalota). Bahart prefers the
+official keyed NAP URL from `BAHART_GTFS_URL` in a gitignored `.env`
+(`/config/hungarian-transport/.env` on Home Assistant). Transitland v2 and
+Mobility Database keys in the same file are a catalog fallback. Without
+those secrets the public menetbrand zip is used, including GitHub Actions
+unless the matching repository secrets are set.
 
 These feeds still need a form or login:
 
 - MÁV / GYSEV rail GTFS: <https://www.mavcsoport.hu/gtfs-igenybejelento>
-- Bahart keyed NAP URL (the public proxy is already in the index): <https://nap.bahart.hu/>
+  Put `mav-gtfs.zip` next to the scripts (or `MAV_GTFS_ZIP` / `MAV_GTFS_URL`
+  in `.env`) and run `python3 scripts/build_mav_index.py`. Prefer unzipped
+  **pfaedle** output (`MAV_PFAEDLE_DIR` or `/opt/pfaedle-trial/out`): official
+  `shapes.txt` is a stub or an 8 km chord across Székesfehérvár–Kelenföld,
+  while pfaedle follows OSM line 30. The card then draws every train's full
+  nationwide line from `mav-index.json.gz`. Stubs that still miss the stop
+  bbox become the stop sequence (IC 856 is Déli → Nagykanizsa). Without the
+  zip the map still falls back to Transitous / FUTÁR.
 - National Access Point (SZKT official dump and others): <https://napportal.kozut.hu/>
 - Kecskemét KEKO city buses: <https://timetable.keko.hu/Kecskemet_GTFS.zip> (auth)
 
@@ -169,14 +186,22 @@ A weekly GitHub Action publishes a patch release when the feeds move.
 
 To rebuild them yourself on Home Assistant OS:
 
-1. Copy `scripts/*.py` and `scripts/run_update.sh` to `/config/hungarian-transport/`.
+1. Copy `scripts/*.py` and `scripts/run_update.sh` to `/config/hungarian-transport/`
+   (`build_mav_index.py` included). pfaedle output stays on the builder host,
+   not on Home Assistant OS — without it the official zip is stop-sequence,
+   not OSM rails.
 2. Copy `packages/hungarian_transport.yaml` into a Home Assistant package
    directory (`packages: !include_dir_named packages`).
 3. Restart Home Assistant. The automation runs at 04:30 Europe/Budapest and
    five minutes after a core start. It HEADs the KTI zip and the municipal
    feeds, rebuilds only when the fingerprint changed, and writes
    `volan-index.json.gz` / `city-index.json.gz` atomically into
-   `/config/www/community/hungarian-transport/`.
+   `/config/www/community/hungarian-transport/`. A durable copy is also kept
+   under `/config/hungarian-transport/` so a HACS update that overwrote the
+   community folder is restored on the next run (larger local `mav-index.json.gz`
+   wins). A local `mav-gtfs.zip` or pfaedle directory also rebuilds
+   `mav-index.json.gz`. A MÁV rebuild failure notifies and exits 1, like Volán
+   and city.
 
 Set `HUNGARIAN_TRANSPORT_WWW` if you installed the card somewhere else.
 Point `notify.admins` at whatever notifier you use, or drop that automation.

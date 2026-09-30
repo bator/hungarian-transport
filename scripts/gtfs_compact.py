@@ -5,11 +5,13 @@ from __future__ import annotations
 import csv
 import gzip
 import io
+import ipaddress
 import json
 import os
 import re
 import tempfile
 import unicodedata
+import urllib.parse
 import urllib.request
 import zipfile
 from collections import defaultdict
@@ -20,7 +22,245 @@ RoutePred = Callable[[str, str, str], bool]
 
 UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungarian-transport)"
 MAX_MEMBER = 500 * 1024 * 1024
+MAX_DOWNLOAD = 200 * 1024 * 1024
 INDEX_SCHEMA = 27
+_BLOCKED_HOSTS = frozenset(
+    {
+        "localhost",
+        "unix",
+        "supervisor",
+        "hassio",
+        "homeassistant",
+        "127.0.0.1",
+        "0.0.0.0",
+        "::1",
+        "::",
+    }
+)
+_ENV_LOADED = False
+_MDB_ACCESS: str | None = None
+
+
+def _parse_env_file(path: Path) -> None:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        val = val.strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
+            val = val[1:-1]
+        os.environ[key] = val
+
+
+def load_env_files() -> None:
+    """Load gitignored .env if present. Never override already-set variables."""
+    global _ENV_LOADED
+    if _ENV_LOADED:
+        return
+    _ENV_LOADED = True
+    extra = (os.environ.get("HUNGARIAN_TRANSPORT_ENV") or "").strip()
+    here = Path(__file__).resolve().parent
+    candidates = []
+    if extra:
+        candidates.append(Path(extra))
+    candidates.extend(
+        [
+            here.parent / ".env",
+            Path("/config/hungarian-transport/.env"),
+            Path("/mnt/data/supervisor/homeassistant/hungarian-transport/.env"),
+        ]
+    )
+    for path in candidates:
+        if path.is_file():
+            _parse_env_file(path)
+
+
+def feed_error(feed_id: str, err: BaseException) -> str:
+    """Log a download failure without echoing keyed NAP / catalog URLs."""
+    return f"{feed_id}: {type(err).__name__}"
+
+
+def assert_public_http_url(url: str) -> None:
+    """Reject file://, loopback, and RFC1918 targets before urlopen."""
+    parsed = urllib.parse.urlparse((url or "").strip())
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(f"blocked url scheme {parsed.scheme or 'none'}")
+    if parsed.username or parsed.password:
+        raise ValueError("blocked url userinfo")
+    host = (parsed.hostname or "").strip("[]").lower()
+    if not host:
+        raise ValueError("blocked url host")
+    if (
+        host in _BLOCKED_HOSTS
+        or host.endswith(".local")
+        or host.endswith(".internal")
+        or host.endswith(".localhost")
+    ):
+        raise ValueError("blocked url host")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    ):
+        raise ValueError("blocked url host")
+
+
+def _safe_http_url(url: str) -> str:
+    text = (url or "").strip()
+    if not text:
+        return ""
+    try:
+        assert_public_http_url(text)
+    except ValueError:
+        return ""
+    return text
+
+
+class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        assert_public_http_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _urlopen(req: urllib.request.Request, timeout: int = 120):
+    opener = urllib.request.build_opener(_PublicRedirectHandler)
+    return opener.open(req, timeout=timeout)
+
+
+def _http_json(url: str, *, method: str = "GET", data: dict | None = None, headers: dict | None = None, timeout: int = 20):
+    hdrs = {"User-Agent": UA, "Accept": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    body = None
+    if data is not None:
+        body = json.dumps(data).encode("utf-8")
+        hdrs.setdefault("Content-Type", "application/json")
+    req = urllib.request.Request(url, data=body, method=method, headers=hdrs)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    if not raw:
+        return None
+    return json.loads(raw.decode("utf-8"))
+
+
+def _transitland_url(query: str) -> str:
+    key = (os.environ.get("TRANSITLAND_API_KEY") or "").strip()
+    if not key or not query:
+        return ""
+    q = urllib.parse.quote(query)
+    data = _http_json(
+        f"https://transit.land/api/v2/rest/feeds?search={q}&limit=8",
+        headers={"apikey": key},
+    )
+    feeds = (data or {}).get("feeds") if isinstance(data, dict) else data
+    if not isinstance(feeds, list):
+        return ""
+    needle = query.casefold()
+    for feed in feeds:
+        if not isinstance(feed, dict):
+            continue
+        oid = str(feed.get("onestop_id") or "")
+        name = str(feed.get("name") or "")
+        if needle not in oid.casefold() and needle not in name.casefold():
+            continue
+        urls = feed.get("urls") if isinstance(feed.get("urls"), dict) else {}
+        current = _safe_http_url(urls.get("static_current") or "")
+        if current:
+            return current
+    return ""
+
+
+def _mdb_access() -> str:
+    global _MDB_ACCESS
+    if _MDB_ACCESS:
+        return _MDB_ACCESS
+    refresh = (os.environ.get("MOBILITY_DATABASE_REFRESH_TOKEN") or "").strip()
+    if not refresh:
+        return ""
+    data = _http_json(
+        "https://api.mobilitydatabase.org/v1/tokens",
+        method="POST",
+        data={"refresh_token": refresh},
+    )
+    token = (data or {}).get("access_token") if isinstance(data, dict) else ""
+    _MDB_ACCESS = (token or "").strip()
+    return _MDB_ACCESS
+
+
+def _mdb_url(query: str) -> str:
+    token = _mdb_access()
+    if not token or not query:
+        return ""
+    data = _http_json(
+        "https://api.mobilitydatabase.org/v1/gtfs_feeds?limit=100&offset=0&country_code=HU",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    feeds = data if isinstance(data, list) else []
+    needle = query.casefold()
+    for feed in feeds:
+        if not isinstance(feed, dict):
+            continue
+        provider = str(feed.get("provider") or "")
+        fid = str(feed.get("id") or "")
+        if needle not in provider.casefold() and needle not in fid.casefold():
+            continue
+        latest = feed.get("latest_dataset") if isinstance(feed.get("latest_dataset"), dict) else {}
+        hosted = (latest.get("hosted_url") or "").strip()
+        if hosted:
+            return hosted
+        info = feed.get("source_info") if isinstance(feed.get("source_info"), dict) else {}
+        producer = (info.get("producer_url") or "").strip()
+        if producer:
+            return producer
+    return ""
+
+
+def catalog_url(query: str) -> str:
+    """Latest zip URL from Mobility Database (HU) then Transitland. Empty on miss."""
+    if not query:
+        return ""
+    skip = (os.environ.get("HUNGARIAN_TRANSPORT_SKIP_CATALOG") or "").strip().lower()
+    if skip in ("1", "true", "yes"):
+        return ""
+    try:
+        found = _safe_http_url(_mdb_url(query))
+        if found:
+            return found
+    except Exception:
+        pass
+    try:
+        return _safe_http_url(_transitland_url(query))
+    except Exception:
+        return ""
+
+
+def resolved_url(feed: dict) -> str:
+    """Env override, then catalog lookup, then the public fallback URL."""
+    load_env_files()
+    env_name = (feed.get("url_env") or "").strip()
+    if env_name:
+        override = (os.environ.get(env_name) or "").strip()
+        if override:
+            return override
+    found = catalog_url((feed.get("catalog_query") or "").strip())
+    if found:
+        return found
+    return (feed.get("url") or "").strip()
 
 
 def parent(sid: str) -> str:
@@ -56,6 +296,82 @@ def slug(text: str) -> str:
     return folded or "local"
 
 
+LINE_CODE_RE = re.compile(r"^[GSZHM]\d{2}$", re.I)
+
+
+def line_code(short: str, long_name: str = "") -> str:
+    """Suburban product code (G43, S40). Not a train number."""
+    for raw in (short, long_name):
+        s = (raw or "").strip().upper()
+        if LINE_CODE_RE.fullmatch(s):
+            return s
+    return ""
+
+
+def train_number(name: str) -> str:
+    """Train number from a MÁV name: 'IC 856 TÓPART' → '856'. Not 'G43' → '43'."""
+    s = (name or "").strip()
+    if not s or LINE_CODE_RE.fullmatch(s):
+        return ""
+    m = re.search(r"(?<!\d)(\d{3,5})(?!\d)", s)
+    if not m:
+        return ""
+    raw = m.group(1)
+    return raw.lstrip("0") or raw
+
+
+def _encode_signed(value: int) -> str:
+    value = ~(value << 1) if value < 0 else (value << 1)
+    chars: list[str] = []
+    while value >= 0x20:
+        chars.append(chr((0x20 | (value & 0x1F)) + 63))
+        value >>= 5
+    chars.append(chr(value + 63))
+    return "".join(chars)
+
+
+def encode_polyline(pts: Iterable[tuple[float, float]], precision: int = 5) -> str:
+    """Google encoded polyline; matches the card's decodePolyline (precision 5)."""
+    factor = 10 ** precision
+    plat = 0
+    plng = 0
+    out: list[str] = []
+    for lat, lng in pts:
+        ilat = int(round(float(lat) * factor))
+        ilng = int(round(float(lng) * factor))
+        out.append(_encode_signed(ilat - plat))
+        out.append(_encode_signed(ilng - plng))
+        plat, plng = ilat, ilng
+    return "".join(out)
+
+
+def decode_polyline(encoded: str, precision: int = 5) -> list[tuple[float, float]]:
+    factor = 10 ** precision
+    coords: list[tuple[float, float]] = []
+    index = 0
+    lat = 0
+    lng = 0
+    text = encoded or ""
+    while index < len(text):
+        for xy in (0, 1):
+            result = 0
+            shift = 0
+            while True:
+                byte = ord(text[index]) - 63
+                index += 1
+                result |= (byte & 0x1F) << shift
+                shift += 5
+                if byte < 0x20:
+                    break
+            delta = ~(result >> 1) if result & 1 else (result >> 1)
+            if xy == 0:
+                lat += delta
+            else:
+                lng += delta
+        coords.append((lat / factor, lng / factor))
+    return coords
+
+
 def open_gtfs_zip(zpath: Path) -> zipfile.ZipFile:
     head = zpath.read_bytes()[:4]
     if head[:2] != b"PK":
@@ -73,6 +389,39 @@ def open_gtfs_zip(zpath: Path) -> zipfile.ZipFile:
     return z
 
 
+class GtfsDir:
+    """Unzipped GTFS folder (pfaedle output). Same read/namelist surface as ZipFile."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+
+    def namelist(self) -> list[str]:
+        return [p.name for p in self.path.iterdir() if p.is_file()]
+
+    def read(self, name: str) -> bytes:
+        return (self.path / name).read_bytes()
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self) -> "GtfsDir":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+def open_gtfs(path: Path):
+    """Open a GTFS zip or an unzipped directory."""
+    path = Path(path)
+    if path.is_dir():
+        names = {p.name.lower() for p in path.iterdir() if p.is_file()}
+        if "routes.txt" not in names or "trips.txt" not in names:
+            raise FileNotFoundError(f"{path} is not a GTFS directory")
+        return GtfsDir(path)
+    return open_gtfs_zip(path)
+
+
 def feed_version(z: zipfile.ZipFile) -> str:
     try:
         rows = list(_open_csv(z, "feed_info.txt"))
@@ -83,9 +432,16 @@ def feed_version(z: zipfile.ZipFile) -> str:
     return ""
 
 
-def _open_csv(z: zipfile.ZipFile, name: str):
-    names = {n.lower(): n for n in z.namelist()}
-    real = names.get(name.lower())
+def _open_csv(z, name: str):
+    wanted = name.lower()
+    members = list(z.namelist())
+    by_lower = {n.lower(): n for n in members}
+    real = by_lower.get(wanted)
+    if real is None:
+        for member in members:
+            if member.lower().rsplit("/", 1)[-1] == wanted:
+                real = member
+                break
     if not real:
         raise FileNotFoundError(name)
     raw = z.read(real)
@@ -103,6 +459,7 @@ def _open_csv(z: zipfile.ZipFile, name: str):
 
 def download_zip(url: str, dest: Path) -> dict:
     """Write url to dest via a sibling tempfile so a kill cannot leave a truncated zip."""
+    assert_public_http_url(url)
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix="gtfs_", suffix=".zip", dir=str(dest.parent))
     os.close(fd)
@@ -112,14 +469,22 @@ def download_zip(url: str, dest: Path) -> dict:
             url,
             headers={"User-Agent": UA, "Accept-Encoding": "identity"},
         )
-        with urllib.request.urlopen(req, timeout=120) as resp, tmp.open("wb") as out:
+        with _urlopen(req, timeout=120) as resp, tmp.open("wb") as out:
+            assert_public_http_url(resp.geturl())
+            cl = resp.headers.get("Content-Length")
+            if cl and cl.isdigit() and int(cl) > MAX_DOWNLOAD:
+                raise ValueError("download too large")
+            total = 0
             while True:
                 chunk = resp.read(1024 * 1024)
                 if not chunk:
                     break
+                total += len(chunk)
+                if total > MAX_DOWNLOAD:
+                    raise ValueError("download too large")
                 out.write(chunk)
         if tmp.stat().st_size < 4 or tmp.read_bytes()[:2] != b"PK":
-            raise zipfile.BadZipFile(f"{url} did not return a zip")
+            raise zipfile.BadZipFile(f"{dest.name} is not a zip file")
         tmp.replace(dest)
         return {"size": dest.stat().st_size, "content_length": str(dest.stat().st_size)}
     except Exception:
@@ -139,7 +504,7 @@ def download_feed(url: str, dest: Path) -> dict:
             return download_zip(u, dest)
         except Exception as err:
             last = err
-    raise last or RuntimeError(f"download failed: {url}")
+    raise last or RuntimeError(f"download failed: {dest.name}")
 
 
 def load_parts(

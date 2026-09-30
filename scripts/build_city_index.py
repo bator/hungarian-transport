@@ -6,7 +6,7 @@ import re
 import sys
 from pathlib import Path
 
-from gtfs_compact import download_feed, load_parts, write_index
+from gtfs_compact import download_feed, feed_error, load_parts, resolved_url, write_index
 
 VOLAN_URL = "https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip"
 OUT = Path("city-index.json.gz")
@@ -14,8 +14,10 @@ OUT = Path("city-index.json.gz")
 # Debrecen DKV is listed as "Nem publikus" on menetbrand. Skip.
 # Weekendbus (Csömör/Pécel) still hosts a zip, but the calendar ended 2025-12-31.
 # Feeds that still need a form or login: MÁV, NAP, KEKO.
-# Menetbrand /download/<slug> is the stable public zip when the publisher
-# has no fixed filename (Kaposvár), a CAPTCHA (Kiskunhalas), or a form (Bahart).
+# Menetbrand /download/<slug> is the public zip when the publisher has no fixed
+# filename (Kaposvár), a CAPTCHA (Kiskunhalas), or until a keyed URL is in .env.
+# Bahart: official NAP URL via BAHART_GTFS_URL; Transitland / Mobility Database
+# as catalog fallback; menetbrand if neither is set.
 CITY_FEEDS = [
     {
         "id": "miskolc",
@@ -75,6 +77,8 @@ CITY_FEEDS = [
         "id": "bahart",
         "name": "Balaton — Bahart",
         "url": "https://gtfs.menetbrand.com/download/bahart",
+        "url_env": "BAHART_GTFS_URL",
+        "catalog_query": "bahart",
         "file": "bahart.zip",
     },
     {
@@ -141,8 +145,8 @@ def collect_parts(base: Path, volan_zip: Path | None = None) -> list[dict]:
         zpath = base / feed["file"]
         try:
             if not zpath.exists():
-                print("downloading", feed["id"], feed["url"])
-                download_feed(feed["url"], zpath)
+                print("downloading", feed["id"])
+                download_feed(resolved_url(feed), zpath)
             parts.extend(
                 load_parts(
                     zpath,
@@ -154,7 +158,7 @@ def collect_parts(base: Path, volan_zip: Path | None = None) -> list[dict]:
             )
         except Exception as err:
             failed.append(feed["id"])
-            print(f"warn {feed['id']}: {err}", file=sys.stderr)
+            print(f"warn {feed_error(feed['id'], err)}", file=sys.stderr)
     if volan_zip and volan_zip.exists():
         try:
             print("volan local", volan_zip)

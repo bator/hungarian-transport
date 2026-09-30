@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node test-i18n.mjs && node test-render.mjs"
+    "test": "node test-i18n.mjs && node test-render.mjs && python3 ha/test_elvira.py"
   },
   "devDependencies": {
     "jsdom": "^24.1.3"

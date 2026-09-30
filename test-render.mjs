@@ -103,7 +103,9 @@ check('countdown from the epoch', out.includes('5 perc'));
 check('travel time shown', out.includes('47 perc'));
 check('pictogram tooltip is a data-tip bubble, not a title',
   out.includes('data-tip="Akad\u00e1lymentes, alacsonypadl\u00f3s j\u00e1rm\u0171"'));
-check('booking pictogram rendered', out.includes('Helyjegy'));
+check('booking pictogram rendered',
+  out.includes('class="picto booking"') && out.includes('>H<')
+    && out.includes('data-tip="Helyjegy v\u00e1lt\u00e1sa k\u00f6telez\u0151"'));
 check('row data is escaped', !out.includes('<script>') && out.includes('&lt;script&gt;'));
 check('card size grows with the rows', card.getCardSize() >= 2, String(card.getCardSize()));
 
@@ -400,6 +402,15 @@ check('Kelenf\u00f6ld MAV id prefers rail over coach station',
     { id: 'hu-volanbusz_773538', name: 'Budapest, Kelenf\u00f6ld aut.\u00e1ll.', lat: 47.46, lon: 19.02 },
     { id: 'hu-bkk_CS056215', name: 'Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s', lat: 47.46, lon: 19.02 },
   ], { id: 'BKK_005501024', name: 'Kelenf\u00f6ld' }).id === 'at-Railway-x');
+check('BKK CSF parent maps to Transitous child F stop',
+  Lib.bkkTransitousStopIds('BKK_CSF01507').indexOf('hu-bkk_F01507') >= 0
+  && Lib.bkkTransitousStopIds('BKK_005501024').length === 0);
+check('Mester / Konyves geocode prefers the named stop over Kobanyai BKK hit',
+  Lib.pickTransitousHit([
+    { id: 'hu-Kecskemét_SA445', name: 'Könyves Kálmán körút 55.', lat: 46.89, lon: 19.67 },
+    { id: 'hu-volanbusz_hkir_773520', name: 'Mester utca / Könyves Kálmán körút', lat: 47.47, lon: 19.08 },
+    { id: 'hu-bkk_008148', name: 'Kőbányai út / Könyves Kálmán körút', lat: 47.486, lon: 19.107 },
+  ], { id: 'BKK_CSF01507', name: 'Mester utca / Könyves Kálmán körút' }, 'tram').id === 'hu-volanbusz_hkir_773520');
 check('Transitous keeps Hungarian stops',
   Lib.transitousInHungary({ id: 'hu-mvk_1', name: 'X' })
   && !Lib.transitousInHungary({ id: 'de-db_1', name: 'Berlin' }));
@@ -704,6 +715,11 @@ check('FUTAR Google object stays in Hungary at 1e5',
 check('finiteLatLon rejects off-globe MOTIS-as-1e5 coords',
   Lib.finiteLatLon(475.18, 190.78) == null
   && Lib.finiteLatLon(47.5, 19.05) != null);
+check('finiteLatLon rejects null-island from Number(null)',
+  Lib.finiteLatLon(null, null) == null
+  && Lib.finiteLatLon(0, 0) == null
+  && Lib.finiteLatLon('', '') == null
+  && Lib.finiteLatLon(undefined, undefined) == null);
 check('mapGpsLatLon drops null-island and Gulf of Guinea',
   Lib.mapGpsLatLon(0, 0) == null
   && Lib.mapGpsLatLon('', '') == null
@@ -1309,26 +1325,26 @@ check('elvira result parser reads top-level departures',
   const rail = (extra) => Object.assign({
     vehicle: 'rail', rawType: 'RAIL', dep: dep, sched: dep,
   }, extra);
-  check('numbered through express is dropped from the hop merge',
+  check('numbered through express stays on the hop',
     Lib.mergeVolanRows([], [rail({
       label: '16907', trainNumber: '16907', booking: true, tripId: 'elvira:3640191',
-    })], 12).length === 0);
-  check('numbered through személy is dropped from the hop merge',
+    })], 12)[0].label === '16907');
+  check('numbered through személy stays on the hop',
     Lib.mergeVolanRows([], [rail({
       label: '9792', trainNumber: '9792', booking: false, tripId: 'elvira:2888904',
-    })], 12).length === 0);
-  check('another numbered személy is dropped the same way',
+    })], 12)[0].label === '9792');
+  check('another numbered személy stays the same way',
     Lib.mergeVolanRows([], [rail({
       label: '9704', trainNumber: '9704', booking: false, tripId: 'elvira:2888905',
-    })], 12).length === 0);
-  check('generic EX plus a long train number is dropped',
+    })], 12)[0].label === '9704');
+  check('generic EX plus a long train number stays as EX',
     Lib.mergeVolanRows([], [rail({
       label: 'EX', trainNumber: '16907', booking: true, tripId: 'elvira:1',
-    })], 12).length === 0);
-  check('generic EN plus a long train number is dropped',
+    })], 12)[0].label === 'EX');
+  check('generic EN plus a long train number stays as EN',
     Lib.mergeVolanRows([], [rail({
       label: 'EN', trainNumber: '4240', booking: true, tripId: 'elvira:2',
-    })], 12).length === 0);
+    })], 12)[0].label === 'EN');
   check('generic IC keeps a named overlay slot',
     Lib.mergeVolanRows([], [rail({
       label: 'IC', trainNumber: '852', booking: true, tripId: 'elvira:1',
@@ -1341,6 +1357,17 @@ check('elvira result parser reads top-level departures',
     Lib.mergeVolanRows([], [rail({
       label: 'Z30', trainNumber: '4542', booking: false, tripId: 'elvira:2887496',
     })], 12)[0].label === 'Z30');
+  check('numbered FUTAR overlay does not replace G43',
+    Lib.mergeVolanRows([rail({
+      label: '19707', trainNumber: '19707', dep: dep, sched: dep,
+    })], [rail({
+      label: 'G43', trainNumber: '19707', dep: dep, sched: dep, color: '#AACD46',
+    })], 12).length === 1
+    && Lib.mergeVolanRows([rail({
+      label: '19707', trainNumber: '19707', dep: dep, sched: dep,
+    })], [rail({
+      label: 'G43', trainNumber: '19707', dep: dep, sched: dep, color: '#AACD46',
+    })], 12)[0].label === 'G43');
   check('city bus number is not treated as a rail badge',
     Lib.mergeVolanRows([], [{
       label: '7', vehicle: 'bus', dep: dep, sched: dep, tripId: 'BKK_X',
@@ -1396,6 +1423,183 @@ check('elvira placeholder blue takes FUTAR G43/Z30 brand colors on merge', (() =
     && String(g43.color).replace('#', '').toUpperCase() === 'AACD46'
     && String(z30.color).replace('#', '').toUpperCase() === 'FFCD28'
     && g43.platform === '5' && z30.platform === '7';
+})());
+check('overlay copies ELVIRA platform and booking onto a FUTAR host', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 600;
+  const merged = Lib.mergeVolanRows(
+    [{
+      label: 'IC', dep, sched: dep, color: '#2E5EA8',
+      platform: '4', booking: true, trainNumber: '914', tripId: 'elvira:1',
+    }],
+    [{
+      label: 'IC', dep, sched: dep, color: '#4477aa', tripId: 'BKK_914_1',
+    }],
+    12,
+  );
+  return merged.length === 1
+    && merged[0].platform === '4'
+    && merged[0].booking === true
+    && merged[0].tripId === 'BKK_914_1'
+    && Lib.rowTrainNumber(merged[0]) === '914';
+})());
+check('GÖCSEJ ELVIRA platform merges onto FUTAR IC 955 even without trainNumber on FUTAR', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 3600;
+  const merged = Lib.mergeVolanRows(
+    [{
+      label: 'IC', vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
+      color: '#2E5EA8', tripId: 'BKK_955_313',
+    }],
+    [{
+      label: 'GÖCSEJ', vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
+      color: '#4477aa', platform: '6', trainNumber: '955', tripId: 'elvira:2975814',
+    }],
+    12,
+  );
+  return merged.length === 1
+    && merged[0].platform === '6'
+    && merged[0].label === 'GÖCSEJ'
+    && Lib.rowTrainNumber(merged[0]) === '955';
+})());
+check('GÖCSEJ 967 same-minute merge keeps origin vágány', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 120;
+  const merged = Lib.mergeVolanRows(
+    [{
+      label: 'IC', vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
+      color: '#2E5EA8', trainNumber: '967', tripId: 'BKK_967_313',
+    }],
+    [{
+      label: 'GÖCSEJ', vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
+      color: '#4477aa', platform: '6', trainNumber: '967', tripId: 'elvira:2939299',
+    }],
+    12,
+  );
+  return merged.length === 1 && merged[0].platform === '6';
+})());
+check('origin overlayOnly copies booking onto FUTAR without dest hit and drops GEMENC', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 3600;
+  const rail = (extra) => Object.assign({
+    vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
+  }, extra);
+  const merged = Lib.mergeVolanRows(
+    [
+      rail({ label: 'IC', trainNumber: '966', tripId: 'BKK_966_313' }),
+      rail({
+        label: 'G43', trainNumber: '3511', tripId: 'BKK_3511_108',
+        dep: dep + 120, sched: dep + 120,
+      }),
+      rail({
+        label: 'Z30', trainNumber: '4543', tripId: 'BKK_4543_108',
+        dep: dep + 240, sched: dep + 240,
+      }),
+    ],
+    [
+      rail({
+        label: 'GÖCSEJ', trainNumber: '966', booking: true,
+        platform: '6', tripId: 'elvira:2975814', destHit: false,
+      }),
+      rail({
+        label: 'GEMENC', trainNumber: '800', booking: true,
+        dep: dep + 60, sched: dep + 60, tripId: 'elvira:gemenc', destHit: false,
+      }),
+      rail({
+        label: 'G43', trainNumber: '3511', booking: false,
+        dep: dep + 120, sched: dep + 120, tripId: 'elvira:g43', destHit: false,
+      }),
+      rail({
+        label: 'Z30', trainNumber: '4543', booking: false,
+        dep: dep + 240, sched: dep + 240, tripId: 'elvira:z30', destHit: false,
+      }),
+    ],
+    12,
+    { overlayOnly: true },
+  );
+  const gocsej = merged.find((r) => Lib.rowTrainNumber(r) === '966');
+  const g43 = merged.find((r) => r.label === 'G43');
+  const z30 = merged.find((r) => r.label === 'Z30');
+  return merged.length === 3
+    && gocsej && gocsej.booking === true && gocsej.platform === '6' && gocsej.label === 'GÖCSEJ'
+    && g43 && g43.booking !== true
+    && z30 && z30.booking !== true
+    && !merged.some((r) => String(r.label || '').toUpperCase() === 'GEMENC');
+})());
+check('overlayOnly does not pair GEMENC onto a same-minute FUTAR IC', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 3600;
+  const rail = (extra) => Object.assign({
+    vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
+  }, extra);
+  const merged = Lib.mergeVolanRows(
+    [rail({ label: 'IC', trainNumber: '966', tripId: 'BKK_966_313' })],
+    [rail({
+      label: 'GEMENC', trainNumber: '800', booking: true,
+      platform: '3', tripId: 'elvira:gemenc', destHit: false,
+    })],
+    12,
+    { overlayOnly: true },
+  );
+  return merged.length === 1
+    && merged[0].label === 'IC'
+    && Lib.rowTrainNumber(merged[0]) === '966'
+    && merged[0].booking !== true
+    && merged[0].platform !== '3';
+})());
+check('overlayOnly does not byTime-merge two ICs at the same minute', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 3600;
+  const rail = (extra) => Object.assign({
+    vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
+  }, extra);
+  const merged = Lib.mergeVolanRows(
+    [rail({ label: 'IC', tripId: 'BKK_966_313' })],
+    [rail({
+      label: 'IC', booking: true, platform: '3',
+      tripId: 'elvira:other-ic', destHit: false,
+    })],
+    12,
+    { overlayOnly: true },
+  );
+  return merged.length === 1
+    && merged[0].label === 'IC'
+    && merged[0].booking !== true
+    && merged[0].platform !== '3'
+    && merged[0].tripId === 'BKK_966_313';
+})());
+check('Székesfehérvár name maps to ELVIRA station code',
+  Lib.elviraCodeFromName('Székesfehérvár') === '005503269');
+check('MOTIS scheduledTrack becomes the row platform', (() => {
+  const start = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+  const end = new Date(Date.now() + 70 * 60 * 1000).toISOString();
+  const rows = Lib.rowsFromMotis({
+    itineraries: [{
+      transfers: 0,
+      startTime: start,
+      endTime: end,
+      legs: [{
+        mode: 'RAIL',
+        routeShortName: 'IC',
+        tripShortName: '914',
+        headsign: 'Szombathely',
+        startTime: start,
+        endTime: end,
+        duration: 3600,
+        from: { scheduledTrack: '4' },
+        tripId: 'hu-mav_914',
+      }],
+    }],
+  }, { name: 'Székesfehérvár' }, 'mav', 180);
+  return rows.length === 1 && rows[0].platform === '4';
+})());
+check('asRow keeps platform badge and helyjegy flag', (() => {
+  const painted = Lib.asRow({
+    label: 'IC', rawType: 'RAIL', dep: Math.floor(Date.now() / 1000) + 120,
+    platform: '4', booking: true, head: 'Székesfehérvár',
+  }, 'Székesfehérvár', 'hu');
+  const html = (() => {
+    const card = document.createElement('hungarian-transport-card');
+    card.setConfig({ language: 'hu' });
+    return card._rowHtml(painted, 'hu', 0);
+  })();
+  return painted.platform === '4' && painted.booking === true
+    && html.includes('class="plat"') && html.includes('>4<')
+    && html.includes('class="picto booking"') && html.includes('>H<');
 })());
 check('ELVIRA-only G43/Z30 get BKK badge colours', (() => {
   const g = Lib.applyRailBadge({ label: 'G43', color: '#4477aa' });
@@ -1604,17 +1808,51 @@ check('map skips FUTAR resolve when ELVIRA row already has GPS',
   !Lib.needsFutarMapResolve({ tripId: 'elvira:2890602', lat: 47.229, lon: 18.668 })
   && Lib.needsFutarMapResolve({ tripId: 'elvira:2890602' })
   && !Lib.needsFutarMapResolve({ tripId: 'BKK_861_74', lat: null, lon: null }));
-check('hop map uses Transitous full trip for trains and buses',
+check('hop map uses MÁV GTFS full line for trains, Transitous for buses',
   src.includes('motisShapeForHop')
+  && src.includes('mavShapeForRow')
+  && src.includes('mav-index.json.gz')
   && src.includes('/api/v5/stoptimes')
   && src.includes('_mapBoardMarker')
   && src.includes('combineHopShapes')
   && src.includes('stitchShapes')
+  && src.includes('clipShapeFromBoard')
+  && src.includes('clipShapeFromBoardToward')
+  && src.includes('clipRideShape')
+  && src.includes('clipShapeToBoardDest')
+  && src.includes('keepsFullLineShape')
+  && src.includes('pickPublishedLineShape')
+  && src.includes('futarTripShape')
+  && src.includes('bkkTransitousStopIds')
   && src.includes('if (canFutar)')
+  && src.includes('pfaedle OSM rails')
   && !src.includes('clipShapeAfterPoint')
   && !src.includes('truncatedMotis')
   && !src.includes('!hasShape && BkkLib.isTrainRow(row)')
   && !/shape = BkkLib.clipShapeToHop\(/.test(src));
+check('mavShapeIndexKey prefers suburban line over colliding train numbers', (() => {
+  const idx = { n: { 19707: 1, 9068: 2, 861: 3 }, l: { G43: 10, S40: 11 } };
+  const g43 = Lib.mavShapeIndexKey({ label: 'G43', trainNumber: '19707', vehicle: 'rail' }, idx);
+  const g43long = Lib.mavShapeIndexKey(
+    { label: 'G43 19707', trainNumber: '19707', vehicle: 'rail' }, idx,
+  );
+  const ic = Lib.mavShapeIndexKey({ label: 'BALATON', trainNumber: '861', vehicle: 'rail' }, idx);
+  const sz = Lib.mavShapeIndexKey({ label: 'Sz', trainNumber: '9068', vehicle: 'rail' }, idx);
+  const s40 = Lib.mavShapeIndexKey({ label: 'S40', trainNumber: '4343', vehicle: 'rail' }, idx);
+  return g43 && g43.kind === 'l' && g43.key === 'G43'
+    && g43long && g43long.kind === 'l' && g43long.key === 'G43'
+    && ic && ic.kind === 'n' && ic.key === '861'
+    && sz && sz.kind === 'n' && sz.key === '9068'
+    && s40 && s40.kind === 'l' && s40.key === 'S40';
+})());
+check('mavShapeForRow prefers suburban line then train number',
+  src.includes('suburbanLineLabel(label)')
+  && src.includes('idx.l[line]')
+  && src.includes('idx.l[label]')
+  && src.includes('idx.n[num]'));
+check('mav index miss is not cached',
+  src.includes('const empty = !idx || !Array.isArray(idx.p) || idx.p.length < 1')
+  && src.includes('if (empty) cache.delete(url)'));
 check('transitous host is api.transitous.org',
   src.includes("const TRANSITOUS = 'https://api.transitous.org'")
   && src.includes('String(TRANSITOUS).replace(/\\/$/, \'\')')
@@ -1846,8 +2084,12 @@ check('pickMotisHopRow matches train number not a later same-label hop', (() => 
 }
 check('map overlay CSS pins Leaflet SVG over tiles',
   src.includes('leaflet-overlay-pane') && src.includes('max-width:none!important'));
-check('hop map polyline is unclipped on a canvas renderer',
-  src.includes('noClip: true') && src.includes('preferCanvas: true'));
+check('hop map polyline is unclipped SVG on the overlay pane',
+  src.includes('noClip: true')
+  && src.includes("pane: 'overlayPane'")
+  && /L\.map\(canvas, \{ scrollWheelZoom: true, preferCanvas: false \}/.test(src)
+  && !/L\.map\(canvas, \{ scrollWheelZoom: true, preferCanvas: true \}/.test(src)
+  && !src.includes('L.canvas({ padding'));
 {
   const vm = src.slice(src.indexOf('async _openVehicleMap'), src.indexOf('  _syncOpenMap()'));
   check('hop vehicle map draws one polyline before fitBounds',
@@ -2026,8 +2268,9 @@ check('enrichFromHass keeps EMMA GPS over a FUTAR vehicle pin', (() => {
     && rows[0].lat === 47.464
     && rows[0].lon === 19.021;
 })());
-check('hop map does not fetch FUTAR trip-details in the browser',
-  !/details = await BkkLib.tripDetails\(cfg\.apiKey/.test(src)
+check('hop map bus shape uses FUTAR trip-details polyline',
+  src.includes('futarTripShape')
+  && src.includes('packed && packed.polyline')
   && src.includes("BkkLib.hassService(hass, 'trip_shape'"));
 check('decodePolyline accepts a FUTAR polyline object',
   Lib.decodePolyline({ points: '_p~iF~ps|U' }).length >= 1);
@@ -2095,6 +2338,235 @@ check('combineHopShapes stitches when MOTIS misses the Veszprem headsign', (() =
   return combined[combined.length - 1][1] === 17.9090
     && combined.length > motis.length;
 })());
+check('combineHopShapes keeps MOTIS hop when FUTAR G43 starts at Kobanya', (() => {
+  const motis = [[47.4651, 19.0208], [47.35, 18.8], [47.185, 18.414]];
+  const futar = [
+    [47.463, 19.1498], [47.464, 19.08], [47.4651, 19.0208], [47.35, 18.8], [47.185, 18.414],
+  ];
+  const combined = Lib.combineHopShapes(motis, futar, true, futar);
+  return combined[0][1] < 19.05 && combined[0][1] > 19.00;
+})());
+check('combineHopShapes keeps MOTIS inbound from Deli on 9068', (() => {
+  const motis = [
+    [47.4996, 19.0247],
+    [47.4643, 19.0206],
+    [47.1833, 18.4250],
+    [47.0960, 17.9090],
+  ];
+  const futar = [
+    [47.463, 19.1498],
+    [47.4643, 19.0206],
+    [47.1833, 18.4250],
+    [47.0960, 17.9090],
+  ];
+  const combined = Lib.combineHopShapes(motis, futar, true, futar);
+  return combined[0][0] > 47.49 && combined[combined.length - 1][1] === 17.9090;
+})());
+check('clipShapeFromBoard drops G43 inbound before Kelenfold', (() => {
+  const futar = [
+    [47.463, 19.1498], [47.464, 19.08], [47.4651, 19.0208], [47.35, 18.8], [47.185, 18.414],
+  ];
+  const clipped = Lib.clipShapeFromBoard(futar, [47.46445, 19.0219]);
+  return clipped[0][1] < 19.05 && clipped[clipped.length - 1][1] < 18.5;
+})());
+check('clipShapeFromBoard keeps Veszprem tail after Kelenfold', (() => {
+  const full = [
+    [47.4989, 19.0250],
+    [47.4643, 19.0206],
+    [47.1833, 18.4250],
+    [47.0960, 17.9090],
+  ];
+  const clipped = Lib.clipShapeFromBoard(full, [47.46445, 19.0219]);
+  return clipped[0][1] < 19.05
+    && clipped[clipped.length - 1][1] === 17.9090;
+})());
+check('clipShapeFromBoard keeps full 2B if board is 2km off the tracks', (() => {
+  const full = [
+    [47.5144, 19.0469],
+    [47.469814, 19.082997],
+    [47.452218, 19.09187],
+    [47.4330, 19.1050],
+  ];
+  const clipped = Lib.clipShapeFromBoard(full, [47.4858, 19.1071]);
+  return clipped.length === full.length && clipped[0][0] === 47.5144;
+})());
+check('clipShapeToBoardDest keeps 2B hop Mester to Timot, drops Jaszai and Pacsirtatelep', (() => {
+  const full = [
+    [47.5144, 19.0469],
+    [47.4816, 19.0687],
+    [47.469814, 19.082997],
+    [47.4606, 19.0871],
+    [47.452218, 19.09187],
+    [47.4330, 19.1050],
+  ];
+  const clipped = Lib.clipShapeToBoardDest(
+    full,
+    [47.469814, 19.082997],
+    [47.452218, 19.09187],
+  );
+  const lats = clipped.map((pt) => pt[0]);
+  return clipped.length >= 2
+    && Math.max(...lats) < 47.48
+    && Math.min(...lats) > 47.44
+    && clipped[0][0] > 47.46
+    && clipped[clipped.length - 1][0] < 47.46;
+})());
+check('keepsFullLineShape is tram/metro/trolley/bus/coach/rail',
+  Lib.keepsFullLineShape({ vehicle: 'tram', label: '2B' })
+  && Lib.keepsFullLineShape({ type: 'TRAM', label: '1' })
+  && Lib.keepsFullLineShape({ vehicle: 'rail' })
+  && Lib.keepsFullLineShape({ type: 'SUBWAY' })
+  && Lib.keepsFullLineShape({ type: 'TROLLEYBUS' })
+  && Lib.keepsFullLineShape({ vehicle: 'bus', label: '8E' })
+  && Lib.keepsFullLineShape({ type: 'BUS' })
+  && Lib.keepsFullLineShape({ vehicle: 'coach' }));
+check('tram hop map does not clip origin to dest',
+  src.includes('keepsFullLineShape')
+  && src.includes('stop-to-stop hop cut')
+  && src.includes('Published line stays whole')
+  && src.includes('clipRideShape')
+  && /if \(BkkLib\.keepsFullLineShape\(row\)\) return pts/.test(src)
+  && !/const railHop = kind === 'rail'/.test(src));
+check('clipShapeToBoardDest refuses a collapsed dest geocode', (() => {
+  const full = [
+    [47.5144, 19.0469],
+    [47.469814, 19.082997],
+    [47.452218, 19.09187],
+    [47.4330, 19.1050],
+  ];
+  const clipped = Lib.clipShapeToBoardDest(
+    full,
+    [47.469814, 19.082997],
+    [47.4699, 19.0830],
+  );
+  return clipped.length === full.length && clipped[0][0] === 47.5144;
+})());
+check('clipShapeFromBoardToward drops Kobanya on G43 Kelenfold to Szekesfehervar', (() => {
+  const line = [
+    [47.183, 18.425],
+    [47.31, 18.72],
+    [47.46445, 19.0219],
+    [47.464, 19.08],
+    [47.464, 19.150],
+  ];
+  const clipped = Lib.clipShapeFromBoardToward(
+    line,
+    [47.46445, 19.0219],
+    [47.1853, 18.4142],
+  );
+  const lons = clipped.map((pt) => pt[1]);
+  return clipped.length >= 2
+    && Math.max(...lons) < 19.05
+    && clipped[0][1] < 18.5
+    && clipped[clipped.length - 1][1] < 19.05;
+})());
+check('clipShapeFromBoardToward keeps Veszprem tail on 9068 past Szekesfehervar', (() => {
+  const full = [
+    [47.4989, 19.0250],
+    [47.4643, 19.0206],
+    [47.1833, 18.4250],
+    [47.0960, 17.9090],
+  ];
+  const clipped = Lib.clipShapeFromBoardToward(
+    full,
+    [47.46445, 19.0219],
+    [47.1853, 18.4142],
+  );
+  return clipped[0][1] < 19.05
+    && clipped[clipped.length - 1][1] === 17.9090;
+})());
+check('clipRideShape tram keeps full 2B line', (() => {
+  const full = [
+    [47.5144, 19.0469],
+    [47.469814, 19.082997],
+    [47.4330, 19.1050],
+  ];
+  const clipped = Lib.clipRideShape(
+    full,
+    [47.469814, 19.082997],
+    [47.452218, 19.09187],
+    { vehicle: 'tram', label: '2B' },
+  );
+  return clipped.length === full.length && clipped[0][0] === 47.5144;
+})());
+check('clipRideShape bus 8E Keleti hop keeps full Ujpalota line', (() => {
+  const full = [
+    [47.5690, 19.1520],
+    [47.5310, 19.1200],
+    [47.5004, 19.0840],
+    [47.4940, 19.0600],
+    [47.4896, 19.0617],
+    [47.4860, 19.0570],
+    [47.4830, 19.0530],
+    [47.4770, 19.0470],
+    [47.4645, 19.0220],
+  ];
+  const clipped = Lib.clipRideShape(
+    full,
+    [47.5004, 19.0840],
+    [47.4645, 19.0220],
+    { vehicle: 'bus', label: '8E', type: 'BUS' },
+  );
+  const coach = Lib.clipRideShape(
+    full,
+    [47.5004, 19.0840],
+    [47.4645, 19.0220],
+    { vehicle: 'coach', type: 'COACH' },
+  );
+  return clipped.length === full.length
+    && clipped[0][0] === 47.5690
+    && clipped[clipped.length - 1][0] === 47.4645
+    && coach.length === full.length
+    && coach[0][0] === 47.5690;
+})());
+check('clipRideShape train keeps full G43 line', (() => {
+  const full = [
+    [47.183, 18.425],
+    [47.46445, 19.0219],
+    [47.464, 19.150],
+  ];
+  const clipped = Lib.clipRideShape(
+    full,
+    [47.46445, 19.0219],
+    [47.1853, 18.4142],
+    { vehicle: 'rail', label: 'G43' },
+  );
+  return clipped.length === full.length && clipped[clipped.length - 1][1] === 19.150;
+})());
+check('pickPublishedLineShape keeps FUTAR 8E over MOTIS hop chord', (() => {
+  const hop = [[47.5004, 19.0840], [47.4645, 19.0220]];
+  const line = [
+    [47.5690, 19.1520],
+    [47.5310, 19.1200],
+    [47.5004, 19.0840],
+    [47.4940, 19.0600],
+    [47.4896, 19.0617],
+    [47.4860, 19.0570],
+    [47.4830, 19.0530],
+    [47.4770, 19.0470],
+    [47.4645, 19.0220],
+  ];
+  const picked = Lib.pickPublishedLineShape(
+    hop, line, { vehicle: 'bus', label: '8E', type: 'BUS' }, true,
+  );
+  const train = Lib.pickPublishedLineShape(
+    hop, line, { vehicle: 'rail', label: 'G43' }, true,
+  );
+  return picked.length === line.length
+    && picked[0][0] === 47.5690
+    && picked[picked.length - 1][0] === 47.4645
+    && train[0][0] === hop[0][0];
+})());
+check('futarTripShape reads trip-details polyline not hass trip_shape',
+  src.includes('async futarTripShape')
+  && src.includes('packed && packed.polyline')
+  && src.includes('pickPublishedLineShape')
+  && src.includes('bkk_stop has no trip_shape')
+  && src.includes('1.4.6'));
+check('knownStopCoords resolves destKey without a BKK id',
+  Lib.knownStopCoords({ key: 'székesfehérvár' })[0] > 47.18
+  && Lib.knownStopCoords({ name: 'Budapest-Kelenföld' })[1] < 19.03
+  && Lib.knownStopCoords({ key: 'keleti' })[0] > 47.49);
 check('motisCoversHead is false when 9068 tripTo is Szekesfehervar',
   !Lib.motisCoversHead(
     { tripTo: 'Székesfehérvár', nextNames: ['Martonvásár', 'Velence'] },
@@ -2366,5 +2838,59 @@ check('enrichFromHass keeps EMMA tripShortName over a named label', (() => {
   }, rows);
   return rows[0].lat === 47.3 && rows[0].lon === 18.7;
 })());
+
+const origMavIndex = Lib.mavIndex;
+const ic856 = Lib.encodePolyline
+  ? null
+  : [[47.498889, 19.025], [47.183611, 18.424722], [46.440833, 16.986667]];
+Lib.mavIndex = async () => ({
+  n: { 856: 0 },
+  l: { G43: 1 },
+  p: [
+    '_p~iF~ps|U_ulLnnqC_mqNvxq`@',
+    Lib.decodePolyline && ic856 ? '' : '',
+  ],
+});
+/* Build a real encoded string via decode round-trip: encode in the test by
+   feeding decodePolyline's inverse is not exported, so pack lat/lon as a
+   precision-5 polyline generated here. */
+function encodePts(pts) {
+  const factor = 1e5;
+  let plat = 0;
+  let plng = 0;
+  let out = '';
+  const enc = (v) => {
+    v = v < 0 ? ~(v << 1) : (v << 1);
+    let s = '';
+    while (v >= 0x20) {
+      s += String.fromCharCode((0x20 | (v & 0x1f)) + 63);
+      v >>= 5;
+    }
+    s += String.fromCharCode(v + 63);
+    return s;
+  };
+  pts.forEach((p) => {
+    const ilat = Math.round(p[0] * factor);
+    const ilng = Math.round(p[1] * factor);
+    out += enc(ilat - plat) + enc(ilng - plng);
+    plat = ilat;
+    plng = ilng;
+  });
+  return out;
+}
+const poly856 = encodePts(ic856);
+const polyG43 = encodePts([[47.186, 18.434], [47.478, 19.12]]);
+Lib.mavIndex = async () => ({ n: { 856: 0 }, l: { G43: 1 }, p: [poly856, polyG43] });
+const mavIc = await Lib.mavShapeForRow({ label: 'IC 856 TÓPART', trainNumber: '856', vehicle: 'rail' });
+check('mavShapeForRow IC 856 is Déli to Nagykanizsa',
+  mavIc.length === 3
+  && Math.abs(mavIc[0][1] - 19.025) < 1e-3
+  && Math.abs(mavIc[mavIc.length - 1][1] - 16.987) < 1e-2,
+  JSON.stringify(mavIc));
+const mavG43 = await Lib.mavShapeForRow({ label: 'G43', vehicle: 'rail' });
+check('mavShapeForRow G43 uses the line code',
+  mavG43.length === 2 && Math.abs(mavG43[0][1] - 18.434) < 1e-3,
+  JSON.stringify(mavG43));
+Lib.mavIndex = origMavIndex;
 
 process.exit(failed ? 1 : 0);

@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "rev = 1.4.6-rev.N prerelease (default, next patch after HACS stable 1.4.5). Do not pick patch/minor/major unless asked."
+        description: "rev = 1.4.7-rev.N prerelease (default, next patch after HACS stable 1.4.6). Do not pick patch/minor/major unless asked."
         type: choice
         options:
           - rev
@@ -115,30 +115,69 @@ jobs:
 
       - name: Build GTFS indexes
         if: steps.ver.outputs.create == 'true'
+        env:
+          BAHART_GTFS_URL: ${{ secrets.BAHART_GTFS_URL }}
+          MOBILITY_DATABASE_REFRESH_TOKEN: ${{ secrets.MOBILITY_DATABASE_REFRESH_TOKEN }}
+          TRANSITLAND_API_KEY: ${{ secrets.TRANSITLAND_API_KEY }}
         run: |
           python3 scripts/build_volan_index.py
           python3 scripts/build_city_index.py
+          if [ -d pfaedle-out ] || [ -d /opt/pfaedle-trial/out ]; then
+            python3 scripts/build_mav_index.py
+          else
+            echo "skip mav index (no pfaedle on runner; do not ship an official-zip chord)"
+          fi
           mkdir -p dist
           cp -f volan-index.json.gz city-index.json.gz dist/
-          ls -lh dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz
+          if [ -f mav-index.json.gz ]; then cp -f mav-index.json.gz dist/; fi
+          ls -lh dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz dist/mav-index.json.gz 2>/dev/null || true
 
       - name: Stamp card version and pack zip
         if: steps.ver.outputs.create == 'true'
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
-          tag="${{ steps.ver.outputs.tag }}"
+          tag="$TAG"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rev\.[0-9]+)?$ ]]; then
+            echo "refusing tag"
+            exit 1
+          fi
           ver="${tag#v}"
-          sed -i "s/^const CARD_VERSION = '.*';/const CARD_VERSION = '${ver}';/" dist/hungarian-transport.js
-          (cd dist && zip -9 ../hungarian-transport.zip hungarian-transport.js volan-index.json.gz city-index.json.gz)
+          export VER="$ver"
+          python3 <<'PY'
+          import os, pathlib, re
+          ver = os.environ["VER"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(-rev\.[0-9]+)?", ver):
+              raise SystemExit("bad ver")
+          path = pathlib.Path("dist/hungarian-transport.js")
+          text = path.read_text(encoding="utf-8")
+          text, n = re.subn(
+              r"^const CARD_VERSION = '.*';",
+              "const CARD_VERSION = '%s';" % ver,
+              text,
+              count=1,
+              flags=re.M,
+          )
+          if n != 1:
+              raise SystemExit("CARD_VERSION stamp failed")
+          path.write_text(text, encoding="utf-8")
+          PY
+          (cd dist && zip -9 ../hungarian-transport.zip hungarian-transport.js volan-index.json.gz city-index.json.gz $( [ -f mav-index.json.gz ] && echo mav-index.json.gz ))
           ls -lh hungarian-transport.zip
 
       - name: Publish GitHub release
         if: steps.ver.outputs.create == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
         run: |
           set -euo pipefail
-          tag="${{ steps.ver.outputs.tag }}"
+          tag="$TAG"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rev\.[0-9]+)?$ ]]; then
+            echo "refusing tag"
+            exit 1
+          fi
           ver="${tag#v}"
           notes="Hungarian transport ${ver}."
           extra=()

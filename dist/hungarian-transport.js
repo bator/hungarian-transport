@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.6-rev.3';
+const CARD_VERSION = '1.4.6';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -103,6 +103,7 @@ const BKK_RAIL_BADGE = {
 const ASSET_BASE = new URL('.', import.meta.url).href;
 let VOLAN_INDEX_OVERRIDE = '';
 let CITY_INDEX_OVERRIDE = '';
+let MAV_INDEX_OVERRIDE = '';
 let leafletPromise = null;
 
 function setVolanIndexUrl(url) {
@@ -111,6 +112,10 @@ function setVolanIndexUrl(url) {
 
 function setCityIndexUrl(url) {
   CITY_INDEX_OVERRIDE = String(url || '');
+}
+
+function setMavIndexUrl(url) {
+  MAV_INDEX_OVERRIDE = String(url || '');
 }
 
 /* Hungarian timetables are published in Budapest wall-clock time. Deriving the
@@ -191,6 +196,11 @@ function volanIndexUrl() {
 
 function cityIndexUrl() {
   const base = CITY_INDEX_OVERRIDE || new URL('city-index.json.gz', ASSET_BASE).href;
+  return dayBuster(base);
+}
+
+function mavIndexUrl() {
+  const base = MAV_INDEX_OVERRIDE || new URL('mav-index.json.gz', ASSET_BASE).href;
   return dayBuster(base);
 }
 
@@ -951,6 +961,7 @@ const BkkLib = {
     const f = BkkLib.fold(name);
     if (f === 'keleti' || f === 'budapest keleti') return '005510017';
     if (f === 'kelenfold' || f === 'budapest kelenfold') return '005501024';
+    if (f === 'szekesfehervar' || f === 'szechenyi ut szekesfehervar') return '005503269';
     return '';
   },
   isRailDest(dest) {
@@ -1196,6 +1207,14 @@ const BkkLib = {
       if (timer) clearTimeout(timer);
     }
   },
+  bkkTransitousStopIds(id) {
+    const raw = String(id || '').trim();
+    if (!/^BKK_/i.test(raw) || /^BKK_0055/i.test(raw)) return [];
+    const body = raw.replace(/^BKK_/i, '');
+    const ids = ['hu-bkk_' + body];
+    if (/^CSF/i.test(body) && body.length > 3) ids.push('hu-bkk_F' + body.slice(3));
+    return ids;
+  },
   transitousFeedWant(id) {
     const s = String(id || '');
     if (/^BKK_0055/i.test(s)) return 'hu-mav_';
@@ -1331,6 +1350,12 @@ const BkkLib = {
       else if (railWant && hid.indexOf('hu-bkk_') === 0) score += 2;
       else if (/^hu-/.test(hid)) score += 1;
       if (/railway/i.test(hid) && railWant) score += 2;
+      const wantTok = BkkLib.foldTokens(wantName);
+      const hitTok = BkkLib.foldTokens(hname);
+      const missing = wantTok.filter((tok) => !hitTok.some((y) => (
+        y === tok || y.indexOf(tok) >= 0 || tok.indexOf(y) >= 0
+      )));
+      if (missing.length) score -= 4 * missing.length;
       if (BkkLib.foldTokenMatch(wantName, hname)) score += 3;
       if (BkkLib.fold(wantName) && BkkLib.fold(hname) === BkkLib.fold(wantName)) score += 2;
       if (/aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(hname)) score -= 4;
@@ -1364,7 +1389,32 @@ const BkkLib = {
   },
   async transitousStopRef(stop, kind) {
     const name = String((stop && (stop.name || stop.key)) || '').trim();
-    const fromStop = BkkLib.finiteLatLon(stop && stop.lat, stop && stop.lon);
+    const fromStop = BkkLib.mapGpsLatLon(stop && stop.lat, stop && stop.lon)
+      || BkkLib.knownStopCoords(stop);
+    const mapped = BkkLib.bkkTransitousStopIds(stop && stop.id);
+    for (let i = 0; i < mapped.length; i += 1) {
+      try {
+        const data = await BkkLib.transitousFetch('/api/v5/stoptimes', {
+          stopId: mapped[i],
+          n: '1',
+        });
+        const place = data && data.place;
+        const pt = place && BkkLib.mapGpsLatLon(place.lat, place.lon);
+        if (!pt) continue;
+        const pname = String((place && place.name) || '').trim();
+        if (name && pname
+            && !BkkLib.foldTokenMatch(name, pname)
+            && BkkLib.fold(name) !== BkkLib.fold(pname)) {
+          continue;
+        }
+        return {
+          id: mapped[i],
+          name: pname || name,
+          lat: pt[0],
+          lon: pt[1],
+        };
+      } catch (_e) { /* parent CSF ids 404; child F ids usually work */ }
+    }
     const queries = [];
     if (name) queries.push(name);
     let stripped = name;
@@ -1391,7 +1441,7 @@ const BkkLib = {
       const rail = hits.find((h) => /railway|hu-mav_/i.test(String((h && h.id) || '')));
       if (rail) hit = rail;
     }
-    const board = BkkLib.finiteLatLon(hit && hit.lat, hit && hit.lon) || fromStop;
+    const board = BkkLib.mapGpsLatLon(hit && hit.lat, hit && hit.lon) || fromStop;
     return {
       id: (hit && hit.id) || '',
       name: (hit && hit.name) || name,
@@ -1462,6 +1512,10 @@ const BkkLib = {
       const trainNumber = /RAIL|SUBURBAN|TRAIN/.test(rawType)
         ? BkkLib.emmaTrainNumber(leg.tripShortName || label)
         : '';
+      const fromStop = leg.from || {};
+      const plat = String(
+        fromStop.scheduledTrack || fromStop.track || fromStop.platform || '',
+      ).trim();
       const row = {
         tripId,
         motisTripId: tripRaw,
@@ -1474,9 +1528,10 @@ const BkkLib = {
         sched: dep,
         delay: 0,
         head: String(leg.headsign || destName || ''),
-        platform: '',
+        platform: plat,
         wheelchair: false,
         bikesAllowed: false,
+        booking: !!(leg.mayRequireBooking || fromStop.mayRequireBooking || leg.booking),
         trainNumber,
         travel,
         shape: BkkLib.decodePolyline(leg.legGeometry),
@@ -1515,6 +1570,16 @@ const BkkLib = {
   },
   isTrainRow(row) {
     return BkkLib.vehicleBucket(row) === 'rail';
+  },
+  /* Hop maps draw the whole published line (street or track), not a
+     stop-to-stop chord. Bus/tram/metro/trolley/coach/rail all keep it
+     (8E: Újpalota → Kelenföld, 2B: Jászai → Pacsirtatelep, G43: the
+     pfaedle rails). Leaflet canvas at GPS zoom clips that; SVG does not. */
+  keepsFullLineShape(row) {
+    if (BkkLib.isTrainRow(row)) return true;
+    const kind = BkkLib.vehicleBucket(row);
+    return kind === 'tram' || kind === 'subway' || kind === 'trolley'
+      || kind === 'bus' || kind === 'coach';
   },
   vehicleBucket(row) {
     if (!row) return '';
@@ -1717,15 +1782,16 @@ const BkkLib = {
       if (!opts.time) opts.time = new Date((anchor - 120) * 1000).toISOString();
     }
     const kind = BkkLib.vehicleBucket(row);
-    let board = BkkLib.finiteLatLon(origin && origin.lat, origin && origin.lon);
+    let board = BkkLib.mapGpsLatLon(origin && origin.lat, origin && origin.lon)
+      || BkkLib.knownStopCoords(origin);
     let hit = null;
     let source = '';
     let hopShape = [];
     let fullShape = [];
     try {
       const ref = await BkkLib.transitousStopRef(origin, kind);
-      if (ref && BkkLib.finiteLatLon(ref.lat, ref.lon)) {
-        board = BkkLib.finiteLatLon(ref.lat, ref.lon);
+      if (ref && BkkLib.mapGpsLatLon(ref.lat, ref.lon)) {
+        board = BkkLib.mapGpsLatLon(ref.lat, ref.lon);
       }
       if (ref && ref.id) {
         const data = await BkkLib.transitousFetch('/api/v5/stoptimes', {
@@ -1735,7 +1801,7 @@ const BkkLib = {
           fetchStops: 'true',
         });
         if (!board && data && data.place) {
-          board = BkkLib.finiteLatLon(data.place.lat, data.place.lon);
+          board = BkkLib.mapGpsLatLon(data.place.lat, data.place.lon);
         }
         const sts = BkkLib.rowsFromMotisStopTimes(data);
         hit = BkkLib.pickMotisVehicle(sts, row, dest);
@@ -1758,10 +1824,27 @@ const BkkLib = {
         fullShape = [];
       }
     }
-    const shape = fullShape.length >= 2 ? fullShape : hopShape;
+    /* Prefer the full trip polyline (tracks). hopShape from a MOTIS plan is
+       often just the stop-to-stop hop cut. */
+    let shape = fullShape.length >= 2 ? fullShape : hopShape;
+    let destPt = BkkLib.mapGpsLatLon(dest && dest.lat, dest && dest.lon)
+      || BkkLib.knownStopCoords(dest);
+    if (!BkkLib.keepsFullLineShape(row)) {
+      if (!destPt && dest && (dest.name || dest.key || dest.id)) {
+        try {
+          const destRef = await BkkLib.transitousStopRef(dest, kind);
+          destPt = destRef && BkkLib.mapGpsLatLon(destRef.lat, destRef.lon);
+        } catch (_e) {
+          destPt = null;
+        }
+      }
+      const clipped = BkkLib.clipShapeToBoardDest(shape, board, destPt);
+      if (clipped.length >= 2) shape = clipped;
+    }
     return {
       shape: shape,
       board: board,
+      dest: destPt,
       source: source,
       hit: hit,
       coversHead: BkkLib.motisCoversHead(hit, row),
@@ -2255,7 +2338,7 @@ const BkkLib = {
         const rows = await BkkLib.elviraBetween(
           hass, station.id, dest.id, 480, dest.name || '', { apiKey, originName: station.name || '' },
         );
-        const next = (rows || []).filter((row) => Number(row.dep) >= walkEnd - 30)
+        const next = (rows || []).filter((row) => row.destHit !== false && Number(row.dep) >= walkEnd - 30)
           .sort((a, b) => a.dep - b.dep)[0];
         if (next && next.dep) {
           const rideMin = Number(next.travel) > 0 ? Number(next.travel) : 0;
@@ -2453,20 +2536,72 @@ const BkkLib = {
   combineHopShapes(motisShape, futarShape, coversHead, rowShape) {
     const motis = BkkLib.validMapShape(motisShape);
     const futar = BkkLib.validMapShape(futarShape);
-    let combined;
-    if (motis.length >= 2 && futar.length >= 2 && coversHead === false) {
-      combined = BkkLib.pickFullerShape(BkkLib.stitchShapes(motis, futar), futar);
-    } else {
-      combined = BkkLib.pickFullerShape(motis, futar);
+    const row = BkkLib.validMapShape(rowShape);
+    /* A longer FUTÁR *line* (G43 from Kőbánya-Kispest) must not replace a
+       MOTIS trip that already starts at the board. Same-corridor FUTÁR
+       may still add a tail (9068 → Veszprém). Do not drop inbound MOTIS. */
+    if (motis.length >= 2 && futar.length >= 2) {
+      const startGap = BkkLib.haversineMeters(motis[0], futar[0]);
+      const sameCorridor = startGap <= 2500;
+      if (!sameCorridor) {
+        if (coversHead === false) {
+          const stitched = BkkLib.stitchShapes(motis, futar);
+          return stitched.length >= 2 ? stitched : motis;
+        }
+        return motis;
+      }
+      if (coversHead === false) {
+        return BkkLib.pickFullerShape(BkkLib.stitchShapes(motis, futar), futar);
+      }
+      return BkkLib.pickFullerShape(motis, futar);
     }
-    return BkkLib.pickFullerShape(combined, rowShape);
+    if (motis.length >= 2) return motis;
+    if (futar.length >= 2) return futar;
+    return row;
   },
   finiteLatLon(lat, lon) {
+    if (lat == null || lon == null || lat === '' || lon === '') return null;
     const a = Number(lat);
     const b = Number(lon);
     if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
     if (Math.abs(a) > 90 || Math.abs(b) > 180) return null;
+    /* Number(null) is 0. Null-island / Gulf-of-Guinea must not become a board pin. */
+    if (Math.abs(a) < 1 && Math.abs(b) < 1) return null;
     return [a, b];
+  },
+  RAIL_HUB_COORDS: {
+    'BKK_005501024': [47.46445, 19.0219],
+    'BKK_005503269': [47.1853, 18.4142],
+    'BKK_005510017': [47.5005, 19.0839],
+    'BKK_CSF01131': [47.5005, 19.0839],
+    'BKK_CS007896': [47.4644, 19.022],
+    'BKK_056216': [47.4644, 19.022],
+  },
+  RAIL_HUB_ALIASES: {
+    'kelenfold': [47.46445, 19.0219],
+    'budapest kelenfold': [47.46445, 19.0219],
+    'szekesfehervar': [47.1853, 18.4142],
+    'keleti': [47.5005, 19.0839],
+    'keleti palyaudvar': [47.5005, 19.0839],
+    'deli': [47.4988, 19.025],
+    'budapest deli': [47.4988, 19.025],
+  },
+  knownStopCoords(stop) {
+    const id = String((stop && (stop.id || stop.stopId)) || '');
+    const byId = BkkLib.RAIL_HUB_COORDS[id];
+    if (byId) return BkkLib.mapGpsLatLon(byId[0], byId[1]);
+    const texts = [
+      stop && stop.key,
+      stop && stop.name,
+      stop && stop.destKey,
+    ];
+    for (let i = 0; i < texts.length; i++) {
+      const folded = BkkLib.fold(texts[i] || '');
+      if (!folded) continue;
+      const hit = BkkLib.RAIL_HUB_ALIASES[folded];
+      if (hit) return BkkLib.mapGpsLatLon(hit[0], hit[1]);
+    }
+    return null;
   },
   /* Live GPS for this card: drop null-island / empty 0,0 and anything
      outside the region Hungarian services actually run in. 0.47,0.19
@@ -2558,6 +2693,71 @@ const BkkLib = {
     const toM = (Math.max(d0, d1) / maxOfficial) * polyLen;
     const sliced = BkkLib.sliceShapeMeters(pts, fromM, toM);
     return sliced;
+  },
+  /* Drop the inbound GTFS tail before the card origin. Keep everything after
+     so a through train (9068 → Veszprém) is not cut at the hop destination. */
+  clipShapeFromBoard(shape, board, maxM) {
+    const pts = BkkLib.validMapShape(shape);
+    const start = Array.isArray(board)
+      ? BkkLib.mapGpsLatLon(board[0], board[1])
+      : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
+    if (pts.length < 2 || !start) return pts;
+    let best = 0;
+    let bestD = 1e15;
+    pts.forEach((p, i) => {
+      const d = BkkLib.haversineMeters(p, start);
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    });
+    const limit = Number.isFinite(Number(maxM)) && Number(maxM) > 0 ? Number(maxM) : 1200;
+    if (bestD > limit) return pts;
+    const out = pts.slice(best);
+    return out.length >= 2 ? out : pts;
+  },
+  /* GTFS/pfaedle stores one canonical direction. A hop at Kelenföld on a
+     Székesfehérvár→Kőbánya polyline must keep the prefix (toward Szfvár),
+     not the Kőbánya tail. Through trains keep that end of the line. */
+  clipShapeFromBoardToward(shape, board, dest, maxM) {
+    const pts = BkkLib.validMapShape(shape);
+    const start = Array.isArray(board)
+      ? BkkLib.mapGpsLatLon(board[0], board[1])
+      : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
+    const goal = Array.isArray(dest)
+      ? BkkLib.mapGpsLatLon(dest[0], dest[1])
+      : BkkLib.mapGpsLatLon(dest && dest.lat, dest && dest.lon);
+    if (pts.length < 2 || !start) return pts;
+    if (!goal) return BkkLib.clipShapeFromBoard(pts, start, maxM);
+    let iBoard = 0;
+    let dBoard = 1e15;
+    let iDest = 0;
+    let dDest = 1e15;
+    pts.forEach((p, i) => {
+      const db = BkkLib.haversineMeters(p, start);
+      if (db < dBoard) {
+        dBoard = db;
+        iBoard = i;
+      }
+      const dd = BkkLib.haversineMeters(p, goal);
+      if (dd < dDest) {
+        dDest = dd;
+        iDest = i;
+      }
+    });
+    const limit = Number.isFinite(Number(maxM)) && Number(maxM) > 0 ? Number(maxM) : 1200;
+    if (dBoard > limit) return pts;
+    if (dDest > 8000) return BkkLib.clipShapeFromBoard(pts, start, maxM);
+    if (iDest === iBoard) return BkkLib.clipShapeFromBoard(pts, start, maxM);
+    const out = iDest > iBoard ? pts.slice(iBoard) : pts.slice(0, iBoard + 1);
+    return out.length >= 2 ? out : pts;
+  },
+  clipRideShape(shape, board, dest, row) {
+    const pts = BkkLib.validMapShape(shape);
+    if (pts.length < 2) return pts;
+    /* Published line stays whole. Hop clip is a last-resort for unknown modes. */
+    if (BkkLib.keepsFullLineShape(row)) return pts;
+    return BkkLib.clipShapeToBoardDest(pts, board, dest);
   },
   motisCoversHead(hit, row) {
     if (!hit) return false;
@@ -2663,6 +2863,22 @@ const BkkLib = {
     }
     const sliced = pts.slice(i0, i1 + 1);
     return sliced.length >= 2 ? sliced : pts;
+  },
+  clipShapeToBoardDest(shape, board, dest) {
+    const pts = BkkLib.validMapShape(shape);
+    const a = Array.isArray(board)
+      ? BkkLib.mapGpsLatLon(board[0], board[1])
+      : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
+    const b = Array.isArray(dest)
+      ? BkkLib.mapGpsLatLon(dest[0], dest[1])
+      : BkkLib.mapGpsLatLon(dest && dest.lat, dest && dest.lon);
+    if (pts.length < 2 || !a || !b) return pts;
+    const sliced = BkkLib.sliceShapeBetween(pts, a, b);
+    if (sliced.length < 2) return pts;
+    const span = BkkLib.shapeSpanMeters(sliced);
+    const orig = BkkLib.shapeSpanMeters(pts);
+    if (span < 200 && orig > 2000) return pts;
+    return sliced;
   },
   async fillJourneyShapes(journey) {
     if (!journey || !Array.isArray(journey.legs)) return journey;
@@ -2856,7 +3072,7 @@ const BkkLib = {
       throw err;
     });
     cache.set(url, p);
-    while (cache.size > 4) cache.delete(cache.keys().next().value);
+    while (cache.size > 8) cache.delete(cache.keys().next().value);
     return p;
   },
   volanIndex() {
@@ -2864,6 +3080,92 @@ const BkkLib = {
   },
   cityIndex() {
     return BkkLib._indexCached(cityIndexUrl(), 'errCityHttp', 'errCityGunzip');
+  },
+  _mavP: new Map(),
+  mavIndex() {
+    const url = mavIndexUrl();
+    const cache = BkkLib._mavP;
+    const hit = cache.get(url);
+    if (hit) return hit;
+    const p = BkkLib._loadMavIndex(url).then((idx) => {
+      const empty = !idx || !Array.isArray(idx.p) || idx.p.length < 1;
+      if (empty) cache.delete(url);
+      return idx && typeof idx === 'object' ? idx : { n: {}, l: {}, p: [] };
+    }).catch(() => {
+      cache.delete(url);
+      return { n: {}, l: {}, p: [] };
+    });
+    cache.set(url, p);
+    while (cache.size > 4) cache.delete(cache.keys().next().value);
+    return p;
+  },
+  async _loadMavIndex(url) {
+    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 45000) : null;
+    let res;
+    try {
+      res = await fetch(url, { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
+    } catch (_err) {
+      return { n: {}, l: {}, p: [] };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    if (!res.ok) return { n: {}, l: {}, p: [] };
+    const buf = await res.arrayBuffer();
+    const u8 = new Uint8Array(buf);
+    let text = '';
+    if (u8.length >= 2 && u8[0] === 0x1f && u8[1] === 0x8b) {
+      if (typeof DecompressionStream !== 'function') return { n: {}, l: {}, p: [] };
+      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+      text = await new Response(stream).text();
+    } else {
+      text = new TextDecoder().decode(u8);
+    }
+    let idx;
+    try {
+      idx = JSON.parse(text);
+    } catch (_e) {
+      return { n: {}, l: {}, p: [] };
+    }
+    if (!idx || typeof idx !== 'object' || !idx.n || !Array.isArray(idx.p)) {
+      return { n: {}, l: {}, p: [] };
+    }
+    return {
+      n: idx.n && typeof idx.n === 'object' ? idx.n : {},
+      l: idx.l && typeof idx.l === 'object' ? idx.l : {},
+      p: idx.p,
+    };
+  },
+  mavShapeIndexKey(row, idx) {
+    const num = BkkLib.rowTrainNumber(row);
+    const label = String((row && (row.label || row.route || '')) || '').trim().toUpperCase();
+    if (!idx) return null;
+    /* BKK suburban trip ids (G43 19707) collide with unrelated MÁV train
+       numbers. Branded G/S/Z lines always use the line polyline. */
+    const line = (label.match(/^[SGZ]\d{2}/) || [])[0];
+    if (BkkLib.suburbanLineLabel(label) && line && idx.l && idx.l[line] != null) {
+      return { kind: 'l', key: line, ix: idx.l[line] };
+    }
+    if (num && idx.n && idx.n[num] != null) {
+      return { kind: 'n', key: num, ix: idx.n[num] };
+    }
+    if (label && idx.l && idx.l[label] != null) {
+      return { kind: 'l', key: label, ix: idx.l[label] };
+    }
+    return null;
+  },
+  async mavShapeForRow(row) {
+    try {
+      const idx = await BkkLib.mavIndex();
+      if (!idx || !Array.isArray(idx.p)) return [];
+      const hit = BkkLib.mavShapeIndexKey(row, idx);
+      if (!hit) return [];
+      const encoded = idx.p[hit.ix];
+      if (encoded == null || encoded === '') return [];
+      return BkkLib.validMapShape(BkkLib.decodePolyline(encoded));
+    } catch (_e) {
+      return [];
+    }
   },
   async _loadGtfsIndex(url, httpKey, gunzipKey) {
     const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
@@ -3252,7 +3554,7 @@ const BkkLib = {
     if (direct) return direct.replace(/^0+/, '') || direct;
     return BkkLib.trainNumberFromTripId(row && row.tripId);
   },
-  mergeVolanRows(gtfs, otp, limit) {
+  mergeVolanRows(gtfs, otp, limit, opts) {
     const out = [];
     const byTime = new Map();
     const byNum = new Map();
@@ -3269,7 +3571,11 @@ const BkkLib = {
       }
       const prevLab = String(prev.label || '');
       const rowLab = String(row.label || '');
-      if (BkkLib.genericRailLabel(prevLab) && rowLab && !BkkLib.genericRailLabel(rowLab)) {
+      const brandedLab = (lab) => {
+        const s = String(lab || '').trim();
+        return !!(s && !BkkLib.genericRailLabel(s) && !/^\d+$/.test(s));
+      };
+      if (!brandedLab(prevLab) && brandedLab(rowLab)) {
         prev.label = rowLab;
       }
       const prevHasGps = !!BkkLib.mapGpsLatLon(prev.lat, prev.lon);
@@ -3289,27 +3595,84 @@ const BkkLib = {
       ['vehicleId', 'licensePlate', 'model', 'vehicleStatus', 'stopDistancePercent'].forEach((k) => {
         if ((prev[k] == null || prev[k] === '') && row[k] != null && row[k] !== '') prev[k] = row[k];
       });
+      if (!prev.platform && row.platform) prev.platform = String(row.platform);
+      if (row.booking) prev.booking = true;
+      if (!prev.trainNumber && row.trainNumber) prev.trainNumber = String(row.trainNumber);
+      if (prev.travel == null && row.travel != null) prev.travel = row.travel;
+      if (row.wheelchair) prev.wheelchair = true;
+      if (row.bikesAllowed) prev.bikesAllowed = true;
     };
-    const add = (row) => {
+    const minuteOf = (row) => Math.round(Number((row && (row.sched || row.dep)) || 0) / 60);
+    const brandedHost = (row) => BkkLib.isTrainRow(row)
+      && !BkkLib.numberedRailBadge(row)
+      && (BkkLib.suburbanLineLabel(row && row.label)
+        || (!BkkLib.genericRailLabel(row && row.label) && String((row && row.label) || '').trim()));
+    const add = (row, skipUnmatched) => {
       if (!row || !departureStillDue(row.dep || row.sched)) return;
-      if (BkkLib.numberedRailBadge(row)) return;
       const n = BkkLib.rowTrainNumber(row);
       if (n && byNum.has(n)) {
         overlay(out[byNum.get(n)], row);
         return;
       }
+      const min = minuteOf(row);
+      if (BkkLib.numberedRailBadge(row) && min) {
+        const host = out.findIndex((p) => brandedHost(p) && minuteOf(p) === min);
+        if (host >= 0) {
+          overlay(out[host], row);
+          if (n) byNum.set(n, host);
+          return;
+        }
+      } else if (brandedHost(row) && min) {
+        const numbered = out.findIndex((p) => BkkLib.numberedRailBadge(p) && minuteOf(p) === min);
+        if (numbered >= 0) {
+          overlay(out[numbered], row);
+          if (n) byNum.set(n, numbered);
+          return;
+        }
+      }
+      /* Named IC (GÖCSEJ) vs generic FUTÁR IC at the same minute, when the
+         train number on one side did not parse. Suburban G43/Z30 stay out.
+         overlayOnly must not use this: GEMENC at the same minute would steal
+         a FUTÁR IC and copy booking. Spec is trainNumber (+ minute). */
+      if (!skipUnmatched && BkkLib.isTrainRow(row) && min) {
+        const namedIc = (r) => BkkLib.isTrainRow(r)
+          && !BkkLib.suburbanLineLabel(r && r.label)
+          && !BkkLib.genericRailLabel(r && r.label)
+          && !/^\d+$/.test(String((r && r.label) || '').trim());
+        const genericIc = (r) => BkkLib.isTrainRow(r) && BkkLib.genericRailLabel(r && r.label);
+        let pair = -1;
+        if (namedIc(row)) {
+          pair = out.findIndex((p) => genericIc(p) && minuteOf(p) === min);
+        } else if (genericIc(row)) {
+          pair = out.findIndex((p) => namedIc(p) && minuteOf(p) === min);
+        }
+        if (pair >= 0) {
+          overlay(out[pair], row);
+          const pn = BkkLib.rowTrainNumber(out[pair]) || n;
+          if (pn) byNum.set(pn, pair);
+          if (n) byNum.set(n, pair);
+          return;
+        }
+      }
+      /* overlayOnly must not pair by label+minute: two ICs at the same
+         minute would copy booking onto the other FUTÁR train. Spec is
+         trainNumber (byNum) plus branded/numbered pairing above. */
       const tk = timeOf(row);
-      if (byTime.has(tk)) {
+      if (!skipUnmatched && byTime.has(tk)) {
         overlay(out[byTime.get(tk)], row);
         return;
       }
+      if (skipUnmatched) return;
       const idx = out.length;
       out.push(row);
       byTime.set(tk, idx);
       if (n) byNum.set(n, idx);
     };
-    (otp || []).forEach(add);
-    (gtfs || []).forEach(add);
+    const overlayOnly = !!(opts && opts.overlayOnly);
+    const hosts = overlayOnly ? (gtfs || []) : (otp || []);
+    const extra = overlayOnly ? (otp || []) : (gtfs || []);
+    hosts.forEach((row) => add(row, false));
+    extra.forEach((row) => add(row, overlayOnly));
     out.sort((a, b) => (a.dep || 0) - (b.dep || 0));
     const cap = Number(limit);
     return out.slice(0, (Number.isFinite(cap) && cap > 0) ? cap : 12);
@@ -3493,6 +3856,30 @@ const BkkLib = {
     } catch (_e) {
       return [];
     }
+  },
+  /* FUTÁR trip-details.json already ships the street polyline
+     (8E Kelenföld-bound: ~1000 points, Újpalota → Kelenföld).
+     bkk_stop has no trip_shape service, so the map must decode this
+     itself instead of waiting on Home Assistant. */
+  async futarTripShape(apiKey, cache, tripId) {
+    if (!apiKey || !BkkLib.isFutarTripId(tripId)) return [];
+    try {
+      const packed = await BkkLib.tripDetails(apiKey, cache, tripId);
+      return BkkLib.validMapShape(BkkLib.decodePolyline(packed && packed.polyline));
+    } catch (_e) {
+      return [];
+    }
+  },
+  /* Bus/tram/metro/trolley/coach maps want the published line, not the
+     Transitous hop-cut. combineHopShapes drops a FUTÁR line that starts
+     far from the board (8E at Újpalota vs a Keleti hop). */
+  pickPublishedLineShape(motisShape, futarShape, row, coversHead) {
+    const motis = BkkLib.validMapShape(motisShape);
+    const futar = BkkLib.validMapShape(futarShape);
+    if (BkkLib.keepsFullLineShape(row) && !BkkLib.isTrainRow(row) && futar.length >= 8) {
+      return futar;
+    }
+    return BkkLib.combineHopShapes(motis, futar, coversHead, []);
   },
   async addTransitousVolanStops(byId, q, motisHits) {
     const motis = motisHits || await BkkLib.searchStopsTransitous(q);
@@ -3954,10 +4341,11 @@ const BkkLib = {
     const now = Math.floor(Date.now() / 1000);
     const latest = now + horizon * 60;
     let rows = [];
+    let elviraExtra = [];
     if ((mode === 'mav' || mode === 'all') && opts.hass && !opts.skipElvira) {
       try {
         const destId = (dest && dest.id) || opts.destStopId || '';
-        const extra = await BkkLib.elviraBetween(
+        elviraExtra = await BkkLib.elviraBetween(
           opts.hass,
           stopId,
           destId,
@@ -3965,7 +4353,6 @@ const BkkLib = {
           (dest && dest.name) || '',
           { apiKey: apiKey, originName: opts.originName || '' },
         );
-        rows = BkkLib.mergeVolanRows(rows, extra, maxRows);
       } catch (_e) { /* ELVIRA optional; FUTÁR/GTFS rows still show */ }
     }
     const queryFutar = mode === 'bkk' || mode === 'mav' || /^BKK_/i.test(String(stopId || ''));
@@ -4165,6 +4552,9 @@ const BkkLib = {
     if (!opts.skipElvira) {
       rows = await BkkLib.fillTransitousIfEmpty(rows, origin, dest, opts);
     }
+    if (elviraExtra.length) {
+      rows = BkkLib.mergeVolanRows(rows, elviraExtra, maxRows, { overlayOnly: true });
+    }
     if (opts.deferGps) return rows;
     return BkkLib.attachCoachGps(opts.hass, rows);
   },
@@ -4357,9 +4747,9 @@ const BkkLib = {
   suburbanLineLabel(label) {
     return /^[SGZ]\d/i.test(String(label || '').trim());
   },
-  /* Hop boards keep branded lines (S40/G43/Z30, BAKONY, TÓPART) and
-     generic IC/EC/IR/S/SZ so named overlays can land. Drop a badge that
-     is only digits, or EX/EN plus a 4+ digit train number. */
+  /* True when the row's visible jelzés is a MÁV train number (16907) or
+     generic EX/EN plus a long number. These stay on the hop; merge them
+     onto a branded suburban/named row when they are the same departure. */
   numberedRailBadge(row) {
     if (!row || !BkkLib.isTrainRow(row)) return false;
     const label = String(row.label || '').trim();
@@ -4801,7 +5191,7 @@ class BKKHopCard extends HTMLElement {
         color: var(--secondary-text-color); }
       .pictos { display: inline-flex; gap: 4px; align-items: center; }
       .picto { position: relative; font-size: 11px; line-height: 1.2; cursor: help; }
-      .picto.booking { color: #c0392b; font-weight: 800; font-size: 11px; }
+      .picto.booking { color: #c0392b; font-weight: 800; font-size: 13px; }
       .plat {
         display: inline-block; margin-right: 4px; padding: 0 5px; border-radius: 2px;
         background: #2E5EA8; color: #fff; font-size: 11px; font-weight: 700;
@@ -5174,58 +5564,139 @@ class BKKHopCard extends HTMLElement {
   async _loadRowMapShape(row) {
     const cfg = this._config || {};
     let shape = BkkLib.validMapShape(row && row.shape);
-    let board = BkkLib.finiteLatLon(cfg.stopLat, cfg.stopLon);
-    let motisShape = [];
-    let motisCoversHead = true;
-    let motisMap = null;
-    try {
-      motisMap = await BkkLib.motisShapeForHop(
-        row,
-        { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon },
-        { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey },
-        { minutesAfter: cfg.minutesAfter, mode: 'all' },
-      );
-      motisShape = BkkLib.validMapShape(motisMap && motisMap.shape);
-      motisCoversHead = !!(motisMap && motisMap.coversHead);
-      if (motisMap && motisMap.board) {
-        const orig = BkkLib.finiteLatLon(cfg.stopLat, cfg.stopLon);
-        if (!orig || BkkLib.haversineMeters(orig, motisMap.board) <= 300) {
-          board = motisMap.board;
-        }
-      }
-    } catch (_e) { /* row shape / GPS still draw */ }
-    if (shape.length < 2 && /^gtfs:/i.test(String((row && row.tripId) || '')) && this._hass) {
+    let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon)
+      || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
+    /* MÁV nationwide rails from pfaedle OSM rails (not official 8 km chords
+       on Székesfehérvár–Kelenföld, and not the Transitous hop cut). */
+    if (BkkLib.isTrainRow(row)) {
       try {
-        const points = await BkkLib.coachShape(this._hass, row.label, row.headsign || '');
-        shape = BkkLib.validMapShape(BkkLib.decodePolyline(points));
-      } catch (_e) { /* FUTAR / MOTIS still fill */ }
+        const mavShape = await BkkLib.mavShapeForRow(row);
+        if (mavShape.length >= 2) {
+          if (!board) {
+            board = BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
+          }
+          return { shape: mavShape, board: board };
+        }
+      } catch (_e) { /* MOTIS / FUTÁR still fill */ }
     }
     const tripId = (row && row.tripId) || '';
     const canFutar = cfg.apiKey && (
       !/^motis:/i.test(String(tripId || '')) || !!BkkLib.rowTrainNumber(row)
     );
-    let futarShape = [];
+    let geomTrip = '';
     if (canFutar) {
-      let geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : '';
+      geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : '';
       if (!geomTrip && this._hass) {
         const hit = BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), row);
         if (hit && BkkLib.isFutarTripId(hit.tripId)) geomTrip = hit.tripId;
       }
-      if (BkkLib.isFutarTripId(geomTrip)) {
-        try {
-          futarShape = await BkkLib.hassTripShape(this._hass, cfg.apiKey, geomTrip);
-        } catch (_e) { /* other rows still draw */ }
+    }
+    let futarShape = [];
+    /* City buses/trams: decode FUTÁR trip-details polyline here.
+       hass trip_shape does not exist on bkk_stop. */
+    if (geomTrip && cfg.apiKey && !BkkLib.isTrainRow(row)) {
+      try {
+        futarShape = await BkkLib.futarTripShape(cfg.apiKey, this._tripCache || {}, geomTrip);
+      } catch (_e) { /* MOTIS hop still fills */ }
+    }
+    const published = BkkLib.keepsFullLineShape(row) && !BkkLib.isTrainRow(row)
+      && futarShape.length >= 8;
+    let motisShape = [];
+    let motisCoversHead = true;
+    let motisMap = null;
+    if (!published) {
+      try {
+        motisMap = await BkkLib.motisShapeForHop(
+          row,
+          { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon },
+          { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey },
+          { minutesAfter: cfg.minutesAfter, mode: 'all' },
+        );
+        motisShape = BkkLib.validMapShape(motisMap && motisMap.shape);
+        motisCoversHead = !!(motisMap && motisMap.coversHead);
+        if (motisMap && motisMap.board) {
+          const motisBoard = BkkLib.mapGpsLatLon(motisMap.board[0], motisMap.board[1]);
+          if (motisBoard) {
+            const orig = board;
+            if (!orig || BkkLib.haversineMeters(orig, motisBoard) <= 300) {
+              board = motisBoard;
+            }
+          }
+        }
+      } catch (_e) { /* row shape / GPS still draw */ }
+    }
+    if (!board) {
+      board = BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
+    }
+    if (!published && shape.length < 2 && /^gtfs:/i.test(String((row && row.tripId) || '')) && this._hass) {
+      try {
+        const points = await BkkLib.coachShape(this._hass, row.label, row.headsign || '');
+        shape = BkkLib.validMapShape(BkkLib.decodePolyline(points));
+      } catch (_e) { /* FUTAR / MOTIS still fill */ }
+    }
+    if (canFutar && BkkLib.isTrainRow(row) && BkkLib.isFutarTripId(geomTrip)) {
+      try {
+        futarShape = await BkkLib.hassTripShape(this._hass, cfg.apiKey, geomTrip);
+      } catch (_e) { /* other rows still draw */ }
+    }
+    /* Direction-aware clip only when this mode does not keep the published line. */
+    const clipForeignFutar = (pts) => {
+      const valid = BkkLib.validMapShape(pts);
+      if (BkkLib.keepsFullLineShape(row)) return valid;
+      if (!board || valid.length < 2) return valid;
+      const startGap = BkkLib.haversineMeters(valid[0], board);
+      if (startGap <= 2500) return valid;
+      return BkkLib.clipRideShape(
+        valid,
+        board,
+        BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon)
+          || BkkLib.knownStopCoords({
+            id: cfg.destStopId, name: cfg.destName, key: cfg.destKey,
+          }),
+        row,
+      );
+    };
+    if (!BkkLib.keepsFullLineShape(row)) {
+      futarShape = clipForeignFutar(futarShape);
+    }
+    if (published) {
+      shape = BkkLib.pickPublishedLineShape(motisShape, futarShape, row, motisCoversHead);
+    } else {
+      shape = BkkLib.combineHopShapes(
+        motisShape,
+        futarShape,
+        motisCoversHead,
+        BkkLib.isTrainRow(row) ? clipForeignFutar(row && row.shape) : (row && row.shape),
+      );
+      const motisGap = BkkLib.shapeGpsGapMeters(motisShape, row && row.lat, row && row.lon);
+      const futarGap = BkkLib.shapeGpsGapMeters(futarShape, row && row.lat, row && row.lon);
+      if (motisGap != null && futarGap != null && futarGap + 400 < motisGap && futarGap < 3000) {
+        shape = futarShape;
+      } else if (motisGap != null && motisGap > 4000 && futarShape.length >= 2
+          && (futarGap == null || futarGap < motisGap)) {
+        shape = futarShape;
       }
     }
-    shape = BkkLib.combineHopShapes(motisShape, futarShape, motisCoversHead, row && row.shape);
-    const motisGap = BkkLib.shapeGpsGapMeters(motisShape, row && row.lat, row && row.lon);
-    const futarGap = BkkLib.shapeGpsGapMeters(futarShape, row && row.lat, row && row.lon);
-    if (motisGap != null && futarGap != null && futarGap + 400 < motisGap && futarGap < 3000) {
-      shape = futarShape;
-    } else if (motisGap != null && motisGap > 4000 && futarShape.length >= 2
-        && (futarGap == null || futarGap < motisGap)) {
-      shape = futarShape;
+    /* Published line stays whole (8E Újpalota→Kelenföld, not the hop). */
+    let destPt = (motisMap && motisMap.dest)
+      || BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon)
+      || BkkLib.knownStopCoords({
+        id: cfg.destStopId, name: cfg.destName, key: cfg.destKey,
+      });
+    if (!destPt && cfg.destName && !BkkLib.keepsFullLineShape(row)) {
+      try {
+        const destRef = await BkkLib.transitousStopRef({
+          id: cfg.destStopId,
+          name: cfg.destName,
+          key: cfg.destKey,
+          lat: cfg.destLat,
+          lon: cfg.destLon,
+        }, BkkLib.vehicleBucket(row));
+        destPt = destRef && BkkLib.mapGpsLatLon(destRef.lat, destRef.lon);
+      } catch (_e) { /* keep the combined shape */ }
     }
+    const clipped = BkkLib.clipRideShape(shape, board, destPt, row);
+    if (clipped.length >= 2) shape = clipped;
     return { shape: BkkLib.validMapShape(shape), board: board };
   }
 
@@ -5291,7 +5762,7 @@ class BKKHopCard extends HTMLElement {
     const startLon = hasGps ? lon : 19.05;
     let map;
     try {
-      map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: true }).setView([startLat, startLon], hasGps ? 12 : 8);
+      map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView([startLat, startLon], hasGps ? 12 : 8);
       L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
         maxZoom: 20,
         subdomains: 'abc',
@@ -5324,7 +5795,8 @@ class BKKHopCard extends HTMLElement {
       drawMarker();
       foot.textContent = this._mapFootText(row, false, true, false, lang);
     }
-    let board = BkkLib.finiteLatLon(cfg.stopLat, cfg.stopLon);
+    let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon)
+      || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
     try {
       const got = await this._loadRowMapShape(row);
       shape = BkkLib.validMapShape(got.shape);
@@ -5342,12 +5814,9 @@ class BKKHopCard extends HTMLElement {
       lon = pos[1];
     }
     const routeColor = BkkLib.mapRouteColor(row, {});
-    const longRoute = hasShape && BkkLib.shapeSpanMeters(shape) > 40000;
-    const routeRenderer = (typeof L.canvas === 'function')
-      ? L.canvas({ padding: longRoute ? 2 : 0.8 })
-      : undefined;
-    const lineBase = { lineJoin: 'round', lineCap: 'round', noClip: true };
-    if (routeRenderer) lineBase.renderer = routeRenderer;
+    const lineBase = {
+      lineJoin: 'round', lineCap: 'round', noClip: true, pane: 'overlayPane',
+    };
     const applyView = () => {
       try { map.invalidateSize(); } catch (_e) { /* ignore */ }
       if (hasShape) {
@@ -5435,6 +5904,7 @@ class BKKHopCard extends HTMLElement {
     const cfg = this._config || {};
     if (cfg.volanIndex) setVolanIndexUrl(cfg.volanIndex);
     if (cfg.cityIndex) setCityIndexUrl(cfg.cityIndex);
+    if (cfg.mavIndex) setMavIndexUrl(cfg.mavIndex);
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     const mode = this._departMode();
     const ready = cfg.stopId && cfg.destKey && (cfg.apiKey || mode === 'volan' || mode === 'helyi' || mode === 'all');
@@ -5491,7 +5961,7 @@ class BKKHopCard extends HTMLElement {
           let list = futarFull
             ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
             : earlyRows.slice();
-          list = BkkLib.mergeVolanRows(list, elviraRows, cap);
+          list = BkkLib.mergeVolanRows(list, elviraRows, cap, { overlayOnly: true });
           paintRows(list);
         };
         let startThrough = null;
@@ -5567,13 +6037,14 @@ class BKKHopCard extends HTMLElement {
         let merged = futarFull
           ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
           : earlyRows.slice();
-        merged = BkkLib.mergeVolanRows(merged, elviraRows, cap);
+        merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
         if (!merged.length) {
           merged = await BkkLib.fillTransitousIfEmpty(merged, origin, dest, {
             mode: this._departMode(),
             minutesAfter: cfg.minutesAfter,
           });
           if (gen !== this._gen) return;
+          merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
           earlyRows = merged;
           paintRows(merged);
         }
@@ -6646,6 +7117,7 @@ class BKKHopCardEditor extends HTMLElement {
     if (!this._destRoutes) this._destRoutes = {};
     if (this._config.volanIndex) setVolanIndexUrl(this._config.volanIndex);
     if (this._config.cityIndex) setCityIndexUrl(this._config.cityIndex);
+    if (this._config.mavIndex) setMavIndexUrl(this._config.mavIndex);
     if (!this._built) this._build();
     this._syncLang();
     this._syncTexts();

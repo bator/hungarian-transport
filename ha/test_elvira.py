@@ -1,0 +1,168 @@
+#!/usr/bin/env python3
+"""Unit checks for ELVIRA origin overlay. No live IK_API calls."""
+from __future__ import annotations
+
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from elvira import (  # noqa: E402
+    ELVIRA_ROW_CAP,
+    STATIONINFO_MAX_COUNT,
+    parse_elvira_services,
+    rows_from_stationinfo,
+)
+
+import zoneinfo
+
+
+def check(name: str, ok: bool, detail: str = "") -> bool:
+    mark = "ok" if ok else "FAIL"
+    extra = f" {detail}" if detail and not ok else ""
+    print(f"{mark}  {name}{extra}")
+    return ok
+
+
+def svc(**kwargs):
+    return kwargs
+
+
+failed = 0
+
+if not check(
+    "StationInfo maxCount is 500 (Kelenföld evening origin overlay)",
+    STATIONINFO_MAX_COUNT == "500",
+    repr(STATIONINFO_MAX_COUNT),
+):
+    failed += 1
+if not check(
+    "Python row cap matches maxCount (evening overlay not sliced at 200)",
+    ELVIRA_ROW_CAP == int(STATIONINFO_MAX_COUNT) == 500,
+    repr(ELVIRA_ROW_CAP),
+):
+    failed += 1
+
+if not check(
+    "#3880 code is helyjegy kötelező",
+    parse_elvira_services({"services": [svc(code="3880", description="")]})["booking"],
+):
+    failed += 1
+if not check(
+    "SZOLGALTATAS#3880 key is helyjegy kötelező",
+    parse_elvira_services({"services": [svc(key="SZOLGALTATAS#3880")]})["booking"],
+):
+    failed += 1
+if not check(
+    "Helyjegy váltása kötelező text still matches",
+    parse_elvira_services({
+        "services": [svc(description="Helyjegy váltása kötelező")],
+    })["booking"],
+):
+    failed += 1
+if not check(
+    "#94345 is not required booking",
+    not parse_elvira_services({
+        "services": [svc(code="94345", description="Helyjegy váltható.")],
+    })["booking"],
+):
+    failed += 1
+if not check(
+    "13880 does not false-positive as 3880",
+    not parse_elvira_services({"services": [svc(code="13880")]})["booking"],
+):
+    failed += 1
+
+tz = zoneinfo.ZoneInfo("Europe/Budapest")
+now = datetime(2026, 9, 30, 17, 20, tzinfo=tz)
+latest = now + timedelta(minutes=180)
+start = now + timedelta(minutes=40)
+start_iso = start.strftime("%Y-%m-%dT%H:%M:%S")
+gocsej = {
+    "trainId": "2975814",
+    "code": "966",
+    "name": "GÖCSEJ",
+    "start": start_iso,
+    "actualOrEstimatedStart": start_iso,
+    "startTrack": "6",
+    "endStation": {"name": "Szombathely"},
+    "services": [{"code": "3880", "description": "Helyjegy váltása kötelező"}],
+}
+gemenc = {
+    "trainId": "1",
+    "code": "800",
+    "name": "GEMENC",
+    "start": (now + timedelta(minutes=50)).strftime("%Y-%m-%dT%H:%M:%S"),
+    "startTrack": "3",
+    "endStation": {"name": "Baja"},
+    "services": [{"code": "3880"}],
+}
+g43 = {
+    "trainId": "2",
+    "code": "3511",
+    "name": "G43",
+    "start": (now + timedelta(minutes=55)).strftime("%Y-%m-%dT%H:%M:%S"),
+    "startTrack": "5",
+    "endStation": {"name": "Budapest-Déli"},
+    "services": [{"code": "94345", "description": "Helyjegy váltható."}],
+}
+
+rows = rows_from_stationinfo([gocsej, gemenc, g43], [], tz, now, latest, "Kelenföld")
+by_num = {r["trainNumber"]: r for r in rows}
+
+if not check("origin rows emit without dest StationInfo", len(rows) == 3):
+    failed += 1
+if not check(
+    "GÖCSEJ booking true and destHit false when dest board empty",
+    by_num.get("966", {}).get("booking") is True
+    and by_num.get("966", {}).get("destHit") is False
+    and by_num.get("966", {}).get("travel") is None
+    and by_num.get("966", {}).get("platform") == "6",
+    repr(by_num.get("966")),
+):
+    failed += 1
+if not check(
+    "G43 does not get booking from #94345",
+    by_num.get("3511", {}).get("booking") is False,
+    repr(by_num.get("3511")),
+):
+    failed += 1
+
+dest_arr = [{
+    "trainId": "2975814",
+    "code": "966",
+    "arrive": (start + timedelta(minutes=62)).strftime("%Y-%m-%dT%H:%M:%S"),
+}]
+hit_rows = rows_from_stationinfo([gocsej], dest_arr, tz, now, latest, "Kelenföld")
+if not check(
+    "dest hit still fills travel when dest board has the train",
+    len(hit_rows) == 1
+    and hit_rows[0]["destHit"] is True
+    and hit_rows[0]["travel"] == 62
+    and hit_rows[0]["booking"] is True,
+    repr(hit_rows[:1]),
+):
+    failed += 1
+
+morning = now.replace(hour=8, minute=10, second=0, microsecond=0)
+stale_dest = [{
+    "trainId": "morning-other",
+    "code": "966",
+    "arrive": morning.strftime("%Y-%m-%dT%H:%M:%S"),
+}]
+stale_rows = rows_from_stationinfo([gocsej], stale_dest, tz, now, latest, "Kelenföld")
+if not check(
+    "past dest code match keeps origin row without destHit",
+    len(stale_rows) == 1
+    and stale_rows[0]["trainNumber"] == "966"
+    and stale_rows[0]["destHit"] is False
+    and stale_rows[0]["travel"] is None
+    and stale_rows[0]["booking"] is True
+    and stale_rows[0]["platform"] == "6",
+    repr(stale_rows[:1]),
+):
+    failed += 1
+
+if failed:
+    sys.exit(1)
+print("elvira origin overlay tests passed")
