@@ -12,6 +12,8 @@ VOLAN_URL = "https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip"
 OUT = Path("city-index.json.gz")
 
 # Debrecen DKV is not published as a public zip. Skip until a URL exists.
+# Weekendbus (Csömör/Pécel) publishes a zip, but the calendar ended 2025-12-31.
+# Feeds that need a form or login stay out: MÁV, BAHART, NAP, KEKO, Kaposvár.
 CITY_FEEDS = [
     {
         "id": "miskolc",
@@ -36,6 +38,30 @@ CITY_FEEDS = [
         "name": "Szombathely — Blaguss",
         "url": "https://szombathely.utas.hu/api/static/v1/gtfs-google/gtfs-google.zip",
         "file": "szombathely.zip",
+    },
+    {
+        "id": "veszprem",
+        "name": "Veszprém — V-Busz",
+        "url": "https://vbusz.hu/gtfs",
+        "file": "veszprem.zip",
+    },
+    {
+        "id": "paks",
+        "name": "Paks — Paksbusz",
+        "url": "https://utazastervezo.paksbusz.net/api/static/v1/gtfs-google/gtfs-google.zip",
+        "file": "paks.zip",
+    },
+    {
+        "id": "dombovar",
+        "name": "Dombóvár — PTKE",
+        "url": "https://dombovar.ptke.hu/gtfs",
+        "file": "dombovar.zip",
+    },
+    {
+        "id": "kecskemet-kisvasut",
+        "name": "Kecskemét — Kisvasút",
+        "url": "https://kecskemetikisvasut.hu/wp-content/uploads/jk-gtfs/feed.zip",
+        "file": "kecskemet-kisvasut.zip",
     },
 ]
 

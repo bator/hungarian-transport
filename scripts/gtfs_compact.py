@@ -195,6 +195,11 @@ def _load_parts(
             continue
         sid2p[raw] = parent(raw)
         sid2n[raw] = row.get("stop_name") or ""
+    # `_12` is a platform suffix only when the parent id is itself a stop.
+    # Kecskeméti Kisvasút uses jk_stop_8 / jk_stop_9 as distinct stations.
+    for sid, p in list(sid2p.items()):
+        if p != sid and p not in sid2n:
+            sid2p[sid] = sid
 
     pname: dict[str, str] = {}
     for sid, p in sid2p.items():

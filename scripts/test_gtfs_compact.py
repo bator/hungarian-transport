@@ -11,6 +11,7 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from build_city_index import CITY_FEEDS  # noqa: E402
 from gtfs_compact import hm, load_parts, write_index  # noqa: E402
 
 
@@ -36,6 +37,12 @@ def main() -> int:
     failed |= not check("hm garbage", hm("ab:cd") is None)
     failed |= not check("hm overnight", hm("25:10:00") == 1510)
 
+    ids = [f["id"] for f in CITY_FEEDS]
+    failed |= not check("city feeds unique ids", len(ids) == len(set(ids)), str(ids))
+    for expected in ("miskolc", "pecs", "szeged", "szombathely", "veszprem", "paks", "dombovar", "kecskemet-kisvasut"):
+        failed |= not check(f"city feed {expected}", expected in ids)
+    failed |= not check("weekendbus stays out", "weekendbus" not in ids)
+
     files = {
         "agency.txt": "agency_id,agency_name\nA,Szeged - Local\n",
         "stops.txt": "stop_id,stop_name\n1,Alpha\n2,Beta\n",
@@ -60,6 +67,22 @@ def main() -> int:
         failed |= not check("exception_type 1 is add", parts[0]["a"][0] == ["20260101"], str(parts[0]["a"]))
         failed |= not check("exception_type 2 is remove", parts[0]["r"][0] == ["20260102"], str(parts[0]["r"]))
         failed |= not check("unknown exception_type ignored", "20260103" not in parts[0]["a"][0] + parts[0]["r"][0])
+
+        # Distinct stations named like jk_stop_8 must not collapse to one parent.
+        rail_files = dict(files)
+        rail_files["stops.txt"] = "stop_id,stop_name\njk_stop_8,Kiskunmajsa\njk_stop_9,Kecskemét KK\n"
+        rail_files["stop_times.txt"] = (
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+            "T1,10:30:00,10:30:00,jk_stop_8,1\n"
+            "T1,13:30:00,13:30:00,jk_stop_9,2\n"
+        )
+        rz = gtfs_zip(rail_files)
+        try:
+            rparts = load_parts(rz, lambda short, *_: bool(short), op_id="kisvasut", prefix="kisvasut:")
+            failed |= not check("jk_stop_N stays two stations", len(rparts[0]["s"]) == 2, str(rparts[0]["s"]))
+            failed |= not check("jk_stop_N keeps the trip", len(rparts[0]["t"]) == 1, str(rparts[0]["t"]))
+        finally:
+            rz.unlink()
 
         volan_files = dict(files)
         volan_files["agency.txt"] = "agency_id,agency_name\nA,Szeged\n"

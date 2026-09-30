@@ -4,8 +4,8 @@
 [![release][release-badge]][release-url]
 
 Home Assistant dashboard card for **BKK**, **MÁV**, **Volán** and Hungarian
-city operators (Miskolc, Pécs, Szeged, Szombathely, plus Volán local networks
-such as Sopron or Eger).
+city operators (Miskolc, Pécs, Szeged, Szombathely, Veszprém, Paks, Dombóvár,
+Kecskeméti Kisvasút, plus Volán local networks such as Sopron or Eger).
 
 Pick an origin and a destination. The card lists the next departures between
 those two stops. City and rail traffic in Budapest come from the live BKK FUTÁR
@@ -141,7 +141,21 @@ full itinerary. The older `custom:bkk-stop-card-plan` type remains registered
 as an alias.
 
 Debrecen DKV does not publish a public GTFS zip, so it is not in the city
-picker until a URL exists.
+picker until a URL exists. Weekendbus (Csömör/Pécel) still hosts a zip, but
+the calendar ended 2025-12-31, so it is not wired.
+
+These feeds need a form, login, or a non-stable URL, and stay out of the
+index until that changes:
+
+- MÁV / GYSEV rail GTFS: <https://www.mavcsoport.hu/gtfs-igenybejelento>
+- BAHART Balaton boats: <https://nap.bahart.hu/>
+- National Access Point (SZKT official dump and others): <https://napportal.kozut.hu/>
+- Kecskemét KEKO city buses: <https://timetable.keko.hu/Kecskemet_GTFS.zip> (auth)
+- Kaposvár: <https://www.kaposbusz.hu/letoltheto-menetrend> (GTFS on the page, no fixed filename)
+
+BKK static GTFS is public, but Budapest already uses live FUTÁR, so that zip
+is not folded into `city-index.json.gz`. The BKK Open Data key is only for
+FUTÁR / GTFS-RT.
 
 ## Keeping the GTFS indexes current
 
@@ -174,7 +188,8 @@ reflects the official GTFS, so it will not invent a connection.
   transfer planning.
 - [KTI](https://gtfs.kti.hu/) for the national Volán GTFS.
 - Municipal GTFS: MVK (Miskolc), Tüke Busz (Pécs), SZKT (Szeged), Blaguss
-  (Szombathely).
+  (Szombathely), V-Busz (Veszprém), Paksbusz (Paks), PTKE (Dombóvár),
+  Kecskeméti Kisvasút.
 
 ## License
 
