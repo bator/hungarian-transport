@@ -11,9 +11,11 @@ from gtfs_compact import download_feed, load_parts, write_index
 VOLAN_URL = "https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip"
 OUT = Path("city-index.json.gz")
 
-# Debrecen DKV is not published as a public zip. Skip until a URL exists.
-# Weekendbus (Csömör/Pécel) publishes a zip, but the calendar ended 2025-12-31.
-# Feeds that need a form or login stay out: MÁV, BAHART, NAP, KEKO, Kaposvár.
+# Debrecen DKV is listed as "Nem publikus" on menetbrand. Skip.
+# Weekendbus (Csömör/Pécel) still hosts a zip, but the calendar ended 2025-12-31.
+# Feeds that still need a form or login: MÁV, NAP, KEKO.
+# Menetbrand /download/<slug> is the stable public zip when the publisher
+# has no fixed filename (Kaposvár), a CAPTCHA (Kiskunhalas), or a form (Bahart).
 CITY_FEEDS = [
     {
         "id": "miskolc",
@@ -62,6 +64,54 @@ CITY_FEEDS = [
         "name": "Kecskemét — Kisvasút",
         "url": "https://kecskemetikisvasut.hu/wp-content/uploads/jk-gtfs/feed.zip",
         "file": "kecskemet-kisvasut.zip",
+    },
+    {
+        "id": "budaors",
+        "name": "Budaörs — HOMM",
+        "url": "https://armadina-transit.fra1.digitaloceanspaces.com/budaors.zip",
+        "file": "budaors.zip",
+    },
+    {
+        "id": "bahart",
+        "name": "Balaton — Bahart",
+        "url": "https://gtfs.menetbrand.com/download/bahart",
+        "file": "bahart.zip",
+    },
+    {
+        "id": "hodmezovasarhely",
+        "name": "Hódmezővásárhely — HVSZ",
+        "url": "https://gtfs.menetbrand.com/download/hodmezovasarhely",
+        "file": "hodmezovasarhely.zip",
+    },
+    {
+        "id": "kaposvar",
+        "name": "Kaposvár — KKZRT",
+        "url": "https://gtfs.menetbrand.com/download/kaposvar",
+        "file": "kaposvar.zip",
+    },
+    {
+        "id": "kiskunhalas",
+        "name": "Kiskunhalas — Halasbusz",
+        "url": "https://gtfs.menetbrand.com/download/kiskunhalas",
+        "file": "kiskunhalas.zip",
+    },
+    {
+        "id": "szekesfehervar",
+        "name": "Székesfehérvár — helyi",
+        "url": "https://gtfs.menetbrand.com/download/szekesfehervar",
+        "file": "szekesfehervar.zip",
+    },
+    {
+        "id": "tatabanya",
+        "name": "Tatabánya — T-Busz",
+        "url": "https://gtfs.menetbrand.com/download/tatabanya",
+        "file": "tatabanya.zip",
+    },
+    {
+        "id": "varpalota",
+        "name": "Várpalota — THURY-BUSZ",
+        "url": "https://gtfs.menetbrand.com/download/varpalota",
+        "file": "varpalota.zip",
     },
 ]
 

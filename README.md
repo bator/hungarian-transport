@@ -5,7 +5,9 @@
 
 Home Assistant dashboard card for **BKK**, **MÁV**, **Volán** and Hungarian
 city operators (Miskolc, Pécs, Szeged, Szombathely, Veszprém, Paks, Dombóvár,
-Kecskeméti Kisvasút, plus Volán local networks such as Sopron or Eger).
+Kecskeméti Kisvasút, Budaörs, Bahart, Hódmezővásárhely, Kaposvár, Kiskunhalas,
+Székesfehérvár, Tatabánya, Várpalota, plus Volán local networks such as
+Sopron or Eger).
 
 Pick an origin and a destination. The card lists the next departures between
 those two stops. City and rail traffic in Budapest come from the live BKK FUTÁR
@@ -140,18 +142,21 @@ card picker; the visual editor and the on-card pickers both set look-ahead
 full itinerary. The older `custom:bkk-stop-card-plan` type remains registered
 as an alias.
 
-Debrecen DKV does not publish a public GTFS zip, so it is not in the city
-picker until a URL exists. Weekendbus (Csömör/Pécel) still hosts a zip, but
-the calendar ended 2025-12-31, so it is not wired.
+Debrecen DKV is marked not public on the [menetbrand catalog](https://gtfs.menetbrand.com/letoltes/),
+so it stays out of the city picker. Weekendbus (Csömör/Pécel) still hosts a
+zip, but the calendar ended 2025-12-31, so it is not wired. Those lines now
+run as Volán / MÁV.
 
-These feeds need a form, login, or a non-stable URL, and stay out of the
-index until that changes:
+Where the publisher has no fixed zip URL, the city index uses the public
+menetbrand `/download/<slug>` proxy (Bahart, Kaposvár, Hódmezővásárhely,
+Kiskunhalas, Székesfehérvár, Tatabánya, Várpalota).
+
+These feeds still need a form or login:
 
 - MÁV / GYSEV rail GTFS: <https://www.mavcsoport.hu/gtfs-igenybejelento>
-- BAHART Balaton boats: <https://nap.bahart.hu/>
+- Bahart keyed NAP URL (the public proxy is already in the index): <https://nap.bahart.hu/>
 - National Access Point (SZKT official dump and others): <https://napportal.kozut.hu/>
 - Kecskemét KEKO city buses: <https://timetable.keko.hu/Kecskemet_GTFS.zip> (auth)
-- Kaposvár: <https://www.kaposbusz.hu/letoltheto-menetrend> (GTFS on the page, no fixed filename)
 
 BKK static GTFS is public, but Budapest already uses live FUTÁR, so that zip
 is not folded into `city-index.json.gz`. The BKK Open Data key is only for
@@ -189,7 +194,9 @@ reflects the official GTFS, so it will not invent a connection.
 - [KTI](https://gtfs.kti.hu/) for the national Volán GTFS.
 - Municipal GTFS: MVK (Miskolc), Tüke Busz (Pécs), SZKT (Szeged), Blaguss
   (Szombathely), V-Busz (Veszprém), Paksbusz (Paks), PTKE (Dombóvár),
-  Kecskeméti Kisvasút.
+  Kecskeméti Kisvasút, HOMM (Budaörs), Bahart, HVSZ (Hódmezővásárhely),
+  KKZRT (Kaposvár), Halasbusz (Kiskunhalas), Székesfehérvár helyi, T-Busz
+  (Tatabánya), THURY-BUSZ (Várpalota).
 
 ## License
 

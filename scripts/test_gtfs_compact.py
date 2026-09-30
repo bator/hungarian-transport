@@ -39,9 +39,27 @@ def main() -> int:
 
     ids = [f["id"] for f in CITY_FEEDS]
     failed |= not check("city feeds unique ids", len(ids) == len(set(ids)), str(ids))
-    for expected in ("miskolc", "pecs", "szeged", "szombathely", "veszprem", "paks", "dombovar", "kecskemet-kisvasut"):
+    for expected in (
+        "miskolc",
+        "pecs",
+        "szeged",
+        "szombathely",
+        "veszprem",
+        "paks",
+        "dombovar",
+        "kecskemet-kisvasut",
+        "budaors",
+        "bahart",
+        "hodmezovasarhely",
+        "kaposvar",
+        "kiskunhalas",
+        "szekesfehervar",
+        "tatabanya",
+        "varpalota",
+    ):
         failed |= not check(f"city feed {expected}", expected in ids)
     failed |= not check("weekendbus stays out", "weekendbus" not in ids)
+    failed |= not check("debrecen stays out", "debrecen" not in ids)
 
     files = {
         "agency.txt": "agency_id,agency_name\nA,Szeged - Local\n",
