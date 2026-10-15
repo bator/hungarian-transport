@@ -19,7 +19,10 @@ jobs:
       - name: HACS validation
         uses: hacs/action@main
         with:
-          category: plugin
+          category: integration
+
+      - name: Hassfest validation
+        uses: home-assistant/actions/hassfest@master
 
   tests:
     name: Card and GTFS tests

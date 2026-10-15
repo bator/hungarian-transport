@@ -23,34 +23,28 @@ they follow the Home Assistant user's language; you can pin one explicitly.
 
 ### HACS
 
-1. HACS → Frontend → ⋮ → Custom repositories → add
-   `https://github.com/bator/hungarian-transport` with category **Dashboard**
-   (not Integration).
-2. Download **Hungarian transport**.
-3. HACS adds the Lovelace resource automatically. If you manage resources by
-   hand, add:
+This release is a HACS **Integration** so it installs both the ELVIRA backend
+and the card. Existing users must make this one-time migration:
 
-   ```yaml
-   url: /hacsfiles/hungarian-transport/hungarian-transport.js
-   type: module
-   ```
+1. In HACS, remove the existing `hungarian-transport` custom repository that
+   was added as **Dashboard**.
+2. Add `https://github.com/bator/hungarian-transport` again as a custom
+   repository with category **Integration**, then download a GitHub release.
+3. Restart Home Assistant, then go to **Settings → Devices & services → Add
+   integration** and add **Hungarian transport** once.
 
-   `type: module` is required — the card resolves `volan-index.json.gz` and
-   `city-index.json.gz` from the module URL.
-
-   If Lovelace is pinned to `hungarian-transport.full.js` (so a HACS refresh of
-   `hungarian-transport.js` cannot 404 the resource), keep that filename in the
-   resource list. Indexes still live in the same folder.
-
-HACS installs everything under `dist/` (`hungarian-transport.js` plus both
-GTFS indexes). The default branch is hidden; pick a GitHub release.
+The integration registers `hungarian_transport.elvira_between` and loads the
+card module and its GTFS indexes automatically; no Lovelace resource entry or
+separate ELVIRA helper is needed. Future releases update the integration and
+card together through HACS.
 
 ### Manual
 
-Copy the three files from `dist/` into `/config/www/hungarian-transport/` and
-add the matching `/local/hungarian-transport/hungarian-transport.js` resource
-(`type: module`). A GitHub release also attaches `hungarian-transport.zip`
-with the same three files.
+For a frontend-only manual install, copy the files from `dist/` into
+`/config/www/hungarian-transport/` and add the matching
+`/local/hungarian-transport/hungarian-transport.js` resource (`type: module`).
+The GitHub release attaches `hungarian-transport-frontend.zip` with these
+frontend files. This does not install the ELVIRA backend.
 
 Build the indexes first:
 
@@ -85,10 +79,10 @@ Live positions come from BKK FUTÁR for Budapest city and rail, from MÁV EMMA
 for trains, from utas.hu for Volán coaches, and from Szombathely GTFS-RT for
 that city's buses. Other municipal operators stay on the official static GTFS.
 Train, coach, and Szombathely dots need the companion `bkk_stop` services
-`elvira_between`, `coach_positions`, and `coach_shape` on the Home Assistant
-host. The MÁV seat-reservation marker also comes from `elvira_between`, so its
-Home Assistant-side ELVIRA helper must be installed and kept up to date along
-with the card. The timetable still lists without these services.
+`coach_positions` and `coach_shape` on the Home Assistant host. The MÁV
+seat-reservation marker is provided by this integration's
+`hungarian_transport.elvira_between` service. The timetable still lists
+without the optional position services.
 
 ## Options
 

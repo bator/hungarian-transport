@@ -1,8 +1,8 @@
 """MÁV ELVIRA timetable for the Hungarian transport Lovelace card.
 
 CORS blocks jegy.mav.hu from the browser, so the card calls
-`bkk_stop.elvira_between` here. StationInfo rows carry `startTrack` (vágány)
-and `services` (helyjegy kötelező).
+`hungarian_transport.elvira_between` here. StationInfo rows carry `startTrack`
+(vágány) and `services` (helyjegy kötelező).
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ ELVIRA_HEADERS = {
     "Origin": "https://jegy.mav.hu",
     "Referer": "https://jegy.mav.hu/",
 }
-DOMAIN = "bkk_stop"
+DOMAIN = "hungarian_transport"
 
 # StationInfo with travelDate=now drops trains that already left the origin,
 # including delayed ones FUTÁR still lists. Midnight keeps the day's rows

@@ -1,0 +1,10 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hungarian transport",
+        "description": "Enable the Hungarian transport card and MÁV ELVIRA service."
+      }
+    }
+  }
+}

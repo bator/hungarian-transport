@@ -6,7 +6,14 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(
+    0,
+    str(
+        Path(__file__).resolve().parents[1]
+        / "custom_components"
+        / "hungarian_transport"
+    ),
+)
 from elvira import (  # noqa: E402
     ELVIRA_ROW_CAP,
     STATIONINFO_MAX_COUNT,

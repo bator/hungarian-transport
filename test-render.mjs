@@ -1314,6 +1314,9 @@ check('coach station aliases share one key',
     czech.length === 1 && czech[0].id === 'hu-volanbusz_hkir_773538',
     JSON.stringify(czech.map((h) => h.id)));
 }
+check('ELVIRA calls the bundled Hungarian transport service',
+  src.includes("hass.callService('hungarian_transport', 'elvira_between'")
+  && !src.includes("hass.callService('bkk_stop', 'elvira_between'"));
 check('elvira result parser reads response.departures',
   Lib.elviraRowsFromResult({ context: {}, response: { departures: [{ label: 'TOKAJ' }] } }).length === 1);
 check('elvira result parser reads REST service_response',

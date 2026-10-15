@@ -23,7 +23,7 @@ permissions:
 
 jobs:
   release:
-    name: Build indexes and publish zip
+    name: Build indexes and publish integration zip
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -132,7 +132,7 @@ jobs:
           if [ -f mav-index.json.gz ]; then cp -f mav-index.json.gz dist/; fi
           ls -lh dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz dist/mav-index.json.gz 2>/dev/null || true
 
-      - name: Stamp card version and pack zip
+      - name: Stamp release and pack assets
         if: steps.ver.outputs.create == 'true'
         env:
           TAG: ${{ steps.ver.outputs.tag }}
@@ -163,8 +163,19 @@ jobs:
               raise SystemExit("CARD_VERSION stamp failed")
           path.write_text(text, encoding="utf-8")
           PY
-          (cd dist && zip -9 ../hungarian-transport.zip hungarian-transport.js volan-index.json.gz city-index.json.gz $( [ -f mav-index.json.gz ] && echo mav-index.json.gz ))
-          ls -lh hungarian-transport.zip
+          mkdir -p custom_components/hungarian_transport/www
+          cp dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz custom_components/hungarian_transport/www/
+          if [ -f dist/mav-index.json.gz ]; then cp dist/mav-index.json.gz custom_components/hungarian_transport/www/; fi
+          python3 <<'PY'
+          import json, os, pathlib
+          path = pathlib.Path("custom_components/hungarian_transport/manifest.json")
+          manifest = json.loads(path.read_text(encoding="utf-8"))
+          manifest["version"] = os.environ["VER"]
+          path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+          (cd custom_components/hungarian_transport && zip -qr9 ../../hungarian-transport.zip .)
+          (cd dist && zip -9 ../hungarian-transport-frontend.zip hungarian-transport.js volan-index.json.gz city-index.json.gz $( [ -f mav-index.json.gz ] && echo mav-index.json.gz ))
+          ls -lh hungarian-transport.zip hungarian-transport-frontend.zip
 
       - name: Publish GitHub release
         if: steps.ver.outputs.create == 'true'
@@ -188,7 +199,7 @@ jobs:
             notes="${notes} Includes fresh Volán and city GTFS indexes."
           fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" hungarian-transport.zip --clobber
+            gh release upload "$tag" hungarian-transport.zip hungarian-transport-frontend.zip --clobber
           else
-            gh release create "$tag" hungarian-transport.zip --title "$tag" --notes "$notes" "${extra[@]}"
+            gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip --title "$tag" --notes "$notes" "${extra[@]}"
           fi
