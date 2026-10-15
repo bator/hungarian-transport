@@ -1562,6 +1562,34 @@ check('overlayOnly does not byTime-merge two ICs at the same minute', (() => {
     && merged[0].platform !== '3'
     && merged[0].tripId === 'BKK_966_313';
 })());
+check('overlayOnly matches repeated train numbers to the correct departure', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 600;
+  const rail = (extra) => Object.assign({
+    vehicle: 'rail', rawType: 'RAIL',
+  }, extra);
+  const merged = Lib.mergeVolanRows(
+    [
+      rail({ label: 'IC', trainNumber: '914', dep, sched: dep, tripId: 'BKK_914_1' }),
+      rail({
+        label: 'IC', trainNumber: '914', dep: dep + 3600, sched: dep + 3600,
+        tripId: 'BKK_914_2',
+      }),
+    ],
+    [
+      rail({
+        label: 'IC', trainNumber: '914', dep: dep + 3600, sched: dep + 3600,
+        booking: true, tripId: 'elvira:914',
+      }),
+    ],
+    12,
+    { overlayOnly: true },
+  );
+  return merged.length === 2
+    && merged[0].booking !== true
+    && merged[1].booking === true
+    && merged[0].tripId === 'BKK_914_1'
+    && merged[1].tripId === 'BKK_914_2';
+})());
 check('Székesfehérvár name maps to ELVIRA station code',
   Lib.elviraCodeFromName('Székesfehérvár') === '005503269');
 check('MOTIS scheduledTrack becomes the row platform', (() => {

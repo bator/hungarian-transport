@@ -3603,6 +3603,7 @@ const BkkLib = {
       if (row.bikesAllowed) prev.bikesAllowed = true;
     };
     const minuteOf = (row) => Math.round(Number((row && (row.sched || row.dep)) || 0) / 60);
+    const numberKey = (number, minute) => number ? `${number}|${minute}` : '';
     const brandedHost = (row) => BkkLib.isTrainRow(row)
       && !BkkLib.numberedRailBadge(row)
       && (BkkLib.suburbanLineLabel(row && row.label)
@@ -3610,23 +3611,24 @@ const BkkLib = {
     const add = (row, skipUnmatched) => {
       if (!row || !departureStillDue(row.dep || row.sched)) return;
       const n = BkkLib.rowTrainNumber(row);
-      if (n && byNum.has(n)) {
-        overlay(out[byNum.get(n)], row);
+      const min = minuteOf(row);
+      const nk = numberKey(n, min);
+      if (nk && byNum.has(nk)) {
+        overlay(out[byNum.get(nk)], row);
         return;
       }
-      const min = minuteOf(row);
       if (BkkLib.numberedRailBadge(row) && min) {
         const host = out.findIndex((p) => brandedHost(p) && minuteOf(p) === min);
         if (host >= 0) {
           overlay(out[host], row);
-          if (n) byNum.set(n, host);
+          if (n) byNum.set(numberKey(n, min), host);
           return;
         }
       } else if (brandedHost(row) && min) {
         const numbered = out.findIndex((p) => BkkLib.numberedRailBadge(p) && minuteOf(p) === min);
         if (numbered >= 0) {
           overlay(out[numbered], row);
-          if (n) byNum.set(n, numbered);
+          if (n) byNum.set(numberKey(n, min), numbered);
           return;
         }
       }
@@ -3649,8 +3651,8 @@ const BkkLib = {
         if (pair >= 0) {
           overlay(out[pair], row);
           const pn = BkkLib.rowTrainNumber(out[pair]) || n;
-          if (pn) byNum.set(pn, pair);
-          if (n) byNum.set(n, pair);
+          if (pn) byNum.set(numberKey(pn, min), pair);
+          if (n) byNum.set(numberKey(n, min), pair);
           return;
         }
       }
@@ -3666,7 +3668,7 @@ const BkkLib = {
       const idx = out.length;
       out.push(row);
       byTime.set(tk, idx);
-      if (n) byNum.set(n, idx);
+      if (n) byNum.set(numberKey(n, min), idx);
     };
     const overlayOnly = !!(opts && opts.overlayOnly);
     const hosts = overlayOnly ? (gtfs || []) : (otp || []);
