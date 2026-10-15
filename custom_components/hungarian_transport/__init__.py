@@ -75,12 +75,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         schema=ELVIRA_SERVICE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
+    frontend.add_extra_js_url(hass, CARD_URL)
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Load the card module."""
-    frontend.add_extra_js_url(hass, CARD_URL)
+    """Set up the integration entry."""
     return True
 
 
