@@ -6,6 +6,7 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.components import frontend
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
@@ -36,9 +37,22 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             f"Hungarian transport release is missing its frontend assets: {www_path}"
         )
 
-    hass.http.register_static_path(
-        "/hungarian-transport", str(www_path), cache_headers=False
-    )
+    if hasattr(hass.http, "async_register_static_paths"):
+        from homeassistant.components.http import StaticPathConfig
+
+        await hass.http.async_register_static_paths(
+            [
+                StaticPathConfig(
+                    url_path="/hungarian-transport",
+                    path=str(www_path),
+                    cache_headers=False,
+                )
+            ]
+        )
+    else:
+        hass.http.register_static_path(
+            "/hungarian-transport", str(www_path), cache_headers=False
+        )
     session = async_get_clientsession(hass)
 
     async def handle_elvira_between(
