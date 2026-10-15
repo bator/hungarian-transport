@@ -3603,7 +3603,11 @@ const BkkLib = {
       if (row.bikesAllowed) prev.bikesAllowed = true;
     };
     const minuteOf = (row) => Math.round(Number((row && (row.sched || row.dep)) || 0) / 60);
-    const numberKey = (number, minute) => number ? `${number}|${minute}` : '';
+    const numberKey = (number, minute) => {
+      const raw = String(number || '').trim();
+      const normalized = BkkLib.emmaTrainNumber(raw) || raw.replace(/^0+/, '') || raw;
+      return normalized ? `${normalized}|${minute}` : '';
+    };
     const brandedHost = (row) => BkkLib.isTrainRow(row)
       && !BkkLib.numberedRailBadge(row)
       && (BkkLib.suburbanLineLabel(row && row.label)
@@ -3732,6 +3736,7 @@ const BkkLib = {
       const rows = BkkLib.elviraRowsFromResult(res);
       return Array.isArray(rows) ? rows : [];
     } catch (err) {
+      console.warn('MÁV ELVIRA reservation data unavailable:', err);
       return [];
     }
   },

@@ -1569,9 +1569,9 @@ check('overlayOnly matches repeated train numbers to the correct departure', (()
   }, extra);
   const merged = Lib.mergeVolanRows(
     [
-      rail({ label: 'IC', trainNumber: '914', dep, sched: dep, tripId: 'BKK_914_1' }),
+      rail({ label: 'IC', trainNumber: 'IC 914', dep, sched: dep, tripId: 'BKK_914_1' }),
       rail({
-        label: 'IC', trainNumber: '914', dep: dep + 3600, sched: dep + 3600,
+        label: 'IC', trainNumber: 'IC 914', dep: dep + 3600, sched: dep + 3600,
         tripId: 'BKK_914_2',
       }),
     ],

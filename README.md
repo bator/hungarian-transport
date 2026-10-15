@@ -86,7 +86,9 @@ for trains, from utas.hu for Volán coaches, and from Szombathely GTFS-RT for
 that city's buses. Other municipal operators stay on the official static GTFS.
 Train, coach, and Szombathely dots need the companion `bkk_stop` services
 `elvira_between`, `coach_positions`, and `coach_shape` on the Home Assistant
-host. The timetable still lists without them.
+host. The MÁV seat-reservation marker also comes from `elvira_between`, so its
+Home Assistant-side ELVIRA helper must be installed and kept up to date along
+with the card. The timetable still lists without these services.
 
 ## Options
 
