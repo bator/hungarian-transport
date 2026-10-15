@@ -1,4 +1,4 @@
-const CARD_VERSION = '1.4.7-rev.2';
+const CARD_VERSION = '1.4.7-rev.3';
 
 const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
@@ -3558,6 +3558,7 @@ const BkkLib = {
     const out = [];
     const byTime = new Map();
     const byNum = new Map();
+    const trainNumberMatchWindowMin = 5;
     const generic = (c) => {
       const x = String(c || '').replace('#', '').toLowerCase();
       return !x || x === '4477aa';
@@ -3603,10 +3604,30 @@ const BkkLib = {
       if (row.bikesAllowed) prev.bikesAllowed = true;
     };
     const minuteOf = (row) => Math.round(Number((row && (row.sched || row.dep)) || 0) / 60);
-    const numberKey = (number, minute) => {
+    const numberKey = (number) => {
       const raw = String(number || '').trim();
-      const normalized = BkkLib.emmaTrainNumber(raw) || raw.replace(/^0+/, '') || raw;
-      return normalized ? `${normalized}|${minute}` : '';
+      return BkkLib.emmaTrainNumber(raw) || raw.replace(/^0+/, '') || raw;
+    };
+    const registerNumber = (number, index) => {
+      const key = numberKey(number);
+      if (!key) return;
+      const rows = byNum.get(key) || [];
+      if (rows.indexOf(index) < 0) rows.push(index);
+      byNum.set(key, rows);
+    };
+    const findNumberMatch = (number, minute) => {
+      const rows = byNum.get(numberKey(number)) || [];
+      if (!minute || !rows.length) return -1;
+      let best = -1;
+      let distance = trainNumberMatchWindowMin + 1;
+      rows.forEach((index) => {
+        const delta = Math.abs(minuteOf(out[index]) - minute);
+        if (delta < distance) {
+          best = index;
+          distance = delta;
+        }
+      });
+      return distance <= trainNumberMatchWindowMin ? best : -1;
     };
     const brandedHost = (row) => BkkLib.isTrainRow(row)
       && !BkkLib.numberedRailBadge(row)
@@ -3616,23 +3637,23 @@ const BkkLib = {
       if (!row || !departureStillDue(row.dep || row.sched)) return;
       const n = BkkLib.rowTrainNumber(row);
       const min = minuteOf(row);
-      const nk = numberKey(n, min);
-      if (nk && byNum.has(nk)) {
-        overlay(out[byNum.get(nk)], row);
+      const numberMatch = n ? findNumberMatch(n, min) : -1;
+      if (numberMatch >= 0) {
+        overlay(out[numberMatch], row);
         return;
       }
       if (BkkLib.numberedRailBadge(row) && min) {
         const host = out.findIndex((p) => brandedHost(p) && minuteOf(p) === min);
         if (host >= 0) {
           overlay(out[host], row);
-          if (n) byNum.set(numberKey(n, min), host);
+          registerNumber(n, host);
           return;
         }
       } else if (brandedHost(row) && min) {
         const numbered = out.findIndex((p) => BkkLib.numberedRailBadge(p) && minuteOf(p) === min);
         if (numbered >= 0) {
           overlay(out[numbered], row);
-          if (n) byNum.set(numberKey(n, min), numbered);
+          registerNumber(n, numbered);
           return;
         }
       }
@@ -3655,8 +3676,8 @@ const BkkLib = {
         if (pair >= 0) {
           overlay(out[pair], row);
           const pn = BkkLib.rowTrainNumber(out[pair]) || n;
-          if (pn) byNum.set(numberKey(pn, min), pair);
-          if (n) byNum.set(numberKey(n, min), pair);
+          registerNumber(pn, pair);
+          registerNumber(n, pair);
           return;
         }
       }
@@ -3672,7 +3693,7 @@ const BkkLib = {
       const idx = out.length;
       out.push(row);
       byTime.set(tk, idx);
-      if (n) byNum.set(numberKey(n, min), idx);
+      registerNumber(n, idx);
     };
     const overlayOnly = !!(opts && opts.overlayOnly);
     const hosts = overlayOnly ? (gtfs || []) : (otp || []);

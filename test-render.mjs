@@ -1590,6 +1590,33 @@ check('overlayOnly matches repeated train numbers to the correct departure', (()
     && merged[0].tripId === 'BKK_914_1'
     && merged[1].tripId === 'BKK_914_2';
 })());
+check('overlayOnly matches ELVIRA booking when scheduled departures differ by minutes', (() => {
+  const dep = Math.floor(Date.now() / 1000) + 600;
+  const rail = (extra) => Object.assign({
+    vehicle: 'rail', rawType: 'RAIL',
+  }, extra);
+  const merged = Lib.mergeVolanRows(
+    [
+      rail({ label: 'IC', trainNumber: 'IC 914', dep, sched: dep, tripId: 'BKK_914_1' }),
+      rail({
+        label: 'IC', trainNumber: 'IC 914', dep: dep + 3600, sched: dep + 3600,
+        tripId: 'BKK_914_2',
+      }),
+    ],
+    [
+      rail({
+        label: 'IC', trainNumber: '914', dep: dep + 3720, sched: dep + 3720,
+        booking: true, tripId: 'elvira:914',
+      }),
+    ],
+    12,
+    { overlayOnly: true },
+  );
+  return merged.length === 2
+    && merged[0].booking !== true
+    && merged[1].booking === true
+    && merged[1].tripId === 'BKK_914_2';
+})());
 check('Székesfehérvár name maps to ELVIRA station code',
   Lib.elviraCodeFromName('Székesfehérvár') === '005503269');
 check('MOTIS scheduledTrack becomes the row platform', (() => {
@@ -2590,7 +2617,7 @@ check('futarTripShape reads trip-details polyline not hass trip_shape',
   && src.includes('packed && packed.polyline')
   && src.includes('pickPublishedLineShape')
   && src.includes('bkk_stop has no trip_shape')
-  && src.includes('1.4.7-rev.2'));
+  && src.includes('1.4.7-rev.3'));
 check('knownStopCoords resolves destKey without a BKK id',
   Lib.knownStopCoords({ key: 'székesfehérvár' })[0] > 47.18
   && Lib.knownStopCoords({ name: 'Budapest-Kelenföld' })[1] < 19.03
