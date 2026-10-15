@@ -1,0 +1,20 @@
+elvira_between:
+  fields:
+    origin_code:
+      required: true
+      selector:
+        text:
+    dest_code:
+      required: true
+      selector:
+        text:
+    minutes_after:
+      default: 180
+      selector:
+        number:
+          min: 15
+          max: 480
+          mode: box
+    dest_name:
+      selector:
+        text:

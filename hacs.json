@@ -1,7 +1,8 @@
 {
   "name": "Hungarian transport",
-  "filename": "hungarian-transport.js",
+  "filename": "hungarian-transport.zip",
   "hide_default_branch": true,
+  "zip_release": true,
   "render_readme": true,
   "homeassistant": "2024.4.0",
   "country": "HU"

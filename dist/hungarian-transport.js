@@ -3732,12 +3732,12 @@ const BkkLib = {
       let res;
       if (typeof hass.callService === 'function') {
         try {
-          res = await hass.callService('bkk_stop', 'elvira_between', serviceData, undefined, false, true);
+          res = await hass.callService('hungarian_transport', 'elvira_between', serviceData, undefined, false, true);
         } catch (err) {
           if (!hass.connection) throw err;
           res = await hass.connection.sendMessagePromise({
             type: 'call_service',
-            domain: 'bkk_stop',
+            domain: 'hungarian_transport',
             service: 'elvira_between',
             service_data: serviceData,
             return_response: true,
@@ -3746,7 +3746,7 @@ const BkkLib = {
       } else if (hass.connection) {
         res = await hass.connection.sendMessagePromise({
           type: 'call_service',
-          domain: 'bkk_stop',
+          domain: 'hungarian_transport',
           service: 'elvira_between',
           service_data: serviceData,
           return_response: true,

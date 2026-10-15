@@ -1,0 +1,34 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Hungarian transport",
+        "description": "Enable the Hungarian transport card and MÁV ELVIRA service."
+      }
+    }
+  },
+  "services": {
+    "elvira_between": {
+      "name": "Get MÁV departures",
+      "description": "Fetch MÁV timetable and mandatory seat reservation information between two stations.",
+      "fields": {
+        "origin_code": {
+          "name": "Origin station code",
+          "description": "Nine-digit MÁV station code for the origin."
+        },
+        "dest_code": {
+          "name": "Destination station code",
+          "description": "Nine-digit MÁV station code for the destination."
+        },
+        "minutes_after": {
+          "name": "Look-ahead time",
+          "description": "How many minutes ahead to include departures."
+        },
+        "dest_name": {
+          "name": "Destination name",
+          "description": "Optional display name for the destination."
+        }
+      }
+    }
+  }
+}
