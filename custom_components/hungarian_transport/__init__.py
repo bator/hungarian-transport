@@ -29,7 +29,7 @@ CARD_URL = "/hungarian-transport/hungarian-transport.js"
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Register the card asset path once during Home Assistant startup."""
+    """Register the card asset path and ELVIRA service."""
     www_path = Path(__file__).parent / "www"
     if not www_path.is_dir():
         raise FileNotFoundError(
@@ -39,12 +39,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.http.register_static_path(
         "/hungarian-transport", str(www_path), cache_headers=False
     )
-    return True
-
-
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Set up the ELVIRA service and load the card module."""
-    frontend.add_extra_js_url(hass, CARD_URL)
     session = async_get_clientsession(hass)
 
     async def handle_elvira_between(
@@ -70,11 +64,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return True
 
 
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Load the card module."""
+    frontend.add_extra_js_url(hass, CARD_URL)
+    return True
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload the integration."""
-    hass.services.async_remove(DOMAIN, SERVICE_ELVIRA_BETWEEN)
     if hasattr(frontend, "remove_extra_js_url"):
         frontend.remove_extra_js_url(hass, CARD_URL)
     else:
         hass.data[frontend.DATA_EXTRA_MODULE_URL].remove(CARD_URL)
     return True
+
+
+CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
