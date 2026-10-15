@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.loader import async_get_integration
 
 from .const import DOMAIN, SERVICE_ELVIRA_BETWEEN
 from .elvira import elvira_between
@@ -38,8 +39,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         )
 
     if hasattr(hass.http, "async_register_static_paths"):
-        from homeassistant.components.http import StaticPathConfig
-
         await hass.http.async_register_static_paths(
             [
                 StaticPathConfig(
@@ -75,21 +74,28 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         schema=ELVIRA_SERVICE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
-    frontend.add_extra_js_url(hass, CARD_URL)
+    integration = await async_get_integration(hass, DOMAIN)
+    card_url = f"{CARD_URL}?v={integration.version}"
+    hass.data.setdefault(DOMAIN, {})["card_url"] = card_url
+    frontend.add_extra_js_url(hass, card_url)
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration entry."""
+    frontend.add_extra_js_url(hass, hass.data[DOMAIN]["card_url"])
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload the integration."""
+    card_url = hass.data[DOMAIN].get("card_url")
+    if card_url is None:
+        return True
     if hasattr(frontend, "remove_extra_js_url"):
-        frontend.remove_extra_js_url(hass, CARD_URL)
+        frontend.remove_extra_js_url(hass, card_url)
     else:
-        hass.data[frontend.DATA_EXTRA_MODULE_URL].remove(CARD_URL)
+        hass.data[frontend.DATA_EXTRA_MODULE_URL].remove(card_url)
     return True
 
 
