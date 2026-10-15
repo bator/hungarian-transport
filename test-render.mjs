@@ -2590,7 +2590,7 @@ check('futarTripShape reads trip-details polyline not hass trip_shape',
   && src.includes('packed && packed.polyline')
   && src.includes('pickPublishedLineShape')
   && src.includes('bkk_stop has no trip_shape')
-  && src.includes('1.4.7-rev.1'));
+  && src.includes('1.4.7-rev.2'));
 check('knownStopCoords resolves destKey without a BKK id',
   Lib.knownStopCoords({ key: 'székesfehérvár' })[0] > 47.18
   && Lib.knownStopCoords({ name: 'Budapest-Kelenföld' })[1] < 19.03
