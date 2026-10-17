@@ -8436,33 +8436,35 @@ var BKKPlannerCardEditor = class extends BKKHopCardEditor {
 };
 
 // src/index.js
-if (!customElements.get(BKK_HOP_EDITOR)) {
-  customElements.define(BKK_HOP_EDITOR, BKKHopCardEditor);
-}
-if (!customElements.get(BKK_HOP_EDITOR_ALIAS)) {
-  customElements.define(BKK_HOP_EDITOR_ALIAS, class extends BKKHopCardEditor {
+var ELEMENTS = [
+  [BKK_HOP_EDITOR, BKKHopCardEditor],
+  [BKK_HOP_EDITOR_ALIAS, class extends BKKHopCardEditor {
+  }],
+  [BKK_PLANNER_EDITOR, BKKPlannerCardEditor],
+  [BKK_PLANNER_EDITOR_ALIAS, class extends BKKPlannerCardEditor {
+  }],
+  [BKK_HOP_TAG, BKKHopCard],
+  [BKK_HOP_TAG_ALIAS, class extends BKKHopCard {
+  }],
+  [BKK_PLANNER_TAG, BKKPlannerCard],
+  [BKK_PLANNER_TAG_ALIAS, class extends BKKPlannerCard {
+  }]
+];
+function registerElements() {
+  ELEMENTS.forEach(([tag, cls]) => {
+    if (customElements.get(tag)) return;
+    try {
+      customElements.define(tag, cls);
+    } catch (err) {
+      console.warn(`Hungarian transport: could not register <${tag}>`, err);
+    }
   });
 }
-if (!customElements.get(BKK_PLANNER_EDITOR)) {
-  customElements.define(BKK_PLANNER_EDITOR, BKKPlannerCardEditor);
-}
-if (!customElements.get(BKK_PLANNER_EDITOR_ALIAS)) {
-  customElements.define(BKK_PLANNER_EDITOR_ALIAS, class extends BKKPlannerCardEditor {
-  });
-}
-if (!customElements.get(BKK_HOP_TAG)) {
-  customElements.define(BKK_HOP_TAG, BKKHopCard);
-}
-if (!customElements.get(BKK_HOP_TAG_ALIAS)) {
-  customElements.define(BKK_HOP_TAG_ALIAS, class extends BKKHopCard {
-  });
-}
-if (!customElements.get(BKK_PLANNER_TAG)) {
-  customElements.define(BKK_PLANNER_TAG, BKKPlannerCard);
-}
-if (!customElements.get(BKK_PLANNER_TAG_ALIAS)) {
-  customElements.define(BKK_PLANNER_TAG_ALIAS, class extends BKKPlannerCard {
-  });
+var haRoot = typeof document !== "undefined" && document.querySelector ? document.querySelector("home-assistant, hc-main") : null;
+if (haRoot && !customElements.get(haRoot.localName)) {
+  customElements.whenDefined(haRoot.localName).then(registerElements, registerElements);
+} else {
+  registerElements();
 }
 console.info(
   `%c HUNGARIAN-TRANSPORT %c ${CARD_VERSION} `,
