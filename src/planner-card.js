@@ -811,7 +811,7 @@ export class BKKPlannerCard extends BKKHopCard {
     const seq = ++this._searchSeq;
     try {
       this._err = '';
-      if (!this._apiKey()) await this._fillKey();
+      if (!this._hasFutar()) await this._fillKey();
       if (seq !== this._searchSeq) return;
       const hits = await BkkLib.searchPlannerStops(this._apiKey(), q);
       if (seq !== this._searchSeq) return;
@@ -873,7 +873,7 @@ export class BKKPlannerCard extends BKKHopCard {
     this._destsLoading = true;
     this._paintDestHits('');
     try {
-      if (!this._apiKey()) await this._fillKey();
+      if (!this._hasFutar()) await this._fillKey();
       const placeOrigin = /^(geo:|node\/)/i.test(String(cfg.stopId || ''))
         || cfg.stopKind === 'address' || cfg.stopKind === 'place';
       if (placeOrigin) {
@@ -933,7 +933,7 @@ export class BKKPlannerCard extends BKKHopCard {
     }
     const seq = ++this._destSearchSeq;
     try {
-      if (!this._apiKey()) await this._fillKey();
+      if (!this._hasFutar()) await this._fillKey();
       const extras = await BkkLib.searchPlannerStops(this._apiKey(), q);
       if (seq !== this._destSearchSeq) return;
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);

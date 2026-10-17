@@ -225,7 +225,7 @@ Object.assign(BkkLib, {
     if (BkkLib.isFutarTripId(tid)) return tid;
     const num = BkkLib.rowTrainNumber(row);
     const wantKey = BkkLib.rowTimeKey(row);
-    if (!apiKey || (!num && !wantKey)) return '';
+    if (!BkkLib.hasFutar(apiKey) || (!num && !wantKey)) return '';
     const stops = [];
     [stopId, extraStopId].forEach((id) => {
       if (id && stops.indexOf(id) < 0) stops.push(id);

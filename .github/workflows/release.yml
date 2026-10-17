@@ -180,7 +180,9 @@ jobs:
           mkdir -p custom_components/hungarian_transport/www
           cp dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz custom_components/hungarian_transport/www/
           if [ -f dist/mav-index.json.gz ]; then cp dist/mav-index.json.gz custom_components/hungarian_transport/www/; fi
-          cp -r dist/leaflet custom_components/hungarian_transport/www/
+          # Releases before the vendored Leaflet load it from unpkg; the weekly
+          # refresh re-packs such a tag, which has no dist/leaflet.
+          if [ -d dist/leaflet ]; then cp -r dist/leaflet custom_components/hungarian_transport/www/; fi
           python3 <<'PY'
           import json, os, pathlib
           path = pathlib.Path("custom_components/hungarian_transport/manifest.json")
@@ -189,7 +191,7 @@ jobs:
           path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
           PY
           (cd custom_components/hungarian_transport && zip -qr9 ../../hungarian-transport.zip .)
-          (cd dist && zip -9r ../hungarian-transport-frontend.zip hungarian-transport.js leaflet volan-index.json.gz city-index.json.gz $( [ -f mav-index.json.gz ] && echo mav-index.json.gz ))
+          (cd dist && zip -9r ../hungarian-transport-frontend.zip hungarian-transport.js volan-index.json.gz city-index.json.gz $( [ -d leaflet ] && echo leaflet ) $( [ -f mav-index.json.gz ] && echo mav-index.json.gz ))
           ls -lh hungarian-transport.zip hungarian-transport-frontend.zip
 
       - name: Publish GitHub release

@@ -1,4 +1,4 @@
-import { DEFAULT_MINUTES_AFTER, INTEGRATION_KEY } from '../config.js';
+import { DEFAULT_MINUTES_AFTER } from '../config.js';
 import { BkkLib } from '../lib/core.js';
 
 Object.assign(BkkLib, {
@@ -27,31 +27,8 @@ Object.assign(BkkLib, {
       dest_name: destName || '',
     };
     try {
-      let res;
-      if (typeof hass.callService === 'function') {
-        try {
-          res = await hass.callService('hungarian_transport', 'elvira_between', serviceData, undefined, false, true);
-        } catch (err) {
-          if (!hass.connection) throw err;
-          res = await hass.connection.sendMessagePromise({
-            type: 'call_service',
-            domain: 'hungarian_transport',
-            service: 'elvira_between',
-            service_data: serviceData,
-            return_response: true,
-          });
-        }
-      } else if (hass.connection) {
-        res = await hass.connection.sendMessagePromise({
-          type: 'call_service',
-          domain: 'hungarian_transport',
-          service: 'elvira_between',
-          service_data: serviceData,
-          return_response: true,
-        });
-      } else {
-        return [];
-      }
+      const res = await BkkLib.callServiceResponse(hass, 'hungarian_transport', 'elvira_between', serviceData);
+      if (!res) return [];
       const rows = BkkLib.elviraRowsFromResult(res);
       return Array.isArray(rows) ? rows : [];
     } catch (err) {
@@ -76,31 +53,8 @@ Object.assign(BkkLib, {
     if (BkkLib._coachPosInflight) return BkkLib._coachPosInflight;
     const run = (async () => {
       try {
-        let res;
-        if (typeof hass.callService === 'function') {
-          try {
-            res = await hass.callService('bkk_stop', 'coach_positions', {}, undefined, false, true);
-          } catch (err) {
-            if (!hass.connection) throw err;
-            res = await hass.connection.sendMessagePromise({
-              type: 'call_service',
-              domain: 'bkk_stop',
-              service: 'coach_positions',
-              service_data: {},
-              return_response: true,
-            });
-          }
-        } else if (hass.connection) {
-          res = await hass.connection.sendMessagePromise({
-            type: 'call_service',
-            domain: 'bkk_stop',
-            service: 'coach_positions',
-            service_data: {},
-            return_response: true,
-          });
-        } else {
-          return [];
-        }
+        const res = await BkkLib.hassService(hass, 'coach_positions', {});
+        if (!res) return [];
         const vehicles = BkkLib.coachVehiclesFromResult(res);
         const list = Array.isArray(vehicles) ? vehicles : [];
         BkkLib._coachPosCache = { ts: Date.now(), vehicles: list };
@@ -118,31 +72,8 @@ Object.assign(BkkLib, {
     if (!hass || !route) return '';
     const serviceData = { route: String(route), headsign: String(headsign || '') };
     try {
-      let res;
-      if (typeof hass.callService === 'function') {
-        try {
-          res = await hass.callService('bkk_stop', 'coach_shape', serviceData, undefined, false, true);
-        } catch (err) {
-          if (!hass.connection) throw err;
-          res = await hass.connection.sendMessagePromise({
-            type: 'call_service',
-            domain: 'bkk_stop',
-            service: 'coach_shape',
-            service_data: serviceData,
-            return_response: true,
-          });
-        }
-      } else if (hass.connection) {
-        res = await hass.connection.sendMessagePromise({
-          type: 'call_service',
-          domain: 'bkk_stop',
-          service: 'coach_shape',
-          service_data: serviceData,
-          return_response: true,
-        });
-      } else {
-        return '';
-      }
+      const res = await BkkLib.hassService(hass, 'coach_shape', serviceData);
+      if (!res) return '';
       const payload = (res && (res.response || res.service_response)) || res || {};
       return String(payload.points || '');
     } catch (err) {
@@ -156,24 +87,32 @@ Object.assign(BkkLib, {
     if (nested && nested !== res) return BkkLib.servicePayload(nested);
     return res;
   },
-  async hassService(hass, service, serviceData) {
+  /* Call a service that returns a response. The websocket message is the one
+     path that carries return_response on every frontend version; callService
+     is only the fallback when there is no connection. Resolves to null when
+     neither exists. */
+  async callServiceResponse(hass, domain, service, serviceData) {
     if (!hass) return null;
     if (hass.connection && typeof hass.connection.sendMessagePromise === 'function') {
       return hass.connection.sendMessagePromise({
         type: 'call_service',
-        domain: 'bkk_stop',
+        domain: String(domain),
         service: String(service),
         service_data: serviceData || {},
         return_response: true,
       });
     }
     if (typeof hass.callService === 'function') {
-      return hass.callService('bkk_stop', service, serviceData, undefined, false, true);
+      return hass.callService(domain, service, serviceData || {}, undefined, false, true);
     }
     return null;
   },
+  /* Companion bkk_stop services (coach GPS and shapes). */
+  hassService(hass, service, serviceData) {
+    return BkkLib.callServiceResponse(hass, 'bkk_stop', service, serviceData);
+  },
   async hassTripShape(hass, apiKey, tripId) {
-    if (!hass || !BkkLib.isFutarTripId(tripId) || !apiKey || apiKey === INTEGRATION_KEY) return [];
+    if (!hass || !BkkLib.isFutarTripId(tripId) || !apiKey) return [];
     const serviceData = { trip_id: String(tripId), api_key: String(apiKey) };
     try {
       const res = await BkkLib.hassService(hass, 'trip_shape', serviceData);
@@ -188,7 +127,7 @@ Object.assign(BkkLib, {
      bkk_stop has no trip_shape service, so the map must decode this
      itself instead of waiting on Home Assistant. */
   async futarTripShape(apiKey, cache, tripId) {
-    if (!apiKey || !BkkLib.isFutarTripId(tripId)) return [];
+    if (!BkkLib.hasFutar(apiKey) || !BkkLib.isFutarTripId(tripId)) return [];
     try {
       const packed = await BkkLib.tripDetails(apiKey, cache, tripId);
       return BkkLib.validMapShape(BkkLib.decodePolyline(packed && packed.polyline));

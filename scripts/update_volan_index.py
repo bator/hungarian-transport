@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import fcntl
+import filecmp
+import gzip
 import json
 import os
+import re
 import signal
 import sys
 import urllib.error
@@ -63,8 +66,27 @@ def persist_index(www_path: Path, base: Path) -> None:
         print(f"warn persist {www_path.name}: {type(err).__name__}", file=sys.stderr)
 
 
+def index_schema(path: Path) -> int | None:
+    """Schema version from the head of a gzipped index (`{"v":N,...}`)."""
+    try:
+        with gzip.open(path, "rb") as fh:
+            head = fh.read(64)
+    except (OSError, EOFError):
+        return None
+    m = re.match(rb'\{"v":(\d+)', head)
+    return int(m.group(1)) if m else None
+
+
 def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
-    """Copy durable indexes back if HACS wiped or shrank them."""
+    """Put the durable indexes back after HACS replaced the served folder.
+
+    The durable copy is the last index built here, and state.json describes
+    exactly that feed; if the feed has moved since, this same run rebuilds.
+    So the durable copy wins over whatever a release shipped, unless it was
+    built with an older index schema than the shipped one (stale scripts in
+    /config/hungarian-transport). For mav-index the larger, pfaedle-based
+    index wins, since releases built without pfaedle ship a stop-sequence one.
+    """
     restored: list[str] = []
     if not base.is_dir():
         return restored
@@ -74,15 +96,22 @@ def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
         dest = www / name
         if not src.is_file():
             continue
-        missing = not dest.is_file()
-        smaller = False
         if dest.is_file():
             try:
-                smaller = dest.stat().st_size + 4096 < src.stat().st_size
+                if filecmp.cmp(src, dest, shallow=False):
+                    continue
+                if name == "mav-index.json.gz" and dest.stat().st_size + 4096 >= src.stat().st_size:
+                    continue
             except OSError:
-                smaller = True
-        if not (missing or smaller):
-            continue
+                pass
+            local_v, shipped_v = index_schema(src), index_schema(dest)
+            if local_v is not None and shipped_v is not None and local_v < shipped_v:
+                print(
+                    f"warn keep shipped {name}: local schema {local_v} < {shipped_v};"
+                    " copy the new scripts to /config/hungarian-transport",
+                    file=sys.stderr,
+                )
+                continue
         try:
             _atomic_copy(src, dest)
             restored.append(name)

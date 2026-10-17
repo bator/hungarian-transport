@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from typing import Any
 
 import aiohttp
+
+from .cache import SharedTTLCache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -71,33 +72,10 @@ class FutarProxy:
     def __init__(self, session: aiohttp.ClientSession, api_key: str) -> None:
         self._session = session
         self._api_key = api_key
-        self._cache: dict[tuple, tuple[float, dict]] = {}
-        self._inflight: dict[tuple, asyncio.Future] = {}
+        self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX)
 
     async def get(self, path: str, params: dict[str, Any]) -> dict:
         key = (path, tuple(sorted((str(k), str(v)) for k, v in (params or {}).items())))
-        hit = self._cache.get(key)
-        if hit and time.monotonic() - hit[0] < FUTAR_CACHE_TTL:
-            return hit[1]
-        task = self._inflight.get(key)
-        if task is None:
-            task = asyncio.ensure_future(
-                futar_get(self._session, self._api_key, path, params)
-            )
-            self._inflight[key] = task
-
-            def _store(done: asyncio.Future) -> None:
-                self._inflight.pop(key, None)
-                if done.cancelled() or done.exception() is not None:
-                    return
-                if len(self._cache) >= FUTAR_CACHE_MAX:
-                    now = time.monotonic()
-                    for stale in [k for k, v in self._cache.items() if now - v[0] >= FUTAR_CACHE_TTL]:
-                        self._cache.pop(stale, None)
-                    while len(self._cache) >= FUTAR_CACHE_MAX:
-                        self._cache.pop(next(iter(self._cache)))
-                self._cache[key] = (time.monotonic(), done.result())
-
-            task.add_done_callback(_store)
-        # A card detaching must not cancel the request other cards wait for.
-        return await asyncio.shield(task)
+        return await self._cache.get(
+            key, lambda: futar_get(self._session, self._api_key, path, params)
+        )

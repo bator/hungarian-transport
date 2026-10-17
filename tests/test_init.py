@@ -16,6 +16,7 @@ from custom_components.hungarian_transport.const import DOMAIN, SERVICE_ELVIRA_B
 from custom_components.hungarian_transport.elvira import ELVIRA_URL, service_days
 
 ORIGIN = "005510009"
+BUDAPEST = dt_util.get_time_zone("Europe/Budapest")
 DEST = "005501016"
 
 
@@ -94,9 +95,10 @@ def _board(start, arrive=None, code="966"):
 
 
 async def test_elvira_service_returns_rows(hass, aioclient_mock) -> None:
+    """StationInfo times are naive Budapest time, whatever HA's own time zone is."""
     await _setup(hass)
-    hass.config.time_zone = "Europe/Budapest"
-    now = dt_util.now(dt_util.get_time_zone("Europe/Budapest"))
+    await hass.config.async_set_time_zone("America/Los_Angeles")
+    now = dt_util.now(BUDAPEST).replace(microsecond=0)
     start = now + timedelta(minutes=30)
     dep, arr = _board(start, start + timedelta(minutes=62))
     aioclient_mock.post(
@@ -117,13 +119,18 @@ async def test_elvira_service_returns_rows(hass, aioclient_mock) -> None:
     assert rows[0]["booking"] is True
     assert rows[0]["platform"] == "6"
     assert rows[0]["travel"] == 62
+    assert rows[0]["dep"] == int(start.timestamp())
+    # Service days (travelDate) are Budapest dates too.
+    asked = {call[2]["travelDate"][:10] for call in aioclient_mock.mock_calls}
+    expected = {d.isoformat() for d in service_days(now, now + timedelta(minutes=60))}
+    assert asked == expected
 
 
 async def test_elvira_service_shares_concurrent_requests(hass, aioclient_mock) -> None:
     await _setup(hass)
     aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
     data = {"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": 15}
-    now = dt_util.now(dt_util.get_time_zone(hass.config.time_zone))
+    now = dt_util.now(BUDAPEST)
     boards = 2 * len(service_days(now, now + timedelta(minutes=15)))
 
     def call():

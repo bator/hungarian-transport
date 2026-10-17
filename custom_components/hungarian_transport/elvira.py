@@ -9,11 +9,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-import time
 import unicodedata
 from datetime import date, datetime, timedelta
 
 import zoneinfo
+
+from .cache import SharedTTLCache
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,6 +28,10 @@ ELVIRA_HEADERS = {
     "Referer": "https://jegy.mav.hu/",
 }
 DOMAIN = "hungarian_transport"
+# MÁV timetables, service days and the naive times in StationInfo are Budapest
+# wall-clock time, whatever time zone Home Assistant itself runs in.
+MAV_TZ = zoneinfo.ZoneInfo("Europe/Budapest")
+ELVIRA_CACHE_MAX = 64
 
 # StationInfo with travelDate=now drops trains that already left the origin,
 # including delayed ones FUTÁR still lists. Midnight keeps the day's rows
@@ -157,36 +162,19 @@ async def _fetch_station(session, station_code: str, day: date) -> tuple[list, l
 
 
 async def _station_legs(session, hass, station_code: str, day: date):
-    """StationInfo for one station and service day, cached and de-duplicated.
+    """StationInfo for one station and service day, cached and shared.
 
     Every card on every open dashboard polls this service, so concurrent calls
     for the same board share one request.
     """
     data = hass.data.setdefault(DOMAIN, {})
-    cache = data.setdefault("elvira_cache", {})
-    inflight = data.setdefault("elvira_inflight", {})
-    key = (station_code, day.isoformat())
-    cached = cache.get(key)
-    if cached and (time.time() - cached["ts"]) < ELVIRA_CACHE_TTL:
-        return cached["dep"], cached["arr"]
-    task = inflight.get(key)
-    if task is None:
-        task = asyncio.ensure_future(_fetch_station(session, station_code, day))
-        inflight[key] = task
-
-        def _store(done: asyncio.Future) -> None:
-            inflight.pop(key, None)
-            if done.cancelled() or done.exception() is not None:
-                return
-            dep, arr = done.result()
-            oldest = (day - timedelta(days=1)).isoformat()
-            for stale in [k for k in cache if k[1] < oldest]:
-                cache.pop(stale, None)
-            cache[key] = {"ts": time.time(), "dep": dep, "arr": arr}
-
-        task.add_done_callback(_store)
-    # One caller giving up (card detached) must not cancel the shared request.
-    return await asyncio.shield(task)
+    cache = data.get("elvira_cache")
+    if cache is None:
+        cache = data["elvira_cache"] = SharedTTLCache(ELVIRA_CACHE_TTL, ELVIRA_CACHE_MAX)
+    return await cache.get(
+        (station_code, day.isoformat()),
+        lambda: _fetch_station(session, station_code, day),
+    )
 
 
 def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
@@ -281,10 +269,7 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     dest_code = station_code_digits(dest_code)
     if len(origin_code) < 9 or len(dest_code) < 9 or origin_code == dest_code:
         return []
-    try:
-        tz = zoneinfo.ZoneInfo(hass.config.time_zone or "Europe/Budapest")
-    except Exception:
-        tz = zoneinfo.ZoneInfo("Europe/Budapest")
+    tz = MAV_TZ
     now = datetime.now(tz)
     latest = now + timedelta(minutes=int(minutes_after or 180))
     days = service_days(now, latest)

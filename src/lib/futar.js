@@ -1,4 +1,4 @@
-import { BKK_API, INTEGRATION_KEY } from '../config.js';
+import { BKK_API } from '../config.js';
 import { codedError } from '../i18n.js';
 import { BkkLib } from '../lib/core.js';
 
@@ -54,10 +54,18 @@ Object.assign(BkkLib, {
     return !!(h && h.services && h.services.hungarian_transport
       && h.services.hungarian_transport.futar);
   },
-  effectiveApiKey(cfg, hass) {
+  /* The only key the browser ever holds is one the user put on a card. With
+     no such key, FUTÁR goes through the integration when it holds the key,
+     and a key borrowed from a sibling card is only the last resort. */
+  cardApiKey(cfg, hass, borrowedKey) {
     const own = String((cfg && cfg.apiKey) || '').trim();
     if (own) return own;
-    return BkkLib.integrationHasKey(hass) ? INTEGRATION_KEY : '';
+    if (BkkLib.integrationHasKey(hass)) return '';
+    return String(borrowedKey || '').trim();
+  },
+  /* FUTÁR is reachable with this card key, or through the integration. */
+  hasFutar(apiKey, hass) {
+    return !!String(apiKey || '').trim() || BkkLib.integrationHasKey(hass);
   },
   async _fetchViaIntegration(path, params) {
     const hass = BkkLib._hass;
@@ -69,15 +77,7 @@ Object.assign(BkkLib, {
     });
     let res;
     try {
-      const call = typeof hass.callService === 'function'
-        ? hass.callService('hungarian_transport', 'futar', serviceData, undefined, false, true)
-        : hass.connection.sendMessagePromise({
-          type: 'call_service',
-          domain: 'hungarian_transport',
-          service: 'futar',
-          service_data: serviceData,
-          return_response: true,
-        });
+      const call = BkkLib.callServiceResponse(hass, 'hungarian_transport', 'futar', serviceData);
       res = await Promise.race([call, timeout]);
     } catch (err) {
       const msg = err && (err.message || err.code);
@@ -91,9 +91,11 @@ Object.assign(BkkLib, {
     if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);
     return data;
   },
+  /* With a card key the browser calls FUTÁR directly; without one, the
+     integration's hungarian_transport.futar service does, with its own key. */
   async fetch(apiKey, path, params, foreground) {
-    if (!apiKey) throw codedError('errNoApiKey');
-    if (apiKey === INTEGRATION_KEY) {
+    if (!apiKey) {
+      if (!BkkLib.integrationHasKey()) throw codedError('errNoApiKey');
       await BkkLib._gate(!!foreground);
       try {
         return await BkkLib._fetchViaIntegration(path, params);
@@ -171,7 +173,7 @@ Object.assign(BkkLib, {
     const lat = Number(stop && stop.lat);
     const lon = Number(stop && stop.lon);
     if (name && Number.isFinite(lat) && Number.isFinite(lon)) return `${name}::${lat},${lon}`;
-    if (!apiKey || !name) return '';
+    if (!BkkLib.hasFutar(apiKey) || !name) return '';
     try {
       const data = await BkkLib.fetch(apiKey, 'search.json', { query: name }, true);
       const stops = (((data.data || {}).references) || {}).stops || {};

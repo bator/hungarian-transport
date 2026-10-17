@@ -73,7 +73,7 @@ Object.assign(BkkLib, {
     const motis = await BkkLib.transitousJourney(origin, dest, opts);
     if (motis && motis.legs.some((leg) => !leg.walk)) return motis;
     let futar = null;
-    if (apiKey) {
+    if (BkkLib.hasFutar(apiKey)) {
       const fromPlace = await BkkLib.planPlace(apiKey, origin);
       const toPlace = await BkkLib.planPlace(apiKey, dest);
       if (fromPlace && toPlace) {
@@ -395,7 +395,7 @@ Object.assign(BkkLib, {
     return { walk, train, ready: Math.round(train.endMs / 1000) };
   },
   async probeApiKey(apiKey) {
-    if (!apiKey) return { ok: false, code: 'errNoApiKey' };
+    if (!BkkLib.hasFutar(apiKey)) return { ok: false, code: 'errNoApiKey' };
     try {
       await BkkLib.fetch(apiKey, 'search.json', { query: '.' }, true);
       return { ok: true };
