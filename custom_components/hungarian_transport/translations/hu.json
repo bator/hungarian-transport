@@ -1,0 +1,46 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Magyar közlekedés",
+        "description": "A magyar közlekedési kártya és a MÁV ELVIRA szolgáltatás bekapcsolása."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "A Magyar közlekedés integráció már be van állítva.",
+      "already_configured": "A Magyar közlekedés integráció már be van állítva."
+    }
+  },
+  "services": {
+    "elvira_between": {
+      "name": "MÁV indulások lekérése",
+      "description": "MÁV menetrend és kötelező helyjegy információ két állomás között.",
+      "fields": {
+        "origin_code": {
+          "name": "Indulási állomás kódja",
+          "description": "Az indulási állomás kilencjegyű MÁV kódja."
+        },
+        "dest_code": {
+          "name": "Célállomás kódja",
+          "description": "A célállomás kilencjegyű MÁV kódja."
+        },
+        "minutes_after": {
+          "name": "Előretekintés",
+          "description": "Hány percre előre listázza az indulásokat."
+        },
+        "dest_name": {
+          "name": "Célállomás neve",
+          "description": "Opcionális megjelenítendő név a célállomáshoz."
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_station_code": {
+      "message": "A(z) {field} mezőnek kilencjegyű MÁV állomáskódnak kell lennie, ezt kaptam: \"{value}\"."
+    },
+    "same_station": {
+      "message": "Az indulási és a célállomás nem lehet ugyanaz."
+    }
+  }
+}

@@ -6,11 +6,12 @@ CORS blocks jegy.mav.hu from the browser, so the card calls
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import zoneinfo
 
@@ -31,6 +32,9 @@ DOMAIN = "hungarian_transport"
 # including delayed ones FUTÁR still lists. Midnight keeps the day's rows
 # (startTrack included) so Göcsej 967/955 still merge onto the hop.
 ARRIVAL_GRACE = timedelta(minutes=2)
+# StationInfo is per service day. Shortly after midnight, delayed trains of the
+# previous day are still due; near midnight the look-ahead reaches tomorrow.
+LATE_TRAIN_WINDOW = timedelta(hours=3)
 # Kelenföld midnight StationInfo truncates ~11:32 at 200 (moreResult=false).
 # 500 reaches ~22:32 so evening origin overlay still has #3880 to copy.
 STATIONINFO_MAX_COUNT = "500"
@@ -111,12 +115,22 @@ def _label_from_row(row: dict) -> str:
     return str(row.get("code") or "IC")
 
 
-async def _fetch_station(session, station_code: str, tz) -> tuple[list, list]:
-    now = datetime.now(tz)
-    travel = now.replace(hour=0, minute=0, second=0, microsecond=0)
+def service_days(now: datetime, latest: datetime) -> list[date]:
+    """Service days whose StationInfo can hold a departure in [now, latest]."""
+    days = []
+    if (now - LATE_TRAIN_WINDOW).date() < now.date():
+        days.append(now.date() - timedelta(days=1))
+    day = now.date()
+    while day <= latest.date():
+        days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+async def _fetch_station(session, station_code: str, day: date) -> tuple[list, list]:
     payload = {
         "type": "StationInfo",
-        "travelDate": travel.strftime("%Y-%m-%dT%H:%M:%S"),
+        "travelDate": f"{day.isoformat()}T00:00:00",
         "stationNumberCode": station_code,
         "minCount": "0",
         "maxCount": STATIONINFO_MAX_COUNT,
@@ -142,17 +156,37 @@ async def _fetch_station(session, station_code: str, tz) -> tuple[list, list]:
     )
 
 
-async def _station_legs(session, hass, station_code: str):
-    cache = hass.data.setdefault(DOMAIN, {}).setdefault("elvira_cache", {})
-    cached = cache.get(station_code)
-    now = time.time()
-    tz = zoneinfo.ZoneInfo(hass.config.time_zone or "Europe/Budapest")
-    day = datetime.now(tz).strftime("%Y-%m-%d")
-    if cached and cached.get("day") == day and (now - cached.get("ts", 0)) < ELVIRA_CACHE_TTL:
-        return cached.get("dep") or [], cached.get("arr") or []
-    dep, arr = await _fetch_station(session, station_code, tz)
-    cache[station_code] = {"ts": now, "day": day, "dep": dep, "arr": arr}
-    return dep, arr
+async def _station_legs(session, hass, station_code: str, day: date):
+    """StationInfo for one station and service day, cached and de-duplicated.
+
+    Every card on every open dashboard polls this service, so concurrent calls
+    for the same board share one request.
+    """
+    data = hass.data.setdefault(DOMAIN, {})
+    cache = data.setdefault("elvira_cache", {})
+    inflight = data.setdefault("elvira_inflight", {})
+    key = (station_code, day.isoformat())
+    cached = cache.get(key)
+    if cached and (time.time() - cached["ts"]) < ELVIRA_CACHE_TTL:
+        return cached["dep"], cached["arr"]
+    task = inflight.get(key)
+    if task is None:
+        task = asyncio.ensure_future(_fetch_station(session, station_code, day))
+        inflight[key] = task
+
+        def _store(done: asyncio.Future) -> None:
+            inflight.pop(key, None)
+            if done.cancelled() or done.exception() is not None:
+                return
+            dep, arr = done.result()
+            oldest = (day - timedelta(days=1)).isoformat()
+            for stale in [k for k in cache if k[1] < oldest]:
+                cache.pop(stale, None)
+            cache[key] = {"ts": time.time(), "dep": dep, "arr": arr}
+
+        task.add_done_callback(_store)
+    # One caller giving up (card detached) must not cancel the shared request.
+    return await asyncio.shield(task)
 
 
 def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
@@ -163,32 +197,48 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
     overlays these onto FUTÁR/MOTIS hop rows and must not append unmatched
     origin-only trains (GEMENC Baja, …).
     """
-    dest_by_id = {}
-    dest_by_code = {}
+    dest_by_id: dict[str, list] = {}
+    dest_by_code: dict[str, list] = {}
     for row in darr or []:
+        arr = _iso_dt(
+            row.get("actualOrEstimatedArrive") or row.get("arrive") or row.get("start"),
+            tz,
+        )
+        if arr is None:
+            continue
         tid = str(row.get("trainId") or "")
         code = str(row.get("code") or "").strip()
         if tid:
-            dest_by_id.setdefault(tid, row)
+            dest_by_id.setdefault(tid, []).append((arr, row))
         if code:
-            dest_by_code.setdefault(code, row)
+            dest_by_code.setdefault(code, []).append((arr, row))
+
+    def dest_hit(tid: str, code: str, start: datetime):
+        # Train numbers repeat every day, and a truncated dest board
+        # (Kelenföld ~11:36) can still list a morning run of the same `code`.
+        # Only the first arrival after this departure belongs to this run.
+        for cands in (dest_by_id.get(tid) or [], dest_by_code.get(code) or []):
+            after = [c for c in cands if c[0] >= start]
+            if after:
+                return min(after, key=lambda c: c[0])
+        return None, None
+
     out = []
+    seen = set()
     for row in odep or []:
         start = _iso_dt(row.get("actualOrEstimatedStart") or row.get("start"), tz)
         if start is None:
             continue
         tid = str(row.get("trainId") or "")
         code = str(row.get("code") or "").strip()
-        hit = dest_by_id.get(tid) or dest_by_code.get(code)
-        arr = None
-        if hit:
-            arr = _iso_dt(
-                hit.get("actualOrEstimatedArrive") or hit.get("arrive") or hit.get("start"),
-                tz,
-            )
-        # Truncated dest board (Kelenföld ~11:36) can still match a morning
-        # `code`. Drop that dest hit; keep the origin row and its booking.
-        if arr is not None and (arr < now - ARRIVAL_GRACE or arr < start):
+        run = (tid or code, row.get("start") or start.isoformat())
+        if run in seen:
+            continue
+        seen.add(run)
+        arr, hit = dest_hit(tid, code, start)
+        # An arrival that already happened is a stale match; keep the origin
+        # row and its booking without travel time.
+        if arr is not None and arr < now - ARRIVAL_GRACE:
             hit = None
             arr = None
         if arr is None and start < now - ARRIVAL_GRACE:
@@ -204,7 +254,7 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
         sched = _iso_dt(row.get("start"), tz) or start
         delay = int((start - sched).total_seconds()) if sched is not None else 0
         out.append({
-            "tripId": "elvira:" + (tid or code),
+            "tripId": "elvira:" + (tid or code or str(int(sched.timestamp()))),
             "label": _label_from_row(row),
             "head": dest_name or ((row.get("endStation") or {}).get("name") or ""),
             "dep": int(start.timestamp()),
@@ -235,12 +285,12 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
         tz = zoneinfo.ZoneInfo(hass.config.time_zone or "Europe/Budapest")
     except Exception:
         tz = zoneinfo.ZoneInfo("Europe/Budapest")
-    odep, _oarr = await _station_legs(session, hass, origin_code)
-    try:
-        _ddep, darr = await _station_legs(session, hass, dest_code)
-    except Exception as err:
-        _LOGGER.warning("ELVIRA dest StationInfo %s skipped: %s", dest_code, err)
-        darr = []
     now = datetime.now(tz)
     latest = now + timedelta(minutes=int(minutes_after or 180))
+    days = service_days(now, latest)
+    boards = await asyncio.gather(
+        *(_station_legs(session, hass, code, day) for code in (origin_code, dest_code) for day in days)
+    )
+    odep = [row for dep, _arr in boards[: len(days)] for row in dep]
+    darr = [row for _dep, arr in boards[len(days):] for row in arr]
     return rows_from_stationinfo(odep, darr, tz, now, latest, dest_name)
