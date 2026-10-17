@@ -160,6 +160,15 @@ card picker; the visual editor and the on-card pickers both set look-ahead
 full itinerary. The older `custom:bkk-stop-card-plan` type remains registered
 as an alias.
 
+Under **When** the planner switches between **Now** (the live departure
+board, plus a faster transfer itinerary when there is one), **Depart** and
+**Arrive**. With a time picked it lists up to six itineraries for that moment,
+leaving at or after it or arriving by it. Itineraries that another one beats
+on both departure and arrival are dropped. Each itinerary shows its times,
+duration, transfers and the lines as coloured badges; the open one adds a map
+and a timeline of every leg. The time stays on the card and is not saved in
+the dashboard configuration.
+
 Debrecen DKV is marked not public on the [menetbrand catalog](https://gtfs.menetbrand.com/letoltes/),
 so it stays out of the city picker. Weekendbus (Csömör/Pécel) still hosts a
 zip, but the calendar ended 2025-12-31, so it is not wired. Those lines now

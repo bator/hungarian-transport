@@ -1,4 +1,4 @@
-import { clampMinutesAfter } from '../config.js';
+import { clampMinutesAfter, pad2, tzFields } from '../config.js';
 import { BkkLib } from '../lib/core.js';
 
 Object.assign(BkkLib, {
@@ -11,6 +11,14 @@ Object.assign(BkkLib, {
     its.forEach((it) => {
       if (Number(it.duration || 1e15) < Number(best.duration || 1e15)) best = it;
     });
+    return BkkLib.futarJourney(best);
+  },
+  journeysFromPlan(payload) {
+    const its = ((((payload || {}).data || {}).entry || {}).plan || {}).itineraries || [];
+    return its.map((it) => BkkLib.futarJourney(it)).filter(Boolean);
+  },
+  futarJourney(best) {
+    if (!best) return null;
     const legs = [];
     const tripStart = BkkLib.epochMs(best.startTime);
     let prevEnd = tripStart;
@@ -41,6 +49,8 @@ Object.assign(BkkLib, {
       const toLon = Number(to.lon);
       legs.push({
         walk,
+        startMs: startMs || undefined,
+        endMs: endMs || undefined,
         minutes,
         meters,
         label: String(leg.routeShortName || ''),
@@ -65,13 +75,86 @@ Object.assign(BkkLib, {
       walkMin: Math.max(0, Math.round(Number(best.walkTime || 0) / 60)),
       waitMin,
       transfers: Math.max(0, Number(best.transfers || 0)),
+      startMs: BkkLib.epochMs(best.startTime) || undefined,
+      endMs: BkkLib.epochMs(best.endTime) || undefined,
       legs,
     };
+  },
+  /* MOTIS and FUTÁR name coordinate endpoints START and END. */
+  nameJourneyEnds(journey, origin, dest) {
+    if (!journey || !Array.isArray(journey.legs)) return journey;
+    const from = String((origin && origin.name) || '').trim();
+    const to = String((dest && dest.name) || '').trim();
+    journey.legs.forEach((leg) => {
+      if (from && /^start$/i.test(String(leg.from || '').trim())) leg.from = from;
+      if (to && /^end$/i.test(String(leg.to || '').trim())) leg.to = to;
+    });
+    return journey;
+  },
+  /* FUTÁR plan-trip parameters for a chosen moment (Budapest wall clock). */
+  futarPlanTime(opts) {
+    const ms = Number(opts && opts.time);
+    if (!(ms > 0)) return {};
+    const f = tzFields(new Date(ms));
+    const out = {
+      date: `${f.y}-${pad2(f.mo)}-${pad2(f.d)}`,
+      time: `${pad2(f.h)}:${pad2(f.mi)}`,
+    };
+    if (opts.arriveBy) out.arriveBy = 'true';
+    return out;
+  },
+  /* Keep only itineraries nobody beats: drop one when another leaves no
+     earlier and arrives no later (a 22:39 → 06:52 night wait next to a
+     01:56 → 04:33). Ties keep the one with fewer transfers. */
+  dropDominatedJourneys(list) {
+    const items = (Array.isArray(list) ? list : []).filter(Boolean);
+    return items.filter((a) => {
+      if (!a.startMs || !a.endMs) return true;
+      return !items.some((b) => {
+        if (b === a || !b.startMs || !b.endMs) return false;
+        if (b.startMs < a.startMs || b.endMs > a.endMs) return false;
+        if (b.startMs > a.startMs || b.endMs < a.endMs) return true;
+        return (b.transfers || 0) < (a.transfers || 0);
+      });
+    });
+  },
+  /* Several itineraries for the planner's chosen time: Transitous first,
+     FUTÁR plan-trip when it has none. */
+  async planJourneys(apiKey, origin, dest, hass, opts) {
+    opts = opts || {};
+    let list = await BkkLib.transitousJourneys(origin, dest, opts);
+    if (!list.length && BkkLib.hasFutar(apiKey)) {
+      const fromPlace = await BkkLib.planPlace(apiKey, origin);
+      const toPlace = await BkkLib.planPlace(apiKey, dest);
+      if (fromPlace && toPlace) {
+        try {
+          const data = await BkkLib.fetch(apiKey, 'plan-trip.json', Object.assign({
+            fromPlace,
+            toPlace,
+            mode: 'TRANSIT,WALK',
+            numItineraries: '6',
+          }, BkkLib.futarPlanTime(opts)), true);
+          list = BkkLib.journeysFromPlan(data).filter((j) => j.legs.some((leg) => !leg.walk));
+        } catch (_e) {
+          list = [];
+        }
+      }
+    }
+    list.forEach((j) => BkkLib.nameJourneyEnds(j, origin, dest));
+    list = BkkLib.dropDominatedJourneys(list);
+    const at = Number(opts.time) || Date.now();
+    const key = opts.arriveBy ? 'endMs' : 'startMs';
+    list.sort((a, b) => (a[key] || at) - (b[key] || at));
+    if (opts.arriveBy) {
+      /* Latest arrivals before the requested time first. */
+      list.reverse();
+    }
+    return list.slice(0, opts.max || 6);
   },
   async planJourney(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
     const motis = await BkkLib.transitousJourney(origin, dest, opts);
-    if (motis && motis.legs.some((leg) => !leg.walk)) return motis;
+    if (motis && motis.legs.some((leg) => !leg.walk)) return BkkLib.nameJourneyEnds(motis, origin, dest);
     let futar = null;
     if (BkkLib.hasFutar(apiKey)) {
       const fromPlace = await BkkLib.planPlace(apiKey, origin);
@@ -92,7 +175,7 @@ Object.assign(BkkLib, {
         }
       }
     }
-    if (futar && futar.legs.some((leg) => !leg.walk)) return futar;
+    if (futar && futar.legs.some((leg) => !leg.walk)) return BkkLib.nameJourneyEnds(futar, origin, dest);
     const viaCity = await BkkLib.cityRailJourney(apiKey, hass, origin, dest);
     return viaCity || futar;
   },

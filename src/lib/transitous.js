@@ -723,6 +723,16 @@ Object.assign(BkkLib, {
     its.forEach((it) => {
       if (Number(it.duration || 1e15) < Number(best.duration || 1e15)) best = it;
     });
+    return BkkLib.motisJourney(best);
+  },
+  /* Every itinerary of a MOTIS plan, in the order Transitous returns them
+     (by departure, or by arrival for arriveBy). */
+  journeysFromMotis(payload) {
+    const its = (payload && payload.itineraries) || [];
+    return its.map((it) => BkkLib.motisJourney(it)).filter(Boolean);
+  },
+  motisJourney(best) {
+    if (!best) return null;
     const legs = [];
     const tripStart = BkkLib.isoMs(best.startTime);
     let prevEnd = tripStart;
@@ -756,6 +766,8 @@ Object.assign(BkkLib, {
       const toLon = Number(to.lon);
       const row = {
         walk,
+        startMs: startMs || undefined,
+        endMs: endMs || undefined,
         minutes,
         meters,
         label: walk ? '' : BkkLib.motisLegLabel(leg),
@@ -790,10 +802,15 @@ Object.assign(BkkLib, {
       walkMin,
       waitMin,
       transfers: Math.max(0, Number(best.transfers || 0)),
+      startMs: BkkLib.isoMs(best.startTime) || undefined,
+      endMs: BkkLib.isoMs(best.endTime) || undefined,
       legs,
     };
   },
-  async transitousJourney(origin, dest, opts) {
+  /* MOTIS plan between two places. opts.time (epoch ms) plans for that
+     moment instead of now; opts.arriveBy makes it the arrival time. */
+  async transitousPlan(origin, dest, opts) {
+    opts = opts || {};
     const places = await Promise.all([
       BkkLib.transitousPlace(origin),
       BkkLib.transitousPlace(dest),
@@ -801,19 +818,32 @@ Object.assign(BkkLib, {
     const fromPlace = places[0];
     const toPlace = places[1];
     if (!fromPlace || !toPlace) return null;
+    const planParams = {
+      fromPlace,
+      toPlace,
+      numItineraries: String(opts.numItineraries || 12),
+      searchWindow: String(clampMinutesAfter(opts.minutesAfter) * 60),
+    };
+    if (Number(opts.time) > 0) planParams.time = new Date(Number(opts.time)).toISOString();
+    if (opts.arriveBy) planParams.arriveBy = 'true';
+    return BkkLib.transitousFetch('/api/v5/plan', planParams);
+  },
+  async transitousJourney(origin, dest, opts) {
     try {
-      const planParams = {
-        fromPlace,
-        toPlace,
-        numItineraries: '12',
-        searchWindow: String(clampMinutesAfter(opts && opts.minutesAfter) * 60),
-      };
-      const data = await BkkLib.transitousFetch('/api/v5/plan', planParams);
+      const data = await BkkLib.transitousPlan(origin, dest, opts);
       const journey = BkkLib.journeyFromMotis(data);
       if (journey && journey.legs.some((leg) => !leg.walk)) return journey;
       return null;
     } catch (_e) {
       return null;
+    }
+  },
+  async transitousJourneys(origin, dest, opts) {
+    try {
+      const data = await BkkLib.transitousPlan(origin, dest, opts);
+      return BkkLib.journeysFromMotis(data).filter((j) => j.legs.some((leg) => !leg.walk));
+    } catch (_e) {
+      return [];
     }
   },
   /* Direct board rows hide the transfer block unless the itinerary is a

@@ -1076,8 +1076,8 @@ check('planner BKK-board map button opens a single-vehicle map', vehicleMapOpene
     && !plan.shadowRoot.querySelector('.j-map-only'),
     html.slice(0, 400));
 }
-check('transitous journey asks for 12 itineraries',
-  /numItineraries: '12'/.test(src));
+check('transitous journey asks for 12 itineraries by default',
+  src.includes('numItineraries: String(opts.numItineraries || 12)'));
 {
   const planJFromBoard = [];
   const origPJ = Lib.planJourney;
@@ -3196,6 +3196,94 @@ Lib.mavIndex = origMavIndex;
   } finally {
     globalThis.fetch = realFetch;
   }
+}
+
+/* Planner: plan for a chosen time, itinerary list and timeline. */
+{
+  const iso = (h, m) => Date.UTC(2026, 9, 19, h, m);
+  const motis = Lib.journeysFromMotis({ itineraries: [
+    { startTime: '2026-10-19T06:00:00Z', endTime: '2026-10-19T07:10:00Z', duration: 4200, transfers: 1, legs: [
+      { mode: 'WALK', from: { name: 'START' }, to: { name: 'Népliget' }, startTime: '2026-10-19T06:00:00Z', endTime: '2026-10-19T06:04:00Z', duration: 240, distance: 300 },
+      { mode: 'COACH', routeShortName: '1205', from: { name: 'Népliget' }, to: { name: 'END' }, startTime: '2026-10-19T06:05:00Z', endTime: '2026-10-19T07:10:00Z', duration: 3900, headsign: 'Székesfehérvár', routeColor: 'F9AB13', routeTextColor: '000000' },
+    ] },
+    { startTime: '2026-10-19T05:50:00Z', endTime: '2026-10-19T07:30:00Z', duration: 6000, transfers: 2, legs: [
+      { mode: 'BUS', routeShortName: '99', from: { name: 'A' }, to: { name: 'B' }, startTime: '2026-10-19T05:50:00Z', endTime: '2026-10-19T07:30:00Z', duration: 6000 },
+    ] },
+  ] });
+  check('every MOTIS itinerary is kept with its times',
+    motis.length === 2 && motis[0].startMs === iso(6, 0) && motis[0].endMs === iso(7, 10)
+    && motis[0].legs[1].startMs === iso(6, 5), JSON.stringify(motis.map((j) => [j.startMs, j.endMs])));
+  Lib.nameJourneyEnds(motis[0], { name: 'Népliget autóbusz-pályaudvar' }, { name: 'Székesfehérvár' });
+  check('START and END become the picked places',
+    motis[0].legs[0].from === 'Népliget autóbusz-pályaudvar' && motis[0].legs[1].to === 'Székesfehérvár');
+  const kept = Lib.dropDominatedJourneys(motis);
+  check('an itinerary that leaves earlier and arrives later than another is dropped',
+    kept.length === 1 && kept[0] === motis[0], JSON.stringify(kept.map((j) => j.startMs)));
+  const ft = Lib.futarPlanTime({ time: iso(6, 30), arriveBy: true });
+  check('FUTÁR plan-trip gets Budapest date and time',
+    ft.date === '2026-10-19' && ft.time === '08:30' && ft.arriveBy === 'true', JSON.stringify(ft));
+
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  document.body.appendChild(pc);
+  pc.hass = { states: {}, language: 'hu', services: {} };
+  const asked = [];
+  const origPlanJourneys = Lib.planJourneys;
+  const origPlanJourney = Lib.planJourney;
+  Lib.planJourneys = async (key, o, d, h, opts) => { asked.push(opts); return [motis[0], Object.assign({}, motis[0], { startMs: iso(6, 30), endMs: iso(7, 40) })]; };
+  Lib.planJourney = async () => null;
+  pc.setConfig({ language: 'hu', stopId: 'hkir_773521', stopName: 'Népliget', destStopId: 'hkir_665908', destName: 'Székesfehérvár', destKey: 'szekesfehervar' });
+  await new Promise((r) => setTimeout(r, 20));
+  const root = pc.shadowRoot;
+  const seg = [...root.querySelectorAll('#pwhen button')].map((b) => b.textContent);
+  check('planner offers Most, Indulás and Érkezés', JSON.stringify(seg) === JSON.stringify(['Most', 'Indulás', 'Érkezés']), JSON.stringify(seg));
+  check('planner title is the card title, not origin → destination again',
+    root.querySelector('.head').textContent === 'Tervező');
+  check('now mode shows the look-ahead and hides the time field',
+    !root.querySelector('#pmin').hidden && root.querySelector('#pat').hidden);
+  root.querySelector('[data-when="depart"]').click();
+  await new Promise((r) => setTimeout(r, 20));
+  const at = root.querySelector('#pat');
+  check('Indulás plans for the picked time',
+    pc._when.mode === 'depart' && pc._when.at > 0 && asked.length === 1
+    && asked[0].time === pc._when.at && !asked[0].arriveBy, JSON.stringify(asked));
+  check('time mode shows the time field and hides the look-ahead and live board',
+    !at.hidden && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(at.value)
+    && root.querySelector('#pmin').hidden && root.querySelector('.body').hidden, at.value);
+  check('time field round-trips through Budapest time',
+    pc._parseWhenInput(pc._whenInputValue(iso(6, 5))) === iso(6, 5));
+  const heads = root.querySelectorAll('.itin-head');
+  check('itineraries are listed with the first one open',
+    heads.length === 2 && root.querySelectorAll('.itin.open').length === 1
+    && !!root.querySelector('.itin.open #pjmap') && root.innerHTML.includes('Útvonalak'),
+    String(heads.length));
+  check('itinerary shows times, duration and the line badge',
+    root.querySelector('.itin-time').textContent.includes('–')
+    && root.querySelector('.itin-dur').textContent === '1 ó 10 p'
+    && root.querySelector('.itin-legs').innerHTML.includes('>1205<'));
+  check('timeline lists walk, wait, ride and arrival',
+    [...root.querySelectorAll('.itin.open .tl li')].map((li) => li.className).join(',') === 'tl-walk,tl-wait,tl-ride,tl-end'
+    && root.querySelector('.tl-ride .tl-stop').textContent === 'Népliget'
+    && root.querySelector('.tl-end .tl-stop').textContent === 'Székesfehérvár');
+  heads[1].click();
+  check('tapping another itinerary opens it instead',
+    root.querySelectorAll('.itin.open').length === 1
+    && root.querySelectorAll('.itin-head')[1].getAttribute('aria-expanded') === 'true');
+  root.querySelector('[data-when="arrive"]').click();
+  await new Promise((r) => setTimeout(r, 20));
+  check('Érkezés asks for arrival by the same time',
+    asked.length === 2 && asked[1].arriveBy === true && asked[1].time === pc._when.at
+    && root.innerHTML.includes('-ig'), JSON.stringify(asked[1]));
+  root.querySelector('[data-when="now"]').click();
+  await new Promise((r) => setTimeout(r, 20));
+  check('Most goes back to the live board',
+    pc._when.mode === 'now' && root.querySelector('#pat').hidden && !root.querySelector('#pmin').hidden);
+  root.querySelector('[data-when="depart"]').click();
+  await new Promise((r) => setTimeout(r, 20));
+  root.querySelector('#preset').click();
+  check('Új resets the time to now', pc._when.mode === 'now');
+  Lib.planJourneys = origPlanJourneys;
+  Lib.planJourney = origPlanJourney;
+  pc.remove();
 }
 
 process.exit(failed ? 1 : 0);
