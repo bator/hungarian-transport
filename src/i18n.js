@@ -96,6 +96,26 @@ export const I18N = {
     plannerPickDest: 'V\u00e1lassz c\u00e9lt...',
     plannerNoRoutes: 'Nincs indul\u00f3 j\u00e1rat ebben a meg\u00e1ll\u00f3ban.',
     plannerNoDepartures: 'Nincs k\u00f6zelg\u0151 indul\u00e1s a v\u00e1lasztott j\u00e1ratokkal.',
+    plannerWhen: 'Mikor',
+    plannerNow: 'Most',
+    plannerDepartAt: 'Indulás',
+    plannerArriveBy: 'Érkezés',
+    plannerHorizon: (n) => (n < 60 ? `${n} perc` : `${String(n / 60).replace('.', ',')} óra`),
+    plannerRoutes: 'Útvonalak',
+    plannerRoutesFrom: (when) => `indulás ${when}`,
+    plannerRoutesBy: (when) => `érkezés ${when}-ig`,
+    plannerSearching: 'Útvonalak keresése…',
+    plannerNoJourneys: 'Erre az időpontra nem találtam útvonalat.',
+    plannerDuration: (min) => {
+      const n = Math.max(0, Math.round(Number(min) || 0));
+      if (n < 60) return `${n} perc`;
+      return n % 60 ? `${Math.floor(n / 60)} ó ${n % 60} p` : `${n / 60} óra`;
+    },
+    plannerTransfers: (n) => (Number(n) > 0 ? `${n} átszállás` : 'átszállás nélkül'),
+    plannerWalkTotal: (min) => `${min} perc gyalogl\u00e1s`,
+    plannerToday: 'ma',
+    plannerTomorrow: 'holnap',
+    plannerMapLarge: 'Nagy térkép',
     colArrival: '\u00e9rkez\u00e9s',
     colExpected: 'v\u00e1rhat\u00f3',
     colTravel: 'menetid\u0151',
@@ -254,6 +274,30 @@ export const I18N = {
     plannerPickDest: 'Pick a destination...',
     plannerNoRoutes: 'No departures from this stop.',
     plannerNoDepartures: 'No upcoming departure on the selected routes.',
+    plannerWhen: 'When',
+    plannerNow: 'Now',
+    plannerDepartAt: 'Depart',
+    plannerArriveBy: 'Arrive',
+    plannerHorizon: (n) => (n < 60 ? `${n} min` : `${n / 60} h`),
+    plannerRoutes: 'Routes',
+    plannerRoutesFrom: (when) => `leaving ${when}`,
+    plannerRoutesBy: (when) => `arriving by ${when}`,
+    plannerSearching: 'Finding routes…',
+    plannerNoJourneys: 'No route found for this time.',
+    plannerDuration: (min) => {
+      const n = Math.max(0, Math.round(Number(min) || 0));
+      if (n < 60) return `${n} min`;
+      return n % 60 ? `${Math.floor(n / 60)} h ${n % 60} min` : `${n / 60} h`;
+    },
+    plannerTransfers: (n) => {
+      const k = Number(n) || 0;
+      if (k <= 0) return 'direct';
+      return k === 1 ? '1 transfer' : `${k} transfers`;
+    },
+    plannerWalkTotal: (min) => `${min} min walking`,
+    plannerToday: 'today',
+    plannerTomorrow: 'tomorrow',
+    plannerMapLarge: 'Full map',
     colArrival: 'in',
     colExpected: 'expected',
     colTravel: 'travel',
