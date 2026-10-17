@@ -18,3 +18,19 @@ elvira_between:
     dest_name:
       selector:
         text:
+futar:
+  fields:
+    path:
+      required: true
+      selector:
+        select:
+          options:
+            - arrivals-and-departures-for-stop.json
+            - plan-trip.json
+            - route-details.json
+            - schedule-for-stop.json
+            - search.json
+            - trip-details.json
+    params:
+      selector:
+        object:

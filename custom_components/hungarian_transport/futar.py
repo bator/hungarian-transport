@@ -1,0 +1,103 @@
+"""BKK FUTÁR proxy that keeps the Open Data key in Home Assistant.
+
+The card used to call go.bkk.hu straight from the browser with `apiKey` from
+the dashboard config, so every dashboard viewer could read the key. With the
+key in the config entry, the card calls `hungarian_transport.futar` instead.
+Only the endpoints the card uses are allowed, and identical requests from
+several cards and browsers share one upstream call.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from typing import Any
+
+import aiohttp
+
+_LOGGER = logging.getLogger(__name__)
+
+BKK_API = "https://go.bkk.hu/api/query/v1/ws/otp/api/where"
+FUTAR_PATHS = (
+    "arrivals-and-departures-for-stop.json",
+    "plan-trip.json",
+    "route-details.json",
+    "schedule-for-stop.json",
+    "search.json",
+    "trip-details.json",
+)
+# Departure boards refresh every 15 s at the earliest on the card.
+FUTAR_CACHE_TTL = 15
+FUTAR_CACHE_MAX = 256
+FUTAR_TIMEOUT = aiohttp.ClientTimeout(total=20)
+
+
+class FutarError(Exception):
+    """FUTÁR could not be reached or answered with an HTTP error."""
+
+
+class FutarAuthError(FutarError):
+    """FUTÁR rejected the API key."""
+
+
+async def futar_get(
+    session: aiohttp.ClientSession, api_key: str, path: str, params: dict[str, Any]
+) -> dict:
+    """One FUTÁR request. Raises FutarError; the key never appears in errors."""
+    query = {str(k): str(v) for k, v in (params or {}).items() if k != "key"}
+    query.update({"key": api_key, "version": "4", "appVersion": "apiary-1.0"})
+    try:
+        async with session.get(
+            f"{BKK_API}/{path}", params=query, timeout=FUTAR_TIMEOUT
+        ) as resp:
+            if resp.status in (401, 403):
+                raise FutarAuthError(f"HTTP {resp.status}")
+            if resp.status // 100 != 2:
+                raise FutarError(f"HTTP {resp.status}")
+            data = await resp.json(content_type=None)
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+        raise FutarError(type(err).__name__) from None
+    if not isinstance(data, dict):
+        raise FutarError("unexpected response")
+    status = str(data.get("status") or "OK")
+    if status in ("UNAUTHORIZED", "INVALID_API_KEY", "INVALID_KEY"):
+        raise FutarAuthError(status)
+    return data
+
+
+class FutarProxy:
+    """Short-lived cache and request sharing in front of futar_get."""
+
+    def __init__(self, session: aiohttp.ClientSession, api_key: str) -> None:
+        self._session = session
+        self._api_key = api_key
+        self._cache: dict[tuple, tuple[float, dict]] = {}
+        self._inflight: dict[tuple, asyncio.Future] = {}
+
+    async def get(self, path: str, params: dict[str, Any]) -> dict:
+        key = (path, tuple(sorted((str(k), str(v)) for k, v in (params or {}).items())))
+        hit = self._cache.get(key)
+        if hit and time.monotonic() - hit[0] < FUTAR_CACHE_TTL:
+            return hit[1]
+        task = self._inflight.get(key)
+        if task is None:
+            task = asyncio.ensure_future(
+                futar_get(self._session, self._api_key, path, params)
+            )
+            self._inflight[key] = task
+
+            def _store(done: asyncio.Future) -> None:
+                self._inflight.pop(key, None)
+                if done.cancelled() or done.exception() is not None:
+                    return
+                if len(self._cache) >= FUTAR_CACHE_MAX:
+                    now = time.monotonic()
+                    for stale in [k for k, v in self._cache.items() if now - v[0] >= FUTAR_CACHE_TTL]:
+                        self._cache.pop(stale, None)
+                    while len(self._cache) >= FUTAR_CACHE_MAX:
+                        self._cache.pop(next(iter(self._cache)))
+                self._cache[key] = (time.monotonic(), done.result())
+
+            task.add_done_callback(_store)
+        # A card detaching must not cancel the request other cards wait for.
+        return await asyncio.shield(task)

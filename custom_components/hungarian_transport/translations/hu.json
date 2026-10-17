@@ -3,12 +3,19 @@
     "step": {
       "user": {
         "title": "Magyar közlekedés",
-        "description": "A magyar közlekedési kártya és a MÁV ELVIRA szolgáltatás bekapcsolása."
+        "description": "A magyar közlekedési kártya és a MÁV ELVIRA szolgáltatás bekapcsolása. Megadhatod a BKK Open Data kulcsodat is ({url}): a kártyák így a Home Assistanton át érik el a BKK FUTÁR-t, és a kulcs nem kerül a dashboardok konfigurációjába.",
+        "data": {
+          "api_key": "BKK API kulcs"
+        }
       }
     },
     "abort": {
       "single_instance_allowed": "A Magyar közlekedés integráció már be van állítva.",
       "already_configured": "A Magyar közlekedés integráció már be van állítva."
+    },
+    "error": {
+      "invalid_auth": "A BKK FUTÁR elutasította ezt a kulcsot.",
+      "cannot_connect": "Nem érhető el a BKK FUTÁR. Próbáld újra később."
     }
   },
   "services": {
@@ -33,6 +40,20 @@
           "description": "Opcionális megjelenítendő név a célállomáshoz."
         }
       }
+    },
+    "futar": {
+      "name": "BKK FUTÁR lekérdezés",
+      "description": "BKK FUTÁR végpont hívása az integrációban tárolt kulccsal. A dashboard kártya használja.",
+      "fields": {
+        "path": {
+          "name": "Végpont",
+          "description": "FUTÁR végpont, például search.json."
+        },
+        "params": {
+          "name": "Paraméterek",
+          "description": "A végpont lekérdezési paraméterei."
+        }
+      }
     }
   },
   "exceptions": {
@@ -41,6 +62,27 @@
     },
     "same_station": {
       "message": "Az indulási és a célállomás nem lehet ugyanaz."
+    },
+    "futar_auth": {
+      "message": "A BKK FUTÁR elutasította a beállított kulcsot ({error}). Frissítsd az integráció beállításaiban."
+    },
+    "futar_unavailable": {
+      "message": "Nem érhető el a BKK FUTÁR ({error})."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "BKK Open Data kulcs",
+        "description": "A saját kulcs nélküli kártyák ezt használják a Home Assistanton keresztül. Üresen hagyva törlődik. Ingyenes kulcs: {url}",
+        "data": {
+          "api_key": "BKK API kulcs"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "A BKK FUTÁR elutasította ezt a kulcsot.",
+      "cannot_connect": "Nem érhető el a BKK FUTÁR. Próbáld újra később."
     }
   }
 }

@@ -3,12 +3,19 @@
     "step": {
       "user": {
         "title": "Hungarian transport",
-        "description": "Enable the Hungarian transport card and MÁV ELVIRA service."
+        "description": "Enable the Hungarian transport card and MÁV ELVIRA service. Optionally add your BKK Open Data key ({url}): cards then reach BKK FUTÁR through Home Assistant, and the key stays out of dashboard configs.",
+        "data": {
+          "api_key": "BKK API key"
+        }
       }
     },
     "abort": {
       "single_instance_allowed": "Hungarian transport is already set up.",
       "already_configured": "Hungarian transport is already set up."
+    },
+    "error": {
+      "invalid_auth": "BKK FUTÁR rejected this key.",
+      "cannot_connect": "Could not reach BKK FUTÁR. Try again later."
     }
   },
   "services": {
@@ -33,6 +40,20 @@
           "description": "Optional display name for the destination."
         }
       }
+    },
+    "futar": {
+      "name": "BKK FUTÁR request",
+      "description": "Call a BKK FUTÁR endpoint with the key stored in the integration. Used by the dashboard card.",
+      "fields": {
+        "path": {
+          "name": "Endpoint",
+          "description": "FUTÁR endpoint, for example search.json."
+        },
+        "params": {
+          "name": "Parameters",
+          "description": "Query parameters for the endpoint."
+        }
+      }
     }
   },
   "exceptions": {
@@ -41,6 +62,27 @@
     },
     "same_station": {
       "message": "Origin and destination must be different stations."
+    },
+    "futar_auth": {
+      "message": "BKK FUTÁR rejected the configured key ({error}). Update it in the integration options."
+    },
+    "futar_unavailable": {
+      "message": "BKK FUTÁR is not reachable ({error})."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "BKK Open Data key",
+        "description": "Cards without their own key use this one through Home Assistant. Leave it empty to remove it. Free key: {url}",
+        "data": {
+          "api_key": "BKK API key"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "BKK FUTÁR rejected this key.",
+      "cannot_connect": "Could not reach BKK FUTÁR. Try again later."
     }
   }
 }

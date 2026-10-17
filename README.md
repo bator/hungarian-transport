@@ -70,10 +70,19 @@ an alias.
 BKK and MÁV modes need a BKK Open Data API key, free after a short sign-up:
 <https://opendata.bkk.hu/data-sources>
 
-The key is stored in the card configuration. If another Hungarian transport
-card on the same dashboard already has one, the editor reuses it. When the
-key works, the editor hides the field and shows a **Change** link; the field
-reappears if the key is missing or FUTÁR rejects it. Volán and Helyi modes
+The recommended place for the key is the integration: enter it when adding
+**Hungarian transport**, or later under **Settings → Devices & services →
+Hungarian transport → Configure**. Cards without their own key then reach BKK
+FUTÁR through the `hungarian_transport.futar` service, so the key never
+appears in dashboard configs or in browser requests, and identical requests
+from several cards and devices share one call. The editor shows that the key
+comes from the integration.
+
+A key can still be set per card (`apiKey`), which takes precedence. If another
+Hungarian transport card on the same dashboard already has one and the
+integration has none, the editor reuses it. When the key works, the editor
+hides the field and shows a **Change** link; the field reappears if the key is
+missing or FUTÁR rejects it. Volán and Helyi modes
 do not need a key.
 
 Live positions come from BKK FUTÁR for Budapest city and rail, from MÁV EMMA
@@ -90,7 +99,7 @@ without the optional position services.
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `type` | string | — | `custom:hungarian-transport-card` |
-| `apiKey` | string | — | BKK Open Data API key |
+| `apiKey` | string | — | BKK Open Data API key. Optional when the integration holds the key. |
 | `language` | string | `auto` | `auto`, `hu` or `en`. `auto` follows the Home Assistant user's language. |
 | `name` | string | `origin → destination` | Card header |
 | `stopId` | string | — | Origin stop, set by the editor |
@@ -113,7 +122,6 @@ without the optional position services.
 
 ```yaml
 type: custom:hungarian-transport-card
-apiKey: 00000000-0000-0000-0000-000000000000
 language: en
 mav: true
 stopId: BKK_005501024

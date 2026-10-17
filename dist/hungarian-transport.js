@@ -4,6 +4,10 @@ const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
 const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
 const TRANSITOUS = 'https://api.transitous.org';
+/* Stand-in for cfg.apiKey when the Hungarian transport integration holds the
+   BKK key: FUTÁR calls then go through hungarian_transport.futar, so the key
+   never reaches the browser or the dashboard config. Never saved to config. */
+const INTEGRATION_KEY = 'hungarian_transport:integration';
 /* Default departure look-ahead. Override per card with `minutesAfter`.
    The Kelenfold-Szekesfehervar hop lists trains past 2h, so 180 is the
    floor that still fills travelMin on those rows. */
@@ -215,6 +219,7 @@ const I18N = {
     apiKeyHint: 'Ingyenes kulcs, egyszer\u0171 regisztr\u00e1ci\u00f3 ut\u00e1n:',
     apiKeyOk: 'A BKK API kulcs rendben van.',
     apiKeyChange: 'M\u00f3dos\u00edt\u00e1s',
+    apiKeyIntegration: 'A BKK API kulcsot a Magyar k\u00f6zleked\u00e9s integr\u00e1ci\u00f3 adja.',
     nameLabel: 'N\u00e9v (opcion\u00e1lis)',
     namePlaceholder: 'Hungarian transport',
     destLoading: 'El\u00e9rhet\u0151 c\u00e9lok bet\u00f6lt\u00e9se...',
@@ -259,7 +264,7 @@ const I18N = {
     mapTypeSubway: 'Metr\u00f3',
     mapTypeRail: 'Vonat',
     mapTypeVehicle: 'J\u00e1rm\u0171',
-    errNoApiKey: 'Hi\u00e1nyzik az apiKey a k\u00e1rtya be\u00e1ll\u00edt\u00e1s\u00e1b\u00f3l.',
+    errNoApiKey: 'Nincs BKK API kulcs: add meg a Magyar k\u00f6zleked\u00e9s integr\u00e1ci\u00f3ban vagy a k\u00e1rty\u00e1ban.',
     errApiKeyBad: 'A BKK API kulcs \u00e9rv\u00e9nytelen (401/403).',
     errApiKeyProbe: 'A BKK API kulcsot nem siker\u00fclt ellen\u0151rizni.',
     errVolanHttp: (status) => `Vol\u00e1n menetrend HTTP ${status}`,
@@ -372,6 +377,7 @@ const I18N = {
     apiKeyHint: 'Free key, after a quick sign-up:',
     apiKeyOk: 'The BKK API key is working.',
     apiKeyChange: 'Change',
+    apiKeyIntegration: 'The BKK API key comes from the Hungarian transport integration.',
     nameLabel: 'Name (optional)',
     namePlaceholder: 'Hungarian transport',
     destLoading: 'Loading reachable destinations...',
@@ -416,7 +422,7 @@ const I18N = {
     mapTypeSubway: 'Metro',
     mapTypeRail: 'Train',
     mapTypeVehicle: 'Vehicle',
-    errNoApiKey: 'The apiKey is missing from the card configuration.',
+    errNoApiKey: 'No BKK API key: set it in the Hungarian transport integration or in the card.',
     errApiKeyBad: 'The BKK API key is invalid (401/403).',
     errApiKeyProbe: 'Could not verify the BKK API key.',
     errVolanHttp: (status) => `Vol\u00e1n timetable HTTP ${status}`,
@@ -1078,8 +1084,60 @@ const BkkLib = {
     if (cache && cache !== BkkLib._mem) BkkLib.cachePut(cache, key, value);
     return value;
   },
+  /* Latest hass object from any card or editor, for integration FUTÁR calls. */
+  _hass: null,
+  integrationHasKey(hass) {
+    const h = hass || BkkLib._hass;
+    return !!(h && h.services && h.services.hungarian_transport
+      && h.services.hungarian_transport.futar);
+  },
+  effectiveApiKey(cfg, hass) {
+    const own = String((cfg && cfg.apiKey) || '').trim();
+    if (own) return own;
+    return BkkLib.integrationHasKey(hass) ? INTEGRATION_KEY : '';
+  },
+  async _fetchViaIntegration(path, params) {
+    const hass = BkkLib._hass;
+    if (!BkkLib.integrationHasKey(hass)) throw codedError('errNoApiKey');
+    const serviceData = { path: String(path), params: params || {} };
+    let timer = null;
+    const timeout = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('BKK timeout')), 20000);
+    });
+    let res;
+    try {
+      const call = typeof hass.callService === 'function'
+        ? hass.callService('hungarian_transport', 'futar', serviceData, undefined, false, true)
+        : hass.connection.sendMessagePromise({
+          type: 'call_service',
+          domain: 'hungarian_transport',
+          service: 'futar',
+          service_data: serviceData,
+          return_response: true,
+        });
+      res = await Promise.race([call, timeout]);
+    } catch (err) {
+      const msg = err && (err.message || err.code);
+      throw new Error(msg && /^BKK /.test(String(msg)) ? String(msg) : `BKK ${msg || err}`);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+    const payload = BkkLib.servicePayload(res);
+    const data = payload && payload.data;
+    if (!data || typeof data !== 'object') throw new Error('BKK empty response');
+    if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);
+    return data;
+  },
   async fetch(apiKey, path, params, foreground) {
     if (!apiKey) throw codedError('errNoApiKey');
+    if (apiKey === INTEGRATION_KEY) {
+      await BkkLib._gate(!!foreground);
+      try {
+        return await BkkLib._fetchViaIntegration(path, params);
+      } finally {
+        BkkLib._ungate();
+      }
+    }
     await BkkLib._gate(!!foreground);
     const q = new URLSearchParams(Object.assign({
       key: apiKey, version: '4', appVersion: 'apiary-1.0',
@@ -3878,7 +3936,7 @@ const BkkLib = {
     return null;
   },
   async hassTripShape(hass, apiKey, tripId) {
-    if (!hass || !BkkLib.isFutarTripId(tripId) || !apiKey) return [];
+    if (!hass || !BkkLib.isFutarTripId(tripId) || !apiKey || apiKey === INTEGRATION_KEY) return [];
     const serviceData = { trip_id: String(tripId), api_key: String(apiKey) };
     try {
       const res = await BkkLib.hassService(hass, 'trip_shape', serviceData);
@@ -5086,11 +5144,21 @@ class BKKHopCard extends HTMLElement {
     Promise.resolve().then(() => this._reload()).catch((err) => this._showErr(err));
   }
 
+  _apiKey() {
+    return BkkLib.effectiveApiKey(this._config, this._hass);
+  }
+
   set hass(hass) {
     const first = !this._hass;
     const langBefore = this._hass ? this._lang() : '';
+    const viaBefore = this._viaIntegration;
     this._hass = hass;
+    BkkLib._hass = hass;
     if (this._lang() !== langBefore) this._paint();
+    /* The integration's futar service can register after the first paint
+       (key added in the options flow): reload once it shows up. */
+    this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
+    if (this._viaIntegration && !viaBefore && this._painted && !this._reloadActive) this._reloadSafe();
     if (first && this._rawRows && this._rawRows.length) {
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       const cfg = this._config || {};
@@ -5105,7 +5173,7 @@ class BKKHopCard extends HTMLElement {
   _maybeFillKey() {
     const mode = BkkLib.mode(this._config || {});
     if (mode === 'volan' || mode === 'helyi') return;
-    if (this._config.apiKey || this._keyTried) return;
+    if (this._config.apiKey || this._keyTried || BkkLib.integrationHasKey(this._hass)) return;
     this._keyTried = true;
     this._fillKey().catch(() => { /* dashboard config not readable */ });
   }
@@ -5611,7 +5679,7 @@ class BKKHopCard extends HTMLElement {
       } catch (_e) { /* MOTIS / FUTÁR still fill */ }
     }
     const tripId = (row && row.tripId) || '';
-    const canFutar = cfg.apiKey && (
+    const canFutar = this._apiKey() && (
       !/^motis:/i.test(String(tripId || '')) || !!BkkLib.rowTrainNumber(row)
     );
     let geomTrip = '';
@@ -5625,9 +5693,9 @@ class BKKHopCard extends HTMLElement {
     let futarShape = [];
     /* City buses/trams: decode FUTÁR trip-details polyline here.
        hass trip_shape does not exist on bkk_stop. */
-    if (geomTrip && cfg.apiKey && !BkkLib.isTrainRow(row)) {
+    if (geomTrip && this._apiKey() && !BkkLib.isTrainRow(row)) {
       try {
-        futarShape = await BkkLib.futarTripShape(cfg.apiKey, this._tripCache || {}, geomTrip);
+        futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
       } catch (_e) { /* MOTIS hop still fills */ }
     }
     const published = BkkLib.keepsFullLineShape(row) && !BkkLib.isTrainRow(row)
@@ -5667,7 +5735,7 @@ class BKKHopCard extends HTMLElement {
     }
     if (canFutar && BkkLib.isTrainRow(row) && BkkLib.isFutarTripId(geomTrip)) {
       try {
-        futarShape = await BkkLib.hassTripShape(this._hass, cfg.apiKey, geomTrip);
+        futarShape = await BkkLib.hassTripShape(this._hass, this._apiKey(), geomTrip);
       } catch (_e) { /* other rows still draw */ }
     }
     /* Direction-aware clip only when this mode does not keep the published line. */
@@ -5938,7 +6006,7 @@ class BKKHopCard extends HTMLElement {
     if (cfg.mavIndex) setMavIndexUrl(cfg.mavIndex);
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     const mode = this._departMode();
-    const ready = cfg.stopId && cfg.destKey && (cfg.apiKey || mode === 'volan' || mode === 'helyi' || mode === 'all');
+    const ready = cfg.stopId && cfg.destKey && (this._apiKey() || mode === 'volan' || mode === 'helyi' || mode === 'all');
     if (!ready) {
       this._rows = [];
       this._loading = false;
@@ -5969,7 +6037,7 @@ class BKKHopCard extends HTMLElement {
             cfg.destStopId || '',
             cfg.minutesAfter,
             cfg.destName || '',
-            { apiKey: cfg.apiKey, originName: cfg.stopName || '' },
+            { apiKey: this._apiKey(), originName: cfg.stopName || '' },
           ).catch(() => [])
           : Promise.resolve([]);
         const paintRows = (list) => {
@@ -6012,7 +6080,7 @@ class BKKHopCard extends HTMLElement {
           lon: cfg.stopLon,
         };
         const rows = await BkkLib.departures(
-          cfg.apiKey, cfg.stopId, cfg.routeIds, dest,
+          this._apiKey(), cfg.stopId, cfg.routeIds, dest,
           {
             originName: cfg.stopName || '',
             cache: this._tripCache || {},
@@ -6051,7 +6119,7 @@ class BKKHopCard extends HTMLElement {
           Promise.all((this._rawRows || []).map(async (row) => {
             if (row.travel != null || /^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ''))) return;
             row.travel = await BkkLib.travelMin(
-              cfg.apiKey, row.tripId, cfg.destKey, row.dep, origin, this._tripCache || {},
+              this._apiKey(), row.tripId, cfg.destKey, row.dep, origin, this._tripCache || {},
             );
           })),
         ]);
@@ -6172,7 +6240,7 @@ class BKKPlannerCard extends BKKHopCard {
     this._journeyKey = key;
     this._journeyLoading = true;
     BkkLib.planJourney(
-      cfg.apiKey,
+      this._apiKey(),
       { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon },
       { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
       this._hass,
@@ -6407,7 +6475,7 @@ class BKKPlannerCard extends BKKHopCard {
     if (!segs.length && cfg.stopId && cfg.destName) {
       try {
         const journey = await BkkLib.planJourney(
-          cfg.apiKey,
+          this._apiKey(),
           { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon },
           { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
           this._hass,
@@ -6913,9 +6981,9 @@ class BKKPlannerCard extends BKKHopCard {
     const seq = ++this._searchSeq;
     try {
       this._err = '';
-      if (!this._config.apiKey) await this._fillKey();
+      if (!this._apiKey()) await this._fillKey();
       if (seq !== this._searchSeq) return;
-      const hits = await BkkLib.searchPlannerStops(this._config.apiKey, q);
+      const hits = await BkkLib.searchPlannerStops(this._apiKey(), q);
       if (seq !== this._searchSeq) return;
       if (!hits.length) {
         box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'mode').all.empty) + '</span>';
@@ -6975,7 +7043,7 @@ class BKKPlannerCard extends BKKHopCard {
     this._destsLoading = true;
     this._paintDestHits('');
     try {
-      if (!cfg.apiKey) await this._fillKey();
+      if (!this._apiKey()) await this._fillKey();
       const placeOrigin = /^(geo:|node\/)/i.test(String(cfg.stopId || ''))
         || cfg.stopKind === 'address' || cfg.stopKind === 'place';
       if (placeOrigin) {
@@ -6983,7 +7051,7 @@ class BKKPlannerCard extends BKKHopCard {
         this._destRoutes = {};
       } else {
         const out = await BkkLib.reachableDests(
-          this._config.apiKey,
+          this._apiKey(),
           this._tripCache || {},
           { id: cfg.stopId, name: cfg.stopName || '' },
           'all',
@@ -7035,8 +7103,8 @@ class BKKPlannerCard extends BKKHopCard {
     }
     const seq = ++this._destSearchSeq;
     try {
-      if (!this._config.apiKey) await this._fillKey();
-      const extras = await BkkLib.searchPlannerStops(this._config.apiKey, q);
+      if (!this._apiKey()) await this._fillKey();
+      const extras = await BkkLib.searchPlannerStops(this._apiKey(), q);
       if (seq !== this._destSearchSeq) return;
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
       if (!hits.length && this._destsLoading) {
@@ -7159,7 +7227,7 @@ class BKKHopCardEditor extends HTMLElement {
     this._syncApiKey();
     this._syncMode();
     this._probeKey();
-    if (this._config.stopId && (this._config.apiKey || this._mode() === 'volan' || this._mode() === 'helyi') && this._loadedStop !== this._config.stopId) {
+    if (this._config.stopId && (this._apiKey() || this._mode() === 'volan' || this._mode() === 'helyi') && this._loadedStop !== this._config.stopId) {
       this._loadDests();
     }
   }
@@ -7167,13 +7235,21 @@ class BKKHopCardEditor extends HTMLElement {
   set hass(hass) {
     const first = !this._hass;
     this._hass = hass;
+    BkkLib._hass = hass;
     // "auto" resolves against hass.language, which is only known once hass lands.
     if (first && this._built && this._lang() !== resolveLang(this._config.language, null)) {
       this._syncTexts();
       this._syncMode();
     }
-    if (!this._userEditedKey && !this._config.apiKey && !this._loadingKey) this._fillKey();
-    else if (this._config.apiKey) this._probeKey();
+    /* With the key in the integration, do not copy a sibling card's key into
+       this card's config: keeping it out of dashboards is the point. */
+    const viaIntegration = BkkLib.integrationHasKey(hass);
+    if (!this._userEditedKey && !this._config.apiKey && !this._loadingKey && !viaIntegration) this._fillKey();
+    else if (this._apiKey()) this._probeKey();
+  }
+
+  _apiKey() {
+    return BkkLib.effectiveApiKey(this._config, this._hass);
   }
 
   _lang() { return resolveLang(this._config.language, this._hass); }
@@ -7459,10 +7535,13 @@ class BKKHopCardEditor extends HTMLElement {
       if (okWrap) okWrap.style.display = 'none';
       return;
     }
-    const key = (this._config.apiKey || '').trim();
-    const settled = !!key && this._keyOk === true && !this._keyReveal;
+    const own = (this._config.apiKey || '').trim();
+    const viaIntegration = !own && BkkLib.integrationHasKey(this._hass);
+    const settled = !this._keyReveal && (viaIntegration || (!!own && this._keyOk === true));
     wrap.style.display = settled ? 'none' : '';
     if (okWrap) okWrap.style.display = settled ? '' : 'none';
+    const okText = this._el('apiKeyOkText');
+    if (okText) okText.textContent = t(this._lang(), viaIntegration ? 'apiKeyIntegration' : 'apiKeyOk');
   }
 
   _modeCopy(mode) {
@@ -7650,7 +7729,7 @@ class BKKHopCardEditor extends HTMLElement {
       this._syncApiKey();
       return;
     }
-    const key = (this._config.apiKey || '').trim();
+    const key = this._apiKey();
     if (!key) {
       this._keyOk = false;
       this._syncApiKey();
@@ -7665,14 +7744,14 @@ class BKKHopCardEditor extends HTMLElement {
     this._probedKey = key;
     try {
       const result = await BkkLib.probeApiKey(key);
-      if ((this._config.apiKey || '').trim() !== key) return;
+      if (this._apiKey() !== key) return;
       this._keyOk = !!result.ok;
       this._syncApiKey();
       if (!result.ok && result.code) this._error(errText(this._lang(), codedError(result.code)));
       else if (result.ok) this._error('');
     } finally {
       this._probingKey = false;
-      const latest = (this._config.apiKey || '').trim();
+      const latest = this._apiKey();
       if (latest && latest !== this._probedKey) this._probeKey();
     }
   }
@@ -7691,10 +7770,10 @@ class BKKHopCardEditor extends HTMLElement {
     const seq = ++this._searchSeq;
     try {
       this._error('');
-      if (!this._config.apiKey && !this._userEditedKey) await this._fillKey();
+      if (!this._apiKey() && !this._userEditedKey) await this._fillKey();
       if (seq !== this._searchSeq) return;
       const mode = this._mode();
-      const hits = await BkkLib.searchStops(this._config.apiKey, q, mode, this._config.city);
+      const hits = await BkkLib.searchStops(this._apiKey(), q, mode, this._config.city);
       if (seq !== this._searchSeq) return;
       if (!hits.length) {
         box.innerHTML = '<span class="hint">' + BkkLib.esc(this._modeCopy(mode).empty) + '</span>';
@@ -7781,7 +7860,7 @@ class BKKHopCardEditor extends HTMLElement {
 
   async _loadDests() {
     if (!this._config.stopId) return;
-    if (!this._config.apiKey && this._mode() !== 'volan' && this._mode() !== 'helyi') return;
+    if (!this._apiKey() && this._mode() !== 'volan' && this._mode() !== 'helyi') return;
     const stopId = this._config.stopId;
     const seq = ++this._destSeq;
     this._destsLoading = true;
@@ -7790,7 +7869,7 @@ class BKKHopCardEditor extends HTMLElement {
     try {
       this._error('');
       const idx = await BkkLib.reachableDests(
-        this._config.apiKey,
+        this._apiKey(),
         this._cache,
         { id: this._config.stopId, name: this._config.stopName },
         this._mode(),
