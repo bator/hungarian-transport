@@ -16,3 +16,4 @@ state.json
 *.tmp
 *.log
 node_modules/
+.pytest_cache/

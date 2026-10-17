@@ -5,6 +5,10 @@
         "title": "Hungarian transport",
         "description": "Enable the Hungarian transport card and MÁV ELVIRA service."
       }
+    },
+    "abort": {
+      "single_instance_allowed": "Hungarian transport is already set up.",
+      "already_configured": "Hungarian transport is already set up."
     }
   },
   "services": {
@@ -29,6 +33,14 @@
           "description": "Optional display name for the destination."
         }
       }
+    }
+  },
+  "exceptions": {
+    "invalid_station_code": {
+      "message": "{field} must be a nine-digit MÁV station code, got \"{value}\"."
+    },
+    "same_station": {
+      "message": "Origin and destination must be different stations."
     }
   }
 }

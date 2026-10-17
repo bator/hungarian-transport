@@ -19,6 +19,7 @@ from elvira import (  # noqa: E402
     STATIONINFO_MAX_COUNT,
     parse_elvira_services,
     rows_from_stationinfo,
+    service_days,
 )
 
 import zoneinfo
@@ -167,6 +168,64 @@ if not check(
     and stale_rows[0]["booking"] is True
     and stale_rows[0]["platform"] == "6",
     repr(stale_rows[:1]),
+):
+    failed += 1
+
+evening = datetime(2026, 9, 30, 22, 30, tzinfo=tz)
+if not check(
+    "look-ahead past midnight also asks tomorrow's board",
+    [d.isoformat() for d in service_days(evening, evening + timedelta(minutes=180))]
+    == ["2026-09-30", "2026-10-01"],
+):
+    failed += 1
+night = datetime(2026, 10, 1, 0, 40, tzinfo=tz)
+if not check(
+    "after midnight yesterday's board still holds delayed trains",
+    [d.isoformat() for d in service_days(night, night + timedelta(minutes=60))]
+    == ["2026-09-30", "2026-10-01"],
+):
+    failed += 1
+if not check(
+    "daytime asks only today's board",
+    [d.isoformat() for d in service_days(now, latest)] == ["2026-09-30"],
+):
+    failed += 1
+
+late_start = evening + timedelta(minutes=50)
+late_train = dict(
+    gocsej,
+    start=late_start.strftime("%Y-%m-%dT%H:%M:%S"),
+    actualOrEstimatedStart=late_start.strftime("%Y-%m-%dT%H:%M:%S"),
+)
+two_runs = [
+    {"trainId": "morning-run", "code": "966",
+     "arrive": evening.replace(hour=9).strftime("%Y-%m-%dT%H:%M:%S")},
+    {"trainId": "night-run", "code": "966",
+     "arrive": (late_start + timedelta(minutes=70)).strftime("%Y-%m-%dT%H:%M:%S")},
+]
+cross = rows_from_stationinfo(
+    [late_train], two_runs, tz, evening, evening + timedelta(minutes=180), "Szombathely"
+)
+if not check(
+    "repeated train code matches the run arriving after midnight",
+    len(cross) == 1 and cross[0]["destHit"] is True and cross[0]["travel"] == 70,
+    repr(cross[:1]),
+):
+    failed += 1
+
+delayed = dict(
+    gocsej,
+    trainId="",
+    start=(night - timedelta(minutes=50)).strftime("%Y-%m-%dT%H:%M:%S"),
+    actualOrEstimatedStart=(night + timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S"),
+)
+after_midnight = rows_from_stationinfo(
+    [delayed, delayed], [], tz, night, night + timedelta(minutes=60), ""
+)
+if not check(
+    "delayed train from yesterday's board is listed once with its delay",
+    len(after_midnight) == 1 and after_midnight[0]["delay"] == 55 * 60,
+    repr(after_midnight),
 ):
     failed += 1
 

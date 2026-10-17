@@ -9,13 +9,14 @@ from homeassistant.components import frontend
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
 from .const import DOMAIN, SERVICE_ELVIRA_BETWEEN
-from .elvira import elvira_between
+from .elvira import elvira_between, station_code_digits
 
 ELVIRA_SERVICE_SCHEMA = vol.Schema(
     {
@@ -28,11 +29,23 @@ ELVIRA_SERVICE_SCHEMA = vol.Schema(
     }
 )
 CARD_URL = "/hungarian-transport/hungarian-transport.js"
+WWW_PATH = Path(__file__).parent / "www"
+
+
+def _station_code(call: ServiceCall, field: str) -> str:
+    code = station_code_digits(call.data[field])
+    if len(code) != 9:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="invalid_station_code",
+            translation_placeholders={"field": field, "value": str(call.data[field])},
+        )
+    return code
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the card asset path and ELVIRA service."""
-    www_path = Path(__file__).parent / "www"
+    www_path = WWW_PATH
     if not www_path.is_dir():
         raise FileNotFoundError(
             f"Hungarian transport release is missing its frontend assets: {www_path}"
@@ -52,11 +65,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async def handle_elvira_between(
         call: ServiceCall,
     ) -> dict[str, list[dict[str, Any]]]:
+        origin = _station_code(call, "origin_code")
+        dest = _station_code(call, "dest_code")
+        if origin == dest:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="same_station",
+            )
         rows = await elvira_between(
             session,
             hass,
-            call.data["origin_code"],
-            call.data["dest_code"],
+            origin,
+            dest,
             call.data["minutes_after"],
             call.data["dest_name"],
         )

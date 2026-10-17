@@ -1,0 +1,4 @@
+# Home Assistant test harness for tests/ (pins Home Assistant itself).
+pytest-homeassistant-custom-component==0.13.316
+# frontend is a dependency of the integration; HA needs its package to set it up.
+home-assistant-frontend==20260128.6
