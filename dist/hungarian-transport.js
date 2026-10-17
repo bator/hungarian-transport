@@ -1337,6 +1337,7 @@ Object.assign(BkkLib, {
     const inArea = (hit) => !!area && (hit.areas || []).some((a) => BkkLib.fold(a && a.name) === area);
     const areaHits = area ? list.filter((hit) => hit && inArea(hit)) : [];
     const busWanted = /aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(wantName);
+    const near = BkkLib.mapGpsLatLon(stop && stop.lat, stop && stop.lon);
     let best = null;
     let bestScore = -1;
     list.forEach((hit) => {
@@ -1358,6 +1359,12 @@ Object.assign(BkkLib, {
       if (BkkLib.foldTokenMatch(wantName, hname)) score += 3;
       if (BkkLib.fold(wantName) && BkkLib.fold(hname) === BkkLib.fold(wantName)) score += 2;
       if (!busWanted && /aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(hname)) score -= 4;
+      const hpt = near && BkkLib.mapGpsLatLon(hit.lat, hit.lon);
+      if (hpt) {
+        const d = BkkLib.haversineMeters(near, hpt);
+        if (d <= 400) score += 6;
+        else if (d > 5e3) score -= 6;
+      }
       if (score > bestScore) {
         bestScore = score;
         best = hit;
@@ -3045,7 +3052,7 @@ var BKK_HOP_EDITOR_ALIAS = "bkk-stop-card-r3-editor";
 var BKK_PLANNER_EDITOR = "hungarian-transit-stop-card-plan-editor";
 var BKK_PLANNER_EDITOR_ALIAS = "bkk-stop-card-plan-editor";
 var OWN_CARD_TYPES = [BKK_HOP_TAG, BKK_HOP_TAG_ALIAS, BKK_PLANNER_TAG, BKK_PLANNER_TAG_ALIAS];
-var INDEX_SCHEMA = 28;
+var INDEX_SCHEMA = 29;
 
 // src/lib/dashboard-key.js
 Object.assign(BkkLib, {
@@ -3230,6 +3237,7 @@ Object.assign(BkkLib, {
       throw codedError("errIndexParse");
     }
     if (idx.v && Number(idx.v) > INDEX_SCHEMA) throw codedError("errIndexSchema", idx.v);
+    const g = Array.isArray(idx.g) && idx.g.length === 2 * idx.s.length ? idx.g : null;
     idx.stops = (idx.s || []).map((row, i) => ({
       i,
       id: row[0],
@@ -3237,8 +3245,12 @@ Object.assign(BkkLib, {
       num: String(row[2] || ""),
       op: row.length > 3 ? Number(row[3]) : 0,
       key: BkkLib.norm(row[1]),
-      fold: BkkLib.fold(row[1])
+      fold: BkkLib.fold(row[1]),
+      lat: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i] / 1e5 : null,
+      lon: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i + 1] / 1e5 : null
     }));
+    idx.g = null;
+    idx.url = url;
     idx.ops = (idx.o || []).map((row, i) => ({ i, id: row[0], name: row[1] }));
     idx.byNum = /* @__PURE__ */ new Map();
     idx.byKey = /* @__PURE__ */ new Map();
@@ -3489,6 +3501,83 @@ Object.assign(BkkLib, {
     if (rt === 11 || rt === 800) return { vehicle: "trolleybus", rawType: "TROLLEYBUS" };
     return { vehicle, rawType };
   },
+  /* Where a GTFS trip runs: its stops' coordinates and a reference into the
+     sharded shapes folder (trip row element 5), carried on the departure row
+     so the map needs neither the index nor Transitous. */
+  gtfsTripGeo(idx, t2, from, to) {
+    const ps = t2 && t2[2] || [];
+    const stops = ps.map((p) => {
+      const st = idx.stops[p];
+      return st && st.lat != null ? [st.lat, st.lon] : null;
+    });
+    const ref = Number(t2 && t2[5]);
+    const sh = idx.sh;
+    return {
+      shape: sh && sh.dir && sh.n > 0 && Number.isInteger(ref) && ref >= 0 ? { base: idx.url, dir: sh.dir, n: sh.n, id: ref } : null,
+      stops,
+      from,
+      to: to >= 0 ? to : ps.length - 1
+    };
+  },
+  _shapeShards: /* @__PURE__ */ new Map(),
+  async _fetchJsonGz(url, timeoutMs) {
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs || 2e4) : null;
+    try {
+      const res = await fetch(url, { signal: ctrl ? ctrl.signal : void 0 });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = await res.arrayBuffer();
+      const u8 = new Uint8Array(buf);
+      if (u8.length >= 2 && u8[0] === 31 && u8[1] === 139) {
+        if (typeof DecompressionStream !== "function") throw new Error("no gzip");
+        const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
+        return JSON.parse(await new Response(stream).text());
+      }
+      return JSON.parse(new TextDecoder().decode(u8));
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  },
+  /* One trip's shapes.txt polyline. Shard id % n holds it at id / n; the
+     folder name carries a content hash, so the browser cache can keep it. */
+  async gtfsShape(ref) {
+    if (!ref || !ref.dir || !(ref.n > 0) || !(ref.id >= 0)) return [];
+    const k = ref.id % ref.n;
+    const url = new URL(`${ref.dir}/${String(k).padStart(2, "0")}.json.gz`, ref.base).href;
+    let p = BkkLib._shapeShards.get(url);
+    if (!p) {
+      p = BkkLib._fetchJsonGz(url).catch((err) => {
+        BkkLib._shapeShards.delete(url);
+        throw err;
+      });
+      BkkLib._shapeShards.set(url, p);
+      while (BkkLib._shapeShards.size > 16) BkkLib._shapeShards.delete(BkkLib._shapeShards.keys().next().value);
+    }
+    const shard = await p;
+    const enc = shard && Array.isArray(shard.p) ? shard.p[Math.floor(ref.id / ref.n)] : "";
+    return enc ? BkkLib.validMapShape(BkkLib.decodePolyline(enc)) : [];
+  },
+  /* GTFS geometry for a departure row: the shapes.txt route (the whole line,
+     or the hop for kinds the card clips), the boarding and alighting stops,
+     and the stop-to-stop line as a last resort. Null for non-GTFS rows. */
+  async gtfsRowShape(row) {
+    const geo = row && row.gtfs;
+    if (!geo) return null;
+    const pts = Array.isArray(geo.stops) ? geo.stops : [];
+    const board = pts[geo.from] || null;
+    const dest = pts[geo.to] || null;
+    let shape = [];
+    try {
+      shape = await BkkLib.gtfsShape(geo.shape);
+    } catch (_e) {
+      shape = [];
+    }
+    if (shape.length >= 2 && !BkkLib.keepsFullLineShape(row) && board && dest) {
+      const hop = BkkLib.clipShapeToBoardDest(shape, board, dest);
+      if (hop.length >= 2) shape = hop;
+    }
+    return { shape, board, dest, stopLine: BkkLib.validMapShape(pts.filter(Boolean)) };
+  },
   /* City name of a local operator ("Székesfehérvár — helyi" → Székesfehérvár),
      so Transitous stop lookups stay inside that city. */
   async stopArea(cfg) {
@@ -3551,6 +3640,7 @@ Object.assign(BkkLib, {
         if (!departureStillDue(depTs)) continue;
         const kind = BkkLib.gtfsRouteKind(t2[4], vehicle, rawType);
         rows.push({
+          gtfs: BkkLib.gtfsTripGeo(idx, t2, oidx, didx),
           tripId: "gtfs:" + route + ":" + day.ymd + ":" + depMin + ":" + origin.i,
           label: route,
           color,
@@ -4962,6 +5052,7 @@ Object.assign(BkkLib, {
       hasGps,
       hasLocation: hasGps || !gtfs && !!r.tripId || !!(shape && shape.length >= 2) || /^elvira:/i.test(String(r.tripId || "")),
       shape,
+      gtfs: r.gtfs || null,
       vehicle: r.vehicle || "",
       vehicleId: r.vehicleId || "",
       licensePlate: r.licensePlate || "",
@@ -6323,6 +6414,9 @@ var BKKHopCard = class extends HTMLElement {
       } catch (_e) {
       }
     }
+    const gtfsGeo = await BkkLib.gtfsRowShape(row);
+    if (gtfsGeo && gtfsGeo.board) board = gtfsGeo.board;
+    if (gtfsGeo && gtfsGeo.shape.length >= 2) return { shape: gtfsGeo.shape, board };
     const tripId = row && row.tripId || "";
     const canFutar = this._hasFutar() && (!/^motis:/i.test(String(tripId || "")) || !!BkkLib.rowTrainNumber(row));
     let geomTrip = "";
@@ -6349,8 +6443,21 @@ var BKKHopCard = class extends HTMLElement {
       try {
         motisMap = await BkkLib.motisShapeForHop(
           row,
-          { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon, area },
-          { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey, area },
+          {
+            id: cfg.stopId,
+            name: cfg.stopName,
+            lat: cfg.stopLat != null ? cfg.stopLat : gtfsGeo && gtfsGeo.board && gtfsGeo.board[0],
+            lon: cfg.stopLon != null ? cfg.stopLon : gtfsGeo && gtfsGeo.board && gtfsGeo.board[1],
+            area
+          },
+          {
+            id: cfg.destStopId,
+            name: cfg.destName,
+            key: cfg.destKey,
+            lat: gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[0] : void 0,
+            lon: gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[1] : void 0,
+            area
+          },
           { minutesAfter: cfg.minutesAfter, mode: "all" }
         );
         motisShape = BkkLib.validMapShape(motisMap && motisMap.shape);
@@ -6441,7 +6548,9 @@ var BKKHopCard = class extends HTMLElement {
     }
     const clipped = BkkLib.clipRideShape(shape, board, destPt, row);
     if (clipped.length >= 2) shape = clipped;
-    return { shape: BkkLib.validMapShape(shape), board };
+    shape = BkkLib.validMapShape(shape);
+    if (shape.length < 2 && gtfsGeo && gtfsGeo.stopLine.length >= 2) shape = gtfsGeo.stopLine;
+    return { shape, board };
   }
   async _openVehicleMap(row) {
     const lang = this._lang();

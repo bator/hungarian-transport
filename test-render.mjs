@@ -3137,4 +3137,61 @@ Lib.mavIndex = origMavIndex;
     kapos && kapos.id === 'hu-kaposvár_720884', kapos && kapos.id);
 }
 
+/* GTFS rows draw their shapes.txt route from the sharded shapes folder,
+   with no Transitous lookup; without a shape they fall back to the stops. */
+{
+  const { gzipSync } = await import('node:zlib');
+  const base = 'http://localhost:8123/hungarian-transport/';
+  const enc = 'oehyG_r|yBg^_jAg^_q@o}@_|B';
+  const fixture = {
+    v: 29,
+    sh: { dir: 'city-shapes-test', n: 64 },
+    feed: '',
+    s: [['t:1', 'Alpha', '1', 0], ['t:2', 'Beta', '2', 0], ['t:3', 'Gamma', '3', 0]],
+    g: [4625000, 2014000, 4626000, 2016000, 4627000, 2018000],
+    c: [['1111111', '20200101', '20991231']],
+    a: [[]],
+    r: [[]],
+    t: [[0, '7', [0, 1, 2], [480, 490, 500], 3, 65]],
+    o: [['test', 'Test — helyi']],
+  };
+  const files = {
+    [base + 'city-index.json.gz']: gzipSync(JSON.stringify(fixture)),
+    [base + 'city-shapes-test/01.json.gz']: gzipSync(JSON.stringify({ v: 1, p: ['', enc] })),
+  };
+  const asked = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const u = String(url).split('?')[0];
+    asked.push(u);
+    return files[u] ? new Response(files[u], { status: 200 }) : new Response('', { status: 404 });
+  };
+  try {
+    const idx = await Lib._loadGtfsIndex(base + 'city-index.json.gz?v=1', 'errIndexHttp', 'errIndexGunzip');
+    check('index stops carry their coordinates',
+      idx.stops[1].lat === 46.26 && idx.stops[1].lon === 20.16, JSON.stringify(idx.stops[1]));
+    const geo = Lib.gtfsTripGeo(idx, idx.t[0], 0, 2);
+    check('departure geometry points at shard 01, slot 1',
+      geo.shape && geo.shape.dir === 'city-shapes-test' && geo.shape.id === 65 && geo.stops.length === 3,
+      JSON.stringify(geo));
+    const geoCard = document.createElement('hungarian-transport-card');
+    geoCard._config = { stopId: 't:1', stopName: 'Alpha', destKey: 'gamma', destName: 'Gamma', helyi: true, city: 'test' };
+    const row = { tripId: 'gtfs:7:20261019:480:0', label: '7', vehicle: 'bus', rawType: 'BUS', dep: 1800000000, gtfs: geo };
+    asked.length = 0;
+    const out = await geoCard._loadRowMapShape(row);
+    check('GTFS row draws its shapes.txt route without Transitous',
+      out.shape.length === 4 && Math.abs(out.shape[1][1] - 20.152) < 1e-6
+      && out.board[0] === 46.25 && !asked.some((u) => u.includes('transitous')),
+      JSON.stringify({ n: out.shape.length, board: out.board, asked }));
+    const plain = Object.assign({}, row, { gtfs: Object.assign({}, geo, { shape: null }) });
+    const out2 = await geoCard._loadRowMapShape(plain);
+    check('without a shape the route falls back to the GTFS stops',
+      out2.shape.length === 3 && out2.shape[2][0] === 46.27, JSON.stringify(out2.shape));
+    const asRowKept = Lib.asRow(Object.assign({ head: 'Gamma', text: '#fff', color: '#000' }, row), 'Gamma', 'hu');
+    check('asRow keeps the GTFS geometry', asRowKept.gtfs === geo);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 process.exit(failed ? 1 : 0);

@@ -17,3 +17,6 @@ state.json
 *.log
 node_modules/
 .pytest_cache/
+/volan-shapes-*/
+/city-shapes-*/
+dist/*-shapes-*/

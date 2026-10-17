@@ -650,6 +650,11 @@ export class BKKHopCard extends HTMLElement {
         }
       } catch (_e) { /* MOTIS / FUTÁR still fill */ }
     }
+    /* GTFS rows (Volán, city feeds) carry their own stops and shapes.txt
+       route: no network beyond one shape shard, and no guessing. */
+    const gtfsGeo = await BkkLib.gtfsRowShape(row);
+    if (gtfsGeo && gtfsGeo.board) board = gtfsGeo.board;
+    if (gtfsGeo && gtfsGeo.shape.length >= 2) return { shape: gtfsGeo.shape, board };
     const tripId = (row && row.tripId) || '';
     const canFutar = this._hasFutar() && (
       !/^motis:/i.test(String(tripId || '')) || !!BkkLib.rowTrainNumber(row)
@@ -680,8 +685,21 @@ export class BKKHopCard extends HTMLElement {
       try {
         motisMap = await BkkLib.motisShapeForHop(
           row,
-          { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon, area },
-          { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey, area },
+          {
+            id: cfg.stopId,
+            name: cfg.stopName,
+            lat: cfg.stopLat != null ? cfg.stopLat : (gtfsGeo && gtfsGeo.board && gtfsGeo.board[0]),
+            lon: cfg.stopLon != null ? cfg.stopLon : (gtfsGeo && gtfsGeo.board && gtfsGeo.board[1]),
+            area,
+          },
+          {
+            id: cfg.destStopId,
+            name: cfg.destName,
+            key: cfg.destKey,
+            lat: gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[0] : undefined,
+            lon: gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[1] : undefined,
+            area,
+          },
           { minutesAfter: cfg.minutesAfter, mode: 'all' },
         );
         motisShape = BkkLib.validMapShape(motisMap && motisMap.shape);
@@ -770,7 +788,10 @@ export class BKKHopCard extends HTMLElement {
     }
     const clipped = BkkLib.clipRideShape(shape, board, destPt, row);
     if (clipped.length >= 2) shape = clipped;
-    return { shape: BkkLib.validMapShape(shape), board: board };
+    shape = BkkLib.validMapShape(shape);
+    /* No shapes.txt route and nothing from Transitous: join the GTFS stops. */
+    if (shape.length < 2 && gtfsGeo && gtfsGeo.stopLine.length >= 2) shape = gtfsGeo.stopLine;
+    return { shape, board: board };
   }
 
   async _openVehicleMap(row) {

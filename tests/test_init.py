@@ -71,6 +71,20 @@ async def test_index_is_revalidated_not_redownloaded(hass, hass_client, card_ass
     leaflet = await client.get("/hungarian-transport/leaflet/leaflet.js")
     assert leaflet.status == 200
 
+
+async def test_shapes_folder_is_served(hass, hass_client, card_assets) -> None:
+    """The card loads one shard of <feed>-shapes-<hash>/ when a map opens."""
+    folder = card_assets / "volan-shapes-0123456789"
+    folder.mkdir()
+    (folder / "07.json.gz").write_bytes(b"\x1f\x8bshard")
+    await _setup(hass)
+    client = await hass_client()
+
+    resp = await client.get("/hungarian-transport/volan-shapes-0123456789/07.json.gz")
+    assert resp.status == 200
+    assert await resp.read() == b"\x1f\x8bshard"
+
+
 async def test_setup_fails_without_assets(hass, card_assets) -> None:
     (card_assets / "hungarian-transport.js").unlink()
     card_assets.rmdir()
