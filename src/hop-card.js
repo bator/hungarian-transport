@@ -281,9 +281,29 @@ export class BKKHopCard extends HTMLElement {
      between refreshes without hitting the API again. */
   _startTick() {
     if (this._tick) clearInterval(this._tick);
-    this._tick = setInterval(() => {
-      if ((this._rows || []).length) this._paint();
-    }, 15000);
+    this._tick = setInterval(() => this._tickPaint(), 15000);
+  }
+
+  /* Between refreshes only the countdowns change. Rewriting the whole table
+     every 15 s dropped hover, keyboard focus and open tooltips, so update the
+     text in place and repaint only when a departure falls off the list. */
+  _tickPaint() {
+    const shown = this._shownRows || [];
+    if (!shown.length || !this._elBody) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const due = (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
+    if (due.length !== shown.length || due.some((r, i) => r !== shown[i])) {
+      this._paint();
+      return;
+    }
+    const lang = this._lang();
+    this._elBody.querySelectorAll('tr[data-row-index]').forEach((tr) => {
+      const row = shown[Number(tr.getAttribute('data-row-index'))];
+      const cell = tr.querySelector('.cd');
+      if (!row || !cell) return;
+      const text = this._countdown(row.depTs, lang);
+      if (cell.textContent !== text) cell.textContent = text;
+    });
   }
 
   _paint() {
@@ -296,6 +316,9 @@ export class BKKHopCard extends HTMLElement {
     const nowSec = Math.floor(Date.now() / 1000);
     const allRows = this._rows || [];
     const rows = allRows.filter((r) => departureStillDue(r.depTs, nowSec));
+    /* data-row-index points into this list, not into _rows: departed rows
+       are filtered out, so the two indexes differ once a bus has left. */
+    this._shownRows = rows;
     if (rows.length) {
       this._elBody.innerHTML = `<table><tbody>${
         rows.map((r, i) => this._rowHtml(r, lang, i)).join('')
@@ -381,7 +404,7 @@ export class BKKHopCard extends HTMLElement {
       <td class="when"><span class="${atClass}" title="${esc(atTip)}">${
       esc(r.predicted_attime || r.attime || '')}</span>${
       sched ? `<span class="sched">${esc(sched)}</span>` : ''}</td>
-      <td class="in">${esc(this._countdown(r.depTs, lang))}${travel}</td>
+      <td class="in"><span class="cd">${esc(this._countdown(r.depTs, lang))}</span>${travel}</td>
     </tr>`;
   }
 
@@ -411,7 +434,7 @@ export class BKKHopCard extends HTMLElement {
     }
     if (!tr) return null;
     const idx = Number(tr.getAttribute('data-row-index'));
-    return (this._rows || [])[idx] || null;
+    return (this._shownRows || [])[idx] || null;
   }
 
   _onRowClick(ev) {

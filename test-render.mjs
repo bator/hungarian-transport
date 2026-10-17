@@ -118,6 +118,39 @@ check('booking pictogram rendered',
 check('row data is escaped', !out.includes('<script>') && out.includes('&lt;script&gt;'));
 check('card size grows with the rows', card.getCardSize() >= 2, String(card.getCardSize()));
 
+{
+  /* The 15 s tick only rewrites countdown text; a full repaint happens only
+     when a departure leaves the list. */
+  const realNow = Date.now;
+  const firstRow = () => card.shadowRoot.querySelector('tr[data-row-index]');
+  const before = firstRow();
+  Date.now = () => realNow() + 2 * 60 * 1000;
+  card._tickPaint();
+  const cds = [...card.shadowRoot.querySelectorAll('tr[data-row-index] .cd')].map((el) => el.textContent);
+  check('tick keeps the table and updates countdowns in place',
+    firstRow() === before && cds.includes('3 perc'), JSON.stringify(cds));
+  Date.now = () => realNow() + 10 * 60 * 1000;
+  card._tickPaint();
+  check('tick repaints once a departure leaves the list',
+    firstRow() !== before
+      && card.shadowRoot.querySelectorAll('tr[data-row-index]').length < 2,
+    String(card.shadowRoot.querySelectorAll('tr[data-row-index]').length));
+  Date.now = realNow;
+
+  /* Row index follows the rows on screen, not _rows with departed entries. */
+  const saved = card._rows;
+  const gone = Object.assign({}, saved[2]);
+  const live = Object.assign({}, saved[0], { headsign: 'Clicked train' });
+  card._rows = [gone, live];
+  card._paint();
+  const tr = firstRow();
+  const picked = card._rowFromClick({ target: tr });
+  check('clicking the first visible row opens that row, not a departed one',
+    !!picked && picked.headsign === 'Clicked train', picked && picked.headsign);
+  card._rows = saved;
+  card._paint();
+}
+
 card._showErr(new Error('boom'));
 const withErr = html();
 check('error keeps the rows and adds a banner',
