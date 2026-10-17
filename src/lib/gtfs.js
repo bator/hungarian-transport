@@ -148,6 +148,8 @@ Object.assign(BkkLib, {
       throw codedError('errIndexParse');
     }
     if (idx.v && Number(idx.v) > INDEX_SCHEMA) throw codedError('errIndexSchema', idx.v);
+    /* Schema 29: "g" holds lat, lon per stop in 1e-5 degrees (0, 0 = unknown). */
+    const g = Array.isArray(idx.g) && idx.g.length === 2 * idx.s.length ? idx.g : null;
     idx.stops = (idx.s || []).map((row, i) => ({
       i,
       id: row[0],
@@ -156,7 +158,12 @@ Object.assign(BkkLib, {
       op: row.length > 3 ? Number(row[3]) : 0,
       key: BkkLib.norm(row[1]),
       fold: BkkLib.fold(row[1]),
+      lat: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i] / 1e5 : null,
+      lon: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i + 1] / 1e5 : null,
     }));
+    idx.g = null;
+    /* The shapes folder ("sh") sits next to the index file. */
+    idx.url = url;
     idx.ops = (idx.o || []).map((row, i) => ({ i, id: row[0], name: row[1] }));
     idx.byNum = new Map();
     idx.byKey = new Map();
@@ -409,6 +416,85 @@ Object.assign(BkkLib, {
     if (rt === 11 || rt === 800) return { vehicle: 'trolleybus', rawType: 'TROLLEYBUS' };
     return { vehicle, rawType };
   },
+  /* Where a GTFS trip runs: its stops' coordinates and a reference into the
+     sharded shapes folder (trip row element 5), carried on the departure row
+     so the map needs neither the index nor Transitous. */
+  gtfsTripGeo(idx, t, from, to) {
+    const ps = (t && t[2]) || [];
+    const stops = ps.map((p) => {
+      const st = idx.stops[p];
+      return st && st.lat != null ? [st.lat, st.lon] : null;
+    });
+    const ref = Number(t && t[5]);
+    const sh = idx.sh;
+    return {
+      shape: sh && sh.dir && sh.n > 0 && Number.isInteger(ref) && ref >= 0
+        ? { base: idx.url, dir: sh.dir, n: sh.n, id: ref }
+        : null,
+      stops,
+      from,
+      to: to >= 0 ? to : ps.length - 1,
+    };
+  },
+  _shapeShards: new Map(),
+  async _fetchJsonGz(url, timeoutMs) {
+    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs || 20000) : null;
+    try {
+      const res = await fetch(url, { signal: ctrl ? ctrl.signal : undefined });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const buf = await res.arrayBuffer();
+      const u8 = new Uint8Array(buf);
+      if (u8.length >= 2 && u8[0] === 0x1f && u8[1] === 0x8b) {
+        if (typeof DecompressionStream !== 'function') throw new Error('no gzip');
+        const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+        return JSON.parse(await new Response(stream).text());
+      }
+      return JSON.parse(new TextDecoder().decode(u8));
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  },
+  /* One trip's shapes.txt polyline. Shard id % n holds it at id / n; the
+     folder name carries a content hash, so the browser cache can keep it. */
+  async gtfsShape(ref) {
+    if (!ref || !ref.dir || !(ref.n > 0) || !(ref.id >= 0)) return [];
+    const k = ref.id % ref.n;
+    const url = new URL(`${ref.dir}/${String(k).padStart(2, '0')}.json.gz`, ref.base).href;
+    let p = BkkLib._shapeShards.get(url);
+    if (!p) {
+      p = BkkLib._fetchJsonGz(url).catch((err) => {
+        BkkLib._shapeShards.delete(url);
+        throw err;
+      });
+      BkkLib._shapeShards.set(url, p);
+      while (BkkLib._shapeShards.size > 16) BkkLib._shapeShards.delete(BkkLib._shapeShards.keys().next().value);
+    }
+    const shard = await p;
+    const enc = shard && Array.isArray(shard.p) ? shard.p[Math.floor(ref.id / ref.n)] : '';
+    return enc ? BkkLib.validMapShape(BkkLib.decodePolyline(enc)) : [];
+  },
+  /* GTFS geometry for a departure row: the shapes.txt route (the whole line,
+     or the hop for kinds the card clips), the boarding and alighting stops,
+     and the stop-to-stop line as a last resort. Null for non-GTFS rows. */
+  async gtfsRowShape(row) {
+    const geo = row && row.gtfs;
+    if (!geo) return null;
+    const pts = Array.isArray(geo.stops) ? geo.stops : [];
+    const board = pts[geo.from] || null;
+    const dest = pts[geo.to] || null;
+    let shape = [];
+    try {
+      shape = await BkkLib.gtfsShape(geo.shape);
+    } catch (_e) {
+      shape = [];
+    }
+    if (shape.length >= 2 && !BkkLib.keepsFullLineShape(row) && board && dest) {
+      const hop = BkkLib.clipShapeToBoardDest(shape, board, dest);
+      if (hop.length >= 2) shape = hop;
+    }
+    return { shape, board, dest, stopLine: BkkLib.validMapShape(pts.filter(Boolean)) };
+  },
   /* City name of a local operator ("Székesfehérvár — helyi" → Székesfehérvár),
      so Transitous stop lookups stay inside that city. */
   async stopArea(cfg) {
@@ -474,6 +560,7 @@ Object.assign(BkkLib, {
         if (!departureStillDue(depTs)) continue;
         const kind = BkkLib.gtfsRouteKind(t[4], vehicle, rawType);
         rows.push({
+          gtfs: BkkLib.gtfsTripGeo(idx, t, oidx, didx),
           tripId: 'gtfs:' + route + ':' + day.ymd + ':' + depMin + ':' + origin.i,
           label: route,
           color: color,

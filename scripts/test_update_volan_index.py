@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from update_volan_index import index_schema, restore_hacs_indexes  # noqa: E402
+from update_volan_index import index_schema, persist_index, restore_hacs_indexes  # noqa: E402
 
 failed = 0
 
@@ -68,6 +68,40 @@ with tempfile.TemporaryDirectory() as tmp:
     restored = restore_hacs_indexes(base, www)
     check("larger shipped mav index is kept", "mav-index.json.gz" not in restored
           and feed_of(www / "mav-index.json.gz") == "release-pfaedle", repr(restored))
+
+
+def write_with_shapes(path: Path, schema: int, feed: str, folder: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = {"v": schema, "sh": {"dir": folder, "n": 64}, "feed": feed}
+    path.write_bytes(gzip.compress(json.dumps(body, separators=(",", ":")).encode(), mtime=0))
+    (path.parent / folder).mkdir(exist_ok=True)
+    (path.parent / folder / "00.json.gz").write_bytes(gzip.compress(b'{"v":1,"p":[]}'))
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp) / "durable"
+    www = Path(tmp) / "www"
+    base.mkdir()
+    write_with_shapes(www / "volan-index.json.gz", 29, "built", "volan-shapes-new")
+    (base / "volan-shapes-old").mkdir()
+    persist_index(www / "volan-index.json.gz", base)
+    check("persist copies the shapes folder and drops the old one",
+          (base / "volan-shapes-new" / "00.json.gz").is_file() and not (base / "volan-shapes-old").exists())
+
+    # HACS update: the served folder now holds the release index and shapes.
+    for entry in list(www.iterdir()):
+        if entry.is_dir():
+            import shutil
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    write_with_shapes(www / "volan-index.json.gz", 29, "release", "volan-shapes-release")
+    restored = restore_hacs_indexes(base, www)
+    check("restore brings the durable index together with its shapes folder",
+          restored == ["volan-index.json.gz"] and (www / "volan-shapes-new" / "00.json.gz").is_file(),
+          repr(restored))
+    check("the release shapes folder nobody points at is removed",
+          not (www / "volan-shapes-release").exists(), repr(sorted(p.name for p in www.iterdir())))
 
 if failed:
     sys.exit(1)

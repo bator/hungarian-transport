@@ -14,7 +14,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_city_index import CITY_FEEDS  # noqa: E402
 from gtfs_compact import (  # noqa: E402
+    SHAPE_SHARDS,
     assert_public_http_url,
+    index_shapes,
+    simplify_shape,
     catalog_url,
     decode_polyline,
     encode_polyline,
@@ -142,7 +145,7 @@ def main() -> int:
             tout = Path(tempfile.mkdtemp()) / "tram.json.gz"
             write_index(tparts, tout, with_operators=True)
             tidx = json.loads(gzip.decompress(tout.read_bytes()))
-            failed |= not check("write_index keeps route_type", tidx["t"][0][4] == 0 and tidx["v"] == 28, str(tidx["t"][0]))
+            failed |= not check("write_index keeps route_type", tidx["t"][0][4] == 0 and tidx["v"] == 29, str(tidx["t"][0]))
         finally:
             tz.unlink()
 
@@ -161,6 +164,61 @@ def main() -> int:
             failed |= not check("jk_stop_N keeps the trip", len(rparts[0]["t"]) == 1, str(rparts[0]["t"]))
         finally:
             rz.unlink()
+
+        # Stop coordinates and shapes.txt end up in the index and its shapes folder.
+        shape_files = dict(files)
+        shape_files["stops.txt"] = "stop_id,stop_name,stop_lat,stop_lon\n1,Alpha,46.25000,20.14000\n2,Beta,46.26000,20.16000\n"
+        shape_files["trips.txt"] = "route_id,service_id,trip_id,shape_id\nR1,S1,T1,SH1\n"
+        # SH2 is split in two runs (ungrouped file); SH1 has a straight-line
+        # midpoint that simplification must drop.
+        shape_files["shapes.txt"] = (
+            "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\n"
+            "SH1,46.25000,20.14000,1\nSH2,47.0,19.0,1\nSH1,46.25500,20.15000,2\n"
+            "SH1,46.26000,20.16000,3\nSH2,47.1,19.1,2\n"
+        )
+        sz = gtfs_zip(shape_files)
+        try:
+            sparts = load_parts(sz, lambda short, *_: bool(short), op_id="szeged", op_name="Szeged — SZKT")
+            sdir = Path(tempfile.mkdtemp())
+            sout = sdir / "city-index.json.gz"
+            sinfo = write_index(sparts, sout, with_operators=True)
+            sidx = json.loads(gzip.decompress(sout.read_bytes()))
+            folder = (sidx.get("sh") or {}).get("dir", "")
+            failed |= not check("stop coordinates stored as 1e-5 degrees",
+                                sidx["g"] == [4625000, 2014000, 4626000, 2016000], str(sidx["g"]))
+            failed |= not check("trip points at shape 0", sidx["t"][0][5] == 0, str(sidx["t"][0]))
+            failed |= not check("index head names its shapes folder",
+                                index_shapes(sout) == folder and folder.startswith("city-shapes-"), folder)
+            shards = sorted(p.name for p in (sdir / folder).iterdir())
+            failed |= not check("shapes folder has every shard", len(shards) == SHAPE_SHARDS, str(len(shards)))
+            shard0 = json.loads(gzip.decompress((sdir / folder / "00.json.gz").read_bytes()))
+            pts = decode_polyline(shard0["p"][0])
+            failed |= not check("straight midpoint simplified away", len(pts) == 2, str(pts))
+            failed |= not check("only used shapes are written", sinfo["shapes"] == 1, str(sinfo))
+            # A rebuild with other shapes swaps the folder and removes the old one.
+            shape_files["shapes.txt"] = shape_files["shapes.txt"].replace("46.26000,20.16000,3", "46.27000,20.17000,3")
+            sz2 = gtfs_zip(shape_files)
+            try:
+                write_index(load_parts(sz2, lambda short, *_: bool(short), op_id="szeged", op_name="Szeged — SZKT"),
+                            sout, with_operators=True)
+                folders = [p.name for p in sdir.iterdir() if p.is_dir()]
+                failed |= not check("old shapes folder pruned after swap",
+                                    len(folders) == 1 and folders[0] == index_shapes(sout) != folder, str(folders))
+            finally:
+                sz2.unlink()
+        finally:
+            sz.unlink()
+        from gtfs_compact import load_shapes, open_gtfs_zip  # noqa: E402
+        uz = gtfs_zip(shape_files)
+        try:
+            with open_gtfs_zip(uz) as z:
+                ushapes = load_shapes(z)
+            failed |= not check("ungrouped shape is read whole",
+                                len(decode_polyline(ushapes.get("SH2", ""))) == 2, str(ushapes.get("SH2")))
+        finally:
+            uz.unlink()
+        failed |= not check("simplify keeps a real corner",
+                            len(simplify_shape([(47.0, 19.0), (47.001, 19.0), (47.001, 19.001)], 10)) == 3)
 
         volan_files = dict(files)
         volan_files["agency.txt"] = "agency_id,agency_name\nA,Szeged\n"

@@ -94,6 +94,14 @@ seat-reservation marker is provided by this integration's
 `hungarian_transport.elvira_between` service. The timetable still lists
 without the optional position services.
 
+Tapping a Volán or city departure opens a map with the trip's route from the
+feed's own `shapes.txt`. The shapes are simplified (10 m) and shipped next to
+the indexes in `volan-shapes-<hash>/` and `city-shapes-<hash>/`, split into 64
+small files, so opening a map downloads one file of at most ~140 kB and no
+third-party service is involved. A trip without a shape falls back to
+Transitous, and then to a line through its stops. City trams, trolleybuses and
+the Bahart ferry keep their GTFS vehicle type.
+
 ## Options
 
 | Option | Type | Default | Description |
@@ -213,7 +221,9 @@ To rebuild them yourself on Home Assistant OS:
    release ships a newer index schema than your copied scripts build (larger
    local `mav-index.json.gz` wins). A local `mav-gtfs.zip` or pfaedle directory also rebuilds
    `mav-index.json.gz`. A MÁV rebuild failure notifies and exits 1, like Volán
-   and city.
+   and city. The shapes folders travel with their indexes. Simplifying the
+   Volán `shapes.txt` (8 million points) takes about a minute on a desktop and
+   longer on a Raspberry Pi; `run_update.sh` allows 30 minutes.
 
 Set `HUNGARIAN_TRANSPORT_WWW` if you installed the card somewhere else, for
 example `/config/www/hungarian-transport` for the manual `/local` install.

@@ -141,6 +141,11 @@ jobs:
           fi
           mkdir -p dist
           cp -f volan-index.json.gz city-index.json.gz dist/
+          # Sharded shapes.txt routes; each index names its folder ("sh").
+          rm -rf dist/*-shapes-*/
+          for d in volan-shapes-*/ city-shapes-*/; do
+            if [ -d "$d" ]; then cp -r "$d" dist/; fi
+          done
           if [ -f mav-index.json.gz ]; then cp -f mav-index.json.gz dist/; fi
           ls -lh dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz dist/mav-index.json.gz 2>/dev/null || true
 
@@ -183,6 +188,9 @@ jobs:
           # Releases before the vendored Leaflet load it from unpkg; the weekly
           # refresh re-packs such a tag, which has no dist/leaflet.
           if [ -d dist/leaflet ]; then cp -r dist/leaflet custom_components/hungarian_transport/www/; fi
+          for d in dist/*-shapes-*/; do
+            if [ -d "$d" ]; then cp -r "$d" custom_components/hungarian_transport/www/; fi
+          done
           python3 <<'PY'
           import json, os, pathlib
           path = pathlib.Path("custom_components/hungarian_transport/manifest.json")
@@ -191,7 +199,7 @@ jobs:
           path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
           PY
           (cd custom_components/hungarian_transport && zip -qr9 ../../hungarian-transport.zip .)
-          (cd dist && zip -9r ../hungarian-transport-frontend.zip hungarian-transport.js volan-index.json.gz city-index.json.gz $( [ -d leaflet ] && echo leaflet ) $( [ -f mav-index.json.gz ] && echo mav-index.json.gz ))
+          (cd dist && zip -9r ../hungarian-transport-frontend.zip hungarian-transport.js volan-index.json.gz city-index.json.gz $( [ -d leaflet ] && echo leaflet ) $(ls -d *-shapes-*/ 2>/dev/null) $( [ -f mav-index.json.gz ] && echo mav-index.json.gz ))
           ls -lh hungarian-transport.zip hungarian-transport-frontend.zip
 
       - name: Publish GitHub release

@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import csv
 import gzip
+import hashlib
 import io
 import ipaddress
 import json
+import math
 import os
 import re
+import shutil
 import tempfile
 import unicodedata
 import urllib.parse
@@ -24,7 +27,16 @@ UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungari
 MAX_MEMBER = 500 * 1024 * 1024
 MAX_DOWNLOAD = 200 * 1024 * 1024
 # 28: trip rows carry GTFS route_type as a fifth element.
-INDEX_SCHEMA = 28
+# 29: stop coordinates ("g"), a shape reference per trip and "sh", the
+#     sharded shapes folder next to the index.
+INDEX_SCHEMA = 29
+# Shapes are split into this many files so opening one map downloads one
+# small shard (shape id % n), not every route of the feed.
+SHAPE_SHARDS = 64
+# Douglas–Peucker tolerance: 10 m keeps streets recognisable at city zoom
+# and drops ~60 % of the points.
+SHAPE_TOLERANCE_M = 10.0
+_SHAPES_MEMO: dict[tuple, dict[str, str]] = {}
 _BLOCKED_HOSTS = frozenset(
     {
         "localhost",
@@ -402,6 +414,9 @@ class GtfsDir:
     def read(self, name: str) -> bytes:
         return (self.path / name).read_bytes()
 
+    def open(self, name: str):
+        return (self.path / name).open("rb")
+
     def close(self) -> None:
         return None
 
@@ -433,7 +448,7 @@ def feed_version(z: zipfile.ZipFile) -> str:
     return ""
 
 
-def _open_csv(z, name: str):
+def _member(z, name: str) -> str:
     wanted = name.lower()
     members = list(z.namelist())
     by_lower = {n.lower(): n for n in members}
@@ -445,6 +460,134 @@ def _open_csv(z, name: str):
                 break
     if not real:
         raise FileNotFoundError(name)
+    return real
+
+
+def _stream_shape_points(z):
+    """(shape_id, seq, lat, lon) from shapes.txt without reading the member
+    into memory (388 MB in the Volán feed). csv.reader, not DictReader: this
+    loop runs 8 million times. Shape files are ASCII, so UTF-8 is enough."""
+    real = _member(z, "shapes.txt")
+    with z.open(real) as fh:
+        rows = csv.reader(io.TextIOWrapper(fh, encoding="utf-8-sig", errors="replace", newline=""))
+        header = [h.strip() for h in next(rows, [])]
+        try:
+            i_id = header.index("shape_id")
+            i_lat = header.index("shape_pt_lat")
+            i_lon = header.index("shape_pt_lon")
+            i_seq = header.index("shape_pt_sequence")
+        except ValueError:
+            return
+        width = max(i_id, i_lat, i_lon, i_seq)
+        for row in rows:
+            if len(row) <= width:
+                continue
+            try:
+                yield row[i_id], float(row[i_seq]), float(row[i_lat]), float(row[i_lon])
+            except ValueError:
+                continue
+
+
+def simplify_shape(pts: list[tuple[float, float]], tol_m: float) -> list[tuple[float, float]]:
+    """Douglas–Peucker on a local equirectangular projection (metres)."""
+    if len(pts) < 3:
+        return list(pts)
+    kx = 111320.0 * math.cos(math.radians(pts[0][0]))
+    ky = 110540.0
+    xy = [(lon * kx, lat * ky) for lat, lon in pts]
+    keep = [False] * len(pts)
+    keep[0] = keep[-1] = True
+    tol2 = tol_m * tol_m
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        a, b = stack.pop()
+        ax, ay = xy[a]
+        dx, dy = xy[b][0] - ax, xy[b][1] - ay
+        seg2 = dx * dx + dy * dy
+        worst, wi = -1.0, -1
+        for i in range(a + 1, b):
+            px, py = xy[i][0] - ax, xy[i][1] - ay
+            if seg2:
+                t = (px * dx + py * dy) / seg2
+                t = 0.0 if t < 0 else 1.0 if t > 1 else t
+                px -= t * dx
+                py -= t * dy
+            d2 = px * px + py * py
+            if d2 > worst:
+                worst, wi = d2, i
+        if worst > tol2:
+            keep[wi] = True
+            stack.append((a, wi))
+            stack.append((wi, b))
+    return [p for p, k in zip(pts, keep) if k]
+
+
+def _encode_shape(raw: list[tuple[float, float, float]]) -> str:
+    raw.sort()
+    pts: list[tuple[float, float]] = []
+    last = None
+    for _seq, lat, lon in raw:
+        if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            continue
+        # Points closer than ~2 m add nothing at map zoom; skip them before
+        # the (quadratic in the worst case) simplification.
+        if last is not None and abs(lat - last[0]) < 2e-5 and abs(lon - last[1]) < 3e-5:
+            continue
+        pts.append((lat, lon))
+        last = (lat, lon)
+    if raw and pts and (raw[-1][1], raw[-1][2]) != pts[-1]:
+        pts.append((raw[-1][1], raw[-1][2]))
+    if len(pts) < 2:
+        return ""
+    return encode_polyline(simplify_shape(pts, SHAPE_TOLERANCE_M))
+
+
+def load_shapes(z, memo_key: tuple | None = None) -> dict[str, str]:
+    """shape_id -> simplified encoded polyline.
+
+    Streams shapes.txt one shape at a time, which needs the file grouped by
+    shape_id (every Hungarian feed is). A shape that shows up again later is
+    re-read in a second pass. The Volán zip feeds both the Volán and the city
+    index, so results are memoised per zip within one process.
+    """
+    if memo_key is not None and memo_key in _SHAPES_MEMO:
+        return _SHAPES_MEMO[memo_key]
+    out: dict[str, str] = {}
+    split: set[str] = set()
+    try:
+        cur: str | None = None
+        buf: list[tuple[float, float, float]] = []
+        for sid, seq, lat, lon in _stream_shape_points(z):
+            if sid != cur:
+                if cur is not None:
+                    if cur in out:
+                        split.add(cur)
+                    else:
+                        out[cur] = _encode_shape(buf)
+                cur, buf = sid, []
+            buf.append((seq, lat, lon))
+        if cur is not None:
+            if cur in out:
+                split.add(cur)
+            else:
+                out[cur] = _encode_shape(buf)
+        if split:
+            again: dict[str, list] = defaultdict(list)
+            for sid, seq, lat, lon in _stream_shape_points(z):
+                if sid in split:
+                    again[sid].append((seq, lat, lon))
+            for sid, raw in again.items():
+                out[sid] = _encode_shape(raw)
+    except FileNotFoundError:
+        pass
+    out = {k: v for k, v in out.items() if v}
+    if memo_key is not None:
+        _SHAPES_MEMO[memo_key] = out
+    return out
+
+
+def _open_csv(z, name: str):
+    real = _member(z, name)
     raw = z.read(real)
     text = None
     for enc in ("utf-8-sig", "utf-8", "cp1250", "iso-8859-2", "latin-1"):
@@ -555,12 +698,19 @@ def _load_parts(
 
     sid2p: dict[str, str] = {}
     sid2n: dict[str, str] = {}
+    sid2ll: dict[str, tuple[float, float]] = {}
     for row in _open_csv(z, "stops.txt"):
         raw = row.get("stop_id") or ""
         if not raw:
             continue
         sid2p[raw] = parent(raw)
         sid2n[raw] = row.get("stop_name") or ""
+        try:
+            lat, lon = float(row.get("stop_lat") or ""), float(row.get("stop_lon") or "")
+        except ValueError:
+            continue
+        if -90 <= lat <= 90 and -180 <= lon <= 180 and (lat or lon):
+            sid2ll[raw] = (lat, lon)
     # `_12` is a platform suffix only when the parent id is itself a stop.
     # Kecskeméti Kisvasút uses jk_stop_8 / jk_stop_9 as distinct stations.
     for sid, p in list(sid2p.items()):
@@ -568,8 +718,15 @@ def _load_parts(
             sid2p[sid] = sid
 
     pname: dict[str, str] = {}
+    # A parent's own position if it has one, else its first platform's.
+    pll: dict[str, tuple[float, float]] = {}
     for sid, p in sid2p.items():
         pname.setdefault(p, sid2n[sid])
+        if sid == p and sid in sid2ll:
+            pll[p] = sid2ll[sid]
+    for sid, p in sid2p.items():
+        if p not in pll and sid in sid2ll:
+            pll[p] = sid2ll[sid]
 
     routes: dict[str, str] = {}
     route_types: dict[str, int] = {}
@@ -595,6 +752,7 @@ def _load_parts(
         keep_routes.add(rid)
 
     trips_meta: dict[str, tuple[str, str]] = {}
+    trip_shape: dict[str, str] = {}
     keep_trips: set[str] = set()
     for row in _open_csv(z, "trips.txt"):
         rid = row.get("route_id") or ""
@@ -602,6 +760,8 @@ def _load_parts(
         if not tid:
             continue
         trips_meta[tid] = (rid, row.get("service_id") or "")
+        if row.get("shape_id"):
+            trip_shape[tid] = row["shape_id"]
         if rid in keep_routes:
             keep_trips.add(tid)
 
@@ -689,6 +849,16 @@ def _load_parts(
     if cur:
         flush(cur, seq)
 
+    shapes: dict[str, str] = {}
+    if any(tid in trip_shape for tid in keep_trips):
+        zp = Path(zpath)
+        try:
+            st = zp.stat()
+            memo = (str(zp.resolve()), st.st_size, st.st_mtime_ns)
+        except OSError:
+            memo = None
+        shapes = load_shapes(z, memo)
+
     def pack(op: str, name: str, trip_ids: Iterable[str]) -> dict:
         used_p: set[str] = set()
         used_s: set[str] = set()
@@ -707,9 +877,18 @@ def _load_parts(
         services = sorted(used_s)
         s_ix = {s: i for i, s in enumerate(services)}
         trip_rows = []
+        shape_list: list[str] = []
+        shape_ix: dict[str, int] = {}
         for tid in chosen:
             rid, sid = trips_meta[tid]
             pts = seqs[tid]
+            enc = shapes.get(trip_shape.get(tid, ""), "")
+            ref = -1
+            if enc:
+                ref = shape_ix.get(enc, -1)
+                if ref < 0:
+                    ref = shape_ix[enc] = len(shape_list)
+                    shape_list.append(enc)
             trip_rows.append(
                 [
                     s_ix[sid],
@@ -718,8 +897,13 @@ def _load_parts(
                     [m for _p, m in pts],
                     # Tram, trolleybus and ferry rows must not be matched as buses.
                     route_types.get(rid, 3),
+                    ref,
                 ]
             )
+        coords: list[int] = []
+        for p in parents:
+            ll = pll.get(p)
+            coords.extend((round(ll[0] * 1e5), round(ll[1] * 1e5)) if ll else (0, 0))
         cal_rows = []
         add_rows = []
         rem_rows = []
@@ -733,6 +917,9 @@ def _load_parts(
             "op_name": name,
             "feed": version,
             "s": [[pre + p, pname.get(p, p), stop_num(p)] for p in parents],
+            # lat, lon per stop as integers of 1e-5 degrees; 0, 0 = unknown.
+            "g": coords,
+            "shapes": shape_list,
             "c": cal_rows,
             "a": add_rows,
             "r": rem_rows,
@@ -782,15 +969,72 @@ def existing_trips(out: Path) -> int | None:
         return None
 
 
+def shapes_stem(out: Path) -> str:
+    """'volan' for volan-index.json.gz; the shapes folder is named after it."""
+    name = out.name
+    for suffix in ("-index.json.gz", ".json.gz"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name.split(".")[0]
+
+
+def write_shapes(shapes: list[str], out: Path) -> dict | None:
+    """Write shapes into <stem>-shapes-<hash>/NN.json.gz next to the index.
+
+    The folder name carries a content hash, so an index and its shapes are
+    swapped atomically: the folder exists before the index points at it.
+    Shard k holds the shapes with id % n == k, at position id // n.
+    """
+    if not shapes:
+        return None
+    digest = hashlib.sha1("\n".join(shapes).encode("utf-8")).hexdigest()[:10]
+    name = f"{shapes_stem(out)}-shapes-{digest}"
+    final = out.parent / name
+    if not final.is_dir():
+        tmp = Path(tempfile.mkdtemp(prefix=name + ".", dir=str(out.parent)))
+        try:
+            for k in range(SHAPE_SHARDS):
+                body = json.dumps({"v": 1, "p": shapes[k::SHAPE_SHARDS]}, separators=(",", ":"))
+                (tmp / f"{k:02d}.json.gz").write_bytes(gzip.compress(body.encode("utf-8"), 9, mtime=0))
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, final)
+        except BaseException:
+            shutil.rmtree(tmp, ignore_errors=True)
+            raise
+    return {"dir": name, "n": SHAPE_SHARDS}
+
+
+def prune_shapes(out: Path, keep: str | None) -> None:
+    """Drop shapes folders (and interrupted temp folders) the index no longer uses."""
+    prefix = shapes_stem(out) + "-shapes-"
+    for entry in out.parent.glob(prefix + "*"):
+        if entry.is_dir() and entry.name != keep:
+            shutil.rmtree(entry, ignore_errors=True)
+
+
+def index_shapes(path: Path) -> str | None:
+    """Shapes folder an index file points at, read from the start of the file."""
+    try:
+        with gzip.open(path, "rb") as fh:
+            head = fh.read(256)
+    except (OSError, EOFError):
+        return None
+    m = re.search(rb'"sh":\{"dir":"([A-Za-z0-9_.-]+)"', head)
+    return m.group(1).decode("ascii") if m else None
+
+
 def write_index(parts: list[dict], out: Path, *, with_operators: bool, schema: int = INDEX_SCHEMA) -> dict:
-    """Merge operator parts into one gzipped compact index."""
+    """Merge operator parts into one gzipped compact index (and its shapes)."""
     ops: list[tuple[str, str]] = []
     seen_op: dict[str, int] = {}
     all_s: list[list] = []
+    all_g: list[int] = []
     all_c: list = []
     all_a: list = []
     all_r: list = []
     all_t: list = []
+    all_shapes: list[str] = []
+    shape_seen: dict[str, int] = {}
     feeds: list[str] = []
     for part in parts:
         oid = part["op_id"]
@@ -805,11 +1049,23 @@ def write_index(parts: list[dict], out: Path, *, with_operators: bool, schema: i
                 all_s.append([row[0], row[1], row[2], op_ix])
             else:
                 all_s.append([row[0], row[1], row[2]])
+        g = part.get("g") or []
+        all_g.extend(g if len(g) == 2 * len(part["s"]) else [0, 0] * len(part["s"]))
+        remap = []
+        for enc in part.get("shapes") or []:
+            ix = shape_seen.get(enc)
+            if ix is None:
+                ix = shape_seen[enc] = len(all_shapes)
+                all_shapes.append(enc)
+            remap.append(ix)
         all_c.extend(part["c"])
         all_a.extend(part["a"])
         all_r.extend(part["r"])
         for t in part["t"]:
-            all_t.append([t[0] + c_off, t[1], [p + s_off for p in t[2]], t[3], *t[4:]])
+            row = [t[0] + c_off, t[1], [p + s_off for p in t[2]], t[3], *t[4:5]]
+            if len(t) > 5:
+                row.append(remap[t[5]] if t[5] is not None and t[5] >= 0 else -1)
+            all_t.append(row)
         if part.get("feed"):
             feeds.append(f"{oid}:{part['feed']}")
     prev = existing_trips(out)
@@ -817,25 +1073,32 @@ def write_index(parts: list[dict], out: Path, *, with_operators: bool, schema: i
         raise RuntimeError(
             f"refusing to replace {out.name}: {len(all_t)} trips vs previous {prev}"
         )
-    idx = {
-        "v": schema,
+    sh = write_shapes(all_shapes, out)
+    # "v" and "sh" first: index_schema() and index_shapes() read only the head.
+    idx: dict = {"v": schema}
+    if sh:
+        idx["sh"] = sh
+    idx.update({
         "feed": ";".join(feeds),
         "s": all_s,
+        "g": all_g,
         "c": all_c,
         "a": all_a,
         "r": all_r,
         "t": all_t,
-    }
+    })
     if with_operators:
         idx["o"] = [[oid, name] for oid, name in ops]
     raw = json.dumps(idx, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     tmp = out.with_name(out.name + ".tmp")
     tmp.write_bytes(gzip.compress(raw, compresslevel=9))
     tmp.replace(out)
+    prune_shapes(out, sh["dir"] if sh else None)
     return {
         "feed_version": idx["feed"],
         "trips": len(all_t),
         "stops": len(all_s),
         "ops": len(ops),
         "bytes": out.stat().st_size,
+        "shapes": len(all_shapes),
     }

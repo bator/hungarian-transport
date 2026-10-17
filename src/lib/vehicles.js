@@ -408,6 +408,7 @@ Object.assign(BkkLib, {
       hasLocation: hasGps || (!gtfs && !!r.tripId) || !!(shape && shape.length >= 2)
         || /^elvira:/i.test(String(r.tripId || '')),
       shape: shape,
+      gtfs: r.gtfs || null,
       vehicle: r.vehicle || '',
       vehicleId: r.vehicleId || '',
       licensePlate: r.licensePlate || '',

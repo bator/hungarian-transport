@@ -8,6 +8,7 @@ import gzip
 import json
 import os
 import re
+import shutil
 import signal
 import sys
 import urllib.error
@@ -19,7 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from build_city_index import CITY_FEEDS, build_city_index  # noqa: E402
 from build_mav_index import build_mav_index, resolve_mav_feed  # noqa: E402
 from build_volan_index import GTFS_URL, build_index  # noqa: E402
-from gtfs_compact import UA, download_feed, download_zip, feed_error, resolved_url  # noqa: E402
+from gtfs_compact import (  # noqa: E402
+    UA,
+    download_feed,
+    download_zip,
+    feed_error,
+    index_shapes,
+    prune_shapes,
+    resolved_url,
+)
 
 WEBHOOK_PATH = "/api/webhook/hungarian-transport-gtfs"
 HA_BASE = Path("/config/hungarian-transport")
@@ -53,15 +62,29 @@ def _atomic_copy(src: Path, dest: Path) -> None:
     tmp.replace(dest)
 
 
+def _copy_shapes(index: Path, src_dir: Path, dest_dir: Path) -> None:
+    """Copy the shapes folder an index points at, if the target lacks it."""
+    name = index_shapes(index)
+    if not name or (dest_dir / name).is_dir() or not (src_dir / name).is_dir():
+        return
+    tmp = dest_dir / f"{name}.copy"
+    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.copytree(src_dir / name, tmp)
+    os.replace(tmp, dest_dir / name)
+
+
 def persist_index(www_path: Path, base: Path) -> None:
-    """Keep a durable copy outside the folder HACS overwrites on update."""
+    """Keep a durable copy (index and its shapes folder) outside the folder
+    HACS overwrites on update."""
     if not www_path.is_file() or not base.is_dir():
         return
     dest = base / www_path.name
     try:
         if dest.resolve() == www_path.resolve():
             return
+        _copy_shapes(www_path, www_path.parent, base)
         _atomic_copy(www_path, dest)
+        prune_shapes(dest, index_shapes(dest))
     except OSError as err:
         print(f"warn persist {www_path.name}: {type(err).__name__}", file=sys.stderr)
 
@@ -80,6 +103,7 @@ def index_schema(path: Path) -> int | None:
 def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
     """Put the durable indexes back after HACS replaced the served folder.
 
+    Each index brings the shapes folder it points at.
     The durable copy is the last index built here, and state.json describes
     exactly that feed; if the feed has moved since, this same run rebuilds.
     So the durable copy wins over whatever a release shipped, unless it was
@@ -113,10 +137,14 @@ def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
                 )
                 continue
         try:
+            _copy_shapes(src, base, www)
             _atomic_copy(src, dest)
             restored.append(name)
         except OSError as err:
             print(f"warn restore {name}: {type(err).__name__}", file=sys.stderr)
+    for name in INDEX_FILES:
+        if (www / name).is_file():
+            prune_shapes(www / name, index_shapes(www / name))
     return restored
 
 

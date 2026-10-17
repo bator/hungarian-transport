@@ -179,6 +179,7 @@ Object.assign(BkkLib, {
     const inArea = (hit) => !!area && (hit.areas || []).some((a) => BkkLib.fold(a && a.name) === area);
     const areaHits = area ? list.filter((hit) => hit && inArea(hit)) : [];
     const busWanted = /aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(wantName);
+    const near = BkkLib.mapGpsLatLon(stop && stop.lat, stop && stop.lon);
     let best = null;
     let bestScore = -1;
     list.forEach((hit) => {
@@ -202,6 +203,13 @@ Object.assign(BkkLib, {
       if (BkkLib.foldTokenMatch(wantName, hname)) score += 3;
       if (BkkLib.fold(wantName) && BkkLib.fold(hname) === BkkLib.fold(wantName)) score += 2;
       if (!busWanted && /aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(hname)) score -= 4;
+      /* Known stop coordinates (GTFS index) settle same-named stops. */
+      const hpt = near && BkkLib.mapGpsLatLon(hit.lat, hit.lon);
+      if (hpt) {
+        const d = BkkLib.haversineMeters(near, hpt);
+        if (d <= 400) score += 6;
+        else if (d > 5000) score -= 6;
+      }
       if (score > bestScore) {
         bestScore = score;
         best = hit;

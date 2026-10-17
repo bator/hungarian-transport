@@ -11,6 +11,8 @@ if [ -f "$log" ]; then
     mv "$log" "$log.1" || true
   fi
 fi
-setsid env PYTHONUNBUFFERED=1 timeout 600 python3 "$base/update_volan_index.py" \
+# Volán shapes.txt (8 M points) adds about a minute on a desktop and several
+# on a Raspberry Pi, hence the generous limit.
+setsid env PYTHONUNBUFFERED=1 timeout 1800 python3 "$base/update_volan_index.py" \
   >> "$log" 2>&1 < /dev/null &
 echo "started $!"
