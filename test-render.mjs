@@ -121,17 +121,21 @@ check('card size grows with the rows', card.getCardSize() >= 2, String(card.getC
 {
   /* The 15 s tick only rewrites countdown text; a full repaint happens only
      when a departure leaves the list. */
+  /* The clock is set from `now`, the second the rows were built from, so a
+     slow CI runner cannot push the bus past its grace minute. */
   const realNow = Date.now;
   const firstRow = () => card.shadowRoot.querySelector('tr[data-row-index]');
   const before = firstRow();
-  Date.now = () => realNow() + 2 * 60 * 1000;
+  /* +100 s: the S40 (+300 s) shows 3 perc, the bus (+60 s) is 40 s late,
+     still inside its grace minute. */
+  Date.now = () => (now + 100) * 1000;
   card._tickPaint();
   const cds = [...card.shadowRoot.querySelectorAll('tr[data-row-index] .cd')].map((el) => el.textContent);
   check('tick keeps the table and updates countdowns in place',
     firstRow() === before && cds.includes('3 perc'), JSON.stringify(cds));
   /* +3 min: the bus due at +1 min is past its grace minute, the S40 due at
      +5 min stays. */
-  Date.now = () => realNow() + 3 * 60 * 1000;
+  Date.now = () => (now + 180) * 1000;
   card._tickPaint();
   const left = [...card.shadowRoot.querySelectorAll('tr[data-row-index]')];
   const leftHtml = left.map((tr) => tr.innerHTML).join('');
