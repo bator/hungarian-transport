@@ -49,6 +49,27 @@ async def test_setup_serves_card_and_registers_service(hass, hass_client) -> Non
     assert card_url not in _card_urls(hass)
 
 
+
+async def test_index_is_revalidated_not_redownloaded(hass, hass_client, card_assets) -> None:
+    """The card fetches indexes with cache: 'no-cache' and relies on 304."""
+    (card_assets / "volan-index.json.gz").write_bytes(b"\x1f\x8bindex")
+    (card_assets / "leaflet").mkdir()
+    (card_assets / "leaflet" / "leaflet.js").write_text("// leaflet", encoding="utf-8")
+    await _setup(hass)
+    client = await hass_client()
+
+    first = await client.get("/hungarian-transport/volan-index.json.gz")
+    assert first.status == 200
+    etag = first.headers.get("ETag")
+    last_modified = first.headers.get("Last-Modified")
+    assert etag or last_modified
+    headers = {"If-None-Match": etag} if etag else {"If-Modified-Since": last_modified}
+    again = await client.get("/hungarian-transport/volan-index.json.gz", headers=headers)
+    assert again.status == 304
+
+    leaflet = await client.get("/hungarian-transport/leaflet/leaflet.js")
+    assert leaflet.status == 200
+
 async def test_setup_fails_without_assets(hass, card_assets) -> None:
     (card_assets / "hungarian-transport.js").unlink()
     card_assets.rmdir()

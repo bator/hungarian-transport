@@ -2145,6 +2145,12 @@ check('pickMotisHopRow matches train number not a later same-label hop', (() => 
 }
 check('map overlay CSS pins Leaflet SVG over tiles',
   src.includes('leaflet-overlay-pane') && src.includes('max-width:none!important'));
+check('Leaflet loads from the card folder, not a CDN',
+  !src.includes('unpkg.com')
+  && src.includes("new URL('leaflet/leaflet.js', ASSET_BASE)")
+  && src.includes("new URL('leaflet/leaflet.css', ASSET_BASE)"));
+check('GTFS indexes revalidate instead of bypassing the HTTP cache',
+  (src.match(/cache: 'no-cache'/g) || []).length === 2);
 check('hop map polyline is unclipped SVG on the overlay pane',
   src.includes('noClip: true')
   && src.includes("pane: 'overlayPane'")
