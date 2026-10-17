@@ -40,7 +40,8 @@ card together through HACS.
 
 ### Manual
 
-For a frontend-only manual install, copy the files from `dist/` into
+For a frontend-only manual install, copy the files from `dist/` (including the
+`leaflet/` folder, which the maps load next to the card) into
 `/config/www/hungarian-transport/` and add the matching
 `/local/hungarian-transport/hungarian-transport.js` resource (`type: module`).
 The GitHub release attaches `hungarian-transport-frontend.zip` with these

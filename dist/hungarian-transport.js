@@ -3104,7 +3104,7 @@ const BkkLib = {
     const timer = ctrl ? setTimeout(() => ctrl.abort(), 45000) : null;
     let res;
     try {
-      res = await fetch(url, { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
+      res = await fetch(url, { cache: 'no-cache', signal: ctrl ? ctrl.signal : undefined });
     } catch (_err) {
       return { n: {}, l: {}, p: [] };
     } finally {
@@ -3171,8 +3171,11 @@ const BkkLib = {
     const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
     const timer = ctrl ? setTimeout(() => ctrl.abort(), 45000) : null;
     let res;
+    /* no-cache revalidates: Home Assistant answers 304 for an unchanged index,
+       so a dashboard reload does not download megabytes again, while a rebuilt
+       index (new ETag) is fetched at once. */
     try {
-      res = await fetch(url, { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined });
+      res = await fetch(url, { cache: 'no-cache', signal: ctrl ? ctrl.signal : undefined });
     } catch (_err) {
       throw codedError('errIndexFetch');
     } finally {
@@ -5440,7 +5443,7 @@ class BKKHopCard extends HTMLElement {
         const link = document.createElement('link');
         link.id = cssId;
         link.rel = 'stylesheet';
-        link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+        link.href = new URL('leaflet/leaflet.css', ASSET_BASE).href;
         document.head.appendChild(link);
       }
       if (typeof window !== 'undefined' && isLeaflet(window.L)) {
@@ -5459,7 +5462,7 @@ class BKKHopCard extends HTMLElement {
       }
       const script = document.createElement('script');
       script.id = 'hungarian-transport-leaflet-js';
-      script.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      script.src = new URL('leaflet/leaflet.js', ASSET_BASE).href;
       script.onload = () => {
         if (isLeaflet(window.L)) resolve(window.L);
         else reject(new Error('leaflet'));
@@ -5523,7 +5526,7 @@ class BKKHopCard extends HTMLElement {
   }
 
   _mapChromeCss() {
-    /* Leaflet CSS from unpkg can fail to apply (CSP / referrer). Without pane
+    /* Leaflet CSS (shipped next to the card) can still fail to apply. Without pane
        positioning the SVG route is laid out below the tiles and clipped. */
     return `
         .ht-map-overlay{position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
