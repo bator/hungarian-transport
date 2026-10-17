@@ -178,7 +178,11 @@ FUTÁR / GTFS-RT.
 ## Keeping the GTFS indexes current
 
 HACS installs the indexes that were built when the GitHub release was cut.
-A weekly GitHub Action publishes a patch release when the feeds move.
+A weekly GitHub Action rebuilds the indexes from the latest stable release's
+code and re-uploads that release's assets, so fresh downloads get current
+feeds. HACS does not re-download a version that is already installed, so
+existing installs only pick up new feeds with the next release, or with the
+local rebuild below.
 
 To rebuild them yourself on Home Assistant OS:
 
@@ -192,14 +196,17 @@ To rebuild them yourself on Home Assistant OS:
    five minutes after a core start. It HEADs the KTI zip and the municipal
    feeds, rebuilds only when the fingerprint changed, and writes
    `volan-index.json.gz` / `city-index.json.gz` atomically into
-   `/config/www/community/hungarian-transport/`. A durable copy is also kept
-   under `/config/hungarian-transport/` so a HACS update that overwrote the
-   community folder is restored on the next run (larger local `mav-index.json.gz`
-   wins). A local `mav-gtfs.zip` or pfaedle directory also rebuilds
+   `/config/custom_components/hungarian_transport/www/`, where the integration
+   serves the card from (the old `/config/www/community/hungarian-transport/`
+   folder is used only when the integration is not installed). A durable copy
+   is also kept under `/config/hungarian-transport/` so a HACS update that
+   overwrote the integration folder is restored on the next run (larger local
+   `mav-index.json.gz` wins). A local `mav-gtfs.zip` or pfaedle directory also rebuilds
    `mav-index.json.gz`. A MÁV rebuild failure notifies and exits 1, like Volán
    and city.
 
-Set `HUNGARIAN_TRANSPORT_WWW` if you installed the card somewhere else.
+Set `HUNGARIAN_TRANSPORT_WWW` if you installed the card somewhere else, for
+example `/config/www/hungarian-transport` for the manual `/local` install.
 Point `notify.admins` at whatever notifier you use, or drop that automation.
 
 There is no direct coach between, for example, Székesfehérvár

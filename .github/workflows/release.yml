@@ -108,6 +108,18 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "create=true" >> "$GITHUB_OUTPUT"
 
+      # The weekly refresh re-packs an existing stable release. Build it from
+      # that tag, not from main, so the zip never ships unreleased card code
+      # (or an index schema the released card cannot read) under an old version.
+      - name: Check out released code for refresh
+        if: steps.ver.outputs.create == 'true' && github.event_name == 'schedule'
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "refs/tags/${TAG}"
+          git log --oneline -1
+
       - uses: actions/setup-python@v5
         if: steps.ver.outputs.create == 'true'
         with:
@@ -201,5 +213,6 @@ jobs:
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" hungarian-transport.zip hungarian-transport-frontend.zip --clobber
           else
-            gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip --title "$tag" --notes "$notes" "${extra[@]}"
+            # Tag the commit that was built, not whatever the default branch is now.
+            gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip --target "$GITHUB_SHA" --title "$tag" --notes "$notes" "${extra[@]}"
           fi
