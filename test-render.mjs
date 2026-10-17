@@ -9,7 +9,10 @@ const dom = new JSDOM('<!doctype html><html><body></body></html>', {
 });
 for (const key of ['window', 'document', 'customElements', 'HTMLElement', 'Element',
   'navigator', 'CSSStyleDeclaration', 'Node', 'Event', 'CustomEvent']) {
-  globalThis[key] = dom.window[key];
+  /* Node 21+ ships a getter-only globalThis.navigator, so plain assignment throws. */
+  Object.defineProperty(globalThis, key, {
+    value: dom.window[key], configurable: true, writable: true,
+  });
 }
 
 await import('./dist/hungarian-transport.js');

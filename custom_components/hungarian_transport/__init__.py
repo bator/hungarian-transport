@@ -38,20 +38,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             f"Hungarian transport release is missing its frontend assets: {www_path}"
         )
 
-    if hasattr(hass.http, "async_register_static_paths"):
-        await hass.http.async_register_static_paths(
-            [
-                StaticPathConfig(
-                    url_path="/hungarian-transport",
-                    path=str(www_path),
-                    cache_headers=False,
-                )
-            ]
-        )
-    else:
-        hass.http.register_static_path(
-            "/hungarian-transport", str(www_path), cache_headers=False
-        )
+    await hass.http.async_register_static_paths(
+        [
+            StaticPathConfig(
+                url_path="/hungarian-transport",
+                path=str(www_path),
+                cache_headers=False,
+            )
+        ]
+    )
     session = async_get_clientsession(hass)
 
     async def handle_elvira_between(
@@ -92,10 +87,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     card_url = hass.data[DOMAIN].get("card_url")
     if card_url is None:
         return True
-    if hasattr(frontend, "remove_extra_js_url"):
-        frontend.remove_extra_js_url(hass, card_url)
-    else:
-        hass.data[frontend.DATA_EXTRA_MODULE_URL].remove(card_url)
+    frontend.remove_extra_js_url(hass, card_url)
     return True
 
 

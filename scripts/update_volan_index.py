@@ -20,12 +20,25 @@ from gtfs_compact import UA, download_feed, download_zip, feed_error, resolved_u
 
 WEBHOOK_PATH = "/api/webhook/hungarian-transport-gtfs"
 HA_BASE = Path("/config/hungarian-transport")
-HA_WWW = Path(
-    os.environ.get(
-        "HUNGARIAN_TRANSPORT_WWW",
-        "/config/www/community/hungarian-transport",
-    )
-)
+# The integration serves /hungarian-transport/ from its own www folder, and the
+# card loads the indexes next to itself. The community folder is only used by
+# the old HACS Dashboard install and the manual /local install.
+INTEGRATION_WWW = Path("/config/custom_components/hungarian_transport/www")
+LEGACY_WWW = Path("/config/www/community/hungarian-transport")
+
+
+def default_www() -> Path:
+    override = (os.environ.get("HUNGARIAN_TRANSPORT_WWW") or "").strip()
+    if override:
+        return Path(override)
+    # Never create the integration folder: without a manifest HA would see a
+    # broken custom component.
+    if INTEGRATION_WWW.is_dir():
+        return INTEGRATION_WWW
+    return LEGACY_WWW
+
+
+HA_WWW = default_www()
 
 INDEX_FILES = ("volan-index.json.gz", "city-index.json.gz", "mav-index.json.gz")
 
@@ -38,7 +51,7 @@ def _atomic_copy(src: Path, dest: Path) -> None:
 
 
 def persist_index(www_path: Path, base: Path) -> None:
-    """Keep a durable copy outside the HACS community folder."""
+    """Keep a durable copy outside the folder HACS overwrites on update."""
     if not www_path.is_file() or not base.is_dir():
         return
     dest = base / www_path.name
