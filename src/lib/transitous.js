@@ -173,10 +173,17 @@ Object.assign(BkkLib, {
     const want = BkkLib.transitousFeedWant(stop && stop.id);
     const wantName = (stop && stop.name) || '';
     kind = String(kind || '').toLowerCase();
+    /* A bare street name ("Béla utca") exists in many towns. When the stop's
+       city is known and some hit lies in it, hits elsewhere are out. */
+    const area = BkkLib.fold((stop && stop.area) || '');
+    const inArea = (hit) => !!area && (hit.areas || []).some((a) => BkkLib.fold(a && a.name) === area);
+    const areaHits = area ? list.filter((hit) => hit && inArea(hit)) : [];
+    const busWanted = /aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(wantName);
     let best = null;
     let bestScore = -1;
     list.forEach((hit) => {
       if (!hit) return;
+      if (areaHits.length && !inArea(hit)) return;
       const hid = String(hit.id || '');
       const hname = hit.name || '';
       let score = 0;
@@ -194,13 +201,14 @@ Object.assign(BkkLib, {
       if (missing.length) score -= 4 * missing.length;
       if (BkkLib.foldTokenMatch(wantName, hname)) score += 3;
       if (BkkLib.fold(wantName) && BkkLib.fold(hname) === BkkLib.fold(wantName)) score += 2;
-      if (/aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(hname)) score -= 4;
+      if (!busWanted && /aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(hname)) score -= 4;
       if (score > bestScore) {
         bestScore = score;
         best = hit;
       }
     });
-    return bestScore >= 3 ? best : (list[0] || null);
+    if (bestScore >= 3) return best;
+    return (areaHits.length ? areaHits[0] : list[0]) || null;
   },
   transitousCoord(hit) {
     if (!hit) return '';
@@ -252,6 +260,8 @@ Object.assign(BkkLib, {
       } catch (_e) { /* parent CSF ids 404; child F ids usually work */ }
     }
     const queries = [];
+    const area = String((stop && stop.area) || '').trim();
+    if (name && area && BkkLib.fold(name).indexOf(BkkLib.fold(area)) < 0) queries.push(`${name} ${area}`);
     if (name) queries.push(name);
     let stripped = name;
     [' vas\u00fat\u00e1llom\u00e1s', ' p\u00e1lyaudvar', ' pu.'].forEach((sfx) => {
@@ -425,6 +435,7 @@ Object.assign(BkkLib, {
       if (/tram/.test(s)) return 'tram';
       if (/subway|metro/.test(s)) return 'subway';
       if (/trolley/.test(s)) return 'trolley';
+      if (/ferry|boat/.test(s)) return 'ferry';
       if (/coach/.test(s)) return 'coach';
       if (/bus/.test(s)) return 'bus';
       return s;
@@ -436,6 +447,7 @@ Object.assign(BkkLib, {
     if (v === 'tram' || typ.indexOf('TRAM') >= 0) return 'tram';
     if (v === 'subway' || v === 'metro' || /SUBWAY|METRO/.test(typ)) return 'subway';
     if (v === 'trolley' || v === 'trolleybus' || typ.indexOf('TROLLEY') >= 0) return 'trolley';
+    if (v === 'ferry' || typ.indexOf('FERRY') >= 0) return 'ferry';
     if (v === 'coach' || typ === 'COACH' || /^gtfs:/i.test(String(row.tripId || ''))) return 'coach';
     if (v === 'bus' || typ === 'BUS') return 'bus';
     if (BkkLib.rowTrainNumber(row) && !/bus|tram|subway|trolley|coach/i.test(v)) return 'rail';
@@ -526,6 +538,10 @@ Object.assign(BkkLib, {
     const num = BkkLib.rowTrainNumber(row);
     const label = String((row && row.label) || '').trim().toUpperCase();
     const dep = Number((row && (row.dep || row.sched || row.depTs)) || 0);
+    /* A row with a real line label (2, 26, 5020, S40) only takes a vehicle of
+       that line: drawing another line's route is worse than drawing none.
+       Generic rail labels (IC, S) and unlabelled rows may fall back on time. */
+    const wantsId = !!(num || (label && !BkkLib.genericRailLabel(label)));
     let best = null;
     let bestScore = -1e9;
     const usable = (m) => {
@@ -548,10 +564,7 @@ Object.assign(BkkLib, {
       const dt = dep ? Math.abs(Number(m.dep || 0) - dep) : 0;
       if (dep && dt > 45 * 60 && !sameNum) return;
       const identity = sameNum || sameLabel || sameAlias;
-      if (!identity) {
-        const wantsId = !!(num || (label.length >= 3 && !BkkLib.genericRailLabel(label)));
-        if (wantsId) return;
-      }
+      if (!identity && wantsId) return;
       const destNear = destOn && (!dep || dt <= 12 * 60);
       if (!identity && !destNear) return;
       const score = (sameNum ? 1000 : 0)
@@ -568,10 +581,11 @@ Object.assign(BkkLib, {
       const near = list.filter((m) => usable(m) && Math.abs(Number(m.dep || 0) - dep) <= 8 * 60);
       const toward = dest ? near.filter((m) => BkkLib.destOnMotisRow(m, dest)) : near;
       const pool = toward.length ? toward : near;
-      const wantsId = !!(num || (label.length >= 3 && !BkkLib.genericRailLabel(label)));
       if (pool.length === 1) {
         const dt0 = Math.abs(Number(pool[0].dep || 0) - dep);
-        if (!wantsId || dt0 <= 90) {
+        /* Trains may carry a different number in MOTIS than in FUTÁR, so a
+           lone train due within 90 s is still the same run. */
+        if (!wantsId || (BkkLib.isTrainRow(row) && dt0 <= 90)) {
           best = pool[0];
         }
       } else if (pool.length > 1 && !wantsId) {

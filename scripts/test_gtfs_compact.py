@@ -131,6 +131,20 @@ def main() -> int:
         failed |= not check("exception_type 1 is add", parts[0]["a"][0] == ["20260101"], str(parts[0]["a"]))
         failed |= not check("exception_type 2 is remove", parts[0]["r"][0] == ["20260102"], str(parts[0]["r"]))
         failed |= not check("unknown exception_type ignored", "20260103" not in parts[0]["a"][0] + parts[0]["r"][0])
+        failed |= not check("route_type defaults to bus", trip[4] == 3, str(trip))
+
+        tram_files = dict(files)
+        tram_files["routes.txt"] = "route_id,route_short_name,agency_id,route_type\nR1,2,A,0\n"
+        tz = gtfs_zip(tram_files)
+        try:
+            tparts = load_parts(tz, lambda short, *_: bool(short), op_id="szeged", op_name="Szeged — SZKT")
+            failed |= not check("route_type 0 (tram) kept on the trip", tparts[0]["t"][0][4] == 0, str(tparts[0]["t"][0]))
+            tout = Path(tempfile.mkdtemp()) / "tram.json.gz"
+            write_index(tparts, tout, with_operators=True)
+            tidx = json.loads(gzip.decompress(tout.read_bytes()))
+            failed |= not check("write_index keeps route_type", tidx["t"][0][4] == 0 and tidx["v"] == 28, str(tidx["t"][0]))
+        finally:
+            tz.unlink()
 
         # Distinct stations named like jk_stop_8 must not collapse to one parent.
         rail_files = dict(files)

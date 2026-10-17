@@ -23,7 +23,8 @@ RoutePred = Callable[[str, str, str], bool]
 UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungarian-transport)"
 MAX_MEMBER = 500 * 1024 * 1024
 MAX_DOWNLOAD = 200 * 1024 * 1024
-INDEX_SCHEMA = 27
+# 28: trip rows carry GTFS route_type as a fifth element.
+INDEX_SCHEMA = 28
 _BLOCKED_HOSTS = frozenset(
     {
         "localhost",
@@ -571,6 +572,7 @@ def _load_parts(
         pname.setdefault(p, sid2n[sid])
 
     routes: dict[str, str] = {}
+    route_types: dict[str, int] = {}
     route_agency: dict[str, str] = {}
     keep_routes: set[str] = set()
     for row in _open_csv(z, "routes.txt"):
@@ -585,6 +587,10 @@ def _load_parts(
         if not include_route(short, aname, aid):
             continue
         routes[rid] = short
+        try:
+            route_types[rid] = int(row.get("route_type") or 3)
+        except ValueError:
+            route_types[rid] = 3
         route_agency[rid] = aid
         keep_routes.add(rid)
 
@@ -710,6 +716,8 @@ def _load_parts(
                     routes[rid],
                     [p_ix[p] for p, _m in pts],
                     [m for _p, m in pts],
+                    # Tram, trolleybus and ferry rows must not be matched as buses.
+                    route_types.get(rid, 3),
                 ]
             )
         cal_rows = []
@@ -801,7 +809,7 @@ def write_index(parts: list[dict], out: Path, *, with_operators: bool, schema: i
         all_a.extend(part["a"])
         all_r.extend(part["r"])
         for t in part["t"]:
-            all_t.append([t[0] + c_off, t[1], [p + s_off for p in t[2]], t[3]])
+            all_t.append([t[0] + c_off, t[1], [p + s_off for p in t[2]], t[3], *t[4:]])
         if part.get("feed"):
             feeds.append(f"{oid}:{part['feed']}")
     prev = existing_trips(out)

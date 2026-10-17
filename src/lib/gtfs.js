@@ -397,6 +397,30 @@ Object.assign(BkkLib, {
     const idx = await BkkLib.cityIndex();
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), '#0F6FC6', '#ffffff', 'bus', 'BUS', minutesAfter);
   },
+  /* GTFS route_type (basic and extended codes) to the card's vehicle kind.
+     Buses keep the caller's default: coach for Volán, bus for city feeds. */
+  gtfsRouteKind(routeType, vehicle, rawType) {
+    const rt = Number(routeType);
+    if (!Number.isFinite(rt)) return { vehicle, rawType };
+    if (rt === 0 || (rt >= 900 && rt < 1000)) return { vehicle: 'tram', rawType: 'TRAM' };
+    if (rt === 1 || (rt >= 400 && rt < 500)) return { vehicle: 'subway', rawType: 'SUBWAY' };
+    if (rt === 2 || (rt >= 100 && rt < 200) || rt === 300) return { vehicle: 'rail', rawType: 'RAIL' };
+    if (rt === 4 || (rt >= 1000 && rt < 1100) || rt === 1200) return { vehicle: 'ferry', rawType: 'FERRY' };
+    if (rt === 11 || rt === 800) return { vehicle: 'trolleybus', rawType: 'TROLLEYBUS' };
+    return { vehicle, rawType };
+  },
+  /* City name of a local operator ("Székesfehérvár — helyi" → Székesfehérvár),
+     so Transitous stop lookups stay inside that city. */
+  async stopArea(cfg) {
+    if (BkkLib.mode(cfg || {}) !== 'helyi' || !cfg.city) return '';
+    try {
+      const idx = await BkkLib.cityIndex();
+      const op = (idx.ops || []).find((o) => o.id === cfg.city);
+      return op ? String(op.name || '').split(' \u2014 ')[0].trim() : '';
+    } catch (_e) {
+      return '';
+    }
+  },
   gtfsDepartures(idx, stopId, dest, originName, opIx, color, text, vehicle, rawType, minutesAfter) {
     const origin = BkkLib.volanMatchStop(idx, { id: stopId, name: originName || '' }, opIx == null ? null : opIx);
     if (!origin) return [];
@@ -448,13 +472,14 @@ Object.assign(BkkLib, {
         const travel = (arrMin != null && arrMin >= depMin && arrMin - depMin <= 1440) ? (arrMin - depMin) : null;
         const depTs = day.midnight + depMin * 60;
         if (!departureStillDue(depTs)) continue;
+        const kind = BkkLib.gtfsRouteKind(t[4], vehicle, rawType);
         rows.push({
           tripId: 'gtfs:' + route + ':' + day.ymd + ':' + depMin + ':' + origin.i,
           label: route,
           color: color,
           text: text,
-          vehicle: vehicle,
-          rawType: rawType,
+          vehicle: kind.vehicle,
+          rawType: kind.rawType,
           dep: depTs,
           sched: depTs,
           delay: 0,

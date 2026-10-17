@@ -3102,4 +3102,39 @@ Lib.mavIndex = origMavIndex;
   globalThis.fetch = realFetch;
 }
 
+/* Map routes for GTFS rows: never borrow another line's route. */
+{
+  const dep = 1800000000;
+  const shp = [[46.35, 17.79], [46.36, 17.76]];
+  const busRow = { label: '32', dep, vehicle: 'bus', rawType: 'BUS', tripId: 'gtfs:32:20261019:600:1' };
+  const other = { label: '5600', dep: dep + 30, vehicle: 'bus', shape: shp };
+  const same = { label: '32', dep: dep + 240, vehicle: 'bus', shape: shp };
+  check('short bus label does not take another line at the same time',
+    Lib.pickMotisVehicle([other], busRow, null) === null);
+  check('short bus label takes its own line',
+    Lib.pickMotisVehicle([other, same], busRow, null) === same);
+  const ferryRow = { label: 'Siófok-Balatonfüred-Tihany', dep, vehicle: 'ferry', rawType: 'FERRY', tripId: 'gtfs:x' };
+  check('a ferry is not matched with a bus leaving the same quay',
+    Lib.vehicleBucket(ferryRow) === 'ferry'
+    && Lib.pickMotisVehicle([{ label: '6038', dep: dep + 20, vehicle: 'bus', shape: shp }], ferryRow, null) === null);
+  const kinds = [0, 11, 4, 3, 700, 900].map((rt) => Lib.gtfsRouteKind(rt, 'bus', 'BUS').vehicle);
+  check('GTFS route_type picks tram, trolleybus, ferry, or keeps the bus default',
+    JSON.stringify(kinds) === JSON.stringify(['tram', 'trolleybus', 'ferry', 'bus', 'bus', 'tram']),
+    JSON.stringify(kinds));
+  const hits = [
+    { id: 'hu-bkk_F00867', name: 'Béla utca', lat: 47.58, lon: 19.08, areas: [{ name: 'Budapest' }] },
+    { id: 'hu-volanbusz_hkir_665919', name: 'Székesfehérvár, Béla utca', lat: 47.22, lon: 18.46,
+      areas: [{ name: 'Székesfehérvári járás' }, { name: 'Székesfehérvár' }] },
+  ];
+  const picked = Lib.pickTransitousHit(hits, { id: 'szekesfehervar:1', name: 'Béla utca', area: 'Székesfehérvár' }, 'bus');
+  check('stop lookup stays inside the operator city',
+    picked && picked.id === 'hu-volanbusz_hkir_665919', picked && picked.id);
+  const kapos = Lib.pickTransitousHit([
+    { id: 'hu-kaposvár_720884', name: 'Autóbusz-állomás', areas: [{ name: 'Kaposvár' }] },
+    { id: 'hu-volanbusz_hkir_549762', name: 'Kapuvár, autóbusz-állomás', areas: [{ name: 'Kapuvár' }] },
+  ], { id: 'kaposvar:1', name: 'Autóbusz-állomás', area: 'Kaposvár' }, 'bus');
+  check('a bus station asked by name is not penalised as a bus station',
+    kapos && kapos.id === 'hu-kaposvár_720884', kapos && kapos.id);
+}
+
 process.exit(failed ? 1 : 0);
