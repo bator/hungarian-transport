@@ -1,6 +1,5 @@
 /* Renders the card in jsdom: it must draw its own rows, with no dependency on
    any other custom element. */
-import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
@@ -17,7 +16,14 @@ for (const key of ['window', 'document', 'customElements', 'HTMLElement', 'Eleme
 
 await import('./dist/hungarian-transport.js');
 
-const src = await readFile('./dist/hungarian-transport.js', 'utf8');
+/* Source-text checks read the modules in src/; behaviour checks run the built bundle. */
+const readSources = async () => {
+  const { readdir, readFile: rf } = await import('node:fs/promises');
+  const files = (await readdir('./src', { recursive: true }))
+    .filter((f) => f.endsWith('.js')).sort();
+  return (await Promise.all(files.map((f) => rf(`./src/${f}`, 'utf8')))).join('\n');
+};
+const src = await readSources();
 
 let failed = false;
 const check = (name, ok, detail) => {

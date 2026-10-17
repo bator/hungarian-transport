@@ -42,7 +42,14 @@ Object.defineProperty(globalThis, 'navigator', {
 
 await import('./dist/hungarian-transport.js');
 
-const src = await (await import('node:fs/promises')).readFile('./dist/hungarian-transport.js', 'utf8');
+/* Source-text checks read the modules in src/; behaviour checks run the built bundle. */
+const readSources = async () => {
+  const { readdir, readFile: rf } = await import('node:fs/promises');
+  const files = (await readdir('./src', { recursive: true }))
+    .filter((f) => f.endsWith('.js')).sort();
+  return (await Promise.all(files.map((f) => rf(`./src/${f}`, 'utf8')))).join('\n');
+};
+const src = await readSources();
 
 /* Compare the two dictionaries by re-evaluating just the I18N literal. */
 const start = src.indexOf('const I18N = {');

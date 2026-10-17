@@ -222,6 +222,27 @@ There is no direct coach between, for example, Székesfehérvár
 autóbusz-állomás and Kelenföld — such services terminate at Népliget. The card
 reflects the official GTFS, so it will not invent a connection.
 
+## Development
+
+The card sources are ES modules in `src/` (`lib/` holds the FUTÁR, Transitous,
+GTFS and map helpers, one file per area). `dist/hungarian-transport.js` is the
+esbuild bundle that HACS ships; do not edit it by hand.
+
+```bash
+npm ci
+npm run lint
+npm run build
+npm test
+```
+
+CI fails when the committed bundle does not match `npm run build`.
+Integration tests need Python 3.13:
+
+```bash
+pip install -r requirements_test.txt
+python -m pytest
+```
+
 ## Credits
 
 - [BKK Open Data / FUTÁR](https://opendata.bkk.hu/) for Budapest city and rail
