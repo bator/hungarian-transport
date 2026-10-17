@@ -1,610 +1,42 @@
-const CARD_VERSION = '1.4.7-rev.3';
+/* Hungarian transport cards. Generated from src/ by 'npm run build'; do not edit. */
 
-const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
-const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
-const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
-const TRANSITOUS = 'https://api.transitous.org';
-/* Stand-in for cfg.apiKey when the Hungarian transport integration holds the
-   BKK key: FUTÁR calls then go through hungarian_transport.futar, so the key
-   never reaches the browser or the dashboard config. Never saved to config. */
-const INTEGRATION_KEY = 'hungarian_transport:integration';
-/* Default departure look-ahead. Override per card with `minutesAfter`.
-   The Kelenfold-Szekesfehervar hop lists trains past 2h, so 180 is the
-   floor that still fills travelMin on those rows. */
-const DEFAULT_MINUTES_AFTER = 180;
-const MIN_MINUTES_AFTER = 15;
-const MAX_MINUTES_AFTER = 480;
-const MINUTES_AFTER_PRESETS = [30, 60, 90, 120, 180, 240, 360, 480];
-const DEPART_MINUTES_AFTER = String(DEFAULT_MINUTES_AFTER);
+// src/lib/core.js
+var BkkLib = {};
 
-/* A departure stays on the card until a minute after it was due.
-   Anything older is a bus that already left. */
-const DEPARTURE_GRACE_SEC = 60;
-
-function departureStillDue(dep, nowSec) {
-  const ts = Number(dep);
-  if (!Number.isFinite(ts) || ts <= 0) return true;
-  return ts >= (nowSec || Math.floor(Date.now() / 1000)) - DEPARTURE_GRACE_SEC;
-}
-
-function clampMinutesAfter(value) {
-  if (value == null || value === '') return DEFAULT_MINUTES_AFTER;
-  const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) return DEFAULT_MINUTES_AFTER;
-  return Math.min(MAX_MINUTES_AFTER, Math.max(MIN_MINUTES_AFTER, Math.round(n)));
-}
-
-function maxDepartureRows(horizon) {
-  const h = clampMinutesAfter(horizon);
-  const cap = h >= 480 ? 80 : 40;
-  return Math.min(cap, Math.max(12, Math.round(h / 2.5)));
-}
-const PLATFORM_IN_HEAD = /(?:\u00b7\s*)?(?:v\u00e1g|pl)\.(\S+)/i;
-const PLATFORM_STRIP = /\s*(?:\u00b7\s*)?(?:v\u00e1g|pl)\.\S+/gi;
-
-/* Shortcut chips in the editor: national hubs only. Override them per card with
-   `favorites: [{ id, name }]` if your own stops are elsewhere. */
-const BKK_FAVORITES = [
-  { id: 'BKK_CSF01131', name: 'Keleti p\u00e1lyaudvar' },
-  { id: 'BKK_CS007896', name: 'Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s' },
-];
-const MAV_FAVORITES = [
-  { id: 'BKK_005510017', name: 'Budapest-Keleti' },
-  { id: 'BKK_005501024', name: 'Budapest-Kelenf\u00f6ld' },
-  { id: 'BKK_005503269', name: 'Sz\u00e9kesfeh\u00e9rv\u00e1r' },
-];
-const VOLAN_FAVORITES = [
-  { id: 'hkir_773521', name: 'Budapest, N\u00e9pliget aut\u00f3busz-p\u00e1lyaudvar' },
-  { id: 'volan_773538_99', name: 'Budapest, Kelenf\u00f6ld vas\u00fat\u00e1llom\u00e1s' },
-];
-const FAVORITES = BKK_FAVORITES.concat(VOLAN_FAVORITES, MAV_FAVORITES);
-const DEFAULT_FAVORITES = {
-  bkk: BKK_FAVORITES,
-  mav: MAV_FAVORITES,
-  volan: VOLAN_FAVORITES,
-  helyi: [],
-  all: FAVORITES,
-};
-
-const VEHICLE_ICONS = {
-  BUS: 'mdi:bus',
-  TRAM: 'mdi:tram',
-  TROLLEYBUS: 'mdi:bus-electric',
-  SUBWAY: 'mdi:subway-variant',
-  METRO: 'mdi:subway-variant',
-  RAIL: 'mdi:train',
-  TRAIN: 'mdi:train',
-  FERRY: 'mdi:ferry',
-};
-
-function vehicleIcon(type) {
-  const key = String(type || '').toUpperCase();
-  if (VEHICLE_ICONS[key]) return VEHICLE_ICONS[key];
-  if (key.indexOf('RAIL') >= 0 || key.indexOf('TRAIN') >= 0) return 'mdi:train';
-  if (key.indexOf('TRAM') >= 0) return 'mdi:tram';
-  if (key.indexOf('TROLLEY') >= 0) return 'mdi:bus-electric';
-  if (key.indexOf('SUBWAY') >= 0 || key.indexOf('METRO') >= 0) return 'mdi:subway-variant';
-  return 'mdi:bus';
-}
-
-/* BKK GO rail-line badge colours. ELVIRA rows have no route color (always
-   #4477aa); FUTÁR is often empty on a MÁV hop, so the label is the source. */
-const BKK_RAIL_BADGE = {
-  G43: ['AACD46', 'FFFFFF'],
-  Z30: ['FFCD28', '3C3C3C'],
-  S10: ['00AFF0', 'FFFFFF'],
-  S12: ['00AFF0', 'FFFFFF'],
-  S30: ['00AFF0', 'FFFFFF'],
-  S36: ['00AFF0', 'FFFFFF'],
-  S40: ['00AFF0', 'FFFFFF'],
-  IC: ['2E5EA8', 'FFFFFF'],
-  EC: ['2E5EA8', 'FFFFFF'],
-  SZ: ['5C6B7A', 'FFFFFF'],
-};
-
-/* Assets live next to this module, so the card works from /hacsfiles/, /local/
-   or wherever the Lovelace resource points. Requires `type: module`. */
-const ASSET_BASE = new URL('.', import.meta.url).href;
-let VOLAN_INDEX_OVERRIDE = '';
-let CITY_INDEX_OVERRIDE = '';
-let MAV_INDEX_OVERRIDE = '';
-let leafletPromise = null;
-
-function setVolanIndexUrl(url) {
-  VOLAN_INDEX_OVERRIDE = String(url || '');
-}
-
-function setCityIndexUrl(url) {
-  CITY_INDEX_OVERRIDE = String(url || '');
-}
-
-function setMavIndexUrl(url) {
-  MAV_INDEX_OVERRIDE = String(url || '');
-}
-
-/* Hungarian timetables are published in Budapest wall-clock time. Deriving the
-   service day and the minute offsets from the browser's zone breaks the card
-   for anyone whose Home Assistant is set to a different timezone. */
-const TZ = 'Europe/Budapest';
-const TZ_PARTS = new Intl.DateTimeFormat('en-GB', {
-  timeZone: TZ,
-  hour12: false,
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-});
-const pad2 = (n) => String(n).padStart(2, '0');
-
-function tzFields(date) {
-  const out = {};
-  TZ_PARTS.formatToParts(date).forEach((p) => {
-    if (p.type !== 'literal') out[p.type] = p.value;
-  });
-  return {
-    y: Number(out.year),
-    mo: Number(out.month),
-    d: Number(out.day),
-    h: Number(out.hour) % 24,
-    mi: Number(out.minute),
-  };
-}
-
-function tzParts(date) {
-  const f = tzFields(date);
-  return { ymd: `${f.y}${pad2(f.mo)}${pad2(f.d)}`, mins: f.h * 60 + f.mi };
-}
-
-/* Epoch seconds for a Budapest wall-clock moment given as YYYYMMDD plus minutes
-   from midnight. GTFS uses 24:xx and beyond for after-midnight trips, so mins
-   may exceed 1440. Two passes settle the DST offset. */
-function tzEpochSec(ymd, mins) {
-  const y = Number(ymd.slice(0, 4));
-  const mo = Number(ymd.slice(4, 6));
-  const d = Number(ymd.slice(6, 8));
-  const target = Date.UTC(y, mo - 1, d) + (mins || 0) * 60000;
-  let utc = target;
-  for (let i = 0; i < 2; i++) {
-    const f = tzFields(new Date(utc));
-    utc += target - Date.UTC(f.y, f.mo - 1, f.d, f.h, f.mi);
-  }
-  return Math.round(utc / 1000);
-}
-
-function tzShiftYmd(ymd, days) {
-  const y = Number(ymd.slice(0, 4));
-  const mo = Number(ymd.slice(4, 6));
-  const d = Number(ymd.slice(6, 8));
-  const t = new Date(Date.UTC(y, mo - 1, d + (days || 0)));
-  return `${t.getUTCFullYear()}${pad2(t.getUTCMonth() + 1)}${pad2(t.getUTCDate())}`;
-}
-
-/* GTFS calendar.txt starts the week on Monday. */
-function tzDow(ymd) {
-  const y = Number(ymd.slice(0, 4));
-  const mo = Number(ymd.slice(4, 6));
-  const d = Number(ymd.slice(6, 8));
-  const js = new Date(Date.UTC(y, mo - 1, d)).getUTCDay();
-  return js === 0 ? 6 : js - 1;
-}
-
-function dayBuster(base) {
-  return `${base}${base.includes('?') ? '&' : '?'}v=${tzParts(new Date()).ymd}`;
-}
-
-function volanIndexUrl() {
-  const base = VOLAN_INDEX_OVERRIDE || new URL('volan-index.json.gz', ASSET_BASE).href;
-  return dayBuster(base);
-}
-
-function cityIndexUrl() {
-  const base = CITY_INDEX_OVERRIDE || new URL('city-index.json.gz', ASSET_BASE).href;
-  return dayBuster(base);
-}
-
-function mavIndexUrl() {
-  const base = MAV_INDEX_OVERRIDE || new URL('mav-index.json.gz', ASSET_BASE).href;
-  return dayBuster(base);
-}
-
-const I18N = {
-  hu: {
-    langAuto: 'Automatikus (Home Assistant nyelve)',
-    langHu: 'Magyar',
-    langEn: 'English',
-    langLabel: 'Nyelv',
-    apiKeyLabel: 'BKK API kulcs',
-    apiKeyPlaceholder: 'UUID a BKK Open Dat\u00e1b\u00f3l',
-    apiKeyHint: 'Ingyenes kulcs, egyszer\u0171 regisztr\u00e1ci\u00f3 ut\u00e1n:',
-    apiKeyOk: 'A BKK API kulcs rendben van.',
-    apiKeyChange: 'M\u00f3dos\u00edt\u00e1s',
-    apiKeyIntegration: 'A BKK API kulcsot a Magyar k\u00f6zleked\u00e9s integr\u00e1ci\u00f3 adja.',
-    nameLabel: 'N\u00e9v (opcion\u00e1lis)',
-    namePlaceholder: 'Hungarian transport',
-    destLoading: 'El\u00e9rhet\u0151 c\u00e9lok bet\u00f6lt\u00e9se...',
-    destEmptySuggest: (list) => 'Nincs k\u00f6zvetlen j\u00e1rat erre a c\u00e9lra. El\u00e9rhet\u0151 c\u00e9lok: ' + list + '.',
-    platformShort: (p) => `v\u00e1g.${p}`,
-    tipPlatform: (p) => `V\u00e1g\u00e1ny ${p}`,
-    minutes: (n) => `${n} perc`,
-    now: 'most',
-    cardNoDepartures: 'Nincs k\u00f6zelg\u0151 indul\u00e1s.',
-    cardPickStops: 'V\u00e1lassz forr\u00e1s \u00e9s c\u00e9l meg\u00e1ll\u00f3t a k\u00e1rtya be\u00e1ll\u00edt\u00e1saiban.',
-    cardLoading: 'Bet\u00f6lt\u00e9s\u2026',
-    tipWheelchair: 'Akad\u00e1lymentes, alacsonypadl\u00f3s j\u00e1rm\u0171',
-    tipBike: 'Ker\u00e9kp\u00e1r sz\u00e1ll\u00edthat\u00f3',
-    tipBooking: 'Helyjegy v\u00e1lt\u00e1sa k\u00f6telez\u0151',
-    tipDelay: (n) => `${n} perc k\u00e9s\u00e9s`,
-    tipEarly: (n) => `${n} perccel kor\u00e1bban indul`,
-    tipScheduled: (hm) => `Menetrend szerint ${hm}`,
-    tipTravel: (n) => `Menetid\u0151 a c\u00e9lig: ${n} perc`,
-    tipTrain: (nr) => `Vonatsz\u00e1m: ${nr}`,
-    mapOpenTip: 'T\u00e9rk\u00e9p: j\u00e1rm\u0171 az \u00fatvonalon',
-    mapClose: 'Bez\u00e1r\u00e1s',
-    mapLoadingRoute: '\u00datvonal bet\u00f6lt\u00e9se\u2026',
-    mapNoData: 'Ehhez a j\u00e1rathoz jelenleg nincs \u00e9l\u0151 poz\u00edci\u00f3 vagy \u00fatvonal.',
-    mapLeafletFail: 'A t\u00e9rk\u00e9p bet\u00f6lt\u00e9se nem siker\u00fclt.',
-    mapNoGeometry: 'A BKK nem adott vissza \u00fatvonal-geometri\u00e1t ehhez a j\u00e1rathoz.',
-    mapRouteFail: (msg) => `\u00datvonal nem t\u00f6lthet\u0151: ${msg}`,
-    mapNothingToShow: 'Nincs megjelen\u00edthet\u0151 \u00fatvonal ehhez a j\u00e1rathoz.',
-    mapFullRoute: 'Teljes \u00fatvonal',
-    mapBoardStop: 'Felsz\u00e1ll\u00e1s',
-    mapLivePos: '\u00c9l\u0151 poz\u00edci\u00f3',
-    mapEstPos: 'Becs\u00fclt poz\u00edci\u00f3 (menetrend)',
-    mapNoGps: 'Nincs \u00e9l\u0151 GPS',
-    mapUntilStop: (n) => `Meg\u00e1ll\u00f3ig: ${n}%`,
-    mapExpected: (hm) => `V\u00e1rhat\u00f3: ${hm}`,
-    mapExpectedVs: (pair) => `V\u00e1rhat\u00f3: ${pair[0]} (menetrend ${pair[1]})`,
-    mapFootFallback: 'J\u00e1rm\u0171 a t\u00e9rk\u00e9pen',
-    mapLiveDot: '\u00c9l\u0151 poz\u00edci\u00f3',
-    mapEstDot: 'Becs\u00fclt poz\u00edci\u00f3',
-    mapTypeBus: 'Busz',
-    mapTypeTram: 'Villamos',
-    mapTypeTrolley: 'Trolibusz',
-    mapTypeSubway: 'Metr\u00f3',
-    mapTypeRail: 'Vonat',
-    mapTypeVehicle: 'J\u00e1rm\u0171',
-    errNoApiKey: 'Nincs BKK API kulcs: add meg a Magyar k\u00f6zleked\u00e9s integr\u00e1ci\u00f3ban vagy a k\u00e1rty\u00e1ban.',
-    errApiKeyBad: 'A BKK API kulcs \u00e9rv\u00e9nytelen (401/403).',
-    errApiKeyProbe: 'A BKK API kulcsot nem siker\u00fclt ellen\u0151rizni.',
-    errVolanHttp: (status) => `Vol\u00e1n menetrend HTTP ${status}`,
-    errVolanGunzip: 'A b\u00f6ng\u00e9sz\u0151 nem tudja kicsomagolni a Vol\u00e1n menetrendet.',
-    errCityHttp: (status) => `Helyi menetrend HTTP ${status}`,
-    errCityGunzip: 'A b\u00f6ng\u00e9sz\u0151 nem tudja kicsomagolni a helyi menetrendet.',
-    errIndexFetch: 'A menetrend-index nem t\u00f6lt\u0151d\u00f6tt le (id\u0151t\u00fall\u00e9p\u00e9s vagy h\u00e1l\u00f3zati hiba).',
-    errIndexParse: 'A let\u00f6lt\u00f6tt menetrend-index olvashatatlan.',
-    errIndexSchema: (v) => `A menetrend-index \u00fajabb (v${v}), mint amit ez a k\u00e1rtya ismer. Friss\u00edtsd a k\u00e1rty\u00e1t.`,
-    cityLabel: 'V\u00e1ros',
-    cityPlaceholder: 'V\u00e1lassz v\u00e1rost',
-    minutesAfterLabel: 'Menetrend el\u0151re (perc)',
-    minutesAfterHint: 'H\u00e1ny percet n\u00e9zzen el\u0151re az indul\u00e1sokb\u00f3l. 30\u2013480 perc, alap\u00e9rtelmez\u00e9s 180.',
-    plannerTitle: 'Tervez\u0151',
-    plannerStep1: 'Forr\u00e1s',
-    plannerStep2: 'C\u00e9l',
-    plannerStep3: 'Meddig',
-    plannerSwap: 'Csere',
-    plannerDepartures: 'Indul\u00e1sok',
-    plannerSearchPlaceholder: 'Utca, h\u00e1zsz\u00e1m, v\u00e1ros, meg\u00e1ll\u00f3...',
-    plannerDestPlaceholder: 'Utca, h\u00e1zsz\u00e1m, v\u00e1ros, meg\u00e1ll\u00f3...',
-    plannerTypeDest: '\u00cdrj egy utc\u00e1t, v\u00e1rost vagy meg\u00e1ll\u00f3t.',
-    plannerAddress: 'c\u00edm',
-    plannerPlace: 'hely',
-    plannerReset: '\u00daj',
-    plannerMultiHint: 'T\u00f6bbet is v\u00e1laszthatsz. Ekkor csak a k\u00f6z\u00f6s meg\u00e1ll\u00f3k maradnak.',
-    plannerPickVehicleFirst: 'El\u0151bb v\u00e1lassz j\u00e1rm\u0171vet',
-    plannerPickAll: 'V\u00e1lassz forr\u00e1s \u00e9s c\u00e9l meg\u00e1ll\u00f3t.',
-    plannerLoading: 'Bet\u00f6lt\u00e9s...',
-    plannerNoSharedStop: 'Nincs k\u00f6z\u00f6s meg\u00e1ll\u00f3',
-    plannerNoSharedLater: 'Ezeknek a j\u00e1ratoknak nincs k\u00f6z\u00f6s k\u00e9s\u0151bbi meg\u00e1ll\u00f3ja.',
-    plannerJourneyTitle: '\u00c1tsz\u00e1ll\u00e1ssal',
-    plannerJourneySummary: (parts) => `${parts[0]} perc \u00b7 ${parts[1]} \u00e1tsz\u00e1ll\u00e1s \u00b7 ${parts[2]} perc gyalogl\u00e1s \u00b7 ${parts[3]} perc v\u00e1rakoz\u00e1s`,
-    plannerWalk: (parts) => `Gyalogl\u00e1s ${parts[0]} perc, ${parts[1]} m`,
-    plannerWait: (min) => `V\u00e1rakoz\u00e1s ${min} perc`,
-    plannerStationWalk: (parts) => `Gyalogl\u00e1s a v\u00e1g\u00e1nyhoz ${parts[0]} perc, ${parts[1]} m`,
-    plannerRide: (min) => `${min} perc`,
-    plannerShowMap: 'T\u00e9rk\u00e9p',
-    plannerPickDest: 'V\u00e1lassz c\u00e9lt...',
-    plannerNoRoutes: 'Nincs indul\u00f3 j\u00e1rat ebben a meg\u00e1ll\u00f3ban.',
-    plannerNoDepartures: 'Nincs k\u00f6zelg\u0151 indul\u00e1s a v\u00e1lasztott j\u00e1ratokkal.',
-    colArrival: '\u00e9rkez\u00e9s',
-    colExpected: 'v\u00e1rhat\u00f3',
-    colTravel: 'menetid\u0151',
-    mode: {
-      bkk: {
-        stop: 'Forr\u00e1s meg\u00e1ll\u00f3',
-        dest: 'C\u00e9l meg\u00e1ll\u00f3',
-        hint: 'Add meg a forr\u00e1s \u00e9s a c\u00e9l meg\u00e1ll\u00f3t. Az \u00f6sszes BKK j\u00e1rat megjelenik k\u00f6z\u00f6tt\u00fck.',
-        originPh: 'Keres\u00e9s, pl. Bosny\u00e1k t\u00e9r, \u00c1rp\u00e1d h\u00edd',
-        destPh: 'Keres\u00e9s a forr\u00e1sb\u00f3l el\u00e9rhet\u0151 meg\u00e1ll\u00f3k k\u00f6z\u00f6tt',
-        empty: 'Nincs BKK meg\u00e1ll\u00f3 erre a keres\u00e9sre.',
-        destEmpty: 'Err\u0151l a meg\u00e1ll\u00f3r\u00f3l nincs j\u00e1rat erre a c\u00e9lra.',
-        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
-        destNone: 'Nincs el\u00e9rhet\u0151 BKK c\u00e9l ebb\u0151l a forr\u00e1sb\u00f3l.',
-      },
-      all: {
-        stop: 'Forr\u00e1s meg\u00e1ll\u00f3',
-        dest: 'C\u00e9l meg\u00e1ll\u00f3',
-        hint: 'V\u00e1lassz forr\u00e1s \u00e9s c\u00e9l meg\u00e1ll\u00f3t. Minden BKK, Vol\u00e1n \u00e9s M\u00c1V j\u00e1rat megjelenik k\u00f6z\u00f6tt\u00fck.',
-        originPh: 'Utca, meg\u00e1ll\u00f3, aut\u00f3busz-\u00e1llom\u00e1s...',
-        destPh: 'C\u00e9l meg\u00e1ll\u00f3 keres\u00e9se...',
-        empty: 'Nincs meg\u00e1ll\u00f3 erre a keres\u00e9sre.',
-        destEmpty: 'Nincs j\u00e1rat ebb\u0151l a meg\u00e1ll\u00f3b\u00f3l oda.',
-        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
-        destNone: 'Ebb\u0151l a forr\u00e1sb\u00f3l nincs k\u00f6zvetlen c\u00e9l.',
-      },
-      mav: {
-        stop: 'Forr\u00e1s \u00e1llom\u00e1s',
-        dest: 'C\u00e9l \u00e1llom\u00e1s',
-        hint: 'Add meg a forr\u00e1s \u00e9s a c\u00e9l \u00e1llom\u00e1st. Az \u00f6sszes vonat megjelenik k\u00f6z\u00f6tt\u00fck.',
-        originPh: 'Keres\u00e9s, pl. Kelenf\u00f6ld, Sz\u00e9kesfeh\u00e9rv\u00e1r',
-        destPh: 'Keres\u00e9s a forr\u00e1sb\u00f3l el\u00e9rhet\u0151 \u00e1llom\u00e1sok k\u00f6z\u00f6tt',
-        empty: 'Nincs M\u00c1V \u00e1llom\u00e1s erre a keres\u00e9sre.',
-        destEmpty: 'Err\u0151l az \u00e1llom\u00e1sr\u00f3l nincs vonat erre a c\u00e9lra.',
-        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s \u00e1llom\u00e1st.',
-        destNone: 'Nincs el\u00e9rhet\u0151 M\u00c1V c\u00e9l\u00e1llom\u00e1s ebb\u0151l a forr\u00e1sb\u00f3l.',
-      },
-      volan: {
-        stop: 'Forr\u00e1s meg\u00e1ll\u00f3',
-        dest: 'C\u00e9l meg\u00e1ll\u00f3',
-        hint: 'Add meg a forr\u00e1s \u00e9s a c\u00e9l Vol\u00e1n meg\u00e1ll\u00f3t. Az \u00f6sszes busz megjelenik k\u00f6z\u00f6tt\u00fck.',
-        originPh: 'Keres\u00e9s, pl. N\u00e9pliget, Sz\u00e9kesfeh\u00e9rv\u00e1r aut\u00f3busz-\u00e1llom\u00e1s',
-        destPh: 'Keres\u00e9s a forr\u00e1sb\u00f3l el\u00e9rhet\u0151 Vol\u00e1n meg\u00e1ll\u00f3k k\u00f6z\u00f6tt',
-        empty: 'Nincs Vol\u00e1n meg\u00e1ll\u00f3 erre a keres\u00e9sre.',
-        destEmpty: 'Err\u0151l a meg\u00e1ll\u00f3r\u00f3l nincs k\u00f6zvetlen Vol\u00e1n erre a c\u00e9lra.',
-        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
-        destNone: 'Nincs el\u00e9rhet\u0151 Vol\u00e1n c\u00e9l ebb\u0151l a forr\u00e1sb\u00f3l.',
-      },
-      helyi: {
-        stop: 'Forr\u00e1s meg\u00e1ll\u00f3',
-        dest: 'C\u00e9l meg\u00e1ll\u00f3',
-        hint: 'V\u00e1lassz v\u00e1rost, majd a forr\u00e1s \u00e9s a c\u00e9l meg\u00e1ll\u00f3t. A helyi j\u00e1ratok jelennek meg k\u00f6z\u00f6tt\u00fck.',
-        originPh: 'Keres\u00e9s a v\u00e1ros meg\u00e1ll\u00f3i k\u00f6z\u00f6tt',
-        destPh: 'Keres\u00e9s a forr\u00e1sb\u00f3l el\u00e9rhet\u0151 meg\u00e1ll\u00f3k k\u00f6z\u00f6tt',
-        empty: 'Nincs meg\u00e1ll\u00f3 erre a keres\u00e9sre ebben a v\u00e1rosban.',
-        destEmpty: 'Err\u0151l a meg\u00e1ll\u00f3r\u00f3l nincs k\u00f6zvetlen j\u00e1rat erre a c\u00e9lra.',
-        destNeedOrigin: 'El\u0151bb v\u00e1lassz forr\u00e1s meg\u00e1ll\u00f3t.',
-        destNone: 'Nincs el\u00e9rhet\u0151 c\u00e9l ebb\u0151l a forr\u00e1sb\u00f3l.',
-      },
-    },
-  },
-  en: {
-    langAuto: 'Automatic (Home Assistant language)',
-    langHu: 'Magyar',
-    langEn: 'English',
-    langLabel: 'Language',
-    apiKeyLabel: 'BKK API key',
-    apiKeyPlaceholder: 'UUID from BKK Open Data',
-    apiKeyHint: 'Free key, after a quick sign-up:',
-    apiKeyOk: 'The BKK API key is working.',
-    apiKeyChange: 'Change',
-    apiKeyIntegration: 'The BKK API key comes from the Hungarian transport integration.',
-    nameLabel: 'Name (optional)',
-    namePlaceholder: 'Hungarian transport',
-    destLoading: 'Loading reachable destinations...',
-    destEmptySuggest: (list) => 'No direct service to that destination. Reachable destinations: ' + list + '.',
-    platformShort: (p) => `pl.${p}`,
-    tipPlatform: (p) => `Platform ${p}`,
-    minutes: (n) => `${n} min`,
-    now: 'now',
-    cardNoDepartures: 'No upcoming departures.',
-    cardPickStops: 'Pick an origin and a destination stop in the card settings.',
-    cardLoading: 'Loading\u2026',
-    tipWheelchair: 'Wheelchair accessible, low-floor vehicle',
-    tipBike: 'Bikes allowed',
-    tipBooking: 'Seat reservation required',
-    tipDelay: (n) => `${n} min late`,
-    tipEarly: (n) => `${n} min early`,
-    tipScheduled: (hm) => `Scheduled for ${hm}`,
-    tipTravel: (n) => `Travel time to destination: ${n} min`,
-    tipTrain: (nr) => `Train number: ${nr}`,
-    mapOpenTip: 'Map: vehicle on its route',
-    mapClose: 'Close',
-    mapLoadingRoute: 'Loading route\u2026',
-    mapNoData: 'No live position or route is available for this trip.',
-    mapLeafletFail: 'Could not load the map.',
-    mapNoGeometry: 'BKK did not return a route shape for this trip.',
-    mapRouteFail: (msg) => `Could not load the route: ${msg}`,
-    mapNothingToShow: 'Nothing to show on the map for this trip.',
-    mapFullRoute: 'Full route',
-    mapBoardStop: 'Boarding',
-    mapLivePos: 'Live position',
-    mapEstPos: 'Estimated position (timetable)',
-    mapNoGps: 'No live GPS',
-    mapUntilStop: (n) => `To stop: ${n}%`,
-    mapExpected: (hm) => `Due: ${hm}`,
-    mapExpectedVs: (pair) => `Due: ${pair[0]} (scheduled ${pair[1]})`,
-    mapFootFallback: 'Vehicle on the map',
-    mapLiveDot: 'Live position',
-    mapEstDot: 'Estimated position',
-    mapTypeBus: 'Bus',
-    mapTypeTram: 'Tram',
-    mapTypeTrolley: 'Trolleybus',
-    mapTypeSubway: 'Metro',
-    mapTypeRail: 'Train',
-    mapTypeVehicle: 'Vehicle',
-    errNoApiKey: 'No BKK API key: set it in the Hungarian transport integration or in the card.',
-    errApiKeyBad: 'The BKK API key is invalid (401/403).',
-    errApiKeyProbe: 'Could not verify the BKK API key.',
-    errVolanHttp: (status) => `Vol\u00e1n timetable HTTP ${status}`,
-    errVolanGunzip: 'This browser cannot decompress the Vol\u00e1n timetable.',
-    errCityHttp: (status) => `Local timetable HTTP ${status}`,
-    errCityGunzip: 'This browser cannot decompress the local timetable.',
-    errIndexFetch: 'Could not download the timetable index (timeout or network error).',
-    errIndexParse: 'The downloaded timetable index is unreadable.',
-    errIndexSchema: (v) => `The timetable index is newer (v${v}) than this card understands. Please update the card.`,
-    cityLabel: 'City',
-    cityPlaceholder: 'Pick a city',
-    minutesAfterLabel: 'Look-ahead (minutes)',
-    minutesAfterHint: 'How far ahead to list departures. 30\u2013480 minutes, default 180.',
-    plannerTitle: 'Planner',
-    plannerStep1: 'Origin',
-    plannerStep2: 'Destination',
-    plannerStep3: 'Look-ahead',
-    plannerSwap: 'Swap',
-    plannerDepartures: 'Departures',
-    plannerSearchPlaceholder: 'Street, house number, city, stop...',
-    plannerDestPlaceholder: 'Street, house number, city, stop...',
-    plannerTypeDest: 'Type a street, city or stop.',
-    plannerAddress: 'address',
-    plannerPlace: 'place',
-    plannerReset: 'Reset',
-    plannerMultiHint: 'You can pick several. Only stops shared by all of them are kept.',
-    plannerPickVehicleFirst: 'Pick a vehicle first',
-    plannerPickAll: 'Pick an origin and a destination stop.',
-    plannerLoading: 'Loading...',
-    plannerNoSharedStop: 'No shared stop',
-    plannerNoSharedLater: 'These routes share no later stop.',
-    plannerJourneyTitle: 'With a transfer',
-    plannerJourneySummary: (parts) => `${parts[0]} min \u00b7 ${parts[1]} transfer \u00b7 ${parts[2]} min walking \u00b7 ${parts[3]} min waiting`,
-    plannerWalk: (parts) => `Walk ${parts[0]} min, ${parts[1]} m`,
-    plannerWait: (min) => `Wait ${min} min`,
-    plannerStationWalk: (parts) => `Walk to the platform ${parts[0]} min, ${parts[1]} m`,
-    plannerRide: (min) => `${min} min`,
-    plannerShowMap: 'Map',
-    plannerPickDest: 'Pick a destination...',
-    plannerNoRoutes: 'No departures from this stop.',
-    plannerNoDepartures: 'No upcoming departure on the selected routes.',
-    colArrival: 'in',
-    colExpected: 'expected',
-    colTravel: 'travel',
-    mode: {
-      bkk: {
-        stop: 'Origin stop',
-        dest: 'Destination stop',
-        hint: 'Pick an origin and a destination stop. Every BKK service between them is listed.',
-        originPh: 'Search, e.g. Bosny\u00e1k t\u00e9r, \u00c1rp\u00e1d h\u00edd',
-        destPh: 'Search among the stops reachable from the origin',
-        empty: 'No BKK stop matches this search.',
-        destEmpty: 'No service from this stop to that destination.',
-        destNeedOrigin: 'Pick an origin stop first.',
-        destNone: 'No BKK destination is reachable from this origin.',
-      },
-      all: {
-        stop: 'Origin stop',
-        dest: 'Destination stop',
-        hint: 'Pick an origin and a destination stop. Every BKK, Vol\u00e1n and M\u00c1V service between them is listed.',
-        originPh: 'Street, stop, coach station...',
-        destPh: 'Search destination stop...',
-        empty: 'No stop matches this search.',
-        destEmpty: 'No service from this stop to that destination.',
-        destNeedOrigin: 'Pick an origin stop first.',
-        destNone: 'No destination is reachable from this origin.',
-      },
-      mav: {
-        stop: 'Origin station',
-        dest: 'Destination station',
-        hint: 'Pick an origin and a destination station. Every train between them is listed.',
-        originPh: 'Search, e.g. Kelenf\u00f6ld, Sz\u00e9kesfeh\u00e9rv\u00e1r',
-        destPh: 'Search among the stations reachable from the origin',
-        empty: 'No M\u00c1V station matches this search.',
-        destEmpty: 'No train from this station to that destination.',
-        destNeedOrigin: 'Pick an origin station first.',
-        destNone: 'No M\u00c1V destination is reachable from this origin.',
-      },
-      volan: {
-        stop: 'Origin stop',
-        dest: 'Destination stop',
-        hint: 'Pick an origin and a destination Vol\u00e1n stop. Every coach between them is listed.',
-        originPh: 'Search, e.g. N\u00e9pliget, Sz\u00e9kesfeh\u00e9rv\u00e1r aut\u00f3busz-\u00e1llom\u00e1s',
-        destPh: 'Search among the Vol\u00e1n stops reachable from the origin',
-        empty: 'No Vol\u00e1n stop matches this search.',
-        destEmpty: 'No direct coach from this stop to that destination.',
-        destNeedOrigin: 'Pick an origin stop first.',
-        destNone: 'No Vol\u00e1n destination is reachable from this origin.',
-      },
-      helyi: {
-        stop: 'Origin stop',
-        dest: 'Destination stop',
-        hint: 'Pick a city, then an origin and a destination. Local services between them are listed.',
-        originPh: 'Search stops in this city',
-        destPh: 'Search among the stops reachable from the origin',
-        empty: 'No stop in this city matches the search.',
-        destEmpty: 'No direct service from this stop to that destination.',
-        destNeedOrigin: 'Pick an origin stop first.',
-        destNone: 'No destination is reachable from this origin.',
-      },
-    },
-  },
-};
-
-/* Errors thrown deep in BkkLib carry a translation key so the display site can
-   render them in the language the card is configured for. */
-function codedError(key, arg) {
-  const err = new Error(String(I18N.hu[key] instanceof Function ? I18N.hu[key](arg) : I18N.hu[key]));
-  err.i18nKey = key;
-  err.i18nArg = arg;
-  return err;
-}
-
-function resolveLang(pref, hass) {
-  if (pref === 'hu' || pref === 'en') return pref;
-  const raw = (hass && hass.language)
-    || (typeof navigator !== 'undefined' ? navigator.language : '')
-    || 'hu';
-  return String(raw).toLowerCase().startsWith('hu') ? 'hu' : 'en';
-}
-
-function t(lang, key, arg) {
-  const dict = I18N[lang] || I18N.hu;
-  const value = dict[key] !== undefined ? dict[key] : I18N.hu[key];
-  return typeof value === 'function' ? value(arg) : value;
-}
-
-function modeCopy(lang, mode) {
-  const dict = I18N[lang] || I18N.hu;
-  return dict.mode[mode] || dict.mode.bkk;
-}
-
-function errText(lang, err) {
-  if (err && err.i18nKey) return t(lang, err.i18nKey, err.i18nArg);
-  return (err && err.message) ? err.message : String(err);
-}
-
-const BKK_HOP_TAG = 'hungarian-transport-card';
-const BKK_HOP_EDITOR = 'hungarian-transport-card-editor';
-const BKK_HOP_TAG_ALIAS = 'bkk-stop-card-r3';
-const BKK_HOP_EDITOR_ALIAS = 'bkk-stop-card-r3-editor';
-const BKK_PLANNER_EDITOR = 'hungarian-transit-stop-card-plan-editor';
-const BKK_PLANNER_EDITOR_ALIAS = 'bkk-stop-card-plan-editor';
-const OWN_CARD_TYPES = [BKK_HOP_TAG, BKK_HOP_TAG_ALIAS, BKK_PLANNER_TAG, BKK_PLANNER_TAG_ALIAS];
-/* Highest compact-index layout this card understands; see scripts/gtfs_compact.py. */
-const INDEX_SCHEMA = 27;
-
-const BkkLib = {
+// src/lib/names.js
+Object.assign(BkkLib, {
   esc(s) {
-    return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => (
-      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-    ));
+    return String(s === null || s === void 0 ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   },
   norm(name) {
-    let t = String(name || '').normalize('NFC');
-    t = t.replace(/[\u200B-\u200D\uFEFF]/g, '');
-    t = t.replace(/[\u00A0\u202F]/g, ' ');
-    t = t.trim().toLowerCase();
-    t = t.replace(/[\u2013\u2014]/g, '-');
-    t = t.replace(/\s+/g, ' ');
-    [' vas\u00fat\u00e1llom\u00e1s', ' p\u00e1lyaudvar', ' pu.'].forEach((sfx) => {
-      if (t.endsWith(sfx)) t = t.slice(0, -sfx.length).trim();
+    let t2 = String(name || "").normalize("NFC");
+    t2 = t2.replace(/[\u200B-\u200D\uFEFF]/g, "");
+    t2 = t2.replace(/[\u00A0\u202F]/g, " ");
+    t2 = t2.trim().toLowerCase();
+    t2 = t2.replace(/[\u2013\u2014]/g, "-");
+    t2 = t2.replace(/\s+/g, " ");
+    [" vasútállomás", " pályaudvar", " pu."].forEach((sfx) => {
+      if (t2.endsWith(sfx)) t2 = t2.slice(0, -sfx.length).trim();
     });
-    t = t.replace(/[,.;:\s]+$/g, '').trim();
-    return t;
+    t2 = t2.replace(/[,.;:\s]+$/g, "").trim();
+    return t2;
   },
   /* "Keleti pályaudvar M" (street) and "Keleti pályaudvar" (metro) are one place. */
   stationKey(name) {
-    let t = String(name || '').normalize('NFC');
-    t = t.replace(/[\u200B-\u200D\uFEFF]/g, '');
-    t = t.replace(/[\u00A0\u202F]/g, ' ');
-    t = t.trim().toLowerCase();
-    t = t.replace(/[\u2013\u2014]/g, '-');
-    t = t.replace(/\s+/g, ' ');
-    t = t.replace(/\s+m\+h$/i, '').trim();
-    t = t.replace(/\s+m\+$/i, '').trim();
-    if (/\sm$/i.test(t)) t = t.replace(/\sm$/i, '').trim();
-    [' vas\u00fat\u00e1llom\u00e1s', ' p\u00e1lyaudvar', ' pu.', ' v\u00e1.', ' va.', ' pu'].forEach((sfx) => {
-      if (t.endsWith(sfx)) t = t.slice(0, -sfx.length).trim();
+    let t2 = String(name || "").normalize("NFC");
+    t2 = t2.replace(/[\u200B-\u200D\uFEFF]/g, "");
+    t2 = t2.replace(/[\u00A0\u202F]/g, " ");
+    t2 = t2.trim().toLowerCase();
+    t2 = t2.replace(/[\u2013\u2014]/g, "-");
+    t2 = t2.replace(/\s+/g, " ");
+    t2 = t2.replace(/\s+m\+h$/i, "").trim();
+    t2 = t2.replace(/\s+m\+$/i, "").trim();
+    if (/\sm$/i.test(t2)) t2 = t2.replace(/\sm$/i, "").trim();
+    [" vasútállomás", " pályaudvar", " pu.", " vá.", " va.", " pu"].forEach((sfx) => {
+      if (t2.endsWith(sfx)) t2 = t2.slice(0, -sfx.length).trim();
     });
-    t = t.replace(/[,.;:\s]+$/g, '').trim();
-    return t;
+    t2 = t2.replace(/[,.;:\s]+$/g, "").trim();
+    return t2;
   },
   nameEq(a, b) {
     if (!a || !b) return false;
@@ -623,15 +55,11 @@ const BkkLib = {
     return !!(pa && pb && pa === pb);
   },
   fold(s) {
-    return BkkLib.norm(s)
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]+/g, ' ')
-      .trim();
+    return BkkLib.norm(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
   },
   foldTokens(s) {
     const stop = /^(a|az|es|palyaudvar|vasutallomas|allomas|pu|megallo|ter|utca|ut|varos|budapest)$/;
-    return BkkLib.fold(s).split(' ').filter((tok) => tok.length >= 4 && !stop.test(tok));
+    return BkkLib.fold(s).split(" ").filter((tok) => tok.length >= 4 && !stop.test(tok));
   },
   foldTokenMatch(a, b) {
     const left = BkkLib.foldTokens(a);
@@ -640,7 +68,7 @@ const BkkLib = {
     return left.some((x) => right.some((y) => x === y || x.indexOf(y) >= 0 || y.indexOf(x) >= 0));
   },
   isRailHubName(name) {
-    const raw = String(name || '');
+    const raw = String(name || "");
     if (!raw) return false;
     if (/aut[o\u00f3]busz/i.test(raw) || /vol[a\u00e1]n/i.test(raw)) return false;
     return /p\u00e1lyaudvar|vas\u00fat\u00e1llom\u00e1s|\bpu\.?\b/i.test(raw);
@@ -648,10 +76,10 @@ const BkkLib = {
   isStopArea(stop) {
     if (!stop) return false;
     if (stop.locationType === 1) return true;
-    return /_CS/i.test(String(stop.id || ''));
+    return /_CS/i.test(String(stop.id || ""));
   },
   groupStops(stops) {
-    const byName = new Map();
+    const byName = /* @__PURE__ */ new Map();
     (stops || []).forEach((s) => {
       if (!s || !s.id || !s.name) return;
       const key = BkkLib.stationKey(s.name) || BkkLib.norm(s.name);
@@ -661,20 +89,16 @@ const BkkLib = {
     });
     const hits = [];
     byName.forEach((group) => {
-      const bkkArea = group.find((s) => /^BKK_CS/i.test(String(s.id || '')));
-      const mavParent = group.find((s) => /^BKK_0055[0-9]+$/.test(String(s.id || '')));
-      const volanArea = group.find((s) => (
-        /^AREA_CS/i.test(String(s.id || '')) ||
-        (/^volan_/i.test(String(s.id || '')) && s.locationType === 1)
-      ));
-      const area = bkkArea || mavParent || volanArea
-        || group.find((s) => BkkLib.isStopArea(s) && !/^STOP_/i.test(String(s.id || '')));
+      const bkkArea = group.find((s) => /^BKK_CS/i.test(String(s.id || "")));
+      const mavParent = group.find((s) => /^BKK_0055[0-9]+$/.test(String(s.id || "")));
+      const volanArea = group.find((s) => /^AREA_CS/i.test(String(s.id || "")) || /^volan_/i.test(String(s.id || "")) && s.locationType === 1);
+      const area = bkkArea || mavParent || volanArea || group.find((s) => BkkLib.isStopArea(s) && !/^STOP_/i.test(String(s.id || "")));
       const withParent = group.find((s) => s.parentStationId);
       const named = group.find((s) => !BkkLib.isMetroSuffixName(s.name)) || group[0];
       const pick = area || withParent || named;
       const hit = {
-        id: area ? area.id : (pick.parentStationId || pick.id),
-        name: named.name,
+        id: area ? area.id : pick.parentStationId || pick.id,
+        name: named.name
       };
       const withCoord = group.find((s) => BkkLib.finiteLatLon(s.lat, s.lon)) || pick;
       if (BkkLib.finiteLatLon(withCoord.lat, withCoord.lon)) {
@@ -686,73 +110,73 @@ const BkkLib = {
     return hits;
   },
   placeRestKey(rest) {
-    const t = String(rest || '').trim();
-    if (!t) return '';
-    const sk = BkkLib.stationKey(t) || BkkLib.norm(t);
+    const t2 = String(rest || "").trim();
+    if (!t2) return "";
+    const sk = BkkLib.stationKey(t2) || BkkLib.norm(t2);
     const folded = BkkLib.fold(sk);
-    if (!folded) return '';
-    if (/^(vasutallomas|palyaudvar|pu|va)$/.test(folded.replace(/[\s.]/g, ''))) return '';
+    if (!folded) return "";
+    if (/^(vasutallomas|palyaudvar|pu|va)$/.test(folded.replace(/[\s.]/g, ""))) return "";
     return sk;
   },
   splitCityPrefix(name) {
-    let t = String(name || '').replace(/[\u2013\u2014]/g, '-').trim();
-    t = t.replace(/\s*\(([^)]+)\)\s*$/, '').trim();
-    let m = t.match(/^([^,]+),\s*(.+)$/);
+    let t2 = String(name || "").replace(/[\u2013\u2014]/g, "-").trim();
+    t2 = t2.replace(/\s*\(([^)]+)\)\s*$/, "").trim();
+    let m = t2.match(/^([^,]+),\s*(.+)$/);
     if (m && BkkLib.placeRestKey(m[2])) {
       return { city: m[1].trim(), rest: m[2].trim() };
     }
-    m = t.match(/^([^\s,]+)-(.+)$/);
-    if (m && BkkLib.placeRestKey(m[2]) && BkkLib.fold(m[1]) === 'budapest') {
+    m = t2.match(/^([^\s,]+)-(.+)$/);
+    if (m && BkkLib.placeRestKey(m[2]) && BkkLib.fold(m[1]) === "budapest") {
       return { city: m[1].trim(), rest: m[2].trim() };
     }
     return null;
   },
   placeNameKey(stop) {
-    const raw = String((stop && (stop.name || stop.label)) || '');
-    let t = raw.replace(/[\u2013\u2014]/g, '-').trim();
-    t = t.replace(/\s*\(([^)]+)\)\s*$/, '').trim();
-    t = t.replace(/\s+[ivxlcdm]+\.?\s*ker(?:ület|ulet)\s*$/i, '').trim();
-    let key = BkkLib.stationKey(t) || BkkLib.norm(t);
-    const split = BkkLib.splitCityPrefix(t);
+    const raw = String(stop && (stop.name || stop.label) || "");
+    let t2 = raw.replace(/[\u2013\u2014]/g, "-").trim();
+    t2 = t2.replace(/\s*\(([^)]+)\)\s*$/, "").trim();
+    t2 = t2.replace(/\s+[ivxlcdm]+\.?\s*ker(?:ület|ulet)\s*$/i, "").trim();
+    let key = BkkLib.stationKey(t2) || BkkLib.norm(t2);
+    const split = BkkLib.splitCityPrefix(t2);
     if (split) key = BkkLib.placeRestKey(split.rest) || key;
     let folded = BkkLib.fold(key);
     const cityLead = folded.match(/^budapest\s+(.+)$/);
     if (cityLead) folded = cityLead[1];
-    folded = folded.replace(/\s+(?:train|railway)\s+station$/, '').trim();
-    folded = folded.replace(/\s+(?:p\s*r|parkolo)$/, '').trim();
+    folded = folded.replace(/\s+(?:train|railway)\s+station$/, "").trim();
+    folded = folded.replace(/\s+(?:p\s*r|parkolo)$/, "").trim();
     if (/^(?:(?:auto)?busz?(?:\s+|-)(?:station|allomas|palyaudvar)|aut\s*all)$/.test(folded)) {
-      folded = 'aut all';
+      folded = "aut all";
     } else {
       folded = folded.replace(
         /\s+(?:(?:auto)?busz?(?:\s+|-)(?:station|allomas|palyaudvar)|aut\s*all)$/,
-        ' aut all',
+        " aut all"
       );
     }
     return folded;
   },
   stopCityKey(stop) {
-    const name = String((stop && stop.name) || '');
+    const name = String(stop && stop.name || "");
     const split = BkkLib.splitCityPrefix(name);
     if (split) return BkkLib.fold(split.city);
-    const label = String((stop && (stop.label || stop.name)) || '');
+    const label = String(stop && (stop.label || stop.name) || "");
     const paren = label.match(/\(([^)]+)\)\s*$/);
     if (paren && !/^(m[\u00e1a]v|vol[\u00e1a]n)$/i.test(paren[1])) {
       return BkkLib.fold(paren[1]);
     }
-    return '';
+    return "";
   },
   plannerStopKey(stop) {
-    return BkkLib.stopCityKey(stop) + '|' + BkkLib.placeNameKey(stop);
+    return BkkLib.stopCityKey(stop) + "|" + BkkLib.placeNameKey(stop);
   },
   stopIdRank(id) {
-    const s = String(id || '');
+    const s = String(id || "");
     if (/^BKK_CS/i.test(s)) return 1;
     if (/^BKK_0055\d{6,}$/i.test(s)) return 3;
-    if (/^BKK_/i.test(s) && s.split('_').length <= 2) return 2;
+    if (/^BKK_/i.test(s) && s.split("_").length <= 2) return 2;
     if (/^BKK_/i.test(s)) return 4;
     if (/^hu-bkk_/i.test(s)) return 5;
     if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return 6;
-    if (/^[a-z][a-z0-9]*:/i.test(s) && s.indexOf('/') < 0) return 7;
+    if (/^[a-z][a-z0-9]*:/i.test(s) && s.indexOf("/") < 0) return 7;
     if (/^hu-/i.test(s)) return 8;
     if (/^(?:geo:|node\/|way\/)/i.test(s)) return 10;
     if (/^(?:cz-|sk-|ua-|de-|al-|at-|eu-|pl-)/i.test(s)) return 12;
@@ -760,15 +184,15 @@ const BkkLib = {
     return 9;
   },
   stopIdFamily(stop) {
-    if (BkkLib.isPlaceStop(stop)) return 'osm';
-    const s = String((stop && stop.id) || '');
-    if (/^(?:geo:|node\/|way\/)/i.test(s)) return 'osm';
-    if (/^BKK_0055/i.test(s) || /(?:^hu-mav_|railway)/i.test(s)) return 'mav';
-    if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return 'volan';
-    if (/^(?:BKK_|hu-bkk_)/i.test(s)) return 'bkk';
-    if (/^[a-z][a-z0-9]*:/i.test(s) && s.indexOf('/') < 0) return 'city';
-    if (/^hu-/i.test(s)) return 'hu';
-    return 'other';
+    if (BkkLib.isPlaceStop(stop)) return "osm";
+    const s = String(stop && stop.id || "");
+    if (/^(?:geo:|node\/|way\/)/i.test(s)) return "osm";
+    if (/^BKK_0055/i.test(s) || /(?:^hu-mav_|railway)/i.test(s)) return "mav";
+    if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return "volan";
+    if (/^(?:BKK_|hu-bkk_)/i.test(s)) return "bkk";
+    if (/^[a-z][a-z0-9]*:/i.test(s) && s.indexOf("/") < 0) return "city";
+    if (/^hu-/i.test(s)) return "hu";
+    return "other";
   },
   stopsTooFar(a, b) {
     const pa = BkkLib.finiteLatLon(a && a.lat, a && a.lon);
@@ -822,19 +246,17 @@ const BkkLib = {
         win.lat = s.lat;
         win.lon = s.lon;
       }
-      if (!win.kind && s.kind && s.kind !== 'place' && s.kind !== 'address') win.kind = s.kind;
+      if (!win.kind && s.kind && s.kind !== "place" && s.kind !== "address") win.kind = s.kind;
     });
-    const named = list.find((s) => (
-      s.name && !BkkLib.isPlaceStop(s) && !BkkLib.isMetroSuffixName(s.name)
-    )) || list.find((s) => s.name && !BkkLib.isPlaceStop(s)) || win;
+    const named = list.find((s) => s.name && !BkkLib.isPlaceStop(s) && !BkkLib.isMetroSuffixName(s.name)) || list.find((s) => s.name && !BkkLib.isPlaceStop(s)) || win;
     if (named && named.name) win.name = named.name;
     if (win.label) {
-      win.label = String(win.label).replace(/\s*\((?:M[\u00c1A]V|Vol[\u00e1a]n)\)\s*$/i, '');
+      win.label = String(win.label).replace(/\s*\((?:M[\u00c1A]V|Vol[\u00e1a]n)\)\s*$/i, "");
     }
     return win;
   },
   collapseSameNameStops(stops) {
-    const byKey = new Map();
+    const byKey = /* @__PURE__ */ new Map();
     (stops || []).forEach((s) => {
       if (!s || !s.id || !s.name) return;
       const key = BkkLib.placeNameKey(s);
@@ -855,20 +277,20 @@ const BkkLib = {
     return out;
   },
   destHitsForQuery(dests, q, extras) {
-    const f = BkkLib.fold(q || '');
+    const f = BkkLib.fold(q || "");
     const out = [];
-    const seen = new Map();
+    const seen = /* @__PURE__ */ new Map();
     const add = (d) => {
       if (!d || !d.name) return;
-      const id = d.id || d.stopId || '';
+      const id = d.id || d.stopId || "";
       let key = BkkLib.placeNameKey(d) || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
-      if (id && /^geo:/i.test(id) && String(d.kind || '') === 'address') key = key + '|' + id;
+      if (id && /^geo:/i.test(id) && String(d.kind || "") === "address") key = key + "|" + id;
       if (!key) return;
       const prev = seen.get(key);
       if (prev) {
         if (BkkLib.stopIdRank(id) < BkkLib.stopIdRank(prev.id)) prev.id = id;
         if (BkkLib.elviraStationCode(id) && !BkkLib.elviraStationCode(prev.id)) prev.id = id;
-        if (/^geo:/i.test(String(prev.id || '')) && id && !/^geo:/i.test(id)) prev.id = id;
+        if (/^geo:/i.test(String(prev.id || "")) && id && !/^geo:/i.test(id)) prev.id = id;
         if (Number.isFinite(Number(d.lat)) && !Number.isFinite(Number(prev.lat))) {
           prev.lat = Number(d.lat);
           prev.lon = Number(d.lon);
@@ -876,7 +298,7 @@ const BkkLib = {
         if (d.kind && !prev.kind) prev.kind = d.kind;
         return;
       }
-      const row = { key: key, name: d.name, id: id };
+      const row = { key, name: d.name, id };
       if (Number.isFinite(Number(d.lat))) row.lat = Number(d.lat);
       if (Number.isFinite(Number(d.lon))) row.lon = Number(d.lon);
       if (d.kind) row.kind = d.kind;
@@ -895,80 +317,79 @@ const BkkLib = {
     return out;
   },
   isMavRoute(rt) {
-    const t = String((rt && rt.type) || '').toUpperCase();
-    if (t.indexOf('SUBURBAN') >= 0) return false;
-    return t === 'RAIL' || t === 'RAILWAY' || t === 'TRAIN';
+    const t2 = String(rt && rt.type || "").toUpperCase();
+    if (t2.indexOf("SUBURBAN") >= 0) return false;
+    return t2 === "RAIL" || t2 === "RAILWAY" || t2 === "TRAIN";
   },
   isVolanRoute(rt) {
     if (!rt) return false;
-    if (String(rt.type || '').toUpperCase() === 'COACH') return true;
-    if (/^volan_/i.test(String(rt.id || ''))) return true;
-    return /volan/i.test(String(rt.agencyId || ''));
+    if (String(rt.type || "").toUpperCase() === "COACH") return true;
+    if (/^volan_/i.test(String(rt.id || ""))) return true;
+    return /volan/i.test(String(rt.agencyId || ""));
   },
   isMavStop(stop) {
     if (!stop) return false;
-    const t = String(stop.type || '').toUpperCase();
-    if (t.indexOf('SUBURBAN') >= 0) return false;
-    if (t === 'RAIL' || t === 'RAILWAY' || t === 'TRAIN') return true;
-    return /^BKK_0055/.test(String(stop.id || ''));
+    const t2 = String(stop.type || "").toUpperCase();
+    if (t2.indexOf("SUBURBAN") >= 0) return false;
+    if (t2 === "RAIL" || t2 === "RAILWAY" || t2 === "TRAIN") return true;
+    return /^BKK_0055/.test(String(stop.id || ""));
   },
   isVolanStop(stop) {
     if (!stop) return false;
-    const id = String(stop.id || '');
+    const id = String(stop.id || "");
     if (/^volan_/i.test(id) || /^AREA_CS/i.test(id) || /^hkir_/i.test(id)) return true;
     if (/^hu-volanbusz_/i.test(id)) return true;
-    if (String(stop.type || '').toUpperCase() === 'COACH') return true;
+    if (String(stop.type || "").toUpperCase() === "COACH") return true;
     return false;
   },
   /* BKK street stops next to a metro are named "… M". The hop card and
      commute sensors use the non-M stop (the metro / parent name). */
   isMetroSuffixName(name) {
-    const n = String(name || '').normalize('NFC').replace(/\s+/g, ' ').trim();
+    const n = String(name || "").normalize("NFC").replace(/\s+/g, " ").trim();
     return /\sM$/i.test(n);
   },
   isBkkStop(stop) {
     if (!stop || BkkLib.isMavStop(stop) || BkkLib.isVolanStop(stop)) return false;
-    const id = String(stop.id || '');
+    const id = String(stop.id || "");
     if (/^AREA_/i.test(id) || /^STOP_/i.test(id)) return false;
-    const t = String(stop.type || '').toUpperCase();
-    if (t === 'COACH') return false;
-    if (t === 'BUS' || t === 'TRAM' || t === 'SUBWAY' || t === 'TROLLEYBUS' ||
-        t === 'FERRY' || t.indexOf('SUBURBAN') >= 0) return true;
+    const t2 = String(stop.type || "").toUpperCase();
+    if (t2 === "COACH") return false;
+    if (t2 === "BUS" || t2 === "TRAM" || t2 === "SUBWAY" || t2 === "TROLLEYBUS" || t2 === "FERRY" || t2.indexOf("SUBURBAN") >= 0) return true;
     if (!/^BKK_/i.test(id)) return false;
     if (stop.locationType === 1) return true;
-    return !t;
+    return !t2;
   },
   mode(cfg) {
-    if (cfg && cfg.volan) return 'volan';
-    if (cfg && cfg.helyi) return 'helyi';
-    if (cfg && cfg.mav) return 'mav';
-    return 'bkk';
+    if (cfg && cfg.volan) return "volan";
+    if (cfg && cfg.helyi) return "helyi";
+    if (cfg && cfg.mav) return "mav";
+    return "bkk";
   },
   routeMatchesMode(rt, mode) {
-    if (mode === 'mav') return BkkLib.isMavRoute(rt);
-    if (mode === 'volan') return BkkLib.isVolanRoute(rt);
-    if (mode === 'all') return true;
+    if (mode === "mav") return BkkLib.isMavRoute(rt);
+    if (mode === "volan") return BkkLib.isVolanRoute(rt);
+    if (mode === "all") return true;
     return !BkkLib.isMavRoute(rt) && !BkkLib.isVolanRoute(rt);
   },
   stopNum(id) {
-    const s = String(id || '');
+    const s = String(id || "");
     const m = s.match(/^(?:volan_|AREA_CS|hkir_)(\d+)/i);
     if (m) return m[1];
     const n = s.match(/(\d{5,})/);
-    return n ? n[1] : '';
+    return n ? n[1] : "";
   },
   elviraStationCode(id) {
-    const m = String(id || '').match(/(\d{9})/);
-    return m ? m[1] : '';
+    const m = String(id || "").match(/(\d{9})/);
+    return m ? m[1] : "";
   },
   /* BKK street/metro parents (CSF…) sit next to MÁV stations but have no
      9-digit ELVIRA code. Map the well-known names; searchStops fills the rest. */
   elviraCodeFromName(name) {
     const f = BkkLib.fold(name);
-    if (f === 'keleti' || f === 'budapest keleti') return '005510017';
-    if (f === 'kelenfold' || f === 'budapest kelenfold') return '005501024';
-    if (f === 'szekesfehervar' || f === 'szechenyi ut szekesfehervar') return '005503269';
-    return '';
+    if (f === "keleti" || f === "budapest keleti") return "005510017";
+    if (f === "kelenfold" || f === "budapest kelenfold") return "005501024";
+    if (f === "szekesfehervar" || f === "szechenyi ut szekesfehervar") return "005503269";
+    return "";
   },
   isRailDest(dest) {
     if (!dest) return false;
@@ -982,28 +403,29 @@ const BkkLib = {
     if (direct) return direct;
     const mapped = BkkLib.elviraCodeFromName(name);
     if (mapped) return mapped;
-    const n = String(name || '').trim();
-    if (!apiKey || !n) return '';
+    const n = String(name || "").trim();
+    if (!apiKey || !n) return "";
     const queries = [n];
     const key = BkkLib.stationKey(n);
     if (key && key !== n) queries.push(key);
     BkkLib.aliasQueries(n).forEach((q) => queries.push(q));
-    const seen = new Set();
+    const seen = /* @__PURE__ */ new Set();
     for (let i = 0; i < queries.length; i++) {
       const q = queries[i];
       if (!q || seen.has(q)) continue;
       seen.add(q);
       try {
-        const hits = await BkkLib.searchStops(apiKey, q, 'mav');
+        const hits = await BkkLib.searchStops(apiKey, q, "mav");
         for (let j = 0; j < hits.length; j++) {
           const c = BkkLib.elviraStationCode(hits[j].id);
           if (c) {
             return c;
           }
         }
-      } catch (_e) { /* search is a fallback */ }
+      } catch (_e) {
+      }
     }
-    return '';
+    return "";
   },
   sameStop(id, originId) {
     if (!id || !originId) return false;
@@ -1015,7 +437,7 @@ const BkkLib = {
     if (va && vb && (/^(?:volan_|AREA_CS|hkir_)/i.test(a) || /^(?:volan_|AREA_CS|hkir_)/i.test(b))) {
       return va === vb;
     }
-    const base = (s) => s.replace(/^BKK_/, '').split('_')[0];
+    const base = (s) => s.replace(/^BKK_/, "").split("_")[0];
     if (/^volan_/i.test(a) || /^volan_/i.test(b) || /^AREA_/i.test(a) || /^AREA_/i.test(b) || /^hkir_/i.test(a) || /^hkir_/i.test(b)) {
       return false;
     }
@@ -1024,10 +446,10 @@ const BkkLib = {
   aliasQueries(q) {
     const f = BkkLib.fold(q);
     const extra = [];
-    if (f.includes('arpad hid')) extra.push('Goncz Arpad varoskozpont');
-    if (f.includes('moszkva')) extra.push('Szell Kalman ter');
-    if (f === 'keleti' || f.indexOf('keleti ') === 0) extra.push('Budapest-Keleti');
-    if (f === 'kelenfold' || f.indexOf('kelenfold ') === 0) extra.push('Budapest-Kelenfold');
+    if (f.includes("arpad hid")) extra.push("Goncz Arpad varoskozpont");
+    if (f.includes("moszkva")) extra.push("Szell Kalman ter");
+    if (f === "keleti" || f.indexOf("keleti ") === 0) extra.push("Budapest-Keleti");
+    if (f === "kelenfold" || f.indexOf("kelenfold ") === 0) extra.push("Budapest-Kelenfold");
     const key = BkkLib.stationKey(q);
     if (key && key !== q && extra.indexOf(key) < 0) extra.push(key);
     return extra;
@@ -1035,19 +457,533 @@ const BkkLib = {
   labelAliased(q, hit) {
     const f = BkkLib.fold(q);
     const n = BkkLib.fold(hit.name);
-    if (f.includes('arpad hid') && n === 'goncz arpad varoskozpont') {
-      return 'G\u00f6ncz \u00c1rp\u00e1d v\u00e1rosk\u00f6zpont (M3, \u00c1rp\u00e1d h\u00edd)';
+    if (f.includes("arpad hid") && n === "goncz arpad varoskozpont") {
+      return "Göncz Árpád városközpont (M3, Árpád híd)";
     }
     return hit.name;
+  }
+});
+
+// src/config.js
+var CARD_VERSION = "1.4.7-rev.3";
+var BKK_PLANNER_TAG = "hungarian-transit-stop-card-plan";
+var BKK_PLANNER_TAG_ALIAS = "bkk-stop-card-plan";
+var BKK_API = "https://go.bkk.hu/api/query/v1/ws/otp/api/where";
+var TRANSITOUS = "https://api.transitous.org";
+var INTEGRATION_KEY = "hungarian_transport:integration";
+var DEFAULT_MINUTES_AFTER = 180;
+var MIN_MINUTES_AFTER = 15;
+var MAX_MINUTES_AFTER = 480;
+var MINUTES_AFTER_PRESETS = [30, 60, 90, 120, 180, 240, 360, 480];
+var DEPART_MINUTES_AFTER = String(DEFAULT_MINUTES_AFTER);
+var DEPARTURE_GRACE_SEC = 60;
+function departureStillDue(dep, nowSec) {
+  const ts = Number(dep);
+  if (!Number.isFinite(ts) || ts <= 0) return true;
+  return ts >= (nowSec || Math.floor(Date.now() / 1e3)) - DEPARTURE_GRACE_SEC;
+}
+function clampMinutesAfter(value) {
+  if (value == null || value === "") return DEFAULT_MINUTES_AFTER;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_MINUTES_AFTER;
+  return Math.min(MAX_MINUTES_AFTER, Math.max(MIN_MINUTES_AFTER, Math.round(n)));
+}
+function maxDepartureRows(horizon) {
+  const h = clampMinutesAfter(horizon);
+  const cap = h >= 480 ? 80 : 40;
+  return Math.min(cap, Math.max(12, Math.round(h / 2.5)));
+}
+var PLATFORM_IN_HEAD = /(?:\u00b7\s*)?(?:v\u00e1g|pl)\.(\S+)/i;
+var PLATFORM_STRIP = /\s*(?:\u00b7\s*)?(?:v\u00e1g|pl)\.\S+/gi;
+var BKK_FAVORITES = [
+  { id: "BKK_CSF01131", name: "Keleti pályaudvar" },
+  { id: "BKK_CS007896", name: "Kelenföld vasútállomás" }
+];
+var MAV_FAVORITES = [
+  { id: "BKK_005510017", name: "Budapest-Keleti" },
+  { id: "BKK_005501024", name: "Budapest-Kelenföld" },
+  { id: "BKK_005503269", name: "Székesfehérvár" }
+];
+var VOLAN_FAVORITES = [
+  { id: "hkir_773521", name: "Budapest, Népliget autóbusz-pályaudvar" },
+  { id: "volan_773538_99", name: "Budapest, Kelenföld vasútállomás" }
+];
+var FAVORITES = BKK_FAVORITES.concat(VOLAN_FAVORITES, MAV_FAVORITES);
+var DEFAULT_FAVORITES = {
+  bkk: BKK_FAVORITES,
+  mav: MAV_FAVORITES,
+  volan: VOLAN_FAVORITES,
+  helyi: [],
+  all: FAVORITES
+};
+var VEHICLE_ICONS = {
+  BUS: "mdi:bus",
+  TRAM: "mdi:tram",
+  TROLLEYBUS: "mdi:bus-electric",
+  SUBWAY: "mdi:subway-variant",
+  METRO: "mdi:subway-variant",
+  RAIL: "mdi:train",
+  TRAIN: "mdi:train",
+  FERRY: "mdi:ferry"
+};
+function vehicleIcon(type) {
+  const key = String(type || "").toUpperCase();
+  if (VEHICLE_ICONS[key]) return VEHICLE_ICONS[key];
+  if (key.indexOf("RAIL") >= 0 || key.indexOf("TRAIN") >= 0) return "mdi:train";
+  if (key.indexOf("TRAM") >= 0) return "mdi:tram";
+  if (key.indexOf("TROLLEY") >= 0) return "mdi:bus-electric";
+  if (key.indexOf("SUBWAY") >= 0 || key.indexOf("METRO") >= 0) return "mdi:subway-variant";
+  return "mdi:bus";
+}
+var BKK_RAIL_BADGE = {
+  G43: ["AACD46", "FFFFFF"],
+  Z30: ["FFCD28", "3C3C3C"],
+  S10: ["00AFF0", "FFFFFF"],
+  S12: ["00AFF0", "FFFFFF"],
+  S30: ["00AFF0", "FFFFFF"],
+  S36: ["00AFF0", "FFFFFF"],
+  S40: ["00AFF0", "FFFFFF"],
+  IC: ["2E5EA8", "FFFFFF"],
+  EC: ["2E5EA8", "FFFFFF"],
+  SZ: ["5C6B7A", "FFFFFF"]
+};
+var ASSET_BASE = new URL(".", import.meta.url).href;
+var VOLAN_INDEX_OVERRIDE = "";
+var CITY_INDEX_OVERRIDE = "";
+var MAV_INDEX_OVERRIDE = "";
+function setVolanIndexUrl(url) {
+  VOLAN_INDEX_OVERRIDE = String(url || "");
+}
+function setCityIndexUrl(url) {
+  CITY_INDEX_OVERRIDE = String(url || "");
+}
+function setMavIndexUrl(url) {
+  MAV_INDEX_OVERRIDE = String(url || "");
+}
+var TZ = "Europe/Budapest";
+var TZ_PARTS = new Intl.DateTimeFormat("en-GB", {
+  timeZone: TZ,
+  hour12: false,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit"
+});
+var pad2 = (n) => String(n).padStart(2, "0");
+function tzFields(date) {
+  const out = {};
+  TZ_PARTS.formatToParts(date).forEach((p) => {
+    if (p.type !== "literal") out[p.type] = p.value;
+  });
+  return {
+    y: Number(out.year),
+    mo: Number(out.month),
+    d: Number(out.day),
+    h: Number(out.hour) % 24,
+    mi: Number(out.minute)
+  };
+}
+function tzParts(date) {
+  const f = tzFields(date);
+  return { ymd: `${f.y}${pad2(f.mo)}${pad2(f.d)}`, mins: f.h * 60 + f.mi };
+}
+function tzEpochSec(ymd, mins) {
+  const y = Number(ymd.slice(0, 4));
+  const mo = Number(ymd.slice(4, 6));
+  const d = Number(ymd.slice(6, 8));
+  const target = Date.UTC(y, mo - 1, d) + (mins || 0) * 6e4;
+  let utc = target;
+  for (let i = 0; i < 2; i++) {
+    const f = tzFields(new Date(utc));
+    utc += target - Date.UTC(f.y, f.mo - 1, f.d, f.h, f.mi);
+  }
+  return Math.round(utc / 1e3);
+}
+function tzShiftYmd(ymd, days) {
+  const y = Number(ymd.slice(0, 4));
+  const mo = Number(ymd.slice(4, 6));
+  const d = Number(ymd.slice(6, 8));
+  const t2 = new Date(Date.UTC(y, mo - 1, d + (days || 0)));
+  return `${t2.getUTCFullYear()}${pad2(t2.getUTCMonth() + 1)}${pad2(t2.getUTCDate())}`;
+}
+function tzDow(ymd) {
+  const y = Number(ymd.slice(0, 4));
+  const mo = Number(ymd.slice(4, 6));
+  const d = Number(ymd.slice(6, 8));
+  const js = new Date(Date.UTC(y, mo - 1, d)).getUTCDay();
+  return js === 0 ? 6 : js - 1;
+}
+function dayBuster(base) {
+  return `${base}${base.includes("?") ? "&" : "?"}v=${tzParts(/* @__PURE__ */ new Date()).ymd}`;
+}
+function volanIndexUrl() {
+  const base = VOLAN_INDEX_OVERRIDE || new URL("volan-index.json.gz", ASSET_BASE).href;
+  return dayBuster(base);
+}
+function cityIndexUrl() {
+  const base = CITY_INDEX_OVERRIDE || new URL("city-index.json.gz", ASSET_BASE).href;
+  return dayBuster(base);
+}
+function mavIndexUrl() {
+  const base = MAV_INDEX_OVERRIDE || new URL("mav-index.json.gz", ASSET_BASE).href;
+  return dayBuster(base);
+}
+
+// src/i18n.js
+var I18N = {
+  hu: {
+    langAuto: "Automatikus (Home Assistant nyelve)",
+    langHu: "Magyar",
+    langEn: "English",
+    langLabel: "Nyelv",
+    apiKeyLabel: "BKK API kulcs",
+    apiKeyPlaceholder: "UUID a BKK Open Datából",
+    apiKeyHint: "Ingyenes kulcs, egyszerű regisztráció után:",
+    apiKeyOk: "A BKK API kulcs rendben van.",
+    apiKeyChange: "Módosítás",
+    apiKeyIntegration: "A BKK API kulcsot a Magyar közlekedés integráció adja.",
+    nameLabel: "Név (opcionális)",
+    namePlaceholder: "Hungarian transport",
+    destLoading: "Elérhető célok betöltése...",
+    destEmptySuggest: (list) => "Nincs közvetlen járat erre a célra. Elérhető célok: " + list + ".",
+    platformShort: (p) => `vág.${p}`,
+    tipPlatform: (p) => `Vágány ${p}`,
+    minutes: (n) => `${n} perc`,
+    now: "most",
+    cardNoDepartures: "Nincs közelgő indulás.",
+    cardPickStops: "Válassz forrás és cél megállót a kártya beállításaiban.",
+    cardLoading: "Betöltés…",
+    tipWheelchair: "Akadálymentes, alacsonypadlós jármű",
+    tipBike: "Kerékpár szállítható",
+    tipBooking: "Helyjegy váltása kötelező",
+    tipDelay: (n) => `${n} perc késés`,
+    tipEarly: (n) => `${n} perccel korábban indul`,
+    tipScheduled: (hm) => `Menetrend szerint ${hm}`,
+    tipTravel: (n) => `Menetidő a célig: ${n} perc`,
+    tipTrain: (nr) => `Vonatszám: ${nr}`,
+    mapOpenTip: "Térkép: jármű az útvonalon",
+    mapClose: "Bezárás",
+    mapLoadingRoute: "Útvonal betöltése…",
+    mapNoData: "Ehhez a járathoz jelenleg nincs élő pozíció vagy útvonal.",
+    mapLeafletFail: "A térkép betöltése nem sikerült.",
+    mapNoGeometry: "A BKK nem adott vissza útvonal-geometriát ehhez a járathoz.",
+    mapRouteFail: (msg) => `Útvonal nem tölthető: ${msg}`,
+    mapNothingToShow: "Nincs megjeleníthető útvonal ehhez a járathoz.",
+    mapFullRoute: "Teljes útvonal",
+    mapBoardStop: "Felszállás",
+    mapLivePos: "Élő pozíció",
+    mapEstPos: "Becsült pozíció (menetrend)",
+    mapNoGps: "Nincs élő GPS",
+    mapUntilStop: (n) => `Megállóig: ${n}%`,
+    mapExpected: (hm) => `Várható: ${hm}`,
+    mapExpectedVs: (pair) => `Várható: ${pair[0]} (menetrend ${pair[1]})`,
+    mapFootFallback: "Jármű a térképen",
+    mapLiveDot: "Élő pozíció",
+    mapEstDot: "Becsült pozíció",
+    mapTypeBus: "Busz",
+    mapTypeTram: "Villamos",
+    mapTypeTrolley: "Trolibusz",
+    mapTypeSubway: "Metró",
+    mapTypeRail: "Vonat",
+    mapTypeVehicle: "Jármű",
+    errNoApiKey: "Nincs BKK API kulcs: add meg a Magyar közlekedés integrációban vagy a kártyában.",
+    errApiKeyBad: "A BKK API kulcs érvénytelen (401/403).",
+    errApiKeyProbe: "A BKK API kulcsot nem sikerült ellenőrizni.",
+    errVolanHttp: (status) => `Volán menetrend HTTP ${status}`,
+    errVolanGunzip: "A böngésző nem tudja kicsomagolni a Volán menetrendet.",
+    errCityHttp: (status) => `Helyi menetrend HTTP ${status}`,
+    errCityGunzip: "A böngésző nem tudja kicsomagolni a helyi menetrendet.",
+    errIndexFetch: "A menetrend-index nem töltődött le (időtúllépés vagy hálózati hiba).",
+    errIndexParse: "A letöltött menetrend-index olvashatatlan.",
+    errIndexSchema: (v) => `A menetrend-index újabb (v${v}), mint amit ez a kártya ismer. Frissítsd a kártyát.`,
+    cityLabel: "Város",
+    cityPlaceholder: "Válassz várost",
+    minutesAfterLabel: "Menetrend előre (perc)",
+    minutesAfterHint: "Hány percet nézzen előre az indulásokból. 30–480 perc, alapértelmezés 180.",
+    plannerTitle: "Tervező",
+    plannerStep1: "Forrás",
+    plannerStep2: "Cél",
+    plannerStep3: "Meddig",
+    plannerSwap: "Csere",
+    plannerDepartures: "Indulások",
+    plannerSearchPlaceholder: "Utca, házszám, város, megálló...",
+    plannerDestPlaceholder: "Utca, házszám, város, megálló...",
+    plannerTypeDest: "Írj egy utcát, várost vagy megállót.",
+    plannerAddress: "cím",
+    plannerPlace: "hely",
+    plannerReset: "Új",
+    plannerMultiHint: "Többet is választhatsz. Ekkor csak a közös megállók maradnak.",
+    plannerPickVehicleFirst: "Előbb válassz járművet",
+    plannerPickAll: "Válassz forrás és cél megállót.",
+    plannerLoading: "Betöltés...",
+    plannerNoSharedStop: "Nincs közös megálló",
+    plannerNoSharedLater: "Ezeknek a járatoknak nincs közös későbbi megállója.",
+    plannerJourneyTitle: "Átszállással",
+    plannerJourneySummary: (parts) => `${parts[0]} perc · ${parts[1]} átszállás · ${parts[2]} perc gyaloglás · ${parts[3]} perc várakozás`,
+    plannerWalk: (parts) => `Gyaloglás ${parts[0]} perc, ${parts[1]} m`,
+    plannerWait: (min) => `Várakozás ${min} perc`,
+    plannerStationWalk: (parts) => `Gyaloglás a vágányhoz ${parts[0]} perc, ${parts[1]} m`,
+    plannerRide: (min) => `${min} perc`,
+    plannerShowMap: "Térkép",
+    plannerPickDest: "Válassz célt...",
+    plannerNoRoutes: "Nincs induló járat ebben a megállóban.",
+    plannerNoDepartures: "Nincs közelgő indulás a választott járatokkal.",
+    colArrival: "érkezés",
+    colExpected: "várható",
+    colTravel: "menetidő",
+    mode: {
+      bkk: {
+        stop: "Forrás megálló",
+        dest: "Cél megálló",
+        hint: "Add meg a forrás és a cél megállót. Az összes BKK járat megjelenik közöttük.",
+        originPh: "Keresés, pl. Bosnyák tér, Árpád híd",
+        destPh: "Keresés a forrásból elérhető megállók között",
+        empty: "Nincs BKK megálló erre a keresésre.",
+        destEmpty: "Erről a megállóról nincs járat erre a célra.",
+        destNeedOrigin: "Előbb válassz forrás megállót.",
+        destNone: "Nincs elérhető BKK cél ebből a forrásból."
+      },
+      all: {
+        stop: "Forrás megálló",
+        dest: "Cél megálló",
+        hint: "Válassz forrás és cél megállót. Minden BKK, Volán és MÁV járat megjelenik közöttük.",
+        originPh: "Utca, megálló, autóbusz-állomás...",
+        destPh: "Cél megálló keresése...",
+        empty: "Nincs megálló erre a keresésre.",
+        destEmpty: "Nincs járat ebből a megállóból oda.",
+        destNeedOrigin: "Előbb válassz forrás megállót.",
+        destNone: "Ebből a forrásból nincs közvetlen cél."
+      },
+      mav: {
+        stop: "Forrás állomás",
+        dest: "Cél állomás",
+        hint: "Add meg a forrás és a cél állomást. Az összes vonat megjelenik közöttük.",
+        originPh: "Keresés, pl. Kelenföld, Székesfehérvár",
+        destPh: "Keresés a forrásból elérhető állomások között",
+        empty: "Nincs MÁV állomás erre a keresésre.",
+        destEmpty: "Erről az állomásról nincs vonat erre a célra.",
+        destNeedOrigin: "Előbb válassz forrás állomást.",
+        destNone: "Nincs elérhető MÁV célállomás ebből a forrásból."
+      },
+      volan: {
+        stop: "Forrás megálló",
+        dest: "Cél megálló",
+        hint: "Add meg a forrás és a cél Volán megállót. Az összes busz megjelenik közöttük.",
+        originPh: "Keresés, pl. Népliget, Székesfehérvár autóbusz-állomás",
+        destPh: "Keresés a forrásból elérhető Volán megállók között",
+        empty: "Nincs Volán megálló erre a keresésre.",
+        destEmpty: "Erről a megállóról nincs közvetlen Volán erre a célra.",
+        destNeedOrigin: "Előbb válassz forrás megállót.",
+        destNone: "Nincs elérhető Volán cél ebből a forrásból."
+      },
+      helyi: {
+        stop: "Forrás megálló",
+        dest: "Cél megálló",
+        hint: "Válassz várost, majd a forrás és a cél megállót. A helyi járatok jelennek meg közöttük.",
+        originPh: "Keresés a város megállói között",
+        destPh: "Keresés a forrásból elérhető megállók között",
+        empty: "Nincs megálló erre a keresésre ebben a városban.",
+        destEmpty: "Erről a megállóról nincs közvetlen járat erre a célra.",
+        destNeedOrigin: "Előbb válassz forrás megállót.",
+        destNone: "Nincs elérhető cél ebből a forrásból."
+      }
+    }
   },
+  en: {
+    langAuto: "Automatic (Home Assistant language)",
+    langHu: "Magyar",
+    langEn: "English",
+    langLabel: "Language",
+    apiKeyLabel: "BKK API key",
+    apiKeyPlaceholder: "UUID from BKK Open Data",
+    apiKeyHint: "Free key, after a quick sign-up:",
+    apiKeyOk: "The BKK API key is working.",
+    apiKeyChange: "Change",
+    apiKeyIntegration: "The BKK API key comes from the Hungarian transport integration.",
+    nameLabel: "Name (optional)",
+    namePlaceholder: "Hungarian transport",
+    destLoading: "Loading reachable destinations...",
+    destEmptySuggest: (list) => "No direct service to that destination. Reachable destinations: " + list + ".",
+    platformShort: (p) => `pl.${p}`,
+    tipPlatform: (p) => `Platform ${p}`,
+    minutes: (n) => `${n} min`,
+    now: "now",
+    cardNoDepartures: "No upcoming departures.",
+    cardPickStops: "Pick an origin and a destination stop in the card settings.",
+    cardLoading: "Loading…",
+    tipWheelchair: "Wheelchair accessible, low-floor vehicle",
+    tipBike: "Bikes allowed",
+    tipBooking: "Seat reservation required",
+    tipDelay: (n) => `${n} min late`,
+    tipEarly: (n) => `${n} min early`,
+    tipScheduled: (hm) => `Scheduled for ${hm}`,
+    tipTravel: (n) => `Travel time to destination: ${n} min`,
+    tipTrain: (nr) => `Train number: ${nr}`,
+    mapOpenTip: "Map: vehicle on its route",
+    mapClose: "Close",
+    mapLoadingRoute: "Loading route…",
+    mapNoData: "No live position or route is available for this trip.",
+    mapLeafletFail: "Could not load the map.",
+    mapNoGeometry: "BKK did not return a route shape for this trip.",
+    mapRouteFail: (msg) => `Could not load the route: ${msg}`,
+    mapNothingToShow: "Nothing to show on the map for this trip.",
+    mapFullRoute: "Full route",
+    mapBoardStop: "Boarding",
+    mapLivePos: "Live position",
+    mapEstPos: "Estimated position (timetable)",
+    mapNoGps: "No live GPS",
+    mapUntilStop: (n) => `To stop: ${n}%`,
+    mapExpected: (hm) => `Due: ${hm}`,
+    mapExpectedVs: (pair) => `Due: ${pair[0]} (scheduled ${pair[1]})`,
+    mapFootFallback: "Vehicle on the map",
+    mapLiveDot: "Live position",
+    mapEstDot: "Estimated position",
+    mapTypeBus: "Bus",
+    mapTypeTram: "Tram",
+    mapTypeTrolley: "Trolleybus",
+    mapTypeSubway: "Metro",
+    mapTypeRail: "Train",
+    mapTypeVehicle: "Vehicle",
+    errNoApiKey: "No BKK API key: set it in the Hungarian transport integration or in the card.",
+    errApiKeyBad: "The BKK API key is invalid (401/403).",
+    errApiKeyProbe: "Could not verify the BKK API key.",
+    errVolanHttp: (status) => `Volán timetable HTTP ${status}`,
+    errVolanGunzip: "This browser cannot decompress the Volán timetable.",
+    errCityHttp: (status) => `Local timetable HTTP ${status}`,
+    errCityGunzip: "This browser cannot decompress the local timetable.",
+    errIndexFetch: "Could not download the timetable index (timeout or network error).",
+    errIndexParse: "The downloaded timetable index is unreadable.",
+    errIndexSchema: (v) => `The timetable index is newer (v${v}) than this card understands. Please update the card.`,
+    cityLabel: "City",
+    cityPlaceholder: "Pick a city",
+    minutesAfterLabel: "Look-ahead (minutes)",
+    minutesAfterHint: "How far ahead to list departures. 30–480 minutes, default 180.",
+    plannerTitle: "Planner",
+    plannerStep1: "Origin",
+    plannerStep2: "Destination",
+    plannerStep3: "Look-ahead",
+    plannerSwap: "Swap",
+    plannerDepartures: "Departures",
+    plannerSearchPlaceholder: "Street, house number, city, stop...",
+    plannerDestPlaceholder: "Street, house number, city, stop...",
+    plannerTypeDest: "Type a street, city or stop.",
+    plannerAddress: "address",
+    plannerPlace: "place",
+    plannerReset: "Reset",
+    plannerMultiHint: "You can pick several. Only stops shared by all of them are kept.",
+    plannerPickVehicleFirst: "Pick a vehicle first",
+    plannerPickAll: "Pick an origin and a destination stop.",
+    plannerLoading: "Loading...",
+    plannerNoSharedStop: "No shared stop",
+    plannerNoSharedLater: "These routes share no later stop.",
+    plannerJourneyTitle: "With a transfer",
+    plannerJourneySummary: (parts) => `${parts[0]} min · ${parts[1]} transfer · ${parts[2]} min walking · ${parts[3]} min waiting`,
+    plannerWalk: (parts) => `Walk ${parts[0]} min, ${parts[1]} m`,
+    plannerWait: (min) => `Wait ${min} min`,
+    plannerStationWalk: (parts) => `Walk to the platform ${parts[0]} min, ${parts[1]} m`,
+    plannerRide: (min) => `${min} min`,
+    plannerShowMap: "Map",
+    plannerPickDest: "Pick a destination...",
+    plannerNoRoutes: "No departures from this stop.",
+    plannerNoDepartures: "No upcoming departure on the selected routes.",
+    colArrival: "in",
+    colExpected: "expected",
+    colTravel: "travel",
+    mode: {
+      bkk: {
+        stop: "Origin stop",
+        dest: "Destination stop",
+        hint: "Pick an origin and a destination stop. Every BKK service between them is listed.",
+        originPh: "Search, e.g. Bosnyák tér, Árpád híd",
+        destPh: "Search among the stops reachable from the origin",
+        empty: "No BKK stop matches this search.",
+        destEmpty: "No service from this stop to that destination.",
+        destNeedOrigin: "Pick an origin stop first.",
+        destNone: "No BKK destination is reachable from this origin."
+      },
+      all: {
+        stop: "Origin stop",
+        dest: "Destination stop",
+        hint: "Pick an origin and a destination stop. Every BKK, Volán and MÁV service between them is listed.",
+        originPh: "Street, stop, coach station...",
+        destPh: "Search destination stop...",
+        empty: "No stop matches this search.",
+        destEmpty: "No service from this stop to that destination.",
+        destNeedOrigin: "Pick an origin stop first.",
+        destNone: "No destination is reachable from this origin."
+      },
+      mav: {
+        stop: "Origin station",
+        dest: "Destination station",
+        hint: "Pick an origin and a destination station. Every train between them is listed.",
+        originPh: "Search, e.g. Kelenföld, Székesfehérvár",
+        destPh: "Search among the stations reachable from the origin",
+        empty: "No MÁV station matches this search.",
+        destEmpty: "No train from this station to that destination.",
+        destNeedOrigin: "Pick an origin station first.",
+        destNone: "No MÁV destination is reachable from this origin."
+      },
+      volan: {
+        stop: "Origin stop",
+        dest: "Destination stop",
+        hint: "Pick an origin and a destination Volán stop. Every coach between them is listed.",
+        originPh: "Search, e.g. Népliget, Székesfehérvár autóbusz-állomás",
+        destPh: "Search among the Volán stops reachable from the origin",
+        empty: "No Volán stop matches this search.",
+        destEmpty: "No direct coach from this stop to that destination.",
+        destNeedOrigin: "Pick an origin stop first.",
+        destNone: "No Volán destination is reachable from this origin."
+      },
+      helyi: {
+        stop: "Origin stop",
+        dest: "Destination stop",
+        hint: "Pick a city, then an origin and a destination. Local services between them are listed.",
+        originPh: "Search stops in this city",
+        destPh: "Search among the stops reachable from the origin",
+        empty: "No stop in this city matches the search.",
+        destEmpty: "No direct service from this stop to that destination.",
+        destNeedOrigin: "Pick an origin stop first.",
+        destNone: "No destination is reachable from this origin."
+      }
+    }
+  }
+};
+function codedError(key, arg) {
+  const err = new Error(String(I18N.hu[key] instanceof Function ? I18N.hu[key](arg) : I18N.hu[key]));
+  err.i18nKey = key;
+  err.i18nArg = arg;
+  return err;
+}
+function resolveLang(pref, hass) {
+  if (pref === "hu" || pref === "en") return pref;
+  const raw = hass && hass.language || (typeof navigator !== "undefined" ? navigator.language : "") || "hu";
+  return String(raw).toLowerCase().startsWith("hu") ? "hu" : "en";
+}
+function t(lang, key, arg) {
+  const dict = I18N[lang] || I18N.hu;
+  const value = dict[key] !== void 0 ? dict[key] : I18N.hu[key];
+  return typeof value === "function" ? value(arg) : value;
+}
+function modeCopy(lang, mode) {
+  const dict = I18N[lang] || I18N.hu;
+  return dict.mode[mode] || dict.mode.bkk;
+}
+function errText(lang, err) {
+  if (err && err.i18nKey) return t(lang, err.i18nKey, err.i18nArg);
+  return err && err.message ? err.message : String(err);
+}
+
+// src/lib/futar.js
+Object.assign(BkkLib, {
   _mem: {},
   _inflight: {},
   _gateActive: 0,
   _gateCards: 0,
   _gateWaiters: [],
   _gateFgWaiters: [],
-  _boards: new Map(),
-  _boardInflight: new Map(),
+  _boards: /* @__PURE__ */ new Map(),
+  _boardInflight: /* @__PURE__ */ new Map(),
   /* One slot pair per card on the dashboard, between 4 and 24. */
   _gateLimit() {
     const cards = Math.max(1, BkkLib._gateCards || 1);
@@ -1077,7 +1013,7 @@ const BkkLib = {
       BkkLib._mem[key] = cache[key];
       return cache[key];
     }
-    return undefined;
+    return void 0;
   },
   _store(cache, key, value) {
     BkkLib.cachePut(BkkLib._mem, key, value);
@@ -1088,33 +1024,30 @@ const BkkLib = {
   _hass: null,
   integrationHasKey(hass) {
     const h = hass || BkkLib._hass;
-    return !!(h && h.services && h.services.hungarian_transport
-      && h.services.hungarian_transport.futar);
+    return !!(h && h.services && h.services.hungarian_transport && h.services.hungarian_transport.futar);
   },
   effectiveApiKey(cfg, hass) {
-    const own = String((cfg && cfg.apiKey) || '').trim();
+    const own = String(cfg && cfg.apiKey || "").trim();
     if (own) return own;
-    return BkkLib.integrationHasKey(hass) ? INTEGRATION_KEY : '';
+    return BkkLib.integrationHasKey(hass) ? INTEGRATION_KEY : "";
   },
   async _fetchViaIntegration(path, params) {
     const hass = BkkLib._hass;
-    if (!BkkLib.integrationHasKey(hass)) throw codedError('errNoApiKey');
+    if (!BkkLib.integrationHasKey(hass)) throw codedError("errNoApiKey");
     const serviceData = { path: String(path), params: params || {} };
     let timer = null;
     const timeout = new Promise((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('BKK timeout')), 20000);
+      timer = setTimeout(() => reject(new Error("BKK timeout")), 2e4);
     });
     let res;
     try {
-      const call = typeof hass.callService === 'function'
-        ? hass.callService('hungarian_transport', 'futar', serviceData, undefined, false, true)
-        : hass.connection.sendMessagePromise({
-          type: 'call_service',
-          domain: 'hungarian_transport',
-          service: 'futar',
-          service_data: serviceData,
-          return_response: true,
-        });
+      const call = typeof hass.callService === "function" ? hass.callService("hungarian_transport", "futar", serviceData, void 0, false, true) : hass.connection.sendMessagePromise({
+        type: "call_service",
+        domain: "hungarian_transport",
+        service: "futar",
+        service_data: serviceData,
+        return_response: true
+      });
       res = await Promise.race([call, timeout]);
     } catch (err) {
       const msg = err && (err.message || err.code);
@@ -1124,12 +1057,12 @@ const BkkLib = {
     }
     const payload = BkkLib.servicePayload(res);
     const data = payload && payload.data;
-    if (!data || typeof data !== 'object') throw new Error('BKK empty response');
-    if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);
+    if (!data || typeof data !== "object") throw new Error("BKK empty response");
+    if (data.status && data.status !== "OK") throw new Error(`BKK ${data.status}`);
     return data;
   },
   async fetch(apiKey, path, params, foreground) {
-    if (!apiKey) throw codedError('errNoApiKey');
+    if (!apiKey) throw codedError("errNoApiKey");
     if (apiKey === INTEGRATION_KEY) {
       await BkkLib._gate(!!foreground);
       try {
@@ -1140,20 +1073,22 @@ const BkkLib = {
     }
     await BkkLib._gate(!!foreground);
     const q = new URLSearchParams(Object.assign({
-      key: apiKey, version: '4', appVersion: 'apiary-1.0',
+      key: apiKey,
+      version: "4",
+      appVersion: "apiary-1.0"
     }, params));
-    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(() => ctrl.abort(), 20000) : null;
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 2e4) : null;
     try {
       let res;
       try {
-        res = await fetch(`${BKK_API}/${path}?${q}`, { signal: ctrl ? ctrl.signal : undefined });
+        res = await fetch(`${BKK_API}/${path}?${q}`, { signal: ctrl ? ctrl.signal : void 0 });
       } catch (err) {
-        throw new Error(err && err.name === 'AbortError' ? 'BKK timeout' : `BKK ${err}`);
+        throw new Error(err && err.name === "AbortError" ? "BKK timeout" : `BKK ${err}`);
       }
       if (!res.ok) throw new Error(`BKK HTTP ${res.status}`);
       const data = await res.json();
-      if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);
+      if (data.status && data.status !== "OK") throw new Error(`BKK ${data.status}`);
       return data;
     } finally {
       if (timer) clearTimeout(timer);
@@ -1162,18 +1097,18 @@ const BkkLib = {
   },
   /* Same stop and horizon is one request, shared by every card that needs it. */
   departureBoard(apiKey, stopId, horizon) {
-    const key = String(stopId) + '|' + String(horizon);
+    const key = String(stopId) + "|" + String(horizon);
     const hit = BkkLib._boards.get(key);
-    if (hit && Date.now() - hit.ts < 20000) return Promise.resolve(hit.data);
+    if (hit && Date.now() - hit.ts < 2e4) return Promise.resolve(hit.data);
     const inflight = BkkLib._boardInflight.get(key);
     if (inflight) return inflight;
-    const run = BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
+    const run = BkkLib.fetch(apiKey, "arrivals-and-departures-for-stop.json", {
       stopId: String(stopId),
       minutesAfter: String(horizon),
-      minutesBefore: '0',
-      onlyDepartures: 'true',
-      includeReferences: 'true',
-      includeVehicleFromTrip: 'true',
+      minutesBefore: "0",
+      onlyDepartures: "true",
+      includeReferences: "true",
+      includeVehicleFromTrip: "true"
     }, true).then((data) => {
       BkkLib._boards.set(key, { ts: Date.now(), data });
       return data;
@@ -1184,7 +1119,7 @@ const BkkLib = {
     return run;
   },
   boardSpanMin(data, nowSec) {
-    const times = ((((data || {}).data || {}).entry) || {}).stopTimes || [];
+    const times = (((data || {}).data || {}).entry || {}).stopTimes || [];
     let last = 0;
     times.forEach((st) => {
       const dep = st.predictedDepartureTime || st.departureTime || 0;
@@ -1194,24 +1129,24 @@ const BkkLib = {
     return { count: times.length, spanMin: (last - nowSec) / 60 };
   },
   planPlaceVertex(name, id) {
-    const label = String(name || '').replace(/::/g, ' ').trim();
-    const raw = String(id || '');
+    const label = String(name || "").replace(/::/g, " ").trim();
+    const raw = String(id || "");
     const m = raw.match(/^BKK_(.+)$/i);
     if (m && label) return `${label}::BKK:${m[1]}`;
-    return '';
+    return "";
   },
   async planPlace(apiKey, stop) {
-    const name = (stop && stop.name) || '';
-    const id = (stop && stop.id) || '';
+    const name = stop && stop.name || "";
+    const id = stop && stop.id || "";
     const vertex = BkkLib.planPlaceVertex(name, id);
     if (vertex) return vertex;
     const lat = Number(stop && stop.lat);
     const lon = Number(stop && stop.lon);
     if (name && Number.isFinite(lat) && Number.isFinite(lon)) return `${name}::${lat},${lon}`;
-    if (!apiKey || !name) return '';
+    if (!apiKey || !name) return "";
     try {
-      const data = await BkkLib.fetch(apiKey, 'search.json', { query: name }, true);
-      const stops = (((data.data || {}).references) || {}).stops || {};
+      const data = await BkkLib.fetch(apiKey, "search.json", { query: name }, true);
+      const stops = ((data.data || {}).references || {}).stops || {};
       const want = BkkLib.fold(name);
       let best = null;
       Object.values(stops).forEach((s) => {
@@ -1219,21 +1154,25 @@ const BkkLib = {
         if (id && s.id === id) best = s;
         else if (!best && BkkLib.fold(s.name) === want) best = s;
       });
-      if (!best) return '';
-      return `${String(name).replace(/::/g, ' ')}::${best.lat},${best.lon}`;
+      if (!best) return "";
+      return `${String(name).replace(/::/g, " ")}::${best.lat},${best.lon}`;
     } catch (_e) {
-      return '';
+      return "";
     }
-  },
+  }
+});
+
+// src/lib/transitous.js
+Object.assign(BkkLib, {
   /* FUTÁR plan-trip times are epoch milliseconds. Values below 1e11 are seconds. */
   epochMs(value) {
     const n = Number(value);
     if (!Number.isFinite(n) || n <= 0) return 0;
-    return n >= 1e11 ? n : n * 1000;
+    return n >= 1e11 ? n : n * 1e3;
   },
   isoMs(value) {
-    if (value == null || value === '') return 0;
-    if (typeof value === 'number') return BkkLib.epochMs(value);
+    if (value == null || value === "") return 0;
+    if (typeof value === "number") return BkkLib.epochMs(value);
     const n = Date.parse(String(value));
     return Number.isFinite(n) && n > 0 ? n : 0;
   },
@@ -1241,64 +1180,63 @@ const BkkLib = {
     const q = new URLSearchParams();
     Object.keys(params || {}).forEach((key) => {
       const val = params[key];
-      if (val == null || val === '') return;
+      if (val == null || val === "") return;
       q.set(key, String(val));
     });
-    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(() => ctrl.abort(), 10000) : null;
-    const base = String(TRANSITOUS).replace(/\/$/, '');
-    const rel = String(path || '').indexOf('/') === 0 ? String(path) : ('/' + String(path || ''));
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 1e4) : null;
+    const base = String(TRANSITOUS).replace(/\/$/, "");
+    const rel = String(path || "").indexOf("/") === 0 ? String(path) : "/" + String(path || "");
     try {
       const res = await fetch(`${base}${rel}?${q}`, {
-        cache: 'no-store',
-        signal: ctrl ? ctrl.signal : undefined,
+        cache: "no-store",
+        signal: ctrl ? ctrl.signal : void 0,
         headers: {
-          Accept: 'application/json',
-        },
+          Accept: "application/json"
+        }
       });
       if (!res.ok) throw new Error(`Transitous HTTP ${res.status}`);
       return res.json();
     } catch (err) {
-      if (err && err.name === 'AbortError') throw new Error('Transitous timeout');
+      if (err && err.name === "AbortError") throw new Error("Transitous timeout");
       throw err;
     } finally {
       if (timer) clearTimeout(timer);
     }
   },
   bkkTransitousStopIds(id) {
-    const raw = String(id || '').trim();
+    const raw = String(id || "").trim();
     if (!/^BKK_/i.test(raw) || /^BKK_0055/i.test(raw)) return [];
-    const body = raw.replace(/^BKK_/i, '');
-    const ids = ['hu-bkk_' + body];
-    if (/^CSF/i.test(body) && body.length > 3) ids.push('hu-bkk_F' + body.slice(3));
+    const body = raw.replace(/^BKK_/i, "");
+    const ids = ["hu-bkk_" + body];
+    if (/^CSF/i.test(body) && body.length > 3) ids.push("hu-bkk_F" + body.slice(3));
     return ids;
   },
   transitousFeedWant(id) {
-    const s = String(id || '');
-    if (/^BKK_0055/i.test(s)) return 'hu-mav_';
-    if (/^BKK_/i.test(s)) return 'hu-bkk_';
-    if (/^(volan_|AREA_CS|hkir_)/i.test(s)) return 'hu-volanbusz_';
-    if (/^miskolc:/i.test(s)) return 'hu-mvk_';
-    if (s.indexOf(':') > 0) return 'hu-';
-    return '';
+    const s = String(id || "");
+    if (/^BKK_0055/i.test(s)) return "hu-mav_";
+    if (/^BKK_/i.test(s)) return "hu-bkk_";
+    if (/^(volan_|AREA_CS|hkir_)/i.test(s)) return "hu-volanbusz_";
+    if (/^miskolc:/i.test(s)) return "hu-mvk_";
+    if (s.indexOf(":") > 0) return "hu-";
+    return "";
   },
   async transitousGeocode(text, opts) {
-    const q = String(text || '').trim();
+    const q = String(text || "").trim();
     if (!q) return [];
-    const params = { text: q, language: 'hu' };
+    const params = { text: q, language: "hu" };
     const typ = opts && opts.type;
-    if (typ === 'all') {
-      /* omit type: STOP, ADDRESS and PLACE together */
+    if (typ === "all") {
     } else {
-      params.type = typ || 'STOP';
+      params.type = typ || "STOP";
     }
-    const data = await BkkLib.transitousFetch('/api/v1/geocode', params);
+    const data = await BkkLib.transitousFetch("/api/v1/geocode", params);
     return Array.isArray(data) ? data : [];
   },
   transitousInHungary(hit) {
     if (!hit) return false;
-    if (/^hu-/i.test(String(hit.id || ''))) return true;
-    if ((hit.areas || []).some((a) => /magyarorsz/i.test((a && a.name) || ''))) return true;
+    if (/^hu-/i.test(String(hit.id || ""))) return true;
+    if ((hit.areas || []).some((a) => /magyarorsz/i.test(a && a.name || ""))) return true;
     const lat = Number(hit.lat);
     const lon = Number(hit.lon);
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
@@ -1306,9 +1244,9 @@ const BkkLib = {
   },
   isPlaceStop(stop) {
     if (!stop) return false;
-    if (/^(geo:|node\/|way\/)/i.test(String(stop.id || stop.stopId || ''))) return true;
-    const kind = String(stop.kind || stop.stopKind || '');
-    return kind === 'address' || kind === 'place';
+    if (/^(geo:|node\/|way\/)/i.test(String(stop.id || stop.stopId || ""))) return true;
+    const kind = String(stop.kind || stop.stopKind || "");
+    return kind === "address" || kind === "place";
   },
   allowFutarHopShape(row, hasGps) {
     return !(BkkLib.isTrainRow(row) && hasGps);
@@ -1318,36 +1256,31 @@ const BkkLib = {
     const lat = Number(hit.lat);
     const lon = Number(hit.lon);
     const areas = hit.areas || [];
-    const city = (areas.find((a) => Number(a.adminLevel) === 8) || areas.find((a) => a.unique) || {}).name || '';
-    const kindRaw = String(hit.type || '').toUpperCase();
-    const kind = kindRaw === 'ADDRESS' ? 'address' : kindRaw === 'PLACE' ? 'place' : 'stop';
-    let id = String(hit.id || '');
+    const city = (areas.find((a) => Number(a.adminLevel) === 8) || areas.find((a) => a.unique) || {}).name || "";
+    const kindRaw = String(hit.type || "").toUpperCase();
+    const kind = kindRaw === "ADDRESS" ? "address" : kindRaw === "PLACE" ? "place" : "stop";
+    let id = String(hit.id || "");
     if (!id && Number.isFinite(lat) && Number.isFinite(lon)) {
-      id = 'geo:' + lat.toFixed(6) + ',' + lon.toFixed(6);
+      id = "geo:" + lat.toFixed(6) + "," + lon.toFixed(6);
     }
     if (!id) return null;
     return {
       id,
       name: hit.name,
-      label: city ? (hit.name + ' (' + city + ')') : hit.name,
-      lat: Number.isFinite(lat) ? lat : undefined,
-      lon: Number.isFinite(lon) ? lon : undefined,
-      kind,
+      label: city ? hit.name + " (" + city + ")" : hit.name,
+      lat: Number.isFinite(lat) ? lat : void 0,
+      lon: Number.isFinite(lon) ? lon : void 0,
+      kind
     };
   },
   plannerHitLabel(s, lang) {
-    const tag = s && s.kind === 'address' ? t(lang, 'plannerAddress')
-      : s && s.kind === 'place' ? t(lang, 'plannerPlace') : '';
-    const base = (s && (s.label || s.name)) || '';
-    return tag ? (base + ' \u00b7 ' + tag) : base;
+    const tag = s && s.kind === "address" ? t(lang, "plannerAddress") : s && s.kind === "place" ? t(lang, "plannerPlace") : "";
+    const base = s && (s.label || s.name) || "";
+    return tag ? base + " · " + tag : base;
   },
   async searchStopsTransitous(q, opts) {
     const hits = await BkkLib.transitousGeocode(q, opts);
-    return (hits || [])
-      .filter((hit) => BkkLib.transitousInHungary(hit))
-      .map((hit) => BkkLib.transitousHitToStop(hit))
-      .filter((s) => s && s.id)
-      .slice(0, 20);
+    return (hits || []).filter((hit) => BkkLib.transitousInHungary(hit)).map((hit) => BkkLib.transitousHitToStop(hit)).filter((s) => s && s.id).slice(0, 20);
   },
   capPlannerHits(hits, n) {
     const limit = n || 24;
@@ -1368,24 +1301,26 @@ const BkkLib = {
     return out;
   },
   async searchPlannerStops(apiKey, q) {
-    const byId = new Map();
+    const byId = /* @__PURE__ */ new Map();
     try {
-      const motis = await BkkLib.searchStopsTransitous(q, { type: 'all' });
+      const motis = await BkkLib.searchStopsTransitous(q, { type: "all" });
       motis.forEach((s) => {
         if (!s || !s.id || /^hu-volanbusz_/i.test(s.id)) return;
-        const mapped = String(s.id).replace(/^hu-bkk_/i, 'BKK_');
+        const mapped = String(s.id).replace(/^hu-bkk_/i, "BKK_");
         const row = mapped !== s.id ? Object.assign({}, s, { id: mapped }) : s;
         if (byId.has(row.id)) return;
         byId.set(row.id, row);
       });
       await BkkLib.addTransitousVolanStops(byId, q, motis);
-    } catch (_e) { /* GTFS / BKK still fill the list */ }
+    } catch (_e) {
+    }
     try {
-      (await BkkLib.searchStops(apiKey, q, 'all', '', { skipTransitousVolan: true })).forEach((s) => {
+      (await BkkLib.searchStops(apiKey, q, "all", "", { skipTransitousVolan: true })).forEach((s) => {
         if (!s || !s.id || byId.has(s.id)) return;
         byId.set(s.id, s);
       });
-    } catch (_e) { /* Transitous hits are enough when the index is missing */ }
+    } catch (_e) {
+    }
     const collapsed = BkkLib.collapseSameNameStops(Array.from(byId.values()));
     return BkkLib.capPlannerHits(collapsed, 24);
   },
@@ -1393,26 +1328,24 @@ const BkkLib = {
     const list = Array.isArray(hits) ? hits : [];
     if (!list.length) return null;
     const want = BkkLib.transitousFeedWant(stop && stop.id);
-    const wantName = (stop && stop.name) || '';
-    kind = String(kind || '').toLowerCase();
+    const wantName = stop && stop.name || "";
+    kind = String(kind || "").toLowerCase();
     let best = null;
     let bestScore = -1;
     list.forEach((hit) => {
       if (!hit) return;
-      const hid = String(hit.id || '');
-      const hname = hit.name || '';
+      const hid = String(hit.id || "");
+      const hname = hit.name || "";
       let score = 0;
-      const railWant = want === 'hu-mav_' || kind === 'rail' || kind === 'train';
-      if (railWant && (/railway/i.test(hid) || hid.indexOf('hu-mav_') === 0)) score += 8;
+      const railWant = want === "hu-mav_" || kind === "rail" || kind === "train";
+      if (railWant && (/railway/i.test(hid) || hid.indexOf("hu-mav_") === 0)) score += 8;
       else if (want && hid.indexOf(want) === 0) score += 5;
-      else if (railWant && hid.indexOf('hu-bkk_') === 0) score += 2;
+      else if (railWant && hid.indexOf("hu-bkk_") === 0) score += 2;
       else if (/^hu-/.test(hid)) score += 1;
       if (/railway/i.test(hid) && railWant) score += 2;
       const wantTok = BkkLib.foldTokens(wantName);
       const hitTok = BkkLib.foldTokens(hname);
-      const missing = wantTok.filter((tok) => !hitTok.some((y) => (
-        y === tok || y.indexOf(tok) >= 0 || tok.indexOf(y) >= 0
-      )));
+      const missing = wantTok.filter((tok) => !hitTok.some((y) => y === tok || y.indexOf(tok) >= 0 || tok.indexOf(y) >= 0));
       if (missing.length) score -= 4 * missing.length;
       if (BkkLib.foldTokenMatch(wantName, hname)) score += 3;
       if (BkkLib.fold(wantName) && BkkLib.fold(hname) === BkkLib.fold(wantName)) score += 2;
@@ -1422,61 +1355,59 @@ const BkkLib = {
         best = hit;
       }
     });
-    return bestScore >= 3 ? best : (list[0] || null);
+    return bestScore >= 3 ? best : list[0] || null;
   },
   transitousCoord(hit) {
-    if (!hit) return '';
+    if (!hit) return "";
     const lat = Number(hit.lat);
     const lon = Number(hit.lon);
-    if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + ',' + lon;
-    return String(hit.id || '');
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + "," + lon;
+    return String(hit.id || "");
   },
   async transitousPlace(stop, kind) {
-    if (!stop) return '';
+    if (!stop) return "";
     const lat = Number(stop.lat);
     const lon = Number(stop.lon);
-    if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + ',' + lon;
-    const name = String(stop.name || '').trim();
-    if (!name) return String(stop.id || '');
+    if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + "," + lon;
+    const name = String(stop.name || "").trim();
+    if (!name) return String(stop.id || "");
     try {
       const hits = await BkkLib.transitousGeocode(name);
       return BkkLib.transitousCoord(BkkLib.pickTransitousHit(hits, stop, kind));
     } catch (_e) {
-      return '';
+      return "";
     }
   },
   async transitousStopRef(stop, kind) {
-    const name = String((stop && (stop.name || stop.key)) || '').trim();
-    const fromStop = BkkLib.mapGpsLatLon(stop && stop.lat, stop && stop.lon)
-      || BkkLib.knownStopCoords(stop);
+    const name = String(stop && (stop.name || stop.key) || "").trim();
+    const fromStop = BkkLib.mapGpsLatLon(stop && stop.lat, stop && stop.lon) || BkkLib.knownStopCoords(stop);
     const mapped = BkkLib.bkkTransitousStopIds(stop && stop.id);
     for (let i = 0; i < mapped.length; i += 1) {
       try {
-        const data = await BkkLib.transitousFetch('/api/v5/stoptimes', {
+        const data = await BkkLib.transitousFetch("/api/v5/stoptimes", {
           stopId: mapped[i],
-          n: '1',
+          n: "1"
         });
         const place = data && data.place;
         const pt = place && BkkLib.mapGpsLatLon(place.lat, place.lon);
         if (!pt) continue;
-        const pname = String((place && place.name) || '').trim();
-        if (name && pname
-            && !BkkLib.foldTokenMatch(name, pname)
-            && BkkLib.fold(name) !== BkkLib.fold(pname)) {
+        const pname = String(place && place.name || "").trim();
+        if (name && pname && !BkkLib.foldTokenMatch(name, pname) && BkkLib.fold(name) !== BkkLib.fold(pname)) {
           continue;
         }
         return {
           id: mapped[i],
           name: pname || name,
           lat: pt[0],
-          lon: pt[1],
+          lon: pt[1]
         };
-      } catch (_e) { /* parent CSF ids 404; child F ids usually work */ }
+      } catch (_e) {
+      }
     }
     const queries = [];
     if (name) queries.push(name);
     let stripped = name;
-    [' vas\u00fat\u00e1llom\u00e1s', ' p\u00e1lyaudvar', ' pu.'].forEach((sfx) => {
+    [" vasútállomás", " pályaudvar", " pu."].forEach((sfx) => {
       const low = stripped.toLowerCase();
       if (low.endsWith(sfx)) stripped = stripped.slice(0, -sfx.length).trim();
     });
@@ -1486,113 +1417,108 @@ const BkkLib = {
     for (let i = 0; i < queries.length; i += 1) {
       try {
         const found = await BkkLib.transitousGeocode(queries[i]);
-        (found || []).forEach((hit) => {
-          const id = hit && hit.id;
+        (found || []).forEach((hit2) => {
+          const id = hit2 && hit2.id;
           if (!id || seen[id]) return;
           seen[id] = true;
-          hits.push(hit);
+          hits.push(hit2);
         });
-      } catch (_e) { /* next query */ }
+      } catch (_e) {
+      }
     }
     let hit = BkkLib.pickTransitousHit(hits, stop, kind);
-    if ((kind === 'rail' || kind === 'train') && hit && !/railway|hu-mav_/i.test(String(hit.id || ''))) {
-      const rail = hits.find((h) => /railway|hu-mav_/i.test(String((h && h.id) || '')));
+    if ((kind === "rail" || kind === "train") && hit && !/railway|hu-mav_/i.test(String(hit.id || ""))) {
+      const rail = hits.find((h) => /railway|hu-mav_/i.test(String(h && h.id || "")));
       if (rail) hit = rail;
     }
     const board = BkkLib.mapGpsLatLon(hit && hit.lat, hit && hit.lon) || fromStop;
     return {
-      id: (hit && hit.id) || '',
-      name: (hit && hit.name) || name,
+      id: hit && hit.id || "",
+      name: hit && hit.name || name,
       lat: board ? board[0] : null,
-      lon: board ? board[1] : null,
+      lon: board ? board[1] : null
     };
   },
   motisLegLabel(leg) {
-    const short = String((leg && leg.routeShortName) || '').trim();
+    const short = String(leg && leg.routeShortName || "").trim();
     if (short) return short;
-    const display = String((leg && leg.displayName) || '').trim();
+    const display = String(leg && leg.displayName || "").trim();
     if (display) return display;
-    return String((leg && leg.tripShortName) || '').trim();
+    return String(leg && leg.tripShortName || "").trim();
   },
   motisLegType(mode) {
-    const m = String(mode || '').toUpperCase();
-    if (m.indexOf('SUBURBAN') >= 0) return 'SUBURBAN';
-    if (/RAIL|TRAIN/.test(m)) return 'RAIL';
-    if (m.indexOf('TRAM') >= 0) return 'TRAM';
-    if (m.indexOf('SUBWAY') >= 0 || m.indexOf('METRO') >= 0) return 'SUBWAY';
-    if (m.indexOf('TROLLEY') >= 0) return 'TROLLEYBUS';
-    if (m === 'COACH') return 'COACH';
-    return 'BUS';
+    const m = String(mode || "").toUpperCase();
+    if (m.indexOf("SUBURBAN") >= 0) return "SUBURBAN";
+    if (/RAIL|TRAIN/.test(m)) return "RAIL";
+    if (m.indexOf("TRAM") >= 0) return "TRAM";
+    if (m.indexOf("SUBWAY") >= 0 || m.indexOf("METRO") >= 0) return "SUBWAY";
+    if (m.indexOf("TROLLEY") >= 0) return "TROLLEYBUS";
+    if (m === "COACH") return "COACH";
+    return "BUS";
   },
   motisMatchesMode(leg, mode) {
-    if (mode === 'all' || mode === 'helyi') return true;
-    const m = String((leg && leg.mode) || '').toUpperCase();
-    if (m === 'WALK') return false;
-    const id = String((leg && (leg.tripId || leg.routeId)) || '');
+    if (mode === "all" || mode === "helyi") return true;
+    const m = String(leg && leg.mode || "").toUpperCase();
+    if (m === "WALK") return false;
+    const id = String(leg && (leg.tripId || leg.routeId) || "");
     return BkkLib.routeMatchesMode({
       type: BkkLib.motisLegType(m),
-      id: /volan/i.test(id) ? ('volan_' + id) : id,
-      agencyId: id,
-    }, mode || 'all');
+      id: /volan/i.test(id) ? "volan_" + id : id,
+      agencyId: id
+    }, mode || "all");
   },
   rowsFromMotis(payload, dest, mode, horizon, parseOpts) {
-    const its = (payload && payload.itineraries) || [];
+    const its = payload && payload.itineraries || [];
     parseOpts = parseOpts || {};
-    const now = Number(parseOpts.now) > 0
-      ? Number(parseOpts.now)
-      : Math.floor(Date.now() / 1000);
+    const now = Number(parseOpts.now) > 0 ? Number(parseOpts.now) : Math.floor(Date.now() / 1e3);
     const h = clampMinutesAfter(horizon);
     const latest = now + h * 60;
-    const destName = (dest && (dest.name || dest.key)) || '';
+    const destName = dest && (dest.name || dest.key) || "";
     const out = [];
     its.forEach((it) => {
       if (Number(it.transfers || 0) > 0) return;
-      const ride = (it.legs || []).filter((leg) => String(leg.mode || '').toUpperCase() !== 'WALK');
+      const ride = (it.legs || []).filter((leg2) => String(leg2.mode || "").toUpperCase() !== "WALK");
       if (ride.length !== 1) return;
       const leg = ride[0];
-      if (!BkkLib.motisMatchesMode(leg, mode || 'all')) return;
+      if (!BkkLib.motisMatchesMode(leg, mode || "all")) return;
       const startMs = BkkLib.isoMs(leg.startTime || it.startTime);
-      const dep = startMs ? Math.round(startMs / 1000) : 0;
+      const dep = startMs ? Math.round(startMs / 1e3) : 0;
       if (!dep || dep > latest + 60) return;
       if (!parseOpts.keepPast && !departureStillDue(dep, now)) return;
       const endMs = BkkLib.isoMs(leg.endTime || it.endTime);
       const sec = Number(leg.duration);
-      const fromSec = Number.isFinite(sec) && sec > 0
-        ? sec
-        : (startMs && endMs ? Math.round((endMs - startMs) / 1000) : 0);
+      const fromSec = Number.isFinite(sec) && sec > 0 ? sec : startMs && endMs ? Math.round((endMs - startMs) / 1e3) : 0;
       const travel = fromSec <= 0 ? null : Math.max(1, Math.round(fromSec / 60));
       const rawType = BkkLib.motisLegType(leg.mode);
       const label = BkkLib.motisLegLabel(leg);
-      const color = String(leg.routeColor || '').replace(/#/g, '') || (rawType === 'RAIL' ? '4477AA' : '009EE3');
-      const text = String(leg.routeTextColor || '').replace(/#/g, '') || 'ffffff';
-      const tripRaw = String(leg.tripId || '').trim();
-      const tripId = 'motis:' + (tripRaw || (dep + ':' + label));
-      const trainNumber = /RAIL|SUBURBAN|TRAIN/.test(rawType)
-        ? BkkLib.emmaTrainNumber(leg.tripShortName || label)
-        : '';
+      const color = String(leg.routeColor || "").replace(/#/g, "") || (rawType === "RAIL" ? "4477AA" : "009EE3");
+      const text = String(leg.routeTextColor || "").replace(/#/g, "") || "ffffff";
+      const tripRaw = String(leg.tripId || "").trim();
+      const tripId = "motis:" + (tripRaw || dep + ":" + label);
+      const trainNumber = /RAIL|SUBURBAN|TRAIN/.test(rawType) ? BkkLib.emmaTrainNumber(leg.tripShortName || label) : "";
       const fromStop = leg.from || {};
       const plat = String(
-        fromStop.scheduledTrack || fromStop.track || fromStop.platform || '',
+        fromStop.scheduledTrack || fromStop.track || fromStop.platform || ""
       ).trim();
       const row = {
         tripId,
         motisTripId: tripRaw,
         label,
-        color: '#' + color,
-        text: '#' + text,
+        color: "#" + color,
+        text: "#" + text,
         vehicle: BkkLib.vehicleKind({ type: rawType, id: tripRaw }),
         rawType,
         dep,
         sched: dep,
         delay: 0,
-        head: String(leg.headsign || destName || ''),
+        head: String(leg.headsign || destName || ""),
         platform: plat,
         wheelchair: false,
         bikesAllowed: false,
         booking: !!(leg.mayRequireBooking || fromStop.mayRequireBooking || leg.booking),
         trainNumber,
         travel,
-        shape: BkkLib.decodePolyline(leg.legGeometry),
+        shape: BkkLib.decodePolyline(leg.legGeometry)
       };
       BkkLib.applyRailBadge(row);
       out.push(row);
@@ -1612,22 +1538,22 @@ const BkkLib = {
       const params = {
         fromPlace,
         toPlace,
-        timetableView: 'true',
-        maxTransfers: '0',
+        timetableView: "true",
+        maxTransfers: "0",
         numItineraries: String(maxDepartureRows(horizon)),
-        searchWindow: String(horizon * 60),
+        searchWindow: String(horizon * 60)
       };
       if (opts.time) params.time = String(opts.time);
-      else if (anchor > 0) params.time = new Date(Math.max(0, anchor - 120) * 1000).toISOString();
-      const data = await BkkLib.transitousFetch('/api/v5/plan', params);
+      else if (anchor > 0) params.time = new Date(Math.max(0, anchor - 120) * 1e3).toISOString();
+      const data = await BkkLib.transitousFetch("/api/v5/plan", params);
       const parseOpts = anchor > 0 ? { now: anchor, keepPast: true } : {};
-      return BkkLib.rowsFromMotis(data, dest, opts.mode || 'all', horizon, parseOpts);
+      return BkkLib.rowsFromMotis(data, dest, opts.mode || "all", horizon, parseOpts);
     } catch (_e) {
       return [];
     }
   },
   isTrainRow(row) {
-    return BkkLib.vehicleBucket(row) === 'rail';
+    return BkkLib.vehicleBucket(row) === "rail";
   },
   /* Hop maps draw the whole published line (street or track), not a
      stop-to-stop chord. Bus/tram/metro/trolley/coach/rail all keep it
@@ -1636,51 +1562,47 @@ const BkkLib = {
   keepsFullLineShape(row) {
     if (BkkLib.isTrainRow(row)) return true;
     const kind = BkkLib.vehicleBucket(row);
-    return kind === 'tram' || kind === 'subway' || kind === 'trolley'
-      || kind === 'bus' || kind === 'coach';
+    return kind === "tram" || kind === "subway" || kind === "trolley" || kind === "bus" || kind === "coach";
   },
   vehicleBucket(row) {
-    if (!row) return '';
-    if (typeof row === 'string') {
+    if (!row) return "";
+    if (typeof row === "string") {
       const s = row.toLowerCase();
-      if (/rail|train|suburban/.test(s)) return 'rail';
-      if (/tram/.test(s)) return 'tram';
-      if (/subway|metro/.test(s)) return 'subway';
-      if (/trolley/.test(s)) return 'trolley';
-      if (/coach/.test(s)) return 'coach';
-      if (/bus/.test(s)) return 'bus';
+      if (/rail|train|suburban/.test(s)) return "rail";
+      if (/tram/.test(s)) return "tram";
+      if (/subway|metro/.test(s)) return "subway";
+      if (/trolley/.test(s)) return "trolley";
+      if (/coach/.test(s)) return "coach";
+      if (/bus/.test(s)) return "bus";
       return s;
     }
-    const v = String(row.vehicle || '').toLowerCase();
-    const typ = String(row.rawType || row.type || row.mode || '').toUpperCase();
-    if (v === 'rail' || v === 'train' || /RAIL|SUBURBAN|TRAIN/.test(typ)) return 'rail';
-    if (/^elvira:/i.test(String(row.tripId || ''))) return 'rail';
-    if (v === 'tram' || typ.indexOf('TRAM') >= 0) return 'tram';
-    if (v === 'subway' || v === 'metro' || /SUBWAY|METRO/.test(typ)) return 'subway';
-    if (v === 'trolley' || v === 'trolleybus' || typ.indexOf('TROLLEY') >= 0) return 'trolley';
-    if (v === 'coach' || typ === 'COACH' || /^gtfs:/i.test(String(row.tripId || ''))) return 'coach';
-    if (v === 'bus' || typ === 'BUS') return 'bus';
-    if (BkkLib.rowTrainNumber(row) && !/bus|tram|subway|trolley|coach/i.test(v)) return 'rail';
-    return v || 'bus';
+    const v = String(row.vehicle || "").toLowerCase();
+    const typ = String(row.rawType || row.type || row.mode || "").toUpperCase();
+    if (v === "rail" || v === "train" || /RAIL|SUBURBAN|TRAIN/.test(typ)) return "rail";
+    if (/^elvira:/i.test(String(row.tripId || ""))) return "rail";
+    if (v === "tram" || typ.indexOf("TRAM") >= 0) return "tram";
+    if (v === "subway" || v === "metro" || /SUBWAY|METRO/.test(typ)) return "subway";
+    if (v === "trolley" || v === "trolleybus" || typ.indexOf("TROLLEY") >= 0) return "trolley";
+    if (v === "coach" || typ === "COACH" || /^gtfs:/i.test(String(row.tripId || ""))) return "coach";
+    if (v === "bus" || typ === "BUS") return "bus";
+    if (BkkLib.rowTrainNumber(row) && !/bus|tram|subway|trolley|coach/i.test(v)) return "rail";
+    return v || "bus";
   },
   sameVehicleBucket(a, b) {
     const x = BkkLib.vehicleBucket(a);
     const y = BkkLib.vehicleBucket(b);
     if (!x || !y) return true;
     if (x === y) return true;
-    return (x === 'bus' && y === 'coach') || (x === 'coach' && y === 'bus');
+    return x === "bus" && y === "coach" || x === "coach" && y === "bus";
   },
   motisTripIdRaw(row) {
-    const raw = String((row && (row.motisTripId || row.tripId)) || '').replace(/^motis:/i, '').trim();
-    if (!raw || /^\d+:/.test(raw)) return '';
+    const raw = String(row && (row.motisTripId || row.tripId) || "").replace(/^motis:/i, "").trim();
+    if (!raw || /^\d+:/.test(raw)) return "";
     return raw;
   },
   namedTrainAliasMatch(a, b) {
-    const aliases = { ADRIA: ['AGRAM'], AGRAM: ['ADRIA'] };
-    const tokens = (s) => String(s || '').toUpperCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
-      .split(/[^A-Z]+/)
-      .filter((t) => t.length >= 4 && !BkkLib.genericRailLabel(t));
+    const aliases = { ADRIA: ["AGRAM"], AGRAM: ["ADRIA"] };
+    const tokens = (s) => String(s || "").toUpperCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/[^A-Z]+/).filter((t2) => t2.length >= 4 && !BkkLib.genericRailLabel(t2));
     const ta = tokens(a);
     const tb = tokens(b);
     for (let i = 0; i < ta.length; i += 1) {
@@ -1692,21 +1614,21 @@ const BkkLib = {
     return false;
   },
   motisLabelMatch(a, b) {
-    const la = String(a || '').trim().toUpperCase();
-    const lb = String(b || '').trim().toUpperCase();
+    const la = String(a || "").trim().toUpperCase();
+    const lb = String(b || "").trim().toUpperCase();
     if (!la || !lb) return false;
     if (la === lb) return true;
-    if (lb.indexOf(la + ' ') === 0 || la.indexOf(lb + ' ') === 0) return true;
+    if (lb.indexOf(la + " ") === 0 || la.indexOf(lb + " ") === 0) return true;
     if (BkkLib.genericRailLabel(la) || BkkLib.genericRailLabel(lb)) return false;
     const fa = BkkLib.fold(la);
     const fb = BkkLib.fold(lb);
     if (!fa || !fb) return false;
     if (fa === fb) return true;
-    const esc = fa.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp('(?:^|[^a-z0-9])' + esc + '(?:[^a-z0-9]|$)').test(fb);
+    const esc = fa.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp("(?:^|[^a-z0-9])" + esc + "(?:[^a-z0-9]|$)").test(fb);
   },
   destOnMotisRow(m, dest) {
-    const want = BkkLib.fold((dest && (dest.name || dest.key)) || '');
+    const want = BkkLib.fold(dest && (dest.name || dest.key) || "");
     if (!want) return false;
     const names = [];
     (m && m.nextNames || []).forEach((n) => names.push(n));
@@ -1717,40 +1639,37 @@ const BkkLib = {
     });
   },
   rowsFromMotisStopTimes(payload) {
-    const sts = (payload && payload.stopTimes) || [];
+    const sts = payload && payload.stopTimes || [];
     return sts.map((st) => {
-      const place = (st && st.place) || {};
+      const place = st && st.place || {};
       const startMs = BkkLib.isoMs(place.departure || place.scheduledDeparture);
       const rawType = BkkLib.motisLegType(st.mode);
-      const label = String(st.displayName || st.routeShortName || st.tripShortName || '').trim();
-      const tripRaw = String((st && st.tripId) || '').trim();
-      const destName = (st.tripTo && st.tripTo.name) || '';
+      const label = String(st.displayName || st.routeShortName || st.tripShortName || "").trim();
+      const tripRaw = String(st && st.tripId || "").trim();
+      const destName = st.tripTo && st.tripTo.name || "";
       return {
-        tripId: tripRaw ? ('motis:' + tripRaw) : '',
+        tripId: tripRaw ? "motis:" + tripRaw : "",
         motisTripId: tripRaw,
         label,
         vehicle: BkkLib.vehicleKind({ type: rawType, id: tripRaw }),
         rawType,
-        dep: startMs ? Math.round(startMs / 1000) : 0,
-        sched: startMs ? Math.round(startMs / 1000) : 0,
-        head: String(st.headsign || destName || ''),
+        dep: startMs ? Math.round(startMs / 1e3) : 0,
+        sched: startMs ? Math.round(startMs / 1e3) : 0,
+        head: String(st.headsign || destName || ""),
         tripTo: destName,
-        nextNames: ((st.nextStops || []).map((p) => p && p.name).filter(Boolean)),
-        trainNumber: /RAIL|SUBURBAN|TRAIN/.test(rawType)
-          ? BkkLib.emmaTrainNumber(st.tripShortName || label)
-          : '',
-        shape: [],
+        nextNames: (st.nextStops || []).map((p) => p && p.name).filter(Boolean),
+        trainNumber: /RAIL|SUBURBAN|TRAIN/.test(rawType) ? BkkLib.emmaTrainNumber(st.tripShortName || label) : "",
+        shape: []
       };
     }).filter((row) => row.motisTripId);
   },
   pickMotisVehicle(motis, row, dest) {
     const list = Array.isArray(motis) ? motis : [];
     const num = BkkLib.rowTrainNumber(row);
-    const label = String((row && row.label) || '').trim().toUpperCase();
-    const dep = Number((row && (row.dep || row.sched || row.depTs)) || 0);
+    const label = String(row && row.label || "").trim().toUpperCase();
+    const dep = Number(row && (row.dep || row.sched || row.depTs) || 0);
     let best = null;
     let bestScore = -1e9;
-    let matchHow = '';
     const usable = (m) => {
       if (!m) return false;
       if (!BkkLib.sameVehicleBucket(row, m)) return false;
@@ -1760,51 +1679,41 @@ const BkkLib = {
     list.forEach((m) => {
       if (!usable(m)) return;
       const mNum = BkkLib.rowTrainNumber(m);
-      const mLabel = String((m && m.label) || '').trim().toUpperCase();
+      const mLabel = String(m && m.label || "").trim().toUpperCase();
       const sameNum = !!(num && mNum && num === mNum);
       const sameLabel = BkkLib.motisLabelMatch(label, mLabel);
-      const sameAlias = !!(label && (
-        BkkLib.namedTrainAliasMatch(label, mLabel)
-        || BkkLib.namedTrainAliasMatch(label, String((m && m.head) || ''))
-      ));
+      const sameAlias = !!(label && (BkkLib.namedTrainAliasMatch(label, mLabel) || BkkLib.namedTrainAliasMatch(label, String(m && m.head || ""))));
       const destOn = BkkLib.destOnMotisRow(m, dest);
       const dt = dep ? Math.abs(Number(m.dep || 0) - dep) : 0;
       if (dep && dt > 45 * 60 && !sameNum) return;
       const identity = sameNum || sameLabel || sameAlias;
       if (!identity) {
-        const wantsId = !!(num || (label.length >= 3 && !BkkLib.genericRailLabel(label)));
+        const wantsId = !!(num || label.length >= 3 && !BkkLib.genericRailLabel(label));
         if (wantsId) return;
       }
       const destNear = destOn && (!dep || dt <= 12 * 60);
       if (!identity && !destNear) return;
-      const score = (sameNum ? 1000 : 0)
-        + (sameLabel ? 400 : 0)
-        + (sameAlias ? 250 : 0)
-        + (destNear ? 50 : 0)
-        - Math.min(dt, 1800) / 60;
+      const score = (sameNum ? 1e3 : 0) + (sameLabel ? 400 : 0) + (sameAlias ? 250 : 0) + (destNear ? 50 : 0) - Math.min(dt, 1800) / 60;
       if (score > bestScore) {
         best = m;
         bestScore = score;
-        matchHow = sameNum ? 'num' : (destOn ? 'dest' : (sameAlias ? 'alias' : (sameLabel ? 'label' : 'time')));
       }
     });
     if (!best && dep) {
       const near = list.filter((m) => usable(m) && Math.abs(Number(m.dep || 0) - dep) <= 8 * 60);
       const toward = dest ? near.filter((m) => BkkLib.destOnMotisRow(m, dest)) : near;
       const pool = toward.length ? toward : near;
-      const wantsId = !!(num || (label.length >= 3 && !BkkLib.genericRailLabel(label)));
+      const wantsId = !!(num || label.length >= 3 && !BkkLib.genericRailLabel(label));
       if (pool.length === 1) {
         const dt0 = Math.abs(Number(pool[0].dep || 0) - dep);
         if (!wantsId || dt0 <= 90) {
           best = pool[0];
-          matchHow = toward.length ? 'dest-time' : 'time';
         }
       } else if (pool.length > 1 && !wantsId) {
         pool.sort((a, b) => Math.abs(Number(a.dep || 0) - dep) - Math.abs(Number(b.dep || 0) - dep));
         const gap = Math.abs(Number(pool[1].dep || 0) - dep) - Math.abs(Number(pool[0].dep || 0) - dep);
         if (gap >= 60 || toward.length === 1) {
           best = pool[0];
-          matchHow = toward.length ? 'dest-time' : 'time';
         }
       }
     }
@@ -1814,16 +1723,16 @@ const BkkLib = {
     return BkkLib.pickMotisVehicle(motis, row, dest);
   },
   async motisTripShape(tripId) {
-    const raw = String(tripId || '').replace(/^motis:/i, '').trim();
+    const raw = String(tripId || "").replace(/^motis:/i, "").trim();
     if (!raw || /^\d+:/.test(raw)) return [];
-    const data = await BkkLib.transitousFetch('/api/v5/trip', {
+    const data = await BkkLib.transitousFetch("/api/v5/trip", {
       tripId: raw,
-      joinInterlinedLegs: 'true',
+      joinInterlinedLegs: "true"
     });
-    const legs = (data && data.legs) || [];
+    const legs = data && data.legs || [];
     const pts = [];
     legs.forEach((leg) => {
-      if (String((leg && leg.mode) || '').toUpperCase() === 'WALK') return;
+      if (String(leg && leg.mode || "").toUpperCase() === "WALK") return;
       BkkLib.validMapShape(BkkLib.decodePolyline(leg && leg.legGeometry)).forEach((pt) => {
         const last = pts[pts.length - 1];
         if (last && last[0] === pt[0] && last[1] === pt[1]) return;
@@ -1834,16 +1743,15 @@ const BkkLib = {
   },
   async motisShapeForHop(row, origin, dest, opts) {
     opts = Object.assign({}, opts || {});
-    const anchor = Number((row && (row.dep || row.sched || row.depTs)) || 0);
+    const anchor = Number(row && (row.dep || row.sched || row.depTs) || 0);
     if (anchor > 0) {
       opts.anchorDep = anchor;
-      if (!opts.time) opts.time = new Date((anchor - 120) * 1000).toISOString();
+      if (!opts.time) opts.time = new Date((anchor - 120) * 1e3).toISOString();
     }
     const kind = BkkLib.vehicleBucket(row);
-    let board = BkkLib.mapGpsLatLon(origin && origin.lat, origin && origin.lon)
-      || BkkLib.knownStopCoords(origin);
+    let board = BkkLib.mapGpsLatLon(origin && origin.lat, origin && origin.lon) || BkkLib.knownStopCoords(origin);
     let hit = null;
-    let source = '';
+    let source = "";
     let hopShape = [];
     let fullShape = [];
     try {
@@ -1852,25 +1760,26 @@ const BkkLib = {
         board = BkkLib.mapGpsLatLon(ref.lat, ref.lon);
       }
       if (ref && ref.id) {
-        const data = await BkkLib.transitousFetch('/api/v5/stoptimes', {
+        const data = await BkkLib.transitousFetch("/api/v5/stoptimes", {
           stopId: ref.id,
-          time: opts.time || undefined,
-          n: '40',
-          fetchStops: 'true',
+          time: opts.time || void 0,
+          n: "40",
+          fetchStops: "true"
         });
         if (!board && data && data.place) {
           board = BkkLib.mapGpsLatLon(data.place.lat, data.place.lon);
         }
         const sts = BkkLib.rowsFromMotisStopTimes(data);
         hit = BkkLib.pickMotisVehicle(sts, row, dest);
-        if (hit) source = 'stoptimes';
+        if (hit) source = "stoptimes";
       }
-    } catch (_e) { /* hop plan is the fallback */ }
+    } catch (_e) {
+    }
     if (!hit) {
       const motis = await BkkLib.transitousDepartures(origin, dest, opts);
       hit = BkkLib.pickMotisVehicle(motis, row, dest);
       hopShape = BkkLib.validMapShape(hit && hit.shape);
-      if (hit) source = 'plan';
+      if (hit) source = "plan";
     } else {
       hopShape = BkkLib.validMapShape(hit.shape);
     }
@@ -1882,11 +1791,8 @@ const BkkLib = {
         fullShape = [];
       }
     }
-    /* Prefer the full trip polyline (tracks). hopShape from a MOTIS plan is
-       often just the stop-to-stop hop cut. */
     let shape = fullShape.length >= 2 ? fullShape : hopShape;
-    let destPt = BkkLib.mapGpsLatLon(dest && dest.lat, dest && dest.lon)
-      || BkkLib.knownStopCoords(dest);
+    let destPt = BkkLib.mapGpsLatLon(dest && dest.lat, dest && dest.lon) || BkkLib.knownStopCoords(dest);
     if (!BkkLib.keepsFullLineShape(row)) {
       if (!destPt && dest && (dest.name || dest.key || dest.id)) {
         try {
@@ -1900,12 +1806,12 @@ const BkkLib = {
       if (clipped.length >= 2) shape = clipped;
     }
     return {
-      shape: shape,
-      board: board,
+      shape,
+      board,
       dest: destPt,
-      source: source,
-      hit: hit,
-      coversHead: BkkLib.motisCoversHead(hit, row),
+      source,
+      hit,
+      coversHead: BkkLib.motisCoversHead(hit, row)
     };
   },
   async fillTransitousIfEmpty(rows, origin, dest, opts) {
@@ -1921,7 +1827,7 @@ const BkkLib = {
   /* MOTIS v5: itinerary duration is seconds; leg duration is seconds;
      startTime/endTime are ISO-8601. */
   journeyFromMotis(payload) {
-    const its = (payload && payload.itineraries) || [];
+    const its = payload && payload.itineraries || [];
     if (!its.length) return null;
     let best = its[0];
     its.forEach((it) => {
@@ -1931,13 +1837,11 @@ const BkkLib = {
     const tripStart = BkkLib.isoMs(best.startTime);
     let prevEnd = tripStart;
     (best.legs || []).forEach((leg) => {
-      const walk = String(leg.mode || '').toUpperCase() === 'WALK';
+      const walk = String(leg.mode || "").toUpperCase() === "WALK";
       const startMs = BkkLib.isoMs(leg.startTime);
       const endMs = BkkLib.isoMs(leg.endTime);
       const sec = Number(leg.duration);
-      const fromSec = Number.isFinite(sec) && sec > 0
-        ? sec
-        : (startMs && endMs ? Math.round((endMs - startMs) / 1000) : 0);
+      const fromSec = Number.isFinite(sec) && sec > 0 ? sec : startMs && endMs ? Math.round((endMs - startMs) / 1e3) : 0;
       let minutes = fromSec <= 0 ? 0 : Math.max(1, Math.round(fromSec / 60));
       let meters = Math.max(0, Math.round(Number(leg.distance || 0)));
       if (!meters && walk) meters = minutes * 80;
@@ -1945,10 +1849,10 @@ const BkkLib = {
         if (!walk || meters < 25) return;
         minutes = 1;
       }
-      let waitMin = 0;
+      let waitMin2 = 0;
       if (!walk && startMs && prevEnd) {
-        waitMin = Math.round((startMs - prevEnd) / 60000);
-        if (waitMin < 1) waitMin = 0;
+        waitMin2 = Math.round((startMs - prevEnd) / 6e4);
+        if (waitMin2 < 1) waitMin2 = 0;
       }
       if (endMs) prevEnd = endMs;
       else if (startMs) prevEnd = startMs;
@@ -1962,27 +1866,27 @@ const BkkLib = {
         walk,
         minutes,
         meters,
-        label: walk ? '' : BkkLib.motisLegLabel(leg),
-        headsign: String(leg.headsign || ''),
-        color: String(leg.routeColor || '').replace(/#/g, ''),
-        text: String(leg.routeTextColor || '').replace(/#/g, ''),
-        from: String(from.name || ''),
-        to: String(to.name || ''),
-        waitMin,
-        tripId: String(leg.tripId || ''),
+        label: walk ? "" : BkkLib.motisLegLabel(leg),
+        headsign: String(leg.headsign || ""),
+        color: String(leg.routeColor || "").replace(/#/g, ""),
+        text: String(leg.routeTextColor || "").replace(/#/g, ""),
+        from: String(from.name || ""),
+        to: String(to.name || ""),
+        waitMin: waitMin2,
+        tripId: String(leg.tripId || ""),
         shape: BkkLib.decodePolyline(leg.legGeometry),
-        fromLat: Number.isFinite(fromLat) ? fromLat : undefined,
-        fromLon: Number.isFinite(fromLon) ? fromLon : undefined,
-        toLat: Number.isFinite(toLat) ? toLat : undefined,
-        toLon: Number.isFinite(toLon) ? toLon : undefined,
+        fromLat: Number.isFinite(fromLat) ? fromLat : void 0,
+        fromLon: Number.isFinite(fromLon) ? fromLon : void 0,
+        toLat: Number.isFinite(toLat) ? toLat : void 0,
+        toLon: Number.isFinite(toLon) ? toLon : void 0
       };
       if (!walk) {
         const badge = BkkLib.applyRailBadge({
           label: row.label,
-          color: row.color || '4477AA',
+          color: row.color || "4477AA"
         });
-        row.color = String(badge.color || row.color).replace(/#/g, '');
-        if (badge.text) row.text = String(badge.text).replace(/#/g, '');
+        row.color = String(badge.color || row.color).replace(/#/g, "");
+        if (badge.text) row.text = String(badge.text).replace(/#/g, "");
       }
       legs.push(row);
     });
@@ -1994,13 +1898,13 @@ const BkkLib = {
       walkMin,
       waitMin,
       transfers: Math.max(0, Number(best.transfers || 0)),
-      legs,
+      legs
     };
   },
   async transitousJourney(origin, dest, opts) {
     const places = await Promise.all([
       BkkLib.transitousPlace(origin),
-      BkkLib.transitousPlace(dest),
+      BkkLib.transitousPlace(dest)
     ]);
     const fromPlace = places[0];
     const toPlace = places[1];
@@ -2009,10 +1913,10 @@ const BkkLib = {
       const planParams = {
         fromPlace,
         toPlace,
-        numItineraries: '12',
-        searchWindow: String(clampMinutesAfter(opts && opts.minutesAfter) * 60),
+        numItineraries: "12",
+        searchWindow: String(clampMinutesAfter(opts && opts.minutesAfter) * 60)
       };
-      const data = await BkkLib.transitousFetch('/api/v5/plan', planParams);
+      const data = await BkkLib.transitousFetch("/api/v5/plan", planParams);
       const journey = BkkLib.journeyFromMotis(data);
       if (journey && journey.legs.some((leg) => !leg.walk)) return journey;
       return null;
@@ -2033,7 +1937,11 @@ const BkkLib = {
     )).filter((n) => Number.isFinite(n) && n > 0);
     if (!travels.length) return true;
     return dur < Math.min.apply(null, travels);
-  },
+  }
+});
+
+// src/lib/journey.js
+Object.assign(BkkLib, {
   /* FUTÁR plan-trip: itinerary duration and walkTime are seconds.
      Each leg duration is milliseconds. */
   journeyFromPlan(payload) {
@@ -2047,14 +1955,14 @@ const BkkLib = {
     const tripStart = BkkLib.epochMs(best.startTime);
     let prevEnd = tripStart;
     (best.legs || []).forEach((leg) => {
-      const sec = Math.round(Number(leg.duration || 0) / 1000);
-      const walk = String(leg.mode || '').toUpperCase() === 'WALK';
+      const sec = Math.round(Number(leg.duration || 0) / 1e3);
+      const walk = String(leg.mode || "").toUpperCase() === "WALK";
       const startMs = BkkLib.epochMs(leg.startTime);
       const endMs = BkkLib.epochMs(leg.endTime);
-      let waitMin = 0;
+      let waitMin2 = 0;
       if (!walk && startMs && prevEnd) {
-        waitMin = Math.round((startMs - prevEnd) / 60000);
-        if (waitMin < 1) waitMin = 0;
+        waitMin2 = Math.round((startMs - prevEnd) / 6e4);
+        if (waitMin2 < 1) waitMin2 = 0;
       }
       if (endMs) prevEnd = endMs;
       else if (startMs) prevEnd = startMs;
@@ -2075,19 +1983,19 @@ const BkkLib = {
         walk,
         minutes,
         meters,
-        label: String(leg.routeShortName || ''),
-        headsign: String(leg.headsign || ''),
-        color: String(leg.routeColor || '').replace(/#/g, ''),
-        text: String(leg.routeTextColor || '').replace(/#/g, ''),
-        from: String(from.name || ''),
-        to: String(to.name || ''),
-        waitMin,
-        tripId: String(leg.tripId || ''),
+        label: String(leg.routeShortName || ""),
+        headsign: String(leg.headsign || ""),
+        color: String(leg.routeColor || "").replace(/#/g, ""),
+        text: String(leg.routeTextColor || "").replace(/#/g, ""),
+        from: String(from.name || ""),
+        to: String(to.name || ""),
+        waitMin: waitMin2,
+        tripId: String(leg.tripId || ""),
         shape: BkkLib.decodePolyline(leg.legGeometry),
-        fromLat: Number.isFinite(fromLat) ? fromLat : undefined,
-        fromLon: Number.isFinite(fromLon) ? fromLon : undefined,
-        toLat: Number.isFinite(toLat) ? toLat : undefined,
-        toLon: Number.isFinite(toLon) ? toLon : undefined,
+        fromLat: Number.isFinite(fromLat) ? fromLat : void 0,
+        fromLon: Number.isFinite(fromLon) ? fromLon : void 0,
+        toLat: Number.isFinite(toLat) ? toLat : void 0,
+        toLon: Number.isFinite(toLon) ? toLon : void 0
       });
     });
     if (!legs.length) return null;
@@ -2097,7 +2005,7 @@ const BkkLib = {
       walkMin: Math.max(0, Math.round(Number(best.walkTime || 0) / 60)),
       waitMin,
       transfers: Math.max(0, Number(best.transfers || 0)),
-      legs,
+      legs
     };
   },
   async planJourney(apiKey, origin, dest, hass, opts) {
@@ -2111,12 +2019,12 @@ const BkkLib = {
       if (fromPlace && toPlace) {
         try {
           const horizon = clampMinutesAfter(opts.minutesAfter);
-          const data = await BkkLib.fetch(apiKey, 'plan-trip.json', {
+          const data = await BkkLib.fetch(apiKey, "plan-trip.json", {
             fromPlace,
             toPlace,
-            mode: 'TRANSIT,WALK',
+            mode: "TRANSIT,WALK",
             numItineraries: String(Math.min(12, Math.max(5, Math.round(horizon / 40)))),
-            searchWindow: String(horizon * 60),
+            searchWindow: String(horizon * 60)
           }, true);
           futar = BkkLib.journeyFromPlan(data);
         } catch (_e) {
@@ -2136,36 +2044,36 @@ const BkkLib = {
     const stops = idx.stops || [];
     const op = originStop.op;
     const day = BkkLib.volanDay(0);
-    const ride = new Map();
+    const ride = /* @__PURE__ */ new Map();
     const trips = idx.t || [];
     for (let n = 0; n < trips.length; n++) {
-      const t = trips[n];
-      const ps = t[2] || [];
-      const ms = t[3] || [];
+      const t2 = trips[n];
+      const ps = t2[2] || [];
+      const ms = t2[3] || [];
       if (ps.length < 2) continue;
       const first = stops[ps[0]];
       if (!first || first.op !== op) continue;
-      if (!BkkLib.volanServiceOk(idx, t[0], day.ymd, day.dow)) continue;
+      if (!BkkLib.volanServiceOk(idx, t2[0], day.ymd, day.dow)) continue;
       const span = Math.min(ps.length, 28);
       for (let i = 0; i < span; i++) {
         for (let j = i + 1; j < span; j++) {
           const mins = ms[j] - ms[i];
           if (mins < 1 || mins > 150) continue;
-          const key = ps[i] + '|' + ps[j];
+          const key = ps[i] + "|" + ps[j];
           const prev = ride.get(key);
           if (!prev || mins < prev.ride) {
-            ride.set(key, { from: ps[i], to: ps[j], route: String(t[1]), ride: mins });
+            ride.set(key, { from: ps[i], to: ps[j], route: String(t2[1]), ride: mins });
           }
         }
       }
     }
-    const rideAt = new Map();
+    const rideAt = /* @__PURE__ */ new Map();
     ride.forEach((edge) => {
       if (!rideAt.has(edge.from)) rideAt.set(edge.from, []);
       rideAt.get(edge.from).push(edge);
     });
-    const walkAt = new Map();
-    const byFold = new Map();
+    const walkAt = /* @__PURE__ */ new Map();
+    const byFold = /* @__PURE__ */ new Map();
     stops.forEach((st) => {
       if (!st || st.op !== op || !st.fold) return;
       if (!byFold.has(st.fold)) byFold.set(st.fold, []);
@@ -2189,7 +2097,9 @@ const BkkLib = {
     if (!starts.length) starts.push(originStop.i);
     const board = (at) => {
       const ids = [at];
-      (walkAt.get(at) || []).forEach((to) => { if (ids.indexOf(to) < 0) ids.push(to); });
+      (walkAt.get(at) || []).forEach((to) => {
+        if (ids.indexOf(to) < 0) ids.push(to);
+      });
       return ids;
     };
     let bestHub = null;
@@ -2201,19 +2111,31 @@ const BkkLib = {
       board(startAt).forEach((bay) => {
         const walked = bay === startAt ? 0 : 3;
         const base = {
-          at: bay, rides: 0, cost: walked, prev: walked ? {
-            at: startAt, prev: null, walk: true, minutes: 3,
+          at: bay,
+          rides: 0,
+          cost: walked,
+          prev: walked ? {
+            at: startAt,
+            prev: null,
+            walk: true,
+            minutes: 3,
             from: stops[startAt] && stops[startAt].name,
-            to: stops[bay] && stops[bay].name,
-          } : null,
+            to: stops[bay] && stops[bay].name
+          } : null
         };
         (rideAt.get(bay) || []).forEach((edge) => {
           const first = {
-            at: edge.to, rides: 1, cost: base.cost + edge.ride, prev: base.prev || base,
-            walk: false, route: edge.route, minutes: edge.ride,
-            fromI: edge.from, toI: edge.to,
+            at: edge.to,
+            rides: 1,
+            cost: base.cost + edge.ride,
+            prev: base.prev || base,
+            walk: false,
+            route: edge.route,
+            minutes: edge.ride,
+            fromI: edge.from,
+            toI: edge.to,
             from: stops[bay] && stops[bay].name,
-            to: stops[edge.to] && stops[edge.to].name,
+            to: stops[edge.to] && stops[edge.to].name
           };
           consider(first);
           board(edge.to).forEach((mid) => {
@@ -2221,18 +2143,27 @@ const BkkLib = {
             (rideAt.get(mid) || []).forEach((edge2) => {
               if (edge2.route === edge.route && edge2.to === edge.to) return;
               const secondPrev = {
-                at: mid, rides: 1, cost: first.cost + midWalk, prev: first,
-                walk: midWalk > 0, minutes: midWalk,
+                at: mid,
+                rides: 1,
+                cost: first.cost + midWalk,
+                prev: first,
+                walk: midWalk > 0,
+                minutes: midWalk,
                 from: stops[edge.to] && stops[edge.to].name,
-                to: stops[mid] && stops[mid].name,
+                to: stops[mid] && stops[mid].name
               };
               const second = {
-                at: edge2.to, rides: 2, cost: first.cost + midWalk + edge2.ride,
+                at: edge2.to,
+                rides: 2,
+                cost: first.cost + midWalk + edge2.ride,
                 prev: midWalk ? secondPrev : first,
-                walk: false, route: edge2.route, minutes: edge2.ride,
-                fromI: edge2.from, toI: edge2.to,
+                walk: false,
+                route: edge2.route,
+                minutes: edge2.ride,
+                fromI: edge2.from,
+                toI: edge2.to,
                 from: stops[mid] && stops[mid].name,
-                to: stops[edge2.to] && stops[edge2.to].name,
+                to: stops[edge2.to] && stops[edge2.to].name
               };
               consider(second);
             });
@@ -2245,12 +2176,12 @@ const BkkLib = {
     for (let step = bestHub; step && step.prev; step = step.prev) {
       edges.push({
         walk: !!step.walk,
-        route: step.route || '',
+        route: step.route || "",
         minutes: step.minutes,
         fromI: step.fromI,
         toI: step.toI,
-        from: step.from || '',
-        to: step.to || '',
+        from: step.from || "",
+        to: step.to || ""
       });
     }
     edges.reverse();
@@ -2258,63 +2189,71 @@ const BkkLib = {
       minutes: bestHub.cost,
       hubName: stops[bestHub.at] && stops[bestHub.at].name,
       hubFold: stops[bestHub.at] && stops[bestHub.at].fold,
-      edges,
+      edges
     };
   },
   async cityRailJourney(apiKey, hass, origin, dest) {
     if (!BkkLib.isRailDest(dest)) return null;
     let idx;
-    try { idx = await BkkLib.cityIndex(); } catch (_e) { return null; }
+    try {
+      idx = await BkkLib.cityIndex();
+    } catch (_e) {
+      return null;
+    }
     if (!idx || !idx.stops) return null;
     let originStop = (idx.stops || []).find((st) => st && st.id === origin.id);
     if (!originStop) {
-      originStop = BkkLib.volanMatchStop(idx, { id: origin.id, name: origin.name || '' }, null);
+      originStop = BkkLib.volanMatchStop(idx, { id: origin.id, name: origin.name || "" }, null);
     }
     if (!originStop || originStop.op == null) return null;
     const path = BkkLib.cityHubPath(idx, originStop);
     if (!path || !path.edges.length) return null;
     const op = (idx.ops || [])[originStop.op];
-    const cityName = op ? String(op.name).split(' — ')[0] : '';
-    const destFold = BkkLib.fold((dest && dest.name) || '');
+    const cityName = op ? String(op.name).split(" — ")[0] : "";
+    const destFold = BkkLib.fold(dest && dest.name || "");
     const cityTok = new Set(BkkLib.foldTokens(cityName));
     const destTok = BkkLib.foldTokens(destFold);
     const hubTok = BkkLib.foldTokens(path.hubFold);
-    const destIsHub = !!(destFold && path.hubFold && (
-      destFold === path.hubFold
-      || (BkkLib.foldTokenMatch(destFold, path.hubFold)
-        && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok)))
-    ));
-    let ready = Math.floor(Date.now() / 1000);
+    const destIsHub = !!(destFold && path.hubFold && (destFold === path.hubFold || BkkLib.foldTokenMatch(destFold, path.hubFold) && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok))));
+    let ready = Math.floor(Date.now() / 1e3);
     const legs = [];
     for (let i = 0; i < path.edges.length; i++) {
       const edge = path.edges[i];
       if (edge.walk) {
-        const startMs = ready * 1000;
+        const startMs = ready * 1e3;
         ready += edge.minutes * 60;
         legs.push({
-          walk: true, minutes: edge.minutes, meters: edge.minutes * 80,
-          label: '', headsign: '', color: '', text: '',
-          from: edge.from, to: edge.to, waitMin: 0,
-          startMs, endMs: ready * 1000,
+          walk: true,
+          minutes: edge.minutes,
+          meters: edge.minutes * 80,
+          label: "",
+          headsign: "",
+          color: "",
+          text: "",
+          from: edge.from,
+          to: edge.to,
+          waitMin: 0,
+          startMs,
+          endMs: ready * 1e3
         });
         continue;
       }
       const timed = BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.route, ready);
       if (!timed) return null;
-      const waitMin = Math.round((timed.dep - ready) / 60);
+      const waitMin2 = Math.round((timed.dep - ready) / 60);
       legs.push({
         walk: false,
         minutes: Math.max(1, Math.round((timed.arr - timed.dep) / 60)),
         meters: 0,
         label: edge.route,
         headsign: edge.to,
-        color: '0F6FC6',
-        text: 'FFFFFF',
+        color: "0F6FC6",
+        text: "FFFFFF",
         from: edge.from,
         to: edge.to,
-        waitMin: waitMin >= 1 ? waitMin : 0,
-        startMs: timed.dep * 1000,
-        endMs: timed.arr * 1000,
+        waitMin: waitMin2 >= 1 ? waitMin2 : 0,
+        startMs: timed.dep * 1e3,
+        endMs: timed.arr * 1e3
       });
       ready = timed.arr;
     }
@@ -2341,11 +2280,11 @@ const BkkLib = {
       }
     }
     return {
-      durationMin: Math.max(1, Math.round((ready - Math.floor(Date.now() / 1000)) / 60)),
+      durationMin: Math.max(1, Math.round((ready - Math.floor(Date.now() / 1e3)) / 60)),
       walkMin,
       waitMin,
       transfers: Math.max(0, legs.filter((leg) => !leg.walk).length - 1),
-      legs,
+      legs
     };
   },
   nextCityRide(idx, fromI, toI, route, readySec) {
@@ -2354,11 +2293,11 @@ const BkkLib = {
       const day = BkkLib.volanDay(off);
       const trips = idx.t || [];
       for (let n = 0; n < trips.length; n++) {
-        const t = trips[n];
-        if (String(t[1]) !== route) continue;
-        if (!BkkLib.volanServiceOk(idx, t[0], day.ymd, day.dow)) continue;
-        const ps = t[2] || [];
-        const ms = t[3] || [];
+        const t2 = trips[n];
+        if (String(t2[1]) !== route) continue;
+        if (!BkkLib.volanServiceOk(idx, t2[0], day.ymd, day.dow)) continue;
+        const ps = t2[2] || [];
+        const ms = t2[3] || [];
         const o = ps.indexOf(fromI);
         const d = ps.indexOf(toI);
         if (o < 0 || d <= o) continue;
@@ -2373,12 +2312,12 @@ const BkkLib = {
   },
   async railAfterCity(apiKey, hass, cityName, path, dest, readySec) {
     if (!path || !path.hubName) return null;
-    const query = (cityName ? cityName + ' ' : '') + (path.hubName || '');
+    const query = (cityName ? cityName + " " : "") + (path.hubName || "");
     let station = null;
     try {
-      const hits = await BkkLib.searchStops(apiKey, query, 'mav');
-      const want = path.hubFold || path.hubName || '';
-      station = (hits || []).find((hit) => BkkLib.foldTokenMatch(want, hit.name || '')) || null;
+      const hits = await BkkLib.searchStops(apiKey, query, "mav");
+      const want = path.hubFold || path.hubName || "";
+      station = (hits || []).find((hit) => BkkLib.foldTokenMatch(want, hit.name || "")) || null;
     } catch (_e) {
       station = null;
     }
@@ -2386,101 +2325,120 @@ const BkkLib = {
     const walkStart = readySec;
     const walkEnd = readySec + 6 * 60;
     const walk = {
-      walk: true, stationWalk: true, minutes: 6, meters: 480, label: '', headsign: '',
-      color: '', text: '', from: path.hubName || '', to: station.name || '',
-      waitMin: 0, startMs: walkStart * 1000, endMs: walkEnd * 1000,
+      walk: true,
+      stationWalk: true,
+      minutes: 6,
+      meters: 480,
+      label: "",
+      headsign: "",
+      color: "",
+      text: "",
+      from: path.hubName || "",
+      to: station.name || "",
+      waitMin: 0,
+      startMs: walkStart * 1e3,
+      endMs: walkEnd * 1e3
     };
     let train = null;
     if (hass && dest && dest.id) {
       try {
         const rows = await BkkLib.elviraBetween(
-          hass, station.id, dest.id, 480, dest.name || '', { apiKey, originName: station.name || '' },
+          hass,
+          station.id,
+          dest.id,
+          480,
+          dest.name || "",
+          { apiKey, originName: station.name || "" }
         );
-        const next = (rows || []).filter((row) => row.destHit !== false && Number(row.dep) >= walkEnd - 30)
-          .sort((a, b) => a.dep - b.dep)[0];
+        const next = (rows || []).filter((row) => row.destHit !== false && Number(row.dep) >= walkEnd - 30).sort((a, b) => a.dep - b.dep)[0];
         if (next && next.dep) {
           const rideMin = Number(next.travel) > 0 ? Number(next.travel) : 0;
           const arr = rideMin ? next.dep + rideMin * 60 : next.dep;
           const waitMin = Math.round((next.dep - walkEnd) / 60);
           const badge = BkkLib.applyRailBadge({
-            label: String(next.label || next.trainNumber || ''),
-            color: '4477AA',
+            label: String(next.label || next.trainNumber || ""),
+            color: "4477AA"
           });
           train = {
             walk: false,
             minutes: rideMin || 1,
             meters: 0,
-            label: String(next.label || next.trainNumber || ''),
-            headsign: dest.name || '',
-            color: String(badge.color || '4477AA').replace('#', ''),
-            text: String(badge.text || 'FFFFFF').replace('#', ''),
-            from: station.name || '',
-            to: dest.name || '',
+            label: String(next.label || next.trainNumber || ""),
+            headsign: dest.name || "",
+            color: String(badge.color || "4477AA").replace("#", ""),
+            text: String(badge.text || "FFFFFF").replace("#", ""),
+            from: station.name || "",
+            to: dest.name || "",
             waitMin: waitMin >= 1 ? waitMin : 0,
-            startMs: next.dep * 1000,
-            endMs: arr * 1000,
+            startMs: next.dep * 1e3,
+            endMs: arr * 1e3
           };
         }
-      } catch (_e) { /* no train → whole city→rail journey is null */ }
+      } catch (_e) {
+      }
     }
     if (!train) return null;
-    return { walk, train, ready: Math.round(train.endMs / 1000) };
+    return { walk, train, ready: Math.round(train.endMs / 1e3) };
   },
   async probeApiKey(apiKey) {
-    if (!apiKey) return { ok: false, code: 'errNoApiKey' };
+    if (!apiKey) return { ok: false, code: "errNoApiKey" };
     try {
-      await BkkLib.fetch(apiKey, 'search.json', { query: '.' }, true);
+      await BkkLib.fetch(apiKey, "search.json", { query: "." }, true);
       return { ok: true };
     } catch (err) {
       const msg = String(err && err.message ? err.message : err);
-      if (/HTTP 401|HTTP 403/.test(msg)) return { ok: false, code: 'errApiKeyBad' };
-      if (err && err.i18nKey === 'errNoApiKey') return { ok: false, code: 'errNoApiKey' };
-      return { ok: false, code: 'errApiKeyProbe' };
+      if (/HTTP 401|HTTP 403/.test(msg)) return { ok: false, code: "errApiKeyBad" };
+      if (err && err.i18nKey === "errNoApiKey") return { ok: false, code: "errNoApiKey" };
+      return { ok: false, code: "errApiKeyProbe" };
     }
-  },
+  }
+});
+
+// src/lib/geo.js
+Object.assign(BkkLib, {
   hm(ts) {
-    if (!ts) return '';
-    const f = tzFields(new Date(ts * 1000));
+    if (!ts) return "";
+    const f = tzFields(new Date(ts * 1e3));
     return `${pad2(f.h)}:${pad2(f.mi)}`;
   },
   vehicleKind(rt) {
-    if (BkkLib.isMavRoute(rt)) return 'rail';
-    const t = String((rt && rt.type) || '').toUpperCase();
-    if (t.indexOf('SUBURBAN') >= 0) return 'rail';
-    if (t.indexOf('TRAM') >= 0) return 'tram';
-    if (t.indexOf('SUBWAY') >= 0 || t.indexOf('METRO') >= 0) return 'subway';
-    if (t.indexOf('TROLLEY') >= 0) return 'trolleybus';
-    if (t === 'COACH' || BkkLib.isVolanRoute(rt)) return 'coach';
-    return 'bus';
+    if (BkkLib.isMavRoute(rt)) return "rail";
+    const t2 = String(rt && rt.type || "").toUpperCase();
+    if (t2.indexOf("SUBURBAN") >= 0) return "rail";
+    if (t2.indexOf("TRAM") >= 0) return "tram";
+    if (t2.indexOf("SUBWAY") >= 0 || t2.indexOf("METRO") >= 0) return "subway";
+    if (t2.indexOf("TROLLEY") >= 0) return "trolleybus";
+    if (t2 === "COACH" || BkkLib.isVolanRoute(rt)) return "coach";
+    return "bus";
   },
   vehicleLoc(veh) {
-    if (!veh || typeof veh !== 'object') return { lat: NaN, lon: NaN };
+    if (!veh || typeof veh !== "object") return { lat: NaN, lon: NaN };
     const loc = veh.location || {};
     const lat = loc.lat != null ? loc.lat : veh.latitude;
-    const lon = loc.lon != null ? loc.lon : (veh.longitude != null ? veh.longitude : veh.lng);
+    const lon = loc.lon != null ? loc.lon : veh.longitude != null ? veh.longitude : veh.lng;
     const pt = BkkLib.mapGpsLatLon(lat, lon);
     if (!pt) return { lat: NaN, lon: NaN };
     return { lat: pt[0], lon: pt[1] };
   },
   unixSec(ts) {
     const n = Number(ts);
-    if (!Number.isFinite(n) || n <= 0) return Date.now() / 1000;
-    return n > 1e12 ? n / 1000 : n;
+    if (!Number.isFinite(n) || n <= 0) return Date.now() / 1e3;
+    return n > 1e12 ? n / 1e3 : n;
   },
   decodePolyline(encoded) {
     let precision = 5;
     let fromObject = false;
     let hadPrecision = false;
-    if (encoded && typeof encoded === 'object') {
+    if (encoded && typeof encoded === "object") {
       fromObject = true;
       const p = Number(encoded.precision);
       if (Number.isFinite(p) && p >= 4 && p <= 7) {
         precision = p;
         hadPrecision = true;
       }
-      encoded = encoded.points || '';
+      encoded = encoded.points || "";
     }
-    if (!encoded || typeof encoded !== 'string') return [];
+    if (!encoded || typeof encoded !== "string") return [];
     const factor = Math.pow(10, precision);
     const coords = [];
     let index = 0;
@@ -2489,15 +2447,15 @@ const BkkLib = {
     try {
       while (index < encoded.length) {
         for (let xy = 0; xy < 2; xy++) {
-          let result = 0;
+          let result2 = 0;
           let shift = 0;
           let byte;
           do {
             byte = encoded.charCodeAt(index++) - 63;
-            result |= (byte & 0x1f) << shift;
+            result2 |= (byte & 31) << shift;
             shift += 5;
-          } while (byte >= 0x20);
-          const delta = (result & 1) ? ~(result >> 1) : (result >> 1);
+          } while (byte >= 32);
+          const delta = result2 & 1 ? ~(result2 >> 1) : result2 >> 1;
           if (xy === 0) lat += delta;
           else lng += delta;
         }
@@ -2506,13 +2464,8 @@ const BkkLib = {
     } catch (_e) {
       return [];
     }
-    /* MOTIS v5 encodes at 10**precision (usually 6). A Google/FUTÁR string
-       is 1e5. If a precision-6 payload was decoded as 1e5, lat is ~475.
-       FUTÁR `{points, length}` has no precision field and must stay 1e5 —
-       retrying those as 6 shrinks Hungary to ~4.7. */
     let result = coords;
-    if (coords.length && precision === 5
-        && (Math.abs(coords[0][0]) > 90 || Math.abs(coords[0][1]) > 180)) {
+    if (coords.length && precision === 5 && (Math.abs(coords[0][0]) > 90 || Math.abs(coords[0][1]) > 180)) {
       if (!fromObject || hadPrecision) {
         return BkkLib.decodePolyline({ points: encoded, precision: 6 });
       }
@@ -2575,7 +2528,7 @@ const BkkLib = {
         best = i;
       }
     });
-    if (bestD > 3000) return spanB > spanA ? b : a;
+    if (bestD > 3e3) return spanB > spanA ? b : a;
     const tail = b.slice(best);
     if (tail.length < 2) return spanB > spanA ? b : a;
     return a.concat(tail.slice(1));
@@ -2595,9 +2548,6 @@ const BkkLib = {
     const motis = BkkLib.validMapShape(motisShape);
     const futar = BkkLib.validMapShape(futarShape);
     const row = BkkLib.validMapShape(rowShape);
-    /* A longer FUTÁR *line* (G43 from Kőbánya-Kispest) must not replace a
-       MOTIS trip that already starts at the board. Same-corridor FUTÁR
-       may still add a tail (9068 → Veszprém). Do not drop inbound MOTIS. */
     if (motis.length >= 2 && futar.length >= 2) {
       const startGap = BkkLib.haversineMeters(motis[0], futar[0]);
       const sameCorridor = startGap <= 2500;
@@ -2618,43 +2568,42 @@ const BkkLib = {
     return row;
   },
   finiteLatLon(lat, lon) {
-    if (lat == null || lon == null || lat === '' || lon === '') return null;
+    if (lat == null || lon == null || lat === "" || lon === "") return null;
     const a = Number(lat);
     const b = Number(lon);
     if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
     if (Math.abs(a) > 90 || Math.abs(b) > 180) return null;
-    /* Number(null) is 0. Null-island / Gulf-of-Guinea must not become a board pin. */
     if (Math.abs(a) < 1 && Math.abs(b) < 1) return null;
     return [a, b];
   },
   RAIL_HUB_COORDS: {
-    'BKK_005501024': [47.46445, 19.0219],
-    'BKK_005503269': [47.1853, 18.4142],
-    'BKK_005510017': [47.5005, 19.0839],
-    'BKK_CSF01131': [47.5005, 19.0839],
-    'BKK_CS007896': [47.4644, 19.022],
-    'BKK_056216': [47.4644, 19.022],
+    "BKK_005501024": [47.46445, 19.0219],
+    "BKK_005503269": [47.1853, 18.4142],
+    "BKK_005510017": [47.5005, 19.0839],
+    "BKK_CSF01131": [47.5005, 19.0839],
+    "BKK_CS007896": [47.4644, 19.022],
+    "BKK_056216": [47.4644, 19.022]
   },
   RAIL_HUB_ALIASES: {
-    'kelenfold': [47.46445, 19.0219],
-    'budapest kelenfold': [47.46445, 19.0219],
-    'szekesfehervar': [47.1853, 18.4142],
-    'keleti': [47.5005, 19.0839],
-    'keleti palyaudvar': [47.5005, 19.0839],
-    'deli': [47.4988, 19.025],
-    'budapest deli': [47.4988, 19.025],
+    "kelenfold": [47.46445, 19.0219],
+    "budapest kelenfold": [47.46445, 19.0219],
+    "szekesfehervar": [47.1853, 18.4142],
+    "keleti": [47.5005, 19.0839],
+    "keleti palyaudvar": [47.5005, 19.0839],
+    "deli": [47.4988, 19.025],
+    "budapest deli": [47.4988, 19.025]
   },
   knownStopCoords(stop) {
-    const id = String((stop && (stop.id || stop.stopId)) || '');
+    const id = String(stop && (stop.id || stop.stopId) || "");
     const byId = BkkLib.RAIL_HUB_COORDS[id];
     if (byId) return BkkLib.mapGpsLatLon(byId[0], byId[1]);
     const texts = [
       stop && stop.key,
       stop && stop.name,
-      stop && stop.destKey,
+      stop && stop.destKey
     ];
     for (let i = 0; i < texts.length; i++) {
-      const folded = BkkLib.fold(texts[i] || '');
+      const folded = BkkLib.fold(texts[i] || "");
       if (!folded) continue;
       const hit = BkkLib.RAIL_HUB_ALIASES[folded];
       if (hit) return BkkLib.mapGpsLatLon(hit[0], hit[1]);
@@ -2711,17 +2660,15 @@ const BkkLib = {
   clipShapeToHop(shape, details, origin, dest) {
     const pts = BkkLib.validMapShape(shape);
     if (pts.length < 2) return pts;
-    const sts = (details && details.sts) || [];
-    const stops = (details && details.stops) || {};
+    const sts = details && details.sts || [];
+    const stops = details && details.stops || {};
     if (!sts.length || !origin) return pts;
     let oidx = BkkLib.originIndex(sts, stops, origin);
     if (oidx < 0) {
       return pts;
     }
     let didx = -1;
-    const destObj = dest && (dest.id || dest.key || dest.name)
-      ? { id: dest.id, name: dest.key || dest.name }
-      : null;
+    const destObj = dest && (dest.id || dest.key || dest.name) ? { id: dest.id, name: dest.key || dest.name } : null;
     if (destObj) {
       for (let i = Math.max(0, oidx) + 1; i < sts.length; i++) {
         const stop = Object.assign({ id: sts[i].stopId }, stops[sts[i].stopId] || {});
@@ -2747,8 +2694,8 @@ const BkkLib = {
       return Number.isFinite(n) ? n : 0;
     }));
     if (!(polyLen > 0) || !(maxOfficial > 0)) return pts;
-    const fromM = (Math.min(d0, d1) / maxOfficial) * polyLen;
-    const toM = (Math.max(d0, d1) / maxOfficial) * polyLen;
+    const fromM = Math.min(d0, d1) / maxOfficial * polyLen;
+    const toM = Math.max(d0, d1) / maxOfficial * polyLen;
     const sliced = BkkLib.sliceShapeMeters(pts, fromM, toM);
     return sliced;
   },
@@ -2756,9 +2703,7 @@ const BkkLib = {
      so a through train (9068 → Veszprém) is not cut at the hop destination. */
   clipShapeFromBoard(shape, board, maxM) {
     const pts = BkkLib.validMapShape(shape);
-    const start = Array.isArray(board)
-      ? BkkLib.mapGpsLatLon(board[0], board[1])
-      : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
+    const start = Array.isArray(board) ? BkkLib.mapGpsLatLon(board[0], board[1]) : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
     if (pts.length < 2 || !start) return pts;
     let best = 0;
     let bestD = 1e15;
@@ -2779,12 +2724,8 @@ const BkkLib = {
      not the Kőbánya tail. Through trains keep that end of the line. */
   clipShapeFromBoardToward(shape, board, dest, maxM) {
     const pts = BkkLib.validMapShape(shape);
-    const start = Array.isArray(board)
-      ? BkkLib.mapGpsLatLon(board[0], board[1])
-      : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
-    const goal = Array.isArray(dest)
-      ? BkkLib.mapGpsLatLon(dest[0], dest[1])
-      : BkkLib.mapGpsLatLon(dest && dest.lat, dest && dest.lon);
+    const start = Array.isArray(board) ? BkkLib.mapGpsLatLon(board[0], board[1]) : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
+    const goal = Array.isArray(dest) ? BkkLib.mapGpsLatLon(dest[0], dest[1]) : BkkLib.mapGpsLatLon(dest && dest.lat, dest && dest.lon);
     if (pts.length < 2 || !start) return pts;
     if (!goal) return BkkLib.clipShapeFromBoard(pts, start, maxM);
     let iBoard = 0;
@@ -2805,7 +2746,7 @@ const BkkLib = {
     });
     const limit = Number.isFinite(Number(maxM)) && Number(maxM) > 0 ? Number(maxM) : 1200;
     if (dBoard > limit) return pts;
-    if (dDest > 8000) return BkkLib.clipShapeFromBoard(pts, start, maxM);
+    if (dDest > 8e3) return BkkLib.clipShapeFromBoard(pts, start, maxM);
     if (iDest === iBoard) return BkkLib.clipShapeFromBoard(pts, start, maxM);
     const out = iDest > iBoard ? pts.slice(iBoard) : pts.slice(0, iBoard + 1);
     return out.length >= 2 ? out : pts;
@@ -2813,44 +2754,55 @@ const BkkLib = {
   clipRideShape(shape, board, dest, row) {
     const pts = BkkLib.validMapShape(shape);
     if (pts.length < 2) return pts;
-    /* Published line stays whole. Hop clip is a last-resort for unknown modes. */
     if (BkkLib.keepsFullLineShape(row)) return pts;
     return BkkLib.clipShapeToBoardDest(pts, board, dest);
   },
   motisCoversHead(hit, row) {
     if (!hit) return false;
-    const raw = String((row && (row.head || row.headsign || row.tripTo)) || '').replace(PLATFORM_STRIP, '').trim();
+    const raw = String(row && (row.head || row.headsign || row.tripTo) || "").replace(PLATFORM_STRIP, "").trim();
     if (!raw) return true;
     return BkkLib.destOnMotisRow(hit, { name: raw, key: raw });
   },
   rideMapColor(leg) {
-    const hex = String((leg && leg.color) || '').replace('#', '');
-    if (/^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(hex)) return '#' + hex;
-    return '#0F6FC6';
+    const hex = String(leg && leg.color || "").replace("#", "");
+    if (/^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(hex)) return "#" + hex;
+    return "#0F6FC6";
   },
   MAP_ROUTE_PALETTE: [
-    '#e53935', '#8e24aa', '#3949ab', '#00897b', '#f9a825', '#6d4c41',
-    '#d81b60', '#00acc1', '#43a047', '#fb8c00', '#5c6bc0', '#00838f',
+    "#e53935",
+    "#8e24aa",
+    "#3949ab",
+    "#00897b",
+    "#f9a825",
+    "#6d4c41",
+    "#d81b60",
+    "#00acc1",
+    "#43a047",
+    "#fb8c00",
+    "#5c6bc0",
+    "#00838f"
   ],
   normMapHex(color) {
-    const hex = String(color || '').replace('#', '').trim();
+    const hex = String(color || "").replace("#", "").trim();
     if (/^[0-9a-fA-F]{3}$/.test(hex)) {
-      return ('#' + hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2]).toLowerCase();
+      return ("#" + hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2]).toLowerCase();
     }
-    if (/^[0-9a-fA-F]{6}$/.test(hex)) return ('#' + hex).toLowerCase();
-    return '';
+    if (/^[0-9a-fA-F]{6}$/.test(hex)) return ("#" + hex).toLowerCase();
+    return "";
   },
   mapRouteLabel(row) {
-    return String((row && (row.label || row.route || '')) || '').trim() || '?';
+    return String(row && (row.label || row.route || "") || "").trim() || "?";
   },
   mapRouteColor(row, usedByLabel) {
     const label = BkkLib.mapRouteLabel(row);
     usedByLabel = usedByLabel || {};
     if (usedByLabel[label]) return usedByLabel[label];
     const used = {};
-    Object.keys(usedByLabel).forEach((k) => { used[String(usedByLabel[k]).toLowerCase()] = true; });
+    Object.keys(usedByLabel).forEach((k) => {
+      used[String(usedByLabel[k]).toLowerCase()] = true;
+    });
     let color = BkkLib.normMapHex(row && row.color);
-    if (color && used[color]) color = '';
+    if (color && used[color]) color = "";
     if (!color) {
       const palette = BkkLib.MAP_ROUTE_PALETTE;
       color = palette.find((c) => !used[c]) || palette[Object.keys(usedByLabel).length % palette.length];
@@ -2869,7 +2821,7 @@ const BkkLib = {
     return BkkLib.finiteLatLon(leg && leg.toLat, leg && leg.toLon);
   },
   stitchJourneyLegCoords(journey) {
-    const legs = (journey && journey.legs) || [];
+    const legs = journey && journey.legs || [];
     for (let i = 0; i < legs.length; i++) {
       const leg = legs[i];
       if (BkkLib.legStartPoint(leg) || i < 1) continue;
@@ -2924,18 +2876,14 @@ const BkkLib = {
   },
   clipShapeToBoardDest(shape, board, dest) {
     const pts = BkkLib.validMapShape(shape);
-    const a = Array.isArray(board)
-      ? BkkLib.mapGpsLatLon(board[0], board[1])
-      : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
-    const b = Array.isArray(dest)
-      ? BkkLib.mapGpsLatLon(dest[0], dest[1])
-      : BkkLib.mapGpsLatLon(dest && dest.lat, dest && dest.lon);
+    const a = Array.isArray(board) ? BkkLib.mapGpsLatLon(board[0], board[1]) : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
+    const b = Array.isArray(dest) ? BkkLib.mapGpsLatLon(dest[0], dest[1]) : BkkLib.mapGpsLatLon(dest && dest.lat, dest && dest.lon);
     if (pts.length < 2 || !a || !b) return pts;
     const sliced = BkkLib.sliceShapeBetween(pts, a, b);
     if (sliced.length < 2) return pts;
     const span = BkkLib.shapeSpanMeters(sliced);
     const orig = BkkLib.shapeSpanMeters(pts);
-    if (span < 200 && orig > 2000) return pts;
+    if (span < 200 && orig > 2e3) return pts;
     return sliced;
   },
   async fillJourneyShapes(journey) {
@@ -2944,7 +2892,7 @@ const BkkLib = {
     await Promise.all(journey.legs.map(async (leg) => {
       if (!leg || leg.walk) return;
       if (BkkLib.validMapShape(leg.shape).length >= 2) return;
-      const tid = String(leg.tripId || '');
+      const tid = String(leg.tripId || "");
       if (!tid) return;
       try {
         let pts = await BkkLib.motisTripShape(tid);
@@ -2952,7 +2900,8 @@ const BkkLib = {
         const b = BkkLib.finiteLatLon(leg.toLat, leg.toLon);
         if (pts.length >= 2 && a && b) pts = BkkLib.sliceShapeBetween(pts, a, b);
         if (pts.length >= 2) leg.shape = pts;
-      } catch (_e) { /* endpoint fallback in journeyMapSegments */ }
+      } catch (_e) {
+      }
     }));
     BkkLib.stitchJourneyLegCoords(journey);
     return journey;
@@ -2964,13 +2913,13 @@ const BkkLib = {
       if (!Array.isArray(shape) || shape.length < 2) return;
       segs.push({
         walk: !!walk,
-        color: walk ? '' : (color || '#0F6FC6'),
+        color: walk ? "" : color || "#0F6FC6",
         shape,
-        from: from || '',
-        to: to || '',
+        from: from || "",
+        to: to || ""
       });
     };
-    ((journey && journey.legs) || []).forEach((leg) => {
+    (journey && journey.legs || []).forEach((leg) => {
       let shape = BkkLib.validMapShape(leg.shape);
       if (shape.length < 2) {
         const a = BkkLib.finiteLatLon(leg.fromLat, leg.fromLon);
@@ -2982,32 +2931,31 @@ const BkkLib = {
     if (segs.length) return segs;
     const start = BkkLib.finiteLatLon(
       origin && (origin.stopLat != null ? origin.stopLat : origin.lat),
-      origin && (origin.stopLon != null ? origin.stopLon : origin.lon),
+      origin && (origin.stopLon != null ? origin.stopLon : origin.lon)
     );
     const end = BkkLib.finiteLatLon(
       dest && (dest.destLat != null ? dest.destLat : dest.lat),
-      dest && (dest.destLon != null ? dest.destLon : dest.lon),
+      dest && (dest.destLon != null ? dest.destLon : dest.lon)
     );
-    if (start && end) add([start, end], false, '#0F6FC6', '', '');
+    if (start && end) add([start, end], false, "#0F6FC6", "", "");
     return segs;
   },
   haversineMeters(a, b) {
-    const toRad = (d) => (d * Math.PI) / 180;
-    const R = 6371000;
+    const toRad = (d) => d * Math.PI / 180;
+    const R = 6371e3;
     const dLat = toRad(b[0] - a[0]);
     const dLon = toRad(b[1] - a[1]);
     const lat1 = toRad(a[0]);
     const lat2 = toRad(b[0]);
-    const h = Math.sin(dLat / 2) ** 2
-      + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
     return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
   },
   pointAlongShape(shape, targetMeters) {
     if (!Array.isArray(shape) || shape.length < 1) return null;
     if (shape.length === 1 || !(targetMeters > 0)) return shape[0];
     const cum = [0];
-    for (let i = 1; i < shape.length; i++) {
-      cum.push(cum[i - 1] + BkkLib.haversineMeters(shape[i - 1], shape[i]));
+    for (let i2 = 1; i2 < shape.length; i2++) {
+      cum.push(cum[i2 - 1] + BkkLib.haversineMeters(shape[i2 - 1], shape[i2]));
     }
     const total = cum[cum.length - 1];
     if (!(total > 0)) return shape[0];
@@ -3021,7 +2969,7 @@ const BkkLib = {
     const f = (tval - cum[i0]) / seg;
     return [
       shape[i0][0] + (shape[i1][0] - shape[i0][0]) * f,
-      shape[i0][1] + (shape[i1][1] - shape[i0][1]) * f,
+      shape[i0][1] + (shape[i1][1] - shape[i0][1]) * f
     ];
   },
   estimatePositionFromSchedule(shape, stopTimes, nowSec) {
@@ -3029,13 +2977,11 @@ const BkkLib = {
       return null;
     }
     const stops = stopTimes.map((st) => {
-      const tval = st.predictedDepartureTime != null ? st.predictedDepartureTime
-        : (st.predictedArrivalTime != null ? st.predictedArrivalTime
-          : (st.departureTime != null ? st.departureTime : st.arrivalTime));
+      const tval = st.predictedDepartureTime != null ? st.predictedDepartureTime : st.predictedArrivalTime != null ? st.predictedArrivalTime : st.departureTime != null ? st.departureTime : st.arrivalTime;
       const dist = st.shapeDistTraveled != null ? Number(st.shapeDistTraveled) : NaN;
       return {
         t: tval != null ? Number(tval) : NaN,
-        dist: Number.isFinite(dist) ? dist : NaN,
+        dist: Number.isFinite(dist) ? dist : NaN
       };
     }).filter((s) => Number.isFinite(s.t)).sort((a, b) => a.t - b.t);
     if (!stops.length) return null;
@@ -3058,43 +3004,57 @@ const BkkLib = {
       if (Number.isFinite(a.dist) && Number.isFinite(b.dist)) {
         targetDist = a.dist + (b.dist - a.dist) * f;
       } else {
-        const i0 = Math.floor((i / Math.max(1, stops.length - 1)) * (shape.length - 1));
-        const i1 = Math.floor(((i + 1) / Math.max(1, stops.length - 1)) * (shape.length - 1));
+        const i0 = Math.floor(i / Math.max(1, stops.length - 1) * (shape.length - 1));
+        const i1 = Math.floor((i + 1) / Math.max(1, stops.length - 1) * (shape.length - 1));
         const p0 = shape[Math.max(0, Math.min(shape.length - 1, i0))];
         const p1 = shape[Math.max(0, Math.min(shape.length - 1, i1))];
         return [
           p0[0] + (p1[0] - p0[0]) * f,
-          p0[1] + (p1[1] - p0[1]) * f,
+          p0[1] + (p1[1] - p0[1]) * f
         ];
       }
     }
     const maxOfficial = Math.max(
-      ...stops.map((s) => (Number.isFinite(s.dist) ? s.dist : 0)),
-      targetDist || 0,
+      ...stops.map((s) => Number.isFinite(s.dist) ? s.dist : 0),
+      targetDist || 0
     );
     let polyLen = 0;
     for (let i = 1; i < shape.length; i++) {
       polyLen += BkkLib.haversineMeters(shape[i - 1], shape[i]);
     }
-    const scaled = maxOfficial > 0 ? (targetDist / maxOfficial) * polyLen : targetDist;
+    const scaled = maxOfficial > 0 ? targetDist / maxOfficial * polyLen : targetDist;
     return BkkLib.pointAlongShape(shape, scaled);
-  },
+  }
+});
+
+// src/tags.js
+var BKK_HOP_TAG = "hungarian-transport-card";
+var BKK_HOP_EDITOR = "hungarian-transport-card-editor";
+var BKK_HOP_TAG_ALIAS = "bkk-stop-card-r3";
+var BKK_HOP_EDITOR_ALIAS = "bkk-stop-card-r3-editor";
+var BKK_PLANNER_EDITOR = "hungarian-transit-stop-card-plan-editor";
+var BKK_PLANNER_EDITOR_ALIAS = "bkk-stop-card-plan-editor";
+var OWN_CARD_TYPES = [BKK_HOP_TAG, BKK_HOP_TAG_ALIAS, BKK_PLANNER_TAG, BKK_PLANNER_TAG_ALIAS];
+var INDEX_SCHEMA = 27;
+
+// src/lib/dashboard-key.js
+Object.assign(BkkLib, {
   /* Only a key that sits on one of our own cards may be reused. A dashboard can
      hold apiKey values belonging to entirely unrelated cards, and those must
      never end up in a request to BKK. */
   findApiKey(node, acc) {
     if (!acc) acc = [];
-    if (!node || typeof node !== 'object') return acc;
+    if (!node || typeof node !== "object") return acc;
     if (Array.isArray(node)) {
       node.forEach((x) => BkkLib.findApiKey(x, acc));
       return acc;
     }
-    const type = String(node.type || '').replace(/^custom:/, '');
-    if (typeof node.apiKey === 'string' && node.apiKey && OWN_CARD_TYPES.indexOf(type) >= 0) {
+    const type = String(node.type || "").replace(/^custom:/, "");
+    if (typeof node.apiKey === "string" && node.apiKey && OWN_CARD_TYPES.indexOf(type) >= 0) {
       acc.push(node.apiKey);
     }
     Object.keys(node).forEach((k) => {
-      if (k === 'apiKey') return;
+      if (k === "apiKey") return;
       BkkLib.findApiKey(node[k], acc);
     });
     return acc;
@@ -3103,24 +3063,29 @@ const BkkLib = {
      configured on a sibling card instead of asking for it again. Only the
      default dashboard and the one being viewed are inspected. */
   async apiKeyFromDashboard(hass) {
-    if (!hass || !hass.connection) return '';
+    if (!hass || !hass.connection) return "";
     const paths = [null];
     if (hass.panelUrl && paths.indexOf(hass.panelUrl) < 0) paths.push(hass.panelUrl);
     for (let i = 0; i < paths.length; i++) {
       try {
-        const msg = { type: 'lovelace/config' };
+        const msg = { type: "lovelace/config" };
         if (paths[i]) msg.url_path = paths[i];
         const cfg = await hass.connection.sendMessagePromise(msg);
         const keys = BkkLib.findApiKey(cfg);
         if (keys.length) return keys[0];
-      } catch (_e) { /* not a Lovelace dashboard, or no access */ }
+      } catch (_e) {
+      }
     }
-    return '';
-  },
+    return "";
+  }
+});
+
+// src/lib/gtfs.js
+Object.assign(BkkLib, {
   /* Cached per resolved URL, so two cards pointing at different index files do
      not serve each other's data. The URL carries a daily cache-buster, which
      also expires the entry on a dashboard left open overnight. */
-  _idx: new Map(),
+  _idx: /* @__PURE__ */ new Map(),
   _indexCached(url, httpKey, gunzipKey) {
     const cache = BkkLib._idx;
     const hit = cache.get(url);
@@ -3134,12 +3099,12 @@ const BkkLib = {
     return p;
   },
   volanIndex() {
-    return BkkLib._indexCached(volanIndexUrl(), 'errVolanHttp', 'errVolanGunzip');
+    return BkkLib._indexCached(volanIndexUrl(), "errVolanHttp", "errVolanGunzip");
   },
   cityIndex() {
-    return BkkLib._indexCached(cityIndexUrl(), 'errCityHttp', 'errCityGunzip');
+    return BkkLib._indexCached(cityIndexUrl(), "errCityHttp", "errCityGunzip");
   },
-  _mavP: new Map(),
+  _mavP: /* @__PURE__ */ new Map(),
   mavIndex() {
     const url = mavIndexUrl();
     const cache = BkkLib._mavP;
@@ -3148,7 +3113,7 @@ const BkkLib = {
     const p = BkkLib._loadMavIndex(url).then((idx) => {
       const empty = !idx || !Array.isArray(idx.p) || idx.p.length < 1;
       if (empty) cache.delete(url);
-      return idx && typeof idx === 'object' ? idx : { n: {}, l: {}, p: [] };
+      return idx && typeof idx === "object" ? idx : { n: {}, l: {}, p: [] };
     }).catch(() => {
       cache.delete(url);
       return { n: {}, l: {}, p: [] };
@@ -3158,11 +3123,11 @@ const BkkLib = {
     return p;
   },
   async _loadMavIndex(url) {
-    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(() => ctrl.abort(), 45000) : null;
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 45e3) : null;
     let res;
     try {
-      res = await fetch(url, { cache: 'no-cache', signal: ctrl ? ctrl.signal : undefined });
+      res = await fetch(url, { cache: "no-cache", signal: ctrl ? ctrl.signal : void 0 });
     } catch (_err) {
       return { n: {}, l: {}, p: [] };
     } finally {
@@ -3171,10 +3136,10 @@ const BkkLib = {
     if (!res.ok) return { n: {}, l: {}, p: [] };
     const buf = await res.arrayBuffer();
     const u8 = new Uint8Array(buf);
-    let text = '';
-    if (u8.length >= 2 && u8[0] === 0x1f && u8[1] === 0x8b) {
-      if (typeof DecompressionStream !== 'function') return { n: {}, l: {}, p: [] };
-      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+    let text = "";
+    if (u8.length >= 2 && u8[0] === 31 && u8[1] === 139) {
+      if (typeof DecompressionStream !== "function") return { n: {}, l: {}, p: [] };
+      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
       text = await new Response(stream).text();
     } else {
       text = new TextDecoder().decode(u8);
@@ -3185,30 +3150,28 @@ const BkkLib = {
     } catch (_e) {
       return { n: {}, l: {}, p: [] };
     }
-    if (!idx || typeof idx !== 'object' || !idx.n || !Array.isArray(idx.p)) {
+    if (!idx || typeof idx !== "object" || !idx.n || !Array.isArray(idx.p)) {
       return { n: {}, l: {}, p: [] };
     }
     return {
-      n: idx.n && typeof idx.n === 'object' ? idx.n : {},
-      l: idx.l && typeof idx.l === 'object' ? idx.l : {},
-      p: idx.p,
+      n: idx.n && typeof idx.n === "object" ? idx.n : {},
+      l: idx.l && typeof idx.l === "object" ? idx.l : {},
+      p: idx.p
     };
   },
   mavShapeIndexKey(row, idx) {
     const num = BkkLib.rowTrainNumber(row);
-    const label = String((row && (row.label || row.route || '')) || '').trim().toUpperCase();
+    const label = String(row && (row.label || row.route || "") || "").trim().toUpperCase();
     if (!idx) return null;
-    /* BKK suburban trip ids (G43 19707) collide with unrelated MÁV train
-       numbers. Branded G/S/Z lines always use the line polyline. */
     const line = (label.match(/^[SGZ]\d{2}/) || [])[0];
     if (BkkLib.suburbanLineLabel(label) && line && idx.l && idx.l[line] != null) {
-      return { kind: 'l', key: line, ix: idx.l[line] };
+      return { kind: "l", key: line, ix: idx.l[line] };
     }
     if (num && idx.n && idx.n[num] != null) {
-      return { kind: 'n', key: num, ix: idx.n[num] };
+      return { kind: "n", key: num, ix: idx.n[num] };
     }
     if (label && idx.l && idx.l[label] != null) {
-      return { kind: 'l', key: label, ix: idx.l[label] };
+      return { kind: "l", key: label, ix: idx.l[label] };
     }
     return null;
   },
@@ -3219,33 +3182,30 @@ const BkkLib = {
       const hit = BkkLib.mavShapeIndexKey(row, idx);
       if (!hit) return [];
       const encoded = idx.p[hit.ix];
-      if (encoded == null || encoded === '') return [];
+      if (encoded == null || encoded === "") return [];
       return BkkLib.validMapShape(BkkLib.decodePolyline(encoded));
     } catch (_e) {
       return [];
     }
   },
   async _loadGtfsIndex(url, httpKey, gunzipKey) {
-    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(() => ctrl.abort(), 45000) : null;
+    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), 45e3) : null;
     let res;
-    /* no-cache revalidates: Home Assistant answers 304 for an unchanged index,
-       so a dashboard reload does not download megabytes again, while a rebuilt
-       index (new ETag) is fetched at once. */
     try {
-      res = await fetch(url, { cache: 'no-cache', signal: ctrl ? ctrl.signal : undefined });
+      res = await fetch(url, { cache: "no-cache", signal: ctrl ? ctrl.signal : void 0 });
     } catch (_err) {
-      throw codedError('errIndexFetch');
+      throw codedError("errIndexFetch");
     } finally {
       if (timer) clearTimeout(timer);
     }
     if (!res.ok) throw codedError(httpKey, res.status);
     const buf = await res.arrayBuffer();
     const u8 = new Uint8Array(buf);
-    let text = '';
-    if (u8.length >= 2 && u8[0] === 0x1f && u8[1] === 0x8b) {
-      if (typeof DecompressionStream !== 'function') throw codedError(gunzipKey);
-      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
+    let text = "";
+    if (u8.length >= 2 && u8[0] === 31 && u8[1] === 139) {
+      if (typeof DecompressionStream !== "function") throw codedError(gunzipKey);
+      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
       text = await new Response(stream).text();
     } else {
       text = new TextDecoder().decode(u8);
@@ -3254,28 +3214,27 @@ const BkkLib = {
     try {
       idx = JSON.parse(text);
     } catch (_e) {
-      /* Usually an HTML error page served in place of the index. */
-      throw codedError('errIndexParse');
+      throw codedError("errIndexParse");
     }
-    if (!idx || typeof idx !== 'object' || !Array.isArray(idx.s) || !Array.isArray(idx.t)) {
-      throw codedError('errIndexParse');
+    if (!idx || typeof idx !== "object" || !Array.isArray(idx.s) || !Array.isArray(idx.t)) {
+      throw codedError("errIndexParse");
     }
-    if (idx.v && Number(idx.v) > INDEX_SCHEMA) throw codedError('errIndexSchema', idx.v);
+    if (idx.v && Number(idx.v) > INDEX_SCHEMA) throw codedError("errIndexSchema", idx.v);
     idx.stops = (idx.s || []).map((row, i) => ({
       i,
       id: row[0],
       name: row[1],
-      num: String(row[2] || ''),
+      num: String(row[2] || ""),
       op: row.length > 3 ? Number(row[3]) : 0,
       key: BkkLib.norm(row[1]),
-      fold: BkkLib.fold(row[1]),
+      fold: BkkLib.fold(row[1])
     }));
     idx.ops = (idx.o || []).map((row, i) => ({ i, id: row[0], name: row[1] }));
-    idx.byNum = new Map();
-    idx.byKey = new Map();
+    idx.byNum = /* @__PURE__ */ new Map();
+    idx.byKey = /* @__PURE__ */ new Map();
     idx.stops.forEach((st) => {
-      const nk = st.op + ':' + st.num;
-      const kk = st.op + ':' + st.key;
+      const nk = st.op + ":" + st.num;
+      const kk = st.op + ":" + st.key;
       if (st.num && !idx.byNum.has(nk)) idx.byNum.set(nk, st);
       if (st.key && !idx.byKey.has(kk)) idx.byKey.set(kk, st);
     });
@@ -3295,7 +3254,7 @@ const BkkLib = {
      after-midnight (24:xx) trips stay visible. */
   volanDay(offset) {
     const off = offset || 0;
-    const now = tzParts(new Date());
+    const now = tzParts(/* @__PURE__ */ new Date());
     const ymd = tzShiftYmd(now.ymd, off);
     let mins = 0;
     if (off === 0) mins = now.mins;
@@ -3304,16 +3263,16 @@ const BkkLib = {
       ymd,
       dow: tzDow(ymd),
       mins,
-      midnight: tzEpochSec(ymd, 0),
+      midnight: tzEpochSec(ymd, 0)
     };
   },
   volanServiceOk(idx, si, ymd, dow) {
     const c = (idx.c || [])[si];
     if (!c) return false;
-    const days = String(c[0] || '0000000');
-    const start = String(c[1] || '');
-    const end = String(c[2] || '');
-    let ok = ymd >= start && ymd <= end && days.charAt(dow) === '1';
+    const days = String(c[0] || "0000000");
+    const start = String(c[1] || "");
+    const end = String(c[2] || "");
+    let ok = ymd >= start && ymd <= end && days.charAt(dow) === "1";
     const add = (idx.a || [])[si] || [];
     const rem = (idx.r || [])[si] || [];
     if (add.some((x) => String(x) === ymd)) ok = true;
@@ -3321,14 +3280,14 @@ const BkkLib = {
     return ok;
   },
   cityOpId(idx, stop) {
-    if (!idx || !stop) return '';
-    const id = String(stop.id || '');
+    if (!idx || !stop) return "";
+    const id = String(stop.id || "");
     const hit = (idx.stops || []).find((s) => s.id === id);
     if (hit && idx.ops && idx.ops[hit.op]) return idx.ops[hit.op].id;
-    const colon = id.indexOf(':');
-    const prefix = colon > 0 ? id.slice(0, colon) : '';
+    const colon = id.indexOf(":");
+    const prefix = colon > 0 ? id.slice(0, colon) : "";
     const op = (idx.ops || []).find((o) => o.id === prefix);
-    return op ? op.id : '';
+    return op ? op.id : "";
   },
   cityStopIndexes(idx, stop, opIx) {
     const origin = BkkLib.volanMatchStop(idx, stop, opIx);
@@ -3342,16 +3301,16 @@ const BkkLib = {
   },
   volanMatchStop(idx, stop, opIx) {
     if (!idx || !stop) return null;
-    const op = (opIx == null) ? 0 : opIx;
+    const op = opIx == null ? 0 : opIx;
     const pool = opIx == null ? idx.stops : BkkLib.cityStops(idx, op);
     const num = BkkLib.stopNum(stop.id);
-    if (num && idx.byNum.has(op + ':' + num)) {
-      const hit = idx.byNum.get(op + ':' + num);
+    if (num && idx.byNum.has(op + ":" + num)) {
+      const hit = idx.byNum.get(op + ":" + num);
       if (opIx == null || hit.op === op) return hit;
     }
-    const key = BkkLib.norm(stop.name || '');
-    if (key && idx.byKey.has(op + ':' + key)) return idx.byKey.get(op + ':' + key);
-    const f = BkkLib.fold(stop.name || '');
+    const key = BkkLib.norm(stop.name || "");
+    if (key && idx.byKey.has(op + ":" + key)) return idx.byKey.get(op + ":" + key);
+    const f = BkkLib.fold(stop.name || "");
     if (!f || f.length < 4) return null;
     const exact = pool.find((s) => s.fold === f);
     if (exact) return exact;
@@ -3368,7 +3327,7 @@ const BkkLib = {
   volanDestHit(st, destKey, destFold) {
     if (!st) return false;
     if (destKey && (st.key === destKey || st.fold === destFold)) return true;
-    const fk = destFold || BkkLib.fold(destKey || '');
+    const fk = destFold || BkkLib.fold(destKey || "");
     if (fk && fk.length >= 4 && st.fold.indexOf(fk) >= 0) return true;
     return false;
   },
@@ -3380,7 +3339,7 @@ const BkkLib = {
     const idx = await BkkLib.volanIndex();
     const origin = BkkLib.volanMatchStop(idx, stop, null);
     if (!origin) return [];
-    const seen = new Set();
+    const seen = /* @__PURE__ */ new Set();
     const out = [];
     const trips = idx.t || [];
     for (let i = 0; i < trips.length; i++) {
@@ -3390,15 +3349,15 @@ const BkkLib = {
       if (ps.indexOf(origin.i) < 0) continue;
       seen.add(route);
       out.push({
-        id: 'gtfs:' + route,
+        id: "gtfs:" + route,
         label: String(route),
-        color: '#F9AB13',
-        text: '#000000',
-        type: 'COACH',
-        source: 'gtfs',
+        color: "#F9AB13",
+        text: "#000000",
+        type: "COACH",
+        source: "gtfs"
       });
     }
-    out.sort((a, b) => a.label.localeCompare(b.label, 'hu', { numeric: true }));
+    out.sort((a, b) => a.label.localeCompare(b.label, "hu", { numeric: true }));
     return out;
   },
   async volanRemainingNames(stop, routeLabel) {
@@ -3406,7 +3365,7 @@ const BkkLib = {
     const origin = BkkLib.volanMatchStop(idx, stop, null);
     if (!origin || !routeLabel) return [];
     const want = String(routeLabel);
-    const byKey = new Map();
+    const byKey = /* @__PURE__ */ new Map();
     const trips = idx.t || [];
     for (let i = 0; i < trips.length; i++) {
       if (String(trips[i][1]) !== want) continue;
@@ -3424,7 +3383,7 @@ const BkkLib = {
   citySearchAll(idx, q) {
     const f = BkkLib.fold(q);
     if (!f || !idx) return [];
-    const best = new Map();
+    const best = /* @__PURE__ */ new Map();
     (idx.stops || []).forEach((s) => {
       const fold = s.fold || BkkLib.fold(s.name);
       if (!fold || fold.indexOf(f) < 0) return;
@@ -3432,8 +3391,8 @@ const BkkLib = {
       if (!op) return;
       const prev = best.get(op.id);
       const start = fold.startsWith(f) ? 0 : 1;
-      if (!prev || start < prev.start || (start === prev.start && s.name.localeCompare(prev.stop.name, 'hu') < 0)) {
-        best.set(op.id, { stop: s, start: start });
+      if (!prev || start < prev.start || start === prev.start && s.name.localeCompare(prev.stop.name, "hu") < 0) {
+        best.set(op.id, { stop: s, start });
       }
     });
     return Array.from(best.values()).map((row) => row.stop);
@@ -3455,13 +3414,13 @@ const BkkLib = {
       const as = a.fold.startsWith(f) ? 0 : 1;
       const bs = b.fold.startsWith(f) ? 0 : 1;
       if (as !== bs) return as - bs;
-      return a.name.localeCompare(b.name, 'hu');
+      return a.name.localeCompare(b.name, "hu");
     });
     return hits.slice(0, 20).map((s) => ({
       id: s.id,
       name: s.name,
       label: s.name,
-      type: 'BUS',
+      type: "BUS"
     }));
   },
   async volanReachableDests(stop) {
@@ -3476,16 +3435,14 @@ const BkkLib = {
   gtfsReachableDests(idx, stop, opIx) {
     const origin = BkkLib.volanMatchStop(idx, stop, opIx == null ? null : opIx);
     if (!origin) return { dests: [], destRoutes: {} };
-    const indexes = opIx == null
-      ? [origin.i]
-      : BkkLib.cityStopIndexes(idx, stop, opIx);
-    const byKey = new Map();
+    const indexes = opIx == null ? [origin.i] : BkkLib.cityStopIndexes(idx, stop, opIx);
+    const byKey = /* @__PURE__ */ new Map();
     const destRoutes = {};
     const trips = idx.t || [];
     for (let i = 0; i < trips.length; i++) {
-      const t = trips[i];
-      const route = t[1];
-      const ps = t[2] || [];
+      const t2 = trips[i];
+      const route = t2[1];
+      const ps = t2[2] || [];
       const oidx = ps.findIndex((p) => indexes.indexOf(p) >= 0);
       if (oidx < 0) continue;
       for (let j = oidx + 1; j < ps.length; j++) {
@@ -3498,32 +3455,29 @@ const BkkLib = {
       }
     }
     const dests = Array.from(byKey.values());
-    dests.sort((a, b) => a.name.localeCompare(b.name, 'hu'));
+    dests.sort((a, b) => a.name.localeCompare(b.name, "hu"));
     return { dests, destRoutes };
   },
   async volanDepartures(stopId, dest, originName, minutesAfter) {
     const idx = await BkkLib.volanIndex();
-    return BkkLib.gtfsDepartures(idx, stopId, dest, originName, null, '#F9AB13', '#000000', 'coach', 'COACH', minutesAfter);
+    return BkkLib.gtfsDepartures(idx, stopId, dest, originName, null, "#F9AB13", "#000000", "coach", "COACH", minutesAfter);
   },
   async cityDepartures(stopId, dest, originName, city, minutesAfter) {
     if (!city) return [];
     const idx = await BkkLib.cityIndex();
-    return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), '#0F6FC6', '#ffffff', 'bus', 'BUS', minutesAfter);
+    return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), "#0F6FC6", "#ffffff", "bus", "BUS", minutesAfter);
   },
   gtfsDepartures(idx, stopId, dest, originName, opIx, color, text, vehicle, rawType, minutesAfter) {
-    const origin = BkkLib.volanMatchStop(idx, { id: stopId, name: originName || '' }, opIx == null ? null : opIx);
+    const origin = BkkLib.volanMatchStop(idx, { id: stopId, name: originName || "" }, opIx == null ? null : opIx);
     if (!origin) return [];
-    const indexes = opIx == null
-      ? [origin.i]
-      : BkkLib.cityStopIndexes(idx, { id: stopId, name: originName || '' }, opIx);
+    const indexes = opIx == null ? [origin.i] : BkkLib.cityStopIndexes(idx, { id: stopId, name: originName || "" }, opIx);
     const destKey = dest && dest.key;
-    const destFold = BkkLib.fold((dest && dest.name) || destKey || '');
+    const destFold = BkkLib.fold(dest && dest.name || destKey || "");
     const horizon = clampMinutesAfter(minutesAfter);
     const rowCap = maxDepartureRows(horizon);
     const rows = [];
     const trips = idx.t || [];
     const todayMins = BkkLib.volanDay(0).mins;
-    /* -1 catches yesterday's 24:xx trips, which are still tonight's buses. */
     const dayOffsets = [-1, 0, 1];
     for (let n = 0; n < dayOffsets.length; n++) {
       const day = BkkLib.volanDay(dayOffsets[n]);
@@ -3536,11 +3490,11 @@ const BkkLib = {
         latest = remain;
       }
       for (let i = 0; i < trips.length; i++) {
-        const t = trips[i];
-        if (!BkkLib.volanServiceOk(idx, t[0], day.ymd, day.dow)) continue;
-        const route = t[1];
-        const ps = t[2] || [];
-        const ms = t[3] || [];
+        const t2 = trips[i];
+        if (!BkkLib.volanServiceOk(idx, t2[0], day.ymd, day.dow)) continue;
+        const route = t2[1];
+        const ps = t2[2] || [];
+        const ms = t2[3] || [];
         const oidx = ps.findIndex((p) => indexes.indexOf(p) >= 0);
         if (oidx < 0) continue;
         const depMin = ms[oidx];
@@ -3558,33 +3512,33 @@ const BkkLib = {
         }
         const destStop = didx >= 0 ? idx.stops[ps[didx]] : idx.stops[ps[ps.length - 1]];
         const arrMin = didx >= 0 ? ms[didx] : null;
-        const travel = (arrMin != null && arrMin >= depMin && arrMin - depMin <= 1440) ? (arrMin - depMin) : null;
+        const travel = arrMin != null && arrMin >= depMin && arrMin - depMin <= 1440 ? arrMin - depMin : null;
         const depTs = day.midnight + depMin * 60;
         if (!departureStillDue(depTs)) continue;
         rows.push({
-          tripId: 'gtfs:' + route + ':' + day.ymd + ':' + depMin + ':' + origin.i,
+          tripId: "gtfs:" + route + ":" + day.ymd + ":" + depMin + ":" + origin.i,
           label: route,
-          color: color,
-          text: text,
-          vehicle: vehicle,
-          rawType: rawType,
+          color,
+          text,
+          vehicle,
+          rawType,
           dep: depTs,
           sched: depTs,
           delay: 0,
-          head: (dest && dest.name) || (destStop && destStop.name) || '',
-          platform: '',
+          head: dest && dest.name || destStop && destStop.name || "",
+          platform: "",
           wheelchair: false,
           bikesAllowed: false,
-          trainNumber: '',
-          travel,
+          trainNumber: "",
+          travel
         });
       }
     }
     rows.sort((a, b) => a.dep - b.dep);
     const uniq = [];
-    const seen = new Set();
+    const seen = /* @__PURE__ */ new Set();
     rows.forEach((row) => {
-      const k = row.label + '|' + row.sched;
+      const k = row.label + "|" + row.sched;
       if (seen.has(k)) return;
       seen.add(k);
       uniq.push(row);
@@ -3592,14 +3546,14 @@ const BkkLib = {
     return uniq.slice(0, rowCap);
   },
   mergeDestIndex(a, b) {
-    const byKey = new Map();
+    const byKey = /* @__PURE__ */ new Map();
     const destRoutes = {};
     const add = (idx) => {
       (idx && idx.dests || []).forEach((d) => {
         if (!d || !d.key) return;
         if (!byKey.has(d.key)) byKey.set(d.key, d);
         if (!destRoutes[d.key]) destRoutes[d.key] = [];
-        ((idx.destRoutes && idx.destRoutes[d.key]) || d.routes || []).forEach((rid) => {
+        (idx.destRoutes && idx.destRoutes[d.key] || d.routes || []).forEach((rid) => {
           if (rid && destRoutes[d.key].indexOf(rid) < 0) destRoutes[d.key].push(rid);
         });
       });
@@ -3607,34 +3561,34 @@ const BkkLib = {
     add(a);
     add(b);
     const dests = Array.from(byKey.values());
-    dests.sort((x, y) => x.name.localeCompare(y.name, 'hu'));
+    dests.sort((x, y) => x.name.localeCompare(y.name, "hu"));
     return { dests, destRoutes };
   },
   rowTrainNumber(row) {
-    const direct = String((row && row.trainNumber) || '').trim();
-    if (direct) return direct.replace(/^0+/, '') || direct;
+    const direct = String(row && row.trainNumber || "").trim();
+    if (direct) return direct.replace(/^0+/, "") || direct;
     return BkkLib.trainNumberFromTripId(row && row.tripId);
   },
   mergeVolanRows(gtfs, otp, limit, opts) {
     const out = [];
-    const byTime = new Map();
-    const byNum = new Map();
+    const byTime = /* @__PURE__ */ new Map();
+    const byNum = /* @__PURE__ */ new Map();
     const trainNumberMatchWindowMin = 5;
     const generic = (c) => {
-      const x = String(c || '').replace('#', '').toLowerCase();
-      return !x || x === '4477aa';
+      const x = String(c || "").replace("#", "").toLowerCase();
+      return !x || x === "4477aa";
     };
-    const timeOf = (row) => `${String(row.label || '').toUpperCase()}|${Math.round(Number(row.sched || row.dep || 0) / 60)}`;
+    const timeOf = (row) => `${String(row.label || "").toUpperCase()}|${Math.round(Number(row.sched || row.dep || 0) / 60)}`;
     const overlay = (prev, row) => {
       if (!prev || !row) return;
       if (generic(prev.color) && row.color && !generic(row.color)) {
         prev.color = row.color;
         if (row.text) prev.text = row.text;
       }
-      const prevLab = String(prev.label || '');
-      const rowLab = String(row.label || '');
+      const prevLab = String(prev.label || "");
+      const rowLab = String(row.label || "");
       const brandedLab = (lab) => {
-        const s = String(lab || '').trim();
+        const s = String(lab || "").trim();
         return !!(s && !BkkLib.genericRailLabel(s) && !/^\d+$/.test(s));
       };
       if (!brandedLab(prevLab) && brandedLab(rowLab)) {
@@ -3642,20 +3596,19 @@ const BkkLib = {
       }
       const prevHasGps = !!BkkLib.mapGpsLatLon(prev.lat, prev.lon);
       const rowHasGps = !!BkkLib.mapGpsLatLon(row.lat, row.lon);
-      const rowElvira = /^elvira:/i.test(String(row.tripId || ''));
+      const rowElvira = /^elvira:/i.test(String(row.tripId || ""));
       if (rowHasGps && (!prevHasGps || rowElvira)) {
         prev.lat = Number(row.lat);
         prev.lon = Number(row.lon);
       }
-      const tid = String(row.tripId || '');
+      const tid = String(row.tripId || "");
       if (BkkLib.isFutarTripId(tid)) prev.tripId = tid;
       else if (tid && !/^(elvira:|gtfs:)/.test(tid) && !prevHasGps) prev.tripId = tid;
-      if ((!Array.isArray(prev.shape) || prev.shape.length < 2)
-          && Array.isArray(row.shape) && row.shape.length >= 2) {
+      if ((!Array.isArray(prev.shape) || prev.shape.length < 2) && Array.isArray(row.shape) && row.shape.length >= 2) {
         prev.shape = row.shape;
       }
-      ['vehicleId', 'licensePlate', 'model', 'vehicleStatus', 'stopDistancePercent'].forEach((k) => {
-        if ((prev[k] == null || prev[k] === '') && row[k] != null && row[k] !== '') prev[k] = row[k];
+      ["vehicleId", "licensePlate", "model", "vehicleStatus", "stopDistancePercent"].forEach((k) => {
+        if ((prev[k] == null || prev[k] === "") && row[k] != null && row[k] !== "") prev[k] = row[k];
       });
       if (!prev.platform && row.platform) prev.platform = String(row.platform);
       if (row.booking) prev.booking = true;
@@ -3664,10 +3617,10 @@ const BkkLib = {
       if (row.wheelchair) prev.wheelchair = true;
       if (row.bikesAllowed) prev.bikesAllowed = true;
     };
-    const minuteOf = (row) => Math.round(Number((row && (row.sched || row.dep)) || 0) / 60);
+    const minuteOf = (row) => Math.round(Number(row && (row.sched || row.dep) || 0) / 60);
     const numberKey = (number) => {
-      const raw = String(number || '').trim();
-      return BkkLib.emmaTrainNumber(raw) || raw.replace(/^0+/, '') || raw;
+      const raw = String(number || "").trim();
+      return BkkLib.emmaTrainNumber(raw) || raw.replace(/^0+/, "") || raw;
     };
     const registerNumber = (number, index) => {
       const key = numberKey(number);
@@ -3690,10 +3643,7 @@ const BkkLib = {
       });
       return distance <= trainNumberMatchWindowMin ? best : -1;
     };
-    const brandedHost = (row) => BkkLib.isTrainRow(row)
-      && !BkkLib.numberedRailBadge(row)
-      && (BkkLib.suburbanLineLabel(row && row.label)
-        || (!BkkLib.genericRailLabel(row && row.label) && String((row && row.label) || '').trim()));
+    const brandedHost = (row) => BkkLib.isTrainRow(row) && !BkkLib.numberedRailBadge(row) && (BkkLib.suburbanLineLabel(row && row.label) || !BkkLib.genericRailLabel(row && row.label) && String(row && row.label || "").trim());
     const add = (row, skipUnmatched) => {
       if (!row || !departureStillDue(row.dep || row.sched)) return;
       const n = BkkLib.rowTrainNumber(row);
@@ -3718,15 +3668,8 @@ const BkkLib = {
           return;
         }
       }
-      /* Named IC (GÖCSEJ) vs generic FUTÁR IC at the same minute, when the
-         train number on one side did not parse. Suburban G43/Z30 stay out.
-         overlayOnly must not use this: GEMENC at the same minute would steal
-         a FUTÁR IC and copy booking. Spec is trainNumber (+ minute). */
       if (!skipUnmatched && BkkLib.isTrainRow(row) && min) {
-        const namedIc = (r) => BkkLib.isTrainRow(r)
-          && !BkkLib.suburbanLineLabel(r && r.label)
-          && !BkkLib.genericRailLabel(r && r.label)
-          && !/^\d+$/.test(String((r && r.label) || '').trim());
+        const namedIc = (r) => BkkLib.isTrainRow(r) && !BkkLib.suburbanLineLabel(r && r.label) && !BkkLib.genericRailLabel(r && r.label) && !/^\d+$/.test(String(r && r.label || "").trim());
         const genericIc = (r) => BkkLib.isTrainRow(r) && BkkLib.genericRailLabel(r && r.label);
         let pair = -1;
         if (namedIc(row)) {
@@ -3742,9 +3685,6 @@ const BkkLib = {
           return;
         }
       }
-      /* overlayOnly must not pair by label+minute: two ICs at the same
-         minute would copy booking onto the other FUTÁR train. Spec is
-         trainNumber (byNum) plus branded/numbered pairing above. */
       const tk = timeOf(row);
       if (!skipUnmatched && byTime.has(tk)) {
         overlay(out[byTime.get(tk)], row);
@@ -3757,14 +3697,18 @@ const BkkLib = {
       registerNumber(n, idx);
     };
     const overlayOnly = !!(opts && opts.overlayOnly);
-    const hosts = overlayOnly ? (gtfs || []) : (otp || []);
-    const extra = overlayOnly ? (otp || []) : (gtfs || []);
+    const hosts = overlayOnly ? gtfs || [] : otp || [];
+    const extra = overlayOnly ? otp || [] : gtfs || [];
     hosts.forEach((row) => add(row, false));
     extra.forEach((row) => add(row, overlayOnly));
     out.sort((a, b) => (a.dep || 0) - (b.dep || 0));
     const cap = Number(limit);
-    return out.slice(0, (Number.isFinite(cap) && cap > 0) ? cap : 12);
-  },
+    return out.slice(0, Number.isFinite(cap) && cap > 0 ? cap : 12);
+  }
+});
+
+// src/lib/services.js
+Object.assign(BkkLib, {
   elviraRowsFromResult(res) {
     if (!res) return [];
     if (Array.isArray(res)) return res;
@@ -3778,8 +3722,8 @@ const BkkLib = {
     opts = opts || {};
     let origin = BkkLib.elviraStationCode(originId);
     let dest = BkkLib.elviraStationCode(destId);
-    if (!origin) origin = await BkkLib.elviraResolveCode(opts.apiKey, originId, opts.originName || '');
-    if (!dest) dest = await BkkLib.elviraResolveCode(opts.apiKey, destId, destName || '');
+    if (!origin) origin = await BkkLib.elviraResolveCode(opts.apiKey, originId, opts.originName || "");
+    if (!dest) dest = await BkkLib.elviraResolveCode(opts.apiKey, destId, destName || "");
     if (!hass || !origin || !dest || origin === dest) {
       return [];
     }
@@ -3787,30 +3731,30 @@ const BkkLib = {
       origin_code: origin,
       dest_code: dest,
       minutes_after: minutesAfter || DEFAULT_MINUTES_AFTER,
-      dest_name: destName || '',
+      dest_name: destName || ""
     };
     try {
       let res;
-      if (typeof hass.callService === 'function') {
+      if (typeof hass.callService === "function") {
         try {
-          res = await hass.callService('hungarian_transport', 'elvira_between', serviceData, undefined, false, true);
+          res = await hass.callService("hungarian_transport", "elvira_between", serviceData, void 0, false, true);
         } catch (err) {
           if (!hass.connection) throw err;
           res = await hass.connection.sendMessagePromise({
-            type: 'call_service',
-            domain: 'hungarian_transport',
-            service: 'elvira_between',
+            type: "call_service",
+            domain: "hungarian_transport",
+            service: "elvira_between",
             service_data: serviceData,
-            return_response: true,
+            return_response: true
           });
         }
       } else if (hass.connection) {
         res = await hass.connection.sendMessagePromise({
-          type: 'call_service',
-          domain: 'hungarian_transport',
-          service: 'elvira_between',
+          type: "call_service",
+          domain: "hungarian_transport",
+          service: "elvira_between",
           service_data: serviceData,
-          return_response: true,
+          return_response: true
         });
       } else {
         return [];
@@ -3818,7 +3762,7 @@ const BkkLib = {
       const rows = BkkLib.elviraRowsFromResult(res);
       return Array.isArray(rows) ? rows : [];
     } catch (err) {
-      console.warn('MÁV ELVIRA reservation data unavailable:', err);
+      console.warn("MÁV ELVIRA reservation data unavailable:", err);
       return [];
     }
   },
@@ -3835,31 +3779,31 @@ const BkkLib = {
     if (!hass) return [];
     const now = Date.now();
     const hit = BkkLib._coachPosCache;
-    if (hit && now - hit.ts < 20000) return hit.vehicles;
+    if (hit && now - hit.ts < 2e4) return hit.vehicles;
     if (BkkLib._coachPosInflight) return BkkLib._coachPosInflight;
     const run = (async () => {
       try {
         let res;
-        if (typeof hass.callService === 'function') {
+        if (typeof hass.callService === "function") {
           try {
-            res = await hass.callService('bkk_stop', 'coach_positions', {}, undefined, false, true);
+            res = await hass.callService("bkk_stop", "coach_positions", {}, void 0, false, true);
           } catch (err) {
             if (!hass.connection) throw err;
             res = await hass.connection.sendMessagePromise({
-              type: 'call_service',
-              domain: 'bkk_stop',
-              service: 'coach_positions',
+              type: "call_service",
+              domain: "bkk_stop",
+              service: "coach_positions",
               service_data: {},
-              return_response: true,
+              return_response: true
             });
           }
         } else if (hass.connection) {
           res = await hass.connection.sendMessagePromise({
-            type: 'call_service',
-            domain: 'bkk_stop',
-            service: 'coach_positions',
+            type: "call_service",
+            domain: "bkk_stop",
+            service: "coach_positions",
             service_data: {},
-            return_response: true,
+            return_response: true
           });
         } else {
           return [];
@@ -3878,42 +3822,42 @@ const BkkLib = {
     return run;
   },
   async coachShape(hass, route, headsign) {
-    if (!hass || !route) return '';
-    const serviceData = { route: String(route), headsign: String(headsign || '') };
+    if (!hass || !route) return "";
+    const serviceData = { route: String(route), headsign: String(headsign || "") };
     try {
       let res;
-      if (typeof hass.callService === 'function') {
+      if (typeof hass.callService === "function") {
         try {
-          res = await hass.callService('bkk_stop', 'coach_shape', serviceData, undefined, false, true);
+          res = await hass.callService("bkk_stop", "coach_shape", serviceData, void 0, false, true);
         } catch (err) {
           if (!hass.connection) throw err;
           res = await hass.connection.sendMessagePromise({
-            type: 'call_service',
-            domain: 'bkk_stop',
-            service: 'coach_shape',
+            type: "call_service",
+            domain: "bkk_stop",
+            service: "coach_shape",
             service_data: serviceData,
-            return_response: true,
+            return_response: true
           });
         }
       } else if (hass.connection) {
         res = await hass.connection.sendMessagePromise({
-          type: 'call_service',
-          domain: 'bkk_stop',
-          service: 'coach_shape',
+          type: "call_service",
+          domain: "bkk_stop",
+          service: "coach_shape",
           service_data: serviceData,
-          return_response: true,
+          return_response: true
         });
       } else {
-        return '';
+        return "";
       }
-      const payload = (res && (res.response || res.service_response)) || res || {};
-      return String(payload.points || '');
+      const payload = res && (res.response || res.service_response) || res || {};
+      return String(payload.points || "");
     } catch (err) {
-      return '';
+      return "";
     }
   },
   servicePayload(res) {
-    if (!res || typeof res !== 'object') return {};
+    if (!res || typeof res !== "object") return {};
     if (Array.isArray(res.shape) || Array.isArray(res.points) || Array.isArray(res.departures)) return res;
     const nested = res.response || res.service_response || res.result;
     if (nested && nested !== res) return BkkLib.servicePayload(nested);
@@ -3921,17 +3865,17 @@ const BkkLib = {
   },
   async hassService(hass, service, serviceData) {
     if (!hass) return null;
-    if (hass.connection && typeof hass.connection.sendMessagePromise === 'function') {
+    if (hass.connection && typeof hass.connection.sendMessagePromise === "function") {
       return hass.connection.sendMessagePromise({
-        type: 'call_service',
-        domain: 'bkk_stop',
+        type: "call_service",
+        domain: "bkk_stop",
         service: String(service),
         service_data: serviceData || {},
-        return_response: true,
+        return_response: true
       });
     }
-    if (typeof hass.callService === 'function') {
-      return hass.callService('bkk_stop', service, serviceData, undefined, false, true);
+    if (typeof hass.callService === "function") {
+      return hass.callService("bkk_stop", service, serviceData, void 0, false, true);
     }
     return null;
   },
@@ -3939,7 +3883,7 @@ const BkkLib = {
     if (!hass || !BkkLib.isFutarTripId(tripId) || !apiKey || apiKey === INTEGRATION_KEY) return [];
     const serviceData = { trip_id: String(tripId), api_key: String(apiKey) };
     try {
-      const res = await BkkLib.hassService(hass, 'trip_shape', serviceData);
+      const res = await BkkLib.hassService(hass, "trip_shape", serviceData);
       const payload = BkkLib.servicePayload(res);
       return BkkLib.validMapShape(payload.shape || payload.points || []);
     } catch (_e) {
@@ -3969,7 +3913,11 @@ const BkkLib = {
       return futar;
     }
     return BkkLib.combineHopShapes(motis, futar, coversHead, []);
-  },
+  }
+});
+
+// src/lib/departures.js
+Object.assign(BkkLib, {
   async addTransitousVolanStops(byId, q, motisHits) {
     const motis = motisHits || await BkkLib.searchStopsTransitous(q);
     let idx = null;
@@ -3981,7 +3929,7 @@ const BkkLib = {
     motis.forEach((s) => {
       if (!s || !s.id || !/^hu-volanbusz_/i.test(s.id)) return;
       let id = s.id;
-      let name = s.name || '';
+      let name = s.name || "";
       if (idx) {
         const hit = BkkLib.volanMatchStop(idx, { id: s.id, name: s.name }, null);
         if (hit && hit.id) {
@@ -4000,62 +3948,66 @@ const BkkLib = {
         name,
         label: name,
         lat: s.lat,
-        lon: s.lon,
+        lon: s.lon
       });
     });
   },
   async searchStops(apiKey, q, mode, city, opts) {
-    const byId = new Map();
-    if (mode === 'volan' || mode === 'all') {
+    const byId = /* @__PURE__ */ new Map();
+    if (mode === "volan" || mode === "all") {
       try {
         (await BkkLib.volanSearchStops(q)).forEach((s) => byId.set(s.id, s));
-      } catch (_e) { /* GTFS index optional */ }
+      } catch (_e) {
+      }
       try {
         if (!(opts && opts.skipTransitousVolan)) {
           await BkkLib.addTransitousVolanStops(byId, q);
         }
-      } catch (_e) { /* Transitous names are extra coverage */ }
+      } catch (_e) {
+      }
     }
-    if (mode === 'all') {
+    if (mode === "all") {
       try {
         const idx = await BkkLib.cityIndex();
-        const seenFold = new Set();
+        const seenFold = /* @__PURE__ */ new Set();
         BkkLib.citySearchAll(idx, q).forEach((s) => {
           const opId = BkkLib.cityOpId(idx, s);
           const op = (idx.ops || []).find((o) => o.id === opId);
-          const city = op ? String(op.name).split(' — ')[0] : '';
-          const fold = BkkLib.fold(s.name) + '|' + opId;
+          const city2 = op ? String(op.name).split(" — ")[0] : "";
+          const fold = BkkLib.fold(s.name) + "|" + opId;
           if (!opId || seenFold.has(fold)) return;
           seenFold.add(fold);
           byId.set(s.id, {
             id: s.id,
             name: s.name,
-            label: city ? (s.name + ' (' + city + ')') : s.name,
-            city: true,
+            label: city2 ? s.name + " (" + city2 + ")" : s.name,
+            city: true
           });
         });
-      } catch (_e) { /* city index optional */ }
+      } catch (_e) {
+      }
     }
-    if (mode === 'helyi') {
+    if (mode === "helyi") {
       try {
         (await BkkLib.citySearchStops(q, city)).forEach((s) => byId.set(s.id, s));
-      } catch (_e) { /* GTFS index optional */ }
+      } catch (_e) {
+      }
       return BkkLib.groupStops(Array.from(byId.values())).slice(0, 20);
     }
     if (apiKey) {
       try {
         const queries = [q].concat(BkkLib.aliasQueries(q));
         for (let i = 0; i < queries.length; i++) {
-          const data = await BkkLib.fetch(apiKey, 'search.json', { query: queries[i] }, true);
-          const stops = (((data.data || {}).references) || {}).stops || {};
+          const data = await BkkLib.fetch(apiKey, "search.json", { query: queries[i] }, true);
+          const stops = ((data.data || {}).references || {}).stops || {};
           Object.values(stops).forEach((s) => {
             if (!s || !s.id || !s.name) return;
             if (/^STOP_/i.test(String(s.id))) return;
-            if (mode === 'mav' && !BkkLib.isMavStop(s)) return;
-            if (mode === 'volan' && !BkkLib.isVolanStop(s)) return;
-            if (mode === 'bkk' && !BkkLib.isBkkStop(s)) return;
+            if (mode === "mav" && !BkkLib.isMavStop(s)) return;
+            if (mode === "volan" && !BkkLib.isVolanStop(s)) return;
+            if (mode === "bkk" && !BkkLib.isBkkStop(s)) return;
             const num = BkkLib.stopNum(s.id);
-            if ((mode === 'volan' || mode === 'all') && num && BkkLib.isVolanStop(s)) {
+            if ((mode === "volan" || mode === "all") && num && BkkLib.isVolanStop(s)) {
               const clash = Array.from(byId.values()).find((x) => BkkLib.stopNum(x.id) === num);
               if (clash) return;
             }
@@ -4063,17 +4015,17 @@ const BkkLib = {
           });
         }
       } catch (err) {
-        if ((mode !== 'volan' && mode !== 'all') || !byId.size) throw err;
+        if (mode !== "volan" && mode !== "all" || !byId.size) throw err;
       }
     }
     let hits;
-    if (mode === 'all') {
+    if (mode === "all") {
       const mav = [];
       const volan = [];
-      const city = [];
+      const city2 = [];
       const rest = [];
       Array.from(byId.values()).forEach((s) => {
-        if (s.city) city.push(s);
+        if (s.city) city2.push(s);
         else if (BkkLib.isMavStop(s)) mav.push(s);
         else if (BkkLib.isVolanStop(s)) volan.push(s);
         else rest.push(s);
@@ -4082,12 +4034,14 @@ const BkkLib = {
         BkkLib.groupStops(rest),
         BkkLib.groupStops(mav),
         BkkLib.groupStops(volan),
-        city,
+        city2
       ];
       hits = [];
       const max = Math.max(groups[0].length, groups[1].length, groups[2].length, groups[3].length);
       for (let i = 0; i < max; i++) {
-        groups.forEach((g) => { if (g[i]) hits.push(g[i]); });
+        groups.forEach((g) => {
+          if (g[i]) hits.push(g[i]);
+        });
       }
     } else {
       hits = BkkLib.groupStops(Array.from(byId.values()));
@@ -4095,20 +4049,20 @@ const BkkLib = {
     hits = hits.map((h) => {
       if (h.city && h.label) return h;
       let label = BkkLib.labelAliased(q, h);
-      if (mode === 'all') {
-        if (BkkLib.isMavStop(h)) label += ' (M\u00c1V)';
-        else if (BkkLib.isVolanStop(h)) label += ' (Vol\u00e1n)';
+      if (mode === "all") {
+        if (BkkLib.isMavStop(h)) label += " (MÁV)";
+        else if (BkkLib.isVolanStop(h)) label += " (Volán)";
       }
-      return Object.assign({}, h, { label: label });
+      return Object.assign({}, h, { label });
     });
     const foldedQ = BkkLib.fold(q);
     hits.sort((a, b) => {
-      const as = (foldedQ.includes('arpad hid') && BkkLib.fold(a.name).includes('goncz arpad')) ? 0 : 1;
-      const bs = (foldedQ.includes('arpad hid') && BkkLib.fold(b.name).includes('goncz arpad')) ? 0 : 1;
+      const as = foldedQ.includes("arpad hid") && BkkLib.fold(a.name).includes("goncz arpad") ? 0 : 1;
+      const bs = foldedQ.includes("arpad hid") && BkkLib.fold(b.name).includes("goncz arpad") ? 0 : 1;
       if (as !== bs) return as - bs;
-      return (a.label || a.name).localeCompare(b.label || b.name, 'hu');
+      return (a.label || a.name).localeCompare(b.label || b.name, "hu");
     });
-    if (mode === 'all') hits = BkkLib.collapseSameNameStops(hits);
+    if (mode === "all") hits = BkkLib.collapseSameNameStops(hits);
     const cities = hits.filter((h) => h.city).slice(0, 40);
     const other = hits.filter((h) => !h.city).slice(0, 20);
     return cities.concat(other);
@@ -4116,11 +4070,9 @@ const BkkLib = {
   async remainingNames(apiKey, cache, stop, routeId) {
     const { variants, stops } = await BkkLib.loadRoutePattern(apiKey, cache, routeId);
     const names = [];
-    const seen = new Set();
+    const seen = /* @__PURE__ */ new Set();
     variants.forEach((v) => {
-      const idx = (v.ids || []).findIndex((id) => (
-        BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), stop)
-      ));
+      const idx = (v.ids || []).findIndex((id) => BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), stop));
       if (idx < 0) return;
       v.ids.slice(idx + 1).forEach((id) => {
         const raw = (stops[id] || {}).name;
@@ -4135,17 +4087,15 @@ const BkkLib = {
   originIndex(sts, stops, origin) {
     if (!origin) return 0;
     const oid = origin.id || origin;
-    const on = origin.name || '';
+    const on = origin.name || "";
     const originObj = { id: oid, name: on };
-    let idx = (sts || []).findIndex((s) => (
-      BkkLib.stopMatchesOrigin(Object.assign({ id: s.stopId }, stops[s.stopId] || {}), originObj)
-    ));
+    let idx = (sts || []).findIndex((s) => BkkLib.stopMatchesOrigin(Object.assign({ id: s.stopId }, stops[s.stopId] || {}), originObj));
     return idx;
   },
   stopMatchesOrigin(stop, origin) {
     if (!stop || !origin) return false;
     const oid = origin.id || origin;
-    const oname = origin.name || '';
+    const oname = origin.name || "";
     if (stop.id && BkkLib.sameStop(stop.id, oid)) return true;
     if (stop.parentStationId && BkkLib.sameStop(stop.parentStationId, oid)) return true;
     if (oname && BkkLib.nameEq(stop.name, oname)) return true;
@@ -4160,17 +4110,17 @@ const BkkLib = {
     if (BkkLib._inflight[routeId]) return BkkLib._inflight[routeId];
     const p = (async () => {
       try {
-        const data = await BkkLib.fetch(apiKey, 'route-details.json', {
+        const data = await BkkLib.fetch(apiKey, "route-details.json", {
           routeId,
-          includeReferences: 'true',
+          includeReferences: "true"
         }, true);
         const entry = (data.data || {}).entry || {};
         const packed = {
           variants: (entry.variants || []).map((v) => ({
             name: v.name,
-            ids: v.stopIds || [],
+            ids: v.stopIds || []
           })),
-          stops: ((data.data || {}).references || {}).stops || {},
+          stops: ((data.data || {}).references || {}).stops || {}
         };
         return BkkLib._store(cache, routeId, packed);
       } finally {
@@ -4181,21 +4131,17 @@ const BkkLib = {
     return p;
   },
   polesFromPatterns(patterns, origin, destKey) {
-    const poles = new Set();
+    const poles = /* @__PURE__ */ new Set();
     (patterns || []).forEach((pat) => {
       if (!pat) return;
       const variants = pat.variants || [];
       const stops = pat.stops || {};
       variants.forEach((v) => {
         const ids = v.ids || [];
-        const oidx = ids.findIndex((id) => (
-          BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), origin)
-        ));
+        const oidx = ids.findIndex((id) => BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), origin));
         if (oidx < 0) return;
         if (destKey) {
-          const hits = ids.slice(oidx + 1).some((id) => (
-            BkkLib.nameEq((stops[id] || {}).name, destKey)
-          ));
+          const hits = ids.slice(oidx + 1).some((id) => BkkLib.nameEq((stops[id] || {}).name, destKey));
           if (!hits) return;
         }
         poles.add(ids[oidx]);
@@ -4212,7 +4158,7 @@ const BkkLib = {
         return null;
       }
     }));
-    const poles = new Set(BkkLib.polesFromPatterns(patterns, origin, destKey || ''));
+    const poles = new Set(BkkLib.polesFromPatterns(patterns, origin, destKey || ""));
     if (!destKey) {
       if (!poles.size && origin && BkkLib.isStopArea({ id: origin.id })) {
         (await BkkLib.childStopIds(apiKey, cache, origin.id)).forEach((id) => poles.add(id));
@@ -4222,21 +4168,18 @@ const BkkLib = {
     return Array.from(poles);
   },
   async childStopIds(apiKey, cache, parentId) {
-    const key = 'children:' + parentId;
+    const key = "children:" + parentId;
     const hit = BkkLib._cached(cache, key);
     if (Array.isArray(hit)) return hit;
     if (BkkLib._inflight[key]) return BkkLib._inflight[key];
     const p = (async () => {
       try {
-        const data = await BkkLib.fetch(apiKey, 'schedule-for-stop.json', {
+        const data = await BkkLib.fetch(apiKey, "schedule-for-stop.json", {
           stopId: parentId,
-          includeReferences: 'true',
+          includeReferences: "true"
         }, true);
         const stops = ((data.data || {}).references || {}).stops || {};
-        const ids = Object.values(stops)
-          .filter((s) => s && s.id && s.parentStationId === parentId)
-          .filter((s) => !/^STOP_/i.test(s.id) && !BkkLib.isMavStop(s) && !BkkLib.isVolanStop(s))
-          .map((s) => s.id);
+        const ids = Object.values(stops).filter((s) => s && s.id && s.parentStationId === parentId).filter((s) => !/^STOP_/i.test(s.id) && !BkkLib.isMavStop(s) && !BkkLib.isVolanStop(s)).map((s) => s.id);
         return BkkLib._store(cache, key, ids);
       } finally {
         delete BkkLib._inflight[key];
@@ -4251,25 +4194,27 @@ const BkkLib = {
     if (!cache) return value;
     const keys = Object.keys(cache);
     if (keys.length >= 400) {
-      keys.slice(0, keys.length - 399).forEach((k) => { delete cache[k]; });
+      keys.slice(0, keys.length - 399).forEach((k) => {
+        delete cache[k];
+      });
     }
     cache[key] = value;
     return value;
   },
   async tripDetails(apiKey, cache, tripId) {
-    const key = 'trip:' + tripId;
+    const key = "trip:" + tripId;
     const hit = BkkLib._cached(cache, key);
     if (hit) return hit;
     if (BkkLib._inflight[key]) return BkkLib._inflight[key];
     const p = (async () => {
       try {
-        const data = await BkkLib.fetch(apiKey, 'trip-details.json', { tripId });
+        const data = await BkkLib.fetch(apiKey, "trip-details.json", { tripId });
         const packed = {
-          sts: (((data.data || {}).entry) || {}).stopTimes || [],
-          stops: (((data.data || {}).references) || {}).stops || {},
-          polyline: ((((data.data || {}).entry) || {}).polyline || {}).points || '',
-          vehicle: (((data.data || {}).entry) || {}).vehicle || null,
-          nowSec: BkkLib.unixSec(data.currentTime),
+          sts: ((data.data || {}).entry || {}).stopTimes || [],
+          stops: ((data.data || {}).references || {}).stops || {},
+          polyline: (((data.data || {}).entry || {}).polyline || {}).points || "",
+          vehicle: ((data.data || {}).entry || {}).vehicle || null,
+          nowSec: BkkLib.unixSec(data.currentTime)
         };
         return BkkLib._store(cache, key, packed);
       } finally {
@@ -4295,7 +4240,7 @@ const BkkLib = {
     const oidx = BkkLib.originIndex(sts, stops, origin);
     if (oidx < 0) return [];
     const names = [];
-    const seen = new Set();
+    const seen = /* @__PURE__ */ new Set();
     sts.slice(oidx + 1).forEach((s) => {
       const raw = (stops[s.stopId] || {}).name;
       const n = BkkLib.placeNameKey({ name: raw }) || BkkLib.stationKey(raw) || BkkLib.norm(raw);
@@ -4306,31 +4251,31 @@ const BkkLib = {
     return names;
   },
   async reachableDests(apiKey, cache, stop, mode, city) {
-    if (mode === 'helyi') {
+    if (mode === "helyi") {
       return BkkLib.cityReachableDests(stop, city);
     }
     let out = { dests: [], destRoutes: {} };
     try {
-      const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
+      const data = await BkkLib.fetch(apiKey, "arrivals-and-departures-for-stop.json", {
         stopId: stop.id,
         minutesAfter: DEPART_MINUTES_AFTER,
-        minutesBefore: '0',
-        onlyDepartures: 'true',
-        includeReferences: 'true',
+        minutesBefore: "0",
+        onlyDepartures: "true",
+        includeReferences: "true"
       }, true);
       const refs = (data.data || {}).references || {};
       const routes = refs.routes || {};
       const trips = refs.trips || {};
       const times = ((data.data || {}).entry || {}).stopTimes || [];
-      const seenTrip = new Set();
-      const seenRoute = new Set();
+      const seenTrip = /* @__PURE__ */ new Set();
+      const seenRoute = /* @__PURE__ */ new Set();
       const tripJobs = [];
       const routeIds = [];
       for (let i = 0; i < times.length; i++) {
         const st = times[i];
         const trip = trips[st.tripId] || {};
         const rid = trip.routeId;
-        const rt = routes[rid] || { id: rid, type: '' };
+        const rt = routes[rid] || { id: rid, type: "" };
         if (!BkkLib.routeMatchesMode(rt, mode)) continue;
         if (rid && !seenRoute.has(rid)) {
           seenRoute.add(rid);
@@ -4357,7 +4302,7 @@ const BkkLib = {
           return { routeId: rid, names: [] };
         }
       }));
-      const byKey = new Map();
+      const byKey = /* @__PURE__ */ new Map();
       const destRoutes = {};
       fromTrips.concat(fromRoutes).forEach(({ routeId, names }) => {
         (names || []).forEach((n) => {
@@ -4372,22 +4317,24 @@ const BkkLib = {
         });
       });
       const dests = Array.from(byKey.values());
-      dests.sort((a, b) => a.name.localeCompare(b.name, 'hu'));
+      dests.sort((a, b) => a.name.localeCompare(b.name, "hu"));
       out = { dests, destRoutes };
     } catch (err) {
-      if (mode !== 'volan' && mode !== 'all') throw err;
+      if (mode !== "volan" && mode !== "all") throw err;
     }
-    if (mode === 'volan' || mode === 'all') {
+    if (mode === "volan" || mode === "all") {
       try {
         out = BkkLib.mergeDestIndex(await BkkLib.volanReachableDests(stop), out);
-      } catch (_e) { /* GTFS index optional */ }
+      } catch (_e) {
+      }
     }
-    if (mode === 'all') {
+    if (mode === "all") {
       try {
         const idx = await BkkLib.cityIndex();
         const cityId = BkkLib.cityOpId(idx, stop);
         if (cityId) out = BkkLib.mergeDestIndex(await BkkLib.cityReachableDests(stop, cityId), out);
-      } catch (_e) { /* city index optional */ }
+      } catch (_e) {
+      }
     }
     return out;
   },
@@ -4402,232 +4349,225 @@ const BkkLib = {
       const arr = dest.predictedArrivalTime || dest.arrivalTime || dest.departureTime;
       if (!arr || !dep) return null;
       const mins = Math.round((arr - dep) / 60);
-      return (mins >= 1 && mins <= 1440) ? mins : null;
+      return mins >= 1 && mins <= 1440 ? mins : null;
     } catch (_e) {
       return null;
     }
   },
   async departures(apiKey, stopId, routeIds, dest, opts) {
     opts = opts || {};
-    const mode = opts.mode || (opts.mav ? 'mav' : 'bkk');
+    const mode = opts.mode || (opts.mav ? "mav" : "bkk");
     const horizon = clampMinutesAfter(opts.minutesAfter);
-    if (mode === 'helyi') {
+    if (mode === "helyi") {
       let cityRows = await BkkLib.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
       cityRows = await BkkLib.fillTransitousIfEmpty(
         cityRows,
-        { id: stopId, name: opts.originName || '' },
+        { id: stopId, name: opts.originName || "" },
         dest,
-        opts,
+        opts
       );
       if (opts.deferGps) return cityRows;
       return BkkLib.attachCoachGps(opts.hass, cityRows);
     }
     const cache = opts.cache || {};
-    const origin = { id: stopId, name: opts.originName || '' };
+    const origin = { id: stopId, name: opts.originName || "" };
     const selected = new Set(routeIds || []);
     const destKey = dest && dest.key;
     const maxRows = maxDepartureRows(horizon);
-    const now = Math.floor(Date.now() / 1000);
+    const now = Math.floor(Date.now() / 1e3);
     const latest = now + horizon * 60;
     let rows = [];
     let elviraExtra = [];
-    if ((mode === 'mav' || mode === 'all') && opts.hass && !opts.skipElvira) {
+    if ((mode === "mav" || mode === "all") && opts.hass && !opts.skipElvira) {
       try {
-        const destId = (dest && dest.id) || opts.destStopId || '';
+        const destId = dest && dest.id || opts.destStopId || "";
         elviraExtra = await BkkLib.elviraBetween(
           opts.hass,
           stopId,
           destId,
           horizon,
-          (dest && dest.name) || '',
-          { apiKey: apiKey, originName: opts.originName || '' },
+          dest && dest.name || "",
+          { apiKey, originName: opts.originName || "" }
         );
-      } catch (_e) { /* ELVIRA optional; FUTÁR/GTFS rows still show */ }
-    }
-    const queryFutar = mode === 'bkk' || mode === 'mav' || /^BKK_/i.test(String(stopId || ''));
-    const futarTask = queryFutar ? (async () => {
-    let candidates = [];
-    try {
-      let poles = [];
-      const poleRoutes = Array.from(selected);
-      if (poleRoutes.length) {
-        try {
-          poles = await BkkLib.originPoles(apiKey, cache, origin, poleRoutes, destKey || '');
-        } catch (_e) {
-          poles = [];
-        }
+      } catch (_e) {
       }
-      if (!poles.length) poles = [stopId];
-      const loadBoards = (ids) => Promise.all(ids.map(async (pid) => {
-        try {
-          return await BkkLib.departureBoard(apiKey, pid, horizon);
-        } catch (_e) {
-          return null;
+    }
+    const queryFutar = mode === "bkk" || mode === "mav" || /^BKK_/i.test(String(stopId || ""));
+    const futarTask = queryFutar ? (async () => {
+      let candidates = [];
+      try {
+        let poles = [];
+        const poleRoutes = Array.from(selected);
+        if (poleRoutes.length) {
+          try {
+            poles = await BkkLib.originPoles(apiKey, cache, origin, poleRoutes, destKey || "");
+          } catch (_e) {
+            poles = [];
+          }
         }
-      }));
-      let payloads = await loadBoards(poles);
-      const usedParentOnly = poles.length === 1 && poles[0] === stopId;
-      const span = payloads.reduce((best, data) => {
-        const cur = BkkLib.boardSpanMin(data, now);
-        return {
-          count: best.count + cur.count,
-          spanMin: Math.max(best.spanMin, cur.spanMin),
-        };
-      }, { count: 0, spanMin: 0 });
-      const capped = usedParentOnly && (span.count >= 60 || span.spanMin + 2 < horizon);
-      if (capped) {
-        const discovered = [];
-        payloads.forEach((data) => {
-          const refs = ((data && data.data || {}).references) || {};
-          const entry = ((data && data.data || {}).entry) || {};
-          const trips = refs.trips || {};
-          const routes = refs.routes || {};
-          const ids = new Set(entry.routeIds || []);
-          (entry.stopTimes || []).forEach((st) => {
-            const rid = (trips[st.tripId] || {}).routeId;
-            if (rid) ids.add(rid);
+        if (!poles.length) poles = [stopId];
+        const loadBoards = (ids) => Promise.all(ids.map(async (pid) => {
+          try {
+            return await BkkLib.departureBoard(apiKey, pid, horizon);
+          } catch (_e) {
+            return null;
+          }
+        }));
+        let payloads = await loadBoards(poles);
+        const usedParentOnly = poles.length === 1 && poles[0] === stopId;
+        const span = payloads.reduce((best, data) => {
+          const cur = BkkLib.boardSpanMin(data, now);
+          return {
+            count: best.count + cur.count,
+            spanMin: Math.max(best.spanMin, cur.spanMin)
+          };
+        }, { count: 0, spanMin: 0 });
+        const capped = usedParentOnly && (span.count >= 60 || span.spanMin + 2 < horizon);
+        if (capped) {
+          const discovered = [];
+          payloads.forEach((data) => {
+            const refs = (data && data.data || {}).references || {};
+            const entry = (data && data.data || {}).entry || {};
+            const trips = refs.trips || {};
+            const routes = refs.routes || {};
+            const ids = new Set(entry.routeIds || []);
+            (entry.stopTimes || []).forEach((st) => {
+              const rid = (trips[st.tripId] || {}).routeId;
+              if (rid) ids.add(rid);
+            });
+            ids.forEach((rid) => {
+              const rt = routes[rid] || {};
+              if (!BkkLib.routeMatchesMode(rt, mode)) return;
+              if (!BkkLib.keepFutarCandidate(rt, selected, mode, destKey)) return;
+              if (discovered.indexOf(rid) < 0) discovered.push(rid);
+            });
           });
-          ids.forEach((rid) => {
+          if (discovered.length) {
+            let extra = [];
+            try {
+              extra = await BkkLib.originPoles(apiKey, cache, origin, discovered, destKey || "");
+            } catch (_e) {
+              extra = [];
+            }
+            const fresh = extra.filter((id) => poles.indexOf(id) < 0);
+            if (fresh.length) {
+              poles = poles.concat(fresh);
+              payloads = payloads.concat(await loadBoards(fresh));
+            }
+          }
+        }
+        const seenTrip = /* @__PURE__ */ new Set();
+        payloads.forEach((data) => {
+          if (!data) return;
+          const refs = (data.data || {}).references || {};
+          const routes = refs.routes || {};
+          const trips = refs.trips || {};
+          const times = ((data.data || {}).entry || {}).stopTimes || [];
+          const stops = refs.stops || {};
+          times.forEach((st) => {
+            if (!st.tripId || seenTrip.has(st.tripId)) return;
+            const trip = trips[st.tripId] || {};
+            const rid = trip.routeId;
             const rt = routes[rid] || {};
             if (!BkkLib.routeMatchesMode(rt, mode)) return;
             if (!BkkLib.keepFutarCandidate(rt, selected, mode, destKey)) return;
-            if (discovered.indexOf(rid) < 0) discovered.push(rid);
+            const dep = st.predictedDepartureTime || st.departureTime;
+            if (dep && dep > latest + 60) return;
+            if (dep && !departureStillDue(dep, now)) return;
+            seenTrip.add(st.tripId);
+            const fallbackColor = mode === "volan" ? "F9AB13" : "4477aa";
+            const fallbackText = mode === "volan" ? "000000" : "ffffff";
+            const veh = st.vehicle || {};
+            const loc = BkkLib.vehicleLoc(veh);
+            candidates.push({
+              tripId: st.tripId,
+              label: rt.iconDisplayText || rt.shortName || "?",
+              color: "#" + String(rt.color || fallbackColor).replace("#", ""),
+              text: "#" + String(rt.textColor || fallbackText).replace("#", ""),
+              vehicle: BkkLib.vehicleKind(rt),
+              rawType: String(rt.type || "BUS").toUpperCase(),
+              dep,
+              sched: st.departureTime,
+              delay: st.predictedDepartureTime && st.departureTime ? st.predictedDepartureTime - st.departureTime : 0,
+              head: trip.tripHeadsign || st.stopHeadsign || "",
+              platform: (stops[st.stopId] || {}).platformCode || "",
+              wheelchair: trip.wheelchairAccessible === 1 || trip.wheelchairAccessible === true || st.wheelchairAccessible === true,
+              bikesAllowed: trip.bikesAllowed === 1 || trip.bikesAllowed === true,
+              trainNumber: trip.shortName || trip.tripShortName || BkkLib.trainNumberFromTripId(st.tripId) || "",
+              booking: !!st.mayRequireBooking,
+              lat: loc.lat,
+              lon: loc.lon,
+              vehicleId: veh.vehicleId || "",
+              licensePlate: veh.licensePlate || "",
+              model: veh.model || "",
+              vehicleStatus: veh.status || "",
+              stopDistancePercent: veh.stopDistancePercent
+            });
           });
         });
-        if (discovered.length) {
-          let extra = [];
-          try {
-            extra = await BkkLib.originPoles(apiKey, cache, origin, discovered, destKey || '');
-          } catch (_e) {
-            extra = [];
-          }
-          const fresh = extra.filter((id) => poles.indexOf(id) < 0);
-          if (fresh.length) {
-            poles = poles.concat(fresh);
-            payloads = payloads.concat(await loadBoards(fresh));
-          }
-        }
+        candidates.sort((a, b) => (a.dep || 0) - (b.dep || 0));
+      } catch (err) {
+        if (mode !== "volan" && mode !== "all") throw err;
       }
-      const seenTrip = new Set();
-      payloads.forEach((data) => {
-        if (!data) return;
-        const refs = (data.data || {}).references || {};
-        const routes = refs.routes || {};
-        const trips = refs.trips || {};
-        const times = ((data.data || {}).entry || {}).stopTimes || [];
-        const stops = refs.stops || {};
-        times.forEach((st) => {
-          if (!st.tripId || seenTrip.has(st.tripId)) return;
-          const trip = trips[st.tripId] || {};
-          const rid = trip.routeId;
-          const rt = routes[rid] || {};
-          if (!BkkLib.routeMatchesMode(rt, mode)) return;
-          if (!BkkLib.keepFutarCandidate(rt, selected, mode, destKey)) return;
-          const dep = st.predictedDepartureTime || st.departureTime;
-          if (dep && dep > latest + 60) return;
-          if (dep && !departureStillDue(dep, now)) return;
-          seenTrip.add(st.tripId);
-          const fallbackColor = mode === 'volan' ? 'F9AB13' : '4477aa';
-          const fallbackText = mode === 'volan' ? '000000' : 'ffffff';
-          const veh = st.vehicle || {};
-          const loc = BkkLib.vehicleLoc(veh);
-          candidates.push({
-            tripId: st.tripId,
-            label: rt.iconDisplayText || rt.shortName || '?',
-            color: '#' + String(rt.color || fallbackColor).replace('#', ''),
-            text: '#' + String(rt.textColor || fallbackText).replace('#', ''),
-            vehicle: BkkLib.vehicleKind(rt),
-            rawType: String(rt.type || 'BUS').toUpperCase(),
-            dep: dep,
-            sched: st.departureTime,
-            delay: (st.predictedDepartureTime && st.departureTime)
-              ? (st.predictedDepartureTime - st.departureTime) : 0,
-            head: trip.tripHeadsign || st.stopHeadsign || '',
-            platform: (stops[st.stopId] || {}).platformCode || '',
-            wheelchair: trip.wheelchairAccessible === 1
-              || trip.wheelchairAccessible === true
-              || st.wheelchairAccessible === true,
-            bikesAllowed: trip.bikesAllowed === 1 || trip.bikesAllowed === true,
-            trainNumber: trip.shortName || trip.tripShortName
-              || BkkLib.trainNumberFromTripId(st.tripId) || '',
-            booking: !!st.mayRequireBooking,
-            lat: loc.lat,
-            lon: loc.lon,
-            vehicleId: veh.vehicleId || '',
-            licensePlate: veh.licensePlate || '',
-            model: veh.model || '',
-            vehicleStatus: veh.status || '',
-            stopDistancePercent: veh.stopDistancePercent,
+      let sure = [];
+      let maybe = [];
+      const headHitsDest = (row) => !!(dest && (BkkLib.nameEq(row.head, dest.name) || BkkLib.nameEq(row.head, dest.key)));
+      if (destKey && candidates.length) {
+        candidates.forEach((row) => {
+          if (headHitsDest(row)) sure.push(row);
+          else maybe.push(row);
+        });
+        sure = sure.slice(0, maxRows);
+      } else {
+        sure = candidates.slice(0, maxRows);
+      }
+      const asFutar = (list) => list.map((row) => Object.assign({ travel: null }, row));
+      const early = asFutar(sure);
+      if (destKey && maybe.length && sure.length < maxRows && typeof opts.armThroughCheck === "function") {
+        opts.armThroughCheck(() => {
+          const pending = (async () => {
+            const picked = sure.slice();
+            for (let i = 0; i < maybe.length && picked.length < maxRows; i += 16) {
+              const chunk = maybe.slice(i, i + 16);
+              const flags = await Promise.all(chunk.map((row) => BkkLib.tripGoesTo(apiKey, cache, row.tripId, origin, destKey)));
+              flags.forEach((ok, j) => {
+                if (ok) picked.push(chunk[j]);
+              });
+            }
+            const full = asFutar(picked.slice(0, maxRows));
+            if (typeof opts.onFutarUpdate === "function") opts.onFutarUpdate(full);
+          })();
+          pending.catch(() => {
+            if (typeof opts.onFutarUpdate === "function") opts.onFutarUpdate(asFutar(sure));
           });
         });
-      });
-      candidates.sort((a, b) => (a.dep || 0) - (b.dep || 0));
-    } catch (err) {
-      if (mode !== 'volan' && mode !== 'all') throw err;
-    }
-    let sure = [];
-    let maybe = [];
-    /* A matching headsign is the destination itself, so those rows skip the
-       per-trip request. Through-routes still need trip-details, but that
-       check must not hold the first timetable paint. */
-    const headHitsDest = (row) => !!(dest && (
-      BkkLib.nameEq(row.head, dest.name) || BkkLib.nameEq(row.head, dest.key)
-    ));
-    if (destKey && candidates.length) {
-      candidates.forEach((row) => {
-        if (headHitsDest(row)) sure.push(row);
-        else maybe.push(row);
-      });
-      sure = sure.slice(0, maxRows);
-    } else {
-      sure = candidates.slice(0, maxRows);
-    }
-    const asFutar = (list) => list.map((row) => Object.assign({ travel: null }, row));
-    const early = asFutar(sure);
-    if (destKey && maybe.length && sure.length < maxRows && typeof opts.armThroughCheck === 'function') {
-      opts.armThroughCheck(() => {
-        const pending = (async () => {
-          const picked = sure.slice();
-          for (let i = 0; i < maybe.length && picked.length < maxRows; i += 16) {
-            const chunk = maybe.slice(i, i + 16);
-            const flags = await Promise.all(chunk.map((row) => (
-              BkkLib.tripGoesTo(apiKey, cache, row.tripId, origin, destKey)
-            )));
-            flags.forEach((ok, j) => { if (ok) picked.push(chunk[j]); });
-          }
-          const full = asFutar(picked.slice(0, maxRows));
-          if (typeof opts.onFutarUpdate === 'function') opts.onFutarUpdate(full);
-        })();
-        pending.catch(() => {
-          if (typeof opts.onFutarUpdate === 'function') opts.onFutarUpdate(asFutar(sure));
-        });
-      });
-    }
-    return early;
+      }
+      return early;
     })() : Promise.resolve([]);
     const gtfsTask = (async () => {
       let extraVolan = [];
       let extraCity = [];
-      if (mode === 'volan' || mode === 'all') {
+      if (mode === "volan" || mode === "all") {
         try {
           extraVolan = await BkkLib.volanDepartures(stopId, dest, opts.originName, horizon);
-          if (mode === 'all' && selected.size) {
-            extraVolan = extraVolan.filter((row) => selected.has('gtfs:' + row.label));
+          if (mode === "all" && selected.size) {
+            extraVolan = extraVolan.filter((row) => selected.has("gtfs:" + row.label));
           }
         } catch (err) {
-          if (mode !== 'all') throw err;
+          if (mode !== "all") throw err;
         }
       }
-      if (mode === 'all') {
+      if (mode === "all") {
         try {
           const idx = await BkkLib.cityIndex();
-          const cityId = BkkLib.cityOpId(idx, { id: stopId, name: opts.originName || '' });
+          const cityId = BkkLib.cityOpId(idx, { id: stopId, name: opts.originName || "" });
           if (cityId) {
             extraCity = await BkkLib.cityDepartures(stopId, dest, opts.originName, cityId, horizon);
           }
-        } catch (_e) { /* city index optional */ }
+        } catch (_e) {
+        }
       }
-      if ((extraVolan.length || extraCity.length) && typeof opts.onPartial === 'function') {
+      if ((extraVolan.length || extraCity.length) && typeof opts.onPartial === "function") {
         let partial = BkkLib.mergeVolanRows(extraVolan, rows, maxRows);
         partial = BkkLib.mergeVolanRows(extraCity, partial, maxRows);
         opts.onPartial(partial);
@@ -4646,45 +4586,48 @@ const BkkLib = {
     }
     if (opts.deferGps) return rows;
     return BkkLib.attachCoachGps(opts.hass, rows);
-  },
+  }
+});
 
+// src/lib/vehicles.js
+Object.assign(BkkLib, {
   trainNumberFromTripId(tripId) {
-    const s = String(tripId || '');
-    /* BKK_90681_106 is train 9068 (trailing 1 on a 5-digit body).
-       West/south IC trips are BKK_8661_47 for train 866, BKK_8741_47 for 874.
-       Suburban 4xxx ids (BKK_4541_108) must keep all four digits. */
+    const s = String(tripId || "");
     const long = s.match(/^BKK_([89]\d{3})1(?:_|$)/);
     if (long) return long[1];
     const ic = s.match(/^BKK_([89]\d{2})1(?:_|$)/);
     if (ic) return ic[1];
     const m = s.match(/^BKK_(\d+)(?:_|$)/);
-    return m ? m[1] : '';
+    return m ? m[1] : "";
   },
   isFutarTripId(tripId) {
-    const t = String(tripId || '');
-    return !!t && !/^(elvira:|gtfs:|motis:)/.test(t);
+    const t2 = String(tripId || "");
+    return !!t2 && !/^(elvira:|gtfs:|motis:)/.test(t2);
   },
   emmaTrainNumber(text) {
-    const s = String(text || '').trim();
+    const s = String(text || "").trim();
     const lead = s.match(/^(\d+)/);
-    if (lead) return lead[1].replace(/^0+/, '') || lead[1];
+    if (lead) return lead[1].replace(/^0+/, "") || lead[1];
     const mid = s.match(/\b(\d{3,5})\b/);
-    return mid ? (mid[1].replace(/^0+/, '') || mid[1]) : '';
+    return mid ? mid[1].replace(/^0+/, "") || mid[1] : "";
   },
   matchEmmaVehicle(row, vehicle) {
     if (!row || !vehicle) return false;
     const num = BkkLib.rowTrainNumber(row);
     const trip = vehicle.trip || {};
-    const n = BkkLib.emmaTrainNumber(trip.tripShortName || vehicle.label || '');
+    const n = BkkLib.emmaTrainNumber(trip.tripShortName || vehicle.label || "");
     if (num && n && num === n) return true;
-    const name = String(row.label || '').trim().toUpperCase();
+    const name = String(row.label || "").trim().toUpperCase();
     if (!name || name.length < 3 || BkkLib.genericRailLabel(name)) return false;
     const blob = [
-      trip.tripShortName, trip.tripHeadsign,
-      (trip.route || {}).longName, (trip.route || {}).shortName, vehicle.label,
-    ].join(' ').toUpperCase();
-    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (!new RegExp('(?:^|[^A-Z0-9])' + esc + '(?:[^A-Z0-9]|$)').test(blob)) return false;
+      trip.tripShortName,
+      trip.tripHeadsign,
+      (trip.route || {}).longName,
+      (trip.route || {}).shortName,
+      vehicle.label
+    ].join(" ").toUpperCase();
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (!new RegExp("(?:^|[^A-Z0-9])" + esc + "(?:[^A-Z0-9]|$)").test(blob)) return false;
     return !num || !n || num === n;
   },
   applyEmmaPositions(rows, vehicles) {
@@ -4710,29 +4653,28 @@ const BkkLib = {
     const lat = Number(row && row.lat);
     const lon = Number(row && row.lon);
     if (Number.isFinite(lat) && Number.isFinite(lon)) return false;
-    return !BkkLib.isFutarTripId((row && row.tripId) || '');
+    return !BkkLib.isFutarTripId(row && row.tripId || "");
   },
   coachRouteKeys(route) {
-    const raw = String(route || '').trim().toUpperCase();
+    const raw = String(route || "").trim().toUpperCase();
     const keys = [];
     const add = (value) => {
-      const key = String(value || '');
+      const key = String(value || "");
       if (key && keys.indexOf(key) < 0) keys.push(key);
     };
     add(raw);
-    const body = raw.indexOf('SZ') === 0 ? raw.slice(2) : raw;
+    const body = raw.indexOf("SZ") === 0 ? raw.slice(2) : raw;
     add(body);
-    const stripped = body.replace(/^0+/, '');
+    const stripped = body.replace(/^0+/, "");
     add(stripped);
-    if (stripped) add('SZ' + stripped);
+    if (stripped) add("SZ" + stripped);
     return keys;
   },
   applyCoachGps(rows, vehicles, nowSec) {
     const list = Array.isArray(rows) ? rows : [];
     const vehs = Array.isArray(vehicles) ? vehicles : [];
-    const byRoute = new Map();
-    const fold = (value) => String(value || '').toLowerCase()
-      .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '');
+    const byRoute = /* @__PURE__ */ new Map();
+    const fold = (value) => String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "");
     vehs.forEach((vehicle) => {
       if (!vehicle) return;
       if (!BkkLib.mapGpsLatLon(vehicle.lat, vehicle.lon)) return;
@@ -4741,13 +4683,13 @@ const BkkLib = {
         byRoute.get(key).push(vehicle);
       });
     });
-    const now = Number.isFinite(Number(nowSec)) ? Number(nowSec) : Math.floor(Date.now() / 1000);
+    const now = Number.isFinite(Number(nowSec)) ? Number(nowSec) : Math.floor(Date.now() / 1e3);
     const rowHead = (row) => fold(row.headsign || row.head);
     const vehicleClassOk = (row, vehicle) => {
-      const route = String(vehicle.route || '').trim().toUpperCase();
-      const kind = String(row.vehicle || '').toLowerCase();
-      if (route.indexOf('SZ') === 0) return kind === 'bus';
-      if (/^\d{4}$/.test(route)) return kind === 'coach';
+      const route = String(vehicle.route || "").trim().toUpperCase();
+      const kind = String(row.vehicle || "").toLowerCase();
+      if (route.indexOf("SZ") === 0) return kind === "bus";
+      if (/^\d{4}$/.test(route)) return kind === "coach";
       return true;
     };
     const pairOk = (row, vehicle) => {
@@ -4761,11 +4703,11 @@ const BkkLib = {
       }
       return false;
     };
-    const groups = new Map();
+    const groups = /* @__PURE__ */ new Map();
     list.forEach((row, idx) => {
-      if (!row || !/^(gtfs:|motis:)/.test(String(row.tripId || ''))) return;
+      if (!row || !/^(gtfs:|motis:)/.test(String(row.tripId || ""))) return;
       if (BkkLib.mapGpsLatLon(row.lat, row.lon)) return;
-      let key = '';
+      let key = "";
       BkkLib.coachRouteKeys(row.label).some((candidate) => {
         if (!byRoute.has(candidate)) return false;
         key = candidate;
@@ -4777,9 +4719,9 @@ const BkkLib = {
     });
     groups.forEach((indexes, key) => {
       const uniq = [];
-      const seen = new Set();
+      const seen = /* @__PURE__ */ new Set();
       byRoute.get(key).forEach((vehicle) => {
-        const id = String(vehicle.tripId || (vehicle.lat + ',' + vehicle.lon));
+        const id = String(vehicle.tripId || vehicle.lat + "," + vehicle.lon);
         if (seen.has(id)) return;
         seen.add(id);
         uniq.push(vehicle);
@@ -4793,12 +4735,12 @@ const BkkLib = {
           const vehicleHead = fold(vehicle.head);
           const headMatch = !!(head && vehicleHead && (head.indexOf(vehicleHead) >= 0 || vehicleHead.indexOf(head) >= 0));
           const distance = Math.abs((dep || now) - now);
-          pairs.push({ idx: idx, vi: vi, score: (headMatch ? 0 : 1) * 1e12 + distance });
+          pairs.push({ idx, vi, score: (headMatch ? 0 : 1) * 1e12 + distance });
         });
       });
       pairs.sort((a, b) => a.score - b.score);
-      const usedRow = new Set();
-      const usedVehicle = new Set();
+      const usedRow = /* @__PURE__ */ new Set();
+      const usedVehicle = /* @__PURE__ */ new Set();
       pairs.forEach((pair) => {
         if (usedRow.has(pair.idx) || usedVehicle.has(pair.vi)) return;
         usedRow.add(pair.idx);
@@ -4813,35 +4755,33 @@ const BkkLib = {
   },
   async attachCoachGps(hass, rows) {
     const list = Array.isArray(rows) ? rows : [];
-    const needs = list.some((row) => row
-      && /^(gtfs:|motis:)/.test(String(row.tripId || ''))
-      && !BkkLib.mapGpsLatLon(row.lat, row.lon));
+    const needs = list.some((row) => row && /^(gtfs:|motis:)/.test(String(row.tripId || "")) && !BkkLib.mapGpsLatLon(row.lat, row.lon));
     if (!hass || !needs) return list;
     return BkkLib.applyCoachGps(list, await BkkLib.coachPositions(hass));
   },
   keepFutarCandidate(rt, selected, mode, destKey) {
-    if (!selected || !selected.size || mode === 'volan') return true;
-    if (destKey && (mode === 'bkk' || mode === 'mav' || mode === 'all')) return true;
-    const rid = (rt && rt.id) || '';
+    if (!selected || !selected.size || mode === "volan") return true;
+    if (destKey && (mode === "bkk" || mode === "mav" || mode === "all")) return true;
+    const rid = rt && rt.id || "";
     return selected.has(rid);
   },
   rowTimeKey(row) {
-    const label = String((row && row.label) || '').toUpperCase();
-    const min = Math.round(Number((row && (row.sched || row.dep)) || 0) / 60);
-    return label + '|' + min;
+    const label = String(row && row.label || "").toUpperCase();
+    const min = Math.round(Number(row && (row.sched || row.dep) || 0) / 60);
+    return label + "|" + min;
   },
   genericRailLabel(label) {
-    return /^(IC|EC|IR|EX|EN|RJX|S|SZ)$/i.test(String(label || '').trim());
+    return /^(IC|EC|IR|EX|EN|RJX|S|SZ)$/i.test(String(label || "").trim());
   },
   suburbanLineLabel(label) {
-    return /^[SGZ]\d/i.test(String(label || '').trim());
+    return /^[SGZ]\d/i.test(String(label || "").trim());
   },
   /* True when the row's visible jelzés is a MÁV train number (16907) or
      generic EX/EN plus a long number. These stay on the hop; merge them
      onto a branded suburban/named row when they are the same departure. */
   numberedRailBadge(row) {
     if (!row || !BkkLib.isTrainRow(row)) return false;
-    const label = String(row.label || '').trim();
+    const label = String(row.label || "").trim();
     if (/^\d+$/.test(label)) return true;
     if (/^(EX|EN)$/i.test(label) && /^\d{4,}$/.test(BkkLib.rowTrainNumber(row))) return true;
     return false;
@@ -4849,87 +4789,87 @@ const BkkLib = {
   matchFutarStopTime(row, st, trip, rt) {
     if (!row || !st || !st.tripId) return false;
     const num = BkkLib.rowTrainNumber(row);
-    const n = String((trip && (trip.shortName || trip.tripShortName)) || '').trim().replace(/^0+/, '')
-      || BkkLib.trainNumberFromTripId(st.tripId);
+    const n = String(trip && (trip.shortName || trip.tripShortName) || "").trim().replace(/^0+/, "") || BkkLib.trainNumberFromTripId(st.tripId);
     if (num && n && num === n) return true;
     const rowMin = Math.round(Number(row.sched || row.dep || 0) / 60);
     const stMin = Math.round(Number(
-      st.departureTime || st.predictedDepartureTime || st.arrivalTime || st.predictedArrivalTime || 0,
+      st.departureTime || st.predictedDepartureTime || st.arrivalTime || st.predictedArrivalTime || 0
     ) / 60);
     if (!rowMin || !stMin || Math.abs(rowMin - stMin) > 1) return false;
-    const rl = String(row.label || '').toUpperCase();
-    const fl = String((rt && (rt.iconDisplayText || rt.shortName)) || '').toUpperCase();
+    const rl = String(row.label || "").toUpperCase();
+    const fl = String(rt && (rt.iconDisplayText || rt.shortName) || "").toUpperCase();
     if (rl && fl && rl === fl) return true;
-    if (rl && fl && BkkLib.genericRailLabel(rl) !== BkkLib.genericRailLabel(fl)
-        && (BkkLib.genericRailLabel(rl) || BkkLib.genericRailLabel(fl))) {
+    if (rl && fl && BkkLib.genericRailLabel(rl) !== BkkLib.genericRailLabel(fl) && (BkkLib.genericRailLabel(rl) || BkkLib.genericRailLabel(fl))) {
       return true;
     }
     return false;
   },
   async futarTripIdForRow(apiKey, cache, row, stopId, extraStopId) {
-    const tid = String((row && row.tripId) || '');
+    const tid = String(row && row.tripId || "");
     if (BkkLib.isFutarTripId(tid)) return tid;
     const num = BkkLib.rowTrainNumber(row);
     const wantKey = BkkLib.rowTimeKey(row);
-    if (!apiKey || (!num && !wantKey)) return '';
+    if (!apiKey || !num && !wantKey) return "";
     const stops = [];
     [stopId, extraStopId].forEach((id) => {
       if (id && stops.indexOf(id) < 0) stops.push(id);
     });
-    if (!stops.length) return '';
-    const key = 'futarTrip:' + stops.join(',') + ':' + (num || wantKey);
+    if (!stops.length) return "";
+    const key = "futarTrip:" + stops.join(",") + ":" + (num || wantKey);
     const hit = BkkLib._cached(cache, key);
-    if (typeof hit === 'string') return hit;
+    if (typeof hit === "string") return hit;
     try {
       for (let s = 0; s < stops.length; s++) {
-        const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
+        const data = await BkkLib.fetch(apiKey, "arrivals-and-departures-for-stop.json", {
           stopId: stops[s],
-          minutesAfter: '360',
-          minutesBefore: '180',
-          includeReferences: 'true',
-          includeVehicleFromTrip: 'true',
+          minutesAfter: "360",
+          minutesBefore: "180",
+          includeReferences: "true",
+          includeVehicleFromTrip: "true"
         });
-        const refs = ((data.data || {}).references) || {};
+        const refs = (data.data || {}).references || {};
         const trips = refs.trips || {};
         const routes = refs.routes || {};
-        const times = (((data.data || {}).entry) || {}).stopTimes || [];
+        const times = ((data.data || {}).entry || {}).stopTimes || [];
         for (let i = 0; i < times.length; i++) {
           const st = times[i];
-          const trip = trips[(st && st.tripId) || ''] || {};
+          const trip = trips[st && st.tripId || ""] || {};
           const rt = routes[trip.routeId] || {};
           if (BkkLib.matchFutarStopTime(row, st, trip, rt)) {
             return BkkLib._store(cache, key, st.tripId);
           }
         }
       }
-      return BkkLib._store(cache, key, '');
+      return BkkLib._store(cache, key, "");
     } catch (_e) {
-      return '';
+      return "";
     }
   },
   platformFromText(text) {
-    const m = String(text || '').match(PLATFORM_IN_HEAD);
-    return m ? m[1] : '';
+    const m = String(text || "").match(PLATFORM_IN_HEAD);
+    return m ? m[1] : "";
   },
   stripPlatform(text) {
-    return String(text || '').replace(PLATFORM_STRIP, '').replace(/\s+/g, ' ').trim();
+    return String(text || "").replace(PLATFORM_STRIP, "").replace(/\s+/g, " ").trim();
   },
   collectHassVehicles(hass) {
     const out = [];
-    const states = (hass && hass.states) || {};
+    const states = hass && hass.states || {};
     Object.keys(states).forEach((eid) => {
-      if (eid.indexOf('sensor.') !== 0) return;
+      if (eid.indexOf("sensor.") !== 0) return;
       const vehs = (states[eid].attributes || {}).vehicles;
       if (!Array.isArray(vehs)) return;
-      vehs.forEach((v) => { if (v) out.push(v); });
+      vehs.forEach((v) => {
+        if (v) out.push(v);
+      });
     });
     return out;
   },
   matchHassVehicle(pool, row) {
-    const trip = String(row.tripId || '');
-    const num = String(row.trainNumber || BkkLib.trainNumberFromTripId(row.tripId) || '');
+    const trip = String(row.tripId || "");
+    const num = String(row.trainNumber || BkkLib.trainNumberFromTripId(row.tripId) || "");
     const hm = BkkLib.hm(row.sched || row.dep);
-    const label = String(row.label || '').toUpperCase();
+    const label = String(row.label || "").toUpperCase();
     let best = null;
     let bestScore = 0;
     pool.forEach((v) => {
@@ -4937,7 +4877,7 @@ const BkkLib = {
       if (trip && v.tripId && String(v.tripId) === trip) s += 5;
       if (num && v.trainNumber && String(v.trainNumber) === num) s += 3;
       if (hm && v.attime && String(v.attime) === hm) s += 2;
-      const vr = String(v.routeid || '').toUpperCase();
+      const vr = String(v.routeid || "").toUpperCase();
       if (label && vr && label === vr) s += 1;
       if (s > bestScore) {
         bestScore = s;
@@ -4983,91 +4923,819 @@ const BkkLib = {
       label: v.label || v.trainNumber,
       trip: {
         tripShortName: String(
-          (v.trip && (v.trip.tripShortName || v.trip.shortName))
-          || v.trainNumber || v.shortName || v.label || '',
-        ),
-      },
+          v.trip && (v.trip.tripShortName || v.trip.shortName) || v.trainNumber || v.shortName || v.label || ""
+        )
+      }
     })));
     return rows;
   },
   applyRailBadge(row) {
     if (!row) return row;
-    let key = String(row.label || '').trim().toUpperCase().normalize('NFC');
-    if (key === 'S') {
-      row.label = 'Sz';
-      key = 'SZ';
+    let key = String(row.label || "").trim().toUpperCase().normalize("NFC");
+    if (key === "S") {
+      row.label = "Sz";
+      key = "SZ";
     }
     let badge = BKK_RAIL_BADGE[key];
-    if (!badge && BkkLib.isTrainRow(row) && key
-        && !BkkLib.suburbanLineLabel(key)
-        && !BkkLib.genericRailLabel(key)
-        && !/^\d+$/.test(key)) {
+    if (!badge && BkkLib.isTrainRow(row) && key && !BkkLib.suburbanLineLabel(key) && !BkkLib.genericRailLabel(key) && !/^\d+$/.test(key)) {
       badge = BKK_RAIL_BADGE.IC;
     }
     if (!badge) return row;
-    const cur = String(row.color || '').replace('#', '').toLowerCase();
-    if (!cur || cur === '4477aa') {
-      row.color = '#' + badge[0];
-      row.text = '#' + badge[1];
+    const cur = String(row.color || "").replace("#", "").toLowerCase();
+    if (!cur || cur === "4477aa") {
+      row.color = "#" + badge[0];
+      row.text = "#" + badge[1];
     }
     return row;
   },
-
   /* One departure in the shape the card renders: display strings plus the raw
      epoch seconds, so the countdown can tick without refetching. */
   asRow(r, destName, lang) {
     BkkLib.applyRailBadge(r);
     const dep = r.dep;
-    let type = String(r.rawType || r.vehicle || 'BUS').toUpperCase();
-    if (type.indexOf('SUBURBAN') >= 0 || type === 'TRAIN' || type === 'RAILWAY') type = 'RAIL';
-    let head = String(r.head || destName || '').trim();
+    let type = String(r.rawType || r.vehicle || "BUS").toUpperCase();
+    if (type.indexOf("SUBURBAN") >= 0 || type === "TRAIN" || type === "RAILWAY") type = "RAIL";
+    let head = String(r.head || destName || "").trim();
     const plat = r.platform ? String(r.platform) : BkkLib.platformFromText(head);
     head = BkkLib.stripPlatform(head);
     const lat = Number(r.lat);
     const lon = Number(r.lon);
     const gps = BkkLib.mapGpsLatLon(lat, lon);
     const hasGps = !!gps;
-    const gtfs = /^(gtfs:|elvira:|motis:)/.test(String(r.tripId || ''));
-    const shape = Array.isArray(r.shape) ? r.shape : undefined;
+    const gtfs = /^(gtfs:|elvira:|motis:)/.test(String(r.tripId || ""));
+    const shape = Array.isArray(r.shape) ? r.shape : void 0;
     return {
-      type: type,
+      type,
       icon: vehicleIcon(type),
       label: r.label,
       headsign: head,
-      tripId: r.tripId || '',
+      tripId: r.tripId || "",
       depTs: dep || 0,
       schedTs: r.sched || dep || 0,
       attime: BkkLib.hm(r.sched || dep),
       predicted_attime: BkkLib.hm(dep),
       wheelchair: !!r.wheelchair,
       bikesAllowed: !!r.bikesAllowed,
-      color: String(r.color || '').replace('#', ''),
-      textcolor: String(r.text || r.textcolor || '').replace('#', ''),
-      platform: plat || '',
-      trainNumber: r.trainNumber || '',
+      color: String(r.color || "").replace("#", ""),
+      textcolor: String(r.text || r.textcolor || "").replace("#", ""),
+      platform: plat || "",
+      trainNumber: r.trainNumber || "",
       delay: Number(r.delay || 0),
       booking: !!r.booking,
       travelMin: r.travel,
       lat: hasGps ? gps[0] : null,
       lon: hasGps ? gps[1] : null,
-      hasGps: hasGps,
-      hasLocation: hasGps || (!gtfs && !!r.tripId) || !!(shape && shape.length >= 2)
-        || /^elvira:/i.test(String(r.tripId || '')),
-      shape: shape,
-      vehicle: r.vehicle || '',
-      vehicleId: r.vehicleId || '',
-      licensePlate: r.licensePlate || '',
-      model: r.model || '',
-      vehicleStatus: r.vehicleStatus || '',
-      stopDistancePercent: r.stopDistancePercent,
+      hasGps,
+      hasLocation: hasGps || !gtfs && !!r.tripId || !!(shape && shape.length >= 2) || /^elvira:/i.test(String(r.tripId || "")),
+      shape,
+      vehicle: r.vehicle || "",
+      vehicleId: r.vehicleId || "",
+      licensePlate: r.licensePlate || "",
+      model: r.model || "",
+      vehicleStatus: r.vehicleStatus || "",
+      stopDistancePercent: r.stopDistancePercent
     };
-  },
-};
+  }
+});
 
-class BKKHopCard extends HTMLElement {
+// src/editor.js
+var BKKHopCardEditor = class extends HTMLElement {
   constructor() {
     super();
-    this.attachShadow({ mode: 'open' });
+    this._config = { routeIds: [] };
+    this._built = false;
+    this._searchTimer = null;
+    this._destTimer = null;
+    this._loadingKey = false;
+    this._cache = {};
+    this._dests = [];
+    this._destRoutes = {};
+    this._loadedStop = "";
+    this._destsLoading = false;
+    this._keyOk = null;
+    this._probingKey = false;
+    this._keyDirty = false;
+    this._userEditedKey = false;
+    this._keyReveal = false;
+    this._searchSeq = 0;
+    this._destSeq = 0;
+    this._citySeq = 0;
+  }
+  disconnectedCallback() {
+    if (this._searchTimer) {
+      clearTimeout(this._searchTimer);
+      this._searchTimer = null;
+    }
+    if (this._destTimer) {
+      clearTimeout(this._destTimer);
+      this._destTimer = null;
+    }
+  }
+  setConfig(config) {
+    this._config = Object.assign({ routeIds: [] }, config || {});
+    if (!this._cache) this._cache = {};
+    if (!this._dests) this._dests = [];
+    if (!this._destRoutes) this._destRoutes = {};
+    if (this._config.volanIndex) setVolanIndexUrl(this._config.volanIndex);
+    if (this._config.cityIndex) setCityIndexUrl(this._config.cityIndex);
+    if (this._config.mavIndex) setMavIndexUrl(this._config.mavIndex);
+    if (!this._built) this._build();
+    this._syncLang();
+    this._syncTexts();
+    this._syncName();
+    this._syncStopLabel();
+    this._syncDestLabel();
+    this._syncMinutesAfter();
+    this._syncApiKey();
+    this._syncMode();
+    this._probeKey();
+    if (this._config.stopId && (this._apiKey() || this._mode() === "volan" || this._mode() === "helyi") && this._loadedStop !== this._config.stopId) {
+      this._loadDests();
+    }
+  }
+  set hass(hass) {
+    const first = !this._hass;
+    this._hass = hass;
+    BkkLib._hass = hass;
+    if (first && this._built && this._lang() !== resolveLang(this._config.language, null)) {
+      this._syncTexts();
+      this._syncMode();
+    }
+    const viaIntegration = BkkLib.integrationHasKey(hass);
+    if (!this._userEditedKey && !this._config.apiKey && !this._loadingKey && !viaIntegration) this._fillKey();
+    else if (this._apiKey()) this._probeKey();
+  }
+  _apiKey() {
+    return BkkLib.effectiveApiKey(this._config, this._hass);
+  }
+  _lang() {
+    return resolveLang(this._config.language, this._hass);
+  }
+  _mode() {
+    return BkkLib.mode(this._config);
+  }
+  _build() {
+    this._built = true;
+    this.innerHTML = `
+      <style>
+        .card-config { padding: 8px 0 4px; }
+        .card-config .f { margin-bottom: 18px; }
+        .card-config label {
+          display: block; font-weight: 500; margin-bottom: 8px;
+          color: var(--primary-text-color);
+        }
+        .card-config input, .card-config select {
+          width: 100%; box-sizing: border-box; font: inherit;
+          background: var(--mdc-text-field-fill-color, var(--secondary-background-color, rgba(128,128,128,.12)));
+          color: var(--primary-text-color);
+          border: 0; border-bottom: 1px solid var(--divider-color);
+          border-radius: 4px 4px 0 0; padding: 12px 12px 10px;
+        }
+        .card-config .hint { font-size: 12px; color: var(--secondary-text-color); margin: 6px 0 0; }
+        .card-config .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+        .card-config .chip.on {
+          color: var(--text-primary-color, #fff);
+          background: var(--primary-color);
+          border-color: var(--primary-color);
+        }
+        .card-config .hit {
+          display: block; width: 100%; text-align: left; font: inherit;
+          background: transparent; color: var(--primary-text-color);
+          border: 0; border-bottom: 1px solid var(--divider-color);
+          padding: 10px 8px; cursor: pointer;
+        }
+        .card-config .hit:hover { background: var(--secondary-background-color); }
+        .card-config .list { max-height: 200px; overflow: auto; }
+        .card-config .picked { font-weight: 600; margin-top: 6px; }
+        .card-config .err { color: var(--error-color, #e66); font-size: 12px; margin-top: 8px; }
+        .card-config .switch {
+          display: flex; align-items: center; gap: 10px; font-weight: 500;
+        }
+        .card-config .switch input { width: auto; margin: 0; }
+        .card-config .row { display: flex; gap: 18px; flex-wrap: wrap; }
+        .card-config .row .switch { margin-right: 8px; }
+        .card-config a { color: var(--primary-color); }
+      </style>
+      <div class="card-config">
+        <div class="f">
+          <label id="lblLang"></label>
+          <select id="lang">
+            <option value="auto"></option>
+            <option value="hu"></option>
+            <option value="en"></option>
+          </select>
+        </div>
+        <div class="f" id="apiKeyWrap">
+          <label id="lblApiKey"></label>
+          <input id="apiKey" type="text" autocomplete="off">
+          <div class="hint"><span id="hintApiKey"></span>
+            <a href="https://opendata.bkk.hu/data-sources" target="_blank" rel="noopener">opendata.bkk.hu/data-sources</a>
+          </div>
+        </div>
+        <div class="f" id="apiKeyOkWrap" style="display:none">
+          <div class="hint"><span id="apiKeyOkText"></span>
+            <a href="#" id="apiKeyEdit"></a>
+          </div>
+        </div>
+        <div class="f">
+          <label id="lblName"></label>
+          <input id="name" type="text" placeholder="Hungarian transport">
+        </div>
+        <div class="f">
+          <div class="row" id="modeSwitches">
+            <label class="switch"><input id="mav" type="checkbox"> MÁV</label>
+            <label class="switch"><input id="volan" type="checkbox"> Volán</label>
+            <label class="switch"><input id="helyi" type="checkbox"> Helyi</label>
+          </div>
+          <div class="hint" id="modeHint"></div>
+        </div>
+        <div class="f" id="cityWrap" style="display:none">
+          <label id="lblCity"></label>
+          <select id="city"></select>
+        </div>
+        <div class="f">
+          <label id="lblStop"></label>
+          <input id="q" type="search">
+          <div class="chips" id="fav"></div>
+          <div class="picked" id="stopPicked"></div>
+          <div class="list" id="hits"></div>
+        </div>
+        <div class="f">
+          <label id="lblDest"></label>
+          <input id="dq" type="search">
+          <div class="picked" id="destPicked"></div>
+          <div class="list" id="destHits"></div>
+        </div>
+        <div class="f">
+          <label id="lblMinutesAfter"></label>
+          <select id="minutesAfter"></select>
+          <div class="chips" id="minutesAfterChips"></div>
+          <div class="hint" id="hintMinutesAfter"></div>
+        </div>
+        <div class="err" id="err"></div>
+      </div>
+    `;
+    this._el("lang").addEventListener("change", (ev) => {
+      this._emit({ language: ev.target.value });
+      this._syncTexts();
+      this._syncMode();
+      this._paintDestHits(this._el("dq") ? this._el("dq").value.trim() : "");
+    });
+    this._el("name").addEventListener("input", (ev) => {
+      this._emit({ name: ev.target.value });
+    });
+    this._el("apiKey").addEventListener("input", () => {
+      this._keyDirty = true;
+      this._userEditedKey = true;
+    });
+    this._el("apiKey").addEventListener("change", (ev) => {
+      this._keyDirty = false;
+      this._userEditedKey = true;
+      this._keyOk = null;
+      this._probedKey = "";
+      this._error("");
+      this._emit({ apiKey: ev.target.value.trim() });
+      this._probeKey();
+    });
+    this._el("apiKeyEdit").addEventListener("click", (ev) => {
+      ev.preventDefault();
+      this._keyReveal = true;
+      this._syncApiKey();
+      const el = this._el("apiKey");
+      if (el) el.focus();
+    });
+    this._el("mav").addEventListener("change", () => this._onModeToggle("mav"));
+    this._el("volan").addEventListener("change", () => this._onModeToggle("volan"));
+    this._el("helyi").addEventListener("change", () => this._onModeToggle("helyi"));
+    this._el("city").addEventListener("change", (ev) => {
+      this._emit({
+        city: ev.target.value,
+        stopId: "",
+        stopName: "",
+        destKey: "",
+        destName: "",
+        routeIds: []
+      });
+      this._dests = [];
+      this._loadedStop = "";
+      this._syncStopLabel();
+      this._syncDestLabel();
+    });
+    this._el("q").addEventListener("input", () => {
+      clearTimeout(this._searchTimer);
+      this._searchTimer = setTimeout(() => this._search(this._el("q").value.trim(), "origin"), 280);
+    });
+    this._el("dq").addEventListener("input", () => {
+      clearTimeout(this._destTimer);
+      this._destTimer = setTimeout(() => this._search(this._el("dq").value.trim(), "dest"), 280);
+    });
+    this._el("dq").addEventListener("focus", () => {
+      this._search(this._el("dq").value.trim(), "dest");
+    });
+    this._el("minutesAfter").addEventListener("change", (ev) => {
+      const next = clampMinutesAfter(ev.target.value);
+      if (next === clampMinutesAfter(this._config.minutesAfter)) {
+        this._syncMinutesAfter();
+        return;
+      }
+      this._emit({ minutesAfter: next });
+    });
+    this._paintFav();
+  }
+  _el(id) {
+    return this.querySelector("#" + id);
+  }
+  /* The editor lives in HA's shadow tree. document.activeElement is the host,
+     so walking only shadowRoots never reaches these light-DOM inputs. */
+  _focusedEl() {
+    try {
+      return this.querySelector(":focus");
+    } catch (_e) {
+      return null;
+    }
+  }
+  _isEditing(el) {
+    if (!el) return false;
+    const focused = this._focusedEl();
+    if (focused === el) return true;
+    if (focused && el.contains && el.contains(focused)) return true;
+    try {
+      if (typeof el.matches === "function" && el.matches(":focus, :focus-within")) return true;
+    } catch (_e) {
+    }
+    return false;
+  }
+  _syncName() {
+    const el = this._el("name");
+    if (!el || this._isEditing(el)) return;
+    el.value = this._config.name || "";
+  }
+  _syncStopLabel() {
+    const el = this._el("stopPicked");
+    if (el) el.textContent = this._config.stopName || "";
+    const q = this._el("q");
+    if (q && !this._isEditing(q) && this._config.stopName) {
+      q.placeholder = this._config.stopName;
+    }
+  }
+  _syncDestLabel() {
+    const el = this._el("destPicked");
+    if (el) el.textContent = this._config.destName || "";
+    const q = this._el("dq");
+    if (q && !this._isEditing(q) && this._config.destName) {
+      q.placeholder = this._config.destName;
+    }
+  }
+  _syncMinutesAfter() {
+    const cur = clampMinutesAfter(this._config.minutesAfter);
+    const sel = this._el("minutesAfter");
+    if (sel) {
+      const lang = this._lang();
+      const values = MINUTES_AFTER_PRESETS.slice();
+      if (values.indexOf(cur) < 0) values.push(cur);
+      values.sort((a, b) => a - b);
+      const sig = lang + ":" + values.join(",");
+      if (sel.dataset.opts !== sig) {
+        sel.innerHTML = values.map((n) => `<option value="${n}">${BkkLib.esc(t(lang, "minutes", n))}</option>`).join("");
+        sel.dataset.opts = sig;
+      }
+      if (!this._isEditing(sel)) sel.value = String(cur);
+    }
+    const box = this._el("minutesAfterChips");
+    if (!box) return;
+    const signature = String(cur);
+    if (box.dataset.cur === signature && box.childElementCount) {
+      Array.from(box.children).forEach((b) => {
+        b.classList.toggle("on", Number(b.getAttribute("data-min")) === cur);
+      });
+      return;
+    }
+    box.innerHTML = "";
+    box.dataset.cur = signature;
+    MINUTES_AFTER_PRESETS.forEach((n) => {
+      const b = document.createElement("button");
+      b.className = "chip" + (n === cur ? " on" : "");
+      b.type = "button";
+      b.setAttribute("data-min", String(n));
+      b.textContent = String(n);
+      b.addEventListener("click", () => {
+        if (n === clampMinutesAfter(this._config.minutesAfter)) return;
+        this._emit({ minutesAfter: n });
+      });
+      box.appendChild(b);
+    });
+  }
+  _syncApiKey() {
+    this._syncApiKeyVisibility();
+    const wrap = this._el("apiKeyWrap");
+    const hidden = wrap && wrap.style.display === "none";
+    const el = this._el("apiKey");
+    if (!el || this._isEditing(el) || this._keyDirty) return;
+    el.value = hidden ? "" : this._config.apiKey || "";
+  }
+  /* A working key is noise in the form, but it still has to be replaceable
+     without hand-editing YAML, hence the "change" link. */
+  _syncApiKeyVisibility() {
+    const wrap = this._el("apiKeyWrap");
+    const okWrap = this._el("apiKeyOkWrap");
+    if (!wrap) return;
+    const mode = this._mode();
+    if (mode === "volan" || mode === "helyi") {
+      wrap.style.display = "none";
+      if (okWrap) okWrap.style.display = "none";
+      return;
+    }
+    const own = (this._config.apiKey || "").trim();
+    const viaIntegration = !own && BkkLib.integrationHasKey(this._hass);
+    const settled = !this._keyReveal && (viaIntegration || !!own && this._keyOk === true);
+    wrap.style.display = settled ? "none" : "";
+    if (okWrap) okWrap.style.display = settled ? "" : "none";
+    const okText = this._el("apiKeyOkText");
+    if (okText) okText.textContent = t(this._lang(), viaIntegration ? "apiKeyIntegration" : "apiKeyOk");
+  }
+  _modeCopy(mode) {
+    return modeCopy(this._lang(), mode);
+  }
+  _syncLang() {
+    const el = this._el("lang");
+    if (!el) return;
+    const lang = this._lang();
+    el.options[0].textContent = t(lang, "langAuto");
+    el.options[1].textContent = t(lang, "langHu");
+    el.options[2].textContent = t(lang, "langEn");
+    const pref = this._config.language === "hu" || this._config.language === "en" ? this._config.language : "auto";
+    if (!this._isEditing(el)) el.value = pref;
+  }
+  _syncTexts() {
+    const lang = this._lang();
+    this._syncLang();
+    const set = (id, text) => {
+      const el = this._el(id);
+      if (el) el.textContent = text;
+    };
+    set("lblLang", t(lang, "langLabel"));
+    set("lblApiKey", t(lang, "apiKeyLabel"));
+    set("hintApiKey", t(lang, "apiKeyHint"));
+    set("apiKeyOkText", t(lang, "apiKeyOk"));
+    set("apiKeyEdit", t(lang, "apiKeyChange"));
+    set("lblName", t(lang, "nameLabel"));
+    set("lblCity", t(lang, "cityLabel"));
+    set("lblMinutesAfter", t(lang, "minutesAfterLabel"));
+    set("hintMinutesAfter", t(lang, "minutesAfterHint"));
+    this._syncMinutesAfter();
+    const key = this._el("apiKey");
+    if (key) key.placeholder = t(lang, "apiKeyPlaceholder");
+    const name = this._el("name");
+    if (name) name.placeholder = t(lang, "namePlaceholder");
+  }
+  _syncMode() {
+    const mode = this._mode();
+    const mav = this._el("mav");
+    const volan = this._el("volan");
+    const helyi = this._el("helyi");
+    if (mav && !this._isEditing(mav)) mav.checked = mode === "mav";
+    if (volan && !this._isEditing(volan)) volan.checked = mode === "volan";
+    if (helyi && !this._isEditing(helyi)) helyi.checked = mode === "helyi";
+    const wrap = this._el("cityWrap");
+    if (wrap) wrap.style.display = mode === "helyi" ? "" : "none";
+    if (mode === "helyi") this._fillCities();
+    const copy = this._modeCopy(mode);
+    const hint = this._el("modeHint");
+    if (hint) hint.textContent = copy.hint;
+    const lblStop = this._el("lblStop");
+    if (lblStop) lblStop.textContent = copy.stop;
+    const lblDest = this._el("lblDest");
+    if (lblDest) lblDest.textContent = copy.dest;
+    const q = this._el("q");
+    if (q && !this._isEditing(q) && !this._config.stopName) q.placeholder = copy.originPh;
+    const dq = this._el("dq");
+    if (dq && !this._isEditing(dq) && !this._config.destName) dq.placeholder = copy.destPh;
+    this._syncApiKeyVisibility();
+    this._paintFav();
+  }
+  _paintFav() {
+    const fav = this._el("fav");
+    if (!fav) return;
+    fav.innerHTML = "";
+    const mode = this._mode();
+    const custom = Array.isArray(this._config.favorites) ? this._config.favorites : null;
+    const list = (custom || DEFAULT_FAVORITES[mode] || []).filter((f) => f && f.id && f.name);
+    const shown = !custom && mode === "all" ? BkkLib.collapseSameNameStops(list) : list;
+    shown.forEach((f) => {
+      const b = document.createElement("button");
+      b.className = "chip";
+      b.type = "button";
+      b.textContent = f.name.split(" / ")[0];
+      b.addEventListener("click", () => this._pickStop(f, "origin"));
+      fav.appendChild(b);
+    });
+  }
+  _onModeToggle(which) {
+    const mavOn = !!(this._el("mav") && this._el("mav").checked);
+    const volanOn = !!(this._el("volan") && this._el("volan").checked);
+    const helyiOn = !!(this._el("helyi") && this._el("helyi").checked);
+    let mav = mavOn;
+    let volan = volanOn;
+    let helyi = helyiOn;
+    if (which === "mav" && mav) {
+      volan = false;
+      helyi = false;
+    }
+    if (which === "volan" && volan) {
+      mav = false;
+      helyi = false;
+    }
+    if (which === "helyi" && helyi) {
+      mav = false;
+      volan = false;
+    }
+    if (this._el("mav")) this._el("mav").checked = mav;
+    if (this._el("volan")) this._el("volan").checked = volan;
+    if (this._el("helyi")) this._el("helyi").checked = helyi;
+    const q = this._el("q");
+    const dq = this._el("dq");
+    if (q) q.value = "";
+    if (dq) dq.value = "";
+    const hits = this._el("hits");
+    const destHits = this._el("destHits");
+    if (hits) hits.innerHTML = "";
+    if (destHits) destHits.innerHTML = "";
+    this._dests = [];
+    this._destRoutes = {};
+    this._cache = {};
+    this._loadedStop = "";
+    this._emit({
+      mav,
+      volan,
+      helyi,
+      city: helyi ? this._config.city || "" : "",
+      routeIds: [],
+      stopId: "",
+      stopName: "",
+      destKey: "",
+      destName: ""
+    });
+    this._syncMode();
+    this._syncStopLabel();
+    this._syncDestLabel();
+  }
+  async _fillCities() {
+    const sel = this._el("city");
+    if (!sel || this._isEditing(sel)) return;
+    const seq = ++this._citySeq;
+    try {
+      const idx = await BkkLib.cityIndex();
+      if (seq !== this._citySeq) return;
+      const ops = (idx.ops || []).slice().sort((a, b) => a.name.localeCompare(b.name, "hu"));
+      const cur = this._config.city || "";
+      const signature = ops.map((o) => o.id).join("|");
+      if (sel.dataset.ops === signature && sel.options.length > 1) {
+        if (cur && sel.value !== cur) sel.value = cur;
+        return;
+      }
+      const ph = t(this._lang(), "cityPlaceholder");
+      sel.innerHTML = `<option value="">${BkkLib.esc(ph)}</option>` + ops.map((o) => `<option value="${BkkLib.esc(o.id)}">${BkkLib.esc(o.name)}</option>`).join("");
+      sel.dataset.ops = signature;
+      if (cur) sel.value = cur;
+    } catch (err) {
+      if (seq !== this._citySeq) return;
+      this._error(errText(this._lang(), err));
+    }
+  }
+  _error(msg) {
+    const el = this._el("err");
+    if (el) el.textContent = msg || "";
+  }
+  _emit(patch) {
+    const cfg = Object.assign({}, this._config, patch);
+    this._config = cfg;
+    this.dispatchEvent(new CustomEvent("config-changed", {
+      bubbles: true,
+      composed: true,
+      detail: { config: cfg }
+    }));
+  }
+  async _fillKey() {
+    this._loadingKey = true;
+    try {
+      const key = await BkkLib.apiKeyFromDashboard(this._hass);
+      if (key && !this._config.apiKey && !this._userEditedKey) {
+        this._emit({ apiKey: key });
+        await this._probeKey();
+      }
+    } finally {
+      this._loadingKey = false;
+    }
+  }
+  async _probeKey() {
+    const mode = this._mode();
+    if (mode === "volan" || mode === "helyi") {
+      this._syncApiKey();
+      return;
+    }
+    const key = this._apiKey();
+    if (!key) {
+      this._keyOk = false;
+      this._syncApiKey();
+      return;
+    }
+    if (this._probingKey) return;
+    if (this._probedKey === key && this._keyOk != null) {
+      this._syncApiKey();
+      return;
+    }
+    this._probingKey = true;
+    this._probedKey = key;
+    try {
+      const result = await BkkLib.probeApiKey(key);
+      if (this._apiKey() !== key) return;
+      this._keyOk = !!result.ok;
+      this._syncApiKey();
+      if (!result.ok && result.code) this._error(errText(this._lang(), codedError(result.code)));
+      else if (result.ok) this._error("");
+    } finally {
+      this._probingKey = false;
+      const latest = this._apiKey();
+      if (latest && latest !== this._probedKey) this._probeKey();
+    }
+  }
+  async _search(q, which) {
+    const box = this._el(which === "dest" ? "destHits" : "hits");
+    if (!box) return;
+    if (which === "dest") {
+      this._paintDestHits(q);
+      return;
+    }
+    if (!q || q.length < 2) {
+      box.innerHTML = "";
+      return;
+    }
+    const seq = ++this._searchSeq;
+    try {
+      this._error("");
+      if (!this._apiKey() && !this._userEditedKey) await this._fillKey();
+      if (seq !== this._searchSeq) return;
+      const mode = this._mode();
+      const hits = await BkkLib.searchStops(this._apiKey(), q, mode, this._config.city);
+      if (seq !== this._searchSeq) return;
+      if (!hits.length) {
+        box.innerHTML = '<span class="hint">' + BkkLib.esc(this._modeCopy(mode).empty) + "</span>";
+        return;
+      }
+      box.innerHTML = hits.map((s) => `<button class="hit" type="button" data-id="${BkkLib.esc(s.id)}">${BkkLib.esc(s.label || s.name)}</button>`).join("");
+      box.querySelectorAll(".hit").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.getAttribute("data-id");
+          const st = hits.find((h) => h.id === id);
+          this._pickStop({ id: st.id, name: st.name, label: st.label }, which);
+        });
+      });
+    } catch (err) {
+      if (seq !== this._searchSeq) return;
+      this._error(errText(this._lang(), err));
+    }
+  }
+  /* Rank the reachable destinations by how much of the query they share, so an
+     unreachable search still ends with something usable. */
+  _suggestDests(f) {
+    const dests = this._dests || [];
+    if (!dests.length) return [];
+    if (!f || f.length < 3) return dests.slice(0, 6);
+    const grams = /* @__PURE__ */ new Set();
+    for (let i = 0; i + 3 <= f.length; i++) grams.add(f.slice(i, i + 3));
+    const scored = dests.map((d) => {
+      const fold = BkkLib.fold(d.name);
+      let score = 0;
+      grams.forEach((g) => {
+        if (fold.indexOf(g) >= 0) score += 1;
+      });
+      return { d, score };
+    }).filter((x) => x.score > 0);
+    scored.sort((a, b) => b.score - a.score);
+    const picked = scored.slice(0, 6).map((x) => x.d);
+    return picked.length ? picked : dests.slice(0, 6);
+  }
+  _paintDestHits(q) {
+    const box = this._el("destHits");
+    if (!box) return;
+    const copy = this._modeCopy(this._mode());
+    if (!this._config.stopId) {
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(copy.destNeedOrigin) + "</span>";
+      return;
+    }
+    if (this._destsLoading) {
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "destLoading")) + "</span>";
+      return;
+    }
+    if (!this._dests.length) {
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(copy.destNone) + "</span>";
+      return;
+    }
+    const f = BkkLib.fold(q || "");
+    const hits = f ? this._dests.filter((d) => BkkLib.fold(d.name).indexOf(f) >= 0) : this._dests;
+    if (!hits.length) {
+      const alts = this._suggestDests(f);
+      const msg = alts.length ? t(this._lang(), "destEmptySuggest", alts.map((d) => d.name).join(", ")) : copy.destEmpty;
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(msg) + "</span>";
+      return;
+    }
+    const shown = hits.slice(0, 50);
+    box.innerHTML = shown.map((s) => `<button class="hit" type="button" data-key="${BkkLib.esc(s.key)}">${BkkLib.esc(s.name)}</button>`).join("");
+    box.querySelectorAll(".hit").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.getAttribute("data-key");
+        const st = this._dests.find((d) => d.key === key);
+        if (!st) return;
+        this._pickStop({ id: st.id, name: st.name, key: st.key }, "dest");
+      });
+    });
+  }
+  async _loadDests() {
+    if (!this._config.stopId) return;
+    if (!this._apiKey() && this._mode() !== "volan" && this._mode() !== "helyi") return;
+    const stopId = this._config.stopId;
+    const seq = ++this._destSeq;
+    this._destsLoading = true;
+    const box = this._el("destHits");
+    if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "destLoading")) + "</span>";
+    try {
+      this._error("");
+      const idx = await BkkLib.reachableDests(
+        this._apiKey(),
+        this._cache,
+        { id: this._config.stopId, name: this._config.stopName },
+        this._mode(),
+        this._config.city
+      );
+      if (seq !== this._destSeq || this._config.stopId !== stopId) return;
+      this._loadedStop = stopId;
+      this._dests = idx.dests || [];
+      this._destRoutes = idx.destRoutes || {};
+      if (this._config.destKey && this._destRoutes[this._config.destKey]) {
+        const ids = this._destRoutes[this._config.destKey].slice();
+        const cur = this._config.routeIds || [];
+        const same = ids.length === cur.length && ids.every((id) => cur.indexOf(id) >= 0);
+        if (!same) this._emit({ routeIds: ids });
+      }
+      const dq = this._el("dq");
+      this._paintDestHits(dq ? dq.value.trim() : "");
+    } catch (err) {
+      if (seq !== this._destSeq) return;
+      this._loadedStop = "";
+      this._error(errText(this._lang(), err));
+      if (box) box.innerHTML = "";
+    } finally {
+      if (seq === this._destSeq) this._destsLoading = false;
+    }
+  }
+  _pickStop(stop, which) {
+    if (which === "dest") {
+      const box2 = this._el("destHits");
+      const dq2 = this._el("dq");
+      if (box2) box2.innerHTML = "";
+      if (dq2) dq2.value = stop.label || stop.name;
+      const key = stop.key || BkkLib.norm(stop.name);
+      const patch2 = {
+        destKey: key,
+        destName: stop.name,
+        routeIds: (this._destRoutes[key] || []).slice()
+      };
+      if (!this._config.name && this._config.stopName) {
+        patch2.name = `${this._config.stopName} → ${stop.name}`;
+      }
+      this._emit(patch2);
+      this._syncDestLabel();
+      return;
+    }
+    const box = this._el("hits");
+    const q = this._el("q");
+    if (box) box.innerHTML = "";
+    if (q) q.value = stop.label || stop.name;
+    this._cache = {};
+    this._dests = [];
+    this._destRoutes = {};
+    this._loadedStop = "";
+    const patch = {
+      stopId: stop.id,
+      stopName: stop.name,
+      routeIds: [],
+      destKey: "",
+      destName: ""
+    };
+    this._emit(patch);
+    this._syncStopLabel();
+    this._syncDestLabel();
+    const dq = this._el("dq");
+    if (dq) dq.value = "";
+  }
+};
+
+// src/hop-card.js
+var leafletPromise = null;
+var BKKHopCard = class extends HTMLElement {
+  constructor() {
+    super();
+    this.attachShadow({ mode: "open" });
     this._config = {};
     this._poll = null;
     this._tick = null;
@@ -5075,7 +5743,7 @@ class BKKHopCard extends HTMLElement {
     this._tripCache = {};
     this._rows = [];
     this._rawRows = [];
-    this._err = '';
+    this._err = "";
     this._loading = false;
     this._painted = false;
     this._gen = 0;
@@ -5089,43 +5757,42 @@ class BKKHopCard extends HTMLElement {
     this._openMapKey = null;
     this._onMapKey = null;
     this._mapClicksBound = false;
-    this._openingMap = '';
+    this._openingMap = "";
   }
-
   static async getConfigElement() {
     if (!customElements.get(BKK_HOP_EDITOR)) await customElements.whenDefined(BKK_HOP_EDITOR);
     return document.createElement(BKK_HOP_EDITOR);
   }
-
   static getStubConfig() {
     return {
-      name: '',
-      stopId: '',
-      stopName: '',
+      name: "",
+      stopId: "",
+      stopName: "",
       routeIds: [],
-      destKey: '',
-      destName: '',
+      destKey: "",
+      destName: "",
       mav: false,
       volan: false,
       helyi: false,
-      city: '',
-      language: 'auto',
-      minutesAfter: DEFAULT_MINUTES_AFTER,
+      city: "",
+      language: "auto",
+      minutesAfter: DEFAULT_MINUTES_AFTER
     };
   }
-
   _lang() {
     return resolveLang((this._config || {}).language, this._hass);
   }
-
   setConfig(config) {
     if (!this.shadowRoot) {
-      try { this.attachShadow({ mode: 'open' }); } catch (_e) { /* already attached */ }
+      try {
+        this.attachShadow({ mode: "open" });
+      } catch (_e) {
+      }
     }
     this._holdGate();
     this._config = Object.assign({ routeIds: [] }, config || {});
     this._tripCache = {};
-    this._err = '';
+    this._err = "";
     this._keyTried = false;
     try {
       this._render();
@@ -5135,7 +5802,6 @@ class BKKHopCard extends HTMLElement {
     }
     this._reloadSafe();
   }
-
   /* _reload is async, so its rejections need an owner. Mark in-flight
      synchronously: Home Assistant often setConfig()s then attaches in the
      same turn, and connectedCallback must not start a second fetch. */
@@ -5143,20 +5809,16 @@ class BKKHopCard extends HTMLElement {
     this._reloadActive = true;
     Promise.resolve().then(() => this._reload()).catch((err) => this._showErr(err));
   }
-
   _apiKey() {
     return BkkLib.effectiveApiKey(this._config, this._hass);
   }
-
   set hass(hass) {
     const first = !this._hass;
-    const langBefore = this._hass ? this._lang() : '';
+    const langBefore = this._hass ? this._lang() : "";
     const viaBefore = this._viaIntegration;
     this._hass = hass;
     BkkLib._hass = hass;
     if (this._lang() !== langBefore) this._paint();
-    /* The integration's futar service can register after the first paint
-       (key added in the options flow): reload once it shows up. */
     this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
     if (this._viaIntegration && !viaBefore && this._painted && !this._reloadActive) this._reloadSafe();
     if (first && this._rawRows && this._rawRows.length) {
@@ -5167,22 +5829,20 @@ class BKKHopCard extends HTMLElement {
     }
     this._maybeFillKey();
   }
-
   /* hass is set on every state change, so looking for a sibling card's key has
      to happen at most once, and never in the key-less modes. */
   _maybeFillKey() {
     const mode = BkkLib.mode(this._config || {});
-    if (mode === 'volan' || mode === 'helyi') return;
+    if (mode === "volan" || mode === "helyi") return;
     if (this._config.apiKey || this._keyTried || BkkLib.integrationHasKey(this._hass)) return;
     this._keyTried = true;
-    this._fillKey().catch(() => { /* dashboard config not readable */ });
+    this._fillKey().catch(() => {
+    });
   }
-
   getCardSize() {
     const rows = Math.max(1, (this._rows || []).length);
     return Math.max(1, Math.round((44 + rows * 30) / 50));
   }
-
   /* Home Assistant re-parents cards while editing a dashboard, so the timers
      have to come back after a detach. */
   _holdGate() {
@@ -5190,7 +5850,6 @@ class BKKHopCard extends HTMLElement {
     this._gateHeld = true;
     BkkLib._gateCards += 1;
   }
-
   connectedCallback() {
     this._holdGate();
     if (!this._painted) return;
@@ -5198,54 +5857,56 @@ class BKKHopCard extends HTMLElement {
     this._bindMapClicks();
     if (!this._poll && !this._reloadActive && this._shouldReloadOnConnect()) this._reloadSafe();
   }
-
   _shouldPoll() {
     return true;
   }
-
   _shouldReloadOnConnect() {
     return true;
   }
-
   disconnectedCallback() {
     if (this._gateHeld) {
       this._gateHeld = false;
       BkkLib._gateCards = Math.max(0, BkkLib._gateCards - 1);
     }
-    if (this._poll) { clearInterval(this._poll); this._poll = null; }
-    if (this._tick) { clearInterval(this._tick); this._tick = null; }
+    if (this._poll) {
+      clearInterval(this._poll);
+      this._poll = null;
+    }
+    if (this._tick) {
+      clearInterval(this._tick);
+      this._tick = null;
+    }
   }
-
   /* Keep the rows on screen and put the failure in a banner above them: a
      single failed refresh should not wipe a timetable that is still useful. */
   _showErr(err) {
     this._err = errText(this._lang(), err);
     this._paint();
   }
-
   async _fillKey() {
     const key = await BkkLib.apiKeyFromDashboard(this._hass);
     if (!key || this._config.apiKey) return;
     this._config = Object.assign({}, this._config, { apiKey: key });
     this._reloadSafe();
   }
-
   _header() {
     const cfg = this._config || {};
     const ready = cfg.stopId && cfg.destKey;
     if (cfg.name) return cfg.name;
-    if (ready) return `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
-    return 'Hungarian transport';
+    if (ready) return `${cfg.stopName || ""} → ${cfg.destName || ""}`;
+    return "Hungarian transport";
   }
-
   _render() {
     if (!this._rows) this._rows = [];
     if (!this._tripCache) this._tripCache = {};
     const root = this.shadowRoot;
     if (!root) return;
-    if (this._painted) { this._paint(); return; }
+    if (this._painted) {
+      this._paint();
+      return;
+    }
     while (root.firstChild) root.removeChild(root.firstChild);
-    const style = document.createElement('style');
+    const style = document.createElement("style");
     style.textContent = `
       :host { display: block; pointer-events: auto; }
       ha-card { overflow: visible; pointer-events: auto; }
@@ -5315,15 +5976,15 @@ class BKKHopCard extends HTMLElement {
         opacity: 1; visibility: visible;
       }
     `;
-    const card = document.createElement('ha-card');
-    const wrap = document.createElement('div');
-    wrap.className = 'wrap';
-    this._elHead = document.createElement('div');
-    this._elHead.className = 'head';
-    this._elErr = document.createElement('div');
-    this._elErr.className = 'err';
-    this._elBody = document.createElement('div');
-    this._elBody.className = 'body';
+    const card = document.createElement("ha-card");
+    const wrap = document.createElement("div");
+    wrap.className = "wrap";
+    this._elHead = document.createElement("div");
+    this._elHead.className = "head";
+    this._elErr = document.createElement("div");
+    this._elErr.className = "err";
+    this._elBody = document.createElement("div");
+    this._elBody.className = "body";
     wrap.appendChild(this._elHead);
     wrap.appendChild(this._elErr);
     wrap.appendChild(this._elBody);
@@ -5335,144 +5996,138 @@ class BKKHopCard extends HTMLElement {
     this._paint();
     this._startTick();
   }
-
   /* The countdown is derived from the epoch seconds, so it stays honest
      between refreshes without hitting the API again. */
   _startTick() {
     if (this._tick) clearInterval(this._tick);
-    this._tick = setInterval(() => {
-      if ((this._rows || []).length) this._paint();
-    }, 15000);
+    this._tick = setInterval(() => this._tickPaint(), 15e3);
   }
-
+  /* Between refreshes only the countdowns change. Rewriting the whole table
+     every 15 s dropped hover, keyboard focus and open tooltips, so update the
+     text in place and repaint only when a departure falls off the list. */
+  _tickPaint() {
+    const shown = this._shownRows || [];
+    if (!shown.length || !this._elBody) return;
+    const nowSec = Math.floor(Date.now() / 1e3);
+    const due = (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
+    if (due.length !== shown.length || due.some((r, i) => r !== shown[i])) {
+      this._paint();
+      return;
+    }
+    const lang = this._lang();
+    this._elBody.querySelectorAll("tr[data-row-index]").forEach((tr) => {
+      const row = shown[Number(tr.getAttribute("data-row-index"))];
+      const cell = tr.querySelector(".cd");
+      if (!row || !cell) return;
+      const text = this._countdown(row.depTs, lang);
+      if (cell.textContent !== text) cell.textContent = text;
+    });
+  }
   _paint() {
     if (!this._painted || !this._elBody) return;
     const lang = this._lang();
     const cfg = this._config || {};
     this._elHead.textContent = this._header();
-    this._elErr.textContent = this._err || '';
-    this._elErr.style.display = this._err ? '' : 'none';
-    const nowSec = Math.floor(Date.now() / 1000);
+    this._elErr.textContent = this._err || "";
+    this._elErr.style.display = this._err ? "" : "none";
+    const nowSec = Math.floor(Date.now() / 1e3);
     const allRows = this._rows || [];
     const rows = allRows.filter((r) => departureStillDue(r.depTs, nowSec));
+    this._shownRows = rows;
     if (rows.length) {
-      this._elBody.innerHTML = `<table><tbody>${
-        rows.map((r, i) => this._rowHtml(r, lang, i)).join('')
-      }</tbody></table>`;
+      this._elBody.innerHTML = `<table><tbody>${rows.map((r, i) => this._rowHtml(r, lang, i)).join("")}</tbody></table>`;
       return;
     }
     const msg = this._emptyBodyMessage(lang, cfg);
-    this._elBody.innerHTML = msg ? `<div class="msg">${BkkLib.esc(msg)}</div>` : '';
+    this._elBody.innerHTML = msg ? `<div class="msg">${BkkLib.esc(msg)}</div>` : "";
   }
-
   _emptyBodyMessage(lang, cfg) {
-    if (!cfg.stopId || !cfg.destKey) return t(lang, 'cardPickStops');
-    if (this._loading) return t(lang, 'cardLoading');
-    if (this._err) return '';
-    return t(lang, 'cardNoDepartures');
+    if (!cfg.stopId || !cfg.destKey) return t(lang, "cardPickStops");
+    if (this._loading) return t(lang, "cardLoading");
+    if (this._err) return "";
+    return t(lang, "cardNoDepartures");
   }
-
   _badgeStyle(row) {
     const hex = (v, fallback) => {
-      const s = String(v || '').replace('#', '');
-      return /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(s) ? '#' + s : fallback;
+      const s = String(v || "").replace("#", "");
+      return /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(s) ? "#" + s : fallback;
     };
-    const bg = hex(row.color, 'var(--primary-color)');
-    const fg = hex(row.textcolor, '#fff');
+    const bg = hex(row.color, "var(--primary-color)");
+    const fg = hex(row.textcolor, "#fff");
     return `background:${bg};color:${fg}`;
   }
-
   _picto(glyph, tip, cls) {
-    const extra = cls ? ` ${cls}` : '';
-    return `<span class="picto${extra}" tabindex="0" role="img" aria-label="${BkkLib.esc(tip)}"`
-      + ` data-tip="${BkkLib.esc(tip)}">${BkkLib.esc(glyph)}</span>`;
+    const extra = cls ? ` ${cls}` : "";
+    return `<span class="picto${extra}" tabindex="0" role="img" aria-label="${BkkLib.esc(tip)}" data-tip="${BkkLib.esc(tip)}">${BkkLib.esc(glyph)}</span>`;
   }
-
   _countdown(ts, lang) {
-    if (!ts) return '';
-    const mins = Math.round((ts * 1000 - Date.now()) / 60000);
-    return mins <= 0 ? t(lang, 'now') : t(lang, 'minutes', mins);
+    if (!ts) return "";
+    const mins = Math.round((ts * 1e3 - Date.now()) / 6e4);
+    return mins <= 0 ? t(lang, "now") : t(lang, "minutes", mins);
   }
-
   _rowHtml(r, lang, idx) {
     const esc = BkkLib.esc;
     const delayMin = Math.round(Number(r.delay || 0) / 60);
-    let atClass = 'at';
-    let sched = '';
-    let atTip = '';
+    let atClass = "at";
+    let sched = "";
+    let atTip = "";
     if (delayMin >= 1) {
-      atClass += ' late';
-      atTip = t(lang, 'tipDelay', delayMin);
+      atClass += " late";
+      atTip = t(lang, "tipDelay", delayMin);
       if (r.attime && r.attime !== r.predicted_attime) sched = r.attime;
     } else if (delayMin <= -1) {
-      atClass += ' early';
-      atTip = t(lang, 'tipEarly', Math.abs(delayMin));
+      atClass += " early";
+      atTip = t(lang, "tipEarly", Math.abs(delayMin));
       if (r.attime && r.attime !== r.predicted_attime) sched = r.attime;
     } else if (r.attime) {
-      atTip = t(lang, 'tipScheduled', r.attime);
+      atTip = t(lang, "tipScheduled", r.attime);
     }
     const pictos = [];
-    if (r.wheelchair) pictos.push(this._picto('\u267f', t(lang, 'tipWheelchair')));
-    if (r.bikesAllowed) pictos.push(this._picto('\ud83d\udeb2', t(lang, 'tipBike')));
-    if (r.booking) pictos.push(this._picto('H', t(lang, 'tipBooking'), 'booking'));
-    const plat = r.platform
-      ? `<span class="plat" title="${esc(t(lang, 'tipPlatform', r.platform))}">${
-        esc(r.platform)}</span>`
-      : '';
-    const travel = r.travelMin
-      ? `<span class="travel" title="${esc(t(lang, 'tipTravel', r.travelMin))}">${
-        esc(t(lang, 'minutes', r.travelMin))}</span>`
-      : '';
-    const num = r.trainNumber
-      ? `<span class="num" title="${esc(t(lang, 'tipTrain', r.trainNumber))}">${
-        esc(r.trainNumber)}</span>`
-      : '';
-    const tip = esc(t(lang, 'mapOpenTip'));
+    if (r.wheelchair) pictos.push(this._picto("♿", t(lang, "tipWheelchair")));
+    if (r.bikesAllowed) pictos.push(this._picto("🚲", t(lang, "tipBike")));
+    if (r.booking) pictos.push(this._picto("H", t(lang, "tipBooking"), "booking"));
+    const plat = r.platform ? `<span class="plat" title="${esc(t(lang, "tipPlatform", r.platform))}">${esc(r.platform)}</span>` : "";
+    const travel = r.travelMin ? `<span class="travel" title="${esc(t(lang, "tipTravel", r.travelMin))}">${esc(t(lang, "minutes", r.travelMin))}</span>` : "";
+    const num = r.trainNumber ? `<span class="num" title="${esc(t(lang, "tipTrain", r.trainNumber))}">${esc(r.trainNumber)}</span>` : "";
+    const tip = esc(t(lang, "mapOpenTip"));
     const clickable = ` class="row-clickable" data-row-index="${idx}" title="${tip}"`;
     const mapBtn = `<td class="mapbtn"><button type="button" class="map-open" aria-label="${tip}" title="${tip}"><ha-icon icon="mdi:map-marker-outline"></ha-icon></button></td>`;
     return `<tr${clickable}>
-      <td class="icon"><ha-icon icon="${esc(r.icon || 'mdi:bus')}"></ha-icon></td>
-      <td class="route"><span class="badge${String(r.label || '').length > 4 ? ' long' : ''}" style="${esc(this._badgeStyle(r))}">${
-      esc(r.label || '?')}</span></td>
-      <td class="dest" title="${esc(r.headsign || '')}">${esc(r.headsign || '')}${num}</td>
-      <td class="flags">${plat}${pictos.length ? `<span class="pictos">${pictos.join('')}</span>` : ''}</td>
+      <td class="icon"><ha-icon icon="${esc(r.icon || "mdi:bus")}"></ha-icon></td>
+      <td class="route"><span class="badge${String(r.label || "").length > 4 ? " long" : ""}" style="${esc(this._badgeStyle(r))}">${esc(r.label || "?")}</span></td>
+      <td class="dest" title="${esc(r.headsign || "")}">${esc(r.headsign || "")}${num}</td>
+      <td class="flags">${plat}${pictos.length ? `<span class="pictos">${pictos.join("")}</span>` : ""}</td>
       ${mapBtn}
-      <td class="when"><span class="${atClass}" title="${esc(atTip)}">${
-      esc(r.predicted_attime || r.attime || '')}</span>${
-      sched ? `<span class="sched">${esc(sched)}</span>` : ''}</td>
-      <td class="in">${esc(this._countdown(r.depTs, lang))}${travel}</td>
+      <td class="when"><span class="${atClass}" title="${esc(atTip)}">${esc(r.predicted_attime || r.attime || "")}</span>${sched ? `<span class="sched">${esc(sched)}</span>` : ""}</td>
+      <td class="in"><span class="cd">${esc(this._countdown(r.depTs, lang))}</span>${travel}</td>
     </tr>`;
   }
-
   _bindMapClicks() {
     if (this._mapClicksBound) return;
     if (!this._elBody) return;
     this._mapClicksBound = true;
     const fn = (ev) => this._onRowClick(ev);
-    this._elBody.addEventListener('click', fn);
-    this.addEventListener('click', fn, true);
+    this._elBody.addEventListener("click", fn);
+    this.addEventListener("click", fn, true);
   }
-
   _rowFromClick(ev) {
-    const path = (typeof ev.composedPath === 'function') ? ev.composedPath() : [];
+    const path = typeof ev.composedPath === "function" ? ev.composedPath() : [];
     let tr = null;
     for (let i = 0; i < path.length; i++) {
       const n = path[i];
-      if (n && n.nodeType === 1 && n.getAttribute && n.getAttribute('data-row-index') != null
-        && (n.tagName === 'TR' || (n.classList && n.classList.contains('row-clickable')))) {
+      if (n && n.nodeType === 1 && n.getAttribute && n.getAttribute("data-row-index") != null && (n.tagName === "TR" || n.classList && n.classList.contains("row-clickable"))) {
         tr = n;
         break;
       }
     }
     if (!tr) {
       const start = ev.target;
-      if (start && start.closest) tr = start.closest('tr[data-row-index]');
+      if (start && start.closest) tr = start.closest("tr[data-row-index]");
     }
     if (!tr) return null;
-    const idx = Number(tr.getAttribute('data-row-index'));
-    return (this._rows || [])[idx] || null;
+    const idx = Number(tr.getAttribute("data-row-index"));
+    return (this._shownRows || [])[idx] || null;
   }
-
   _onRowClick(ev) {
     const row = this._rowFromClick(ev);
     if (!row) return;
@@ -5480,91 +6135,101 @@ class BKKHopCard extends HTMLElement {
     ev.stopPropagation();
     this._openVehicleMap(row);
   }
-
   _mapTypeLabel(kind, lang) {
-    const k = String(kind || '').toLowerCase();
-    if (k === 'tram') return t(lang, 'mapTypeTram');
-    if (k === 'trolleybus' || k === 'trolley') return t(lang, 'mapTypeTrolley');
-    if (k === 'subway' || k === 'metro') return t(lang, 'mapTypeSubway');
-    if (k === 'rail' || k === 'train' || k === 'coach') return t(lang, 'mapTypeRail');
-    if (k === 'bus') return t(lang, 'mapTypeBus');
-    return t(lang, 'mapTypeVehicle');
+    const k = String(kind || "").toLowerCase();
+    if (k === "tram") return t(lang, "mapTypeTram");
+    if (k === "trolleybus" || k === "trolley") return t(lang, "mapTypeTrolley");
+    if (k === "subway" || k === "metro") return t(lang, "mapTypeSubway");
+    if (k === "rail" || k === "train" || k === "coach") return t(lang, "mapTypeRail");
+    if (k === "bus") return t(lang, "mapTypeBus");
+    return t(lang, "mapTypeVehicle");
   }
-
   _mapGlyph(kind) {
-    const k = String(kind || '').toLowerCase();
-    if (k === 'tram') return '\ud83d\ude8a';
-    if (k === 'trolleybus' || k === 'trolley') return '\ud83d\ude8e';
-    if (k === 'subway' || k === 'metro') return '\ud83d\ude87';
-    if (k === 'rail' || k === 'train' || k === 'coach') return '\ud83d\ude86';
-    if (k === 'bus') return '\ud83d\ude8c';
-    return '\ud83d\udccd';
+    const k = String(kind || "").toLowerCase();
+    if (k === "tram") return "🚊";
+    if (k === "trolleybus" || k === "trolley") return "🚎";
+    if (k === "subway" || k === "metro") return "🚇";
+    if (k === "rail" || k === "train" || k === "coach") return "🚆";
+    if (k === "bus") return "🚌";
+    return "📍";
   }
-
   _ensureLeaflet() {
-    const isLeaflet = (L) => !!(L && typeof L.map === 'function' && typeof L.tileLayer === 'function' && typeof L.divIcon === 'function');
-    if (typeof window !== 'undefined' && isLeaflet(window.L)) return Promise.resolve(window.L);
+    const isLeaflet = (L) => !!(L && typeof L.map === "function" && typeof L.tileLayer === "function" && typeof L.divIcon === "function");
+    if (typeof window !== "undefined" && isLeaflet(window.L)) return Promise.resolve(window.L);
     if (leafletPromise) return leafletPromise;
     leafletPromise = new Promise((resolve, reject) => {
-      const cssId = 'hungarian-transport-leaflet-css';
-      if (typeof document !== 'undefined' && !document.getElementById(cssId)) {
-        const link = document.createElement('link');
+      const cssId = "hungarian-transport-leaflet-css";
+      if (typeof document !== "undefined" && !document.getElementById(cssId)) {
+        const link = document.createElement("link");
         link.id = cssId;
-        link.rel = 'stylesheet';
-        link.href = new URL('leaflet/leaflet.css', ASSET_BASE).href;
+        link.rel = "stylesheet";
+        link.href = new URL("leaflet/leaflet.css", ASSET_BASE).href;
         document.head.appendChild(link);
       }
-      if (typeof window !== 'undefined' && isLeaflet(window.L)) {
+      if (typeof window !== "undefined" && isLeaflet(window.L)) {
         resolve(window.L);
         return;
       }
-      const existing = typeof document !== 'undefined'
-        ? document.getElementById('hungarian-transport-leaflet-js') : null;
+      const existing = typeof document !== "undefined" ? document.getElementById("hungarian-transport-leaflet-js") : null;
       if (existing) {
-        existing.addEventListener('load', () => {
+        existing.addEventListener("load", () => {
           if (isLeaflet(window.L)) resolve(window.L);
-          else reject(new Error('leaflet'));
+          else reject(new Error("leaflet"));
         });
-        existing.addEventListener('error', reject);
+        existing.addEventListener("error", reject);
         return;
       }
-      const script = document.createElement('script');
-      script.id = 'hungarian-transport-leaflet-js';
-      script.src = new URL('leaflet/leaflet.js', ASSET_BASE).href;
+      const script = document.createElement("script");
+      script.id = "hungarian-transport-leaflet-js";
+      script.src = new URL("leaflet/leaflet.js", ASSET_BASE).href;
       script.onload = () => {
         if (isLeaflet(window.L)) resolve(window.L);
-        else reject(new Error('leaflet'));
+        else reject(new Error("leaflet"));
       };
       script.onerror = reject;
       document.head.appendChild(script);
     });
     return leafletPromise;
   }
-
   _closeVehicleMap() {
-    if (this._onMapKey && typeof document !== 'undefined') {
-      document.removeEventListener('keydown', this._onMapKey);
+    if (this._onMapKey && typeof document !== "undefined") {
+      document.removeEventListener("keydown", this._onMapKey);
       this._onMapKey = null;
     }
     if (this._mapRoute && this._map) {
-      try { this._map.removeLayer(this._mapRoute); } catch (_e) { /* ignore */ }
+      try {
+        this._map.removeLayer(this._mapRoute);
+      } catch (_e) {
+      }
       this._mapRoute = null;
     }
     if (this._mapRouteOutline && this._map) {
-      try { this._map.removeLayer(this._mapRouteOutline); } catch (_e) { /* ignore */ }
+      try {
+        this._map.removeLayer(this._mapRouteOutline);
+      } catch (_e) {
+      }
       this._mapRouteOutline = null;
     }
     if (this._mapBoardMarker && this._map) {
-      try { this._map.removeLayer(this._mapBoardMarker); } catch (_e) { /* ignore */ }
+      try {
+        this._map.removeLayer(this._mapBoardMarker);
+      } catch (_e) {
+      }
       this._mapBoardMarker = null;
     }
     (this._mapRouteLayers || []).forEach((layer) => {
       if (!this._map || !layer) return;
-      try { this._map.removeLayer(layer); } catch (_e) { /* ignore */ }
+      try {
+        this._map.removeLayer(layer);
+      } catch (_e) {
+      }
     });
     this._mapRouteLayers = [];
     if (this._map) {
-      try { this._map.remove(); } catch (_e) { /* ignore */ }
+      try {
+        this._map.remove();
+      } catch (_e) {
+      }
       this._map = null;
       this._mapMarker = null;
     }
@@ -5573,29 +6238,22 @@ class BKKHopCard extends HTMLElement {
     }
     this._mapOverlay = null;
     this._openMapKey = null;
-    this._openingMap = '';
+    this._openingMap = "";
   }
-
   _mapKey(row) {
-    return `${row.label || ''}|${row.headsign || ''}|${row.vehicleId || row.tripId || ''}`;
+    return `${row.label || ""}|${row.headsign || ""}|${row.vehicleId || row.tripId || ""}`;
   }
-
   _boardIcon(name, lang) {
-    const tip = t(lang, 'mapBoardStop') + (name ? ': ' + name : '');
+    const tip = t(lang, "mapBoardStop") + (name ? ": " + name : "");
     return `<div class="ht-board-dot" title="${BkkLib.esc(tip)}"><span class="ht-board-dot-core"></span></div>`;
   }
-
   _dotIcon(row, live, lang, colorHex) {
-    const color = BkkLib.normMapHex(colorHex || (row && row.color)) || '#2E5EA8';
-    const pulse = live ? 'ht-veh-dot-live' : 'ht-veh-dot-est';
-    const tip = live ? t(lang, 'mapLiveDot') : t(lang, 'mapEstDot');
-    return `<div class="ht-veh-dot ${pulse}" style="--bg:${BkkLib.esc(color)};" title="${BkkLib.esc(tip)}">`
-      + `<span class="ht-veh-dot-core"></span></div>`;
+    const color = BkkLib.normMapHex(colorHex || row && row.color) || "#2E5EA8";
+    const pulse = live ? "ht-veh-dot-live" : "ht-veh-dot-est";
+    const tip = live ? t(lang, "mapLiveDot") : t(lang, "mapEstDot");
+    return `<div class="ht-veh-dot ${pulse}" style="--bg:${BkkLib.esc(color)};" title="${BkkLib.esc(tip)}"><span class="ht-veh-dot-core"></span></div>`;
   }
-
   _mapChromeCss() {
-    /* Leaflet CSS (shipped next to the card) can still fail to apply. Without pane
-       positioning the SVG route is laid out below the tiles and clipped. */
     return `
         .ht-map-overlay{position:fixed;inset:0;z-index:2147483000;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px;box-sizing:border-box}
         .ht-map-panel{width:min(720px,100%);height:min(70vh,560px);background:var(--card-background-color,#fff);border-radius:28px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.35);color:var(--primary-text-color,#222)}
@@ -5620,31 +6278,29 @@ class BKKHopCard extends HTMLElement {
         .ht-map-canvas .leaflet-marker-pane{z-index:600}
     `;
   }
-
   _mapFootText(row, hasShape, hasGps, estimated, lang, hasBoard) {
     const bits = [];
-    if (hasShape) bits.push(t(lang, 'mapFullRoute'));
-    if (hasBoard) bits.push(t(lang, 'mapBoardStop'));
-    if (hasGps) bits.push(t(lang, 'mapLivePos'));
-    else if (estimated) bits.push(t(lang, 'mapEstPos'));
-    else if (hasShape) bits.push(t(lang, 'mapNoGps'));
-    if (row.stopDistancePercent != null && row.stopDistancePercent !== '') {
-      bits.push(t(lang, 'mapUntilStop', row.stopDistancePercent));
+    if (hasShape) bits.push(t(lang, "mapFullRoute"));
+    if (hasBoard) bits.push(t(lang, "mapBoardStop"));
+    if (hasGps) bits.push(t(lang, "mapLivePos"));
+    else if (estimated) bits.push(t(lang, "mapEstPos"));
+    else if (hasShape) bits.push(t(lang, "mapNoGps"));
+    if (row.stopDistancePercent != null && row.stopDistancePercent !== "") {
+      bits.push(t(lang, "mapUntilStop", row.stopDistancePercent));
     }
     if (row.vehicleStatus) bits.push(String(row.vehicleStatus));
     if (row.licensePlate) bits.push(String(row.licensePlate));
     if (row.predicted_attime && row.attime && row.predicted_attime !== row.attime) {
-      bits.push(t(lang, 'mapExpectedVs', [row.predicted_attime, row.attime]));
+      bits.push(t(lang, "mapExpectedVs", [row.predicted_attime, row.attime]));
     } else if (row.predicted_attime || row.attime) {
-      bits.push(t(lang, 'mapExpected', row.predicted_attime || row.attime));
+      bits.push(t(lang, "mapExpected", row.predicted_attime || row.attime));
     }
-    return bits.join(' \u00b7 ') || t(lang, 'mapFootFallback');
+    return bits.join(" · ") || t(lang, "mapFootFallback");
   }
-
   _showMapNotice(message) {
     this._closeVehicleMap();
-    const overlay = document.createElement('div');
-    overlay.className = 'ht-map-overlay';
+    const overlay = document.createElement("div");
+    overlay.className = "ht-map-overlay";
     overlay.innerHTML = `
       <style>
         .ht-map-overlay{position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:16px}
@@ -5656,17 +6312,15 @@ class BKKHopCard extends HTMLElement {
     document.body.appendChild(overlay);
     this._mapOverlay = overlay;
     const close = () => this._closeVehicleMap();
-    overlay.querySelector('button').addEventListener('click', close);
-    overlay.addEventListener('click', (ev) => { if (ev.target === overlay) close(); });
+    overlay.querySelector("button").addEventListener("click", close);
+    overlay.addEventListener("click", (ev) => {
+      if (ev.target === overlay) close();
+    });
   }
-
   async _loadRowMapShape(row) {
     const cfg = this._config || {};
     let shape = BkkLib.validMapShape(row && row.shape);
-    let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon)
-      || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
-    /* MÁV nationwide rails from pfaedle OSM rails (not official 8 km chords
-       on Székesfehérvár–Kelenföld, and not the Transitous hop cut). */
+    let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon) || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
     if (BkkLib.isTrainRow(row)) {
       try {
         const mavShape = await BkkLib.mavShapeForRow(row);
@@ -5674,32 +6328,29 @@ class BKKHopCard extends HTMLElement {
           if (!board) {
             board = BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
           }
-          return { shape: mavShape, board: board };
+          return { shape: mavShape, board };
         }
-      } catch (_e) { /* MOTIS / FUTÁR still fill */ }
+      } catch (_e) {
+      }
     }
-    const tripId = (row && row.tripId) || '';
-    const canFutar = this._apiKey() && (
-      !/^motis:/i.test(String(tripId || '')) || !!BkkLib.rowTrainNumber(row)
-    );
-    let geomTrip = '';
+    const tripId = row && row.tripId || "";
+    const canFutar = this._apiKey() && (!/^motis:/i.test(String(tripId || "")) || !!BkkLib.rowTrainNumber(row));
+    let geomTrip = "";
     if (canFutar) {
-      geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : '';
+      geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : "";
       if (!geomTrip && this._hass) {
         const hit = BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), row);
         if (hit && BkkLib.isFutarTripId(hit.tripId)) geomTrip = hit.tripId;
       }
     }
     let futarShape = [];
-    /* City buses/trams: decode FUTÁR trip-details polyline here.
-       hass trip_shape does not exist on bkk_stop. */
     if (geomTrip && this._apiKey() && !BkkLib.isTrainRow(row)) {
       try {
         futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
-      } catch (_e) { /* MOTIS hop still fills */ }
+      } catch (_e) {
+      }
     }
-    const published = BkkLib.keepsFullLineShape(row) && !BkkLib.isTrainRow(row)
-      && futarShape.length >= 8;
+    const published = BkkLib.keepsFullLineShape(row) && !BkkLib.isTrainRow(row) && futarShape.length >= 8;
     let motisShape = [];
     let motisCoversHead = true;
     let motisMap = null;
@@ -5709,7 +6360,7 @@ class BKKHopCard extends HTMLElement {
           row,
           { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon },
           { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey },
-          { minutesAfter: cfg.minutesAfter, mode: 'all' },
+          { minutesAfter: cfg.minutesAfter, mode: "all" }
         );
         motisShape = BkkLib.validMapShape(motisMap && motisMap.shape);
         motisCoversHead = !!(motisMap && motisMap.coversHead);
@@ -5722,23 +6373,25 @@ class BKKHopCard extends HTMLElement {
             }
           }
         }
-      } catch (_e) { /* row shape / GPS still draw */ }
+      } catch (_e) {
+      }
     }
     if (!board) {
       board = BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
     }
-    if (!published && shape.length < 2 && /^gtfs:/i.test(String((row && row.tripId) || '')) && this._hass) {
+    if (!published && shape.length < 2 && /^gtfs:/i.test(String(row && row.tripId || "")) && this._hass) {
       try {
-        const points = await BkkLib.coachShape(this._hass, row.label, row.headsign || '');
+        const points = await BkkLib.coachShape(this._hass, row.label, row.headsign || "");
         shape = BkkLib.validMapShape(BkkLib.decodePolyline(points));
-      } catch (_e) { /* FUTAR / MOTIS still fill */ }
+      } catch (_e) {
+      }
     }
     if (canFutar && BkkLib.isTrainRow(row) && BkkLib.isFutarTripId(geomTrip)) {
       try {
         futarShape = await BkkLib.hassTripShape(this._hass, this._apiKey(), geomTrip);
-      } catch (_e) { /* other rows still draw */ }
+      } catch (_e) {
+      }
     }
-    /* Direction-aware clip only when this mode does not keep the published line. */
     const clipForeignFutar = (pts) => {
       const valid = BkkLib.validMapShape(pts);
       if (BkkLib.keepsFullLineShape(row)) return valid;
@@ -5748,11 +6401,12 @@ class BKKHopCard extends HTMLElement {
       return BkkLib.clipRideShape(
         valid,
         board,
-        BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon)
-          || BkkLib.knownStopCoords({
-            id: cfg.destStopId, name: cfg.destName, key: cfg.destKey,
-          }),
-        row,
+        BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon) || BkkLib.knownStopCoords({
+          id: cfg.destStopId,
+          name: cfg.destName,
+          key: cfg.destKey
+        }),
+        row
       );
     };
     if (!BkkLib.keepsFullLineShape(row)) {
@@ -5765,23 +6419,21 @@ class BKKHopCard extends HTMLElement {
         motisShape,
         futarShape,
         motisCoversHead,
-        BkkLib.isTrainRow(row) ? clipForeignFutar(row && row.shape) : (row && row.shape),
+        BkkLib.isTrainRow(row) ? clipForeignFutar(row && row.shape) : row && row.shape
       );
       const motisGap = BkkLib.shapeGpsGapMeters(motisShape, row && row.lat, row && row.lon);
       const futarGap = BkkLib.shapeGpsGapMeters(futarShape, row && row.lat, row && row.lon);
-      if (motisGap != null && futarGap != null && futarGap + 400 < motisGap && futarGap < 3000) {
+      if (motisGap != null && futarGap != null && futarGap + 400 < motisGap && futarGap < 3e3) {
         shape = futarShape;
-      } else if (motisGap != null && motisGap > 4000 && futarShape.length >= 2
-          && (futarGap == null || futarGap < motisGap)) {
+      } else if (motisGap != null && motisGap > 4e3 && futarShape.length >= 2 && (futarGap == null || futarGap < motisGap)) {
         shape = futarShape;
       }
     }
-    /* Published line stays whole (8E Újpalota→Kelenföld, not the hop). */
-    let destPt = (motisMap && motisMap.dest)
-      || BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon)
-      || BkkLib.knownStopCoords({
-        id: cfg.destStopId, name: cfg.destName, key: cfg.destKey,
-      });
+    let destPt = motisMap && motisMap.dest || BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon) || BkkLib.knownStopCoords({
+      id: cfg.destStopId,
+      name: cfg.destName,
+      key: cfg.destKey
+    });
     if (!destPt && cfg.destName && !BkkLib.keepsFullLineShape(row)) {
       try {
         const destRef = await BkkLib.transitousStopRef({
@@ -5789,16 +6441,16 @@ class BKKHopCard extends HTMLElement {
           name: cfg.destName,
           key: cfg.destKey,
           lat: cfg.destLat,
-          lon: cfg.destLon,
+          lon: cfg.destLon
         }, BkkLib.vehicleBucket(row));
         destPt = destRef && BkkLib.mapGpsLatLon(destRef.lat, destRef.lon);
-      } catch (_e) { /* keep the combined shape */ }
+      } catch (_e) {
+      }
     }
     const clipped = BkkLib.clipRideShape(shape, board, destPt, row);
     if (clipped.length >= 2) shape = clipped;
-    return { shape: BkkLib.validMapShape(shape), board: board };
+    return { shape: BkkLib.validMapShape(shape), board };
   }
-
   async _openVehicleMap(row) {
     const lang = this._lang();
     const cfg = this._config || {};
@@ -5814,96 +6466,106 @@ class BKKHopCard extends HTMLElement {
     let shape = BkkLib.validMapShape(row.shape);
     let hasShape = shape.length >= 2;
     let positionEstimated = false;
-    const tripId = row.tripId || '';
+    const tripId = row.tripId || "";
     if (!hasGps && !tripId && !hasShape) {
-      this._showMapNotice(t(lang, 'mapNoData'));
+      this._showMapNotice(t(lang, "mapNoData"));
       return;
     }
     let L;
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
-      this._showMapNotice(t(lang, 'mapLeafletFail'));
+      this._showMapNotice(t(lang, "mapLeafletFail"));
       return;
     }
-    const overlay = document.createElement('div');
-    overlay.className = 'ht-map-overlay';
-    const sub = this._mapTypeLabel(row.vehicle || row.type, lang)
-      + (row.model ? ' \u00b7 ' + row.model : '');
+    const overlay = document.createElement("div");
+    overlay.className = "ht-map-overlay";
+    const sub = this._mapTypeLabel(row.vehicle || row.type, lang) + (row.model ? " · " + row.model : "");
     overlay.innerHTML = `
       <style>${this._mapChromeCss()}</style>
       <div class="ht-map-panel" role="dialog" aria-modal="true">
         <div class="ht-map-head">
           <div class="meta">
-            <div>${BkkLib.esc(this._mapGlyph(row.vehicle || row.type))} ${BkkLib.esc(row.label || '')} \u2192 ${BkkLib.esc(row.headsign || '')}</div>
+            <div>${BkkLib.esc(this._mapGlyph(row.vehicle || row.type))} ${BkkLib.esc(row.label || "")} → ${BkkLib.esc(row.headsign || "")}</div>
             <div class="sub">${BkkLib.esc(sub)}</div>
           </div>
-          <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, 'mapClose'))}">\u00d7</button>
+          <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, "mapClose"))}">×</button>
         </div>
         <div class="ht-map-canvas"></div>
-        <div class="ht-map-foot">${BkkLib.esc(t(lang, 'mapLoadingRoute'))}</div>
+        <div class="ht-map-foot">${BkkLib.esc(t(lang, "mapLoadingRoute"))}</div>
       </div>
     `;
     (document.documentElement || document.body).appendChild(overlay);
     this._mapOverlay = overlay;
     this._openMapKey = key;
     this._onMapKey = (ev) => {
-      if (ev.key === 'Escape') this._closeVehicleMap();
+      if (ev.key === "Escape") this._closeVehicleMap();
     };
-    document.addEventListener('keydown', this._onMapKey);
-    overlay.querySelector('.ht-map-close').addEventListener('click', () => this._closeVehicleMap());
-    overlay.addEventListener('click', (ev) => {
+    document.addEventListener("keydown", this._onMapKey);
+    overlay.querySelector(".ht-map-close").addEventListener("click", () => this._closeVehicleMap());
+    overlay.addEventListener("click", (ev) => {
       if (ev.target === overlay) this._closeVehicleMap();
     });
-    const canvas = overlay.querySelector('.ht-map-canvas');
-    const foot = overlay.querySelector('.ht-map-foot');
+    const canvas = overlay.querySelector(".ht-map-canvas");
+    const foot = overlay.querySelector(".ht-map-foot");
     const startLat = hasGps ? lat : 47.5;
     const startLon = hasGps ? lon : 19.05;
     let map;
     try {
       map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView([startLat, startLon], hasGps ? 12 : 8);
-      L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
+      L.tileLayer("https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png", {
         maxZoom: 20,
-        subdomains: 'abc',
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>',
+        subdomains: "abc",
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>'
       }).addTo(map);
     } catch (_e) {
-      this._showMapNotice(t(lang, 'mapLeafletFail'));
+      this._showMapNotice(t(lang, "mapLeafletFail"));
       return;
     }
     this._map = map;
     this._mapRouteLayers = [];
-    const resizeMap = () => { try { map.invalidateSize(); } catch (_e) { /* ignore */ } };
-    requestAnimationFrame(() => { resizeMap(); requestAnimationFrame(resizeMap); });
+    const resizeMap = () => {
+      try {
+        map.invalidateSize();
+      } catch (_e) {
+      }
+    };
+    requestAnimationFrame(() => {
+      resizeMap();
+      requestAnimationFrame(resizeMap);
+    });
     const drawMarker = () => {
       if (!this._map || this._map !== map) return;
       const here = BkkLib.mapGpsLatLon(lat, lon);
       if (!here) return;
       if (this._mapMarker) {
-        try { this._map.removeLayer(this._mapMarker); } catch (_e) { /* ignore */ }
+        try {
+          this._map.removeLayer(this._mapMarker);
+        } catch (_e) {
+        }
       }
       const icon = L.divIcon({
-        className: '',
+        className: "",
         html: this._dotIcon(row, hasGps && !positionEstimated, lang),
         iconSize: [22, 22],
-        iconAnchor: [11, 11],
+        iconAnchor: [11, 11]
       });
-      this._mapMarker = L.marker(here, { icon: icon, zIndexOffset: 600 }).addTo(map);
+      this._mapMarker = L.marker(here, { icon, zIndexOffset: 600 }).addTo(map);
     };
     if (hasGps) {
       drawMarker();
       foot.textContent = this._mapFootText(row, false, true, false, lang);
     }
-    let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon)
-      || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
+    let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon) || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
     try {
       const got = await this._loadRowMapShape(row);
       shape = BkkLib.validMapShape(got.shape);
       hasShape = shape.length >= 2;
       if (got.board) board = got.board;
-    } catch (_e) { /* timetable row still shows the live dot */ }
+    } catch (_e) {
+    }
     if (!this._map || this._map !== map || !this._mapOverlay) {
-      this._openingMap = '';
+      this._openingMap = "";
       return;
     }
     const pos = BkkLib.mapGpsLatLon(lat, lon);
@@ -5914,10 +6576,16 @@ class BKKHopCard extends HTMLElement {
     }
     const routeColor = BkkLib.mapRouteColor(row, {});
     const lineBase = {
-      lineJoin: 'round', lineCap: 'round', noClip: true, pane: 'overlayPane',
+      lineJoin: "round",
+      lineCap: "round",
+      noClip: true,
+      pane: "overlayPane"
     };
     const applyView = () => {
-      try { map.invalidateSize(); } catch (_e) { /* ignore */ }
+      try {
+        map.invalidateSize();
+      } catch (_e) {
+      }
       if (hasShape) {
         const bounds = L.latLngBounds(shape);
         if (hasPosition) bounds.extend([lat, lon]);
@@ -5931,17 +6599,25 @@ class BKKHopCard extends HTMLElement {
         map.setView([lat, lon], 13);
       }
       (this._mapRouteLayers || []).forEach((layer) => {
-        if (layer && typeof layer.redraw === 'function') {
-          try { layer.redraw(); } catch (_e) { /* ignore */ }
+        if (layer && typeof layer.redraw === "function") {
+          try {
+            layer.redraw();
+          } catch (_e) {
+          }
         }
       });
     };
     if (hasShape) {
       const outline = L.polyline(shape, Object.assign({
-        color: '#1a1a1a', weight: 7, opacity: 0.45, interactive: false,
+        color: "#1a1a1a",
+        weight: 7,
+        opacity: 0.45,
+        interactive: false
       }, lineBase)).addTo(map);
       const line = L.polyline(shape, Object.assign({
-        color: routeColor, weight: 5, opacity: 0.98,
+        color: routeColor,
+        weight: 5,
+        opacity: 0.98
       }, lineBase)).addTo(map);
       this._mapRouteLayers.push(outline, line);
       this._mapRouteOutline = outline;
@@ -5949,10 +6625,10 @@ class BKKHopCard extends HTMLElement {
     }
     if (board) {
       const stopIcon = L.divIcon({
-        className: '',
+        className: "",
         html: this._boardIcon(cfg.stopName, lang),
         iconSize: [18, 18],
-        iconAnchor: [9, 9],
+        iconAnchor: [9, 9]
       });
       this._mapBoardMarker = L.marker(board, { icon: stopIcon, zIndexOffset: 500 }).addTo(map);
     }
@@ -5961,18 +6637,17 @@ class BKKHopCard extends HTMLElement {
     const hasBoard = !!board;
     foot.textContent = this._mapFootText(row, hasShape, hasGps, positionEstimated, lang, hasBoard);
     if (!hasShape && !hasBoard && !hasPosition) {
-      foot.textContent = t(lang, 'mapNothingToShow');
+      foot.textContent = t(lang, "mapNothingToShow");
     } else if (!hasShape) {
-      foot.textContent = t(lang, 'mapNoGeometry');
+      foot.textContent = t(lang, "mapNoGeometry");
     }
     setTimeout(applyView, 80);
-    this._openingMap = '';
+    this._openingMap = "";
   }
-
   _syncOpenMap() {
     if (!this._map || !this._openMapKey) return;
     const lang = this._lang();
-    const L = typeof window !== 'undefined' ? window.L : null;
+    const L = typeof window !== "undefined" ? window.L : null;
     if (!this._mapMarker) return;
     const row = (this._rows || []).find((r) => this._mapKey(r) === this._openMapKey);
     if (!row || !row.hasGps || row.lat == null || row.lon == null) return;
@@ -5981,32 +6656,31 @@ class BKKHopCard extends HTMLElement {
     this._mapMarker.setLatLng(gps);
     if (L) {
       this._mapMarker.setIcon(L.divIcon({
-        className: '',
+        className: "",
         html: this._dotIcon(row, true, lang),
         iconSize: [22, 22],
-        iconAnchor: [11, 11],
+        iconAnchor: [11, 11]
       }));
     }
-    const foot = this._mapOverlay && this._mapOverlay.querySelector('.ht-map-foot');
+    const foot = this._mapOverlay && this._mapOverlay.querySelector(".ht-map-foot");
     if (foot) foot.textContent = this._mapFootText(row, true, true, false, lang, !!this._mapBoardMarker);
   }
-
   _departMode() {
     return BkkLib.mode(this._config || {});
   }
-
   async _reload() {
-    /* Overlapping reloads (config edits, reconnects) must not leave an orphan
-       interval behind, so every run is tagged with the generation that owns it. */
     const gen = ++this._gen;
     this._reloadActive = true;
     const cfg = this._config || {};
     if (cfg.volanIndex) setVolanIndexUrl(cfg.volanIndex);
     if (cfg.cityIndex) setCityIndexUrl(cfg.cityIndex);
     if (cfg.mavIndex) setMavIndexUrl(cfg.mavIndex);
-    if (this._poll) { clearInterval(this._poll); this._poll = null; }
+    if (this._poll) {
+      clearInterval(this._poll);
+      this._poll = null;
+    }
     const mode = this._departMode();
-    const ready = cfg.stopId && cfg.destKey && (this._apiKey() || mode === 'volan' || mode === 'helyi' || mode === 'all');
+    const ready = cfg.stopId && cfg.destKey && (this._apiKey() || mode === "volan" || mode === "helyi" || mode === "all");
     if (!ready) {
       this._rows = [];
       this._loading = false;
@@ -6021,33 +6695,31 @@ class BKKHopCard extends HTMLElement {
           this._rows = [];
           this._rawRows = [];
           this._loading = false;
-          this._err = '';
+          this._err = "";
           this._journey = null;
-          this._journeyKey = '';
+          this._journeyKey = "";
           this._journeyLoading = false;
           this._paint();
-          if (typeof this._considerJourney === 'function') this._considerJourney();
+          if (typeof this._considerJourney === "function") this._considerJourney();
           return;
         }
-        const wantElvira = (mode === 'mav' || mode === 'all') && this._hass;
-        const elviraP = wantElvira
-          ? BkkLib.elviraBetween(
-            this._hass,
-            cfg.stopId,
-            cfg.destStopId || '',
-            cfg.minutesAfter,
-            cfg.destName || '',
-            { apiKey: this._apiKey(), originName: cfg.stopName || '' },
-          ).catch(() => [])
-          : Promise.resolve([]);
+        const wantElvira = (mode === "mav" || mode === "all") && this._hass;
+        const elviraP = wantElvira ? BkkLib.elviraBetween(
+          this._hass,
+          cfg.stopId,
+          cfg.destStopId || "",
+          cfg.minutesAfter,
+          cfg.destName || "",
+          { apiKey: this._apiKey(), originName: cfg.stopName || "" }
+        ).catch(() => []) : Promise.resolve([]);
         const paintRows = (list) => {
           if (gen !== this._gen) return;
-          const merged = list || [];
-          merged.forEach((row) => BkkLib.applyRailBadge(row));
-          this._rawRows = merged;
+          const merged2 = list || [];
+          merged2.forEach((row) => BkkLib.applyRailBadge(row));
+          this._rawRows = merged2;
           BkkLib.enrichFromHass(this._hass, this._rawRows);
           this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
-          this._err = '';
+          this._err = "";
           this._loading = false;
           this._paint();
         };
@@ -6057,53 +6729,59 @@ class BKKHopCard extends HTMLElement {
         let elviraRows = [];
         const publish = () => {
           if (gen !== this._gen) return;
-          let list = futarFull
-            ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
-            : earlyRows.slice();
+          let list = futarFull ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap) : earlyRows.slice();
           list = BkkLib.mergeVolanRows(list, elviraRows, cap, { overlayOnly: true });
           paintRows(list);
         };
         let startThrough = null;
-        let throughResolve = () => {};
-        const throughWait = new Promise((resolve) => { throughResolve = resolve; });
+        let throughResolve = () => {
+        };
+        const throughWait = new Promise((resolve) => {
+          throughResolve = resolve;
+        });
         const dest = {
           key: cfg.destKey,
           name: cfg.destName,
-          id: cfg.destStopId || '',
+          id: cfg.destStopId || "",
           lat: cfg.destLat,
-          lon: cfg.destLon,
+          lon: cfg.destLon
         };
         const origin = {
           id: cfg.stopId,
-          name: cfg.stopName || '',
+          name: cfg.stopName || "",
           lat: cfg.stopLat,
-          lon: cfg.stopLon,
+          lon: cfg.stopLon
         };
         const rows = await BkkLib.departures(
-          this._apiKey(), cfg.stopId, cfg.routeIds, dest,
+          this._apiKey(),
+          cfg.stopId,
+          cfg.routeIds,
+          dest,
           {
-            originName: cfg.stopName || '',
+            originName: cfg.stopName || "",
             cache: this._tripCache || {},
             mode: this._departMode(),
-            city: cfg.city || '',
+            city: cfg.city || "",
             minutesAfter: cfg.minutesAfter,
             deferTravel: true,
             deferGps: true,
             hass: this._hass,
             skipElvira: true,
             onPartial: paintRows,
-            armThroughCheck: (fn) => { startThrough = fn; },
+            armThroughCheck: (fn) => {
+              startThrough = fn;
+            },
             onFutarUpdate: (full) => {
               throughResolve();
               if (gen !== this._gen) return;
               futarFull = full || [];
               publish();
-            },
-          },
+            }
+          }
         );
         if (gen !== this._gen) return;
         this._journey = null;
-        this._journeyKey = '';
+        this._journeyKey = "";
         this._journeyLoading = false;
         earlyRows = rows || [];
         publish();
@@ -6117,11 +6795,16 @@ class BKKHopCard extends HTMLElement {
             this._syncOpenMap();
           }),
           Promise.all((this._rawRows || []).map(async (row) => {
-            if (row.travel != null || /^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ''))) return;
+            if (row.travel != null || /^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ""))) return;
             row.travel = await BkkLib.travelMin(
-              this._apiKey(), row.tripId, cfg.destKey, row.dep, origin, this._tripCache || {},
+              this._apiKey(),
+              row.tripId,
+              cfg.destKey,
+              row.dep,
+              origin,
+              this._tripCache || {}
             );
-          })),
+          }))
         ]);
         if (startThrough) {
           startThrough();
@@ -6133,21 +6816,19 @@ class BKKHopCard extends HTMLElement {
         publish();
         await throughWait;
         if (gen !== this._gen) return;
-        let merged = futarFull
-          ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
-          : earlyRows.slice();
+        let merged = futarFull ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap) : earlyRows.slice();
         merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
         if (!merged.length) {
           merged = await BkkLib.fillTransitousIfEmpty(merged, origin, dest, {
             mode: this._departMode(),
-            minutesAfter: cfg.minutesAfter,
+            minutesAfter: cfg.minutesAfter
           });
           if (gen !== this._gen) return;
           merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
           earlyRows = merged;
           paintRows(merged);
         }
-        if (typeof this._considerJourney === 'function') this._considerJourney();
+        if (typeof this._considerJourney === "function") this._considerJourney();
         await gpsTravel;
         if (gen !== this._gen) return;
         this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
@@ -6165,16 +6846,16 @@ class BKKHopCard extends HTMLElement {
       await run();
       if (!this.isConnected || gen !== this._gen) return;
       if (!this._shouldPoll()) return;
-      const every = Math.max(15, Number(cfg.refresh || 45)) * 1000;
+      const every = Math.max(15, Number(cfg.refresh || 45)) * 1e3;
       this._poll = setInterval(run, every);
     } finally {
       if (gen === this._gen) this._reloadActive = false;
     }
   }
-}
+};
 
-
-class BKKPlannerCard extends BKKHopCard {
+// src/planner-card.js
+var BKKPlannerCard = class extends BKKHopCard {
   constructor() {
     super();
     this._searchTimer = null;
@@ -6188,52 +6869,45 @@ class BKKPlannerCard extends BKKHopCard {
     this._destsLoading = false;
     this._pickersMounted = false;
   }
-
   static async getConfigElement() {
     if (!customElements.get(BKK_PLANNER_EDITOR)) {
       await customElements.whenDefined(BKK_PLANNER_EDITOR);
     }
     return document.createElement(BKK_PLANNER_EDITOR);
   }
-
   static getStubConfig() {
     return {
-      name: '',
-      language: 'auto',
+      name: "",
+      language: "auto",
       minutesAfter: DEFAULT_MINUTES_AFTER,
-      stopId: '',
-      stopName: '',
-      destKey: '',
-      destName: '',
-      destStopId: '',
-      routeIds: [],
+      stopId: "",
+      stopName: "",
+      destKey: "",
+      destName: "",
+      destStopId: "",
+      routeIds: []
     };
   }
-
   getCardSize() {
     return Math.max(6, super.getCardSize() + 3);
   }
-
   _departMode() {
-    return 'all';
+    return "all";
   }
-
   _shouldPoll() {
     return false;
   }
-
   _shouldReloadOnConnect() {
-    return !(this._journey || this._journeyLoading || (this._rows && this._rows.length));
+    return !(this._journey || this._journeyLoading || this._rows && this._rows.length);
   }
-
   /* A full paint remounts the inline map. Leave the countdown frozen until
      the user changes origin, destination or the look-ahead. */
-  _startTick() {}
-
+  _startTick() {
+  }
   _considerJourney() {
     const cfg = this._config || {};
     const horizon = clampMinutesAfter(cfg.minutesAfter);
-    const key = [cfg.stopId, cfg.destStopId || '', cfg.destName, horizon].join('|');
+    const key = [cfg.stopId, cfg.destStopId || "", cfg.destName, horizon].join("|");
     if (!cfg.stopId || !cfg.destName) return;
     if (this._journeyKey === key && (this._journeyLoading || this._journey)) return;
     const gen = this._gen;
@@ -6241,10 +6915,10 @@ class BKKPlannerCard extends BKKHopCard {
     this._journeyLoading = true;
     BkkLib.planJourney(
       this._apiKey(),
-      { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon },
-      { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
+      { id: cfg.stopId, name: cfg.stopName || "", lat: cfg.stopLat, lon: cfg.stopLon },
+      { id: cfg.destStopId || "", name: cfg.destName || "", lat: cfg.destLat, lon: cfg.destLon },
       this._hass,
-      { minutesAfter: horizon },
+      { minutesAfter: horizon }
     ).then(async (journey) => {
       if (gen !== this._gen) return;
       this._journeyLoading = false;
@@ -6253,7 +6927,8 @@ class BKKPlannerCard extends BKKHopCard {
       if (!journey) return;
       try {
         await BkkLib.fillJourneyShapes(journey);
-      } catch (_e) { /* draw the endpoint fallback */ }
+      } catch (_e) {
+      }
       if (gen !== this._gen) return;
       this._journey = journey;
       this._paintJourney();
@@ -6262,79 +6937,93 @@ class BKKPlannerCard extends BKKHopCard {
       this._journeyLoading = false;
     });
   }
-
   _emptyBodyMessage(lang, cfg) {
-    if (this._journey && this._journey.legs && this._journey.legs.length) return '';
-    if (this._journeyLoading) return t(lang, 'cardLoading');
+    if (this._journey && this._journey.legs && this._journey.legs.length) return "";
+    if (this._journeyLoading) return t(lang, "cardLoading");
     return super._emptyBodyMessage(lang, cfg);
   }
-
   _paint() {
     this._teardownPlannerInlineMap();
     super._paint();
     this._paintJourney();
   }
-
   disconnectedCallback() {
     this._teardownPlannerInlineMap();
     super.disconnectedCallback();
   }
-
   connectedCallback() {
     super.connectedCallback();
     if (!this._painted || this._plannerMap) return;
-    const host = this._elBody && this._elBody.querySelector('.journey-plan');
-    if (host && host.querySelector('#pjmap')) this._mountPlannerInlineMap(host);
+    const host = this._elBody && this._elBody.querySelector(".journey-plan");
+    if (host && host.querySelector("#pjmap")) this._mountPlannerInlineMap(host);
   }
-
   _teardownPlannerInlineMap() {
     if (this._plannerMap) {
-      try { this._plannerMap.remove(); } catch (_e) { /* ignore */ }
+      try {
+        this._plannerMap.remove();
+      } catch (_e) {
+      }
       this._plannerMap = null;
     }
   }
-
   _drawJourneyPolylines(L, map, segs, opts) {
     if (!Array.isArray(segs) || !segs.length) return [];
     opts = opts || {};
     const clickable = !!opts.interactive;
     const allPts = [];
-    const lineBase = { lineJoin: 'round', lineCap: 'round', noClip: true };
+    const lineBase = { lineJoin: "round", lineCap: "round", noClip: true };
     segs.forEach((seg) => {
       const shape = seg.shape;
       shape.forEach((pt) => allPts.push(pt));
       if (seg.walk) {
         L.polyline(shape, Object.assign({
-          color: '#1a1a1a', weight: 5, opacity: 0.35, dashArray: '8 8', interactive: false,
+          color: "#1a1a1a",
+          weight: 5,
+          opacity: 0.35,
+          dashArray: "8 8",
+          interactive: false
         }, lineBase)).addTo(map);
         L.polyline(shape, Object.assign({
-          color: '#888888', weight: 3, opacity: 0.95, dashArray: '8 8', interactive: clickable,
+          color: "#888888",
+          weight: 3,
+          opacity: 0.95,
+          dashArray: "8 8",
+          interactive: clickable
         }, lineBase)).addTo(map);
       } else {
         L.polyline(shape, Object.assign({
-          color: '#1a1a1a', weight: 7, opacity: 0.45, interactive: false,
+          color: "#1a1a1a",
+          weight: 7,
+          opacity: 0.45,
+          interactive: false
         }, lineBase)).addTo(map);
         L.polyline(shape, Object.assign({
-          color: seg.color, weight: 5, opacity: 0.98, interactive: clickable,
+          color: seg.color,
+          weight: 5,
+          opacity: 0.98,
+          interactive: clickable
         }, lineBase)).addTo(map);
       }
     });
     const pin = (pt, fill) => {
       if (!pt) return;
       L.circleMarker(pt, {
-        radius: 7, color: '#fff', weight: 2, fillColor: fill, fillOpacity: 1,
+        radius: 7,
+        color: "#fff",
+        weight: 2,
+        fillColor: fill,
+        fillOpacity: 1
       }).addTo(map);
     };
-    pin(segs[0].shape[0], '#0F6FC6');
+    pin(segs[0].shape[0], "#0F6FC6");
     for (let i = 0; i < segs.length - 1; i++) {
       const shape = segs[i].shape;
-      pin(shape[shape.length - 1], '#555555');
+      pin(shape[shape.length - 1], "#555555");
     }
     const lastSeg = segs[segs.length - 1].shape;
-    pin(lastSeg[lastSeg.length - 1], '#0F6FC6');
+    pin(lastSeg[lastSeg.length - 1], "#0F6FC6");
     return allPts;
   }
-
   _fitJourneyView(L, map, allPts, pad) {
     if (!map || !allPts || allPts.length < 2) return;
     const bounds = L.latLngBounds(allPts);
@@ -6342,82 +7031,74 @@ class BKKPlannerCard extends BKKHopCard {
       try {
         map.invalidateSize();
         map.fitBounds(bounds, { padding: [pad, pad], maxZoom: 14 });
-      } catch (_e) { /* ignore */ }
+      } catch (_e) {
+      }
     };
     apply();
-    requestAnimationFrame(() => { apply(); requestAnimationFrame(apply); });
+    requestAnimationFrame(() => {
+      apply();
+      requestAnimationFrame(apply);
+    });
     setTimeout(apply, 200);
   }
-
   _paintJourney() {
     if (!this._elBody) return;
     this._teardownPlannerInlineMap();
-    const prev = this._elBody.querySelector('.journey-plan');
+    const prev = this._elBody.querySelector(".journey-plan");
     if (prev) prev.remove();
     const cfg = this._config || {};
     if (!cfg.stopId || !cfg.destName) return;
     const lang = this._lang();
     const esc = BkkLib.esc;
-    const nowSec = Math.floor(Date.now() / 1000);
+    const nowSec = Math.floor(Date.now() / 1e3);
     const visible = (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
     const journey = this._journey;
-    const mapBtn = `<button type="button" id="pmap">${esc(t(lang, 'plannerShowMap'))}</button>`;
-    const bindMap = (box, useBoard) => {
-      this._elBody.insertBefore(box, this._elBody.firstChild);
-      const btn = box.querySelector('#pmap');
+    const mapBtn = `<button type="button" id="pmap">${esc(t(lang, "plannerShowMap"))}</button>`;
+    const bindMap = (box2, useBoard) => {
+      this._elBody.insertBefore(box2, this._elBody.firstChild);
+      const btn = box2.querySelector("#pmap");
       if (btn) {
-        btn.addEventListener('click', () => {
+        btn.addEventListener("click", () => {
           if (!useBoard) return this._openJourneyMap();
           const first = visible[0];
           if (first) return this._openVehicleMap(first);
-          this._showMapNotice(t(lang, 'mapNoData'));
+          this._showMapNotice(t(lang, "mapNoData"));
         });
       }
     };
-    const showJourney = !!(journey && journey.legs && journey.legs.length
-      && (!visible.length || BkkLib.journeyBeatsBoard(journey, visible)));
+    const showJourney = !!(journey && journey.legs && journey.legs.length && (!visible.length || BkkLib.journeyBeatsBoard(journey, visible)));
     if (visible.length && !showJourney) {
-      const box = document.createElement('div');
-      box.className = 'journey-plan j-map-only';
-      box.innerHTML = mapBtn;
-      bindMap(box, true);
+      const box2 = document.createElement("div");
+      box2.className = "journey-plan j-map-only";
+      box2.innerHTML = mapBtn;
+      bindMap(box2, true);
       return;
     }
     if (!showJourney) return;
     const legs = journey.legs.map((leg) => {
       if (leg.walk) {
-        const walkKey = leg.stationWalk ? 'plannerStationWalk' : 'plannerWalk';
-        return `<div class="j-leg j-walk"><span class="j-mode">${esc(t(lang, walkKey, [leg.minutes, leg.meters]))}</span>`
-          + `<span class="j-where">${esc(leg.from)} \u2192 ${esc(leg.to)}</span></div>`;
+        const walkKey = leg.stationWalk ? "plannerStationWalk" : "plannerWalk";
+        return `<div class="j-leg j-walk"><span class="j-mode">${esc(t(lang, walkKey, [leg.minutes, leg.meters]))}</span><span class="j-where">${esc(leg.from)} → ${esc(leg.to)}</span></div>`;
       }
-      const wait = leg.waitMin >= 1
-        ? `<div class="j-leg j-wait">${esc(t(lang, 'plannerWait', leg.waitMin))}</div>`
-        : '';
-      const ride = leg.label
-        ? `<span class="j-badge" style="${esc(this._badgeStyle({ color: leg.color, textcolor: leg.text }))}">${esc(leg.label)}</span>`
-        : '';
-      return wait + `<div class="j-leg">${ride}<span class="j-where">${esc(leg.headsign || leg.to)}</span>`
-        + `<span class="j-min">${esc(t(lang, 'plannerRide', leg.minutes))}</span></div>`;
-    }).join('');
-    const box = document.createElement('div');
-    box.className = 'journey-plan';
-    box.innerHTML = `<div class="j-title">${esc(t(lang, 'plannerJourneyTitle'))}</div>`
-      + `<div class="j-sum">${esc(t(lang, 'plannerJourneySummary', [journey.durationMin, journey.transfers, journey.walkMin, journey.waitMin || 0]))}</div>`
-      + `<div id="pjmap" class="j-map" hidden></div>`
-      + mapBtn
-      + legs;
+      const wait = leg.waitMin >= 1 ? `<div class="j-leg j-wait">${esc(t(lang, "plannerWait", leg.waitMin))}</div>` : "";
+      const ride = leg.label ? `<span class="j-badge" style="${esc(this._badgeStyle({ color: leg.color, textcolor: leg.text }))}">${esc(leg.label)}</span>` : "";
+      return wait + `<div class="j-leg">${ride}<span class="j-where">${esc(leg.headsign || leg.to)}</span><span class="j-min">${esc(t(lang, "plannerRide", leg.minutes))}</span></div>`;
+    }).join("");
+    const box = document.createElement("div");
+    box.className = "journey-plan";
+    box.innerHTML = `<div class="j-title">${esc(t(lang, "plannerJourneyTitle"))}</div><div class="j-sum">${esc(t(lang, "plannerJourneySummary", [journey.durationMin, journey.transfers, journey.walkMin, journey.waitMin || 0]))}</div><div id="pjmap" class="j-map" hidden></div>` + mapBtn + legs;
     bindMap(box, false);
     this._mountPlannerInlineMap(box);
   }
-
   async _mountPlannerInlineMap(host) {
-    const el = host && host.querySelector('#pjmap');
+    const el = host && host.querySelector("#pjmap");
     if (!el) return;
     try {
       const cfg = this._config || {};
       try {
         await BkkLib.fillJourneyShapes(this._journey);
-      } catch (_e) { /* draw the endpoint fallback */ }
+      } catch (_e) {
+      }
       if (!el.isConnected) return;
       const segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
       if (!segs.length) {
@@ -6444,78 +7125,80 @@ class BKKPlannerCard extends BKKHopCard {
         keyboard: false,
         preferCanvas: false,
         attributionControl: true,
-        zoomControl: false,
+        zoomControl: false
       }).setView(start, 8);
       this._plannerMap = map;
-      L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
+      L.tileLayer("https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png", {
         maxZoom: 20,
-        subdomains: 'abc',
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+        subdomains: "abc",
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
       }).addTo(map);
       const allPts = this._drawJourneyPolylines(L, map, segs, { interactive: false });
-      map.on('click', () => this._openJourneyMap());
+      map.on("click", () => this._openJourneyMap());
       this._fitJourneyView(L, map, allPts, 16);
     } catch (_e) {
       this._teardownPlannerInlineMap();
       el.hidden = true;
     }
   }
-
   async _openJourneyMap() {
     const lang = this._lang();
     const cfg = this._config || {};
-    if (this._openingMap === 'journey') return;
-    if (this._mapOverlay && this._openMapKey === 'journey') return;
+    if (this._openingMap === "journey") return;
+    if (this._mapOverlay && this._openMapKey === "journey") return;
     this._closeVehicleMap();
-    this._openingMap = 'journey';
+    this._openingMap = "journey";
     try {
       await BkkLib.fillJourneyShapes(this._journey);
-    } catch (_e) { /* draw the endpoint fallback */ }
+    } catch (_e) {
+    }
     let segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
     if (!segs.length && cfg.stopId && cfg.destName) {
       try {
         const journey = await BkkLib.planJourney(
           this._apiKey(),
-          { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon },
-          { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
+          { id: cfg.stopId, name: cfg.stopName || "", lat: cfg.stopLat, lon: cfg.stopLon },
+          { id: cfg.destStopId || "", name: cfg.destName || "", lat: cfg.destLat, lon: cfg.destLon },
           this._hass,
-          { minutesAfter: clampMinutesAfter(cfg.minutesAfter) },
+          { minutesAfter: clampMinutesAfter(cfg.minutesAfter) }
         );
         if (journey) this._journey = journey;
         try {
           await BkkLib.fillJourneyShapes(this._journey);
-        } catch (_e) { /* draw the endpoint fallback */ }
+        } catch (_e) {
+        }
         segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
-      } catch (_e) { /* fall through to the no-geometry notice */ }
+      } catch (_e) {
+      }
     }
     if (!segs.length) {
-      this._openingMap = '';
-      this._showMapNotice(t(lang, 'mapNoData'));
+      this._openingMap = "";
+      this._showMapNotice(t(lang, "mapNoData"));
       return;
     }
     let L;
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
-      this._openingMap = '';
-      this._showMapNotice(t(lang, 'mapLeafletFail'));
+      this._openingMap = "";
+      this._showMapNotice(t(lang, "mapLeafletFail"));
       return;
     }
-    const overlay = document.createElement('div');
-    overlay.className = 'ht-map-overlay';
-    const title = `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
-    const footText = t(lang, 'plannerJourneySummary', [
+    const overlay = document.createElement("div");
+    overlay.className = "ht-map-overlay";
+    const title = `${cfg.stopName || ""} → ${cfg.destName || ""}`;
+    const footText = t(lang, "plannerJourneySummary", [
       this._journey && this._journey.durationMin,
       this._journey && this._journey.transfers,
       this._journey && this._journey.walkMin,
-      (this._journey && this._journey.waitMin) || 0,
+      this._journey && this._journey.waitMin || 0
     ]);
     overlay.innerHTML = `
       <style>${this._mapChromeCss()}</style>
       <div class="ht-map-panel" role="dialog" aria-modal="true">
         <div class="ht-map-head">
           <div class="meta">${BkkLib.esc(title)}</div>
-          <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, 'mapClose'))}">\u00d7</button>
+          <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, "mapClose"))}">×</button>
         </div>
         <div class="ht-map-canvas"></div>
         <div class="ht-map-foot">${BkkLib.esc(footText)}</div>
@@ -6523,73 +7206,68 @@ class BKKPlannerCard extends BKKHopCard {
     `;
     (document.documentElement || document.body).appendChild(overlay);
     this._mapOverlay = overlay;
-    this._openMapKey = 'journey';
+    this._openMapKey = "journey";
     this._onMapKey = (ev) => {
-      if (ev.key === 'Escape') this._closeVehicleMap();
+      if (ev.key === "Escape") this._closeVehicleMap();
     };
-    document.addEventListener('keydown', this._onMapKey);
-    overlay.querySelector('.ht-map-close').addEventListener('click', () => this._closeVehicleMap());
-    overlay.addEventListener('click', (ev) => {
+    document.addEventListener("keydown", this._onMapKey);
+    overlay.querySelector(".ht-map-close").addEventListener("click", () => this._closeVehicleMap());
+    overlay.addEventListener("click", (ev) => {
       if (ev.target === overlay) this._closeVehicleMap();
     });
-    const canvas = overlay.querySelector('.ht-map-canvas');
+    const canvas = overlay.querySelector(".ht-map-canvas");
     const start = segs[0].shape[0];
     let map;
     try {
       map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView(start, 8);
-      L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
+      L.tileLayer("https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png", {
         maxZoom: 20,
-        subdomains: 'abc',
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>',
+        subdomains: "abc",
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>'
       }).addTo(map);
     } catch (_e) {
-      this._openingMap = '';
-      this._showMapNotice(t(lang, 'mapLeafletFail'));
+      this._openingMap = "";
+      this._showMapNotice(t(lang, "mapLeafletFail"));
       return;
     }
     this._map = map;
     const allPts = this._drawJourneyPolylines(L, map, segs);
     this._fitJourneyView(L, map, allPts, 36);
-    this._openingMap = '';
+    this._openingMap = "";
   }
-
   _header() {
     const cfg = this._config || {};
     if (cfg.stopId && cfg.destKey) {
-      return `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
+      return `${cfg.stopName || ""} → ${cfg.destName || ""}`;
     }
-    return cfg.name || t(this._lang(), 'plannerTitle');
+    return cfg.name || t(this._lang(), "plannerTitle");
   }
-
   _render() {
     const first = !this._painted;
     super._render();
-    const card = this.shadowRoot && this.shadowRoot.querySelector('ha-card');
-    if (card) card.classList.add('is-planner');
+    const card = this.shadowRoot && this.shadowRoot.querySelector("ha-card");
+    if (card) card.classList.add("is-planner");
     if (first) this._mountPickers();
     else this._syncPickerLabels();
     this._ensureDepartureCaption();
   }
-
   _ensureDepartureCaption() {
-    if (!this.shadowRoot || !this._elBody || this.shadowRoot.getElementById('pdeps')) return;
-    const cap = document.createElement('div');
-    cap.id = 'pdeps';
-    cap.className = 'deps-label';
-    cap.textContent = t(this._lang(), 'plannerDepartures');
+    if (!this.shadowRoot || !this._elBody || this.shadowRoot.getElementById("pdeps")) return;
+    const cap = document.createElement("div");
+    cap.id = "pdeps";
+    cap.className = "deps-label";
+    cap.textContent = t(this._lang(), "plannerDepartures");
     this._elBody.parentNode.insertBefore(cap, this._elBody);
   }
-
   _planEl(id) {
     return this.shadowRoot ? this.shadowRoot.getElementById(id) : null;
   }
-
   _mountPickers() {
     if (this._pickersMounted || !this.shadowRoot) return;
-    const wrap = this.shadowRoot.querySelector('.wrap');
+    const wrap = this.shadowRoot.querySelector(".wrap");
     const head = this._elHead;
     if (!wrap || !head) return;
-    const style = document.createElement('style');
+    const style = document.createElement("style");
     style.textContent = `
       ha-card.is-planner { overflow: visible; }
       ha-card.is-planner .wrap { padding: 4px 4px 8px; }
@@ -6729,37 +7407,37 @@ class BKKPlannerCard extends BKKHopCard {
     `;
     this.shadowRoot.appendChild(style);
     const lang = this._lang();
-    const plan = document.createElement('div');
-    plan.className = 'plan';
+    const plan = document.createElement("div");
+    plan.className = "plan";
     plan.innerHTML = `
       <div class="journey">
         <div class="spine">
           <span class="dot from"></span>
           <span class="stem"></span>
-          <button id="pswap" type="button">${BkkLib.esc(t(lang, 'plannerSwap'))}</button>
+          <button id="pswap" type="button">${BkkLib.esc(t(lang, "plannerSwap"))}</button>
           <span class="stem"></span>
           <span class="dot to"></span>
         </div>
         <div class="places">
           <div class="place">
-            <div class="label" id="plab1">${BkkLib.esc(t(lang, 'plannerStep1'))}</div>
-            <input id="pq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerSearchPlaceholder'))}">
+            <div class="label" id="plab1">${BkkLib.esc(t(lang, "plannerStep1"))}</div>
+            <input id="pq" type="search" placeholder="${BkkLib.esc(t(lang, "plannerSearchPlaceholder"))}">
             <button type="button" class="picked" id="pstop"></button>
             <div class="suggest" id="pfav"></div>
             <div class="list" id="phits"></div>
           </div>
           <div class="place">
-            <div class="label" id="plab2">${BkkLib.esc(t(lang, 'plannerStep2'))}</div>
-            <input id="pdq" type="search" placeholder="${BkkLib.esc(t(lang, 'plannerDestPlaceholder'))}">
+            <div class="label" id="plab2">${BkkLib.esc(t(lang, "plannerStep2"))}</div>
+            <input id="pdq" type="search" placeholder="${BkkLib.esc(t(lang, "plannerDestPlaceholder"))}">
             <button type="button" class="picked" id="pdest"></button>
             <div class="list" id="pdhits"></div>
           </div>
         </div>
       </div>
       <div class="horizon">
-        <div class="label" id="plab3">${BkkLib.esc(t(lang, 'plannerStep3'))}</div>
-        <select id="pmin" aria-label="${BkkLib.esc(t(lang, 'plannerStep3'))}"></select>
-        <button id="preset" type="button">${BkkLib.esc(t(lang, 'plannerReset'))}</button>
+        <div class="label" id="plab3">${BkkLib.esc(t(lang, "plannerStep3"))}</div>
+        <select id="pmin" aria-label="${BkkLib.esc(t(lang, "plannerStep3"))}"></select>
+        <button id="preset" type="button">${BkkLib.esc(t(lang, "plannerReset"))}</button>
       </div>
     `;
     wrap.insertBefore(plan, head);
@@ -6767,143 +7445,132 @@ class BKKPlannerCard extends BKKHopCard {
     this._bindPickers();
     this._paintFav();
     this._syncPickerLabels();
-    this._paintDestHits('');
+    this._paintDestHits("");
   }
-
   _bindPickers() {
-    const q = this._planEl('pq');
-    const dq = this._planEl('pdq');
-    const reset = this._planEl('preset');
-    const swap = this._planEl('pswap');
+    const q = this._planEl("pq");
+    const dq = this._planEl("pdq");
+    const reset = this._planEl("preset");
+    const swap = this._planEl("pswap");
     if (q) {
-      q.addEventListener('input', () => {
+      q.addEventListener("input", () => {
         clearTimeout(this._searchTimer);
         this._searchTimer = setTimeout(() => this._searchOrigin(q.value.trim()), 280);
       });
-      q.addEventListener('blur', () => {
-        if ((this._config || {}).stopName && !q.value.trim()) q.classList.add('compact-hide');
+      q.addEventListener("blur", () => {
+        if ((this._config || {}).stopName && !q.value.trim()) q.classList.add("compact-hide");
       });
     }
     if (dq) {
-      dq.addEventListener('input', () => {
+      dq.addEventListener("input", () => {
         clearTimeout(this._destTimer);
         this._destTimer = setTimeout(() => this._searchDest(dq.value.trim()), 280);
       });
-      dq.addEventListener('focus', () => this._searchDest(dq.value.trim()));
-      dq.addEventListener('blur', () => {
-        if ((this._config || {}).destName && !dq.value.trim()) dq.classList.add('compact-hide');
+      dq.addEventListener("focus", () => this._searchDest(dq.value.trim()));
+      dq.addEventListener("blur", () => {
+        if ((this._config || {}).destName && !dq.value.trim()) dq.classList.add("compact-hide");
       });
     }
-    const stop = this._planEl('pstop');
-    const dest = this._planEl('pdest');
+    const stop = this._planEl("pstop");
+    const dest = this._planEl("pdest");
     if (stop && q) {
-      stop.addEventListener('click', () => {
-        q.classList.remove('compact-hide');
+      stop.addEventListener("click", () => {
+        q.classList.remove("compact-hide");
         q.focus();
       });
     }
     if (dest && dq) {
-      dest.addEventListener('click', () => {
-        dq.classList.remove('compact-hide');
+      dest.addEventListener("click", () => {
+        dq.classList.remove("compact-hide");
         dq.focus();
       });
     }
-    if (reset) reset.addEventListener('click', () => this._resetPlan());
-    if (swap) swap.addEventListener('click', () => this._swapPlan());
+    if (reset) reset.addEventListener("click", () => this._resetPlan());
+    if (swap) swap.addEventListener("click", () => this._swapPlan());
     this._paintMinutesAfter();
   }
-
   _paintFav() {
-    const box = this._planEl('pfav');
+    const box = this._planEl("pfav");
     if (!box) return;
-    box.innerHTML = '';
-    const shortName = (name) => String(name || '')
-      .replace(/^Budapest,\s*/, '')
-      .replace(/^Budapest-/, '')
-      .replace(/\s+aut\u00f3busz-p\u00e1lyaudvar$/, '')
-      .replace(/\s+vas\u00fat\u00e1llom\u00e1s$/, '')
-      .replace(/\s+p\u00e1lyaudvar$/, '');
+    box.innerHTML = "";
+    const shortName = (name) => String(name || "").replace(/^Budapest,\s*/, "").replace(/^Budapest-/, "").replace(/\s+aut\u00f3busz-p\u00e1lyaudvar$/, "").replace(/\s+vas\u00fat\u00e1llom\u00e1s$/, "").replace(/\s+p\u00e1lyaudvar$/, "");
     const list = BkkLib.collapseSameNameStops(
-      BKK_FAVORITES.concat(VOLAN_FAVORITES, MAV_FAVORITES),
+      BKK_FAVORITES.concat(VOLAN_FAVORITES, MAV_FAVORITES)
     );
-    const row = document.createElement('div');
-    row.className = 'suggest-row';
-    const stops = document.createElement('span');
-    stops.className = 'suggest-stops';
+    const row = document.createElement("div");
+    row.className = "suggest-row";
+    const stops = document.createElement("span");
+    stops.className = "suggest-stops";
     list.forEach((fav) => {
-      const id = String(fav.id || '');
-      const mark = /^BKK_0055/i.test(id) ? 'M'
-        : /^(?:volan_|hkir_|AREA_CS)/i.test(id) ? 'V'
-        : 'B';
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'suggest-stop';
-      const feed = document.createElement('span');
-      feed.className = 'suggest-feed';
+      const id = String(fav.id || "");
+      const mark = /^BKK_0055/i.test(id) ? "M" : /^(?:volan_|hkir_|AREA_CS)/i.test(id) ? "V" : "B";
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "suggest-stop";
+      const feed = document.createElement("span");
+      feed.className = "suggest-feed";
       feed.textContent = mark;
       button.appendChild(feed);
       button.appendChild(document.createTextNode(shortName(fav.name)));
-      button.addEventListener('click', () => this._pickOrigin(fav));
+      button.addEventListener("click", () => this._pickOrigin(fav));
       stops.appendChild(button);
     });
     row.appendChild(stops);
     box.appendChild(row);
   }
-
   _syncPickerLabels() {
     const cfg = this._config || {};
     const lang = this._lang();
-    const stop = this._planEl('pstop');
-    const dest = this._planEl('pdest');
-    const q = this._planEl('pq');
-    const dq = this._planEl('pdq');
+    const stop = this._planEl("pstop");
+    const dest = this._planEl("pdest");
+    const q = this._planEl("pq");
+    const dq = this._planEl("pdq");
     if (stop) {
-      stop.textContent = cfg.stopName || '';
-      stop.classList.toggle('show', !!cfg.stopName);
+      stop.textContent = cfg.stopName || "";
+      stop.classList.toggle("show", !!cfg.stopName);
     }
-    const fav = this._planEl('pfav');
-    if (fav) fav.classList.toggle('hidden', !!cfg.stopName);
+    const fav = this._planEl("pfav");
+    if (fav) fav.classList.toggle("hidden", !!cfg.stopName);
     if (dest) {
-      dest.textContent = cfg.destName || '';
-      dest.classList.toggle('show', !!cfg.destName);
+      dest.textContent = cfg.destName || "";
+      dest.classList.toggle("show", !!cfg.destName);
     }
     if (q) {
-      q.placeholder = t(lang, 'plannerSearchPlaceholder');
-      const editing = document.activeElement === q || !!(q.value || '').trim();
-      q.classList.toggle('compact-hide', !!cfg.stopName && !editing);
+      q.placeholder = t(lang, "plannerSearchPlaceholder");
+      const editing = document.activeElement === q || !!(q.value || "").trim();
+      q.classList.toggle("compact-hide", !!cfg.stopName && !editing);
     }
     if (dq) {
-      dq.placeholder = t(lang, 'plannerDestPlaceholder');
-      const editing = document.activeElement === dq || !!(dq.value || '').trim();
-      dq.classList.toggle('compact-hide', !!cfg.destName && !editing);
+      dq.placeholder = t(lang, "plannerDestPlaceholder");
+      const editing = document.activeElement === dq || !!(dq.value || "").trim();
+      dq.classList.toggle("compact-hide", !!cfg.destName && !editing);
     }
-    const lab1 = this._planEl('plab1');
-    const lab2 = this._planEl('plab2');
-    if (lab1) lab1.textContent = t(lang, 'plannerStep1');
-    if (lab2) lab2.textContent = t(lang, 'plannerStep2');
-    const lab3 = this._planEl('plab3');
-    if (lab3) lab3.textContent = t(lang, 'plannerStep3');
-    const deps = this._planEl('pdeps');
-    if (deps) deps.textContent = t(lang, 'plannerDepartures');
-    const swap = this._planEl('pswap');
-    const reset = this._planEl('preset');
-    if (swap) swap.textContent = t(lang, 'plannerSwap');
-    if (reset) reset.textContent = t(lang, 'plannerReset');
+    const lab1 = this._planEl("plab1");
+    const lab2 = this._planEl("plab2");
+    if (lab1) lab1.textContent = t(lang, "plannerStep1");
+    if (lab2) lab2.textContent = t(lang, "plannerStep2");
+    const lab3 = this._planEl("plab3");
+    if (lab3) lab3.textContent = t(lang, "plannerStep3");
+    const deps = this._planEl("pdeps");
+    if (deps) deps.textContent = t(lang, "plannerDepartures");
+    const swap = this._planEl("pswap");
+    const reset = this._planEl("preset");
+    if (swap) swap.textContent = t(lang, "plannerSwap");
+    if (reset) reset.textContent = t(lang, "plannerReset");
     this._paintMinutesAfter();
   }
-
   _paintMinutesAfter() {
-    const sel = this._planEl('pmin');
-    if (!sel || sel.tagName !== 'SELECT') return;
+    const sel = this._planEl("pmin");
+    if (!sel || sel.tagName !== "SELECT") return;
     const current = clampMinutesAfter(this._config && this._config.minutesAfter);
     if (!sel.options.length) {
       MINUTES_AFTER_PRESETS.forEach((n) => {
-        const o = document.createElement('option');
+        const o = document.createElement("option");
         o.value = String(n);
         o.textContent = String(n);
         sel.appendChild(o);
       });
-      sel.addEventListener('change', () => {
+      sel.addEventListener("change", () => {
         const n = clampMinutesAfter(sel.value);
         this._config = Object.assign({}, this._config, { minutesAfter: n });
         this._reloadSafe();
@@ -6911,7 +7578,6 @@ class BKKPlannerCard extends BKKHopCard {
     }
     sel.value = String(current);
   }
-
   _swapPlan() {
     const cfg = this._config || {};
     const newOriginId = cfg.destStopId;
@@ -6922,79 +7588,78 @@ class BKKPlannerCard extends BKKHopCard {
       stopName: newOriginName,
       stopLat: cfg.destLat,
       stopLon: cfg.destLon,
-      stopKind: cfg.destKind || '',
-      destKey: BkkLib.stationKey(cfg.stopName || ''),
-      destName: cfg.stopName || '',
+      stopKind: cfg.destKind || "",
+      destKey: BkkLib.stationKey(cfg.stopName || ""),
+      destName: cfg.stopName || "",
       destStopId: cfg.stopId,
       destLat: cfg.stopLat,
       destLon: cfg.stopLon,
-      destKind: cfg.stopKind || '',
-      routeIds: [],
+      destKind: cfg.stopKind || "",
+      routeIds: []
     });
     this._dests = [];
     this._destRoutes = {};
     this._rows = [];
     this._rawRows = [];
-    this._err = '';
-    const q = this._planEl('pq');
-    const dq = this._planEl('pdq');
-    const hits = this._planEl('phits');
-    if (q) q.value = '';
-    if (dq) dq.value = '';
-    if (hits) hits.innerHTML = '';
+    this._err = "";
+    const q = this._planEl("pq");
+    const dq = this._planEl("pdq");
+    const hits = this._planEl("phits");
+    if (q) q.value = "";
+    if (dq) dq.value = "";
+    if (hits) hits.innerHTML = "";
     this._syncPickerLabels();
     this._paint();
     this._loadDests().then(() => this._reloadSafe());
   }
-
   _resetPlan() {
     this._dests = [];
     this._destRoutes = {};
     this._config = Object.assign({}, this._config, {
-      stopId: '',
-      stopName: '',
-      stopKind: '',
-      destKey: '',
-      destName: '',
-      destStopId: '',
-      destKind: '',
-      routeIds: [],
+      stopId: "",
+      stopName: "",
+      stopKind: "",
+      destKey: "",
+      destName: "",
+      destStopId: "",
+      destKind: "",
+      routeIds: []
     });
     this._rows = [];
     this._rawRows = [];
-    this._err = '';
-    const q = this._planEl('pq');
-    const dq = this._planEl('pdq');
-    const hits = this._planEl('phits');
-    if (q) q.value = '';
-    if (dq) dq.value = '';
-    if (hits) hits.innerHTML = '';
+    this._err = "";
+    const q = this._planEl("pq");
+    const dq = this._planEl("pdq");
+    const hits = this._planEl("phits");
+    if (q) q.value = "";
+    if (dq) dq.value = "";
+    if (hits) hits.innerHTML = "";
     this._syncPickerLabels();
-    this._paintDestHits('');
+    this._paintDestHits("");
     this._paint();
   }
-
   async _searchOrigin(q) {
-    const box = this._planEl('phits');
+    const box = this._planEl("phits");
     if (!box) return;
-    if (!q || q.length < 2) { box.innerHTML = ''; return; }
+    if (!q || q.length < 2) {
+      box.innerHTML = "";
+      return;
+    }
     const seq = ++this._searchSeq;
     try {
-      this._err = '';
+      this._err = "";
       if (!this._apiKey()) await this._fillKey();
       if (seq !== this._searchSeq) return;
       const hits = await BkkLib.searchPlannerStops(this._apiKey(), q);
       if (seq !== this._searchSeq) return;
       if (!hits.length) {
-        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'mode').all.empty) + '</span>';
+        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "mode").all.empty) + "</span>";
         return;
       }
-      box.innerHTML = hits.map((s) => (
-        `<button class="hit" type="button" data-id="${BkkLib.esc(s.id)}">${BkkLib.esc(BkkLib.plannerHitLabel(s, this._lang()))}</button>`
-      )).join('');
-      box.querySelectorAll('.hit').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const id = btn.getAttribute('data-id');
+      box.innerHTML = hits.map((s) => `<button class="hit" type="button" data-id="${BkkLib.esc(s.id)}">${BkkLib.esc(BkkLib.plannerHitLabel(s, this._lang()))}</button>`).join("");
+      box.querySelectorAll(".hit").forEach((btn) => {
+        btn.addEventListener("click", () => {
+          const id = btn.getAttribute("data-id");
           const st = hits.find((h) => h.id === id);
           if (st) this._pickOrigin(st);
         });
@@ -7004,48 +7669,45 @@ class BKKPlannerCard extends BKKHopCard {
       this._showErr(err);
     }
   }
-
   async _pickOrigin(stop) {
     this._config = Object.assign({}, this._config, {
       stopId: stop.id,
       stopName: stop.name,
       stopLat: stop.lat,
       stopLon: stop.lon,
-      stopKind: stop.kind || '',
-      destKey: '',
-      destName: '',
-      destStopId: '',
-      destLat: undefined,
-      destLon: undefined,
-      destKind: '',
-      routeIds: [],
+      stopKind: stop.kind || "",
+      destKey: "",
+      destName: "",
+      destStopId: "",
+      destLat: void 0,
+      destLon: void 0,
+      destKind: "",
+      routeIds: []
     });
     this._dests = [];
     this._destRoutes = {};
     this._rows = [];
     this._rawRows = [];
-    this._err = '';
-    const q = this._planEl('pq');
-    const dq = this._planEl('pdq');
-    const hits = this._planEl('phits');
-    if (q) q.value = '';
-    if (dq) dq.value = '';
-    if (hits) hits.innerHTML = '';
+    this._err = "";
+    const q = this._planEl("pq");
+    const dq = this._planEl("pdq");
+    const hits = this._planEl("phits");
+    if (q) q.value = "";
+    if (dq) dq.value = "";
+    if (hits) hits.innerHTML = "";
     this._syncPickerLabels();
     this._paint();
     await this._loadDests();
   }
-
   async _loadDests() {
     const cfg = this._config || {};
     if (!cfg.stopId) return;
     const seq = ++this._destSeq;
     this._destsLoading = true;
-    this._paintDestHits('');
+    this._paintDestHits("");
     try {
       if (!this._apiKey()) await this._fillKey();
-      const placeOrigin = /^(geo:|node\/)/i.test(String(cfg.stopId || ''))
-        || cfg.stopKind === 'address' || cfg.stopKind === 'place';
+      const placeOrigin = /^(geo:|node\/)/i.test(String(cfg.stopId || "")) || cfg.stopKind === "address" || cfg.stopKind === "place";
       if (placeOrigin) {
         this._dests = [];
         this._destRoutes = {};
@@ -7053,13 +7715,13 @@ class BKKPlannerCard extends BKKHopCard {
         const out = await BkkLib.reachableDests(
           this._apiKey(),
           this._tripCache || {},
-          { id: cfg.stopId, name: cfg.stopName || '' },
-          'all',
-          '',
+          { id: cfg.stopId, name: cfg.stopName || "" },
+          "all",
+          ""
         );
         if (seq !== this._destSeq) return;
-        this._dests = (out && out.dests) || [];
-        this._destRoutes = (out && out.destRoutes) || {};
+        this._dests = out && out.dests || [];
+        this._destRoutes = out && out.destRoutes || {};
       }
     } catch (err) {
       if (seq !== this._destSeq) return;
@@ -7069,11 +7731,10 @@ class BKKPlannerCard extends BKKHopCard {
     } finally {
       if (seq === this._destSeq) {
         this._destsLoading = false;
-        this._searchDest((this._planEl('pdq') || {}).value || '');
+        this._searchDest((this._planEl("pdq") || {}).value || "");
       }
     }
   }
-
   _idsForDest(key) {
     const raw = this._destRoutes[key] || [];
     const out = [];
@@ -7081,24 +7742,23 @@ class BKKPlannerCard extends BKKHopCard {
       if (!id) return;
       out.push(id);
       const s = String(id);
-      if (s.indexOf('gtfs:') !== 0 && !/^BKK_/i.test(s) && !/^volan_/i.test(s) && !/^hkir_/i.test(s)) {
-        out.push('gtfs:' + s);
+      if (s.indexOf("gtfs:") !== 0 && !/^BKK_/i.test(s) && !/^volan_/i.test(s) && !/^hkir_/i.test(s)) {
+        out.push("gtfs:" + s);
       }
     });
     return out;
   }
-
   async _searchDest(q) {
-    const box = this._planEl('pdhits');
+    const box = this._planEl("pdhits");
     if (!box) return;
     const lang = this._lang();
     const cfg = this._config || {};
     if (!cfg.stopId) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerPickAll')) + '</span>';
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, "plannerPickAll")) + "</span>";
       return;
     }
     if (!q || q.length < 2) {
-      this._paintDestHits(q || '');
+      this._paintDestHits(q || "");
       return;
     }
     const seq = ++this._destSearchSeq;
@@ -7108,914 +7768,149 @@ class BKKPlannerCard extends BKKHopCard {
       if (seq !== this._destSearchSeq) return;
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
       if (!hits.length && this._destsLoading) {
-        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'destLoading')) + '</span>';
+        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, "destLoading")) + "</span>";
         return;
       }
-      this._renderDestHits(hits, t(lang, 'mode').all.empty);
+      this._renderDestHits(hits, t(lang, "mode").all.empty);
     } catch (err) {
       if (seq !== this._destSearchSeq) return;
       this._showErr(err);
     }
   }
-
   _renderDestHits(hits, emptyMsg) {
-    const box = this._planEl('pdhits');
+    const box = this._planEl("pdhits");
     if (!box) return;
     this._destHits = hits || [];
     if (!this._destHits.length) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(emptyMsg) + '</span>';
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(emptyMsg) + "</span>";
       return;
     }
     const shown = this._destHits.slice(0, 20);
-    box.innerHTML = shown.map((d) => (
-      `<button class="hit" type="button" data-key="${BkkLib.esc(d.key)}" data-id="${BkkLib.esc(d.id || '')}">${BkkLib.esc(BkkLib.plannerHitLabel(d, this._lang()))}</button>`
-    )).join('');
-    box.querySelectorAll('.hit').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const key = btn.getAttribute('data-key');
-        const id = btn.getAttribute('data-id') || '';
+    box.innerHTML = shown.map((d) => `<button class="hit" type="button" data-key="${BkkLib.esc(d.key)}" data-id="${BkkLib.esc(d.id || "")}">${BkkLib.esc(BkkLib.plannerHitLabel(d, this._lang()))}</button>`).join("");
+    box.querySelectorAll(".hit").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const key = btn.getAttribute("data-key");
+        const id = btn.getAttribute("data-id") || "";
         const d = (this._destHits || []).find((x) => x.key === key);
         if (d) this._pickDest(Object.assign({}, d, { id: d.id || id }));
       });
     });
   }
-
   _paintDestHits(q) {
-    const box = this._planEl('pdhits');
+    const box = this._planEl("pdhits");
     if (!box) return;
     const lang = this._lang();
     const cfg = this._config || {};
     if (!cfg.stopId) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerPickAll')) + '</span>';
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, "plannerPickAll")) + "</span>";
       return;
     }
     if (this._destsLoading) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'destLoading')) + '</span>';
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, "destLoading")) + "</span>";
       return;
     }
     if (!this._dests.length) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerTypeDest')) + '</span>';
+      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, "plannerTypeDest")) + "</span>";
       return;
     }
     const hits = BkkLib.destHitsForQuery(this._dests, q, []);
-    this._renderDestHits(hits, t(lang, 'mode').all.destEmpty);
+    this._renderDestHits(hits, t(lang, "mode").all.destEmpty);
   }
-
   _pickDest(dest) {
     this._config = Object.assign({}, this._config, {
       destKey: dest.key,
       destName: dest.name,
-      destStopId: dest.id || '',
+      destStopId: dest.id || "",
       destLat: dest.lat,
       destLon: dest.lon,
-      destKind: dest.kind || '',
-      routeIds: this._idsForDest(dest.key),
+      destKind: dest.kind || "",
+      routeIds: this._idsForDest(dest.key)
     });
-    const dq = this._planEl('pdq');
-    const hits = this._planEl('pdhits');
-    if (dq) dq.value = '';
-    if (hits) hits.innerHTML = '';
+    const dq = this._planEl("pdq");
+    const hits = this._planEl("pdhits");
+    if (dq) dq.value = "";
+    if (hits) hits.innerHTML = "";
     this._syncPickerLabels();
     this._reloadSafe();
   }
-}
+};
 
-
-class BKKHopCardEditor extends HTMLElement {
-  constructor() {
-    super();
-    this._config = { routeIds: [] };
-    this._built = false;
-    this._searchTimer = null;
-    this._destTimer = null;
-    this._loadingKey = false;
-    this._cache = {};
-    this._dests = [];
-    this._destRoutes = {};
-    this._loadedStop = '';
-    this._destsLoading = false;
-    this._keyOk = null;
-    this._probingKey = false;
-    this._keyDirty = false;
-    this._userEditedKey = false;
-    this._keyReveal = false;
-    this._searchSeq = 0;
-    this._destSeq = 0;
-    this._citySeq = 0;
+// src/planner-editor.js
+var BKKPlannerCardEditor = class extends BKKHopCardEditor {
+  _mode() {
+    return "all";
   }
-
-  disconnectedCallback() {
-    if (this._searchTimer) { clearTimeout(this._searchTimer); this._searchTimer = null; }
-    if (this._destTimer) { clearTimeout(this._destTimer); this._destTimer = null; }
-  }
-
-  setConfig(config) {
-    this._config = Object.assign({ routeIds: [] }, config || {});
-    if (!this._cache) this._cache = {};
-    if (!this._dests) this._dests = [];
-    if (!this._destRoutes) this._destRoutes = {};
-    if (this._config.volanIndex) setVolanIndexUrl(this._config.volanIndex);
-    if (this._config.cityIndex) setCityIndexUrl(this._config.cityIndex);
-    if (this._config.mavIndex) setMavIndexUrl(this._config.mavIndex);
-    if (!this._built) this._build();
-    this._syncLang();
-    this._syncTexts();
-    this._syncName();
-    this._syncStopLabel();
-    this._syncDestLabel();
-    this._syncMinutesAfter();
-    this._syncApiKey();
-    this._syncMode();
-    this._probeKey();
-    if (this._config.stopId && (this._apiKey() || this._mode() === 'volan' || this._mode() === 'helyi') && this._loadedStop !== this._config.stopId) {
-      this._loadDests();
-    }
-  }
-
-  set hass(hass) {
-    const first = !this._hass;
-    this._hass = hass;
-    BkkLib._hass = hass;
-    // "auto" resolves against hass.language, which is only known once hass lands.
-    if (first && this._built && this._lang() !== resolveLang(this._config.language, null)) {
-      this._syncTexts();
-      this._syncMode();
-    }
-    /* With the key in the integration, do not copy a sibling card's key into
-       this card's config: keeping it out of dashboards is the point. */
-    const viaIntegration = BkkLib.integrationHasKey(hass);
-    if (!this._userEditedKey && !this._config.apiKey && !this._loadingKey && !viaIntegration) this._fillKey();
-    else if (this._apiKey()) this._probeKey();
-  }
-
-  _apiKey() {
-    return BkkLib.effectiveApiKey(this._config, this._hass);
-  }
-
-  _lang() { return resolveLang(this._config.language, this._hass); }
-
-  _mode() { return BkkLib.mode(this._config); }
-
-  _build() {
-    this._built = true;
-    this.innerHTML = `
-      <style>
-        .card-config { padding: 8px 0 4px; }
-        .card-config .f { margin-bottom: 18px; }
-        .card-config label {
-          display: block; font-weight: 500; margin-bottom: 8px;
-          color: var(--primary-text-color);
-        }
-        .card-config input, .card-config select {
-          width: 100%; box-sizing: border-box; font: inherit;
-          background: var(--mdc-text-field-fill-color, var(--secondary-background-color, rgba(128,128,128,.12)));
-          color: var(--primary-text-color);
-          border: 0; border-bottom: 1px solid var(--divider-color);
-          border-radius: 4px 4px 0 0; padding: 12px 12px 10px;
-        }
-        .card-config .hint { font-size: 12px; color: var(--secondary-text-color); margin: 6px 0 0; }
-        .card-config .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-        .card-config .chip.on {
-          color: var(--text-primary-color, #fff);
-          background: var(--primary-color);
-          border-color: var(--primary-color);
-        }
-        .card-config .hit {
-          display: block; width: 100%; text-align: left; font: inherit;
-          background: transparent; color: var(--primary-text-color);
-          border: 0; border-bottom: 1px solid var(--divider-color);
-          padding: 10px 8px; cursor: pointer;
-        }
-        .card-config .hit:hover { background: var(--secondary-background-color); }
-        .card-config .list { max-height: 200px; overflow: auto; }
-        .card-config .picked { font-weight: 600; margin-top: 6px; }
-        .card-config .err { color: var(--error-color, #e66); font-size: 12px; margin-top: 8px; }
-        .card-config .switch {
-          display: flex; align-items: center; gap: 10px; font-weight: 500;
-        }
-        .card-config .switch input { width: auto; margin: 0; }
-        .card-config .row { display: flex; gap: 18px; flex-wrap: wrap; }
-        .card-config .row .switch { margin-right: 8px; }
-        .card-config a { color: var(--primary-color); }
-      </style>
-      <div class="card-config">
-        <div class="f">
-          <label id="lblLang"></label>
-          <select id="lang">
-            <option value="auto"></option>
-            <option value="hu"></option>
-            <option value="en"></option>
-          </select>
-        </div>
-        <div class="f" id="apiKeyWrap">
-          <label id="lblApiKey"></label>
-          <input id="apiKey" type="text" autocomplete="off">
-          <div class="hint"><span id="hintApiKey"></span>
-            <a href="https://opendata.bkk.hu/data-sources" target="_blank" rel="noopener">opendata.bkk.hu/data-sources</a>
-          </div>
-        </div>
-        <div class="f" id="apiKeyOkWrap" style="display:none">
-          <div class="hint"><span id="apiKeyOkText"></span>
-            <a href="#" id="apiKeyEdit"></a>
-          </div>
-        </div>
-        <div class="f">
-          <label id="lblName"></label>
-          <input id="name" type="text" placeholder="Hungarian transport">
-        </div>
-        <div class="f">
-          <div class="row" id="modeSwitches">
-            <label class="switch"><input id="mav" type="checkbox"> M\u00c1V</label>
-            <label class="switch"><input id="volan" type="checkbox"> Vol\u00e1n</label>
-            <label class="switch"><input id="helyi" type="checkbox"> Helyi</label>
-          </div>
-          <div class="hint" id="modeHint"></div>
-        </div>
-        <div class="f" id="cityWrap" style="display:none">
-          <label id="lblCity"></label>
-          <select id="city"></select>
-        </div>
-        <div class="f">
-          <label id="lblStop"></label>
-          <input id="q" type="search">
-          <div class="chips" id="fav"></div>
-          <div class="picked" id="stopPicked"></div>
-          <div class="list" id="hits"></div>
-        </div>
-        <div class="f">
-          <label id="lblDest"></label>
-          <input id="dq" type="search">
-          <div class="picked" id="destPicked"></div>
-          <div class="list" id="destHits"></div>
-        </div>
-        <div class="f">
-          <label id="lblMinutesAfter"></label>
-          <select id="minutesAfter"></select>
-          <div class="chips" id="minutesAfterChips"></div>
-          <div class="hint" id="hintMinutesAfter"></div>
-        </div>
-        <div class="err" id="err"></div>
-      </div>
-    `;
-    this._el('lang').addEventListener('change', (ev) => {
-      this._emit({ language: ev.target.value });
-      this._syncTexts();
-      this._syncMode();
-      this._paintDestHits(this._el('dq') ? this._el('dq').value.trim() : '');
-    });
-    this._el('name').addEventListener('input', (ev) => {
-      this._emit({ name: ev.target.value });
-    });
-    this._el('apiKey').addEventListener('input', () => {
-      this._keyDirty = true;
-      this._userEditedKey = true;
-    });
-    this._el('apiKey').addEventListener('change', (ev) => {
-      this._keyDirty = false;
-      this._userEditedKey = true;
-      this._keyOk = null;
-      this._probedKey = '';
-      this._error('');
-      this._emit({ apiKey: ev.target.value.trim() });
-      this._probeKey();
-    });
-    this._el('apiKeyEdit').addEventListener('click', (ev) => {
-      ev.preventDefault();
-      this._keyReveal = true;
-      this._syncApiKey();
-      const el = this._el('apiKey');
-      if (el) el.focus();
-    });
-    this._el('mav').addEventListener('change', () => this._onModeToggle('mav'));
-    this._el('volan').addEventListener('change', () => this._onModeToggle('volan'));
-    this._el('helyi').addEventListener('change', () => this._onModeToggle('helyi'));
-    this._el('city').addEventListener('change', (ev) => {
-      this._emit({
-        city: ev.target.value,
-        stopId: '',
-        stopName: '',
-        destKey: '',
-        destName: '',
-        routeIds: [],
-      });
-      this._dests = [];
-      this._loadedStop = '';
-      this._syncStopLabel();
-      this._syncDestLabel();
-    });
-    this._el('q').addEventListener('input', () => {
-      clearTimeout(this._searchTimer);
-      this._searchTimer = setTimeout(() => this._search(this._el('q').value.trim(), 'origin'), 280);
-    });
-    this._el('dq').addEventListener('input', () => {
-      clearTimeout(this._destTimer);
-      this._destTimer = setTimeout(() => this._search(this._el('dq').value.trim(), 'dest'), 280);
-    });
-    this._el('dq').addEventListener('focus', () => {
-      this._search(this._el('dq').value.trim(), 'dest');
-    });
-    this._el('minutesAfter').addEventListener('change', (ev) => {
-      const next = clampMinutesAfter(ev.target.value);
-      if (next === clampMinutesAfter(this._config.minutesAfter)) {
-        this._syncMinutesAfter();
-        return;
-      }
-      this._emit({ minutesAfter: next });
-    });
-    this._paintFav();
-  }
-
-  _el(id) { return this.querySelector('#' + id); }
-
-  /* The editor lives in HA's shadow tree. document.activeElement is the host,
-     so walking only shadowRoots never reaches these light-DOM inputs. */
-  _focusedEl() {
-    try {
-      return this.querySelector(':focus');
-    } catch (_e) {
-      return null;
-    }
-  }
-
-  _isEditing(el) {
-    if (!el) return false;
-    const focused = this._focusedEl();
-    if (focused === el) return true;
-    if (focused && el.contains && el.contains(focused)) return true;
-    try {
-      if (typeof el.matches === 'function' && el.matches(':focus, :focus-within')) return true;
-    } catch (_e) { /* jsdom */ }
-    return false;
-  }
-
-  _syncName() {
-    const el = this._el('name');
-    if (!el || this._isEditing(el)) return;
-    el.value = this._config.name || '';
-  }
-
-  _syncStopLabel() {
-    const el = this._el('stopPicked');
-    if (el) el.textContent = this._config.stopName || '';
-    const q = this._el('q');
-    if (q && !this._isEditing(q) && this._config.stopName) {
-      q.placeholder = this._config.stopName;
-    }
-  }
-
-  _syncDestLabel() {
-    const el = this._el('destPicked');
-    if (el) el.textContent = this._config.destName || '';
-    const q = this._el('dq');
-    if (q && !this._isEditing(q) && this._config.destName) {
-      q.placeholder = this._config.destName;
-    }
-  }
-
-  _syncMinutesAfter() {
-    const cur = clampMinutesAfter(this._config.minutesAfter);
-    const sel = this._el('minutesAfter');
-    if (sel) {
-      const lang = this._lang();
-      const values = MINUTES_AFTER_PRESETS.slice();
-      if (values.indexOf(cur) < 0) values.push(cur);
-      values.sort((a, b) => a - b);
-      const sig = lang + ':' + values.join(',');
-      if (sel.dataset.opts !== sig) {
-        sel.innerHTML = values.map((n) => (
-          `<option value="${n}">${BkkLib.esc(t(lang, 'minutes', n))}</option>`
-        )).join('');
-        sel.dataset.opts = sig;
-      }
-      if (!this._isEditing(sel)) sel.value = String(cur);
-    }
-    const box = this._el('minutesAfterChips');
-    if (!box) return;
-    const signature = String(cur);
-    if (box.dataset.cur === signature && box.childElementCount) {
-      Array.from(box.children).forEach((b) => {
-        b.classList.toggle('on', Number(b.getAttribute('data-min')) === cur);
-      });
-      return;
-    }
-    box.innerHTML = '';
-    box.dataset.cur = signature;
-    MINUTES_AFTER_PRESETS.forEach((n) => {
-      const b = document.createElement('button');
-      b.className = 'chip' + (n === cur ? ' on' : '');
-      b.type = 'button';
-      b.setAttribute('data-min', String(n));
-      b.textContent = String(n);
-      b.addEventListener('click', () => {
-        if (n === clampMinutesAfter(this._config.minutesAfter)) return;
-        this._emit({ minutesAfter: n });
-      });
-      box.appendChild(b);
-    });
-  }
-
-  _syncApiKey() {
-    this._syncApiKeyVisibility();
-    const wrap = this._el('apiKeyWrap');
-    const hidden = wrap && wrap.style.display === 'none';
-    const el = this._el('apiKey');
-    if (!el || this._isEditing(el) || this._keyDirty) return;
-    el.value = hidden ? '' : (this._config.apiKey || '');
-  }
-
-  /* A working key is noise in the form, but it still has to be replaceable
-     without hand-editing YAML, hence the "change" link. */
-  _syncApiKeyVisibility() {
-    const wrap = this._el('apiKeyWrap');
-    const okWrap = this._el('apiKeyOkWrap');
-    if (!wrap) return;
-    const mode = this._mode();
-    if (mode === 'volan' || mode === 'helyi') {
-      wrap.style.display = 'none';
-      if (okWrap) okWrap.style.display = 'none';
-      return;
-    }
-    const own = (this._config.apiKey || '').trim();
-    const viaIntegration = !own && BkkLib.integrationHasKey(this._hass);
-    const settled = !this._keyReveal && (viaIntegration || (!!own && this._keyOk === true));
-    wrap.style.display = settled ? 'none' : '';
-    if (okWrap) okWrap.style.display = settled ? '' : 'none';
-    const okText = this._el('apiKeyOkText');
-    if (okText) okText.textContent = t(this._lang(), viaIntegration ? 'apiKeyIntegration' : 'apiKeyOk');
-  }
-
-  _modeCopy(mode) {
-    return modeCopy(this._lang(), mode);
-  }
-
-  _syncLang() {
-    const el = this._el('lang');
-    if (!el) return;
-    const lang = this._lang();
-    el.options[0].textContent = t(lang, 'langAuto');
-    el.options[1].textContent = t(lang, 'langHu');
-    el.options[2].textContent = t(lang, 'langEn');
-    const pref = (this._config.language === 'hu' || this._config.language === 'en')
-      ? this._config.language
-      : 'auto';
-    if (!this._isEditing(el)) el.value = pref;
-  }
-
-  _syncTexts() {
-    const lang = this._lang();
-    this._syncLang();
-    const set = (id, text) => {
-      const el = this._el(id);
-      if (el) el.textContent = text;
-    };
-    set('lblLang', t(lang, 'langLabel'));
-    set('lblApiKey', t(lang, 'apiKeyLabel'));
-    set('hintApiKey', t(lang, 'apiKeyHint'));
-    set('apiKeyOkText', t(lang, 'apiKeyOk'));
-    set('apiKeyEdit', t(lang, 'apiKeyChange'));
-    set('lblName', t(lang, 'nameLabel'));
-    set('lblCity', t(lang, 'cityLabel'));
-    set('lblMinutesAfter', t(lang, 'minutesAfterLabel'));
-    set('hintMinutesAfter', t(lang, 'minutesAfterHint'));
-    this._syncMinutesAfter();
-    const key = this._el('apiKey');
-    if (key) key.placeholder = t(lang, 'apiKeyPlaceholder');
-    const name = this._el('name');
-    if (name) name.placeholder = t(lang, 'namePlaceholder');
-  }
-
-  _syncMode() {
-    const mode = this._mode();
-    const mav = this._el('mav');
-    const volan = this._el('volan');
-    const helyi = this._el('helyi');
-    if (mav && !this._isEditing(mav)) mav.checked = mode === 'mav';
-    if (volan && !this._isEditing(volan)) volan.checked = mode === 'volan';
-    if (helyi && !this._isEditing(helyi)) helyi.checked = mode === 'helyi';
-    const wrap = this._el('cityWrap');
-    if (wrap) wrap.style.display = mode === 'helyi' ? '' : 'none';
-    if (mode === 'helyi') this._fillCities();
-    const copy = this._modeCopy(mode);
-    const hint = this._el('modeHint');
-    if (hint) hint.textContent = copy.hint;
-    const lblStop = this._el('lblStop');
-    if (lblStop) lblStop.textContent = copy.stop;
-    const lblDest = this._el('lblDest');
-    if (lblDest) lblDest.textContent = copy.dest;
-    const q = this._el('q');
-    if (q && !this._isEditing(q) && !this._config.stopName) q.placeholder = copy.originPh;
-    const dq = this._el('dq');
-    if (dq && !this._isEditing(dq) && !this._config.destName) dq.placeholder = copy.destPh;
-    this._syncApiKeyVisibility();
-    this._paintFav();
-  }
-
-  _paintFav() {
-    const fav = this._el('fav');
-    if (!fav) return;
-    fav.innerHTML = '';
-    const mode = this._mode();
-    const custom = Array.isArray(this._config.favorites) ? this._config.favorites : null;
-    const list = (custom || DEFAULT_FAVORITES[mode] || []).filter((f) => f && f.id && f.name);
-    const shown = (!custom && mode === 'all') ? BkkLib.collapseSameNameStops(list) : list;
-    shown.forEach((f) => {
-      const b = document.createElement('button');
-      b.className = 'chip';
-      b.type = 'button';
-      b.textContent = f.name.split(' / ')[0];
-      b.addEventListener('click', () => this._pickStop(f, 'origin'));
-      fav.appendChild(b);
-    });
-  }
-
-  _onModeToggle(which) {
-    const mavOn = !!(this._el('mav') && this._el('mav').checked);
-    const volanOn = !!(this._el('volan') && this._el('volan').checked);
-    const helyiOn = !!(this._el('helyi') && this._el('helyi').checked);
-    let mav = mavOn;
-    let volan = volanOn;
-    let helyi = helyiOn;
-    if (which === 'mav' && mav) { volan = false; helyi = false; }
-    if (which === 'volan' && volan) { mav = false; helyi = false; }
-    if (which === 'helyi' && helyi) { mav = false; volan = false; }
-    if (this._el('mav')) this._el('mav').checked = mav;
-    if (this._el('volan')) this._el('volan').checked = volan;
-    if (this._el('helyi')) this._el('helyi').checked = helyi;
-    const q = this._el('q');
-    const dq = this._el('dq');
-    if (q) q.value = '';
-    if (dq) dq.value = '';
-    const hits = this._el('hits');
-    const destHits = this._el('destHits');
-    if (hits) hits.innerHTML = '';
-    if (destHits) destHits.innerHTML = '';
-    this._dests = [];
-    this._destRoutes = {};
-    this._cache = {};
-    this._loadedStop = '';
-    this._emit({
-      mav: mav,
-      volan: volan,
-      helyi: helyi,
-      city: helyi ? (this._config.city || '') : '',
-      routeIds: [],
-      stopId: '',
-      stopName: '',
-      destKey: '',
-      destName: '',
-    });
-    this._syncMode();
-    this._syncStopLabel();
-    this._syncDestLabel();
-  }
-
-  async _fillCities() {
-    const sel = this._el('city');
-    if (!sel || this._isEditing(sel)) return;
-    const seq = ++this._citySeq;
-    try {
-      const idx = await BkkLib.cityIndex();
-      if (seq !== this._citySeq) return;
-      const ops = (idx.ops || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'hu'));
-      const cur = this._config.city || '';
-      const signature = ops.map((o) => o.id).join('|');
-      if (sel.dataset.ops === signature && sel.options.length > 1) {
-        if (cur && sel.value !== cur) sel.value = cur;
-        return;
-      }
-      const ph = t(this._lang(), 'cityPlaceholder');
-      sel.innerHTML = `<option value="">${BkkLib.esc(ph)}</option>` + ops.map((o) => (
-        `<option value="${BkkLib.esc(o.id)}">${BkkLib.esc(o.name)}</option>`
-      )).join('');
-      sel.dataset.ops = signature;
-      if (cur) sel.value = cur;
-    } catch (err) {
-      if (seq !== this._citySeq) return;
-      this._error(errText(this._lang(), err));
-    }
-  }
-
-  _error(msg) {
-    const el = this._el('err');
-    if (el) el.textContent = msg || '';
-  }
-
-  _emit(patch) {
-    const cfg = Object.assign({}, this._config, patch);
-    this._config = cfg;
-    this.dispatchEvent(new CustomEvent('config-changed', {
-      bubbles: true,
-      composed: true,
-      detail: { config: cfg },
-    }));
-  }
-
-  async _fillKey() {
-    this._loadingKey = true;
-    try {
-      const key = await BkkLib.apiKeyFromDashboard(this._hass);
-      if (key && !this._config.apiKey && !this._userEditedKey) {
-        this._emit({ apiKey: key });
-        await this._probeKey();
-      }
-    } finally {
-      this._loadingKey = false;
-    }
-  }
-
-  async _probeKey() {
-    const mode = this._mode();
-    if (mode === 'volan' || mode === 'helyi') {
-      this._syncApiKey();
-      return;
-    }
-    const key = this._apiKey();
-    if (!key) {
-      this._keyOk = false;
-      this._syncApiKey();
-      return;
-    }
-    if (this._probingKey) return;
-    if (this._probedKey === key && this._keyOk != null) {
-      this._syncApiKey();
-      return;
-    }
-    this._probingKey = true;
-    this._probedKey = key;
-    try {
-      const result = await BkkLib.probeApiKey(key);
-      if (this._apiKey() !== key) return;
-      this._keyOk = !!result.ok;
-      this._syncApiKey();
-      if (!result.ok && result.code) this._error(errText(this._lang(), codedError(result.code)));
-      else if (result.ok) this._error('');
-    } finally {
-      this._probingKey = false;
-      const latest = this._apiKey();
-      if (latest && latest !== this._probedKey) this._probeKey();
-    }
-  }
-
-  async _search(q, which) {
-    const box = this._el(which === 'dest' ? 'destHits' : 'hits');
-    if (!box) return;
-    if (which === 'dest') {
-      this._paintDestHits(q);
-      return;
-    }
-    if (!q || q.length < 2) {
-      box.innerHTML = '';
-      return;
-    }
-    const seq = ++this._searchSeq;
-    try {
-      this._error('');
-      if (!this._apiKey() && !this._userEditedKey) await this._fillKey();
-      if (seq !== this._searchSeq) return;
-      const mode = this._mode();
-      const hits = await BkkLib.searchStops(this._apiKey(), q, mode, this._config.city);
-      if (seq !== this._searchSeq) return;
-      if (!hits.length) {
-        box.innerHTML = '<span class="hint">' + BkkLib.esc(this._modeCopy(mode).empty) + '</span>';
-        return;
-      }
-      box.innerHTML = hits.map((s) => (
-        `<button class="hit" type="button" data-id="${BkkLib.esc(s.id)}">${BkkLib.esc(s.label || s.name)}</button>`
-      )).join('');
-      box.querySelectorAll('.hit').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const id = btn.getAttribute('data-id');
-          const st = hits.find((h) => h.id === id);
-          this._pickStop({ id: st.id, name: st.name, label: st.label }, which);
-        });
-      });
-    } catch (err) {
-      if (seq !== this._searchSeq) return;
-      this._error(errText(this._lang(), err));
-    }
-  }
-
-  /* Rank the reachable destinations by how much of the query they share, so an
-     unreachable search still ends with something usable. */
-  _suggestDests(f) {
-    const dests = this._dests || [];
-    if (!dests.length) return [];
-    if (!f || f.length < 3) return dests.slice(0, 6);
-    const grams = new Set();
-    for (let i = 0; i + 3 <= f.length; i++) grams.add(f.slice(i, i + 3));
-    const scored = dests.map((d) => {
-      const fold = BkkLib.fold(d.name);
-      let score = 0;
-      grams.forEach((g) => { if (fold.indexOf(g) >= 0) score += 1; });
-      return { d, score };
-    }).filter((x) => x.score > 0);
-    scored.sort((a, b) => b.score - a.score);
-    const picked = scored.slice(0, 6).map((x) => x.d);
-    return picked.length ? picked : dests.slice(0, 6);
-  }
-
-  _paintDestHits(q) {
-    const box = this._el('destHits');
-    if (!box) return;
-    const copy = this._modeCopy(this._mode());
-    if (!this._config.stopId) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(copy.destNeedOrigin) + '</span>';
-      return;
-    }
-    if (this._destsLoading) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
-      return;
-    }
-    if (!this._dests.length) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(copy.destNone) + '</span>';
-      return;
-    }
-    const f = BkkLib.fold(q || '');
-    const hits = f
-      ? this._dests.filter((d) => BkkLib.fold(d.name).indexOf(f) >= 0)
-      : this._dests;
-    if (!hits.length) {
-      /* A stop can exist and still be unreachable from this origin, so name a
-         few destinations that do have a direct service. */
-      const alts = this._suggestDests(f);
-      const msg = alts.length
-        ? t(this._lang(), 'destEmptySuggest', alts.map((d) => d.name).join(', '))
-        : copy.destEmpty;
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(msg) + '</span>';
-      return;
-    }
-    const shown = hits.slice(0, 50);
-    box.innerHTML = shown.map((s) => (
-      `<button class="hit" type="button" data-key="${BkkLib.esc(s.key)}">${BkkLib.esc(s.name)}</button>`
-    )).join('');
-    box.querySelectorAll('.hit').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const key = btn.getAttribute('data-key');
-        const st = this._dests.find((d) => d.key === key);
-        if (!st) return;
-        this._pickStop({ id: st.id, name: st.name, key: st.key }, 'dest');
-      });
-    });
-  }
-
-  async _loadDests() {
-    if (!this._config.stopId) return;
-    if (!this._apiKey() && this._mode() !== 'volan' && this._mode() !== 'helyi') return;
-    const stopId = this._config.stopId;
-    const seq = ++this._destSeq;
-    this._destsLoading = true;
-    const box = this._el('destHits');
-    if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
-    try {
-      this._error('');
-      const idx = await BkkLib.reachableDests(
-        this._apiKey(),
-        this._cache,
-        { id: this._config.stopId, name: this._config.stopName },
-        this._mode(),
-        this._config.city,
-      );
-      if (seq !== this._destSeq || this._config.stopId !== stopId) return;
-      this._loadedStop = stopId;
-      this._dests = idx.dests || [];
-      this._destRoutes = idx.destRoutes || {};
-      if (this._config.destKey && this._destRoutes[this._config.destKey]) {
-        const ids = this._destRoutes[this._config.destKey].slice();
-        const cur = this._config.routeIds || [];
-        const same = ids.length === cur.length && ids.every((id) => cur.indexOf(id) >= 0);
-        if (!same) this._emit({ routeIds: ids });
-      }
-      const dq = this._el('dq');
-      this._paintDestHits(dq ? dq.value.trim() : '');
-    } catch (err) {
-      if (seq !== this._destSeq) return;
-      this._loadedStop = '';
-      this._error(errText(this._lang(), err));
-      if (box) box.innerHTML = '';
-    } finally {
-      if (seq === this._destSeq) this._destsLoading = false;
-    }
-  }
-
-  _pickStop(stop, which) {
-    if (which === 'dest') {
-      const box = this._el('destHits');
-      const dq = this._el('dq');
-      if (box) box.innerHTML = '';
-      if (dq) dq.value = stop.label || stop.name;
-      const key = stop.key || BkkLib.norm(stop.name);
-      const patch = {
-        destKey: key,
-        destName: stop.name,
-        routeIds: (this._destRoutes[key] || []).slice(),
-      };
-      if (!this._config.name && this._config.stopName) {
-        patch.name = `${this._config.stopName} \u2192 ${stop.name}`;
-      }
-      this._emit(patch);
-      this._syncDestLabel();
-      return;
-    }
-    const box = this._el('hits');
-    const q = this._el('q');
-    if (box) box.innerHTML = '';
-    if (q) q.value = stop.label || stop.name;
-    this._cache = {};
-    this._dests = [];
-    this._destRoutes = {};
-    this._loadedStop = '';
-    const patch = {
-      stopId: stop.id,
-      stopName: stop.name,
-      routeIds: [],
-      destKey: '',
-      destName: '',
-    };
-    this._emit(patch);
-    this._syncStopLabel();
-    this._syncDestLabel();
-    const dq = this._el('dq');
-    if (dq) dq.value = '';
-    /* setConfig, called after config-changed, loads destinations once. */
-  }
-}
-
-
-class BKKPlannerCardEditor extends BKKHopCardEditor {
-  _mode() { return 'all'; }
-
   setConfig(config) {
     super.setConfig(config);
     this._hideModeControls();
   }
-
   _hideModeControls() {
-    const row = this._el('modeSwitches');
-    if (row) row.style.display = 'none';
-    const city = this._el('cityWrap');
-    if (city) city.style.display = 'none';
+    const row = this._el("modeSwitches");
+    if (row) row.style.display = "none";
+    const city = this._el("cityWrap");
+    if (city) city.style.display = "none";
   }
-
   _syncMode() {
     super._syncMode();
     this._hideModeControls();
-    const hint = this._el('modeHint');
-    if (hint) hint.textContent = t(this._lang(), 'plannerPickAll');
-    const lblStop = this._el('lblStop');
-    if (lblStop) lblStop.textContent = t(this._lang(), 'plannerStep1');
-    const lblDest = this._el('lblDest');
-    if (lblDest) lblDest.textContent = t(this._lang(), 'plannerStep2');
+    const hint = this._el("modeHint");
+    if (hint) hint.textContent = t(this._lang(), "plannerPickAll");
+    const lblStop = this._el("lblStop");
+    if (lblStop) lblStop.textContent = t(this._lang(), "plannerStep1");
+    const lblDest = this._el("lblDest");
+    if (lblDest) lblDest.textContent = t(this._lang(), "plannerStep2");
   }
-}
+};
 
-
-/* `bkk-stop-card-r3` and its editor stay registered so dashboards written
-   before the rename keep working. */
+// src/index.js
 if (!customElements.get(BKK_HOP_EDITOR)) {
   customElements.define(BKK_HOP_EDITOR, BKKHopCardEditor);
 }
 if (!customElements.get(BKK_HOP_EDITOR_ALIAS)) {
-  customElements.define(BKK_HOP_EDITOR_ALIAS, class extends BKKHopCardEditor {});
+  customElements.define(BKK_HOP_EDITOR_ALIAS, class extends BKKHopCardEditor {
+  });
 }
 if (!customElements.get(BKK_PLANNER_EDITOR)) {
   customElements.define(BKK_PLANNER_EDITOR, BKKPlannerCardEditor);
 }
 if (!customElements.get(BKK_PLANNER_EDITOR_ALIAS)) {
-  customElements.define(BKK_PLANNER_EDITOR_ALIAS, class extends BKKPlannerCardEditor {});
+  customElements.define(BKK_PLANNER_EDITOR_ALIAS, class extends BKKPlannerCardEditor {
+  });
 }
 if (!customElements.get(BKK_HOP_TAG)) {
   customElements.define(BKK_HOP_TAG, BKKHopCard);
 }
 if (!customElements.get(BKK_HOP_TAG_ALIAS)) {
-  customElements.define(BKK_HOP_TAG_ALIAS, class extends BKKHopCard {});
+  customElements.define(BKK_HOP_TAG_ALIAS, class extends BKKHopCard {
+  });
 }
 if (!customElements.get(BKK_PLANNER_TAG)) {
   customElements.define(BKK_PLANNER_TAG, BKKPlannerCard);
 }
 if (!customElements.get(BKK_PLANNER_TAG_ALIAS)) {
-  customElements.define(BKK_PLANNER_TAG_ALIAS, class extends BKKPlannerCard {});
+  customElements.define(BKK_PLANNER_TAG_ALIAS, class extends BKKPlannerCard {
+  });
 }
-
-console.info(`%c HUNGARIAN-TRANSPORT %c ${CARD_VERSION} `,
-  'color:#fff;background:#0f6fc6;font-weight:700',
-  'color:#0f6fc6;background:#fff;font-weight:700');
-
+console.info(
+  `%c HUNGARIAN-TRANSPORT %c ${CARD_VERSION} `,
+  "color:#fff;background:#0f6fc6;font-weight:700",
+  "color:#0f6fc6;background:#fff;font-weight:700"
+);
 globalThis.HungarianTransportLib = BkkLib;
-
 window.customCards = window.customCards || [];
 if (!window.customCards.some((c) => c.type === BKK_HOP_TAG)) {
   window.customCards.push({
     type: BKK_HOP_TAG,
-    name: 'Hungarian transport',
-    description: 'BKK, M\u00c1V, Vol\u00e1n and local-city departures between two stops',
-    preview: false,
+    name: "Hungarian transport",
+    description: "BKK, MÁV, Volán and local-city departures between two stops",
+    preview: false
   });
 }
 if (!window.customCards.some((c) => c.type === BKK_PLANNER_TAG)) {
   window.customCards.push({
     type: BKK_PLANNER_TAG,
-    name: 'Hungarian transit stop planner',
-    description: 'Pick two stops; every BKK, Vol\u00e1n and M\u00c1V service between them is listed',
-    preview: false,
+    name: "Hungarian transit stop planner",
+    description: "Pick two stops; every BKK, Volán and MÁV service between them is listed",
+    preview: false
   });
 }

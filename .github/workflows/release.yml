@@ -164,9 +164,11 @@ jobs:
               raise SystemExit("bad ver")
           path = pathlib.Path("dist/hungarian-transport.js")
           text = path.read_text(encoding="utf-8")
+          # Hand-written bundles used `const ... = '...'`; esbuild emits
+          # `var ... = "..."`. Accept both so tag refreshes of old releases work.
           text, n = re.subn(
-              r"^const CARD_VERSION = '.*';",
-              "const CARD_VERSION = '%s';" % ver,
+              r"""^(const|var|let) CARD_VERSION = (['"]).*\2;""",
+              lambda m: '%s CARD_VERSION = %s%s%s;' % (m.group(1), m.group(2), ver, m.group(2)),
               text,
               count=1,
               flags=re.M,
