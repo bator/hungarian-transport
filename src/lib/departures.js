@@ -74,7 +74,7 @@ Object.assign(BkkLib, {
       } catch (_e) { /* GTFS index optional */ }
       return BkkLib.groupStops(Array.from(byId.values())).slice(0, 20);
     }
-    if (apiKey) {
+    if (BkkLib.hasFutar(apiKey)) {
       try {
         const queries = [q].concat(BkkLib.aliasQueries(q));
         for (let i = 0; i < queries.length; i++) {

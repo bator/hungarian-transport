@@ -85,8 +85,14 @@ export class BKKHopCard extends HTMLElement {
     Promise.resolve().then(() => this._reload()).catch((err) => this._showErr(err));
   }
 
+  /* The card's own key, or a key borrowed from a sibling card while the
+     integration has none. Empty when FUTÁR goes through the integration. */
   _apiKey() {
-    return BkkLib.effectiveApiKey(this._config, this._hass);
+    return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
+  }
+
+  _hasFutar() {
+    return BkkLib.hasFutar(this._apiKey(), this._hass);
   }
 
   set hass(hass) {
@@ -164,10 +170,12 @@ export class BKKHopCard extends HTMLElement {
     this._paint();
   }
 
+  /* Kept apart from the config: once the integration's futar service shows
+     up (HA still starting, entry reloading), it wins over a borrowed key. */
   async _fillKey() {
     const key = await BkkLib.apiKeyFromDashboard(this._hass);
     if (!key || this._config.apiKey) return;
-    this._config = Object.assign({}, this._config, { apiKey: key });
+    this._borrowedKey = key;
     this._reloadSafe();
   }
 
@@ -643,7 +651,7 @@ export class BKKHopCard extends HTMLElement {
       } catch (_e) { /* MOTIS / FUTÁR still fill */ }
     }
     const tripId = (row && row.tripId) || '';
-    const canFutar = this._apiKey() && (
+    const canFutar = this._hasFutar() && (
       !/^motis:/i.test(String(tripId || '')) || !!BkkLib.rowTrainNumber(row)
     );
     let geomTrip = '';
@@ -657,7 +665,7 @@ export class BKKHopCard extends HTMLElement {
     let futarShape = [];
     /* City buses/trams: decode FUTÁR trip-details polyline here.
        hass trip_shape does not exist on bkk_stop. */
-    if (geomTrip && this._apiKey() && !BkkLib.isTrainRow(row)) {
+    if (geomTrip && this._hasFutar() && !BkkLib.isTrainRow(row)) {
       try {
         futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
       } catch (_e) { /* MOTIS hop still fills */ }
@@ -970,7 +978,7 @@ export class BKKHopCard extends HTMLElement {
     if (cfg.mavIndex) setMavIndexUrl(cfg.mavIndex);
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     const mode = this._departMode();
-    const ready = cfg.stopId && cfg.destKey && (this._apiKey() || mode === 'volan' || mode === 'helyi' || mode === 'all');
+    const ready = cfg.stopId && cfg.destKey && (this._hasFutar() || mode === 'volan' || mode === 'helyi' || mode === 'all');
     if (!ready) {
       this._rows = [];
       this._loading = false;

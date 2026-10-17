@@ -209,8 +209,9 @@ To rebuild them yourself on Home Assistant OS:
    serves the card from (the old `/config/www/community/hungarian-transport/`
    folder is used only when the integration is not installed). A durable copy
    is also kept under `/config/hungarian-transport/` so a HACS update that
-   overwrote the integration folder is restored on the next run (larger local
-   `mav-index.json.gz` wins). A local `mav-gtfs.zip` or pfaedle directory also rebuilds
+   overwrote the integration folder is restored on the next run, unless the
+   release ships a newer index schema than your copied scripts build (larger
+   local `mav-index.json.gz` wins). A local `mav-gtfs.zip` or pfaedle directory also rebuilds
    `mav-index.json.gz`. A MÁV rebuild failure notifies and exits 1, like Volán
    and city.
 

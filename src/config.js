@@ -5,10 +5,6 @@ export const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
 export const BKK_PLANNER_TAG_ALIAS = 'bkk-stop-card-plan';
 export const BKK_API = 'https://go.bkk.hu/api/query/v1/ws/otp/api/where';
 export const TRANSITOUS = 'https://api.transitous.org';
-/* Stand-in for cfg.apiKey when the Hungarian transport integration holds the
-   BKK key: FUTÁR calls then go through hungarian_transport.futar, so the key
-   never reaches the browser or the dashboard config. Never saved to config. */
-export const INTEGRATION_KEY = 'hungarian_transport:integration';
 /* Default departure look-ahead. Override per card with `minutesAfter`.
    The Kelenfold-Szekesfehervar hop lists trains past 2h, so 180 is the
    floor that still fills travelMin on those rows. */

@@ -413,7 +413,7 @@ Object.assign(BkkLib, {
     const mapped = BkkLib.elviraCodeFromName(name);
     if (mapped) return mapped;
     const n = String(name || '').trim();
-    if (!apiKey || !n) return '';
+    if (!BkkLib.hasFutar(apiKey) || !n) return '';
     const queries = [n];
     const key = BkkLib.stationKey(n);
     if (key && key !== n) queries.push(key);

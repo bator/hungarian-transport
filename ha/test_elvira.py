@@ -3,18 +3,17 @@
 from __future__ import annotations
 
 import sys
+import types
 from datetime import datetime, timedelta
 from pathlib import Path
 
-sys.path.insert(
-    0,
-    str(
-        Path(__file__).resolve().parents[1]
-        / "custom_components"
-        / "hungarian_transport"
-    ),
-)
-from elvira import (  # noqa: E402
+# Load elvira.py as part of its package (it imports .cache) without running the
+# package __init__, which needs Home Assistant.
+_PKG_DIR = Path(__file__).resolve().parents[1] / "custom_components" / "hungarian_transport"
+_pkg = types.ModuleType("hungarian_transport")
+_pkg.__path__ = [str(_PKG_DIR)]
+sys.modules["hungarian_transport"] = _pkg
+from hungarian_transport.elvira import (  # noqa: E402
     ELVIRA_ROW_CAP,
     STATIONINFO_MAX_COUNT,
     parse_elvira_services,

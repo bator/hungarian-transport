@@ -404,7 +404,7 @@ Object.assign(BkkLib, {
     const mapped = BkkLib.elviraCodeFromName(name);
     if (mapped) return mapped;
     const n = String(name || "").trim();
-    if (!apiKey || !n) return "";
+    if (!BkkLib.hasFutar(apiKey) || !n) return "";
     const queries = [n];
     const key = BkkLib.stationKey(n);
     if (key && key !== n) queries.push(key);
@@ -470,7 +470,6 @@ var BKK_PLANNER_TAG = "hungarian-transit-stop-card-plan";
 var BKK_PLANNER_TAG_ALIAS = "bkk-stop-card-plan";
 var BKK_API = "https://go.bkk.hu/api/query/v1/ws/otp/api/where";
 var TRANSITOUS = "https://api.transitous.org";
-var INTEGRATION_KEY = "hungarian_transport:integration";
 var DEFAULT_MINUTES_AFTER = 180;
 var MIN_MINUTES_AFTER = 15;
 var MAX_MINUTES_AFTER = 480;
@@ -1026,10 +1025,18 @@ Object.assign(BkkLib, {
     const h = hass || BkkLib._hass;
     return !!(h && h.services && h.services.hungarian_transport && h.services.hungarian_transport.futar);
   },
-  effectiveApiKey(cfg, hass) {
+  /* The only key the browser ever holds is one the user put on a card. With
+     no such key, FUTÁR goes through the integration when it holds the key,
+     and a key borrowed from a sibling card is only the last resort. */
+  cardApiKey(cfg, hass, borrowedKey) {
     const own = String(cfg && cfg.apiKey || "").trim();
     if (own) return own;
-    return BkkLib.integrationHasKey(hass) ? INTEGRATION_KEY : "";
+    if (BkkLib.integrationHasKey(hass)) return "";
+    return String(borrowedKey || "").trim();
+  },
+  /* FUTÁR is reachable with this card key, or through the integration. */
+  hasFutar(apiKey, hass) {
+    return !!String(apiKey || "").trim() || BkkLib.integrationHasKey(hass);
   },
   async _fetchViaIntegration(path, params) {
     const hass = BkkLib._hass;
@@ -1041,13 +1048,7 @@ Object.assign(BkkLib, {
     });
     let res;
     try {
-      const call = typeof hass.callService === "function" ? hass.callService("hungarian_transport", "futar", serviceData, void 0, false, true) : hass.connection.sendMessagePromise({
-        type: "call_service",
-        domain: "hungarian_transport",
-        service: "futar",
-        service_data: serviceData,
-        return_response: true
-      });
+      const call = BkkLib.callServiceResponse(hass, "hungarian_transport", "futar", serviceData);
       res = await Promise.race([call, timeout]);
     } catch (err) {
       const msg = err && (err.message || err.code);
@@ -1061,9 +1062,11 @@ Object.assign(BkkLib, {
     if (data.status && data.status !== "OK") throw new Error(`BKK ${data.status}`);
     return data;
   },
+  /* With a card key the browser calls FUTÁR directly; without one, the
+     integration's hungarian_transport.futar service does, with its own key. */
   async fetch(apiKey, path, params, foreground) {
-    if (!apiKey) throw codedError("errNoApiKey");
-    if (apiKey === INTEGRATION_KEY) {
+    if (!apiKey) {
+      if (!BkkLib.integrationHasKey()) throw codedError("errNoApiKey");
       await BkkLib._gate(!!foreground);
       try {
         return await BkkLib._fetchViaIntegration(path, params);
@@ -1143,7 +1146,7 @@ Object.assign(BkkLib, {
     const lat = Number(stop && stop.lat);
     const lon = Number(stop && stop.lon);
     if (name && Number.isFinite(lat) && Number.isFinite(lon)) return `${name}::${lat},${lon}`;
-    if (!apiKey || !name) return "";
+    if (!BkkLib.hasFutar(apiKey) || !name) return "";
     try {
       const data = await BkkLib.fetch(apiKey, "search.json", { query: name }, true);
       const stops = ((data.data || {}).references || {}).stops || {};
@@ -2013,7 +2016,7 @@ Object.assign(BkkLib, {
     const motis = await BkkLib.transitousJourney(origin, dest, opts);
     if (motis && motis.legs.some((leg) => !leg.walk)) return motis;
     let futar = null;
-    if (apiKey) {
+    if (BkkLib.hasFutar(apiKey)) {
       const fromPlace = await BkkLib.planPlace(apiKey, origin);
       const toPlace = await BkkLib.planPlace(apiKey, dest);
       if (fromPlace && toPlace) {
@@ -2381,7 +2384,7 @@ Object.assign(BkkLib, {
     return { walk, train, ready: Math.round(train.endMs / 1e3) };
   },
   async probeApiKey(apiKey) {
-    if (!apiKey) return { ok: false, code: "errNoApiKey" };
+    if (!BkkLib.hasFutar(apiKey)) return { ok: false, code: "errNoApiKey" };
     try {
       await BkkLib.fetch(apiKey, "search.json", { query: "." }, true);
       return { ok: true };
@@ -3734,31 +3737,8 @@ Object.assign(BkkLib, {
       dest_name: destName || ""
     };
     try {
-      let res;
-      if (typeof hass.callService === "function") {
-        try {
-          res = await hass.callService("hungarian_transport", "elvira_between", serviceData, void 0, false, true);
-        } catch (err) {
-          if (!hass.connection) throw err;
-          res = await hass.connection.sendMessagePromise({
-            type: "call_service",
-            domain: "hungarian_transport",
-            service: "elvira_between",
-            service_data: serviceData,
-            return_response: true
-          });
-        }
-      } else if (hass.connection) {
-        res = await hass.connection.sendMessagePromise({
-          type: "call_service",
-          domain: "hungarian_transport",
-          service: "elvira_between",
-          service_data: serviceData,
-          return_response: true
-        });
-      } else {
-        return [];
-      }
+      const res = await BkkLib.callServiceResponse(hass, "hungarian_transport", "elvira_between", serviceData);
+      if (!res) return [];
       const rows = BkkLib.elviraRowsFromResult(res);
       return Array.isArray(rows) ? rows : [];
     } catch (err) {
@@ -3783,31 +3763,8 @@ Object.assign(BkkLib, {
     if (BkkLib._coachPosInflight) return BkkLib._coachPosInflight;
     const run = (async () => {
       try {
-        let res;
-        if (typeof hass.callService === "function") {
-          try {
-            res = await hass.callService("bkk_stop", "coach_positions", {}, void 0, false, true);
-          } catch (err) {
-            if (!hass.connection) throw err;
-            res = await hass.connection.sendMessagePromise({
-              type: "call_service",
-              domain: "bkk_stop",
-              service: "coach_positions",
-              service_data: {},
-              return_response: true
-            });
-          }
-        } else if (hass.connection) {
-          res = await hass.connection.sendMessagePromise({
-            type: "call_service",
-            domain: "bkk_stop",
-            service: "coach_positions",
-            service_data: {},
-            return_response: true
-          });
-        } else {
-          return [];
-        }
+        const res = await BkkLib.hassService(hass, "coach_positions", {});
+        if (!res) return [];
         const vehicles = BkkLib.coachVehiclesFromResult(res);
         const list = Array.isArray(vehicles) ? vehicles : [];
         BkkLib._coachPosCache = { ts: Date.now(), vehicles: list };
@@ -3825,31 +3782,8 @@ Object.assign(BkkLib, {
     if (!hass || !route) return "";
     const serviceData = { route: String(route), headsign: String(headsign || "") };
     try {
-      let res;
-      if (typeof hass.callService === "function") {
-        try {
-          res = await hass.callService("bkk_stop", "coach_shape", serviceData, void 0, false, true);
-        } catch (err) {
-          if (!hass.connection) throw err;
-          res = await hass.connection.sendMessagePromise({
-            type: "call_service",
-            domain: "bkk_stop",
-            service: "coach_shape",
-            service_data: serviceData,
-            return_response: true
-          });
-        }
-      } else if (hass.connection) {
-        res = await hass.connection.sendMessagePromise({
-          type: "call_service",
-          domain: "bkk_stop",
-          service: "coach_shape",
-          service_data: serviceData,
-          return_response: true
-        });
-      } else {
-        return "";
-      }
+      const res = await BkkLib.hassService(hass, "coach_shape", serviceData);
+      if (!res) return "";
       const payload = res && (res.response || res.service_response) || res || {};
       return String(payload.points || "");
     } catch (err) {
@@ -3863,24 +3797,32 @@ Object.assign(BkkLib, {
     if (nested && nested !== res) return BkkLib.servicePayload(nested);
     return res;
   },
-  async hassService(hass, service, serviceData) {
+  /* Call a service that returns a response. The websocket message is the one
+     path that carries return_response on every frontend version; callService
+     is only the fallback when there is no connection. Resolves to null when
+     neither exists. */
+  async callServiceResponse(hass, domain, service, serviceData) {
     if (!hass) return null;
     if (hass.connection && typeof hass.connection.sendMessagePromise === "function") {
       return hass.connection.sendMessagePromise({
         type: "call_service",
-        domain: "bkk_stop",
+        domain: String(domain),
         service: String(service),
         service_data: serviceData || {},
         return_response: true
       });
     }
     if (typeof hass.callService === "function") {
-      return hass.callService("bkk_stop", service, serviceData, void 0, false, true);
+      return hass.callService(domain, service, serviceData || {}, void 0, false, true);
     }
     return null;
   },
+  /* Companion bkk_stop services (coach GPS and shapes). */
+  hassService(hass, service, serviceData) {
+    return BkkLib.callServiceResponse(hass, "bkk_stop", service, serviceData);
+  },
   async hassTripShape(hass, apiKey, tripId) {
-    if (!hass || !BkkLib.isFutarTripId(tripId) || !apiKey || apiKey === INTEGRATION_KEY) return [];
+    if (!hass || !BkkLib.isFutarTripId(tripId) || !apiKey) return [];
     const serviceData = { trip_id: String(tripId), api_key: String(apiKey) };
     try {
       const res = await BkkLib.hassService(hass, "trip_shape", serviceData);
@@ -3895,7 +3837,7 @@ Object.assign(BkkLib, {
      bkk_stop has no trip_shape service, so the map must decode this
      itself instead of waiting on Home Assistant. */
   async futarTripShape(apiKey, cache, tripId) {
-    if (!apiKey || !BkkLib.isFutarTripId(tripId)) return [];
+    if (!BkkLib.hasFutar(apiKey) || !BkkLib.isFutarTripId(tripId)) return [];
     try {
       const packed = await BkkLib.tripDetails(apiKey, cache, tripId);
       return BkkLib.validMapShape(BkkLib.decodePolyline(packed && packed.polyline));
@@ -3994,7 +3936,7 @@ Object.assign(BkkLib, {
       }
       return BkkLib.groupStops(Array.from(byId.values())).slice(0, 20);
     }
-    if (apiKey) {
+    if (BkkLib.hasFutar(apiKey)) {
       try {
         const queries = [q].concat(BkkLib.aliasQueries(q));
         for (let i = 0; i < queries.length; i++) {
@@ -4809,7 +4751,7 @@ Object.assign(BkkLib, {
     if (BkkLib.isFutarTripId(tid)) return tid;
     const num = BkkLib.rowTrainNumber(row);
     const wantKey = BkkLib.rowTimeKey(row);
-    if (!apiKey || !num && !wantKey) return "";
+    if (!BkkLib.hasFutar(apiKey) || !num && !wantKey) return "";
     const stops = [];
     [stopId, extraStopId].forEach((id) => {
       if (id && stops.indexOf(id) < 0) stops.push(id);
@@ -5049,7 +4991,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._syncApiKey();
     this._syncMode();
     this._probeKey();
-    if (this._config.stopId && (this._apiKey() || this._mode() === "volan" || this._mode() === "helyi") && this._loadedStop !== this._config.stopId) {
+    if (this._config.stopId && (this._hasFutar() || this._mode() === "volan" || this._mode() === "helyi") && this._loadedStop !== this._config.stopId) {
       this._loadDests();
     }
   }
@@ -5063,10 +5005,19 @@ var BKKHopCardEditor = class extends HTMLElement {
     }
     const viaIntegration = BkkLib.integrationHasKey(hass);
     if (!this._userEditedKey && !this._config.apiKey && !this._loadingKey && !viaIntegration) this._fillKey();
-    else if (this._apiKey()) this._probeKey();
+    else if (this._hasFutar()) this._probeKey();
   }
   _apiKey() {
-    return BkkLib.effectiveApiKey(this._config, this._hass);
+    return BkkLib.cardApiKey(this._config, this._hass);
+  }
+  _hasFutar() {
+    return BkkLib.hasFutar(this._apiKey(), this._hass);
+  }
+  /* What a probe result belongs to: this card's key, or the integration. */
+  _keyAccess() {
+    const key = this._apiKey();
+    if (key) return `key:${key}`;
+    return BkkLib.integrationHasKey(this._hass) ? "integration" : "";
   }
   _lang() {
     return resolveLang(this._config.language, this._hass);
@@ -5347,7 +5298,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     }
     const own = (this._config.apiKey || "").trim();
     const viaIntegration = !own && BkkLib.integrationHasKey(this._hass);
-    const settled = !this._keyReveal && (viaIntegration || !!own && this._keyOk === true);
+    const settled = !this._keyReveal && (viaIntegration && this._keyOk !== false || !!own && this._keyOk === true);
     wrap.style.display = settled ? "none" : "";
     if (okWrap) okWrap.style.display = settled ? "" : "none";
     const okText = this._el("apiKeyOkText");
@@ -5533,29 +5484,29 @@ var BKKHopCardEditor = class extends HTMLElement {
       this._syncApiKey();
       return;
     }
-    const key = this._apiKey();
-    if (!key) {
+    const access = this._keyAccess();
+    if (!access) {
       this._keyOk = false;
       this._syncApiKey();
       return;
     }
     if (this._probingKey) return;
-    if (this._probedKey === key && this._keyOk != null) {
+    if (this._probedKey === access && this._keyOk != null) {
       this._syncApiKey();
       return;
     }
     this._probingKey = true;
-    this._probedKey = key;
+    this._probedKey = access;
     try {
-      const result = await BkkLib.probeApiKey(key);
-      if (this._apiKey() !== key) return;
+      const result = await BkkLib.probeApiKey(this._apiKey());
+      if (this._keyAccess() !== access) return;
       this._keyOk = !!result.ok;
       this._syncApiKey();
       if (!result.ok && result.code) this._error(errText(this._lang(), codedError(result.code)));
       else if (result.ok) this._error("");
     } finally {
       this._probingKey = false;
-      const latest = this._apiKey();
+      const latest = this._keyAccess();
       if (latest && latest !== this._probedKey) this._probeKey();
     }
   }
@@ -5573,7 +5524,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     const seq = ++this._searchSeq;
     try {
       this._error("");
-      if (!this._apiKey() && !this._userEditedKey) await this._fillKey();
+      if (!this._hasFutar() && !this._userEditedKey) await this._fillKey();
       if (seq !== this._searchSeq) return;
       const mode = this._mode();
       const hits = await BkkLib.searchStops(this._apiKey(), q, mode, this._config.city);
@@ -5652,7 +5603,7 @@ var BKKHopCardEditor = class extends HTMLElement {
   }
   async _loadDests() {
     if (!this._config.stopId) return;
-    if (!this._apiKey() && this._mode() !== "volan" && this._mode() !== "helyi") return;
+    if (!this._hasFutar() && this._mode() !== "volan" && this._mode() !== "helyi") return;
     const stopId = this._config.stopId;
     const seq = ++this._destSeq;
     this._destsLoading = true;
@@ -5809,8 +5760,13 @@ var BKKHopCard = class extends HTMLElement {
     this._reloadActive = true;
     Promise.resolve().then(() => this._reload()).catch((err) => this._showErr(err));
   }
+  /* The card's own key, or a key borrowed from a sibling card while the
+     integration has none. Empty when FUTÁR goes through the integration. */
   _apiKey() {
-    return BkkLib.effectiveApiKey(this._config, this._hass);
+    return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
+  }
+  _hasFutar() {
+    return BkkLib.hasFutar(this._apiKey(), this._hass);
   }
   set hass(hass) {
     const first = !this._hass;
@@ -5883,10 +5839,12 @@ var BKKHopCard = class extends HTMLElement {
     this._err = errText(this._lang(), err);
     this._paint();
   }
+  /* Kept apart from the config: once the integration's futar service shows
+     up (HA still starting, entry reloading), it wins over a borrowed key. */
   async _fillKey() {
     const key = await BkkLib.apiKeyFromDashboard(this._hass);
     if (!key || this._config.apiKey) return;
-    this._config = Object.assign({}, this._config, { apiKey: key });
+    this._borrowedKey = key;
     this._reloadSafe();
   }
   _header() {
@@ -6334,7 +6292,7 @@ var BKKHopCard = class extends HTMLElement {
       }
     }
     const tripId = row && row.tripId || "";
-    const canFutar = this._apiKey() && (!/^motis:/i.test(String(tripId || "")) || !!BkkLib.rowTrainNumber(row));
+    const canFutar = this._hasFutar() && (!/^motis:/i.test(String(tripId || "")) || !!BkkLib.rowTrainNumber(row));
     let geomTrip = "";
     if (canFutar) {
       geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : "";
@@ -6344,7 +6302,7 @@ var BKKHopCard = class extends HTMLElement {
       }
     }
     let futarShape = [];
-    if (geomTrip && this._apiKey() && !BkkLib.isTrainRow(row)) {
+    if (geomTrip && this._hasFutar() && !BkkLib.isTrainRow(row)) {
       try {
         futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
       } catch (_e) {
@@ -6680,7 +6638,7 @@ var BKKHopCard = class extends HTMLElement {
       this._poll = null;
     }
     const mode = this._departMode();
-    const ready = cfg.stopId && cfg.destKey && (this._apiKey() || mode === "volan" || mode === "helyi" || mode === "all");
+    const ready = cfg.stopId && cfg.destKey && (this._hasFutar() || mode === "volan" || mode === "helyi" || mode === "all");
     if (!ready) {
       this._rows = [];
       this._loading = false;
@@ -7648,7 +7606,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     const seq = ++this._searchSeq;
     try {
       this._err = "";
-      if (!this._apiKey()) await this._fillKey();
+      if (!this._hasFutar()) await this._fillKey();
       if (seq !== this._searchSeq) return;
       const hits = await BkkLib.searchPlannerStops(this._apiKey(), q);
       if (seq !== this._searchSeq) return;
@@ -7706,7 +7664,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._destsLoading = true;
     this._paintDestHits("");
     try {
-      if (!this._apiKey()) await this._fillKey();
+      if (!this._hasFutar()) await this._fillKey();
       const placeOrigin = /^(geo:|node\/)/i.test(String(cfg.stopId || "")) || cfg.stopKind === "address" || cfg.stopKind === "place";
       if (placeOrigin) {
         this._dests = [];
@@ -7763,7 +7721,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     }
     const seq = ++this._destSearchSeq;
     try {
-      if (!this._apiKey()) await this._fillKey();
+      if (!this._hasFutar()) await this._fillKey();
       const extras = await BkkLib.searchPlannerStops(this._apiKey(), q);
       if (seq !== this._destSearchSeq) return;
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);

@@ -129,12 +129,17 @@ check('card size grows with the rows', card.getCardSize() >= 2, String(card.getC
   const cds = [...card.shadowRoot.querySelectorAll('tr[data-row-index] .cd')].map((el) => el.textContent);
   check('tick keeps the table and updates countdowns in place',
     firstRow() === before && cds.includes('3 perc'), JSON.stringify(cds));
-  Date.now = () => realNow() + 10 * 60 * 1000;
+  /* +3 min: the bus due at +1 min is past its grace minute, the S40 due at
+     +5 min stays. */
+  Date.now = () => realNow() + 3 * 60 * 1000;
   card._tickPaint();
+  const left = [...card.shadowRoot.querySelectorAll('tr[data-row-index]')];
+  const leftHtml = left.map((tr) => tr.innerHTML).join('');
   check('tick repaints once a departure leaves the list',
-    firstRow() !== before
-      && card.shadowRoot.querySelectorAll('tr[data-row-index]').length < 2,
-    String(card.shadowRoot.querySelectorAll('tr[data-row-index]').length));
+    firstRow() !== before && left.length === 1
+      && leftHtml.includes('>S40<') && leftHtml.includes('2 perc')
+      && !leftHtml.includes('&lt;script&gt;'),
+    JSON.stringify({ rows: left.length, html: leftHtml.slice(0, 200) }));
   Date.now = realNow;
 
   /* Row index follows the rows on screen, not _rows with departed entries. */
@@ -1357,8 +1362,8 @@ check('coach station aliases share one key',
     JSON.stringify(czech.map((h) => h.id)));
 }
 check('ELVIRA calls the bundled Hungarian transport service',
-  src.includes("hass.callService('hungarian_transport', 'elvira_between'")
-  && !src.includes("hass.callService('bkk_stop', 'elvira_between'"));
+  src.includes("BkkLib.callServiceResponse(hass, 'hungarian_transport', 'elvira_between'")
+  && !src.includes("'bkk_stop', 'elvira_between'"));
 check('elvira result parser reads response.departures',
   Lib.elviraRowsFromResult({ context: {}, response: { departures: [{ label: 'TOKAJ' }] } }).length === 1);
 check('elvira result parser reads REST service_response',
@@ -3019,13 +3024,14 @@ Lib.mavIndex = origMavIndex;
     },
   };
   const noKey = { states: {}, language: 'en', services: { hungarian_transport: { elvira_between: {} } } };
-  check('effective key is the integration stand-in only when futar exists',
-    Lib.effectiveApiKey({}, hassWithKey) === 'hungarian_transport:integration'
-    && Lib.effectiveApiKey({}, noKey) === ''
-    && Lib.effectiveApiKey({ apiKey: 'own' }, hassWithKey) === 'own');
+  check('card key: own key wins, integration beats a borrowed key',
+    Lib.cardApiKey({ apiKey: 'own' }, hassWithKey, 'borrowed') === 'own'
+    && Lib.cardApiKey({}, hassWithKey, 'borrowed') === ''
+    && Lib.cardApiKey({}, noKey, 'borrowed') === 'borrowed'
+    && Lib.hasFutar('', hassWithKey) && !Lib.hasFutar('', noKey) && Lib.hasFutar('k', noKey));
 
   Lib._hass = hassWithKey;
-  const data = await Lib.fetch('hungarian_transport:integration', 'search.json', { query: 'Keleti' }, true);
+  const data = await Lib.fetch('', 'search.json', { query: 'Keleti' }, true);
   check('integration key calls hungarian_transport.futar, not BKK from the browser',
     calls.length === 1 && calls[0].domain === 'hungarian_transport' && calls[0].service === 'futar'
     && calls[0].data.path === 'search.json' && calls[0].data.params.query === 'Keleti'
@@ -3050,6 +3056,48 @@ Lib.mavIndex = origMavIndex;
     !edEvents.some((c) => c && c.apiKey),
     JSON.stringify(edEvents));
   ed.remove();
+
+  /* A rejected integration key brings the field back. */
+  const hassBadKey = Object.assign({}, hassWithKey, {
+    callService: async () => { throw { code: 'home_assistant_error', message: 'BKK FUTÁR rejected the configured key (HTTP 403).' }; },
+  });
+  Lib._hass = hassBadKey;
+  const ed2 = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed2);
+  ed2.setConfig({ type: 'custom:hungarian-transport-card', language: 'en' });
+  ed2.hass = hassBadKey;
+  await new Promise((r) => setTimeout(r, 20));
+  const wrap2 = ed2.querySelector('#apiKeyWrap');
+  const okWrap2 = ed2.querySelector('#apiKeyOkWrap');
+  check('editor shows the key field when the integration key is rejected',
+    !!wrap2 && wrap2.style.display !== 'none' && !!okWrap2 && okWrap2.style.display === 'none',
+    JSON.stringify({ wrap: wrap2 && wrap2.style.display, ok: okWrap2 && okWrap2.style.display }));
+  ed2.remove();
+
+  /* A key borrowed from a sibling card while HA was starting gives way to the
+     integration once its futar service appears. */
+  const dashboard = { views: [{ cards: [{ type: 'custom:hungarian-transport-card', apiKey: 'sibling-key' }] }] };
+  const starting = {
+    states: {},
+    language: 'en',
+    services: { hungarian_transport: { elvira_between: {} } },
+    connection: {
+      sendMessagePromise: async (msg) => (msg.type === 'lovelace/config' ? dashboard : {}),
+    },
+  };
+  Lib._hass = starting;
+  const borrower = document.createElement('hungarian-transport-card');
+  document.body.appendChild(borrower);
+  borrower.setConfig({ language: 'en' });
+  borrower.hass = starting;
+  await new Promise((r) => setTimeout(r, 20));
+  const borrowed = borrower._apiKey();
+  borrower.hass = Object.assign({}, starting, { services: hassWithKey.services });
+  check('borrowed sibling key stays out of the config and yields to the integration',
+    borrowed === 'sibling-key' && !borrower._config.apiKey
+    && borrower._apiKey() === '' && borrower._hasFutar(),
+    JSON.stringify({ borrowed, now: borrower._apiKey(), cfg: borrower._config.apiKey || '' }));
+  borrower.remove();
   Lib._hass = null;
   globalThis.fetch = realFetch;
 }

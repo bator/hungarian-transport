@@ -48,7 +48,7 @@ export class BKKHopCardEditor extends HTMLElement {
     this._syncApiKey();
     this._syncMode();
     this._probeKey();
-    if (this._config.stopId && (this._apiKey() || this._mode() === 'volan' || this._mode() === 'helyi') && this._loadedStop !== this._config.stopId) {
+    if (this._config.stopId && (this._hasFutar() || this._mode() === 'volan' || this._mode() === 'helyi') && this._loadedStop !== this._config.stopId) {
       this._loadDests();
     }
   }
@@ -66,11 +66,22 @@ export class BKKHopCardEditor extends HTMLElement {
        this card's config: keeping it out of dashboards is the point. */
     const viaIntegration = BkkLib.integrationHasKey(hass);
     if (!this._userEditedKey && !this._config.apiKey && !this._loadingKey && !viaIntegration) this._fillKey();
-    else if (this._apiKey()) this._probeKey();
+    else if (this._hasFutar()) this._probeKey();
   }
 
   _apiKey() {
-    return BkkLib.effectiveApiKey(this._config, this._hass);
+    return BkkLib.cardApiKey(this._config, this._hass);
+  }
+
+  _hasFutar() {
+    return BkkLib.hasFutar(this._apiKey(), this._hass);
+  }
+
+  /* What a probe result belongs to: this card's key, or the integration. */
+  _keyAccess() {
+    const key = this._apiKey();
+    if (key) return `key:${key}`;
+    return BkkLib.integrationHasKey(this._hass) ? 'integration' : '';
   }
 
   _lang() { return resolveLang(this._config.language, this._hass); }
@@ -358,7 +369,10 @@ export class BKKHopCardEditor extends HTMLElement {
     }
     const own = (this._config.apiKey || '').trim();
     const viaIntegration = !own && BkkLib.integrationHasKey(this._hass);
-    const settled = !this._keyReveal && (viaIntegration || (!!own && this._keyOk === true));
+    /* A rejected integration key shows the field again, so a card key can
+       be entered while the integration's key is fixed. */
+    const settled = !this._keyReveal
+      && ((viaIntegration && this._keyOk !== false) || (!!own && this._keyOk === true));
     wrap.style.display = settled ? 'none' : '';
     if (okWrap) okWrap.style.display = settled ? '' : 'none';
     const okText = this._el('apiKeyOkText');
@@ -550,29 +564,29 @@ export class BKKHopCardEditor extends HTMLElement {
       this._syncApiKey();
       return;
     }
-    const key = this._apiKey();
-    if (!key) {
+    const access = this._keyAccess();
+    if (!access) {
       this._keyOk = false;
       this._syncApiKey();
       return;
     }
     if (this._probingKey) return;
-    if (this._probedKey === key && this._keyOk != null) {
+    if (this._probedKey === access && this._keyOk != null) {
       this._syncApiKey();
       return;
     }
     this._probingKey = true;
-    this._probedKey = key;
+    this._probedKey = access;
     try {
-      const result = await BkkLib.probeApiKey(key);
-      if (this._apiKey() !== key) return;
+      const result = await BkkLib.probeApiKey(this._apiKey());
+      if (this._keyAccess() !== access) return;
       this._keyOk = !!result.ok;
       this._syncApiKey();
       if (!result.ok && result.code) this._error(errText(this._lang(), codedError(result.code)));
       else if (result.ok) this._error('');
     } finally {
       this._probingKey = false;
-      const latest = this._apiKey();
+      const latest = this._keyAccess();
       if (latest && latest !== this._probedKey) this._probeKey();
     }
   }
@@ -591,7 +605,7 @@ export class BKKHopCardEditor extends HTMLElement {
     const seq = ++this._searchSeq;
     try {
       this._error('');
-      if (!this._apiKey() && !this._userEditedKey) await this._fillKey();
+      if (!this._hasFutar() && !this._userEditedKey) await this._fillKey();
       if (seq !== this._searchSeq) return;
       const mode = this._mode();
       const hits = await BkkLib.searchStops(this._apiKey(), q, mode, this._config.city);
@@ -681,7 +695,7 @@ export class BKKHopCardEditor extends HTMLElement {
 
   async _loadDests() {
     if (!this._config.stopId) return;
-    if (!this._apiKey() && this._mode() !== 'volan' && this._mode() !== 'helyi') return;
+    if (!this._hasFutar() && this._mode() !== 'volan' && this._mode() !== 'helyi') return;
     const stopId = this._config.stopId;
     const seq = ++this._destSeq;
     this._destsLoading = true;
