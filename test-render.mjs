@@ -121,17 +121,21 @@ check('card size grows with the rows', card.getCardSize() >= 2, String(card.getC
 {
   /* The 15 s tick only rewrites countdown text; a full repaint happens only
      when a departure leaves the list. */
+  /* The clock is set from `now`, the second the rows were built from, so a
+     slow CI runner cannot push the bus past its grace minute. */
   const realNow = Date.now;
   const firstRow = () => card.shadowRoot.querySelector('tr[data-row-index]');
   const before = firstRow();
-  Date.now = () => realNow() + 2 * 60 * 1000;
+  /* +100 s: the S40 (+300 s) shows 3 perc, the bus (+60 s) is 40 s late,
+     still inside its grace minute. */
+  Date.now = () => (now + 100) * 1000;
   card._tickPaint();
   const cds = [...card.shadowRoot.querySelectorAll('tr[data-row-index] .cd')].map((el) => el.textContent);
   check('tick keeps the table and updates countdowns in place',
     firstRow() === before && cds.includes('3 perc'), JSON.stringify(cds));
   /* +3 min: the bus due at +1 min is past its grace minute, the S40 due at
      +5 min stays. */
-  Date.now = () => realNow() + 3 * 60 * 1000;
+  Date.now = () => (now + 180) * 1000;
   card._tickPaint();
   const left = [...card.shadowRoot.querySelectorAll('tr[data-row-index]')];
   const leftHtml = left.map((tr) => tr.innerHTML).join('');
@@ -3100,6 +3104,41 @@ Lib.mavIndex = origMavIndex;
   borrower.remove();
   Lib._hass = null;
   globalThis.fetch = realFetch;
+}
+
+/* Map routes for GTFS rows: never borrow another line's route. */
+{
+  const dep = 1800000000;
+  const shp = [[46.35, 17.79], [46.36, 17.76]];
+  const busRow = { label: '32', dep, vehicle: 'bus', rawType: 'BUS', tripId: 'gtfs:32:20261019:600:1' };
+  const other = { label: '5600', dep: dep + 30, vehicle: 'bus', shape: shp };
+  const same = { label: '32', dep: dep + 240, vehicle: 'bus', shape: shp };
+  check('short bus label does not take another line at the same time',
+    Lib.pickMotisVehicle([other], busRow, null) === null);
+  check('short bus label takes its own line',
+    Lib.pickMotisVehicle([other, same], busRow, null) === same);
+  const ferryRow = { label: 'Siófok-Balatonfüred-Tihany', dep, vehicle: 'ferry', rawType: 'FERRY', tripId: 'gtfs:x' };
+  check('a ferry is not matched with a bus leaving the same quay',
+    Lib.vehicleBucket(ferryRow) === 'ferry'
+    && Lib.pickMotisVehicle([{ label: '6038', dep: dep + 20, vehicle: 'bus', shape: shp }], ferryRow, null) === null);
+  const kinds = [0, 11, 4, 3, 700, 900].map((rt) => Lib.gtfsRouteKind(rt, 'bus', 'BUS').vehicle);
+  check('GTFS route_type picks tram, trolleybus, ferry, or keeps the bus default',
+    JSON.stringify(kinds) === JSON.stringify(['tram', 'trolleybus', 'ferry', 'bus', 'bus', 'tram']),
+    JSON.stringify(kinds));
+  const hits = [
+    { id: 'hu-bkk_F00867', name: 'Béla utca', lat: 47.58, lon: 19.08, areas: [{ name: 'Budapest' }] },
+    { id: 'hu-volanbusz_hkir_665919', name: 'Székesfehérvár, Béla utca', lat: 47.22, lon: 18.46,
+      areas: [{ name: 'Székesfehérvári járás' }, { name: 'Székesfehérvár' }] },
+  ];
+  const picked = Lib.pickTransitousHit(hits, { id: 'szekesfehervar:1', name: 'Béla utca', area: 'Székesfehérvár' }, 'bus');
+  check('stop lookup stays inside the operator city',
+    picked && picked.id === 'hu-volanbusz_hkir_665919', picked && picked.id);
+  const kapos = Lib.pickTransitousHit([
+    { id: 'hu-kaposvár_720884', name: 'Autóbusz-állomás', areas: [{ name: 'Kaposvár' }] },
+    { id: 'hu-volanbusz_hkir_549762', name: 'Kapuvár, autóbusz-állomás', areas: [{ name: 'Kapuvár' }] },
+  ], { id: 'kaposvar:1', name: 'Autóbusz-állomás', area: 'Kaposvár' }, 'bus');
+  check('a bus station asked by name is not penalised as a bus station',
+    kapos && kapos.id === 'hu-kaposvár_720884', kapos && kapos.id);
 }
 
 process.exit(failed ? 1 : 0);

@@ -1333,10 +1333,15 @@ Object.assign(BkkLib, {
     const want = BkkLib.transitousFeedWant(stop && stop.id);
     const wantName = stop && stop.name || "";
     kind = String(kind || "").toLowerCase();
+    const area = BkkLib.fold(stop && stop.area || "");
+    const inArea = (hit) => !!area && (hit.areas || []).some((a) => BkkLib.fold(a && a.name) === area);
+    const areaHits = area ? list.filter((hit) => hit && inArea(hit)) : [];
+    const busWanted = /aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(wantName);
     let best = null;
     let bestScore = -1;
     list.forEach((hit) => {
       if (!hit) return;
+      if (areaHits.length && !inArea(hit)) return;
       const hid = String(hit.id || "");
       const hname = hit.name || "";
       let score = 0;
@@ -1352,13 +1357,14 @@ Object.assign(BkkLib, {
       if (missing.length) score -= 4 * missing.length;
       if (BkkLib.foldTokenMatch(wantName, hname)) score += 3;
       if (BkkLib.fold(wantName) && BkkLib.fold(hname) === BkkLib.fold(wantName)) score += 2;
-      if (/aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(hname)) score -= 4;
+      if (!busWanted && /aut[o\u00f3]busz|aut\.?\s*\u00e1ll/i.test(hname)) score -= 4;
       if (score > bestScore) {
         bestScore = score;
         best = hit;
       }
     });
-    return bestScore >= 3 ? best : list[0] || null;
+    if (bestScore >= 3) return best;
+    return (areaHits.length ? areaHits[0] : list[0]) || null;
   },
   transitousCoord(hit) {
     if (!hit) return "";
@@ -1408,6 +1414,8 @@ Object.assign(BkkLib, {
       }
     }
     const queries = [];
+    const area = String(stop && stop.area || "").trim();
+    if (name && area && BkkLib.fold(name).indexOf(BkkLib.fold(area)) < 0) queries.push(`${name} ${area}`);
     if (name) queries.push(name);
     let stripped = name;
     [" vasútállomás", " pályaudvar", " pu."].forEach((sfx) => {
@@ -1575,6 +1583,7 @@ Object.assign(BkkLib, {
       if (/tram/.test(s)) return "tram";
       if (/subway|metro/.test(s)) return "subway";
       if (/trolley/.test(s)) return "trolley";
+      if (/ferry|boat/.test(s)) return "ferry";
       if (/coach/.test(s)) return "coach";
       if (/bus/.test(s)) return "bus";
       return s;
@@ -1586,6 +1595,7 @@ Object.assign(BkkLib, {
     if (v === "tram" || typ.indexOf("TRAM") >= 0) return "tram";
     if (v === "subway" || v === "metro" || /SUBWAY|METRO/.test(typ)) return "subway";
     if (v === "trolley" || v === "trolleybus" || typ.indexOf("TROLLEY") >= 0) return "trolley";
+    if (v === "ferry" || typ.indexOf("FERRY") >= 0) return "ferry";
     if (v === "coach" || typ === "COACH" || /^gtfs:/i.test(String(row.tripId || ""))) return "coach";
     if (v === "bus" || typ === "BUS") return "bus";
     if (BkkLib.rowTrainNumber(row) && !/bus|tram|subway|trolley|coach/i.test(v)) return "rail";
@@ -1671,6 +1681,7 @@ Object.assign(BkkLib, {
     const num = BkkLib.rowTrainNumber(row);
     const label = String(row && row.label || "").trim().toUpperCase();
     const dep = Number(row && (row.dep || row.sched || row.depTs) || 0);
+    const wantsId = !!(num || label && !BkkLib.genericRailLabel(label));
     let best = null;
     let bestScore = -1e9;
     const usable = (m) => {
@@ -1690,10 +1701,7 @@ Object.assign(BkkLib, {
       const dt = dep ? Math.abs(Number(m.dep || 0) - dep) : 0;
       if (dep && dt > 45 * 60 && !sameNum) return;
       const identity = sameNum || sameLabel || sameAlias;
-      if (!identity) {
-        const wantsId = !!(num || label.length >= 3 && !BkkLib.genericRailLabel(label));
-        if (wantsId) return;
-      }
+      if (!identity && wantsId) return;
       const destNear = destOn && (!dep || dt <= 12 * 60);
       if (!identity && !destNear) return;
       const score = (sameNum ? 1e3 : 0) + (sameLabel ? 400 : 0) + (sameAlias ? 250 : 0) + (destNear ? 50 : 0) - Math.min(dt, 1800) / 60;
@@ -1706,10 +1714,9 @@ Object.assign(BkkLib, {
       const near = list.filter((m) => usable(m) && Math.abs(Number(m.dep || 0) - dep) <= 8 * 60);
       const toward = dest ? near.filter((m) => BkkLib.destOnMotisRow(m, dest)) : near;
       const pool = toward.length ? toward : near;
-      const wantsId = !!(num || label.length >= 3 && !BkkLib.genericRailLabel(label));
       if (pool.length === 1) {
         const dt0 = Math.abs(Number(pool[0].dep || 0) - dep);
-        if (!wantsId || dt0 <= 90) {
+        if (!wantsId || BkkLib.isTrainRow(row) && dt0 <= 90) {
           best = pool[0];
         }
       } else if (pool.length > 1 && !wantsId) {
@@ -3038,7 +3045,7 @@ var BKK_HOP_EDITOR_ALIAS = "bkk-stop-card-r3-editor";
 var BKK_PLANNER_EDITOR = "hungarian-transit-stop-card-plan-editor";
 var BKK_PLANNER_EDITOR_ALIAS = "bkk-stop-card-plan-editor";
 var OWN_CARD_TYPES = [BKK_HOP_TAG, BKK_HOP_TAG_ALIAS, BKK_PLANNER_TAG, BKK_PLANNER_TAG_ALIAS];
-var INDEX_SCHEMA = 27;
+var INDEX_SCHEMA = 28;
 
 // src/lib/dashboard-key.js
 Object.assign(BkkLib, {
@@ -3470,6 +3477,30 @@ Object.assign(BkkLib, {
     const idx = await BkkLib.cityIndex();
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), "#0F6FC6", "#ffffff", "bus", "BUS", minutesAfter);
   },
+  /* GTFS route_type (basic and extended codes) to the card's vehicle kind.
+     Buses keep the caller's default: coach for Volán, bus for city feeds. */
+  gtfsRouteKind(routeType, vehicle, rawType) {
+    const rt = Number(routeType);
+    if (!Number.isFinite(rt)) return { vehicle, rawType };
+    if (rt === 0 || rt >= 900 && rt < 1e3) return { vehicle: "tram", rawType: "TRAM" };
+    if (rt === 1 || rt >= 400 && rt < 500) return { vehicle: "subway", rawType: "SUBWAY" };
+    if (rt === 2 || rt >= 100 && rt < 200 || rt === 300) return { vehicle: "rail", rawType: "RAIL" };
+    if (rt === 4 || rt >= 1e3 && rt < 1100 || rt === 1200) return { vehicle: "ferry", rawType: "FERRY" };
+    if (rt === 11 || rt === 800) return { vehicle: "trolleybus", rawType: "TROLLEYBUS" };
+    return { vehicle, rawType };
+  },
+  /* City name of a local operator ("Székesfehérvár — helyi" → Székesfehérvár),
+     so Transitous stop lookups stay inside that city. */
+  async stopArea(cfg) {
+    if (BkkLib.mode(cfg || {}) !== "helyi" || !cfg.city) return "";
+    try {
+      const idx = await BkkLib.cityIndex();
+      const op = (idx.ops || []).find((o) => o.id === cfg.city);
+      return op ? String(op.name || "").split(" — ")[0].trim() : "";
+    } catch (_e) {
+      return "";
+    }
+  },
   gtfsDepartures(idx, stopId, dest, originName, opIx, color, text, vehicle, rawType, minutesAfter) {
     const origin = BkkLib.volanMatchStop(idx, { id: stopId, name: originName || "" }, opIx == null ? null : opIx);
     if (!origin) return [];
@@ -3518,13 +3549,14 @@ Object.assign(BkkLib, {
         const travel = arrMin != null && arrMin >= depMin && arrMin - depMin <= 1440 ? arrMin - depMin : null;
         const depTs = day.midnight + depMin * 60;
         if (!departureStillDue(depTs)) continue;
+        const kind = BkkLib.gtfsRouteKind(t2[4], vehicle, rawType);
         rows.push({
           tripId: "gtfs:" + route + ":" + day.ymd + ":" + depMin + ":" + origin.i,
           label: route,
           color,
           text,
-          vehicle,
-          rawType,
+          vehicle: kind.vehicle,
+          rawType: kind.rawType,
           dep: depTs,
           sched: depTs,
           delay: 0,
@@ -6312,12 +6344,13 @@ var BKKHopCard = class extends HTMLElement {
     let motisShape = [];
     let motisCoversHead = true;
     let motisMap = null;
+    const area = await BkkLib.stopArea(cfg);
     if (!published) {
       try {
         motisMap = await BkkLib.motisShapeForHop(
           row,
-          { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon },
-          { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey },
+          { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon, area },
+          { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey, area },
           { minutesAfter: cfg.minutesAfter, mode: "all" }
         );
         motisShape = BkkLib.validMapShape(motisMap && motisMap.shape);
@@ -6399,7 +6432,8 @@ var BKKHopCard = class extends HTMLElement {
           name: cfg.destName,
           key: cfg.destKey,
           lat: cfg.destLat,
-          lon: cfg.destLon
+          lon: cfg.destLon,
+          area
         }, BkkLib.vehicleBucket(row));
         destPt = destRef && BkkLib.mapGpsLatLon(destRef.lat, destRef.lon);
       } catch (_e) {

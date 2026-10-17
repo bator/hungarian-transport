@@ -675,12 +675,13 @@ export class BKKHopCard extends HTMLElement {
     let motisShape = [];
     let motisCoversHead = true;
     let motisMap = null;
+    const area = await BkkLib.stopArea(cfg);
     if (!published) {
       try {
         motisMap = await BkkLib.motisShapeForHop(
           row,
-          { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon },
-          { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey },
+          { id: cfg.stopId, name: cfg.stopName, lat: cfg.stopLat, lon: cfg.stopLon, area },
+          { id: cfg.destStopId, name: cfg.destName, key: cfg.destKey, area },
           { minutesAfter: cfg.minutesAfter, mode: 'all' },
         );
         motisShape = BkkLib.validMapShape(motisMap && motisMap.shape);
@@ -762,6 +763,7 @@ export class BKKHopCard extends HTMLElement {
           key: cfg.destKey,
           lat: cfg.destLat,
           lon: cfg.destLon,
+          area,
         }, BkkLib.vehicleBucket(row));
         destPt = destRef && BkkLib.mapGpsLatLon(destRef.lat, destRef.lon);
       } catch (_e) { /* keep the combined shape */ }
