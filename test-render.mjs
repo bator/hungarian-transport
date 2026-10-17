@@ -2960,4 +2960,59 @@ check('mavShapeForRow G43 uses the line code',
   JSON.stringify(mavG43));
 Lib.mavIndex = origMavIndex;
 
+/* BKK key held by the integration: FUTÁR goes through hungarian_transport.futar
+   and the key never appears in a browser request or the card config. */
+{
+  const calls = [];
+  const browserFetches = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    browserFetches.push(String(url));
+    return realFetch ? realFetch(url, init) : { ok: false, status: 599 };
+  };
+  const hassWithKey = {
+    states: {},
+    language: 'en',
+    services: { hungarian_transport: { futar: {}, elvira_between: {} } },
+    callService: async (domain, service, data) => {
+      calls.push({ domain, service, data });
+      return { context: {}, response: { data: { status: 'OK', data: { list: [] } } } };
+    },
+  };
+  const noKey = { states: {}, language: 'en', services: { hungarian_transport: { elvira_between: {} } } };
+  check('effective key is the integration stand-in only when futar exists',
+    Lib.effectiveApiKey({}, hassWithKey) === 'hungarian_transport:integration'
+    && Lib.effectiveApiKey({}, noKey) === ''
+    && Lib.effectiveApiKey({ apiKey: 'own' }, hassWithKey) === 'own');
+
+  Lib._hass = hassWithKey;
+  const data = await Lib.fetch('hungarian_transport:integration', 'search.json', { query: 'Keleti' }, true);
+  check('integration key calls hungarian_transport.futar, not BKK from the browser',
+    calls.length === 1 && calls[0].domain === 'hungarian_transport' && calls[0].service === 'futar'
+    && calls[0].data.path === 'search.json' && calls[0].data.params.query === 'Keleti'
+    && data.status === 'OK'
+    && !browserFetches.some((u) => u.includes('go.bkk.hu')),
+    JSON.stringify({ calls, browserFetches }));
+
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  const edEvents = [];
+  ed.addEventListener('config-changed', (ev) => edEvents.push(ev.detail.config));
+  ed.setConfig({ type: 'custom:hungarian-transport-card', language: 'en' });
+  ed.hass = hassWithKey;
+  await new Promise((r) => setTimeout(r, 20));
+  const okWrap = ed.querySelector('#apiKeyOkWrap') || (ed.shadowRoot && ed.shadowRoot.querySelector('#apiKeyOkWrap'));
+  const okText = ed.querySelector('#apiKeyOkText') || (ed.shadowRoot && ed.shadowRoot.querySelector('#apiKeyOkText'));
+  check('editor hides the key field and says the integration provides it',
+    !!okWrap && okWrap.style.display !== 'none'
+    && !!okText && /integration/i.test(okText.textContent),
+    okText ? okText.textContent : 'no okText');
+  check('editor never writes a key into the card config',
+    !edEvents.some((c) => c && c.apiKey),
+    JSON.stringify(edEvents));
+  ed.remove();
+  Lib._hass = null;
+  globalThis.fetch = realFetch;
+}
+
 process.exit(failed ? 1 : 0);

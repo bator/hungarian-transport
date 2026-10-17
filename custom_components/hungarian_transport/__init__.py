@@ -9,14 +9,15 @@ from homeassistant.components import frontend
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
-from .const import DOMAIN, SERVICE_ELVIRA_BETWEEN
+from .const import CONF_API_KEY, DOMAIN, SERVICE_ELVIRA_BETWEEN, SERVICE_FUTAR
 from .elvira import elvira_between, station_code_digits
+from .futar import FUTAR_PATHS, FutarAuthError, FutarError, FutarProxy
 
 ELVIRA_SERVICE_SCHEMA = vol.Schema(
     {
@@ -26,6 +27,14 @@ ELVIRA_SERVICE_SCHEMA = vol.Schema(
             "minutes_after", default=180
         ): vol.All(cv.positive_int, vol.Range(min=15, max=480)),
         vol.Optional("dest_name", default=""): cv.string,
+    }
+)
+FUTAR_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required("path"): vol.In(FUTAR_PATHS),
+        vol.Optional("params", default=dict): vol.Schema(
+            {cv.string: vol.Any(cv.string, int, float, bool)}
+        ),
     }
 )
 CARD_URL = "/hungarian-transport/hungarian-transport.js"
@@ -96,10 +105,52 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     return True
 
 
+def _entry_api_key(entry: ConfigEntry) -> str:
+    return str(entry.options.get(CONF_API_KEY) or entry.data.get(CONF_API_KEY) or "").strip()
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration entry."""
     frontend.add_extra_js_url(hass, hass.data[DOMAIN]["card_url"])
+    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+
+    api_key = _entry_api_key(entry)
+    if not api_key:
+        return True
+    # The card switches to this service when it exists, so it is registered
+    # only while a key is configured.
+    proxy = FutarProxy(async_get_clientsession(hass), api_key)
+
+    async def handle_futar(call: ServiceCall) -> dict[str, Any]:
+        try:
+            data = await proxy.get(call.data["path"], call.data["params"])
+        except FutarAuthError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="futar_auth",
+                translation_placeholders={"error": str(err)},
+            ) from None
+        except FutarError as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="futar_unavailable",
+                translation_placeholders={"error": str(err)},
+            ) from None
+        return {"data": data}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_FUTAR,
+        handle_futar,
+        schema=FUTAR_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    entry.async_on_unload(lambda: hass.services.async_remove(DOMAIN, SERVICE_FUTAR))
     return True
+
+
+async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    await hass.config_entries.async_reload(entry.entry_id)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
