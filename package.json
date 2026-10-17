@@ -4,8 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "esbuild src/index.js --bundle --format=esm --target=es2022 --charset=utf8 --legal-comments=none --banner:js=\"/* Hungarian transport cards. Generated from src/ by 'npm run build'; do not edit. */\" --outfile=dist/hungarian-transport.js",
-    "lint": "eslint src eslint.config.js test-render.mjs test-i18n.mjs",
-    "test": "node test-i18n.mjs && node test-render.mjs && python3 ha/test_elvira.py"
+    "lint": "eslint src eslint.config.js test-render.mjs test-i18n.mjs test-boot.mjs",
+    "test": "node test-i18n.mjs && node test-render.mjs && node test-boot.mjs && python3 ha/test_elvira.py"
   },
   "devDependencies": {
     "@eslint/js": "^9.36.0",

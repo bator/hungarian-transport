@@ -21,30 +21,46 @@ import { BKK_HOP_EDITOR, BKK_HOP_EDITOR_ALIAS, BKK_HOP_TAG, BKK_HOP_TAG_ALIAS, B
 
 
 /* `bkk-stop-card-r3` and its editor stay registered so dashboards written
-   before the rename keep working. */
-if (!customElements.get(BKK_HOP_EDITOR)) {
-  customElements.define(BKK_HOP_EDITOR, BKKHopCardEditor);
+   before the rename keep working. Aliases get their own subclass: a class
+   can back only one tag per registry. */
+const ELEMENTS = [
+  [BKK_HOP_EDITOR, BKKHopCardEditor],
+  [BKK_HOP_EDITOR_ALIAS, class extends BKKHopCardEditor {}],
+  [BKK_PLANNER_EDITOR, BKKPlannerCardEditor],
+  [BKK_PLANNER_EDITOR_ALIAS, class extends BKKPlannerCardEditor {}],
+  [BKK_HOP_TAG, BKKHopCard],
+  [BKK_HOP_TAG_ALIAS, class extends BKKHopCard {}],
+  [BKK_PLANNER_TAG, BKKPlannerCard],
+  [BKK_PLANNER_TAG_ALIAS, class extends BKKPlannerCard {}],
+];
+
+/* Looked up at call time on purpose: the registry may have been replaced. */
+function registerElements() {
+  ELEMENTS.forEach(([tag, cls]) => {
+    if (customElements.get(tag)) return;
+    try {
+      customElements.define(tag, cls);
+    } catch (err) {
+      console.warn(`Hungarian transport: could not register <${tag}>`, err);
+    }
+  });
 }
-if (!customElements.get(BKK_HOP_EDITOR_ALIAS)) {
-  customElements.define(BKK_HOP_EDITOR_ALIAS, class extends BKKHopCardEditor {});
-}
-if (!customElements.get(BKK_PLANNER_EDITOR)) {
-  customElements.define(BKK_PLANNER_EDITOR, BKKPlannerCardEditor);
-}
-if (!customElements.get(BKK_PLANNER_EDITOR_ALIAS)) {
-  customElements.define(BKK_PLANNER_EDITOR_ALIAS, class extends BKKPlannerCardEditor {});
-}
-if (!customElements.get(BKK_HOP_TAG)) {
-  customElements.define(BKK_HOP_TAG, BKKHopCard);
-}
-if (!customElements.get(BKK_HOP_TAG_ALIAS)) {
-  customElements.define(BKK_HOP_TAG_ALIAS, class extends BKKHopCard {});
-}
-if (!customElements.get(BKK_PLANNER_TAG)) {
-  customElements.define(BKK_PLANNER_TAG, BKKPlannerCard);
-}
-if (!customElements.get(BKK_PLANNER_TAG_ALIAS)) {
-  customElements.define(BKK_PLANNER_TAG_ALIAS, class extends BKKPlannerCard {});
+
+/* Home Assistant's app bundle installs a scoped custom element registry
+   polyfill that replaces window.customElements. The integration loads this
+   module next to that bundle at boot, so it can run first; a tag defined in
+   the native registry before the swap is invisible to the polyfill's get(),
+   and every card then shows "Custom element doesn't exist" (Configuration
+   error) until the next lucky reload. HA defines its own root element only
+   after the swap, so wait for that one. Loaded later (a Lovelace resource,
+   or outside HA), register at once. */
+const haRoot = typeof document !== 'undefined' && document.querySelector
+  ? document.querySelector('home-assistant, hc-main')
+  : null;
+if (haRoot && !customElements.get(haRoot.localName)) {
+  customElements.whenDefined(haRoot.localName).then(registerElements, registerElements);
+} else {
+  registerElements();
 }
 
 console.info(`%c HUNGARIAN-TRANSPORT %c ${CARD_VERSION} `,
