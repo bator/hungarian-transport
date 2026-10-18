@@ -13,10 +13,12 @@ dist/mav-index.json.gz
 /*.zip
 volanbusz_gtfs.zip
 state.json
+update.lock
 *.tmp
 *.log
 node_modules/
 .pytest_cache/
 /volan-shapes-*/
 /city-shapes-*/
+pfaedle-out/
 dist/*-shapes-*/
