@@ -6,8 +6,21 @@ import { INDEX_SCHEMA } from '../tags.js';
 Object.assign(BkkLib, {
   /* Cached per resolved URL, so two cards pointing at different index files do
      not serve each other's data. The URL carries a daily cache-buster, which
-     also expires the entry on a dashboard left open overnight. */
+     also expires the entry on a dashboard left open overnight; the day before's
+     copy of the same file is dropped then, not kept for days (each decoded
+     index is tens of MB on a wall tablet). */
   _idx: new Map(),
+  _indexBase(url) {
+    return String(url).replace(/([?&])v=\d{8}(&|$)/, (_m, lead, tail) => (tail ? lead : '')).replace(/[?&]$/, '');
+  },
+  _cacheIndex(cache, url, p, max) {
+    const base = BkkLib._indexBase(url);
+    Array.from(cache.keys()).forEach((k) => {
+      if (k !== url && BkkLib._indexBase(k) === base) cache.delete(k);
+    });
+    cache.set(url, p);
+    while (cache.size > max) cache.delete(cache.keys().next().value);
+  },
   _indexCached(url, httpKey, gunzipKey) {
     const cache = BkkLib._idx;
     const hit = cache.get(url);
@@ -16,8 +29,7 @@ Object.assign(BkkLib, {
       cache.delete(url);
       throw err;
     });
-    cache.set(url, p);
-    while (cache.size > 8) cache.delete(cache.keys().next().value);
+    BkkLib._cacheIndex(cache, url, p, 8);
     return p;
   },
   volanIndex() {
@@ -40,8 +52,7 @@ Object.assign(BkkLib, {
       cache.delete(url);
       return { n: {}, l: {}, p: [] };
     });
-    cache.set(url, p);
-    while (cache.size > 4) cache.delete(cache.keys().next().value);
+    BkkLib._cacheIndex(cache, url, p, 4);
     return p;
   },
   /* Headers and body under one timeout: a body that stalls after its
@@ -304,7 +315,9 @@ Object.assign(BkkLib, {
     if (!st) return false;
     if (destKey && (st.key === destKey || st.fold === destFold)) return true;
     const fk = destFold || BkkLib.fold(destKey || '');
-    if (fk && fk.length >= 4 && st.fold.indexOf(fk) >= 0) return true;
+    /* Whole words only: "Tata" is in "Budapest, Tata" but not in
+       "Tatabánya", nor "Eger" in "Egerszalók". */
+    if (fk && fk.length >= 4 && (' ' + st.fold + ' ').indexOf(' ' + fk + ' ') >= 0) return true;
     return false;
   },
   async volanSearchStops(q) {

@@ -1,4 +1,4 @@
-import { ASSET_BASE, DEFAULT_MINUTES_AFTER, departureStillDue, maxDepartureRows, refreshSeconds, setCityIndexUrl, setMavIndexUrl, setVolanIndexUrl } from './config.js';
+import { ASSET_BASE, DEFAULT_MINUTES_AFTER, clampMinutesAfter, departureStillDue, maxDepartureRows, refreshSeconds, setCityIndexUrl, setMavIndexUrl, setVolanIndexUrl } from './config.js';
 import { errText, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 import { BKK_HOP_EDITOR } from './tags.js';
@@ -525,6 +525,13 @@ export class BKKHopCard extends HTMLElement {
       };
       script.onerror = reject;
       document.head.appendChild(script);
+    });
+    /* A failed load (offline for a moment) is tried again on the next open,
+       not remembered until the page reloads. */
+    leafletPromise.catch(() => {
+      leafletPromise = null;
+      const el = typeof document !== 'undefined' ? document.getElementById('hungarian-transport-leaflet-js') : null;
+      if (el && !isLeaflet(window.L)) el.remove();
     });
     return leafletPromise;
   }
@@ -1158,7 +1165,8 @@ ${this._stopPinCss()}
             this._hass,
             cfg.stopId,
             cfg.destStopId || '',
-            cfg.minutesAfter,
+            /* The service takes 15..480 and rejects the call otherwise. */
+            clampMinutesAfter(cfg.minutesAfter),
             cfg.destName || '',
             { apiKey: this._apiKey(), originName: cfg.stopName || '' },
           ).catch(() => [])
@@ -1231,20 +1239,25 @@ ${this._stopPinCss()}
         earlyRows = rows || [];
         publish();
         this._syncOpenMap();
+        const firstRows = this._rawRows;
+        const needsTravel = (row) => row.travel == null && !/^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ''));
+        const fillTravel = (list) => Promise.all((list || []).map(async (row) => {
+          if (!needsTravel(row)) return;
+          row.travel = await BkkLib.travelMin(
+            this._apiKey(), row.tripId, cfg.destKey, row.dep, origin, this._tripCache || {},
+          );
+        }));
         const gpsTravel = Promise.all([
-          BkkLib.attachCoachGps(this._hass, this._rawRows).then((withGps) => {
-            if (gen !== this._gen) return;
+          BkkLib.attachCoachGps(this._hass, firstRows).then((withGps) => {
+            /* A newer list (the through-check) must not be replaced by this
+               older one; it gets its GPS on the last pass below. */
+            if (gen !== this._gen || this._rawRows !== firstRows) return;
             this._rawRows = withGps;
             this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
             this._paint();
             this._syncOpenMap();
           }),
-          Promise.all((this._rawRows || []).map(async (row) => {
-            if (row.travel != null || /^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ''))) return;
-            row.travel = await BkkLib.travelMin(
-              this._apiKey(), row.tripId, cfg.destKey, row.dep, origin, this._tripCache || {},
-            );
-          })),
+          fillTravel(firstRows),
         ]);
         if (startThrough) {
           startThrough();
@@ -1273,6 +1286,18 @@ ${this._stopPinCss()}
         if (typeof this._considerJourney === 'function') this._considerJourney();
         await gpsTravel;
         if (gen !== this._gen) return;
+        /* Rows the through-check added (the destination mid-route) are new
+           objects: their ride time and coach GPS are filled here. Trip
+           details are cached by then, so this costs no request. */
+        if (this._rawRows !== firstRows) {
+          const latest = this._rawRows;
+          const [withGps] = await Promise.all([
+            BkkLib.attachCoachGps(this._hass, latest),
+            fillTravel(latest),
+          ]);
+          if (gen !== this._gen || this._rawRows !== latest) return;
+          this._rawRows = withGps;
+        }
         this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
         this._paint();
         this._syncOpenMap();
@@ -1289,7 +1314,14 @@ ${this._stopPinCss()}
       if (!this.isConnected || gen !== this._gen) return;
       if (!this._shouldPoll()) return;
       const every = refreshSeconds(cfg.refresh) * 1000;
-      this._poll = setInterval(run, every);
+      /* A run slower than the interval (a stalled ELVIRA call) skips the next
+         tick instead of racing it: two runs could paint out of order. */
+      let busy = false;
+      this._poll = setInterval(() => {
+        if (busy) return;
+        busy = true;
+        run().finally(() => { busy = false; });
+      }, every);
     } finally {
       if (gen === this._gen) this._reloadActive = false;
     }

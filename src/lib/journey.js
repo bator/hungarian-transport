@@ -7,11 +7,37 @@ Object.assign(BkkLib, {
   journeyFromPlan(payload) {
     const its = ((((payload || {}).data || {}).entry || {}).plan || {}).itineraries || [];
     if (!its.length) return null;
+    return BkkLib.futarJourney(BkkLib.bestItinerary(its, (it) => Number(it.endTime)));
+  },
+  /* The itinerary that arrives first; among equal arrivals the shorter ride,
+     then fewer transfers. The search window spans hours: the shortest
+     duration alone picked a trip leaving almost three hours later. */
+  bestItinerary(its, endMs) {
+    const arrive = (it) => {
+      const v = endMs(it);
+      return Number.isFinite(v) && v > 0 ? v : Infinity;
+    };
+    const rides = (it) => (it.legs || []).filter((leg) => {
+      const mode = String(leg.mode || '').toUpperCase();
+      return mode && mode !== 'WALK';
+    }).length;
     let best = its[0];
     its.forEach((it) => {
-      if (Number(it.duration || 1e15) < Number(best.duration || 1e15)) best = it;
+      const a = arrive(it);
+      const b = arrive(best);
+      if (a !== b) {
+        if (a < b) best = it;
+        return;
+      }
+      const da = Number(it.duration || 1e15);
+      const db = Number(best.duration || 1e15);
+      if (da !== db) {
+        if (da < db) best = it;
+        return;
+      }
+      if (rides(it) < rides(best)) best = it;
     });
-    return BkkLib.futarJourney(best);
+    return best;
   },
   journeysFromPlan(payload) {
     const its = ((((payload || {}).data || {}).entry || {}).plan || {}).itineraries || [];
@@ -401,7 +427,8 @@ Object.assign(BkkLib, {
   },
   nextCityRide(idx, fromI, toI, route, readySec) {
     let best = null;
-    for (let off = 0; off < 2; off++) {
+    /* -1: after midnight, yesterday's 24:xx trips are tonight's rides. */
+    for (let off = -1; off < 2; off++) {
       const day = BkkLib.volanDay(off);
       const trips = idx.t || [];
       for (let n = 0; n < trips.length; n++) {
@@ -418,7 +445,8 @@ Object.assign(BkkLib, {
         const arr = day.base + ms[d] * 60;
         if (!best || dep < best.dep) best = { dep, arr };
       }
-      if (best) break;
+      /* Yesterday's late trip can still lose to an earlier one today. */
+      if (best && off >= 0) break;
     }
     return best;
   },

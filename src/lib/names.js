@@ -50,7 +50,10 @@ Object.assign(BkkLib, {
     if (fa && fb && fa === fb) return true;
     const pa = BkkLib.placeNameKey({ name: a });
     const pb = BkkLib.placeNameKey({ name: b });
-    return !!(pa && pb && pa === pb);
+    if (!pa || !pb || pa !== pb) return false;
+    /* The place key drops the city: "Győr, autóbusz-állomás" and "Szeged,
+       autóbusz-állomás" share it. Two named, different cities are two places. */
+    return !BkkLib.citiesConflict({ name: a }, { name: b });
   },
   fold(s) {
     return BkkLib.norm(s)
@@ -284,6 +287,11 @@ Object.assign(BkkLib, {
     }
     return out;
   },
+  /* One row per place: the same stop from FUTÁR, Volán and the search is
+     merged, but the city stays part of the place (116 towns have an
+     "autóbusz-állomás"). `key` is the reachable-list key when there is one,
+     so it finds that destination's routes; `routeKeys` holds every merged
+     source's key. */
   destHitsForQuery(dests, q, extras) {
     const f = BkkLib.fold(q || '');
     const out = [];
@@ -291,11 +299,24 @@ Object.assign(BkkLib, {
     const add = (d) => {
       if (!d || !d.name) return;
       const id = d.id || d.stopId || '';
-      let key = BkkLib.placeNameKey(d) || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
-      if (id && /^geo:/i.test(id) && String(d.kind || '') === 'address') key = key + '|' + id;
-      if (!key) return;
-      const prev = seen.get(key);
+      let place = BkkLib.placeNameKey(d) || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
+      if (!place) return;
+      if (id && /^geo:/i.test(id) && String(d.kind || '') === 'address') place = place + '|' + id;
+      /* A row without a city joins any row of that place; two different
+         named cities stay two rows. */
+      const city = BkkLib.stopCityKey(d);
+      const rows = seen.get(place) || [];
+      const prev = rows.find((r) => r.city === city)
+        || (city ? rows.find((r) => !r.city) : rows[0]);
+      if (prev && city && !prev.city) prev.city = city;
       if (prev) {
+        if (d.key && prev.routeKeys.indexOf(d.key) < 0) {
+          prev.routeKeys.push(d.key);
+          if (!prev.fromList) {
+            prev.key = d.key;
+            prev.fromList = true;
+          }
+        }
         if (BkkLib.stopIdRank(id) < BkkLib.stopIdRank(prev.id)) prev.id = id;
         if (BkkLib.elviraStationCode(id) && !BkkLib.elviraStationCode(prev.id)) prev.id = id;
         if (/^geo:/i.test(String(prev.id || '')) && id && !/^geo:/i.test(id)) prev.id = id;
@@ -306,12 +327,16 @@ Object.assign(BkkLib, {
         if (d.kind && !prev.kind) prev.kind = d.kind;
         return;
       }
-      const row = { key: key, name: d.name, id: id };
+      const row = {
+        key: d.key || place, name: d.name, id: id, routeKeys: d.key ? [d.key] : [], fromList: !!d.key,
+      };
       if (Number.isFinite(Number(d.lat))) row.lat = Number(d.lat);
       if (Number.isFinite(Number(d.lon))) row.lon = Number(d.lon);
       if (d.kind) row.kind = d.kind;
       if (d.label) row.label = d.label;
-      seen.set(key, row);
+      Object.defineProperty(row, 'city', { value: city, writable: true, enumerable: false });
+      rows.push(row);
+      seen.set(place, rows);
       out.push(row);
     };
     (extras || []).forEach(add);
@@ -407,6 +432,10 @@ Object.assign(BkkLib, {
     if (BkkLib.elviraCodeFromName(dest.name)) return true;
     return BkkLib.isRailHubName(dest.name);
   },
+  /* A stop whose id carries no ELVIRA code is looked up by name, which is a
+     few FUTÁR searches: on every poll without this memo. A found code is
+     kept for the page, a miss for ten minutes. */
+  _elviraCodes: new Map(),
   async elviraResolveCode(apiKey, id, name) {
     const direct = BkkLib.elviraStationCode(id);
     if (direct) return direct;
@@ -414,6 +443,14 @@ Object.assign(BkkLib, {
     if (mapped) return mapped;
     const n = String(name || '').trim();
     if (!BkkLib.hasFutar(apiKey) || !n) return '';
+    const memoKey = String(id || '') + '|' + n;
+    const hit = BkkLib._elviraCodes.get(memoKey);
+    if (hit && (hit.code || Date.now() - hit.ts < 600000)) return hit.code;
+    const code = await BkkLib._searchElviraCode(apiKey, n);
+    BkkLib._elviraCodes.set(memoKey, { code, ts: Date.now() });
+    return code;
+  },
+  async _searchElviraCode(apiKey, n) {
     const queries = [n];
     const key = BkkLib.stationKey(n);
     if (key && key !== n) queries.push(key);

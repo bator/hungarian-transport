@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
@@ -128,7 +129,8 @@ class MavGtfsUploadView(HomeAssistantView):
         if not request[KEY_HASS_USER].is_admin:
             return self.json_message("Admin access required", HTTPStatus.UNAUTHORIZED)
         dest = source_path(hass)
-        tmp = dest.with_name(dest.name + ".upload")
+        # Own temp file per upload: two at once must not write into one file.
+        tmp = dest.with_name(f"{dest.name}.{uuid.uuid4().hex}.upload")
         await hass.async_add_executor_job(partial(dest.parent.mkdir, parents=True, exist_ok=True))
         size = 0
         fh = await hass.async_add_executor_job(partial(open, tmp, "wb"))

@@ -646,17 +646,28 @@ Object.assign(BkkLib, {
     }
     const asFutar = (list) => list.map((row) => Object.assign({ travel: null }, row));
     const early = asFutar(sure);
-    if (destKey && maybe.length && sure.length < maxRows && typeof opts.armThroughCheck === 'function') {
+    /* A full list of direct rows still leaves room for a through trip that
+       leaves before the last of them: check those, then keep the earliest. */
+    const sureFull = sure.length >= maxRows;
+    const lastSure = sureFull ? (sure[sure.length - 1].dep || 0) : Infinity;
+    const pool = maybe.filter((row) => (row.dep || 0) <= lastSure);
+    if (destKey && pool.length && typeof opts.armThroughCheck === 'function') {
       opts.armThroughCheck(() => {
         const pending = (async () => {
           const picked = sure.slice();
-          for (let i = 0; i < maybe.length && picked.length < maxRows; i += 16) {
-            const chunk = maybe.slice(i, i + 16);
+          let found = 0;
+          for (let i = 0; i < pool.length && (sureFull ? found < maxRows : picked.length < maxRows); i += 16) {
+            const chunk = pool.slice(i, i + 16);
             const flags = await Promise.all(chunk.map((row) => (
               BkkLib.tripGoesTo(apiKey, cache, row.tripId, origin, destKey)
             )));
-            flags.forEach((ok, j) => { if (ok) picked.push(chunk[j]); });
+            flags.forEach((ok, j) => {
+              if (!ok) return;
+              picked.push(chunk[j]);
+              found += 1;
+            });
           }
+          picked.sort((a, b) => (a.dep || 0) - (b.dep || 0));
           const full = asFutar(picked.slice(0, maxRows));
           if (typeof opts.onFutarUpdate === 'function') opts.onFutarUpdate(full);
         })();

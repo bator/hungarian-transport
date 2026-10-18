@@ -3749,7 +3749,8 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     refreshSeconds('30s') === 45 && refreshSeconds(undefined) === 45 && refreshSeconds(-5) === 45 && refreshSeconds('') === 45);
   check('refresh is clamped to 15 s .. 1 h',
     refreshSeconds(5) === 15 && refreshSeconds('60') === 60 && refreshSeconds(99999) === 3600);
-  check('the card polls with the parsed refresh', /setInterval\(run, every\)/.test(src) && /refreshSeconds\(cfg\.refresh\)/.test(src));
+  check('the card polls with the parsed refresh, one run at a time',
+    /refreshSeconds\(cfg\.refresh\)/.test(src) && /if \(busy\) return;/.test(src) && /\}, every\);/.test(src));
 }
 {
   /* Two opens racing the first Leaflet load leave one overlay, and it closes. */
@@ -3803,6 +3804,209 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   check('the row map still closes', overlays() === 0, String(overlays()));
   Object.assign(Lib, keep);
   planCard.remove();
+}
+
+/* Review follow-ups: name matching, journey choice, planner state, polling. */
+{
+  check('a place key does not join two named towns',
+    !Lib.nameEq('Győr, autóbusz-állomás', 'Szeged, autóbusz-állomás')
+    && !Lib.nameEq('Kecskemét, Széchenyi tér', 'Szeged, Széchenyi tér')
+    && Lib.nameEq('Szeged, autóbusz-állomás', 'Szeged, autóbusz-állomás')
+    && Lib.nameEq('Budapest-Keleti', 'Keleti pályaudvar')
+    && Lib.nameEq('Budapest-Kelenföld', 'Kelenföld vasútállomás'));
+  const towns = Lib.destHitsForQuery([
+    { key: 'győr, autóbusz-állomás', name: 'Győr, autóbusz-állomás', id: 'volan_1' },
+    { key: 'szeged, autóbusz-állomás', name: 'Szeged, autóbusz-állomás', id: 'volan_2' },
+  ], '', []);
+  check('two towns’ bus stations stay two destinations, each with its own route key',
+    towns.length === 2 && towns[0].key === 'győr, autóbusz-állomás' && towns[1].key === 'szeged, autóbusz-állomás',
+    JSON.stringify(towns.map((h) => h.key)));
+  const merged = Lib.destHitsForQuery([
+    { key: 'kelenföld', name: 'Kelenföld vasútállomás', id: 'BKK_005501024' },
+  ], 'kelen', [{ id: 'volan_773538_99', name: 'Budapest, Kelenföld vasútállomás' }]);
+  check('a search hit and a listed destination merge, keeping the list key for routes',
+    merged.length === 1 && merged[0].key === 'kelenföld' && merged[0].routeKeys.join() === 'kelenföld',
+    JSON.stringify(merged));
+  const fold = (n) => ({ key: Lib.norm(n), fold: Lib.fold(n) });
+  check('a destination town matches whole words, not the start of another town',
+    !Lib.volanDestHit(fold('Tatabánya, autóbusz-állomás'), 'tata', Lib.fold('Tata'))
+    && !Lib.volanDestHit(fold('Egerszalók, posta'), 'eger', Lib.fold('Eger'))
+    && Lib.volanDestHit(fold('Tata, vasútállomás'), 'tata', Lib.fold('Tata'))
+    && Lib.volanDestHit(fold('Budapest, Kelenföld vasútállomás'), 'kelenföld', Lib.fold('Kelenföld')));
+}
+{
+  const at = (min) => new Date(Date.UTC(2026, 9, 20, 8, min)).toISOString();
+  const soon = { startTime: at(5), endTime: at(65), duration: 3600, legs: [{ mode: 'BUS' }] };
+  const later = { startTime: at(170), endTime: at(228), duration: 3480, legs: [{ mode: 'BUS' }] };
+  check('the journey that arrives first wins, not the shortest of a three-hour window',
+    Lib.bestItinerary([later, soon], (it) => Date.parse(it.endTime)) === soon);
+  const direct = { endTime: at(65), duration: 3600, legs: [{ mode: 'RAIL' }] };
+  const change = { endTime: at(65), duration: 3600, legs: [{ mode: 'BUS' }, { mode: 'WALK' }, { mode: 'TRAM' }] };
+  check('an equal arrival prefers fewer rides', Lib.bestItinerary([change, direct], (it) => Date.parse(it.endTime)) === direct);
+  const { t } = await import('./src/i18n.js');
+  check('the English journey summary counts transfers',
+    t('en', 'plannerJourneySummary', [30, 0, 2, 0]).includes('0 transfers')
+    && t('en', 'plannerJourneySummary', [30, 1, 2, 0]).includes('1 transfer ')
+    && t('en', 'plannerJourneySummary', [30, 2, 2, 0]).includes('2 transfers'));
+}
+{
+  /* After midnight, yesterday's 24:30 trip is tonight's 00:30 ride. */
+  const realNow = Date.now;
+  Date.now = () => Date.UTC(2026, 9, 20, 22, 20);
+  const idx = { c: [['1111111', '20200101', '20301231']], t: [[0, 'R1', [0, 1], [1470, 1480]]] };
+  const ride = Lib.nextCityRide(idx, 0, 1, 'R1', Math.floor(Date.now() / 1000));
+  Date.now = realNow;
+  check('a city ride from yesterday’s service day is found tonight',
+    !!ride && ride.dep === Date.UTC(2026, 9, 20, 22, 30) / 1000, JSON.stringify(ride));
+}
+{
+  const m = new Map();
+  Lib._cacheIndex(m, 'http://x/volan-index.json.gz?v=20261017', Promise.resolve(1), 8);
+  Lib._cacheIndex(m, 'http://x/city-index.json.gz?v=20261017', Promise.resolve(2), 8);
+  Lib._cacheIndex(m, 'http://x/volan-index.json.gz?v=20261018', Promise.resolve(3), 8);
+  check('a new day drops yesterday’s copy of the same index, and only that',
+    m.size === 2 && m.has('http://x/volan-index.json.gz?v=20261018') && m.has('http://x/city-index.json.gz?v=20261017'),
+    JSON.stringify(Array.from(m.keys())));
+  let reads = 0;
+  const conn = { sendMessagePromise: async () => { reads += 1; return { views: [] }; } };
+  const k1 = await Lib.apiKeyFromDashboard({ panelUrl: 'dash-memo', connection: conn });
+  const n1 = reads;
+  const k2 = await Lib.apiKeyFromDashboard({ panelUrl: 'dash-memo', connection: conn });
+  check('a dashboard without a key is not read again on the next update',
+    k1 === '' && k2 === '' && n1 === 2 && reads === 2, String(reads));
+  const keepSearch = Lib.searchStops;
+  let searches = 0;
+  Lib.searchStops = async () => { searches += 1; return []; };
+  const c1 = await Lib.elviraResolveCode('test-key', 'BKK_NOCODE', 'Sehollakó');
+  const s1 = searches;
+  const c2 = await Lib.elviraResolveCode('test-key', 'BKK_NOCODE', 'Sehollakó');
+  Lib.searchStops = keepSearch;
+  check('a station without an ELVIRA code is not searched on every poll',
+    c1 === '' && c2 === '' && s1 > 0 && searches === s1, String(searches));
+}
+{
+  /* 45 direct rows fill the list, yet a through bus leaving sooner belongs in it. */
+  const now = Math.floor(Date.now() / 1000);
+  const stopTimes = [];
+  const trips = {};
+  for (let i = 0; i < 45; i++) {
+    stopTimes.push({ tripId: `A${i}`, departureTime: now + 120 + i * 60 });
+    trips[`A${i}`] = { routeId: 'R_A', tripHeadsign: 'Zugló' };
+  }
+  stopTimes.push({ tripId: 'B1', departureTime: now + 150 });
+  trips.B1 = { routeId: 'R_B', tripHeadsign: 'Rákospalota' };
+  const board = { data: { entry: { stopTimes }, references: { trips, routes: { R_A: { shortName: '7', type: 'BUS' }, R_B: { shortName: '9', type: 'BUS' } }, stops: {} } } };
+  const keep = { departureBoard: Lib.departureBoard, tripGoesTo: Lib.tripGoesTo, originPoles: Lib.originPoles };
+  Lib.departureBoard = async () => board;
+  Lib.originPoles = async () => [];
+  Lib.tripGoesTo = async (_k, _c, tripId) => tripId === 'B1';
+  let armed = null;
+  let full = null;
+  const early = await Lib.departures('test-key', 'BKK_F1', [], { key: 'zugló', name: 'Zugló' }, {
+    mode: 'bkk', minutesAfter: 180, cache: {},
+    armThroughCheck: (fn) => { armed = fn; },
+    onFutarUpdate: (rows) => { full = rows; },
+  });
+  if (armed) armed();
+  await new Promise((r) => setTimeout(r, 20));
+  Object.assign(Lib, keep);
+  check('a full list of direct rows still checks the through trips leaving before its end',
+    !!armed && !!full && full.length === early.length && full.some((r) => r.tripId === 'B1')
+    && full.map((r) => r.dep).every((d, i, a) => i === 0 || a[i - 1] <= d),
+    JSON.stringify({ armed: !!armed, early: early.length, full: full && full.length, b1: !!(full && full.some((r) => r.tripId === 'B1')) }));
+}
+{
+  /* A through-check row is a new object: it still gets its ride time. */
+  const keep = { departures: Lib.departures, travelMin: Lib.travelMin };
+  const now = Math.floor(Date.now() / 1000);
+  const base = { label: '7', vehicle: 'bus', rawType: 'BUS', color: '#009EE3', text: '#ffffff' };
+  const sureRow = Object.assign({ tripId: 'BKK_T1', head: 'Zugló', dep: now + 120, sched: now + 120 }, base);
+  const throughRow = Object.assign({ tripId: 'BKK_T2', head: 'Óbuda', dep: now + 300, sched: now + 300 }, base);
+  Lib.departures = async (_k, _s, _r, _d, opts) => {
+    opts.armThroughCheck(() => {
+      setTimeout(() => opts.onFutarUpdate([Object.assign({ travel: null }, sureRow), Object.assign({ travel: null }, throughRow)]), 5);
+    });
+    return [Object.assign({ travel: null }, sureRow)];
+  };
+  Lib.travelMin = async (_k, tripId) => (tripId === 'BKK_T2' ? 15 : 7);
+  const hop = document.createElement('hungarian-transport-card');
+  document.body.appendChild(hop);
+  hop.setConfig({ language: 'hu', apiKey: 'test-key', stopId: 'BKK_F1', stopName: 'Fő tér', destKey: 'zugló', destName: 'Zugló', routeIds: [] });
+  hop._considerJourney = () => {};
+  /* setConfig starts the reload; wait for its through-check to land. */
+  for (let i = 0; i < 50; i++) {
+    const done = (hop._rawRows || []).find((r) => r.tripId === 'BKK_T2' && r.travel != null);
+    if (done && !hop._reloadActive) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const t2 = (hop._rawRows || []).find((r) => r.tripId === 'BKK_T2');
+  const t1 = (hop._rawRows || []).find((r) => r.tripId === 'BKK_T1');
+  check('a row the through-check adds gets its ride time',
+    !!t2 && t2.travel === 15 && !!t1 && t1.travel === 7,
+    JSON.stringify((hop._rawRows || []).map((r) => ({ id: r.tripId, travel: r.travel }))));
+  hop.remove();
+  Object.assign(Lib, keep);
+}
+{
+  /* A failed Leaflet load is tried again on the next open. */
+  const prevL = window.L;
+  window.L = undefined;
+  const probe = document.createElement('hungarian-transport-card');
+  document.body.appendChild(probe);
+  const p1 = probe._ensureLeaflet();
+  const s1 = document.getElementById('hungarian-transport-leaflet-js');
+  s1.dispatchEvent(new window.Event('error'));
+  const r1 = await p1.then(() => 'ok', () => 'failed');
+  await new Promise((r) => setTimeout(r, 0));
+  const p2 = probe._ensureLeaflet();
+  const s2 = document.getElementById('hungarian-transport-leaflet-js');
+  check('a failed Leaflet load is retried, not remembered', r1 === 'failed' && p2 !== p1 && !!s2 && s2 !== s1);
+  p2.catch(() => {});
+  s2.dispatchEvent(new window.Event('error'));
+  await new Promise((r) => setTimeout(r, 0));
+  probe.remove();
+  window.L = prevL;
+}
+{
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'hu', stopId: 'BKK_F1', stopName: 'Fő tér', minutesAfter: 45 });
+  let reloads = 0;
+  pc._reloadSafe = () => { reloads += 1; };
+  pc._loadDests = async () => {};
+  pc._destRoutes = { 'győr, autóbusz-állomás': ['volan_1'], 'aut all': ['BKK_2'] };
+  pc._journey = { legs: [{ walk: false }] };
+  pc._rows = [{ label: 'old' }];
+  const gen0 = pc._gen;
+  pc._pickDest({ key: 'aut all', name: 'Győr, autóbusz-állomás', id: 'volan_x', routeKeys: ['győr, autóbusz-állomás', 'aut all'] });
+  check('a picked town keeps its name in the destination key and all its routes',
+    pc._config.destKey === 'győr, autóbusz-állomás'
+    && pc._config.routeIds.indexOf('volan_1') >= 0 && pc._config.routeIds.indexOf('BKK_2') >= 0,
+    JSON.stringify({ key: pc._config.destKey, ids: pc._config.routeIds }));
+  check('picking a destination drops the old pair’s journey and rows',
+    pc._journey === null && pc._rows.length === 0 && pc._gen > gen0 && reloads === 1);
+  pc._journey = { legs: [{ walk: false }] };
+  pc._config = Object.assign({}, pc._config, { destStopId: 'volan_x', destName: 'Győr, autóbusz-állomás' });
+  const gen1 = pc._gen;
+  pc._swapPlan();
+  check('a swap plans the new pair at once, without the old journey',
+    pc._journey === null && pc._gen > gen1 && reloads === 2 && pc._config.stopName === 'Győr, autóbusz-állomás');
+  pc._rows = [{ label: 'x' }];
+  pc._loadedAt = Date.now();
+  const fresh = pc._shouldReloadOnConnect();
+  pc._loadedAt = Date.now() - 10 * 60 * 1000;
+  const stale = pc._shouldReloadOnConnect();
+  check('the planner plans again when shown after a while', fresh === false && stale === true);
+  pc._paintMinutesAfter();
+  const sel = pc._planEl('pmin');
+  check('a look-ahead that is not a preset still shows in the select',
+    !!sel && sel.value === '45', sel && sel.value);
+  const realNow = Date.now;
+  Date.now = () => Date.UTC(2026, 9, 24, 22, 30);
+  const label = pc._whenText(Date.UTC(2026, 9, 26, 6, 30));
+  Date.now = realNow;
+  check('on the DST night, tomorrow is the next calendar day', label.startsWith('holnap'), label);
+  pc.remove();
 }
 
 process.exit(failed ? 1 : 0);
