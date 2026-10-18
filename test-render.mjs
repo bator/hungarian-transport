@@ -3356,6 +3356,14 @@ Lib.mavIndex = origMavIndex;
   check('journey pins: a few steps to the stop add no start or end pin',
     JSON.stringify(short.map((p) => p.kind)) === JSON.stringify(['board', 'alight']),
     JSON.stringify(short.map((p) => p.kind + ':' + p.name)));
+  const sameStop = Lib.journeyStopPins([
+    { walk: true, shape: [[47.5425, 19.1375], [47.54095, 19.13916]], from: 'Fő tér', to: 'Fő tér' },
+    { walk: false, shape: [[47.54095, 19.13916], [47.51175, 19.09915]], from: 'Fő tér', to: 'Astoria M' },
+    { walk: true, shape: [[47.51175, 19.09915], [47.5140, 19.1020]], from: 'Astoria M', to: 'Astoria' },
+  ]);
+  check('journey pins: a walk across the same stop adds no start or end pin',
+    JSON.stringify(sameStop.map((p) => p.kind)) === JSON.stringify(['board', 'alight']),
+    JSON.stringify(sameStop.map((p) => p.kind + ':' + p.name)));
   check('journey pins: no rides, no pins',
     Lib.journeyStopPins([{ walk: true, shape: [[47.5, 19], [47.6, 19.1]], from: 'A', to: 'B' }]).length === 0);
 }
@@ -3392,7 +3400,11 @@ Lib.mavIndex = origMavIndex;
     map: () => fakeMap,
     tileLayer: () => layer(),
     divIcon: (o) => o,
-    marker: (pt, o) => { const m = Object.assign(layer(), { pt, html: o.icon.html }); made.push(m); return m; },
+    marker: (pt, o) => {
+      const m = Object.assign(layer(), { pt, html: o.icon.html, anchor: o.icon.iconAnchor, size: o.icon.iconSize });
+      made.push(m);
+      return m;
+    },
     polyline: () => layer(),
     latLngBounds: () => ({ extend() {} }),
   };
@@ -3422,6 +3434,21 @@ Lib.mavIndex = origMavIndex;
   check('row map footer explains both pins',
     !!foot && foot.textContent.includes('● Felszállás') && foot.textContent.includes('○ Leszállás'),
     foot && foot.textContent);
+  pinCard._closeVehicleMap();
+  made.length = 0;
+  await pinCard._openVehicleMap({
+    label: '1', headsign: 'Kelenföld', color: 'FFD800', textcolor: '000000', icon: 'mdi:tram',
+    tripId: 'BKK_T2', hasGps: true, lat: 47.53, lon: 19.11,
+  });
+  const veh = made.find((m) => m.html.includes('ht-veh-dot'));
+  check('the vehicle is a disc with its type icon, not a stop dot',
+    !!veh && veh.html.includes('<ha-icon icon="mdi:tram">') && veh.html.includes('--ink:#000000')
+    && !veh.html.includes('ht-stop-pin'),
+    veh && veh.html);
+  check('the vehicle marker is centred on its position',
+    !!veh && JSON.stringify(veh.anchor) === JSON.stringify([16, 16]) && JSON.stringify(veh.size) === JSON.stringify([32, 32])
+    && !/\.ht-veh-dot\{[^}]*translate/.test(src),
+    veh && JSON.stringify({ anchor: veh.anchor, size: veh.size }));
   pinCard._closeVehicleMap();
   check('closing the map clears both stop markers',
     !pinCard._mapBoardMarker && !pinCard._mapAlightMarker && !document.querySelector('.ht-map-overlay'));
