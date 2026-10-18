@@ -505,6 +505,45 @@ def main() -> int:
     finally:
         pass
 
+    # audit_city_shapes: a stop beside its shape passes, one 400 m away and a
+    # trip without a shape are reported, per operator.
+    import audit_city_shapes as acs
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        shape_dir = base / "city-shapes-test"
+        shape_dir.mkdir()
+        line = [(46.2500, 20.1400), (46.2600, 20.1400), (46.2700, 20.1400)]
+        with gzip.open(shape_dir / "00.json.gz", "wt", encoding="utf-8") as fh:
+            json.dump({"v": 1, "p": [gc.encode_polyline(line)]}, fh)
+        with gzip.open(shape_dir / "01.json.gz", "wt", encoding="utf-8") as fh:
+            json.dump({"v": 1, "p": []}, fh)
+        g = []
+        for lat, lon in [(46.2500, 20.1405), (46.2650, 20.1400), (46.2700, 20.1452)]:
+            g += [round(lat * 1e5), round(lon * 1e5)]
+        idx = {
+            "v": 29, "o": [["szeged", "Szeged"]], "g": g,
+            "s": [["a", "Alfa", "", 0], ["b", "Béta", "", 0], ["c", "Céda", "", 0]],
+            "sh": {"dir": "city-shapes-test", "n": 2},
+            "t": [[0, "1", [0, 1], [0, 5], 3, 0], [0, "2", [1, 2], [0, 5], 3, 0], [0, "3", [0, 2], [0, 5], 3, 1],
+                  [0, "4", [1, 0], [0, 5], 3, 0]],
+        }
+        with gzip.open(base / "city-index.json.gz", "wt", encoding="utf-8") as fh:
+            json.dump(idx, fh)
+        rep = acs.audit(base / "city-index.json.gz")
+        op = rep["operators"].get("szeged", {})
+        failed |= not check(
+            "city shape audit: on route, off route, out of order, no shape",
+            op.get("patterns") == 4 and op.get("ok") == 1 and op.get("off_route") == 1 and op.get("no_shape") == 1
+            and op.get("out_of_order") == 1
+            and any(w.get("stop") == "Céda" and 350 < w.get("m", 0) < 450 for w in rep["worst"]),
+            json.dumps(op),
+        )
+        failed |= not check(
+            "city shape audit: --min-ok fails a weak operator",
+            acs.main([str(base / "city-index.json.gz"), "--min-ok", "0.9"]) == 1
+            and acs.main([str(base / "city-index.json.gz")]) == 0,
+        )
+
     return 1 if failed else 0
 
 

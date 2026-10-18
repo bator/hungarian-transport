@@ -567,6 +567,24 @@ Object.assign(BkkLib, {
     await Promise.all(journey.legs.map(async (leg) => {
       if (!leg || leg.walk) return;
       if (BkkLib.validMapShape(leg.shape).length >= 2) return;
+      /* A city feed ride (the planner's own fallback): its shapes.txt route
+         between its two stops, else the line through its stops. */
+      if (leg.gtfs) {
+        const g = leg.gtfs;
+        const pts = Array.isArray(g.stops) ? g.stops : [];
+        const a = pts[g.from];
+        const b = pts[g.to];
+        let shape = [];
+        try {
+          shape = await BkkLib.gtfsShape(g.shape);
+        } catch (_e) {
+          shape = [];
+        }
+        if (shape.length >= 2 && a && b) shape = BkkLib.sliceShapeBetween(shape, a, b);
+        if (shape.length < 2) shape = BkkLib.validMapShape(pts.slice(g.from, g.to + 1).filter(Boolean));
+        if (shape.length >= 2) leg.shape = shape;
+        return;
+      }
       const tid = String(leg.tripId || '');
       if (!tid) return;
       try {

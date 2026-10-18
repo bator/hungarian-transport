@@ -259,6 +259,18 @@ jobs:
           if [ -f mav-index.json.gz ]; then cp -f mav-index.json.gz dist/; fi
           ls -lh dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz dist/mav-index.json.gz 2>/dev/null || true
 
+      # How the city lines will draw: every stop pattern against its shapes.txt
+      # route. Informational (the feeds decide), shown on the run summary.
+      - name: City route audit
+        run: |
+          set -euo pipefail
+          {
+            echo "### City routes"
+            echo '```'
+            python3 scripts/audit_city_shapes.py city-index.json.gz
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: Stamp release and pack assets
         env:
           TAG: ${{ needs.resolve.outputs.tag }}

@@ -53,6 +53,7 @@ They write into the current directory, not into `dist/`:
 ```bash
 python3 scripts/build_volan_index.py   # volan-index.json.gz, volan-shapes-<hash>/
 python3 scripts/build_city_index.py    # city-index.json.gz, city-shapes-<hash>/
+python3 scripts/audit_city_shapes.py city-index.json.gz   # does each line reach its stops, in order?
 ```
 
 Then copy `dist/hungarian-transport.js`, `dist/leaflet/`, both indexes and the
