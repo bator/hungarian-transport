@@ -1099,14 +1099,8 @@ check('transitous journey asks for 12 itineraries by default',
     planJFromBoard.length >= 1,
     String(planJFromBoard.length));
 }
-check('planner favorite chips include a Volan station',
-  planHtml.includes('N\u00e9pliget'));
-check('planner favorite chips include a MAV station',
-  planHtml.includes('Sz\u00e9kesfeh\u00e9rv\u00e1r') || planHtml.includes('Budapest-Kelenf'));
-check('planner favorites wrap in one row with feed marks',
-  plan.shadowRoot.querySelectorAll('#pfav .suggest-kind').length === 0
-  && plan.shadowRoot.querySelectorAll('#pfav .suggest-feed').length >= 4
-  && plan.shadowRoot.querySelectorAll('#pfav .suggest-stop').length <= 5
+check('planner has no preset origin suggestions',
+  plan.shadowRoot.querySelectorAll('#pfav .suggest-stop').length === 0
   && /\.suggest \{[^}]*flex-direction:\s*row/.test(src));
 check('planner dest search lists MAV stations outside the live sample',
   Lib.destHitsForQuery(
@@ -4007,6 +4001,68 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   Date.now = realNow;
   check('on the DST night, tomorrow is the next calendar day', label.startsWith('holnap'), label);
   pc.remove();
+}
+
+/* Origin suggestions: the stops this user picks, from their HA storage. */
+{
+  const DAY = 86400000;
+  const now = Date.now();
+  const stored = [
+    { id: 'hkir_773521', name: 'Budapest, Népliget autóbusz-pályaudvar', n: 2, t: now - DAY },
+    { id: 'BKK_005503269', name: 'Székesfehérvár', n: 5, t: now - 120 * DAY },
+    { id: 'BKK_CSF03154', name: 'Fő tér', n: 1, t: now - 2 * DAY },
+  ];
+  const writes = [];
+  const userHass = {
+    states: {}, language: 'hu', connection: {},
+    callWS: async (msg) => {
+      if (msg.type === 'frontend/get_user_data') return { value: msg.key === Lib.STOP_HISTORY_KEY ? stored : null };
+      if (msg.type === 'frontend/set_user_data') { writes.push(msg); return null; }
+      return null;
+    },
+  };
+  Lib._stopHistory = null;
+  const own = document.createElement('hungarian-transit-stop-card-plan');
+  document.body.appendChild(own);
+  own.hass = userHass;
+  own.setConfig({ language: 'hu' });
+  await new Promise((r) => setTimeout(r, 0));
+  own._paintFav();
+  const chips = Array.from(own.shadowRoot.querySelectorAll('#pfav .suggest-stop')).map((b) => b.textContent);
+  check('origin suggestions are the user’s own stops, most used first, with their feed mark',
+    chips.length === 3 && chips[0] === 'VNépliget' && chips[1] === 'BFő tér' && chips[2] === 'MSzékesfehérvár'
+    && !own.shadowRoot.innerHTML.includes('Keleti pályaudvar'),
+    JSON.stringify(chips));
+  await own._pickOrigin({ id: 'BKK_CSF03154', name: 'Fő tér', lat: 47.57, lon: 19.12 });
+  await new Promise((r) => setTimeout(r, 0));
+  const saved = writes.length ? writes[writes.length - 1] : null;
+  const foTer = saved && saved.value.find((e) => e.id === 'BKK_CSF03154');
+  check('a picked origin is counted and stored for this user',
+    !!saved && saved.key === Lib.STOP_HISTORY_KEY && !!foTer && foTer.n === 2 && foTer.lat === 47.57,
+    JSON.stringify(saved && saved.value.map((e) => [e.id, e.n])));
+  own._pickDest({ key: 'baja, autóbusz-állomás', name: 'Baja, autóbusz-állomás', id: 'volan_baja', routeKeys: [] });
+  await new Promise((r) => setTimeout(r, 0));
+  const afterDest = writes[writes.length - 1].value;
+  check('a picked destination counts too, without its route keys',
+    afterDest.some((e) => e.id === 'volan_baja' && !('routeKeys' in e) && !('key' in e)),
+    JSON.stringify(afterDest.map((e) => e.id)));
+  own.remove();
+  Lib._stopHistory = null;
+  const bare = document.createElement('hungarian-transit-stop-card-plan');
+  document.body.appendChild(bare);
+  bare.hass = { states: {}, language: 'hu', connection: {}, callWS: async () => ({ value: null }) };
+  bare.setConfig({ language: 'hu' });
+  await new Promise((r) => setTimeout(r, 0));
+  check('with no history there are no suggestions', bare.shadowRoot.querySelectorAll('#pfav .suggest-stop').length === 0);
+  bare.remove();
+  Lib._stopHistory = null;
+  const capped = [];
+  for (let i = 0; i < 30; i++) capped.push({ id: `S${i}`, name: `Stop ${i}`, n: i + 1, t: now });
+  Lib._stopHistory = { conn: null, p: Promise.resolve(Lib._cleanStopHistory(capped)) };
+  const kept = await Lib.recordStop(null, { id: 'NEW', name: 'New stop' });
+  check('the history keeps the 24 most used stops', kept.length === 24 && kept[0].id === 'S29' && !kept.some((e) => e.id === 'S0'),
+    JSON.stringify(kept.map((e) => e.id).slice(0, 3)));
+  Lib._stopHistory = null;
 }
 
 process.exit(failed ? 1 : 0);

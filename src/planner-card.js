@@ -1,4 +1,4 @@
-import { BKK_FAVORITES, DEFAULT_MINUTES_AFTER, MAV_FAVORITES, MINUTES_AFTER_PRESETS, VOLAN_FAVORITES, clampMinutesAfter, departureStillDue, pad2, tzEpochSec, tzFields, tzShiftYmd } from './config.js';
+import { DEFAULT_MINUTES_AFTER, MINUTES_AFTER_PRESETS, clampMinutesAfter, departureStillDue, pad2, tzEpochSec, tzFields, tzShiftYmd } from './config.js';
 import { BKKHopCard } from './hop-card.js';
 import { t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
@@ -733,7 +733,7 @@ export class BKKPlannerCard extends BKKHopCard {
       }
 
       .plan .suggest { margin-top: 6px; display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; }
-      .plan .suggest.hidden { display: none; }
+      .plan .suggest.hidden, .plan .suggest:empty { display: none; }
       .plan .suggest-row, .plan .suggest-stops { display: contents; }
       .plan .suggest-kind { display: none; }
       .plan .suggest-stop {
@@ -1014,9 +1014,21 @@ ${this._stopPinCss()}
     }
   }
 
+  /* The stops this user picks most, from their own Home Assistant storage
+     (see stop-history.js); nothing until they have picked one. */
   _paintFav() {
     const box = this._planEl('pfav');
     if (!box) return;
+    const cfg = this._config || {};
+    const conn = (this._hass && this._hass.connection) || null;
+    if (this._historyFor !== conn) {
+      this._historyFor = conn;
+      BkkLib.loadStopHistory(this._hass).then((list) => {
+        if (this._historyFor !== conn) return;
+        this._historyList = list;
+        this._paintFav();
+      }).catch(() => { /* no suggestions */ });
+    }
     box.innerHTML = '';
     const shortName = (name) => String(name || '')
       .replace(/^Budapest,\s*/, '')
@@ -1024,25 +1036,25 @@ ${this._stopPinCss()}
       .replace(/\s+aut\u00f3busz-p\u00e1lyaudvar$/, '')
       .replace(/\s+vas\u00fat\u00e1llom\u00e1s$/, '')
       .replace(/\s+p\u00e1lyaudvar$/, '');
-    const list = BkkLib.collapseSameNameStops(
-      BKK_FAVORITES.concat(VOLAN_FAVORITES, MAV_FAVORITES),
-    );
+    const list = BkkLib.frequentStops(this._historyList || [], { excludeId: cfg.stopId, limit: 6 });
+    if (!list.length) return;
+    const marks = { mav: 'M', volan: 'V', bkk: 'B', city: 'H' };
     const row = document.createElement('div');
     row.className = 'suggest-row';
     const stops = document.createElement('span');
     stops.className = 'suggest-stops';
     list.forEach((fav) => {
-      const id = String(fav.id || '');
-      const mark = /^BKK_0055/i.test(id) ? 'M'
-        : /^(?:volan_|hkir_|AREA_CS)/i.test(id) ? 'V'
-        : 'B';
+      const mark = marks[BkkLib.stopIdFamily(fav)] || '';
       const button = document.createElement('button');
       button.type = 'button';
       button.className = 'suggest-stop';
-      const feed = document.createElement('span');
-      feed.className = 'suggest-feed';
-      feed.textContent = mark;
-      button.appendChild(feed);
+      button.title = fav.label || fav.name;
+      if (mark) {
+        const feed = document.createElement('span');
+        feed.className = 'suggest-feed';
+        feed.textContent = mark;
+        button.appendChild(feed);
+      }
       button.appendChild(document.createTextNode(shortName(fav.name)));
       button.addEventListener('click', () => this._pickOrigin(fav));
       stops.appendChild(button);
@@ -1221,7 +1233,15 @@ ${this._stopPinCss()}
     }
   }
 
+  /* Every picked stop counts towards the user's suggestions. */
+  _rememberStop(stop) {
+    BkkLib.recordStop(this._hass, stop).then((list) => {
+      this._historyList = list;
+    }).catch(() => { /* suggestions only */ });
+  }
+
   async _pickOrigin(stop) {
+    this._rememberStop(stop);
     this._config = Object.assign({}, this._config, {
       stopId: stop.id,
       stopName: stop.name,
@@ -1378,6 +1398,7 @@ ${this._stopPinCss()}
   }
 
   _pickDest(dest) {
+    this._rememberStop(dest);
     /* A key without its town ("aut all") matches every town's bus station;
        a named town stays in the destination key. */
     const destKey = BkkLib.splitCityPrefix(dest.name || '') ? BkkLib.norm(dest.name) : dest.key;

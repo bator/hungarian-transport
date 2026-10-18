@@ -10,6 +10,7 @@ import './lib/gtfs.js';
 import './lib/services.js';
 import './lib/departures.js';
 import './lib/vehicles.js';
+import './lib/stop-history.js';
 import { BKK_PLANNER_TAG, BKK_PLANNER_TAG_ALIAS, CARD_VERSION } from './config.js';
 import { BKKHopCardEditor } from './editor.js';
 import { BKKHopCard } from './hop-card.js';
