@@ -13,12 +13,15 @@ import math
 import os
 import re
 import shutil
+import socket
+import sys
 import tempfile
 import unicodedata
 import urllib.parse
 import urllib.request
 import zipfile
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
@@ -106,8 +109,48 @@ def feed_error(feed_id: str, err: BaseException) -> str:
     return f"{feed_id}: {type(err).__name__}"
 
 
+def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        return _blocked_ip(ip.ipv4_mapped)
+    return bool(
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def resolve_public_host(host: str, port: int) -> None:
+    """Raise ValueError unless every address of host is public.
+
+    getaddrinfo also parses the numeric spellings ipaddress rejects
+    (2130706433, 0x7f000001, 127.1, 0177.0.0.1), so a loopback dressed up as
+    a decimal cannot slip past the literal check. A name that does not
+    resolve cannot be downloaded either, so it is refused as well.
+    """
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError) as err:
+        raise ValueError(f"unresolvable url host: {type(err).__name__}") from None
+    if not infos:
+        raise ValueError("unresolvable url host")
+    for _family, _type, _proto, _canon, sockaddr in infos:
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            raise ValueError("blocked url host") from None
+        if _blocked_ip(ip):
+            raise ValueError("blocked url host")
+
+
 def assert_public_http_url(url: str) -> None:
-    """Reject file://, loopback, and RFC1918 targets before urlopen."""
+    """Reject file://, loopback, link-local and RFC1918 targets before urlopen.
+
+    Literal addresses are checked as such; names (and numeric spellings that
+    are not IP literals) are resolved and every address must be public.
+    """
     parsed = urllib.parse.urlparse((url or "").strip())
     if parsed.scheme not in ("http", "https"):
         raise ValueError(f"blocked url scheme {parsed.scheme or 'none'}")
@@ -124,17 +167,15 @@ def assert_public_http_url(url: str) -> None:
     ):
         raise ValueError("blocked url host")
     try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        raise ValueError("blocked url port") from None
+    try:
         ip = ipaddress.ip_address(host)
     except ValueError:
+        resolve_public_host(host, port)
         return
-    if (
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    ):
+    if _blocked_ip(ip):
         raise ValueError("blocked url host")
 
 
@@ -679,27 +720,44 @@ def download_zip(url: str, dest: Path) -> dict:
         raise
 
 
-def download_feed(url: str, dest: Path) -> dict:
-    """Prefer HTTPS when the published URL is still http://."""
-    candidates = [url]
-    if url.startswith("http://"):
-        candidates.insert(0, "https://" + url[len("http://") :])
+def download_feed(url: str, dest: Path, *, allow_insecure: bool = False) -> dict:
+    """Download a feed, over HTTPS even when the published URL is http://.
+
+    Plain HTTP (an unauthenticated zip that becomes card data) is used only
+    for a feed whose entry says ``"insecure": True``, after HTTPS failed, and
+    then with a warning on stderr; otherwise the HTTPS failure is raised.
+    """
+    insecure = url.startswith("http://")
+    candidates = ["https://" + url[len("http://") :]] if insecure else [url]
+    if insecure and allow_insecure:
+        candidates.append(url)
     last: Exception | None = None
     for u in candidates:
+        if u.startswith("http://"):
+            print(
+                f"warn insecure download {dest.name}: https failed ({type(last).__name__}), "
+                "using plain http as the feed entry allows",
+                file=sys.stderr,
+            )
         try:
             return download_zip(u, dest)
         except Exception as err:
             last = err
+    if insecure and not allow_insecure:
+        raise RuntimeError(
+            f"{dest.name}: https download failed ({type(last).__name__}); "
+            "plain http is not allowed for this feed"
+        ) from last
     raise last or RuntimeError(f"download failed: {dest.name}")
 
 
-def download_any(urls: Iterable[str], dest: Path) -> dict:
+def download_any(urls: Iterable[str], dest: Path, *, allow_insecure: bool = False) -> dict:
     """download_feed from the first URL that works, so a broken keyed
     override still falls back to the public zip."""
     last: Exception | None = None
     for url in urls:
         try:
-            return download_feed(url, dest)
+            return download_feed(url, dest, allow_insecure=allow_insecure)
         except Exception as err:
             last = err
     raise last or RuntimeError(f"no download url: {dest.name}")
@@ -1095,8 +1153,55 @@ def index_shapes(path: Path) -> str | None:
     return m.group(1).decode("ascii") if m else None
 
 
-def write_index(parts: list[dict], out: Path, *, with_operators: bool, schema: int = INDEX_SCHEMA) -> dict:
-    """Merge operator parts into one gzipped compact index (and its shapes)."""
+_YMD = re.compile(r"\d{8}")
+
+
+def calendar_end(part: dict) -> str:
+    """Last service day (YYYYMMDD) a part can run on: the latest calendar.txt
+    end_date of a service with any weekday set, or the latest added
+    calendar_dates.txt date. "" when the feed carries no calendar at all."""
+    end = ""
+    for row in part.get("c") or []:
+        if len(row) >= 3 and set(str(row[0])) != {"0"} and _YMD.fullmatch(str(row[2])) and row[2] > end:
+            end = row[2]
+    for dates in part.get("a") or []:
+        for d in dates or []:
+            if _YMD.fullmatch(str(d)) and d > end:
+                end = d
+    return end
+
+
+def stale_parts(parts: list[dict], today: str | None = None) -> list[tuple[str, str]]:
+    """(op_id, last service day) of the parts whose calendar ended before today."""
+    today = today or date.today().strftime("%Y%m%d")
+    out = []
+    for part in parts:
+        end = calendar_end(part)
+        if end and end < today:
+            out.append((part["op_id"], end))
+    return out
+
+
+def write_index(
+    parts: list[dict],
+    out: Path,
+    *,
+    with_operators: bool,
+    schema: int = INDEX_SCHEMA,
+    today: str | None = None,
+) -> dict:
+    """Merge operator parts into one gzipped compact index (and its shapes).
+
+    Refuses an index that would lose most of the trips of the one in place,
+    and one built from a feed whose calendar already ended (a stale zip the
+    publisher forgot): the card would show a timetable nothing runs on.
+    """
+    stale = stale_parts(parts, today)
+    if stale:
+        raise IndexGuardError(
+            f"refusing to write {out.name}: calendar ended for "
+            + ", ".join(f"{op} ({end[:4]}-{end[4:6]}-{end[6:]})" for op, end in stale)
+        )
     ops: list[tuple[str, str]] = []
     seen_op: dict[str, int] = {}
     all_s: list[list] = []

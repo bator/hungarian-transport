@@ -6,6 +6,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 import voluptuous as vol
 
+from homeassistant import config_entries
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.setup import async_setup_component
 
@@ -82,6 +83,16 @@ async def test_rejected_key_raises_translated_error(hass, aioclient_mock) -> Non
 
     assert err.value.translation_key == "futar_auth"
     assert "secret-key" not in str(err.value)
+
+    # A rejected key starts one reauth flow, however many cards poll.
+    await hass.async_block_till_done()
+    with pytest.raises(HomeAssistantError):
+        await _call(hass, params={"query": "Deli"})
+    await hass.async_block_till_done()
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert len(flows) == 1
+    assert flows[0]["context"]["source"] == config_entries.SOURCE_REAUTH
+    assert flows[0]["step_id"] == "reauth_confirm"
 
 
 async def test_service_follows_options(hass, aioclient_mock) -> None:

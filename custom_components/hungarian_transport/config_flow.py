@@ -1,5 +1,6 @@
 """Config flow for Hungarian transport."""
 
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
@@ -62,6 +63,33 @@ class HungarianTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
         return self.async_show_form(
             step_id="user",
+            data_schema=_key_schema(),
+            errors=errors,
+            description_placeholders={"url": KEY_URL},
+        )
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """FUTÁR rejected the stored key at runtime."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Take a new BKK key (or none, which removes the FUTÁR service)."""
+        entry = self._get_reauth_entry()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            api_key = (user_input.get(CONF_API_KEY) or "").strip()
+            if api_key and (error := await _validate_key(self.hass, api_key)):
+                errors["base"] = error
+            else:
+                return self.async_update_reload_and_abort(
+                    entry, options={CONF_API_KEY: api_key}
+                )
+        return self.async_show_form(
+            step_id="reauth_confirm",
             data_schema=_key_schema(),
             errors=errors,
             description_placeholders={"url": KEY_URL},

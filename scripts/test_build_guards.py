@@ -3,6 +3,7 @@
 streamed GTFS reading. No network."""
 from __future__ import annotations
 
+import contextlib
 import gzip
 import io
 import json
@@ -19,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_city_index as bci  # noqa: E402
 import build_mav_index as bmi  # noqa: E402
 from build_volan_index import build_index  # noqa: E402
-from gtfs_compact import IndexGuardError, _open_csv, operator_trips, write_index  # noqa: E402
+from gtfs_compact import IndexGuardError, _open_csv, calendar_end, operator_trips, stale_parts, write_index  # noqa: E402
 
 failed = 0
 
@@ -46,7 +47,7 @@ def gtfs_zip(path: Path, files: dict[str, str | bytes]) -> Path:
     return path
 
 
-def city_feed(route: str = "12", trips: int = 1) -> dict[str, str]:
+def city_feed(route: str = "12", trips: int = 1, end: str = "20271231") -> dict[str, str]:
     stop_times = ["trip_id,arrival_time,departure_time,stop_id,stop_sequence"]
     trip_rows = ["route_id,service_id,trip_id"]
     for i in range(trips):
@@ -59,7 +60,7 @@ def city_feed(route: str = "12", trips: int = 1) -> dict[str, str]:
         "routes.txt": f"route_id,route_short_name,agency_id\nR1,{route},A\n",
         "trips.txt": "\n".join(trip_rows) + "\n",
         "calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
-        "S1,1,1,1,1,1,1,1,20260101,20271231\n",
+        f"S1,1,1,1,1,1,1,1,20260101,{end}\n",
         "stop_times.txt": "\n".join(stop_times) + "\n",
     }
 
@@ -119,7 +120,7 @@ with tempfile.TemporaryDirectory() as tmp:
     downloads: list[str] = []
     bad_urls: dict[str, bytes | None] = {}
 
-    def fake_download(url: str, dest: Path) -> dict:
+    def fake_download(url: str, dest: Path, **_kw) -> dict:
         downloads.append(url)
         if url in bad_urls:
             body = bad_urls[url]
@@ -159,6 +160,82 @@ with tempfile.TemporaryDirectory() as tmp:
     check("allowed missing feed builds and is reported as skipped",
           "b" in info["skipped"] and set(operator_trips(out)) == {"a"}, repr(info))
     os.environ.pop(bci.ALLOW_MISSING_ENV, None)
+
+    # The http:// publishers are the only ones allowed to fall back to http.
+    seen_kw: list[dict] = []
+
+    def recording_download(url: str, dest: Path, **kw) -> dict:
+        seen_kw.append(kw)
+        shutil.copy(fixtures / "a.zip", dest)
+        return {"size": dest.stat().st_size}
+
+    bci.download_feed = recording_download
+    bci._load_feed(base, {"id": "c", "name": "C", "url": "http://c.example/c.zip", "file": "c.zip", "insecure": True})
+    bci._load_feed(base, {"id": "d", "name": "D", "url": "https://d.example/d.zip", "file": "d.zip"})
+    check("insecure feed entry reaches download_feed",
+          [kw.get("allow_insecure") for kw in seen_kw] == [True, False], repr(seen_kw))
+bci.CITY_FEEDS = real_feeds
+
+# ---- 1b. a feed whose calendar already ended is not an index ----------------
+
+check("calendar_end takes the latest end_date", calendar_end(part("x", 1)) == "20271231")
+late = part("x", 1)
+late["c"] = [["0000000", "20200101", "20991231"], ["1111100", "20260101", "20260630"]]
+late["a"] = [[], ["20260705", "20260820"]]
+check("calendar_end ignores the all-zero default row and counts added dates", calendar_end(late) == "20260820")
+none = part("x", 1)
+none["c"] = [["0000000", "20200101", "20991231"]]
+check("a feed without a calendar has no end", calendar_end(none) == "")
+check("stale_parts names the ended operators",
+      stale_parts([part("fresh", 1), late], today="20260901") == [("x", "20260820")])
+check("stale_parts on the last service day is still fresh", stale_parts([late], today="20260820") == [])
+
+with tempfile.TemporaryDirectory() as tmp:
+    out = Path(tmp) / "city-index.json.gz"
+    err = raises(lambda: write_index([part("miskolc", 100), late], out, with_operators=True, today="20270101"))
+    check("write_index refuses a part whose calendar ended",
+          isinstance(err, IndexGuardError) and "calendar ended for x (2026-08-20)" in str(err) and not out.exists(),
+          repr(err))
+    write_index([part("miskolc", 100), none], out, with_operators=True, today="20270101")
+    check("write_index accepts a part without a calendar", out.exists())
+
+    stale_zip = gtfs_zip(Path(tmp) / "volan.zip", city_feed("1001", trips=3, end="20250131"))
+    vout = Path(tmp) / "volan-index.json.gz"
+    err = raises(lambda: build_index(stale_zip, vout, min_trips=3))
+    check("Volán index from an ended calendar is refused",
+          isinstance(err, IndexGuardError) and "calendar ended" in str(err) and not vout.exists(), repr(err))
+
+    base = Path(tmp) / "city"
+    fixtures = base / "fixtures"
+    fixtures.mkdir(parents=True)
+    gtfs_zip(fixtures / "a.zip", city_feed())
+    gtfs_zip(fixtures / "b.zip", city_feed("7", end="20250131"))
+    bci.CITY_FEEDS = [
+        {"id": "a", "name": "A", "url": "https://a.example/a.zip", "file": "a.zip"},
+        {"id": "b", "name": "B", "url": "https://b.example/b.zip", "file": "b.zip"},
+    ]
+
+    def copy_download(url: str, dest: Path, **_kw) -> dict:
+        shutil.copy(fixtures / Path(url).name, dest)
+        return {"size": dest.stat().st_size}
+
+    bci.download_feed = copy_download
+    cout = base / "city-index.json.gz"
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        info = bci.build_city_index(base, cout, today="20260301")
+    check("city feed with an ended calendar is skipped with a warning",
+          "b" in info["skipped"] and set(operator_trips(cout)) == {"a"} and "calendar of b ended 2025-01-31" in stderr.getvalue(),
+          f"{info} {stderr.getvalue()!r}")
+    write_index([part("a", 5), part("b", 5)], cout, with_operators=True, today="20260301")
+    err = raises(lambda: bci.build_city_index(base, cout, today="20260301"))
+    check("an ended feed the index had counts as missing for the guard",
+          isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
+    os.environ[bci.ALLOW_MISSING_ENV] = "b"
+    info = bci.build_city_index(base, cout, today="20260301")
+    check("allowed, the ended feed is dropped and the rest is written",
+          "b" in info["skipped"] and set(operator_trips(cout)) == {"a"}, repr(info))
+    os.environ.pop(bci.ALLOW_MISSING_ENV, None)
 bci.CITY_FEEDS = real_feeds
 
 # ---- 1. Volán index: too few trips is a broken feed -----------------------
@@ -182,7 +259,7 @@ with tempfile.TemporaryDirectory() as tmp:
     dest = base / "mav-gtfs.zip"
     served: dict[str, object] = {"body": b"PK feed-1", "calls": 0}
 
-    def fake_mav_download(url: str, path: Path) -> dict:
+    def fake_mav_download(url: str, path: Path, **_kw) -> dict:
         served["calls"] = int(served["calls"]) + 1
         if served["body"] is None:
             raise OSError("down")

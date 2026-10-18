@@ -13,6 +13,15 @@ _PKG_DIR = Path(__file__).resolve().parents[1] / "custom_components" / "hungaria
 _pkg = types.ModuleType("hungarian_transport")
 _pkg.__path__ = [str(_PKG_DIR)]
 sys.modules["hungarian_transport"] = _pkg
+# elvira.py needs aiohttp only for its timeout and error types; `npm test`
+# runs this file with a bare interpreter, so stand in for it when absent.
+try:
+    import aiohttp  # noqa: F401
+except ImportError:
+    _aiohttp = types.ModuleType("aiohttp")
+    _aiohttp.ClientTimeout = lambda **kw: kw
+    _aiohttp.ClientError = type("ClientError", (Exception,), {})
+    sys.modules["aiohttp"] = _aiohttp
 from hungarian_transport.elvira import (  # noqa: E402
     ELVIRA_ROW_CAP,
     STATIONINFO_MAX_COUNT,

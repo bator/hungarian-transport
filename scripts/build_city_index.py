@@ -15,6 +15,7 @@ from gtfs_compact import (
     load_env_files,
     load_parts,
     operator_trips,
+    stale_parts,
     write_index,
 )
 
@@ -34,24 +35,29 @@ ALLOW_MISSING_ENV = "HUNGARIAN_TRANSPORT_ALLOW_MISSING"
 # filename (Kaposvár), a CAPTCHA (Kiskunhalas), or until a keyed URL is in .env.
 # Bahart: official NAP URL via BAHART_GTFS_URL; Transitland / Mobility Database
 # as catalog fallback; menetbrand if neither is set.
+# "insecure": the publisher still serves plain http. HTTPS is tried first;
+# only these feeds may fall back to http (download_feed warns when it does).
 CITY_FEEDS = [
     {
         "id": "miskolc",
         "name": "Miskolc — MVK",
         "url": "http://gtfs.cdata.hu/mvkzrt.zip",
         "file": "miskolc.zip",
+        "insecure": True,
     },
     {
         "id": "pecs",
         "name": "Pécs — Tüke Busz",
         "url": "http://mobilitas.biokom.hu/gtfs",
         "file": "pecs.zip",
+        "insecure": True,
     },
     {
         "id": "szeged",
         "name": "Szeged — SZKT",
         "url": "http://szegedimenetrend.hu/google_transit.zip",
         "file": "szeged.zip",
+        "insecure": True,
     },
     {
         "id": "szombathely",
@@ -175,7 +181,7 @@ def _load_feed(base: Path, feed: dict) -> list[dict]:
     for url in feed_urls(feed):
         try:
             print("downloading", feed["id"])
-            download_feed(url, zpath)
+            download_feed(url, zpath, allow_insecure=bool(feed.get("insecure")))
             return load()
         except Exception as err:
             last = err
@@ -183,8 +189,23 @@ def _load_feed(base: Path, feed: dict) -> list[dict]:
     raise last or FileNotFoundError(feed["file"])
 
 
-def collect_parts(base: Path, volan_zip: Path | None = None) -> tuple[list[dict], list[str]]:
-    """Operator parts with trips, and the feed ids that failed or had none."""
+def _fresh(got: list[dict], label: str, today: str | None) -> list[dict]:
+    """Drop parts whose calendar already ended, loudly. The feed then counts
+    as missing for guard_feeds, so a stale zip blocks the rebuild unless it
+    is explicitly allowed to go."""
+    ended = dict(stale_parts(got, today))
+    if not ended:
+        return got
+    for op, end in ended.items():
+        print(f"warn {label}: calendar of {op} ended {end[:4]}-{end[4:6]}-{end[6:]}; skipped", file=sys.stderr)
+    return [p for p in got if p["op_id"] not in ended]
+
+
+def collect_parts(
+    base: Path, volan_zip: Path | None = None, *, today: str | None = None
+) -> tuple[list[dict], list[str]]:
+    """Operator parts with trips, and the feed ids that failed, had none or
+    whose calendar already ended."""
     parts: list[dict] = []
     failed: list[str] = []
     for feed in CITY_FEEDS:
@@ -197,6 +218,10 @@ def collect_parts(base: Path, volan_zip: Path | None = None) -> tuple[list[dict]
         if not got:
             failed.append(feed["id"])
             print(f"warn {feed['id']}: no trips", file=sys.stderr)
+        else:
+            got = _fresh(got, feed["id"], today)
+            if not got:
+                failed.append(feed["id"])
         parts.extend(got)
     if volan_zip and volan_zip.exists():
         try:
@@ -215,6 +240,7 @@ def collect_parts(base: Path, volan_zip: Path | None = None) -> tuple[list[dict]
         except Exception as err:
             got = []
             print(f"warn volan-local: {err}", file=sys.stderr)
+        got = _fresh(got, "volan-local", today)
         if not got:
             failed.append("volan-local")
         parts.extend(got)
@@ -279,10 +305,10 @@ def guard_feeds(out: Path, parts: list[dict], allow: set[str] | None = None) -> 
         )
 
 
-def build_city_index(base: Path, out: Path, volan_zip: Path | None = None) -> dict:
-    parts, failed = collect_parts(base, volan_zip)
+def build_city_index(base: Path, out: Path, volan_zip: Path | None = None, *, today: str | None = None) -> dict:
+    parts, failed = collect_parts(base, volan_zip, today=today)
     guard_feeds(out, parts)
-    info = write_index(parts, out, with_operators=True)
+    info = write_index(parts, out, with_operators=True, today=today)
     info["skipped"] = failed
     return info
 

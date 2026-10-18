@@ -2,18 +2,25 @@
 """Sanity checks for the compact GTFS builder. No live downloads."""
 from __future__ import annotations
 
+import contextlib
 import gzip
+import io
 import json
 import math
 import os
+import re
+import socket
 import sys
 import tempfile
+import urllib.request
 import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gtfs_compact as gc  # noqa: E402
 from build_city_index import CITY_FEEDS  # noqa: E402
 from gtfs_compact import (  # noqa: E402
+    INDEX_SCHEMA,
     SHAPE_SHARDS,
     assert_public_http_url,
     index_shapes,
@@ -271,11 +278,111 @@ def main() -> int:
         except ValueError:
             return False
 
-    failed |= not check("https public url allowed", url_ok("https://gtfs.kti.hu/file.zip"))
-    failed |= not check("file scheme blocked", not url_ok("file:///config/www/x.zip"))
-    failed |= not check("loopback blocked", not url_ok("http://127.0.0.1/x.zip"))
-    failed |= not check("rfc1918 blocked", not url_ok("http://192.168.1.1/x.zip"))
-    failed |= not check("supervisor host blocked", not url_ok("http://supervisor/core"))
+    # Names resolve through a table, so the checks need no network; numeric
+    # spellings go to the real getaddrinfo, which parses them without DNS.
+    table = {
+        "gtfs.kti.hu": ["193.6.200.73"],
+        "internal.example": ["10.0.0.5"],
+        "mixed.example": ["93.184.216.34", "192.168.1.9"],
+        "mapped.example": ["::ffff:127.0.0.1"],
+    }
+    real_gai = socket.getaddrinfo
+
+    def fake_gai(host, port, *args, **kwargs):
+        if host in table:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port)) for ip in table[host]]
+        if host.endswith(".example"):
+            raise socket.gaierror(-2, "Name or service not known")
+        return real_gai(host, port, *args, **kwargs)
+
+    gc.socket.getaddrinfo = fake_gai
+    try:
+        failed |= not check("https public url allowed", url_ok("https://gtfs.kti.hu/file.zip"))
+        failed |= not check("file scheme blocked", not url_ok("file:///config/www/x.zip"))
+        failed |= not check("loopback blocked", not url_ok("http://127.0.0.1/x.zip"))
+        failed |= not check("rfc1918 blocked", not url_ok("http://192.168.1.1/x.zip"))
+        failed |= not check("supervisor host blocked", not url_ok("http://supervisor/core"))
+        failed |= not check("decimal loopback blocked", not url_ok("http://2130706433/x.zip"))
+        failed |= not check("hex loopback blocked", not url_ok("http://0x7f000001/x.zip"))
+        failed |= not check("short loopback blocked", not url_ok("http://127.1/x.zip"))
+        failed |= not check("octal loopback blocked", not url_ok("http://0177.0.0.1/x.zip"))
+        failed |= not check("ipv4-mapped loopback blocked", not url_ok("http://[::ffff:127.0.0.1]/x.zip"))
+        failed |= not check("link-local blocked", not url_ok("http://169.254.169.254/latest"))
+        failed |= not check("name resolving to rfc1918 blocked", not url_ok("https://internal.example/x.zip"))
+        failed |= not check("name with one private address blocked", not url_ok("https://mixed.example/x.zip"))
+        failed |= not check("name resolving to mapped loopback blocked", not url_ok("https://mapped.example/x.zip"))
+        failed |= not check("unresolvable name blocked", not url_ok("https://nope.example/x.zip"))
+        handler = gc._PublicRedirectHandler()
+        origin = urllib.request.Request("https://gtfs.kti.hu/a.zip")
+        try:
+            handler.redirect_request(origin, None, 302, "Found", {}, "http://127.1/x.zip")
+            failed |= not check("redirect to loopback blocked", False)
+        except ValueError:
+            failed |= not check("redirect to loopback blocked", True)
+        try:
+            handler.redirect_request(origin, None, 302, "Found", {}, "https://internal.example/x.zip")
+            failed |= not check("redirect to private name blocked", False)
+        except ValueError:
+            failed |= not check("redirect to private name blocked", True)
+        moved = handler.redirect_request(origin, None, 302, "Found", {}, "https://gtfs.kti.hu/b.zip")
+        failed |= not check("redirect to public host followed", moved is not None and moved.full_url.endswith("/b.zip"))
+
+        # Plain http is upgraded; the fallback needs the feed's explicit say-so.
+        zips: list[str] = []
+        real_zip = gc.download_zip
+
+        def fake_zip(u: str, dest: Path) -> dict:
+            zips.append(u)
+            if u.startswith("https://"):
+                raise OSError("no tls")
+            dest.write_bytes(b"PK")
+            return {"size": 2}
+
+        gc.download_zip = fake_zip
+        dest = Path(tempfile.mkdtemp()) / "feed.zip"
+        try:
+            err = None
+            try:
+                gc.download_feed("http://feed.example/f.zip", dest)
+            except Exception as e:  # noqa: BLE001
+                err = e
+            failed |= not check(
+                "http feed without insecure flag is not fetched over http",
+                isinstance(err, RuntimeError) and zips == ["https://feed.example/f.zip"] and not dest.exists(),
+                f"{err!r} {zips}",
+            )
+            zips.clear()
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                gc.download_feed("http://feed.example/f.zip", dest, allow_insecure=True)
+            failed |= not check(
+                "insecure feed falls back to http after https, loudly",
+                zips == ["https://feed.example/f.zip", "http://feed.example/f.zip"]
+                and dest.exists() and "insecure" in stderr.getvalue(),
+                f"{zips} {stderr.getvalue()!r}",
+            )
+            zips.clear()
+            try:
+                gc.download_feed("https://feed.example/f.zip", dest, allow_insecure=True)
+                failed |= not check("https feed never downgrades", False)
+            except OSError:
+                failed |= not check("https feed never downgrades", zips == ["https://feed.example/f.zip"], str(zips))
+        finally:
+            gc.download_zip = real_zip
+            dest.unlink(missing_ok=True)
+        insecure_feeds = {f["id"] for f in CITY_FEEDS if f.get("insecure")}
+        http_feeds = {f["id"] for f in CITY_FEEDS if f["url"].startswith("http://")}
+        failed |= not check("only the http:// city feeds are marked insecure", insecure_feeds == http_feeds, str(http_feeds ^ insecure_feeds))
+    finally:
+        gc.socket.getaddrinfo = real_gai
+
+    tags = (Path(__file__).resolve().parents[1] / "src" / "tags.js").read_text(encoding="utf-8")
+    m = re.search(r"^export const INDEX_SCHEMA = (\d+);", tags, re.M)
+    failed |= not check(
+        "src/tags.js INDEX_SCHEMA matches scripts/gtfs_compact.py",
+        m is not None and int(m.group(1)) == INDEX_SCHEMA,
+        f"card {m.group(1) if m else None} vs builder {INDEX_SCHEMA}",
+    )
     import inspect
     cat_src = inspect.getsource(catalog_url)
     failed |= not check(

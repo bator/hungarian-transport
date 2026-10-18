@@ -8,10 +8,12 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.components.frontend import DATA_EXTRA_MODULE_URL
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
+from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS
 from custom_components.hungarian_transport.const import DOMAIN, SERVICE_ELVIRA_BETWEEN
 from custom_components.hungarian_transport.elvira import ELVIRA_URL, service_days
 
@@ -98,7 +100,8 @@ async def test_shapes_folder_is_served(hass, hass_client, card_assets) -> None:
     assert await resp.read() == b"\x1f\x8bshard"
 
 
-async def test_setup_fails_without_assets(hass, card_assets) -> None:
+async def test_setup_fails_without_assets(hass, card_assets, caplog) -> None:
+    """A source checkout has no www/: setup fails with a Repairs issue, not a traceback."""
     for asset in card_assets.iterdir():
         asset.unlink()
     card_assets.rmdir()
@@ -106,6 +109,13 @@ async def test_setup_fails_without_assets(hass, card_assets) -> None:
     entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN)
     entry.add_to_hass(hass)
     assert not await hass.config_entries.async_setup(entry.entry_id)
+
+    issue = ir.async_get(hass).async_get_issue(DOMAIN, ISSUE_MISSING_ASSETS)
+    assert issue is not None
+    assert issue.severity is ir.IssueSeverity.ERROR
+    assert issue.translation_placeholders == {"path": str(card_assets)}
+    assert "missing its frontend assets" in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 def _board(start, arrive=None, code="966"):
@@ -191,3 +201,55 @@ async def test_elvira_service_rejects_bad_codes(hass, aioclient_mock, data, key)
 
     assert err.value.translation_key == key
     assert aioclient_mock.call_count == 0
+
+
+async def _elvira_call(hass):
+    return await hass.services.async_call(
+        DOMAIN,
+        SERVICE_ELVIRA_BETWEEN,
+        {"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": 15},
+        blocking=True,
+        return_response=True,
+    )
+
+
+async def test_elvira_outage_is_an_error_and_is_not_cached(hass, aioclient_mock) -> None:
+    """HTTP errors surface as HomeAssistantError; the shared cache must not
+    hold the failed board for ELVIRA_CACHE_TTL as 'no trains'."""
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, status=503)
+    now = dt_util.now(BUDAPEST)
+    boards = 2 * len(service_days(now, now + timedelta(minutes=15)))
+
+    with pytest.raises(HomeAssistantError) as err:
+        await _elvira_call(hass)
+    assert err.value.translation_key == "elvira_unavailable"
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert aioclient_mock.call_count == boards
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+    resp = await _elvira_call(hass)
+    assert resp == {"departures": []}
+    # Every board was fetched again right away: nothing empty was cached.
+    assert aioclient_mock.call_count == boards
+
+
+@pytest.mark.parametrize("body", [[1, 2], "nope", None])
+async def test_elvira_unexpected_body_is_an_error(hass, aioclient_mock, body) -> None:
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, json=body)
+
+    with pytest.raises(HomeAssistantError) as err:
+        await _elvira_call(hass)
+    assert err.value.translation_key == "elvira_unavailable"
+
+
+async def test_elvira_timeout_is_an_error(hass, aioclient_mock) -> None:
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, exc=asyncio.TimeoutError())
+
+    with pytest.raises(HomeAssistantError) as err:
+        await _elvira_call(hass)
+    assert err.value.translation_key == "elvira_unavailable"
+    assert "TimeoutError" in str(err.value)

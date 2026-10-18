@@ -7,11 +7,15 @@ import gzip
 import json
 import os
 import random
+import signal
+import stat
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import gtfs_compact  # noqa: E402
 import update_volan_index as uvi  # noqa: E402
 from update_volan_index import index_feed, index_schema, persist_index, restore_hacs_indexes  # noqa: E402
 
@@ -156,7 +160,7 @@ class Fake:
             raise OSError("unreachable")
         return {"etag": self.etag.get(url, "")}
 
-    def download_feed(self, url: str, dest: Path) -> dict:
+    def download_feed(self, url: str, dest: Path, **_kw) -> dict:
         if url in self.broken:
             raise OSError("unreachable")
         self.downloads.append(url)
@@ -247,6 +251,92 @@ with tempfile.TemporaryDirectory() as tmp:
           fake.downloads[-1] == "https://public.example/a.zip" and fake.state()["cities"]["a"]["etag"] == "a-3",
           repr(fake.downloads[-2:]))
     os.environ.pop("TEST_A_GTFS_URL", None)
+
+    # Every way the run can die reaches the webhook, not only update.log.
+    sent: list[str] = []
+    uvi.notify = lambda message, *_a, **_k: sent.append(message)
+    fake.city_fails = None
+
+    def kill_self(_base, out, _volan):
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("SIGTERM handler did not exit")
+
+    uvi.build_city_index = kill_self
+    fake.etag["https://public.example/a.zip"] = "a-4"
+    code = fake.run()
+    check("SIGTERM exits 1 and reports through the webhook",
+          code == 1 and len(sent) == 1 and "SIGTERM" in sent[0] and "megszakítva" in sent[0], repr((code, sent)))
+    uvi.build_city_index = fake.build_city_index
+
+    sent.clear()
+    real_paths = uvi.paths
+
+    def broken_paths():
+        raise PermissionError("/config is read-only")
+
+    uvi.paths = broken_paths
+    code = fake.run()
+    check("a failure before the main loop exits 1 and reports through the webhook",
+          code == 1 and len(sent) == 1 and "PermissionError" in sent[0], repr((code, sent)))
+    uvi.paths = real_paths
+
+check("notify's user agent is the downloader's", uvi.UA == gtfs_compact.UA)
+
+err = None
+try:
+    uvi.request("HEAD", "http://127.1/volan.zip")
+except ValueError as e:
+    err = e
+check("HEAD requests go through the public-host guard", err is not None, repr(err))
+
+# ---- run_update.sh: the shell wrapper reports the exits the script cannot ---
+
+script = Path(__file__).resolve().parent / "run_update.sh"
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    base = root / "base"
+    bin_dir = root / "bin"
+    base.mkdir()
+    bin_dir.mkdir()
+    curl_log = root / "curl.log"
+    fake_curl = bin_dir / "curl"
+    fake_curl.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" >> {curl_log}\n")
+    fake_curl.chmod(fake_curl.stat().st_mode | stat.S_IXUSR)
+    worker = base / "update_volan_index.py"
+    worker.write_text(
+        "import os, signal, sys\n"
+        "mode = os.environ.get('FAKE_MODE', '0')\n"
+        "print('fake run', mode)\n"
+        "if mode == 'kill':\n"
+        "    os.kill(os.getpid(), signal.SIGKILL)\n"
+        "sys.exit(int(mode))\n"
+    )
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}",
+        "HUNGARIAN_TRANSPORT_BASE": str(base),
+        "HUNGARIAN_TRANSPORT_WEBHOOK": "http://127.0.0.1:1/api/webhook/test",
+    }
+
+    def run_worker(mode: str) -> str:
+        curl_log.unlink(missing_ok=True)
+        done = subprocess.run(["bash", str(script), "--worker"], env={**env, "FAKE_MODE": mode},
+                              capture_output=True, text=True, timeout=60)
+        check(f"worker exits 0 after a run with mode {mode}", done.returncode == 0, done.stderr)
+        return curl_log.read_text() if curl_log.exists() else ""
+
+    check("a clean run sends nothing from the wrapper", run_worker("0") == "")
+    check("exit 1 (the script reported itself) sends nothing from the wrapper", run_worker("1") == "")
+    posted = run_worker("kill")
+    check("a killed script is reported by the wrapper",
+          "exit 137" in posted and "http://127.0.0.1:1/api/webhook/test" in posted, repr(posted))
+    posted = run_worker("2")
+    check("a script that crashed before reporting is reported by the wrapper",
+          "exit 2" in posted and "el sem indult" in posted, repr(posted))
+    check("the log holds every run", (base / "update.log").read_text().count("fake run") == 4)
+
+    done = subprocess.run(["bash", str(script)], env={**env, "FAKE_MODE": "0"}, capture_output=True, text=True, timeout=60)
+    check("the detached launcher exits 0 at once", done.returncode == 0 and done.stdout.startswith("started "), repr(done))
 
 if failed:
     sys.exit(1)

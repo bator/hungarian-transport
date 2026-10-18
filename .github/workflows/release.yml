@@ -78,7 +78,7 @@ jobs:
             while IFS= read -r t; do
               r="${t#v${base}-rev.}"
               if [[ "$r" =~ ^[0-9]+$ ]] && [ "$r" -gt "$n" ]; then n=$r; fi
-            done < <(gh release list --limit 50 --json tagName --jq '.[].tagName' || true)
+            done < <(gh release list --exclude-drafts --limit 50 --json tagName --jq '.[].tagName' || true)
             echo "$n"
           }
 
@@ -228,9 +228,20 @@ jobs:
           BAHART_GTFS_URL: ${{ secrets.BAHART_GTFS_URL }}
           MOBILITY_DATABASE_REFRESH_TOKEN: ${{ secrets.MOBILITY_DATABASE_REFRESH_TOKEN }}
           TRANSITLAND_API_KEY: ${{ secrets.TRANSITLAND_API_KEY }}
-          HUNGARIAN_TRANSPORT_ALLOW_MISSING: ${{ github.event.inputs.allow_missing || vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}
+          ALLOW_MISSING_INPUT: ${{ github.event.inputs.allow_missing || '' }}
+          ALLOW_MISSING_VAR: ${{ vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}
         run: |
           set -euo pipefail
+          # The dispatch input relaxes the city guard for this run only. The
+          # repository variable relaxes it for every run, the weekly refresh
+          # included, so say so on every run until it is unset again.
+          if [ -n "$ALLOW_MISSING_VAR" ]; then
+            echo "::warning title=City index guard relaxed::Repository variable HUNGARIAN_TRANSPORT_ALLOW_MISSING='${ALLOW_MISSING_VAR}' lets every run drop these city feeds. Unset it once the feed is back."
+          fi
+          if [ -n "$ALLOW_MISSING_INPUT" ]; then
+            echo "::notice::allow_missing='${ALLOW_MISSING_INPUT}' for this run."
+          fi
+          export HUNGARIAN_TRANSPORT_ALLOW_MISSING="${ALLOW_MISSING_INPUT:-$ALLOW_MISSING_VAR}"
           python3 scripts/build_volan_index.py
           python3 scripts/build_city_index.py
           if [ -d pfaedle-out ] || [ -d /opt/pfaedle-trial/out ]; then
@@ -301,6 +312,30 @@ jobs:
           (cd custom_components/hungarian_transport && zip -qr9 ../../hungarian-transport.zip .)
           (cd dist && zip -9r ../hungarian-transport-frontend.zip hungarian-transport.js volan-index.json.gz city-index.json.gz $( [ -d leaflet ] && echo leaflet ) $(ls -d *-shapes-*/ 2>/dev/null) $( [ -f mav-index.json.gz ] && echo mav-index.json.gz ))
           ls -lh hungarian-transport.zip hungarian-transport-frontend.zip
+          # The tag, manifest.json in the integration zip and CARD_VERSION in
+          # both bundles must say the same version, or HACS and the card
+          # disagree about what is installed.
+          python3 - "$ver" <<'PY'
+          import json, re, sys, zipfile
+          ver = sys.argv[1]
+          problems = []
+          with zipfile.ZipFile("hungarian-transport.zip") as z:
+              manifest = json.loads(z.read("manifest.json"))
+              bundles = {"hungarian-transport.zip:www/hungarian-transport.js": z.read("www/hungarian-transport.js")}
+          with zipfile.ZipFile("hungarian-transport-frontend.zip") as z:
+              bundles["hungarian-transport-frontend.zip:hungarian-transport.js"] = z.read("hungarian-transport.js")
+          if manifest.get("version") != ver:
+              problems.append(f"manifest.json version {manifest.get('version')!r} != {ver}")
+          for name, raw in bundles.items():
+              m = re.search(r"""^(?:const|var|let) CARD_VERSION = (['"])(.*?)\1;""", raw.decode("utf-8"), re.M)
+              found = m.group(2) if m else None
+              if found != ver:
+                  problems.append(f"{name} CARD_VERSION {found!r} != {ver}")
+          if problems:
+              print("::error title=Release version mismatch::" + "; ".join(problems))
+              sys.exit(1)
+          print(f"tag, manifest.json and CARD_VERSION agree on {ver}")
+          PY
 
       - uses: actions/upload-artifact@v4
         with:
@@ -344,7 +379,13 @@ jobs:
           else
             notes="${notes} Includes fresh Volán and city GTFS indexes."
           fi
-          if gh release view "$tag" >/dev/null 2>&1; then
+          # An upload into a draft release leaves it unpublished (and HACS
+          # never sees it); refuse instead of quietly succeeding.
+          draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || echo missing)
+          if [ "$draft" = "true" ]; then
+            echo "::error::Release $tag exists as a draft. Publish or delete the draft, then rerun."
+            exit 1
+          elif [ "$draft" = "false" ]; then
             gh release upload "$tag" hungarian-transport.zip hungarian-transport-frontend.zip --clobber
           else
             # Tag the commit that was built, not whatever the default branch is now.

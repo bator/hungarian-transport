@@ -8,13 +8,18 @@ route and stations. Each build is followed by an audit of every trip; when
 fewer than MIN_OK of the trains pass, a persistent notification says so.
 
 The index lives next to the card, which a HACS update replaces, so it is
-rebuilt at startup whenever it is missing or older than the feed.
+rebuilt at startup whenever it is missing or older than the feed. The build
+(a minute of CPU over stop_times.txt) runs as a separate Python process, not
+in the executor: an executor thread would hold the GIL against the event loop
+right after startup, and the process gives the feed's memory back on exit.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import sys
 import uuid
 from functools import partial
 from http import HTTPStatus
@@ -40,6 +45,9 @@ UPLOAD_URL = "/api/hungarian_transport/mav_gtfs"
 MAX_UPLOAD = 300 * 1024 * 1024
 MIN_OK = 0.99
 NOTIFICATION_ID = "hungarian_transport_mav_index"
+# Standard library only, so Home Assistant's own interpreter runs it.
+BUILD_RUNNER = Path(mav_index.__file__)
+BUILD_TIMEOUT = 30 * 60
 
 
 def source_path(hass: HomeAssistant) -> Path:
@@ -52,14 +60,34 @@ def _needs_build(src: Path, out: Path) -> bool:
     return not out.is_file() or out.stat().st_mtime < src.stat().st_mtime
 
 
-def _build(src: Path, out: Path) -> dict[str, Any]:
-    mav_index.check_feed(src)
-    index = mav_index.build(src)
-    stats = dict(index["_stats"])
-    stats["bytes"] = mav_index.write(index, out)
-    report = mav_index.audit(src, index)
-    stats["audit"] = {k: v for k, v in report.items() if k != "worst"}
-    stats["audit_worst"] = report["worst"][:5]
+async def _build(src: Path, out: Path) -> dict[str, Any]:
+    """mav_index.build_and_audit in its own process; its stats dict."""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        str(BUILD_RUNNER),
+        str(src),
+        str(out),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        async with asyncio.timeout(BUILD_TIMEOUT):
+            stdout, stderr = await proc.communicate()
+    except BaseException:
+        proc.kill()
+        await proc.wait()
+        raise
+    if proc.returncode != 0:
+        tail = stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output"]
+        raise RuntimeError(f"index build exited {proc.returncode}: {tail[0]}")
+    try:
+        stats = json.loads(stdout)
+    except ValueError as err:
+        raise RuntimeError("index build returned no statistics") from err
+    if not isinstance(stats, dict) or "audit" not in stats:
+        raise RuntimeError("index build returned no statistics")
     return stats
 
 
@@ -74,7 +102,7 @@ async def async_build(hass: HomeAssistant, www: Path, *, force: bool = False) ->
             raise FileNotFoundError(str(src))
         if not force and not await hass.async_add_executor_job(_needs_build, src, out):
             return None
-        stats = await hass.async_add_executor_job(_build, src, out)
+        stats = await _build(src, out)
     data["mav"] = stats
     audit = stats["audit"]
     _LOGGER.info(
@@ -127,7 +155,8 @@ class MavGtfsUploadView(HomeAssistantView):
     async def post(self, request: web.Request) -> web.Response:
         hass = request.app[KEY_HASS]
         if not request[KEY_HASS_USER].is_admin:
-            return self.json_message("Admin access required", HTTPStatus.UNAUTHORIZED)
+            # Authenticated, but not allowed: 403, not 401.
+            return self.json_message("Admin access required", HTTPStatus.FORBIDDEN)
         dest = source_path(hass)
         # Own temp file per upload: two at once must not write into one file.
         tmp = dest.with_name(f"{dest.name}.{uuid.uuid4().hex}.upload")

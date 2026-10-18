@@ -12,6 +12,7 @@ import re
 import unicodedata
 from datetime import date, datetime, timedelta
 
+import aiohttp
 import zoneinfo
 
 from .cache import SharedTTLCache
@@ -44,6 +45,15 @@ LATE_TRAIN_WINDOW = timedelta(hours=3)
 # 500 reaches ~22:32 so evening origin overlay still has #3880 to copy.
 STATIONINFO_MAX_COUNT = "500"
 ELVIRA_ROW_CAP = 500
+ELVIRA_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
+
+class ElviraError(Exception):
+    """ELVIRA could not be reached or answered with an HTTP error.
+
+    Raised, not swallowed: a result that never arrived must not sit in the
+    shared cache for ELVIRA_CACHE_TTL seconds as an empty board.
+    """
 
 
 def station_code_digits(value: str) -> str:
@@ -165,16 +175,20 @@ async def _fetch_station(session, station_code: str, day: date) -> tuple[list, l
             ELVIRA_URL,
             json=payload,
             headers=ELVIRA_HEADERS,
-            timeout=30,
+            timeout=ELVIRA_TIMEOUT,
         ) as resp:
             if resp.status // 100 != 2:
                 _LOGGER.warning("ELVIRA StationInfo %s HTTP %s", station_code, resp.status)
-                return [], []
+                raise ElviraError(f"HTTP {resp.status}")
             data = await resp.json(content_type=None)
-    except Exception as err:
-        _LOGGER.warning("ELVIRA StationInfo %s failed: %s", station_code, err)
-        return [], []
-    details = (data or {}).get("stationSchedulerDetails") or {}
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+        _LOGGER.warning("ELVIRA StationInfo %s failed: %s", station_code, type(err).__name__)
+        raise ElviraError(type(err).__name__) from None
+    if not isinstance(data, dict):
+        raise ElviraError("unexpected response")
+    details = data.get("stationSchedulerDetails")
+    if not isinstance(details, dict):
+        details = {}
     return (
         list(details.get("departureScheduler") or []),
         list(details.get("arrivalScheduler") or []),
@@ -190,7 +204,13 @@ async def _station_legs(session, hass, station_code: str, day: date):
     data = hass.data.setdefault(DOMAIN, {})
     cache = data.get("elvira_cache")
     if cache is None:
-        cache = data["elvira_cache"] = SharedTTLCache(ELVIRA_CACHE_TTL, ELVIRA_CACHE_MAX)
+        cache = data["elvira_cache"] = SharedTTLCache(
+            ELVIRA_CACHE_TTL,
+            ELVIRA_CACHE_MAX,
+            task_factory=lambda coro: hass.async_create_background_task(
+                coro, "hungarian_transport_elvira", eager_start=False
+            ),
+        )
     return await cache.get(
         (station_code, day.isoformat()),
         lambda: _fetch_station(session, station_code, day),

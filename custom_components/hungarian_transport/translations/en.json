@@ -7,11 +7,19 @@
         "data": {
           "api_key": "BKK API key"
         }
+      },
+      "reauth_confirm": {
+        "title": "BKK key rejected",
+        "description": "BKK FUTÁR rejected the stored key. Enter a new one, or leave it empty to remove FUTÁR access. Free key: {url}",
+        "data": {
+          "api_key": "BKK API key"
+        }
       }
     },
     "abort": {
       "single_instance_allowed": "Hungarian transport is already set up.",
-      "already_configured": "Hungarian transport is already set up."
+      "already_configured": "Hungarian transport is already set up.",
+      "reauth_successful": "The BKK key was updated."
     },
     "error": {
       "invalid_auth": "BKK FUTÁR rejected this key.",
@@ -78,6 +86,9 @@
     },
     "mav_build_failed": {
       "message": "The MÁV route index could not be built: {error}"
+    },
+    "elvira_unavailable": {
+      "message": "MÁV ELVIRA is not reachable ({error})."
     }
   },
   "options": {
@@ -93,6 +104,12 @@
     "error": {
       "invalid_auth": "BKK FUTÁR rejected this key.",
       "cannot_connect": "Could not reach BKK FUTÁR. Try again later."
+    }
+  },
+  "issues": {
+    "missing_assets": {
+      "title": "Frontend assets missing",
+      "description": "Hungarian transport found no card files at `{path}`. The source tree has none; install the release zip (HACS or the hungarian-transport.zip asset of a GitHub release) and restart Home Assistant."
     }
   }
 }

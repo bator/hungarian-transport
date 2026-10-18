@@ -1,5 +1,6 @@
 """Home Assistant integration for Hungarian transport services and card assets."""
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.start import async_at_started
@@ -19,8 +21,10 @@ from homeassistant.loader import async_get_integration
 
 from . import mav
 from .const import CONF_API_KEY, DOMAIN, SERVICE_ELVIRA_BETWEEN, SERVICE_FUTAR, SERVICE_REBUILD_MAV
-from .elvira import elvira_between, station_code_digits
+from .elvira import ElviraError, elvira_between, station_code_digits
 from .futar import FUTAR_PATHS, FutarAuthError, FutarError, FutarProxy
+
+_LOGGER = logging.getLogger(__name__)
 
 ELVIRA_SERVICE_SCHEMA = vol.Schema(
     {
@@ -47,6 +51,7 @@ CARD_URL = "/hungarian-transport/hungarian-transport.js"
 LOADER_FILE = "hungarian-transport-loader.js"
 LOADER_URL = f"/hungarian-transport/{LOADER_FILE}"
 WWW_PATH = Path(__file__).parent / "www"
+ISSUE_MISSING_ASSETS = "missing_assets"
 
 
 def _station_code(call: ServiceCall, field: str) -> str:
@@ -64,9 +69,24 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the card asset path and ELVIRA service."""
     www_path = WWW_PATH
     if not www_path.is_dir():
-        raise FileNotFoundError(
-            f"Hungarian transport release is missing its frontend assets: {www_path}"
+        # A git checkout (or a broken HACS download) has no www/: the release
+        # zip ships it. Say so in Repairs instead of a traceback at startup.
+        _LOGGER.error(
+            "Hungarian transport is missing its frontend assets at %s; "
+            "install the release zip, not the source tree",
+            www_path,
         )
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            ISSUE_MISSING_ASSETS,
+            is_fixable=False,
+            severity=ir.IssueSeverity.ERROR,
+            translation_key=ISSUE_MISSING_ASSETS,
+            translation_placeholders={"path": str(www_path)},
+        )
+        return False
+    ir.async_delete_issue(hass, DOMAIN, ISSUE_MISSING_ASSETS)
 
     await hass.http.async_register_static_paths(
         [
@@ -89,14 +109,22 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 translation_domain=DOMAIN,
                 translation_key="same_station",
             )
-        rows = await elvira_between(
-            session,
-            hass,
-            origin,
-            dest,
-            call.data["minutes_after"],
-            call.data["dest_name"],
-        )
+        try:
+            rows = await elvira_between(
+                session,
+                hass,
+                origin,
+                dest,
+                call.data["minutes_after"],
+                call.data["dest_name"],
+            )
+        except ElviraError as err:
+            # An outage is an error on the card, not an empty board.
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="elvira_unavailable",
+                translation_placeholders={"error": str(err)},
+            ) from None
         return {"departures": rows}
 
     hass.services.async_register(
@@ -166,12 +194,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return True
     # The card switches to this service when it exists, so it is registered
     # only while a key is configured.
-    proxy = FutarProxy(async_get_clientsession(hass), api_key)
+    proxy = FutarProxy(
+        async_get_clientsession(hass),
+        api_key,
+        task_factory=lambda coro: hass.async_create_background_task(
+            coro, "hungarian_transport_futar", eager_start=False
+        ),
+    )
 
     async def handle_futar(call: ServiceCall) -> dict[str, Any]:
         try:
             data = await proxy.get(call.data["path"], call.data["params"])
         except FutarAuthError as err:
+            # The stored key stopped working (revoked, expired): ask for a new
+            # one in the UI instead of failing every card poll quietly.
+            entry.async_start_reauth(hass)
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
                 translation_key="futar_auth",
