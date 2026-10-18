@@ -658,6 +658,8 @@ Object.assign(BkkLib, {
       });
       if (!prev.platform && row.platform) prev.platform = String(row.platform);
       if (row.booking) prev.booking = true;
+      if (row.nationalPass) prev.nationalPass = true;
+      if (row.reservationFreeSection) prev.reservationFreeSection = true;
       if (!prev.trainNumber && row.trainNumber) prev.trainNumber = String(row.trainNumber);
       if (prev.travel == null && row.travel != null) prev.travel = row.travel;
       if (row.wheelchair) prev.wheelchair = true;

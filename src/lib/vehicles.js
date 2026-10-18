@@ -401,6 +401,8 @@ Object.assign(BkkLib, {
       trainNumber: r.trainNumber || '',
       delay: Number(r.delay || 0),
       booking: !!r.booking,
+      nationalPass: !!r.nationalPass,
+      reservationFreeSection: !!r.reservationFreeSection,
       travelMin: r.travel,
       lat: hasGps ? gps[0] : null,
       lon: hasGps ? gps[1] : null,

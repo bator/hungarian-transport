@@ -3286,4 +3286,44 @@ Lib.mavIndex = origMavIndex;
   pc.remove();
 }
 
+/* National pass (Országbérlet) on seat-reservation trains. */
+{
+  const dep = Math.floor(Date.now() / 1000) + 3600;
+  const rail = (extra) => Object.assign({ vehicle: 'rail', rawType: 'RAIL', dep, sched: dep }, extra);
+  const merged = Lib.mergeVolanRows(
+    [rail({ label: 'IC', trainNumber: '950', tripId: 'BKK_950_313' })],
+    [rail({ label: 'GÖCSEJ', trainNumber: '950', booking: true, nationalPass: true, reservationFreeSection: true, tripId: 'elvira:950', destHit: false })],
+    12,
+    { overlayOnly: true },
+  );
+  check('ELVIRA overlay copies the national-pass flags onto the FUTÁR train',
+    merged.length === 1 && merged[0].booking === true && merged[0].nationalPass === true
+    && merged[0].reservationFreeSection === true, JSON.stringify(merged[0]));
+  const asRow = Lib.asRow(merged[0], 'Székesfehérvár', 'hu');
+  check('asRow keeps the national-pass flags', asRow.nationalPass === true && asRow.reservationFreeSection === true);
+
+  const pc = document.createElement('hungarian-transport-card');
+  document.body.appendChild(pc);
+  pc.hass = { states: {}, language: 'hu' };
+  pc.setConfig({ language: 'hu' });
+  const now2 = Math.floor(Date.now() / 1000);
+  const base = { type: 'RAIL', icon: 'mdi:train', headsign: 'Szombathely', depTs: now2 + 600, schedTs: now2 + 600,
+    attime: '10:10', predicted_attime: '10:10', color: '4477aa', textcolor: 'ffffff', delay: 0, travelMin: 50 };
+  pc._rows = [
+    Object.assign({}, base, { label: 'GÖCSEJ', booking: true, nationalPass: true, reservationFreeSection: true }),
+    Object.assign({}, base, { label: 'TENKES', booking: true, nationalPass: false, depTs: now2 + 900 }),
+    Object.assign({}, base, { label: 'S40', booking: false, nationalPass: true, depTs: now2 + 1200 }),
+  ];
+  pc._paint();
+  const rowsHtml = [...pc.shadowRoot.querySelectorAll('tr[data-row-index]')].map((tr) => tr.innerHTML);
+  check('seat-reservation train valid with the pass shows OB next to H',
+    rowsHtml[0].includes('class="picto pass"') && rowsHtml[0].includes('>OB<')
+    && rowsHtml[0].includes('data-tip="Országbérlettel igénybe vehető"'), rowsHtml[0].slice(0, 300));
+  check('H tooltip mentions the reservation-free domestic section',
+    rowsHtml[0].includes('Helyjegy váltása kötelező · a kijelölt belföldi szakaszon 2. osztályon helyjegy nélkül is'));
+  check('seat-reservation train without the pass gets no OB', rowsHtml[1].includes('>H<') && !rowsHtml[1].includes('>OB<'));
+  check('no OB on trains without a seat reservation', !rowsHtml[2].includes('>OB<') && !rowsHtml[2].includes('>H<'));
+  pc.remove();
+}
+
 process.exit(failed ? 1 : 0);

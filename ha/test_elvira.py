@@ -80,6 +80,32 @@ if not check(
 ):
     failed += 1
 
+if not check(
+    "#8163379 marks the national pass (Országbérlet)",
+    parse_elvira_services({"services": [svc(code="SZOLGALTATAS#8163379", description="Országbérlettel igénybe vehető")]})["nationalPass"],
+):
+    failed += 1
+if not check(
+    "a train without the pass service is not marked",
+    not parse_elvira_services({"services": [svc(code="SZOLGALTATAS#3880", description="Helyjegy váltása kötelező")]})["nationalPass"],
+):
+    failed += 1
+if not check(
+    "#8586013 marks the reservation-free domestic section",
+    parse_elvira_services({"services": [svc(code="SZOLGALTATAS#8586013", description="Belföldi utazásra a kijelölt viszonylaton helyjegy váltása nélkül igénybe vehető 2. kocsiosztályon.")]})["reservationFreeSection"],
+):
+    failed += 1
+if not check(
+    "Kerékpár nem szállítható does not allow bikes",
+    not parse_elvira_services({"services": [svc(code="SZOLGALTATAS#3857", description="Kerékpár nem szállítható")]})["bikesAllowed"],
+):
+    failed += 1
+if not check(
+    "Kerékpár a megjelölt helyen szállítható still allows bikes",
+    parse_elvira_services({"services": [svc(code="SZOLGALTATAS#8595413", description="Kerékpár a megjelölt helyen szállítható.")]})["bikesAllowed"],
+):
+    failed += 1
+
 tz = zoneinfo.ZoneInfo("Europe/Budapest")
 now = datetime(2026, 9, 30, 17, 20, tzinfo=tz)
 latest = now + timedelta(minutes=180)
@@ -122,6 +148,7 @@ if not check("origin rows emit without dest StationInfo", len(rows) == 3):
 if not check(
     "GÖCSEJ booking true and destHit false when dest board empty",
     by_num.get("966", {}).get("booking") is True
+    and by_num.get("966", {}).get("nationalPass") is False
     and by_num.get("966", {}).get("destHit") is False
     and by_num.get("966", {}).get("travel") is None
     and by_num.get("966", {}).get("platform") == "6",
