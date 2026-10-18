@@ -894,7 +894,6 @@ ${this._stopPinCss()}
     wrap.insertBefore(plan, head.nextSibling);
     this._pickersMounted = true;
     this._bindPickers();
-    this._paintFav();
     this._syncPickerLabels();
     this._paintDestHits('');
   }
@@ -1096,6 +1095,9 @@ ${this._stopPinCss()}
       const editing = document.activeElement === dq || !!(dq.value || '').trim();
       dq.classList.toggle('compact-hide', !!cfg.destName && !editing);
     }
+    /* The suggestions follow the user's picks, so they are drawn again
+       whenever the pickers change (a reset shows them again). */
+    this._paintFav();
     const lab1 = this._planEl('plab1');
     const lab2 = this._planEl('plab2');
     if (lab1) lab1.textContent = t(lang, 'plannerStep1');
@@ -1243,6 +1245,7 @@ ${this._stopPinCss()}
   _rememberStop(stop) {
     BkkLib.recordStop(this._hass, stop).then((list) => {
       this._historyList = list;
+      this._paintFav();
     }).catch(() => { /* suggestions only */ });
   }
 

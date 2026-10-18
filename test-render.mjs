@@ -4103,8 +4103,9 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   own.hass = userHass;
   own.setConfig({ language: 'hu' });
   await new Promise((r) => setTimeout(r, 0));
-  own._paintFav();
-  const chips = Array.from(own.shadowRoot.querySelectorAll('#pfav .suggest-stop')).map((b) => b.textContent);
+  /* Drawn by the card itself once the history arrives: no manual paint. */
+  const chipsNow = () => Array.from(own.shadowRoot.querySelectorAll('#pfav .suggest-stop')).map((b) => b.textContent);
+  const chips = chipsNow();
   check('origin suggestions are the user’s own stops, most used first, with their feed mark',
     chips.length === 3 && chips[0] === 'VNépliget' && chips[1] === 'BFő tér' && chips[2] === 'MSzékesfehérvár'
     && !own.shadowRoot.innerHTML.includes('Keleti pályaudvar'),
@@ -4122,6 +4123,12 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   check('a picked destination counts too, without its route keys',
     afterDest.some((e) => e.id === 'volan_baja' && !('routeKeys' in e) && !('key' in e)),
     JSON.stringify(afterDest.map((e) => e.id)));
+  own._resetPlan();
+  const afterReset = chipsNow();
+  check('after a reset the suggestions show the stops just picked',
+    afterReset.some((c) => c.includes('Baja')) && afterReset[0] === 'BFő tér'
+    && !own._planEl('pfav').classList.contains('hidden'),
+    JSON.stringify(afterReset));
   own.remove();
   Lib._stopHistory = null;
   const bare = document.createElement('hungarian-transit-stop-card-plan');
