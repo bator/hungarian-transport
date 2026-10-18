@@ -46,7 +46,7 @@ Object.assign(BkkLib, {
   _coachPosInflight: null,
   _coachPosCache: null,
   async coachPositions(hass) {
-    if (!hass) return [];
+    if (!BkkLib.hasCompanionService(hass, 'coach_positions')) return [];
     const now = Date.now();
     const hit = BkkLib._coachPosCache;
     if (hit && now - hit.ts < 20000) return hit.vehicles;
@@ -69,7 +69,7 @@ Object.assign(BkkLib, {
     return run;
   },
   async coachShape(hass, route, headsign) {
-    if (!hass || !route) return '';
+    if (!route || !BkkLib.hasCompanionService(hass, 'coach_shape')) return '';
     const serviceData = { route: String(route), headsign: String(headsign || '') };
     try {
       const res = await BkkLib.hassService(hass, 'coach_shape', serviceData);
@@ -107,20 +107,18 @@ Object.assign(BkkLib, {
     }
     return null;
   },
-  /* Companion bkk_stop services (coach GPS and shapes). */
-  hassService(hass, service, serviceData) {
-    return BkkLib.callServiceResponse(hass, 'bkk_stop', service, serviceData);
+  /* The bkk_stop companion integration is optional. Without it every poll
+     with GTFS or MOTIS rows would make a failing call_service round trip, so
+     its services are only called when hass lists them. */
+  hasCompanionService(hass, service) {
+    const domain = hass && hass.services && hass.services.bkk_stop;
+    return !!(domain && typeof domain === 'object' && domain[service]);
   },
-  async hassTripShape(hass, apiKey, tripId) {
-    if (!hass || !BkkLib.isFutarTripId(tripId) || !apiKey) return [];
-    const serviceData = { trip_id: String(tripId), api_key: String(apiKey) };
-    try {
-      const res = await BkkLib.hassService(hass, 'trip_shape', serviceData);
-      const payload = BkkLib.servicePayload(res);
-      return BkkLib.validMapShape(payload.shape || payload.points || []);
-    } catch (_e) {
-      return [];
-    }
+  /* Companion bkk_stop services (coach GPS and shapes). Resolves to null
+     when the companion is not installed or lacks the service. */
+  hassService(hass, service, serviceData) {
+    if (!BkkLib.hasCompanionService(hass, service)) return Promise.resolve(null);
+    return BkkLib.callServiceResponse(hass, 'bkk_stop', service, serviceData);
   },
   /* FUTÁR trip-details.json already ships the street polyline
      (8E Kelenföld-bound: ~1000 points, Újpalota → Kelenföld).

@@ -1,4 +1,4 @@
-import { DEFAULT_FAVORITES, MINUTES_AFTER_PRESETS, clampMinutesAfter, setCityIndexUrl, setMavIndexUrl, setVolanIndexUrl } from './config.js';
+import { DEFAULT_FAVORITES, MINUTES_AFTER_PRESETS, clampMinutesAfter, normalizeCardConfig, setCityIndexUrl, setMavIndexUrl, setVolanIndexUrl } from './config.js';
 import { codedError, errText, modeCopy, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 
@@ -14,6 +14,7 @@ export class BKKHopCardEditor extends HTMLElement {
     this._dests = [];
     this._destRoutes = {};
     this._loadedStop = '';
+    this._loadingStop = '';
     this._destsLoading = false;
     this._keyOk = null;
     this._probingKey = false;
@@ -31,7 +32,7 @@ export class BKKHopCardEditor extends HTMLElement {
   }
 
   setConfig(config) {
-    this._config = Object.assign({ routeIds: [] }, config || {});
+    this._config = normalizeCardConfig(config);
     if (!this._cache) this._cache = {};
     if (!this._dests) this._dests = [];
     if (!this._destRoutes) this._destRoutes = {};
@@ -48,7 +49,11 @@ export class BKKHopCardEditor extends HTMLElement {
     this._syncApiKey();
     this._syncMode();
     this._probeKey();
-    if (this._config.stopId && (this._hasFutar() || this._mode() === 'volan' || this._mode() === 'helyi') && this._loadedStop !== this._config.stopId) {
+    /* Every keystroke in the name field comes back as a setConfig: a load
+       already running for this stop must not be restarted. */
+    const stopId = this._config.stopId;
+    const loading = this._destsLoading && this._loadingStop === stopId;
+    if (stopId && (this._hasFutar() || this._mode() === 'volan' || this._mode() === 'helyi') && this._loadedStop !== stopId && !loading) {
       this._loadDests();
     }
   }
@@ -699,6 +704,7 @@ export class BKKHopCardEditor extends HTMLElement {
     const stopId = this._config.stopId;
     const seq = ++this._destSeq;
     this._destsLoading = true;
+    this._loadingStop = stopId;
     const box = this._el('destHits');
     if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
     try {
@@ -728,7 +734,10 @@ export class BKKHopCardEditor extends HTMLElement {
       this._error(errText(this._lang(), err));
       if (box) box.innerHTML = '';
     } finally {
-      if (seq === this._destSeq) this._destsLoading = false;
+      if (seq === this._destSeq) {
+        this._destsLoading = false;
+        this._loadingStop = '';
+      }
     }
   }
 

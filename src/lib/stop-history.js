@@ -9,23 +9,34 @@ const HISTORY_KEEP = 24;
 /* A stop used often long ago fades: its count halves every 30 days. */
 const HISTORY_HALF_LIFE_DAYS = 30;
 
-const localRead = () => {
+/* localStorage is per browser profile, while the history is per Home
+   Assistant user: two users of one tablet must not see each other's stops. */
+const localKey = (hass) => {
+  const uid = hass && hass.user && hass.user.id;
+  return uid ? `${HISTORY_KEY}:${uid}` : HISTORY_KEY;
+};
+
+const localRead = (hass) => {
   try {
-    return JSON.parse(globalThis.localStorage.getItem(HISTORY_KEY) || '[]');
+    return JSON.parse(globalThis.localStorage.getItem(localKey(hass)) || '[]');
   } catch (_e) {
     return [];
   }
 };
 
-const localWrite = (list) => {
+const localWrite = (hass, list) => {
   try {
-    globalThis.localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+    globalThis.localStorage.setItem(localKey(hass), JSON.stringify(list));
   } catch (_e) { /* private window or storage off: the HA copy still holds it */ }
 };
 
 Object.assign(BkkLib, {
   STOP_HISTORY_KEY: HISTORY_KEY,
+  stopHistoryLocalKey: localKey,
   _stopHistory: null,
+  /* Writes queue up behind each other: two picks in one tick (an origin and
+     a destination) must both land in the list. */
+  _stopHistoryWrite: Promise.resolve(),
   stopHistoryScore(entry, now) {
     const ageDays = Math.max(0, ((now || Date.now()) - (Number(entry && entry.t) || 0)) / 86400000);
     return (Number(entry && entry.n) || 1) * Math.pow(0.5, ageDays / HISTORY_HALF_LIFE_DAYS);
@@ -59,12 +70,15 @@ Object.assign(BkkLib, {
       if (hass && typeof hass.callWS === 'function') {
         try {
           const res = await hass.callWS({ type: 'frontend/get_user_data', key: HISTORY_KEY });
-          list = res && res.value;
+          /* null is an answer: this user has no history yet. Only a failed
+             call falls back to the browser's copy. */
+          list = Array.isArray(res && res.value) ? res.value : [];
         } catch (_e) {
-          list = null;
+          list = localRead(hass);
         }
+      } else {
+        list = localRead(hass);
       }
-      if (!Array.isArray(list)) list = localRead();
       return BkkLib._cleanStopHistory(list);
     })();
     BkkLib._stopHistory = { conn, p };
@@ -72,8 +86,13 @@ Object.assign(BkkLib, {
   },
   /* Count a pick (an origin, a destination or a suggestion), keep the most
      used, and store the list for this user. */
-  async recordStop(hass, stop) {
+  recordStop(hass, stop) {
     if (!stop || !stop.id || !stop.name) return BkkLib.loadStopHistory(hass);
+    const run = BkkLib._stopHistoryWrite.then(() => BkkLib._recordStopNow(hass, stop));
+    BkkLib._stopHistoryWrite = run.catch(() => { /* the next write still runs */ });
+    return run;
+  },
+  async _recordStopNow(hass, stop) {
     const list = (await BkkLib.loadStopHistory(hass)).map((e) => Object.assign({}, e));
     const now = Date.now();
     const id = String(stop.id);
@@ -95,7 +114,7 @@ Object.assign(BkkLib, {
       .sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now))
       .slice(0, HISTORY_KEEP));
     BkkLib._stopHistory = { conn: (hass && hass.connection) || null, p: Promise.resolve(next) };
-    localWrite(next);
+    localWrite(hass, next);
     if (hass && typeof hass.callWS === 'function') {
       try {
         await hass.callWS({ type: 'frontend/set_user_data', key: HISTORY_KEY, value: next });
