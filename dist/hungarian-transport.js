@@ -674,6 +674,7 @@ var I18N = {
     mapFullRoute: "Teljes útvonal",
     mapBoardStop: "Felszállás",
     mapAlightStop: "Leszállás",
+    mapApproxLine: "Közelítő vonal: ehhez a járathoz nincs útvonaladat",
     mapTransferStop: "Átszállás",
     mapStartPoint: "Indulás",
     mapEndPoint: "Érkezés",
@@ -858,6 +859,7 @@ var I18N = {
     mapFullRoute: "Full route",
     mapBoardStop: "Boarding",
     mapAlightStop: "Alighting",
+    mapApproxLine: "Approximate line: no route data for this trip",
     mapTransferStop: "Transfer",
     mapStartPoint: "Start",
     mapEndPoint: "Arrival",
@@ -3456,16 +3458,48 @@ Object.assign(BkkLib, {
     return null;
   },
   async mavShapeForRow(row) {
+    const route = await BkkLib.mavRouteForRow(row, "", "");
+    return route ? route.shape : [];
+  },
+  /* Schema 2 keeps every stop pattern of a train (936 sometimes runs on to
+     Szombathely) with its stations: take the longest one that serves the
+     card's two stations in order, else one serving the boarding station.
+     Pins go on that pattern's own station coordinates. */
+  pickMavVariant(variants, stations, boardName, alightName) {
+    const same = (i, name) => !!name && BkkLib.nameEq(((stations || [])[i] || [])[0] || "", name);
+    let firstBoard = null;
+    for (const variant of variants || []) {
+      const ids = variant && variant[1] || [];
+      const b = ids.findIndex((i) => same(i, boardName));
+      if (b < 0) continue;
+      const a = ids.findIndex((i, k) => k > b && same(i, alightName));
+      if (a > b) return { variant, board: b, alight: a };
+      if (!firstBoard) firstBoard = { variant, board: b, alight: -1 };
+    }
+    if (firstBoard) return firstBoard;
+    return variants && variants[0] ? { variant: variants[0], board: -1, alight: -1 } : null;
+  },
+  async mavRouteForRow(row, boardName, alightName) {
     try {
       const idx = await BkkLib.mavIndex();
-      if (!idx || !Array.isArray(idx.p)) return [];
+      if (!idx || !Array.isArray(idx.p)) return null;
       const hit = BkkLib.mavShapeIndexKey(row, idx);
-      if (!hit) return [];
-      const encoded = idx.p[hit.ix];
-      if (encoded == null || encoded === "") return [];
-      return BkkLib.validMapShape(BkkLib.decodePolyline(encoded));
+      if (!hit) return null;
+      if (!Array.isArray(hit.ix)) {
+        const shape2 = BkkLib.validMapShape(BkkLib.decodePolyline(idx.p[hit.ix] || ""));
+        return shape2.length >= 2 ? { shape: shape2, board: null, alight: null } : null;
+      }
+      const pick = BkkLib.pickMavVariant(hit.ix, idx.st, boardName, alightName);
+      if (!pick) return null;
+      const shape = BkkLib.validMapShape(BkkLib.decodePolyline(idx.p[pick.variant[0]] || ""));
+      if (shape.length < 2) return null;
+      const at = (pos) => {
+        const st = pos >= 0 ? (idx.st || [])[pick.variant[1][pos]] : null;
+        return st ? BkkLib.mapGpsLatLon(st[1] / 1e5, st[2] / 1e5) : null;
+      };
+      return { shape, board: at(pick.board), alight: at(pick.alight) };
     } catch (_e) {
-      return [];
+      return null;
     }
   },
   async _loadGtfsIndex(url, httpKey, gunzipKey) {
@@ -6740,12 +6774,15 @@ ${this._stopPinCss()}
     let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon) || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
     if (BkkLib.isTrainRow(row)) {
       try {
-        const mavShape = await BkkLib.mavShapeForRow(row);
-        if (mavShape.length >= 2) {
-          if (!board) {
-            board = BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
-          }
-          return { shape: mavShape, board, alight: await this._rowAlightPoint(row, []) };
+        const mav = await BkkLib.mavRouteForRow(row, cfg.stopName || "", cfg.destName || cfg.destKey || "");
+        if (mav && mav.shape.length >= 2) {
+          const ownBoard = mav.board || board;
+          const ownAlight = mav.alight || await this._rowAlightPoint(row, []);
+          return {
+            shape: mav.shape,
+            board: BkkLib.pinOnRoute(ownBoard, [], mav.shape),
+            alight: ownAlight && BkkLib.pinOnRoute(ownAlight, [], mav.shape)
+          };
         }
       } catch (_e) {
       }
@@ -6894,8 +6931,14 @@ ${this._stopPinCss()}
     if (clipped.length >= 2) shape = clipped;
     shape = BkkLib.validMapShape(shape);
     if (shape.length < 2 && gtfsGeo && gtfsGeo.stopLine.length >= 2) shape = gtfsGeo.stopLine;
+    let approx = false;
+    if (shape.length < 2 && board && destPt && BkkLib.haversineMeters(board, destPt) > 30) {
+      shape = [board, destPt];
+      approx = true;
+    }
     return {
       shape,
+      approx,
       board: BkkLib.pinOnRoute(board, [futarHop && futarHop.board, motisBoardPt], shape),
       alight: destPt && BkkLib.pinOnRoute(destPt, [futarHop && futarHop.alight, motisMap && motisMap.dest], shape)
     };
@@ -7030,10 +7073,12 @@ ${this._stopPinCss()}
     }
     let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon) || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
     let alight = null;
+    let approx = false;
     try {
       const got = await this._loadRowMapShape(row);
       shape = BkkLib.validMapShape(got.shape);
       hasShape = shape.length >= 2;
+      approx = hasShape && !!got.approx;
       if (got.board) board = got.board;
       alight = got.alight || null;
     } catch (_e) {
@@ -7081,17 +7126,18 @@ ${this._stopPinCss()}
       });
     };
     if (hasShape) {
+      const dash = approx ? { dashArray: "10 10" } : {};
       const outline = L.polyline(shape, Object.assign({
         color: "#1a1a1a",
         weight: 7,
         opacity: 0.45,
         interactive: false
-      }, lineBase)).addTo(map);
+      }, lineBase, dash)).addTo(map);
       const line2 = L.polyline(shape, Object.assign({
         color: routeColor,
         weight: 5,
         opacity: 0.98
-      }, lineBase)).addTo(map);
+      }, lineBase, dash)).addTo(map);
       this._mapRouteLayers.push(outline, line2);
       this._mapRouteOutline = outline;
       this._mapRoute = line2;
@@ -7114,6 +7160,8 @@ ${this._stopPinCss()}
       foot.textContent = t(lang, "mapNothingToShow");
     } else if (!hasShape) {
       foot.textContent = t(lang, "mapNoGeometry");
+    } else if (approx) {
+      foot.textContent = t(lang, "mapApproxLine") + " · " + foot.textContent;
     }
     setTimeout(applyView, 80);
     this._openingMap = "";

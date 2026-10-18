@@ -54,6 +54,10 @@
           "description": "A végpont lekérdezési paraméterei."
         }
       }
+    },
+    "rebuild_mav_index": {
+      "name": "MÁV útvonalindex újraépítése",
+      "description": "Felépíti a vonatok útvonalindexét a /config/hungarian-transport/mav-gtfs.zip fájlból, és minden járatot ellenőriz vele."
     }
   },
   "exceptions": {
@@ -68,6 +72,12 @@
     },
     "futar_unavailable": {
       "message": "Nem érhető el a BKK FUTÁR ({error})."
+    },
+    "mav_source_missing": {
+      "message": "Nincs MÁV GTFS itt: {path}. A MÁV csak regisztrált felhasználóknak adja ki; a letöltött zipet tedd ide."
+    },
+    "mav_build_failed": {
+      "message": "A MÁV útvonalindex nem készült el: {error}"
     }
   },
   "options": {

@@ -12,10 +12,12 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
-from .const import CONF_API_KEY, DOMAIN, SERVICE_ELVIRA_BETWEEN, SERVICE_FUTAR
+from . import mav
+from .const import CONF_API_KEY, DOMAIN, SERVICE_ELVIRA_BETWEEN, SERVICE_FUTAR, SERVICE_REBUILD_MAV
 from .elvira import elvira_between, station_code_digits
 from .futar import FUTAR_PATHS, FutarAuthError, FutarError, FutarProxy
 
@@ -103,6 +105,41 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         schema=ELVIRA_SERVICE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
+    # MÁV GTFS is registration-only, so the rail index is built here from the
+    # feed the user supplies (see mav.py), and checked trip by trip.
+    hass.http.register_view(mav.MavGtfsUploadView(www_path))
+
+    async def handle_rebuild_mav(call: ServiceCall) -> dict[str, Any]:
+        try:
+            stats = await mav.async_build(hass, www_path, force=True)
+        except FileNotFoundError as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="mav_source_missing",
+                translation_placeholders={"path": str(mav.source_path(hass))},
+            ) from err
+        except Exception as err:
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="mav_build_failed",
+                translation_placeholders={"error": str(err)},
+            ) from err
+        return stats or {}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REBUILD_MAV,
+        handle_rebuild_mav,
+        supports_response=SupportsResponse.OPTIONAL,
+    )
+
+    async def _build_mav_at_start(_hass: HomeAssistant) -> None:
+        hass.async_create_background_task(
+            mav.async_build_if_needed(hass, www_path), "hungarian_transport_mav_index"
+        )
+
+    async_at_started(hass, _build_mav_at_start)
+
     integration = await async_get_integration(hass, DOMAIN)
     entry_url = LOADER_URL if (www_path / LOADER_FILE).is_file() else CARD_URL
     card_url = f"{entry_url}?v={integration.version}"

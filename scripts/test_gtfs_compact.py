@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import math
 import os
 import sys
 import tempfile
@@ -29,7 +30,7 @@ from gtfs_compact import (  # noqa: E402
     train_number,
     write_index,
 )
-from build_mav_index import _covers, load_rail_shapes, write_mav_index  # noqa: E402
+from build_mav_index import _mav_module  # noqa: E402
 
 
 def gtfs_zip(files: dict[str, str]) -> Path:
@@ -287,13 +288,16 @@ def main() -> int:
     szf = (47.183611, 18.424722)
     mid = (47.3167, 18.7908)
     kel = (47.464444, 19.02)
+    mav = _mav_module()
+    chord = mav.RouteGrid([szf, kel])
     failed |= not check(
-        "2-point chord does not cover intermediate stops",
-        not _covers([szf, kel], [szf, mid, kel]),
+        "2-point chord misses an intermediate station",
+        chord.gap(mid) > mav.STOP_TOLERANCE_M,
+        str(round(chord.gap(mid))),
     )
     failed |= not check(
-        "2-point covers 2-stop trip",
-        _covers([szf, kel], [szf, kel]),
+        "2-point chord passes its own end stations",
+        chord.gap(szf) < 1 and chord.gap(kel) < 1,
     )
 
     stub_dir = Path(tempfile.mkdtemp()) / "official-chord"
@@ -324,13 +328,13 @@ def main() -> int:
         f"shp857,{kel[0]},{kel[1]},1\n"
     )
     (stub_dir / "feed_info.txt").write_text("feed_publisher_name,feed_version\nMÁV,official-stub\n")
-    stub_payload = load_rail_shapes(stub_dir)
-    stub_ix = stub_payload["n"].get("857")
-    stub_geom = decode_polyline(stub_payload["p"][stub_ix]) if stub_ix is not None else []
+    stub_payload = mav.build(stub_dir)
+    stub_var = (stub_payload["n"].get("857") or [[None, []]])[0]
+    stub_geom = decode_polyline(stub_payload["p"][stub_var[0]]) if stub_var[0] is not None else []
     failed |= not check(
         "official 2-point chord replaced by stop sequence",
-        stub_payload.get("stub_replaced", 0) >= 1 and len(stub_geom) >= 3,
-        f"replaced={stub_payload.get('stub_replaced')} npts={len(stub_geom)}",
+        stub_payload["_stats"]["stop_lines"] >= 1 and len(stub_geom) >= 3,
+        f"stats={stub_payload['_stats']} npts={len(stub_geom)}",
     )
 
     rail_dir = Path(tempfile.mkdtemp()) / "pfaedle-out"
@@ -341,7 +345,9 @@ def main() -> int:
     shape_rows = ["shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence"]
     for i in range(npts):
         t = i / (npts - 1)
-        lat = szf[0] + (kel[0] - szf[0]) * t
+        # A curving line (like the rails), so simplification keeps its bends.
+        bend = 0.02 * math.sin(t * math.pi * 4)
+        lat = szf[0] + (kel[0] - szf[0]) * t + bend
         lon = szf[1] + (kel[1] - szf[1]) * t
         shape_rows.append(f"shp857,{lat:.6f},{lon:.6f},{i}")
     (rail_dir / "agency.txt").write_text("agency_id,agency_name\nMAV,MÁV\n")
@@ -368,15 +374,21 @@ def main() -> int:
         with open_gtfs(rail_dir) as src:
             failed |= not check("open_gtfs directory", "shapes.txt" in src.namelist())
         idx_out = Path(tempfile.mkdtemp()) / "mav-index.json.gz"
-        payload = load_rail_shapes(rail_dir)
-        info = write_mav_index(payload, idx_out)
+        payload = mav.build(rail_dir)
+        info = mav.write(payload, idx_out)
         idx = json.loads(gzip.open(idx_out).read())
-        ix = idx["n"].get("857")
+        var = (idx["n"].get("857") or [[None, []]])[0]
+        ix = var[0]
         geom = decode_polyline(idx["p"][ix]) if ix is not None else []
         failed |= not check("pfaedle dir indexes 857", ix is not None, str(idx.get("n")))
         failed |= not check(
-            "pfaedle dir keeps dense shape",
-            len(geom) >= 30,
+            "variant lists its own stations",
+            [idx["st"][i][0] for i in var[1]] == ["Székesfehérvár", "Budapest-Kelenföld"],
+            str(var[1]),
+        )
+        failed |= not check(
+            "pfaedle dir keeps the bends of its shape",
+            len(geom) >= 5,
             f"npts={len(geom)} info={info}",
         )
         failed |= not check(

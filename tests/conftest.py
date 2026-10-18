@@ -21,3 +21,13 @@ def card_assets(tmp_path, monkeypatch):
     )
     return www
 
+
+@pytest.fixture(autouse=True)
+def mav_source(tmp_path, monkeypatch):
+    """Keep the MÁV feed out of the shared testing_config directory."""
+    src = tmp_path / "config" / "hungarian-transport" / "mav-gtfs.zip"
+    monkeypatch.setattr(
+        "custom_components.hungarian_transport.mav.source_path", lambda hass: src
+    )
+    return src
+

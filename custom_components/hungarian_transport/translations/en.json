@@ -54,6 +54,10 @@
           "description": "Query parameters for the endpoint."
         }
       }
+    },
+    "rebuild_mav_index": {
+      "name": "Rebuild MÁV route index",
+      "description": "Build the train route index from /config/hungarian-transport/mav-gtfs.zip and check every trip against it."
     }
   },
   "exceptions": {
@@ -68,6 +72,12 @@
     },
     "futar_unavailable": {
       "message": "BKK FUTÁR is not reachable ({error})."
+    },
+    "mav_source_missing": {
+      "message": "No MÁV GTFS at {path}. MÁV publishes it to registered users only; put the downloaded zip there."
+    },
+    "mav_build_failed": {
+      "message": "The MÁV route index could not be built: {error}"
     }
   },
   "options": {

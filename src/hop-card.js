@@ -702,12 +702,16 @@ ${this._stopPinCss()}
        on Székesfehérvár–Kelenföld, and not the Transitous hop cut). */
     if (BkkLib.isTrainRow(row)) {
       try {
-        const mavShape = await BkkLib.mavShapeForRow(row);
-        if (mavShape.length >= 2) {
-          if (!board) {
-            board = BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
-          }
-          return { shape: mavShape, board: board, alight: await this._rowAlightPoint(row, []) };
+        const mav = await BkkLib.mavRouteForRow(row, cfg.stopName || '', cfg.destName || cfg.destKey || '');
+        if (mav && mav.shape.length >= 2) {
+          /* The train's own stations, on its own route (MÁV GTFS). */
+          const ownBoard = mav.board || board;
+          const ownAlight = mav.alight || await this._rowAlightPoint(row, []);
+          return {
+            shape: mav.shape,
+            board: BkkLib.pinOnRoute(ownBoard, [], mav.shape),
+            alight: ownAlight && BkkLib.pinOnRoute(ownAlight, [], mav.shape),
+          };
         }
       } catch (_e) { /* MOTIS / FUTÁR still fill */ }
     }
@@ -858,8 +862,16 @@ ${this._stopPinCss()}
     shape = BkkLib.validMapShape(shape);
     /* No shapes.txt route and nothing from Transitous: join the GTFS stops. */
     if (shape.length < 2 && gtfsGeo && gtfsGeo.stopLine.length >= 2) shape = gtfsGeo.stopLine;
+    /* Every source came back empty: still show where the ride goes, as a
+       line marked approximate, rather than no route at all. */
+    let approx = false;
+    if (shape.length < 2 && board && destPt && BkkLib.haversineMeters(board, destPt) > 30) {
+      shape = [board, destPt];
+      approx = true;
+    }
     return {
       shape,
+      approx,
       board: BkkLib.pinOnRoute(board, [futarHop && futarHop.board, motisBoardPt], shape),
       alight: destPt && BkkLib.pinOnRoute(destPt, [futarHop && futarHop.alight, motisMap && motisMap.dest], shape),
     };
@@ -989,10 +1001,12 @@ ${this._stopPinCss()}
     let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon)
       || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
     let alight = null;
+    let approx = false;
     try {
       const got = await this._loadRowMapShape(row);
       shape = BkkLib.validMapShape(got.shape);
       hasShape = shape.length >= 2;
+      approx = hasShape && !!got.approx;
       if (got.board) board = got.board;
       alight = got.alight || null;
     } catch (_e) { /* timetable row still shows the live dot */ }
@@ -1031,12 +1045,13 @@ ${this._stopPinCss()}
       });
     };
     if (hasShape) {
+      const dash = approx ? { dashArray: '10 10' } : {};
       const outline = L.polyline(shape, Object.assign({
         color: '#1a1a1a', weight: 7, opacity: 0.45, interactive: false,
-      }, lineBase)).addTo(map);
+      }, lineBase, dash)).addTo(map);
       const line = L.polyline(shape, Object.assign({
         color: routeColor, weight: 5, opacity: 0.98,
-      }, lineBase)).addTo(map);
+      }, lineBase, dash)).addTo(map);
       this._mapRouteLayers.push(outline, line);
       this._mapRouteOutline = outline;
       this._mapRoute = line;
@@ -1057,6 +1072,8 @@ ${this._stopPinCss()}
       foot.textContent = t(lang, 'mapNothingToShow');
     } else if (!hasShape) {
       foot.textContent = t(lang, 'mapNoGeometry');
+    } else if (approx) {
+      foot.textContent = t(lang, 'mapApproxLine') + ' \u00b7 ' + foot.textContent;
     }
     setTimeout(applyView, 80);
     this._openingMap = '';
