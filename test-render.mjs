@@ -3548,4 +3548,68 @@ Lib.mavIndex = origMavIndex;
   Object.assign(Lib, keep);
 }
 
+/* MÁV index schema 2: every stop pattern of a train, with its stations. */
+{
+  const st = [
+    ['Szombathely', 4723510, 1663160], ['Székesfehérvár', 4718361, 1842472],
+    ['Martonvásár', 4731570, 1878800], ['Budapest-Kelenföld', 4746432, 1902063],
+  ];
+  const enc = (pts) => {
+    const e = (v) => { let x = v < 0 ? ~(v << 1) : v << 1; let o = ''; while (x >= 0x20) { o += String.fromCharCode((0x20 | (x & 0x1f)) + 63); x >>= 5; } return o + String.fromCharCode(x + 63); };
+    let pl = 0; let pg = 0; let out = '';
+    pts.forEach(([la, lo]) => { const a = Math.round(la * 1e5); const b = Math.round(lo * 1e5); out += e(a - pl) + e(b - pg); pl = a; pg = b; });
+    return out;
+  };
+  const longLine = [[47.2351, 16.6316], [47.20, 17.5], [47.18361, 18.42472], [47.3157, 18.788], [47.46432, 19.02063]];
+  const shortLine = [[47.18361, 18.42472], [47.3157, 18.788], [47.46432, 19.02063]];
+  const idx2 = { v: 2, st, p: [enc(longLine), enc(shortLine)], n: { 905: [[0, [0, 1, 2, 3]], [1, [1, 2, 3]]] }, l: {} };
+  const pick = Lib.pickMavVariant(idx2.n['905'], st, 'Székesfehérvár', 'Kelenföld vasútállomás');
+  check('MÁV variant: serves both stations in order, BKK naming matches',
+    !!pick && pick.variant[0] === 0 && pick.board === 1 && pick.alight === 3, JSON.stringify(pick));
+  const keepIdx = Lib.mavIndex;
+  Lib.mavIndex = async () => idx2;
+  const route = await Lib.mavRouteForRow({ label: 'BAKONY', trainNumber: '905', type: 'RAIL' }, 'Székesfehérvár', 'Budapest-Kelenföld');
+  check('MÁV route: the variant’s line and its own station pins',
+    !!route && route.shape.length === 5 && route.board[0] === 47.18361 && route.alight[0] === 47.46432,
+    JSON.stringify(route && { n: route.shape.length, board: route.board, alight: route.alight }));
+  Lib.mavIndex = async () => ({ v: 1, p: [enc(shortLine)], n: { 905: 0 }, l: {} });
+  const old = await Lib.mavRouteForRow({ label: 'BAKONY', trainNumber: '905', type: 'RAIL' }, '', '');
+  check('MÁV route: an old schema-1 index still draws', !!old && old.shape.length === 3 && old.board === null);
+
+  Lib.mavIndex = async () => idx2;
+  const trainCard = document.createElement('hungarian-transport-card');
+  document.body.appendChild(trainCard);
+  trainCard.setConfig({ language: 'hu', stopId: 'BKK_005503269', stopName: 'Székesfehérvár', mav: true,
+    destKey: 'budapest-kelenföld', destName: 'Budapest-Kelenföld', routeIds: [] });
+  const got = await trainCard._loadRowMapShape({ label: 'BAKONY', headsign: 'Budapest-Déli', type: 'RAIL', tripId: 'elvira:905', trainNumber: '905' });
+  check('a train row draws the index route with pins on its own stations',
+    got.shape.length === 5 && got.board[0] === 47.18361 && got.alight[0] === 47.46432 && !got.approx,
+    JSON.stringify({ n: got.shape.length, board: got.board, alight: got.alight }));
+  trainCard.remove();
+  Lib.mavIndex = keepIdx;
+}
+{
+  const keep = {};
+  ['mavIndex', 'gtfsRowShape', 'motisShapeForHop', 'hassTripShape', 'futarTripShape', 'tripHopStops', 'stopArea', 'transitousStopRef', 'coachShape']
+    .forEach((k) => { keep[k] = Lib[k]; });
+  Lib.mavIndex = async () => ({ v: 2, st: [], p: [], n: {}, l: {} });
+  Lib.gtfsRowShape = async () => null;
+  Lib.motisShapeForHop = async () => ({ shape: [], board: null, dest: null, coversHead: false, hit: null });
+  Lib.hassTripShape = async () => [];
+  Lib.futarTripShape = async () => [];
+  Lib.tripHopStops = async () => null;
+  Lib.stopArea = async () => '';
+  Lib.transitousStopRef = async () => null;
+  const lone = document.createElement('hungarian-transport-card');
+  document.body.appendChild(lone);
+  lone.setConfig({ language: 'hu', stopId: 'BKK_005503269', stopName: 'Székesfehérvár', mav: true,
+    destKey: 'budapest-kelenföld', destName: 'Budapest-Kelenföld', routeIds: [] });
+  const got = await lone._loadRowMapShape({ label: 'IC', headsign: 'Budapest-Déli', type: 'RAIL', tripId: 'elvira:999', trainNumber: '999' });
+  check('no source at all still gives a line, marked approximate',
+    got.approx === true && got.shape.length === 2 && got.shape[0][0] === got.board[0],
+    JSON.stringify(got));
+  lone.remove();
+  Object.assign(Lib, keep);
+}
+
 process.exit(failed ? 1 : 0);

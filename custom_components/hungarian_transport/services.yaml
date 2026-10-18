@@ -34,3 +34,4 @@ futar:
     params:
       selector:
         object:
+rebuild_mav_index:

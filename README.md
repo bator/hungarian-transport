@@ -114,6 +114,64 @@ Every map marks where you get on and off, with the stop's name:
 The alighting stop is the trip's own stop when the GTFS feed or BKK FUTÁR
 lists it. Otherwise it comes from Transitous or the configured destination.
 
+### MÁV train routes
+
+MÁV publishes its timetable (GTFS, CC0 licence) only to registered users, so
+the release cannot ship it. Without it a train's map relies on a live
+Transitous lookup, which sometimes finds no trip, and on BKK FUTÁR, which
+only knows trains around Budapest. With the feed, every train in Hungary
+draws its own route.
+
+1. Register at <https://www.mavcsoport.hu/gtfs-igenybejelento>. MÁV emails
+   the download address and a login.
+2. Download the zip (`gtfsMavMenetrend.zip`).
+3. Put it at `/config/hungarian-transport/mav-gtfs.zip`. With the
+   **File editor** app: open the `hungarian-transport` folder (create it if
+   missing), choose *Upload file*, then rename the file to `mav-gtfs.zip`.
+4. Restart Home Assistant, or run the `hungarian_transport.rebuild_mav_index`
+   action.
+
+The integration then builds `mav-index.json.gz` next to the card:
+
+- **Every stop pattern of every train.** A train number can run a longer or
+  shorter route on different days (936 sometimes continues to Szombathely),
+  so each pattern is kept with its route and its stations. The map picks the
+  pattern that serves your two stations, in order, and puts the pins on that
+  train's own station coordinates.
+- **Checked trip by trip.** After each build, every trip in the feed is
+  drawn the way the card would draw it, and every one of its stations must
+  lie within 300 m of the route. If fewer than 99% of the trains pass, a
+  notification says so. The result is in the action's response and in the
+  log.
+- **Rebuilt when needed.** A HACS update replaces the card's folder, so the
+  index is rebuilt at startup whenever it is missing or older than the zip.
+
+MÁV's own `shapes.txt` is coarse: an 8 km chord cuts across the fields
+between Székesfehérvár and Kelenföld. A route that misses one of its
+stations is replaced by the line through its stations, so a train never
+skips its stops on the map. For routes that follow the tracks, run the feed
+through [pfaedle](https://github.com/ad-freiburg/pfaedle) first:
+
+```bash
+docker run --rm -v "$PWD":/data ghcr.io/ad-freiburg/pfaedle:latest \
+  -D -m rail -x /data/hungary-latest.osm.pbf -i /data/mav-gtfs.zip
+```
+
+Then zip `gtfs-out/` and use that as `mav-gtfs.zip`. With a pfaedle feed
+(October 2026) all 24,994 trips of 2,623 trains passed the check.
+
+**Updating automatically.** An admin can upload the zip instead of copying
+it. The response contains the build and check results:
+
+```bash
+curl -X POST -H "Authorization: Bearer $HA_TOKEN" \
+  --data-binary @mav-gtfs.zip \
+  http://homeassistant.local:8123/api/hungarian_transport/mav_gtfs
+```
+
+A daily job that downloads (and pfaedle-matches) the feed can end with this
+call, so the card follows timetable changes on its own.
+
 ## Options
 
 | Option | Type | Default | Description |
@@ -197,15 +255,8 @@ unless the matching repository secrets are set.
 
 These feeds still need a form or login:
 
-- MÁV / GYSEV rail GTFS: <https://www.mavcsoport.hu/gtfs-igenybejelento>
-  Put `mav-gtfs.zip` next to the scripts (or `MAV_GTFS_ZIP` / `MAV_GTFS_URL`
-  in `.env`) and run `python3 scripts/build_mav_index.py`. Prefer unzipped
-  **pfaedle** output (`MAV_PFAEDLE_DIR` or `/opt/pfaedle-trial/out`): official
-  `shapes.txt` is a stub or an 8 km chord across Székesfehérvár–Kelenföld,
-  while pfaedle follows OSM line 30. The card then draws every train's full
-  nationwide line from `mav-index.json.gz`. Stubs that still miss the stop
-  bbox become the stop sequence (IC 856 is Déli → Nagykanizsa). Without the
-  zip the map still falls back to Transitous / FUTÁR.
+- MÁV / GYSEV rail GTFS: <https://www.mavcsoport.hu/gtfs-igenybejelento>.
+  See [MÁV train routes](#máv-train-routes) for how to add it.
 - National Access Point (SZKT official dump and others): <https://napportal.kozut.hu/>
 - Kecskemét KEKO city buses: <https://timetable.keko.hu/Kecskemet_GTFS.zip> (auth)
 
@@ -290,6 +341,12 @@ python -m pytest
   Kecskeméti Kisvasút, HOMM (Budaörs), Bahart, HVSZ (Hódmezővásárhely),
   KKZRT (Kaposvár), Halasbusz (Kiskunhalas), Székesfehérvár helyi, T-Busz
   (Tatabánya), THURY-BUSZ (Várpalota).
+- [MÁV-csoport](https://www.mavcsoport.hu/gtfs-igenybejelento) for the rail
+  GTFS you add yourself (CC0).
+- [pfaedle](https://github.com/ad-freiburg/pfaedle) (University of Freiburg)
+  for matching train routes to the rails, on
+  [OpenStreetMap](https://www.openstreetmap.org/copyright) data
+  (© OpenStreetMap contributors, ODbL).
 
 ## License
 
