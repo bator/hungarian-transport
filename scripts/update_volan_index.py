@@ -25,9 +25,9 @@ from gtfs_compact import (  # noqa: E402
     download_feed,
     download_zip,
     feed_error,
+    feed_urls,
     index_shapes,
     prune_shapes,
-    resolved_url,
 )
 
 WEBHOOK_PATH = "/api/webhook/hungarian-transport-gtfs"
@@ -53,6 +53,7 @@ def default_www() -> Path:
 HA_WWW = default_www()
 
 INDEX_FILES = ("volan-index.json.gz", "city-index.json.gz", "mav-index.json.gz")
+MAV_INDEX = "mav-index.json.gz"
 
 
 def _atomic_copy(src: Path, dest: Path) -> None:
@@ -100,6 +101,32 @@ def index_schema(path: Path) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def index_feed(path: Path) -> str:
+    """Feed version from the head of a gzipped MÁV index (`{"v":N,"feed":"..."`)."""
+    try:
+        with gzip.open(path, "rb") as fh:
+            head = fh.read(512)
+    except (OSError, EOFError):
+        return ""
+    m = re.match(rb'\{"v":\d+,"feed":"((?:[^"\\]|\\.)*)"', head)
+    return m.group(1).decode("utf-8", errors="replace") if m else ""
+
+
+def served_mav_wins(durable: Path, served: Path) -> bool:
+    """Whether the served MÁV index beats the durable copy.
+
+    The integration also builds the served one, from an uploaded or copied
+    feed, without touching the durable copy. Of two builds of the same feed
+    the larger, pfaedle-based one wins (an official zip gives a stop-sequence
+    index). Of two different feeds, or when a feed version is unknown, the
+    later build wins.
+    """
+    feed = index_feed(durable)
+    if feed and feed == index_feed(served):
+        return served.stat().st_size + 4096 >= durable.stat().st_size
+    return served.stat().st_mtime > durable.stat().st_mtime
+
+
 def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
     """Put the durable indexes back after HACS replaced the served folder.
 
@@ -108,8 +135,9 @@ def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
     exactly that feed; if the feed has moved since, this same run rebuilds.
     So the durable copy wins over whatever a release shipped, unless it was
     built with an older index schema than the shipped one (stale scripts in
-    /config/hungarian-transport). For mav-index the larger, pfaedle-based
-    index wins, since releases built without pfaedle ship a stop-sequence one.
+    /config/hungarian-transport). For mav-index see served_mav_wins(); a
+    served index that wins becomes the durable copy, so the next HACS update
+    restores it and not an older feed.
     """
     restored: list[str] = []
     if not base.is_dir():
@@ -124,7 +152,8 @@ def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
             try:
                 if filecmp.cmp(src, dest, shallow=False):
                     continue
-                if name == "mav-index.json.gz" and dest.stat().st_size + 4096 >= src.stat().st_size:
+                if name == MAV_INDEX and served_mav_wins(src, dest):
+                    persist_index(dest, base)
                     continue
             except OSError:
                 pass
@@ -334,6 +363,11 @@ def main() -> int:
         if state.get(k)
     }
     city_state = state.get("cities") or {}
+    # Fingerprints of city zips downloaded this run. They go into state.json
+    # only once a city index was built from them; otherwise (failed build,
+    # SIGTERM) the next run downloads and rebuilds again.
+    city_pending: dict[str, dict] = {}
+    city_retry = bool(state.get("city_retry"))
     changed: list[str] = []
     exit_code = 0
     if restored:
@@ -371,33 +405,43 @@ def main() -> int:
         else:
             print(f"unchanged volan {volan_state.get('feed_version') or '?'}")
 
-        city_need = volan_changed or not city_out.exists()
+        # A city rebuild that failed (or was killed) last time is retried even
+        # when no feed moved since; the Volán local routes come from zip_path.
+        city_retry = city_retry or volan_changed or not city_out.exists()
         for feed in CITY_FEEDS:
-            url = resolved_url(feed)
-            try:
-                meta = remote_meta(url)
-            except Exception as err:
-                print(f"warn HEAD {feed_error(feed['id'], err)}", file=sys.stderr)
-                continue
             prev = city_state.get(feed["id"]) or {}
             zpath = base / feed["file"]
-            if same_remote(prev, meta) and zpath.exists():
-                city_state[feed["id"]] = merge_meta(meta, prev, zpath.stat().st_size)
-                continue
-            try:
-                downloaded = download_feed(url, zpath)
-            except Exception as err:
-                print(f"warn download {feed_error(feed['id'], err)}", file=sys.stderr)
-                continue
-            city_state[feed["id"]] = merge_meta(
-                meta, downloaded, zpath.stat().st_size if zpath.exists() else None
-            )
-            city_need = True
+            # A keyed override (BAHART_GTFS_URL) that fails falls back to the
+            # catalog and then the public URL.
+            for url in feed_urls(feed):
+                try:
+                    meta = remote_meta(url)
+                except Exception as err:
+                    print(f"warn HEAD {feed_error(feed['id'], err)}", file=sys.stderr)
+                    continue
+                if same_remote(prev, meta) and zpath.exists():
+                    city_state[feed["id"]] = merge_meta(meta, prev, zpath.stat().st_size)
+                    break
+                try:
+                    downloaded = download_feed(url, zpath)
+                except Exception as err:
+                    print(f"warn download {feed_error(feed['id'], err)}", file=sys.stderr)
+                    continue
+                city_pending[feed["id"]] = merge_meta(
+                    meta, downloaded, zpath.stat().st_size if zpath.exists() else None
+                )
+                city_retry = True
+                break
 
-        if city_need:
+        if city_retry:
             try:
                 info = build_city_index(base, city_out, zip_path if zip_path.exists() else None)
                 persist_index(city_out, base)
+                for fid, meta in city_pending.items():
+                    # A feed the index skipped is downloaded again next time.
+                    if fid not in info["skipped"]:
+                        city_state[fid] = meta
+                city_retry = False
                 changed.append(f"city ops={info['ops']} trips={info['trips']}")
             except Exception as err:
                 msg = f"error city rebuild: {err}"
@@ -431,6 +475,7 @@ def main() -> int:
             {
                 "volan": volan_state,
                 "cities": city_state,
+                "city_retry": city_retry,
                 "index": str(volan_out),
                 "city_index": str(city_out),
                 "mav_index": str(mav_out),

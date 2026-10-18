@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
-"""Build mav-index.json.gz from MÁV GTFS, then audit it.
+"""Build mav-index.json.gz from MÁV GTFS, audit it, and write it if it passes.
 
 The builder is the integration's own (custom_components/hungarian_transport/
 mav_index.py): every stop pattern of every train with its route and its
 stations. Official shapes.txt is a coarse chord (8 km jumps on line 30); a
 pfaedle-matched feed follows the OSM rails, so prefer that when present.
 A pattern whose shape misses one of its stations falls back to the station
-sequence. The audit then checks every trip of the feed station by station.
+sequence. The audit then checks every trip of the feed station by station;
+below MIN_OK of the trains passing, the previous index is kept.
 """
 from __future__ import annotations
 
+import filecmp
 import os
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 from gtfs_compact import download_feed, load_env_files
 
 OUT = Path("mav-index.json.gz")
+# Share of trains that must pass the audit before the index is written; the
+# integration warns below the same ratio.
+MIN_OK = 0.99
+# A zip downloaded from MAV_GTFS_URL is fetched again once it is this old.
+URL_MAX_AGE_S = 20 * 3600
 LOCAL_ZIPS = (
     Path("mav-gtfs.zip"),
     Path("/opt/pfaedle-trial/gtfs/mav-gtfs.zip"),
@@ -41,6 +50,34 @@ def _is_gtfs_dir(path: Path) -> bool:
     return "routes.txt" in names and "trips.txt" in names and "shapes.txt" in names
 
 
+def refresh_from_url(url: str, dest: Path, *, max_age_s: float = URL_MAX_AGE_S) -> None:
+    """Fetch MAV_GTFS_URL into dest unless dest is recent. An unchanged zip
+    keeps its file (and mtime), so the index is not rebuilt for nothing; a
+    failed download keeps the old zip."""
+    try:
+        if time.time() - dest.stat().st_mtime < max_age_s:
+            return
+    except OSError:
+        pass
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix="gtfs_", suffix=".zip", dir=str(dest.parent))
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        print("downloading MÁV GTFS")
+        download_feed(url, tmp)
+        if dest.is_file() and filecmp.cmp(tmp, dest, shallow=False):
+            print("MÁV GTFS unchanged")
+            return
+        tmp.replace(dest)
+    except Exception as err:
+        if not dest.is_file():
+            raise
+        print(f"warn MÁV GTFS download: {type(err).__name__}; keeping {dest.name}", file=sys.stderr)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 def resolve_mav_feed(base: Path) -> Path:
     load_env_files()
     env_dir = (os.environ.get("MAV_PFAEDLE_DIR") or "").strip()
@@ -57,16 +94,17 @@ def resolve_mav_feed(base: Path) -> Path:
         p = cand if cand.is_absolute() else base / cand
         if _is_gtfs_dir(p):
             return p
+    # With MAV_GTFS_URL set, base/mav-gtfs.zip is that URL's copy: refresh it
+    # instead of letting the first download shadow the URL for good.
+    url = _feed_url()
+    dest = base / "mav-gtfs.zip"
+    if url:
+        refresh_from_url(url, dest)
+        return dest
     for cand in LOCAL_ZIPS:
         p = cand if cand.is_absolute() else base / cand
         if p.is_file():
             return p
-    url = _feed_url()
-    dest = base / "mav-gtfs.zip"
-    if url:
-        print("downloading MÁV GTFS")
-        download_feed(url, dest)
-        return dest
     raise FileNotFoundError(
         "MÁV GTFS not found. Set MAV_PFAEDLE_DIR / MAV_GTFS_ZIP / MAV_GTFS_URL "
         "or place mav-gtfs.zip here."
@@ -84,17 +122,25 @@ def _mav_module():
     return mav_index
 
 
-def build_mav_index(zpath: Path, out: Path, *, audit: bool = True) -> dict:
+def build_mav_index(zpath: Path, out: Path, *, audit: bool = True, min_ok: float = MIN_OK) -> dict:
+    """Build, audit, then write. An index that fails the audit is not
+    written, so the previous one stays in place."""
     mav = _mav_module()
     index = mav.build(zpath)
     stats = dict(index["_stats"])
     if stats["trains"] + stats["lines"] < 50:
         raise RuntimeError(f"MÁV index too small: {stats['trains']} trains, {stats['lines']} lines")
-    stats["bytes"] = mav.write(index, out)
     if audit:
         report = mav.audit(zpath, index)
         stats["audit"] = {k: v for k, v in report.items() if k != "worst"}
         stats["audit_worst"] = report["worst"][:5]
+        if report["ok_ratio"] < min_ok:
+            worst = ", ".join(w["train"] for w in stats["audit_worst"])
+            raise RuntimeError(
+                f"MÁV index failed its audit: {report['trains_ok']}/{report['trains']} trains pass "
+                f"({report['ok_ratio']:.1%} < {min_ok:.0%}); first failing: {worst}"
+            )
+    stats["bytes"] = mav.write(index, out)
     return stats
 
 

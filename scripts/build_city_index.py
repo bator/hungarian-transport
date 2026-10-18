@@ -2,14 +2,30 @@
 """Build city-index.json.gz: municipal GTFS + Volán local (non-4-digit) routes."""
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
 
-from gtfs_compact import download_feed, feed_error, load_parts, resolved_url, write_index
+from gtfs_compact import (
+    IndexGuardError,
+    download_feed,
+    feed_error,
+    feed_urls,
+    load_env_files,
+    load_parts,
+    operator_trips,
+    write_index,
+)
 
 VOLAN_URL = "https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip"
 OUT = Path("city-index.json.gz")
+# A feed that the previous index had must not vanish or shrink below this
+# share of its trips; the previous index stays in place instead.
+MIN_TRIP_RATIO = 0.5
+MIN_GUARDED_TRIPS = 50
+# Comma-separated feed ids (or "all") that may be missing from a rebuild.
+ALLOW_MISSING_ENV = "HUNGARIAN_TRANSPORT_ALLOW_MISSING"
 
 # Debrecen DKV is listed as "Nem publikus" on menetbrand. Skip.
 # Weekendbus (Csömör/Pécel) still hosts a zip, but the calendar ended 2025-12-31.
@@ -138,53 +154,137 @@ def skip_helykozi(agency: str) -> bool:
     return "helyközi" in low or "helykozi" in low
 
 
-def collect_parts(base: Path, volan_zip: Path | None = None) -> list[dict]:
+def _load_feed(base: Path, feed: dict) -> list[dict]:
+    """Parts of one city feed. A missing zip is downloaded; when the zip from
+    one URL (a keyed override, say) fails to download or parse, the next URL
+    is tried, down to the public one."""
+    zpath = base / feed["file"]
+
+    def load() -> list[dict]:
+        return load_parts(
+            zpath,
+            include_all,
+            op_id=feed["id"],
+            op_name=feed["name"],
+            prefix=f"{feed['id']}:",
+        )
+
+    if zpath.exists():
+        return load()
+    last: Exception | None = None
+    for url in feed_urls(feed):
+        try:
+            print("downloading", feed["id"])
+            download_feed(url, zpath)
+            return load()
+        except Exception as err:
+            last = err
+            zpath.unlink(missing_ok=True)
+    raise last or FileNotFoundError(feed["file"])
+
+
+def collect_parts(base: Path, volan_zip: Path | None = None) -> tuple[list[dict], list[str]]:
+    """Operator parts with trips, and the feed ids that failed or had none."""
     parts: list[dict] = []
     failed: list[str] = []
     for feed in CITY_FEEDS:
-        zpath = base / feed["file"]
         try:
-            if not zpath.exists():
-                print("downloading", feed["id"])
-                download_feed(resolved_url(feed), zpath)
-            parts.extend(
-                load_parts(
-                    zpath,
-                    include_all,
-                    op_id=feed["id"],
-                    op_name=feed["name"],
-                    prefix=f"{feed['id']}:",
-                )
-            )
+            got = [p for p in _load_feed(base, feed) if p.get("t")]
         except Exception as err:
             failed.append(feed["id"])
             print(f"warn {feed_error(feed['id'], err)}", file=sys.stderr)
+            continue
+        if not got:
+            failed.append(feed["id"])
+            print(f"warn {feed['id']}: no trips", file=sys.stderr)
+        parts.extend(got)
     if volan_zip and volan_zip.exists():
         try:
             print("volan local", volan_zip)
-            parts.extend(
-                load_parts(
+            got = [
+                p
+                for p in load_parts(
                     volan_zip,
                     include_volan_local,
                     split_agencies=True,
                     skip_agency=skip_helykozi,
                     prefix="",
                 )
-            )
+                if p.get("t")
+            ]
         except Exception as err:
-            failed.append("volan-local")
+            got = []
             print(f"warn volan-local: {err}", file=sys.stderr)
-    parts = [p for p in parts if p.get("t")]
+        if not got:
+            failed.append("volan-local")
+        parts.extend(got)
+    else:
+        failed.append("volan-local")
     if not parts:
         raise RuntimeError("no city GTFS parts" + (f" ({', '.join(failed)})" if failed else ""))
     if failed:
         print("partial city index, skipped:", ", ".join(failed), file=sys.stderr)
-    return parts
+    return parts, failed
+
+
+def _feed_group(op_id: str) -> str | None:
+    """The configured feed an operator comes from; Volán local agencies count
+    as one. None for operators of feeds no longer configured."""
+    if op_id in {f["id"] for f in CITY_FEEDS}:
+        return op_id
+    if op_id.startswith("volan-"):
+        return "volan-local"
+    return None
+
+
+def _group_trips(op_trips: dict[str, int]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for op_id, n in op_trips.items():
+        group = _feed_group(op_id)
+        if group:
+            out[group] = out.get(group, 0) + n
+    return out
+
+
+def allowed_missing() -> set[str]:
+    load_env_files()
+    raw = os.environ.get(ALLOW_MISSING_ENV) or ""
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def guard_feeds(out: Path, parts: list[dict], allow: set[str] | None = None) -> None:
+    """Refuse a rebuild that loses a feed the previous index had, or most of
+    its trips. Without a previous index there is nothing to compare."""
+    prev = operator_trips(out)
+    if not prev:
+        return
+    allow = allowed_missing() if allow is None else allow
+    now: dict[str, int] = {}
+    for part in parts:
+        now[part["op_id"]] = now.get(part["op_id"], 0) + len(part["t"])
+    before, after = _group_trips(prev), _group_trips(now)
+    problems = []
+    for group, had in sorted(before.items()):
+        if group in allow or "all" in allow:
+            continue
+        has = after.get(group, 0)
+        if not has:
+            problems.append(f"{group} missing (had {had} trips)")
+        elif had >= MIN_GUARDED_TRIPS and has < had * MIN_TRIP_RATIO:
+            problems.append(f"{group} {has} trips vs {had}")
+    if problems:
+        raise IndexGuardError(
+            f"refusing to replace {out.name}: " + "; ".join(problems)
+            + f" (set {ALLOW_MISSING_ENV} to accept)"
+        )
 
 
 def build_city_index(base: Path, out: Path, volan_zip: Path | None = None) -> dict:
-    parts = collect_parts(base, volan_zip)
-    return write_index(parts, out, with_operators=True)
+    parts, failed = collect_parts(base, volan_zip)
+    guard_feeds(out, parts)
+    info = write_index(parts, out, with_operators=True)
+    info["skipped"] = failed
+    return info
 
 
 def main() -> None:
