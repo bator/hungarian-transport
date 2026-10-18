@@ -3140,8 +3140,9 @@ Object.assign(BkkLib, {
   },
   /* Stops to mark on a journey map: where each ride boards and alights. A
      transfer at the same stop is one pin. A walk to or from the journey's
-     ends gets a start or an end pin, unless it is so short that the pin
-     would sit on the stop's own. */
+     ends gets a start or an end pin, unless it only crosses the same stop
+     (Fő tér to the Fő tér pole, Astoria M to Astoria) or is so short that
+     the pin would sit on the stop's own. */
   journeyStopPins(segs) {
     const list = Array.isArray(segs) ? segs : [];
     const pins = [];
@@ -3149,8 +3150,8 @@ Object.assign(BkkLib, {
     if (!rides.length) return pins;
     const first = list[0];
     const last = list[list.length - 1];
-    const apart = (a, b) => BkkLib.haversineMeters(a, b) > 150;
-    if (first.walk && first.shape.length && apart(first.shape[0], rides[0].shape[0])) {
+    const ownPin = (pt, name, ridePt, rideName) => BkkLib.haversineMeters(pt, ridePt) > 150 && !BkkLib.nameEq(name, rideName);
+    if (first.walk && first.shape.length && ownPin(first.shape[0], first.from, rides[0].shape[0], rides[0].from)) {
       pins.push({ kind: "start", pt: first.shape[0], name: first.from || "" });
     }
     rides.forEach((seg) => {
@@ -3164,9 +3165,9 @@ Object.assign(BkkLib, {
       }
       pins.push({ kind: "alight", pt: seg.shape[seg.shape.length - 1], name: seg.to || "", color: seg.color });
     });
-    const lastRide = rides[rides.length - 1].shape;
+    const lastRide = rides[rides.length - 1];
     const endPt = last.walk && last.shape.length ? last.shape[last.shape.length - 1] : null;
-    if (endPt && apart(endPt, lastRide[lastRide.length - 1])) {
+    if (endPt && ownPin(endPt, last.to, lastRide.shape[lastRide.shape.length - 1], lastRide.to)) {
       pins.push({ kind: "end", pt: endPt, name: last.to || "" });
     }
     return pins;
@@ -6609,11 +6610,16 @@ var BKKHopCard = class extends HTMLElement {
         .ht-stop-line{flex:none;min-width:14px;padding:1px 6px;border-radius:999px;background:var(--line,#1a1a1a);color:var(--ink,#fff);font:800 11px/1.25 system-ui,sans-serif;text-align:center}
     `;
   }
+  /* The vehicle: a larger disc with its type icon (bus, tram, …), so it is
+     not mistaken for the boarding stop's dot in the same colour. */
   _dotIcon(row, live, lang, colorHex) {
+    const esc = BkkLib.esc;
     const color = BkkLib.normMapHex(colorHex || row && row.color) || "#2E5EA8";
+    const ink = BkkLib.normMapHex(row && row.textcolor) || BkkLib.mapTextOn(color);
     const pulse = live ? "ht-veh-dot-live" : "ht-veh-dot-est";
     const tip = live ? t(lang, "mapLiveDot") : t(lang, "mapEstDot");
-    return `<div class="ht-veh-dot ${pulse}" style="--bg:${BkkLib.esc(color)};" title="${BkkLib.esc(tip)}"><span class="ht-veh-dot-core"></span></div>`;
+    const icon = String(row && row.icon || "mdi:bus");
+    return `<div class="ht-veh-dot ${pulse}" style="--bg:${esc(color)};--ink:${esc(ink)}" title="${esc(tip)}"><span class="ht-veh-dot-core"><ha-icon icon="${esc(icon)}"></ha-icon></span></div>`;
   }
   _mapChromeCss() {
     return `
@@ -6625,9 +6631,10 @@ var BKKHopCard = class extends HTMLElement {
         .ht-map-close{border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;opacity:.7;color:inherit}
         .ht-map-canvas{flex:1;height:420px;min-height:420px;position:relative}
         .ht-map-foot{padding:8px 12px;font:12px/1.35 system-ui,sans-serif;opacity:.85;border-top:1px solid var(--divider-color,rgba(0,0,0,.08))}
-        .ht-veh-dot{width:22px;height:22px;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(0,0,0,.45))}
-        .ht-veh-dot-core{width:14px;height:14px;border-radius:50%;background:var(--bg,#2E5EA8);border:2.5px solid #fff;box-sizing:border-box}
-        .ht-veh-dot-live .ht-veh-dot-core{width:16px;height:16px;box-shadow:0 0 0 3px color-mix(in srgb, var(--bg,#2E5EA8) 35%, transparent)}
+        .ht-veh-dot{width:32px;height:32px;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(0,0,0,.45))}
+        .ht-veh-dot-core{width:26px;height:26px;border-radius:50%;background:var(--bg,#2E5EA8);color:var(--ink,#fff);border:2.5px solid #fff;box-sizing:border-box;display:flex;align-items:center;justify-content:center}
+        .ht-veh-dot-core ha-icon{--mdc-icon-size:15px;display:flex}
+        .ht-veh-dot-live .ht-veh-dot-core{box-shadow:0 0 0 4px color-mix(in srgb, var(--bg,#2E5EA8) 35%, transparent)}
         .ht-veh-dot-est .ht-veh-dot-core{border-style:dashed;opacity:.95}
 ${this._stopPinCss()}
         .ht-map-canvas .leaflet-container{width:100%;height:100%;min-height:420px;overflow:hidden}
@@ -6952,8 +6959,8 @@ ${this._stopPinCss()}
       const icon = L.divIcon({
         className: "",
         html: this._dotIcon(row, hasGps && !positionEstimated, lang),
-        iconSize: [22, 22],
-        iconAnchor: [11, 11]
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
       });
       this._mapMarker = L.marker(here, { icon, zIndexOffset: 600 }).addTo(map);
     };
@@ -7065,8 +7072,8 @@ ${this._stopPinCss()}
       this._mapMarker.setIcon(L.divIcon({
         className: "",
         html: this._dotIcon(row, true, lang),
-        iconSize: [22, 22],
-        iconAnchor: [11, 11]
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
       }));
     }
     const foot = this._mapOverlay && this._mapOverlay.querySelector(".ht-map-foot");

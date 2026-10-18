@@ -612,12 +612,17 @@ export class BKKHopCard extends HTMLElement {
     `;
   }
 
+  /* The vehicle: a larger disc with its type icon (bus, tram, …), so it is
+     not mistaken for the boarding stop's dot in the same colour. */
   _dotIcon(row, live, lang, colorHex) {
+    const esc = BkkLib.esc;
     const color = BkkLib.normMapHex(colorHex || (row && row.color)) || '#2E5EA8';
+    const ink = BkkLib.normMapHex(row && row.textcolor) || BkkLib.mapTextOn(color);
     const pulse = live ? 'ht-veh-dot-live' : 'ht-veh-dot-est';
     const tip = live ? t(lang, 'mapLiveDot') : t(lang, 'mapEstDot');
-    return `<div class="ht-veh-dot ${pulse}" style="--bg:${BkkLib.esc(color)};" title="${BkkLib.esc(tip)}">`
-      + `<span class="ht-veh-dot-core"></span></div>`;
+    const icon = String((row && row.icon) || 'mdi:bus');
+    return `<div class="ht-veh-dot ${pulse}" style="--bg:${esc(color)};--ink:${esc(ink)}" title="${esc(tip)}">`
+      + `<span class="ht-veh-dot-core"><ha-icon icon="${esc(icon)}"></ha-icon></span></div>`;
   }
 
   _mapChromeCss() {
@@ -632,9 +637,10 @@ export class BKKHopCard extends HTMLElement {
         .ht-map-close{border:0;background:transparent;font-size:22px;line-height:1;cursor:pointer;padding:4px 8px;opacity:.7;color:inherit}
         .ht-map-canvas{flex:1;height:420px;min-height:420px;position:relative}
         .ht-map-foot{padding:8px 12px;font:12px/1.35 system-ui,sans-serif;opacity:.85;border-top:1px solid var(--divider-color,rgba(0,0,0,.08))}
-        .ht-veh-dot{width:22px;height:22px;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(0,0,0,.45))}
-        .ht-veh-dot-core{width:14px;height:14px;border-radius:50%;background:var(--bg,#2E5EA8);border:2.5px solid #fff;box-sizing:border-box}
-        .ht-veh-dot-live .ht-veh-dot-core{width:16px;height:16px;box-shadow:0 0 0 3px color-mix(in srgb, var(--bg,#2E5EA8) 35%, transparent)}
+        .ht-veh-dot{width:32px;height:32px;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(0,0,0,.45))}
+        .ht-veh-dot-core{width:26px;height:26px;border-radius:50%;background:var(--bg,#2E5EA8);color:var(--ink,#fff);border:2.5px solid #fff;box-sizing:border-box;display:flex;align-items:center;justify-content:center}
+        .ht-veh-dot-core ha-icon{--mdc-icon-size:15px;display:flex}
+        .ht-veh-dot-live .ht-veh-dot-core{box-shadow:0 0 0 4px color-mix(in srgb, var(--bg,#2E5EA8) 35%, transparent)}
         .ht-veh-dot-est .ht-veh-dot-core{border-style:dashed;opacity:.95}
 ${this._stopPinCss()}
         .ht-map-canvas .leaflet-container{width:100%;height:100%;min-height:420px;overflow:hidden}
@@ -957,8 +963,8 @@ ${this._stopPinCss()}
       const icon = L.divIcon({
         className: '',
         html: this._dotIcon(row, hasGps && !positionEstimated, lang),
-        iconSize: [22, 22],
-        iconAnchor: [11, 11],
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
       });
       this._mapMarker = L.marker(here, { icon: icon, zIndexOffset: 600 }).addTo(map);
     };
@@ -1056,8 +1062,8 @@ ${this._stopPinCss()}
       this._mapMarker.setIcon(L.divIcon({
         className: '',
         html: this._dotIcon(row, true, lang),
-        iconSize: [22, 22],
-        iconAnchor: [11, 11],
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
       }));
     }
     const foot = this._mapOverlay && this._mapOverlay.querySelector('.ht-map-foot');

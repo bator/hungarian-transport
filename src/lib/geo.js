@@ -570,8 +570,9 @@ Object.assign(BkkLib, {
   },
   /* Stops to mark on a journey map: where each ride boards and alights. A
      transfer at the same stop is one pin. A walk to or from the journey's
-     ends gets a start or an end pin, unless it is so short that the pin
-     would sit on the stop's own. */
+     ends gets a start or an end pin, unless it only crosses the same stop
+     (Fő tér to the Fő tér pole, Astoria M to Astoria) or is so short that
+     the pin would sit on the stop's own. */
   journeyStopPins(segs) {
     const list = Array.isArray(segs) ? segs : [];
     const pins = [];
@@ -579,8 +580,9 @@ Object.assign(BkkLib, {
     if (!rides.length) return pins;
     const first = list[0];
     const last = list[list.length - 1];
-    const apart = (a, b) => BkkLib.haversineMeters(a, b) > 150;
-    if (first.walk && first.shape.length && apart(first.shape[0], rides[0].shape[0])) {
+    const ownPin = (pt, name, ridePt, rideName) => BkkLib.haversineMeters(pt, ridePt) > 150
+      && !BkkLib.nameEq(name, rideName);
+    if (first.walk && first.shape.length && ownPin(first.shape[0], first.from, rides[0].shape[0], rides[0].from)) {
       pins.push({ kind: 'start', pt: first.shape[0], name: first.from || '' });
     }
     rides.forEach((seg) => {
@@ -594,9 +596,9 @@ Object.assign(BkkLib, {
       }
       pins.push({ kind: 'alight', pt: seg.shape[seg.shape.length - 1], name: seg.to || '', color: seg.color });
     });
-    const lastRide = rides[rides.length - 1].shape;
+    const lastRide = rides[rides.length - 1];
     const endPt = last.walk && last.shape.length ? last.shape[last.shape.length - 1] : null;
-    if (endPt && apart(endPt, lastRide[lastRide.length - 1])) {
+    if (endPt && ownPin(endPt, last.to, lastRide.shape[lastRide.shape.length - 1], lastRide.to)) {
       pins.push({ kind: 'end', pt: endPt, name: last.to || '' });
     }
     return pins;
