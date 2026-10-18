@@ -3511,4 +3511,41 @@ Lib.mavIndex = origMavIndex;
     }));
 }
 
+/* Trains Transitous misses still get a route: FUTÁR's trip details. */
+{
+  const keep = {};
+  ['mavShapeForRow', 'motisShapeForHop', 'hassTripShape', 'futarTripShape', 'tripHopStops', 'stopArea', 'transitousStopRef']
+    .forEach((k) => { keep[k] = Lib[k]; });
+  const futarLine = [[47.2300, 16.6200], [47.1836, 18.4247], [47.3157, 18.7880], [47.4643, 19.0206], [47.4989, 19.0250]];
+  let futarCalls = 0;
+  let motisResult = { shape: [], board: [47.1836, 18.4247], dest: [47.4643, 19.0206], coversHead: false, hit: null };
+  Lib.mavShapeForRow = async () => [];
+  Lib.motisShapeForHop = async () => motisResult;
+  Lib.hassTripShape = async () => [];
+  Lib.futarTripShape = async () => { futarCalls += 1; return futarLine; };
+  Lib.tripHopStops = async () => ({ board: [47.1836, 18.4247], alight: [47.4643, 19.0206] });
+  Lib.stopArea = async () => '';
+  Lib.transitousStopRef = async () => null;
+  const trainCard = document.createElement('hungarian-transport-card');
+  document.body.appendChild(trainCard);
+  trainCard.setConfig({
+    language: 'hu', stopId: 'BKK_005503269', stopName: 'Székesfehérvár', mav: true,
+    destKey: 'budapest-kelenföld', destName: 'Budapest-Kelenföld', apiKey: 'test-key', routeIds: [],
+  });
+  const train = { label: 'BAKONY', headsign: 'Budapest-Déli', type: 'RAIL', tripId: 'BKK_9051_316', trainNumber: '905' };
+  const got = await trainCard._loadRowMapShape(train);
+  check('a train Transitous misses draws FUTÁR’s whole route',
+    futarCalls === 1 && Lib.validMapShape(got.shape).length === futarLine.length && got.shape[0][1] === 16.62,
+    JSON.stringify({ futarCalls, n: Lib.validMapShape(got.shape).length }));
+  check('its stop pins sit on that route',
+    Lib.distanceToShapeMeters(got.board, got.shape) < 20 && Lib.distanceToShapeMeters(got.alight, got.shape) < 20,
+    JSON.stringify({ board: got.board, alight: got.alight }));
+  futarCalls = 0;
+  motisResult = Object.assign({}, motisResult, { shape: [[47.1836, 18.4247], [47.3157, 18.7880], [47.4643, 19.0206]], coversHead: true });
+  await trainCard._loadRowMapShape(train);
+  check('with a Transitous route the FUTÁR trip is not fetched for the shape', futarCalls === 0, String(futarCalls));
+  trainCard.remove();
+  Object.assign(Lib, keep);
+}
+
 process.exit(failed ? 1 : 0);

@@ -804,6 +804,14 @@ ${this._stopPinCss()}
       try {
         futarShape = await BkkLib.hassTripShape(this._hass, this._apiKey(), geomTrip);
       } catch (_e) { /* other rows still draw */ }
+      /* Without the bkk_stop companion, or when Transitous misses the train
+         (BAKONY 905 from Szombathely), FUTÁR's own trip details still carry
+         the whole train route, along the tracks. */
+      if (futarShape.length < 2 && motisShape.length < 2 && this._hasFutar()) {
+        try {
+          futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
+        } catch (_e) { /* the stop pins still show */ }
+      }
     }
     /* Direction-aware clip only when this mode does not keep the published line. */
     const clipForeignFutar = (pts) => {
