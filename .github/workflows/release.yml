@@ -185,6 +185,8 @@ jobs:
           mkdir -p custom_components/hungarian_transport/www
           cp dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz custom_components/hungarian_transport/www/
           if [ -f dist/mav-index.json.gz ]; then cp dist/mav-index.json.gz custom_components/hungarian_transport/www/; fi
+          # The integration's entry module; releases before it load the bundle directly.
+          if [ -f dist/hungarian-transport-loader.js ]; then cp dist/hungarian-transport-loader.js custom_components/hungarian_transport/www/; fi
           # Releases before the vendored Leaflet load it from unpkg; the weekly
           # refresh re-packs such a tag, which has no dist/leaflet.
           if [ -d dist/leaflet ]; then cp -r dist/leaflet custom_components/hungarian_transport/www/; fi

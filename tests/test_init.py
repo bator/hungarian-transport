@@ -38,10 +38,13 @@ async def test_setup_serves_card_and_registers_service(hass, hass_client) -> Non
 
     assert hass.services.has_service(DOMAIN, SERVICE_ELVIRA_BETWEEN)
     card_url = hass.data[DOMAIN]["card_url"]
-    assert card_url.startswith("/hungarian-transport/hungarian-transport.js?v=")
+    assert card_url.startswith("/hungarian-transport/hungarian-transport-loader.js?v=")
     assert card_url in _card_urls(hass)
 
     client = await hass_client()
+    resp = await client.get("/hungarian-transport/hungarian-transport-loader.js")
+    assert resp.status == 200
+    assert await resp.text() == "// loader"
     resp = await client.get("/hungarian-transport/hungarian-transport.js")
     assert resp.status == 200
     assert await resp.text() == "// card"
@@ -49,6 +52,16 @@ async def test_setup_serves_card_and_registers_service(hass, hass_client) -> Non
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert card_url not in _card_urls(hass)
 
+
+
+async def test_card_loads_directly_without_loader(hass, card_assets) -> None:
+    """A www/ without the loader (an older build) still gets its cards."""
+    (card_assets / "hungarian-transport-loader.js").unlink()
+    await _setup(hass)
+
+    card_url = hass.data[DOMAIN]["card_url"]
+    assert card_url.startswith("/hungarian-transport/hungarian-transport.js?v=")
+    assert card_url in _card_urls(hass)
 
 
 async def test_index_is_revalidated_not_redownloaded(hass, hass_client, card_assets) -> None:
@@ -86,7 +99,8 @@ async def test_shapes_folder_is_served(hass, hass_client, card_assets) -> None:
 
 
 async def test_setup_fails_without_assets(hass, card_assets) -> None:
-    (card_assets / "hungarian-transport.js").unlink()
+    for asset in card_assets.iterdir():
+        asset.unlink()
     card_assets.rmdir()
     assert await async_setup_component(hass, "http", {})
     entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN)
