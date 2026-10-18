@@ -76,10 +76,21 @@ _BOOKING_REQUIRED_RE = re.compile(
     r"(?:SZOLGALTATAS[#:]|#|\b)3880\b",
     re.IGNORECASE,
 )
+# 8163379 = Országbérlettel igénybe vehető.
+_NATIONAL_PASS_RE = re.compile(r"(?:SZOLGALTATAS[#:]|#|\b)8163379\b", re.IGNORECASE)
+# 8586013 = Belföldi utazásra a kijelölt viszonylaton helyjegy váltása nélkül
+# igénybe vehető 2. kocsiosztályon (part of an IC run is open without one).
+_RESERVATION_FREE_RE = re.compile(r"(?:SZOLGALTATAS[#:]|#|\b)8586013\b", re.IGNORECASE)
 
 
 def parse_elvira_services(row: dict) -> dict:
-    flags = {"booking": False, "bikesAllowed": False, "wheelchair": False}
+    flags = {
+        "booking": False,
+        "bikesAllowed": False,
+        "wheelchair": False,
+        "nationalPass": False,
+        "reservationFreeSection": False,
+    }
     for svc in row.get("services") or []:
         svc = svc or {}
         blob = " ".join(
@@ -92,10 +103,19 @@ def parse_elvira_services(row: dict) -> dict:
         )
         if required:
             flags["booking"] = True
-        if "kerekpar" in low:
+        # "Kerékpár nem szállítható" is a service too; it must not light the bike icon.
+        if "kerekpar" in low and "nem szallithato" not in low:
             flags["bikesAllowed"] = True
         if "kerekesszek" in low:
             flags["wheelchair"] = True
+        if _NATIONAL_PASS_RE.search(blob) or (
+            "orszagberlet" in low and "igenybe veheto" in low and "nem veheto" not in low
+        ):
+            flags["nationalPass"] = True
+        if _RESERVATION_FREE_RE.search(blob) or (
+            "helyjegy valtasa nelkul" in low and "igenybe veheto" in low
+        ):
+            flags["reservationFreeSection"] = True
     return flags
 
 
@@ -256,6 +276,8 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
             "booking": bool(flags.get("booking")),
             "bikesAllowed": bool(flags.get("bikesAllowed")),
             "wheelchair": bool(flags.get("wheelchair")),
+            "nationalPass": bool(flags.get("nationalPass")),
+            "reservationFreeSection": bool(flags.get("reservationFreeSection")),
             "color": "#4477aa",
             "text": "#ffffff",
             "delay": delay,

@@ -656,6 +656,8 @@ var I18N = {
     tipWheelchair: "Akadálymentes, alacsonypadlós jármű",
     tipBike: "Kerékpár szállítható",
     tipBooking: "Helyjegy váltása kötelező",
+    tipBookingFreeSection: "a kijelölt belföldi szakaszon 2. osztályon helyjegy nélkül is",
+    tipNationalPass: "Országbérlettel igénybe vehető",
     tipDelay: (n) => `${n} perc késés`,
     tipEarly: (n) => `${n} perccel korábban indul`,
     tipScheduled: (hm) => `Menetrend szerint ${hm}`,
@@ -834,6 +836,8 @@ var I18N = {
     tipWheelchair: "Wheelchair accessible, low-floor vehicle",
     tipBike: "Bikes allowed",
     tipBooking: "Seat reservation required",
+    tipBookingFreeSection: "not needed in 2nd class on the marked domestic section",
+    tipNationalPass: "Valid with the national pass (Országbérlet)",
     tipDelay: (n) => `${n} min late`,
     tipEarly: (n) => `${n} min early`,
     tipScheduled: (hm) => `Scheduled for ${hm}`,
@@ -3893,6 +3897,8 @@ Object.assign(BkkLib, {
       });
       if (!prev.platform && row.platform) prev.platform = String(row.platform);
       if (row.booking) prev.booking = true;
+      if (row.nationalPass) prev.nationalPass = true;
+      if (row.reservationFreeSection) prev.reservationFreeSection = true;
       if (!prev.trainNumber && row.trainNumber) prev.trainNumber = String(row.trainNumber);
       if (prev.travel == null && row.travel != null) prev.travel = row.travel;
       if (row.wheelchair) prev.wheelchair = true;
@@ -5202,6 +5208,8 @@ Object.assign(BkkLib, {
       trainNumber: r.trainNumber || "",
       delay: Number(r.delay || 0),
       booking: !!r.booking,
+      nationalPass: !!r.nationalPass,
+      reservationFreeSection: !!r.reservationFreeSection,
       travelMin: r.travel,
       lat: hasGps ? gps[0] : null,
       lon: hasGps ? gps[1] : null,
@@ -6189,6 +6197,10 @@ var BKKHopCard = class extends HTMLElement {
       .pictos { display: inline-flex; gap: 4px; align-items: center; }
       .picto { position: relative; font-size: 11px; line-height: 1.2; cursor: help; }
       .picto.booking { color: #c0392b; font-weight: 800; font-size: 13px; }
+      .picto.pass {
+        padding: 0 3px; border-radius: 2px; background: #2e7d32; color: #fff;
+        font-size: 10px; font-weight: 800; letter-spacing: 0.02em; line-height: 1.45;
+      }
       .plat {
         display: inline-block; margin-right: 4px; padding: 0 5px; border-radius: 2px;
         background: #2E5EA8; color: #fff; font-size: 11px; font-weight: 700;
@@ -6322,7 +6334,11 @@ var BKKHopCard = class extends HTMLElement {
     const pictos = [];
     if (r.wheelchair) pictos.push(this._picto("♿", t(lang, "tipWheelchair")));
     if (r.bikesAllowed) pictos.push(this._picto("🚲", t(lang, "tipBike")));
-    if (r.booking) pictos.push(this._picto("H", t(lang, "tipBooking"), "booking"));
+    if (r.booking) {
+      const tip2 = r.reservationFreeSection ? `${t(lang, "tipBooking")} · ${t(lang, "tipBookingFreeSection")}` : t(lang, "tipBooking");
+      pictos.push(this._picto("H", tip2, "booking"));
+      if (r.nationalPass) pictos.push(this._picto("OB", t(lang, "tipNationalPass"), "pass"));
+    }
     const plat = r.platform ? `<span class="plat" title="${esc(t(lang, "tipPlatform", r.platform))}">${esc(r.platform)}</span>` : "";
     const travel = r.travelMin ? `<span class="travel" title="${esc(t(lang, "tipTravel", r.travelMin))}">${esc(t(lang, "minutes", r.travelMin))}</span>` : "";
     const num = r.trainNumber ? `<span class="num" title="${esc(t(lang, "tipTrain", r.trainNumber))}">${esc(r.trainNumber)}</span>` : "";

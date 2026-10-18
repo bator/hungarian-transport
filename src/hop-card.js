@@ -240,6 +240,10 @@ export class BKKHopCard extends HTMLElement {
       .pictos { display: inline-flex; gap: 4px; align-items: center; }
       .picto { position: relative; font-size: 11px; line-height: 1.2; cursor: help; }
       .picto.booking { color: #c0392b; font-weight: 800; font-size: 13px; }
+      .picto.pass {
+        padding: 0 3px; border-radius: 2px; background: #2e7d32; color: #fff;
+        font-size: 10px; font-weight: 800; letter-spacing: 0.02em; line-height: 1.45;
+      }
       .plat {
         display: inline-block; margin-right: 4px; padding: 0 5px; border-radius: 2px;
         background: #2E5EA8; color: #fff; font-size: 11px; font-weight: 700;
@@ -386,7 +390,15 @@ export class BKKHopCard extends HTMLElement {
     const pictos = [];
     if (r.wheelchair) pictos.push(this._picto('\u267f', t(lang, 'tipWheelchair')));
     if (r.bikesAllowed) pictos.push(this._picto('\ud83d\udeb2', t(lang, 'tipBike')));
-    if (r.booking) pictos.push(this._picto('H', t(lang, 'tipBooking'), 'booking'));
+    if (r.booking) {
+      const tip = r.reservationFreeSection
+        ? `${t(lang, 'tipBooking')} \u00b7 ${t(lang, 'tipBookingFreeSection')}`
+        : t(lang, 'tipBooking');
+      pictos.push(this._picto('H', tip, 'booking'));
+      /* Seat-reservation trains mostly still take the national pass; say so
+         where ELVIRA lists it, since that is what pass holders look for. */
+      if (r.nationalPass) pictos.push(this._picto('OB', t(lang, 'tipNationalPass'), 'pass'));
+    }
     const plat = r.platform
       ? `<span class="plat" title="${esc(t(lang, 'tipPlatform', r.platform))}">${
         esc(r.platform)}</span>`
