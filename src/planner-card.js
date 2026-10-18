@@ -1,5 +1,5 @@
 import { BKK_FAVORITES, DEFAULT_MINUTES_AFTER, MAV_FAVORITES, MINUTES_AFTER_PRESETS, VOLAN_FAVORITES, clampMinutesAfter, departureStillDue, pad2, tzEpochSec, tzFields, tzShiftYmd } from './config.js';
-import { BKKHopCard } from './hop-card.js';
+import { BKKHopCard, NARROW_ROWS_PX } from './hop-card.js';
 import { t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 import { BKK_PLANNER_EDITOR } from './tags.js';
@@ -663,9 +663,15 @@ export class BKKPlannerCard extends BKKHopCard {
         min-width: 2.6em; text-align: center; border-radius: 8px;
         padding: 4px 8px; font-weight: 700;
       }
+      @container ht-deps (max-width: ${NARROW_ROWS_PX}px) {
+        ha-card.is-planner td { padding: 0; }
+        ha-card.is-planner tr { padding: 9px 0; }
+      }
 
       .plan { display: flex; flex-direction: column; gap: 10px; }
-      .route {
+      /* Scoped to .plan: a bare .route / .when also matched the departure
+         board's td.route and td.when and squeezed the headsign to a letter. */
+      .plan .route {
         display: grid; grid-template-columns: 14px minmax(0, 1fr) 40px; column-gap: 10px;
         padding: 10px 8px 10px 12px; border-radius: 16px;
         background: var(--secondary-background-color, rgba(127,127,127,.12));
@@ -709,7 +715,7 @@ export class BKKPlannerCard extends BKKHopCard {
       #pswap svg { width: 22px; height: 22px; fill: currentColor; }
       #pswap:active { transform: rotate(180deg); transition: transform .2s; }
 
-      .when { display: flex; flex-direction: column; gap: 8px; }
+      .plan .when { display: flex; flex-direction: column; gap: 8px; }
       .seg {
         display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; padding: 3px;
         border-radius: 12px; background: var(--secondary-background-color, rgba(127,127,127,.12));
