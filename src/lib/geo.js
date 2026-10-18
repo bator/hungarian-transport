@@ -144,6 +144,51 @@ Object.assign(BkkLib, {
     if (tail.length < 2) return spanB > spanA ? b : a;
     return a.concat(tail.slice(1));
   },
+  /* Metres from a point to the nearest segment of a route (not just its
+     vertices, which sit kilometres apart on straight railway chords). */
+  distanceToShapeMeters(pt, shape) {
+    const p = Array.isArray(pt) ? BkkLib.mapGpsLatLon(pt[0], pt[1]) : null;
+    const pts = BkkLib.validMapShape(shape);
+    if (!p || !pts.length) return null;
+    const k = Math.cos((p[0] * Math.PI) / 180);
+    const xy = (q) => [(q[1] - p[1]) * k * 111320, (q[0] - p[0]) * 110540];
+    if (pts.length === 1) return Math.hypot(...xy(pts[0]));
+    let best = Infinity;
+    for (let i = 1; i < pts.length; i++) {
+      const a = xy(pts[i - 1]);
+      const b = xy(pts[i]);
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const len = dx * dx + dy * dy;
+      const t = len ? Math.max(0, Math.min(1, -(a[0] * dx + a[1] * dy) / len)) : 0;
+      const d = Math.hypot(a[0] + t * dx, a[1] + t * dy);
+      if (d < best) best = d;
+    }
+    return best;
+  },
+  /* A stop pin belongs on the drawn route. When the chosen point is off it
+     (a hand-kept or configured coordinate) and another source puts the stop
+     on the route, that one wins. Without a better candidate the chosen
+     point stays: moving it along the line would only guess. */
+  pinOnRoute(chosen, candidates, shape) {
+    const asPt = (q) => (Array.isArray(q) ? BkkLib.mapGpsLatLon(q[0], q[1]) : null);
+    const first = asPt(chosen);
+    const others = (candidates || []).map(asPt).filter(Boolean);
+    if (BkkLib.validMapShape(shape).length < 2) return first || others[0] || null;
+    const gap = (q) => BkkLib.distanceToShapeMeters(q, shape);
+    if (first && gap(first) <= 150) return first;
+    let best = null;
+    let bestGap = Infinity;
+    others.forEach((q) => {
+      const g = gap(q);
+      if (g < bestGap) {
+        best = q;
+        bestGap = g;
+      }
+    });
+    if (best && bestGap <= 60) return best;
+    return first || best;
+  },
   shapeGpsGapMeters(shape, lat, lon) {
     const gps = BkkLib.mapGpsLatLon(lat, lon);
     const pts = BkkLib.validMapShape(shape);
@@ -191,22 +236,25 @@ Object.assign(BkkLib, {
     if (Math.abs(a) < 1 && Math.abs(b) < 1) return null;
     return [a, b];
   },
+  /* Station coordinates as the MÁV GTFS stops have them (via Transitous),
+     so a pin lands on the tracks: Székesfehérvár used to point at the city
+     centre, 840 m from the station. */
   RAIL_HUB_COORDS: {
-    'BKK_005501024': [47.46445, 19.0219],
-    'BKK_005503269': [47.1853, 18.4142],
-    'BKK_005510017': [47.5005, 19.0839],
-    'BKK_CSF01131': [47.5005, 19.0839],
-    'BKK_CS007896': [47.4644, 19.022],
-    'BKK_056216': [47.4644, 19.022],
+    'BKK_005501024': [47.46432, 19.02063],
+    'BKK_005503269': [47.18361, 18.42472],
+    'BKK_005510017': [47.50042, 19.08462],
+    'BKK_CSF01131': [47.50042, 19.08462],
+    'BKK_CS007896': [47.46432, 19.02063],
+    'BKK_056216': [47.46432, 19.02063],
   },
   RAIL_HUB_ALIASES: {
-    'kelenfold': [47.46445, 19.0219],
-    'budapest kelenfold': [47.46445, 19.0219],
-    'szekesfehervar': [47.1853, 18.4142],
-    'keleti': [47.5005, 19.0839],
-    'keleti palyaudvar': [47.5005, 19.0839],
-    'deli': [47.4988, 19.025],
-    'budapest deli': [47.4988, 19.025],
+    'kelenfold': [47.46432, 19.02063],
+    'budapest kelenfold': [47.46432, 19.02063],
+    'szekesfehervar': [47.18361, 18.42472],
+    'keleti': [47.50042, 19.08462],
+    'keleti palyaudvar': [47.50042, 19.08462],
+    'deli': [47.49889, 19.025],
+    'budapest deli': [47.49889, 19.025],
   },
   knownStopCoords(stop) {
     const id = String((stop && (stop.id || stop.stopId)) || '');
