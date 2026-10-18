@@ -538,6 +538,13 @@ def main() -> int:
             and any(w.get("stop") == "Céda" and 350 < w.get("m", 0) < 450 for w in rep["worst"]),
             json.dumps(op),
         )
+        loop = [(46.2598, 20.1408), (46.2610, 20.1390), (46.2580, 20.1380), (46.2575, 20.1400), (46.2598, 20.1408)]
+        mars, tavasz = (46.2578, 20.1395), (46.2610, 20.1391)
+        failed |= not check(
+            "city shape audit: a loop may start past the trip's first stop",
+            acs.ordered_miss([mars, tavasz], loop, 100.0) is None
+            and acs.ordered_miss([mars, tavasz], loop[:-1], 100.0) is not None,
+        )
         failed |= not check(
             "city shape audit: --min-ok fails a weak operator",
             acs.main([str(base / "city-index.json.gz"), "--min-ok", "0.9"]) == 1

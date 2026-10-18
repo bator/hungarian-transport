@@ -50,6 +50,10 @@ def ordered_miss(points: list, shape: list[tuple[float, float]], tolerance_m: fl
     """Walk the shape forward: the first stop it does not reach within
     tolerance_m after the previous one, as (position, metres to the whole
     shape), or None when every stop is reached in order."""
+    # A closed loop (Szeged 78 starts and ends past Mars tér, its first
+    # stop) is walked round once more, so a trip may start anywhere on it.
+    if len(shape) > 2 and _gap(shape[0], shape[-1], shape[-1]) <= tolerance_m:
+        shape = shape + shape[1:]
     pos = 0
     last = len(shape) - 1
     for n, p in enumerate(points):
