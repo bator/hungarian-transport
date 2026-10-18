@@ -246,7 +246,10 @@ reflects the official GTFS, so it will not invent a connection.
 
 The card sources are ES modules in `src/` (`lib/` holds the FUTÁR, Transitous,
 GTFS and map helpers, one file per area). `dist/hungarian-transport.js` is the
-esbuild bundle that HACS ships; do not edit it by hand.
+esbuild bundle that HACS ships; do not edit it by hand. The integration hands
+Home Assistant `dist/hungarian-transport-loader.js` (built from
+`src/loader.js`), which imports the bundle and retries a failed download, so a
+dropped connection does not leave the cards on "Configuration error".
 
 ```bash
 npm ci
@@ -255,7 +258,7 @@ npm run build
 npm test
 ```
 
-CI fails when the committed bundle does not match `npm run build`.
+CI fails when the committed bundle or loader does not match `npm run build`.
 Integration tests need Python 3.13:
 
 ```bash

@@ -38,6 +38,11 @@ FUTAR_SERVICE_SCHEMA = vol.Schema(
     }
 )
 CARD_URL = "/hungarian-transport/hungarian-transport.js"
+# Imports the bundle and retries a failed download; Home Assistant never
+# retries an extra module, so a dropped download would leave every card on
+# "Configuration error" until a full reload.
+LOADER_FILE = "hungarian-transport-loader.js"
+LOADER_URL = f"/hungarian-transport/{LOADER_FILE}"
 WWW_PATH = Path(__file__).parent / "www"
 
 
@@ -99,7 +104,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         supports_response=SupportsResponse.ONLY,
     )
     integration = await async_get_integration(hass, DOMAIN)
-    card_url = f"{CARD_URL}?v={integration.version}"
+    entry_url = LOADER_URL if (www_path / LOADER_FILE).is_file() else CARD_URL
+    card_url = f"{entry_url}?v={integration.version}"
     hass.data.setdefault(DOMAIN, {})["card_url"] = card_url
     frontend.add_extra_js_url(hass, card_url)
     return True

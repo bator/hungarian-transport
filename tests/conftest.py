@@ -15,6 +15,7 @@ def card_assets(tmp_path, monkeypatch):
     www = tmp_path / "www"
     www.mkdir()
     (www / "hungarian-transport.js").write_text("// card", encoding="utf-8")
+    (www / "hungarian-transport-loader.js").write_text("// loader", encoding="utf-8")
     monkeypatch.setattr(
         "custom_components.hungarian_transport.WWW_PATH", www
     )
