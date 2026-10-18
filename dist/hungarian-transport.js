@@ -6845,6 +6845,12 @@ ${this._stopPinCss()}
         futarShape = await BkkLib.hassTripShape(this._hass, this._apiKey(), geomTrip);
       } catch (_e) {
       }
+      if (futarShape.length < 2 && motisShape.length < 2 && this._hasFutar()) {
+        try {
+          futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
+        } catch (_e) {
+        }
+      }
     }
     const clipForeignFutar = (pts) => {
       const valid = BkkLib.validMapShape(pts);
