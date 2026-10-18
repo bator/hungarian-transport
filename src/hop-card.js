@@ -751,6 +751,7 @@ ${this._stopPinCss()}
     let motisShape = [];
     let motisCoversHead = true;
     let motisMap = null;
+    let motisBoardPt = null;
     const area = await BkkLib.stopArea(cfg);
     if (!published) {
       try {
@@ -777,6 +778,7 @@ ${this._stopPinCss()}
         motisCoversHead = !!(motisMap && motisMap.coversHead);
         if (motisMap && motisMap.board) {
           const motisBoard = BkkLib.mapGpsLatLon(motisMap.board[0], motisMap.board[1]);
+          motisBoardPt = motisBoard;
           if (motisBoard) {
             const orig = board;
             if (!orig || BkkLib.haversineMeters(orig, motisBoard) <= 300) {
@@ -848,7 +850,11 @@ ${this._stopPinCss()}
     shape = BkkLib.validMapShape(shape);
     /* No shapes.txt route and nothing from Transitous: join the GTFS stops. */
     if (shape.length < 2 && gtfsGeo && gtfsGeo.stopLine.length >= 2) shape = gtfsGeo.stopLine;
-    return { shape, board: board, alight: destPt };
+    return {
+      shape,
+      board: BkkLib.pinOnRoute(board, [futarHop && futarHop.board, motisBoardPt], shape),
+      alight: destPt && BkkLib.pinOnRoute(destPt, [futarHop && futarHop.alight, motisMap && motisMap.dest], shape),
+    };
   }
 
   /* Where the rider gets off: the trip's own stop (GTFS or FUTÁR) first, then

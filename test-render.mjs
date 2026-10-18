@@ -3482,4 +3482,33 @@ Lib.mavIndex = origMavIndex;
   globalThis.requestAnimationFrame = prevRaf;
 }
 
+/* Rail pins: exact station points, and a pin stays on the drawn route. */
+{
+  const chord = [[47.4643, 19.0206], [47.1836, 18.4247]];
+  const mid = [47.32395, 18.72265];
+  check('route distance measures to the segment, not just its far-apart vertices',
+    Lib.distanceToShapeMeters(mid, chord) < 50 && Lib.distanceToShapeMeters([47.4643, 19.0206], chord) < 1,
+    String(Math.round(Lib.distanceToShapeMeters(mid, chord))));
+  const route = [[47.2000, 18.4600], [47.1836, 18.4247], [47.1700, 18.3900]];
+  const centre = [47.1853, 18.4142];
+  const station = [47.18330, 18.42495];
+  const picked = Lib.pinOnRoute(centre, [null, station], route);
+  check('an off-route pin yields to a source that puts the stop on the route',
+    picked[0] === station[0] && picked[1] === station[1], JSON.stringify(picked));
+  check('the city-centre point really is off this route',
+    Lib.distanceToShapeMeters(centre, route) > 500, String(Math.round(Lib.distanceToShapeMeters(centre, route))));
+  const kept = Lib.pinOnRoute([47.1836, 18.4247], [[47.19, 18.40]], route);
+  check('an on-route pin is kept', kept[0] === 47.1836, JSON.stringify(kept));
+  const alone = Lib.pinOnRoute(centre, [], route);
+  check('without a better source the pin is not guessed along the line', alone[0] === centre[0], JSON.stringify(alone));
+  const szfv = Lib.knownStopCoords({ id: 'BKK_005503269', name: 'Székesfehérvár' });
+  check('Székesfehérvár is the railway station, not the city centre',
+    !!szfv && Lib.haversineMeters(szfv, [47.183613, 18.424723]) < 60, JSON.stringify(szfv));
+  check('every hub alias points at its station',
+    ['kelenföld', 'székesfehérvár', 'keleti', 'déli'].every((n) => {
+      const pt = Lib.knownStopCoords({ name: n });
+      return !!pt && Lib.distanceToShapeMeters(pt, [[pt[0], pt[1]]]) === 0;
+    }));
+}
+
 process.exit(failed ? 1 : 0);
