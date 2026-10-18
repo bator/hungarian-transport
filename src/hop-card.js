@@ -5,6 +5,10 @@ import { BKK_HOP_EDITOR } from './tags.js';
 
 let leafletPromise = null;
 
+/* Departure board width (the card minus its padding) below which rows switch
+   to the two-line phone layout. A 500 px desktop section column stays above it. */
+export const NARROW_ROWS_PX = 440;
+
 export class BKKHopCard extends HTMLElement {
   constructor() {
     super();
@@ -207,7 +211,7 @@ export class BKKHopCard extends HTMLElement {
         text-overflow: ellipsis; white-space: nowrap; }
       .err { font-size: 12px; color: var(--error-color, #e66); margin-bottom: 6px; }
       .msg { font-size: 12px; color: var(--secondary-text-color); }
-      .body { pointer-events: auto; }
+      .body { pointer-events: auto; container: ht-deps / inline-size; }
       table { width: 100%; border-collapse: collapse; font-size: 13px; pointer-events: auto; }
       tbody tr, tr.row-clickable { cursor: pointer; }
       tr.row-clickable:hover td { background: color-mix(in srgb, var(--primary-color) 8%, transparent); }
@@ -270,6 +274,46 @@ export class BKKHopCard extends HTMLElement {
       .picto:hover::after, .picto:hover::before,
       .picto:focus-visible::after, .picto:focus-visible::before {
         opacity: 1; visibility: visible;
+      }
+      /* On a phone the fixed columns (badge, pictograms, map pin, time,
+         countdown) left the headsign a letter or two. Below ${NARROW_ROWS_PX}px each
+         row becomes two lines on a shared grid: badge over vehicle icon, the
+         headsign across the middle with pictograms and the map pin under it,
+         and the time columns still aligned from row to row. */
+      @container ht-deps (max-width: ${NARROW_ROWS_PX}px) {
+        table { display: block; }
+        tbody {
+          display: grid; column-gap: 8px;
+          grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+        }
+        /* Without subgrid each row keeps the same tracks, just unaligned. */
+        tr {
+          display: grid; grid-column: 1 / -1;
+          grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+          grid-template-columns: subgrid;
+          grid-template-rows: auto auto; row-gap: 2px; align-items: center;
+          padding: 6px 0;
+        }
+        tr + tr { border-top: 1px solid var(--divider-color); }
+        tr + tr td { border-top: 0; }
+        tr.row-clickable:hover td { background: none; }
+        tr.row-clickable:hover { background: color-mix(in srgb, var(--primary-color) 8%, transparent); }
+        td { padding: 0; }
+        td.icon, td.route, td.flags, td.mapbtn, td.when, td.in { width: auto; }
+        td.route { grid-area: 1 / 1; justify-self: center; }
+        td.icon { grid-area: 2 / 1; justify-self: center; }
+        td.dest {
+          grid-area: 1 / 2 / 2 / 4; min-width: 0; max-width: none;
+          white-space: normal; overflow-wrap: break-word; line-height: 1.3;
+          display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+        }
+        .num { white-space: nowrap; }
+        td.flags { grid-area: 2 / 2; min-width: 0; white-space: normal; }
+        .pictos { flex-wrap: wrap; }
+        td.mapbtn { grid-area: 2 / 3; }
+        td.when { grid-area: 1 / 4 / 3 / 5; align-self: start; }
+        td.in { grid-area: 1 / 5 / 3 / 6; align-self: start; }
+        .sched { display: block; margin-left: 0; }
       }
     `;
     const card = document.createElement('ha-card');
