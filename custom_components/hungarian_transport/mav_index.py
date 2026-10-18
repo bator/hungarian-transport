@@ -13,7 +13,9 @@ misses one of its own stations by more than STOP_TOLERANCE_M uses the station
 sequence instead, so a train never draws a route that skips its stops.
 
 ``audit`` checks every trip of the feed against the index the way the card
-uses it. Standard library only: it runs inside Home Assistant.
+uses it. Standard library only: it runs inside Home Assistant, and as its own
+process (``python mav_index.py FEED OUT``) so a minute of CPU on stop_times
+does not hold Home Assistant's GIL right after startup.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ import json
 import math
 import os
 import re
+import sys
 import tempfile
 import unicodedata
 import zipfile
@@ -337,7 +340,12 @@ def _shapes(feed: Feed, wanted: set[str]) -> dict[str, list[tuple[float, float]]
 
 
 def build(path: Path) -> dict[str, Any]:
-    """Index dict (schema 2) plus build statistics under "_stats"."""
+    """Index dict (schema 2) plus build statistics under "_stats".
+
+    "_loaded" carries the parsed feed (trips, stops, trip_stops) for ``audit``,
+    so the audit right after a build does not read stop_times.txt again.
+    ``write`` drops every "_" key.
+    """
     with Feed(path) as feed:
         version = feed_version(feed)
         trips, stops, trip_stops = _load(feed)
@@ -399,6 +407,7 @@ def build(path: Path) -> dict[str, Any]:
         "p": polylines,
         "n": numbers,
         "l": lines,
+        "_loaded": (trips, stops, trip_stops),
         "_stats": {
             "feed_version": version,
             "trains": len(numbers),
@@ -458,11 +467,19 @@ def pick_variant(index: dict[str, Any], key: tuple[str, str], board: str, alight
     return first_board or (variants[0], -1, -1)
 
 
-def audit(path: Path, index: dict[str, Any]) -> dict[str, Any]:
+def audit(path: Path, index: dict[str, Any], loaded: tuple | None = None) -> dict[str, Any]:
     """Every trip, as the card would draw it between its first and last
-    station: is every one of its stations on the drawn route?"""
-    with Feed(path) as feed:
-        trips, stops, trip_stops = _load(feed)
+    station: is every one of its stations on the drawn route?
+
+    ``loaded`` is the (trips, stops, trip_stops) triple of ``_load``; an index
+    fresh from ``build`` carries it as "_loaded". The feed is only parsed
+    again for an index read back from disk."""
+    if loaded is None:
+        loaded = index.get("_loaded")
+    if loaded is None:
+        with Feed(path) as feed:
+            loaded = _load(feed)
+    trips, stops, trip_stops = loaded
     polys: dict[int, RouteGrid] = {}
     gaps: dict[tuple[int, str], float] = {}
     keys: dict[tuple[str, str], dict[str, Any]] = {}
@@ -512,3 +529,40 @@ def audit(path: Path, index: dict[str, Any]) -> dict[str, Any]:
         "tolerance_m": STOP_TOLERANCE_M,
         "worst": worst[:30],
     }
+
+
+# ---- build + audit as one job (Home Assistant runs it in a subprocess) -------
+
+
+def build_and_audit(src: Path, out: Path) -> dict[str, Any]:
+    """Check, build, write and audit; the stats dict Home Assistant keeps."""
+    check_feed(src)
+    index = build(src)
+    stats = dict(index["_stats"])
+    stats["bytes"] = write(index, out)
+    report = audit(src, index)
+    stats["audit"] = {k: v for k, v in report.items() if k != "worst"}
+    stats["audit_worst"] = report["worst"][:5]
+    return stats
+
+
+def _main(argv: list[str]) -> int:
+    if len(argv) != 3:
+        print("usage: mav_index.py FEED(.zip|dir) OUT.json.gz", file=sys.stderr)
+        return 2
+    try:
+        # Below Home Assistant's own priority: the build is not urgent.
+        os.nice(10)
+    except (OSError, AttributeError):
+        pass
+    try:
+        stats = build_and_audit(Path(argv[1]), Path(argv[2]))
+    except Exception as err:  # noqa: BLE001 - the parent reads stderr
+        print(f"{type(err).__name__}: {err}", file=sys.stderr)
+        return 1
+    json.dump(stats, sys.stdout, ensure_ascii=False)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main(sys.argv))

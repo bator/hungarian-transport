@@ -5,6 +5,8 @@ import gzip
 import io
 import json
 import math
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
@@ -12,7 +14,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.core import Context, HomeAssistant
-from homeassistant.exceptions import ServiceValidationError, Unauthorized
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError, Unauthorized
 from homeassistant.setup import async_setup_component
 
 from custom_components.hungarian_transport import mav, mav_index
@@ -96,6 +98,51 @@ def test_index_keeps_every_stop_pattern_and_passes_its_audit(tmp_path: Path) -> 
     assert report["trips"] == 3 and report["trips_bad"] == 0 and report["ok_ratio"] == 1.0
 
 
+def test_audit_after_build_reads_the_feed_once(tmp_path: Path, monkeypatch) -> None:
+    """build hands its parsed feed to audit; stop_times.txt (the big one) is
+    streamed once, not twice, and an index read back from disk still audits."""
+    feed = tmp_path / "mav.zip"
+    feed.write_bytes(_feed_zip())
+    reads: list[str] = []
+    real_rows = mav_index.Feed.rows
+
+    def counting_rows(self, name):
+        reads.append(name)
+        return real_rows(self, name)
+
+    monkeypatch.setattr(mav_index.Feed, "rows", counting_rows)
+    index = mav_index.build(feed)
+    report = mav_index.audit(feed, index)
+    assert report["ok_ratio"] == 1.0
+    assert reads.count("stop_times.txt") == 1
+
+    out = tmp_path / "mav-index.json.gz"
+    mav_index.write(index, out)
+    reads.clear()
+    report = mav_index.audit(feed, mav_index.read(out))
+    assert report["ok_ratio"] == 1.0 and reads.count("stop_times.txt") == 1
+
+
+def test_build_runner_is_a_standalone_process(tmp_path: Path) -> None:
+    """Home Assistant runs mav_index.py as its own interpreter: stdlib only,
+    stats as JSON on stdout, a one-line reason on stderr when it fails."""
+    feed = tmp_path / "mav.zip"
+    feed.write_bytes(_feed_zip())
+    out = tmp_path / "mav-index.json.gz"
+    cmd = [sys.executable, "-I", str(mav.BUILD_RUNNER), str(feed), str(out)]
+    done = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    stats = json.loads(done.stdout)
+    assert stats["trains"] == 2 and stats["audit"]["ok_ratio"] == 1.0
+    assert "_loaded" not in json.loads(gzip.decompress(out.read_bytes()))
+
+    bad = tmp_path / "bad.zip"
+    bad.write_bytes(b"not a zip")
+    done = subprocess.run(cmd[:-2] + [str(bad), str(out)], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 1
+    assert "not a GTFS zip" in done.stderr
+
+
 def test_card_choice_serves_both_stations(tmp_path: Path) -> None:
     feed = tmp_path / "mav.zip"
     feed.write_bytes(_feed_zip())
@@ -125,22 +172,45 @@ async def test_upload_rejects_non_admins_and_bad_files(
     await _setup(hass)
     reader = await hass_client(hass_read_only_access_token)
     resp = await reader.post(mav.UPLOAD_URL, data=_feed_zip())
-    assert resp.status == 401
+    # Authenticated but not an admin: forbidden, not unauthorized.
+    assert resp.status == 403
     admin = await hass_client()
     resp = await admin.post(mav.UPLOAD_URL, data=b"not a zip")
     assert resp.status == 400
     assert not mav_source.exists()
 
 
-async def test_rebuild_service(hass: HomeAssistant, card_assets, mav_source) -> None:
+async def test_rebuild_service(hass: HomeAssistant, card_assets, mav_source, monkeypatch) -> None:
     await _setup(hass)
     with pytest.raises(ServiceValidationError):
         await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
     mav_source.parent.mkdir(parents=True, exist_ok=True)
     mav_source.write_bytes(_feed_zip())
+    spawned: list[tuple] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def spying_exec(*args, **kwargs):
+        spawned.append(args)
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(mav.asyncio, "create_subprocess_exec", spying_exec)
     result = await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
     assert result["trains"] == 2 and result["audit"]["trains_ok"] == 2
     assert (card_assets / "mav-index.json.gz").is_file()
+    # The build ran in its own process, not in Home Assistant's executor.
+    assert len(spawned) == 1 and spawned[0][0] == sys.executable
+    assert Path(spawned[0][2]) == mav.BUILD_RUNNER
+
+
+async def test_rebuild_service_reports_a_failed_build(hass: HomeAssistant, card_assets, mav_source) -> None:
+    await _setup(hass)
+    mav_source.parent.mkdir(parents=True, exist_ok=True)
+    mav_source.write_bytes(b"PK not really a feed")
+    with pytest.raises(HomeAssistantError) as err:
+        await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert err.value.translation_key == "mav_build_failed"
+    assert "index build exited 1" in str(err.value)
+    assert not (card_assets / "mav-index.json.gz").exists()
 
 
 async def test_rebuild_service_is_admin_only(

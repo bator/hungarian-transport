@@ -60,3 +60,23 @@ async def test_size_cap_and_errors_are_not_cached() -> None:
         pass
     assert len(cache) == 2
     assert await cache.get("err", lambda: value("ok")) == "ok"
+
+
+async def test_task_factory_owns_the_fetch_tasks() -> None:
+    """Home Assistant passes async_create_background_task so the request is
+    tracked (and cancelled at shutdown) instead of an untracked future."""
+    created: list[asyncio.Task] = []
+
+    def factory(coro):
+        task = asyncio.get_running_loop().create_task(coro, name="tracked")
+        created.append(task)
+        return task
+
+    cache = SharedTTLCache(ttl=10, max_entries=8, task_factory=factory)
+
+    async def value(v):
+        return v
+
+    assert await cache.get("k", lambda: value("v")) == "v"
+    assert await cache.get("k", lambda: value("again")) == "v"
+    assert len(created) == 1 and created[0].get_name() == "tracked"

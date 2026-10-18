@@ -14,7 +14,7 @@ from typing import Any
 
 import aiohttp
 
-from .cache import SharedTTLCache
+from .cache import SharedTTLCache, TaskFactory
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,10 +69,15 @@ async def futar_get(
 class FutarProxy:
     """Short-lived cache and request sharing in front of futar_get."""
 
-    def __init__(self, session: aiohttp.ClientSession, api_key: str) -> None:
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        api_key: str,
+        task_factory: TaskFactory | None = None,
+    ) -> None:
         self._session = session
         self._api_key = api_key
-        self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX)
+        self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX, task_factory)
 
     async def get(self, path: str, params: dict[str, Any]) -> dict:
         key = (path, tuple(sorted((str(k), str(v)) for k, v in (params or {}).items())))

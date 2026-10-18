@@ -16,21 +16,58 @@ import urllib.request
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from build_city_index import CITY_FEEDS, build_city_index  # noqa: E402
-from build_mav_index import build_mav_index, resolve_mav_feed  # noqa: E402
-from build_volan_index import GTFS_URL, build_index  # noqa: E402
-from gtfs_compact import (  # noqa: E402
-    UA,
-    download_feed,
-    download_zip,
-    feed_error,
-    feed_urls,
-    index_shapes,
-    prune_shapes,
-)
-
 WEBHOOK_PATH = "/api/webhook/hungarian-transport-gtfs"
+# Same string as gtfs_compact.UA, kept here so notify() works when the
+# sibling modules fail to import (a half-updated install).
+UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungarian-transport)"
+
+
+def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
+    payload = json.dumps({"title": title, "message": message}).encode("utf-8")
+    urls: list[tuple[str, dict]] = [
+        ("http://127.0.0.1:8123" + WEBHOOK_PATH, {"Content-Type": "application/json", "User-Agent": UA}),
+    ]
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if token:
+        urls.append(
+            (
+                "http://supervisor/core" + WEBHOOK_PATH,
+                {
+                    "Content-Type": "application/json",
+                    "User-Agent": UA,
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+        )
+    for url, headers in urls:
+        try:
+            req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
+            return
+        except Exception:
+            continue
+
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+try:
+    from build_city_index import CITY_FEEDS, build_city_index  # noqa: E402
+    from build_mav_index import build_mav_index, resolve_mav_feed  # noqa: E402
+    from build_volan_index import GTFS_URL, build_index  # noqa: E402
+    from gtfs_compact import (  # noqa: E402
+        _urlopen,
+        assert_public_http_url,
+        download_feed,
+        download_zip,
+        feed_error,
+        feed_urls,
+        index_shapes,
+        prune_shapes,
+    )
+except ImportError as err:  # a script is missing or broken: say so, do not die quietly
+    notify(f"Volán GTFS frissítés el sem indult: {type(err).__name__}: {err}")
+    raise
+
 HA_BASE = Path("/config/hungarian-transport")
 # The integration serves /hungarian-transport/ from its own www folder, and the
 # card loads the indexes next to itself. The community folder is only used by
@@ -177,33 +214,6 @@ def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
     return restored
 
 
-def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
-    payload = json.dumps({"title": title, "message": message}).encode("utf-8")
-    urls: list[tuple[str, dict]] = [
-        ("http://127.0.0.1:8123" + WEBHOOK_PATH, {"Content-Type": "application/json", "User-Agent": UA}),
-    ]
-    token = os.environ.get("SUPERVISOR_TOKEN")
-    if token:
-        urls.append(
-            (
-                "http://supervisor/core" + WEBHOOK_PATH,
-                {
-                    "Content-Type": "application/json",
-                    "User-Agent": UA,
-                    "Authorization": f"Bearer {token}",
-                },
-            )
-        )
-    for url, headers in urls:
-        try:
-            req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                resp.read()
-            return
-        except Exception:
-            continue
-
-
 def paths() -> tuple[Path, Path, Path, Path]:
     if HA_BASE.is_dir() or Path("/config").is_dir():
         HA_BASE.mkdir(parents=True, exist_ok=True)
@@ -296,9 +306,13 @@ def merge_meta(head: dict, downloaded: dict | None, size: int | None) -> dict:
 
 
 def request(method: str, url: str):
+    """HEAD/GET with the same public-host and redirect guards as a download:
+    a feed URL (a keyed override from .env included) must not reach the
+    supervisor or the LAN."""
+    assert_public_http_url(url)
     hdrs = {"User-Agent": UA, "Accept": "*/*", "Accept-Encoding": "identity"}
     req = urllib.request.Request(url, method=method, headers=hdrs)
-    return urllib.request.urlopen(req, timeout=60)
+    return _urlopen(req, timeout=60)
 
 
 def remote_meta(url: str) -> dict:
@@ -339,6 +353,24 @@ def acquire_lock(path: Path):
 
 
 def main() -> int:
+    """Run the update; any failure reaches the webhook, not only the log.
+
+    run_update.sh detaches this script, so a traceback in update.log is all a
+    silent failure would leave. Exit 1 means "reported through the webhook";
+    the shell wrapper reports the exit codes this script cannot (killed, not
+    started)."""
+    try:
+        return _main()
+    except SystemExit:
+        raise
+    except Exception as err:
+        msg = f"error {type(err).__name__}: {err}"
+        print(msg, file=sys.stderr)
+        notify(f"Volán GTFS frissítés sikertelen: {msg}")
+        return 1
+
+
+def _main() -> int:
     base, volan_out, city_out, mav_out = paths()
     lock = acquire_lock(base / "update.lock")
     if lock is None:
@@ -347,8 +379,15 @@ def main() -> int:
     sweep_temps(base, volan_out.parent)
     restored = restore_hacs_indexes(base, volan_out.parent)
 
-    def on_signal(_signum, _frame):
+    def on_signal(signum, _frame):
+        # SIGTERM from `timeout`, a Home Assistant restart or shell_command's
+        # process-group kill: the run did not finish, say so.
         sweep_temps(base, volan_out.parent)
+        try:
+            name = signal.Signals(signum).name
+        except ValueError:
+            name = str(signum)
+        notify(f"Volán GTFS frissítés megszakítva ({name}): az indexek nem frissültek, lásd update.log")
         sys.exit(1)
 
     signal.signal(signal.SIGTERM, on_signal)
@@ -423,7 +462,7 @@ def main() -> int:
                     city_state[feed["id"]] = merge_meta(meta, prev, zpath.stat().st_size)
                     break
                 try:
-                    downloaded = download_feed(url, zpath)
+                    downloaded = download_feed(url, zpath, allow_insecure=bool(feed.get("insecure")))
                 except Exception as err:
                     print(f"warn download {feed_error(feed['id'], err)}", file=sys.stderr)
                     continue

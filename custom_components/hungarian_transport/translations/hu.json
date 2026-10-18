@@ -7,11 +7,19 @@
         "data": {
           "api_key": "BKK API kulcs"
         }
+      },
+      "reauth_confirm": {
+        "title": "A BKK kulcsot elutasították",
+        "description": "A BKK FUTÁR elutasította a tárolt kulcsot. Adj meg újat, vagy hagyd üresen a FUTÁR-elérés eltávolításához. Ingyenes kulcs: {url}",
+        "data": {
+          "api_key": "BKK API kulcs"
+        }
       }
     },
     "abort": {
       "single_instance_allowed": "A Magyar közlekedés integráció már be van állítva.",
-      "already_configured": "A Magyar közlekedés integráció már be van állítva."
+      "already_configured": "A Magyar közlekedés integráció már be van állítva.",
+      "reauth_successful": "A BKK kulcs frissült."
     },
     "error": {
       "invalid_auth": "A BKK FUTÁR elutasította ezt a kulcsot.",
@@ -78,6 +86,9 @@
     },
     "mav_build_failed": {
       "message": "A MÁV útvonalindex nem készült el: {error}"
+    },
+    "elvira_unavailable": {
+      "message": "A MÁV ELVIRA nem érhető el ({error})."
     }
   },
   "options": {
@@ -93,6 +104,12 @@
     "error": {
       "invalid_auth": "A BKK FUTÁR elutasította ezt a kulcsot.",
       "cannot_connect": "Nem érhető el a BKK FUTÁR. Próbáld újra később."
+    }
+  },
+  "issues": {
+    "missing_assets": {
+      "title": "Hiányoznak a kártya fájljai",
+      "description": "A Magyar közlekedés integráció nem találta a kártya fájljait itt: `{path}`. A forráskódban nincsenek benne; telepítsd a kiadás zipjét (HACS vagy a GitHub-kiadás hungarian-transport.zip fájlja), majd indítsd újra a Home Assistantot."
     }
   }
 }

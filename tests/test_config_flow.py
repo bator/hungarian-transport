@@ -91,3 +91,28 @@ async def test_options_flow_sets_and_clears_key(hass, aioclient_mock) -> None:
         result["flow_id"], {CONF_API_KEY: ""}
     )
     assert entry.options == {CONF_API_KEY: ""}
+
+
+async def test_reauth_flow_replaces_the_key(hass, aioclient_mock) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: "old"})
+    entry.add_to_hass(hass)
+    aioclient_mock.get(SEARCH, status=401)
+
+    result = await entry.start_reauth_flow(hass)
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_API_KEY: "still-wrong"}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "invalid_auth"}
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_API_KEY: " new-key "}
+    )
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert entry.options == {CONF_API_KEY: "new-key"}
