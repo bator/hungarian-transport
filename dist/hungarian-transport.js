@@ -487,6 +487,13 @@ function clampMinutesAfter(value) {
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_MINUTES_AFTER;
   return Math.min(MAX_MINUTES_AFTER, Math.max(MIN_MINUTES_AFTER, Math.round(n)));
 }
+var DEFAULT_REFRESH_S = 45;
+function refreshSeconds(value) {
+  if (value == null || value === "") return DEFAULT_REFRESH_S;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_REFRESH_S;
+  return Math.min(3600, Math.max(15, Math.round(n)));
+}
 function maxDepartureRows(horizon) {
   const h = clampMinutesAfter(horizon);
   const cap = h >= 480 ? 80 : 40;
@@ -1257,7 +1264,7 @@ Object.assign(BkkLib, {
         }
       });
       if (!res.ok) throw new Error(`Transitous HTTP ${res.status}`);
-      return res.json();
+      return await res.json();
     } catch (err) {
       if (err && err.name === "AbortError") throw new Error("Transitous timeout");
       throw err;
@@ -2488,9 +2495,9 @@ Object.assign(BkkLib, {
         const o = ps.indexOf(fromI);
         const d = ps.indexOf(toI);
         if (o < 0 || d <= o) continue;
-        const dep = day.midnight + ms[o] * 60;
+        const dep = day.base + ms[o] * 60;
         if (dep < readySec - 30) continue;
-        const arr = day.midnight + ms[d] * 60;
+        const arr = day.base + ms[d] * 60;
         if (!best || dep < best.dep) best = { dep, arr };
       }
       if (best) break;
@@ -3404,28 +3411,43 @@ Object.assign(BkkLib, {
     while (cache.size > 4) cache.delete(cache.keys().next().value);
     return p;
   },
-  async _loadMavIndex(url) {
+  /* Headers and body under one timeout: a body that stalls after its
+     headers must not leave an index promise pending until the page reloads.
+     no-cache revalidates: Home Assistant answers 304 for an unchanged index,
+     so a dashboard reload does not download megabytes again, while a rebuilt
+     index (new ETag) is fetched at once. Resolves { status, bytes }, with
+     bytes null on an HTTP error; rejects on a network error or timeout. */
+  async _fetchIndexBytes(url) {
     const ctrl = typeof AbortController === "function" ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(() => ctrl.abort(), 45e3) : null;
-    let res;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), BkkLib._indexTimeoutMs) : null;
     try {
-      res = await fetch(url, { cache: "no-cache", signal: ctrl ? ctrl.signal : void 0 });
-    } catch (_err) {
-      return { n: {}, l: {}, p: [] };
+      const res = await fetch(url, { cache: "no-cache", signal: ctrl ? ctrl.signal : void 0 });
+      if (!res.ok) return { status: res.status, bytes: null };
+      return { status: res.status, bytes: new Uint8Array(await res.arrayBuffer()) };
     } finally {
       if (timer) clearTimeout(timer);
     }
-    if (!res.ok) return { n: {}, l: {}, p: [] };
-    const buf = await res.arrayBuffer();
-    const u8 = new Uint8Array(buf);
-    let text = "";
+  },
+  _indexTimeoutMs: 45e3,
+  /* Index text, gunzipped when gzip; null when this browser cannot gunzip. */
+  async _indexText(u8) {
     if (u8.length >= 2 && u8[0] === 31 && u8[1] === 139) {
-      if (typeof DecompressionStream !== "function") return { n: {}, l: {}, p: [] };
-      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
-      text = await new Response(stream).text();
-    } else {
-      text = new TextDecoder().decode(u8);
+      if (typeof DecompressionStream !== "function") return null;
+      const stream = new Blob([u8]).stream().pipeThrough(new DecompressionStream("gzip"));
+      return new Response(stream).text();
     }
+    return new TextDecoder().decode(u8);
+  },
+  async _loadMavIndex(url) {
+    let got;
+    try {
+      got = await BkkLib._fetchIndexBytes(url);
+    } catch (_err) {
+      return { n: {}, l: {}, p: [] };
+    }
+    if (!got.bytes) return { n: {}, l: {}, p: [] };
+    const text = await BkkLib._indexText(got.bytes);
+    if (text == null) return { n: {}, l: {}, p: [] };
     let idx;
     try {
       idx = JSON.parse(text);
@@ -3436,6 +3458,9 @@ Object.assign(BkkLib, {
       return { n: {}, l: {}, p: [] };
     }
     return {
+      v: Number(idx.v) || 1,
+      feed: String(idx.feed || ""),
+      st: Array.isArray(idx.st) ? idx.st : [],
       n: idx.n && typeof idx.n === "object" ? idx.n : {},
       l: idx.l && typeof idx.l === "object" ? idx.l : {},
       p: idx.p
@@ -3503,27 +3528,15 @@ Object.assign(BkkLib, {
     }
   },
   async _loadGtfsIndex(url, httpKey, gunzipKey) {
-    const ctrl = typeof AbortController === "function" ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(() => ctrl.abort(), 45e3) : null;
-    let res;
+    let got;
     try {
-      res = await fetch(url, { cache: "no-cache", signal: ctrl ? ctrl.signal : void 0 });
+      got = await BkkLib._fetchIndexBytes(url);
     } catch (_err) {
       throw codedError("errIndexFetch");
-    } finally {
-      if (timer) clearTimeout(timer);
     }
-    if (!res.ok) throw codedError(httpKey, res.status);
-    const buf = await res.arrayBuffer();
-    const u8 = new Uint8Array(buf);
-    let text = "";
-    if (u8.length >= 2 && u8[0] === 31 && u8[1] === 139) {
-      if (typeof DecompressionStream !== "function") throw codedError(gunzipKey);
-      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
-      text = await new Response(stream).text();
-    } else {
-      text = new TextDecoder().decode(u8);
-    }
+    if (!got.bytes) throw codedError(httpKey, got.status);
+    const text = await BkkLib._indexText(got.bytes);
+    if (text == null) throw codedError(gunzipKey);
     let idx;
     try {
       idx = JSON.parse(text);
@@ -3568,22 +3581,26 @@ Object.assign(BkkLib, {
     if (opIx < 0) return idx.stops || [];
     return (idx.stops || []).filter((s) => s.op === opIx);
   },
-  /* One GTFS service day. `mins` is the earliest departure minute still worth
-     looking at: for yesterday's service day that is now + 24h, which is how
-     after-midnight (24:xx) trips stay visible. */
-  volanDay(offset) {
+  /* One GTFS service day. GTFS times count from noon minus 12 h, not from
+     midnight: on the two DST days midnight is an hour off that base, and
+     every departure of the day would shift by an hour. `base` is that moment
+     in epoch seconds and `mins` is now in the day's own GTFS minutes: about
+     now + 24h for yesterday (its 24:xx trips are tonight's), negative for
+     tomorrow. */
+  volanDay(offset, nowMs) {
     const off = offset || 0;
-    const now = tzParts(/* @__PURE__ */ new Date());
-    const ymd = tzShiftYmd(now.ymd, off);
-    let mins = 0;
-    if (off === 0) mins = now.mins;
-    else if (off < 0) mins = now.mins - off * 1440;
+    const at = nowMs == null ? Date.now() : nowMs;
+    const ymd = tzShiftYmd(tzParts(new Date(at)).ymd, off);
+    const base = BkkLib.gtfsDayBase(ymd);
     return {
       ymd,
       dow: tzDow(ymd),
-      mins,
-      midnight: tzEpochSec(ymd, 0)
+      mins: Math.floor((at / 1e3 - base) / 60),
+      base
     };
+  },
+  gtfsDayBase(ymd) {
+    return tzEpochSec(ymd, 720) - 12 * 3600;
   },
   volanServiceOk(idx, si, ymd, dow) {
     const c = (idx.c || [])[si];
@@ -3897,18 +3914,12 @@ Object.assign(BkkLib, {
     const rowCap = maxDepartureRows(horizon);
     const rows = [];
     const trips = idx.t || [];
-    const todayMins = BkkLib.volanDay(0).mins;
     const dayOffsets = [-1, 0, 1];
     for (let n = 0; n < dayOffsets.length; n++) {
       const day = BkkLib.volanDay(dayOffsets[n]);
-      let earliest = day.mins - 1;
-      let latest = day.mins + horizon;
-      if (dayOffsets[n] > 0) {
-        const remain = horizon - (1440 - todayMins);
-        if (remain <= 0) continue;
-        earliest = -1;
-        latest = remain;
-      }
+      const earliest = day.mins - 1;
+      const latest = day.mins + horizon;
+      if (latest < 0) continue;
       for (let i = 0; i < trips.length; i++) {
         const t2 = trips[i];
         if (!BkkLib.volanServiceOk(idx, t2[0], day.ymd, day.dow)) continue;
@@ -3933,7 +3944,7 @@ Object.assign(BkkLib, {
         const destStop = didx >= 0 ? idx.stops[ps[didx]] : idx.stops[ps[ps.length - 1]];
         const arrMin = didx >= 0 ? ms[didx] : null;
         const travel = arrMin != null && arrMin >= depMin && arrMin - depMin <= 1440 ? arrMin - depMin : null;
-        const depTs = day.midnight + depMin * 60;
+        const depTs = day.base + depMin * 60;
         if (!departureStillDue(depTs)) continue;
         const kind = BkkLib.gtfsRouteKind(t2[4], vehicle, rawType);
         rows.push({
@@ -4722,9 +4733,20 @@ Object.assign(BkkLib, {
       const start = oidx >= 0 ? oidx + 1 : 0;
       const dest = sts.slice(start).find((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
       if (!dest) return null;
-      const arr = dest.predictedArrivalTime || dest.arrivalTime || dest.departureTime;
-      if (!arr || !dep) return null;
-      const mins = Math.round((arr - dep) / 60);
+      const o = oidx >= 0 ? sts[oidx] : null;
+      const oPred = o && (o.predictedDepartureTime || o.predictedArrivalTime);
+      const oPlan = o && (o.departureTime || o.arrivalTime);
+      let from = dep;
+      let arr = dest.predictedArrivalTime || dest.arrivalTime || dest.departureTime;
+      if (oPred && dest.predictedArrivalTime) {
+        from = oPred;
+        arr = dest.predictedArrivalTime;
+      } else if (oPlan && (dest.arrivalTime || dest.departureTime)) {
+        from = oPlan;
+        arr = dest.arrivalTime || dest.departureTime;
+      }
+      if (!arr || !from) return null;
+      const mins = Math.round((arr - from) / 60);
       return mins >= 1 && mins <= 1440 ? mins : null;
     } catch (_e) {
       return null;
@@ -6270,6 +6292,7 @@ var BKKHopCard = class extends HTMLElement {
       clearInterval(this._tick);
       this._tick = null;
     }
+    this._closeVehicleMap();
   }
   /* Keep the rows on screen and put the failure in a banner above them: a
      single failed refresh should not wipe a timetable that is still useful. */
@@ -6595,7 +6618,11 @@ var BKKHopCard = class extends HTMLElement {
     });
     return leafletPromise;
   }
+  /* Every close (and so every new open) bumps the map sequence. An open that
+     is still awaiting Leaflet or a route checks it after each await, so a
+     superseded open never adds a second overlay that nothing can close. */
   _closeVehicleMap() {
+    this._mapSeq = (this._mapSeq || 0) + 1;
     if (this._onMapKey && typeof document !== "undefined") {
       document.removeEventListener("keydown", this._onMapKey);
       this._onMapKey = null;
@@ -6645,6 +6672,9 @@ var BKKHopCard = class extends HTMLElement {
     this._mapOverlay = null;
     this._openMapKey = null;
     this._openingMap = "";
+  }
+  _mapStale(seq) {
+    return seq !== this._mapSeq || !this.isConnected;
   }
   _mapKey(row) {
     return `${row.label || ""}|${row.headsign || ""}|${row.vehicleId || row.tripId || ""}`;
@@ -6974,6 +7004,7 @@ ${this._stopPinCss()}
     if (this._mapOverlay && this._openMapKey === key) return;
     this._closeVehicleMap();
     this._openingMap = key;
+    const seq = this._mapSeq;
     const gps0 = BkkLib.mapGpsLatLon(row.lat, row.lon);
     let lat = gps0 ? gps0[0] : NaN;
     let lon = gps0 ? gps0[1] : NaN;
@@ -6990,9 +7021,10 @@ ${this._stopPinCss()}
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
-      this._showMapNotice(t(lang, "mapLeafletFail"));
+      if (!this._mapStale(seq)) this._showMapNotice(t(lang, "mapLeafletFail"));
       return;
     }
+    if (this._mapStale(seq)) return;
     const overlay = document.createElement("div");
     overlay.className = "ht-map-overlay";
     const sub = this._mapTypeLabel(row.vehicle || row.type, lang) + (row.model ? " · " + row.model : "");
@@ -7084,10 +7116,7 @@ ${this._stopPinCss()}
     } catch (_e) {
     }
     if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
-    if (!this._map || this._map !== map || !this._mapOverlay) {
-      this._openingMap = "";
-      return;
-    }
+    if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
     const pos = BkkLib.mapGpsLatLon(lat, lon);
     const hasPosition = !!pos;
     if (hasPosition) {
@@ -7378,7 +7407,7 @@ ${this._stopPinCss()}
       await run();
       if (!this.isConnected || gen !== this._gen) return;
       if (!this._shouldPoll()) return;
-      const every = Math.max(15, Number(cfg.refresh || 45)) * 1e3;
+      const every = refreshSeconds(cfg.refresh) * 1e3;
       this._poll = setInterval(run, every);
     } finally {
       if (gen === this._gen) this._reloadActive = false;
@@ -7820,10 +7849,12 @@ var BKKPlannerCard = class extends BKKHopCard {
     if (this._mapOverlay && this._openMapKey === "journey") return;
     this._closeVehicleMap();
     this._openingMap = "journey";
+    const seq = this._mapSeq;
     try {
       await BkkLib.fillJourneyShapes(this._journey);
     } catch (_e) {
     }
+    if (this._mapStale(seq)) return;
     let segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
     if (!segs.length && cfg.stopId && cfg.destName) {
       try {
@@ -7834,15 +7865,18 @@ var BKKPlannerCard = class extends BKKHopCard {
           this._hass,
           { minutesAfter: clampMinutesAfter(cfg.minutesAfter) }
         );
+        if (this._mapStale(seq)) return;
         if (journey) this._journey = journey;
         try {
           await BkkLib.fillJourneyShapes(this._journey);
         } catch (_e) {
         }
+        if (this._mapStale(seq)) return;
         segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
       } catch (_e) {
       }
     }
+    if (this._mapStale(seq)) return;
     if (!segs.length) {
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapNoData"));
@@ -7852,10 +7886,12 @@ var BKKPlannerCard = class extends BKKHopCard {
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
+      if (this._mapStale(seq)) return;
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapLeafletFail"));
       return;
     }
+    if (this._mapStale(seq)) return;
     const overlay = document.createElement("div");
     overlay.className = "ht-map-overlay";
     const title = `${cfg.stopName || ""} → ${cfg.destName || ""}`;

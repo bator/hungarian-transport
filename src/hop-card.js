@@ -1,4 +1,4 @@
-import { ASSET_BASE, DEFAULT_MINUTES_AFTER, departureStillDue, maxDepartureRows, setCityIndexUrl, setMavIndexUrl, setVolanIndexUrl } from './config.js';
+import { ASSET_BASE, DEFAULT_MINUTES_AFTER, departureStillDue, maxDepartureRows, refreshSeconds, setCityIndexUrl, setMavIndexUrl, setVolanIndexUrl } from './config.js';
 import { errText, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 import { BKK_HOP_EDITOR } from './tags.js';
@@ -162,6 +162,9 @@ export class BKKHopCard extends HTMLElement {
     }
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     if (this._tick) { clearInterval(this._tick); this._tick = null; }
+    /* The overlay hangs off <html>, outside the card: navigating away (or
+       the back gesture) must not leave it over the next view. */
+    this._closeVehicleMap();
   }
 
   /* Keep the rows on screen and put the failure in a banner above them: a
@@ -526,7 +529,11 @@ export class BKKHopCard extends HTMLElement {
     return leafletPromise;
   }
 
+  /* Every close (and so every new open) bumps the map sequence. An open that
+     is still awaiting Leaflet or a route checks it after each await, so a
+     superseded open never adds a second overlay that nothing can close. */
   _closeVehicleMap() {
+    this._mapSeq = (this._mapSeq || 0) + 1;
     if (this._onMapKey && typeof document !== 'undefined') {
       document.removeEventListener('keydown', this._onMapKey);
       this._onMapKey = null;
@@ -561,6 +568,10 @@ export class BKKHopCard extends HTMLElement {
     this._mapOverlay = null;
     this._openMapKey = null;
     this._openingMap = '';
+  }
+
+  _mapStale(seq) {
+    return seq !== this._mapSeq || !this.isConnected;
   }
 
   _mapKey(row) {
@@ -911,6 +922,7 @@ ${this._stopPinCss()}
     if (this._mapOverlay && this._openMapKey === key) return;
     this._closeVehicleMap();
     this._openingMap = key;
+    const seq = this._mapSeq;
     const gps0 = BkkLib.mapGpsLatLon(row.lat, row.lon);
     let lat = gps0 ? gps0[0] : NaN;
     let lon = gps0 ? gps0[1] : NaN;
@@ -927,9 +939,10 @@ ${this._stopPinCss()}
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
-      this._showMapNotice(t(lang, 'mapLeafletFail'));
+      if (!this._mapStale(seq)) this._showMapNotice(t(lang, 'mapLeafletFail'));
       return;
     }
+    if (this._mapStale(seq)) return;
     const overlay = document.createElement('div');
     overlay.className = 'ht-map-overlay';
     const sub = this._mapTypeLabel(row.vehicle || row.type, lang)
@@ -1012,10 +1025,7 @@ ${this._stopPinCss()}
     } catch (_e) { /* timetable row still shows the live dot */ }
     /* Same spot as the boarding stop (a loop line, a bad lookup): one pin. */
     if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
-    if (!this._map || this._map !== map || !this._mapOverlay) {
-      this._openingMap = '';
-      return;
-    }
+    if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
     const pos = BkkLib.mapGpsLatLon(lat, lon);
     const hasPosition = !!pos;
     if (hasPosition) {
@@ -1278,7 +1288,7 @@ ${this._stopPinCss()}
       await run();
       if (!this.isConnected || gen !== this._gen) return;
       if (!this._shouldPoll()) return;
-      const every = Math.max(15, Number(cfg.refresh || 45)) * 1000;
+      const every = refreshSeconds(cfg.refresh) * 1000;
       this._poll = setInterval(run, every);
     } finally {
       if (gen === this._gen) this._reloadActive = false;

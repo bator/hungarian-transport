@@ -31,6 +31,17 @@ export function clampMinutesAfter(value) {
   return Math.min(MAX_MINUTES_AFTER, Math.max(MIN_MINUTES_AFTER, Math.round(n)));
 }
 
+/* Poll interval in seconds from the card's `refresh`. A value that is not a
+   number ("30s") must not reach setInterval as NaN, which polls at once and
+   forever. */
+export const DEFAULT_REFRESH_S = 45;
+export function refreshSeconds(value) {
+  if (value == null || value === '') return DEFAULT_REFRESH_S;
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_REFRESH_S;
+  return Math.min(3600, Math.max(15, Math.round(n)));
+}
+
 export function maxDepartureRows(horizon) {
   const h = clampMinutesAfter(horizon);
   const cap = h >= 480 ? 80 : 40;

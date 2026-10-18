@@ -35,7 +35,8 @@ Object.assign(BkkLib, {
         },
       });
       if (!res.ok) throw new Error(`Transitous HTTP ${res.status}`);
-      return res.json();
+      /* Awaited here, so the timeout also covers the body. */
+      return await res.json();
     } catch (err) {
       if (err && err.name === 'AbortError') throw new Error('Transitous timeout');
       throw err;
