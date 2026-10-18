@@ -907,11 +907,11 @@ const plan = document.createElement('hungarian-transit-stop-card-plan');
 document.body.appendChild(plan);
 plan.hass = { states: {}, language: 'hu' };
 plan.setConfig({ language: 'hu' });
-check('planner does not auto-refresh after a trip is loaded',
+check('planner does not auto-refresh, but its countdowns tick',
   plan._shouldPoll() === false
-  && plan._tick === null
+  && plan._tick !== null
   && card._shouldPoll() === true,
-  JSON.stringify({ planPoll: plan._shouldPoll(), planTick: plan._tick, hopPoll: card._shouldPoll() }));
+  JSON.stringify({ planPoll: plan._shouldPoll(), planTick: !!plan._tick, hopPoll: card._shouldPoll() }));
 check('planner skips reconnect reload while a trip is on screen',
   (() => {
     plan._journey = { durationMin: 26, legs: [{ walk: false, label: 'M4' }] };
@@ -2029,9 +2029,38 @@ check('mavShapeForRow prefers suburban line then train number',
   && src.includes('idx.l[line]')
   && src.includes('idx.l[label]')
   && src.includes('idx.n[num]'));
-check('mav index miss is not cached',
-  src.includes('const empty = !idx || !Array.isArray(idx.p) || idx.p.length < 1')
-  && src.includes('if (empty) cache.delete(url)'));
+{
+  /* An empty or failed MÁV index is kept for a while: every train-row map
+     open must not wait 45 s on a stalled server again. */
+  const keepLoad = Lib._loadMavIndex;
+  Lib._mavP.clear();
+  Lib._mavEmptyAt.clear();
+  let loads = 0;
+  Lib._loadMavIndex = async () => { loads += 1; return { n: {}, l: {}, p: [] }; };
+  const first = await Lib.mavIndex();
+  await Lib.mavIndex();
+  check('an empty MÁV index is not refetched at once',
+    loads === 1 && Array.isArray(first.p) && first.p.length === 0 && Lib._mavEmptyAt.size === 1,
+    JSON.stringify({ loads, emptyAt: Lib._mavEmptyAt.size }));
+  const url = Array.from(Lib._mavEmptyAt.keys())[0];
+  Lib._mavEmptyAt.set(url, Date.now() - Lib._mavEmptyRetryMs - 1);
+  Lib._loadMavIndex = async () => { loads += 1; throw new Error('stalled'); };
+  const retried = await Lib.mavIndex();
+  await Lib.mavIndex();
+  check('after the hold the MÁV index is fetched again, and a failure is held too',
+    loads === 2 && retried.p.length === 0 && Lib._mavEmptyAt.has(url),
+    JSON.stringify({ loads }));
+  Lib._mavEmptyAt.set(url, Date.now() - Lib._mavEmptyRetryMs - 1);
+  Lib._loadMavIndex = async () => { loads += 1; return { v: 2, st: [], n: { 1: 0 }, l: {}, p: ['abc'] }; };
+  const good = await Lib.mavIndex();
+  await Lib.mavIndex();
+  check('a loaded MÁV index clears the hold and stays cached',
+    loads === 3 && good.p.length === 1 && !Lib._mavEmptyAt.has(url),
+    JSON.stringify({ loads, held: Lib._mavEmptyAt.has(url) }));
+  Lib._mavP.clear();
+  Lib._mavEmptyAt.clear();
+  Lib._loadMavIndex = keepLoad;
+}
 check('transitous host is api.transitous.org',
   src.includes("const TRANSITOUS = 'https://api.transitous.org'")
   && src.includes('String(TRANSITOUS).replace(/\\/$/, \'\')')
@@ -2044,7 +2073,6 @@ check('isTrainRow is rail and elvira only',
 check('hop map still tries FUTAR geometry when MOTIS misses the headsign',
   src.includes('const canFutar')
   && src.includes('if (canFutar)')
-  && src.includes('hassTripShape')
   && src.includes('matchHassVehicle'));
 check('train with GPS skips FUTAR hop shape',
   !Lib.allowFutarHopShape({ vehicle: 'rail', tripId: 'elvira:1' }, true)
@@ -2193,27 +2221,26 @@ check('pickMotisVehicle still matches Göcsej by train number', (() => {
     language: 'hu', apiKey: 'x',
     stopLat: 47.46, stopLon: 19.02,
   });
-  card._hass = { connection: {} };
+  let serviceCalls = 0;
+  card._hass = { connection: { sendMessagePromise: async () => { serviceCalls += 1; return {}; } } };
   const origMotis = Lib.motisShapeForHop;
-  const origHass = Lib.hassTripShape;
+  const origHassService = Lib.hassService;
   const motisShape = [[47.18, 18.42], [47.46, 19.02]];
-  const futarShape = [[47.50, 19.54], [47.23, 16.62]];
   try {
     Lib.motisShapeForHop = async () => ({ shape: motisShape, coversHead: true });
-    Lib.hassTripShape = async () => futarShape;
+    Lib.hassService = async () => { serviceCalls += 1; return null; };
     const got = await card._loadRowMapShape({
       label: 'GÖCSEJ', trainNumber: '954', vehicle: 'rail',
       tripId: 'BKK_954_1', lat: 47.50, lon: 19.55,
       shape: motisShape,
     });
-    check('loadRowMapShape prefers FUTAR when GPS is far from MOTIS',
-      got.shape.length === 2
-      && got.shape[0][1] === 19.54
-      && got.shape[1][1] === 16.62,
-      JSON.stringify(got.shape));
+    /* bkk_stop has no trip_shape service: a train map never asks HA for one. */
+    check('loadRowMapShape never calls Home Assistant for a train shape',
+      serviceCalls === 0 && got.shape.length === 2 && got.shape[1][1] === 19.02,
+      JSON.stringify({ serviceCalls, shape: got.shape }));
   } finally {
     Lib.motisShapeForHop = origMotis;
-    Lib.hassTripShape = origHass;
+    Lib.hassService = origHassService;
   }
 }
 check('pickMotisHopRow matches a bus route number', (() => {
@@ -2288,19 +2315,33 @@ check('hop map polyline is unclipped SVG on the overlay pane',
     && !vm.includes('boardMapLayers')
     && !vm.includes('mapAllTrips'));
 }
-check('hop map loads FUTAR geometry through Home Assistant',
-  src.includes('hassTripShape') && src.includes("'trip_shape'"));
+check('no card code asks bkk_stop for a trip_shape',
+  !src.includes('hassTripShape') && !src.includes("'trip_shape'"));
 {
-  const shape = [[47.49923, 19.02468], [47.11915, 17.91143]];
-  const wrapped = await Lib.hassTripShape({
-    connection: { sendMessagePromise: async () => ({ response: { shape } }) },
-  }, 'x', 'BKK_90681_106');
-  const flat = await Lib.hassTripShape({
-    connection: { sendMessagePromise: async () => ({ shape }) },
-  }, 'x', 'BKK_90681_106');
-  check('hassTripShape reads wrapped and flat service payloads',
-    wrapped.length === 2 && wrapped[1][1] === 17.91143
-    && flat.length === 2 && flat[0][0] === 47.49923);
+  /* The bkk_stop companion is optional: without it (or without the service)
+     no call_service round trip is made, the call resolves empty at once. */
+  let calls = 0;
+  const conn = { sendMessagePromise: async () => { calls += 1; return { vehicles: [{ id: 'v1' }], points: 'abc' }; } };
+  const bare = { connection: conn, services: { hungarian_transport: { futar: {} } } };
+  const withCompanion = { connection: conn, services: { bkk_stop: { coach_positions: {}, coach_shape: {} } } };
+  check('hasCompanionService reads hass.services.bkk_stop',
+    !Lib.hasCompanionService(bare, 'coach_positions') && !Lib.hasCompanionService(null, 'coach_shape')
+    && !Lib.hasCompanionService({ connection: conn, services: { bkk_stop: {} } }, 'coach_shape')
+    && Lib.hasCompanionService(withCompanion, 'coach_positions'));
+  Lib._coachPosCache = null;
+  const noPos = await Lib.coachPositions(bare);
+  const noShape = await Lib.coachShape(bare, '1050', 'Győr');
+  const noSvc = await Lib.hassService(bare, 'coach_positions', {});
+  check('without the companion coachPositions and coachShape return empty with no service call',
+    calls === 0 && Array.isArray(noPos) && noPos.length === 0 && noShape === '' && noSvc === null,
+    JSON.stringify({ calls, noPos, noShape, noSvc }));
+  Lib._coachPosCache = null;
+  const pos = await Lib.coachPositions(withCompanion);
+  const shape = await Lib.coachShape(withCompanion, '1050', 'Győr');
+  check('with the companion the coach services are called',
+    calls === 2 && pos.length === 1 && pos[0].id === 'v1' && shape === 'abc',
+    JSON.stringify({ calls, pos, shape }));
+  Lib._coachPosCache = null;
 }
 check('coach route keys match SZ009 with 9',
   Lib.coachRouteKeys('SZ009').indexOf('9') >= 0
@@ -2456,8 +2497,7 @@ check('enrichFromHass keeps EMMA GPS over a FUTAR vehicle pin', (() => {
 })());
 check('hop map bus shape uses FUTAR trip-details polyline',
   src.includes('futarTripShape')
-  && src.includes('packed && packed.polyline')
-  && src.includes("BkkLib.hassService(hass, 'trip_shape'"));
+  && src.includes('packed && packed.polyline'));
 check('decodePolyline accepts a FUTAR polyline object',
   Lib.decodePolyline({ points: '_p~iF~ps|U' }).length >= 1);
 check('clipShapeToHop drops the prefix before origin', (() => {
@@ -3585,14 +3625,13 @@ Lib.mavIndex = origMavIndex;
 /* Trains Transitous misses still get a route: FUTÁR's trip details. */
 {
   const keep = {};
-  ['mavShapeForRow', 'motisShapeForHop', 'hassTripShape', 'futarTripShape', 'tripHopStops', 'stopArea', 'transitousStopRef']
+  ['mavShapeForRow', 'motisShapeForHop', 'futarTripShape', 'tripHopStops', 'stopArea', 'transitousStopRef']
     .forEach((k) => { keep[k] = Lib[k]; });
   const futarLine = [[47.2300, 16.6200], [47.1836, 18.4247], [47.3157, 18.7880], [47.4643, 19.0206], [47.4989, 19.0250]];
   let futarCalls = 0;
   let motisResult = { shape: [], board: [47.1836, 18.4247], dest: [47.4643, 19.0206], coversHead: false, hit: null };
   Lib.mavShapeForRow = async () => [];
   Lib.motisShapeForHop = async () => motisResult;
-  Lib.hassTripShape = async () => [];
   Lib.futarTripShape = async () => { futarCalls += 1; return futarLine; };
   Lib.tripHopStops = async () => ({ board: [47.1836, 18.4247], alight: [47.4643, 19.0206] });
   Lib.stopArea = async () => '';
@@ -3661,12 +3700,11 @@ Lib.mavIndex = origMavIndex;
 }
 {
   const keep = {};
-  ['mavIndex', 'gtfsRowShape', 'motisShapeForHop', 'hassTripShape', 'futarTripShape', 'tripHopStops', 'stopArea', 'transitousStopRef', 'coachShape']
+  ['mavIndex', 'gtfsRowShape', 'motisShapeForHop', 'futarTripShape', 'tripHopStops', 'stopArea', 'transitousStopRef', 'coachShape']
     .forEach((k) => { keep[k] = Lib[k]; });
   Lib.mavIndex = async () => ({ v: 2, st: [], p: [], n: {}, l: {} });
   Lib.gtfsRowShape = async () => null;
   Lib.motisShapeForHop = async () => ({ shape: [], board: null, dest: null, coversHead: false, hit: null });
-  Lib.hassTripShape = async () => [];
   Lib.futarTripShape = async () => [];
   Lib.tripHopStops = async () => null;
   Lib.stopArea = async () => '';
@@ -4146,6 +4184,238 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   check('the history keeps the 24 most used stops', kept.length === 24 && kept[0].id === 'S29' && !kept.some((e) => e.id === 'S0'),
     JSON.stringify(kept.map((e) => e.id).slice(0, 3)));
   Lib._stopHistory = null;
+}
+
+/* ---- Card-side review batch ---- */
+
+/* Sections view sizing. */
+{
+  const hop = document.createElement('hungarian-transport-card');
+  const pl = document.createElement('hungarian-transit-stop-card-plan');
+  const g1 = hop.getGridOptions();
+  const g2 = pl.getGridOptions();
+  check('both cards publish grid options for the sections view',
+    g1.columns === 12 && g1.min_columns === 6 && g1.rows === 'auto'
+    && g2.columns === 12 && g2.min_columns === 6 && g2.rows === 'auto' && g2.min_rows === 6,
+    JSON.stringify({ g1, g2 }));
+}
+
+/* setConfig normalises hand-written YAML and tells a cosmetic edit from a data change. */
+{
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu' };
+  let reloads = 0;
+  c._reloadSafe = () => { reloads += 1; };
+  c.setConfig({ stopId: 42, stopName: 'Fő tér', destKey: 'x', destName: 7, routeIds: '9, 109,,', minutesAfter: 9999, volan: true });
+  check('setConfig normalises routeIds, ids, names and minutesAfter',
+    c._config.stopId === '42' && c._config.destName === '7'
+    && JSON.stringify(c._config.routeIds) === '["9","109"]' && c._config.minutesAfter === 480
+    && reloads === 1,
+    JSON.stringify({ cfg: c._config, reloads }));
+  c.setConfig({ stopId: '42', stopName: 'Fő tér', destKey: 'x', destName: '7', routeIds: 7, volan: true });
+  check('a non-list routeIds becomes an empty list', JSON.stringify(c._config.routeIds) === '[]' && reloads === 2,
+    JSON.stringify(c._config.routeIds));
+  c._tripCache = { keep: 1 };
+  c._rows = [{ label: 'kept', headsign: 'x', depTs: Math.floor(Date.now() / 1000) + 600 }];
+  c._paint();
+  c.setConfig({ stopId: '42', stopName: 'Fő tér', destKey: 'x', destName: '7', routeIds: [], volan: true, name: 'Új cím' });
+  check('a title-only change repaints without a reload and keeps the rows and caches',
+    reloads === 2 && c._tripCache.keep === 1 && c._rows.length === 1
+    && c.shadowRoot.querySelector('.head').textContent === 'Új cím'
+    && c.shadowRoot.innerHTML.includes('>kept<'),
+    JSON.stringify({ reloads, head: c.shadowRoot.querySelector('.head').textContent }));
+  c.setConfig({ stopId: '42', stopName: 'Fő tér', destKey: 'x', destName: '7', routeIds: [], volan: true, name: 'Új cím', language: 'en' });
+  check('a language-only change does not reload either', reloads === 2, String(reloads));
+  c.setConfig({ stopId: '42', stopName: 'Fő tér', destKey: 'x', destName: '7', routeIds: [], volan: true, name: 'Új cím', language: 'en', minutesAfter: 60 });
+  check('a look-ahead change reloads', reloads === 3 && c._tripCache.keep === undefined, String(reloads));
+  c.remove();
+
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  ed.setConfig({ routeIds: 'a, b', stopId: 5, volan: true });
+  check('the editor normalises its config the same way',
+    JSON.stringify(ed._config.routeIds) === '["a","b"]' && ed._config.stopId === '5',
+    JSON.stringify(ed._config));
+  ed.remove();
+}
+
+/* Both stops set but FUTÁR out of reach: say so, not "no departures". */
+{
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ stopId: 'BKK_F00001', stopName: 'Keleti', destKey: 'blaha', destName: 'Blaha' });
+  await new Promise((r) => setTimeout(r, 10));
+  const err = c.shadowRoot.querySelector('.err');
+  check('without FUTÁR access the card shows the no-API-key error instead of no departures',
+    !!err && err.textContent.includes('Nincs BKK API kulcs')
+    && !c.shadowRoot.innerHTML.includes('Nincs közelgő indulás'),
+    JSON.stringify({ err: err && err.textContent, body: c.shadowRoot.querySelector('.body').innerHTML.slice(0, 80) }));
+  c.remove();
+  const v = document.createElement('hungarian-transport-card');
+  document.body.appendChild(v);
+  v.hass = { states: {}, language: 'hu', services: {} };
+  v._reloadSafe = () => {};
+  v.setConfig({ stopId: 'volan_1', stopName: 'Győr', destKey: 'pápa', destName: 'Pápa', volan: true });
+  /* The ready branch paints "loading" before its first await; the not-ready
+     branch sets the error synchronously. The fetch itself is then discarded. */
+  const running = v._reload();
+  const readyPath = !v._err && v._loading === true;
+  v._gen += 1;
+  running.catch(() => {});
+  check('a Volán board without a key is not an error', readyPath, JSON.stringify({ err: v._err, loading: v._loading }));
+  v.remove();
+}
+
+/* Background tab: no polling, no ticking; back in front: one run and the timers again. */
+{
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu' };
+  let reloads = 0;
+  c._reloadSafe = () => { reloads += 1; };
+  c.setConfig({ stopId: 'volan_1', stopName: 'Győr', destKey: 'pápa', destName: 'Pápa', volan: true });
+  c._poll = setInterval(() => {}, 1e6);
+  let vis = 'visible';
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => vis });
+  vis = 'hidden';
+  document.dispatchEvent(new Event('visibilitychange'));
+  check('a hidden page stops the poll and the tick', c._poll === null && c._tick === null && reloads === 1,
+    JSON.stringify({ poll: !!c._poll, tick: !!c._tick, reloads }));
+  c._startTick();
+  check('the tick does not start while hidden', c._tick === null);
+  vis = 'visible';
+  document.dispatchEvent(new Event('visibilitychange'));
+  check('back in front the card reloads once and ticks again', reloads === 2 && c._tick !== null,
+    JSON.stringify({ reloads, tick: !!c._tick }));
+  c.remove();
+  c._tick = setInterval(() => {}, 1e6);
+  vis = 'hidden';
+  document.dispatchEvent(new Event('visibilitychange'));
+  check('a detached card no longer listens to visibility', c._tick !== null && reloads === 2);
+  clearInterval(c._tick);
+  c._tick = null;
+  delete document.visibilityState;
+  check('hop card ticks and polls stop on hidden in source',
+    src.includes("document.addEventListener('visibilitychange'") && src.includes("document.removeEventListener('visibilitychange'"));
+}
+
+/* Editor: typing the title must not restart a destination load in flight. */
+{
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  const keepReach = Lib.reachableDests;
+  let loads = 0;
+  let release = null;
+  Lib.reachableDests = () => { loads += 1; return new Promise((r) => { release = r; }); };
+  ed.setConfig({ volan: true, stopId: 'volan_1', stopName: 'Győr', name: 'G' });
+  ed.setConfig({ volan: true, stopId: 'volan_1', stopName: 'Győr', name: 'Gy' });
+  ed.setConfig({ volan: true, stopId: 'volan_1', stopName: 'Győr', name: 'Győ' });
+  check('intermediate setConfigs do not restart the destination load',
+    loads === 1 && ed._destsLoading && ed._loadingStop === 'volan_1', JSON.stringify({ loads, loading: ed._destsLoading }));
+  release({ dests: [{ key: 'pápa', name: 'Pápa' }], destRoutes: { 'pápa': ['volan_9'] } });
+  await new Promise((r) => setTimeout(r, 0));
+  ed.setConfig({ volan: true, stopId: 'volan_1', stopName: 'Győr', name: 'Győr' });
+  check('once loaded the stop is remembered and not loaded again',
+    loads === 1 && ed._loadedStop === 'volan_1' && !ed._destsLoading && ed._dests.length === 1,
+    JSON.stringify({ loads, loaded: ed._loadedStop }));
+  ed.setConfig({ volan: true, stopId: 'volan_2', stopName: 'Pápa', name: 'Győr' });
+  check('a new stop loads its destinations', loads === 2 && ed._loadingStop === 'volan_2', String(loads));
+  release({ dests: [], destRoutes: {} });
+  await new Promise((r) => setTimeout(r, 0));
+  Lib.reachableDests = keepReach;
+  ed.remove();
+}
+
+/* Stop history: per HA user in localStorage, null from HA is an answer, writes queue. */
+{
+  const store = new Map();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    },
+  });
+  const key = Lib.STOP_HISTORY_KEY;
+  store.set(key, JSON.stringify([{ id: 'SHARED', name: 'Shared' }]));
+  store.set(`${key}:u1`, JSON.stringify([{ id: 'MINE', name: 'Mine' }]));
+  Lib._stopHistory = null;
+  const failing = { connection: { a: 1 }, user: { id: 'u1' }, callWS: async () => { throw new Error('offline'); } };
+  const fallback = await Lib.loadStopHistory(failing);
+  check('a failed get_user_data falls back to this user\'s own browser copy',
+    fallback.length === 1 && fallback[0].id === 'MINE', JSON.stringify(fallback));
+  Lib._stopHistory = null;
+  const empty = { connection: { b: 1 }, user: { id: 'u1' }, callWS: async () => ({ value: null }) };
+  const none = await Lib.loadStopHistory(empty);
+  check('a null answer from Home Assistant means no history, not the browser copy', none.length === 0, JSON.stringify(none));
+  Lib._stopHistory = null;
+  const writes = [];
+  const u2 = {
+    connection: { c: 1 },
+    user: { id: 'u2' },
+    callWS: async (msg) => {
+      if (msg.type === 'frontend/set_user_data') { writes.push(msg.value); return null; }
+      return { value: [] };
+    },
+  };
+  const both = await Promise.all([
+    Lib.recordStop(u2, { id: 'P', name: 'Pápa' }),
+    Lib.recordStop(u2, { id: 'Q', name: 'Győr' }),
+  ]);
+  const final = await Lib.loadStopHistory(u2);
+  check('two picks in one tick both reach the history',
+    final.some((e) => e.id === 'P') && final.some((e) => e.id === 'Q')
+    && both[1].length === 2 && writes.length === 2 && writes[1].length === 2,
+    JSON.stringify({ final: final.map((e) => e.id), writes: writes.map((w) => w.map((e) => e.id)) }));
+  check('the browser copy is keyed by the HA user',
+    store.has(`${key}:u2`) && JSON.parse(store.get(`${key}:u2`)).length === 2
+    && JSON.parse(store.get(key)).length === 1,
+    JSON.stringify(Array.from(store.keys())));
+  Lib._stopHistory = null;
+  delete globalThis.localStorage;
+}
+
+/* Destination search: a destination whose name is inside the query must not match. */
+{
+  const dests = [{ key: 'eger', name: 'Eger' }, { key: 'egerszalok', name: 'Egerszalók' }];
+  const forEger = Lib.destHitsForQuery(dests, 'Eger', []).map((h) => h.name);
+  const forSzalok = Lib.destHitsForQuery(dests, 'Egerszalók', []).map((h) => h.name);
+  const words = Lib.destHitsForQuery([{ key: 'kelenfold', name: 'Kelenföld' }], 'kelenföld vasútállomás', []).map((h) => h.name);
+  check('destHitsForQuery: "Egerszalók" does not pull Eger, "Eger" still offers both',
+    forEger.length === 2 && forSzalok.length === 1 && forSzalok[0] === 'Egerszalók' && words.length === 1,
+    JSON.stringify({ forEger, forSzalok, words }));
+}
+
+/* Planner: invalidation stops a running destination search, detach clears timers, focus in the shadow root. */
+{
+  const pl = document.createElement('hungarian-transit-stop-card-plan');
+  document.body.appendChild(pl);
+  pl.hass = { states: {}, language: 'hu' };
+  pl._reloadSafe = () => {};
+  pl.setConfig({ language: 'hu' });
+  const seq0 = pl._destSearchSeq;
+  pl._invalidatePlan();
+  check('_invalidatePlan bumps the destination search sequence', pl._destSearchSeq === seq0 + 1);
+  check('the planner ticks its countdowns', pl._tick !== null && !src.includes('_startTick() {}'));
+  const q = pl._planEl('pq');
+  if (q) q.focus();
+  pl._syncPickerLabels();
+  check('planner reads focus from its shadow root, not from document',
+    !/document\.activeElement/.test(src.replace(/\/\*[\s\S]*?\*\//g, ''))
+    && (!q || pl.shadowRoot.activeElement === q),
+    String(!!q));
+  pl._searchTimer = setTimeout(() => {}, 1e6);
+  pl._destTimer = setTimeout(() => {}, 1e6);
+  pl.remove();
+  check('planner detach clears the search debounce timers', pl._searchTimer === null && pl._destTimer === null);
 }
 
 process.exit(failed ? 1 : 0);

@@ -39,18 +39,29 @@ Object.assign(BkkLib, {
     return BkkLib._indexCached(cityIndexUrl(), 'errCityHttp', 'errCityGunzip');
   },
   _mavP: new Map(),
+  /* When the index came back empty or failed: url -> the time of that answer.
+     Opening a train map must not wait on a stalled server again for a while. */
+  _mavEmptyAt: new Map(),
+  _mavEmptyRetryMs: 10 * 60 * 1000,
   mavIndex() {
     const url = mavIndexUrl();
     const cache = BkkLib._mavP;
     const hit = cache.get(url);
-    if (hit) return hit;
-    const p = BkkLib._loadMavIndex(url).then((idx) => {
-      const empty = !idx || !Array.isArray(idx.p) || idx.p.length < 1;
-      if (empty) cache.delete(url);
-      return idx && typeof idx === 'object' ? idx : { n: {}, l: {}, p: [] };
-    }).catch(() => {
+    if (hit) {
+      const emptyAt = BkkLib._mavEmptyAt.get(url);
+      if (!emptyAt || Date.now() - emptyAt < BkkLib._mavEmptyRetryMs) return hit;
       cache.delete(url);
-      return { n: {}, l: {}, p: [] };
+      BkkLib._mavEmptyAt.delete(url);
+    }
+    const empty = () => ({ n: {}, l: {}, p: [] });
+    const p = BkkLib._loadMavIndex(url).then((idx) => {
+      const ok = idx && typeof idx === 'object' && Array.isArray(idx.p) && idx.p.length > 0;
+      if (ok) BkkLib._mavEmptyAt.delete(url);
+      else BkkLib._mavEmptyAt.set(url, Date.now());
+      return idx && typeof idx === 'object' ? idx : empty();
+    }).catch(() => {
+      BkkLib._mavEmptyAt.set(url, Date.now());
+      return empty();
     });
     BkkLib._cacheIndex(cache, url, p, 4);
     return p;

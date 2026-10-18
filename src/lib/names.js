@@ -343,7 +343,9 @@ Object.assign(BkkLib, {
     (dests || []).forEach((d) => {
       if (f) {
         const dn = BkkLib.fold(d.name);
-        if (dn.indexOf(f) < 0 && f.indexOf(dn) < 0) return;
+        /* The query inside the name, or the whole name as words of a longer
+           query ("kelenfold vasutallomas"); "eger" must not pull Egerszalók. */
+        if (dn.indexOf(f) < 0 && (' ' + f + ' ').indexOf(' ' + dn + ' ') < 0) return;
       }
       add(d);
     });

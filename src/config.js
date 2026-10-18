@@ -31,6 +31,38 @@ export function clampMinutesAfter(value) {
   return Math.min(MAX_MINUTES_AFTER, Math.max(MIN_MINUTES_AFTER, Math.round(n)));
 }
 
+/* Keys that only change how the card looks: a change to them alone must not
+   refetch the departures. Everything else selects or filters the data. */
+export const PRESENTATION_KEYS = ['name', 'language', 'type'];
+const STRING_KEYS = ['name', 'stopId', 'stopName', 'destKey', 'destName', 'destStopId', 'city', 'apiKey', 'language', 'stopKind', 'destKind'];
+
+/* Hand-written YAML arrives as whatever the user typed: `routeIds: "9,109"`
+   would otherwise be split into characters by new Set(). */
+export function normalizeRouteIds(value) {
+  if (Array.isArray(value)) return value.filter((v) => v != null && v !== '').map((v) => String(v).trim()).filter(Boolean);
+  if (typeof value === 'string') return value.split(',').map((v) => v.trim()).filter(Boolean);
+  return [];
+}
+
+export function normalizeCardConfig(config) {
+  const cfg = Object.assign({}, config || {});
+  cfg.routeIds = normalizeRouteIds(cfg.routeIds);
+  STRING_KEYS.forEach((k) => {
+    if (!(k in cfg) || typeof cfg[k] === 'string') return;
+    cfg[k] = cfg[k] == null ? '' : String(cfg[k]);
+  });
+  if (cfg.minutesAfter != null && cfg.minutesAfter !== '') cfg.minutesAfter = clampMinutesAfter(cfg.minutesAfter);
+  return cfg;
+}
+
+/* A stable text for the data-selecting part of a config, to tell a cosmetic
+   edit (title, language) from one that needs a reload. */
+export function configDataKey(config) {
+  const cfg = config || {};
+  return JSON.stringify(Object.keys(cfg).filter((k) => PRESENTATION_KEYS.indexOf(k) < 0).sort()
+    .map((k) => [k, cfg[k]]));
+}
+
 /* Poll interval in seconds from the card's `refresh`. A value that is not a
    number ("30s") must not reach setInterval as NaN, which polls at once and
    forever. */

@@ -1,4 +1,4 @@
-import { ASSET_BASE, DEFAULT_MINUTES_AFTER, clampMinutesAfter, departureStillDue, maxDepartureRows, refreshSeconds, setCityIndexUrl, setMavIndexUrl, setVolanIndexUrl } from './config.js';
+import { ASSET_BASE, DEFAULT_MINUTES_AFTER, clampMinutesAfter, configDataKey, departureStillDue, maxDepartureRows, normalizeCardConfig, refreshSeconds, setCityIndexUrl, setMavIndexUrl, setVolanIndexUrl } from './config.js';
 import { errText, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 import { BKK_HOP_EDITOR } from './tags.js';
@@ -14,8 +14,10 @@ export class BKKHopCard extends HTMLElement {
     super();
     this.attachShadow({ mode: 'open' });
     this._config = {};
+    this._configDataKey = null;
     this._poll = null;
     this._tick = null;
+    this._onVisibility = null;
     this._hass = null;
     this._tripCache = {};
     this._rows = [];
@@ -69,7 +71,21 @@ export class BKKHopCard extends HTMLElement {
       try { this.attachShadow({ mode: 'open' }); } catch (_e) { /* already attached */ }
     }
     this._holdGate();
-    this._config = Object.assign({ routeIds: [] }, config || {});
+    const next = normalizeCardConfig(config);
+    const prevKey = this._configDataKey;
+    const nextKey = configDataKey(next);
+    this._config = next;
+    this._configDataKey = nextKey;
+    /* Only the title or the language changed (the editor emits on every
+       keystroke): redraw with the rows and timers it already has. */
+    if (prevKey != null && prevKey === nextKey && this._painted) {
+      try {
+        this._render();
+      } catch (err) {
+        this._showErr(err);
+      }
+      return;
+    }
     this._tripCache = {};
     this._err = '';
     this._keyTried = false;
@@ -135,6 +151,12 @@ export class BKKHopCard extends HTMLElement {
     return Math.max(1, Math.round((44 + rows * 30) / 50));
   }
 
+  /* Sections view: a departure board needs half a 12-column row at least to
+     keep the headsign readable; its height follows the rows. */
+  getGridOptions() {
+    return { columns: 12, min_columns: 6, rows: 'auto' };
+  }
+
   /* Home Assistant re-parents cards while editing a dashboard, so the timers
      have to come back after a detach. */
   _holdGate() {
@@ -145,9 +167,39 @@ export class BKKHopCard extends HTMLElement {
 
   connectedCallback() {
     this._holdGate();
+    this._bindVisibility();
     if (!this._painted) return;
     this._startTick();
     this._bindMapClicks();
+    if (!this._poll && !this._reloadActive && this._shouldReloadOnConnect()) this._reloadSafe();
+  }
+
+  _pageHidden() {
+    return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+  }
+
+  _bindVisibility() {
+    if (this._onVisibility || typeof document === 'undefined') return;
+    this._onVisibility = () => this._visibilityChanged();
+    document.addEventListener('visibilitychange', this._onVisibility);
+  }
+
+  _unbindVisibility() {
+    if (!this._onVisibility || typeof document === 'undefined') return;
+    document.removeEventListener('visibilitychange', this._onVisibility);
+    this._onVisibility = null;
+  }
+
+  /* A background tab must not poll the APIs or repaint countdowns nobody
+     sees. Back in front: one fresh run, then the timers again. */
+  _visibilityChanged() {
+    if (this._pageHidden()) {
+      if (this._poll) { clearInterval(this._poll); this._poll = null; }
+      if (this._tick) { clearInterval(this._tick); this._tick = null; }
+      return;
+    }
+    if (!this.isConnected || !this._painted) return;
+    this._startTick();
     if (!this._poll && !this._reloadActive && this._shouldReloadOnConnect()) this._reloadSafe();
   }
 
@@ -160,6 +212,7 @@ export class BKKHopCard extends HTMLElement {
   }
 
   disconnectedCallback() {
+    this._unbindVisibility();
     if (this._gateHeld) {
       this._gateHeld = false;
       BkkLib._gateCards = Math.max(0, BkkLib._gateCards - 1);
@@ -341,6 +394,8 @@ export class BKKHopCard extends HTMLElement {
      between refreshes without hitting the API again. */
   _startTick() {
     if (this._tick) clearInterval(this._tick);
+    this._tick = null;
+    if (this._pageHidden()) return;
     this._tick = setInterval(() => this._tickPaint(), 15000);
   }
 
@@ -867,12 +922,9 @@ ${this._stopPinCss()}
       } catch (_e) { /* FUTAR / MOTIS still fill */ }
     }
     if (canFutar && BkkLib.isTrainRow(row) && BkkLib.isFutarTripId(geomTrip)) {
-      try {
-        futarShape = await BkkLib.hassTripShape(this._hass, this._apiKey(), geomTrip);
-      } catch (_e) { /* other rows still draw */ }
-      /* Without the bkk_stop companion, or when Transitous misses the train
-         (BAKONY 905 from Szombathely), FUTÁR's own trip details still carry
-         the whole train route, along the tracks. */
+      /* When Transitous misses the train (BAKONY 905 from Szombathely),
+         FUTÁR's own trip details still carry the whole train route, along
+         the tracks. bkk_stop has no trip_shape service to ask instead. */
       if (futarShape.length < 2 && motisShape.length < 2 && this._hasFutar()) {
         try {
           futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
@@ -1184,6 +1236,10 @@ ${this._stopPinCss()}
     if (!ready) {
       this._rows = [];
       this._loading = false;
+      /* Both stops are set, so the only thing missing is FUTÁR access (bkk
+         or mav mode, no key on the card or in the integration): say that
+         instead of "no departures". */
+      if (cfg.stopId && cfg.destKey) this._err = t(this._lang(), 'errNoApiKey');
       this._paint();
       if (gen === this._gen) this._reloadActive = false;
       return;
@@ -1356,7 +1412,8 @@ ${this._stopPinCss()}
     try {
       await run();
       if (!this.isConnected || gen !== this._gen) return;
-      if (!this._shouldPoll()) return;
+      /* Hidden tab: the visibilitychange handler reloads and polls again. */
+      if (!this._shouldPoll() || this._pageHidden()) return;
       const every = refreshSeconds(cfg.refresh) * 1000;
       /* A run slower than the interval (a stalled ELVIRA call) skips the next
          tick instead of racing it: two runs could paint out of order. */

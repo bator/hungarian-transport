@@ -334,7 +334,7 @@ Object.assign(BkkLib, {
     (dests || []).forEach((d) => {
       if (f) {
         const dn = BkkLib.fold(d.name);
-        if (dn.indexOf(f) < 0 && f.indexOf(dn) < 0) return;
+        if (dn.indexOf(f) < 0 && (" " + f + " ").indexOf(" " + dn + " ") < 0) return;
       }
       add(d);
     });
@@ -522,6 +522,27 @@ function clampMinutesAfter(value) {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_MINUTES_AFTER;
   return Math.min(MAX_MINUTES_AFTER, Math.max(MIN_MINUTES_AFTER, Math.round(n)));
+}
+var PRESENTATION_KEYS = ["name", "language", "type"];
+var STRING_KEYS = ["name", "stopId", "stopName", "destKey", "destName", "destStopId", "city", "apiKey", "language", "stopKind", "destKind"];
+function normalizeRouteIds(value) {
+  if (Array.isArray(value)) return value.filter((v) => v != null && v !== "").map((v) => String(v).trim()).filter(Boolean);
+  if (typeof value === "string") return value.split(",").map((v) => v.trim()).filter(Boolean);
+  return [];
+}
+function normalizeCardConfig(config) {
+  const cfg = Object.assign({}, config || {});
+  cfg.routeIds = normalizeRouteIds(cfg.routeIds);
+  STRING_KEYS.forEach((k) => {
+    if (!(k in cfg) || typeof cfg[k] === "string") return;
+    cfg[k] = cfg[k] == null ? "" : String(cfg[k]);
+  });
+  if (cfg.minutesAfter != null && cfg.minutesAfter !== "") cfg.minutesAfter = clampMinutesAfter(cfg.minutesAfter);
+  return cfg;
+}
+function configDataKey(config) {
+  const cfg = config || {};
+  return JSON.stringify(Object.keys(cfg).filter((k) => PRESENTATION_KEYS.indexOf(k) < 0).sort().map((k) => [k, cfg[k]]));
 }
 var DEFAULT_REFRESH_S = 45;
 function refreshSeconds(value) {
@@ -3491,18 +3512,29 @@ Object.assign(BkkLib, {
     return BkkLib._indexCached(cityIndexUrl(), "errCityHttp", "errCityGunzip");
   },
   _mavP: /* @__PURE__ */ new Map(),
+  /* When the index came back empty or failed: url -> the time of that answer.
+     Opening a train map must not wait on a stalled server again for a while. */
+  _mavEmptyAt: /* @__PURE__ */ new Map(),
+  _mavEmptyRetryMs: 10 * 60 * 1e3,
   mavIndex() {
     const url = mavIndexUrl();
     const cache = BkkLib._mavP;
     const hit = cache.get(url);
-    if (hit) return hit;
-    const p = BkkLib._loadMavIndex(url).then((idx) => {
-      const empty = !idx || !Array.isArray(idx.p) || idx.p.length < 1;
-      if (empty) cache.delete(url);
-      return idx && typeof idx === "object" ? idx : { n: {}, l: {}, p: [] };
-    }).catch(() => {
+    if (hit) {
+      const emptyAt = BkkLib._mavEmptyAt.get(url);
+      if (!emptyAt || Date.now() - emptyAt < BkkLib._mavEmptyRetryMs) return hit;
       cache.delete(url);
-      return { n: {}, l: {}, p: [] };
+      BkkLib._mavEmptyAt.delete(url);
+    }
+    const empty = () => ({ n: {}, l: {}, p: [] });
+    const p = BkkLib._loadMavIndex(url).then((idx) => {
+      const ok = idx && typeof idx === "object" && Array.isArray(idx.p) && idx.p.length > 0;
+      if (ok) BkkLib._mavEmptyAt.delete(url);
+      else BkkLib._mavEmptyAt.set(url, Date.now());
+      return idx && typeof idx === "object" ? idx : empty();
+    }).catch(() => {
+      BkkLib._mavEmptyAt.set(url, Date.now());
+      return empty();
     });
     BkkLib._cacheIndex(cache, url, p, 4);
     return p;
@@ -4284,7 +4316,7 @@ Object.assign(BkkLib, {
   _coachPosInflight: null,
   _coachPosCache: null,
   async coachPositions(hass) {
-    if (!hass) return [];
+    if (!BkkLib.hasCompanionService(hass, "coach_positions")) return [];
     const now = Date.now();
     const hit = BkkLib._coachPosCache;
     if (hit && now - hit.ts < 2e4) return hit.vehicles;
@@ -4307,7 +4339,7 @@ Object.assign(BkkLib, {
     return run;
   },
   async coachShape(hass, route, headsign) {
-    if (!hass || !route) return "";
+    if (!route || !BkkLib.hasCompanionService(hass, "coach_shape")) return "";
     const serviceData = { route: String(route), headsign: String(headsign || "") };
     try {
       const res = await BkkLib.hassService(hass, "coach_shape", serviceData);
@@ -4345,20 +4377,18 @@ Object.assign(BkkLib, {
     }
     return null;
   },
-  /* Companion bkk_stop services (coach GPS and shapes). */
-  hassService(hass, service, serviceData) {
-    return BkkLib.callServiceResponse(hass, "bkk_stop", service, serviceData);
+  /* The bkk_stop companion integration is optional. Without it every poll
+     with GTFS or MOTIS rows would make a failing call_service round trip, so
+     its services are only called when hass lists them. */
+  hasCompanionService(hass, service) {
+    const domain = hass && hass.services && hass.services.bkk_stop;
+    return !!(domain && typeof domain === "object" && domain[service]);
   },
-  async hassTripShape(hass, apiKey, tripId) {
-    if (!hass || !BkkLib.isFutarTripId(tripId) || !apiKey) return [];
-    const serviceData = { trip_id: String(tripId), api_key: String(apiKey) };
-    try {
-      const res = await BkkLib.hassService(hass, "trip_shape", serviceData);
-      const payload = BkkLib.servicePayload(res);
-      return BkkLib.validMapShape(payload.shape || payload.points || []);
-    } catch (_e) {
-      return [];
-    }
+  /* Companion bkk_stop services (coach GPS and shapes). Resolves to null
+     when the companion is not installed or lacks the service. */
+  hassService(hass, service, serviceData) {
+    if (!BkkLib.hasCompanionService(hass, service)) return Promise.resolve(null);
+    return BkkLib.callServiceResponse(hass, "bkk_stop", service, serviceData);
   },
   /* FUTÁR trip-details.json already ships the street polyline
      (8E Kelenföld-bound: ~1000 points, Újpalota → Kelenföld).
@@ -5506,22 +5536,30 @@ Object.assign(BkkLib, {
 var HISTORY_KEY = "hungarian_transport_planner_stops";
 var HISTORY_KEEP = 24;
 var HISTORY_HALF_LIFE_DAYS = 30;
-var localRead = () => {
+var localKey = (hass) => {
+  const uid = hass && hass.user && hass.user.id;
+  return uid ? `${HISTORY_KEY}:${uid}` : HISTORY_KEY;
+};
+var localRead = (hass) => {
   try {
-    return JSON.parse(globalThis.localStorage.getItem(HISTORY_KEY) || "[]");
+    return JSON.parse(globalThis.localStorage.getItem(localKey(hass)) || "[]");
   } catch (_e) {
     return [];
   }
 };
-var localWrite = (list) => {
+var localWrite = (hass, list) => {
   try {
-    globalThis.localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+    globalThis.localStorage.setItem(localKey(hass), JSON.stringify(list));
   } catch (_e) {
   }
 };
 Object.assign(BkkLib, {
   STOP_HISTORY_KEY: HISTORY_KEY,
+  stopHistoryLocalKey: localKey,
   _stopHistory: null,
+  /* Writes queue up behind each other: two picks in one tick (an origin and
+     a destination) must both land in the list. */
+  _stopHistoryWrite: Promise.resolve(),
   stopHistoryScore(entry, now) {
     const ageDays = Math.max(0, ((now || Date.now()) - (Number(entry && entry.t) || 0)) / 864e5);
     return (Number(entry && entry.n) || 1) * Math.pow(0.5, ageDays / HISTORY_HALF_LIFE_DAYS);
@@ -5555,12 +5593,13 @@ Object.assign(BkkLib, {
       if (hass && typeof hass.callWS === "function") {
         try {
           const res = await hass.callWS({ type: "frontend/get_user_data", key: HISTORY_KEY });
-          list = res && res.value;
+          list = Array.isArray(res && res.value) ? res.value : [];
         } catch (_e) {
-          list = null;
+          list = localRead(hass);
         }
+      } else {
+        list = localRead(hass);
       }
-      if (!Array.isArray(list)) list = localRead();
       return BkkLib._cleanStopHistory(list);
     })();
     BkkLib._stopHistory = { conn, p };
@@ -5568,8 +5607,14 @@ Object.assign(BkkLib, {
   },
   /* Count a pick (an origin, a destination or a suggestion), keep the most
      used, and store the list for this user. */
-  async recordStop(hass, stop) {
+  recordStop(hass, stop) {
     if (!stop || !stop.id || !stop.name) return BkkLib.loadStopHistory(hass);
+    const run = BkkLib._stopHistoryWrite.then(() => BkkLib._recordStopNow(hass, stop));
+    BkkLib._stopHistoryWrite = run.catch(() => {
+    });
+    return run;
+  },
+  async _recordStopNow(hass, stop) {
     const list = (await BkkLib.loadStopHistory(hass)).map((e) => Object.assign({}, e));
     const now = Date.now();
     const id = String(stop.id);
@@ -5589,7 +5634,7 @@ Object.assign(BkkLib, {
     if (stop.label) entry.label = String(stop.label);
     const next = BkkLib._cleanStopHistory(list.sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now)).slice(0, HISTORY_KEEP));
     BkkLib._stopHistory = { conn: hass && hass.connection || null, p: Promise.resolve(next) };
-    localWrite(next);
+    localWrite(hass, next);
     if (hass && typeof hass.callWS === "function") {
       try {
         await hass.callWS({ type: "frontend/set_user_data", key: HISTORY_KEY, value: next });
@@ -5620,6 +5665,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._dests = [];
     this._destRoutes = {};
     this._loadedStop = "";
+    this._loadingStop = "";
     this._destsLoading = false;
     this._keyOk = null;
     this._probingKey = false;
@@ -5641,7 +5687,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     }
   }
   setConfig(config) {
-    this._config = Object.assign({ routeIds: [] }, config || {});
+    this._config = normalizeCardConfig(config);
     if (!this._cache) this._cache = {};
     if (!this._dests) this._dests = [];
     if (!this._destRoutes) this._destRoutes = {};
@@ -5658,7 +5704,9 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._syncApiKey();
     this._syncMode();
     this._probeKey();
-    if (this._config.stopId && (this._hasFutar() || this._mode() === "volan" || this._mode() === "helyi") && this._loadedStop !== this._config.stopId) {
+    const stopId = this._config.stopId;
+    const loading = this._destsLoading && this._loadingStop === stopId;
+    if (stopId && (this._hasFutar() || this._mode() === "volan" || this._mode() === "helyi") && this._loadedStop !== stopId && !loading) {
       this._loadDests();
     }
   }
@@ -6274,6 +6322,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     const stopId = this._config.stopId;
     const seq = ++this._destSeq;
     this._destsLoading = true;
+    this._loadingStop = stopId;
     const box = this._el("destHits");
     if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "destLoading")) + "</span>";
     try {
@@ -6303,7 +6352,10 @@ var BKKHopCardEditor = class extends HTMLElement {
       this._error(errText(this._lang(), err));
       if (box) box.innerHTML = "";
     } finally {
-      if (seq === this._destSeq) this._destsLoading = false;
+      if (seq === this._destSeq) {
+        this._destsLoading = false;
+        this._loadingStop = "";
+      }
     }
   }
   _pickStop(stop, which) {
@@ -6356,8 +6408,10 @@ var BKKHopCard = class extends HTMLElement {
     super();
     this.attachShadow({ mode: "open" });
     this._config = {};
+    this._configDataKey = null;
     this._poll = null;
     this._tick = null;
+    this._onVisibility = null;
     this._hass = null;
     this._tripCache = {};
     this._rows = [];
@@ -6410,7 +6464,19 @@ var BKKHopCard = class extends HTMLElement {
       }
     }
     this._holdGate();
-    this._config = Object.assign({ routeIds: [] }, config || {});
+    const next = normalizeCardConfig(config);
+    const prevKey = this._configDataKey;
+    const nextKey = configDataKey(next);
+    this._config = next;
+    this._configDataKey = nextKey;
+    if (prevKey != null && prevKey === nextKey && this._painted) {
+      try {
+        this._render();
+      } catch (err) {
+        this._showErr(err);
+      }
+      return;
+    }
     this._tripCache = {};
     this._err = "";
     this._keyTried = false;
@@ -6468,6 +6534,11 @@ var BKKHopCard = class extends HTMLElement {
     const rows = Math.max(1, (this._rows || []).length);
     return Math.max(1, Math.round((44 + rows * 30) / 50));
   }
+  /* Sections view: a departure board needs half a 12-column row at least to
+     keep the headsign readable; its height follows the rows. */
+  getGridOptions() {
+    return { columns: 12, min_columns: 6, rows: "auto" };
+  }
   /* Home Assistant re-parents cards while editing a dashboard, so the timers
      have to come back after a detach. */
   _holdGate() {
@@ -6477,9 +6548,41 @@ var BKKHopCard = class extends HTMLElement {
   }
   connectedCallback() {
     this._holdGate();
+    this._bindVisibility();
     if (!this._painted) return;
     this._startTick();
     this._bindMapClicks();
+    if (!this._poll && !this._reloadActive && this._shouldReloadOnConnect()) this._reloadSafe();
+  }
+  _pageHidden() {
+    return typeof document !== "undefined" && document.visibilityState === "hidden";
+  }
+  _bindVisibility() {
+    if (this._onVisibility || typeof document === "undefined") return;
+    this._onVisibility = () => this._visibilityChanged();
+    document.addEventListener("visibilitychange", this._onVisibility);
+  }
+  _unbindVisibility() {
+    if (!this._onVisibility || typeof document === "undefined") return;
+    document.removeEventListener("visibilitychange", this._onVisibility);
+    this._onVisibility = null;
+  }
+  /* A background tab must not poll the APIs or repaint countdowns nobody
+     sees. Back in front: one fresh run, then the timers again. */
+  _visibilityChanged() {
+    if (this._pageHidden()) {
+      if (this._poll) {
+        clearInterval(this._poll);
+        this._poll = null;
+      }
+      if (this._tick) {
+        clearInterval(this._tick);
+        this._tick = null;
+      }
+      return;
+    }
+    if (!this.isConnected || !this._painted) return;
+    this._startTick();
     if (!this._poll && !this._reloadActive && this._shouldReloadOnConnect()) this._reloadSafe();
   }
   _shouldPoll() {
@@ -6489,6 +6592,7 @@ var BKKHopCard = class extends HTMLElement {
     return true;
   }
   disconnectedCallback() {
+    this._unbindVisibility();
     if (this._gateHeld) {
       this._gateHeld = false;
       BkkLib._gateCards = Math.max(0, BkkLib._gateCards - 1);
@@ -6672,6 +6776,8 @@ var BKKHopCard = class extends HTMLElement {
      between refreshes without hitting the API again. */
   _startTick() {
     if (this._tick) clearInterval(this._tick);
+    this._tick = null;
+    if (this._pageHidden()) return;
     this._tick = setInterval(() => this._tickPaint(), 15e3);
   }
   /* Between refreshes only the countdowns change. Rewriting the whole table
@@ -7162,10 +7268,6 @@ ${this._stopPinCss()}
       }
     }
     if (canFutar && BkkLib.isTrainRow(row) && BkkLib.isFutarTripId(geomTrip)) {
-      try {
-        futarShape = await BkkLib.hassTripShape(this._hass, this._apiKey(), geomTrip);
-      } catch (_e) {
-      }
       if (futarShape.length < 2 && motisShape.length < 2 && this._hasFutar()) {
         try {
           futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
@@ -7499,6 +7601,7 @@ ${this._stopPinCss()}
     if (!ready) {
       this._rows = [];
       this._loading = false;
+      if (cfg.stopId && cfg.destKey) this._err = t(this._lang(), "errNoApiKey");
       this._paint();
       if (gen === this._gen) this._reloadActive = false;
       return;
@@ -7673,7 +7776,7 @@ ${this._stopPinCss()}
     try {
       await run();
       if (!this.isConnected || gen !== this._gen) return;
-      if (!this._shouldPoll()) return;
+      if (!this._shouldPoll() || this._pageHidden()) return;
       const every = refreshSeconds(cfg.refresh) * 1e3;
       let busy = false;
       this._poll = setInterval(() => {
@@ -7730,6 +7833,9 @@ var BKKPlannerCard = class extends BKKHopCard {
   getCardSize() {
     return Math.max(6, super.getCardSize() + 3);
   }
+  getGridOptions() {
+    return { columns: 12, min_columns: 6, rows: "auto", min_rows: 6 };
+  }
   _departMode() {
     return "all";
   }
@@ -7747,6 +7853,7 @@ var BKKPlannerCard = class extends BKKHopCard {
      journey lookup still fetches belongs to the old pair and must not paint. */
   _invalidatePlan() {
     this._gen += 1;
+    this._destSearchSeq += 1;
     this._reloadActive = false;
     if (this._poll) {
       clearInterval(this._poll);
@@ -7761,10 +7868,6 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._journeyLoading = false;
     this._journeysDone = false;
     this._openJourney = 0;
-  }
-  /* A full paint remounts the inline map. Leave the countdown frozen until
-     the user changes origin, destination or the look-ahead. */
-  _startTick() {
   }
   _timed() {
     return this._when && this._when.mode !== "now" && this._when.at > 0;
@@ -7862,6 +7965,14 @@ var BKKPlannerCard = class extends BKKHopCard {
     return super._emptyBodyMessage(lang, cfg);
   }
   disconnectedCallback() {
+    if (this._searchTimer) {
+      clearTimeout(this._searchTimer);
+      this._searchTimer = null;
+    }
+    if (this._destTimer) {
+      clearTimeout(this._destTimer);
+      this._destTimer = null;
+    }
     this._teardownPlannerInlineMap();
     super.disconnectedCallback();
   }
@@ -8729,12 +8840,12 @@ ${this._stopPinCss()}
     }
     if (q) {
       q.placeholder = t(lang, "plannerSearchPlaceholder");
-      const editing = document.activeElement === q || !!(q.value || "").trim();
+      const editing = this.shadowRoot.activeElement === q || !!(q.value || "").trim();
       q.classList.toggle("compact-hide", !!cfg.stopName && !editing);
     }
     if (dq) {
       dq.placeholder = t(lang, "plannerDestPlaceholder");
-      const editing = document.activeElement === dq || !!(dq.value || "").trim();
+      const editing = this.shadowRoot.activeElement === dq || !!(dq.value || "").trim();
       dq.classList.toggle("compact-hide", !!cfg.destName && !editing);
     }
     this._paintFav();

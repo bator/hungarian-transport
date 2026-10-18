@@ -52,6 +52,10 @@ export class BKKPlannerCard extends BKKHopCard {
     return Math.max(6, super.getCardSize() + 3);
   }
 
+  getGridOptions() {
+    return { columns: 12, min_columns: 6, rows: 'auto', min_rows: 6 };
+  }
+
   _departMode() {
     return 'all';
   }
@@ -72,6 +76,8 @@ export class BKKPlannerCard extends BKKHopCard {
      journey lookup still fetches belongs to the old pair and must not paint. */
   _invalidatePlan() {
     this._gen += 1;
+    /* A destination search still running belongs to the old origin. */
+    this._destSearchSeq += 1;
     this._reloadActive = false;
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     this._rows = [];
@@ -84,10 +90,6 @@ export class BKKPlannerCard extends BKKHopCard {
     this._journeysDone = false;
     this._openJourney = 0;
   }
-
-  /* A full paint remounts the inline map. Leave the countdown frozen until
-     the user changes origin, destination or the look-ahead. */
-  _startTick() {}
 
   _timed() {
     return this._when && this._when.mode !== 'now' && this._when.at > 0;
@@ -186,6 +188,8 @@ export class BKKPlannerCard extends BKKHopCard {
   }
 
   disconnectedCallback() {
+    if (this._searchTimer) { clearTimeout(this._searchTimer); this._searchTimer = null; }
+    if (this._destTimer) { clearTimeout(this._destTimer); this._destTimer = null; }
     this._teardownPlannerInlineMap();
     super.disconnectedCallback();
   }
@@ -1087,12 +1091,12 @@ ${this._stopPinCss()}
     }
     if (q) {
       q.placeholder = t(lang, 'plannerSearchPlaceholder');
-      const editing = document.activeElement === q || !!(q.value || '').trim();
+      const editing = this.shadowRoot.activeElement === q || !!(q.value || '').trim();
       q.classList.toggle('compact-hide', !!cfg.stopName && !editing);
     }
     if (dq) {
       dq.placeholder = t(lang, 'plannerDestPlaceholder');
-      const editing = document.activeElement === dq || !!(dq.value || '').trim();
+      const editing = this.shadowRoot.activeElement === dq || !!(dq.value || '').trim();
       dq.classList.toggle('compact-hide', !!cfg.destName && !editing);
     }
     /* The suggestions follow the user's picks, so they are drawn again
