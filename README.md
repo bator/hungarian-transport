@@ -237,6 +237,13 @@ card picker; the visual editor and the on-card pickers both set look-ahead
 full itinerary. The older `custom:bkk-stop-card-plan` type remains registered
 as an alias.
 
+The suggestions under the origin are your own stops: every origin and
+destination you pick counts, the most used ones (and the recent ones, as an old
+count halves every 30 days) come first, and the one already picked is left out.
+They are kept per Home Assistant user in that user's own frontend storage, so
+your phone and your tablet show the same list; a new user sees none until
+they pick a stop.
+
 Under **When** the planner switches between **Now** (the live departure
 board, plus a faster transfer itinerary when there is one), **Depart** and
 **Arrive**. With a time picked it lists up to six itineraries for that moment,

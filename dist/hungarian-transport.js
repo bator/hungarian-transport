@@ -5502,6 +5502,111 @@ Object.assign(BkkLib, {
   }
 });
 
+// src/lib/stop-history.js
+var HISTORY_KEY = "hungarian_transport_planner_stops";
+var HISTORY_KEEP = 24;
+var HISTORY_HALF_LIFE_DAYS = 30;
+var localRead = () => {
+  try {
+    return JSON.parse(globalThis.localStorage.getItem(HISTORY_KEY) || "[]");
+  } catch (_e) {
+    return [];
+  }
+};
+var localWrite = (list) => {
+  try {
+    globalThis.localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+  } catch (_e) {
+  }
+};
+Object.assign(BkkLib, {
+  STOP_HISTORY_KEY: HISTORY_KEY,
+  _stopHistory: null,
+  stopHistoryScore(entry, now) {
+    const ageDays = Math.max(0, ((now || Date.now()) - (Number(entry && entry.t) || 0)) / 864e5);
+    return (Number(entry && entry.n) || 1) * Math.pow(0.5, ageDays / HISTORY_HALF_LIFE_DAYS);
+  },
+  _cleanStopHistory(list) {
+    const out = [];
+    const seen = /* @__PURE__ */ new Set();
+    (Array.isArray(list) ? list : []).forEach((e) => {
+      if (!e || !e.id || !e.name) return;
+      const id = String(e.id);
+      if (seen.has(id)) return;
+      seen.add(id);
+      const row = { id, name: String(e.name), n: Math.max(1, Number(e.n) || 1), t: Number(e.t) || 0 };
+      if (Number.isFinite(Number(e.lat)) && Number.isFinite(Number(e.lon)) && e.lat !== null && e.lon !== null) {
+        row.lat = Number(e.lat);
+        row.lon = Number(e.lon);
+      }
+      if (e.kind) row.kind = String(e.kind);
+      if (e.label) row.label = String(e.label);
+      out.push(row);
+    });
+    return out;
+  },
+  /* One read per connection; a new login reads again. */
+  loadStopHistory(hass) {
+    const conn = hass && hass.connection || null;
+    const memo = BkkLib._stopHistory;
+    if (memo && memo.conn === conn) return memo.p;
+    const p = (async () => {
+      let list = null;
+      if (hass && typeof hass.callWS === "function") {
+        try {
+          const res = await hass.callWS({ type: "frontend/get_user_data", key: HISTORY_KEY });
+          list = res && res.value;
+        } catch (_e) {
+          list = null;
+        }
+      }
+      if (!Array.isArray(list)) list = localRead();
+      return BkkLib._cleanStopHistory(list);
+    })();
+    BkkLib._stopHistory = { conn, p };
+    return p;
+  },
+  /* Count a pick (an origin, a destination or a suggestion), keep the most
+     used, and store the list for this user. */
+  async recordStop(hass, stop) {
+    if (!stop || !stop.id || !stop.name) return BkkLib.loadStopHistory(hass);
+    const list = (await BkkLib.loadStopHistory(hass)).map((e) => Object.assign({}, e));
+    const now = Date.now();
+    const id = String(stop.id);
+    let entry = list.find((e) => e.id === id);
+    if (!entry) {
+      entry = { id, name: String(stop.name), n: 0, t: 0 };
+      list.push(entry);
+    }
+    entry.n += 1;
+    entry.t = now;
+    entry.name = String(stop.name);
+    if (Number.isFinite(Number(stop.lat)) && Number.isFinite(Number(stop.lon)) && stop.lat !== null && stop.lon !== null) {
+      entry.lat = Number(stop.lat);
+      entry.lon = Number(stop.lon);
+    }
+    if (stop.kind) entry.kind = String(stop.kind);
+    if (stop.label) entry.label = String(stop.label);
+    const next = BkkLib._cleanStopHistory(list.sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now)).slice(0, HISTORY_KEEP));
+    BkkLib._stopHistory = { conn: hass && hass.connection || null, p: Promise.resolve(next) };
+    localWrite(next);
+    if (hass && typeof hass.callWS === "function") {
+      try {
+        await hass.callWS({ type: "frontend/set_user_data", key: HISTORY_KEY, value: next });
+      } catch (_e) {
+      }
+    }
+    return next;
+  },
+  /* The most used stops first, without the one already picked. */
+  frequentStops(list, opts) {
+    opts = opts || {};
+    const now = opts.now || Date.now();
+    const skip = String(opts.excludeId || "");
+    return (list || []).filter((e) => e && e.id && e.id !== skip).slice().sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now)).slice(0, opts.limit || 6);
+  }
+});
+
 // src/editor.js
 var BKKHopCardEditor = class extends HTMLElement {
   constructor() {
@@ -8288,7 +8393,7 @@ var BKKPlannerCard = class extends BKKHopCard {
       }
 
       .plan .suggest { margin-top: 6px; display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; }
-      .plan .suggest.hidden { display: none; }
+      .plan .suggest.hidden, .plan .suggest:empty { display: none; }
       .plan .suggest-row, .plan .suggest-stops { display: contents; }
       .plan .suggest-kind { display: none; }
       .plan .suggest-stop {
@@ -8562,28 +8667,43 @@ ${this._stopPinCss()}
       if (timed && this.shadowRoot.activeElement !== at) at.value = this._whenInputValue(this._when.at);
     }
   }
+  /* The stops this user picks most, from their own Home Assistant storage
+     (see stop-history.js); nothing until they have picked one. */
   _paintFav() {
     const box = this._planEl("pfav");
     if (!box) return;
+    const cfg = this._config || {};
+    const conn = this._hass && this._hass.connection || null;
+    if (this._historyFor !== conn) {
+      this._historyFor = conn;
+      BkkLib.loadStopHistory(this._hass).then((list2) => {
+        if (this._historyFor !== conn) return;
+        this._historyList = list2;
+        this._paintFav();
+      }).catch(() => {
+      });
+    }
     box.innerHTML = "";
     const shortName = (name) => String(name || "").replace(/^Budapest,\s*/, "").replace(/^Budapest-/, "").replace(/\s+aut\u00f3busz-p\u00e1lyaudvar$/, "").replace(/\s+vas\u00fat\u00e1llom\u00e1s$/, "").replace(/\s+p\u00e1lyaudvar$/, "");
-    const list = BkkLib.collapseSameNameStops(
-      BKK_FAVORITES.concat(VOLAN_FAVORITES, MAV_FAVORITES)
-    );
+    const list = BkkLib.frequentStops(this._historyList || [], { excludeId: cfg.stopId, limit: 6 });
+    if (!list.length) return;
+    const marks = { mav: "M", volan: "V", bkk: "B", city: "H" };
     const row = document.createElement("div");
     row.className = "suggest-row";
     const stops = document.createElement("span");
     stops.className = "suggest-stops";
     list.forEach((fav) => {
-      const id = String(fav.id || "");
-      const mark = /^BKK_0055/i.test(id) ? "M" : /^(?:volan_|hkir_|AREA_CS)/i.test(id) ? "V" : "B";
+      const mark = marks[BkkLib.stopIdFamily(fav)] || "";
       const button = document.createElement("button");
       button.type = "button";
       button.className = "suggest-stop";
-      const feed = document.createElement("span");
-      feed.className = "suggest-feed";
-      feed.textContent = mark;
-      button.appendChild(feed);
+      button.title = fav.label || fav.name;
+      if (mark) {
+        const feed = document.createElement("span");
+        feed.className = "suggest-feed";
+        feed.textContent = mark;
+        button.appendChild(feed);
+      }
       button.appendChild(document.createTextNode(shortName(fav.name)));
       button.addEventListener("click", () => this._pickOrigin(fav));
       stops.appendChild(button);
@@ -8754,7 +8874,15 @@ ${this._stopPinCss()}
       this._showErr(err);
     }
   }
+  /* Every picked stop counts towards the user's suggestions. */
+  _rememberStop(stop) {
+    BkkLib.recordStop(this._hass, stop).then((list) => {
+      this._historyList = list;
+    }).catch(() => {
+    });
+  }
   async _pickOrigin(stop) {
+    this._rememberStop(stop);
     this._config = Object.assign({}, this._config, {
       stopId: stop.id,
       stopName: stop.name,
@@ -8903,6 +9031,7 @@ ${this._stopPinCss()}
     this._renderDestHits(hits, t(lang, "mode").all.destEmpty);
   }
   _pickDest(dest) {
+    this._rememberStop(dest);
     const destKey = BkkLib.splitCityPrefix(dest.name || "") ? BkkLib.norm(dest.name) : dest.key;
     const routeKeys = dest.routeKeys && dest.routeKeys.length ? dest.routeKeys : [dest.key];
     this._config = Object.assign({}, this._config, {
