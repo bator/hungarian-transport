@@ -102,6 +102,18 @@ third-party service is involved. A trip without a shape falls back to
 Transitous, and then to a line through its stops. City trams, trolleybuses and
 the Bahart ferry keep their GTFS vehicle type.
 
+Every map marks where you get on and off, with the stop's name:
+
+| Pin | Meaning |
+|---|---|
+| Dot in the line's colour, with the line's badge | Boarding |
+| White ring in the line's colour | Alighting, when the card has a destination |
+| White ring with a dark border | Transfer at the same stop |
+| Blue dot, dark target | Start and end of a planner itinerary that begins or ends with a walk |
+
+The alighting stop is the trip's own stop when the GTFS feed or BKK FUTÁR
+lists it. Otherwise it comes from Transitous or the configured destination.
+
 ## Options
 
 | Option | Type | Default | Description |

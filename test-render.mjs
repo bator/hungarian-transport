@@ -3326,4 +3326,133 @@ Lib.mavIndex = origMavIndex;
   pc.remove();
 }
 
+/* Map stop pins: boarding and alighting of every ride. */
+{
+  const pins = Lib.journeyStopPins([
+    { walk: true, shape: [[47.496, 18.994], [47.501, 19.001]], from: 'Otthon', to: 'Fő tér' },
+    { walk: false, shape: [[47.501, 19.001], [47.520, 19.050]], from: 'Fő tér', to: 'Zugló vasútállomás' },
+    { walk: false, shape: [[47.5202, 19.0502], [47.530, 19.090]], from: 'Zugló vasútállomás', to: 'Mester utca' },
+    { walk: true, shape: [[47.530, 19.090], [47.534, 19.097]], from: 'Mester utca', to: 'Munkahely' },
+  ]);
+  check('journey pins: start, board, transfer at the same stop, alight, end',
+    JSON.stringify(pins.map((p) => [p.kind, p.name])) === JSON.stringify([
+      ['start', 'Otthon'], ['board', 'Fő tér'], ['transfer', 'Zugló vasútállomás'],
+      ['alight', 'Mester utca'], ['end', 'Munkahely'],
+    ]),
+    JSON.stringify(pins.map((p) => [p.kind, p.name])));
+  const walked = Lib.journeyStopPins([
+    { walk: false, shape: [[47.50, 19.00], [47.52, 19.05]], from: 'A', to: 'B' },
+    { walk: true, shape: [[47.52, 19.05], [47.53, 19.06]], from: 'B', to: 'C' },
+    { walk: false, shape: [[47.53, 19.06], [47.55, 19.10]], from: 'C', to: 'D' },
+  ]);
+  check('journey pins: a walk between rides keeps both stops',
+    JSON.stringify(walked.map((p) => p.kind + ':' + p.name)) === JSON.stringify(['board:A', 'alight:B', 'board:C', 'alight:D']),
+    JSON.stringify(walked.map((p) => p.kind + ':' + p.name)));
+  const short = Lib.journeyStopPins([
+    { walk: true, shape: [[47.4640, 19.0196], [47.4641, 19.0197]], from: 'Kelenföld vasútállomás', to: 'Kelenföld vasútállomás' },
+    { walk: false, shape: [[47.4641, 19.0197], [47.4890, 19.0610]], from: 'Kelenföld vasútállomás', to: 'Astoria M' },
+    { walk: true, shape: [[47.4890, 19.0610], [47.4893, 19.0614]], from: 'Astoria M', to: 'Astoria' },
+  ]);
+  check('journey pins: a few steps to the stop add no start or end pin',
+    JSON.stringify(short.map((p) => p.kind)) === JSON.stringify(['board', 'alight']),
+    JSON.stringify(short.map((p) => p.kind + ':' + p.name)));
+  check('journey pins: no rides, no pins',
+    Lib.journeyStopPins([{ walk: true, shape: [[47.5, 19], [47.6, 19.1]], from: 'A', to: 'B' }]).length === 0);
+}
+{
+  const cache = {
+    'trip:BKK_PINTEST': {
+      sts: [{ stopId: 'S0' }, { stopId: 'S1' }, { stopId: 'S2' }, { stopId: 'S3' }],
+      stops: {
+        S0: { name: 'Kelenföld vasútállomás', lat: 47.4641, lon: 19.0197 },
+        S1: { name: 'Fő tér', lat: 47.5701, lon: 19.1202 },
+        S2: { name: 'Bosnyák tér', lat: 47.5143, lon: 19.1105 },
+        S3: { name: 'Zugló vasútállomás', lat: 47.5163, lon: 19.0889 },
+      },
+      polyline: '',
+      vehicle: null,
+      nowSec: 0,
+    },
+  };
+  const hop = await Lib.tripHopStops('test-key', cache, 'BKK_PINTEST', { id: 'BKK_NOPE', name: 'Fő tér' }, 'zugló vasútállomás');
+  check('FUTÁR trip gives exact board and alight stops',
+    !!hop && hop.board[0] === 47.5701 && hop.alight[0] === 47.5163,
+    JSON.stringify(hop));
+  const noDest = await Lib.tripHopStops('test-key', cache, 'BKK_PINTEST', { id: 'BKK_NOPE', name: 'Fő tér' }, 'Kelenföld vasútállomás');
+  check('FUTÁR alight is only a stop after boarding',
+    !!noDest && !!noDest.board && noDest.alight === null, JSON.stringify(noDest));
+}
+{
+  const made = [];
+  const layer = () => ({ addTo() { return this; }, setLatLng() {}, setIcon() {}, redraw() {} });
+  const fakeMap = {
+    setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {},
+  };
+  const fakeL = {
+    map: () => fakeMap,
+    tileLayer: () => layer(),
+    divIcon: (o) => o,
+    marker: (pt, o) => { const m = Object.assign(layer(), { pt, html: o.icon.html }); made.push(m); return m; },
+    polyline: () => layer(),
+    latLngBounds: () => ({ extend() {} }),
+  };
+  const prevL = window.L;
+  window.L = fakeL;
+  const prevRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  const pinCard = document.createElement('hungarian-transport-card');
+  document.body.appendChild(pinCard);
+  pinCard.setConfig({
+    language: 'hu', stopId: 'BKK_CSF03154', stopName: 'Fő tér',
+    destKey: 'zugló', destName: 'Zugló vasútállomás', routeIds: [],
+  });
+  pinCard._loadRowMapShape = async () => ({
+    shape: [[47.5701, 19.1202], [47.5163, 19.0889]], board: [47.5701, 19.1202], alight: [47.5163, 19.0889],
+  });
+  await pinCard._openVehicleMap({ label: '7', headsign: 'Albertfalva', color: '009EE3', tripId: 'BKK_T1' });
+  const board = made.find((m) => m.html.includes('ht-stop-board'));
+  const alight = made.find((m) => m.html.includes('ht-stop-alight'));
+  check('row map marks the boarding stop with its name',
+    !!board && board.pt[0] === 47.5701 && board.html.includes('Fő tér') && board.html.includes('Felszállás'),
+    board && board.html);
+  check('row map marks the alighting stop with its name',
+    !!alight && alight.pt[0] === 47.5163 && alight.html.includes('Zugló vasútállomás') && alight.html.includes('Leszállás'),
+    alight && alight.html);
+  const foot = document.querySelector('.ht-map-overlay .ht-map-foot');
+  check('row map footer explains both pins',
+    !!foot && foot.textContent.includes('● Felszállás') && foot.textContent.includes('○ Leszállás'),
+    foot && foot.textContent);
+  pinCard._closeVehicleMap();
+  check('closing the map clears both stop markers',
+    !pinCard._mapBoardMarker && !pinCard._mapAlightMarker && !document.querySelector('.ht-map-overlay'));
+
+  pinCard.setConfig({ language: 'hu', stopId: 'BKK_CSF03154', stopName: 'Fő tér', routeIds: [] });
+  check('a card without a destination has no alighting stop',
+    (await pinCard._rowAlightPoint({ label: '7' }, [[47.5, 19.1]])) === null);
+  pinCard.setConfig({ language: 'hu', stopId: 'BKK_CSF03154', stopName: 'Fő tér', destKey: 'zugló', destName: 'Zugló', routeIds: [] });
+  const first = await pinCard._rowAlightPoint({ label: '7' }, [null, [47.5163, 19.0889], [47.1, 19.1]]);
+  check('the trip’s own stop wins for the alighting point', !!first && first[0] === 47.5163, JSON.stringify(first));
+  pinCard.remove();
+
+  made.length = 0;
+  plan._drawJourneyPolylines(fakeL, fakeMap, [
+    { walk: false, color: '#005CA5', shape: [[47.50, 19.00], [47.52, 19.05]], from: 'Kelenföld', to: 'Deák Ferenc tér' },
+    { walk: false, color: '#FFD800', shape: [[47.52, 19.05], [47.53, 19.06]], from: 'Deák Ferenc tér', to: 'Astoria' },
+  ], { labels: true });
+  check('journey map pins boarding, transfer and alighting with names',
+    made.length === 3
+    && made[0].html.includes('ht-stop-board') && made[0].html.includes('Kelenföld')
+    && made[1].html.includes('ht-stop-transfer') && made[1].html.includes('Deák Ferenc tér')
+    && made[2].html.includes('ht-stop-alight') && made[2].html.includes('Astoria'),
+    JSON.stringify(made.map((m) => m.html.replace(/<[^>]+>/g, ' ').trim())));
+  made.length = 0;
+  plan._drawJourneyPolylines(fakeL, fakeMap, [
+    { walk: false, color: '#005CA5', shape: [[47.50, 19.00], [47.52, 19.05]], from: 'Kelenföld', to: 'Deák Ferenc tér' },
+  ], { interactive: false });
+  check('the small journey preview has pins without labels',
+    made.length === 2 && !made.some((m) => m.html.includes('ht-stop-lbl')));
+  window.L = prevL;
+  globalThis.requestAnimationFrame = prevRaf;
+}
+
 process.exit(failed ? 1 : 0);

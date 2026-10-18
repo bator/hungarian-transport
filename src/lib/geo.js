@@ -396,6 +396,17 @@ Object.assign(BkkLib, {
     '#e53935', '#8e24aa', '#3949ab', '#00897b', '#f9a825', '#6d4c41',
     '#d81b60', '#00acc1', '#43a047', '#fb8c00', '#5c6bc0', '#00838f',
   ],
+  /* Dark or white text, whichever reads on this line colour. */
+  mapTextOn(color) {
+    const hex = BkkLib.normMapHex(color);
+    if (!hex) return '#ffffff';
+    const lin = (i) => {
+      const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+      return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+    };
+    const lum = 0.2126 * lin(1) + 0.7152 * lin(3) + 0.0722 * lin(5);
+    return lum > 0.4 ? '#1a1a1a' : '#ffffff';
+  },
   normMapHex(color) {
     const hex = String(color || '').replace('#', '').trim();
     if (/^[0-9a-fA-F]{3}$/.test(hex)) {
@@ -524,11 +535,13 @@ Object.assign(BkkLib, {
   journeyMapSegments(journey, origin, dest) {
     BkkLib.stitchJourneyLegCoords(journey);
     const segs = [];
-    const add = (shape, walk, color, from, to) => {
+    const add = (shape, walk, color, from, to, leg) => {
       if (!Array.isArray(shape) || shape.length < 2) return;
       segs.push({
         walk: !!walk,
         color: walk ? '' : (color || '#0F6FC6'),
+        label: walk ? '' : String((leg && leg.label) || ''),
+        text: walk ? '' : String((leg && leg.text) || ''),
         shape,
         from: from || '',
         to: to || '',
@@ -541,7 +554,7 @@ Object.assign(BkkLib, {
         const b = BkkLib.finiteLatLon(leg.toLat, leg.toLon);
         if (a && b) shape = [a, b];
       }
-      add(shape, leg.walk, BkkLib.rideMapColor(leg), leg.from, leg.to);
+      add(shape, leg.walk, BkkLib.rideMapColor(leg), leg.from, leg.to, leg);
     });
     if (segs.length) return segs;
     const start = BkkLib.finiteLatLon(
@@ -554,6 +567,39 @@ Object.assign(BkkLib, {
     );
     if (start && end) add([start, end], false, '#0F6FC6', '', '');
     return segs;
+  },
+  /* Stops to mark on a journey map: where each ride boards and alights. A
+     transfer at the same stop is one pin. A walk to or from the journey's
+     ends gets a start or an end pin, unless it is so short that the pin
+     would sit on the stop's own. */
+  journeyStopPins(segs) {
+    const list = Array.isArray(segs) ? segs : [];
+    const pins = [];
+    const rides = list.filter((s) => !s.walk && Array.isArray(s.shape) && s.shape.length >= 2);
+    if (!rides.length) return pins;
+    const first = list[0];
+    const last = list[list.length - 1];
+    const apart = (a, b) => BkkLib.haversineMeters(a, b) > 150;
+    if (first.walk && first.shape.length && apart(first.shape[0], rides[0].shape[0])) {
+      pins.push({ kind: 'start', pt: first.shape[0], name: first.from || '' });
+    }
+    rides.forEach((seg) => {
+      const board = seg.shape[0];
+      const line = { color: seg.color, label: seg.label || '', text: seg.text || '' };
+      const prev = pins[pins.length - 1];
+      if (prev && prev.kind === 'alight' && BkkLib.haversineMeters(prev.pt, board) <= 60) {
+        Object.assign(prev, line, { kind: 'transfer', name: prev.name || seg.from || '' });
+      } else {
+        pins.push(Object.assign({ kind: 'board', pt: board, name: seg.from || '' }, line));
+      }
+      pins.push({ kind: 'alight', pt: seg.shape[seg.shape.length - 1], name: seg.to || '', color: seg.color });
+    });
+    const lastRide = rides[rides.length - 1].shape;
+    const endPt = last.walk && last.shape.length ? last.shape[last.shape.length - 1] : null;
+    if (endPt && apart(endPt, lastRide[lastRide.length - 1])) {
+      pins.push({ kind: 'end', pt: endPt, name: last.to || '' });
+    }
+    return pins;
   },
   haversineMeters(a, b) {
     const toRad = (d) => (d * Math.PI) / 180;
