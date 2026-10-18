@@ -24,9 +24,33 @@ Object.assign(BkkLib, {
   },
   /* A dashboard usually holds several of these cards. Reuse the key already
      configured on a sibling card instead of asking for it again. Only the
-     default dashboard and the one being viewed are inspected. */
-  async apiKeyFromDashboard(hass) {
-    if (!hass || !hass.connection) return '';
+     default dashboard and the one being viewed are inspected.
+     Editors and planners ask on every hass update or keystroke while no key
+     is found, and each ask is one or two full lovelace/config reads: a found
+     key is kept for the page, a miss for a minute, concurrent asks share one. */
+  _dashKeys: new WeakMap(),
+  apiKeyFromDashboard(hass) {
+    if (!hass || !hass.connection) return Promise.resolve('');
+    /* Per connection (a new login is a new one) and per dashboard. */
+    let byPanel = BkkLib._dashKeys.get(hass.connection);
+    if (!byPanel) {
+      byPanel = new Map();
+      BkkLib._dashKeys.set(hass.connection, byPanel);
+    }
+    const memo = String(hass.panelUrl || '');
+    const hit = byPanel.get(memo);
+    if (hit && (hit.p || hit.key || Date.now() - hit.ts < 60000)) return hit.p || Promise.resolve(hit.key);
+    const p = BkkLib._readDashboardKey(hass).then((key) => {
+      byPanel.set(memo, { key, ts: Date.now() });
+      return key;
+    }, () => {
+      byPanel.delete(memo);
+      return '';
+    });
+    byPanel.set(memo, { p, key: '', ts: Date.now() });
+    return p;
+  },
+  async _readDashboardKey(hass) {
     const paths = [null];
     if (hass.panelUrl && paths.indexOf(hass.panelUrl) < 0) paths.push(hass.panelUrl);
     for (let i = 0; i < paths.length; i++) {

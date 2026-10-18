@@ -1,5 +1,6 @@
 """MÁV route index: upload, build at startup, rebuild service, audit."""
 
+import asyncio
 import gzip
 import io
 import json
@@ -10,8 +11,8 @@ from pathlib import Path
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import ServiceValidationError
+from homeassistant.core import Context, HomeAssistant
+from homeassistant.exceptions import ServiceValidationError, Unauthorized
 from homeassistant.setup import async_setup_component
 
 from custom_components.hungarian_transport import mav, mav_index
@@ -140,6 +141,33 @@ async def test_rebuild_service(hass: HomeAssistant, card_assets, mav_source) -> 
     result = await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
     assert result["trains"] == 2 and result["audit"]["trains_ok"] == 2
     assert (card_assets / "mav-index.json.gz").is_file()
+
+
+async def test_rebuild_service_is_admin_only(
+    hass: HomeAssistant, hass_read_only_user, card_assets, mav_source
+) -> None:
+    await _setup(hass)
+    mav_source.parent.mkdir(parents=True, exist_ok=True)
+    mav_source.write_bytes(_feed_zip())
+    with pytest.raises(Unauthorized):
+        await hass.services.async_call(
+            DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True,
+            context=Context(user_id=hass_read_only_user.id),
+        )
+    assert not (card_assets / "mav-index.json.gz").exists()
+
+
+async def test_concurrent_uploads_use_their_own_temp_files(
+    hass: HomeAssistant, hass_client, card_assets, mav_source
+) -> None:
+    await _setup(hass)
+    client = await hass_client()
+    first, second = await asyncio.gather(
+        client.post(mav.UPLOAD_URL, data=_feed_zip()),
+        client.post(mav.UPLOAD_URL, data=_feed_zip()),
+    )
+    assert first.status == 200 and second.status == 200
+    assert not list(mav_source.parent.glob("*.upload"))
 
 
 async def test_startup_rebuilds_a_missing_index(hass: HomeAssistant, card_assets, mav_source) -> None:

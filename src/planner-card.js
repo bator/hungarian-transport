@@ -1,8 +1,11 @@
-import { BKK_FAVORITES, DEFAULT_MINUTES_AFTER, MAV_FAVORITES, MINUTES_AFTER_PRESETS, VOLAN_FAVORITES, clampMinutesAfter, departureStillDue, pad2, tzEpochSec, tzFields } from './config.js';
+import { BKK_FAVORITES, DEFAULT_MINUTES_AFTER, MAV_FAVORITES, MINUTES_AFTER_PRESETS, VOLAN_FAVORITES, clampMinutesAfter, departureStillDue, pad2, tzEpochSec, tzFields, tzShiftYmd } from './config.js';
 import { BKKHopCard } from './hop-card.js';
 import { t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 import { BKK_PLANNER_EDITOR } from './tags.js';
+
+/* After this long off screen the planner plans again on return. */
+const PLANNER_STALE_MS = 5 * 60 * 1000;
 
 export class BKKPlannerCard extends BKKHopCard {
   constructor() {
@@ -57,8 +60,29 @@ export class BKKPlannerCard extends BKKHopCard {
     return false;
   }
 
+  /* Back on the view after a while, the departures and countdowns on screen
+     are stale: plan again. A chosen time does not go stale. */
   _shouldReloadOnConnect() {
-    return !(this._journey || this._journeyLoading || (this._rows && this._rows.length));
+    const idle = !(this._journey || this._journeyLoading || (this._rows && this._rows.length));
+    const stale = !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
+    return idle || stale;
+  }
+
+  /* A new origin, destination or a swap: whatever the running reload or
+     journey lookup still fetches belongs to the old pair and must not paint. */
+  _invalidatePlan() {
+    this._gen += 1;
+    this._reloadActive = false;
+    if (this._poll) { clearInterval(this._poll); this._poll = null; }
+    this._rows = [];
+    this._rawRows = [];
+    this._err = '';
+    this._journey = null;
+    this._journeys = [];
+    this._journeyKey = '';
+    this._journeyLoading = false;
+    this._journeysDone = false;
+    this._openJourney = 0;
   }
 
   /* A full paint remounts the inline map. Leave the countdown frozen until
@@ -73,6 +97,7 @@ export class BKKPlannerCard extends BKKHopCard {
      board stays for "now": FUTÁR, the GTFS indexes and ELVIRA all answer
      for the present. */
   async _reload() {
+    this._loadedAt = Date.now();
     if (!this._timed()) return super._reload();
     const gen = ++this._gen;
     this._reloadActive = true;
@@ -240,8 +265,12 @@ export class BKKPlannerCard extends BKKHopCard {
   _whenText(ms) {
     const lang = this._lang();
     const f = tzFields(new Date(ms));
-    const today = tzFields(new Date());
-    const tomorrow = tzFields(new Date(Date.now() + 86400000));
+    const today = tzFields(new Date(Date.now()));
+    /* Calendar tomorrow, not now + 24 h: on a DST day those differ. */
+    const tomorrow = (() => {
+      const ymd = tzShiftYmd(`${today.y}${pad2(today.mo)}${pad2(today.d)}`, 1);
+      return { y: Number(ymd.slice(0, 4)), mo: Number(ymd.slice(4, 6)), d: Number(ymd.slice(6, 8)) };
+    })();
     const clock = `${pad2(f.h)}:${pad2(f.mi)}`;
     const same = (a, b) => a.y === b.y && a.mo === b.mo && a.d === b.d;
     if (same(f, today)) return `${t(lang, 'plannerToday')} ${clock}`;
@@ -376,7 +405,11 @@ export class BKKPlannerCard extends BKKHopCard {
       return;
     }
     if (!showJourney) return;
-    box.innerHTML = `<div class="j-title">${esc(t(lang, 'plannerJourneyTitle'))}</div>`
+    /* "With a transfer" only when there is one; a direct ride or a walk
+       says so. */
+    const rides = ((journey && journey.legs) || []).filter((leg) => !leg.walk).length;
+    const titleKey = rides > 1 ? 'plannerJourneyTitle' : (rides === 1 ? 'plannerJourneyDirect' : 'plannerJourneyWalk');
+    box.innerHTML = `<div class="j-title">${esc(t(lang, titleKey))}</div>`
       + this._itineraryHtml(journey, 0, true);
     host.appendChild(box);
     this._bindJourneyBox(box, false);
@@ -1080,6 +1113,14 @@ ${this._stopPinCss()}
         this._reloadSafe();
       });
     }
+    /* A configured look-ahead that is not a preset (45, 200) gets its own
+       option, so the select does not show blank. */
+    if (!Array.from(sel.options).some((o) => Number(o.value) === current)) {
+      const o = document.createElement('option');
+      o.value = String(current);
+      const after = Array.from(sel.options).find((x) => Number(x.value) > current);
+      sel.insertBefore(o, after || null);
+    }
     const lang = this._lang();
     Array.from(sel.options).forEach((o) => { o.textContent = t(lang, 'plannerHorizon', Number(o.value)); });
     sel.value = String(current);
@@ -1104,11 +1145,9 @@ ${this._stopPinCss()}
       destKind: cfg.stopKind || '',
       routeIds: [],
     });
+    this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
-    this._rows = [];
-    this._rawRows = [];
-    this._err = '';
     const q = this._planEl('pq');
     const dq = this._planEl('pdq');
     const hits = this._planEl('phits');
@@ -1117,7 +1156,10 @@ ${this._stopPinCss()}
     if (hits) hits.innerHTML = '';
     this._syncPickerLabels();
     this._paint();
-    this._loadDests().then(() => this._reloadSafe());
+    /* The swapped pair needs no route list (routeIds is empty): plan now,
+       and load the new origin's destinations alongside. */
+    this._reloadSafe();
+    this._loadDests();
   }
 
   _resetPlan() {
@@ -1135,9 +1177,7 @@ ${this._stopPinCss()}
       destKind: '',
       routeIds: [],
     });
-    this._rows = [];
-    this._rawRows = [];
-    this._err = '';
+    this._invalidatePlan();
     const q = this._planEl('pq');
     const dq = this._planEl('pdq');
     const hits = this._planEl('phits');
@@ -1152,8 +1192,9 @@ ${this._stopPinCss()}
   async _searchOrigin(q) {
     const box = this._planEl('phits');
     if (!box) return;
-    if (!q || q.length < 2) { box.innerHTML = ''; return; }
+    /* A cleared or too short query also cancels the search still running. */
     const seq = ++this._searchSeq;
+    if (!q || q.length < 2) { box.innerHTML = ''; return; }
     try {
       this._err = '';
       if (!this._hasFutar()) await this._fillKey();
@@ -1195,11 +1236,9 @@ ${this._stopPinCss()}
       destKind: '',
       routeIds: [],
     });
+    this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
-    this._rows = [];
-    this._rawRows = [];
-    this._err = '';
     const q = this._planEl('pq');
     const dq = this._planEl('pdq');
     const hits = this._planEl('phits');
@@ -1249,8 +1288,11 @@ ${this._stopPinCss()}
     }
   }
 
-  _idsForDest(key) {
-    const raw = this._destRoutes[key] || [];
+  _idsForDest(keys) {
+    const raw = [];
+    (Array.isArray(keys) ? keys : [keys]).forEach((key) => {
+      (this._destRoutes[key] || []).forEach((id) => { if (raw.indexOf(id) < 0) raw.push(id); });
+    });
     const out = [];
     raw.forEach((id) => {
       if (!id) return;
@@ -1272,11 +1314,11 @@ ${this._stopPinCss()}
       box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerPickAll')) + '</span>';
       return;
     }
+    const seq = ++this._destSearchSeq;
     if (!q || q.length < 2) {
       this._paintDestHits(q || '');
       return;
     }
-    const seq = ++this._destSearchSeq;
     try {
       if (!this._hasFutar()) await this._fillKey();
       const extras = await BkkLib.searchPlannerStops(this._apiKey(), q);
@@ -1302,15 +1344,14 @@ ${this._stopPinCss()}
       return;
     }
     const shown = this._destHits.slice(0, 20);
-    box.innerHTML = shown.map((d) => (
-      `<button class="hit" type="button" data-key="${BkkLib.esc(d.key)}" data-id="${BkkLib.esc(d.id || '')}">${BkkLib.esc(BkkLib.plannerHitLabel(d, this._lang()))}</button>`
+    /* By position: two towns' "autóbusz-állomás" can share a key. */
+    box.innerHTML = shown.map((d, i) => (
+      `<button class="hit" type="button" data-ix="${i}" data-key="${BkkLib.esc(d.key)}" data-id="${BkkLib.esc(d.id || '')}">${BkkLib.esc(BkkLib.plannerHitLabel(d, this._lang()))}</button>`
     )).join('');
     box.querySelectorAll('.hit').forEach((btn) => {
       btn.addEventListener('click', () => {
-        const key = btn.getAttribute('data-key');
-        const id = btn.getAttribute('data-id') || '';
-        const d = (this._destHits || []).find((x) => x.key === key);
-        if (d) this._pickDest(Object.assign({}, d, { id: d.id || id }));
+        const d = shown[Number(btn.getAttribute('data-ix'))];
+        if (d) this._pickDest(Object.assign({}, d));
       });
     });
   }
@@ -1337,15 +1378,20 @@ ${this._stopPinCss()}
   }
 
   _pickDest(dest) {
+    /* A key without its town ("aut all") matches every town's bus station;
+       a named town stays in the destination key. */
+    const destKey = BkkLib.splitCityPrefix(dest.name || '') ? BkkLib.norm(dest.name) : dest.key;
+    const routeKeys = dest.routeKeys && dest.routeKeys.length ? dest.routeKeys : [dest.key];
     this._config = Object.assign({}, this._config, {
-      destKey: dest.key,
+      destKey,
       destName: dest.name,
       destStopId: dest.id || '',
       destLat: dest.lat,
       destLon: dest.lon,
       destKind: dest.kind || '',
-      routeIds: this._idsForDest(dest.key),
+      routeIds: this._idsForDest(routeKeys),
     });
+    this._invalidatePlan();
     const dq = this._planEl('pdq');
     const hits = this._planEl('pdhits');
     if (dq) dq.value = '';

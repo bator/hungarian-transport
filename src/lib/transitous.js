@@ -720,11 +720,7 @@ Object.assign(BkkLib, {
   journeyFromMotis(payload) {
     const its = (payload && payload.itineraries) || [];
     if (!its.length) return null;
-    let best = its[0];
-    its.forEach((it) => {
-      if (Number(it.duration || 1e15) < Number(best.duration || 1e15)) best = it;
-    });
-    return BkkLib.motisJourney(best);
+    return BkkLib.motisJourney(BkkLib.bestItinerary(its, (it) => Date.parse(it.endTime || '')));
   },
   /* Every itinerary of a MOTIS plan, in the order Transitous returns them
      (by departure, or by arrival for arriveBy). */

@@ -52,7 +52,8 @@ Object.assign(BkkLib, {
     if (fa && fb && fa === fb) return true;
     const pa = BkkLib.placeNameKey({ name: a });
     const pb = BkkLib.placeNameKey({ name: b });
-    return !!(pa && pb && pa === pb);
+    if (!pa || !pb || pa !== pb) return false;
+    return !BkkLib.citiesConflict({ name: a }, { name: b });
   },
   fold(s) {
     return BkkLib.norm(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
@@ -276,6 +277,11 @@ Object.assign(BkkLib, {
     }
     return out;
   },
+  /* One row per place: the same stop from FUTÁR, Volán and the search is
+     merged, but the city stays part of the place (116 towns have an
+     "autóbusz-állomás"). `key` is the reachable-list key when there is one,
+     so it finds that destination's routes; `routeKeys` holds every merged
+     source's key. */
   destHitsForQuery(dests, q, extras) {
     const f = BkkLib.fold(q || "");
     const out = [];
@@ -283,11 +289,21 @@ Object.assign(BkkLib, {
     const add = (d) => {
       if (!d || !d.name) return;
       const id = d.id || d.stopId || "";
-      let key = BkkLib.placeNameKey(d) || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
-      if (id && /^geo:/i.test(id) && String(d.kind || "") === "address") key = key + "|" + id;
-      if (!key) return;
-      const prev = seen.get(key);
+      let place = BkkLib.placeNameKey(d) || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
+      if (!place) return;
+      if (id && /^geo:/i.test(id) && String(d.kind || "") === "address") place = place + "|" + id;
+      const city = BkkLib.stopCityKey(d);
+      const rows = seen.get(place) || [];
+      const prev = rows.find((r) => r.city === city) || (city ? rows.find((r) => !r.city) : rows[0]);
+      if (prev && city && !prev.city) prev.city = city;
       if (prev) {
+        if (d.key && prev.routeKeys.indexOf(d.key) < 0) {
+          prev.routeKeys.push(d.key);
+          if (!prev.fromList) {
+            prev.key = d.key;
+            prev.fromList = true;
+          }
+        }
         if (BkkLib.stopIdRank(id) < BkkLib.stopIdRank(prev.id)) prev.id = id;
         if (BkkLib.elviraStationCode(id) && !BkkLib.elviraStationCode(prev.id)) prev.id = id;
         if (/^geo:/i.test(String(prev.id || "")) && id && !/^geo:/i.test(id)) prev.id = id;
@@ -298,12 +314,20 @@ Object.assign(BkkLib, {
         if (d.kind && !prev.kind) prev.kind = d.kind;
         return;
       }
-      const row = { key, name: d.name, id };
+      const row = {
+        key: d.key || place,
+        name: d.name,
+        id,
+        routeKeys: d.key ? [d.key] : [],
+        fromList: !!d.key
+      };
       if (Number.isFinite(Number(d.lat))) row.lat = Number(d.lat);
       if (Number.isFinite(Number(d.lon))) row.lon = Number(d.lon);
       if (d.kind) row.kind = d.kind;
       if (d.label) row.label = d.label;
-      seen.set(key, row);
+      Object.defineProperty(row, "city", { value: city, writable: true, enumerable: false });
+      rows.push(row);
+      seen.set(place, rows);
       out.push(row);
     };
     (extras || []).forEach(add);
@@ -398,6 +422,10 @@ Object.assign(BkkLib, {
     if (BkkLib.elviraCodeFromName(dest.name)) return true;
     return BkkLib.isRailHubName(dest.name);
   },
+  /* A stop whose id carries no ELVIRA code is looked up by name, which is a
+     few FUTÁR searches: on every poll without this memo. A found code is
+     kept for the page, a miss for ten minutes. */
+  _elviraCodes: /* @__PURE__ */ new Map(),
   async elviraResolveCode(apiKey, id, name) {
     const direct = BkkLib.elviraStationCode(id);
     if (direct) return direct;
@@ -405,6 +433,14 @@ Object.assign(BkkLib, {
     if (mapped) return mapped;
     const n = String(name || "").trim();
     if (!BkkLib.hasFutar(apiKey) || !n) return "";
+    const memoKey = String(id || "") + "|" + n;
+    const hit = BkkLib._elviraCodes.get(memoKey);
+    if (hit && (hit.code || Date.now() - hit.ts < 6e5)) return hit.code;
+    const code = await BkkLib._searchElviraCode(apiKey, n);
+    BkkLib._elviraCodes.set(memoKey, { code, ts: Date.now() });
+    return code;
+  },
+  async _searchElviraCode(apiKey, n) {
     const queries = [n];
     const key = BkkLib.stationKey(n);
     if (key && key !== n) queries.push(key);
@@ -733,6 +769,8 @@ var I18N = {
     plannerNoSharedStop: "Nincs közös megálló",
     plannerNoSharedLater: "Ezeknek a járatoknak nincs közös későbbi megállója.",
     plannerJourneyTitle: "Átszállással",
+    plannerJourneyDirect: "Átszállás nélkül",
+    plannerJourneyWalk: "Gyalog",
     plannerJourneySummary: (parts) => `${parts[0]} perc · ${parts[1]} átszállás · ${parts[2]} perc gyaloglás · ${parts[3]} perc várakozás`,
     plannerWalk: (parts) => `Gyaloglás ${parts[0]} perc, ${parts[1]} m`,
     plannerWait: (min) => `Várakozás ${min} perc`,
@@ -918,7 +956,9 @@ var I18N = {
     plannerNoSharedStop: "No shared stop",
     plannerNoSharedLater: "These routes share no later stop.",
     plannerJourneyTitle: "With a transfer",
-    plannerJourneySummary: (parts) => `${parts[0]} min · ${parts[1]} transfer · ${parts[2]} min walking · ${parts[3]} min waiting`,
+    plannerJourneyDirect: "Direct",
+    plannerJourneyWalk: "On foot",
+    plannerJourneySummary: (parts) => `${parts[0]} min · ${Number(parts[1]) === 1 ? "1 transfer" : `${parts[1]} transfers`} · ${parts[2]} min walking · ${parts[3]} min waiting`,
     plannerWalk: (parts) => `Walk ${parts[0]} min, ${parts[1]} m`,
     plannerWait: (min) => `Wait ${min} min`,
     plannerStationWalk: (parts) => `Walk to the platform ${parts[0]} min, ${parts[1]} m`,
@@ -1911,11 +1951,7 @@ Object.assign(BkkLib, {
   journeyFromMotis(payload) {
     const its = payload && payload.itineraries || [];
     if (!its.length) return null;
-    let best = its[0];
-    its.forEach((it) => {
-      if (Number(it.duration || 1e15) < Number(best.duration || 1e15)) best = it;
-    });
-    return BkkLib.motisJourney(best);
+    return BkkLib.motisJourney(BkkLib.bestItinerary(its, (it) => Date.parse(it.endTime || "")));
   },
   /* Every itinerary of a MOTIS plan, in the order Transitous returns them
      (by departure, or by arrival for arriveBy). */
@@ -2059,11 +2095,37 @@ Object.assign(BkkLib, {
   journeyFromPlan(payload) {
     const its = ((((payload || {}).data || {}).entry || {}).plan || {}).itineraries || [];
     if (!its.length) return null;
+    return BkkLib.futarJourney(BkkLib.bestItinerary(its, (it) => Number(it.endTime)));
+  },
+  /* The itinerary that arrives first; among equal arrivals the shorter ride,
+     then fewer transfers. The search window spans hours: the shortest
+     duration alone picked a trip leaving almost three hours later. */
+  bestItinerary(its, endMs) {
+    const arrive = (it) => {
+      const v = endMs(it);
+      return Number.isFinite(v) && v > 0 ? v : Infinity;
+    };
+    const rides = (it) => (it.legs || []).filter((leg) => {
+      const mode = String(leg.mode || "").toUpperCase();
+      return mode && mode !== "WALK";
+    }).length;
     let best = its[0];
     its.forEach((it) => {
-      if (Number(it.duration || 1e15) < Number(best.duration || 1e15)) best = it;
+      const a = arrive(it);
+      const b = arrive(best);
+      if (a !== b) {
+        if (a < b) best = it;
+        return;
+      }
+      const da = Number(it.duration || 1e15);
+      const db = Number(best.duration || 1e15);
+      if (da !== db) {
+        if (da < db) best = it;
+        return;
+      }
+      if (rides(it) < rides(best)) best = it;
     });
-    return BkkLib.futarJourney(best);
+    return best;
   },
   journeysFromPlan(payload) {
     const its = ((((payload || {}).data || {}).entry || {}).plan || {}).itineraries || [];
@@ -2483,7 +2545,7 @@ Object.assign(BkkLib, {
   },
   nextCityRide(idx, fromI, toI, route, readySec) {
     let best = null;
-    for (let off = 0; off < 2; off++) {
+    for (let off = -1; off < 2; off++) {
       const day = BkkLib.volanDay(off);
       const trips = idx.t || [];
       for (let n = 0; n < trips.length; n++) {
@@ -2500,7 +2562,7 @@ Object.assign(BkkLib, {
         const arr = day.base + ms[d] * 60;
         if (!best || dep < best.dep) best = { dep, arr };
       }
-      if (best) break;
+      if (best && off >= 0) break;
     }
     return best;
   },
@@ -3350,9 +3412,32 @@ Object.assign(BkkLib, {
   },
   /* A dashboard usually holds several of these cards. Reuse the key already
      configured on a sibling card instead of asking for it again. Only the
-     default dashboard and the one being viewed are inspected. */
-  async apiKeyFromDashboard(hass) {
-    if (!hass || !hass.connection) return "";
+     default dashboard and the one being viewed are inspected.
+     Editors and planners ask on every hass update or keystroke while no key
+     is found, and each ask is one or two full lovelace/config reads: a found
+     key is kept for the page, a miss for a minute, concurrent asks share one. */
+  _dashKeys: /* @__PURE__ */ new WeakMap(),
+  apiKeyFromDashboard(hass) {
+    if (!hass || !hass.connection) return Promise.resolve("");
+    let byPanel = BkkLib._dashKeys.get(hass.connection);
+    if (!byPanel) {
+      byPanel = /* @__PURE__ */ new Map();
+      BkkLib._dashKeys.set(hass.connection, byPanel);
+    }
+    const memo = String(hass.panelUrl || "");
+    const hit = byPanel.get(memo);
+    if (hit && (hit.p || hit.key || Date.now() - hit.ts < 6e4)) return hit.p || Promise.resolve(hit.key);
+    const p = BkkLib._readDashboardKey(hass).then((key) => {
+      byPanel.set(memo, { key, ts: Date.now() });
+      return key;
+    }, () => {
+      byPanel.delete(memo);
+      return "";
+    });
+    byPanel.set(memo, { p, key: "", ts: Date.now() });
+    return p;
+  },
+  async _readDashboardKey(hass) {
     const paths = [null];
     if (hass.panelUrl && paths.indexOf(hass.panelUrl) < 0) paths.push(hass.panelUrl);
     for (let i = 0; i < paths.length; i++) {
@@ -3373,8 +3458,21 @@ Object.assign(BkkLib, {
 Object.assign(BkkLib, {
   /* Cached per resolved URL, so two cards pointing at different index files do
      not serve each other's data. The URL carries a daily cache-buster, which
-     also expires the entry on a dashboard left open overnight. */
+     also expires the entry on a dashboard left open overnight; the day before's
+     copy of the same file is dropped then, not kept for days (each decoded
+     index is tens of MB on a wall tablet). */
   _idx: /* @__PURE__ */ new Map(),
+  _indexBase(url) {
+    return String(url).replace(/([?&])v=\d{8}(&|$)/, (_m, lead, tail) => tail ? lead : "").replace(/[?&]$/, "");
+  },
+  _cacheIndex(cache, url, p, max) {
+    const base = BkkLib._indexBase(url);
+    Array.from(cache.keys()).forEach((k) => {
+      if (k !== url && BkkLib._indexBase(k) === base) cache.delete(k);
+    });
+    cache.set(url, p);
+    while (cache.size > max) cache.delete(cache.keys().next().value);
+  },
   _indexCached(url, httpKey, gunzipKey) {
     const cache = BkkLib._idx;
     const hit = cache.get(url);
@@ -3383,8 +3481,7 @@ Object.assign(BkkLib, {
       cache.delete(url);
       throw err;
     });
-    cache.set(url, p);
-    while (cache.size > 8) cache.delete(cache.keys().next().value);
+    BkkLib._cacheIndex(cache, url, p, 8);
     return p;
   },
   volanIndex() {
@@ -3407,8 +3504,7 @@ Object.assign(BkkLib, {
       cache.delete(url);
       return { n: {}, l: {}, p: [] };
     });
-    cache.set(url, p);
-    while (cache.size > 4) cache.delete(cache.keys().next().value);
+    BkkLib._cacheIndex(cache, url, p, 4);
     return p;
   },
   /* Headers and body under one timeout: a body that stalls after its
@@ -3664,7 +3760,7 @@ Object.assign(BkkLib, {
     if (!st) return false;
     if (destKey && (st.key === destKey || st.fold === destFold)) return true;
     const fk = destFold || BkkLib.fold(destKey || "");
-    if (fk && fk.length >= 4 && st.fold.indexOf(fk) >= 0) return true;
+    if (fk && fk.length >= 4 && (" " + st.fold + " ").indexOf(" " + fk + " ") >= 0) return true;
     return false;
   },
   async volanSearchStops(q) {
@@ -4921,17 +5017,24 @@ Object.assign(BkkLib, {
       }
       const asFutar = (list) => list.map((row) => Object.assign({ travel: null }, row));
       const early = asFutar(sure);
-      if (destKey && maybe.length && sure.length < maxRows && typeof opts.armThroughCheck === "function") {
+      const sureFull = sure.length >= maxRows;
+      const lastSure = sureFull ? sure[sure.length - 1].dep || 0 : Infinity;
+      const pool = maybe.filter((row) => (row.dep || 0) <= lastSure);
+      if (destKey && pool.length && typeof opts.armThroughCheck === "function") {
         opts.armThroughCheck(() => {
           const pending = (async () => {
             const picked = sure.slice();
-            for (let i = 0; i < maybe.length && picked.length < maxRows; i += 16) {
-              const chunk = maybe.slice(i, i + 16);
+            let found = 0;
+            for (let i = 0; i < pool.length && (sureFull ? found < maxRows : picked.length < maxRows); i += 16) {
+              const chunk = pool.slice(i, i + 16);
               const flags = await Promise.all(chunk.map((row) => BkkLib.tripGoesTo(apiKey, cache, row.tripId, origin, destKey)));
               flags.forEach((ok, j) => {
-                if (ok) picked.push(chunk[j]);
+                if (!ok) return;
+                picked.push(chunk[j]);
+                found += 1;
               });
             }
+            picked.sort((a, b) => (a.dep || 0) - (b.dep || 0));
             const full = asFutar(picked.slice(0, maxRows));
             if (typeof opts.onFutarUpdate === "function") opts.onFutarUpdate(full);
           })();
@@ -6616,6 +6719,11 @@ var BKKHopCard = class extends HTMLElement {
       script.onerror = reject;
       document.head.appendChild(script);
     });
+    leafletPromise.catch(() => {
+      leafletPromise = null;
+      const el = typeof document !== "undefined" ? document.getElementById("hungarian-transport-leaflet-js") : null;
+      if (el && !isLeaflet(window.L)) el.remove();
+    });
     return leafletPromise;
   }
   /* Every close (and so every new open) bumps the map sequence. An open that
@@ -7269,7 +7377,8 @@ ${this._stopPinCss()}
           this._hass,
           cfg.stopId,
           cfg.destStopId || "",
-          cfg.minutesAfter,
+          /* The service takes 15..480 and rejects the call otherwise. */
+          clampMinutesAfter(cfg.minutesAfter),
           cfg.destName || "",
           { apiKey: this._apiKey(), originName: cfg.stopName || "" }
         ).catch(() => []) : Promise.resolve([]);
@@ -7347,25 +7456,28 @@ ${this._stopPinCss()}
         earlyRows = rows || [];
         publish();
         this._syncOpenMap();
+        const firstRows = this._rawRows;
+        const needsTravel = (row) => row.travel == null && !/^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ""));
+        const fillTravel = (list) => Promise.all((list || []).map(async (row) => {
+          if (!needsTravel(row)) return;
+          row.travel = await BkkLib.travelMin(
+            this._apiKey(),
+            row.tripId,
+            cfg.destKey,
+            row.dep,
+            origin,
+            this._tripCache || {}
+          );
+        }));
         const gpsTravel = Promise.all([
-          BkkLib.attachCoachGps(this._hass, this._rawRows).then((withGps) => {
-            if (gen !== this._gen) return;
+          BkkLib.attachCoachGps(this._hass, firstRows).then((withGps) => {
+            if (gen !== this._gen || this._rawRows !== firstRows) return;
             this._rawRows = withGps;
             this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
             this._paint();
             this._syncOpenMap();
           }),
-          Promise.all((this._rawRows || []).map(async (row) => {
-            if (row.travel != null || /^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ""))) return;
-            row.travel = await BkkLib.travelMin(
-              this._apiKey(),
-              row.tripId,
-              cfg.destKey,
-              row.dep,
-              origin,
-              this._tripCache || {}
-            );
-          }))
+          fillTravel(firstRows)
         ]);
         if (startThrough) {
           startThrough();
@@ -7392,6 +7504,15 @@ ${this._stopPinCss()}
         if (typeof this._considerJourney === "function") this._considerJourney();
         await gpsTravel;
         if (gen !== this._gen) return;
+        if (this._rawRows !== firstRows) {
+          const latest = this._rawRows;
+          const [withGps] = await Promise.all([
+            BkkLib.attachCoachGps(this._hass, latest),
+            fillTravel(latest)
+          ]);
+          if (gen !== this._gen || this._rawRows !== latest) return;
+          this._rawRows = withGps;
+        }
         this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
         this._paint();
         this._syncOpenMap();
@@ -7408,7 +7529,14 @@ ${this._stopPinCss()}
       if (!this.isConnected || gen !== this._gen) return;
       if (!this._shouldPoll()) return;
       const every = refreshSeconds(cfg.refresh) * 1e3;
-      this._poll = setInterval(run, every);
+      let busy = false;
+      this._poll = setInterval(() => {
+        if (busy) return;
+        busy = true;
+        run().finally(() => {
+          busy = false;
+        });
+      }, every);
     } finally {
       if (gen === this._gen) this._reloadActive = false;
     }
@@ -7416,6 +7544,7 @@ ${this._stopPinCss()}
 };
 
 // src/planner-card.js
+var PLANNER_STALE_MS = 5 * 60 * 1e3;
 var BKKPlannerCard = class extends BKKHopCard {
   constructor() {
     super();
@@ -7461,8 +7590,31 @@ var BKKPlannerCard = class extends BKKHopCard {
   _shouldPoll() {
     return false;
   }
+  /* Back on the view after a while, the departures and countdowns on screen
+     are stale: plan again. A chosen time does not go stale. */
   _shouldReloadOnConnect() {
-    return !(this._journey || this._journeyLoading || this._rows && this._rows.length);
+    const idle = !(this._journey || this._journeyLoading || this._rows && this._rows.length);
+    const stale = !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
+    return idle || stale;
+  }
+  /* A new origin, destination or a swap: whatever the running reload or
+     journey lookup still fetches belongs to the old pair and must not paint. */
+  _invalidatePlan() {
+    this._gen += 1;
+    this._reloadActive = false;
+    if (this._poll) {
+      clearInterval(this._poll);
+      this._poll = null;
+    }
+    this._rows = [];
+    this._rawRows = [];
+    this._err = "";
+    this._journey = null;
+    this._journeys = [];
+    this._journeyKey = "";
+    this._journeyLoading = false;
+    this._journeysDone = false;
+    this._openJourney = 0;
   }
   /* A full paint remounts the inline map. Leave the countdown frozen until
      the user changes origin, destination or the look-ahead. */
@@ -7475,6 +7627,7 @@ var BKKPlannerCard = class extends BKKHopCard {
      board stays for "now": FUTÁR, the GTFS indexes and ELVIRA all answer
      for the present. */
   async _reload() {
+    this._loadedAt = Date.now();
     if (!this._timed()) return super._reload();
     const gen = ++this._gen;
     this._reloadActive = true;
@@ -7655,8 +7808,11 @@ var BKKPlannerCard = class extends BKKHopCard {
   _whenText(ms) {
     const lang = this._lang();
     const f = tzFields(new Date(ms));
-    const today = tzFields(/* @__PURE__ */ new Date());
-    const tomorrow = tzFields(new Date(Date.now() + 864e5));
+    const today = tzFields(new Date(Date.now()));
+    const tomorrow = (() => {
+      const ymd = tzShiftYmd(`${today.y}${pad2(today.mo)}${pad2(today.d)}`, 1);
+      return { y: Number(ymd.slice(0, 4)), mo: Number(ymd.slice(4, 6)), d: Number(ymd.slice(6, 8)) };
+    })();
     const clock = `${pad2(f.h)}:${pad2(f.mi)}`;
     const same = (a, b) => a.y === b.y && a.mo === b.mo && a.d === b.d;
     if (same(f, today)) return `${t(lang, "plannerToday")} ${clock}`;
@@ -7765,7 +7921,9 @@ var BKKPlannerCard = class extends BKKHopCard {
       return;
     }
     if (!showJourney) return;
-    box.innerHTML = `<div class="j-title">${esc(t(lang, "plannerJourneyTitle"))}</div>` + this._itineraryHtml(journey, 0, true);
+    const rides = (journey && journey.legs || []).filter((leg) => !leg.walk).length;
+    const titleKey = rides > 1 ? "plannerJourneyTitle" : rides === 1 ? "plannerJourneyDirect" : "plannerJourneyWalk";
+    box.innerHTML = `<div class="j-title">${esc(t(lang, titleKey))}</div>` + this._itineraryHtml(journey, 0, true);
     host.appendChild(box);
     this._bindJourneyBox(box, false);
   }
@@ -8447,6 +8605,12 @@ ${this._stopPinCss()}
         this._reloadSafe();
       });
     }
+    if (!Array.from(sel.options).some((o) => Number(o.value) === current)) {
+      const o = document.createElement("option");
+      o.value = String(current);
+      const after = Array.from(sel.options).find((x) => Number(x.value) > current);
+      sel.insertBefore(o, after || null);
+    }
     const lang = this._lang();
     Array.from(sel.options).forEach((o) => {
       o.textContent = t(lang, "plannerHorizon", Number(o.value));
@@ -8472,11 +8636,9 @@ ${this._stopPinCss()}
       destKind: cfg.stopKind || "",
       routeIds: []
     });
+    this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
-    this._rows = [];
-    this._rawRows = [];
-    this._err = "";
     const q = this._planEl("pq");
     const dq = this._planEl("pdq");
     const hits = this._planEl("phits");
@@ -8485,7 +8647,8 @@ ${this._stopPinCss()}
     if (hits) hits.innerHTML = "";
     this._syncPickerLabels();
     this._paint();
-    this._loadDests().then(() => this._reloadSafe());
+    this._reloadSafe();
+    this._loadDests();
   }
   _resetPlan() {
     this._when = { mode: "now", at: 0 };
@@ -8502,9 +8665,7 @@ ${this._stopPinCss()}
       destKind: "",
       routeIds: []
     });
-    this._rows = [];
-    this._rawRows = [];
-    this._err = "";
+    this._invalidatePlan();
     const q = this._planEl("pq");
     const dq = this._planEl("pdq");
     const hits = this._planEl("phits");
@@ -8518,11 +8679,11 @@ ${this._stopPinCss()}
   async _searchOrigin(q) {
     const box = this._planEl("phits");
     if (!box) return;
+    const seq = ++this._searchSeq;
     if (!q || q.length < 2) {
       box.innerHTML = "";
       return;
     }
-    const seq = ++this._searchSeq;
     try {
       this._err = "";
       if (!this._hasFutar()) await this._fillKey();
@@ -8561,11 +8722,9 @@ ${this._stopPinCss()}
       destKind: "",
       routeIds: []
     });
+    this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
-    this._rows = [];
-    this._rawRows = [];
-    this._err = "";
     const q = this._planEl("pq");
     const dq = this._planEl("pdq");
     const hits = this._planEl("phits");
@@ -8612,8 +8771,13 @@ ${this._stopPinCss()}
       }
     }
   }
-  _idsForDest(key) {
-    const raw = this._destRoutes[key] || [];
+  _idsForDest(keys) {
+    const raw = [];
+    (Array.isArray(keys) ? keys : [keys]).forEach((key) => {
+      (this._destRoutes[key] || []).forEach((id) => {
+        if (raw.indexOf(id) < 0) raw.push(id);
+      });
+    });
     const out = [];
     raw.forEach((id) => {
       if (!id) return;
@@ -8634,11 +8798,11 @@ ${this._stopPinCss()}
       box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, "plannerPickAll")) + "</span>";
       return;
     }
+    const seq = ++this._destSearchSeq;
     if (!q || q.length < 2) {
       this._paintDestHits(q || "");
       return;
     }
-    const seq = ++this._destSearchSeq;
     try {
       if (!this._hasFutar()) await this._fillKey();
       const extras = await BkkLib.searchPlannerStops(this._apiKey(), q);
@@ -8663,13 +8827,11 @@ ${this._stopPinCss()}
       return;
     }
     const shown = this._destHits.slice(0, 20);
-    box.innerHTML = shown.map((d) => `<button class="hit" type="button" data-key="${BkkLib.esc(d.key)}" data-id="${BkkLib.esc(d.id || "")}">${BkkLib.esc(BkkLib.plannerHitLabel(d, this._lang()))}</button>`).join("");
+    box.innerHTML = shown.map((d, i) => `<button class="hit" type="button" data-ix="${i}" data-key="${BkkLib.esc(d.key)}" data-id="${BkkLib.esc(d.id || "")}">${BkkLib.esc(BkkLib.plannerHitLabel(d, this._lang()))}</button>`).join("");
     box.querySelectorAll(".hit").forEach((btn) => {
       btn.addEventListener("click", () => {
-        const key = btn.getAttribute("data-key");
-        const id = btn.getAttribute("data-id") || "";
-        const d = (this._destHits || []).find((x) => x.key === key);
-        if (d) this._pickDest(Object.assign({}, d, { id: d.id || id }));
+        const d = shown[Number(btn.getAttribute("data-ix"))];
+        if (d) this._pickDest(Object.assign({}, d));
       });
     });
   }
@@ -8694,15 +8856,18 @@ ${this._stopPinCss()}
     this._renderDestHits(hits, t(lang, "mode").all.destEmpty);
   }
   _pickDest(dest) {
+    const destKey = BkkLib.splitCityPrefix(dest.name || "") ? BkkLib.norm(dest.name) : dest.key;
+    const routeKeys = dest.routeKeys && dest.routeKeys.length ? dest.routeKeys : [dest.key];
     this._config = Object.assign({}, this._config, {
-      destKey: dest.key,
+      destKey,
       destName: dest.name,
       destStopId: dest.id || "",
       destLat: dest.lat,
       destLon: dest.lon,
       destKind: dest.kind || "",
-      routeIds: this._idsForDest(dest.key)
+      routeIds: this._idsForDest(routeKeys)
     });
+    this._invalidatePlan();
     const dq = this._planEl("pdq");
     const hits = this._planEl("pdhits");
     if (dq) dq.value = "";

@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
@@ -126,7 +127,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             ) from err
         return stats or {}
 
-    hass.services.async_register(
+    # A rebuild reads and checks the whole feed (a minute of CPU on a small
+    # host): admins only, like the upload.
+    async_register_admin_service(
+        hass,
         DOMAIN,
         SERVICE_REBUILD_MAV,
         handle_rebuild_mav,
