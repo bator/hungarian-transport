@@ -119,6 +119,82 @@ check('row data is escaped', !out.includes('<script>') && out.includes('&lt;scri
 check('card size grows with the rows', card.getCardSize() >= 2, String(card.getCardSize()));
 
 {
+  /* jsdom has no layout engine, so the phone layout is checked on the
+     stylesheet: the board is a size container, and below its breakpoint the
+     headsign owns the one flexible track instead of getting what the fixed
+     columns leave (a letter or two at 320-400 px). */
+  const rulesOf = (cssText) => {
+    const el = document.createElement('style');
+    el.textContent = cssText;
+    document.head.appendChild(el);
+    const rules = [...el.sheet.cssRules];
+    el.remove();
+    return rules;
+  };
+  const ruleFor = (rules, sel) => rules.find((r) => r.selectorText === sel);
+  const prop = (rule, name) => (rule ? rule.style.getPropertyValue(name).trim() : '');
+  const hopRules = rulesOf(card.shadowRoot.querySelector('style').textContent);
+  check('departure board is a named inline-size container',
+    /^ht-deps\s*\/\s*inline-size$/.test(prop(ruleFor(hopRules, '.body'), 'container')),
+    prop(ruleFor(hopRules, '.body'), 'container'));
+  const narrow = hopRules.find((r) => /^ht-deps\s*\(max-width:\s*\d+px\)$/.test(r.containerText || ''));
+  const breakpoint = narrow ? Number(/(\d+)px/.exec(narrow.containerText)[1]) : 0;
+  /* A 320-400 px card leaves a 296-376 px board; a 500 px desktop section
+     column leaves 476 px and keeps the table layout. */
+  check('narrow rows cover phone cards and spare a desktop column',
+    breakpoint >= 376 && breakpoint < 476, narrow ? narrow.containerText : 'no @container ht-deps rule');
+  const inner = narrow ? [...narrow.cssRules] : [];
+  const tracks = prop(ruleFor(inner, 'tbody'), 'grid-template-columns').split(/\s+(?![^(]*\))/);
+  const flexible = tracks.map((tr, i) => (/\dfr\b/.test(tr) ? i + 1 : 0)).filter(Boolean);
+  check('narrow grid has exactly one flexible track and it may shrink to fit',
+    flexible.length === 1 && /^minmax\(0(px)?,\s*1fr\)$/.test(tracks[flexible[0] - 1])
+      && prop(ruleFor(inner, 'tr'), 'grid-template-columns') === 'subgrid',
+    JSON.stringify(tracks));
+  const narrowDest = ruleFor(inner, 'td.dest');
+  const area = prop(narrowDest, 'grid-area').split('/').map((s) => Number(s.trim()));
+  check('narrow headsign takes the flexible track and the map column beside it',
+    area.length === 4 && area[0] === 1 && area[1] === flexible[0] && area[3] > area[1] + 1,
+    prop(narrowDest, 'grid-area'));
+  check('narrow headsign may shrink, wraps once and then ellipsizes',
+    prop(narrowDest, 'min-width') === '0' && prop(narrowDest, 'max-width') === 'none'
+      && prop(narrowDest, 'white-space') === 'normal'
+      && prop(narrowDest, '-webkit-line-clamp') === '2',
+    narrowDest ? narrowDest.style.cssText : 'no narrow td.dest rule');
+  const startCol = (sel) => Number(prop(ruleFor(inner, sel), 'grid-area').split('/')[1]);
+  check('narrow pictograms sit under the headsign and the times keep their own columns',
+    startCol('td.flags') === flexible[0] && Number(prop(ruleFor(inner, 'td.flags'), 'grid-area').split('/')[0]) === 2
+      && startCol('td.when') > flexible[0] + 1 && startCol('td.in') > startCol('td.when'),
+    ['td.flags', 'td.when', 'td.in'].map((s) => prop(ruleFor(inner, s), 'grid-area')).join(' | '));
+  const wideDest = ruleFor(hopRules, 'td.dest');
+  check('wide headsign keeps the one-line ellipsis table cell',
+    prop(wideDest, 'max-width') === '0' && prop(wideDest, 'white-space') === 'nowrap'
+      && prop(wideDest, 'text-overflow') === 'ellipsis');
+
+  /* The planner shares the board; its own picker rules must not reach the
+     departure cells (a bare .route / .when once turned td.route into a grid). */
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  document.body.appendChild(pc);
+  pc.hass = { states: {}, language: 'hu', services: {} };
+  pc.setConfig({ language: 'hu' });
+  pc._rows = card._rows;
+  pc._paint();
+  const cells = [...pc.shadowRoot.querySelectorAll('tr[data-row-index] td')];
+  const plannerRules = [...pc.shadowRoot.querySelectorAll('style')].slice(1)
+    .flatMap((el) => rulesOf(el.textContent));
+  const leaks = plannerRules.filter((r) => r.selectorText && !/\btd\b/.test(r.selectorText)
+    && cells.some((td) => { try { return td.matches(r.selectorText); } catch { return false; } }));
+  check('planner rows render departure cells', cells.length >= 7, String(cells.length));
+  check('planner picker rules do not style departure cells',
+    plannerRules.length > 20 && leaks.length === 0, leaks.map((r) => r.selectorText).join(', '));
+  const plannerNarrow = plannerRules.find((r) => r.containerText === narrow?.containerText);
+  const plannerCellPad = prop(ruleFor([...(plannerNarrow ? plannerNarrow.cssRules : [])], 'ha-card.is-planner td'), 'padding');
+  check('planner drops its roomy cell padding on the narrow board',
+    ['0', '0px'].includes(plannerCellPad),
+    plannerNarrow ? plannerNarrow.cssText.slice(0, 160) : 'no matching planner @container rule');
+  pc.remove();
+}
+
+{
   /* The 15 s tick only rewrites countdown text; a full repaint happens only
      when a departure leaves the list. */
   /* The clock is set from `now`, the second the rows were built from, so a
