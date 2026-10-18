@@ -463,9 +463,11 @@ export class BKKPlannerCard extends BKKHopCard {
     if (this._mapOverlay && this._openMapKey === 'journey') return;
     this._closeVehicleMap();
     this._openingMap = 'journey';
+    const seq = this._mapSeq;
     try {
       await BkkLib.fillJourneyShapes(this._journey);
     } catch (_e) { /* draw the endpoint fallback */ }
+    if (this._mapStale(seq)) return;
     let segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
     if (!segs.length && cfg.stopId && cfg.destName) {
       try {
@@ -476,13 +478,16 @@ export class BKKPlannerCard extends BKKHopCard {
           this._hass,
           { minutesAfter: clampMinutesAfter(cfg.minutesAfter) },
         );
+        if (this._mapStale(seq)) return;
         if (journey) this._journey = journey;
         try {
           await BkkLib.fillJourneyShapes(this._journey);
         } catch (_e) { /* draw the endpoint fallback */ }
+        if (this._mapStale(seq)) return;
         segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
       } catch (_e) { /* fall through to the no-geometry notice */ }
     }
+    if (this._mapStale(seq)) return;
     if (!segs.length) {
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapNoData'));
@@ -492,10 +497,12 @@ export class BKKPlannerCard extends BKKHopCard {
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
+      if (this._mapStale(seq)) return;
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapLeafletFail'));
       return;
     }
+    if (this._mapStale(seq)) return;
     const overlay = document.createElement('div');
     overlay.className = 'ht-map-overlay';
     const title = `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;

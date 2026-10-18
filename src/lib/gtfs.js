@@ -44,28 +44,43 @@ Object.assign(BkkLib, {
     while (cache.size > 4) cache.delete(cache.keys().next().value);
     return p;
   },
-  async _loadMavIndex(url) {
+  /* Headers and body under one timeout: a body that stalls after its
+     headers must not leave an index promise pending until the page reloads.
+     no-cache revalidates: Home Assistant answers 304 for an unchanged index,
+     so a dashboard reload does not download megabytes again, while a rebuilt
+     index (new ETag) is fetched at once. Resolves { status, bytes }, with
+     bytes null on an HTTP error; rejects on a network error or timeout. */
+  async _fetchIndexBytes(url) {
     const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(() => ctrl.abort(), 45000) : null;
-    let res;
+    const timer = ctrl ? setTimeout(() => ctrl.abort(), BkkLib._indexTimeoutMs) : null;
     try {
-      res = await fetch(url, { cache: 'no-cache', signal: ctrl ? ctrl.signal : undefined });
-    } catch (_err) {
-      return { n: {}, l: {}, p: [] };
+      const res = await fetch(url, { cache: 'no-cache', signal: ctrl ? ctrl.signal : undefined });
+      if (!res.ok) return { status: res.status, bytes: null };
+      return { status: res.status, bytes: new Uint8Array(await res.arrayBuffer()) };
     } finally {
       if (timer) clearTimeout(timer);
     }
-    if (!res.ok) return { n: {}, l: {}, p: [] };
-    const buf = await res.arrayBuffer();
-    const u8 = new Uint8Array(buf);
-    let text = '';
+  },
+  _indexTimeoutMs: 45000,
+  /* Index text, gunzipped when gzip; null when this browser cannot gunzip. */
+  async _indexText(u8) {
     if (u8.length >= 2 && u8[0] === 0x1f && u8[1] === 0x8b) {
-      if (typeof DecompressionStream !== 'function') return { n: {}, l: {}, p: [] };
-      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
-      text = await new Response(stream).text();
-    } else {
-      text = new TextDecoder().decode(u8);
+      if (typeof DecompressionStream !== 'function') return null;
+      const stream = new Blob([u8]).stream().pipeThrough(new DecompressionStream('gzip'));
+      return new Response(stream).text();
     }
+    return new TextDecoder().decode(u8);
+  },
+  async _loadMavIndex(url) {
+    let got;
+    try {
+      got = await BkkLib._fetchIndexBytes(url);
+    } catch (_err) {
+      return { n: {}, l: {}, p: [] };
+    }
+    if (!got.bytes) return { n: {}, l: {}, p: [] };
+    const text = await BkkLib._indexText(got.bytes);
+    if (text == null) return { n: {}, l: {}, p: [] };
     let idx;
     try {
       idx = JSON.parse(text);
@@ -75,7 +90,12 @@ Object.assign(BkkLib, {
     if (!idx || typeof idx !== 'object' || !idx.n || !Array.isArray(idx.p)) {
       return { n: {}, l: {}, p: [] };
     }
+    /* Schema 2 needs the station table: variants name their stations by
+       index into st, and the map pins sit on those coordinates. */
     return {
+      v: Number(idx.v) || 1,
+      feed: String(idx.feed || ''),
+      st: Array.isArray(idx.st) ? idx.st : [],
       n: idx.n && typeof idx.n === 'object' ? idx.n : {},
       l: idx.l && typeof idx.l === 'object' ? idx.l : {},
       p: idx.p,
@@ -145,30 +165,15 @@ Object.assign(BkkLib, {
     }
   },
   async _loadGtfsIndex(url, httpKey, gunzipKey) {
-    const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
-    const timer = ctrl ? setTimeout(() => ctrl.abort(), 45000) : null;
-    let res;
-    /* no-cache revalidates: Home Assistant answers 304 for an unchanged index,
-       so a dashboard reload does not download megabytes again, while a rebuilt
-       index (new ETag) is fetched at once. */
+    let got;
     try {
-      res = await fetch(url, { cache: 'no-cache', signal: ctrl ? ctrl.signal : undefined });
+      got = await BkkLib._fetchIndexBytes(url);
     } catch (_err) {
       throw codedError('errIndexFetch');
-    } finally {
-      if (timer) clearTimeout(timer);
     }
-    if (!res.ok) throw codedError(httpKey, res.status);
-    const buf = await res.arrayBuffer();
-    const u8 = new Uint8Array(buf);
-    let text = '';
-    if (u8.length >= 2 && u8[0] === 0x1f && u8[1] === 0x8b) {
-      if (typeof DecompressionStream !== 'function') throw codedError(gunzipKey);
-      const stream = new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'));
-      text = await new Response(stream).text();
-    } else {
-      text = new TextDecoder().decode(u8);
-    }
+    if (!got.bytes) throw codedError(httpKey, got.status);
+    const text = await BkkLib._indexText(got.bytes);
+    if (text == null) throw codedError(gunzipKey);
     let idx;
     try {
       idx = JSON.parse(text);
@@ -216,22 +221,26 @@ Object.assign(BkkLib, {
     if (opIx < 0) return idx.stops || [];
     return (idx.stops || []).filter((s) => s.op === opIx);
   },
-  /* One GTFS service day. `mins` is the earliest departure minute still worth
-     looking at: for yesterday's service day that is now + 24h, which is how
-     after-midnight (24:xx) trips stay visible. */
-  volanDay(offset) {
+  /* One GTFS service day. GTFS times count from noon minus 12 h, not from
+     midnight: on the two DST days midnight is an hour off that base, and
+     every departure of the day would shift by an hour. `base` is that moment
+     in epoch seconds and `mins` is now in the day's own GTFS minutes: about
+     now + 24h for yesterday (its 24:xx trips are tonight's), negative for
+     tomorrow. */
+  volanDay(offset, nowMs) {
     const off = offset || 0;
-    const now = tzParts(new Date());
-    const ymd = tzShiftYmd(now.ymd, off);
-    let mins = 0;
-    if (off === 0) mins = now.mins;
-    else if (off < 0) mins = now.mins - off * 1440;
+    const at = nowMs == null ? Date.now() : nowMs;
+    const ymd = tzShiftYmd(tzParts(new Date(at)).ymd, off);
+    const base = BkkLib.gtfsDayBase(ymd);
     return {
       ymd,
       dow: tzDow(ymd),
-      mins,
-      midnight: tzEpochSec(ymd, 0),
+      mins: Math.floor((at / 1000 - base) / 60),
+      base,
     };
+  },
+  gtfsDayBase(ymd) {
+    return tzEpochSec(ymd, 720) - 12 * 3600;
   },
   volanServiceOk(idx, si, ymd, dow) {
     const c = (idx.c || [])[si];
@@ -551,19 +560,14 @@ Object.assign(BkkLib, {
     const rowCap = maxDepartureRows(horizon);
     const rows = [];
     const trips = idx.t || [];
-    const todayMins = BkkLib.volanDay(0).mins;
-    /* -1 catches yesterday's 24:xx trips, which are still tonight's buses. */
+    /* -1 catches yesterday's 24:xx trips, which are still tonight's buses;
+       +1 is tomorrow morning when the look-ahead crosses its base. */
     const dayOffsets = [-1, 0, 1];
     for (let n = 0; n < dayOffsets.length; n++) {
       const day = BkkLib.volanDay(dayOffsets[n]);
-      let earliest = day.mins - 1;
-      let latest = day.mins + horizon;
-      if (dayOffsets[n] > 0) {
-        const remain = horizon - (1440 - todayMins);
-        if (remain <= 0) continue;
-        earliest = -1;
-        latest = remain;
-      }
+      const earliest = day.mins - 1;
+      const latest = day.mins + horizon;
+      if (latest < 0) continue;
       for (let i = 0; i < trips.length; i++) {
         const t = trips[i];
         if (!BkkLib.volanServiceOk(idx, t[0], day.ymd, day.dow)) continue;
@@ -588,7 +592,7 @@ Object.assign(BkkLib, {
         const destStop = didx >= 0 ? idx.stops[ps[didx]] : idx.stops[ps[ps.length - 1]];
         const arrMin = didx >= 0 ? ms[didx] : null;
         const travel = (arrMin != null && arrMin >= depMin && arrMin - depMin <= 1440) ? (arrMin - depMin) : null;
-        const depTs = day.midnight + depMin * 60;
+        const depTs = day.base + depMin * 60;
         if (!departureStillDue(depTs)) continue;
         const kind = BkkLib.gtfsRouteKind(t[4], vehicle, rawType);
         rows.push({

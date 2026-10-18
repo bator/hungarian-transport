@@ -413,9 +413,9 @@ Object.assign(BkkLib, {
         const o = ps.indexOf(fromI);
         const d = ps.indexOf(toI);
         if (o < 0 || d <= o) continue;
-        const dep = day.midnight + ms[o] * 60;
+        const dep = day.base + ms[o] * 60;
         if (dep < readySec - 30) continue;
-        const arr = day.midnight + ms[d] * 60;
+        const arr = day.base + ms[d] * 60;
         if (!best || dep < best.dep) best = { dep, arr };
       }
       if (best) break;

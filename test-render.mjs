@@ -2198,7 +2198,8 @@ check('Leaflet loads from the card folder, not a CDN',
   && src.includes("new URL('leaflet/leaflet.js', ASSET_BASE)")
   && src.includes("new URL('leaflet/leaflet.css', ASSET_BASE)"));
 check('GTFS indexes revalidate instead of bypassing the HTTP cache',
-  (src.match(/cache: 'no-cache'/g) || []).length === 2);
+  (src.match(/cache: 'no-cache'/g) || []).length === 1
+  && (src.match(/BkkLib\._fetchIndexBytes\(url\)/g) || []).length === 2);
 check('hop map polyline is unclipped SVG on the overlay pane',
   src.includes('noClip: true')
   && src.includes("pane: 'overlayPane'")
@@ -3610,6 +3611,198 @@ Lib.mavIndex = origMavIndex;
     JSON.stringify(got));
   lone.remove();
   Object.assign(Lib, keep);
+}
+
+/* Review fixes (1.9.1): each block runs the real code path the bug was in.
+   The maps above still have resize frames queued; from here on they run. */
+globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+{
+  /* The real MÁV loader, not a mocked mavIndex: schema 2 needs its st table. */
+  const { gzipSync } = await import('node:zlib');
+  const encPts = (pts) => {
+    let out = '';
+    let plat = 0;
+    let plng = 0;
+    const one = (v) => {
+      let x = v < 0 ? ~(v << 1) : (v << 1);
+      let s = '';
+      while (x >= 0x20) { s += String.fromCharCode((0x20 | (x & 0x1f)) + 63); x >>= 5; }
+      return s + String.fromCharCode(x + 63);
+    };
+    pts.forEach(([la, lo]) => {
+      const a = Math.round(la * 1e5);
+      const b = Math.round(lo * 1e5);
+      out += one(a - plat) + one(b - plng);
+      plat = a;
+      plng = b;
+    });
+    return out;
+  };
+  const idx = {
+    v: 2,
+    feed: 'test',
+    st: [
+      ['Székesfehérvár', 4718361, 1842472],
+      ['Budapest-Kelenföld', 4746432, 1902063],
+      ['Szombathely', 4723000, 1662000],
+      ['Veszprém', 4709000, 1791000],
+    ],
+    p: [
+      encPts([[47.23, 16.62], [47.09, 17.91], [47.18361, 18.42472]]),
+      encPts([[47.18361, 18.42472], [47.3, 18.7], [47.46432, 19.02063]]),
+    ],
+    /* The longest pattern first, as the builder writes it; it does not
+       reach Kelenföld, so the card must read st to skip it. */
+    n: { 905: [[0, [2, 3, 0]], [1, [0, 1]]] },
+    l: {},
+  };
+  const gz = gzipSync(Buffer.from(JSON.stringify(idx)));
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true, status: 200,
+    arrayBuffer: async () => gz.buffer.slice(gz.byteOffset, gz.byteOffset + gz.byteLength),
+  });
+  const keepIdx = Lib.mavIndex;
+  Lib.mavIndex = origMavIndex;
+  Lib._mavP.clear();
+  const loaded = await Lib.mavIndex();
+  check('MÁV index loader keeps the station table', Array.isArray(loaded.st) && loaded.st.length === 4 && loaded.v === 2,
+    JSON.stringify(Object.keys(loaded)));
+  const route = await Lib.mavRouteForRow({ label: 'IC', trainNumber: '905', type: 'RAIL' }, 'Székesfehérvár', 'Budapest-Kelenföld');
+  check('MÁV variant and pins come from the loaded index',
+    !!route && !!route.board && !!route.alight && route.board[0] === 47.18361 && route.alight[0] === 47.46432
+    && route.shape[route.shape.length - 1][0] === 47.46432,
+    JSON.stringify(route && { board: route.board, alight: route.alight, end: route.shape[route.shape.length - 1] }));
+  globalThis.fetch = realFetch;
+  Lib._mavP.clear();
+  Lib.mavIndex = keepIdx;
+}
+{
+  /* A body that stalls after its headers ends at the timeout. */
+  const realFetch = globalThis.fetch;
+  const keepMs = Lib._indexTimeoutMs;
+  Lib._indexTimeoutMs = 50;
+  globalThis.fetch = async (_url, init) => ({
+    ok: true, status: 200,
+    arrayBuffer: () => new Promise((_res, rej) => {
+      init.signal.addEventListener('abort', () => rej(Object.assign(new Error('aborted'), { name: 'AbortError' })));
+    }),
+  });
+  const within = (p) => Promise.race([p, new Promise((r) => setTimeout(() => r('hung'), 2000))]);
+  const mav = await within(Lib._loadMavIndex('http://x/mav-index.json.gz'));
+  check('a stalled MÁV index body times out to an empty index',
+    mav !== 'hung' && Array.isArray(mav.p) && mav.p.length === 0, String(mav === 'hung' ? 'hung' : JSON.stringify(mav)));
+  const gtfs = await within(Lib._loadGtfsIndex('http://x/volan-index.json.gz', 'errVolanHttp', 'errVolanGunzip')
+    .then(() => 'resolved', (err) => err && err.i18nKey));
+  check('a stalled GTFS index body times out with a fetch error', gtfs === 'errIndexFetch', String(gtfs));
+  globalThis.fetch = realFetch;
+  Lib._indexTimeoutMs = keepMs;
+  check('Transitous reads its body under the timeout', /return await res\.json\(\)/.test(src));
+}
+{
+  /* GTFS times count from noon minus 12 h; on DST days that is not midnight. */
+  const at = (ymd, mins) => new Date((Lib.gtfsDayBase(ymd) + mins * 60) * 1000).toISOString();
+  check('GTFS 08:00 on the autumn DST day is 08:00 CET', at('20261025', 480) === '2026-10-25T07:00:00.000Z', at('20261025', 480));
+  check('GTFS 08:00 on the spring DST day is 08:00 CEST', at('20270328', 480) === '2027-03-28T06:00:00.000Z', at('20270328', 480));
+  check('GTFS 08:00 on an ordinary day is 08:00 local', at('20261024', 480) === '2026-10-24T06:00:00.000Z', at('20261024', 480));
+  check('GTFS 25:30 is 01:30 the next morning', at('20261020', 1530) === '2026-10-20T23:30:00.000Z', at('20261020', 1530));
+  const day = Lib.volanDay(0, Date.UTC(2026, 9, 25, 10, 0));
+  check('service-day minutes on the DST day follow the GTFS base',
+    day.ymd === '20261025' && day.mins === 660 && day.base === Lib.gtfsDayBase('20261025'), JSON.stringify(day));
+  const prev = Lib.volanDay(-1, Date.UTC(2026, 9, 25, 10, 0));
+  const next = Lib.volanDay(1, Date.UTC(2026, 9, 25, 10, 0));
+  check('yesterday runs past 24:00 and tomorrow is still ahead',
+    prev.ymd === '20261024' && prev.mins === 660 + 1440 + 60 && next.ymd === '20261026' && next.mins < 0,
+    JSON.stringify({ prev, next }));
+  check('no GTFS time is counted from midnight any more', !/\.midnight\b/.test(src));
+}
+{
+  /* Cached trip details: the ride is measured inside one snapshot. */
+  const T0 = 1800000000;
+  const cache = {
+    'trip:BKK_TRAVELTEST': {
+      sts: [
+        { stopId: 'S1', departureTime: T0, predictedDepartureTime: T0 + 300 },
+        { stopId: 'S2', arrivalTime: T0 + 600, predictedArrivalTime: T0 + 900 },
+        { stopId: 'S3', arrivalTime: T0 + 900, predictedArrivalTime: T0 + 1200 },
+      ],
+      stops: { S1: { name: 'Fő tér' }, S2: { name: 'Köztes' }, S3: { name: 'Zugló vasútállomás' } },
+      polyline: '', vehicle: null, nowSec: T0,
+    },
+  };
+  /* The delay grew from 5 to 11 minutes since the snapshot. */
+  const ride = await Lib.travelMin('test-key', 'BKK_TRAVELTEST', 'Zugló vasútállomás', T0 + 660, { id: 'S1', name: 'Fő tér' }, cache);
+  check('a grown delay does not shorten the ride', ride === 15, String(ride));
+  cache['trip:BKK_TRAVELPLAN'] = {
+    sts: [
+      { stopId: 'S1', departureTime: T0 },
+      { stopId: 'S3', arrivalTime: T0 + 1080, predictedArrivalTime: T0 + 1500 },
+    ],
+    stops: cache['trip:BKK_TRAVELTEST'].stops, polyline: '', vehicle: null, nowSec: T0,
+  };
+  const plan = await Lib.travelMin('test-key', 'BKK_TRAVELPLAN', 'Zugló vasútállomás', T0 + 420, { id: 'S1', name: 'Fő tér' }, cache);
+  check('without an origin prediction both ends use the timetable', plan === 18, String(plan));
+}
+{
+  const { refreshSeconds } = await import('./src/config.js');
+  check('refresh that is not a number falls back to 45 s',
+    refreshSeconds('30s') === 45 && refreshSeconds(undefined) === 45 && refreshSeconds(-5) === 45 && refreshSeconds('') === 45);
+  check('refresh is clamped to 15 s .. 1 h',
+    refreshSeconds(5) === 15 && refreshSeconds('60') === 60 && refreshSeconds(99999) === 3600);
+  check('the card polls with the parsed refresh', /setInterval\(run, every\)/.test(src) && /refreshSeconds\(cfg\.refresh\)/.test(src));
+}
+{
+  /* Two opens racing the first Leaflet load leave one overlay, and it closes. */
+  const layer = () => ({ addTo() { return this; }, setLatLng() {}, setIcon() {}, redraw() {} });
+  const fakeMap = () => ({
+    setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {},
+  });
+  const fakeL = {
+    map: () => fakeMap(), tileLayer: () => layer(), divIcon: (o) => o, marker: () => layer(),
+    polyline: () => layer(), latLngBounds: () => ({ extend() {} }),
+  };
+  const overlays = () => document.querySelectorAll('.ht-map-overlay').length;
+  const raceCard = document.createElement('hungarian-transport-card');
+  document.body.appendChild(raceCard);
+  raceCard.setConfig({ language: 'hu', stopId: 'BKK_CSF03154', stopName: 'Fő tér', routeIds: [] });
+  raceCard._loadRowMapShape = async () => ({ shape: [[47.57, 19.12], [47.51, 19.08]], board: [47.57, 19.12], alight: null });
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  raceCard._ensureLeaflet = () => gate;
+  const a = raceCard._openVehicleMap({ label: '7', headsign: 'Albertfalva', tripId: 'BKK_RACE_A' });
+  const b = raceCard._openVehicleMap({ label: '9', headsign: 'Óbuda', tripId: 'BKK_RACE_B' });
+  release(fakeL);
+  await Promise.all([a, b]);
+  check('two map opens during the Leaflet load leave one overlay',
+    overlays() === 1 && raceCard._openMapKey && raceCard._openMapKey.includes('BKK_RACE_B'),
+    String(overlays()));
+  raceCard._closeVehicleMap();
+  check('that overlay closes', overlays() === 0, String(overlays()));
+  raceCard._ensureLeaflet = async () => fakeL;
+  await raceCard._openVehicleMap({ label: '7', headsign: 'Albertfalva', tripId: 'BKK_RACE_C' });
+  raceCard.remove();
+  check('a detached card takes its map overlay with it', overlays() === 0, String(overlays()));
+
+  const planCard = document.createElement('hungarian-transit-stop-card-plan');
+  document.body.appendChild(planCard);
+  planCard.setConfig({ language: 'hu', stopId: 'BKK_CSF03154', stopName: 'Fő tér', destName: 'Astoria', routeIds: [] });
+  planCard._ensureLeaflet = async () => fakeL;
+  planCard._loadRowMapShape = raceCard._loadRowMapShape;
+  planCard._journey = { legs: [], durationMin: 10, transfers: 0, walkMin: 1, waitMin: 0 };
+  const keep = { fillJourneyShapes: Lib.fillJourneyShapes, journeyMapSegments: Lib.journeyMapSegments };
+  let releaseShapes;
+  Lib.fillJourneyShapes = () => new Promise((r) => { releaseShapes = r; });
+  Lib.journeyMapSegments = () => [{ walk: false, color: '#005CA5', shape: [[47.5, 19.0], [47.52, 19.05]], from: 'Fő tér', to: 'Astoria' }];
+  const journey = planCard._openJourneyMap();
+  await planCard._openVehicleMap({ label: '7', headsign: 'Albertfalva', tripId: 'BKK_RACE_D' });
+  releaseShapes();
+  await journey;
+  check('a row map opened while the journey map loads stays the only overlay',
+    overlays() === 1 && planCard._openMapKey !== 'journey', String(overlays()));
+  planCard._closeVehicleMap();
+  check('the row map still closes', overlays() === 0, String(overlays()));
+  Object.assign(Lib, keep);
+  planCard.remove();
 }
 
 process.exit(failed ? 1 : 0);

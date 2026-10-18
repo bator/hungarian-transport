@@ -446,9 +446,24 @@ Object.assign(BkkLib, {
       const start = oidx >= 0 ? oidx + 1 : 0;
       const dest = sts.slice(start).find((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
       if (!dest) return null;
-      const arr = dest.predictedArrivalTime || dest.arrivalTime || dest.departureTime;
-      if (!arr || !dep) return null;
-      const mins = Math.round((arr - dep) / 60);
+      /* Trip details are cached for the session, so their predictions age
+         while `dep` is always fresh: a bus that ran late since would lose
+         that delay from its ride. Both ends come from the same snapshot
+         instead, predicted with predicted and timetable with timetable. */
+      const o = oidx >= 0 ? sts[oidx] : null;
+      const oPred = o && (o.predictedDepartureTime || o.predictedArrivalTime);
+      const oPlan = o && (o.departureTime || o.arrivalTime);
+      let from = dep;
+      let arr = dest.predictedArrivalTime || dest.arrivalTime || dest.departureTime;
+      if (oPred && dest.predictedArrivalTime) {
+        from = oPred;
+        arr = dest.predictedArrivalTime;
+      } else if (oPlan && (dest.arrivalTime || dest.departureTime)) {
+        from = oPlan;
+        arr = dest.arrivalTime || dest.departureTime;
+      }
+      if (!arr || !from) return null;
+      const mins = Math.round((arr - from) / 60);
       return (mins >= 1 && mins <= 1440) ? mins : null;
     } catch (_e) {
       return null;
