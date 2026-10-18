@@ -299,7 +299,7 @@ Object.assign(BkkLib, {
               if (edge2.route === edge.route && edge2.to === edge.to) return;
               const secondPrev = {
                 at: mid, rides: 1, cost: first.cost + midWalk, prev: first,
-                walk: midWalk > 0, minutes: midWalk,
+                walk: midWalk > 0, minutes: midWalk, fromI: edge.to, toI: mid,
                 from: stops[edge.to] && stops[edge.to].name,
                 to: stops[mid] && stops[mid].name,
               };
@@ -373,6 +373,7 @@ Object.assign(BkkLib, {
           label: '', headsign: '', color: '', text: '',
           from: edge.from, to: edge.to, waitMin: 0,
           startMs, endMs: ready * 1000,
+          fromI: edge.fromI, toI: edge.toI,
         });
         continue;
       }
@@ -392,6 +393,11 @@ Object.assign(BkkLib, {
         waitMin: waitMin >= 1 ? waitMin : 0,
         startMs: timed.dep * 1000,
         endMs: timed.arr * 1000,
+        /* The trip's stops and shapes.txt route, so the map draws the ride
+           along its streets instead of a line between two names. */
+        gtfs: timed.trip ? BkkLib.gtfsTripGeo(idx, timed.trip, timed.o, timed.d) : null,
+        fromI: edge.fromI,
+        toI: edge.toI,
       });
       ready = timed.arr;
     }
@@ -417,6 +423,20 @@ Object.assign(BkkLib, {
         last.toLon = end[1];
       }
     }
+    /* Every other city leg ends at a stop of the index: its coordinates
+       place the leg (the origin and destination above win at the ends). */
+    const stopAt = (i) => {
+      const st = Number.isInteger(i) ? idx.stops[i] : null;
+      return st ? BkkLib.finiteLatLon(st.lat, st.lon) : null;
+    };
+    legs.forEach((leg) => {
+      const a = stopAt(leg.fromI);
+      const b = stopAt(leg.toI);
+      if (a && leg.fromLat == null) { leg.fromLat = a[0]; leg.fromLon = a[1]; }
+      if (b && leg.toLat == null) { leg.toLat = b[0]; leg.toLon = b[1]; }
+      delete leg.fromI;
+      delete leg.toI;
+    });
     return {
       durationMin: Math.max(1, Math.round((ready - Math.floor(Date.now() / 1000)) / 60)),
       walkMin,
@@ -443,7 +463,7 @@ Object.assign(BkkLib, {
         const dep = day.base + ms[o] * 60;
         if (dep < readySec - 30) continue;
         const arr = day.base + ms[d] * 60;
-        if (!best || dep < best.dep) best = { dep, arr };
+        if (!best || dep < best.dep) best = { dep, arr, trip: t, o, d };
       }
       /* Yesterday's late trip can still lose to an earlier one today. */
       if (best && off >= 0) break;

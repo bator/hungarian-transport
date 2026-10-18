@@ -4418,4 +4418,70 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   check('planner detach clears the search debounce timers', pl._searchTimer === null && pl._destTimer === null);
 }
 
+/* The planner's city fallback draws its rides along their own shapes. */
+{
+  const st = (i, id, name, lat, lon) => ({ i, op: 0, id, name, fold: Lib.fold(name), key: Lib.norm(name), lat, lon });
+  const geoIdx = {
+    url: 'http://localhost:8123/hungarian-transport/city-index.json.gz',
+    sh: { dir: 'city-shapes-geo', n: 1 },
+    c: [['1111111', '20000101', '20991231']],
+    ops: [{ i: 0, id: 'miskolc', name: 'Miskolc — MVK' }],
+    byNum: new Map(),
+    byKey: new Map(),
+    stops: [
+      st(0, 'miskolc:zoo', 'Miskolci Állatkert', 48.1000, 20.7000),
+      st(1, 'miskolc:fm1', 'Felső-Majláth', 48.1100, 20.7100),
+      st(2, 'miskolc:fm2', 'Felső-Majláth', 48.1101, 20.7102),
+      st(3, 'miskolc:tiszai', 'Tiszai pályaudvar', 48.1200, 20.8000),
+    ],
+    t: [
+      [0, 'ZOO', [0, 1], [940, 947], 3, 0],
+      [0, '1', [2, 3], [100, 122], 0, 0],
+    ],
+  };
+  const keep = { cityIndex: Lib.cityIndex, nextCityRide: Lib.nextCityRide, gtfsShape: Lib.gtfsShape };
+  const now = Math.floor(Date.now() / 1000);
+  Lib.cityIndex = async () => geoIdx;
+  Lib.nextCityRide = (idx, fromI, toI, route) => {
+    const t = idx.t.find((x) => x[1] === route);
+    return { dep: now + 60, arr: now + 300, trip: t, o: t[2].indexOf(fromI), d: t[2].indexOf(toI) };
+  };
+  /* One shapes.txt route for both lines: bends between their stops. */
+  const bend = [[48.1000, 20.7000], [48.1050, 20.7080], [48.1100, 20.7100], [48.1101, 20.7102], [48.1180, 20.7600], [48.1200, 20.8000]];
+  Lib.gtfsShape = async () => bend;
+  const journey = await Lib.cityRailJourney('k', { states: {} },
+    { id: 'miskolc:zoo', name: 'Miskolci Állatkert' },
+    { id: 'miskolc:tiszai', name: 'Tiszai pályaudvar' });
+  const rides = (journey && journey.legs || []).filter((l) => !l.walk);
+  check('city fallback rides carry their trip geometry and stop coordinates',
+    rides.length === 2 && rides.every((l) => l.gtfs && l.fromLat != null && l.toLat != null)
+    && rides[0].fromLat === 48.1 && rides[1].toLon === 20.8,
+    JSON.stringify(rides.map((l) => ({ label: l.label, gtfs: !!l.gtfs, from: [l.fromLat, l.fromLon], to: [l.toLat, l.toLon] }))));
+  await Lib.fillJourneyShapes(journey);
+  const segs = Lib.journeyMapSegments(journey, {}, {});
+  const zoo = segs.find((sg) => sg.label === 'ZOO');
+  const one = segs.find((sg) => sg.label === '1');
+  check('the map draws each city ride along its shape, not a straight line',
+    !!zoo && zoo.shape.length >= 3 && zoo.shape.some((pt) => pt[0] === 48.105)
+    && !!one && one.shape.length >= 3 && one.shape.some((pt) => pt[1] === 20.76),
+    JSON.stringify(segs.map((sg) => ({ label: sg.label, walk: sg.walk, n: sg.shape.length }))));
+  Lib.gtfsShape = async () => [];
+  const bare = await Lib.cityRailJourney('k', { states: {} },
+    { id: 'miskolc:zoo', name: 'Miskolci Állatkert' },
+    { id: 'miskolc:tiszai', name: 'Tiszai pályaudvar' });
+  await Lib.fillJourneyShapes(bare);
+  const bareRide = bare.legs.find((l) => l.label === 'ZOO');
+  check('without a shape a city ride follows its own stops',
+    !!bareRide && Array.isArray(bareRide.shape) && bareRide.shape.length === 2 && bareRide.shape[1][0] === 48.11,
+    JSON.stringify(bareRide && bareRide.shape));
+  Object.assign(Lib, keep);
+  const realNow = Date.now;
+  Date.now = () => Date.UTC(2026, 9, 20, 22, 20);
+  const rideIdx = { c: [['1111111', '20200101', '20301231']], t: [[0, 'R1', [0, 1], [1470, 1480]]] };
+  const ride = Lib.nextCityRide(rideIdx, 0, 1, 'R1', Math.floor(Date.now() / 1000));
+  Date.now = realNow;
+  check('nextCityRide names the trip and its stop positions',
+    !!ride && ride.trip === rideIdx.t[0] && ride.o === 0 && ride.d === 1, JSON.stringify(ride && { o: ride.o, d: ride.d }));
+}
+
 process.exit(failed ? 1 : 0);

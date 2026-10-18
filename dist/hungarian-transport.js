@@ -2426,6 +2426,8 @@ Object.assign(BkkLib, {
                 prev: first,
                 walk: midWalk > 0,
                 minutes: midWalk,
+                fromI: edge.to,
+                toI: mid,
                 from: stops[edge.to] && stops[edge.to].name,
                 to: stops[mid] && stops[mid].name
               };
@@ -2511,7 +2513,9 @@ Object.assign(BkkLib, {
           to: edge.to,
           waitMin: 0,
           startMs,
-          endMs: ready * 1e3
+          endMs: ready * 1e3,
+          fromI: edge.fromI,
+          toI: edge.toI
         });
         continue;
       }
@@ -2530,7 +2534,12 @@ Object.assign(BkkLib, {
         to: edge.to,
         waitMin: waitMin2 >= 1 ? waitMin2 : 0,
         startMs: timed.dep * 1e3,
-        endMs: timed.arr * 1e3
+        endMs: timed.arr * 1e3,
+        /* The trip's stops and shapes.txt route, so the map draws the ride
+           along its streets instead of a line between two names. */
+        gtfs: timed.trip ? BkkLib.gtfsTripGeo(idx, timed.trip, timed.o, timed.d) : null,
+        fromI: edge.fromI,
+        toI: edge.toI
       });
       ready = timed.arr;
     }
@@ -2556,6 +2565,24 @@ Object.assign(BkkLib, {
         last.toLon = end[1];
       }
     }
+    const stopAt = (i) => {
+      const st = Number.isInteger(i) ? idx.stops[i] : null;
+      return st ? BkkLib.finiteLatLon(st.lat, st.lon) : null;
+    };
+    legs.forEach((leg) => {
+      const a = stopAt(leg.fromI);
+      const b = stopAt(leg.toI);
+      if (a && leg.fromLat == null) {
+        leg.fromLat = a[0];
+        leg.fromLon = a[1];
+      }
+      if (b && leg.toLat == null) {
+        leg.toLat = b[0];
+        leg.toLon = b[1];
+      }
+      delete leg.fromI;
+      delete leg.toI;
+    });
     return {
       durationMin: Math.max(1, Math.round((ready - Math.floor(Date.now() / 1e3)) / 60)),
       walkMin,
@@ -2581,7 +2608,7 @@ Object.assign(BkkLib, {
         const dep = day.base + ms[o] * 60;
         if (dep < readySec - 30) continue;
         const arr = day.base + ms[d] * 60;
-        if (!best || dep < best.dep) best = { dep, arr };
+        if (!best || dep < best.dep) best = { dep, arr, trip: t2, o, d };
       }
       if (best && off >= 0) break;
     }
@@ -3228,6 +3255,22 @@ Object.assign(BkkLib, {
     await Promise.all(journey.legs.map(async (leg) => {
       if (!leg || leg.walk) return;
       if (BkkLib.validMapShape(leg.shape).length >= 2) return;
+      if (leg.gtfs) {
+        const g = leg.gtfs;
+        const pts = Array.isArray(g.stops) ? g.stops : [];
+        const a = pts[g.from];
+        const b = pts[g.to];
+        let shape = [];
+        try {
+          shape = await BkkLib.gtfsShape(g.shape);
+        } catch (_e) {
+          shape = [];
+        }
+        if (shape.length >= 2 && a && b) shape = BkkLib.sliceShapeBetween(shape, a, b);
+        if (shape.length < 2) shape = BkkLib.validMapShape(pts.slice(g.from, g.to + 1).filter(Boolean));
+        if (shape.length >= 2) leg.shape = shape;
+        return;
+      }
       const tid = String(leg.tripId || "");
       if (!tid) return;
       try {

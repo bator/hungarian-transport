@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from gtfs_compact import (
+    PLATFORM_SPLIT_M,
     IndexGuardError,
     download_feed,
     feed_error,
@@ -173,6 +174,7 @@ def _load_feed(base: Path, feed: dict) -> list[dict]:
             op_id=feed["id"],
             op_name=feed["name"],
             prefix=f"{feed['id']}:",
+            split_platforms_m=PLATFORM_SPLIT_M,
         )
 
     if zpath.exists():
@@ -234,6 +236,7 @@ def collect_parts(
                     split_agencies=True,
                     skip_agency=skip_helykozi,
                     prefix="",
+                    split_platforms_m=PLATFORM_SPLIT_M,
                 )
                 if p.get("t")
             ]

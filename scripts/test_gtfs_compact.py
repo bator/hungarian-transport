@@ -505,6 +505,102 @@ def main() -> int:
     finally:
         pass
 
+    # audit_city_shapes: a stop beside its shape passes, one 400 m away and a
+    # trip without a shape are reported, per operator.
+    import audit_city_shapes as acs
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        shape_dir = base / "city-shapes-test"
+        shape_dir.mkdir()
+        line = [(46.2500, 20.1400), (46.2600, 20.1400), (46.2700, 20.1400)]
+        with gzip.open(shape_dir / "00.json.gz", "wt", encoding="utf-8") as fh:
+            json.dump({"v": 1, "p": [gc.encode_polyline(line)]}, fh)
+        with gzip.open(shape_dir / "01.json.gz", "wt", encoding="utf-8") as fh:
+            json.dump({"v": 1, "p": []}, fh)
+        g = []
+        for lat, lon in [(46.2500, 20.1405), (46.2650, 20.1400), (46.2700, 20.1452)]:
+            g += [round(lat * 1e5), round(lon * 1e5)]
+        idx = {
+            "v": 29, "o": [["szeged", "Szeged"]], "g": g,
+            "s": [["a", "Alfa", "", 0], ["b", "Béta", "", 0], ["c", "Céda", "", 0]],
+            "sh": {"dir": "city-shapes-test", "n": 2},
+            "t": [[0, "1", [0, 1], [0, 5], 3, 0], [0, "2", [1, 2], [0, 5], 3, 0], [0, "3", [0, 2], [0, 5], 3, 1],
+                  [0, "4", [1, 0], [0, 5], 3, 0]],
+        }
+        with gzip.open(base / "city-index.json.gz", "wt", encoding="utf-8") as fh:
+            json.dump(idx, fh)
+        rep = acs.audit(base / "city-index.json.gz")
+        op = rep["operators"].get("szeged", {})
+        failed |= not check(
+            "city shape audit: on route, off route, out of order, no shape",
+            op.get("patterns") == 4 and op.get("ok") == 1 and op.get("off_route") == 1 and op.get("no_shape") == 1
+            and op.get("out_of_order") == 1
+            and any(w.get("stop") == "Céda" and 350 < w.get("m", 0) < 450 for w in rep["worst"]),
+            json.dumps(op),
+        )
+        loop = [(46.2598, 20.1408), (46.2610, 20.1390), (46.2580, 20.1380), (46.2575, 20.1400), (46.2598, 20.1408)]
+        mars, tavasz = (46.2578, 20.1395), (46.2610, 20.1391)
+        failed |= not check(
+            "city shape audit: a loop may start past the trip's first stop",
+            acs.ordered_miss([mars, tavasz], loop, 100.0) is None
+            and acs.ordered_miss([mars, tavasz], loop[:-1], 100.0) is not None,
+        )
+        failed |= not check(
+            "city shape audit: --min-ok fails a weak operator",
+            acs.main([str(base / "city-index.json.gz"), "--min-ok", "0.9"]) == 1
+            and acs.main([str(base / "city-index.json.gz")]) == 0,
+        )
+
+    # A platform far from its station keeps its own place (city builds only):
+    # Szentes, Damjanich utca has platforms 3-4 on another street.
+    far_files = {
+        "agency.txt": "agency_id,agency_name\nA,Szentes\n",
+        "stops.txt": (
+            "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n"
+            "hkir_9,Damjanich utca,46.670162,20.252863,1,\n"
+            "hkir_9_1,Damjanich utca,46.669931,20.253118,,hkir_9\n"
+            "hkir_9_3,Damjanich utca,46.672600,20.259211,,hkir_9\n"
+            "hkir_8,Drahos utca,46.66,20.24,,\n"
+        ),
+        "routes.txt": "route_id,route_short_name,agency_id\nR3,3,A\nR1,1,A\n",
+        "trips.txt": "route_id,service_id,trip_id\nR3,S1,T3\nR1,S1,T1\n",
+        "calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nS1,1,1,1,1,1,1,1,20200101,20991231\n",
+        "stop_times.txt": (
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+            "T3,08:00:00,08:00:00,hkir_8,1\nT3,08:05:00,08:05:00,hkir_9_3,2\n"
+            "T1,09:00:00,09:00:00,hkir_8,1\nT1,09:05:00,09:05:00,hkir_9_1,2\n"
+        ),
+    }
+    fz = gtfs_zip(far_files)
+    try:
+        def place(parts, route):
+            p = parts[0]
+            trip = next(t for t in p["t"] if t[1] == route)
+            i = trip[2][-1]
+            return p["s"][i], (p["g"][2 * i] / 1e5, p["g"][2 * i + 1] / 1e5)
+        merged = load_parts(fz, lambda short, *_: bool(short), op_id="szentes", prefix="szentes:")
+        split = load_parts(fz, lambda short, *_: bool(short), op_id="szentes", prefix="szentes:",
+                           split_platforms_m=gc.PLATFORM_SPLIT_M)
+        m3, mll3 = place(merged, "3")
+        s3, sll3 = place(split, "3")
+        s1, sll1 = place(split, "1")
+        failed |= not check(
+            "without the split every platform is the station",
+            m3[0] == "szentes:hkir_9" and abs(mll3[1] - 20.25286) < 1e-4, f"{m3} {mll3}",
+        )
+        failed |= not check(
+            "a far platform keeps its own place, name and station number",
+            s3[0] == "szentes:hkir_9_3" and s3[1] == "Damjanich utca" and s3[2] == "9"
+            and abs(sll3[0] - 46.6726) < 1e-4 and abs(sll3[1] - 20.25921) < 1e-4,
+            f"{s3} {sll3}",
+        )
+        failed |= not check(
+            "a near platform is still the station",
+            s1[0] == "szentes:hkir_9" and abs(sll1[1] - 20.25286) < 1e-4, f"{s1} {sll1}",
+        )
+    finally:
+        fz.unlink(missing_ok=True)
+
     return 1 if failed else 0
 
 
