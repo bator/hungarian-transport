@@ -40,19 +40,26 @@ card together through HACS.
 
 ### Manual
 
-For a frontend-only manual install, copy the files from `dist/` (including the
-`leaflet/` folder, which the maps load next to the card) into
-`/config/www/hungarian-transport/` and add the matching
+For a frontend-only manual install, unzip `hungarian-transport-frontend.zip`
+from a GitHub release into `/config/www/hungarian-transport/` and add the
 `/local/hungarian-transport/hungarian-transport.js` resource (`type: module`).
-The GitHub release attaches `hungarian-transport-frontend.zip` with these
-frontend files. This does not install the ELVIRA backend.
+The zip holds the card bundle, the `leaflet/` folder the maps load, and the
+GTFS indexes with their shapes folders. This does not install the ELVIRA
+backend.
 
-Build the indexes first:
+To build the indexes yourself, run the builders from the repository root.
+They write into the current directory, not into `dist/`:
 
 ```bash
-python3 scripts/build_volan_index.py
-python3 scripts/build_city_index.py
+python3 scripts/build_volan_index.py   # volan-index.json.gz, volan-shapes-<hash>/
+python3 scripts/build_city_index.py    # city-index.json.gz, city-shapes-<hash>/
 ```
+
+Then copy `dist/hungarian-transport.js`, `dist/leaflet/`, both indexes and the
+shapes folder each index names into `/config/www/hungarian-transport/`. The
+`*.json.gz` files committed in `dist/` are an old snapshot without shapes; do
+not ship them. For the daily rebuild below, set
+`HUNGARIAN_TRANSPORT_WWW=/config/www/hungarian-transport`.
 
 ## Setup
 
@@ -269,9 +276,15 @@ FUTÁR / GTFS-RT.
 HACS installs the indexes that were built when the GitHub release was cut.
 A weekly GitHub Action rebuilds the indexes from the latest stable release's
 code and re-uploads that release's assets, so fresh downloads get current
-feeds. HACS does not re-download a version that is already installed, so
-existing installs only pick up new feeds with the next release, or with the
-local rebuild below.
+feeds. A release run compares the new indexes with the latest published
+ones: a city feed that is gone, a feed that lost more than half of its trips,
+or a Volán index with far too few trips fails the run, and the published
+assets stay as they are. To accept a feed that is gone for good, list its id
+in the `allow_missing` input (or the `HUNGARIAN_TRANSPORT_ALLOW_MISSING`
+repository variable for the weekly run) and drop it from `CITY_FEEDS`.
+HACS does not re-download a version that is already installed, so existing
+installs only pick up new feeds with the next release, or with the local
+rebuild below.
 
 To rebuild them yourself on Home Assistant OS:
 
@@ -290,10 +303,17 @@ To rebuild them yourself on Home Assistant OS:
    folder is used only when the integration is not installed). A durable copy
    is also kept under `/config/hungarian-transport/` so a HACS update that
    overwrote the integration folder is restored on the next run, unless the
-   release ships a newer index schema than your copied scripts build (larger
-   local `mav-index.json.gz` wins). A local `mav-gtfs.zip` or pfaedle directory also rebuilds
-   `mav-index.json.gz`. A MÁV rebuild failure notifies and exits 1, like Volán
-   and city. The shapes folders travel with their indexes. Simplifying the
+   release ships a newer index schema than your copied scripts build. For
+   `mav-index.json.gz`, of two builds of the same feed the larger
+   (pfaedle-based) one wins, otherwise the later build, so an index the
+   integration built from an uploaded zip is kept. A local `mav-gtfs.zip` or
+   pfaedle directory also rebuilds `mav-index.json.gz`; with `MAV_GTFS_URL`
+   set, each daily run downloads the zip again once it is 20 hours old. A MÁV
+   index that fails its audit is not written. A rebuild failure notifies and
+   exits 1, like Volán and city, and keeps the previous index; a city feed
+   that failed is downloaded and rebuilt again on the next run. The city
+   index refuses to drop a feed it had (`HUNGARIAN_TRANSPORT_ALLOW_MISSING` in
+   `.env` accepts one). The shapes folders travel with their indexes. Simplifying the
    Volán `shapes.txt` (8 million points) takes about a minute on a desktop and
    longer on a Raspberry Pi; `run_update.sh` allows 30 minutes.
 

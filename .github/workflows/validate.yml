@@ -9,6 +9,9 @@ on:
     - cron: "0 4 * * *"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   hacs:
     name: HACS
@@ -17,12 +20,14 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: HACS validation
-        uses: hacs/action@main
+        # main as of 2026-06-08; bump deliberately.
+        uses: hacs/action@1ebf01c408f29afcb6406bd431bc98fd8cbb15aa
         with:
           category: integration
 
       - name: Hassfest validation
-        uses: home-assistant/actions/hassfest@master
+        # master as of 2026-09-27; bump deliberately.
+        uses: home-assistant/actions/hassfest@06749dd8c0b54f350bc69c8752456cee498808a3
 
   tests:
     name: Card and GTFS tests
@@ -45,6 +50,11 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Python lint
+        run: |
+          pip install ruff==0.16.10
+          ruff check --target-version py312 --select E,F,W,B --ignore E501,B905 custom_components scripts
+
       - name: Bundle is up to date with src/
         run: |
           npm run build
@@ -58,6 +68,9 @@ jobs:
 
       - name: Index updater tests
         run: python3 scripts/test_update_volan_index.py
+
+      - name: Index guard tests
+        run: python3 scripts/test_build_guards.py
 
   integration:
     name: Integration tests

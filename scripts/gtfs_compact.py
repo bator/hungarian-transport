@@ -2,6 +2,7 @@
 """Compact a GTFS zip into the JSON the Lovelace card decompresses."""
 from __future__ import annotations
 
+import codecs
 import csv
 import gzip
 import hashlib
@@ -19,7 +20,7 @@ import urllib.request
 import zipfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 RoutePred = Callable[[str, str, str], bool]
 
@@ -52,6 +53,10 @@ _BLOCKED_HOSTS = frozenset(
 )
 _ENV_LOADED = False
 _MDB_ACCESS: str | None = None
+
+
+class IndexGuardError(RuntimeError):
+    """A rebuilt index lost too much against the one it would replace."""
 
 
 def _parse_env_file(path: Path) -> None:
@@ -262,18 +267,35 @@ def catalog_url(query: str) -> str:
         return ""
 
 
-def resolved_url(feed: dict) -> str:
-    """Env override, then catalog lookup, then the public fallback URL."""
+def feed_urls(feed: dict) -> Iterator[str]:
+    """Env override, then catalog lookup, then the public fallback URL, each
+    once. Lazy, so the catalog is only asked when the override fails."""
     load_env_files()
+    seen: set[str] = set()
+
+    def fresh(url: str | None) -> str:
+        url = (url or "").strip()
+        if not url or url in seen:
+            return ""
+        seen.add(url)
+        return url
+
     env_name = (feed.get("url_env") or "").strip()
     if env_name:
-        override = (os.environ.get(env_name) or "").strip()
-        if override:
-            return override
-    found = catalog_url((feed.get("catalog_query") or "").strip())
-    if found:
-        return found
-    return (feed.get("url") or "").strip()
+        url = fresh(os.environ.get(env_name))
+        if url:
+            yield url
+    url = fresh(catalog_url((feed.get("catalog_query") or "").strip()))
+    if url:
+        yield url
+    url = fresh(feed.get("url"))
+    if url:
+        yield url
+
+
+def resolved_url(feed: dict) -> str:
+    """Env override, then catalog lookup, then the public fallback URL."""
+    return next(feed_urls(feed), "")
 
 
 def parent(sid: str) -> str:
@@ -586,19 +608,39 @@ def load_shapes(z, memo_key: tuple | None = None) -> dict[str, str]:
     return out
 
 
-def _open_csv(z, name: str):
-    real = _member(z, name)
-    raw = z.read(real)
-    text = None
-    for enc in ("utf-8-sig", "utf-8", "cp1250", "iso-8859-2", "latin-1"):
+def _legacy_bytes(err: UnicodeError) -> tuple[str, int]:
+    """Decode error handler: bytes that are not UTF-8 are read as cp1250
+    (iso-8859-2 for the five bytes cp1250 leaves undefined). Hungarian feeds
+    are UTF-8 or cp1250, so a streamed member needs no encoding pre-pass."""
+    if not isinstance(err, UnicodeDecodeError):
+        raise err
+    out = []
+    for b in err.object[err.start:err.end]:
         try:
-            text = raw.decode(enc)
-            break
+            out.append(bytes([b]).decode("cp1250"))
         except UnicodeDecodeError:
-            continue
-    if text is None:
-        text = raw.decode("utf-8", errors="replace")
-    return csv.DictReader(io.StringIO(text))
+            out.append(bytes([b]).decode("iso-8859-2"))
+    return "".join(out), err.end
+
+
+codecs.register_error("gtfs_legacy", _legacy_bytes)
+
+
+def _csv_rows(z, real: str) -> Iterator[dict[str, str]]:
+    with z.open(real) as fh:
+        text = io.TextIOWrapper(fh, encoding="utf-8-sig", errors="gtfs_legacy", newline="")
+        reader = csv.DictReader(text, restval="")
+        if reader.fieldnames:
+            reader.fieldnames = [h.strip() for h in reader.fieldnames]
+        yield from reader
+
+
+def _open_csv(z, name: str) -> Iterator[dict[str, str]]:
+    """Rows of a GTFS member, streamed: stop_times.txt of the Volán feed is
+    several hundred MB, too much to hold in memory on a Home Assistant host.
+    Header names are stripped; a short row gets "" for its missing columns.
+    A missing member raises FileNotFoundError here, not on first iteration."""
+    return _csv_rows(z, _member(z, name))
 
 
 def download_zip(url: str, dest: Path) -> dict:
@@ -649,6 +691,18 @@ def download_feed(url: str, dest: Path) -> dict:
         except Exception as err:
             last = err
     raise last or RuntimeError(f"download failed: {dest.name}")
+
+
+def download_any(urls: Iterable[str], dest: Path) -> dict:
+    """download_feed from the first URL that works, so a broken keyed
+    override still falls back to the public zip."""
+    last: Exception | None = None
+    for url in urls:
+        try:
+            return download_feed(url, dest)
+        except Exception as err:
+            last = err
+    raise last or RuntimeError(f"no download url: {dest.name}")
 
 
 def load_parts(
@@ -969,6 +1023,24 @@ def existing_trips(out: Path) -> int | None:
         return None
 
 
+def operator_trips(out: Path) -> dict[str, int] | None:
+    """Trips per operator id of an existing index with operators; None when
+    there is no readable index. A trip belongs to the operator of its first stop."""
+    if not out.exists():
+        return None
+    try:
+        with gzip.open(out, "rt", encoding="utf-8") as fh:
+            idx = json.load(fh)
+        ops = idx.get("o") or []
+        stops = idx.get("s") or []
+        counts: dict[str, int] = defaultdict(int)
+        for t in idx.get("t") or []:
+            counts[ops[stops[t[2][0]][3]][0]] += 1
+        return dict(counts)
+    except (OSError, json.JSONDecodeError, gzip.BadGzipFile, IndexError, KeyError, TypeError):
+        return None
+
+
 def shapes_stem(out: Path) -> str:
     """'volan' for volan-index.json.gz; the shapes folder is named after it."""
     name = out.name
@@ -1070,7 +1142,7 @@ def write_index(parts: list[dict], out: Path, *, with_operators: bool, schema: i
             feeds.append(f"{oid}:{part['feed']}")
     prev = existing_trips(out)
     if prev is not None and prev >= 50 and len(all_t) < prev * 0.5:
-        raise RuntimeError(
+        raise IndexGuardError(
             f"refusing to replace {out.name}: {len(all_t)} trips vs previous {prev}"
         )
     sh = write_shapes(all_shapes, out)

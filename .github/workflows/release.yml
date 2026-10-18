@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "rev = 1.4.7-rev.N prerelease (default, next patch after HACS stable 1.4.6). Do not pick patch/minor/major unless asked."
+        description: "rev = next patch as a -rev.N prerelease (e.g. 1.9.1-rev.1 after stable 1.9.0; HACS stable stays). patch/minor/major publish a stable release: only when asked."
         type: choice
         options:
           - rev
@@ -17,29 +17,58 @@ on:
           - minor
           - major
         default: rev
+      allow_missing:
+        description: "City feed ids (comma-separated, or all) the city index may lose against the previous release. Normally empty."
+        type: string
+        default: ""
 
+# Only the publish job writes; the jobs that run npm, the builders and the
+# downloaded GTFS feeds get a read-only token.
 permissions:
-  contents: write
+  contents: read
+
+# Two runs at once would race on the -rev.N number and on the release assets.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build indexes and publish integration zip
+  resolve:
+    name: Resolve tag
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      create: ${{ steps.ver.outputs.create }}
+      ref: ${{ steps.ver.outputs.ref }}
+      baseline: ${{ steps.ver.outputs.baseline }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Release from main only
+        if: github.event_name != 'schedule'
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "::error::Run the release from main, not ${GITHUB_REF}."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::${GITHUB_SHA} is not on main."
+            exit 1
+          fi
+
       - name: Resolve tag
         id: ver
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           BUMP: ${{ github.event.inputs.bump || '' }}
         run: |
           set -euo pipefail
 
           latest_stable() {
-            gh release list --limit 50 --json tagName,isPrerelease \
+            gh release list --exclude-drafts --limit 50 --json tagName,isPrerelease \
               --jq '[.[] | select(.isPrerelease==false) | .tagName | select(test("-rev\\.")|not)][0] // empty'
           }
 
@@ -64,9 +93,21 @@ jobs:
             echo "${major:-0} ${minor:-0} ${patch:-0}"
           }
 
+          # tag to publish, the code to build (ref) and the release whose
+          # indexes the new ones replace (baseline).
+          emit() {
+            {
+              echo "tag=${1}"
+              echo "create=${2}"
+              echo "ref=${3:-$GITHUB_SHA}"
+              echo "baseline=${4:-}"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          latest=$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // empty')
+
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
-            echo "create=true" >> "$GITHUB_OUTPUT"
+            emit "${GITHUB_REF_NAME}" true "" "$latest"
             exit 0
           fi
 
@@ -74,19 +115,21 @@ jobs:
             tag=$(latest_stable)
             if [ -z "$tag" ]; then
               echo "No stable release to refresh; skip."
-              echo "create=false" >> "$GITHUB_OUTPUT"
+              emit "" false
               exit 0
             fi
             echo "Refreshing GTFS zip on ${tag} (no version bump)"
-            echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-            echo "create=true" >> "$GITHUB_OUTPUT"
+            # Build and test the released code, not main, so the zip never ships
+            # unreleased card code (or an index schema the released card cannot
+            # read) under an old version. Its own indexes are the baseline.
+            emit "$tag" true "refs/tags/${tag}" "$tag"
             exit 0
           fi
 
           stable=$(latest_stable)
           if [ -z "$stable" ]; then
             echo "No previous stable release; skip."
-            echo "create=false" >> "$GITHUB_OUTPUT"
+            emit "" false
             exit 0
           fi
           read -r major minor patch <<< "$(parse_semver "$stable")"
@@ -105,33 +148,89 @@ jobs:
             tag="v${base}-rev.$((n + 1))"
           fi
           echo "Manual ${bump} from ${stable} -> ${tag}"
-          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
-          echo "create=true" >> "$GITHUB_OUTPUT"
+          emit "$tag" true "" "$latest"
 
-      # The weekly refresh re-packs an existing stable release. Build it from
-      # that tag, not from main, so the zip never ships unreleased card code
-      # (or an index schema the released card cannot read) under an old version.
-      - name: Check out released code for refresh
-        if: steps.ver.outputs.create == 'true' && github.event_name == 'schedule'
-        env:
-          TAG: ${{ steps.ver.outputs.tag }}
-        run: |
-          set -euo pipefail
-          git checkout --detach "refs/tags/${TAG}"
-          git log --oneline -1
+  test:
+    name: Tests
+    needs: resolve
+    if: needs.resolve.outputs.create == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
 
       - uses: actions/setup-python@v5
-        if: steps.ver.outputs.create == 'true'
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements_test.txt
+
+      - name: Card tests, bundle up to date with src/
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          git diff --exit-code dist/
+          npm test
+
+      - name: GTFS script tests
+        run: |
+          set -euo pipefail
+          for t in scripts/test_gtfs_compact.py scripts/test_update_volan_index.py scripts/test_build_guards.py; do
+            # A weekly refresh of an older tag may predate a test file.
+            if [ -f "$t" ]; then python3 "$t"; fi
+          done
+
+      - name: Integration tests
+        run: |
+          set -euo pipefail
+          pip install -r requirements_test.txt
+          python -m pytest -q
+
+  build:
+    name: Build indexes and pack
+    needs: resolve
+    if: needs.resolve.outputs.create == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # The builders compare against the index already in place: a city feed
+      # that vanished, most of a feed's trips gone or a near-empty Volán index
+      # fails the run, and the published assets stay as they are.
+      - name: Previous release indexes
+        if: needs.resolve.outputs.baseline != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE: ${{ needs.resolve.outputs.baseline }}
+        run: |
+          set -euo pipefail
+          gh release download "$BASELINE" --repo "$GITHUB_REPOSITORY" \
+            --pattern hungarian-transport-frontend.zip --dir baseline
+          unzip -o -j baseline/hungarian-transport-frontend.zip volan-index.json.gz city-index.json.gz -d .
+          rm -rf baseline
+          ls -l volan-index.json.gz city-index.json.gz
+
       - name: Build GTFS indexes
-        if: steps.ver.outputs.create == 'true'
         env:
           BAHART_GTFS_URL: ${{ secrets.BAHART_GTFS_URL }}
           MOBILITY_DATABASE_REFRESH_TOKEN: ${{ secrets.MOBILITY_DATABASE_REFRESH_TOKEN }}
           TRANSITLAND_API_KEY: ${{ secrets.TRANSITLAND_API_KEY }}
+          HUNGARIAN_TRANSPORT_ALLOW_MISSING: ${{ github.event.inputs.allow_missing || vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}
         run: |
+          set -euo pipefail
           python3 scripts/build_volan_index.py
           python3 scripts/build_city_index.py
           if [ -d pfaedle-out ] || [ -d /opt/pfaedle-trial/out ]; then
@@ -150,9 +249,8 @@ jobs:
           ls -lh dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz dist/mav-index.json.gz 2>/dev/null || true
 
       - name: Stamp release and pack assets
-        if: steps.ver.outputs.create == 'true'
         env:
-          TAG: ${{ steps.ver.outputs.tag }}
+          TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
           tag="$TAG"
@@ -204,11 +302,32 @@ jobs:
           (cd dist && zip -9r ../hungarian-transport-frontend.zip hungarian-transport.js volan-index.json.gz city-index.json.gz $( [ -d leaflet ] && echo leaflet ) $(ls -d *-shapes-*/ 2>/dev/null) $( [ -f mav-index.json.gz ] && echo mav-index.json.gz ))
           ls -lh hungarian-transport.zip hungarian-transport-frontend.zip
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: |
+            hungarian-transport.zip
+            hungarian-transport-frontend.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish GitHub release
+    needs: [resolve, test, build]
+    if: needs.resolve.outputs.create == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+
       - name: Publish GitHub release
-        if: steps.ver.outputs.create == 'true'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.ver.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -euo pipefail
           tag="$TAG"
