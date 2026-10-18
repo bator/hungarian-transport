@@ -544,6 +544,56 @@ def main() -> int:
             and acs.main([str(base / "city-index.json.gz")]) == 0,
         )
 
+    # A platform far from its station keeps its own place (city builds only):
+    # Szentes, Damjanich utca has platforms 3-4 on another street.
+    far_files = {
+        "agency.txt": "agency_id,agency_name\nA,Szentes\n",
+        "stops.txt": (
+            "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\n"
+            "hkir_9,Damjanich utca,46.670162,20.252863,1,\n"
+            "hkir_9_1,Damjanich utca,46.669931,20.253118,,hkir_9\n"
+            "hkir_9_3,Damjanich utca,46.672600,20.259211,,hkir_9\n"
+            "hkir_8,Drahos utca,46.66,20.24,,\n"
+        ),
+        "routes.txt": "route_id,route_short_name,agency_id\nR3,3,A\nR1,1,A\n",
+        "trips.txt": "route_id,service_id,trip_id\nR3,S1,T3\nR1,S1,T1\n",
+        "calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nS1,1,1,1,1,1,1,1,20200101,20991231\n",
+        "stop_times.txt": (
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+            "T3,08:00:00,08:00:00,hkir_8,1\nT3,08:05:00,08:05:00,hkir_9_3,2\n"
+            "T1,09:00:00,09:00:00,hkir_8,1\nT1,09:05:00,09:05:00,hkir_9_1,2\n"
+        ),
+    }
+    fz = gtfs_zip(far_files)
+    try:
+        def place(parts, route):
+            p = parts[0]
+            trip = next(t for t in p["t"] if t[1] == route)
+            i = trip[2][-1]
+            return p["s"][i], (p["g"][2 * i] / 1e5, p["g"][2 * i + 1] / 1e5)
+        merged = load_parts(fz, lambda short, *_: bool(short), op_id="szentes", prefix="szentes:")
+        split = load_parts(fz, lambda short, *_: bool(short), op_id="szentes", prefix="szentes:",
+                           split_platforms_m=gc.PLATFORM_SPLIT_M)
+        m3, mll3 = place(merged, "3")
+        s3, sll3 = place(split, "3")
+        s1, sll1 = place(split, "1")
+        failed |= not check(
+            "without the split every platform is the station",
+            m3[0] == "szentes:hkir_9" and abs(mll3[1] - 20.25286) < 1e-4, f"{m3} {mll3}",
+        )
+        failed |= not check(
+            "a far platform keeps its own place, name and station number",
+            s3[0] == "szentes:hkir_9_3" and s3[1] == "Damjanich utca" and s3[2] == "9"
+            and abs(sll3[0] - 46.6726) < 1e-4 and abs(sll3[1] - 20.25921) < 1e-4,
+            f"{s3} {sll3}",
+        )
+        failed |= not check(
+            "a near platform is still the station",
+            s1[0] == "szentes:hkir_9" and abs(sll1[1] - 20.25286) < 1e-4, f"{s1} {sll1}",
+        )
+    finally:
+        fz.unlink(missing_ok=True)
+
     return 1 if failed else 0
 
 

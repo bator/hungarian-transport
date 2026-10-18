@@ -40,6 +40,10 @@ SHAPE_SHARDS = 64
 # Douglas–Peucker tolerance: 10 m keeps streets recognisable at city zoom
 # and drops ~60 % of the points.
 SHAPE_TOLERANCE_M = 10.0
+# A platform this far from its station (`X_3` of `X`) keeps its own place in
+# a city index: Szentes, Damjanich utca has platforms on another street,
+# 550 m away. City cards group stops by name, so departures stay together.
+PLATFORM_SPLIT_M = 100.0
 _SHAPES_MEMO: dict[tuple, dict[str, str]] = {}
 _BLOCKED_HOSTS = frozenset(
     {
@@ -356,6 +360,11 @@ def hm(t: str | None) -> int | None:
         return int(a[0]) * 60 + int(a[1])
     except ValueError:
         return None
+
+
+def _meters(a: tuple[float, float], b: tuple[float, float]) -> float:
+    k = math.cos(math.radians(a[0]))
+    return math.hypot((a[1] - b[1]) * k * 111320.0, (a[0] - b[0]) * 110540.0)
 
 
 def stop_num(pid: str) -> str:
@@ -772,8 +781,11 @@ def load_parts(
     op_id: str = "",
     op_name: str = "",
     skip_agency: Callable[[str], bool] | None = None,
+    split_platforms_m: float | None = None,
 ) -> list[dict]:
-    """Parse one GTFS zip into one or more operator parts."""
+    """Parse one GTFS zip into one or more operator parts. With
+    split_platforms_m, a platform farther than that from its station is a
+    stop of its own (same name, own position) instead of the station's."""
     with open_gtfs_zip(zpath) as z:
         return _load_parts(
             z,
@@ -784,6 +796,7 @@ def load_parts(
             op_name=op_name,
             skip_agency=skip_agency,
             zpath=zpath,
+            split_platforms_m=split_platforms_m,
         )
 
 
@@ -797,6 +810,7 @@ def _load_parts(
     op_name: str,
     skip_agency: Callable[[str], bool] | None,
     zpath: Path,
+    split_platforms_m: float | None = None,
 ) -> list[dict]:
     version = feed_version(z)
 
@@ -839,6 +853,18 @@ def _load_parts(
     for sid, p in sid2p.items():
         if p not in pll and sid in sid2ll:
             pll[p] = sid2ll[sid]
+    # Station numbers stay with split platforms, so an id lookup by number
+    # still lands on the station's stops.
+    pnum: dict[str, str] = {}
+    if split_platforms_m:
+        for sid, p in list(sid2p.items()):
+            if p == sid or sid not in sid2ll or p not in pll:
+                continue
+            if _meters(sid2ll[sid], pll[p]) > split_platforms_m:
+                sid2p[sid] = sid
+                pname[sid] = sid2n[sid]
+                pll[sid] = sid2ll[sid]
+                pnum[sid] = stop_num(p)
 
     routes: dict[str, str] = {}
     route_types: dict[str, int] = {}
@@ -1028,7 +1054,7 @@ def _load_parts(
             "op_id": op,
             "op_name": name,
             "feed": version,
-            "s": [[pre + p, pname.get(p, p), stop_num(p)] for p in parents],
+            "s": [[pre + p, pname.get(p, p), pnum.get(p) or stop_num(p)] for p in parents],
             # lat, lon per stop as integers of 1e-5 degrees; 0, 0 = unknown.
             "g": coords,
             "shapes": shape_list,
