@@ -204,19 +204,17 @@ export class BKKPlannerCard extends BKKHopCard {
         }, lineBase)).addTo(map);
       }
     });
-    const pin = (pt, fill) => {
-      if (!pt) return;
-      L.circleMarker(pt, {
-        radius: 7, color: '#fff', weight: 2, fillColor: fill, fillOpacity: 1,
+    /* Boarding and alighting stop of every ride; names only on the big map,
+       where there is room for them. */
+    const lang = this._lang();
+    BkkLib.journeyStopPins(segs).forEach((pin) => {
+      L.marker(pin.pt, {
+        icon: this._stopPinIcon(L, pin, lang, !!opts.labels),
+        zIndexOffset: pin.kind === 'alight' ? 500 : 520,
+        keyboard: false,
+        interactive: clickable || !!opts.labels,
       }).addTo(map);
-    };
-    pin(segs[0].shape[0], '#0F6FC6');
-    for (let i = 0; i < segs.length - 1; i++) {
-      const shape = segs[i].shape;
-      pin(shape[shape.length - 1], '#555555');
-    }
-    const lastSeg = segs[segs.length - 1].shape;
-    pin(lastSeg[lastSeg.length - 1], '#0F6FC6');
+    });
     return allPts;
   }
 
@@ -545,7 +543,7 @@ export class BKKPlannerCard extends BKKHopCard {
       return;
     }
     this._map = map;
-    const allPts = this._drawJourneyPolylines(L, map, segs);
+    const allPts = this._drawJourneyPolylines(L, map, segs, { labels: true });
     this._fitJourneyView(L, map, allPts, 36);
     this._openingMap = '';
   }
@@ -771,6 +769,7 @@ export class BKKPlannerCard extends BKKHopCard {
       .journey-plan .j-map .leaflet-overlay-pane{z-index:400}
       .journey-plan .j-map .leaflet-marker-pane{z-index:600}
       .journey-plan .j-map .leaflet-control-attribution{font-size:10px;background:rgba(255,255,255,.72)}
+${this._stopPinCss()}
       .journey-plan #pmap {
         margin-top: 10px; border: 0; cursor: pointer; font: inherit; font-size: 13px; font-weight: 700;
         border-radius: 999px; padding: 8px 14px;

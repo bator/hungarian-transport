@@ -26,6 +26,7 @@ export class BKKHopCard extends HTMLElement {
     this._map = null;
     this._mapMarker = null;
     this._mapBoardMarker = null;
+    this._mapAlightMarker = null;
     this._mapRoute = null;
     this._openMapKey = null;
     this._onMapKey = null;
@@ -538,10 +539,12 @@ export class BKKHopCard extends HTMLElement {
       try { this._map.removeLayer(this._mapRouteOutline); } catch (_e) { /* ignore */ }
       this._mapRouteOutline = null;
     }
-    if (this._mapBoardMarker && this._map) {
-      try { this._map.removeLayer(this._mapBoardMarker); } catch (_e) { /* ignore */ }
-      this._mapBoardMarker = null;
-    }
+    [this._mapBoardMarker, this._mapAlightMarker].forEach((marker) => {
+      if (!marker || !this._map) return;
+      try { this._map.removeLayer(marker); } catch (_e) { /* ignore */ }
+    });
+    this._mapBoardMarker = null;
+    this._mapAlightMarker = null;
     (this._mapRouteLayers || []).forEach((layer) => {
       if (!this._map || !layer) return;
       try { this._map.removeLayer(layer); } catch (_e) { /* ignore */ }
@@ -564,9 +567,49 @@ export class BKKHopCard extends HTMLElement {
     return `${row.label || ''}|${row.headsign || ''}|${row.vehicleId || row.tripId || ''}`;
   }
 
-  _boardIcon(name, lang) {
-    const tip = t(lang, 'mapBoardStop') + (name ? ': ' + name : '');
-    return `<div class="ht-board-dot" title="${BkkLib.esc(tip)}"><span class="ht-board-dot-core"></span></div>`;
+  /* Stops in the style of a metro map: boarding is a dot in the line's colour,
+     alighting a ring, a transfer a neutral ring; the journey's start is a
+     blue dot and its end a target. Boarding names sit right of the pin with
+     the line's badge, alighting names left, so a transfer between two nearby
+     stops shows both. */
+  _stopPinIcon(L, pin, lang, withLabel) {
+    const esc = BkkLib.esc;
+    const word = {
+      board: 'mapBoardStop', alight: 'mapAlightStop', transfer: 'mapTransferStop',
+      start: 'mapStartPoint', end: 'mapEndPoint',
+    }[pin.kind] || 'mapBoardStop';
+    const tip = t(lang, word) + (pin.name ? ': ' + pin.name : '');
+    const line = BkkLib.normMapHex(pin.color) || '#1a1a1a';
+    const ink = BkkLib.normMapHex(pin.text) || BkkLib.mapTextOn(line);
+    const badge = pin.label && pin.kind !== 'alight'
+      ? `<b class="ht-stop-line">${esc(pin.label)}</b>` : '';
+    const label = withLabel && pin.name
+      ? `<span class="ht-stop-lbl">${badge}<span class="ht-stop-name">${esc(pin.name)}</span></span>` : '';
+    return L.divIcon({
+      className: 'ht-stop-pin-wrap',
+      html: `<div class="ht-stop-pin ht-stop-${esc(pin.kind)}" style="--line:${esc(line)};--ink:${esc(ink)}"`
+        + ` title="${esc(tip)}"><span class="ht-stop-mark"></span>${label}</div>`,
+      iconSize: [20, 20],
+      iconAnchor: [10, 10],
+    });
+  }
+
+  /* The card's own map overlay lives outside the shadow root; the planner's
+     inline map lives inside it. Both include these rules. */
+  _stopPinCss() {
+    return `
+        .ht-stop-pin{position:relative;width:20px;height:20px;display:flex;align-items:center;justify-content:center}
+        .ht-stop-mark{width:16px;height:16px;box-sizing:border-box;border-radius:50%;background:var(--line,#1a1a1a);border:3px solid #fff;box-shadow:0 0 0 1px rgba(0,0,0,.25),0 1px 4px rgba(0,0,0,.4)}
+        .ht-stop-alight .ht-stop-mark{background:#fff;border:4px solid var(--line,#1a1a1a)}
+        .ht-stop-transfer .ht-stop-mark{width:18px;height:18px;background:#fff;border:4px solid #1a1a1a}
+        .ht-stop-start .ht-stop-mark{width:14px;height:14px;background:#1a73e8;border:3px solid #fff;box-shadow:0 0 0 4px rgba(26,115,232,.25),0 1px 4px rgba(0,0,0,.4)}
+        .ht-stop-end .ht-stop-mark{width:18px;height:18px;background:#1a1a1a;border:3px solid #fff;box-shadow:0 0 0 2px #1a1a1a,0 1px 5px rgba(0,0,0,.45)}
+        .ht-stop-lbl{position:absolute;left:19px;top:50%;transform:translateY(-50%);display:flex;align-items:center;gap:5px;white-space:nowrap;max-width:220px;padding:3px 9px 3px 4px;border-radius:999px;background:#fff;color:#1f1f1f;font:600 12px/1.2 system-ui,sans-serif;box-shadow:0 1px 4px rgba(0,0,0,.3);pointer-events:none}
+        .ht-stop-lbl:not(:has(.ht-stop-line)){padding-left:9px}
+        .ht-stop-alight .ht-stop-lbl,.ht-stop-end .ht-stop-lbl{left:auto;right:19px}
+        .ht-stop-name{overflow:hidden;text-overflow:ellipsis}
+        .ht-stop-line{flex:none;min-width:14px;padding:1px 6px;border-radius:999px;background:var(--line,#1a1a1a);color:var(--ink,#fff);font:800 11px/1.25 system-ui,sans-serif;text-align:center}
+    `;
   }
 
   _dotIcon(row, live, lang, colorHex) {
@@ -593,8 +636,7 @@ export class BKKHopCard extends HTMLElement {
         .ht-veh-dot-core{width:14px;height:14px;border-radius:50%;background:var(--bg,#2E5EA8);border:2.5px solid #fff;box-sizing:border-box}
         .ht-veh-dot-live .ht-veh-dot-core{width:16px;height:16px;box-shadow:0 0 0 3px color-mix(in srgb, var(--bg,#2E5EA8) 35%, transparent)}
         .ht-veh-dot-est .ht-veh-dot-core{border-style:dashed;opacity:.95}
-        .ht-board-dot{width:18px;height:18px;transform:translate(-50%,-50%);display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(0,0,0,.45))}
-        .ht-board-dot-core{width:11px;height:11px;background:var(--primary-text-color,#111);border:2px solid var(--card-background-color,#fff);box-sizing:border-box;transform:rotate(45deg)}
+${this._stopPinCss()}
         .ht-map-canvas .leaflet-container{width:100%;height:100%;min-height:420px;overflow:hidden}
         .ht-map-canvas .leaflet-pane,.ht-map-canvas .leaflet-tile,.ht-map-canvas .leaflet-marker-icon,.ht-map-canvas .leaflet-marker-shadow,.ht-map-canvas .leaflet-tile-container,.ht-map-canvas .leaflet-zoom-box,.ht-map-canvas .leaflet-image-layer,.ht-map-canvas .leaflet-layer{position:absolute;left:0;top:0}
         .ht-map-canvas .leaflet-pane>svg,.ht-map-canvas .leaflet-pane>canvas{position:absolute}
@@ -605,10 +647,11 @@ export class BKKHopCard extends HTMLElement {
     `;
   }
 
-  _mapFootText(row, hasShape, hasGps, estimated, lang, hasBoard) {
+  _mapFootText(row, hasShape, hasGps, estimated, lang, hasBoard, hasAlight) {
     const bits = [];
     if (hasShape) bits.push(t(lang, 'mapFullRoute'));
-    if (hasBoard) bits.push(t(lang, 'mapBoardStop'));
+    if (hasBoard) bits.push('\u25cf ' + t(lang, 'mapBoardStop'));
+    if (hasAlight) bits.push('\u25cb ' + t(lang, 'mapAlightStop'));
     if (hasGps) bits.push(t(lang, 'mapLivePos'));
     else if (estimated) bits.push(t(lang, 'mapEstPos'));
     else if (hasShape) bits.push(t(lang, 'mapNoGps'));
@@ -658,7 +701,7 @@ export class BKKHopCard extends HTMLElement {
           if (!board) {
             board = BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
           }
-          return { shape: mavShape, board: board };
+          return { shape: mavShape, board: board, alight: await this._rowAlightPoint(row, []) };
         }
       } catch (_e) { /* MOTIS / FUTÁR still fill */ }
     }
@@ -666,7 +709,9 @@ export class BKKHopCard extends HTMLElement {
        route: no network beyond one shape shard, and no guessing. */
     const gtfsGeo = await BkkLib.gtfsRowShape(row);
     if (gtfsGeo && gtfsGeo.board) board = gtfsGeo.board;
-    if (gtfsGeo && gtfsGeo.shape.length >= 2) return { shape: gtfsGeo.shape, board };
+    if (gtfsGeo && gtfsGeo.shape.length >= 2) {
+      return { shape: gtfsGeo.shape, board, alight: await this._rowAlightPoint(row, [gtfsGeo.dest]) };
+    }
     const tripId = (row && row.tripId) || '';
     const canFutar = this._hasFutar() && (
       !/^motis:/i.test(String(tripId || '')) || !!BkkLib.rowTrainNumber(row)
@@ -686,6 +731,14 @@ export class BKKHopCard extends HTMLElement {
       try {
         futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
       } catch (_e) { /* MOTIS hop still fills */ }
+    }
+    /* Same trip-details response (cached): the exact board and alight stops. */
+    let futarHop = null;
+    if (geomTrip && this._hasFutar() && cfg.destKey) {
+      try {
+        futarHop = await BkkLib.tripHopStops(this._apiKey(), this._tripCache || {}, geomTrip,
+          { id: cfg.stopId, name: cfg.stopName }, cfg.destKey);
+      } catch (_e) { /* Transitous and the config still place the stops */ }
     }
     const published = BkkLib.keepsFullLineShape(row) && !BkkLib.isTrainRow(row)
       && futarShape.length >= 8;
@@ -726,6 +779,9 @@ export class BKKHopCard extends HTMLElement {
           }
         }
       } catch (_e) { /* row shape / GPS still draw */ }
+    }
+    if (futarHop && futarHop.board && (!board || BkkLib.haversineMeters(board, futarHop.board) <= 300)) {
+      board = futarHop.board;
     }
     if (!board) {
       board = BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
@@ -780,30 +836,39 @@ export class BKKHopCard extends HTMLElement {
       }
     }
     /* Published line stays whole (8E Újpalota→Kelenföld, not the hop). */
-    let destPt = (motisMap && motisMap.dest)
-      || BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon)
-      || BkkLib.knownStopCoords({
-        id: cfg.destStopId, name: cfg.destName, key: cfg.destKey,
-      });
-    if (!destPt && cfg.destName && !BkkLib.keepsFullLineShape(row)) {
-      try {
-        const destRef = await BkkLib.transitousStopRef({
-          id: cfg.destStopId,
-          name: cfg.destName,
-          key: cfg.destKey,
-          lat: cfg.destLat,
-          lon: cfg.destLon,
-          area,
-        }, BkkLib.vehicleBucket(row));
-        destPt = destRef && BkkLib.mapGpsLatLon(destRef.lat, destRef.lon);
-      } catch (_e) { /* keep the combined shape */ }
-    }
+    const destPt = await this._rowAlightPoint(row, [futarHop && futarHop.alight, motisMap && motisMap.dest]);
     const clipped = BkkLib.clipRideShape(shape, board, destPt, row);
     if (clipped.length >= 2) shape = clipped;
     shape = BkkLib.validMapShape(shape);
     /* No shapes.txt route and nothing from Transitous: join the GTFS stops. */
     if (shape.length < 2 && gtfsGeo && gtfsGeo.stopLine.length >= 2) shape = gtfsGeo.stopLine;
-    return { shape, board: board };
+    return { shape, board: board, alight: destPt };
+  }
+
+  /* Where the rider gets off: the trip's own stop (GTFS or FUTÁR) first, then
+     Transitous's hop end, the configured stop, and a Transitous lookup.
+     Cards without a destination have no alighting stop. */
+  async _rowAlightPoint(row, candidates) {
+    const cfg = this._config || {};
+    if (!cfg.destKey && !cfg.destName && !cfg.destStopId) return null;
+    const asPt = (p) => (Array.isArray(p) ? BkkLib.mapGpsLatLon(p[0], p[1]) : null);
+    const known = (candidates || []).map(asPt).find(Boolean)
+      || BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon)
+      || BkkLib.knownStopCoords({ id: cfg.destStopId, name: cfg.destName, key: cfg.destKey });
+    if (known || !cfg.destName) return known || null;
+    try {
+      const ref = await BkkLib.transitousStopRef({
+        id: cfg.destStopId,
+        name: cfg.destName,
+        key: cfg.destKey,
+        lat: cfg.destLat,
+        lon: cfg.destLon,
+        area: await BkkLib.stopArea(cfg),
+      }, BkkLib.vehicleBucket(row));
+      return (ref && BkkLib.mapGpsLatLon(ref.lat, ref.lon)) || null;
+    } catch (_e) {
+      return null;
+    }
   }
 
   async _openVehicleMap(row) {
@@ -903,12 +968,16 @@ export class BKKHopCard extends HTMLElement {
     }
     let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon)
       || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
+    let alight = null;
     try {
       const got = await this._loadRowMapShape(row);
       shape = BkkLib.validMapShape(got.shape);
       hasShape = shape.length >= 2;
       if (got.board) board = got.board;
+      alight = got.alight || null;
     } catch (_e) { /* timetable row still shows the live dot */ }
+    /* Same spot as the boarding stop (a loop line, a bad lookup): one pin. */
+    if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
     if (!this._map || this._map !== map || !this._mapOverlay) {
       this._openingMap = '';
       return;
@@ -925,17 +994,15 @@ export class BKKHopCard extends HTMLElement {
     };
     const applyView = () => {
       try { map.invalidateSize(); } catch (_e) { /* ignore */ }
+      const points = [board, alight, hasPosition ? [lat, lon] : null].filter(Boolean);
       if (hasShape) {
         const bounds = L.latLngBounds(shape);
-        if (hasPosition) bounds.extend([lat, lon]);
-        if (board) bounds.extend(board);
+        points.forEach((pt) => bounds.extend(pt));
         map.fitBounds(bounds, { padding: [36, 36], maxZoom: 12 });
-      } else if (board && hasPosition) {
-        map.fitBounds(L.latLngBounds([board, [lat, lon]]), { padding: [36, 36], maxZoom: 12 });
-      } else if (board) {
-        map.setView(board, 13);
-      } else if (hasPosition) {
-        map.setView([lat, lon], 13);
+      } else if (points.length >= 2) {
+        map.fitBounds(L.latLngBounds(points), { padding: [36, 36], maxZoom: 12 });
+      } else if (points.length) {
+        map.setView(points[0], 13);
       }
       (this._mapRouteLayers || []).forEach((layer) => {
         if (layer && typeof layer.redraw === 'function') {
@@ -954,19 +1021,18 @@ export class BKKHopCard extends HTMLElement {
       this._mapRouteOutline = outline;
       this._mapRoute = line;
     }
-    if (board) {
-      const stopIcon = L.divIcon({
-        className: '',
-        html: this._boardIcon(cfg.stopName, lang),
-        iconSize: [18, 18],
-        iconAnchor: [9, 9],
-      });
-      this._mapBoardMarker = L.marker(board, { icon: stopIcon, zIndexOffset: 500 }).addTo(map);
+    const stopPin = (pin) => L.marker(pin.pt, {
+      icon: this._stopPinIcon(L, pin, lang, true), zIndexOffset: 500, keyboard: false,
+    }).addTo(map);
+    const line = { color: routeColor, label: row.label || '', text: row.textcolor || '' };
+    if (alight) {
+      this._mapAlightMarker = stopPin({ kind: 'alight', pt: alight, name: cfg.destName || '', color: routeColor });
     }
+    if (board) this._mapBoardMarker = stopPin(Object.assign({ kind: 'board', pt: board, name: cfg.stopName || '' }, line));
     if (hasPosition && !this._mapMarker) drawMarker();
     applyView();
     const hasBoard = !!board;
-    foot.textContent = this._mapFootText(row, hasShape, hasGps, positionEstimated, lang, hasBoard);
+    foot.textContent = this._mapFootText(row, hasShape, hasGps, positionEstimated, lang, hasBoard, !!alight);
     if (!hasShape && !hasBoard && !hasPosition) {
       foot.textContent = t(lang, 'mapNothingToShow');
     } else if (!hasShape) {
@@ -995,7 +1061,10 @@ export class BKKHopCard extends HTMLElement {
       }));
     }
     const foot = this._mapOverlay && this._mapOverlay.querySelector('.ht-map-foot');
-    if (foot) foot.textContent = this._mapFootText(row, true, true, false, lang, !!this._mapBoardMarker);
+    if (foot) {
+      foot.textContent = this._mapFootText(row, true, true, false, lang,
+        !!this._mapBoardMarker, !!this._mapAlightMarker);
+    }
   }
 
   _departMode() {

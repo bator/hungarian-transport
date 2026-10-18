@@ -322,6 +322,21 @@ Object.assign(BkkLib, {
       return false;
     }
   },
+  /* The trip's own stops for the map: where the rider boards, and the first
+     later stop named like the card's destination. Exact, and on the route. */
+  async tripHopStops(apiKey, cache, tripId, origin, destKey) {
+    const { sts, stops } = await BkkLib.tripDetails(apiKey, cache, tripId);
+    const oidx = BkkLib.originIndex(sts, stops, origin);
+    if (oidx < 0) return null;
+    const at = (s) => {
+      const stop = (s && stops[s.stopId]) || {};
+      return BkkLib.mapGpsLatLon(stop.lat, stop.lon);
+    };
+    const hit = destKey
+      ? sts.slice(oidx + 1).find((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey))
+      : null;
+    return { board: at(sts[oidx]), alight: hit ? at(hit) : null };
+  },
   async tripRemainingNames(apiKey, cache, tripId, origin) {
     const { sts, stops } = await BkkLib.tripDetails(apiKey, cache, tripId);
     const oidx = BkkLib.originIndex(sts, stops, origin);
