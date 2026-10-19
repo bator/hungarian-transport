@@ -41,21 +41,35 @@ FAIL_REPEAT_DAYS = 7
 MAV_KEY = "mav"
 
 
-# A keyed feed override (BAHART_GTFS_URL=...?apikey=...) can end up in an
-# exception text. What goes to the log and the webhook loses every URL query,
-# the user:password part of a URL, and bare key=value pairs of secret names.
+# A keyed feed override (BAHART_GTFS_URL=...?apikey=..., a MÁV link whose
+# parameter names nobody knows) can end up in an exception text. What goes to
+# the log and the webhook loses:
+# - every URL query, and any "?name=..." query without a scheme (/f.zip?k=...);
+# - the user:password part of a URL;
+# - an Authorization scheme's credentials (Bearer ..., Basic ...);
+# - the value of a name whose last _/- segment is a secret word (key, token,
+#   secret, password ...: apikey, client_secret, refresh_token, x-api-key),
+#   with = or :, spaces and quotes around it (apikey = x, "access_token": "x").
 _URL_QUERY = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s?#'\"<>]*)\?[^\s#'\"<>]*")
+_BARE_QUERY = re.compile(r"\?(?=[A-Za-z0-9_.%-]+=)[^\s#'\"<>]*")
 _URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@'\"<>]+@")
+_AUTH_SCHEME = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+_SECRET_WORD = r"(?:api[_-]?key|apikey|key|token|secret|password|passwd|pwd|sig|signature|credentials?|authorization)"
 _SECRET_PARAM = re.compile(
-    r"(?i)\b((?:api[_-]?)?key|token|access_token|secret|password|passwd|sig|signature)=[^\s&'\"<>]+"
+    r"(?i)(^|[^a-z0-9])((?:[a-z0-9]+[_-])*" + _SECRET_WORD + r")([\"']?\s*[:=]\s*[\"']?)"
+    # an Authorization scheme word stays (its credentials went with _AUTH_SCHEME)
+    r"(?!(?:Bearer|Basic)\s)[^\s&'\"<>,;]+"
 )
 
 
 def redact(text: str) -> str:
-    """text without URL queries, URL credentials and secret-named key=value pairs."""
+    """text without URL queries, URL credentials, auth credentials and the values of
+    secret-named parameters (see above)."""
     text = _URL_USERINFO.sub(r"\1…@", text)
     text = _URL_QUERY.sub(r"\1?…", text)
-    return _SECRET_PARAM.sub(r"\1=…", text)
+    text = _BARE_QUERY.sub("?…", text)
+    text = _AUTH_SCHEME.sub(r"\1 …", text)
+    return _SECRET_PARAM.sub(r"\1\2\3…", text)
 
 
 def notify(message: str, title: str = "Hungarian transport GTFS") -> None:

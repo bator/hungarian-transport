@@ -578,6 +578,17 @@ for raw, want in [
     ("HTTP Error 403 for apikey=K1 and token=T1", "HTTP Error 403 for apikey=… and token=…"),
     ("error city rebuild: HTTP Error 404: Not Found", "error city rebuild: HTTP Error 404: Not Found"),
     ("https://h.example/download/bahart/ ok, keyboard=fine", "https://h.example/download/bahart/ ok, keyboard=fine"),
+    # J-3: what the name list let through
+    ("fetch /f.zip?k=S1 failed", "fetch /f.zip?… failed"),
+    ("client_secret=S2", "client_secret=…"),
+    ("refresh_token=S3&x=1", "refresh_token=…&x=1"),
+    ("Authorization: Bearer S4", "Authorization: Bearer …"),
+    ("Authorization: S4b", "Authorization: …"),
+    ("apikey: S5", "apikey: …"),
+    ("apikey = S6", "apikey = …"),
+    ("x-api-key: S7", "x-api-key: …"),
+    ('{"access_token": "S8"}', '{"access_token": "…"}'),
+    ("monkey=fine, what? ok", "monkey=fine, what? ok"),
 ]:
     check(f"redact({raw!r})", uvi.redact(raw) == want, repr(uvi.redact(raw)))
 
