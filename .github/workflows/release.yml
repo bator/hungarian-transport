@@ -4,6 +4,11 @@ on:
   push:
     tags:
       - "v*"
+  # Weekly: rebuild the GTFS indexes on the latest stable tag's code and
+  # replace that release's zips in place (gh release upload --clobber), so
+  # fresh downloads get current feeds without a version bump. On purpose;
+  # each upload carries a matching SHA256SUMS and a build provenance
+  # attestation, so a replaced asset can still be checked.
   schedule:
     - cron: "30 2 * * 1"
   workflow_dispatch:
@@ -382,6 +387,10 @@ jobs:
               sys.exit(1)
           print(f"tag, manifest.json and CARD_VERSION agree on {ver}")
           PY
+          # Shipped next to the zips (the weekly refresh replaces them in
+          # place): sha256sum -c SHA256SUMS checks a download.
+          sha256sum hungarian-transport.zip hungarian-transport-frontend.zip > SHA256SUMS
+          cat SHA256SUMS
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -389,6 +398,7 @@ jobs:
           path: |
             hungarian-transport.zip
             hungarian-transport-frontend.zip
+            SHA256SUMS
           if-no-files-found: error
           retention-days: 7
 
@@ -399,10 +409,23 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # build provenance attestation (Sigstore via OIDC) for the two zips
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-assets
+
+      - name: Check the checksums of what is about to be published
+        run: sha256sum -c SHA256SUMS
+
+      # gh attestation verify hungarian-transport.zip --repo <owner>/<repo>
+      - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            hungarian-transport.zip
+            hungarian-transport-frontend.zip
 
       - name: Publish GitHub release
         env:
@@ -432,8 +455,8 @@ jobs:
             echo "::error::Release $tag exists as a draft. Publish or delete the draft, then rerun."
             exit 1
           elif [ "$draft" = "false" ]; then
-            gh release upload "$tag" hungarian-transport.zip hungarian-transport-frontend.zip --clobber
+            gh release upload "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS --clobber
           else
             # Tag the commit that was built, not whatever the default branch is now.
-            gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip --target "$GITHUB_SHA" --title "$tag" --notes "$notes" "${extra[@]}"
+            gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS --target "$GITHUB_SHA" --title "$tag" --notes "$notes" "${extra[@]}"
           fi

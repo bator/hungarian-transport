@@ -303,6 +303,10 @@ to the variable), and drop it from `CITY_FEEDS`.
 HACS does not re-download a version that is already installed, so existing
 installs only pick up new feeds with the next release, or with the local
 rebuild below.
+Because the weekly run replaces the zips of an existing release, every
+upload also publishes `SHA256SUMS` and a build provenance attestation: check
+a download with `sha256sum -c SHA256SUMS` (next to the zips) or
+`gh attestation verify hungarian-transport.zip --repo bator/hungarian-transport`.
 
 To rebuild them yourself on Home Assistant OS:
 
