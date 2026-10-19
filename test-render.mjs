@@ -6122,4 +6122,158 @@ const settle = async (el) => {
     JSON.stringify({ n: labels.length, missing }));
 }
 
+/* ---- Bugs found while shooting the user manual ---- */
+
+/* A Volán coach's map is a coach's, not a train's; a ferry's a ferry's. */
+{
+  const prevL = window.L;
+  const prevRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  const layer = () => ({ addTo() { return this; }, setLatLng() {}, setIcon() {}, redraw() {} });
+  window.L = {
+    map: () => ({ setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {} }),
+    tileLayer: () => layer(),
+    divIcon: (o) => o,
+    marker: () => layer(),
+    polyline: () => layer(),
+    latLngBounds: () => ({ extend() {} }),
+  };
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c._reloadSafe = () => {};
+  c._loadRowMapShape = async () => ({ shape: [[47.68, 17.63], [47.33, 17.47]], board: [47.68, 17.63], alight: null });
+  const head = async (language, row) => {
+    c.setConfig({ language, stopId: 'volan_1', stopName: 'Győr', volan: true, routeIds: [] });
+    await c._openVehicleMap(row);
+    const meta = document.querySelector('.ht-map-overlay .ht-map-head .meta');
+    const out = meta ? [meta.firstElementChild.textContent, meta.querySelector('.sub').textContent] : [];
+    c._closeVehicleMap();
+    return out;
+  };
+  const coach = { label: '1180', headsign: 'Pápa', vehicle: 'coach', type: 'COACH', tripId: 'gtfs:1180-1' };
+  const ferry = { label: 'D12', headsign: 'Római fürdő', vehicle: 'ferry', type: 'FERRY', tripId: 'BKK_D12' };
+  const huCoach = await head('hu', coach);
+  const enCoach = await head('en', coach);
+  check('a Volán map header shows a coach, not a train',
+    huCoach[0].startsWith('\u{1F68C} ') && huCoach[1] === 'Távolsági busz'
+    && enCoach[0].startsWith('\u{1F68C} ') && enCoach[1] === 'Coach',
+    JSON.stringify({ huCoach, enCoach }));
+  const huFerry = await head('hu', ferry);
+  const enFerry = await head('en', ferry);
+  check('a ferry map header shows a ferry, not a vehicle pin',
+    huFerry[0].startsWith('⛴ ') && huFerry[1] === 'Hajó'
+    && enFerry[0].startsWith('⛴ ') && enFerry[1] === 'Ferry',
+    JSON.stringify({ huFerry, enFerry }));
+  c.remove();
+  window.L = prevL;
+  globalThis.requestAnimationFrame = prevRaf;
+}
+
+/* The editor lists the reachable destinations as soon as they load, not
+   only once the destination field is focused. */
+{
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  const keepReach = Lib.reachableDests;
+  let release = null;
+  Lib.reachableDests = () => new Promise((r) => { release = r; });
+  ed.setConfig({ volan: true, language: 'hu', stopId: 'volan_1', stopName: 'Győr' });
+  const box = ed.querySelector('#destHits');
+  const loadingShown = !!box && box.textContent.includes('Elérhető célok betöltése');
+  release({ dests: [{ key: 'pápa', name: 'Pápa' }, { key: 'tata', name: 'Tata' }], destRoutes: {} });
+  await settleTicks();
+  const names = [...box.querySelectorAll('button.hit')].map((b) => b.textContent);
+  check('loaded destinations replace the loading hint without focusing the field',
+    loadingShown && !ed._destsLoading && JSON.stringify(names) === '["Pápa","Tata"]'
+    && !box.textContent.includes('betöltése'),
+    JSON.stringify({ loadingShown, names, box: box && box.textContent }));
+  Lib.reachableDests = keepReach;
+  ed.remove();
+}
+
+/* Folding an itinerary, or opening another, right after its map was drawn
+   must not leave Leaflet to throw from a removed map. The fake models
+   Leaflet 1.9.4: an animated zoom ends on its own 250 ms timer, which reads
+   the map pane remove() has deleted ("reading '_leaflet_pos'"), and any view
+   change on a removed map throws. */
+{
+  const prevRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  const made = [];
+  const thrown = [];
+  const late = [];
+  const layer = () => ({ addTo() { return this; }, setLatLng() {}, setIcon() {}, redraw() {} });
+  const L = {
+    map: (el, opts) => {
+      const map = {
+        opts: opts || {},
+        loaded: false,
+        removed: false,
+        view(name, o) {
+          if (this.removed) {
+            late.push(name);
+            throw new TypeError("Cannot read properties of undefined (reading '_leaflet_pos')");
+          }
+          const animated = this.loaded && this.opts.zoomAnimation !== false && !(o && o.animate === false);
+          if (name !== 'invalidateSize') this.loaded = true;
+          if (animated) setTimeout(() => { if (this.removed) thrown.push(name); }, 250);
+        },
+        setView(c, z, o) { this.view('setView', o); return this; },
+        fitBounds(b, o) { this.view('fitBounds', o); return this; },
+        invalidateSize() { this.view('invalidateSize', { animate: false }); return this; },
+        removeLayer() {},
+        remove() { this.removed = true; return this; },
+        on() {},
+      };
+      made.push(map);
+      return map;
+    },
+    tileLayer: () => layer(),
+    polyline: () => layer(),
+    marker: () => layer(),
+    divIcon: (o) => o,
+    latLngBounds: (pts) => ({ pts, extend() {} }),
+  };
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  pc._ensureLeaflet = async () => L;
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'hu', stopId: 'geo:47.19,18.41', stopName: 'A', destKey: 'b', destName: 'B' });
+  const ride = (minutes) => ({ walk: false, label: '7', color: '009EE3', minutes, from: 'A', to: 'B', shape: [[47.5, 19.0], [47.52, 19.05]] });
+  const journey = (min) => ({ durationMin: min, transfers: 0, walkMin: 0, waitMin: 0, legs: [ride(min)] });
+  pc._rows = [];
+  pc._when = { mode: 'depart', at: Date.now() + 3600 * 1000 };
+  pc._journeys = [journey(20), journey(25)];
+  pc._openJourney = 0;
+  pc._journey = pc._journeys[0];
+  pc._paint();
+  await settleTicks();
+  const first = made[0];
+  const heads = () => pc.shadowRoot.querySelectorAll('.itin-head');
+  heads()[0].click();
+  heads()[1].click();
+  await settleTicks();
+  await new Promise((r) => setTimeout(r, 320));
+  check('folding an itinerary, or opening another, right after its map was drawn throws nothing',
+    made.length === 2 && first.removed && !made[1].removed && pc._plannerMap === made[1]
+    && thrown.length === 0 && late.length === 0,
+    JSON.stringify({ maps: made.length, thrown, late }));
+  check('the inline map never animates a zoom', made.every((m) => m.opts.zoomAnimation === false),
+    JSON.stringify(made.map((m) => m.opts.zoomAnimation)));
+
+  await pc._openJourneyMap();
+  pc._closeVehicleMap();
+  pc._loadRowMapShape = async () => ({ shape: [[47.5, 19.0], [47.52, 19.05]], board: [47.5, 19.0], alight: null });
+  await pc._openVehicleMap({ label: '7', headsign: 'B', color: '009EE3', tripId: 'BKK_T7' });
+  pc._closeVehicleMap();
+  await new Promise((r) => setTimeout(r, 320));
+  check('closing the journey or a vehicle map right after it opened throws nothing',
+    made.length === 4 && made[2].removed && made[3].removed && thrown.length === 0 && late.length === 0,
+    JSON.stringify({ maps: made.length, thrown, late }));
+  pc.remove();
+  globalThis.requestAnimationFrame = prevRaf;
+}
+
 process.exit(failed ? 1 : 0);
