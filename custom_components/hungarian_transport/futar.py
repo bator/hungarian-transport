@@ -50,9 +50,12 @@ FUTAR_PARAM_MAX_LEN = 256
 # and the burst allowed on top. Every authenticated user can call the
 # service, so this caps what they can spend of the configured key.
 # One destination list on a cold cache is 73 calls (departures.js: 1 board,
-# 40 trip-details, 32 route-details), so the burst holds a whole list.
+# 40 trip-details, 32 route-details). A dashboard opened after a restart
+# loads every card's list at once (six cards: about 440 calls in a minute),
+# and a refused trip-details call drops that departure from the card, so
+# the burst holds several whole lists; the rate still caps steady use.
 FUTAR_RATE = 5.0
-FUTAR_BURST = 100
+FUTAR_BURST = 400
 # A call over the limit waits for a token this long at most (the summed
 # sleeps, not the clock) before it is refused. The card swallows a refused
 # call (an incomplete list, not an error), so waiting is the better answer.
