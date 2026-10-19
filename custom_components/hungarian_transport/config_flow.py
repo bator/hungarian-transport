@@ -78,16 +78,26 @@ class HungarianTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Take a new BKK key (or none, which removes the FUTÁR service)."""
-        entry = self._get_reauth_entry()
+        # _get_reauth_entry() arrived in HA 2024.11; hacs.json allows 2024.10.
+        entry_id = self.context["entry_id"]
+        entry = self.hass.config_entries.async_get_entry(entry_id)
+        if entry is None:
+            raise config_entries.UnknownEntry(entry_id)
         errors: dict[str, str] = {}
         if user_input is not None:
             api_key = (user_input.get(CONF_API_KEY) or "").strip()
             if api_key and (error := await _validate_key(self.hass, api_key)):
                 errors["base"] = error
             else:
-                return self.async_update_reload_and_abort(
+                # The entry's update listener reloads it once; reloading here
+                # as well (async_update_reload_and_abort) would set it up twice.
+                # The same key accepted again changes nothing, so no listener
+                # fires: reload anyway to drop the proxy that saw it rejected.
+                if not self.hass.config_entries.async_update_entry(
                     entry, options={CONF_API_KEY: api_key}
-                )
+                ):
+                    self.hass.config_entries.async_schedule_reload(entry.entry_id)
+                return self.async_abort(reason="reauth_successful")
         return self.async_show_form(
             step_id="reauth_confirm",
             data_schema=_key_schema(),

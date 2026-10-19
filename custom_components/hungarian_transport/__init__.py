@@ -181,7 +181,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 
 def _entry_api_key(entry: ConfigEntry) -> str:
-    return str(entry.options.get(CONF_API_KEY) or entry.data.get(CONF_API_KEY) or "").strip()
+    # The key has only ever been stored in the options.
+    return str(entry.options.get(CONF_API_KEY) or "").strip()
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -207,7 +208,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             data = await proxy.get(call.data["path"], call.data["params"])
         except FutarAuthError as err:
             # The stored key stopped working (revoked, expired): ask for a new
-            # one in the UI instead of failing every card poll quietly.
+            # one in the UI instead of failing every card poll quietly. The
+            # proxy fails fast from now on, until the new key reloads the entry.
             entry.async_start_reauth(hass)
             raise HomeAssistantError(
                 translation_domain=DOMAIN,
