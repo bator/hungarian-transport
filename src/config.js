@@ -70,13 +70,15 @@ export function configDataKey(config) {
 
 /* Poll interval in seconds from the card's `refresh`. A value that is not a
    number ("30s") must not reach setInterval as NaN, which polls at once and
-   forever. */
+   forever. The floor is the shared departure board's lifetime (futar.js):
+   polling faster would only read the same board again. */
 export const DEFAULT_REFRESH_S = 45;
+export const MIN_REFRESH_S = 20;
 export function refreshSeconds(value) {
   if (value == null || value === '') return DEFAULT_REFRESH_S;
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_REFRESH_S;
-  return Math.min(3600, Math.max(15, Math.round(n)));
+  return Math.min(3600, Math.max(MIN_REFRESH_S, Math.round(n)));
 }
 
 export function maxDepartureRows(horizon) {
@@ -164,6 +166,17 @@ export function setCityIndexUrl(url) {
 
 export function setMavIndexUrl(url) {
   MAV_INDEX_OVERRIDE = String(url || '');
+}
+
+/* The index URLs of the card about to look something up. The lookups read
+   one module-wide setting, so a card without its own goes back to the
+   bundled indexes: another card's override must not apply to it, nor stay
+   on once that card is gone. */
+export function applyIndexOverrides(cfg) {
+  const c = cfg || {};
+  setVolanIndexUrl(c.volanIndex);
+  setCityIndexUrl(c.cityIndex);
+  setMavIndexUrl(c.mavIndex);
 }
 
 /* Hungarian timetables are published in Budapest wall-clock time. Deriving the

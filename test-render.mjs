@@ -1848,29 +1848,8 @@ check('BKK+dest keeps a bus omitted from routeIds',
   Lib.keepFutarCandidate({ id: 'BKK_1335' }, new Set(['BKK_0070', 'BKK_1100']), 'bkk', 'keleti'));
 check('BKK without dest still filters unselected buses',
   !Lib.keepFutarCandidate({ id: 'BKK_1335' }, new Set(['BKK_0070']), 'bkk', ''));
-check('rowTimeKey joins label and sched minute',
-  Lib.rowTimeKey({ label: 'S30', sched: 1790020080 }) === 'S30|' + Math.round(1790020080 / 60));
-check('BALATON matches FUTAR IC 861 by train number',
-  Lib.matchFutarStopTime(
-    { label: 'BALATON', trainNumber: '861', sched: 1790015820, tripId: 'elvira:2890602' },
-    { tripId: 'BKK_861_74', departureTime: 1790015820 },
-    { shortName: null },
-    { iconDisplayText: 'IC' },
-  ));
-check('BALATON matches FUTAR IC by sched minute when labels differ',
-  Lib.matchFutarStopTime(
-    { label: 'BALATON', trainNumber: '', sched: 1790015820, tripId: 'elvira:1' },
-    { tripId: 'BKK_861_74', departureTime: 1790015820 },
-    {},
-    { iconDisplayText: 'IC' },
-  ));
-check('BALATON does not match a different-minute IC',
-  !Lib.matchFutarStopTime(
-    { label: 'BALATON', trainNumber: '861', sched: 1790015820, tripId: 'elvira:1' },
-    { tripId: 'BKK_963_313', departureTime: 1790015820 + 3600 },
-    {},
-    { iconDisplayText: 'IC' },
-  ));
+check('the unused FUTÁR trip resolver and its helpers are gone',
+  !/futarTripIdForRow|matchFutarStopTime|rowTimeKey|needsFutarMapResolve|hasLocation/.test(src));
 check('EMMA tripShortName 861 BALATON yields train number 861',
   Lib.emmaTrainNumber('861 BALATON InterCity') === '861');
 check('emmaTrainNumber reads IC 856 TÓPART',
@@ -1983,10 +1962,6 @@ check('ELVIRA GPS still wins if FUTAR was added first', (() => {
     && merged[0].lat === 47.2290993
     && merged[0].lon === 18.6682205;
 })());
-check('map skips FUTAR resolve when ELVIRA row already has GPS',
-  !Lib.needsFutarMapResolve({ tripId: 'elvira:2890602', lat: 47.229, lon: 18.668 })
-  && Lib.needsFutarMapResolve({ tripId: 'elvira:2890602' })
-  && !Lib.needsFutarMapResolve({ tripId: 'BKK_861_74', lat: null, lon: null }));
 check('hop map uses MÁV GTFS full line for trains, Transitous for buses',
   src.includes('motisShapeForHop')
   && src.includes('mavShapeForRow')
@@ -3855,10 +3830,10 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   const { refreshSeconds } = await import('./src/config.js');
   check('refresh that is not a number falls back to 45 s',
     refreshSeconds('30s') === 45 && refreshSeconds(undefined) === 45 && refreshSeconds(-5) === 45 && refreshSeconds('') === 45);
-  check('refresh is clamped to 15 s .. 1 h',
-    refreshSeconds(5) === 15 && refreshSeconds('60') === 60 && refreshSeconds(99999) === 3600);
+  check('refresh is clamped to 20 s (the shared board lifetime) .. 1 h',
+    refreshSeconds(5) === 20 && refreshSeconds(15) === 20 && refreshSeconds('60') === 60 && refreshSeconds(99999) === 3600);
   check('the card polls with the parsed refresh, one run at a time',
-    /refreshSeconds\(cfg\.refresh\)/.test(src) && /if \(busy\) return;/.test(src) && /\}, every\);/.test(src));
+    /refreshSeconds\(cfg\.refresh\)/.test(src) && /if \(pollRun\.busy\) return;/.test(src) && /\}, every\);/.test(src));
 }
 {
   /* Two opens racing the first Leaflet load leave one overlay, and it closes. */
@@ -4896,7 +4871,7 @@ const deferred = () => {
   const left = Array.from(Lib._boards.keys());
   Date.now = realNow;
   check('an expired departure board leaves the cache on the next insert',
-    both === 2 && left.length === 1 && left[0] === 'S3|60', JSON.stringify({ both, left }));
+    both === 2 && left.length === 1 && left[0] === 'key:k|S3|60', JSON.stringify({ both, left }));
   Lib._boards.clear();
   Lib.fetch = keepFetch;
 }
@@ -4944,6 +4919,523 @@ const deferred = () => {
   c._closeVehicleMap();
   check('the map notice button is translated', huOk === 'Rendben' && enOk === 'OK', JSON.stringify({ huOk, enOk }));
   c.remove();
+}
+
+/* Fourth review: hop card and editor. */
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const settle = async (el) => {
+  for (let i = 0; i < 100 && el._reloadActive; i++) await wait(10);
+};
+{
+  /* Every FUTÁR board failing is an error, not an empty timetable; one
+     pole failing still leaves the others. */
+  const keep = { departureBoard: Lib.departureBoard, originPoles: Lib.originPoles };
+  const now = Math.floor(Date.now() / 1000);
+  const good = { data: {
+    entry: { stopTimes: [{ tripId: 'T1', departureTime: now + 300 }] },
+    references: { trips: { T1: { routeId: 'R1', tripHeadsign: 'Zugló' } }, routes: { R1: { id: 'R1', shortName: '7', type: 'BUS' } }, stops: {} },
+  } };
+  Lib.originPoles = async () => ['P1', 'P2'];
+  Lib.departureBoard = async () => { throw new Error('BKK HTTP 401'); };
+  const dest = { key: 'zugló', name: 'Zugló' };
+  let thrown = null;
+  try {
+    await Lib.departures('revoked', 'BKK_F1', ['R1'], dest, { mode: 'bkk', minutesAfter: 60, cache: {} });
+  } catch (err) { thrown = err; }
+  let mavThrown = null;
+  try {
+    await Lib.departures('revoked', 'BKK_005510017', ['R1'], dest, { mode: 'mav', minutesAfter: 60, cache: {} });
+  } catch (err) { mavThrown = err; }
+  Lib.departureBoard = async (_k, pid) => {
+    if (pid === 'P1') throw new Error('BKK timeout');
+    return good;
+  };
+  const partial = await Lib.departures('k', 'BKK_F1', ['R1'], dest, { mode: 'bkk', minutesAfter: 60, cache: {} });
+  Object.assign(Lib, keep);
+  check('every failed FUTÁR board rejects departures() with the first error (bkk and mav)',
+    !!thrown && thrown.message === 'BKK HTTP 401' && !!mavThrown && mavThrown.message === 'BKK HTTP 401',
+    JSON.stringify({ bkk: thrown && thrown.message, mav: mavThrown && mavThrown.message }));
+  check('one failed pole still returns the other pole\'s rows',
+    partial.length === 1 && partial[0].tripId === 'T1', JSON.stringify(partial.map((r) => r.tripId)));
+}
+{
+  /* The shared board cache keeps a card key apart from the integration. */
+  const keepFetch = Lib.fetch;
+  Lib._boards.clear();
+  Lib._boardInflight.clear();
+  const calls = [];
+  Lib.fetch = async (apiKey) => {
+    calls.push(apiKey);
+    if (apiKey === 'revoked') throw new Error('BKK HTTP 401');
+    return { data: { entry: { stopTimes: [] } } };
+  };
+  await Lib.departureBoard('', 'S9', 60);
+  let err = null;
+  try { await Lib.departureBoard('revoked', 'S9', 60); } catch (e) { err = e; }
+  await Lib.departureBoard('', 'S9', 60);
+  await Lib.departureBoard('good', 'S9', 60);
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+  check('a card with its own key never gets the board fetched with another key or the integration',
+    JSON.stringify(calls) === JSON.stringify(['', 'revoked', 'good']) && !!err && /401/.test(err.message),
+    JSON.stringify({ calls, err: err && err.message }));
+}
+{
+  /* The card shows that error, and still fills the board from Transitous. */
+  const keep = { departures: Lib.departures, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty };
+  const now = Math.floor(Date.now() / 1000);
+  Lib.departures = async () => { throw new Error('BKK HTTP 401'); };
+  Lib.fillTransitousIfEmpty = async () => [{
+    tripId: 'motis:1', label: '7', vehicle: 'bus', rawType: 'BUS', head: 'Zugló', dep: now + 300, sched: now + 300,
+  }];
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu' };
+  c.setConfig({ language: 'hu', apiKey: 'revoked', stopId: 'BKK_F1', stopName: 'Fő tér', destKey: 'zugló', destName: 'Zugló', routeIds: [] });
+  await settle(c);
+  const errEl = c.shadowRoot.querySelector('.err');
+  check('a failed FUTÁR board shows its error, with Transitous rows under it',
+    !!errEl && errEl.textContent.includes('BKK HTTP 401') && errEl.style.display !== 'none'
+    && c.shadowRoot.querySelectorAll('tr').length === 1 && !c.shadowRoot.innerHTML.includes('Nincs közelgő indulás'),
+    JSON.stringify({ err: errEl && errEl.textContent, rows: c.shadowRoot.querySelectorAll('tr').length }));
+  c.remove();
+  Object.assign(Lib, keep);
+}
+{
+  /* A new pair drops the old pair's rows, even when its first fetch fails. */
+  const keep = { departures: Lib.departures, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty };
+  const now = Math.floor(Date.now() / 1000);
+  let fail = false;
+  Lib.departures = async () => {
+    if (fail) throw new Error('BKK timeout');
+    return [{ tripId: 'BKK_A1', label: '7', vehicle: 'bus', rawType: 'BUS', head: 'Zugló', dep: now + 300, sched: now + 300 }];
+  };
+  Lib.fillTransitousIfEmpty = async (rows) => rows || [];
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu' };
+  c.setConfig({ language: 'hu', apiKey: 'k', stopId: 'BKK_F1', stopName: 'Fő tér', destKey: 'zugló', destName: 'Zugló', routeIds: [] });
+  await settle(c);
+  const before = c.shadowRoot.querySelectorAll('tr').length;
+  fail = true;
+  c.setConfig({ language: 'hu', apiKey: 'k', stopId: 'BKK_F2', stopName: 'Astoria', destKey: 'óbuda', destName: 'Óbuda', routeIds: [] });
+  await settle(c);
+  const head = c.shadowRoot.querySelector('.head').textContent;
+  check('a new pair whose first fetch fails shows no rows of the old pair',
+    before === 1 && c.shadowRoot.querySelectorAll('tr').length === 0 && (c._rawRows || []).length === 0
+    && head.includes('Astoria') && c.shadowRoot.querySelector('.err').textContent.includes('BKK timeout'),
+    JSON.stringify({ before, after: c.shadowRoot.querySelectorAll('tr').length, head }));
+  c.remove();
+  Object.assign(Lib, keep);
+}
+{
+  /* Opening the editor keeps the configured routes; a card without any
+     gets them filled in. */
+  const keep = { reachableDests: Lib.reachableDests };
+  Lib.reachableDests = async () => ({
+    dests: [{ key: 'zugló', name: 'Zugló' }], destRoutes: { zugló: ['BKK_NIGHT'] },
+  });
+  const hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } } };
+  const open = async (routeIds) => {
+    const ed = document.createElement('hungarian-transport-card-editor');
+    document.body.appendChild(ed);
+    ed._probeKey = () => {};
+    const emitted = [];
+    ed.addEventListener('config-changed', (ev) => emitted.push(ev.detail.config));
+    ed.hass = hass;
+    ed.setConfig({ language: 'hu', stopId: 'BKK_F1', stopName: 'Fő tér', destKey: 'zugló', destName: 'Zugló', routeIds });
+    await wait(20);
+    ed.remove();
+    return emitted;
+  };
+  const configured = await open(['BKK_7', 'BKK_9']);
+  const bare = await open([]);
+  Object.assign(Lib, keep);
+  Lib._hass = null;
+  check('opening the editor does not rewrite a card\'s routes with the ones running now',
+    configured.length === 0, JSON.stringify(configured.map((c) => c.routeIds)));
+  check('a card without routes gets the reachable ones',
+    bare.length === 1 && JSON.stringify(bare[0].routeIds) === '["BKK_NIGHT"]', JSON.stringify(bare.map((c) => c.routeIds)));
+}
+{
+  /* The editor's "A → B" title follows the next pair; a typed one stays. */
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  let last = null;
+  ed.addEventListener('config-changed', (ev) => { last = ev.detail.config; });
+  ed.setConfig({ language: 'hu', stopId: 'A1', stopName: 'Alfa', destKey: 'béta', destName: 'Béta', name: 'Alfa → Béta', routeIds: ['R'] });
+  ed._pickStop({ key: 'gamma', name: 'Gamma' }, 'dest');
+  const sameOrigin = last.name;
+  ed.setConfig(last);
+  ed._pickStop({ id: 'D1', name: 'Delta' }, 'origin');
+  ed.setConfig(last);
+  const afterOrigin = last.name;
+  ed._pickStop({ key: 'eps', name: 'Epszilon' }, 'dest');
+  const newPair = last.name;
+  ed.setConfig(Object.assign({}, last, { name: 'Munkába' }));
+  ed._pickStop({ key: 'zeta', name: 'Zéta' }, 'dest');
+  const typed = last.name;
+  ed.remove();
+  check('the auto title follows a new destination and a new pair, a typed title stays',
+    sameOrigin === 'Alfa → Gamma' && afterOrigin === 'Alfa → Gamma' && newPair === 'Delta → Epszilon' && typed === 'Munkába',
+    JSON.stringify({ sameOrigin, afterOrigin, newPair, typed }));
+}
+{
+  /* Volán and city editors do not copy a sibling card's key in. */
+  const keep = { apiKeyFromDashboard: Lib.apiKeyFromDashboard, searchStops: Lib.searchStops };
+  let asked = 0;
+  Lib.apiKeyFromDashboard = async () => { asked += 1; return 'sibling-key'; };
+  Lib.searchStops = async () => [];
+  const make = async (cfg) => {
+    const ed = document.createElement('hungarian-transport-card-editor');
+    document.body.appendChild(ed);
+    ed._probeKey = async () => {};
+    ed._loadDests = async () => {};
+    ed.setConfig(cfg);
+    ed.hass = { states: {}, language: 'hu', connection: {} };
+    await ed._search('Győr', 'origin');
+    await wait(5);
+    ed.remove();
+    return ed._config.apiKey;
+  };
+  const volanKey = await make({ language: 'hu', volan: true });
+  const helyiKey = await make({ language: 'hu', helyi: true, city: 'gyor' });
+  const volanAsked = asked;
+  const bkkKey = await make({ language: 'hu' });
+  Object.assign(Lib, keep);
+  Lib._hass = null;
+  check('a Volán or city editor never borrows a sibling card\'s API key',
+    volanAsked === 0 && !volanKey && !helyiKey, JSON.stringify({ volanAsked, volanKey, helyiKey }));
+  check('a BKK editor still does', bkkKey === 'sibling-key', String(bkkKey));
+}
+{
+  /* The banner is worded at paint: a language switch rewords it. */
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'auto', stopId: 'BKK_F00001', stopName: 'Keleti', destKey: 'blaha', destName: 'Blaha' });
+  await settle(c);
+  const hu = c.shadowRoot.querySelector('.err').textContent;
+  c.hass = { states: {}, language: 'en', services: {} };
+  const en = c.shadowRoot.querySelector('.err').textContent;
+  c.remove();
+  check('the error banner follows a language change',
+    hu.startsWith('Nincs BKK API kulcs') && en.startsWith('No BKK API key'), JSON.stringify({ hu, en }));
+
+  const keep = { cityIndex: Lib.cityIndex };
+  Lib.cityIndex = async () => ({ ops: [{ id: 'gyor', name: 'Győr' }] });
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  ed.setConfig({ language: 'hu', helyi: true });
+  await wait(5);
+  const huCity = ed._el('city').options[0].textContent;
+  ed._error(Object.assign(new Error('no key'), { i18nKey: 'errNoApiKey' }));
+  const huErr = ed._el('err').textContent;
+  ed.setConfig({ language: 'en', helyi: true });
+  await wait(5);
+  const enCity = ed._el('city').options[0].textContent;
+  const enErr = ed._el('err').textContent;
+  ed.remove();
+  Object.assign(Lib, keep);
+  check('the editor rewords the city placeholder and its error after a language switch',
+    huCity === 'Válassz várost' && enCity === 'Pick a city'
+    && huErr.startsWith('Nincs BKK API kulcs') && enErr.startsWith('No BKK API key'),
+    JSON.stringify({ huCity, enCity, huErr, enErr }));
+}
+{
+  /* The open map: footer state kept across polls, the vehicle placed once
+     GPS shows up for a row whose ids changed, no fitBounds after a close,
+     focus on the close button and back on the row's button. */
+  const made = [];
+  let removed = false;
+  let fitAfterRemove = 0;
+  const layer = (pt) => ({
+    pt, addTo() { return this; }, setLatLng(p) { this.pt = p; }, setIcon(i) { this.icon = i; }, redraw() {},
+    getLatLng() { return this.pt ? { lat: this.pt[0], lng: this.pt[1] } : null; },
+  });
+  const fakeMap = {
+    setView() { return this; }, invalidateSize() {}, removeLayer() {}, on() {},
+    fitBounds() { if (removed) fitAfterRemove += 1; },
+    remove() { removed = true; },
+  };
+  const fakeL = {
+    map: () => { removed = false; return fakeMap; },
+    tileLayer: () => layer(), divIcon: (o) => o, polyline: () => layer(), latLngBounds: () => ({ extend() {} }),
+    marker: (pt, o) => {
+      const m = Object.assign(layer(pt), { html: (o.icon && o.icon.html) || '' });
+      made.push(m);
+      return m;
+    },
+  };
+  const prevRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  const c = document.createElement('hungarian-transport-card');
+  c._reloadSafe = () => {};
+  document.body.appendChild(c);
+  c.setConfig({ language: 'hu', stopId: 'BKK_F1', stopName: 'Fő tér', destKey: 'zugló', destName: 'Zugló', routeIds: [] });
+  c._ensureLeaflet = async () => fakeL;
+  c._loadRowMapShape = async () => ({
+    shape: [[47.57, 19.12], [47.51, 19.08]], approx: true, board: [47.57, 19.12], alight: [47.51, 19.08],
+  });
+  const now = Math.floor(Date.now() / 1000);
+  const row = {
+    label: '7', headsign: 'Zugló', tripId: 'elvira:77', depTs: now + 300, schedTs: now + 300,
+    attime: '10:05', predicted_attime: '10:05', color: '009EE3', textcolor: 'ffffff', icon: 'mdi:bus', hasGps: false,
+  };
+  c._rows = [row];
+  c._paint();
+  c.shadowRoot.querySelector('.map-open').focus();
+  const hadFocus = c.shadowRoot.activeElement && c.shadowRoot.activeElement.classList.contains('map-open');
+  await c._openVehicleMap(c._shownRows[0]);
+  const closeBtn = document.querySelector('.ht-map-overlay .ht-map-close');
+  const focusedClose = document.activeElement === closeBtn;
+  const foot = () => document.querySelector('.ht-map-overlay .ht-map-foot').textContent;
+  const opened = foot();
+  const noVehicle = !made.some((m) => m.html.includes('ht-veh-dot'));
+  /* A poll: the ELVIRA row now carries the FUTÁR trip id, a vehicle id and GPS. */
+  c._rows = [Object.assign({}, row, { tripId: 'BKK_77', vehicleId: 'V1', hasGps: true, lat: 47.55, lon: 19.1 })];
+  c._paint();
+  c._syncOpenMap();
+  const veh = made.find((m) => m.html.includes('ht-veh-dot'));
+  const placedAt = veh && veh.pt.slice();
+  const synced = foot();
+  c._rows = [Object.assign({}, c._rows[0], { lat: 47.56, lon: 19.11 })];
+  c._syncOpenMap();
+  const moved = veh && veh.pt[0] === 47.56;
+  c._closeVehicleMap();
+  const backOnRow = c.shadowRoot.activeElement && c.shadowRoot.activeElement.classList.contains('map-open');
+  check('the open map keeps its "approximate line" footer when GPS arrives',
+    opened.startsWith('Közelítő vonal') && synced.startsWith('Közelítő vonal') && synced.includes('Élő pozíció'),
+    JSON.stringify({ opened, synced }));
+  check('a vehicle that gets GPS after the map opened is placed, and followed, though its ids changed',
+    noVehicle && !!placedAt && placedAt[0] === 47.55 && moved, JSON.stringify({ noVehicle, placedAt, now: veh && veh.pt }));
+  check('the map moves focus to its close button and back to the row\'s map button',
+    hadFocus && focusedClose && backOnRow, JSON.stringify({ hadFocus, focusedClose, backOnRow }));
+  await c._openVehicleMap(c._shownRows[0]);
+  c._closeVehicleMap();
+  await wait(120);
+  check('a map closed right after it opened is not fitted any more', removed && fitAfterRemove === 0,
+    JSON.stringify({ removed, fitAfterRemove }));
+  c._showMapNotice('Nincs adat');
+  const ok = document.querySelector('.ht-map-notice button');
+  const okFocused = document.activeElement === ok;
+  document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape' }));
+  check('the map notice takes focus and closes on Escape',
+    okFocused && !document.querySelector('.ht-map-overlay'), JSON.stringify({ okFocused }));
+  c.remove();
+  globalThis.requestAnimationFrame = prevRaf;
+}
+{
+  /* A card that is built but not on the page holds no gate slot, does not
+     tick and does not fetch; attaching it starts all three. */
+  const gate0 = Lib._gateCards;
+  const c = document.createElement('hungarian-transport-card');
+  let reloads = 0;
+  c._reload = async () => { reloads += 1; };
+  c.setConfig({ language: 'hu', volan: true, stopId: 'volan_1', stopName: 'Győr', destKey: 'pápa', destName: 'Pápa' });
+  await wait(5);
+  const idle = { gate: Lib._gateCards - gate0, tick: c._tick !== null, reloads };
+  document.body.appendChild(c);
+  await wait(5);
+  const live = { gate: Lib._gateCards - gate0, tick: c._tick !== null, reloads };
+  c.remove();
+  check('setConfig on a detached card waits for connectedCallback',
+    idle.gate === 0 && !idle.tick && idle.reloads === 0 && live.gate === 1 && live.tick && live.reloads === 1
+    && Lib._gateCards === gate0, JSON.stringify({ idle, live }));
+}
+{
+  /* Index overrides belong to the card or editor using them. */
+  const keep = { _indexCached: Lib._indexCached, departures: Lib.departures, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty };
+  const urls = [];
+  Lib._indexCached = (url) => { urls.push(url); return Promise.resolve({ ops: [] }); };
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  ed.setConfig({ language: 'hu', volan: true, volanIndex: 'https://example.invalid/editor-volan.json.gz' });
+  Lib.volanIndex();
+  ed.setConfig({ language: 'hu', volan: true });
+  Lib.volanIndex();
+  ed.remove();
+  Lib.departures = async () => { Lib.volanIndex(); return []; };
+  Lib.fillTransitousIfEmpty = async (rows) => rows || [];
+  const runCard = async (extra) => {
+    const c = document.createElement('hungarian-transport-card');
+    c._reloadSafe = () => {};
+    document.body.appendChild(c);
+    c.setConfig(Object.assign({ language: 'hu', volan: true, stopId: 'volan_1', stopName: 'Győr', destKey: 'pápa', destName: 'Pápa' }, extra));
+    await c._reload();
+    c.remove();
+  };
+  await runCard({ volanIndex: 'https://example.invalid/card-volan.json.gz' });
+  await runCard({});
+  Object.assign(Lib, keep);
+  check('a card or editor without its own index URL is back on the bundled index',
+    urls.length === 4 && urls[0].includes('editor-volan') && urls[1].includes('/volan-index.json.gz')
+    && urls[2].includes('card-volan') && urls[3].includes('/volan-index.json.gz'),
+    JSON.stringify(urls));
+}
+{
+  /* ELVIRA only when the integration has the service; after a failure, a
+     pause and one warning. */
+  const realNow = Date.now;
+  const keep = { callServiceResponse: Lib.callServiceResponse };
+  const keepWarn = console.warn;
+  let calls = 0;
+  let fail = true;
+  const warns = [];
+  Lib.callServiceResponse = async () => {
+    calls += 1;
+    if (fail) throw new Error('unavailable');
+    return { response: { departures: [{ tripId: 'elvira:1' }] } };
+  };
+  console.warn = (...a) => warns.push(a.map(String).join(' '));
+  Lib._elviraDownUntil = 0;
+  Lib._elviraWarned = false;
+  const ask = (hass) => Lib.elviraBetween(hass, 'BKK_005510017', 'BKK_005503269', 60, 'Székesfehérvár', {});
+  const without = { states: {}, services: { hungarian_transport: { futar: {} } } };
+  const withSvc = { states: {}, services: { hungarian_transport: { elvira_between: {} } } };
+  await ask(without);
+  const noService = calls;
+  await ask(withSvc);
+  await ask(withSvc);
+  const backedOff = calls;
+  let t = realNow() + 4 * 60000;
+  Date.now = () => t;
+  await ask(withSvc);
+  const retried = calls;
+  t += 4 * 60000;
+  fail = false;
+  const rows = await ask(withSvc);
+  Date.now = realNow;
+  console.warn = keepWarn;
+  Object.assign(Lib, keep);
+  Lib._elviraDownUntil = 0;
+  Lib._elviraWarned = false;
+  check('ELVIRA is not called without the elvira_between service',
+    noService === 0, String(noService));
+  check('a failed ELVIRA call pauses ELVIRA for minutes and warns once',
+    backedOff === 1 && retried === 2 && warns.length === 1 && rows.length === 1,
+    JSON.stringify({ backedOff, retried, warns: warns.length, rows: rows.length }));
+}
+{
+  /* One scan of hass.states per change, and one pattern per row. */
+  let scans = 0;
+  const target = {
+    'sensor.x': { attributes: { vehicles: [
+      { lat: 47.2, lon: 18.6, trip: { tripShortName: '861 BALATON' } },
+      { lat: 47.3, lon: 18.7, trip: { tripShortName: '9724 személyvonat' } },
+      { lat: 47.4, lon: 18.8, trip: { tripShortName: '2000 TÓPART' } },
+    ] } },
+  };
+  const states = new Proxy(target, { ownKeys(tgt) { scans += 1; return Reflect.ownKeys(tgt); } });
+  const hass = { states };
+  const RealRegExp = globalThis.RegExp;
+  let patterns = 0;
+  globalThis.RegExp = class extends RealRegExp {
+    constructor(...args) { super(...args); patterns += 1; }
+  };
+  let rows;
+  for (let i = 0; i < 4; i++) {
+    rows = [
+      { label: 'BALATON', trainNumber: '861', tripId: 'elvira:1' },
+      { label: 'TÓPART', trainNumber: '', tripId: 'elvira:2' },
+    ];
+    Lib.enrichFromHass(hass, rows);
+  }
+  globalThis.RegExp = RealRegExp;
+  const fresh = Lib.collectHassVehicles({ states: Object.assign({}, target) });
+  check('enrichFromHass scans hass.states once per states object and builds one pattern per row',
+    scans === 1 && patterns === 4 * 2 && rows[0].lat === 47.2 && rows[1].lat === 47.4 && fresh.length === 3,
+    JSON.stringify({ scans, patterns, lat: rows.map((r) => r.lat) }));
+}
+{
+  /* Back after a short tab switch the poll picks up; after a long one, a run. */
+  const keep = { departures: Lib.departures, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty };
+  const now = Math.floor(Date.now() / 1000);
+  let runs = 0;
+  /* Cards left on the page by earlier checks hear the same events. */
+  Lib.departures = async (_k, stopId) => {
+    if (stopId === 'volan_vis') runs += 1;
+    return [{ tripId: 'gtfs:1', label: '700', vehicle: 'coach', rawType: 'BUS', head: 'Pápa', dep: now + 600, sched: now + 600 }];
+  };
+  Lib.fillTransitousIfEmpty = async (rows) => rows || [];
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu' };
+  c.setConfig({ language: 'hu', volan: true, stopId: 'volan_vis', stopName: 'Győr', destKey: 'pápa', destName: 'Pápa', refresh: 60 });
+  await settle(c);
+  const first = runs;
+  const realNow = Date.now;
+  let t = realNow();
+  Date.now = () => t;
+  let vis = 'visible';
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => vis });
+  vis = 'hidden';
+  document.dispatchEvent(new Event('visibilitychange'));
+  const stopped = c._poll === null;
+  t += 10000;
+  vis = 'visible';
+  document.dispatchEvent(new Event('visibilitychange'));
+  await wait(10);
+  const quick = { runs: runs - first, poll: c._poll !== null, tick: c._tick !== null };
+  vis = 'hidden';
+  document.dispatchEvent(new Event('visibilitychange'));
+  t += 120000;
+  vis = 'visible';
+  document.dispatchEvent(new Event('visibilitychange'));
+  await settle(c);
+  await wait(10);
+  const long = { runs: runs - first, poll: c._poll !== null };
+  Date.now = realNow;
+  delete document.visibilityState;
+  c.remove();
+  Object.assign(Lib, keep);
+  check('a short tab switch resumes the poll without a refetch, a long one refetches',
+    first === 1 && stopped && quick.runs === 0 && quick.poll && quick.tick && long.runs === 1 && long.poll,
+    JSON.stringify({ first, stopped, quick, long }));
+}
+{
+  /* The loader retries a download that broke off, not a bundle that threw. */
+  const { copyFileSync, mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { pathToFileURL } = await import('node:url');
+  const dir = mkdtempSync(join(tmpdir(), 'ht-loader-eval-'));
+  writeFileSync(join(dir, 'hungarian-transport.js'),
+    'globalThis.__htEvalRuns = (globalThis.__htEvalRuns || 0) + 1;\n'
+    + 'throw new TypeError("Cannot read properties of undefined (reading \'define\')");\n');
+  copyFileSync('dist/hungarian-transport-loader.js', join(dir, 'hungarian-transport-loader.js'));
+  const warns = [];
+  const errors = [];
+  const keepWarn = console.warn;
+  const keepErr = console.error;
+  console.warn = (...a) => warns.push(a.map(String).join(' '));
+  console.error = (...a) => errors.push(a.map(String).join(' '));
+  await import(`${pathToFileURL(join(dir, 'hungarian-transport-loader.js')).href}?v=9.9.9`);
+  for (let i = 0; i < 80 && !warns.length && !errors.length; i++) await wait(25);
+  console.warn = keepWarn;
+  console.error = keepErr;
+  rmSync(dir, { recursive: true, force: true });
+  check('the loader does not retry a bundle that threw while running',
+    globalThis.__htEvalRuns === 1 && warns.length === 0 && errors.length === 1,
+    JSON.stringify({ runs: globalThis.__htEvalRuns, warns, errors }));
+}
+{
+  /* Every editor label names its control. */
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed.setConfig({ language: 'hu' });
+  const labels = [...ed.querySelectorAll('label[id]')];
+  const missing = labels.filter((l) => !l.htmlFor || !ed.querySelector('#' + l.htmlFor)).map((l) => l.id);
+  ed.remove();
+  check('editor labels point at their fields', labels.length === 7 && missing.length === 0,
+    JSON.stringify({ n: labels.length, missing }));
 }
 
 process.exit(failed ? 1 : 0);
