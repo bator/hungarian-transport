@@ -25,30 +25,51 @@ Object.assign(BkkLib, {
     const mid = s.match(/\b(\d{3,5})\b/);
     return mid ? (mid[1].replace(/^0+/, '') || mid[1]) : '';
   },
+  /* What a vehicle is matched on, worked out once per vehicle rather than
+     once per row and vehicle pair. */
+  _emmaVehicleKey(vehicle) {
+    const trip = vehicle.trip || {};
+    return {
+      n: BkkLib.emmaTrainNumber(trip.tripShortName || vehicle.label || ''),
+      blob: [
+        trip.tripShortName, trip.tripHeadsign,
+        (trip.route || {}).longName, (trip.route || {}).shortName, vehicle.label,
+      ].join(' ').toUpperCase(),
+    };
+  },
+  /* A row's train number, and its named label as a whole-word pattern
+     (BALATON, not Balatonfüred): one RegExp per row. */
+  _emmaRowKey(row) {
+    const name = String(row.label || '').trim().toUpperCase();
+    const named = !!name && name.length >= 3 && !BkkLib.genericRailLabel(name);
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return {
+      num: BkkLib.rowTrainNumber(row),
+      re: named ? new RegExp('(?:^|[^A-Z0-9])' + esc + '(?:[^A-Z0-9]|$)') : null,
+    };
+  },
+  _emmaKeysMatch(rk, vk) {
+    if (rk.num && vk.n && rk.num === vk.n) return true;
+    if (!rk.re || !rk.re.test(vk.blob)) return false;
+    return !rk.num || !vk.n;
+  },
   matchEmmaVehicle(row, vehicle) {
     if (!row || !vehicle) return false;
-    const num = BkkLib.rowTrainNumber(row);
-    const trip = vehicle.trip || {};
-    const n = BkkLib.emmaTrainNumber(trip.tripShortName || vehicle.label || '');
-    if (num && n && num === n) return true;
-    const name = String(row.label || '').trim().toUpperCase();
-    if (!name || name.length < 3 || BkkLib.genericRailLabel(name)) return false;
-    const blob = [
-      trip.tripShortName, trip.tripHeadsign,
-      (trip.route || {}).longName, (trip.route || {}).shortName, vehicle.label,
-    ].join(' ').toUpperCase();
-    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    if (!new RegExp('(?:^|[^A-Z0-9])' + esc + '(?:[^A-Z0-9]|$)').test(blob)) return false;
-    return !num || !n || num === n;
+    return BkkLib._emmaKeysMatch(BkkLib._emmaRowKey(row), BkkLib._emmaVehicleKey(vehicle));
   },
-  applyEmmaPositions(rows, vehicles) {
-    const list = Array.isArray(rows) ? rows : [];
-    const vehs = Array.isArray(vehicles) ? vehicles : [];
+  _emmaKeyed(vehicles) {
+    return (Array.isArray(vehicles) ? vehicles : [])
+      .filter(Boolean)
+      .map((v) => ({ v, k: BkkLib._emmaVehicleKey(v) }));
+  },
+  _applyEmmaKeyed(list, keyed) {
+    if (!keyed.length) return list;
     list.forEach((row) => {
       if (!row) return;
-      for (let i = 0; i < vehs.length; i++) {
-        const v = vehs[i];
-        if (!BkkLib.matchEmmaVehicle(row, v)) continue;
+      const rk = BkkLib._emmaRowKey(row);
+      for (let i = 0; i < keyed.length; i++) {
+        const v = keyed[i].v;
+        if (!BkkLib._emmaKeysMatch(rk, keyed[i].k)) continue;
         const gps = BkkLib.mapGpsLatLon(v.lat, v.lon);
         if (!gps) continue;
         row.lat = gps[0];
@@ -60,11 +81,9 @@ Object.assign(BkkLib, {
     });
     return list;
   },
-  needsFutarMapResolve(row) {
-    const lat = Number(row && row.lat);
-    const lon = Number(row && row.lon);
-    if (Number.isFinite(lat) && Number.isFinite(lon)) return false;
-    return !BkkLib.isFutarTripId((row && row.tripId) || '');
+  applyEmmaPositions(rows, vehicles) {
+    const list = Array.isArray(rows) ? rows : [];
+    return BkkLib._applyEmmaKeyed(list, BkkLib._emmaKeyed(vehicles));
   },
   coachRouteKeys(route) {
     const raw = String(route || '').trim().toUpperCase();
@@ -179,11 +198,6 @@ Object.assign(BkkLib, {
     const rid = (rt && rt.id) || '';
     return selected.has(rid);
   },
-  rowTimeKey(row) {
-    const label = String((row && row.label) || '').toUpperCase();
-    const min = Math.round(Number((row && (row.sched || row.dep)) || 0) / 60);
-    return label + '|' + min;
-  },
   genericRailLabel(label) {
     return /^(IC|EC|IR|EX|EN|RJX|S|SZ)$/i.test(String(label || '').trim());
   },
@@ -200,67 +214,6 @@ Object.assign(BkkLib, {
     if (/^(EX|EN)$/i.test(label) && /^\d{4,}$/.test(BkkLib.rowTrainNumber(row))) return true;
     return false;
   },
-  matchFutarStopTime(row, st, trip, rt) {
-    if (!row || !st || !st.tripId) return false;
-    const num = BkkLib.rowTrainNumber(row);
-    const n = String((trip && (trip.shortName || trip.tripShortName)) || '').trim().replace(/^0+/, '')
-      || BkkLib.trainNumberFromTripId(st.tripId);
-    if (num && n && num === n) return true;
-    const rowMin = Math.round(Number(row.sched || row.dep || 0) / 60);
-    const stMin = Math.round(Number(
-      st.departureTime || st.predictedDepartureTime || st.arrivalTime || st.predictedArrivalTime || 0,
-    ) / 60);
-    if (!rowMin || !stMin || Math.abs(rowMin - stMin) > 1) return false;
-    const rl = String(row.label || '').toUpperCase();
-    const fl = String((rt && (rt.iconDisplayText || rt.shortName)) || '').toUpperCase();
-    if (rl && fl && rl === fl) return true;
-    if (rl && fl && BkkLib.genericRailLabel(rl) !== BkkLib.genericRailLabel(fl)
-        && (BkkLib.genericRailLabel(rl) || BkkLib.genericRailLabel(fl))) {
-      return true;
-    }
-    return false;
-  },
-  async futarTripIdForRow(apiKey, cache, row, stopId, extraStopId) {
-    const tid = String((row && row.tripId) || '');
-    if (BkkLib.isFutarTripId(tid)) return tid;
-    const num = BkkLib.rowTrainNumber(row);
-    const wantKey = BkkLib.rowTimeKey(row);
-    if (!BkkLib.hasFutar(apiKey) || (!num && !wantKey)) return '';
-    const stops = [];
-    [stopId, extraStopId].forEach((id) => {
-      if (id && stops.indexOf(id) < 0) stops.push(id);
-    });
-    if (!stops.length) return '';
-    const key = 'futarTrip:' + stops.join(',') + ':' + (num || wantKey);
-    const hit = BkkLib._cached(cache, key);
-    if (typeof hit === 'string') return hit;
-    try {
-      for (let s = 0; s < stops.length; s++) {
-        const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
-          stopId: stops[s],
-          minutesAfter: '360',
-          minutesBefore: '180',
-          includeReferences: 'true',
-          includeVehicleFromTrip: 'true',
-        });
-        const refs = ((data.data || {}).references) || {};
-        const trips = refs.trips || {};
-        const routes = refs.routes || {};
-        const times = (((data.data || {}).entry) || {}).stopTimes || [];
-        for (let i = 0; i < times.length; i++) {
-          const st = times[i];
-          const trip = trips[(st && st.tripId) || ''] || {};
-          const rt = routes[trip.routeId] || {};
-          if (BkkLib.matchFutarStopTime(row, st, trip, rt)) {
-            return BkkLib._store(cache, key, st.tripId);
-          }
-        }
-      }
-      return BkkLib._store(cache, key, '');
-    } catch (_e) {
-      return '';
-    }
-  },
   platformFromText(text) {
     const m = String(text || '').match(PLATFORM_IN_HEAD);
     return m ? m[1] : '';
@@ -268,16 +221,44 @@ Object.assign(BkkLib, {
   stripPlatform(text) {
     return String(text || '').replace(PLATFORM_STRIP, '').replace(/\s+/g, ' ').trim();
   },
+  /* Home Assistant hands over a new states object on every change and the
+     same one in between, so one scan of all states serves every paint of
+     every card until something changes. The list is shared: read only. */
+  _hassVehicles: new WeakMap(),
   collectHassVehicles(hass) {
+    const states = hass && hass.states;
+    if (!states || typeof states !== 'object') return [];
+    const hit = BkkLib._hassVehicles.get(states);
+    if (hit) return hit.all;
     const out = [];
-    const states = (hass && hass.states) || {};
     Object.keys(states).forEach((eid) => {
       if (eid.indexOf('sensor.') !== 0) return;
-      const vehs = (states[eid].attributes || {}).vehicles;
+      const vehs = ((states[eid] || {}).attributes || {}).vehicles;
       if (!Array.isArray(vehs)) return;
       vehs.forEach((v) => { if (v) out.push(v); });
     });
+    BkkLib._hassVehicles.set(states, { all: out, emma: null });
     return out;
+  },
+  /* The EMMA (non-FUTÁR) vehicles of the same scan, keyed for matching. */
+  _hassEmmaKeyed(hass, pool) {
+    const memo = hass && hass.states && BkkLib._hassVehicles.get(hass.states);
+    if (memo && memo.all === pool && memo.emma) return memo.emma;
+    const keyed = BkkLib._emmaKeyed(pool.filter((v) => !BkkLib.isFutarTripId(v && v.tripId)).map((v) => ({
+      lat: v.lat,
+      lon: v.lon,
+      heading: v.heading,
+      speed: v.speed,
+      label: v.label || v.trainNumber,
+      trip: {
+        tripShortName: String(
+          (v.trip && (v.trip.tripShortName || v.trip.shortName))
+          || v.trainNumber || v.shortName || v.label || '',
+        ),
+      },
+    })));
+    if (memo && memo.all === pool) memo.emma = keyed;
+    return keyed;
   },
   matchHassVehicle(pool, row) {
     const trip = String(row.tripId || '');
@@ -329,19 +310,7 @@ Object.assign(BkkLib, {
         row.lon = incoming[1];
       }
     });
-    BkkLib.applyEmmaPositions(rows, pool.filter((v) => !BkkLib.isFutarTripId(v && v.tripId)).map((v) => ({
-      lat: v.lat,
-      lon: v.lon,
-      heading: v.heading,
-      speed: v.speed,
-      label: v.label || v.trainNumber,
-      trip: {
-        tripShortName: String(
-          (v.trip && (v.trip.tripShortName || v.trip.shortName))
-          || v.trainNumber || v.shortName || v.label || '',
-        ),
-      },
-    })));
+    BkkLib._applyEmmaKeyed(rows, BkkLib._hassEmmaKeyed(hass, pool));
     return rows;
   },
   applyRailBadge(row) {
@@ -381,7 +350,6 @@ Object.assign(BkkLib, {
     const lon = Number(r.lon);
     const gps = BkkLib.mapGpsLatLon(lat, lon);
     const hasGps = !!gps;
-    const gtfs = /^(gtfs:|elvira:|motis:)/.test(String(r.tripId || ''));
     const shape = Array.isArray(r.shape) ? r.shape : undefined;
     return {
       type: type,
@@ -407,8 +375,6 @@ Object.assign(BkkLib, {
       lat: hasGps ? gps[0] : null,
       lon: hasGps ? gps[1] : null,
       hasGps: hasGps,
-      hasLocation: hasGps || (!gtfs && !!r.tripId) || !!(shape && shape.length >= 2)
-        || /^elvira:/i.test(String(r.tripId || '')),
       shape: shape,
       gtfs: r.gtfs || null,
       vehicle: r.vehicle || '',

@@ -1,9 +1,10 @@
-import { BKK_API } from '../config.js';
+import { BKK_API, MIN_REFRESH_S } from '../config.js';
 import { codedError } from '../i18n.js';
 import { BkkLib } from '../lib/core.js';
 
-/* A departure board is shared between cards for this long. */
-const BOARD_TTL_MS = 20000;
+/* A departure board is shared between cards for this long: no longer than
+   the shortest poll, so a card polling at the floor always gets a new one. */
+const BOARD_TTL_MS = MIN_REFRESH_S * 1000;
 
 Object.assign(BkkLib, {
   _mem: {},
@@ -128,9 +129,12 @@ Object.assign(BkkLib, {
       BkkLib._ungate();
     }
   },
-  /* Same stop and horizon is one request, shared by every card that needs it. */
+  /* Same stop, horizon and FUTÁR access is one request, shared by every card
+     that needs it. A card with its own (revoked) key must not be served the
+     board another card fetched with a working one, nor the other way round. */
   departureBoard(apiKey, stopId, horizon) {
-    const key = String(stopId) + '|' + String(horizon);
+    const via = String(apiKey || '').trim();
+    const key = (via ? 'key:' + via : 'integration') + '|' + String(stopId) + '|' + String(horizon);
     const hit = BkkLib._boards.get(key);
     if (hit && Date.now() - hit.ts < BOARD_TTL_MS) return Promise.resolve(hit.data);
     const inflight = BkkLib._boardInflight.get(key);
