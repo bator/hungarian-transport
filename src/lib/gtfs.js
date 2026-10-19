@@ -36,11 +36,22 @@ Object.assign(BkkLib, {
     BkkLib._cacheIndex(cache, url, p, 8);
     return p;
   },
+  /* One card's view of the library: the same functions, with that card's own
+     index URLs (volanIndex / cityIndex / mavIndex from its config). The lookups
+     reach the indexes through `this`, so a card's override follows its own
+     calls across every await and never leaks to another card (review J-2).
+     A card without overrides gets the library itself. */
+  withIndexes(cfg) {
+    const c = cfg || {};
+    const ix = { volan: String(c.volanIndex || ''), city: String(c.cityIndex || ''), mav: String(c.mavIndex || '') };
+    if (!ix.volan && !ix.city && !ix.mav) return BkkLib;
+    return Object.create(BkkLib, { _ix: { value: ix } });
+  },
   volanIndex() {
-    return BkkLib._indexCached(volanIndexUrl(), 'errVolanHttp', 'errVolanGunzip');
+    return BkkLib._indexCached(volanIndexUrl(this && this._ix && this._ix.volan), 'errVolanHttp', 'errVolanGunzip');
   },
   cityIndex() {
-    return BkkLib._indexCached(cityIndexUrl(), 'errCityHttp', 'errCityGunzip');
+    return BkkLib._indexCached(cityIndexUrl(this && this._ix && this._ix.city), 'errCityHttp', 'errCityGunzip');
   },
   _mavP: new Map(),
   /* When the index came back empty or failed: url -> the time of that answer.
@@ -48,7 +59,7 @@ Object.assign(BkkLib, {
   _mavEmptyAt: new Map(),
   _mavEmptyRetryMs: 10 * 60 * 1000,
   mavIndex() {
-    const url = mavIndexUrl();
+    const url = mavIndexUrl(this && this._ix && this._ix.mav);
     const cache = BkkLib._mavP;
     const hit = cache.get(url);
     if (hit) {
@@ -165,7 +176,7 @@ Object.assign(BkkLib, {
   },
   async mavRouteForRow(row, boardName, alightName) {
     try {
-      const idx = await BkkLib.mavIndex();
+      const idx = await this.mavIndex();
       if (!idx || !Array.isArray(idx.p)) return null;
       const hit = BkkLib.mavShapeIndexKey(row, idx);
       if (!hit) return null;
@@ -277,8 +288,8 @@ Object.assign(BkkLib, {
       try { return await get(); } catch (_e) { return null; }
     };
     const [city, volan] = await Promise.all([
-      load(cityish, () => BkkLib.cityIndex()),
-      load(volanish, () => BkkLib.volanIndex()),
+      load(cityish, () => this.cityIndex()),
+      load(volanish, () => this.volanIndex()),
     ]);
     return list.map((s) => {
       const idx = cityish(s) ? city : (volanish(s) ? volan : null);
@@ -440,11 +451,11 @@ Object.assign(BkkLib, {
     return split ? BkkLib.fold(split.city) : '';
   },
   async volanSearchStops(q) {
-    const idx = await BkkLib.volanIndex();
+    const idx = await this.volanIndex();
     return BkkLib.gtfsSearchStops(idx, q, null);
   },
   async volanRoutesAtStop(stop) {
-    const idx = await BkkLib.volanIndex();
+    const idx = await this.volanIndex();
     const origin = BkkLib.volanMatchStop(idx, stop, null);
     if (!origin) return [];
     const seen = new Set();
@@ -469,7 +480,7 @@ Object.assign(BkkLib, {
     return out;
   },
   async volanRemainingNames(stop, routeLabel) {
-    const idx = await BkkLib.volanIndex();
+    const idx = await this.volanIndex();
     const origin = BkkLib.volanMatchStop(idx, stop, null);
     if (!origin || !routeLabel) return [];
     const want = String(routeLabel);
@@ -507,7 +518,7 @@ Object.assign(BkkLib, {
   },
   async citySearchStops(q, city) {
     if (!city) return [];
-    const idx = await BkkLib.cityIndex();
+    const idx = await this.cityIndex();
     return BkkLib.gtfsSearchStops(idx, q, BkkLib.opIx(idx, city));
   },
   gtfsSearchStops(idx, q, opIx) {
@@ -527,12 +538,12 @@ Object.assign(BkkLib, {
     return hits.slice(0, 20).map((s) => BkkLib.gtfsHit(idx, s, { label: s.name, type: 'BUS' }));
   },
   async volanReachableDests(stop) {
-    const idx = await BkkLib.volanIndex();
+    const idx = await this.volanIndex();
     return BkkLib.gtfsReachableDests(idx, stop, null);
   },
   async cityReachableDests(stop, city) {
     if (!city) return { dests: [], destRoutes: {} };
-    const idx = await BkkLib.cityIndex();
+    const idx = await this.cityIndex();
     return BkkLib.gtfsReachableDests(idx, stop, BkkLib.opIx(idx, city));
   },
   gtfsReachableDests(idx, stop, opIx) {
@@ -564,12 +575,12 @@ Object.assign(BkkLib, {
     return { dests, destRoutes };
   },
   async volanDepartures(stopId, dest, originName, minutesAfter) {
-    const idx = await BkkLib.volanIndex();
+    const idx = await this.volanIndex();
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, null, '#F9AB13', '#000000', 'coach', 'COACH', minutesAfter);
   },
   async cityDepartures(stopId, dest, originName, city, minutesAfter) {
     if (!city) return [];
-    const idx = await BkkLib.cityIndex();
+    const idx = await this.cityIndex();
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), '#0F6FC6', '#ffffff', 'bus', 'BUS', minutesAfter);
   },
   /* GTFS route_type (basic and extended codes) to the card's vehicle kind.
@@ -668,7 +679,7 @@ Object.assign(BkkLib, {
   async stopArea(cfg) {
     if (BkkLib.mode(cfg || {}) !== 'helyi' || !cfg.city) return '';
     try {
-      const idx = await BkkLib.cityIndex();
+      const idx = await this.cityIndex();
       const op = (idx.ops || []).find((o) => o.id === cfg.city);
       return op ? String(op.name || '').split(' \u2014 ')[0].trim() : '';
     } catch (_e) {

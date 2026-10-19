@@ -109,7 +109,10 @@ Object.assign(BkkLib, {
     return data;
   },
   /* With a card key the browser calls FUTÁR directly; without one, the
-     integration's hungarian_transport.futar service does, with its own key. */
+     integration's hungarian_transport.futar service does, with its own key.
+     The card key path is DEPRECATED (review J-3): the key goes into the URL
+     below and is readable from the dashboard config by every Home Assistant
+     user. It still works; see BkkLib.warnCardApiKey. */
   async fetch(apiKey, path, params, foreground) {
     if (!apiKey) {
       if (!BkkLib.integrationHasKey()) throw codedError('errNoApiKey');

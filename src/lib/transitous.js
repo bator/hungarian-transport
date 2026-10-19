@@ -181,10 +181,10 @@ Object.assign(BkkLib, {
         if (byId.has(row.id)) return;
         byId.set(row.id, row);
       });
-      await BkkLib.addTransitousVolanStops(byId, q, motis);
+      await this.addTransitousVolanStops(byId, q, motis);
     } catch (_e) { /* GTFS / BKK still fill the list */ }
     try {
-      (await BkkLib.searchStops(apiKey, q, 'all', '', { skipTransitousVolan: true })).forEach((s) => {
+      (await this.searchStops(apiKey, q, 'all', '', { skipTransitousVolan: true })).forEach((s) => {
         if (!s || !s.id || byId.has(s.id)) return;
         byId.set(s.id, s);
       });
@@ -192,7 +192,7 @@ Object.assign(BkkLib, {
     /* City and Volán index hits get their coordinates first: the collapse
        tells two towns' same-named stops apart by them, and a picked stop
        is planned from where it is. */
-    const placed = await BkkLib.withGtfsCoords(Array.from(byId.values()));
+    const placed = await this.withGtfsCoords(Array.from(byId.values()));
     const collapsed = BkkLib.collapseSameNameStops(placed);
     return BkkLib.capPlannerHits(collapsed, 24);
   },
