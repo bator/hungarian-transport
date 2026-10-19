@@ -532,7 +532,9 @@ Object.assign(BkkLib, {
       return { ok: true };
     } catch (err) {
       const msg = String(err && err.message ? err.message : err);
-      if (/HTTP 401|HTTP 403/.test(msg)) return { ok: false, code: 'errApiKeyBad' };
+      if ((err && err.code === 'futar_auth') || /HTTP 401|HTTP 403/.test(msg)) {
+        return { ok: false, code: 'errApiKeyBad' };
+      }
       if (err && err.i18nKey === 'errNoApiKey') return { ok: false, code: 'errNoApiKey' };
       return { ok: false, code: 'errApiKeyProbe' };
     }

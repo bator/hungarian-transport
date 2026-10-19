@@ -3217,6 +3217,95 @@ Lib.mavIndex = origMavIndex;
   globalThis.fetch = realFetch;
 }
 
+/* Expected outages are part of the service response, not service errors:
+   {data: null, error, detail} from futar, {departures: [], error, detail}
+   from elvira_between. */
+{
+  const viaWs = (response) => ({
+    states: {},
+    language: 'en',
+    services: { hungarian_transport: { futar: {}, elvira_between: {} } },
+    connection: { sendMessagePromise: async () => ({ context: {}, response }) },
+  });
+  const failure = async (hass) => {
+    Lib._hass = hass;
+    try {
+      await Lib.fetch('', 'search.json', { query: 'Keleti' }, true);
+      return null;
+    } catch (err) {
+      return err;
+    }
+  };
+  const down = await failure(viaWs({ data: null, error: 'futar_unavailable', detail: 'HTTP 503' }));
+  check('futar_unavailable keeps the "BKK <detail>" message',
+    !!down && down.message === 'BKK HTTP 503' && down.code === 'futar_unavailable',
+    down && down.message);
+  const bare = await failure(viaWs({ data: null, error: 'futar_unavailable' }));
+  check('futar error without detail names the error key',
+    !!bare && bare.message === 'BKK futar_unavailable', bare && bare.message);
+  const rejected = await failure(viaWs({ data: null, error: 'futar_auth', detail: 'UNAUTHORIZED' }));
+  check('futar_auth says the integration key was rejected',
+    !!rejected && rejected.code === 'futar_auth'
+    && /^BKK FUTÁR rejected the configured key \(UNAUTHORIZED\)/.test(rejected.message),
+    rejected && rejected.message);
+  Lib._hass = viaWs({ data: null, error: 'futar_auth', detail: 'UNAUTHORIZED' });
+  const probe = await Lib.probeApiKey('');
+  check('key probe reads futar_auth as a bad key, whatever the detail',
+    !probe.ok && probe.code === 'errApiKeyBad', JSON.stringify(probe));
+  const empty = await failure(viaWs({}));
+  check('futar response without data or error is still an empty response',
+    !!empty && empty.message === 'BKK empty response', empty && empty.message);
+  Lib._hass = null;
+
+  const warns = [];
+  const realWarn = console.warn;
+  console.warn = (...args) => { warns.push(args.map(String).join(' ')); };
+  try {
+    let answer = { departures: [], error: 'elvira_unavailable', detail: 'HTTP 503' };
+    const hass = {
+      states: {},
+      language: 'en',
+      connection: { sendMessagePromise: async () => ({ context: {}, response: answer }) },
+    };
+    const poll = () => Lib.elviraBetween(hass, 'BKK_005510009', 'BKK_005501024', 60, 'Szeged');
+    const first = await poll();
+    const second = await poll();
+    check('elvira_unavailable gives no rows and warns once per outage, not per poll',
+      Array.isArray(first) && first.length === 0 && Array.isArray(second) && second.length === 0
+      && warns.length === 1 && /elvira_unavailable \(HTTP 503\)/.test(warns[0]),
+      JSON.stringify(warns));
+    answer = { departures: [{ label: 'IC 712' }] };
+    const back = await poll();
+    answer = { departures: [], error: 'elvira_unavailable', detail: 'TimeoutError' };
+    await poll();
+    check('a good ELVIRA answer ends the outage; the next one warns again',
+      back.length === 1 && back[0].label === 'IC 712' && warns.length === 2
+      && /TimeoutError/.test(warns[1]),
+      JSON.stringify(warns));
+    const other = () => Lib.elviraBetween(hass, 'BKK_005510009', 'BKK_005517228', 60, 'Debrecen');
+    await other();
+    await poll();
+    check('each station pair has its own outage',
+      warns.length === 3, JSON.stringify(warns));
+    const throwing = {
+      states: {},
+      language: 'en',
+      connection: { sendMessagePromise: async () => { throw { code: 'service_validation_error', message: 'not loaded' }; } },
+    };
+    const pollThrowing = (destId) => Lib.elviraBetween(throwing, 'BKK_005510009', destId, 60, '');
+    const thrown = await pollThrowing('BKK_005513912');
+    await pollThrowing('BKK_005513912');
+    check('a failing service call warns once per outage too',
+      thrown.length === 0 && warns.length === 4 && /not loaded|object/.test(warns[3]), JSON.stringify(warns));
+    await pollThrowing('BKK_005517228');
+    check('error payload and failing call are the same outage',
+      warns.length === 4, JSON.stringify(warns));
+  } finally {
+    console.warn = realWarn;
+    Lib._elviraOutages.clear();
+  }
+}
+
 /* Map routes for GTFS rows: never borrow another line's route. */
 {
   const dep = 1800000000;

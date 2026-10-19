@@ -70,6 +70,16 @@ Object.assign(BkkLib, {
   hasFutar(apiKey, hass) {
     return !!String(apiKey || '').trim() || BkkLib.integrationHasKey(hass);
   },
+  /* Same messages the service error carried before: "BKK <detail>" for an
+     outage, a key-specific one when FUTÁR rejected the integration's key. */
+  _integrationError(code, detail) {
+    const why = String(detail || code);
+    const err = new Error(code === 'futar_auth'
+      ? `BKK FUTÁR rejected the configured key (${why}). Update it in the integration options.`
+      : `BKK ${why}`);
+    err.code = String(code);
+    return err;
+  },
   async _fetchViaIntegration(path, params) {
     const hass = BkkLib._hass;
     if (!BkkLib.integrationHasKey(hass)) throw codedError('errNoApiKey');
@@ -89,6 +99,9 @@ Object.assign(BkkLib, {
       if (timer) clearTimeout(timer);
     }
     const payload = BkkLib.servicePayload(res);
+    /* Expected outages come back as {data: null, error, detail} instead of a
+       service error, so polling cards do not log an ERROR line each time. */
+    if (payload && payload.error) throw BkkLib._integrationError(payload.error, payload.detail);
     const data = payload && payload.data;
     if (!data || typeof data !== 'object') throw new Error('BKK empty response');
     if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);

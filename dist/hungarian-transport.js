@@ -1184,6 +1184,14 @@ Object.assign(BkkLib, {
   hasFutar(apiKey, hass) {
     return !!String(apiKey || "").trim() || BkkLib.integrationHasKey(hass);
   },
+  /* Same messages the service error carried before: "BKK <detail>" for an
+     outage, a key-specific one when FUTÁR rejected the integration's key. */
+  _integrationError(code, detail) {
+    const why = String(detail || code);
+    const err = new Error(code === "futar_auth" ? `BKK FUTÁR rejected the configured key (${why}). Update it in the integration options.` : `BKK ${why}`);
+    err.code = String(code);
+    return err;
+  },
   async _fetchViaIntegration(path, params) {
     const hass = BkkLib._hass;
     if (!BkkLib.integrationHasKey(hass)) throw codedError("errNoApiKey");
@@ -1203,6 +1211,7 @@ Object.assign(BkkLib, {
       if (timer) clearTimeout(timer);
     }
     const payload = BkkLib.servicePayload(res);
+    if (payload && payload.error) throw BkkLib._integrationError(payload.error, payload.detail);
     const data = payload && payload.data;
     if (!data || typeof data !== "object") throw new Error("BKK empty response");
     if (data.status && data.status !== "OK") throw new Error(`BKK ${data.status}`);
@@ -2755,7 +2764,9 @@ Object.assign(BkkLib, {
       return { ok: true };
     } catch (err) {
       const msg = String(err && err.message ? err.message : err);
-      if (/HTTP 401|HTTP 403/.test(msg)) return { ok: false, code: "errApiKeyBad" };
+      if (err && err.code === "futar_auth" || /HTTP 401|HTTP 403/.test(msg)) {
+        return { ok: false, code: "errApiKeyBad" };
+      }
       if (err && err.i18nKey === "errNoApiKey") return { ok: false, code: "errNoApiKey" };
       return { ok: false, code: "errApiKeyProbe" };
     }
@@ -4421,15 +4432,30 @@ Object.assign(BkkLib, {
       minutes_after: minutesAfter || DEFAULT_MINUTES_AFTER,
       dest_name: destName || ""
     };
+    const pair = `${origin}>${dest}`;
     try {
       const res = await BkkLib.callServiceResponse(hass, "hungarian_transport", "elvira_between", serviceData);
       if (!res) return [];
+      const payload = BkkLib.servicePayload(res);
+      if (payload && payload.error) {
+        BkkLib._elviraDown(pair, `${payload.error}${payload.detail ? ` (${payload.detail})` : ""}`);
+        return [];
+      }
+      BkkLib._elviraOutages.delete(pair);
       const rows = BkkLib.elviraRowsFromResult(res);
       return Array.isArray(rows) ? rows : [];
     } catch (err) {
-      console.warn("MÁV ELVIRA reservation data unavailable:", err);
+      BkkLib._elviraDown(pair, err);
       return [];
     }
+  },
+  /* Cards poll every 15–45 s: warn when a station pair's outage starts, not
+     on every poll; its next good answer ends the outage. */
+  _elviraOutages: /* @__PURE__ */ new Set(),
+  _elviraDown(pair, reason) {
+    if (BkkLib._elviraOutages.has(pair)) return;
+    BkkLib._elviraOutages.add(pair);
+    console.warn("MÁV ELVIRA reservation data unavailable:", reason);
   },
   coachVehiclesFromResult(res) {
     if (!res) return [];

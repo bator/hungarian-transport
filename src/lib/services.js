@@ -26,15 +26,31 @@ Object.assign(BkkLib, {
       minutes_after: minutesAfter || DEFAULT_MINUTES_AFTER,
       dest_name: destName || '',
     };
+    const pair = `${origin}>${dest}`;
     try {
       const res = await BkkLib.callServiceResponse(hass, 'hungarian_transport', 'elvira_between', serviceData);
       if (!res) return [];
+      /* An outage is {departures: [], error, detail}, not a service error. */
+      const payload = BkkLib.servicePayload(res);
+      if (payload && payload.error) {
+        BkkLib._elviraDown(pair, `${payload.error}${payload.detail ? ` (${payload.detail})` : ''}`);
+        return [];
+      }
+      BkkLib._elviraOutages.delete(pair);
       const rows = BkkLib.elviraRowsFromResult(res);
       return Array.isArray(rows) ? rows : [];
     } catch (err) {
-      console.warn('MÁV ELVIRA reservation data unavailable:', err);
+      BkkLib._elviraDown(pair, err);
       return [];
     }
+  },
+  /* Cards poll every 15–45 s: warn when a station pair's outage starts, not
+     on every poll; its next good answer ends the outage. */
+  _elviraOutages: new Set(),
+  _elviraDown(pair, reason) {
+    if (BkkLib._elviraOutages.has(pair)) return;
+    BkkLib._elviraOutages.add(pair);
+    console.warn('MÁV ELVIRA reservation data unavailable:', reason);
   },
   coachVehiclesFromResult(res) {
     if (!res) return [];
