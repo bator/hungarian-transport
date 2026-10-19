@@ -247,6 +247,16 @@ jobs:
           ALLOW_MISSING_VAR: ${{ vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}
         run: |
           set -euo pipefail
+          # Both values end up in workflow commands below (::warning::,
+          # ::notice::). A newline in them would start a command of its own,
+          # so only feed ids, "all", commas and spaces get through; anything
+          # else stops the run without echoing the value.
+          for name in ALLOW_MISSING_INPUT ALLOW_MISSING_VAR; do
+            if [[ ! "${!name}" =~ ^[A-Za-z0-9_.,\ -]*$ ]]; then
+              echo "::error title=Bad allow_missing::${name} may only hold feed ids, all, commas and spaces."
+              exit 1
+            fi
+          done
           # The dispatch input relaxes the city guard for this run only, on
           # top of the repository variable. The variable relaxes it for every
           # run, the weekly refresh included, so say so on every run until it
