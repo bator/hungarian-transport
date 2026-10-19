@@ -1,6 +1,12 @@
 import { PLATFORM_STRIP, pad2, tzFields } from '../config.js';
 import { BkkLib } from '../lib/core.js';
 
+/* A shape whose ends lie this close is a closed loop. */
+const SHAPE_LOOP_CLOSE_M = 100;
+/* A later vertex this much farther from a stop than the nearest one still
+   counts as passing that stop. */
+const SHAPE_SAME_STOP_M = 150;
+
 Object.assign(BkkLib, {
   hm(ts) {
     if (!ts) return '';
@@ -515,6 +521,11 @@ Object.assign(BkkLib, {
     }
     return journey;
   },
+  /* The part of a shape from `from` to `to`, in that direction. The nearest
+     vertex to `to` can lie before the one to `from`: on a closed loop that
+     starts past the boarding stop (Szeged 78 at Mars tér) the ride runs on
+     over the shape's end, and on a line that passes the destination twice
+     the later pass is the one the ride reaches. */
   sliceShapeBetween(shape, from, to) {
     const pts = BkkLib.validMapShape(shape);
     if (pts.length < 2) return pts;
@@ -537,12 +548,27 @@ Object.assign(BkkLib, {
         i1 = i;
       }
     });
-    if (i1 < i0) {
-      const tmp = i0;
-      i0 = i1;
-      i1 = tmp;
+    let sliced;
+    if (i1 >= i0) {
+      sliced = pts.slice(i0, i1 + 1);
+    } else if (BkkLib.haversineMeters(pts[0], pts[pts.length - 1]) <= SHAPE_LOOP_CLOSE_M) {
+      /* The last vertex is the first one again: skip it on the way round. */
+      sliced = pts.slice(i0).concat(pts.slice(1, i1 + 1));
+    } else {
+      let iAhead = -1;
+      let dAhead = 1e15;
+      for (let i = i0 + 1; i < pts.length; i++) {
+        const d = BkkLib.haversineMeters(pts[i], b);
+        if (d < dAhead) {
+          dAhead = d;
+          iAhead = i;
+        }
+      }
+      sliced = iAhead > i0 && dAhead <= d1 + SHAPE_SAME_STOP_M
+        ? pts.slice(i0, iAhead + 1)
+        /* The shape runs the other way: still draw it from `from` to `to`. */
+        : pts.slice(i1, i0 + 1).reverse();
     }
-    const sliced = pts.slice(i0, i1 + 1);
     return sliced.length >= 2 ? sliced : pts;
   },
   clipShapeToBoardDest(shape, board, dest) {

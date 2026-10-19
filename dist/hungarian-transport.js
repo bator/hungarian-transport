@@ -523,7 +523,16 @@ function clampMinutesAfter(value) {
   if (!Number.isFinite(n) || n <= 0) return DEFAULT_MINUTES_AFTER;
   return Math.min(MAX_MINUTES_AFTER, Math.max(MIN_MINUTES_AFTER, Math.round(n)));
 }
-var PRESENTATION_KEYS = ["name", "language", "type"];
+var PRESENTATION_KEYS = [
+  "name",
+  "language",
+  "type",
+  "grid_options",
+  "view_layout",
+  "visibility",
+  "layout_options",
+  "card_mod"
+];
 var STRING_KEYS = ["name", "stopId", "stopName", "destKey", "destName", "destStopId", "city", "apiKey", "language", "stopKind", "destKind"];
 function normalizeRouteIds(value) {
   if (Array.isArray(value)) return value.filter((v) => v != null && v !== "").map((v) => String(v).trim()).filter(Boolean);
@@ -705,9 +714,13 @@ var I18N = {
     apiKeyHint: "Ingyenes kulcs, egyszerű regisztráció után:",
     apiKeyOk: "A BKK API kulcs rendben van.",
     apiKeyChange: "Módosítás",
+    apiKeyShow: "Mutat",
+    apiKeyHide: "Elrejt",
     apiKeyIntegration: "A BKK API kulcsot a Magyar közlekedés integráció adja.",
     nameLabel: "Név (opcionális)",
-    namePlaceholder: "Hungarian transport",
+    namePlaceholder: "Magyar közlekedés",
+    cardTitle: "Magyar közlekedés",
+    helyiLabel: "Helyi",
     destLoading: "Elérhető célok betöltése...",
     destEmptySuggest: (list) => "Nincs közvetlen járat erre a célra. Elérhető célok: " + list + ".",
     platformShort: (p) => `vág.${p}`,
@@ -729,6 +742,7 @@ var I18N = {
     tipTrain: (nr) => `Vonatszám: ${nr}`,
     mapOpenTip: "Térkép: jármű az útvonalon",
     mapClose: "Bezárás",
+    mapOk: "Rendben",
     mapLoadingRoute: "Útvonal betöltése…",
     mapNoData: "Ehhez a járathoz jelenleg nincs élő pozíció vagy útvonal.",
     mapLeafletFail: "A térkép betöltése nem sikerült.",
@@ -770,7 +784,7 @@ var I18N = {
     cityLabel: "Város",
     cityPlaceholder: "Válassz várost",
     minutesAfterLabel: "Menetrend előre (perc)",
-    minutesAfterHint: "Hány percet nézzen előre az indulásokból. 30–480 perc, alapértelmezés 180.",
+    minutesAfterHint: ([lo, hi, def]) => `Hány percet nézzen előre az indulásokból. ${lo}–${hi} perc, alapértelmezés ${def}.`,
     plannerTitle: "Tervező",
     plannerStep1: "Forrás",
     plannerStep2: "Cél",
@@ -892,9 +906,13 @@ var I18N = {
     apiKeyHint: "Free key, after a quick sign-up:",
     apiKeyOk: "The BKK API key is working.",
     apiKeyChange: "Change",
+    apiKeyShow: "Show",
+    apiKeyHide: "Hide",
     apiKeyIntegration: "The BKK API key comes from the Hungarian transport integration.",
     nameLabel: "Name (optional)",
     namePlaceholder: "Hungarian transport",
+    cardTitle: "Hungarian transport",
+    helyiLabel: "Local",
     destLoading: "Loading reachable destinations...",
     destEmptySuggest: (list) => "No direct service to that destination. Reachable destinations: " + list + ".",
     platformShort: (p) => `pl.${p}`,
@@ -916,6 +934,7 @@ var I18N = {
     tipTrain: (nr) => `Train number: ${nr}`,
     mapOpenTip: "Map: vehicle on its route",
     mapClose: "Close",
+    mapOk: "OK",
     mapLoadingRoute: "Loading route…",
     mapNoData: "No live position or route is available for this trip.",
     mapLeafletFail: "Could not load the map.",
@@ -957,7 +976,7 @@ var I18N = {
     cityLabel: "City",
     cityPlaceholder: "Pick a city",
     minutesAfterLabel: "Look-ahead (minutes)",
-    minutesAfterHint: "How far ahead to list departures. 30–480 minutes, default 180.",
+    minutesAfterHint: ([lo, hi, def]) => `How far ahead to list departures. ${lo}–${hi} minutes, default ${def}.`,
     plannerTitle: "Planner",
     plannerStep1: "Origin",
     plannerStep2: "Destination",
@@ -1100,6 +1119,7 @@ function errText(lang, err) {
 }
 
 // src/lib/futar.js
+var BOARD_TTL_MS = 2e4;
 Object.assign(BkkLib, {
   _mem: {},
   _inflight: {},
@@ -1228,7 +1248,7 @@ Object.assign(BkkLib, {
   departureBoard(apiKey, stopId, horizon) {
     const key = String(stopId) + "|" + String(horizon);
     const hit = BkkLib._boards.get(key);
-    if (hit && Date.now() - hit.ts < 2e4) return Promise.resolve(hit.data);
+    if (hit && Date.now() - hit.ts < BOARD_TTL_MS) return Promise.resolve(hit.data);
     const inflight = BkkLib._boardInflight.get(key);
     if (inflight) return inflight;
     const run = BkkLib.fetch(apiKey, "arrivals-and-departures-for-stop.json", {
@@ -1239,7 +1259,11 @@ Object.assign(BkkLib, {
       includeReferences: "true",
       includeVehicleFromTrip: "true"
     }, true).then((data) => {
-      BkkLib._boards.set(key, { ts: Date.now(), data });
+      const now = Date.now();
+      BkkLib._boards.forEach((v, k) => {
+        if (now - v.ts >= BOARD_TTL_MS) BkkLib._boards.delete(k);
+      });
+      BkkLib._boards.set(key, { ts: now, data });
       return data;
     }).finally(() => {
       BkkLib._boardInflight.delete(key);
@@ -1350,17 +1374,30 @@ Object.assign(BkkLib, {
     if (s.indexOf(":") > 0) return "hu-";
     return "";
   },
-  async transitousGeocode(text, opts) {
+  /* A stop does not move: every poll of an empty board geocoded both ends
+     again. Answers stay for the page; a failed lookup is asked again. */
+  _geocodeCache: /* @__PURE__ */ new Map(),
+  _geocodeCacheMax: 200,
+  transitousGeocode(text, opts) {
     const q = String(text || "").trim();
-    if (!q) return [];
+    if (!q) return Promise.resolve([]);
     const params = { text: q, language: "hu" };
     const typ = opts && opts.type;
     if (typ === "all") {
     } else {
       params.type = typ || "STOP";
     }
-    const data = await BkkLib.transitousFetch("/api/v1/geocode", params);
-    return Array.isArray(data) ? data : [];
+    const key = `${params.type || "all"}|${q}`;
+    const cache = BkkLib._geocodeCache;
+    const hit = cache.get(key);
+    if (hit) return hit;
+    const run = BkkLib.transitousFetch("/api/v1/geocode", params).then((data) => Array.isArray(data) ? data : []);
+    run.catch(() => {
+      if (cache.get(key) === run) cache.delete(key);
+    });
+    if (cache.size >= BkkLib._geocodeCacheMax) cache.delete(cache.keys().next().value);
+    cache.set(key, run);
+    return run;
   },
   transitousInHungary(hit) {
     if (!hit) return false;
@@ -1957,11 +1994,38 @@ Object.assign(BkkLib, {
       coversHead: BkkLib.motisCoversHead(hit, row)
     };
   },
+  /* An empty board (a city line at night) stays empty for a while: after a
+     fill that found nothing (or failed), the same pair is not asked again
+     for ten minutes, instead of a plan on every poll. */
+  _transitousEmptyAt: /* @__PURE__ */ new Map(),
+  _transitousEmptyRetryMs: 10 * 60 * 1e3,
+  _transitousFillKey(origin, dest, opts) {
+    const o = origin || {};
+    const d = dest || {};
+    return [
+      o.id || "",
+      o.name || "",
+      d.id || "",
+      d.key || "",
+      d.name || "",
+      opts && opts.mode || "all",
+      clampMinutesAfter(opts && opts.minutesAfter)
+    ].join("|");
+  },
   async fillTransitousIfEmpty(rows, origin, dest, opts) {
     const list = Array.isArray(rows) ? rows : [];
     if (list.length) return list;
+    const key = BkkLib._transitousFillKey(origin, dest, opts);
+    const empties = BkkLib._transitousEmptyAt;
+    const now = Date.now();
+    if (now - (empties.get(key) || 0) < BkkLib._transitousEmptyRetryMs) return list;
+    empties.forEach((ts, k) => {
+      if (now - ts >= BkkLib._transitousEmptyRetryMs) empties.delete(k);
+    });
     try {
       const extra = await BkkLib.transitousDepartures(origin, dest, opts);
+      if (extra.length) empties.delete(key);
+      else empties.set(key, Date.now());
       return BkkLib.mergeVolanRows(extra, list, maxDepartureRows(opts && opts.minutesAfter));
     } catch (_e) {
       return list;
@@ -2699,6 +2763,8 @@ Object.assign(BkkLib, {
 });
 
 // src/lib/geo.js
+var SHAPE_LOOP_CLOSE_M = 100;
+var SHAPE_SAME_STOP_M = 150;
 Object.assign(BkkLib, {
   hm(ts) {
     if (!ts) return "";
@@ -3207,6 +3273,11 @@ Object.assign(BkkLib, {
     }
     return journey;
   },
+  /* The part of a shape from `from` to `to`, in that direction. The nearest
+     vertex to `to` can lie before the one to `from`: on a closed loop that
+     starts past the boarding stop (Szeged 78 at Mars tér) the ride runs on
+     over the shape's end, and on a line that passes the destination twice
+     the later pass is the one the ride reaches. */
   sliceShapeBetween(shape, from, to) {
     const pts = BkkLib.validMapShape(shape);
     if (pts.length < 2) return pts;
@@ -3229,12 +3300,23 @@ Object.assign(BkkLib, {
         i1 = i;
       }
     });
-    if (i1 < i0) {
-      const tmp = i0;
-      i0 = i1;
-      i1 = tmp;
+    let sliced;
+    if (i1 >= i0) {
+      sliced = pts.slice(i0, i1 + 1);
+    } else if (BkkLib.haversineMeters(pts[0], pts[pts.length - 1]) <= SHAPE_LOOP_CLOSE_M) {
+      sliced = pts.slice(i0).concat(pts.slice(1, i1 + 1));
+    } else {
+      let iAhead = -1;
+      let dAhead = 1e15;
+      for (let i = i0 + 1; i < pts.length; i++) {
+        const d = BkkLib.haversineMeters(pts[i], b);
+        if (d < dAhead) {
+          dAhead = d;
+          iAhead = i;
+        }
+      }
+      sliced = iAhead > i0 && dAhead <= d1 + SHAPE_SAME_STOP_M ? pts.slice(i0, iAhead + 1) : pts.slice(i1, i0 + 1).reverse();
     }
-    const sliced = pts.slice(i0, i1 + 1);
     return sliced.length >= 2 ? sliced : pts;
   },
   clipShapeToBoardDest(shape, board, dest) {
@@ -5581,18 +5663,23 @@ var HISTORY_KEEP = 24;
 var HISTORY_HALF_LIFE_DAYS = 30;
 var localKey = (hass) => {
   const uid = hass && hass.user && hass.user.id;
-  return uid ? `${HISTORY_KEY}:${uid}` : HISTORY_KEY;
+  return uid ? `${HISTORY_KEY}:${uid}` : "";
 };
 var localRead = (hass) => {
+  const key = localKey(hass);
+  if (!key) return [];
   try {
-    return JSON.parse(globalThis.localStorage.getItem(localKey(hass)) || "[]");
+    return JSON.parse(globalThis.localStorage.getItem(key) || "[]");
   } catch (_e) {
     return [];
   }
 };
 var localWrite = (hass, list) => {
+  const key = localKey(hass);
+  if (!key) return;
   try {
-    globalThis.localStorage.setItem(localKey(hass), JSON.stringify(list));
+    globalThis.localStorage.setItem(key, JSON.stringify(list));
+    globalThis.localStorage.removeItem(HISTORY_KEY);
   } catch (_e) {
   }
 };
@@ -5715,11 +5802,17 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._keyDirty = false;
     this._userEditedKey = false;
     this._keyReveal = false;
+    this._keyVisible = false;
     this._searchSeq = 0;
     this._destSeq = 0;
     this._citySeq = 0;
   }
   disconnectedCallback() {
+    this._cancelSearches();
+  }
+  /* A pick, a reset or a mode change ends the searches still typed or in
+     flight: their hits belong to the old field and must not paint under it. */
+  _cancelSearches() {
     if (this._searchTimer) {
       clearTimeout(this._searchTimer);
       this._searchTimer = null;
@@ -5728,6 +5821,7 @@ var BKKHopCardEditor = class extends HTMLElement {
       clearTimeout(this._destTimer);
       this._destTimer = null;
     }
+    this._searchSeq += 1;
   }
   setConfig(config) {
     this._config = normalizeCardConfig(config);
@@ -5823,6 +5917,13 @@ var BKKHopCardEditor = class extends HTMLElement {
         .card-config .switch input { width: auto; margin: 0; }
         .card-config .row { display: flex; gap: 18px; flex-wrap: wrap; }
         .card-config .row .switch { margin-right: 8px; }
+        .card-config .keyrow { display: flex; gap: 6px; align-items: stretch; }
+        .card-config .keyrow input { flex: 1 1 auto; min-width: 0; }
+        .card-config .reveal {
+          flex: 0 0 auto; font: inherit; cursor: pointer; padding: 0 12px;
+          background: transparent; color: var(--primary-color);
+          border: 1px solid var(--divider-color); border-radius: 4px;
+        }
         .card-config a { color: var(--primary-color); }
       </style>
       <div class="card-config">
@@ -5836,7 +5937,10 @@ var BKKHopCardEditor = class extends HTMLElement {
         </div>
         <div class="f" id="apiKeyWrap">
           <label id="lblApiKey"></label>
-          <input id="apiKey" type="text" autocomplete="off">
+          <div class="keyrow">
+            <input id="apiKey" type="password" autocomplete="off" spellcheck="false">
+            <button type="button" class="reveal" id="apiKeyShow" aria-pressed="false"></button>
+          </div>
           <div class="hint"><span id="hintApiKey"></span>
             <a href="https://opendata.bkk.hu/data-sources" target="_blank" rel="noopener">opendata.bkk.hu/data-sources</a>
           </div>
@@ -5854,7 +5958,7 @@ var BKKHopCardEditor = class extends HTMLElement {
           <div class="row" id="modeSwitches">
             <label class="switch"><input id="mav" type="checkbox"> MÁV</label>
             <label class="switch"><input id="volan" type="checkbox"> Volán</label>
-            <label class="switch"><input id="helyi" type="checkbox"> Helyi</label>
+            <label class="switch"><input id="helyi" type="checkbox"> <span id="lblHelyi"></span></label>
           </div>
           <div class="hint" id="modeHint"></div>
         </div>
@@ -5906,6 +6010,10 @@ var BKKHopCardEditor = class extends HTMLElement {
       this._emit({ apiKey: ev.target.value.trim() });
       this._probeKey();
     });
+    this._el("apiKeyShow").addEventListener("click", () => {
+      this._keyVisible = !this._keyVisible;
+      this._syncKeyReveal();
+    });
     this._el("apiKeyEdit").addEventListener("click", (ev) => {
       ev.preventDefault();
       this._keyReveal = true;
@@ -5917,14 +6025,8 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._el("volan").addEventListener("change", () => this._onModeToggle("volan"));
     this._el("helyi").addEventListener("change", () => this._onModeToggle("helyi"));
     this._el("city").addEventListener("change", (ev) => {
-      this._emit({
-        city: ev.target.value,
-        stopId: "",
-        stopName: "",
-        destKey: "",
-        destName: "",
-        routeIds: []
-      });
+      this._cancelSearches();
+      this._emit(Object.assign({ city: ev.target.value }, this._noStops()));
       this._dests = [];
       this._loadedStop = "";
       this._syncStopLabel();
@@ -6062,6 +6164,16 @@ var BKKHopCardEditor = class extends HTMLElement {
     const okText = this._el("apiKeyOkText");
     if (okText) okText.textContent = t(this._lang(), viaIntegration ? "apiKeyIntegration" : "apiKeyOk");
   }
+  /* The key is a password field; the button shows it to check a paste. */
+  _syncKeyReveal() {
+    const el = this._el("apiKey");
+    const btn = this._el("apiKeyShow");
+    if (el) el.type = this._keyVisible ? "text" : "password";
+    if (!btn) return;
+    const label = t(this._lang(), this._keyVisible ? "apiKeyHide" : "apiKeyShow");
+    btn.textContent = label;
+    btn.setAttribute("aria-pressed", this._keyVisible ? "true" : "false");
+  }
   _modeCopy(mode) {
     return modeCopy(this._lang(), mode);
   }
@@ -6088,12 +6200,14 @@ var BKKHopCardEditor = class extends HTMLElement {
     set("apiKeyOkText", t(lang, "apiKeyOk"));
     set("apiKeyEdit", t(lang, "apiKeyChange"));
     set("lblName", t(lang, "nameLabel"));
+    set("lblHelyi", t(lang, "helyiLabel"));
     set("lblCity", t(lang, "cityLabel"));
     set("lblMinutesAfter", t(lang, "minutesAfterLabel"));
-    set("hintMinutesAfter", t(lang, "minutesAfterHint"));
+    set("hintMinutesAfter", t(lang, "minutesAfterHint", [MIN_MINUTES_AFTER, MAX_MINUTES_AFTER, DEFAULT_MINUTES_AFTER]));
     this._syncMinutesAfter();
     const key = this._el("apiKey");
     if (key) key.placeholder = t(lang, "apiKeyPlaceholder");
+    this._syncKeyReveal();
     const name = this._el("name");
     if (name) name.placeholder = t(lang, "namePlaceholder");
   }
@@ -6169,21 +6283,17 @@ var BKKHopCardEditor = class extends HTMLElement {
     const destHits = this._el("destHits");
     if (hits) hits.innerHTML = "";
     if (destHits) destHits.innerHTML = "";
+    this._cancelSearches();
     this._dests = [];
     this._destRoutes = {};
     this._cache = {};
     this._loadedStop = "";
-    this._emit({
+    this._emit(Object.assign({
       mav,
       volan,
       helyi,
-      city: helyi ? this._config.city || "" : "",
-      routeIds: [],
-      stopId: "",
-      stopName: "",
-      destKey: "",
-      destName: ""
-    });
+      city: helyi ? this._config.city || "" : ""
+    }, this._noStops()));
     this._syncMode();
     this._syncStopLabel();
     this._syncDestLabel();
@@ -6215,8 +6325,13 @@ var BKKHopCardEditor = class extends HTMLElement {
     const el = this._el("err");
     if (el) el.textContent = msg || "";
   }
+  /* undefined in a patch removes the key, so a new pick leaves nothing of
+     the old stop (coordinates, kind) behind in the card's YAML. */
   _emit(patch) {
     const cfg = Object.assign({}, this._config, patch);
+    Object.keys(patch || {}).forEach((k) => {
+      if (patch[k] === void 0) delete cfg[k];
+    });
     this._config = cfg;
     this.dispatchEvent(new CustomEvent("config-changed", {
       bubbles: true,
@@ -6275,11 +6390,11 @@ var BKKHopCardEditor = class extends HTMLElement {
       this._paintDestHits(q);
       return;
     }
+    const seq = ++this._searchSeq;
     if (!q || q.length < 2) {
       box.innerHTML = "";
       return;
     }
-    const seq = ++this._searchSeq;
     try {
       this._error("");
       if (!this._hasFutar() && !this._userEditedKey) await this._fillKey();
@@ -6296,7 +6411,7 @@ var BKKHopCardEditor = class extends HTMLElement {
         btn.addEventListener("click", () => {
           const id = btn.getAttribute("data-id");
           const st = hits.find((h) => h.id === id);
-          this._pickStop({ id: st.id, name: st.name, label: st.label }, which);
+          if (st) this._pickStop(st, which);
         });
       });
     } catch (err) {
@@ -6355,7 +6470,7 @@ var BKKHopCardEditor = class extends HTMLElement {
         const key = btn.getAttribute("data-key");
         const st = this._dests.find((d) => d.key === key);
         if (!st) return;
-        this._pickStop({ id: st.id, name: st.name, key: st.key }, "dest");
+        this._pickStop(st, "dest");
       });
     });
   }
@@ -6401,19 +6516,51 @@ var BKKHopCardEditor = class extends HTMLElement {
       }
     }
   }
+  /* What a pick knows of a stop: its id, coordinates and kind replace the
+     old stop's, or clear them. Hand-written stopLat / destKind left over from
+     an earlier stop would otherwise keep placing pins and Transitous
+     lookups there, and the planner's swap needs destStopId. */
+  _stopPatch(stop, prefix) {
+    const num = (v) => v != null && v !== "" && Number.isFinite(Number(v)) ? Number(v) : void 0;
+    const lat = num(stop && stop.lat);
+    const lon = num(stop && stop.lon);
+    const both = lat !== void 0 && lon !== void 0;
+    return {
+      [`${prefix}Lat`]: both ? lat : void 0,
+      [`${prefix}Lon`]: both ? lon : void 0,
+      [`${prefix}Kind`]: stop && stop.kind ? String(stop.kind) : void 0
+    };
+  }
+  /* Both stops gone (mode or city change). */
+  _noStops() {
+    return Object.assign({
+      stopId: "",
+      stopName: "",
+      destKey: "",
+      destName: "",
+      destStopId: void 0,
+      routeIds: []
+    }, this._stopPatch(null, "stop"), this._stopPatch(null, "dest"));
+  }
+  /* The hop card's title names the pair it was set up for. */
+  _autoName() {
+    return true;
+  }
   _pickStop(stop, which) {
+    this._cancelSearches();
     if (which === "dest") {
       const box2 = this._el("destHits");
       const dq2 = this._el("dq");
       if (box2) box2.innerHTML = "";
       if (dq2) dq2.value = stop.label || stop.name;
       const key = stop.key || BkkLib.norm(stop.name);
-      const patch2 = {
+      const patch2 = Object.assign({
         destKey: key,
         destName: stop.name,
+        destStopId: stop.id ? String(stop.id) : void 0,
         routeIds: (this._destRoutes[key] || []).slice()
-      };
-      if (!this._config.name && this._config.stopName) {
+      }, this._stopPatch(stop, "dest"));
+      if (this._autoName() && !this._config.name && this._config.stopName) {
         patch2.name = `${this._config.stopName} → ${stop.name}`;
       }
       this._emit(patch2);
@@ -6428,13 +6575,10 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._dests = [];
     this._destRoutes = {};
     this._loadedStop = "";
-    const patch = {
+    const patch = Object.assign({}, this._noStops(), {
       stopId: stop.id,
-      stopName: stop.name,
-      routeIds: [],
-      destKey: "",
-      destName: ""
-    };
+      stopName: stop.name
+    }, this._stopPatch(stop, "stop"));
     this._emit(patch);
     this._syncStopLabel();
     this._syncDestLabel();
@@ -6508,7 +6652,7 @@ var BKKHopCard = class extends HTMLElement {
     }
     this._holdGate();
     const next = normalizeCardConfig(config);
-    const prevKey = this._configDataKey;
+    const prevKey = this._configDataKey != null ? configDataKey(this._config) : null;
     const nextKey = configDataKey(next);
     this._config = next;
     this._configDataKey = nextKey;
@@ -6552,7 +6696,7 @@ var BKKHopCard = class extends HTMLElement {
     const viaBefore = this._viaIntegration;
     this._hass = hass;
     BkkLib._hass = hass;
-    if (this._lang() !== langBefore) this._paint();
+    if (this._lang() !== langBefore) this._langChanged();
     this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
     if (this._viaIntegration && !viaBefore && this._painted && !this._reloadActive) this._reloadSafe();
     if (first && this._rawRows && this._rawRows.length) {
@@ -6562,6 +6706,11 @@ var BKKHopCard = class extends HTMLElement {
       this._paint();
     }
     this._maybeFillKey();
+  }
+  /* With `language: auto` Home Assistant calls setConfig before hass, so the
+     first paint is in the browser's language: redraw in the user's. */
+  _langChanged() {
+    this._paint();
   }
   /* hass is set on every state change, so looking for a sibling card's key has
      to happen at most once, and never in the key-less modes. */
@@ -6669,7 +6818,7 @@ var BKKHopCard = class extends HTMLElement {
     const ready = cfg.stopId && cfg.destKey;
     if (cfg.name) return cfg.name;
     if (ready) return `${cfg.stopName || ""} → ${cfg.destName || ""}`;
-    return "Hungarian transport";
+    return t(this._lang(), "cardTitle");
   }
   _render() {
     if (!this._rows) this._rows = [];
@@ -7191,7 +7340,7 @@ ${this._stopPinCss()}
         .ht-map-notice{background:var(--card-background-color,#fff);padding:16px 18px;border-radius:10px;max-width:360px;font:14px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.3);color:var(--primary-text-color,#222)}
         .ht-map-notice button{margin-top:12px;border:0;background:var(--primary-color,#03a9f4);color:#fff;padding:8px 12px;border-radius:6px;cursor:pointer}
       </style>
-      <div class="ht-map-notice" role="dialog">${BkkLib.esc(message)}<br><button type="button">OK</button></div>
+      <div class="ht-map-notice" role="dialog">${BkkLib.esc(message)}<br><button type="button">${BkkLib.esc(t(this._lang(), "mapOk"))}</button></div>
     `;
     document.body.appendChild(overlay);
     this._mapOverlay = overlay;
@@ -7783,7 +7932,7 @@ ${this._stopPinCss()}
         if (gen !== this._gen) return;
         let merged = futarFull ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap) : earlyRows.slice();
         merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
-        if (!merged.length) {
+        if (!merged.length && mode !== "helyi") {
           merged = await BkkLib.fillTransitousIfEmpty(merged, origin, dest, {
             mode: this._departMode(),
             minutesAfter: cfg.minutesAfter
@@ -7849,6 +7998,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._destRoutes = {};
     this._destHits = [];
     this._destsLoading = false;
+    this._destsFor = "";
     this._pickersMounted = false;
     this._when = { mode: "now", at: 0 };
     this._journeys = [];
@@ -7896,6 +8046,15 @@ var BKKPlannerCard = class extends BKKHopCard {
      journey lookup still fetches belongs to the old pair and must not paint. */
   _invalidatePlan() {
     this._gen += 1;
+    if (this._searchTimer) {
+      clearTimeout(this._searchTimer);
+      this._searchTimer = null;
+    }
+    if (this._destTimer) {
+      clearTimeout(this._destTimer);
+      this._destTimer = null;
+    }
+    this._searchSeq += 1;
     this._destSearchSeq += 1;
     this._reloadActive = false;
     if (this._poll) {
@@ -7999,6 +8158,22 @@ var BKKPlannerCard = class extends BKKHopCard {
       if (gen !== this._gen) return;
       this._journeyLoading = false;
     });
+  }
+  set hass(hass) {
+    super.hass = hass;
+    if (!this._pickersMounted) return;
+    if (this._historyFor !== (hass && hass.connection || null)) this._paintFav();
+    this._ensureDests();
+  }
+  /* Language from hass after the pickers were drawn: their labels, the
+     time switch and the destination hint follow, not only the board. */
+  _langChanged() {
+    if (this._pickersMounted) {
+      this._syncPickerLabels();
+      const box = this._planEl("pdhits");
+      if (box && box.querySelector(".hint") && !box.querySelector(".hit")) this._paintDestHits("");
+    }
+    super._langChanged();
   }
   _emptyBodyMessage(lang, cfg) {
     if (this._timed()) return "";
@@ -8415,6 +8590,14 @@ var BKKPlannerCard = class extends BKKHopCard {
     if (first) this._mountPickers();
     else this._syncPickerLabels();
     this._ensureDepartureCaption();
+    this._ensureDests();
+  }
+  /* An origin from the YAML or the editor needs its reachable destinations
+     too, not only one picked in the card. */
+  _ensureDests() {
+    const cfg = this._config || {};
+    if (!this._pickersMounted || !this._hass || !cfg.stopId || this._destsFor === cfg.stopId) return;
+    this._loadDests();
   }
   /* Itineraries sit between the pickers and the departure board. */
   _ensureDepartureCaption() {
@@ -8826,7 +9009,11 @@ ${this._stopPinCss()}
     const box = this._planEl("pfav");
     if (!box) return;
     const cfg = this._config || {};
-    const conn = this._hass && this._hass.connection || null;
+    if (!this._hass) {
+      box.innerHTML = "";
+      return;
+    }
+    const conn = this._hass.connection || null;
     if (this._historyFor !== conn) {
       this._historyFor = conn;
       BkkLib.loadStopHistory(this._hass).then((list2) => {
@@ -8877,6 +9064,10 @@ ${this._stopPinCss()}
     }
     const fav = this._planEl("pfav");
     if (fav) fav.classList.toggle("hidden", !!cfg.stopName);
+    const sel = this._planEl("pmin");
+    if (sel) sel.setAttribute("aria-label", t(lang, "plannerStep3"));
+    const at = this._planEl("pat");
+    if (at) at.setAttribute("aria-label", t(lang, "plannerWhen"));
     if (dest) {
       dest.textContent = cfg.destName || "";
       dest.classList.toggle("show", !!cfg.destName);
@@ -8976,6 +9167,9 @@ ${this._stopPinCss()}
     this._journeys = [];
     this._dests = [];
     this._destRoutes = {};
+    this._destsFor = "";
+    this._destSeq += 1;
+    this._destsLoading = false;
     this._config = Object.assign({}, this._config, {
       stopId: "",
       stopName: "",
@@ -9068,6 +9262,7 @@ ${this._stopPinCss()}
   async _loadDests() {
     const cfg = this._config || {};
     if (!cfg.stopId) return;
+    this._destsFor = cfg.stopId;
     const seq = ++this._destSeq;
     this._destsLoading = true;
     this._paintDestHits("");
@@ -9212,6 +9407,11 @@ ${this._stopPinCss()}
 var BKKPlannerCardEditor = class extends BKKHopCardEditor {
   _mode() {
     return "all";
+  }
+  /* The planner's pair changes in the card itself: an "A → B" name baked
+     in here would be wrong after the first pick there. Its title is its own. */
+  _autoName() {
+    return false;
   }
   setConfig(config) {
     super.setConfig(config);

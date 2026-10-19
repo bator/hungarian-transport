@@ -61,9 +61,13 @@ Object.assign(BkkLib, {
     if (s.indexOf(':') > 0) return 'hu-';
     return '';
   },
-  async transitousGeocode(text, opts) {
+  /* A stop does not move: every poll of an empty board geocoded both ends
+     again. Answers stay for the page; a failed lookup is asked again. */
+  _geocodeCache: new Map(),
+  _geocodeCacheMax: 200,
+  transitousGeocode(text, opts) {
     const q = String(text || '').trim();
-    if (!q) return [];
+    if (!q) return Promise.resolve([]);
     const params = { text: q, language: 'hu' };
     const typ = opts && opts.type;
     if (typ === 'all') {
@@ -71,8 +75,16 @@ Object.assign(BkkLib, {
     } else {
       params.type = typ || 'STOP';
     }
-    const data = await BkkLib.transitousFetch('/api/v1/geocode', params);
-    return Array.isArray(data) ? data : [];
+    const key = `${params.type || 'all'}|${q}`;
+    const cache = BkkLib._geocodeCache;
+    const hit = cache.get(key);
+    if (hit) return hit;
+    const run = BkkLib.transitousFetch('/api/v1/geocode', params)
+      .then((data) => (Array.isArray(data) ? data : []));
+    run.catch(() => { if (cache.get(key) === run) cache.delete(key); });
+    if (cache.size >= BkkLib._geocodeCacheMax) cache.delete(cache.keys().next().value);
+    cache.set(key, run);
+    return run;
   },
   transitousInHungary(hit) {
     if (!hit) return false;
@@ -705,11 +717,29 @@ Object.assign(BkkLib, {
       coversHead: BkkLib.motisCoversHead(hit, row),
     };
   },
+  /* An empty board (a city line at night) stays empty for a while: after a
+     fill that found nothing (or failed), the same pair is not asked again
+     for ten minutes, instead of a plan on every poll. */
+  _transitousEmptyAt: new Map(),
+  _transitousEmptyRetryMs: 10 * 60 * 1000,
+  _transitousFillKey(origin, dest, opts) {
+    const o = origin || {};
+    const d = dest || {};
+    return [o.id || '', o.name || '', d.id || '', d.key || '', d.name || '',
+      (opts && opts.mode) || 'all', clampMinutesAfter(opts && opts.minutesAfter)].join('|');
+  },
   async fillTransitousIfEmpty(rows, origin, dest, opts) {
     const list = Array.isArray(rows) ? rows : [];
     if (list.length) return list;
+    const key = BkkLib._transitousFillKey(origin, dest, opts);
+    const empties = BkkLib._transitousEmptyAt;
+    const now = Date.now();
+    if (now - (empties.get(key) || 0) < BkkLib._transitousEmptyRetryMs) return list;
+    empties.forEach((ts, k) => { if (now - ts >= BkkLib._transitousEmptyRetryMs) empties.delete(k); });
     try {
       const extra = await BkkLib.transitousDepartures(origin, dest, opts);
+      if (extra.length) empties.delete(key);
+      else empties.set(key, Date.now());
       return BkkLib.mergeVolanRows(extra, list, maxDepartureRows(opts && opts.minutesAfter));
     } catch (_e) {
       return list;

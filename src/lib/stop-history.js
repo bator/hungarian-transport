@@ -10,23 +10,30 @@ const HISTORY_KEEP = 24;
 const HISTORY_HALF_LIFE_DAYS = 30;
 
 /* localStorage is per browser profile, while the history is per Home
-   Assistant user: two users of one tablet must not see each other's stops. */
+   Assistant user: two users of one tablet must not see each other's stops.
+   Without a known user there is no browser copy at all; the bare key older
+   versions shared between users is never read, and goes on the next write. */
 const localKey = (hass) => {
   const uid = hass && hass.user && hass.user.id;
-  return uid ? `${HISTORY_KEY}:${uid}` : HISTORY_KEY;
+  return uid ? `${HISTORY_KEY}:${uid}` : '';
 };
 
 const localRead = (hass) => {
+  const key = localKey(hass);
+  if (!key) return [];
   try {
-    return JSON.parse(globalThis.localStorage.getItem(localKey(hass)) || '[]');
+    return JSON.parse(globalThis.localStorage.getItem(key) || '[]');
   } catch (_e) {
     return [];
   }
 };
 
 const localWrite = (hass, list) => {
+  const key = localKey(hass);
+  if (!key) return;
   try {
-    globalThis.localStorage.setItem(localKey(hass), JSON.stringify(list));
+    globalThis.localStorage.setItem(key, JSON.stringify(list));
+    globalThis.localStorage.removeItem(HISTORY_KEY);
   } catch (_e) { /* private window or storage off: the HA copy still holds it */ }
 };
 
