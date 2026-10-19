@@ -42,6 +42,7 @@ export class BKKHopCardEditor extends HTMLElement {
 
   setConfig(config) {
     this._config = normalizeCardConfig(config);
+    BkkLib.warnCardApiKey(this._config);
     if (!this._cache) this._cache = {};
     if (!this._dests) this._dests = [];
     if (!this._destRoutes) this._destRoutes = {};
@@ -178,6 +179,9 @@ export class BKKHopCardEditor extends HTMLElement {
           <div class="hint"><span id="apiKeyOkText"></span>
             <a href="#" id="apiKeyEdit"></a>
           </div>
+        </div>
+        <div class="f" id="apiKeyDeprecatedWrap" style="display:none">
+          <div class="hint" id="apiKeyDeprecated"></div>
         </div>
         <div class="f">
           <label id="lblName" for="name"></label>
@@ -403,6 +407,11 @@ export class BKKHopCardEditor extends HTMLElement {
     if (okWrap) okWrap.style.display = settled ? '' : 'none';
     const okText = this._el('apiKeyOkText');
     if (okText) okText.textContent = t(this._lang(), viaIntegration ? 'apiKeyIntegration' : 'apiKeyOk');
+    /* A key in the card YAML still works, but it is deprecated (J-3): say so while the card has one. */
+    const depWrap = this._el('apiKeyDeprecatedWrap');
+    const dep = this._el('apiKeyDeprecated');
+    if (depWrap) depWrap.style.display = own ? '' : 'none';
+    if (dep) dep.textContent = own ? t(this._lang(), 'apiKeyDeprecated') : '';
   }
 
   /* The key is a password field; the button shows it to check a paste. */

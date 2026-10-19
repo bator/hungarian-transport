@@ -6343,4 +6343,49 @@ const settle = async (el) => {
   ed.remove();
 }
 
+
+/* J-3: a BKK key in the card YAML is deprecated (it travels in the request URL and any logged-in Home
+   Assistant user can read it from lovelace/config). It still works; the card warns once per page,
+   without the key in the text, and the editor says so next to the field. */
+{
+  const secret = 'deadbeef-1111-2222-3333-cafebabe0000';
+  const warns = [];
+  const keepWarn = console.warn;
+  console.warn = (...args) => { warns.push(args.map(String).join(' ')); };
+  Lib._warnedCardKey = false;
+  const mkCard = (extra) => {
+    const c = document.createElement('hungarian-transport-card');
+    c._reloadSafe = () => {};
+    c.setConfig(Object.assign({ language: 'hu', stopId: 'BKK_F01', stopName: 'Deák tér' }, extra));
+    return c;
+  };
+  mkCard({ apiKey: secret });
+  mkCard({ apiKey: secret });
+  mkCard({});
+  console.warn = keepWarn;
+  const mine = warns.filter((w) => /apiKey/.test(w) && /deprecated/i.test(w));
+  check('a card-level apiKey warns once per page that it is deprecated, without the key itself',
+    mine.length === 1 && !warns.some((w) => w.includes(secret)), JSON.stringify({ n: mine.length, any: warns.length }));
+  check('the card-level apiKey still reaches the card (no behaviour change)',
+    mkCard({ apiKey: secret })._config.apiKey === secret);
+
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  ed._fillKey = async () => {};
+  ed.setConfig({ language: 'hu', apiKey: secret });
+  const note = ed._el('apiKeyDeprecatedWrap');
+  const shownWithKey = !!note && note.style.display !== 'none' && /elavult/i.test(ed._el('apiKeyDeprecated').textContent);
+  ed.setConfig({ language: 'hu' });
+  const hiddenWithout = !!note && note.style.display === 'none';
+  ed.setConfig({ language: 'en', apiKey: secret });
+  const english = /deprecated/i.test(ed._el('apiKeyDeprecated').textContent);
+  check('the editor marks a card-level key as deprecated (hu/en), and only when the card has one',
+    shownWithKey && hiddenWithout && english && !ed._el('apiKeyDeprecated').textContent.includes(secret),
+    JSON.stringify({ shownWithKey, hiddenWithout, english }));
+  ed.remove();
+}
+
 process.exit(failed ? 1 : 0);

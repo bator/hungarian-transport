@@ -88,6 +88,7 @@ export class BKKHopCard extends HTMLElement {
     const nextKey = configDataKey(next);
     this._config = next;
     this._configDataKey = nextKey;
+    BkkLib.warnCardApiKey(next);
     /* Only the title or the language changed (the editor emits on every
        keystroke): redraw with the rows and timers it already has. */
     if (prevKey != null && prevKey === nextKey && this._painted) {

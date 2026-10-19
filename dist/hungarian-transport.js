@@ -775,6 +775,7 @@ var I18N = {
     apiKeyShow: "Mutat",
     apiKeyHide: "Elrejt",
     apiKeyIntegration: "A BKK API kulcsot a Magyar közlekedés integráció adja.",
+    apiKeyDeprecated: "A kártyán megadott kulcs elavult: minden bejelentkezett Home Assistant-felhasználó kiolvashatja a műszerfal beállításaiból, és a kérés címében megy a BKK-nak. Add meg inkább a Magyar közlekedés integrációban, és töröld innen.",
     nameLabel: "Név (opcionális)",
     namePlaceholder: "Magyar közlekedés",
     cardTitle: "Magyar közlekedés",
@@ -955,6 +956,7 @@ var I18N = {
     apiKeyShow: "Show",
     apiKeyHide: "Hide",
     apiKeyIntegration: "The BKK API key comes from the Hungarian transport integration.",
+    apiKeyDeprecated: "A key on the card is deprecated: every logged-in Home Assistant user can read it from the dashboard config, and it is sent to BKK in the request URL. Enter it in the Hungarian transport integration instead and remove it here.",
     nameLabel: "Name (optional)",
     namePlaceholder: "Hungarian transport",
     cardTitle: "Hungarian transport",
@@ -1252,7 +1254,10 @@ Object.assign(BkkLib, {
     return data;
   },
   /* With a card key the browser calls FUTÁR directly; without one, the
-     integration's hungarian_transport.futar service does, with its own key. */
+     integration's hungarian_transport.futar service does, with its own key.
+     The card key path is DEPRECATED (review J-3): the key goes into the URL
+     below and is readable from the dashboard config by every Home Assistant
+     user. It still works; see BkkLib.warnCardApiKey. */
   async fetch(apiKey, path, params, foreground) {
     if (!apiKey) {
       if (!BkkLib.integrationHasKey()) throw codedError("errNoApiKey");
@@ -3553,6 +3558,22 @@ var INDEX_SCHEMA = 29;
 
 // src/lib/dashboard-key.js
 Object.assign(BkkLib, {
+  /* DEPRECATED card-level key (review J-3, 2026-10-19). A key in the card YAML
+     is sent to BKK as a query parameter (futar.js), and any logged-in Home
+     Assistant user, admin or not, can read it with the lovelace/config call
+     used below. It keeps working; the recommended place is the integration
+     (the hungarian_transport.futar service), whose key never leaves Home
+     Assistant. The card says so once per page, without the key itself. */
+  _warnedCardKey: false,
+  warnCardApiKey(cfg) {
+    if (BkkLib._warnedCardKey || !cfg || typeof cfg.apiKey !== "string" || !cfg.apiKey.trim()) return false;
+    BkkLib._warnedCardKey = true;
+    try {
+      console.warn("Hungarian transport: the card-level apiKey is deprecated. Every logged-in Home Assistant user can read it from the dashboard config, and it is sent to BKK in the request URL. Enter the key in the Hungarian transport integration instead and remove apiKey from the card.");
+    } catch (_e) {
+    }
+    return true;
+  },
   /* Only a key that sits on one of our own cards may be reused. A dashboard can
      hold apiKey values belonging to entirely unrelated cards, and those must
      never end up in a request to BKK. */
@@ -6025,6 +6046,7 @@ var BKKHopCardEditor = class extends HTMLElement {
   }
   setConfig(config) {
     this._config = normalizeCardConfig(config);
+    BkkLib.warnCardApiKey(this._config);
     if (!this._cache) this._cache = {};
     if (!this._dests) this._dests = [];
     if (!this._destRoutes) this._destRoutes = {};
@@ -6152,6 +6174,9 @@ var BKKHopCardEditor = class extends HTMLElement {
           <div class="hint"><span id="apiKeyOkText"></span>
             <a href="#" id="apiKeyEdit"></a>
           </div>
+        </div>
+        <div class="f" id="apiKeyDeprecatedWrap" style="display:none">
+          <div class="hint" id="apiKeyDeprecated"></div>
         </div>
         <div class="f">
           <label id="lblName" for="name"></label>
@@ -6366,6 +6391,10 @@ var BKKHopCardEditor = class extends HTMLElement {
     if (okWrap) okWrap.style.display = settled ? "" : "none";
     const okText = this._el("apiKeyOkText");
     if (okText) okText.textContent = t(this._lang(), viaIntegration ? "apiKeyIntegration" : "apiKeyOk");
+    const depWrap = this._el("apiKeyDeprecatedWrap");
+    const dep = this._el("apiKeyDeprecated");
+    if (depWrap) depWrap.style.display = own ? "" : "none";
+    if (dep) dep.textContent = own ? t(this._lang(), "apiKeyDeprecated") : "";
   }
   /* The key is a password field; the button shows it to check a paste. */
   _syncKeyReveal() {
@@ -6887,6 +6916,7 @@ var BKKHopCard = class extends HTMLElement {
     const nextKey = configDataKey(next);
     this._config = next;
     this._configDataKey = nextKey;
+    BkkLib.warnCardApiKey(next);
     if (prevKey != null && prevKey === nextKey && this._painted) {
       try {
         this._render();
