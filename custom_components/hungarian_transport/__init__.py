@@ -141,7 +141,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async def handle_rebuild_mav(call: ServiceCall) -> dict[str, Any]:
         try:
             stats = await mav.async_build(hass, www_path, force=True)
-        except FileNotFoundError as err:
+        except mav.MavSourceMissing as err:
             raise ServiceValidationError(
                 translation_domain=DOMAIN,
                 translation_key="mav_source_missing",
