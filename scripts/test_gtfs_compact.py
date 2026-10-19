@@ -338,11 +338,18 @@ def main() -> int:
             failed |= not check("redirect to private name blocked", True)
         moved = handler.redirect_request(origin, None, 302, "Found", {}, "https://gtfs.kti.hu/b.zip")
         failed |= not check("redirect to public host followed", moved is not None and moved.full_url.endswith("/b.zip"))
+        # The same host losing https on a redirect is asked over https again;
+        # nothing is ever fetched over plain http for an https feed.
+        same = handler.redirect_request(origin, None, 302, "Found", {}, "HTTP://gtfs.kti.hu/b.zip")
+        failed |= not check(
+            "https redirected to plain http on the same host stays https",
+            same is not None and same.full_url == "https://gtfs.kti.hu/b.zip", same and same.full_url,
+        )
         try:
-            handler.redirect_request(origin, None, 302, "Found", {}, "HTTP://gtfs.kti.hu/b.zip")
-            failed |= not check("https redirected to plain http refused", False)
-        except ValueError:
-            failed |= not check("https redirected to plain http refused", True)
+            handler.redirect_request(origin, None, 302, "Found", {}, "http://93.184.216.34/b.zip")
+            failed |= not check("https redirected to plain http on another host refused", False)
+        except ValueError as err:
+            failed |= not check("https redirected to plain http on another host refused", "https required" in str(err), str(err))
         loose = gc._PublicRedirectHandler(allow_insecure=True)
         moved = loose.redirect_request(origin, None, 302, "Found", {}, "http://gtfs.kti.hu/b.zip")
         failed |= not check("plain http redirect followed for an insecure feed", moved is not None)
@@ -811,6 +818,23 @@ def main() -> int:
         )
     finally:
         fz.unlink(missing_ok=True)
+
+    # https -> http on the same host (a server adding a slash) is asked over
+    # https again; to another host it is still refused.
+    up = gc.upgrade_same_host_redirect
+    failed |= not check(
+        "same-host https->http redirect is upgraded, others are not",
+        up("https://gtfs.menetbrand.com/download/tatabanya", "http://gtfs.menetbrand.com/download/tatabanya/")
+        == "https://gtfs.menetbrand.com/download/tatabanya/"
+        and up("https://dombovar.ptke.hu/gtfs", "http://dombovar.ptke.hu:80/gtfs/") == "https://dombovar.ptke.hu/gtfs/"
+        and up("https://a.example/x", "http://b.example/x/") == "http://b.example/x/"
+        and up("http://a.example/x", "http://a.example/x/") == "http://a.example/x/",
+    )
+    failed |= not check(
+        "city feeds name their final https address (no redirect)",
+        all(not re.search(r"menetbrand\.com/download/[a-z]+$|ptke\.hu/gtfs$", f["url"]) for f in CITY_FEEDS),
+        str([f["url"] for f in CITY_FEEDS if "menetbrand" in f["url"] or "ptke" in f["url"]]),
+    )
 
     return 1 if failed else 0
 

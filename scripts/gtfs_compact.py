@@ -214,9 +214,23 @@ class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
         self.allow_insecure = allow_insecure
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
+        newurl = upgrade_same_host_redirect(req.full_url, newurl)
         assert_public_http_url(newurl)
         assert_https(newurl, allow_insecure=self.allow_insecure)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def upgrade_same_host_redirect(old: str, new: str) -> str:
+    """https://host/x -> http://host/x/ is a server adding a slash and losing
+    the scheme on the way (menetbrand.com, dombovar.ptke.hu): ask for the
+    same address over https instead. A redirect to another host stays as it
+    is, for assert_https to judge."""
+    a, b = urllib.parse.urlparse(old), urllib.parse.urlparse(new)
+    if a.scheme.lower() == "https" and b.scheme.lower() == "http" and a.hostname and a.hostname == b.hostname \
+            and b.port in (None, 80):
+        netloc = b.netloc.rsplit(":", 1)[0] if b.port == 80 else b.netloc
+        return urllib.parse.urlunparse(("https", netloc, b.path, b.params, b.query, b.fragment))
+    return new
 
 
 def _urlopen(req: urllib.request.Request, timeout: int = 120, *, allow_insecure: bool = False):
