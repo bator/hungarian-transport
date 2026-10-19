@@ -599,12 +599,13 @@ Object.assign(BkkLib, {
           const fallbackText = mode === 'volan' ? '000000' : 'ffffff';
           const veh = st.vehicle || {};
           const loc = BkkLib.vehicleLoc(veh);
+          const vehicle = BkkLib.vehicleKind(rt);
           candidates.push({
             tripId: st.tripId,
             label: rt.iconDisplayText || rt.shortName || '?',
             color: '#' + String(rt.color || fallbackColor).replace('#', ''),
             text: '#' + String(rt.textColor || fallbackText).replace('#', ''),
-            vehicle: BkkLib.vehicleKind(rt),
+            vehicle,
             rawType: String(rt.type || 'BUS').toUpperCase(),
             dep: dep,
             sched: st.departureTime,
@@ -616,8 +617,12 @@ Object.assign(BkkLib, {
               || trip.wheelchairAccessible === true
               || st.wheelchairAccessible === true,
             bikesAllowed: trip.bikesAllowed === 1 || trip.bikesAllowed === true,
-            trainNumber: trip.shortName || trip.tripShortName
-              || BkkLib.trainNumberFromTripId(st.tripId) || '',
+            /* Only trains have a train number. A bus on a numeric ad-hoc
+               trip id (BKK_1792439004037) must not show one. */
+            trainNumber: vehicle === 'rail'
+              ? (trip.shortName || trip.tripShortName
+                || BkkLib.trainNumberFromTripId(st.tripId) || '')
+              : '',
             booking: !!st.mayRequireBooking,
             lat: loc.lat,
             lon: loc.lon,

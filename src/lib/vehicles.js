@@ -6,12 +6,14 @@ Object.assign(BkkLib, {
     const s = String(tripId || '');
     /* BKK_90681_106 is train 9068 (trailing 1 on a 5-digit body).
        West/south IC trips are BKK_8661_47 for train 866, BKK_8741_47 for 874.
-       Suburban 4xxx ids (BKK_4541_108) must keep all four digits. */
+       Suburban 4xxx ids (BKK_4541_108) must keep all four digits.
+       No train number has more than five digits: BKK_1792439004037 is an
+       ad-hoc FUTÁR trip (a millisecond timestamp), not a train. */
     const long = s.match(/^BKK_([89]\d{3})1(?:_|$)/);
     if (long) return long[1];
     const ic = s.match(/^BKK_([89]\d{2})1(?:_|$)/);
     if (ic) return ic[1];
-    const m = s.match(/^BKK_(\d+)(?:_|$)/);
+    const m = s.match(/^BKK_(\d{1,5})(?:_|$)/);
     return m ? m[1] : '';
   },
   /* The other reading of a 4–5 digit id body: the train number plus one
