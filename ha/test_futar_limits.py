@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 import types
 from pathlib import Path
 
@@ -77,35 +78,83 @@ async def main() -> None:
         check(f"{path}: the allowlist keeps every parameter the card sends", keys <= futar.FUTAR_PARAMS[path],
               repr(keys - futar.FUTAR_PARAMS[path]))
 
-    # Rate limit: misses only; a burst, then FUTAR_RATE per second.
+    # Rate limit on a virtual clock: a sleep moves the clock, so waiting is measurable.
+    async def virtual_sleep(seconds):
+        clock[0] += seconds
+
+    futar._sleep = virtual_sleep
     proxy = futar.FutarProxy(None, "secret")
     calls.clear()
-    limited = 0
+    start = clock[0]
     for i in range(futar.FUTAR_BURST + 10):
-        try:
-            await proxy.get("search.json", {"query": f"q{i}"})
-        except futar.FutarRateLimited:
-            limited += 1
-    check("a burst above FUTAR_BURST distinct misses is cut", len(calls) == futar.FUTAR_BURST and limited == 10,
-          repr((len(calls), limited)))
+        await proxy.get("search.json", {"query": f"q{i}"})
+    check("over the burst a call waits for a token instead of being refused",
+          len(calls) == futar.FUTAR_BURST + 10 and abs((clock[0] - start) - 10 / futar.FUTAR_RATE) < 0.05,
+          repr((len(calls), clock[0] - start)))
     hits = len(calls)
     await proxy.get("search.json", {"query": "q0"})
     check("cache hits do not need a token", len(calls) == hits)
-    clock[0] += 1.0
-    ok = 0
-    for i in range(10):
-        try:
-            await proxy.get("search.json", {"query": f"later{i}"})
-            ok += 1
-        except futar.FutarRateLimited:
-            pass
-    check("tokens come back at FUTAR_RATE per second", ok == int(futar.FUTAR_RATE), repr(ok))
     clock[0] += 3600
     await proxy.get("search.json", {"query": "after an hour"})
     check("the bucket refills to FUTAR_BURST, not beyond", proxy._tokens == futar.FUTAR_BURST - 1, repr(proxy._tokens))
 
+    # A clock that does not move (nothing refills): refused after FUTAR_TOKEN_WAIT_SEC of sleeping.
+    slept: list[float] = []
+
+    async def stuck_sleep(seconds):
+        slept.append(seconds)
+
+    futar._sleep = stuck_sleep
+    proxy._tokens = 0.0
+    proxy._tokens_at = clock[0]
+    try:
+        await proxy.get("search.json", {"query": "starved"})
+        err = None
+    except futar.FutarRateLimited as e:
+        err = e
+    check("a call that cannot get a token in FUTAR_TOKEN_WAIT_SEC is refused",
+          err is not None and sum(slept) <= futar.FUTAR_TOKEN_WAIT_SEC and sum(slept) > futar.FUTAR_TOKEN_WAIT_SEC - 0.5,
+          repr((err, sum(slept))))
+    check("a refusal is not an outage: no unavailable state", proxy._failing is False)
+    futar._sleep = asyncio.sleep
+
+
+async def load_pattern(delay: float, gate: int) -> tuple[int, int]:
+    """One destination list on a cold cache (departures.js:361-405): 1 board,
+    40 trip-details, 32 route-details, through the card's concurrency gate,
+    on the real clock. Returns (refused, sent)."""
+    futar._monotonic = time.monotonic
+    sent = [0]
+
+    async def slow_get(_session, _key, path, params):
+        sent[0] += 1
+        await asyncio.sleep(delay)
+        return {"status": "OK"}
+
+    futar.futar_get = slow_get
+    proxy = futar.FutarProxy(None, "secret")
+    jobs = ([("arrivals-and-departures-for-stop.json", {"stopId": "BKK_F1"})]
+            + [("trip-details.json", {"tripId": f"BKK_T{i}"}) for i in range(40)]
+            + [("route-details.json", {"routeId": f"BKK_R{i}"}) for i in range(32)])
+    gate_sem = asyncio.Semaphore(gate)
+    refused = [0]
+
+    async def one(path, params):
+        async with gate_sem:
+            try:
+                await proxy.get(path, params)
+            except futar.FutarRateLimited:
+                refused[0] += 1
+
+    await asyncio.gather(*(one(p, q) for p, q in jobs))
+    return refused[0], sent[0]
+
 
 asyncio.run(main())
+for delay, gate in [(0.1, 4), (0.1, 8), (0.1, 12), (0.1, 24), (0.25, 24)]:
+    refused, sent = asyncio.run(load_pattern(delay, gate))
+    check(f"a 73-call destination list (delay {delay} s, gate {gate}) loads with no refusal",
+          refused == 0 and sent == 73, repr((refused, sent)))
 if failed:
     sys.exit(1)
 print("futar limit tests passed")
