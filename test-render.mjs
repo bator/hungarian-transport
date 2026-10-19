@@ -1831,6 +1831,57 @@ check('loose trip-id number drops one digit only where the readings differ',
   && Lib.trainNumberLooseFromTripId('BKK_90681_106') === ''
   && Lib.trainNumberLooseFromTripId('BKK_865_74') === ''
   && Lib.trainNumberLooseFromTripId('elvira:2889849') === '');
+/* Rákospatak utca, 2026-10-19: bus 7 to Albertfalva ran on the ad-hoc
+   FUTÁR trip BKK_1792439004037 (a millisecond timestamp), which was shown
+   as a train number. No Hungarian train number has more than five digits. */
+check('a trip id body longer than five digits is no train number',
+  Lib.trainNumberFromTripId('BKK_1792439004037') === ''
+  && Lib.trainNumberFromTripId('BKK_179243') === ''
+  && Lib.trainNumberFromTripId('BKK_25431_12') === '25431'
+  && Lib.trainNumberLooseFromTripId('BKK_1792439004037') === ''
+  && Lib.rowTrainNumber({ tripId: 'BKK_1792439004037' }) === ''
+  && Lib.vehicleBucket({ tripId: 'BKK_1792439004037' }) === 'bus');
+await (async () => {
+  /* FUTÁR rows read a train number off the trip id only when they are rail:
+     a bus on a numeric ad-hoc trip id has none. */
+  const keep = { departureBoard: Lib.departureBoard, originPoles: Lib.originPoles };
+  const now = Math.floor(Date.now() / 1000);
+  const board = { data: {
+    entry: { stopTimes: [
+      { tripId: 'BKK_1792439004037', departureTime: now + 120 },
+      { tripId: 'BKK_17924', departureTime: now + 180 },
+      { tripId: 'BKK_4541_108', departureTime: now + 240 },
+      { tripId: 'BKK_8624_67', departureTime: now + 300 },
+      { tripId: 'BKK_2461_311', departureTime: now + 360 },
+    ] },
+    references: {
+      trips: {
+        BKK_1792439004037: { routeId: 'R7', tripHeadsign: 'Albertfalva vasútállomás' },
+        BKK_17924: { routeId: 'R7', tripHeadsign: 'Albertfalva vasútállomás' },
+        BKK_4541_108: { routeId: 'RS', tripHeadsign: 'Albertfalva vasútállomás' },
+        BKK_8624_67: { routeId: 'RIC', tripHeadsign: 'Albertfalva vasútállomás' },
+        BKK_2461_311: { routeId: 'RIC', tripHeadsign: 'Albertfalva vasútállomás', tripShortName: '246' },
+      },
+      routes: {
+        R7: { id: 'R7', shortName: '7', type: 'BUS' },
+        RS: { id: 'RS', shortName: 'S30', type: 'SUBURBAN_RAILWAY' },
+        RIC: { id: 'RIC', shortName: 'IC', type: 'RAIL' },
+      },
+      stops: {},
+    },
+  } };
+  Lib.departureBoard = async () => board;
+  Lib.originPoles = async () => [];
+  const dest = { key: 'albertfalva vasútállomás', name: 'Albertfalva vasútállomás' };
+  const rows = await Lib.departures('k', 'BKK_F1', [], dest, { mode: 'all', minutesAfter: 60, cache: {} });
+  Object.assign(Lib, keep);
+  const num = (id) => (rows.find((r) => r.tripId === id) || {}).trainNumber;
+  check('a FUTÁR bus row takes no train number from its trip id; rail rows still do',
+    rows.length === 5 && num('BKK_1792439004037') === '' && num('BKK_17924') === ''
+    && num('BKK_4541_108') === '4541' && num('BKK_8624_67') === '8624'
+    && num('BKK_2461_311') === '246',
+    JSON.stringify(rows.map((r) => [r.tripId, r.trainNumber])));
+})();
 /* Kelenföld → Székesfehérvár, 2026-10-19: FUTÁR gives two ICs no
    tripShortName, so their numbers are read off the trip id (8624, 2461);
    ELVIRA has them as BALATON 862 and CITADELLA 246, platform 4. */
