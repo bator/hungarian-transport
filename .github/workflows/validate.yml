@@ -85,6 +85,9 @@ jobs:
       - name: Manual server tests
         run: python3 docs/manual/tools/test_server.py
 
+      - name: Card URL tag tests
+        run: python3 ha/test_assets.py
+
   integration:
     name: Integration tests
     runs-on: ubuntu-latest
