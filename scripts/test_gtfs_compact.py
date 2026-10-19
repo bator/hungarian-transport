@@ -352,7 +352,30 @@ def main() -> int:
             failed |= not check("https redirected to plain http on another host refused", "https required" in str(err), str(err))
         loose = gc._PublicRedirectHandler(allow_insecure=True)
         moved = loose.redirect_request(origin, None, 302, "Found", {}, "http://gtfs.kti.hu/b.zip")
-        failed |= not check("plain http redirect followed for an insecure feed", moved is not None)
+        failed |= not check(
+            "an insecure feed's same-host http redirect is asked over https first",
+            moved is not None and moved.full_url == "https://gtfs.kti.hu/b.zip", moved and moved.full_url,
+        )
+        moved = loose.redirect_request(origin, None, 302, "Found", {}, "http://93.184.216.34/b.zip")
+        failed |= not check(
+            "plain http redirect to another host followed for an insecure feed",
+            moved is not None and moved.full_url == "http://93.184.216.34/b.zip", moved and moved.full_url,
+        )
+        # dombovar.ptke.hu style: https://host/x -> http://host/x/ is asked
+        # as https://host/x/, which redirects to http://host/x/ again.
+        # Upgrading that once more would loop until urllib gives up.
+        slash = urllib.request.Request("https://gtfs.kti.hu/gtfs/")
+        moved = loose.redirect_request(slash, None, 301, "Moved", {}, "http://gtfs.kti.hu/gtfs/")
+        failed |= not check(
+            "an https address redirecting to itself over http is followed over http for an insecure feed",
+            moved is not None and moved.full_url == "http://gtfs.kti.hu/gtfs/", moved and moved.full_url,
+        )
+        try:
+            handler.redirect_request(slash, None, 301, "Moved", {}, "http://gtfs.kti.hu/gtfs/")
+            failed |= not check("an https address redirecting to itself over http is refused for an https feed", False)
+        except ValueError as err:
+            failed |= not check("an https address redirecting to itself over http is refused for an https feed",
+                                "https required" in str(err), str(err))
 
         # download_zip checks the scheme of the URL it was given and of the
         # one it ended up at, whatever its spelling.
@@ -499,10 +522,83 @@ def main() -> int:
                             gc._mdb_url("bahart") == "https://files.mobilitydatabase.org/mdb-2/latest.zip",
                             gc._mdb_url("bahart"))
         gc._http_json = lambda *_a, **_k: [
+            {"provider": "Bahart", "id": "mdb-1", "status": "deprecated",
+             "latest_dataset": {"hosted_url": "https://files.mobilitydatabase.org/mdb-1/latest.zip"}},
+            {"provider": "Bahart", "id": "mdb-4", "status": "active",
+             "latest_dataset": {"hosted_url": "https://files.mobilitydatabase.org/mdb-4/latest.zip"}},
+        ]
+        failed |= not check("catalog prefers an active feed over a deprecated one listed first",
+                            gc._mdb_url("bahart") == "https://files.mobilitydatabase.org/mdb-4/latest.zip",
+                            gc._mdb_url("bahart"))
+        gc._http_json = lambda *_a, **_k: [
             {"provider": "Bahart", "id": "mdb-1", "source_info": {"producer_url": "https://bahart.example/gtfs.zip"}}]
         failed |= not check("catalog falls back to the producer url", gc._mdb_url("bahart") == "https://bahart.example/gtfs.zip")
     finally:
         gc._http_json, gc._mdb_access = real_json, real_access
+
+    # .env: `export KEY=…`, comments after a value, quotes; a `#` inside a
+    # URL stays. The Home Assistant file wins over /config/.env.
+    env_keys = ("T_EXPORTED", "T_COMMENT", "T_QUOTED", "T_SINGLE", "T_HASH", "T_EMPTY", "T_SET")
+    saved_env = {k: os.environ.pop(k, None) for k in env_keys}
+    env_file = Path(tempfile.mkdtemp()) / ".env"
+    env_file.write_text(
+        "export T_EXPORTED=https://a.example/x.zip\n"
+        "T_COMMENT=https://b.example/y.zip?apikey=k  # keyed NAP URL\n"
+        'T_QUOTED="a b" # spaced\n'
+        "T_SINGLE='q # r'\n"
+        "T_HASH=https://c.example/z#frag\n"
+        "T_EMPTY= # nothing yet\n"
+        "T_SET=from-file\n",
+        encoding="utf-8",
+    )
+    os.environ["T_SET"] = "from-env"
+    try:
+        gc._parse_env_file(env_file)
+        got_env = {k: os.environ.get(k) for k in env_keys}
+        failed |= not check("an .env line parses export, comments and quotes", got_env == {
+            "T_EXPORTED": "https://a.example/x.zip", "T_COMMENT": "https://b.example/y.zip?apikey=k",
+            "T_QUOTED": "a b", "T_SINGLE": "q # r", "T_HASH": "https://c.example/z#frag", "T_EMPTY": "",
+            "T_SET": "from-env",
+        }, repr(got_env))
+    finally:
+        for k, v in saved_env.items():
+            os.environ.pop(k, None)
+            if v is not None:
+                os.environ[k] = v
+    saved_extra = os.environ.pop("HUNGARIAN_TRANSPORT_ENV", None)
+    try:
+        order = gc.env_candidates()
+        failed |= not check(
+            "/config/hungarian-transport/.env wins over the .env next to the scripts' folder",
+            order[0] == Path("/config/hungarian-transport/.env")
+            and order[1] == Path(gc.__file__).resolve().parent.parent / ".env", repr(order))
+        os.environ["HUNGARIAN_TRANSPORT_ENV"] = str(env_file)
+        failed |= not check("HUNGARIAN_TRANSPORT_ENV comes first", gc.env_candidates()[0] == env_file)
+    finally:
+        os.environ.pop("HUNGARIAN_TRANSPORT_ENV", None)
+        if saved_extra is not None:
+            os.environ["HUNGARIAN_TRANSPORT_ENV"] = saved_extra
+
+    # A shape point that is not a coordinate is dropped, the last one too:
+    # a trailing (0, 999) must not end the line, a NaN must not fail the feed.
+    shape_zip = gtfs_zip({"shapes.txt": "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\n"
+                          "s1,47.0,19.0,1\ns1,47.01,19.01,2\ns1,47.02,19.02,3\ns1,0,999,4\n"
+                          "s2,47.0,19.0,1\ns2,47.01,19.01,2\ns2,nan,19.03,3\n"
+                          "s3,47.0,19.0,1\ns3,47.01,inf,2\ns3,47.02,19.02,3\ns3,47.03,19.03,nan\n"})
+    try:
+        with zipfile.ZipFile(shape_zip) as z:
+            shape_lines = {k: decode_polyline(v) for k, v in gc.load_shapes(z).items()}
+        failed |= not check(
+            "non-finite and off-globe shape points are dropped, the last one included",
+            set(shape_lines) == {"s1", "s2", "s3"}
+            and shape_lines["s1"][-1] == (47.02, 19.02) and shape_lines["s2"][-1] == (47.01, 19.01)
+            and shape_lines["s3"] == [(47.0, 19.0), (47.02, 19.02)]
+            and all(-90 <= la <= 90 and -180 <= lo <= 180 for pts in shape_lines.values() for la, lo in pts),
+            repr(shape_lines))
+    except Exception as err:  # noqa: BLE001
+        failed |= not check("non-finite and off-globe shape points are dropped, the last one included", False, repr(err))
+    finally:
+        shape_zip.unlink(missing_ok=True)
 
     # The zip check reads the first bytes, not a whole 100 MB feed.
     small = gtfs_zip({"stops.txt": "stop_id,stop_name\n1,A\n"})

@@ -1,15 +1,16 @@
 """The FUTÁR proxy service keeps the BKK key in Home Assistant."""
 
 import asyncio
+import logging
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.setup import async_setup_component
 
+from custom_components.hungarian_transport import futar
 from custom_components.hungarian_transport.const import CONF_API_KEY, DOMAIN, SERVICE_FUTAR
 from custom_components.hungarian_transport.futar import BKK_API
 
@@ -74,22 +75,23 @@ async def test_only_card_endpoints_are_allowed(hass, aioclient_mock) -> None:
     assert aioclient_mock.call_count == 0
 
 
-async def test_rejected_key_raises_translated_error(hass, aioclient_mock) -> None:
+REJECTED = {"data": None, "error": "futar_auth", "detail": "HTTP 403"}
+
+
+async def test_rejected_key_is_an_error_in_the_response(hass, aioclient_mock) -> None:
+    """Not an exception: the websocket API would log one at ERROR on every
+    card poll. The key never appears in the response."""
     aioclient_mock.get(SEARCH, status=403)
     await _setup(hass)
 
-    with pytest.raises(HomeAssistantError) as err:
-        await _call(hass)
-
-    assert err.value.translation_key == "futar_auth"
-    assert "secret-key" not in str(err.value)
+    resp = await _call(hass)
+    assert resp == REJECTED
+    assert "secret-key" not in str(resp)
 
     # A rejected key starts one reauth flow, however many cards poll, and
     # is not sent upstream again while the reauth is pending.
     await hass.async_block_till_done()
-    with pytest.raises(HomeAssistantError) as err:
-        await _call(hass, params={"query": "Deli"})
-    assert err.value.translation_key == "futar_auth"
+    assert await _call(hass, params={"query": "Deli"}) == REJECTED
     assert aioclient_mock.call_count == 1
     await hass.async_block_till_done()
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
@@ -119,8 +121,7 @@ async def test_new_key_after_rejection_reaches_futar(hass, aioclient_mock) -> No
     reload with a new key asks FUTÁR again."""
     aioclient_mock.get(SEARCH, status=401)
     entry = await _setup(hass)
-    with pytest.raises(HomeAssistantError):
-        await _call(hass)
+    assert (await _call(hass))["error"] == "futar_auth"
 
     aioclient_mock.clear_requests()
     aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
@@ -140,3 +141,63 @@ async def test_options_key_only(hass, aioclient_mock) -> None:
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
     assert not hass.services.has_service(DOMAIN, SERVICE_FUTAR)
+
+
+async def test_rejection_is_asked_again_after_a_while(hass, aioclient_mock, monkeypatch) -> None:
+    """A 401 FUTÁR gave by mistake must not switch FUTÁR off until a restart:
+    after REJECTED_RETRY one call asks again."""
+    clock = [1000.0]
+    monkeypatch.setattr(futar, "_monotonic", lambda: clock[0])
+    aioclient_mock.get(SEARCH, status=401)
+    await _setup(hass)
+    assert (await _call(hass))["error"] == "futar_auth"
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    clock[0] += futar.REJECTED_RETRY - 1
+    assert (await _call(hass, params={"query": "Deli"}))["error"] == "futar_auth"
+    assert aioclient_mock.call_count == 0
+
+    clock[0] += 2
+    assert (await _call(hass, params={"query": "Deli"}))["data"]["status"] == "OK"
+    assert aioclient_mock.call_count == 1
+    # Accepted again: no more fail-fast.
+    assert (await _call(hass, params={"query": "Nyugati"}))["data"]["status"] == "OK"
+
+
+async def test_same_key_saved_in_options_asks_futar_again(hass, aioclient_mock) -> None:
+    """The futar_auth advice: saving the key in the options (the same one,
+    once FUTÁR takes it again) reloads the entry and its proxy."""
+    aioclient_mock.get(SEARCH, status=401)
+    entry = await _setup(hass)
+    assert (await _call(hass))["error"] == "futar_auth"
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_API_KEY: "secret-key"}
+    )
+    await hass.async_block_till_done()
+    assert (await _call(hass))["data"]["status"] == "OK"
+
+
+async def test_outage_is_logged_once_not_per_poll(hass, aioclient_mock, caplog) -> None:
+    aioclient_mock.get(SEARCH, status=503)
+    await _setup(hass)
+
+    for query in ("A", "B", "C"):
+        resp = await _call(hass, params={"query": query})
+        assert resp == {"data": None, "error": "futar_unavailable", "detail": "HTTP 503"}
+    records = [r for r in caplog.records if r.name.endswith(".futar")]
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    caplog.clear()
+    await _call(hass, params={"query": "D"})
+    await _call(hass, params={"query": "E"})
+    assert [r.getMessage() for r in caplog.records if r.name.endswith(".futar")] == [
+        "BKK FUTÁR answers again"
+    ]

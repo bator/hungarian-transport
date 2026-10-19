@@ -14,11 +14,15 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import (
+    MockConfigEntry,
+    async_get_persistent_notifications,
+)
 
 from homeassistant.components.http import KEY_HASS_USER
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError, Unauthorized
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.http import KEY_HASS
 from homeassistant.setup import async_setup_component
 
@@ -31,6 +35,12 @@ KEL = (47.46432, 19.02063)
 SZOMBATHELY = (47.23510, 16.63160)
 
 
+@pytest.fixture(autouse=True)
+def small_feeds(monkeypatch):
+    """The test feed has two trains; real ones have hundreds."""
+    monkeypatch.setattr(mav, "MIN_TRAINS", 1)
+
+
 def _rails(a, b, n=30):
     """A bending line between two stations, like a pfaedle shape."""
     out = []
@@ -41,7 +51,7 @@ def _rails(a, b, n=30):
     return out
 
 
-def _feed_zip(version: str = "test-feed") -> bytes:
+def _feed_zip(version: str = "test-feed", route_type: str = "2") -> bytes:
     """Train 905 runs Szombathely - Kelenföld on one day and Székesfehérvár -
     Kelenföld on another (two stop patterns); a third trip has a shape that
     misses its middle station and must fall back to the station line."""
@@ -50,7 +60,10 @@ def _feed_zip(version: str = "test-feed") -> bytes:
     files = {
         "agency.txt": "agency_id,agency_name\nMAV,MÁV\n",
         "feed_info.txt": f"feed_publisher_name,feed_version\nMÁV,{version}\n",
-        "routes.txt": "route_id,route_short_name,route_long_name,route_type\nR905,,IC 905 BAKONY,2\nR858,,IC 858,2\n",
+        "routes.txt": (
+            "route_id,route_short_name,route_long_name,route_type\n"
+            f"R905,,IC 905 BAKONY,{route_type}\nR858,,IC 858,{route_type}\n"
+        ),
         "trips.txt": "route_id,service_id,trip_id,shape_id\nR905,S1,T1,long\nR905,S2,T2,short\nR858,S1,T3,chord\n",
         "stops.txt": (
             "stop_id,stop_name,stop_lat,stop_lon\n"
@@ -134,16 +147,25 @@ def test_build_runner_is_a_standalone_process(tmp_path: Path) -> None:
     feed = tmp_path / "mav.zip"
     feed.write_bytes(_feed_zip())
     out = tmp_path / "mav-index.json.gz"
-    cmd = [sys.executable, "-I", str(mav.BUILD_RUNNER), str(feed), str(out)]
+    cmd = [sys.executable, "-I", str(mav.BUILD_RUNNER), str(feed), str(out), "--min-trains", "1"]
     done = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
     stats = json.loads(done.stdout)
-    assert stats["trains"] == 2 and stats["audit"]["ok_ratio"] == 1.0
+    assert stats["trains"] == 2 and stats["audit"]["ok_ratio"] == 1.0 and stats["written"]
     assert "_loaded" not in json.loads(gzip.decompress(out.read_bytes()))
+
+    # The default guard wants a real feed's trains: nothing written, and
+    # the stats say why.
+    out.unlink()
+    done = subprocess.run(cmd[:-2], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr
+    stats = json.loads(done.stdout)
+    assert stats["written"] is False and "only 2 trains" in stats["rejected"]
+    assert not out.exists()
 
     bad = tmp_path / "bad.zip"
     bad.write_bytes(b"not a zip")
-    done = subprocess.run(cmd[:-2] + [str(bad), str(out)], capture_output=True, text=True, timeout=60)
+    done = subprocess.run(cmd[:3] + [str(bad), str(out)], capture_output=True, text=True, timeout=60)
     assert done.returncode == 1
     assert "not a GTFS zip" in done.stderr
 
@@ -286,11 +308,20 @@ def test_staleness_follows_the_feed_not_the_clock(tmp_path: Path) -> None:
     assert mav._needs_build(src, out, state)
 
     # An index this integration did not build (a release shipped it, the
-    # update script restored it) is kept unless the feed is newer.
+    # update script restored it) is kept when it came from the same feed
+    # version, whatever its mtime (HACS unpacks it after the feed arrived).
     state.unlink()
+    mav_index.write({"v": mav_index.SCHEMA, "feed": "next-feed", "st": []}, out)
+    os.utime(src, ns=(out.stat().st_mtime_ns + 10**9,) * 2)
     assert not mav._needs_build(src, out, state)
-    after = out.stat().st_mtime_ns + 10**9
-    os.utime(src, ns=(after, after))
+    mav_index.write({"v": mav_index.SCHEMA, "feed": "older-feed", "st": []}, out)
+    os.utime(src, ns=(out.stat().st_mtime_ns - 10**9,) * 2)
+    assert mav._needs_build(src, out, state)
+    # The state's feed_version names this feed's version without opening the zip.
+    mav._write_state(state, {"source": mav._fingerprint(src), "index": [0, 0], "feed_version": "older-feed"})
+    assert not mav._needs_build(src, out, state)
+    # Not an index at all, or one without a feed version: built again.
+    out.write_bytes(b"index")
     assert mav._needs_build(src, out, state)
 
 
@@ -329,7 +360,8 @@ async def test_upload_build_outlives_a_client_that_gives_up(
     the new feed replaced the old one; the build must still finish."""
     await _setup(hass)
     started, release, _calls = _gate_builds(monkeypatch)
-    handler = asyncio.ensure_future(mav.MavGtfsUploadView(card_assets).post(_Upload(hass, _feed_zip())))
+    view = mav.MavGtfsUploadView(card_assets, lambda _hass: True)
+    handler = asyncio.ensure_future(view.post(_Upload(hass, _feed_zip())))
     await started.wait()
     handler.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -392,8 +424,10 @@ async def test_build_timeout_kills_the_process_and_its_temp_file(
     assert "timed out after 1.5s" in str(err.value)
     assert procs[0].returncode == -signal.SIGKILL
     assert sorted(p.name for p in card_assets.glob("mav-index*")) == ["mav-index.json.gz.tmp"]
-    # The next start tries again.
-    assert mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
+    # Thirty minutes of CPU at every start would not help: the next start
+    # leaves this feed alone, and Repairs says so.
+    assert not mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is not None
 
 
 async def test_kill_tolerates_a_process_that_already_exited(
@@ -453,7 +487,7 @@ def test_failed_audit_keeps_the_previous_index(tmp_path: Path, monkeypatch) -> N
 
     monkeypatch.setattr(mav_index, "audit", broken_audit)
     with pytest.raises(RuntimeError, match="audit broke"):
-        mav_index.build_and_audit(feed, out)
+        mav_index.build_and_audit(feed, out, min_trains=1)
     assert out.read_bytes() == b"previous index"
     assert sorted(p.name for p in work.iterdir()) == ["mav-index.json.gz", "mav.zip"]
 
@@ -468,3 +502,213 @@ def test_runner_prints_ascii_stats(tmp_path: Path, monkeypatch, capsys) -> None:
     printed = capsys.readouterr().out
     assert printed.isascii()
     assert json.loads(printed)["feed_version"] == "MÁV 2026 ősz"
+
+
+def _index_bytes(card_assets: Path) -> bytes:
+    return (card_assets / mav.INDEX_NAME).read_bytes()
+
+
+async def test_bus_only_upload_keeps_the_good_feed_and_index(
+    hass: HomeAssistant, hass_client, card_assets, mav_source
+) -> None:
+    """A wrong feed that is still GTFS (buses only) passes check_feed; its
+    empty index must not replace the good one, nor the feed the good one."""
+    await _setup(hass)
+    client = await hass_client()
+    assert (await client.post(mav.UPLOAD_URL, data=_feed_zip())).status == 200
+    good_index, good_feed = _index_bytes(card_assets), mav_source.read_bytes()
+
+    resp = await client.post(mav.UPLOAD_URL, data=_feed_zip("bus-feed", route_type="3"))
+    assert resp.status == 422, await resp.text()
+    body = await resp.json()
+    assert body["written"] is False and "only 0 trains" in body["rejected"]
+    assert _index_bytes(card_assets) == good_index
+    assert mav_source.read_bytes() == good_feed
+    assert not list(mav_source.parent.glob("*.upload"))
+    notification = async_get_persistent_notifications(hass)[mav.NOTIFICATION_ID]
+    assert "bus-feed was not written: only 0 trains" in notification["message"]
+    # The feed on disk is still the one the index was built from.
+    assert not mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
+    # An upload that failed is the uploader's to fix: no Repairs issue.
+    assert ir.async_get(hass).async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+
+async def test_index_failing_its_audit_is_not_written(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch
+) -> None:
+    await _setup(hass)
+    _write_feed(mav_source)
+    await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    good_index = _index_bytes(card_assets)
+
+    _write_feed(mav_source, "strict-feed")
+    monkeypatch.setattr(mav, "MIN_OK", 1.01)
+    with pytest.raises(HomeAssistantError) as err:
+        await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert err.value.translation_key == "mav_build_failed"
+    assert "2 of 2 trains pass the audit" in str(err.value)
+    assert _index_bytes(card_assets) == good_index
+    message = async_get_persistent_notifications(hass)[mav.NOTIFICATION_ID]["message"]
+    assert "strict-feed was not written" in message and "previous index stays" in message
+
+
+async def test_failed_feed_is_not_built_again_at_every_start(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch
+) -> None:
+    mav_source.parent.mkdir(parents=True, exist_ok=True)
+    mav_source.write_bytes(b"PK not really a feed")
+    spawned: list[tuple] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def spying_exec(*args, **kwargs):
+        spawned.append(args)
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(mav.asyncio, "create_subprocess_exec", spying_exec)
+    await _setup(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert len(spawned) == 1
+    state = mav._read_state(mav.state_path(hass))
+    assert state["failed"] == mav._fingerprint(mav_source) and "exited 1" in state["error"]
+    issues = ir.async_get(hass)
+    issue = issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED)
+    assert issue is not None and issue.translation_placeholders["path"] == str(mav_source)
+
+    # The next start: no build, and the Repairs issue (gone with the
+    # restart) is back.
+    ir.async_delete_issue(hass, DOMAIN, mav.ISSUE_BUILD_FAILED)
+    await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 1
+    assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is not None
+
+    # The rebuild service still tries; a new feed builds and clears it all.
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert len(spawned) == 2
+    _write_feed(mav_source)
+    await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 3
+    assert (card_assets / mav.INDEX_NAME).is_file()
+    assert "failed" not in mav._read_state(mav.state_path(hass))
+    assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+
+async def test_forced_request_upgrades_a_queued_build(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch
+) -> None:
+    """A rebuild asked for while a plain build waits makes that build a
+    forced one, instead of queueing a second full build behind it."""
+    await _setup(hass)
+    _write_feed(mav_source)
+    started, release, calls = _gate_builds(monkeypatch)
+    first = asyncio.ensure_future(mav.async_build(hass, card_assets, force=True))
+    await started.wait()
+    plain = asyncio.ensure_future(mav.async_build(hass, card_assets))
+    forced = asyncio.ensure_future(mav.async_build(hass, card_assets, force=True))
+    await asyncio.sleep(0)
+    release.set()
+    results = await asyncio.gather(first, plain, forced)
+    # The first build made the index current: a plain build alone would
+    # have returned None without building.
+    assert len(calls) == 2
+    assert results[1] is results[2] and results[1]["trains"] == 2
+
+
+async def test_stopping_cancels_a_running_build(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch, tmp_path
+) -> None:
+    """Home Assistant cancels background tasks when it stops: the process
+    dies with its temp file, and the next start builds again (a stop is
+    not a failed feed)."""
+    runner = tmp_path / "slow_runner.py"
+    runner.write_text(SLOW_RUNNER, encoding="utf-8")
+    monkeypatch.setattr(mav, "BUILD_RUNNER", runner)
+    procs = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def spying_exec(*args, **kwargs):
+        procs.append(await real_exec(*args, **kwargs))
+        return procs[-1]
+
+    monkeypatch.setattr(mav.asyncio, "create_subprocess_exec", spying_exec)
+    await _setup(hass)
+    _write_feed(mav_source)
+    task = mav._build_task(hass, card_assets, True)
+    temp = card_assets / (mav.INDEX_NAME + ".k1ll_me0")
+    for _ in range(200):
+        if temp.exists():
+            break
+        await asyncio.sleep(0.05)
+    assert temp.exists()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert procs[0].returncode == -signal.SIGKILL
+    assert not temp.exists()
+    state = mav._read_state(mav.state_path(hass))
+    assert state["building"] and "failed" not in state
+    assert mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+
+async def test_stopping_cancels_a_queued_build(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch
+) -> None:
+    """A queued build cancelled before it started is not handed to the next
+    request, which gets a build of its own."""
+    await _setup(hass)
+    _write_feed(mav_source)
+    started, release, calls = _gate_builds(monkeypatch)
+    first = asyncio.ensure_future(mav.async_build(hass, card_assets, force=True))
+    await started.wait()
+    queued = mav._build_task(hass, card_assets, True)
+    assert hass.data[DOMAIN]["mav_queued"].task is queued
+
+    queued.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued
+    assert "mav_queued" not in hass.data[DOMAIN]
+    later = asyncio.ensure_future(mav.async_build(hass, card_assets, force=True))
+    await asyncio.sleep(0)
+    release.set()
+    first_stats, later_stats = await asyncio.gather(first, later)
+    assert len(calls) == 2 and later_stats["trains"] == 2
+
+
+FAILING_RUNNER = """import pathlib, sys
+out = pathlib.Path(sys.argv[2])
+(out.parent / (out.name + ".f4iled00")).write_bytes(b"half an index")
+sys.exit("MemoryError")
+"""
+
+
+async def test_temp_indexes_go_before_a_build_and_after_a_failed_one(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch, tmp_path
+) -> None:
+    """www/ is served: a killed Home Assistant's temp index goes before the
+    next build, and a build process that dies leaves none behind."""
+    (card_assets / (mav.INDEX_NAME + ".0ld_k1ll")).write_bytes(b"from a killed build")
+    await _setup(hass)
+    _write_feed(mav_source)
+    await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert sorted(p.name for p in card_assets.glob("mav-index*")) == [mav.INDEX_NAME]
+
+    runner = tmp_path / "failing_runner.py"
+    runner.write_text(FAILING_RUNNER, encoding="utf-8")
+    monkeypatch.setattr(mav, "BUILD_RUNNER", runner)
+    with pytest.raises(HomeAssistantError) as err:
+        await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert "exited 1: MemoryError" in str(err.value)
+    assert sorted(p.name for p in card_assets.glob("mav-index*")) == [mav.INDEX_NAME]
+
+
+async def test_setup_removes_uploads_left_behind(hass: HomeAssistant, mav_source) -> None:
+    mav_source.parent.mkdir(parents=True, exist_ok=True)
+    stale = mav_source.with_name(f"{mav_source.name}.{'ab' * 16}.upload")
+    stale.write_bytes(b"half an upload")
+    other = mav_source.with_name("notes.upload")
+    other.write_bytes(b"not ours")
+    await _setup(hass)
+    assert not stale.exists()
+    assert other.exists()

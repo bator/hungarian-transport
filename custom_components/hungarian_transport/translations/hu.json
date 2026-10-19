@@ -89,6 +89,9 @@
     },
     "elvira_unavailable": {
       "message": "A MÁV ELVIRA nem érhető el ({error})."
+    },
+    "not_loaded": {
+      "message": "A Magyar közlekedés integráció le van tiltva vagy nincs betöltve. Előbb engedélyezd az integráció bejegyzését."
     }
   },
   "options": {
@@ -110,6 +113,10 @@
     "missing_assets": {
       "title": "Hiányoznak a kártya fájljai",
       "description": "A Magyar közlekedés integráció nem találta a kártya fájljait itt: `{path}`. A forráskódban nincsenek benne; telepítsd a kiadás zipjét (HACS vagy a GitHub-kiadás hungarian-transport.zip fájlja), majd indítsd újra a Home Assistantot."
+    },
+    "mav_build_failed": {
+      "title": "Nem készült el a MÁV útvonalindex",
+      "description": "A MÁV útvonalindex nem készült el ebből: `{path}`: {error}\n\nA Home Assistant indításkor nem próbálja újra ezt a feedet. Tegyél oda újat (vagy töltsd fel), vagy hívd meg a `hungarian_transport.rebuild_mav_index` műveletet az újrapróbáláshoz."
     }
   }
 }

@@ -16,13 +16,23 @@ function bundleUrl(attempt) {
   return url.href;
 }
 
+/* Only a download or import that broke off is worth another try. Browsers
+   report it as a TypeError about the module (Node as ERR_MODULE_NOT_FOUND).
+   A bundle that loaded and then threw while running would only throw again,
+   and every retry would run its top level once more. */
+function isLoadFailure(err) {
+  if (!err) return false;
+  if (err.code === 'ERR_MODULE_NOT_FOUND') return true;
+  return err.name === 'TypeError' && /module|import|fetch/i.test(String(err.message || ''));
+}
+
 async function load() {
   for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt += 1) {
     try {
       await import(bundleUrl(attempt));
       return;
     } catch (err) {
-      if (attempt === RETRY_DELAYS_MS.length) {
+      if (attempt === RETRY_DELAYS_MS.length || !isLoadFailure(err)) {
         console.error('Hungarian transport: could not load the cards', err);
         return;
       }

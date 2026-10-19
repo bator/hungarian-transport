@@ -9,6 +9,7 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import TextSelector, TextSelectorConfig, TextSelectorType
 
 from .const import CONF_API_KEY, DOMAIN
 from .futar import FutarAuthError, FutarError, futar_get
@@ -29,8 +30,21 @@ async def _validate_key(hass: HomeAssistant, api_key: str) -> str | None:
     return None
 
 
-def _key_schema(default: str = "") -> vol.Schema:
-    return vol.Schema({vol.Optional(CONF_API_KEY, default=default): str})
+def _key_schema(current: str = "") -> vol.Schema:
+    """The key field, masked like a password.
+
+    The frontend leaves a cleared optional field out of the submitted data,
+    and a default would then put the old key back: the current key is only a
+    suggested value, so clearing the field removes the key.
+    """
+    description = {"suggested_value": current} if current else None
+    return vol.Schema(
+        {
+            vol.Optional(CONF_API_KEY, description=description): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.PASSWORD)
+            )
+        }
+    )
 
 
 class HungarianTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -122,6 +136,11 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
             if api_key and (error := await _validate_key(self.hass, api_key)):
                 errors["base"] = error
             else:
+                if entry is not None and api_key == current:
+                    # Saving the same key changes no option, so the update
+                    # listener does not reload the entry: reload it here, or
+                    # a proxy that saw the key rejected would keep failing.
+                    self.hass.config_entries.async_schedule_reload(entry.entry_id)
                 return self.async_create_entry(data={CONF_API_KEY: api_key})
         return self.async_show_form(
             step_id="init",

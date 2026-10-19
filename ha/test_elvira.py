@@ -264,6 +264,46 @@ if not check(
 ):
     failed += 1
 
+# 2026-10-25 03:00 CEST becomes 02:00 CET. A night train leaving 01:50 CEST
+# and arriving 03:20 CET travels 150 minutes, not the 90 the wall clocks show.
+dst_night = datetime(2026, 10, 25, 1, 40, tzinfo=tz)
+dst_train = dict(
+    gocsej,
+    trainId="dst-night",
+    code="40400",
+    start="2026-10-25T01:50:00",
+    actualOrEstimatedStart="2026-10-25T01:55:00+02:00",
+)
+dst_arr = [{"trainId": "dst-night", "code": "40400", "arrive": "2026-10-25T03:20:00"}]
+dst_rows = rows_from_stationinfo(
+    [dst_train], dst_arr, tz, dst_night, dst_night + timedelta(minutes=180), "Szeged"
+)
+if not check(
+    "travel time and delay across the autumn clock change are real minutes",
+    len(dst_rows) == 1
+    and dst_rows[0]["travel"] == 145
+    and dst_rows[0]["delay"] == 5 * 60
+    and dst_rows[0]["dep"] == int(datetime(2026, 10, 24, 23, 55, tzinfo=zoneinfo.ZoneInfo("UTC")).timestamp()),
+    repr(dst_rows),
+):
+    failed += 1
+# 02:30 CET is after 02:40 CEST, although its wall clock is earlier: a train
+# that left at 02:40 CEST (00:40 UTC) is gone by 02:30 CET (01:30 UTC).
+after_change = datetime(2026, 10, 25, 2, 30, fold=1, tzinfo=tz)
+left = dict(gocsej, trainId="left", code="40402", start="2026-10-25T02:40:00+02:00")
+left["actualOrEstimatedStart"] = left["start"]
+due = dict(gocsej, trainId="due", code="40404", start="2026-10-25T02:40:00+01:00")
+due["actualOrEstimatedStart"] = due["start"]
+gone_rows = rows_from_stationinfo(
+    [left, due], [], tz, after_change, after_change + timedelta(minutes=60), ""
+)
+if not check(
+    "departure before now in the repeated hour is dropped, the one after kept",
+    [r["trainNumber"] for r in gone_rows] == ["40404"],
+    repr(gone_rows),
+):
+    failed += 1
+
 if failed:
     sys.exit(1)
 print("elvira origin overlay tests passed")

@@ -304,9 +304,14 @@ To rebuild them yourself on Home Assistant OS:
    not OSM rails.
 2. Copy `packages/hungarian_transport.yaml` into a Home Assistant package
    directory (`packages: !include_dir_named packages`).
-3. Restart Home Assistant. The automation runs at 04:30 Europe/Budapest and
-   five minutes after a core start. It HEADs the KTI zip and the municipal
-   feeds, rebuilds only when the fingerprint changed, and writes
+3. Restart Home Assistant. The automation runs at 04:30 in Home Assistant's
+   own time zone (Settings → System → General) and five minutes after a core
+   start. It HEADs the KTI zip and the municipal feeds (over https; plain http
+   only for the city feeds marked insecure) and rebuilds only when the
+   fingerprint changed. A server that gives no usable fingerprint is
+   downloaded, and a zip byte for byte the same as the one the index was
+   built from is no change either. A new Volán zip replaces the kept
+   `volanbusz_gtfs.zip` only once its index built. The run writes
    `volan-index.json.gz` / `city-index.json.gz` atomically into
    `/config/custom_components/hungarian_transport/www/`, where the integration
    serves the card from (the old `/config/www/community/hungarian-transport/`
@@ -320,16 +325,23 @@ To rebuild them yourself on Home Assistant OS:
    pfaedle directory also rebuilds `mav-index.json.gz`; with `MAV_GTFS_URL`
    set, each daily run downloads the zip again once it is 20 hours old. A MÁV
    index that fails its audit is not written. Volán, city and MÁV fail
-   independently: each failure notifies and keeps that index as it was, and
-   the rest of the run goes on. A city feed that failed is downloaded and
-   rebuilt again on the next run; one left out because its calendar ended is
-   not, until the publisher posts a new zip. The shapes folders travel with
-   their indexes. Simplifying the Volán `shapes.txt` (8 million points) takes
-   about a minute on a desktop and longer on a Raspberry Pi; `run_update.sh`
-   allows 30 minutes.
+   independently: each failed rebuild notifies and keeps that index as it
+   was, and the rest of the run goes on. A city feed that failed is
+   downloaded and rebuilt again on the next run; one left out because its
+   calendar ended is not, until the publisher posts a new zip. A feed that
+   fails to download keeps its last zip; once it has failed three days in a
+   row the webhook says so, then weekly while it keeps failing (the same for
+   `MAV_GTFS_URL`). The shapes folders travel with their indexes.
+   Simplifying the Volán `shapes.txt` (8 million points) takes about a
+   minute on a desktop and longer on a Raspberry Pi; `run_update.sh` allows
+   30 minutes.
 
-Set `HUNGARIAN_TRANSPORT_WWW` if you installed the card somewhere else, for
-example `/config/www/hungarian-transport` for the manual `/local` install.
+Set `HUNGARIAN_TRANSPORT_WWW` in `/config/hungarian-transport/.env` if you
+installed the card somewhere else, for example
+`/config/www/hungarian-transport` for the manual `/local` install.
+`HUNGARIAN_TRANSPORT_WEBHOOK` there sends the update's messages, those of
+`run_update.sh` included, to another webhook URL. That file wins over a
+`/config/.env`; `export KEY=value` and `# comments` after a value are fine.
 Point `notify.admins` at whatever notifier you use, or drop that automation.
 
 ### When an update fails
@@ -340,6 +352,12 @@ itself. `/config/hungarian-transport/update.log` has the details.
 
 - *… frissítés sikertelen: …* — a feed did not download, did not parse or
   failed a guard. That index stays as it was and the next run tries again.
+  A city feed or `MAV_GTFS_URL` that does not download is only reported once
+  it has failed three days in a row (`download failing: <id> since …`, then
+  weekly): its URL has probably moved. The last zip stays in the index
+  until its calendar ends.
+- *Új menetrend: … (skipped: …)* — the index was rebuilt without these
+  feeds: they failed to download or parse, and are tried again next run.
 - *… el sem indult* or *… összeomlott (exit N)* — the script could not start
   or crashed. Usually `/config/hungarian-transport/` holds a half-copied set
   of scripts: copy all of `scripts/` again.
@@ -348,7 +366,11 @@ itself. `/config/hungarian-transport/update.log` has the details.
 
 The city index (locally and in a release run) is not replaced when the
 rebuild would lose a feed that the index in place still runs, or more than
-half of a feed's trips. The message names the feed:
+half of a feed's trips. Each feed is judged on its own, by the trips that
+still run; there is no check on the index's total, so feeds whose calendars
+end together (several on 31 December) leave without holding back the rest.
+The Volán index is a single feed: it is refused with fewer than half the
+trips of the one in place. The message names the feed:
 
 - `<id> missing (had N trips)` — the feed did not download or parse.
 - `<id> calendar ended YYYY-MM-DD (had N trips, the previous index runs until

@@ -1,4 +1,4 @@
-import { DEFAULT_FAVORITES, DEFAULT_MINUTES_AFTER, MAX_MINUTES_AFTER, MINUTES_AFTER_PRESETS, MIN_MINUTES_AFTER, clampMinutesAfter, normalizeCardConfig, setCityIndexUrl, setMavIndexUrl, setVolanIndexUrl } from './config.js';
+import { DEFAULT_FAVORITES, DEFAULT_MINUTES_AFTER, MAX_MINUTES_AFTER, MINUTES_AFTER_PRESETS, MIN_MINUTES_AFTER, applyIndexOverrides, clampMinutesAfter, normalizeCardConfig } from './config.js';
 import { codedError, errText, modeCopy, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 
@@ -25,6 +25,7 @@ export class BKKHopCardEditor extends HTMLElement {
     this._searchSeq = 0;
     this._destSeq = 0;
     this._citySeq = 0;
+    this._autoTitle = '';
   }
 
   disconnectedCallback() {
@@ -44,9 +45,7 @@ export class BKKHopCardEditor extends HTMLElement {
     if (!this._cache) this._cache = {};
     if (!this._dests) this._dests = [];
     if (!this._destRoutes) this._destRoutes = {};
-    if (this._config.volanIndex) setVolanIndexUrl(this._config.volanIndex);
-    if (this._config.cityIndex) setCityIndexUrl(this._config.cityIndex);
-    if (this._config.mavIndex) setMavIndexUrl(this._config.mavIndex);
+    applyIndexOverrides(this._config);
     if (!this._built) this._build();
     this._syncLang();
     this._syncTexts();
@@ -78,7 +77,7 @@ export class BKKHopCardEditor extends HTMLElement {
     /* With the key in the integration, do not copy a sibling card's key into
        this card's config: keeping it out of dashboards is the point. */
     const viaIntegration = BkkLib.integrationHasKey(hass);
-    if (!this._userEditedKey && !this._config.apiKey && !this._loadingKey && !viaIntegration) this._fillKey();
+    if (!this._userEditedKey && !this._config.apiKey && !this._loadingKey && !viaIntegration && !this._keyless()) this._fillKey();
     else if (this._hasFutar()) this._probeKey();
   }
 
@@ -100,6 +99,13 @@ export class BKKHopCardEditor extends HTMLElement {
   _lang() { return resolveLang(this._config.language, this._hass); }
 
   _mode() { return BkkLib.mode(this._config); }
+
+  /* Volán and city boards come from the GTFS indexes: no FUTÁR key, and
+     none copied in from a sibling card (the card itself never asks). */
+  _keyless() {
+    const mode = this._mode();
+    return mode === 'volan' || mode === 'helyi';
+  }
 
   _build() {
     this._built = true;
@@ -152,7 +158,7 @@ export class BKKHopCardEditor extends HTMLElement {
       </style>
       <div class="card-config">
         <div class="f">
-          <label id="lblLang"></label>
+          <label id="lblLang" for="lang"></label>
           <select id="lang">
             <option value="auto"></option>
             <option value="hu"></option>
@@ -160,7 +166,7 @@ export class BKKHopCardEditor extends HTMLElement {
           </select>
         </div>
         <div class="f" id="apiKeyWrap">
-          <label id="lblApiKey"></label>
+          <label id="lblApiKey" for="apiKey"></label>
           <div class="keyrow">
             <input id="apiKey" type="password" autocomplete="off" spellcheck="false">
             <button type="button" class="reveal" id="apiKeyShow" aria-pressed="false"></button>
@@ -175,7 +181,7 @@ export class BKKHopCardEditor extends HTMLElement {
           </div>
         </div>
         <div class="f">
-          <label id="lblName"></label>
+          <label id="lblName" for="name"></label>
           <input id="name" type="text" placeholder="Hungarian transport">
         </div>
         <div class="f">
@@ -187,24 +193,24 @@ export class BKKHopCardEditor extends HTMLElement {
           <div class="hint" id="modeHint"></div>
         </div>
         <div class="f" id="cityWrap" style="display:none">
-          <label id="lblCity"></label>
+          <label id="lblCity" for="city"></label>
           <select id="city"></select>
         </div>
         <div class="f">
-          <label id="lblStop"></label>
+          <label id="lblStop" for="q"></label>
           <input id="q" type="search">
           <div class="chips" id="fav"></div>
           <div class="picked" id="stopPicked"></div>
           <div class="list" id="hits"></div>
         </div>
         <div class="f">
-          <label id="lblDest"></label>
+          <label id="lblDest" for="dq"></label>
           <input id="dq" type="search">
           <div class="picked" id="destPicked"></div>
           <div class="list" id="destHits"></div>
         </div>
         <div class="f">
-          <label id="lblMinutesAfter"></label>
+          <label id="lblMinutesAfter" for="minutesAfter"></label>
           <select id="minutesAfter"></select>
           <div class="chips" id="minutesAfterChips"></div>
           <div class="hint" id="hintMinutesAfter"></div>
@@ -451,6 +457,7 @@ export class BKKHopCardEditor extends HTMLElement {
     this._syncKeyReveal();
     const name = this._el('name');
     if (name) name.placeholder = t(lang, 'namePlaceholder');
+    this._syncErr();
   }
 
   _syncMode() {
@@ -543,12 +550,14 @@ export class BKKHopCardEditor extends HTMLElement {
       if (seq !== this._citySeq) return;
       const ops = (idx.ops || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'hu'));
       const cur = this._config.city || '';
-      const signature = ops.map((o) => o.id).join('|');
+      const lang = this._lang();
+      /* The placeholder option is worded too: a language switch redraws. */
+      const signature = lang + ':' + ops.map((o) => o.id).join('|');
       if (sel.dataset.ops === signature && sel.options.length > 1) {
         if (cur && sel.value !== cur) sel.value = cur;
         return;
       }
-      const ph = t(this._lang(), 'cityPlaceholder');
+      const ph = t(lang, 'cityPlaceholder');
       sel.innerHTML = `<option value="">${BkkLib.esc(ph)}</option>` + ops.map((o) => (
         `<option value="${BkkLib.esc(o.id)}">${BkkLib.esc(o.name)}</option>`
       )).join('');
@@ -556,13 +565,20 @@ export class BKKHopCardEditor extends HTMLElement {
       if (cur) sel.value = cur;
     } catch (err) {
       if (seq !== this._citySeq) return;
-      this._error(errText(this._lang(), err));
+      this._error(err);
     }
   }
 
-  _error(msg) {
+  /* An error is kept as thrown and worded in the editor's language, now
+     and after a language switch. */
+  _error(err) {
+    this._lastErr = err || '';
+    this._syncErr();
+  }
+
+  _syncErr() {
     const el = this._el('err');
-    if (el) el.textContent = msg || '';
+    if (el) el.textContent = this._lastErr ? errText(this._lang(), this._lastErr) : '';
   }
 
   /* undefined in a patch removes the key, so a new pick leaves nothing of
@@ -579,6 +595,7 @@ export class BKKHopCardEditor extends HTMLElement {
   }
 
   async _fillKey() {
+    if (this._keyless()) return;
     this._loadingKey = true;
     try {
       const key = await BkkLib.apiKeyFromDashboard(this._hass);
@@ -615,7 +632,7 @@ export class BKKHopCardEditor extends HTMLElement {
       if (this._keyAccess() !== access) return;
       this._keyOk = !!result.ok;
       this._syncApiKey();
-      if (!result.ok && result.code) this._error(errText(this._lang(), codedError(result.code)));
+      if (!result.ok && result.code) this._error(codedError(result.code));
       else if (result.ok) this._error('');
     } finally {
       this._probingKey = false;
@@ -642,6 +659,7 @@ export class BKKHopCardEditor extends HTMLElement {
       if (!this._hasFutar() && !this._userEditedKey) await this._fillKey();
       if (seq !== this._searchSeq) return;
       const mode = this._mode();
+      applyIndexOverrides(this._config);
       const hits = await BkkLib.searchStops(this._apiKey(), q, mode, this._config.city);
       if (seq !== this._searchSeq) return;
       if (!hits.length) {
@@ -660,7 +678,7 @@ export class BKKHopCardEditor extends HTMLElement {
       });
     } catch (err) {
       if (seq !== this._searchSeq) return;
-      this._error(errText(this._lang(), err));
+      this._error(err);
     }
   }
 
@@ -738,6 +756,7 @@ export class BKKHopCardEditor extends HTMLElement {
     if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
     try {
       this._error('');
+      applyIndexOverrides(this._config);
       const idx = await BkkLib.reachableDests(
         this._apiKey(),
         this._cache,
@@ -749,18 +768,20 @@ export class BKKHopCardEditor extends HTMLElement {
       this._loadedStop = stopId;
       this._dests = idx.dests || [];
       this._destRoutes = idx.destRoutes || {};
-      if (this._config.destKey && this._destRoutes[this._config.destKey]) {
-        const ids = this._destRoutes[this._config.destKey].slice();
-        const cur = this._config.routeIds || [];
-        const same = ids.length === cur.length && ids.every((id) => cur.indexOf(id) >= 0);
-        if (!same) this._emit({ routeIds: ids });
+      /* Reachable routes are what runs in the next few hours: at night the
+         night bus stands in for the day lines. Opening the editor must not
+         rewrite (and dirty) a configured card with them, so only a card
+         without routes is filled; a destination pick sets its own. */
+      const cur = this._config.routeIds || [];
+      if (this._config.destKey && this._destRoutes[this._config.destKey] && !cur.length) {
+        this._emit({ routeIds: this._destRoutes[this._config.destKey].slice() });
       }
       const dq = this._el('dq');
       this._paintDestHits(dq ? dq.value.trim() : '');
     } catch (err) {
       if (seq !== this._destSeq) return;
       this._loadedStop = '';
-      this._error(errText(this._lang(), err));
+      this._error(err);
       if (box) box.innerHTML = '';
     } finally {
       if (seq === this._destSeq) {
@@ -803,6 +824,18 @@ export class BKKHopCardEditor extends HTMLElement {
     return true;
   }
 
+  _pairTitle(stopName, destName) {
+    return stopName && destName ? `${stopName} \u2192 ${destName}` : '';
+  }
+
+  /* A title the editor wrote (or one reading just like it) follows the
+     next pair; a title the user typed stays. */
+  _titleIsAuto(name) {
+    if (!name) return true;
+    if (this._autoTitle && name === this._autoTitle) return true;
+    return name === this._pairTitle(this._config.stopName, this._config.destName);
+  }
+
   _pickStop(stop, which) {
     this._cancelSearches();
     if (which === 'dest') {
@@ -817,10 +850,12 @@ export class BKKHopCardEditor extends HTMLElement {
         destStopId: stop.id ? String(stop.id) : undefined,
         routeIds: (this._destRoutes[key] || []).slice(),
       }, this._stopPatch(stop, 'dest'));
-      if (this._autoName() && !this._config.name && this._config.stopName) {
-        patch.name = `${this._config.stopName} \u2192 ${stop.name}`;
+      if (this._autoName() && this._config.stopName && this._titleIsAuto(this._config.name || '')) {
+        patch.name = this._pairTitle(this._config.stopName, stop.name);
+        this._autoTitle = patch.name;
       }
       this._emit(patch);
+      this._syncName();
       this._syncDestLabel();
       return;
     }
@@ -828,6 +863,9 @@ export class BKKHopCardEditor extends HTMLElement {
     const q = this._el('q');
     if (box) box.innerHTML = '';
     if (q) q.value = stop.label || stop.name;
+    /* The old pair's title, if the editor wrote it, is replaced once the
+       new destination is picked. */
+    if (this._config.name && this._titleIsAuto(this._config.name)) this._autoTitle = this._config.name;
     this._cache = {};
     this._dests = [];
     this._destRoutes = {};
