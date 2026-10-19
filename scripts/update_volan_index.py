@@ -41,8 +41,25 @@ FAIL_REPEAT_DAYS = 7
 MAV_KEY = "mav"
 
 
+# A keyed feed override (BAHART_GTFS_URL=...?apikey=...) can end up in an
+# exception text. What goes to the log and the webhook loses every URL query,
+# the user:password part of a URL, and bare key=value pairs of secret names.
+_URL_QUERY = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s?#'\"<>]*)\?[^\s#'\"<>]*")
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@'\"<>]+@")
+_SECRET_PARAM = re.compile(
+    r"(?i)\b((?:api[_-]?)?key|token|access_token|secret|password|passwd|sig|signature)=[^\s&'\"<>]+"
+)
+
+
+def redact(text: str) -> str:
+    """text without URL queries, URL credentials and secret-named key=value pairs."""
+    text = _URL_USERINFO.sub(r"\1…@", text)
+    text = _URL_QUERY.sub(r"\1?…", text)
+    return _SECRET_PARAM.sub(r"\1=…", text)
+
+
 def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
-    payload = json.dumps({"title": title, "message": message}).encode("utf-8")
+    payload = json.dumps({"title": title, "message": redact(message)}).encode("utf-8")
     webhook = (os.environ.get(WEBHOOK_ENV) or "").strip() or "http://127.0.0.1:8123" + WEBHOOK_PATH
     urls: list[tuple[str, dict]] = [
         (webhook, {"Content-Type": "application/json", "User-Agent": UA}),
@@ -461,7 +478,9 @@ def acquire_lock(path: Path):
 
 
 def report(title: str, msg: str) -> None:
-    """A failure, to update.log and to the webhook."""
+    """A failure, to update.log and to the webhook. The raw exception text in
+    msg may hold a keyed URL: both get it redacted."""
+    msg = redact(msg)
     print(msg, file=sys.stderr)
     notify(f"{title}: {msg}")
 
