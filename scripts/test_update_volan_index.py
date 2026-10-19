@@ -556,6 +556,11 @@ check("HEAD requests go through the public-host guard", err is not None, repr(er
 # ---- run_update.sh: the shell wrapper reports the exits the script cannot ---
 
 script = Path(__file__).resolve().parent / "run_update.sh"
+set_lines = [line for line in script.read_text().splitlines() if line.startswith("set -")]
+check("run_update.sh runs with set -euo pipefail", set_lines == ["set -euo pipefail"], repr(set_lines))
+probe = subprocess.run(["bash", "-c", "; ".join(set_lines + ["false | true"])], capture_output=True, timeout=30)
+check("under its options a failing pipeline stage is not hidden by the last one", probe.returncode != 0,
+      repr(probe.returncode))
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     base = root / "base"
