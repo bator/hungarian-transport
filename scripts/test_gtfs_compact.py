@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import gzip
+import http.client
 import http.server
 import io
 import json
@@ -1021,9 +1022,20 @@ def rebinding_checks() -> bool:
                             evil.hits == [("127.0.0.2", f"pinned.test:{port}")], repr(evil.hits))
 
         proxied = urllib.request.Request("http://feed.example/f.zip")
-        proxied.set_proxy("proxy.lan:3128", "http")
+        proxied.set_proxy("user:pw@proxy.lan:3128", "http")
         failed |= not check("through a proxy the plain connection is used (the proxy resolves)",
                             gc._via_proxy(proxied) and not gc._via_proxy(urllib.request.Request(url)))
+        gc._proxy_warned = False
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            first = gc._connection_class(proxied, http.client.HTTPConnection, gc._PublicHTTPConnection)
+            gc._connection_class(proxied, http.client.HTTPConnection, gc._PublicHTTPConnection)
+            direct = gc._connection_class(urllib.request.Request(url), http.client.HTTPConnection,
+                                          gc._PublicHTTPConnection)
+        failed |= not check("a proxied download is said once on stderr, without the proxy address",
+                            first is http.client.HTTPConnection and direct is gc._PublicHTTPConnection
+                            and err.getvalue().count("not pinned") == 1 and "proxy.lan" not in err.getvalue()
+                            and "pw" not in err.getvalue(), repr(err.getvalue()))
         failed |= tls_checks(fake_gai, answers)
     finally:
         gc.socket.getaddrinfo, gc._blocked_ip = real_gai, real_blocked

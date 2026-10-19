@@ -219,14 +219,33 @@ def _via_proxy(req: urllib.request.Request) -> bool:
     return req.has_proxy() or bool(getattr(req, "_tunnel_host", None))
 
 
+_proxy_warned = False
+
+
+def _connection_class(req: urllib.request.Request, plain: type, pinned: type) -> type:
+    """pinned, or plain through a proxy; the latter said once per run on stderr
+    (update.log), without the proxy address (it may carry credentials)."""
+    global _proxy_warned
+    if not _via_proxy(req):
+        return pinned
+    if not _proxy_warned:
+        _proxy_warned = True
+        print(
+            "warn downloads go through a proxy: the address is checked before the request,"
+            " but the connection is not pinned to it (the proxy resolves the name)",
+            file=sys.stderr,
+        )
+    return plain
+
+
 class _PublicHTTPHandler(urllib.request.HTTPHandler):
     def http_open(self, req):
-        return self.do_open(http.client.HTTPConnection if _via_proxy(req) else _PublicHTTPConnection, req)
+        return self.do_open(_connection_class(req, http.client.HTTPConnection, _PublicHTTPConnection), req)
 
 
 class _PublicHTTPSHandler(urllib.request.HTTPSHandler):
     def https_open(self, req):
-        conn = http.client.HTTPSConnection if _via_proxy(req) else _PublicHTTPSConnection
+        conn = _connection_class(req, http.client.HTTPSConnection, _PublicHTTPSConnection)
         return self.do_open(conn, req, context=self._context)
 
 
