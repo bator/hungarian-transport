@@ -357,7 +357,10 @@ def build_city_index(base: Path, out: Path, volan_zip: Path | None = None, *, to
     out, info["expired"] those of them whose calendar ended (id -> last day)."""
     parts, failed, expired = collect_parts(base, volan_zip, today=today)
     guard_feeds(out, parts, expired=expired, today=today)
-    info = write_index(parts, out, with_operators=True, today=today)
+    # guard_feeds is the city index's guard: write_index's overall count
+    # would also count trips whose calendar already ended (several feeds end
+    # on 31 December) and ignore HUNGARIAN_TRANSPORT_ALLOW_MISSING.
+    info = write_index(parts, out, with_operators=True, today=today, guard_total=False)
     info["skipped"] = failed
     info["expired"] = expired
     return info

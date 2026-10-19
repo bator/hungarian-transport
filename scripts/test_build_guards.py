@@ -284,6 +284,62 @@ with tempfile.TemporaryDirectory() as tmp:
     check("running Volán local agencies still are",
           isinstance(err, IndexGuardError) and "volan-local 60 trips vs 260" in str(err), repr(err))
 
+# Year end: several big feeds' calendars end on 31 December together. The
+# feeds still running are far fewer than the previous index's trips, but
+# guard_feeds compares feed by feed, so write_index must not refuse on the
+# total (it counted the ended trips and ignored ALLOW_MISSING).
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp)
+    fixtures = base / "fixtures"
+    fixtures.mkdir()
+    gtfs_zip(fixtures / "miskolc.zip", city_feed(trips=49))
+    gtfs_zip(fixtures / "szeged.zip", city_feed("7", trips=3, end="20261231"))
+    gtfs_zip(fixtures / "pecs.zip", city_feed("9", trips=3, end="20261231"))
+    bci.CITY_FEEDS = [
+        {"id": fid, "name": fid, "url": f"https://{fid}.example/{fid}.zip", "file": f"{fid}.zip"}
+        for fid in ("miskolc", "szeged", "pecs")
+    ]
+
+    def year_end_download(url: str, dest: Path, **_kw) -> dict:
+        shutil.copy(fixtures / Path(url).name, dest)
+        return {"size": dest.stat().st_size}
+
+    bci.download_feed = year_end_download
+    cout = base / "city-index.json.gz"
+    write_index([part("miskolc", 49), part("szeged", 100, end="20261231"), part("pecs", 107, end="20261231")],
+                cout, with_operators=True, today="20261201")
+    with contextlib.redirect_stderr(io.StringIO()):
+        err = raises(lambda: bci.build_city_index(base, cout, today="20270102"))
+    check("feeds whose calendars ended together at year end leave without freezing the city index",
+          err is None and operator_trips(cout) == {"miskolc": 49}, repr(err))
+
+    # A running feed lost on purpose (ALLOW_MISSING=all) is not refused on
+    # the total either.
+    write_index([part("miskolc", 49), part("szeged", 200)], cout, with_operators=True, today="20261201")
+    (base / "szeged.zip").write_bytes(b"<html>moved</html>")
+    os.environ[bci.ALLOW_MISSING_ENV] = "all"
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            err = raises(lambda: bci.build_city_index(base, cout, today="20261202"))
+    finally:
+        os.environ.pop(bci.ALLOW_MISSING_ENV, None)
+    check("ALLOW_MISSING=all accepts a city index with far fewer trips in all",
+          err is None and set(operator_trips(cout) or {}) == {"miskolc", "pecs"}, repr(err))
+    write_index([part("miskolc", 49), part("szeged", 200)], cout, with_operators=True, today="20261201")
+    with contextlib.redirect_stderr(io.StringIO()):
+        err = raises(lambda: bci.build_city_index(base, cout, today="20261202"))
+    check("without it the lost running feed is still refused, by name",
+          isinstance(err, IndexGuardError) and "szeged missing (had 200 trips)" in str(err), repr(err))
+bci.CITY_FEEDS = real_feeds
+
+# The Volán index keeps its overall guard: one feed, so the total is the feed.
+with tempfile.TemporaryDirectory() as tmp:
+    vout = Path(tmp) / "volan-index.json.gz"
+    write_index([part("volan", 100)], vout, with_operators=False)
+    err = raises(lambda: write_index([part("volan", 40)], vout, with_operators=False))
+    check("an index losing most of its trips is still refused by default",
+          isinstance(err, IndexGuardError) and "40 trips vs previous 100" in str(err), repr(err))
+
 # ---- 1. Volán index: too few trips is a broken feed -----------------------
 
 with tempfile.TemporaryDirectory() as tmp:
@@ -340,8 +396,15 @@ with tempfile.TemporaryDirectory() as tmp:
           dest.stat().st_mtime == mtime and served["calls"] == 3)
 
     served["body"] = None
-    bmi.resolve_mav_feed(base)
+    url_errors: list[BaseException] = []
+    bmi.resolve_mav_feed(base, url_errors=url_errors)
     check("a failed download keeps the previous zip", dest.read_bytes() == b"PK feed-2")
+    check("and says so to the caller, who counts the failing days",
+          len(url_errors) == 1 and isinstance(url_errors[0], OSError), repr(url_errors))
+    url_errors.clear()
+    bmi.resolve_mav_feed(base, url_errors=url_errors)
+    check("the kept zip keeps its old mtime, so the next run tries again",
+          served["calls"] == 5 and len(url_errors) == 1, f"{served['calls']} {url_errors!r}")
     check("no temp zip is left behind", sorted(p.name for p in base.iterdir()) == ["mav-gtfs.zip"],
           repr(sorted(p.name for p in base.iterdir())))
     dest.unlink()

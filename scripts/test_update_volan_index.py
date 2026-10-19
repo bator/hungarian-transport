@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -155,11 +157,14 @@ class Fake:
         self.city_info: dict = {"ops": 1, "trips": 5, "skipped": []}
         self.city_builds = 0
         self.downloads: list[str] = []
+        self.heads: list[tuple[str, dict]] = []
+        self.body: dict[str, bytes] = {}
 
     def paths(self):
         return self.base, self.www / "volan-index.json.gz", self.www / "city-index.json.gz", self.www / "mav-index.json.gz"
 
-    def remote_meta(self, url: str) -> dict:
+    def remote_meta(self, url: str, **kw) -> dict:
+        self.heads.append((url, kw))
         if url in self.broken:
             raise OSError("unreachable")
         return {"etag": self.etag.get(url, "")}
@@ -168,7 +173,8 @@ class Fake:
         if url in self.broken:
             raise OSError("unreachable")
         self.downloads.append(url)
-        dest.write_bytes(b"PK" + url.encode())
+        # The bytes follow the fingerprint unless a test pins them.
+        dest.write_bytes(self.body.get(url) or b"PK" + url.encode() + self.etag.get(url, "").encode())
         return {"size": dest.stat().st_size}
 
     def build_city_index(self, _base: Path, out: Path, _volan: Path | None) -> dict:
@@ -178,8 +184,8 @@ class Fake:
         out.write_bytes(gzip.compress(b'{"v":29}'))
         return dict(self.city_info)
 
-    def download_zip(self, url: str, dest: Path) -> dict:
-        return self.download_feed(url, dest)
+    def download_zip(self, url: str, dest: Path, **kw) -> dict:
+        return self.download_feed(url, dest, **kw)
 
     def install(self) -> None:
         uvi.paths = self.paths
@@ -196,7 +202,7 @@ class Fake:
             "url_env": "TEST_A_GTFS_URL",
         }]
 
-        def no_mav(_base):
+        def no_mav(_base, **_kw):
             raise FileNotFoundError("no MÁV feed in this test")
 
         uvi.resolve_mav_feed = no_mav
@@ -216,8 +222,10 @@ os.environ.pop("TEST_A_GTFS_URL", None)
 with tempfile.TemporaryDirectory() as tmp:
     fake = Fake(Path(tmp))
     fake.install()
-    # The Volán index is current; city feed "a" was built at etag a-1 and has moved to a-2.
+    # The Volán index (and its zip) is current; city feed "a" was built at
+    # etag a-1 and has moved to a-2.
     (fake.www / "volan-index.json.gz").write_bytes(gzip.compress(b'{"v":29}'))
+    (fake.base / "volanbusz_gtfs.zip").write_bytes(b"PK volan-1")
     (fake.www / "city-index.json.gz").write_bytes(gzip.compress(b'{"v":29}'))
     (fake.base / "a.zip").write_bytes(b"PK old")
     (fake.base / "state.json").write_text(json.dumps({
@@ -347,7 +355,196 @@ with tempfile.TemporaryDirectory() as tmp:
           fake.state()["cities"]["a"]["etag"] == "a-7", repr(fake.state()["cities"]))
     fake.city_info = {"ops": 1, "trips": 5, "skipped": []}
 
+    # The success line names the feeds the index left out.
+    sent.clear()
+    fake.etag["https://public.example/a.zip"] = "a-9"
+    fake.city_info = {"ops": 1, "trips": 5, "skipped": ["a", "volan-local"], "expired": {}}
+    fake.run()
+    check("the announcement lists the skipped feeds",
+          len(sent) == 1 and "(skipped: a, volan-local)" in sent[0], repr(sent))
+    fake.city_info = {"ops": 1, "trips": 5, "skipped": []}
+    fake.run()
+
+# A server whose HEAD gives no usable fingerprint sends the same zip again:
+# that is no new timetable, so nothing is rebuilt or announced.
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    sent = []
+    uvi.notify = lambda message, *_a, **_k: sent.append(message)
+    volan_builds: list[Path] = []
+
+    def fake_build_index(zpath: Path, out: Path) -> dict:
+        volan_builds.append(zpath)
+        out.write_bytes(gzip.compress(b'{"v":29}'))
+        return {"feed_version": "v1", "trips": 46000, "stops": 9000}
+
+    uvi.build_index = fake_build_index
+    fake.etag = {}
+    fake.body = {"https://kti.example/volan.zip": b"PK volan same", "https://public.example/a.zip": b"PK a same"}
+    code = fake.run()
+    check("first run without fingerprints builds both and records their hashes",
+          code == 0 and len(volan_builds) == 1 and fake.city_builds == 1 and len(sent) == 1
+          and fake.state()["volan"].get("sha256") and fake.state()["cities"]["a"].get("sha256"),
+          repr((code, sent, fake.state())))
+    sent.clear()
+    for _ in range(3):
+        code = fake.run()
+    check("the same bytes again are neither rebuilt nor announced",
+          code == 0 and len(volan_builds) == 1 and fake.city_builds == 1 and sent == []
+          and fake.downloads.count("https://kti.example/volan.zip") == 4, repr((code, sent, fake.downloads)))
+    fake.body["https://public.example/a.zip"] = b"PK a new"
+    fake.run()
+    check("new bytes behind the same (missing) fingerprint are rebuilt",
+          fake.city_builds == 2 and len(volan_builds) == 1 and len(sent) == 1, repr(sent))
+
+    # A Volán zip that downloads but does not build leaves the zip the city
+    # index takes its local lines from as it was.
+    zip_path = fake.base / "volanbusz_gtfs.zip"
+    good = zip_path.read_bytes()
+    fake.body["https://kti.example/volan.zip"] = b"PK volan broken"
+    seen_volan: list[bytes] = []
+
+    def refusing_build(zpath: Path, _out: Path) -> dict:
+        seen_volan.append(zpath.read_bytes())
+        raise gtfs_compact.IndexGuardError("refusing to write volan-index.json.gz: 12 trips")
+
+    def recording_city(_base: Path, out: Path, volan: Path | None) -> dict:
+        seen_volan.append(volan.read_bytes() if volan else b"")
+        out.write_bytes(gzip.compress(b'{"v":29}'))
+        return dict(fake.city_info)
+
+    uvi.build_index = refusing_build
+    uvi.build_city_index = recording_city
+    sent.clear()
+    fake.body["https://public.example/a.zip"] = b"PK a newer"
+    code = fake.run()
+    check("a Volán zip that fails its build does not replace the previous one",
+          code == uvi.REPORTED and zip_path.read_bytes() == good and seen_volan == [b"PK volan broken", good]
+          and not list(fake.base.glob("*.tmp")) and not list(fake.base.glob("gtfs_*.zip")),
+          repr((code, seen_volan, sorted(p.name for p in fake.base.iterdir()))))
+    uvi.build_index = fake_build_index
+    uvi.build_city_index = fake.build_city_index
+
+    # The fingerprint did not move, but the zip is gone: fetch it again.
+    fake.body["https://kti.example/volan.zip"] = b"PK volan same"
+    fake.etag["https://kti.example/volan.zip"] = "volan-7"
+    fake.run()
+    builds = len(volan_builds)
+    zip_path.unlink()
+    downloads = fake.downloads.count("https://kti.example/volan.zip")
+    fake.run()
+    check("a missing Volán zip is downloaded again despite the same fingerprint",
+          zip_path.read_bytes() == b"PK volan same" and len(volan_builds) == builds
+          and fake.downloads.count("https://kti.example/volan.zip") == downloads + 1,
+          repr((fake.downloads, len(volan_builds) - builds)))
+
+# A city feed (or MAV_GTFS_URL) that keeps failing to download is reported
+# on the third day, then weekly; one bad day only goes to update.log.
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    sent = []
+    uvi.notify = lambda message, *_a, **_k: sent.append(message)
+    uvi.build_index = lambda _z, out: (out.write_bytes(gzip.compress(b'{"v":29}')),
+                                       {"feed_version": "v1", "trips": 1, "stops": 1})[1]
+    fake.run()
+    fake.broken.add("https://public.example/a.zip")
+    mav_fails = {"on": True}
+
+    def failing_mav(_base, *, url_errors=None):
+        if mav_fails["on"] and url_errors is not None:
+            url_errors.append(urllib.error.HTTPError("https://mav.example/x?key=s3cret", 404, "Not Found", {}, None))
+        return Path(tmp) / "no-such-mav.zip"
+
+    uvi.resolve_mav_feed = failing_mav
+    uvi.mav_source_newer = lambda *_a: False
+    start = date(2026, 12, 30)
+    got: list[tuple[int, list[str]]] = []
+    for day in range(12):
+        uvi._today = lambda d=day: start + timedelta(days=d)
+        sent.clear()
+        code = fake.run()
+        got.append((code, list(sent)))
+    reported_days = [d for d, (_c, msgs) in enumerate(got) if msgs]
+    check("a failing feed is reported on its third day and weekly after that",
+          reported_days == [2, 9] and all(c == 0 for c, _m in got), repr(got))
+    city_msg = [m for m in got[2][1] if "Helyi" in m]
+    mav_msg = [m for m in got[2][1] if "MÁV" in m]
+    check("the report names the feed, since when and the error, not the URL",
+          len(city_msg) == 1 and "a since 2026-12-30 (3 days, 3 runs, last OSError)" in city_msg[0]
+          and len(mav_msg) == 1 and "mav since 2026-12-30" in mav_msg[0] and "HTTP 404" in mav_msg[0]
+          and "s3cret" not in mav_msg[0], repr(got[2][1]))
+    check("the failure count is kept in state.json", fake.state()["failing"]["a"]["runs"] == 12,
+          repr(fake.state().get("failing")))
+    fake.broken.discard("https://public.example/a.zip")
+    mav_fails["on"] = False
+    fake.run()
+    check("a feed that downloads again leaves the failing list", fake.state()["failing"] == {},
+          repr(fake.state().get("failing")))
+    uvi._today = date.today
+
+# The daily HEAD of a keyed http:// override goes over https, like its
+# download; only a feed marked insecure is asked over plain http.
+opened: list[tuple[str, bool]] = []
+real_urlopen, real_assert = uvi._urlopen, uvi.assert_public_http_url
+uvi._urlopen = lambda req, timeout=60, *, allow_insecure=False: opened.append((req.full_url, allow_insecure))
+uvi.assert_public_http_url = lambda _url: None
+try:
+    uvi.request("HEAD", "http://nap.example/bahart.zip?apikey=k")
+    uvi.request("HEAD", "http://gtfs.cdata.hu/mvkzrt.zip", allow_insecure=True)
+finally:
+    uvi._urlopen, uvi.assert_public_http_url = real_urlopen, real_assert
+check("an http:// HEAD is upgraded to https unless the feed is insecure",
+      opened == [("https://nap.example/bahart.zip?apikey=k", False), ("http://gtfs.cdata.hu/mvkzrt.zip", True)],
+      repr(opened))
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    uvi.CITY_FEEDS = [{"id": "m", "file": "m.zip", "url": "http://m.example/m.zip", "insecure": True},
+                      {"id": "k", "file": "k.zip", "url": "https://k.example/k.zip"}]
+    fake.run()
+    check("the city loop tells remote_meta which feeds may use http",
+          [(u, kw.get("allow_insecure")) for u, kw in fake.heads[1:]]
+          == [("http://m.example/m.zip", True), ("https://k.example/k.zip", False)], repr(fake.heads))
+
+    # A kill during the HACS restore (before the main loop) is reported too.
+    sent = []
+    uvi.notify = lambda message, *_a, **_k: sent.append(message)
+    stale: list[int] = []
+    signal.signal(signal.SIGTERM, lambda *_a: stale.append(1))
+    real_restore = uvi.restore_hacs_indexes
+
+    def kill_in_restore(*_a):
+        os.kill(os.getpid(), signal.SIGTERM)
+        raise AssertionError("SIGTERM handler did not exit")
+
+    uvi.restore_hacs_indexes = kill_in_restore
+    try:
+        code = fake.run()
+    finally:
+        uvi.restore_hacs_indexes = real_restore
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    check("the SIGTERM handler is in place before the HACS restore",
+          code == uvi.REPORTED and not stale and len(sent) == 1 and "megszakítva" in sent[0], repr((code, sent, stale)))
+
 check("notify's user agent is the downloader's", uvi.UA == gtfs_compact.UA)
+
+# HUNGARIAN_TRANSPORT_WWW and HUNGARIAN_TRANSPORT_WEBHOOK from .env: the
+# served folder is chosen at import, so .env must be read before that.
+with tempfile.TemporaryDirectory() as tmp:
+    env_file = Path(tmp) / ".env"
+    env_file.write_text(f"export HUNGARIAN_TRANSPORT_WWW={tmp}/www  # manual /local install\n"
+                        f"{uvi.WEBHOOK_ENV}=http://127.0.0.1:9/api/webhook/x\n")
+    clean = {k: v for k, v in os.environ.items() if k not in ("HUNGARIAN_TRANSPORT_WWW", uvi.WEBHOOK_ENV)}
+    done = subprocess.run(
+        [sys.executable, "-I", "-c",
+         "import os, sys; sys.path.insert(0, sys.argv[1]); import update_volan_index as u;"
+         " print(u.HA_WWW); print(os.environ.get(u.WEBHOOK_ENV))", str(Path(__file__).resolve().parent)],
+        env={**clean, "HUNGARIAN_TRANSPORT_ENV": str(env_file)}, capture_output=True, text=True, timeout=60,
+    )
+    check("HUNGARIAN_TRANSPORT_WWW and the webhook are read from .env",
+          done.stdout.split() == [f"{tmp}/www", "http://127.0.0.1:9/api/webhook/x"], repr((done.stdout, done.stderr)))
 
 err = None
 try:
@@ -420,6 +617,26 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a script that crashed before reporting is reported by the wrapper",
           "exit 2" in posted and "el sem indult" in posted, repr(posted))
     check("the log holds every run", (base / "update.log").read_text().count("fake run") == 5)
+
+    # The webhook may come from .env, as for the script itself.
+    (base / ".env").write_text("export HUNGARIAN_TRANSPORT_WEBHOOK=http://127.0.0.1:2/api/webhook/from-env  # test\n")
+    shutil.copy(Path(__file__).resolve().parent / "gtfs_compact.py", base / "gtfs_compact.py")
+    no_hook = {k: v for k, v in env.items() if k != "HUNGARIAN_TRANSPORT_WEBHOOK"}
+    curl_log.unlink(missing_ok=True)
+    done = subprocess.run(["bash", str(script), "--worker"],
+                          env={**no_hook, "FAKE_MODE": "2", "HUNGARIAN_TRANSPORT_ENV": str(base / ".env")},
+                          capture_output=True, text=True, timeout=60)
+    posted = curl_log.read_text() if curl_log.exists() else ""
+    check("the wrapper takes HUNGARIAN_TRANSPORT_WEBHOOK from .env",
+          done.returncode == 0 and "http://127.0.0.1:2/api/webhook/from-env" in posted, repr((posted, done.stderr)))
+    (base / "gtfs_compact.py").unlink()
+    (base / ".env").unlink()
+    curl_log.unlink(missing_ok=True)
+    subprocess.run(["bash", str(script), "--worker"], env={**no_hook, "FAKE_MODE": "2"},
+                   capture_output=True, text=True, timeout=60)
+    posted = curl_log.read_text() if curl_log.exists() else ""
+    check("without one the wrapper uses the default webhook",
+          "http://127.0.0.1:8123/api/webhook/hungarian-transport-gtfs" in posted, repr(posted))
 
     token = "tok-" + "s3cr3t"
     posted = run_worker("2", {"FAKE_CURL_FAIL": "1", "SUPERVISOR_TOKEN": token})
