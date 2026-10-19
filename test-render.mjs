@@ -4375,9 +4375,9 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     final.some((e) => e.id === 'P') && final.some((e) => e.id === 'Q')
     && both[1].length === 2 && writes.length === 2 && writes[1].length === 2,
     JSON.stringify({ final: final.map((e) => e.id), writes: writes.map((w) => w.map((e) => e.id)) }));
-  check('the browser copy is keyed by the HA user',
+  check('the browser copy is keyed by the HA user, and the old shared copy goes',
     store.has(`${key}:u2`) && JSON.parse(store.get(`${key}:u2`)).length === 2
-    && JSON.parse(store.get(key)).length === 1,
+    && !store.has(key),
     JSON.stringify(Array.from(store.keys())));
   Lib._stopHistory = null;
   delete globalThis.localStorage;
@@ -4482,6 +4482,468 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   Date.now = realNow;
   check('nextCityRide names the trip and its stop positions',
     !!ride && ride.trip === rideIdx.t[0] && ride.o === 0 && ride.d === 1, JSON.stringify(ride && { o: ride.o, d: ride.d }));
+}
+
+/* ---- Third card review batch ---- */
+
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const deferred = () => {
+  let resolve;
+  const p = new Promise((r) => { resolve = r; });
+  return { p, resolve };
+};
+
+/* Home Assistant's real order: setConfig first, hass after. With `language:
+   auto` the first paint is in the browser's language (jsdom: en-US). */
+{
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  pc._loadDests = async () => {};
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'auto' });
+  const before = pc._planEl('plab1').textContent;
+  pc.hass = { states: {}, language: 'hu', services: {} };
+  const seg = [...pc._planEl('pwhen').querySelectorAll('button')].map((b) => b.textContent);
+  const got = {
+    before,
+    lab1: pc._planEl('plab1').textContent,
+    lab2: pc._planEl('plab2').textContent,
+    seg,
+    head: pc.shadowRoot.querySelector('.head').textContent,
+    hint: pc._planEl('pdhits').textContent,
+    reset: pc._planEl('preset').textContent,
+  };
+  check('a planner set up before hass draws its pickers again in the hass language',
+    got.before === 'Origin' && got.lab1 === 'Forrás' && got.lab2 === 'Cél'
+    && got.seg[0] === 'Most' && got.seg[1] === 'Indulás' && got.head === 'Tervező'
+    && got.hint.startsWith('Válassz forrás') && got.reset === 'Új',
+    JSON.stringify(got));
+  pc.remove();
+
+  const hop = document.createElement('hungarian-transport-card');
+  hop._reloadSafe = () => {};
+  document.body.appendChild(hop);
+  hop.setConfig({ language: 'auto' });
+  const hopBefore = hop.shadowRoot.querySelector('.head').textContent;
+  hop.hass = { states: {}, language: 'hu' };
+  const hopAfter = hop.shadowRoot.querySelector('.head').textContent;
+  check('the hop card title without stops is translated and follows the hass language',
+    hopBefore === 'Hungarian transport' && hopAfter === 'Magyar közlekedés',
+    JSON.stringify({ hopBefore, hopAfter }));
+  hop.remove();
+}
+
+/* Editor picks set or clear the stop's id, coordinates and kind. */
+{
+  const ped = document.createElement('hungarian-transit-stop-card-plan-editor');
+  document.body.appendChild(ped);
+  ped.hass = { states: {}, language: 'hu' };
+  ped._probeKey = () => {};
+  ped._loadDests = async () => {};
+  let last = null;
+  ped.addEventListener('config-changed', (ev) => { last = ev.detail.config; });
+  ped.setConfig({
+    language: 'hu', stopId: 'BKK_OLD', stopName: 'Régi', stopLat: 1, stopLon: 2, stopKind: 'place',
+    destKey: 'x', destName: 'X', destStopId: 'BKK_OLDD', destLat: 3, destLon: 4, destKind: 'address',
+  });
+  ped._pickStop({ id: 'BKK_F1', name: 'Fő tér', lat: 47.5, lon: 19.1 }, 'origin');
+  check('an origin picked in the editor replaces the old stop’s coordinates and kind, and clears the destination',
+    !!last && last.stopId === 'BKK_F1' && last.stopLat === 47.5 && last.stopLon === 19.1
+    && !('stopKind' in last) && last.destKey === '' && last.destName === ''
+    && !('destStopId' in last) && !('destLat' in last) && !('destLon' in last) && !('destKind' in last),
+    JSON.stringify(last));
+  ped.setConfig(last);
+  ped._destRoutes = { blaha: ['BKK_9'] };
+  ped._pickStop({ id: 'BKK_F2', key: 'blaha', name: 'Blaha Lujza tér' }, 'dest');
+  check('a destination picked in the editor carries its stop id, and the planner editor bakes in no name',
+    last.destStopId === 'BKK_F2' && last.destKey === 'blaha' && JSON.stringify(last.routeIds) === '["BKK_9"]'
+    && !('destLat' in last) && !last.name,
+    JSON.stringify(last));
+  ped.remove();
+
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  pc._loadDests = async () => {};
+  document.body.appendChild(pc);
+  pc.setConfig(last);
+  pc._swapPlan();
+  check('a planner set up in the editor can swap its stops',
+    pc._config.stopId === 'BKK_F2' && pc._config.stopName === 'Blaha Lujza tér'
+    && pc._config.destStopId === 'BKK_F1' && pc._config.destName === 'Fő tér' && pc._config.destLat === 47.5,
+    JSON.stringify(pc._config));
+  pc.remove();
+
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  let hopLast = null;
+  ed.addEventListener('config-changed', (ev) => { hopLast = ev.detail.config; });
+  ed.setConfig({ language: 'hu', volan: true, stopId: 'volan_1', stopName: 'Győr' });
+  ed._pickStop({ id: 'volan_2', key: 'pápa', name: 'Pápa', lat: 47.33, lon: 17.47, kind: 'stop' }, 'dest');
+  check('the hop editor still names its card after the pair, with the destination’s coordinates and kind',
+    hopLast.name === 'Győr → Pápa' && hopLast.destStopId === 'volan_2'
+    && hopLast.destLat === 47.33 && hopLast.destLon === 17.47 && hopLast.destKind === 'stop',
+    JSON.stringify(hopLast));
+  ed.setConfig(hopLast);
+  ed._el('helyi').checked = true;
+  ed._onModeToggle('helyi');
+  check('a mode change clears both stops with their coordinates',
+    hopLast.helyi === true && hopLast.stopId === '' && !('destStopId' in hopLast)
+    && !('destLat' in hopLast) && !('destKind' in hopLast) && !('stopLat' in hopLast),
+    JSON.stringify(hopLast));
+  ed.remove();
+}
+
+/* An empty city board: Transitous once, then a ten-minute pause. */
+{
+  const keep = {
+    cityDepartures: Lib.cityDepartures,
+    transitousFetch: Lib.transitousFetch,
+    fillTransitousIfEmpty: Lib.fillTransitousIfEmpty,
+  };
+  Lib._geocodeCache.clear();
+  Lib._transitousEmptyAt.clear();
+  const asked = { geocode: 0, plan: 0 };
+  Lib.cityDepartures = async () => [];
+  Lib.transitousFetch = async (path, params) => {
+    if (/geocode/.test(path)) {
+      asked.geocode += 1;
+      return [{ id: 'hu-szeged_' + params.text, name: params.text, lat: 46.25, lon: 20.15 }];
+    }
+    if (/plan/.test(path)) asked.plan += 1;
+    return { itineraries: [] };
+  };
+  const c = document.createElement('hungarian-transport-card');
+  c._reloadSafe = () => {};
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu' };
+  c.setConfig({ helyi: true, city: 'szeged', stopId: 'szeged:1', stopName: 'Mars tér', destKey: 'dugonics ter', destName: 'Dugonics tér' });
+  await c._reload();
+  const first = Object.assign({}, asked);
+  await c._reload();
+  const second = Object.assign({}, asked);
+  check('an empty city board asks Transitous once per pair: two geocodes and one plan, then nothing',
+    first.geocode === 2 && first.plan === 1 && second.geocode === 2 && second.plan === 1,
+    JSON.stringify({ first, second }));
+  c.remove();
+
+  let fills = 0;
+  Lib.fillTransitousIfEmpty = async (rows) => { fills += 1; return rows; };
+  const v = document.createElement('hungarian-transport-card');
+  v._reloadSafe = () => {};
+  v.setConfig({ helyi: true, city: 'szeged', stopId: 'szeged:1', stopName: 'Mars tér', destKey: 'x', destName: 'X' });
+  await v._reload();
+  const helyiFills = fills;
+  v.setConfig({ volan: true, stopId: 'volan_1', stopName: 'Győr', destKey: 'pápa', destName: 'Pápa' });
+  const keepVolan = Lib.volanDepartures;
+  Lib.volanDepartures = async () => [];
+  await v._reload();
+  Lib.volanDepartures = keepVolan;
+  check('the hop card leaves a city board’s fill to departures(), and still fills a Volán board itself',
+    helyiFills === 1 && fills === 2, JSON.stringify({ helyiFills, fills }));
+  if (v._tick) { clearInterval(v._tick); v._tick = null; }
+  Lib.fillTransitousIfEmpty = keep.fillTransitousIfEmpty;
+
+  const realNow = Date.now;
+  const t0 = realNow();
+  Date.now = () => t0;
+  Lib._transitousEmptyAt.clear();
+  const keepDeps = Lib.transitousDepartures;
+  let plans = 0;
+  let answer = [];
+  Lib.transitousDepartures = async () => { plans += 1; return answer; };
+  const o = { id: 'A', name: 'A' };
+  const d = { key: 'b', name: 'B' };
+  const opts = { mode: 'all', minutesAfter: 60 };
+  await Lib.fillTransitousIfEmpty([], o, d, opts);
+  await Lib.fillTransitousIfEmpty([], o, d, opts);
+  const paused = plans;
+  await Lib.fillTransitousIfEmpty([], o, { key: 'c', name: 'C' }, opts);
+  const otherPair = plans;
+  Date.now = () => t0 + 11 * 60 * 1000;
+  answer = [{ label: '7', dep: Math.floor(t0 / 1000) + 900 }];
+  const after = await Lib.fillTransitousIfEmpty([], o, d, opts);
+  await Lib.fillTransitousIfEmpty([], o, d, opts);
+  Date.now = realNow;
+  check('an empty fill pauses that pair for ten minutes; another pair, and a fill with rows, ask again',
+    paused === 1 && otherPair === 2 && after.length === 1 && plans === 4,
+    JSON.stringify({ paused, otherPair, plans, after: after.length }));
+  Lib.transitousDepartures = keepDeps;
+
+  Lib._geocodeCache.clear();
+  let geo = 0;
+  let fail = true;
+  Lib.transitousFetch = async () => {
+    geo += 1;
+    if (fail) throw new Error('Transitous timeout');
+    return [{ id: 'hu-x', name: 'Y', lat: 47.1, lon: 19.1 }];
+  };
+  const p1 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' });
+  fail = false;
+  const p2 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' });
+  const p3 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' });
+  check('a geocode answer stays for the page, a failed one is asked again',
+    p1 === '' && p2 === '47.1,19.1' && p3 === p2 && geo === 2, JSON.stringify({ p1, p2, p3, geo }));
+  Lib._geocodeCache.clear();
+  Lib._transitousEmptyAt.clear();
+  Object.assign(Lib, { cityDepartures: keep.cityDepartures, transitousFetch: keep.transitousFetch });
+}
+
+/* sliceShapeBetween keeps the ride's direction. */
+{
+  const same = (p, q) => !!p && !!q && p[0] === q[0] && p[1] === q[1];
+  const loop = [];
+  for (let i = 0; i < 36; i++) {
+    const a = (i * 10 * Math.PI) / 180;
+    loop.push([46.25 + 0.01 * Math.sin(a), 20.15 + 0.014 * Math.cos(a)]);
+  }
+  loop.push(loop[0].slice());
+  const round = Lib.sliceShapeBetween(loop, loop[30], loop[5]);
+  check('on a closed loop the ride runs on over the shape’s end, the short way round',
+    round.length === 12 && same(round[0], loop[30]) && same(round[round.length - 1], loop[5])
+    && !round.some((pt) => same(pt, loop[20])),
+    JSON.stringify({ n: round.length }));
+  const line = [[47.0, 19.0], [47.0, 19.01], [47.0, 19.02], [47.0, 19.03]];
+  const back = Lib.sliceShapeBetween(line, line[3], line[1]);
+  check('a shape that runs the other way is cut from the boarding stop to the destination',
+    back.length === 3 && same(back[0], line[3]) && same(back[2], line[1]), JSON.stringify(back));
+  const lasso = [
+    [47.0, 19.0], [47.0, 19.01], [47.0, 19.02], [47.01, 19.03],
+    [47.02, 19.02], [47.0003, 19.0101], [47.0003, 19.0049],
+  ];
+  const later = Lib.sliceShapeBetween(lasso, lasso[4], lasso[1]);
+  check('a line that passes the destination twice takes the pass after the boarding stop',
+    later.length === 2 && same(later[0], lasso[4]) && same(later[1], lasso[5]), JSON.stringify(later));
+  const keepShape = Lib.gtfsShape;
+  Lib.gtfsShape = async () => loop;
+  const journey = { legs: [{ walk: false, label: '78', gtfs: { shape: { dir: 'x', id: 1 }, stops: [loop[30], loop[5]], from: 0, to: 1 } }] };
+  await Lib.fillJourneyShapes(journey);
+  Lib.gtfsShape = keepShape;
+  const leg = journey.legs[0];
+  check('a city ride on a loop line is drawn the short way round',
+    Array.isArray(leg.shape) && leg.shape.length === 12 && leg.shape[0][0] === loop[30][0],
+    JSON.stringify(leg.shape && leg.shape.length));
+}
+
+/* A re-applied config after in-card picks restores its stops and reloads; HA layout keys do not reload. */
+{
+  const cfg = { language: 'hu', stopId: 'BKK_A', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_B' };
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  let reloads = 0;
+  pc._reloadSafe = () => { reloads += 1; };
+  pc._loadDests = async () => {};
+  document.body.appendChild(pc);
+  pc.setConfig(cfg);
+  pc._pickDest({ key: 'c', name: 'C', id: 'BKK_C' });
+  const afterPick = reloads;
+  pc._rows = [{ label: 'C-row', headsign: 'C', depTs: Math.floor(Date.now() / 1000) + 600 }];
+  pc.setConfig(Object.assign({}, cfg, { name: 'Új cím' }));
+  check('re-applying the configured stops after an in-card pick brings them back and reloads',
+    afterPick === 2 && reloads === 3 && pc._config.destName === 'B' && pc._config.destStopId === 'BKK_B',
+    JSON.stringify({ afterPick, reloads, dest: pc._config.destName }));
+  const beforeLayout = reloads;
+  pc.setConfig(Object.assign({}, cfg, {
+    name: 'Új cím', grid_options: { columns: 6 }, visibility: [{ condition: 'screen' }],
+    view_layout: { position: 'main' }, layout_options: { grid_rows: 4 }, card_mod: { style: 'x' },
+  }));
+  check('Home Assistant layout keys alone do not reload', reloads === beforeLayout, String(reloads));
+  pc.remove();
+}
+
+/* Picks, clears and resets cancel the searches still typed or in flight. */
+{
+  const keepSearch = Lib.searchStops;
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  ed.setConfig({ language: 'hu', volan: true });
+  let pending = deferred();
+  Lib.searchStops = () => pending.p;
+  const running = ed._search('Győr', 'origin');
+  ed._searchTimer = setTimeout(() => {}, 1e6);
+  ed._destTimer = setTimeout(() => {}, 1e6);
+  ed._pickStop({ id: 'volan_1', name: 'Győr' }, 'origin');
+  pending.resolve([{ id: 'volan_9', name: 'Győrszentiván' }]);
+  await running;
+  check('an editor pick drops the origin search in flight and the typed timers',
+    ed._el('hits').innerHTML === '' && ed._searchTimer === null && ed._destTimer === null,
+    ed._el('hits').innerHTML.slice(0, 80));
+  pending = deferred();
+  const again = ed._search('Pá', 'origin');
+  await tick();
+  ed._search('', 'origin');
+  pending.resolve([{ id: 'volan_8', name: 'Pápa' }]);
+  await again;
+  check('clearing the editor’s origin field cancels its search', ed._el('hits').innerHTML === '',
+    ed._el('hits').innerHTML.slice(0, 80));
+  Lib.searchStops = keepSearch;
+  ed.remove();
+
+  const keepPlanner = Lib.searchPlannerStops;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  pc._loadDests = async () => {};
+  document.body.appendChild(pc);
+  pc.hass = { states: {}, language: 'hu' };
+  pc.setConfig({ language: 'hu' });
+  pending = deferred();
+  Lib.searchPlannerStops = () => pending.p;
+  const origin = pc._searchOrigin('Kele');
+  await pc._pickOrigin({ id: 'BKK_F1', name: 'Fő tér' });
+  pending.resolve([{ id: 'BKK_X', name: 'Keleti' }]);
+  await origin;
+  check('a planner pick drops the origin search in flight', pc._planEl('phits').innerHTML === '',
+    pc._planEl('phits').innerHTML.slice(0, 80));
+  pc._searchTimer = setTimeout(() => {}, 1e6);
+  pc._destTimer = setTimeout(() => {}, 1e6);
+  pc._resetPlan();
+  check('a planner reset clears the typed search timers', pc._searchTimer === null && pc._destTimer === null);
+  pc._destTimer = setTimeout(() => {}, 1e6);
+  pc._config = Object.assign({}, pc._config, { stopId: 'BKK_F1', stopName: 'Fő tér' });
+  pc._pickDest({ key: 'blaha', name: 'Blaha' });
+  check('a planner destination pick clears the destination timer', pc._destTimer === null);
+  Lib.searchPlannerStops = keepPlanner;
+  pc.remove();
+}
+
+/* Stop history waits for hass and never reads the old shared browser key. */
+{
+  const store = new Map();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    },
+  });
+  store.set(Lib.STOP_HISTORY_KEY, JSON.stringify([{ id: 'SHARED', name: 'Shared stop' }]));
+  Lib._stopHistory = null;
+  const anonymous = await Lib.loadStopHistory(null);
+  check('without a user the shared browser key is not read', anonymous.length === 0, JSON.stringify(anonymous));
+  Lib._stopHistory = null;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  pc._loadDests = async () => {};
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'hu' });
+  await tick();
+  const chips = () => [...pc.shadowRoot.querySelectorAll('#pfav .suggest-stop')].map((b) => b.textContent);
+  const beforeHass = chips();
+  check('before hass the planner loads no suggestions', beforeHass.length === 0 && Lib._stopHistory === null,
+    JSON.stringify(beforeHass));
+  pc.hass = {
+    states: {}, language: 'hu', connection: {}, user: { id: 'u9' },
+    callWS: async (msg) => (msg.type === 'frontend/get_user_data' ? { value: [{ id: 'BKK_F9', name: 'Saját megálló' }] } : null),
+  };
+  await tick();
+  await tick();
+  const withHass = chips();
+  check('with hass the suggestions are this user’s', withHass.length === 1 && withHass[0].includes('Saját megálló'),
+    JSON.stringify(withHass));
+  pc.remove();
+  Lib._stopHistory = null;
+  delete globalThis.localStorage;
+}
+
+/* An origin from the YAML loads its reachable destinations once hass is there. */
+{
+  const keepReach = Lib.reachableDests;
+  let loads = 0;
+  Lib.reachableDests = async (_k, _c, stop) => {
+    loads += 1;
+    return { dests: [{ key: 'b', name: 'B from ' + stop.id }], destRoutes: { b: ['BKK_9'] } };
+  };
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'hu', stopId: 'BKK_X', stopName: 'X' });
+  const beforeHass = loads;
+  pc.hass = { states: {}, language: 'hu' };
+  await tick();
+  pc.hass = { states: {}, language: 'hu' };
+  await tick();
+  const once = loads;
+  const listed = pc._planEl('pdhits').textContent;
+  pc.setConfig({ language: 'hu', stopId: 'BKK_X', stopName: 'X', name: 'Cím' });
+  const titleOnly = loads;
+  pc.setConfig({ language: 'hu', stopId: 'BKK_Y', stopName: 'Y' });
+  await tick();
+  check('a configured origin loads its destinations once hass is set, and again for a new origin',
+    beforeHass === 0 && once === 1 && listed.includes('B from BKK_X') && titleOnly === 1 && loads === 2,
+    JSON.stringify({ beforeHass, once, titleOnly, loads, listed: listed.slice(0, 40) }));
+  Lib.reachableDests = keepReach;
+  pc.remove();
+}
+
+/* The shared departure board cache drops boards past their 20 s. */
+{
+  const keepFetch = Lib.fetch;
+  const realNow = Date.now;
+  const t0 = realNow();
+  Lib._boards.clear();
+  Lib.fetch = async () => ({ data: { entry: { stopTimes: [] } } });
+  Date.now = () => t0;
+  await Lib.departureBoard('k', 'S1', 60);
+  await Lib.departureBoard('k', 'S2', 60);
+  const both = Lib._boards.size;
+  Date.now = () => t0 + 30000;
+  await Lib.departureBoard('k', 'S3', 60);
+  const left = Array.from(Lib._boards.keys());
+  Date.now = realNow;
+  check('an expired departure board leaves the cache on the next insert',
+    both === 2 && left.length === 1 && left[0] === 'S3|60', JSON.stringify({ both, left }));
+  Lib._boards.clear();
+  Lib.fetch = keepFetch;
+}
+
+/* Small i18n: the Helyi switch, the look-ahead hint, the map notice button, a hidden API key. */
+{
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'en' };
+  ed._probeKey = () => {};
+  ed.setConfig({ language: 'en' });
+  const enLocal = ed._el('lblHelyi').textContent;
+  const enHint = ed._el('hintMinutesAfter').textContent;
+  const key = ed._el('apiKey');
+  const show = ed._el('apiKeyShow');
+  const hidden = key.type;
+  const showLabel = show.textContent;
+  show.click();
+  const shown = key.type;
+  const hideLabel = show.textContent;
+  show.click();
+  ed.setConfig({ language: 'hu' });
+  check('the editor translates the city switch and the look-ahead range matches the clamp',
+    enLocal === 'Local' && ed._el('lblHelyi').textContent === 'Helyi'
+    && enHint.includes('15–480') && ed._el('hintMinutesAfter').textContent.includes('15–480 perc'),
+    JSON.stringify({ enLocal, enHint }));
+  check('the API key is a password field with a show/hide button',
+    hidden === 'password' && shown === 'text' && key.type === 'password'
+    && showLabel === 'Show' && hideLabel === 'Hide' && show.getAttribute('aria-pressed') === 'false',
+    JSON.stringify({ hidden, shown, showLabel, hideLabel }));
+  ed.remove();
+
+  const c = document.createElement('hungarian-transport-card');
+  c._reloadSafe = () => {};
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu' };
+  c.setConfig({ language: 'hu' });
+  c._showMapNotice('Nincs adat');
+  const btn = document.querySelector('.ht-map-notice button');
+  const huOk = btn && btn.textContent;
+  c._closeVehicleMap();
+  c.setConfig({ language: 'en' });
+  c._showMapNotice('No data');
+  const enOk = document.querySelector('.ht-map-notice button').textContent;
+  c._closeVehicleMap();
+  check('the map notice button is translated', huOk === 'Rendben' && enOk === 'OK', JSON.stringify({ huOk, enOk }));
+  c.remove();
 }
 
 process.exit(failed ? 1 : 0);

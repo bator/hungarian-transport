@@ -2,6 +2,9 @@ import { BKK_API } from '../config.js';
 import { codedError } from '../i18n.js';
 import { BkkLib } from '../lib/core.js';
 
+/* A departure board is shared between cards for this long. */
+const BOARD_TTL_MS = 20000;
+
 Object.assign(BkkLib, {
   _mem: {},
   _inflight: {},
@@ -129,7 +132,7 @@ Object.assign(BkkLib, {
   departureBoard(apiKey, stopId, horizon) {
     const key = String(stopId) + '|' + String(horizon);
     const hit = BkkLib._boards.get(key);
-    if (hit && Date.now() - hit.ts < 20000) return Promise.resolve(hit.data);
+    if (hit && Date.now() - hit.ts < BOARD_TTL_MS) return Promise.resolve(hit.data);
     const inflight = BkkLib._boardInflight.get(key);
     if (inflight) return inflight;
     const run = BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
@@ -140,7 +143,11 @@ Object.assign(BkkLib, {
       includeReferences: 'true',
       includeVehicleFromTrip: 'true',
     }, true).then((data) => {
-      BkkLib._boards.set(key, { ts: Date.now(), data });
+      /* Every stop and horizon a card ever showed would stay otherwise: a
+         planner tried on a dozen origins kept a dozen full boards. */
+      const now = Date.now();
+      BkkLib._boards.forEach((v, k) => { if (now - v.ts >= BOARD_TTL_MS) BkkLib._boards.delete(k); });
+      BkkLib._boards.set(key, { ts: now, data });
       return data;
     }).finally(() => {
       BkkLib._boardInflight.delete(key);

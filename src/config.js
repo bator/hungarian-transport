@@ -32,8 +32,13 @@ export function clampMinutesAfter(value) {
 }
 
 /* Keys that only change how the card looks: a change to them alone must not
-   refetch the departures. Everything else selects or filters the data. */
-export const PRESENTATION_KEYS = ['name', 'language', 'type'];
+   refetch the departures. Everything else selects or filters the data.
+   Home Assistant hands its own layout keys (sections grid, visibility,
+   card-mod) to setConfig too. */
+export const PRESENTATION_KEYS = [
+  'name', 'language', 'type',
+  'grid_options', 'view_layout', 'visibility', 'layout_options', 'card_mod',
+];
 const STRING_KEYS = ['name', 'stopId', 'stopName', 'destKey', 'destName', 'destStopId', 'city', 'apiKey', 'language', 'stopKind', 'destKind'];
 
 /* Hand-written YAML arrives as whatever the user typed: `routeIds: "9,109"`

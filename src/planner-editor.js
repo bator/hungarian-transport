@@ -4,6 +4,10 @@ import { t } from './i18n.js';
 export class BKKPlannerCardEditor extends BKKHopCardEditor {
   _mode() { return 'all'; }
 
+  /* The planner's pair changes in the card itself: an "A → B" name baked
+     in here would be wrong after the first pick there. Its title is its own. */
+  _autoName() { return false; }
+
   setConfig(config) {
     super.setConfig(config);
     this._hideModeControls();

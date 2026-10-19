@@ -19,6 +19,8 @@ export class BKKPlannerCard extends BKKHopCard {
     this._destRoutes = {};
     this._destHits = [];
     this._destsLoading = false;
+    /* The origin whose reachable destinations are loaded (or loading). */
+    this._destsFor = '';
     this._pickersMounted = false;
     /* Planning time lives on the card only: a saved time would be stale on
        the next visit. mode: now | depart | arrive; at: epoch ms. */
@@ -76,7 +78,11 @@ export class BKKPlannerCard extends BKKHopCard {
      journey lookup still fetches belongs to the old pair and must not paint. */
   _invalidatePlan() {
     this._gen += 1;
-    /* A destination search still running belongs to the old origin. */
+    /* So do the searches typed or still running: their hits would paint
+       under a field that was just picked or cleared. */
+    if (this._searchTimer) { clearTimeout(this._searchTimer); this._searchTimer = null; }
+    if (this._destTimer) { clearTimeout(this._destTimer); this._destTimer = null; }
+    this._searchSeq += 1;
     this._destSearchSeq += 1;
     this._reloadActive = false;
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
@@ -176,6 +182,26 @@ export class BKKPlannerCard extends BKKHopCard {
       if (gen !== this._gen) return;
       this._journeyLoading = false;
     });
+  }
+
+  set hass(hass) {
+    super.hass = hass;
+    if (!this._pickersMounted) return;
+    /* The suggestions are this user's stops: they wait for hass to say who
+       that is, and follow a new login. */
+    if (this._historyFor !== ((hass && hass.connection) || null)) this._paintFav();
+    this._ensureDests();
+  }
+
+  /* Language from hass after the pickers were drawn: their labels, the
+     time switch and the destination hint follow, not only the board. */
+  _langChanged() {
+    if (this._pickersMounted) {
+      this._syncPickerLabels();
+      const box = this._planEl('pdhits');
+      if (box && box.querySelector('.hint') && !box.querySelector('.hit')) this._paintDestHits('');
+    }
+    super._langChanged();
   }
 
   _emptyBodyMessage(lang, cfg) {
@@ -607,6 +633,15 @@ export class BKKPlannerCard extends BKKHopCard {
     if (first) this._mountPickers();
     else this._syncPickerLabels();
     this._ensureDepartureCaption();
+    this._ensureDests();
+  }
+
+  /* An origin from the YAML or the editor needs its reachable destinations
+     too, not only one picked in the card. */
+  _ensureDests() {
+    const cfg = this._config || {};
+    if (!this._pickersMounted || !this._hass || !cfg.stopId || this._destsFor === cfg.stopId) return;
+    this._loadDests();
   }
 
   /* Itineraries sit between the pickers and the departure board. */
@@ -1029,7 +1064,12 @@ ${this._stopPinCss()}
     const box = this._planEl('pfav');
     if (!box) return;
     const cfg = this._config || {};
-    const conn = (this._hass && this._hass.connection) || null;
+    /* Before hass there is no user to load suggestions for. */
+    if (!this._hass) {
+      box.innerHTML = '';
+      return;
+    }
+    const conn = this._hass.connection || null;
     if (this._historyFor !== conn) {
       this._historyFor = conn;
       BkkLib.loadStopHistory(this._hass).then((list) => {
@@ -1085,6 +1125,10 @@ ${this._stopPinCss()}
     }
     const fav = this._planEl('pfav');
     if (fav) fav.classList.toggle('hidden', !!cfg.stopName);
+    const sel = this._planEl('pmin');
+    if (sel) sel.setAttribute('aria-label', t(lang, 'plannerStep3'));
+    const at = this._planEl('pat');
+    if (at) at.setAttribute('aria-label', t(lang, 'plannerWhen'));
     if (dest) {
       dest.textContent = cfg.destName || '';
       dest.classList.toggle('show', !!cfg.destName);
@@ -1191,6 +1235,10 @@ ${this._stopPinCss()}
     this._journeys = [];
     this._dests = [];
     this._destRoutes = {};
+    this._destsFor = '';
+    /* A destination load still running belongs to the cleared origin. */
+    this._destSeq += 1;
+    this._destsLoading = false;
     this._config = Object.assign({}, this._config, {
       stopId: '',
       stopName: '',
@@ -1286,6 +1334,7 @@ ${this._stopPinCss()}
   async _loadDests() {
     const cfg = this._config || {};
     if (!cfg.stopId) return;
+    this._destsFor = cfg.stopId;
     const seq = ++this._destSeq;
     this._destsLoading = true;
     this._paintDestHits('');

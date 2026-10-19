@@ -72,7 +72,10 @@ export class BKKHopCard extends HTMLElement {
     }
     this._holdGate();
     const next = normalizeCardConfig(config);
-    const prevKey = this._configDataKey;
+    /* Against the config the card shows now, not the one last set: the
+       planner's in-card picks change it, and re-applying the configured
+       stops (a title edit in the editor preview) must bring them back. */
+    const prevKey = this._configDataKey != null ? configDataKey(this._config) : null;
     const nextKey = configDataKey(next);
     this._config = next;
     this._configDataKey = nextKey;
@@ -122,7 +125,7 @@ export class BKKHopCard extends HTMLElement {
     const viaBefore = this._viaIntegration;
     this._hass = hass;
     BkkLib._hass = hass;
-    if (this._lang() !== langBefore) this._paint();
+    if (this._lang() !== langBefore) this._langChanged();
     /* The integration's futar service can register after the first paint
        (key added in the options flow): reload once it shows up. */
     this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
@@ -134,6 +137,12 @@ export class BKKHopCard extends HTMLElement {
       this._paint();
     }
     this._maybeFillKey();
+  }
+
+  /* With `language: auto` Home Assistant calls setConfig before hass, so the
+     first paint is in the browser's language: redraw in the user's. */
+  _langChanged() {
+    this._paint();
   }
 
   /* hass is set on every state change, so looking for a sibling card's key has
@@ -245,7 +254,7 @@ export class BKKHopCard extends HTMLElement {
     const ready = cfg.stopId && cfg.destKey;
     if (cfg.name) return cfg.name;
     if (ready) return `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
-    return 'Hungarian transport';
+    return t(this._lang(), 'cardTitle');
   }
 
   _render() {
@@ -801,7 +810,7 @@ ${this._stopPinCss()}
         .ht-map-notice{background:var(--card-background-color,#fff);padding:16px 18px;border-radius:10px;max-width:360px;font:14px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.3);color:var(--primary-text-color,#222)}
         .ht-map-notice button{margin-top:12px;border:0;background:var(--primary-color,#03a9f4);color:#fff;padding:8px 12px;border-radius:6px;cursor:pointer}
       </style>
-      <div class="ht-map-notice" role="dialog">${BkkLib.esc(message)}<br><button type="button">OK</button></div>
+      <div class="ht-map-notice" role="dialog">${BkkLib.esc(message)}<br><button type="button">${BkkLib.esc(t(this._lang(), 'mapOk'))}</button></div>
     `;
     document.body.appendChild(overlay);
     this._mapOverlay = overlay;
@@ -1373,7 +1382,9 @@ ${this._stopPinCss()}
           ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
           : earlyRows.slice();
         merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
-        if (!merged.length) {
+        /* A city board is filled from Transitous inside departures() already:
+           a second fill here only repeated the same lookups on every poll. */
+        if (!merged.length && mode !== 'helyi') {
           merged = await BkkLib.fillTransitousIfEmpty(merged, origin, dest, {
             mode: this._departMode(),
             minutesAfter: cfg.minutesAfter,
