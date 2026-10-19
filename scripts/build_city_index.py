@@ -82,7 +82,7 @@ CITY_FEEDS = [
     {
         "id": "dombovar",
         "name": "Dombóvár — PTKE",
-        "url": "https://dombovar.ptke.hu/gtfs",
+        "url": "https://dombovar.ptke.hu/gtfs/",
         "file": "dombovar.zip",
     },
     {
@@ -100,7 +100,7 @@ CITY_FEEDS = [
     {
         "id": "bahart",
         "name": "Balaton — Bahart",
-        "url": "https://gtfs.menetbrand.com/download/bahart",
+        "url": "https://gtfs.menetbrand.com/download/bahart/",
         "url_env": "BAHART_GTFS_URL",
         "catalog_query": "bahart",
         "file": "bahart.zip",
@@ -108,37 +108,37 @@ CITY_FEEDS = [
     {
         "id": "hodmezovasarhely",
         "name": "Hódmezővásárhely — HVSZ",
-        "url": "https://gtfs.menetbrand.com/download/hodmezovasarhely",
+        "url": "https://gtfs.menetbrand.com/download/hodmezovasarhely/",
         "file": "hodmezovasarhely.zip",
     },
     {
         "id": "kaposvar",
         "name": "Kaposvár — KKZRT",
-        "url": "https://gtfs.menetbrand.com/download/kaposvar",
+        "url": "https://gtfs.menetbrand.com/download/kaposvar/",
         "file": "kaposvar.zip",
     },
     {
         "id": "kiskunhalas",
         "name": "Kiskunhalas — Halasbusz",
-        "url": "https://gtfs.menetbrand.com/download/kiskunhalas",
+        "url": "https://gtfs.menetbrand.com/download/kiskunhalas/",
         "file": "kiskunhalas.zip",
     },
     {
         "id": "szekesfehervar",
         "name": "Székesfehérvár — helyi",
-        "url": "https://gtfs.menetbrand.com/download/szekesfehervar",
+        "url": "https://gtfs.menetbrand.com/download/szekesfehervar/",
         "file": "szekesfehervar.zip",
     },
     {
         "id": "tatabanya",
         "name": "Tatabánya — T-Busz",
-        "url": "https://gtfs.menetbrand.com/download/tatabanya",
+        "url": "https://gtfs.menetbrand.com/download/tatabanya/",
         "file": "tatabanya.zip",
     },
     {
         "id": "varpalota",
         "name": "Várpalota — THURY-BUSZ",
-        "url": "https://gtfs.menetbrand.com/download/varpalota",
+        "url": "https://gtfs.menetbrand.com/download/varpalota/",
         "file": "varpalota.zip",
     },
 ]
