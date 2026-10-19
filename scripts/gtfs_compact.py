@@ -58,6 +58,9 @@ _BLOCKED_HOSTS = frozenset(
         "::",
     }
 )
+# DNS64 on an IPv6-only network answers with these; the IPv4 host in the
+# low 32 bits is the one that counts.
+_NAT64 = ipaddress.IPv6Network("64:ff9b::/96")
 _ENV_LOADED = False
 _MDB_ACCESS: str | None = None
 
@@ -114,16 +117,16 @@ def feed_error(feed_id: str, err: BaseException) -> str:
 
 
 def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    if ip.version == 6 and ip.ipv4_mapped is not None:
-        return _blocked_ip(ip.ipv4_mapped)
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
+    """Anything but a public unicast address: private, loopback, link-local,
+    carrier-grade NAT (100.64.0.0/10), documentation, multicast, reserved."""
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            return _blocked_ip(ip.ipv4_mapped)
+        if ip in _NAT64:
+            return _blocked_ip(ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF))
+        if ip.is_site_local:
+            return True
+    return bool(not ip.is_global or ip.is_multicast or ip.is_reserved or ip.is_unspecified)
 
 
 def resolve_public_host(host: str, port: int) -> None:
@@ -194,14 +197,30 @@ def _safe_http_url(url: str) -> str:
     return text
 
 
+def assert_https(url: str, *, allow_insecure: bool = False) -> None:
+    """Refuse a plain-http URL (any spelling of the scheme) unless the feed
+    may use http."""
+    scheme = urllib.parse.urlparse((url or "").strip()).scheme
+    if scheme != "https" and not (allow_insecure and scheme == "http"):
+        raise ValueError(f"blocked url scheme {scheme or 'none'} (https required)")
+
+
 class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to a public host, and from https only to https
+    unless the feed may use plain http."""
+
+    def __init__(self, allow_insecure: bool = False):
+        super().__init__()
+        self.allow_insecure = allow_insecure
+
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         assert_public_http_url(newurl)
+        assert_https(newurl, allow_insecure=self.allow_insecure)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _urlopen(req: urllib.request.Request, timeout: int = 120):
-    opener = urllib.request.build_opener(_PublicRedirectHandler)
+def _urlopen(req: urllib.request.Request, timeout: int = 120, *, allow_insecure: bool = False):
+    opener = urllib.request.build_opener(_PublicRedirectHandler(allow_insecure))
     return opener.open(req, timeout=timeout)
 
 
@@ -275,17 +294,20 @@ def _mdb_url(query: str) -> str:
     )
     feeds = data if isinstance(data, list) else []
     needle = query.casefold()
-    for feed in feeds:
-        if not isinstance(feed, dict):
-            continue
-        provider = str(feed.get("provider") or "")
-        fid = str(feed.get("id") or "")
-        if needle not in provider.casefold() and needle not in fid.casefold():
-            continue
+    matches = [
+        feed
+        for feed in feeds
+        if isinstance(feed, dict)
+        and (needle in str(feed.get("provider") or "").casefold() or needle in str(feed.get("id") or "").casefold())
+    ]
+    # The Mobility Database's own copy (validated, https) of any matching
+    # feed beats a publisher URL, which may be plain http or gone.
+    for feed in matches:
         latest = feed.get("latest_dataset") if isinstance(feed.get("latest_dataset"), dict) else {}
         hosted = (latest.get("hosted_url") or "").strip()
         if hosted:
             return hosted
+    for feed in matches:
         info = feed.get("source_info") if isinstance(feed.get("source_info"), dict) else {}
         producer = (info.get("producer_url") or "").strip()
         if producer:
@@ -457,9 +479,13 @@ def decode_polyline(encoded: str, precision: int = 5) -> list[tuple[float, float
     return coords
 
 
+def _zip_magic(path: Path) -> bool:
+    with Path(path).open("rb") as fh:
+        return fh.read(4)[:2] == b"PK"
+
+
 def open_gtfs_zip(zpath: Path) -> zipfile.ZipFile:
-    head = zpath.read_bytes()[:4]
-    if head[:2] != b"PK":
+    if not _zip_magic(zpath):
         raise zipfile.BadZipFile(f"{zpath} is not a zip file")
     z = zipfile.ZipFile(zpath)
     try:
@@ -693,9 +719,13 @@ def _open_csv(z, name: str) -> Iterator[dict[str, str]]:
     return _csv_rows(z, _member(z, name))
 
 
-def download_zip(url: str, dest: Path) -> dict:
-    """Write url to dest via a sibling tempfile so a kill cannot leave a truncated zip."""
+def download_zip(url: str, dest: Path, *, allow_insecure: bool = False) -> dict:
+    """Write url to dest via a sibling tempfile so a kill cannot leave a truncated zip.
+
+    HTTPS only, redirects included, unless allow_insecure (a feed entry marked
+    "insecure"; see download_feed)."""
     assert_public_http_url(url)
+    assert_https(url, allow_insecure=allow_insecure)
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix="gtfs_", suffix=".zip", dir=str(dest.parent))
     os.close(fd)
@@ -705,8 +735,12 @@ def download_zip(url: str, dest: Path) -> dict:
             url,
             headers={"User-Agent": UA, "Accept-Encoding": "identity"},
         )
-        with _urlopen(req, timeout=120) as resp, tmp.open("wb") as out:
-            assert_public_http_url(resp.geturl())
+        with _urlopen(req, timeout=120, allow_insecure=allow_insecure) as resp, tmp.open("wb") as out:
+            final = resp.geturl()
+            assert_public_http_url(final)
+            assert_https(final, allow_insecure=allow_insecure)
+            if urllib.parse.urlparse(final).scheme == "http" and urllib.parse.urlparse(url).scheme == "https":
+                print(f"warn insecure download {dest.name}: https redirected to plain http", file=sys.stderr)
             cl = resp.headers.get("Content-Length")
             if cl and cl.isdigit() and int(cl) > MAX_DOWNLOAD:
                 raise ValueError("download too large")
@@ -719,7 +753,7 @@ def download_zip(url: str, dest: Path) -> dict:
                 if total > MAX_DOWNLOAD:
                     raise ValueError("download too large")
                 out.write(chunk)
-        if tmp.stat().st_size < 4 or tmp.read_bytes()[:2] != b"PK":
+        if tmp.stat().st_size < 4 or not _zip_magic(tmp):
             raise zipfile.BadZipFile(f"{dest.name} is not a zip file")
         tmp.replace(dest)
         return {"size": dest.stat().st_size, "content_length": str(dest.stat().st_size)}
@@ -733,23 +767,28 @@ def download_feed(url: str, dest: Path, *, allow_insecure: bool = False) -> dict
     """Download a feed, over HTTPS even when the published URL is http://.
 
     Plain HTTP (an unauthenticated zip that becomes card data) is used only
-    for a feed whose entry says ``"insecure": True``, after HTTPS failed, and
-    then with a warning on stderr; otherwise the HTTPS failure is raised.
+    for a feed whose entry says ``"insecure": True``: after HTTPS failed, or
+    when its HTTPS URL redirects to http, each time with a warning on stderr.
+    Otherwise the HTTPS failure is raised, and a redirect to http is one.
     """
-    insecure = url.startswith("http://")
-    candidates = ["https://" + url[len("http://") :]] if insecure else [url]
+    parsed = urllib.parse.urlparse((url or "").strip())
+    # urlparse lower-cases the scheme, so "HTTP://" is plain http as well.
+    insecure = parsed.scheme == "http"
+    candidates = [(parsed._replace(scheme="https").geturl(), False)] if insecure else [(url, False)]
     if insecure and allow_insecure:
-        candidates.append(url)
+        candidates.append((parsed.geturl(), True))
     last: Exception | None = None
-    for u in candidates:
-        if u.startswith("http://"):
+    for u, plain in candidates:
+        if plain:
             print(
                 f"warn insecure download {dest.name}: https failed ({type(last).__name__}), "
                 "using plain http as the feed entry allows",
                 file=sys.stderr,
             )
         try:
-            return download_zip(u, dest)
+            # An https attempt may still be redirected to http when the feed
+            # entry allows plain http at all (the publisher's own setup).
+            return download_zip(u, dest, allow_insecure=allow_insecure)
         except Exception as err:
             last = err
     if insecure and not allow_insecure:
@@ -758,18 +797,6 @@ def download_feed(url: str, dest: Path, *, allow_insecure: bool = False) -> dict
             "plain http is not allowed for this feed"
         ) from last
     raise last or RuntimeError(f"download failed: {dest.name}")
-
-
-def download_any(urls: Iterable[str], dest: Path, *, allow_insecure: bool = False) -> dict:
-    """download_feed from the first URL that works, so a broken keyed
-    override still falls back to the public zip."""
-    last: Exception | None = None
-    for url in urls:
-        try:
-            return download_feed(url, dest, allow_insecure=allow_insecure)
-        except Exception as err:
-            last = err
-    raise last or RuntimeError(f"no download url: {dest.name}")
 
 
 def load_parts(
@@ -798,6 +825,60 @@ def load_parts(
             zpath=zpath,
             split_platforms_m=split_platforms_m,
         )
+
+
+def _densest(sids: list[str], sid2ll: dict[str, tuple[float, float]], limit_m: float) -> str:
+    """The platform with the most others within limit_m, then the smallest
+    total distance to them; stops.txt order breaks a tie."""
+
+    def score(sid: str) -> tuple[int, float]:
+        d = [_meters(sid2ll[sid], sid2ll[o]) for o in sids]
+        return -sum(1 for m in d if m <= limit_m), sum(d)
+
+    return min(sids, key=score)
+
+
+def _split_platforms(
+    sid2p: dict[str, str],
+    sid2n: dict[str, str],
+    sid2ll: dict[str, tuple[float, float]],
+    pname: dict[str, str],
+    pll: dict[str, tuple[float, float]],
+    pnum: dict[str, str],
+    limit_m: float,
+) -> None:
+    """Make every platform farther than limit_m from its station a stop of
+    its own (in place).
+
+    The distance is measured from the station's own position, or, when it
+    has none, from its densest platform (most platforms within limit_m, then
+    the smallest total distance): the first platform listed may be the far
+    one, and a plain centroid drifts towards it. Such a station then sits at
+    the centroid of the platforms it kept.
+
+    A split platform with the station's name keeps the station number, so a
+    lookup by number still lands on the station's stops; one with a name of
+    its own is another stop and gets no number.
+    """
+    platforms: dict[str, list[str]] = defaultdict(list)
+    for sid, p in sid2p.items():
+        if sid != p and sid in sid2ll:
+            platforms[p].append(sid)
+    for p, sids in platforms.items():
+        own = p in sid2ll
+        ref = sid2ll[p] if own else sid2ll[_densest(sids, sid2ll, limit_m)]
+        kept: list[tuple[float, float]] = []
+        for sid in sids:
+            ll = sid2ll[sid]
+            if _meters(ll, ref) <= limit_m:
+                kept.append(ll)
+                continue
+            sid2p[sid] = sid
+            pname[sid] = sid2n[sid] or pname[p]
+            pll[sid] = ll
+            pnum[sid] = stop_num(p) if pname[sid] == pname[p] else ""
+        if not own and kept:
+            pll[p] = (sum(ll[0] for ll in kept) / len(kept), sum(ll[1] for ll in kept) / len(kept))
 
 
 def _load_parts(
@@ -853,18 +934,10 @@ def _load_parts(
     for sid, p in sid2p.items():
         if p not in pll and sid in sid2ll:
             pll[p] = sid2ll[sid]
-    # Station numbers stay with split platforms, so an id lookup by number
-    # still lands on the station's stops.
+    # Stop number per stop when it is not stop_num(stop id); "" = none.
     pnum: dict[str, str] = {}
     if split_platforms_m:
-        for sid, p in list(sid2p.items()):
-            if p == sid or sid not in sid2ll or p not in pll:
-                continue
-            if _meters(sid2ll[sid], pll[p]) > split_platforms_m:
-                sid2p[sid] = sid
-                pname[sid] = sid2n[sid]
-                pll[sid] = sid2ll[sid]
-                pnum[sid] = stop_num(p)
+        _split_platforms(sid2p, sid2n, sid2ll, pname, pll, pnum, split_platforms_m)
 
     routes: dict[str, str] = {}
     route_types: dict[str, int] = {}
@@ -1054,7 +1127,7 @@ def _load_parts(
             "op_id": op,
             "op_name": name,
             "feed": version,
-            "s": [[pre + p, pname.get(p, p), pnum.get(p) or stop_num(p)] for p in parents],
+            "s": [[pre + p, pname.get(p, p), pnum[p] if p in pnum else stop_num(p)] for p in parents],
             # lat, lon per stop as integers of 1e-5 degrees; 0, 0 = unknown.
             "g": coords,
             "shapes": shape_list,
@@ -1107,9 +1180,11 @@ def existing_trips(out: Path) -> int | None:
         return None
 
 
-def operator_trips(out: Path) -> dict[str, int] | None:
-    """Trips per operator id of an existing index with operators; None when
-    there is no readable index. A trip belongs to the operator of its first stop."""
+def operator_stats(out: Path) -> dict[str, tuple[int, str]] | None:
+    """(trips, last service day YYYYMMDD or "") per operator id of an
+    existing index with operators; None when there is no readable index. A
+    trip belongs to the operator of its first stop; the last service day
+    follows calendar_end() over the services the operator's trips use."""
     if not out.exists():
         return None
     try:
@@ -1117,12 +1192,32 @@ def operator_trips(out: Path) -> dict[str, int] | None:
             idx = json.load(fh)
         ops = idx.get("o") or []
         stops = idx.get("s") or []
+        cal = idx.get("c") or []
+        added = idx.get("a") or []
         counts: dict[str, int] = defaultdict(int)
+        services: dict[str, set[int]] = defaultdict(set)
         for t in idx.get("t") or []:
-            counts[ops[stops[t[2][0]][3]][0]] += 1
-        return dict(counts)
+            op = ops[stops[t[2][0]][3]][0]
+            counts[op] += 1
+            services[op].add(t[0])
+        out_stats: dict[str, tuple[int, str]] = {}
+        for op, n in counts.items():
+            ix = sorted(i for i in services[op] if isinstance(i, int) and 0 <= i < len(cal))
+            end = calendar_end({
+                "c": [cal[i] for i in ix],
+                "a": [added[i] if i < len(added) else [] for i in ix],
+            })
+            out_stats[op] = (n, end)
+        return out_stats
     except (OSError, json.JSONDecodeError, gzip.BadGzipFile, IndexError, KeyError, TypeError):
         return None
+
+
+def operator_trips(out: Path) -> dict[str, int] | None:
+    """Trips per operator id of an existing index with operators; None when
+    there is no readable index. A trip belongs to the operator of its first stop."""
+    stats = operator_stats(out)
+    return None if stats is None else {op: n for op, (n, _end) in stats.items()}
 
 
 def shapes_stem(out: Path) -> str:

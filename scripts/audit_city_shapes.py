@@ -24,10 +24,15 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gtfs_compact import decode_polyline  # noqa: E402
+from gtfs_compact import decode_polyline, shapes_stem  # noqa: E402
 
 TOLERANCE_M = 100.0
 LONG_SEGMENT_M = 3000.0
+# A shape counts as a closed loop when its ends meet within the tolerance and
+# it is this many times longer than the gap between them (and longer than two
+# tolerances): a short out-and-back whose ends sit 80 m apart is not one.
+LOOP_LENGTH_RATIO = 10.0
+DECODED_CACHE = 256
 
 
 def _gap(p: tuple[float, float], a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -46,13 +51,27 @@ def distance_to_shape(p: tuple[float, float], shape: list[tuple[float, float]]) 
     return min(_gap(p, shape[i], shape[i + 1]) for i in range(len(shape) - 1))
 
 
+def shape_length(shape: list[tuple[float, float]]) -> float:
+    return sum(_gap(a, b, b) for a, b in zip(shape, shape[1:]))
+
+
+def is_loop(shape: list[tuple[float, float]], tolerance_m: float) -> bool:
+    if len(shape) <= 2:
+        return False
+    gap = _gap(shape[0], shape[-1], shape[-1])
+    if gap > tolerance_m:
+        return False
+    length = shape_length(shape)
+    return length > 2 * tolerance_m and length > LOOP_LENGTH_RATIO * gap
+
+
 def ordered_miss(points: list, shape: list[tuple[float, float]], tolerance_m: float):
     """Walk the shape forward: the first stop it does not reach within
     tolerance_m after the previous one, as (position, metres to the whole
     shape), or None when every stop is reached in order."""
     # A closed loop (Szeged 78 starts and ends past Mars tér, its first
     # stop) is walked round once more, so a trip may start anywhere on it.
-    if len(shape) > 2 and _gap(shape[0], shape[-1], shape[-1]) <= tolerance_m:
+    if is_loop(shape, tolerance_m):
         shape = shape + shape[1:]
     pos = 0
     last = len(shape) - 1
@@ -81,10 +100,21 @@ class Shapes:
         self.dir = index_path.parent / sh["dir"] if sh and sh.get("dir") else None
         self.n = int(sh.get("n") or 0) if sh else 0
         self._shards: dict[int, list[str]] = {}
+        # Many stop patterns share a shape: decode it once. Bounded, since
+        # the decoded Volán shapes would not fit in memory at once; audit()
+        # asks for them in ref order, so each is decoded once anyway.
+        self._decoded: dict[int, list[tuple[float, float]]] = {}
 
     def get(self, ref) -> list[tuple[float, float]]:
         if self.dir is None or self.n <= 0 or not isinstance(ref, int) or ref < 0:
             return []
+        if ref not in self._decoded:
+            if len(self._decoded) >= DECODED_CACHE:
+                self._decoded.clear()
+            self._decoded[ref] = self._decode(ref)
+        return self._decoded[ref]
+
+    def _decode(self, ref: int) -> list[tuple[float, float]]:
         k = ref % self.n
         if k not in self._shards:
             path = self.dir / f"{k:02d}.json.gz"
@@ -104,6 +134,10 @@ def audit(index_path: Path, tolerance_m: float = TOLERANCE_M) -> dict:
     stops = idx.get("s") or []
     geo = idx.get("g") or []
     ops = [o[0] if isinstance(o, list) else str(o) for o in (idx.get("o") or [])]
+    # The Volán index has no operator list (stop rows without one): all its
+    # trips are one operator, named after the index ("volan").
+    if not ops:
+        ops = [shapes_stem(index_path)]
 
     def coord(i: int):
         if 2 * i + 1 >= len(geo) or not (geo[2 * i] or geo[2 * i + 1]):
@@ -130,7 +164,7 @@ def audit(index_path: Path, tolerance_m: float = TOLERANCE_M) -> dict:
         "no_coords": 0, "long_segment": 0,
     })
     worst: list[dict] = []
-    for (ref, _ps), rec in patterns.items():
+    for (ref, _ps), rec in sorted(patterns.items(), key=lambda kv: kv[0][0] if isinstance(kv[0][0], int) else -1):
         op = op_of(rec["ps"][0])
         r = per_op[op]
         r["patterns"] += 1

@@ -287,9 +287,11 @@ code and re-uploads that release's assets, so fresh downloads get current
 feeds. A release run compares the new indexes with the latest published
 ones: a city feed that is gone, a feed that lost more than half of its trips,
 or a Volán index with far too few trips fails the run, and the published
-assets stay as they are. To accept a feed that is gone for good, list its id
-in the `allow_missing` input (or the `HUNGARIAN_TRANSPORT_ALLOW_MISSING`
-repository variable for the weekly run) and drop it from `CITY_FEEDS`.
+assets stay as they are (see [When an update fails](#when-an-update-fails)).
+To accept a feed that is gone for good, list its id in the `allow_missing`
+input of a manual run, or in the `HUNGARIAN_TRANSPORT_ALLOW_MISSING`
+repository variable for every run including the weekly one (the input adds
+to the variable), and drop it from `CITY_FEEDS`.
 HACS does not re-download a version that is already installed, so existing
 installs only pick up new feeds with the next release, or with the local
 rebuild below.
@@ -317,17 +319,55 @@ To rebuild them yourself on Home Assistant OS:
    integration built from an uploaded zip is kept. A local `mav-gtfs.zip` or
    pfaedle directory also rebuilds `mav-index.json.gz`; with `MAV_GTFS_URL`
    set, each daily run downloads the zip again once it is 20 hours old. A MÁV
-   index that fails its audit is not written. A rebuild failure notifies and
-   exits 1, like Volán and city, and keeps the previous index; a city feed
-   that failed is downloaded and rebuilt again on the next run. The city
-   index refuses to drop a feed it had (`HUNGARIAN_TRANSPORT_ALLOW_MISSING` in
-   `.env` accepts one). The shapes folders travel with their indexes. Simplifying the
-   Volán `shapes.txt` (8 million points) takes about a minute on a desktop and
-   longer on a Raspberry Pi; `run_update.sh` allows 30 minutes.
+   index that fails its audit is not written. Volán, city and MÁV fail
+   independently: each failure notifies and keeps that index as it was, and
+   the rest of the run goes on. A city feed that failed is downloaded and
+   rebuilt again on the next run; one left out because its calendar ended is
+   not, until the publisher posts a new zip. The shapes folders travel with
+   their indexes. Simplifying the Volán `shapes.txt` (8 million points) takes
+   about a minute on a desktop and longer on a Raspberry Pi; `run_update.sh`
+   allows 30 minutes.
 
 Set `HUNGARIAN_TRANSPORT_WWW` if you installed the card somewhere else, for
 example `/config/www/hungarian-transport` for the manual `/local` install.
 Point `notify.admins` at whatever notifier you use, or drop that automation.
+
+### When an update fails
+
+The local update sends its failures to the webhook (and so to
+`notify.admins`); `run_update.sh` sends the ones the script cannot report
+itself. `/config/hungarian-transport/update.log` has the details.
+
+- *… frissítés sikertelen: …* — a feed did not download, did not parse or
+  failed a guard. That index stays as it was and the next run tries again.
+- *… el sem indult* or *… összeomlott (exit N)* — the script could not start
+  or crashed. Usually `/config/hungarian-transport/` holds a half-copied set
+  of scripts: copy all of `scripts/` again.
+- *… megszakítva* or *… megölve* — Home Assistant restarted during the run,
+  the 30-minute limit hit, or the host ran out of memory.
+
+The city index (locally and in a release run) is not replaced when the
+rebuild would lose a feed that the index in place still runs, or more than
+half of a feed's trips. The message names the feed:
+
+- `<id> missing (had N trips)` — the feed did not download or parse.
+- `<id> calendar ended YYYY-MM-DD (had N trips, the previous index runs until
+  YYYY-MM-DD)` — the publisher's new zip ends before the timetable already
+  in the index.
+- `<id> N trips vs M` — most of the feed's trips are gone.
+
+A feed whose calendar has ended is left out of the index with a warning.
+That is not a failure once the timetable the index had for it has ended as
+well: Bahart after the last sailing of the season, the Kecskemét narrow-gauge
+railway out of season, or a feed published for a few weeks at a time
+(Miskolc) whose next zip is late. It comes back with the publisher's next
+zip. A Volán index whose calendar has ended is refused outright.
+
+To accept a loss on purpose, set `HUNGARIAN_TRANSPORT_ALLOW_MISSING` to the
+feed ids (comma-separated, `volan-local` for the Volán local lines, or
+`all`) in `/config/hungarian-transport/.env`, and clear it once the feed is
+back; on GitHub use the `allow_missing` input or the repository variable
+above.
 
 There is no direct coach between, for example, Székesfehérvár
 autóbusz-állomás and Kelenföld — such services terminate at Népliget. The card
@@ -350,6 +390,23 @@ npm test
 ```
 
 CI fails when the committed bundle or loader does not match `npm run build`.
+
+The GTFS scripts in `scripts/` are standard-library Python. Their tests need
+no network (the updater test also runs `run_update.sh`, so bash and
+coreutils `timeout`), and CI lints the Python with ruff:
+
+```bash
+python3 scripts/test_gtfs_compact.py
+python3 scripts/test_update_volan_index.py
+python3 scripts/test_build_guards.py
+pip install ruff==0.16.10
+ruff check --target-version py312 --select E,F,W,B --ignore E501,B905 custom_components scripts
+```
+
+`python3 scripts/audit_city_shapes.py city-index.json.gz` reports, per
+operator, how every stop pattern lines up with its `shapes.txt` route; the
+release run puts the report on its summary.
+
 Integration tests need Python 3.13:
 
 ```bash
