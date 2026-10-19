@@ -67,26 +67,47 @@ Object.assign(BkkLib, {
     });
     return out;
   },
-  /* One read per connection; a new login reads again. */
+  /* The server's list for this user; null when it cannot be read (no
+     websocket, or the call failed), which is not the same as empty. */
+  async _readServerHistory(hass) {
+    if (!hass || typeof hass.callWS !== 'function') return null;
+    try {
+      const res = await hass.callWS({ type: 'frontend/get_user_data', key: HISTORY_KEY });
+      /* null is an answer: this user has no history yet. */
+      return Array.isArray(res && res.value) ? res.value : [];
+    } catch (_e) {
+      return null;
+    }
+  },
+  /* Two copies of one history (the server's and this browser's, or two
+     devices'): every stop of either, each with its higher count and its
+     later use. */
+  _mergeStopHistory(a, b) {
+    const byId = new Map();
+    BkkLib._cleanStopHistory(a).concat(BkkLib._cleanStopHistory(b)).forEach((e) => {
+      const prev = byId.get(e.id);
+      if (!prev) {
+        byId.set(e.id, e);
+        return;
+      }
+      const newer = e.t > prev.t ? e : prev;
+      byId.set(e.id, Object.assign({}, prev, newer, { n: Math.max(prev.n, e.n), t: Math.max(prev.t, e.t) }));
+    });
+    return Array.from(byId.values());
+  },
+  /* One read per connection; a new login reads again. A failed read shows
+     the browser's copy but is not kept: the next look asks again. */
   loadStopHistory(hass) {
     const conn = (hass && hass.connection) || null;
     const memo = BkkLib._stopHistory;
     if (memo && memo.conn === conn) return memo.p;
     const p = (async () => {
-      let list = null;
-      if (hass && typeof hass.callWS === 'function') {
-        try {
-          const res = await hass.callWS({ type: 'frontend/get_user_data', key: HISTORY_KEY });
-          /* null is an answer: this user has no history yet. Only a failed
-             call falls back to the browser's copy. */
-          list = Array.isArray(res && res.value) ? res.value : [];
-        } catch (_e) {
-          list = localRead(hass);
-        }
-      } else {
-        list = localRead(hass);
+      const server = await BkkLib._readServerHistory(hass);
+      if (server === null) {
+        if (BkkLib._stopHistory && BkkLib._stopHistory.p === p) BkkLib._stopHistory = null;
+        return BkkLib._cleanStopHistory(localRead(hass));
       }
-      return BkkLib._cleanStopHistory(list);
+      return BkkLib._cleanStopHistory(server);
     })();
     BkkLib._stopHistory = { conn, p };
     return p;
@@ -99,8 +120,16 @@ Object.assign(BkkLib, {
     BkkLib._stopHistoryWrite = run.catch(() => { /* the next write still runs */ });
     return run;
   },
+  /* The server's list is read again right before each write, so another
+     device's picks since this page loaded are kept, not overwritten. When
+     it cannot be read, only this browser's copy is written: a list that
+     may be stale must not replace the server's. */
   async _recordStopNow(hass, stop) {
-    const list = (await BkkLib.loadStopHistory(hass)).map((e) => Object.assign({}, e));
+    const server = await BkkLib._readServerHistory(hass);
+    const memo = BkkLib._stopHistory;
+    const conn = (hass && hass.connection) || null;
+    const seen = memo && memo.conn === conn ? await memo.p.catch(() => []) : [];
+    const list = BkkLib._mergeStopHistory(server || [], BkkLib._mergeStopHistory(seen, localRead(hass)));
     const now = Date.now();
     const id = String(stop.id);
     let entry = list.find((e) => e.id === id);
@@ -120,9 +149,9 @@ Object.assign(BkkLib, {
     const next = BkkLib._cleanStopHistory(list
       .sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now))
       .slice(0, HISTORY_KEEP));
-    BkkLib._stopHistory = { conn: (hass && hass.connection) || null, p: Promise.resolve(next) };
+    BkkLib._stopHistory = { conn, p: Promise.resolve(next) };
     localWrite(hass, next);
-    if (hass && typeof hass.callWS === 'function') {
+    if (server !== null) {
       try {
         await hass.callWS({ type: 'frontend/set_user_data', key: HISTORY_KEY, value: next });
       } catch (_e) { /* the local copy still has it */ }

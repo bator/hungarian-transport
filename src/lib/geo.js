@@ -1,11 +1,16 @@
 import { PLATFORM_STRIP, pad2, tzFields } from '../config.js';
 import { BkkLib } from '../lib/core.js';
 
-/* A shape whose ends lie this close is a closed loop. */
+/* A shape whose ends lie this close is a closed loop, when it is also at
+   least this many times longer than that gap. */
 const SHAPE_LOOP_CLOSE_M = 100;
-/* A later vertex this much farther from a stop than the nearest one still
-   counts as passing that stop. */
-const SHAPE_SAME_STOP_M = 150;
+const SHAPE_LOOP_RATIO = 25;
+/* A stretch of shape this much farther from a stop than its closest
+   approach still passes that stop. */
+const SHAPE_PASS_M = 80;
+/* Metres of ride one metre of distance from a stop is worth: of two ways
+   between the stops, a close fit beats a slightly shorter one. */
+const SHAPE_PASS_WEIGHT = 4;
 
 Object.assign(BkkLib, {
   hm(ts) {
@@ -298,136 +303,6 @@ Object.assign(BkkLib, {
       return BkkLib.finiteLatLon(pt[0], pt[1]);
     }).filter(Boolean);
   },
-  sliceShapeMeters(shape, fromM, toM) {
-    const pts = BkkLib.validMapShape(shape);
-    if (pts.length < 2) return pts;
-    let a = Number(fromM);
-    let b = Number(toM);
-    if (!Number.isFinite(a) || !Number.isFinite(b)) return pts;
-    if (b < a) {
-      const tmp = a;
-      a = b;
-      b = tmp;
-    }
-    const out = [];
-    const push = (pt) => {
-      if (!pt) return;
-      const last = out[out.length - 1];
-      if (last && last[0] === pt[0] && last[1] === pt[1]) return;
-      out.push(pt);
-    };
-    push(BkkLib.pointAlongShape(pts, a));
-    let dist = 0;
-    for (let i = 1; i < pts.length; i++) {
-      const next = dist + BkkLib.haversineMeters(pts[i - 1], pts[i]);
-      if (next > a && next < b) push(pts[i]);
-      dist = next;
-    }
-    push(BkkLib.pointAlongShape(pts, b));
-    return out.length >= 2 ? out : pts;
-  },
-  clipShapeToHop(shape, details, origin, dest) {
-    const pts = BkkLib.validMapShape(shape);
-    if (pts.length < 2) return pts;
-    const sts = (details && details.sts) || [];
-    const stops = (details && details.stops) || {};
-    if (!sts.length || !origin) return pts;
-    let oidx = BkkLib.originIndex(sts, stops, origin);
-    if (oidx < 0) {
-      return pts;
-    }
-    let didx = -1;
-    const destObj = dest && (dest.id || dest.key || dest.name)
-      ? { id: dest.id, name: dest.key || dest.name }
-      : null;
-    if (destObj) {
-      for (let i = Math.max(0, oidx) + 1; i < sts.length; i++) {
-        const stop = Object.assign({ id: sts[i].stopId }, stops[sts[i].stopId] || {});
-        if (BkkLib.stopMatchesOrigin(stop, destObj)) {
-          didx = i;
-          break;
-        }
-      }
-    }
-    if (didx < 0) didx = sts.length - 1;
-    if (oidx <= 0 && didx >= sts.length - 1) {
-      return pts;
-    }
-    const d0 = Number(sts[oidx].shapeDistTraveled);
-    const d1 = Number(sts[didx].shapeDistTraveled);
-    if (!Number.isFinite(d0) || !Number.isFinite(d1) || d1 === d0) return pts;
-    let polyLen = 0;
-    for (let i = 1; i < pts.length; i++) {
-      polyLen += BkkLib.haversineMeters(pts[i - 1], pts[i]);
-    }
-    const maxOfficial = Math.max(0, ...sts.map((st) => {
-      const n = Number(st.shapeDistTraveled);
-      return Number.isFinite(n) ? n : 0;
-    }));
-    if (!(polyLen > 0) || !(maxOfficial > 0)) return pts;
-    const fromM = (Math.min(d0, d1) / maxOfficial) * polyLen;
-    const toM = (Math.max(d0, d1) / maxOfficial) * polyLen;
-    const sliced = BkkLib.sliceShapeMeters(pts, fromM, toM);
-    return sliced;
-  },
-  /* Drop the inbound GTFS tail before the card origin. Keep everything after
-     so a through train (9068 → Veszprém) is not cut at the hop destination. */
-  clipShapeFromBoard(shape, board, maxM) {
-    const pts = BkkLib.validMapShape(shape);
-    const start = Array.isArray(board)
-      ? BkkLib.mapGpsLatLon(board[0], board[1])
-      : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
-    if (pts.length < 2 || !start) return pts;
-    let best = 0;
-    let bestD = 1e15;
-    pts.forEach((p, i) => {
-      const d = BkkLib.haversineMeters(p, start);
-      if (d < bestD) {
-        bestD = d;
-        best = i;
-      }
-    });
-    const limit = Number.isFinite(Number(maxM)) && Number(maxM) > 0 ? Number(maxM) : 1200;
-    if (bestD > limit) return pts;
-    const out = pts.slice(best);
-    return out.length >= 2 ? out : pts;
-  },
-  /* GTFS/pfaedle stores one canonical direction. A hop at Kelenföld on a
-     Székesfehérvár→Kőbánya polyline must keep the prefix (toward Szfvár),
-     not the Kőbánya tail. Through trains keep that end of the line. */
-  clipShapeFromBoardToward(shape, board, dest, maxM) {
-    const pts = BkkLib.validMapShape(shape);
-    const start = Array.isArray(board)
-      ? BkkLib.mapGpsLatLon(board[0], board[1])
-      : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
-    const goal = Array.isArray(dest)
-      ? BkkLib.mapGpsLatLon(dest[0], dest[1])
-      : BkkLib.mapGpsLatLon(dest && dest.lat, dest && dest.lon);
-    if (pts.length < 2 || !start) return pts;
-    if (!goal) return BkkLib.clipShapeFromBoard(pts, start, maxM);
-    let iBoard = 0;
-    let dBoard = 1e15;
-    let iDest = 0;
-    let dDest = 1e15;
-    pts.forEach((p, i) => {
-      const db = BkkLib.haversineMeters(p, start);
-      if (db < dBoard) {
-        dBoard = db;
-        iBoard = i;
-      }
-      const dd = BkkLib.haversineMeters(p, goal);
-      if (dd < dDest) {
-        dDest = dd;
-        iDest = i;
-      }
-    });
-    const limit = Number.isFinite(Number(maxM)) && Number(maxM) > 0 ? Number(maxM) : 1200;
-    if (dBoard > limit) return pts;
-    if (dDest > 8000) return BkkLib.clipShapeFromBoard(pts, start, maxM);
-    if (iDest === iBoard) return BkkLib.clipShapeFromBoard(pts, start, maxM);
-    const out = iDest > iBoard ? pts.slice(iBoard) : pts.slice(0, iBoard + 1);
-    return out.length >= 2 ? out : pts;
-  },
   clipRideShape(shape, board, dest, row) {
     const pts = BkkLib.validMapShape(shape);
     if (pts.length < 2) return pts;
@@ -521,55 +396,107 @@ Object.assign(BkkLib, {
     }
     return journey;
   },
-  /* The part of a shape from `from` to `to`, in that direction. The nearest
-     vertex to `to` can lie before the one to `from`: on a closed loop that
-     starts past the boarding stop (Szeged 78 at Mars tér) the ride runs on
-     over the shape's end, and on a line that passes the destination twice
-     the later pass is the one the ride reaches. */
+  /* The foot of the perpendicular from a point to every segment of a
+     shape (repeated vertices skipped): `at` is metres along the shape, `d`
+     the distance to it. */
+  _shapeFeet(xy, cum, p) {
+    const q = xy(p);
+    const feet = [];
+    for (let i = 1; i < xy.pts.length; i++) {
+      const a = xy.pts[i - 1];
+      const b = xy.pts[i];
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const len2 = dx * dx + dy * dy;
+      if (!len2) continue;
+      const t = Math.max(0, Math.min(1, ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / len2));
+      const d = Math.hypot(a[0] + t * dx - q[0], a[1] + t * dy - q[1]);
+      feet.push({ seg: i - 1, t, d, at: cum[i - 1] + t * (cum[i] - cum[i - 1]) });
+    }
+    return feet;
+  },
+  /* Where a shape passes a point: each closest approach (a local minimum of
+     the distance along the shape) no more than SHAPE_PASS_M farther than
+     the closest one. Inside a segment its foot is one; at a vertex, only
+     when the segment before ran towards it (that foot ends at t = 1, and
+     the later foot, at t = 0, stands for the vertex). */
+  _shapePasses(feet) {
+    const limit = feet.reduce((m, f) => Math.min(m, f.d), Infinity) + SHAPE_PASS_M;
+    return feet.filter((f, i) => f.d <= limit && (
+      (f.t > 0 && f.t < 1)
+      || (f.t === 0 && (i === 0 || feet[i - 1].t === 1))
+      || (f.t === 1 && i === feet.length - 1)
+    ));
+  },
+  /* The part of a shape from `from` to `to`, in that direction. Both stops
+     are projected onto the shape's segments, and every pass of the shape by
+     each stop counts: the ride is the shortest stretch from a pass of
+     `from` forward to a pass of `to`, a close pass winning over a far one.
+     An out-and-back line passes both stops twice (Miskolc ZOO, Pécs 1), and
+     only the pair in the direction of travel is short. Two stops on one
+     segment give that short piece, not the whole line. A closed loop
+     (Szeged 78 starts past Mars tér) may run on over its end; a line whose
+     two ends only happen to meet is no loop. */
   sliceShapeBetween(shape, from, to) {
     const pts = BkkLib.validMapShape(shape);
     if (pts.length < 2) return pts;
     const a = BkkLib.finiteLatLon(from && from[0], from && from[1]);
     const b = BkkLib.finiteLatLon(to && to[0], to && to[1]);
     if (!a || !b) return pts;
-    let i0 = 0;
-    let i1 = pts.length - 1;
-    let d0 = 1e15;
-    let d1 = 1e15;
-    pts.forEach((p, i) => {
-      const da = BkkLib.haversineMeters(p, a);
-      const db = BkkLib.haversineMeters(p, b);
-      if (da < d0) {
-        d0 = da;
-        i0 = i;
-      }
-      if (db < d1) {
-        d1 = db;
-        i1 = i;
-      }
-    });
-    let sliced;
-    if (i1 >= i0) {
-      sliced = pts.slice(i0, i1 + 1);
-    } else if (BkkLib.haversineMeters(pts[0], pts[pts.length - 1]) <= SHAPE_LOOP_CLOSE_M) {
-      /* The last vertex is the first one again: skip it on the way round. */
-      sliced = pts.slice(i0).concat(pts.slice(1, i1 + 1));
-    } else {
-      let iAhead = -1;
-      let dAhead = 1e15;
-      for (let i = i0 + 1; i < pts.length; i++) {
-        const d = BkkLib.haversineMeters(pts[i], b);
-        if (d < dAhead) {
-          dAhead = d;
-          iAhead = i;
-        }
-      }
-      sliced = iAhead > i0 && dAhead <= d1 + SHAPE_SAME_STOP_M
-        ? pts.slice(i0, iAhead + 1)
-        /* The shape runs the other way: still draw it from `from` to `to`. */
-        : pts.slice(i1, i0 + 1).reverse();
+    const k = Math.cos((a[0] * Math.PI) / 180) * 111320;
+    const xy = (p) => [p[1] * k, p[0] * 110540];
+    xy.pts = pts.map(xy);
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) {
+      cum.push(cum[i - 1] + Math.hypot(xy.pts[i][0] - xy.pts[i - 1][0], xy.pts[i][1] - xy.pts[i - 1][1]));
     }
-    return sliced.length >= 2 ? sliced : pts;
+    const total = cum[cum.length - 1];
+    const gap = BkkLib.haversineMeters(pts[0], pts[pts.length - 1]);
+    const loop = gap <= SHAPE_LOOP_CLOSE_M && total >= SHAPE_LOOP_RATIO * Math.max(gap, 20);
+    const boards = BkkLib._shapePasses(BkkLib._shapeFeet(xy, cum, a));
+    const alights = BkkLib._shapePasses(BkkLib._shapeFeet(xy, cum, b));
+    if (!boards.length || !alights.length) return pts;
+    let pick = null;
+    const consider = (pa, pb) => {
+      let span = pb.at - pa.at;
+      if (span < 0 && loop) span += total;
+      if (span < 0) return;
+      const cost = span + SHAPE_PASS_WEIGHT * (pa.d + pb.d);
+      if (!pick || cost < pick.cost) pick = { pa, pb, cost, wrap: pb.at < pa.at };
+    };
+    boards.forEach((pa) => alights.forEach((pb) => consider(pa, pb)));
+    const foot = (f) => {
+      const p = pts[f.seg];
+      const q = pts[f.seg + 1];
+      if (f.t === 0) return p;
+      if (f.t === 1) return q;
+      return [p[0] + (q[0] - p[0]) * f.t, p[1] + (q[1] - p[1]) * f.t];
+    };
+    const between = (pa, pb, wrap) => {
+      const out = [foot(pa)];
+      const push = (p) => {
+        const last = out[out.length - 1];
+        if (last[0] !== p[0] || last[1] !== p[1]) out.push(p);
+      };
+      if (wrap) {
+        for (let i = pa.seg + 1; i < pts.length; i++) push(pts[i]);
+        /* The last vertex is the first one again: skip it on the way round. */
+        for (let i = 1; i <= pb.seg; i++) push(pts[i]);
+      } else {
+        for (let i = pa.seg + 1; i <= pb.seg; i++) push(pts[i]);
+      }
+      push(foot(pb));
+      return out;
+    };
+    let sliced;
+    if (pick) {
+      sliced = between(pick.pa, pick.pb, pick.wrap);
+    } else {
+      /* The shape runs the other way: still draw it from `from` to `to`. */
+      const nearest = (list) => list.reduce((m, f) => (f.d < m.d ? f : m), list[0]);
+      sliced = between(nearest(alights), nearest(boards), false).reverse();
+    }
+    return sliced.length >= 2 ? sliced : [a, b];
   },
   clipShapeToBoardDest(shape, board, dest) {
     const pts = BkkLib.validMapShape(shape);
@@ -587,8 +514,19 @@ Object.assign(BkkLib, {
     if (span < 200 && orig > 2000) return pts;
     return sliced;
   },
-  async fillJourneyShapes(journey) {
-    if (!journey || !Array.isArray(journey.legs)) return journey;
+  /* The card, its inline map and the full map all ask for the same
+     journey's shapes: one fill per journey, its trips fetched once. */
+  _journeyFills: new WeakMap(),
+  fillJourneyShapes(journey) {
+    if (!journey || !Array.isArray(journey.legs)) return Promise.resolve(journey);
+    let run = BkkLib._journeyFills.get(journey);
+    if (!run) {
+      run = BkkLib._fillJourneyShapes(journey);
+      BkkLib._journeyFills.set(journey, run);
+    }
+    return run;
+  },
+  async _fillJourneyShapes(journey) {
     BkkLib.stitchJourneyLegCoords(journey);
     await Promise.all(journey.legs.map(async (leg) => {
       if (!leg || leg.walk) return;
@@ -705,82 +643,5 @@ Object.assign(BkkLib, {
     const h = Math.sin(dLat / 2) ** 2
       + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
     return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
-  },
-  pointAlongShape(shape, targetMeters) {
-    if (!Array.isArray(shape) || shape.length < 1) return null;
-    if (shape.length === 1 || !(targetMeters > 0)) return shape[0];
-    const cum = [0];
-    for (let i = 1; i < shape.length; i++) {
-      cum.push(cum[i - 1] + BkkLib.haversineMeters(shape[i - 1], shape[i]));
-    }
-    const total = cum[cum.length - 1];
-    if (!(total > 0)) return shape[0];
-    const tval = Math.max(0, Math.min(total, Number(targetMeters) || 0));
-    let i = 1;
-    while (i < cum.length && cum[i] < tval) i += 1;
-    const i1 = Math.min(i, shape.length - 1);
-    const i0 = Math.max(0, i1 - 1);
-    const seg = cum[i1] - cum[i0];
-    if (!(seg > 0)) return shape[i1];
-    const f = (tval - cum[i0]) / seg;
-    return [
-      shape[i0][0] + (shape[i1][0] - shape[i0][0]) * f,
-      shape[i0][1] + (shape[i1][1] - shape[i0][1]) * f,
-    ];
-  },
-  estimatePositionFromSchedule(shape, stopTimes, nowSec) {
-    if (!Array.isArray(shape) || shape.length < 2 || !Array.isArray(stopTimes) || stopTimes.length < 1) {
-      return null;
-    }
-    const stops = stopTimes.map((st) => {
-      const tval = st.predictedDepartureTime != null ? st.predictedDepartureTime
-        : (st.predictedArrivalTime != null ? st.predictedArrivalTime
-          : (st.departureTime != null ? st.departureTime : st.arrivalTime));
-      const dist = st.shapeDistTraveled != null ? Number(st.shapeDistTraveled) : NaN;
-      return {
-        t: tval != null ? Number(tval) : NaN,
-        dist: Number.isFinite(dist) ? dist : NaN,
-      };
-    }).filter((s) => Number.isFinite(s.t)).sort((a, b) => a.t - b.t);
-    if (!stops.length) return null;
-    const now = Number(nowSec);
-    if (!Number.isFinite(now)) return null;
-    let targetDist;
-    if (now <= stops[0].t) {
-      targetDist = Number.isFinite(stops[0].dist) ? stops[0].dist : 0;
-    } else if (now >= stops[stops.length - 1].t) {
-      const last = stops[stops.length - 1];
-      if (Number.isFinite(last.dist)) targetDist = last.dist;
-      else return shape[shape.length - 1];
-    } else {
-      let i = 0;
-      while (i < stops.length - 1 && stops[i + 1].t < now) i += 1;
-      const a = stops[i];
-      const b = stops[i + 1];
-      const span = b.t - a.t;
-      const f = span > 0 ? (now - a.t) / span : 0;
-      if (Number.isFinite(a.dist) && Number.isFinite(b.dist)) {
-        targetDist = a.dist + (b.dist - a.dist) * f;
-      } else {
-        const i0 = Math.floor((i / Math.max(1, stops.length - 1)) * (shape.length - 1));
-        const i1 = Math.floor(((i + 1) / Math.max(1, stops.length - 1)) * (shape.length - 1));
-        const p0 = shape[Math.max(0, Math.min(shape.length - 1, i0))];
-        const p1 = shape[Math.max(0, Math.min(shape.length - 1, i1))];
-        return [
-          p0[0] + (p1[0] - p0[0]) * f,
-          p0[1] + (p1[1] - p0[1]) * f,
-        ];
-      }
-    }
-    const maxOfficial = Math.max(
-      ...stops.map((s) => (Number.isFinite(s.dist) ? s.dist : 0)),
-      targetDist || 0,
-    );
-    let polyLen = 0;
-    for (let i = 1; i < shape.length; i++) {
-      polyLen += BkkLib.haversineMeters(shape[i - 1], shape[i]);
-    }
-    const scaled = maxOfficial > 0 ? (targetDist / maxOfficial) * polyLen : targetDist;
-    return BkkLib.pointAlongShape(shape, scaled);
   },
 });

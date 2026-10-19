@@ -71,7 +71,7 @@ Object.assign(BkkLib, {
   isRailHubName(name) {
     const raw = String(name || "");
     if (!raw) return false;
-    if (/aut[o\u00f3]busz/i.test(raw) || /vol[a\u00e1]n/i.test(raw)) return false;
+    if (/busz/i.test(raw) || /vol[a\u00e1]n/i.test(raw)) return false;
     return /p\u00e1lyaudvar|vas\u00fat\u00e1llom\u00e1s|\bpu\.?\b/i.test(raw);
   },
   isStopArea(stop) {
@@ -177,7 +177,7 @@ Object.assign(BkkLib, {
     if (/^BKK_/i.test(s)) return 4;
     if (/^hu-bkk_/i.test(s)) return 5;
     if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return 6;
-    if (/^[a-z][a-z0-9]*:/i.test(s) && s.indexOf("/") < 0) return 7;
+    if (/^[a-z][a-z0-9-]*:/i.test(s) && s.indexOf("/") < 0) return 7;
     if (/^hu-/i.test(s)) return 8;
     if (/^(?:geo:|node\/|way\/)/i.test(s)) return 10;
     if (/^(?:cz-|sk-|ua-|de-|al-|at-|eu-|pl-)/i.test(s)) return 12;
@@ -191,15 +191,15 @@ Object.assign(BkkLib, {
     if (/^BKK_0055/i.test(s) || /(?:^hu-mav_|railway)/i.test(s)) return "mav";
     if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return "volan";
     if (/^(?:BKK_|hu-bkk_)/i.test(s)) return "bkk";
-    if (/^[a-z][a-z0-9]*:/i.test(s) && s.indexOf("/") < 0) return "city";
+    if (/^[a-z][a-z0-9-]*:/i.test(s) && s.indexOf("/") < 0) return "city";
     if (/^hu-/i.test(s)) return "hu";
     return "other";
   },
-  stopsTooFar(a, b) {
+  stopsTooFar(a, b, maxM) {
     const pa = BkkLib.finiteLatLon(a && a.lat, a && a.lon);
     const pb = BkkLib.finiteLatLon(b && b.lat, b && b.lon);
     if (!pa || !pb) return false;
-    return BkkLib.haversineMeters(pa, pb) > 400;
+    return BkkLib.haversineMeters(pa, pb) > (maxM || 400);
   },
   stopsCloseEnough(a, b) {
     const pa = BkkLib.finiteLatLon(a && a.lat, a && a.lon);
@@ -207,21 +207,40 @@ Object.assign(BkkLib, {
     if (!pa || !pb) return true;
     return BkkLib.haversineMeters(pa, pb) <= 300;
   },
+  /* Two named towns, or two cross streets ("Szeged, Londoni körút (Bakay
+     Nándor utca)" and "… (Kálvária sugárút)"), are two places. */
   citiesConflict(a, b) {
     const ca = BkkLib.stopCityKey(a);
     const cb = BkkLib.stopCityKey(b);
-    return !!(ca && cb && ca !== cb);
+    if (ca && cb && ca !== cb) return true;
+    const qa = BkkLib.stopQualifier(a);
+    const qb = BkkLib.stopQualifier(b);
+    return !!(qa && qb && qa !== qb);
   },
+  /* Same-named stops of one feed are one stop within 400 m. A stop and a
+     place, or two feeds' stops, are one place in the same town (a foreign
+     coach feed puts Kelenföld at Népliget), else within a kilometre: the
+     town of Budapest's "Fő tér" is not Tatabánya's. */
   splitStopClusters(group) {
     const clusters = [];
+    const townsConflict = (x, s) => {
+      const tx = BkkLib.stopTownKey(x);
+      const ts = BkkLib.stopTownKey(s);
+      return !!(tx && ts && tx !== ts);
+    };
+    const sameTown = (x, s) => {
+      const tx = BkkLib.stopTownKey(x);
+      return !!tx && tx === BkkLib.stopTownKey(s);
+    };
     (group || []).forEach((s) => {
       let joined = null;
       for (let i = 0; i < clusters.length; i++) {
         const cl = clusters[i];
-        if (cl.some((x) => BkkLib.citiesConflict(x, s))) continue;
+        if (cl.some((x) => BkkLib.citiesConflict(x, s) || townsConflict(x, s))) continue;
         const mixPlace = cl.some((x) => BkkLib.isPlaceStop(x) !== BkkLib.isPlaceStop(s));
         const mixOp = cl.some((x) => BkkLib.stopIdFamily(x) !== BkkLib.stopIdFamily(s));
-        if (!mixPlace && !mixOp && cl.some((x) => BkkLib.stopsTooFar(x, s))) continue;
+        const far = mixPlace || mixOp ? cl.some((x) => !sameTown(x, s) && BkkLib.stopsTooFar(x, s, 1e3)) : cl.some((x) => BkkLib.stopsTooFar(x, s));
+        if (far) continue;
         joined = cl;
         break;
       }
@@ -234,6 +253,9 @@ Object.assign(BkkLib, {
     const list = (cluster || []).filter(Boolean);
     if (!list.length) return null;
     const ranked = list.slice().sort((a, b) => {
+      const pa = BkkLib.isPlaceStop(a) ? 1 : 0;
+      const pb = BkkLib.isPlaceStop(b) ? 1 : 0;
+      if (pa !== pb) return pa - pb;
       const ra = BkkLib.stopIdRank(a.id);
       const rb = BkkLib.stopIdRank(b.id);
       if (ra !== rb) return ra - rb;
@@ -272,15 +294,49 @@ Object.assign(BkkLib, {
         if (hit) out.push(hit);
       });
     });
-    if (out.some((s) => !BkkLib.isPlaceStop(s))) {
-      return out.filter((s) => !BkkLib.isPlaceStop(s));
+    const real = out.filter((s) => !BkkLib.isPlaceStop(s));
+    if (!real.length) return out;
+    return out.filter((s) => {
+      if (!BkkLib.isPlaceStop(s) || String(s.kind || "") === "address") return true;
+      const town = BkkLib.stopTownKey(s);
+      return !!town && real.every((x) => {
+        const other = BkkLib.stopTownKey(x);
+        return !!other && other !== town;
+      });
+    });
+  },
+  /* The town a picker row stands in: its "Town, " prefix, the town of its
+     feed (a city feed's area), the town our own label adds ("Fő tér
+     (Tatabánya)"), Budapest for a BKK stop; '' when nothing tells. A
+     bracket in the stop's own name is a cross street (Szeged's "Londoni
+     körút (Bakay Nándor utca)"), not a town. */
+  stopTownKey(stop) {
+    const name = String(stop && stop.name || "");
+    const split = BkkLib.splitCityPrefix(name);
+    if (split) return BkkLib.fold(split.city);
+    if (stop && stop.area) return BkkLib.fold(stop.area);
+    if (BkkLib.stopIdFamily(stop) === "city" && !BkkLib.isPlaceStop(stop)) {
+      return BkkLib.fold(String(stop.id).split(":")[0].replace(/^volan-/i, "").replace(/-/g, " "));
     }
-    return out;
+    const label = String(stop && stop.label || "");
+    if (label && label !== name && label.indexOf(name) === 0) {
+      const paren = label.slice(name.length).match(/^\s*\(([^)]+)\)\s*$/);
+      if (paren && !/^(m[\u00e1a]v|vol[\u00e1a]n)$/i.test(paren[1])) return BkkLib.fold(paren[1]);
+    }
+    return BkkLib.stopIdFamily(stop) === "bkk" ? "budapest" : "";
+  },
+  /* The cross street in brackets at the end of a stop's own name. */
+  stopQualifier(stop) {
+    const m = String(stop && stop.name || "").match(/\(([^)]+)\)\s*$/);
+    if (!m || /^(m[\u00e1a]v|vol[\u00e1a]n)$/i.test(m[1])) return "";
+    return BkkLib.fold(m[1]);
   },
   /* One row per place: the same stop from FUTÁR, Volán and the search is
-     merged, but the city stays part of the place (116 towns have an
-     "autóbusz-állomás"). `key` is the reachable-list key when there is one,
-     so it finds that destination's routes; `routeKeys` holds every merged
+     merged, but the town stays part of the place (116 towns have an
+     "autóbusz-állomás"): rows of two known towns, two cross streets, or
+     more than a kilometre apart stay apart, and a row never takes another
+     row's town. `key` is the reachable-list key when there is one, so it
+     finds that destination's routes; `routeKeys` holds every merged
      source's key. */
   destHitsForQuery(dests, q, extras) {
     const f = BkkLib.fold(q || "");
@@ -292,10 +348,16 @@ Object.assign(BkkLib, {
       let place = BkkLib.placeNameKey(d) || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
       if (!place) return;
       if (id && /^geo:/i.test(id) && String(d.kind || "") === "address") place = place + "|" + id;
-      const city = BkkLib.stopCityKey(d);
+      const town = BkkLib.stopTownKey(d);
+      const qual = BkkLib.stopQualifier(d);
+      const fits = (r) => !(r.town && town && r.town !== town) && !(r.qual && qual && r.qual !== qual) && !BkkLib.stopsTooFar(r, d, 1e3);
       const rows = seen.get(place) || [];
-      const prev = rows.find((r) => r.city === city) || (city ? rows.find((r) => !r.city) : rows[0]);
-      if (prev && city && !prev.city) prev.city = city;
+      const gap = (r) => {
+        const pa = BkkLib.finiteLatLon(r.lat, r.lon);
+        const pb = BkkLib.finiteLatLon(d.lat, d.lon);
+        return pa && pb ? BkkLib.haversineMeters(pa, pb) : Infinity;
+      };
+      const prev = rows.find((r) => r.town === town && r.qual === qual && fits(r)) || rows.filter(fits).sort((x, y) => gap(x) - gap(y))[0];
       if (prev) {
         if (d.key && prev.routeKeys.indexOf(d.key) < 0) {
           prev.routeKeys.push(d.key);
@@ -307,7 +369,7 @@ Object.assign(BkkLib, {
         if (BkkLib.stopIdRank(id) < BkkLib.stopIdRank(prev.id)) prev.id = id;
         if (BkkLib.elviraStationCode(id) && !BkkLib.elviraStationCode(prev.id)) prev.id = id;
         if (/^geo:/i.test(String(prev.id || "")) && id && !/^geo:/i.test(id)) prev.id = id;
-        if (Number.isFinite(Number(d.lat)) && !Number.isFinite(Number(prev.lat))) {
+        if (BkkLib.finiteLatLon(d.lat, d.lon) && !BkkLib.finiteLatLon(prev.lat, prev.lon)) {
           prev.lat = Number(d.lat);
           prev.lon = Number(d.lon);
         }
@@ -321,11 +383,15 @@ Object.assign(BkkLib, {
         routeKeys: d.key ? [d.key] : [],
         fromList: !!d.key
       };
-      if (Number.isFinite(Number(d.lat))) row.lat = Number(d.lat);
-      if (Number.isFinite(Number(d.lon))) row.lon = Number(d.lon);
+      if (BkkLib.finiteLatLon(d.lat, d.lon)) {
+        row.lat = Number(d.lat);
+        row.lon = Number(d.lon);
+      }
       if (d.kind) row.kind = d.kind;
       if (d.label) row.label = d.label;
-      Object.defineProperty(row, "city", { value: city, writable: true, enumerable: false });
+      if (d.area) row.area = d.area;
+      Object.defineProperty(row, "town", { value: town, enumerable: false });
+      Object.defineProperty(row, "qual", { value: qual, enumerable: false });
       rows.push(row);
       seen.set(place, rows);
       out.push(row);
@@ -730,7 +796,6 @@ var I18N = {
     helyiLabel: "Helyi",
     destLoading: "Elérhető célok betöltése...",
     destEmptySuggest: (list) => "Nincs közvetlen járat erre a célra. Elérhető célok: " + list + ".",
-    platformShort: (p) => `vág.${p}`,
     tipPlatform: (p) => `Vágány ${p}`,
     minutes: (n) => `${n} perc`,
     now: "most",
@@ -754,7 +819,6 @@ var I18N = {
     mapNoData: "Ehhez a járathoz jelenleg nincs élő pozíció vagy útvonal.",
     mapLeafletFail: "A térkép betöltése nem sikerült.",
     mapNoGeometry: "A BKK nem adott vissza útvonal-geometriát ehhez a járathoz.",
-    mapRouteFail: (msg) => `Útvonal nem tölthető: ${msg}`,
     mapNothingToShow: "Nincs megjeleníthető útvonal ehhez a járathoz.",
     mapFullRoute: "Teljes útvonal",
     mapBoardStop: "Felszállás",
@@ -804,12 +868,7 @@ var I18N = {
     plannerAddress: "cím",
     plannerPlace: "hely",
     plannerReset: "Új",
-    plannerMultiHint: "Többet is választhatsz. Ekkor csak a közös megállók maradnak.",
-    plannerPickVehicleFirst: "Előbb válassz járművet",
     plannerPickAll: "Válassz forrás és cél megállót.",
-    plannerLoading: "Betöltés...",
-    plannerNoSharedStop: "Nincs közös megálló",
-    plannerNoSharedLater: "Ezeknek a járatoknak nincs közös későbbi megállója.",
     plannerJourneyTitle: "Átszállással",
     plannerJourneyDirect: "Átszállás nélkül",
     plannerJourneyWalk: "Gyalog",
@@ -819,9 +878,6 @@ var I18N = {
     plannerStationWalk: (parts) => `Gyaloglás a vágányhoz ${parts[0]} perc, ${parts[1]} m`,
     plannerRide: (min) => `${min} perc`,
     plannerShowMap: "Térkép",
-    plannerPickDest: "Válassz célt...",
-    plannerNoRoutes: "Nincs induló járat ebben a megállóban.",
-    plannerNoDepartures: "Nincs közelgő indulás a választott járatokkal.",
     plannerWhen: "Mikor",
     plannerNow: "Most",
     plannerDepartAt: "Indulás",
@@ -841,10 +897,6 @@ var I18N = {
     plannerWalkTotal: (min) => `${min} perc gyaloglás`,
     plannerToday: "ma",
     plannerTomorrow: "holnap",
-    plannerMapLarge: "Nagy térkép",
-    colArrival: "érkezés",
-    colExpected: "várható",
-    colTravel: "menetidő",
     mode: {
       bkk: {
         stop: "Forrás megálló",
@@ -922,7 +974,6 @@ var I18N = {
     helyiLabel: "Local",
     destLoading: "Loading reachable destinations...",
     destEmptySuggest: (list) => "No direct service to that destination. Reachable destinations: " + list + ".",
-    platformShort: (p) => `pl.${p}`,
     tipPlatform: (p) => `Platform ${p}`,
     minutes: (n) => `${n} min`,
     now: "now",
@@ -946,7 +997,6 @@ var I18N = {
     mapNoData: "No live position or route is available for this trip.",
     mapLeafletFail: "Could not load the map.",
     mapNoGeometry: "BKK did not return a route shape for this trip.",
-    mapRouteFail: (msg) => `Could not load the route: ${msg}`,
     mapNothingToShow: "Nothing to show on the map for this trip.",
     mapFullRoute: "Full route",
     mapBoardStop: "Boarding",
@@ -996,12 +1046,7 @@ var I18N = {
     plannerAddress: "address",
     plannerPlace: "place",
     plannerReset: "Reset",
-    plannerMultiHint: "You can pick several. Only stops shared by all of them are kept.",
-    plannerPickVehicleFirst: "Pick a vehicle first",
     plannerPickAll: "Pick an origin and a destination stop.",
-    plannerLoading: "Loading...",
-    plannerNoSharedStop: "No shared stop",
-    plannerNoSharedLater: "These routes share no later stop.",
     plannerJourneyTitle: "With a transfer",
     plannerJourneyDirect: "Direct",
     plannerJourneyWalk: "On foot",
@@ -1011,9 +1056,6 @@ var I18N = {
     plannerStationWalk: (parts) => `Walk to the platform ${parts[0]} min, ${parts[1]} m`,
     plannerRide: (min) => `${min} min`,
     plannerShowMap: "Map",
-    plannerPickDest: "Pick a destination...",
-    plannerNoRoutes: "No departures from this stop.",
-    plannerNoDepartures: "No upcoming departure on the selected routes.",
     plannerWhen: "When",
     plannerNow: "Now",
     plannerDepartAt: "Depart",
@@ -1037,10 +1079,6 @@ var I18N = {
     plannerWalkTotal: (min) => `${min} min walking`,
     plannerToday: "today",
     plannerTomorrow: "tomorrow",
-    plannerMapLarge: "Full map",
-    colArrival: "in",
-    colExpected: "expected",
-    colTravel: "travel",
     mode: {
       bkk: {
         stop: "Origin stop",
@@ -1385,9 +1423,12 @@ Object.assign(BkkLib, {
     return "";
   },
   /* A stop does not move: every poll of an empty board geocoded both ends
-     again. Answers stay for the page; a failed lookup is asked again. */
+     again. Answers stay for the page; a failed lookup is asked again, and
+     an empty answer after ten minutes (a geocoder that had no data yet). */
   _geocodeCache: /* @__PURE__ */ new Map(),
   _geocodeCacheMax: 200,
+  _geocodeEmptyAt: /* @__PURE__ */ new Map(),
+  _geocodeEmptyRetryMs: 10 * 60 * 1e3,
   transitousGeocode(text, opts) {
     const q = String(text || "").trim();
     if (!q) return Promise.resolve([]);
@@ -1399,13 +1440,25 @@ Object.assign(BkkLib, {
     }
     const key = `${params.type || "all"}|${q}`;
     const cache = BkkLib._geocodeCache;
+    const empties = BkkLib._geocodeEmptyAt;
     const hit = cache.get(key);
-    if (hit) return hit;
-    const run = BkkLib.transitousFetch("/api/v1/geocode", params).then((data) => Array.isArray(data) ? data : []);
+    const emptyAt = empties.get(key);
+    if (hit && !(emptyAt && Date.now() - emptyAt >= BkkLib._geocodeEmptyRetryMs)) return hit;
+    if (hit) cache.delete(key);
+    empties.delete(key);
+    const run = BkkLib.transitousFetch("/api/v1/geocode", params).then((data) => {
+      const list = Array.isArray(data) ? data : [];
+      if (!list.length && cache.get(key) === run) empties.set(key, Date.now());
+      return list;
+    });
     run.catch(() => {
       if (cache.get(key) === run) cache.delete(key);
     });
-    if (cache.size >= BkkLib._geocodeCacheMax) cache.delete(cache.keys().next().value);
+    if (cache.size >= BkkLib._geocodeCacheMax) {
+      const oldest = cache.keys().next().value;
+      cache.delete(oldest);
+      empties.delete(oldest);
+    }
     cache.set(key, run);
     return run;
   },
@@ -1423,9 +1476,6 @@ Object.assign(BkkLib, {
     if (/^(geo:|node\/|way\/)/i.test(String(stop.id || stop.stopId || ""))) return true;
     const kind = String(stop.kind || stop.stopKind || "");
     return kind === "address" || kind === "place";
-  },
-  allowFutarHopShape(row, hasGps) {
-    return !(BkkLib.isTrainRow(row) && hasGps);
   },
   transitousHitToStop(hit) {
     if (!hit || !hit.name) return null;
@@ -1497,7 +1547,8 @@ Object.assign(BkkLib, {
       });
     } catch (_e) {
     }
-    const collapsed = BkkLib.collapseSameNameStops(Array.from(byId.values()));
+    const placed = await BkkLib.withGtfsCoords(Array.from(byId.values()));
+    const collapsed = BkkLib.collapseSameNameStops(placed);
     return BkkLib.capPlannerHits(collapsed, 24);
   },
   pickTransitousHit(hits, stop, kind) {
@@ -1720,8 +1771,10 @@ Object.assign(BkkLib, {
   async transitousDepartures(origin, dest, opts) {
     opts = opts || {};
     if (!dest || !(dest.key || dest.name || dest.id)) return [];
-    const fromPlace = await BkkLib.transitousPlace(origin);
-    const toPlace = await BkkLib.transitousPlace(dest);
+    const [fromPlace, toPlace] = await Promise.all([
+      BkkLib.transitousPlace(origin),
+      BkkLib.transitousPlace(dest)
+    ]);
     if (!fromPlace || !toPlace) return [];
     const horizon = clampMinutesAfter(opts.minutesAfter);
     const anchor = Number(opts.anchorDep || 0);
@@ -1909,27 +1962,38 @@ Object.assign(BkkLib, {
     }
     return best;
   },
-  pickMotisHopRow(motis, row, dest) {
-    return BkkLib.pickMotisVehicle(motis, row, dest);
-  },
-  async motisTripShape(tripId) {
+  /* A trip's route does not change: the board, its map and the planner
+     ask for it once. A failed fetch is asked again. */
+  _motisTrips: /* @__PURE__ */ new Map(),
+  _motisTripsMax: 32,
+  motisTripShape(tripId) {
     const raw = String(tripId || "").replace(/^motis:/i, "").trim();
-    if (!raw || /^\d+:/.test(raw)) return [];
-    const data = await BkkLib.transitousFetch("/api/v5/trip", {
+    if (!raw || /^\d+:/.test(raw)) return Promise.resolve([]);
+    const cache = BkkLib._motisTrips;
+    const hit = cache.get(raw);
+    if (hit) return hit.then((pts) => pts.slice());
+    const run = BkkLib.transitousFetch("/api/v5/trip", {
       tripId: raw,
       joinInterlinedLegs: "true"
-    });
-    const legs = data && data.legs || [];
-    const pts = [];
-    legs.forEach((leg) => {
-      if (String(leg && leg.mode || "").toUpperCase() === "WALK") return;
-      BkkLib.validMapShape(BkkLib.decodePolyline(leg && leg.legGeometry)).forEach((pt) => {
-        const last = pts[pts.length - 1];
-        if (last && last[0] === pt[0] && last[1] === pt[1]) return;
-        pts.push(pt);
+    }).then((data) => {
+      const legs = data && data.legs || [];
+      const pts = [];
+      legs.forEach((leg) => {
+        if (String(leg && leg.mode || "").toUpperCase() === "WALK") return;
+        BkkLib.validMapShape(BkkLib.decodePolyline(leg && leg.legGeometry)).forEach((pt) => {
+          const last = pts[pts.length - 1];
+          if (last && last[0] === pt[0] && last[1] === pt[1]) return;
+          pts.push(pt);
+        });
       });
+      return pts;
     });
-    return pts;
+    run.catch(() => {
+      if (cache.get(raw) === run) cache.delete(raw);
+    });
+    if (cache.size >= BkkLib._motisTripsMax) cache.delete(cache.keys().next().value);
+    cache.set(raw, run);
+    return run.then((pts) => pts.slice());
   },
   async motisShapeForHop(row, origin, dest, opts) {
     opts = Object.assign({}, opts || {});
@@ -2331,10 +2395,13 @@ Object.assign(BkkLib, {
      FUTÁR plan-trip when it has none. */
   async planJourneys(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
+    [origin, dest] = await BkkLib.withGtfsCoords([origin, dest]);
     let list = await BkkLib.transitousJourneys(origin, dest, opts);
     if (!list.length && BkkLib.hasFutar(apiKey)) {
-      const fromPlace = await BkkLib.planPlace(apiKey, origin);
-      const toPlace = await BkkLib.planPlace(apiKey, dest);
+      const [fromPlace, toPlace] = await Promise.all([
+        BkkLib.planPlace(apiKey, origin),
+        BkkLib.planPlace(apiKey, dest)
+      ]);
       if (fromPlace && toPlace) {
         try {
           const data = await BkkLib.fetch(apiKey, "plan-trip.json", Object.assign({
@@ -2361,12 +2428,15 @@ Object.assign(BkkLib, {
   },
   async planJourney(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
+    [origin, dest] = await BkkLib.withGtfsCoords([origin, dest]);
     const motis = await BkkLib.transitousJourney(origin, dest, opts);
     if (motis && motis.legs.some((leg) => !leg.walk)) return BkkLib.nameJourneyEnds(motis, origin, dest);
     let futar = null;
     if (BkkLib.hasFutar(apiKey)) {
-      const fromPlace = await BkkLib.planPlace(apiKey, origin);
-      const toPlace = await BkkLib.planPlace(apiKey, dest);
+      const [fromPlace, toPlace] = await Promise.all([
+        BkkLib.planPlace(apiKey, origin),
+        BkkLib.planPlace(apiKey, dest)
+      ]);
       if (fromPlace && toPlace) {
         try {
           const horizon = clampMinutesAfter(opts.minutesAfter);
@@ -2387,14 +2457,21 @@ Object.assign(BkkLib, {
     const viaCity = await BkkLib.cityRailJourney(apiKey, hass, origin, dest);
     return viaCity || futar;
   },
-  /* Local GTFS has no planner API. Ride the city feed to a station, walk
-     across, then take the next train. Same-name stops are a 3 minute walk;
-     the station bay to the platform is 6 minutes at 80 m/min. */
-  cityHubPath(idx, originStop) {
-    if (!idx || !originStop) return null;
+  /* One operator's ride and walk edges for a service day: the fastest
+     ride between any two stops of a trip (up to 28 stops in), and walks
+     between same-named stops. Built once per day, not per question. */
+  _cityHubGraphs: /* @__PURE__ */ new WeakMap(),
+  _cityHubGraph(idx, op, ymd) {
+    let byIdx = BkkLib._cityHubGraphs.get(idx);
+    if (!byIdx) {
+      byIdx = /* @__PURE__ */ new Map();
+      BkkLib._cityHubGraphs.set(idx, byIdx);
+    }
+    const memoKey = op + "|" + ymd;
+    const hit = byIdx.get(memoKey);
+    if (hit) return hit;
     const stops = idx.stops || [];
-    const op = originStop.op;
-    const day = BkkLib.volanDay(0);
+    const dow = tzDow(ymd);
     const ride = /* @__PURE__ */ new Map();
     const trips = idx.t || [];
     for (let n = 0; n < trips.length; n++) {
@@ -2404,7 +2481,7 @@ Object.assign(BkkLib, {
       if (ps.length < 2) continue;
       const first = stops[ps[0]];
       if (!first || first.op !== op) continue;
-      if (!BkkLib.volanServiceOk(idx, t2[0], day.ymd, day.dow)) continue;
+      if (!BkkLib.volanServiceOk(idx, t2[0], ymd, dow)) continue;
       const span = Math.min(ps.length, 28);
       for (let i = 0; i < span; i++) {
         for (let j = i + 1; j < span; j++) {
@@ -2440,6 +2517,21 @@ Object.assign(BkkLib, {
         });
       });
     });
+    const graph = { rideAt, walkAt };
+    Array.from(byIdx.keys()).forEach((k) => {
+      if (k.split("|")[1] !== ymd) byIdx.delete(k);
+    });
+    byIdx.set(memoKey, graph);
+    return graph;
+  },
+  /* Local GTFS has no planner API. Ride the city feed to a station, walk
+     across, then take the next train. Same-name stops are a 3 minute walk;
+     the station bay to the platform is 6 minutes at 80 m/min. */
+  cityHubPath(idx, originStop) {
+    if (!idx || !originStop) return null;
+    const stops = idx.stops || [];
+    const op = originStop.op;
+    const { rideAt, walkAt } = BkkLib._cityHubGraph(idx, op, BkkLib.volanDay(0).ymd);
     const hub = (st) => BkkLib.isRailHubName(st && st.name);
     const starts = [];
     stops.forEach((st) => {
@@ -2538,15 +2630,22 @@ Object.assign(BkkLib, {
       });
     }
     edges.reverse();
+    const hubStop = stops[bestHub.at];
+    const hubPt = hubStop ? BkkLib.finiteLatLon(hubStop.lat, hubStop.lon) : null;
     return {
       minutes: bestHub.cost,
-      hubName: stops[bestHub.at] && stops[bestHub.at].name,
-      hubFold: stops[bestHub.at] && stops[bestHub.at].fold,
+      hubName: hubStop && hubStop.name,
+      hubFold: hubStop && hubStop.fold,
+      hubLat: hubPt ? hubPt[0] : void 0,
+      hubLon: hubPt ? hubPt[1] : void 0,
       edges
     };
   },
+  /* Only from a city feed's own stop: a BKK or Volán origin matched by
+     number or name lands on some other town's stop (BKK_F01020 "Kossuth
+     Lajos utca" was a Miskolc one). */
   async cityRailJourney(apiKey, hass, origin, dest) {
-    if (!BkkLib.isRailDest(dest)) return null;
+    if (!BkkLib.isRailDest(dest) || BkkLib.stopIdFamily(origin) !== "city") return null;
     let idx;
     try {
       idx = await BkkLib.cityIndex();
@@ -2554,9 +2653,10 @@ Object.assign(BkkLib, {
       return null;
     }
     if (!idx || !idx.stops) return null;
-    let originStop = (idx.stops || []).find((st) => st && st.id === origin.id);
+    let originStop = BkkLib.gtfsStopById(idx, origin.id);
     if (!originStop) {
-      originStop = BkkLib.volanMatchStop(idx, { id: origin.id, name: origin.name || "" }, null);
+      const opIx = BkkLib.opIx(idx, String(origin.id).split(":")[0]);
+      if (opIx >= 0) originStop = BkkLib.volanMatchStop(idx, { id: "", name: origin.name || "" }, opIx);
     }
     if (!originStop || originStop.op == null) return null;
     const path = BkkLib.cityHubPath(idx, originStop);
@@ -2567,13 +2667,16 @@ Object.assign(BkkLib, {
     const cityTok = new Set(BkkLib.foldTokens(cityName));
     const destTok = BkkLib.foldTokens(destFold);
     const hubTok = BkkLib.foldTokens(path.hubFold);
-    const destIsHub = !!(destFold && path.hubFold && (destFold === path.hubFold || BkkLib.foldTokenMatch(destFold, path.hubFold) && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok))));
-    let ready = Math.floor(Date.now() / 1e3);
+    const hubPt = BkkLib.finiteLatLon(path.hubLat, path.hubLon);
+    const destPt = BkkLib.finiteLatLon(dest && dest.lat, dest && dest.lon);
+    const destIsHub = !!(destFold && path.hubFold && (destFold === path.hubFold || hubPt && destPt && BkkLib.haversineMeters(hubPt, destPt) <= 800 || destTok.length && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok))));
+    const startSec = Math.floor(Date.now() / 1e3);
+    let ready = startSec;
     const legs = [];
     for (let i = 0; i < path.edges.length; i++) {
       const edge = path.edges[i];
       if (edge.walk) {
-        const startMs = ready * 1e3;
+        const startMs2 = ready * 1e3;
         ready += edge.minutes * 60;
         legs.push({
           walk: true,
@@ -2586,7 +2689,7 @@ Object.assign(BkkLib, {
           from: edge.from,
           to: edge.to,
           waitMin: 0,
-          startMs,
+          startMs: startMs2,
           endMs: ready * 1e3,
           fromI: edge.fromI,
           toI: edge.toI
@@ -2596,12 +2699,14 @@ Object.assign(BkkLib, {
       const timed = BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.route, ready);
       if (!timed) return null;
       const waitMin2 = Math.round((timed.dep - ready) / 60);
+      const tripStops = timed.trip && timed.trip[2] || [];
+      const terminus = idx.stops[tripStops[tripStops.length - 1]];
       legs.push({
         walk: false,
         minutes: Math.max(1, Math.round((timed.arr - timed.dep) / 60)),
         meters: 0,
         label: edge.route,
-        headsign: edge.to,
+        headsign: terminus && terminus.name || edge.to,
         color: "0F6FC6",
         text: "FFFFFF",
         from: edge.from,
@@ -2623,6 +2728,16 @@ Object.assign(BkkLib, {
       legs.push(rail.walk);
       legs.push(rail.train);
       ready = rail.ready;
+    }
+    const firstRide = legs.findIndex((leg) => !leg.walk);
+    if (firstRide >= 0) {
+      let at = legs[firstRide].startMs;
+      for (let i = firstRide - 1; i >= 0; i--) {
+        legs[i].endMs = at;
+        legs[i].startMs = at - legs[i].minutes * 6e4;
+        at = legs[i].startMs;
+      }
+      legs[firstRide].waitMin = 0;
     }
     const waitMin = legs.reduce((sum, leg) => sum + (leg.waitMin || 0), 0);
     const walkMin = legs.reduce((sum, leg) => sum + (leg.walk ? leg.minutes : 0), 0);
@@ -2657,11 +2772,15 @@ Object.assign(BkkLib, {
       delete leg.fromI;
       delete leg.toI;
     });
+    const startMs = legs[0] && legs[0].startMs || startSec * 1e3;
+    const endMs = ready * 1e3;
     return {
-      durationMin: Math.max(1, Math.round((ready - Math.floor(Date.now() / 1e3)) / 60)),
+      durationMin: Math.max(1, Math.round((endMs - startMs) / 6e4)),
       walkMin,
       waitMin,
       transfers: Math.max(0, legs.filter((leg) => !leg.walk).length - 1),
+      startMs,
+      endMs,
       legs
     };
   },
@@ -2688,17 +2807,38 @@ Object.assign(BkkLib, {
     }
     return best;
   },
+  /* The railway station at a city feed's hub, from FUTÁR's MÁV stops: the
+     one by the hub stop, else by name. Hubs called just "Vasútállomás"
+     (Székesfehérvár, Szombathely, Kaposvár …) or "Főpályaudvar" (Pécs)
+     share no word with the station ("Székesfehérvár", "Pécs"), so the town
+     names it then; a town with two stations goes by the hub's own word
+     (Miskolc "Gömöri pályaudvar" is Miskolc-Gömöri, not Miskolc-Tiszai). */
+  async railStationAtHub(apiKey, cityName, path) {
+    const hubPt = BkkLib.finiteLatLon(path.hubLat, path.hubLon);
+    const want = path.hubFold || path.hubName || "";
+    const cityTok = BkkLib.foldTokens(cityName);
+    const queries = [(cityName ? cityName + " " : "") + (path.hubName || "")];
+    if (cityName && queries.indexOf(cityName) < 0) queries.push(cityName);
+    for (let i = 0; i < queries.length; i++) {
+      let hits = [];
+      try {
+        hits = await BkkLib.searchStops(apiKey, queries[i], "mav") || [];
+      } catch (_e) {
+        hits = [];
+      }
+      const near = hubPt ? hits.map((hit) => ({ hit, pt: BkkLib.finiteLatLon(hit.lat, hit.lon) })).filter((c) => c.pt && BkkLib.haversineMeters(hubPt, c.pt) <= 1500).sort((x, y) => BkkLib.haversineMeters(hubPt, x.pt) - BkkLib.haversineMeters(hubPt, y.pt))[0] : null;
+      if (near) return near.hit;
+      const byHub = hits.find((hit) => BkkLib.foldTokenMatch(want, hit.name || ""));
+      if (byHub) return byHub;
+      const extra = (hit) => BkkLib.foldTokens(hit.name || "").filter((tok) => cityTok.indexOf(tok) < 0).length;
+      const byTown = cityTok.length ? hits.filter((hit) => BkkLib.foldTokens(hit.name || "").some((tok) => cityTok.indexOf(tok) >= 0)).sort((x, y) => extra(x) - extra(y))[0] : null;
+      if (byTown) return byTown;
+    }
+    return null;
+  },
   async railAfterCity(apiKey, hass, cityName, path, dest, readySec) {
     if (!path || !path.hubName) return null;
-    const query = (cityName ? cityName + " " : "") + (path.hubName || "");
-    let station = null;
-    try {
-      const hits = await BkkLib.searchStops(apiKey, query, "mav");
-      const want = path.hubFold || path.hubName || "";
-      station = (hits || []).find((hit) => BkkLib.foldTokenMatch(want, hit.name || "")) || null;
-    } catch (_e) {
-      station = null;
-    }
+    const station = await BkkLib.railStationAtHub(apiKey, cityName, path);
     if (!station || !station.id) return null;
     const walkStart = readySec;
     const walkEnd = readySec + 6 * 60;
@@ -2720,14 +2860,15 @@ Object.assign(BkkLib, {
     let train = null;
     if (hass && dest && dest.id) {
       try {
-        const rows = await BkkLib.elviraBetween(
+        const destCode = await BkkLib.elviraResolveCode(apiKey, dest.id, dest.name || "");
+        const rows = destCode ? await BkkLib.elviraBetween(
           hass,
           station.id,
-          dest.id,
+          destCode,
           480,
-          dest.name || "",
+          "",
           { apiKey, originName: station.name || "" }
-        );
+        ) : [];
         const next = (rows || []).filter((row) => row.destHit !== false && Number(row.dep) >= walkEnd - 30).sort((a, b) => a.dep - b.dep)[0];
         if (next && next.dep) {
           const rideMin = Number(next.travel) > 0 ? Number(next.travel) : 0;
@@ -2742,7 +2883,7 @@ Object.assign(BkkLib, {
             minutes: rideMin || 1,
             meters: 0,
             label: String(next.label || next.trainNumber || ""),
-            headsign: dest.name || "",
+            headsign: String(next.head || dest.name || ""),
             color: String(badge.color || "4477AA").replace("#", ""),
             text: String(badge.text || "FFFFFF").replace("#", ""),
             from: station.name || "",
@@ -2774,7 +2915,9 @@ Object.assign(BkkLib, {
 
 // src/lib/geo.js
 var SHAPE_LOOP_CLOSE_M = 100;
-var SHAPE_SAME_STOP_M = 150;
+var SHAPE_LOOP_RATIO = 25;
+var SHAPE_PASS_M = 80;
+var SHAPE_PASS_WEIGHT = 4;
 Object.assign(BkkLib, {
   hm(ts) {
     if (!ts) return "";
@@ -3057,128 +3200,6 @@ Object.assign(BkkLib, {
       return BkkLib.finiteLatLon(pt[0], pt[1]);
     }).filter(Boolean);
   },
-  sliceShapeMeters(shape, fromM, toM) {
-    const pts = BkkLib.validMapShape(shape);
-    if (pts.length < 2) return pts;
-    let a = Number(fromM);
-    let b = Number(toM);
-    if (!Number.isFinite(a) || !Number.isFinite(b)) return pts;
-    if (b < a) {
-      const tmp = a;
-      a = b;
-      b = tmp;
-    }
-    const out = [];
-    const push = (pt) => {
-      if (!pt) return;
-      const last = out[out.length - 1];
-      if (last && last[0] === pt[0] && last[1] === pt[1]) return;
-      out.push(pt);
-    };
-    push(BkkLib.pointAlongShape(pts, a));
-    let dist = 0;
-    for (let i = 1; i < pts.length; i++) {
-      const next = dist + BkkLib.haversineMeters(pts[i - 1], pts[i]);
-      if (next > a && next < b) push(pts[i]);
-      dist = next;
-    }
-    push(BkkLib.pointAlongShape(pts, b));
-    return out.length >= 2 ? out : pts;
-  },
-  clipShapeToHop(shape, details, origin, dest) {
-    const pts = BkkLib.validMapShape(shape);
-    if (pts.length < 2) return pts;
-    const sts = details && details.sts || [];
-    const stops = details && details.stops || {};
-    if (!sts.length || !origin) return pts;
-    let oidx = BkkLib.originIndex(sts, stops, origin);
-    if (oidx < 0) {
-      return pts;
-    }
-    let didx = -1;
-    const destObj = dest && (dest.id || dest.key || dest.name) ? { id: dest.id, name: dest.key || dest.name } : null;
-    if (destObj) {
-      for (let i = Math.max(0, oidx) + 1; i < sts.length; i++) {
-        const stop = Object.assign({ id: sts[i].stopId }, stops[sts[i].stopId] || {});
-        if (BkkLib.stopMatchesOrigin(stop, destObj)) {
-          didx = i;
-          break;
-        }
-      }
-    }
-    if (didx < 0) didx = sts.length - 1;
-    if (oidx <= 0 && didx >= sts.length - 1) {
-      return pts;
-    }
-    const d0 = Number(sts[oidx].shapeDistTraveled);
-    const d1 = Number(sts[didx].shapeDistTraveled);
-    if (!Number.isFinite(d0) || !Number.isFinite(d1) || d1 === d0) return pts;
-    let polyLen = 0;
-    for (let i = 1; i < pts.length; i++) {
-      polyLen += BkkLib.haversineMeters(pts[i - 1], pts[i]);
-    }
-    const maxOfficial = Math.max(0, ...sts.map((st) => {
-      const n = Number(st.shapeDistTraveled);
-      return Number.isFinite(n) ? n : 0;
-    }));
-    if (!(polyLen > 0) || !(maxOfficial > 0)) return pts;
-    const fromM = Math.min(d0, d1) / maxOfficial * polyLen;
-    const toM = Math.max(d0, d1) / maxOfficial * polyLen;
-    const sliced = BkkLib.sliceShapeMeters(pts, fromM, toM);
-    return sliced;
-  },
-  /* Drop the inbound GTFS tail before the card origin. Keep everything after
-     so a through train (9068 → Veszprém) is not cut at the hop destination. */
-  clipShapeFromBoard(shape, board, maxM) {
-    const pts = BkkLib.validMapShape(shape);
-    const start = Array.isArray(board) ? BkkLib.mapGpsLatLon(board[0], board[1]) : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
-    if (pts.length < 2 || !start) return pts;
-    let best = 0;
-    let bestD = 1e15;
-    pts.forEach((p, i) => {
-      const d = BkkLib.haversineMeters(p, start);
-      if (d < bestD) {
-        bestD = d;
-        best = i;
-      }
-    });
-    const limit = Number.isFinite(Number(maxM)) && Number(maxM) > 0 ? Number(maxM) : 1200;
-    if (bestD > limit) return pts;
-    const out = pts.slice(best);
-    return out.length >= 2 ? out : pts;
-  },
-  /* GTFS/pfaedle stores one canonical direction. A hop at Kelenföld on a
-     Székesfehérvár→Kőbánya polyline must keep the prefix (toward Szfvár),
-     not the Kőbánya tail. Through trains keep that end of the line. */
-  clipShapeFromBoardToward(shape, board, dest, maxM) {
-    const pts = BkkLib.validMapShape(shape);
-    const start = Array.isArray(board) ? BkkLib.mapGpsLatLon(board[0], board[1]) : BkkLib.mapGpsLatLon(board && board.lat, board && board.lon);
-    const goal = Array.isArray(dest) ? BkkLib.mapGpsLatLon(dest[0], dest[1]) : BkkLib.mapGpsLatLon(dest && dest.lat, dest && dest.lon);
-    if (pts.length < 2 || !start) return pts;
-    if (!goal) return BkkLib.clipShapeFromBoard(pts, start, maxM);
-    let iBoard = 0;
-    let dBoard = 1e15;
-    let iDest = 0;
-    let dDest = 1e15;
-    pts.forEach((p, i) => {
-      const db = BkkLib.haversineMeters(p, start);
-      if (db < dBoard) {
-        dBoard = db;
-        iBoard = i;
-      }
-      const dd = BkkLib.haversineMeters(p, goal);
-      if (dd < dDest) {
-        dDest = dd;
-        iDest = i;
-      }
-    });
-    const limit = Number.isFinite(Number(maxM)) && Number(maxM) > 0 ? Number(maxM) : 1200;
-    if (dBoard > limit) return pts;
-    if (dDest > 8e3) return BkkLib.clipShapeFromBoard(pts, start, maxM);
-    if (iDest === iBoard) return BkkLib.clipShapeFromBoard(pts, start, maxM);
-    const out = iDest > iBoard ? pts.slice(iBoard) : pts.slice(0, iBoard + 1);
-    return out.length >= 2 ? out : pts;
-  },
   clipRideShape(shape, board, dest, row) {
     const pts = BkkLib.validMapShape(shape);
     if (pts.length < 2) return pts;
@@ -3283,51 +3304,101 @@ Object.assign(BkkLib, {
     }
     return journey;
   },
-  /* The part of a shape from `from` to `to`, in that direction. The nearest
-     vertex to `to` can lie before the one to `from`: on a closed loop that
-     starts past the boarding stop (Szeged 78 at Mars tér) the ride runs on
-     over the shape's end, and on a line that passes the destination twice
-     the later pass is the one the ride reaches. */
+  /* The foot of the perpendicular from a point to every segment of a
+     shape (repeated vertices skipped): `at` is metres along the shape, `d`
+     the distance to it. */
+  _shapeFeet(xy, cum, p) {
+    const q = xy(p);
+    const feet = [];
+    for (let i = 1; i < xy.pts.length; i++) {
+      const a = xy.pts[i - 1];
+      const b = xy.pts[i];
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const len2 = dx * dx + dy * dy;
+      if (!len2) continue;
+      const t2 = Math.max(0, Math.min(1, ((q[0] - a[0]) * dx + (q[1] - a[1]) * dy) / len2));
+      const d = Math.hypot(a[0] + t2 * dx - q[0], a[1] + t2 * dy - q[1]);
+      feet.push({ seg: i - 1, t: t2, d, at: cum[i - 1] + t2 * (cum[i] - cum[i - 1]) });
+    }
+    return feet;
+  },
+  /* Where a shape passes a point: each closest approach (a local minimum of
+     the distance along the shape) no more than SHAPE_PASS_M farther than
+     the closest one. Inside a segment its foot is one; at a vertex, only
+     when the segment before ran towards it (that foot ends at t = 1, and
+     the later foot, at t = 0, stands for the vertex). */
+  _shapePasses(feet) {
+    const limit = feet.reduce((m, f) => Math.min(m, f.d), Infinity) + SHAPE_PASS_M;
+    return feet.filter((f, i) => f.d <= limit && (f.t > 0 && f.t < 1 || f.t === 0 && (i === 0 || feet[i - 1].t === 1) || f.t === 1 && i === feet.length - 1));
+  },
+  /* The part of a shape from `from` to `to`, in that direction. Both stops
+     are projected onto the shape's segments, and every pass of the shape by
+     each stop counts: the ride is the shortest stretch from a pass of
+     `from` forward to a pass of `to`, a close pass winning over a far one.
+     An out-and-back line passes both stops twice (Miskolc ZOO, Pécs 1), and
+     only the pair in the direction of travel is short. Two stops on one
+     segment give that short piece, not the whole line. A closed loop
+     (Szeged 78 starts past Mars tér) may run on over its end; a line whose
+     two ends only happen to meet is no loop. */
   sliceShapeBetween(shape, from, to) {
     const pts = BkkLib.validMapShape(shape);
     if (pts.length < 2) return pts;
     const a = BkkLib.finiteLatLon(from && from[0], from && from[1]);
     const b = BkkLib.finiteLatLon(to && to[0], to && to[1]);
     if (!a || !b) return pts;
-    let i0 = 0;
-    let i1 = pts.length - 1;
-    let d0 = 1e15;
-    let d1 = 1e15;
-    pts.forEach((p, i) => {
-      const da = BkkLib.haversineMeters(p, a);
-      const db = BkkLib.haversineMeters(p, b);
-      if (da < d0) {
-        d0 = da;
-        i0 = i;
-      }
-      if (db < d1) {
-        d1 = db;
-        i1 = i;
-      }
-    });
-    let sliced;
-    if (i1 >= i0) {
-      sliced = pts.slice(i0, i1 + 1);
-    } else if (BkkLib.haversineMeters(pts[0], pts[pts.length - 1]) <= SHAPE_LOOP_CLOSE_M) {
-      sliced = pts.slice(i0).concat(pts.slice(1, i1 + 1));
-    } else {
-      let iAhead = -1;
-      let dAhead = 1e15;
-      for (let i = i0 + 1; i < pts.length; i++) {
-        const d = BkkLib.haversineMeters(pts[i], b);
-        if (d < dAhead) {
-          dAhead = d;
-          iAhead = i;
-        }
-      }
-      sliced = iAhead > i0 && dAhead <= d1 + SHAPE_SAME_STOP_M ? pts.slice(i0, iAhead + 1) : pts.slice(i1, i0 + 1).reverse();
+    const k = Math.cos(a[0] * Math.PI / 180) * 111320;
+    const xy = (p) => [p[1] * k, p[0] * 110540];
+    xy.pts = pts.map(xy);
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) {
+      cum.push(cum[i - 1] + Math.hypot(xy.pts[i][0] - xy.pts[i - 1][0], xy.pts[i][1] - xy.pts[i - 1][1]));
     }
-    return sliced.length >= 2 ? sliced : pts;
+    const total = cum[cum.length - 1];
+    const gap = BkkLib.haversineMeters(pts[0], pts[pts.length - 1]);
+    const loop = gap <= SHAPE_LOOP_CLOSE_M && total >= SHAPE_LOOP_RATIO * Math.max(gap, 20);
+    const boards = BkkLib._shapePasses(BkkLib._shapeFeet(xy, cum, a));
+    const alights = BkkLib._shapePasses(BkkLib._shapeFeet(xy, cum, b));
+    if (!boards.length || !alights.length) return pts;
+    let pick = null;
+    const consider = (pa, pb) => {
+      let span = pb.at - pa.at;
+      if (span < 0 && loop) span += total;
+      if (span < 0) return;
+      const cost = span + SHAPE_PASS_WEIGHT * (pa.d + pb.d);
+      if (!pick || cost < pick.cost) pick = { pa, pb, cost, wrap: pb.at < pa.at };
+    };
+    boards.forEach((pa) => alights.forEach((pb) => consider(pa, pb)));
+    const foot = (f) => {
+      const p = pts[f.seg];
+      const q = pts[f.seg + 1];
+      if (f.t === 0) return p;
+      if (f.t === 1) return q;
+      return [p[0] + (q[0] - p[0]) * f.t, p[1] + (q[1] - p[1]) * f.t];
+    };
+    const between = (pa, pb, wrap) => {
+      const out = [foot(pa)];
+      const push = (p) => {
+        const last = out[out.length - 1];
+        if (last[0] !== p[0] || last[1] !== p[1]) out.push(p);
+      };
+      if (wrap) {
+        for (let i = pa.seg + 1; i < pts.length; i++) push(pts[i]);
+        for (let i = 1; i <= pb.seg; i++) push(pts[i]);
+      } else {
+        for (let i = pa.seg + 1; i <= pb.seg; i++) push(pts[i]);
+      }
+      push(foot(pb));
+      return out;
+    };
+    let sliced;
+    if (pick) {
+      sliced = between(pick.pa, pick.pb, pick.wrap);
+    } else {
+      const nearest = (list) => list.reduce((m, f) => f.d < m.d ? f : m, list[0]);
+      sliced = between(nearest(alights), nearest(boards), false).reverse();
+    }
+    return sliced.length >= 2 ? sliced : [a, b];
   },
   clipShapeToBoardDest(shape, board, dest) {
     const pts = BkkLib.validMapShape(shape);
@@ -3341,8 +3412,19 @@ Object.assign(BkkLib, {
     if (span < 200 && orig > 2e3) return pts;
     return sliced;
   },
-  async fillJourneyShapes(journey) {
-    if (!journey || !Array.isArray(journey.legs)) return journey;
+  /* The card, its inline map and the full map all ask for the same
+     journey's shapes: one fill per journey, its trips fetched once. */
+  _journeyFills: /* @__PURE__ */ new WeakMap(),
+  fillJourneyShapes(journey) {
+    if (!journey || !Array.isArray(journey.legs)) return Promise.resolve(journey);
+    let run = BkkLib._journeyFills.get(journey);
+    if (!run) {
+      run = BkkLib._fillJourneyShapes(journey);
+      BkkLib._journeyFills.set(journey, run);
+    }
+    return run;
+  },
+  async _fillJourneyShapes(journey) {
     BkkLib.stitchJourneyLegCoords(journey);
     await Promise.all(journey.legs.map(async (leg) => {
       if (!leg || leg.walk) return;
@@ -3456,81 +3538,6 @@ Object.assign(BkkLib, {
     const lat2 = toRad(b[0]);
     const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
     return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
-  },
-  pointAlongShape(shape, targetMeters) {
-    if (!Array.isArray(shape) || shape.length < 1) return null;
-    if (shape.length === 1 || !(targetMeters > 0)) return shape[0];
-    const cum = [0];
-    for (let i2 = 1; i2 < shape.length; i2++) {
-      cum.push(cum[i2 - 1] + BkkLib.haversineMeters(shape[i2 - 1], shape[i2]));
-    }
-    const total = cum[cum.length - 1];
-    if (!(total > 0)) return shape[0];
-    const tval = Math.max(0, Math.min(total, Number(targetMeters) || 0));
-    let i = 1;
-    while (i < cum.length && cum[i] < tval) i += 1;
-    const i1 = Math.min(i, shape.length - 1);
-    const i0 = Math.max(0, i1 - 1);
-    const seg = cum[i1] - cum[i0];
-    if (!(seg > 0)) return shape[i1];
-    const f = (tval - cum[i0]) / seg;
-    return [
-      shape[i0][0] + (shape[i1][0] - shape[i0][0]) * f,
-      shape[i0][1] + (shape[i1][1] - shape[i0][1]) * f
-    ];
-  },
-  estimatePositionFromSchedule(shape, stopTimes, nowSec) {
-    if (!Array.isArray(shape) || shape.length < 2 || !Array.isArray(stopTimes) || stopTimes.length < 1) {
-      return null;
-    }
-    const stops = stopTimes.map((st) => {
-      const tval = st.predictedDepartureTime != null ? st.predictedDepartureTime : st.predictedArrivalTime != null ? st.predictedArrivalTime : st.departureTime != null ? st.departureTime : st.arrivalTime;
-      const dist = st.shapeDistTraveled != null ? Number(st.shapeDistTraveled) : NaN;
-      return {
-        t: tval != null ? Number(tval) : NaN,
-        dist: Number.isFinite(dist) ? dist : NaN
-      };
-    }).filter((s) => Number.isFinite(s.t)).sort((a, b) => a.t - b.t);
-    if (!stops.length) return null;
-    const now = Number(nowSec);
-    if (!Number.isFinite(now)) return null;
-    let targetDist;
-    if (now <= stops[0].t) {
-      targetDist = Number.isFinite(stops[0].dist) ? stops[0].dist : 0;
-    } else if (now >= stops[stops.length - 1].t) {
-      const last = stops[stops.length - 1];
-      if (Number.isFinite(last.dist)) targetDist = last.dist;
-      else return shape[shape.length - 1];
-    } else {
-      let i = 0;
-      while (i < stops.length - 1 && stops[i + 1].t < now) i += 1;
-      const a = stops[i];
-      const b = stops[i + 1];
-      const span = b.t - a.t;
-      const f = span > 0 ? (now - a.t) / span : 0;
-      if (Number.isFinite(a.dist) && Number.isFinite(b.dist)) {
-        targetDist = a.dist + (b.dist - a.dist) * f;
-      } else {
-        const i0 = Math.floor(i / Math.max(1, stops.length - 1) * (shape.length - 1));
-        const i1 = Math.floor((i + 1) / Math.max(1, stops.length - 1) * (shape.length - 1));
-        const p0 = shape[Math.max(0, Math.min(shape.length - 1, i0))];
-        const p1 = shape[Math.max(0, Math.min(shape.length - 1, i1))];
-        return [
-          p0[0] + (p1[0] - p0[0]) * f,
-          p0[1] + (p1[1] - p0[1]) * f
-        ];
-      }
-    }
-    const maxOfficial = Math.max(
-      ...stops.map((s) => Number.isFinite(s.dist) ? s.dist : 0),
-      targetDist || 0
-    );
-    let polyLen = 0;
-    for (let i = 1; i < shape.length; i++) {
-      polyLen += BkkLib.haversineMeters(shape[i - 1], shape[i]);
-    }
-    const scaled = maxOfficial > 0 ? targetDist / maxOfficial * polyLen : targetDist;
-    return BkkLib.pointAlongShape(shape, scaled);
   }
 });
 
@@ -3611,6 +3618,7 @@ Object.assign(BkkLib, {
 });
 
 // src/lib/gtfs.js
+var DEST_NEAR_M = 1500;
 Object.assign(BkkLib, {
   /* Cached per resolved URL, so two cards pointing at different index files do
      not serve each other's data. The URL carries a daily cache-buster, which
@@ -3745,10 +3753,6 @@ Object.assign(BkkLib, {
     }
     return null;
   },
-  async mavShapeForRow(row) {
-    const route = await BkkLib.mavRouteForRow(row, "", "");
-    return route ? route.shape : [];
-  },
   /* Schema 2 keeps every stop pattern of a train (936 sometimes runs on to
      Szombathely) with its stations: take the longest one that serves the
      card's two stations in order, else one serving the boarding station.
@@ -3823,17 +3827,75 @@ Object.assign(BkkLib, {
       lon: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i + 1] / 1e5 : null
     }));
     idx.g = null;
+    idx.s = null;
     idx.url = url;
     idx.ops = (idx.o || []).map((row, i) => ({ i, id: row[0], name: row[1] }));
     idx.byNum = /* @__PURE__ */ new Map();
     idx.byKey = /* @__PURE__ */ new Map();
+    idx.byId = /* @__PURE__ */ new Map();
     idx.stops.forEach((st) => {
       const nk = st.op + ":" + st.num;
       const kk = st.op + ":" + st.key;
       if (st.num && !idx.byNum.has(nk)) idx.byNum.set(nk, st);
       if (st.key && !idx.byKey.has(kk)) idx.byKey.set(kk, st);
+      if (st.id && !idx.byId.has(st.id)) idx.byId.set(st.id, st);
     });
     return idx;
+  },
+  gtfsStopById(idx, id) {
+    if (!idx || !id) return null;
+    const key = String(id);
+    if (idx.byId) return idx.byId.get(key) || null;
+    return (idx.stops || []).find((s) => s.id === key) || null;
+  },
+  /* The town of a city feed's operator ("Székesfehérvár — helyi" →
+     Székesfehérvár); '' for the Volán index, whose names carry the town. */
+  gtfsOpTown(idx, opIx) {
+    const op = idx && opIx != null ? (idx.ops || [])[opIx] : null;
+    return op ? String(op.name || "").split(" — ")[0].trim() : "";
+  },
+  /* A stop of an index as a picker hit: with its coordinates and its town,
+     so planning starts from that stop and not from whatever a geocoder
+     finds under the bare name (Tatabánya "Fő tér" in Budapest). */
+  gtfsHit(idx, s, extra) {
+    const hit = Object.assign({ id: s.id, name: s.name }, extra || {});
+    if (BkkLib.finiteLatLon(s.lat, s.lon)) {
+      hit.lat = s.lat;
+      hit.lon = s.lon;
+    }
+    const area = idx && idx.ops && idx.ops.length ? BkkLib.gtfsOpTown(idx, s.op) : "";
+    if (area) hit.area = area;
+    return hit;
+  },
+  /* Picked stops that came without coordinates (a city search hit, an
+     older history entry, a YAML origin) get them from the index they
+     belong to. Anything else passes through. */
+  async withGtfsCoords(stops) {
+    const list = Array.isArray(stops) ? stops : [];
+    const need = (s) => s && s.id && !BkkLib.finiteLatLon(s.lat, s.lon);
+    const cityish = (s) => need(s) && BkkLib.stopIdFamily(s) === "city";
+    const volanish = (s) => need(s) && /^(?:hkir_|volan_)/i.test(String(s.id));
+    const load = async (want, get) => {
+      if (!list.some(want)) return null;
+      try {
+        return await get();
+      } catch (_e) {
+        return null;
+      }
+    };
+    const [city, volan] = await Promise.all([
+      load(cityish, () => BkkLib.cityIndex()),
+      load(volanish, () => BkkLib.volanIndex())
+    ]);
+    return list.map((s) => {
+      const idx = cityish(s) ? city : volanish(s) ? volan : null;
+      const hit = idx ? BkkLib.gtfsStopById(idx, s.id) : null;
+      if (!hit || !BkkLib.finiteLatLon(hit.lat, hit.lon)) return s;
+      const out = Object.assign({}, s, { lat: hit.lat, lon: hit.lon });
+      const area = idx.ops && idx.ops.length ? BkkLib.gtfsOpTown(idx, hit.op) : "";
+      if (area && !out.area) out.area = area;
+      return out;
+    });
   },
   opIx(idx, city) {
     if (!idx || !city) return -1;
@@ -3881,7 +3943,7 @@ Object.assign(BkkLib, {
   cityOpId(idx, stop) {
     if (!idx || !stop) return "";
     const id = String(stop.id || "");
-    const hit = (idx.stops || []).find((s) => s.id === id);
+    const hit = BkkLib.gtfsStopById(idx, id);
     if (hit && idx.ops && idx.ops[hit.op]) return idx.ops[hit.op].id;
     const colon = id.indexOf(":");
     const prefix = colon > 0 ? id.slice(0, colon) : "";
@@ -3923,12 +3985,66 @@ Object.assign(BkkLib, {
     });
     return hits[0];
   },
-  volanDestHit(st, destKey, destFold) {
+  /* Folded town names of an index: the "Town, " part of its stop names
+     (the Volán feed names every stop so) and its operators' towns. */
+  _gtfsTowns: /* @__PURE__ */ new WeakMap(),
+  gtfsTowns(idx) {
+    if (!idx || typeof idx !== "object") return /* @__PURE__ */ new Set();
+    let towns = BkkLib._gtfsTowns.get(idx);
+    if (towns) return towns;
+    towns = /* @__PURE__ */ new Set();
+    (idx.stops || []).forEach((st) => {
+      const split = BkkLib.splitCityPrefix(st && st.name);
+      if (split) towns.add(BkkLib.fold(split.city));
+    });
+    (idx.ops || []).forEach((op) => {
+      const town = BkkLib.fold(BkkLib.gtfsOpTown(idx, op.i));
+      if (town) towns.add(town);
+    });
+    BkkLib._gtfsTowns.set(idx, towns);
+    return towns;
+  },
+  /* Whether a stop of a trip is the destination. A town ("Tata", "Eger")
+     is any stop of that town, as a whole word: "Tata, vasútállomás" but not
+     "Tatabánya", nor "Egerszalók". Any other name has to be that place:
+     "Kórház" is not "Kórház tér" nor "Megyei Kórház", and when both name a
+     town it is the same one. With the destination's coordinates, a stop of
+     that name in another town (11 towns have a "Kossuth tér") is too far.
+     opts: { town, lat, lon }, and the destination's place key and town
+     (`place`, `townOf`) when the caller has them worked out already. */
+  volanDestHit(st, destKey, destFold, opts) {
     if (!st) return false;
-    if (destKey && (st.key === destKey || st.fold === destFold)) return true;
+    opts = opts || {};
     const fk = destFold || BkkLib.fold(destKey || "");
-    if (fk && fk.length >= 4 && (" " + st.fold + " ").indexOf(" " + fk + " ") >= 0) return true;
-    return false;
+    if (opts.town) {
+      if (destKey && (st.key === destKey || st.fold === fk)) return true;
+      return !!fk && fk.length >= 4 && (" " + st.fold + " ").indexOf(" " + fk + " ") >= 0;
+    }
+    const want = BkkLib.mapGpsLatLon(opts.lat, opts.lon);
+    const here = BkkLib.mapGpsLatLon(st.lat, st.lon);
+    if (want && here && BkkLib.haversineMeters(want, here) > DEST_NEAR_M) return false;
+    if (destKey && (st.key === destKey || st.fold === fk)) return true;
+    const name = destKey || fk;
+    const place = opts.place != null ? opts.place : BkkLib.placeNameKey({ name });
+    const mine = BkkLib._stopPlace(st);
+    if (!place || place !== mine.place) return false;
+    const town = opts.townOf != null ? opts.townOf : BkkLib._townOf(name);
+    return !(town && mine.town && town !== mine.town);
+  },
+  /* An index stop's place key and town, worked out once per stop. */
+  _stopPlaces: /* @__PURE__ */ new WeakMap(),
+  _stopPlace(st) {
+    let hit = BkkLib._stopPlaces.get(st);
+    if (!hit) {
+      const name = st.name || st.key || "";
+      hit = { place: BkkLib.placeNameKey({ name }), town: BkkLib._townOf(name) };
+      BkkLib._stopPlaces.set(st, hit);
+    }
+    return hit;
+  },
+  _townOf(name) {
+    const split = BkkLib.splitCityPrefix(name);
+    return split ? BkkLib.fold(split.city) : "";
   },
   async volanSearchStops(q) {
     const idx = await BkkLib.volanIndex();
@@ -4015,12 +4131,7 @@ Object.assign(BkkLib, {
       if (as !== bs) return as - bs;
       return a.name.localeCompare(b.name, "hu");
     });
-    return hits.slice(0, 20).map((s) => ({
-      id: s.id,
-      name: s.name,
-      label: s.name,
-      type: "BUS"
-    }));
+    return hits.slice(0, 20).map((s) => BkkLib.gtfsHit(idx, s, { label: s.name, type: "BUS" }));
   },
   async volanReachableDests(stop) {
     const idx = await BkkLib.volanIndex();
@@ -4048,7 +4159,7 @@ Object.assign(BkkLib, {
         const st = idx.stops[ps[j]];
         if (!st || !st.key) continue;
         if (opIx != null && st.op !== opIx) continue;
-        if (!byKey.has(st.key)) byKey.set(st.key, { key: st.key, name: st.name, id: st.id });
+        if (!byKey.has(st.key)) byKey.set(st.key, BkkLib.gtfsHit(idx, st, { key: st.key }));
         if (!destRoutes[st.key]) destRoutes[st.key] = [];
         if (destRoutes[st.key].indexOf(route) < 0) destRoutes[st.key].push(route);
       }
@@ -4173,6 +4284,14 @@ Object.assign(BkkLib, {
     const indexes = opIx == null ? [origin.i] : BkkLib.cityStopIndexes(idx, { id: stopId, name: originName || "" }, opIx);
     const destKey = dest && dest.key;
     const destFold = BkkLib.fold(dest && dest.name || destKey || "");
+    const destName = destKey || destFold;
+    const destOpts = {
+      town: !!destFold && !BkkLib.splitCityPrefix(dest && dest.name || destKey || "") && BkkLib.gtfsTowns(idx).has(destFold),
+      lat: dest && dest.lat,
+      lon: dest && dest.lon,
+      place: BkkLib.placeNameKey({ name: destName }),
+      townOf: BkkLib._townOf(destName)
+    };
     const horizon = clampMinutesAfter(minutesAfter);
     const rowCap = maxDepartureRows(horizon);
     const rows = [];
@@ -4197,7 +4316,7 @@ Object.assign(BkkLib, {
         let didx = -1;
         if (destKey || destFold) {
           for (let j = oidx + 1; j < ps.length; j++) {
-            if (BkkLib.volanDestHit(idx.stops[ps[j]], destKey, destFold)) {
+            if (BkkLib.volanDestHit(idx.stops[ps[j]], destKey, destFold, destOpts)) {
               didx = j;
               break;
             }
@@ -5710,24 +5829,46 @@ Object.assign(BkkLib, {
     });
     return out;
   },
-  /* One read per connection; a new login reads again. */
+  /* The server's list for this user; null when it cannot be read (no
+     websocket, or the call failed), which is not the same as empty. */
+  async _readServerHistory(hass) {
+    if (!hass || typeof hass.callWS !== "function") return null;
+    try {
+      const res = await hass.callWS({ type: "frontend/get_user_data", key: HISTORY_KEY });
+      return Array.isArray(res && res.value) ? res.value : [];
+    } catch (_e) {
+      return null;
+    }
+  },
+  /* Two copies of one history (the server's and this browser's, or two
+     devices'): every stop of either, each with its higher count and its
+     later use. */
+  _mergeStopHistory(a, b) {
+    const byId = /* @__PURE__ */ new Map();
+    BkkLib._cleanStopHistory(a).concat(BkkLib._cleanStopHistory(b)).forEach((e) => {
+      const prev = byId.get(e.id);
+      if (!prev) {
+        byId.set(e.id, e);
+        return;
+      }
+      const newer = e.t > prev.t ? e : prev;
+      byId.set(e.id, Object.assign({}, prev, newer, { n: Math.max(prev.n, e.n), t: Math.max(prev.t, e.t) }));
+    });
+    return Array.from(byId.values());
+  },
+  /* One read per connection; a new login reads again. A failed read shows
+     the browser's copy but is not kept: the next look asks again. */
   loadStopHistory(hass) {
     const conn = hass && hass.connection || null;
     const memo = BkkLib._stopHistory;
     if (memo && memo.conn === conn) return memo.p;
     const p = (async () => {
-      let list = null;
-      if (hass && typeof hass.callWS === "function") {
-        try {
-          const res = await hass.callWS({ type: "frontend/get_user_data", key: HISTORY_KEY });
-          list = Array.isArray(res && res.value) ? res.value : [];
-        } catch (_e) {
-          list = localRead(hass);
-        }
-      } else {
-        list = localRead(hass);
+      const server = await BkkLib._readServerHistory(hass);
+      if (server === null) {
+        if (BkkLib._stopHistory && BkkLib._stopHistory.p === p) BkkLib._stopHistory = null;
+        return BkkLib._cleanStopHistory(localRead(hass));
       }
-      return BkkLib._cleanStopHistory(list);
+      return BkkLib._cleanStopHistory(server);
     })();
     BkkLib._stopHistory = { conn, p };
     return p;
@@ -5741,8 +5882,16 @@ Object.assign(BkkLib, {
     });
     return run;
   },
+  /* The server's list is read again right before each write, so another
+     device's picks since this page loaded are kept, not overwritten. When
+     it cannot be read, only this browser's copy is written: a list that
+     may be stale must not replace the server's. */
   async _recordStopNow(hass, stop) {
-    const list = (await BkkLib.loadStopHistory(hass)).map((e) => Object.assign({}, e));
+    const server = await BkkLib._readServerHistory(hass);
+    const memo = BkkLib._stopHistory;
+    const conn = hass && hass.connection || null;
+    const seen = memo && memo.conn === conn ? await memo.p.catch(() => []) : [];
+    const list = BkkLib._mergeStopHistory(server || [], BkkLib._mergeStopHistory(seen, localRead(hass)));
     const now = Date.now();
     const id = String(stop.id);
     let entry = list.find((e) => e.id === id);
@@ -5760,9 +5909,9 @@ Object.assign(BkkLib, {
     if (stop.kind) entry.kind = String(stop.kind);
     if (stop.label) entry.label = String(stop.label);
     const next = BkkLib._cleanStopHistory(list.sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now)).slice(0, HISTORY_KEEP));
-    BkkLib._stopHistory = { conn: hass && hass.connection || null, p: Promise.resolve(next) };
+    BkkLib._stopHistory = { conn, p: Promise.resolve(next) };
     localWrite(hass, next);
-    if (hass && typeof hass.callWS === "function") {
+    if (server !== null) {
       try {
         await hass.callWS({ type: "frontend/set_user_data", key: HISTORY_KEY, value: next });
       } catch (_e) {
@@ -8172,6 +8321,8 @@ ${this._stopPinCss()}
 
 // src/planner-card.js
 var PLANNER_STALE_MS = 5 * 60 * 1e3;
+var MAP_TILES = "https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png";
+var MAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>';
 var BKKPlannerCard = class extends BKKHopCard {
   constructor() {
     super();
@@ -8222,9 +8373,11 @@ var BKKPlannerCard = class extends BKKHopCard {
     return false;
   }
   /* Back on the view after a while, the departures and countdowns on screen
-     are stale: plan again. A chosen time does not go stale. */
+     are stale: plan again. A chosen time does not go stale, nor do its
+     itineraries when all are folded or none was found. */
   _shouldReloadOnConnect() {
-    const idle = !(this._journey || this._journeyLoading || this._rows && this._rows.length);
+    const planned = this._timed() && (this._journeys && this._journeys.length || this._journeysDone);
+    const idle = !(planned || this._journey || this._journeyLoading || this._rows && this._rows.length);
     const stale = !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
     return idle || stale;
   }
@@ -8352,14 +8505,26 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._ensureDests();
   }
   /* Language from hass after the pickers were drawn: their labels, the
-     time switch and the destination hint follow, not only the board. */
+     time switch and the hints under the fields follow, not only the board. */
   _langChanged() {
-    if (this._pickersMounted) {
-      this._syncPickerLabels();
-      const box = this._planEl("pdhits");
-      if (box && box.querySelector(".hint") && !box.querySelector(".hit")) this._paintDestHits("");
-    }
+    if (this._pickersMounted) this._syncPickerLabels();
     super._langChanged();
+  }
+  /* A hint under a search field keeps its i18n key, so a language change
+     rewrites the same hint (a typed query's "no results" stays that). */
+  _hintText(key) {
+    const lang = this._lang();
+    return key.indexOf("mode.") === 0 ? t(lang, "mode").all[key.slice(5)] : t(lang, key);
+  }
+  _hint(box, key) {
+    box.innerHTML = `<span class="hint" data-hint="${BkkLib.esc(key)}">${BkkLib.esc(this._hintText(key))}</span>`;
+  }
+  _repaintHints() {
+    ["phits", "pdhits"].forEach((id) => {
+      const box = this._planEl(id);
+      const span = box && !box.querySelector(".hit") ? box.querySelector(".hint[data-hint]") : null;
+      if (span) span.textContent = this._hintText(span.getAttribute("data-hint"));
+    });
   }
   _emptyBodyMessage(lang, cfg) {
     if (this._timed()) return "";
@@ -8542,19 +8707,14 @@ var BKKPlannerCard = class extends BKKHopCard {
     const body = open ? `<div class="itin-body"><div id="pjmap" class="j-map" hidden></div>${this._legTimeline(journey)}<button type="button" id="pmap">${esc(t(lang, "plannerShowMap"))}</button></div>` : "";
     return `<div class="itin${open ? " open" : ""}"><button type="button" class="itin-head" data-i="${idx}" aria-expanded="${open ? "true" : "false"}"><span class="itin-top">${times}<span class="itin-dur">${esc(t(lang, "plannerDuration", journey.durationMin))}</span></span><span class="itin-legs">${this._legChips(journey)}</span><span class="itin-meta">${esc(meta.join(" · "))}</span></button>${body}</div>`;
   }
-  _paintJourney() {
-    const host = this._journeyHost;
-    if (!host) return;
-    this._teardownPlannerInlineMap();
-    host.innerHTML = "";
+  /* What the journey box shows: its class and markup, and whether its map
+     button opens the board's first row. Null for nothing. */
+  _journeyView() {
     const cfg = this._config || {};
-    if (!cfg.stopId || !cfg.destName) return;
+    if (!cfg.stopId || !cfg.destName) return null;
     const lang = this._lang();
     const esc = BkkLib.esc;
-    const timed = this._timed();
-    const box = document.createElement("div");
-    box.className = "journey-plan";
-    if (timed) {
+    if (this._timed()) {
       const sub = this._when.mode === "arrive" ? t(lang, "plannerRoutesBy", this._whenText(this._when.at)) : t(lang, "plannerRoutesFrom", this._whenText(this._when.at));
       let inner = `<div class="j-title">${esc(t(lang, "plannerRoutes"))}<span class="j-sub">${esc(sub)}</span></div>`;
       const list = this._journeys || [];
@@ -8565,35 +8725,56 @@ var BKKPlannerCard = class extends BKKHopCard {
       } else {
         inner += list.map((j, i) => this._itineraryHtml(j, i, i === this._openJourney)).join("");
       }
-      box.innerHTML = inner;
-      host.appendChild(box);
-      this._bindJourneyBox(box, false);
-      return;
+      return { className: "journey-plan", html: inner, useBoard: false };
     }
-    const nowSec = Math.floor(Date.now() / 1e3);
-    const visible = (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
+    const visible = this._visibleRows();
     const journey = this._journey;
     const showJourney = !!(journey && journey.legs && journey.legs.length && (!visible.length || BkkLib.journeyBeatsBoard(journey, visible)));
     if (visible.length && !showJourney) {
-      box.className = "journey-plan j-map-only";
-      box.innerHTML = `<button type="button" id="pmap">${esc(t(lang, "plannerShowMap"))}</button>`;
-      host.appendChild(box);
-      this._bindJourneyBox(box, true, visible);
-      return;
+      return {
+        className: "journey-plan j-map-only",
+        html: `<button type="button" id="pmap">${esc(t(lang, "plannerShowMap"))}</button>`,
+        useBoard: true
+      };
     }
-    if (!showJourney) return;
+    if (!showJourney) return null;
     const rides = (journey && journey.legs || []).filter((leg) => !leg.walk).length;
     const titleKey = rides > 1 ? "plannerJourneyTitle" : rides === 1 ? "plannerJourneyDirect" : "plannerJourneyWalk";
-    box.innerHTML = `<div class="j-title">${esc(t(lang, titleKey))}</div>` + this._itineraryHtml(journey, 0, true);
-    host.appendChild(box);
-    this._bindJourneyBox(box, false);
+    return {
+      className: "journey-plan",
+      html: `<div class="j-title">${esc(t(lang, titleKey))}</div>` + this._itineraryHtml(journey, 0, true),
+      useBoard: false
+    };
   }
-  _bindJourneyBox(box, useBoard, visible) {
+  _visibleRows() {
+    const nowSec = Math.floor(Date.now() / 1e3);
+    return (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
+  }
+  /* Redrawn only when what it shows changes: a board repaint (an error
+     banner, a late hass) keeps the box and its inline map as they are. */
+  _paintJourney() {
+    const host = this._journeyHost;
+    if (!host) return;
+    const view = this._journeyView();
+    const sig = view ? view.className + "\n" + view.html : "";
+    if (sig === this._journeySig && this._journeySigOf === this._journey && host.childNodes.length === (view ? 1 : 0)) return;
+    this._journeySig = sig;
+    this._journeySigOf = this._journey;
+    this._teardownPlannerInlineMap();
+    host.innerHTML = "";
+    if (!view) return;
+    const box = document.createElement("div");
+    box.className = view.className;
+    box.innerHTML = view.html;
+    host.appendChild(box);
+    this._bindJourneyBox(box, view.useBoard);
+  }
+  _bindJourneyBox(box, useBoard) {
     const btn = box.querySelector("#pmap");
     if (btn) {
       btn.addEventListener("click", () => {
         if (!useBoard) return this._openJourneyMap();
-        const first = (visible || [])[0];
+        const first = this._visibleRows()[0];
         if (first) return this._openVehicleMap(first);
         this._showMapNotice(t(this._lang(), "mapNoData"));
       });
@@ -8648,11 +8829,7 @@ var BKKPlannerCard = class extends BKKHopCard {
         zoomControl: false
       }).setView(start, 8);
       this._plannerMap = map;
-      L.tileLayer("https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png", {
-        maxZoom: 20,
-        subdomains: "abc",
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-      }).addTo(map);
+      L.tileLayer(MAP_TILES, { maxZoom: 20, subdomains: "abc", attribution: MAP_ATTRIBUTION }).addTo(map);
       const allPts = this._drawJourneyPolylines(L, map, segs, { interactive: false });
       map.on("click", () => this._openJourneyMap());
       this._fitJourneyView(L, map, allPts, 16);
@@ -8747,11 +8924,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     let map;
     try {
       map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView(start, 8);
-      L.tileLayer("https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png", {
-        maxZoom: 20,
-        subdomains: "abc",
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>'
-      }).addTo(map);
+      L.tileLayer(MAP_TILES, { maxZoom: 20, subdomains: "abc", attribution: MAP_ATTRIBUTION }).addTo(map);
     } catch (_e) {
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapLeafletFail"));
@@ -8801,7 +8974,6 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._elBody.parentNode.insertBefore(cap, this._elBody);
   }
   _paint() {
-    this._teardownPlannerInlineMap();
     super._paint();
     const timed = this._timed();
     const cap = this._planEl("pdeps");
@@ -8991,7 +9163,16 @@ var BKKPlannerCard = class extends BKKHopCard {
       .journey-plan .j-map .leaflet-tile-pane{z-index:200}
       .journey-plan .j-map .leaflet-overlay-pane{z-index:400}
       .journey-plan .j-map .leaflet-marker-pane{z-index:600}
-      .journey-plan .j-map .leaflet-control-attribution{font-size:10px;background:rgba(255,255,255,.72)}
+      .journey-plan .j-map .leaflet-top,.journey-plan .j-map .leaflet-bottom{position:absolute;z-index:1000;pointer-events:none}
+      .journey-plan .j-map .leaflet-top{top:0}
+      .journey-plan .j-map .leaflet-bottom{bottom:0}
+      .journey-plan .j-map .leaflet-left{left:0}
+      .journey-plan .j-map .leaflet-right{right:0}
+      .journey-plan .j-map .leaflet-control{position:relative;z-index:800;float:left;clear:both;pointer-events:auto}
+      .journey-plan .j-map .leaflet-right .leaflet-control{float:right}
+      .journey-plan .j-map .leaflet-control-attribution{margin:0;padding:0 5px;font-size:10px;line-height:1.4;color:#333;background:rgba(255,255,255,.72)}
+      .journey-plan .j-map .leaflet-control-attribution a{color:#0078a8;text-decoration:none}
+      .journey-plan .j-map .leaflet-attribution-flag{display:inline!important;vertical-align:baseline!important;width:1em;height:.6669em}
 ${this._stopPinCss()}
       .journey-plan #pmap {
         margin-top: 10px; border: 0; cursor: pointer; font: inherit; font-size: 13px; font-weight: 700;
@@ -9286,6 +9467,7 @@ ${this._stopPinCss()}
     if (reset) reset.textContent = t(lang, "plannerReset");
     this._paintMinutesAfter();
     this._syncWhen();
+    this._repaintHints();
   }
   _paintMinutesAfter() {
     const sel = this._planEl("pmin");
@@ -9337,13 +9519,7 @@ ${this._stopPinCss()}
     this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
-    const q = this._planEl("pq");
-    const dq = this._planEl("pdq");
-    const hits = this._planEl("phits");
-    if (q) q.value = "";
-    if (dq) dq.value = "";
-    if (hits) hits.innerHTML = "";
-    this._syncPickerLabels();
+    this._clearPickerInputs();
     this._paint();
     this._reloadSafe();
     this._loadDests();
@@ -9367,6 +9543,13 @@ ${this._stopPinCss()}
       routeIds: []
     });
     this._invalidatePlan();
+    this._clearPickerInputs();
+    this._paintDestHits("");
+    this._paint();
+  }
+  /* After a pick, a swap or a reset: both fields empty, the origin's hits
+     gone, the picked names on the buttons. */
+  _clearPickerInputs() {
     const q = this._planEl("pq");
     const dq = this._planEl("pdq");
     const hits = this._planEl("phits");
@@ -9374,8 +9557,6 @@ ${this._stopPinCss()}
     if (dq) dq.value = "";
     if (hits) hits.innerHTML = "";
     this._syncPickerLabels();
-    this._paintDestHits("");
-    this._paint();
   }
   async _searchOrigin(q) {
     const box = this._planEl("phits");
@@ -9392,7 +9573,7 @@ ${this._stopPinCss()}
       const hits = await BkkLib.searchPlannerStops(this._apiKey(), q);
       if (seq !== this._searchSeq) return;
       if (!hits.length) {
-        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "mode").all.empty) + "</span>";
+        this._hint(box, "mode.empty");
         return;
       }
       box.innerHTML = hits.map((s) => `<button class="hit" type="button" data-id="${BkkLib.esc(s.id)}">${BkkLib.esc(BkkLib.plannerHitLabel(s, this._lang()))}</button>`).join("");
@@ -9435,13 +9616,7 @@ ${this._stopPinCss()}
     this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
-    const q = this._planEl("pq");
-    const dq = this._planEl("pdq");
-    const hits = this._planEl("phits");
-    if (q) q.value = "";
-    if (dq) dq.value = "";
-    if (hits) hits.innerHTML = "";
-    this._syncPickerLabels();
+    this._clearPickerInputs();
     this._paint();
     await this._loadDests();
   }
@@ -9450,6 +9625,8 @@ ${this._stopPinCss()}
     if (!cfg.stopId) return;
     this._destsFor = cfg.stopId;
     const seq = ++this._destSeq;
+    this._dests = [];
+    this._destRoutes = {};
     this._destsLoading = true;
     this._paintDestHits("");
     try {
@@ -9503,10 +9680,9 @@ ${this._stopPinCss()}
   async _searchDest(q) {
     const box = this._planEl("pdhits");
     if (!box) return;
-    const lang = this._lang();
     const cfg = this._config || {};
     if (!cfg.stopId) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, "plannerPickAll")) + "</span>";
+      this._hint(box, "plannerPickAll");
       return;
     }
     const seq = ++this._destSearchSeq;
@@ -9520,21 +9696,21 @@ ${this._stopPinCss()}
       if (seq !== this._destSearchSeq) return;
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
       if (!hits.length && this._destsLoading) {
-        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, "destLoading")) + "</span>";
+        this._hint(box, "destLoading");
         return;
       }
-      this._renderDestHits(hits, t(lang, "mode").all.empty);
+      this._renderDestHits(hits, "mode.empty");
     } catch (err) {
       if (seq !== this._destSearchSeq) return;
       this._showErr(err);
     }
   }
-  _renderDestHits(hits, emptyMsg) {
+  _renderDestHits(hits, emptyKey) {
     const box = this._planEl("pdhits");
     if (!box) return;
     this._destHits = hits || [];
     if (!this._destHits.length) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(emptyMsg) + "</span>";
+      this._hint(box, emptyKey);
       return;
     }
     const shown = this._destHits.slice(0, 20);
@@ -9549,22 +9725,21 @@ ${this._stopPinCss()}
   _paintDestHits(q) {
     const box = this._planEl("pdhits");
     if (!box) return;
-    const lang = this._lang();
     const cfg = this._config || {};
     if (!cfg.stopId) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, "plannerPickAll")) + "</span>";
+      this._hint(box, "plannerPickAll");
       return;
     }
     if (this._destsLoading) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, "destLoading")) + "</span>";
+      this._hint(box, "destLoading");
       return;
     }
     if (!this._dests.length) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, "plannerTypeDest")) + "</span>";
+      this._hint(box, "plannerTypeDest");
       return;
     }
     const hits = BkkLib.destHitsForQuery(this._dests, q, []);
-    this._renderDestHits(hits, t(lang, "mode").all.destEmpty);
+    this._renderDestHits(hits, "mode.destEmpty");
   }
   _pickDest(dest) {
     this._rememberStop(dest);

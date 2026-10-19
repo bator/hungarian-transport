@@ -3,6 +3,10 @@ import { codedError } from '../i18n.js';
 import { BkkLib } from '../lib/core.js';
 import { INDEX_SCHEMA } from '../tags.js';
 
+/* A destination stop of a trip lies no farther than this from the picked
+   destination's own coordinates. */
+const DEST_NEAR_M = 1500;
+
 Object.assign(BkkLib, {
   /* Cached per resolved URL, so two cards pointing at different index files do
      not serve each other's data. The URL carries a daily cache-buster, which
@@ -141,10 +145,6 @@ Object.assign(BkkLib, {
     }
     return null;
   },
-  async mavShapeForRow(row) {
-    const route = await BkkLib.mavRouteForRow(row, '', '');
-    return route ? route.shape : [];
-  },
   /* Schema 2 keeps every stop pattern of a train (936 sometimes runs on to
      Szombathely) with its stations: take the longest one that serves the
      card's two stations in order, else one serving the boarding station.
@@ -220,19 +220,75 @@ Object.assign(BkkLib, {
       lat: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i] / 1e5 : null,
       lon: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i + 1] / 1e5 : null,
     }));
+    /* The raw rows are in idx.stops now; a wall tablet keeps the index for
+       the page, so the copy goes. */
     idx.g = null;
+    idx.s = null;
     /* The shapes folder ("sh") sits next to the index file. */
     idx.url = url;
     idx.ops = (idx.o || []).map((row, i) => ({ i, id: row[0], name: row[1] }));
     idx.byNum = new Map();
     idx.byKey = new Map();
+    idx.byId = new Map();
     idx.stops.forEach((st) => {
       const nk = st.op + ':' + st.num;
       const kk = st.op + ':' + st.key;
       if (st.num && !idx.byNum.has(nk)) idx.byNum.set(nk, st);
       if (st.key && !idx.byKey.has(kk)) idx.byKey.set(kk, st);
+      if (st.id && !idx.byId.has(st.id)) idx.byId.set(st.id, st);
     });
     return idx;
+  },
+  gtfsStopById(idx, id) {
+    if (!idx || !id) return null;
+    const key = String(id);
+    if (idx.byId) return idx.byId.get(key) || null;
+    return (idx.stops || []).find((s) => s.id === key) || null;
+  },
+  /* The town of a city feed's operator ("Székesfehérvár — helyi" →
+     Székesfehérvár); '' for the Volán index, whose names carry the town. */
+  gtfsOpTown(idx, opIx) {
+    const op = idx && opIx != null ? (idx.ops || [])[opIx] : null;
+    return op ? String(op.name || '').split(' \u2014 ')[0].trim() : '';
+  },
+  /* A stop of an index as a picker hit: with its coordinates and its town,
+     so planning starts from that stop and not from whatever a geocoder
+     finds under the bare name (Tatabánya "Fő tér" in Budapest). */
+  gtfsHit(idx, s, extra) {
+    const hit = Object.assign({ id: s.id, name: s.name }, extra || {});
+    if (BkkLib.finiteLatLon(s.lat, s.lon)) {
+      hit.lat = s.lat;
+      hit.lon = s.lon;
+    }
+    const area = idx && idx.ops && idx.ops.length ? BkkLib.gtfsOpTown(idx, s.op) : '';
+    if (area) hit.area = area;
+    return hit;
+  },
+  /* Picked stops that came without coordinates (a city search hit, an
+     older history entry, a YAML origin) get them from the index they
+     belong to. Anything else passes through. */
+  async withGtfsCoords(stops) {
+    const list = Array.isArray(stops) ? stops : [];
+    const need = (s) => s && s.id && !BkkLib.finiteLatLon(s.lat, s.lon);
+    const cityish = (s) => need(s) && BkkLib.stopIdFamily(s) === 'city';
+    const volanish = (s) => need(s) && /^(?:hkir_|volan_)/i.test(String(s.id));
+    const load = async (want, get) => {
+      if (!list.some(want)) return null;
+      try { return await get(); } catch (_e) { return null; }
+    };
+    const [city, volan] = await Promise.all([
+      load(cityish, () => BkkLib.cityIndex()),
+      load(volanish, () => BkkLib.volanIndex()),
+    ]);
+    return list.map((s) => {
+      const idx = cityish(s) ? city : (volanish(s) ? volan : null);
+      const hit = idx ? BkkLib.gtfsStopById(idx, s.id) : null;
+      if (!hit || !BkkLib.finiteLatLon(hit.lat, hit.lon)) return s;
+      const out = Object.assign({}, s, { lat: hit.lat, lon: hit.lon });
+      const area = idx.ops && idx.ops.length ? BkkLib.gtfsOpTown(idx, hit.op) : '';
+      if (area && !out.area) out.area = area;
+      return out;
+    });
   },
   opIx(idx, city) {
     if (!idx || !city) return -1;
@@ -280,7 +336,7 @@ Object.assign(BkkLib, {
   cityOpId(idx, stop) {
     if (!idx || !stop) return '';
     const id = String(stop.id || '');
-    const hit = (idx.stops || []).find((s) => s.id === id);
+    const hit = BkkLib.gtfsStopById(idx, id);
     if (hit && idx.ops && idx.ops[hit.op]) return idx.ops[hit.op].id;
     const colon = id.indexOf(':');
     const prefix = colon > 0 ? id.slice(0, colon) : '';
@@ -322,14 +378,66 @@ Object.assign(BkkLib, {
     });
     return hits[0];
   },
-  volanDestHit(st, destKey, destFold) {
+  /* Folded town names of an index: the "Town, " part of its stop names
+     (the Volán feed names every stop so) and its operators' towns. */
+  _gtfsTowns: new WeakMap(),
+  gtfsTowns(idx) {
+    if (!idx || typeof idx !== 'object') return new Set();
+    let towns = BkkLib._gtfsTowns.get(idx);
+    if (towns) return towns;
+    towns = new Set();
+    (idx.stops || []).forEach((st) => {
+      const split = BkkLib.splitCityPrefix(st && st.name);
+      if (split) towns.add(BkkLib.fold(split.city));
+    });
+    (idx.ops || []).forEach((op) => {
+      const town = BkkLib.fold(BkkLib.gtfsOpTown(idx, op.i));
+      if (town) towns.add(town);
+    });
+    BkkLib._gtfsTowns.set(idx, towns);
+    return towns;
+  },
+  /* Whether a stop of a trip is the destination. A town ("Tata", "Eger")
+     is any stop of that town, as a whole word: "Tata, vasútállomás" but not
+     "Tatabánya", nor "Egerszalók". Any other name has to be that place:
+     "Kórház" is not "Kórház tér" nor "Megyei Kórház", and when both name a
+     town it is the same one. With the destination's coordinates, a stop of
+     that name in another town (11 towns have a "Kossuth tér") is too far.
+     opts: { town, lat, lon }, and the destination's place key and town
+     (`place`, `townOf`) when the caller has them worked out already. */
+  volanDestHit(st, destKey, destFold, opts) {
     if (!st) return false;
-    if (destKey && (st.key === destKey || st.fold === destFold)) return true;
+    opts = opts || {};
     const fk = destFold || BkkLib.fold(destKey || '');
-    /* Whole words only: "Tata" is in "Budapest, Tata" but not in
-       "Tatabánya", nor "Eger" in "Egerszalók". */
-    if (fk && fk.length >= 4 && (' ' + st.fold + ' ').indexOf(' ' + fk + ' ') >= 0) return true;
-    return false;
+    if (opts.town) {
+      if (destKey && (st.key === destKey || st.fold === fk)) return true;
+      return !!fk && fk.length >= 4 && (' ' + st.fold + ' ').indexOf(' ' + fk + ' ') >= 0;
+    }
+    const want = BkkLib.mapGpsLatLon(opts.lat, opts.lon);
+    const here = BkkLib.mapGpsLatLon(st.lat, st.lon);
+    if (want && here && BkkLib.haversineMeters(want, here) > DEST_NEAR_M) return false;
+    if (destKey && (st.key === destKey || st.fold === fk)) return true;
+    const name = destKey || fk;
+    const place = opts.place != null ? opts.place : BkkLib.placeNameKey({ name });
+    const mine = BkkLib._stopPlace(st);
+    if (!place || place !== mine.place) return false;
+    const town = opts.townOf != null ? opts.townOf : BkkLib._townOf(name);
+    return !(town && mine.town && town !== mine.town);
+  },
+  /* An index stop's place key and town, worked out once per stop. */
+  _stopPlaces: new WeakMap(),
+  _stopPlace(st) {
+    let hit = BkkLib._stopPlaces.get(st);
+    if (!hit) {
+      const name = st.name || st.key || '';
+      hit = { place: BkkLib.placeNameKey({ name }), town: BkkLib._townOf(name) };
+      BkkLib._stopPlaces.set(st, hit);
+    }
+    return hit;
+  },
+  _townOf(name) {
+    const split = BkkLib.splitCityPrefix(name);
+    return split ? BkkLib.fold(split.city) : '';
   },
   async volanSearchStops(q) {
     const idx = await BkkLib.volanIndex();
@@ -416,12 +524,7 @@ Object.assign(BkkLib, {
       if (as !== bs) return as - bs;
       return a.name.localeCompare(b.name, 'hu');
     });
-    return hits.slice(0, 20).map((s) => ({
-      id: s.id,
-      name: s.name,
-      label: s.name,
-      type: 'BUS',
-    }));
+    return hits.slice(0, 20).map((s) => BkkLib.gtfsHit(idx, s, { label: s.name, type: 'BUS' }));
   },
   async volanReachableDests(stop) {
     const idx = await BkkLib.volanIndex();
@@ -451,7 +554,7 @@ Object.assign(BkkLib, {
         const st = idx.stops[ps[j]];
         if (!st || !st.key) continue;
         if (opIx != null && st.op !== opIx) continue;
-        if (!byKey.has(st.key)) byKey.set(st.key, { key: st.key, name: st.name, id: st.id });
+        if (!byKey.has(st.key)) byKey.set(st.key, BkkLib.gtfsHit(idx, st, { key: st.key }));
         if (!destRoutes[st.key]) destRoutes[st.key] = [];
         if (destRoutes[st.key].indexOf(route) < 0) destRoutes[st.key].push(route);
       }
@@ -580,6 +683,15 @@ Object.assign(BkkLib, {
       : BkkLib.cityStopIndexes(idx, { id: stopId, name: originName || '' }, opIx);
     const destKey = dest && dest.key;
     const destFold = BkkLib.fold((dest && dest.name) || destKey || '');
+    const destName = destKey || destFold;
+    const destOpts = {
+      town: !!destFold && !BkkLib.splitCityPrefix((dest && dest.name) || destKey || '')
+        && BkkLib.gtfsTowns(idx).has(destFold),
+      lat: dest && dest.lat,
+      lon: dest && dest.lon,
+      place: BkkLib.placeNameKey({ name: destName }),
+      townOf: BkkLib._townOf(destName),
+    };
     const horizon = clampMinutesAfter(minutesAfter);
     const rowCap = maxDepartureRows(horizon);
     const rows = [];
@@ -606,7 +718,7 @@ Object.assign(BkkLib, {
         let didx = -1;
         if (destKey || destFold) {
           for (let j = oidx + 1; j < ps.length; j++) {
-            if (BkkLib.volanDestHit(idx.stops[ps[j]], destKey, destFold)) {
+            if (BkkLib.volanDestHit(idx.stops[ps[j]], destKey, destFold, destOpts)) {
               didx = j;
               break;
             }
