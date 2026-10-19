@@ -19,6 +19,7 @@ does not hold Home Assistant's GIL right after startup.
 """
 from __future__ import annotations
 
+import argparse
 import csv
 import gzip
 import io
@@ -43,6 +44,11 @@ STOP_TOLERANCE_M = 300.0
 RAIL_ROUTE_TYPES = {"2"} | {str(t) for t in range(100, 118)}
 LINE_CODE_RE = re.compile(r"^[GSZHM]\d{2}$", re.I)
 REQUIRED_FILES = ("routes.txt", "trips.txt", "stops.txt", "stop_times.txt")
+# build_and_audit writes no index with fewer trains and lines than this (a
+# bus-only GTFS passes check_feed), or with fewer than MIN_OK of the trains
+# passing the audit: the same guard as scripts/build_mav_index.py.
+MIN_TRAINS = 50
+MIN_OK = 0.99
 
 
 def train_number(name: str) -> str:
@@ -534,32 +540,65 @@ def audit(path: Path, index: dict[str, Any], loaded: tuple | None = None) -> dic
 # ---- build + audit as one job (Home Assistant runs it in a subprocess) -------
 
 
-def build_and_audit(src: Path, out: Path) -> dict[str, Any]:
+def build_and_audit(
+    src: Path, out: Path, *, min_trains: int = MIN_TRAINS, min_ok: float = MIN_OK
+) -> dict[str, Any]:
     """Check, build and audit, then write; the stats dict Home Assistant keeps.
 
     The audit runs on the index in memory and the write comes last, so a
-    build that fails on the way leaves the previous index alone."""
+    build that fails on the way leaves the previous index alone. So does an
+    index with fewer than min_trains trains and lines, or with fewer than
+    min_ok of its trains passing the audit: stats then say why under
+    "rejected", and "written" is False."""
     check_feed(src)
     index = build(src)
-    report = audit(src, index)
     stats = dict(index["_stats"])
+    stats["written"] = False
+    count = stats["trains"] + stats["lines"]
+    if count < min_trains:
+        stats["rejected"] = (
+            f"only {stats['trains']} trains and {stats['lines']} lines (at least {min_trains} expected)"
+        )
+        return stats
+    report = audit(src, index)
     stats["audit"] = {k: v for k, v in report.items() if k != "worst"}
     stats["audit_worst"] = report["worst"][:5]
+    if report["ok_ratio"] < min_ok:
+        stats["rejected"] = (
+            f"{report['trains_ok']} of {report['trains']} trains pass the audit "
+            f"({report['ok_ratio']:.1%}, at least {min_ok:.0%} expected)"
+        )
+        return stats
     stats["bytes"] = write(index, out)
+    stats["written"] = True
     return stats
 
 
 def _main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        print("usage: mav_index.py FEED(.zip|dir) OUT.json.gz", file=sys.stderr)
-        return 2
+    parser = argparse.ArgumentParser(
+        prog="mav_index.py",
+        description=(
+            "Build, audit and (when it passes) write the MÁV route index. Stats JSON on "
+            "stdout; \"rejected\" in it says why nothing was written."
+        ),
+    )
+    parser.add_argument("feed", help="MÁV GTFS zip or directory")
+    parser.add_argument("out", help="index to write (mav-index.json.gz)")
+    parser.add_argument("--min-trains", type=int, default=MIN_TRAINS)
+    parser.add_argument("--min-ok", type=float, default=MIN_OK)
+    try:
+        args = parser.parse_args(argv[1:])
+    except SystemExit as err:
+        return 2 if err.code else 0
     try:
         # Below Home Assistant's own priority: the build is not urgent.
         os.nice(10)
     except (OSError, AttributeError):
         pass
     try:
-        stats = build_and_audit(Path(argv[1]), Path(argv[2]))
+        stats = build_and_audit(
+            Path(args.feed), Path(args.out), min_trains=args.min_trains, min_ok=args.min_ok
+        )
     except Exception as err:  # noqa: BLE001 - the parent reads stderr
         print(f"{type(err).__name__}: {err}", file=sys.stderr)
         return 1

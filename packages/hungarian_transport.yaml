@@ -1,6 +1,14 @@
 # Daily KTI Volán GTFS check for Hungarian transport.
 # HA shell_command is killed after 60s, so the job is detached; results arrive
 # via a local webhook (notify.admins, Discord forwarder picks it up).
+#
+# The webhook id below is the scripts' default, so anyone on the local network
+# who knows it can post a notification. For a private id, change webhook_id
+# and give run_update.sh the matching URL, for example:
+#   hungarian_transport_gtfs: >-
+#     HUNGARIAN_TRANSPORT_WEBHOOK=http://127.0.0.1:8123/api/webhook/<your-id>
+#     /bin/bash /config/hungarian-transport/run_update.sh
+# (run_update.sh's Supervisor fallback still posts to the default id.)
 
 shell_command:
   hungarian_transport_gtfs: /bin/bash /config/hungarian-transport/run_update.sh
@@ -50,6 +58,10 @@ automation:
           - POST
         local_only: true
         webhook_id: hungarian-transport-gtfs
+    conditions:
+      # The scripts always send a message; an empty POST is not theirs.
+      - condition: template
+        value_template: "{{ ((trigger.json | default({})).message | default('') | string | trim) != '' }}"
     actions:
       - action: notify.admins
         data:

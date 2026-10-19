@@ -10,7 +10,7 @@ import asyncio
 import logging
 import re
 import unicodedata
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import aiohttp
 import zoneinfo
@@ -53,7 +53,8 @@ class ElviraError(Exception):
 
     A board fetch raises it instead of returning an empty board, so a result
     that never arrived does not sit in the shared cache for ELVIRA_CACHE_TTL
-    seconds. elvira_between raises it only when no origin board arrived.
+    seconds. elvira_between raises it only when today's origin board did not
+    arrive.
     """
 
 
@@ -65,6 +66,12 @@ def station_code_digits(value: str) -> str:
 
 
 def _iso_dt(value, tz):
+    """An ELVIRA time as an aware UTC datetime; a naive one is tz wall time.
+
+    UTC, because Python compares and subtracts two datetimes that share a
+    tzinfo by their wall clocks: across the autumn change 01:50 CEST to
+    03:20 CET would be 90 minutes instead of 150.
+    """
     if not value:
         return None
     text = str(value).replace("Z", "+00:00")
@@ -74,7 +81,7 @@ def _iso_dt(value, tz):
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=tz)
-    return dt.astimezone(tz)
+    return dt.astimezone(UTC)
 
 
 def _fold_hu(text: str) -> str:
@@ -102,8 +109,10 @@ def parse_elvira_services(row: dict) -> dict:
         "nationalPass": False,
         "reservationFreeSection": False,
     }
-    for svc in row.get("services") or []:
-        svc = svc or {}
+    services = row.get("services")
+    for svc in services if isinstance(services, list) else []:
+        if not isinstance(svc, dict):
+            continue
         blob = " ".join(
             str(svc.get(key) or "")
             for key in ("description", "name", "shortName", "code", "key", "id")
@@ -141,8 +150,14 @@ def track_from_elvira_row(row: dict) -> str:
     return ""
 
 
+def _end_station(row: dict) -> str:
+    end = row.get("endStation")
+    return str((end.get("name") if isinstance(end, dict) else "") or "")
+
+
 def _label_from_row(row: dict) -> str:
-    jel = ((row.get("viszonylatiJel") or {}).get("jel") or "").strip()
+    sign = row.get("viszonylatiJel")
+    jel = str((sign.get("jel") if isinstance(sign, dict) else "") or "").strip()
     if jel:
         return jel
     name = str(row.get("name") or row.get("fullShortType") or "").strip()
@@ -183,15 +198,15 @@ async def _fetch_station(session, station_code: str, day: date) -> tuple[list, l
             data = await resp.json(content_type=None)
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
         raise ElviraError(type(err).__name__) from None
-    if not isinstance(data, dict):
-        raise ElviraError("unexpected response")
-    details = data.get("stationSchedulerDetails")
+    details = data.get("stationSchedulerDetails") if isinstance(data, dict) else None
     if not isinstance(details, dict):
-        details = {}
-    return (
-        list(details.get("departureScheduler") or []),
-        list(details.get("arrivalScheduler") or []),
-    )
+        # An error page or a changed API, not a day without trains.
+        raise ElviraError("unexpected response")
+    return _board_rows(details.get("departureScheduler")), _board_rows(details.get("arrivalScheduler"))
+
+
+def _board_rows(rows) -> list[dict]:
+    return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
 
 async def _station_legs(session, hass, station_code: str, day: date):
@@ -223,7 +238,10 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
     board (Kelenföld truncates ~11:36, or the board failed and arrives here
     empty) must not drop evening ICs. The card overlays these onto FUTÁR/MOTIS
     hop rows and must not append unmatched origin-only trains (GEMENC Baja, …).
+    Times are compared and subtracted in UTC (see _iso_dt).
     """
+    now = now.astimezone(UTC)
+    latest = latest.astimezone(UTC)
     dest_by_id: dict[str, list] = {}
     dest_by_code: dict[str, list] = {}
     for row in darr or []:
@@ -283,7 +301,7 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
         out.append({
             "tripId": "elvira:" + (tid or code or str(int(sched.timestamp()))),
             "label": _label_from_row(row),
-            "head": dest_name or ((row.get("endStation") or {}).get("name") or ""),
+            "head": dest_name or _end_station(row),
             "dep": int(start.timestamp()),
             "sched": int(sched.timestamp()),
             "platform": track_from_elvira_row(row),
@@ -325,10 +343,11 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     """Origin departures towards dest, for the card to overlay on its rows.
 
     Every station and service day is its own StationInfo board, and the rows
-    come from the origin boards only: ElviraError when none of them arrived.
-    A failed destination board, or a failed board of yesterday or tomorrow
-    next to one that arrived, counts as empty. The rows then lack a travel
-    time or a few late trains, instead of every platform and booking flag.
+    come from the origin boards only: ElviraError when today's did not
+    arrive, since without it every train of the day would be missing. A
+    failed destination board, or a failed board of yesterday or tomorrow,
+    counts as empty. The rows then lack a travel time or a few late trains,
+    instead of every platform and booking flag.
     """
     origin_code = station_code_digits(origin_code)
     dest_code = station_code_digits(dest_code)
@@ -336,7 +355,8 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
         return []
     tz = MAV_TZ
     now = datetime.now(tz)
-    latest = now + timedelta(minutes=int(minutes_after or 180))
+    # Real minutes ahead, not wall-clock ones, on the night the clocks change.
+    latest = (now.astimezone(UTC) + timedelta(minutes=int(minutes_after or 180))).astimezone(tz)
     days = service_days(now, latest)
     boards = await asyncio.gather(
         *(_station_legs(session, hass, code, day) for code in (origin_code, dest_code) for day in days),
@@ -349,9 +369,10 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     origin, dest = boards[: len(days)], boards[len(days):]
     for code, part in ((origin_code, origin), (dest_code, dest)):
         _log_outage(hass, code, next((b for b in part if isinstance(b, ElviraError)), None))
+    today = origin[days.index(now.date())]
+    if isinstance(today, ElviraError):
+        raise ElviraError(str(today))
     arrived = [board for board in origin if not isinstance(board, ElviraError)]
-    if not arrived:
-        raise ElviraError(str(origin[0]))
     odep = [row for dep, _arr in arrived for row in dep]
     darr = [row for board in dest if not isinstance(board, ElviraError) for row in board[1]]
     return rows_from_stationinfo(odep, darr, tz, now, latest, dest_name)

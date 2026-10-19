@@ -89,6 +89,9 @@
     },
     "elvira_unavailable": {
       "message": "MÁV ELVIRA is not reachable ({error})."
+    },
+    "not_loaded": {
+      "message": "Hungarian transport is disabled or not loaded. Enable its integration entry first."
     }
   },
   "options": {
@@ -110,6 +113,10 @@
     "missing_assets": {
       "title": "Frontend assets missing",
       "description": "Hungarian transport found no card files at `{path}`. The source tree has none; install the release zip (HACS or the hungarian-transport.zip asset of a GitHub release) and restart Home Assistant."
+    },
+    "mav_build_failed": {
+      "title": "MÁV route index not built",
+      "description": "The MÁV route index could not be built from `{path}`: {error}\n\nHome Assistant does not build this feed again at startup. Put a new feed there (or upload one), or call the `hungarian_transport.rebuild_mav_index` action to try again."
     }
   }
 }
