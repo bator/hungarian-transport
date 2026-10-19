@@ -6324,4 +6324,23 @@ const settle = async (el) => {
   Lib.transitousGeocode = keep.geo;
 }
 
+
+/* O-1: a favourite whose name is not text in the YAML (`name: 1234`) must not break the editor. */
+{
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  let thrown = null;
+  try {
+    ed.setConfig({ language: 'hu', favorites: [{ id: 'BKK_F1', name: 1234 }, { id: 'BKK_F2', name: 'Deák tér / M1' }] });
+    ed._paintFav();
+  } catch (err) { thrown = String(err && err.message || err); }
+  const chips = Array.from(ed._el('fav') ? ed._el('fav').querySelectorAll('button.chip') : []).map((b) => b.textContent);
+  check('a non-text favourite name (name: 1234) paints as text, nothing throws',
+    thrown === null && chips[0] === '1234' && chips[1] === 'Deák tér', JSON.stringify({ thrown, chips }));
+  ed.remove();
+}
+
 process.exit(failed ? 1 : 0);

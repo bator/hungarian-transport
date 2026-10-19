@@ -497,7 +497,7 @@ export class BKKHopCardEditor extends HTMLElement {
       const b = document.createElement('button');
       b.className = 'chip';
       b.type = 'button';
-      b.textContent = f.name.split(' / ')[0];
+      b.textContent = String(f.name).split(' / ')[0];
       b.addEventListener('click', () => this._pickStop(f, 'origin'));
       fav.appendChild(b);
     });
