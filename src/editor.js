@@ -1,4 +1,4 @@
-import { DEFAULT_FAVORITES, DEFAULT_MINUTES_AFTER, MAX_MINUTES_AFTER, MINUTES_AFTER_PRESETS, MIN_MINUTES_AFTER, applyIndexOverrides, clampMinutesAfter, normalizeCardConfig } from './config.js';
+import { DEFAULT_FAVORITES, DEFAULT_MINUTES_AFTER, MAX_MINUTES_AFTER, MINUTES_AFTER_PRESETS, MIN_MINUTES_AFTER, clampMinutesAfter, normalizeCardConfig } from './config.js';
 import { codedError, errText, modeCopy, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 
@@ -45,7 +45,6 @@ export class BKKHopCardEditor extends HTMLElement {
     if (!this._cache) this._cache = {};
     if (!this._dests) this._dests = [];
     if (!this._destRoutes) this._destRoutes = {};
-    applyIndexOverrides(this._config);
     if (!this._built) this._build();
     this._syncLang();
     this._syncTexts();
@@ -546,7 +545,7 @@ export class BKKHopCardEditor extends HTMLElement {
     if (!sel || this._isEditing(sel)) return;
     const seq = ++this._citySeq;
     try {
-      const idx = await BkkLib.cityIndex();
+      const idx = await BkkLib.withIndexes(this._config).cityIndex();
       if (seq !== this._citySeq) return;
       const ops = (idx.ops || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'hu'));
       const cur = this._config.city || '';
@@ -659,8 +658,7 @@ export class BKKHopCardEditor extends HTMLElement {
       if (!this._hasFutar() && !this._userEditedKey) await this._fillKey();
       if (seq !== this._searchSeq) return;
       const mode = this._mode();
-      applyIndexOverrides(this._config);
-      const hits = await BkkLib.searchStops(this._apiKey(), q, mode, this._config.city);
+      const hits = await BkkLib.withIndexes(this._config).searchStops(this._apiKey(), q, mode, this._config.city);
       if (seq !== this._searchSeq) return;
       if (!hits.length) {
         box.innerHTML = '<span class="hint">' + BkkLib.esc(this._modeCopy(mode).empty) + '</span>';
@@ -756,8 +754,7 @@ export class BKKHopCardEditor extends HTMLElement {
     if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
     try {
       this._error('');
-      applyIndexOverrides(this._config);
-      const idx = await BkkLib.reachableDests(
+      const idx = await BkkLib.withIndexes(this._config).reachableDests(
         this._apiKey(),
         this._cache,
         { id: this._config.stopId, name: this._config.stopName },

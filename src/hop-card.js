@@ -1,4 +1,4 @@
-import { ASSET_BASE, DEFAULT_MINUTES_AFTER, applyIndexOverrides, clampMinutesAfter, configDataKey, departureStillDue, maxDepartureRows, normalizeCardConfig, refreshSeconds } from './config.js';
+import { ASSET_BASE, DEFAULT_MINUTES_AFTER, clampMinutesAfter, configDataKey, departureStillDue, maxDepartureRows, normalizeCardConfig, refreshSeconds } from './config.js';
 import { codedError, errText, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 import { BKK_HOP_EDITOR } from './tags.js';
@@ -941,7 +941,6 @@ ${this._stopPinCss()}
 
   async _loadRowMapShape(row) {
     const cfg = this._config || {};
-    applyIndexOverrides(cfg);
     let shape = BkkLib.validMapShape(row && row.shape);
     let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon)
       || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
@@ -949,7 +948,7 @@ ${this._stopPinCss()}
        on Székesfehérvár–Kelenföld, and not the Transitous hop cut). */
     if (BkkLib.isTrainRow(row)) {
       try {
-        const mav = await BkkLib.mavRouteForRow(row, cfg.stopName || '', cfg.destName || cfg.destKey || '');
+        const mav = await BkkLib.withIndexes(cfg).mavRouteForRow(row, cfg.stopName || '', cfg.destName || cfg.destKey || '');
         if (mav && mav.shape.length >= 2) {
           /* The train's own stations, on its own route (MÁV GTFS). */
           const ownBoard = mav.board || board;
@@ -1003,7 +1002,7 @@ ${this._stopPinCss()}
     let motisCoversHead = true;
     let motisMap = null;
     let motisBoardPt = null;
-    const area = await BkkLib.stopArea(cfg);
+    const area = await BkkLib.withIndexes(cfg).stopArea(cfg);
     if (!published) {
       try {
         motisMap = await BkkLib.motisShapeForHop(
@@ -1139,7 +1138,7 @@ ${this._stopPinCss()}
         key: cfg.destKey,
         lat: cfg.destLat,
         lon: cfg.destLon,
-        area: await BkkLib.stopArea(cfg),
+        area: await BkkLib.withIndexes(cfg).stopArea(cfg),
       }, BkkLib.vehicleBucket(row));
       return (ref && BkkLib.mapGpsLatLon(ref.lat, ref.lon)) || null;
     } catch (_e) {
@@ -1441,8 +1440,8 @@ ${this._stopPinCss()}
     };
     const run = async () => {
       if (gen !== this._gen) return;
-      /* Every run: another card may have pointed the indexes elsewhere since. */
-      applyIndexOverrides(cfg);
+      /* This card's own index URLs, for every lookup of this run (J-2): never a module-wide setting. */
+      const lib = BkkLib.withIndexes(cfg);
       try {
         if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
           this._rows = [];
@@ -1458,7 +1457,7 @@ ${this._stopPinCss()}
         }
         const wantElvira = (mode === 'mav' || mode === 'all') && BkkLib.hasElvira(this._hass);
         const elviraP = wantElvira
-          ? BkkLib.elviraBetween(
+          ? lib.elviraBetween(
             this._hass,
             cfg.stopId,
             cfg.destStopId || '',
@@ -1483,7 +1482,7 @@ ${this._stopPinCss()}
         let startThrough = null;
         let throughResolve = () => {};
         const throughWait = new Promise((resolve) => { throughResolve = resolve; });
-        const rows = await BkkLib.departures(
+        const rows = await lib.departures(
           this._apiKey(), cfg.stopId, cfg.routeIds, dest,
           {
             originName: cfg.stopName || '',

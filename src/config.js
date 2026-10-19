@@ -168,10 +168,11 @@ export function setMavIndexUrl(url) {
   MAV_INDEX_OVERRIDE = String(url || '');
 }
 
-/* The index URLs of the card about to look something up. The lookups read
-   one module-wide setting, so a card without its own goes back to the
-   bundled indexes: another card's override must not apply to it, nor stay
-   on once that card is gone. */
+/* DEPRECATED, kept for callers outside this bundle: sets the module-wide
+   fallback. The cards no longer use it: a module-wide setting read after an
+   await could hand one card's index to another (review J-2, 2026-10-19).
+   Each card now looks its indexes up through BkkLib.withIndexes(config),
+   which carries that card's own volanIndex / cityIndex / mavIndex. */
 export function applyIndexOverrides(cfg) {
   const c = cfg || {};
   setVolanIndexUrl(c.volanIndex);
@@ -250,17 +251,19 @@ export function dayBuster(base) {
   return `${base}${base.includes('?') ? '&' : '?'}v=${tzParts(new Date()).ymd}`;
 }
 
-export function volanIndexUrl() {
-  const base = VOLAN_INDEX_OVERRIDE || new URL('volan-index.json.gz', ASSET_BASE).href;
+/* `own` is the looking-up card's override (BkkLib.withIndexes); the module-wide
+   one is only a fallback for callers outside the cards. */
+export function volanIndexUrl(own) {
+  const base = own || VOLAN_INDEX_OVERRIDE || new URL('volan-index.json.gz', ASSET_BASE).href;
   return dayBuster(base);
 }
 
-export function cityIndexUrl() {
-  const base = CITY_INDEX_OVERRIDE || new URL('city-index.json.gz', ASSET_BASE).href;
+export function cityIndexUrl(own) {
+  const base = own || CITY_INDEX_OVERRIDE || new URL('city-index.json.gz', ASSET_BASE).href;
   return dayBuster(base);
 }
 
-export function mavIndexUrl() {
-  const base = MAV_INDEX_OVERRIDE || new URL('mav-index.json.gz', ASSET_BASE).href;
+export function mavIndexUrl(own) {
+  const base = own || MAV_INDEX_OVERRIDE || new URL('mav-index.json.gz', ASSET_BASE).href;
   return dayBuster(base);
 }

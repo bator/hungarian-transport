@@ -5940,12 +5940,16 @@ const settle = async (el) => {
   document.body.appendChild(ed);
   ed._probeKey = () => {};
   ed._loadDests = async () => {};
+  /* Each card / editor looks its indexes up through its own view (Lib.withIndexes(config), J-2): the
+     module-wide lookup is never switched by a card, so it stays on the bundled index meanwhile. */
   ed.setConfig({ language: 'hu', volan: true, volanIndex: 'https://example.invalid/editor-volan.json.gz' });
+  Lib.withIndexes(ed._config).volanIndex();
   Lib.volanIndex();
   ed.setConfig({ language: 'hu', volan: true });
-  Lib.volanIndex();
+  Lib.withIndexes(ed._config).volanIndex();
   ed.remove();
-  Lib.departures = async () => { Lib.volanIndex(); return []; };
+  /* like the real departures(): the index through `this`, the card's own view */
+  Lib.departures = async function departuresStub() { this.volanIndex(); return []; };
   Lib.fillTransitousIfEmpty = async (rows) => rows || [];
   const runCard = async (extra) => {
     const c = document.createElement('hungarian-transport-card');
@@ -5959,8 +5963,9 @@ const settle = async (el) => {
   await runCard({});
   Object.assign(Lib, keep);
   check('a card or editor without its own index URL is back on the bundled index',
-    urls.length === 4 && urls[0].includes('editor-volan') && urls[1].includes('/volan-index.json.gz')
-    && urls[2].includes('card-volan') && urls[3].includes('/volan-index.json.gz'),
+    urls.length === 5 && urls[0].includes('editor-volan') && urls[1].includes('/volan-index.json.gz')
+    && urls[2].includes('/volan-index.json.gz')
+    && urls[3].includes('card-volan') && urls[4].includes('/volan-index.json.gz'),
     JSON.stringify(urls));
 }
 {
@@ -6274,6 +6279,49 @@ const settle = async (el) => {
     JSON.stringify({ maps: made.length, thrown, late }));
   pc.remove();
   globalThis.requestAnimationFrame = prevRaf;
+}
+
+
+/* J-2: the index overrides (volanIndex / cityIndex / mavIndex) belong to ONE card. Two editors search
+   at the same time, only one of them with its own Volán index; the search reads the index again after
+   a Transitous round trip, i.e. after an await, when the other card has already run its own lookup. */
+{
+  const keep = { fetchIdx: Lib._fetchIndexBytes, geo: Lib.transitousGeocode };
+  const asked = [];
+  Lib._fetchIndexBytes = async (url) => { asked.push(String(url)); return { status: 404, bytes: null }; };
+  const gates = [];
+  Lib.transitousGeocode = () => { const d = deferred(); gates.push(d); return d.p; };
+  const mk = (extra) => {
+    const ed = document.createElement('hungarian-transport-card-editor');
+    document.body.appendChild(ed);
+    ed.hass = { states: {}, language: 'hu' };
+    ed._probeKey = () => {};
+    ed._loadDests = async () => {};
+    ed._fillKey = async () => {};
+    ed.setConfig({ language: 'hu', volan: true, ...extra });
+    return ed;
+  };
+  const own = 'https://a.invalid/own/volan-index.json.gz';
+  const a = mk({ volanIndex: own });
+  const b = mk({});
+  const runA = a._search('Győr', 'origin');
+  await tick();
+  const runB = b._search('Pápa', 'origin');
+  await tick();
+  gates.forEach((g) => g.resolve([]));
+  await tick();
+  gates.forEach((g) => g.resolve([]));
+  await Promise.all([runA, runB]);
+  const volanAsked = asked.filter((u) => /volan-index\.json\.gz/.test(u));
+  const ownAsked = volanAsked.filter((u) => u.startsWith(own));
+  const bundledAsked = volanAsked.filter((u) => !u.startsWith(own));
+  check('an index override stays with its own card across awaits (two editors, one override)',
+    ownAsked.length >= 2 && ownAsked.length === bundledAsked.length,
+    JSON.stringify({ own: ownAsked.length, bundled: bundledAsked.length, gates: gates.length }));
+  a.remove();
+  b.remove();
+  Lib._fetchIndexBytes = keep.fetchIdx;
+  Lib.transitousGeocode = keep.geo;
 }
 
 process.exit(failed ? 1 : 0);

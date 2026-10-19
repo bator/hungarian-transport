@@ -27,8 +27,8 @@ Object.assign(BkkLib, {
     if (!BkkLib.hasElvira(hass) || Date.now() < BkkLib._elviraDownUntil) return [];
     let origin = BkkLib.elviraStationCode(originId);
     let dest = BkkLib.elviraStationCode(destId);
-    if (!origin) origin = await BkkLib.elviraResolveCode(opts.apiKey, originId, opts.originName || '');
-    if (!dest) dest = await BkkLib.elviraResolveCode(opts.apiKey, destId, destName || '');
+    if (!origin) origin = await this.elviraResolveCode(opts.apiKey, originId, opts.originName || '');
+    if (!dest) dest = await this.elviraResolveCode(opts.apiKey, destId, destName || '');
     if (!origin || !dest || origin === dest) {
       return [];
     }

@@ -6,7 +6,7 @@ Object.assign(BkkLib, {
     const motis = motisHits || await BkkLib.searchStopsTransitous(q);
     let idx = null;
     try {
-      idx = await BkkLib.volanIndex();
+      idx = await this.volanIndex();
     } catch (_e) {
       idx = null;
     }
@@ -40,17 +40,17 @@ Object.assign(BkkLib, {
     const byId = new Map();
     if (mode === 'volan' || mode === 'all') {
       try {
-        (await BkkLib.volanSearchStops(q)).forEach((s) => byId.set(s.id, s));
+        (await this.volanSearchStops(q)).forEach((s) => byId.set(s.id, s));
       } catch (_e) { /* GTFS index optional */ }
       try {
         if (!(opts && opts.skipTransitousVolan)) {
-          await BkkLib.addTransitousVolanStops(byId, q);
+          await this.addTransitousVolanStops(byId, q);
         }
       } catch (_e) { /* Transitous names are extra coverage */ }
     }
     if (mode === 'all') {
       try {
-        const idx = await BkkLib.cityIndex();
+        const idx = await this.cityIndex();
         const seenFold = new Set();
         BkkLib.citySearchAll(idx, q).forEach((s) => {
           const opId = BkkLib.cityOpId(idx, s);
@@ -70,7 +70,7 @@ Object.assign(BkkLib, {
     }
     if (mode === 'helyi') {
       try {
-        (await BkkLib.citySearchStops(q, city)).forEach((s) => byId.set(s.id, s));
+        (await this.citySearchStops(q, city)).forEach((s) => byId.set(s.id, s));
       } catch (_e) { /* GTFS index optional */ }
       return BkkLib.groupStops(Array.from(byId.values())).slice(0, 20);
     }
@@ -354,7 +354,7 @@ Object.assign(BkkLib, {
   },
   async reachableDests(apiKey, cache, stop, mode, city) {
     if (mode === 'helyi') {
-      return BkkLib.cityReachableDests(stop, city);
+      return this.cityReachableDests(stop, city);
     }
     let out = { dests: [], destRoutes: {} };
     try {
@@ -426,14 +426,14 @@ Object.assign(BkkLib, {
     }
     if (mode === 'volan' || mode === 'all') {
       try {
-        out = BkkLib.mergeDestIndex(await BkkLib.volanReachableDests(stop), out);
+        out = BkkLib.mergeDestIndex(await this.volanReachableDests(stop), out);
       } catch (_e) { /* GTFS index optional */ }
     }
     if (mode === 'all') {
       try {
-        const idx = await BkkLib.cityIndex();
+        const idx = await this.cityIndex();
         const cityId = BkkLib.cityOpId(idx, stop);
-        if (cityId) out = BkkLib.mergeDestIndex(await BkkLib.cityReachableDests(stop, cityId), out);
+        if (cityId) out = BkkLib.mergeDestIndex(await this.cityReachableDests(stop, cityId), out);
       } catch (_e) { /* city index optional */ }
     }
     return out;
@@ -474,7 +474,7 @@ Object.assign(BkkLib, {
     const mode = opts.mode || (opts.mav ? 'mav' : 'bkk');
     const horizon = clampMinutesAfter(opts.minutesAfter);
     if (mode === 'helyi') {
-      let cityRows = await BkkLib.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
+      let cityRows = await this.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
       cityRows = await BkkLib.fillTransitousIfEmpty(
         cityRows,
         { id: stopId, name: opts.originName || '' },
@@ -496,7 +496,7 @@ Object.assign(BkkLib, {
     if ((mode === 'mav' || mode === 'all') && opts.hass && !opts.skipElvira) {
       try {
         const destId = (dest && dest.id) || opts.destStopId || '';
-        elviraExtra = await BkkLib.elviraBetween(
+        elviraExtra = await this.elviraBetween(
           opts.hass,
           stopId,
           destId,
@@ -689,7 +689,7 @@ Object.assign(BkkLib, {
       let extraCity = [];
       if (mode === 'volan' || mode === 'all') {
         try {
-          extraVolan = await BkkLib.volanDepartures(stopId, dest, opts.originName, horizon);
+          extraVolan = await this.volanDepartures(stopId, dest, opts.originName, horizon);
           if (mode === 'all' && selected.size) {
             extraVolan = extraVolan.filter((row) => selected.has('gtfs:' + row.label));
           }
@@ -699,10 +699,10 @@ Object.assign(BkkLib, {
       }
       if (mode === 'all') {
         try {
-          const idx = await BkkLib.cityIndex();
+          const idx = await this.cityIndex();
           const cityId = BkkLib.cityOpId(idx, { id: stopId, name: opts.originName || '' });
           if (cityId) {
-            extraCity = await BkkLib.cityDepartures(stopId, dest, opts.originName, cityId, horizon);
+            extraCity = await this.cityDepartures(stopId, dest, opts.originName, cityId, horizon);
           }
         } catch (_e) { /* city index optional */ }
       }
