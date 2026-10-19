@@ -1,0 +1,13 @@
+{
+  "name": "hungarian-transport-manual-shots",
+  "private": true,
+  "type": "module",
+  "description": "Screenshots for docs/manual: drives the real cards in a local Chrome.",
+  "scripts": {
+    "shots:en": "node shoot.mjs en",
+    "shots:hu": "node shoot.mjs hu"
+  },
+  "dependencies": {
+    "puppeteer-core": "24.43.1"
+  }
+}
