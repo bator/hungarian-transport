@@ -72,6 +72,9 @@ jobs:
       - name: Index guard tests
         run: python3 scripts/test_build_guards.py
 
+      - name: FUTÁR proxy limit tests
+        run: python3 ha/test_futar_limits.py
+
   integration:
     name: Integration tests
     runs-on: ubuntu-latest

@@ -28,6 +28,29 @@ FUTAR_PATHS = (
     "search.json",
     "trip-details.json",
 )
+# The parameters the card sends for each endpoint (src/lib/futar.js,
+# departures.js, journey.js). Anything else is dropped before the cache key
+# and the upstream call alike, so a caller cannot make every request unique
+# with made-up parameters, nor have a different upstream answer cached under
+# a shared key.
+FUTAR_PARAMS: dict[str, frozenset[str]] = {
+    "arrivals-and-departures-for-stop.json": frozenset({
+        "stopId", "minutesAfter", "minutesBefore", "onlyDepartures", "includeReferences", "includeVehicleFromTrip",
+    }),
+    "plan-trip.json": frozenset({
+        "fromPlace", "toPlace", "mode", "numItineraries", "searchWindow", "date", "time", "arriveBy",
+    }),
+    "route-details.json": frozenset({"routeId", "includeReferences"}),
+    "schedule-for-stop.json": frozenset({"stopId", "includeReferences"}),
+    "search.json": frozenset({"query", "limit"}),
+    "trip-details.json": frozenset({"tripId"}),
+}
+FUTAR_PARAM_MAX_LEN = 256
+# Upstream calls (cache misses only; shared requests count once) per second
+# and the burst allowed on top. Every authenticated user can call the
+# service, so this caps what they can spend of the configured key.
+FUTAR_RATE = 5.0
+FUTAR_BURST = 60
 # Departure boards refresh every 15 s at the earliest on the card.
 FUTAR_CACHE_TTL = 15
 FUTAR_CACHE_MAX = 256
@@ -45,6 +68,20 @@ class FutarError(Exception):
 
 class FutarAuthError(FutarError):
     """FUTÁR rejected the API key."""
+
+
+class FutarRateLimited(FutarError):
+    """Too many upstream calls; this one was not sent."""
+
+
+def futar_params(path: str, params: dict[str, Any] | None) -> dict[str, str]:
+    """params reduced to the ones the card uses for path, as strings.
+    Raises FutarError for a value longer than FUTAR_PARAM_MAX_LEN."""
+    allowed = FUTAR_PARAMS.get(path, frozenset())
+    out = {str(k): str(v) for k, v in (params or {}).items() if str(k) in allowed}
+    if any(len(v) > FUTAR_PARAM_MAX_LEN for v in out.values()):
+        raise FutarError("parameter too long")
+    return out
 
 
 async def futar_get(
@@ -93,6 +130,22 @@ class FutarProxy:
         self._rejected: str | None = None
         self._rejected_at = 0.0
         self._failing = False
+        self._tokens = float(FUTAR_BURST)
+        self._tokens_at = _monotonic()
+
+    def _take_token(self) -> bool:
+        now = _monotonic()
+        self._tokens = min(float(FUTAR_BURST), self._tokens + max(0.0, now - self._tokens_at) * FUTAR_RATE)
+        self._tokens_at = now
+        if self._tokens < 1.0:
+            return False
+        self._tokens -= 1.0
+        return True
+
+    async def _upstream(self, path: str, params: dict[str, str]) -> dict:
+        if not self._take_token():
+            raise FutarRateLimited("rate limited")
+        return await futar_get(self._session, self._api_key, path, params)
 
     async def get(self, path: str, params: dict[str, Any]) -> dict:
         if self._rejected is not None:
@@ -100,11 +153,10 @@ class FutarProxy:
                 raise FutarAuthError(self._rejected)
             # This call asks again; the others keep failing fast meanwhile.
             self._rejected_at = _monotonic()
-        key = (path, tuple(sorted((str(k), str(v)) for k, v in (params or {}).items())))
+        params = futar_params(path, params)
+        key = (path, tuple(sorted(params.items())))
         try:
-            data = await self._cache.get(
-                key, lambda: futar_get(self._session, self._api_key, path, params)
-            )
+            data = await self._cache.get(key, lambda: self._upstream(path, params))
         except FutarAuthError as err:
             if self._rejected is None:
                 _LOGGER.warning("BKK FUTÁR rejected the configured key (%s)", err)

@@ -55,6 +55,26 @@ async def test_proxies_with_stored_key(hass, aioclient_mock) -> None:
     assert query["version"] == "4"
 
 
+async def test_unknown_params_are_dropped_and_share_the_cache(hass, aioclient_mock) -> None:
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    await _setup(hass)
+
+    for i in range(5):
+        await _call(hass, params={"query": "Keleti", "nonce": str(i)})
+    assert aioclient_mock.call_count == 1
+    assert "nonce" not in aioclient_mock.mock_calls[0][1].query
+
+
+async def test_upstream_calls_are_rate_limited(hass, aioclient_mock, monkeypatch) -> None:
+    monkeypatch.setattr(futar, "_monotonic", lambda: 5000.0)
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    await _setup(hass)
+
+    results = [await _call(hass, params={"query": f"q{i}"}) for i in range(futar.FUTAR_BURST + 3)]
+    assert aioclient_mock.call_count == futar.FUTAR_BURST
+    assert [r.get("detail") for r in results[-3:]] == ["rate limited"] * 3
+
+
 async def test_shares_and_caches_identical_requests(hass, aioclient_mock) -> None:
     aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
     await _setup(hass)
