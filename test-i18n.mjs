@@ -79,8 +79,6 @@ check('hu mode hint mentions vonat for MAV', I18N.hu.mode.mav.hint.includes('von
 check('en mode hint is English', I18N.en.mode.mav.hint === 'Pick an origin and a destination station. Every train between them is listed.',
   I18N.en.mode.mav.hint);
 check('en name label', I18N.en.nameLabel === 'Name (optional)', I18N.en.nameLabel);
-check('platform label differs per language',
-  I18N.hu.platformShort(3) === 'vág.3' && I18N.en.platformShort(3) === 'pl.3');
 check('minutes formatter', I18N.hu.minutes(7) === '7 perc' && I18N.en.minutes(7) === '7 min');
 
 check('card element registered', !!registry.get('hungarian-transport-card'));

@@ -6,6 +6,10 @@ import { BKK_PLANNER_EDITOR } from './tags.js';
 
 /* After this long off screen the planner plans again on return. */
 const PLANNER_STALE_MS = 5 * 60 * 1000;
+/* Both journey maps: OpenStreetMap France tiles, credited as they ask. */
+const MAP_TILES = 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png';
+const MAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+  + ' &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>';
 
 export class BKKPlannerCard extends BKKHopCard {
   constructor() {
@@ -67,9 +71,11 @@ export class BKKPlannerCard extends BKKHopCard {
   }
 
   /* Back on the view after a while, the departures and countdowns on screen
-     are stale: plan again. A chosen time does not go stale. */
+     are stale: plan again. A chosen time does not go stale, nor do its
+     itineraries when all are folded or none was found. */
   _shouldReloadOnConnect() {
-    const idle = !(this._journey || this._journeyLoading || (this._rows && this._rows.length));
+    const planned = this._timed() && ((this._journeys && this._journeys.length) || this._journeysDone);
+    const idle = !(planned || this._journey || this._journeyLoading || (this._rows && this._rows.length));
     const stale = !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
     return idle || stale;
   }
@@ -194,14 +200,29 @@ export class BKKPlannerCard extends BKKHopCard {
   }
 
   /* Language from hass after the pickers were drawn: their labels, the
-     time switch and the destination hint follow, not only the board. */
+     time switch and the hints under the fields follow, not only the board. */
   _langChanged() {
-    if (this._pickersMounted) {
-      this._syncPickerLabels();
-      const box = this._planEl('pdhits');
-      if (box && box.querySelector('.hint') && !box.querySelector('.hit')) this._paintDestHits('');
-    }
+    if (this._pickersMounted) this._syncPickerLabels();
     super._langChanged();
+  }
+
+  /* A hint under a search field keeps its i18n key, so a language change
+     rewrites the same hint (a typed query's "no results" stays that). */
+  _hintText(key) {
+    const lang = this._lang();
+    return key.indexOf('mode.') === 0 ? t(lang, 'mode').all[key.slice(5)] : t(lang, key);
+  }
+
+  _hint(box, key) {
+    box.innerHTML = `<span class="hint" data-hint="${BkkLib.esc(key)}">${BkkLib.esc(this._hintText(key))}</span>`;
+  }
+
+  _repaintHints() {
+    ['phits', 'pdhits'].forEach((id) => {
+      const box = this._planEl(id);
+      const span = box && !box.querySelector('.hit') ? box.querySelector('.hint[data-hint]') : null;
+      if (span) span.textContent = this._hintText(span.getAttribute('data-hint'));
+    });
   }
 
   _emptyBodyMessage(lang, cfg) {
@@ -392,19 +413,14 @@ export class BKKPlannerCard extends BKKHopCard {
       + `</button>${body}</div>`;
   }
 
-  _paintJourney() {
-    const host = this._journeyHost;
-    if (!host) return;
-    this._teardownPlannerInlineMap();
-    host.innerHTML = '';
+  /* What the journey box shows: its class and markup, and whether its map
+     button opens the board's first row. Null for nothing. */
+  _journeyView() {
     const cfg = this._config || {};
-    if (!cfg.stopId || !cfg.destName) return;
+    if (!cfg.stopId || !cfg.destName) return null;
     const lang = this._lang();
     const esc = BkkLib.esc;
-    const timed = this._timed();
-    const box = document.createElement('div');
-    box.className = 'journey-plan';
-    if (timed) {
+    if (this._timed()) {
       const sub = this._when.mode === 'arrive'
         ? t(lang, 'plannerRoutesBy', this._whenText(this._when.at))
         : t(lang, 'plannerRoutesFrom', this._whenText(this._when.at));
@@ -417,40 +433,62 @@ export class BKKPlannerCard extends BKKHopCard {
       } else {
         inner += list.map((j, i) => this._itineraryHtml(j, i, i === this._openJourney)).join('');
       }
-      box.innerHTML = inner;
-      host.appendChild(box);
-      this._bindJourneyBox(box, false);
-      return;
+      return { className: 'journey-plan', html: inner, useBoard: false };
     }
-    const nowSec = Math.floor(Date.now() / 1000);
-    const visible = (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
+    const visible = this._visibleRows();
     const journey = this._journey;
     const showJourney = !!(journey && journey.legs && journey.legs.length
       && (!visible.length || BkkLib.journeyBeatsBoard(journey, visible)));
     if (visible.length && !showJourney) {
-      box.className = 'journey-plan j-map-only';
-      box.innerHTML = `<button type="button" id="pmap">${esc(t(lang, 'plannerShowMap'))}</button>`;
-      host.appendChild(box);
-      this._bindJourneyBox(box, true, visible);
-      return;
+      return {
+        className: 'journey-plan j-map-only',
+        html: `<button type="button" id="pmap">${esc(t(lang, 'plannerShowMap'))}</button>`,
+        useBoard: true,
+      };
     }
-    if (!showJourney) return;
+    if (!showJourney) return null;
     /* "With a transfer" only when there is one; a direct ride or a walk
        says so. */
     const rides = ((journey && journey.legs) || []).filter((leg) => !leg.walk).length;
     const titleKey = rides > 1 ? 'plannerJourneyTitle' : (rides === 1 ? 'plannerJourneyDirect' : 'plannerJourneyWalk');
-    box.innerHTML = `<div class="j-title">${esc(t(lang, titleKey))}</div>`
-      + this._itineraryHtml(journey, 0, true);
-    host.appendChild(box);
-    this._bindJourneyBox(box, false);
+    return {
+      className: 'journey-plan',
+      html: `<div class="j-title">${esc(t(lang, titleKey))}</div>` + this._itineraryHtml(journey, 0, true),
+      useBoard: false,
+    };
   }
 
-  _bindJourneyBox(box, useBoard, visible) {
+  _visibleRows() {
+    const nowSec = Math.floor(Date.now() / 1000);
+    return (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec));
+  }
+
+  /* Redrawn only when what it shows changes: a board repaint (an error
+     banner, a late hass) keeps the box and its inline map as they are. */
+  _paintJourney() {
+    const host = this._journeyHost;
+    if (!host) return;
+    const view = this._journeyView();
+    const sig = view ? view.className + '\n' + view.html : '';
+    if (sig === this._journeySig && this._journeySigOf === this._journey && host.childNodes.length === (view ? 1 : 0)) return;
+    this._journeySig = sig;
+    this._journeySigOf = this._journey;
+    this._teardownPlannerInlineMap();
+    host.innerHTML = '';
+    if (!view) return;
+    const box = document.createElement('div');
+    box.className = view.className;
+    box.innerHTML = view.html;
+    host.appendChild(box);
+    this._bindJourneyBox(box, view.useBoard);
+  }
+
+  _bindJourneyBox(box, useBoard) {
     const btn = box.querySelector('#pmap');
     if (btn) {
       btn.addEventListener('click', () => {
         if (!useBoard) return this._openJourneyMap();
-        const first = (visible || [])[0];
+        const first = this._visibleRows()[0];
         if (first) return this._openVehicleMap(first);
         this._showMapNotice(t(this._lang(), 'mapNoData'));
       });
@@ -505,11 +543,7 @@ export class BKKPlannerCard extends BKKHopCard {
         zoomControl: false,
       }).setView(start, 8);
       this._plannerMap = map;
-      L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
-        maxZoom: 20,
-        subdomains: 'abc',
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-      }).addTo(map);
+      L.tileLayer(MAP_TILES, { maxZoom: 20, subdomains: 'abc', attribution: MAP_ATTRIBUTION }).addTo(map);
       const allPts = this._drawJourneyPolylines(L, map, segs, { interactive: false });
       map.on('click', () => this._openJourneyMap());
       this._fitJourneyView(L, map, allPts, 16);
@@ -602,11 +636,7 @@ export class BKKPlannerCard extends BKKHopCard {
     let map;
     try {
       map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView(start, 8);
-      L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
-        maxZoom: 20,
-        subdomains: 'abc',
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>',
-      }).addTo(map);
+      L.tileLayer(MAP_TILES, { maxZoom: 20, subdomains: 'abc', attribution: MAP_ATTRIBUTION }).addTo(map);
     } catch (_e) {
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapLeafletFail'));
@@ -661,7 +691,6 @@ export class BKKPlannerCard extends BKKHopCard {
   }
 
   _paint() {
-    this._teardownPlannerInlineMap();
     super._paint();
     const timed = this._timed();
     const cap = this._planEl('pdeps');
@@ -853,7 +882,16 @@ export class BKKPlannerCard extends BKKHopCard {
       .journey-plan .j-map .leaflet-tile-pane{z-index:200}
       .journey-plan .j-map .leaflet-overlay-pane{z-index:400}
       .journey-plan .j-map .leaflet-marker-pane{z-index:600}
-      .journey-plan .j-map .leaflet-control-attribution{font-size:10px;background:rgba(255,255,255,.72)}
+      .journey-plan .j-map .leaflet-top,.journey-plan .j-map .leaflet-bottom{position:absolute;z-index:1000;pointer-events:none}
+      .journey-plan .j-map .leaflet-top{top:0}
+      .journey-plan .j-map .leaflet-bottom{bottom:0}
+      .journey-plan .j-map .leaflet-left{left:0}
+      .journey-plan .j-map .leaflet-right{right:0}
+      .journey-plan .j-map .leaflet-control{position:relative;z-index:800;float:left;clear:both;pointer-events:auto}
+      .journey-plan .j-map .leaflet-right .leaflet-control{float:right}
+      .journey-plan .j-map .leaflet-control-attribution{margin:0;padding:0 5px;font-size:10px;line-height:1.4;color:#333;background:rgba(255,255,255,.72)}
+      .journey-plan .j-map .leaflet-control-attribution a{color:#0078a8;text-decoration:none}
+      .journey-plan .j-map .leaflet-attribution-flag{display:inline!important;vertical-align:baseline!important;width:1em;height:.6669em}
 ${this._stopPinCss()}
       .journey-plan #pmap {
         margin-top: 10px; border: 0; cursor: pointer; font: inherit; font-size: 13px; font-weight: 700;
@@ -1163,6 +1201,7 @@ ${this._stopPinCss()}
     if (reset) reset.textContent = t(lang, 'plannerReset');
     this._paintMinutesAfter();
     this._syncWhen();
+    this._repaintHints();
   }
 
   _paintMinutesAfter() {
@@ -1216,13 +1255,7 @@ ${this._stopPinCss()}
     this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
-    const q = this._planEl('pq');
-    const dq = this._planEl('pdq');
-    const hits = this._planEl('phits');
-    if (q) q.value = '';
-    if (dq) dq.value = '';
-    if (hits) hits.innerHTML = '';
-    this._syncPickerLabels();
+    this._clearPickerInputs();
     this._paint();
     /* The swapped pair needs no route list (routeIds is empty): plan now,
        and load the new origin's destinations alongside. */
@@ -1250,6 +1283,14 @@ ${this._stopPinCss()}
       routeIds: [],
     });
     this._invalidatePlan();
+    this._clearPickerInputs();
+    this._paintDestHits('');
+    this._paint();
+  }
+
+  /* After a pick, a swap or a reset: both fields empty, the origin's hits
+     gone, the picked names on the buttons. */
+  _clearPickerInputs() {
     const q = this._planEl('pq');
     const dq = this._planEl('pdq');
     const hits = this._planEl('phits');
@@ -1257,8 +1298,6 @@ ${this._stopPinCss()}
     if (dq) dq.value = '';
     if (hits) hits.innerHTML = '';
     this._syncPickerLabels();
-    this._paintDestHits('');
-    this._paint();
   }
 
   async _searchOrigin(q) {
@@ -1274,7 +1313,7 @@ ${this._stopPinCss()}
       const hits = await BkkLib.searchPlannerStops(this._apiKey(), q);
       if (seq !== this._searchSeq) return;
       if (!hits.length) {
-        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'mode').all.empty) + '</span>';
+        this._hint(box, 'mode.empty');
         return;
       }
       box.innerHTML = hits.map((s) => (
@@ -1320,13 +1359,7 @@ ${this._stopPinCss()}
     this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
-    const q = this._planEl('pq');
-    const dq = this._planEl('pdq');
-    const hits = this._planEl('phits');
-    if (q) q.value = '';
-    if (dq) dq.value = '';
-    if (hits) hits.innerHTML = '';
-    this._syncPickerLabels();
+    this._clearPickerInputs();
     this._paint();
     await this._loadDests();
   }
@@ -1336,6 +1369,10 @@ ${this._stopPinCss()}
     if (!cfg.stopId) return;
     this._destsFor = cfg.stopId;
     const seq = ++this._destSeq;
+    /* The last origin's destinations must not be offered while this
+       one's load (an origin changed in the editor). */
+    this._dests = [];
+    this._destRoutes = {};
     this._destsLoading = true;
     this._paintDestHits('');
     try {
@@ -1390,10 +1427,9 @@ ${this._stopPinCss()}
   async _searchDest(q) {
     const box = this._planEl('pdhits');
     if (!box) return;
-    const lang = this._lang();
     const cfg = this._config || {};
     if (!cfg.stopId) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerPickAll')) + '</span>';
+      this._hint(box, 'plannerPickAll');
       return;
     }
     const seq = ++this._destSearchSeq;
@@ -1407,22 +1443,22 @@ ${this._stopPinCss()}
       if (seq !== this._destSearchSeq) return;
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
       if (!hits.length && this._destsLoading) {
-        box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'destLoading')) + '</span>';
+        this._hint(box, 'destLoading');
         return;
       }
-      this._renderDestHits(hits, t(lang, 'mode').all.empty);
+      this._renderDestHits(hits, 'mode.empty');
     } catch (err) {
       if (seq !== this._destSearchSeq) return;
       this._showErr(err);
     }
   }
 
-  _renderDestHits(hits, emptyMsg) {
+  _renderDestHits(hits, emptyKey) {
     const box = this._planEl('pdhits');
     if (!box) return;
     this._destHits = hits || [];
     if (!this._destHits.length) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(emptyMsg) + '</span>';
+      this._hint(box, emptyKey);
       return;
     }
     const shown = this._destHits.slice(0, 20);
@@ -1441,22 +1477,21 @@ ${this._stopPinCss()}
   _paintDestHits(q) {
     const box = this._planEl('pdhits');
     if (!box) return;
-    const lang = this._lang();
     const cfg = this._config || {};
     if (!cfg.stopId) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerPickAll')) + '</span>';
+      this._hint(box, 'plannerPickAll');
       return;
     }
     if (this._destsLoading) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'destLoading')) + '</span>';
+      this._hint(box, 'destLoading');
       return;
     }
     if (!this._dests.length) {
-      box.innerHTML = '<span class="hint">' + BkkLib.esc(t(lang, 'plannerTypeDest')) + '</span>';
+      this._hint(box, 'plannerTypeDest');
       return;
     }
     const hits = BkkLib.destHitsForQuery(this._dests, q, []);
-    this._renderDestHits(hits, t(lang, 'mode').all.destEmpty);
+    this._renderDestHits(hits, 'mode.destEmpty');
   }
 
   _pickDest(dest) {
