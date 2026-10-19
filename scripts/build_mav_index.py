@@ -50,13 +50,14 @@ def _is_gtfs_dir(path: Path) -> bool:
     return "routes.txt" in names and "trips.txt" in names and "shapes.txt" in names
 
 
-def refresh_from_url(url: str, dest: Path, *, max_age_s: float = URL_MAX_AGE_S) -> None:
+def refresh_from_url(url: str, dest: Path, *, max_age_s: float = URL_MAX_AGE_S) -> BaseException | None:
     """Fetch MAV_GTFS_URL into dest unless dest is recent. An unchanged zip
     keeps its file (and mtime), so the index is not rebuilt for nothing; a
-    failed download keeps the old zip."""
+    failed download keeps the old zip and returns its error (the old mtime
+    stays, so the next run tries again). Without an old zip it raises."""
     try:
         if time.time() - dest.stat().st_mtime < max_age_s:
-            return
+            return None
     except OSError:
         pass
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -68,17 +69,22 @@ def refresh_from_url(url: str, dest: Path, *, max_age_s: float = URL_MAX_AGE_S) 
         download_feed(url, tmp)
         if dest.is_file() and filecmp.cmp(tmp, dest, shallow=False):
             print("MÁV GTFS unchanged")
-            return
+            return None
         tmp.replace(dest)
+        return None
     except Exception as err:
         if not dest.is_file():
             raise
         print(f"warn MÁV GTFS download: {type(err).__name__}; keeping {dest.name}", file=sys.stderr)
+        return err
     finally:
         tmp.unlink(missing_ok=True)
 
 
-def resolve_mav_feed(base: Path) -> Path:
+def resolve_mav_feed(base: Path, *, url_errors: list[BaseException] | None = None) -> Path:
+    """The MÁV feed to build from. A MAV_GTFS_URL download that failed while
+    an older copy was kept is appended to url_errors (update_volan_index
+    reports it once it keeps failing)."""
     load_env_files()
     env_dir = (os.environ.get("MAV_PFAEDLE_DIR") or "").strip()
     if env_dir:
@@ -99,7 +105,9 @@ def resolve_mav_feed(base: Path) -> Path:
     url = _feed_url()
     dest = base / "mav-gtfs.zip"
     if url:
-        refresh_from_url(url, dest)
+        err = refresh_from_url(url, dest)
+        if err is not None and url_errors is not None:
+            url_errors.append(err)
         return dest
     for cand in LOCAL_ZIPS:
         p = cand if cand.is_absolute() else base / cand

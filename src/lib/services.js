@@ -11,13 +11,25 @@ Object.assign(BkkLib, {
     if (Array.isArray(payload)) return payload;
     return [];
   },
+  /* The integration registers elvira_between; without it (an older or
+     unloaded integration) every poll was one failing call_service. */
+  hasElvira(hass) {
+    const domain = hass && hass.services && hass.services.hungarian_transport;
+    return !!(domain && typeof domain === 'object' && domain.elvira_between);
+  },
+  /* After a failed call ELVIRA is left alone this long, and the outage is
+     logged once, not on every poll of every MÁV card. */
+  _elviraRetryMs: 3 * 60000,
+  _elviraDownUntil: 0,
+  _elviraWarned: false,
   async elviraBetween(hass, originId, destId, minutesAfter, destName, opts) {
     opts = opts || {};
+    if (!BkkLib.hasElvira(hass) || Date.now() < BkkLib._elviraDownUntil) return [];
     let origin = BkkLib.elviraStationCode(originId);
     let dest = BkkLib.elviraStationCode(destId);
     if (!origin) origin = await BkkLib.elviraResolveCode(opts.apiKey, originId, opts.originName || '');
     if (!dest) dest = await BkkLib.elviraResolveCode(opts.apiKey, destId, destName || '');
-    if (!hass || !origin || !dest || origin === dest) {
+    if (!origin || !dest || origin === dest) {
       return [];
     }
     const serviceData = {
@@ -29,8 +41,11 @@ Object.assign(BkkLib, {
     const pair = `${origin}>${dest}`;
     try {
       const res = await BkkLib.callServiceResponse(hass, 'hungarian_transport', 'elvira_between', serviceData);
+      BkkLib._elviraWarned = false;
       if (!res) return [];
-      /* An outage is {departures: [], error, detail}, not a service error. */
+      /* ELVIRA itself being down is {departures: [], error, detail}, not a
+         service error: the integration answered, so only this pair's
+         outage is noted and no backoff applies to the other pairs. */
       const payload = BkkLib.servicePayload(res);
       if (payload && payload.error) {
         BkkLib._elviraDown(pair, `${payload.error}${payload.detail ? ` (${payload.detail})` : ''}`);
@@ -40,12 +55,16 @@ Object.assign(BkkLib, {
       const rows = BkkLib.elviraRowsFromResult(res);
       return Array.isArray(rows) ? rows : [];
     } catch (err) {
-      BkkLib._elviraDown(pair, err);
+      BkkLib._elviraDownUntil = Date.now() + BkkLib._elviraRetryMs;
+      if (!BkkLib._elviraWarned) {
+        BkkLib._elviraWarned = true;
+        console.warn('MÁV ELVIRA reservation data unavailable, retrying in a few minutes:', err);
+      }
       return [];
     }
   },
-  /* Cards poll every 15–45 s: warn when a station pair's outage starts, not
-     on every poll; its next good answer ends the outage. */
+  /* Cards poll every 15–45 s: warn when a station pair's ELVIRA outage
+     starts, not on every poll; its next good answer ends the outage. */
   _elviraOutages: new Set(),
   _elviraDown(pair, reason) {
     if (BkkLib._elviraOutages.has(pair)) return;

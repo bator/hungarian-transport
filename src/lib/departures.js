@@ -520,14 +520,20 @@ Object.assign(BkkLib, {
         }
       }
       if (!poles.length) poles = [stopId];
+      /* One pole failing still leaves the others' rows. Every board failing
+         (a revoked key, an outage, the integration erroring) is not "no
+         departures": the first error goes up so the card shows it. */
+      let boardErr = null;
       const loadBoards = (ids) => Promise.all(ids.map(async (pid) => {
         try {
           return await BkkLib.departureBoard(apiKey, pid, horizon);
-        } catch (_e) {
+        } catch (err) {
+          if (!boardErr) boardErr = err;
           return null;
         }
       }));
       let payloads = await loadBoards(poles);
+      if (boardErr && payloads.every((data) => !data)) throw boardErr;
       const usedParentOnly = poles.length === 1 && poles[0] === stopId;
       const span = payloads.reduce((best, data) => {
         const cur = BkkLib.boardSpanMin(data, now);

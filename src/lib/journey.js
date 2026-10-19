@@ -1,4 +1,4 @@
-import { clampMinutesAfter, pad2, tzFields } from '../config.js';
+import { clampMinutesAfter, pad2, tzDow, tzFields } from '../config.js';
 import { BkkLib } from '../lib/core.js';
 
 Object.assign(BkkLib, {
@@ -148,10 +148,13 @@ Object.assign(BkkLib, {
      FUTÁR plan-trip when it has none. */
   async planJourneys(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
+    [origin, dest] = await BkkLib.withGtfsCoords([origin, dest]);
     let list = await BkkLib.transitousJourneys(origin, dest, opts);
     if (!list.length && BkkLib.hasFutar(apiKey)) {
-      const fromPlace = await BkkLib.planPlace(apiKey, origin);
-      const toPlace = await BkkLib.planPlace(apiKey, dest);
+      const [fromPlace, toPlace] = await Promise.all([
+        BkkLib.planPlace(apiKey, origin),
+        BkkLib.planPlace(apiKey, dest),
+      ]);
       if (fromPlace && toPlace) {
         try {
           const data = await BkkLib.fetch(apiKey, 'plan-trip.json', Object.assign({
@@ -179,12 +182,15 @@ Object.assign(BkkLib, {
   },
   async planJourney(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
+    [origin, dest] = await BkkLib.withGtfsCoords([origin, dest]);
     const motis = await BkkLib.transitousJourney(origin, dest, opts);
     if (motis && motis.legs.some((leg) => !leg.walk)) return BkkLib.nameJourneyEnds(motis, origin, dest);
     let futar = null;
     if (BkkLib.hasFutar(apiKey)) {
-      const fromPlace = await BkkLib.planPlace(apiKey, origin);
-      const toPlace = await BkkLib.planPlace(apiKey, dest);
+      const [fromPlace, toPlace] = await Promise.all([
+        BkkLib.planPlace(apiKey, origin),
+        BkkLib.planPlace(apiKey, dest),
+      ]);
       if (fromPlace && toPlace) {
         try {
           const horizon = clampMinutesAfter(opts.minutesAfter);
@@ -205,14 +211,21 @@ Object.assign(BkkLib, {
     const viaCity = await BkkLib.cityRailJourney(apiKey, hass, origin, dest);
     return viaCity || futar;
   },
-  /* Local GTFS has no planner API. Ride the city feed to a station, walk
-     across, then take the next train. Same-name stops are a 3 minute walk;
-     the station bay to the platform is 6 minutes at 80 m/min. */
-  cityHubPath(idx, originStop) {
-    if (!idx || !originStop) return null;
+  /* One operator's ride and walk edges for a service day: the fastest
+     ride between any two stops of a trip (up to 28 stops in), and walks
+     between same-named stops. Built once per day, not per question. */
+  _cityHubGraphs: new WeakMap(),
+  _cityHubGraph(idx, op, ymd) {
+    let byIdx = BkkLib._cityHubGraphs.get(idx);
+    if (!byIdx) {
+      byIdx = new Map();
+      BkkLib._cityHubGraphs.set(idx, byIdx);
+    }
+    const memoKey = op + '|' + ymd;
+    const hit = byIdx.get(memoKey);
+    if (hit) return hit;
     const stops = idx.stops || [];
-    const op = originStop.op;
-    const day = BkkLib.volanDay(0);
+    const dow = tzDow(ymd);
     const ride = new Map();
     const trips = idx.t || [];
     for (let n = 0; n < trips.length; n++) {
@@ -222,7 +235,7 @@ Object.assign(BkkLib, {
       if (ps.length < 2) continue;
       const first = stops[ps[0]];
       if (!first || first.op !== op) continue;
-      if (!BkkLib.volanServiceOk(idx, t[0], day.ymd, day.dow)) continue;
+      if (!BkkLib.volanServiceOk(idx, t[0], ymd, dow)) continue;
       const span = Math.min(ps.length, 28);
       for (let i = 0; i < span; i++) {
         for (let j = i + 1; j < span; j++) {
@@ -258,6 +271,20 @@ Object.assign(BkkLib, {
         });
       });
     });
+    const graph = { rideAt, walkAt };
+    /* Yesterday's graph is not asked for again. */
+    Array.from(byIdx.keys()).forEach((k) => { if (k.split('|')[1] !== ymd) byIdx.delete(k); });
+    byIdx.set(memoKey, graph);
+    return graph;
+  },
+  /* Local GTFS has no planner API. Ride the city feed to a station, walk
+     across, then take the next train. Same-name stops are a 3 minute walk;
+     the station bay to the platform is 6 minutes at 80 m/min. */
+  cityHubPath(idx, originStop) {
+    if (!idx || !originStop) return null;
+    const stops = idx.stops || [];
+    const op = originStop.op;
+    const { rideAt, walkAt } = BkkLib._cityHubGraph(idx, op, BkkLib.volanDay(0).ymd);
     const hub = (st) => BkkLib.isRailHubName(st && st.name);
     const starts = [];
     stops.forEach((st) => {
@@ -331,37 +358,52 @@ Object.assign(BkkLib, {
       });
     }
     edges.reverse();
+    const hubStop = stops[bestHub.at];
+    const hubPt = hubStop ? BkkLib.finiteLatLon(hubStop.lat, hubStop.lon) : null;
     return {
       minutes: bestHub.cost,
-      hubName: stops[bestHub.at] && stops[bestHub.at].name,
-      hubFold: stops[bestHub.at] && stops[bestHub.at].fold,
+      hubName: hubStop && hubStop.name,
+      hubFold: hubStop && hubStop.fold,
+      hubLat: hubPt ? hubPt[0] : undefined,
+      hubLon: hubPt ? hubPt[1] : undefined,
       edges,
     };
   },
+  /* Only from a city feed's own stop: a BKK or Volán origin matched by
+     number or name lands on some other town's stop (BKK_F01020 "Kossuth
+     Lajos utca" was a Miskolc one). */
   async cityRailJourney(apiKey, hass, origin, dest) {
-    if (!BkkLib.isRailDest(dest)) return null;
+    if (!BkkLib.isRailDest(dest) || BkkLib.stopIdFamily(origin) !== 'city') return null;
     let idx;
     try { idx = await BkkLib.cityIndex(); } catch (_e) { return null; }
     if (!idx || !idx.stops) return null;
-    let originStop = (idx.stops || []).find((st) => st && st.id === origin.id);
+    let originStop = BkkLib.gtfsStopById(idx, origin.id);
     if (!originStop) {
-      originStop = BkkLib.volanMatchStop(idx, { id: origin.id, name: origin.name || '' }, null);
+      /* A rebuilt index renumbered the stop: its name in that city. */
+      const opIx = BkkLib.opIx(idx, String(origin.id).split(':')[0]);
+      if (opIx >= 0) originStop = BkkLib.volanMatchStop(idx, { id: '', name: origin.name || '' }, opIx);
     }
     if (!originStop || originStop.op == null) return null;
     const path = BkkLib.cityHubPath(idx, originStop);
     if (!path || !path.edges.length) return null;
     const op = (idx.ops || [])[originStop.op];
     const cityName = op ? String(op.name).split(' — ')[0] : '';
+    /* The destination is the station the city ride ends at: by place, or
+       by name, when every word of it is the town's or the hub's (a hub
+       called just "Vasútállomás" has no word of its own). */
     const destFold = BkkLib.fold((dest && dest.name) || '');
     const cityTok = new Set(BkkLib.foldTokens(cityName));
     const destTok = BkkLib.foldTokens(destFold);
     const hubTok = BkkLib.foldTokens(path.hubFold);
+    const hubPt = BkkLib.finiteLatLon(path.hubLat, path.hubLon);
+    const destPt = BkkLib.finiteLatLon(dest && dest.lat, dest && dest.lon);
     const destIsHub = !!(destFold && path.hubFold && (
       destFold === path.hubFold
-      || (BkkLib.foldTokenMatch(destFold, path.hubFold)
-        && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok)))
+      || (hubPt && destPt && BkkLib.haversineMeters(hubPt, destPt) <= 800)
+      || (destTok.length && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok)))
     ));
-    let ready = Math.floor(Date.now() / 1000);
+    const startSec = Math.floor(Date.now() / 1000);
+    let ready = startSec;
     const legs = [];
     for (let i = 0; i < path.edges.length; i++) {
       const edge = path.edges[i];
@@ -380,12 +422,15 @@ Object.assign(BkkLib, {
       const timed = BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.route, ready);
       if (!timed) return null;
       const waitMin = Math.round((timed.dep - ready) / 60);
+      /* The trip's own end, as on the bus: not the stop this ride gets off. */
+      const tripStops = (timed.trip && timed.trip[2]) || [];
+      const terminus = idx.stops[tripStops[tripStops.length - 1]];
       legs.push({
         walk: false,
         minutes: Math.max(1, Math.round((timed.arr - timed.dep) / 60)),
         meters: 0,
         label: edge.route,
-        headsign: edge.to,
+        headsign: (terminus && terminus.name) || edge.to,
         color: '0F6FC6',
         text: 'FFFFFF',
         from: edge.from,
@@ -407,6 +452,18 @@ Object.assign(BkkLib, {
       legs.push(rail.walk);
       legs.push(rail.train);
       ready = rail.ready;
+    }
+    /* The journey starts when it has to: walks before the first ride end
+       as that bus leaves, and waiting for it is not part of the trip. */
+    const firstRide = legs.findIndex((leg) => !leg.walk);
+    if (firstRide >= 0) {
+      let at = legs[firstRide].startMs;
+      for (let i = firstRide - 1; i >= 0; i--) {
+        legs[i].endMs = at;
+        legs[i].startMs = at - legs[i].minutes * 60000;
+        at = legs[i].startMs;
+      }
+      legs[firstRide].waitMin = 0;
     }
     const waitMin = legs.reduce((sum, leg) => sum + (leg.waitMin || 0), 0);
     const walkMin = legs.reduce((sum, leg) => sum + (leg.walk ? leg.minutes : 0), 0);
@@ -437,11 +494,15 @@ Object.assign(BkkLib, {
       delete leg.fromI;
       delete leg.toI;
     });
+    const startMs = (legs[0] && legs[0].startMs) || startSec * 1000;
+    const endMs = ready * 1000;
     return {
-      durationMin: Math.max(1, Math.round((ready - Math.floor(Date.now() / 1000)) / 60)),
+      durationMin: Math.max(1, Math.round((endMs - startMs) / 60000)),
       walkMin,
       waitMin,
       transfers: Math.max(0, legs.filter((leg) => !leg.walk).length - 1),
+      startMs,
+      endMs,
       legs,
     };
   },
@@ -470,17 +531,43 @@ Object.assign(BkkLib, {
     }
     return best;
   },
+  /* The railway station at a city feed's hub, from FUTÁR's MÁV stops: the
+     one by the hub stop, else by name. Hubs called just "Vasútállomás"
+     (Székesfehérvár, Szombathely, Kaposvár …) or "Főpályaudvar" (Pécs)
+     share no word with the station ("Székesfehérvár", "Pécs"), so the town
+     names it then; a town with two stations goes by the hub's own word
+     (Miskolc "Gömöri pályaudvar" is Miskolc-Gömöri, not Miskolc-Tiszai). */
+  async railStationAtHub(apiKey, cityName, path) {
+    const hubPt = BkkLib.finiteLatLon(path.hubLat, path.hubLon);
+    const want = path.hubFold || path.hubName || '';
+    const cityTok = BkkLib.foldTokens(cityName);
+    const queries = [(cityName ? cityName + ' ' : '') + (path.hubName || '')];
+    if (cityName && queries.indexOf(cityName) < 0) queries.push(cityName);
+    for (let i = 0; i < queries.length; i++) {
+      let hits = [];
+      try {
+        hits = (await BkkLib.searchStops(apiKey, queries[i], 'mav')) || [];
+      } catch (_e) {
+        hits = [];
+      }
+      const near = hubPt ? hits
+        .map((hit) => ({ hit, pt: BkkLib.finiteLatLon(hit.lat, hit.lon) }))
+        .filter((c) => c.pt && BkkLib.haversineMeters(hubPt, c.pt) <= 1500)
+        .sort((x, y) => BkkLib.haversineMeters(hubPt, x.pt) - BkkLib.haversineMeters(hubPt, y.pt))[0] : null;
+      if (near) return near.hit;
+      const byHub = hits.find((hit) => BkkLib.foldTokenMatch(want, hit.name || ''));
+      if (byHub) return byHub;
+      const extra = (hit) => BkkLib.foldTokens(hit.name || '').filter((tok) => cityTok.indexOf(tok) < 0).length;
+      const byTown = cityTok.length ? hits
+        .filter((hit) => BkkLib.foldTokens(hit.name || '').some((tok) => cityTok.indexOf(tok) >= 0))
+        .sort((x, y) => extra(x) - extra(y))[0] : null;
+      if (byTown) return byTown;
+    }
+    return null;
+  },
   async railAfterCity(apiKey, hass, cityName, path, dest, readySec) {
     if (!path || !path.hubName) return null;
-    const query = (cityName ? cityName + ' ' : '') + (path.hubName || '');
-    let station = null;
-    try {
-      const hits = await BkkLib.searchStops(apiKey, query, 'mav');
-      const want = path.hubFold || path.hubName || '';
-      station = (hits || []).find((hit) => BkkLib.foldTokenMatch(want, hit.name || '')) || null;
-    } catch (_e) {
-      station = null;
-    }
+    const station = await BkkLib.railStationAtHub(apiKey, cityName, path);
     if (!station || !station.id) return null;
     const walkStart = readySec;
     const walkEnd = readySec + 6 * 60;
@@ -492,9 +579,12 @@ Object.assign(BkkLib, {
     let train = null;
     if (hass && dest && dest.id) {
       try {
-        const rows = await BkkLib.elviraBetween(
-          hass, station.id, dest.id, 480, dest.name || '', { apiKey, originName: station.name || '' },
-        );
+        /* With the station code resolved here, ELVIRA is not handed the
+           destination's name, and heads each train with its own terminus. */
+        const destCode = await BkkLib.elviraResolveCode(apiKey, dest.id, dest.name || '');
+        const rows = destCode ? await BkkLib.elviraBetween(
+          hass, station.id, destCode, 480, '', { apiKey, originName: station.name || '' },
+        ) : [];
         const next = (rows || []).filter((row) => row.destHit !== false && Number(row.dep) >= walkEnd - 30)
           .sort((a, b) => a.dep - b.dep)[0];
         if (next && next.dep) {
@@ -510,7 +600,7 @@ Object.assign(BkkLib, {
             minutes: rideMin || 1,
             meters: 0,
             label: String(next.label || next.trainNumber || ''),
-            headsign: dest.name || '',
+            headsign: String(next.head || dest.name || ''),
             color: String(badge.color || '4477AA').replace('#', ''),
             text: String(badge.text || 'FFFFFF').replace('#', ''),
             from: station.name || '',

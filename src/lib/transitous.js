@@ -62,9 +62,12 @@ Object.assign(BkkLib, {
     return '';
   },
   /* A stop does not move: every poll of an empty board geocoded both ends
-     again. Answers stay for the page; a failed lookup is asked again. */
+     again. Answers stay for the page; a failed lookup is asked again, and
+     an empty answer after ten minutes (a geocoder that had no data yet). */
   _geocodeCache: new Map(),
   _geocodeCacheMax: 200,
+  _geocodeEmptyAt: new Map(),
+  _geocodeEmptyRetryMs: 10 * 60 * 1000,
   transitousGeocode(text, opts) {
     const q = String(text || '').trim();
     if (!q) return Promise.resolve([]);
@@ -77,12 +80,24 @@ Object.assign(BkkLib, {
     }
     const key = `${params.type || 'all'}|${q}`;
     const cache = BkkLib._geocodeCache;
+    const empties = BkkLib._geocodeEmptyAt;
     const hit = cache.get(key);
-    if (hit) return hit;
+    const emptyAt = empties.get(key);
+    if (hit && !(emptyAt && Date.now() - emptyAt >= BkkLib._geocodeEmptyRetryMs)) return hit;
+    if (hit) cache.delete(key);
+    empties.delete(key);
     const run = BkkLib.transitousFetch('/api/v1/geocode', params)
-      .then((data) => (Array.isArray(data) ? data : []));
+      .then((data) => {
+        const list = Array.isArray(data) ? data : [];
+        if (!list.length && cache.get(key) === run) empties.set(key, Date.now());
+        return list;
+      });
     run.catch(() => { if (cache.get(key) === run) cache.delete(key); });
-    if (cache.size >= BkkLib._geocodeCacheMax) cache.delete(cache.keys().next().value);
+    if (cache.size >= BkkLib._geocodeCacheMax) {
+      const oldest = cache.keys().next().value;
+      cache.delete(oldest);
+      empties.delete(oldest);
+    }
     cache.set(key, run);
     return run;
   },
@@ -100,9 +115,6 @@ Object.assign(BkkLib, {
     if (/^(geo:|node\/|way\/)/i.test(String(stop.id || stop.stopId || ''))) return true;
     const kind = String(stop.kind || stop.stopKind || '');
     return kind === 'address' || kind === 'place';
-  },
-  allowFutarHopShape(row, hasGps) {
-    return !(BkkLib.isTrainRow(row) && hasGps);
   },
   transitousHitToStop(hit) {
     if (!hit || !hit.name) return null;
@@ -177,7 +189,11 @@ Object.assign(BkkLib, {
         byId.set(s.id, s);
       });
     } catch (_e) { /* Transitous hits are enough when the index is missing */ }
-    const collapsed = BkkLib.collapseSameNameStops(Array.from(byId.values()));
+    /* City and Volán index hits get their coordinates first: the collapse
+       tells two towns' same-named stops apart by them, and a picked stop
+       is planned from where it is. */
+    const placed = await BkkLib.withGtfsCoords(Array.from(byId.values()));
+    const collapsed = BkkLib.collapseSameNameStops(placed);
     return BkkLib.capPlannerHits(collapsed, 24);
   },
   pickTransitousHit(hits, stop, kind) {
@@ -412,8 +428,10 @@ Object.assign(BkkLib, {
   async transitousDepartures(origin, dest, opts) {
     opts = opts || {};
     if (!dest || !(dest.key || dest.name || dest.id)) return [];
-    const fromPlace = await BkkLib.transitousPlace(origin);
-    const toPlace = await BkkLib.transitousPlace(dest);
+    const [fromPlace, toPlace] = await Promise.all([
+      BkkLib.transitousPlace(origin),
+      BkkLib.transitousPlace(dest),
+    ]);
     if (!fromPlace || !toPlace) return [];
     const horizon = clampMinutesAfter(opts.minutesAfter);
     const anchor = Number(opts.anchorDep || 0);
@@ -619,27 +637,37 @@ Object.assign(BkkLib, {
     }
     return best;
   },
-  pickMotisHopRow(motis, row, dest) {
-    return BkkLib.pickMotisVehicle(motis, row, dest);
-  },
-  async motisTripShape(tripId) {
+  /* A trip's route does not change: the board, its map and the planner
+     ask for it once. A failed fetch is asked again. */
+  _motisTrips: new Map(),
+  _motisTripsMax: 32,
+  motisTripShape(tripId) {
     const raw = String(tripId || '').replace(/^motis:/i, '').trim();
-    if (!raw || /^\d+:/.test(raw)) return [];
-    const data = await BkkLib.transitousFetch('/api/v5/trip', {
+    if (!raw || /^\d+:/.test(raw)) return Promise.resolve([]);
+    const cache = BkkLib._motisTrips;
+    /* Each caller gets its own list to cut or extend. */
+    const hit = cache.get(raw);
+    if (hit) return hit.then((pts) => pts.slice());
+    const run = BkkLib.transitousFetch('/api/v5/trip', {
       tripId: raw,
       joinInterlinedLegs: 'true',
-    });
-    const legs = (data && data.legs) || [];
-    const pts = [];
-    legs.forEach((leg) => {
-      if (String((leg && leg.mode) || '').toUpperCase() === 'WALK') return;
-      BkkLib.validMapShape(BkkLib.decodePolyline(leg && leg.legGeometry)).forEach((pt) => {
-        const last = pts[pts.length - 1];
-        if (last && last[0] === pt[0] && last[1] === pt[1]) return;
-        pts.push(pt);
+    }).then((data) => {
+      const legs = (data && data.legs) || [];
+      const pts = [];
+      legs.forEach((leg) => {
+        if (String((leg && leg.mode) || '').toUpperCase() === 'WALK') return;
+        BkkLib.validMapShape(BkkLib.decodePolyline(leg && leg.legGeometry)).forEach((pt) => {
+          const last = pts[pts.length - 1];
+          if (last && last[0] === pt[0] && last[1] === pt[1]) return;
+          pts.push(pt);
+        });
       });
+      return pts;
     });
-    return pts;
+    run.catch(() => { if (cache.get(raw) === run) cache.delete(raw); });
+    if (cache.size >= BkkLib._motisTripsMax) cache.delete(cache.keys().next().value);
+    cache.set(raw, run);
+    return run.then((pts) => pts.slice());
   },
   async motisShapeForHop(row, origin, dest, opts) {
     opts = Object.assign({}, opts || {});

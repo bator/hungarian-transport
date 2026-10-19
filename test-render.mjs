@@ -967,12 +967,6 @@ check('empty planner transfer summary includes an inline map',
   plan.shadowRoot.innerHTML.includes('id="pjmap"')
   && !!plan.shadowRoot.querySelector('#pjmap')
   && plan.shadowRoot.querySelector('#pjmap').classList.contains('j-map'));
-check('planner source mounts an inline journey map',
-  src.includes('_mountPlannerInlineMap') && src.includes('id="pjmap"'));
-check('planner tears down the inline map before wiping the body',
-  src.indexOf('this._teardownPlannerInlineMap();') < src.indexOf('super._paint();')
-  && src.includes('this._plannerMap')
-  && !/_closeVehicleMap[\s\S]{0,800}_plannerMap/.test(src));
 {
   const noGeom = Lib.journeyMapSegments(
     { legs: [{ walk: true, from: 'A', to: 'B', minutes: 5 }] },
@@ -1057,10 +1051,6 @@ check('combined board overlay is gone',
     Lib.validMapShape(filled.legs[1].shape).length >= 2
     && filled.legs[1].shape[1][0] === 47.464);
 }
-check('journey map scales to every vehicle SVG path',
-  src.includes('_fitJourneyView')
-  && src.includes('preferCanvas: false')
-  && /L\.map\(canvas, \{ scrollWheelZoom: true, preferCanvas: false \}/.test(src));
 const pmap = plan.shadowRoot.querySelector('#pmap');
 if (pmap) pmap.dispatchEvent(new Event('click', { bubbles: true, composed: true }));
 check('pmap click opens the journey map', journeyMapOpened >= 1, String(journeyMapOpened));
@@ -1152,8 +1142,6 @@ check('planner BKK-board map button opens a single-vehicle map', vehicleMapOpene
     && !plan.shadowRoot.querySelector('.j-map-only'),
     html.slice(0, 400));
 }
-check('transitous journey asks for 12 itineraries by default',
-  src.includes('numItineraries: String(opts.numItineraries || 12)'));
 {
   const planJFromBoard = [];
   const origPJ = Lib.planJourney;
@@ -1176,8 +1164,7 @@ check('transitous journey asks for 12 itineraries by default',
     String(planJFromBoard.length));
 }
 check('planner has no preset origin suggestions',
-  plan.shadowRoot.querySelectorAll('#pfav .suggest-stop').length === 0
-  && /\.suggest \{[^}]*flex-direction:\s*row/.test(src));
+  plan.shadowRoot.querySelectorAll('#pfav .suggest-stop').length === 0);
 check('planner dest search lists MAV stations outside the live sample',
   Lib.destHitsForQuery(
     [{ key: 'godollo', name: 'G\u00f6d\u00f6ll\u0151' }],
@@ -1848,37 +1835,16 @@ check('BKK+dest keeps a bus omitted from routeIds',
   Lib.keepFutarCandidate({ id: 'BKK_1335' }, new Set(['BKK_0070', 'BKK_1100']), 'bkk', 'keleti'));
 check('BKK without dest still filters unselected buses',
   !Lib.keepFutarCandidate({ id: 'BKK_1335' }, new Set(['BKK_0070']), 'bkk', ''));
-check('rowTimeKey joins label and sched minute',
-  Lib.rowTimeKey({ label: 'S30', sched: 1790020080 }) === 'S30|' + Math.round(1790020080 / 60));
-check('BALATON matches FUTAR IC 861 by train number',
-  Lib.matchFutarStopTime(
-    { label: 'BALATON', trainNumber: '861', sched: 1790015820, tripId: 'elvira:2890602' },
-    { tripId: 'BKK_861_74', departureTime: 1790015820 },
-    { shortName: null },
-    { iconDisplayText: 'IC' },
-  ));
-check('BALATON matches FUTAR IC by sched minute when labels differ',
-  Lib.matchFutarStopTime(
-    { label: 'BALATON', trainNumber: '', sched: 1790015820, tripId: 'elvira:1' },
-    { tripId: 'BKK_861_74', departureTime: 1790015820 },
-    {},
-    { iconDisplayText: 'IC' },
-  ));
-check('BALATON does not match a different-minute IC',
-  !Lib.matchFutarStopTime(
-    { label: 'BALATON', trainNumber: '861', sched: 1790015820, tripId: 'elvira:1' },
-    { tripId: 'BKK_963_313', departureTime: 1790015820 + 3600 },
-    {},
-    { iconDisplayText: 'IC' },
-  ));
+check('the unused FUTÁR trip resolver and its helpers are gone',
+  !/futarTripIdForRow|matchFutarStopTime|rowTimeKey|needsFutarMapResolve|hasLocation/.test(src));
 check('EMMA tripShortName 861 BALATON yields train number 861',
   Lib.emmaTrainNumber('861 BALATON InterCity') === '861');
 check('emmaTrainNumber reads IC 856 TÓPART',
   Lib.emmaTrainNumber('IC 856 TÓPART') === '856'
   && Lib.emmaTrainNumber('S40') === '');
-check('pickMotisHopRow matches generic IC to IC 856 TÓPART', (() => {
+check('pickMotisVehicle matches generic IC to IC 856 TÓPART', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
-  const hit = Lib.pickMotisHopRow([
+  const hit = Lib.pickMotisVehicle([
     { label: 'IC 856 TÓPART', trainNumber: '856', dep, shape: [[47.465, 19.021], [47.183, 18.424]] },
     { label: 'G43', trainNumber: '3546', dep: dep + 60, shape: [[47.46, 19.15], [47.18, 18.42]] },
   ], { label: 'IC', trainNumber: '856', dep, vehicle: 'rail' });
@@ -1983,20 +1949,13 @@ check('ELVIRA GPS still wins if FUTAR was added first', (() => {
     && merged[0].lat === 47.2290993
     && merged[0].lon === 18.6682205;
 })());
-check('map skips FUTAR resolve when ELVIRA row already has GPS',
-  !Lib.needsFutarMapResolve({ tripId: 'elvira:2890602', lat: 47.229, lon: 18.668 })
-  && Lib.needsFutarMapResolve({ tripId: 'elvira:2890602' })
-  && !Lib.needsFutarMapResolve({ tripId: 'BKK_861_74', lat: null, lon: null }));
 check('hop map uses MÁV GTFS full line for trains, Transitous for buses',
   src.includes('motisShapeForHop')
-  && src.includes('mavShapeForRow')
   && src.includes('mav-index.json.gz')
   && src.includes('/api/v5/stoptimes')
   && src.includes('_mapBoardMarker')
   && src.includes('combineHopShapes')
   && src.includes('stitchShapes')
-  && src.includes('clipShapeFromBoard')
-  && src.includes('clipShapeFromBoardToward')
   && src.includes('clipRideShape')
   && src.includes('clipShapeToBoardDest')
   && src.includes('keepsFullLineShape')
@@ -2024,11 +1983,6 @@ check('mavShapeIndexKey prefers suburban line over colliding train numbers', (()
     && sz && sz.kind === 'n' && sz.key === '9068'
     && s40 && s40.kind === 'l' && s40.key === 'S40';
 })());
-check('mavShapeForRow prefers suburban line then train number',
-  src.includes('suburbanLineLabel(label)')
-  && src.includes('idx.l[line]')
-  && src.includes('idx.l[label]')
-  && src.includes('idx.n[num]'));
 {
   /* An empty or failed MÁV index is kept for a while: every train-row map
      open must not wait 45 s on a stalled server again. */
@@ -2074,14 +2028,9 @@ check('hop map still tries FUTAR geometry when MOTIS misses the headsign',
   src.includes('const canFutar')
   && src.includes('if (canFutar)')
   && src.includes('matchHassVehicle'));
-check('train with GPS skips FUTAR hop shape',
-  !Lib.allowFutarHopShape({ vehicle: 'rail', tripId: 'elvira:1' }, true)
-  && Lib.allowFutarHopShape({ vehicle: 'rail', tripId: 'elvira:1' }, false)
-  && Lib.allowFutarHopShape({ vehicle: 'bus', tripId: 'BKK_C007' }, true));
-check('transitous fetch has no User-Agent header', !src.includes("'User-Agent'"));
-check('pickMotisHopRow matches ELVIRA ADRIA to Transitous AGRAM', (() => {
+check('pickMotisVehicle matches ELVIRA ADRIA to Transitous AGRAM', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
-  const hit = Lib.pickMotisHopRow([
+  const hit = Lib.pickMotisVehicle([
     {
       label: '204 AGRAM - TÓPART', trainNumber: '204', dep, vehicle: 'rail',
       shape: [[47.498, 19.025], [46.249, 16.956]],
@@ -2094,9 +2043,9 @@ check('pickMotisHopRow matches ELVIRA ADRIA to Transitous AGRAM', (() => {
   ], { label: 'ADRIA', trainNumber: '1240', dep, vehicle: 'rail' });
   return hit && /AGRAM/i.test(hit.label);
 })());
-check('pickMotisHopRow does not alias TÓPART onto AGRAM at another hour', (() => {
+check('pickMotisVehicle does not alias TÓPART onto AGRAM at another hour', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
-  const hit = Lib.pickMotisHopRow([
+  const hit = Lib.pickMotisVehicle([
     {
       label: '204 AGRAM - TÓPART', trainNumber: '204', dep, vehicle: 'rail',
       shape: [[47.498, 19.025], [46.249, 16.956]],
@@ -2108,9 +2057,9 @@ check('pickMotisHopRow does not alias TÓPART onto AGRAM at another hour', (() =
   ], { label: 'TÓPART', trainNumber: '856', dep: dep + 7200, vehicle: 'rail' });
   return hit && hit.trainNumber === '856';
 })());
-check('pickMotisHopRow unique close rail dep matches a renamed IC', (() => {
+check('pickMotisVehicle unique close rail dep matches a renamed IC', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
-  const hit = Lib.pickMotisHopRow([
+  const hit = Lib.pickMotisVehicle([
     {
       label: '204 AGRAM - TÓPART', trainNumber: '204', dep, vehicle: 'rail',
       shape: [[47.498, 19.025], [46.249, 16.956]],
@@ -2243,9 +2192,9 @@ check('pickMotisVehicle still matches Göcsej by train number', (() => {
     Lib.hassService = origHassService;
   }
 }
-check('pickMotisHopRow matches a bus route number', (() => {
+check('pickMotisVehicle matches a bus route number', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
-  const hit = Lib.pickMotisHopRow([
+  const hit = Lib.pickMotisVehicle([
     { label: '7', dep, vehicle: 'bus', shape: [[47.48, 19.05], [47.42, 19.07]] },
     { label: '7E', dep: dep + 120, vehicle: 'bus', shape: [[47.50, 19.06], [47.40, 19.08]] },
   ], { label: '7', dep, vehicle: 'bus' });
@@ -2260,9 +2209,9 @@ check('pickMotisVehicle does not match bus 7 to 17 or 7E', (() => {
   ], { label: '7', dep, vehicle: 'bus' });
   return hit && hit.motisTripId === '7';
 })());
-check('pickMotisHopRow matches train number not a later same-label hop', (() => {
+check('pickMotisVehicle matches train number not a later same-label hop', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
-  const hit = Lib.pickMotisHopRow([
+  const hit = Lib.pickMotisVehicle([
     { label: 'S40', trainNumber: '4343', dep, shape: [[47.465, 19.021], [47.183, 18.424]] },
     { label: 'S40', trainNumber: '4350', dep: dep + 3600, shape: [[47.46, 19.15], [47.18, 18.42]] },
   ], { label: 'S40', trainNumber: '4343', dep, vehicle: 'rail' });
@@ -2294,9 +2243,6 @@ check('Leaflet loads from the card folder, not a CDN',
   !src.includes('unpkg.com')
   && src.includes("new URL('leaflet/leaflet.js', ASSET_BASE)")
   && src.includes("new URL('leaflet/leaflet.css', ASSET_BASE)"));
-check('GTFS indexes revalidate instead of bypassing the HTTP cache',
-  (src.match(/cache: 'no-cache'/g) || []).length === 1
-  && (src.match(/BkkLib\._fetchIndexBytes\(url\)/g) || []).length === 2);
 check('hop map polyline is unclipped SVG on the overlay pane',
   src.includes('noClip: true')
   && src.includes("pane: 'overlayPane'")
@@ -2500,37 +2446,6 @@ check('hop map bus shape uses FUTAR trip-details polyline',
   && src.includes('packed && packed.polyline'));
 check('decodePolyline accepts a FUTAR polyline object',
   Lib.decodePolyline({ points: '_p~iF~ps|U' }).length >= 1);
-check('clipShapeToHop drops the prefix before origin', (() => {
-  const shape = [
-    [47.463629, 19.149626],
-    [47.468643, 19.087938],
-    [47.464321, 19.020634],
-    [47.183082, 18.423996],
-  ];
-  const details = {
-    sts: [
-      { stopId: 'BKK_KK', shapeDistTraveled: 0 },
-      { stopId: 'BKK_FERENC', shapeDistTraveled: 5499 },
-      { stopId: 'BKK_005501024', shapeDistTraveled: 11301 },
-      { stopId: 'BKK_005503269', shapeDistTraveled: 74479 },
-    ],
-    stops: {
-      BKK_KK: { id: 'BKK_KK', name: 'Kőbánya-Kispest', lat: 47.463629, lon: 19.149626 },
-      BKK_FERENC: { id: 'BKK_FERENC', name: 'Ferencváros', lat: 47.468643, lon: 19.087938 },
-      BKK_005501024: { id: 'BKK_005501024', name: 'Budapest-Kelenföld', lat: 47.464321, lon: 19.020634 },
-      BKK_005503269: { id: 'BKK_005503269', name: 'Székesfehérvár', lat: 47.183082, lon: 18.423996 },
-    },
-  };
-  const clipped = Lib.clipShapeToHop(
-    shape,
-    details,
-    { id: 'BKK_005501024', name: 'Budapest-Kelenföld' },
-    { id: 'BKK_005503269', key: 'székesfehérvár', name: 'Székesfehérvár' },
-  );
-  if (!clipped || clipped.length < 2) return false;
-  const lons = clipped.map((pt) => pt[1]);
-  return Math.max(...lons) < 19.08 && clipped[0][1] < 19.05;
-})());
 check('pickFullerShape keeps the longer Veszprem branch', (() => {
   const motis = [[47.4989, 19.0250], [47.4643, 19.0206], [47.1833, 18.4250]];
   const futar = [[47.4989, 19.0250], [47.4643, 19.0206], [47.1833, 18.4250], [47.0960, 17.9090]];
@@ -2588,34 +2503,6 @@ check('combineHopShapes keeps MOTIS inbound from Deli on 9068', (() => {
   const combined = Lib.combineHopShapes(motis, futar, true, futar);
   return combined[0][0] > 47.49 && combined[combined.length - 1][1] === 17.9090;
 })());
-check('clipShapeFromBoard drops G43 inbound before Kelenfold', (() => {
-  const futar = [
-    [47.463, 19.1498], [47.464, 19.08], [47.4651, 19.0208], [47.35, 18.8], [47.185, 18.414],
-  ];
-  const clipped = Lib.clipShapeFromBoard(futar, [47.46445, 19.0219]);
-  return clipped[0][1] < 19.05 && clipped[clipped.length - 1][1] < 18.5;
-})());
-check('clipShapeFromBoard keeps Veszprem tail after Kelenfold', (() => {
-  const full = [
-    [47.4989, 19.0250],
-    [47.4643, 19.0206],
-    [47.1833, 18.4250],
-    [47.0960, 17.9090],
-  ];
-  const clipped = Lib.clipShapeFromBoard(full, [47.46445, 19.0219]);
-  return clipped[0][1] < 19.05
-    && clipped[clipped.length - 1][1] === 17.9090;
-})());
-check('clipShapeFromBoard keeps full 2B if board is 2km off the tracks', (() => {
-  const full = [
-    [47.5144, 19.0469],
-    [47.469814, 19.082997],
-    [47.452218, 19.09187],
-    [47.4330, 19.1050],
-  ];
-  const clipped = Lib.clipShapeFromBoard(full, [47.4858, 19.1071]);
-  return clipped.length === full.length && clipped[0][0] === 47.5144;
-})());
 check('clipShapeToBoardDest keeps 2B hop Mester to Timot, drops Jaszai and Pacsirtatelep', (() => {
   const full = [
     [47.5144, 19.0469],
@@ -2646,13 +2533,6 @@ check('keepsFullLineShape is tram/metro/trolley/bus/coach/rail',
   && Lib.keepsFullLineShape({ vehicle: 'bus', label: '8E' })
   && Lib.keepsFullLineShape({ type: 'BUS' })
   && Lib.keepsFullLineShape({ vehicle: 'coach' }));
-check('tram hop map does not clip origin to dest',
-  src.includes('keepsFullLineShape')
-  && src.includes('stop-to-stop hop cut')
-  && src.includes('Published line stays whole')
-  && src.includes('clipRideShape')
-  && /if \(BkkLib\.keepsFullLineShape\(row\)\) return pts/.test(src)
-  && !/const railHop = kind === 'rail'/.test(src));
 check('clipShapeToBoardDest refuses a collapsed dest geocode', (() => {
   const full = [
     [47.5144, 19.0469],
@@ -2666,40 +2546,6 @@ check('clipShapeToBoardDest refuses a collapsed dest geocode', (() => {
     [47.4699, 19.0830],
   );
   return clipped.length === full.length && clipped[0][0] === 47.5144;
-})());
-check('clipShapeFromBoardToward drops Kobanya on G43 Kelenfold to Szekesfehervar', (() => {
-  const line = [
-    [47.183, 18.425],
-    [47.31, 18.72],
-    [47.46445, 19.0219],
-    [47.464, 19.08],
-    [47.464, 19.150],
-  ];
-  const clipped = Lib.clipShapeFromBoardToward(
-    line,
-    [47.46445, 19.0219],
-    [47.1853, 18.4142],
-  );
-  const lons = clipped.map((pt) => pt[1]);
-  return clipped.length >= 2
-    && Math.max(...lons) < 19.05
-    && clipped[0][1] < 18.5
-    && clipped[clipped.length - 1][1] < 19.05;
-})());
-check('clipShapeFromBoardToward keeps Veszprem tail on 9068 past Szekesfehervar', (() => {
-  const full = [
-    [47.4989, 19.0250],
-    [47.4643, 19.0206],
-    [47.1833, 18.4250],
-    [47.0960, 17.9090],
-  ];
-  const clipped = Lib.clipShapeFromBoardToward(
-    full,
-    [47.46445, 19.0219],
-    [47.1853, 18.4142],
-  );
-  return clipped[0][1] < 19.05
-    && clipped[clipped.length - 1][1] === 17.9090;
 })());
 check('clipRideShape tram keeps full 2B line', (() => {
   const full = [
@@ -2841,10 +2687,7 @@ check('planner in-card minutesAfter is a select',
   String(plan.shadowRoot.querySelectorAll('#pmin option').length));
 check('look-ahead is a compact select row',
   !!plan.shadowRoot.querySelector('.horizon #preset')
-  && plan.shadowRoot.querySelector('.horizon > #pmin')
-  && /\.horizon \{[^}]*flex-direction:\s*row/.test(src)
-  && !/\.horizon-bar/.test(src)
-  && !/\.horizon \.chips \{[^}]*flex-wrap:\s*wrap/.test(src));
+  && plan.shadowRoot.querySelector('.horizon > #pmin'));
 check('planner picked stops are buttons',
   plan.shadowRoot.querySelector('#pstop')
   && plan.shadowRoot.querySelector('#pstop').tagName === 'BUTTON'
@@ -3107,14 +2950,14 @@ function encodePts(pts) {
 const poly856 = encodePts(ic856);
 const polyG43 = encodePts([[47.186, 18.434], [47.478, 19.12]]);
 Lib.mavIndex = async () => ({ n: { 856: 0 }, l: { G43: 1 }, p: [poly856, polyG43] });
-const mavIc = await Lib.mavShapeForRow({ label: 'IC 856 TÓPART', trainNumber: '856', vehicle: 'rail' });
-check('mavShapeForRow IC 856 is Déli to Nagykanizsa',
+const mavIc = ((await Lib.mavRouteForRow({ label: 'IC 856 TÓPART', trainNumber: '856', vehicle: 'rail' }, '', '')) || {}).shape || [];
+check('mavRouteForRow IC 856 is Déli to Nagykanizsa',
   mavIc.length === 3
   && Math.abs(mavIc[0][1] - 19.025) < 1e-3
   && Math.abs(mavIc[mavIc.length - 1][1] - 16.987) < 1e-2,
   JSON.stringify(mavIc));
-const mavG43 = await Lib.mavShapeForRow({ label: 'G43', vehicle: 'rail' });
-check('mavShapeForRow G43 uses the line code',
+const mavG43 = ((await Lib.mavRouteForRow({ label: 'G43', vehicle: 'rail' }, '', '')) || {}).shape || [];
+check('mavRouteForRow G43 uses the line code',
   mavG43.length === 2 && Math.abs(mavG43[0][1] - 18.434) < 1e-3,
   JSON.stringify(mavG43));
 Lib.mavIndex = origMavIndex;
@@ -3261,11 +3104,15 @@ Lib.mavIndex = origMavIndex;
   const realWarn = console.warn;
   console.warn = (...args) => { warns.push(args.map(String).join(' ')); };
   try {
+    Lib._elviraDownUntil = 0;
+    Lib._elviraWarned = false;
     let answer = { departures: [], error: 'elvira_unavailable', detail: 'HTTP 503' };
+    let asked = 0;
     const hass = {
       states: {},
       language: 'en',
-      connection: { sendMessagePromise: async () => ({ context: {}, response: answer }) },
+      services: { hungarian_transport: { elvira_between: {} } },
+      connection: { sendMessagePromise: async () => { asked += 1; return { context: {}, response: answer }; } },
     };
     const poll = () => Lib.elviraBetween(hass, 'BKK_005510009', 'BKK_005501024', 60, 'Szeged');
     const first = await poll();
@@ -3274,6 +3121,8 @@ Lib.mavIndex = origMavIndex;
       Array.isArray(first) && first.length === 0 && Array.isArray(second) && second.length === 0
       && warns.length === 1 && /elvira_unavailable \(HTTP 503\)/.test(warns[0]),
       JSON.stringify(warns));
+    check('an error payload is an answer: no backoff, the next poll still asks',
+      asked === 2 && Lib._elviraDownUntil === 0, JSON.stringify({ asked, until: Lib._elviraDownUntil }));
     answer = { departures: [{ label: 'IC 712' }] };
     const back = await poll();
     answer = { departures: [], error: 'elvira_unavailable', detail: 'TimeoutError' };
@@ -3287,22 +3136,11 @@ Lib.mavIndex = origMavIndex;
     await poll();
     check('each station pair has its own outage',
       warns.length === 3, JSON.stringify(warns));
-    const throwing = {
-      states: {},
-      language: 'en',
-      connection: { sendMessagePromise: async () => { throw { code: 'service_validation_error', message: 'not loaded' }; } },
-    };
-    const pollThrowing = (destId) => Lib.elviraBetween(throwing, 'BKK_005510009', destId, 60, '');
-    const thrown = await pollThrowing('BKK_005513912');
-    await pollThrowing('BKK_005513912');
-    check('a failing service call warns once per outage too',
-      thrown.length === 0 && warns.length === 4 && /not loaded|object/.test(warns[3]), JSON.stringify(warns));
-    await pollThrowing('BKK_005517228');
-    check('error payload and failing call are the same outage',
-      warns.length === 4, JSON.stringify(warns));
   } finally {
     console.warn = realWarn;
     Lib._elviraOutages.clear();
+    Lib._elviraDownUntil = 0;
+    Lib._elviraWarned = false;
   }
 }
 
@@ -3714,12 +3552,12 @@ Lib.mavIndex = origMavIndex;
 /* Trains Transitous misses still get a route: FUTÁR's trip details. */
 {
   const keep = {};
-  ['mavShapeForRow', 'motisShapeForHop', 'futarTripShape', 'tripHopStops', 'stopArea', 'transitousStopRef']
+  ['mavRouteForRow', 'motisShapeForHop', 'futarTripShape', 'tripHopStops', 'stopArea', 'transitousStopRef']
     .forEach((k) => { keep[k] = Lib[k]; });
   const futarLine = [[47.2300, 16.6200], [47.1836, 18.4247], [47.3157, 18.7880], [47.4643, 19.0206], [47.4989, 19.0250]];
   let futarCalls = 0;
   let motisResult = { shape: [], board: [47.1836, 18.4247], dest: [47.4643, 19.0206], coversHead: false, hit: null };
-  Lib.mavShapeForRow = async () => [];
+  Lib.mavRouteForRow = async () => null;
   Lib.motisShapeForHop = async () => motisResult;
   Lib.futarTripShape = async () => { futarCalls += 1; return futarLine; };
   Lib.tripHopStops = async () => ({ board: [47.1836, 18.4247], alight: [47.4643, 19.0206] });
@@ -3944,10 +3782,10 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   const { refreshSeconds } = await import('./src/config.js');
   check('refresh that is not a number falls back to 45 s',
     refreshSeconds('30s') === 45 && refreshSeconds(undefined) === 45 && refreshSeconds(-5) === 45 && refreshSeconds('') === 45);
-  check('refresh is clamped to 15 s .. 1 h',
-    refreshSeconds(5) === 15 && refreshSeconds('60') === 60 && refreshSeconds(99999) === 3600);
+  check('refresh is clamped to 20 s (the shared board lifetime) .. 1 h',
+    refreshSeconds(5) === 20 && refreshSeconds(15) === 20 && refreshSeconds('60') === 60 && refreshSeconds(99999) === 3600);
   check('the card polls with the parsed refresh, one run at a time',
-    /refreshSeconds\(cfg\.refresh\)/.test(src) && /if \(busy\) return;/.test(src) && /\}, every\);/.test(src));
+    /refreshSeconds\(cfg\.refresh\)/.test(src) && /if \(pollRun\.busy\) return;/.test(src) && /\}, every\);/.test(src));
 }
 {
   /* Two opens racing the first Leaflet load leave one overlay, and it closes. */
@@ -4803,8 +4641,12 @@ const deferred = () => {
     [47.02, 19.02], [47.0003, 19.0101], [47.0003, 19.0049],
   ];
   const later = Lib.sliceShapeBetween(lasso, lasso[4], lasso[1]);
+  const end = later[later.length - 1];
   check('a line that passes the destination twice takes the pass after the boarding stop',
-    later.length === 2 && same(later[0], lasso[4]) && same(later[1], lasso[5]), JSON.stringify(later));
+    later.length === 3 && same(later[0], lasso[4]) && same(later[1], lasso[5])
+    && end[0] === 47.0003 && Math.abs(end[1] - 19.01) < 1e-9
+    && !later.some((pt) => [0, 1, 2, 3].some((i) => same(pt, lasso[i]))),
+    JSON.stringify(later));
   const keepShape = Lib.gtfsShape;
   Lib.gtfsShape = async () => loop;
   const journey = { legs: [{ walk: false, label: '78', gtfs: { shape: { dir: 'x', id: 1 }, stops: [loop[30], loop[5]], from: 0, to: 1 } }] };
@@ -4985,7 +4827,7 @@ const deferred = () => {
   const left = Array.from(Lib._boards.keys());
   Date.now = realNow;
   check('an expired departure board leaves the cache on the next insert',
-    both === 2 && left.length === 1 && left[0] === 'S3|60', JSON.stringify({ both, left }));
+    both === 2 && left.length === 1 && left[0] === 'key:k|S3|60', JSON.stringify({ both, left }));
   Lib._boards.clear();
   Lib.fetch = keepFetch;
 }
@@ -5033,6 +4875,1113 @@ const deferred = () => {
   c._closeVehicleMap();
   check('the map notice button is translated', huOk === 'Rendben' && enOk === 'OK', JSON.stringify({ huOk, enOk }));
   c.remove();
+}
+
+/* ---- Fourth review: planner and route library ---- */
+
+const settleTicks = async (n) => {
+  for (let i = 0; i < (n || 6); i++) await new Promise((r) => setTimeout(r, 0));
+};
+const shapeLen = (pts) => pts.reduce((m, p, i) => (i ? m + Lib.haversineMeters(pts[i - 1], p) : 0), 0);
+
+/* Rides on real city shapes (the live index's polylines) are cut between
+   their two stops: the hop, not the whole line nor a detour round it. */
+{
+  const cases = [
+    { line: 'Miskolc ZOO', from: 'Papírgyár', to: 'Majális park', a: [48.11425, 20.66282], b: [48.11561, 20.65928], straight: 303,
+      enc: 'khsdHwje}Bt@j@aDvCZxB_f@lcBkArAo@rEy@^aCeAmA\\HvCnAzGcArIsIZ{CsA_AyBi@gGoBwBeKRTr@' },
+    { line: 'Miskolc 29', from: 'Egyetemi kollégiumok', to: 'Tanulmányi épületek', a: [48.07844, 20.77096], b: [48.08124, 20.76697], straight: 430,
+      enc: 'qwqdHayo}BDxA~Ad@EuKl^uBjA|AZ`P|X}@xFnHfAXz@YxDoHpEo@ZsD{FeG_AkFBeCjD{NpEqKdCgMBgCc@wBgA}AgIAwAmBGiDhCo]c@gFeBqG^oBbAe@vDhDbAJdAoAFwBmAoBiDGuBaAkIyKkA{Ca@gEU{b@x@cObDmKzBoDfDwCvKmDlNsBxHmHlWmEPrA{DlNkApGIjD}AbBwHy@aBbENtArMrN|CWmCsYj@kFfCyL`BqElBw@bD|@l@kGhEkRfDuH`@eG}ElDkI_Cyd@dEuBbB}E`MsChCyb@zDgDvAwD|FqUvBwA`AbFzQtBvEzEtGZtAsLhIoA?yGoHeCeEu@l@HlD[d@kCa@o@kA{@Q}YrB~D|iAtKpfCf@rBj@`L\\h@jBQ]cM' },
+    { line: 'Pécs 1', from: 'Vásártér', to: 'Nagy Imre út', a: [46.05033, 18.21308], b: [46.04713, 18.21428], straight: 368,
+      enc: 'eedxGuh_nBAn@tBJEyEv@kFbEuDfAaFwBgk@{F`AkPsh@iAaFS_E|N_EtPmB|ShGpEEdDmCrIeO`D_CnpAc[uA{IuAwCyDcYYwD\\yGWyE~ZeLzMhDeFn]m@tVy@nCmAtAqTfJoPpD}EZI`@iFdBam@xNaD~B{IvNyCvCuEH}SiGuPlB}N~Dz@`IzNne@f@lEdHkAzB~f@IpDmAfE}FlEPlIUr@gAVu@w@' },
+  ];
+  cases.forEach((c) => {
+    const shape = Lib.validMapShape(Lib.decodePolyline(c.enc));
+    const ride = Lib.sliceShapeBetween(shape, c.a, c.b);
+    const m = shapeLen(ride);
+    check(`${c.line} ${c.from} → ${c.to} is drawn as its own hop, not the whole line`,
+      m >= c.straight - 1 && m < 1.5 * c.straight + 100 && m < shapeLen(shape) / 3
+      && Lib.haversineMeters(ride[0], c.a) < 40 && Lib.haversineMeters(ride[ride.length - 1], c.b) < 40,
+      JSON.stringify({ ride: Math.round(m), line: Math.round(shapeLen(shape)) }));
+  });
+  const seg = [[47.0, 19.0], [47.0, 19.02]];
+  const piece = Lib.sliceShapeBetween(seg, [47.0001, 19.005], [47.0001, 19.008]);
+  check('two stops on one segment give that piece, not the whole segment',
+    piece.length === 2 && piece[0][0] === 47.0 && Math.abs(piece[0][1] - 19.005) < 1e-9
+    && Math.abs(piece[1][1] - 19.008) < 1e-9,
+    JSON.stringify(piece));
+  /* Out on one side of the street, back on the other, ending where it
+     started: the ride between two stops of the way back is that stretch. */
+  const outBack = [[47.0, 19.0], [47.0, 19.01], [47.0, 19.02], [47.0002, 19.02], [47.0002, 19.01], [47.0002, 19.0001]];
+  const back = Lib.sliceShapeBetween(outBack, [47.0003, 19.012], [47.0003, 19.006]);
+  check('an out-and-back line whose ends meet rides the way back, not round the line',
+    shapeLen(back) < 600 && back.every((pt) => pt[0] === 47.0002),
+    JSON.stringify({ m: Math.round(shapeLen(back)), back }));
+}
+
+/* City stops carry their coordinates and town, so a pick is planned from
+   that stop, not from a geocode of its bare name. */
+{
+  const keep = {};
+  ['_fetchIndexBytes', 'cityIndex', 'transitousFetch', 'searchStops', 'searchStopsTransitous', 'addTransitousVolanStops']
+    .forEach((k) => { keep[k] = Lib[k]; });
+  const raw = {
+    v: 29,
+    o: [['tatabanya', 'Tatabánya — T-Busz'], ['pecs', 'Pécs — Tüke Busz']],
+    s: [
+      ['tatabanya:SP1', 'Fő tér', '1', 0],
+      ['tatabanya:SP2', 'Kórház', '2', 0],
+      ['pecs:1', 'Autóbusz-állomás', '1', 1],
+    ],
+    g: [4758400, 1839400, 4757000, 1840000, 4607000, 1822000],
+    c: [['1111111', '20000101', '20991231']],
+    t: [[0, '1', [0, 1], [600, 610]]],
+  };
+  Lib._fetchIndexBytes = async () => ({ status: 200, bytes: new TextEncoder().encode(JSON.stringify(raw)) });
+  const idx = await Lib._loadGtfsIndex('http://x/city-index.json?v=20260101', 'errCityHttp', 'errCityGunzip');
+  Lib._fetchIndexBytes = keep._fetchIndexBytes;
+  check('a loaded index lets go of its raw stop rows and finds a stop by id',
+    idx.s === null && idx.stops.length === 3 && Lib.gtfsStopById(idx, 'pecs:1').name === 'Autóbusz-állomás');
+  const tata = Lib.opIx(idx, 'tatabanya');
+  const hits = Lib.gtfsSearchStops(idx, 'fő tér', tata);
+  check('a city search hit has the stop’s coordinates and town',
+    hits.length === 1 && hits[0].lat === 47.584 && hits[0].lon === 18.394 && hits[0].area === 'Tatabánya',
+    JSON.stringify(hits));
+  const reach = Lib.gtfsReachableDests(idx, { id: 'tatabanya:SP1', name: 'Fő tér' }, tata);
+  check('a reachable city destination has coordinates and town',
+    reach.dests.length === 1 && reach.dests[0].name === 'Kórház' && reach.dests[0].lat === 47.57
+    && reach.dests[0].area === 'Tatabánya' && reach.dests[0].key === Lib.norm('Kórház'),
+    JSON.stringify(reach.dests));
+  Lib.cityIndex = async () => idx;
+  const bkk = { id: 'BKK_F01020', name: 'Kossuth Lajos utca' };
+  const [placed, same] = await Lib.withGtfsCoords([{ id: 'tatabanya:SP1', name: 'Fő tér' }, bkk]);
+  check('a city stop picked without coordinates gets them from its index',
+    placed.lat === 47.584 && placed.lon === 18.394 && placed.area === 'Tatabánya' && same === bkk,
+    JSON.stringify(placed));
+  Lib._geocodeCache.clear();
+  Lib._geocodeEmptyAt.clear();
+  const calls = [];
+  Lib.transitousFetch = async (path, params) => {
+    calls.push({ path, params });
+    if (path === '/api/v5/plan') return { itineraries: [] };
+    return [{ name: 'Fő tér', lat: 47.5414, lon: 19.0466, type: 'STOP', id: 'hu-bkk_F01234' }];
+  };
+  await Lib.planJourney('', { id: 'tatabanya:SP1', name: 'Fő tér' },
+    { id: 'BKK_005501024', name: 'Kelenföld', lat: 47.4643, lon: 19.0206 }, null, {});
+  const planned = calls.find((c) => c.path === '/api/v5/plan');
+  check('Tatabánya’s "Fő tér" is planned from Tatabánya, not geocoded into Budapest',
+    !!planned && planned.params.fromPlace === '47.584,18.394' && !calls.some((c) => c.path === '/api/v1/geocode'),
+    JSON.stringify(calls.map((c) => `${c.path} ${c.params.fromPlace || c.params.text}`)));
+  Lib.searchStopsTransitous = async () => [];
+  Lib.addTransitousVolanStops = async () => {};
+  Lib.searchStops = async () => [
+    { id: 'tatabanya:SP1', name: 'Fő tér', label: 'Fő tér (Tatabánya)', city: true },
+    { id: 'BKK_F01234', name: 'Fő tér', lat: 47.5414, lon: 19.0466 },
+  ];
+  const picker = await Lib.searchPlannerStops('', 'fő tér');
+  const inTata = picker.find((h) => h.id === 'tatabanya:SP1');
+  check('Budapest’s "Fő tér" does not swallow Tatabánya’s in the origin search',
+    picker.length === 2 && !!inTata && inTata.lat === 47.584 && inTata.area === 'Tatabánya',
+    JSON.stringify(picker.map((h) => [h.id, h.lat])));
+  Object.assign(Lib, keep);
+}
+
+/* One destination row per place and town. */
+{
+  const gyor = { key: 'győr, autóbusz-állomás', name: 'Győr, autóbusz-állomás', id: 'hkir_100' };
+  const pecs = { key: 'autóbusz-állomás', name: 'Autóbusz-állomás', id: 'pecs:1' };
+  const two = Lib.destHitsForQuery([gyor, pecs], '', []);
+  check('Pécs’s "Autóbusz-állomás" stays its own destination beside Győr’s',
+    two.length === 2 && two[0].id === 'hkir_100' && two[1].id === 'pecs:1' && two[1].routeKeys.join() === pecs.key,
+    JSON.stringify(two.map((h) => [h.id, h.key])));
+  const fo = Lib.destHitsForQuery([], 'fő tér', [
+    { id: 'tatabanya:SP1', name: 'Fő tér', label: 'Fő tér (Tatabánya)' },
+    { id: 'BKK_F01234', name: 'Fő tér' },
+  ]);
+  check('Budapest’s "Fő tér" does not join "Fő tér (Tatabánya)"',
+    fo.length === 2 && fo[0].id === 'tatabanya:SP1' && fo[1].id === 'BKK_F01234',
+    JSON.stringify(fo.map((h) => h.id)));
+  const szeged = Lib.destHitsForQuery([
+    { key: 'a', name: 'Londoni körút (Bakay Nándor utca)', id: 'szeged:1', lat: 46.25482, lon: 20.13882 },
+    { key: 'b', name: 'Londoni körút (Kálvária sugárút)', id: 'szeged:2', lat: 46.25192, lon: 20.13861 },
+    { key: 'c', name: 'Londoni körút', id: 'szeged:3', lat: 46.25199, lon: 20.13797 },
+  ], '', []);
+  check('Szeged’s cross streets keep two "Londoni körút" stops apart, the bare name joins the pole beside it',
+    szeged.length === 2 && szeged[0].routeKeys.join() === 'a' && szeged[1].routeKeys.join() === 'b,c',
+    JSON.stringify(szeged.map((h) => h.routeKeys)));
+  check('two cross streets of one town are two stops, a bare name may be either',
+    !Lib.nameEq('Szeged, Londoni k\u00f6r\u00fat (Bakay N\u00e1ndor utca)', 'Szeged, Londoni k\u00f6r\u00fat (K\u00e1lv\u00e1ria sug\u00e1r\u00fat)')
+    && !Lib.nameEq('Londoni k\u00f6r\u00fat (Bakay N\u00e1ndor utca)', 'Londoni k\u00f6r\u00fat (K\u00e1lv\u00e1ria sug\u00e1r\u00fat)')
+    && Lib.nameEq('Londoni k\u00f6r\u00fat', 'Londoni k\u00f6r\u00fat (Bakay N\u00e1ndor utca)'));
+  check('a cross street in brackets is part of the stop, not its town',
+    Lib.stopTownKey({ id: 'szeged:1', name: 'Londoni körút (Bakay Nándor utca)' }) === 'szeged'
+    && Lib.stopTownKey({ id: 'x', name: 'Fő tér', label: 'Fő tér (Tatabánya)' }) === 'tatabanya'
+    && Lib.stopTownKey({ id: 'volan-gyor:hkir_1', name: 'Pinty utca' }) === 'gyor');
+}
+
+/* The origin search: an address or place gives way only to a stop of its
+   own name and place, or of its town; feeds’ namesakes far apart stay two. */
+{
+  const kept = Lib.collapseSameNameStops([
+    { id: 'BKK_F00001', name: 'Kossuth Lajos utca', lat: 47.4935, lon: 19.0603 },
+    {
+      id: 'geo:47.191000,18.410000', name: 'Kossuth Lajos utca 12', label: 'Kossuth Lajos utca 12 (Székesfehérvár)',
+      lat: 47.191, lon: 18.41, kind: 'address',
+    },
+    {
+      id: 'node/[5]', name: 'Vörösmarty Színház', label: 'Vörösmarty Színház (Székesfehérvár)',
+      lat: 47.19, lon: 18.41, kind: 'place',
+    },
+  ]);
+  check('a Budapest stop does not hide an address or a place in Székesfehérvár',
+    kept.length === 3, JSON.stringify(kept.map((h) => h.id)));
+  const own = Lib.collapseSameNameStops([
+    { id: 'BKK_F00001', name: 'Kossuth Lajos utca', lat: 47.4935, lon: 19.0603 },
+    {
+      id: 'geo:47.493600,19.060400', name: 'Kossuth Lajos utca', label: 'Kossuth Lajos utca (Budapest)',
+      lat: 47.4936, lon: 19.0604, kind: 'address',
+    },
+  ]);
+  check('an address of the stop’s own name and place goes into that stop',
+    own.length === 1 && own[0].id === 'BKK_F00001', JSON.stringify(own.map((h) => h.id)));
+  const apart = Lib.collapseSameNameStops([
+    { id: 'BKK_F01234', name: 'Fő tér', lat: 47.5414, lon: 19.0466 },
+    { id: 'tatabanya:SP1', name: 'Fő tér', lat: 47.584, lon: 18.394 },
+  ]);
+  check('two feeds’ "Fő tér" 50 km apart stay two stops', apart.length === 2, JSON.stringify(apart.map((h) => h.id)));
+  check('a bus station in brackets is not a railway hub',
+    !Lib.isRailHubName('Könyvtár (Buszpályaudvar)') && Lib.isRailHubName('Kaposvár vasútállomás'));
+}
+
+/* A trip's destination stop: a town by whole word, any other name exactly,
+   and with coordinates the namesake in the right town. */
+{
+  const st = (name, lat, lon) => ({ key: Lib.norm(name), fold: Lib.fold(name), name, lat, lon });
+  const korhaz = [Lib.norm('Kórház'), Lib.fold('Kórház')];
+  check('"Kórház" is that stop, not "Kórház tér" nor "Megyei Kórház"',
+    !Lib.volanDestHit(st('Kórház tér'), ...korhaz)
+    && !Lib.volanDestHit(st('Megyei Kórház'), ...korhaz)
+    && Lib.volanDestHit(st('Kórház'), ...korhaz));
+  const gyorTer = [Lib.norm('Győr, Kossuth tér'), Lib.fold('Győr, Kossuth tér')];
+  check('one town’s "Kossuth tér" is not another’s',
+    !Lib.volanDestHit(st('Sopron, Kossuth tér'), ...gyorTer) && Lib.volanDestHit(st('Győr, Kossuth tér'), ...gyorTer));
+  const near = { lat: 47.687, lon: 17.635 };
+  check('a "Kossuth tér" without a town is the one by the picked coordinates',
+    !Lib.volanDestHit(st('Sopron, Kossuth tér', 47.685, 16.59), 'kossuth tér', 'kossuth ter', near)
+    && Lib.volanDestHit(st('Győr, Kossuth tér', 47.688, 17.634), 'kossuth tér', 'kossuth ter', near));
+  const day = Lib.volanDay(0);
+  const idx = {
+    c: [['1111111', '20000101', '20991231']],
+    ops: [],
+    byNum: new Map(),
+    byKey: new Map(),
+    stops: ['Budapest, Népliget', 'Tata, Kórház tér', 'Tata, autóbusz-állomás']
+      .map((name, i) => ({ i, op: 0, id: `hkir_${i + 1}`, num: String(i + 1), name, key: Lib.norm(name), fold: Lib.fold(name) })),
+    t: [[0, '1000', [0, 1, 2], [day.mins + 5, day.mins + 50, day.mins + 55]]],
+  };
+  const toTown = Lib.gtfsDepartures(idx, 'hkir_1', { key: 'tata', name: 'Tata' }, 'Budapest, Népliget', null, '#F9AB13', '#000000', 'coach', 'COACH', 120);
+  const toKorhaz = Lib.gtfsDepartures(idx, 'hkir_1', { key: Lib.norm('Kórház'), name: 'Kórház' }, 'Budapest, Népliget', null, '#F9AB13', '#000000', 'coach', 'COACH', 120);
+  check('a town of the index is any of its stops, a stop name is not a part of another',
+    toTown.length === 1 && toTown[0].travel === 45 && toKorhaz.length === 0,
+    JSON.stringify({ town: toTown.map((r) => r.travel), korhaz: toKorhaz.length }));
+}
+
+/* Stop history: a failed read is not kept, and every write reads the
+   server again, so two devices add up instead of overwriting each other. */
+{
+  const store = new Map();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    },
+  });
+  const localKey = `${Lib.STOP_HISTORY_KEY}:u4`;
+  store.set(localKey, JSON.stringify([{ id: 'LOCAL', name: 'Local copy', n: 1, t: 1 }]));
+  let server = [{ id: 'OTHER', name: 'Other device', n: 3, t: Date.now() - 1000 }];
+  let down = true;
+  let reads = 0;
+  const writes = [];
+  const hass = {
+    connection: { four: 1 },
+    user: { id: 'u4' },
+    callWS: async (msg) => {
+      if (msg.type === 'frontend/get_user_data') {
+        reads += 1;
+        if (down) throw new Error('offline');
+        return { value: server };
+      }
+      if (msg.type === 'frontend/set_user_data') {
+        writes.push(msg.value);
+        server = msg.value;
+      }
+      return null;
+    },
+  };
+  Lib._stopHistory = null;
+  const first = await Lib.loadStopHistory(hass);
+  down = false;
+  const second = await Lib.loadStopHistory(hass);
+  check('a failed history read shows the browser copy and is asked again',
+    first.length === 1 && first[0].id === 'LOCAL' && second.some((e) => e.id === 'OTHER') && reads === 2,
+    JSON.stringify({ first: first.map((e) => e.id), second: second.map((e) => e.id), reads }));
+  server = server.concat([{ id: 'LATER', name: 'Picked on the phone', n: 1, t: Date.now() }]);
+  await Lib.recordStop(hass, { id: 'MINE', name: 'Picked here' });
+  const sent = writes[writes.length - 1] || [];
+  check('a pick reads the server again and keeps the other device’s stops',
+    writes.length === 1 && ['OTHER', 'LATER', 'MINE', 'LOCAL'].every((id) => sent.some((e) => e.id === id))
+    && sent.find((e) => e.id === 'OTHER').n === 3,
+    JSON.stringify(sent.map((e) => [e.id, e.n])));
+  down = true;
+  await Lib.recordStop(hass, { id: 'OFFLINE', name: 'Picked offline' });
+  check('when the server cannot be read, a pick stays in the browser and the server copy is left alone',
+    writes.length === 1 && JSON.parse(store.get(localKey)).some((e) => e.id === 'OFFLINE'),
+    JSON.stringify({ writes: writes.length }));
+  Lib._stopHistory = null;
+  delete globalThis.localStorage;
+}
+
+/* City feed → railway: the station is found for hubs named just
+   "Vasútállomás", only a city stop starts it, and the itinerary has its
+   own times and the vehicles' real termini. */
+{
+  const keep = {};
+  ['cityIndex', 'searchStops', 'elviraBetween', 'volanServiceOk'].forEach((k) => { keep[k] = Lib[k]; });
+  const day = Lib.volanDay(0);
+  const m = day.mins;
+  const szfIdx = {
+    c: [['1111111', '20000101', '20991231']],
+    ops: [{ i: 0, id: 'szekesfehervar', name: 'Székesfehérvár — helyi' }],
+    byNum: new Map(),
+    byKey: new Map(),
+    stops: [
+      ['szekesfehervar:1', 'Kossuth utca', 47.19, 18.41],
+      ['szekesfehervar:2', 'Vasútállomás', 47.1838, 18.4245],
+      ['szekesfehervar:3', 'Palotaváros', 47.2, 18.4],
+    ].map(([id, name, lat, lon], i) => ({ i, op: 0, id, name, key: Lib.norm(name), fold: Lib.fold(name), lat, lon })),
+    t: [[0, '32', [0, 1, 2], [m + 10, m + 20, m + 30]]],
+  };
+  let indexLoads = 0;
+  Lib.cityIndex = async () => { indexLoads += 1; return szfIdx; };
+  const stations = [
+    { id: 'BKK_005503269', name: 'Székesfehérvár', lat: 47.18361, lon: 18.42472 },
+    { id: 'BKK_005503999', name: 'Székesfehérvár-Repülőtér', lat: 47.16, lon: 18.39 },
+  ];
+  Lib.searchStops = async (_k, _q, mode) => (mode === 'mav' ? stations : []);
+  const rideArr = day.base + (m + 20) * 60;
+  const trainDep = rideArr + 16 * 60;
+  const asked = [];
+  Lib.elviraBetween = async (_hass, from, to, _mins, destName) => {
+    asked.push({ from, to, destName });
+    return [{ label: 'IC 900', dep: trainDep, travel: 50, head: 'Budapest-Déli', destHit: true }];
+  };
+  const fromBkk = await Lib.cityRailJourney('', { states: {} }, { id: 'BKK_F01020', name: 'Kossuth Lajos utca' },
+    { id: 'BKK_005501024', name: 'Budapest-Kelenföld' });
+  check('a BKK origin is not matched onto some city feed’s stop',
+    fromBkk === null && indexLoads === 0, JSON.stringify({ fromBkk, indexLoads }));
+  const j = await Lib.cityRailJourney('', { states: {} }, { id: 'szekesfehervar:1', name: 'Kossuth utca' },
+    { id: 'BKK_005501024', name: 'Budapest-Kelenföld' });
+  const bus = j && j.legs.find((leg) => leg.label === '32');
+  const train = j && j.legs.find((leg) => leg.label === 'IC 900');
+  check('a hub called just "Vasútállomás" reaches its railway station and the train',
+    !!train && train.from === 'Székesfehérvár' && asked.length === 1 && asked[0].from === 'BKK_005503269'
+    && asked[0].to === '005501024',
+    JSON.stringify({ legs: j && j.legs.map((l) => l.label || 'walk'), asked }));
+  check('the city ride and the train are headed by their own termini',
+    !!bus && bus.headsign === 'Palotaváros' && bus.to === 'Vasútállomás'
+    && train.headsign === 'Budapest-Déli' && asked[0].destName === '',
+    JSON.stringify({ bus: bus && bus.headsign, train: train && train.headsign }));
+  check('the city→rail itinerary runs from the first bus to the arrival',
+    !!j && j.startMs === bus.startMs && j.endMs === (trainDep + 50 * 60) * 1000
+    && j.durationMin === 76 && bus.waitMin === 0,
+    JSON.stringify(j && { start: j.startMs, end: j.endMs, dur: j.durationMin, wait: bus && bus.waitMin }));
+  const noCoords = { hubName: 'Vasútállomás', hubFold: 'vasutallomas' };
+  Lib.searchStops = async () => stations.map((s) => ({ id: s.id, name: s.name }));
+  const byTown = await Lib.railStationAtHub('', 'Székesfehérvár', noCoords);
+  Lib.searchStops = async () => [{ id: 'BKK_005510001', name: 'Pécs-Külváros' }, { id: 'BKK_005510002', name: 'Pécs' }];
+  const pecs = await Lib.railStationAtHub('', 'Pécs', { hubName: 'Főpályaudvar', hubFold: 'fopalyaudvar' });
+  Lib.searchStops = async () => [{ id: 'BKK_005510009', name: 'Miskolc-Tiszai' }, { id: 'BKK_005510001', name: 'Miskolc-Gömöri' }];
+  const gomori = await Lib.railStationAtHub('', 'Miskolc', { hubName: 'Gömöri pályaudvar', hubFold: 'gomori palyaudvar' });
+  check('a hub’s station by the town when the hub has no word of its own, by the hub’s word in a two-station town',
+    byTown && byTown.id === 'BKK_005503269' && pecs && pecs.name === 'Pécs' && gomori && gomori.name === 'Miskolc-Gömöri',
+    JSON.stringify([byTown && byTown.name, pecs && pecs.name, gomori && gomori.name]));
+  let serviceChecks = 0;
+  Lib.volanServiceOk = (...args) => { serviceChecks += 1; return keep.volanServiceOk(...args); };
+  const fresh = Object.assign({}, szfIdx);
+  const p1 = Lib.cityHubPath(fresh, fresh.stops[0]);
+  const built = serviceChecks;
+  const p2 = Lib.cityHubPath(fresh, fresh.stops[0]);
+  check('a city feed’s ride graph is built once a day, not on every question',
+    built > 0 && serviceChecks === built && p1 && p2 && p2.hubName === p1.hubName && p1.hubLat === 47.1838,
+    JSON.stringify({ built, after: serviceChecks }));
+  Object.assign(Lib, keep);
+}
+
+/* Transitous: an empty geocode is asked again later, a trip's route once,
+   one journey's shapes once, and both ends are looked up together. */
+{
+  const keep = {};
+  ['transitousFetch', 'transitousPlace', 'transitousJourney', 'planPlace', 'fetch', 'cityRailJourney']
+    .forEach((k) => { keep[k] = Lib[k]; });
+  const realNow = Date.now;
+  Lib._geocodeCache.clear();
+  Lib._geocodeEmptyAt.clear();
+  let geocodes = 0;
+  Lib.transitousFetch = async () => { geocodes += 1; return []; };
+  await Lib.transitousGeocode('Sehol sincs');
+  await Lib.transitousGeocode('Sehol sincs');
+  const once = geocodes;
+  const later = realNow() + 11 * 60 * 1000;
+  Date.now = () => later;
+  try {
+    await Lib.transitousGeocode('Sehol sincs');
+  } finally {
+    Date.now = realNow;
+  }
+  check('an empty geocode answer is asked again after ten minutes, not kept for the page',
+    once === 1 && geocodes === 2, JSON.stringify({ once, geocodes }));
+  Lib._geocodeCache.clear();
+  Lib._geocodeEmptyAt.clear();
+  Lib._motisTrips.clear();
+  let trips = 0;
+  const line = encodePts([[47.5, 19.0], [47.51, 19.02], [47.52, 19.05]]);
+  Lib.transitousFetch = async (path) => {
+    if (path === '/api/v5/trip') trips += 1;
+    return { legs: [{ mode: 'BUS', legGeometry: { points: line, precision: 5 } }] };
+  };
+  const journey = { legs: [{ walk: false, label: '7', tripId: 'hu-bkk_T1', fromLat: 47.5, fromLon: 19.0, toLat: 47.52, toLon: 19.05 }] };
+  const fillA = Lib.fillJourneyShapes(journey);
+  const fillB = Lib.fillJourneyShapes(journey);
+  await Promise.all([fillA, fillB]);
+  const again = await Lib.motisTripShape('motis:hu-bkk_T1');
+  check('one journey’s shapes are filled once and a trip’s route is fetched once',
+    fillA === fillB && trips === 1 && again.length === 3 && journey.legs[0].shape.length >= 2,
+    JSON.stringify({ trips, shape: journey.legs[0].shape && journey.legs[0].shape.length }));
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const placing = [];
+  Lib.transitousPlace = async (stop) => { placing.push(stop.name); await gate; return '47.5,19.0'; };
+  Lib.transitousFetch = async () => ({ itineraries: [] });
+  const board = Lib.transitousDepartures({ name: 'A' }, { name: 'B', key: 'b' }, {});
+  await settleTicks(2);
+  const boardBoth = placing.length;
+  Lib.transitousJourney = async () => null;
+  Lib.cityRailJourney = async () => null;
+  Lib.fetch = async () => ({ data: { entry: { plan: { itineraries: [] } } } });
+  const planning = [];
+  Lib.planPlace = async (_k, stop) => { planning.push(stop.name); await gate; return stop.name + '::47.5,19.0'; };
+  const plan = Lib.planJourney('k', { id: 'BKK_A', name: 'A' }, { id: 'BKK_B', name: 'B' }, null, {});
+  await settleTicks(2);
+  const planBoth = planning.length;
+  release();
+  await Promise.all([board, plan]);
+  check('both ends of a board lookup and of a FUTÁR plan are placed at the same time',
+    boardBoth === 2 && planBoth === 2, JSON.stringify({ boardBoth, planBoth }));
+  Object.assign(Lib, keep);
+  check('the helpers nothing calls are gone',
+    ['allowFutarHopShape', 'pickMotisHopRow', 'clipShapeToHop', 'clipShapeFromBoardToward', 'clipShapeFromBoard',
+      'estimatePositionFromSchedule', 'mavShapeForRow', 'sliceShapeMeters', 'pointAlongShape']
+      .every((k) => typeof Lib[k] === 'undefined'));
+}
+
+/* Planner state: hints follow the language, a chosen time's itineraries
+   are not planned again on return, and a new origin drops the old one's
+   destinations at once. */
+{
+  const keep = { reachableDests: Lib.reachableDests };
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'hu' });
+  const hint = (id) => (pc._planEl(id).querySelector('.hint') || {}).textContent || '';
+  const huPick = hint('pdhits');
+  pc.setConfig({ language: 'en' });
+  check('a language change in the editor rewrites the destination hint',
+    huPick === 'Válassz forrás és cél megállót.' && hint('pdhits') === 'Pick an origin and a destination stop.',
+    JSON.stringify([huPick, hint('pdhits')]));
+  pc._loadDests = async () => {};
+  pc.setConfig({ language: 'auto', stopId: 'BKK_A', stopName: 'A' });
+  pc.hass = { states: {}, language: 'hu' };
+  pc._dests = [{ key: 'xaver', name: 'Xavér utca' }];
+  pc._planEl('pdq').value = 'zzz';
+  pc._renderDestHits([], 'mode.empty');
+  pc.hass = { states: {}, language: 'en' };
+  check('a language change keeps a typed query’s "no results", in the new language',
+    hint('pdhits') === 'No stop matches this search.' && !pc._planEl('pdhits').querySelector('.hit'),
+    pc._planEl('pdhits').innerHTML);
+  pc._when = { mode: 'depart', at: Date.now() + 3600000 };
+  pc._rows = [];
+  pc._loadedAt = Date.now();
+  pc._journeyLoading = false;
+  pc._journeys = [{ legs: [] }];
+  pc._journey = null;
+  pc._openJourney = -1;
+  const folded = pc._shouldReloadOnConnect();
+  pc._journeys = [];
+  pc._journeysDone = true;
+  const none = pc._shouldReloadOnConnect();
+  check('a chosen time with its itineraries folded, or none found, is not planned again on return',
+    !folded && !none, JSON.stringify({ folded, none }));
+  pc._when = { mode: 'now', at: 0 };
+  delete pc._loadDests;
+  let release;
+  Lib.reachableDests = () => new Promise((r) => { release = r; });
+  pc._dests = [{ key: 'old', name: 'Old place' }];
+  pc._destRoutes = { old: ['R1'] };
+  pc.setConfig({ language: 'en', stopId: 'BKK_NEW', stopName: 'New' });
+  await settleTicks();
+  const during = { dests: pc._dests.length, routes: Object.keys(pc._destRoutes).length, loading: pc._destsLoading };
+  if (release) release({ dests: [{ key: 'new', name: 'New place' }], destRoutes: { new: ['R2'] } });
+  await settleTicks();
+  check('a new origin from the editor drops the old destinations while its own load',
+    during.dests === 0 && during.routes === 0 && during.loading && pc._dests.length === 1 && pc._dests[0].key === 'new',
+    JSON.stringify(during));
+  Lib.reachableDests = keep.reachableDests;
+  pc.remove();
+}
+
+/* The inline journey map stays across board repaints, is replaced with a
+   new journey and goes with the card; both maps credit their tiles, and
+   Leaflet's controls are laid out inside the shadow root too. */
+{
+  const prevRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  const made = [];
+  const tiles = [];
+  const fits = [];
+  const layer = () => ({ addTo() { return this; } });
+  const L = {
+    map: (el, opts) => {
+      const map = {
+        opts,
+        setView() { return this; },
+        invalidateSize() {},
+        fitBounds(b) { fits.push(b); },
+        removeLayer() {},
+        remove() { this.removed = true; },
+        on() {},
+      };
+      made.push(map);
+      return map;
+    },
+    tileLayer: (url, o) => { tiles.push({ url, o }); return layer(); },
+    polyline: () => layer(),
+    marker: () => layer(),
+    divIcon: (o) => o,
+    latLngBounds: (pts) => ({ pts }),
+  };
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  pc._ensureLeaflet = async () => L;
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'hu', stopId: 'geo:47.19,18.41', stopName: 'A', destKey: 'b', destName: 'B' });
+  const ride = { walk: false, label: '7', color: '009EE3', minutes: 20, from: 'A', to: 'B', shape: [[47.5, 19.0], [47.52, 19.05]] };
+  pc._rows = [];
+  pc._journey = { durationMin: 20, transfers: 0, walkMin: 0, waitMin: 0, legs: [ride] };
+  pc._paint();
+  await settleTicks();
+  pc._paint();
+  pc._showErr(new Error('x'));
+  await settleTicks();
+  check('a board repaint keeps the inline journey map',
+    made.length === 1 && !made[0].removed && !!pc.shadowRoot.querySelector('#pjmap'), String(made.length));
+  check('the inline map credits OpenStreetMap France',
+    tiles.length === 1 && /OpenStreetMap France/.test(tiles[0].o.attribution) && /openstreetmap\.fr\/osmfr/.test(tiles[0].url));
+  pc._journey = { durationMin: 25, transfers: 0, walkMin: 0, waitMin: 0, legs: [Object.assign({}, ride, { minutes: 25 })] };
+  pc._paint();
+  await settleTicks();
+  check('another journey replaces the inline map', made.length === 2 && made[0].removed && !made[1].removed, String(made.length));
+  await pc._openJourneyMap();
+  const big = made[made.length - 1];
+  check('the full journey map is SVG, wheel-zoomable and fitted to the route',
+    made.length === 3 && big.opts.preferCanvas === false && big.opts.scrollWheelZoom === true
+    && fits.length > 0 && /OpenStreetMap France/.test(tiles[tiles.length - 1].o.attribution),
+    JSON.stringify(big.opts));
+  pc._closeVehicleMap();
+  const css = Array.from(pc.shadowRoot.querySelectorAll('style')).map((el) => el.textContent).join('\n');
+  const el = document.createElement('style');
+  el.textContent = css;
+  document.head.appendChild(el);
+  const rules = [...el.sheet.cssRules].filter((r) => r.selectorText);
+  el.remove();
+  /* The value the last rule naming that selector gives, as the cascade would. */
+  const prop = (sel, name) => rules
+    .filter((r) => r.selectorText.split(',').map((x) => x.trim()).indexOf(sel) >= 0)
+    .map((r) => r.style.getPropertyValue(name).trim())
+    .filter(Boolean)
+    .pop() || '';
+  check('Leaflet’s attribution sits in the inline map’s bottom-right corner',
+    prop('.journey-plan .j-map .leaflet-bottom', 'position') === 'absolute'
+    && /^0(px)?$/.test(prop('.journey-plan .j-map .leaflet-bottom', 'bottom'))
+    && /^0(px)?$/.test(prop('.journey-plan .j-map .leaflet-right', 'right'))
+    && prop('.journey-plan .j-map .leaflet-right .leaflet-control', 'float') === 'right',
+    JSON.stringify([prop('.journey-plan .j-map .leaflet-bottom', 'position'), prop('.journey-plan .j-map .leaflet-bottom', 'bottom')]));
+  check('suggestions and the look-ahead are single rows',
+    prop('.plan .suggest', 'flex-direction') === 'row' && prop('.plan .horizon', 'flex-direction') === 'row'
+    && !rules.some((r) => /\.horizon-bar|\.horizon \.chips/.test(r.selectorText)));
+  pc.remove();
+  check('leaving the view removes the inline map', made[1].removed);
+  globalThis.requestAnimationFrame = prevRaf;
+}
+
+/* Transitous itineraries, its fetch, the index fetch and the hop clip. */
+{
+  const keep = { transitousFetch: Lib.transitousFetch, fetchBytes: Lib._fetchIndexBytes };
+  const asked = [];
+  Lib.transitousFetch = async (path, params) => { asked.push(params); return { itineraries: [] }; };
+  await Lib.transitousPlan({ name: 'A', lat: 47.5, lon: 19.0 }, { name: 'B', lat: 47.4, lon: 19.1 }, {});
+  check('a Transitous journey asks for 12 itineraries by default',
+    asked.length === 1 && asked[0].numItineraries === '12', JSON.stringify(asked));
+  Lib.transitousFetch = keep.transitousFetch;
+  const prevFetch = globalThis.fetch;
+  const sent = [];
+  globalThis.fetch = async (url, init) => {
+    sent.push({ url: String(url), init });
+    return { ok: true, status: 200, json: async () => [], arrayBuffer: async () => new TextEncoder().encode('{}').buffer };
+  };
+  try {
+    await Lib.transitousFetch('/api/v1/geocode', { text: 'x' });
+    await Lib._fetchIndexBytes('http://x/volan-index.json.gz');
+  } finally {
+    globalThis.fetch = prevFetch;
+  }
+  const headers = (sent[0] && sent[0].init && sent[0].init.headers) || {};
+  check('a Transitous fetch sends no User-Agent of its own',
+    sent.length === 2 && !Object.keys(headers).some((h) => /user-agent/i.test(h)) && headers.Accept === 'application/json',
+    JSON.stringify(headers));
+  check('an index fetch revalidates instead of bypassing the HTTP cache',
+    sent[1] && sent[1].init.cache === 'no-cache', JSON.stringify(sent[1] && sent[1].init));
+  const viaBytes = [];
+  Lib._fetchIndexBytes = async (url) => { viaBytes.push(url); return { status: 404, bytes: null }; };
+  await Lib._loadMavIndex('http://x/mav-index.json.gz');
+  await Lib._loadGtfsIndex('http://x/city-index.json.gz', 'errCityHttp', 'errCityGunzip').catch(() => null);
+  Lib._fetchIndexBytes = keep.fetchBytes;
+  check('both index loaders go through that fetch', viaBytes.length === 2, JSON.stringify(viaBytes));
+  const full = [[47.5144, 19.0469], [47.469814, 19.082997], [47.452218, 19.09187], [47.4330, 19.1050]];
+  const tram = Lib.clipRideShape(full, [47.469814, 19.082997], [47.452218, 19.09187], { vehicle: 'tram', label: '2B' });
+  const ferry = Lib.clipRideShape(full, [47.469814, 19.082997], [47.452218, 19.09187], { vehicle: 'ferry', label: 'D11' });
+  check('a tram’s hop map keeps the published line, a ferry’s is cut to the hop',
+    tram.length === full.length && ferry.length === 2 && ferry[0][0] === 47.469814 && ferry[1][0] === 47.452218,
+    JSON.stringify({ tram: tram.length, ferry }));
+}
+
+/* Fourth review: hop card and editor. */
+const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+const settle = async (el) => {
+  for (let i = 0; i < 100 && el._reloadActive; i++) await wait(10);
+};
+{
+  /* Every FUTÁR board failing is an error, not an empty timetable; one
+     pole failing still leaves the others. */
+  const keep = { departureBoard: Lib.departureBoard, originPoles: Lib.originPoles };
+  const now = Math.floor(Date.now() / 1000);
+  const good = { data: {
+    entry: { stopTimes: [{ tripId: 'T1', departureTime: now + 300 }] },
+    references: { trips: { T1: { routeId: 'R1', tripHeadsign: 'Zugló' } }, routes: { R1: { id: 'R1', shortName: '7', type: 'BUS' } }, stops: {} },
+  } };
+  Lib.originPoles = async () => ['P1', 'P2'];
+  Lib.departureBoard = async () => { throw new Error('BKK HTTP 401'); };
+  const dest = { key: 'zugló', name: 'Zugló' };
+  let thrown = null;
+  try {
+    await Lib.departures('revoked', 'BKK_F1', ['R1'], dest, { mode: 'bkk', minutesAfter: 60, cache: {} });
+  } catch (err) { thrown = err; }
+  let mavThrown = null;
+  try {
+    await Lib.departures('revoked', 'BKK_005510017', ['R1'], dest, { mode: 'mav', minutesAfter: 60, cache: {} });
+  } catch (err) { mavThrown = err; }
+  Lib.departureBoard = async (_k, pid) => {
+    if (pid === 'P1') throw new Error('BKK timeout');
+    return good;
+  };
+  const partial = await Lib.departures('k', 'BKK_F1', ['R1'], dest, { mode: 'bkk', minutesAfter: 60, cache: {} });
+  Object.assign(Lib, keep);
+  check('every failed FUTÁR board rejects departures() with the first error (bkk and mav)',
+    !!thrown && thrown.message === 'BKK HTTP 401' && !!mavThrown && mavThrown.message === 'BKK HTTP 401',
+    JSON.stringify({ bkk: thrown && thrown.message, mav: mavThrown && mavThrown.message }));
+  check('one failed pole still returns the other pole\'s rows',
+    partial.length === 1 && partial[0].tripId === 'T1', JSON.stringify(partial.map((r) => r.tripId)));
+}
+{
+  /* The shared board cache keeps a card key apart from the integration. */
+  const keepFetch = Lib.fetch;
+  Lib._boards.clear();
+  Lib._boardInflight.clear();
+  const calls = [];
+  Lib.fetch = async (apiKey) => {
+    calls.push(apiKey);
+    if (apiKey === 'revoked') throw new Error('BKK HTTP 401');
+    return { data: { entry: { stopTimes: [] } } };
+  };
+  await Lib.departureBoard('', 'S9', 60);
+  let err = null;
+  try { await Lib.departureBoard('revoked', 'S9', 60); } catch (e) { err = e; }
+  await Lib.departureBoard('', 'S9', 60);
+  await Lib.departureBoard('good', 'S9', 60);
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+  check('a card with its own key never gets the board fetched with another key or the integration',
+    JSON.stringify(calls) === JSON.stringify(['', 'revoked', 'good']) && !!err && /401/.test(err.message),
+    JSON.stringify({ calls, err: err && err.message }));
+}
+{
+  /* The card shows that error, and still fills the board from Transitous. */
+  const keep = { departures: Lib.departures, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty };
+  const now = Math.floor(Date.now() / 1000);
+  Lib.departures = async () => { throw new Error('BKK HTTP 401'); };
+  Lib.fillTransitousIfEmpty = async () => [{
+    tripId: 'motis:1', label: '7', vehicle: 'bus', rawType: 'BUS', head: 'Zugló', dep: now + 300, sched: now + 300,
+  }];
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu' };
+  c.setConfig({ language: 'hu', apiKey: 'revoked', stopId: 'BKK_F1', stopName: 'Fő tér', destKey: 'zugló', destName: 'Zugló', routeIds: [] });
+  await settle(c);
+  const errEl = c.shadowRoot.querySelector('.err');
+  check('a failed FUTÁR board shows its error, with Transitous rows under it',
+    !!errEl && errEl.textContent.includes('BKK HTTP 401') && errEl.style.display !== 'none'
+    && c.shadowRoot.querySelectorAll('tr').length === 1 && !c.shadowRoot.innerHTML.includes('Nincs közelgő indulás'),
+    JSON.stringify({ err: errEl && errEl.textContent, rows: c.shadowRoot.querySelectorAll('tr').length }));
+  c.remove();
+  Object.assign(Lib, keep);
+}
+{
+  /* A new pair drops the old pair's rows, even when its first fetch fails. */
+  const keep = { departures: Lib.departures, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty };
+  const now = Math.floor(Date.now() / 1000);
+  let fail = false;
+  Lib.departures = async () => {
+    if (fail) throw new Error('BKK timeout');
+    return [{ tripId: 'BKK_A1', label: '7', vehicle: 'bus', rawType: 'BUS', head: 'Zugló', dep: now + 300, sched: now + 300 }];
+  };
+  Lib.fillTransitousIfEmpty = async (rows) => rows || [];
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu' };
+  c.setConfig({ language: 'hu', apiKey: 'k', stopId: 'BKK_F1', stopName: 'Fő tér', destKey: 'zugló', destName: 'Zugló', routeIds: [] });
+  await settle(c);
+  const before = c.shadowRoot.querySelectorAll('tr').length;
+  fail = true;
+  c.setConfig({ language: 'hu', apiKey: 'k', stopId: 'BKK_F2', stopName: 'Astoria', destKey: 'óbuda', destName: 'Óbuda', routeIds: [] });
+  await settle(c);
+  const head = c.shadowRoot.querySelector('.head').textContent;
+  check('a new pair whose first fetch fails shows no rows of the old pair',
+    before === 1 && c.shadowRoot.querySelectorAll('tr').length === 0 && (c._rawRows || []).length === 0
+    && head.includes('Astoria') && c.shadowRoot.querySelector('.err').textContent.includes('BKK timeout'),
+    JSON.stringify({ before, after: c.shadowRoot.querySelectorAll('tr').length, head }));
+  c.remove();
+  Object.assign(Lib, keep);
+}
+{
+  /* Opening the editor keeps the configured routes; a card without any
+     gets them filled in. */
+  const keep = { reachableDests: Lib.reachableDests };
+  Lib.reachableDests = async () => ({
+    dests: [{ key: 'zugló', name: 'Zugló' }], destRoutes: { zugló: ['BKK_NIGHT'] },
+  });
+  const hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } } };
+  const open = async (routeIds) => {
+    const ed = document.createElement('hungarian-transport-card-editor');
+    document.body.appendChild(ed);
+    ed._probeKey = () => {};
+    const emitted = [];
+    ed.addEventListener('config-changed', (ev) => emitted.push(ev.detail.config));
+    ed.hass = hass;
+    ed.setConfig({ language: 'hu', stopId: 'BKK_F1', stopName: 'Fő tér', destKey: 'zugló', destName: 'Zugló', routeIds });
+    await wait(20);
+    ed.remove();
+    return emitted;
+  };
+  const configured = await open(['BKK_7', 'BKK_9']);
+  const bare = await open([]);
+  Object.assign(Lib, keep);
+  Lib._hass = null;
+  check('opening the editor does not rewrite a card\'s routes with the ones running now',
+    configured.length === 0, JSON.stringify(configured.map((c) => c.routeIds)));
+  check('a card without routes gets the reachable ones',
+    bare.length === 1 && JSON.stringify(bare[0].routeIds) === '["BKK_NIGHT"]', JSON.stringify(bare.map((c) => c.routeIds)));
+}
+{
+  /* The editor's "A → B" title follows the next pair; a typed one stays. */
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  let last = null;
+  ed.addEventListener('config-changed', (ev) => { last = ev.detail.config; });
+  ed.setConfig({ language: 'hu', stopId: 'A1', stopName: 'Alfa', destKey: 'béta', destName: 'Béta', name: 'Alfa → Béta', routeIds: ['R'] });
+  ed._pickStop({ key: 'gamma', name: 'Gamma' }, 'dest');
+  const sameOrigin = last.name;
+  ed.setConfig(last);
+  ed._pickStop({ id: 'D1', name: 'Delta' }, 'origin');
+  ed.setConfig(last);
+  const afterOrigin = last.name;
+  ed._pickStop({ key: 'eps', name: 'Epszilon' }, 'dest');
+  const newPair = last.name;
+  ed.setConfig(Object.assign({}, last, { name: 'Munkába' }));
+  ed._pickStop({ key: 'zeta', name: 'Zéta' }, 'dest');
+  const typed = last.name;
+  ed.remove();
+  check('the auto title follows a new destination and a new pair, a typed title stays',
+    sameOrigin === 'Alfa → Gamma' && afterOrigin === 'Alfa → Gamma' && newPair === 'Delta → Epszilon' && typed === 'Munkába',
+    JSON.stringify({ sameOrigin, afterOrigin, newPair, typed }));
+}
+{
+  /* Volán and city editors do not copy a sibling card's key in. */
+  const keep = { apiKeyFromDashboard: Lib.apiKeyFromDashboard, searchStops: Lib.searchStops };
+  let asked = 0;
+  Lib.apiKeyFromDashboard = async () => { asked += 1; return 'sibling-key'; };
+  Lib.searchStops = async () => [];
+  const make = async (cfg) => {
+    const ed = document.createElement('hungarian-transport-card-editor');
+    document.body.appendChild(ed);
+    ed._probeKey = async () => {};
+    ed._loadDests = async () => {};
+    ed.setConfig(cfg);
+    ed.hass = { states: {}, language: 'hu', connection: {} };
+    await ed._search('Győr', 'origin');
+    await wait(5);
+    ed.remove();
+    return ed._config.apiKey;
+  };
+  const volanKey = await make({ language: 'hu', volan: true });
+  const helyiKey = await make({ language: 'hu', helyi: true, city: 'gyor' });
+  const volanAsked = asked;
+  const bkkKey = await make({ language: 'hu' });
+  Object.assign(Lib, keep);
+  Lib._hass = null;
+  check('a Volán or city editor never borrows a sibling card\'s API key',
+    volanAsked === 0 && !volanKey && !helyiKey, JSON.stringify({ volanAsked, volanKey, helyiKey }));
+  check('a BKK editor still does', bkkKey === 'sibling-key', String(bkkKey));
+}
+{
+  /* The banner is worded at paint: a language switch rewords it. */
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'auto', stopId: 'BKK_F00001', stopName: 'Keleti', destKey: 'blaha', destName: 'Blaha' });
+  await settle(c);
+  const hu = c.shadowRoot.querySelector('.err').textContent;
+  c.hass = { states: {}, language: 'en', services: {} };
+  const en = c.shadowRoot.querySelector('.err').textContent;
+  c.remove();
+  check('the error banner follows a language change',
+    hu.startsWith('Nincs BKK API kulcs') && en.startsWith('No BKK API key'), JSON.stringify({ hu, en }));
+
+  const keep = { cityIndex: Lib.cityIndex };
+  Lib.cityIndex = async () => ({ ops: [{ id: 'gyor', name: 'Győr' }] });
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  ed.setConfig({ language: 'hu', helyi: true });
+  await wait(5);
+  const huCity = ed._el('city').options[0].textContent;
+  ed._error(Object.assign(new Error('no key'), { i18nKey: 'errNoApiKey' }));
+  const huErr = ed._el('err').textContent;
+  ed.setConfig({ language: 'en', helyi: true });
+  await wait(5);
+  const enCity = ed._el('city').options[0].textContent;
+  const enErr = ed._el('err').textContent;
+  ed.remove();
+  Object.assign(Lib, keep);
+  check('the editor rewords the city placeholder and its error after a language switch',
+    huCity === 'Válassz várost' && enCity === 'Pick a city'
+    && huErr.startsWith('Nincs BKK API kulcs') && enErr.startsWith('No BKK API key'),
+    JSON.stringify({ huCity, enCity, huErr, enErr }));
+}
+{
+  /* The open map: footer state kept across polls, the vehicle placed once
+     GPS shows up for a row whose ids changed, no fitBounds after a close,
+     focus on the close button and back on the row's button. */
+  const made = [];
+  let removed = false;
+  let fitAfterRemove = 0;
+  const layer = (pt) => ({
+    pt, addTo() { return this; }, setLatLng(p) { this.pt = p; }, setIcon(i) { this.icon = i; }, redraw() {},
+    getLatLng() { return this.pt ? { lat: this.pt[0], lng: this.pt[1] } : null; },
+  });
+  const fakeMap = {
+    setView() { return this; }, invalidateSize() {}, removeLayer() {}, on() {},
+    fitBounds() { if (removed) fitAfterRemove += 1; },
+    remove() { removed = true; },
+  };
+  const fakeL = {
+    map: () => { removed = false; return fakeMap; },
+    tileLayer: () => layer(), divIcon: (o) => o, polyline: () => layer(), latLngBounds: () => ({ extend() {} }),
+    marker: (pt, o) => {
+      const m = Object.assign(layer(pt), { html: (o.icon && o.icon.html) || '' });
+      made.push(m);
+      return m;
+    },
+  };
+  const prevRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  const c = document.createElement('hungarian-transport-card');
+  c._reloadSafe = () => {};
+  document.body.appendChild(c);
+  c.setConfig({ language: 'hu', stopId: 'BKK_F1', stopName: 'Fő tér', destKey: 'zugló', destName: 'Zugló', routeIds: [] });
+  c._ensureLeaflet = async () => fakeL;
+  c._loadRowMapShape = async () => ({
+    shape: [[47.57, 19.12], [47.51, 19.08]], approx: true, board: [47.57, 19.12], alight: [47.51, 19.08],
+  });
+  const now = Math.floor(Date.now() / 1000);
+  const row = {
+    label: '7', headsign: 'Zugló', tripId: 'elvira:77', depTs: now + 300, schedTs: now + 300,
+    attime: '10:05', predicted_attime: '10:05', color: '009EE3', textcolor: 'ffffff', icon: 'mdi:bus', hasGps: false,
+  };
+  c._rows = [row];
+  c._paint();
+  c.shadowRoot.querySelector('.map-open').focus();
+  const hadFocus = c.shadowRoot.activeElement && c.shadowRoot.activeElement.classList.contains('map-open');
+  await c._openVehicleMap(c._shownRows[0]);
+  const closeBtn = document.querySelector('.ht-map-overlay .ht-map-close');
+  const focusedClose = document.activeElement === closeBtn;
+  const foot = () => document.querySelector('.ht-map-overlay .ht-map-foot').textContent;
+  const opened = foot();
+  const noVehicle = !made.some((m) => m.html.includes('ht-veh-dot'));
+  /* A poll: the ELVIRA row now carries the FUTÁR trip id, a vehicle id and GPS. */
+  c._rows = [Object.assign({}, row, { tripId: 'BKK_77', vehicleId: 'V1', hasGps: true, lat: 47.55, lon: 19.1 })];
+  c._paint();
+  c._syncOpenMap();
+  const veh = made.find((m) => m.html.includes('ht-veh-dot'));
+  const placedAt = veh && veh.pt.slice();
+  const synced = foot();
+  c._rows = [Object.assign({}, c._rows[0], { lat: 47.56, lon: 19.11 })];
+  c._syncOpenMap();
+  const moved = veh && veh.pt[0] === 47.56;
+  c._closeVehicleMap();
+  const backOnRow = c.shadowRoot.activeElement && c.shadowRoot.activeElement.classList.contains('map-open');
+  check('the open map keeps its "approximate line" footer when GPS arrives',
+    opened.startsWith('Közelítő vonal') && synced.startsWith('Közelítő vonal') && synced.includes('Élő pozíció'),
+    JSON.stringify({ opened, synced }));
+  check('a vehicle that gets GPS after the map opened is placed, and followed, though its ids changed',
+    noVehicle && !!placedAt && placedAt[0] === 47.55 && moved, JSON.stringify({ noVehicle, placedAt, now: veh && veh.pt }));
+  check('the map moves focus to its close button and back to the row\'s map button',
+    hadFocus && focusedClose && backOnRow, JSON.stringify({ hadFocus, focusedClose, backOnRow }));
+  await c._openVehicleMap(c._shownRows[0]);
+  c._closeVehicleMap();
+  await wait(120);
+  check('a map closed right after it opened is not fitted any more', removed && fitAfterRemove === 0,
+    JSON.stringify({ removed, fitAfterRemove }));
+  c._showMapNotice('Nincs adat');
+  const ok = document.querySelector('.ht-map-notice button');
+  const okFocused = document.activeElement === ok;
+  document.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'Escape' }));
+  check('the map notice takes focus and closes on Escape',
+    okFocused && !document.querySelector('.ht-map-overlay'), JSON.stringify({ okFocused }));
+  c.remove();
+  globalThis.requestAnimationFrame = prevRaf;
+}
+{
+  /* A card that is built but not on the page holds no gate slot, does not
+     tick and does not fetch; attaching it starts all three. */
+  const gate0 = Lib._gateCards;
+  const c = document.createElement('hungarian-transport-card');
+  let reloads = 0;
+  c._reload = async () => { reloads += 1; };
+  c.setConfig({ language: 'hu', volan: true, stopId: 'volan_1', stopName: 'Győr', destKey: 'pápa', destName: 'Pápa' });
+  await wait(5);
+  const idle = { gate: Lib._gateCards - gate0, tick: c._tick !== null, reloads };
+  document.body.appendChild(c);
+  await wait(5);
+  const live = { gate: Lib._gateCards - gate0, tick: c._tick !== null, reloads };
+  c.remove();
+  check('setConfig on a detached card waits for connectedCallback',
+    idle.gate === 0 && !idle.tick && idle.reloads === 0 && live.gate === 1 && live.tick && live.reloads === 1
+    && Lib._gateCards === gate0, JSON.stringify({ idle, live }));
+}
+{
+  /* Index overrides belong to the card or editor using them. */
+  const keep = { _indexCached: Lib._indexCached, departures: Lib.departures, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty };
+  const urls = [];
+  Lib._indexCached = (url) => { urls.push(url); return Promise.resolve({ ops: [] }); };
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  ed.setConfig({ language: 'hu', volan: true, volanIndex: 'https://example.invalid/editor-volan.json.gz' });
+  Lib.volanIndex();
+  ed.setConfig({ language: 'hu', volan: true });
+  Lib.volanIndex();
+  ed.remove();
+  Lib.departures = async () => { Lib.volanIndex(); return []; };
+  Lib.fillTransitousIfEmpty = async (rows) => rows || [];
+  const runCard = async (extra) => {
+    const c = document.createElement('hungarian-transport-card');
+    c._reloadSafe = () => {};
+    document.body.appendChild(c);
+    c.setConfig(Object.assign({ language: 'hu', volan: true, stopId: 'volan_1', stopName: 'Győr', destKey: 'pápa', destName: 'Pápa' }, extra));
+    await c._reload();
+    c.remove();
+  };
+  await runCard({ volanIndex: 'https://example.invalid/card-volan.json.gz' });
+  await runCard({});
+  Object.assign(Lib, keep);
+  check('a card or editor without its own index URL is back on the bundled index',
+    urls.length === 4 && urls[0].includes('editor-volan') && urls[1].includes('/volan-index.json.gz')
+    && urls[2].includes('card-volan') && urls[3].includes('/volan-index.json.gz'),
+    JSON.stringify(urls));
+}
+{
+  /* ELVIRA only when the integration has the service; after a failure, a
+     pause and one warning. */
+  const realNow = Date.now;
+  const keep = { callServiceResponse: Lib.callServiceResponse };
+  const keepWarn = console.warn;
+  let calls = 0;
+  let fail = true;
+  const warns = [];
+  Lib.callServiceResponse = async () => {
+    calls += 1;
+    if (fail) throw new Error('unavailable');
+    return { response: { departures: [{ tripId: 'elvira:1' }] } };
+  };
+  console.warn = (...a) => warns.push(a.map(String).join(' '));
+  Lib._elviraDownUntil = 0;
+  Lib._elviraWarned = false;
+  const ask = (hass) => Lib.elviraBetween(hass, 'BKK_005510017', 'BKK_005503269', 60, 'Székesfehérvár', {});
+  const without = { states: {}, services: { hungarian_transport: { futar: {} } } };
+  const withSvc = { states: {}, services: { hungarian_transport: { elvira_between: {} } } };
+  await ask(without);
+  const noService = calls;
+  await ask(withSvc);
+  await ask(withSvc);
+  const backedOff = calls;
+  let t = realNow() + 4 * 60000;
+  Date.now = () => t;
+  await ask(withSvc);
+  const retried = calls;
+  t += 4 * 60000;
+  fail = false;
+  const rows = await ask(withSvc);
+  Date.now = realNow;
+  console.warn = keepWarn;
+  Object.assign(Lib, keep);
+  Lib._elviraDownUntil = 0;
+  Lib._elviraWarned = false;
+  check('ELVIRA is not called without the elvira_between service',
+    noService === 0, String(noService));
+  check('a failed ELVIRA call pauses ELVIRA for minutes and warns once',
+    backedOff === 1 && retried === 2 && warns.length === 1 && rows.length === 1,
+    JSON.stringify({ backedOff, retried, warns: warns.length, rows: rows.length }));
+}
+{
+  /* One scan of hass.states per change, and one pattern per row. */
+  let scans = 0;
+  const target = {
+    'sensor.x': { attributes: { vehicles: [
+      { lat: 47.2, lon: 18.6, trip: { tripShortName: '861 BALATON' } },
+      { lat: 47.3, lon: 18.7, trip: { tripShortName: '9724 személyvonat' } },
+      { lat: 47.4, lon: 18.8, trip: { tripShortName: '2000 TÓPART' } },
+    ] } },
+  };
+  const states = new Proxy(target, { ownKeys(tgt) { scans += 1; return Reflect.ownKeys(tgt); } });
+  const hass = { states };
+  const RealRegExp = globalThis.RegExp;
+  let patterns = 0;
+  globalThis.RegExp = class extends RealRegExp {
+    constructor(...args) { super(...args); patterns += 1; }
+  };
+  let rows;
+  for (let i = 0; i < 4; i++) {
+    rows = [
+      { label: 'BALATON', trainNumber: '861', tripId: 'elvira:1' },
+      { label: 'TÓPART', trainNumber: '', tripId: 'elvira:2' },
+    ];
+    Lib.enrichFromHass(hass, rows);
+  }
+  globalThis.RegExp = RealRegExp;
+  const fresh = Lib.collectHassVehicles({ states: Object.assign({}, target) });
+  check('enrichFromHass scans hass.states once per states object and builds one pattern per row',
+    scans === 1 && patterns === 4 * 2 && rows[0].lat === 47.2 && rows[1].lat === 47.4 && fresh.length === 3,
+    JSON.stringify({ scans, patterns, lat: rows.map((r) => r.lat) }));
+}
+{
+  /* Back after a short tab switch the poll picks up; after a long one, a run. */
+  const keep = { departures: Lib.departures, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty };
+  const now = Math.floor(Date.now() / 1000);
+  let runs = 0;
+  /* Cards left on the page by earlier checks hear the same events. */
+  Lib.departures = async (_k, stopId) => {
+    if (stopId === 'volan_vis') runs += 1;
+    return [{ tripId: 'gtfs:1', label: '700', vehicle: 'coach', rawType: 'BUS', head: 'Pápa', dep: now + 600, sched: now + 600 }];
+  };
+  Lib.fillTransitousIfEmpty = async (rows) => rows || [];
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu' };
+  c.setConfig({ language: 'hu', volan: true, stopId: 'volan_vis', stopName: 'Győr', destKey: 'pápa', destName: 'Pápa', refresh: 60 });
+  await settle(c);
+  const first = runs;
+  const realNow = Date.now;
+  let t = realNow();
+  Date.now = () => t;
+  let vis = 'visible';
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => vis });
+  vis = 'hidden';
+  document.dispatchEvent(new Event('visibilitychange'));
+  const stopped = c._poll === null;
+  t += 10000;
+  vis = 'visible';
+  document.dispatchEvent(new Event('visibilitychange'));
+  await wait(10);
+  const quick = { runs: runs - first, poll: c._poll !== null, tick: c._tick !== null };
+  vis = 'hidden';
+  document.dispatchEvent(new Event('visibilitychange'));
+  t += 120000;
+  vis = 'visible';
+  document.dispatchEvent(new Event('visibilitychange'));
+  await settle(c);
+  await wait(10);
+  const long = { runs: runs - first, poll: c._poll !== null };
+  Date.now = realNow;
+  delete document.visibilityState;
+  c.remove();
+  Object.assign(Lib, keep);
+  check('a short tab switch resumes the poll without a refetch, a long one refetches',
+    first === 1 && stopped && quick.runs === 0 && quick.poll && quick.tick && long.runs === 1 && long.poll,
+    JSON.stringify({ first, stopped, quick, long }));
+}
+{
+  /* The loader retries a download that broke off, not a bundle that threw. */
+  const { copyFileSync, mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { pathToFileURL } = await import('node:url');
+  const dir = mkdtempSync(join(tmpdir(), 'ht-loader-eval-'));
+  writeFileSync(join(dir, 'hungarian-transport.js'),
+    'globalThis.__htEvalRuns = (globalThis.__htEvalRuns || 0) + 1;\n'
+    + 'throw new TypeError("Cannot read properties of undefined (reading \'define\')");\n');
+  copyFileSync('dist/hungarian-transport-loader.js', join(dir, 'hungarian-transport-loader.js'));
+  const warns = [];
+  const errors = [];
+  const keepWarn = console.warn;
+  const keepErr = console.error;
+  console.warn = (...a) => warns.push(a.map(String).join(' '));
+  console.error = (...a) => errors.push(a.map(String).join(' '));
+  await import(`${pathToFileURL(join(dir, 'hungarian-transport-loader.js')).href}?v=9.9.9`);
+  for (let i = 0; i < 80 && !warns.length && !errors.length; i++) await wait(25);
+  console.warn = keepWarn;
+  console.error = keepErr;
+  rmSync(dir, { recursive: true, force: true });
+  check('the loader does not retry a bundle that threw while running',
+    globalThis.__htEvalRuns === 1 && warns.length === 0 && errors.length === 1,
+    JSON.stringify({ runs: globalThis.__htEvalRuns, warns, errors }));
+}
+{
+  /* Every editor label names its control. */
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed.setConfig({ language: 'hu' });
+  const labels = [...ed.querySelectorAll('label[id]')];
+  const missing = labels.filter((l) => !l.htmlFor || !ed.querySelector('#' + l.htmlFor)).map((l) => l.id);
+  ed.remove();
+  check('editor labels point at their fields', labels.length === 7 && missing.length === 0,
+    JSON.stringify({ n: labels.length, missing }));
 }
 
 process.exit(failed ? 1 : 0);

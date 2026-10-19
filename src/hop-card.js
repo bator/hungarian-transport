@@ -1,5 +1,5 @@
-import { ASSET_BASE, DEFAULT_MINUTES_AFTER, clampMinutesAfter, configDataKey, departureStillDue, maxDepartureRows, normalizeCardConfig, refreshSeconds, setCityIndexUrl, setMavIndexUrl, setVolanIndexUrl } from './config.js';
-import { errText, resolveLang, t } from './i18n.js';
+import { ASSET_BASE, DEFAULT_MINUTES_AFTER, applyIndexOverrides, clampMinutesAfter, configDataKey, departureStillDue, maxDepartureRows, normalizeCardConfig, refreshSeconds } from './config.js';
+import { codedError, errText, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 import { BKK_HOP_EDITOR } from './tags.js';
 
@@ -38,6 +38,12 @@ export class BKKHopCard extends HTMLElement {
     this._onMapKey = null;
     this._mapClicksBound = false;
     this._openingMap = '';
+    this._mapRef = null;
+    this._mapState = null;
+    this._mapL = null;
+    this._mapReturnFocus = null;
+    this._hiddenAt = 0;
+    this._pollRun = null;
   }
 
   static async getConfigElement() {
@@ -70,7 +76,10 @@ export class BKKHopCard extends HTMLElement {
     if (!this.shadowRoot) {
       try { this.attachShadow({ mode: 'open' }); } catch (_e) { /* already attached */ }
     }
-    this._holdGate();
+    /* Home Assistant builds a card (setConfig) before it attaches it, and
+       some it never attaches. Only a card on the page takes a gate slot,
+       ticks and fetches; connectedCallback starts all three. */
+    if (this.isConnected) this._holdGate();
     const next = normalizeCardConfig(config);
     /* Against the config the card shows now, not the one last set: the
        planner's in-card picks change it, and re-applying the configured
@@ -92,18 +101,29 @@ export class BKKHopCard extends HTMLElement {
     this._tripCache = {};
     this._err = '';
     this._keyTried = false;
+    /* The rows on screen belong to the old pair. Kept, a first fetch for
+       the new one that fails would leave them under the new title. */
+    this._rows = [];
+    this._rawRows = [];
+    this._pollRun = null;
     try {
       this._render();
     } catch (err) {
       this._showErr(err);
       return;
     }
-    this._reloadSafe();
+    if (this.isConnected) {
+      this._reloadSafe();
+      return;
+    }
+    /* A run still in flight from before a detach is for the old config. */
+    this._gen += 1;
+    this._reloadActive = false;
   }
 
   /* _reload is async, so its rejections need an owner. Mark in-flight
-     synchronously: Home Assistant often setConfig()s then attaches in the
-     same turn, and connectedCallback must not start a second fetch. */
+     synchronously: a detach and re-attach in the same turn (Home Assistant
+     re-parenting a card) must not start a second fetch. */
   _reloadSafe() {
     this._reloadActive = true;
     Promise.resolve().then(() => this._reload()).catch((err) => this._showErr(err));
@@ -129,7 +149,7 @@ export class BKKHopCard extends HTMLElement {
     /* The integration's futar service can register after the first paint
        (key added in the options flow): reload once it shows up. */
     this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
-    if (this._viaIntegration && !viaBefore && this._painted && !this._reloadActive) this._reloadSafe();
+    if (this._viaIntegration && !viaBefore && this._painted && !this._reloadActive && this.isConnected) this._reloadSafe();
     if (first && this._rawRows && this._rawRows.length) {
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       const cfg = this._config || {};
@@ -200,16 +220,48 @@ export class BKKHopCard extends HTMLElement {
   }
 
   /* A background tab must not poll the APIs or repaint countdowns nobody
-     sees. Back in front: one fresh run, then the timers again. */
+     sees. Back in front: the timers again, and a fresh run only after an
+     absence longer than the poll interval. A quick tab switch would
+     otherwise refetch everything each time; the poll picks up instead. */
   _visibilityChanged() {
     if (this._pageHidden()) {
+      if (!this._hiddenAt) this._hiddenAt = Date.now();
       if (this._poll) { clearInterval(this._poll); this._poll = null; }
       if (this._tick) { clearInterval(this._tick); this._tick = null; }
       return;
     }
+    const away = this._hiddenAt ? Date.now() - this._hiddenAt : Infinity;
+    this._hiddenAt = 0;
     if (!this.isConnected || !this._painted) return;
     this._startTick();
-    if (!this._poll && !this._reloadActive && this._shouldReloadOnConnect()) this._reloadSafe();
+    this._tickPaint();
+    if (this._poll || this._reloadActive || !this._shouldReloadOnConnect()) return;
+    if (away < refreshSeconds((this._config || {}).refresh) * 1000 && this._resumePoll()) return;
+    this._reloadSafe();
+  }
+
+  /* The poll repeats the reload's own run. A run slower than the interval
+     (a stalled ELVIRA call) skips the next tick instead of racing it: two
+     runs could paint out of order. The busy flag lives with the run, so a
+     poll picked up again after a tab switch still waits for it. */
+  _armPoll(pollRun) {
+    if (this._poll) { clearInterval(this._poll); this._poll = null; }
+    this._pollRun = pollRun;
+    const cfg = this._config || {};
+    const every = refreshSeconds(cfg.refresh) * 1000;
+    this._poll = setInterval(() => {
+      if (pollRun.busy) return;
+      pollRun.busy = true;
+      pollRun.run().finally(() => { pollRun.busy = false; });
+    }, every);
+  }
+
+  /* The poll of the current reload again, if there is one to pick up. */
+  _resumePoll() {
+    const p = this._pollRun;
+    if (!p || p.gen !== this._gen || !this._shouldPoll()) return false;
+    this._armPoll(p);
+    return true;
   }
 
   _shouldPoll() {
@@ -236,8 +288,14 @@ export class BKKHopCard extends HTMLElement {
   /* Keep the rows on screen and put the failure in a banner above them: a
      single failed refresh should not wipe a timetable that is still useful. */
   _showErr(err) {
-    this._err = errText(this._lang(), err);
+    this._err = err || '';
     this._paint();
+  }
+
+  /* The error is kept as thrown and worded at paint, so a language change
+     (hass arriving, the editor's switch) rewords the banner too. */
+  _errMessage(lang) {
+    return this._err ? errText(lang || this._lang(), this._err) : '';
   }
 
   /* Kept apart from the config: once the integration's futar service shows
@@ -246,7 +304,7 @@ export class BKKHopCard extends HTMLElement {
     const key = await BkkLib.apiKeyFromDashboard(this._hass);
     if (!key || this._config.apiKey) return;
     this._borrowedKey = key;
-    this._reloadSafe();
+    if (this.isConnected) this._reloadSafe();
   }
 
   _header() {
@@ -404,7 +462,7 @@ export class BKKHopCard extends HTMLElement {
   _startTick() {
     if (this._tick) clearInterval(this._tick);
     this._tick = null;
-    if (this._pageHidden()) return;
+    if (this._pageHidden() || !this.isConnected) return;
     this._tick = setInterval(() => this._tickPaint(), 15000);
   }
 
@@ -435,8 +493,9 @@ export class BKKHopCard extends HTMLElement {
     const lang = this._lang();
     const cfg = this._config || {};
     this._elHead.textContent = this._header();
-    this._elErr.textContent = this._err || '';
-    this._elErr.style.display = this._err ? '' : 'none';
+    const errMsg = this._errMessage(lang);
+    this._elErr.textContent = errMsg;
+    this._elErr.style.display = errMsg ? '' : 'none';
     const nowSec = Math.floor(Date.now() / 1000);
     const allRows = this._rows || [];
     const rows = allRows.filter((r) => departureStillDue(r.depTs, nowSec));
@@ -544,9 +603,8 @@ export class BKKHopCard extends HTMLElement {
     if (this._mapClicksBound) return;
     if (!this._elBody) return;
     this._mapClicksBound = true;
-    const fn = (ev) => this._onRowClick(ev);
-    this._elBody.addEventListener('click', fn);
-    this.addEventListener('click', fn, true);
+    /* Capture on the host sees every click in the shadow tree first. */
+    this.addEventListener('click', (ev) => this._onRowClick(ev), true);
   }
 
   _rowFromClick(ev) {
@@ -649,6 +707,7 @@ export class BKKHopCard extends HTMLElement {
      superseded open never adds a second overlay that nothing can close. */
   _closeVehicleMap() {
     this._mapSeq = (this._mapSeq || 0) + 1;
+    const hadOverlay = !!this._mapOverlay;
     if (this._onMapKey && typeof document !== 'undefined') {
       document.removeEventListener('keydown', this._onMapKey);
       this._onMapKey = null;
@@ -683,6 +742,12 @@ export class BKKHopCard extends HTMLElement {
     this._mapOverlay = null;
     this._openMapKey = null;
     this._openingMap = '';
+    this._mapRef = null;
+    this._mapState = null;
+    this._mapL = null;
+    const back = this._mapReturnFocus;
+    this._mapReturnFocus = null;
+    if (hadOverlay) this._restoreFocus(back);
   }
 
   _mapStale(seq) {
@@ -691,6 +756,50 @@ export class BKKHopCard extends HTMLElement {
 
   _mapKey(row) {
     return `${row.label || ''}|${row.headsign || ''}|${row.vehicleId || row.tripId || ''}`;
+  }
+
+  /* What the open map shows, fixed when it opens. _mapKey is not: the
+     vehicle id arrives with GPS, and an ELVIRA row takes the FUTÁR trip id,
+     so a poll would no longer find the row. */
+  _mapRefOf(row) {
+    return {
+      tripId: String((row && row.tripId) || ''),
+      label: String((row && row.label) || ''),
+      headsign: String((row && row.headsign) || ''),
+      sched: Number((row && (row.schedTs || row.depTs)) || 0),
+    };
+  }
+
+  _findMapRow(ref, rows) {
+    if (!ref || !rows) return null;
+    const byTrip = ref.tripId && rows.find((r) => String(r.tripId || '') === ref.tripId);
+    if (byTrip) return byTrip;
+    if (!ref.sched) return null;
+    /* The same departure merged with another source keeps its time, and
+       its line or its headsign. */
+    return rows.find((r) => Number(r.schedTs || r.depTs || 0) === ref.sched
+      && (String(r.label || '') === ref.label || String(r.headsign || '') === ref.headsign)) || null;
+  }
+
+  /* The focused element in this card's own tree (a row's map button, for a
+     keyboard user), to come back to when the overlay closes. */
+  _focusTarget() {
+    const el = this.shadowRoot && this.shadowRoot.activeElement;
+    return el ? { el, ref: null } : null;
+  }
+
+  /* Back where the overlay was opened from. A poll repaints the table, so
+     the row's map button may be a new element by then: find that one. */
+  _restoreFocus(back) {
+    if (!back || !back.el) return;
+    let el = back.el;
+    if (!el.isConnected && back.ref && this._elBody) {
+      const rows = this._shownRows || [];
+      const idx = rows.indexOf(this._findMapRow(back.ref, rows));
+      el = idx >= 0 ? this._elBody.querySelector(`tr[data-row-index="${idx}"] .map-open`) : null;
+    }
+    if (!el || !el.isConnected || typeof el.focus !== 'function') return;
+    try { el.focus(); } catch (_e) { /* ignore */ }
   }
 
   /* Stops in the style of a metro map: boarding is a dot in the line's colour,
@@ -801,7 +910,9 @@ ${this._stopPinCss()}
   }
 
   _showMapNotice(message) {
+    const back = this._mapReturnFocus || this._focusTarget();
     this._closeVehicleMap();
+    this._mapReturnFocus = back;
     const overlay = document.createElement('div');
     overlay.className = 'ht-map-overlay';
     overlay.innerHTML = `
@@ -810,17 +921,24 @@ ${this._stopPinCss()}
         .ht-map-notice{background:var(--card-background-color,#fff);padding:16px 18px;border-radius:10px;max-width:360px;font:14px/1.4 system-ui,sans-serif;box-shadow:0 8px 28px rgba(0,0,0,.3);color:var(--primary-text-color,#222)}
         .ht-map-notice button{margin-top:12px;border:0;background:var(--primary-color,#03a9f4);color:#fff;padding:8px 12px;border-radius:6px;cursor:pointer}
       </style>
-      <div class="ht-map-notice" role="dialog">${BkkLib.esc(message)}<br><button type="button">${BkkLib.esc(t(this._lang(), 'mapOk'))}</button></div>
+      <div class="ht-map-notice" role="dialog" aria-modal="true">${BkkLib.esc(message)}<br><button type="button">${BkkLib.esc(t(this._lang(), 'mapOk'))}</button></div>
     `;
     document.body.appendChild(overlay);
     this._mapOverlay = overlay;
     const close = () => this._closeVehicleMap();
-    overlay.querySelector('button').addEventListener('click', close);
+    const ok = overlay.querySelector('button');
+    ok.addEventListener('click', close);
     overlay.addEventListener('click', (ev) => { if (ev.target === overlay) close(); });
+    this._onMapKey = (ev) => {
+      if (ev.key === 'Escape') close();
+    };
+    document.addEventListener('keydown', this._onMapKey);
+    try { ok.focus(); } catch (_e) { /* ignore */ }
   }
 
   async _loadRowMapShape(row) {
     const cfg = this._config || {};
+    applyIndexOverrides(cfg);
     let shape = BkkLib.validMapShape(row && row.shape);
     let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon)
       || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
@@ -1032,7 +1150,10 @@ ${this._stopPinCss()}
     const key = this._mapKey(row);
     if (this._openingMap === key) return;
     if (this._mapOverlay && this._openMapKey === key) return;
+    const back = this._mapReturnFocus || this._focusTarget();
     this._closeVehicleMap();
+    if (back && !back.ref) back.ref = this._mapRefOf(row);
+    this._mapReturnFocus = back;
     this._openingMap = key;
     const seq = this._mapSeq;
     const gps0 = BkkLib.mapGpsLatLon(row.lat, row.lon);
@@ -1076,14 +1197,25 @@ ${this._stopPinCss()}
     (document.documentElement || document.body).appendChild(overlay);
     this._mapOverlay = overlay;
     this._openMapKey = key;
+    this._mapRef = this._mapRefOf(row);
+    this._mapL = L;
+    /* What the footer says, filled in as the open learns it; a poll's GPS
+       update rewords it from the same state. */
+    const st = {
+      ready: false, hasShape: false, approx: false, hasGps, estimated: false,
+      hasBoard: false, hasAlight: false, hasPosition: hasGps,
+    };
+    this._mapState = st;
     this._onMapKey = (ev) => {
       if (ev.key === 'Escape') this._closeVehicleMap();
     };
     document.addEventListener('keydown', this._onMapKey);
-    overlay.querySelector('.ht-map-close').addEventListener('click', () => this._closeVehicleMap());
+    const closeBtn = overlay.querySelector('.ht-map-close');
+    closeBtn.addEventListener('click', () => this._closeVehicleMap());
     overlay.addEventListener('click', (ev) => {
       if (ev.target === overlay) this._closeVehicleMap();
     });
+    try { closeBtn.focus(); } catch (_e) { /* ignore */ }
     const canvas = overlay.querySelector('.ht-map-canvas');
     const foot = overlay.querySelector('.ht-map-foot');
     const startLat = hasGps ? lat : 47.5;
@@ -1138,6 +1270,16 @@ ${this._stopPinCss()}
     /* Same spot as the boarding stop (a loop line, a bad lookup): one pin. */
     if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
     if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
+    /* A poll may have placed or moved the vehicle while the route loaded. */
+    if (st.hasGps && this._mapMarker && typeof this._mapMarker.getLatLng === 'function') {
+      const at = this._mapMarker.getLatLng();
+      const got = at && BkkLib.mapGpsLatLon(at.lat, at.lng);
+      if (got) {
+        lat = got[0];
+        lon = got[1];
+        hasGps = true;
+      }
+    }
     const pos = BkkLib.mapGpsLatLon(lat, lon);
     const hasPosition = !!pos;
     if (hasPosition) {
@@ -1188,42 +1330,58 @@ ${this._stopPinCss()}
     if (board) this._mapBoardMarker = stopPin(Object.assign({ kind: 'board', pt: board, name: cfg.stopName || '' }, line));
     if (hasPosition && !this._mapMarker) drawMarker();
     applyView();
-    const hasBoard = !!board;
-    foot.textContent = this._mapFootText(row, hasShape, hasGps, positionEstimated, lang, hasBoard, !!alight);
-    if (!hasShape && !hasBoard && !hasPosition) {
-      foot.textContent = t(lang, 'mapNothingToShow');
-    } else if (!hasShape) {
-      foot.textContent = t(lang, 'mapNoGeometry');
-    } else if (approx) {
-      foot.textContent = t(lang, 'mapApproxLine') + ' \u00b7 ' + foot.textContent;
-    }
-    setTimeout(applyView, 80);
+    Object.assign(st, {
+      ready: true, hasShape, approx, hasGps, estimated: positionEstimated,
+      hasBoard: !!board, hasAlight: !!alight, hasPosition,
+    });
+    foot.textContent = this._mapFoot(row, st, lang);
+    /* Closed within these 80 ms, the map is gone: fitBounds on it throws. */
+    setTimeout(() => { if (this._map === map) applyView(); }, 80);
     this._openingMap = '';
   }
 
+  _mapFoot(row, st, lang) {
+    if (!st.hasShape && !st.hasBoard && !st.hasPosition) return t(lang, 'mapNothingToShow');
+    if (!st.hasShape) return t(lang, 'mapNoGeometry');
+    const text = this._mapFootText(row, st.hasShape, st.hasGps, st.estimated, lang, st.hasBoard, st.hasAlight);
+    return st.approx ? t(lang, 'mapApproxLine') + ' \u00b7 ' + text : text;
+  }
+
+  /* A poll moves the vehicle on the open map, and puts it there once GPS
+     shows up for a row that had none when the map opened. */
   _syncOpenMap() {
-    if (!this._map || !this._openMapKey) return;
-    const lang = this._lang();
-    const L = typeof window !== 'undefined' ? window.L : null;
-    if (!this._mapMarker) return;
-    const row = (this._rows || []).find((r) => this._mapKey(r) === this._openMapKey);
-    if (!row || !row.hasGps || row.lat == null || row.lon == null) return;
+    const st = this._mapState;
+    if (!this._map || !this._openMapKey || !st) return;
+    const row = this._findMapRow(this._mapRef, this._rows || []);
+    if (!row || !row.hasGps) return;
     const gps = BkkLib.mapGpsLatLon(row.lat, row.lon);
     if (!gps) return;
-    this._mapMarker.setLatLng(gps);
-    if (L) {
-      this._mapMarker.setIcon(L.divIcon({
-        className: '',
-        html: this._dotIcon(row, true, lang),
-        iconSize: [32, 32],
-        iconAnchor: [16, 16],
-      }));
+    const lang = this._lang();
+    const L = this._mapL || (typeof window !== 'undefined' ? window.L : null);
+    const icon = L && typeof L.divIcon === 'function' ? L.divIcon({
+      className: '',
+      html: this._dotIcon(row, true, lang),
+      iconSize: [32, 32],
+      iconAnchor: [16, 16],
+    }) : null;
+    if (this._mapMarker) {
+      this._mapMarker.setLatLng(gps);
+      if (icon) this._mapMarker.setIcon(icon);
+    } else if (icon && typeof L.marker === 'function') {
+      try {
+        this._mapMarker = L.marker(gps, { icon, zIndexOffset: 600 }).addTo(this._map);
+      } catch (_e) {
+        return;
+      }
+    } else {
+      return;
     }
+    st.hasGps = true;
+    st.hasPosition = true;
+    st.estimated = false;
+    if (!st.ready) return;
     const foot = this._mapOverlay && this._mapOverlay.querySelector('.ht-map-foot');
-    if (foot) {
-      foot.textContent = this._mapFootText(row, true, true, false, lang,
-        !!this._mapBoardMarker, !!this._mapAlightMarker);
-    }
+    if (foot) foot.textContent = this._mapFoot(row, st, lang);
   }
 
   _departMode() {
@@ -1236,10 +1394,8 @@ ${this._stopPinCss()}
     const gen = ++this._gen;
     this._reloadActive = true;
     const cfg = this._config || {};
-    if (cfg.volanIndex) setVolanIndexUrl(cfg.volanIndex);
-    if (cfg.cityIndex) setCityIndexUrl(cfg.cityIndex);
-    if (cfg.mavIndex) setMavIndexUrl(cfg.mavIndex);
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
+    this._pollRun = null;
     const mode = this._departMode();
     const ready = cfg.stopId && cfg.destKey && (this._hasFutar() || mode === 'volan' || mode === 'helyi' || mode === 'all');
     if (!ready) {
@@ -1248,13 +1404,39 @@ ${this._stopPinCss()}
       /* Both stops are set, so the only thing missing is FUTÁR access (bkk
          or mav mode, no key on the card or in the integration): say that
          instead of "no departures". */
-      if (cfg.stopId && cfg.destKey) this._err = t(this._lang(), 'errNoApiKey');
+      if (cfg.stopId && cfg.destKey) this._err = codedError('errNoApiKey');
       this._paint();
       if (gen === this._gen) this._reloadActive = false;
       return;
     }
+    const dest = {
+      key: cfg.destKey,
+      name: cfg.destName,
+      id: cfg.destStopId || '',
+      lat: cfg.destLat,
+      lon: cfg.destLon,
+    };
+    const origin = {
+      id: cfg.stopId,
+      name: cfg.stopName || '',
+      lat: cfg.stopLat,
+      lon: cfg.stopLon,
+    };
+    const paintRows = (list) => {
+      if (gen !== this._gen) return;
+      const merged = list || [];
+      merged.forEach((row) => BkkLib.applyRailBadge(row));
+      this._rawRows = merged;
+      BkkLib.enrichFromHass(this._hass, this._rawRows);
+      this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
+      this._err = '';
+      this._loading = false;
+      this._paint();
+    };
     const run = async () => {
       if (gen !== this._gen) return;
+      /* Every run: another card may have pointed the indexes elsewhere since. */
+      applyIndexOverrides(cfg);
       try {
         if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
           this._rows = [];
@@ -1268,7 +1450,7 @@ ${this._stopPinCss()}
           if (typeof this._considerJourney === 'function') this._considerJourney();
           return;
         }
-        const wantElvira = (mode === 'mav' || mode === 'all') && this._hass;
+        const wantElvira = (mode === 'mav' || mode === 'all') && BkkLib.hasElvira(this._hass);
         const elviraP = wantElvira
           ? BkkLib.elviraBetween(
             this._hass,
@@ -1280,17 +1462,6 @@ ${this._stopPinCss()}
             { apiKey: this._apiKey(), originName: cfg.stopName || '' },
           ).catch(() => [])
           : Promise.resolve([]);
-        const paintRows = (list) => {
-          if (gen !== this._gen) return;
-          const merged = list || [];
-          merged.forEach((row) => BkkLib.applyRailBadge(row));
-          this._rawRows = merged;
-          BkkLib.enrichFromHass(this._hass, this._rawRows);
-          this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
-          this._err = '';
-          this._loading = false;
-          this._paint();
-        };
         const cap = maxDepartureRows(cfg.minutesAfter);
         let earlyRows = [];
         let futarFull = null;
@@ -1306,19 +1477,6 @@ ${this._stopPinCss()}
         let startThrough = null;
         let throughResolve = () => {};
         const throughWait = new Promise((resolve) => { throughResolve = resolve; });
-        const dest = {
-          key: cfg.destKey,
-          name: cfg.destName,
-          id: cfg.destStopId || '',
-          lat: cfg.destLat,
-          lon: cfg.destLon,
-        };
-        const origin = {
-          id: cfg.stopId,
-          name: cfg.stopName || '',
-          lat: cfg.stopLat,
-          lon: cfg.stopLon,
-        };
         const rows = await BkkLib.departures(
           this._apiKey(), cfg.stopId, cfg.routeIds, dest,
           {
@@ -1415,6 +1573,22 @@ ${this._stopPinCss()}
       } catch (err) {
         if (gen !== this._gen) return;
         this._loading = false;
+        /* FUTÁR failing (a revoked key, an outage) used to look like an
+           empty board, which Transitous then filled. It still fills it,
+           now under the error banner instead of in silence. */
+        if (mode === 'bkk' || mode === 'mav') {
+          let filled = [];
+          try {
+            filled = await BkkLib.fillTransitousIfEmpty([], origin, dest, {
+              mode,
+              minutesAfter: cfg.minutesAfter,
+            });
+          } catch (_e) {
+            filled = [];
+          }
+          if (gen !== this._gen) return;
+          if (filled.length) paintRows(filled);
+        }
         this._showErr(err);
       }
     };
@@ -1422,18 +1596,11 @@ ${this._stopPinCss()}
     this._paint();
     try {
       await run();
-      if (!this.isConnected || gen !== this._gen) return;
-      /* Hidden tab: the visibilitychange handler reloads and polls again. */
-      if (!this._shouldPoll() || this._pageHidden()) return;
-      const every = refreshSeconds(cfg.refresh) * 1000;
-      /* A run slower than the interval (a stalled ELVIRA call) skips the next
-         tick instead of racing it: two runs could paint out of order. */
-      let busy = false;
-      this._poll = setInterval(() => {
-        if (busy) return;
-        busy = true;
-        run().finally(() => { busy = false; });
-      }, every);
+      if (!this.isConnected || gen !== this._gen || !this._shouldPoll()) return;
+      this._pollRun = { gen, run, busy: false };
+      /* Hidden tab: the visibilitychange handler picks the poll up again. */
+      if (this._pageHidden()) return;
+      this._armPoll(this._pollRun);
     } finally {
       if (gen === this._gen) this._reloadActive = false;
     }

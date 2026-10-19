@@ -75,7 +75,8 @@ Object.assign(BkkLib, {
   isRailHubName(name) {
     const raw = String(name || '');
     if (!raw) return false;
-    if (/aut[o\u00f3]busz/i.test(raw) || /vol[a\u00e1]n/i.test(raw)) return false;
+    /* "Könyvtár (Buszpályaudvar)" is a bus station, not a railway one. */
+    if (/busz/i.test(raw) || /vol[a\u00e1]n/i.test(raw)) return false;
     return /p\u00e1lyaudvar|vas\u00fat\u00e1llom\u00e1s|\bpu\.?\b/i.test(raw);
   },
   isStopArea(stop) {
@@ -185,7 +186,7 @@ Object.assign(BkkLib, {
     if (/^BKK_/i.test(s)) return 4;
     if (/^hu-bkk_/i.test(s)) return 5;
     if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return 6;
-    if (/^[a-z][a-z0-9]*:/i.test(s) && s.indexOf('/') < 0) return 7;
+    if (/^[a-z][a-z0-9-]*:/i.test(s) && s.indexOf('/') < 0) return 7;
     if (/^hu-/i.test(s)) return 8;
     if (/^(?:geo:|node\/|way\/)/i.test(s)) return 10;
     if (/^(?:cz-|sk-|ua-|de-|al-|at-|eu-|pl-)/i.test(s)) return 12;
@@ -199,15 +200,16 @@ Object.assign(BkkLib, {
     if (/^BKK_0055/i.test(s) || /(?:^hu-mav_|railway)/i.test(s)) return 'mav';
     if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return 'volan';
     if (/^(?:BKK_|hu-bkk_)/i.test(s)) return 'bkk';
-    if (/^[a-z][a-z0-9]*:/i.test(s) && s.indexOf('/') < 0) return 'city';
+    /* City feeds ("miskolc:…", "volan-gyor:…"). */
+    if (/^[a-z][a-z0-9-]*:/i.test(s) && s.indexOf('/') < 0) return 'city';
     if (/^hu-/i.test(s)) return 'hu';
     return 'other';
   },
-  stopsTooFar(a, b) {
+  stopsTooFar(a, b, maxM) {
     const pa = BkkLib.finiteLatLon(a && a.lat, a && a.lon);
     const pb = BkkLib.finiteLatLon(b && b.lat, b && b.lon);
     if (!pa || !pb) return false;
-    return BkkLib.haversineMeters(pa, pb) > 400;
+    return BkkLib.haversineMeters(pa, pb) > (maxM || 400);
   },
   stopsCloseEnough(a, b) {
     const pa = BkkLib.finiteLatLon(a && a.lat, a && a.lon);
@@ -215,21 +217,42 @@ Object.assign(BkkLib, {
     if (!pa || !pb) return true;
     return BkkLib.haversineMeters(pa, pb) <= 300;
   },
+  /* Two named towns, or two cross streets ("Szeged, Londoni körút (Bakay
+     Nándor utca)" and "… (Kálvária sugárút)"), are two places. */
   citiesConflict(a, b) {
     const ca = BkkLib.stopCityKey(a);
     const cb = BkkLib.stopCityKey(b);
-    return !!(ca && cb && ca !== cb);
+    if (ca && cb && ca !== cb) return true;
+    const qa = BkkLib.stopQualifier(a);
+    const qb = BkkLib.stopQualifier(b);
+    return !!(qa && qb && qa !== qb);
   },
+  /* Same-named stops of one feed are one stop within 400 m. A stop and a
+     place, or two feeds' stops, are one place in the same town (a foreign
+     coach feed puts Kelenföld at Népliget), else within a kilometre: the
+     town of Budapest's "Fő tér" is not Tatabánya's. */
   splitStopClusters(group) {
     const clusters = [];
+    const townsConflict = (x, s) => {
+      const tx = BkkLib.stopTownKey(x);
+      const ts = BkkLib.stopTownKey(s);
+      return !!(tx && ts && tx !== ts);
+    };
+    const sameTown = (x, s) => {
+      const tx = BkkLib.stopTownKey(x);
+      return !!tx && tx === BkkLib.stopTownKey(s);
+    };
     (group || []).forEach((s) => {
       let joined = null;
       for (let i = 0; i < clusters.length; i++) {
         const cl = clusters[i];
-        if (cl.some((x) => BkkLib.citiesConflict(x, s))) continue;
+        if (cl.some((x) => BkkLib.citiesConflict(x, s) || townsConflict(x, s))) continue;
         const mixPlace = cl.some((x) => BkkLib.isPlaceStop(x) !== BkkLib.isPlaceStop(s));
         const mixOp = cl.some((x) => BkkLib.stopIdFamily(x) !== BkkLib.stopIdFamily(s));
-        if (!mixPlace && !mixOp && cl.some((x) => BkkLib.stopsTooFar(x, s))) continue;
+        const far = mixPlace || mixOp
+          ? cl.some((x) => !sameTown(x, s) && BkkLib.stopsTooFar(x, s, 1000))
+          : cl.some((x) => BkkLib.stopsTooFar(x, s));
+        if (far) continue;
         joined = cl;
         break;
       }
@@ -241,7 +264,11 @@ Object.assign(BkkLib, {
   pickCollapsedStop(cluster) {
     const list = (cluster || []).filter(Boolean);
     if (!list.length) return null;
+    /* A stop stands for the address or place of its name next to it. */
     const ranked = list.slice().sort((a, b) => {
+      const pa = BkkLib.isPlaceStop(a) ? 1 : 0;
+      const pb = BkkLib.isPlaceStop(b) ? 1 : 0;
+      if (pa !== pb) return pa - pb;
       const ra = BkkLib.stopIdRank(a.id);
       const rb = BkkLib.stopIdRank(b.id);
       if (ra !== rb) return ra - rb;
@@ -282,15 +309,54 @@ Object.assign(BkkLib, {
         if (hit) out.push(hit);
       });
     });
-    if (out.some((s) => !BkkLib.isPlaceStop(s))) {
-      return out.filter((s) => !BkkLib.isPlaceStop(s));
+    /* An address goes only into the stop of its own name and place. A
+       place (a shop, a district) also gives way to a stop of its town, or
+       of no known town; one in another town stays: a Budapest stop must
+       not hide Székesfehérvár. */
+    const real = out.filter((s) => !BkkLib.isPlaceStop(s));
+    if (!real.length) return out;
+    return out.filter((s) => {
+      if (!BkkLib.isPlaceStop(s) || String(s.kind || '') === 'address') return true;
+      const town = BkkLib.stopTownKey(s);
+      return !!town && real.every((x) => {
+        const other = BkkLib.stopTownKey(x);
+        return !!other && other !== town;
+      });
+    });
+  },
+  /* The town a picker row stands in: its "Town, " prefix, the town of its
+     feed (a city feed's area), the town our own label adds ("Fő tér
+     (Tatabánya)"), Budapest for a BKK stop; '' when nothing tells. A
+     bracket in the stop's own name is a cross street (Szeged's "Londoni
+     körút (Bakay Nándor utca)"), not a town. */
+  stopTownKey(stop) {
+    const name = String((stop && stop.name) || '');
+    const split = BkkLib.splitCityPrefix(name);
+    if (split) return BkkLib.fold(split.city);
+    if (stop && stop.area) return BkkLib.fold(stop.area);
+    /* A city feed's id names its town: "pecs:…", "volan-gyor:…". */
+    if (BkkLib.stopIdFamily(stop) === 'city' && !BkkLib.isPlaceStop(stop)) {
+      return BkkLib.fold(String(stop.id).split(':')[0].replace(/^volan-/i, '').replace(/-/g, ' '));
     }
-    return out;
+    const label = String((stop && stop.label) || '');
+    if (label && label !== name && label.indexOf(name) === 0) {
+      const paren = label.slice(name.length).match(/^\s*\(([^)]+)\)\s*$/);
+      if (paren && !/^(m[\u00e1a]v|vol[\u00e1a]n)$/i.test(paren[1])) return BkkLib.fold(paren[1]);
+    }
+    return BkkLib.stopIdFamily(stop) === 'bkk' ? 'budapest' : '';
+  },
+  /* The cross street in brackets at the end of a stop's own name. */
+  stopQualifier(stop) {
+    const m = String((stop && stop.name) || '').match(/\(([^)]+)\)\s*$/);
+    if (!m || /^(m[\u00e1a]v|vol[\u00e1a]n)$/i.test(m[1])) return '';
+    return BkkLib.fold(m[1]);
   },
   /* One row per place: the same stop from FUTÁR, Volán and the search is
-     merged, but the city stays part of the place (116 towns have an
-     "autóbusz-állomás"). `key` is the reachable-list key when there is one,
-     so it finds that destination's routes; `routeKeys` holds every merged
+     merged, but the town stays part of the place (116 towns have an
+     "autóbusz-állomás"): rows of two known towns, two cross streets, or
+     more than a kilometre apart stay apart, and a row never takes another
+     row's town. `key` is the reachable-list key when there is one, so it
+     finds that destination's routes; `routeKeys` holds every merged
      source's key. */
   destHitsForQuery(dests, q, extras) {
     const f = BkkLib.fold(q || '');
@@ -302,13 +368,21 @@ Object.assign(BkkLib, {
       let place = BkkLib.placeNameKey(d) || BkkLib.stationKey(d.name) || BkkLib.norm(d.name);
       if (!place) return;
       if (id && /^geo:/i.test(id) && String(d.kind || '') === 'address') place = place + '|' + id;
-      /* A row without a city joins any row of that place; two different
-         named cities stay two rows. */
-      const city = BkkLib.stopCityKey(d);
+      const town = BkkLib.stopTownKey(d);
+      const qual = BkkLib.stopQualifier(d);
+      const fits = (r) => !(r.town && town && r.town !== town)
+        && !(r.qual && qual && r.qual !== qual)
+        && !BkkLib.stopsTooFar(r, d, 1000);
       const rows = seen.get(place) || [];
-      const prev = rows.find((r) => r.city === city)
-        || (city ? rows.find((r) => !r.city) : rows[0]);
-      if (prev && city && !prev.city) prev.city = city;
+      const gap = (r) => {
+        const pa = BkkLib.finiteLatLon(r.lat, r.lon);
+        const pb = BkkLib.finiteLatLon(d.lat, d.lon);
+        return pa && pb ? BkkLib.haversineMeters(pa, pb) : Infinity;
+      };
+      /* The same town and cross street first, else the nearest that fits:
+         "Londoni körút" goes with the pole beside it, not one 300 m on. */
+      const prev = rows.find((r) => r.town === town && r.qual === qual && fits(r))
+        || rows.filter(fits).sort((x, y) => gap(x) - gap(y))[0];
       if (prev) {
         if (d.key && prev.routeKeys.indexOf(d.key) < 0) {
           prev.routeKeys.push(d.key);
@@ -320,7 +394,7 @@ Object.assign(BkkLib, {
         if (BkkLib.stopIdRank(id) < BkkLib.stopIdRank(prev.id)) prev.id = id;
         if (BkkLib.elviraStationCode(id) && !BkkLib.elviraStationCode(prev.id)) prev.id = id;
         if (/^geo:/i.test(String(prev.id || '')) && id && !/^geo:/i.test(id)) prev.id = id;
-        if (Number.isFinite(Number(d.lat)) && !Number.isFinite(Number(prev.lat))) {
+        if (BkkLib.finiteLatLon(d.lat, d.lon) && !BkkLib.finiteLatLon(prev.lat, prev.lon)) {
           prev.lat = Number(d.lat);
           prev.lon = Number(d.lon);
         }
@@ -330,11 +404,15 @@ Object.assign(BkkLib, {
       const row = {
         key: d.key || place, name: d.name, id: id, routeKeys: d.key ? [d.key] : [], fromList: !!d.key,
       };
-      if (Number.isFinite(Number(d.lat))) row.lat = Number(d.lat);
-      if (Number.isFinite(Number(d.lon))) row.lon = Number(d.lon);
+      if (BkkLib.finiteLatLon(d.lat, d.lon)) {
+        row.lat = Number(d.lat);
+        row.lon = Number(d.lon);
+      }
       if (d.kind) row.kind = d.kind;
       if (d.label) row.label = d.label;
-      Object.defineProperty(row, 'city', { value: city, writable: true, enumerable: false });
+      if (d.area) row.area = d.area;
+      Object.defineProperty(row, 'town', { value: town, enumerable: false });
+      Object.defineProperty(row, 'qual', { value: qual, enumerable: false });
       rows.push(row);
       seen.set(place, rows);
       out.push(row);
