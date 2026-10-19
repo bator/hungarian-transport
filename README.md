@@ -95,11 +95,13 @@ comes from the integration.
 > dashboard config, and the browser sends it to BKK in the request URL. Put the
 > key in the integration instead and remove `apiKey` from the card. The card
 > logs a one-time warning in the browser console, and the editor shows a note
-> next to the field, while a card key is set.
+> next to the field, in every mode, while a card key is set.
 
 A key can still be set per card (`apiKey`), which takes precedence. If another
 Hungarian transport card on the same dashboard already has one and the
-integration has none, the editor reuses it. When the key works, the editor
+integration has none, the card and the editor borrow it at runtime; the editor
+no longer copies it into the new card's YAML, and says where the key comes
+from. When the key works, the editor
 hides the field and shows a **Change** link; the field reappears if the key is
 missing or FUTÁR rejects it. Volán and Helyi modes
 do not need a key.

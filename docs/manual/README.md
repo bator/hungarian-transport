@@ -186,6 +186,11 @@ sign-up. **Show** reveals what you typed.
 Once the key works, the field folds away and a **Change** link stays. If BKK
 rejects the key, the field comes back with an error.
 
+Without a key in the integration, the editor borrows the key of another card
+on the same dashboard for its searches and says so; it does not save that key
+into the new card. A key on a card is deprecated: the editor shows a note
+while the card's YAML holds one, in every mode.
+
 ### 4.3 The four modes
 
 | Mode | Shows | Needs the BKK key |

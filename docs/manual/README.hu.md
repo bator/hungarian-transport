@@ -194,6 +194,11 @@ regisztráció linkje. A **Mutat** gombbal láthatod, amit beírtál.
 Ha a kulcs működik, a mező összecsukódik, és egy **Módosítás** link marad.
 Ha a BKK elutasítja, a mező hibaüzenettel visszajön.
 
+Ha az integrációban nincs kulcs, a szerkesztő a keresésekhez kölcsönveszi egy
+másik kártya kulcsát ugyanezen a műszerfalon, és ezt ki is írja; az új
+kártyába nem menti el. A kártyán megadott kulcs elavult: amíg a kártya
+YAML-jében van kulcs, a szerkesztő minden módban figyelmeztet erre.
+
 ### 4.3 A négy üzemmód
 
 | Mód | Mit mutat | Kell BKK kulcs? |

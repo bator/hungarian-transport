@@ -775,6 +775,7 @@ var I18N = {
     apiKeyShow: "Mutat",
     apiKeyHide: "Elrejt",
     apiKeyIntegration: "A BKK API kulcsot a Magyar közlekedés integráció adja.",
+    apiKeyBorrowed: "A BKK API kulcsot egy másik kártya adja ezen a műszerfalon, ebbe a kártyába nem kerül be. A kártyán megadott kulcs elavult: tedd át a Magyar közlekedés integrációba.",
     apiKeyDeprecated: "A kártyán megadott kulcs elavult: minden bejelentkezett Home Assistant-felhasználó kiolvashatja a műszerfal beállításaiból, és a kérés címében megy a BKK-nak. Add meg inkább a Magyar közlekedés integrációban, és töröld innen.",
     nameLabel: "Név (opcionális)",
     namePlaceholder: "Magyar közlekedés",
@@ -956,6 +957,7 @@ var I18N = {
     apiKeyShow: "Show",
     apiKeyHide: "Hide",
     apiKeyIntegration: "The BKK API key comes from the Hungarian transport integration.",
+    apiKeyBorrowed: "The BKK API key comes from another card on this dashboard and is not saved into this card. A key on a card is deprecated: move it into the Hungarian transport integration.",
     apiKeyDeprecated: "A key on the card is deprecated: every logged-in Home Assistant user can read it from the dashboard config, and it is sent to BKK in the request URL. Enter it in the Hungarian transport integration instead and remove it here.",
     nameLabel: "Name (optional)",
     namePlaceholder: "Hungarian transport",
@@ -4506,6 +4508,12 @@ Object.assign(BkkLib, {
       return BkkLib.trainNumberLooseFromTripId(row.tripId);
     };
     const ownNumber = (row) => BkkLib.isTrainRow(row) && !!String(row.trainNumber || "").trim() && !BkkLib.isFutarTripId(row.tripId) && !BkkLib.suburbanLineLabel(row.label);
+    const numbersOf = (row) => [BkkLib.rowTrainNumber(row), looseNumber(row)].map(numberKey).filter(Boolean);
+    const otherTrain = (a, b) => {
+      const x = numbersOf(a);
+      const y = numbersOf(b);
+      return !!x.length && !!y.length && !x.some((n) => y.indexOf(n) >= 0);
+    };
     const brandedHost = (row) => BkkLib.isTrainRow(row) && !BkkLib.numberedRailBadge(row) && (BkkLib.suburbanLineLabel(row && row.label) || !BkkLib.genericRailLabel(row && row.label) && String(row && row.label || "").trim());
     const add = (row, skipUnmatched) => {
       if (!row || !departureStillDue(row.dep || row.sched)) return;
@@ -4518,14 +4526,14 @@ Object.assign(BkkLib, {
         return;
       }
       if (BkkLib.numberedRailBadge(row) && min) {
-        const host = out.findIndex((p) => brandedHost(p) && minuteOf(p) === min);
+        const host = out.findIndex((p) => brandedHost(p) && minuteOf(p) === min && !otherTrain(p, row));
         if (host >= 0) {
           overlay(out[host], row);
           registerNumber(n, host);
           return;
         }
       } else if (brandedHost(row) && min) {
-        const numbered = out.findIndex((p) => BkkLib.numberedRailBadge(p) && minuteOf(p) === min);
+        const numbered = out.findIndex((p) => BkkLib.numberedRailBadge(p) && minuteOf(p) === min && !otherTrain(p, row));
         if (numbered >= 0) {
           overlay(out[numbered], row);
           registerNumber(n, numbered);
@@ -4537,9 +4545,9 @@ Object.assign(BkkLib, {
         const genericIc = (r) => BkkLib.isTrainRow(r) && BkkLib.genericRailLabel(r && r.label);
         let pair = -1;
         if (namedIc(row)) {
-          pair = out.findIndex((p) => genericIc(p) && minuteOf(p) === min);
+          pair = out.findIndex((p) => genericIc(p) && minuteOf(p) === min && !otherTrain(p, row));
         } else if (genericIc(row)) {
-          pair = out.findIndex((p) => namedIc(p) && minuteOf(p) === min);
+          pair = out.findIndex((p) => namedIc(p) && minuteOf(p) === min && !otherTrain(p, row));
         }
         if (pair >= 0) {
           overlay(out[pair], row);
@@ -4550,7 +4558,7 @@ Object.assign(BkkLib, {
         }
       }
       const tk = timeOf(row);
-      if (!skipUnmatched && byTime.has(tk)) {
+      if (!skipUnmatched && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
         overlay(out[byTime.get(tk)], row);
         return;
       }
@@ -6075,11 +6083,11 @@ var BKKHopCardEditor = class extends HTMLElement {
       this._syncMode();
     }
     const viaIntegration = BkkLib.integrationHasKey(hass);
-    if (!this._userEditedKey && !this._config.apiKey && !this._loadingKey && !viaIntegration && !this._keyless()) this._fillKey();
+    if (!this._userEditedKey && !this._config.apiKey && !this._borrowedKey && !this._loadingKey && !viaIntegration && !this._keyless()) this._fillKey();
     else if (this._hasFutar()) this._probeKey();
   }
   _apiKey() {
-    return BkkLib.cardApiKey(this._config, this._hass);
+    return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
   }
   _hasFutar() {
     return BkkLib.hasFutar(this._apiKey(), this._hass);
@@ -6378,23 +6386,31 @@ var BKKHopCardEditor = class extends HTMLElement {
     const wrap = this._el("apiKeyWrap");
     const okWrap = this._el("apiKeyOkWrap");
     if (!wrap) return;
+    const depWrap = this._el("apiKeyDeprecatedWrap");
+    const dep = this._el("apiKeyDeprecated");
+    const showDeprecated = (on) => {
+      if (depWrap) depWrap.style.display = on ? "" : "none";
+      if (dep) dep.textContent = on ? t(this._lang(), "apiKeyDeprecated") : "";
+    };
+    const own = (this._config.apiKey || "").trim();
     const mode = this._mode();
     if (mode === "volan" || mode === "helyi") {
       wrap.style.display = "none";
       if (okWrap) okWrap.style.display = "none";
+      showDeprecated(!!own);
       return;
     }
-    const own = (this._config.apiKey || "").trim();
     const viaIntegration = !own && BkkLib.integrationHasKey(this._hass);
-    const settled = !this._keyReveal && (viaIntegration && this._keyOk !== false || !!own && this._keyOk === true);
+    const borrowed = !own && !viaIntegration && !!String(this._borrowedKey || "").trim();
+    const settled = !this._keyReveal && (viaIntegration && this._keyOk !== false || (!!own || borrowed) && this._keyOk === true);
     wrap.style.display = settled ? "none" : "";
     if (okWrap) okWrap.style.display = settled ? "" : "none";
     const okText = this._el("apiKeyOkText");
-    if (okText) okText.textContent = t(this._lang(), viaIntegration ? "apiKeyIntegration" : "apiKeyOk");
-    const depWrap = this._el("apiKeyDeprecatedWrap");
-    const dep = this._el("apiKeyDeprecated");
-    if (depWrap) depWrap.style.display = own ? "" : "none";
-    if (dep) dep.textContent = own ? t(this._lang(), "apiKeyDeprecated") : "";
+    if (okText) {
+      const okKey = viaIntegration ? "apiKeyIntegration" : borrowed ? "apiKeyBorrowed" : "apiKeyOk";
+      okText.textContent = t(this._lang(), okKey);
+    }
+    showDeprecated(!!own);
   }
   /* The key is a password field; the button shows it to check a paste. */
   _syncKeyReveal() {
@@ -6585,7 +6601,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     try {
       const key = await BkkLib.apiKeyFromDashboard(this._hass);
       if (key && !this._config.apiKey && !this._userEditedKey) {
-        this._emit({ apiKey: key });
+        this._borrowedKey = key;
         await this._probeKey();
       }
     } finally {
