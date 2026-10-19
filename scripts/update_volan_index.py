@@ -60,11 +60,17 @@ _SECRET_PARAM = re.compile(
     # an Authorization scheme word stays (its credentials went with _AUTH_SCHEME)
     r"(?!(?:Bearer|Basic)\s)[^\s&'\"<>,;]+"
 )
+# Redaction runs on this much of a text at most: the name pattern backtracks
+# on long runs of separators ("a." * 8000 took 1.8 s), and a webhook or log
+# line has no use for more.
+REDACT_MAX = 4096
 
 
 def redact(text: str) -> str:
     """text without URL queries, URL credentials, auth credentials and the values of
-    secret-named parameters (see above)."""
+    secret-named parameters (see above), cut to REDACT_MAX characters."""
+    if len(text) > REDACT_MAX:
+        text = text[:REDACT_MAX] + " …"
     text = _URL_USERINFO.sub(r"\1…@", text)
     text = _URL_QUERY.sub(r"\1?…", text)
     text = _BARE_QUERY.sub("?…", text)
