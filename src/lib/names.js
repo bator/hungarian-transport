@@ -526,7 +526,7 @@ Object.assign(BkkLib, {
     const memoKey = String(id || '') + '|' + n;
     const hit = BkkLib._elviraCodes.get(memoKey);
     if (hit && (hit.code || Date.now() - hit.ts < 600000)) return hit.code;
-    const code = await BkkLib._searchElviraCode(apiKey, n);
+    const code = await this._searchElviraCode(apiKey, n);
     BkkLib._elviraCodes.set(memoKey, { code, ts: Date.now() });
     return code;
   },
@@ -541,7 +541,7 @@ Object.assign(BkkLib, {
       if (!q || seen.has(q)) continue;
       seen.add(q);
       try {
-        const hits = await BkkLib.searchStops(apiKey, q, 'mav');
+        const hits = await this.searchStops(apiKey, q, 'mav');
         for (let j = 0; j < hits.length; j++) {
           const c = BkkLib.elviraStationCode(hits[j].id);
           if (c) {

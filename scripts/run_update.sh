@@ -10,7 +10,9 @@
 # script itself.
 #
 # `run_update.sh --worker` runs the job in the foreground (tests, debugging).
-set -eu
+# pipefail: a failed stage of a pipeline (the escape fallback, the token
+# header pipe) fails the pipeline instead of being hidden by its last stage.
+set -euo pipefail
 base="${HUNGARIAN_TRANSPORT_BASE:-/config/hungarian-transport}"
 default_webhook="http://127.0.0.1:8123/api/webhook/hungarian-transport-gtfs"
 webhook="${HUNGARIAN_TRANSPORT_WEBHOOK:-}"

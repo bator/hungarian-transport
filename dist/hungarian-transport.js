@@ -502,7 +502,7 @@ Object.assign(BkkLib, {
     const memoKey = String(id || "") + "|" + n;
     const hit = BkkLib._elviraCodes.get(memoKey);
     if (hit && (hit.code || Date.now() - hit.ts < 6e5)) return hit.code;
-    const code = await BkkLib._searchElviraCode(apiKey, n);
+    const code = await this._searchElviraCode(apiKey, n);
     BkkLib._elviraCodes.set(memoKey, { code, ts: Date.now() });
     return code;
   },
@@ -517,7 +517,7 @@ Object.assign(BkkLib, {
       if (!q || seen.has(q)) continue;
       seen.add(q);
       try {
-        const hits = await BkkLib.searchStops(apiKey, q, "mav");
+        const hits = await this.searchStops(apiKey, q, "mav");
         for (let j = 0; j < hits.length; j++) {
           const c = BkkLib.elviraStationCode(hits[j].id);
           if (c) {
@@ -690,21 +690,6 @@ var ASSET_BASE = new URL(".", import.meta.url).href;
 var VOLAN_INDEX_OVERRIDE = "";
 var CITY_INDEX_OVERRIDE = "";
 var MAV_INDEX_OVERRIDE = "";
-function setVolanIndexUrl(url) {
-  VOLAN_INDEX_OVERRIDE = String(url || "");
-}
-function setCityIndexUrl(url) {
-  CITY_INDEX_OVERRIDE = String(url || "");
-}
-function setMavIndexUrl(url) {
-  MAV_INDEX_OVERRIDE = String(url || "");
-}
-function applyIndexOverrides(cfg) {
-  const c = cfg || {};
-  setVolanIndexUrl(c.volanIndex);
-  setCityIndexUrl(c.cityIndex);
-  setMavIndexUrl(c.mavIndex);
-}
 var TZ = "Europe/Budapest";
 var TZ_PARTS = new Intl.DateTimeFormat("en-GB", {
   timeZone: TZ,
@@ -762,16 +747,16 @@ function tzDow(ymd) {
 function dayBuster(base) {
   return `${base}${base.includes("?") ? "&" : "?"}v=${tzParts(/* @__PURE__ */ new Date()).ymd}`;
 }
-function volanIndexUrl() {
-  const base = VOLAN_INDEX_OVERRIDE || new URL("volan-index.json.gz", ASSET_BASE).href;
+function volanIndexUrl(own) {
+  const base = own || VOLAN_INDEX_OVERRIDE || new URL("volan-index.json.gz", ASSET_BASE).href;
   return dayBuster(base);
 }
-function cityIndexUrl() {
-  const base = CITY_INDEX_OVERRIDE || new URL("city-index.json.gz", ASSET_BASE).href;
+function cityIndexUrl(own) {
+  const base = own || CITY_INDEX_OVERRIDE || new URL("city-index.json.gz", ASSET_BASE).href;
   return dayBuster(base);
 }
-function mavIndexUrl() {
-  const base = MAV_INDEX_OVERRIDE || new URL("mav-index.json.gz", ASSET_BASE).href;
+function mavIndexUrl(own) {
+  const base = own || MAV_INDEX_OVERRIDE || new URL("mav-index.json.gz", ASSET_BASE).href;
   return dayBuster(base);
 }
 
@@ -790,6 +775,7 @@ var I18N = {
     apiKeyShow: "Mutat",
     apiKeyHide: "Elrejt",
     apiKeyIntegration: "A BKK API kulcsot a Magyar közlekedés integráció adja.",
+    apiKeyDeprecated: "A kártyán megadott kulcs elavult: minden bejelentkezett Home Assistant-felhasználó kiolvashatja a műszerfal beállításaiból, és a kérés címében megy a BKK-nak. Add meg inkább a Magyar közlekedés integrációban, és töröld innen.",
     nameLabel: "Név (opcionális)",
     namePlaceholder: "Magyar közlekedés",
     cardTitle: "Magyar közlekedés",
@@ -970,6 +956,7 @@ var I18N = {
     apiKeyShow: "Show",
     apiKeyHide: "Hide",
     apiKeyIntegration: "The BKK API key comes from the Hungarian transport integration.",
+    apiKeyDeprecated: "A key on the card is deprecated: every logged-in Home Assistant user can read it from the dashboard config, and it is sent to BKK in the request URL. Enter it in the Hungarian transport integration instead and remove it here.",
     nameLabel: "Name (optional)",
     namePlaceholder: "Hungarian transport",
     cardTitle: "Hungarian transport",
@@ -1267,7 +1254,10 @@ Object.assign(BkkLib, {
     return data;
   },
   /* With a card key the browser calls FUTÁR directly; without one, the
-     integration's hungarian_transport.futar service does, with its own key. */
+     integration's hungarian_transport.futar service does, with its own key.
+     The card key path is DEPRECATED (review J-3): the key goes into the URL
+     below and is readable from the dashboard config by every Home Assistant
+     user. It still works; see BkkLib.warnCardApiKey. */
   async fetch(apiKey, path, params, foreground) {
     if (!apiKey) {
       if (!BkkLib.integrationHasKey()) throw codedError("errNoApiKey");
@@ -1550,17 +1540,17 @@ Object.assign(BkkLib, {
         if (byId.has(row.id)) return;
         byId.set(row.id, row);
       });
-      await BkkLib.addTransitousVolanStops(byId, q, motis);
+      await this.addTransitousVolanStops(byId, q, motis);
     } catch (_e) {
     }
     try {
-      (await BkkLib.searchStops(apiKey, q, "all", "", { skipTransitousVolan: true })).forEach((s) => {
+      (await this.searchStops(apiKey, q, "all", "", { skipTransitousVolan: true })).forEach((s) => {
         if (!s || !s.id || byId.has(s.id)) return;
         byId.set(s.id, s);
       });
     } catch (_e) {
     }
-    const placed = await BkkLib.withGtfsCoords(Array.from(byId.values()));
+    const placed = await this.withGtfsCoords(Array.from(byId.values()));
     const collapsed = BkkLib.collapseSameNameStops(placed);
     return BkkLib.capPlannerHits(collapsed, 24);
   },
@@ -2408,7 +2398,7 @@ Object.assign(BkkLib, {
      FUTÁR plan-trip when it has none. */
   async planJourneys(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
-    [origin, dest] = await BkkLib.withGtfsCoords([origin, dest]);
+    [origin, dest] = await this.withGtfsCoords([origin, dest]);
     let list = await BkkLib.transitousJourneys(origin, dest, opts);
     if (!list.length && BkkLib.hasFutar(apiKey)) {
       const [fromPlace, toPlace] = await Promise.all([
@@ -2441,7 +2431,7 @@ Object.assign(BkkLib, {
   },
   async planJourney(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
-    [origin, dest] = await BkkLib.withGtfsCoords([origin, dest]);
+    [origin, dest] = await this.withGtfsCoords([origin, dest]);
     const motis = await BkkLib.transitousJourney(origin, dest, opts);
     if (motis && motis.legs.some((leg) => !leg.walk)) return BkkLib.nameJourneyEnds(motis, origin, dest);
     let futar = null;
@@ -2467,7 +2457,7 @@ Object.assign(BkkLib, {
       }
     }
     if (futar && futar.legs.some((leg) => !leg.walk)) return BkkLib.nameJourneyEnds(futar, origin, dest);
-    const viaCity = await BkkLib.cityRailJourney(apiKey, hass, origin, dest);
+    const viaCity = await this.cityRailJourney(apiKey, hass, origin, dest);
     return viaCity || futar;
   },
   /* One operator's ride and walk edges for a service day: the fastest
@@ -2661,7 +2651,7 @@ Object.assign(BkkLib, {
     if (!BkkLib.isRailDest(dest) || BkkLib.stopIdFamily(origin) !== "city") return null;
     let idx;
     try {
-      idx = await BkkLib.cityIndex();
+      idx = await this.cityIndex();
     } catch (_e) {
       return null;
     }
@@ -2736,7 +2726,7 @@ Object.assign(BkkLib, {
       ready = timed.arr;
     }
     if (!destIsHub) {
-      const rail = await BkkLib.railAfterCity(apiKey, hass, cityName, path, dest, ready);
+      const rail = await this.railAfterCity(apiKey, hass, cityName, path, dest, ready);
       if (!rail) return null;
       legs.push(rail.walk);
       legs.push(rail.train);
@@ -2835,7 +2825,7 @@ Object.assign(BkkLib, {
     for (let i = 0; i < queries.length; i++) {
       let hits = [];
       try {
-        hits = await BkkLib.searchStops(apiKey, queries[i], "mav") || [];
+        hits = await this.searchStops(apiKey, queries[i], "mav") || [];
       } catch (_e) {
         hits = [];
       }
@@ -2851,7 +2841,7 @@ Object.assign(BkkLib, {
   },
   async railAfterCity(apiKey, hass, cityName, path, dest, readySec) {
     if (!path || !path.hubName) return null;
-    const station = await BkkLib.railStationAtHub(apiKey, cityName, path);
+    const station = await this.railStationAtHub(apiKey, cityName, path);
     if (!station || !station.id) return null;
     const walkStart = readySec;
     const walkEnd = readySec + 6 * 60;
@@ -2873,8 +2863,8 @@ Object.assign(BkkLib, {
     let train = null;
     if (hass && dest && dest.id) {
       try {
-        const destCode = await BkkLib.elviraResolveCode(apiKey, dest.id, dest.name || "");
-        const rows = destCode ? await BkkLib.elviraBetween(
+        const destCode = await this.elviraResolveCode(apiKey, dest.id, dest.name || "");
+        const rows = destCode ? await this.elviraBetween(
           hass,
           station.id,
           destCode,
@@ -3568,6 +3558,22 @@ var INDEX_SCHEMA = 29;
 
 // src/lib/dashboard-key.js
 Object.assign(BkkLib, {
+  /* DEPRECATED card-level key (review J-3, 2026-10-19). A key in the card YAML
+     is sent to BKK as a query parameter (futar.js), and any logged-in Home
+     Assistant user, admin or not, can read it with the lovelace/config call
+     used below. It keeps working; the recommended place is the integration
+     (the hungarian_transport.futar service), whose key never leaves Home
+     Assistant. The card says so once per page, without the key itself. */
+  _warnedCardKey: false,
+  warnCardApiKey(cfg) {
+    if (BkkLib._warnedCardKey || !cfg || typeof cfg.apiKey !== "string" || !cfg.apiKey.trim()) return false;
+    BkkLib._warnedCardKey = true;
+    try {
+      console.warn("Hungarian transport: the card-level apiKey is deprecated. Every logged-in Home Assistant user can read it from the dashboard config, and it is sent to BKK in the request URL. Enter the key in the Hungarian transport integration instead and remove apiKey from the card.");
+    } catch (_e) {
+    }
+    return true;
+  },
   /* Only a key that sits on one of our own cards may be reused. A dashboard can
      hold apiKey values belonging to entirely unrelated cards, and those must
      never end up in a request to BKK. */
@@ -3663,11 +3669,22 @@ Object.assign(BkkLib, {
     BkkLib._cacheIndex(cache, url, p, 8);
     return p;
   },
+  /* One card's view of the library: the same functions, with that card's own
+     index URLs (volanIndex / cityIndex / mavIndex from its config). The lookups
+     reach the indexes through `this`, so a card's override follows its own
+     calls across every await and never leaks to another card (review J-2).
+     A card without overrides gets the library itself. */
+  withIndexes(cfg) {
+    const c = cfg || {};
+    const ix = { volan: String(c.volanIndex || ""), city: String(c.cityIndex || ""), mav: String(c.mavIndex || "") };
+    if (!ix.volan && !ix.city && !ix.mav) return BkkLib;
+    return Object.create(BkkLib, { _ix: { value: ix } });
+  },
   volanIndex() {
-    return BkkLib._indexCached(volanIndexUrl(), "errVolanHttp", "errVolanGunzip");
+    return BkkLib._indexCached(volanIndexUrl(this && this._ix && this._ix.volan), "errVolanHttp", "errVolanGunzip");
   },
   cityIndex() {
-    return BkkLib._indexCached(cityIndexUrl(), "errCityHttp", "errCityGunzip");
+    return BkkLib._indexCached(cityIndexUrl(this && this._ix && this._ix.city), "errCityHttp", "errCityGunzip");
   },
   _mavP: /* @__PURE__ */ new Map(),
   /* When the index came back empty or failed: url -> the time of that answer.
@@ -3675,7 +3692,7 @@ Object.assign(BkkLib, {
   _mavEmptyAt: /* @__PURE__ */ new Map(),
   _mavEmptyRetryMs: 10 * 60 * 1e3,
   mavIndex() {
-    const url = mavIndexUrl();
+    const url = mavIndexUrl(this && this._ix && this._ix.mav);
     const cache = BkkLib._mavP;
     const hit = cache.get(url);
     if (hit) {
@@ -3788,7 +3805,7 @@ Object.assign(BkkLib, {
   },
   async mavRouteForRow(row, boardName, alightName) {
     try {
-      const idx = await BkkLib.mavIndex();
+      const idx = await this.mavIndex();
       if (!idx || !Array.isArray(idx.p)) return null;
       const hit = BkkLib.mavShapeIndexKey(row, idx);
       if (!hit) return null;
@@ -3899,8 +3916,8 @@ Object.assign(BkkLib, {
       }
     };
     const [city, volan] = await Promise.all([
-      load(cityish, () => BkkLib.cityIndex()),
-      load(volanish, () => BkkLib.volanIndex())
+      load(cityish, () => this.cityIndex()),
+      load(volanish, () => this.volanIndex())
     ]);
     return list.map((s) => {
       const idx = cityish(s) ? city : volanish(s) ? volan : null;
@@ -4062,11 +4079,11 @@ Object.assign(BkkLib, {
     return split ? BkkLib.fold(split.city) : "";
   },
   async volanSearchStops(q) {
-    const idx = await BkkLib.volanIndex();
+    const idx = await this.volanIndex();
     return BkkLib.gtfsSearchStops(idx, q, null);
   },
   async volanRoutesAtStop(stop) {
-    const idx = await BkkLib.volanIndex();
+    const idx = await this.volanIndex();
     const origin = BkkLib.volanMatchStop(idx, stop, null);
     if (!origin) return [];
     const seen = /* @__PURE__ */ new Set();
@@ -4091,7 +4108,7 @@ Object.assign(BkkLib, {
     return out;
   },
   async volanRemainingNames(stop, routeLabel) {
-    const idx = await BkkLib.volanIndex();
+    const idx = await this.volanIndex();
     const origin = BkkLib.volanMatchStop(idx, stop, null);
     if (!origin || !routeLabel) return [];
     const want = String(routeLabel);
@@ -4129,7 +4146,7 @@ Object.assign(BkkLib, {
   },
   async citySearchStops(q, city) {
     if (!city) return [];
-    const idx = await BkkLib.cityIndex();
+    const idx = await this.cityIndex();
     return BkkLib.gtfsSearchStops(idx, q, BkkLib.opIx(idx, city));
   },
   gtfsSearchStops(idx, q, opIx) {
@@ -4149,12 +4166,12 @@ Object.assign(BkkLib, {
     return hits.slice(0, 20).map((s) => BkkLib.gtfsHit(idx, s, { label: s.name, type: "BUS" }));
   },
   async volanReachableDests(stop) {
-    const idx = await BkkLib.volanIndex();
+    const idx = await this.volanIndex();
     return BkkLib.gtfsReachableDests(idx, stop, null);
   },
   async cityReachableDests(stop, city) {
     if (!city) return { dests: [], destRoutes: {} };
-    const idx = await BkkLib.cityIndex();
+    const idx = await this.cityIndex();
     return BkkLib.gtfsReachableDests(idx, stop, BkkLib.opIx(idx, city));
   },
   gtfsReachableDests(idx, stop, opIx) {
@@ -4184,12 +4201,12 @@ Object.assign(BkkLib, {
     return { dests, destRoutes };
   },
   async volanDepartures(stopId, dest, originName, minutesAfter) {
-    const idx = await BkkLib.volanIndex();
+    const idx = await this.volanIndex();
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, null, "#F9AB13", "#000000", "coach", "COACH", minutesAfter);
   },
   async cityDepartures(stopId, dest, originName, city, minutesAfter) {
     if (!city) return [];
-    const idx = await BkkLib.cityIndex();
+    const idx = await this.cityIndex();
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), "#0F6FC6", "#ffffff", "bus", "BUS", minutesAfter);
   },
   /* GTFS route_type (basic and extended codes) to the card's vehicle kind.
@@ -4286,7 +4303,7 @@ Object.assign(BkkLib, {
   async stopArea(cfg) {
     if (BkkLib.mode(cfg || {}) !== "helyi" || !cfg.city) return "";
     try {
-      const idx = await BkkLib.cityIndex();
+      const idx = await this.cityIndex();
       const op = (idx.ops || []).find((o) => o.id === cfg.city);
       return op ? String(op.name || "").split(" — ")[0].trim() : "";
     } catch (_e) {
@@ -4582,8 +4599,8 @@ Object.assign(BkkLib, {
     if (!BkkLib.hasElvira(hass) || Date.now() < BkkLib._elviraDownUntil) return [];
     let origin = BkkLib.elviraStationCode(originId);
     let dest = BkkLib.elviraStationCode(destId);
-    if (!origin) origin = await BkkLib.elviraResolveCode(opts.apiKey, originId, opts.originName || "");
-    if (!dest) dest = await BkkLib.elviraResolveCode(opts.apiKey, destId, destName || "");
+    if (!origin) origin = await this.elviraResolveCode(opts.apiKey, originId, opts.originName || "");
+    if (!dest) dest = await this.elviraResolveCode(opts.apiKey, destId, destName || "");
     if (!origin || !dest || origin === dest) {
       return [];
     }
@@ -4739,7 +4756,7 @@ Object.assign(BkkLib, {
     const motis = motisHits || await BkkLib.searchStopsTransitous(q);
     let idx = null;
     try {
-      idx = await BkkLib.volanIndex();
+      idx = await this.volanIndex();
     } catch (_e) {
       idx = null;
     }
@@ -4773,19 +4790,19 @@ Object.assign(BkkLib, {
     const byId = /* @__PURE__ */ new Map();
     if (mode === "volan" || mode === "all") {
       try {
-        (await BkkLib.volanSearchStops(q)).forEach((s) => byId.set(s.id, s));
+        (await this.volanSearchStops(q)).forEach((s) => byId.set(s.id, s));
       } catch (_e) {
       }
       try {
         if (!(opts && opts.skipTransitousVolan)) {
-          await BkkLib.addTransitousVolanStops(byId, q);
+          await this.addTransitousVolanStops(byId, q);
         }
       } catch (_e) {
       }
     }
     if (mode === "all") {
       try {
-        const idx = await BkkLib.cityIndex();
+        const idx = await this.cityIndex();
         const seenFold = /* @__PURE__ */ new Set();
         BkkLib.citySearchAll(idx, q).forEach((s) => {
           const opId = BkkLib.cityOpId(idx, s);
@@ -4806,7 +4823,7 @@ Object.assign(BkkLib, {
     }
     if (mode === "helyi") {
       try {
-        (await BkkLib.citySearchStops(q, city)).forEach((s) => byId.set(s.id, s));
+        (await this.citySearchStops(q, city)).forEach((s) => byId.set(s.id, s));
       } catch (_e) {
       }
       return BkkLib.groupStops(Array.from(byId.values())).slice(0, 20);
@@ -5082,7 +5099,7 @@ Object.assign(BkkLib, {
   },
   async reachableDests(apiKey, cache, stop, mode, city) {
     if (mode === "helyi") {
-      return BkkLib.cityReachableDests(stop, city);
+      return this.cityReachableDests(stop, city);
     }
     let out = { dests: [], destRoutes: {} };
     try {
@@ -5154,15 +5171,15 @@ Object.assign(BkkLib, {
     }
     if (mode === "volan" || mode === "all") {
       try {
-        out = BkkLib.mergeDestIndex(await BkkLib.volanReachableDests(stop), out);
+        out = BkkLib.mergeDestIndex(await this.volanReachableDests(stop), out);
       } catch (_e) {
       }
     }
     if (mode === "all") {
       try {
-        const idx = await BkkLib.cityIndex();
+        const idx = await this.cityIndex();
         const cityId = BkkLib.cityOpId(idx, stop);
-        if (cityId) out = BkkLib.mergeDestIndex(await BkkLib.cityReachableDests(stop, cityId), out);
+        if (cityId) out = BkkLib.mergeDestIndex(await this.cityReachableDests(stop, cityId), out);
       } catch (_e) {
       }
     }
@@ -5200,7 +5217,7 @@ Object.assign(BkkLib, {
     const mode = opts.mode || (opts.mav ? "mav" : "bkk");
     const horizon = clampMinutesAfter(opts.minutesAfter);
     if (mode === "helyi") {
-      let cityRows = await BkkLib.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
+      let cityRows = await this.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
       cityRows = await BkkLib.fillTransitousIfEmpty(
         cityRows,
         { id: stopId, name: opts.originName || "" },
@@ -5222,7 +5239,7 @@ Object.assign(BkkLib, {
     if ((mode === "mav" || mode === "all") && opts.hass && !opts.skipElvira) {
       try {
         const destId = dest && dest.id || opts.destStopId || "";
-        elviraExtra = await BkkLib.elviraBetween(
+        elviraExtra = await this.elviraBetween(
           opts.hass,
           stopId,
           destId,
@@ -5400,7 +5417,7 @@ Object.assign(BkkLib, {
       let extraCity = [];
       if (mode === "volan" || mode === "all") {
         try {
-          extraVolan = await BkkLib.volanDepartures(stopId, dest, opts.originName, horizon);
+          extraVolan = await this.volanDepartures(stopId, dest, opts.originName, horizon);
           if (mode === "all" && selected.size) {
             extraVolan = extraVolan.filter((row) => selected.has("gtfs:" + row.label));
           }
@@ -5410,10 +5427,10 @@ Object.assign(BkkLib, {
       }
       if (mode === "all") {
         try {
-          const idx = await BkkLib.cityIndex();
+          const idx = await this.cityIndex();
           const cityId = BkkLib.cityOpId(idx, { id: stopId, name: opts.originName || "" });
           if (cityId) {
-            extraCity = await BkkLib.cityDepartures(stopId, dest, opts.originName, cityId, horizon);
+            extraCity = await this.cityDepartures(stopId, dest, opts.originName, cityId, horizon);
           }
         } catch (_e) {
         }
@@ -6029,10 +6046,10 @@ var BKKHopCardEditor = class extends HTMLElement {
   }
   setConfig(config) {
     this._config = normalizeCardConfig(config);
+    BkkLib.warnCardApiKey(this._config);
     if (!this._cache) this._cache = {};
     if (!this._dests) this._dests = [];
     if (!this._destRoutes) this._destRoutes = {};
-    applyIndexOverrides(this._config);
     if (!this._built) this._build();
     this._syncLang();
     this._syncTexts();
@@ -6157,6 +6174,9 @@ var BKKHopCardEditor = class extends HTMLElement {
           <div class="hint"><span id="apiKeyOkText"></span>
             <a href="#" id="apiKeyEdit"></a>
           </div>
+        </div>
+        <div class="f" id="apiKeyDeprecatedWrap" style="display:none">
+          <div class="hint" id="apiKeyDeprecated"></div>
         </div>
         <div class="f">
           <label id="lblName" for="name"></label>
@@ -6371,6 +6391,10 @@ var BKKHopCardEditor = class extends HTMLElement {
     if (okWrap) okWrap.style.display = settled ? "" : "none";
     const okText = this._el("apiKeyOkText");
     if (okText) okText.textContent = t(this._lang(), viaIntegration ? "apiKeyIntegration" : "apiKeyOk");
+    const depWrap = this._el("apiKeyDeprecatedWrap");
+    const dep = this._el("apiKeyDeprecated");
+    if (depWrap) depWrap.style.display = own ? "" : "none";
+    if (dep) dep.textContent = own ? t(this._lang(), "apiKeyDeprecated") : "";
   }
   /* The key is a password field; the button shows it to check a paste. */
   _syncKeyReveal() {
@@ -6457,7 +6481,7 @@ var BKKHopCardEditor = class extends HTMLElement {
       const b = document.createElement("button");
       b.className = "chip";
       b.type = "button";
-      b.textContent = f.name.split(" / ")[0];
+      b.textContent = String(f.name).split(" / ")[0];
       b.addEventListener("click", () => this._pickStop(f, "origin"));
       fav.appendChild(b);
     });
@@ -6512,7 +6536,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     if (!sel || this._isEditing(sel)) return;
     const seq = ++this._citySeq;
     try {
-      const idx = await BkkLib.cityIndex();
+      const idx = await BkkLib.withIndexes(this._config).cityIndex();
       if (seq !== this._citySeq) return;
       const ops = (idx.ops || []).slice().sort((a, b) => a.name.localeCompare(b.name, "hu"));
       const cur = this._config.city || "";
@@ -6617,8 +6641,7 @@ var BKKHopCardEditor = class extends HTMLElement {
       if (!this._hasFutar() && !this._userEditedKey) await this._fillKey();
       if (seq !== this._searchSeq) return;
       const mode = this._mode();
-      applyIndexOverrides(this._config);
-      const hits = await BkkLib.searchStops(this._apiKey(), q, mode, this._config.city);
+      const hits = await BkkLib.withIndexes(this._config).searchStops(this._apiKey(), q, mode, this._config.city);
       if (seq !== this._searchSeq) return;
       if (!hits.length) {
         box.innerHTML = '<span class="hint">' + BkkLib.esc(this._modeCopy(mode).empty) + "</span>";
@@ -6703,8 +6726,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "destLoading")) + "</span>";
     try {
       this._error("");
-      applyIndexOverrides(this._config);
-      const idx = await BkkLib.reachableDests(
+      const idx = await BkkLib.withIndexes(this._config).reachableDests(
         this._apiKey(),
         this._cache,
         { id: this._config.stopId, name: this._config.stopName },
@@ -6894,6 +6916,7 @@ var BKKHopCard = class extends HTMLElement {
     const nextKey = configDataKey(next);
     this._config = next;
     this._configDataKey = nextKey;
+    BkkLib.warnCardApiKey(next);
     if (prevKey != null && prevKey === nextKey && this._painted) {
       try {
         this._render();
@@ -7698,12 +7721,11 @@ ${this._stopPinCss()}
   }
   async _loadRowMapShape(row) {
     const cfg = this._config || {};
-    applyIndexOverrides(cfg);
     let shape = BkkLib.validMapShape(row && row.shape);
     let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon) || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
     if (BkkLib.isTrainRow(row)) {
       try {
-        const mav = await BkkLib.mavRouteForRow(row, cfg.stopName || "", cfg.destName || cfg.destKey || "");
+        const mav = await BkkLib.withIndexes(cfg).mavRouteForRow(row, cfg.stopName || "", cfg.destName || cfg.destKey || "");
         if (mav && mav.shape.length >= 2) {
           const ownBoard = mav.board || board;
           const ownAlight = mav.alight || await this._rowAlightPoint(row, []);
@@ -7756,7 +7778,7 @@ ${this._stopPinCss()}
     let motisCoversHead = true;
     let motisMap = null;
     let motisBoardPt = null;
-    const area = await BkkLib.stopArea(cfg);
+    const area = await BkkLib.withIndexes(cfg).stopArea(cfg);
     if (!published) {
       try {
         motisMap = await BkkLib.motisShapeForHop(
@@ -7884,7 +7906,7 @@ ${this._stopPinCss()}
         key: cfg.destKey,
         lat: cfg.destLat,
         lon: cfg.destLon,
-        area: await BkkLib.stopArea(cfg)
+        area: await BkkLib.withIndexes(cfg).stopArea(cfg)
       }, BkkLib.vehicleBucket(row));
       return ref && BkkLib.mapGpsLatLon(ref.lat, ref.lon) || null;
     } catch (_e) {
@@ -8215,7 +8237,7 @@ ${this._stopPinCss()}
     };
     const run = async () => {
       if (gen !== this._gen) return;
-      applyIndexOverrides(cfg);
+      const lib = BkkLib.withIndexes(cfg);
       try {
         if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
           this._rows = [];
@@ -8230,7 +8252,7 @@ ${this._stopPinCss()}
           return;
         }
         const wantElvira = (mode === "mav" || mode === "all") && BkkLib.hasElvira(this._hass);
-        const elviraP = wantElvira ? BkkLib.elviraBetween(
+        const elviraP = wantElvira ? lib.elviraBetween(
           this._hass,
           cfg.stopId,
           cfg.destStopId || "",
@@ -8255,7 +8277,7 @@ ${this._stopPinCss()}
         const throughWait = new Promise((resolve) => {
           throughResolve = resolve;
         });
-        const rows = await BkkLib.departures(
+        const rows = await lib.departures(
           this._apiKey(),
           cfg.stopId,
           cfg.routeIds,
@@ -8516,7 +8538,7 @@ var BKKPlannerCard = class extends BKKHopCard {
       this._journey = null;
       this._openJourney = 0;
       this._paintJourney();
-      BkkLib.planJourneys(this._apiKey(), origin, dest, this._hass, {
+      BkkLib.withIndexes(this._config).planJourneys(this._apiKey(), origin, dest, this._hass, {
         time: this._when.at,
         arriveBy: this._when.mode === "arrive",
         minutesAfter: 120
@@ -8537,7 +8559,7 @@ var BKKPlannerCard = class extends BKKHopCard {
       });
       return;
     }
-    BkkLib.planJourney(
+    BkkLib.withIndexes(this._config).planJourney(
       this._apiKey(),
       origin,
       dest,
@@ -8924,7 +8946,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     let segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
     if (!segs.length && cfg.stopId && cfg.destName) {
       try {
-        const journey = await BkkLib.planJourney(
+        const journey = await BkkLib.withIndexes(this._config).planJourney(
           this._apiKey(),
           { id: cfg.stopId, name: cfg.stopName || "", lat: cfg.stopLat, lon: cfg.stopLon },
           { id: cfg.destStopId || "", name: cfg.destName || "", lat: cfg.destLat, lon: cfg.destLon },
@@ -9640,7 +9662,7 @@ ${this._stopPinCss()}
       this._err = "";
       if (!this._hasFutar()) await this._fillKey();
       if (seq !== this._searchSeq) return;
-      const hits = await BkkLib.searchPlannerStops(this._apiKey(), q);
+      const hits = await BkkLib.withIndexes(this._config).searchPlannerStops(this._apiKey(), q);
       if (seq !== this._searchSeq) return;
       if (!hits.length) {
         this._hint(box, "mode.empty");
@@ -9706,7 +9728,7 @@ ${this._stopPinCss()}
         this._dests = [];
         this._destRoutes = {};
       } else {
-        const out = await BkkLib.reachableDests(
+        const out = await BkkLib.withIndexes(this._config).reachableDests(
           this._apiKey(),
           this._tripCache || {},
           { id: cfg.stopId, name: cfg.stopName || "" },
@@ -9762,7 +9784,7 @@ ${this._stopPinCss()}
     }
     try {
       if (!this._hasFutar()) await this._fillKey();
-      const extras = await BkkLib.searchPlannerStops(this._apiKey(), q);
+      const extras = await BkkLib.withIndexes(this._config).searchPlannerStops(this._apiKey(), q);
       if (seq !== this._destSearchSeq) return;
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
       if (!hits.length && this._destsLoading) {

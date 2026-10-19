@@ -148,7 +148,7 @@ Object.assign(BkkLib, {
      FUTÁR plan-trip when it has none. */
   async planJourneys(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
-    [origin, dest] = await BkkLib.withGtfsCoords([origin, dest]);
+    [origin, dest] = await this.withGtfsCoords([origin, dest]);
     let list = await BkkLib.transitousJourneys(origin, dest, opts);
     if (!list.length && BkkLib.hasFutar(apiKey)) {
       const [fromPlace, toPlace] = await Promise.all([
@@ -182,7 +182,7 @@ Object.assign(BkkLib, {
   },
   async planJourney(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
-    [origin, dest] = await BkkLib.withGtfsCoords([origin, dest]);
+    [origin, dest] = await this.withGtfsCoords([origin, dest]);
     const motis = await BkkLib.transitousJourney(origin, dest, opts);
     if (motis && motis.legs.some((leg) => !leg.walk)) return BkkLib.nameJourneyEnds(motis, origin, dest);
     let futar = null;
@@ -208,7 +208,7 @@ Object.assign(BkkLib, {
       }
     }
     if (futar && futar.legs.some((leg) => !leg.walk)) return BkkLib.nameJourneyEnds(futar, origin, dest);
-    const viaCity = await BkkLib.cityRailJourney(apiKey, hass, origin, dest);
+    const viaCity = await this.cityRailJourney(apiKey, hass, origin, dest);
     return viaCity || futar;
   },
   /* One operator's ride and walk edges for a service day: the fastest
@@ -375,7 +375,7 @@ Object.assign(BkkLib, {
   async cityRailJourney(apiKey, hass, origin, dest) {
     if (!BkkLib.isRailDest(dest) || BkkLib.stopIdFamily(origin) !== 'city') return null;
     let idx;
-    try { idx = await BkkLib.cityIndex(); } catch (_e) { return null; }
+    try { idx = await this.cityIndex(); } catch (_e) { return null; }
     if (!idx || !idx.stops) return null;
     let originStop = BkkLib.gtfsStopById(idx, origin.id);
     if (!originStop) {
@@ -447,7 +447,7 @@ Object.assign(BkkLib, {
       ready = timed.arr;
     }
     if (!destIsHub) {
-      const rail = await BkkLib.railAfterCity(apiKey, hass, cityName, path, dest, ready);
+      const rail = await this.railAfterCity(apiKey, hass, cityName, path, dest, ready);
       if (!rail) return null;
       legs.push(rail.walk);
       legs.push(rail.train);
@@ -546,7 +546,7 @@ Object.assign(BkkLib, {
     for (let i = 0; i < queries.length; i++) {
       let hits = [];
       try {
-        hits = (await BkkLib.searchStops(apiKey, queries[i], 'mav')) || [];
+        hits = (await this.searchStops(apiKey, queries[i], 'mav')) || [];
       } catch (_e) {
         hits = [];
       }
@@ -567,7 +567,7 @@ Object.assign(BkkLib, {
   },
   async railAfterCity(apiKey, hass, cityName, path, dest, readySec) {
     if (!path || !path.hubName) return null;
-    const station = await BkkLib.railStationAtHub(apiKey, cityName, path);
+    const station = await this.railStationAtHub(apiKey, cityName, path);
     if (!station || !station.id) return null;
     const walkStart = readySec;
     const walkEnd = readySec + 6 * 60;
@@ -581,8 +581,8 @@ Object.assign(BkkLib, {
       try {
         /* With the station code resolved here, ELVIRA is not handed the
            destination's name, and heads each train with its own terminus. */
-        const destCode = await BkkLib.elviraResolveCode(apiKey, dest.id, dest.name || '');
-        const rows = destCode ? await BkkLib.elviraBetween(
+        const destCode = await this.elviraResolveCode(apiKey, dest.id, dest.name || '');
+        const rows = destCode ? await this.elviraBetween(
           hass, station.id, destCode, 480, '', { apiKey, originName: station.name || '' },
         ) : [];
         const next = (rows || []).filter((row) => row.destHit !== false && Number(row.dep) >= walkEnd - 30)

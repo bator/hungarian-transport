@@ -6,6 +6,7 @@ import codecs
 import csv
 import gzip
 import hashlib
+import http.client
 import io
 import ipaddress
 import json
@@ -147,8 +148,8 @@ def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return bool(not ip.is_global or ip.is_multicast or ip.is_reserved or ip.is_unspecified)
 
 
-def resolve_public_host(host: str, port: int) -> None:
-    """Raise ValueError unless every address of host is public.
+def _public_addrinfo(host: str, port: int) -> list:
+    """getaddrinfo of host, or ValueError unless every address is public.
 
     getaddrinfo also parses the numeric spellings ipaddress rejects
     (2130706433, 0x7f000001, 127.1, 0177.0.0.1), so a loopback dressed up as
@@ -168,6 +169,84 @@ def resolve_public_host(host: str, port: int) -> None:
             raise ValueError("blocked url host") from None
         if _blocked_ip(ip):
             raise ValueError("blocked url host")
+    return infos
+
+
+def resolve_public_host(host: str, port: int) -> None:
+    """Raise ValueError unless every address of host is public (see _public_addrinfo)."""
+    _public_addrinfo(host, port)
+
+
+def _connect_public(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None):
+    """socket.create_connection that connects only to the addresses it has just
+    checked. The URL check and urllib's own connect each resolved the name, so
+    a DNS answer that changed in between (rebinding) reached a private address;
+    here the one resolution is both checked and used."""
+    host, port = address
+    last: OSError | None = None
+    for family, type_, proto, _canon, sockaddr in _public_addrinfo(host, port):
+        sock = socket.socket(family, type_, proto)
+        try:
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(sockaddr)
+            return sock
+        except OSError as err:
+            last = err
+            sock.close()
+    raise last or OSError(f"cannot connect to {host}")
+
+
+class _PublicHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _connect_public
+
+
+class _PublicHTTPSConnection(http.client.HTTPSConnection):
+    # TLS still verifies the certificate and sends SNI for the URL's name
+    # (http.client wraps the socket with server_hostname=self.host).
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _connect_public
+
+
+def _via_proxy(req: urllib.request.Request) -> bool:
+    # Through a proxy the socket goes to the proxy, which resolves the name
+    # itself: the URL check before the request is all there is then.
+    return req.has_proxy() or bool(getattr(req, "_tunnel_host", None))
+
+
+_proxy_warned = False
+
+
+def _connection_class(req: urllib.request.Request, plain: type, pinned: type) -> type:
+    """pinned, or plain through a proxy; the latter said once per run on stderr
+    (update.log), without the proxy address (it may carry credentials)."""
+    global _proxy_warned
+    if not _via_proxy(req):
+        return pinned
+    if not _proxy_warned:
+        _proxy_warned = True
+        print(
+            "warn downloads go through a proxy: the address is checked before the request,"
+            " but the connection is not pinned to it (the proxy resolves the name)",
+            file=sys.stderr,
+        )
+    return plain
+
+
+class _PublicHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_connection_class(req, http.client.HTTPConnection, _PublicHTTPConnection), req)
+
+
+class _PublicHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        conn = _connection_class(req, http.client.HTTPSConnection, _PublicHTTPSConnection)
+        return self.do_open(conn, req, context=self._context)
 
 
 def assert_public_http_url(url: str) -> None:
@@ -259,7 +338,12 @@ def upgrade_same_host_redirect(old: str, new: str) -> str:
 
 
 def _urlopen(req: urllib.request.Request, timeout: int = 120, *, allow_insecure: bool = False):
-    opener = urllib.request.build_opener(_PublicRedirectHandler(allow_insecure))
+    """urlopen for feed downloads: redirects only to public hosts, and every
+    connection (the redirected ones included) goes to an address checked at
+    connect time."""
+    opener = urllib.request.build_opener(
+        _PublicRedirectHandler(allow_insecure), _PublicHTTPHandler(), _PublicHTTPSHandler()
+    )
     return opener.open(req, timeout=timeout)
 
 

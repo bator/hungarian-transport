@@ -5940,12 +5940,16 @@ const settle = async (el) => {
   document.body.appendChild(ed);
   ed._probeKey = () => {};
   ed._loadDests = async () => {};
+  /* Each card / editor looks its indexes up through its own view (Lib.withIndexes(config), J-2): the
+     module-wide lookup is never switched by a card, so it stays on the bundled index meanwhile. */
   ed.setConfig({ language: 'hu', volan: true, volanIndex: 'https://example.invalid/editor-volan.json.gz' });
+  Lib.withIndexes(ed._config).volanIndex();
   Lib.volanIndex();
   ed.setConfig({ language: 'hu', volan: true });
-  Lib.volanIndex();
+  Lib.withIndexes(ed._config).volanIndex();
   ed.remove();
-  Lib.departures = async () => { Lib.volanIndex(); return []; };
+  /* like the real departures(): the index through `this`, the card's own view */
+  Lib.departures = async function departuresStub() { this.volanIndex(); return []; };
   Lib.fillTransitousIfEmpty = async (rows) => rows || [];
   const runCard = async (extra) => {
     const c = document.createElement('hungarian-transport-card');
@@ -5959,8 +5963,9 @@ const settle = async (el) => {
   await runCard({});
   Object.assign(Lib, keep);
   check('a card or editor without its own index URL is back on the bundled index',
-    urls.length === 4 && urls[0].includes('editor-volan') && urls[1].includes('/volan-index.json.gz')
-    && urls[2].includes('card-volan') && urls[3].includes('/volan-index.json.gz'),
+    urls.length === 5 && urls[0].includes('editor-volan') && urls[1].includes('/volan-index.json.gz')
+    && urls[2].includes('/volan-index.json.gz')
+    && urls[3].includes('card-volan') && urls[4].includes('/volan-index.json.gz'),
     JSON.stringify(urls));
 }
 {
@@ -6274,6 +6279,113 @@ const settle = async (el) => {
     JSON.stringify({ maps: made.length, thrown, late }));
   pc.remove();
   globalThis.requestAnimationFrame = prevRaf;
+}
+
+
+/* J-2: the index overrides (volanIndex / cityIndex / mavIndex) belong to ONE card. Two editors search
+   at the same time, only one of them with its own Volán index; the search reads the index again after
+   a Transitous round trip, i.e. after an await, when the other card has already run its own lookup. */
+{
+  const keep = { fetchIdx: Lib._fetchIndexBytes, geo: Lib.transitousGeocode };
+  const asked = [];
+  Lib._fetchIndexBytes = async (url) => { asked.push(String(url)); return { status: 404, bytes: null }; };
+  const gates = [];
+  Lib.transitousGeocode = () => { const d = deferred(); gates.push(d); return d.p; };
+  const mk = (extra) => {
+    const ed = document.createElement('hungarian-transport-card-editor');
+    document.body.appendChild(ed);
+    ed.hass = { states: {}, language: 'hu' };
+    ed._probeKey = () => {};
+    ed._loadDests = async () => {};
+    ed._fillKey = async () => {};
+    ed.setConfig({ language: 'hu', volan: true, ...extra });
+    return ed;
+  };
+  const own = 'https://a.invalid/own/volan-index.json.gz';
+  const a = mk({ volanIndex: own });
+  const b = mk({});
+  const runA = a._search('Győr', 'origin');
+  await tick();
+  const runB = b._search('Pápa', 'origin');
+  await tick();
+  gates.forEach((g) => g.resolve([]));
+  await tick();
+  gates.forEach((g) => g.resolve([]));
+  await Promise.all([runA, runB]);
+  const volanAsked = asked.filter((u) => /volan-index\.json\.gz/.test(u));
+  const ownAsked = volanAsked.filter((u) => u.startsWith(own));
+  const bundledAsked = volanAsked.filter((u) => !u.startsWith(own));
+  check('an index override stays with its own card across awaits (two editors, one override)',
+    ownAsked.length >= 2 && ownAsked.length === bundledAsked.length,
+    JSON.stringify({ own: ownAsked.length, bundled: bundledAsked.length, gates: gates.length }));
+  a.remove();
+  b.remove();
+  Lib._fetchIndexBytes = keep.fetchIdx;
+  Lib.transitousGeocode = keep.geo;
+}
+
+
+/* O-1: a favourite whose name is not text in the YAML (`name: 1234`) must not break the editor. */
+{
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  let thrown = null;
+  try {
+    ed.setConfig({ language: 'hu', favorites: [{ id: 'BKK_F1', name: 1234 }, { id: 'BKK_F2', name: 'Deák tér / M1' }] });
+    ed._paintFav();
+  } catch (err) { thrown = String(err && err.message || err); }
+  const chips = Array.from(ed._el('fav') ? ed._el('fav').querySelectorAll('button.chip') : []).map((b) => b.textContent);
+  check('a non-text favourite name (name: 1234) paints as text, nothing throws',
+    thrown === null && chips[0] === '1234' && chips[1] === 'Deák tér', JSON.stringify({ thrown, chips }));
+  ed.remove();
+}
+
+
+/* J-3: a BKK key in the card YAML is deprecated (it travels in the request URL and any logged-in Home
+   Assistant user can read it from lovelace/config). It still works; the card warns once per page,
+   without the key in the text, and the editor says so next to the field. */
+{
+  const secret = 'deadbeef-1111-2222-3333-cafebabe0000';
+  const warns = [];
+  const keepWarn = console.warn;
+  console.warn = (...args) => { warns.push(args.map(String).join(' ')); };
+  Lib._warnedCardKey = false;
+  const mkCard = (extra) => {
+    const c = document.createElement('hungarian-transport-card');
+    c._reloadSafe = () => {};
+    c.setConfig(Object.assign({ language: 'hu', stopId: 'BKK_F01', stopName: 'Deák tér' }, extra));
+    return c;
+  };
+  mkCard({ apiKey: secret });
+  mkCard({ apiKey: secret });
+  mkCard({});
+  console.warn = keepWarn;
+  const mine = warns.filter((w) => /apiKey/.test(w) && /deprecated/i.test(w));
+  check('a card-level apiKey warns once per page that it is deprecated, without the key itself',
+    mine.length === 1 && !warns.some((w) => w.includes(secret)), JSON.stringify({ n: mine.length, any: warns.length }));
+  check('the card-level apiKey still reaches the card (no behaviour change)',
+    mkCard({ apiKey: secret })._config.apiKey === secret);
+
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  ed._fillKey = async () => {};
+  ed.setConfig({ language: 'hu', apiKey: secret });
+  const note = ed._el('apiKeyDeprecatedWrap');
+  const shownWithKey = !!note && note.style.display !== 'none' && /elavult/i.test(ed._el('apiKeyDeprecated').textContent);
+  ed.setConfig({ language: 'hu' });
+  const hiddenWithout = !!note && note.style.display === 'none';
+  ed.setConfig({ language: 'en', apiKey: secret });
+  const english = /deprecated/i.test(ed._el('apiKeyDeprecated').textContent);
+  check('the editor marks a card-level key as deprecated (hu/en), and only when the card has one',
+    shownWithKey && hiddenWithout && english && !ed._el('apiKeyDeprecated').textContent.includes(secret),
+    JSON.stringify({ shownWithKey, hiddenWithout, english }));
+  ed.remove();
 }
 
 process.exit(failed ? 1 : 0);

@@ -145,7 +145,7 @@ export class BKKPlannerCard extends BKKHopCard {
       this._journey = null;
       this._openJourney = 0;
       this._paintJourney();
-      BkkLib.planJourneys(this._apiKey(), origin, dest, this._hass, {
+      BkkLib.withIndexes(this._config).planJourneys(this._apiKey(), origin, dest, this._hass, {
         time: this._when.at,
         arriveBy: this._when.mode === 'arrive',
         minutesAfter: 120,
@@ -166,7 +166,7 @@ export class BKKPlannerCard extends BKKHopCard {
       });
       return;
     }
-    BkkLib.planJourney(
+    BkkLib.withIndexes(this._config).planJourney(
       this._apiKey(),
       origin,
       dest,
@@ -575,7 +575,7 @@ export class BKKPlannerCard extends BKKHopCard {
     let segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
     if (!segs.length && cfg.stopId && cfg.destName) {
       try {
-        const journey = await BkkLib.planJourney(
+        const journey = await BkkLib.withIndexes(this._config).planJourney(
           this._apiKey(),
           { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon },
           { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
@@ -1317,7 +1317,7 @@ ${this._stopPinCss()}
       this._err = '';
       if (!this._hasFutar()) await this._fillKey();
       if (seq !== this._searchSeq) return;
-      const hits = await BkkLib.searchPlannerStops(this._apiKey(), q);
+      const hits = await BkkLib.withIndexes(this._config).searchPlannerStops(this._apiKey(), q);
       if (seq !== this._searchSeq) return;
       if (!hits.length) {
         this._hint(box, 'mode.empty');
@@ -1390,7 +1390,7 @@ ${this._stopPinCss()}
         this._dests = [];
         this._destRoutes = {};
       } else {
-        const out = await BkkLib.reachableDests(
+        const out = await BkkLib.withIndexes(this._config).reachableDests(
           this._apiKey(),
           this._tripCache || {},
           { id: cfg.stopId, name: cfg.stopName || '' },
@@ -1446,7 +1446,7 @@ ${this._stopPinCss()}
     }
     try {
       if (!this._hasFutar()) await this._fillKey();
-      const extras = await BkkLib.searchPlannerStops(this._apiKey(), q);
+      const extras = await BkkLib.withIndexes(this._config).searchPlannerStops(this._apiKey(), q);
       if (seq !== this._destSearchSeq) return;
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
       if (!hits.length && this._destsLoading) {

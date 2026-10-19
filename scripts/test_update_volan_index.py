@@ -3,8 +3,11 @@
 records a feed as built. No network."""
 from __future__ import annotations
 
+import contextlib
 import gzip
 import http.server
+import io
+import importlib.util
 import json
 import os
 import random
@@ -15,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 from datetime import date, timedelta
 from pathlib import Path
@@ -297,6 +301,22 @@ with tempfile.TemporaryDirectory() as tmp:
           code == uvi.REPORTED and len(sent) == 1 and "PermissionError" in sent[0], repr((code, sent)))
     uvi.paths = real_paths
 
+    # O-7: the raw exception text reaches the webhook, so a keyed URL in it
+    # must not: the query, URL credentials and secret-named params are cut.
+    sent.clear()
+
+    def keyed_failure(_base, out, _volan):
+        raise OSError("fetch https://feed.example/bahart.zip?apikey=SECRETKEY1&v=2"
+                      " via http://u:SECRETPW@feed.example/ failed")
+
+    uvi.build_city_index = keyed_failure
+    fake.etag["https://public.example/a.zip"] = "a-5"
+    code = fake.run()
+    check("a keyed URL in an exception text is redacted before the webhook",
+          code == uvi.REPORTED and len(sent) == 1 and "SECRETKEY1" not in sent[0] and "SECRETPW" not in sent[0]
+          and "https://feed.example/bahart.zip?…" in sent[0] and "Helyi GTFS" in sent[0], repr((code, sent)))
+    uvi.build_city_index = fake.build_city_index
+
     # The Volán HEAD failing does not stop the city feeds or the MÁV index.
     sent.clear()
     fake.broken.add("https://kti.example/volan.zip")
@@ -553,9 +573,84 @@ except ValueError as e:
     err = e
 check("HEAD requests go through the public-host guard", err is not None, repr(err))
 
+# ---- redact(): what the log and the webhook may say ---
+
+for raw, want in [
+    ("error HEAD https://h.example/f.zip?apikey=K1&x=1 timed out", "error HEAD https://h.example/f.zip?… timed out"),
+    ("not public: http://user:pw@10.0.0.1/feed", "not public: http://…@10.0.0.1/feed"),
+    ("HTTP Error 403 for apikey=K1 and token=T1", "HTTP Error 403 for apikey=… and token=…"),
+    ("error city rebuild: HTTP Error 404: Not Found", "error city rebuild: HTTP Error 404: Not Found"),
+    ("https://h.example/download/bahart/ ok, keyboard=fine", "https://h.example/download/bahart/ ok, keyboard=fine"),
+    # J-3: what the name list let through
+    ("fetch /f.zip?k=S1 failed", "fetch /f.zip?… failed"),
+    ("client_secret=S2", "client_secret=…"),
+    ("refresh_token=S3&x=1", "refresh_token=…&x=1"),
+    ("Authorization: Bearer S4", "Authorization: Bearer …"),
+    ("Authorization: S4b", "Authorization: …"),
+    ("apikey: S5", "apikey: …"),
+    ("apikey = S6", "apikey = …"),
+    ("x-api-key: S7", "x-api-key: …"),
+    ('{"access_token": "S8"}', '{"access_token": "…"}'),
+    ("monkey=fine, what? ok", "monkey=fine, what? ok"),
+]:
+    check(f"redact({raw!r})", uvi.redact(raw) == want, repr(uvi.redact(raw)))
+_t0 = time.monotonic()
+_long = uvi.redact("a." * 8000 + " apikey=S9")
+check("redact() of a long text is quick and capped at REDACT_MAX",
+      time.monotonic() - _t0 < 0.5 and len(_long) <= uvi.REDACT_MAX + 2, repr((time.monotonic() - _t0, len(_long))))
+check("a secret at the start of a long text is still redacted", "S10" not in uvi.redact("apikey=S10 " + "x" * 9000))
+
+# O-3: the traceback of a broken sibling goes through the same redaction.
+_err = io.StringIO()
+try:
+    raise OSError("fetch https://h.example/f.zip?apikey=S11 via /g.zip?k=S12 failed")
+except OSError:
+    with contextlib.redirect_stderr(_err):
+        uvi.print_redacted_exc()
+check("print_redacted_exc() keeps the traceback and drops the secrets",
+      "Traceback" in _err.getvalue() and "OSError" in _err.getvalue() and "S11" not in _err.getvalue()
+      and "S12" not in _err.getvalue(), repr(_err.getvalue()[-200:]))
+
+# The earlier blocks replaced uvi.notify; a fresh copy of the module has the real one.
+_spec = importlib.util.spec_from_file_location("uvi_fresh", Path(uvi.__file__))
+uvi_fresh = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(uvi_fresh)
+posted: list[bytes] = []
+
+
+class _Resp:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+    def read(self):
+        return b""
+
+
+def _fake_urlopen(req, timeout=None):
+    posted.append(req.data)
+    return _Resp()
+
+
+_real_urlopen = uvi_fresh.urllib.request.urlopen
+uvi_fresh.urllib.request.urlopen = _fake_urlopen
+try:
+    uvi_fresh.notify("direct: https://h.example/f.zip?apikey=K2")
+finally:
+    uvi_fresh.urllib.request.urlopen = _real_urlopen
+check("notify() itself redacts what it posts",
+      len(posted) == 1 and b"K2" not in posted[0] and b"f.zip?" in posted[0], repr(posted))
+
 # ---- run_update.sh: the shell wrapper reports the exits the script cannot ---
 
 script = Path(__file__).resolve().parent / "run_update.sh"
+set_lines = [line for line in script.read_text().splitlines() if line.startswith("set -")]
+check("run_update.sh runs with set -euo pipefail", set_lines == ["set -euo pipefail"], repr(set_lines))
+probe = subprocess.run(["bash", "-c", "; ".join(set_lines + ["false | true"])], capture_output=True, timeout=30)
+check("under its options a failing pipeline stage is not hidden by the last one", probe.returncode != 0,
+      repr(probe.returncode))
 with tempfile.TemporaryDirectory() as tmp:
     root = Path(tmp)
     base = root / "base"

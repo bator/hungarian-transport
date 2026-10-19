@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - "v*"
+  # Weekly: rebuild the GTFS indexes on the latest stable tag's code and
+  # replace that release's zips in place (gh release upload --clobber), so
+  # fresh downloads get current feeds without a version bump. On purpose;
+  # each upload carries a matching SHA256SUMS, a build provenance
+  # attestation and hungarian-transport-build.json, so a replaced asset can
+  # still be checked. The attestation names the run's commit (main), the
+  # build file names the tag commit the zips were built from.
   schedule:
     - cron: "30 2 * * 1"
   workflow_dispatch:
@@ -47,6 +54,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
+          # Nothing here pushes; gh gets its token from GH_TOKEN, not from .git/config.
+          persist-credentials: false
 
       - name: Release from main only
         if: github.event_name != 'schedule'
@@ -170,6 +179,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.resolve.outputs.ref }}
+          persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -213,6 +223,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ needs.resolve.outputs.ref }}
+          persist-credentials: false
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
@@ -243,6 +254,16 @@ jobs:
           ALLOW_MISSING_VAR: ${{ vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}
         run: |
           set -euo pipefail
+          # Both values end up in workflow commands below (::warning::,
+          # ::notice::). A newline in them would start a command of its own,
+          # so only feed ids, "all", commas and spaces get through; anything
+          # else stops the run without echoing the value.
+          for name in ALLOW_MISSING_INPUT ALLOW_MISSING_VAR; do
+            if [[ ! "${!name}" =~ ^[A-Za-z0-9_.,\ -]*$ ]]; then
+              echo "::error title=Bad allow_missing::${name} may only hold feed ids, all, commas and spaces."
+              exit 1
+            fi
+          done
           # The dispatch input relaxes the city guard for this run only, on
           # top of the repository variable. The variable relaxes it for every
           # run, the weekly refresh included, so say so on every run until it
@@ -368,6 +389,29 @@ jobs:
               sys.exit(1)
           print(f"tag, manifest.json and CARD_VERSION agree on {ver}")
           PY
+          # Shipped next to the zips (the weekly refresh replaces them in
+          # place): sha256sum -c SHA256SUMS checks a download.
+          sha256sum hungarian-transport.zip hungarian-transport-frontend.zip > SHA256SUMS
+          cat SHA256SUMS
+          # The provenance attestation names the commit of the workflow run
+          # (github.sha: main's head on the weekly run), not the tag that was
+          # built; actions/attest has no input for another source commit. This
+          # file says which commit the zips were built from.
+          python3 - <<'PY'
+          import json, os, subprocess
+          info = {
+              "tag": os.environ["TAG"],
+              "built_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "workflow_commit": os.environ["GITHUB_SHA"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "run": f'{os.environ["GITHUB_SERVER_URL"]}/{os.environ["GITHUB_REPOSITORY"]}/actions/runs/{os.environ["GITHUB_RUN_ID"]}',
+              "sha256": dict(reversed(line.split()) for line in open("SHA256SUMS", encoding="utf-8")),
+          }
+          with open("hungarian-transport-build.json", "w", encoding="utf-8") as fh:
+              json.dump(info, fh, indent=2)
+              fh.write("\n")
+          PY
+          cat hungarian-transport-build.json
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -375,6 +419,8 @@ jobs:
           path: |
             hungarian-transport.zip
             hungarian-transport-frontend.zip
+            SHA256SUMS
+            hungarian-transport-build.json
           if-no-files-found: error
           retention-days: 7
 
@@ -385,10 +431,26 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # build provenance attestation (Sigstore via OIDC) for the two zips
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-assets
+
+      - name: Check the checksums of what is about to be published
+        run: sha256sum -c SHA256SUMS
+
+      # gh attestation verify hungarian-transport.zip --repo <owner>/<repo>
+      # The attestation's source commit is this run's github.sha; on the
+      # weekly refresh that is main, while the zips are built from the tag:
+      # hungarian-transport-build.json (uploaded with them) names both.
+      - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            hungarian-transport.zip
+            hungarian-transport-frontend.zip
 
       - name: Publish GitHub release
         env:
@@ -418,8 +480,8 @@ jobs:
             echo "::error::Release $tag exists as a draft. Publish or delete the draft, then rerun."
             exit 1
           elif [ "$draft" = "false" ]; then
-            gh release upload "$tag" hungarian-transport.zip hungarian-transport-frontend.zip --clobber
+            gh release upload "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS hungarian-transport-build.json --clobber
           else
             # Tag the commit that was built, not whatever the default branch is now.
-            gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip --target "$GITHUB_SHA" --title "$tag" --notes "$notes" "${extra[@]}"
+            gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS hungarian-transport-build.json --target "$GITHUB_SHA" --title "$tag" --notes "$notes" "${extra[@]}"
           fi

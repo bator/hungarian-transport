@@ -28,6 +28,40 @@ FUTAR_PATHS = (
     "search.json",
     "trip-details.json",
 )
+# The parameters the card sends for each endpoint (src/lib/futar.js,
+# departures.js, journey.js). Anything else is dropped before the cache key
+# and the upstream call alike, so a caller cannot make every request unique
+# with made-up parameters, nor have a different upstream answer cached under
+# a shared key.
+FUTAR_PARAMS: dict[str, frozenset[str]] = {
+    "arrivals-and-departures-for-stop.json": frozenset({
+        "stopId", "minutesAfter", "minutesBefore", "onlyDepartures", "includeReferences", "includeVehicleFromTrip",
+    }),
+    "plan-trip.json": frozenset({
+        "fromPlace", "toPlace", "mode", "numItineraries", "searchWindow", "date", "time", "arriveBy",
+    }),
+    "route-details.json": frozenset({"routeId", "includeReferences"}),
+    "schedule-for-stop.json": frozenset({"stopId", "includeReferences"}),
+    "search.json": frozenset({"query", "limit"}),
+    "trip-details.json": frozenset({"tripId"}),
+}
+FUTAR_PARAM_MAX_LEN = 256
+# Upstream calls (cache misses only; shared requests count once) per second
+# and the burst allowed on top. Every authenticated user can call the
+# service, so this caps what they can spend of the configured key.
+# One destination list on a cold cache is 73 calls (departures.js: 1 board,
+# 40 trip-details, 32 route-details). A dashboard opened after a restart
+# loads every card's list at once (six cards: about 440 calls in a minute),
+# and a refused trip-details call drops that departure from the card, so
+# the burst holds several whole lists; the rate still caps steady use.
+FUTAR_RATE = 5.0
+FUTAR_BURST = 400
+# A call over the limit waits for a token this long at most (the summed
+# sleeps, not the clock) before it is refused. The card swallows a refused
+# call (an incomplete list, not an error), so waiting is the better answer.
+FUTAR_TOKEN_WAIT_SEC = 5.0
+# A refused call is logged at most this often, with the count since.
+FUTAR_RATE_LOG_EVERY = 300
 # Departure boards refresh every 15 s at the earliest on the card.
 FUTAR_CACHE_TTL = 15
 FUTAR_CACHE_MAX = 256
@@ -37,6 +71,7 @@ FUTAR_TIMEOUT = aiohttp.ClientTimeout(total=20)
 # does not switch FUTÁR off until Home Assistant restarts.
 REJECTED_RETRY = 15 * 60
 _monotonic = time.monotonic
+_sleep = asyncio.sleep
 
 
 class FutarError(Exception):
@@ -45,6 +80,22 @@ class FutarError(Exception):
 
 class FutarAuthError(FutarError):
     """FUTÁR rejected the API key."""
+
+
+class FutarRateLimited(FutarError):
+    """Too many upstream calls; this one was not sent. A FutarError for the
+    service response, but not an outage: FutarProxy logs it on its own and it
+    does not touch the "unavailable / answers again" state."""
+
+
+def futar_params(path: str, params: dict[str, Any] | None) -> dict[str, str]:
+    """params reduced to the ones the card uses for path, as strings.
+    Raises FutarError for a value longer than FUTAR_PARAM_MAX_LEN."""
+    allowed = FUTAR_PARAMS.get(path, frozenset())
+    out = {str(k): str(v) for k, v in (params or {}).items() if str(k) in allowed}
+    if any(len(v) > FUTAR_PARAM_MAX_LEN for v in out.values()):
+        raise FutarError("parameter too long")
+    return out
 
 
 async def futar_get(
@@ -93,6 +144,47 @@ class FutarProxy:
         self._rejected: str | None = None
         self._rejected_at = 0.0
         self._failing = False
+        self._tokens = float(FUTAR_BURST)
+        self._tokens_at = _monotonic()
+        self._limited = 0
+        self._limited_logged_at: float | None = None
+
+    def _take_token(self) -> bool:
+        now = _monotonic()
+        self._tokens = min(float(FUTAR_BURST), self._tokens + max(0.0, now - self._tokens_at) * FUTAR_RATE)
+        self._tokens_at = now
+        if self._tokens < 1.0:
+            return False
+        self._tokens -= 1.0
+        return True
+
+    async def _acquire(self) -> None:
+        """A token, waiting up to FUTAR_TOKEN_WAIT_SEC for one; FutarRateLimited after."""
+        slept = 0.0
+        while not self._take_token():
+            wait = max((1.0 - self._tokens) / FUTAR_RATE, 0.01)
+            if slept + wait > FUTAR_TOKEN_WAIT_SEC:
+                raise FutarRateLimited("rate limited")
+            await _sleep(wait)
+            slept += wait
+
+    def _note_rate_limited(self) -> None:
+        self._limited += 1
+        now = _monotonic()
+        if self._limited_logged_at is None or now - self._limited_logged_at >= FUTAR_RATE_LOG_EVERY:
+            _LOGGER.warning(
+                "BKK FUTÁR calls over the integration's rate limit (%.0f/s, burst %d): %d refused"
+                " since the last such line; cards may miss rows",
+                FUTAR_RATE,
+                FUTAR_BURST,
+                self._limited,
+            )
+            self._limited = 0
+            self._limited_logged_at = now
+
+    async def _upstream(self, path: str, params: dict[str, str]) -> dict:
+        await self._acquire()
+        return await futar_get(self._session, self._api_key, path, params)
 
     async def get(self, path: str, params: dict[str, Any]) -> dict:
         if self._rejected is not None:
@@ -100,11 +192,14 @@ class FutarProxy:
                 raise FutarAuthError(self._rejected)
             # This call asks again; the others keep failing fast meanwhile.
             self._rejected_at = _monotonic()
-        key = (path, tuple(sorted((str(k), str(v)) for k, v in (params or {}).items())))
+        params = futar_params(path, params)
+        key = (path, tuple(sorted(params.items())))
         try:
-            data = await self._cache.get(
-                key, lambda: futar_get(self._session, self._api_key, path, params)
-            )
+            data = await self._cache.get(key, lambda: self._upstream(path, params))
+        except FutarRateLimited:
+            # Our own limit, not FUTÁR failing: no outage state, no "answers again".
+            self._note_rate_limited()
+            raise
         except FutarAuthError as err:
             if self._rejected is None:
                 _LOGGER.warning("BKK FUTÁR rejected the configured key (%s)", err)

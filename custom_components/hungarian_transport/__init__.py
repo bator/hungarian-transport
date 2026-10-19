@@ -20,6 +20,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
 from . import mav
+from .assets import asset_tag
 from .const import CONF_API_KEY, DOMAIN, SERVICE_ELVIRA_BETWEEN, SERVICE_FUTAR, SERVICE_REBUILD_MAV
 from .elvira import ElviraError, elvira_between, station_code_digits
 from .futar import FUTAR_PATHS, FutarAuthError, FutarError, FutarProxy
@@ -188,7 +189,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     integration = await async_get_integration(hass, DOMAIN)
     has_loader = await hass.async_add_executor_job((www_path / LOADER_FILE).is_file)
     entry_url = LOADER_URL if has_loader else CARD_URL
-    card_url = f"{entry_url}?v={integration.version}"
+    # The release version stays readable in the URL; the content hash makes a
+    # rebuilt www/ (a source install keeps the last release's version) a new URL.
+    tag = await hass.async_add_executor_job(asset_tag, www_path)
+    card_url = f"{entry_url}?v={integration.version}" + (f"-{tag}" if tag else "")
     hass.data.setdefault(DOMAIN, {})["card_url"] = card_url
     frontend.add_extra_js_url(hass, card_url)
     return True

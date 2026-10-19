@@ -2,6 +2,23 @@ import { BkkLib } from '../lib/core.js';
 import { OWN_CARD_TYPES } from '../tags.js';
 
 Object.assign(BkkLib, {
+  /* DEPRECATED card-level key (review J-3, 2026-10-19). A key in the card YAML
+     is sent to BKK as a query parameter (futar.js), and any logged-in Home
+     Assistant user, admin or not, can read it with the lovelace/config call
+     used below. It keeps working; the recommended place is the integration
+     (the hungarian_transport.futar service), whose key never leaves Home
+     Assistant. The card says so once per page, without the key itself. */
+  _warnedCardKey: false,
+  warnCardApiKey(cfg) {
+    if (BkkLib._warnedCardKey || !cfg || typeof cfg.apiKey !== 'string' || !cfg.apiKey.trim()) return false;
+    BkkLib._warnedCardKey = true;
+    try {
+      console.warn('Hungarian transport: the card-level apiKey is deprecated. Every logged-in Home Assistant '
+        + 'user can read it from the dashboard config, and it is sent to BKK in the request URL. Enter the key '
+        + 'in the Hungarian transport integration instead and remove apiKey from the card.');
+    } catch (_e) { /* no console */ }
+    return true;
+  },
   /* Only a key that sits on one of our own cards may be reused. A dashboard can
      hold apiKey values belonging to entirely unrelated cards, and those must
      never end up in a request to BKK. */

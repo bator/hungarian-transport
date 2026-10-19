@@ -55,6 +55,35 @@ async def test_proxies_with_stored_key(hass, aioclient_mock) -> None:
     assert query["version"] == "4"
 
 
+async def test_unknown_params_are_dropped_and_share_the_cache(hass, aioclient_mock) -> None:
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    await _setup(hass)
+
+    for i in range(5):
+        await _call(hass, params={"query": "Keleti", "nonce": str(i)})
+    assert aioclient_mock.call_count == 1
+    assert "nonce" not in aioclient_mock.mock_calls[0][1].query
+
+
+async def test_upstream_calls_are_rate_limited(hass, aioclient_mock, monkeypatch, caplog) -> None:
+    """A stopped clock never refills: past the burst a call waits FUTAR_TOKEN_WAIT_SEC
+    (here without really sleeping), then is refused, with its own log line, not as an outage."""
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(futar, "_monotonic", lambda: 5000.0)
+    monkeypatch.setattr(futar, "_sleep", no_sleep)
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    await _setup(hass)
+
+    results = [await _call(hass, params={"query": f"q{i}"}) for i in range(futar.FUTAR_BURST + 3)]
+    assert aioclient_mock.call_count == futar.FUTAR_BURST
+    assert [r.get("detail") for r in results[-3:]] == ["rate limited"] * 3
+    messages = [r.getMessage() for r in caplog.records if r.name.endswith(".futar")]
+    assert len(messages) == 1 and "rate limit" in messages[0]
+    assert not any("unavailable" in m or "answers again" in m for m in messages)
+
+
 async def test_shares_and_caches_identical_requests(hass, aioclient_mock) -> None:
     aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
     await _setup(hass)

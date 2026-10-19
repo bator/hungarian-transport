@@ -90,6 +90,13 @@ appears in dashboard configs or in browser requests, and identical requests
 from several cards and devices share one call. The editor shows that the key
 comes from the integration.
 
+> **Deprecated: `apiKey` on the card.** A key in the card YAML still works, but
+> any logged-in Home Assistant user, admin or not, can read it from the
+> dashboard config, and the browser sends it to BKK in the request URL. Put the
+> key in the integration instead and remove `apiKey` from the card. The card
+> logs a one-time warning in the browser console, and the editor shows a note
+> next to the field, while a card key is set.
+
 A key can still be set per card (`apiKey`), which takes precedence. If another
 Hungarian transport card on the same dashboard already has one and the
 integration has none, the editor reuses it. When the key works, the editor
@@ -193,7 +200,7 @@ call, so the card follows timetable changes on its own.
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
 | `type` | string | — | `custom:hungarian-transport-card` |
-| `apiKey` | string | — | BKK Open Data API key. Optional when the integration holds the key. |
+| `apiKey` | string | — | **Deprecated** (readable by every Home Assistant user, sent in the request URL): BKK Open Data API key. Optional when the integration holds the key; prefer the integration. |
 | `language` | string | `auto` | `auto`, `hu` or `en`. `auto` follows the Home Assistant user's language. |
 | `name` | string | `origin → destination` | Card header |
 | `stopId` | string | — | Origin stop, set by the editor |
@@ -303,6 +310,16 @@ to the variable), and drop it from `CITY_FEEDS`.
 HACS does not re-download a version that is already installed, so existing
 installs only pick up new feeds with the next release, or with the local
 rebuild below.
+Because the weekly run replaces the zips of an existing release, every
+upload also publishes `SHA256SUMS`, `hungarian-transport-build.json` and a
+build provenance attestation: check a download with `sha256sum -c SHA256SUMS`
+(next to the zips) or
+`gh attestation verify hungarian-transport.zip --repo bator/hungarian-transport`.
+The attestation names the commit of the workflow run that built the zip. On
+the weekly refresh that is the head of `main` (where the workflow runs), not
+the release tag: the zips are built from the tag's code, and
+`hungarian-transport-build.json` gives both, `built_commit` (the tag) and
+`workflow_commit` (the run).
 
 To rebuild them yourself on Home Assistant OS:
 
