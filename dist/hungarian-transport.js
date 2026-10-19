@@ -841,6 +841,8 @@ var I18N = {
     mapTypeTrolley: "Trolibusz",
     mapTypeSubway: "Metró",
     mapTypeRail: "Vonat",
+    mapTypeCoach: "Távolsági busz",
+    mapTypeFerry: "Hajó",
     mapTypeVehicle: "Jármű",
     errNoApiKey: "Nincs BKK API kulcs: add meg a Magyar közlekedés integrációban vagy a kártyában.",
     errApiKeyBad: "A BKK API kulcs érvénytelen (401/403).",
@@ -1019,6 +1021,8 @@ var I18N = {
     mapTypeTrolley: "Trolleybus",
     mapTypeSubway: "Metro",
     mapTypeRail: "Train",
+    mapTypeCoach: "Coach",
+    mapTypeFerry: "Ferry",
     mapTypeVehicle: "Vehicle",
     errNoApiKey: "No BKK API key: set it in the Hungarian transport integration or in the card.",
     errApiKeyBad: "The BKK API key is invalid (401/403).",
@@ -6709,6 +6713,8 @@ var BKKHopCardEditor = class extends HTMLElement {
       );
       if (seq !== this._destSeq || this._config.stopId !== stopId) return;
       this._loadedStop = stopId;
+      this._destsLoading = false;
+      this._loadingStop = "";
       this._dests = idx.dests || [];
       this._destRoutes = idx.destRoutes || {};
       const cur = this._config.routeIds || [];
@@ -7393,8 +7399,10 @@ var BKKHopCard = class extends HTMLElement {
     if (k === "tram") return t(lang, "mapTypeTram");
     if (k === "trolleybus" || k === "trolley") return t(lang, "mapTypeTrolley");
     if (k === "subway" || k === "metro") return t(lang, "mapTypeSubway");
-    if (k === "rail" || k === "train" || k === "coach") return t(lang, "mapTypeRail");
+    if (k === "rail" || k === "train") return t(lang, "mapTypeRail");
+    if (k === "coach") return t(lang, "mapTypeCoach");
     if (k === "bus") return t(lang, "mapTypeBus");
+    if (k === "ferry") return t(lang, "mapTypeFerry");
     return t(lang, "mapTypeVehicle");
   }
   _mapGlyph(kind) {
@@ -7402,8 +7410,9 @@ var BKKHopCard = class extends HTMLElement {
     if (k === "tram") return "🚊";
     if (k === "trolleybus" || k === "trolley") return "🚎";
     if (k === "subway" || k === "metro") return "🚇";
-    if (k === "rail" || k === "train" || k === "coach") return "🚆";
-    if (k === "bus") return "🚌";
+    if (k === "rail" || k === "train") return "🚆";
+    if (k === "bus" || k === "coach") return "🚌";
+    if (k === "ferry") return "⛴";
     return "📍";
   }
   _ensureLeaflet() {
@@ -7979,6 +7988,7 @@ ${this._stopPinCss()}
     this._map = map;
     this._mapRouteLayers = [];
     const resizeMap = () => {
+      if (this._map !== map) return;
       try {
         map.invalidateSize();
       } catch (_e) {
@@ -8055,11 +8065,11 @@ ${this._stopPinCss()}
       if (hasShape) {
         const bounds = L.latLngBounds(shape);
         points.forEach((pt) => bounds.extend(pt));
-        map.fitBounds(bounds, { padding: [36, 36], maxZoom: 12 });
+        map.fitBounds(bounds, { padding: [36, 36], maxZoom: 12, animate: false });
       } else if (points.length >= 2) {
-        map.fitBounds(L.latLngBounds(points), { padding: [36, 36], maxZoom: 12 });
+        map.fitBounds(L.latLngBounds(points), { padding: [36, 36], maxZoom: 12, animate: false });
       } else if (points.length) {
-        map.setView(points[0], 13);
+        map.setView(points[0], 13, { animate: false });
       }
       (this._mapRouteLayers || []).forEach((layer) => {
         if (layer && typeof layer.redraw === "function") {
@@ -8605,12 +8615,13 @@ var BKKPlannerCard = class extends BKKHopCard {
     if (host && host.querySelector("#pjmap")) this._mountPlannerInlineMap(host);
   }
   _teardownPlannerInlineMap() {
-    if (this._plannerMap) {
+    const map = this._plannerMap;
+    this._plannerMap = null;
+    if (map) {
       try {
-        this._plannerMap.remove();
+        map.remove();
       } catch (_e) {
       }
-      this._plannerMap = null;
     }
   }
   _drawJourneyPolylines(L, map, segs, opts) {
@@ -8663,13 +8674,18 @@ var BKKPlannerCard = class extends BKKHopCard {
     });
     return allPts;
   }
-  _fitJourneyView(L, map, allPts, pad) {
+  /* Refits once the layout settles. No animation: a zoom animation ends on
+     a 250 ms timer of Leaflet's own that throws once the map is removed (an
+     itinerary folded or swapped right away), and remove() cannot cancel it.
+     A refit due after that skips the removed map. */
+  _fitJourneyView(L, map, allPts, pad, alive) {
     if (!map || !allPts || allPts.length < 2) return;
     const bounds = L.latLngBounds(allPts);
     const apply = () => {
+      if (!alive()) return;
       try {
         map.invalidateSize();
-        map.fitBounds(bounds, { padding: [pad, pad], maxZoom: 14 });
+        map.fitBounds(bounds, { padding: [pad, pad], maxZoom: 14, animate: false });
       } catch (_e) {
       }
     };
@@ -8879,13 +8895,14 @@ var BKKPlannerCard = class extends BKKHopCard {
         keyboard: false,
         preferCanvas: false,
         attributionControl: true,
-        zoomControl: false
+        zoomControl: false,
+        zoomAnimation: false
       }).setView(start, 8);
       this._plannerMap = map;
       L.tileLayer(MAP_TILES, { maxZoom: 20, subdomains: "abc", attribution: MAP_ATTRIBUTION }).addTo(map);
       const allPts = this._drawJourneyPolylines(L, map, segs, { interactive: false });
       map.on("click", () => this._openJourneyMap());
-      this._fitJourneyView(L, map, allPts, 16);
+      this._fitJourneyView(L, map, allPts, 16, () => this._plannerMap === map);
     } catch (_e) {
       this._teardownPlannerInlineMap();
       el.hidden = true;
@@ -8985,7 +9002,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     }
     this._map = map;
     const allPts = this._drawJourneyPolylines(L, map, segs, { labels: true });
-    this._fitJourneyView(L, map, allPts, 36);
+    this._fitJourneyView(L, map, allPts, 36, () => this._map === map);
     this._openingMap = "";
   }
   /* The pickers name origin and destination already; the card keeps its

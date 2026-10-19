@@ -766,6 +766,9 @@ export class BKKHopCardEditor extends HTMLElement {
       );
       if (seq !== this._destSeq || this._config.stopId !== stopId) return;
       this._loadedStop = stopId;
+      /* Done before the paint below, or it repaints the loading hint. */
+      this._destsLoading = false;
+      this._loadingStop = '';
       this._dests = idx.dests || [];
       this._destRoutes = idx.destRoutes || {};
       /* Reachable routes are what runs in the next few hours: at night the

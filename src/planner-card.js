@@ -249,9 +249,10 @@ export class BKKPlannerCard extends BKKHopCard {
   }
 
   _teardownPlannerInlineMap() {
-    if (this._plannerMap) {
-      try { this._plannerMap.remove(); } catch (_e) { /* ignore */ }
-      this._plannerMap = null;
+    const map = this._plannerMap;
+    this._plannerMap = null;
+    if (map) {
+      try { map.remove(); } catch (_e) { /* ignore */ }
     }
   }
 
@@ -294,13 +295,18 @@ export class BKKPlannerCard extends BKKHopCard {
     return allPts;
   }
 
-  _fitJourneyView(L, map, allPts, pad) {
+  /* Refits once the layout settles. No animation: a zoom animation ends on
+     a 250 ms timer of Leaflet's own that throws once the map is removed (an
+     itinerary folded or swapped right away), and remove() cannot cancel it.
+     A refit due after that skips the removed map. */
+  _fitJourneyView(L, map, allPts, pad, alive) {
     if (!map || !allPts || allPts.length < 2) return;
     const bounds = L.latLngBounds(allPts);
     const apply = () => {
+      if (!alive()) return;
       try {
         map.invalidateSize();
-        map.fitBounds(bounds, { padding: [pad, pad], maxZoom: 14 });
+        map.fitBounds(bounds, { padding: [pad, pad], maxZoom: 14, animate: false });
       } catch (_e) { /* ignore */ }
     };
     apply();
@@ -541,12 +547,13 @@ export class BKKPlannerCard extends BKKHopCard {
         preferCanvas: false,
         attributionControl: true,
         zoomControl: false,
+        zoomAnimation: false,
       }).setView(start, 8);
       this._plannerMap = map;
       L.tileLayer(MAP_TILES, { maxZoom: 20, subdomains: 'abc', attribution: MAP_ATTRIBUTION }).addTo(map);
       const allPts = this._drawJourneyPolylines(L, map, segs, { interactive: false });
       map.on('click', () => this._openJourneyMap());
-      this._fitJourneyView(L, map, allPts, 16);
+      this._fitJourneyView(L, map, allPts, 16, () => this._plannerMap === map);
     } catch (_e) {
       this._teardownPlannerInlineMap();
       el.hidden = true;
@@ -644,7 +651,7 @@ export class BKKPlannerCard extends BKKHopCard {
     }
     this._map = map;
     const allPts = this._drawJourneyPolylines(L, map, segs, { labels: true });
-    this._fitJourneyView(L, map, allPts, 36);
+    this._fitJourneyView(L, map, allPts, 36, () => this._map === map);
     this._openingMap = '';
   }
 

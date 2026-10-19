@@ -640,8 +640,10 @@ export class BKKHopCard extends HTMLElement {
     if (k === 'tram') return t(lang, 'mapTypeTram');
     if (k === 'trolleybus' || k === 'trolley') return t(lang, 'mapTypeTrolley');
     if (k === 'subway' || k === 'metro') return t(lang, 'mapTypeSubway');
-    if (k === 'rail' || k === 'train' || k === 'coach') return t(lang, 'mapTypeRail');
+    if (k === 'rail' || k === 'train') return t(lang, 'mapTypeRail');
+    if (k === 'coach') return t(lang, 'mapTypeCoach');
     if (k === 'bus') return t(lang, 'mapTypeBus');
+    if (k === 'ferry') return t(lang, 'mapTypeFerry');
     return t(lang, 'mapTypeVehicle');
   }
 
@@ -650,8 +652,9 @@ export class BKKHopCard extends HTMLElement {
     if (k === 'tram') return '\ud83d\ude8a';
     if (k === 'trolleybus' || k === 'trolley') return '\ud83d\ude8e';
     if (k === 'subway' || k === 'metro') return '\ud83d\ude87';
-    if (k === 'rail' || k === 'train' || k === 'coach') return '\ud83d\ude86';
-    if (k === 'bus') return '\ud83d\ude8c';
+    if (k === 'rail' || k === 'train') return '\ud83d\ude86';
+    if (k === 'bus' || k === 'coach') return '\ud83d\ude8c';
+    if (k === 'ferry') return '\u26f4';
     return '\ud83d\udccd';
   }
 
@@ -1234,7 +1237,10 @@ ${this._stopPinCss()}
     }
     this._map = map;
     this._mapRouteLayers = [];
-    const resizeMap = () => { try { map.invalidateSize(); } catch (_e) { /* ignore */ } };
+    const resizeMap = () => {
+      if (this._map !== map) return;
+      try { map.invalidateSize(); } catch (_e) { /* ignore */ }
+    };
     requestAnimationFrame(() => { resizeMap(); requestAnimationFrame(resizeMap); });
     const drawMarker = () => {
       if (!this._map || this._map !== map) return;
@@ -1296,11 +1302,11 @@ ${this._stopPinCss()}
       if (hasShape) {
         const bounds = L.latLngBounds(shape);
         points.forEach((pt) => bounds.extend(pt));
-        map.fitBounds(bounds, { padding: [36, 36], maxZoom: 12 });
+        map.fitBounds(bounds, { padding: [36, 36], maxZoom: 12, animate: false });
       } else if (points.length >= 2) {
-        map.fitBounds(L.latLngBounds(points), { padding: [36, 36], maxZoom: 12 });
+        map.fitBounds(L.latLngBounds(points), { padding: [36, 36], maxZoom: 12, animate: false });
       } else if (points.length) {
-        map.setView(points[0], 13);
+        map.setView(points[0], 13, { animate: false });
       }
       (this._mapRouteLayers || []).forEach((layer) => {
         if (layer && typeof layer.redraw === 'function') {
