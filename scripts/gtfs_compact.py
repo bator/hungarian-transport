@@ -69,6 +69,18 @@ class IndexGuardError(RuntimeError):
     """A rebuilt index lost too much against the one it would replace."""
 
 
+def _env_value(raw: str) -> str:
+    """The value of a .env line: a quoted value up to its closing quote, an
+    unquoted one up to a ` #` comment. A `#` inside a word (a URL fragment)
+    stays."""
+    val = raw.strip()
+    if val[:1] in ("'", '"'):
+        end = val.find(val[0], 1)
+        if end > 0:
+            return val[1:end]
+    return re.sub(r"(^|\s)#.*$", "", val).strip()
+
+
 def _parse_env_file(path: Path) -> None:
     try:
         text = path.read_text(encoding="utf-8")
@@ -78,14 +90,32 @@ def _parse_env_file(path: Path) -> None:
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
+        # A file that is also sourced by a shell says `export KEY=value`.
+        line = re.sub(r"^export\s+", "", line)
         key, _, val = line.partition("=")
         key = key.strip()
         if not key or key in os.environ:
             continue
-        val = val.strip()
-        if len(val) >= 2 and val[0] == val[-1] and val[0] in "'\"":
-            val = val[1:-1]
-        os.environ[key] = val
+        os.environ[key] = _env_value(val)
+
+
+def env_candidates() -> list[Path]:
+    """The .env files load_env_files() reads, first one wins for a variable:
+    HUNGARIAN_TRANSPORT_ENV, then /config/hungarian-transport/.env (where
+    the README puts it on Home Assistant), then the .env next to the
+    scripts' folder (a repo checkout; /config/.env when the scripts sit in
+    /config/hungarian-transport)."""
+    extra = (os.environ.get("HUNGARIAN_TRANSPORT_ENV") or "").strip()
+    here = Path(__file__).resolve().parent
+    candidates = [Path(extra)] if extra else []
+    candidates.extend(
+        [
+            Path("/config/hungarian-transport/.env"),
+            here.parent / ".env",
+            Path("/mnt/data/supervisor/homeassistant/hungarian-transport/.env"),
+        ]
+    )
+    return candidates
 
 
 def load_env_files() -> None:
@@ -94,19 +124,7 @@ def load_env_files() -> None:
     if _ENV_LOADED:
         return
     _ENV_LOADED = True
-    extra = (os.environ.get("HUNGARIAN_TRANSPORT_ENV") or "").strip()
-    here = Path(__file__).resolve().parent
-    candidates = []
-    if extra:
-        candidates.append(Path(extra))
-    candidates.extend(
-        [
-            here.parent / ".env",
-            Path("/config/hungarian-transport/.env"),
-            Path("/mnt/data/supervisor/homeassistant/hungarian-transport/.env"),
-        ]
-    )
-    for path in candidates:
+    for path in env_candidates():
         if path.is_file():
             _parse_env_file(path)
 
@@ -214,7 +232,14 @@ class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
         self.allow_insecure = allow_insecure
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        newurl = upgrade_same_host_redirect(req.full_url, newurl)
+        upgraded = upgrade_same_host_redirect(req.full_url, newurl)
+        if upgraded == req.full_url:
+            # The https address itself redirects to http: the server has no
+            # https for it, and asking again would loop until urllib gives
+            # up. Plain http it is, if the feed may use it; assert_https
+            # refuses it otherwise.
+            upgraded = newurl
+        newurl = upgraded
         assert_public_http_url(newurl)
         assert_https(newurl, allow_insecure=self.allow_insecure)
         return super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -314,6 +339,9 @@ def _mdb_url(query: str) -> str:
         if isinstance(feed, dict)
         and (needle in str(feed.get("provider") or "").casefold() or needle in str(feed.get("id") or "").casefold())
     ]
+    # An active feed beats a deprecated or inactive one (a publisher's old
+    # entry next to its current one); the order is kept otherwise.
+    matches.sort(key=lambda feed: str(feed.get("status") or "").lower() != "active")
     # The Mobility Database's own copy (validated, https) of any matching
     # feed beats a publisher URL, which may be plain http or gone.
     for feed in matches:
@@ -595,9 +623,15 @@ def _stream_shape_points(z):
             if len(row) <= width:
                 continue
             try:
-                yield row[i_id], float(row[i_seq]), float(row[i_lat]), float(row[i_lon])
+                seq, lat, lon = float(row[i_seq]), float(row[i_lat]), float(row[i_lon])
             except ValueError:
                 continue
+            # float() takes "nan" and "inf": a point like that (or one off
+            # the globe) would fail the polyline of its shape and with it the
+            # whole feed. NaN fails every comparison, so it is dropped here.
+            if not (math.isfinite(seq) and -90 <= lat <= 90 and -180 <= lon <= 180):
+                continue
+            yield row[i_id], seq, lat, lon
 
 
 def simplify_shape(pts: list[tuple[float, float]], tol_m: float) -> list[tuple[float, float]]:
@@ -1079,7 +1113,9 @@ def _load_parts(
         zp = Path(zpath)
         try:
             st = zp.stat()
-            memo = (str(zp.resolve()), st.st_size, st.st_mtime_ns)
+            # The file, not its name: a zip renamed into place after its
+            # build (update_volan_index) still hits the memo.
+            memo = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
         except OSError:
             memo = None
         shapes = load_shapes(z, memo)
@@ -1324,12 +1360,17 @@ def write_index(
     with_operators: bool,
     schema: int = INDEX_SCHEMA,
     today: str | None = None,
+    guard_total: bool = True,
 ) -> dict:
     """Merge operator parts into one gzipped compact index (and its shapes).
 
-    Refuses an index that would lose most of the trips of the one in place,
-    and one built from a feed whose calendar already ended (a stale zip the
-    publisher forgot): the card would show a timetable nothing runs on.
+    Refuses an index built from a feed whose calendar already ended (a stale
+    zip the publisher forgot): the card would show a timetable nothing runs
+    on. With guard_total, also one that would lose most of the trips of the
+    one in place. The city index passes guard_total=False: guard_feeds()
+    compares it feed by feed, counting only what still runs and honouring
+    HUNGARIAN_TRANSPORT_ALLOW_MISSING, so feeds whose calendars end together
+    (at year end) do not freeze it.
     """
     stale = stale_parts(parts, today)
     if stale:
@@ -1380,7 +1421,7 @@ def write_index(
             all_t.append(row)
         if part.get("feed"):
             feeds.append(f"{oid}:{part['feed']}")
-    prev = existing_trips(out)
+    prev = existing_trips(out) if guard_total else None
     if prev is not None and prev >= 50 and len(all_t) < prev * 0.5:
         raise IndexGuardError(
             f"refusing to replace {out.name}: {len(all_t)} trips vs previous {prev}"

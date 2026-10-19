@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import filecmp
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -15,6 +16,7 @@ import traceback
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import date
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -28,6 +30,15 @@ UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungari
 # run_update.sh reports every other non-zero status itself; 1 is what Python
 # exits with on an uncaught exception or a syntax error, so it is not this.
 REPORTED = 3
+# A feed that fails to download (every URL it has) is reported through the
+# webhook once it has failed FAIL_REPORT_DAYS days in a row, then every
+# FAIL_REPEAT_DAYS while it keeps failing; until then update.log has it. A
+# publisher down for a day is not news, but a moved URL would otherwise only
+# show when the old zip's calendar ends and the feed leaves the index.
+FAIL_REPORT_DAYS = 3
+FAIL_REPEAT_DAYS = 7
+# state.json "failing" key of the MÁV source (MAV_GTFS_URL).
+MAV_KEY = "mav"
 
 
 def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
@@ -71,9 +82,18 @@ try:
         feed_error,
         feed_urls,
         index_shapes,
+        load_env_files,
         prune_shapes,
     )
 except Exception as err:  # a sibling is missing, half-copied or broken: say so, do not die quietly
+    try:
+        # The webhook may be set in .env; gtfs_compact itself may be the
+        # sibling that broke.
+        from gtfs_compact import load_env_files  # noqa: E402
+
+        load_env_files()
+    except Exception:
+        pass
     # A SyntaxError or NameError in a half-copied script is not an ImportError.
     notify(f"Volán GTFS frissítés el sem indult: {type(err).__name__}: {err}")
     if __name__ != "__main__":
@@ -100,6 +120,9 @@ def default_www() -> Path:
     return LEGACY_WWW
 
 
+# HUNGARIAN_TRANSPORT_WWW and HUNGARIAN_TRANSPORT_WEBHOOK may come from
+# /config/hungarian-transport/.env: a shell_command has no other place for them.
+load_env_files()
 HA_WWW = default_www()
 
 INDEX_FILES = ("volan-index.json.gz", "city-index.json.gz", "mav-index.json.gz")
@@ -318,21 +341,27 @@ def merge_meta(head: dict, downloaded: dict | None, size: int | None) -> dict:
     return out
 
 
-def request(method: str, url: str):
+def request(method: str, url: str, *, allow_insecure: bool = False):
     """HEAD/GET with the same public-host and redirect guards as a download:
     a feed URL (a keyed override from .env included) must not reach the
-    supervisor or the LAN."""
+    supervisor or the LAN.
+
+    An http:// URL is asked over https, as download_feed fetches it: a keyed
+    override (BAHART_GTFS_URL with its apikey) never goes out in the clear.
+    Only a feed entry marked "insecure" is asked over plain http, and only
+    such a feed may be redirected to http."""
+    parsed = urllib.parse.urlparse((url or "").strip())
+    if parsed.scheme == "http" and not allow_insecure:
+        url = parsed._replace(scheme="https").geturl()
     assert_public_http_url(url)
     hdrs = {"User-Agent": UA, "Accept": "*/*", "Accept-Encoding": "identity"}
     req = urllib.request.Request(url, method=method, headers=hdrs)
-    # A feed published over http is asked over http; https is never
-    # redirected down to it.
-    return _urlopen(req, timeout=60, allow_insecure=urllib.parse.urlparse(url).scheme == "http")
+    return _urlopen(req, timeout=60, allow_insecure=allow_insecure)
 
 
-def remote_meta(url: str) -> dict:
+def remote_meta(url: str, *, allow_insecure: bool = False) -> dict:
     try:
-        with request("HEAD", url) as resp:
+        with request("HEAD", url, allow_insecure=allow_insecure) as resp:
             if 200 <= resp.status < 300:
                 return headers_of(resp)
     except urllib.error.HTTPError as err:
@@ -354,6 +383,70 @@ def same_remote(state: dict, meta: dict) -> bool:
     if meta.get("last_modified") and state.get("last_modified"):
         return meta["last_modified"] == state["last_modified"]
     return False
+
+
+def file_sha256(path: Path) -> str:
+    """Content hash of a downloaded zip: a server whose HEAD gives no usable
+    fingerprint (403/405, a timeout, no ETag, length or Last-Modified) sends
+    the same bytes again, and that is no new timetable."""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _today() -> date:
+    return date.today()
+
+
+def _day(text: object) -> date | None:
+    try:
+        return date.fromisoformat(str(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def error_name(err: BaseException | None) -> str:
+    """What failed, without the URL (a keyed override carries its key)."""
+    if err is None:
+        return "no URL"
+    if isinstance(err, urllib.error.HTTPError):
+        return f"HTTP {err.code}"
+    return type(err).__name__
+
+
+def note_failure(failing: dict, key: str, error: str, today: date) -> dict | None:
+    """Count one more failed run of a feed in failing (state.json); the
+    entry when a report is due (see FAIL_REPORT_DAYS), else None."""
+    entry = failing.get(key)
+    if not isinstance(entry, dict) or _day(entry.get("since")) is None:
+        entry = failing[key] = {"since": today.isoformat(), "runs": 0}
+    try:
+        runs = int(entry.get("runs") or 0)
+    except (TypeError, ValueError):
+        runs = 0
+    entry["runs"] = runs + 1
+    entry["error"] = error
+    since = _day(entry["since"]) or today
+    reported = _day(entry.get("reported"))
+    if (today - since).days + 1 < FAIL_REPORT_DAYS:
+        return None
+    if reported is not None and (today - reported).days < FAIL_REPEAT_DAYS:
+        return None
+    entry["reported"] = today.isoformat()
+    return entry
+
+
+def failure_report(due: dict[str, dict], today: date) -> str:
+    parts = []
+    for key, entry in sorted(due.items()):
+        since = _day(entry.get("since")) or today
+        parts.append(
+            f"{key} since {since.isoformat()} ({(today - since).days + 1} days,"
+            f" {entry.get('runs')} runs, last {entry.get('error')})"
+        )
+    return "download failing: " + "; ".join(parts)
 
 
 def acquire_lock(path: Path):
@@ -390,18 +483,14 @@ def main() -> int:
 
 
 def _main() -> int:
-    base, volan_out, city_out, mav_out = paths()
-    lock = acquire_lock(base / "update.lock")
-    if lock is None:
-        print("another update is running")
-        return 0
-    sweep_temps(base, volan_out.parent)
-    restored = restore_hacs_indexes(base, volan_out.parent)
+    # The folders whose temp files this run owns, swept on SIGTERM. Filled
+    # once the lock is held: before that, they belong to the run holding it.
+    owned: list[Path] = []
 
     def on_signal(signum, _frame):
         # SIGTERM from `timeout`, a Home Assistant restart or shell_command's
         # process-group kill: the run did not finish, say so.
-        sweep_temps(base, volan_out.parent)
+        sweep_temps(*owned)
         try:
             name = signal.Signals(signum).name
         except ValueError:
@@ -409,11 +498,26 @@ def _main() -> int:
         notify(f"Volán GTFS frissítés megszakítva ({name}): az indexek nem frissültek, lásd update.log")
         sys.exit(REPORTED)
 
+    # First thing: a kill during the lock, the sweep or the HACS restore is
+    # reported as well.
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
 
+    base, volan_out, city_out, mav_out = paths()
+    lock = acquire_lock(base / "update.lock")
+    if lock is None:
+        print("another update is running")
+        return 0
+    owned.extend((base, volan_out.parent))
+    sweep_temps(*owned)
+    restored = restore_hacs_indexes(base, volan_out.parent)
+
     state_path = base / "state.json"
     zip_path = base / "volanbusz_gtfs.zip"
+    # A new Volán zip waits here until its index built (sweep_temps takes it
+    # if the run dies): the city index takes its Volán local lines from
+    # zip_path, so a zip that fails build_index must not replace it.
+    new_zip = base / (zip_path.name + ".tmp")
     state = load_state(state_path)
     volan_state = state.get("volan") or {
         k: state.get(k)
@@ -426,6 +530,14 @@ def _main() -> int:
     # SIGTERM) the next run downloads and rebuilds again.
     city_pending: dict[str, dict] = {}
     city_retry = bool(state.get("city_retry"))
+    # Feeds failing to download, run after run: {id: {since, runs, error, reported}}.
+    feed_ids = {feed["id"] for feed in CITY_FEEDS}
+    failing = {
+        k: v
+        for k, v in (state.get("failing") or {}).items()
+        if (k in feed_ids or k == MAV_KEY) and isinstance(v, dict)
+    }
+    today = _today()
     changed: list[str] = []
     exit_code = 0
     if restored:
@@ -442,87 +554,145 @@ def _main() -> int:
             report("Volán GTFS frissítés sikertelen", f"error HEAD {GTFS_URL}: {err}")
             exit_code = REPORTED
 
-        if volan_meta is not None and not (same_remote(volan_state, volan_meta) and volan_out.exists()):
+        if volan_meta is not None and not (
+            same_remote(volan_state, volan_meta) and volan_out.exists() and zip_path.exists()
+        ):
             try:
-                downloaded = download_zip(GTFS_URL, zip_path)
-                info = build_index(zip_path, volan_out)
+                downloaded = download_zip(GTFS_URL, new_zip)
+                digest = file_sha256(new_zip)
+                info = None
+                if digest != volan_state.get("sha256") or not volan_out.exists():
+                    info = build_index(new_zip, volan_out)
+                new_zip.replace(zip_path)
             except Exception as err:
+                new_zip.unlink(missing_ok=True)
                 report("Volán GTFS frissítés sikertelen", f"error volan rebuild: {err}")
                 exit_code = REPORTED
             else:
-                volan_state = merge_meta(
-                    volan_meta,
-                    downloaded,
-                    zip_path.stat().st_size if zip_path.exists() else None,
-                )
-                volan_state["feed_version"] = info["feed_version"]
-                volan_state["trips"] = info["trips"]
-                volan_state["stops"] = info["stops"]
-                persist_index(volan_out, base)
-                changed.append(f"volan {info['feed_version'] or '?'}")
-                volan_built = True
+                size = zip_path.stat().st_size
+                if info is None:
+                    # The zip the index was built from, byte for byte.
+                    volan_state = merge_meta(volan_meta, volan_state, size)
+                    print(f"unchanged volan {volan_state.get('feed_version') or '?'} (same zip)")
+                else:
+                    volan_state = merge_meta(volan_meta, downloaded, size)
+                    volan_state["sha256"] = digest
+                    volan_state["feed_version"] = info["feed_version"]
+                    volan_state["trips"] = info["trips"]
+                    volan_state["stops"] = info["stops"]
+                    persist_index(volan_out, base)
+                    changed.append(f"volan {info['feed_version'] or '?'}")
+                    volan_built = True
         elif volan_meta is not None:
             print(f"unchanged volan {volan_state.get('feed_version') or '?'}")
 
         # A city rebuild that failed (or was killed) last time is retried even
         # when no feed moved since; the Volán local routes come from zip_path.
         city_retry = city_retry or volan_built or not city_out.exists()
+        due: dict[str, dict] = {}
         for feed in CITY_FEEDS:
-            prev = city_state.get(feed["id"]) or {}
+            fid = feed["id"]
+            prev = city_state.get(fid) or {}
             zpath = base / feed["file"]
+            insecure = bool(feed.get("insecure"))
+            fetched = False
+            last_err: BaseException | None = None
             # A keyed override (BAHART_GTFS_URL) that fails falls back to the
             # catalog and then the public URL.
             for url in feed_urls(feed):
                 try:
-                    meta = remote_meta(url)
+                    meta = remote_meta(url, allow_insecure=insecure)
                 except Exception as err:
-                    print(f"warn HEAD {feed_error(feed['id'], err)}", file=sys.stderr)
+                    last_err = err
+                    print(f"warn HEAD {feed_error(fid, err)}", file=sys.stderr)
                     continue
                 if same_remote(prev, meta) and zpath.exists():
-                    city_state[feed["id"]] = merge_meta(meta, prev, zpath.stat().st_size)
+                    city_state[fid] = merge_meta(meta, prev, zpath.stat().st_size)
+                    fetched = True
                     break
                 try:
-                    downloaded = download_feed(url, zpath, allow_insecure=bool(feed.get("insecure")))
+                    downloaded = download_feed(url, zpath, allow_insecure=insecure)
                 except Exception as err:
-                    print(f"warn download {feed_error(feed['id'], err)}", file=sys.stderr)
+                    last_err = err
+                    print(f"warn download {feed_error(fid, err)}", file=sys.stderr)
                     continue
-                city_pending[feed["id"]] = merge_meta(
-                    meta, downloaded, zpath.stat().st_size if zpath.exists() else None
-                )
+                fetched = True
+                size = zpath.stat().st_size if zpath.exists() else None
+                digest = file_sha256(zpath) if zpath.exists() else ""
+                if digest and digest == prev.get("sha256"):
+                    # The zip the index was built from, byte for byte.
+                    city_state[fid] = merge_meta(meta, prev, size)
+                    print(f"unchanged {fid} (same zip)")
+                    break
+                city_pending[fid] = merge_meta(meta, downloaded, size)
+                if digest:
+                    city_pending[fid]["sha256"] = digest
                 city_retry = True
                 break
+            if fetched:
+                failing.pop(fid, None)
+            else:
+                entry = note_failure(failing, fid, error_name(last_err), today)
+                if entry is not None:
+                    due[fid] = entry
+        if due:
+            # Not a failed run: the index keeps the last zip of each, and the
+            # rest of the run goes on.
+            report(
+                "Helyi GTFS frissítés sikertelen",
+                failure_report(due, today) + "; the index keeps the last zip until its calendar ends,"
+                " check the feed URL",
+            )
 
         if city_retry:
             try:
                 info = build_city_index(base, city_out, zip_path if zip_path.exists() else None)
                 persist_index(city_out, base)
                 expired = info.get("expired") or {}
+                # A feed the index skipped because of its content (an ended
+                # calendar) is recorded: the same zip would be skipped
+                # again. One that failed to load is downloaded and rebuilt
+                # again next time; its hash is dropped, so even the same
+                # bytes count as new then.
+                skipped = [fid for fid in info.get("skipped") or [] if fid not in expired]
                 for fid, meta in city_pending.items():
-                    # A feed the index skipped because of its content (an
-                    # ended calendar) is recorded: the same zip would be
-                    # skipped again. One that failed to load is downloaded
-                    # again next time.
-                    if fid not in info["skipped"] or fid in expired:
+                    if fid not in skipped:
                         city_state[fid] = meta
+                for fid in skipped:
+                    if isinstance(city_state.get(fid), dict):
+                        city_state[fid].pop("sha256", None)
                 city_retry = False
                 line = f"city ops={info['ops']} trips={info['trips']}"
                 if expired:
                     line += " (calendar ended: " + ", ".join(
                         f"{fid} {ymd(end)}" for fid, end in sorted(expired.items())
                     ) + ")"
+                if skipped:
+                    line += " (skipped: " + ", ".join(skipped) + ")"
                 changed.append(line)
             except Exception as err:
                 report("Helyi GTFS frissítés sikertelen", f"error city rebuild: {err}")
                 exit_code = REPORTED
 
         mav_src = None
+        mav_errors: list[BaseException] = []
         try:
-            mav_src = resolve_mav_feed(base)
+            mav_src = resolve_mav_feed(base, url_errors=mav_errors)
         except FileNotFoundError:
             mav_src = None
         except Exception as err:
             print(f"warn mav source: {type(err).__name__}", file=sys.stderr)
+            mav_errors.append(err)
             mav_src = None
+        if mav_errors:
+            entry = note_failure(failing, MAV_KEY, error_name(mav_errors[-1]), today)
+            if entry is not None:
+                report(
+                    "MÁV GTFS frissítés sikertelen",
+                    failure_report({MAV_KEY: entry}, today) + "; the MÁV index stays as it was, check MAV_GTFS_URL",
+                )
+        else:
+            failing.pop(MAV_KEY, None)
         if mav_src is not None and mav_source_newer(mav_src, mav_out):
             try:
                 info = build_mav_index(mav_src, mav_out)
@@ -540,6 +710,7 @@ def _main() -> int:
                 "volan": volan_state,
                 "cities": city_state,
                 "city_retry": city_retry,
+                "failing": failing,
                 "index": str(volan_out),
                 "city_index": str(city_out),
                 "mav_index": str(mav_out),

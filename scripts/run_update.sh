@@ -12,7 +12,8 @@
 # `run_update.sh --worker` runs the job in the foreground (tests, debugging).
 set -eu
 base="${HUNGARIAN_TRANSPORT_BASE:-/config/hungarian-transport}"
-webhook="${HUNGARIAN_TRANSPORT_WEBHOOK:-http://127.0.0.1:8123/api/webhook/hungarian-transport-gtfs}"
+default_webhook="http://127.0.0.1:8123/api/webhook/hungarian-transport-gtfs"
+webhook="${HUNGARIAN_TRANSPORT_WEBHOOK:-}"
 log="$base/update.log"
 # update_volan_index.REPORTED: the script already sent this failure.
 reported=3
@@ -45,8 +46,22 @@ notify() {
   return 0
 }
 
+# HUNGARIAN_TRANSPORT_WEBHOOK from .env, read by the script's own parser so
+# both send to the same place. Empty when python3 or the scripts are broken:
+# then the default webhook it is.
+env_webhook() {
+  command -v python3 >/dev/null 2>&1 && [ -f "$base/gtfs_compact.py" ] || return 0
+  python3 -I -c 'import os, sys
+sys.path.insert(0, sys.argv[1])
+import gtfs_compact
+gtfs_compact.load_env_files()
+print(os.environ.get("HUNGARIAN_TRANSPORT_WEBHOOK", "").strip())' "$base" 2>/dev/null || true
+}
+
 worker() {
   local rc=0
+  if [ -z "$webhook" ]; then webhook=$(env_webhook); fi
+  webhook="${webhook:-$default_webhook}"
   # Volán shapes.txt (8 M points) adds about a minute on a desktop and several
   # on a Raspberry Pi, hence the generous limit. SIGTERM lets the script report
   # itself; a minute later it is killed for good (137).
