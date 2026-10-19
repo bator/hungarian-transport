@@ -30,6 +30,30 @@ HA_URL = os.environ.get("HA_URL", "").rstrip("/")
 HA_TOKEN = os.environ.get("HA_TOKEN", "").strip()
 
 
+def local_request_ok(host: str | None, origin: str | None, port: int) -> bool:
+    """Only this machine's own address, as the harness page uses it.
+
+    The server listens on 127.0.0.1, but a page on any site can rebind its own
+    name to 127.0.0.1 (DNS rebinding) and then call /svc as same-origin, with
+    the BKK key and the Home Assistant token behind it. Such a request carries
+    the attacker's name in Host and Origin, so both must be the loopback
+    address with this port; a request without Origin (curl, the harness's own
+    GETs) is judged by Host alone."""
+    allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
+    if (host or "").lower() not in allowed:
+        return False
+    if origin is None:
+        return True
+    return origin.lower() in {f"http://{a}" for a in allowed}
+
+
+@web.middleware
+async def local_only(request: web.Request, handler):
+    if not local_request_ok(request.headers.get("Host"), request.headers.get("Origin"), request.app["port"]):
+        return web.Response(status=403, text="local requests only")
+    return await handler(request)
+
+
 def outage(code: str, detail: str) -> web.Response:
     """An expected outage, shaped like the integration's service response."""
     return web.json_response({"response": {"data": None, "error": code, "detail": detail}})
@@ -98,8 +122,9 @@ async def main() -> None:
         sys.exit(f"{WWW} has no hungarian-transport.js: see docs/manual/tools/README.md")
     print("BKK key set:", bool(BKK_API_KEY), "| Home Assistant for ELVIRA:", bool(HA_URL and HA_TOKEN), flush=True)
     session = aiohttp.ClientSession()
-    app = web.Application(middlewares=[no_cache])
+    app = web.Application(middlewares=[local_only, no_cache])
     app["session"] = session
+    app["port"] = port
     app.router.add_post("/svc", svc)
     app.router.add_static("/ht/", WWW, show_index=False)
     app.router.add_static("/", HERE, show_index=False)
