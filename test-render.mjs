@@ -4121,6 +4121,81 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   Object.assign(Lib, keep);
 }
 {
+  /* Planner, Kelenföld → Székesfehérvár (2026-10-19 21:33): ELVIRA answers
+     with the whole Kelenföld StationInfo, so G44 4711 to Budapest-Déli
+     (platform 2) leaves in the same minute as Sz 8738 to Siófok (platform 4),
+     and S30 4541 with 9068 to Veszprém. The planner's board rows carry the
+     train number as their label (Transitous): the branded G44/S30 row must
+     not land on them, and each takes its own ELVIRA platform, like the hop card. */
+  const keep = {
+    departures: Lib.departures, elviraBetween: Lib.elviraBetween, travelMin: Lib.travelMin,
+    fillTransitousIfEmpty: Lib.fillTransitousIfEmpty, attachCoachGps: Lib.attachCoachGps,
+  };
+  const t0 = Math.floor(Date.now() / 1000) + 1200;
+  const t1 = t0 + 35 * 60;
+  const rail = (extra) => Object.assign({
+    vehicle: 'rail', rawType: 'RAIL', color: '#4477aa', text: '#ffffff', platform: '', delay: 0, travel: null,
+  }, extra);
+  const board = () => [
+    rail({ tripId: 'motis:hu-mav_8738', label: '8738', trainNumber: '8738', head: 'Siófok', dep: t0 + 30, sched: t0 }),
+    rail({ tripId: 'motis:hu-mav_9068', label: '9068', trainNumber: '9068', head: 'Veszprém', dep: t1 + 30, sched: t1 }),
+  ];
+  Lib.departures = async () => board();
+  Lib.fillTransitousIfEmpty = async (rows) => rows || [];
+  Lib.attachCoachGps = async (_h, rows) => rows;
+  Lib.elviraBetween = async () => [
+    rail({ tripId: 'elvira:4711', label: 'G44', trainNumber: '4711', head: 'Budapest-Déli', platform: '2', dep: t0, sched: t0 }),
+    rail({ tripId: 'elvira:8738', label: '8738', trainNumber: '8738', head: 'Siófok', platform: '4', dep: t0 + 30, sched: t0, destHit: true }),
+    rail({ tripId: 'elvira:4541', label: 'S30', trainNumber: '4541', head: 'Budapest-Déli', platform: '2', dep: t1, sched: t1 }),
+    rail({ tripId: 'elvira:9068', label: '9068', trainNumber: '9068', head: 'Veszprém', platform: '4', dep: t1 + 30, sched: t1, destHit: true }),
+  ];
+  Lib.travelMin = async () => null;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
+  pc._considerJourney = () => {};
+  pc._loadDests = async () => {};
+  document.body.appendChild(pc);
+  pc.setConfig({
+    language: 'hu', apiKey: 'test-key', routeIds: [],
+    stopId: 'hu-mav_005501024', stopName: 'Kelenföld vasútállomás',
+    destKey: 'székesfehérvár', destName: 'Székesfehérvár', destStopId: 'hu-mav_005503269',
+  });
+  for (let i = 0; i < 50; i++) {
+    if (!pc._reloadActive && (pc._rawRows || []).some((r) => r.platform)) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const raw = pc._rawRows || [];
+  const row = (n) => raw.find((r) => r.trainNumber === n) || {};
+  check('planner MÁV rows keep their own label and ELVIRA platform, not a same-minute G44/S30',
+    raw.length === 2
+    && row('8738').label === '8738' && row('8738').platform === '4' && row('8738').head === 'Siófok'
+    && row('9068').label === '9068' && row('9068').platform === '4' && row('9068').head === 'Veszprém'
+    && !raw.some((r) => /^(G44|S30)$/.test(r.label)),
+    JSON.stringify(raw.map((r) => ({ id: r.tripId, label: r.label, n: r.trainNumber, p: r.platform }))));
+  pc.remove();
+  Object.assign(Lib, keep);
+}
+check('a branded suburban train in the same minute stays off another numbered train', (() => {
+  const t0 = Math.floor(Date.now() / 1000) + 1200;
+  const host = (n, head) => ({
+    tripId: 'motis:' + n, label: n, trainNumber: n, head, vehicle: 'rail', rawType: 'RAIL', platform: '', dep: t0, sched: t0,
+  });
+  const merged = Lib.mergeVolanRows(
+    [host('8738', 'Siófok')],
+    [{ tripId: 'elvira:4711', label: 'G44', trainNumber: '4711', head: 'Budapest-Déli', vehicle: 'rail', rawType: 'RAIL', platform: '2', dep: t0, sched: t0 }],
+    12,
+    { overlayOnly: true },
+  );
+  /* Without a number of its own, the branded row is still the same departure. */
+  const unnumbered = Lib.mergeVolanRows(
+    [host('8738', 'Siófok')],
+    [{ tripId: 'gtfs:G44:1', label: 'G44', trainNumber: '', head: 'Siófok', vehicle: 'rail', rawType: 'RAIL', platform: '', dep: t0, sched: t0 }],
+    12,
+  );
+  return merged.length === 1 && merged[0].label === '8738' && merged[0].platform === ''
+    && unnumbered.length === 1 && unnumbered[0].label === 'G44' && unnumbered[0].trainNumber === '8738';
+})());
+{
   /* A failed Leaflet load is tried again on the next open. */
   const prevL = window.L;
   window.L = undefined;
@@ -5782,17 +5857,20 @@ const settle = async (el) => {
     await ed._search('Győr', 'origin');
     await wait(5);
     ed.remove();
-    return ed._config.apiKey;
+    return { saved: ed._config.apiKey, used: ed._apiKey() };
   };
-  const volanKey = await make({ language: 'hu', volan: true });
-  const helyiKey = await make({ language: 'hu', helyi: true, city: 'gyor' });
+  const volanKey = (await make({ language: 'hu', volan: true })).used;
+  const helyiKey = (await make({ language: 'hu', helyi: true, city: 'gyor' })).used;
   const volanAsked = asked;
-  const bkkKey = await make({ language: 'hu' });
+  const bkk = await make({ language: 'hu' });
   Object.assign(Lib, keep);
   Lib._hass = null;
   check('a Volán or city editor never borrows a sibling card\'s API key',
     volanAsked === 0 && !volanKey && !helyiKey, JSON.stringify({ volanAsked, volanKey, helyiKey }));
-  check('a BKK editor still does', bkkKey === 'sibling-key', String(bkkKey));
+  /* A card-level key is deprecated: the sibling's key serves the editor's
+     lookups but is not copied into the new card's YAML. */
+  check('a BKK editor borrows it for its lookups without saving it into the card',
+    bkk.used === 'sibling-key' && !bkk.saved, JSON.stringify({ used: !!bkk.used, saved: !!bkk.saved }));
 }
 {
   /* The banner is worded at paint: a language switch rewords it. */
@@ -6385,7 +6463,58 @@ const settle = async (el) => {
   check('the editor marks a card-level key as deprecated (hu/en), and only when the card has one',
     shownWithKey && hiddenWithout && english && !ed._el('apiKeyDeprecated').textContent.includes(secret),
     JSON.stringify({ shownWithKey, hiddenWithout, english }));
+  /* The note follows the YAML key in every mode: a Volán or city card does
+     not use the key, but its config still holds it. */
+  const shown = () => note.style.display !== 'none' && !!ed._el('apiKeyDeprecated').textContent;
+  ed.setConfig({ language: 'hu', apiKey: secret });
+  const bkkShown = shown();
+  ed.setConfig({ language: 'hu', apiKey: secret, volan: true });
+  const volanShown = shown();
+  ed.setConfig({ language: 'hu', volan: true });
+  const volanHidden = !shown();
+  ed.setConfig({ language: 'hu', apiKey: secret, helyi: true, city: 'gyor' });
+  const helyiShown = shown();
+  ed.setConfig({ language: 'hu', helyi: true, city: 'gyor' });
+  const helyiHidden = !shown();
   ed.remove();
+  const opened = (cfg) => {
+    const e = document.createElement('hungarian-transport-card-editor');
+    document.body.appendChild(e);
+    e.hass = { states: {}, language: 'hu' };
+    e._probeKey = () => {};
+    e._loadDests = async () => {};
+    e._fillKey = async () => {};
+    e.setConfig(cfg);
+    const w = e._el('apiKeyDeprecatedWrap');
+    const on = !!w && w.style.display !== 'none' && /elavult/i.test(e._el('apiKeyDeprecated').textContent);
+    e.remove();
+    return on;
+  };
+  const opensVolan = opened({ language: 'hu', volan: true, apiKey: secret });
+  const opensHelyi = opened({ language: 'hu', helyi: true, city: 'gyor', apiKey: secret });
+  const opensVolanBare = opened({ language: 'hu', volan: true });
+  check('the deprecation note follows the card key across BKK, Volán and Local modes',
+    bkkShown && volanShown && volanHidden && helyiShown && helyiHidden
+    && opensVolan && opensHelyi && !opensVolanBare,
+    JSON.stringify({ bkkShown, volanShown, volanHidden, helyiShown, helyiHidden, opensVolan, opensHelyi, opensVolanBare }));
+  /* A borrowed key is not this card's to remove: the "ok" line says where it
+     comes from, and the card's own note stays off. */
+  const eb = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(eb);
+  eb.hass = { states: {}, language: 'en' };
+  eb._probeKey = () => {};
+  eb._loadDests = async () => {};
+  eb._fillKey = async () => {};
+  eb.setConfig({ language: 'en' });
+  eb._borrowedKey = secret;
+  eb._keyOk = true;
+  eb._syncApiKey();
+  const okText = eb._el('apiKeyOkText').textContent;
+  check('a borrowed key folds the field with its own line and no card-key note',
+    eb._el('apiKeyWrap').style.display === 'none' && /another card/i.test(okText) && !okText.includes(secret)
+    && eb._el('apiKeyDeprecatedWrap').style.display === 'none' && eb._el('apiKey').value === '',
+    JSON.stringify({ okText }));
+  eb.remove();
 }
 
 process.exit(failed ? 1 : 0);

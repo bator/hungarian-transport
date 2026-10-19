@@ -74,15 +74,17 @@ export class BKKHopCardEditor extends HTMLElement {
       this._syncTexts();
       this._syncMode();
     }
-    /* With the key in the integration, do not copy a sibling card's key into
-       this card's config: keeping it out of dashboards is the point. */
+    /* A sibling card's key is only borrowed for the editor's own lookups,
+       never written into this card's config: a card-level key is deprecated,
+       and keeping it out of dashboards is the point. */
     const viaIntegration = BkkLib.integrationHasKey(hass);
-    if (!this._userEditedKey && !this._config.apiKey && !this._loadingKey && !viaIntegration && !this._keyless()) this._fillKey();
+    if (!this._userEditedKey && !this._config.apiKey && !this._borrowedKey && !this._loadingKey
+        && !viaIntegration && !this._keyless()) this._fillKey();
     else if (this._hasFutar()) this._probeKey();
   }
 
   _apiKey() {
-    return BkkLib.cardApiKey(this._config, this._hass);
+    return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
   }
 
   _hasFutar() {
@@ -391,27 +393,38 @@ export class BKKHopCardEditor extends HTMLElement {
     const wrap = this._el('apiKeyWrap');
     const okWrap = this._el('apiKeyOkWrap');
     if (!wrap) return;
+    const depWrap = this._el('apiKeyDeprecatedWrap');
+    const dep = this._el('apiKeyDeprecated');
+    const showDeprecated = (on) => {
+      if (depWrap) depWrap.style.display = on ? '' : 'none';
+      if (dep) dep.textContent = on ? t(this._lang(), 'apiKeyDeprecated') : '';
+    };
+    /* A key in the card YAML still works, but it is deprecated (J-3): say so
+       while this card has one, in every mode (a Volán or city card does not
+       use it, but the YAML still holds it). A key borrowed from a sibling
+       card is not this card's to remove; the "ok" line says where it is. */
+    const own = (this._config.apiKey || '').trim();
     const mode = this._mode();
     if (mode === 'volan' || mode === 'helyi') {
       wrap.style.display = 'none';
       if (okWrap) okWrap.style.display = 'none';
+      showDeprecated(!!own);
       return;
     }
-    const own = (this._config.apiKey || '').trim();
     const viaIntegration = !own && BkkLib.integrationHasKey(this._hass);
+    const borrowed = !own && !viaIntegration && !!String(this._borrowedKey || '').trim();
     /* A rejected integration key shows the field again, so a card key can
        be entered while the integration's key is fixed. */
     const settled = !this._keyReveal
-      && ((viaIntegration && this._keyOk !== false) || (!!own && this._keyOk === true));
+      && ((viaIntegration && this._keyOk !== false) || ((!!own || borrowed) && this._keyOk === true));
     wrap.style.display = settled ? 'none' : '';
     if (okWrap) okWrap.style.display = settled ? '' : 'none';
     const okText = this._el('apiKeyOkText');
-    if (okText) okText.textContent = t(this._lang(), viaIntegration ? 'apiKeyIntegration' : 'apiKeyOk');
-    /* A key in the card YAML still works, but it is deprecated (J-3): say so while the card has one. */
-    const depWrap = this._el('apiKeyDeprecatedWrap');
-    const dep = this._el('apiKeyDeprecated');
-    if (depWrap) depWrap.style.display = own ? '' : 'none';
-    if (dep) dep.textContent = own ? t(this._lang(), 'apiKeyDeprecated') : '';
+    if (okText) {
+      const okKey = viaIntegration ? 'apiKeyIntegration' : (borrowed ? 'apiKeyBorrowed' : 'apiKeyOk');
+      okText.textContent = t(this._lang(), okKey);
+    }
+    showDeprecated(!!own);
   }
 
   /* The key is a password field; the button shows it to check a paste. */
@@ -608,7 +621,9 @@ export class BKKHopCardEditor extends HTMLElement {
     try {
       const key = await BkkLib.apiKeyFromDashboard(this._hass);
       if (key && !this._config.apiKey && !this._userEditedKey) {
-        this._emit({ apiKey: key });
+        /* Kept in memory, like the card's own borrowed key: the card reads
+           the sibling's key again at runtime, so nothing needs saving here. */
+        this._borrowedKey = key;
         await this._probeKey();
       }
     } finally {

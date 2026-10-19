@@ -898,6 +898,17 @@ Object.assign(BkkLib, {
       && !!String(row.trainNumber || '').trim()
       && !BkkLib.isFutarTripId(row.tripId)
       && !BkkLib.suburbanLineLabel(row.label);
+    /* Pairing by minute (branded/numbered, named IC, label) is for one
+       departure seen twice. Two rows with train numbers of their own that
+       differ are two trains: ELVIRA lists the whole station, so G44 4711 to
+       Budapest-Déli leaves Kelenföld in the same minute as 8738 to Siófok. */
+    const numbersOf = (row) => [BkkLib.rowTrainNumber(row), looseNumber(row)]
+      .map(numberKey).filter(Boolean);
+    const otherTrain = (a, b) => {
+      const x = numbersOf(a);
+      const y = numbersOf(b);
+      return !!x.length && !!y.length && !x.some((n) => y.indexOf(n) >= 0);
+    };
     const brandedHost = (row) => BkkLib.isTrainRow(row)
       && !BkkLib.numberedRailBadge(row)
       && (BkkLib.suburbanLineLabel(row && row.label)
@@ -913,14 +924,15 @@ Object.assign(BkkLib, {
         return;
       }
       if (BkkLib.numberedRailBadge(row) && min) {
-        const host = out.findIndex((p) => brandedHost(p) && minuteOf(p) === min);
+        const host = out.findIndex((p) => brandedHost(p) && minuteOf(p) === min && !otherTrain(p, row));
         if (host >= 0) {
           overlay(out[host], row);
           registerNumber(n, host);
           return;
         }
       } else if (brandedHost(row) && min) {
-        const numbered = out.findIndex((p) => BkkLib.numberedRailBadge(p) && minuteOf(p) === min);
+        const numbered = out.findIndex((p) => BkkLib.numberedRailBadge(p) && minuteOf(p) === min
+          && !otherTrain(p, row));
         if (numbered >= 0) {
           overlay(out[numbered], row);
           registerNumber(n, numbered);
@@ -939,9 +951,9 @@ Object.assign(BkkLib, {
         const genericIc = (r) => BkkLib.isTrainRow(r) && BkkLib.genericRailLabel(r && r.label);
         let pair = -1;
         if (namedIc(row)) {
-          pair = out.findIndex((p) => genericIc(p) && minuteOf(p) === min);
+          pair = out.findIndex((p) => genericIc(p) && minuteOf(p) === min && !otherTrain(p, row));
         } else if (genericIc(row)) {
-          pair = out.findIndex((p) => namedIc(p) && minuteOf(p) === min);
+          pair = out.findIndex((p) => namedIc(p) && minuteOf(p) === min && !otherTrain(p, row));
         }
         if (pair >= 0) {
           overlay(out[pair], row);
@@ -955,7 +967,7 @@ Object.assign(BkkLib, {
          minute would copy booking onto the other FUTÁR train. Spec is
          trainNumber (byNum) plus branded/numbered pairing above. */
       const tk = timeOf(row);
-      if (!skipUnmatched && byTime.has(tk)) {
+      if (!skipUnmatched && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
         overlay(out[byTime.get(tk)], row);
         return;
       }
