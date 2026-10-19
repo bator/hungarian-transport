@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 import aiohttp
@@ -31,6 +32,11 @@ FUTAR_PATHS = (
 FUTAR_CACHE_TTL = 15
 FUTAR_CACHE_MAX = 256
 FUTAR_TIMEOUT = aiohttp.ClientTimeout(total=20)
+# After FUTÁR rejects the key, calls fail without asking it for this long;
+# then one call asks again, so a 401 given by mistake (an upstream hiccup)
+# does not switch FUTÁR off until Home Assistant restarts.
+REJECTED_RETRY = 15 * 60
+_monotonic = time.monotonic
 
 
 class FutarError(Exception):
@@ -69,9 +75,10 @@ async def futar_get(
 class FutarProxy:
     """Short-lived cache and request sharing in front of futar_get.
 
-    Once FUTÁR rejects the key, every later call fails with that error
-    without asking upstream again: the entry reloads with a new proxy when
-    the key is replaced.
+    Once FUTÁR rejects the key, later calls fail with that error without
+    asking upstream, until REJECTED_RETRY has passed and one call asks again.
+    Saving a key in the options (the same one too) reloads the entry with a
+    new proxy at once. An outage is logged once, not on every card poll.
     """
 
     def __init__(
@@ -84,15 +91,37 @@ class FutarProxy:
         self._api_key = api_key
         self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX, task_factory)
         self._rejected: str | None = None
+        self._rejected_at = 0.0
+        self._failing = False
 
     async def get(self, path: str, params: dict[str, Any]) -> dict:
         if self._rejected is not None:
-            raise FutarAuthError(self._rejected)
+            if _monotonic() - self._rejected_at < REJECTED_RETRY:
+                raise FutarAuthError(self._rejected)
+            # This call asks again; the others keep failing fast meanwhile.
+            self._rejected_at = _monotonic()
         key = (path, tuple(sorted((str(k), str(v)) for k, v in (params or {}).items())))
         try:
-            return await self._cache.get(
+            data = await self._cache.get(
                 key, lambda: futar_get(self._session, self._api_key, path, params)
             )
         except FutarAuthError as err:
+            if self._rejected is None:
+                _LOGGER.warning("BKK FUTÁR rejected the configured key (%s)", err)
             self._rejected = str(err)
+            self._rejected_at = _monotonic()
             raise
+        except FutarError as err:
+            if not self._failing:
+                self._failing = True
+                _LOGGER.warning(
+                    "BKK FUTÁR unavailable (%s); not logged again until it answers", err
+                )
+            raise
+        if self._rejected is not None:
+            _LOGGER.info("BKK FUTÁR accepts the configured key again")
+            self._rejected = None
+        if self._failing:
+            self._failing = False
+            _LOGGER.info("BKK FUTÁR answers again")
+        return data

@@ -8,7 +8,7 @@ import voluptuous as vol
 
 from homeassistant.components import frontend
 from homeassistant.components.http import StaticPathConfig
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
@@ -54,6 +54,20 @@ WWW_PATH = Path(__file__).parent / "www"
 ISSUE_MISSING_ASSETS = "missing_assets"
 
 
+def _entry_loaded(hass: HomeAssistant) -> bool:
+    return any(
+        entry.state is ConfigEntryState.LOADED
+        for entry in hass.config_entries.async_entries(DOMAIN)
+    )
+
+
+def _require_entry(hass: HomeAssistant) -> None:
+    """The services and the upload stay registered after the entry is
+    unloaded (disabled); they refuse until it is loaded again."""
+    if not _entry_loaded(hass):
+        raise ServiceValidationError(translation_domain=DOMAIN, translation_key="not_loaded")
+
+
 def _station_code(call: ServiceCall, field: str) -> str:
     code = station_code_digits(call.data[field])
     if len(code) != 9:
@@ -68,7 +82,7 @@ def _station_code(call: ServiceCall, field: str) -> str:
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Register the card asset path and ELVIRA service."""
     www_path = WWW_PATH
-    if not www_path.is_dir():
+    if not await hass.async_add_executor_job(www_path.is_dir):
         # A git checkout (or a broken HACS download) has no www/: the release
         # zip ships it. Say so in Repairs instead of a traceback at startup.
         _LOGGER.error(
@@ -99,9 +113,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     )
     session = async_get_clientsession(hass)
 
-    async def handle_elvira_between(
-        call: ServiceCall,
-    ) -> dict[str, list[dict[str, Any]]]:
+    async def handle_elvira_between(call: ServiceCall) -> dict[str, Any]:
+        _require_entry(hass)
         origin = _station_code(call, "origin_code")
         dest = _station_code(call, "dest_code")
         if origin == dest:
@@ -119,12 +132,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 call.data["dest_name"],
             )
         except ElviraError as err:
-            # An outage is an error on the card, not an empty board.
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="elvira_unavailable",
-                translation_placeholders={"error": str(err)},
-            ) from None
+            # An outage, not an empty board, but no exception either: the
+            # websocket API logs every failed call at ERROR, and every card
+            # polls every 45 s. elvira.py logs the outage once.
+            return {"departures": [], "error": "elvira_unavailable", "detail": str(err)}
         return {"departures": rows}
 
     hass.services.async_register(
@@ -136,9 +147,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     )
     # MÁV GTFS is registration-only, so the rail index is built here from the
     # feed the user supplies (see mav.py), and checked trip by trip.
-    hass.http.register_view(mav.MavGtfsUploadView(www_path))
+    await mav.async_remove_stale_uploads(hass)
+    hass.http.register_view(mav.MavGtfsUploadView(www_path, _entry_loaded))
 
     async def handle_rebuild_mav(call: ServiceCall) -> dict[str, Any]:
+        _require_entry(hass)
         try:
             stats = await mav.async_build(hass, www_path, force=True)
         except mav.MavSourceMissing as err:
@@ -173,7 +186,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async_at_started(hass, _build_mav_at_start)
 
     integration = await async_get_integration(hass, DOMAIN)
-    entry_url = LOADER_URL if (www_path / LOADER_FILE).is_file() else CARD_URL
+    has_loader = await hass.async_add_executor_job((www_path / LOADER_FILE).is_file)
+    entry_url = LOADER_URL if has_loader else CARD_URL
     card_url = f"{entry_url}?v={integration.version}"
     hass.data.setdefault(DOMAIN, {})["card_url"] = card_url
     frontend.add_extra_js_url(hass, card_url)
@@ -204,24 +218,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     async def handle_futar(call: ServiceCall) -> dict[str, Any]:
+        # Errors are part of the response, not exceptions: the websocket API
+        # logs every failed call at ERROR, and cards poll every 15 s. The
+        # proxy logs an outage or a rejected key once.
         try:
             data = await proxy.get(call.data["path"], call.data["params"])
         except FutarAuthError as err:
             # The stored key stopped working (revoked, expired): ask for a new
             # one in the UI instead of failing every card poll quietly. The
-            # proxy fails fast from now on, until the new key reloads the entry.
+            # proxy fails fast for a while, or until a key saved in the
+            # options reloads the entry.
             entry.async_start_reauth(hass)
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="futar_auth",
-                translation_placeholders={"error": str(err)},
-            ) from None
+            return {"data": None, "error": "futar_auth", "detail": str(err)}
         except FutarError as err:
-            raise HomeAssistantError(
-                translation_domain=DOMAIN,
-                translation_key="futar_unavailable",
-                translation_placeholders={"error": str(err)},
-            ) from None
+            return {"data": None, "error": "futar_unavailable", "detail": str(err)}
         return {"data": data}
 
     hass.services.async_register(
