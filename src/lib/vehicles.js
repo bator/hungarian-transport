@@ -14,6 +14,17 @@ Object.assign(BkkLib, {
     const m = s.match(/^BKK_(\d+)(?:_|$)/);
     return m ? m[1] : '';
   },
+  /* The other reading of a 4–5 digit id body: the train number plus one
+     digit, where the rule above kept every digit (BKK_8624_67 is IC 862,
+     BKK_2461_311 is EC 246). '' when both readings agree. Ambiguous on its
+     own: mergeVolanRows tries it only for long-distance rows, within its
+     train-number window, against a number from another source. */
+  trainNumberLooseFromTripId(tripId) {
+    const m = String(tripId || '').match(/^BKK_(\d{4,5})(?:_|$)/);
+    if (!m) return '';
+    const loose = m[1].slice(0, -1);
+    return loose === BkkLib.trainNumberFromTripId(tripId) ? '' : loose;
+  },
   isFutarTripId(tripId) {
     const t = String(tripId || '');
     return !!t && !/^(elvira:|gtfs:|motis:)/.test(t);

@@ -4399,6 +4399,7 @@ Object.assign(BkkLib, {
     const out = [];
     const byTime = /* @__PURE__ */ new Map();
     const byNum = /* @__PURE__ */ new Map();
+    const byLoose = /* @__PURE__ */ new Map();
     const trainNumberMatchWindowMin = 5;
     const generic = (c) => {
       const x = String(c || "").replace("#", "").toLowerCase();
@@ -4407,6 +4408,8 @@ Object.assign(BkkLib, {
     const timeOf = (row) => `${String(row.label || "").toUpperCase()}|${Math.round(Number(row.sched || row.dep || 0) / 60)}`;
     const overlay = (prev, row) => {
       if (!prev || !row) return;
+      const prevNum = String(prev.trainNumber || "").trim();
+      const prevNumFromId = !!prevNum && BkkLib.isFutarTripId(prev.tripId) && prevNum === BkkLib.trainNumberFromTripId(prev.tripId);
       if (generic(prev.color) && row.color && !generic(row.color)) {
         prev.color = row.color;
         if (row.text) prev.text = row.text;
@@ -4440,7 +4443,9 @@ Object.assign(BkkLib, {
       if (row.booking) prev.booking = true;
       if (row.nationalPass) prev.nationalPass = true;
       if (row.reservationFreeSection) prev.reservationFreeSection = true;
-      if (!prev.trainNumber && row.trainNumber) prev.trainNumber = String(row.trainNumber);
+      if (row.trainNumber && (!prevNum || rowElvira && prevNumFromId)) {
+        prev.trainNumber = String(row.trainNumber);
+      }
       if (prev.travel == null && row.travel != null) prev.travel = row.travel;
       if (row.wheelchair) prev.wheelchair = true;
       if (row.bikesAllowed) prev.bikesAllowed = true;
@@ -4450,15 +4455,15 @@ Object.assign(BkkLib, {
       const raw = String(number || "").trim();
       return BkkLib.emmaTrainNumber(raw) || raw.replace(/^0+/, "") || raw;
     };
-    const registerNumber = (number, index) => {
+    const registerNumber = (number, index, map = byNum) => {
       const key = numberKey(number);
       if (!key) return;
-      const rows = byNum.get(key) || [];
+      const rows = map.get(key) || [];
       if (rows.indexOf(index) < 0) rows.push(index);
-      byNum.set(key, rows);
+      map.set(key, rows);
     };
-    const findNumberMatch = (number, minute) => {
-      const rows = byNum.get(numberKey(number)) || [];
+    const findNumberMatch = (number, minute, map = byNum) => {
+      const rows = map.get(numberKey(number)) || [];
       if (!minute || !rows.length) return -1;
       let best = -1;
       let distance = trainNumberMatchWindowMin + 1;
@@ -4471,12 +4476,22 @@ Object.assign(BkkLib, {
       });
       return distance <= trainNumberMatchWindowMin ? best : -1;
     };
+    const looseNumber = (row) => {
+      if (!BkkLib.isTrainRow(row)) return "";
+      if (!/^(IC|EC|IR|RJX)$/i.test(String(row.label || "").trim())) return "";
+      const fromId = BkkLib.trainNumberFromTripId(row.tripId);
+      const direct = String(row.trainNumber || "").trim();
+      if (!fromId || direct && direct !== fromId) return "";
+      return BkkLib.trainNumberLooseFromTripId(row.tripId);
+    };
+    const ownNumber = (row) => BkkLib.isTrainRow(row) && !!String(row.trainNumber || "").trim() && !BkkLib.isFutarTripId(row.tripId) && !BkkLib.suburbanLineLabel(row.label);
     const brandedHost = (row) => BkkLib.isTrainRow(row) && !BkkLib.numberedRailBadge(row) && (BkkLib.suburbanLineLabel(row && row.label) || !BkkLib.genericRailLabel(row && row.label) && String(row && row.label || "").trim());
     const add = (row, skipUnmatched) => {
       if (!row || !departureStillDue(row.dep || row.sched)) return;
       const n = BkkLib.rowTrainNumber(row);
       const min = minuteOf(row);
-      const numberMatch = n ? findNumberMatch(n, min) : -1;
+      let numberMatch = n ? findNumberMatch(n, min) : -1;
+      if (numberMatch < 0 && n && ownNumber(row)) numberMatch = findNumberMatch(n, min, byLoose);
       if (numberMatch >= 0) {
         overlay(out[numberMatch], row);
         return;
@@ -4523,6 +4538,7 @@ Object.assign(BkkLib, {
       out.push(row);
       byTime.set(tk, idx);
       registerNumber(n, idx);
+      registerNumber(looseNumber(row), idx, byLoose);
     };
     const overlayOnly = !!(opts && opts.overlayOnly);
     const hosts = overlayOnly ? gtfs || [] : otp || [];
@@ -5430,6 +5446,17 @@ Object.assign(BkkLib, {
     if (ic) return ic[1];
     const m = s.match(/^BKK_(\d+)(?:_|$)/);
     return m ? m[1] : "";
+  },
+  /* The other reading of a 4–5 digit id body: the train number plus one
+     digit, where the rule above kept every digit (BKK_8624_67 is IC 862,
+     BKK_2461_311 is EC 246). '' when both readings agree. Ambiguous on its
+     own: mergeVolanRows tries it only for long-distance rows, within its
+     train-number window, against a number from another source. */
+  trainNumberLooseFromTripId(tripId) {
+    const m = String(tripId || "").match(/^BKK_(\d{4,5})(?:_|$)/);
+    if (!m) return "";
+    const loose = m[1].slice(0, -1);
+    return loose === BkkLib.trainNumberFromTripId(tripId) ? "" : loose;
   },
   isFutarTripId(tripId) {
     const t2 = String(tripId || "");

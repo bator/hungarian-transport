@@ -1824,6 +1824,99 @@ check('west IC BKK_8661_47 is train 866 not 8661',
 check('BKK_90681_106 is train 9068 not 906',
   Lib.trainNumberFromTripId('BKK_90681_106') === '9068'
   && Lib.trainNumberFromTripId('BKK_4541_108') === '4541');
+check('loose trip-id number drops one digit only where the readings differ',
+  Lib.trainNumberLooseFromTripId('BKK_8624_67') === '862'
+  && Lib.trainNumberLooseFromTripId('BKK_2461_311') === '246'
+  && Lib.trainNumberLooseFromTripId('BKK_8661_47') === ''
+  && Lib.trainNumberLooseFromTripId('BKK_90681_106') === ''
+  && Lib.trainNumberLooseFromTripId('BKK_865_74') === ''
+  && Lib.trainNumberLooseFromTripId('elvira:2889849') === '');
+/* Kelenföld → Székesfehérvár, 2026-10-19: FUTÁR gives two ICs no
+   tripShortName, so their numbers are read off the trip id (8624, 2461);
+   ELVIRA has them as BALATON 862 and CITADELLA 246, platform 4. */
+const icFutar = (extra) => Object.assign({
+  label: 'IC', color: '#2E5EA8', text: '#FFFFFF', vehicle: 'rail', rawType: 'RAIL',
+  platform: '', booking: false, delay: 0,
+}, extra);
+const icElvira = (extra) => Object.assign({
+  vehicle: 'rail', rawType: 'RAIL', color: '#4477aa', text: '#ffffff',
+  head: 'Székesfehérvár', platform: '4', booking: true, destHit: true, delay: 0,
+}, extra);
+check('FUTÁR ICs BKK_8624_67 and BKK_2461_311 take ELVIRA BALATON 862 and CITADELLA 246', (() => {
+  const t0 = Math.floor(Date.now() / 1000) + 1200;
+  const t1 = t0 + 25 * 60;
+  const merged = Lib.mergeVolanRows(
+    [
+      icFutar({ tripId: 'BKK_8624_67', trainNumber: '8624', head: 'Keszthely', dep: t0, sched: t0 }),
+      icFutar({ tripId: 'BKK_2461_311', trainNumber: '2461', head: 'Ljubljana', dep: t1, sched: t1 }),
+    ],
+    [
+      icElvira({ tripId: 'elvira:balaton', label: 'BALATON', trainNumber: '862', dep: t0, sched: t0 }),
+      icElvira({ tripId: 'elvira:citadella', label: 'CITADELLA', trainNumber: '246', dep: t1, sched: t1 }),
+    ],
+    12,
+    { overlayOnly: true },
+  );
+  const balaton = merged.find((r) => r.tripId === 'BKK_8624_67');
+  const citadella = merged.find((r) => r.tripId === 'BKK_2461_311');
+  return merged.length === 2
+    && !!balaton && balaton.label === 'BALATON' && balaton.platform === '4'
+    && balaton.booking === true && balaton.trainNumber === '862' && balaton.head === 'Keszthely'
+    && !!citadella && citadella.label === 'CITADELLA' && citadella.platform === '4'
+    && citadella.booking === true && citadella.trainNumber === '246'
+    /* EMMA GPS goes by the number: 8624 never met "862 BALATON". */
+    && Lib.matchEmmaVehicle(balaton, { trip: { tripShortName: '862 BALATON InterCity' } });
+})());
+check('a trip-id IC takes no ELVIRA train one digit shorter outside the 5-minute window', (() => {
+  const t0 = Math.floor(Date.now() / 1000) + 1200;
+  const merged = Lib.mergeVolanRows(
+    [icFutar({ tripId: 'BKK_8624_67', trainNumber: '8624', head: 'Keszthely', dep: t0, sched: t0 })],
+    [icElvira({
+      tripId: 'elvira:balaton', label: 'BALATON', trainNumber: '862',
+      dep: t0 + 6 * 60, sched: t0 + 6 * 60,
+    })],
+    12,
+    { overlayOnly: true },
+  );
+  return merged.length === 1 && merged[0].label === 'IC' && merged[0].trainNumber === '8624'
+    && merged[0].platform === '' && merged[0].booking !== true;
+})());
+check('an IC ELVIRA renumbered stays one row when FUTÁR and ELVIRA merge onto it again', (() => {
+  const t0 = Math.floor(Date.now() / 1000) + 1200;
+  const futar = () => [icFutar({ tripId: 'BKK_8624_67', trainNumber: '8624', head: 'Keszthely', dep: t0, sched: t0 })];
+  const elvira = [icElvira({ tripId: 'elvira:862', label: 'IC', trainNumber: '862', dep: t0, sched: t0 })];
+  const first = Lib.mergeVolanRows(futar(), elvira, 12, { overlayOnly: true });
+  const again = Lib.mergeVolanRows(Lib.mergeVolanRows(futar(), first, 12), elvira, 12, { overlayOnly: true });
+  return first.length === 1 && first[0].trainNumber === '862' && first[0].platform === '4'
+    && again.length === 1 && again[0].trainNumber === '862' && again[0].platform === '4'
+    && again[0].booking === true && again[0].tripId === 'BKK_8624_67';
+})());
+check('suburban 4-digit trip ids take no 3-digit ELVIRA train in the same minute', (() => {
+  const t0 = Math.floor(Date.now() / 1000) + 1200;
+  const t1 = t0 + 30 * 60;
+  const merged = Lib.mergeVolanRows(
+    [
+      icFutar({
+        label: 'Z30', color: '#FFCD28', tripId: 'BKK_4541_108', trainNumber: '4541',
+        head: 'Székesfehérvár', dep: t0, sched: t0,
+      }),
+      icFutar({
+        label: 'S', color: '#4477aa', tripId: 'BKK_4561_108', trainNumber: '4561',
+        head: 'Székesfehérvár', dep: t1, sched: t1,
+      }),
+    ],
+    [
+      icElvira({ tripId: 'elvira:454', label: 'IC', trainNumber: '454', platform: '2', dep: t0 + 60, sched: t0 + 60 }),
+      icElvira({ tripId: 'elvira:456', label: 'IC', trainNumber: '456', platform: '2', dep: t1, sched: t1 }),
+    ],
+    12,
+    { overlayOnly: true },
+  );
+  return merged.length === 2
+    && merged.every((r) => r.platform === '' && r.booking !== true)
+    && merged[0].label === 'Z30' && merged[0].trainNumber === '4541'
+    && merged[1].label === 'S' && merged[1].trainNumber === '4561';
+})());
 check('elvira trip id is not a FUTAR trip',
   !Lib.isFutarTripId('elvira:2889849') && Lib.isFutarTripId('BKK_4541_108')
   && !Lib.isFutarTripId('motis:hu-bkk_1'));
@@ -3979,6 +4072,51 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   check('a row the through-check adds gets its ride time',
     !!t2 && t2.travel === 15 && !!t1 && t1.travel === 7,
     JSON.stringify((hop._rawRows || []).map((r) => ({ id: r.tripId, travel: r.travel }))));
+  hop.remove();
+  Object.assign(Lib, keep);
+}
+{
+  /* The MÁV hop card end to end: ELVIRA lands on the first FUTÁR rows, then
+     the through-check's fresh FUTÁR copies (numbers read off the trip id
+     again) merge onto those rows and ELVIRA once more. */
+  const keep = { departures: Lib.departures, elviraBetween: Lib.elviraBetween, travelMin: Lib.travelMin };
+  const t0 = Math.floor(Date.now() / 1000) + 1200;
+  const t1 = t0 + 25 * 60;
+  const board = () => [
+    icFutar({ tripId: 'BKK_8624_67', trainNumber: '8624', head: 'Keszthely', dep: t0, sched: t0, travel: null }),
+    icFutar({ tripId: 'BKK_2461_311', trainNumber: '2461', head: 'Ljubljana', dep: t1, sched: t1, travel: null }),
+  ];
+  Lib.departures = async (_k, _s, _r, _d, opts) => {
+    opts.armThroughCheck(() => { setTimeout(() => opts.onFutarUpdate(board()), 30); });
+    return board();
+  };
+  Lib.elviraBetween = async () => [
+    icElvira({ tripId: 'elvira:balaton', label: 'BALATON', trainNumber: '862', dep: t0, sched: t0, travel: 45 }),
+    icElvira({ tripId: 'elvira:citadella', label: 'CITADELLA', trainNumber: '246', dep: t1, sched: t1, travel: 42 }),
+  ];
+  Lib.travelMin = async () => 45;
+  const hop = document.createElement('hungarian-transport-card');
+  hop.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
+  document.body.appendChild(hop);
+  hop.setConfig({
+    language: 'hu', apiKey: 'test-key', mav: true, routeIds: [],
+    stopId: 'BKK_005501024', stopName: 'Budapest-Kelenföld',
+    destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
+  });
+  hop._considerJourney = () => {};
+  for (let i = 0; i < 50; i++) {
+    if (!hop._reloadActive && (hop._rawRows || []).some((r) => r.platform === '4')) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const raw = hop._rawRows || [];
+  const at = (tripId) => raw.findIndex((r) => r.tripId === tripId);
+  const html = (tripId) => (at(tripId) >= 0 ? hop._rowHtml(hop._rows[at(tripId)], 'hu', at(tripId)) : '');
+  const shows = (tripId, num) => html(tripId).includes('class="plat"') && html(tripId).includes('>4<')
+    && html(tripId).includes('class="picto booking"') && html(tripId).includes(`>${num}</span>`);
+  check('MÁV hop card shows platform 4 and the reservation mark on both trip-id ICs',
+    raw.length === 2 && shows('BKK_8624_67', '862') && shows('BKK_2461_311', '246')
+    && raw[at('BKK_8624_67')].label === 'BALATON' && raw[at('BKK_2461_311')].label === 'CITADELLA',
+    JSON.stringify(raw.map((r) => ({ id: r.tripId, label: r.label, n: r.trainNumber, p: r.platform, b: r.booking }))));
   hop.remove();
   Object.assign(Lib, keep);
 }
