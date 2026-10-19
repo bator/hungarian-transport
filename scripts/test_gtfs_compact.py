@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import contextlib
 import gzip
+import http.server
 import io
 import json
 import math
 import os
 import re
+import shutil
 import socket
+import ssl
+import subprocess
 import sys
 import tempfile
+import threading
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -498,6 +503,8 @@ def main() -> int:
     finally:
         gc.socket.getaddrinfo = real_gai
 
+    failed |= rebinding_checks()
+
     tags = (Path(__file__).resolve().parents[1] / "src" / "tags.js").read_text(encoding="utf-8")
     m = re.search(r"^export const INDEX_SCHEMA = (\d+);", tags, re.M)
     failed |= not check(
@@ -933,6 +940,132 @@ def main() -> int:
     )
 
     return 1 if failed else 0
+
+
+class _HostRecorder(http.server.BaseHTTPRequestHandler):
+    """Answers 200 and records which address was hit with which Host header."""
+
+    def do_GET(self):  # noqa: N802 (http.server API)
+        self.server.hits.append((self.server.server_address[0], self.headers.get("Host")))
+        body = b"ok"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+
+def _serve(ip: str, port: int = 0, tls: ssl.SSLContext | None = None) -> http.server.HTTPServer:
+    srv = http.server.HTTPServer((ip, port), _HostRecorder)
+    srv.hits = []
+    if tls is not None:
+        srv.socket = tls.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+def rebinding_checks() -> bool:
+    """O-6: the address the URL check approved is the address connected to.
+
+    pinned.test answers 127.0.0.1 (treated as public here) on the first lookup
+    and 127.0.0.2 (blocked) on every later one, the way a rebinding DNS server
+    would between the check and the download."""
+    failed = False
+    real_gai, real_blocked = gc.socket.getaddrinfo, gc._blocked_ip
+    good = _serve("127.0.0.1")
+    port = good.server_address[1]
+    try:
+        evil = _serve("127.0.0.2", port)
+    except OSError as err:
+        good.shutdown()
+        return not check("rebinding checks need 127.0.0.2 on loopback", False, repr(err))
+    answers: list[str] = []
+
+    def fake_gai(host, p, *args, **kwargs):
+        if host == "pinned.test":
+            ip = answers.pop(0) if len(answers) > 1 else answers[0]
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, p))]
+        return real_gai(host, p, *args, **kwargs)
+
+    gc.socket.getaddrinfo = fake_gai
+    gc._blocked_ip = lambda ip: str(ip) != "127.0.0.1"
+    url = f"http://pinned.test:{port}/f.zip"
+    try:
+        answers[:] = ["127.0.0.1"]
+        with gc._urlopen(urllib.request.Request(url)) as resp:
+            body = resp.read()
+        failed |= not check("a download connects to the checked address and keeps the Host header",
+                            body == b"ok" and good.hits == [("127.0.0.1", f"pinned.test:{port}")], repr(good.hits))
+
+        good.hits.clear()
+        answers[:] = ["127.0.0.1", "127.0.0.2"]
+        gc.assert_public_http_url(url)  # the check sees the public answer...
+        err = None
+        try:
+            gc._urlopen(urllib.request.Request(url)).close()
+        except ValueError as e:
+            err = e
+        failed |= not check("an answer that turns private after the check is refused at connect time",
+                            err is not None and "blocked url host" in str(err) and evil.hits == [] and good.hits == [],
+                            repr((err, evil.hits, good.hits)))
+
+        # The same sequence through a plain urlopen reaches the private address:
+        # the scenario the pinned connection closes.
+        answers[:] = ["127.0.0.1", "127.0.0.2"]
+        gc.assert_public_http_url(url)
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=10) as resp:
+            resp.read()
+        failed |= not check("(control) an unpinned urlopen does reach the rebound address",
+                            evil.hits == [("127.0.0.2", f"pinned.test:{port}")], repr(evil.hits))
+
+        proxied = urllib.request.Request("http://feed.example/f.zip")
+        proxied.set_proxy("proxy.lan:3128", "http")
+        failed |= not check("through a proxy the plain connection is used (the proxy resolves)",
+                            gc._via_proxy(proxied) and not gc._via_proxy(urllib.request.Request(url)))
+        failed |= tls_checks(fake_gai, answers)
+    finally:
+        gc.socket.getaddrinfo, gc._blocked_ip = real_gai, real_blocked
+        good.shutdown()
+        evil.shutdown()
+    return failed
+
+
+def tls_checks(fake_gai, answers: list[str]) -> bool:
+    """https: connected to the pinned IP, the certificate is still checked
+    against the URL's name (SNI and hostname verification)."""
+    if shutil.which("openssl") is None:
+        print("skip https pinning check (no openssl to make a test certificate)")
+        return False
+    failed = False
+    with tempfile.TemporaryDirectory() as tmp:
+        cert, key = Path(tmp) / "cert.pem", Path(tmp) / "key.pem"
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=pinned.test",
+                        "-addext", "subjectAltName=DNS:pinned.test", "-keyout", str(key), "-out", str(cert)],
+                       check=True, capture_output=True, timeout=60)
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(cert, key)
+        srv = _serve("127.0.0.1", tls=server_ctx)
+        port = srv.server_address[1]
+        client_ctx = ssl.create_default_context(cafile=str(cert))
+        opener = urllib.request.build_opener(gc._PublicRedirectHandler(), gc._PublicHTTPHandler(),
+                                             gc._PublicHTTPSHandler(context=client_ctx))
+        try:
+            answers[:] = ["127.0.0.1"]
+            with opener.open(f"https://pinned.test:{port}/f.zip", timeout=10) as resp:
+                body = resp.read()
+            failed |= not check("https to the pinned address verifies the certificate for the URL's name",
+                                body == b"ok" and srv.hits == [("127.0.0.1", f"pinned.test:{port}")], repr(srv.hits))
+            err = None
+            try:
+                opener.open(f"https://127.0.0.1:{port}/f.zip", timeout=10).close()
+            except (ValueError, OSError) as e:
+                err = e
+            failed |= not check("a name the certificate does not cover still fails", err is not None, repr(err))
+        finally:
+            srv.shutdown()
+    return failed
 
 
 if __name__ == "__main__":
