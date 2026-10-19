@@ -75,6 +75,9 @@ jobs:
       - name: FUTÁR proxy limit tests
         run: python3 ha/test_futar_limits.py
 
+      - name: Manual server tests
+        run: python3 docs/manual/tools/test_server.py
+
   integration:
     name: Integration tests
     runs-on: ubuntu-latest
