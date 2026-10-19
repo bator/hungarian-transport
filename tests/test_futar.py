@@ -84,10 +84,13 @@ async def test_rejected_key_raises_translated_error(hass, aioclient_mock) -> Non
     assert err.value.translation_key == "futar_auth"
     assert "secret-key" not in str(err.value)
 
-    # A rejected key starts one reauth flow, however many cards poll.
+    # A rejected key starts one reauth flow, however many cards poll, and
+    # is not sent upstream again while the reauth is pending.
     await hass.async_block_till_done()
-    with pytest.raises(HomeAssistantError):
+    with pytest.raises(HomeAssistantError) as err:
         await _call(hass, params={"query": "Deli"})
+    assert err.value.translation_key == "futar_auth"
+    assert aioclient_mock.call_count == 1
     await hass.async_block_till_done()
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     assert len(flows) == 1
@@ -109,3 +112,31 @@ async def test_service_follows_options(hass, aioclient_mock) -> None:
     assert hass.services.has_service(DOMAIN, SERVICE_FUTAR)
     await _call(hass)
     assert aioclient_mock.mock_calls[-1][1].query["key"] == "other"
+
+
+async def test_new_key_after_rejection_reaches_futar(hass, aioclient_mock) -> None:
+    """The fail-fast state belongs to the proxy of the rejected key: the
+    reload with a new key asks FUTÁR again."""
+    aioclient_mock.get(SEARCH, status=401)
+    entry = await _setup(hass)
+    with pytest.raises(HomeAssistantError):
+        await _call(hass)
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    hass.config_entries.async_update_entry(entry, options={CONF_API_KEY: "fresh-key"})
+    await hass.async_block_till_done()
+    assert (await _call(hass))["data"]["status"] == "OK"
+    assert aioclient_mock.mock_calls[-1][1].query["key"] == "fresh-key"
+
+
+async def test_options_key_only(hass, aioclient_mock) -> None:
+    """No version stored the key in entry.data; a stray one there is ignored."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=DOMAIN, data={CONF_API_KEY: "stray"}, options={}
+    )
+    assert await async_setup_component(hass, "http", {})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert not hass.services.has_service(DOMAIN, SERVICE_FUTAR)

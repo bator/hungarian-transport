@@ -535,14 +535,17 @@ def audit(path: Path, index: dict[str, Any], loaded: tuple | None = None) -> dic
 
 
 def build_and_audit(src: Path, out: Path) -> dict[str, Any]:
-    """Check, build, write and audit; the stats dict Home Assistant keeps."""
+    """Check, build and audit, then write; the stats dict Home Assistant keeps.
+
+    The audit runs on the index in memory and the write comes last, so a
+    build that fails on the way leaves the previous index alone."""
     check_feed(src)
     index = build(src)
-    stats = dict(index["_stats"])
-    stats["bytes"] = write(index, out)
     report = audit(src, index)
+    stats = dict(index["_stats"])
     stats["audit"] = {k: v for k, v in report.items() if k != "worst"}
     stats["audit_worst"] = report["worst"][:5]
+    stats["bytes"] = write(index, out)
     return stats
 
 
@@ -560,7 +563,8 @@ def _main(argv: list[str]) -> int:
     except Exception as err:  # noqa: BLE001 - the parent reads stderr
         print(f"{type(err).__name__}: {err}", file=sys.stderr)
         return 1
-    json.dump(stats, sys.stdout, ensure_ascii=False)
+    # ASCII only: the pipe's encoding follows the locale Home Assistant runs in.
+    json.dump(stats, sys.stdout, ensure_ascii=True)
     return 0
 
 

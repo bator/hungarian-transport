@@ -2,9 +2,11 @@
 
 import asyncio
 from datetime import timedelta
+import logging
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
 
 from homeassistant.components.frontend import DATA_EXTRA_MODULE_URL
 from homeassistant.core import HomeAssistant
@@ -20,6 +22,8 @@ from custom_components.hungarian_transport.elvira import ELVIRA_URL, service_day
 ORIGIN = "005510009"
 BUDAPEST = dt_util.get_time_zone("Europe/Budapest")
 DEST = "005501016"
+# Midday: one service day, so every call asks for exactly two boards.
+NOON = "2026-10-19 12:00:00+02:00"
 
 
 async def _setup(hass: HomeAssistant) -> MockConfigEntry:
@@ -118,6 +122,21 @@ async def test_setup_fails_without_assets(hass, card_assets, caplog) -> None:
     assert "Traceback" not in caplog.text
 
 
+async def test_missing_assets_issue_goes_once_www_is_back(hass) -> None:
+    """The Repairs issue outlives the boot that raised it; the first start
+    with www/ in place (the release zip installed) removes it."""
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        ISSUE_MISSING_ASSETS,
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key=ISSUE_MISSING_ASSETS,
+    )
+    await _setup(hass)
+    assert ir.async_get(hass).async_get_issue(DOMAIN, ISSUE_MISSING_ASSETS) is None
+
+
 def _board(start, arrive=None, code="966"):
     fmt = "%Y-%m-%dT%H:%M:%S"
     dep = {
@@ -164,7 +183,8 @@ async def test_elvira_service_returns_rows(hass, aioclient_mock) -> None:
     assert asked == expected
 
 
-async def test_elvira_service_shares_concurrent_requests(hass, aioclient_mock) -> None:
+async def test_elvira_service_shares_concurrent_requests(hass, aioclient_mock, freezer) -> None:
+    freezer.move_to(NOON)
     await _setup(hass)
     aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
     data = {"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": 15}
@@ -213,9 +233,10 @@ async def _elvira_call(hass):
     )
 
 
-async def test_elvira_outage_is_an_error_and_is_not_cached(hass, aioclient_mock) -> None:
+async def test_elvira_outage_is_an_error_and_is_not_cached(hass, aioclient_mock, freezer) -> None:
     """HTTP errors surface as HomeAssistantError; the shared cache must not
     hold the failed board for ELVIRA_CACHE_TTL as 'no trains'."""
+    freezer.move_to(NOON)
     await _setup(hass)
     aioclient_mock.post(ELVIRA_URL, status=503)
     now = dt_util.now(BUDAPEST)
@@ -253,3 +274,85 @@ async def test_elvira_timeout_is_an_error(hass, aioclient_mock) -> None:
         await _elvira_call(hass)
     assert err.value.translation_key == "elvira_unavailable"
     assert "TimeoutError" in str(err.value)
+
+
+def _boards(failing, departures):
+    """aioclient_mock side effect: 503 for the (station, day) boards in
+    ``failing`` (a bare station code fails all its days), else the origin's
+    ``departures`` of that day."""
+
+    async def side_effect(method, url, data):
+        code, day = data["stationNumberCode"], data["travelDate"][:10]
+        if code in failing or (code, day) in failing:
+            return AiohttpClientMockResponse(method, url, status=503)
+        deps = [dep for dep in departures if code == ORIGIN and dep["start"][:10] == day]
+        details = {"departureScheduler": deps, "arrivalScheduler": []}
+        return AiohttpClientMockResponse(method, url, json={"stationSchedulerDetails": details})
+
+    return side_effect
+
+
+def _elvira_warnings(caplog) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name.endswith(".elvira") and r.levelno == logging.WARNING
+    ]
+
+
+async def test_elvira_failed_destination_board_counts_as_empty(
+    hass, aioclient_mock, freezer, caplog
+) -> None:
+    """The origin board alone carries platform and booking; a destination
+    outage only costs the travel time, and is logged once, not per poll."""
+    freezer.move_to(NOON)
+    await _setup(hass)
+    start = dt_util.now(BUDAPEST).replace(microsecond=0) + timedelta(minutes=10)
+    dep, _arr = _board(start)
+    aioclient_mock.post(ELVIRA_URL, side_effect=_boards({DEST}, [dep]))
+
+    for _ in range(3):
+        rows = (await _elvira_call(hass))["departures"]
+        assert len(rows) == 1
+        assert rows[0]["platform"] == "6" and rows[0]["booking"] is True
+        assert rows[0]["travel"] is None and rows[0]["destHit"] is False
+    warnings = _elvira_warnings(caplog)
+    assert len(warnings) == 1 and DEST in warnings[0] and "HTTP 503" in warnings[0]
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(ELVIRA_URL, side_effect=_boards(set(), [dep]))
+    caplog.clear()
+    await _elvira_call(hass)
+    await _elvira_call(hass)
+    assert [r.getMessage() for r in caplog.records if "answers again" in r.getMessage()] == [
+        f"ELVIRA StationInfo {DEST} answers again"
+    ]
+
+
+async def test_elvira_failed_extra_day_board_counts_as_empty(hass, aioclient_mock, freezer) -> None:
+    """Just after midnight yesterday's board is asked for its late trains;
+    when only that one fails, today's departures still arrive."""
+    freezer.move_to("2026-10-19 00:30:00+02:00")
+    await _setup(hass)
+    now = dt_util.now(BUDAPEST).replace(microsecond=0)
+    yesterday = (now - timedelta(days=1)).date().isoformat()
+    assert [d.isoformat() for d in service_days(now, now + timedelta(minutes=15))] == [
+        yesterday,
+        now.date().isoformat(),
+    ]
+    dep, _arr = _board(now + timedelta(minutes=10))
+    aioclient_mock.post(ELVIRA_URL, side_effect=_boards({(ORIGIN, yesterday)}, [dep]))
+
+    rows = (await _elvira_call(hass))["departures"]
+    assert [row["platform"] for row in rows] == ["6"]
+
+
+async def test_elvira_error_when_no_origin_board_arrives(hass, aioclient_mock, freezer) -> None:
+    freezer.move_to("2026-10-19 00:30:00+02:00")
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, side_effect=_boards({ORIGIN}, []))
+
+    with pytest.raises(HomeAssistantError) as err:
+        await _elvira_call(hass)
+    assert err.value.translation_key == "elvira_unavailable"
+    assert "HTTP 503" in str(err.value)

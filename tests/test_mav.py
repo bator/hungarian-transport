@@ -5,16 +5,21 @@ import gzip
 import io
 import json
 import math
+import os
+import signal
 import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from homeassistant.components.http import KEY_HASS_USER
 from homeassistant.core import Context, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError, Unauthorized
+from homeassistant.helpers.http import KEY_HASS
 from homeassistant.setup import async_setup_component
 
 from custom_components.hungarian_transport import mav, mav_index
@@ -36,7 +41,7 @@ def _rails(a, b, n=30):
     return out
 
 
-def _feed_zip() -> bytes:
+def _feed_zip(version: str = "test-feed") -> bytes:
     """Train 905 runs Szombathely - Kelenföld on one day and Székesfehérvár -
     Kelenföld on another (two stop patterns); a third trip has a shape that
     misses its middle station and must fall back to the station line."""
@@ -44,7 +49,7 @@ def _feed_zip() -> bytes:
     short_line = _rails(SZF, MID) + _rails(MID, KEL)[1:]
     files = {
         "agency.txt": "agency_id,agency_name\nMAV,MÁV\n",
-        "feed_info.txt": "feed_publisher_name,feed_version\nMÁV,test-feed\n",
+        "feed_info.txt": f"feed_publisher_name,feed_version\nMÁV,{version}\n",
         "routes.txt": "route_id,route_short_name,route_long_name,route_type\nR905,,IC 905 BAKONY,2\nR858,,IC 858,2\n",
         "trips.txt": "route_id,service_id,trip_id,shape_id\nR905,S1,T1,long\nR905,S2,T2,short\nR858,S1,T3,chord\n",
         "stops.txt": (
@@ -248,3 +253,218 @@ async def test_startup_rebuilds_a_missing_index(hass: HomeAssistant, card_assets
     await hass.async_block_till_done(wait_background_tasks=True)
     assert (card_assets / "mav-index.json.gz").is_file()
     assert hass.data[DOMAIN]["mav"]["audit"]["ok_ratio"] == 1.0
+    # Built from this very feed: the next start leaves it alone.
+    assert await mav.async_build(hass, card_assets) is None
+
+
+def _write_feed(path: Path, version: str = "test-feed") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_feed_zip(version))
+
+
+def test_staleness_follows_the_feed_not_the_clock(tmp_path: Path) -> None:
+    """Which feed built the index is recorded by size and mtime, so an index
+    finished after the next feed arrived (the startup build of the old feed
+    held the lock while an upload replaced it) is still rebuilt."""
+    src, out, state = tmp_path / "mav-gtfs.zip", tmp_path / "mav-index.json.gz", tmp_path / mav.STATE_NAME
+    assert not mav._needs_build(src, out, state)
+    _write_feed(src)
+    assert mav._needs_build(src, out, state)
+
+    out.write_bytes(b"index")
+    mav._write_state(state, {"source": mav._fingerprint(src), "index": mav._fingerprint(out)})
+    assert not mav._needs_build(src, out, state)
+
+    # A new feed whose mtime is older than the index.
+    _write_feed(src, "next-feed")
+    before = out.stat().st_mtime_ns - 10**9
+    os.utime(src, ns=(before, before))
+    assert mav._needs_build(src, out, state)
+
+    # A build that started and never finished is done again.
+    mav._write_state(state, {"building": mav._fingerprint(src)})
+    assert mav._needs_build(src, out, state)
+
+    # An index this integration did not build (a release shipped it, the
+    # update script restored it) is kept unless the feed is newer.
+    state.unlink()
+    assert not mav._needs_build(src, out, state)
+    after = out.stat().st_mtime_ns + 10**9
+    os.utime(src, ns=(after, after))
+    assert mav._needs_build(src, out, state)
+
+
+class _Upload(dict):
+    """Just enough of an aiohttp request for MavGtfsUploadView.post."""
+
+    def __init__(self, hass: HomeAssistant, body: bytes) -> None:
+        super().__init__({KEY_HASS_USER: SimpleNamespace(is_admin=True)})
+        self.app = {KEY_HASS: hass}
+
+        async def chunks(_size):
+            yield body
+
+        self.content = SimpleNamespace(iter_chunked=chunks)
+
+
+def _gate_builds(monkeypatch) -> tuple[asyncio.Event, asyncio.Event, list]:
+    """Hold every build at its start until ``release`` is set."""
+    started, release, calls = asyncio.Event(), asyncio.Event(), []
+    real_build = mav._build
+
+    async def gated_build(*args):
+        calls.append(args)
+        started.set()
+        await release.wait()
+        return await real_build(*args)
+
+    monkeypatch.setattr(mav, "_build", gated_build)
+    return started, release, calls
+
+
+async def test_upload_build_outlives_a_client_that_gives_up(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch
+) -> None:
+    """curl --max-time or a proxy timeout cancels the request handler after
+    the new feed replaced the old one; the build must still finish."""
+    await _setup(hass)
+    started, release, _calls = _gate_builds(monkeypatch)
+    handler = asyncio.ensure_future(mav.MavGtfsUploadView(card_assets).post(_Upload(hass, _feed_zip())))
+    await started.wait()
+    handler.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await handler
+
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert (card_assets / mav.INDEX_NAME).is_file()
+    assert hass.data[DOMAIN]["mav"]["trains"] == 2
+    assert not mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
+
+
+async def test_waiting_builds_are_shared(hass: HomeAssistant, card_assets, mav_source, monkeypatch) -> None:
+    """Requests that arrive while a build runs share one follow-up build,
+    which reads the feed as it is when it starts."""
+    await _setup(hass)
+    _write_feed(mav_source)
+    started, release, calls = _gate_builds(monkeypatch)
+    first = asyncio.ensure_future(mav.async_build(hass, card_assets, force=True))
+    await started.wait()
+    second = asyncio.ensure_future(mav.async_build(hass, card_assets, force=True))
+    third = asyncio.ensure_future(mav.async_build(hass, card_assets, force=True))
+    await asyncio.sleep(0)
+    release.set()
+    results = await asyncio.gather(first, second, third)
+    assert len(calls) == 2
+    assert results[1] is results[2] and results[0]["trains"] == 2
+
+
+SLOW_RUNNER = """import pathlib, sys, time
+out = pathlib.Path(sys.argv[2])
+(out.parent / (out.name + ".k1ll_me0")).write_bytes(b"half an index")
+time.sleep(120)
+"""
+
+
+async def test_build_timeout_kills_the_process_and_its_temp_file(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch, tmp_path
+) -> None:
+    runner = tmp_path / "slow_runner.py"
+    runner.write_text(SLOW_RUNNER, encoding="utf-8")
+    monkeypatch.setattr(mav, "BUILD_RUNNER", runner)
+    monkeypatch.setattr(mav, "BUILD_TIMEOUT", 1.5)
+    procs = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def spying_exec(*args, **kwargs):
+        procs.append(await real_exec(*args, **kwargs))
+        return procs[-1]
+
+    monkeypatch.setattr(mav.asyncio, "create_subprocess_exec", spying_exec)
+    # The update script's own temp file is not ours to remove.
+    (card_assets / "mav-index.json.gz.tmp").write_bytes(b"theirs")
+    await _setup(hass)
+    _write_feed(mav_source)
+
+    with pytest.raises(HomeAssistantError) as err:
+        await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert err.value.translation_key == "mav_build_failed"
+    assert "timed out after 1.5s" in str(err.value)
+    assert procs[0].returncode == -signal.SIGKILL
+    assert sorted(p.name for p in card_assets.glob("mav-index*")) == ["mav-index.json.gz.tmp"]
+    # The next start tries again.
+    assert mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
+
+
+async def test_kill_tolerates_a_process_that_already_exited(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch
+) -> None:
+    class ExitedProcess:
+        returncode = None
+
+        async def communicate(self):
+            await asyncio.sleep(3600)
+
+        def kill(self):
+            raise ProcessLookupError
+
+        async def wait(self):
+            return 0
+
+    async def fake_exec(*args, **kwargs):
+        return ExitedProcess()
+
+    monkeypatch.setattr(mav.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(mav, "BUILD_TIMEOUT", 0.05)
+    with pytest.raises(RuntimeError, match="timed out after 0.05s"):
+        await mav._build(hass, mav_source, card_assets / mav.INDEX_NAME)
+
+
+async def test_interpreter_that_does_not_start_is_not_a_missing_feed(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch, caplog
+) -> None:
+    _write_feed(mav_source)
+
+    async def no_exec(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", sys.executable)
+
+    monkeypatch.setattr(mav.asyncio, "create_subprocess_exec", no_exec)
+    await _setup(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    # The startup build says so instead of returning quietly.
+    assert "MÁV index build failed: could not start the index build" in caplog.text
+
+    with pytest.raises(HomeAssistantError) as err:
+        await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert err.value.translation_key == "mav_build_failed"
+    assert "could not start the index build" in str(err.value)
+
+
+def test_failed_audit_keeps_the_previous_index(tmp_path: Path, monkeypatch) -> None:
+    work = tmp_path / "build"
+    work.mkdir()
+    feed = work / "mav.zip"
+    feed.write_bytes(_feed_zip())
+    out = work / "mav-index.json.gz"
+    out.write_bytes(b"previous index")
+
+    def broken_audit(*_args, **_kwargs):
+        raise RuntimeError("audit broke")
+
+    monkeypatch.setattr(mav_index, "audit", broken_audit)
+    with pytest.raises(RuntimeError, match="audit broke"):
+        mav_index.build_and_audit(feed, out)
+    assert out.read_bytes() == b"previous index"
+    assert sorted(p.name for p in work.iterdir()) == ["mav-index.json.gz", "mav.zip"]
+
+
+def test_runner_prints_ascii_stats(tmp_path: Path, monkeypatch, capsys) -> None:
+    """The pipe's encoding follows Home Assistant's locale; ASCII JSON reads
+    back the same under any of them."""
+    feed = tmp_path / "mav.zip"
+    feed.write_bytes(_feed_zip("MÁV 2026 ősz"))
+    monkeypatch.setattr(mav_index.os, "nice", lambda _inc: 0)
+    assert mav_index._main(["mav_index.py", str(feed), str(tmp_path / "mav-index.json.gz")]) == 0
+    printed = capsys.readouterr().out
+    assert printed.isascii()
+    assert json.loads(printed)["feed_version"] == "MÁV 2026 ősz"

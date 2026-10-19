@@ -67,7 +67,12 @@ async def futar_get(
 
 
 class FutarProxy:
-    """Short-lived cache and request sharing in front of futar_get."""
+    """Short-lived cache and request sharing in front of futar_get.
+
+    Once FUTÁR rejects the key, every later call fails with that error
+    without asking upstream again: the entry reloads with a new proxy when
+    the key is replaced.
+    """
 
     def __init__(
         self,
@@ -78,9 +83,16 @@ class FutarProxy:
         self._session = session
         self._api_key = api_key
         self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX, task_factory)
+        self._rejected: str | None = None
 
     async def get(self, path: str, params: dict[str, Any]) -> dict:
+        if self._rejected is not None:
+            raise FutarAuthError(self._rejected)
         key = (path, tuple(sorted((str(k), str(v)) for k, v in (params or {}).items())))
-        return await self._cache.get(
-            key, lambda: futar_get(self._session, self._api_key, path, params)
-        )
+        try:
+            return await self._cache.get(
+                key, lambda: futar_get(self._session, self._api_key, path, params)
+            )
+        except FutarAuthError as err:
+            self._rejected = str(err)
+            raise

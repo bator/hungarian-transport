@@ -51,8 +51,9 @@ ELVIRA_TIMEOUT = aiohttp.ClientTimeout(total=30)
 class ElviraError(Exception):
     """ELVIRA could not be reached or answered with an HTTP error.
 
-    Raised, not swallowed: a result that never arrived must not sit in the
-    shared cache for ELVIRA_CACHE_TTL seconds as an empty board.
+    A board fetch raises it instead of returning an empty board, so a result
+    that never arrived does not sit in the shared cache for ELVIRA_CACHE_TTL
+    seconds. elvira_between raises it only when no origin board arrived.
     """
 
 
@@ -178,11 +179,9 @@ async def _fetch_station(session, station_code: str, day: date) -> tuple[list, l
             timeout=ELVIRA_TIMEOUT,
         ) as resp:
             if resp.status // 100 != 2:
-                _LOGGER.warning("ELVIRA StationInfo %s HTTP %s", station_code, resp.status)
                 raise ElviraError(f"HTTP {resp.status}")
             data = await resp.json(content_type=None)
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
-        _LOGGER.warning("ELVIRA StationInfo %s failed: %s", station_code, type(err).__name__)
         raise ElviraError(type(err).__name__) from None
     if not isinstance(data, dict):
         raise ElviraError("unexpected response")
@@ -221,9 +220,9 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
     """Origin departures with optional dest hit (travel time only).
 
     Booking and startTrack come from the origin StationInfo row. A missing dest
-    board (Kelenföld truncates ~11:36) must not drop evening ICs. The card
-    overlays these onto FUTÁR/MOTIS hop rows and must not append unmatched
-    origin-only trains (GEMENC Baja, …).
+    board (Kelenföld truncates ~11:36, or the board failed and arrives here
+    empty) must not drop evening ICs. The card overlays these onto FUTÁR/MOTIS
+    hop rows and must not append unmatched origin-only trains (GEMENC Baja, …).
     """
     dest_by_id: dict[str, list] = {}
     dest_by_code: dict[str, list] = {}
@@ -306,7 +305,31 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
     return out[:ELVIRA_ROW_CAP]
 
 
+def _log_outage(hass, code: str, err: Exception | None) -> None:
+    """One warning when a station's boards start failing, one line when they
+    answer again; every card polls every 45 s, so not one line per poll."""
+    down: set[str] = hass.data.setdefault(DOMAIN, {}).setdefault("elvira_down", set())
+    if err is not None and code not in down:
+        down.add(code)
+        _LOGGER.warning(
+            "ELVIRA StationInfo %s unavailable (%s); not logged again until it answers",
+            code,
+            err,
+        )
+    elif err is None and code in down:
+        down.discard(code)
+        _LOGGER.info("ELVIRA StationInfo %s answers again", code)
+
+
 async def elvira_between(session, hass, origin_code, dest_code, minutes_after=180, dest_name=""):
+    """Origin departures towards dest, for the card to overlay on its rows.
+
+    Every station and service day is its own StationInfo board, and the rows
+    come from the origin boards only: ElviraError when none of them arrived.
+    A failed destination board, or a failed board of yesterday or tomorrow
+    next to one that arrived, counts as empty. The rows then lack a travel
+    time or a few late trains, instead of every platform and booking flag.
+    """
     origin_code = station_code_digits(origin_code)
     dest_code = station_code_digits(dest_code)
     if len(origin_code) < 9 or len(dest_code) < 9 or origin_code == dest_code:
@@ -316,8 +339,19 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     latest = now + timedelta(minutes=int(minutes_after or 180))
     days = service_days(now, latest)
     boards = await asyncio.gather(
-        *(_station_legs(session, hass, code, day) for code in (origin_code, dest_code) for day in days)
+        *(_station_legs(session, hass, code, day) for code in (origin_code, dest_code) for day in days),
+        return_exceptions=True,
     )
-    odep = [row for dep, _arr in boards[: len(days)] for row in dep]
-    darr = [row for _dep, arr in boards[len(days):] for row in arr]
+    for board in boards:
+        # Only an unreachable board is an empty one; a bug or a cancellation is not.
+        if isinstance(board, BaseException) and not isinstance(board, ElviraError):
+            raise board
+    origin, dest = boards[: len(days)], boards[len(days):]
+    for code, part in ((origin_code, origin), (dest_code, dest)):
+        _log_outage(hass, code, next((b for b in part if isinstance(b, ElviraError)), None))
+    arrived = [board for board in origin if not isinstance(board, ElviraError)]
+    if not arrived:
+        raise ElviraError(str(origin[0]))
+    odep = [row for dep, _arr in arrived for row in dep]
+    darr = [row for board in dest if not isinstance(board, ElviraError) for row in board[1]]
     return rows_from_stationinfo(odep, darr, tz, now, latest, dest_name)
