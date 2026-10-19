@@ -303,6 +303,16 @@ to the variable), and drop it from `CITY_FEEDS`.
 HACS does not re-download a version that is already installed, so existing
 installs only pick up new feeds with the next release, or with the local
 rebuild below.
+Because the weekly run replaces the zips of an existing release, every
+upload also publishes `SHA256SUMS`, `hungarian-transport-build.json` and a
+build provenance attestation: check a download with `sha256sum -c SHA256SUMS`
+(next to the zips) or
+`gh attestation verify hungarian-transport.zip --repo bator/hungarian-transport`.
+The attestation names the commit of the workflow run that built the zip. On
+the weekly refresh that is the head of `main` (where the workflow runs), not
+the release tag: the zips are built from the tag's code, and
+`hungarian-transport-build.json` gives both, `built_commit` (the tag) and
+`workflow_commit` (the run).
 
 To rebuild them yourself on Home Assistant OS:
 

@@ -17,7 +17,7 @@ jobs:
     name: HACS
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: HACS validation
         # main as of 2026-06-08; bump deliberately.
@@ -33,14 +33,14 @@ jobs:
     name: Card and GTFS tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "24"
           cache: npm
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
 
@@ -54,6 +54,13 @@ jobs:
         run: |
           pip install ruff==0.16.10
           ruff check --target-version py312 --select E,F,W,B --ignore E501,B905 custom_components scripts
+
+      # dist/leaflet is Leaflet 1.9.4 as published on npm (leaflet-1.9.4.tgz,
+      # integrity sha512-nxS1ynzJ...FA74PA==; package/dist/leaflet.js,
+      # leaflet.css and package/LICENSE, byte for byte, checked 2026-10-19).
+      # A change to these files has to update .github/vendored.sha256 on purpose.
+      - name: Vendored Leaflet matches its recorded hashes
+        run: sha256sum --check --strict .github/vendored.sha256
 
       - name: Bundle is up to date with src/
         run: |
@@ -72,13 +79,22 @@ jobs:
       - name: Index guard tests
         run: python3 scripts/test_build_guards.py
 
+      - name: FUTÁR proxy limit tests
+        run: python3 ha/test_futar_limits.py
+
+      - name: Manual server tests
+        run: python3 docs/manual/tools/test_server.py
+
+      - name: Card URL tag tests
+        run: python3 ha/test_assets.py
+
   integration:
     name: Integration tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.13"
           cache: pip

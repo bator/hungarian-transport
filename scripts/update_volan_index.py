@@ -41,8 +41,51 @@ FAIL_REPEAT_DAYS = 7
 MAV_KEY = "mav"
 
 
+# A keyed feed override (BAHART_GTFS_URL=...?apikey=..., a MÁV link whose
+# parameter names nobody knows) can end up in an exception text. What goes to
+# the log and the webhook loses:
+# - every URL query, and any "?name=..." query without a scheme (/f.zip?k=...);
+# - the user:password part of a URL;
+# - an Authorization scheme's credentials (Bearer ..., Basic ...);
+# - the value of a name whose last _/- segment is a secret word (key, token,
+#   secret, password ...: apikey, client_secret, refresh_token, x-api-key),
+#   with = or :, spaces and quotes around it (apikey = x, "access_token": "x").
+_URL_QUERY = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s?#'\"<>]*)\?[^\s#'\"<>]*")
+_BARE_QUERY = re.compile(r"\?(?=[A-Za-z0-9_.%-]+=)[^\s#'\"<>]*")
+_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@'\"<>]+@")
+_AUTH_SCHEME = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+_SECRET_WORD = r"(?:api[_-]?key|apikey|key|token|secret|password|passwd|pwd|sig|signature|credentials?|authorization)"
+_SECRET_PARAM = re.compile(
+    r"(?i)(^|[^a-z0-9])((?:[a-z0-9]+[_-])*" + _SECRET_WORD + r")([\"']?\s*[:=]\s*[\"']?)"
+    # an Authorization scheme word stays (its credentials went with _AUTH_SCHEME)
+    r"(?!(?:Bearer|Basic)\s)[^\s&'\"<>,;]+"
+)
+# Redaction runs on this much of a text at most: the name pattern backtracks
+# on long runs of separators ("a." * 8000 took 1.8 s), and a webhook or log
+# line has no use for more.
+REDACT_MAX = 4096
+
+
+def redact(text: str) -> str:
+    """text without URL queries, URL credentials, auth credentials and the values of
+    secret-named parameters (see above), cut to REDACT_MAX characters."""
+    if len(text) > REDACT_MAX:
+        text = text[:REDACT_MAX] + " …"
+    text = _URL_USERINFO.sub(r"\1…@", text)
+    text = _URL_QUERY.sub(r"\1?…", text)
+    text = _BARE_QUERY.sub("?…", text)
+    text = _AUTH_SCHEME.sub(r"\1 …", text)
+    return _SECRET_PARAM.sub(r"\1\2\3…", text)
+
+
+def print_redacted_exc() -> None:
+    """traceback.print_exc() through redact(), line by line (the last lines matter most)."""
+    for line in traceback.format_exc().rstrip("\n").splitlines():
+        print(redact(line), file=sys.stderr)
+
+
 def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
-    payload = json.dumps({"title": title, "message": message}).encode("utf-8")
+    payload = json.dumps({"title": title, "message": redact(message)}).encode("utf-8")
     webhook = (os.environ.get(WEBHOOK_ENV) or "").strip() or "http://127.0.0.1:8123" + WEBHOOK_PATH
     urls: list[tuple[str, dict]] = [
         (webhook, {"Content-Type": "application/json", "User-Agent": UA}),
@@ -98,7 +141,7 @@ except Exception as err:  # a sibling is missing, half-copied or broken: say so,
     notify(f"Volán GTFS frissítés el sem indult: {type(err).__name__}: {err}")
     if __name__ != "__main__":
         raise
-    traceback.print_exc()
+    print_redacted_exc()
     sys.exit(REPORTED)
 
 HA_BASE = Path("/config/hungarian-transport")
@@ -461,7 +504,9 @@ def acquire_lock(path: Path):
 
 
 def report(title: str, msg: str) -> None:
-    """A failure, to update.log and to the webhook."""
+    """A failure, to update.log and to the webhook. The raw exception text in
+    msg may hold a keyed URL: both get it redacted."""
+    msg = redact(msg)
     print(msg, file=sys.stderr)
     notify(f"{title}: {msg}")
 

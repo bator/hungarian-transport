@@ -3,6 +3,7 @@
 import asyncio
 from datetime import timedelta
 import logging
+import re
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -16,6 +17,7 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS, mav
+from custom_components.hungarian_transport.assets import asset_tag
 from custom_components.hungarian_transport.const import (
     DOMAIN,
     SERVICE_ELVIRA_BETWEEN,
@@ -62,6 +64,18 @@ async def test_setup_serves_card_and_registers_service(hass, hass_client) -> Non
     assert await hass.config_entries.async_unload(entry.entry_id)
     assert card_url not in _card_urls(hass)
 
+
+
+async def test_card_url_changes_with_the_bundle(hass, card_assets) -> None:
+    """?v carries the release version and a hash of the bundle and loader, so
+    a www/ rebuilt from source (same manifest version) is a new URL."""
+    await _setup(hass)
+    card_url = hass.data[DOMAIN]["card_url"]
+    tag = asset_tag(card_assets)
+    assert re.fullmatch(r"[0-9a-f]{10}", tag)
+    assert card_url.endswith(f"-{tag}")
+    (card_assets / "hungarian-transport.js").write_text("// card, rebuilt", encoding="utf-8")
+    assert asset_tag(card_assets) != tag
 
 
 async def test_card_loads_directly_without_loader(hass, card_assets) -> None:

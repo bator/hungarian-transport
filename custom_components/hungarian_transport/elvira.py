@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import unicodedata
 from datetime import UTC, date, datetime, timedelta
 
@@ -33,6 +34,12 @@ DOMAIN = "hungarian_transport"
 # wall-clock time, whatever time zone Home Assistant itself runs in.
 MAV_TZ = zoneinfo.ZoneInfo("Europe/Budapest")
 ELVIRA_CACHE_MAX = 64
+# A station whose boards fail is remembered so the warning is not repeated
+# every poll; the entry ends when it answers again, or after this long (a
+# station nobody asks for any more would otherwise stay for good). Bounded
+# like the board cache.
+ELVIRA_DOWN_TTL = 6 * 3600
+ELVIRA_DOWN_MAX = 64
 
 # StationInfo with travelDate=now drops trains that already left the origin,
 # including delayed ones FUTÁR still lists. Midnight keeps the day's rows
@@ -323,19 +330,29 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
     return out[:ELVIRA_ROW_CAP]
 
 
-def _log_outage(hass, code: str, err: Exception | None) -> None:
+def _log_outage(hass, code: str, err: Exception | None, now: float | None = None) -> None:
     """One warning when a station's boards start failing, one line when they
-    answer again; every card polls every 45 s, so not one line per poll."""
-    down: set[str] = hass.data.setdefault(DOMAIN, {}).setdefault("elvira_down", set())
+    answer again; every card polls every 45 s, so not one line per poll.
+
+    A failing station is kept for ELVIRA_DOWN_TTL at most (then a still
+    failing one is warned about again), and for at most ELVIRA_DOWN_MAX
+    stations, the oldest dropped first."""
+    now = time.monotonic() if now is None else now
+    down: dict[str, float] = hass.data.setdefault(DOMAIN, {}).setdefault("elvira_down_since", {})
+    for stale in [c for c, since in down.items() if now - since >= ELVIRA_DOWN_TTL]:
+        del down[stale]
     if err is not None and code not in down:
-        down.add(code)
+        while len(down) >= ELVIRA_DOWN_MAX:
+            del down[min(down, key=down.get)]
+        down[code] = now
         _LOGGER.warning(
-            "ELVIRA StationInfo %s unavailable (%s); not logged again until it answers",
+            "ELVIRA StationInfo %s unavailable (%s); not logged again until it answers (or for %d h)",
             code,
             err,
+            ELVIRA_DOWN_TTL // 3600,
         )
     elif err is None and code in down:
-        down.discard(code)
+        del down[code]
         _LOGGER.info("ELVIRA StationInfo %s answers again", code)
 
 
