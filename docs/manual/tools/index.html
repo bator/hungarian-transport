@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hungarian transport manual harness</title>
+<style>
+  :root {
+    --primary-color: #03a9f4;
+    --text-primary-color: #ffffff;
+    --primary-text-color: #212121;
+    --secondary-text-color: #727272;
+    --divider-color: rgba(0, 0, 0, 0.12);
+    --card-background-color: #ffffff;
+    --ha-card-background: #ffffff;
+    --primary-background-color: #fafafa;
+    --secondary-background-color: #e5e5e5;
+    --error-color: #db4437;
+    --success-color: #43a047;
+    --warning-color: #ffa600;
+    --ha-card-border-radius: 12px;
+    --ha-card-border-color: #e0e0e0;
+    color-scheme: light;
+  }
+  :root[data-theme="dark"] {
+    --primary-text-color: #e1e1e1;
+    --secondary-text-color: #9b9b9b;
+    --divider-color: rgba(225, 225, 225, 0.12);
+    --card-background-color: #1c1c1c;
+    --ha-card-background: #1c1c1c;
+    --primary-background-color: #111111;
+    --secondary-background-color: #282828;
+    --ha-card-border-color: rgba(225, 225, 225, 0.12);
+    color-scheme: dark;
+  }
+  html, body { margin: 0; background: var(--primary-background-color); color: var(--primary-text-color);
+    font-family: Roboto, Noto, "Noto Sans", sans-serif; font-size: 14px; -webkit-font-smoothing: antialiased; }
+  #stage { display: flex; flex-wrap: wrap; gap: 24px; padding: 0; align-items: flex-start; }
+  .shot { box-sizing: border-box; padding: 16px; background: var(--primary-background-color); }
+  .dialog { box-sizing: border-box; background: var(--card-background-color); border-radius: 28px;
+    box-shadow: 0 8px 28px rgba(0,0,0,.28); overflow: hidden; }
+  .dialog > h2 { margin: 0; padding: 20px 24px 12px; font-size: 22px; font-weight: 400; }
+  .dialog .cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 24px; padding: 8px 24px 24px; }
+  .dialog .cols.single { grid-template-columns: minmax(0, 1fr); }
+  .dialog .preview { background: var(--primary-background-color); border-radius: 16px; padding: 16px; align-self: start; }
+  .dialog .actions { display: flex; justify-content: flex-end; gap: 8px; padding: 8px 24px 20px; }
+  .dialog .actions span { color: var(--primary-color); font-weight: 500; padding: 8px 12px; }
+  .note { font-size: 12px; color: var(--secondary-text-color); margin: 6px 4px 0; }
+</style>
+<script type="module" src="./harness.js"></script>
+</head>
+<body>
+<div id="stage"></div>
+</body>
+</html>

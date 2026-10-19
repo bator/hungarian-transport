@@ -19,6 +19,10 @@ official GTFS feeds, shipped next to the card as compact gzip indexes.
 The editor and the card are available in **Hungarian and English**. By default
 they follow the Home Assistant user's language; you can pin one explicitly.
 
+**User manual:** every screen of the cards and the integration, step by step
+with screenshots, in [English](docs/manual/README.md) and
+[Hungarian](docs/manual/README.hu.md).
+
 ## Install
 
 ### HACS
@@ -148,11 +152,15 @@ The integration then builds `mav-index.json.gz` next to the card:
   train's own station coordinates.
 - **Checked trip by trip.** After each build, every trip in the feed is
   drawn the way the card would draw it, and every one of its stations must
-  lie within 300 m of the route. If fewer than 99% of the trains pass, a
-  notification says so. The result is in the action's response and in the
-  log.
+  lie within 300 m of the route. An index with fewer than 50 trains, or with
+  fewer than 99% of them passing, is not written: the previous index stays in
+  use and a notification says so. The result is in the action's response and
+  in the log.
 - **Rebuilt when needed.** A HACS update replaces the card's folder, so the
-  index is rebuilt at startup whenever it is missing or older than the zip.
+  index is rebuilt at startup whenever it is missing or was built from another
+  feed (by the feed's `feed_version`). A feed whose build failed is not built
+  again at every start; its Repairs issue comes back instead, and the
+  `rebuild_mav_index` action forces a new try.
 
 MÁV's own `shapes.txt` is coarse: an 8 km chord cuts across the fields
 between Székesfehérvár and Kelenföld. A route that misses one of its
@@ -197,7 +205,7 @@ call, so the card follows timetable changes on its own.
 | `volan` | bool | `false` | Volán mode: long-distance coaches |
 | `helyi` | bool | `false` | Local-city mode (mutually exclusive with MÁV/Volán) |
 | `city` | string | — | Operator id from `city-index.json.gz` (`pecs`, `miskolc`, `sopron`, …) |
-| `refresh` | number | `45` | Seconds between departure refreshes, minimum 15 |
+| `refresh` | number | `45` | Seconds between departure refreshes, minimum 20 |
 | `minutesAfter` | number | `180` | How many minutes ahead to list departures (15–480). The editor offers presets 30–480; YAML may use any value in range. Also applies to the planner card. |
 | `volanIndex` | string | next to the card | URL of `volan-index.json.gz` |
 | `cityIndex` | string | next to the card | URL of `city-index.json.gz` |
