@@ -92,7 +92,8 @@ async def main() -> None:
           len(calls) == futar.FUTAR_BURST + 10 and abs((clock[0] - start) - 10 / futar.FUTAR_RATE) < 0.05,
           repr((len(calls), clock[0] - start)))
     hits = len(calls)
-    await proxy.get("search.json", {"query": "q0"})
+    # The last query: still cached whatever the burst is (the cache keeps FUTAR_CACHE_MAX).
+    await proxy.get("search.json", {"query": f"q{futar.FUTAR_BURST + 9}"})
     check("cache hits do not need a token", len(calls) == hits)
     clock[0] += 3600
     await proxy.get("search.json", {"query": "after an hour"})
