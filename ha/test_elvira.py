@@ -23,7 +23,10 @@ except ImportError:
     _aiohttp.ClientError = type("ClientError", (Exception,), {})
     sys.modules["aiohttp"] = _aiohttp
 from hungarian_transport.elvira import (  # noqa: E402
+    ELVIRA_DOWN_MAX,
+    ELVIRA_DOWN_TTL,
     ELVIRA_ROW_CAP,
+    _log_outage,
     STATIONINFO_MAX_COUNT,
     parse_elvira_services,
     rows_from_stationinfo,
@@ -303,6 +306,57 @@ if not check(
     repr(gone_rows),
 ):
     failed += 1
+
+# O-10: the "station is down" memory is bounded in time and in size.
+import logging  # noqa: E402
+
+
+class _Hass:
+    def __init__(self):
+        self.data = {}
+
+
+class _Records(logging.Handler):
+    def __init__(self):
+        super().__init__()
+        self.lines = []
+
+    def emit(self, record):
+        self.lines.append(record.getMessage())
+
+
+_rec = _Records()
+_log = logging.getLogger("hungarian_transport.elvira")
+_log.addHandler(_rec)
+_log.setLevel(logging.INFO)
+hass = _Hass()
+boom = RuntimeError("timeout")
+_log_outage(hass, "005510009", boom, now=0.0)
+_log_outage(hass, "005510009", boom, now=45.0)
+down = hass.data["hungarian_transport"]["elvira_down_since"]
+if not check("a failing station is warned about once, not every poll",
+             len([x for x in _rec.lines if "unavailable" in x]) == 1 and list(down) == ["005510009"], repr(_rec.lines)):
+    failed += 1
+_log_outage(hass, "005510009", boom, now=ELVIRA_DOWN_TTL + 1.0)
+if not check("after ELVIRA_DOWN_TTL a station that never answered is forgotten and warned about again",
+             len([x for x in _rec.lines if "unavailable" in x]) == 2 and down["005510009"] == ELVIRA_DOWN_TTL + 1.0,
+             repr((_rec.lines, down))):
+    failed += 1
+_log_outage(hass, "005510009", None, now=ELVIRA_DOWN_TTL + 50.0)
+if not check("an answer clears it with one line", "005510009" not in down and "answers again" in _rec.lines[-1],
+             repr((_rec.lines, down))):
+    failed += 1
+_log_outage(hass, "008000001", boom, now=100.0)
+_log_outage(hass, "008000002", None, now=ELVIRA_DOWN_TTL + 100.0)
+if not check("stale entries go even when only other stations are polled", "008000001" not in down, repr(down)):
+    failed += 1
+for i in range(ELVIRA_DOWN_MAX + 10):
+    _log_outage(hass, f"0090{i:05d}", boom, now=200_000.0 + i)
+if not check("at most ELVIRA_DOWN_MAX stations are remembered, the oldest dropped first",
+             len(down) == ELVIRA_DOWN_MAX and "009000000" not in down and f"0090{ELVIRA_DOWN_MAX + 9:05d}" in down,
+             repr(len(down))):
+    failed += 1
+_log.removeHandler(_rec)
 
 if failed:
     sys.exit(1)
