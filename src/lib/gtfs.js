@@ -790,6 +790,7 @@ Object.assign(BkkLib, {
     const out = [];
     const byTime = new Map();
     const byNum = new Map();
+    const byLoose = new Map();
     const trainNumberMatchWindowMin = 5;
     const generic = (c) => {
       const x = String(c || '').replace('#', '').toLowerCase();
@@ -798,6 +799,9 @@ Object.assign(BkkLib, {
     const timeOf = (row) => `${String(row.label || '').toUpperCase()}|${Math.round(Number(row.sched || row.dep || 0) / 60)}`;
     const overlay = (prev, row) => {
       if (!prev || !row) return;
+      const prevNum = String(prev.trainNumber || '').trim();
+      const prevNumFromId = !!prevNum && BkkLib.isFutarTripId(prev.tripId)
+        && prevNum === BkkLib.trainNumberFromTripId(prev.tripId);
       if (generic(prev.color) && row.color && !generic(row.color)) {
         prev.color = row.color;
         if (row.text) prev.text = row.text;
@@ -832,7 +836,11 @@ Object.assign(BkkLib, {
       if (row.booking) prev.booking = true;
       if (row.nationalPass) prev.nationalPass = true;
       if (row.reservationFreeSection) prev.reservationFreeSection = true;
-      if (!prev.trainNumber && row.trainNumber) prev.trainNumber = String(row.trainNumber);
+      /* ELVIRA's number is the train's own; one read off a FUTÁR trip id
+         may carry a digit too many (BKK_8624_67 is IC 862). */
+      if (row.trainNumber && (!prevNum || (rowElvira && prevNumFromId))) {
+        prev.trainNumber = String(row.trainNumber);
+      }
       if (prev.travel == null && row.travel != null) prev.travel = row.travel;
       if (row.wheelchair) prev.wheelchair = true;
       if (row.bikesAllowed) prev.bikesAllowed = true;
@@ -842,15 +850,15 @@ Object.assign(BkkLib, {
       const raw = String(number || '').trim();
       return BkkLib.emmaTrainNumber(raw) || raw.replace(/^0+/, '') || raw;
     };
-    const registerNumber = (number, index) => {
+    const registerNumber = (number, index, map = byNum) => {
       const key = numberKey(number);
       if (!key) return;
-      const rows = byNum.get(key) || [];
+      const rows = map.get(key) || [];
       if (rows.indexOf(index) < 0) rows.push(index);
-      byNum.set(key, rows);
+      map.set(key, rows);
     };
-    const findNumberMatch = (number, minute) => {
-      const rows = byNum.get(numberKey(number)) || [];
+    const findNumberMatch = (number, minute, map = byNum) => {
+      const rows = map.get(numberKey(number)) || [];
       if (!minute || !rows.length) return -1;
       let best = -1;
       let distance = trainNumberMatchWindowMin + 1;
@@ -863,6 +871,22 @@ Object.assign(BkkLib, {
       });
       return distance <= trainNumberMatchWindowMin ? best : -1;
     };
+    /* A FUTÁR IC/EC whose only number is its trip id is also filed under
+       the id less its last digit (BKK_8624_67: 862), for a number of the
+       train's own (ELVIRA) to find within the same window. Suburban and Sz
+       ids stay whole: BKK_4541_108 is train 4541, not 454. */
+    const looseNumber = (row) => {
+      if (!BkkLib.isTrainRow(row)) return '';
+      if (!/^(IC|EC|IR|RJX)$/i.test(String(row.label || '').trim())) return '';
+      const fromId = BkkLib.trainNumberFromTripId(row.tripId);
+      const direct = String(row.trainNumber || '').trim();
+      if (!fromId || (direct && direct !== fromId)) return '';
+      return BkkLib.trainNumberLooseFromTripId(row.tripId);
+    };
+    const ownNumber = (row) => BkkLib.isTrainRow(row)
+      && !!String(row.trainNumber || '').trim()
+      && !BkkLib.isFutarTripId(row.tripId)
+      && !BkkLib.suburbanLineLabel(row.label);
     const brandedHost = (row) => BkkLib.isTrainRow(row)
       && !BkkLib.numberedRailBadge(row)
       && (BkkLib.suburbanLineLabel(row && row.label)
@@ -871,7 +895,8 @@ Object.assign(BkkLib, {
       if (!row || !departureStillDue(row.dep || row.sched)) return;
       const n = BkkLib.rowTrainNumber(row);
       const min = minuteOf(row);
-      const numberMatch = n ? findNumberMatch(n, min) : -1;
+      let numberMatch = n ? findNumberMatch(n, min) : -1;
+      if (numberMatch < 0 && n && ownNumber(row)) numberMatch = findNumberMatch(n, min, byLoose);
       if (numberMatch >= 0) {
         overlay(out[numberMatch], row);
         return;
@@ -928,6 +953,7 @@ Object.assign(BkkLib, {
       out.push(row);
       byTime.set(tk, idx);
       registerNumber(n, idx);
+      registerNumber(looseNumber(row), idx, byLoose);
     };
     const overlayOnly = !!(opts && opts.overlayOnly);
     const hosts = overlayOnly ? (gtfs || []) : (otp || []);
