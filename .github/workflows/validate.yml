@@ -55,6 +55,13 @@ jobs:
           pip install ruff==0.16.10
           ruff check --target-version py312 --select E,F,W,B --ignore E501,B905 custom_components scripts
 
+      # dist/leaflet is Leaflet 1.9.4 as published on npm (leaflet-1.9.4.tgz,
+      # integrity sha512-nxS1ynzJ...FA74PA==; package/dist/leaflet.js,
+      # leaflet.css and package/LICENSE, byte for byte, checked 2026-10-19).
+      # A change to these files has to update .github/vendored.sha256 on purpose.
+      - name: Vendored Leaflet matches its recorded hashes
+        run: sha256sum --check --strict .github/vendored.sha256
+
       - name: Bundle is up to date with src/
         run: |
           npm run build
