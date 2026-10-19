@@ -3,8 +3,10 @@
 records a feed as built. No network."""
 from __future__ import annotations
 
+import contextlib
 import gzip
 import http.server
+import io
 import importlib.util
 import json
 import os
@@ -597,6 +599,17 @@ _long = uvi.redact("a." * 8000 + " apikey=S9")
 check("redact() of a long text is quick and capped at REDACT_MAX",
       time.monotonic() - _t0 < 0.5 and len(_long) <= uvi.REDACT_MAX + 2, repr((time.monotonic() - _t0, len(_long))))
 check("a secret at the start of a long text is still redacted", "S10" not in uvi.redact("apikey=S10 " + "x" * 9000))
+
+# O-3: the traceback of a broken sibling goes through the same redaction.
+_err = io.StringIO()
+try:
+    raise OSError("fetch https://h.example/f.zip?apikey=S11 via /g.zip?k=S12 failed")
+except OSError:
+    with contextlib.redirect_stderr(_err):
+        uvi.print_redacted_exc()
+check("print_redacted_exc() keeps the traceback and drops the secrets",
+      "Traceback" in _err.getvalue() and "OSError" in _err.getvalue() and "S11" not in _err.getvalue()
+      and "S12" not in _err.getvalue(), repr(_err.getvalue()[-200:]))
 
 # The earlier blocks replaced uvi.notify; a fresh copy of the module has the real one.
 _spec = importlib.util.spec_from_file_location("uvi_fresh", Path(uvi.__file__))

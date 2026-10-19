@@ -78,6 +78,12 @@ def redact(text: str) -> str:
     return _SECRET_PARAM.sub(r"\1\2\3…", text)
 
 
+def print_redacted_exc() -> None:
+    """traceback.print_exc() through redact(), line by line (the last lines matter most)."""
+    for line in traceback.format_exc().rstrip("\n").splitlines():
+        print(redact(line), file=sys.stderr)
+
+
 def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
     payload = json.dumps({"title": title, "message": redact(message)}).encode("utf-8")
     webhook = (os.environ.get(WEBHOOK_ENV) or "").strip() or "http://127.0.0.1:8123" + WEBHOOK_PATH
@@ -135,7 +141,7 @@ except Exception as err:  # a sibling is missing, half-copied or broken: say so,
     notify(f"Volán GTFS frissítés el sem indult: {type(err).__name__}: {err}")
     if __name__ != "__main__":
         raise
-    traceback.print_exc()
+    print_redacted_exc()
     sys.exit(REPORTED)
 
 HA_BASE = Path("/config/hungarian-transport")
