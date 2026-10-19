@@ -20,7 +20,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_city_index as bci  # noqa: E402
 import build_mav_index as bmi  # noqa: E402
 from build_volan_index import build_index  # noqa: E402
-from gtfs_compact import IndexGuardError, _open_csv, calendar_end, operator_trips, stale_parts, write_index  # noqa: E402
+from gtfs_compact import (  # noqa: E402
+    IndexGuardError,
+    _open_csv,
+    calendar_end,
+    operator_stats,
+    operator_trips,
+    stale_parts,
+    write_index,
+)
 
 failed = 0
 
@@ -65,14 +73,14 @@ def city_feed(route: str = "12", trips: int = 1, end: str = "20271231") -> dict[
     }
 
 
-def part(op_id: str, trips: int) -> dict:
+def part(op_id: str, trips: int, end: str = "20271231") -> dict:
     return {
         "op_id": op_id,
         "op_name": op_id,
         "feed": "",
         "s": [[f"{op_id}:1", "Alpha", "1"], [f"{op_id}:2", "Beta", "2"]],
         "g": [],
-        "c": [["1111111", "20260101", "20271231"]],
+        "c": [["1111111", "20260101", end]],
         "a": [[]],
         "r": [[]],
         "t": [[0, "1", [0, 1], [480, 490], 3, -1]] * trips,
@@ -228,15 +236,53 @@ with tempfile.TemporaryDirectory() as tmp:
           "b" in info["skipped"] and set(operator_trips(cout)) == {"a"} and "calendar of b ended 2025-01-31" in stderr.getvalue(),
           f"{info} {stderr.getvalue()!r}")
     write_index([part("a", 5), part("b", 5)], cout, with_operators=True, today="20260301")
+    before = cout.read_bytes()
     err = raises(lambda: bci.build_city_index(base, cout, today="20260301"))
-    check("an ended feed the index had counts as missing for the guard",
-          isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
+    check("an ended feed the previous index still runs is refused, and the message says why",
+          isinstance(err, IndexGuardError) and "b calendar ended 2025-01-31" in str(err)
+          and "runs until 2027-12-31" in str(err) and cout.read_bytes() == before, repr(err))
     os.environ[bci.ALLOW_MISSING_ENV] = "b"
     info = bci.build_city_index(base, cout, today="20260301")
     check("allowed, the ended feed is dropped and the rest is written",
           "b" in info["skipped"] and set(operator_trips(cout)) == {"a"}, repr(info))
     os.environ.pop(bci.ALLOW_MISSING_ENV, None)
+
+    # Bahart after its last sailing: the zip and the previous index both
+    # ended. Nothing that still runs is lost, so the other feeds go ahead.
+    write_index([part("a", 5), part("b", 5, end="20250131")], cout, with_operators=True, today="20250101")
+    check("operator_stats reads the last service day per operator",
+          operator_stats(cout) == {"a": (5, "20271231"), "b": (5, "20250131")}, repr(operator_stats(cout)))
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        info = bci.build_city_index(base, cout, today="20260301")
+    check("a feed whose calendar ended in the previous index too leaves without blocking the rebuild",
+          set(operator_trips(cout)) == {"a"} and info["expired"] == {"b": "20250131"} and "b" in info["skipped"]
+          and "calendar ended 2025-01-31 in the previous index" in stderr.getvalue(),
+          f"{info} {stderr.getvalue()!r}")
+    check("the next rebuild without the ended feed passes", raises(
+        lambda: bci.build_city_index(base, cout, today="20260301")) is None)
+
+    # The same zip downloaded anew (a failed download, not an ended calendar)
+    # is not an expired feed.
+    write_index([part("a", 5), part("b", 5, end="20250131")], cout, with_operators=True, today="20250101")
+    (base / "b.zip").write_bytes(b"<html>gone</html>")
+    with contextlib.redirect_stderr(io.StringIO()):
+        info = bci.build_city_index(base, cout, today="20260301")
+    check("a broken feed whose previous calendar ended is skipped, not expired",
+          info["expired"] == {} and "b" in info["skipped"], repr(info))
 bci.CITY_FEEDS = real_feeds
+
+# Volán local agencies whose calendar ended in the previous index do not
+# count towards the share of trips the rebuild must keep.
+with tempfile.TemporaryDirectory() as tmp:
+    out = Path(tmp) / "city-index.json.gz"
+    write_index([part("volan-szeged", 60), part("volan-siofok", 200, end="20260930")], out, with_operators=True,
+                today="20260901")
+    check("ended Volán local agencies are not lost trips",
+          raises(lambda: bci.guard_feeds(out, [part("volan-szeged", 60)], set(), today="20261019")) is None)
+    err = raises(lambda: bci.guard_feeds(out, [part("volan-szeged", 60)], set(), today="20260915"))
+    check("running Volán local agencies still are",
+          isinstance(err, IndexGuardError) and "volan-local 60 trips vs 260" in str(err), repr(err))
 
 # ---- 1. Volán index: too few trips is a broken feed -----------------------
 

@@ -285,6 +285,9 @@ def main() -> int:
         "internal.example": ["10.0.0.5"],
         "mixed.example": ["93.184.216.34", "192.168.1.9"],
         "mapped.example": ["::ffff:127.0.0.1"],
+        "cgnat.example": ["100.64.12.1"],
+        "nat64.example": ["64:ff9b::c106:c849"],
+        "nat64-private.example": ["64:ff9b::a00:5"],
     }
     real_gai = socket.getaddrinfo
 
@@ -312,6 +315,15 @@ def main() -> int:
         failed |= not check("name with one private address blocked", not url_ok("https://mixed.example/x.zip"))
         failed |= not check("name resolving to mapped loopback blocked", not url_ok("https://mapped.example/x.zip"))
         failed |= not check("unresolvable name blocked", not url_ok("https://nope.example/x.zip"))
+        failed |= not check("carrier-grade NAT literal blocked", not url_ok("http://100.64.0.1/x.zip"))
+        failed |= not check("name resolving to carrier-grade NAT blocked", not url_ok("https://cgnat.example/x.zip"))
+        failed |= not check("multicast blocked", not url_ok("http://224.0.1.1/x.zip"))
+        failed |= not check("NAT64 of a public IPv4 allowed", url_ok("https://[64:ff9b::c106:c849]/x.zip"))
+        failed |= not check("name resolving to NAT64 of a public IPv4 allowed", url_ok("https://nat64.example/x.zip"))
+        failed |= not check("NAT64 of a private IPv4 blocked", not url_ok("https://nat64-private.example/x.zip"))
+        failed |= not check("NAT64 of loopback blocked", not url_ok("https://[64:ff9b::7f00:1]/x.zip"))
+        failed |= not check("IPv6 site-local blocked", not url_ok("https://[fec0::1]/x.zip"))
+        failed |= not check("IPv6 documentation range blocked", not url_ok("https://[2001:db8::1]/x.zip"))
         handler = gc._PublicRedirectHandler()
         origin = urllib.request.Request("https://gtfs.kti.hu/a.zip")
         try:
@@ -326,12 +338,80 @@ def main() -> int:
             failed |= not check("redirect to private name blocked", True)
         moved = handler.redirect_request(origin, None, 302, "Found", {}, "https://gtfs.kti.hu/b.zip")
         failed |= not check("redirect to public host followed", moved is not None and moved.full_url.endswith("/b.zip"))
+        try:
+            handler.redirect_request(origin, None, 302, "Found", {}, "HTTP://gtfs.kti.hu/b.zip")
+            failed |= not check("https redirected to plain http refused", False)
+        except ValueError:
+            failed |= not check("https redirected to plain http refused", True)
+        loose = gc._PublicRedirectHandler(allow_insecure=True)
+        moved = loose.redirect_request(origin, None, 302, "Found", {}, "http://gtfs.kti.hu/b.zip")
+        failed |= not check("plain http redirect followed for an insecure feed", moved is not None)
+
+        # download_zip checks the scheme of the URL it was given and of the
+        # one it ended up at, whatever its spelling.
+        class FakeResp:
+            def __init__(self, final: str):
+                self.final = final
+                self.headers = {"Content-Length": "4"}
+                self.body = [b"PK\x03\x04", b""]
+
+            def geturl(self) -> str:
+                return self.final
+
+            def read(self, _n: int) -> bytes:
+                return self.body.pop(0)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_exc):
+                return False
+
+        real_urlopen = gc._urlopen
+        opened: list[tuple[str, bool]] = []
+        final_url = {"u": ""}
+
+        def fake_urlopen(req, timeout=120, *, allow_insecure=False):
+            opened.append((req.full_url, allow_insecure))
+            return FakeResp(final_url["u"] or req.full_url)
+
+        gc._urlopen = fake_urlopen
+        zdir = Path(tempfile.mkdtemp())
+        try:
+            def zip_err(u: str, **kw) -> BaseException | None:
+                try:
+                    gc.download_zip(u, zdir / "z.zip", **kw)
+                except Exception as e:  # noqa: BLE001
+                    return e
+                return None
+
+            err = zip_err("HTTP://gtfs.kti.hu/a.zip")
+            failed |= not check("download_zip refuses an upper-case HTTP:// url", isinstance(err, ValueError) and not opened,
+                                f"{err!r} {opened}")
+            failed |= not check("download_zip takes plain http when allowed",
+                                zip_err("http://gtfs.kti.hu/a.zip", allow_insecure=True) is None
+                                and opened[-1] == ("http://gtfs.kti.hu/a.zip", True), repr(opened))
+            final_url["u"] = "http://gtfs.kti.hu/moved.zip"
+            (zdir / "z.zip").unlink(missing_ok=True)
+            err = zip_err("https://gtfs.kti.hu/a.zip")
+            failed |= not check("download_zip refuses an https download that ended on http",
+                                isinstance(err, ValueError) and not (zdir / "z.zip").exists(), repr(err))
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                err = zip_err("https://gtfs.kti.hu/a.zip", allow_insecure=True)
+            failed |= not check("an insecure feed redirected to http is downloaded, loudly",
+                                err is None and "redirected to plain http" in stderr.getvalue(), repr(err))
+            final_url["u"] = ""
+            failed |= not check("download_zip over https", zip_err("https://gtfs.kti.hu/a.zip") is None
+                                and opened[-1] == ("https://gtfs.kti.hu/a.zip", False), repr(opened))
+        finally:
+            gc._urlopen = real_urlopen
 
         # Plain http is upgraded; the fallback needs the feed's explicit say-so.
         zips: list[str] = []
         real_zip = gc.download_zip
 
-        def fake_zip(u: str, dest: Path) -> dict:
+        def fake_zip(u: str, dest: Path, **_kw) -> dict:
             zips.append(u)
             if u.startswith("https://"):
                 raise OSError("no tls")
@@ -362,6 +442,18 @@ def main() -> int:
                 f"{zips} {stderr.getvalue()!r}",
             )
             zips.clear()
+            dest.unlink(missing_ok=True)
+            err = None
+            try:
+                gc.download_feed("HTTP://feed.example/f.zip", dest)
+            except Exception as e:  # noqa: BLE001
+                err = e
+            failed |= not check(
+                "an upper-case HTTP:// feed is upgraded, not fetched over http",
+                isinstance(err, RuntimeError) and zips == ["https://feed.example/f.zip"] and not dest.exists(),
+                f"{err!r} {zips}",
+            )
+            zips.clear()
             try:
                 gc.download_feed("https://feed.example/f.zip", dest, allow_insecure=True)
                 failed |= not check("https feed never downgrades", False)
@@ -383,6 +475,45 @@ def main() -> int:
         m is not None and int(m.group(1)) == INDEX_SCHEMA,
         f"card {m.group(1) if m else None} vs builder {INDEX_SCHEMA}",
     )
+    # The Mobility Database's hosted copy of any matching feed beats a
+    # publisher URL, even one listed first.
+    real_json, real_access = gc._http_json, gc._mdb_access
+    gc._mdb_access = lambda: "token"
+    gc._http_json = lambda *_a, **_k: [
+        {"provider": "Bahart", "id": "mdb-1", "source_info": {"producer_url": "http://bahart.example/gtfs.zip"},
+         "latest_dataset": {}},
+        {"provider": "Balatoni Hajózási (Bahart)", "id": "mdb-2",
+         "source_info": {"producer_url": "http://bahart.example/2.zip"},
+         "latest_dataset": {"hosted_url": "https://files.mobilitydatabase.org/mdb-2/latest.zip"}},
+        {"provider": "Other", "id": "mdb-3", "latest_dataset": {"hosted_url": "https://files.example/other.zip"}},
+    ]
+    try:
+        failed |= not check("catalog prefers the hosted copy over a producer url",
+                            gc._mdb_url("bahart") == "https://files.mobilitydatabase.org/mdb-2/latest.zip",
+                            gc._mdb_url("bahart"))
+        gc._http_json = lambda *_a, **_k: [
+            {"provider": "Bahart", "id": "mdb-1", "source_info": {"producer_url": "https://bahart.example/gtfs.zip"}}]
+        failed |= not check("catalog falls back to the producer url", gc._mdb_url("bahart") == "https://bahart.example/gtfs.zip")
+    finally:
+        gc._http_json, gc._mdb_access = real_json, real_access
+
+    # The zip check reads the first bytes, not a whole 100 MB feed.
+    small = gtfs_zip({"stops.txt": "stop_id,stop_name\n1,A\n"})
+    real_read_bytes = Path.read_bytes
+
+    def no_read_bytes(self):
+        raise AssertionError(f"{self} read whole")
+
+    Path.read_bytes = no_read_bytes
+    try:
+        with gc.open_gtfs_zip(small) as z:
+            failed |= not check("open_gtfs_zip reads only the head of the file", "stops.txt" in z.namelist())
+    except AssertionError as err:
+        failed |= not check("open_gtfs_zip reads only the head of the file", False, str(err))
+    finally:
+        Path.read_bytes = real_read_bytes
+        small.unlink(missing_ok=True)
+
     import inspect
     cat_src = inspect.getsource(catalog_url)
     failed |= not check(
@@ -550,6 +681,40 @@ def main() -> int:
             acs.main([str(base / "city-index.json.gz"), "--min-ok", "0.9"]) == 1
             and acs.main([str(base / "city-index.json.gz")]) == 0,
         )
+        # A short out-and-back whose ends are 80 m apart is no loop to walk
+        # round; a long route closing within the tolerance is.
+        k = 1 / (111320.0 * math.cos(math.radians(46.25)))
+        u_turn = [(46.2500, 20.1400), (46.2500 + 300 / 110540.0, 20.1400),
+                  (46.2500 + 300 / 110540.0, 20.1400 + 80 * k), (46.2500, 20.1400 + 80 * k)]
+        open_end = [(46.25, 20.14), (46.27, 20.14), (46.27, 20.16), (46.25, 20.16), (46.25, 20.14 + 150 * k)]
+        failed |= not check(
+            "city shape audit: only a long shape with meeting ends is a loop",
+            acs.is_loop(loop, 100.0) and not acs.is_loop(u_turn, 100.0) and not acs.is_loop(open_end, 100.0)
+            and acs.is_loop(open_end[:-1] + [(46.25, 20.14 + 30 * k)], 100.0),
+        )
+        decoded: list[str] = []
+        real_decode = acs.decode_polyline
+
+        def counting_decode(enc: str):
+            decoded.append(enc)
+            return real_decode(enc)
+
+        acs.decode_polyline = counting_decode
+        try:
+            acs.audit(base / "city-index.json.gz")
+        finally:
+            acs.decode_polyline = real_decode
+        failed |= not check("city shape audit: a shape shared by three patterns is decoded once", len(decoded) == 1,
+                            str(len(decoded)))
+        # The Volán index has no operator list: its trips are one operator.
+        volan = {k: v for k, v in idx.items() if k != "o"}
+        volan["s"] = [row[:3] for row in idx["s"]]
+        with gzip.open(base / "volan-index.json.gz", "wt", encoding="utf-8") as fh:
+            json.dump(volan, fh)
+        vrep = acs.audit(base / "volan-index.json.gz")
+        failed |= not check("city shape audit: an index without operators reports as one",
+                            list(vrep["operators"]) == ["volan"] and vrep["operators"]["volan"]["patterns"] == 4,
+                            json.dumps(vrep["operators"]))
 
     # A platform far from its station keeps its own place (city builds only):
     # Szentes, Damjanich utca has platforms 3-4 on another street.
@@ -597,6 +762,52 @@ def main() -> int:
         failed |= not check(
             "a near platform is still the station",
             s1[0] == "szentes:hkir_9" and abs(sll1[1] - 20.25286) < 1e-4, f"{s1} {sll1}",
+        )
+    finally:
+        fz.unlink(missing_ok=True)
+
+    # A station without a position of its own, whose first platform listed is
+    # the far one: the platforms that belong together stay the station.
+    near = [(46.669931, 20.253118), (46.670300, 20.252700), (46.670100, 20.252500)]
+    rows = ["stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station", "hkir_9,Damjanich utca,,,1,",
+            "hkir_9_3,Damjanich utca,46.672600,20.259211,,hkir_9"]
+    rows += [f"hkir_9_{n},Damjanich utca,{lat},{lon},,hkir_9" for n, (lat, lon) in zip((1, 2, 6), near)]
+    rows += ["hkir_9_4,Kossuth tér,46.672700,20.259500,,hkir_9", "hkir_9_5,,46.667000,20.247000,,hkir_9",
+             "hkir_8,Drahos utca,46.66,20.24,,"]
+    trips = ["route_id,service_id,trip_id"]
+    times = ["trip_id,arrival_time,departure_time,stop_id,stop_sequence"]
+    for n in (1, 2, 3, 4, 5, 6):
+        trips.append(f"R{n},S1,T{n}")
+        times += [f"T{n},08:00:00,08:00:00,hkir_8,1", f"T{n},08:05:00,08:05:00,hkir_9_{n},2"]
+    fz = gtfs_zip({
+        **far_files,
+        "stops.txt": "\n".join(rows) + "\n",
+        "routes.txt": "route_id,route_short_name,agency_id\n" + "".join(f"R{n},{n},A\n" for n in range(1, 7)),
+        "trips.txt": "\n".join(trips) + "\n",
+        "stop_times.txt": "\n".join(times) + "\n",
+    })
+    try:
+        split = load_parts(fz, lambda short, *_: bool(short), op_id="szentes", prefix="szentes:",
+                           split_platforms_m=gc.PLATFORM_SPLIT_M)
+        got = {route: place(split, route) for route in "123456"}
+        centre = (sum(ll[0] for ll in near) / 3, sum(ll[1] for ll in near) / 3)
+        failed |= not check(
+            "without its own position the station is its densest platforms, at their centroid",
+            {got[r][0][0] for r in "126"} == {"szentes:hkir_9"}
+            and abs(got["1"][1][0] - centre[0]) < 2e-5 and abs(got["1"][1][1] - centre[1]) < 2e-5,
+            repr({r: got[r] for r in "126"}),
+        )
+        failed |= not check(
+            "the far first platform is split off with the station number",
+            got["3"][0] == ["szentes:hkir_9_3", "Damjanich utca", "9"], repr(got["3"]),
+        )
+        failed |= not check(
+            "a split platform with a name of its own gets no station number",
+            got["4"][0] == ["szentes:hkir_9_4", "Kossuth tér", ""], repr(got["4"]),
+        )
+        failed |= not check(
+            "a split platform without a name takes the station's name and number",
+            got["5"][0] == ["szentes:hkir_9_5", "Damjanich utca", "9"], repr(got["5"]),
         )
     finally:
         fz.unlink(missing_ok=True)

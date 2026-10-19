@@ -232,16 +232,19 @@ jobs:
           ALLOW_MISSING_VAR: ${{ vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}
         run: |
           set -euo pipefail
-          # The dispatch input relaxes the city guard for this run only. The
-          # repository variable relaxes it for every run, the weekly refresh
-          # included, so say so on every run until it is unset again.
+          # The dispatch input relaxes the city guard for this run only, on
+          # top of the repository variable. The variable relaxes it for every
+          # run, the weekly refresh included, so say so on every run until it
+          # is unset again.
           if [ -n "$ALLOW_MISSING_VAR" ]; then
             echo "::warning title=City index guard relaxed::Repository variable HUNGARIAN_TRANSPORT_ALLOW_MISSING='${ALLOW_MISSING_VAR}' lets every run drop these city feeds. Unset it once the feed is back."
           fi
           if [ -n "$ALLOW_MISSING_INPUT" ]; then
             echo "::notice::allow_missing='${ALLOW_MISSING_INPUT}' for this run."
           fi
-          export HUNGARIAN_TRANSPORT_ALLOW_MISSING="${ALLOW_MISSING_INPUT:-$ALLOW_MISSING_VAR}"
+          allow="$ALLOW_MISSING_VAR"
+          if [ -n "$ALLOW_MISSING_INPUT" ]; then allow="${allow:+$allow,}$ALLOW_MISSING_INPUT"; fi
+          export HUNGARIAN_TRANSPORT_ALLOW_MISSING="$allow"
           python3 scripts/build_volan_index.py
           python3 scripts/build_city_index.py
           if [ -d pfaedle-out ] || [ -d /opt/pfaedle-trial/out ]; then
@@ -260,10 +263,16 @@ jobs:
           ls -lh dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz dist/mav-index.json.gz 2>/dev/null || true
 
       # How the city lines will draw: every stop pattern against its shapes.txt
-      # route. Informational (the feeds decide), shown on the run summary.
+      # route. Informational (the feeds decide), shown on the run summary; it
+      # never fails the release, and a refresh of a tag without it skips it.
       - name: City route audit
+        continue-on-error: true
         run: |
           set -euo pipefail
+          if [ ! -f scripts/audit_city_shapes.py ]; then
+            echo "skip city route audit (not in this tag)"
+            exit 0
+          fi
           {
             echo "### City routes"
             echo '```'

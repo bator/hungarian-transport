@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 from gtfs_compact import (
@@ -15,7 +16,7 @@ from gtfs_compact import (
     feed_urls,
     load_env_files,
     load_parts,
-    operator_trips,
+    operator_stats,
     stale_parts,
     write_index,
 )
@@ -191,25 +192,34 @@ def _load_feed(base: Path, feed: dict) -> list[dict]:
     raise last or FileNotFoundError(feed["file"])
 
 
-def _fresh(got: list[dict], label: str, today: str | None) -> list[dict]:
-    """Drop parts whose calendar already ended, loudly. The feed then counts
-    as missing for guard_feeds, so a stale zip blocks the rebuild unless it
-    is explicitly allowed to go."""
+def ymd(day: str) -> str:
+    return f"{day[:4]}-{day[4:6]}-{day[6:]}" if len(day) == 8 else day or "?"
+
+
+def _fresh(got: list[dict], label: str, today: str | None) -> tuple[list[dict], str]:
+    """Drop parts whose calendar already ended, loudly; the parts left and
+    the last service day of the dropped ones ("" when none was dropped).
+
+    A seasonal feed (Bahart) or a publisher that lets its zip run out ends
+    up here; guard_feeds decides whether the rebuild may lose it."""
     ended = dict(stale_parts(got, today))
     if not ended:
-        return got
+        return got, ""
     for op, end in ended.items():
-        print(f"warn {label}: calendar of {op} ended {end[:4]}-{end[4:6]}-{end[6:]}; skipped", file=sys.stderr)
-    return [p for p in got if p["op_id"] not in ended]
+        print(f"warn {label}: calendar of {op} ended {ymd(end)}; skipped", file=sys.stderr)
+    return [p for p in got if p["op_id"] not in ended], max(ended.values())
 
 
 def collect_parts(
     base: Path, volan_zip: Path | None = None, *, today: str | None = None
-) -> tuple[list[dict], list[str]]:
-    """Operator parts with trips, and the feed ids that failed, had none or
-    whose calendar already ended."""
+) -> tuple[list[dict], list[str], dict[str, str]]:
+    """Operator parts with trips, the feed ids that failed, had none or
+    whose calendar already ended, and of the last: feed id -> last service
+    day. A feed that only lost some operators to an ended calendar (Volán
+    local agencies) is neither failed nor ended."""
     parts: list[dict] = []
     failed: list[str] = []
+    expired: dict[str, str] = {}
     for feed in CITY_FEEDS:
         try:
             got = [p for p in _load_feed(base, feed) if p.get("t")]
@@ -221,9 +231,10 @@ def collect_parts(
             failed.append(feed["id"])
             print(f"warn {feed['id']}: no trips", file=sys.stderr)
         else:
-            got = _fresh(got, feed["id"], today)
+            got, end = _fresh(got, feed["id"], today)
             if not got:
                 failed.append(feed["id"])
+                expired[feed["id"]] = end
         parts.extend(got)
     if volan_zip and volan_zip.exists():
         try:
@@ -243,9 +254,12 @@ def collect_parts(
         except Exception as err:
             got = []
             print(f"warn volan-local: {err}", file=sys.stderr)
-        got = _fresh(got, "volan-local", today)
+        had_any = bool(got)
+        got, end = _fresh(got, "volan-local", today)
         if not got:
             failed.append("volan-local")
+            if had_any:
+                expired["volan-local"] = end
         parts.extend(got)
     else:
         failed.append("volan-local")
@@ -253,7 +267,7 @@ def collect_parts(
         raise RuntimeError("no city GTFS parts" + (f" ({', '.join(failed)})" if failed else ""))
     if failed:
         print("partial city index, skipped:", ", ".join(failed), file=sys.stderr)
-    return parts, failed
+    return parts, failed, expired
 
 
 def _feed_group(op_id: str) -> str | None:
@@ -275,29 +289,59 @@ def _group_trips(op_trips: dict[str, int]) -> dict[str, int]:
     return out
 
 
+def _group_end(prev: dict[str, tuple[int, str]], group: str) -> str:
+    """Last service day of a feed in the previous index ("" = unknown)."""
+    ends = [end for op, (_n, end) in prev.items() if _feed_group(op) == group]
+    return "" if not ends or "" in ends else max(ends)
+
+
 def allowed_missing() -> set[str]:
     load_env_files()
     raw = os.environ.get(ALLOW_MISSING_ENV) or ""
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
-def guard_feeds(out: Path, parts: list[dict], allow: set[str] | None = None) -> None:
+def guard_feeds(
+    out: Path,
+    parts: list[dict],
+    allow: set[str] | None = None,
+    *,
+    expired: dict[str, str] | None = None,
+    today: str | None = None,
+) -> None:
     """Refuse a rebuild that loses a feed the previous index had, or most of
-    its trips. Without a previous index there is nothing to compare."""
-    prev = operator_trips(out)
+    its trips. Without a previous index there is nothing to compare.
+
+    Only trips that still run count: an operator whose calendar in the
+    previous index ended before today has nothing left to lose, so a
+    seasonal feed (Bahart after its last sailing) or an expired zip leaves
+    the index without blocking every other feed. A feed dropped for an
+    ended calendar (expired: feed id -> last day) while the previous index
+    still runs it is refused, and the message says so."""
+    prev = operator_stats(out)
     if not prev:
         return
+    today = today or date.today().strftime("%Y%m%d")
     allow = allowed_missing() if allow is None else allow
+    expired = expired or {}
     now: dict[str, int] = {}
     for part in parts:
         now[part["op_id"]] = now.get(part["op_id"], 0) + len(part["t"])
-    before, after = _group_trips(prev), _group_trips(now)
+    live = {op: n for op, (n, end) in prev.items() if not (end and end < today)}
+    before, after = _group_trips(live), _group_trips(now)
+    for group, had in sorted(_group_trips({op: n for op, (n, _e) in prev.items()}).items()):
+        if group not in before and not after.get(group):
+            print(f"warn {group}: calendar ended {ymd(_group_end(prev, group))} in the previous index"
+                  f" as well; its {had} trips leave the index", file=sys.stderr)
     problems = []
     for group, had in sorted(before.items()):
         if group in allow or "all" in allow:
             continue
         has = after.get(group, 0)
-        if not has:
+        if not has and group in expired:
+            problems.append(f"{group} calendar ended {ymd(expired[group])} (had {had} trips,"
+                            f" the previous index runs until {ymd(_group_end(prev, group))})")
+        elif not has:
             problems.append(f"{group} missing (had {had} trips)")
         elif had >= MIN_GUARDED_TRIPS and has < had * MIN_TRIP_RATIO:
             problems.append(f"{group} {has} trips vs {had}")
@@ -309,10 +353,13 @@ def guard_feeds(out: Path, parts: list[dict], allow: set[str] | None = None) -> 
 
 
 def build_city_index(base: Path, out: Path, volan_zip: Path | None = None, *, today: str | None = None) -> dict:
-    parts, failed = collect_parts(base, volan_zip, today=today)
-    guard_feeds(out, parts)
+    """Build and write the city index; info["skipped"] lists the feeds left
+    out, info["expired"] those of them whose calendar ended (id -> last day)."""
+    parts, failed, expired = collect_parts(base, volan_zip, today=today)
+    guard_feeds(out, parts, expired=expired, today=today)
     info = write_index(parts, out, with_operators=True, today=today)
     info["skipped"] = failed
+    info["expired"] = expired
     return info
 
 

@@ -4,14 +4,17 @@ records a feed as built. No network."""
 from __future__ import annotations
 
 import gzip
+import http.server
 import json
 import os
 import random
+import shutil
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -149,6 +152,7 @@ class Fake:
         self.etag = {"https://kti.example/volan.zip": "volan-1", "https://public.example/a.zip": "a-2"}
         self.broken: set[str] = set()
         self.city_fails: BaseException | None = None
+        self.city_info: dict = {"ops": 1, "trips": 5, "skipped": []}
         self.city_builds = 0
         self.downloads: list[str] = []
 
@@ -172,12 +176,16 @@ class Fake:
         if self.city_fails is not None:
             raise self.city_fails
         out.write_bytes(gzip.compress(b'{"v":29}'))
-        return {"ops": 1, "trips": 5, "skipped": []}
+        return dict(self.city_info)
+
+    def download_zip(self, url: str, dest: Path) -> dict:
+        return self.download_feed(url, dest)
 
     def install(self) -> None:
         uvi.paths = self.paths
         uvi.remote_meta = self.remote_meta
         uvi.download_feed = self.download_feed
+        uvi.download_zip = self.download_zip
         uvi.build_city_index = self.build_city_index
         uvi.notify = lambda *_a, **_k: None
         uvi.GTFS_URL = "https://kti.example/volan.zip"
@@ -219,7 +227,7 @@ with tempfile.TemporaryDirectory() as tmp:
 
     fake.city_fails = RuntimeError("bad feed")
     code = fake.run()
-    check("failed city rebuild exits 1", code == 1, str(code))
+    check("failed city rebuild exits REPORTED", code == uvi.REPORTED, str(code))
     check("failed city rebuild keeps the old fingerprint",
           fake.state()["cities"]["a"]["etag"] == "a-1", repr(fake.state()["cities"]))
     check("failed city rebuild is marked for retry", fake.state().get("city_retry") is True)
@@ -264,8 +272,9 @@ with tempfile.TemporaryDirectory() as tmp:
     uvi.build_city_index = kill_self
     fake.etag["https://public.example/a.zip"] = "a-4"
     code = fake.run()
-    check("SIGTERM exits 1 and reports through the webhook",
-          code == 1 and len(sent) == 1 and "SIGTERM" in sent[0] and "megszakítva" in sent[0], repr((code, sent)))
+    check("SIGTERM exits REPORTED and reports through the webhook",
+          code == uvi.REPORTED and len(sent) == 1 and "SIGTERM" in sent[0] and "megszakítva" in sent[0],
+          repr((code, sent)))
     uvi.build_city_index = fake.build_city_index
 
     sent.clear()
@@ -276,9 +285,67 @@ with tempfile.TemporaryDirectory() as tmp:
 
     uvi.paths = broken_paths
     code = fake.run()
-    check("a failure before the main loop exits 1 and reports through the webhook",
-          code == 1 and len(sent) == 1 and "PermissionError" in sent[0], repr((code, sent)))
+    check("a failure before the main loop exits REPORTED and reports through the webhook",
+          code == uvi.REPORTED and len(sent) == 1 and "PermissionError" in sent[0], repr((code, sent)))
     uvi.paths = real_paths
+
+    # The Volán HEAD failing does not stop the city feeds or the MÁV index.
+    sent.clear()
+    fake.broken.add("https://kti.example/volan.zip")
+    fake.etag["https://public.example/a.zip"] = "a-5"
+    builds = fake.city_builds
+    code = fake.run()
+    check("a Volán HEAD failure is reported and the city feeds still update",
+          code == uvi.REPORTED and fake.city_builds == builds + 1 and fake.state()["cities"]["a"]["etag"] == "a-5"
+          and len(sent) == 1 and "HEAD" in sent[0], repr((code, sent, fake.state()["cities"])))
+    fake.broken.discard("https://kti.example/volan.zip")
+
+    # A Volán rebuild that fails is reported; the city feeds go on, but the
+    # new Volán zip does not trigger a city rebuild of its own.
+    sent.clear()
+    fake.etag["https://kti.example/volan.zip"] = "volan-2"
+    fake.etag["https://public.example/a.zip"] = "a-6"
+    real_build_index = uvi.build_index
+
+    def broken_build(*_a, **_k):
+        raise gtfs_compact.IndexGuardError("refusing to write volan-index.json.gz: 12 trips")
+
+    uvi.build_index = broken_build
+    builds = fake.city_builds
+    code = fake.run()
+    check("a failed Volán rebuild is reported and the city feeds still update",
+          code == uvi.REPORTED and fake.city_builds == builds + 1 and fake.state()["cities"]["a"]["etag"] == "a-6"
+          and fake.state()["volan"]["etag"] == "volan-1" and len(sent) == 1 and "volan rebuild" in sent[0],
+          repr((code, sent)))
+    builds = fake.city_builds
+    fake.run()
+    check("without a new Volán index the city is not rebuilt for it", fake.city_builds == builds)
+    uvi.build_index = real_build_index
+    fake.etag["https://kti.example/volan.zip"] = "volan-1"
+
+    # A feed skipped for its ended calendar is recorded as built: the same
+    # zip would be skipped again, so it is neither downloaded nor announced
+    # every day. A feed that failed to load is fetched again.
+    sent.clear()
+    fake.etag["https://public.example/a.zip"] = "a-7"
+    fake.city_info = {"ops": 0, "trips": 0, "skipped": ["a"], "expired": {"a": "20261101"}}
+    code = fake.run()
+    check("an ended feed's fingerprint is recorded",
+          code == 0 and fake.state()["cities"]["a"]["etag"] == "a-7", repr(fake.state()["cities"]))
+    check("the announcement names the ended calendar",
+          len(sent) == 1 and "calendar ended: a 2026-11-01" in sent[0], repr(sent))
+    sent.clear()
+    builds, downloads = fake.city_builds, len(fake.downloads)
+    fake.run()
+    check("the ended feed is neither downloaded, rebuilt nor announced again",
+          fake.city_builds == builds and len(fake.downloads) == downloads and sent == [],
+          repr((fake.city_builds - builds, sent)))
+    fake.etag["https://public.example/a.zip"] = "a-8"
+    fake.city_info = {"ops": 0, "trips": 0, "skipped": ["a"], "expired": {}}
+    fake.run()
+    check("a feed skipped for failing to load is not recorded",
+          fake.state()["cities"]["a"]["etag"] == "a-7", repr(fake.state()["cities"]))
+    fake.city_info = {"ops": 1, "trips": 5, "skipped": []}
 
 check("notify's user agent is the downloader's", uvi.UA == gtfs_compact.UA)
 
@@ -299,8 +366,17 @@ with tempfile.TemporaryDirectory() as tmp:
     base.mkdir()
     bin_dir.mkdir()
     curl_log = root / "curl.log"
+    stdin_log = root / "curl.stdin"
     fake_curl = bin_dir / "curl"
-    fake_curl.write_text(f"#!/bin/sh\nprintf '%s\\n' \"$@\" >> {curl_log}\n")
+    # Logs its arguments one per line (the JSON body is one of them) and,
+    # for `-H @-`, what it read from stdin. FAKE_CURL_FAIL fails the webhook.
+    fake_curl.write_text(
+        "#!/bin/sh\n"
+        f"for a in \"$@\"; do printf '%s\\n' \"$a\" >> {curl_log}; done\n"
+        f"for a in \"$@\"; do if [ \"$a\" = @- ]; then cat >> {stdin_log}; fi; done\n"
+        "for a in \"$@\"; do case \"$a\" in *127.0.0.1*) [ -n \"$FAKE_CURL_FAIL\" ] && exit 22;; esac; done\n"
+        "exit 0\n"
+    )
     fake_curl.chmod(fake_curl.stat().st_mode | stat.S_IXUSR)
     worker = base / "update_volan_index.py"
     worker.write_text(
@@ -318,25 +394,106 @@ with tempfile.TemporaryDirectory() as tmp:
         "HUNGARIAN_TRANSPORT_WEBHOOK": "http://127.0.0.1:1/api/webhook/test",
     }
 
-    def run_worker(mode: str) -> str:
+    def run_worker(mode: str, extra: dict | None = None) -> str:
         curl_log.unlink(missing_ok=True)
-        done = subprocess.run(["bash", str(script), "--worker"], env={**env, "FAKE_MODE": mode},
+        stdin_log.unlink(missing_ok=True)
+        done = subprocess.run(["bash", str(script), "--worker"], env={**env, "FAKE_MODE": mode, **(extra or {})},
                               capture_output=True, text=True, timeout=60)
         check(f"worker exits 0 after a run with mode {mode}", done.returncode == 0, done.stderr)
         return curl_log.read_text() if curl_log.exists() else ""
 
+    def body_of(posted: str) -> dict:
+        args = posted.splitlines()
+        return json.loads(args[args.index("--data") + 1])
+
     check("a clean run sends nothing from the wrapper", run_worker("0") == "")
-    check("exit 1 (the script reported itself) sends nothing from the wrapper", run_worker("1") == "")
+    check(f"exit {uvi.REPORTED} (the script reported itself) sends nothing from the wrapper",
+          run_worker(str(uvi.REPORTED)) == "")
+    posted = run_worker("1")
+    check("exit 1 (a syntax error or an uncaught exception) is reported by the wrapper",
+          posted and "exit 1" in body_of(posted)["message"] and "összeomlott" in body_of(posted)["message"],
+          repr(posted))
     posted = run_worker("kill")
     check("a killed script is reported by the wrapper",
           "exit 137" in posted and "http://127.0.0.1:1/api/webhook/test" in posted, repr(posted))
     posted = run_worker("2")
     check("a script that crashed before reporting is reported by the wrapper",
           "exit 2" in posted and "el sem indult" in posted, repr(posted))
-    check("the log holds every run", (base / "update.log").read_text().count("fake run") == 4)
+    check("the log holds every run", (base / "update.log").read_text().count("fake run") == 5)
+
+    token = "tok-" + "s3cr3t"
+    posted = run_worker("2", {"FAKE_CURL_FAIL": "1", "SUPERVISOR_TOKEN": token})
+    check("the supervisor fallback carries the token, but not on curl's command line",
+          "http://supervisor/core/api/webhook/hungarian-transport-gtfs" in posted and token not in posted
+          and stdin_log.exists() and f"Authorization: Bearer {token}" in stdin_log.read_text(), repr(posted))
+
+    # The message (with the log path in it) is escaped as JSON.
+    odd = root / 'ba"se\\x'
+    odd.mkdir()
+    shutil.copy(worker, odd / "update_volan_index.py")
+    posted = run_worker("2", {"HUNGARIAN_TRANSPORT_BASE": str(odd)})
+    try:
+        message = body_of(posted)["message"]
+    except (ValueError, KeyError) as err:
+        message = repr(err)
+    check("the wrapper's message is valid JSON with quotes and backslashes in it",
+          f"{odd}/update.log" in message, repr(posted))
+    nopy = root / "nopy"
+    nopy.mkdir()
+    for tool in ("bash", "tr", "sed", "cat", "mkdir", "timeout", "wc", "mv", "printf"):
+        found = shutil.which(tool)
+        if found:
+            (nopy / tool).symlink_to(found)
+    (nopy / "curl").symlink_to(fake_curl)
+    posted = run_worker("2", {"HUNGARIAN_TRANSPORT_BASE": str(odd), "PATH": str(nopy)})
+    try:
+        message = body_of(posted)["message"]
+    except (ValueError, KeyError) as err:
+        message = repr(err)
+    check("without python3 the message is still valid JSON", "el sem indult" in message and str(odd) in message,
+          repr(posted))
 
     done = subprocess.run(["bash", str(script)], env={**env, "FAKE_MODE": "0"}, capture_output=True, text=True, timeout=60)
     check("the detached launcher exits 0 at once", done.returncode == 0 and done.stdout.startswith("started "), repr(done))
+
+# ---- a half-copied sibling script is reported, and exits REPORTED -----------
+
+
+class Hook(http.server.BaseHTTPRequestHandler):
+    posts: list[dict] = []
+
+    def do_POST(self):  # noqa: N802
+        body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        Hook.posts.append(json.loads(body))
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *_a):
+        pass
+
+
+server = http.server.HTTPServer(("127.0.0.1", 0), Hook)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+here = Path(__file__).resolve().parent
+try:
+    for broken_source, label in (("def build_city_index(:\n", "SyntaxError"), ("CITY_FEEDS = [\n  {\n", "SyntaxError"),
+                                 ("raise NameError('half copied')\n", "NameError")):
+        with tempfile.TemporaryDirectory() as tmp:
+            for name in ("update_volan_index.py", "gtfs_compact.py", "build_mav_index.py", "build_volan_index.py"):
+                shutil.copy(here / name, Path(tmp) / name)
+            (Path(tmp) / "build_city_index.py").write_text(broken_source)
+            Hook.posts.clear()
+            done = subprocess.run(
+                [sys.executable, "-I", str(Path(tmp) / "update_volan_index.py")],
+                env={**os.environ, uvi.WEBHOOK_ENV: f"http://127.0.0.1:{server.server_port}/api/webhook/test"},
+                capture_output=True, text=True, timeout=60,
+            )
+            check(f"a sibling with a {label} ({broken_source.splitlines()[0]}) is reported and exits REPORTED",
+                  done.returncode == uvi.REPORTED and len(Hook.posts) == 1
+                  and label in Hook.posts[0]["message"] and "el sem indult" in Hook.posts[0]["message"],
+                  repr((done.returncode, Hook.posts, done.stderr[-300:])))
+finally:
+    server.shutdown()
 
 if failed:
     sys.exit(1)

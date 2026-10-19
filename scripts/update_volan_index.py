@@ -11,21 +11,30 @@ import re
 import shutil
 import signal
 import sys
+import traceback
 import urllib.error
+import urllib.parse
 import urllib.request
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 WEBHOOK_PATH = "/api/webhook/hungarian-transport-gtfs"
+# Same variable as run_update.sh: another webhook URL (tests, a non-default port).
+WEBHOOK_ENV = "HUNGARIAN_TRANSPORT_WEBHOOK"
 # Same string as gtfs_compact.UA, kept here so notify() works when the
 # sibling modules fail to import (a half-updated install).
 UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungarian-transport)"
+# Exit status after a failure this script already sent to the webhook.
+# run_update.sh reports every other non-zero status itself; 1 is what Python
+# exits with on an uncaught exception or a syntax error, so it is not this.
+REPORTED = 3
 
 
 def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
     payload = json.dumps({"title": title, "message": message}).encode("utf-8")
+    webhook = (os.environ.get(WEBHOOK_ENV) or "").strip() or "http://127.0.0.1:8123" + WEBHOOK_PATH
     urls: list[tuple[str, dict]] = [
-        ("http://127.0.0.1:8123" + WEBHOOK_PATH, {"Content-Type": "application/json", "User-Agent": UA}),
+        (webhook, {"Content-Type": "application/json", "User-Agent": UA}),
     ]
     token = os.environ.get("SUPERVISOR_TOKEN")
     if token:
@@ -51,7 +60,7 @@ def notify(message: str, title: str = "Hungarian transport GTFS") -> None:
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
-    from build_city_index import CITY_FEEDS, build_city_index  # noqa: E402
+    from build_city_index import CITY_FEEDS, build_city_index, ymd  # noqa: E402
     from build_mav_index import build_mav_index, resolve_mav_feed  # noqa: E402
     from build_volan_index import GTFS_URL, build_index  # noqa: E402
     from gtfs_compact import (  # noqa: E402
@@ -64,9 +73,13 @@ try:
         index_shapes,
         prune_shapes,
     )
-except ImportError as err:  # a script is missing or broken: say so, do not die quietly
+except Exception as err:  # a sibling is missing, half-copied or broken: say so, do not die quietly
+    # A SyntaxError or NameError in a half-copied script is not an ImportError.
     notify(f"Volán GTFS frissítés el sem indult: {type(err).__name__}: {err}")
-    raise
+    if __name__ != "__main__":
+        raise
+    traceback.print_exc()
+    sys.exit(REPORTED)
 
 HA_BASE = Path("/config/hungarian-transport")
 # The integration serves /hungarian-transport/ from its own www folder, and the
@@ -312,7 +325,9 @@ def request(method: str, url: str):
     assert_public_http_url(url)
     hdrs = {"User-Agent": UA, "Accept": "*/*", "Accept-Encoding": "identity"}
     req = urllib.request.Request(url, method=method, headers=hdrs)
-    return _urlopen(req, timeout=60)
+    # A feed published over http is asked over http; https is never
+    # redirected down to it.
+    return _urlopen(req, timeout=60, allow_insecure=urllib.parse.urlparse(url).scheme == "http")
 
 
 def remote_meta(url: str) -> dict:
@@ -352,22 +367,26 @@ def acquire_lock(path: Path):
     return fh
 
 
+def report(title: str, msg: str) -> None:
+    """A failure, to update.log and to the webhook."""
+    print(msg, file=sys.stderr)
+    notify(f"{title}: {msg}")
+
+
 def main() -> int:
     """Run the update; any failure reaches the webhook, not only the log.
 
     run_update.sh detaches this script, so a traceback in update.log is all a
-    silent failure would leave. Exit 1 means "reported through the webhook";
-    the shell wrapper reports the exit codes this script cannot (killed, not
-    started)."""
+    silent failure would leave. Exit REPORTED (3) means "reported through
+    the webhook"; the shell wrapper reports every other failure (killed, not
+    started, a crash this function did not catch)."""
     try:
         return _main()
     except SystemExit:
         raise
     except Exception as err:
-        msg = f"error {type(err).__name__}: {err}"
-        print(msg, file=sys.stderr)
-        notify(f"Volán GTFS frissítés sikertelen: {msg}")
-        return 1
+        report("Volán GTFS frissítés sikertelen", f"error {type(err).__name__}: {err}")
+        return REPORTED
 
 
 def _main() -> int:
@@ -388,7 +407,7 @@ def _main() -> int:
         except ValueError:
             name = str(signum)
         notify(f"Volán GTFS frissítés megszakítva ({name}): az indexek nem frissültek, lásd update.log")
-        sys.exit(1)
+        sys.exit(REPORTED)
 
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
@@ -413,40 +432,41 @@ def _main() -> int:
         changed.append("restored " + ", ".join(restored))
 
     try:
+        # A Volán failure is reported and the run goes on: the city feeds and
+        # the local MÁV index do not depend on it.
+        volan_built = False
         try:
-            volan_meta = remote_meta(GTFS_URL)
+            volan_meta: dict | None = remote_meta(GTFS_URL)
         except Exception as err:
-            msg = f"error HEAD {GTFS_URL}: {err}"
-            print(msg, file=sys.stderr)
-            notify(f"Volán GTFS frissítés sikertelen: {msg}")
-            return 1
+            volan_meta = None
+            report("Volán GTFS frissítés sikertelen", f"error HEAD {GTFS_URL}: {err}")
+            exit_code = REPORTED
 
-        volan_changed = not (same_remote(volan_state, volan_meta) and volan_out.exists())
-        if volan_changed:
+        if volan_meta is not None and not (same_remote(volan_state, volan_meta) and volan_out.exists()):
             try:
                 downloaded = download_zip(GTFS_URL, zip_path)
                 info = build_index(zip_path, volan_out)
             except Exception as err:
-                msg = f"error volan rebuild: {err}"
-                print(msg, file=sys.stderr)
-                notify(f"Volán GTFS frissítés sikertelen: {msg}")
-                return 1
-            volan_state = merge_meta(
-                volan_meta,
-                downloaded,
-                zip_path.stat().st_size if zip_path.exists() else None,
-            )
-            volan_state["feed_version"] = info["feed_version"]
-            volan_state["trips"] = info["trips"]
-            volan_state["stops"] = info["stops"]
-            persist_index(volan_out, base)
-            changed.append(f"volan {info['feed_version'] or '?'}")
-        else:
+                report("Volán GTFS frissítés sikertelen", f"error volan rebuild: {err}")
+                exit_code = REPORTED
+            else:
+                volan_state = merge_meta(
+                    volan_meta,
+                    downloaded,
+                    zip_path.stat().st_size if zip_path.exists() else None,
+                )
+                volan_state["feed_version"] = info["feed_version"]
+                volan_state["trips"] = info["trips"]
+                volan_state["stops"] = info["stops"]
+                persist_index(volan_out, base)
+                changed.append(f"volan {info['feed_version'] or '?'}")
+                volan_built = True
+        elif volan_meta is not None:
             print(f"unchanged volan {volan_state.get('feed_version') or '?'}")
 
         # A city rebuild that failed (or was killed) last time is retried even
         # when no feed moved since; the Volán local routes come from zip_path.
-        city_retry = city_retry or volan_changed or not city_out.exists()
+        city_retry = city_retry or volan_built or not city_out.exists()
         for feed in CITY_FEEDS:
             prev = city_state.get(feed["id"]) or {}
             zpath = base / feed["file"]
@@ -476,17 +496,24 @@ def _main() -> int:
             try:
                 info = build_city_index(base, city_out, zip_path if zip_path.exists() else None)
                 persist_index(city_out, base)
+                expired = info.get("expired") or {}
                 for fid, meta in city_pending.items():
-                    # A feed the index skipped is downloaded again next time.
-                    if fid not in info["skipped"]:
+                    # A feed the index skipped because of its content (an
+                    # ended calendar) is recorded: the same zip would be
+                    # skipped again. One that failed to load is downloaded
+                    # again next time.
+                    if fid not in info["skipped"] or fid in expired:
                         city_state[fid] = meta
                 city_retry = False
-                changed.append(f"city ops={info['ops']} trips={info['trips']}")
+                line = f"city ops={info['ops']} trips={info['trips']}"
+                if expired:
+                    line += " (calendar ended: " + ", ".join(
+                        f"{fid} {ymd(end)}" for fid, end in sorted(expired.items())
+                    ) + ")"
+                changed.append(line)
             except Exception as err:
-                msg = f"error city rebuild: {err}"
-                print(msg, file=sys.stderr)
-                notify(f"Helyi GTFS frissítés sikertelen: {msg}")
-                exit_code = 1
+                report("Helyi GTFS frissítés sikertelen", f"error city rebuild: {err}")
+                exit_code = REPORTED
 
         mav_src = None
         try:
@@ -504,10 +531,8 @@ def _main() -> int:
                     f"mav trains={info['trains']} lines={info.get('lines') or 0}"
                 )
             except Exception as err:
-                msg = f"error mav rebuild: {err}"
-                print(msg, file=sys.stderr)
-                notify(f"MÁV GTFS frissítés sikertelen: {msg}")
-                exit_code = 1
+                report("MÁV GTFS frissítés sikertelen", f"error mav rebuild: {err}")
+                exit_code = REPORTED
     finally:
         save_state(
             state_path,
