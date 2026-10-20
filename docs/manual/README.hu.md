@@ -479,10 +479,11 @@ A kártyák a Home Assistant témád színeit használják:
 
 ## 9. A menetrendek frissen tartása
 
-A Volán és a helyi menetrendek minden kiadással együtt érkeznek, és egy
-heti GitHub-folyamat frissíti őket az új letöltésekhez. A HACS nem tölti le
-újra azt a verziót, ami már telepítve van, ezért a meglévő telepítések a
-következő kiadással kapnak friss menetrendet.
+A Volán és a helyi menetrendek minden kiadással együtt érkeznek. Egy heti
+GitHub-folyamat újraépíti őket, és ha valamelyik menetrend változott, új
+patch-kiadást ad ki ugyanazzal a kóddal és a friss menetrendekkel. A HACS
+ezt szokásos frissítésként kínálja fel; egy kiadás, ha egyszer kint van, már
+nem változik.
 
 A saját Home Assistantodon napi frissítéshez kövesd a README
 [Keeping the GTFS indexes current](../../README.md#keeping-the-gtfs-indexes-current)

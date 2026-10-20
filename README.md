@@ -298,28 +298,29 @@ FUTÁR / GTFS-RT.
 
 ## Keeping the GTFS indexes current
 
-HACS installs the indexes that were built when the GitHub release was cut.
-A weekly GitHub Action rebuilds the indexes from the latest stable release's
-code and re-uploads that release's assets, so fresh downloads get current
-feeds. A release run compares the new indexes with the latest published
-ones: a city feed that is gone, a feed that lost more than half of its trips,
-or a Volán index with far too few trips fails the run, and the published
-assets stay as they are (see [When an update fails](#when-an-update-fails)).
+HACS installs the indexes that were built when the GitHub release was cut,
+and a published release never changes afterwards. A weekly GitHub Action
+rebuilds the indexes on the latest stable release's code; when a feed
+changed, it publishes them as the next patch release (1.9.12 → 1.9.13),
+tagged on that same commit, so HACS offers the new timetables as an
+ordinary update and no unreleased code goes out with them. When nothing
+changed, nothing is published. A release run compares the new indexes with
+the latest published ones: a city feed that is gone, a feed that lost more
+than half of its trips, or a Volán index with far too few trips fails the
+run, and no release is made (see [When an update fails](#when-an-update-fails)).
 To accept a feed that is gone for good, list its id in the `allow_missing`
 input of a manual run, or in the `HUNGARIAN_TRANSPORT_ALLOW_MISSING`
 repository variable for every run including the weekly one (the input adds
 to the variable), and drop it from `CITY_FEEDS`.
-HACS does not re-download a version that is already installed, so existing
-installs only pick up new feeds with the next release, or with the local
-rebuild below.
-Because the weekly run replaces the zips of an existing release, every
-upload also publishes `SHA256SUMS`, `hungarian-transport-build.json` and a
-build provenance attestation: check a download with `sha256sum -c SHA256SUMS`
+Between releases, the local rebuild below keeps an install current every day.
+Every release also publishes `SHA256SUMS`, `hungarian-transport-build.json`
+and a build provenance attestation: check a download with
+`sha256sum -c SHA256SUMS`
 (next to the zips) or
 `gh attestation verify hungarian-transport.zip --repo bator/hungarian-transport`.
 The attestation names the commit of the workflow run that built the zip. On
-the weekly refresh that is the head of `main` (where the workflow runs), not
-the release tag: the zips are built from the tag's code, and
+a weekly timetable release that is the head of `main` (where the workflow
+runs), not the tagged commit the zips are built from;
 `hungarian-transport-build.json` gives both, `built_commit` (the tag) and
 `workflow_commit` (the run).
 
