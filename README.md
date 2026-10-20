@@ -37,14 +37,24 @@ every screen, step by step, with screenshots.
 
 ## Install
 
-1. In HACS, add `https://github.com/bator/hungarian-transport` as a custom
-   repository with category **Integration**, and download it.
+1. Open the repository in HACS and click **Download**:
+
+   [![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=bator&repository=hungarian-transport&category=integration)
+
 2. Restart Home Assistant.
-3. **Settings → Devices & services → Add integration → Hungarian transport.**
-   Enter your free [BKK Open Data key](https://opendata.bkk.hu/data-sources)
-   here (BKK and MÁV cards need it; Volán and city cards do not).
+3. Add the integration, and enter your free
+   [BKK Open Data key](https://opendata.bkk.hu/data-sources) there (BKK and
+   MÁV cards need it; Volán and city cards do not):
+
+   [![Open your Home Assistant instance and start setting up Hungarian transport.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=hungarian_transport)
+
 4. Add the **Hungarian transport** or the **Hungarian transit stop planner**
    card to a dashboard, and pick two stops in its editor.
+
+Without the buttons: in HACS add `https://github.com/bator/hungarian-transport`
+as a custom repository with category **Integration**, and after the restart
+go to **Settings → Devices & services → Add integration → Hungarian
+transport**.
 
 Installed it earlier as a HACS **Dashboard** repository? Remove that
 repository first, then add it again as an **Integration**.

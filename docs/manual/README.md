@@ -51,6 +51,20 @@ Where the data comes from:
 
 ### 2.1 With HACS
 
+The quickest way is two buttons. Each opens your own Home Assistant (the
+first time, my.home-assistant.io asks for its address).
+
+1. Open the repository in HACS, then click **Download**:
+
+   [![Open your Home Assistant instance and open this repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=bator&repository=hungarian-transport&category=integration)
+
+2. Restart Home Assistant.
+3. Start setting up the integration:
+
+   [![Open your Home Assistant instance and start setting up Hungarian transport.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=hungarian_transport)
+
+Without the buttons:
+
 1. In HACS, open the menu and choose **Custom repositories**.
 2. Add `https://github.com/bator/hungarian-transport` with the category
    **Integration**.
