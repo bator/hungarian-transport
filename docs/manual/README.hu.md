@@ -152,8 +152,8 @@ saját útvonalát rajzolja.
 Az építés minden járatot ellenőriz: minden állomásnak a kirajzolt
 útvonaltól legfeljebb 300 méterre kell lennie. Ha az ellenőrzés elbukik, az
 előző index marad használatban, és egy értesítés megmondja, miért. A sínen
-pontosan futó útvonalakhoz lásd a README
-[MÁV train routes](../../README.md#máv-train-routes) részét.
+pontosan futó útvonalakhoz lásd a menetrend-útmutató
+[MÁV train routes](../timetables.md#máv-train-routes) részét.
 
 ---
 
@@ -485,8 +485,8 @@ patch-kiadást ad ki ugyanazzal a kóddal és a friss menetrendekkel. A HACS
 ezt szokásos frissítésként kínálja fel; egy kiadás, ha egyszer kint van, már
 nem változik.
 
-A saját Home Assistantodon napi frissítéshez kövesd a README
-[Keeping the GTFS indexes current](../../README.md#keeping-the-gtfs-indexes-current)
+A saját Home Assistantodon napi frissítéshez kövesd a menetrend-útmutató
+[Keeping the GTFS indexes current](../timetables.md#keeping-the-gtfs-indexes-current)
 részét. Röviden:
 
 1. Másold a `scripts/` mappát a `/config/hungarian-transport/` alá.
@@ -495,7 +495,7 @@ részét. Röviden:
    perccel fut, és csak a megváltozott feedeket építi újra.
 
 Egy sikertelen frissítés megtartja az előző menetrendet, és értesítést küld
-(lásd [When an update fails](../../README.md#when-an-update-fails)).
+(lásd [When an update fails](../timetables.md#when-an-update-fails)).
 
 ---
 
