@@ -51,6 +51,21 @@ Honnan jönnek az adatok:
 
 ### 2.1 HACS-szal
 
+A leggyorsabb út két gomb. Mindkettő a saját Home Assistantodat nyitja meg
+(először a my.home-assistant.io megkérdezi a címét).
+
+1. Nyisd meg a tárolót a HACS-ban, majd kattints a **Letöltés** (Download)
+   gombra:
+
+   [![A tároló megnyitása a HACS-ban a saját Home Assistantodban.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=bator&repository=hungarian-transport&category=integration)
+
+2. Indítsd újra a Home Assistantot.
+3. Indítsd el az integráció beállítását:
+
+   [![A Magyar közlekedés beállításának indítása a saját Home Assistantodban.](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=hungarian_transport)
+
+Gombok nélkül:
+
 1. A HACS menüjében válaszd az **Egyéni tárolók** (Custom repositories)
    pontot.
 2. Add hozzá a `https://github.com/bator/hungarian-transport` tárolót
