@@ -146,7 +146,7 @@ users. With it, every train in Hungary draws its own route.
 The build checks every trip: each station must lie within 300 m of the
 drawn route. If the check fails, the previous index stays in use and a
 notification tells you why. For routes that follow the tracks exactly, see
-[MÁV train routes](../../README.md#máv-train-routes) in the README.
+[MÁV train routes](../timetables.md#máv-train-routes).
 
 ---
 
@@ -469,8 +469,8 @@ release with the same code and the fresh timetables. HACS then offers it as
 an ordinary update; a release, once out, never changes.
 
 For daily updates on your own Home Assistant, follow
-[Keeping the GTFS indexes current](../../README.md#keeping-the-gtfs-indexes-current)
-in the README. In short:
+[Keeping the GTFS indexes current](../timetables.md#keeping-the-gtfs-indexes-current)
+in the timetables guide. In short:
 
 1. Copy `scripts/` to `/config/hungarian-transport/`.
 2. Copy `packages/hungarian_transport.yaml` into your packages folder.
@@ -478,7 +478,7 @@ in the README. In short:
    start, and rebuilds only the feeds that changed.
 
 A failed update keeps the previous timetable and sends a notification (see
-[When an update fails](../../README.md#when-an-update-fails)).
+[When an update fails](../timetables.md#when-an-update-fails)).
 
 ---
 
