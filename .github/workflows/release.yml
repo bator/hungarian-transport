@@ -4,13 +4,12 @@ on:
   push:
     tags:
       - "v*"
-  # Weekly: rebuild the GTFS indexes on the latest stable tag's code and
-  # replace that release's zips in place (gh release upload --clobber), so
-  # fresh downloads get current feeds without a version bump. On purpose;
-  # each upload carries a matching SHA256SUMS, a build provenance
-  # attestation and hungarian-transport-build.json, so a replaced asset can
-  # still be checked. The attestation names the run's commit (main), the
-  # build file names the tag commit the zips were built from.
+  # Weekly: rebuild the GTFS indexes on the latest stable tag's code and,
+  # when a feed changed, publish them as the next patch release, tagged on
+  # that same commit (no unreleased code). A published release is never
+  # changed afterwards: what HACS installs as a version stays that version.
+  # Each release carries SHA256SUMS, a build provenance attestation and
+  # hungarian-transport-build.json (the tag, and the commit it was built from).
   schedule:
     - cron: "30 2 * * 1"
   workflow_dispatch:
@@ -50,6 +49,8 @@ jobs:
       create: ${{ steps.ver.outputs.create }}
       ref: ${{ steps.ver.outputs.ref }}
       baseline: ${{ steps.ver.outputs.baseline }}
+      target: ${{ steps.ver.outputs.target }}
+      refresh: ${{ steps.ver.outputs.refresh }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -113,14 +114,17 @@ jobs:
             echo "${major:-0} ${minor:-0} ${patch:-0}"
           }
 
-          # tag to publish, the code to build (ref) and the release whose
-          # indexes the new ones replace (baseline).
+          # tag to publish, the code to build (ref), the release whose
+          # indexes the new ones replace (baseline), the commit the new tag
+          # points at (target) and whether this is a timetable-only release.
           emit() {
             {
               echo "tag=${1}"
               echo "create=${2}"
               echo "ref=${3:-$GITHUB_SHA}"
               echo "baseline=${4:-}"
+              echo "target=${5:-$GITHUB_SHA}"
+              echo "refresh=${6:-false}"
             } >> "$GITHUB_OUTPUT"
           }
 
@@ -132,17 +136,26 @@ jobs:
           fi
 
           if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
-            tag=$(latest_stable)
-            if [ -z "$tag" ]; then
+            stable=$(latest_stable)
+            if [ -z "$stable" ]; then
               echo "No stable release to refresh; skip."
               emit "" false
               exit 0
             fi
-            echo "Refreshing GTFS zip on ${tag} (no version bump)"
-            # Build and test the released code, not main, so the zip never ships
-            # unreleased card code (or an index schema the released card cannot
-            # read) under an old version. Its own indexes are the baseline.
-            emit "$tag" true "refs/tags/${tag}" "$tag"
+            read -r major minor patch <<< "$(parse_semver "$stable")"
+            tag="v${major}.${minor}.$((patch + 1))"
+            if gh release view "$tag" >/dev/null 2>&1; then
+              echo "::error::${tag} already exists; the weekly refresh never changes a release."
+              exit 1
+            fi
+            commit=$(git rev-parse "refs/tags/${stable}^{commit}")
+            # Build and test the released code, not main, so a timetable
+            # release never ships unreleased card code (or an index schema the
+            # released card cannot read). The new tag points at that same
+            # commit, and it is published only when the indexes differ from
+            # the stable release's own (the baseline).
+            echo "Timetable refresh: ${stable} code, new indexes as ${tag} if a feed changed"
+            emit "$tag" true "refs/tags/${stable}" "$stable" "$commit" true
             exit 0
           fi
 
@@ -219,6 +232,8 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.create == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.changed.outputs.changed }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -242,6 +257,9 @@ jobs:
           gh release download "$BASELINE" --repo "$GITHUB_REPOSITORY" \
             --pattern hungarian-transport-frontend.zip --dir baseline
           unzip -o -j baseline/hungarian-transport-frontend.zip volan-index.json.gz city-index.json.gz -d .
+          # Kept aside: the builders rewrite these in place.
+          mkdir -p .baseline
+          cp volan-index.json.gz city-index.json.gz .baseline/
           rm -rf baseline
           ls -l volan-index.json.gz city-index.json.gz
 
@@ -293,6 +311,31 @@ jobs:
           done
           if [ -f mav-index.json.gz ]; then cp -f mav-index.json.gz dist/; fi
           ls -lh dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz dist/mav-index.json.gz 2>/dev/null || true
+
+      # A timetable refresh publishes only new data. The indexes are compared
+      # by content (gzip headers carry a time stamp); the shapes folders are
+      # named after their index, so an unchanged index means unchanged shapes.
+      - name: Did a timetable change
+        id: changed
+        env:
+          REFRESH: ${{ needs.resolve.outputs.refresh }}
+        run: |
+          set -euo pipefail
+          if [ "$REFRESH" != "true" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed=false
+          for f in volan-index.json.gz city-index.json.gz; do
+            if [ ! -f ".baseline/$f" ] || ! cmp -s <(gzip -dc "$f") <(gzip -dc ".baseline/$f"); then
+              echo "$f changed"
+              changed=true
+            fi
+          done
+          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
+          if [ "$changed" = "false" ]; then
+            echo "::notice title=No timetable change::The rebuilt indexes equal the latest release's; nothing is published."
+          fi
 
       # How the city lines will draw: every stop pattern against its shapes.txt
       # route. Informational (the feeds decide), shown on the run summary; it
@@ -389,14 +432,13 @@ jobs:
               sys.exit(1)
           print(f"tag, manifest.json and CARD_VERSION agree on {ver}")
           PY
-          # Shipped next to the zips (the weekly refresh replaces them in
-          # place): sha256sum -c SHA256SUMS checks a download.
+          # Shipped next to the zips: sha256sum -c SHA256SUMS checks a download.
           sha256sum hungarian-transport.zip hungarian-transport-frontend.zip > SHA256SUMS
           cat SHA256SUMS
           # The provenance attestation names the commit of the workflow run
-          # (github.sha: main's head on the weekly run), not the tag that was
-          # built; actions/attest has no input for another source commit. This
-          # file says which commit the zips were built from.
+          # (github.sha: main's head on the weekly run), not the tag commit the
+          # zips were built from; actions/attest has no input for another
+          # source commit. This file says which commit that was.
           python3 - <<'PY'
           import json, os, subprocess
           info = {
@@ -427,7 +469,7 @@ jobs:
   publish:
     name: Publish GitHub release
     needs: [resolve, test, build]
-    if: needs.resolve.outputs.create == 'true'
+    if: needs.resolve.outputs.create == 'true' && needs.build.outputs.changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -444,8 +486,9 @@ jobs:
 
       # gh attestation verify hungarian-transport.zip --repo <owner>/<repo>
       # The attestation's source commit is this run's github.sha; on the
-      # weekly refresh that is main, while the zips are built from the tag:
-      # hungarian-transport-build.json (uploaded with them) names both.
+      # weekly refresh that is main, while the zips are built from the stable
+      # tag's commit: hungarian-transport-build.json (uploaded with them)
+      # names both.
       - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: |
@@ -457,11 +500,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.resolve.outputs.tag }}
+          TARGET: ${{ needs.resolve.outputs.target }}
+          REFRESH: ${{ needs.resolve.outputs.refresh }}
+          BASELINE: ${{ needs.resolve.outputs.baseline }}
         run: |
           set -euo pipefail
           tag="$TAG"
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rev\.[0-9]+)?$ ]]; then
             echo "refusing tag"
+            exit 1
+          fi
+          if [[ ! "$TARGET" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "refusing target"
             exit 1
           fi
           ver="${tag#v}"
@@ -470,18 +520,19 @@ jobs:
           if [[ "$tag" == *-rev.* ]]; then
             extra+=(--prerelease)
             notes="${notes} Live Lovelace revision between HACS releases."
+          elif [ "$REFRESH" = "true" ]; then
+            notes="${notes} Timetable update: fresh Volán and city GTFS indexes on the code of ${BASELINE}."
           else
             notes="${notes} Includes fresh Volán and city GTFS indexes."
           fi
-          # An upload into a draft release leaves it unpublished (and HACS
-          # never sees it); refuse instead of quietly succeeding.
-          draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || echo missing)
-          if [ "$draft" = "true" ]; then
-            echo "::error::Release $tag exists as a draft. Publish or delete the draft, then rerun."
+          # A published release is never changed: what HACS installs as a
+          # version stays what was released as it. A draft is refused too
+          # (HACS never sees an unpublished release).
+          state=$(gh release view "$tag" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo missing)
+          if [ "$state" != "missing" ]; then
+            echo "::error::Release $tag already exists (${state}). A release is not changed after publishing; release the next version instead."
             exit 1
-          elif [ "$draft" = "false" ]; then
-            gh release upload "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS hungarian-transport-build.json --clobber
-          else
-            # Tag the commit that was built, not whatever the default branch is now.
-            gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS hungarian-transport-build.json --target "$GITHUB_SHA" --title "$tag" --notes "$notes" "${extra[@]}"
           fi
+          # Tag the commit that was built: main's head for a code release, the
+          # stable tag's commit for a timetable refresh.
+          gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS hungarian-transport-build.json --target "$TARGET" --title "$tag" --notes "$notes" "${extra[@]}"

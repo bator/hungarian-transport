@@ -463,10 +463,10 @@ The cards use your Home Assistant theme colours:
 
 ## 9. Keeping timetables current
 
-The Volán and city timetables ship with each release, and a weekly GitHub
-job refreshes them for new downloads. Home Assistant (HACS) does not
-download a version you already have, so existing installs get new
-timetables with the next release.
+The Volán and city timetables ship with each release. A weekly GitHub job
+rebuilds them, and when a timetable changed it publishes a new patch
+release with the same code and the fresh timetables. HACS then offers it as
+an ordinary update; a release, once out, never changes.
 
 For daily updates on your own Home Assistant, follow
 [Keeping the GTFS indexes current](../../README.md#keeping-the-gtfs-indexes-current)
