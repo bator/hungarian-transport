@@ -10,11 +10,15 @@ from homeassistant.components import frontend
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import (
+    HomeAssistantError,
+    ServiceValidationError,
+    Unauthorized,
+    UnknownUser,
+)
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.service import async_register_admin_service
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
@@ -67,6 +71,18 @@ def _require_entry(hass: HomeAssistant) -> None:
     unloaded (disabled); they refuse until it is loaded again."""
     if not _entry_loaded(hass):
         raise ServiceValidationError(translation_domain=DOMAIN, translation_key="not_loaded")
+
+
+async def _require_admin(hass: HomeAssistant, call: ServiceCall) -> None:
+    """What async_register_admin_service checks: a call without a user (an
+    automation, a script) is allowed, a user must be an admin."""
+    if not call.context.user_id:
+        return
+    user = await hass.auth.async_get_user(call.context.user_id)
+    if user is None:
+        raise UnknownUser(context=call.context)
+    if not user.is_admin:
+        raise Unauthorized(context=call.context)
 
 
 def _station_code(call: ServiceCall, field: str) -> str:
@@ -152,6 +168,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.http.register_view(mav.MavGtfsUploadView(www_path, _entry_loaded))
 
     async def handle_rebuild_mav(call: ServiceCall) -> dict[str, Any]:
+        await _require_admin(hass, call)
         _require_entry(hass)
         try:
             stats = await mav.async_build(hass, www_path, force=True)
@@ -170,12 +187,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         return stats or {}
 
     # A rebuild reads and checks the whole feed (a minute of CPU on a small
-    # host): admins only, like the upload.
-    async_register_admin_service(
-        hass,
+    # host): admins only, like the upload. Not async_register_admin_service:
+    # it takes supports_response from Home Assistant 2025.6 only.
+    hass.services.async_register(
         DOMAIN,
         SERVICE_REBUILD_MAV,
         handle_rebuild_mav,
+        schema=vol.Schema({}),
         supports_response=SupportsResponse.OPTIONAL,
     )
 

@@ -16,7 +16,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
-from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS, mav
+from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS, elvira, mav
 from custom_components.hungarian_transport.assets import asset_tag
 from custom_components.hungarian_transport.const import (
     DOMAIN,
@@ -519,3 +519,54 @@ async def test_services_refuse_while_the_entry_is_unloaded(
     await hass.async_block_till_done()
     aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
     assert await _elvira_call(hass) == {"departures": []}
+
+
+def _station(n: int) -> str:
+    return f"0055{n:05d}"
+
+
+async def test_elvira_requests_are_rate_limited(
+    hass, aioclient_mock, freezer, monkeypatch, caplog
+) -> None:
+    """Any logged-in user can call elvira_between and every new station pair
+    is new boards: past the burst a board is refused (one log line, no
+    request, not an outage), and the clock refills the bucket."""
+    clock = [1000.0]
+    monkeypatch.setattr(elvira, "_monotonic", lambda: clock[0])
+    freezer.move_to(NOON)
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+
+    async def call(origin: str) -> dict:
+        return await hass.services.async_call(
+            DOMAIN,
+            SERVICE_ELVIRA_BETWEEN,
+            {"origin_code": origin, "dest_code": DEST, "minutes_after": 15},
+            blocking=True,
+            return_response=True,
+        )
+
+    # One service day at noon: the first call takes the destination board
+    # too, every further origin one board.
+    for n in range(elvira.ELVIRA_BURST - 1):
+        assert await call(_station(n)) == {"departures": []}
+    assert aioclient_mock.call_count == elvira.ELVIRA_BURST
+    for n in range(100, 105):
+        assert await call(_station(n)) == _unavailable("rate limited")
+    assert aioclient_mock.call_count == elvira.ELVIRA_BURST
+    limited = [m for m in _elvira_warnings(caplog) if "rate limit" in m]
+    assert len(limited) == 1
+    assert not [m for m in _elvira_warnings(caplog) if "unavailable" in m]
+
+    clock[0] += 1 / elvira.ELVIRA_RATE
+    assert await call(_station(200)) == {"departures": []}
+    assert aioclient_mock.call_count == elvira.ELVIRA_BURST + 1
+
+
+def test_elvira_rate_limit_leaves_room_for_cards() -> None:
+    """Six MÁV cards on six different pairs near midnight (three service
+    days, so six boards each) every ELVIRA_CACHE_TTL, and all of them at
+    once when a dashboard opens."""
+    boards = 6 * 2 * 3
+    assert boards / elvira.ELVIRA_CACHE_TTL <= elvira.ELVIRA_RATE * 0.9
+    assert boards <= elvira.ELVIRA_BURST

@@ -9,19 +9,26 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import voluptuous as vol
 from pytest_homeassistant_custom_component.common import (
     MockConfigEntry,
     async_get_persistent_notifications,
 )
 
 from homeassistant.components.http import KEY_HASS_USER
-from homeassistant.core import Context, HomeAssistant
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError, Unauthorized
+from homeassistant.core import Context, HomeAssistant, SupportsResponse
+from homeassistant.exceptions import (
+    HomeAssistantError,
+    ServiceValidationError,
+    Unauthorized,
+    UnknownUser,
+)
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.http import KEY_HASS
 from homeassistant.setup import async_setup_component
@@ -254,6 +261,51 @@ async def test_rebuild_service_is_admin_only(
     assert not (card_assets / "mav-index.json.gz").exists()
 
 
+async def test_rebuild_service_lets_admins_and_automations_through(
+    hass: HomeAssistant, hass_admin_user, mav_source
+) -> None:
+    """Without a feed the handler answers mav_source_missing: the call got
+    past the admin check."""
+    await _setup(hass)
+    for context in (Context(user_id=hass_admin_user.id), Context()):
+        with pytest.raises(ServiceValidationError) as err:
+            await hass.services.async_call(
+                DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True, context=context
+            )
+        assert err.value.translation_key == "mav_source_missing"
+    with pytest.raises(UnknownUser):
+        await hass.services.async_call(
+            DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True,
+            context=Context(user_id="no-such-user"),
+        )
+
+
+async def test_setup_does_not_need_admin_service_responses(
+    hass: HomeAssistant, monkeypatch
+) -> None:
+    """async_register_admin_service takes supports_response from Home
+    Assistant 2025.6 only; hacs.json allows 2024.10, where setup raised
+    TypeError half way through."""
+
+    def admin_service_2025_5(hass, domain, service, service_func, schema=None):
+        hass.services.async_register(domain, service, service_func, schema)
+
+    monkeypatch.setattr(
+        "homeassistant.helpers.service.async_register_admin_service", admin_service_2025_5
+    )
+    monkeypatch.setattr(
+        "custom_components.hungarian_transport.async_register_admin_service",
+        admin_service_2025_5,
+        raising=False,
+    )
+    await _setup(hass)
+    assert hass.services.supports_response(DOMAIN, SERVICE_REBUILD_MAV) is SupportsResponse.OPTIONAL
+    with pytest.raises(vol.Invalid):
+        await hass.services.async_call(
+            DOMAIN, SERVICE_REBUILD_MAV, {"bogus": 1}, blocking=True, return_response=True
+        )
+
+
 async def test_concurrent_uploads_use_their_own_temp_files(
     hass: HomeAssistant, hass_client, card_assets, mav_source
 ) -> None:
@@ -372,6 +424,40 @@ async def test_upload_build_outlives_a_client_that_gives_up(
     assert (card_assets / mav.INDEX_NAME).is_file()
     assert hass.data[DOMAIN]["mav"]["trains"] == 2
     assert not mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
+
+
+@pytest.mark.parametrize("fail", ["cancel", "error"])
+async def test_upload_temp_file_goes_when_the_check_does_not_finish(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch, fail
+) -> None:
+    """A client that disconnects during check_feed cancels the handler before
+    async_build owns the temp file (up to MAX_UPLOAD bytes): it must go too."""
+    await _setup(hass)
+    entered, gate = threading.Event(), threading.Event()
+
+    def slow_check(path):
+        entered.set()
+        gate.wait(5)
+        if fail == "error":
+            raise RuntimeError("check crashed")
+
+    monkeypatch.setattr(mav.mav_index, "check_feed", slow_check)
+    view = mav.MavGtfsUploadView(card_assets, lambda _hass: True)
+    handler = asyncio.ensure_future(view.post(_Upload(hass, _feed_zip())))
+    await hass.async_add_executor_job(entered.wait, 5)
+    assert list(mav_source.parent.glob("*.upload"))
+    if fail == "cancel":
+        handler.cancel()
+        gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await handler
+    else:
+        gate.set()
+        with pytest.raises(RuntimeError):
+            await handler
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert not list(mav_source.parent.glob("*.upload"))
+    assert not mav_source.exists()
 
 
 async def test_waiting_builds_are_shared(hass: HomeAssistant, card_assets, mav_source, monkeypatch) -> None:
