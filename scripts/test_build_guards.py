@@ -170,6 +170,28 @@ with tempfile.TemporaryDirectory() as tmp:
           "b" in info["skipped"] and set(operator_trips(out)) == {"a"}, repr(info))
     os.environ.pop(bci.ALLOW_MISSING_ENV, None)
 
+    # A new zip next to the one in place (update_volan_index stages it): one
+    # that does not load is rejected and the feed keeps the zip in place.
+    shutil.copy(fixtures / "b.zip", base / "b.zip")
+    bci.build_city_index(base, out)
+    staged = base / "b.zip.tmp"
+    staged.write_bytes(b"<html>gone</html>")
+    err = raises(lambda: bci.build_city_index(base, out, zips={"b": staged}))
+    info = bci.build_city_index(base, out, zips={"b": staged})
+    check("a new zip that fails to load is rejected, the zip in place is used",
+          err is None and info["rejected"] == ["b"] and "b" not in info["skipped"]
+          and set(operator_trips(out)) == {"a", "b"}, repr((err, info)))
+    shutil.copy(fixtures / "b.zip", staged)
+    info = bci.build_city_index(base, out, zips={"b": staged})
+    check("a new zip that loads is used", info["rejected"] == [] and set(operator_trips(out)) == {"a", "b"}, repr(info))
+    (base / "b.zip").unlink()
+    staged.write_bytes(b"<html>gone</html>")
+    err = raises(lambda: bci.build_city_index(base, out, zips={"b": staged}))
+    check("a rejected new zip with none in place leaves the feed out (and the guard refuses)",
+          isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
+    shutil.copy(fixtures / "b.zip", base / "b.zip")
+    staged.unlink()
+
     # The http:// publishers are the only ones allowed to fall back to http.
     seen_kw: list[dict] = []
 

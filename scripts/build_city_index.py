@@ -165,11 +165,12 @@ def skip_helykozi(agency: str) -> bool:
     return "helyközi" in low or "helykozi" in low
 
 
-def _load_feed(base: Path, feed: dict) -> list[dict]:
-    """Parts of one city feed. A missing zip is downloaded; when the zip from
+def _load_feed(base: Path, feed: dict, zpath: Path | None = None) -> list[dict]:
+    """Parts of one city feed, from zpath when given (a new zip not yet in
+    base), else from base. A missing zip is downloaded; when the zip from
     one URL (a keyed override, say) fails to download or parse, the next URL
     is tried, down to the public one."""
-    zpath = base / feed["file"]
+    zpath = zpath or base / feed["file"]
 
     def load() -> list[dict]:
         return load_parts(
@@ -214,18 +215,43 @@ def _fresh(got: list[dict], label: str, today: str | None) -> tuple[list[dict], 
 
 
 def collect_parts(
-    base: Path, volan_zip: Path | None = None, *, today: str | None = None
-) -> tuple[list[dict], list[str], dict[str, str]]:
+    base: Path,
+    volan_zip: Path | None = None,
+    *,
+    today: str | None = None,
+    zips: dict[str, Path] | None = None,
+) -> tuple[list[dict], list[str], dict[str, str], list[str]]:
     """Operator parts with trips, the feed ids that failed, had none or
-    whose calendar already ended, and of the last: feed id -> last service
-    day. A feed that only lost some operators to an ended calendar (Volán
-    local agencies) is neither failed nor ended."""
+    whose calendar already ended, of the last: feed id -> last service
+    day, and the feed ids whose new zip was rejected. A feed that only lost
+    some operators to an ended calendar (Volán local agencies) is neither
+    failed nor ended.
+
+    zips: feed id -> a newly downloaded zip to read instead of the one in
+    base. One that fails to load or has no trips is rejected and the feed
+    falls back to its zip in base, so a broken download does not take a
+    working feed out of the index (and the guard does not refuse it all)."""
     parts: list[dict] = []
     failed: list[str] = []
     expired: dict[str, str] = {}
+    rejected: list[str] = []
     for feed in CITY_FEEDS:
+        new_zip = (zips or {}).get(feed["id"])
         try:
-            got = [p for p in _load_feed(base, feed) if p.get("t")]
+            got = []
+            if new_zip is not None:
+                try:
+                    got = [p for p in _load_feed(base, feed, new_zip) if p.get("t")]
+                    if not got:
+                        raise ValueError("no trips")
+                except Exception as err:
+                    rejected.append(feed["id"])
+                    print(f"warn new zip {feed_error(feed['id'], err)}; the previous zip stays", file=sys.stderr)
+                    got = []
+                    if not (base / feed["file"]).exists():
+                        raise
+            if not got:
+                got = [p for p in _load_feed(base, feed) if p.get("t")]
         except Exception as err:
             failed.append(feed["id"])
             print(f"warn {feed_error(feed['id'], err)}", file=sys.stderr)
@@ -270,7 +296,7 @@ def collect_parts(
         raise RuntimeError("no city GTFS parts" + (f" ({', '.join(failed)})" if failed else ""))
     if failed:
         print("partial city index, skipped:", ", ".join(failed), file=sys.stderr)
-    return parts, failed, expired
+    return parts, failed, expired, rejected
 
 
 def _feed_group(op_id: str) -> str | None:
@@ -366,10 +392,18 @@ def guard_feeds(
         )
 
 
-def build_city_index(base: Path, out: Path, volan_zip: Path | None = None, *, today: str | None = None) -> dict:
+def build_city_index(
+    base: Path,
+    out: Path,
+    volan_zip: Path | None = None,
+    *,
+    today: str | None = None,
+    zips: dict[str, Path] | None = None,
+) -> dict:
     """Build and write the city index; info["skipped"] lists the feeds left
-    out, info["expired"] those of them whose calendar ended (id -> last day)."""
-    parts, failed, expired = collect_parts(base, volan_zip, today=today)
+    out, info["expired"] those of them whose calendar ended (id -> last day),
+    info["rejected"] the new zips (zips, see collect_parts) not used."""
+    parts, failed, expired, rejected = collect_parts(base, volan_zip, today=today, zips=zips)
     guard_feeds(out, parts, expired=expired, today=today)
     # guard_feeds is the city index's guard: write_index's overall count
     # would also count trips whose calendar already ended (several feeds end
@@ -377,6 +411,7 @@ def build_city_index(base: Path, out: Path, volan_zip: Path | None = None, *, to
     info = write_index(parts, out, with_operators=True, today=today, guard_total=False)
     info["skipped"] = failed
     info["expired"] = expired
+    info["rejected"] = rejected
     return info
 
 
