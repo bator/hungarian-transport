@@ -2463,8 +2463,9 @@ Object.assign(BkkLib, {
     return viaCity || futar;
   },
   /* One operator's ride and walk edges for a service day: the fastest
-     ride between any two stops of a trip (up to 28 stops in), and walks
-     between same-named stops. Built once per day, not per question. */
+     ride between any two stops of a trip (up to 28 stops in), with every
+     route that serves the pair, and walks between same-named stops. Built
+     once per day, not per question. */
   _cityHubGraphs: /* @__PURE__ */ new WeakMap(),
   _cityHubGraph(idx, op, ymd) {
     let byIdx = BkkLib._cityHubGraphs.get(idx);
@@ -2493,9 +2494,16 @@ Object.assign(BkkLib, {
           const mins = ms[j] - ms[i];
           if (mins < 1 || mins > 150) continue;
           const key = ps[i] + "|" + ps[j];
+          const route = String(t2[1]);
           const prev = ride.get(key);
-          if (!prev || mins < prev.ride) {
-            ride.set(key, { from: ps[i], to: ps[j], route: String(t2[1]), ride: mins });
+          if (!prev) {
+            ride.set(key, { from: ps[i], to: ps[j], route, routes: [route], ride: mins });
+            continue;
+          }
+          if (prev.routes.indexOf(route) < 0) prev.routes.push(route);
+          if (mins < prev.ride) {
+            prev.ride = mins;
+            prev.route = route;
           }
         }
       }
@@ -2531,9 +2539,10 @@ Object.assign(BkkLib, {
   },
   /* Local GTFS has no planner API. Ride the city feed to a station, walk
      across, then take the next train. Same-name stops are a 3 minute walk;
-     the station bay to the platform is 6 minutes at 80 m/min. */
-  cityHubPath(idx, originStop) {
-    if (!idx || !originStop) return null;
+     the station bay to the platform is 6 minutes at 80 m/min. The paths
+     come cheapest first by ride time alone; the timetable picks among them. */
+  cityHubPaths(idx, originStop, limit = 24) {
+    if (!idx || !originStop) return [];
     const stops = idx.stops || [];
     const op = originStop.op;
     const { rideAt, walkAt } = BkkLib._cityHubGraph(idx, op, BkkLib.volanDay(0).ymd);
@@ -2550,10 +2559,10 @@ Object.assign(BkkLib, {
       });
       return ids;
     };
-    let bestHub = null;
+    const hubs = [];
     const consider = (state) => {
       const here = stops[state.at];
-      if (hub(here) && state.cost > 0 && (!bestHub || state.cost < bestHub.cost)) bestHub = state;
+      if (hub(here) && state.cost > 0) hubs.push(state);
     };
     starts.forEach((startAt) => {
       board(startAt).forEach((bay) => {
@@ -2579,6 +2588,7 @@ Object.assign(BkkLib, {
             prev: base.prev || base,
             walk: false,
             route: edge.route,
+            routes: edge.routes,
             minutes: edge.ride,
             fromI: edge.from,
             toI: edge.to,
@@ -2589,7 +2599,7 @@ Object.assign(BkkLib, {
           board(edge.to).forEach((mid) => {
             const midWalk = mid === edge.to ? 0 : 3;
             (rideAt.get(mid) || []).forEach((edge2) => {
-              if (edge2.route === edge.route && edge2.to === edge.to) return;
+              if (edge2.to === edge.to) return;
               const secondPrev = {
                 at: mid,
                 rides: 1,
@@ -2609,6 +2619,7 @@ Object.assign(BkkLib, {
                 prev: midWalk ? secondPrev : first,
                 walk: false,
                 route: edge2.route,
+                routes: edge2.routes,
                 minutes: edge2.ride,
                 fromI: edge2.from,
                 toI: edge2.to,
@@ -2621,30 +2632,35 @@ Object.assign(BkkLib, {
         });
       });
     });
-    if (!bestHub) return null;
-    const edges = [];
-    for (let step = bestHub; step && step.prev; step = step.prev) {
-      edges.push({
-        walk: !!step.walk,
-        route: step.route || "",
-        minutes: step.minutes,
-        fromI: step.fromI,
-        toI: step.toI,
-        from: step.from || "",
-        to: step.to || ""
-      });
-    }
-    edges.reverse();
-    const hubStop = stops[bestHub.at];
-    const hubPt = hubStop ? BkkLib.finiteLatLon(hubStop.lat, hubStop.lon) : null;
-    return {
-      minutes: bestHub.cost,
-      hubName: hubStop && hubStop.name,
-      hubFold: hubStop && hubStop.fold,
-      hubLat: hubPt ? hubPt[0] : void 0,
-      hubLon: hubPt ? hubPt[1] : void 0,
-      edges
-    };
+    return hubs.sort((a, b) => a.cost - b.cost).slice(0, limit).map((state) => {
+      const edges = [];
+      for (let step = state; step && step.prev; step = step.prev) {
+        edges.push({
+          walk: !!step.walk,
+          route: step.route || "",
+          routes: step.walk ? [] : (step.routes || [step.route || ""]).slice(),
+          minutes: step.minutes,
+          fromI: step.fromI,
+          toI: step.toI,
+          from: step.from || "",
+          to: step.to || ""
+        });
+      }
+      edges.reverse();
+      const hubStop = stops[state.at];
+      const hubPt = hubStop ? BkkLib.finiteLatLon(hubStop.lat, hubStop.lon) : null;
+      return {
+        minutes: state.cost,
+        hubName: hubStop && hubStop.name,
+        hubFold: hubStop && hubStop.fold,
+        hubLat: hubPt ? hubPt[0] : void 0,
+        hubLon: hubPt ? hubPt[1] : void 0,
+        edges
+      };
+    });
+  },
+  cityHubPath(idx, originStop) {
+    return BkkLib.cityHubPaths(idx, originStop, 1)[0] || null;
   },
   /* Only from a city feed's own stop: a BKK or Volán origin matched by
      number or name lands on some other town's stop (BKK_F01020 "Kossuth
@@ -2664,69 +2680,92 @@ Object.assign(BkkLib, {
       if (opIx >= 0) originStop = BkkLib.volanMatchStop(idx, { id: "", name: origin.name || "" }, opIx);
     }
     if (!originStop || originStop.op == null) return null;
-    const path = BkkLib.cityHubPath(idx, originStop);
-    if (!path || !path.edges.length) return null;
+    const paths = BkkLib.cityHubPaths(idx, originStop).filter((p) => p.edges.length);
+    if (!paths.length) return null;
     const op = (idx.ops || [])[originStop.op];
     const cityName = op ? String(op.name).split(" — ")[0] : "";
     const destFold = BkkLib.fold(dest && dest.name || "");
     const cityTok = new Set(BkkLib.foldTokens(cityName));
     const destTok = BkkLib.foldTokens(destFold);
-    const hubTok = BkkLib.foldTokens(path.hubFold);
-    const hubPt = BkkLib.finiteLatLon(path.hubLat, path.hubLon);
     const destPt = BkkLib.finiteLatLon(dest && dest.lat, dest && dest.lon);
-    const destIsHub = !!(destFold && path.hubFold && (destFold === path.hubFold || hubPt && destPt && BkkLib.haversineMeters(hubPt, destPt) <= 800 || destTok.length && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok))));
+    const isDestHub = (path2) => {
+      const hubTok = BkkLib.foldTokens(path2.hubFold);
+      const hubPt = BkkLib.finiteLatLon(path2.hubLat, path2.hubLon);
+      return !!(destFold && path2.hubFold && (destFold === path2.hubFold || hubPt && destPt && BkkLib.haversineMeters(hubPt, destPt) <= 800 || destTok.length && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok))));
+    };
+    const toDest = paths.filter(isDestHub);
+    const destIsHub = toDest.length > 0;
     const startSec = Math.floor(Date.now() / 1e3);
-    let ready = startSec;
-    const legs = [];
-    for (let i = 0; i < path.edges.length; i++) {
-      const edge = path.edges[i];
-      if (edge.walk) {
-        const startMs2 = ready * 1e3;
-        ready += edge.minutes * 60;
-        legs.push({
-          walk: true,
-          minutes: edge.minutes,
-          meters: edge.minutes * 80,
-          label: "",
-          headsign: "",
-          color: "",
-          text: "",
+    const rides = /* @__PURE__ */ new Map();
+    const nextRide = (edge, readySec) => {
+      const key = edge.fromI + "|" + edge.toI + "|" + edge.routes.join(",") + "|" + readySec;
+      if (!rides.has(key)) rides.set(key, BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.routes, readySec));
+      return rides.get(key);
+    };
+    const timeCityPath = (path2) => {
+      let ready2 = startSec;
+      const legs2 = [];
+      for (let i = 0; i < path2.edges.length; i++) {
+        const edge = path2.edges[i];
+        if (edge.walk) {
+          const startMs2 = ready2 * 1e3;
+          ready2 += edge.minutes * 60;
+          legs2.push({
+            walk: true,
+            minutes: edge.minutes,
+            meters: edge.minutes * 80,
+            label: "",
+            headsign: "",
+            color: "",
+            text: "",
+            from: edge.from,
+            to: edge.to,
+            waitMin: 0,
+            startMs: startMs2,
+            endMs: ready2 * 1e3,
+            fromI: edge.fromI,
+            toI: edge.toI
+          });
+          continue;
+        }
+        const timed = nextRide(edge, ready2);
+        if (!timed) return null;
+        const waitMin2 = Math.round((timed.dep - ready2) / 60);
+        const tripStops = timed.trip && timed.trip[2] || [];
+        const terminus = idx.stops[tripStops[tripStops.length - 1]];
+        legs2.push({
+          walk: false,
+          minutes: Math.max(1, Math.round((timed.arr - timed.dep) / 60)),
+          meters: 0,
+          label: timed.trip ? String(timed.trip[1]) : edge.route,
+          headsign: terminus && terminus.name || edge.to,
+          color: "0F6FC6",
+          text: "FFFFFF",
           from: edge.from,
           to: edge.to,
-          waitMin: 0,
-          startMs: startMs2,
-          endMs: ready * 1e3,
+          waitMin: waitMin2 >= 1 ? waitMin2 : 0,
+          startMs: timed.dep * 1e3,
+          endMs: timed.arr * 1e3,
+          /* The trip's stops and shapes.txt route, so the map draws the ride
+             along its streets instead of a line between two names. */
+          gtfs: timed.trip ? BkkLib.gtfsTripGeo(idx, timed.trip, timed.o, timed.d) : null,
           fromI: edge.fromI,
           toI: edge.toI
         });
-        continue;
+        ready2 = timed.arr;
       }
-      const timed = BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.route, ready);
-      if (!timed) return null;
-      const waitMin2 = Math.round((timed.dep - ready) / 60);
-      const tripStops = timed.trip && timed.trip[2] || [];
-      const terminus = idx.stops[tripStops[tripStops.length - 1]];
-      legs.push({
-        walk: false,
-        minutes: Math.max(1, Math.round((timed.arr - timed.dep) / 60)),
-        meters: 0,
-        label: edge.route,
-        headsign: terminus && terminus.name || edge.to,
-        color: "0F6FC6",
-        text: "FFFFFF",
-        from: edge.from,
-        to: edge.to,
-        waitMin: waitMin2 >= 1 ? waitMin2 : 0,
-        startMs: timed.dep * 1e3,
-        endMs: timed.arr * 1e3,
-        /* The trip's stops and shapes.txt route, so the map draws the ride
-           along its streets instead of a line between two names. */
-        gtfs: timed.trip ? BkkLib.gtfsTripGeo(idx, timed.trip, timed.o, timed.d) : null,
-        fromI: edge.fromI,
-        toI: edge.toI
-      });
-      ready = timed.arr;
+      return { path: path2, legs: legs2, ready: ready2 };
+    };
+    let best = null;
+    const tried = destIsHub ? toDest : paths;
+    for (let i = 0; i < tried.length; i++) {
+      if (best && startSec + tried[i].minutes * 60 >= best.ready) break;
+      const timed = timeCityPath(tried[i]);
+      if (timed && (!best || timed.ready < best.ready)) best = timed;
     }
+    if (!best) return null;
+    const { path, legs } = best;
+    let { ready } = best;
     if (!destIsHub) {
       const rail = await this.railAfterCity(apiKey, hass, cityName, path, dest, ready);
       if (!rail) return null;
@@ -2789,14 +2828,17 @@ Object.assign(BkkLib, {
       legs
     };
   },
-  nextCityRide(idx, fromI, toI, route, readySec) {
+  /* The ride that gets there first on any of `routes` (one route or a
+     list): a slow line leaving now beats a fast one leaving at dawn. */
+  nextCityRide(idx, fromI, toI, routes, readySec) {
+    const want = new Set([].concat(routes).map(String));
     let best = null;
     for (let off = -1; off < 2; off++) {
       const day = BkkLib.volanDay(off);
       const trips = idx.t || [];
       for (let n = 0; n < trips.length; n++) {
         const t2 = trips[n];
-        if (String(t2[1]) !== route) continue;
+        if (!want.has(String(t2[1]))) continue;
         if (!BkkLib.volanServiceOk(idx, t2[0], day.ymd, day.dow)) continue;
         const ps = t2[2] || [];
         const ms = t2[3] || [];
@@ -2806,7 +2848,7 @@ Object.assign(BkkLib, {
         const dep = day.base + ms[o] * 60;
         if (dep < readySec - 30) continue;
         const arr = day.base + ms[d] * 60;
-        if (!best || dep < best.dep) best = { dep, arr, trip: t2, o, d };
+        if (!best || arr < best.arr || arr === best.arr && dep > best.dep) best = { dep, arr, trip: t2, o, d };
       }
       if (best && off >= 0) break;
     }
@@ -2862,6 +2904,11 @@ Object.assign(BkkLib, {
       startMs: walkStart * 1e3,
       endMs: walkEnd * 1e3
     };
+    const stationPt = BkkLib.finiteLatLon(station.lat, station.lon);
+    if (stationPt) {
+      walk.toLat = stationPt[0];
+      walk.toLon = stationPt[1];
+    }
     let train = null;
     if (hass && dest && dest.id) {
       try {
@@ -2897,6 +2944,10 @@ Object.assign(BkkLib, {
             startMs: next.dep * 1e3,
             endMs: arr * 1e3
           };
+          if (stationPt) {
+            train.fromLat = stationPt[0];
+            train.fromLon = stationPt[1];
+          }
         }
       } catch (_e) {
       }
@@ -4012,8 +4063,8 @@ Object.assign(BkkLib, {
     const hits = pool.filter((s) => s.fold.indexOf(f) >= 0);
     if (!hits.length) return null;
     hits.sort((a, b) => {
-      const ah = /autobusz-allomas|palyaudvar/.test(a.fold) ? 0 : 1;
-      const bh = /autobusz-allomas|palyaudvar/.test(b.fold) ? 0 : 1;
+      const ah = /autobusz allomas|palyaudvar/.test(a.fold) ? 0 : 1;
+      const bh = /autobusz allomas|palyaudvar/.test(b.fold) ? 0 : 1;
       if (ah !== bh) return ah - bh;
       return a.fold.length - b.fold.length;
     });
@@ -4157,8 +4208,8 @@ Object.assign(BkkLib, {
     const pool = opIx == null || opIx < 0 ? idx.stops : BkkLib.cityStops(idx, opIx);
     const hits = pool.filter((s) => s.fold.indexOf(f) >= 0);
     hits.sort((a, b) => {
-      const ah = /autobusz-allomas|palyaudvar/.test(a.fold) ? 0 : 1;
-      const bh = /autobusz-allomas|palyaudvar/.test(b.fold) ? 0 : 1;
+      const ah = /autobusz allomas|palyaudvar/.test(a.fold) ? 0 : 1;
+      const bh = /autobusz allomas|palyaudvar/.test(b.fold) ? 0 : 1;
       if (ah !== bh) return ah - bh;
       const as = a.fold.startsWith(f) ? 0 : 1;
       const bs = b.fold.startsWith(f) ? 0 : 1;
@@ -5958,6 +6009,12 @@ Object.assign(BkkLib, {
     BkkLib._stopHistory = { conn, p };
     return p;
   },
+  /* Whether this connection's list is held (read from the server, or
+     being read): false after a failed read, so the caller asks again. */
+  stopHistoryKept(hass) {
+    const memo = BkkLib._stopHistory;
+    return !!memo && memo.conn === (hass && hass.connection || null);
+  },
   /* Count a pick (an origin, a destination or a suggestion), keep the most
      used, and store the list for this user. */
   recordStop(hass, stop) {
@@ -5994,7 +6051,7 @@ Object.assign(BkkLib, {
     if (stop.kind) entry.kind = String(stop.kind);
     if (stop.label) entry.label = String(stop.label);
     const next = BkkLib._cleanStopHistory(list.sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now)).slice(0, HISTORY_KEEP));
-    BkkLib._stopHistory = { conn, p: Promise.resolve(next) };
+    BkkLib._stopHistory = server !== null ? { conn, p: Promise.resolve(next) } : null;
     localWrite(hass, next);
     if (server !== null) {
       try {
@@ -9494,12 +9551,16 @@ ${this._stopPinCss()}
     const conn = this._hass.connection || null;
     if (this._historyFor !== conn) {
       this._historyFor = conn;
-      BkkLib.loadStopHistory(this._hass).then((list2) => {
+      const hass = this._hass;
+      const retry = () => {
+        if (this._historyFor === conn) this._historyFor = void 0;
+      };
+      BkkLib.loadStopHistory(hass).then((list2) => {
         if (this._historyFor !== conn) return;
         this._historyList = list2;
         this._paintFav();
-      }).catch(() => {
-      });
+        if (!BkkLib.stopHistoryKept(hass)) retry();
+      }).catch(retry);
     }
     box.innerHTML = "";
     const shortName = (name) => String(name || "").replace(/^Budapest,\s*/, "").replace(/^Budapest-/, "").replace(/\s+aut\u00f3busz-p\u00e1lyaudvar$/, "").replace(/\s+vas\u00fat\u00e1llom\u00e1s$/, "").replace(/\s+p\u00e1lyaudvar$/, "");
@@ -9702,9 +9763,11 @@ ${this._stopPinCss()}
   }
   /* Every picked stop counts towards the user's suggestions. */
   _rememberStop(stop) {
-    BkkLib.recordStop(this._hass, stop).then((list) => {
+    const hass = this._hass;
+    BkkLib.recordStop(hass, stop).then((list) => {
       this._historyList = list;
       this._paintFav();
+      if (!BkkLib.stopHistoryKept(hass)) this._historyFor = void 0;
     }).catch(() => {
     });
   }

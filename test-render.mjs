@@ -4633,8 +4633,8 @@ check('a branded suburban train in the same minute stays off another numbered tr
   const keep = { cityIndex: Lib.cityIndex, nextCityRide: Lib.nextCityRide, gtfsShape: Lib.gtfsShape };
   const now = Math.floor(Date.now() / 1000);
   Lib.cityIndex = async () => geoIdx;
-  Lib.nextCityRide = (idx, fromI, toI, route) => {
-    const t = idx.t.find((x) => x[1] === route);
+  Lib.nextCityRide = (idx, fromI, toI, routes) => {
+    const t = idx.t.find((x) => [].concat(routes).includes(x[1]));
     return { dep: now + 60, arr: now + 300, trip: t, o: t[2].indexOf(fromI), d: t[2].indexOf(toI) };
   };
   /* One shapes.txt route for both lines: bends between their stops. */
@@ -6566,6 +6566,189 @@ const settle = async (el) => {
     && eb._el('apiKeyDeprecatedWrap').style.display === 'none' && eb._el('apiKey').value === '',
     JSON.stringify({ okText }));
   eb.remove();
+}
+
+/* ---- Planner A–Z review (2026-10-21) ---- */
+
+/* City → rail: every route of a stop pair is kept, and the ride (and the
+   station) is chosen by when it gets there, not by ride time alone. */
+{
+  const keep = {};
+  ['cityIndex', 'railAfterCity'].forEach((k) => { keep[k] = Lib[k]; });
+  const realNow = Date.now;
+  const cityOf = (names, trips) => {
+    const stops = names.map((n, i) => ({
+      i, id: 'miskolc:' + i, name: n, num: '', op: 0, key: Lib.norm(n), fold: Lib.fold(n), lat: 48.1 + i * 0.01, lon: 20.78,
+    }));
+    return {
+      stops, t: trips, c: [['1111111', '20200101', '20991231']], a: [], r: [],
+      ops: [{ i: 0, id: 'miskolc', name: 'Miskolc — helyi' }],
+      byId: new Map(stops.map((s) => [s.id, s])), byNum: new Map(), byKey: new Map(),
+    };
+  };
+  /* X: 5 minutes, hourly 06:00–19:00. Y: 10 minutes, every 10 minutes. */
+  const pairTrips = () => {
+    const t = [];
+    for (let h = 6; h <= 19; h++) t.push([0, 'X', [0, 1], [h * 60, h * 60 + 5], 3]);
+    for (let m = 0; m < 24 * 60; m += 10) t.push([0, 'Y', [0, 1], [m, m + 10], 3]);
+    return t;
+  };
+  const at = (h, min) => Date.UTC(2026, 9, 20, h - 2, min);
+  const rideAt = async (h, min) => {
+    Date.now = () => at(h, min);
+    Lib.cityIndex = async () => cityOf(['Búza tér', 'Tiszai pályaudvar'], pairTrips());
+    try {
+      const j = await Lib.cityRailJourney('', null, { id: 'miskolc:0', name: 'Búza tér' }, { id: '', name: 'Tiszai pályaudvar' });
+      const ride = j && j.legs.find((l) => !l.walk);
+      return ride ? [ride.label, ride.startMs, ride.endMs] : null;
+    } finally {
+      Date.now = realNow;
+    }
+  };
+  const morning = await rideAt(8, 17);
+  const evening = await rideAt(20, 17);
+  const onTheHour = await rideAt(8, 57);
+  check('a city ride takes the line that arrives first, not the fastest that runs at dawn or ended for the day',
+    !!morning && morning[0] === 'Y' && morning[1] === at(8, 20) && morning[2] === at(8, 30)
+    && !!evening && evening[0] === 'Y' && evening[1] === at(20, 20)
+    && !!onTheHour && onTheHour[0] === 'X' && onTheHour[2] === at(9, 5),
+    JSON.stringify({ morning, evening, onTheHour }));
+
+  /* Tiszai: 5 minutes, once at 06:00. Gömöri: 10 minutes, every 10. */
+  const hubTrips = [[0, 'X', [0, 1], [360, 365], 3]];
+  for (let m = 0; m < 24 * 60; m += 10) hubTrips.push([0, 'Y', [0, 2], [m, m + 10], 3]);
+  let railFrom = null;
+  Lib.railAfterCity = async (_k, _h, _city, path, dest, ready) => {
+    railFrom = path.hubName;
+    return {
+      walk: { walk: true, stationWalk: true, minutes: 6, from: path.hubName, to: 'station', startMs: ready * 1000, endMs: (ready + 360) * 1000 },
+      train: { walk: false, label: 'IC', minutes: 60, from: 'station', to: dest.name, startMs: (ready + 600) * 1000, endMs: (ready + 4200) * 1000 },
+      ready: ready + 4200,
+    };
+  };
+  Lib.cityIndex = async () => cityOf(['Búza tér', 'Tiszai pályaudvar', 'Gömöri pályaudvar'], hubTrips);
+  Date.now = () => at(8, 17);
+  let viaHub;
+  try {
+    viaHub = await Lib.cityRailJourney('', null, { id: 'miskolc:0', name: 'Búza tér' }, { id: 'BKK_005501024', name: 'Kelenföld' });
+  } finally {
+    Date.now = realNow;
+  }
+  const hubRide = viaHub && viaHub.legs.find((l) => !l.walk);
+  check('the station is the one the city reaches first, waits included',
+    railFrom === 'Gömöri pályaudvar' && !!hubRide && hubRide.label === 'Y' && hubRide.startMs === at(8, 20),
+    JSON.stringify({ railFrom, ride: hubRide && [hubRide.label, hubRide.startMs] }));
+  Object.assign(Lib, keep);
+}
+
+/* City → rail on the map: the walk to the station and the train start at
+   the station's own place, so both are drawn. */
+{
+  const keep = {};
+  ['cityIndex', 'searchStops', 'elviraResolveCode', 'elviraBetween', 'gtfsShape', 'hasFutar'].forEach((k) => { keep[k] = Lib[k]; });
+  const names = ['Búza tér', 'Tiszai pályaudvar'];
+  const stops = names.map((n, i) => ({
+    i, id: 'miskolc:' + i, name: n, num: '', op: 0, key: Lib.norm(n), fold: Lib.fold(n), lat: 48.10 + i * 0.01, lon: 20.78 + i * 0.02,
+  }));
+  const t = [];
+  for (let m = 0; m < 24 * 60; m += 10) t.push([0, 'Y', [0, 1], [m, m + 10], 3]);
+  const idx = {
+    stops, t, c: [['1111111', '20200101', '20991231']], a: [], r: [],
+    ops: [{ i: 0, id: 'miskolc', name: 'Miskolc — helyi' }],
+    byId: new Map(stops.map((s) => [s.id, s])), byNum: new Map(), byKey: new Map(),
+  };
+  Lib.hasFutar = () => true;
+  Lib.cityIndex = async () => idx;
+  Lib.gtfsShape = async () => [];
+  Lib.searchStops = async () => [{ id: 'BKK_005510009', name: 'Miskolc-Tiszai', lat: 48.1035, lon: 20.8104 }];
+  Lib.elviraResolveCode = async () => '005501024';
+  Lib.elviraBetween = async () => [{
+    label: 'IC', trainNumber: '563', dep: Math.floor(Date.now() / 1000) + 3600, travel: 140, head: 'Kelenföld',
+  }];
+  const j = await Lib.cityRailJourney('k', { states: {} },
+    { id: 'miskolc:0', name: 'Búza tér', lat: 48.10, lon: 20.78 },
+    { id: 'BKK_005501024', name: 'Kelenföld', lat: 47.4643, lon: 19.0206 });
+  if (j) await Lib.fillJourneyShapes(j);
+  const segs = j ? Lib.journeyMapSegments(j, {}, {}) : [];
+  const walk = j && j.legs.find((l) => l.stationWalk);
+  const train = j && j.legs.find((l) => l.label === 'IC');
+  check('the map of a city → rail journey draws the walk to the station and the train',
+    !!walk && walk.toLat === 48.1035 && !!train && train.fromLon === 20.8104
+    && segs.some((sg) => sg.walk) && segs.some((sg) => sg.label === 'IC') && segs.some((sg) => sg.label === 'Y'),
+    JSON.stringify(segs.map((sg) => (sg.walk ? 'walk' : sg.label))));
+  Object.assign(Lib, keep);
+}
+
+/* A coach station leads a town's stops: fold() turns its hyphen into a space. */
+{
+  const mk = (names) => ({
+    stops: names.map((n, i) => ({ i, id: 's' + i, name: n, num: '', op: 0, key: Lib.norm(n), fold: Lib.fold(n) })),
+    byNum: new Map(), byKey: new Map(), byId: new Map(),
+  });
+  const listed = Lib.gtfsSearchStops(mk(['Győr, Szent István út', 'Győr, Árpád út', 'Győr, Adyváros', 'Győr, autóbusz-állomás']), 'Győr', null)
+    .map((s) => s.name);
+  const matched = Lib.volanMatchStop(mk(['Gyor alma', 'Győr, autóbusz-állomás']), { id: '', name: 'Győr' }, null);
+  check('a town’s coach station comes first in the stop search and the name match',
+    listed[0] === 'Győr, autóbusz-állomás' && !!matched && matched.name === 'Győr, autóbusz-állomás',
+    JSON.stringify({ listed, matched: matched && matched.name }));
+}
+
+/* Stop history: a pick written while the server could not be read is not
+   kept as this connection's list, and the planner reads again on the next
+   hass instead of keeping the browser copy. */
+{
+  const store = new Map();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    },
+  });
+  let up = false;
+  let reads = 0;
+  const server = [{ id: 'S1', name: 'Other device stop', n: 9, t: Date.now() }];
+  const callWS = async (m) => {
+    if (m.type === 'frontend/get_user_data') {
+      reads += 1;
+      if (!up) throw new Error('ws down');
+      return { value: server };
+    }
+    return null;
+  };
+  const hass = { states: {}, language: 'hu', user: { id: 'u13' }, connection: { az: 1 }, callWS };
+  Lib._stopHistory = null;
+  await Lib.recordStop(hass, { id: 'L1', name: 'Local pick' });
+  up = true;
+  const shown = (await Lib.loadStopHistory(hass)).map((e) => e.id);
+  check('after a pick made offline, the server’s list is read once the websocket is back',
+    shown.includes('S1'), JSON.stringify(shown));
+
+  up = false;
+  reads = 0;
+  Lib._stopHistory = null;
+  store.clear();
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  pc._loadDests = async () => {};
+  document.body.appendChild(pc);
+  pc.hass = hass;
+  pc.setConfig({ language: 'hu' });
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  const failedReads = reads;
+  up = true;
+  pc.hass = Object.assign({}, hass);
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  const chips = Array.from(pc.shadowRoot.querySelectorAll('#pfav .suggest-stop')).map((b) => b.textContent);
+  check('the planner asks for the history again after a failed read',
+    failedReads >= 1 && reads > failedReads && chips.some((c) => c.includes('Other device stop')),
+    JSON.stringify({ failedReads, reads, chips }));
+  pc.remove();
+  Lib._stopHistory = null;
+  delete globalThis.localStorage;
 }
 
 process.exit(failed ? 1 : 0);

@@ -1117,11 +1117,15 @@ ${this._stopPinCss()}
     const conn = this._hass.connection || null;
     if (this._historyFor !== conn) {
       this._historyFor = conn;
-      BkkLib.loadStopHistory(this._hass).then((list) => {
+      const hass = this._hass;
+      /* A failed read showed this browser's copy: the next hass asks again. */
+      const retry = () => { if (this._historyFor === conn) this._historyFor = undefined; };
+      BkkLib.loadStopHistory(hass).then((list) => {
         if (this._historyFor !== conn) return;
         this._historyList = list;
         this._paintFav();
-      }).catch(() => { /* no suggestions */ });
+        if (!BkkLib.stopHistoryKept(hass)) retry();
+      }).catch(retry);
     }
     box.innerHTML = '';
     const shortName = (name) => String(name || '')
@@ -1341,9 +1345,12 @@ ${this._stopPinCss()}
 
   /* Every picked stop counts towards the user's suggestions. */
   _rememberStop(stop) {
-    BkkLib.recordStop(this._hass, stop).then((list) => {
+    const hass = this._hass;
+    BkkLib.recordStop(hass, stop).then((list) => {
       this._historyList = list;
       this._paintFav();
+      /* Written without the server's list: read it again on the next hass. */
+      if (!BkkLib.stopHistoryKept(hass)) this._historyFor = undefined;
     }).catch(() => { /* suggestions only */ });
   }
 

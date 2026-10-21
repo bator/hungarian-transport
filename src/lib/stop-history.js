@@ -112,6 +112,12 @@ Object.assign(BkkLib, {
     BkkLib._stopHistory = { conn, p };
     return p;
   },
+  /* Whether this connection's list is held (read from the server, or
+     being read): false after a failed read, so the caller asks again. */
+  stopHistoryKept(hass) {
+    const memo = BkkLib._stopHistory;
+    return !!memo && memo.conn === ((hass && hass.connection) || null);
+  },
   /* Count a pick (an origin, a destination or a suggestion), keep the most
      used, and store the list for this user. */
   recordStop(hass, stop) {
@@ -149,7 +155,9 @@ Object.assign(BkkLib, {
     const next = BkkLib._cleanStopHistory(list
       .sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now))
       .slice(0, HISTORY_KEEP));
-    BkkLib._stopHistory = { conn, p: Promise.resolve(next) };
+    /* Kept for this connection only when the server's list was read: a
+       list built without it would hide the other devices' picks for good. */
+    BkkLib._stopHistory = server !== null ? { conn, p: Promise.resolve(next) } : null;
     localWrite(hass, next);
     if (server !== null) {
       try {
