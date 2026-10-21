@@ -459,6 +459,48 @@ with tempfile.TemporaryDirectory() as tmp:
           and fake.downloads.count("https://kti.example/volan.zip") == downloads + 1,
           repr((fake.downloads, len(volan_builds) - builds)))
 
+# Older scripts in /config/hungarian-transport do not overwrite an index a
+# release shipped with a newer schema (restore_hacs_indexes kept it): the
+# run says so and leaves both indexes, and the pending city zips, as they are.
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    sent = []
+    uvi.notify = lambda message, *_a, **_k: sent.append(message)
+    volan_builds = []
+    uvi.build_index = lambda z, out: (volan_builds.append(z), out.write_bytes(gzip.compress(b'{"v":29}')),
+                                      {"feed_version": "v2", "trips": 1, "stops": 1})[2]
+    newer = gtfs_compact.INDEX_SCHEMA + 1
+    shipped = gzip.compress(json.dumps({"v": newer, "feed": "release"}, separators=(",", ":")).encode(), mtime=0)
+    for name in ("volan-index.json.gz", "city-index.json.gz"):
+        (fake.www / name).write_bytes(shipped)
+        write_index(fake.base / name, gtfs_compact.INDEX_SCHEMA, "local")
+    (fake.base / "volanbusz_gtfs.zip").write_bytes(b"PK volan-0")
+    (fake.base / "a.zip").write_bytes(b"PK old")
+    (fake.base / "state.json").write_text(json.dumps({
+        "volan": {"etag": "volan-0"},
+        "cities": {"a": {"etag": "a-1"}},
+    }))
+    code = fake.run()
+    check("a newer-schema shipped index is not rebuilt by older scripts",
+          code == uvi.REPORTED and volan_builds == [] and fake.city_builds == 0
+          and "https://kti.example/volan.zip" not in fake.downloads
+          and all((fake.www / n).read_bytes() == shipped for n in ("volan-index.json.gz", "city-index.json.gz")),
+          repr((code, volan_builds, fake.city_builds, fake.downloads)))
+    check("the schema conflict is reported through the webhook, once per index",
+          len(sent) == 2 and all(f"schema {newer}" in m and "copy the new scripts" in m for m in sent), repr(sent))
+    check("the city rebuild stays pending for the new scripts",
+          fake.state().get("city_retry") is True and fake.state()["cities"]["a"]["etag"] == "a-1"
+          and fake.state()["volan"].get("etag") == "volan-0", repr(fake.state()))
+    # New scripts (same schema as the shipped indexes): both are rebuilt.
+    for name in ("volan-index.json.gz", "city-index.json.gz"):
+        write_index(fake.www / name, gtfs_compact.INDEX_SCHEMA, "release")
+    sent.clear()
+    code = fake.run()
+    check("with scripts of the shipped schema both indexes are rebuilt",
+          code == 0 and len(volan_builds) == 1 and fake.city_builds == 1
+          and fake.state()["cities"]["a"]["etag"] == "a-2", repr((code, sent, fake.state())))
+
 # A city feed (or MAV_GTFS_URL) that keeps failing to download is reported
 # on the third day, then weekly; one bad day only goes to update.log.
 with tempfile.TemporaryDirectory() as tmp:

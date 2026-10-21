@@ -102,7 +102,23 @@ rebuilds the indexes on the latest stable release's code; when a feed
 changed, it publishes them as the next patch release (1.9.12 → 1.9.13),
 tagged on that same commit, so HACS offers the new timetables as an
 ordinary update and no unreleased code goes out with them. When nothing
-changed, nothing is published. A release run compares the new indexes with
+changed, nothing is published: the indexes are compared by content (every
+trip with its stops, times, service days and route shape), not by their
+bytes, so a rebuild that only lists the same trips in another order is no
+change.
+
+Version numbers keep the timetable releases and the live-Lovelace
+prereleases apart. A `rev` run publishes main as `X.Y.(Z+2)-rev.N` after
+stable `X.Y.Z` (1.9.15-rev.1 after 1.9.13), leaving the next patch (1.9.14)
+to the weekly timetable release, which semver ranks below the prerelease:
+beta users stay on main. A later `rev` run continues an open series, or
+starts one two patches above a newer stable. A `patch` run publishes main
+under the open series' number (1.9.15), so what the beta ran ships under
+its own version; without an open series it is the next patch. If a weekly
+release finds the open series on the very next patch (no `rev` run since
+the previous timetable release), it takes the number above the series and
+warns: beta users are then offered that release's older code until the next
+`rev` run. A release run compares the new indexes with
 the latest published ones: a city feed that is gone, a feed that lost more
 than half of its trips, or a Volán index with far too few trips fails the
 run, and no release is made (see [When an update fails](#when-an-update-fails)).
@@ -144,7 +160,10 @@ To rebuild them yourself on Home Assistant OS:
    folder is used only when the integration is not installed). A durable copy
    is also kept under `/config/hungarian-transport/` so a HACS update that
    overwrote the integration folder is restored on the next run, unless the
-   release ships a newer index schema than your copied scripts build. For
+   release ships a newer index schema than your copied scripts build. Such
+   scripts do not rebuild that index either: the run skips it, keeps the
+   shipped one and says *… kihagyva: … has index schema N, these scripts
+   build M* until you copy the new `scripts/` over. For
    `mav-index.json.gz`, of two builds of the same feed the larger
    (pfaedle-based) one wins, otherwise the later build, so an index the
    integration built from an uploaded zip is kept. A local `mav-gtfs.zip` or
@@ -184,6 +203,9 @@ itself. `/config/hungarian-transport/update.log` has the details.
   until its calendar ends.
 - *Új menetrend: … (skipped: …)* — the index was rebuilt without these
   feeds: they failed to download or parse, and are tried again next run.
+- *… frissítés kihagyva: … has index schema N, these scripts build M* — a
+  release shipped a newer index format than the copied scripts write; the
+  shipped index stays. Copy all of `scripts/` again.
 - *… el sem indult* or *… összeomlott (exit N)* — the script could not start
   or crashed. Usually `/config/hungarian-transport/` holds a half-copied set
   of scripts: copy all of `scripts/` again.
@@ -193,10 +215,12 @@ itself. `/config/hungarian-transport/update.log` has the details.
 The city index (locally and in a release run) is not replaced when the
 rebuild would lose a feed that the index in place still runs, or more than
 half of a feed's trips. Each feed is judged on its own, by the trips that
-still run; there is no check on the index's total, so feeds whose calendars
-end together (several on 31 December) leave without holding back the rest.
-The Volán index is a single feed: it is refused with fewer than half the
-trips of the one in place. The message names the feed:
+still run: a trip counts while its own service has days left (today or
+later), on both sides, so a feed whose summer service ended is compared on
+its autumn trips alone. There is no check on the index's total, so feeds
+whose calendars end together (several on 31 December) leave without holding
+back the rest. The Volán index is a single feed: it is refused with fewer
+than half the still-running trips of the one in place. The message names the feed:
 
 - `<id> missing (had N trips)` — the feed did not download or parse.
 - `<id> calendar ended YYYY-MM-DD (had N trips, the previous index runs until

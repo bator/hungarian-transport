@@ -118,6 +118,7 @@ try:
     from build_mav_index import build_mav_index, resolve_mav_feed  # noqa: E402
     from build_volan_index import GTFS_URL, build_index  # noqa: E402
     from gtfs_compact import (  # noqa: E402
+        INDEX_SCHEMA,
         _urlopen,
         assert_public_http_url,
         download_feed,
@@ -215,6 +216,21 @@ def index_schema(path: Path) -> int | None:
         return None
     m = re.match(rb'\{"v":(\d+)', head)
     return int(m.group(1)) if m else None
+
+
+def schema_conflict(out: Path) -> str:
+    """Why these scripts must not write out, or "": the index in place has a
+    newer schema than they build (a release shipped it, and the copies in
+    /config/hungarian-transport are older). Rebuilding it would hand the card
+    an index format it no longer reads; restore_hacs_indexes keeps the
+    shipped one for the same reason."""
+    shipped = index_schema(out) if out.is_file() else None
+    if shipped is None or shipped <= INDEX_SCHEMA:
+        return ""
+    return (
+        f"{out.name} has index schema {shipped}, these scripts build {INDEX_SCHEMA}:"
+        " not rebuilt, copy the new scripts to /config/hungarian-transport"
+    )
 
 
 def index_feed(path: Path) -> str:
@@ -599,7 +615,13 @@ def _main() -> int:
             report("Volán GTFS frissítés sikertelen", f"error HEAD {GTFS_URL}: {err}")
             exit_code = REPORTED
 
-        if volan_meta is not None and not (
+        volan_conflict = schema_conflict(volan_out)
+        if volan_meta is not None and volan_conflict:
+            # Checked before the download: the same 100 MB every day for an
+            # index that cannot be written helps nobody.
+            report("Volán GTFS frissítés kihagyva", volan_conflict)
+            exit_code = REPORTED
+        elif volan_meta is not None and not (
             same_remote(volan_state, volan_meta) and volan_out.exists() and zip_path.exists()
         ):
             try:
@@ -689,7 +711,13 @@ def _main() -> int:
                 " check the feed URL",
             )
 
-        if city_retry:
+        city_conflict = schema_conflict(city_out) if city_retry else ""
+        if city_conflict:
+            # city_retry stays set and the new zips stay pending: the scripts
+            # that can write this index rebuild it on their first run.
+            report("Helyi GTFS frissítés kihagyva", city_conflict)
+            exit_code = REPORTED
+        elif city_retry:
             try:
                 info = build_city_index(base, city_out, zip_path if zip_path.exists() else None)
                 persist_index(city_out, base)

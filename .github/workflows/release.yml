@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "rev = next patch as a -rev.N prerelease (e.g. 1.9.1-rev.1 after stable 1.9.0; HACS stable stays). patch/minor/major publish a stable release: only when asked."
+        description: "rev = a -rev.N prerelease two patches up (1.9.2-rev.1 after stable 1.9.0; the weekly timetable release takes 1.9.1 and stays below it; HACS stable stays). patch = stable release of main, numbered as the open -rev series (else next patch). patch/minor/major: only when asked."
         type: choice
         options:
           - rev
@@ -35,9 +35,15 @@ on:
 permissions:
   contents: read
 
-# Two runs at once would race on the -rev.N number and on the release assets.
+# Two dispatch or weekly runs at once would race on the version number and
+# on the release assets, so they queue in one group. GitHub keeps one running
+# and one pending run per group and cancels the pending one when another
+# arrives; a tag push waiting there would be dropped (a tag without a
+# release). So each tag push has a group of its own and is never replaced.
+# It may run next to a dispatch or weekly run: those never pick a version
+# that is already a tag, and their publish refuses a tag that exists.
 concurrency:
-  group: release
+  group: ${{ github.ref_type == 'tag' && format('release-tag-{0}', github.ref_name) || 'release' }}
   cancel-in-progress: false
 
 jobs:
@@ -103,6 +109,29 @@ jobs:
             echo "$n"
           }
 
+          # Patch numbers of the -rev series of major.minor above patch
+          # (vX.Y.P-rev.N with P > patch), one per line.
+          open_revs() {
+            local major="$1" minor="$2" patch="$3" t r
+            while IFS= read -r t; do
+              [[ "$t" == "v${major}.${minor}."*"-rev."* ]] || continue
+              r="${t#v${major}.${minor}.}"
+              r="${r%%-rev.*}"
+              if [[ "$r" =~ ^[0-9]+$ ]] && [ "$r" -gt "$patch" ]; then echo "$r"; fi
+            done < <(gh release list --exclude-drafts --limit 1000 --json tagName --jq '.[].tagName' || true)
+          }
+
+          # The highest of open_revs, 0 when there is none.
+          newest_rev() {
+            open_revs "$@" | sort -n | tail -n 1 | grep . || echo 0
+          }
+
+          # A release or a bare tag (a tag push whose run has not published yet).
+          tag_taken() {
+            gh release view "$1" >/dev/null 2>&1 && return 0
+            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$1" >/dev/null 2>&1
+          }
+
           parse_semver() {
             local ver="${1#v}"
             ver="${ver%%-*}"
@@ -143,8 +172,21 @@ jobs:
               exit 0
             fi
             read -r major minor patch <<< "$(parse_semver "$stable")"
-            tag="v${major}.${minor}.$((patch + 1))"
-            if gh release view "$tag" >/dev/null 2>&1; then
+            # The next patch, which rev dispatches leave free (their series
+            # starts two above the stable). It must stay below the newest
+            # -rev series: semver ranks X.Y.P above X.Y.P-rev.N, and beta
+            # users would be offered the old code of this refresh over the
+            # prerelease. Only when that series sits on the next patch (no
+            # rev dispatch since the last refresh) is there no room: the
+            # refresh then goes above it and says so.
+            rev=$(newest_rev "$major" "$minor" "$patch")
+            next=$((patch + 1))
+            if [ "$rev" -eq "$next" ]; then
+              next=$((rev + 1))
+              echo "::warning title=Timetable release above the beta::v${major}.${minor}.${rev}-rev.* is on the next patch, so this refresh is v${major}.${minor}.${next} and beta users are offered ${stable}'s code with it. Dispatch rev to put them back on main."
+            fi
+            tag="v${major}.${minor}.${next}"
+            if tag_taken "$tag"; then
               echo "::error::${tag} already exists; the weekly refresh never changes a release."
               exit 1
             fi
@@ -167,18 +209,31 @@ jobs:
           fi
           read -r major minor patch <<< "$(parse_semver "$stable")"
           bump="${BUMP:-rev}"
+          rev=$(newest_rev "$major" "$minor" "$patch")
           if [ "$bump" = "major" ]; then
             tag="v$((major + 1)).0.0"
           elif [ "$bump" = "minor" ]; then
             tag="v${major}.$((minor + 1)).0"
           elif [ "$bump" = "patch" ]; then
-            tag="v${major}.${minor}.$((patch + 1))"
+            # main as a stable release takes the number of the open -rev
+            # series, so what beta users ran ships under its own number.
+            p=$((patch + 1))
+            if [ "$rev" -gt "$p" ]; then p=$rev; fi
+            tag="v${major}.${minor}.${p}"
           else
-            # Live Lovelace is the next patch, published only as a prerelease,
-            # so HACS stable stays on the last real release.
-            base="${major}.${minor}.$((patch + 1))"
+            # Live Lovelace as a prerelease, so HACS stable stays on the last
+            # real release. Two patches up: the next patch is the weekly
+            # timetable release's, which must rank below this (semver puts
+            # X.Y.P above X.Y.P-rev.N). An open series that high continues.
+            p=$((patch + 2))
+            if [ "$rev" -gt "$p" ]; then p=$rev; fi
+            base="${major}.${minor}.${p}"
             n=$(latest_rev_n "$base")
             tag="v${base}-rev.$((n + 1))"
+          fi
+          if tag_taken "$tag"; then
+            echo "::error::${tag} already exists; release the next version instead."
+            exit 1
           fi
           echo "Manual ${bump} from ${stable} -> ${tag}"
           emit "$tag" true "" "$latest"
@@ -257,9 +312,14 @@ jobs:
           gh release download "$BASELINE" --repo "$GITHUB_REPOSITORY" \
             --pattern hungarian-transport-frontend.zip --dir baseline
           unzip -o -j baseline/hungarian-transport-frontend.zip volan-index.json.gz city-index.json.gz -d .
-          # Kept aside: the builders rewrite these in place.
+          # Kept aside: the builders rewrite these in place. The shapes
+          # folders go with them, for the timetable comparison below (a
+          # release before shapes has none: unzip exits 11, nothing matched).
           mkdir -p .baseline
           cp volan-index.json.gz city-index.json.gz .baseline/
+          rc=0
+          unzip -q -o baseline/hungarian-transport-frontend.zip 'volan-shapes-*' 'city-shapes-*' -d .baseline || rc=$?
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 11 ]; then exit "$rc"; fi
           rm -rf baseline
           ls -l volan-index.json.gz city-index.json.gz
 
@@ -312,9 +372,22 @@ jobs:
           if [ -f mav-index.json.gz ]; then cp -f mav-index.json.gz dist/; fi
           ls -lh dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz dist/mav-index.json.gz 2>/dev/null || true
 
+      # The comparison script comes from the workflow's own commit (main on
+      # the weekly run), not from the tag being rebuilt: older tags lack it.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: needs.resolve.outputs.refresh == 'true'
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: scripts/index_digest.py
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
       # A timetable refresh publishes only new data. The indexes are compared
-      # by content (gzip headers carry a time stamp); the shapes folders are
-      # named after their index, so an unchanged index means unchanged shapes.
+      # by content: index_digest.py resolves every trip's stops, service and
+      # shape and ignores row order, which the builders of older tags vary
+      # from run to run (PYTHONHASHSEED), and with it the shapes folder name.
+      # An index it cannot read counts as changed.
       - name: Did a timetable change
         id: changed
         env:
@@ -327,9 +400,16 @@ jobs:
           fi
           changed=false
           for f in volan-index.json.gz city-index.json.gz; do
-            if [ ! -f ".baseline/$f" ] || ! cmp -s <(gzip -dc "$f") <(gzip -dc ".baseline/$f"); then
+            new=$(python3 .release-tools/scripts/index_digest.py "$f" | cut -d' ' -f1) || new=""
+            old=""
+            if [ -f ".baseline/$f" ]; then
+              old=$(python3 .release-tools/scripts/index_digest.py ".baseline/$f" | cut -d' ' -f1) || old=""
+            fi
+            if [ -z "$new" ] || [ "$new" != "$old" ]; then
               echo "$f changed"
               changed=true
+            else
+              echo "$f unchanged (${new})"
             fi
           done
           echo "changed=${changed}" >> "$GITHUB_OUTPUT"
@@ -512,6 +592,13 @@ jobs:
           fi
           if [[ ! "$TARGET" =~ ^[0-9a-f]{40}$ ]]; then
             echo "refusing target"
+            exit 1
+          fi
+          # A tag push runs in a group of its own (see concurrency): a
+          # dispatch or weekly run must not publish over a tag pushed since
+          # it resolved its version.
+          if [ "${GITHUB_REF_TYPE}" != "tag" ] && gh api "repos/${GH_REPO}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+            echo "::error::Tag ${tag} exists already (pushed while this run was building); release the next version instead."
             exit 1
           fi
           ver="${tag#v}"

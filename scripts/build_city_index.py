@@ -16,7 +16,9 @@ from gtfs_compact import (
     feed_urls,
     load_env_files,
     load_parts,
+    operator_running_trips,
     operator_stats,
+    running_trips,
     stale_parts,
     write_index,
 )
@@ -312,12 +314,13 @@ def guard_feeds(
     """Refuse a rebuild that loses a feed the previous index had, or most of
     its trips. Without a previous index there is nothing to compare.
 
-    Only trips that still run count: an operator whose calendar in the
-    previous index ended before today has nothing left to lose, so a
-    seasonal feed (Bahart after its last sailing) or an expired zip leaves
-    the index without blocking every other feed. A feed dropped for an
-    ended calendar (expired: feed id -> last day) while the previous index
-    still runs it is refused, and the message says so."""
+    Only trips that still run count, on both sides: a trip whose own
+    service ended before today has nothing left to lose. A seasonal feed
+    (Bahart after its last sailing) or an expired zip leaves the index
+    without blocking every other feed, and a feed whose summer service
+    ended keeps its guard on the trips that still run. A feed dropped for
+    an ended calendar (expired: feed id -> last day) while the previous
+    index still runs it is refused, and the message says so."""
     prev = operator_stats(out)
     if not prev:
         return
@@ -326,8 +329,8 @@ def guard_feeds(
     expired = expired or {}
     now: dict[str, int] = {}
     for part in parts:
-        now[part["op_id"]] = now.get(part["op_id"], 0) + len(part["t"])
-    live = {op: n for op, (n, end) in prev.items() if not (end and end < today)}
+        now[part["op_id"]] = now.get(part["op_id"], 0) + len(running_trips(part, today))
+    live = {op: n for op, n in (operator_running_trips(out, today) or {}).items() if n}
     before, after = _group_trips(live), _group_trips(now)
     for group, had in sorted(_group_trips({op: n for op, (n, _e) in prev.items()}).items()):
         if group not in before and not after.get(group):
