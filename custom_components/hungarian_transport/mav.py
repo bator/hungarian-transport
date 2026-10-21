@@ -458,12 +458,17 @@ class MavGtfsUploadView(HomeAssistantView):
             await hass.async_add_executor_job(fh.close)
             await hass.async_add_executor_job(partial(tmp.unlink, missing_ok=True))
             raise
-        await hass.async_add_executor_job(fh.close)
         try:
+            await hass.async_add_executor_job(fh.close)
             await hass.async_add_executor_job(mav_index.check_feed, tmp)
-        except ValueError as err:
+        except BaseException as err:
+            # Until async_build takes it over, the temp file (up to
+            # MAX_UPLOAD) is this handler's, also when a client that
+            # disconnects cancels it here.
             await hass.async_add_executor_job(partial(tmp.unlink, missing_ok=True))
-            return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+            if isinstance(err, ValueError):
+                return self.json_message(str(err), HTTPStatus.BAD_REQUEST)
+            raise
         try:
             # Built from the temp file, which becomes the feed only once its
             # index is written. A client that disconnects now cancels this

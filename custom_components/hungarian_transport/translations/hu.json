@@ -90,6 +90,9 @@
     "elvira_unavailable": {
       "message": "A MÁV ELVIRA nem érhető el ({error})."
     },
+    "elvira_rate_limited": {
+      "message": "Túl sok MÁV ELVIRA-lekérés ebből a Home Assistantból ({error}); a következő frissítés újra próbálja."
+    },
     "not_loaded": {
       "message": "A Magyar közlekedés integráció le van tiltva vagy nincs betöltve. Előbb engedélyezd az integráció bejegyzését."
     }

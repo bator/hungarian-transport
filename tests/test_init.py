@@ -1,7 +1,7 @@
 """Setup, static assets and the ELVIRA service."""
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 import re
 
@@ -16,7 +16,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
-from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS, mav
+from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS, elvira, mav
 from custom_components.hungarian_transport.assets import asset_tag
 from custom_components.hungarian_transport.const import (
     DOMAIN,
@@ -519,3 +519,109 @@ async def test_services_refuse_while_the_entry_is_unloaded(
     await hass.async_block_till_done()
     aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
     assert await _elvira_call(hass) == {"departures": []}
+
+
+def _station(n: int) -> str:
+    return f"0055{n:05d}"
+
+
+async def test_elvira_requests_are_rate_limited(
+    hass, aioclient_mock, freezer, monkeypatch, caplog
+) -> None:
+    """Any logged-in user can call elvira_between and every new station pair
+    is new boards: past the burst a board is refused (one log line, no
+    request, not an outage), and the clock refills the bucket."""
+    clock = [1000.0]
+    monkeypatch.setattr(elvira, "_monotonic", lambda: clock[0])
+    freezer.move_to(NOON)
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+
+    async def call(origin: str) -> dict:
+        return await hass.services.async_call(
+            DOMAIN,
+            SERVICE_ELVIRA_BETWEEN,
+            {"origin_code": origin, "dest_code": DEST, "minutes_after": 15},
+            blocking=True,
+            return_response=True,
+        )
+
+    # One service day at noon: the first call takes the destination board
+    # too, every further origin one board.
+    for n in range(elvira.ELVIRA_BURST - 1):
+        assert await call(_station(n)) == {"departures": []}
+    assert aioclient_mock.call_count == elvira.ELVIRA_BURST
+    for n in range(100, 105):
+        assert await call(_station(n)) == {
+            "departures": [],
+            "error": "elvira_rate_limited",
+            "detail": "rate limited",
+        }
+    assert aioclient_mock.call_count == elvira.ELVIRA_BURST
+    limited = [m for m in _elvira_warnings(caplog) if "rate limit" in m]
+    assert len(limited) == 1
+    assert not [m for m in _elvira_warnings(caplog) if "unavailable" in m]
+
+    clock[0] += 1 / elvira.ELVIRA_RATE
+    assert await call(_station(200)) == {"departures": []}
+    assert aioclient_mock.call_count == elvira.ELVIRA_BURST + 1
+
+
+async def test_station_answering_again_is_logged_despite_a_refused_board(
+    hass, aioclient_mock, freezer, monkeypatch, caplog
+) -> None:
+    """A station that was down and now answers some boards, while the rate
+    limit refuses another, has answered: one "answers again" line, not
+    silence until every board of a later call gets through."""
+    caplog.set_level(logging.INFO, logger=elvira.__name__)
+    monkeypatch.setattr(elvira, "_monotonic", lambda: 1000.0)
+    # Two service days after midnight: four boards per call, fetched origin
+    # yesterday, origin today, destination yesterday, destination today.
+    freezer.move_to("2026-10-19 00:30:00+02:00")
+    monkeypatch.setattr(elvira, "ELVIRA_BURST", 7)
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, status=503)
+    assert (await _elvira_call(hass))["error"] == "elvira_unavailable"
+    assert len([m for m in _elvira_warnings(caplog) if "unavailable" in m]) == 2
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+    assert await _elvira_call(hass) == {"departures": []}
+    assert aioclient_mock.call_count == 3
+    again = [r.getMessage() for r in caplog.records if "answers again" in r.getMessage()]
+    assert sorted(again) == sorted(f"ELVIRA StationInfo {code} answers again" for code in (ORIGIN, DEST))
+
+
+async def test_todays_origin_board_gets_the_last_token(
+    hass, aioclient_mock, freezer, monkeypatch
+) -> None:
+    """After midnight a call needs yesterday's boards too; with one token
+    left it goes to today's origin board, without which the call fails."""
+    monkeypatch.setattr(elvira, "_monotonic", lambda: 1000.0)
+    freezer.move_to("2026-10-21 00:30:00+02:00")
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+    limit = elvira._RateLimit()
+    limit._tokens = 1.0
+    hass.data[DOMAIN]["elvira_rate"] = limit
+
+    assert await _elvira_call(hass) == {"departures": []}
+    assert [(c[2]["stationNumberCode"], c[2]["travelDate"][:10]) for c in aioclient_mock.mock_calls] == [
+        (ORIGIN, "2026-10-21")
+    ]
+
+
+def test_elvira_rate_limit_leaves_room_for_cards() -> None:
+    """Six MÁV cards on six different pairs, at the time of day with the
+    most service days, every ELVIRA_CACHE_TTL, and all of them at once when
+    a dashboard opens."""
+    start = datetime(2026, 10, 21, tzinfo=BUDAPEST)
+    # minutes_after is at most 480 (the service schema).
+    days = max(
+        len(service_days(now, now + timedelta(minutes=480)))
+        for now in (start + timedelta(minutes=m) for m in range(0, 24 * 60, 5))
+    )
+    assert days == 2
+    boards = 6 * 2 * days
+    assert boards / elvira.ELVIRA_CACHE_TTL <= elvira.ELVIRA_RATE * 0.9
+    assert boards <= elvira.ELVIRA_BURST

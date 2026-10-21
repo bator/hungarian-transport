@@ -4624,6 +4624,7 @@ Object.assign(BkkLib, {
       BkkLib._elviraWarned = false;
       if (!res) return [];
       const payload = BkkLib.servicePayload(res);
+      if (payload && payload.error === "elvira_rate_limited") return [];
       if (payload && payload.error) {
         BkkLib._elviraDown(pair, `${payload.error}${payload.detail ? ` (${payload.detail})` : ""}`);
         return [];
