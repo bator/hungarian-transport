@@ -86,20 +86,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Every published release (tag, prerelease flag), newest first, read
-          # once. A GitHub API failure stops the run: an empty list would mean
-          # "no -rev series" and "no such tag", and a version picked on that
-          # could land above the beta channel or on a tag that exists.
-          if ! releases=$(gh release list --exclude-drafts --limit 1000 --json tagName,isPrerelease \
-              --jq '.[] | [.tagName, (.isPrerelease | tostring)] | @tsv'); then
+          # Every published release (tag, prerelease flag), last published
+          # first, read once. gh lists by createdAt, which is the tagged
+          # commit's date: a weekly timetable release tags the stable's own
+          # commit, so the two tie. A GitHub API failure stops the run: an
+          # empty list would mean "no -rev series" and "no such tag", and a
+          # version picked on that could land above the beta channel or on a
+          # tag that exists.
+          if ! releases=$(gh release list --exclude-drafts --limit 1000 --json tagName,isPrerelease,publishedAt \
+              --jq 'sort_by(.publishedAt) | reverse | .[] | [.tagName, (.isPrerelease | tostring)] | @tsv'); then
             echo "::error::Could not list the releases (GitHub API); no version is picked on a guess."
             exit 1
           fi
 
-          # The newest published release that is not a prerelease, however
-          # many -rev.N came after it (24 after 1.4.2).
+          # The highest stable version (vX.Y.Z, not a prerelease), however
+          # many -rev.N came after it (24 after 1.4.2). By version, not by
+          # date: createdAt ties a timetable release with its stable, and an
+          # older version tagged or published later would win on any date.
           latest_stable() {
-            awk -F'\t' '$2 == "false" && $1 !~ /-rev\./ { print $1; exit }' <<< "$releases"
+            awk -F'\t' '$2 == "false" && $1 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ { print $1 }' <<< "$releases" \
+              | sort -V | tail -n 1
           }
 
           latest_rev_n() {
