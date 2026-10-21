@@ -204,9 +204,8 @@ Object.assign(BkkLib, {
     const id = (stop && stop.id) || '';
     const vertex = BkkLib.planPlaceVertex(name, id);
     if (vertex) return vertex;
-    const lat = Number(stop && stop.lat);
-    const lon = Number(stop && stop.lon);
-    if (name && Number.isFinite(lat) && Number.isFinite(lon)) return `${name}::${lat},${lon}`;
+    const pt = BkkLib.mapGpsLatLon(stop && stop.lat, stop && stop.lon);
+    if (name && pt) return `${name}::${pt[0]},${pt[1]}`;
     if (!BkkLib.hasFutar(apiKey) || !name) return '';
     try {
       const data = await BkkLib.fetch(apiKey, 'search.json', { query: name }, true);

@@ -492,8 +492,11 @@ Object.assign(BkkLib, {
     const n = s.match(/(\d{5,})/);
     return n ? n[1] : '';
   },
+  /* Only a MÁV station's id carries one (BKK_005511387, BKK_CS…,
+     hu-mav_…, the bare code): a city stop's longer number (szeged:2430584836)
+     is not a station code. */
   elviraStationCode(id) {
-    const m = String(id || '').match(/(\d{9})/);
+    const m = String(id || '').match(/^(?:BKK_(?:CS)?|hu-mav_)?(\d{9})$/i);
     return m ? m[1] : '';
   },
   /* BKK street/metro parents (CSF…) sit next to MÁV stations but have no
