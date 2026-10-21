@@ -55,11 +55,11 @@ ELVIRA_ROW_CAP = 500
 ELVIRA_TIMEOUT = aiohttp.ClientTimeout(total=30)
 # StationInfo requests (cache misses only; shared requests count once) per
 # second and the burst allowed on top. Any logged-in user can call
-# elvira_between, and every new station pair is up to six POSTs to
-# jegy-a.mav.hu (two stations, up to three service days): a loop over
-# station codes must not get Home Assistant's address blocked. A card asks
-# for its boards every ELVIRA_CACHE_TTL: six cards on six pairs near
-# midnight are 36 boards (0.8/s), all of them at once when a dashboard opens.
+# elvira_between, and every new station pair is up to four POSTs to
+# jegy-a.mav.hu (two stations, up to two service days): a loop over station
+# codes must not get Home Assistant's address blocked. A card asks for its
+# boards every ELVIRA_CACHE_TTL: six cards on six pairs around midnight are
+# 24 boards (0.53/s), all of them at once when a dashboard opens.
 ELVIRA_RATE = 1.0
 ELVIRA_BURST = 60
 # A refused board is logged at most this often, with the count since.
@@ -286,9 +286,11 @@ async def _station_legs(session, hass, station_code: str, day: date):
     if limit is None:
         limit = data["elvira_rate"] = _RateLimit()
 
-    async def fetch():
+    def fetch():
+        # The token goes on the miss itself, in the order the boards are
+        # asked for (see elvira_between), not when the request task starts.
         limit.take()
-        return await _fetch_station(session, station_code, day)
+        return _fetch_station(session, station_code, day)
 
     return await cache.get((station_code, day.isoformat()), fetch)
 
@@ -430,15 +432,25 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     # Real minutes ahead, not wall-clock ones, on the night the clocks change.
     latest = (now.astimezone(UTC) + timedelta(minutes=int(minutes_after or 180))).astimezone(tz)
     days = service_days(now, latest)
-    boards = await asyncio.gather(
-        *(_station_legs(session, hass, code, day) for code in (origin_code, dest_code) for day in days),
+    # Today's origin board first: the call fails without it, so with the
+    # rate limit's last token left it is the board that gets it.
+    wanted = [(origin_code, now.date())] + [
+        (code, day)
+        for code in (origin_code, dest_code)
+        for day in days
+        if (code, day) != (origin_code, now.date())
+    ]
+    results = await asyncio.gather(
+        *(_station_legs(session, hass, code, day) for code, day in wanted),
         return_exceptions=True,
     )
-    for board in boards:
+    for board in results:
         # Only an unreachable board is an empty one; a bug or a cancellation is not.
         if isinstance(board, BaseException) and not isinstance(board, ElviraError):
             raise board
-    origin, dest = boards[: len(days)], boards[len(days):]
+    boards = dict(zip(wanted, results))
+    origin = [boards[(origin_code, day)] for day in days]
+    dest = [boards[(dest_code, day)] for day in days]
     for code, part in ((origin_code, origin), (dest_code, dest)):
         errors = [b for b in part if isinstance(b, ElviraError)]
         outage = next((b for b in errors if not isinstance(b, ElviraRateLimited)), None)

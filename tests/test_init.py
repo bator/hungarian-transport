@@ -1,7 +1,7 @@
 """Setup, static assets and the ELVIRA service."""
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 import re
 
@@ -592,10 +592,36 @@ async def test_station_answering_again_is_logged_despite_a_refused_board(
     assert sorted(again) == sorted(f"ELVIRA StationInfo {code} answers again" for code in (ORIGIN, DEST))
 
 
+async def test_todays_origin_board_gets_the_last_token(
+    hass, aioclient_mock, freezer, monkeypatch
+) -> None:
+    """After midnight a call needs yesterday's boards too; with one token
+    left it goes to today's origin board, without which the call fails."""
+    monkeypatch.setattr(elvira, "_monotonic", lambda: 1000.0)
+    freezer.move_to("2026-10-21 00:30:00+02:00")
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+    limit = elvira._RateLimit()
+    limit._tokens = 1.0
+    hass.data[DOMAIN]["elvira_rate"] = limit
+
+    assert await _elvira_call(hass) == {"departures": []}
+    assert [(c[2]["stationNumberCode"], c[2]["travelDate"][:10]) for c in aioclient_mock.mock_calls] == [
+        (ORIGIN, "2026-10-21")
+    ]
+
+
 def test_elvira_rate_limit_leaves_room_for_cards() -> None:
-    """Six MÁV cards on six different pairs near midnight (three service
-    days, so six boards each) every ELVIRA_CACHE_TTL, and all of them at
-    once when a dashboard opens."""
-    boards = 6 * 2 * 3
+    """Six MÁV cards on six different pairs, at the time of day with the
+    most service days, every ELVIRA_CACHE_TTL, and all of them at once when
+    a dashboard opens."""
+    start = datetime(2026, 10, 21, tzinfo=BUDAPEST)
+    # minutes_after is at most 480 (the service schema).
+    days = max(
+        len(service_days(now, now + timedelta(minutes=480)))
+        for now in (start + timedelta(minutes=m) for m in range(0, 24 * 60, 5))
+    )
+    assert days == 2
+    boards = 6 * 2 * days
     assert boards / elvira.ELVIRA_CACHE_TTL <= elvira.ELVIRA_RATE * 0.9
     assert boards <= elvira.ELVIRA_BURST
