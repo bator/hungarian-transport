@@ -1271,17 +1271,21 @@ def _load_parts(
             "t": trip_rows,
         }
 
+    # keep_trips is a set: its order changes with PYTHONHASHSEED. Trip ids in
+    # order make the same feed give the same index (and shapes folder), so
+    # the weekly release sees no change where there is none.
+    trip_order = sorted(keep_trips)
     if not split_agencies:
         oid = op_id or slug(op_name or Path(zpath).stem)
         oname = op_name or agencies.get(next(iter(agencies), ""), oid)
-        return [pack(oid, oname, keep_trips)]
+        return [pack(oid, oname, trip_order)]
 
     by_agency: dict[str, list[str]] = defaultdict(list)
-    for tid in keep_trips:
+    for tid in trip_order:
         rid = trips_meta[tid][0]
         by_agency[route_agency.get(rid, "")].append(tid)
     parts = []
-    for aid, tids in by_agency.items():
+    for aid, tids in sorted(by_agency.items()):
         aname = agencies.get(aid, aid or op_name or "Helyi")
         oid = slug(aname)
         if oid in {"helykozi-busz", "mav-szemelyszallitasi-zrt"}:
@@ -1303,15 +1307,70 @@ def _load_parts(
     return parts
 
 
-def existing_trips(out: Path) -> int | None:
+def running_trips(idx: dict, today: str | None = None) -> list[list]:
+    """The trips of an index or part whose own service still runs on or
+    after today (calendar_end() of that one service; unknown counts as
+    running). A feed with a summer and an autumn service keeps the summer
+    trips after the summer ended: they are not trips a rebuild can lose."""
+    today = today or date.today().strftime("%Y%m%d")
+    cal = idx.get("c") or []
+    added = idx.get("a") or []
+    ends: dict[int, str] = {}
+    out = []
+    for t in idx.get("t") or []:
+        sv = t[0]
+        if sv not in ends:
+            ok = isinstance(sv, int) and 0 <= sv < len(cal)
+            ends[sv] = calendar_end({
+                "c": [cal[sv]] if ok else [],
+                "a": [added[sv]] if ok and sv < len(added) else [],
+            })
+        if not ends[sv] or ends[sv] >= today:
+            out.append(t)
+    return out
+
+
+# Below this many trips a guard has nothing meaningful to compare.
+GUARD_MIN_TRIPS = 50
+# The running trips of a previous index are its yardstick only when they are
+# at least this share of all its trips (see guard_on_running).
+GUARD_RUNNING_SHARE = 0.25
+
+
+def guard_on_running(running: int, total: int) -> bool:
+    """Whether a rebuild is compared with the previous index (or feed) on
+    the trips that still run, on both sides, rather than on all trips.
+
+    Running trips only when they are a fair part of the whole (at least
+    GUARD_MIN_TRIPS and GUARD_RUNNING_SHARE of it): a feed whose summer
+    service ended keeps its autumn trips as the yardstick, so it is not
+    refused for the summer. When only a handful still run (a calendar that
+    has nearly ended), all trips are, as before the per-trip count: a
+    truncated feed must not pass then, when the guard matters most."""
+    return running >= GUARD_MIN_TRIPS and running >= total * GUARD_RUNNING_SHARE
+
+
+def existing_trips(out: Path, today: str | None = None) -> tuple[int, int] | None:
+    """(trips whose service still runs, all trips) of an existing index;
+    None when there is no readable index."""
+    idx = _read_index(out)
+    if idx is None:
+        return None
+    try:
+        return len(running_trips(idx, today)), len(idx.get("t") or [])
+    except (IndexError, TypeError):
+        return None
+
+
+def _read_index(out: Path) -> dict | None:
     if not out.exists():
         return None
     try:
         with gzip.open(out, "rt", encoding="utf-8") as fh:
             idx = json.load(fh)
-        return len(idx.get("t") or [])
-    except (OSError, json.JSONDecodeError, gzip.BadGzipFile):
+    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError, gzip.BadGzipFile):
         return None
+    return idx if isinstance(idx, dict) else None
 
 
 def operator_stats(out: Path) -> dict[str, tuple[int, str]] | None:
@@ -1319,11 +1378,10 @@ def operator_stats(out: Path) -> dict[str, tuple[int, str]] | None:
     existing index with operators; None when there is no readable index. A
     trip belongs to the operator of its first stop; the last service day
     follows calendar_end() over the services the operator's trips use."""
-    if not out.exists():
+    idx = _read_index(out)
+    if idx is None:
         return None
     try:
-        with gzip.open(out, "rt", encoding="utf-8") as fh:
-            idx = json.load(fh)
         ops = idx.get("o") or []
         stops = idx.get("s") or []
         cal = idx.get("c") or []
@@ -1343,7 +1401,24 @@ def operator_stats(out: Path) -> dict[str, tuple[int, str]] | None:
             })
             out_stats[op] = (n, end)
         return out_stats
-    except (OSError, json.JSONDecodeError, gzip.BadGzipFile, IndexError, KeyError, TypeError):
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def operator_running_trips(out: Path, today: str | None = None) -> dict[str, int] | None:
+    """Trips per operator id of an existing index whose own service still
+    runs (running_trips); None when there is no readable index."""
+    idx = _read_index(out)
+    if idx is None:
+        return None
+    try:
+        ops = idx.get("o") or []
+        stops = idx.get("s") or []
+        counts: dict[str, int] = defaultdict(int)
+        for t in running_trips(idx, today):
+            counts[ops[stops[t[2][0]][3]][0]] += 1
+        return dict(counts)
+    except (IndexError, KeyError, TypeError):
         return None
 
 
@@ -1505,11 +1580,20 @@ def write_index(
             all_t.append(row)
         if part.get("feed"):
             feeds.append(f"{oid}:{part['feed']}")
-    prev = existing_trips(out) if guard_total else None
-    if prev is not None and prev >= 50 and len(all_t) < prev * 0.5:
-        raise IndexGuardError(
-            f"refusing to replace {out.name}: {len(all_t)} trips vs previous {prev}"
-        )
+    # The summer trips of a feed are not lost when the summer is over: the
+    # comparison is on the trips that still run, on both sides, unless only
+    # a handful of the previous ones do (guard_on_running), then on all.
+    prev = existing_trips(out, today) if guard_total else None
+    if prev is not None:
+        if guard_on_running(*prev):
+            had, what = prev[0], "running trips"
+            has = len(running_trips({"c": all_c, "a": all_a, "t": all_t}, today))
+        else:
+            had, has, what = prev[1], len(all_t), "trips"
+        if had >= GUARD_MIN_TRIPS and has < had * 0.5:
+            raise IndexGuardError(
+                f"refusing to replace {out.name}: {has} {what} vs previous {had}"
+            )
     sh = write_shapes(all_shapes, out)
     # "v" and "sh" first: index_schema() and index_shapes() read only the head.
     idx: dict = {"v": schema}
@@ -1528,7 +1612,7 @@ def write_index(
         idx["o"] = [[oid, name] for oid, name in ops]
     raw = json.dumps(idx, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     tmp = out.with_name(out.name + ".tmp")
-    tmp.write_bytes(gzip.compress(raw, compresslevel=9))
+    tmp.write_bytes(gzip.compress(raw, compresslevel=9, mtime=0))
     tmp.replace(out)
     prune_shapes(out, sh["dir"] if sh else None)
     return {

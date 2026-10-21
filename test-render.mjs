@@ -3280,6 +3280,18 @@ Lib.mavIndex = origMavIndex;
     await poll();
     check('each station pair has its own outage',
       warns.length === 3, JSON.stringify(warns));
+    answer = { departures: [], error: 'elvira_rate_limited', detail: 'rate limited' };
+    const limited = await poll();
+    answer = { departures: [], error: 'elvira_unavailable', detail: 'TimeoutError' };
+    await poll();
+    check('elvira_rate_limited gives no rows, no outage warning, and leaves the outage as it was',
+      Array.isArray(limited) && limited.length === 0 && warns.length === 3
+      && Lib._elviraDownUntil === 0, JSON.stringify(warns));
+    Lib._elviraOutages.clear();
+    answer = { departures: [], error: 'elvira_rate_limited', detail: 'rate limited' };
+    await poll();
+    check('a rate-limited answer does not mark a pair that was fine as down',
+      warns.length === 3 && Lib._elviraOutages.size === 0, JSON.stringify(warns));
   } finally {
     console.warn = realWarn;
     Lib._elviraOutages.clear();
@@ -6857,6 +6869,493 @@ const settle = async (el) => {
   check('a ride arriving after midnight loses to tomorrow’s earlier arrival on another route',
     !!ride && ride.trip === rideIdx.t[1] && ride.arr === Date.UTC(2026, 9, 20, 22, 15) / 1000,
     JSON.stringify(ride && { route: ride.trip[1], arr: ride.arr }));
+}
+
+/* ---- A–Z review: hop card and editor ---- */
+
+/* A through trip (the destination mid-route, headsign elsewhere) is found
+   only by the through-check: the first load keeps its spinner until it
+   answers, and a poll keeps the trips it already checked while a new
+   trip's details are still on the way. */
+{
+  const keepFetch = Lib.fetch;
+  const keepFill = Lib.fillTransitousIfEmpty;
+  const t0 = Math.floor(Date.now() / 1000);
+  let trips = ['AZTHRU_T1', 'AZTHRU_T2'];
+  const held = new Set(trips);
+  const gates = new Map();
+  const stops = {
+    AZTHRU_O: { id: 'AZTHRU_O', name: 'Azorigo' },
+    AZTHRU_D: { id: 'AZTHRU_D', name: 'Azcelpont' },
+    AZTHRU_E: { id: 'AZTHRU_E', name: 'Azvegallomas' },
+  };
+  Lib._boards.clear();
+  Lib.fillTransitousIfEmpty = async (rows) => rows;
+  Lib.fetch = async (key, path, params) => {
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      return { data: {
+        entry: { stopTimes: trips.map((t, i) => ({ tripId: t, stopId: 'AZTHRU_O', departureTime: t0 + 300 + i * 600 })) },
+        references: {
+          trips: Object.fromEntries(trips.map((t) => [t, { routeId: 'AZTHRU_R', tripHeadsign: 'Azvegallomas' }])),
+          routes: { AZTHRU_R: { id: 'AZTHRU_R', shortName: '7', type: 'BUS' } },
+          stops: { AZTHRU_O: stops.AZTHRU_O },
+        },
+      } };
+    }
+    if (path === 'trip-details.json') {
+      if (held.has(params.tripId)) await new Promise((r) => gates.set(params.tripId, r));
+      const i = trips.indexOf(params.tripId);
+      return { data: { entry: { stopTimes: [
+        { stopId: 'AZTHRU_O', departureTime: t0 + 300 + i * 600 },
+        { stopId: 'AZTHRU_D', arrivalTime: t0 + 900 + i * 600 },
+        { stopId: 'AZTHRU_E', arrivalTime: t0 + 1500 + i * 600 },
+      ] }, references: { stops } } };
+    }
+    return { data: { entry: {}, references: {} } };
+  };
+  const release = () => {
+    gates.forEach((r, id) => { held.delete(id); r(); });
+    gates.clear();
+  };
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'hu', stopId: 'AZTHRU_O', stopName: 'Azorigo', destKey: 'azcelpont', destName: 'Azcelpont', apiKey: 'k' });
+  await settleTicks(30);
+  const body = () => c.shadowRoot.querySelector('.body').textContent;
+  const firstText = body();
+  const firstLoading = c._loading && !/Nincs közelgő/.test(firstText);
+  release();
+  await settleTicks(30);
+  const loaded = c._rows.length;
+  trips = ['AZTHRU_T1', 'AZTHRU_T2', 'AZTHRU_T3'];
+  held.add('AZTHRU_T3');
+  Lib._boards.clear();
+  const poll = c._pollRun && c._pollRun.run();
+  await settleTicks(30);
+  const midPoll = c._rows.length;
+  const waited = gates.has('AZTHRU_T3');
+  release();
+  await poll;
+  await settleTicks(30);
+  const afterPoll = c._rows.length;
+  check('a through-trip board keeps loading, then keeps its rows while a poll checks a new trip',
+    firstLoading && loaded === 2 && waited && midPoll === 2 && afterPoll === 3,
+    JSON.stringify({ firstText: firstText.trim(), loaded, waited, midPoll, afterPoll }));
+  c.remove();
+  release();
+  Lib.fetch = keepFetch;
+  Lib.fillTransitousIfEmpty = keepFill;
+  Lib._boards.clear();
+}
+
+/* Saved routeIds are what ran in the next three hours when the card was set
+   up: at night only the night bus. They must not hide a day line that
+   leaves from another pole of the same hub. */
+{
+  const keepFetch = Lib.fetch;
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZP_P1: { id: 'AZP_P1', name: 'Azhub', parentStationId: 'AZP_CSF1' },
+    AZP_P2: { id: 'AZP_P2', name: 'Azhub', parentStationId: 'AZP_CSF1' },
+    AZP_D: { id: 'AZP_D', name: 'Azpcel' },
+  };
+  Lib._boards.clear();
+  Lib.fetch = async (key, path, params) => {
+    if (path === 'route-details.json') {
+      const pole = params.routeId === 'AZP_N' ? 'AZP_P1' : 'AZP_P2';
+      return { data: { entry: { variants: [{ name: 'v', stopIds: [pole, 'AZP_D'] }] }, references: { stops: S } } };
+    }
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      const day = params.stopId !== 'AZP_P1';
+      const tid = day ? 'AZP_DAY1' : 'AZP_NIGHT1';
+      return { data: {
+        entry: { stopTimes: [{ tripId: tid, stopId: params.stopId === 'AZP_CSF1' ? 'AZP_P2' : params.stopId, departureTime: t0 + 600 }] },
+        references: {
+          trips: { [tid]: { routeId: day ? 'AZP_D7' : 'AZP_N', tripHeadsign: 'Azpcel' } },
+          routes: { AZP_D7: { id: 'AZP_D7', shortName: '7', type: 'BUS' }, AZP_N: { id: 'AZP_N', shortName: '907', type: 'BUS' } },
+          stops: S,
+        },
+      } };
+    }
+    return { data: {} };
+  };
+  const rows = await Lib.departures('k', 'AZP_CSF1', ['AZP_N'], { key: 'azpcel', name: 'Azpcel' },
+    { originName: 'Azhub', mode: 'bkk', minutesAfter: 180, deferGps: true, skipElvira: true });
+  const labels = rows.map((r) => r.label).sort();
+  check('saved night routeIds do not hide a day line from another pole',
+    JSON.stringify(labels) === '["7","907"]', JSON.stringify(labels));
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+}
+
+/* An "A → B" title the editor wrote follows the next pair after a mode or
+   city change, which clears the pair first. A typed title stays. */
+{
+  const keepReach = Lib.reachableDests;
+  Lib.reachableDests = async () => ({ dests: [], destRoutes: {} });
+  const mk = () => {
+    const ed = document.createElement('hungarian-transport-card-editor');
+    document.body.appendChild(ed);
+    ed._probeKey = () => {};
+    ed.hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } } };
+    ed.addEventListener('config-changed', (e) => { ed._last = e.detail.config; });
+    return ed;
+  };
+  const pickPair = (ed) => {
+    ed._pickStop({ id: 'volan_az1', name: 'Azkelenföld' }, 'origin');
+    ed.setConfig(ed._last);
+    ed._pickStop({ key: 'azfehervar', name: 'Azfehérvár' }, 'dest');
+    return ed._last.name;
+  };
+  const a = mk();
+  a.setConfig({ language: 'hu', name: 'Keleti → Szolnok', stopId: 'BKK_A', stopName: 'Keleti', destKey: 'szolnok', destName: 'Szolnok' });
+  a._el('volan').checked = true;
+  a._onModeToggle('volan');
+  a.setConfig(a._last);
+  const afterMode = pickPair(a);
+  a.remove();
+  const b = mk();
+  b.setConfig({ language: 'hu', helyi: true, city: 'gyor', name: 'Győr A → Győr B', stopId: 'gyor_1', stopName: 'Győr A', destKey: 'gyor b', destName: 'Győr B' });
+  const sel = b._el('city');
+  const opt = document.createElement('option');
+  opt.value = 'pecs';
+  sel.appendChild(opt);
+  sel.value = 'pecs';
+  sel.dispatchEvent(new Event('change'));
+  b.setConfig(b._last);
+  const afterCity = pickPair(b);
+  b.remove();
+  const c = mk();
+  c.setConfig({ language: 'hu', name: 'Munkába', stopId: 'BKK_A', stopName: 'Keleti', destKey: 'szolnok', destName: 'Szolnok' });
+  c._el('volan').checked = true;
+  c._onModeToggle('volan');
+  c.setConfig(c._last);
+  const typed = pickPair(c);
+  c.remove();
+  check('an auto title follows the next pair after a mode or city change; a typed one stays',
+    afterMode === 'Azkelenföld → Azfehérvár' && afterCity === 'Azkelenföld → Azfehérvár' && typed === 'Munkába',
+    JSON.stringify({ afterMode, afterCity, typed }));
+  Lib.reachableDests = keepReach;
+}
+
+/* The planner editor (mode "all") lists destinations without any BKK key:
+   the GTFS indexes need none, as the planner card itself allows. */
+{
+  const keepReach = Lib.reachableDests;
+  let calls = 0;
+  Lib.reachableDests = async () => { calls += 1; return { dests: [{ key: 'azfehervar', name: 'Azfehérvár' }], destRoutes: {} }; };
+  const ed = document.createElement('hungarian-transit-stop-card-plan-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed._fillKey = async () => {};
+  ed.hass = { states: {}, language: 'hu', services: {} };
+  ed.setConfig({ language: 'hu', stopId: 'volan_az2', stopName: 'Azkelenföld' });
+  await settleTicks();
+  const names = [...ed.querySelectorAll('#destHits button.hit')].map((x) => x.textContent);
+  check('the planner editor loads destinations without a BKK key',
+    calls === 1 && JSON.stringify(names) === '["Azfehérvár"]', JSON.stringify({ calls, names }));
+  ed.remove();
+  Lib.reachableDests = keepReach;
+}
+
+/* BKK and MÁV searches with no key anywhere say the key is missing, not
+   "no stops found" for a search that never ran. */
+{
+  const keepFetch = Lib.fetch;
+  let calls = 0;
+  Lib.fetch = async () => { calls += 1; throw new Error('no request expected'); };
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed._fillKey = async () => {};
+  ed.hass = { states: {}, language: 'hu', services: {} };
+  const said = async (cfg) => {
+    ed.setConfig(Object.assign({ language: 'hu' }, cfg));
+    await ed._search('Keleti', 'origin');
+    return { hits: ed.querySelector('#hits').textContent, err: ed.querySelector('#err').textContent };
+  };
+  const bkk = await said({});
+  const mav = await said({ mav: true });
+  const missing = (r) => /Nincs BKK API kulcs/.test(r.err) && !/Nincs BKK megálló|Nincs/.test(r.hits);
+  check('a keyless BKK or MÁV search names the missing key and sends nothing',
+    missing(bkk) && missing(mav) && calls === 0, JSON.stringify({ bkk, mav, calls }));
+  ed.remove();
+  Lib.fetch = keepFetch;
+}
+
+/* A sibling pole listed before the stop itself still leaves the stop's own
+   board first, so a capped board discovers the rest of the hub. */
+{
+  const keepFetch = Lib.fetch;
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZQ_P0: { id: 'AZQ_P0', name: 'Azqhub' },
+    AZQ_P1: { id: 'AZQ_P1', name: 'Azqhub' },
+    AZQ_P3: { id: 'AZQ_P3', name: 'Azqhub' },
+    AZQ_D: { id: 'AZQ_D', name: 'Azqcel' },
+  };
+  const firstPole = { AZQ_A: 'AZQ_P0', AZQ_B: 'AZQ_P1', AZQ_D7: 'AZQ_P3' };
+  const boardTrip = {
+    AZQ_P0: ['AZQ_TA', 'AZQ_A', 600],
+    AZQ_P1: ['AZQ_T7A', 'AZQ_D7', 700],
+    AZQ_P3: ['AZQ_T7B', 'AZQ_D7', 1300],
+  };
+  const boards = [];
+  Lib._boards.clear();
+  Lib.fetch = async (key, path, params) => {
+    if (path === 'route-details.json') {
+      return { data: { entry: { variants: [{ name: 'v', stopIds: [firstPole[params.routeId], 'AZQ_D'] }] }, references: { stops: S } } };
+    }
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      boards.push(params.stopId);
+      const [tid, rid, at] = boardTrip[params.stopId] || [];
+      return { data: {
+        entry: { stopTimes: tid ? [{ tripId: tid, stopId: params.stopId, departureTime: t0 + at }] : [] },
+        references: {
+          trips: tid ? { [tid]: { routeId: rid, tripHeadsign: 'Azqcel' } } : {},
+          routes: { AZQ_A: { id: 'AZQ_A', shortName: '1', type: 'BUS' }, AZQ_D7: { id: 'AZQ_D7', shortName: '7', type: 'BUS' } },
+          stops: S,
+        },
+      } };
+    }
+    return { data: {} };
+  };
+  const rows = await Lib.departures('k', 'AZQ_P1', ['AZQ_A', 'AZQ_B'], { key: 'azqcel', name: 'Azqcel' },
+    { originName: 'Azqhub', mode: 'bkk', minutesAfter: 180, deferGps: true, skipElvira: true });
+  check('the stop\'s own board goes first even when a sibling pole is listed before it',
+    boards[0] === 'AZQ_P1' && boards.includes('AZQ_P3') && rows.length === 3,
+    JSON.stringify({ boards, rows: rows.map((r) => r.label) }));
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+}
+
+/* "all" lists destinations at once without a key; a sibling card's key
+   borrowed afterwards reloads the list with the BKK destinations. */
+{
+  const keepDash = Lib.apiKeyFromDashboard;
+  const keepReach = Lib.reachableDests;
+  let giveKey = null;
+  Lib.apiKeyFromDashboard = () => new Promise((r) => { giveKey = r; });
+  const keys = [];
+  Lib.reachableDests = async (apiKey) => {
+    keys.push(apiKey || '');
+    return apiKey
+      ? { dests: [{ key: 'azkeleti', name: 'Azkeleti' }, { key: 'azfehervar', name: 'Azfehérvár' }], destRoutes: {} }
+      : { dests: [{ key: 'azfehervar', name: 'Azfehérvár' }], destRoutes: {} };
+  };
+  const ed = document.createElement('hungarian-transit-stop-card-plan-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = async () => {};
+  ed.hass = { states: {}, language: 'hu', services: {} };
+  ed.setConfig({ language: 'hu', stopId: 'volan_az3', stopName: 'Azkelenföld' });
+  await settleTicks();
+  const before = [...ed.querySelectorAll('#destHits button.hit')].map((x) => x.textContent);
+  giveKey('azsibling');
+  await settleTicks();
+  const after = [...ed.querySelectorAll('#destHits button.hit')].map((x) => x.textContent);
+  check('a key borrowed after a keyless destination load reloads the list',
+    JSON.stringify(before) === '["Azfehérvár"]' && keys.length === 2 && keys[1] === 'azsibling'
+    && JSON.stringify(after) === '["Azkeleti","Azfehérvár"]',
+    JSON.stringify({ before, after, calls: keys.length, last: keys[keys.length - 1] === 'azsibling' }));
+  ed.remove();
+  Lib.apiKeyFromDashboard = keepDash;
+  Lib.reachableDests = keepReach;
+}
+
+/* A failed run's banner and Transitous rows go once FUTÁR answers again,
+   even while the through-check is still running. */
+{
+  const keepFetch = Lib.fetch;
+  const keepFill = Lib.fillTransitousIfEmpty;
+  const t0 = Math.floor(Date.now() / 1000);
+  let down = true;
+  const gates = [];
+  const stops = { AZE_O: { id: 'AZE_O', name: 'Azeorigo' }, AZE_D: { id: 'AZE_D', name: 'Azecel' }, AZE_E: { id: 'AZE_E', name: 'Azevege' } };
+  Lib._boards.clear();
+  Lib.fillTransitousIfEmpty = async (rows) => (rows.length ? rows : [{
+    tripId: 'motis:aze1', label: 'T9', dep: t0 + 400, sched: t0 + 400, head: 'Azecel', vehicle: 'bus', rawType: 'BUS',
+    color: '#000000', text: '#ffffff', travel: null,
+  }]);
+  Lib.fetch = async (key, path) => {
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      if (down) throw new Error('HTTP 503');
+      return { data: {
+        entry: { stopTimes: [{ tripId: 'AZE_T1', stopId: 'AZE_O', departureTime: t0 + 300 }] },
+        references: {
+          trips: { AZE_T1: { routeId: 'AZE_R', tripHeadsign: 'Azevege' } },
+          routes: { AZE_R: { id: 'AZE_R', shortName: '5', type: 'BUS' } },
+          stops: { AZE_O: stops.AZE_O },
+        },
+      } };
+    }
+    if (path === 'trip-details.json') {
+      await new Promise((r) => gates.push(r));
+      return { data: { entry: { stopTimes: [
+        { stopId: 'AZE_O', departureTime: t0 + 300 },
+        { stopId: 'AZE_D', arrivalTime: t0 + 900 },
+        { stopId: 'AZE_E', arrivalTime: t0 + 1500 },
+      ] }, references: { stops } } };
+    }
+    return { data: { entry: {}, references: {} } };
+  };
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'hu', stopId: 'AZE_O', stopName: 'Azeorigo', destKey: 'azecel', destName: 'Azecel', apiKey: 'k' });
+  await settleTicks(30);
+  const broke = !!c._err && c._rows.length === 1;
+  down = false;
+  Lib._boards.clear();
+  const poll = c._pollRun ? c._pollRun.run() : c._reload();
+  await settleTicks(30);
+  const mid = { err: !!c._err, rows: c._rows.length, loading: c._loading, waiting: gates.length };
+  gates.splice(0).forEach((r) => r());
+  await poll;
+  await settleTicks(30);
+  const end = c._rows.map((r) => r.label);
+  check('a recovered board drops the old error and Transitous rows while the through-check runs',
+    broke && !mid.err && mid.rows === 0 && mid.loading && mid.waiting === 1 && JSON.stringify(end) === '["5"]',
+    JSON.stringify({ broke, mid, end }));
+  c.remove();
+  gates.splice(0).forEach((r) => r());
+  Lib.fetch = keepFetch;
+  Lib.fillTransitousIfEmpty = keepFill;
+  Lib._boards.clear();
+}
+
+/* FUTÁR rows a failed poll kept under its banner stay when the next poll
+   recovers and its through-check is still running; only the banner goes. */
+{
+  const keepFetch = Lib.fetch;
+  const keepFill = Lib.fillTransitousIfEmpty;
+  const t0 = Math.floor(Date.now() / 1000);
+  let phase = 'ok';
+  let trip = 'AZK_T1';
+  const gates = [];
+  const stops = { AZK_O: { id: 'AZK_O', name: 'Azkorigo' }, AZK_D: { id: 'AZK_D', name: 'Azkcel' }, AZK_E: { id: 'AZK_E', name: 'Azkvege' } };
+  Lib._boards.clear();
+  Lib.fillTransitousIfEmpty = async (rows) => rows;
+  Lib.fetch = async (key, path, params) => {
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      if (phase === 'down') throw new Error('HTTP 503');
+      return { data: {
+        entry: { stopTimes: [{ tripId: trip, stopId: 'AZK_O', departureTime: t0 + 300 }] },
+        references: {
+          trips: { [trip]: { routeId: 'AZK_R', tripHeadsign: 'Azkvege' } },
+          routes: { AZK_R: { id: 'AZK_R', shortName: '5', type: 'BUS' } },
+          stops: { AZK_O: stops.AZK_O },
+        },
+      } };
+    }
+    if (path === 'trip-details.json') {
+      if (params.tripId !== 'AZK_T1') await new Promise((r) => gates.push(r));
+      return { data: { entry: { stopTimes: [
+        { stopId: 'AZK_O', departureTime: t0 + 300 },
+        { stopId: 'AZK_D', arrivalTime: t0 + 900 },
+        { stopId: 'AZK_E', arrivalTime: t0 + 1500 },
+      ] }, references: { stops } } };
+    }
+    return { data: { entry: {}, references: {} } };
+  };
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'hu', stopId: 'AZK_O', stopName: 'Azkorigo', destKey: 'azkcel', destName: 'Azkcel', apiKey: 'k' });
+  await settleTicks(30);
+  const ids = () => c._rawRows.map((r) => r.tripId);
+  const first = ids();
+  phase = 'down';
+  Lib._boards.clear();
+  await c._pollRun.run();
+  await settleTicks(30);
+  const kept = { err: !!c._err, ids: ids() };
+  phase = 'ok';
+  trip = 'AZK_T2';
+  Lib._boards.clear();
+  const poll = c._pollRun.run();
+  await settleTicks(30);
+  const mid = { err: !!c._err, ids: ids(), loading: c._loading, waiting: gates.length };
+  gates.splice(0).forEach((r) => r());
+  await poll;
+  await settleTicks(30);
+  const end = ids();
+  check('FUTÁR rows kept under a banner stay while the recovered poll checks a new trip',
+    JSON.stringify(first) === '["AZK_T1"]' && kept.err && JSON.stringify(kept.ids) === '["AZK_T1"]'
+    && !mid.err && JSON.stringify(mid.ids) === '["AZK_T1"]' && !mid.loading && mid.waiting === 1
+    && JSON.stringify(end) === '["AZK_T2"]',
+    JSON.stringify({ first, kept, mid, end }));
+  c.remove();
+  gates.splice(0).forEach((r) => r());
+  Lib.fetch = keepFetch;
+  Lib.fillTransitousIfEmpty = keepFill;
+  Lib._boards.clear();
+}
+
+/* The integration's FUTÁR coming up after a keyless "all" list loaded
+   reloads the destinations once, not on every later state update. */
+{
+  const keepReach = Lib.reachableDests;
+  const access = [];
+  Lib.reachableDests = async () => {
+    access.push(ed._keyAccess());
+    return { dests: [{ key: 'azfehervar', name: 'Azfehérvár' }], destRoutes: {} };
+  };
+  const ed = document.createElement('hungarian-transit-stop-card-plan-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = async () => {};
+  ed._fillKey = async () => {};
+  ed.hass = { states: {}, language: 'hu', services: {} };
+  ed.setConfig({ language: 'hu', stopId: 'volan_az4', stopName: 'Azkelenföld' });
+  await settleTicks();
+  const futarHass = () => ({ states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } } });
+  ed.hass = futarHass();
+  await settleTicks();
+  ed.hass = futarHass();
+  await settleTicks();
+  check('FUTÁR appearing in hass reloads a keyless destination list once',
+    JSON.stringify(access) === '["","integration"]', JSON.stringify(access));
+  ed.remove();
+  Lib.reachableDests = keepReach;
+}
+
+/* A parent station's own board already lists its child poles: an uncapped
+   one is not read again pole by pole on every poll. */
+{
+  const keepFetch = Lib.fetch;
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZC_P1: { id: 'AZC_P1', name: 'Azchub', parentStationId: 'AZC_CSF' },
+    AZC_D: { id: 'AZC_D', name: 'Azccel' },
+  };
+  const boards = [];
+  Lib._boards.clear();
+  Lib.fetch = async (key, path) => {
+    if (path === 'route-details.json') {
+      return { data: { entry: { variants: [{ name: 'v', stopIds: ['AZC_P1', 'AZC_D'] }] }, references: { stops: S } } };
+    }
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      boards.push(1);
+      return { data: {
+        entry: { stopTimes: [
+          { tripId: 'AZC_T1', stopId: 'AZC_P1', departureTime: t0 + 600 },
+          { tripId: 'AZC_T2', stopId: 'AZC_P1', departureTime: t0 + 59 * 60 },
+        ] },
+        references: {
+          trips: { AZC_T1: { routeId: 'AZC_R', tripHeadsign: 'Azccel' }, AZC_T2: { routeId: 'AZC_R', tripHeadsign: 'Azccel' } },
+          routes: { AZC_R: { id: 'AZC_R', shortName: '9', type: 'BUS' } },
+          stops: S,
+        },
+      } };
+    }
+    return { data: {} };
+  };
+  const rows = await Lib.departures('k', 'AZC_CSF', ['AZC_R'], { key: 'azccel', name: 'Azccel' },
+    { originName: 'Azchub', mode: 'bkk', minutesAfter: 60, deferGps: true, skipElvira: true });
+  check('an uncapped parent board is not read again through its saved child pole',
+    boards.length === 1 && rows.length === 2, JSON.stringify({ boards: boards.length, rows: rows.length }));
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
 }
 
 process.exit(failed ? 1 : 0);

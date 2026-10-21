@@ -53,6 +53,18 @@ LATE_TRAIN_WINDOW = timedelta(hours=3)
 STATIONINFO_MAX_COUNT = "500"
 ELVIRA_ROW_CAP = 500
 ELVIRA_TIMEOUT = aiohttp.ClientTimeout(total=30)
+# StationInfo requests (cache misses only; shared requests count once) per
+# second and the burst allowed on top. Any logged-in user can call
+# elvira_between, and every new station pair is up to four POSTs to
+# jegy-a.mav.hu (two stations, up to two service days): a loop over station
+# codes must not get Home Assistant's address blocked. A card asks for its
+# boards every ELVIRA_CACHE_TTL: six cards on six pairs around midnight are
+# 24 boards (0.53/s), all of them at once when a dashboard opens.
+ELVIRA_RATE = 1.0
+ELVIRA_BURST = 60
+# A refused board is logged at most this often, with the count since.
+ELVIRA_RATE_LOG_EVERY = 300
+_monotonic = time.monotonic
 
 
 class ElviraError(Exception):
@@ -63,6 +75,44 @@ class ElviraError(Exception):
     seconds. elvira_between raises it only when today's origin board did not
     arrive.
     """
+
+
+class ElviraRateLimited(ElviraError):
+    """Over the integration's own limit; this board was not asked for. An
+    ElviraError for the service response, but not an outage: it is logged on
+    its own and does not touch the "unavailable / answers again" state."""
+
+
+class _RateLimit:
+    """Token bucket in front of ELVIRA, shared by every caller."""
+
+    def __init__(self) -> None:
+        self._tokens = float(ELVIRA_BURST)
+        self._at = _monotonic()
+        self._refused = 0
+        self._logged_at: float | None = None
+
+    def take(self) -> None:
+        """One token, or ElviraRateLimited at once: the card polls again in
+        ELVIRA_CACHE_TTL seconds anyway."""
+        now = _monotonic()
+        self._tokens = min(float(ELVIRA_BURST), self._tokens + max(0.0, now - self._at) * ELVIRA_RATE)
+        self._at = now
+        if self._tokens >= 1.0:
+            self._tokens -= 1.0
+            return
+        self._refused += 1
+        if self._logged_at is None or now - self._logged_at >= ELVIRA_RATE_LOG_EVERY:
+            _LOGGER.warning(
+                "ELVIRA requests over the integration's rate limit (%.0f/s, burst %d): %d boards refused"
+                " since the last such line; cards may miss MÁV rows",
+                ELVIRA_RATE,
+                ELVIRA_BURST,
+                self._refused,
+            )
+            self._refused = 0
+            self._logged_at = now
+        raise ElviraRateLimited("rate limited")
 
 
 def station_code_digits(value: str) -> str:
@@ -232,10 +282,17 @@ async def _station_legs(session, hass, station_code: str, day: date):
                 coro, "hungarian_transport_elvira", eager_start=False
             ),
         )
-    return await cache.get(
-        (station_code, day.isoformat()),
-        lambda: _fetch_station(session, station_code, day),
-    )
+    limit = data.get("elvira_rate")
+    if limit is None:
+        limit = data["elvira_rate"] = _RateLimit()
+
+    def fetch():
+        # The token goes on the miss itself, in the order the boards are
+        # asked for (see elvira_between), not when the request task starts.
+        limit.take()
+        return _fetch_station(session, station_code, day)
+
+    return await cache.get((station_code, day.isoformat()), fetch)
 
 
 def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
@@ -375,20 +432,37 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     # Real minutes ahead, not wall-clock ones, on the night the clocks change.
     latest = (now.astimezone(UTC) + timedelta(minutes=int(minutes_after or 180))).astimezone(tz)
     days = service_days(now, latest)
-    boards = await asyncio.gather(
-        *(_station_legs(session, hass, code, day) for code in (origin_code, dest_code) for day in days),
+    # Today's origin board first: the call fails without it, so with the
+    # rate limit's last token left it is the board that gets it.
+    wanted = [(origin_code, now.date())] + [
+        (code, day)
+        for code in (origin_code, dest_code)
+        for day in days
+        if (code, day) != (origin_code, now.date())
+    ]
+    results = await asyncio.gather(
+        *(_station_legs(session, hass, code, day) for code, day in wanted),
         return_exceptions=True,
     )
-    for board in boards:
+    for board in results:
         # Only an unreachable board is an empty one; a bug or a cancellation is not.
         if isinstance(board, BaseException) and not isinstance(board, ElviraError):
             raise board
-    origin, dest = boards[: len(days)], boards[len(days):]
+    boards = dict(zip(wanted, results))
+    origin = [boards[(origin_code, day)] for day in days]
+    dest = [boards[(dest_code, day)] for day in days]
     for code, part in ((origin_code, origin), (dest_code, dest)):
-        _log_outage(hass, code, next((b for b in part if isinstance(b, ElviraError)), None))
+        errors = [b for b in part if isinstance(b, ElviraError)]
+        outage = next((b for b in errors if not isinstance(b, ElviraRateLimited)), None)
+        if outage is None and len(errors) == len(part):
+            # Every board refused here, none asked: nothing heard from the
+            # station either way. One that arrived means it answers again.
+            continue
+        _log_outage(hass, code, outage)
     today = origin[days.index(now.date())]
     if isinstance(today, ElviraError):
-        raise ElviraError(str(today))
+        # A rate limit stays one for the service response.
+        raise type(today)(str(today))
     arrived = [board for board in origin if not isinstance(board, ElviraError)]
     odep = [row for dep, _arr in arrived for row in dep]
     darr = [row for board in dest if not isinstance(board, ElviraError) for row in board[1]]

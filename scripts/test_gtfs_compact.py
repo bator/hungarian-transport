@@ -940,7 +940,119 @@ def main() -> int:
         str([f["url"] for f in CITY_FEEDS if "menetbrand" in f["url"] or "ptke" in f["url"]]),
     )
 
+    failed |= determinism_checks()
+    failed |= digest_checks()
+
     return 1 if failed else 0
+
+
+# Builds one feed into a Volán-style index and a city-style one (agencies
+# split), then prints a digest of each decompressed index, its shapes folder
+# name and the shard contents. Run in a child so PYTHONHASHSEED takes effect.
+_DETERMINISM_CHILD = r'''
+import gzip, hashlib, json, sys, zipfile
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import gtfs_compact as g
+out = Path(sys.argv[2])
+z = out / "feed.zip"
+stops = "stop_id,stop_name,stop_lat,stop_lon\n" + "".join(
+    f"S{i},Stop {i},47.{i:03d},19.{i:03d}\n" for i in range(20))
+routes = "route_id,agency_id,route_short_name,route_type\nR1,A,1234,3\nR2,B,12,3\nR3,C,7,0\n"
+trips = "route_id,service_id,trip_id,shape_id\n" + "".join(
+    f"R{1 + i % 3},SV{i % 2},T{i},SH{i % 5}\n" for i in range(60))
+st = "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n" + "".join(
+    f"T{i},08:{i:02d}:00,08:{i:02d}:00,S{i % 20},1\nT{i},09:{i:02d}:00,09:{i:02d}:00,S{(i + 3) % 20},2\n"
+    for i in range(60))
+shapes = "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\n" + "".join(
+    f"SH{k},47.{k}{j:02d},19.{j:03d},{j}\n" for k in range(5) for j in range(5))
+cal = ("service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+       "SV0,1,1,1,1,1,0,0,20260101,20991231\nSV1,0,0,0,0,0,1,1,20260101,20991231\n")
+agency = "agency_id,agency_name\nA,Volánbusz\nB,Volánbusz - Szeged\nC,Volánbusz - Pécs\n"
+with zipfile.ZipFile(z, "w") as zf:
+    for name, body in [("stops.txt", stops), ("routes.txt", routes), ("trips.txt", trips),
+                       ("stop_times.txt", st), ("shapes.txt", shapes), ("calendar.txt", cal),
+                       ("agency.txt", agency)]:
+        zf.writestr(name, body)
+res = {}
+for name, kw, ops in [("volan-index.json.gz", {"op_id": "volan", "op_name": "Volán"}, False),
+                      ("city-index.json.gz", {"split_agencies": True}, True)]:
+    idx = out / name
+    g.write_index(g.load_parts(z, lambda short, *_: bool(short), **kw), idx, with_operators=ops)
+    sh = g.index_shapes(idx)
+    shards = b"".join(gzip.decompress(p.read_bytes()) for p in sorted((out / sh).iterdir()))
+    res[name] = [hashlib.sha256(gzip.decompress(idx.read_bytes())).hexdigest(), sh,
+                 hashlib.sha256(shards).hexdigest(), len(json.loads(gzip.decompress(idx.read_bytes()))["t"])]
+print(json.dumps(res, sort_keys=True))
+'''
+
+
+def determinism_checks() -> bool:
+    """The same feed gives the same index bytes and shapes folder whatever
+    PYTHONHASHSEED is: the weekly release compares decompressed indexes and
+    would publish a new patch every week otherwise."""
+    here = str(Path(__file__).resolve().parent)
+    runs = []
+    for seed in ("1", "2", "3"):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, PYTHONHASHSEED=seed)
+            proc = subprocess.run([sys.executable, "-c", _DETERMINISM_CHILD, here, tmp],
+                                  env=env, capture_output=True, text=True, timeout=120)
+            runs.append(proc.stdout.strip() if proc.returncode == 0 else "error: " + proc.stderr[-500:])
+    first = json.loads(runs[0]) if not runs[0].startswith("error") else {}
+    return not check(
+        "same feed, different PYTHONHASHSEED: identical decompressed indexes, shapes folders and shards",
+        len(set(runs)) == 1 and bool(first) and all(v[3] > 0 for v in first.values()),
+        " | ".join(runs) if len(set(runs)) > 1 or not first else "",
+    )
+
+
+
+def _digest_part(op: str, reverse: bool = False, late: int = 0) -> dict:
+    shapes = [encode_polyline([(47.1, 19.1), (47.2, 19.2 + k / 10)]) for k in range(3)]
+    trips = [[k % 2, str(k), [0, 1], [480 + k, 490 + k + late], 3, k % 3] for k in range(6)]
+    part = {"op_id": op, "op_name": op.title(), "feed": f"{op}-v1",
+            "s": [[f"{op}:1", "A", "1"], [f"{op}:2", "B", "2"]], "g": [4710000, 1910000, 4720000, 1920000],
+            "shapes": shapes, "c": [["1111100", "20260101", "20991231"], ["0000011", "20260101", "20991231"]],
+            "a": [[], ["20261224"]], "r": [["20261225"], []], "t": trips}
+    if reverse:
+        # Same timetable, every list in another order (stops, services,
+        # shapes, trips), as an older builder may have written it.
+        part["s"] = part["s"][::-1]
+        part["g"] = [4720000, 1920000, 4710000, 1910000]
+        part["shapes"] = shapes[::-1]
+        part["c"], part["a"], part["r"] = part["c"][::-1], part["a"][::-1], part["r"][::-1]
+        part["t"] = [[1 - t[0], t[1], [1 - p for p in t[2]], t[3], t[4], 2 - t[5]] for t in trips][::-1]
+    return part
+
+
+def digest_checks() -> bool:
+    """index_digest (the weekly release's "did a timetable change") sees
+    through row order and the shapes folder name, not through a changed time."""
+    import index_digest  # noqa: PLC0415
+
+    failed = False
+    with tempfile.TemporaryDirectory() as tmp:
+        dirs = [Path(tmp) / d for d in ("a", "b", "c")]
+        for d in dirs:
+            d.mkdir()
+        write_index([_digest_part("x"), _digest_part("y")], dirs[0] / "city-index.json.gz", with_operators=True)
+        write_index([_digest_part("y", True), _digest_part("x", True)], dirs[1] / "city-index.json.gz",
+                    with_operators=True)
+        write_index([_digest_part("x"), _digest_part("y", late=1)], dirs[2] / "city-index.json.gz",
+                    with_operators=True)
+        a, b, c = (d / "city-index.json.gz" for d in dirs)
+        raw_differs = gzip.decompress(a.read_bytes()) != gzip.decompress(b.read_bytes())
+        failed |= not check(
+            "index digest: same timetable in another order (and shapes folder) is unchanged",
+            raw_differs and index_shapes(a) != index_shapes(b) and index_digest.digest(a) == index_digest.digest(b),
+        )
+        failed |= not check("index digest: a changed time is a change", index_digest.digest(a) != index_digest.digest(c))
+        shutil.rmtree(dirs[1] / index_shapes(b))
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            status = index_digest.main([str(b)])
+        failed |= not check("index digest: an index without its shapes folder fails", status == 1)
+    return failed
 
 
 class _HostRecorder(http.server.BaseHTTPRequestHandler):
