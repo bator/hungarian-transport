@@ -307,6 +307,43 @@ if not check(
 ):
     failed += 1
 
+# A train number repeats every day. Train 2345 runs the other way: it passes
+# the destination at 17:10 and the origin at 17:40. Tomorrow's 17:10 at the
+# destination (tomorrow's board is asked for in the evening) is not its
+# arrival: no destHit, no 23.5-hour travel time.
+_tz = zoneinfo.ZoneInfo("Europe/Budapest")
+_eve = datetime(2026, 10, 21, 17, 0, tzinfo=_tz)
+_back = rows_from_stationinfo(
+    [{"trainId": "T-today", "code": "2345", "start": _eve.replace(minute=40).isoformat()}],
+    [
+        {"trainId": "T-today", "code": "2345", "arrive": _eve.replace(minute=10).isoformat()},
+        {"trainId": "T-tomorrow", "code": "2345",
+         "arrive": (_eve + timedelta(days=1)).replace(minute=10).isoformat()},
+    ],
+    _tz, _eve, _eve + timedelta(minutes=480),
+)
+if not check(
+    "the same train number tomorrow is not this run's arrival (opposite direction)",
+    [(r["destHit"], r["travel"]) for r in _back] == [(False, None)],
+    repr(_back),
+):
+    failed += 1
+_fwd = rows_from_stationinfo(
+    [{"trainId": "A", "code": "2346", "start": _eve.replace(minute=40).isoformat()}],
+    [
+        {"trainId": "B", "code": "2346", "arrive": _eve.replace(hour=19, minute=5).isoformat()},
+        {"trainId": "C", "code": "2346",
+         "arrive": (_eve + timedelta(days=1)).replace(hour=19, minute=5).isoformat()},
+    ],
+    _tz, _eve, _eve + timedelta(minutes=480),
+)
+if not check(
+    "the code fallback still pairs today's arrival (85 min), not tomorrow's",
+    [(r["destHit"], r["travel"]) for r in _fwd] == [(True, 85)],
+    repr(_fwd),
+):
+    failed += 1
+
 # O-10: the "station is down" memory is bounded in time and in size.
 import logging  # noqa: E402
 

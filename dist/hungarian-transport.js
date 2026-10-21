@@ -468,8 +468,11 @@ Object.assign(BkkLib, {
     const n = s.match(/(\d{5,})/);
     return n ? n[1] : "";
   },
+  /* Only a MÁV station's id carries one (BKK_005511387, BKK_CS…,
+     hu-mav_…, the bare code): a city stop's longer number (szeged:2430584836)
+     is not a station code. */
   elviraStationCode(id) {
-    const m = String(id || "").match(/(\d{9})/);
+    const m = String(id || "").match(/^(?:BKK_(?:CS)?|hu-mav_)?(\d{9})$/i);
     return m ? m[1] : "";
   },
   /* BKK street/metro parents (CSF…) sit next to MÁV stations but have no
@@ -1160,6 +1163,7 @@ function errText(lang, err) {
 
 // src/lib/futar.js
 var BOARD_TTL_MS = MIN_REFRESH_S * 1e3;
+var BOARD_STALE_MS = 5 * 60 * 1e3;
 Object.assign(BkkLib, {
   _mem: {},
   _inflight: {},
@@ -1316,10 +1320,13 @@ Object.assign(BkkLib, {
     }, true).then((data) => {
       const now = Date.now();
       BkkLib._boards.forEach((v, k) => {
-        if (now - v.ts >= BOARD_TTL_MS) BkkLib._boards.delete(k);
+        if (now - v.ts >= BOARD_STALE_MS) BkkLib._boards.delete(k);
       });
       BkkLib._boards.set(key, { ts: now, data });
       return data;
+    }, (err) => {
+      if (err && err.code === "futar_rate_limited" && hit && Date.now() - hit.ts < BOARD_STALE_MS) return hit.data;
+      throw err;
     }).finally(() => {
       BkkLib._boardInflight.delete(key);
     });
@@ -1348,9 +1355,8 @@ Object.assign(BkkLib, {
     const id = stop && stop.id || "";
     const vertex = BkkLib.planPlaceVertex(name, id);
     if (vertex) return vertex;
-    const lat = Number(stop && stop.lat);
-    const lon = Number(stop && stop.lon);
-    if (name && Number.isFinite(lat) && Number.isFinite(lon)) return `${name}::${lat},${lon}`;
+    const pt = BkkLib.mapGpsLatLon(stop && stop.lat, stop && stop.lon);
+    if (name && pt) return `${name}::${pt[0]},${pt[1]}`;
     if (!BkkLib.hasFutar(apiKey) || !name) return "";
     try {
       const data = await BkkLib.fetch(apiKey, "search.json", { query: name }, true);
@@ -1613,9 +1619,8 @@ Object.assign(BkkLib, {
   },
   async transitousPlace(stop, kind) {
     if (!stop) return "";
-    const lat = Number(stop.lat);
-    const lon = Number(stop.lon);
-    if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + "," + lon;
+    const pt = BkkLib.mapGpsLatLon(stop.lat, stop.lon);
+    if (pt) return pt[0] + "," + pt[1];
     const name = String(stop.name || "").trim();
     if (!name) return String(stop.id || "");
     try {
@@ -3795,12 +3800,27 @@ Object.assign(BkkLib, {
     cache.set(url, p);
     while (cache.size > max) cache.delete(cache.keys().next().value);
   },
+  /* A file that is not a usable index (an HTML page, a newer schema, bad
+     gzip) stays that way: its failure is kept this long, as the MÁV index's
+     is, instead of every lookup downloading and parsing it again. */
+  _idxFailedAt: /* @__PURE__ */ new Map(),
+  _idxFailRetryMs: 10 * 60 * 1e3,
   _indexCached(url, httpKey, gunzipKey) {
     const cache = BkkLib._idx;
     const hit = cache.get(url);
-    if (hit) return hit;
-    const p = BkkLib._loadGtfsIndex(url, httpKey, gunzipKey).catch((err) => {
+    if (hit) {
+      const failedAt = BkkLib._idxFailedAt.get(url);
+      if (!failedAt || Date.now() - failedAt < BkkLib._idxFailRetryMs) return hit;
       cache.delete(url);
+    }
+    BkkLib._idxFailedAt.delete(url);
+    const lasting = /* @__PURE__ */ new Set(["errIndexSchema", "errIndexParse", gunzipKey]);
+    const p = BkkLib._loadGtfsIndex(url, httpKey, gunzipKey).catch((err) => {
+      if (err && lasting.has(err.i18nKey) && cache.get(url) === p) {
+        BkkLib._idxFailedAt.set(url, Date.now());
+      } else if (cache.get(url) === p) {
+        cache.delete(url);
+      }
       throw err;
     });
     BkkLib._cacheIndex(cache, url, p, 8);
@@ -3997,7 +4017,7 @@ Object.assign(BkkLib, {
     }));
     idx.g = null;
     idx.s = null;
-    idx.url = url;
+    idx.url = BkkLib._absoluteUrl(url);
     idx.ops = (idx.o || []).map((row, i) => ({ i, id: row[0], name: row[1] }));
     idx.byNum = /* @__PURE__ */ new Map();
     idx.byKey = /* @__PURE__ */ new Map();
@@ -4010,6 +4030,16 @@ Object.assign(BkkLib, {
       if (st.id && !idx.byId.has(st.id)) idx.byId.set(st.id, st);
     });
     return idx;
+  },
+  _absoluteUrl(url) {
+    const doc = typeof document !== "undefined" ? document : null;
+    const loc = typeof location !== "undefined" ? location : null;
+    const base = doc && doc.baseURI || loc && loc.href || void 0;
+    try {
+      return new URL(String(url), base).href;
+    } catch (_e) {
+      return String(url);
+    }
   },
   gtfsStopById(idx, id) {
     if (!idx || !id) return null;
@@ -5452,6 +5482,11 @@ Object.assign(BkkLib, {
           }
         }));
         let payloads = await loadBoards(poles);
+        if (near.length && !payloads[0]) {
+          poles = poles.concat(near);
+          payloads = payloads.concat(await loadBoards(near));
+          near = [];
+        }
         if (boardErr && payloads.every((data) => !data)) throw boardErr;
         const usedParentOnly = poles[0] === stopId && (poles.length === 1 || !!destKey);
         const span = payloads.slice(0, usedParentOnly ? 1 : payloads.length).reduce((best, data) => {
@@ -5788,7 +5823,7 @@ Object.assign(BkkLib, {
     const groups = /* @__PURE__ */ new Map();
     list.forEach((row, idx) => {
       if (!row || !/^(gtfs:|motis:)/.test(String(row.tripId || ""))) return;
-      if (BkkLib.mapGpsLatLon(row.lat, row.lon)) return;
+      if (BkkLib.mapGpsLatLon(row.lat, row.lon) && !row.gpsCarried) return;
       let key = "";
       BkkLib.coachRouteKeys(row.label).some((candidate) => {
         if (!byRoute.has(candidate)) return false;
@@ -5799,45 +5834,54 @@ Object.assign(BkkLib, {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(idx);
     });
+    const vehicleId = (vehicle) => String(vehicle.tripId || vehicle.lat + "," + vehicle.lon);
+    const pairs = [];
     groups.forEach((indexes, key) => {
       const uniq = [];
       const seen = /* @__PURE__ */ new Set();
       byRoute.get(key).forEach((vehicle) => {
-        const id = String(vehicle.tripId || vehicle.lat + "," + vehicle.lon);
+        const id = vehicleId(vehicle);
         if (seen.has(id)) return;
         seen.add(id);
         uniq.push(vehicle);
       });
-      const pairs = [];
       indexes.forEach((idx) => {
-        uniq.forEach((vehicle, vi) => {
+        uniq.forEach((vehicle) => {
           if (!pairOk(list[idx], vehicle)) return;
           const dep = Number(list[idx].dep || list[idx].sched || 0);
           const head = rowHead(list[idx]);
           const vehicleHead = fold(vehicle.head);
           const headMatch = !!(head && vehicleHead && (head.indexOf(vehicleHead) >= 0 || vehicleHead.indexOf(head) >= 0));
           const distance = Math.abs((dep || now) - now);
-          pairs.push({ idx, vi, score: (headMatch ? 0 : 1) * 1e12 + distance });
+          pairs.push({ idx, vehicle, score: (headMatch ? 0 : 1) * 1e12 + distance });
         });
       });
-      pairs.sort((a, b) => a.score - b.score);
-      const usedRow = /* @__PURE__ */ new Set();
-      const usedVehicle = /* @__PURE__ */ new Set();
-      pairs.forEach((pair) => {
-        if (usedRow.has(pair.idx) || usedVehicle.has(pair.vi)) return;
-        usedRow.add(pair.idx);
-        usedVehicle.add(pair.vi);
-        const gps = BkkLib.mapGpsLatLon(uniq[pair.vi].lat, uniq[pair.vi].lon);
-        if (!gps) return;
-        list[pair.idx].lat = gps[0];
-        list[pair.idx].lon = gps[1];
-      });
+    });
+    pairs.sort((a, b) => a.score - b.score);
+    const usedRow = /* @__PURE__ */ new Set();
+    const usedVehicle = /* @__PURE__ */ new Set();
+    pairs.forEach((pair) => {
+      const vid = vehicleId(pair.vehicle);
+      if (usedRow.has(pair.idx) || usedVehicle.has(vid)) return;
+      usedRow.add(pair.idx);
+      usedVehicle.add(vid);
+      const gps = BkkLib.mapGpsLatLon(pair.vehicle.lat, pair.vehicle.lon);
+      if (!gps) return;
+      list[pair.idx].lat = gps[0];
+      list[pair.idx].lon = gps[1];
+      delete list[pair.idx].gpsCarried;
+    });
+    list.forEach((row) => {
+      if (!row || !row.gpsCarried) return;
+      row.lat = null;
+      row.lon = null;
+      delete row.gpsCarried;
     });
     return list;
   },
   async attachCoachGps(hass, rows) {
     const list = Array.isArray(rows) ? rows : [];
-    const needs = list.some((row) => row && /^(gtfs:|motis:)/.test(String(row.tripId || "")) && !BkkLib.mapGpsLatLon(row.lat, row.lon));
+    const needs = list.some((row) => row && /^(gtfs:|motis:)/.test(String(row.tripId || "")) && (row.gpsCarried || !BkkLib.mapGpsLatLon(row.lat, row.lon)));
     if (!hass || !needs) return list;
     return BkkLib.applyCoachGps(list, await BkkLib.coachPositions(hass));
   },
@@ -6248,6 +6292,9 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._destsLoading = false;
     this._keyOk = null;
     this._probingKey = false;
+    this._probeRetryMs = 3e4;
+    this._probeRetryAt = 0;
+    this._fillKeyP = null;
     this._keyDirty = false;
     this._userEditedKey = false;
     this._keyReveal = false;
@@ -6833,7 +6880,18 @@ var BKKHopCardEditor = class extends HTMLElement {
       detail: { config: cfg }
     }));
   }
-  async _fillKey() {
+  /* One lookup at a time: a search typed while the hass setter's lookup
+     runs waits for that one instead of starting a second (and a second
+     _loadDests). */
+  _fillKey() {
+    if (!this._fillKeyP) {
+      this._fillKeyP = this._fillKeyRun().finally(() => {
+        this._fillKeyP = null;
+      });
+    }
+    return this._fillKeyP;
+  }
+  async _fillKeyRun() {
     if (this._keyless()) return;
     this._loadingKey = true;
     try {
@@ -6861,7 +6919,7 @@ var BKKHopCardEditor = class extends HTMLElement {
       return;
     }
     if (this._probingKey) return;
-    if (this._probedKey === access && this._keyOk != null) {
+    if (this._probedKey === access && (this._keyOk != null || Date.now() < this._probeRetryAt)) {
       this._syncApiKey();
       return;
     }
@@ -6870,7 +6928,9 @@ var BKKHopCardEditor = class extends HTMLElement {
     try {
       const result = await BkkLib.probeApiKey(this._apiKey());
       if (this._keyAccess() !== access) return;
-      this._keyOk = !!result.ok;
+      const unreached = !result.ok && result.code === "errApiKeyProbe";
+      this._keyOk = unreached ? null : !!result.ok;
+      this._probeRetryAt = unreached ? Date.now() + this._probeRetryMs : 0;
       this._syncApiKey();
       if (!result.ok && result.code) this._error(codedError(result.code));
       else if (result.ok) this._error("");
@@ -8138,7 +8198,8 @@ ${this._stopPinCss()}
         motisShape,
         futarShape,
         motisCoversHead,
-        BkkLib.isTrainRow(row) ? clipForeignFutar(row && row.shape) : row && row.shape
+        /* The row's own line, or the coach_shape service's for a GTFS row. */
+        BkkLib.isTrainRow(row) ? clipForeignFutar(shape) : shape
       );
       const motisGap = BkkLib.shapeGpsGapMeters(motisShape, row && row.lat, row && row.lon);
       const futarGap = BkkLib.shapeGpsGapMeters(futarShape, row && row.lat, row && row.lon);
@@ -8499,10 +8560,31 @@ ${this._stopPinCss()}
       lat: cfg.stopLat,
       lon: cfg.stopLon
     };
+    const carryOver = (list) => {
+      const prev = /* @__PURE__ */ new Map();
+      (this._rawRows || []).forEach((row) => {
+        if (row && row.tripId) prev.set(String(row.tripId), row);
+      });
+      if (!prev.size) return;
+      list.forEach((row) => {
+        const old = row && row.tripId ? prev.get(String(row.tripId)) : null;
+        if (!old || old === row) return;
+        if (row.travel == null && old.travel != null) row.travel = old.travel;
+        if (/^(gtfs:|motis:)/.test(String(row.tripId)) && !BkkLib.mapGpsLatLon(row.lat, row.lon)) {
+          const gps = BkkLib.mapGpsLatLon(old.lat, old.lon);
+          if (gps) {
+            row.lat = gps[0];
+            row.lon = gps[1];
+            row.gpsCarried = true;
+          }
+        }
+      });
+    };
     const paintRows = (list) => {
       if (gen !== this._gen) return;
       const merged = list || [];
       merged.forEach((row) => BkkLib.applyRailBadge(row));
+      carryOver(merged);
       this._rawRows = merged;
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
@@ -8581,7 +8663,13 @@ ${this._stopPinCss()}
             deferGps: true,
             hass: this._hass,
             skipElvira: true,
-            onPartial: paintRows,
+            /* The GTFS rows come before FUTÁR answers: the last run's FUTÁR
+               rows stay beside them until then, instead of vanishing. */
+            onPartial: (list) => {
+              if (gen !== this._gen) return;
+              const kept = (this._rowsFilled ? [] : this._rawRows || []).filter((row) => BkkLib.isFutarTripId(row && row.tripId)).map((row) => Object.assign({}, row));
+              paintRows(kept.length ? BkkLib.mergeVolanRows(list, kept, cap) : list);
+            },
             armThroughCheck: (fn) => {
               startThrough = fn;
             },
@@ -8663,7 +8751,8 @@ ${this._stopPinCss()}
       } catch (err) {
         if (gen !== this._gen) return;
         this._loading = false;
-        if (mode === "bkk" || mode === "mav") {
+        const keepRows = (this._rawRows || []).length && !this._rowsFilled;
+        if ((mode === "bkk" || mode === "mav") && !keepRows) {
           let filled = [];
           try {
             filled = await BkkLib.fillTransitousIfEmpty([], origin, dest, {

@@ -1098,7 +1098,8 @@ ${this._stopPinCss()}
         motisShape,
         futarShape,
         motisCoversHead,
-        BkkLib.isTrainRow(row) ? clipForeignFutar(row && row.shape) : (row && row.shape),
+        /* The row's own line, or the coach_shape service's for a GTFS row. */
+        BkkLib.isTrainRow(row) ? clipForeignFutar(shape) : shape,
       );
       const motisGap = BkkLib.shapeGpsGapMeters(motisShape, row && row.lat, row && row.lon);
       const futarGap = BkkLib.shapeGpsGapMeters(futarShape, row && row.lat, row && row.lon);
@@ -1438,10 +1439,36 @@ ${this._stopPinCss()}
       lat: cfg.stopLat,
       lon: cfg.stopLon,
     };
+    /* Every poll builds new row objects: a trip's ride time and coach GPS
+       from the last list stay on it until this run fills them again, so
+       they do not blink out while ELVIRA or the GPS lookup answers. The
+       coach position is marked (gpsCarried): the lookup replaces or drops
+       it. FUTÁR rows bring their own vehicle position on every poll. */
+    const carryOver = (list) => {
+      const prev = new Map();
+      (this._rawRows || []).forEach((row) => {
+        if (row && row.tripId) prev.set(String(row.tripId), row);
+      });
+      if (!prev.size) return;
+      list.forEach((row) => {
+        const old = row && row.tripId ? prev.get(String(row.tripId)) : null;
+        if (!old || old === row) return;
+        if (row.travel == null && old.travel != null) row.travel = old.travel;
+        if (/^(gtfs:|motis:)/.test(String(row.tripId)) && !BkkLib.mapGpsLatLon(row.lat, row.lon)) {
+          const gps = BkkLib.mapGpsLatLon(old.lat, old.lon);
+          if (gps) {
+            row.lat = gps[0];
+            row.lon = gps[1];
+            row.gpsCarried = true;
+          }
+        }
+      });
+    };
     const paintRows = (list) => {
       if (gen !== this._gen) return;
       const merged = list || [];
       merged.forEach((row) => BkkLib.applyRailBadge(row));
+      carryOver(merged);
       this._rawRows = merged;
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
@@ -1525,7 +1552,15 @@ ${this._stopPinCss()}
             deferGps: true,
             hass: this._hass,
             skipElvira: true,
-            onPartial: paintRows,
+            /* The GTFS rows come before FUTÁR answers: the last run's FUTÁR
+               rows stay beside them until then, instead of vanishing. */
+            onPartial: (list) => {
+              if (gen !== this._gen) return;
+              const kept = (this._rowsFilled ? [] : (this._rawRows || []))
+                .filter((row) => BkkLib.isFutarTripId(row && row.tripId))
+                .map((row) => Object.assign({}, row));
+              paintRows(kept.length ? BkkLib.mergeVolanRows(list, kept, cap) : list);
+            },
             armThroughCheck: (fn) => { startThrough = fn; },
             onFutarUpdate: (full) => {
               throughResolve();
@@ -1611,8 +1646,11 @@ ${this._stopPinCss()}
         this._loading = false;
         /* FUTÁR failing (a revoked key, an outage) used to look like an
            empty board, which Transitous then filled. It still fills it,
-           now under the error banner instead of in silence. */
-        if (mode === 'bkk' || mode === 'mav') {
+           now under the error banner instead of in silence. A poll that
+           fails keeps the FUTÁR rows it had (_showErr): only an empty
+           board, or one Transitous filled before, is filled again. */
+        const keepRows = (this._rawRows || []).length && !this._rowsFilled;
+        if ((mode === 'bkk' || mode === 'mav') && !keepRows) {
           let filled = [];
           try {
             filled = await BkkLib.fillTransitousIfEmpty([], origin, dest, {

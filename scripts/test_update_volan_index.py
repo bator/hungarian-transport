@@ -163,6 +163,9 @@ class Fake:
         self.downloads: list[str] = []
         self.heads: list[tuple[str, dict]] = []
         self.body: dict[str, bytes] = {}
+        self.built: dict[str, bytes] = {}
+        self.meta: dict[str, dict] = {}
+        self.guard_missing = False
 
     def paths(self):
         return self.base, self.www / "volan-index.json.gz", self.www / "city-index.json.gz", self.www / "mav-index.json.gz"
@@ -171,6 +174,8 @@ class Fake:
         self.heads.append((url, kw))
         if url in self.broken:
             raise OSError("unreachable")
+        if url in self.meta:
+            return dict(self.meta[url])
         return {"etag": self.etag.get(url, "")}
 
     def download_feed(self, url: str, dest: Path, **_kw) -> dict:
@@ -181,12 +186,32 @@ class Fake:
         dest.write_bytes(self.body.get(url) or b"PK" + url.encode() + self.etag.get(url, "").encode())
         return {"size": dest.stat().st_size}
 
-    def build_city_index(self, _base: Path, out: Path, _volan: Path | None) -> dict:
+    def build_city_index(self, base: Path, out: Path, _volan: Path | None, *, zips=None) -> dict:
+        """A zip (new or in place) starting with BROKEN fails to load, as
+        build_city_index treats one: a new one is rejected for the zip in
+        place, a zip in place is skipped. self.built has the bytes used."""
         self.city_builds += 1
         if self.city_fails is not None:
             raise self.city_fails
+        info = dict(self.city_info)
+        info["rejected"], skipped, self.built = [], list(info.get("skipped") or []), {}
+        for feed in uvi.CITY_FEEDS:
+            fid, old = feed["id"], base / feed["file"]
+            new = (zips or {}).get(fid)
+            if new is not None and not new.read_bytes().startswith(b"BROKEN"):
+                self.built[fid] = new.read_bytes()
+                continue
+            if new is not None:
+                info["rejected"].append(fid)
+            if old.exists() and not old.read_bytes().startswith(b"BROKEN"):
+                self.built[fid] = old.read_bytes()
+            elif fid not in skipped:
+                skipped.append(fid)
+        info["skipped"] = skipped
+        if self.guard_missing and skipped:
+            raise gtfs_compact.IndexGuardError(f"refusing to replace {out.name}: {skipped[0]} missing")
         out.write_bytes(gzip.compress(b'{"v":29}'))
-        return dict(self.city_info)
+        return info
 
     def download_zip(self, url: str, dest: Path, **kw) -> dict:
         return self.download_feed(url, dest, **kw)
@@ -277,7 +302,7 @@ with tempfile.TemporaryDirectory() as tmp:
     uvi.notify = lambda message, *_a, **_k: sent.append(message)
     fake.city_fails = None
 
-    def kill_self(_base, out, _volan):
+    def kill_self(_base, out, _volan, **_kw):
         os.kill(os.getpid(), signal.SIGTERM)
         raise AssertionError("SIGTERM handler did not exit")
 
@@ -305,7 +330,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # must not: the query, URL credentials and secret-named params are cut.
     sent.clear()
 
-    def keyed_failure(_base, out, _volan):
+    def keyed_failure(_base, out, _volan, **_kw):
         raise OSError("fetch https://feed.example/bahart.zip?apikey=SECRETKEY1&v=2"
                       " via http://u:SECRETPW@feed.example/ failed")
 
@@ -371,8 +396,12 @@ with tempfile.TemporaryDirectory() as tmp:
     fake.etag["https://public.example/a.zip"] = "a-8"
     fake.city_info = {"ops": 0, "trips": 0, "skipped": ["a"], "expired": {}}
     fake.run()
-    check("a feed skipped for failing to load is not recorded",
-          fake.state()["cities"]["a"]["etag"] == "a-7", repr(fake.state()["cities"]))
+    check("a feed skipped for failing to load loses its fingerprint",
+          not {"etag", "sha256", "content_length", "fetched"} & set(fake.state()["cities"]["a"]),
+          repr(fake.state()["cities"]))
+    downloads = len(fake.downloads)
+    fake.run()
+    check("the same HEAD is downloaded again after a skip", len(fake.downloads) == downloads + 1, repr(fake.downloads))
     fake.city_info = {"ops": 1, "trips": 5, "skipped": []}
 
     # The success line names the feeds the index left out.
@@ -429,7 +458,7 @@ with tempfile.TemporaryDirectory() as tmp:
         seen_volan.append(zpath.read_bytes())
         raise gtfs_compact.IndexGuardError("refusing to write volan-index.json.gz: 12 trips")
 
-    def recording_city(_base: Path, out: Path, volan: Path | None) -> dict:
+    def recording_city(_base: Path, out: Path, volan: Path | None, **_kw) -> dict:
         seen_volan.append(volan.read_bytes() if volan else b"")
         out.write_bytes(gzip.compress(b'{"v":29}'))
         return dict(fake.city_info)
@@ -611,6 +640,131 @@ check("notify's user agent is the downloader's", uvi.UA == gtfs_compact.UA)
 
 # HUNGARIAN_TRANSPORT_WWW and HUNGARIAN_TRANSPORT_WEBHOOK from .env: the
 # served folder is chosen at import, so .env must be read before that.
+# ---- size-only HEAD, a zip that fails to load, a broken new zip -------------
+
+day0 = date(2026, 11, 2)
+uvi._today = lambda: day0
+check("size-only match holds within WEAK_MATCH_DAYS of the last download",
+      uvi.same_remote({"content_length": "10", "fetched": "2026-10-27"}, {"content_length": "10"}))
+check("size-only match expires after WEAK_MATCH_DAYS",
+      not uvi.same_remote({"content_length": "10", "fetched": "2026-10-26"}, {"content_length": "10"}))
+check("size-only match without a download date is no match",
+      not uvi.same_remote({"content_length": "10"}, {"content_length": "10"}))
+check("size and Last-Modified both equal is a match, however old",
+      uvi.same_remote({"content_length": "10", "last_modified": "x", "fetched": "2025-01-01"},
+                      {"content_length": "10", "last_modified": "x"}))
+check("a new Last-Modified at the same size is no match",
+      not uvi.same_remote({"content_length": "10", "last_modified": "x", "fetched": "2026-11-02"},
+                          {"content_length": "10", "last_modified": "y"}))
+check("the ETag decides when both have one",
+      uvi.same_remote({"etag": "e", "content_length": "9"}, {"etag": "e", "content_length": "10"}))
+
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    built_volan: list[bytes] = []
+
+    def size_build_index(zpath: Path, out: Path) -> dict:
+        built_volan.append(zpath.read_bytes())
+        out.write_bytes(gzip.compress(b'{"v":29}'))
+        return {"feed_version": "v1", "trips": 46000, "stops": 9000}
+
+    real_build_index = uvi.build_index
+    uvi.build_index = size_build_index
+    kti, pub = "https://kti.example/volan.zip", "https://public.example/a.zip"
+    # KTI: no ETag, a Last-Modified that is just the response time (dropped):
+    # only the size is left. The next timetable has the same size.
+    fake.meta = {kti: {"content_length": "13"}, pub: {"content_length": "9"}}
+    fake.body = {kti: b"PK volan v1  ", pub: b"PK a v1  "}
+    day = 0
+    uvi._today = lambda: day0 + timedelta(days=day)
+    code = fake.run()
+    check("size-only: the first run downloads and builds", code == 0 and built_volan == [b"PK volan v1  "]
+          and fake.built.get("a") == b"PK a v1  " and fake.state()["volan"].get("fetched") == "2026-11-02",
+          repr((code, built_volan, fake.state())))
+    fake.body = {kti: b"PK volan v2  ", pub: b"PK a v2  "}
+    downloads = len(fake.downloads)
+    day = 3
+    fake.run()
+    check("size-only: within the week the same size is not downloaded", len(fake.downloads) == downloads)
+    day = 7
+    code = fake.run()
+    check("size-only: after a week the same-size change is downloaded and built",
+          code == 0 and built_volan[-1] == b"PK volan v2  " and fake.built.get("a") == b"PK a v2  "
+          and (fake.base / "a.zip").read_bytes() == b"PK a v2  "
+          and fake.state()["cities"]["a"].get("fetched") == "2026-11-09", repr((code, built_volan, fake.state())))
+    builds, vbuilds, downloads = fake.city_builds, len(built_volan), len(fake.downloads)
+    day = 14
+    fake.run()
+    check("size-only: the same bytes a week later are downloaded but not rebuilt",
+          len(fake.downloads) == downloads + 2 and fake.city_builds == builds and len(built_volan) == vbuilds
+          and fake.state()["cities"]["a"].get("fetched") == "2026-11-16" and not list(fake.base.glob("*.tmp")),
+          repr((fake.downloads[downloads:], fake.state())))
+    uvi.build_index = real_build_index
+    uvi._today = date.today
+
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    pub = "https://public.example/a.zip"
+    # a.zip on disk fails to load, but its ETag is the one in state.json.
+    fake.etag[pub] = "a-5"
+    (fake.www / "volan-index.json.gz").write_bytes(gzip.compress(b'{"v":29}'))
+    (fake.base / "volanbusz_gtfs.zip").write_bytes(b"PK volan-1")
+    (fake.base / "a.zip").write_bytes(b"BROKEN a-5 on disk")
+    (fake.base / "state.json").write_text(json.dumps({
+        "volan": {"etag": "volan-1"},
+        "cities": {"a": {"etag": "a-5", "sha256": "x"}},
+    }))
+    fake.body[pub] = b"PK a-5 good"
+    fake.run()
+    check("a zip that fails to load drops the feed's whole fingerprint",
+          fake.downloads == [] and "etag" not in fake.state()["cities"]["a"], repr(fake.state()["cities"]))
+    fake.run()
+    check("the next run downloads it again and builds from it",
+          fake.downloads == [pub] and fake.built.get("a") == b"PK a-5 good"
+          and fake.state()["cities"]["a"].get("etag") == "a-5", repr((fake.downloads, fake.state()["cities"])))
+
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    fake.guard_missing = True  # a feed missing from the rebuild is refused, as guard_feeds does
+    pub = "https://public.example/a.zip"
+    (fake.www / "volan-index.json.gz").write_bytes(gzip.compress(b'{"v":29}'))
+    (fake.base / "volanbusz_gtfs.zip").write_bytes(b"PK volan-1")
+    (fake.www / "city-index.json.gz").write_bytes(gzip.compress(b'{"v":29}'))
+    (fake.base / "a.zip").write_bytes(b"PK a good")
+    (fake.base / "state.json").write_text(json.dumps({
+        "volan": {"etag": "volan-1"},
+        "cities": {"a": {"etag": "a-1", "sha256": "good"}},
+    }))
+    fake.etag[pub] = "a-2"
+    fake.body[pub] = b"BROKEN a-2"
+    sent: list[str] = []
+    uvi.notify = lambda message, *_a, **_k: sent.append(message)
+    code = fake.run()
+    check("a broken new city zip does not replace the working one",
+          code == 0 and (fake.base / "a.zip").read_bytes() == b"PK a good" and fake.built.get("a") == b"PK a good"
+          and not list(fake.base.glob("*.tmp")), repr((code, sent, sorted(p.name for p in fake.base.iterdir()))))
+    check("the rejected zip is announced and not recorded",
+          fake.state()["cities"]["a"].get("etag") == "a-1" and len(sent) == 1 and "new zip rejected" in sent[0],
+          repr((sent, fake.state()["cities"])))
+    fake.run()
+    check("the broken feed is downloaded again next run", fake.downloads == [pub, pub], repr(fake.downloads))
+    fake.body[pub] = b"PK a fixed"
+    fake.etag[pub] = "a-3"
+    code = fake.run()
+    check("a fixed zip replaces the old one after its build",
+          code == 0 and (fake.base / "a.zip").read_bytes() == b"PK a fixed" and fake.built.get("a") == b"PK a fixed"
+          and fake.state()["cities"]["a"].get("etag") == "a-3", repr((code, fake.state()["cities"])))
+    fake.etag[pub] = "a-4"
+    fake.body[pub] = b"PK a newest"
+    fake.city_fails = RuntimeError("bad build")
+    code = fake.run()
+    check("a failed city build keeps the zip in place and leaves no new one behind",
+          code == uvi.REPORTED and (fake.base / "a.zip").read_bytes() == b"PK a fixed"
+          and not list(fake.base.glob("*.tmp")), repr((code, sorted(p.name for p in fake.base.iterdir()))))
+
 with tempfile.TemporaryDirectory() as tmp:
     env_file = Path(tmp) / ".env"
     env_file.write_text(f"export HUNGARIAN_TRANSPORT_WWW={tmp}/www  # manual /local install\n"

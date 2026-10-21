@@ -2,7 +2,9 @@
 
 import asyncio
 from datetime import datetime, timedelta
+import json
 import logging
+from pathlib import Path
 import re
 
 import pytest
@@ -16,6 +18,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
+import custom_components.hungarian_transport as integration
 from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS, elvira, mav
 from custom_components.hungarian_transport.assets import asset_tag
 from custom_components.hungarian_transport.const import (
@@ -418,6 +421,32 @@ async def test_elvira_failed_extra_day_board_counts_as_empty(hass, aioclient_moc
     assert [row["platform"] for row in rows] == ["6"]
 
 
+async def test_elvira_failed_extra_day_board_is_not_an_outage(
+    hass, aioclient_mock, freezer, caplog
+) -> None:
+    """Between 00:00 and 03:00 yesterday's boards are asked for too. When
+    only those fail, the stations answer: no "unavailable" warning (and no
+    "answers again" later). Today's board failing is still one."""
+    freezer.move_to("2026-10-19 00:30:00+02:00")
+    await _setup(hass)
+    now = dt_util.now(BUDAPEST).replace(microsecond=0)
+    yesterday = (now - timedelta(days=1)).date().isoformat()
+    dep, _arr = _board(now + timedelta(minutes=10))
+    aioclient_mock.post(
+        ELVIRA_URL, side_effect=_boards({(ORIGIN, yesterday), (DEST, yesterday)}, [dep])
+    )
+
+    assert len((await _elvira_call(hass))["departures"]) == 1
+    assert _elvira_warnings(caplog) == []
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(ELVIRA_URL, side_effect=_boards({DEST}, [dep]))
+    freezer.tick(elvira.ELVIRA_CACHE_TTL + 1)
+    await _elvira_call(hass)
+    warnings = _elvira_warnings(caplog)
+    assert len(warnings) == 1 and DEST in warnings[0]
+
+
 async def test_elvira_error_when_no_origin_board_arrives(hass, aioclient_mock, freezer) -> None:
     freezer.move_to("2026-10-19 00:30:00+02:00")
     await _setup(hass)
@@ -625,3 +654,25 @@ def test_elvira_rate_limit_leaves_room_for_cards() -> None:
     boards = 6 * 2 * days
     assert boards / elvira.ELVIRA_CACHE_TTL <= elvira.ELVIRA_RATE * 0.9
     assert boards <= elvira.ELVIRA_BURST
+
+
+_PKG = Path(integration.__file__).parent
+
+
+@pytest.mark.parametrize("lang", ["en", "hu"])
+def test_exception_translations_are_raised_and_error_codes_documented(lang) -> None:
+    """exceptions.* is only read for a raised ServiceValidationError or
+    HomeAssistantError; a service response's "error" code is not looked up
+    there, so it is explained in the service description instead."""
+    strings = json.loads((_PKG / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
+    source = "\n".join(p.read_text(encoding="utf-8") for p in _PKG.glob("*.py"))
+    raised = set(re.findall(r'translation_key="(\w+)"', source))
+    assert set(strings["exceptions"]) == raised
+    codes = set(re.findall(r'"error": "(\w+)"', (_PKG / "__init__.py").read_text(encoding="utf-8")))
+    assert codes == {
+        "elvira_rate_limited", "elvira_unavailable", "futar_auth", "futar_rate_limited", "futar_unavailable",
+    }
+    for code in codes:
+        service = code.split("_")[0]
+        service = "elvira_between" if service == "elvira" else service
+        assert code in strings["services"][service]["description"], code

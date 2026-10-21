@@ -1332,22 +1332,32 @@ def running_trips(idx: dict, today: str | None = None) -> list[list]:
 
 # Below this many trips a guard has nothing meaningful to compare.
 GUARD_MIN_TRIPS = 50
-# The running trips of a previous index are its yardstick only when they are
-# at least this share of all its trips (see guard_on_running).
+# When the running trips of a previous index are less than this share of all
+# its trips, its calendar has mostly ended (see guard_basis).
 GUARD_RUNNING_SHARE = 0.25
+# The share of those few running trips a rebuild must then keep.
+GUARD_ENDING_KEEP = 0.9
 
 
-def guard_on_running(running: int, total: int) -> bool:
-    """Whether a rebuild is compared with the previous index (or feed) on
-    the trips that still run, on both sides, rather than on all trips.
+def guard_basis(running: int, total: int, ratio: float) -> tuple[bool, float]:
+    """How a rebuild is compared with the previous index (or feed):
+    (on the trips that still run, on both sides, rather than on all trips;
+    the share of that yardstick the rebuild must keep).
 
-    Running trips only when they are a fair part of the whole (at least
-    GUARD_MIN_TRIPS and GUARD_RUNNING_SHARE of it): a feed whose summer
-    service ended keeps its autumn trips as the yardstick, so it is not
-    refused for the summer. When only a handful still run (a calendar that
-    has nearly ended), all trips are, as before the per-trip count: a
-    truncated feed must not pass then, when the guard matters most."""
-    return running >= GUARD_MIN_TRIPS and running >= total * GUARD_RUNNING_SHARE
+    Running trips whenever at least GUARD_MIN_TRIPS still run, so a feed
+    whose summer service ended keeps its autumn trips as the yardstick and
+    is not refused for the summer, however long the summer was. When those
+    are only a small part of the whole (under GUARD_RUNNING_SHARE), the
+    calendar has mostly ended and a truncated feed must not pass, when the
+    guard matters most: the rebuild has to keep GUARD_ENDING_KEEP of them
+    rather than ratio. A rebuild is then either the same remaining
+    services or a new period, larger still. Under GUARD_MIN_TRIPS running,
+    all trips, as before the per-trip count."""
+    if running < GUARD_MIN_TRIPS:
+        return False, ratio
+    if running < total * GUARD_RUNNING_SHARE:
+        return True, max(ratio, GUARD_ENDING_KEEP)
+    return True, ratio
 
 
 def existing_trips(out: Path, today: str | None = None) -> tuple[int, int] | None:
@@ -1582,15 +1592,16 @@ def write_index(
             feeds.append(f"{oid}:{part['feed']}")
     # The summer trips of a feed are not lost when the summer is over: the
     # comparison is on the trips that still run, on both sides, unless only
-    # a handful of the previous ones do (guard_on_running), then on all.
+    # a handful of the previous ones do, then on all (guard_basis).
     prev = existing_trips(out, today) if guard_total else None
     if prev is not None:
-        if guard_on_running(*prev):
+        on_running, keep = guard_basis(*prev, 0.5)
+        if on_running:
             had, what = prev[0], "running trips"
             has = len(running_trips({"c": all_c, "a": all_a, "t": all_t}, today))
         else:
             had, has, what = prev[1], len(all_t), "trips"
-        if had >= GUARD_MIN_TRIPS and has < had * 0.5:
+        if had >= GUARD_MIN_TRIPS and has < had * keep:
             raise IndexGuardError(
                 f"refusing to replace {out.name}: {has} {what} vs previous {had}"
             )

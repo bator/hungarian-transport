@@ -5,6 +5,10 @@ import { BkkLib } from '../lib/core.js';
 /* A departure board is shared between cards for this long: no longer than
    the shortest poll, so a card polling at the floor always gets a new one. */
 const BOARD_TTL_MS = MIN_REFRESH_S * 1000;
+/* An older board stands in for a refresh that the integration's own rate
+   limit refused (futar_rate_limited): not an outage, so no banner, and the
+   departures it lists still leave on time. Kept no longer than this. */
+const BOARD_STALE_MS = 5 * 60 * 1000;
 
 Object.assign(BkkLib, {
   _mem: {},
@@ -166,9 +170,12 @@ Object.assign(BkkLib, {
       /* Every stop and horizon a card ever showed would stay otherwise: a
          planner tried on a dozen origins kept a dozen full boards. */
       const now = Date.now();
-      BkkLib._boards.forEach((v, k) => { if (now - v.ts >= BOARD_TTL_MS) BkkLib._boards.delete(k); });
+      BkkLib._boards.forEach((v, k) => { if (now - v.ts >= BOARD_STALE_MS) BkkLib._boards.delete(k); });
       BkkLib._boards.set(key, { ts: now, data });
       return data;
+    }, (err) => {
+      if (err && err.code === 'futar_rate_limited' && hit && Date.now() - hit.ts < BOARD_STALE_MS) return hit.data;
+      throw err;
     }).finally(() => {
       BkkLib._boardInflight.delete(key);
     });
@@ -197,9 +204,8 @@ Object.assign(BkkLib, {
     const id = (stop && stop.id) || '';
     const vertex = BkkLib.planPlaceVertex(name, id);
     if (vertex) return vertex;
-    const lat = Number(stop && stop.lat);
-    const lon = Number(stop && stop.lon);
-    if (name && Number.isFinite(lat) && Number.isFinite(lon)) return `${name}::${lat},${lon}`;
+    const pt = BkkLib.mapGpsLatLon(stop && stop.lat, stop && stop.lon);
+    if (name && pt) return `${name}::${pt[0]},${pt[1]}`;
     if (!BkkLib.hasFutar(apiKey) || !name) return '';
     try {
       const data = await BkkLib.fetch(apiKey, 'search.json', { query: name }, true);

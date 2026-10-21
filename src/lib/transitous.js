@@ -256,9 +256,9 @@ Object.assign(BkkLib, {
   },
   async transitousPlace(stop, kind) {
     if (!stop) return '';
-    const lat = Number(stop.lat);
-    const lon = Number(stop.lon);
-    if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + ',' + lon;
+    /* A stop without coordinates (lat: null) is not at 0,0. */
+    const pt = BkkLib.mapGpsLatLon(stop.lat, stop.lon);
+    if (pt) return pt[0] + ',' + pt[1];
     const name = String(stop.name || '').trim();
     if (!name) return String(stop.id || '');
     try {

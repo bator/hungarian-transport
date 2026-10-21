@@ -170,6 +170,28 @@ with tempfile.TemporaryDirectory() as tmp:
           "b" in info["skipped"] and set(operator_trips(out)) == {"a"}, repr(info))
     os.environ.pop(bci.ALLOW_MISSING_ENV, None)
 
+    # A new zip next to the one in place (update_volan_index stages it): one
+    # that does not load is rejected and the feed keeps the zip in place.
+    shutil.copy(fixtures / "b.zip", base / "b.zip")
+    bci.build_city_index(base, out)
+    staged = base / "b.zip.tmp"
+    staged.write_bytes(b"<html>gone</html>")
+    err = raises(lambda: bci.build_city_index(base, out, zips={"b": staged}))
+    info = bci.build_city_index(base, out, zips={"b": staged})
+    check("a new zip that fails to load is rejected, the zip in place is used",
+          err is None and info["rejected"] == ["b"] and "b" not in info["skipped"]
+          and set(operator_trips(out)) == {"a", "b"}, repr((err, info)))
+    shutil.copy(fixtures / "b.zip", staged)
+    info = bci.build_city_index(base, out, zips={"b": staged})
+    check("a new zip that loads is used", info["rejected"] == [] and set(operator_trips(out)) == {"a", "b"}, repr(info))
+    (base / "b.zip").unlink()
+    staged.write_bytes(b"<html>gone</html>")
+    err = raises(lambda: bci.build_city_index(base, out, zips={"b": staged}))
+    check("a rejected new zip with none in place leaves the feed out (and the guard refuses)",
+          isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
+    shutil.copy(fixtures / "b.zip", base / "b.zip")
+    staged.unlink()
+
     # The http:// publishers are the only ones allowed to fall back to http.
     seen_kw: list[dict] = []
 
@@ -384,13 +406,13 @@ with tempfile.TemporaryDirectory() as tmp:
           isinstance(err, IndexGuardError) and "40 trips vs previous 300" in str(err), repr(err))
     err = raises(lambda: write_index([seasonal("volan", 0, 200)], vout, with_operators=False, today="20261021"))
     check("a full new Volán feed after an ended one is written", err is None, repr(err))
-    # Only a handful of the previous trips still run: all of them are the
-    # yardstick, as before the per-trip count, so a feed that really shrank
-    # is refused; never a weaker guard than that.
+    # Only a few of the previous trips still run: a feed that really shrank
+    # is refused. At least GUARD_MIN_TRIPS running: the rebuild has to keep
+    # nearly all of them; fewer: all trips are the yardstick.
     write_index([seasonal("volan", 100000, 60)], vout, with_operators=False, today="20260820")
     err = raises(lambda: write_index([seasonal("volan", 0, 30)], vout, with_operators=False, today="20261021"))
-    check("Volán: 60 of 100060 running, new 30 is refused on all trips",
-          isinstance(err, IndexGuardError) and "30 trips vs previous 100060" in str(err), repr(err))
+    check("Volán: 60 of 100060 running, new 30 is refused",
+          isinstance(err, IndexGuardError) and "30 running trips vs previous 60" in str(err), repr(err))
     write_index([seasonal("volan", 100000, 49)], vout, with_operators=False, today="20260820")
     err = raises(lambda: write_index([seasonal("volan", 0, 30)], vout, with_operators=False, today="20261021"))
     check("Volán: 49 of 100049 running, new 30 is refused on all trips",
@@ -406,6 +428,27 @@ with tempfile.TemporaryDirectory() as tmp:
           isinstance(err, IndexGuardError) and "szeged 5 trips vs 2000" in str(err), repr(err))
     err = raises(lambda: bci.guard_feeds(out, [seasonal("szeged", 1960, 40)], set(), today="20261021"))
     check("city: the same nearly-ended feed again is accepted", err is None, repr(err))
+    # The summer service was most of the feed (900 ended, 100 running): a
+    # rebuild with the 100 autumn trips is the same feed, not a lost one.
+    write_index([seasonal("szeged", 900, 100)], out, with_operators=True, today="20260820", guard_total=False)
+    err = raises(lambda: bci.guard_feeds(out, [seasonal("szeged", 0, 100)], set(), today="20261021"))
+    check("city: 100 of 1000 running, new 100 is accepted", err is None, repr(err))
+    err = raises(lambda: bci.guard_feeds(out, [seasonal("szeged", 0, 2000)], set(), today="20261021"))
+    check("city: 100 of 1000 running, a new larger period is accepted", err is None, repr(err))
+    err = raises(lambda: bci.guard_feeds(out, [seasonal("szeged", 0, 60)], set(), today="20261021"))
+    check("city: 100 of 1000 running, new 60 is refused",
+          isinstance(err, IndexGuardError) and "szeged 60 trips vs 100" in str(err), repr(err))
+    vout.unlink()
+    write_index([seasonal("volan", 900, 100)], vout, with_operators=False, today="20260820")
+    err = raises(lambda: write_index([seasonal("volan", 0, 100)], vout, with_operators=False, today="20261021"))
+    check("Volán: 100 of 1000 running, new 100 is accepted", err is None, repr(err))
+    write_index([seasonal("volan", 900, 100)], vout, with_operators=False, today="20260820")
+    err = raises(lambda: write_index([seasonal("volan", 0, 60)], vout, with_operators=False, today="20261021"))
+    check("Volán: 100 of 1000 running, new 60 is refused",
+          isinstance(err, IndexGuardError) and "60 running trips vs previous 100" in str(err), repr(err))
+    check("guard_basis: rule table",
+          [gc.guard_basis(r, t, 0.5) for r, t in ((49, 100049), (60, 100060), (100, 1000), (400, 1400), (200, 500))]
+          == [(False, 0.5), (True, 0.9), (True, 0.9), (True, 0.5), (True, 0.5)])
     vout.write_bytes(gzip.compress(b"[1, 2"))
     check("a truncated previous index is no reference", gc.existing_trips(vout) is None)
     vout.write_bytes(gzip.compress(b"\xff\xfe not utf-8"))

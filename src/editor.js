@@ -19,6 +19,11 @@ export class BKKHopCardEditor extends HTMLElement {
     this._destsLoading = false;
     this._keyOk = null;
     this._probingKey = false;
+    /* A probe that could not reach FUTÁR (a timeout, an outage) says
+       nothing about the key: it is asked again after this long. */
+    this._probeRetryMs = 30000;
+    this._probeRetryAt = 0;
+    this._fillKeyP = null;
     this._keyDirty = false;
     this._userEditedKey = false;
     this._keyReveal = false;
@@ -642,7 +647,17 @@ export class BKKHopCardEditor extends HTMLElement {
     }));
   }
 
-  async _fillKey() {
+  /* One lookup at a time: a search typed while the hass setter's lookup
+     runs waits for that one instead of starting a second (and a second
+     _loadDests). */
+  _fillKey() {
+    if (!this._fillKeyP) {
+      this._fillKeyP = this._fillKeyRun().finally(() => { this._fillKeyP = null; });
+    }
+    return this._fillKeyP;
+  }
+
+  async _fillKeyRun() {
     if (this._keyless()) return;
     this._loadingKey = true;
     try {
@@ -674,7 +689,7 @@ export class BKKHopCardEditor extends HTMLElement {
       return;
     }
     if (this._probingKey) return;
-    if (this._probedKey === access && this._keyOk != null) {
+    if (this._probedKey === access && (this._keyOk != null || Date.now() < this._probeRetryAt)) {
       this._syncApiKey();
       return;
     }
@@ -683,7 +698,9 @@ export class BKKHopCardEditor extends HTMLElement {
     try {
       const result = await BkkLib.probeApiKey(this._apiKey());
       if (this._keyAccess() !== access) return;
-      this._keyOk = !!result.ok;
+      const unreached = !result.ok && result.code === 'errApiKeyProbe';
+      this._keyOk = unreached ? null : !!result.ok;
+      this._probeRetryAt = unreached ? Date.now() + this._probeRetryMs : 0;
       this._syncApiKey();
       if (!result.ok && result.code) this._error(codedError(result.code));
       else if (result.ok) this._error('');

@@ -25,12 +25,27 @@ Object.assign(BkkLib, {
     cache.set(url, p);
     while (cache.size > max) cache.delete(cache.keys().next().value);
   },
+  /* A file that is not a usable index (an HTML page, a newer schema, bad
+     gzip) stays that way: its failure is kept this long, as the MÁV index's
+     is, instead of every lookup downloading and parsing it again. */
+  _idxFailedAt: new Map(),
+  _idxFailRetryMs: 10 * 60 * 1000,
   _indexCached(url, httpKey, gunzipKey) {
     const cache = BkkLib._idx;
     const hit = cache.get(url);
-    if (hit) return hit;
-    const p = BkkLib._loadGtfsIndex(url, httpKey, gunzipKey).catch((err) => {
+    if (hit) {
+      const failedAt = BkkLib._idxFailedAt.get(url);
+      if (!failedAt || Date.now() - failedAt < BkkLib._idxFailRetryMs) return hit;
       cache.delete(url);
+    }
+    BkkLib._idxFailedAt.delete(url);
+    const lasting = new Set(['errIndexSchema', 'errIndexParse', gunzipKey]);
+    const p = BkkLib._loadGtfsIndex(url, httpKey, gunzipKey).catch((err) => {
+      if (err && lasting.has(err.i18nKey) && cache.get(url) === p) {
+        BkkLib._idxFailedAt.set(url, Date.now());
+      } else if (cache.get(url) === p) {
+        cache.delete(url);
+      }
       throw err;
     });
     BkkLib._cacheIndex(cache, url, p, 8);
@@ -235,8 +250,9 @@ Object.assign(BkkLib, {
        the page, so the copy goes. */
     idx.g = null;
     idx.s = null;
-    /* The shapes folder ("sh") sits next to the index file. */
-    idx.url = url;
+    /* The shapes folder ("sh") sits next to the index file. A card's own
+       index URL may be relative (/local/…): shape URLs resolve against it. */
+    idx.url = BkkLib._absoluteUrl(url);
     idx.ops = (idx.o || []).map((row, i) => ({ i, id: row[0], name: row[1] }));
     idx.byNum = new Map();
     idx.byKey = new Map();
@@ -249,6 +265,16 @@ Object.assign(BkkLib, {
       if (st.id && !idx.byId.has(st.id)) idx.byId.set(st.id, st);
     });
     return idx;
+  },
+  _absoluteUrl(url) {
+    const doc = typeof document !== 'undefined' ? document : null;
+    const loc = typeof location !== 'undefined' ? location : null;
+    const base = (doc && doc.baseURI) || (loc && loc.href) || undefined;
+    try {
+      return new URL(String(url), base).href;
+    } catch (_e) {
+      return String(url);
+    }
   },
   gtfsStopById(idx, id) {
     if (!idx || !id) return null;

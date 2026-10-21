@@ -143,6 +143,7 @@ class FutarProxy:
         self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX, task_factory)
         self._rejected: str | None = None
         self._rejected_at = 0.0
+        self._probing = False
         self._failing = False
         self._tokens = float(FUTAR_BURST)
         self._tokens_at = _monotonic()
@@ -183,22 +184,32 @@ class FutarProxy:
             self._limited_logged_at = now
 
     async def _upstream(self, path: str, params: dict[str, str]) -> dict:
-        await self._acquire()
+        try:
+            await self._acquire()
+        except FutarRateLimited:
+            # Counted here, once per refused request: every caller sharing
+            # it gets the same error.
+            self._note_rate_limited()
+            raise
         return await futar_get(self._session, self._api_key, path, params)
 
     async def get(self, path: str, params: dict[str, Any]) -> dict:
+        # Before the rejected-key check: a call refused here never reaches
+        # FUTÁR, so it cannot be the call that asks again.
+        params = futar_params(path, params)
+        probe = False
         if self._rejected is not None:
-            if _monotonic() - self._rejected_at < REJECTED_RETRY:
+            if self._probing or _monotonic() - self._rejected_at < REJECTED_RETRY:
                 raise FutarAuthError(self._rejected)
             # This call asks again; the others keep failing fast meanwhile.
-            self._rejected_at = _monotonic()
-        params = futar_params(path, params)
+            # Only another rejection starts a new REJECTED_RETRY: after a
+            # timeout or our own rate limit, the next call asks again.
+            probe = self._probing = True
         key = (path, tuple(sorted(params.items())))
         try:
             data = await self._cache.get(key, lambda: self._upstream(path, params))
         except FutarRateLimited:
             # Our own limit, not FUTÁR failing: no outage state, no "answers again".
-            self._note_rate_limited()
             raise
         except FutarAuthError as err:
             if self._rejected is None:
@@ -213,6 +224,9 @@ class FutarProxy:
                     "BKK FUTÁR unavailable (%s); not logged again until it answers", err
                 )
             raise
+        finally:
+            if probe:
+                self._probing = False
         if self._rejected is not None:
             _LOGGER.info("BKK FUTÁR accepts the configured key again")
             self._rejected = None
