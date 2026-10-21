@@ -576,7 +576,9 @@ export class BKKPlannerCard extends BKKHopCard {
     } catch (_e) { /* draw the endpoint fallback */ }
     if (this._mapStale(seq)) return;
     let segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
-    if (!segs.length && cfg.stopId && cfg.destName) {
+    /* Only "now" plans again for a map: a chosen time's open itinerary is
+       one of several, and a plan for now would replace it with another. */
+    if (!segs.length && cfg.stopId && cfg.destName && !this._timed()) {
       try {
         const journey = await BkkLib.withIndexes(this._config).planJourney(
           this._apiKey(),
