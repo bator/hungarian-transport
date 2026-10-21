@@ -98,7 +98,8 @@ the Bahart ferry keep their GTFS vehicle type.
 
 HACS installs the indexes that were built when the GitHub release was cut,
 and a published release never changes afterwards. A weekly GitHub Action
-rebuilds the indexes on the latest stable release's code; when a feed
+rebuilds the indexes on the latest stable release's code (the highest
+`X.Y.Z` by version, not the newest by date); when a feed
 changed, it publishes them as the next patch release (1.9.12 → 1.9.13),
 tagged on that same commit, so HACS offers the new timetables as an
 ordinary update and no unreleased code goes out with them. When nothing
@@ -126,7 +127,11 @@ run is published. The version is picked from GitHub's list of releases and
 tags; when GitHub does not answer, the run stops instead of guessing. A release run compares the new indexes with
 the latest published ones: a city feed that is gone, a feed that lost more
 than half of its trips, or a Volán index with far too few trips fails the
-run, and no release is made (see [When an update fails](#when-an-update-fails)).
+run. Trips whose own service has ended (a summer timetable in October) do
+not count as lost: the comparison is on the trips that still run, and when
+those are under a quarter of the old index, the new one has to keep 90% of
+them (under 50 still running: all trips). A failed run makes no release
+(see [When an update fails](#when-an-update-fails)).
 To accept a feed that is gone for good, list its id in the `allow_missing`
 input of a manual run, or in the `HUNGARIAN_TRANSPORT_ALLOW_MISSING`
 repository variable for every run including the weekly one (the input adds

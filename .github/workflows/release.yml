@@ -86,20 +86,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Every published release (tag, prerelease flag), newest first, read
-          # once. A GitHub API failure stops the run: an empty list would mean
-          # "no -rev series" and "no such tag", and a version picked on that
-          # could land above the beta channel or on a tag that exists.
-          if ! releases=$(gh release list --exclude-drafts --limit 1000 --json tagName,isPrerelease \
-              --jq '.[] | [.tagName, (.isPrerelease | tostring)] | @tsv'); then
+          # Every published release (tag, prerelease flag), last published
+          # first, read once. gh lists by createdAt, which is the tagged
+          # commit's date: a weekly timetable release tags the stable's own
+          # commit, so the two tie. A GitHub API failure stops the run: an
+          # empty list would mean "no -rev series" and "no such tag", and a
+          # version picked on that could land above the beta channel or on a
+          # tag that exists.
+          if ! releases=$(gh release list --exclude-drafts --limit 1000 --json tagName,isPrerelease,publishedAt \
+              --jq 'sort_by(.publishedAt) | reverse | .[] | [.tagName, (.isPrerelease | tostring)] | @tsv'); then
             echo "::error::Could not list the releases (GitHub API); no version is picked on a guess."
             exit 1
           fi
 
-          # The newest published release that is not a prerelease, however
-          # many -rev.N came after it (24 after 1.4.2).
+          # The highest stable version (vX.Y.Z, not a prerelease), however
+          # many -rev.N came after it (24 after 1.4.2). By version, not by
+          # date: createdAt ties a timetable release with its stable, and an
+          # older version tagged or published later would win on any date.
           latest_stable() {
-            awk -F'\t' '$2 == "false" && $1 !~ /-rev\./ { print $1; exit }' <<< "$releases"
+            awk -F'\t' '$2 == "false" && $1 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ { print $1 }' <<< "$releases" \
+              | sort -V | tail -n 1
           }
 
           latest_rev_n() {
@@ -278,18 +284,37 @@ jobs:
           cache: pip
           cache-dependency-path: requirements_test.txt
 
-      - name: Card tests, bundle up to date with src/
+      # What validate.yml checks on main, on the ref being released: the
+      # release packs dist/ (dist/leaflet included). A weekly refresh of an
+      # older tag may predate a check; what that tag does not have is skipped.
+      - name: Vendored Leaflet matches its recorded hashes
+        run: |
+          set -euo pipefail
+          if [ -f .github/vendored.sha256 ]; then sha256sum --check --strict .github/vendored.sha256; fi
+
+      - name: Card tests, lint, bundle up to date with src/
         run: |
           set -euo pipefail
           npm ci
+          npm run --if-present lint
           npm run build
           git diff --exit-code dist/
           npm test
 
-      - name: GTFS script tests
+      - name: Python lint
         run: |
           set -euo pipefail
-          for t in scripts/test_gtfs_compact.py scripts/test_update_volan_index.py scripts/test_build_guards.py; do
+          # The ruff rules the ref's own validate.yml runs, when it runs any.
+          if grep -q 'ruff check' .github/workflows/validate.yml; then
+            pip install ruff==0.16.10
+            ruff check --target-version py312 --select E,F,W,B --ignore E501,B905 custom_components scripts
+          fi
+
+      - name: GTFS script and helper tests
+        run: |
+          set -euo pipefail
+          for t in scripts/test_gtfs_compact.py scripts/test_update_volan_index.py scripts/test_build_guards.py \
+              scripts/test_release_resolve.py ha/test_futar_limits.py ha/test_assets.py docs/manual/tools/test_server.py; do
             # A weekly refresh of an older tag may predate a test file.
             if [ -f "$t" ]; then python3 "$t"; fi
           done

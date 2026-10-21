@@ -432,16 +432,31 @@ def remote_meta(url: str, *, allow_insecure: bool = False) -> dict:
     return {}
 
 
+# A HEAD whose only fingerprint is the size (no ETag; a Last-Modified that is
+# just the response time is dropped, see headers_of) misses a same-size
+# timetable change. Such a match holds this many days after the zip was last
+# downloaded ("fetched" in state.json); then it is downloaded again and its
+# sha256 decides whether it is new.
+WEAK_MATCH_DAYS = 7
+
+
 def same_remote(state: dict, meta: dict) -> bool:
     if not state or not meta:
         return False
     if meta.get("etag") and state.get("etag"):
         return meta["etag"] == state["etag"]
-    if meta.get("content_length") and state.get("content_length"):
-        return str(meta["content_length"]) == str(state["content_length"])
+    strong = False
     if meta.get("last_modified") and state.get("last_modified"):
-        return meta["last_modified"] == state["last_modified"]
-    return False
+        if meta["last_modified"] != state["last_modified"]:
+            return False
+        strong = True
+    if meta.get("content_length") and state.get("content_length"):
+        if str(meta["content_length"]) != str(state["content_length"]):
+            return False
+        if not strong:
+            fetched = _day(state.get("fetched"))
+            return fetched is not None and 0 <= (_today() - fetched).days < WEAK_MATCH_DAYS
+    return strong
 
 
 def file_sha256(path: Path) -> str:
@@ -590,6 +605,8 @@ def _main() -> int:
     # only once a city index was built from them; otherwise (failed build,
     # SIGTERM) the next run downloads and rebuilds again.
     city_pending: dict[str, dict] = {}
+    # Their zips, next to the ones in use (feed id -> path), until then.
+    city_staged: dict[str, Path] = {}
     city_retry = bool(state.get("city_retry"))
     # Feeds failing to download, run after run: {id: {since, runs, error, reported}}.
     feed_ids = {feed["id"] for feed in CITY_FEEDS}
@@ -661,9 +678,11 @@ def _main() -> int:
                 if info is None:
                     # The zip the index was built from, byte for byte.
                     volan_state = merge_meta(volan_meta, volan_state, size)
+                    volan_state["fetched"] = today.isoformat()
                     print(f"unchanged volan {volan_state.get('feed_version') or '?'} (same zip)")
                 else:
                     volan_state = merge_meta(volan_meta, downloaded, size)
+                    volan_state["fetched"] = today.isoformat()
                     volan_state["sha256"] = digest
                     volan_state["feed_version"] = info["feed_version"]
                     volan_state["trips"] = info["trips"]
@@ -698,23 +717,33 @@ def _main() -> int:
                     city_state[fid] = merge_meta(meta, prev, zpath.stat().st_size)
                     fetched = True
                     break
+                # The zip in place stays until a city index was built from
+                # the new one (build_city_index rejects one that fails to
+                # load and keeps using the old).
+                staged = zpath.with_name(zpath.name + ".tmp")
                 try:
-                    downloaded = download_feed(url, zpath, allow_insecure=insecure)
+                    downloaded = download_feed(url, staged, allow_insecure=insecure)
                 except Exception as err:
+                    staged.unlink(missing_ok=True)
                     last_err = err
                     print(f"warn download {feed_error(fid, err)}", file=sys.stderr)
                     continue
                 fetched = True
-                size = zpath.stat().st_size if zpath.exists() else None
-                digest = file_sha256(zpath) if zpath.exists() else ""
-                if digest and digest == prev.get("sha256"):
+                size = staged.stat().st_size if staged.exists() else None
+                digest = file_sha256(staged) if staged.exists() else ""
+                if digest and digest == prev.get("sha256") and zpath.exists():
                     # The zip the index was built from, byte for byte.
+                    staged.unlink()
                     city_state[fid] = merge_meta(meta, prev, size)
+                    city_state[fid]["fetched"] = today.isoformat()
                     print(f"unchanged {fid} (same zip)")
                     break
                 city_pending[fid] = merge_meta(meta, downloaded, size)
+                city_pending[fid]["fetched"] = today.isoformat()
                 if digest:
                     city_pending[fid]["sha256"] = digest
+                if staged.exists():
+                    city_staged[fid] = staged
                 city_retry = True
                 break
             if fetched:
@@ -739,21 +768,34 @@ def _main() -> int:
             exit_code = skip_rebuild("Helyi GTFS frissítés kihagyva", city_out, city_conflict) or exit_code
         elif city_retry:
             try:
-                info = build_city_index(base, city_out, zip_path if zip_path.exists() else None)
+                info = build_city_index(
+                    base, city_out, zip_path if zip_path.exists() else None, zips=dict(city_staged)
+                )
+                # The new zips the index was built from replace the old ones;
+                # a rejected one goes, and its feed is downloaded again next
+                # run (state.json keeps the old zip's fingerprint).
+                rejected = set(info.get("rejected") or [])
+                for fid, staged in city_staged.items():
+                    if fid in rejected:
+                        staged.unlink(missing_ok=True)
+                    else:
+                        staged.replace(staged.with_name(staged.name.removesuffix(".tmp")))
+                city_staged.clear()
                 persist_index(city_out, base)
                 expired = info.get("expired") or {}
                 # A feed the index skipped because of its content (an ended
                 # calendar) is recorded: the same zip would be skipped
                 # again. One that failed to load is downloaded and rebuilt
-                # again next time; its hash is dropped, so even the same
-                # bytes count as new then.
+                # again next time; its fingerprint is dropped, so the same
+                # HEAD or even the same bytes count as new then.
                 skipped = [fid for fid in info.get("skipped") or [] if fid not in expired]
                 for fid, meta in city_pending.items():
-                    if fid not in skipped:
+                    if fid not in skipped and fid not in rejected:
                         city_state[fid] = meta
                 for fid in skipped:
                     if isinstance(city_state.get(fid), dict):
-                        city_state[fid].pop("sha256", None)
+                        for key in ("etag", "last_modified", "content_length", "size", "sha256", "fetched"):
+                            city_state[fid].pop(key, None)
                 city_retry = False
                 line = f"city ops={info['ops']} trips={info['trips']}"
                 if expired:
@@ -762,6 +804,8 @@ def _main() -> int:
                     ) + ")"
                 if skipped:
                     line += " (skipped: " + ", ".join(skipped) + ")"
+                if rejected:
+                    line += " (new zip rejected, previous kept: " + ", ".join(sorted(rejected)) + ")"
                 changed.append(line)
             except Exception as err:
                 report("Helyi GTFS frissítés sikertelen", f"error city rebuild: {err}")
@@ -797,6 +841,10 @@ def _main() -> int:
                 report("MÁV GTFS frissítés sikertelen", f"error mav rebuild: {err}")
                 exit_code = REPORTED
     finally:
+        # New city zips no index was built from (failed build, schema
+        # conflict, SIGTERM): the zips in place stay.
+        for staged in city_staged.values():
+            staged.unlink(missing_ok=True)
         save_state(
             state_path,
             {

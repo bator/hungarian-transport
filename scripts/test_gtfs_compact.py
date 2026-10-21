@@ -780,6 +780,12 @@ def main() -> int:
             and any(w.get("stop") == "Céda" and 350 < w.get("m", 0) < 450 for w in rep["worst"]),
             json.dumps(op),
         )
+        failed |= not check(
+            "city shape audit: trips without a shape count as bad trips",
+            op.get("trips_bad") == 3 and rep["total"]["trips_bad"] == 3
+            and "(1/4 trips)" in acs.report_text(rep),
+            json.dumps(rep["total"]),
+        )
         loop = [(46.2598, 20.1408), (46.2610, 20.1390), (46.2580, 20.1380), (46.2575, 20.1400), (46.2598, 20.1408)]
         mars, tavasz = (46.2578, 20.1395), (46.2610, 20.1391)
         failed |= not check(
