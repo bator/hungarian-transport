@@ -118,6 +118,7 @@ try:
     from build_mav_index import build_mav_index, resolve_mav_feed  # noqa: E402
     from build_volan_index import GTFS_URL, build_index  # noqa: E402
     from gtfs_compact import (  # noqa: E402
+        INDEX_SCHEMA,
         _urlopen,
         assert_public_http_url,
         download_feed,
@@ -215,6 +216,21 @@ def index_schema(path: Path) -> int | None:
         return None
     m = re.match(rb'\{"v":(\d+)', head)
     return int(m.group(1)) if m else None
+
+
+def schema_conflict(out: Path) -> str:
+    """Why these scripts must not write out, or "": the index in place has a
+    newer schema than they build (a release shipped it, and the copies in
+    /config/hungarian-transport are older). Rebuilding it would hand the card
+    an index format it no longer reads; restore_hacs_indexes keeps the
+    shipped one for the same reason."""
+    shipped = index_schema(out) if out.is_file() else None
+    if shipped is None or shipped <= INDEX_SCHEMA:
+        return ""
+    return (
+        f"{out.name} has index schema {shipped}, these scripts build {INDEX_SCHEMA}:"
+        " not rebuilt, copy the new scripts to /config/hungarian-transport"
+    )
 
 
 def index_feed(path: Path) -> str:
@@ -582,6 +598,26 @@ def _main() -> int:
         for k, v in (state.get("failing") or {}).items()
         if (k in feed_ids or k == MAV_KEY) and isinstance(v, dict)
     }
+    # Schema conflicts (see schema_conflict) already sent to the webhook:
+    # index name -> message. Reported once, not every day; one that cleared
+    # is forgotten, so it is reported again should it come back.
+    schema_reported = {
+        k: v
+        for k, v in (state.get("schema_reported") or {}).items()
+        if isinstance(v, str) and k in (volan_out.name, city_out.name)
+    }
+    for out in (volan_out, city_out):
+        if out.name in schema_reported and not schema_conflict(out):
+            schema_reported.pop(out.name)
+
+    def skip_rebuild(title: str, out: Path, msg: str) -> int:
+        if schema_reported.get(out.name) == msg:
+            print(f"warn {msg} (reported before)", file=sys.stderr)
+            return 0
+        schema_reported[out.name] = msg
+        report(title, msg)
+        return REPORTED
+
     today = _today()
     changed: list[str] = []
     exit_code = 0
@@ -600,6 +636,13 @@ def _main() -> int:
             exit_code = REPORTED
 
         if volan_meta is not None and not (
+            same_remote(volan_state, volan_meta) and volan_out.exists() and zip_path.exists()
+        ) and (volan_conflict := schema_conflict(volan_out)):
+            # A rebuild would follow, but these scripts must not write this
+            # index. Checked before the download: the same 100 MB every day
+            # for an index that cannot be written helps nobody.
+            exit_code = skip_rebuild("Volán GTFS frissítés kihagyva", volan_out, volan_conflict) or exit_code
+        elif volan_meta is not None and not (
             same_remote(volan_state, volan_meta) and volan_out.exists() and zip_path.exists()
         ):
             try:
@@ -689,7 +732,12 @@ def _main() -> int:
                 " check the feed URL",
             )
 
-        if city_retry:
+        city_conflict = schema_conflict(city_out) if city_retry else ""
+        if city_conflict:
+            # city_retry stays set and the new zips stay pending: the scripts
+            # that can write this index rebuild it on their first run.
+            exit_code = skip_rebuild("Helyi GTFS frissítés kihagyva", city_out, city_conflict) or exit_code
+        elif city_retry:
             try:
                 info = build_city_index(base, city_out, zip_path if zip_path.exists() else None)
                 persist_index(city_out, base)
@@ -756,6 +804,7 @@ def _main() -> int:
                 "cities": city_state,
                 "city_retry": city_retry,
                 "failing": failing,
+                "schema_reported": schema_reported,
                 "index": str(volan_out),
                 "city_index": str(city_out),
                 "mav_index": str(mav_out),
