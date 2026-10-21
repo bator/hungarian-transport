@@ -4992,6 +4992,17 @@ Object.assign(BkkLib, {
     });
     return Array.from(poles);
   },
+  /* Poles of the loaded route patterns that belong to the stop area parentId. */
+  childPolesOf(cache, routeIds, parentId) {
+    const kids = /* @__PURE__ */ new Set();
+    (routeIds || []).forEach((rid) => {
+      const stops = (BkkLib._cached(cache, rid) || {}).stops || {};
+      Object.values(stops).forEach((st) => {
+        if (st && st.id && st.parentStationId && BkkLib.sameStop(st.parentStationId, parentId)) kids.add(st.id);
+      });
+    });
+    return kids;
+  },
   async originPoles(apiKey, cache, origin, routeIds, destKey) {
     const routes = (routeIds || []).filter(Boolean);
     const patterns = await Promise.all(routes.map(async (rid) => {
@@ -5067,16 +5078,26 @@ Object.assign(BkkLib, {
     BkkLib._inflight[key] = p;
     return p;
   },
+  tripReaches(details, origin, destKey) {
+    const { sts, stops } = details;
+    const oidx = BkkLib.originIndex(sts, stops, origin);
+    if (oidx < 0) return false;
+    return sts.slice(oidx + 1).some((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
+  },
   async tripGoesTo(apiKey, cache, tripId, origin, destKey) {
     if (!tripId || !destKey) return false;
     try {
-      const { sts, stops } = await BkkLib.tripDetails(apiKey, cache, tripId);
-      const oidx = BkkLib.originIndex(sts, stops, origin);
-      if (oidx < 0) return false;
-      return sts.slice(oidx + 1).some((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
+      return BkkLib.tripReaches(await BkkLib.tripDetails(apiKey, cache, tripId), origin, destKey);
     } catch (_e) {
       return false;
     }
+  },
+  /* What tripGoesTo would answer from the cached trip details alone:
+     true / false, or undefined when the trip was never loaded. */
+  knownTripGoesTo(cache, tripId, origin, destKey) {
+    if (!tripId || !destKey) return false;
+    const hit = BkkLib._cached(cache, "trip:" + tripId);
+    return hit ? BkkLib.tripReaches(hit, origin, destKey) : void 0;
   },
   /* The trip's own stops for the map: where the rider boards, and the first
      later stop named like the card's destination. Exact, and on the route. */
@@ -5272,7 +5293,15 @@ Object.assign(BkkLib, {
             poles = [];
           }
         }
-        if (!poles.length) poles = [stopId];
+        let near = [];
+        if (!poles.length) {
+          poles = [stopId];
+        } else if (destKey) {
+          const kids = BkkLib.childPolesOf(cache, poleRoutes, stopId);
+          const saved = poles.filter((p) => p !== stopId);
+          near = saved.filter((p) => kids.has(p));
+          poles = [stopId].concat(saved.filter((p) => !kids.has(p)));
+        }
         let boardErr = null;
         const loadBoards = (ids) => Promise.all(ids.map(async (pid) => {
           try {
@@ -5284,8 +5313,8 @@ Object.assign(BkkLib, {
         }));
         let payloads = await loadBoards(poles);
         if (boardErr && payloads.every((data) => !data)) throw boardErr;
-        const usedParentOnly = poles.length === 1 && poles[0] === stopId;
-        const span = payloads.reduce((best, data) => {
+        const usedParentOnly = poles[0] === stopId && (poles.length === 1 || !!destKey);
+        const span = payloads.slice(0, usedParentOnly ? 1 : payloads.length).reduce((best, data) => {
           const cur = BkkLib.boardSpanMin(data, now);
           return {
             count: best.count + cur.count,
@@ -5312,18 +5341,18 @@ Object.assign(BkkLib, {
               if (discovered.indexOf(rid) < 0) discovered.push(rid);
             });
           });
+          let extra = [];
           if (discovered.length) {
-            let extra = [];
             try {
               extra = await BkkLib.originPoles(apiKey, cache, origin, discovered, destKey || "");
             } catch (_e) {
               extra = [];
             }
-            const fresh = extra.filter((id) => poles.indexOf(id) < 0);
-            if (fresh.length) {
-              poles = poles.concat(fresh);
-              payloads = payloads.concat(await loadBoards(fresh));
-            }
+          }
+          const fresh = Array.from(new Set(near.concat(extra))).filter((id) => poles.indexOf(id) < 0);
+          if (fresh.length) {
+            poles = poles.concat(fresh);
+            payloads = payloads.concat(await loadBoards(fresh));
           }
         }
         const seenTrip = /* @__PURE__ */ new Set();
@@ -5387,8 +5416,9 @@ Object.assign(BkkLib, {
       const headHitsDest = (row) => !!(dest && (BkkLib.nameEq(row.head, dest.name) || BkkLib.nameEq(row.head, dest.key)));
       if (destKey && candidates.length) {
         candidates.forEach((row) => {
-          if (headHitsDest(row)) sure.push(row);
-          else maybe.push(row);
+          const known = headHitsDest(row) || BkkLib.knownTripGoesTo(cache, row.tripId, origin, destKey);
+          if (known === true) sure.push(row);
+          else if (known === void 0) maybe.push(row);
         });
         sure = sure.slice(0, maxRows);
       } else {
@@ -6027,6 +6057,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._dests = [];
     this._destRoutes = {};
     this._loadedStop = "";
+    this._loadedAccess = "";
     this._loadingStop = "";
     this._destsLoading = false;
     this._keyOk = null;
@@ -6074,7 +6105,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._probeKey();
     const stopId = this._config.stopId;
     const loading = this._destsLoading && this._loadingStop === stopId;
-    if (stopId && (this._hasFutar() || this._mode() === "volan" || this._mode() === "helyi") && this._loadedStop !== stopId && !loading) {
+    if (stopId && this._canLoadDests() && this._destsStale(stopId) && !loading) {
       this._loadDests();
     }
   }
@@ -6089,6 +6120,8 @@ var BKKHopCardEditor = class extends HTMLElement {
     const viaIntegration = BkkLib.integrationHasKey(hass);
     if (!this._userEditedKey && !this._config.apiKey && !this._borrowedKey && !this._loadingKey && !viaIntegration && !this._keyless()) this._fillKey();
     else if (this._hasFutar()) this._probeKey();
+    const stopId = this._config.stopId;
+    if (stopId && this._loadedStop === stopId && this._destsStale(stopId) && !(this._destsLoading && this._loadingStop === stopId)) this._loadDests();
   }
   _apiKey() {
     return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
@@ -6113,6 +6146,19 @@ var BKKHopCardEditor = class extends HTMLElement {
   _keyless() {
     const mode = this._mode();
     return mode === "volan" || mode === "helyi";
+  }
+  /* Only the BKK and MÁV modes need FUTÁR: "all" falls back to the GTFS
+     indexes without a key, as the card itself does. */
+  _needsKey() {
+    const mode = this._mode();
+    return mode === "bkk" || mode === "mav";
+  }
+  _canLoadDests() {
+    return this._hasFutar() || !this._needsKey();
+  }
+  _destsStale(stopId) {
+    if (this._loadedStop !== stopId) return true;
+    return !this._loadedAccess && !this._keyless() && !!this._keyAccess();
   }
   _build() {
     this._built = true;
@@ -6266,6 +6312,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._el("helyi").addEventListener("change", () => this._onModeToggle("helyi"));
     this._el("city").addEventListener("change", (ev) => {
       this._cancelSearches();
+      this._keepAutoTitle();
       this._emit(Object.assign({ city: ev.target.value }, this._noStops()));
       this._dests = [];
       this._loadedStop = "";
@@ -6541,6 +6588,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._destRoutes = {};
     this._cache = {};
     this._loadedStop = "";
+    this._keepAutoTitle();
     this._emit(Object.assign({
       mav,
       volan,
@@ -6606,6 +6654,8 @@ var BKKHopCardEditor = class extends HTMLElement {
       const key = await BkkLib.apiKeyFromDashboard(this._hass);
       if (key && !this._config.apiKey && !this._userEditedKey) {
         this._borrowedKey = key;
+        const stopId = this._config.stopId;
+        if (stopId && this._destsStale(stopId)) this._loadDests();
         await this._probeKey();
       }
     } finally {
@@ -6660,6 +6710,11 @@ var BKKHopCardEditor = class extends HTMLElement {
       this._error("");
       if (!this._hasFutar() && !this._userEditedKey) await this._fillKey();
       if (seq !== this._searchSeq) return;
+      if (!this._hasFutar() && this._needsKey()) {
+        box.innerHTML = "";
+        this._error(codedError("errNoApiKey"));
+        return;
+      }
       const mode = this._mode();
       const hits = await BkkLib.withIndexes(this._config).searchStops(this._apiKey(), q, mode, this._config.city);
       if (seq !== this._searchSeq) return;
@@ -6737,8 +6792,9 @@ var BKKHopCardEditor = class extends HTMLElement {
   }
   async _loadDests() {
     if (!this._config.stopId) return;
-    if (!this._hasFutar() && this._mode() !== "volan" && this._mode() !== "helyi") return;
+    if (!this._canLoadDests()) return;
     const stopId = this._config.stopId;
+    const access = this._keyAccess();
     const seq = ++this._destSeq;
     this._destsLoading = true;
     this._loadingStop = stopId;
@@ -6755,6 +6811,7 @@ var BKKHopCardEditor = class extends HTMLElement {
       );
       if (seq !== this._destSeq || this._config.stopId !== stopId) return;
       this._loadedStop = stopId;
+      this._loadedAccess = access;
       this._destsLoading = false;
       this._loadingStop = "";
       this._dests = idx.dests || [];
@@ -6817,6 +6874,12 @@ var BKKHopCardEditor = class extends HTMLElement {
     if (this._autoTitle && name === this._autoTitle) return true;
     return name === this._pairTitle(this._config.stopName, this._config.destName);
   }
+  /* The old pair's title, if the editor wrote it, is replaced once the
+     next pair is picked: remembered here, before the pair is cleared and
+     _titleIsAuto can no longer tell it from a typed one. */
+  _keepAutoTitle() {
+    if (this._config.name && this._titleIsAuto(this._config.name)) this._autoTitle = this._config.name;
+  }
   _pickStop(stop, which) {
     this._cancelSearches();
     if (which === "dest") {
@@ -6844,7 +6907,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     const q = this._el("q");
     if (box) box.innerHTML = "";
     if (q) q.value = stop.label || stop.name;
-    if (this._config.name && this._titleIsAuto(this._config.name)) this._autoTitle = this._config.name;
+    this._keepAutoTitle();
     this._cache = {};
     this._dests = [];
     this._destRoutes = {};
@@ -6879,6 +6942,7 @@ var BKKHopCard = class extends HTMLElement {
     this._rawRows = [];
     this._err = "";
     this._loading = false;
+    this._rowsFilled = false;
     this._painted = false;
     this._gen = 0;
     this._keyTried = false;
@@ -8251,6 +8315,7 @@ ${this._stopPinCss()}
       this._rawRows = merged;
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
+      this._rowsFilled = false;
       this._err = "";
       this._loading = false;
       this._paint();
@@ -8289,6 +8354,19 @@ ${this._stopPinCss()}
           if (gen !== this._gen) return;
           let list = futarFull ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap) : earlyRows.slice();
           list = BkkLib.mergeVolanRows(list, elviraRows, cap, { overlayOnly: true });
+          if (!list.length && startThrough && !futarFull) {
+            if (this._err) {
+              this._err = "";
+              if (this._rowsFilled) {
+                this._rows = [];
+                this._rawRows = [];
+                this._rowsFilled = false;
+                this._loading = true;
+              }
+              this._paint();
+            }
+            return;
+          }
           paintRows(list);
         };
         let startThrough = null;
@@ -8405,7 +8483,10 @@ ${this._stopPinCss()}
             filled = [];
           }
           if (gen !== this._gen) return;
-          if (filled.length) paintRows(filled);
+          if (filled.length) {
+            paintRows(filled);
+            this._rowsFilled = true;
+          }
         }
         this._showErr(err);
       }
