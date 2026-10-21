@@ -14,7 +14,7 @@ from gtfs_compact import (
     download_feed,
     feed_error,
     feed_urls,
-    guard_on_running,
+    guard_basis,
     load_env_files,
     load_parts,
     operator_running_trips,
@@ -319,9 +319,8 @@ def guard_feeds(
     nothing left to lose: a seasonal feed (Bahart after its last sailing)
     or an expired zip leaves the index without blocking every other feed.
     A feed that still runs is compared on the trips that still run, on both
-    sides, when they are a fair part of its trips (guard_on_running), so a
-    feed whose summer service ended is not refused for it; otherwise on all
-    its trips. A feed dropped for an ended calendar (expired: feed id ->
+    sides, when enough of them do (guard_basis), so a feed whose summer
+    service ended is not refused for it; otherwise on all its trips. A feed dropped for an ended calendar (expired: feed id ->
     last day) while the previous index still runs it is refused, and the
     message says so."""
     prev = operator_stats(out)
@@ -348,7 +347,8 @@ def guard_feeds(
     for group, running in sorted(before.items()):
         if group in allow or "all" in allow:
             continue
-        if guard_on_running(running, before_all[group]):
+        on_running, keep = guard_basis(running, before_all[group], MIN_TRIP_RATIO)
+        if on_running:
             had, has = running, after_running.get(group, 0)
         else:
             had, has = before_all[group], after_all.get(group, 0)
@@ -357,7 +357,7 @@ def guard_feeds(
                             f" the previous index runs until {ymd(_group_end(prev, group))})")
         elif not has:
             problems.append(f"{group} missing (had {had} trips)")
-        elif had >= MIN_GUARDED_TRIPS and has < had * MIN_TRIP_RATIO:
+        elif had >= MIN_GUARDED_TRIPS and has < had * keep:
             problems.append(f"{group} {has} trips vs {had}")
     if problems:
         raise IndexGuardError(
