@@ -29,7 +29,7 @@
   "services": {
     "elvira_between": {
       "name": "Get MÁV departures",
-      "description": "Fetch MÁV timetable and mandatory seat reservation information between two stations.",
+      "description": "Fetch MÁV timetable and mandatory seat reservation information between two stations. When MÁV ELVIRA cannot be reached, the response has no departures and an error: elvira_unavailable (MÁV is down) or elvira_rate_limited (too many requests from this Home Assistant; the next refresh tries again).",
       "fields": {
         "origin_code": {
           "name": "Origin station code",
@@ -51,7 +51,7 @@
     },
     "futar": {
       "name": "BKK FUTÁR request",
-      "description": "Call a BKK FUTÁR endpoint with the key stored in the integration. Used by the dashboard card.",
+      "description": "Call a BKK FUTÁR endpoint with the key stored in the integration. Used by the dashboard card. When there is no answer, the response has no data and an error: futar_auth (BKK rejected the stored key; update it in the integration options), futar_unavailable (BKK FUTÁR is down) or futar_rate_limited (too many requests from this Home Assistant; the next refresh tries again).",
       "fields": {
         "path": {
           "name": "Endpoint",
@@ -75,23 +75,11 @@
     "same_station": {
       "message": "Origin and destination must be different stations."
     },
-    "futar_auth": {
-      "message": "BKK FUTÁR rejected the configured key ({error}). Update it in the integration options."
-    },
-    "futar_unavailable": {
-      "message": "BKK FUTÁR is not reachable ({error})."
-    },
     "mav_source_missing": {
       "message": "No MÁV GTFS at {path}. MÁV publishes it to registered users only; put the downloaded zip there."
     },
     "mav_build_failed": {
       "message": "The MÁV route index could not be built: {error}"
-    },
-    "elvira_unavailable": {
-      "message": "MÁV ELVIRA is not reachable ({error})."
-    },
-    "elvira_rate_limited": {
-      "message": "Too many MÁV ELVIRA requests from this Home Assistant ({error}); the next refresh tries again."
     },
     "not_loaded": {
       "message": "Hungarian transport is disabled or not loaded. Enable its integration entry first."
@@ -101,9 +89,10 @@
     "step": {
       "init": {
         "title": "BKK Open Data key",
-        "description": "Cards without their own key use this one through Home Assistant. Leave it empty to remove it. Free key: {url}",
+        "description": "Cards without their own key use this one through Home Assistant. The stored key is not shown: leave the field empty to keep it, or tick the box to remove it. Free key: {url}",
         "data": {
-          "api_key": "BKK API key"
+          "api_key": "BKK API key",
+          "remove_key": "Remove the stored key"
         }
       }
     },

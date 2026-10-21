@@ -29,7 +29,7 @@
   "services": {
     "elvira_between": {
       "name": "MÁV indulások lekérése",
-      "description": "MÁV menetrend és kötelező helyjegy információ két állomás között.",
+      "description": "MÁV menetrend és kötelező helyjegy információ két állomás között. Ha a MÁV ELVIRA nem érhető el, a válaszban nincs indulás, csak hiba: elvira_unavailable (a MÁV nem válaszol) vagy elvira_rate_limited (túl sok lekérés ebből a Home Assistantból; a következő frissítés újra próbálja).",
       "fields": {
         "origin_code": {
           "name": "Indulási állomás kódja",
@@ -51,7 +51,7 @@
     },
     "futar": {
       "name": "BKK FUTÁR lekérdezés",
-      "description": "BKK FUTÁR végpont hívása az integrációban tárolt kulccsal. A dashboard kártya használja.",
+      "description": "BKK FUTÁR végpont hívása az integrációban tárolt kulccsal. A dashboard kártya használja. Ha nincs válasz, a válaszban nincs adat, csak hiba: futar_auth (a BKK elutasította a tárolt kulcsot; frissítsd az integráció beállításaiban), futar_unavailable (a BKK FUTÁR nem érhető el) vagy futar_rate_limited (túl sok lekérés ebből a Home Assistantból; a következő frissítés újra próbálja).",
       "fields": {
         "path": {
           "name": "Végpont",
@@ -75,23 +75,11 @@
     "same_station": {
       "message": "Az indulási és a célállomás nem lehet ugyanaz."
     },
-    "futar_auth": {
-      "message": "A BKK FUTÁR elutasította a beállított kulcsot ({error}). Frissítsd az integráció beállításaiban."
-    },
-    "futar_unavailable": {
-      "message": "Nem érhető el a BKK FUTÁR ({error})."
-    },
     "mav_source_missing": {
       "message": "Nincs MÁV GTFS itt: {path}. A MÁV csak regisztrált felhasználóknak adja ki; a letöltött zipet tedd ide."
     },
     "mav_build_failed": {
       "message": "A MÁV útvonalindex nem készült el: {error}"
-    },
-    "elvira_unavailable": {
-      "message": "A MÁV ELVIRA nem érhető el ({error})."
-    },
-    "elvira_rate_limited": {
-      "message": "Túl sok MÁV ELVIRA-lekérés ebből a Home Assistantból ({error}); a következő frissítés újra próbálja."
     },
     "not_loaded": {
       "message": "A Magyar közlekedés integráció le van tiltva vagy nincs betöltve. Előbb engedélyezd az integráció bejegyzését."
@@ -101,9 +89,10 @@
     "step": {
       "init": {
         "title": "BKK Open Data kulcs",
-        "description": "A saját kulcs nélküli kártyák ezt használják a Home Assistanton keresztül. Üresen hagyva törlődik. Ingyenes kulcs: {url}",
+        "description": "A saját kulcs nélküli kártyák ezt használják a Home Assistanton keresztül. A tárolt kulcs nem jelenik meg: üresen hagyva megmarad, a jelölőnégyzettel törölhető. Ingyenes kulcs: {url}",
         "data": {
-          "api_key": "BKK API kulcs"
+          "api_key": "BKK API kulcs",
+          "remove_key": "Tárolt kulcs törlése"
         }
       }
     },

@@ -1160,6 +1160,7 @@ function errText(lang, err) {
 
 // src/lib/futar.js
 var BOARD_TTL_MS = MIN_REFRESH_S * 1e3;
+var BOARD_STALE_MS = 5 * 60 * 1e3;
 Object.assign(BkkLib, {
   _mem: {},
   _inflight: {},
@@ -1316,10 +1317,13 @@ Object.assign(BkkLib, {
     }, true).then((data) => {
       const now = Date.now();
       BkkLib._boards.forEach((v, k) => {
-        if (now - v.ts >= BOARD_TTL_MS) BkkLib._boards.delete(k);
+        if (now - v.ts >= BOARD_STALE_MS) BkkLib._boards.delete(k);
       });
       BkkLib._boards.set(key, { ts: now, data });
       return data;
+    }, (err) => {
+      if (err && err.code === "futar_rate_limited" && hit && Date.now() - hit.ts < BOARD_STALE_MS) return hit.data;
+      throw err;
     }).finally(() => {
       BkkLib._boardInflight.delete(key);
     });

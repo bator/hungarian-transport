@@ -78,7 +78,8 @@ async def test_upstream_calls_are_rate_limited(hass, aioclient_mock, monkeypatch
 
     results = [await _call(hass, params={"query": f"q{i}"}) for i in range(futar.FUTAR_BURST + 3)]
     assert aioclient_mock.call_count == futar.FUTAR_BURST
-    assert [r.get("detail") for r in results[-3:]] == ["rate limited"] * 3
+    # Its own error code: the card keeps quiet on it, unlike an outage.
+    assert results[-3:] == [{"data": None, "error": "futar_rate_limited", "detail": "rate limited"}] * 3
     messages = [r.getMessage() for r in caplog.records if r.name.endswith(".futar")]
     assert len(messages) == 1 and "rate limit" in messages[0]
     assert not any("unavailable" in m or "answers again" in m for m in messages)
@@ -192,6 +193,62 @@ async def test_rejection_is_asked_again_after_a_while(hass, aioclient_mock, monk
     assert aioclient_mock.call_count == 1
     # Accepted again: no more fail-fast.
     assert (await _call(hass, params={"query": "Nyugati"}))["data"]["status"] == "OK"
+
+
+async def test_failed_probe_does_not_restart_the_rejection_window(
+    hass, aioclient_mock, monkeypatch
+) -> None:
+    """The call that asks again after REJECTED_RETRY can fail for another
+    reason: a refused parameter, our own rate limit, a FUTÁR outage. None of
+    them is a rejection, so the next call asks again instead of failing fast
+    for another REJECTED_RETRY."""
+    clock = [1000.0]
+    monkeypatch.setattr(futar, "_monotonic", lambda: clock[0])
+    aioclient_mock.get(SEARCH, status=401)
+    await _setup(hass)
+    assert (await _call(hass))["error"] == "futar_auth"
+    clock[0] += futar.REJECTED_RETRY + 1
+
+    # Refused before any request: not the call that asks again.
+    too_long = await _call(hass, params={"query": "x" * (futar.FUTAR_PARAM_MAX_LEN + 1)})
+    assert too_long["detail"] == "parameter too long"
+    assert aioclient_mock.call_count == 1
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, status=503)
+    assert (await _call(hass, params={"query": "A"}))["error"] == "futar_unavailable"
+    assert aioclient_mock.call_count == 1
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(futar, "_sleep", no_sleep)
+    monkeypatch.setattr(futar, "FUTAR_BURST", 0)
+    monkeypatch.setattr(futar, "FUTAR_RATE", 1e-9)
+    assert (await _call(hass, params={"query": "B"}))["error"] == "futar_rate_limited"
+    monkeypatch.undo()
+    monkeypatch.setattr(futar, "_monotonic", lambda: clock[0])
+    clock[0] += 1  # a token again
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    assert (await _call(hass, params={"query": "C"}))["data"]["status"] == "OK"
+    assert aioclient_mock.call_count == 1
+
+
+async def test_a_probe_rejected_again_restarts_the_window(hass, aioclient_mock, monkeypatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(futar, "_monotonic", lambda: clock[0])
+    aioclient_mock.get(SEARCH, status=401)
+    await _setup(hass)
+    assert (await _call(hass))["error"] == "futar_auth"
+    clock[0] += futar.REJECTED_RETRY + 1
+    assert (await _call(hass, params={"query": "A"}))["error"] == "futar_auth"
+    assert aioclient_mock.call_count == 2
+
+    clock[0] += futar.REJECTED_RETRY - 1
+    assert (await _call(hass, params={"query": "B"}))["error"] == "futar_auth"
+    assert aioclient_mock.call_count == 2
 
 
 async def test_same_key_saved_in_options_asks_futar_again(hass, aioclient_mock) -> None:

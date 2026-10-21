@@ -1,0 +1,10 @@
+# The oldest Home Assistant hacs.json allows (2024.10.0), for the CI job
+# "Integration tests (oldest HA)". Harness release 0.13.171 pins
+# homeassistant==2024.10.0; the frontend is the one that release shipped.
+pytest-homeassistant-custom-component==0.13.171
+home-assistant-frontend==20241002.2
+# Left unpinned by Home Assistant 2024.10 and broken by later releases:
+# josepy 2 removed ComparableX509 (acme, via hass_nabucasa, fails to import),
+# pycares 4.9 leaves a shutdown thread the harness reports after each test.
+josepy==1.15.0
+pycares==4.4.0

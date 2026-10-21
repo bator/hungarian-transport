@@ -1,5 +1,7 @@
 """Fixtures for Hungarian transport tests."""
 
+from unittest.mock import patch
+
 import pytest
 
 
@@ -7,6 +9,15 @@ import pytest
 def auto_enable_custom_integrations(enable_custom_integrations):
     """Load custom_components/ from this repository."""
     yield
+
+
+@pytest.fixture(autouse=True)
+def no_http_server():
+    """Set up http without listening on a socket. The harness does this
+    itself from Home Assistant 2025.x on; the oldest supported release
+    (hacs.json, CI job "Integration tests (oldest HA)") needs it here."""
+    with patch("homeassistant.components.http.start_http_server_and_save_config"):
+        yield
 
 
 @pytest.fixture(autouse=True)

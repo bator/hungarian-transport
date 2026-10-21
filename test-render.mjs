@@ -3239,6 +3239,9 @@ Lib.mavIndex = origMavIndex;
   const probe = await Lib.probeApiKey('');
   check('key probe reads futar_auth as a bad key, whatever the detail',
     !probe.ok && probe.code === 'errApiKeyBad', JSON.stringify(probe));
+  const limited = await failure(viaWs({ data: null, error: 'futar_rate_limited', detail: 'rate limited' }));
+  check('futar_rate_limited keeps its code for the board fallback',
+    !!limited && limited.code === 'futar_rate_limited', limited && limited.message);
   const empty = await failure(viaWs({}));
   check('futar response without data or error is still an empty response',
     !!empty && empty.message === 'BKK empty response', empty && empty.message);
@@ -5135,7 +5138,8 @@ const deferred = () => {
   pc.remove();
 }
 
-/* The shared departure board cache drops boards past their 20 s. */
+/* The shared departure board cache drops boards five minutes old (kept that
+   long only to stand in for a rate-limited refresh). */
 {
   const keepFetch = Lib.fetch;
   const realNow = Date.now;
@@ -5146,12 +5150,54 @@ const deferred = () => {
   await Lib.departureBoard('k', 'S1', 60);
   await Lib.departureBoard('k', 'S2', 60);
   const both = Lib._boards.size;
-  Date.now = () => t0 + 30000;
+  Date.now = () => t0 + 5 * 60 * 1000;
   await Lib.departureBoard('k', 'S3', 60);
   const left = Array.from(Lib._boards.keys());
   Date.now = realNow;
-  check('an expired departure board leaves the cache on the next insert',
+  check('an old departure board leaves the cache on the next insert',
     both === 2 && left.length === 1 && left[0] === 'key:k|S3|60', JSON.stringify({ both, left }));
+  Lib._boards.clear();
+  Lib.fetch = keepFetch;
+}
+
+/* futar_rate_limited is the integration's own limit, not BKK down: the last
+   board (up to five minutes old) answers instead, so the card shows no
+   "BKK rate limited" banner. An outage still fails. */
+{
+  const keepFetch = Lib.fetch;
+  const realNow = Date.now;
+  const t0 = realNow();
+  Lib._boards.clear();
+  const board = { data: { entry: { stopTimes: [{ departureTime: 1 }] } } };
+  let fail = null;
+  Lib.fetch = async () => {
+    if (!fail) return board;
+    const err = new Error(`BKK ${fail}`);
+    err.code = fail;
+    throw err;
+  };
+  const attempt = async () => {
+    try {
+      return await Lib.departureBoard('', 'S1', 60);
+    } catch (err) {
+      return err;
+    }
+  };
+  Date.now = () => t0;
+  await attempt();
+  Date.now = () => t0 + 30000;
+  fail = 'futar_rate_limited';
+  const limited = await attempt();
+  fail = 'futar_unavailable';
+  const down = await attempt();
+  fail = 'futar_rate_limited';
+  Date.now = () => t0 + 5 * 60 * 1000;
+  const tooOld = await attempt();
+  Date.now = realNow;
+  check('a rate-limited board refresh falls back to the last board, an outage does not',
+    limited === board && down instanceof Error && down.code === 'futar_unavailable'
+    && tooOld instanceof Error && tooOld.code === 'futar_rate_limited',
+    JSON.stringify({ limited: limited === board, down: down && down.code, tooOld: tooOld && tooOld.code }));
   Lib._boards.clear();
   Lib.fetch = keepFetch;
 }
