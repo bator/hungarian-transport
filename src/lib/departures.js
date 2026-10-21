@@ -616,7 +616,8 @@ Object.assign(BkkLib, {
         const refs = (data.data || {}).references || {};
         const routes = refs.routes || {};
         const trips = refs.trips || {};
-        const times = ((data.data || {}).entry || {}).stopTimes || [];
+        const entry = (data.data || {}).entry || {};
+        const times = entry.stopTimes || [];
         const stops = refs.stops || {};
         times.forEach((st) => {
           if (!st.tripId || seenTrip.has(st.tripId)) return;
@@ -646,7 +647,10 @@ Object.assign(BkkLib, {
             delay: (st.predictedDepartureTime && st.departureTime)
               ? (st.predictedDepartureTime - st.departureTime) : 0,
             head: trip.tripHeadsign || st.stopHeadsign || '',
-            platform: (stops[st.stopId] || {}).platformCode || '',
+            /* A single pole's board leaves stopId off its stop times (the
+               entry names the pole), so its rows need the entry's stopId to
+               show the same stand code as the parent station's board. */
+            platform: (stops[st.stopId || entry.stopId] || {}).platformCode || '',
             wheelchair: trip.wheelchairAccessible === 1
               || trip.wheelchairAccessible === true
               || st.wheelchairAccessible === true,

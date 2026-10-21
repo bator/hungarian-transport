@@ -4139,6 +4139,53 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   Object.assign(Lib, keep);
 }
 {
+  /* Móricz Zsigmond körtér (2026-10-21): FUTÁR gives the tram poles a stand
+     code (49 → Deák from B1). The parent station's board names the pole on
+     each stop time; a single pole's board leaves stopId off and names the
+     pole in its entry. Both rows carry B1, and the card shows it as a stop,
+     not as a rail track. */
+  const now = Math.floor(Date.now() / 1000);
+  const refs = (stopTimes) => ({
+    trips: Object.fromEntries(stopTimes.map((st) => [st.tripId, { routeId: 'BKK_3490', tripHeadsign: 'Deák Ferenc tér M' }])),
+    routes: { BKK_3490: { shortName: '49', type: 'TRAM', color: 'FFD800', textColor: '000000' } },
+    stops: {
+      BKK_CSF02198: { name: 'Móricz Zsigmond körtér' },
+      BKK_F02203: { name: 'Móricz Zsigmond körtér M', platformCode: 'B1', parentStationId: 'BKK_CSF02198' },
+    },
+  });
+  const parentTimes = [{ tripId: 'T_PARENT', stopId: 'BKK_F02203', departureTime: now + 120 }];
+  const poleTimes = [{ tripId: 'T_POLE', departureTime: now + 240 }];
+  const boards = {
+    BKK_CSF02198: { data: { entry: { stopId: 'BKK_CSF02198', stopTimes: parentTimes }, references: refs(parentTimes) } },
+    BKK_F02203: { data: { entry: { stopId: 'BKK_F02203', stopTimes: poleTimes }, references: refs(poleTimes) } },
+  };
+  const keep = { departureBoard: Lib.departureBoard, tripGoesTo: Lib.tripGoesTo, originPoles: Lib.originPoles };
+  Lib.departureBoard = async (_k, pid) => boards[pid];
+  Lib.originPoles = async () => [];
+  Lib.tripGoesTo = async () => true;
+  const dest = { key: 'deák ferenc tér', name: 'Deák Ferenc tér' };
+  const load = (stopId) => Lib.departures('test-key', stopId, [], dest, { mode: 'bkk', minutesAfter: 10, cache: {} });
+  const fromParent = (await load('BKK_CSF02198')).find((r) => r.tripId === 'T_PARENT');
+  const fromPole = (await load('BKK_F02203')).find((r) => r.tripId === 'T_POLE');
+  Object.assign(Lib, keep);
+  check('a tram row has its pole\'s stand code from the parent board and from the pole\'s own board alike',
+    !!fromParent && !!fromPole && fromParent.platform === 'B1' && fromPole.platform === 'B1',
+    JSON.stringify({ parent: fromParent && fromParent.platform, pole: fromPole && fromPole.platform }));
+  const card = document.createElement('hungarian-transport-card');
+  card.setConfig({ language: 'hu' });
+  const tram = Lib.asRow(Object.assign({}, fromPole || {}), 'Deák Ferenc tér', 'hu');
+  const train = Lib.asRow({ label: 'S30', rawType: 'RAIL', dep: now + 120, platform: '4', head: 'Székesfehérvár' }, 'Székesfehérvár', 'hu');
+  const tramHu = card._rowHtml(tram, 'hu', 0);
+  const tramEn = card._rowHtml(tram, 'en', 0);
+  const trainHu = card._rowHtml(train, 'hu', 1);
+  check('a tram stand code is a stop box with its own tooltip, a train keeps the track box',
+    tramHu.includes('class="plat stand" title="Megállóhely B1">B1<')
+    && tramEn.includes('class="plat stand" title="Stop B1">B1<')
+    && !tramHu.includes('Vágány') && !tramEn.includes('Platform')
+    && trainHu.includes('class="plat" title="Vágány 4">4<'),
+    JSON.stringify({ tramHu: (tramHu.match(/<span class="plat[^<]*<\/span>/) || [''])[0], trainHu: (trainHu.match(/<span class="plat[^<]*<\/span>/) || [''])[0] }));
+}
+{
   /* The MÁV hop card end to end: ELVIRA lands on the first FUTÁR rows, then
      the through-check's fresh FUTÁR copies (numbers read off the trip id
      again) merge onto those rows and ELVIRA once more. */
