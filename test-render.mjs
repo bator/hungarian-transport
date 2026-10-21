@@ -6781,4 +6781,144 @@ const settle = async (el) => {
   Lib.fetch = keepFetch;
 }
 
+/* A sibling pole listed before the stop itself still leaves the stop's own
+   board first, so a capped board discovers the rest of the hub. */
+{
+  const keepFetch = Lib.fetch;
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZQ_P0: { id: 'AZQ_P0', name: 'Azqhub' },
+    AZQ_P1: { id: 'AZQ_P1', name: 'Azqhub' },
+    AZQ_P3: { id: 'AZQ_P3', name: 'Azqhub' },
+    AZQ_D: { id: 'AZQ_D', name: 'Azqcel' },
+  };
+  const firstPole = { AZQ_A: 'AZQ_P0', AZQ_B: 'AZQ_P1', AZQ_D7: 'AZQ_P3' };
+  const boardTrip = {
+    AZQ_P0: ['AZQ_TA', 'AZQ_A', 600],
+    AZQ_P1: ['AZQ_T7A', 'AZQ_D7', 700],
+    AZQ_P3: ['AZQ_T7B', 'AZQ_D7', 1300],
+  };
+  const boards = [];
+  Lib._boards.clear();
+  Lib.fetch = async (key, path, params) => {
+    if (path === 'route-details.json') {
+      return { data: { entry: { variants: [{ name: 'v', stopIds: [firstPole[params.routeId], 'AZQ_D'] }] }, references: { stops: S } } };
+    }
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      boards.push(params.stopId);
+      const [tid, rid, at] = boardTrip[params.stopId] || [];
+      return { data: {
+        entry: { stopTimes: tid ? [{ tripId: tid, stopId: params.stopId, departureTime: t0 + at }] : [] },
+        references: {
+          trips: tid ? { [tid]: { routeId: rid, tripHeadsign: 'Azqcel' } } : {},
+          routes: { AZQ_A: { id: 'AZQ_A', shortName: '1', type: 'BUS' }, AZQ_D7: { id: 'AZQ_D7', shortName: '7', type: 'BUS' } },
+          stops: S,
+        },
+      } };
+    }
+    return { data: {} };
+  };
+  const rows = await Lib.departures('k', 'AZQ_P1', ['AZQ_A', 'AZQ_B'], { key: 'azqcel', name: 'Azqcel' },
+    { originName: 'Azqhub', mode: 'bkk', minutesAfter: 180, deferGps: true, skipElvira: true });
+  check('the stop\'s own board goes first even when a sibling pole is listed before it',
+    boards[0] === 'AZQ_P1' && boards.includes('AZQ_P3') && rows.length === 3,
+    JSON.stringify({ boards, rows: rows.map((r) => r.label) }));
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+}
+
+/* "all" lists destinations at once without a key; a sibling card's key
+   borrowed afterwards reloads the list with the BKK destinations. */
+{
+  const keepDash = Lib.apiKeyFromDashboard;
+  const keepReach = Lib.reachableDests;
+  let giveKey = null;
+  Lib.apiKeyFromDashboard = () => new Promise((r) => { giveKey = r; });
+  const keys = [];
+  Lib.reachableDests = async (apiKey) => {
+    keys.push(apiKey || '');
+    return apiKey
+      ? { dests: [{ key: 'azkeleti', name: 'Azkeleti' }, { key: 'azfehervar', name: 'Azfehérvár' }], destRoutes: {} }
+      : { dests: [{ key: 'azfehervar', name: 'Azfehérvár' }], destRoutes: {} };
+  };
+  const ed = document.createElement('hungarian-transit-stop-card-plan-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = async () => {};
+  ed.hass = { states: {}, language: 'hu', services: {} };
+  ed.setConfig({ language: 'hu', stopId: 'volan_az3', stopName: 'Azkelenföld' });
+  await settleTicks();
+  const before = [...ed.querySelectorAll('#destHits button.hit')].map((x) => x.textContent);
+  giveKey('azsibling');
+  await settleTicks();
+  const after = [...ed.querySelectorAll('#destHits button.hit')].map((x) => x.textContent);
+  check('a key borrowed after a keyless destination load reloads the list',
+    JSON.stringify(before) === '["Azfehérvár"]' && keys.length === 2 && keys[1] === 'azsibling'
+    && JSON.stringify(after) === '["Azkeleti","Azfehérvár"]',
+    JSON.stringify({ before, after, calls: keys.length, last: keys[keys.length - 1] === 'azsibling' }));
+  ed.remove();
+  Lib.apiKeyFromDashboard = keepDash;
+  Lib.reachableDests = keepReach;
+}
+
+/* A failed run's banner and Transitous rows go once FUTÁR answers again,
+   even while the through-check is still running. */
+{
+  const keepFetch = Lib.fetch;
+  const keepFill = Lib.fillTransitousIfEmpty;
+  const t0 = Math.floor(Date.now() / 1000);
+  let down = true;
+  const gates = [];
+  const stops = { AZE_O: { id: 'AZE_O', name: 'Azeorigo' }, AZE_D: { id: 'AZE_D', name: 'Azecel' }, AZE_E: { id: 'AZE_E', name: 'Azevege' } };
+  Lib._boards.clear();
+  Lib.fillTransitousIfEmpty = async (rows) => (rows.length ? rows : [{
+    tripId: 'motis:aze1', label: 'T9', dep: t0 + 400, sched: t0 + 400, head: 'Azecel', vehicle: 'bus', rawType: 'BUS',
+    color: '#000000', text: '#ffffff', travel: null,
+  }]);
+  Lib.fetch = async (key, path) => {
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      if (down) throw new Error('HTTP 503');
+      return { data: {
+        entry: { stopTimes: [{ tripId: 'AZE_T1', stopId: 'AZE_O', departureTime: t0 + 300 }] },
+        references: {
+          trips: { AZE_T1: { routeId: 'AZE_R', tripHeadsign: 'Azevege' } },
+          routes: { AZE_R: { id: 'AZE_R', shortName: '5', type: 'BUS' } },
+          stops: { AZE_O: stops.AZE_O },
+        },
+      } };
+    }
+    if (path === 'trip-details.json') {
+      await new Promise((r) => gates.push(r));
+      return { data: { entry: { stopTimes: [
+        { stopId: 'AZE_O', departureTime: t0 + 300 },
+        { stopId: 'AZE_D', arrivalTime: t0 + 900 },
+        { stopId: 'AZE_E', arrivalTime: t0 + 1500 },
+      ] }, references: { stops } } };
+    }
+    return { data: { entry: {}, references: {} } };
+  };
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'hu', stopId: 'AZE_O', stopName: 'Azeorigo', destKey: 'azecel', destName: 'Azecel', apiKey: 'k' });
+  await settleTicks(30);
+  const broke = !!c._err && c._rows.length === 1;
+  down = false;
+  Lib._boards.clear();
+  const poll = c._pollRun ? c._pollRun.run() : c._reload();
+  await settleTicks(30);
+  const mid = { err: !!c._err, rows: c._rows.length, loading: c._loading, waiting: gates.length };
+  gates.splice(0).forEach((r) => r());
+  await poll;
+  await settleTicks(30);
+  const end = c._rows.map((r) => r.label);
+  check('a recovered board drops the old error and Transitous rows while the through-check runs',
+    broke && !mid.err && mid.rows === 0 && mid.loading && mid.waiting === 1 && JSON.stringify(end) === '["5"]',
+    JSON.stringify({ broke, mid, end }));
+  c.remove();
+  gates.splice(0).forEach((r) => r());
+  Lib.fetch = keepFetch;
+  Lib.fillTransitousIfEmpty = keepFill;
+  Lib._boards.clear();
+}
+
 process.exit(failed ? 1 : 0);

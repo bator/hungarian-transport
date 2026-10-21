@@ -14,6 +14,7 @@ export class BKKHopCardEditor extends HTMLElement {
     this._dests = [];
     this._destRoutes = {};
     this._loadedStop = '';
+    this._loadedAccess = '';
     this._loadingStop = '';
     this._destsLoading = false;
     this._keyOk = null;
@@ -60,7 +61,7 @@ export class BKKHopCardEditor extends HTMLElement {
        already running for this stop must not be restarted. */
     const stopId = this._config.stopId;
     const loading = this._destsLoading && this._loadingStop === stopId;
-    if (stopId && this._canLoadDests() && this._loadedStop !== stopId && !loading) {
+    if (stopId && this._canLoadDests() && this._destsStale(stopId) && !loading) {
       this._loadDests();
     }
   }
@@ -118,6 +119,13 @@ export class BKKHopCardEditor extends HTMLElement {
 
   _canLoadDests() {
     return this._hasFutar() || !this._needsKey();
+  }
+
+  _destsStale(stopId) {
+    if (this._loadedStop !== stopId) return true;
+    /* Loaded before any key was there ("all" needs none): a key borrowed
+       or set later adds the BKK destinations. */
+    return !this._loadedAccess && !this._keyless() && !!this._keyAccess();
   }
 
   _build() {
@@ -637,6 +645,9 @@ export class BKKHopCardEditor extends HTMLElement {
         /* Kept in memory, like the card's own borrowed key: the card reads
            the sibling's key again at runtime, so nothing needs saving here. */
         this._borrowedKey = key;
+        /* A keyless list ("all" mode) loaded meanwhile lacks the BKK stops. */
+        const stopId = this._config.stopId;
+        if (stopId && this._destsStale(stopId)) this._loadDests();
         await this._probeKey();
       }
     } finally {
@@ -791,6 +802,7 @@ export class BKKHopCardEditor extends HTMLElement {
     if (!this._config.stopId) return;
     if (!this._canLoadDests()) return;
     const stopId = this._config.stopId;
+    const access = this._keyAccess();
     const seq = ++this._destSeq;
     this._destsLoading = true;
     this._loadingStop = stopId;
@@ -807,6 +819,7 @@ export class BKKHopCardEditor extends HTMLElement {
       );
       if (seq !== this._destSeq || this._config.stopId !== stopId) return;
       this._loadedStop = stopId;
+      this._loadedAccess = access;
       /* Done before the paint below, or it repaints the loading hint. */
       this._destsLoading = false;
       this._loadingStop = '';

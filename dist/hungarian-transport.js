@@ -5282,7 +5282,7 @@ Object.assign(BkkLib, {
           }
         }
         if (!poles.length) poles = [stopId];
-        else if (destKey && poles.indexOf(stopId) < 0) poles.unshift(stopId);
+        else if (destKey) poles = [stopId].concat(poles.filter((p) => p !== stopId));
         let boardErr = null;
         const loadBoards = (ids) => Promise.all(ids.map(async (pid) => {
           try {
@@ -6038,6 +6038,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._dests = [];
     this._destRoutes = {};
     this._loadedStop = "";
+    this._loadedAccess = "";
     this._loadingStop = "";
     this._destsLoading = false;
     this._keyOk = null;
@@ -6085,7 +6086,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._probeKey();
     const stopId = this._config.stopId;
     const loading = this._destsLoading && this._loadingStop === stopId;
-    if (stopId && this._canLoadDests() && this._loadedStop !== stopId && !loading) {
+    if (stopId && this._canLoadDests() && this._destsStale(stopId) && !loading) {
       this._loadDests();
     }
   }
@@ -6133,6 +6134,10 @@ var BKKHopCardEditor = class extends HTMLElement {
   }
   _canLoadDests() {
     return this._hasFutar() || !this._needsKey();
+  }
+  _destsStale(stopId) {
+    if (this._loadedStop !== stopId) return true;
+    return !this._loadedAccess && !this._keyless() && !!this._keyAccess();
   }
   _build() {
     this._built = true;
@@ -6628,6 +6633,8 @@ var BKKHopCardEditor = class extends HTMLElement {
       const key = await BkkLib.apiKeyFromDashboard(this._hass);
       if (key && !this._config.apiKey && !this._userEditedKey) {
         this._borrowedKey = key;
+        const stopId = this._config.stopId;
+        if (stopId && this._destsStale(stopId)) this._loadDests();
         await this._probeKey();
       }
     } finally {
@@ -6766,6 +6773,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     if (!this._config.stopId) return;
     if (!this._canLoadDests()) return;
     const stopId = this._config.stopId;
+    const access = this._keyAccess();
     const seq = ++this._destSeq;
     this._destsLoading = true;
     this._loadingStop = stopId;
@@ -6782,6 +6790,7 @@ var BKKHopCardEditor = class extends HTMLElement {
       );
       if (seq !== this._destSeq || this._config.stopId !== stopId) return;
       this._loadedStop = stopId;
+      this._loadedAccess = access;
       this._destsLoading = false;
       this._loadingStop = "";
       this._dests = idx.dests || [];
@@ -8322,7 +8331,16 @@ ${this._stopPinCss()}
           if (gen !== this._gen) return;
           let list = futarFull ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap) : earlyRows.slice();
           list = BkkLib.mergeVolanRows(list, elviraRows, cap, { overlayOnly: true });
-          if (!list.length && startThrough && !futarFull) return;
+          if (!list.length && startThrough && !futarFull) {
+            if (this._err) {
+              this._err = "";
+              this._rows = [];
+              this._rawRows = [];
+              this._loading = true;
+              this._paint();
+            }
+            return;
+          }
           paintRows(list);
         };
         let startThrough = null;

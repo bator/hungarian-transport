@@ -534,7 +534,7 @@ Object.assign(BkkLib, {
          The stop's own board is still read, and a capped one discovers the
          rest below, so a day line on another pole is not left out. */
       if (!poles.length) poles = [stopId];
-      else if (destKey && poles.indexOf(stopId) < 0) poles.unshift(stopId);
+      else if (destKey) poles = [stopId].concat(poles.filter((p) => p !== stopId));
       /* One pole failing still leaves the others' rows. Every board failing
          (a revoked key, an outage, the integration erroring) is not "no
          departures": the first error goes up so the card shows it. */

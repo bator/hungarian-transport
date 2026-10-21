@@ -1481,7 +1481,18 @@ ${this._stopPinCss()}
           /* Through trips (the destination mid-route) come only from the
              through-check: an empty list before it answers is not "no
              departures". The first load keeps its spinner, a poll its rows. */
-          if (!list.length && startThrough && !futarFull) return;
+          if (!list.length && startThrough && !futarFull) {
+            /* Rows shown under the last run's error banner (a Transitous
+               fill) are not this board's: back to the spinner. */
+            if (this._err) {
+              this._err = '';
+              this._rows = [];
+              this._rawRows = [];
+              this._loading = true;
+              this._paint();
+            }
+            return;
+          }
           paintRows(list);
         };
         let startThrough = null;
