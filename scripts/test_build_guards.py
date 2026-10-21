@@ -381,9 +381,31 @@ with tempfile.TemporaryDirectory() as tmp:
     write_index([seasonal("volan", 300, 0)], vout, with_operators=False, today="20260820")
     err = raises(lambda: write_index([seasonal("volan", 0, 40)], vout, with_operators=False, today="20261021"))
     check("an ended previous Volán index is compared on all its trips",
-          isinstance(err, IndexGuardError) and "40 running trips vs previous 300" in str(err), repr(err))
+          isinstance(err, IndexGuardError) and "40 trips vs previous 300" in str(err), repr(err))
     err = raises(lambda: write_index([seasonal("volan", 0, 200)], vout, with_operators=False, today="20261021"))
     check("a full new Volán feed after an ended one is written", err is None, repr(err))
+    # Only a handful of the previous trips still run: all of them are the
+    # yardstick, as before the per-trip count, so a feed that really shrank
+    # is refused; never a weaker guard than that.
+    write_index([seasonal("volan", 100000, 60)], vout, with_operators=False, today="20260820")
+    err = raises(lambda: write_index([seasonal("volan", 0, 30)], vout, with_operators=False, today="20261021"))
+    check("Volán: 60 of 100060 running, new 30 is refused on all trips",
+          isinstance(err, IndexGuardError) and "30 trips vs previous 100060" in str(err), repr(err))
+    write_index([seasonal("volan", 100000, 49)], vout, with_operators=False, today="20260820")
+    err = raises(lambda: write_index([seasonal("volan", 0, 30)], vout, with_operators=False, today="20261021"))
+    check("Volán: 49 of 100049 running, new 30 is refused on all trips",
+          isinstance(err, IndexGuardError) and "30 trips vs previous 100049" in str(err), repr(err))
+    vout.unlink()
+    write_index([seasonal("volan", 1000, 400)], vout, with_operators=False, today="20260820")
+    err = raises(lambda: write_index([seasonal("volan", 0, 400)], vout, with_operators=False, today="20261021"))
+    check("Volán: running trips a fair share (400 of 1400) are the yardstick", err is None, repr(err))
+    out = Path(tmp) / "city-index.json.gz"
+    write_index([seasonal("szeged", 1960, 40)], out, with_operators=True, today="20260820", guard_total=False)
+    err = raises(lambda: bci.guard_feeds(out, [seasonal("szeged", 0, 5)], set(), today="20261021"))
+    check("city: 40 of 2000 running, new 5 is refused on all trips",
+          isinstance(err, IndexGuardError) and "szeged 5 trips vs 2000" in str(err), repr(err))
+    err = raises(lambda: bci.guard_feeds(out, [seasonal("szeged", 1960, 40)], set(), today="20261021"))
+    check("city: the same nearly-ended feed again is accepted", err is None, repr(err))
     vout.write_bytes(gzip.compress(b"[1, 2"))
     check("a truncated previous index is no reference", gc.existing_trips(vout) is None)
     vout.write_bytes(gzip.compress(b"\xff\xfe not utf-8"))

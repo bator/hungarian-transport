@@ -219,14 +219,17 @@ itself. `/config/hungarian-transport/update.log` has the details.
 
 The city index (locally and in a release run) is not replaced when the
 rebuild would lose a feed that the index in place still runs, or more than
-half of a feed's trips. Each feed is judged on its own, by the trips that
-still run: a trip counts while its own service has days left (today or
-later), on both sides, so a feed whose summer service ended is compared on
-its autumn trips alone. There is no check on the index's total, so feeds
-whose calendars end together (several on 31 December) leave without holding
-back the rest. The Volán index is a single feed: it is refused with fewer
-than half the still-running trips of the one in place, or of all its trips
-when fewer than 50 of them still run (an index whose calendar has ended). The message names the feed:
+half of a feed's trips. Each feed is judged on its own. A feed whose trips
+in the index have all ended has nothing left to lose; one that still runs is
+compared on the trips that still run (a trip counts while its own service
+has days left), on both sides, as long as they are at least a quarter of its
+trips and at least 50: a feed whose summer service ended is compared on its
+autumn trips alone. When only a handful still run, all its trips are the
+yardstick, so a feed that really shrank is refused then too. There is no
+check on the index's total, so feeds whose calendars end together (several
+on 31 December) leave without holding back the rest. The Volán index is a
+single feed, compared the same way: it is refused with fewer than half the
+trips of the one in place. The message names the feed:
 
 - `<id> missing (had N trips)` — the feed did not download or parse.
 - `<id> calendar ended YYYY-MM-DD (had N trips, the previous index runs until

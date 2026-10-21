@@ -492,6 +492,23 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the city rebuild stays pending for the new scripts",
           fake.state().get("city_retry") is True and fake.state()["cities"]["a"]["etag"] == "a-1"
           and fake.state()["volan"].get("etag") == "volan-0", repr(fake.state()))
+    sent.clear()
+    code = fake.run()
+    check("the same schema conflict is not reported again the next day",
+          code == 0 and sent == [] and volan_builds == [] and fake.city_builds == 0
+          and "https://kti.example/volan.zip" not in fake.downloads, repr((code, sent, fake.downloads)))
+    # An unchanged feed would not be rebuilt anyway: no report at all, even
+    # for a conflict that was never reported.
+    st = fake.state()
+    st.update(schema_reported={}, city_retry=False, volan={"etag": "volan-1"}, cities={"a": {"etag": "a-2"}})
+    (fake.base / "state.json").write_text(json.dumps(st))
+    code = fake.run()
+    check("an unchanged feed with a schema conflict sends no report",
+          code == 0 and sent == [] and volan_builds == [] and fake.city_builds == 0, repr((code, sent)))
+    (fake.base / "state.json").write_text(json.dumps({
+        "volan": {"etag": "volan-0"},
+        "cities": {"a": {"etag": "a-1"}},
+    }))
     # New scripts (same schema as the shipped indexes): both are rebuilt.
     for name in ("volan-index.json.gz", "city-index.json.gz"):
         write_index(fake.www / name, gtfs_compact.INDEX_SCHEMA, "release")

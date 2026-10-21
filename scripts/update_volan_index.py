@@ -598,6 +598,26 @@ def _main() -> int:
         for k, v in (state.get("failing") or {}).items()
         if (k in feed_ids or k == MAV_KEY) and isinstance(v, dict)
     }
+    # Schema conflicts (see schema_conflict) already sent to the webhook:
+    # index name -> message. Reported once, not every day; one that cleared
+    # is forgotten, so it is reported again should it come back.
+    schema_reported = {
+        k: v
+        for k, v in (state.get("schema_reported") or {}).items()
+        if isinstance(v, str) and k in (volan_out.name, city_out.name)
+    }
+    for out in (volan_out, city_out):
+        if out.name in schema_reported and not schema_conflict(out):
+            schema_reported.pop(out.name)
+
+    def skip_rebuild(title: str, out: Path, msg: str) -> int:
+        if schema_reported.get(out.name) == msg:
+            print(f"warn {msg} (reported before)", file=sys.stderr)
+            return 0
+        schema_reported[out.name] = msg
+        report(title, msg)
+        return REPORTED
+
     today = _today()
     changed: list[str] = []
     exit_code = 0
@@ -615,12 +635,13 @@ def _main() -> int:
             report("Volán GTFS frissítés sikertelen", f"error HEAD {GTFS_URL}: {err}")
             exit_code = REPORTED
 
-        volan_conflict = schema_conflict(volan_out)
-        if volan_meta is not None and volan_conflict:
-            # Checked before the download: the same 100 MB every day for an
-            # index that cannot be written helps nobody.
-            report("Volán GTFS frissítés kihagyva", volan_conflict)
-            exit_code = REPORTED
+        if volan_meta is not None and not (
+            same_remote(volan_state, volan_meta) and volan_out.exists() and zip_path.exists()
+        ) and (volan_conflict := schema_conflict(volan_out)):
+            # A rebuild would follow, but these scripts must not write this
+            # index. Checked before the download: the same 100 MB every day
+            # for an index that cannot be written helps nobody.
+            exit_code = skip_rebuild("Volán GTFS frissítés kihagyva", volan_out, volan_conflict) or exit_code
         elif volan_meta is not None and not (
             same_remote(volan_state, volan_meta) and volan_out.exists() and zip_path.exists()
         ):
@@ -715,8 +736,7 @@ def _main() -> int:
         if city_conflict:
             # city_retry stays set and the new zips stay pending: the scripts
             # that can write this index rebuild it on their first run.
-            report("Helyi GTFS frissítés kihagyva", city_conflict)
-            exit_code = REPORTED
+            exit_code = skip_rebuild("Helyi GTFS frissítés kihagyva", city_out, city_conflict) or exit_code
         elif city_retry:
             try:
                 info = build_city_index(base, city_out, zip_path if zip_path.exists() else None)
@@ -784,6 +804,7 @@ def _main() -> int:
                 "cities": city_state,
                 "city_retry": city_retry,
                 "failing": failing,
+                "schema_reported": schema_reported,
                 "index": str(volan_out),
                 "city_index": str(city_out),
                 "mav_index": str(mav_out),

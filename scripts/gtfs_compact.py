@@ -1332,20 +1332,32 @@ def running_trips(idx: dict, today: str | None = None) -> list[list]:
 
 # Below this many trips a guard has nothing meaningful to compare.
 GUARD_MIN_TRIPS = 50
+# The running trips of a previous index are its yardstick only when they are
+# at least this share of all its trips (see guard_on_running).
+GUARD_RUNNING_SHARE = 0.25
 
 
-def existing_trips(out: Path, today: str | None = None) -> int | None:
-    """Trips a rebuild of an existing index is compared with: those whose
-    service still runs (running_trips), or all of them when fewer than
-    GUARD_MIN_TRIPS still run. An index whose calendar has (nearly) ended is
-    the one a truncated feed would replace; its few running trips would let
-    anything through."""
+def guard_on_running(running: int, total: int) -> bool:
+    """Whether a rebuild is compared with the previous index (or feed) on
+    the trips that still run, on both sides, rather than on all trips.
+
+    Running trips only when they are a fair part of the whole (at least
+    GUARD_MIN_TRIPS and GUARD_RUNNING_SHARE of it): a feed whose summer
+    service ended keeps its autumn trips as the yardstick, so it is not
+    refused for the summer. When only a handful still run (a calendar that
+    has nearly ended), all trips are, as before the per-trip count: a
+    truncated feed must not pass then, when the guard matters most."""
+    return running >= GUARD_MIN_TRIPS and running >= total * GUARD_RUNNING_SHARE
+
+
+def existing_trips(out: Path, today: str | None = None) -> tuple[int, int] | None:
+    """(trips whose service still runs, all trips) of an existing index;
+    None when there is no readable index."""
     idx = _read_index(out)
     if idx is None:
         return None
     try:
-        running = len(running_trips(idx, today))
-        return running if running >= GUARD_MIN_TRIPS else len(idx.get("t") or [])
+        return len(running_trips(idx, today)), len(idx.get("t") or [])
     except (IndexError, TypeError):
         return None
 
@@ -1568,15 +1580,19 @@ def write_index(
             all_t.append(row)
         if part.get("feed"):
             feeds.append(f"{oid}:{part['feed']}")
-    # Only trips whose service still runs count, on both sides: the summer
-    # trips of a feed are not lost when the summer is over. An index with
-    # (almost) nothing running is compared on all its trips (existing_trips).
+    # The summer trips of a feed are not lost when the summer is over: the
+    # comparison is on the trips that still run, on both sides, unless only
+    # a handful of the previous ones do (guard_on_running), then on all.
     prev = existing_trips(out, today) if guard_total else None
-    if prev is not None and prev >= GUARD_MIN_TRIPS:
-        running = len(running_trips({"c": all_c, "a": all_a, "t": all_t}, today))
-        if running < prev * 0.5:
+    if prev is not None:
+        if guard_on_running(*prev):
+            had, what = prev[0], "running trips"
+            has = len(running_trips({"c": all_c, "a": all_a, "t": all_t}, today))
+        else:
+            had, has, what = prev[1], len(all_t), "trips"
+        if had >= GUARD_MIN_TRIPS and has < had * 0.5:
             raise IndexGuardError(
-                f"refusing to replace {out.name}: {running} running trips vs previous {prev}"
+                f"refusing to replace {out.name}: {has} {what} vs previous {had}"
             )
     sh = write_shapes(all_shapes, out)
     # "v" and "sh" first: index_schema() and index_shapes() read only the head.

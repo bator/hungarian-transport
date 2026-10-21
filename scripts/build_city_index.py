@@ -14,6 +14,7 @@ from gtfs_compact import (
     download_feed,
     feed_error,
     feed_urls,
+    guard_on_running,
     load_env_files,
     load_parts,
     operator_running_trips,
@@ -314,33 +315,43 @@ def guard_feeds(
     """Refuse a rebuild that loses a feed the previous index had, or most of
     its trips. Without a previous index there is nothing to compare.
 
-    Only trips that still run count, on both sides: a trip whose own
-    service ended before today has nothing left to lose. A seasonal feed
-    (Bahart after its last sailing) or an expired zip leaves the index
-    without blocking every other feed, and a feed whose summer service
-    ended keeps its guard on the trips that still run. A feed dropped for
-    an ended calendar (expired: feed id -> last day) while the previous
-    index still runs it is refused, and the message says so."""
+    An operator whose trips in the previous index have all ended has
+    nothing left to lose: a seasonal feed (Bahart after its last sailing)
+    or an expired zip leaves the index without blocking every other feed.
+    A feed that still runs is compared on the trips that still run, on both
+    sides, when they are a fair part of its trips (guard_on_running), so a
+    feed whose summer service ended is not refused for it; otherwise on all
+    its trips. A feed dropped for an ended calendar (expired: feed id ->
+    last day) while the previous index still runs it is refused, and the
+    message says so."""
     prev = operator_stats(out)
     if not prev:
         return
     today = today or date.today().strftime("%Y%m%d")
     allow = allowed_missing() if allow is None else allow
     expired = expired or {}
-    now: dict[str, int] = {}
+    now_running: dict[str, int] = {}
+    now_all: dict[str, int] = {}
     for part in parts:
-        now[part["op_id"]] = now.get(part["op_id"], 0) + len(running_trips(part, today))
+        op = part["op_id"]
+        now_running[op] = now_running.get(op, 0) + len(running_trips(part, today))
+        now_all[op] = now_all.get(op, 0) + len(part["t"])
     live = {op: n for op, n in (operator_running_trips(out, today) or {}).items() if n}
-    before, after = _group_trips(live), _group_trips(now)
+    before = _group_trips(live)
+    before_all = _group_trips({op: n for op, (n, _e) in prev.items() if op in live})
+    after_running, after_all = _group_trips(now_running), _group_trips(now_all)
     for group, had in sorted(_group_trips({op: n for op, (n, _e) in prev.items()}).items()):
-        if group not in before and not after.get(group):
+        if group not in before and not after_all.get(group):
             print(f"warn {group}: calendar ended {ymd(_group_end(prev, group))} in the previous index"
                   f" as well; its {had} trips leave the index", file=sys.stderr)
     problems = []
-    for group, had in sorted(before.items()):
+    for group, running in sorted(before.items()):
         if group in allow or "all" in allow:
             continue
-        has = after.get(group, 0)
+        if guard_on_running(running, before_all[group]):
+            had, has = running, after_running.get(group, 0)
+        else:
+            had, has = before_all[group], after_all.get(group, 0)
         if not has and group in expired:
             problems.append(f"{group} calendar ended {ymd(expired[group])} (had {had} trips,"
                             f" the previous index runs until {ymd(_group_end(prev, group))})")
