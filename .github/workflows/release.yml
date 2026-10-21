@@ -284,18 +284,37 @@ jobs:
           cache: pip
           cache-dependency-path: requirements_test.txt
 
-      - name: Card tests, bundle up to date with src/
+      # What validate.yml checks on main, on the ref being released: the
+      # release packs dist/ (dist/leaflet included). A weekly refresh of an
+      # older tag may predate a check; what that tag does not have is skipped.
+      - name: Vendored Leaflet matches its recorded hashes
+        run: |
+          set -euo pipefail
+          if [ -f .github/vendored.sha256 ]; then sha256sum --check --strict .github/vendored.sha256; fi
+
+      - name: Card tests, lint, bundle up to date with src/
         run: |
           set -euo pipefail
           npm ci
+          npm run --if-present lint
           npm run build
           git diff --exit-code dist/
           npm test
 
-      - name: GTFS script tests
+      - name: Python lint
         run: |
           set -euo pipefail
-          for t in scripts/test_gtfs_compact.py scripts/test_update_volan_index.py scripts/test_build_guards.py; do
+          # The ruff rules the ref's own validate.yml runs, when it runs any.
+          if grep -q 'ruff check' .github/workflows/validate.yml; then
+            pip install ruff==0.16.10
+            ruff check --target-version py312 --select E,F,W,B --ignore E501,B905 custom_components scripts
+          fi
+
+      - name: GTFS script and helper tests
+        run: |
+          set -euo pipefail
+          for t in scripts/test_gtfs_compact.py scripts/test_update_volan_index.py scripts/test_build_guards.py \
+              scripts/test_release_resolve.py ha/test_futar_limits.py ha/test_assets.py docs/manual/tools/test_server.py; do
             # A weekly refresh of an older tag may predate a test file.
             if [ -f "$t" ]; then python3 "$t"; fi
           done
