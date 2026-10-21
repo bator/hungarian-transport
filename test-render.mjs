@@ -6568,4 +6568,217 @@ const settle = async (el) => {
   eb.remove();
 }
 
+/* ---- A–Z review: hop card and editor ---- */
+
+/* A through trip (the destination mid-route, headsign elsewhere) is found
+   only by the through-check: the first load keeps its spinner until it
+   answers, and a poll keeps the trips it already checked while a new
+   trip's details are still on the way. */
+{
+  const keepFetch = Lib.fetch;
+  const keepFill = Lib.fillTransitousIfEmpty;
+  const t0 = Math.floor(Date.now() / 1000);
+  let trips = ['AZTHRU_T1', 'AZTHRU_T2'];
+  const held = new Set(trips);
+  const gates = new Map();
+  const stops = {
+    AZTHRU_O: { id: 'AZTHRU_O', name: 'Azorigo' },
+    AZTHRU_D: { id: 'AZTHRU_D', name: 'Azcelpont' },
+    AZTHRU_E: { id: 'AZTHRU_E', name: 'Azvegallomas' },
+  };
+  Lib._boards.clear();
+  Lib.fillTransitousIfEmpty = async (rows) => rows;
+  Lib.fetch = async (key, path, params) => {
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      return { data: {
+        entry: { stopTimes: trips.map((t, i) => ({ tripId: t, stopId: 'AZTHRU_O', departureTime: t0 + 300 + i * 600 })) },
+        references: {
+          trips: Object.fromEntries(trips.map((t) => [t, { routeId: 'AZTHRU_R', tripHeadsign: 'Azvegallomas' }])),
+          routes: { AZTHRU_R: { id: 'AZTHRU_R', shortName: '7', type: 'BUS' } },
+          stops: { AZTHRU_O: stops.AZTHRU_O },
+        },
+      } };
+    }
+    if (path === 'trip-details.json') {
+      if (held.has(params.tripId)) await new Promise((r) => gates.set(params.tripId, r));
+      const i = trips.indexOf(params.tripId);
+      return { data: { entry: { stopTimes: [
+        { stopId: 'AZTHRU_O', departureTime: t0 + 300 + i * 600 },
+        { stopId: 'AZTHRU_D', arrivalTime: t0 + 900 + i * 600 },
+        { stopId: 'AZTHRU_E', arrivalTime: t0 + 1500 + i * 600 },
+      ] }, references: { stops } } };
+    }
+    return { data: { entry: {}, references: {} } };
+  };
+  const release = () => {
+    gates.forEach((r, id) => { held.delete(id); r(); });
+    gates.clear();
+  };
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'hu', stopId: 'AZTHRU_O', stopName: 'Azorigo', destKey: 'azcelpont', destName: 'Azcelpont', apiKey: 'k' });
+  await settleTicks(30);
+  const body = () => c.shadowRoot.querySelector('.body').textContent;
+  const firstText = body();
+  const firstLoading = c._loading && !/Nincs közelgő/.test(firstText);
+  release();
+  await settleTicks(30);
+  const loaded = c._rows.length;
+  trips = ['AZTHRU_T1', 'AZTHRU_T2', 'AZTHRU_T3'];
+  held.add('AZTHRU_T3');
+  Lib._boards.clear();
+  const poll = c._pollRun && c._pollRun.run();
+  await settleTicks(30);
+  const midPoll = c._rows.length;
+  const waited = gates.has('AZTHRU_T3');
+  release();
+  await poll;
+  await settleTicks(30);
+  const afterPoll = c._rows.length;
+  check('a through-trip board keeps loading, then keeps its rows while a poll checks a new trip',
+    firstLoading && loaded === 2 && waited && midPoll === 2 && afterPoll === 3,
+    JSON.stringify({ firstText: firstText.trim(), loaded, waited, midPoll, afterPoll }));
+  c.remove();
+  release();
+  Lib.fetch = keepFetch;
+  Lib.fillTransitousIfEmpty = keepFill;
+  Lib._boards.clear();
+}
+
+/* Saved routeIds are what ran in the next three hours when the card was set
+   up: at night only the night bus. They must not hide a day line that
+   leaves from another pole of the same hub. */
+{
+  const keepFetch = Lib.fetch;
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZP_P1: { id: 'AZP_P1', name: 'Azhub', parentStationId: 'AZP_CSF1' },
+    AZP_P2: { id: 'AZP_P2', name: 'Azhub', parentStationId: 'AZP_CSF1' },
+    AZP_D: { id: 'AZP_D', name: 'Azpcel' },
+  };
+  Lib._boards.clear();
+  Lib.fetch = async (key, path, params) => {
+    if (path === 'route-details.json') {
+      const pole = params.routeId === 'AZP_N' ? 'AZP_P1' : 'AZP_P2';
+      return { data: { entry: { variants: [{ name: 'v', stopIds: [pole, 'AZP_D'] }] }, references: { stops: S } } };
+    }
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      const day = params.stopId !== 'AZP_P1';
+      const tid = day ? 'AZP_DAY1' : 'AZP_NIGHT1';
+      return { data: {
+        entry: { stopTimes: [{ tripId: tid, stopId: params.stopId === 'AZP_CSF1' ? 'AZP_P2' : params.stopId, departureTime: t0 + 600 }] },
+        references: {
+          trips: { [tid]: { routeId: day ? 'AZP_D7' : 'AZP_N', tripHeadsign: 'Azpcel' } },
+          routes: { AZP_D7: { id: 'AZP_D7', shortName: '7', type: 'BUS' }, AZP_N: { id: 'AZP_N', shortName: '907', type: 'BUS' } },
+          stops: S,
+        },
+      } };
+    }
+    return { data: {} };
+  };
+  const rows = await Lib.departures('k', 'AZP_CSF1', ['AZP_N'], { key: 'azpcel', name: 'Azpcel' },
+    { originName: 'Azhub', mode: 'bkk', minutesAfter: 180, deferGps: true, skipElvira: true });
+  const labels = rows.map((r) => r.label).sort();
+  check('saved night routeIds do not hide a day line from another pole',
+    JSON.stringify(labels) === '["7","907"]', JSON.stringify(labels));
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+}
+
+/* An "A → B" title the editor wrote follows the next pair after a mode or
+   city change, which clears the pair first. A typed title stays. */
+{
+  const keepReach = Lib.reachableDests;
+  Lib.reachableDests = async () => ({ dests: [], destRoutes: {} });
+  const mk = () => {
+    const ed = document.createElement('hungarian-transport-card-editor');
+    document.body.appendChild(ed);
+    ed._probeKey = () => {};
+    ed.hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } } };
+    ed.addEventListener('config-changed', (e) => { ed._last = e.detail.config; });
+    return ed;
+  };
+  const pickPair = (ed) => {
+    ed._pickStop({ id: 'volan_az1', name: 'Azkelenföld' }, 'origin');
+    ed.setConfig(ed._last);
+    ed._pickStop({ key: 'azfehervar', name: 'Azfehérvár' }, 'dest');
+    return ed._last.name;
+  };
+  const a = mk();
+  a.setConfig({ language: 'hu', name: 'Keleti → Szolnok', stopId: 'BKK_A', stopName: 'Keleti', destKey: 'szolnok', destName: 'Szolnok' });
+  a._el('volan').checked = true;
+  a._onModeToggle('volan');
+  a.setConfig(a._last);
+  const afterMode = pickPair(a);
+  a.remove();
+  const b = mk();
+  b.setConfig({ language: 'hu', helyi: true, city: 'gyor', name: 'Győr A → Győr B', stopId: 'gyor_1', stopName: 'Győr A', destKey: 'gyor b', destName: 'Győr B' });
+  const sel = b._el('city');
+  const opt = document.createElement('option');
+  opt.value = 'pecs';
+  sel.appendChild(opt);
+  sel.value = 'pecs';
+  sel.dispatchEvent(new Event('change'));
+  b.setConfig(b._last);
+  const afterCity = pickPair(b);
+  b.remove();
+  const c = mk();
+  c.setConfig({ language: 'hu', name: 'Munkába', stopId: 'BKK_A', stopName: 'Keleti', destKey: 'szolnok', destName: 'Szolnok' });
+  c._el('volan').checked = true;
+  c._onModeToggle('volan');
+  c.setConfig(c._last);
+  const typed = pickPair(c);
+  c.remove();
+  check('an auto title follows the next pair after a mode or city change; a typed one stays',
+    afterMode === 'Azkelenföld → Azfehérvár' && afterCity === 'Azkelenföld → Azfehérvár' && typed === 'Munkába',
+    JSON.stringify({ afterMode, afterCity, typed }));
+  Lib.reachableDests = keepReach;
+}
+
+/* The planner editor (mode "all") lists destinations without any BKK key:
+   the GTFS indexes need none, as the planner card itself allows. */
+{
+  const keepReach = Lib.reachableDests;
+  let calls = 0;
+  Lib.reachableDests = async () => { calls += 1; return { dests: [{ key: 'azfehervar', name: 'Azfehérvár' }], destRoutes: {} }; };
+  const ed = document.createElement('hungarian-transit-stop-card-plan-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed._fillKey = async () => {};
+  ed.hass = { states: {}, language: 'hu', services: {} };
+  ed.setConfig({ language: 'hu', stopId: 'volan_az2', stopName: 'Azkelenföld' });
+  await settleTicks();
+  const names = [...ed.querySelectorAll('#destHits button.hit')].map((x) => x.textContent);
+  check('the planner editor loads destinations without a BKK key',
+    calls === 1 && JSON.stringify(names) === '["Azfehérvár"]', JSON.stringify({ calls, names }));
+  ed.remove();
+  Lib.reachableDests = keepReach;
+}
+
+/* BKK and MÁV searches with no key anywhere say the key is missing, not
+   "no stops found" for a search that never ran. */
+{
+  const keepFetch = Lib.fetch;
+  let calls = 0;
+  Lib.fetch = async () => { calls += 1; throw new Error('no request expected'); };
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = () => {};
+  ed._fillKey = async () => {};
+  ed.hass = { states: {}, language: 'hu', services: {} };
+  const said = async (cfg) => {
+    ed.setConfig(Object.assign({ language: 'hu' }, cfg));
+    await ed._search('Keleti', 'origin');
+    return { hits: ed.querySelector('#hits').textContent, err: ed.querySelector('#err').textContent };
+  };
+  const bkk = await said({});
+  const mav = await said({ mav: true });
+  const missing = (r) => /Nincs BKK API kulcs/.test(r.err) && !/Nincs BKK megálló|Nincs/.test(r.hits);
+  check('a keyless BKK or MÁV search names the missing key and sends nothing',
+    missing(bkk) && missing(mav) && calls === 0, JSON.stringify({ bkk, mav, calls }));
+  ed.remove();
+  Lib.fetch = keepFetch;
+}
+
 process.exit(failed ? 1 : 0);

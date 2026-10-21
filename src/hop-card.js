@@ -1478,6 +1478,10 @@ ${this._stopPinCss()}
             ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
             : earlyRows.slice();
           list = BkkLib.mergeVolanRows(list, elviraRows, cap, { overlayOnly: true });
+          /* Through trips (the destination mid-route) come only from the
+             through-check: an empty list before it answers is not "no
+             departures". The first load keeps its spinner, a poll its rows. */
+          if (!list.length && startThrough && !futarFull) return;
           paintRows(list);
         };
         let startThrough = null;

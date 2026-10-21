@@ -311,16 +311,26 @@ Object.assign(BkkLib, {
     BkkLib._inflight[key] = p;
     return p;
   },
+  tripReaches(details, origin, destKey) {
+    const { sts, stops } = details;
+    const oidx = BkkLib.originIndex(sts, stops, origin);
+    if (oidx < 0) return false;
+    return sts.slice(oidx + 1).some((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
+  },
   async tripGoesTo(apiKey, cache, tripId, origin, destKey) {
     if (!tripId || !destKey) return false;
     try {
-      const { sts, stops } = await BkkLib.tripDetails(apiKey, cache, tripId);
-      const oidx = BkkLib.originIndex(sts, stops, origin);
-      if (oidx < 0) return false;
-      return sts.slice(oidx + 1).some((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
+      return BkkLib.tripReaches(await BkkLib.tripDetails(apiKey, cache, tripId), origin, destKey);
     } catch (_e) {
       return false;
     }
+  },
+  /* What tripGoesTo would answer from the cached trip details alone:
+     true / false, or undefined when the trip was never loaded. */
+  knownTripGoesTo(cache, tripId, origin, destKey) {
+    if (!tripId || !destKey) return false;
+    const hit = BkkLib._cached(cache, 'trip:' + tripId);
+    return hit ? BkkLib.tripReaches(hit, origin, destKey) : undefined;
   },
   /* The trip's own stops for the map: where the rider boards, and the first
      later stop named like the card's destination. Exact, and on the route. */
@@ -519,7 +529,12 @@ Object.assign(BkkLib, {
           poles = [];
         }
       }
+      /* Saved routes are what ran when the card was set up (at night only
+         the night bus): with a destination they only add a hub's far poles.
+         The stop's own board is still read, and a capped one discovers the
+         rest below, so a day line on another pole is not left out. */
       if (!poles.length) poles = [stopId];
+      else if (destKey && poles.indexOf(stopId) < 0) poles.unshift(stopId);
       /* One pole failing still leaves the others' rows. Every board failing
          (a revoked key, an outage, the integration erroring) is not "no
          departures": the first error goes up so the card shows it. */
@@ -534,8 +549,8 @@ Object.assign(BkkLib, {
       }));
       let payloads = await loadBoards(poles);
       if (boardErr && payloads.every((data) => !data)) throw boardErr;
-      const usedParentOnly = poles.length === 1 && poles[0] === stopId;
-      const span = payloads.reduce((best, data) => {
+      const usedParentOnly = poles[0] === stopId && (poles.length === 1 || !!destKey);
+      const span = payloads.slice(0, usedParentOnly ? 1 : payloads.length).reduce((best, data) => {
         const cur = BkkLib.boardSpanMin(data, now);
         return {
           count: best.count + cur.count,
@@ -647,9 +662,13 @@ Object.assign(BkkLib, {
       BkkLib.nameEq(row.head, dest.name) || BkkLib.nameEq(row.head, dest.key)
     ));
     if (destKey && candidates.length) {
+      /* Trips already checked on an earlier poll are answered from the
+         cache, so a through trip stays in the first paint instead of
+         dropping out until the slowest new trip's details arrive. */
       candidates.forEach((row) => {
-        if (headHitsDest(row)) sure.push(row);
-        else maybe.push(row);
+        const known = headHitsDest(row) || BkkLib.knownTripGoesTo(cache, row.tripId, origin, destKey);
+        if (known === true) sure.push(row);
+        else if (known === undefined) maybe.push(row);
       });
       sure = sure.slice(0, maxRows);
     } else {

@@ -60,7 +60,7 @@ export class BKKHopCardEditor extends HTMLElement {
        already running for this stop must not be restarted. */
     const stopId = this._config.stopId;
     const loading = this._destsLoading && this._loadingStop === stopId;
-    if (stopId && (this._hasFutar() || this._mode() === 'volan' || this._mode() === 'helyi') && this._loadedStop !== stopId && !loading) {
+    if (stopId && this._canLoadDests() && this._loadedStop !== stopId && !loading) {
       this._loadDests();
     }
   }
@@ -107,6 +107,17 @@ export class BKKHopCardEditor extends HTMLElement {
   _keyless() {
     const mode = this._mode();
     return mode === 'volan' || mode === 'helyi';
+  }
+
+  /* Only the BKK and MÁV modes need FUTÁR: "all" falls back to the GTFS
+     indexes without a key, as the card itself does. */
+  _needsKey() {
+    const mode = this._mode();
+    return mode === 'bkk' || mode === 'mav';
+  }
+
+  _canLoadDests() {
+    return this._hasFutar() || !this._needsKey();
   }
 
   _build() {
@@ -261,6 +272,7 @@ export class BKKHopCardEditor extends HTMLElement {
     this._el('helyi').addEventListener('change', () => this._onModeToggle('helyi'));
     this._el('city').addEventListener('change', (ev) => {
       this._cancelSearches();
+      this._keepAutoTitle();
       this._emit(Object.assign({ city: ev.target.value }, this._noStops()));
       this._dests = [];
       this._loadedStop = '';
@@ -551,6 +563,7 @@ export class BKKHopCardEditor extends HTMLElement {
     this._destRoutes = {};
     this._cache = {};
     this._loadedStop = '';
+    this._keepAutoTitle();
     this._emit(Object.assign({
       mav: mav,
       volan: volan,
@@ -681,6 +694,13 @@ export class BKKHopCardEditor extends HTMLElement {
       this._error('');
       if (!this._hasFutar() && !this._userEditedKey) await this._fillKey();
       if (seq !== this._searchSeq) return;
+      /* No key on the card, in the integration or on a sibling card: say
+         so, instead of "no stops found" for a search that never ran. */
+      if (!this._hasFutar() && this._needsKey()) {
+        box.innerHTML = '';
+        this._error(codedError('errNoApiKey'));
+        return;
+      }
       const mode = this._mode();
       const hits = await BkkLib.withIndexes(this._config).searchStops(this._apiKey(), q, mode, this._config.city);
       if (seq !== this._searchSeq) return;
@@ -769,7 +789,7 @@ export class BKKHopCardEditor extends HTMLElement {
 
   async _loadDests() {
     if (!this._config.stopId) return;
-    if (!this._hasFutar() && this._mode() !== 'volan' && this._mode() !== 'helyi') return;
+    if (!this._canLoadDests()) return;
     const stopId = this._config.stopId;
     const seq = ++this._destSeq;
     this._destsLoading = true;
@@ -860,6 +880,13 @@ export class BKKHopCardEditor extends HTMLElement {
     return name === this._pairTitle(this._config.stopName, this._config.destName);
   }
 
+  /* The old pair's title, if the editor wrote it, is replaced once the
+     next pair is picked: remembered here, before the pair is cleared and
+     _titleIsAuto can no longer tell it from a typed one. */
+  _keepAutoTitle() {
+    if (this._config.name && this._titleIsAuto(this._config.name)) this._autoTitle = this._config.name;
+  }
+
   _pickStop(stop, which) {
     this._cancelSearches();
     if (which === 'dest') {
@@ -887,9 +914,7 @@ export class BKKHopCardEditor extends HTMLElement {
     const q = this._el('q');
     if (box) box.innerHTML = '';
     if (q) q.value = stop.label || stop.name;
-    /* The old pair's title, if the editor wrote it, is replaced once the
-       new destination is picked. */
-    if (this._config.name && this._titleIsAuto(this._config.name)) this._autoTitle = this._config.name;
+    this._keepAutoTitle();
     this._cache = {};
     this._dests = [];
     this._destRoutes = {};
