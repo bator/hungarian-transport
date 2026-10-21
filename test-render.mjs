@@ -7405,4 +7405,171 @@ const settle = async (el) => {
   Lib._boards.clear();
 }
 
+/* ---- Planner review, fifth round: city → rail ---- */
+
+/* A destination named only by its town ends at the town's own station,
+   not the nearer Rókus or Kiskundorozsma one of the same feed; an origin
+   that cannot reach it does not end at another station instead. */
+{
+  const keep = {};
+  ['cityIndex', 'railAfterCity'].forEach((k) => { keep[k] = Lib[k]; });
+  const realNow = Date.now;
+  const names = ['Tisza Lajos körút', 'Szeged vasútállomás', 'Rókus vasútállomás', 'Kiskundorozsma vasútállomás', 'Dorozsmai út'];
+  const stops = names.map((n, i) => ({
+    i, id: 'szeged:' + i, name: n, num: '', op: 0, key: Lib.norm(n), fold: Lib.fold(n), lat: 46.2 + i * 0.02, lon: 20.1,
+  }));
+  const t = [];
+  for (let m = 0; m < 24 * 60; m += 10) {
+    t.push([0, 'R', [0, 2], [m, m + 5], 3]);
+    t.push([0, 'S', [0, 1], [m, m + 15], 3]);
+    t.push([0, 'K', [4, 3], [m, m + 4], 3]);
+  }
+  const idx = {
+    stops, t, c: [['1111111', '20200101', '20991231']], a: [], r: [],
+    ops: [{ i: 0, id: 'szeged', name: 'Szeged — SZKT' }],
+    byId: new Map(stops.map((s) => [s.id, s])), byNum: new Map(), byKey: new Map(),
+  };
+  Lib.cityIndex = async () => idx;
+  const asked = [];
+  Lib.railAfterCity = async (_k, _h, _c, path) => { asked.push(path.hubName); return null; };
+  Date.now = () => Date.UTC(2026, 9, 20, 8, 3);
+  let main;
+  let far;
+  try {
+    main = await Lib.cityRailJourney('', null, { id: 'szeged:0', name: 'Tisza Lajos körút' }, { id: 'BKK_005517228', name: 'Szeged' });
+    far = await Lib.cityRailJourney('', null, { id: 'szeged:4', name: 'Dorozsmai út' }, { id: 'BKK_005517228', name: 'Szeged' });
+  } finally {
+    Date.now = realNow;
+  }
+  const lastRide = main && [...main.legs].reverse().find((l) => !l.walk);
+  check('a destination named by its town ends at that town’s own station, not the first one reached',
+    !!lastRide && lastRide.to === 'Szeged vasútállomás' && lastRide.label === 'S',
+    JSON.stringify(main && main.legs.map((l) => [l.label || 'walk', l.to])));
+  check('an origin that cannot reach the town’s station does not end at another one of the town',
+    far == null || !far.legs.some((l) => l.to === 'Kiskundorozsma vasútállomás'),
+    JSON.stringify({ legs: far && far.legs.map((l) => [l.label || 'walk', l.to]), asked }));
+  Object.assign(Lib, keep);
+}
+
+/* The origin's other pole is a start of its own: no 3 minute walk to it
+   duplicates its paths and eats the station's budget, and a walk that is
+   taken first is part of the path it costs. */
+{
+  const names = ['Fő tér', 'Fő tér', 'Vasútállomás'];
+  for (let i = 0; i < 6; i++) names.push('Köztes ' + i);
+  const stops = names.map((n, i) => ({
+    i, id: 'pecs:' + i, name: n, num: '', op: 0, key: Lib.norm(n), fold: Lib.fold(n), lat: 46.07 + i * 0.001, lon: 18.23,
+  }));
+  const t = [];
+  /* Five ways in from pole 0 (10–13 minutes), one from pole 1 (20): the
+     six the station's budget holds, when no walk between the poles
+     copies pole 0's at 13–16. */
+  for (let r = 0; r < 4; r++) {
+    for (let h = 5; h < 23; h++) t.push([0, 'A' + r, [0, 3 + r, 2], [h * 60, h * 60 + 5, h * 60 + 10 + r], 3]);
+  }
+  for (let h = 5; h < 23; h++) t.push([0, 'B', [1, 2], [h * 60, h * 60 + 20], 3]);
+  const idx = { stops, t, c: [['1111111', '20200101', '20991231']], a: [], r: [], ops: [{ i: 0, id: 'pecs', name: 'Pécs — Tüke Busz' }] };
+  const paths = Lib.cityHubPaths(idx, stops[0]);
+  const sig = (p) => p.edges.map((e) => (e.walk ? 'walk' : e.fromI + '>' + e.toI + ':' + e.routes.join(','))).join('/');
+  const sigs = paths.map(sig);
+  check('the origin’s other pole adds no walked duplicate, and its own line keeps a place',
+    new Set(sigs).size === sigs.length && sigs.some((x) => x === '1>2:B')
+    && paths.every((p) => p.edges.reduce((sum, e) => sum + e.minutes, 0) === p.minutes),
+    JSON.stringify(paths.map((p) => [p.minutes, sig(p)])));
+
+  const keepGraph = Lib._cityHubGraph;
+  const two = [
+    { i: 0, op: 0, fold: 'fo ter', name: 'Fő tér' },
+    { i: 1, op: 0, fold: 'fo ter b', name: 'Fő tér B' },
+    { i: 2, op: 0, fold: 'vasutallomas', name: 'Vasútállomás' },
+  ];
+  Lib._cityHubGraph = () => ({
+    rideAt: new Map([[1, [{ from: 1, to: 2, ride: 10, route: '7', routes: ['7'] }]]]),
+    nightAt: new Map(),
+    nightUntil: -1,
+    walkAt: new Map([[0, [1]], [1, [0]]]),
+  });
+  let walked;
+  try {
+    walked = Lib.cityHubPaths({ stops: two }, two[0]);
+  } finally {
+    Lib._cityHubGraph = keepGraph;
+  }
+  check('a walk to a neighbouring pole before the first ride is one of the path’s edges',
+    walked.length === 1 && walked[0].minutes === 13 && walked[0].edges.length === 2
+    && walked[0].edges[0].walk && walked[0].edges[0].minutes === 3 && walked[0].edges[0].from === 'Fő tér',
+    JSON.stringify(walked));
+}
+
+/* Sunday 03:00: Saturday's night line still runs (27:20, 40 minutes),
+   while the day lines, faster and many, start at 05:00. */
+{
+  const keep = { cityIndex: Lib.cityIndex };
+  const realNow = Date.now;
+  const names = ['Malomvölgyi út', 'Főpályaudvar'];
+  for (let i = 0; i < 8; i++) names.push('Köztes ' + i);
+  const stops = names.map((n, i) => ({
+    i, id: 'pecs:' + i, name: n, num: '', op: 0, key: Lib.norm(n), fold: Lib.fold(n), lat: 46.07 + i * 0.001, lon: 18.23,
+  }));
+  const t = [];
+  for (let r = 0; r < 8; r++) {
+    for (let h = 5; h < 23; h++) t.push([0, 'D' + r, [0, 2 + r, 1], [h * 60, h * 60 + 3, h * 60 + 6 + r], 3]);
+  }
+  /* Calendar 1: Saturdays only. */
+  t.push([1, 'N', [0, 1], [27 * 60 + 20, 28 * 60], 3]);
+  const idx = {
+    stops, t, c: [['1111111', '20200101', '20991231'], ['0000010', '20200101', '20991231']], a: [], r: [],
+    ops: [{ i: 0, id: 'pecs', name: 'Pécs — Tüke Busz' }],
+    byId: new Map(stops.map((s) => [s.id, s])), byNum: new Map(), byKey: new Map(),
+  };
+  Lib.cityIndex = async () => idx;
+  Date.now = () => Date.UTC(2026, 10, 1, 2, 0);
+  let j;
+  let noon;
+  try {
+    j = await Lib.cityRailJourney('', null, { id: 'pecs:0', name: 'Malomvölgyi út' }, { id: 'BKK_005515131', name: 'Pécs' });
+    Date.now = () => Date.UTC(2026, 10, 1, 11, 0);
+    noon = Lib.cityHubPaths(idx, stops[0]);
+  } finally {
+    Date.now = realNow;
+  }
+  check('after midnight yesterday’s night line is ridden, not the first day line at dawn',
+    !!j && j.legs.length === 1 && j.legs[0].label === 'N'
+    && j.legs[0].startMs === Date.UTC(2026, 10, 1, 2, 20) && j.legs[0].endMs === Date.UTC(2026, 10, 1, 3, 0),
+    JSON.stringify(j && j.legs.map((l) => [l.label || 'walk', l.startMs, l.endMs])));
+  check('once the night is over its line is not offered',
+    noon.length > 0 && noon.every((p) => p.edges.every((e) => e.routes.indexOf('N') < 0)),
+    JSON.stringify(noon.map((p) => p.edges.map((e) => e.routes.join(',')))));
+  Object.assign(Lib, keep);
+}
+
+/* At a chosen time the full map of an itinerary without geometry does not
+   plan again for "now" and replace the open itinerary. */
+{
+  const keep = { planJourney: Lib.planJourney, fillJourneyShapes: Lib.fillJourneyShapes };
+  let planned = 0;
+  const fresh = { durationMin: 9, transfers: 0, walkMin: 0, waitMin: 0, legs: [] };
+  Lib.planJourney = async () => { planned += 1; return fresh; };
+  Lib.fillJourneyShapes = async () => {};
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'hu', stopId: 'BKK_A', stopName: 'A', destKey: 'b', destName: 'B' });
+  const open = { durationMin: 30, transfers: 0, walkMin: 0, waitMin: 0, legs: [{ walk: false, label: '7', minutes: 30, from: 'A', to: 'B' }] };
+  pc._when = { mode: 'depart', at: Date.now() + 3600 * 1000 };
+  pc._journeys = [open];
+  pc._openJourney = 0;
+  pc._journey = open;
+  try {
+    await pc._openJourneyMap();
+  } finally {
+    Object.assign(Lib, keep);
+  }
+  check('a chosen time’s itinerary map does not plan for now or replace the open itinerary',
+    planned === 0 && pc._journey === open && pc._journeys[0] === open,
+    JSON.stringify({ planned, replaced: pc._journey !== open }));
+  pc._closeVehicleMap();
+  pc.remove();
+}
+
 process.exit(failed ? 1 : 0);
