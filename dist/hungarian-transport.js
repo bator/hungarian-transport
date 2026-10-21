@@ -2688,10 +2688,10 @@ Object.assign(BkkLib, {
     const cityTok = new Set(BkkLib.foldTokens(cityName));
     const destTok = BkkLib.foldTokens(destFold);
     const destPt = BkkLib.finiteLatLon(dest && dest.lat, dest && dest.lon);
-    const isDestHub = (path2) => {
-      const hubTok = BkkLib.foldTokens(path2.hubFold);
-      const hubPt = BkkLib.finiteLatLon(path2.hubLat, path2.hubLon);
-      return !!(destFold && path2.hubFold && (destFold === path2.hubFold || hubPt && destPt && BkkLib.haversineMeters(hubPt, destPt) <= 800 || destTok.length && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok))));
+    const isDestHub = (path) => {
+      const hubTok = BkkLib.foldTokens(path.hubFold);
+      const hubPt = BkkLib.finiteLatLon(path.hubLat, path.hubLon);
+      return !!(destFold && path.hubFold && (destFold === path.hubFold || hubPt && destPt && BkkLib.haversineMeters(hubPt, destPt) <= 800 || destTok.length && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok))));
     };
     const toDest = paths.filter(isDestHub);
     const destIsHub = toDest.length > 0;
@@ -2702,11 +2702,11 @@ Object.assign(BkkLib, {
       if (!rides.has(key)) rides.set(key, BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.routes, readySec));
       return rides.get(key);
     };
-    const timeCityPath = (path2) => {
+    const timeCityPath = (path) => {
       let ready2 = startSec;
       const legs2 = [];
-      for (let i = 0; i < path2.edges.length; i++) {
-        const edge = path2.edges[i];
+      for (let i = 0; i < path.edges.length; i++) {
+        const edge = path.edges[i];
         if (edge.walk) {
           const startMs2 = ready2 * 1e3;
           ready2 += edge.minutes * 60;
@@ -2754,25 +2754,41 @@ Object.assign(BkkLib, {
         });
         ready2 = timed.arr;
       }
-      return { path: path2, legs: legs2, ready: ready2 };
+      return { path, legs: legs2, ready: ready2 };
     };
-    let best = null;
+    const bestAt = /* @__PURE__ */ new Map();
     const tried = destIsHub ? toDest : paths;
+    let first = null;
     for (let i = 0; i < tried.length; i++) {
-      if (best && startSec + tried[i].minutes * 60 >= best.ready) break;
+      const floor = startSec + tried[i].minutes * 60;
+      if (destIsHub && first && floor >= first.ready) break;
+      const key = tried[i].hubFold || tried[i].hubName || "";
+      const held = bestAt.get(key);
+      if (held && floor >= held.ready) continue;
       const timed = timeCityPath(tried[i]);
-      if (timed && (!best || timed.ready < best.ready)) best = timed;
+      if (!timed) continue;
+      if (!held || timed.ready < held.ready) bestAt.set(key, timed);
+      if (!first || timed.ready < first.ready) first = timed;
     }
-    if (!best) return null;
-    const { path, legs } = best;
-    let { ready } = best;
+    if (!first) return null;
+    let best = first;
     if (!destIsHub) {
-      const rail = await this.railAfterCity(apiKey, hass, cityName, path, dest, ready);
-      if (!rail) return null;
-      legs.push(rail.walk);
-      legs.push(rail.train);
-      ready = rail.ready;
+      const hubs = Array.from(bestAt.values()).sort((a, b) => a.ready - b.ready).slice(0, 3);
+      const rails = await Promise.all(hubs.map((city) => this.railAfterCity(apiKey, hass, cityName, city.path, dest, city.ready).catch(() => null)));
+      best = null;
+      let railBest = null;
+      rails.forEach((rail, n) => {
+        if (rail && (!railBest || rail.ready < railBest.ready)) {
+          railBest = rail;
+          best = hubs[n];
+        }
+      });
+      if (!best) return null;
+      best.legs.push(railBest.walk);
+      best.legs.push(railBest.train);
+      best.ready = railBest.ready;
     }
+    const { legs, ready } = best;
     const firstRide = legs.findIndex((leg) => !leg.walk);
     if (firstRide >= 0) {
       let at = legs[firstRide].startMs;
@@ -2830,15 +2846,33 @@ Object.assign(BkkLib, {
   },
   /* The ride that gets there first on any of `routes` (one route or a
      list): a slow line leaving now beats a fast one leaving at dawn. */
+  /* An index's trips by route, so a ride is looked up among its own
+     line's trips, not the whole feed's, for every path and day. */
+  _cityTripsByRoute: /* @__PURE__ */ new WeakMap(),
+  cityTripsOf(idx, routes) {
+    let byRoute = BkkLib._cityTripsByRoute.get(idx);
+    if (!byRoute) {
+      byRoute = /* @__PURE__ */ new Map();
+      (idx.t || []).forEach((t2) => {
+        const key = String(t2[1]);
+        if (!byRoute.has(key)) byRoute.set(key, []);
+        byRoute.get(key).push(t2);
+      });
+      BkkLib._cityTripsByRoute.set(idx, byRoute);
+    }
+    const out = [];
+    new Set([].concat(routes).map(String)).forEach((route) => {
+      (byRoute.get(route) || []).forEach((t2) => out.push(t2));
+    });
+    return out;
+  },
   nextCityRide(idx, fromI, toI, routes, readySec) {
-    const want = new Set([].concat(routes).map(String));
+    const trips = BkkLib.cityTripsOf(idx, routes);
     let best = null;
     for (let off = -1; off < 2; off++) {
       const day = BkkLib.volanDay(off);
-      const trips = idx.t || [];
       for (let n = 0; n < trips.length; n++) {
         const t2 = trips[n];
-        if (!want.has(String(t2[1]))) continue;
         if (!BkkLib.volanServiceOk(idx, t2[0], day.ymd, day.dow)) continue;
         const ps = t2[2] || [];
         const ms = t2[3] || [];
@@ -4063,12 +4097,17 @@ Object.assign(BkkLib, {
     const hits = pool.filter((s) => s.fold.indexOf(f) >= 0);
     if (!hits.length) return null;
     hits.sort((a, b) => {
-      const ah = /autobusz allomas|palyaudvar/.test(a.fold) ? 0 : 1;
-      const bh = /autobusz allomas|palyaudvar/.test(b.fold) ? 0 : 1;
+      const ah = BkkLib.isCoachStationFold(a.fold) ? 0 : 1;
+      const bh = BkkLib.isCoachStationFold(b.fold) ? 0 : 1;
       if (ah !== bh) return ah - bh;
       return a.fold.length - b.fold.length;
     });
     return hits[0];
+  },
+  /* A coach station (or a "pályaudvar") by its folded name: fold() turns
+     "autóbusz-állomás" into "autobusz allomas"; some feeds write it closed. */
+  isCoachStationFold(folded) {
+    return /autobusz ?allomas|palyaudvar/.test(String(folded || ""));
   },
   /* Folded town names of an index: the "Town, " part of its stop names
      (the Volán feed names every stop so) and its operators' towns. */
@@ -4208,8 +4247,8 @@ Object.assign(BkkLib, {
     const pool = opIx == null || opIx < 0 ? idx.stops : BkkLib.cityStops(idx, opIx);
     const hits = pool.filter((s) => s.fold.indexOf(f) >= 0);
     hits.sort((a, b) => {
-      const ah = /autobusz allomas|palyaudvar/.test(a.fold) ? 0 : 1;
-      const bh = /autobusz allomas|palyaudvar/.test(b.fold) ? 0 : 1;
+      const ah = BkkLib.isCoachStationFold(a.fold) ? 0 : 1;
+      const bh = BkkLib.isCoachStationFold(b.fold) ? 0 : 1;
       if (ah !== bh) return ah - bh;
       const as = a.fold.startsWith(f) ? 0 : 1;
       const bs = b.fold.startsWith(f) ? 0 : 1;
@@ -5992,19 +6031,55 @@ Object.assign(BkkLib, {
     });
     return Array.from(byId.values());
   },
+  /* The most used stops first, at most HISTORY_KEEP of them. */
+  _rankStopHistory(list, now) {
+    return BkkLib._cleanStopHistory(list.slice().sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now)).slice(0, HISTORY_KEEP));
+  },
+  /* Whether `local` has a stop the server's list lacks, or a later or more
+     counted use of one: picks made while the server could not be read. */
+  _stopHistoryAhead(local, server) {
+    const byId = new Map(server.map((e) => [e.id, e]));
+    return local.some((e) => {
+      const s = byId.get(e.id);
+      return !s || e.n > s.n || e.t > s.t;
+    });
+  },
+  /* Picks kept only in this browser go to the server: read again right
+     before writing (behind any write in flight), so nothing newer is lost. */
+  _pushLocalStopHistory(hass) {
+    const run = BkkLib._stopHistoryWrite.then(async () => {
+      const server = await BkkLib._readServerHistory(hass);
+      if (server === null) return;
+      const cleanServer = BkkLib._cleanStopHistory(server);
+      const local = BkkLib._cleanStopHistory(localRead(hass));
+      if (!BkkLib._stopHistoryAhead(local, cleanServer)) return;
+      const next = BkkLib._rankStopHistory(BkkLib._mergeStopHistory(cleanServer, local), Date.now());
+      localWrite(hass, next);
+      await hass.callWS({ type: "frontend/set_user_data", key: HISTORY_KEY, value: next });
+    });
+    BkkLib._stopHistoryWrite = run.catch(() => {
+    });
+    return BkkLib._stopHistoryWrite;
+  },
   /* One read per connection; a new login reads again. A failed read shows
-     the browser's copy but is not kept: the next look asks again. */
+     the browser's copy but is not kept: the next look asks again. A good
+     read shows the server's list with this browser's picks merged in, and
+     sends those picks up when the server lacks them. */
   loadStopHistory(hass) {
     const conn = hass && hass.connection || null;
     const memo = BkkLib._stopHistory;
     if (memo && memo.conn === conn) return memo.p;
     const p = (async () => {
       const server = await BkkLib._readServerHistory(hass);
+      const local = BkkLib._cleanStopHistory(localRead(hass));
       if (server === null) {
         if (BkkLib._stopHistory && BkkLib._stopHistory.p === p) BkkLib._stopHistory = null;
-        return BkkLib._cleanStopHistory(localRead(hass));
+        return local;
       }
-      return BkkLib._cleanStopHistory(server);
+      const cleanServer = BkkLib._cleanStopHistory(server);
+      if (!BkkLib._stopHistoryAhead(local, cleanServer)) return cleanServer;
+      BkkLib._pushLocalStopHistory(hass);
+      return BkkLib._rankStopHistory(BkkLib._mergeStopHistory(cleanServer, local), Date.now());
     })();
     BkkLib._stopHistory = { conn, p };
     return p;
@@ -6050,7 +6125,7 @@ Object.assign(BkkLib, {
     }
     if (stop.kind) entry.kind = String(stop.kind);
     if (stop.label) entry.label = String(stop.label);
-    const next = BkkLib._cleanStopHistory(list.sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now)).slice(0, HISTORY_KEEP));
+    const next = BkkLib._rankStopHistory(list, now);
     BkkLib._stopHistory = server !== null ? { conn, p: Promise.resolve(next) } : null;
     localWrite(hass, next);
     if (server !== null) {
@@ -8482,6 +8557,7 @@ ${this._stopPinCss()}
 
 // src/planner-card.js
 var PLANNER_STALE_MS = 5 * 60 * 1e3;
+var HISTORY_RETRY_MS = 60 * 1e3;
 var MAP_TILES = "https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png";
 var MAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>';
 var BKKPlannerCard = class extends BKKHopCard {
@@ -8662,7 +8738,7 @@ var BKKPlannerCard = class extends BKKHopCard {
   set hass(hass) {
     super.hass = hass;
     if (!this._pickersMounted) return;
-    if (this._historyFor !== (hass && hass.connection || null)) this._paintFav();
+    if (this._historyDue(hass && hass.connection || null)) this._paintFav();
     this._ensureDests();
   }
   /* Language from hass after the pickers were drawn: their labels, the
@@ -9538,6 +9614,11 @@ ${this._stopPinCss()}
       if (timed && this.shadowRoot.activeElement !== at) at.value = this._whenInputValue(this._when.at);
     }
   }
+  /* A new login reads the suggestions at once; a failed read again only
+     after HISTORY_RETRY_MS. */
+  _historyDue(conn) {
+    return this._historyFor !== conn || this._historyRetryAt > 0 && Date.now() >= this._historyRetryAt;
+  }
   /* The stops this user picks most, from their own Home Assistant storage
      (see stop-history.js); nothing until they have picked one. */
   _paintFav() {
@@ -9549,11 +9630,12 @@ ${this._stopPinCss()}
       return;
     }
     const conn = this._hass.connection || null;
-    if (this._historyFor !== conn) {
+    if (this._historyDue(conn)) {
       this._historyFor = conn;
+      this._historyRetryAt = 0;
       const hass = this._hass;
       const retry = () => {
-        if (this._historyFor === conn) this._historyFor = void 0;
+        if (this._historyFor === conn) this._historyRetryAt = Date.now() + HISTORY_RETRY_MS;
       };
       BkkLib.loadStopHistory(hass).then((list2) => {
         if (this._historyFor !== conn) return;
@@ -9767,7 +9849,7 @@ ${this._stopPinCss()}
     BkkLib.recordStop(hass, stop).then((list) => {
       this._historyList = list;
       this._paintFav();
-      if (!BkkLib.stopHistoryKept(hass)) this._historyFor = void 0;
+      if (!BkkLib.stopHistoryKept(hass)) this._historyRetryAt = Date.now() + HISTORY_RETRY_MS;
     }).catch(() => {
     });
   }

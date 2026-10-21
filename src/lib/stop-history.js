@@ -95,19 +95,56 @@ Object.assign(BkkLib, {
     });
     return Array.from(byId.values());
   },
+  /* The most used stops first, at most HISTORY_KEEP of them. */
+  _rankStopHistory(list, now) {
+    return BkkLib._cleanStopHistory(list.slice()
+      .sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now))
+      .slice(0, HISTORY_KEEP));
+  },
+  /* Whether `local` has a stop the server's list lacks, or a later or more
+     counted use of one: picks made while the server could not be read. */
+  _stopHistoryAhead(local, server) {
+    const byId = new Map(server.map((e) => [e.id, e]));
+    return local.some((e) => {
+      const s = byId.get(e.id);
+      return !s || e.n > s.n || e.t > s.t;
+    });
+  },
+  /* Picks kept only in this browser go to the server: read again right
+     before writing (behind any write in flight), so nothing newer is lost. */
+  _pushLocalStopHistory(hass) {
+    const run = BkkLib._stopHistoryWrite.then(async () => {
+      const server = await BkkLib._readServerHistory(hass);
+      if (server === null) return;
+      const cleanServer = BkkLib._cleanStopHistory(server);
+      const local = BkkLib._cleanStopHistory(localRead(hass));
+      if (!BkkLib._stopHistoryAhead(local, cleanServer)) return;
+      const next = BkkLib._rankStopHistory(BkkLib._mergeStopHistory(cleanServer, local), Date.now());
+      localWrite(hass, next);
+      await hass.callWS({ type: 'frontend/set_user_data', key: HISTORY_KEY, value: next });
+    });
+    BkkLib._stopHistoryWrite = run.catch(() => { /* the next write still runs */ });
+    return BkkLib._stopHistoryWrite;
+  },
   /* One read per connection; a new login reads again. A failed read shows
-     the browser's copy but is not kept: the next look asks again. */
+     the browser's copy but is not kept: the next look asks again. A good
+     read shows the server's list with this browser's picks merged in, and
+     sends those picks up when the server lacks them. */
   loadStopHistory(hass) {
     const conn = (hass && hass.connection) || null;
     const memo = BkkLib._stopHistory;
     if (memo && memo.conn === conn) return memo.p;
     const p = (async () => {
       const server = await BkkLib._readServerHistory(hass);
+      const local = BkkLib._cleanStopHistory(localRead(hass));
       if (server === null) {
         if (BkkLib._stopHistory && BkkLib._stopHistory.p === p) BkkLib._stopHistory = null;
-        return BkkLib._cleanStopHistory(localRead(hass));
+        return local;
       }
-      return BkkLib._cleanStopHistory(server);
+      const cleanServer = BkkLib._cleanStopHistory(server);
+      if (!BkkLib._stopHistoryAhead(local, cleanServer)) return cleanServer;
+      BkkLib._pushLocalStopHistory(hass);
+      return BkkLib._rankStopHistory(BkkLib._mergeStopHistory(cleanServer, local), Date.now());
     })();
     BkkLib._stopHistory = { conn, p };
     return p;
@@ -152,9 +189,7 @@ Object.assign(BkkLib, {
     }
     if (stop.kind) entry.kind = String(stop.kind);
     if (stop.label) entry.label = String(stop.label);
-    const next = BkkLib._cleanStopHistory(list
-      .sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now))
-      .slice(0, HISTORY_KEEP));
+    const next = BkkLib._rankStopHistory(list, now);
     /* Kept for this connection only when the server's list was read: a
        list built without it would hide the other devices' picks for good. */
     BkkLib._stopHistory = server !== null ? { conn, p: Promise.resolve(next) } : null;

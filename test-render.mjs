@@ -4546,7 +4546,8 @@ check('a branded suburban train in the same minute stays off another numbered tr
   Lib._stopHistory = null;
   const empty = { connection: { b: 1 }, user: { id: 'u1' }, callWS: async () => ({ value: null }) };
   const none = await Lib.loadStopHistory(empty);
-  check('a null answer from Home Assistant means no history, not the browser copy', none.length === 0, JSON.stringify(none));
+  check('a null answer from Home Assistant shows this user’s own browser picks, never the shared old key',
+    none.length === 1 && none[0].id === 'MINE', JSON.stringify(none));
   Lib._stopHistory = null;
   const writes = [];
   const u2 = {
@@ -5388,20 +5389,22 @@ const shapeLen = (pts) => pts.reduce((m, p, i) => (i ? m + Lib.haversineMeters(p
   const first = await Lib.loadStopHistory(hass);
   down = false;
   const second = await Lib.loadStopHistory(hass);
-  check('a failed history read shows the browser copy and is asked again',
-    first.length === 1 && first[0].id === 'LOCAL' && second.some((e) => e.id === 'OTHER') && reads === 2,
-    JSON.stringify({ first: first.map((e) => e.id), second: second.map((e) => e.id), reads }));
+  await Lib._stopHistoryWrite;
+  check('a failed history read shows the browser copy and is asked again; the browser’s picks then reach the server',
+    first.length === 1 && first[0].id === 'LOCAL' && second.some((e) => e.id === 'OTHER') && second.some((e) => e.id === 'LOCAL')
+    && writes.length === 1 && reads === 3 && ['OTHER', 'LOCAL'].every((id) => server.some((e) => e.id === id)),
+    JSON.stringify({ first: first.map((e) => e.id), second: second.map((e) => e.id), server: server.map((e) => e.id), reads }));
   server = server.concat([{ id: 'LATER', name: 'Picked on the phone', n: 1, t: Date.now() }]);
   await Lib.recordStop(hass, { id: 'MINE', name: 'Picked here' });
   const sent = writes[writes.length - 1] || [];
   check('a pick reads the server again and keeps the other device’s stops',
-    writes.length === 1 && ['OTHER', 'LATER', 'MINE', 'LOCAL'].every((id) => sent.some((e) => e.id === id))
+    writes.length === 2 && ['OTHER', 'LATER', 'MINE', 'LOCAL'].every((id) => sent.some((e) => e.id === id))
     && sent.find((e) => e.id === 'OTHER').n === 3,
     JSON.stringify(sent.map((e) => [e.id, e.n])));
   down = true;
   await Lib.recordStop(hass, { id: 'OFFLINE', name: 'Picked offline' });
   check('when the server cannot be read, a pick stays in the browser and the server copy is left alone',
-    writes.length === 1 && JSON.parse(store.get(localKey)).some((e) => e.id === 'OFFLINE'),
+    writes.length === 2 && JSON.parse(store.get(localKey)).some((e) => e.id === 'OFFLINE'),
     JSON.stringify({ writes: writes.length }));
   Lib._stopHistory = null;
   delete globalThis.localStorage;
@@ -6617,27 +6620,53 @@ const settle = async (el) => {
   /* Tiszai: 5 minutes, once at 06:00. Gömöri: 10 minutes, every 10. */
   const hubTrips = [[0, 'X', [0, 1], [360, 365], 3]];
   for (let m = 0; m < 24 * 60; m += 10) hubTrips.push([0, 'Y', [0, 2], [m, m + 10], 3]);
-  let railFrom = null;
+  const asked = [];
+  /* A train from each station, by when the city gets there, or per station. */
+  let trainFrom = (_hub, ready) => ({ dep: ready + 600, arr: ready + 4200 });
   Lib.railAfterCity = async (_k, _h, _city, path, dest, ready) => {
-    railFrom = path.hubName;
+    asked.push(path.hubName);
+    const tr = trainFrom(path.hubName, ready);
+    if (!tr) return null;
     return {
       walk: { walk: true, stationWalk: true, minutes: 6, from: path.hubName, to: 'station', startMs: ready * 1000, endMs: (ready + 360) * 1000 },
-      train: { walk: false, label: 'IC', minutes: 60, from: 'station', to: dest.name, startMs: (ready + 600) * 1000, endMs: (ready + 4200) * 1000 },
-      ready: ready + 4200,
+      train: { walk: false, label: 'IC', minutes: 60, from: 'station', to: dest.name, startMs: tr.dep * 1000, endMs: tr.arr * 1000 },
+      ready: tr.arr,
     };
   };
-  Lib.cityIndex = async () => cityOf(['Búza tér', 'Tiszai pályaudvar', 'Gömöri pályaudvar'], hubTrips);
-  Date.now = () => at(8, 17);
-  let viaHub;
-  try {
-    viaHub = await Lib.cityRailJourney('', null, { id: 'miskolc:0', name: 'Búza tér' }, { id: 'BKK_005501024', name: 'Kelenföld' });
-  } finally {
-    Date.now = realNow;
-  }
+  const viaHubAt = async (trips) => {
+    Lib.cityIndex = async () => cityOf(['Búza tér', 'Tiszai pályaudvar', 'Gömöri pályaudvar'], trips);
+    Date.now = () => at(8, 17);
+    try {
+      return await Lib.cityRailJourney('', null, { id: 'miskolc:0', name: 'Búza tér' }, { id: 'BKK_005501024', name: 'Kelenföld' });
+    } finally {
+      Date.now = realNow;
+    }
+  };
+  const viaHub = await viaHubAt(hubTrips);
   const hubRide = viaHub && viaHub.legs.find((l) => !l.walk);
+  const hubWalk = viaHub && viaHub.legs.find((l) => l.stationWalk);
   check('the station is the one the city reaches first, waits included',
-    railFrom === 'Gömöri pályaudvar' && !!hubRide && hubRide.label === 'Y' && hubRide.startMs === at(8, 20),
-    JSON.stringify({ railFrom, ride: hubRide && [hubRide.label, hubRide.startMs] }));
+    !!hubWalk && hubWalk.from === 'Gömöri pályaudvar' && !!hubRide && hubRide.label === 'Y' && hubRide.startMs === at(8, 20),
+    JSON.stringify({ from: hubWalk && hubWalk.from, ride: hubRide && [hubRide.label, hubRide.startMs] }));
+
+  /* Tiszai now hourly (there 09:05), Gömöri at 08:30: the train decides. */
+  const hourly = [];
+  for (let h = 6; h <= 19; h++) hourly.push([0, 'X', [0, 1], [h * 60, h * 60 + 5], 3]);
+  for (let m = 0; m < 24 * 60; m += 10) hourly.push([0, 'Y', [0, 2], [m, m + 10], 3]);
+  const sec = (h, min) => at(h, min) / 1000;
+  trainFrom = (hub) => (hub === 'Gömöri pályaudvar'
+    ? { dep: sec(10, 0), arr: sec(12, 0) }
+    : { dep: sec(9, 20), arr: sec(11, 0) });
+  const laterTrain = await viaHubAt(hourly);
+  trainFrom = (hub) => (hub === 'Gömöri pályaudvar' ? null : { dep: sec(9, 20), arr: sec(11, 0) });
+  asked.length = 0;
+  const noTrain = await viaHubAt(hourly);
+  const fromOf = (j) => { const w = j && j.legs.find((l) => l.stationWalk); return w ? w.from : null; };
+  check('the station is chosen by the arrival at the destination, and one without a train is not the end',
+    fromOf(laterTrain) === 'Tiszai pályaudvar' && laterTrain.endMs === at(11, 0)
+    && fromOf(noTrain) === 'Tiszai pályaudvar' && noTrain.endMs === at(11, 0)
+    && asked.length === 2,
+    JSON.stringify({ later: fromOf(laterTrain), none: fromOf(noTrain), asked }));
   Object.assign(Lib, keep);
 }
 
@@ -6691,6 +6720,9 @@ const settle = async (el) => {
   check('a town’s coach station comes first in the stop search and the name match',
     listed[0] === 'Győr, autóbusz-állomás' && !!matched && matched.name === 'Győr, autóbusz-állomás',
     JSON.stringify({ listed, matched: matched && matched.name }));
+  const closed = Lib.gtfsSearchStops(mk(['Győr, Adyváros', 'Győr, autóbuszállomás']), 'Győr', null).map((s) => s.name);
+  check('a coach station written closed ("autóbuszállomás") leads too',
+    closed[0] === 'Győr, autóbuszállomás' && Lib.isCoachStationFold(Lib.fold('Győr autóbusz-állomás')), JSON.stringify(closed));
 }
 
 /* Stop history: a pick written while the server could not be read is not
@@ -6708,13 +6740,14 @@ const settle = async (el) => {
   });
   let up = false;
   let reads = 0;
-  const server = [{ id: 'S1', name: 'Other device stop', n: 9, t: Date.now() }];
+  let server = [{ id: 'S1', name: 'Other device stop', n: 9, t: Date.now() }];
   const callWS = async (m) => {
     if (m.type === 'frontend/get_user_data') {
       reads += 1;
       if (!up) throw new Error('ws down');
       return { value: server };
     }
+    if (m.type === 'frontend/set_user_data') server = m.value;
     return null;
   };
   const hass = { states: {}, language: 'hu', user: { id: 'u13' }, connection: { az: 1 }, callWS };
@@ -6722,8 +6755,12 @@ const settle = async (el) => {
   await Lib.recordStop(hass, { id: 'L1', name: 'Local pick' });
   up = true;
   const shown = (await Lib.loadStopHistory(hass)).map((e) => e.id);
+  await Lib._stopHistoryWrite;
   check('after a pick made offline, the server’s list is read once the websocket is back',
     shown.includes('S1'), JSON.stringify(shown));
+  check('a pick made offline stays in the suggestions and reaches the server once it can be read',
+    shown.includes('L1') && server.some((e) => e.id === 'L1') && server.some((e) => e.id === 'S1'),
+    JSON.stringify({ shown, server: server.map((e) => e.id) }));
 
   up = false;
   reads = 0;
@@ -6739,13 +6776,29 @@ const settle = async (el) => {
   await new Promise((r) => setTimeout(r, 0));
   const failedReads = reads;
   up = true;
-  pc.hass = Object.assign({}, hass);
+  /* hass changes many times a minute: no new read, nor a repaint, before
+     the minute is up. */
+  let paints = 0;
+  const paint = pc._paintFav.bind(pc);
+  pc._paintFav = () => { paints += 1; paint(); };
+  for (let i = 0; i < 5; i++) pc.hass = Object.assign({}, hass);
   await new Promise((r) => setTimeout(r, 0));
-  await new Promise((r) => setTimeout(r, 0));
+  const readsInMinute = reads;
+  const paintsInMinute = paints;
+  const realNow = Date.now;
+  Date.now = () => realNow() + 61 * 1000;
+  try {
+    pc.hass = Object.assign({}, hass);
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+  } finally {
+    Date.now = realNow;
+  }
   const chips = Array.from(pc.shadowRoot.querySelectorAll('#pfav .suggest-stop')).map((b) => b.textContent);
-  check('the planner asks for the history again after a failed read',
+  check('after a failed history read the planner waits a minute, then asks again',
+    readsInMinute === failedReads && paintsInMinute === 0 &&
     failedReads >= 1 && reads > failedReads && chips.some((c) => c.includes('Other device stop')),
-    JSON.stringify({ failedReads, reads, chips }));
+    JSON.stringify({ failedReads, readsInMinute, paintsInMinute, reads, chips }));
   pc.remove();
   Lib._stopHistory = null;
   delete globalThis.localStorage;

@@ -480,25 +480,46 @@ Object.assign(BkkLib, {
     };
     /* The earliest arrival at the station wins, waits included: the
        fastest line by ride time may not run again until tomorrow. A path's
-       ride time is a floor for its arrival, so the search stops once the
-       next path cannot beat the best one. */
-    let best = null;
+       ride time is a floor for its arrival, so a path is not timed once it
+       cannot beat the best one to its station. */
+    const bestAt = new Map();
     const tried = destIsHub ? toDest : paths;
+    let first = null;
     for (let i = 0; i < tried.length; i++) {
-      if (best && startSec + tried[i].minutes * 60 >= best.ready) break;
+      const floor = startSec + tried[i].minutes * 60;
+      /* The destination's own station: only the overall best counts. */
+      if (destIsHub && first && floor >= first.ready) break;
+      const key = tried[i].hubFold || tried[i].hubName || '';
+      const held = bestAt.get(key);
+      if (held && floor >= held.ready) continue;
       const timed = timeCityPath(tried[i]);
-      if (timed && (!best || timed.ready < best.ready)) best = timed;
+      if (!timed) continue;
+      if (!held || timed.ready < held.ready) bestAt.set(key, timed);
+      if (!first || timed.ready < first.ready) first = timed;
     }
-    if (!best) return null;
-    const { path, legs } = best;
-    let { ready } = best;
+    if (!first) return null;
+    let best = first;
     if (!destIsHub) {
-      const rail = await this.railAfterCity(apiKey, hass, cityName, path, dest, ready);
-      if (!rail) return null;
-      legs.push(rail.walk);
-      legs.push(rail.train);
-      ready = rail.ready;
+      /* The train decides: a station reached first may have none to the
+         destination, or a later one. The three stations the city reaches
+         first are asked, and the earliest arrival at the destination wins. */
+      const hubs = Array.from(bestAt.values()).sort((a, b) => a.ready - b.ready).slice(0, 3);
+      const rails = await Promise.all(hubs.map((city) => this.railAfterCity(apiKey, hass, cityName, city.path, dest, city.ready)
+        .catch(() => null)));
+      best = null;
+      let railBest = null;
+      rails.forEach((rail, n) => {
+        if (rail && (!railBest || rail.ready < railBest.ready)) {
+          railBest = rail;
+          best = hubs[n];
+        }
+      });
+      if (!best) return null;
+      best.legs.push(railBest.walk);
+      best.legs.push(railBest.train);
+      best.ready = railBest.ready;
     }
+    const { legs, ready } = best;
     /* The journey starts when it has to: walks before the first ride end
        as that bus leaves, and waiting for it is not part of the trip. */
     const firstRide = legs.findIndex((leg) => !leg.walk);
@@ -554,16 +575,34 @@ Object.assign(BkkLib, {
   },
   /* The ride that gets there first on any of `routes` (one route or a
      list): a slow line leaving now beats a fast one leaving at dawn. */
+  /* An index's trips by route, so a ride is looked up among its own
+     line's trips, not the whole feed's, for every path and day. */
+  _cityTripsByRoute: new WeakMap(),
+  cityTripsOf(idx, routes) {
+    let byRoute = BkkLib._cityTripsByRoute.get(idx);
+    if (!byRoute) {
+      byRoute = new Map();
+      (idx.t || []).forEach((t) => {
+        const key = String(t[1]);
+        if (!byRoute.has(key)) byRoute.set(key, []);
+        byRoute.get(key).push(t);
+      });
+      BkkLib._cityTripsByRoute.set(idx, byRoute);
+    }
+    const out = [];
+    new Set([].concat(routes).map(String)).forEach((route) => {
+      (byRoute.get(route) || []).forEach((t) => out.push(t));
+    });
+    return out;
+  },
   nextCityRide(idx, fromI, toI, routes, readySec) {
-    const want = new Set([].concat(routes).map(String));
+    const trips = BkkLib.cityTripsOf(idx, routes);
     let best = null;
     /* -1: after midnight, yesterday's 24:xx trips are tonight's rides. */
     for (let off = -1; off < 2; off++) {
       const day = BkkLib.volanDay(off);
-      const trips = idx.t || [];
       for (let n = 0; n < trips.length; n++) {
         const t = trips[n];
-        if (!want.has(String(t[1]))) continue;
         if (!BkkLib.volanServiceOk(idx, t[0], day.ymd, day.dow)) continue;
         const ps = t[2] || [];
         const ms = t[3] || [];

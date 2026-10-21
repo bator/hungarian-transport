@@ -6,6 +6,9 @@ import { BKK_PLANNER_EDITOR } from './tags.js';
 
 /* After this long off screen the planner plans again on return. */
 const PLANNER_STALE_MS = 5 * 60 * 1000;
+/* After a failed stop-history read, the next one waits this long: hass
+   changes many times a minute. */
+const HISTORY_RETRY_MS = 60 * 1000;
 /* Both journey maps: OpenStreetMap France tiles, credited as they ask. */
 const MAP_TILES = 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png';
 const MAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
@@ -195,7 +198,7 @@ export class BKKPlannerCard extends BKKHopCard {
     if (!this._pickersMounted) return;
     /* The suggestions are this user's stops: they wait for hass to say who
        that is, and follow a new login. */
-    if (this._historyFor !== ((hass && hass.connection) || null)) this._paintFav();
+    if (this._historyDue((hass && hass.connection) || null)) this._paintFav();
     this._ensureDests();
   }
 
@@ -1103,6 +1106,12 @@ ${this._stopPinCss()}
     }
   }
 
+  /* A new login reads the suggestions at once; a failed read again only
+     after HISTORY_RETRY_MS. */
+  _historyDue(conn) {
+    return this._historyFor !== conn || (this._historyRetryAt > 0 && Date.now() >= this._historyRetryAt);
+  }
+
   /* The stops this user picks most, from their own Home Assistant storage
      (see stop-history.js); nothing until they have picked one. */
   _paintFav() {
@@ -1115,11 +1124,13 @@ ${this._stopPinCss()}
       return;
     }
     const conn = this._hass.connection || null;
-    if (this._historyFor !== conn) {
+    if (this._historyDue(conn)) {
       this._historyFor = conn;
+      this._historyRetryAt = 0;
       const hass = this._hass;
-      /* A failed read showed this browser's copy: the next hass asks again. */
-      const retry = () => { if (this._historyFor === conn) this._historyFor = undefined; };
+      /* A failed read showed this browser's copy: a hass a minute later
+         asks again. */
+      const retry = () => { if (this._historyFor === conn) this._historyRetryAt = Date.now() + HISTORY_RETRY_MS; };
       BkkLib.loadStopHistory(hass).then((list) => {
         if (this._historyFor !== conn) return;
         this._historyList = list;
@@ -1349,8 +1360,8 @@ ${this._stopPinCss()}
     BkkLib.recordStop(hass, stop).then((list) => {
       this._historyList = list;
       this._paintFav();
-      /* Written without the server's list: read it again on the next hass. */
-      if (!BkkLib.stopHistoryKept(hass)) this._historyFor = undefined;
+      /* Written without the server's list: read it again a minute later. */
+      if (!BkkLib.stopHistoryKept(hass)) this._historyRetryAt = Date.now() + HISTORY_RETRY_MS;
     }).catch(() => { /* suggestions only */ });
   }
 
