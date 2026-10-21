@@ -6804,4 +6804,59 @@ const settle = async (el) => {
   delete globalThis.localStorage;
 }
 
+/* City → rail: a station farther away is still a candidate when the
+   nearest one has many more ways in; and a ride is chosen by arrival
+   across service days. */
+{
+  const keep = {};
+  ['cityIndex', 'railAfterCity'].forEach((k) => { keep[k] = Lib[k]; });
+  const realNow = Date.now;
+  /* 0 origin, 1 Tiszai, 2 Gömöri, 3..32 stops between origin and Tiszai:
+     31 two-minute ways to Tiszai, one eleven-minute ride to Gömöri. */
+  const names = ['Babits Mihály utca', 'Tiszai pályaudvar', 'Gömöri pályaudvar'];
+  for (let i = 0; i < 30; i++) names.push('Köztes ' + i);
+  const stops = names.map((n, i) => ({
+    i, id: 'miskolc:' + i, name: n, num: '', op: 0, key: Lib.norm(n), fold: Lib.fold(n), lat: 48.1 + i * 0.001, lon: 20.78,
+  }));
+  const t = [];
+  for (let r = 0; r < 30; r++) {
+    for (let h = 5; h < 23; h++) t.push([0, 'T' + r, [0, 3 + r, 1], [h * 60 + r, h * 60 + r + 1, h * 60 + r + 2], 3]);
+  }
+  for (let m = 0; m < 24 * 60; m += 10) t.push([0, 'G', [0, 2], [m, m + 11], 3]);
+  const idx = {
+    stops, t, c: [['1111111', '20200101', '20991231']], a: [], r: [],
+    ops: [{ i: 0, id: 'miskolc', name: 'Miskolc — helyi' }],
+    byId: new Map(stops.map((s) => [s.id, s])), byNum: new Map(), byKey: new Map(),
+  };
+  const asked = [];
+  Lib.cityIndex = async () => idx;
+  Lib.railAfterCity = async (_k, _h, _c, path) => { asked.push(path.hubName); return null; };
+  Date.now = () => Date.UTC(2026, 9, 20, 6, 17);
+  let j;
+  try {
+    j = await Lib.cityRailJourney('', null, { id: 'miskolc:0', name: 'Babits Mihály utca' }, { id: 'BKK_005510124', name: 'Miskolc-Gömöri' });
+  } finally {
+    Date.now = realNow;
+  }
+  const hubs = new Set(Lib.cityHubPaths(idx, stops[0]).map((p) => p.hubName));
+  check('a farther station is not crowded out by the nearest one’s many ways in, and is the trip when it is the destination',
+    hubs.has('Gömöri pályaudvar') && !!j && j.legs.length === 1 && j.legs[0].label === 'G' && asked.length === 0,
+    JSON.stringify({ hubs: Array.from(hubs), legs: j && j.legs.map((l) => l.label || 'walk'), asked }));
+  Object.assign(Lib, keep);
+
+  /* 23:45: route A leaves 23:50 and arrives 00:40; route B leaves 00:05
+     tomorrow and arrives 00:15. */
+  Date.now = () => Date.UTC(2026, 9, 20, 21, 45);
+  const rideIdx = { c: [['1111111', '20200101', '20301231']], t: [[0, 'A', [0, 1], [1430, 1480]], [0, 'B', [0, 1], [5, 15]]] };
+  let ride;
+  try {
+    ride = Lib.nextCityRide(rideIdx, 0, 1, ['A', 'B'], Math.floor(Date.now() / 1000));
+  } finally {
+    Date.now = realNow;
+  }
+  check('a ride arriving after midnight loses to tomorrow’s earlier arrival on another route',
+    !!ride && ride.trip === rideIdx.t[1] && ride.arr === Date.UTC(2026, 9, 20, 22, 15) / 1000,
+    JSON.stringify(ride && { route: ride.trip[1], arr: ride.arr }));
+}
+
 process.exit(failed ? 1 : 0);

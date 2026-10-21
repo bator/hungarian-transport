@@ -2540,8 +2540,10 @@ Object.assign(BkkLib, {
   /* Local GTFS has no planner API. Ride the city feed to a station, walk
      across, then take the next train. Same-name stops are a 3 minute walk;
      the station bay to the platform is 6 minutes at 80 m/min. The paths
-     come cheapest first by ride time alone; the timetable picks among them. */
-  cityHubPaths(idx, originStop, limit = 24) {
+     come cheapest first by ride time alone, at most `perHub` to each
+     station, so the nearest one's variants do not crowd out the others;
+     the timetable picks among them. */
+  cityHubPaths(idx, originStop, perHub = 6) {
     if (!idx || !originStop) return [];
     const stops = idx.stops || [];
     const op = originStop.op;
@@ -2632,7 +2634,15 @@ Object.assign(BkkLib, {
         });
       });
     });
-    return hubs.sort((a, b) => a.cost - b.cost).slice(0, limit).map((state) => {
+    const perStation = /* @__PURE__ */ new Map();
+    const kept = hubs.sort((a, b) => a.cost - b.cost).filter((state) => {
+      const st = stops[state.at];
+      const key = st && (st.fold || st.name) || String(state.at);
+      const n = perStation.get(key) || 0;
+      perStation.set(key, n + 1);
+      return n < perHub;
+    });
+    return kept.map((state) => {
       const edges = [];
       for (let step = state; step && step.prev; step = step.prev) {
         edges.push({
@@ -2884,7 +2894,6 @@ Object.assign(BkkLib, {
         const arr = day.base + ms[d] * 60;
         if (!best || arr < best.arr || arr === best.arr && dep > best.dep) best = { dep, arr, trip: t2, o, d };
       }
-      if (best && off >= 0) break;
     }
     return best;
   },
