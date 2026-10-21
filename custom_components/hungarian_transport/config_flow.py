@@ -9,12 +9,19 @@ from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.selector import TextSelector, TextSelectorConfig, TextSelectorType
+from homeassistant.helpers.selector import (
+    BooleanSelector,
+    TextSelector,
+    TextSelectorConfig,
+    TextSelectorType,
+)
 
 from .const import CONF_API_KEY, DOMAIN
 from .futar import FutarAuthError, FutarError, futar_get
 
 KEY_URL = "https://opendata.bkk.hu/data-sources"
+# Options flow: an empty key field keeps the stored key, this removes it.
+CONF_REMOVE_KEY = "remove_key"
 
 
 async def _validate_key(hass: HomeAssistant, api_key: str) -> str | None:
@@ -30,21 +37,22 @@ async def _validate_key(hass: HomeAssistant, api_key: str) -> str | None:
     return None
 
 
-def _key_schema(current: str = "") -> vol.Schema:
-    """The key field, masked like a password.
+def _key_schema(has_key: bool = False) -> vol.Schema:
+    """The key field, masked like a password and always empty.
 
-    The frontend leaves a cleared optional field out of the submitted data,
-    and a default would then put the old key back: the current key is only a
-    suggested value, so clearing the field removes the key.
+    The stored key is never put in the form (not even as a suggested value):
+    the form data goes to the browser, and the key moved into Home Assistant
+    so that browsers do not hold it. With a key stored, an empty field keeps
+    it and a checkbox removes it.
     """
-    description = {"suggested_value": current} if current else None
-    return vol.Schema(
-        {
-            vol.Optional(CONF_API_KEY, description=description): TextSelector(
-                TextSelectorConfig(type=TextSelectorType.PASSWORD)
-            )
-        }
-    )
+    fields: dict[Any, Any] = {
+        vol.Optional(CONF_API_KEY): TextSelector(
+            TextSelectorConfig(type=TextSelectorType.PASSWORD)
+        )
+    }
+    if has_key:
+        fields[vol.Optional(CONF_REMOVE_KEY, default=False)] = BooleanSelector()
+    return vol.Schema(fields)
 
 
 class HungarianTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -132,8 +140,13 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
         current = str((entry.options if entry else {}).get(CONF_API_KEY) or "")
         errors: dict[str, str] = {}
         if user_input is not None:
-            api_key = (user_input.get(CONF_API_KEY) or "").strip()
-            if api_key and (error := await _validate_key(self.hass, api_key)):
+            typed = (user_input.get(CONF_API_KEY) or "").strip()
+            if user_input.get(CONF_REMOVE_KEY):
+                api_key = ""
+            else:
+                # An empty field keeps the stored key, saved again (a reload).
+                api_key = typed or current
+            if api_key and api_key == typed and (error := await _validate_key(self.hass, api_key)):
                 errors["base"] = error
             else:
                 if entry is not None and api_key == current:
@@ -144,7 +157,7 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
                 return self.async_create_entry(data={CONF_API_KEY: api_key})
         return self.async_show_form(
             step_id="init",
-            data_schema=_key_schema(current),
+            data_schema=_key_schema(bool(current)),
             errors=errors,
             description_placeholders={"url": KEY_URL},
         )

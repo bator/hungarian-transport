@@ -117,6 +117,19 @@ async def main() -> None:
           err is not None and sum(slept) <= futar.FUTAR_TOKEN_WAIT_SEC and sum(slept) > futar.FUTAR_TOKEN_WAIT_SEC - 0.5,
           repr((err, sum(slept))))
     check("a refusal is not an outage: no unavailable state", proxy._failing is False)
+
+    # Callers sharing one refused request: one refusal in the log's count,
+    # not one per card waiting for it.
+    proxy._tokens = 0.0
+    proxy._tokens_at = clock[0]
+    proxy._limited = 0
+    proxy._limited_logged_at = clock[0]
+    shared = await asyncio.gather(
+        *(proxy.get("search.json", {"query": "shared"}) for _ in range(5)), return_exceptions=True
+    )
+    check("callers sharing one refused request count it once",
+          all(isinstance(r, futar.FutarRateLimited) for r in shared) and proxy._limited == 1,
+          repr((shared, proxy._limited)))
     futar._sleep = asyncio.sleep
 
 

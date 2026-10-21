@@ -8,10 +8,11 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.helpers.selector import TextSelector, TextSelectorType
+from homeassistant.helpers.selector import BooleanSelector, TextSelector, TextSelectorType
 from homeassistant.setup import async_setup_component
 
 import custom_components.hungarian_transport as integration
+from custom_components.hungarian_transport.config_flow import CONF_REMOVE_KEY
 from custom_components.hungarian_transport.const import CONF_API_KEY, DOMAIN
 from custom_components.hungarian_transport.futar import BKK_API
 
@@ -81,15 +82,15 @@ async def test_second_entry_is_refused(hass) -> None:
 
 
 def _key_field(result) -> vol.Optional:
-    (field,) = result["data_schema"].schema
+    field = next(iter(result["data_schema"].schema))
     assert field == CONF_API_KEY
     return field
 
 
 # The frontend leaves a cleared optional field out of what it submits ({});
 # an API client may send the empty string.
-@pytest.mark.parametrize("cleared", [{}, {CONF_API_KEY: ""}])
-async def test_options_flow_sets_and_clears_key(hass, aioclient_mock, cleared) -> None:
+@pytest.mark.parametrize("empty", [{}, {CONF_API_KEY: ""}, {CONF_API_KEY: "  "}])
+async def test_options_flow_sets_keeps_and_removes_key(hass, aioclient_mock, empty) -> None:
     aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
     entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: ""})
     entry.add_to_hass(hass)
@@ -101,26 +102,62 @@ async def test_options_flow_sets_and_clears_key(hass, aioclient_mock, cleared) -
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options == {CONF_API_KEY: "new-key"}
+    assert aioclient_mock.call_count == 1
+
+    # The field comes back empty: leaving it so keeps the key, unasked.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], empty)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {CONF_API_KEY: "new-key"}
+    assert aioclient_mock.call_count == 1
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
-    result = await hass.config_entries.options.async_configure(result["flow_id"], cleared)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {**empty, CONF_REMOVE_KEY: True}
+    )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options == {CONF_API_KEY: ""}
 
 
-async def test_key_field_is_masked_and_only_suggested(hass) -> None:
-    """A password field, prefilled with the current key as a suggestion, not
-    a default that would bring a cleared key back."""
+async def test_remove_wins_over_a_typed_key(hass, aioclient_mock) -> None:
     entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: "current"})
     entry.add_to_hass(hass)
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_API_KEY: "typed", CONF_REMOVE_KEY: True}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {CONF_API_KEY: ""}
+    assert aioclient_mock.call_count == 0
+
+
+async def test_stored_key_never_goes_to_the_form(hass) -> None:
+    """The form data reaches the admin's browser: the stored key is neither
+    a default nor a suggested value. The field is a password field, and a
+    checkbox removes the key."""
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: "current"})
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert "current" not in repr(result)
     field = _key_field(result)
     assert field.default is vol.UNDEFINED
-    assert field.description == {"suggested_value": "current"}
+    assert not field.description
     selector = result["data_schema"].schema[field]
     assert isinstance(selector, TextSelector)
     assert selector.config["type"] == TextSelectorType.PASSWORD
+    remove = next(k for k in result["data_schema"].schema if k == CONF_REMOVE_KEY)
+    assert remove.default() is False
+    assert isinstance(result["data_schema"].schema[remove], BooleanSelector)
+
+
+async def test_no_remove_box_without_a_stored_key(hass) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: ""})
+    entry.add_to_hass(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert list(result["data_schema"].schema) == [CONF_API_KEY]
 
 
 async def test_user_form_has_no_suggested_key(hass) -> None:

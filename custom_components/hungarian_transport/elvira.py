@@ -48,6 +48,11 @@ ARRIVAL_GRACE = timedelta(minutes=2)
 # StationInfo is per service day. Shortly after midnight, delayed trains of the
 # previous day are still due; near midnight the look-ahead reaches tomorrow.
 LATE_TRAIN_WINDOW = timedelta(hours=3)
+# The longest a train can take from origin to destination and still be the
+# same run. A Hungarian domestic run is under eight hours, delays included;
+# the same train number a day later (the next run, or one in the opposite
+# direction passing the destination first) is 24 hours on.
+MAX_TRAVEL = timedelta(hours=12)
 # Kelenföld midnight StationInfo truncates ~11:32 at 200 (moreResult=false).
 # 500 reaches ~22:32 so evening origin overlay still has #3880 to copy.
 STATIONINFO_MAX_COUNT = "500"
@@ -325,9 +330,12 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
     def dest_hit(tid: str, code: str, start: datetime):
         # Train numbers repeat every day, and a truncated dest board
         # (Kelenföld ~11:36) can still list a morning run of the same `code`.
-        # Only the first arrival after this departure belongs to this run.
+        # Only the first arrival after this departure, within MAX_TRAVEL,
+        # belongs to this run: tomorrow's board lists the same number again,
+        # and for a train that passes the destination before the origin
+        # (the opposite direction) that is the only arrival after it.
         for cands in (dest_by_id.get(tid) or [], dest_by_code.get(code) or []):
-            after = [c for c in cands if c[0] >= start]
+            after = [c for c in cands if start <= c[0] <= start + MAX_TRAVEL]
             if after:
                 return min(after, key=lambda c: c[0])
         return None, None
@@ -357,7 +365,7 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
         travel = None
         if arr is not None:
             travel = int((arr - start).total_seconds() / 60)
-            if travel < 1 or travel > 1440:
+            if travel < 1:
                 travel = None
         flags = parse_elvira_services(row)
         sched = _iso_dt(row.get("start"), tz) or start
@@ -451,15 +459,29 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     boards = dict(zip(wanted, results))
     origin = [boards[(origin_code, day)] for day in days]
     dest = [boards[(dest_code, day)] for day in days]
+    today_index = days.index(now.date())
     for code, part in ((origin_code, origin), (dest_code, dest)):
         errors = [b for b in part if isinstance(b, ElviraError)]
-        outage = next((b for b in errors if not isinstance(b, ElviraRateLimited)), None)
-        if outage is None and len(errors) == len(part):
+        outages = [b for b in errors if not isinstance(b, ElviraRateLimited)]
+        today_board = part[today_index]
+        if isinstance(today_board, ElviraError) and not isinstance(today_board, ElviraRateLimited):
+            # Today's board is the one the rows need.
+            outage = today_board
+        elif len(errors) < len(part):
+            # A board arrived: the station answers, even when yesterday's or
+            # tomorrow's did not (only a few late trains are missing then).
+            outage = None
+            for board, day in zip(part, days):
+                if isinstance(board, ElviraError) and not isinstance(board, ElviraRateLimited):
+                    _LOGGER.debug("ELVIRA StationInfo %s for %s unavailable (%s)", code, day, board)
+        elif outages:
+            outage = outages[0]
+        else:
             # Every board refused here, none asked: nothing heard from the
-            # station either way. One that arrived means it answers again.
+            # station either way.
             continue
         _log_outage(hass, code, outage)
-    today = origin[days.index(now.date())]
+    today = origin[today_index]
     if isinstance(today, ElviraError):
         # A rate limit stays one for the service response.
         raise type(today)(str(today))
