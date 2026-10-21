@@ -293,6 +293,7 @@ From left to right:
 | Line badge | The line in its own colours (Budapest suburban train colours for S, G and Z lines). |
 | Headsign | Where the vehicle goes. MÁV rows add the train number in grey. |
 | Blue box | The platform (MÁV, from ELVIRA). |
+| Outlined code | On a tram, bus or metro row, the stop's stand code from FUTÁR (B1, say). |
 | ♿ | Wheelchair accessible, low-floor vehicle. |
 | 🚲 | Bikes allowed. |
 | **H** | Seat reservation required. The tooltip says when 2nd class needs none on a domestic section. |

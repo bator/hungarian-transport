@@ -380,6 +380,10 @@ export class BKKHopCard extends HTMLElement {
         background: #2E5EA8; color: #fff; font-size: 11px; font-weight: 700;
         line-height: 1.45; white-space: nowrap;
       }
+      .plat.stand {
+        background: none; color: var(--secondary-text-color); font-weight: 600;
+        box-shadow: inset 0 0 0 1px var(--divider-color, rgba(127, 127, 127, 0.5));
+      }
       .picto::after {
         content: attr(data-tip); position: absolute; left: 50%; top: calc(100% + 7px);
         transform: translateX(-50%); background: var(--primary-text-color, #222);
@@ -573,8 +577,12 @@ export class BKKHopCard extends HTMLElement {
          where ELVIRA lists it, since that is what pass holders look for. */
       if (r.nationalPass) pictos.push(this._picto('OB', t(lang, 'tipNationalPass'), 'pass'));
     }
+    /* Only a train has a track. FUTÁR gives tram, bus and metro poles a
+       stand code (B1, I1) as well: that one is shown plain, as a stop. */
+    const rail = BkkLib.isTrainRow(r);
     const plat = r.platform
-      ? `<span class="plat" title="${esc(t(lang, 'tipPlatform', r.platform))}">${
+      ? `<span class="plat${rail ? '' : ' stand'}" title="${
+        esc(t(lang, rail ? 'tipPlatform' : 'tipStand', r.platform))}">${
         esc(r.platform)}</span>`
       : '';
     const travel = r.travelMin

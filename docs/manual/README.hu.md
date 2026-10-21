@@ -304,6 +304,7 @@ Balról jobbra:
 | Vonaljelzés | A vonal a saját színeiben (az S, G és Z vonatoknál a budapesti elővárosi színekkel). |
 | Célállomás | Merre megy a jármű. MÁV soroknál szürkével a vonatszám is. |
 | Kék doboz | A vágány (MÁV, az ELVIRA-ból). |
+| Keretes kód | Villamos-, busz- vagy metrósornál a megállóhely jele a FUTÁR-ból (pl. B1). |
 | ♿ | Akadálymentes, alacsonypadlós jármű. |
 | 🚲 | Kerékpár szállítható. |
 | **H** | Helyjegy váltása kötelező. A magyarázat azt is megmondja, ha belföldi szakaszon 2. osztályon nem kell. |

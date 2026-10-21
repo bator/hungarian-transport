@@ -784,6 +784,7 @@ var I18N = {
     destLoading: "Elérhető célok betöltése...",
     destEmptySuggest: (list) => "Nincs közvetlen járat erre a célra. Elérhető célok: " + list + ".",
     tipPlatform: (p) => `Vágány ${p}`,
+    tipStand: (p) => `Megállóhely ${p}`,
     minutes: (n) => `${n} perc`,
     now: "most",
     cardNoDepartures: "Nincs közelgő indulás.",
@@ -966,6 +967,7 @@ var I18N = {
     destLoading: "Loading reachable destinations...",
     destEmptySuggest: (list) => "No direct service to that destination. Reachable destinations: " + list + ".",
     tipPlatform: (p) => `Platform ${p}`,
+    tipStand: (p) => `Stop ${p}`,
     minutes: (n) => `${n} min`,
     now: "now",
     cardNoDepartures: "No upcoming departures.",
@@ -5460,7 +5462,8 @@ Object.assign(BkkLib, {
           const refs = (data.data || {}).references || {};
           const routes = refs.routes || {};
           const trips = refs.trips || {};
-          const times = ((data.data || {}).entry || {}).stopTimes || [];
+          const entry = (data.data || {}).entry || {};
+          const times = entry.stopTimes || [];
           const stops = refs.stops || {};
           times.forEach((st) => {
             if (!st.tripId || seenTrip.has(st.tripId)) return;
@@ -5489,7 +5492,10 @@ Object.assign(BkkLib, {
               sched: st.departureTime,
               delay: st.predictedDepartureTime && st.departureTime ? st.predictedDepartureTime - st.departureTime : 0,
               head: trip.tripHeadsign || st.stopHeadsign || "",
-              platform: (stops[st.stopId] || {}).platformCode || "",
+              /* A single pole's board leaves stopId off its stop times (the
+                 entry names the pole), so its rows need the entry's stopId to
+                 show the same stand code as the parent station's board. */
+              platform: (stops[st.stopId || entry.stopId] || {}).platformCode || "",
               wheelchair: trip.wheelchairAccessible === 1 || trip.wheelchairAccessible === true || st.wheelchairAccessible === true,
               bikesAllowed: trip.bikesAllowed === 1 || trip.bikesAllowed === true,
               /* Only trains have a train number. A bus on a numeric ad-hoc
@@ -7419,6 +7425,10 @@ var BKKHopCard = class extends HTMLElement {
         background: #2E5EA8; color: #fff; font-size: 11px; font-weight: 700;
         line-height: 1.45; white-space: nowrap;
       }
+      .plat.stand {
+        background: none; color: var(--secondary-text-color); font-weight: 600;
+        box-shadow: inset 0 0 0 1px var(--divider-color, rgba(127, 127, 127, 0.5));
+      }
       .picto::after {
         content: attr(data-tip); position: absolute; left: 50%; top: calc(100% + 7px);
         transform: translateX(-50%); background: var(--primary-text-color, #222);
@@ -7595,7 +7605,8 @@ var BKKHopCard = class extends HTMLElement {
       pictos.push(this._picto("H", tip2, "booking"));
       if (r.nationalPass) pictos.push(this._picto("OB", t(lang, "tipNationalPass"), "pass"));
     }
-    const plat = r.platform ? `<span class="plat" title="${esc(t(lang, "tipPlatform", r.platform))}">${esc(r.platform)}</span>` : "";
+    const rail = BkkLib.isTrainRow(r);
+    const plat = r.platform ? `<span class="plat${rail ? "" : " stand"}" title="${esc(t(lang, rail ? "tipPlatform" : "tipStand", r.platform))}">${esc(r.platform)}</span>` : "";
     const travel = r.travelMin ? `<span class="travel" title="${esc(t(lang, "tipTravel", r.travelMin))}">${esc(t(lang, "minutes", r.travelMin))}</span>` : "";
     const num = r.trainNumber ? `<span class="num" title="${esc(t(lang, "tipTrain", r.trainNumber))}">${esc(r.trainNumber)}</span>` : "";
     const tip = esc(t(lang, "mapOpenTip"));
