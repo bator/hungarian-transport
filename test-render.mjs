@@ -7405,4 +7405,367 @@ const settle = async (el) => {
   Lib._boards.clear();
 }
 
+/* With a destination and every saved pole a child of the parent, only the
+   parent's board is read: when it fails, the child poles' boards stand in
+   instead of the whole board failing. */
+{
+  const keep = { op: Lib.originPoles, kids: Lib.childPolesOf, board: Lib.departureBoard };
+  const t0 = Math.floor(Date.now() / 1000);
+  const board = (pid) => ({ data: {
+    entry: { stopId: pid, stopTimes: [{ stopId: pid, tripId: 'AZP_T' + pid, departureTime: t0 + (pid === 'AZP_K1' ? 300 : 900) }] },
+    references: {
+      trips: { ['AZP_T' + pid]: { routeId: 'AZP_R', tripHeadsign: 'Azpcel' } },
+      routes: { AZP_R: { id: 'AZP_R', shortName: '7', type: 'BUS' } },
+      stops: {},
+    },
+  } });
+  const calls = [];
+  Lib.originPoles = async () => ['AZP_P', 'AZP_K1', 'AZP_K2'];
+  Lib.childPolesOf = () => new Set(['AZP_K1', 'AZP_K2']);
+  Lib.departureBoard = async (_k, pid) => {
+    calls.push(pid);
+    if (pid === 'AZP_P') throw new Error('parent timeout');
+    return board(pid);
+  };
+  let rows = null;
+  let threw = '';
+  try {
+    rows = await Lib.departures('k', 'AZP_P', ['AZP_R'], { key: 'azpcel', name: 'Azpcel' },
+      { originName: 'Azporigo', mode: 'bkk', minutesAfter: 60, deferGps: true, skipElvira: true, cache: {} });
+  } catch (err) {
+    threw = String(err && err.message);
+  }
+  check('a failed parent board falls back to its saved child poles',
+    !threw && rows && rows.length === 2 && calls.indexOf('AZP_K1') >= 0 && calls.indexOf('AZP_K2') >= 0,
+    JSON.stringify({ threw, rows: rows && rows.map((r) => r.tripId), calls }));
+  Object.assign(Lib, { originPoles: keep.op, childPolesOf: keep.kids, departureBoard: keep.board });
+}
+
+/* One failed poll keeps the FUTÁR rows on screen under the banner: they
+   are not swapped for a Transitous fill. */
+{
+  const keep = { dep: Lib.departures, fill: Lib.fillTransitousIfEmpty, gps: Lib.attachCoachGps, travel: Lib.travelMin };
+  const t0 = Math.floor(Date.now() / 1000);
+  let n = 0;
+  Lib.departures = async () => {
+    n += 1;
+    if (n === 1) return [{ tripId: 'BKK_AZQ_T1', label: '7', head: 'Azqcel', dep: t0 + 300, sched: t0 + 300, vehicle: 'bus', rawType: 'BUS', travel: null }];
+    throw new Error('HTTP 503');
+  };
+  Lib.fillTransitousIfEmpty = async (rows) => ((rows && rows.length) ? rows
+    : [{ tripId: 'motis:AZQ', label: '7', head: 'Azqcel', dep: t0 + 400, sched: t0 + 400, vehicle: 'bus', rawType: 'BUS' }]);
+  Lib.attachCoachGps = async (_h, rows) => rows;
+  Lib.travelMin = async () => 5;
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'hu', stopId: 'BKK_AZQ_O', stopName: 'Azqorigo', destKey: 'azqcel', destName: 'Azqcel', apiKey: 'k' });
+  await settleTicks(30);
+  const ids = () => (c._rawRows || []).map((r) => r.tripId);
+  const first = ids();
+  await c._pollRun.run();
+  await settleTicks(30);
+  const after = ids();
+  check('a failed poll keeps the FUTÁR rows instead of a Transitous fill',
+    JSON.stringify(first) === '["BKK_AZQ_T1"]' && JSON.stringify(after) === '["BKK_AZQ_T1"]'
+    && !!c._err && !c._rowsFilled,
+    JSON.stringify({ first, after, err: !!c._err, filled: c._rowsFilled }));
+  c.remove();
+  Object.assign(Lib, { departures: keep.dep, fillTransitousIfEmpty: keep.fill, attachCoachGps: keep.gps, travelMin: keep.travel });
+}
+
+/* Only a MÁV station's id carries an ELVIRA code: a Szeged city stop's
+   longer number is not one, and does not make the destination a station. */
+check('a city stop number is not an ELVIRA station code',
+  Lib.elviraStationCode('szeged:2430584836') === ''
+  && !Lib.isRailDest({ id: 'szeged:2430584836', name: 'Azr utca' })
+  && Lib.elviraStationCode('hu-mav_005501024') === '005501024'
+  && Lib.elviraStationCode('005510017') === '005510017'
+  && Lib.elviraStationCode('BKK_0055110170') === '');
+
+/* A stop without coordinates (lat: null) is looked up by name, not
+   planned from 0,0. */
+{
+  const keep = { geo: Lib.transitousGeocode, fetch: Lib.fetch };
+  Lib.transitousGeocode = async () => [{ id: 'azs', name: 'Azsplace', lat: 47.49, lon: 19.06, type: 'STOP' }];
+  Lib.fetch = async () => ({ data: { references: { stops: {} } } });
+  const place = await Lib.transitousPlace({ id: 'BKK_AZS', name: 'Azsplace', lat: null, lon: null });
+  const vertex = await Lib.planPlace('k', { id: '', name: 'Azsplace', lat: null, lon: null });
+  check('missing coordinates are not 0,0 for Transitous or the FUTÁR planner',
+    place === '47.49,19.06' && vertex === '', JSON.stringify({ place, vertex }));
+  Object.assign(Lib, { transitousGeocode: keep.geo, fetch: keep.fetch });
+}
+
+/* A GTFS row without its own line gets the coach_shape service's. */
+{
+  const keep = {
+    gtfs: Lib.gtfsRowShape, motis: Lib.motisShapeForHop, area: Lib.stopArea,
+    coach: Lib.coachShape, decode: Lib.decodePolyline,
+  };
+  const pts = [[46.90, 18.05], [46.95, 18.10], [47.00, 18.15], [47.05, 18.20]];
+  Lib.gtfsRowShape = async () => null;
+  Lib.motisShapeForHop = async () => null;
+  Lib.stopArea = async () => '';
+  Lib.coachShape = async () => 'azt';
+  Lib.decodePolyline = (enc) => (enc === 'azt' ? pts.map((p) => p.slice()) : keep.decode(enc));
+  const c = document.createElement('hungarian-transport-card');
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c._config = { language: 'hu', stopId: 'volan_azt', stopName: 'Aztorigo', destKey: 'aztcel', destName: 'Aztcel', destLat: 47.05, destLon: 18.20, apiKey: 'k' };
+  const got = await c._loadRowMapShape({ tripId: 'gtfs:azt', label: '1234', headsign: 'Aztcel', vehicle: 'coach', rawType: 'BUS' });
+  check('a GTFS row map draws the coach_shape service line',
+    got && got.shape.length >= 2 && !got.approx, JSON.stringify(got && { n: got.shape.length, approx: got.approx }));
+  Object.assign(Lib, {
+    gtfsRowShape: keep.gtfs, motisShapeForHop: keep.motis, stopArea: keep.area,
+    coachShape: keep.coach, decodePolyline: keep.decode,
+  });
+}
+
+/* One vehicle filed under two route keys (12 and SZ12) goes to one row. */
+{
+  const t0 = Math.floor(Date.now() / 1000);
+  const rows = [
+    { tripId: 'gtfs:azu1', label: '12', headsign: '', dep: t0 + 60, vehicle: 'bus' },
+    { tripId: 'gtfs:azu2', label: 'SZ12', headsign: '', dep: t0 + 120, vehicle: 'bus' },
+  ];
+  Lib.applyCoachGps(rows, [{ route: 'SZ12', lat: 47.2, lon: 18.4, head: '', tripId: 'azuv1' }], t0);
+  const withGps = rows.filter((r) => Lib.mapGpsLatLon(r.lat, r.lon)).length;
+  check('one coach GPS position is given to one row only', withGps === 1,
+    JSON.stringify(rows.map((r) => [r.label, r.lat, r.lon])));
+}
+
+/* A carried coach position only bridges the lookup: matched, it is
+   replaced; unmatched, it goes. */
+{
+  const t0 = Math.floor(Date.now() / 1000);
+  const rows = [
+    { tripId: 'gtfs:azv1', label: '1100', headsign: '', dep: t0 + 60, vehicle: 'coach', lat: 47.1, lon: 18.1, gpsCarried: true },
+    { tripId: 'gtfs:azv2', label: '1200', headsign: '', dep: t0 + 60, vehicle: 'coach', lat: 47.3, lon: 18.3, gpsCarried: true },
+  ];
+  Lib.applyCoachGps(rows, [{ route: '1100', lat: 47.15, lon: 18.15, head: '', tripId: 'azvv1' }], t0);
+  check('a carried coach position is replaced or dropped by the lookup',
+    rows[0].lat === 47.15 && !rows[0].gpsCarried && rows[1].lat == null && !rows[1].gpsCarried,
+    JSON.stringify(rows));
+}
+
+/* A poll's GTFS rows arrive before FUTÁR: the FUTÁR rows on screen stay
+   beside them until FUTÁR answers. */
+{
+  const keep = {
+    op: Lib.originPoles, board: Lib.departureBoard, volan: Lib.volanDepartures,
+    fill: Lib.fillTransitousIfEmpty, gps: Lib.attachCoachGps, travel: Lib.travelMin,
+  };
+  const t0 = Math.floor(Date.now() / 1000);
+  const board = { data: {
+    entry: { stopId: 'BKK_AZW_O', stopTimes: [{ tripId: 'BKK_AZW_T1', departureTime: t0 + 600 }] },
+    references: {
+      trips: { BKK_AZW_T1: { routeId: 'AZW_R', tripHeadsign: 'Azwcel' } },
+      routes: { AZW_R: { id: 'AZW_R', shortName: '800', type: 'COACH' } },
+      stops: {},
+    },
+  } };
+  let gate = null;
+  Lib.originPoles = async () => [];
+  Lib.departureBoard = async () => {
+    if (gate) await gate.p;
+    return board;
+  };
+  Lib.volanDepartures = async () => [{ tripId: 'gtfs:azw', label: '820', head: 'Azwcel', dep: t0 + 900, sched: t0 + 900, vehicle: 'coach', rawType: 'BUS', travel: 30 }];
+  Lib.fillTransitousIfEmpty = async (rows) => rows;
+  Lib.attachCoachGps = async (_h, rows) => rows;
+  Lib.travelMin = async () => null;
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'hu', stopId: 'BKK_AZW_O', stopName: 'Azworigo', destKey: 'azwcel', destName: 'Azwcel', volan: true, apiKey: 'k' });
+  await settleTicks(30);
+  const first = c._rows.map((r) => r.label).sort().join(',');
+  const seen = [];
+  const paint = c._paint.bind(c);
+  c._paint = () => {
+    seen.push(c._rows.map((r) => r.label).sort().join(','));
+    paint();
+  };
+  let release = null;
+  gate = { p: new Promise((r) => { release = r; }) };
+  const poll = c._pollRun.run();
+  await settleTicks(30);
+  release();
+  await poll;
+  await settleTicks(30);
+  check('GTFS rows painted before FUTÁR answers keep the FUTÁR rows',
+    first === '800,820' && seen.length > 0 && seen.every((s) => s === '800,820'),
+    JSON.stringify({ first, seen }));
+  c.remove();
+  Object.assign(Lib, {
+    originPoles: keep.op, departureBoard: keep.board, volanDepartures: keep.volan,
+    fillTransitousIfEmpty: keep.fill, attachCoachGps: keep.gps, travelMin: keep.travel,
+  });
+}
+
+/* Each poll builds new rows: the ride time and the coach GPS of the last
+   list stay on them while this run fills them again. */
+{
+  const keep = { dep: Lib.departures, fill: Lib.fillTransitousIfEmpty, gps: Lib.attachCoachGps, travel: Lib.travelMin };
+  const t0 = Math.floor(Date.now() / 1000);
+  let travelGate = null;
+  let gpsGate = null;
+  Lib.departures = async () => [
+    { tripId: 'BKK_AZX_T1', label: '7', head: 'Azxcel', dep: t0 + 300, sched: t0 + 300, vehicle: 'bus', rawType: 'BUS', travel: null },
+    { tripId: 'gtfs:azx', label: '1300', head: 'Azxcel', dep: t0 + 400, sched: t0 + 400, vehicle: 'coach', rawType: 'BUS', travel: 20 },
+  ];
+  Lib.fillTransitousIfEmpty = async (rows) => rows;
+  Lib.travelMin = async () => {
+    if (travelGate) await travelGate.p;
+    return 12;
+  };
+  Lib.attachCoachGps = async (_h, rows) => {
+    if (gpsGate) {
+      await gpsGate.p;
+      return rows;
+    }
+    rows.forEach((r) => {
+      if (/^gtfs:/.test(r.tripId)) {
+        r.lat = 47.2;
+        r.lon = 18.4;
+      }
+    });
+    return rows;
+  };
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'hu', stopId: 'BKK_AZX_O', stopName: 'Azxorigo', destKey: 'azxcel', destName: 'Azxcel', apiKey: 'k' });
+  await settleTicks(30);
+  const pick = () => {
+    const bus = c._rows.find((r) => r.label === '7') || {};
+    const coach = (c._rawRows || []).find((r) => r.tripId === 'gtfs:azx') || {};
+    return { travel: bus.travelMin, lat: coach.lat };
+  };
+  const first = pick();
+  const gates = [];
+  const mk = () => {
+    const g = {};
+    g.p = new Promise((r) => { g.r = r; });
+    gates.push(g);
+    return g;
+  };
+  travelGate = mk();
+  gpsGate = mk();
+  const poll = c._pollRun.run();
+  await settleTicks(30);
+  const mid = pick();
+  gates.forEach((g) => g.r());
+  await poll;
+  await settleTicks(30);
+  check('ride time and coach GPS do not blink out during a poll',
+    first.travel === 12 && first.lat === 47.2 && mid.travel === 12 && mid.lat === 47.2,
+    JSON.stringify({ first, mid }));
+  c.remove();
+  Object.assign(Lib, { departures: keep.dep, fillTransitousIfEmpty: keep.fill, attachCoachGps: keep.gps, travelMin: keep.travel });
+}
+
+/* A key probe that could not reach FUTÁR is asked again after a while:
+   the key is not marked bad, and it does not stay unverified for good. */
+{
+  const keep = { probe: Lib.probeApiKey, city: Lib.cityIndex };
+  let calls = 0;
+  let fail = true;
+  Lib.probeApiKey = async () => {
+    calls += 1;
+    return fail ? { ok: false, code: 'errApiKeyProbe' } : { ok: true };
+  };
+  Lib.cityIndex = async () => ({ ops: [] });
+  const hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } } };
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.setConfig({ type: 'custom:hungarian-transport-card', language: 'hu' });
+  ed.hass = hass;
+  await settleTicks();
+  const afterFail = { calls, keyOk: ed._keyOk };
+  ed.hass = Object.assign({}, hass, { states: { x: 1 } });
+  await settleTicks();
+  const inWindow = calls;
+  fail = false;
+  ed._probeRetryMs = 0;
+  ed._probeRetryAt = 0;
+  ed.hass = Object.assign({}, hass, { states: { x: 2 } });
+  await settleTicks();
+  check('an unreachable key probe is retried later, not marked bad for good',
+    afterFail.calls === 1 && afterFail.keyOk == null && inWindow === 1 && calls === 2 && ed._keyOk === true
+    && !ed.querySelector('#err').textContent,
+    JSON.stringify({ afterFail, inWindow, calls, keyOk: ed._keyOk, err: ed.querySelector('#err').textContent }));
+  ed.remove();
+  Object.assign(Lib, { probeApiKey: keep.probe, cityIndex: keep.city });
+}
+
+/* A search typed while the sibling-key lookup runs waits for that lookup
+   instead of starting a second one. */
+{
+  const keep = { dash: Lib.apiKeyFromDashboard };
+  let calls = 0;
+  let release = null;
+  Lib.apiKeyFromDashboard = async () => {
+    calls += 1;
+    await new Promise((r) => { release = r; });
+    return '';
+  };
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed._probeKey = async () => {};
+  ed.setConfig({ type: 'custom:hungarian-transport-card', language: 'hu' });
+  ed.hass = { states: {}, language: 'hu', services: {} };
+  await settleTicks();
+  const search = ed._search('Azy', 'origin');
+  await settleTicks();
+  const during = calls;
+  if (release) release();
+  await search;
+  await settleTicks();
+  check('a search during the sibling-key lookup does not start a second one',
+    during === 1, JSON.stringify({ during, calls }));
+  ed.remove();
+  Lib.apiKeyFromDashboard = keep.dash;
+}
+
+/* An index file that is not an index (an HTML page) is not downloaded and
+   parsed again on every lookup; a relative index URL still finds shapes. */
+{
+  const keep = { bytes: Lib._fetchIndexBytes, gz: Lib._fetchJsonGz };
+  const fetched = [];
+  Lib._fetchIndexBytes = async (url) => {
+    fetched.push(url);
+    if (/azzbad/.test(url)) return { status: 200, bytes: new TextEncoder().encode('<html>no</html>') };
+    return { status: 200, bytes: new TextEncoder().encode(JSON.stringify({ v: 1, s: [], t: [] })) };
+  };
+  const bad = Lib.withIndexes({ volanIndex: 'http://localhost:8123/local/azzbad/volan-index.json.gz' });
+  const errs = [];
+  for (let i = 0; i < 3; i++) {
+    try {
+      await bad.volanIndex();
+    } catch (err) {
+      errs.push(err && err.i18nKey);
+    }
+  }
+  const badFetches = fetched.filter((u) => /azzbad/.test(u)).length;
+  const idx = await Lib.withIndexes({ cityIndex: '/local/azzrel/city-index.json.gz' }).cityIndex();
+  const shardUrls = [];
+  Lib._fetchJsonGz = async (url) => {
+    shardUrls.push(url);
+    return { p: [] };
+  };
+  let shapeErr = '';
+  try {
+    await Lib.gtfsShape({ base: idx.url, dir: 'sh-azz', n: 1, id: 0 });
+  } catch (err) {
+    shapeErr = String(err && err.message);
+  }
+  check('a broken index is not refetched on every lookup',
+    badFetches === 1 && errs.length === 3 && errs.every((k) => k === 'errIndexParse'),
+    JSON.stringify({ badFetches, errs }));
+  check('a relative index URL still resolves its shape shards',
+    !shapeErr && shardUrls[0] === 'http://localhost:8123/local/azzrel/sh-azz/00.json.gz',
+    JSON.stringify({ url: idx.url, shapeErr, shardUrls }));
+  Object.assign(Lib, { _fetchIndexBytes: keep.bytes, _fetchJsonGz: keep.gz });
+}
+
 process.exit(failed ? 1 : 0);

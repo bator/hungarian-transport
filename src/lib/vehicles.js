@@ -150,7 +150,7 @@ Object.assign(BkkLib, {
     const groups = new Map();
     list.forEach((row, idx) => {
       if (!row || !/^(gtfs:|motis:)/.test(String(row.tripId || ''))) return;
-      if (BkkLib.mapGpsLatLon(row.lat, row.lon)) return;
+      if (BkkLib.mapGpsLatLon(row.lat, row.lon) && !row.gpsCarried) return;
       let key = '';
       BkkLib.coachRouteKeys(row.label).some((candidate) => {
         if (!byRoute.has(candidate)) return false;
@@ -161,39 +161,52 @@ Object.assign(BkkLib, {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(idx);
     });
+    /* A vehicle filed under two keys (12 and SZ12) is one bus: pairs from
+       every group compete for it, and it goes to one row only. */
+    const vehicleId = (vehicle) => String(vehicle.tripId || (vehicle.lat + ',' + vehicle.lon));
+    const pairs = [];
     groups.forEach((indexes, key) => {
       const uniq = [];
       const seen = new Set();
       byRoute.get(key).forEach((vehicle) => {
-        const id = String(vehicle.tripId || (vehicle.lat + ',' + vehicle.lon));
+        const id = vehicleId(vehicle);
         if (seen.has(id)) return;
         seen.add(id);
         uniq.push(vehicle);
       });
-      const pairs = [];
       indexes.forEach((idx) => {
-        uniq.forEach((vehicle, vi) => {
+        uniq.forEach((vehicle) => {
           if (!pairOk(list[idx], vehicle)) return;
           const dep = Number(list[idx].dep || list[idx].sched || 0);
           const head = rowHead(list[idx]);
           const vehicleHead = fold(vehicle.head);
           const headMatch = !!(head && vehicleHead && (head.indexOf(vehicleHead) >= 0 || vehicleHead.indexOf(head) >= 0));
           const distance = Math.abs((dep || now) - now);
-          pairs.push({ idx: idx, vi: vi, score: (headMatch ? 0 : 1) * 1e12 + distance });
+          pairs.push({ idx: idx, vehicle: vehicle, score: (headMatch ? 0 : 1) * 1e12 + distance });
         });
       });
-      pairs.sort((a, b) => a.score - b.score);
-      const usedRow = new Set();
-      const usedVehicle = new Set();
-      pairs.forEach((pair) => {
-        if (usedRow.has(pair.idx) || usedVehicle.has(pair.vi)) return;
-        usedRow.add(pair.idx);
-        usedVehicle.add(pair.vi);
-        const gps = BkkLib.mapGpsLatLon(uniq[pair.vi].lat, uniq[pair.vi].lon);
-        if (!gps) return;
-        list[pair.idx].lat = gps[0];
-        list[pair.idx].lon = gps[1];
-      });
+    });
+    pairs.sort((a, b) => a.score - b.score);
+    const usedRow = new Set();
+    const usedVehicle = new Set();
+    pairs.forEach((pair) => {
+      const vid = vehicleId(pair.vehicle);
+      if (usedRow.has(pair.idx) || usedVehicle.has(vid)) return;
+      usedRow.add(pair.idx);
+      usedVehicle.add(vid);
+      const gps = BkkLib.mapGpsLatLon(pair.vehicle.lat, pair.vehicle.lon);
+      if (!gps) return;
+      list[pair.idx].lat = gps[0];
+      list[pair.idx].lon = gps[1];
+      delete list[pair.idx].gpsCarried;
+    });
+    /* The last poll's position (gpsCarried) only bridged this lookup: a row
+       no vehicle matched now has none. */
+    list.forEach((row) => {
+      if (!row || !row.gpsCarried) return;
+      row.lat = null;
+      row.lon = null;
+      delete row.gpsCarried;
     });
     return list;
   },
@@ -201,7 +214,7 @@ Object.assign(BkkLib, {
     const list = Array.isArray(rows) ? rows : [];
     const needs = list.some((row) => row
       && /^(gtfs:|motis:)/.test(String(row.tripId || ''))
-      && !BkkLib.mapGpsLatLon(row.lat, row.lon));
+      && (row.gpsCarried || !BkkLib.mapGpsLatLon(row.lat, row.lon)));
     if (!hass || !needs) return list;
     return BkkLib.applyCoachGps(list, await BkkLib.coachPositions(hass));
   },

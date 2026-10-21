@@ -567,6 +567,13 @@ Object.assign(BkkLib, {
         }
       }));
       let payloads = await loadBoards(poles);
+      /* The parent's board stood in for its child poles: when it failed,
+         their own boards are read instead of dropping their rows. */
+      if (near.length && !payloads[0]) {
+        poles = poles.concat(near);
+        payloads = payloads.concat(await loadBoards(near));
+        near = [];
+      }
       if (boardErr && payloads.every((data) => !data)) throw boardErr;
       const usedParentOnly = poles[0] === stopId && (poles.length === 1 || !!destKey);
       const span = payloads.slice(0, usedParentOnly ? 1 : payloads.length).reduce((best, data) => {
