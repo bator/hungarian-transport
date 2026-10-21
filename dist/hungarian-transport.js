@@ -4991,6 +4991,17 @@ Object.assign(BkkLib, {
     });
     return Array.from(poles);
   },
+  /* Poles of the loaded route patterns that belong to the stop area parentId. */
+  childPolesOf(cache, routeIds, parentId) {
+    const kids = /* @__PURE__ */ new Set();
+    (routeIds || []).forEach((rid) => {
+      const stops = (BkkLib._cached(cache, rid) || {}).stops || {};
+      Object.values(stops).forEach((st) => {
+        if (st && st.id && st.parentStationId && BkkLib.sameStop(st.parentStationId, parentId)) kids.add(st.id);
+      });
+    });
+    return kids;
+  },
   async originPoles(apiKey, cache, origin, routeIds, destKey) {
     const routes = (routeIds || []).filter(Boolean);
     const patterns = await Promise.all(routes.map(async (rid) => {
@@ -5281,8 +5292,15 @@ Object.assign(BkkLib, {
             poles = [];
           }
         }
-        if (!poles.length) poles = [stopId];
-        else if (destKey) poles = [stopId].concat(poles.filter((p) => p !== stopId));
+        let near = [];
+        if (!poles.length) {
+          poles = [stopId];
+        } else if (destKey) {
+          const kids = BkkLib.childPolesOf(cache, poleRoutes, stopId);
+          const saved = poles.filter((p) => p !== stopId);
+          near = saved.filter((p) => kids.has(p));
+          poles = [stopId].concat(saved.filter((p) => !kids.has(p)));
+        }
         let boardErr = null;
         const loadBoards = (ids) => Promise.all(ids.map(async (pid) => {
           try {
@@ -5322,18 +5340,18 @@ Object.assign(BkkLib, {
               if (discovered.indexOf(rid) < 0) discovered.push(rid);
             });
           });
+          let extra = [];
           if (discovered.length) {
-            let extra = [];
             try {
               extra = await BkkLib.originPoles(apiKey, cache, origin, discovered, destKey || "");
             } catch (_e) {
               extra = [];
             }
-            const fresh = extra.filter((id) => poles.indexOf(id) < 0);
-            if (fresh.length) {
-              poles = poles.concat(fresh);
-              payloads = payloads.concat(await loadBoards(fresh));
-            }
+          }
+          const fresh = Array.from(new Set(near.concat(extra))).filter((id) => poles.indexOf(id) < 0);
+          if (fresh.length) {
+            poles = poles.concat(fresh);
+            payloads = payloads.concat(await loadBoards(fresh));
           }
         }
         const seenTrip = /* @__PURE__ */ new Set();
@@ -6101,6 +6119,8 @@ var BKKHopCardEditor = class extends HTMLElement {
     const viaIntegration = BkkLib.integrationHasKey(hass);
     if (!this._userEditedKey && !this._config.apiKey && !this._borrowedKey && !this._loadingKey && !viaIntegration && !this._keyless()) this._fillKey();
     else if (this._hasFutar()) this._probeKey();
+    const stopId = this._config.stopId;
+    if (stopId && this._loadedStop === stopId && this._destsStale(stopId) && !(this._destsLoading && this._loadingStop === stopId)) this._loadDests();
   }
   _apiKey() {
     return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
@@ -6921,6 +6941,7 @@ var BKKHopCard = class extends HTMLElement {
     this._rawRows = [];
     this._err = "";
     this._loading = false;
+    this._rowsFilled = false;
     this._painted = false;
     this._gen = 0;
     this._keyTried = false;
@@ -8293,6 +8314,7 @@ ${this._stopPinCss()}
       this._rawRows = merged;
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
+      this._rowsFilled = false;
       this._err = "";
       this._loading = false;
       this._paint();
@@ -8334,9 +8356,12 @@ ${this._stopPinCss()}
           if (!list.length && startThrough && !futarFull) {
             if (this._err) {
               this._err = "";
-              this._rows = [];
-              this._rawRows = [];
-              this._loading = true;
+              if (this._rowsFilled) {
+                this._rows = [];
+                this._rawRows = [];
+                this._rowsFilled = false;
+                this._loading = true;
+              }
               this._paint();
             }
             return;
@@ -8457,7 +8482,10 @@ ${this._stopPinCss()}
             filled = [];
           }
           if (gen !== this._gen) return;
-          if (filled.length) paintRows(filled);
+          if (filled.length) {
+            paintRows(filled);
+            this._rowsFilled = true;
+          }
         }
         this._showErr(err);
       }

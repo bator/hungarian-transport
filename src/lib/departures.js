@@ -235,6 +235,17 @@ Object.assign(BkkLib, {
     });
     return Array.from(poles);
   },
+  /* Poles of the loaded route patterns that belong to the stop area parentId. */
+  childPolesOf(cache, routeIds, parentId) {
+    const kids = new Set();
+    (routeIds || []).forEach((rid) => {
+      const stops = (BkkLib._cached(cache, rid) || {}).stops || {};
+      Object.values(stops).forEach((st) => {
+        if (st && st.id && st.parentStationId && BkkLib.sameStop(st.parentStationId, parentId)) kids.add(st.id);
+      });
+    });
+    return kids;
+  },
   async originPoles(apiKey, cache, origin, routeIds, destKey) {
     const routes = (routeIds || []).filter(Boolean);
     const patterns = await Promise.all(routes.map(async (rid) => {
@@ -532,9 +543,17 @@ Object.assign(BkkLib, {
       /* Saved routes are what ran when the card was set up (at night only
          the night bus): with a destination they only add a hub's far poles.
          The stop's own board is still read, and a capped one discovers the
-         rest below, so a day line on another pole is not left out. */
-      if (!poles.length) poles = [stopId];
-      else if (destKey) poles = [stopId].concat(poles.filter((p) => p !== stopId));
+         rest below, so a day line on another pole is not left out. Its own
+         child poles are on that board already: read only when it is capped. */
+      let near = [];
+      if (!poles.length) {
+        poles = [stopId];
+      } else if (destKey) {
+        const kids = BkkLib.childPolesOf(cache, poleRoutes, stopId);
+        const saved = poles.filter((p) => p !== stopId);
+        near = saved.filter((p) => kids.has(p));
+        poles = [stopId].concat(saved.filter((p) => !kids.has(p)));
+      }
       /* One pole failing still leaves the others' rows. Every board failing
          (a revoked key, an outage, the integration erroring) is not "no
          departures": the first error goes up so the card shows it. */
@@ -577,18 +596,18 @@ Object.assign(BkkLib, {
             if (discovered.indexOf(rid) < 0) discovered.push(rid);
           });
         });
+        let extra = [];
         if (discovered.length) {
-          let extra = [];
           try {
             extra = await BkkLib.originPoles(apiKey, cache, origin, discovered, destKey || '');
           } catch (_e) {
             extra = [];
           }
-          const fresh = extra.filter((id) => poles.indexOf(id) < 0);
-          if (fresh.length) {
-            poles = poles.concat(fresh);
-            payloads = payloads.concat(await loadBoards(fresh));
-          }
+        }
+        const fresh = Array.from(new Set(near.concat(extra))).filter((id) => poles.indexOf(id) < 0);
+        if (fresh.length) {
+          poles = poles.concat(fresh);
+          payloads = payloads.concat(await loadBoards(fresh));
         }
       }
       const seenTrip = new Set();

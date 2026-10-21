@@ -24,6 +24,8 @@ export class BKKHopCard extends HTMLElement {
     this._rawRows = [];
     this._err = '';
     this._loading = false;
+    /* The shown rows are a Transitous fill under an error banner. */
+    this._rowsFilled = false;
     this._painted = false;
     this._gen = 0;
     this._keyTried = false;
@@ -1435,6 +1437,7 @@ ${this._stopPinCss()}
       this._rawRows = merged;
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
+      this._rowsFilled = false;
       this._err = '';
       this._loading = false;
       this._paint();
@@ -1482,13 +1485,17 @@ ${this._stopPinCss()}
              through-check: an empty list before it answers is not "no
              departures". The first load keeps its spinner, a poll its rows. */
           if (!list.length && startThrough && !futarFull) {
-            /* Rows shown under the last run's error banner (a Transitous
-               fill) are not this board's: back to the spinner. */
+            /* FUTÁR answers again: the last run's banner goes. Its
+               Transitous fill-ins are not this board's rows (back to the
+               spinner); FUTÁR rows it kept stay until the check answers. */
             if (this._err) {
               this._err = '';
-              this._rows = [];
-              this._rawRows = [];
-              this._loading = true;
+              if (this._rowsFilled) {
+                this._rows = [];
+                this._rawRows = [];
+                this._rowsFilled = false;
+                this._loading = true;
+              }
               this._paint();
             }
             return;
@@ -1608,7 +1615,10 @@ ${this._stopPinCss()}
             filled = [];
           }
           if (gen !== this._gen) return;
-          if (filled.length) paintRows(filled);
+          if (filled.length) {
+            paintRows(filled);
+            this._rowsFilled = true;
+          }
         }
         this._showErr(err);
       }

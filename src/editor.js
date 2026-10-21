@@ -82,6 +82,12 @@ export class BKKHopCardEditor extends HTMLElement {
     if (!this._userEditedKey && !this._config.apiKey && !this._borrowedKey && !this._loadingKey
         && !viaIntegration && !this._keyless()) this._fillKey();
     else if (this._hasFutar()) this._probeKey();
+    /* The integration's FUTÁR coming up after a keyless ("all") list was
+       loaded adds the BKK destinations. Only a loaded list is redone, so a
+       failed load does not retry on every state update. */
+    const stopId = this._config.stopId;
+    if (stopId && this._loadedStop === stopId && this._destsStale(stopId)
+        && !(this._destsLoading && this._loadingStop === stopId)) this._loadDests();
   }
 
   _apiKey() {
