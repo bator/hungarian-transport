@@ -442,13 +442,15 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     for code, part in ((origin_code, origin), (dest_code, dest)):
         errors = [b for b in part if isinstance(b, ElviraError)]
         outage = next((b for b in errors if not isinstance(b, ElviraRateLimited)), None)
-        if outage is None and errors:
-            # Refused here, not by ELVIRA: it says nothing about the station.
+        if outage is None and len(errors) == len(part):
+            # Every board refused here, none asked: nothing heard from the
+            # station either way. One that arrived means it answers again.
             continue
         _log_outage(hass, code, outage)
     today = origin[days.index(now.date())]
     if isinstance(today, ElviraError):
-        raise ElviraError(str(today))
+        # A rate limit stays one for the service response.
+        raise type(today)(str(today))
     arrived = [board for board in origin if not isinstance(board, ElviraError)]
     odep = [row for dep, _arr in arrived for row in dep]
     darr = [row for board in dest if not isinstance(board, ElviraError) for row in board[1]]

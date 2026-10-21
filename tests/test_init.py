@@ -552,7 +552,11 @@ async def test_elvira_requests_are_rate_limited(
         assert await call(_station(n)) == {"departures": []}
     assert aioclient_mock.call_count == elvira.ELVIRA_BURST
     for n in range(100, 105):
-        assert await call(_station(n)) == _unavailable("rate limited")
+        assert await call(_station(n)) == {
+            "departures": [],
+            "error": "elvira_rate_limited",
+            "detail": "rate limited",
+        }
     assert aioclient_mock.call_count == elvira.ELVIRA_BURST
     limited = [m for m in _elvira_warnings(caplog) if "rate limit" in m]
     assert len(limited) == 1
@@ -561,6 +565,31 @@ async def test_elvira_requests_are_rate_limited(
     clock[0] += 1 / elvira.ELVIRA_RATE
     assert await call(_station(200)) == {"departures": []}
     assert aioclient_mock.call_count == elvira.ELVIRA_BURST + 1
+
+
+async def test_station_answering_again_is_logged_despite_a_refused_board(
+    hass, aioclient_mock, freezer, monkeypatch, caplog
+) -> None:
+    """A station that was down and now answers some boards, while the rate
+    limit refuses another, has answered: one "answers again" line, not
+    silence until every board of a later call gets through."""
+    caplog.set_level(logging.INFO, logger=elvira.__name__)
+    monkeypatch.setattr(elvira, "_monotonic", lambda: 1000.0)
+    # Two service days after midnight: four boards per call, fetched origin
+    # yesterday, origin today, destination yesterday, destination today.
+    freezer.move_to("2026-10-19 00:30:00+02:00")
+    monkeypatch.setattr(elvira, "ELVIRA_BURST", 7)
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, status=503)
+    assert (await _elvira_call(hass))["error"] == "elvira_unavailable"
+    assert len([m for m in _elvira_warnings(caplog) if "unavailable" in m]) == 2
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+    assert await _elvira_call(hass) == {"departures": []}
+    assert aioclient_mock.call_count == 3
+    again = [r.getMessage() for r in caplog.records if "answers again" in r.getMessage()]
+    assert sorted(again) == sorted(f"ELVIRA StationInfo {code} answers again" for code in (ORIGIN, DEST))
 
 
 def test_elvira_rate_limit_leaves_room_for_cards() -> None:

@@ -47,6 +47,9 @@ Object.assign(BkkLib, {
          service error: the integration answered, so only this pair's
          outage is noted and no backoff applies to the other pairs. */
       const payload = BkkLib.servicePayload(res);
+      /* The integration's own request limit, not MÁV being down: no rows
+         this poll, no outage warning, and the pair's outage state stays. */
+      if (payload && payload.error === 'elvira_rate_limited') return [];
       if (payload && payload.error) {
         BkkLib._elviraDown(pair, `${payload.error}${payload.detail ? ` (${payload.detail})` : ''}`);
         return [];

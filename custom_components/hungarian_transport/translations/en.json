@@ -90,6 +90,9 @@
     "elvira_unavailable": {
       "message": "MÁV ELVIRA is not reachable ({error})."
     },
+    "elvira_rate_limited": {
+      "message": "Too many MÁV ELVIRA requests from this Home Assistant ({error}); the next refresh tries again."
+    },
     "not_loaded": {
       "message": "Hungarian transport is disabled or not loaded. Enable its integration entry first."
     }

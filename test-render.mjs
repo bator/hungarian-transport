@@ -3280,6 +3280,18 @@ Lib.mavIndex = origMavIndex;
     await poll();
     check('each station pair has its own outage',
       warns.length === 3, JSON.stringify(warns));
+    answer = { departures: [], error: 'elvira_rate_limited', detail: 'rate limited' };
+    const limited = await poll();
+    answer = { departures: [], error: 'elvira_unavailable', detail: 'TimeoutError' };
+    await poll();
+    check('elvira_rate_limited gives no rows, no outage warning, and leaves the outage as it was',
+      Array.isArray(limited) && limited.length === 0 && warns.length === 3
+      && Lib._elviraDownUntil === 0, JSON.stringify(warns));
+    Lib._elviraOutages.clear();
+    answer = { departures: [], error: 'elvira_rate_limited', detail: 'rate limited' };
+    await poll();
+    check('a rate-limited answer does not mark a pair that was fine as down',
+      warns.length === 3 && Lib._elviraOutages.size === 0, JSON.stringify(warns));
   } finally {
     console.warn = realWarn;
     Lib._elviraOutages.clear();

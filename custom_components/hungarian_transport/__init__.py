@@ -26,7 +26,7 @@ from homeassistant.loader import async_get_integration
 from . import mav
 from .assets import asset_tag
 from .const import CONF_API_KEY, DOMAIN, SERVICE_ELVIRA_BETWEEN, SERVICE_FUTAR, SERVICE_REBUILD_MAV
-from .elvira import ElviraError, elvira_between, station_code_digits
+from .elvira import ElviraError, ElviraRateLimited, elvira_between, station_code_digits
 from .futar import FUTAR_PATHS, FutarAuthError, FutarError, FutarProxy
 
 _LOGGER = logging.getLogger(__name__)
@@ -148,6 +148,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 call.data["minutes_after"],
                 call.data["dest_name"],
             )
+        except ElviraRateLimited as err:
+            # The integration's own limit, not MÁV being down.
+            return {"departures": [], "error": "elvira_rate_limited", "detail": str(err)}
         except ElviraError as err:
             # An outage, not an empty board, but no exception either: the
             # websocket API logs every failed call at ERROR, and every card
