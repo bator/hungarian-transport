@@ -160,7 +160,7 @@ def audit(index_path: Path, tolerance_m: float = TOLERANCE_M) -> dict:
         rec["trips"] += 1
 
     per_op: dict[str, dict] = defaultdict(lambda: {
-        "patterns": 0, "trips": 0, "ok": 0, "no_shape": 0, "off_route": 0, "out_of_order": 0,
+        "patterns": 0, "trips": 0, "trips_bad": 0, "ok": 0, "no_shape": 0, "off_route": 0, "out_of_order": 0,
         "no_coords": 0, "long_segment": 0,
     })
     worst: list[dict] = []
@@ -175,6 +175,7 @@ def audit(index_path: Path, tolerance_m: float = TOLERANCE_M) -> dict:
         shape = shapes.get(ref)
         if len(shape) < 2:
             r["no_shape"] += 1
+            r["trips_bad"] += rec["trips"]
             worst.append({"op": op, "route": rec["route"], "trips": rec["trips"], "why": "no shape"})
             continue
         if longest_segment(shape) > LONG_SEGMENT_M:
@@ -188,14 +189,14 @@ def audit(index_path: Path, tolerance_m: float = TOLERANCE_M) -> dict:
                 far, far_stop = d, stops[i][1] if i < len(stops) else ""
         if far > tolerance_m:
             r["off_route"] += 1
-            r["trips_bad"] = r.get("trips_bad", 0) + rec["trips"]
+            r["trips_bad"] += rec["trips"]
             worst.append({"op": op, "route": rec["route"], "trips": rec["trips"], "why": "stop off route",
                           "stop": far_stop, "m": round(far)})
             continue
         miss = ordered_miss(pts, shape, tolerance_m)
         if miss is not None:
             r["out_of_order"] += 1
-            r["trips_bad"] = r.get("trips_bad", 0) + rec["trips"]
+            r["trips_bad"] += rec["trips"]
             n = miss[0]
             worst.append({"op": op, "route": rec["route"], "trips": rec["trips"], "why": "stops out of order",
                           "stop": stops[rec["ps"][n]][1] if rec["ps"][n] < len(stops) else "", "m": round(miss[1])})
