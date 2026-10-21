@@ -382,12 +382,17 @@ Object.assign(BkkLib, {
     const hits = pool.filter((s) => s.fold.indexOf(f) >= 0);
     if (!hits.length) return null;
     hits.sort((a, b) => {
-      const ah = /autobusz-allomas|palyaudvar/.test(a.fold) ? 0 : 1;
-      const bh = /autobusz-allomas|palyaudvar/.test(b.fold) ? 0 : 1;
+      const ah = BkkLib.isCoachStationFold(a.fold) ? 0 : 1;
+      const bh = BkkLib.isCoachStationFold(b.fold) ? 0 : 1;
       if (ah !== bh) return ah - bh;
       return a.fold.length - b.fold.length;
     });
     return hits[0];
+  },
+  /* A coach station (or a "pályaudvar") by its folded name: fold() turns
+     "autóbusz-állomás" into "autobusz allomas"; some feeds write it closed. */
+  isCoachStationFold(folded) {
+    return /autobusz ?allomas|palyaudvar/.test(String(folded || ''));
   },
   /* Folded town names of an index: the "Town, " part of its stop names
      (the Volán feed names every stop so) and its operators' towns. */
@@ -527,8 +532,8 @@ Object.assign(BkkLib, {
     const pool = opIx == null || opIx < 0 ? idx.stops : BkkLib.cityStops(idx, opIx);
     const hits = pool.filter((s) => s.fold.indexOf(f) >= 0);
     hits.sort((a, b) => {
-      const ah = /autobusz-allomas|palyaudvar/.test(a.fold) ? 0 : 1;
-      const bh = /autobusz-allomas|palyaudvar/.test(b.fold) ? 0 : 1;
+      const ah = BkkLib.isCoachStationFold(a.fold) ? 0 : 1;
+      const bh = BkkLib.isCoachStationFold(b.fold) ? 0 : 1;
       if (ah !== bh) return ah - bh;
       const as = a.fold.startsWith(f) ? 0 : 1;
       const bs = b.fold.startsWith(f) ? 0 : 1;
