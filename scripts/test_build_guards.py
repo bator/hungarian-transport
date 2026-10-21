@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_city_index as bci  # noqa: E402
 import build_mav_index as bmi  # noqa: E402
+import gtfs_compact as gc  # noqa: E402
 from build_volan_index import build_index  # noqa: E402
 from gtfs_compact import (  # noqa: E402
     IndexGuardError,
@@ -375,6 +376,18 @@ with tempfile.TemporaryDirectory() as tmp:
     err = raises(lambda: write_index([seasonal("volan", 0, 90)], vout, with_operators=False, today="20261021"))
     check("Volán total still refuses losing most of the running trips",
           isinstance(err, IndexGuardError) and "90 running trips vs previous 200" in str(err), repr(err))
+    # The previous index's calendar has ended (nothing runs): a truncated
+    # feed must not pass because there is nothing running to compare with.
+    write_index([seasonal("volan", 300, 0)], vout, with_operators=False, today="20260820")
+    err = raises(lambda: write_index([seasonal("volan", 0, 40)], vout, with_operators=False, today="20261021"))
+    check("an ended previous Volán index is compared on all its trips",
+          isinstance(err, IndexGuardError) and "40 running trips vs previous 300" in str(err), repr(err))
+    err = raises(lambda: write_index([seasonal("volan", 0, 200)], vout, with_operators=False, today="20261021"))
+    check("a full new Volán feed after an ended one is written", err is None, repr(err))
+    vout.write_bytes(gzip.compress(b"[1, 2"))
+    check("a truncated previous index is no reference", gc.existing_trips(vout) is None)
+    vout.write_bytes(gzip.compress(b"\xff\xfe not utf-8"))
+    check("a non-UTF-8 previous index is no reference", gc.existing_trips(vout) is None)
 
 # ---- 1. Volán index: too few trips is a broken feed -----------------------
 

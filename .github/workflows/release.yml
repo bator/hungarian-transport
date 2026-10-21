@@ -15,7 +15,7 @@ on:
   workflow_dispatch:
     inputs:
       bump:
-        description: "rev = a -rev.N prerelease two patches up (1.9.2-rev.1 after stable 1.9.0; the weekly timetable release takes 1.9.1 and stays below it; HACS stable stays). patch = stable release of main, numbered as the open -rev series (else next patch). patch/minor/major: only when asked."
+        description: "rev = a -rev.N prerelease two patches up (1.9.2-rev.1 after stable 1.9.0; the weekly timetable release takes 1.9.1 and stays below it, then starts a rev run itself while a series is open; HACS stable stays). patch = stable release of main, numbered as the open -rev series (else next patch). patch/minor/major: only when asked."
         type: choice
         options:
           - rev
@@ -57,6 +57,7 @@ jobs:
       baseline: ${{ steps.ver.outputs.baseline }}
       target: ${{ steps.ver.outputs.target }}
       refresh: ${{ steps.ver.outputs.refresh }}
+      beta: ${{ steps.ver.outputs.beta }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -85,27 +86,29 @@ jobs:
         run: |
           set -euo pipefail
 
-          # GitHub's latest release: the newest published one that is not a
-          # prerelease, however many -rev.N came after it (24 after 1.4.2).
-          # The full list is the fallback, should that one ever be a -rev tag.
+          # Every published release (tag, prerelease flag), newest first, read
+          # once. A GitHub API failure stops the run: an empty list would mean
+          # "no -rev series" and "no such tag", and a version picked on that
+          # could land above the beta channel or on a tag that exists.
+          if ! releases=$(gh release list --exclude-drafts --limit 1000 --json tagName,isPrerelease \
+              --jq '.[] | [.tagName, (.isPrerelease | tostring)] | @tsv'); then
+            echo "::error::Could not list the releases (GitHub API); no version is picked on a guess."
+            exit 1
+          fi
+
+          # The newest published release that is not a prerelease, however
+          # many -rev.N came after it (24 after 1.4.2).
           latest_stable() {
-            local tag
-            tag=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name // empty' 2>/dev/null || true)
-            if [ -n "$tag" ] && [[ "$tag" != *-rev.* ]]; then
-              echo "$tag"
-              return 0
-            fi
-            gh release list --exclude-drafts --limit 1000 --json tagName,isPrerelease \
-              --jq '[.[] | select(.isPrerelease==false) | .tagName | select(test("-rev\\.")|not)][0] // empty'
+            awk -F'\t' '$2 == "false" && $1 !~ /-rev\./ { print $1; exit }' <<< "$releases"
           }
 
           latest_rev_n() {
             local base="$1"
             local n=0 t r
-            while IFS= read -r t; do
+            while IFS=$'\t' read -r t _; do
               r="${t#v${base}-rev.}"
               if [[ "$r" =~ ^[0-9]+$ ]] && [ "$r" -gt "$n" ]; then n=$r; fi
-            done < <(gh release list --exclude-drafts --limit 1000 --json tagName --jq '.[].tagName' || true)
+            done <<< "$releases"
             echo "$n"
           }
 
@@ -113,23 +116,30 @@ jobs:
           # (vX.Y.P-rev.N with P > patch), one per line.
           open_revs() {
             local major="$1" minor="$2" patch="$3" t r
-            while IFS= read -r t; do
+            while IFS=$'\t' read -r t _; do
               [[ "$t" == "v${major}.${minor}."*"-rev."* ]] || continue
               r="${t#v${major}.${minor}.}"
               r="${r%%-rev.*}"
               if [[ "$r" =~ ^[0-9]+$ ]] && [ "$r" -gt "$patch" ]; then echo "$r"; fi
-            done < <(gh release list --exclude-drafts --limit 1000 --json tagName --jq '.[].tagName' || true)
+            done <<< "$releases"
           }
 
           # The highest of open_revs, 0 when there is none.
           newest_rev() {
-            open_revs "$@" | sort -n | tail -n 1 | grep . || echo 0
+            local r
+            r=$(open_revs "$@" | sort -n | tail -n 1)
+            echo "${r:-0}"
           }
 
-          # A release or a bare tag (a tag push whose run has not published yet).
+          # A release or a bare tag (a tag push whose run has not published
+          # yet). Only a 404 means free; any other API failure stops the run.
           tag_taken() {
-            gh release view "$1" >/dev/null 2>&1 && return 0
-            gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$1" >/dev/null 2>&1
+            local out
+            if cut -f1 <<< "$releases" | grep -qxF "$1"; then return 0; fi
+            if out=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/$1" --jq .ref 2>&1); then return 0; fi
+            if [[ "$out" == *"HTTP 404"* ]]; then return 1; fi
+            echo "::error::Could not check whether tag $1 exists (GitHub API); stopping."
+            exit 1
           }
 
           parse_semver() {
@@ -154,10 +164,11 @@ jobs:
               echo "baseline=${4:-}"
               echo "target=${5:-$GITHUB_SHA}"
               echo "refresh=${6:-false}"
+              echo "beta=${7:-false}"
             } >> "$GITHUB_OUTPUT"
           }
 
-          latest=$(gh release list --exclude-drafts --limit 1 --json tagName --jq '.[0].tagName // empty')
+          latest=$(head -n 1 <<< "$releases" | cut -f1)
 
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             emit "${GITHUB_REF_NAME}" true "" "$latest"
@@ -181,10 +192,17 @@ jobs:
             # refresh then goes above it and says so.
             rev=$(newest_rev "$major" "$minor" "$patch")
             next=$((patch + 1))
+            # The beta job dispatches a rev run after every timetable release
+            # while a -rev series is open, so that should not happen; when
+            # that run failed, this is the fallback.
             if [ "$rev" -eq "$next" ]; then
               next=$((rev + 1))
-              echo "::warning title=Timetable release above the beta::v${major}.${minor}.${rev}-rev.* is on the next patch, so this refresh is v${major}.${minor}.${next} and beta users are offered ${stable}'s code with it. Dispatch rev to put them back on main."
+              echo "::warning title=Timetable release above the beta::v${major}.${minor}.${rev}-rev.* is on the next patch, so this refresh is v${major}.${minor}.${next} and beta users are offered ${stable}'s code with it until the rev run after it is published."
             fi
+            # Beta users run the open -rev series: after this release, a rev
+            # run puts main (with these indexes) two patches above it again.
+            beta=false
+            if [ "$rev" -gt 0 ]; then beta=true; fi
             tag="v${major}.${minor}.${next}"
             if tag_taken "$tag"; then
               echo "::error::${tag} already exists; the weekly refresh never changes a release."
@@ -197,7 +215,7 @@ jobs:
             # commit, and it is published only when the indexes differ from
             # the stable release's own (the baseline).
             echo "Timetable refresh: ${stable} code, new indexes as ${tag} if a feed changed"
-            emit "$tag" true "refs/tags/${stable}" "$stable" "$commit" true
+            emit "$tag" true "refs/tags/${stable}" "$stable" "$commit" true "$beta"
             exit 0
           fi
 
@@ -597,9 +615,16 @@ jobs:
           # A tag push runs in a group of its own (see concurrency): a
           # dispatch or weekly run must not publish over a tag pushed since
           # it resolved its version.
-          if [ "${GITHUB_REF_TYPE}" != "tag" ] && gh api "repos/${GH_REPO}/git/ref/tags/${tag}" >/dev/null 2>&1; then
-            echo "::error::Tag ${tag} exists already (pushed while this run was building); release the next version instead."
-            exit 1
+          # Only a 404 means "no such tag" / "no such release"; any other API
+          # failure stops the publish rather than guessing.
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            if out=$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq .ref 2>&1); then
+              echo "::error::Tag ${tag} exists already (pushed while this run was building); release the next version instead."
+              exit 1
+            elif [[ "$out" != *"HTTP 404"* ]]; then
+              echo "::error::Could not check whether tag ${tag} exists (GitHub API); not publishing."
+              exit 1
+            fi
           fi
           ver="${tag#v}"
           notes="Hungarian transport ${ver}."
@@ -615,7 +640,13 @@ jobs:
           # A published release is never changed: what HACS installs as a
           # version stays what was released as it. A draft is refused too
           # (HACS never sees an unpublished release).
-          state=$(gh release view "$tag" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>/dev/null || echo missing)
+          if ! state=$(gh release view "$tag" --json isDraft --jq 'if .isDraft then "draft" else "published" end' 2>&1); then
+            if [[ "$state" != *"release not found"* ]]; then
+              echo "::error::Could not check whether release ${tag} exists (GitHub API); not publishing."
+              exit 1
+            fi
+            state=missing
+          fi
           if [ "$state" != "missing" ]; then
             echo "::error::Release $tag already exists (${state}). A release is not changed after publishing; release the next version instead."
             exit 1
@@ -623,3 +654,28 @@ jobs:
           # Tag the commit that was built: main's head for a code release, the
           # stable tag's commit for a timetable refresh.
           gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS hungarian-transport-build.json --target "$TARGET" --title "$tag" --notes "$notes" "${extra[@]}"
+
+  # After a weekly timetable release, while a -rev series is open (beta users
+  # run it), publish main as the next rev, which starts two patches above
+  # the new stable. Beta users then stay above the timetable release on
+  # main's code (with the same fresh indexes) instead of being offered the
+  # older code of the release that just went out. GITHUB_TOKEN may start a
+  # workflow_dispatch run. That run is a rev, not a refresh, so its own beta
+  # job is skipped: no loop.
+  beta:
+    name: Rev release for the beta channel
+    needs: [resolve, publish]
+    if: needs.resolve.outputs.refresh == 'true' && needs.resolve.outputs.beta == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch a rev release from main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --ref main -f bump=rev
+          echo "::notice title=Beta channel::${TAG} is out; a rev release from main was dispatched so beta users stay above it."

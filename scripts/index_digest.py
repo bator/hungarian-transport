@@ -48,7 +48,7 @@ def canonical(index: Path) -> dict:
             stop.append(ops[row[3]][0])
         stop.extend(coords[2 * i: 2 * i + 2])
         stops.append(stop)
-    cal, added, removed = idx.get("c") or [], idx.get("a") or [], idx.get("r") or [],
+    cal, added, removed = idx.get("c") or [], idx.get("a") or [], idx.get("r") or []
     trips = []
     for t in idx.get("t") or []:
         sv = t[0]

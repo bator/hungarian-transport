@@ -114,11 +114,16 @@ to the weekly timetable release, which semver ranks below the prerelease:
 beta users stay on main. A later `rev` run continues an open series, or
 starts one two patches above a newer stable. A `patch` run publishes main
 under the open series' number (1.9.15), so what the beta ran ships under
-its own version; without an open series it is the next patch. If a weekly
-release finds the open series on the very next patch (no `rev` run since
-the previous timetable release), it takes the number above the series and
-warns: beta users are then offered that release's older code until the next
-`rev` run. A release run compares the new indexes with
+its own version; without an open series it is the next patch. While a
+series is open, every weekly timetable release is followed by a `rev` run
+from main that the workflow starts itself: main with the fresh indexes,
+two patches above the new stable, so the beta channel stays above it on
+main's code. That run is a prerelease, not a refresh, and starts nothing
+further. Only if it failed does the next weekly release find the open
+series on the very next patch; it then takes the number above the series
+and warns: beta users are offered that release's older code until a `rev`
+run is published. The version is picked from GitHub's list of releases and
+tags; when GitHub does not answer, the run stops instead of guessing. A release run compares the new indexes with
 the latest published ones: a city feed that is gone, a feed that lost more
 than half of its trips, or a Volán index with far too few trips fails the
 run, and no release is made (see [When an update fails](#when-an-update-fails)).
@@ -220,7 +225,8 @@ later), on both sides, so a feed whose summer service ended is compared on
 its autumn trips alone. There is no check on the index's total, so feeds
 whose calendars end together (several on 31 December) leave without holding
 back the rest. The Volán index is a single feed: it is refused with fewer
-than half the still-running trips of the one in place. The message names the feed:
+than half the still-running trips of the one in place, or of all its trips
+when fewer than 50 of them still run (an index whose calendar has ended). The message names the feed:
 
 - `<id> missing (had N trips)` — the feed did not download or parse.
 - `<id> calendar ended YYYY-MM-DD (had N trips, the previous index runs until

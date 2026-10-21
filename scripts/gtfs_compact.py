@@ -1330,15 +1330,23 @@ def running_trips(idx: dict, today: str | None = None) -> list[list]:
     return out
 
 
+# Below this many trips a guard has nothing meaningful to compare.
+GUARD_MIN_TRIPS = 50
+
+
 def existing_trips(out: Path, today: str | None = None) -> int | None:
-    """Trips of an existing index whose service still runs (running_trips)."""
-    if not out.exists():
+    """Trips a rebuild of an existing index is compared with: those whose
+    service still runs (running_trips), or all of them when fewer than
+    GUARD_MIN_TRIPS still run. An index whose calendar has (nearly) ended is
+    the one a truncated feed would replace; its few running trips would let
+    anything through."""
+    idx = _read_index(out)
+    if idx is None:
         return None
     try:
-        with gzip.open(out, "rt", encoding="utf-8") as fh:
-            idx = json.load(fh)
-        return len(running_trips(idx, today))
-    except (OSError, json.JSONDecodeError, gzip.BadGzipFile, IndexError, TypeError):
+        running = len(running_trips(idx, today))
+        return running if running >= GUARD_MIN_TRIPS else len(idx.get("t") or [])
+    except (IndexError, TypeError):
         return None
 
 
@@ -1347,9 +1355,10 @@ def _read_index(out: Path) -> dict | None:
         return None
     try:
         with gzip.open(out, "rt", encoding="utf-8") as fh:
-            return json.load(fh)
-    except (OSError, json.JSONDecodeError, gzip.BadGzipFile):
+            idx = json.load(fh)
+    except (OSError, EOFError, UnicodeDecodeError, json.JSONDecodeError, gzip.BadGzipFile):
         return None
+    return idx if isinstance(idx, dict) else None
 
 
 def operator_stats(out: Path) -> dict[str, tuple[int, str]] | None:
@@ -1560,9 +1569,10 @@ def write_index(
         if part.get("feed"):
             feeds.append(f"{oid}:{part['feed']}")
     # Only trips whose service still runs count, on both sides: the summer
-    # trips of a feed are not lost when the summer is over.
+    # trips of a feed are not lost when the summer is over. An index with
+    # (almost) nothing running is compared on all its trips (existing_trips).
     prev = existing_trips(out, today) if guard_total else None
-    if prev is not None and prev >= 50:
+    if prev is not None and prev >= GUARD_MIN_TRIPS:
         running = len(running_trips({"c": all_c, "a": all_a, "t": all_t}, today))
         if running < prev * 0.5:
             raise IndexGuardError(
