@@ -16,7 +16,10 @@ built. Which feed (size, mtime) built which index is kept in STATE_NAME next
 to the feed, and so is a feed whose build failed: that one is not built again
 at every start, a Repairs issue says so, and the rebuild service tries again.
 A build that was interrupted (timeout, killed, out of memory) says nothing
-about the feed and is not recorded so: the next start tries again.
+about the feed and is not recorded so: the next start tries again. One that
+is interrupted INTERRUPTED_LIMIT times in a row on the same feed (a host too
+small for it) is not tried again at startup either, with a Repairs issue,
+until the feed changes or the rebuild service builds it.
 The build (a minute of CPU over stop_times.txt) runs as a separate Python
 process, not in the executor: an executor thread would hold the GIL against
 the event loop right after startup, and the process gives the feed's memory
@@ -84,9 +87,14 @@ UPLOAD_RE = re.compile(re.escape(SOURCE_NAME) + r"\.[0-9a-f]{32}\.upload")
 STATE_TEMP_RE = re.compile(re.escape(STATE_NAME) + r"\.[0-9a-f]{32}\.writing")
 # mav_index.write puts "feed" right after "v", so the head of the file has it.
 INDEX_FEED_RE = re.compile(rb'"feed":("(?:[^"\\]|\\.)*"|null)')
-# State keys about the index on disk and the feed that last failed; a new
-# build record ("building") keeps them, so a build that fails can put them back.
-STATE_KEEP = ("source", "index", "feed_version", "failed", "error")
+# State keys about the index on disk, the feed that last failed and the
+# interruptions in a row of the current feed's build; a new build record
+# ("building") keeps them, so a build that fails can put them back.
+STATE_KEEP = ("source", "index", "feed_version", "failed", "error", "interrupted")
+# Interruptions in a row of one feed's build after which startup stops trying
+# it: an OOM kill on a small host, or the timeout, happens again at every
+# start, each time costing BUILD_TIMEOUT of CPU or memory pressure.
+INTERRUPTED_LIMIT = 2
 
 
 class MavSourceMissing(Exception):
@@ -167,6 +175,22 @@ def _index_feed(path: Path) -> str | None:
     return feed if isinstance(feed, str) else None
 
 
+def _interruptions(state: dict[str, Any], source: list[int]) -> tuple[int, str]:
+    """How many builds of the feed with fingerprint source were interrupted
+    in a row, and the last one's error."""
+    record = state.get("interrupted")
+    if not isinstance(record, dict) or record.get("source") != source:
+        return 0, ""
+    count = record.get("count")
+    if not isinstance(count, int) or isinstance(count, bool):
+        return 0, ""
+    return count, str(record.get("error") or "")
+
+
+def _interrupted_message(count: int, error: str) -> str:
+    return f"the build was interrupted {count} times in a row, last: {error}"
+
+
 def _source_version(src: Path) -> str:
     """feed_info.txt's feed_version of the feed, "" when it has none."""
     try:
@@ -179,8 +203,9 @@ def _source_version(src: Path) -> str:
 def _needs_build(src: Path, out: Path, state_file: Path) -> bool:
     """Whether the index is missing or was not built from the current feed.
 
-    A feed whose build failed is not built again (the rebuild service and an
-    upload force a build). A build that did not finish leaves "building" in
+    A feed whose build failed, or was interrupted INTERRUPTED_LIMIT times in
+    a row, is not built again (the rebuild service and an upload force a
+    build). A build that did not finish leaves "building" in
     the state file and is done again. An index this integration did not
     build (a release shipped it, or the update script restored it) is kept
     when its "feed" is the current feed's feed_version: its mtime says when
@@ -191,6 +216,8 @@ def _needs_build(src: Path, out: Path, state_file: Path) -> bool:
         return False
     state = _read_state(state_file)
     if state.get("failed") == source:
+        return False
+    if _interruptions(state, source)[0] >= INTERRUPTED_LIMIT:
         return False
     index = _fingerprint(out)
     if index is None:
@@ -391,9 +418,12 @@ async def _build_locked(hass: HomeAssistant, www: Path, job: _Job) -> dict[str, 
         raise MavSourceMissing(str(src))
     state = await hass.async_add_executor_job(_read_state, state_file)
     if not job.force and not await hass.async_add_executor_job(_needs_build, src, out, state_file):
+        interrupted, last_error = _interruptions(state, source)
         if state.get("failed") == source:
             # Repairs issues do not outlive a restart; this feed still fails.
             _create_failed_issue(hass, str(state.get("error") or ""))
+        elif interrupted >= INTERRUPTED_LIMIT:
+            _create_failed_issue(hass, _interrupted_message(interrupted, last_error))
         return None
     previous = {key: state[key] for key in STATE_KEEP if key in state}
     index_before = await hass.async_add_executor_job(_fingerprint, out)
@@ -410,10 +440,18 @@ async def _build_locked(hass: HomeAssistant, www: Path, job: _Job) -> dict[str, 
         restored = previous if unchanged else {}
         if job.upload is None and isinstance(err, MavBuildInterrupted):
             # Says nothing about the feed: the next start tries again (an
-            # earlier failure of it, too, is no longer known to hold).
+            # earlier failure of it, too, is no longer known to hold), unless
+            # this feed's build keeps being interrupted.
+            count = _interruptions(previous, source)[0] + 1
             restored = {k: v for k, v in restored.items() if k not in ("failed", "error")}
+            restored["interrupted"] = {"source": source, "count": count, "error": str(err)}
+            if count >= INTERRUPTED_LIMIT:
+                _create_failed_issue(hass, _interrupted_message(count, str(err)))
+            else:
+                ir.async_delete_issue(hass, DOMAIN, ISSUE_BUILD_FAILED)
         elif job.upload is None:
             # Not again at every start; the rebuild service tries again.
+            restored = {k: v for k, v in restored.items() if k != "interrupted"}
             restored = {**restored, "failed": source, "error": str(err)}
             _create_failed_issue(hass, str(err))
         else:
