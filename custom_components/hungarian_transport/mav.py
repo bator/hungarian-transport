@@ -15,6 +15,8 @@ rebuilt at startup whenever it is missing or the feed changed since it was
 built. Which feed (size, mtime) built which index is kept in STATE_NAME next
 to the feed, and so is a feed whose build failed: that one is not built again
 at every start, a Repairs issue says so, and the rebuild service tries again.
+A build that was interrupted (timeout, killed, out of memory) says nothing
+about the feed and is not recorded so: the next start tries again.
 The build (a minute of CPU over stop_times.txt) runs as a separate Python
 process, not in the executor: an executor thread would hold the GIL against
 the event loop right after startup, and the process gives the feed's memory
@@ -76,6 +78,10 @@ TEMP_INDEX_RE = re.compile(re.escape(INDEX_NAME) + r"\.[a-z0-9_]{8}")
 # An upload's own temp file next to the feed; one left behind (Home Assistant
 # stopped during the upload or its build) is removed at the next setup.
 UPLOAD_RE = re.compile(re.escape(SOURCE_NAME) + r"\.[0-9a-f]{32}\.upload")
+# _write_state's temp file next to the feed. Not "*.tmp": the index update
+# script (scripts/update_volan_index.py, sweep_temps) deletes those in this
+# folder, which could take this file between its write and its rename.
+STATE_TEMP_RE = re.compile(re.escape(STATE_NAME) + r"\.[0-9a-f]{32}\.writing")
 # mav_index.write puts "feed" right after "v", so the head of the file has it.
 INDEX_FEED_RE = re.compile(rb'"feed":("(?:[^"\\]|\\.)*"|null)')
 # State keys about the index on disk and the feed that last failed; a new
@@ -85,6 +91,12 @@ STATE_KEEP = ("source", "index", "feed_version", "failed", "error")
 
 class MavSourceMissing(Exception):
     """There is no MÁV GTFS zip at source_path()."""
+
+
+class MavBuildInterrupted(RuntimeError):
+    """The build did not finish for a reason outside the feed: it timed out,
+    was killed, ran out of memory or did not start. Not recorded as a failed
+    feed, so the next start tries again."""
 
 
 class MavIndexRejected(RuntimeError):
@@ -123,7 +135,13 @@ def _read_state(path: Path) -> dict[str, Any]:
 
 
 def _write_state(path: Path, state: dict[str, Any]) -> None:
-    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    """Replace the state file. Only called under the build lock, so another
+    temp file of it is one a stopped Home Assistant left behind."""
+    with contextlib.suppress(OSError):
+        for stale in path.parent.iterdir():
+            if STATE_TEMP_RE.fullmatch(stale.name):
+                stale.unlink(missing_ok=True)
+    tmp = path.with_name(f"{path.name}.{uuid.uuid4().hex}.writing")
     try:
         tmp.write_text(json.dumps(state), encoding="utf-8")
         os.replace(tmp, path)
@@ -228,7 +246,7 @@ async def _build(hass: HomeAssistant, src: Path, out: Path) -> dict[str, Any]:
         )
     except OSError as err:
         # The interpreter did not start; not to be read as a missing feed.
-        raise RuntimeError(f"could not start the index build: {err}") from err
+        raise MavBuildInterrupted(f"could not start the index build: {err}") from err
     try:
         async with asyncio.timeout(BUILD_TIMEOUT):
             stdout, stderr = await proc.communicate()
@@ -239,12 +257,17 @@ async def _build(hass: HomeAssistant, src: Path, out: Path) -> dict[str, Any]:
         await proc.wait()
         await hass.async_add_executor_job(_remove_temp_indexes, out)
         if isinstance(err, TimeoutError):
-            raise RuntimeError(f"index build timed out after {BUILD_TIMEOUT}s") from None
+            raise MavBuildInterrupted(f"index build timed out after {BUILD_TIMEOUT}s") from None
         raise
     if proc.returncode != 0:
         await hass.async_add_executor_job(_remove_temp_indexes, out)
         tail = stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output"]
-        raise RuntimeError(f"index build exited {proc.returncode}: {tail[0]}")
+        message = f"index build exited {proc.returncode}: {tail[0]}"
+        # Killed by a signal (the OOM killer, a stop) or out of memory: the
+        # host's state at the time, not something wrong with the feed.
+        if proc.returncode < 0 or tail[0].startswith("MemoryError"):
+            raise MavBuildInterrupted(message)
+        raise RuntimeError(message)
     try:
         stats = json.loads(stdout)
     except ValueError as err:
@@ -385,7 +408,11 @@ async def _build_locked(hass: HomeAssistant, www: Path, job: _Job) -> dict[str, 
         # Nothing was written: what the state said about the index still holds.
         unchanged = index_before == await hass.async_add_executor_job(_fingerprint, out)
         restored = previous if unchanged else {}
-        if job.upload is None:
+        if job.upload is None and isinstance(err, MavBuildInterrupted):
+            # Says nothing about the feed: the next start tries again (an
+            # earlier failure of it, too, is no longer known to hold).
+            restored = {k: v for k, v in restored.items() if k not in ("failed", "error")}
+        elif job.upload is None:
             # Not again at every start; the rebuild service tries again.
             restored = {**restored, "failed": source, "error": str(err)}
             _create_failed_issue(hass, str(err))
@@ -402,7 +429,6 @@ async def _build_locked(hass: HomeAssistant, www: Path, job: _Job) -> dict[str, 
     )
     ir.async_delete_issue(hass, DOMAIN, ISSUE_BUILD_FAILED)
     persistent_notification.async_dismiss(hass, NOTIFICATION_ID)
-    hass.data.setdefault(DOMAIN, {})["mav"] = stats
     audit = stats["audit"]
     _LOGGER.info(
         "MÁV index %s: %s trains, %s variants (%s on the station line), audit %s/%s trains",
