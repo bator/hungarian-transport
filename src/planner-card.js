@@ -592,6 +592,9 @@ export class BKKPlannerCard extends BKKHopCard {
         try {
           await BkkLib.fillJourneyShapes(this._journey);
         } catch (_e) { /* draw the endpoint fallback */ }
+        /* The card's own box shows the journey the map now draws, not the
+           one this replan replaced. */
+        if (journey) this._paint();
         if (this._mapStale(seq)) return;
         segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
       } catch (_e) { /* fall through to the no-geometry notice */ }
@@ -1404,7 +1407,7 @@ ${this._stopPinCss()}
     this._paintDestHits('');
     try {
       if (!this._hasFutar()) await this._fillKey();
-      const placeOrigin = /^(geo:|node\/)/i.test(String(cfg.stopId || ''))
+      const placeOrigin = /^(geo:|node\/|way\/)/i.test(String(cfg.stopId || ''))
         || cfg.stopKind === 'address' || cfg.stopKind === 'place';
       if (placeOrigin) {
         this._dests = [];

@@ -2710,6 +2710,10 @@ Object.assign(BkkLib, {
   cityHubPath(idx, originStop) {
     return BkkLib.cityHubPaths(idx, originStop, 1)[0] || null;
   },
+  /* How far a city hub may be from a destination with coordinates and
+     still be it: a bus stand by its station, not the next station along
+     (Sopron-Déli is ~1.3 km from Sopron, Győr-Szabadhegy 2.2 km from Győr). */
+  DEST_HUB_M: 1e3,
   /* Only from a city feed's own stop: a BKK or Volán origin matched by
      number or name lands on some other town's stop (BKK_F01020 "Kossuth
      Lajos utca" was a Miskolc one). */
@@ -2736,17 +2740,24 @@ Object.assign(BkkLib, {
     const cityTok = new Set(BkkLib.foldTokens(cityName));
     const destTok = BkkLib.foldTokens(destFold);
     const destPt = BkkLib.finiteLatLon(dest && dest.lat, dest && dest.lon);
+    const ownOpId = String(op && op.id || String(origin.id).split(":")[0]);
+    const destOpId = BkkLib.stopIdFamily(dest) === "city" ? String(dest.id).split(":")[0] : "";
+    const byName = !destOpId || destOpId === ownOpId;
     const hubWord = (tok) => /palyaudvar|allomas/.test(tok) || /^(bejarati|elagazas|parkolo)$/.test(tok);
     const destWordsIn = (hubTok) => destTok.length && destTok.every((tok) => hubTok.indexOf(tok) >= 0 || cityTok.has(tok));
     const sameName = (hub) => hub.fold === destFold;
     const ownStation = (hub) => {
       const hubTok = BkkLib.foldTokens(hub.fold);
-      const hubPt = BkkLib.finiteLatLon(hub.lat, hub.lon);
-      return !!(hubPt && destPt && BkkLib.haversineMeters(hubPt, destPt) <= 800 || destWordsIn(hubTok) && hubTok.every((tok) => cityTok.has(tok) || hubWord(tok) || destTok.indexOf(tok) >= 0));
+      return !!(destWordsIn(hubTok) && hubTok.every((tok) => cityTok.has(tok) || hubWord(tok) || destTok.indexOf(tok) >= 0));
     };
-    const anyStation = (hub) => destWordsIn(BkkLib.foldTokens(hub.fold));
+    const anyStation = (hub) => !!destWordsIn(BkkLib.foldTokens(hub.fold));
+    const placed = (rule) => (hub) => {
+      const hubPt = BkkLib.finiteLatLon(hub.lat, hub.lon);
+      if (hubPt && destPt) return BkkLib.haversineMeters(hubPt, destPt) <= BkkLib.DEST_HUB_M;
+      return byName && !!destFold && rule(hub);
+    };
     const townHubs = idx.stops.filter((st) => st && st.op === originStop.op && st.fold && BkkLib.isRailHubName(st.name));
-    const isDestHub = destFold ? [sameName, ownStation, anyStation].find((rule) => townHubs.some(rule)) : null;
+    const isDestHub = destFold || destPt ? [sameName, ownStation, anyStation].map(placed).find((rule) => townHubs.some(rule)) : null;
     const toDest = isDestHub ? paths.filter((path) => path.hubFold && isDestHub({ fold: path.hubFold, lat: path.hubLat, lon: path.hubLon })) : [];
     const destIsHub = toDest.length > 0;
     const startSec = Math.floor(Date.now() / 1e3);
@@ -2829,8 +2840,28 @@ Object.assign(BkkLib, {
     if (!first) return null;
     let best = first;
     if (!destIsHub) {
+      let railDest = dest;
+      if (destOpId) {
+        const destOp = (idx.ops || [])[BkkLib.opIx(idx, destOpId)];
+        const destTown = destOp ? String(destOp.name).split(" — ")[0] : "";
+        let station = null;
+        if (destTown) {
+          try {
+            station = await this.railStationAtHub(apiKey, destTown, {
+              hubName: dest.name || "",
+              hubFold: destFold,
+              hubLat: destPt ? destPt[0] : void 0,
+              hubLon: destPt ? destPt[1] : void 0
+            });
+          } catch (_e) {
+            station = null;
+          }
+        }
+        if (!station || !station.id) return null;
+        railDest = { id: station.id, name: station.name || dest.name || "" };
+      }
       const hubs = Array.from(bestAt.values()).sort((a, b) => a.ready - b.ready).slice(0, 3);
-      const rails = await Promise.all(hubs.map((city) => this.railAfterCity(apiKey, hass, cityName, city.path, dest, city.ready).catch(() => null)));
+      const rails = await Promise.all(hubs.map((city) => this.railAfterCity(apiKey, hass, cityName, city.path, railDest, city.ready).catch(() => null)));
       best = null;
       let railBest = null;
       rails.forEach((rail, n) => {
@@ -9360,6 +9391,7 @@ var BKKPlannerCard = class extends BKKHopCard {
           await BkkLib.fillJourneyShapes(this._journey);
         } catch (_e) {
         }
+        if (journey) this._paint();
         if (this._mapStale(seq)) return;
         segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
       } catch (_e) {
@@ -10136,7 +10168,7 @@ ${this._stopPinCss()}
     this._paintDestHits("");
     try {
       if (!this._hasFutar()) await this._fillKey();
-      const placeOrigin = /^(geo:|node\/)/i.test(String(cfg.stopId || "")) || cfg.stopKind === "address" || cfg.stopKind === "place";
+      const placeOrigin = /^(geo:|node\/|way\/)/i.test(String(cfg.stopId || "")) || cfg.stopKind === "address" || cfg.stopKind === "place";
       if (placeOrigin) {
         this._dests = [];
         this._destRoutes = {};
