@@ -2,9 +2,11 @@ import { BKK_API, MIN_REFRESH_S } from '../config.js';
 import { codedError } from '../i18n.js';
 import { BkkLib } from '../lib/core.js';
 
-/* A departure board is shared between cards for this long: no longer than
-   the shortest poll, so a card polling at the floor always gets a new one. */
-const BOARD_TTL_MS = MIN_REFRESH_S * 1000;
+/* A departure board is shared between cards for this long: well under the
+   shortest poll, and timed from the request, so a card polling at the floor
+   always gets a new one (at exactly the floor every second poll was the
+   previous board). */
+const BOARD_TTL_MS = Math.max(1, MIN_REFRESH_S - 5) * 1000;
 /* An older board stands in for a refresh that the integration's own rate
    limit refused (futar_rate_limited): not an outage, so no banner, and the
    departures it lists still leave on time. Kept no longer than this. */
@@ -159,6 +161,7 @@ Object.assign(BkkLib, {
     if (hit && Date.now() - hit.ts < BOARD_TTL_MS) return Promise.resolve(hit.data);
     const inflight = BkkLib._boardInflight.get(key);
     if (inflight) return inflight;
+    const asked = Date.now();
     const run = BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
       stopId: String(stopId),
       minutesAfter: String(horizon),
@@ -171,7 +174,7 @@ Object.assign(BkkLib, {
          planner tried on a dozen origins kept a dozen full boards. */
       const now = Date.now();
       BkkLib._boards.forEach((v, k) => { if (now - v.ts >= BOARD_STALE_MS) BkkLib._boards.delete(k); });
-      BkkLib._boards.set(key, { ts: now, data });
+      BkkLib._boards.set(key, { ts: asked, data });
       return data;
     }, (err) => {
       if (err && err.code === 'futar_rate_limited' && hit && Date.now() - hit.ts < BOARD_STALE_MS) return hit.data;

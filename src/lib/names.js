@@ -530,28 +530,25 @@ Object.assign(BkkLib, {
     const hit = BkkLib._elviraCodes.get(memoKey);
     if (hit && (hit.code || Date.now() - hit.ts < 600000)) return hit.code;
     const code = await this._searchElviraCode(apiKey, n);
+    /* A search that failed (a FUTÁR timeout) is no answer: only a real
+       "no such station" is kept for ten minutes. */
+    if (code === null) return '';
     BkkLib._elviraCodes.set(memoKey, { code, ts: Date.now() });
     return code;
   },
+  /* The station code by name, '' when FUTÁR has none, null when a search
+     failed and nothing was found: that one is asked again next time. */
   async _searchElviraCode(apiKey, n) {
-    const queries = [n];
-    const key = BkkLib.stationKey(n);
-    if (key && key !== n) queries.push(key);
-    BkkLib.aliasQueries(n).forEach((q) => queries.push(q));
-    const seen = new Set();
-    for (let i = 0; i < queries.length; i++) {
-      const q = queries[i];
-      if (!q || seen.has(q)) continue;
-      seen.add(q);
-      try {
-        const hits = await this.searchStops(apiKey, q, 'mav');
-        for (let j = 0; j < hits.length; j++) {
-          const c = BkkLib.elviraStationCode(hits[j].id);
-          if (c) {
-            return c;
-          }
-        }
-      } catch (_e) { /* search is a fallback */ }
+    /* searchStops asks the name's aliases (its station key too) itself. */
+    let hits;
+    try {
+      hits = (await this.searchStops(apiKey, n, 'mav')) || [];
+    } catch (_e) {
+      return null;
+    }
+    for (let j = 0; j < hits.length; j++) {
+      const c = BkkLib.elviraStationCode(hits[j].id);
+      if (c) return c;
     }
     return '';
   },
@@ -579,8 +576,18 @@ Object.assign(BkkLib, {
     if (f === 'keleti' || f.indexOf('keleti ') === 0) extra.push('Budapest-Keleti');
     if (f === 'kelenfold' || f.indexOf('kelenfold ') === 0) extra.push('Budapest-Kelenfold');
     const key = BkkLib.stationKey(q);
-    if (key && key !== q && extra.indexOf(key) < 0) extra.push(key);
-    return extra;
+    if (key) extra.push(key);
+    /* FUTÁR's search ignores case: "deák" for "Deák" is the same request
+       again, so only a form that differs by more than case is another query
+       ("keleti" for "Keleti pályaudvar" is one). */
+    const caseless = (x) => String(x || '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
+    const seen = new Set([caseless(q)]);
+    return extra.filter((x) => {
+      const xc = caseless(x);
+      if (!xc || seen.has(xc)) return false;
+      seen.add(xc);
+      return true;
+    });
   },
   labelAliased(q, hit) {
     const f = BkkLib.fold(q);

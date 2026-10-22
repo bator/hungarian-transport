@@ -589,8 +589,9 @@ Object.assign(BkkLib, {
     if (!destIsHub) {
       /* A city feed's stop is a station only in its own town: ELVIRA asked
          for "Vasútállomás" by name answers some town's. Its station is
-         found as a hub's is, by place or by that town's name, or there is
-         no train to it. */
+         found as a hub's is: by its place when the stop has one (only a
+         station by it), else by that town's name, or there is no train to
+         it. */
       let railDest = dest;
       if (destOpId) {
         const destOp = (idx.ops || [])[BkkLib.opIx(idx, destOpId)];
@@ -603,6 +604,7 @@ Object.assign(BkkLib, {
               hubFold: destFold,
               hubLat: destPt ? destPt[0] : undefined,
               hubLon: destPt ? destPt[1] : undefined,
+              nearOnly: true,
             });
           } catch (_e) {
             station = null;
@@ -732,7 +734,7 @@ Object.assign(BkkLib, {
     return best;
   },
   /* The railway station at a city feed's hub, from FUTÁR's MÁV stops: the
-     one by the hub stop, else by name. Hubs called just "Vasútállomás"
+     one by the hub stop, else by name (path.nearOnly: only by the stop). Hubs called just "Vasútállomás"
      (Székesfehérvár, Szombathely, Kaposvár …) or "Főpályaudvar" (Pécs)
      share no word with the station ("Székesfehérvár", "Pécs"), so the town
      names it then; a town with two stations goes by the hub's own word
@@ -755,6 +757,10 @@ Object.assign(BkkLib, {
         .filter((c) => c.pt && BkkLib.haversineMeters(hubPt, c.pt) <= 1500)
         .sort((x, y) => BkkLib.haversineMeters(hubPt, x.pt) - BkkLib.haversineMeters(hubPt, y.pt))[0] : null;
       if (near) return near.hit;
+      /* A destination's own place decides: a station by name or town that
+         is not by it (Szeged for Kiskundorozsma, 4.8 km) is not a train to
+         it, and no journey beats a wrong one. */
+      if (hubPt && path.nearOnly) continue;
       const byHub = hits.find((hit) => BkkLib.foldTokenMatch(want, hit.name || ''));
       if (byHub) return byHub;
       const extra = (hit) => BkkLib.foldTokens(hit.name || '').filter((tok) => cityTok.indexOf(tok) < 0).length;

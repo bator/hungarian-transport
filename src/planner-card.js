@@ -571,10 +571,20 @@ export class BKKPlannerCard extends BKKHopCard {
     this._closeVehicleMap();
     this._openingMap = 'journey';
     const seq = this._mapSeq;
+    /* A swap or a new origin or destination while this open still waits
+       (_invalidatePlan) makes it one for the old pair: its plan must not
+       replace the new pair's journey, paint, or open a map. */
+    const gen = this._gen;
+    const stale = () => {
+      if (this._mapStale(seq)) return true;
+      if (gen === this._gen) return false;
+      this._openingMap = '';
+      return true;
+    };
     try {
       await BkkLib.fillJourneyShapes(this._journey);
     } catch (_e) { /* draw the endpoint fallback */ }
-    if (this._mapStale(seq)) return;
+    if (stale()) return;
     let segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
     /* Only "now" plans again for a map: a chosen time's open itinerary is
        one of several, and a plan for now would replace it with another. */
@@ -587,19 +597,19 @@ export class BKKPlannerCard extends BKKHopCard {
           this._hass,
           { minutesAfter: clampMinutesAfter(cfg.minutesAfter) },
         );
-        if (this._mapStale(seq)) return;
+        if (stale()) return;
         if (journey) this._journey = journey;
         try {
           await BkkLib.fillJourneyShapes(this._journey);
         } catch (_e) { /* draw the endpoint fallback */ }
+        if (stale()) return;
         /* The card's own box shows the journey the map now draws, not the
            one this replan replaced. */
-        if (journey) this._paint();
-        if (this._mapStale(seq)) return;
+        if (journey) this._paintJourney();
         segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
       } catch (_e) { /* fall through to the no-geometry notice */ }
     }
-    if (this._mapStale(seq)) return;
+    if (stale()) return;
     if (!segs.length) {
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapNoData'));
@@ -609,12 +619,12 @@ export class BKKPlannerCard extends BKKHopCard {
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
-      if (this._mapStale(seq)) return;
+      if (stale()) return;
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapLeafletFail'));
       return;
     }
-    if (this._mapStale(seq)) return;
+    if (stale()) return;
     const overlay = document.createElement('div');
     overlay.className = 'ht-map-overlay';
     const title = `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
