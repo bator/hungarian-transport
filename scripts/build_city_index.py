@@ -214,12 +214,17 @@ def _fresh(got: list[dict], label: str, today: str | None) -> tuple[list[dict], 
     return [p for p in got if p["op_id"] not in ended], max(ended.values())
 
 
+def _with_trips(parts: list[dict]) -> list[dict]:
+    return [p for p in parts if p.get("t")]
+
+
 def collect_parts(
     base: Path,
     volan_zip: Path | None = None,
     *,
     today: str | None = None,
     zips: dict[str, Path] | None = None,
+    out: Path | None = None,
 ) -> tuple[list[dict], list[str], dict[str, str], list[str]]:
     """Operator parts with trips, the feed ids that failed, had none or
     whose calendar already ended, of the last: feed id -> last service
@@ -230,47 +235,70 @@ def collect_parts(
     zips: feed id -> a newly downloaded zip to read instead of the one in
     base. One that fails to load or has no trips is rejected and the feed
     falls back to its zip in base, so a broken download does not take a
-    working feed out of the index (and the guard does not refuse it all)."""
+    working feed out of the index (and the guard does not refuse it all).
+    So is one that loads but that guard_feeds would refuse against the
+    previous index out (its calendar already ended, most of its trips
+    gone) while the zip in base passes: one stale or truncated download
+    does not block the other feeds' updates. HUNGARIAN_TRANSPORT_ALLOW_MISSING
+    does not apply here: it lets the index lose a feed, not swap a good
+    zip for a bad one."""
+    today = today or date.today().strftime("%Y%m%d")
+    previous = _previous(out, today) if zips else None
     parts: list[dict] = []
     failed: list[str] = []
     expired: dict[str, str] = {}
     rejected: list[str] = []
     for feed in CITY_FEEDS:
-        new_zip = (zips or {}).get(feed["id"])
-        try:
-            got = []
-            if new_zip is not None:
-                try:
-                    got = [p for p in _load_feed(base, feed, new_zip) if p.get("t")]
-                    if not got:
-                        raise ValueError("no trips")
-                except Exception as err:
-                    rejected.append(feed["id"])
-                    print(f"warn new zip {feed_error(feed['id'], err)}; the previous zip stays", file=sys.stderr)
-                    got = []
-                    if not (base / feed["file"]).exists():
-                        raise
-            if not got:
-                got = [p for p in _load_feed(base, feed) if p.get("t")]
-        except Exception as err:
-            failed.append(feed["id"])
-            print(f"warn {feed_error(feed['id'], err)}", file=sys.stderr)
-            continue
+        fid = feed["id"]
+        new_zip = (zips or {}).get(fid)
+        in_base = (base / feed["file"]).exists()
+        got: list[dict] | None = None
+        if new_zip is not None:
+            try:
+                got = _with_trips(_load_feed(base, feed, new_zip))
+                if not got:
+                    raise ValueError("no trips")
+            except Exception as err:
+                got = None
+                rejected.append(fid)
+                print(f"warn new zip {feed_error(fid, err)}; the previous zip stays", file=sys.stderr)
+                if not in_base:
+                    failed.append(fid)
+                    continue
+            else:
+                why = _feed_problem(fid, previous, got, today)
+                if why and in_base:
+                    try:
+                        old = _with_trips(_load_feed(base, feed))
+                    except Exception:
+                        old = []
+                    # Only for a zip in base that passes: when both fail,
+                    # the newer one stays and guard_feeds decides.
+                    if old and not _feed_problem(fid, previous, old, today):
+                        rejected.append(fid)
+                        print(f"warn new zip {fid}: {why}; the previous zip stays", file=sys.stderr)
+                        got = old
+        if got is None:
+            try:
+                got = _with_trips(_load_feed(base, feed))
+            except Exception as err:
+                failed.append(fid)
+                print(f"warn {feed_error(fid, err)}", file=sys.stderr)
+                continue
         if not got:
-            failed.append(feed["id"])
-            print(f"warn {feed['id']}: no trips", file=sys.stderr)
+            failed.append(fid)
+            print(f"warn {fid}: no trips", file=sys.stderr)
         else:
-            got, end = _fresh(got, feed["id"], today)
+            got, end = _fresh(got, fid, today)
             if not got:
-                failed.append(feed["id"])
-                expired[feed["id"]] = end
+                failed.append(fid)
+                expired[fid] = end
         parts.extend(got)
     if volan_zip and volan_zip.exists():
         try:
             print("volan local", volan_zip)
-            got = [
-                p
-                for p in load_parts(
+            got = _with_trips(
+                load_parts(
                     volan_zip,
                     include_volan_local,
                     split_agencies=True,
@@ -278,8 +306,7 @@ def collect_parts(
                     prefix="",
                     split_platforms_m=PLATFORM_SPLIT_M,
                 )
-                if p.get("t")
-            ]
+            )
         except Exception as err:
             got = []
             print(f"warn volan-local: {err}", file=sys.stderr)
@@ -330,6 +357,70 @@ def allowed_missing() -> set[str]:
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
+# What guard_feeds compares a rebuild with: (operator stats, running trips
+# per feed, all trips per feed of the operators still running) of the
+# previous index.
+Previous = tuple[dict[str, tuple[int, str]], dict[str, int], dict[str, int]]
+
+
+def _previous(out: Path | None, today: str) -> Previous | None:
+    """The previous index as guard_feeds sees it; None without one."""
+    prev = operator_stats(out) if out is not None else None
+    if not prev:
+        return None
+    live = {op: n for op, n in (operator_running_trips(out, today) or {}).items() if n}
+    return prev, _group_trips(live), _group_trips({op: n for op, (n, _e) in prev.items() if op in live})
+
+
+def _counts(parts: list[dict], today: str) -> tuple[dict[str, int], dict[str, int]]:
+    """(running trips, all trips) per feed of parts."""
+    running: dict[str, int] = {}
+    total: dict[str, int] = {}
+    for part in parts:
+        op = part["op_id"]
+        running[op] = running.get(op, 0) + len(running_trips(part, today))
+        total[op] = total.get(op, 0) + len(part["t"])
+    return _group_trips(running), _group_trips(total)
+
+
+def _group_problem(
+    group: str,
+    previous: Previous,
+    after_running: dict[str, int],
+    after_all: dict[str, int],
+    expired: dict[str, str],
+) -> str:
+    """Why guard_feeds refuses a rebuild for this feed, or ""."""
+    prev, before, before_all = previous
+    running = before.get(group)
+    if not running:
+        return ""
+    on_running, keep = guard_basis(running, before_all[group], MIN_TRIP_RATIO)
+    if on_running:
+        had, has = running, after_running.get(group, 0)
+    else:
+        had, has = before_all[group], after_all.get(group, 0)
+    if not has and group in expired:
+        return (f"{group} calendar ended {ymd(expired[group])} (had {had} trips,"
+                f" the previous index runs until {ymd(_group_end(prev, group))})")
+    if not has:
+        return f"{group} missing (had {had} trips)"
+    if had >= MIN_GUARDED_TRIPS and has < had * keep:
+        return f"{group} {has} trips vs {had}"
+    return ""
+
+
+def _feed_problem(fid: str, previous: Previous | None, got: list[dict], today: str) -> str:
+    """_group_problem for one city feed built from got (its parts with
+    trips), quietly: what guard_feeds would say about it, or ""."""
+    if previous is None:
+        return ""
+    ended = dict(stale_parts(got, today))
+    fresh = [p for p in got if p["op_id"] not in ended]
+    expired = {fid: max(ended.values())} if ended and not fresh else {}
+    return _group_problem(fid, previous, *_counts(fresh, today), expired)
+
+
 def guard_feeds(
     out: Path,
     parts: list[dict],
@@ -346,45 +437,28 @@ def guard_feeds(
     or an expired zip leaves the index without blocking every other feed.
     A feed that still runs is compared on the trips that still run, on both
     sides, when enough of them do (guard_basis), so a feed whose summer
-    service ended is not refused for it; otherwise on all its trips. A feed dropped for an ended calendar (expired: feed id ->
-    last day) while the previous index still runs it is refused, and the
-    message says so."""
-    prev = operator_stats(out)
-    if not prev:
-        return
+    service ended is not refused for it; otherwise on all its trips. A feed
+    dropped for an ended calendar (expired: feed id -> last day) while the
+    previous index still runs it is refused, and the message says so."""
     today = today or date.today().strftime("%Y%m%d")
+    previous = _previous(out, today)
+    if previous is None:
+        return
     allow = allowed_missing() if allow is None else allow
     expired = expired or {}
-    now_running: dict[str, int] = {}
-    now_all: dict[str, int] = {}
-    for part in parts:
-        op = part["op_id"]
-        now_running[op] = now_running.get(op, 0) + len(running_trips(part, today))
-        now_all[op] = now_all.get(op, 0) + len(part["t"])
-    live = {op: n for op, n in (operator_running_trips(out, today) or {}).items() if n}
-    before = _group_trips(live)
-    before_all = _group_trips({op: n for op, (n, _e) in prev.items() if op in live})
-    after_running, after_all = _group_trips(now_running), _group_trips(now_all)
+    prev, before, _before_all = previous
+    after_running, after_all = _counts(parts, today)
     for group, had in sorted(_group_trips({op: n for op, (n, _e) in prev.items()}).items()):
         if group not in before and not after_all.get(group):
             print(f"warn {group}: calendar ended {ymd(_group_end(prev, group))} in the previous index"
                   f" as well; its {had} trips leave the index", file=sys.stderr)
     problems = []
-    for group, running in sorted(before.items()):
+    for group in sorted(before):
         if group in allow or "all" in allow:
             continue
-        on_running, keep = guard_basis(running, before_all[group], MIN_TRIP_RATIO)
-        if on_running:
-            had, has = running, after_running.get(group, 0)
-        else:
-            had, has = before_all[group], after_all.get(group, 0)
-        if not has and group in expired:
-            problems.append(f"{group} calendar ended {ymd(expired[group])} (had {had} trips,"
-                            f" the previous index runs until {ymd(_group_end(prev, group))})")
-        elif not has:
-            problems.append(f"{group} missing (had {had} trips)")
-        elif had >= MIN_GUARDED_TRIPS and has < had * keep:
-            problems.append(f"{group} {has} trips vs {had}")
+        why = _group_problem(group, previous, after_running, after_all, expired)
+        if why:
+            problems.append(why)
     if problems:
         raise IndexGuardError(
             f"refusing to replace {out.name}: " + "; ".join(problems)
@@ -403,7 +477,7 @@ def build_city_index(
     """Build and write the city index; info["skipped"] lists the feeds left
     out, info["expired"] those of them whose calendar ended (id -> last day),
     info["rejected"] the new zips (zips, see collect_parts) not used."""
-    parts, failed, expired, rejected = collect_parts(base, volan_zip, today=today, zips=zips)
+    parts, failed, expired, rejected = collect_parts(base, volan_zip, today=today, zips=zips, out=out)
     guard_feeds(out, parts, expired=expired, today=today)
     # guard_feeds is the city index's guard: write_index's overall count
     # would also count trips whose calendar already ended (several feeds end
