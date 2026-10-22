@@ -51,14 +51,15 @@ Object.assign(BkkLib, {
     };
   },
   /* A row's train number, and its named label as a whole-word pattern
-     (BALATON, not Balatonfüred): one RegExp per row. */
+     (BALATON, not Balatonfüred; TISZA, not Tiszaújváros: an accented
+     letter is part of the word): one RegExp per row. */
   _emmaRowKey(row) {
     const name = String(row.label || '').trim().toUpperCase();
     const named = !!name && name.length >= 3 && !BkkLib.genericRailLabel(name);
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return {
       num: BkkLib.rowTrainNumber(row),
-      re: named ? new RegExp('(?:^|[^A-Z0-9])' + esc + '(?:[^A-Z0-9]|$)') : null,
+      re: named ? new RegExp('(?:^|[^\\p{L}\\p{N}])' + esc + '(?:[^\\p{L}\\p{N}]|$)', 'u') : null,
     };
   },
   _emmaKeysMatch(rk, vk) {
@@ -309,12 +310,17 @@ Object.assign(BkkLib, {
     const num = String(row.trainNumber || BkkLib.trainNumberFromTripId(row.tripId) || '');
     const hm = BkkLib.hm(row.sched || row.dep);
     const label = String(row.label || '').toUpperCase();
+    const numKey = BkkLib.emmaTrainNumber(num);
     let best = null;
     let bestScore = 0;
     pool.forEach((v) => {
+      /* Another train number is another train, whatever its time and
+         route: 2620 does not take 2621's platform or position. */
+      const vNum = BkkLib.emmaTrainNumber(v.trainNumber);
+      if (numKey && vNum && vNum !== numKey) return;
       let s = 0;
       if (trip && v.tripId && String(v.tripId) === trip) s += 5;
-      if (num && v.trainNumber && String(v.trainNumber) === num) s += 3;
+      if (numKey && vNum === numKey) s += 3;
       if (hm && v.attime && String(v.attime) === hm) s += 2;
       const vr = String(v.routeid || '').toUpperCase();
       if (label && vr && label === vr) s += 1;

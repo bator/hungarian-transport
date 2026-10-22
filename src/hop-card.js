@@ -9,6 +9,11 @@ let leafletPromise = null;
    to the two-line phone layout. A 500 px desktop section column stays above it. */
 export const NARROW_ROWS_PX = 440;
 
+/* A sibling card's key that was not found is looked for again after a
+   minute (apiKeyFromDashboard keeps a miss that long), then less often. */
+const KEY_RETRY_MS = 60 * 1000;
+const KEY_RETRY_MAX_MS = 15 * 60 * 1000;
+
 export class BKKHopCard extends HTMLElement {
   constructor() {
     super();
@@ -28,7 +33,9 @@ export class BKKHopCard extends HTMLElement {
     this._rowsFilled = false;
     this._painted = false;
     this._gen = 0;
-    this._keyTried = false;
+    this._keyRetryAt = 0;
+    this._keyBackoff = 0;
+    this._keyFilling = false;
     this._reloadActive = false;
     this._mapOverlay = null;
     this._map = null;
@@ -103,7 +110,8 @@ export class BKKHopCard extends HTMLElement {
     }
     this._tripCache = {};
     this._err = '';
-    this._keyTried = false;
+    this._keyRetryAt = 0;
+    this._keyBackoff = 0;
     /* The rows on screen belong to the old pair. Kept, a first fetch for
        the new one that fails would leave them under the new title. */
     this._rows = [];
@@ -168,14 +176,26 @@ export class BKKHopCard extends HTMLElement {
     this._paint();
   }
 
-  /* hass is set on every state change, so looking for a sibling card's key has
-     to happen at most once, and never in the key-less modes. */
+  /* hass is set on every state change, so a sibling card's key is looked for
+     once at a time, never in the key-less modes, and once found not again.
+     A miss, or a lovelace/config read that failed (a reconnect, say), is
+     asked again later, less and less often: not on every state change, and
+     not never (the card stayed on "no API key" until a page reload). */
   _maybeFillKey() {
     const mode = BkkLib.mode(this._config || {});
     if (mode === 'volan' || mode === 'helyi') return;
-    if (this._config.apiKey || this._keyTried || BkkLib.integrationHasKey(this._hass)) return;
-    this._keyTried = true;
-    this._fillKey().catch(() => { /* dashboard config not readable */ });
+    if (this._config.apiKey || BkkLib.integrationHasKey(this._hass)) return;
+    if (this._keyFilling || Date.now() < this._keyRetryAt) return;
+    this._keyFilling = true;
+    this._fillKey().catch(() => { /* dashboard config not readable */ }).then(() => {
+      this._keyFilling = false;
+      if (this._borrowedKey) {
+        this._keyRetryAt = Infinity;
+        return;
+      }
+      this._keyBackoff = Math.min(KEY_RETRY_MAX_MS, this._keyBackoff ? this._keyBackoff * 2 : KEY_RETRY_MS);
+      this._keyRetryAt = Date.now() + this._keyBackoff;
+    });
   }
 
   getCardSize() {
@@ -1555,7 +1575,6 @@ ${this._stopPinCss()}
             deferTravel: true,
             deferGps: true,
             hass: this._hass,
-            skipElvira: true,
             /* The GTFS rows come before FUTÁR answers: the last run's FUTÁR
                rows stay beside them until then, instead of vanishing. */
             onPartial: (list) => {

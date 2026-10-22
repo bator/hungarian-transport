@@ -75,27 +75,31 @@ Object.assign(BkkLib, {
       return BkkLib.groupStops(Array.from(byId.values())).slice(0, 20);
     }
     if (BkkLib.hasFutar(apiKey)) {
-      try {
-        const queries = [q].concat(BkkLib.aliasQueries(q));
-        for (let i = 0; i < queries.length; i++) {
-          const data = await BkkLib.fetch(apiKey, 'search.json', { query: queries[i] }, true);
-          const stops = (((data.data || {}).references) || {}).stops || {};
-          Object.values(stops).forEach((s) => {
-            if (!s || !s.id || !s.name) return;
-            if (/^STOP_/i.test(String(s.id))) return;
-            if (mode === 'mav' && !BkkLib.isMavStop(s)) return;
-            if (mode === 'volan' && !BkkLib.isVolanStop(s)) return;
-            if (mode === 'bkk' && !BkkLib.isBkkStop(s)) return;
-            const num = BkkLib.stopNum(s.id);
-            if ((mode === 'volan' || mode === 'all') && num && BkkLib.isVolanStop(s)) {
-              const clash = Array.from(byId.values()).find((x) => BkkLib.stopNum(x.id) === num);
-              if (clash) return;
-            }
-            byId.set(s.id, s);
-          });
+      const queries = [q].concat(BkkLib.aliasQueries(q));
+      for (let i = 0; i < queries.length; i++) {
+        let data;
+        try {
+          data = await BkkLib.fetch(apiKey, 'search.json', { query: queries[i] }, true);
+        } catch (err) {
+          /* An alias (a rate limit on the second request, say) does not
+             take back what the typed name found already. */
+          if (!byId.size || (i === 0 && mode !== 'volan' && mode !== 'all')) throw err;
+          break;
         }
-      } catch (err) {
-        if ((mode !== 'volan' && mode !== 'all') || !byId.size) throw err;
+        const stops = ((((data || {}).data || {}).references) || {}).stops || {};
+        Object.values(stops).forEach((s) => {
+          if (!s || !s.id || !s.name) return;
+          if (/^STOP_/i.test(String(s.id))) return;
+          if (mode === 'mav' && !BkkLib.isMavStop(s)) return;
+          if (mode === 'volan' && !BkkLib.isVolanStop(s)) return;
+          if (mode === 'bkk' && !BkkLib.isBkkStop(s)) return;
+          const num = BkkLib.stopNum(s.id);
+          if ((mode === 'volan' || mode === 'all') && num && BkkLib.isVolanStop(s)) {
+            const clash = Array.from(byId.values()).find((x) => BkkLib.stopNum(x.id) === num);
+            if (clash) return;
+          }
+          byId.set(s.id, s);
+        });
       }
     }
     let hits;
@@ -513,20 +517,8 @@ Object.assign(BkkLib, {
     const now = Math.floor(Date.now() / 1000);
     const latest = now + horizon * 60;
     let rows = [];
-    let elviraExtra = [];
-    if ((mode === 'mav' || mode === 'all') && opts.hass && !opts.skipElvira) {
-      try {
-        const destId = (dest && dest.id) || opts.destStopId || '';
-        elviraExtra = await this.elviraBetween(
-          opts.hass,
-          stopId,
-          destId,
-          horizon,
-          (dest && dest.name) || '',
-          { apiKey: apiKey, originName: opts.originName || '' },
-        );
-      } catch (_e) { /* ELVIRA optional; FUTÁR/GTFS rows still show */ }
-    }
+    /* ELVIRA's trains and an empty board's Transitous fill are the card's
+       own steps (hop-card _reload), not this one's. */
     const queryFutar = mode === 'bkk' || mode === 'mav' || /^BKK_/i.test(String(stopId || ''));
     const futarTask = queryFutar ? (async () => {
     let candidates = [];
@@ -775,12 +767,6 @@ Object.assign(BkkLib, {
     rows = BkkLib.mergeVolanRows(futar, rows, maxRows);
     rows = BkkLib.mergeVolanRows(gtfs.extraVolan, rows, maxRows);
     rows = BkkLib.mergeVolanRows(gtfs.extraCity, rows, maxRows);
-    if (!opts.skipElvira) {
-      rows = await BkkLib.fillTransitousIfEmpty(rows, origin, dest, opts);
-    }
-    if (elviraExtra.length) {
-      rows = BkkLib.mergeVolanRows(rows, elviraExtra, maxRows, { overlayOnly: true });
-    }
     if (opts.deferGps) return rows;
     return BkkLib.attachCoachGps(opts.hass, rows);
   },

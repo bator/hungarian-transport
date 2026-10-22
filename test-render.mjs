@@ -7074,7 +7074,7 @@ const settle = async (el) => {
     return { data: {} };
   };
   const rows = await Lib.departures('k', 'AZP_CSF1', ['AZP_N'], { key: 'azpcel', name: 'Azpcel' },
-    { originName: 'Azhub', mode: 'bkk', minutesAfter: 180, deferGps: true, skipElvira: true });
+    { originName: 'Azhub', mode: 'bkk', minutesAfter: 180, deferGps: true });
   const labels = rows.map((r) => r.label).sort();
   check('saved night routeIds do not hide a day line from another pole',
     JSON.stringify(labels) === '["7","907"]', JSON.stringify(labels));
@@ -7215,7 +7215,7 @@ const settle = async (el) => {
     return { data: {} };
   };
   const rows = await Lib.departures('k', 'AZQ_P1', ['AZQ_A', 'AZQ_B'], { key: 'azqcel', name: 'Azqcel' },
-    { originName: 'Azqhub', mode: 'bkk', minutesAfter: 180, deferGps: true, skipElvira: true });
+    { originName: 'Azqhub', mode: 'bkk', minutesAfter: 180, deferGps: true });
   check('the stop\'s own board goes first even when a sibling pole is listed before it',
     boards[0] === 'AZQ_P1' && boards.includes('AZQ_P3') && rows.length === 3,
     JSON.stringify({ boards, rows: rows.map((r) => r.label) }));
@@ -7444,7 +7444,7 @@ const settle = async (el) => {
     return { data: {} };
   };
   const rows = await Lib.departures('k', 'AZC_CSF', ['AZC_R'], { key: 'azccel', name: 'Azccel' },
-    { originName: 'Azchub', mode: 'bkk', minutesAfter: 60, deferGps: true, skipElvira: true });
+    { originName: 'Azchub', mode: 'bkk', minutesAfter: 60, deferGps: true });
   check('an uncapped parent board is not read again through its saved child pole',
     boards.length === 1 && rows.length === 2, JSON.stringify({ boards: boards.length, rows: rows.length }));
   Lib.fetch = keepFetch;
@@ -7648,7 +7648,7 @@ const settle = async (el) => {
   let threw = '';
   try {
     rows = await Lib.departures('k', 'AZP_P', ['AZP_R'], { key: 'azpcel', name: 'Azpcel' },
-      { originName: 'Azporigo', mode: 'bkk', minutesAfter: 60, deferGps: true, skipElvira: true, cache: {} });
+      { originName: 'Azporigo', mode: 'bkk', minutesAfter: 60, deferGps: true, cache: {} });
   } catch (err) {
     threw = String(err && err.message);
   }
@@ -8340,6 +8340,278 @@ check('a city stop number is not an ELVIRA station code',
   check('a stop origin still looks its destinations up', looked === 1 && pc._dests.length === 1, String(looked));
   Object.assign(Lib, keep);
   pc.remove();
+}
+
+
+/* ---- Seventh review: planner and card library ---- */
+
+/* A swap while the journey map's replan is in flight: the old pair's plan
+   must not replace the new pair's journey, paint, or open a map. */
+{
+  const keep = {
+    planJourney: Lib.planJourney,
+    fillJourneyShapes: Lib.fillJourneyShapes,
+    journeyMapSegments: Lib.journeyMapSegments,
+  };
+  const layer = () => ({ addTo() { return this; } });
+  const L = {
+    map: () => ({
+      setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {},
+    }),
+    tileLayer: () => layer(),
+    polyline: () => layer(),
+    marker: () => layer(),
+    divIcon: (o) => o,
+    latLngBounds: (pts) => ({ pts }),
+  };
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  pc._loadDests = async () => {};
+  pc._ensureLeaflet = async () => L;
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+  pc._rows = [];
+  const mk = (label) => ({ durationMin: 10, transfers: 0, walkMin: 0, waitMin: 0, legs: [{ walk: false, label, color: '009EE3', minutes: 10, from: 'x', to: 'y' }] });
+  pc._journey = mk('NOSHAPE7');
+  pc._paint();
+  await settleTicks();
+  Lib.fillJourneyShapes = async () => {};
+  Lib.journeyMapSegments = () => [];
+  let release = () => {};
+  const calls = [];
+  Lib.planJourney = (_k, o, d) => {
+    calls.push(o.name + '->' + d.name);
+    if (o.name === 'A') return new Promise((r) => { release = () => r(mk('OLD_A_TO_B')); });
+    return Promise.resolve(mk('NEW_B_TO_A'));
+  };
+  const opening = pc._openJourneyMap();
+  await settleTicks();
+  pc._swapPlan();
+  pc._considerJourney();
+  await settleTicks();
+  const box = () => (pc.shadowRoot.querySelector('.journey-plan') || {}).textContent || '';
+  const mid = box();
+  release();
+  await opening;
+  await settleTicks();
+  const after = box();
+  check('a swap during the journey map’s replan keeps the new pair’s plan: no old box, no old map',
+    /NEW_B_TO_A/.test(mid) && /NEW_B_TO_A/.test(after) && !/OLD_A_TO_B/.test(after)
+    && pc._journey && pc._journey.legs[0].label === 'NEW_B_TO_A' && !pc._mapOverlay && pc._openingMap === '',
+    JSON.stringify({ calls, mid, after, label: pc._journey && pc._journey.legs[0].label, overlay: !!pc._mapOverlay }));
+  pc._closeVehicleMap();
+  Object.assign(Lib, keep);
+  pc.remove();
+}
+
+/* A city feed's destination with a place takes only a station by that
+   place: Szeged's station 4.8 km from "Kiskundorozsma vasútállomás" is no
+   train to it. */
+{
+  const keep = { cityIndex: Lib.cityIndex, searchStops: Lib.searchStops, elviraBetween: Lib.elviraBetween };
+  const day = Lib.volanDay(0);
+  const m = day.mins;
+  const idx = {
+    c: [['1111111', '20000101', '20991231']],
+    ops: [{ i: 0, id: 'hodmezovasarhely', name: 'Hódmezővásárhely — helyi' }, { i: 1, id: 'szeged', name: 'Szeged — SZKT' }],
+    byNum: new Map(),
+    byKey: new Map(),
+    stops: [
+      ['hodmezovasarhely:1', 'Kossuth tér', 46.418, 20.33, 0],
+      ['hodmezovasarhely:2', 'Népkert vasútállomás', 46.40532, 20.31473, 0],
+      ['szeged:9', 'Kiskundorozsma vasútállomás', 46.27058, 20.08917, 1],
+    ].map(([id, name, lat, lon, op], i) => ({ i, op, id, name, key: Lib.norm(name), fold: Lib.fold(name), lat, lon })),
+    t: [[0, '12', [0, 1], [m + 10, m + 20]]],
+  };
+  Lib.cityIndex = async () => idx;
+  const stations = [
+    { id: 'BKK_005517939', name: 'Szeged', lat: 46.2405, lon: 20.1424 },
+    { id: 'BKK_005517921', name: 'Szeged-Rókus', lat: 46.2655, lon: 20.1270 },
+    { id: 'BKK_005517962', name: 'Kiskundorozsma', lat: 46.2707, lon: 20.0890 },
+    { id: 'BKK_005517525', name: 'Hódmezővásárhely-Népkert', lat: 46.4054, lon: 20.3150 },
+  ];
+  /* FUTÁR-like: every word of the query is in the name. */
+  const allWords = async (_k, q) => {
+    const words = Lib.fold(q).split(' ').filter((w) => w.length >= 3 && w !== 'vasutallomas');
+    return stations.filter((st) => words.every((w) => Lib.fold(st.name).includes(w)));
+  };
+  let asked = [];
+  Lib.elviraBetween = async (_h, from, to) => {
+    asked.push(to);
+    return [{ label: 'S 100', dep: day.base + (m + 40) * 60, travel: 25, head: 'Szeged', destHit: true }];
+  };
+  const origin = { id: 'hodmezovasarhely:1', name: 'Kossuth tér' };
+  const dest = { id: 'szeged:9', name: 'Kiskundorozsma vasútállomás', lat: 46.27058, lon: 20.08917 };
+  const legsOf = (j) => j && j.legs.map((l) => (l.walk ? 'walk' : l.label) + '>' + l.to);
+  Lib.searchStops = allWords;
+  const far = await Lib.cityRailJourney('k', { states: {} }, origin, dest);
+  /* The same place with its own station in the answer: that one. */
+  asked = [];
+  Lib.searchStops = async () => stations;
+  const near = await Lib.cityRailJourney('k', { states: {} }, origin, dest);
+  check('a destination’s town station km off its place is not its train (Kiskundorozsma, not Szeged)',
+    far === null, JSON.stringify(legsOf(far)));
+  check('a station by the destination’s place still is',
+    !!near && asked.length > 0 && asked.every((to) => to === '005517962'),
+    JSON.stringify({ legs: legsOf(near), asked }));
+  Object.assign(Lib, keep);
+}
+
+/* A sensor train with another number is another train, whatever its time
+   and route: 2620 does not take 2621's platform, position or trip. */
+{
+  const dep = Math.floor(Date.now() / 1000) + 600;
+  const row = { trainNumber: '2620', label: 'S70', sched: dep, dep };
+  const other = { trainNumber: '2621', attime: Lib.hm(dep), routeid: 'S70', platform: '3', lat: 47.5, lon: 19.1 };
+  const own = Object.assign({}, other, { trainNumber: '2620', platform: '5' });
+  const bare = Object.assign({}, other, { trainNumber: '', platform: '6' });
+  check('a sensor train with another number does not match a numbered row',
+    Lib.matchHassVehicle([other], row) === null, JSON.stringify(Lib.matchHassVehicle([other], row)));
+  check('its own number, or none, by time and route still matches',
+    Lib.matchHassVehicle([other, own], row) === own && Lib.matchHassVehicle([bare], row) === bare,
+    JSON.stringify([Lib.matchHassVehicle([other, own], row), Lib.matchHassVehicle([bare], row)]));
+}
+
+/* A FUTÁR error is no answer: the station code is looked for again, not
+   kept as "none" for ten minutes. */
+{
+  const keep = { fetch: Lib.fetch, isMavStop: Lib.isMavStop };
+  const calls = [];
+  let fail = true;
+  Lib.fetch = async (_k, _path, params) => {
+    calls.push(params && params.query);
+    if (fail) throw new Error('BKK timeout');
+    return { data: { references: { stops: { BKK_005517228: { id: 'BKK_005517228', name: 'Szeged', type: 'RAIL', vehicleType: 'RAIL' } } } } };
+  };
+  Lib.isMavStop = () => true;
+  const c1 = await Lib.elviraResolveCode('KEY', 'szeged:7123', 'Szegedx7');
+  fail = false;
+  calls.length = 0;
+  const c2 = await Lib.elviraResolveCode('KEY', 'szeged:7123', 'Szegedx7');
+  check('an ELVIRA code search that failed is asked again once FUTÁR answers',
+    c1 === '' && c2 === '005517228' && calls.length > 0, JSON.stringify({ c1, c2, calls }));
+  /* A real "no such station" is still kept. */
+  Lib.fetch = async (_k, _path, params) => { calls.push(params && params.query); return { data: { references: { stops: {} } } }; };
+  await Lib.elviraResolveCode('KEY', 'szeged:7124', 'Nowherex7');
+  calls.length = 0;
+  await Lib.elviraResolveCode('KEY', 'szeged:7124', 'Nowherex7');
+  check('a station FUTÁR does not know is still kept as none', calls.length === 0, JSON.stringify(calls));
+  Object.assign(Lib, keep);
+}
+
+/* At the shortest poll (20 s) every poll gets a new board, not every
+   second one the previous. */
+{
+  const keep = { fetch: Lib.fetch, now: Date.now };
+  let fetches = 0;
+  let now = keep.now();
+  const base = now;
+  Date.now = () => now;
+  Lib.fetch = async () => { fetches += 1; now += 800; return { n: fetches }; };
+  const seen = [];
+  try {
+    for (let i = 0; i < 6; i++) {
+      now = base + i * 20000;
+      const d = await Lib.departureBoard('', 'BKK_F7TTL', 60);
+      seen.push(d.n);
+    }
+  } finally {
+    Date.now = keep.now;
+    Lib.fetch = keep.fetch;
+  }
+  check('a 20 s poll gets a new departure board every time', seen.join(',') === '1,2,3,4,5,6' && fetches === 6,
+    seen.join(','));
+}
+
+/* A case-only alias is the same FUTÁR search again; and a failed alias
+   request does not take back what the typed name found. */
+{
+  const keep = { fetch: Lib.fetch, isMavStop: Lib.isMavStop };
+  check('aliases differ from the name by more than case',
+    Lib.aliasQueries('Deák').length === 0 && Lib.aliasQueries('Szeged').length === 0
+    && Lib.aliasQueries('Keleti pályaudvar').join('|') === 'Budapest-Keleti|keleti'
+    && Lib.aliasQueries('Szeged vasútállomás').join('|') === 'szeged',
+    JSON.stringify([Lib.aliasQueries('Deák'), Lib.aliasQueries('Szeged'), Lib.aliasQueries('Keleti pályaudvar'),
+      Lib.aliasQueries('Szeged vasútállomás')]));
+  const asked = [];
+  Lib.fetch = async (_k, _path, params) => {
+    asked.push(params.query);
+    if (asked.length > 1) throw Object.assign(new Error('rate limited'), { code: 'futar_rate_limited' });
+    return { data: { references: { stops: { BKK_005510017: { id: 'BKK_005510017', name: 'Budapest-Keleti', type: 'RAIL', vehicleType: 'RAIL' } } } } };
+  };
+  Lib.isMavStop = () => true;
+  let hits = null;
+  let err = '';
+  try {
+    hits = await Lib.searchStops('k', 'Keleti pályaudvar', 'mav');
+  } catch (e) {
+    err = String(e && e.message);
+  }
+  check('a failed alias search keeps the typed name’s hits',
+    asked.length === 2 && !!hits && hits.some((h) => h.id === 'BKK_005510017'),
+    JSON.stringify({ asked, hits: hits && hits.map((h) => h.id), err }));
+  asked.length = 0;
+  Lib.fetch = async () => { asked.push(1); throw new Error('BKK timeout'); };
+  err = '';
+  try {
+    await Lib.searchStops('k', 'Keleti pályaudvar', 'mav');
+  } catch (e) {
+    err = String(e && e.message);
+  }
+  check('a failed search for the typed name itself is still an error', /timeout/.test(err) && asked.length === 1, err);
+  Object.assign(Lib, keep);
+}
+
+/* An accented capital is part of the word: the TISZA train is not one
+   heading for Tiszaújváros. */
+check('a named train does not match a headsign it only begins (Tisza, Tiszaújváros)',
+  !Lib.matchEmmaVehicle({ label: 'Tisza' }, { trip: { tripShortName: '', tripHeadsign: 'Tiszaújváros' } })
+  && Lib.matchEmmaVehicle({ label: 'Tisza' }, { trip: { tripShortName: '', tripHeadsign: 'Tisza Budapest-Keleti' } })
+  && Lib.matchEmmaVehicle({ label: 'Hernád' }, { trip: { tripShortName: '', tripHeadsign: 'Hernád (Kassa)' } })
+  && !Lib.matchEmmaVehicle({ label: 'Balaton' }, { trip: { tripHeadsign: 'Balatonfüred' } }));
+
+/* A sibling card's key whose lovelace/config read failed once is looked for
+   again later, not never (the card stayed on "no API key"). */
+{
+  const realNow = Date.now;
+  let offset = 0;
+  Date.now = () => realNow() + offset;
+  try {
+    let reads = 0;
+    let down = true;
+    const dashboard = { views: [{ cards: [{ type: 'custom:hungarian-transport-card', apiKey: 'sibling-key7' }] }] };
+    const conn = {
+      sendMessagePromise: async (msg) => {
+        if (msg.type !== 'lovelace/config') return {};
+        reads += 1;
+        if (down) throw new Error('connection lost');
+        return dashboard;
+      },
+    };
+    const hass = { states: {}, language: 'en', connection: conn };
+    const kc = document.createElement('hungarian-transport-card');
+    kc._reloadSafe = () => {};
+    document.body.appendChild(kc);
+    kc.setConfig({ language: 'en' });
+    kc.hass = hass;
+    await settleTicks();
+    const first = kc._apiKey();
+    const readsFirst = reads;
+    kc.hass = Object.assign({}, hass);
+    await settleTicks();
+    const readsSoon = reads;
+    down = false;
+    offset = 61 * 1000;
+    kc.hass = Object.assign({}, hass);
+    await settleTicks();
+    check('a dashboard key read that failed is tried again later, not on every state change',
+      first === '' && readsFirst > 0 && readsSoon === readsFirst && kc._apiKey() === 'sibling-key7',
+      JSON.stringify({ first, readsFirst, readsSoon, reads, key: kc._apiKey() }));
+    kc.remove();
+  } finally {
+    Date.now = realNow;
+    Lib._hass = null;
+  }
 }
 
 process.exit(failed ? 1 : 0);

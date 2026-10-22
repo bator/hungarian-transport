@@ -506,29 +506,22 @@ Object.assign(BkkLib, {
     const hit = BkkLib._elviraCodes.get(memoKey);
     if (hit && (hit.code || Date.now() - hit.ts < 6e5)) return hit.code;
     const code = await this._searchElviraCode(apiKey, n);
+    if (code === null) return "";
     BkkLib._elviraCodes.set(memoKey, { code, ts: Date.now() });
     return code;
   },
+  /* The station code by name, '' when FUTÁR has none, null when a search
+     failed and nothing was found: that one is asked again next time. */
   async _searchElviraCode(apiKey, n) {
-    const queries = [n];
-    const key = BkkLib.stationKey(n);
-    if (key && key !== n) queries.push(key);
-    BkkLib.aliasQueries(n).forEach((q) => queries.push(q));
-    const seen = /* @__PURE__ */ new Set();
-    for (let i = 0; i < queries.length; i++) {
-      const q = queries[i];
-      if (!q || seen.has(q)) continue;
-      seen.add(q);
-      try {
-        const hits = await this.searchStops(apiKey, q, "mav");
-        for (let j = 0; j < hits.length; j++) {
-          const c = BkkLib.elviraStationCode(hits[j].id);
-          if (c) {
-            return c;
-          }
-        }
-      } catch (_e) {
-      }
+    let hits;
+    try {
+      hits = await this.searchStops(apiKey, n, "mav") || [];
+    } catch (_e) {
+      return null;
+    }
+    for (let j = 0; j < hits.length; j++) {
+      const c = BkkLib.elviraStationCode(hits[j].id);
+      if (c) return c;
     }
     return "";
   },
@@ -556,8 +549,15 @@ Object.assign(BkkLib, {
     if (f === "keleti" || f.indexOf("keleti ") === 0) extra.push("Budapest-Keleti");
     if (f === "kelenfold" || f.indexOf("kelenfold ") === 0) extra.push("Budapest-Kelenfold");
     const key = BkkLib.stationKey(q);
-    if (key && key !== q && extra.indexOf(key) < 0) extra.push(key);
-    return extra;
+    if (key) extra.push(key);
+    const caseless = (x) => String(x || "").normalize("NFC").toLowerCase().replace(/\s+/g, " ").trim();
+    const seen = /* @__PURE__ */ new Set([caseless(q)]);
+    return extra.filter((x) => {
+      const xc = caseless(x);
+      if (!xc || seen.has(xc)) return false;
+      seen.add(xc);
+      return true;
+    });
   },
   labelAliased(q, hit) {
     const f = BkkLib.fold(q);
@@ -1162,7 +1162,7 @@ function errText(lang, err) {
 }
 
 // src/lib/futar.js
-var BOARD_TTL_MS = MIN_REFRESH_S * 1e3;
+var BOARD_TTL_MS = Math.max(1, MIN_REFRESH_S - 5) * 1e3;
 var BOARD_STALE_MS = 5 * 60 * 1e3;
 Object.assign(BkkLib, {
   _mem: {},
@@ -1310,6 +1310,7 @@ Object.assign(BkkLib, {
     if (hit && Date.now() - hit.ts < BOARD_TTL_MS) return Promise.resolve(hit.data);
     const inflight = BkkLib._boardInflight.get(key);
     if (inflight) return inflight;
+    const asked = Date.now();
     const run = BkkLib.fetch(apiKey, "arrivals-and-departures-for-stop.json", {
       stopId: String(stopId),
       minutesAfter: String(horizon),
@@ -1322,7 +1323,7 @@ Object.assign(BkkLib, {
       BkkLib._boards.forEach((v, k) => {
         if (now - v.ts >= BOARD_STALE_MS) BkkLib._boards.delete(k);
       });
-      BkkLib._boards.set(key, { ts: now, data });
+      BkkLib._boards.set(key, { ts: asked, data });
       return data;
     }, (err) => {
       if (err && err.code === "futar_rate_limited" && hit && Date.now() - hit.ts < BOARD_STALE_MS) return hit.data;
@@ -2851,7 +2852,8 @@ Object.assign(BkkLib, {
               hubName: dest.name || "",
               hubFold: destFold,
               hubLat: destPt ? destPt[0] : void 0,
-              hubLon: destPt ? destPt[1] : void 0
+              hubLon: destPt ? destPt[1] : void 0,
+              nearOnly: true
             });
           } catch (_e) {
             station = null;
@@ -2975,7 +2977,7 @@ Object.assign(BkkLib, {
     return best;
   },
   /* The railway station at a city feed's hub, from FUTÁR's MÁV stops: the
-     one by the hub stop, else by name. Hubs called just "Vasútállomás"
+     one by the hub stop, else by name (path.nearOnly: only by the stop). Hubs called just "Vasútállomás"
      (Székesfehérvár, Szombathely, Kaposvár …) or "Főpályaudvar" (Pécs)
      share no word with the station ("Székesfehérvár", "Pécs"), so the town
      names it then; a town with two stations goes by the hub's own word
@@ -2995,6 +2997,7 @@ Object.assign(BkkLib, {
       }
       const near = hubPt ? hits.map((hit) => ({ hit, pt: BkkLib.finiteLatLon(hit.lat, hit.lon) })).filter((c) => c.pt && BkkLib.haversineMeters(hubPt, c.pt) <= 1500).sort((x, y) => BkkLib.haversineMeters(hubPt, x.pt) - BkkLib.haversineMeters(hubPt, y.pt))[0] : null;
       if (near) return near.hit;
+      if (hubPt && path.nearOnly) continue;
       const byHub = hits.find((hit) => BkkLib.foldTokenMatch(want, hit.name || ""));
       if (byHub) return byHub;
       const extra = (hit) => BkkLib.foldTokens(hit.name || "").filter((tok) => cityTok.indexOf(tok) < 0).length;
@@ -5039,27 +5042,29 @@ Object.assign(BkkLib, {
       return BkkLib.groupStops(Array.from(byId.values())).slice(0, 20);
     }
     if (BkkLib.hasFutar(apiKey)) {
-      try {
-        const queries = [q].concat(BkkLib.aliasQueries(q));
-        for (let i = 0; i < queries.length; i++) {
-          const data = await BkkLib.fetch(apiKey, "search.json", { query: queries[i] }, true);
-          const stops = ((data.data || {}).references || {}).stops || {};
-          Object.values(stops).forEach((s) => {
-            if (!s || !s.id || !s.name) return;
-            if (/^STOP_/i.test(String(s.id))) return;
-            if (mode === "mav" && !BkkLib.isMavStop(s)) return;
-            if (mode === "volan" && !BkkLib.isVolanStop(s)) return;
-            if (mode === "bkk" && !BkkLib.isBkkStop(s)) return;
-            const num = BkkLib.stopNum(s.id);
-            if ((mode === "volan" || mode === "all") && num && BkkLib.isVolanStop(s)) {
-              const clash = Array.from(byId.values()).find((x) => BkkLib.stopNum(x.id) === num);
-              if (clash) return;
-            }
-            byId.set(s.id, s);
-          });
+      const queries = [q].concat(BkkLib.aliasQueries(q));
+      for (let i = 0; i < queries.length; i++) {
+        let data;
+        try {
+          data = await BkkLib.fetch(apiKey, "search.json", { query: queries[i] }, true);
+        } catch (err) {
+          if (!byId.size || i === 0 && mode !== "volan" && mode !== "all") throw err;
+          break;
         }
-      } catch (err) {
-        if (mode !== "volan" && mode !== "all" || !byId.size) throw err;
+        const stops = (((data || {}).data || {}).references || {}).stops || {};
+        Object.values(stops).forEach((s) => {
+          if (!s || !s.id || !s.name) return;
+          if (/^STOP_/i.test(String(s.id))) return;
+          if (mode === "mav" && !BkkLib.isMavStop(s)) return;
+          if (mode === "volan" && !BkkLib.isVolanStop(s)) return;
+          if (mode === "bkk" && !BkkLib.isBkkStop(s)) return;
+          const num = BkkLib.stopNum(s.id);
+          if ((mode === "volan" || mode === "all") && num && BkkLib.isVolanStop(s)) {
+            const clash = Array.from(byId.values()).find((x) => BkkLib.stopNum(x.id) === num);
+            if (clash) return;
+          }
+          byId.set(s.id, s);
+        });
       }
     }
     let hits;
@@ -5466,21 +5471,6 @@ Object.assign(BkkLib, {
     const now = Math.floor(Date.now() / 1e3);
     const latest = now + horizon * 60;
     let rows = [];
-    let elviraExtra = [];
-    if ((mode === "mav" || mode === "all") && opts.hass && !opts.skipElvira) {
-      try {
-        const destId = dest && dest.id || opts.destStopId || "";
-        elviraExtra = await this.elviraBetween(
-          opts.hass,
-          stopId,
-          destId,
-          horizon,
-          dest && dest.name || "",
-          { apiKey, originName: opts.originName || "" }
-        );
-      } catch (_e) {
-      }
-    }
     const queryFutar = mode === "bkk" || mode === "mav" || /^BKK_/i.test(String(stopId || ""));
     const futarTask = queryFutar ? (async () => {
       let candidates = [];
@@ -5698,12 +5688,6 @@ Object.assign(BkkLib, {
     rows = BkkLib.mergeVolanRows(futar, rows, maxRows);
     rows = BkkLib.mergeVolanRows(gtfs.extraVolan, rows, maxRows);
     rows = BkkLib.mergeVolanRows(gtfs.extraCity, rows, maxRows);
-    if (!opts.skipElvira) {
-      rows = await BkkLib.fillTransitousIfEmpty(rows, origin, dest, opts);
-    }
-    if (elviraExtra.length) {
-      rows = BkkLib.mergeVolanRows(rows, elviraExtra, maxRows, { overlayOnly: true });
-    }
     if (opts.deferGps) return rows;
     return BkkLib.attachCoachGps(opts.hass, rows);
   }
@@ -5758,14 +5742,15 @@ Object.assign(BkkLib, {
     };
   },
   /* A row's train number, and its named label as a whole-word pattern
-     (BALATON, not Balatonfüred): one RegExp per row. */
+     (BALATON, not Balatonfüred; TISZA, not Tiszaújváros: an accented
+     letter is part of the word): one RegExp per row. */
   _emmaRowKey(row) {
     const name = String(row.label || "").trim().toUpperCase();
     const named = !!name && name.length >= 3 && !BkkLib.genericRailLabel(name);
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     return {
       num: BkkLib.rowTrainNumber(row),
-      re: named ? new RegExp("(?:^|[^A-Z0-9])" + esc + "(?:[^A-Z0-9]|$)") : null
+      re: named ? new RegExp("(?:^|[^\\p{L}\\p{N}])" + esc + "(?:[^\\p{L}\\p{N}]|$)", "u") : null
     };
   },
   _emmaKeysMatch(rk, vk) {
@@ -6006,12 +5991,15 @@ Object.assign(BkkLib, {
     const num = String(row.trainNumber || BkkLib.trainNumberFromTripId(row.tripId) || "");
     const hm = BkkLib.hm(row.sched || row.dep);
     const label = String(row.label || "").toUpperCase();
+    const numKey = BkkLib.emmaTrainNumber(num);
     let best = null;
     let bestScore = 0;
     pool.forEach((v) => {
+      const vNum = BkkLib.emmaTrainNumber(v.trainNumber);
+      if (numKey && vNum && vNum !== numKey) return;
       let s = 0;
       if (trip && v.tripId && String(v.tripId) === trip) s += 5;
-      if (num && v.trainNumber && String(v.trainNumber) === num) s += 3;
+      if (numKey && vNum === numKey) s += 3;
       if (hm && v.attime && String(v.attime) === hm) s += 2;
       const vr = String(v.routeid || "").toUpperCase();
       if (label && vr && label === vr) s += 1;
@@ -7221,6 +7209,8 @@ var BKKHopCardEditor = class extends HTMLElement {
 // src/hop-card.js
 var leafletPromise = null;
 var NARROW_ROWS_PX = 440;
+var KEY_RETRY_MS = 60 * 1e3;
+var KEY_RETRY_MAX_MS = 15 * 60 * 1e3;
 var BKKHopCard = class extends HTMLElement {
   constructor() {
     super();
@@ -7239,7 +7229,9 @@ var BKKHopCard = class extends HTMLElement {
     this._rowsFilled = false;
     this._painted = false;
     this._gen = 0;
-    this._keyTried = false;
+    this._keyRetryAt = 0;
+    this._keyBackoff = 0;
+    this._keyFilling = false;
     this._reloadActive = false;
     this._mapOverlay = null;
     this._map = null;
@@ -7305,7 +7297,8 @@ var BKKHopCard = class extends HTMLElement {
     }
     this._tripCache = {};
     this._err = "";
-    this._keyTried = false;
+    this._keyRetryAt = 0;
+    this._keyBackoff = 0;
     this._rows = [];
     this._rawRows = [];
     this._pollRun = null;
@@ -7359,14 +7352,26 @@ var BKKHopCard = class extends HTMLElement {
   _langChanged() {
     this._paint();
   }
-  /* hass is set on every state change, so looking for a sibling card's key has
-     to happen at most once, and never in the key-less modes. */
+  /* hass is set on every state change, so a sibling card's key is looked for
+     once at a time, never in the key-less modes, and once found not again.
+     A miss, or a lovelace/config read that failed (a reconnect, say), is
+     asked again later, less and less often: not on every state change, and
+     not never (the card stayed on "no API key" until a page reload). */
   _maybeFillKey() {
     const mode = BkkLib.mode(this._config || {});
     if (mode === "volan" || mode === "helyi") return;
-    if (this._config.apiKey || this._keyTried || BkkLib.integrationHasKey(this._hass)) return;
-    this._keyTried = true;
+    if (this._config.apiKey || BkkLib.integrationHasKey(this._hass)) return;
+    if (this._keyFilling || Date.now() < this._keyRetryAt) return;
+    this._keyFilling = true;
     this._fillKey().catch(() => {
+    }).then(() => {
+      this._keyFilling = false;
+      if (this._borrowedKey) {
+        this._keyRetryAt = Infinity;
+        return;
+      }
+      this._keyBackoff = Math.min(KEY_RETRY_MAX_MS, this._keyBackoff ? this._keyBackoff * 2 : KEY_RETRY_MS);
+      this._keyRetryAt = Date.now() + this._keyBackoff;
     });
   }
   getCardSize() {
@@ -8710,7 +8715,6 @@ ${this._stopPinCss()}
             deferTravel: true,
             deferGps: true,
             hass: this._hass,
-            skipElvira: true,
             /* The GTFS rows come before FUTÁR answers: the last run's FUTÁR
                rows stay beside them until then, instead of vanishing. */
             onPartial: (list) => {
@@ -9370,11 +9374,18 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._closeVehicleMap();
     this._openingMap = "journey";
     const seq = this._mapSeq;
+    const gen = this._gen;
+    const stale = () => {
+      if (this._mapStale(seq)) return true;
+      if (gen === this._gen) return false;
+      this._openingMap = "";
+      return true;
+    };
     try {
       await BkkLib.fillJourneyShapes(this._journey);
     } catch (_e) {
     }
-    if (this._mapStale(seq)) return;
+    if (stale()) return;
     let segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
     if (!segs.length && cfg.stopId && cfg.destName && !this._timed()) {
       try {
@@ -9385,19 +9396,19 @@ var BKKPlannerCard = class extends BKKHopCard {
           this._hass,
           { minutesAfter: clampMinutesAfter(cfg.minutesAfter) }
         );
-        if (this._mapStale(seq)) return;
+        if (stale()) return;
         if (journey) this._journey = journey;
         try {
           await BkkLib.fillJourneyShapes(this._journey);
         } catch (_e) {
         }
-        if (journey) this._paint();
-        if (this._mapStale(seq)) return;
+        if (stale()) return;
+        if (journey) this._paintJourney();
         segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
       } catch (_e) {
       }
     }
-    if (this._mapStale(seq)) return;
+    if (stale()) return;
     if (!segs.length) {
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapNoData"));
@@ -9407,12 +9418,12 @@ var BKKPlannerCard = class extends BKKHopCard {
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
-      if (this._mapStale(seq)) return;
+      if (stale()) return;
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapLeafletFail"));
       return;
     }
-    if (this._mapStale(seq)) return;
+    if (stale()) return;
     const overlay = document.createElement("div");
     overlay.className = "ht-map-overlay";
     const title = `${cfg.stopName || ""} → ${cfg.destName || ""}`;
