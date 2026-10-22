@@ -385,11 +385,16 @@ def main() -> int:
 
         # download_zip checks the scheme of the URL it was given and of the
         # one it ended up at, whatever its spelling.
+        tiny = io.BytesIO()
+        with zipfile.ZipFile(tiny, "w") as z:
+            z.writestr("agency.txt", "agency_id\n")
+        tiny_zip = tiny.getvalue()
+
         class FakeResp:
             def __init__(self, final: str):
                 self.final = final
-                self.headers = {"Content-Length": "4"}
-                self.body = [b"PK\x03\x04", b""]
+                self.headers = {"Content-Length": str(len(tiny_zip))}
+                self.body = [tiny_zip, b""]
 
             def geturl(self) -> str:
                 return self.final
@@ -505,6 +510,7 @@ def main() -> int:
         gc.socket.getaddrinfo = real_gai
 
     failed |= rebinding_checks()
+    failed |= cut_download_checks()
 
     tags = (Path(__file__).resolve().parents[1] / "src" / "tags.js").read_text(encoding="utf-8")
     m = re.search(r"^export const INDEX_SCHEMA = (\d+);", tags, re.M)
@@ -1083,6 +1089,84 @@ def _serve(ip: str, port: int = 0, tls: ssl.SSLContext | None = None) -> http.se
         srv.socket = tls.wrap_socket(srv.socket, server_side=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
+
+
+class _CutServer(http.server.BaseHTTPRequestHandler):
+    """Serves server.body; the first GET (server.cut) sends only half of it
+    and closes, with or without the full Content-Length."""
+
+    def do_GET(self):  # noqa: N802 (http.server API)
+        srv = self.server
+        srv.gets += 1
+        body = srv.body
+        cut = srv.cut and srv.gets == 1
+        self.send_response(200)
+        if srv.length:
+            self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body[: len(body) // 2] if cut else body)
+        self.wfile.flush()
+        self.close_connection = True
+
+    def log_message(self, *_args):
+        pass
+
+
+def cut_download_checks() -> bool:
+    """A connection cut mid-download is a failed download, not a zip that
+    fails to load: http.client hands back the bytes it got without
+    IncompleteRead, and they start with PK. download_zip compares them with
+    Content-Length and reads the zip directory."""
+    failed = False
+    with zipfile.ZipFile(buf := io.BytesIO(), "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("stops.txt", "stop_id,stop_name\n" + "".join(f"{i},Stop {i * 7919 % 10007}\n" for i in range(4000)))
+        z.writestr("trips.txt", "route_id,service_id,trip_id\n" + "".join(f"R,S,T{i}\n" for i in range(4000)))
+    body = buf.getvalue()
+    srv = http.server.HTTPServer(("127.0.0.1", 0), _CutServer)
+    srv.body, srv.gets, srv.cut, srv.length = body, 0, True, True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/f.zip"
+    real_blocked, real_assert = gc._blocked_ip, gc.assert_public_http_url
+    # Loopback stands in for a public host here.
+    gc._blocked_ip = lambda ip: False
+    gc.assert_public_http_url = lambda _u: None
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "f.zip"
+
+            def get() -> BaseException | None:
+                try:
+                    gc.download_zip(url, dest, allow_insecure=True)
+                except Exception as e:  # noqa: BLE001
+                    return e
+                return None
+
+            err = get()
+            failed |= not check("a download cut short of its Content-Length raises IncompleteDownload",
+                                isinstance(err, gc.IncompleteDownload) and "of" in str(err), repr(err))
+            failed |= not check("and leaves neither the zip nor a temp file behind",
+                                not dest.exists() and not list(Path(tmp).iterdir()), repr(list(Path(tmp).iterdir())))
+            err = get()
+            failed |= not check("the full download next time is written", err is None and dest.read_bytes() == body,
+                                repr(err))
+            dest.unlink()
+            srv.gets, srv.length = 0, False
+            err = get()
+            failed |= not check("a cut download without Content-Length fails on its zip directory",
+                                isinstance(err, gc.IncompleteDownload) and "zip directory" in str(err)
+                                and not dest.exists(), repr(err))
+            srv.gets, srv.cut = 0, False
+            failed |= not check("a whole download without Content-Length is written", get() is None and dest.exists())
+            srv.body, srv.gets = body[:4] + b"\0" * (len(body) - 4), 0
+            dest.unlink()
+            err = get()
+            failed |= not check("bytes that start with PK but are no zip are refused",
+                                isinstance(err, gc.IncompleteDownload) and not dest.exists(), repr(err))
+    finally:
+        gc._blocked_ip, gc.assert_public_http_url = real_blocked, real_assert
+        srv.shutdown()
+        srv.server_close()
+    return failed
 
 
 def rebinding_checks() -> bool:

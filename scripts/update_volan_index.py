@@ -40,8 +40,17 @@ FAIL_REPEAT_DAYS = 7
 # state.json "failing" key of the MÁV source (MAV_GTFS_URL).
 MAV_KEY = "mav"
 # The "failing" error of a city feed whose new zip build_city_index rejected
-# (it does not load, its calendar already ended, most of its trips are gone).
+# for its content (no trips, its calendar already ended, most of its trips
+# are gone).
 REJECTED_ERROR = "new zip rejected, see update.log"
+# The same for a new zip that does not load: no fingerprint is kept for it,
+# so it is downloaded and built again next run.
+BROKEN_ERROR = "new zip does not load, see update.log"
+# A zip rejected for its content is not downloaded again while the
+# publisher serves it, for at most this many days after the build that
+# rejected it ("checked"), and not past the last service day of the zip
+# kept instead ("until"): then it is built again, and the guard may take it.
+REJECT_RECHECK_DAYS = 7
 
 
 # A keyed feed override (BAHART_GTFS_URL=...?apikey=..., a MÁV link whose
@@ -484,6 +493,20 @@ def _day(text: object) -> date | None:
         return None
 
 
+def rejection_holds(bad: dict, today: date) -> bool:
+    """Whether the rejected fingerprint bad (state.json cities.<id>.rejected)
+    still spares its zip a download and a build: only a rejection for the
+    zip's content ("why") does, see REJECT_RECHECK_DAYS. An entry without
+    a reason (scripts before it was kept) may be a download cut short."""
+    if not bad.get("why"):
+        return False
+    checked = _day(bad.get("checked"))
+    if checked is None or not 0 <= (today - checked).days < REJECT_RECHECK_DAYS:
+        return False
+    until = _day(bad.get("until"))
+    return until is None or today <= until
+
+
 def error_name(err: BaseException | None) -> str:
     """What failed, without the URL (a keyed override carries its key)."""
     if err is None:
@@ -725,9 +748,15 @@ def _main() -> int:
             # The fingerprint of a new zip build_city_index rejected (see
             # below): the same zip is not downloaded and rejected again.
             bad = prev.get("rejected") if isinstance(prev.get("rejected"), dict) else {}
+            if bad and not rejection_holds(bad, today):
+                print(f"{fid}: the zip rejected before ({bad.get('why') or 'no reason kept'}) is checked again")
+                bad = {}
+                prev = {k: v for k, v in prev.items() if k != "rejected"}
+                city_state[fid] = prev
             zpath = base / feed["file"]
             insecure = bool(feed.get("insecure"))
             fetched = False
+            blocked = False
             still_rejected = False
             last_err: BaseException | None = None
             # A keyed override (BAHART_GTFS_URL) that fails falls back to the
@@ -748,7 +777,7 @@ def _main() -> int:
                     print(f"unchanged {fid} (the rejected zip, previous kept)")
                     break
                 if city_blocked:
-                    fetched = city_retry = True
+                    blocked = city_retry = True
                     print(f"warn {fid} moved; not downloaded: {city_blocked}", file=sys.stderr)
                     break
                 # The zip in place stays until a city index was built from
@@ -795,6 +824,9 @@ def _main() -> int:
                 entry = note_failure(failing, fid, REJECTED_ERROR, today)
                 if entry is not None:
                     due[fid] = entry
+            elif blocked:
+                # Nothing was downloaded: a failing streak goes on as it was.
+                pass
             elif fetched:
                 # A new zip (city_pending) counts once its build took it.
                 if fid not in city_pending:
@@ -809,6 +841,14 @@ def _main() -> int:
         due = {}
 
         city_conflict = city_blocked if city_retry else ""
+        # A rebuild only for new zips that may all be rejected: whether the
+        # index changed at all is told by its bytes (the build is
+        # deterministic, its gzip carries no time).
+        index_before = (
+            file_sha256(city_out)
+            if city_pending and not city_rebuild_anyway and not city_conflict and city_out.is_file()
+            else ""
+        )
         if city_conflict:
             # city_retry stays set and the feeds that moved keep their old
             # fingerprint (none was downloaded): the scripts that can write
@@ -822,6 +862,7 @@ def _main() -> int:
                 # The new zips the index was built from replace the old ones;
                 # a rejected one goes (its fingerprint stays, see below).
                 rejected = set(info.get("rejected") or [])
+                refused = info.get("refused") or {}
                 for fid, staged in city_staged.items():
                     if fid in rejected:
                         staged.unlink(missing_ok=True)
@@ -838,13 +879,25 @@ def _main() -> int:
                 skipped = [fid for fid in info.get("skipped") or [] if fid not in expired]
                 for fid, meta in city_pending.items():
                     if fid in rejected:
-                        # Its fingerprint is kept apart from the zip in use:
-                        # the same zip is neither downloaded nor rejected
-                        # again, and the feed counts as failing until the
-                        # publisher serves another one.
-                        old = city_state.get(fid) if isinstance(city_state.get(fid), dict) else {}
-                        city_state[fid] = {**old, "rejected": meta}
-                        entry = note_failure(failing, fid, REJECTED_ERROR, today)
+                        # The feed counts as failing until the publisher
+                        # serves a zip the index takes. One rejected for its
+                        # content keeps its fingerprint apart from the zip in
+                        # use, with the reason: the same zip is neither
+                        # downloaded nor rejected again until
+                        # rejection_holds() lets it go. One that failed to
+                        # load (a download cut short, say) keeps none and is
+                        # downloaded again next run.
+                        why = refused.get(fid) if isinstance(refused.get(fid), dict) else None
+                        if why is not None:
+                            old = city_state.get(fid) if isinstance(city_state.get(fid), dict) else {}
+                            until = str(why.get("until") or "")
+                            city_state[fid] = {**old, "rejected": {
+                                **meta,
+                                "why": str(why.get("why") or "rejected"),
+                                "until": ymd(until) if until else "",
+                                "checked": today.isoformat(),
+                            }}
+                        entry = note_failure(failing, fid, REJECTED_ERROR if why is not None else BROKEN_ERROR, today)
                         if entry is not None:
                             due[fid] = entry
                     elif fid not in skipped:
@@ -864,11 +917,15 @@ def _main() -> int:
                     line += " (skipped: " + ", ".join(skipped) + ")"
                 if rejected:
                     line += " (new zip rejected, previous kept: " + ", ".join(sorted(rejected)) + ")"
-                if not city_rebuild_anyway and city_pending and all(
-                    fid in rejected and fid not in skipped for fid in city_pending
+                if (
+                    index_before
+                    and all(fid in rejected and fid not in skipped for fid in city_pending)
+                    and city_out.is_file()
+                    and file_sha256(city_out) == index_before
                 ):
-                    # Built only for new zips, and every one was rejected:
-                    # the index has the timetables it had, nothing to announce.
+                    # Built only for new zips, every one was rejected, and
+                    # the index is the one it was (no other feed's calendar
+                    # ended, none failed to load): nothing to announce.
                     print(line)
                 else:
                     changed.append(line)

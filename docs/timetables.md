@@ -183,10 +183,16 @@ To rebuild them yourself on Home Assistant OS:
    independently: each failed rebuild notifies and keeps that index as it
    was, and the rest of the run goes on. A city feed that failed is
    downloaded and rebuilt again on the next run; one left out because its
-   calendar ended is not, until the publisher posts a new zip. A feed that
-   fails to download keeps its last zip; once it has failed three days in a
-   row the webhook says so, then weekly while it keeps failing (the same for
-   `MAV_GTFS_URL`). The shapes folders travel with their indexes.
+   calendar ended is not, until the publisher posts a new zip. A download
+   shorter than its `Content-Length`, or a zip without a readable directory,
+   is a failed download. A new city zip the index does not take leaves the
+   zip in place: one that does not load is downloaded again next run; one
+   the feed guard below refuses (no trips, its calendar ended, most of its
+   trips gone) is not, while the publisher serves it, for up to 7 days and
+   not past the last service day of the zip in place, then it is built
+   again. A feed that fails to download keeps its last zip; once it has
+   failed three days in a row the webhook says so, then weekly while it
+   keeps failing (the same for `MAV_GTFS_URL`). The shapes folders travel with their indexes.
    Simplifying the Volán `shapes.txt` (8 million points) takes about a
    minute on a desktop and longer on a Raspberry Pi; `run_update.sh` allows
    30 minutes.
@@ -210,7 +216,9 @@ itself. `/config/hungarian-transport/update.log` has the details.
   A city feed or `MAV_GTFS_URL` that does not download is only reported once
   it has failed three days in a row (`download failing: <id> since …`, then
   weekly): its URL has probably moved. The last zip stays in the index
-  until its calendar ends.
+  until its calendar ends. `last new zip rejected` or `last new zip does not
+  load` means the feed downloads, but the index keeps the old zip;
+  `update.log` says why.
 - *Új menetrend: … (skipped: …)* — the index was rebuilt without these
   feeds: they failed to download or parse, and are tried again next run.
 - *… frissítés kihagyva: … has index schema N, these scripts build M* — a
@@ -253,7 +261,8 @@ To accept a loss on purpose, set `HUNGARIAN_TRANSPORT_ALLOW_MISSING` to the
 feed ids (comma-separated, `volan-local` for the Volán local lines, or
 `all`) in `/config/hungarian-transport/.env`, and clear it once the feed is
 back; on GitHub use the `allow_missing` input or the repository variable
-above.
+above. Locally it also lets a named feed's new zip replace the one in place
+when the guard would refuse it (a timetable cut on purpose).
 
 There is no direct coach between, for example, Székesfehérvár
 autóbusz-állomás and Kelenföld — such services terminate at Népliget. The card
