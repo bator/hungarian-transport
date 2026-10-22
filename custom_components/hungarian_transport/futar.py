@@ -59,7 +59,7 @@ FUTAR_BURST = 400
 # A call over the limit waits for a token this long at most (the summed
 # sleeps, not the clock) before it is refused. The card swallows a refused
 # call (an incomplete list, not an error), so waiting is the better answer.
-# The wait and FUTAR_TIMEOUT together stay well inside CARD_TIMEOUT_SEC.
+# The upstream call gets what is left of CARD_TIMEOUT_SEC after the wait.
 FUTAR_TOKEN_WAIT_SEC = 4.0
 # A refused call is logged at most this often, with the count since.
 FUTAR_RATE_LOG_EVERY = 300
@@ -67,17 +67,27 @@ FUTAR_RATE_LOG_EVERY = 300
 FUTAR_CACHE_TTL = 15
 FUTAR_CACHE_MAX = 256
 # The card gives up on the service call after this long (src/lib/futar.js,
-# "BKK timeout") and treats it as an outage. The worst case here, a full
-# token wait followed by an upstream call that runs into FUTAR_TIMEOUT, has to
-# answer before that, with room for the websocket round trip.
+# "BKK timeout") and treats it as an outage. The upstream call's timeout is
+# the rest of that budget after the token wait, less FUTAR_MARGIN_SEC for the
+# websocket round trip: a slow plan-trip.json gets every second the card still
+# waits for, and the worst case, a full token wait followed by an upstream
+# call that times out, still answers before the card gives up.
 CARD_TIMEOUT_SEC = 20
-FUTAR_TIMEOUT = aiohttp.ClientTimeout(total=12)
+FUTAR_MARGIN_SEC = 2.0
+# Never less than this, also when the event loop was slower than the budget.
+FUTAR_MIN_TIMEOUT_SEC = 1.0
 # After FUTÁR rejects the key, calls fail without asking it for this long;
 # then one call asks again, so a 401 given by mistake (an upstream hiccup)
 # does not switch FUTÁR off until Home Assistant restarts.
 REJECTED_RETRY = 15 * 60
 _monotonic = time.monotonic
 _sleep = asyncio.sleep
+
+
+def futar_timeout(waited: float = 0.0) -> aiohttp.ClientTimeout:
+    """The upstream call's timeout after waited seconds of the card's budget."""
+    total = CARD_TIMEOUT_SEC - FUTAR_MARGIN_SEC - max(waited, 0.0)
+    return aiohttp.ClientTimeout(total=max(total, FUTAR_MIN_TIMEOUT_SEC))
 
 
 class FutarError(Exception):
@@ -105,14 +115,19 @@ def futar_params(path: str, params: dict[str, Any] | None) -> dict[str, str]:
 
 
 async def futar_get(
-    session: aiohttp.ClientSession, api_key: str, path: str, params: dict[str, Any]
+    session: aiohttp.ClientSession,
+    api_key: str,
+    path: str,
+    params: dict[str, Any],
+    timeout: aiohttp.ClientTimeout | None = None,
 ) -> dict:
-    """One FUTÁR request. Raises FutarError; the key never appears in errors."""
+    """One FUTÁR request, by default with the card's whole budget (futar_timeout).
+    Raises FutarError; the key never appears in errors."""
     query = {str(k): str(v) for k, v in (params or {}).items() if k != "key"}
     query.update({"key": api_key, "version": "4", "appVersion": "apiary-1.0"})
     try:
         async with session.get(
-            f"{BKK_API}/{path}", params=query, timeout=FUTAR_TIMEOUT
+            f"{BKK_API}/{path}", params=query, timeout=timeout or futar_timeout()
         ) as resp:
             if resp.status in (401, 403):
                 raise FutarAuthError(f"HTTP {resp.status}")
@@ -165,8 +180,9 @@ class FutarProxy:
         self._tokens -= 1.0
         return True
 
-    async def _acquire(self) -> None:
-        """A token, waiting up to FUTAR_TOKEN_WAIT_SEC for one; FutarRateLimited after."""
+    async def _acquire(self) -> float:
+        """A token, waiting up to FUTAR_TOKEN_WAIT_SEC for one; the seconds
+        slept for it. FutarRateLimited after that."""
         slept = 0.0
         while not self._take_token():
             wait = max((1.0 - self._tokens) / FUTAR_RATE, 0.01)
@@ -174,6 +190,7 @@ class FutarProxy:
                 raise FutarRateLimited("rate limited")
             await _sleep(wait)
             slept += wait
+        return slept
 
     def _note_rate_limited(self) -> None:
         self._limited += 1
@@ -190,14 +207,17 @@ class FutarProxy:
             self._limited_logged_at = now
 
     async def _upstream(self, path: str, params: dict[str, str]) -> dict:
+        started = _monotonic()
         try:
-            await self._acquire()
+            slept = await self._acquire()
         except FutarRateLimited:
             # Counted here, once per refused request: every caller sharing
             # it gets the same error.
             self._note_rate_limited()
             raise
-        data = await futar_get(self._session, self._api_key, path, params)
+        # The summed sleeps, or the clock when a busy event loop took longer.
+        waited = max(slept, _monotonic() - started)
+        data = await futar_get(self._session, self._api_key, path, params, futar_timeout(waited))
         # Only an answer from FUTÁR itself ends an outage: a cache hit for
         # another request proves nothing, and clearing the state on one made
         # the log flap between "unavailable" and "answers again".

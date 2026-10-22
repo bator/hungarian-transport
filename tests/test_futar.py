@@ -312,11 +312,47 @@ async def test_worst_case_answers_before_the_card_gives_up(monkeypatch) -> None:
     proxy._tokens = 0.0
     with pytest.raises(futar.FutarRateLimited):
         await proxy._acquire()
-    worst = sum(slept) + futar.FUTAR_TIMEOUT.total
+    worst = sum(slept) + futar.futar_timeout(sum(slept)).total
     assert sum(slept) <= futar.FUTAR_TOKEN_WAIT_SEC
     # Room for the websocket round trip and the event loop.
-    assert worst <= futar.CARD_TIMEOUT_SEC - 3
-    assert futar.FUTAR_TOKEN_WAIT_SEC + futar.FUTAR_TIMEOUT.total <= futar.CARD_TIMEOUT_SEC - 3
+    assert futar.FUTAR_MARGIN_SEC >= 2
+    assert worst <= futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
+    longest_wait = futar.FUTAR_TOKEN_WAIT_SEC
+    assert longest_wait + futar.futar_timeout(longest_wait).total <= futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
+
+
+@pytest.mark.parametrize(
+    ("debt", "busy", "timeout"),
+    [(None, 0.0, 18.0), (19.0, 0.0, 14.0), (19.0, 2.0, 12.0)],
+    ids=["no-wait", "token-wait", "busy-loop"],
+)
+async def test_upstream_timeout_is_what_is_left_of_the_card_budget(monkeypatch, debt, busy, timeout) -> None:
+    """A fixed 12 s timeout failed a plan-trip.json answering in 12-20 s,
+    which the card (20 s) still waits for. The upstream call gets the card's
+    budget less the token wait (the clock when the loop was slower) and the
+    margin."""
+    clock = [5000.0]
+
+    async def advancing_sleep(seconds):
+        clock[0] += seconds + busy
+
+    seen: list[float] = []
+
+    async def fake_get(session, api_key, path, params, timeout=None):
+        seen.append(timeout.total)
+        return {"status": "OK", "data": {}}
+
+    monkeypatch.setattr(futar, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(futar, "_sleep", advancing_sleep)
+    monkeypatch.setattr(futar, "futar_get", fake_get)
+    proxy = futar.FutarProxy(None, "secret-key")
+    if debt is not None:
+        # A token is 20 short: exactly FUTAR_TOKEN_WAIT_SEC (4 s) of waiting at 5/s.
+        proxy._tokens = -debt
+    await proxy.get("plan-trip.json", {"fromPlace": "a", "toPlace": "b"})
+    assert seen == [pytest.approx(timeout)]
+    assert futar.futar_timeout().total == futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
+    assert futar.futar_timeout(30).total == futar.FUTAR_MIN_TIMEOUT_SEC
 
 
 async def test_cache_hit_does_not_end_an_outage(hass, aioclient_mock, caplog) -> None:

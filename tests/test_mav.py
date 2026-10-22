@@ -547,6 +547,103 @@ async def test_interrupted_startup_build_is_tried_again_at_the_next_start(
     assert out.is_file()
 
 
+@pytest.mark.parametrize("runner_text", [SLOW_RUNNER, KILLED_RUNNER], ids=["timeout", "killed"])
+async def test_build_interrupted_again_and_again_stops_at_startup(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch, tmp_path, runner_text
+) -> None:
+    """A build that the OOM killer (or the timeout) stops every time used to
+    run again at every start, with no Repairs issue: 30 minutes of CPU or
+    memory pressure per start. From the second interruption in a row of one
+    feed, startup leaves it to the rebuild service and Repairs says so."""
+    _write_feed(mav_source)
+    runner = tmp_path / "interrupted_runner.py"
+    runner.write_text(runner_text, encoding="utf-8")
+    monkeypatch.setattr(mav, "BUILD_RUNNER", runner)
+    monkeypatch.setattr(mav, "BUILD_TIMEOUT", 1.5)
+    spawned: list[tuple] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def spying_exec(*args, **kwargs):
+        spawned.append(args)
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(mav.asyncio, "create_subprocess_exec", spying_exec)
+    out = card_assets / mav.INDEX_NAME
+    state_file = mav.state_path(hass)
+    issues = ir.async_get(hass)
+    await _setup(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    # The first interruption may be the host's state at the time.
+    assert len(spawned) == 1
+    assert mav._read_state(state_file)["interrupted"]["count"] == 1
+    assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+    assert mav._needs_build(mav_source, out, state_file)
+
+    # The second start: interrupted again, so not tried at later starts.
+    await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 2
+    state = mav._read_state(state_file)
+    assert state["interrupted"]["count"] == 2 and "failed" not in state
+    issue = issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED)
+    assert issue is not None
+    assert "interrupted 2 times in a row" in issue.translation_placeholders["error"]
+    assert not mav._needs_build(mav_source, out, state_file)
+    for _ in range(3):
+        # Repairs issues do not outlive a restart: each start brings it back.
+        ir.async_delete_issue(hass, DOMAIN, mav.ISSUE_BUILD_FAILED)
+        await mav.async_build_if_needed(hass, card_assets)
+        assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is not None
+    assert len(spawned) == 2
+
+    # The rebuild service still builds; once it succeeds, all is cleared.
+    with pytest.raises(HomeAssistantError):
+        await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert len(spawned) == 3
+    assert mav._read_state(state_file)["interrupted"]["count"] == 3
+    monkeypatch.setattr(mav, "BUILD_RUNNER", Path(mav_index.__file__))
+    await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert len(spawned) == 4 and out.is_file()
+    assert "interrupted" not in mav._read_state(state_file)
+    assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+
+async def test_interruptions_count_per_feed_and_in_a_row(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch, tmp_path
+) -> None:
+    """A new feed starts from no interruptions, and a build that fails for
+    the feed ends the run of interruptions."""
+    _write_feed(mav_source)
+    runner = tmp_path / "killed_runner.py"
+    runner.write_text(KILLED_RUNNER, encoding="utf-8")
+    monkeypatch.setattr(mav, "BUILD_RUNNER", runner)
+    out = card_assets / mav.INDEX_NAME
+    state_file = mav.state_path(hass)
+    await _setup(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    await mav.async_build_if_needed(hass, card_assets)
+    assert not mav._needs_build(mav_source, out, state_file)
+
+    # A new feed is built at the next start, its interruptions counted anew.
+    _write_feed(mav_source, "newer-feed")
+    assert mav._needs_build(mav_source, out, state_file)
+    await mav.async_build_if_needed(hass, card_assets)
+    state = mav._read_state(state_file)
+    assert state["interrupted"] == {
+        "source": mav._fingerprint(mav_source),
+        "count": 1,
+        "error": state["interrupted"]["error"],
+    }
+    assert "exited -9" in state["interrupted"]["error"]
+    assert ir.async_get(hass).async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+    # A failure of the feed itself is recorded as one, not as a run of interruptions.
+    monkeypatch.setattr(mav, "BUILD_RUNNER", Path(mav_index.__file__))
+    mav_source.write_bytes(b"PK not really a feed")
+    await mav.async_build_if_needed(hass, card_assets)
+    state = mav._read_state(state_file)
+    assert state["failed"] == mav._fingerprint(mav_source) and "interrupted" not in state
+
+
 async def test_kill_tolerates_a_process_that_already_exited(
     hass: HomeAssistant, card_assets, mav_source, monkeypatch
 ) -> None:
