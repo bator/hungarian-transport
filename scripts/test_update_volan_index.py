@@ -513,7 +513,7 @@ with tempfile.TemporaryDirectory() as tmp:
     code = fake.run()
     check("a newer-schema shipped index is not rebuilt by older scripts",
           code == uvi.REPORTED and volan_builds == [] and fake.city_builds == 0
-          and "https://kti.example/volan.zip" not in fake.downloads
+          and fake.downloads == []
           and all((fake.www / n).read_bytes() == shipped for n in ("volan-index.json.gz", "city-index.json.gz")),
           repr((code, volan_builds, fake.city_builds, fake.downloads)))
     check("the schema conflict is reported through the webhook, once per index",
@@ -525,7 +525,10 @@ with tempfile.TemporaryDirectory() as tmp:
     code = fake.run()
     check("the same schema conflict is not reported again the next day",
           code == 0 and sent == [] and volan_builds == [] and fake.city_builds == 0
-          and "https://kti.example/volan.zip" not in fake.downloads, repr((code, sent, fake.downloads)))
+          and fake.downloads == [], repr((code, sent, fake.downloads)))
+    check("a moved city feed is not downloaded while the index cannot be written",
+          fake.downloads == [] and fake.state()["cities"]["a"] == {"etag": "a-1"}
+          and fake.state().get("city_retry") is True, repr((fake.downloads, fake.state())))
     # An unchanged feed would not be rebuilt anyway: no report at all, even
     # for a conflict that was never reported.
     st = fake.state()
@@ -746,17 +749,43 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a broken new city zip does not replace the working one",
           code == 0 and (fake.base / "a.zip").read_bytes() == b"PK a good" and fake.built.get("a") == b"PK a good"
           and not list(fake.base.glob("*.tmp")), repr((code, sent, sorted(p.name for p in fake.base.iterdir()))))
-    check("the rejected zip is announced and not recorded",
-          fake.state()["cities"]["a"].get("etag") == "a-1" and len(sent) == 1 and "new zip rejected" in sent[0],
+    check("a rejected zip is not announced as a new timetable, nor recorded as the zip in use",
+          sent == [] and fake.state()["cities"]["a"].get("etag") == "a-1"
+          and fake.state()["cities"]["a"].get("sha256") == "good"
+          and fake.state()["cities"]["a"].get("rejected", {}).get("etag") == "a-2",
           repr((sent, fake.state()["cities"])))
-    fake.run()
-    check("the broken feed is downloaded again next run", fake.downloads == [pub, pub], repr(fake.downloads))
+    check("a rejected zip counts as a failing feed",
+          fake.state()["failing"].get("a", {}).get("runs") == 1, repr(fake.state().get("failing")))
+    # The publisher keeps serving it: not downloaded, rebuilt or announced
+    # again, and reported as failing from the third day (FAIL_REPORT_DAYS).
+    builds = fake.city_builds
+    for day in (1, 2):
+        uvi._today = lambda day=day: date.today() + timedelta(days=day)
+        fake.run()
+    check("the same rejected zip is neither downloaded nor rebuilt again",
+          fake.downloads == [pub] and fake.city_builds == builds, repr((fake.downloads, fake.city_builds - builds)))
+    check("a feed whose new zip keeps being rejected is reported on the third day",
+          len(sent) == 1 and "Helyi GTFS frissítés sikertelen" in sent[0] and "a since" in sent[0]
+          and "new zip rejected" in sent[0] and fake.state()["failing"]["a"]["runs"] == 3, repr((sent, fake.state())))
+    # A HEAD without a fingerprint: the bytes are fetched, and their sha256
+    # matches the rejected zip's, so no rebuild.
+    fake.meta[pub] = {}
+    sent.clear()
+    uvi._today = lambda: date.today() + timedelta(days=3)
+    code = fake.run()
+    check("the same rejected bytes behind a HEAD without fingerprint are not rebuilt",
+          code == 0 and fake.downloads == [pub, pub] and fake.city_builds == builds and sent == []
+          and not list(fake.base.glob("*.tmp")), repr((code, fake.downloads, sent)))
+    del fake.meta[pub]
+    uvi._today = date.today
     fake.body[pub] = b"PK a fixed"
     fake.etag[pub] = "a-3"
     code = fake.run()
     check("a fixed zip replaces the old one after its build",
           code == 0 and (fake.base / "a.zip").read_bytes() == b"PK a fixed" and fake.built.get("a") == b"PK a fixed"
           and fake.state()["cities"]["a"].get("etag") == "a-3", repr((code, fake.state()["cities"])))
+    check("a taken zip clears the rejected fingerprint and the failure count",
+          "rejected" not in fake.state()["cities"]["a"] and "a" not in fake.state()["failing"], repr(fake.state()))
     fake.etag[pub] = "a-4"
     fake.body[pub] = b"PK a newest"
     fake.city_fails = RuntimeError("bad build")
