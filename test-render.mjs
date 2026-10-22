@@ -7633,7 +7633,11 @@ const settle = async (el) => {
     },
   } });
   const calls = [];
-  Lib.originPoles = async () => ['AZP_P', 'AZP_K1', 'AZP_K2'];
+  let opCalls = 0;
+  Lib.originPoles = async () => {
+    opCalls += 1;
+    return ['AZP_P', 'AZP_K1', 'AZP_K2'];
+  };
   Lib.childPolesOf = () => new Set(['AZP_K1', 'AZP_K2']);
   Lib.departureBoard = async (_k, pid) => {
     calls.push(pid);
@@ -7651,6 +7655,10 @@ const settle = async (el) => {
   check('a failed parent board falls back to its saved child poles',
     !threw && rows && rows.length === 2 && calls.indexOf('AZP_K1') >= 0 && calls.indexOf('AZP_K2') >= 0,
     JSON.stringify({ threw, rows: rows && rows.map((r) => r.tripId), calls }));
+  /* The failed parent board has no span: it is not "capped", so the
+     outage does not set off discovery's extra lookups. */
+  check('a failed parent board does not set off route discovery',
+    opCalls === 1 && calls.length === 3, JSON.stringify({ opCalls, calls }));
   Object.assign(Lib, { originPoles: keep.op, childPolesOf: keep.kids, departureBoard: keep.board });
 }
 
@@ -7979,6 +7987,208 @@ check('a city stop number is not an ELVIRA station code',
     !shapeErr && shardUrls[0] === 'http://localhost:8123/local/azzrel/sh-azz/00.json.gz',
     JSON.stringify({ url: idx.url, shapeErr, shardUrls }));
   Object.assign(Lib, { _fetchIndexBytes: keep.bytes, _fetchJsonGz: keep.gz });
+}
+
+/* ---- Sixth review: hop card and its libraries ---- */
+
+/* A failed poll keeps only FUTÁR rows still due: an outage longer than
+   the kept rows fills the board from Transitous instead of leaving only
+   the banner. */
+{
+  const keep = { dep: Lib.departures, fill: Lib.fillTransitousIfEmpty, gps: Lib.attachCoachGps, travel: Lib.travelMin };
+  const t0 = Math.floor(Date.now() / 1000);
+  let n = 0;
+  let fills = 0;
+  Lib.departures = async () => {
+    n += 1;
+    if (n === 1) return [{ tripId: 'BKK_BAA_T1', label: '7', head: 'Baacel', dep: t0 + 300, sched: t0 + 300, vehicle: 'bus', rawType: 'BUS', travel: 4 }];
+    throw new Error('HTTP 503');
+  };
+  Lib.fillTransitousIfEmpty = async (rows) => {
+    if (rows && rows.length) return rows;
+    fills += 1;
+    return [{ tripId: 'motis:BAA', label: '7', head: 'Baacel', dep: t0 + 900, sched: t0 + 900, vehicle: 'bus', rawType: 'BUS' }];
+  };
+  Lib.attachCoachGps = async (_h, rows) => rows;
+  Lib.travelMin = async () => 4;
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'hu', stopId: 'BKK_BAA_O', stopName: 'Baaorigo', destKey: 'baacel', destName: 'Baacel', apiKey: 'k' });
+  await settleTicks(30);
+  await c._pollRun.run();
+  await settleTicks(30);
+  const keptWhileDue = (c._rawRows || []).map((r) => r.tripId).join(',');
+  const fillsWhileDue = fills;
+  /* The outage outlasts the kept row: it has left by the next poll. */
+  c._rawRows.forEach((r) => { r.dep = t0 - 3600; r.sched = t0 - 3600; });
+  c._rows.forEach((r) => { r.depTs = t0 - 3600; r.schedTs = t0 - 3600; });
+  await c._pollRun.run();
+  await settleTicks(30);
+  const shown = (c._shownRows || []).map((r) => r.tripId).join(',');
+  check('an outage longer than the kept FUTÁR rows fills the board from Transitous',
+    keptWhileDue === 'BKK_BAA_T1' && fillsWhileDue === 0 && fills === 1
+    && shown === 'motis:BAA' && c._rowsFilled && !!c._err,
+    JSON.stringify({ keptWhileDue, fillsWhileDue, fills, shown, filled: c._rowsFilled, err: !!c._err }));
+  c.remove();
+  Object.assign(Lib, { departures: keep.dep, fillTransitousIfEmpty: keep.fill, attachCoachGps: keep.gps, travelMin: keep.travel });
+}
+
+/* A successful poll's Transitous fill (FUTÁR answered with nothing) is
+   not this board's own rows: the next failed poll fills it again instead
+   of keeping the Transitous rows as if FUTÁR had sent them. */
+{
+  const keep = { dep: Lib.departures, fill: Lib.fillTransitousIfEmpty, gps: Lib.attachCoachGps, travel: Lib.travelMin };
+  const t0 = Math.floor(Date.now() / 1000);
+  let n = 0;
+  let fills = 0;
+  Lib.departures = async () => {
+    n += 1;
+    if (n === 1) return [];
+    throw new Error('HTTP 503');
+  };
+  Lib.fillTransitousIfEmpty = async (rows) => {
+    if (rows && rows.length) return rows;
+    fills += 1;
+    return [{ tripId: 'motis:BAB' + fills, label: '7', head: 'Babcel', dep: t0 + 900, sched: t0 + 900, vehicle: 'bus', rawType: 'BUS' }];
+  };
+  Lib.attachCoachGps = async (_h, rows) => rows;
+  Lib.travelMin = async () => null;
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { states: {}, language: 'hu', services: {} };
+  c.setConfig({ language: 'hu', stopId: 'BKK_BAB_O', stopName: 'Baborigo', destKey: 'babcel', destName: 'Babcel', apiKey: 'k' });
+  await settleTicks(30);
+  const first = { ids: (c._rawRows || []).map((r) => r.tripId).join(','), filled: c._rowsFilled };
+  await c._pollRun.run();
+  await settleTicks(30);
+  const after = (c._rawRows || []).map((r) => r.tripId).join(',');
+  check('a Transitous fill on a successful poll is refilled by a failed one',
+    first.ids === 'motis:BAB1' && first.filled === true && fills === 2
+    && after === 'motis:BAB2' && c._rowsFilled && !!c._err,
+    JSON.stringify({ first, fills, after, filled: c._rowsFilled, err: !!c._err }));
+  c.remove();
+  Object.assign(Lib, { departures: keep.dep, fillTransitousIfEmpty: keep.fill, attachCoachGps: keep.gps, travelMin: keep.travel });
+}
+
+/* A position the sensor or EMMA gives a GTFS/MOTIS row is enrichment's
+   own: carried to the next poll, it is not dropped by a coach lookup that
+   matched no coach (the map dot blinked out every other poll). */
+{
+  const t0 = Math.floor(Date.now() / 1000);
+  const hass = { states: { 'sensor.bac': { attributes: { vehicles: [
+    { tripId: 'elvira:bac', trainNumber: '2512', label: '2512', lat: 47.5, lon: 19.0 },
+    { label: 'BACNEV', lat: 47.7, lon: 19.3 },
+  ] } } } };
+  const rows = [
+    { tripId: 'gtfs:BAC1', label: 'G20', trainNumber: '2512', vehicle: 'rail', dep: t0 + 600, sched: t0 + 600, lat: 47.4, lon: 18.9, gpsCarried: true },
+    { tripId: 'motis:BAC2', label: 'BACNEV', vehicle: 'rail', dep: t0 + 700, sched: t0 + 700, lat: 47.6, lon: 19.2, gpsCarried: true },
+  ];
+  Lib.enrichFromHass(hass, rows);
+  const flags = rows.map((r) => !!r.gpsCarried);
+  Lib.applyCoachGps(rows, [], t0);
+  check('a sensor or EMMA position is not dropped by an unmatched coach lookup',
+    JSON.stringify(flags) === '[false,false]'
+    && rows[0].lat === 47.5 && rows[0].lon === 19 && rows[1].lat === 47.7 && rows[1].lon === 19.3,
+    JSON.stringify({ flags, rows: rows.map((r) => [r.lat, r.lon, r.gpsCarried]) }));
+}
+
+/* The same, through the card's polls: a MOTIS train whose position comes
+   from a sensor keeps it on every poll while the coach lookup is slow and
+   matches nothing. */
+{
+  const keep = {
+    dep: Lib.departures, fill: Lib.fillTransitousIfEmpty, elvira: Lib.hasElvira,
+    coach: Lib.coachPositions, travel: Lib.travelMin,
+  };
+  const t0 = Math.floor(Date.now() / 1000);
+  Lib.departures = async () => [{ tripId: 'motis:BAD', label: 'S70', vehicle: 'rail', rawType: 'RAIL', trainNumber: '5270', dep: t0 + 600, sched: t0 + 600, head: 'Badcel' }];
+  Lib.fillTransitousIfEmpty = async (rows) => rows;
+  Lib.hasElvira = () => false;
+  Lib.coachPositions = async () => {
+    await new Promise((r) => setTimeout(r, 5));
+    return [];
+  };
+  Lib.travelMin = async () => null;
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { language: 'hu', services: {}, states: { 'sensor.bad': { attributes: { vehicles: [{ trainNumber: '5270', label: 'S70', lat: 47.6, lon: 19.1 }] } } } };
+  c.setConfig({ language: 'hu', stopId: 'BKK_BAD_O', stopName: 'Badorigo', destKey: 'badcel', destName: 'Badcel', mav: true, apiKey: 'k' });
+  await new Promise((r) => setTimeout(r, 40));
+  const seen = [];
+  for (let i = 0; i < 3; i++) {
+    await c._pollRun.run();
+    await new Promise((r) => setTimeout(r, 20));
+    seen.push((c._rows || []).map((r) => (r.hasGps ? r.lat + ',' + r.lon : 'none')).join('|'));
+  }
+  check('a sensor position stays on the card on every poll',
+    seen.length === 3 && seen.every((s) => s === '47.6,19.1'), JSON.stringify(seen));
+  c.remove();
+  Object.assign(Lib, {
+    departures: keep.dep, fillTransitousIfEmpty: keep.fill, hasElvira: keep.elvira,
+    coachPositions: keep.coach, travelMin: keep.travel,
+  });
+}
+
+/* After a failed load, a poll waiting on the through-check with nothing
+   on the board shows the spinner, not "no departures". */
+{
+  const keep = { dep: Lib.departures, fill: Lib.fillTransitousIfEmpty, elvira: Lib.hasElvira, gps: Lib.attachCoachGps };
+  const t0 = Math.floor(Date.now() / 1000);
+  let fail = true;
+  let release = null;
+  Lib.departures = async (_k, _s, _r, _d, opts) => {
+    if (fail) throw new Error('BKK timeout');
+    opts.armThroughCheck(() => {
+      new Promise((r) => { release = r; }).then(() => opts.onFutarUpdate([
+        { tripId: 'BKK_BAE_T1', label: '9', vehicle: 'bus', rawType: 'BUS', dep: t0 + 600, sched: t0 + 600, head: 'Baecel' },
+      ]));
+    });
+    return [];
+  };
+  Lib.fillTransitousIfEmpty = async (rows) => rows || [];
+  Lib.hasElvira = () => false;
+  Lib.attachCoachGps = async (_h, rows) => rows;
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c.hass = { language: 'en', states: {}, services: { hungarian_transport: { futar: {} } } };
+  c.setConfig({ language: 'en', stopId: 'BKK_BAE_O', stopName: 'Baeorigo', destKey: 'baecel', destName: 'Baecel' });
+  await settleTicks(30);
+  const msg = () => (c.shadowRoot.querySelector('.msg') || {}).textContent || '';
+  const failed = { msg: msg(), err: c._elErr.textContent };
+  fail = false;
+  const poll = c._pollRun.run();
+  await settleTicks(30);
+  const pending = { msg: msg(), err: c._elErr.textContent };
+  if (release) release();
+  await poll;
+  await settleTicks(30);
+  check('a poll after a failed load shows the spinner until the through-check answers',
+    !!failed.err && pending.msg === 'Loading…' && !pending.err
+    && (c._rows || []).map((r) => r.tripId).join(',') === 'BKK_BAE_T1',
+    JSON.stringify({ failed, pending, rows: (c._rows || []).length }));
+  c.remove();
+  Object.assign(Lib, { departures: keep.dep, fillTransitousIfEmpty: keep.fill, hasElvira: keep.elvira, attachCoachGps: keep.gps });
+}
+
+/* One EMMA vehicle is one train: two unnumbered rows with the same name
+   do not both get its position, and a numbered row comes first. */
+{
+  const t0 = Math.floor(Date.now() / 1000);
+  const twin = [
+    { tripId: 'gtfs:BAF1', label: 'BAFNEV', vehicle: 'rail', dep: t0 + 300 },
+    { tripId: 'gtfs:BAF2', label: 'BAFNEV', vehicle: 'rail', dep: t0 + 3900 },
+  ];
+  Lib.applyEmmaPositions(twin, [{ label: 'BAFNEV', lat: 46.9, lon: 17.9, trip: { tripShortName: 'BAFNEV' } }]);
+  const numbered = [
+    { tripId: 'gtfs:BAG1', label: 'BAGNEV', vehicle: 'rail', dep: t0 + 300 },
+    { tripId: 'gtfs:BAG2', label: 'BAGNEV', trainNumber: '1952', vehicle: 'rail', dep: t0 + 3900 },
+  ];
+  Lib.applyEmmaPositions(numbered, [{ label: 'BAGNEV', lat: 46.8, lon: 17.8, trip: { tripShortName: '1952 BAGNEV' } }]);
+  const pos = (list) => list.map((r) => (Lib.mapGpsLatLon(r.lat, r.lon) ? r.lat : null));
+  check('one EMMA vehicle is given to one row only',
+    JSON.stringify(pos(twin)) === '[46.9,null]' && JSON.stringify(pos(numbered)) === '[null,46.8]',
+    JSON.stringify({ twin: pos(twin), numbered: pos(numbered) }));
 }
 
 process.exit(failed ? 1 : 0);

@@ -1443,7 +1443,9 @@ ${this._stopPinCss()}
        from the last list stay on it until this run fills them again, so
        they do not blink out while ELVIRA or the GPS lookup answers. The
        coach position is marked (gpsCarried): the lookup replaces or drops
-       it. FUTÁR rows bring their own vehicle position on every poll. */
+       it, and a sensor or EMMA position (enrichFromHass) replaces it and
+       clears the mark. FUTÁR rows bring their own vehicle position on
+       every poll. */
     const carryOver = (list) => {
       const prev = new Map();
       (this._rawRows || []).forEach((row) => {
@@ -1529,8 +1531,10 @@ ${this._stopPinCss()}
                 this._rows = [];
                 this._rawRows = [];
                 this._rowsFilled = false;
-                this._loading = true;
               }
+              /* Nothing on the board (the failed run left none): the
+                 spinner, not "no departures", until the check answers. */
+              if (!(this._rawRows || []).length) this._loading = true;
               this._paint();
             }
             return;
@@ -1622,6 +1626,9 @@ ${this._stopPinCss()}
           merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
           earlyRows = merged;
           paintRows(merged);
+          /* Transitous rows, not this board's own: a failed poll replaces
+             them instead of keeping them as if FUTÁR had sent them. */
+          if (merged.length) this._rowsFilled = true;
         }
         if (typeof this._considerJourney === 'function') this._considerJourney();
         await gpsTravel;
@@ -1648,8 +1655,12 @@ ${this._stopPinCss()}
            empty board, which Transitous then filled. It still fills it,
            now under the error banner instead of in silence. A poll that
            fails keeps the FUTÁR rows it had (_showErr): only an empty
-           board, or one Transitous filled before, is filled again. */
-        const keepRows = (this._rawRows || []).length && !this._rowsFilled;
+           board, or one Transitous filled before, is filled again. Rows
+           that have all left by now count as an empty board: an outage
+           longer than the kept rows must not leave only the banner. */
+        const nowSec = Math.floor(Date.now() / 1000);
+        const keepRows = !this._rowsFilled
+          && (this._rows || []).some((row) => row && departureStillDue(row.depTs, nowSec));
         if ((mode === 'bkk' || mode === 'mav') && !keepRows) {
           let filled = [];
           try {
