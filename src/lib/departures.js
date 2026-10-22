@@ -583,7 +583,11 @@ Object.assign(BkkLib, {
           spanMin: Math.max(best.spanMin, cur.spanMin),
         };
       }, { count: 0, spanMin: 0 });
-      const capped = usedParentOnly && (span.count >= 60 || span.spanMin + 2 < horizon);
+      /* A failed parent board (its child poles stood in) has no span: it is
+         not "capped", or every outage or rate limit set off discovery's
+         extra route and board requests. */
+      const capped = usedParentOnly && !!payloads[0]
+        && (span.count >= 60 || span.spanMin + 2 < horizon);
       if (capped) {
         const discovered = [];
         payloads.forEach((data) => {

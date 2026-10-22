@@ -39,6 +39,9 @@ FAIL_REPORT_DAYS = 3
 FAIL_REPEAT_DAYS = 7
 # state.json "failing" key of the MÁV source (MAV_GTFS_URL).
 MAV_KEY = "mav"
+# The "failing" error of a city feed whose new zip build_city_index rejected
+# (it does not load, its calendar already ended, most of its trips are gone).
+REJECTED_ERROR = "new zip rejected, see update.log"
 
 
 # A keyed feed override (BAHART_GTFS_URL=...?apikey=..., a MÁV link whose
@@ -636,6 +639,17 @@ def _main() -> int:
         return REPORTED
 
     today = _today()
+
+    def report_due(due: dict[str, dict]) -> None:
+        # Not a failed run: the index keeps the last zip of each, and the
+        # rest of the run goes on.
+        if due:
+            report(
+                "Helyi GTFS frissítés sikertelen",
+                failure_report(due, today) + "; the index keeps the last zip until its calendar ends,"
+                " check the feed URL",
+            )
+
     changed: list[str] = []
     exit_code = 0
     if restored:
@@ -696,13 +710,25 @@ def _main() -> int:
         # A city rebuild that failed (or was killed) last time is retried even
         # when no feed moved since; the Volán local routes come from zip_path.
         city_retry = city_retry or volan_built or not city_out.exists()
+        # Whether the rebuild has a reason other than new city zips: without
+        # one, a rebuild whose every new zip was rejected changed nothing.
+        city_rebuild_anyway = city_retry
+        # These scripts must not write the city index (see schema_conflict):
+        # a feed that moved is not downloaded, as for the Volán index, and
+        # keeps its old fingerprint, so the scripts that can write the index
+        # download and rebuild it on their first run.
+        city_blocked = schema_conflict(city_out)
         due: dict[str, dict] = {}
         for feed in CITY_FEEDS:
             fid = feed["id"]
             prev = city_state.get(fid) or {}
+            # The fingerprint of a new zip build_city_index rejected (see
+            # below): the same zip is not downloaded and rejected again.
+            bad = prev.get("rejected") if isinstance(prev.get("rejected"), dict) else {}
             zpath = base / feed["file"]
             insecure = bool(feed.get("insecure"))
             fetched = False
+            still_rejected = False
             last_err: BaseException | None = None
             # A keyed override (BAHART_GTFS_URL) that fails falls back to the
             # catalog and then the public URL.
@@ -716,6 +742,14 @@ def _main() -> int:
                 if same_remote(prev, meta) and zpath.exists():
                     city_state[fid] = merge_meta(meta, prev, zpath.stat().st_size)
                     fetched = True
+                    break
+                if same_remote(bad, meta) and zpath.exists():
+                    fetched = still_rejected = True
+                    print(f"unchanged {fid} (the rejected zip, previous kept)")
+                    break
+                if city_blocked:
+                    fetched = city_retry = True
+                    print(f"warn {fid} moved; not downloaded: {city_blocked}", file=sys.stderr)
                     break
                 # The zip in place stays until a city index was built from
                 # the new one (build_city_index rejects one that fails to
@@ -738,6 +772,15 @@ def _main() -> int:
                     city_state[fid]["fetched"] = today.isoformat()
                     print(f"unchanged {fid} (same zip)")
                     break
+                if digest and digest == bad.get("sha256") and zpath.exists():
+                    # The zip rejected before, byte for byte.
+                    staged.unlink()
+                    bad = merge_meta(meta, bad, size)
+                    bad["fetched"] = today.isoformat()
+                    city_state[fid] = {**prev, "rejected": bad}
+                    still_rejected = True
+                    print(f"unchanged {fid} (the rejected zip, previous kept)")
+                    break
                 city_pending[fid] = merge_meta(meta, downloaded, size)
                 city_pending[fid]["fetched"] = today.isoformat()
                 if digest:
@@ -746,25 +789,30 @@ def _main() -> int:
                     city_staged[fid] = staged
                 city_retry = True
                 break
-            if fetched:
-                failing.pop(fid, None)
+            if still_rejected:
+                # The publisher still serves the zip rejected before: a feed
+                # that does not update, as one that fails to download.
+                entry = note_failure(failing, fid, REJECTED_ERROR, today)
+                if entry is not None:
+                    due[fid] = entry
+            elif fetched:
+                # A new zip (city_pending) counts once its build took it.
+                if fid not in city_pending:
+                    failing.pop(fid, None)
             else:
                 entry = note_failure(failing, fid, error_name(last_err), today)
                 if entry is not None:
                     due[fid] = entry
-        if due:
-            # Not a failed run: the index keeps the last zip of each, and the
-            # rest of the run goes on.
-            report(
-                "Helyi GTFS frissítés sikertelen",
-                failure_report(due, today) + "; the index keeps the last zip until its calendar ends,"
-                " check the feed URL",
-            )
+        # Reported before the build: note_failure already set "reported",
+        # and the finally saves it even when the run is killed during it.
+        report_due(due)
+        due = {}
 
-        city_conflict = schema_conflict(city_out) if city_retry else ""
+        city_conflict = city_blocked if city_retry else ""
         if city_conflict:
-            # city_retry stays set and the new zips stay pending: the scripts
-            # that can write this index rebuild it on their first run.
+            # city_retry stays set and the feeds that moved keep their old
+            # fingerprint (none was downloaded): the scripts that can write
+            # this index download and rebuild them on their first run.
             exit_code = skip_rebuild("Helyi GTFS frissítés kihagyva", city_out, city_conflict) or exit_code
         elif city_retry:
             try:
@@ -772,8 +820,7 @@ def _main() -> int:
                     base, city_out, zip_path if zip_path.exists() else None, zips=dict(city_staged)
                 )
                 # The new zips the index was built from replace the old ones;
-                # a rejected one goes, and its feed is downloaded again next
-                # run (state.json keeps the old zip's fingerprint).
+                # a rejected one goes (its fingerprint stays, see below).
                 rejected = set(info.get("rejected") or [])
                 for fid, staged in city_staged.items():
                     if fid in rejected:
@@ -790,11 +837,22 @@ def _main() -> int:
                 # HEAD or even the same bytes count as new then.
                 skipped = [fid for fid in info.get("skipped") or [] if fid not in expired]
                 for fid, meta in city_pending.items():
-                    if fid not in skipped and fid not in rejected:
+                    if fid in rejected:
+                        # Its fingerprint is kept apart from the zip in use:
+                        # the same zip is neither downloaded nor rejected
+                        # again, and the feed counts as failing until the
+                        # publisher serves another one.
+                        old = city_state.get(fid) if isinstance(city_state.get(fid), dict) else {}
+                        city_state[fid] = {**old, "rejected": meta}
+                        entry = note_failure(failing, fid, REJECTED_ERROR, today)
+                        if entry is not None:
+                            due[fid] = entry
+                    elif fid not in skipped:
                         city_state[fid] = meta
+                        failing.pop(fid, None)
                 for fid in skipped:
                     if isinstance(city_state.get(fid), dict):
-                        for key in ("etag", "last_modified", "content_length", "size", "sha256", "fetched"):
+                        for key in ("etag", "last_modified", "content_length", "size", "sha256", "fetched", "rejected"):
                             city_state[fid].pop(key, None)
                 city_retry = False
                 line = f"city ops={info['ops']} trips={info['trips']}"
@@ -806,10 +864,18 @@ def _main() -> int:
                     line += " (skipped: " + ", ".join(skipped) + ")"
                 if rejected:
                     line += " (new zip rejected, previous kept: " + ", ".join(sorted(rejected)) + ")"
-                changed.append(line)
+                if not city_rebuild_anyway and city_pending and all(
+                    fid in rejected and fid not in skipped for fid in city_pending
+                ):
+                    # Built only for new zips, and every one was rejected:
+                    # the index has the timetables it had, nothing to announce.
+                    print(line)
+                else:
+                    changed.append(line)
             except Exception as err:
                 report("Helyi GTFS frissítés sikertelen", f"error city rebuild: {err}")
                 exit_code = REPORTED
+        report_due(due)
 
         mav_src = None
         mav_errors: list[BaseException] = []
@@ -841,8 +907,8 @@ def _main() -> int:
                 report("MÁV GTFS frissítés sikertelen", f"error mav rebuild: {err}")
                 exit_code = REPORTED
     finally:
-        # New city zips no index was built from (failed build, schema
-        # conflict, SIGTERM): the zips in place stay.
+        # New city zips no index was built from (failed build, SIGTERM):
+        # the zips in place stay.
         for staged in city_staged.values():
             staged.unlink(missing_ok=True)
         save_state(

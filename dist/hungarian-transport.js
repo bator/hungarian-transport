@@ -5527,7 +5527,7 @@ Object.assign(BkkLib, {
             spanMin: Math.max(best.spanMin, cur.spanMin)
           };
         }, { count: 0, spanMin: 0 });
-        const capped = usedParentOnly && (span.count >= 60 || span.spanMin + 2 < horizon);
+        const capped = usedParentOnly && !!payloads[0] && (span.count >= 60 || span.spanMin + 2 < horizon);
         if (capped) {
           const discovered = [];
           payloads.forEach((data) => {
@@ -5780,23 +5780,39 @@ Object.assign(BkkLib, {
   _emmaKeyed(vehicles) {
     return (Array.isArray(vehicles) ? vehicles : []).filter(Boolean).map((v) => ({ v, k: BkkLib._emmaVehicleKey(v) }));
   },
+  /* One EMMA vehicle is one train: it goes to one row only. Train-number
+     matches are paired first, so a row with the same name but no number
+     does not take the numbered row's train; among same-named rows the
+     first (soonest) one gets it. The position is enrichment's own, so it
+     is no longer the last poll's carried coach GPS (gpsCarried). */
   _applyEmmaKeyed(list, keyed) {
     if (!keyed.length) return list;
-    list.forEach((row) => {
-      if (!row) return;
-      const rk = BkkLib._emmaRowKey(row);
+    const entries = list.map((row) => row ? { row, rk: BkkLib._emmaRowKey(row) } : null);
+    const usedVehicle = /* @__PURE__ */ new Set();
+    const placed = /* @__PURE__ */ new Set();
+    const assign = (byNumber) => entries.forEach((entry, ri) => {
+      if (!entry || placed.has(ri)) return;
       for (let i = 0; i < keyed.length; i++) {
+        if (usedVehicle.has(i)) continue;
+        const k = keyed[i].k;
+        const hit = byNumber ? !!(entry.rk.num && k.n && entry.rk.num === k.n) : BkkLib._emmaKeysMatch(entry.rk, k);
+        if (!hit) continue;
         const v = keyed[i].v;
-        if (!BkkLib._emmaKeysMatch(rk, keyed[i].k)) continue;
         const gps = BkkLib.mapGpsLatLon(v.lat, v.lon);
         if (!gps) continue;
+        const row = entry.row;
         row.lat = gps[0];
         row.lon = gps[1];
+        delete row.gpsCarried;
         if (v.heading != null) row.heading = v.heading;
         if (v.speed != null) row.speed = v.speed;
+        usedVehicle.add(i);
+        placed.add(ri);
         break;
       }
     });
+    assign(true);
+    assign(false);
     return list;
   },
   applyEmmaPositions(rows, vehicles) {
@@ -6030,9 +6046,10 @@ Object.assign(BkkLib, {
       }
       if (v.bikesAllowed === true || v.bikesallowed === true) row.bikesAllowed = true;
       const incoming = BkkLib.mapGpsLatLon(v.lat, v.lon);
-      if (!BkkLib.mapGpsLatLon(row.lat, row.lon) && incoming) {
+      if (incoming && (row.gpsCarried || !BkkLib.mapGpsLatLon(row.lat, row.lon))) {
         row.lat = incoming[0];
         row.lon = incoming[1];
+        delete row.gpsCarried;
       }
     });
     BkkLib._applyEmmaKeyed(rows, BkkLib._hassEmmaKeyed(hass, pool));
@@ -8665,8 +8682,8 @@ ${this._stopPinCss()}
                 this._rows = [];
                 this._rawRows = [];
                 this._rowsFilled = false;
-                this._loading = true;
               }
+              if (!(this._rawRows || []).length) this._loading = true;
               this._paint();
             }
             return;
@@ -8763,6 +8780,7 @@ ${this._stopPinCss()}
           merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
           earlyRows = merged;
           paintRows(merged);
+          if (merged.length) this._rowsFilled = true;
         }
         if (typeof this._considerJourney === "function") this._considerJourney();
         await gpsTravel;
@@ -8782,7 +8800,8 @@ ${this._stopPinCss()}
       } catch (err) {
         if (gen !== this._gen) return;
         this._loading = false;
-        const keepRows = (this._rawRows || []).length && !this._rowsFilled;
+        const nowSec = Math.floor(Date.now() / 1e3);
+        const keepRows = !this._rowsFilled && (this._rows || []).some((row) => row && departureStillDue(row.depTs, nowSec));
         if ((mode === "bkk" || mode === "mav") && !keepRows) {
           let filled = [];
           try {

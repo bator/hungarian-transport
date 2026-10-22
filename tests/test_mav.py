@@ -326,7 +326,7 @@ async def test_startup_rebuilds_a_missing_index(hass: HomeAssistant, card_assets
     await _setup(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert (card_assets / "mav-index.json.gz").is_file()
-    assert hass.data[DOMAIN]["mav"]["audit"]["ok_ratio"] == 1.0
+    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "test-feed"
     # Built from this very feed: the next start leaves it alone.
     assert await mav.async_build(hass, card_assets) is None
 
@@ -422,7 +422,7 @@ async def test_upload_build_outlives_a_client_that_gives_up(
     release.set()
     await hass.async_block_till_done(wait_background_tasks=True)
     assert (card_assets / mav.INDEX_NAME).is_file()
-    assert hass.data[DOMAIN]["mav"]["trains"] == 2
+    assert mav._read_state(mav.state_path(hass))["feed_version"] == "test-feed"
     assert not mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
 
 
@@ -510,10 +510,41 @@ async def test_build_timeout_kills_the_process_and_its_temp_file(
     assert "timed out after 1.5s" in str(err.value)
     assert procs[0].returncode == -signal.SIGKILL
     assert sorted(p.name for p in card_assets.glob("mav-index*")) == ["mav-index.json.gz.tmp"]
-    # Thirty minutes of CPU at every start would not help: the next start
-    # leaves this feed alone, and Repairs says so.
-    assert not mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
-    assert ir.async_get(hass).async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is not None
+    # A timeout says nothing about the feed: no failed feed on record, no
+    # Repairs issue, and the next start (no index on disk) builds again.
+    assert "failed" not in mav._read_state(mav.state_path(hass))
+    assert mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+
+KILLED_RUNNER = """import os, signal
+os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+@pytest.mark.parametrize("runner_text", [SLOW_RUNNER, KILLED_RUNNER], ids=["timeout", "killed"])
+async def test_interrupted_startup_build_is_tried_again_at_the_next_start(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch, tmp_path, runner_text
+) -> None:
+    """A startup build that timed out or was killed (the OOM killer) used to
+    be recorded as a failed feed, so no later start built the missing index."""
+    _write_feed(mav_source)
+    runner = tmp_path / "interrupted_runner.py"
+    runner.write_text(runner_text, encoding="utf-8")
+    monkeypatch.setattr(mav, "BUILD_RUNNER", runner)
+    monkeypatch.setattr(mav, "BUILD_TIMEOUT", 1.5)
+    await _setup(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    out = card_assets / mav.INDEX_NAME
+    assert not out.exists()
+    assert "failed" not in mav._read_state(mav.state_path(hass))
+    assert ir.async_get(hass).async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+    assert mav._needs_build(mav_source, out, mav.state_path(hass))
+
+    # The next start, with the host back to normal, builds the index.
+    monkeypatch.setattr(mav, "BUILD_RUNNER", Path(mav_index.__file__))
+    await mav.async_build_if_needed(hass, card_assets)
+    assert out.is_file()
 
 
 async def test_kill_tolerates_a_process_that_already_exited(
@@ -798,3 +829,26 @@ async def test_setup_removes_uploads_left_behind(hass: HomeAssistant, mav_source
     await _setup(hass)
     assert not stale.exists()
     assert other.exists()
+
+
+def test_state_temp_file_is_not_the_update_scripts_to_sweep(tmp_path: Path, monkeypatch) -> None:
+    """scripts/update_volan_index.py deletes *.tmp next to the feed
+    (sweep_temps); a state write caught between its write and its rename used
+    to fail with FileNotFoundError. A temp file a stopped Home Assistant left
+    behind goes at the next write."""
+    folder = tmp_path / "hungarian-transport"
+    folder.mkdir()
+    state_file = folder / mav.STATE_NAME
+    leftover = folder / f"{mav.STATE_NAME}.{'0' * 32}.writing"
+    leftover.write_text("{}", encoding="utf-8")
+    real_replace = os.replace
+
+    def replace_after_a_sweep(src, dst):
+        for path in folder.glob("*.tmp"):
+            path.unlink()
+        real_replace(src, dst)
+
+    monkeypatch.setattr(mav.os, "replace", replace_after_a_sweep)
+    mav._write_state(state_file, {"source": [1, 2]})
+    assert mav._read_state(state_file) == {"source": [1, 2]}
+    assert sorted(p.name for p in folder.iterdir()) == [mav.STATE_NAME]

@@ -1,5 +1,7 @@
 """Config and options flow for Hungarian transport."""
 
+import json
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -119,7 +121,10 @@ async def test_options_flow_sets_keeps_and_removes_key(hass, aioclient_mock, emp
     assert entry.options == {CONF_API_KEY: ""}
 
 
-async def test_remove_wins_over_a_typed_key(hass, aioclient_mock) -> None:
+async def test_typed_key_and_remove_together_is_a_form_error(hass, aioclient_mock) -> None:
+    """Saving either would drop the other silently: a new key ticked for
+    removal used to save no key at all, unvalidated, and FUTÁR went away."""
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
     entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: "current"})
     entry.add_to_hass(hass)
 
@@ -127,9 +132,23 @@ async def test_remove_wins_over_a_typed_key(hass, aioclient_mock) -> None:
     result = await hass.config_entries.options.async_configure(
         result["flow_id"], {CONF_API_KEY: "typed", CONF_REMOVE_KEY: True}
     )
-    assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_API_KEY: ""}
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "remove_and_new_key"}
+    for lang in ("en", "hu"):
+        strings = json.loads(
+            (Path(integration.__file__).parent / "translations" / f"{lang}.json").read_text(encoding="utf-8")
+        )
+        assert strings["options"]["error"]["remove_and_new_key"]
+    assert entry.options == {CONF_API_KEY: "current"}
     assert aioclient_mock.call_count == 0
+
+    # The same form, answered either way, then saves.
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_API_KEY: "typed"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {CONF_API_KEY: "typed"}
+    assert aioclient_mock.call_count == 1
 
 
 async def test_stored_key_never_goes_to_the_form(hass) -> None:

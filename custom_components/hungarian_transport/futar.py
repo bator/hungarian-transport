@@ -59,13 +59,19 @@ FUTAR_BURST = 400
 # A call over the limit waits for a token this long at most (the summed
 # sleeps, not the clock) before it is refused. The card swallows a refused
 # call (an incomplete list, not an error), so waiting is the better answer.
-FUTAR_TOKEN_WAIT_SEC = 5.0
+# The wait and FUTAR_TIMEOUT together stay well inside CARD_TIMEOUT_SEC.
+FUTAR_TOKEN_WAIT_SEC = 4.0
 # A refused call is logged at most this often, with the count since.
 FUTAR_RATE_LOG_EVERY = 300
 # Departure boards refresh every 15 s at the earliest on the card.
 FUTAR_CACHE_TTL = 15
 FUTAR_CACHE_MAX = 256
-FUTAR_TIMEOUT = aiohttp.ClientTimeout(total=20)
+# The card gives up on the service call after this long (src/lib/futar.js,
+# "BKK timeout") and treats it as an outage. The worst case here, a full
+# token wait followed by an upstream call that runs into FUTAR_TIMEOUT, has to
+# answer before that, with room for the websocket round trip.
+CARD_TIMEOUT_SEC = 20
+FUTAR_TIMEOUT = aiohttp.ClientTimeout(total=12)
 # After FUTÁR rejects the key, calls fail without asking it for this long;
 # then one call asks again, so a 401 given by mistake (an upstream hiccup)
 # does not switch FUTÁR off until Home Assistant restarts.
@@ -191,7 +197,14 @@ class FutarProxy:
             # it gets the same error.
             self._note_rate_limited()
             raise
-        return await futar_get(self._session, self._api_key, path, params)
+        data = await futar_get(self._session, self._api_key, path, params)
+        # Only an answer from FUTÁR itself ends an outage: a cache hit for
+        # another request proves nothing, and clearing the state on one made
+        # the log flap between "unavailable" and "answers again".
+        if self._failing:
+            self._failing = False
+            _LOGGER.info("BKK FUTÁR answers again")
+        return data
 
     async def get(self, path: str, params: dict[str, Any]) -> dict:
         # Before the rejected-key check: a call refused here never reaches
@@ -230,7 +243,4 @@ class FutarProxy:
         if self._rejected is not None:
             _LOGGER.info("BKK FUTÁR accepts the configured key again")
             self._rejected = None
-        if self._failing:
-            self._failing = False
-            _LOGGER.info("BKK FUTÁR answers again")
         return data

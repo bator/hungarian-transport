@@ -98,7 +98,8 @@
     },
     "error": {
       "invalid_auth": "A BKK FUTÁR elutasította ezt a kulcsot.",
-      "cannot_connect": "Nem érhető el a BKK FUTÁR. Próbáld újra később."
+      "cannot_connect": "Nem érhető el a BKK FUTÁR. Próbáld újra később.",
+      "remove_and_new_key": "Vagy új kulcsot adj meg, vagy jelöld be a tárolt kulcs törlését, a kettőt egyszerre nem lehet."
     }
   },
   "issues": {
