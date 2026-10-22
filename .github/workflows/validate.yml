@@ -79,6 +79,11 @@ jobs:
       - name: Index guard tests
         run: python3 scripts/test_build_guards.py
 
+      # The release workflow's "Resolve tag" step, against a stub gh and git;
+      # release.yml runs it too, but only after a change reached main.
+      - name: Release tag resolve tests
+        run: python3 scripts/test_release_resolve.py
+
       - name: FUTÁR proxy limit tests
         run: python3 ha/test_futar_limits.py
 
