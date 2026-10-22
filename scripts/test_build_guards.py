@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_city_index as bci  # noqa: E402
 import build_mav_index as bmi  # noqa: E402
 import gtfs_compact as gc  # noqa: E402
+import index_digest  # noqa: E402
 from build_volan_index import build_index  # noqa: E402
 from gtfs_compact import (  # noqa: E402
     IndexGuardError,
@@ -205,6 +206,57 @@ with tempfile.TemporaryDirectory() as tmp:
     bci._load_feed(base, {"id": "d", "name": "D", "url": "https://d.example/d.zip", "file": "d.zip"})
     check("insecure feed entry reaches download_feed",
           [kw.get("allow_insecure") for kw in seen_kw] == [True, False], repr(seen_kw))
+bci.CITY_FEEDS = real_feeds
+
+# A new zip that loads but that the guard would refuse (its calendar already
+# ended, most of its trips gone) is rejected for the zip in place, which
+# passes; the other feeds' updates go through. HUNGARIAN_TRANSPORT_ALLOW_MISSING
+# does not let it replace the good zip either.
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp)
+    bci.CITY_FEEDS = [
+        {"id": "a", "name": "A", "url": "https://a.example/a.zip", "file": "a.zip"},
+        {"id": "b", "name": "B", "url": "https://b.example/b.zip", "file": "b.zip"},
+    ]
+    today = "20261022"
+    gtfs_zip(base / "a.zip", city_feed(trips=60))
+    gtfs_zip(base / "b.zip", city_feed("7", trips=60))
+    out = base / "city-index.json.gz"
+    bci.build_city_index(base, out, today=today)
+    staged_a, staged_b = base / "a.zip.tmp", base / "b.zip.tmp"
+    gtfs_zip(staged_b, city_feed("7", trips=70))
+    for label, bad in (("whose calendar already ended", city_feed(trips=60, end="20260930")),
+                       ("with most of its trips gone", city_feed(trips=10))):
+        gtfs_zip(staged_a, bad)
+        err, info = None, {}
+        try:
+            info = bci.build_city_index(base, out, today=today, zips={"a": staged_a, "b": staged_b})
+        except Exception as e:
+            err = e
+        check(f"a new zip {label} is rejected, the zip in place is used and the other feed updates",
+              err is None and info["rejected"] == ["a"] and info["skipped"] == ["volan-local"]
+              and operator_trips(out) == {"a": 60, "b": 70}, repr((err, info)))
+    first = index_digest.digest(out)
+    bci.build_city_index(base, out, today=today, zips={"a": staged_a, "b": staged_b})
+    check("the rebuild with a rejected zip is deterministic", index_digest.digest(out) == first)
+
+    os.environ[bci.ALLOW_MISSING_ENV] = "all"
+    info = bci.build_city_index(base, out, today=today, zips={"a": staged_a, "b": staged_b})
+    check("HUNGARIAN_TRANSPORT_ALLOW_MISSING does not let a truncated zip replace a good one",
+          info["rejected"] == ["a"] and operator_trips(out) == {"a": 60, "b": 70}, repr(info))
+    os.environ.pop(bci.ALLOW_MISSING_ENV, None)
+
+    gtfs_zip(staged_a, city_feed(trips=58))
+    info = bci.build_city_index(base, out, today=today, zips={"a": staged_a})
+    check("a new zip the guard passes is used", info["rejected"] == [] and operator_trips(out)["a"] == 58, repr(info))
+
+    # The zip in place fails the guard as well (it ended too): the newer zip
+    # stays and the guard refuses, as before.
+    gtfs_zip(base / "a.zip", city_feed(trips=60, end="20261001"))
+    gtfs_zip(staged_a, city_feed(trips=10))
+    err = raises(lambda: bci.build_city_index(base, out, today=today, zips={"a": staged_a}))
+    check("when the zip in place fails too, the new zip is not rejected and the guard decides",
+          isinstance(err, IndexGuardError) and "a 10 trips vs 58" in str(err), repr(err))
 bci.CITY_FEEDS = real_feeds
 
 # ---- 1b. a feed whose calendar already ended is not an index ----------------
