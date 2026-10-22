@@ -75,23 +75,41 @@ Object.assign(BkkLib, {
       .filter(Boolean)
       .map((v) => ({ v, k: BkkLib._emmaVehicleKey(v) }));
   },
+  /* One EMMA vehicle is one train: it goes to one row only. Train-number
+     matches are paired first, so a row with the same name but no number
+     does not take the numbered row's train; among same-named rows the
+     first (soonest) one gets it. The position is enrichment's own, so it
+     is no longer the last poll's carried coach GPS (gpsCarried). */
   _applyEmmaKeyed(list, keyed) {
     if (!keyed.length) return list;
-    list.forEach((row) => {
-      if (!row) return;
-      const rk = BkkLib._emmaRowKey(row);
+    const entries = list.map((row) => (row ? { row, rk: BkkLib._emmaRowKey(row) } : null));
+    const usedVehicle = new Set();
+    const placed = new Set();
+    const assign = (byNumber) => entries.forEach((entry, ri) => {
+      if (!entry || placed.has(ri)) return;
       for (let i = 0; i < keyed.length; i++) {
+        if (usedVehicle.has(i)) continue;
+        const k = keyed[i].k;
+        const hit = byNumber
+          ? !!(entry.rk.num && k.n && entry.rk.num === k.n)
+          : BkkLib._emmaKeysMatch(entry.rk, k);
+        if (!hit) continue;
         const v = keyed[i].v;
-        if (!BkkLib._emmaKeysMatch(rk, keyed[i].k)) continue;
         const gps = BkkLib.mapGpsLatLon(v.lat, v.lon);
         if (!gps) continue;
+        const row = entry.row;
         row.lat = gps[0];
         row.lon = gps[1];
+        delete row.gpsCarried;
         if (v.heading != null) row.heading = v.heading;
         if (v.speed != null) row.speed = v.speed;
+        usedVehicle.add(i);
+        placed.add(ri);
         break;
       }
     });
+    assign(true);
+    assign(false);
     return list;
   },
   applyEmmaPositions(rows, vehicles) {
@@ -330,10 +348,14 @@ Object.assign(BkkLib, {
         row.tripId = String(v.tripId);
       }
       if (v.bikesAllowed === true || v.bikesallowed === true) row.bikesAllowed = true;
+      /* A carried coach position (gpsCarried) is only the last poll's: the
+         sensor's own position replaces it, and is not the coach lookup's
+         to drop when no coach matches. */
       const incoming = BkkLib.mapGpsLatLon(v.lat, v.lon);
-      if (!BkkLib.mapGpsLatLon(row.lat, row.lon) && incoming) {
+      if (incoming && (row.gpsCarried || !BkkLib.mapGpsLatLon(row.lat, row.lon))) {
         row.lat = incoming[0];
         row.lon = incoming[1];
+        delete row.gpsCarried;
       }
     });
     BkkLib._applyEmmaKeyed(rows, BkkLib._hassEmmaKeyed(hass, pool));
