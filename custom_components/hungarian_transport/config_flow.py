@@ -142,13 +142,18 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             typed = (user_input.get(CONF_API_KEY) or "").strip()
             if user_input.get(CONF_REMOVE_KEY):
+                # A new key and "remove" at once: saving either one would
+                # silently drop the other, so the form asks again.
                 api_key = ""
+                if typed:
+                    errors["base"] = "remove_and_new_key"
             else:
                 # An empty field keeps the stored key, saved again (a reload).
                 api_key = typed or current
-            if api_key and api_key == typed and (error := await _validate_key(self.hass, api_key)):
-                errors["base"] = error
-            else:
+            if not errors and api_key and api_key == typed:
+                if error := await _validate_key(self.hass, api_key):
+                    errors["base"] = error
+            if not errors:
                 if entry is not None and api_key == current:
                     # Saving the same key changes no option, so the update
                     # listener does not reload the entry: reload it here, or

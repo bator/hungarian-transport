@@ -98,7 +98,8 @@
     },
     "error": {
       "invalid_auth": "BKK FUTÁR rejected this key.",
-      "cannot_connect": "Could not reach BKK FUTÁR. Try again later."
+      "cannot_connect": "Could not reach BKK FUTÁR. Try again later.",
+      "remove_and_new_key": "Either type a new key or tick the box to remove the stored one, not both."
     }
   },
   "issues": {

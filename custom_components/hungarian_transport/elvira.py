@@ -17,6 +17,7 @@ import aiohttp
 import zoneinfo
 
 from .cache import SharedTTLCache
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,7 +30,6 @@ ELVIRA_HEADERS = {
     "Origin": "https://jegy.mav.hu",
     "Referer": "https://jegy.mav.hu/",
 }
-DOMAIN = "hungarian_transport"
 # MÁV timetables, service days and the naive times in StationInfo are Budapest
 # wall-clock time, whatever time zone Home Assistant itself runs in.
 MAV_TZ = zoneinfo.ZoneInfo("Europe/Budapest")

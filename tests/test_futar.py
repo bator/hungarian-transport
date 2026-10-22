@@ -1,6 +1,8 @@
 """The FUTÁR proxy service keeps the BKK key in Home Assistant."""
 
 import asyncio
+import re
+from pathlib import Path
 import logging
 
 import pytest
@@ -284,6 +286,61 @@ async def test_outage_is_logged_once_not_per_poll(hass, aioclient_mock, caplog) 
     caplog.clear()
     await _call(hass, params={"query": "D"})
     await _call(hass, params={"query": "E"})
+    assert [r.getMessage() for r in caplog.records if r.name.endswith(".futar")] == [
+        "BKK FUTÁR answers again"
+    ]
+
+
+async def test_worst_case_answers_before_the_card_gives_up(monkeypatch) -> None:
+    """A full token wait followed by an upstream call that times out must
+    answer inside the card's own timeout, or a cold start with an empty
+    bucket shows "BKK timeout" (an outage) instead of a refused call."""
+    card = (Path(__file__).parents[1] / "src" / "lib" / "futar.js").read_text(encoding="utf-8")
+    match = re.search(r"new Error\('BKK timeout'\)\)\s*,\s*(\d+)\s*\)", card)
+    assert match, "the card's FUTÁR timeout moved: update CARD_TIMEOUT_SEC"
+    assert int(match.group(1)) == futar.CARD_TIMEOUT_SEC * 1000
+
+    slept: list[float] = []
+
+    async def record_sleep(seconds):
+        slept.append(seconds)
+
+    # A stopped clock never refills: the call waits as long as it may.
+    monkeypatch.setattr(futar, "_monotonic", lambda: 5000.0)
+    monkeypatch.setattr(futar, "_sleep", record_sleep)
+    proxy = futar.FutarProxy(None, "secret-key")
+    proxy._tokens = 0.0
+    with pytest.raises(futar.FutarRateLimited):
+        await proxy._acquire()
+    worst = sum(slept) + futar.FUTAR_TIMEOUT.total
+    assert sum(slept) <= futar.FUTAR_TOKEN_WAIT_SEC
+    # Room for the websocket round trip and the event loop.
+    assert worst <= futar.CARD_TIMEOUT_SEC - 3
+    assert futar.FUTAR_TOKEN_WAIT_SEC + futar.FUTAR_TIMEOUT.total <= futar.CARD_TIMEOUT_SEC - 3
+
+
+async def test_cache_hit_does_not_end_an_outage(hass, aioclient_mock, caplog) -> None:
+    """Only an upstream answer clears the outage state: a cached board of
+    another request used to log "answers again" between two failures."""
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    await _setup(hass)
+    assert (await _call(hass, params={"query": "cached"}))["data"]["status"] == "OK"
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, status=503)
+    caplog.clear()
+    assert (await _call(hass, params={"query": "A"}))["error"] == "futar_unavailable"
+    # Served from the cache, FUTÁR not asked: still an outage.
+    assert (await _call(hass, params={"query": "cached"}))["data"]["status"] == "OK"
+    assert aioclient_mock.call_count == 1
+    assert (await _call(hass, params={"query": "B"}))["error"] == "futar_unavailable"
+    messages = [r.getMessage() for r in caplog.records if r.name.endswith(".futar")]
+    assert len(messages) == 1 and "unavailable" in messages[0]
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    caplog.clear()
+    await _call(hass, params={"query": "C"})
     assert [r.getMessage() for r in caplog.records if r.name.endswith(".futar")] == [
         "BKK FUTÁR answers again"
     ]
