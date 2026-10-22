@@ -7981,4 +7981,155 @@ check('a city stop number is not an ELVIRA station code',
   Object.assign(Lib, { _fetchIndexBytes: keep.bytes, _fetchJsonGz: keep.gz });
 }
 
+/* City feed → rail: the destination is a hub only by its own place when
+   both have one, and by name only in its own town's feed. Székesfehérvár's
+   "Vasútállomás" is not Szombathely's, and "Győr" is not Győr-Szabadhegy
+   2.2 km off: those journeys take the train, or there is none. */
+{
+  const keep = {};
+  ['cityIndex', 'searchStops', 'elviraBetween'].forEach((k) => { keep[k] = Lib[k]; });
+  const day = Lib.volanDay(0);
+  const m = day.mins;
+  const idx = {
+    c: [['1111111', '20000101', '20991231']],
+    ops: [
+      { i: 0, id: 'szekesfehervar', name: 'Székesfehérvár — helyi' },
+      { i: 1, id: 'szombathely', name: 'Szombathely — Blaguss' },
+      { i: 2, id: 'volan-gyor', name: 'Győr' },
+    ],
+    byNum: new Map(),
+    byKey: new Map(),
+    stops: [
+      ['szekesfehervar:B419', 'Agyag utca', 47.2, 18.43, 0],
+      ['szekesfehervar:2', 'Vasútállomás', 47.1838, 18.4245, 0],
+      ['szombathely:51150', 'Vasútállomás', 47.23702, 16.63181, 1],
+      ['volan-gyor:1', 'Győr (Gyirmót), Ménfői út', 47.64, 17.66, 2],
+      ['volan-gyor:2', 'Győr, Szabadhegy, vasútállomás', 47.6721, 17.6612, 2],
+    ].map(([id, name, lat, lon, op], i) => ({ i, op, id, name, key: Lib.norm(name), fold: Lib.fold(name), lat, lon })),
+    t: [[0, '38', [0, 1], [m + 10, m + 29]], [0, '37', [3, 4], [m + 10, m + 30]]],
+  };
+  Lib.cityIndex = async () => idx;
+  /* A bare "Vasútállomás" is answered with some town's station. */
+  Lib.searchStops = async (_k, q, mode) => {
+    if (mode !== 'mav') return [];
+    if (/szombathely/i.test(q)) return [{ id: 'BKK_005504034', name: 'Szombathely', lat: 47.2335, lon: 16.6297 }];
+    if (/győr/i.test(q)) {
+      return [
+        { id: 'BKK_005504200', name: 'Győr-Szabadhegy', lat: 47.6725, lon: 17.6605 },
+        { id: 'BKK_005504209', name: 'Győr', lat: 47.6815, lon: 17.6337 },
+      ];
+    }
+    return [{ id: 'BKK_005503269', name: 'Székesfehérvár', lat: 47.18361, lon: 18.42472 }];
+  };
+  let asked = [];
+  let trains = true;
+  Lib.elviraBetween = async (_hass, from, to) => {
+    asked.push({ from, to });
+    if (!trains) return [];
+    return [{ label: 'IC 900', dep: day.base + (m + 50) * 60, travel: 90, head: 'Terminus', destHit: true }];
+  };
+  const hass = { states: {} };
+  const legsOf = (j) => (j ? j.legs.map((l) => (l.walk ? 'walk' : l.label) + '>' + l.to) : null);
+  const agyag = { id: 'szekesfehervar:B419', name: 'Agyag utca' };
+  const szhely = { id: 'szombathely:51150', name: 'Vasútállomás', lat: 47.23702, lon: 16.63181 };
+  const last = (j) => j && j.legs[j.legs.length - 1];
+
+  const placed = await Lib.cityRailJourney('', hass, agyag, szhely);
+  check('another town’s "Vasútállomás" with coordinates is reached by train, not by the bus to this town’s',
+    !!placed && last(placed).label === 'IC 900' && last(placed).to === 'Szombathely'
+    && placed.legs.some((l) => l.label === '38' && l.to === 'Vasútállomás')
+    && asked.length === 1 && asked[0].from === 'BKK_005503269' && asked[0].to === '005504034',
+    JSON.stringify({ legs: legsOf(placed), asked }));
+  asked = [];
+  const named = await Lib.cityRailJourney('', hass, agyag, { id: szhely.id, name: szhely.name });
+  check('without coordinates another town’s "Vasútállomás" is not this town’s by name',
+    !!named && last(named).label === 'IC 900' && asked.length === 1 && asked[0].to === '005504034',
+    JSON.stringify({ legs: legsOf(named), asked }));
+  trains = false;
+  asked = [];
+  const noTrain = await Lib.cityRailJourney('', hass, agyag, szhely);
+  check('with no train to another town’s station there is no journey, not a bus ride to the wrong town',
+    noTrain === null && asked.length === 1, JSON.stringify({ legs: legsOf(noTrain), asked }));
+
+  const gyirmot = { id: 'volan-gyor:1', name: 'Győr (Gyirmót), Ménfői út' };
+  const gyor = { id: 'BKK_005504209', name: 'Győr', lat: 47.6807, lon: 17.634 };
+  asked = [];
+  const gyorNone = await Lib.cityRailJourney('', hass, gyirmot, gyor);
+  trains = true;
+  asked = [];
+  const gyorRail = await Lib.cityRailJourney('', hass, gyirmot, gyor);
+  check('"Győr" does not end at Győr-Szabadhegy 2.2 km off: the train takes it on, or there is no journey',
+    gyorNone === null && !!gyorRail && last(gyorRail).label === 'IC 900'
+    && asked.length === 1 && asked[0].from === 'BKK_005504200' && asked[0].to === '005504209',
+    JSON.stringify({ none: legsOf(gyorNone), rail: legsOf(gyorRail), asked }));
+  asked = [];
+  const atHub = await Lib.cityRailJourney('', hass, gyirmot,
+    { id: 'BKK_005504200', name: 'Győr-Szabadhegy', lat: 47.6725, lon: 17.6605 });
+  check('a hub by the destination’s own place is it: the bus ends there, no train',
+    !!atHub && last(atHub).label === '37' && last(atHub).to === 'Győr, Szabadhegy, vasútállomás' && asked.length === 0,
+    JSON.stringify({ legs: legsOf(atHub), asked }));
+  Object.assign(Lib, keep);
+}
+
+/* A replan from the journey map redraws the card's own journey box, and an
+   OSM way origin (way/…) is a place: no destinations are looked up for it. */
+{
+  const keep = {
+    planJourney: Lib.planJourney,
+    fillJourneyShapes: Lib.fillJourneyShapes,
+    journeyMapSegments: Lib.journeyMapSegments,
+    reachableDests: Lib.reachableDests,
+  };
+  const layer = () => ({ addTo() { return this; } });
+  const L = {
+    map: () => ({
+      setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {},
+    }),
+    tileLayer: () => layer(),
+    polyline: () => layer(),
+    marker: () => layer(),
+    divIcon: (o) => o,
+    latLngBounds: (pts) => ({ pts }),
+  };
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  pc._loadDests = async () => {};
+  pc._ensureLeaflet = async () => L;
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+  pc._rows = [];
+  const stale = { durationMin: 11, transfers: 0, walkMin: 0, waitMin: 0, legs: [{ walk: false, label: 'OLD7', color: '009EE3', minutes: 11, from: 'A', to: 'B' }] };
+  const fresh = { durationMin: 23, transfers: 0, walkMin: 0, waitMin: 0, legs: [{ walk: false, label: 'NEW9', color: '009EE3', minutes: 23, from: 'A', to: 'B', shape: [[47.5, 19.0], [47.52, 19.05]] }] };
+  pc._journey = stale;
+  pc._paint();
+  await settleTicks();
+  const box = () => (pc.shadowRoot.querySelector('.journey-plan') || {}).textContent || '';
+  const before = box();
+  let replans = 0;
+  Lib.planJourney = async () => { replans += 1; return fresh; };
+  Lib.fillJourneyShapes = async () => {};
+  Lib.journeyMapSegments = (j) => (j && j.legs.some((l) => l.shape)
+    ? [{ walk: false, color: '#009EE3', shape: j.legs[0].shape, from: 'A', to: 'B' }] : []);
+  await pc._openJourneyMap();
+  await settleTicks();
+  check('a replan from the journey map redraws the card’s journey box',
+    replans === 1 && pc._journey === fresh && /OLD7/.test(before) && /NEW9/.test(box()) && !/OLD7/.test(box()),
+    JSON.stringify({ replans, before, after: box() }));
+  pc._closeVehicleMap();
+
+  delete pc._loadDests;
+  let looked = 0;
+  Lib.reachableDests = async () => { looked += 1; return { dests: [{ key: 'x', name: 'X' }], destRoutes: {} }; };
+  pc._fillKey = async () => {};
+  pc._config = Object.assign({}, pc._config, { stopId: 'way/[123456]', stopName: 'Some square', stopKind: '' });
+  await pc._loadDests();
+  check('an OSM way origin is a place: its destinations are not looked up',
+    looked === 0 && pc._dests.length === 0, JSON.stringify({ looked, dests: pc._dests.length }));
+  pc._config = Object.assign({}, pc._config, { stopId: 'BKK_F00001', stopName: 'A' });
+  await pc._loadDests();
+  check('a stop origin still looks its destinations up', looked === 1 && pc._dests.length === 1, String(looked));
+  Object.assign(Lib, keep);
+  pc.remove();
+}
+
 process.exit(failed ? 1 : 0);
