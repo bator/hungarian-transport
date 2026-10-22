@@ -70,6 +70,13 @@ class IndexGuardError(RuntimeError):
     """A rebuilt index lost too much against the one it would replace."""
 
 
+class IncompleteDownload(OSError):
+    """A download that ended before its Content-Length, or whose zip has no
+    readable central directory: a connection cut short, not a bad feed.
+    CPython's http.client returns the bytes it got without IncompleteRead
+    when the server closes early, so the length is checked here."""
+
+
 def _env_value(raw: str) -> str:
     """The value of a .env line: a quoted value up to its closing quote, an
     unquoted one up to a ` #` comment. A `#` inside a word (a URL fragment)
@@ -851,8 +858,29 @@ def _open_csv(z, name: str) -> Iterator[dict[str, str]]:
     return _csv_rows(z, _member(z, name))
 
 
+def _check_zip_directory(path: Path, name: str) -> None:
+    """IncompleteDownload unless path has a zip central directory whose
+    members all lie inside the file. A zip cut short loses its central
+    directory (it is at the end) even without a Content-Length to compare;
+    reading the directory costs nothing next to the download, unlike a CRC
+    pass over the members."""
+    size = path.stat().st_size
+    try:
+        with zipfile.ZipFile(path) as z:
+            members = z.infolist()
+    except (zipfile.BadZipFile, OSError, EOFError) as err:
+        raise IncompleteDownload(f"{name}: no zip directory ({err})") from err
+    for info in members:
+        if info.header_offset + info.compress_size > size:
+            raise IncompleteDownload(f"{name}: {info.filename} runs past the end of the file")
+
+
 def download_zip(url: str, dest: Path, *, allow_insecure: bool = False) -> dict:
     """Write url to dest via a sibling tempfile so a kill cannot leave a truncated zip.
+
+    A body shorter than its Content-Length, or a zip without a readable
+    central directory, raises IncompleteDownload (a failed download, tried
+    again next run) instead of leaving a zip that fails to load.
 
     HTTPS only, redirects included, unless allow_insecure (a feed entry marked
     "insecure"; see download_feed)."""
@@ -885,8 +913,11 @@ def download_zip(url: str, dest: Path, *, allow_insecure: bool = False) -> dict:
                 if total > MAX_DOWNLOAD:
                     raise ValueError("download too large")
                 out.write(chunk)
+        if cl and cl.isdigit() and total != int(cl):
+            raise IncompleteDownload(f"{dest.name}: got {total} of {cl} bytes")
         if tmp.stat().st_size < 4 or not _zip_magic(tmp):
             raise zipfile.BadZipFile(f"{dest.name} is not a zip file")
+        _check_zip_directory(tmp, dest.name)
         tmp.replace(dest)
         return {"size": dest.stat().st_size, "content_length": str(dest.stat().st_size)}
     except Exception:

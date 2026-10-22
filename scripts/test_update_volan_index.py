@@ -20,13 +20,20 @@ import tempfile
 import threading
 import time
 import urllib.error
+import zipfile
 from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import build_city_index as bci  # noqa: E402
 import gtfs_compact  # noqa: E402
 import update_volan_index as uvi  # noqa: E402
+from gtfs_compact import operator_trips  # noqa: E402
 from update_volan_index import index_feed, index_schema, persist_index, restore_hacs_indexes  # noqa: E402
+
+# The real network and builder, before Fake.install() replaces them.
+REAL_DOWNLOAD_FEED = uvi.download_feed
+REAL_BUILD_CITY_INDEX = uvi.build_city_index
 
 failed = 0
 
@@ -166,6 +173,7 @@ class Fake:
         self.built: dict[str, bytes] = {}
         self.meta: dict[str, dict] = {}
         self.guard_missing = False
+        self.until = ""
 
     def paths(self):
         return self.base, self.www / "volan-index.json.gz", self.www / "city-index.json.gz", self.www / "mav-index.json.gz"
@@ -189,20 +197,25 @@ class Fake:
     def build_city_index(self, base: Path, out: Path, _volan: Path | None, *, zips=None) -> dict:
         """A zip (new or in place) starting with BROKEN fails to load, as
         build_city_index treats one: a new one is rejected for the zip in
-        place, a zip in place is skipped. self.built has the bytes used."""
+        place, a zip in place is skipped. A new zip starting with SMALL
+        loads but the guard refuses it: rejected for its content (refused,
+        until self.until). self.built has the bytes used."""
         self.city_builds += 1
         if self.city_fails is not None:
             raise self.city_fails
         info = dict(self.city_info)
-        info["rejected"], skipped, self.built = [], list(info.get("skipped") or []), {}
+        info["rejected"], info["refused"] = [], {}
+        skipped, self.built = list(info.get("skipped") or []), {}
         for feed in uvi.CITY_FEEDS:
             fid, old = feed["id"], base / feed["file"]
             new = (zips or {}).get(fid)
-            if new is not None and not new.read_bytes().startswith(b"BROKEN"):
+            if new is not None and not new.read_bytes().startswith((b"BROKEN", b"SMALL")):
                 self.built[fid] = new.read_bytes()
                 continue
             if new is not None:
                 info["rejected"].append(fid)
+                if new.read_bytes().startswith(b"SMALL"):
+                    info["refused"][fid] = {"why": f"{fid} 10 trips vs 60", "until": self.until}
             if old.exists() and not old.read_bytes().startswith(b"BROKEN"):
                 self.built[fid] = old.read_bytes()
             elif fid not in skipped:
@@ -210,8 +223,15 @@ class Fake:
         info["skipped"] = skipped
         if self.guard_missing and skipped:
             raise gtfs_compact.IndexGuardError(f"refusing to replace {out.name}: {skipped[0]} missing")
-        out.write_bytes(gzip.compress(b'{"v":29}'))
+        out.write_bytes(self.index_bytes(self.built))
         return info
+
+    @staticmethod
+    def index_bytes(built: dict[str, bytes]) -> bytes:
+        """The city index a build from these zips writes: the same bytes for
+        the same zips, as build_city_index does."""
+        body = {"v": 29, "zips": {fid: data.decode("latin-1") for fid, data in sorted(built.items())}}
+        return gzip.compress(json.dumps(body).encode(), mtime=0)
 
     def download_zip(self, url: str, dest: Path, **kw) -> dict:
         return self.download_feed(url, dest, **kw)
@@ -735,24 +755,26 @@ with tempfile.TemporaryDirectory() as tmp:
     pub = "https://public.example/a.zip"
     (fake.www / "volan-index.json.gz").write_bytes(gzip.compress(b'{"v":29}'))
     (fake.base / "volanbusz_gtfs.zip").write_bytes(b"PK volan-1")
-    (fake.www / "city-index.json.gz").write_bytes(gzip.compress(b'{"v":29}'))
     (fake.base / "a.zip").write_bytes(b"PK a good")
+    (fake.www / "city-index.json.gz").write_bytes(fake.index_bytes({"a": b"PK a good"}))
     (fake.base / "state.json").write_text(json.dumps({
         "volan": {"etag": "volan-1"},
         "cities": {"a": {"etag": "a-1", "sha256": "good"}},
     }))
     fake.etag[pub] = "a-2"
-    fake.body[pub] = b"BROKEN a-2"
+    fake.body[pub] = b"SMALL a-2"
     sent: list[str] = []
     uvi.notify = lambda message, *_a, **_k: sent.append(message)
     code = fake.run()
-    check("a broken new city zip does not replace the working one",
+    check("a new city zip the guard refuses does not replace the working one",
           code == 0 and (fake.base / "a.zip").read_bytes() == b"PK a good" and fake.built.get("a") == b"PK a good"
           and not list(fake.base.glob("*.tmp")), repr((code, sent, sorted(p.name for p in fake.base.iterdir()))))
     check("a rejected zip is not announced as a new timetable, nor recorded as the zip in use",
           sent == [] and fake.state()["cities"]["a"].get("etag") == "a-1"
           and fake.state()["cities"]["a"].get("sha256") == "good"
-          and fake.state()["cities"]["a"].get("rejected", {}).get("etag") == "a-2",
+          and fake.state()["cities"]["a"].get("rejected", {}).get("etag") == "a-2"
+          and fake.state()["cities"]["a"]["rejected"].get("why") == "a 10 trips vs 60"
+          and fake.state()["cities"]["a"]["rejected"].get("checked") == date.today().isoformat(),
           repr((sent, fake.state()["cities"])))
     check("a rejected zip counts as a failing feed",
           fake.state()["failing"].get("a", {}).get("runs") == 1, repr(fake.state().get("failing")))
@@ -777,6 +799,17 @@ with tempfile.TemporaryDirectory() as tmp:
           code == 0 and fake.downloads == [pub, pub] and fake.city_builds == builds and sent == []
           and not list(fake.base.glob("*.tmp")), repr((code, fake.downloads, sent)))
     del fake.meta[pub]
+    # REJECT_RECHECK_DAYS after the build that rejected it, the zip is built
+    # again: the guard may judge it otherwise by now. Still refused, the
+    # failing streak goes on and the check date moves.
+    uvi._today = lambda: date.today() + timedelta(days=uvi.REJECT_RECHECK_DAYS)
+    code = fake.run()
+    check("a rejected zip is downloaded and built again after REJECT_RECHECK_DAYS",
+          code == 0 and fake.downloads == [pub, pub, pub] and fake.city_builds == builds + 1 and sent == []
+          and fake.state()["cities"]["a"]["rejected"].get("checked")
+          == (date.today() + timedelta(days=uvi.REJECT_RECHECK_DAYS)).isoformat()
+          and fake.state()["failing"]["a"]["runs"] == 5 and (fake.base / "a.zip").read_bytes() == b"PK a good",
+          repr((code, fake.downloads, fake.city_builds - builds, sent, fake.state())))
     uvi._today = date.today
     fake.body[pub] = b"PK a fixed"
     fake.etag[pub] = "a-3"
@@ -793,6 +826,268 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a failed city build keeps the zip in place and leaves no new one behind",
           code == uvi.REPORTED and (fake.base / "a.zip").read_bytes() == b"PK a fixed"
           and not list(fake.base.glob("*.tmp")), repr((code, sorted(p.name for p in fake.base.iterdir()))))
+
+# A new zip that fails to load (a download cut short gets here when no
+# Content-Length gave it away) keeps no fingerprint: it is downloaded and
+# built again every run, and counts as failing. An entry the scripts before
+# it left (rejected without a reason) no longer stops a download either.
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    pub = "https://public.example/a.zip"
+    (fake.www / "volan-index.json.gz").write_bytes(gzip.compress(b'{"v":29}'))
+    (fake.base / "volanbusz_gtfs.zip").write_bytes(b"PK volan-1")
+    (fake.base / "a.zip").write_bytes(b"PK a good")
+    (fake.www / "city-index.json.gz").write_bytes(fake.index_bytes({"a": b"PK a good"}))
+    (fake.base / "state.json").write_text(json.dumps({
+        "volan": {"etag": "volan-1"},
+        "cities": {"a": {"etag": "a-1", "sha256": "good", "rejected": {"etag": "a-2"}}},
+    }))
+    fake.etag[pub] = "a-2"
+    fake.body[pub] = b"BROKEN a-2"
+    sent = []
+    uvi.notify = lambda message, *_a, **_k: sent.append(message)
+    code = fake.run()
+    check("a rejected fingerprint without a reason does not stop the download",
+          code == 0 and fake.downloads == [pub] and fake.city_builds == 1, repr((code, fake.downloads)))
+    check("a new zip that does not load keeps no rejected fingerprint",
+          "rejected" not in fake.state()["cities"]["a"] and fake.state()["cities"]["a"].get("etag") == "a-1"
+          and (fake.base / "a.zip").read_bytes() == b"PK a good" and sent == [],
+          repr((sent, fake.state()["cities"])))
+    for day in (1, 2):
+        uvi._today = lambda day=day: date.today() + timedelta(days=day)
+        fake.run()
+    check("a new zip that does not load is downloaded and built again each run",
+          fake.downloads == [pub] * 3 and fake.city_builds == 3, repr((fake.downloads, fake.city_builds)))
+    check("and is reported on the third day as a zip that does not load",
+          len(sent) == 1 and "a since" in sent[0] and "does not load" in sent[0]
+          and fake.state()["failing"]["a"]["runs"] == 3, repr((sent, fake.state().get("failing"))))
+    fake.body[pub] = b"PK a-2 whole"
+    uvi._today = lambda: date.today() + timedelta(days=3)
+    code = fake.run()
+    check("once it loads it is taken and the failure count is cleared",
+          code == 0 and (fake.base / "a.zip").read_bytes() == b"PK a-2 whole"
+          and fake.state()["cities"]["a"].get("etag") == "a-2" and "a" not in fake.state()["failing"],
+          repr((code, fake.state())))
+    uvi._today = date.today
+
+# A zip rejected while the one in place still runs is not kept out past
+# that one's last service day ("until"): then it is downloaded and built
+# again, and the guard decides anew.
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    pub = "https://public.example/a.zip"
+    (fake.www / "volan-index.json.gz").write_bytes(gzip.compress(b'{"v":29}'))
+    (fake.base / "volanbusz_gtfs.zip").write_bytes(b"PK volan-1")
+    (fake.base / "a.zip").write_bytes(b"PK a good")
+    (fake.www / "city-index.json.gz").write_bytes(fake.index_bytes({"a": b"PK a good"}))
+    (fake.base / "state.json").write_text(json.dumps({
+        "volan": {"etag": "volan-1"},
+        "cities": {"a": {"etag": "a-1", "sha256": "good"}},
+    }))
+    fake.etag[pub] = "a-2"
+    fake.body[pub] = b"SMALL a-2"
+    fake.until = (date.today() + timedelta(days=1)).strftime("%Y%m%d")
+    fake.run()
+    check("the rejection keeps the last day of the zip in place",
+          fake.state()["cities"]["a"]["rejected"].get("until") == (date.today() + timedelta(days=1)).isoformat(),
+          repr(fake.state()["cities"]))
+    uvi._today = lambda: date.today() + timedelta(days=1)
+    fake.run()
+    check("up to that day the rejected zip is not downloaded again", fake.downloads == [pub], repr(fake.downloads))
+    fake.body[pub] = b"PK a-2 (the same timetable, now acceptable)"
+    uvi._today = lambda: date.today() + timedelta(days=2)
+    code = fake.run()
+    check("the day after, it is downloaded, built and taken",
+          code == 0 and fake.downloads == [pub, pub] and fake.state()["cities"]["a"].get("etag") == "a-2"
+          and "rejected" not in fake.state()["cities"]["a"], repr((code, fake.downloads, fake.state()["cities"])))
+    uvi._today = date.today
+
+# A schema conflict (no download) leaves a feed's failing streak alone: it
+# says nothing about whether the feed downloads.
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    (fake.www / "volan-index.json.gz").write_bytes(gzip.compress(b'{"v":%d}' % gtfs_compact.INDEX_SCHEMA))
+    (fake.base / "volanbusz_gtfs.zip").write_bytes(b"PK volan-1")
+    (fake.www / "city-index.json.gz").write_bytes(gzip.compress(b'{"v":%d}' % (gtfs_compact.INDEX_SCHEMA + 1)))
+    (fake.base / "a.zip").write_bytes(b"PK old")
+    streak = {"since": (date.today() - timedelta(days=1)).isoformat(), "runs": 2, "error": "HTTP 404"}
+    (fake.base / "state.json").write_text(json.dumps({
+        "volan": {"etag": "volan-1"}, "cities": {"a": {"etag": "a-1"}}, "failing": {"a": dict(streak)},
+    }))
+    fake.run()
+    check("a moved feed not downloaded for a schema conflict keeps its failing streak",
+          fake.downloads == [] and fake.state()["failing"].get("a") == streak, repr((fake.downloads, fake.state())))
+
+
+def gtfs_zip(path: Path, trips: int, end: str = "20271231", route: str = "12") -> Path:
+    """A one-route city feed with trips trips, running until end."""
+    stop_times = ["trip_id,arrival_time,departure_time,stop_id,stop_sequence"]
+    trip_rows = ["route_id,service_id,trip_id"]
+    for i in range(trips):
+        trip_rows.append(f"R1,S1,T{i}")
+        stop_times += [f"T{i},08:{i % 60:02d}:00,08:{i % 60:02d}:00,1,1", f"T{i},09:{i % 60:02d}:00,09:{i % 60:02d}:00,2,2"]
+    files = {
+        "agency.txt": "agency_id,agency_name\nA,Local\n",
+        "stops.txt": "stop_id,stop_name\n1,Alpha\n2,Beta\n",
+        "routes.txt": f"route_id,route_short_name,agency_id\nR1,{route},A\n",
+        "trips.txt": "\n".join(trip_rows) + "\n",
+        "calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+        f"S1,1,1,1,1,1,1,1,20260101,{end}\n",
+        "stop_times.txt": "\n".join(stop_times) + "\n",
+    }
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, body in files.items():
+            z.writestr(name, body)
+    return path
+
+
+class RealCity(Fake):
+    """Fake network, but the real build_city_index on real zips, on day self.day."""
+
+    FEEDS = [{"id": "a", "name": "A", "url": "https://a.example/a.zip", "file": "a.zip"},
+             {"id": "b", "name": "B", "url": "https://b.example/b.zip", "file": "b.zip"}]
+
+    def __init__(self, root: Path) -> None:
+        super().__init__(root)
+        self.day = date(2026, 10, 22)
+        self.etag.update({f["url"]: f"{f['id']}-1" for f in self.FEEDS})
+        self.sent: list[str] = []
+
+    def install(self) -> None:
+        super().install()
+        uvi.CITY_FEEDS = bci.CITY_FEEDS = self.FEEDS
+        uvi._today = lambda: self.day
+        uvi.notify = lambda message, *_a, **_k: self.sent.append(message)
+        today = lambda: self.day.strftime("%Y%m%d")  # noqa: E731
+        uvi.build_city_index = lambda b, o, _v, *, zips=None: REAL_BUILD_CITY_INDEX(b, o, None, today=today(), zips=zips)
+
+    def start(self, a: Path, b: Path) -> None:
+        """The index in place, built from a and b on self.day."""
+        shutil.copy(a, self.base / "a.zip")
+        shutil.copy(b, self.base / "b.zip")
+        REAL_BUILD_CITY_INDEX(self.base, self.www / "city-index.json.gz", None, today=self.day.strftime("%Y%m%d"))
+        (self.www / "volan-index.json.gz").write_bytes(gzip.compress(b'{"v":29}'))
+        (self.base / "volanbusz_gtfs.zip").write_bytes(b"PK volan-1")
+        (self.base / "state.json").write_text(json.dumps({
+            "volan": {"etag": "volan-1"},
+            "cities": {f["id"]: {"etag": f"{f['id']}-1", "sha256": uvi.file_sha256(self.base / f["file"])}
+                       for f in self.FEEDS},
+        }))
+
+    def trips(self) -> dict[str, int] | None:
+        return operator_trips(self.www / "city-index.json.gz")
+
+
+real_city_feeds = bci.CITY_FEEDS
+# The reviewers' case: a smaller winter timetable is refused while the
+# summer one runs; the summer one ends, and the feed must come back with
+# the winter zip the publisher still serves, not drop out for good.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    city = RealCity(root)
+    city.install()
+    city.start(gtfs_zip(root / "a-summer.zip", 60, end="20261031"), gtfs_zip(root / "b.zip", 60, route="7"))
+    pub = "https://a.example/a.zip"
+    city.etag[pub] = "a-2"
+    city.body[pub] = gtfs_zip(root / "a-winter.zip", 20).read_bytes()
+    city.run()
+    rejected = city.state()["cities"]["a"].get("rejected", {})
+    check("real build: the smaller timetable is refused while the summer one runs, until its last day",
+          city.trips() == {"a": 60, "b": 60} and rejected.get("until") == "2026-10-31" and rejected.get("why")
+          and city.sent == [], repr((city.trips(), city.state()["cities"]["a"], city.sent)))
+    city.day = date(2026, 10, 25)
+    city.run()
+    check("real build: not downloaded again while the summer timetable runs", city.downloads == [pub],
+          repr(city.downloads))
+    city.day = date(2026, 11, 1)
+    city.run()
+    check("real build: the day the summer timetable ended, the winter zip is downloaded again and taken",
+          city.downloads == [pub, pub] and city.trips() == {"a": 20, "b": 60}
+          and "rejected" not in city.state()["cities"]["a"] and "a" not in city.state()["failing"],
+          repr((city.downloads, city.trips(), city.state())))
+
+# A rebuild for a new zip that is rejected is quiet only when the index
+# stayed as it was: another feed whose calendar ended in it leaves the
+# index, and that is news.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    city = RealCity(root)
+    city.install()
+    city.start(gtfs_zip(root / "a.zip", 60), gtfs_zip(root / "b-summer.zip", 60, end="20261031", route="7"))
+    pub = "https://a.example/a.zip"
+    city.etag[pub] = "a-2"
+    city.body[pub] = gtfs_zip(root / "a-small.zip", 20).read_bytes()
+    code = city.run()
+    check("real build: a rejected zip that changes nothing sends nothing",
+          code == 0 and city.sent == [] and city.trips() == {"a": 60, "b": 60}, repr((code, city.sent)))
+    city.day = date(2026, 11, 2)
+    city.etag[pub] = "a-3"
+    city.body[pub] = gtfs_zip(root / "a-smaller.zip", 19).read_bytes()
+    code = city.run()
+    check("real build: a rejected zip whose rebuild lost an ended feed is announced",
+          code == 0 and city.trips() == {"a": 60}
+          and [m for m in city.sent if m.startswith("Új menetrend") and "calendar ended: b 2026-10-31" in m],
+          repr((code, city.trips(), city.sent)))
+
+# A connection cut mid-download (Content-Length says more) is a download
+# that failed: no fingerprint is kept, the next run downloads the zip again
+# and takes it.
+with tempfile.TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    city = RealCity(root)
+    city.install()
+    city.start(gtfs_zip(root / "a.zip", 60), gtfs_zip(root / "b.zip", 60, route="7"))
+    new_body = gtfs_zip(root / "a-new.zip", 62).read_bytes()
+    gets: list[int] = []
+
+    class Cut(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 (http.server API)
+            gets.append(1)
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(new_body)))
+            self.end_headers()
+            self.wfile.write(new_body if len(gets) > 1 else new_body[: len(new_body) // 2])
+            self.wfile.flush()
+            self.close_connection = True
+
+        def log_message(self, *_a):
+            pass
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), Cut)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/a.zip"
+    city.FEEDS = [{**city.FEEDS[0], "url": url, "insecure": True}, city.FEEDS[1]]
+    uvi.CITY_FEEDS = bci.CITY_FEEDS = city.FEEDS
+    city.etag[url] = "a-2"
+    uvi.download_feed = REAL_DOWNLOAD_FEED
+    real_blocked, real_assert = gtfs_compact._blocked_ip, gtfs_compact.assert_public_http_url
+    # Loopback stands in for the publisher (https is tried first and fails).
+    gtfs_compact._blocked_ip = lambda ip: False
+    gtfs_compact.assert_public_http_url = lambda _u: None
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = city.run()
+        check("real download cut short: a failed download, no rejected fingerprint, the zip in place stays",
+              code == 0 and len(gets) == 1 and "rejected" not in city.state()["cities"]["a"]
+              and city.state()["failing"]["a"]["error"] == "IncompleteDownload"
+              and city.trips() == {"a": 60, "b": 60} and not list(city.base.glob("*.tmp")),
+              repr((code, len(gets), city.state(), city.trips())))
+        city.day = date(2026, 10, 23)
+        with contextlib.redirect_stderr(io.StringIO()):
+            code = city.run()
+        check("real download cut short: the next run downloads the zip again and takes it",
+              code == 0 and len(gets) == 2 and (city.base / "a.zip").read_bytes() == new_body
+              and city.trips() == {"a": 62, "b": 60} and "a" not in city.state()["failing"],
+              repr((code, len(gets), city.trips(), city.state())))
+    finally:
+        gtfs_compact._blocked_ip, gtfs_compact.assert_public_http_url = real_blocked, real_assert
+        srv.shutdown()
+        srv.server_close()
+bci.CITY_FEEDS = real_city_feeds
+uvi._today = date.today
 
 with tempfile.TemporaryDirectory() as tmp:
     env_file = Path(tmp) / ".env"

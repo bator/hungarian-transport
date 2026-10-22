@@ -182,6 +182,14 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a new zip that fails to load is rejected, the zip in place is used",
           err is None and info["rejected"] == ["b"] and "b" not in info["skipped"]
           and set(operator_trips(out)) == {"a", "b"}, repr((err, info)))
+    # A zip that does not load may be a download gone wrong: not a content
+    # rejection, so the updater keeps no fingerprint and fetches it again.
+    check("a new zip that fails to load is not rejected for its content", info["refused"] == {}, repr(info))
+    gtfs_zip(staged, city_feed("7", trips=0))
+    info = bci.build_city_index(base, out, zips={"b": staged})
+    check("a new zip without trips is rejected for its content, the zip in place is used",
+          info["rejected"] == ["b"] and info["refused"] == {"b": {"why": "no trips", "until": ""}}
+          and set(operator_trips(out)) == {"a", "b"}, repr(info))
     shutil.copy(fixtures / "b.zip", staged)
     info = bci.build_city_index(base, out, zips={"b": staged})
     check("a new zip that loads is used", info["rejected"] == [] and set(operator_trips(out)) == {"a", "b"}, repr(info))
@@ -211,7 +219,7 @@ bci.CITY_FEEDS = real_feeds
 # A new zip that loads but that the guard would refuse (its calendar already
 # ended, most of its trips gone) is rejected for the zip in place, which
 # passes; the other feeds' updates go through. HUNGARIAN_TRANSPORT_ALLOW_MISSING
-# does not let it replace the good zip either.
+# naming the feed lets it replace the zip in place: the reduction is meant.
 with tempfile.TemporaryDirectory() as tmp:
     base = Path(tmp)
     bci.CITY_FEEDS = [
@@ -236,15 +244,53 @@ with tempfile.TemporaryDirectory() as tmp:
         check(f"a new zip {label} is rejected, the zip in place is used and the other feed updates",
               err is None and info["rejected"] == ["a"] and info["skipped"] == ["volan-local"]
               and operator_trips(out) == {"a": 60, "b": 70}, repr((err, info)))
+        # The reason goes with it, and the last day of the zip kept: once
+        # that one ends, the updater offers the new zip to the guard again.
+        check(f"a new zip {label} is rejected for its content, until the zip in place ends",
+              set(info.get("refused") or {}) == {"a"} and info["refused"]["a"]["until"] == "20271231"
+              and ("calendar ended" in info["refused"]["a"]["why"] or "10 trips vs 60" in info["refused"]["a"]["why"]),
+              repr(info.get("refused")))
     first = index_digest.digest(out)
+    first_bytes = out.read_bytes()
     bci.build_city_index(base, out, today=today, zips={"a": staged_a, "b": staged_b})
-    check("the rebuild with a rejected zip is deterministic", index_digest.digest(out) == first)
+    check("the rebuild with a rejected zip is deterministic",
+          index_digest.digest(out) == first and out.read_bytes() == first_bytes)
 
-    os.environ[bci.ALLOW_MISSING_ENV] = "all"
+    # _previous() reads the whole previous index (about a second on the
+    # release one): once per build, for the per-feed and the index guard.
+    reads: list[str] = []
+    real_previous = bci._previous
+
+    def counted_previous(*args, **kwargs):
+        reads.append("previous")
+        return real_previous(*args, **kwargs)
+
+    bci._previous = counted_previous
+    try:
+        bci.build_city_index(base, out, today=today, zips={"a": staged_a, "b": staged_b})
+    finally:
+        bci._previous = real_previous
+    check("a build reads the previous index once", reads == ["previous"], repr(reads))
+
+    os.environ[bci.ALLOW_MISSING_ENV] = "b"
     info = bci.build_city_index(base, out, today=today, zips={"a": staged_a, "b": staged_b})
-    check("HUNGARIAN_TRANSPORT_ALLOW_MISSING does not let a truncated zip replace a good one",
+    check("HUNGARIAN_TRANSPORT_ALLOW_MISSING naming another feed does not let the zip in",
           info["rejected"] == ["a"] and operator_trips(out) == {"a": 60, "b": 70}, repr(info))
-    os.environ.pop(bci.ALLOW_MISSING_ENV, None)
+    for allow in ("a", "all"):
+        os.environ[bci.ALLOW_MISSING_ENV] = allow
+        bci.build_city_index(base, out, today=today)
+        err, info = None, {}
+        try:
+            info = bci.build_city_index(base, out, today=today, zips={"a": staged_a, "b": staged_b})
+        except Exception as e:
+            err = e
+        check(f"HUNGARIAN_TRANSPORT_ALLOW_MISSING={allow} lets an intended reduction replace the zip in place",
+              err is None and info["rejected"] == [] and info["refused"] == {}
+              and operator_trips(out) == {"a": 10, "b": 70}, repr((err, info)))
+        os.environ.pop(bci.ALLOW_MISSING_ENV, None)
+        info = bci.build_city_index(base, out, today=today)
+        check(f"(ALLOW_MISSING={allow}) the zip in place is back for the next check",
+              operator_trips(out) == {"a": 60, "b": 60}, repr(operator_trips(out)))
 
     gtfs_zip(staged_a, city_feed(trips=58))
     info = bci.build_city_index(base, out, today=today, zips={"a": staged_a})
@@ -257,6 +303,28 @@ with tempfile.TemporaryDirectory() as tmp:
     err = raises(lambda: bci.build_city_index(base, out, today=today, zips={"a": staged_a}))
     check("when the zip in place fails too, the new zip is not rejected and the guard decides",
           isinstance(err, IndexGuardError) and "a 10 trips vs 58" in str(err), repr(err))
+bci.CITY_FEEDS = real_feeds
+
+# A smaller new timetable rejected while the one in place still runs is
+# taken once that one ended: its rejection names that day.
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp)
+    bci.CITY_FEEDS = [
+        {"id": "a", "name": "A", "url": "https://a.example/a.zip", "file": "a.zip"},
+        {"id": "b", "name": "B", "url": "https://b.example/b.zip", "file": "b.zip"},
+    ]
+    gtfs_zip(base / "a.zip", city_feed(trips=60, end="20261031"))
+    gtfs_zip(base / "b.zip", city_feed("7", trips=60))
+    out = base / "city-index.json.gz"
+    bci.build_city_index(base, out, today="20261022")
+    staged_a = gtfs_zip(base / "a.zip.tmp", city_feed(trips=20))
+    info = bci.build_city_index(base, out, today="20261022", zips={"a": staged_a})
+    check("a smaller timetable is rejected while the one in place runs, until its last day",
+          info["refused"].get("a", {}).get("until") == "20261031" and operator_trips(out) == {"a": 60, "b": 60},
+          repr(info))
+    info = bci.build_city_index(base, out, today="20261101", zips={"a": staged_a})
+    check("the day after, the same zip is taken", info["rejected"] == [] and operator_trips(out) == {"a": 20, "b": 60},
+          repr(info))
 bci.CITY_FEEDS = real_feeds
 
 # ---- 1b. a feed whose calendar already ended is not an index ----------------
