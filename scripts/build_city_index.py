@@ -8,6 +8,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
+from build_volan_index import download_volan
 from gtfs_compact import (
     PLATFORM_SPLIT_M,
     IndexGuardError,
@@ -25,7 +26,6 @@ from gtfs_compact import (
     write_index,
 )
 
-VOLAN_URL = "https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip"
 OUT = Path("city-index.json.gz")
 # A feed that the previous index had must not vanish or shrink below this
 # share of its trips; the previous index stays in place instead.
@@ -542,8 +542,7 @@ def main() -> None:
     base = Path(".")
     volan = Path("volanbusz_gtfs.zip")
     if not volan.exists():
-        print("downloading", VOLAN_URL)
-        download_feed(VOLAN_URL, volan)
+        download_volan(volan)
     info = build_city_index(base, OUT, volan)
     print("wrote", OUT, info)
 

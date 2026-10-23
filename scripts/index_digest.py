@@ -8,6 +8,12 @@ PYTHONHASHSEED), and the shapes folder is named after that order. The digest
 resolves every reference (a trip's stops, service and shape, a stop's
 operator) and sorts what is left, so it changes only with the timetable.
 
+The MÁV index (mav-index.json.gz: "st" stations, "p" polylines, "n" trains
+and "l" lines, each a list of variants) is resolved the same way: every
+variant becomes its polyline and its stations, in the index's own variant
+order (the card takes the first variant that serves both stations). Its
+gzip header carries the build time, so the file bytes differ every build.
+
 Usage: index_digest.py INDEX.json.gz...  prints "<digest>  <path>" per index.
 The shapes folder an index names ("sh") is read from next to the index; an
 index whose shapes cannot be read fails (exit 1), so the caller treats it as
@@ -35,9 +41,26 @@ def _shapes(index: Path, sh: dict | None) -> dict[int, str]:
     return out
 
 
+def canonical_mav(idx: dict) -> dict:
+    stations = idx.get("st") or []
+    polylines = idx.get("p") or []
+
+    def variants(rows: list) -> list:
+        return [[polylines[v[0]], [stations[i] for i in v[1]], *v[2:]] for v in rows]
+
+    return {
+        "v": idx.get("v"),
+        "feed": idx.get("feed"),
+        "n": {k: variants(v) for k, v in sorted((idx.get("n") or {}).items())},
+        "l": {k: variants(v) for k, v in sorted((idx.get("l") or {}).items())},
+    }
+
+
 def canonical(index: Path) -> dict:
     with gzip.open(index, "rt", encoding="utf-8") as fh:
         idx = json.load(fh)
+    if "st" in idx and "t" not in idx:
+        return canonical_mav(idx)
     shapes = _shapes(index, idx.get("sh"))
     ops = [list(o) for o in idx.get("o") or []]
     coords = idx.get("g") or []

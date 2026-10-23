@@ -128,7 +128,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
     from build_city_index import CITY_FEEDS, build_city_index, ymd  # noqa: E402
     from build_mav_index import build_mav_index, resolve_mav_feed  # noqa: E402
-    from build_volan_index import GTFS_URL, build_index  # noqa: E402
+    from build_volan_index import FALLBACK_URL as VOLAN_FALLBACK_URL  # noqa: E402
+    from build_volan_index import GTFS_URL, build_index, volan_urls  # noqa: E402
     from gtfs_compact import (  # noqa: E402
         INDEX_SCHEMA,
         _urlopen,
@@ -682,11 +683,24 @@ def _main() -> int:
         # A Volán failure is reported and the run goes on: the city feeds and
         # the local MÁV index do not depend on it.
         volan_built = False
-        try:
-            volan_meta: dict | None = remote_meta(GTFS_URL)
-        except Exception as err:
-            volan_meta = None
-            report("Volán GTFS frissítés sikertelen", f"error HEAD {GTFS_URL}: {err}")
+        # The first URL whose HEAD answers is the one checked; a download
+        # that fails there tries the others (the same zip, see
+        # build_volan_index).
+        urls = volan_urls(GTFS_URL, VOLAN_FALLBACK_URL)
+        volan_url = ""
+        volan_meta: dict | None = None
+        head_errors: list[str] = []
+        for url in urls:
+            try:
+                volan_meta = remote_meta(url)
+            except Exception as err:
+                head_errors.append(f"{url}: {err}")
+                print(redact(f"warn HEAD {url}: {error_name(err)}"), file=sys.stderr)
+                continue
+            volan_url = url
+            break
+        if volan_meta is None:
+            report("Volán GTFS frissítés sikertelen", "error HEAD " + "; ".join(head_errors))
             exit_code = REPORTED
 
         if volan_meta is not None and not (
@@ -700,7 +714,22 @@ def _main() -> int:
             same_remote(volan_state, volan_meta) and volan_out.exists() and zip_path.exists()
         ):
             try:
-                downloaded = download_zip(GTFS_URL, new_zip)
+                downloaded = None
+                last_err: Exception | None = None
+                for url in [volan_url] + [u for u in urls if u != volan_url]:
+                    try:
+                        downloaded = download_zip(url, new_zip)
+                    except Exception as err:
+                        last_err = err
+                        print(redact(f"warn Volán download {url}: {error_name(err)}"), file=sys.stderr)
+                        continue
+                    if url != volan_url:
+                        # Not the zip the HEAD fingerprint describes: the
+                        # next run checks again.
+                        volan_meta = {}
+                    break
+                if downloaded is None:
+                    raise last_err or RuntimeError("no Volán GTFS URL")
                 digest = file_sha256(new_zip)
                 info = None
                 if digest != volan_state.get("sha256") or not volan_out.exists():

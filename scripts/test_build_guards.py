@@ -686,6 +686,219 @@ with tempfile.TemporaryDirectory() as tmp:
           stats["audit"]["ok_ratio"] >= bmi.MIN_OK and json.loads(gzip.decompress(out.read_bytes()))["feed"] == "test",
           repr(stats.get("audit")))
 
+    # The weekly release compares MÁV indexes by content (index_digest).
+    first = index_digest.digest(out)
+    time.sleep(1.1)  # gzip stamps the build time into the file
+    again = Path(tmp) / "again.json.gz"
+    bmi.build_mav_index(feed, again)
+    check("a MÁV rebuild of the same feed has the same digest",
+          index_digest.digest(again) == first, f"{index_digest.digest(again)} {first}")
+    idx = json.loads(gzip.decompress(out.read_bytes()))
+    # The same content with the station and polyline tables in another order.
+    order = list(range(len(idx["st"])))[::-1]
+    pos = {old: new for new, old in enumerate(order)}
+    shuffled = dict(idx, st=[idx["st"][i] for i in order],
+                    n={k: [[v[0], [pos[i] for i in v[1]]] for v in vs] for k, vs in idx["n"].items()})
+    (Path(tmp) / "shuffled.json.gz").write_bytes(gzip.compress(json.dumps(shuffled).encode(), mtime=0))
+    check("the MÁV digest ignores table order", index_digest.digest(Path(tmp) / "shuffled.json.gz") == first)
+    moved = dict(idx, st=[[n, la + 1, lo] for n, la, lo in idx["st"]])
+    (Path(tmp) / "moved.json.gz").write_bytes(gzip.compress(json.dumps(moved).encode(), mtime=0))
+    check("a moved MÁV station changes the digest", index_digest.digest(Path(tmp) / "moved.json.gz") != first)
+    swapped = dict(idx, n={k: vs[::-1] for k, vs in idx["n"].items()})
+    swapped["n"]["800"] = [idx["n"]["800"][0], idx["n"]["801"][0]]
+    (Path(tmp) / "swapped.json.gz").write_bytes(gzip.compress(json.dumps(swapped).encode(), mtime=0))
+    check("a changed MÁV variant list changes the digest", index_digest.digest(Path(tmp) / "swapped.json.gz") != first)
+
+# ---- 5b. MÁV credentials: HTTP Basic to the feed's host only --------------
+
+import base64  # noqa: E402
+import http.client  # noqa: E402
+import socket  # noqa: E402
+import urllib.error  # noqa: E402
+import urllib.parse  # noqa: E402
+import urllib.request  # noqa: E402
+import urllib.response  # noqa: E402
+
+import build_volan_index as bvi  # noqa: E402
+import update_volan_index as uvi  # noqa: E402
+
+# Not a developer's .env: the tests set what they use.
+gc._ENV_LOADED = True
+for key in ("MAV_GTFS_USER", "MAV_GTFS_PASSWORD", "MAV_GTFS_URL", "VOLAN_GTFS_URL"):
+    os.environ.pop(key, None)
+USER, PASSWORD = "rail-user", "pa ss:wörd\"1"
+EXPECTED_AUTH = "Basic " + base64.b64encode(f"{USER}:{PASSWORD}".encode()).decode()
+
+tiny = io.BytesIO()
+with zipfile.ZipFile(tiny, "w") as z:
+    z.writestr("agency.txt", "agency_id\n")
+TINY_ZIP = tiny.getvalue()
+PUBLIC_IPS = {"mav.example": "93.184.216.34", "cdn.example": "93.184.216.35"}
+real_gai = gc.socket.getaddrinfo
+
+
+def fake_gai(host, port, *args, **kwargs):
+    if host in PUBLIC_IPS:
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_IPS[host], port))]
+    raise socket.gaierror(-2, "Name or service not known")
+
+
+def response(url: str, code: int, headers: str, body: bytes = b""):
+    msg = http.client.parse_headers(io.BytesIO(headers.encode("latin-1") + b"\r\n"))
+    resp = urllib.response.addinfourl(io.BytesIO(body), msg, url, code)
+    resp.msg = {200: "OK", 302: "Found", 401: "Unauthorized"}[code]
+    return resp
+
+
+class FakeHTTPS(urllib.request.HTTPSHandler):
+    """The server side, in place of a socket: mav.example answers ROUTES,
+    every request (with the Authorization it carried) goes to SEEN."""
+
+    SEEN: list[tuple[str, str | None]] = []
+    ROUTES: dict[str, tuple[int, str]] = {}
+
+    def https_open(self, req):
+        FakeHTTPS.SEEN.append((req.full_url, req.get_header("Authorization")))
+        code, extra = FakeHTTPS.ROUTES.get(req.full_url, (200, ""))
+        if code == 200:
+            return response(req.full_url, 200, f"Content-Length: {len(TINY_ZIP)}\r\n", TINY_ZIP)
+        if code == 302:
+            return response(req.full_url, 302, f"Location: {extra}\r\nContent-Length: 0\r\n")
+        return response(req.full_url, code, "Content-Length: 0\r\nWWW-Authenticate: Basic realm=\"GTFS\"\r\n")
+
+
+real_https_handler = gc._PublicHTTPSHandler
+gc.socket.getaddrinfo = fake_gai
+gc._PublicHTTPSHandler = FakeHTTPS
+try:
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "mav.zip"
+        FakeHTTPS.SEEN.clear()
+        FakeHTTPS.ROUTES = {}
+        gc.download_zip("https://mav.example/gtfs.zip", dest, auth=(USER, PASSWORD))
+        check("credentials go to the feed's host as HTTP Basic",
+              FakeHTTPS.SEEN == [("https://mav.example/gtfs.zip", EXPECTED_AUTH)] and dest.read_bytes() == TINY_ZIP,
+              repr(FakeHTTPS.SEEN))
+
+        FakeHTTPS.SEEN.clear()
+        FakeHTTPS.ROUTES = {"https://mav.example/gtfs.zip": (302, "https://cdn.example/gtfs.zip")}
+        dest.unlink()
+        gc.download_zip("https://mav.example/gtfs.zip", dest, auth=(USER, PASSWORD))
+        check("the Authorization header is not sent after a cross-host redirect",
+              [u for u, _a in FakeHTTPS.SEEN] == ["https://mav.example/gtfs.zip", "https://cdn.example/gtfs.zip"]
+              and FakeHTTPS.SEEN[0][1] == EXPECTED_AUTH and FakeHTTPS.SEEN[1][1] is None and dest.is_file(),
+              repr(FakeHTTPS.SEEN))
+
+        FakeHTTPS.SEEN.clear()
+        FakeHTTPS.ROUTES = {"https://mav.example/gtfs.zip": (401, "")}
+        err = raises(lambda: gc.download_zip("https://mav.example/gtfs.zip", Path(tmp) / "x.zip", auth=(USER, "wrong")))
+        text = f"{err} {err!r} " + uvi.error_name(err)
+        check("a refused login raises HTTP 401 without the credentials",
+              isinstance(err, urllib.error.HTTPError) and err.code == 401 and USER not in text
+              and "wrong" not in text and "Basic" not in text and not (Path(tmp) / "x.zip").exists(), text)
+
+        FakeHTTPS.SEEN.clear()
+        err = raises(lambda: gc.download_zip("http://mav.example/gtfs.zip", Path(tmp) / "x.zip",
+                                             allow_insecure=True, auth=(USER, PASSWORD)), ValueError)
+        check("credentials never go over plain http, even for an insecure feed",
+              err is not None and not FakeHTTPS.SEEN and PASSWORD not in str(err), repr(err))
+        FakeHTTPS.ROUTES = {}
+        gc.download_feed("http://mav.example/gtfs.zip", dest, allow_insecure=True, auth=(USER, PASSWORD))
+        check("an http:// feed URL with credentials is asked over https only",
+              [u for u, _a in FakeHTTPS.SEEN] == ["https://mav.example/gtfs.zip"], repr(FakeHTTPS.SEEN))
+        for bad in [("a:b", "pw-x1"), ("", "pw-x2"), ("uname-x3", ""), ("uname-x4", "line\nbreak")]:
+            err = raises(lambda bad=bad: gc.basic_auth(bad), ValueError)
+            check(f"unusable credentials refused without naming them ({bad[0]!r})",
+                  err is not None and (not bad[1] or bad[1] not in str(err)) and (not bad[0] or bad[0] not in str(err)),
+                  repr(err))
+        check("userinfo in a feed URL is still refused",
+              raises(lambda: gc.assert_public_http_url(f"https://{USER}:pw@mav.example/gtfs.zip"), ValueError) is not None)
+        quoted = urllib.parse.quote(PASSWORD, safe="")
+        line = f"urlopen failed: Authorization: {EXPECTED_AUTH} for https://{USER}:{quoted}@mav.example/x"
+        check("redaction covers an Authorization header and URL credentials",
+              EXPECTED_AUTH.split()[1] not in uvi.redact(line) and quoted not in uvi.redact(line)
+              and USER not in uvi.redact(line), uvi.redact(line))
+finally:
+    gc.socket.getaddrinfo = real_gai
+    gc._PublicHTTPSHandler = real_https_handler
+
+# MAV_GTFS_USER / MAV_GTFS_PASSWORD reach the download of MAV_GTFS_URL.
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp)
+    calls: list[dict] = []
+
+    def capturing_download(url: str, path: Path, **kw) -> dict:
+        calls.append({"url": url, **kw})
+        if kw.get("auth") and kw["auth"][1] != PASSWORD:
+            raise urllib.error.HTTPError(url, 401, "Unauthorized", http.client.HTTPMessage(), None)
+        path.write_bytes(b"PK feed")
+        return {"size": 7}
+
+    bmi.download_feed = capturing_download
+    os.environ["MAV_GTFS_URL"] = "https://mav.example/gtfs.zip"
+    bmi.resolve_mav_feed(base)
+    check("without credentials MAV_GTFS_URL is fetched anonymously", calls and "auth" not in calls[-1], repr(calls))
+    (base / "mav-gtfs.zip").unlink()
+    os.environ["MAV_GTFS_USER"], os.environ["MAV_GTFS_PASSWORD"] = USER, PASSWORD
+    bmi.resolve_mav_feed(base)
+    check("MAV_GTFS_USER / MAV_GTFS_PASSWORD are passed as auth",
+          calls[-1].get("auth") == (USER, PASSWORD) and calls[-1]["url"] == "https://mav.example/gtfs.zip", repr(calls[-1]))
+
+    # A refused login keeps the previous zip and says so without the secret.
+    t = time.time() - bmi.URL_MAX_AGE_S - 60
+    os.utime(base / "mav-gtfs.zip", (t, t))
+    os.environ["MAV_GTFS_PASSWORD"] = "wrong-secret"
+    out, err_out, url_errors = io.StringIO(), io.StringIO(), []
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err_out):
+        bmi.resolve_mav_feed(base, url_errors=url_errors)
+    logged = out.getvalue() + err_out.getvalue() + " ".join(f"{e} {e!r}" for e in url_errors)
+    check("a refused login is reported as HTTP 401, the zip kept, no credential logged",
+          len(url_errors) == 1 and uvi.error_name(url_errors[0]) == "HTTP 401"
+          and (base / "mav-gtfs.zip").read_bytes() == b"PK feed"
+          and "wrong-secret" not in logged and USER not in logged, logged)
+
+    os.environ.pop("MAV_GTFS_PASSWORD")
+    url_errors = []
+    bmi.resolve_mav_feed(base, url_errors=url_errors)
+    check("only one of the two set is an error (the old zip stays), not an anonymous download",
+          len(url_errors) == 1 and isinstance(url_errors[0], ValueError) and USER not in str(url_errors[0])
+          and "auth" in calls[-1], repr((url_errors, calls[-1:])))
+    (base / "mav-gtfs.zip").unlink()
+    check("only one of the two set without an old zip raises",
+          raises(lambda: bmi.resolve_mav_feed(base), ValueError) is not None)
+    for key in ("MAV_GTFS_USER", "MAV_GTFS_PASSWORD", "MAV_GTFS_URL"):
+        os.environ.pop(key, None)
+
+# ---- 5c. Volán feed URLs: opendata.utas.hu, then KTI ------------------------
+
+check("the Volán feed comes from opendata.utas.hu first, KTI second",
+      bvi.volan_urls() == ["https://opendata.utas.hu/public-gtfs/volanbusz_gtfs.zip",
+                           "https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip"], repr(bvi.volan_urls()))
+os.environ["VOLAN_GTFS_URL"] = "https://mirror.example/volan.zip"
+check("VOLAN_GTFS_URL replaces the first, the KTI fallback stays",
+      bvi.volan_urls() == ["https://mirror.example/volan.zip", "https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip"])
+os.environ["VOLAN_GTFS_URL"] = bvi.FALLBACK_URL
+check("an override equal to the fallback is tried once", bvi.volan_urls() == [bvi.FALLBACK_URL])
+os.environ.pop("VOLAN_GTFS_URL")
+with tempfile.TemporaryDirectory() as tmp:
+    tried: list[str] = []
+
+    def flaky_download(url: str, path: Path, **_kw) -> dict:
+        tried.append(url)
+        if "opendata" in url:
+            raise OSError("down")
+        path.write_bytes(b"PK volan")
+        return {"size": 8}
+
+    bvi.download_feed = flaky_download
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        used = bvi.download_volan(Path(tmp) / "volanbusz_gtfs.zip")
+    check("a failing primary falls back to KTI", used == bvi.FALLBACK_URL and tried == bvi.volan_urls(), repr(tried))
+    bvi.download_feed = lambda *_a, **_k: (_ for _ in ()).throw(OSError("all down"))
+    check("both failing raises the last error",
+          raises(lambda: bvi.download_volan(Path(tmp) / "v.zip"), OSError) is not None)
+    check("the city builder downloads through the same list", bci.download_volan is bvi.download_volan)
+
 # ---- 6. GTFS members are streamed, not read whole --------------------------
 
 

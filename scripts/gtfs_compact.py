@@ -2,6 +2,7 @@
 """Compact a GTFS zip into the JSON the Lovelace card decompresses."""
 from __future__ import annotations
 
+import base64
 import codecs
 import csv
 import gzip
@@ -875,7 +876,20 @@ def _check_zip_directory(path: Path, name: str) -> None:
             raise IncompleteDownload(f"{name}: {info.filename} runs past the end of the file")
 
 
-def download_zip(url: str, dest: Path, *, allow_insecure: bool = False) -> dict:
+def basic_auth(auth: tuple[str, str]) -> str:
+    """The Authorization header value of HTTP Basic credentials (user, password).
+    Errors never name either."""
+    user, password = auth
+    if not user or not password:
+        raise ValueError("credentials need a user name and a password")
+    if ":" in user or any(ord(c) < 32 for c in user + password):
+        raise ValueError("credentials hold a character HTTP Basic cannot carry")
+    return "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+
+
+def download_zip(
+    url: str, dest: Path, *, allow_insecure: bool = False, auth: tuple[str, str] | None = None
+) -> dict:
     """Write url to dest via a sibling tempfile so a kill cannot leave a truncated zip.
 
     A body shorter than its Content-Length, or a zip without a readable
@@ -883,9 +897,17 @@ def download_zip(url: str, dest: Path, *, allow_insecure: bool = False) -> dict:
     again next run) instead of leaving a zip that fails to load.
 
     HTTPS only, redirects included, unless allow_insecure (a feed entry marked
-    "insecure"; see download_feed)."""
+    "insecure"; see download_feed).
+
+    auth, HTTP Basic (user, password), goes over https only and only to the
+    URL's own host: it is an unredirected header, which urllib drops on any
+    redirect (a feed that redirects elsewhere gets no credentials and fails
+    with 401 there). It never appears in a URL, an error or a log line."""
     assert_public_http_url(url)
+    if auth is not None:
+        allow_insecure = False
     assert_https(url, allow_insecure=allow_insecure)
+    authorization = basic_auth(auth) if auth is not None else ""
     dest.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix="gtfs_", suffix=".zip", dir=str(dest.parent))
     os.close(fd)
@@ -895,6 +917,8 @@ def download_zip(url: str, dest: Path, *, allow_insecure: bool = False) -> dict:
             url,
             headers={"User-Agent": UA, "Accept-Encoding": "identity"},
         )
+        if authorization:
+            req.add_unredirected_header("Authorization", authorization)
         with _urlopen(req, timeout=120, allow_insecure=allow_insecure) as resp, tmp.open("wb") as out:
             final = resp.geturl()
             assert_public_http_url(final)
@@ -926,14 +950,19 @@ def download_zip(url: str, dest: Path, *, allow_insecure: bool = False) -> dict:
         raise
 
 
-def download_feed(url: str, dest: Path, *, allow_insecure: bool = False) -> dict:
+def download_feed(
+    url: str, dest: Path, *, allow_insecure: bool = False, auth: tuple[str, str] | None = None
+) -> dict:
     """Download a feed, over HTTPS even when the published URL is http://.
 
     Plain HTTP (an unauthenticated zip that becomes card data) is used only
     for a feed whose entry says ``"insecure": True``: after HTTPS failed, or
     when its HTTPS URL redirects to http, each time with a warning on stderr.
     Otherwise the HTTPS failure is raised, and a redirect to http is one.
+    With auth (HTTP Basic, see download_zip) never plain http.
     """
+    if auth is not None:
+        allow_insecure = False
     parsed = urllib.parse.urlparse((url or "").strip())
     # urlparse lower-cases the scheme, so "HTTP://" is plain http as well.
     insecure = parsed.scheme == "http"
@@ -951,6 +980,8 @@ def download_feed(url: str, dest: Path, *, allow_insecure: bool = False) -> dict
         try:
             # An https attempt may still be redirected to http when the feed
             # entry allows plain http at all (the publisher's own setup).
+            if auth is not None:
+                return download_zip(u, dest, allow_insecure=False, auth=auth)
             return download_zip(u, dest, allow_insecure=allow_insecure)
         except Exception as err:
             last = err
