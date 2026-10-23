@@ -15,6 +15,11 @@ rebuilt at startup whenever it is missing or the feed changed since it was
 built. Which feed (size, mtime) built which index is kept in STATE_NAME next
 to the feed, and so is a feed whose build failed: that one is not built again
 at every start, a Repairs issue says so, and the rebuild service tries again.
+Releases ship an index too. At startup the newer feed wins: an index on disk
+from a newer feed than the local one (by the date its feed_version starts
+with) is kept, and so is any index while the local feed has expired. An
+upload or the rebuild service always builds the local feed; that index then
+stays until the next update unpacks a release's index over it.
 A build that was interrupted (timeout, killed, out of memory) says nothing
 about the feed and is not recorded so: the next start tries again. One that
 is interrupted INTERRUPTED_LIMIT times in a row on the same feed (a host too
@@ -43,6 +48,7 @@ import uuid
 import zipfile
 import zlib
 from collections.abc import Callable
+from datetime import date, datetime
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
@@ -55,6 +61,7 @@ from homeassistant.components.http import KEY_HASS_USER, HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.http import KEY_HASS
+from homeassistant.util import dt as dt_util
 
 from . import mav_index
 from .const import DOMAIN
@@ -95,6 +102,14 @@ STATE_KEEP = ("source", "index", "feed_version", "failed", "error", "interrupted
 # it: an OOM kill on a small host, or the timeout, happens again at every
 # start, each time costing BUILD_TIMEOUT of CPU or memory pressure.
 INTERRUPTED_LIMIT = 2
+# MÁV's feed_version starts with the feed's date: "20261022.M2ChangeID".
+FEED_DATE_RE = re.compile(r"(\d{8})(?!\d)")
+# What the startup check decides about the local feed.
+BUILD = "build"
+CURRENT = "current"
+FAILED = "failed"
+INTERRUPTED = "interrupted"
+SUPERSEDED = "superseded"
 
 
 class MavSourceMissing(Exception):
@@ -191,43 +206,116 @@ def _interrupted_message(count: int, error: str) -> str:
     return f"the build was interrupted {count} times in a row, last: {error}"
 
 
-def _source_version(src: Path) -> str:
-    """feed_info.txt's feed_version of the feed, "" when it has none."""
+@dataclass(frozen=True)
+class _FeedInfo:
+    """feed_info.txt's first row: feed_version, feed_start_date, feed_end_date."""
+
+    version: str = ""
+    start: str = ""
+    end: str = ""
+
+
+def _source_info(src: Path) -> _FeedInfo:
+    """The feed's feed_info.txt; empty fields when it has none."""
     try:
         with mav_index.Feed(src) as feed:
-            return mav_index.feed_version(feed)
+            for row in feed.rows("feed_info.txt"):
+                return _FeedInfo(
+                    (row.get("feed_version") or "").strip(),
+                    (row.get("feed_start_date") or "").strip(),
+                    (row.get("feed_end_date") or "").strip(),
+                )
     except (OSError, ValueError, zipfile.BadZipFile, csv.Error):
-        return ""
+        pass
+    return _FeedInfo()
 
 
-def _needs_build(src: Path, out: Path, state_file: Path) -> bool:
-    """Whether the index is missing or was not built from the current feed.
+def _gtfs_date(value: str | None) -> date | None:
+    """The date a GTFS date (YYYYMMDD) or a feed_version starting with one names."""
+    match = FEED_DATE_RE.match(value or "")
+    if match is None:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d").date()
+    except ValueError:
+        return None
 
-    A feed whose build failed, or was interrupted INTERRUPTED_LIMIT times in
-    a row, is not built again (the rebuild service and an upload force a
-    build). A build that did not finish leaves "building" in
-    the state file and is done again. An index this integration did not
-    build (a release shipped it, or the update script restored it) is kept
-    when its "feed" is the current feed's feed_version: its mtime says when
-    it was unpacked, not which feed it came from.
+
+def _feed_date(info: _FeedInfo) -> date | None:
+    """How recent a feed is: its feed_version's date, else its start, else its end."""
+    for value in (info.version, info.start, info.end):
+        if (day := _gtfs_date(value)) is not None:
+            return day
+    return None
+
+
+def _today() -> date:
+    """Today in Home Assistant's time zone: a feed ends at the end of its day."""
+    return dt_util.now().date()
+
+
+def _superseded(info: _FeedInfo, index_feed: str | None, today: date) -> bool:
+    """Whether the index on disk, built from index_feed, beats the local feed.
+
+    Only an index that names its feed can. It does when the local feed has
+    expired, or when the index's feed_version dates a newer feed. A local feed
+    that cannot be dated is built, as is one of the same date.
+    """
+    if not index_feed or index_feed == info.version:
+        return False
+    end = _gtfs_date(info.end)
+    if end is not None and end < today:
+        return True
+    local, current = _feed_date(info), _gtfs_date(index_feed)
+    return local is not None and current is not None and current > local
+
+
+def _startup_decision(src: Path, out: Path, state_file: Path, today: date | None = None) -> str | None:
+    """What startup does with the local feed: BUILD it, or why not.
+
+    None without a feed. SUPERSEDED: the index on disk names a newer feed
+    than the local one (a release shipped it), or the local feed has expired;
+    the newer feed wins. FAILED and INTERRUPTED: the feed's build failed, or
+    was interrupted INTERRUPTED_LIMIT times in a row; the rebuild service and
+    an upload force a build. CURRENT: the index on disk is this feed's.
+
+    A build that did not finish leaves "building" in the state file and is
+    done again. An index this integration did not build (a release shipped
+    it, or the update script restored it) is kept when its "feed" is the
+    current feed's feed_version: its mtime says when it was unpacked, not
+    which feed it came from.
     """
     source = _fingerprint(src)
     if source is None:
-        return False
+        return None
     state = _read_state(state_file)
-    if state.get("failed") == source:
-        return False
-    if _interruptions(state, source)[0] >= INTERRUPTED_LIMIT:
-        return False
     index = _fingerprint(out)
-    if index is None:
-        return True
-    if state.get("building"):
-        return True
+    own = state.get("source") == source
+    # The state's feed_version names this feed's version without opening the zip.
+    version = state.get("feed_version") if own else None
+    index_feed: str | None = None
+    if index is not None and not (own and state.get("index") == index):
+        # The index on disk was not built from this feed: the newer one wins.
+        index_feed = _index_feed(out)
+        if not version or index_feed != version:
+            info = _source_info(src)
+            version = version or info.version
+            if _superseded(info, index_feed, today or _today()):
+                return SUPERSEDED
+    if state.get("failed") == source:
+        return FAILED
+    if _interruptions(state, source)[0] >= INTERRUPTED_LIMIT:
+        return INTERRUPTED
+    if index is None or state.get("building"):
+        return BUILD
     if state.get("index") == index:
-        return state.get("source") != source
-    version = state.get("feed_version") if state.get("source") == source else _source_version(src)
-    return not version or _index_feed(out) != version
+        return BUILD if not own else CURRENT
+    return CURRENT if version and index_feed == version else BUILD
+
+
+def _needs_build(src: Path, out: Path, state_file: Path, today: date | None = None) -> bool:
+    """Whether startup builds the local feed (see _startup_decision)."""
+    return _startup_decision(src, out, state_file, today) == BUILD
 
 
 def _remove_temp_indexes(out: Path) -> None:
@@ -380,6 +468,24 @@ async def _run_job(hass: HomeAssistant, www: Path, job: _Job) -> dict[str, Any] 
             del data["mav_queued"]
 
 
+async def _log_superseded(hass: HomeAssistant, src: Path, out: Path, source: list[int]) -> None:
+    """Say once per feed and index why the local feed is not built."""
+    index = await hass.async_add_executor_job(_fingerprint, out)
+    data = hass.data.setdefault(DOMAIN, {})
+    if data.get("mav_superseded") == (source, index):
+        return
+    data["mav_superseded"] = (source, index)
+    info = await hass.async_add_executor_job(_source_info, src)
+    current = await hass.async_add_executor_job(_index_feed, out)
+    end = _gtfs_date(info.end)
+    why = f"expired on {end.isoformat()}" if end and end < _today() else "is older"
+    _LOGGER.info(
+        "Keeping the MÁV index of feed %s: the local feed %s (%s) %s. Upload it "
+        "or run the rebuild_mav_index action to build it anyway",
+        current, info.version or "without a feed_version", src, why,
+    )
+
+
 def _create_failed_issue(hass: HomeAssistant, error: str) -> None:
     ir.async_create_issue(
         hass,
@@ -417,14 +523,18 @@ async def _build_locked(hass: HomeAssistant, www: Path, job: _Job) -> dict[str, 
     if source is None:
         raise MavSourceMissing(str(src))
     state = await hass.async_add_executor_job(_read_state, state_file)
-    if not job.force and not await hass.async_add_executor_job(_needs_build, src, out, state_file):
-        interrupted, last_error = _interruptions(state, source)
-        if state.get("failed") == source:
-            # Repairs issues do not outlive a restart; this feed still fails.
-            _create_failed_issue(hass, str(state.get("error") or ""))
-        elif interrupted >= INTERRUPTED_LIMIT:
-            _create_failed_issue(hass, _interrupted_message(interrupted, last_error))
-        return None
+    if not job.force:
+        decision = await hass.async_add_executor_job(_startup_decision, src, out, state_file, _today())
+        if decision != BUILD:
+            interrupted, last_error = _interruptions(state, source)
+            if decision == FAILED:
+                # Repairs issues do not outlive a restart; this feed still fails.
+                _create_failed_issue(hass, str(state.get("error") or ""))
+            elif decision == INTERRUPTED:
+                _create_failed_issue(hass, _interrupted_message(interrupted, last_error))
+            elif decision == SUPERSEDED:
+                await _log_superseded(hass, src, out, source)
+            return None
     previous = {key: state[key] for key in STATE_KEEP if key in state}
     index_before = await hass.async_add_executor_job(_fingerprint, out)
     # Until the build has finished, the index on disk may not match any feed.

@@ -161,8 +161,10 @@ saját útvonalát rajzolja.
    editor** alkalmazással: nyisd meg (vagy hozd létre) a
    `hungarian-transport` mappát, töltsd fel a fájlt, és nevezd át
    `mav-gtfs.zip`-re.
-4. Indítsd újra a Home Assistantot, vagy futtasd a **MÁV útvonalindex
-   újraépítése** műveletet.
+4. Futtasd a **MÁV útvonalindex újraépítése** műveletet, vagy töltsd fel a
+   feedet. Az újraindítás csak akkor elég, ha a feeded újabb a kiadással
+   érkezett indexnél: induláskor az újabb feed nyer, a régebbi vagy lejárt
+   feedből nem épül index.
 
 Az építés minden járatot ellenőriz: minden állomásnak a kirajzolt
 útvonaltól legfeljebb 300 méterre kell lennie. Ha az ellenőrzés elbukik, az

@@ -3,7 +3,9 @@
 import asyncio
 import gzip
 import io
+import itertools
 import json
+import logging
 import math
 import os
 import signal
@@ -11,6 +13,7 @@ import subprocess
 import sys
 import threading
 import zipfile
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,7 +61,7 @@ def _rails(a, b, n=30):
     return out
 
 
-def _feed_zip(version: str = "test-feed", route_type: str = "2") -> bytes:
+def _feed_zip(version: str = "test-feed", route_type: str = "2", start: str = "", end: str = "") -> bytes:
     """Train 905 runs Szombathely - Kelenföld on one day and Székesfehérvár -
     Kelenföld on another (two stop patterns); a third trip has a shape that
     misses its middle station and must fall back to the station line."""
@@ -66,7 +69,9 @@ def _feed_zip(version: str = "test-feed", route_type: str = "2") -> bytes:
     short_line = _rails(SZF, MID) + _rails(MID, KEL)[1:]
     files = {
         "agency.txt": "agency_id,agency_name\nMAV,MÁV\n",
-        "feed_info.txt": f"feed_publisher_name,feed_version\nMÁV,{version}\n",
+        "feed_info.txt": (
+            f"feed_publisher_name,feed_version,feed_start_date,feed_end_date\nMÁV,{version},{start},{end}\n"
+        ),
         "routes.txt": (
             "route_id,route_short_name,route_long_name,route_type\n"
             f"R905,,IC 905 BAKONY,{route_type}\nR858,,IC 858,{route_type}\n"
@@ -331,9 +336,16 @@ async def test_startup_rebuilds_a_missing_index(hass: HomeAssistant, card_assets
     assert await mav.async_build(hass, card_assets) is None
 
 
-def _write_feed(path: Path, version: str = "test-feed") -> None:
+_FEED_STAMPS = itertools.count(1)
+
+
+def _write_feed(path: Path, version: str = "test-feed", start: str = "", end: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_feed_zip(version))
+    path.write_bytes(_feed_zip(version, start=start, end=end))
+    # Feeds written in a row can share their size and (coarse) mtime, which
+    # would make them one feed to the state file.
+    stamp = 10**18 + next(_FEED_STAMPS) * 10**9
+    os.utime(path, ns=(stamp, stamp))
 
 
 def test_staleness_follows_the_feed_not_the_clock(tmp_path: Path) -> None:
@@ -958,12 +970,14 @@ def _ship_index(www: Path, feed: str) -> bytes:
 
 
 async def test_shipped_index_with_and_without_a_local_feed(
-    hass: HomeAssistant, card_assets, mav_source, monkeypatch
+    hass: HomeAssistant, hass_client, card_assets, mav_source, monkeypatch, caplog
 ) -> None:
     """Releases ship www/mav-index.json.gz. Without a local feed it is used
-    as it is (no build, no Repairs issue); a local feed of another version
-    still builds and wins; a HACS update that unpacks the shipped index over
-    it costs one build, not one at every start."""
+    as it is (no build, no Repairs issue). With one, the newer feed wins at
+    startup: an older local feed is not built over the shipped index, a newer
+    one is, once after each update. An upload or the rebuild action builds
+    the local feed whatever its age, and the starts after it keep that index
+    until the next update ships a newer one."""
     spawned: list[tuple] = []
     real_exec = asyncio.create_subprocess_exec
 
@@ -972,6 +986,7 @@ async def test_shipped_index_with_and_without_a_local_feed(
         return await real_exec(*args, **kwargs)
 
     monkeypatch.setattr(mav.asyncio, "create_subprocess_exec", spying_exec)
+    monkeypatch.setattr(mav, "_today", lambda: date(2026, 10, 23))
     issues = ir.async_get(hass)
     shipped = _ship_index(card_assets, "20261023.release")
 
@@ -983,29 +998,164 @@ async def test_shipped_index_with_and_without_a_local_feed(
     assert not async_get_persistent_notifications(hass)
     assert not mav.state_path(hass).exists()
 
-    # A local feed of another version: built at the next start, and it wins.
-    _write_feed(mav_source, "local-feed")
+    # A local feed older than the shipped index: kept, at every start, with
+    # one line in the log and no Repairs issue.
+    _write_feed(mav_source, "20260601.local", "20260601", "20261231")
+    caplog.set_level(logging.INFO, logger=mav.__name__)
+    for _ in range(2):
+        await mav.async_build_if_needed(hass, card_assets)
+    assert not spawned
+    assert (card_assets / mav.INDEX_NAME).read_bytes() == shipped
+    assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+    kept = [r for r in caplog.records if "Keeping the MÁV index" in r.getMessage()]
+    assert len(kept) == 1 and kept[0].levelno == logging.INFO
+    assert "20261023.release" in kept[0].getMessage() and "is older" in kept[0].getMessage()
+
+    # A newer local feed is built at the next start, and it wins.
+    _write_feed(mav_source, "20261101.local", "20261101", "20261231")
     await mav.async_build_if_needed(hass, card_assets)
     assert len(spawned) == 1
-    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "local-feed"
+    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "20261101.local"
     await mav.async_build_if_needed(hass, card_assets)
     assert len(spawned) == 1
 
-    # A HACS update unpacks the next release's index over it: one build
+    # A HACS update unpacks an older release's index over it: one build
     # brings the local feed back, the starts after it build nothing.
     _ship_index(card_assets, "20261030.release")
     await mav.async_build_if_needed(hass, card_assets)
     assert len(spawned) == 2
-    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "local-feed"
+    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "20261101.local"
     for _ in range(2):
         await mav.async_build_if_needed(hass, card_assets)
     assert len(spawned) == 2
 
-    # A release index of the local feed's own version (pfaedle-matched, where
-    # the local zip may have MÁV's coarse shapes) is kept, at every start.
-    same = _ship_index(card_assets, "local-feed")
+    # A newer release's index is kept, at every start.
+    newer = _ship_index(card_assets, "20261106.release")
     for _ in range(2):
         await mav.async_build_if_needed(hass, card_assets)
     assert len(spawned) == 2
+    assert (card_assets / mav.INDEX_NAME).read_bytes() == newer
+
+    # The rebuild action builds the older local feed anyway, and the starts
+    # after it do not flip back to the release's index.
+    await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert len(spawned) == 3
+    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "20261101.local"
+    for _ in range(2):
+        await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 3
+
+    # So does an upload of an older feed; the next update's newer index wins again.
+    client = await hass_client()
+    resp = await client.post(mav.UPLOAD_URL, data=_feed_zip("20260901.upload", start="20260901", end="20261231"))
+    assert resp.status == 200, await resp.text()
+    assert len(spawned) == 4
+    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "20260901.upload"
+    await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 4
+    newer = _ship_index(card_assets, "20261113.release")
+    await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 4
+    assert (card_assets / mav.INDEX_NAME).read_bytes() == newer
+
+    # A release index of the local feed's own version (pfaedle-matched, where
+    # the local zip may have MÁV's coarse shapes) is kept, at every start.
+    _write_feed(mav_source, "20261120.local", "20261120", "20261231")
+    same = _ship_index(card_assets, "20261120.local")
+    for _ in range(2):
+        await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 4
     assert (card_assets / mav.INDEX_NAME).read_bytes() == same
     assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+
+def test_newer_feed_wins_at_startup(tmp_path: Path) -> None:
+    """The local feed is built at startup unless the index on disk names a
+    newer feed (by the date its feed_version starts with) or the local feed
+    has expired. A local feed that cannot be dated is built, as before."""
+    src, out, state = tmp_path / "mav-gtfs.zip", tmp_path / mav.INDEX_NAME, tmp_path / mav.STATE_NAME
+    today = date(2026, 10, 23)
+
+    def decision() -> str | None:
+        return mav._startup_decision(src, out, state, today)
+
+    _ship_index(tmp_path, "20261023.M2ChangeID")
+    # Shipped newer than local: not built.
+    _write_feed(src, "20260601.M2ChangeID", "20260601", "20261231")
+    assert decision() == mav.SUPERSEDED
+    assert not mav._needs_build(src, out, state, today)
+    # Local newer: built.
+    _write_feed(src, "20261030.M2ChangeID", "20261030", "20261231")
+    assert decision() == mav.BUILD
+    # The same date, another version: built.
+    _write_feed(src, "20261023.other", "20261023", "20261231")
+    assert decision() == mav.BUILD
+    # Local newer, but expired: never over a shipped index.
+    _write_feed(src, "20261030.M2ChangeID", "20261001", "20261022")
+    assert decision() == mav.SUPERSEDED
+    # Ends today: still running.
+    _write_feed(src, "20261030.M2ChangeID", "20261001", "20261023")
+    assert decision() == mav.BUILD
+    # Undated local feed (no date in feed_version, no start or end): built.
+    _write_feed(src, "local-feed")
+    assert decision() == mav.BUILD
+    # A feed_version without a date is dated by feed_start_date, then by
+    # feed_end_date.
+    _write_feed(src, "local-feed", "20260601", "20261231")
+    assert decision() == mav.SUPERSEDED
+    _write_feed(src, "local-feed", "20261101", "20261231")
+    assert decision() == mav.BUILD
+    _write_feed(src, "local-feed", "", "20261030")
+    assert decision() == mav.BUILD
+    _write_feed(src, "local-feed", "", "20261022")
+    assert decision() == mav.SUPERSEDED
+    # Not a real date: undated.
+    _write_feed(src, "20261399.M2ChangeID")
+    assert decision() == mav.BUILD
+
+    # An index that cannot be dated (another build, no feed) does not win
+    # over a dated local feed; an index that names no feed never wins, not
+    # even over an expired one.
+    _ship_index(tmp_path, "release")
+    _write_feed(src, "20260601.M2ChangeID", "20260601", "20261231")
+    assert decision() == mav.BUILD
+    out.write_bytes(b"index")
+    _write_feed(src, "20260601.M2ChangeID", "20260101", "20260601")
+    assert decision() == mav.BUILD
+    # No index at all: an expired feed is still better than none.
+    out.unlink()
+    assert decision() == mav.BUILD
+
+    # A feed whose build failed, or keeps being interrupted, says so only
+    # while it would be used: a newer shipped index makes it moot.
+    _ship_index(tmp_path, "20261023.M2ChangeID")
+    _write_feed(src, "20260601.M2ChangeID", "20260601", "20261231")
+    source = mav._fingerprint(src)
+    mav._write_state(state, {"failed": source, "error": "boom"})
+    assert decision() == mav.SUPERSEDED
+    mav._write_state(state, {"interrupted": {"source": source, "count": mav.INTERRUPTED_LIMIT, "error": "x"}})
+    assert decision() == mav.SUPERSEDED
+    _write_feed(src, "20261030.M2ChangeID", "20261030", "20261231")
+    source = mav._fingerprint(src)
+    mav._write_state(state, {"failed": source, "error": "boom"})
+    assert decision() == mav.FAILED
+    mav._write_state(state, {"interrupted": {"source": source, "count": mav.INTERRUPTED_LIMIT, "error": "x"}})
+    assert decision() == mav.INTERRUPTED
+
+
+def test_stale_local_feed_does_not_replace_a_newer_shipped_index(tmp_path: Path) -> None:
+    """The review's case: a feed built here months ago, then a HACS update
+    unpacks a release's newer index. The old feed is not built over it."""
+    src, out, state = tmp_path / "mav-gtfs.zip", tmp_path / mav.INDEX_NAME, tmp_path / mav.STATE_NAME
+    today = date(2026, 10, 23)
+    _write_feed(src, "20260601.OLD", "20260601", "20261231")
+    _ship_index(tmp_path, "20260601.OLD")
+    mav._write_state(
+        state, {"source": mav._fingerprint(src), "index": mav._fingerprint(out), "feed_version": "20260601.OLD"}
+    )
+    assert mav._startup_decision(src, out, state, today) == mav.CURRENT
+    _ship_index(tmp_path, "20261023.M2ChangeID")
+    assert mav._startup_decision(src, out, state, today) == mav.SUPERSEDED
+    # Without a feed there is nothing to decide.
+    src.unlink()
+    assert mav._startup_decision(src, out, state, today) is None

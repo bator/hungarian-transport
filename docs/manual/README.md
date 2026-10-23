@@ -155,7 +155,9 @@ users. With it, every train in Hungary draws its own route.
 3. Put it at `/config/hungarian-transport/mav-gtfs.zip`, for example with
    the **File editor** app: open (or create) the `hungarian-transport`
    folder, upload the file, rename it to `mav-gtfs.zip`.
-4. Restart Home Assistant, or run **Rebuild MÁV route index**.
+4. Run **Rebuild MÁV route index**, or upload the feed. A restart is enough
+   only when your feed is newer than the index that came with the release:
+   at startup the newer feed wins, and an older or expired feed is not built.
 
 The build checks every trip: each station must lie within 300 m of the
 drawn route. If the check fails, the previous index stays in use and a
