@@ -440,6 +440,10 @@ Object.assign(BkkLib, {
      still be it: a bus stand by its station, not the next station along
      (Sopron-Déli is ~1.3 km from Sopron, Győr-Szabadhegy 2.2 km from Győr). */
   DEST_HUB_M: 1000,
+  /* How far a station found by the hub's or the town's name may be from a
+     hub with a place: a "Vasútállomás" bus stand sits by its station, a
+     town's other station 20 km off is no walk. */
+  RAIL_HUB_NAME_M: 2000,
   /* Only from a city feed's own stop: a BKK or Volán origin matched by
      number or name lands on some other town's stop (BKK_F01020 "Kossuth
      Lajos utca" was a Miskolc one). */
@@ -744,7 +748,14 @@ Object.assign(BkkLib, {
     const want = path.hubFold || path.hubName || '';
     const cityTok = BkkLib.foldTokens(cityName);
     const queries = [(cityName ? cityName + ' ' : '') + (path.hubName || '')];
+    /* A hub named for its own place ("Kiskundorozsma vasútállomás" in
+       Szeged's feed, "Hódmezővásárhely vasútállomás" in a Szeged line's)
+       shares no word with the town's stations: its name alone finds it.
+       Only with the hub's place to hold the answer to: alone, "Déli
+       pályaudvar" in Sopron would be Budapest-Déli. */
+    if (hubPt && path.hubName && queries.indexOf(path.hubName) < 0) queries.push(path.hubName);
     if (cityName && queries.indexOf(cityName) < 0) queries.push(cityName);
+    const dist = (pt) => BkkLib.haversineMeters(hubPt, pt);
     for (let i = 0; i < queries.length; i++) {
       let hits = [];
       try {
@@ -754,13 +765,21 @@ Object.assign(BkkLib, {
       }
       const near = hubPt ? hits
         .map((hit) => ({ hit, pt: BkkLib.finiteLatLon(hit.lat, hit.lon) }))
-        .filter((c) => c.pt && BkkLib.haversineMeters(hubPt, c.pt) <= 1500)
-        .sort((x, y) => BkkLib.haversineMeters(hubPt, x.pt) - BkkLib.haversineMeters(hubPt, y.pt))[0] : null;
+        .filter((c) => c.pt && dist(c.pt) <= 1500)
+        .sort((x, y) => dist(x.pt) - dist(y.pt))[0] : null;
       if (near) return near.hit;
       /* A destination's own place decides: a station by name or town that
          is not by it (Szeged for Kiskundorozsma, 4.8 km) is not a train to
          it, and no journey beats a wrong one. */
       if (hubPt && path.nearOnly) continue;
+      /* A hub's place holds the name rules too: Szeged's station is no
+         walk from a tram stop at Hódmezővásárhely's, 20 km off. */
+      if (hubPt) {
+        hits = hits.filter((hit) => {
+          const pt = BkkLib.finiteLatLon(hit.lat, hit.lon);
+          return !!pt && dist(pt) <= BkkLib.RAIL_HUB_NAME_M;
+        });
+      }
       const byHub = hits.find((hit) => BkkLib.foldTokenMatch(want, hit.name || ''));
       if (byHub) return byHub;
       const extra = (hit) => BkkLib.foldTokens(hit.name || '').filter((tok) => cityTok.indexOf(tok) < 0).length;
