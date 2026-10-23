@@ -33,8 +33,9 @@ the secrets, or a feed newer than the last release):
 3. Put it at `/config/hungarian-transport/mav-gtfs.zip`. With the
    **File editor** app: open the `hungarian-transport` folder (create it if
    missing), choose *Upload file*, then rename the file to `mav-gtfs.zip`.
-4. Restart Home Assistant, or run the `hungarian_transport.rebuild_mav_index`
-   action.
+4. Run the `hungarian_transport.rebuild_mav_index` action, or upload the
+   feed. A restart is enough only when your feed is newer than the index
+   that came with the release (see *The release's index* below).
 
 The integration then builds `mav-index.json.gz` next to the card:
 
