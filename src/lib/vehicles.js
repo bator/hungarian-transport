@@ -311,17 +311,27 @@ Object.assign(BkkLib, {
     const hm = BkkLib.hm(row.sched || row.dep);
     const label = String(row.label || '').toUpperCase();
     const numKey = BkkLib.emmaTrainNumber(num);
+    /* A number read off the FUTÁR trip id has a second reading, one digit
+       shorter (BKK_8624_67 is IC 862): a sensor train with that number is
+       the same train, not another. It counts only with the time agreeing:
+       BKK_4541_108 is train 4541, and a 454 at another time is not it. */
+    const looseKey = row.trainNumber ? ''
+      : BkkLib.emmaTrainNumber(BkkLib.trainNumberLooseFromTripId(row.tripId));
     let best = null;
     let bestScore = 0;
     pool.forEach((v) => {
+      const sameTrip = !!trip && !!v.tripId && String(v.tripId) === trip;
+      const timeHit = !!hm && !!v.attime && String(v.attime) === hm;
       /* Another train number is another train, whatever its time and
-         route: 2620 does not take 2621's platform or position. */
+         route: 2620 does not take 2621's platform or position. The same
+         trip id is the same train whatever number either side read. */
       const vNum = BkkLib.emmaTrainNumber(v.trainNumber);
-      if (numKey && vNum && vNum !== numKey) return;
+      const looseHit = !!looseKey && vNum === looseKey;
+      if (numKey && vNum && vNum !== numKey && !looseHit && !sameTrip) return;
       let s = 0;
-      if (trip && v.tripId && String(v.tripId) === trip) s += 5;
-      if (numKey && vNum === numKey) s += 3;
-      if (hm && v.attime && String(v.attime) === hm) s += 2;
+      if (sameTrip) s += 5;
+      if ((numKey && vNum === numKey) || (looseHit && timeHit)) s += 3;
+      if (timeHit) s += 2;
       const vr = String(v.routeid || '').toUpperCase();
       if (label && vr && label === vr) s += 1;
       if (s > bestScore) {

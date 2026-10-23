@@ -685,6 +685,9 @@ export class BKKHopCardEditor extends HTMLElement {
     const access = this._keyAccess();
     if (!access) {
       this._keyOk = false;
+      /* No access is no answer about a key: the one that comes back is
+         probed again, not taken as already refused. */
+      this._probedKey = '';
       this._syncApiKey();
       return;
     }

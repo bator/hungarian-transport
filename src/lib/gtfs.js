@@ -935,7 +935,12 @@ Object.assign(BkkLib, {
        Budapest-Déli leaves Kelenföld in the same minute as 8738 to Siófok. */
     const numbersOf = (row) => [BkkLib.rowTrainNumber(row), looseNumber(row)]
       .map(numberKey).filter(Boolean);
+    /* Two FUTÁR trips are two departures, whatever their label and minute:
+       paired, one row would carry one's trip id under the other's headsign. */
     const otherTrain = (a, b) => {
+      const ta = String((a && a.tripId) || '');
+      const tb = String((b && b.tripId) || '');
+      if (ta !== tb && BkkLib.isFutarTripId(ta) && BkkLib.isFutarTripId(tb)) return true;
       const x = numbersOf(a);
       const y = numbersOf(b);
       return !!x.length && !!y.length && !x.some((n) => y.indexOf(n) >= 0);

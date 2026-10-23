@@ -326,6 +326,9 @@ export class BKKHopCard extends HTMLElement {
   async _fillKey() {
     const key = await BkkLib.apiKeyFromDashboard(this._hass);
     if (!key || this._config.apiKey) return;
+    /* The same key found again (setConfig restarts the lookup) changes
+       nothing: the reload setConfig started already has it. */
+    if (key === this._borrowedKey) return;
     this._borrowedKey = key;
     if (this.isConnected) this._reloadSafe();
   }

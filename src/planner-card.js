@@ -28,6 +28,13 @@ export class BKKPlannerCard extends BKKHopCard {
     this._destsLoading = false;
     /* The origin whose reachable destinations are loaded (or loading). */
     this._destsFor = '';
+    /* The FUTÁR access that list was loaded with: one loaded before the
+       integration's service showed up (HA starting, an entry reload) lacks
+       the BKK destinations, and loads again when it does. */
+    this._destsAccess = '';
+    /* Bumped only by a new origin, destination or swap (_invalidatePlan),
+       not by a reload of the same pair: a map opening waits on this. */
+    this._pairGen = 0;
     this._pickersMounted = false;
     /* Planning time lives on the card only: a saved time would be stale on
        the next visit. mode: now | depart | arrive; at: epoch ms. */
@@ -87,6 +94,7 @@ export class BKKPlannerCard extends BKKHopCard {
      journey lookup still fetches belongs to the old pair and must not paint. */
   _invalidatePlan() {
     this._gen += 1;
+    this._pairGen += 1;
     /* So do the searches typed or still running: their hits would paint
        under a field that was just picked or cleared. */
     if (this._searchTimer) { clearTimeout(this._searchTimer); this._searchTimer = null; }
@@ -190,6 +198,9 @@ export class BKKPlannerCard extends BKKHopCard {
     }).catch(() => {
       if (gen !== this._gen) return;
       this._journeyLoading = false;
+      /* The planner does not poll: an empty board left on "Loading…" would
+         stay there. */
+      this._paint();
     });
   }
 
@@ -573,11 +584,12 @@ export class BKKPlannerCard extends BKKHopCard {
     const seq = this._mapSeq;
     /* A swap or a new origin or destination while this open still waits
        (_invalidatePlan) makes it one for the old pair: its plan must not
-       replace the new pair's journey, paint, or open a map. */
-    const gen = this._gen;
+       replace the new pair's journey, paint, or open a map. A reload of
+       the same pair (a key showing up, back on the view) does not. */
+    const gen = this._pairGen;
     const stale = () => {
       if (this._mapStale(seq)) return true;
-      if (gen === this._gen) return false;
+      if (gen === this._pairGen) return false;
       this._openingMap = '';
       return true;
     };
@@ -695,8 +707,21 @@ export class BKKPlannerCard extends BKKHopCard {
      too, not only one picked in the card. */
   _ensureDests() {
     const cfg = this._config || {};
-    if (!this._pickersMounted || !this._hass || !cfg.stopId || this._destsFor === cfg.stopId) return;
+    if (!this._pickersMounted || !this._hass || !cfg.stopId) return;
+    if (this._destsFor === cfg.stopId) {
+      /* Losing access (the service gone for a moment) keeps the list. */
+      const access = this._futarAccess();
+      if (!access || access === this._destsAccess) return;
+    }
     this._loadDests();
+  }
+
+  /* What a destination list's FUTÁR stops came through: this card's or a
+     borrowed key, the integration, or nothing. */
+  _futarAccess() {
+    const key = this._apiKey();
+    if (key) return `key:${key}`;
+    return BkkLib.integrationHasKey(this._hass) ? 'integration' : '';
   }
 
   /* Itineraries sit between the pickers and the departure board. */
@@ -1408,6 +1433,7 @@ ${this._stopPinCss()}
     const cfg = this._config || {};
     if (!cfg.stopId) return;
     this._destsFor = cfg.stopId;
+    this._destsAccess = this._futarAccess();
     const seq = ++this._destSeq;
     /* The last origin's destinations must not be offered while this
        one's load (an origin changed in the editor). */
@@ -1417,6 +1443,8 @@ ${this._stopPinCss()}
     this._paintDestHits('');
     try {
       if (!this._hasFutar()) await this._fillKey();
+      /* A key borrowed just now is what this list loads with. */
+      if (seq === this._destSeq) this._destsAccess = this._futarAccess();
       const placeOrigin = /^(geo:|node\/|way\/)/i.test(String(cfg.stopId || ''))
         || cfg.stopKind === 'address' || cfg.stopKind === 'place';
       if (placeOrigin) {

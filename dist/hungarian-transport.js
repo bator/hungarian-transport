@@ -2715,6 +2715,10 @@ Object.assign(BkkLib, {
      still be it: a bus stand by its station, not the next station along
      (Sopron-Déli is ~1.3 km from Sopron, Győr-Szabadhegy 2.2 km from Győr). */
   DEST_HUB_M: 1e3,
+  /* How far a station found by the hub's or the town's name may be from a
+     hub with a place: a "Vasútállomás" bus stand sits by its station, a
+     town's other station 20 km off is no walk. */
+  RAIL_HUB_NAME_M: 2e3,
   /* Only from a city feed's own stop: a BKK or Volán origin matched by
      number or name lands on some other town's stop (BKK_F01020 "Kossuth
      Lajos utca" was a Miskolc one). */
@@ -2987,7 +2991,9 @@ Object.assign(BkkLib, {
     const want = path.hubFold || path.hubName || "";
     const cityTok = BkkLib.foldTokens(cityName);
     const queries = [(cityName ? cityName + " " : "") + (path.hubName || "")];
+    if (hubPt && path.hubName && queries.indexOf(path.hubName) < 0) queries.push(path.hubName);
     if (cityName && queries.indexOf(cityName) < 0) queries.push(cityName);
+    const dist = (pt) => BkkLib.haversineMeters(hubPt, pt);
     for (let i = 0; i < queries.length; i++) {
       let hits = [];
       try {
@@ -2995,9 +3001,15 @@ Object.assign(BkkLib, {
       } catch (_e) {
         hits = [];
       }
-      const near = hubPt ? hits.map((hit) => ({ hit, pt: BkkLib.finiteLatLon(hit.lat, hit.lon) })).filter((c) => c.pt && BkkLib.haversineMeters(hubPt, c.pt) <= 1500).sort((x, y) => BkkLib.haversineMeters(hubPt, x.pt) - BkkLib.haversineMeters(hubPt, y.pt))[0] : null;
+      const near = hubPt ? hits.map((hit) => ({ hit, pt: BkkLib.finiteLatLon(hit.lat, hit.lon) })).filter((c) => c.pt && dist(c.pt) <= 1500).sort((x, y) => dist(x.pt) - dist(y.pt))[0] : null;
       if (near) return near.hit;
       if (hubPt && path.nearOnly) continue;
+      if (hubPt) {
+        hits = hits.filter((hit) => {
+          const pt = BkkLib.finiteLatLon(hit.lat, hit.lon);
+          return !!pt && dist(pt) <= BkkLib.RAIL_HUB_NAME_M;
+        });
+      }
       const byHub = hits.find((hit) => BkkLib.foldTokenMatch(want, hit.name || ""));
       if (byHub) return byHub;
       const extra = (hit) => BkkLib.foldTokens(hit.name || "").filter((tok) => cityTok.indexOf(tok) < 0).length;
@@ -4714,6 +4726,9 @@ Object.assign(BkkLib, {
     const ownNumber = (row) => BkkLib.isTrainRow(row) && !!String(row.trainNumber || "").trim() && !BkkLib.isFutarTripId(row.tripId) && !BkkLib.suburbanLineLabel(row.label);
     const numbersOf = (row) => [BkkLib.rowTrainNumber(row), looseNumber(row)].map(numberKey).filter(Boolean);
     const otherTrain = (a, b) => {
+      const ta = String(a && a.tripId || "");
+      const tb = String(b && b.tripId || "");
+      if (ta !== tb && BkkLib.isFutarTripId(ta) && BkkLib.isFutarTripId(tb)) return true;
       const x = numbersOf(a);
       const y = numbersOf(b);
       return !!x.length && !!y.length && !x.some((n) => y.indexOf(n) >= 0);
@@ -5992,15 +6007,19 @@ Object.assign(BkkLib, {
     const hm = BkkLib.hm(row.sched || row.dep);
     const label = String(row.label || "").toUpperCase();
     const numKey = BkkLib.emmaTrainNumber(num);
+    const looseKey = row.trainNumber ? "" : BkkLib.emmaTrainNumber(BkkLib.trainNumberLooseFromTripId(row.tripId));
     let best = null;
     let bestScore = 0;
     pool.forEach((v) => {
+      const sameTrip = !!trip && !!v.tripId && String(v.tripId) === trip;
+      const timeHit = !!hm && !!v.attime && String(v.attime) === hm;
       const vNum = BkkLib.emmaTrainNumber(v.trainNumber);
-      if (numKey && vNum && vNum !== numKey) return;
+      const looseHit = !!looseKey && vNum === looseKey;
+      if (numKey && vNum && vNum !== numKey && !looseHit && !sameTrip) return;
       let s = 0;
-      if (trip && v.tripId && String(v.tripId) === trip) s += 5;
-      if (numKey && vNum === numKey) s += 3;
-      if (hm && v.attime && String(v.attime) === hm) s += 2;
+      if (sameTrip) s += 5;
+      if (numKey && vNum === numKey || looseHit && timeHit) s += 3;
+      if (timeHit) s += 2;
       const vr = String(v.routeid || "").toUpperCase();
       if (label && vr && label === vr) s += 1;
       if (s > bestScore) {
@@ -6951,6 +6970,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     const access = this._keyAccess();
     if (!access) {
       this._keyOk = false;
+      this._probedKey = "";
       this._syncApiKey();
       return;
     }
@@ -7502,6 +7522,7 @@ var BKKHopCard = class extends HTMLElement {
   async _fillKey() {
     const key = await BkkLib.apiKeyFromDashboard(this._hass);
     if (!key || this._config.apiKey) return;
+    if (key === this._borrowedKey) return;
     this._borrowedKey = key;
     if (this.isConnected) this._reloadSafe();
   }
@@ -8857,6 +8878,8 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._destHits = [];
     this._destsLoading = false;
     this._destsFor = "";
+    this._destsAccess = "";
+    this._pairGen = 0;
     this._pickersMounted = false;
     this._when = { mode: "now", at: 0 };
     this._journeys = [];
@@ -8906,6 +8929,7 @@ var BKKPlannerCard = class extends BKKHopCard {
      journey lookup still fetches belongs to the old pair and must not paint. */
   _invalidatePlan() {
     this._gen += 1;
+    this._pairGen += 1;
     if (this._searchTimer) {
       clearTimeout(this._searchTimer);
       this._searchTimer = null;
@@ -9017,6 +9041,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     }).catch(() => {
       if (gen !== this._gen) return;
       this._journeyLoading = false;
+      this._paint();
     });
   }
   set hass(hass) {
@@ -9374,10 +9399,10 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._closeVehicleMap();
     this._openingMap = "journey";
     const seq = this._mapSeq;
-    const gen = this._gen;
+    const gen = this._pairGen;
     const stale = () => {
       if (this._mapStale(seq)) return true;
-      if (gen === this._gen) return false;
+      if (gen === this._pairGen) return false;
       this._openingMap = "";
       return true;
     };
@@ -9491,8 +9516,19 @@ var BKKPlannerCard = class extends BKKHopCard {
      too, not only one picked in the card. */
   _ensureDests() {
     const cfg = this._config || {};
-    if (!this._pickersMounted || !this._hass || !cfg.stopId || this._destsFor === cfg.stopId) return;
+    if (!this._pickersMounted || !this._hass || !cfg.stopId) return;
+    if (this._destsFor === cfg.stopId) {
+      const access = this._futarAccess();
+      if (!access || access === this._destsAccess) return;
+    }
     this._loadDests();
+  }
+  /* What a destination list's FUTÁR stops came through: this card's or a
+     borrowed key, the integration, or nothing. */
+  _futarAccess() {
+    const key = this._apiKey();
+    if (key) return `key:${key}`;
+    return BkkLib.integrationHasKey(this._hass) ? "integration" : "";
   }
   /* Itineraries sit between the pickers and the departure board. */
   _ensureDepartureCaption() {
@@ -10172,6 +10208,7 @@ ${this._stopPinCss()}
     const cfg = this._config || {};
     if (!cfg.stopId) return;
     this._destsFor = cfg.stopId;
+    this._destsAccess = this._futarAccess();
     const seq = ++this._destSeq;
     this._dests = [];
     this._destRoutes = {};
@@ -10179,6 +10216,7 @@ ${this._stopPinCss()}
     this._paintDestHits("");
     try {
       if (!this._hasFutar()) await this._fillKey();
+      if (seq === this._destSeq) this._destsAccess = this._futarAccess();
       const placeOrigin = /^(geo:|node\/|way\/)/i.test(String(cfg.stopId || "")) || cfg.stopKind === "address" || cfg.stopKind === "place";
       if (placeOrigin) {
         this._dests = [];
