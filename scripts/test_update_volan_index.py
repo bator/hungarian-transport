@@ -155,6 +155,8 @@ with tempfile.TemporaryDirectory() as tmp:
 
 
 VOLAN_FALLBACK = "https://kti-fallback.example/volan.zip"
+# Fake.install replaces it; the tests of the real one keep it here.
+REAL_REMOTE_META = uvi.remote_meta
 # A developer's .env must not move the Volán URL under the tests.
 os.environ["VOLAN_GTFS_URL"] = ""
 
@@ -434,6 +436,60 @@ with tempfile.TemporaryDirectory() as tmp:
     fake.broken.add(VOLAN_FALLBACK)
     fake.etag["https://kti.example/volan.zip"] = "volan-1"
     fake.run()
+
+    # The real remote_meta: a primary that times out does not count as
+    # answering (its {} never matches the state, and the fallback's zip
+    # would be downloaded again every day it is down). The fallback's HEAD
+    # decides, its fingerprint is recorded, the next run downloads nothing.
+    class _Head:
+        status = 200
+
+        def __init__(self, headers: dict) -> None:
+            self.headers = headers
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+    real_request = uvi.request
+    asked: list[str] = []
+
+    def primary_times_out(method: str, url: str, **_kw):
+        asked.append(url)
+        if url == "https://kti.example/volan.zip":
+            raise urllib.error.URLError(TimeoutError("timed out"))
+        if url == VOLAN_FALLBACK:
+            return _Head({"ETag": '"fb-7"', "Content-Length": "40"})
+        return _Head({"ETag": fake.etag.get(url, "")})
+
+    uvi.request = primary_times_out
+    uvi.remote_meta = REAL_REMOTE_META
+    fake.broken.add("https://kti.example/volan.zip")
+    fake.broken.discard(VOLAN_FALLBACK)
+    sent.clear()
+    before = list(fake.downloads)
+    code = fake.run()
+    first = fake.downloads[len(before):]
+    check("a Volán primary that times out: the fallback's HEAD decides and its fingerprint is kept",
+          code == 0 and first.count(VOLAN_FALLBACK) == 1 and "https://kti.example/volan.zip" not in first
+          and fake.state()["volan"].get("etag") == '"fb-7"' and not any("sikertelen" in m for m in sent),
+          repr((code, first, fake.state()["volan"], sent)))
+    before = list(fake.downloads)
+    asked.clear()
+    code = fake.run()
+    check("while the primary is down, the next run downloads nothing",
+          code == 0 and VOLAN_FALLBACK not in fake.downloads[len(before):]
+          and asked[:2] == ["https://kti.example/volan.zip", VOLAN_FALLBACK],
+          repr((code, fake.downloads[len(before):], asked)))
+    # Primary back: its own fingerprint differs, the zip is fetched there
+    # once and found to be the same bytes.
+    uvi.request = real_request
+    uvi.remote_meta = fake.remote_meta
+    fake.broken.discard("https://kti.example/volan.zip")
+    fake.broken.add(VOLAN_FALLBACK)
+    fake.run()
     uvi.build_index = real_build_index
     sent.clear()
 
@@ -682,6 +738,39 @@ with tempfile.TemporaryDirectory() as tmp:
 # The daily HEAD of a keyed http:// override goes over https, like its
 # download; only a feed marked insecure is asked over plain http.
 opened: list[tuple[str, bool]] = []
+# remote_meta: a server without HEAD (403/405/501) is unknown ({}); one that
+# does not answer is unknown only where the caller has no other URL.
+real_request = uvi.request
+for raised, strict_raises, label in (
+        (urllib.error.URLError(TimeoutError("timed out")), True, "a timeout"),
+        (ConnectionRefusedError("refused"), True, "a refused connection"),
+        (urllib.error.HTTPError("https://x.example/a.zip", 405, "no HEAD", {}, None), False, "HTTP 405"),
+        (urllib.error.HTTPError("https://x.example/a.zip", 501, "no HEAD", {}, None), False, "HTTP 501")):
+    def head_fails(_method, _url, _err=raised, **_kw):
+        raise _err
+    uvi.request = head_fails
+    lenient = REAL_REMOTE_META("https://x.example/a.zip")
+    try:
+        strict = REAL_REMOTE_META("https://x.example/a.zip", unreachable_ok=False)
+    except OSError:
+        strict = "raised"
+    check(f"remote_meta on {label}: {{}} by default, {'raises' if strict_raises else '{}'} with unreachable_ok=False",
+          lenient == {} and strict == ("raised" if strict_raises else {}), repr((lenient, strict)))
+
+
+def head_500(_method, _url, **_kw):
+    raise urllib.error.HTTPError("https://x.example/a.zip", 500, "boom", {}, None)
+
+
+uvi.request = head_500
+try:
+    REAL_REMOTE_META("https://x.example/a.zip")
+    raised_500 = False
+except urllib.error.HTTPError:
+    raised_500 = True
+check("remote_meta on HTTP 500 raises", raised_500)
+uvi.request = real_request
+
 real_urlopen, real_assert = uvi._urlopen, uvi.assert_public_http_url
 uvi._urlopen = lambda req, timeout=60, *, allow_insecure=False: opened.append((req.full_url, allow_insecure))
 uvi.assert_public_http_url = lambda _url: None
