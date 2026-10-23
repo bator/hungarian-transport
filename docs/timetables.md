@@ -108,14 +108,19 @@ audits the index with `scripts/build_mav_index.py`. About a minute of
 pfaedle; the run summary shows the trains, lines and audit. The index ships
 only when it passes the audit (99% of the trains) and at least 90% of its
 stop patterns follow their pfaedle route: an index on MÁV's own coarse
-shapes is never released. When the download, pfaedle or the audit fails,
-the release still goes out with the previous release's MÁV index and a
-warning. Without the secrets (a fork) releases have no MÁV index, as
-before. The weekly release counts a changed MÁV index (compared by content,
-not bytes) as a timetable change, so a new MÁV timetable alone publishes a
-patch. The **MÁV index** workflow runs the same pipeline on a pull request
-that touches it, or by hand, and keeps the index as a 3-day artifact
-without publishing anything.
+shapes is never released. A refused login (HTTP 401/403) is not retried,
+so wrong credentials cost one login per run; pfaedle gets 30 minutes. When
+the download, pfaedle or the audit fails, and on a run without the secrets,
+the release still goes out with the previous release's MÁV index (when the
+card still reads its format), the failure with a warning. A repository
+whose releases never had one (a fork) ships none. The weekly release counts
+a changed or new MÁV index (compared by content, not bytes) as a timetable
+change, so a new MÁV timetable alone publishes a patch; an index that is
+not in a build never does. The OSM extract is cached only after a build
+that went through. The **MÁV index** workflow runs the same pipeline on a
+pull request that touches it, or by hand, builds the index a second time
+from the same downloaded zip to check that it is reproducible, and keeps it
+as a 3-day artifact without publishing anything.
 
 ## Live positions and route shapes
 

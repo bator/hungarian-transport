@@ -46,19 +46,22 @@ jobs:
           python-version: "3.12"
 
       # Geofabrik refreshes the extract daily; a week-old one matches the rails
-      # as well and saves 300 MB per run.
+      # as well and saves 300 MB per run. Saved only after a build that went
+      # through: an extract that broke off is never kept for the week.
       - name: OSM cache week
         id: week
         if: env.MAV_SECRETS == 'true'
         run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: osm-cache
         if: env.MAV_SECRETS == 'true'
         with:
           path: .osm
           key: osm-hungary-${{ steps.week.outputs.week }}
 
       - name: MÁV GTFS, pfaedle, build and audit
+        id: mav
         if: env.MAV_SECRETS == 'true'
         env:
           MAV_GTFS_USER: ${{ secrets.MAV_GTFS_USER }}
@@ -67,15 +70,21 @@ jobs:
           OSM_PBF: ${{ github.workspace }}/.osm/hungary-latest.osm.pbf
         run: bash scripts/release_mav_index.sh "$RUNNER_TEMP/mav"
 
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: env.MAV_SECRETS == 'true' && steps.mav.outcome == 'success' && steps.osm-cache.outputs.cache-hit != 'true'
+        with:
+          path: .osm
+          key: osm-hungary-${{ steps.week.outputs.week }}
+
       # The weekly release publishes only when the index changed. Built again
       # from a second pfaedle run under another hash seed, it must give the
-      # same content digest, or every week would count as a change.
+      # same content digest, or every week would count as a change. The same
+      # zip as the first build: no second login, and a feed MÁV replaced in
+      # between cannot pass for a build that is not reproducible.
       - name: Same feed, same index
         if: env.MAV_SECRETS == 'true'
         env:
-          MAV_GTFS_USER: ${{ secrets.MAV_GTFS_USER }}
-          MAV_GTFS_PASSWORD: ${{ secrets.MAV_GTFS_PASSWORD }}
-          MAV_GTFS_URL: ${{ vars.MAV_GTFS_URL }}
+          MAV_GTFS_ZIP: ${{ runner.temp }}/mav/gtfs/mav-gtfs.zip
           OSM_PBF: ${{ github.workspace }}/.osm/hungary-latest.osm.pbf
           MAV_INDEX_OUT: mav-index.again.json.gz
           PYTHONHASHSEED: "4242"

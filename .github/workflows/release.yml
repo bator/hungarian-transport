@@ -112,7 +112,7 @@ jobs:
             local base="$1"
             local n=0 t r
             while IFS=$'\t' read -r t _; do
-              r="${t#v${base}-rev.}"
+              r="${t#"v${base}-rev."}"
               if [[ "$r" =~ ^[0-9]+$ ]] && [ "$r" -gt "$n" ]; then n=$r; fi
             done <<< "$releases"
             echo "$n"
@@ -124,7 +124,7 @@ jobs:
             local major="$1" minor="$2" patch="$3" t r
             while IFS=$'\t' read -r t _; do
               [[ "$t" == "v${major}.${minor}."*"-rev."* ]] || continue
-              r="${t#v${major}.${minor}.}"
+              r="${t#"v${major}.${minor}."}"
               r="${r%%-rev.*}"
               if [[ "$r" =~ ^[0-9]+$ ]] && [ "$r" -gt "$patch" ]; then echo "$r"; fi
             done <<< "$releases"
@@ -314,7 +314,8 @@ jobs:
         run: |
           set -euo pipefail
           for t in scripts/test_gtfs_compact.py scripts/test_update_volan_index.py scripts/test_build_guards.py \
-              scripts/test_release_resolve.py ha/test_futar_limits.py ha/test_assets.py docs/manual/tools/test_server.py; do
+              scripts/test_release_resolve.py scripts/test_release_mav_index.py scripts/test_release_workflow.py \
+              ha/test_futar_limits.py ha/test_assets.py docs/manual/tools/test_server.py; do
             # A weekly refresh of an older tag may predate a test file.
             if [ -f "$t" ]; then python3 "$t"; fi
           done
@@ -330,12 +331,17 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.create == 'true'
     runs-on: ubuntu-latest
+    # About 5 minutes; pfaedle has its own limit (release_mav_index.sh).
+    timeout-minutes: 60
     outputs:
       changed: ${{ steps.changed.outputs.changed }}
     env:
       # Whether both MÁV secrets are set (true/false); the values themselves
       # are only in the step that downloads the feed.
       MAV_SECRETS: ${{ secrets.MAV_GTFS_USER != '' && secrets.MAV_GTFS_PASSWORD != '' }}
+      # The MÁV build and the fallback's schema check import the
+      # integration's package; no __pycache__ may end up in its zip.
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -434,23 +440,29 @@ jobs:
 
       # MÁV's GTFS needs a registered user: with the MAV_GTFS_USER and
       # MAV_GTFS_PASSWORD secrets the release ships a pfaedle-matched MÁV
-      # index (release_mav_index.sh), without them none. Never one built on
-      # MÁV's own coarse shapes. The extract is cached per ISO week.
+      # index (release_mav_index.sh). Never one built on MÁV's own coarse
+      # shapes. The extract is cached per ISO week, and saved only after a
+      # MÁV build that went through: an extract that broke off or failed its
+      # md5 is never kept for the week.
       - name: OSM cache week
         id: week
         if: env.MAV_SECRETS == 'true'
         run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: osm-cache
         if: env.MAV_SECRETS == 'true'
         with:
           path: .osm
           key: osm-hungary-${{ steps.week.outputs.week }}
 
-      # A failed download, pfaedle run or audit does not stop the release:
-      # the previous release's MÁV index ships again, with a warning (when
-      # this code's card still reads its schema).
+      # Without the secrets, or when the download, pfaedle or the audit
+      # fails, the release still goes out: with the previous release's MÁV
+      # index when this code's card reads its schema, else with none. So a
+      # weekly run without the secrets ships the same index and publishes
+      # nothing for it.
       - name: MÁV index (pfaedle)
+        id: mav
         env:
           MAV_GTFS_USER: ${{ secrets.MAV_GTFS_USER }}
           MAV_GTFS_PASSWORD: ${{ secrets.MAV_GTFS_PASSWORD }}
@@ -459,40 +471,54 @@ jobs:
         run: |
           set -euo pipefail
           rm -f mav-index.json.gz dist/mav-index.json.gz
-          if [ "$MAV_SECRETS" != "true" ]; then
-            echo "skip mav index (no MAV_GTFS_USER / MAV_GTFS_PASSWORD secrets)"
-            exit 0
-          fi
-          if bash .release-tools/scripts/release_mav_index.sh "$RUNNER_TEMP/mav"; then
-            cp -f mav-index.json.gz dist/
-            ls -lh dist/mav-index.json.gz
-            exit 0
-          fi
-          rm -f mav-index.json.gz
-          keep=false
-          if [ -f .baseline/mav-index.json.gz ] && [ -f custom_components/hungarian_transport/mav_index.py ]; then
-            if python3 - <<'PY'
+          keep_baseline() {
+            if [ ! -f .baseline/mav-index.json.gz ] || [ ! -f custom_components/hungarian_transport/mav_index.py ]; then
+              return 1
+            fi
+            python3 - <<'PY' || return 1
           import gzip, json, sys
           sys.path.insert(0, "custom_components/hungarian_transport")
           import mav_index
           v = json.loads(gzip.decompress(open(".baseline/mav-index.json.gz", "rb").read())).get("v")
           sys.exit(0 if v == mav_index.SCHEMA else 1)
           PY
-            then keep=true; fi
-          fi
-          if [ "$keep" = "true" ]; then
             cp -f .baseline/mav-index.json.gz dist/
+          }
+          if [ "$MAV_SECRETS" != "true" ]; then
+            if keep_baseline; then
+              echo "::notice title=MÁV index not rebuilt::No MAV_GTFS_USER / MAV_GTFS_PASSWORD secrets; the previous release's mav-index.json.gz ships again."
+            else
+              echo "skip mav index (no MAV_GTFS_USER / MAV_GTFS_PASSWORD secrets, no previous MÁV index this code reads)"
+            fi
+            exit 0
+          fi
+          if bash .release-tools/scripts/release_mav_index.sh "$RUNNER_TEMP/mav"; then
+            cp -f mav-index.json.gz dist/
+            ls -lh dist/mav-index.json.gz
+            echo "built=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          rm -f mav-index.json.gz
+          if keep_baseline; then
             echo "::warning title=MÁV index not rebuilt::The MÁV download, pfaedle or the audit failed (see this step's log); the previous release's mav-index.json.gz ships again."
           else
             echo "::warning title=No MÁV index::The MÁV download, pfaedle or the audit failed (see this step's log) and there is no previous MÁV index this code reads; this release has none."
           fi
+
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: env.MAV_SECRETS == 'true' && steps.mav.outputs.built == 'true' && steps.osm-cache.outputs.cache-hit != 'true'
+        with:
+          path: .osm
+          key: osm-hungary-${{ steps.week.outputs.week }}
 
       # A timetable refresh publishes only new data. The indexes are compared
       # by content: index_digest.py resolves every trip's stops, service and
       # shape and ignores row order, which the builders of older tags vary
       # from run to run (PYTHONHASHSEED), and with it the shapes folder name.
       # An index it cannot read counts as changed. The MÁV index (what ships,
-      # in dist/) counts as changed when it appeared, went away or differs.
+      # in dist/) counts as changed when it appeared or differs. One that
+      # went away is no change by itself (only the previous one this code
+      # cannot read is dropped): it never publishes a release on its own.
       - name: Did a timetable change
         id: changed
         env:
@@ -506,8 +532,12 @@ jobs:
           changed=false
           for f in volan-index.json.gz city-index.json.gz dist/mav-index.json.gz; do
             name=$(basename "$f")
-            if [ "$name" = "mav-index.json.gz" ] && [ ! -f "$f" ] && [ ! -f ".baseline/$name" ]; then
-              echo "$name in neither release"
+            if [ "$name" = "mav-index.json.gz" ] && [ ! -f "$f" ]; then
+              if [ -f ".baseline/$name" ]; then
+                echo "$name not in this build; not counted as a change"
+              else
+                echo "$name in neither release"
+              fi
               continue
             fi
             new=""
@@ -598,8 +628,14 @@ jobs:
           manifest["version"] = os.environ["VER"]
           path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
           PY
-          (cd custom_components/hungarian_transport && zip -qr9 ../../hungarian-transport.zip .)
-          (cd dist && zip -9r ../hungarian-transport-frontend.zip hungarian-transport.js volan-index.json.gz city-index.json.gz $( [ -d leaflet ] && echo leaflet ) $(ls -d *-shapes-*/ 2>/dev/null) $( [ -f mav-index.json.gz ] && echo mav-index.json.gz ))
+          (cd custom_components/hungarian_transport && zip -qr9 ../../hungarian-transport.zip . -x '*__pycache__*' '*.pyc')
+          frontend=(hungarian-transport.js volan-index.json.gz city-index.json.gz)
+          if [ -d dist/leaflet ]; then frontend+=(leaflet); fi
+          for d in dist/*-shapes-*/; do
+            if [ -d "$d" ]; then frontend+=("$(basename "$d")/"); fi
+          done
+          if [ -f dist/mav-index.json.gz ]; then frontend+=(mav-index.json.gz); fi
+          (cd dist && zip -9r ../hungarian-transport-frontend.zip "${frontend[@]}")
           ls -lh hungarian-transport.zip hungarian-transport-frontend.zip
           # The tag, manifest.json in the integration zip and CARD_VERSION in
           # both bundles must say the same version, or HACS and the card
@@ -610,6 +646,9 @@ jobs:
           problems = []
           with zipfile.ZipFile("hungarian-transport.zip") as z:
               manifest = json.loads(z.read("manifest.json"))
+              stray = [n for n in z.namelist() if "__pycache__" in n or n.endswith(".pyc")]
+              if stray:
+                  problems.append("bytecode in hungarian-transport.zip: " + ", ".join(stray[:5]))
               bundles = {"hungarian-transport.zip:www/hungarian-transport.js": z.read("www/hungarian-transport.js")}
           with zipfile.ZipFile("hungarian-transport-frontend.zip") as z:
               bundles["hungarian-transport-frontend.zip:hungarian-transport.js"] = z.read("hungarian-transport.js")

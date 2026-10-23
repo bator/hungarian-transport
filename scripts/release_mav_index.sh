@@ -11,27 +11,44 @@
 # Exit status non-zero: no index was written (one left from before stays).
 #
 # Environment:
-#   MAV_GTFS_USER, MAV_GTFS_PASSWORD  required; written to a netrc file
-#                     (umask 077) for the feed's host only, never to a
-#                     command line, a log or the work dir's other files
+#   MAV_GTFS_USER, MAV_GTFS_PASSWORD  required unless MAV_GTFS_ZIP is set;
+#                     written to a netrc file (umask 077) for the feed's host
+#                     only, never to a command line, a log or the work dir's
+#                     other files
 #   MAV_GTFS_URL      optional, https on *.mavcsoport.hu only
+#   MAV_GTFS_ZIP      optional: a MÁV zip downloaded before (another run's
+#                     WORK_DIR/gtfs/mav-gtfs.zip); used instead of a download
+#                     (no login), checked the same way
 #   OSM_PBF           the Hungary extract; downloaded (md5-checked) if missing
 #   MAV_INDEX_OUT     optional, default mav-index.json.gz
 #   MAV_MIN_FITTED    share of variants that must follow their shape (pfaedle
 #                     output does; MÁV's own coarse shapes fit about 3%)
+#   PFAEDLE_TIMEOUT   how long pfaedle may run (timeout(1) syntax), default
+#                     30m; a run that takes longer fails like any other
+#   DOWNLOAD_RETRY_DELAY  seconds between download attempts, default 15
 set -euo pipefail
 
 work="${1:?usage: release_mav_index.sh WORK_DIR}"
 out="${MAV_INDEX_OUT:-mav-index.json.gz}"
 url="${MAV_GTFS_URL:-https://www.mavcsoport.hu/gtfs/gtfsMavMenetrend.zip}"
-osm="${OSM_PBF:-$work/hungary-latest.osm.pbf}"
+gtfs_zip="${MAV_GTFS_ZIP:-}"
 osm_url="https://download.geofabrik.de/europe/hungary-latest.osm.pbf"
 min_fitted="${MAV_MIN_FITTED:-0.9}"
+pfaedle_timeout="${PFAEDLE_TIMEOUT:-30m}"
+retry_delay="${DOWNLOAD_RETRY_DELAY:-15}"
 # ad-freiburg/pfaedle, pinned by digest (bump deliberately).
 image="ghcr.io/ad-freiburg/pfaedle@sha256:af4fdc647699ea1ffe5150fd1f9d264c465c2876710ea749e8cb284f13abd20d"
 
-if [ -z "${MAV_GTFS_USER:-}" ] || [ -z "${MAV_GTFS_PASSWORD:-}" ]; then
-  echo "MAV_GTFS_USER and MAV_GTFS_PASSWORD are required" >&2
+if [ -z "$gtfs_zip" ] && { [ -z "${MAV_GTFS_USER:-}" ] || [ -z "${MAV_GTFS_PASSWORD:-}" ]; }; then
+  echo "MAV_GTFS_USER and MAV_GTFS_PASSWORD are required (or MAV_GTFS_ZIP)" >&2
+  exit 2
+fi
+if [ -n "$gtfs_zip" ] && [ ! -s "$gtfs_zip" ]; then
+  echo "MAV_GTFS_ZIP is not a file" >&2
+  exit 2
+fi
+if [[ ! "$pfaedle_timeout" =~ ^[0-9]+[smhd]?$ ]] || [[ ! "$retry_delay" =~ ^[0-9]+$ ]]; then
+  echo "PFAEDLE_TIMEOUT must look like 30m, DOWNLOAD_RETRY_DELAY like 15" >&2
   exit 2
 fi
 if [ ! -f scripts/build_mav_index.py ] || [ ! -f custom_components/hungarian_transport/mav_index.py ]; then
@@ -40,11 +57,46 @@ if [ ! -f scripts/build_mav_index.py ] || [ ! -f custom_components/hungarian_tra
 fi
 
 mkdir -p "$work"
-work="$(cd "$work" && pwd)"
+work="$(cd "$work" && pwd -P)"
+# Only now that $work is absolute: docker -v takes a relative source for a
+# volume name.
+osm="${OSM_PBF:-$work/hungary-latest.osm.pbf}"
+case "$osm" in /*) ;; *) osm="$PWD/$osm" ;; esac
+if [ -n "$gtfs_zip" ]; then
+  gtfs_zip="$(realpath "$gtfs_zip")"
+  case "$gtfs_zip" in
+    "$work"/gtfs/* | "$work"/gtfs-out/*)
+      echo "MAV_GTFS_ZIP lies in the work dir this run clears; use another WORK_DIR" >&2
+      exit 2 ;;
+  esac
+fi
+
+# Whatever a failed or interrupted run leaves must not outlive it: the netrc,
+# a half-downloaded extract (actions/cache would keep it for the week) and a
+# pfaedle container that outlived its time limit.
+netrc=""
+container="mav-pfaedle-$$-$RANDOM"
+pfaedle_started=false
+cleanup() {
+  if [ -n "$netrc" ]; then rm -f "$netrc"; fi
+  rm -f "$osm.part" "$osm.md5"
+  if [ "$pfaedle_started" = true ]; then docker rm -f "$container" >/dev/null 2>&1 || true; fi
+}
+trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
+
 rm -rf "$work/gtfs" "$work/gtfs-out"
 mkdir -p "$work/gtfs" "$work/gtfs-out"
 t0=$SECONDS
 
+if [ -n "$gtfs_zip" ]; then
+  echo "MÁV GTFS from MAV_GTFS_ZIP, not downloaded"
+  cp -f "$gtfs_zip" "$work/gtfs/mav-gtfs.zip"
+  # What the checks below read from a download.
+  : > "$work/mav-headers.txt"
+  echo "200 - local" > "$work/mav-curl.txt"
+else
 # The feed's host, from a URL that may only be https on mavcsoport.hu,
 # without userinfo: the credentials go nowhere else.
 host="$(python3 -I - "$url" <<'PY'
@@ -68,9 +120,9 @@ netrc="$work/netrc"
 import os, sys
 host, path = sys.argv[1], sys.argv[2]
 def tok(v: str) -> str:
-    # curl (7.84+) reads a quoted netrc token with \\ and \" escapes.
-    if v and not any(c.isspace() or c in '"\\' for c in v):
-        return v
+    # Always quoted: curl (7.84+) reads a quoted netrc token with \\ and \"
+    # escapes, and an unquoted one starting with # as a comment (an empty
+    # password, then a refused login).
     return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
 user, password = os.environ["MAV_GTFS_USER"], os.environ["MAV_GTFS_PASSWORD"]
 if any(ord(c) < 32 for c in user + password):
@@ -80,16 +132,47 @@ with os.fdopen(fd, "w") as fh:
     fh.write(f"machine {host} login {tok(user)} password {tok(password)}\n")
 PY
 )
-trap 'rm -f "$netrc"' EXIT
 
+# Retried here, not by curl: a refused login (401/403) is final, as every
+# retry is another login with the same credentials (an account lockout).
+# Other 4xx answers are final too, except 408 and 429; 5xx, timeouts and
+# broken connections are tried 6 times.
 echo "downloading the MÁV GTFS from $host"
-curl --fail --silent --show-error --location --max-redirs 3 \
-  --proto =https --proto-redir =https --netrc-file "$netrc" \
-  --retry 5 --retry-delay 15 --retry-all-errors --connect-timeout 30 --max-time 600 \
-  --max-filesize 314572800 -A "hungarian-transport-release (+https://github.com/${GITHUB_REPOSITORY:-bator/hungarian-transport})" \
-  --dump-header "$work/mav-headers.txt" -o "$work/gtfs/mav-gtfs.zip" \
-  -w '%{http_code} %{size_download} %{content_type}\n' "$url" > "$work/mav-curl.txt"
+attempts=6
+attempt=1
+while :; do
+  rc=0
+  curl --fail --silent --show-error --location --max-redirs 3 \
+    --proto =https --proto-redir =https --netrc-file "$netrc" \
+    --connect-timeout 30 --max-time 600 \
+    --max-filesize 314572800 -A "hungarian-transport-release (+https://github.com/${GITHUB_REPOSITORY:-bator/hungarian-transport})" \
+    --dump-header "$work/mav-headers.txt" -o "$work/gtfs/mav-gtfs.zip" \
+    -w '%{http_code} %{size_download} %{content_type}\n' "$url" > "$work/mav-curl.txt" || rc=$?
+  if [ "$rc" -eq 0 ]; then break; fi
+  code="$(cut -d' ' -f1 "$work/mav-curl.txt" 2>/dev/null || true)"
+  case "$code" in
+    401 | 403)
+      echo "MÁV GTFS: HTTP $code, the login was refused; not retried (check MAV_GTFS_USER / MAV_GTFS_PASSWORD)" >&2
+      exit 1 ;;
+    408 | 429) ;;
+    4??)
+      echo "MÁV GTFS: HTTP $code; not retried" >&2
+      exit 1 ;;
+  esac
+  if [ "$rc" -eq 63 ]; then
+    echo "MÁV GTFS: larger than --max-filesize; not retried" >&2
+    exit 1
+  fi
+  if [ "$attempt" -ge "$attempts" ]; then
+    echo "MÁV GTFS: download failed (curl exit $rc, HTTP ${code:-none}) $attempts times" >&2
+    exit 1
+  fi
+  echo "MÁV GTFS: curl exit $rc, HTTP ${code:-none}; attempt $((attempt + 1)) of $attempts in ${retry_delay}s" >&2
+  attempt=$((attempt + 1))
+  sleep "$retry_delay"
+done
 rm -f "$netrc"
+fi
 t_dl=$((SECONDS - t0))
 
 # The zip as served: the last response's Content-Length (when it sent one)
@@ -128,10 +211,10 @@ if [ ! -s "$osm" ]; then
   echo "downloading $osm_url"
   mkdir -p "$(dirname "$osm")"
   curl --fail --silent --show-error --location --proto =https --proto-redir =https \
-    --retry 5 --retry-delay 15 --retry-all-errors --connect-timeout 30 --max-time 1200 \
+    --retry 5 --retry-delay "$retry_delay" --retry-all-errors --connect-timeout 30 --max-time 1200 \
     -o "$osm.part" "$osm_url"
   curl --fail --silent --show-error --location --proto =https --proto-redir =https \
-    --retry 5 --retry-delay 15 --retry-all-errors -o "$osm.md5" "$osm_url.md5"
+    --retry 5 --retry-delay "$retry_delay" --retry-all-errors -o "$osm.md5" "$osm_url.md5"
   want="$(cut -d' ' -f1 "$osm.md5")"
   got="$(md5sum "$osm.part" | cut -d' ' -f1)"
   if [ -z "$want" ] || [ "$want" != "$got" ]; then
@@ -147,12 +230,24 @@ t_osm=$((SECONDS - t1))
 
 t2=$SECONDS
 docker pull -q "$image" >/dev/null
-# No network inside: pfaedle reads the two files and writes the feed.
-docker run --rm --network none \
+# No network inside: pfaedle reads the two files and writes the feed. About
+# a minute; one that hangs is stopped at PFAEDLE_TIMEOUT (the container is
+# removed on exit) and the run fails as on any pfaedle error.
+pfaedle_started=true
+rc=0
+timeout --kill-after=60 "$pfaedle_timeout" \
+  docker run --rm --name "$container" --network none \
   -v "$osm":/osm/hungary-latest.osm.pbf:ro \
   -v "$work/gtfs":/gtfs:ro \
   -v "$work/gtfs-out":/gtfs-out \
-  "$image" -D -m rail -x /osm/hungary-latest.osm.pbf -i /gtfs/mav-gtfs.zip -o /gtfs-out
+  "$image" -D -m rail -x /osm/hungary-latest.osm.pbf -i /gtfs/mav-gtfs.zip -o /gtfs-out || rc=$?
+if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+  echo "pfaedle did not finish within $pfaedle_timeout" >&2
+  exit 1
+elif [ "$rc" -ne 0 ]; then
+  echo "pfaedle failed (exit $rc)" >&2
+  exit 1
+fi
 t_pfaedle=$((SECONDS - t2))
 
 # pfaedle writes the tables it read and matched; any other member of MÁV's
@@ -183,8 +278,9 @@ PY
 
 t3=$SECONDS
 # The checkout's own builder and audit (the index schema its card reads).
-# Written next to the work dir first: the coarse-shape guard decides.
-python3 - "$work/gtfs-out" "$work/mav-index.json.gz" "$work/mav-build.json" "$min_fitted" <<'PY'
+# Written next to the work dir first: the coarse-shape guard decides. No
+# bytecode: the builder imports the integration's package, which is zipped.
+python3 -B - "$work/gtfs-out" "$work/mav-index.json.gz" "$work/mav-build.json" "$min_fitted" <<'PY'
 import json, sys
 from pathlib import Path
 sys.path.insert(0, "scripts")
