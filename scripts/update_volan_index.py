@@ -431,7 +431,11 @@ def request(method: str, url: str, *, allow_insecure: bool = False):
     return _urlopen(req, timeout=60, allow_insecure=allow_insecure)
 
 
-def remote_meta(url: str, *, allow_insecure: bool = False) -> dict:
+def remote_meta(url: str, *, allow_insecure: bool = False, unreachable_ok: bool = True) -> dict:
+    """The HEAD fingerprint; {} (unknown) for a server without HEAD (403,
+    405, 501), or, unless unreachable_ok is False, one that did not answer
+    (timeout, refused): the caller then downloads. With unreachable_ok=False
+    that raises instead, so a caller with another URL asks that one."""
     try:
         with request("HEAD", url, allow_insecure=allow_insecure) as resp:
             if 200 <= resp.status < 300:
@@ -440,7 +444,8 @@ def remote_meta(url: str, *, allow_insecure: bool = False) -> dict:
         if err.code not in (403, 405, 501):
             raise
     except OSError:
-        pass
+        if not unreachable_ok:
+            raise
     # Do not GET a 100 MB body just to read headers. Treat as unknown.
     return {}
 
@@ -685,14 +690,16 @@ def _main() -> int:
         volan_built = False
         # The first URL whose HEAD answers is the one checked; a download
         # that fails there tries the others (the same zip, see
-        # build_volan_index).
+        # build_volan_index). A primary that times out or refuses the
+        # connection does not answer: its {} would never match the state, and
+        # the fallback's zip would be downloaded again every day it is down.
         urls = volan_urls(GTFS_URL, VOLAN_FALLBACK_URL)
         volan_url = ""
         volan_meta: dict | None = None
         head_errors: list[str] = []
         for url in urls:
             try:
-                volan_meta = remote_meta(url)
+                volan_meta = remote_meta(url, unreachable_ok=False)
             except Exception as err:
                 head_errors.append(f"{url}: {err}")
                 print(redact(f"warn HEAD {url}: {error_name(err)}"), file=sys.stderr)
@@ -717,16 +724,22 @@ def _main() -> int:
                 downloaded = None
                 last_err: Exception | None = None
                 for url in [volan_url] + [u for u in urls if u != volan_url]:
+                    meta = volan_meta
+                    if url != volan_url:
+                        # Not the zip the first HEAD describes: this URL's
+                        # own fingerprint is recorded ({} when it has none,
+                        # and the next run checks again).
+                        try:
+                            meta = remote_meta(url)
+                        except Exception:
+                            meta = {}
                     try:
                         downloaded = download_zip(url, new_zip)
                     except Exception as err:
                         last_err = err
                         print(redact(f"warn Volán download {url}: {error_name(err)}"), file=sys.stderr)
                         continue
-                    if url != volan_url:
-                        # Not the zip the HEAD fingerprint describes: the
-                        # next run checks again.
-                        volan_meta = {}
+                    volan_meta = meta
                     break
                 if downloaded is None:
                     raise last_err or RuntimeError("no Volán GTFS URL")

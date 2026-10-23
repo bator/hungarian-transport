@@ -84,6 +84,15 @@ jobs:
       - name: Release tag resolve tests
         run: python3 scripts/test_release_resolve.py
 
+      # release.yml's MÁV, timetable-change and pack steps as written, and
+      # release_mav_index.sh against a local https server (curl, netrc,
+      # retries, cleanup, the pfaedle time limit); no network, no secrets.
+      - name: Release workflow step tests
+        run: python3 scripts/test_release_workflow.py
+
+      - name: MÁV release script tests
+        run: python3 scripts/test_release_mav_index.py
+
       - name: FUTÁR proxy limit tests
         run: python3 ha/test_futar_limits.py
 
