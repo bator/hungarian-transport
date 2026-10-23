@@ -15,11 +15,17 @@ current. The [user manual](manual/README.md) covers the cards themselves.
 
 ## MÁV train routes
 
-MÁV publishes its timetable (GTFS, CC0 licence) only to registered users, so
-the release cannot ship it. Without it a train's map relies on a live
+MÁV publishes its timetable (GTFS, CC0 licence) only to registered users.
+Releases ship a MÁV index matched to the OSM rails with pfaedle when the
+repository that builds them has a MÁV login (see
+[Releases with the MÁV index](#releases-with-the-máv-index)); such an
+install needs nothing more. Without an index a train's map relies on a live
 Transitous lookup, which sometimes finds no trip, and on BKK FUTÁR, which
-only knows trains around Budapest. With the feed, every train in Hungary
-draws its own route.
+only knows trains around Budapest. With one, every train in Hungary draws
+its own route.
+
+To build it on your own Home Assistant instead (a fork's release without
+the secrets, or a feed newer than the last release):
 
 1. Register at <https://www.mavcsoport.hu/gtfs-igenybejelento>. MÁV emails
    the download address and a login.
@@ -48,6 +54,11 @@ The integration then builds `mav-index.json.gz` next to the card:
   feed (by the feed's `feed_version`). A feed whose build failed is not built
   again at every start; its Repairs issue comes back instead, and the
   `rebuild_mav_index` action forces a new try.
+- **The release's index.** Without a local feed the index a release shipped
+  is used as it is: nothing is built and nothing is reported. With one, a
+  shipped index of the same `feed_version` is kept (it follows the rails);
+  one of another version is replaced by a build of the local feed, once
+  after each update.
 
 MÁV's own `shapes.txt` is coarse: an 8 km chord cuts across the fields
 between Székesfehérvár and Kelenföld. A route that misses one of its
@@ -74,6 +85,37 @@ curl -X POST -H "Authorization: Bearer $HA_TOKEN" \
 
 A daily job that downloads (and pfaedle-matches) the feed can end with this
 call, so the card follows timetable changes on its own.
+
+### Releases with the MÁV index
+
+The release workflow builds `mav-index.json.gz` when the repository has the
+MÁV login as Actions secrets. Settings → Secrets and variables → Actions:
+
+| Name | Kind | Value |
+| --- | --- | --- |
+| `MAV_GTFS_USER` | secret | the user name from MÁV's e-mail |
+| `MAV_GTFS_PASSWORD` | secret | its password |
+| `MAV_GTFS_URL` | variable, optional | the zip's address; default `https://www.mavcsoport.hu/gtfs/gtfsMavMenetrend.zip` |
+| `VOLAN_GTFS_URL` | variable, optional | another Volán zip address (see [Feed sources](#feed-sources)) |
+
+With both secrets set, every release run (the weekly timetable release
+included) downloads MÁV's zip over https with HTTP Basic auth (the
+credentials go to a netrc file for that host only, never onto a command
+line or into the log), checks its length and zip directory, matches it to
+the [Geofabrik](https://download.geofabrik.de/europe/hungary.html) Hungary
+extract (cached for a week) with a pinned pfaedle image, and builds and
+audits the index with `scripts/build_mav_index.py`. About a minute of
+pfaedle; the run summary shows the trains, lines and audit. The index ships
+only when it passes the audit (99% of the trains) and at least 90% of its
+stop patterns follow their pfaedle route: an index on MÁV's own coarse
+shapes is never released. When the download, pfaedle or the audit fails,
+the release still goes out with the previous release's MÁV index and a
+warning. Without the secrets (a fork) releases have no MÁV index, as
+before. The weekly release counts a changed MÁV index (compared by content,
+not bytes) as a timetable change, so a new MÁV timetable alone publishes a
+patch. The **MÁV index** workflow runs the same pipeline on a pull request
+that touches it, or by hand, and keeps the index as a 3-day artifact
+without publishing anything.
 
 ## Live positions and route shapes
 
@@ -153,12 +195,17 @@ To rebuild them yourself on Home Assistant OS:
 1. Copy `scripts/*.py` and `scripts/run_update.sh` to `/config/hungarian-transport/`
    (`build_mav_index.py` included). pfaedle output stays on the builder host,
    not on Home Assistant OS — without it the official zip is stop-sequence,
-   not OSM rails.
+   not OSM rails. To download MÁV's zip there, set `MAV_GTFS_URL`,
+   `MAV_GTFS_USER` and `MAV_GTFS_PASSWORD` in
+   `/config/hungarian-transport/.env` (HTTP Basic over https only, never
+   sent on after a redirect, never logged). A release's pfaedle index of the
+   same feed beats such a stop-sequence build (see below).
 2. Copy `packages/hungarian_transport.yaml` into a Home Assistant package
    directory (`packages: !include_dir_named packages`).
 3. Restart Home Assistant. The automation runs at 04:30 in Home Assistant's
    own time zone (Settings → System → General) and five minutes after a core
-   start. It HEADs the KTI zip and the municipal feeds (over https; plain http
+   start. It HEADs the Volán zip (`opendata.utas.hu`, then KTI when that
+   fails, or `VOLAN_GTFS_URL`) and the municipal feeds (over https; plain http
    only for the city feeds marked insecure) and rebuilds only when the
    fingerprint changed. A server that gives no usable fingerprint is
    downloaded, and a zip byte for byte the same as the one the index was
@@ -284,10 +331,17 @@ Mobility Database keys in the same file are a catalog fallback. Without
 those secrets the public menetbrand zip is used, including GitHub Actions
 unless the matching repository secrets are set.
 
+The Volán feed comes from <https://opendata.utas.hu/public-gtfs/volanbusz_gtfs.zip>,
+the address MÁV announced for it, and from
+<https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip> (the same zip) when
+that fails. `VOLAN_GTFS_URL` (in `.env`, or as a repository variable for
+the release) replaces the first; KTI stays the fallback.
+
 These feeds still need a form or login:
 
 - MÁV / GYSEV rail GTFS: <https://www.mavcsoport.hu/gtfs-igenybejelento>.
-  See [MÁV train routes](#máv-train-routes).
+  See [MÁV train routes](#máv-train-routes); releases build it with the
+  repository's MÁV secrets.
 - National Access Point (SZKT official dump and others): <https://napportal.kozut.hu/>
 - Kecskemét KEKO city buses: <https://timetable.keko.hu/Kecskemet_GTFS.zip> (auth)
 
