@@ -332,6 +332,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       changed: ${{ steps.changed.outputs.changed }}
+    env:
+      # Whether both MÁV secrets are set (true/false); the values themselves
+      # are only in the step that downloads the feed.
+      MAV_SECRETS: ${{ secrets.MAV_GTFS_USER != '' && secrets.MAV_GTFS_PASSWORD != '' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -341,6 +345,19 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
+
+      # The comparison script and the MÁV pipeline come from the workflow's
+      # own commit (main on the weekly run), not from the tag being rebuilt:
+      # older tags lack them.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.sha }}
+          path: .release-tools
+          sparse-checkout: |
+            scripts/index_digest.py
+            scripts/release_mav_index.sh
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       # The builders compare against the index already in place: a city feed
       # that vanished, most of a feed's trips gone or a near-empty Volán index
@@ -363,8 +380,13 @@ jobs:
           rc=0
           unzip -q -o baseline/hungarian-transport-frontend.zip 'volan-shapes-*' 'city-shapes-*' -d .baseline || rc=$?
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 11 ]; then exit "$rc"; fi
+          # The MÁV index, when the release has one: the comparison below,
+          # and what ships again should this run's MÁV build fail.
+          rc=0
+          unzip -q -o -j baseline/hungarian-transport-frontend.zip mav-index.json.gz -d .baseline || rc=$?
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 11 ]; then exit "$rc"; fi
           rm -rf baseline
-          ls -l volan-index.json.gz city-index.json.gz
+          ls -l volan-index.json.gz city-index.json.gz .baseline/mav-index.json.gz 2>/dev/null || true
 
       - name: Build GTFS indexes
         env:
@@ -373,6 +395,7 @@ jobs:
           TRANSITLAND_API_KEY: ${{ secrets.TRANSITLAND_API_KEY }}
           ALLOW_MISSING_INPUT: ${{ github.event.inputs.allow_missing || '' }}
           ALLOW_MISSING_VAR: ${{ vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}
+          VOLAN_GTFS_URL: ${{ vars.VOLAN_GTFS_URL || '' }}
         run: |
           set -euo pipefail
           # Both values end up in workflow commands below (::warning::,
@@ -400,11 +423,6 @@ jobs:
           export HUNGARIAN_TRANSPORT_ALLOW_MISSING="$allow"
           python3 scripts/build_volan_index.py
           python3 scripts/build_city_index.py
-          if [ -d pfaedle-out ] || [ -d /opt/pfaedle-trial/out ]; then
-            python3 scripts/build_mav_index.py
-          else
-            echo "skip mav index (no pfaedle on runner; do not ship an official-zip chord)"
-          fi
           mkdir -p dist
           cp -f volan-index.json.gz city-index.json.gz dist/
           # Sharded shapes.txt routes; each index names its folder ("sh").
@@ -412,25 +430,69 @@ jobs:
           for d in volan-shapes-*/ city-shapes-*/; do
             if [ -d "$d" ]; then cp -r "$d" dist/; fi
           done
-          if [ -f mav-index.json.gz ]; then cp -f mav-index.json.gz dist/; fi
-          ls -lh dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz dist/mav-index.json.gz 2>/dev/null || true
+          ls -lh dist/hungarian-transport.js dist/volan-index.json.gz dist/city-index.json.gz
 
-      # The comparison script comes from the workflow's own commit (main on
-      # the weekly run), not from the tag being rebuilt: older tags lack it.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        if: needs.resolve.outputs.refresh == 'true'
+      # MÁV's GTFS needs a registered user: with the MAV_GTFS_USER and
+      # MAV_GTFS_PASSWORD secrets the release ships a pfaedle-matched MÁV
+      # index (release_mav_index.sh), without them none. Never one built on
+      # MÁV's own coarse shapes. The extract is cached per ISO week.
+      - name: OSM cache week
+        id: week
+        if: env.MAV_SECRETS == 'true'
+        run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: env.MAV_SECRETS == 'true'
         with:
-          ref: ${{ github.sha }}
-          path: .release-tools
-          sparse-checkout: scripts/index_digest.py
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
+          path: .osm
+          key: osm-hungary-${{ steps.week.outputs.week }}
+
+      # A failed download, pfaedle run or audit does not stop the release:
+      # the previous release's MÁV index ships again, with a warning (when
+      # this code's card still reads its schema).
+      - name: MÁV index (pfaedle)
+        env:
+          MAV_GTFS_USER: ${{ secrets.MAV_GTFS_USER }}
+          MAV_GTFS_PASSWORD: ${{ secrets.MAV_GTFS_PASSWORD }}
+          MAV_GTFS_URL: ${{ vars.MAV_GTFS_URL }}
+          OSM_PBF: ${{ github.workspace }}/.osm/hungary-latest.osm.pbf
+        run: |
+          set -euo pipefail
+          rm -f mav-index.json.gz dist/mav-index.json.gz
+          if [ "$MAV_SECRETS" != "true" ]; then
+            echo "skip mav index (no MAV_GTFS_USER / MAV_GTFS_PASSWORD secrets)"
+            exit 0
+          fi
+          if bash .release-tools/scripts/release_mav_index.sh "$RUNNER_TEMP/mav"; then
+            cp -f mav-index.json.gz dist/
+            ls -lh dist/mav-index.json.gz
+            exit 0
+          fi
+          rm -f mav-index.json.gz
+          keep=false
+          if [ -f .baseline/mav-index.json.gz ] && [ -f custom_components/hungarian_transport/mav_index.py ]; then
+            if python3 - <<'PY'
+          import gzip, json, sys
+          sys.path.insert(0, "custom_components/hungarian_transport")
+          import mav_index
+          v = json.loads(gzip.decompress(open(".baseline/mav-index.json.gz", "rb").read())).get("v")
+          sys.exit(0 if v == mav_index.SCHEMA else 1)
+          PY
+            then keep=true; fi
+          fi
+          if [ "$keep" = "true" ]; then
+            cp -f .baseline/mav-index.json.gz dist/
+            echo "::warning title=MÁV index not rebuilt::The MÁV download, pfaedle or the audit failed (see this step's log); the previous release's mav-index.json.gz ships again."
+          else
+            echo "::warning title=No MÁV index::The MÁV download, pfaedle or the audit failed (see this step's log) and there is no previous MÁV index this code reads; this release has none."
+          fi
 
       # A timetable refresh publishes only new data. The indexes are compared
       # by content: index_digest.py resolves every trip's stops, service and
       # shape and ignores row order, which the builders of older tags vary
       # from run to run (PYTHONHASHSEED), and with it the shapes folder name.
-      # An index it cannot read counts as changed.
+      # An index it cannot read counts as changed. The MÁV index (what ships,
+      # in dist/) counts as changed when it appeared, went away or differs.
       - name: Did a timetable change
         id: changed
         env:
@@ -442,17 +504,25 @@ jobs:
             exit 0
           fi
           changed=false
-          for f in volan-index.json.gz city-index.json.gz; do
-            new=$(python3 .release-tools/scripts/index_digest.py "$f" | cut -d' ' -f1) || new=""
+          for f in volan-index.json.gz city-index.json.gz dist/mav-index.json.gz; do
+            name=$(basename "$f")
+            if [ "$name" = "mav-index.json.gz" ] && [ ! -f "$f" ] && [ ! -f ".baseline/$name" ]; then
+              echo "$name in neither release"
+              continue
+            fi
+            new=""
+            if [ -f "$f" ]; then
+              new=$(python3 .release-tools/scripts/index_digest.py "$f" | cut -d' ' -f1) || new=""
+            fi
             old=""
-            if [ -f ".baseline/$f" ]; then
-              old=$(python3 .release-tools/scripts/index_digest.py ".baseline/$f" | cut -d' ' -f1) || old=""
+            if [ -f ".baseline/$name" ]; then
+              old=$(python3 .release-tools/scripts/index_digest.py ".baseline/$name" | cut -d' ' -f1) || old=""
             fi
             if [ -z "$new" ] || [ "$new" != "$old" ]; then
-              echo "$f changed"
+              echo "$name changed"
               changed=true
             else
-              echo "$f unchanged (${new})"
+              echo "$name unchanged (${new})"
             fi
           done
           echo "changed=${changed}" >> "$GITHUB_OUTPUT"
@@ -658,9 +728,9 @@ jobs:
             extra+=(--prerelease)
             notes="${notes} Live Lovelace revision between HACS releases."
           elif [ "$REFRESH" = "true" ]; then
-            notes="${notes} Timetable update: fresh Volán and city GTFS indexes on the code of ${BASELINE}."
+            notes="${notes} Timetable update: fresh GTFS indexes (Volán, city, MÁV when built) on the code of ${BASELINE}."
           else
-            notes="${notes} Includes fresh Volán and city GTFS indexes."
+            notes="${notes} Includes fresh GTFS indexes (Volán, city, MÁV when built)."
           fi
           # A published release is never changed: what HACS installs as a
           # version stays what was released as it. A draft is refused too
