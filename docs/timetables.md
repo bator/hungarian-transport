@@ -55,10 +55,18 @@ The integration then builds `mav-index.json.gz` next to the card:
   again at every start; its Repairs issue comes back instead, and the
   `rebuild_mav_index` action forces a new try.
 - **The release's index.** Without a local feed the index a release shipped
-  is used as it is: nothing is built and nothing is reported. With one, a
-  shipped index of the same `feed_version` is kept (it follows the rails);
-  one of another version is replaced by a build of the local feed, once
-  after each update.
+  is used as it is: nothing is built and nothing is reported. With one, the
+  newer feed wins at startup. A feed's date is the one its `feed_version`
+  starts with (`20261022.M2ChangeID`), else its `feed_start_date`, else its
+  `feed_end_date`. A shipped index of the same `feed_version` is kept (it
+  follows the rails), and so is one from a newer feed: the log says once
+  that the local feed was not used. A shipped index of an older feed is
+  replaced by a build of the local feed, once after each update. A local
+  feed that cannot be dated is built, as is one of the same date. A local
+  feed past its `feed_end_date` is never built over a shipped index.
+- **You choose.** An upload or the `rebuild_mav_index` action always builds
+  the local feed, whatever its age. That index stays at the next starts; the
+  next update that ships a newer feed's index replaces it again.
 
 MÁV's own `shapes.txt` is coarse: an 8 km chord cuts across the fields
 between Székesfehérvár and Kelenföld. A route that misses one of its
