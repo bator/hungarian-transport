@@ -949,3 +949,63 @@ def test_state_temp_file_is_not_the_update_scripts_to_sweep(tmp_path: Path, monk
     mav._write_state(state_file, {"source": [1, 2]})
     assert mav._read_state(state_file) == {"source": [1, 2]}
     assert sorted(p.name for p in folder.iterdir()) == [mav.STATE_NAME]
+
+
+def _ship_index(www: Path, feed: str) -> bytes:
+    """What a release unpacks into www/: a pfaedle-built index of feed."""
+    mav_index.write({"v": mav_index.SCHEMA, "feed": feed, "st": [], "p": [], "n": {}, "l": {}}, www / mav.INDEX_NAME)
+    return (www / mav.INDEX_NAME).read_bytes()
+
+
+async def test_shipped_index_with_and_without_a_local_feed(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch
+) -> None:
+    """Releases ship www/mav-index.json.gz. Without a local feed it is used
+    as it is (no build, no Repairs issue); a local feed of another version
+    still builds and wins; a HACS update that unpacks the shipped index over
+    it costs one build, not one at every start."""
+    spawned: list[tuple] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def spying_exec(*args, **kwargs):
+        spawned.append(args)
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(mav.asyncio, "create_subprocess_exec", spying_exec)
+    issues = ir.async_get(hass)
+    shipped = _ship_index(card_assets, "20261023.release")
+
+    await _setup(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert not spawned
+    assert (card_assets / mav.INDEX_NAME).read_bytes() == shipped
+    assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+    assert not async_get_persistent_notifications(hass)
+    assert not mav.state_path(hass).exists()
+
+    # A local feed of another version: built at the next start, and it wins.
+    _write_feed(mav_source, "local-feed")
+    await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 1
+    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "local-feed"
+    await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 1
+
+    # A HACS update unpacks the next release's index over it: one build
+    # brings the local feed back, the starts after it build nothing.
+    _ship_index(card_assets, "20261030.release")
+    await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 2
+    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "local-feed"
+    for _ in range(2):
+        await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 2
+
+    # A release index of the local feed's own version (pfaedle-matched, where
+    # the local zip may have MÁV's coarse shapes) is kept, at every start.
+    same = _ship_index(card_assets, "local-feed")
+    for _ in range(2):
+        await mav.async_build_if_needed(hass, card_assets)
+    assert len(spawned) == 2
+    assert (card_assets / mav.INDEX_NAME).read_bytes() == same
+    assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None

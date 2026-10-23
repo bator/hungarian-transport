@@ -91,10 +91,10 @@ it from the dashboard. Keep it in the integration.
 | --- | --- |
 | Budapest buses, trams, metro, HÉV, suburban trains | [BKK FUTÁR](https://opendata.bkk.hu/), live |
 | MÁV trains | BKK FUTÁR, MÁV ELVIRA (platforms, seat reservations) |
-| Volán coaches | [KTI](https://gtfs.kti.hu/) national GTFS, shipped with each release |
+| Volán coaches | National Volán GTFS ([opendata.utas.hu](https://opendata.utas.hu/), [KTI](https://gtfs.kti.hu/) as fallback), shipped with each release |
 | City networks | Each operator's GTFS, shipped with each release |
 | Stop search, transfers | [Transitous](https://transitous.org/), BKK FUTÁR as fallback |
-| Train routes on the map (optional) | [MÁV GTFS][timetables-mav] you add yourself |
+| MÁV train routes on the map | [MÁV GTFS][timetables-mav] matched to the OSM rails with pfaedle, shipped with each release built with the MÁV secrets; or add the feed yourself |
 
 A weekly job publishes a new patch release when a timetable changed; a
 published release never changes. To refresh the timetables daily on your own

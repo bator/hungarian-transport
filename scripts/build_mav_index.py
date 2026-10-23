@@ -43,6 +43,22 @@ def _feed_url() -> str:
     return (os.environ.get("MAV_GTFS_URL") or "").strip()
 
 
+def _feed_auth() -> tuple[str, str] | None:
+    """MAV_GTFS_USER / MAV_GTFS_PASSWORD (environment or .env): HTTP Basic
+    credentials for MAV_GTFS_URL, MÁV's own registered-user download. Sent
+    over https only, to the URL's host only (never on a redirect); never in
+    a URL, a log line, an error or state.json. Only one of the two set is
+    an error, not an anonymous download."""
+    load_env_files()
+    user = (os.environ.get("MAV_GTFS_USER") or "").strip()
+    password = os.environ.get("MAV_GTFS_PASSWORD") or ""
+    if not user and not password:
+        return None
+    if not user or not password:
+        raise ValueError("set both MAV_GTFS_USER and MAV_GTFS_PASSWORD, or neither")
+    return user, password
+
+
 def _is_gtfs_dir(path: Path) -> bool:
     if not path.is_dir():
         return False
@@ -50,11 +66,14 @@ def _is_gtfs_dir(path: Path) -> bool:
     return "routes.txt" in names and "trips.txt" in names and "shapes.txt" in names
 
 
-def refresh_from_url(url: str, dest: Path, *, max_age_s: float = URL_MAX_AGE_S) -> BaseException | None:
+def refresh_from_url(
+    url: str, dest: Path, *, max_age_s: float = URL_MAX_AGE_S, auth: tuple[str, str] | None = None
+) -> BaseException | None:
     """Fetch MAV_GTFS_URL into dest unless dest is recent. An unchanged zip
     keeps its file (and mtime), so the index is not rebuilt for nothing; a
     failed download keeps the old zip and returns its error (the old mtime
-    stays, so the next run tries again). Without an old zip it raises."""
+    stays, so the next run tries again). Without an old zip it raises.
+    auth: HTTP Basic credentials (see _feed_auth)."""
     try:
         if time.time() - dest.stat().st_mtime < max_age_s:
             return None
@@ -65,8 +84,11 @@ def refresh_from_url(url: str, dest: Path, *, max_age_s: float = URL_MAX_AGE_S) 
     os.close(fd)
     tmp = Path(tmp_name)
     try:
-        print("downloading MÁV GTFS")
-        download_feed(url, tmp)
+        print("downloading MÁV GTFS" + (" (HTTP Basic auth)" if auth else ""))
+        if auth is not None:
+            download_feed(url, tmp, auth=auth)
+        else:
+            download_feed(url, tmp)
         if dest.is_file() and filecmp.cmp(tmp, dest, shallow=False):
             print("MÁV GTFS unchanged")
             return None
@@ -105,7 +127,16 @@ def resolve_mav_feed(base: Path, *, url_errors: list[BaseException] | None = Non
     url = _feed_url()
     dest = base / "mav-gtfs.zip"
     if url:
-        err = refresh_from_url(url, dest)
+        try:
+            auth = _feed_auth()
+        except ValueError as err:
+            # Like a failed download: an older copy stays in use.
+            if not dest.is_file():
+                raise
+            if url_errors is not None:
+                url_errors.append(err)
+            return dest
+        err = refresh_from_url(url, dest, auth=auth)
         if err is not None and url_errors is not None:
             url_errors.append(err)
         return dest
@@ -115,7 +146,7 @@ def resolve_mav_feed(base: Path, *, url_errors: list[BaseException] | None = Non
             return p
     raise FileNotFoundError(
         "MÁV GTFS not found. Set MAV_PFAEDLE_DIR / MAV_GTFS_ZIP / MAV_GTFS_URL "
-        "or place mav-gtfs.zip here."
+        "(with MAV_GTFS_USER / MAV_GTFS_PASSWORD for MÁV's own download) or place mav-gtfs.zip here."
     )
 
 

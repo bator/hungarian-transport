@@ -154,6 +154,11 @@ with tempfile.TemporaryDirectory() as tmp:
 
 
 
+VOLAN_FALLBACK = "https://kti-fallback.example/volan.zip"
+# A developer's .env must not move the Volán URL under the tests.
+os.environ["VOLAN_GTFS_URL"] = ""
+
+
 class Fake:
     """Stands in for the network and the builders inside update_volan_index.main()."""
 
@@ -244,6 +249,9 @@ class Fake:
         uvi.build_city_index = self.build_city_index
         uvi.notify = lambda *_a, **_k: None
         uvi.GTFS_URL = "https://kti.example/volan.zip"
+        # The fallback answers only where a test says so.
+        uvi.VOLAN_FALLBACK_URL = VOLAN_FALLBACK
+        self.broken.add(VOLAN_FALLBACK)
         uvi.CITY_FEEDS = [{
             "id": "a",
             "file": "a.zip",
@@ -372,6 +380,62 @@ with tempfile.TemporaryDirectory() as tmp:
           code == uvi.REPORTED and fake.city_builds == builds + 1 and fake.state()["cities"]["a"]["etag"] == "a-5"
           and len(sent) == 1 and "HEAD" in sent[0], repr((code, sent, fake.state()["cities"])))
     fake.broken.discard("https://kti.example/volan.zip")
+
+    # The primary Volán URL down, the fallback up: no report, the fallback's
+    # zip is downloaded, and its HEAD fingerprint is the one recorded.
+    sent.clear()
+    real_build_index = uvi.build_index
+
+    def fake_build_index(zpath: Path, out: Path) -> dict:
+        out.write_bytes(gzip.compress(b'{"v":29}'))
+        return {"feed_version": zpath.read_bytes().decode("latin-1"), "trips": 46000, "stops": 9000}
+
+    uvi.build_index = fake_build_index
+    fake.broken.add("https://kti.example/volan.zip")
+    fake.broken.discard(VOLAN_FALLBACK)
+    fake.etag[VOLAN_FALLBACK] = "fallback-1"
+    heads = len(fake.heads)
+    code = fake.run()
+    check("a Volán primary that is down falls back to the second URL",
+          code == 0 and not any("sikertelen" in m for m in sent) and VOLAN_FALLBACK in fake.downloads[-2:]
+          and [u for u, _kw in fake.heads[heads:]][:2] == ["https://kti.example/volan.zip", VOLAN_FALLBACK]
+          and fake.state()["volan"].get("etag") == "fallback-1",
+          repr((code, sent, fake.downloads[-2:], fake.state()["volan"])))
+    # HEAD answers on the primary but its download fails: the fallback's
+    # zip is used, and no fingerprint is kept for it, so the next run checks.
+    fake.broken.discard("https://kti.example/volan.zip")
+    fake.etag["https://kti.example/volan.zip"] = "volan-9"
+    real_download = fake.download_feed
+    failing_primary: list[str] = []
+
+    def primary_get_fails(url: str, dest: Path, **kw) -> dict:
+        if url == "https://kti.example/volan.zip":
+            failing_primary.append(url)
+            raise OSError("reset")
+        return real_download(url, dest, **kw)
+
+    fake.download_feed = primary_get_fails
+    code = fake.run()
+    check("a failed primary download is taken from the fallback",
+          code == 0 and failing_primary and VOLAN_FALLBACK in fake.downloads[-2:]
+          and fake.state()["volan"].get("etag") != "volan-9", repr((code, failing_primary, fake.state()["volan"])))
+    fake.download_feed = real_download
+    os.environ["VOLAN_GTFS_URL"] = "https://override.example/volan.zip"
+    fake.etag["https://override.example/volan.zip"] = "override-1"
+    heads = len(fake.heads)
+    code = fake.run()
+    check("VOLAN_GTFS_URL replaces the primary URL",
+          code == 0 and fake.heads[heads][0] == "https://override.example/volan.zip"
+          and "https://kti.example/volan.zip" not in [u for u, _kw in fake.heads[heads:]]
+          and "https://override.example/volan.zip" in fake.downloads[-2:], repr((code, fake.heads[heads:])))
+    check("the Volán URL list: override, then the fallback once",
+          uvi.volan_urls(uvi.GTFS_URL, VOLAN_FALLBACK) == ["https://override.example/volan.zip", VOLAN_FALLBACK])
+    os.environ["VOLAN_GTFS_URL"] = ""
+    fake.broken.add(VOLAN_FALLBACK)
+    fake.etag["https://kti.example/volan.zip"] = "volan-1"
+    fake.run()
+    uvi.build_index = real_build_index
+    sent.clear()
 
     # A Volán rebuild that fails is reported; the city feeds go on, but the
     # new Volán zip does not trigger a city rebuild of its own.
