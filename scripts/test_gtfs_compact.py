@@ -1263,8 +1263,9 @@ def tls_checks(fake_gai, answers: list[str]) -> bool:
         srv = _serve("127.0.0.1", tls=server_ctx)
         port = srv.server_address[1]
         client_ctx = ssl.create_default_context(cafile=str(cert))
-        opener = urllib.request.build_opener(gc._PublicRedirectHandler(), gc._PublicHTTPHandler(),
-                                             gc._PublicHTTPSHandler(context=client_ctx))
+        # no proxy from the environment: the test server is local
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), gc._PublicRedirectHandler(),
+                                             gc._PublicHTTPHandler(), gc._PublicHTTPSHandler(context=client_ctx))
         try:
             answers[:] = ["127.0.0.1"]
             with opener.open(f"https://pinned.test:{port}/f.zip", timeout=10) as resp:
