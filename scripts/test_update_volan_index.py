@@ -45,12 +45,13 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         failed += 1
 
 
-def write_index(path: Path, schema: int, feed: str, pad: int = 0) -> None:
+def write_index(path: Path, schema: int, feed: str, pad: int = 0, built: int = 0) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     # Incompressible padding, so sizes differ after gzip as well.
     rnd = random.Random(pad)
     body = {"v": schema, "feed": feed, "pad": "".join(rnd.choice("0123456789abcdef") for _ in range(pad))}
-    path.write_bytes(gzip.compress(json.dumps(body, separators=(",", ":")).encode(), mtime=0))
+    # built: the gzip header's mtime, as mav_index.write stamps the build time.
+    path.write_bytes(gzip.compress(json.dumps(body, separators=(",", ":")).encode(), mtime=built))
 
 
 def feed_of(path: Path) -> str:
@@ -116,6 +117,16 @@ with tempfile.TemporaryDirectory() as tmp:
     age(mav_www, 3600)
     restored = restore_hacs_indexes(base, www)
     check("later durable mav build of another feed is restored",
+          "mav-index.json.gz" in restored and feed_of(mav_www) == "20261020", repr(restored))
+
+    # HACS unpacked the Monday release just now (a fresh st_mtime), but it was
+    # built before this morning's durable copy: the build time in the gzip
+    # header decides, and the newer durable build is restored.
+    write_index(mav_base, 2, "20261020", pad=50_000, built=1_700_000_000 + 7 * 3600)
+    age(mav_base, 3600)
+    write_index(mav_www, 2, "20261013", built=1_700_000_000)
+    restored = restore_hacs_indexes(base, www)
+    check("a shipped mav index unpacked later but built earlier does not beat the durable copy",
           "mav-index.json.gz" in restored and feed_of(mav_www) == "20261020", repr(restored))
 
 

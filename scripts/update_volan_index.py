@@ -257,6 +257,22 @@ def index_feed(path: Path) -> str:
     return m.group(1).decode("utf-8", errors="replace") if m else ""
 
 
+def _built_at(path: Path) -> float:
+    """When a gzipped index was built: the gzip header's mtime, which a copy
+    and a HACS unpack keep, unlike st_mtime (the unpack time). st_mtime when
+    the header carries none (mtime=0, as the Volán and city indexes are written)."""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(8)
+    except OSError:
+        head = b""
+    if len(head) == 8 and head[:2] == b"\x1f\x8b":
+        built = int.from_bytes(head[4:8], "little")
+        if built:
+            return float(built)
+    return path.stat().st_mtime
+
+
 def served_mav_wins(durable: Path, served: Path) -> bool:
     """Whether the served MÁV index beats the durable copy.
 
@@ -264,12 +280,12 @@ def served_mav_wins(durable: Path, served: Path) -> bool:
     feed, without touching the durable copy. Of two builds of the same feed
     the larger, pfaedle-based one wins (an official zip gives a stop-sequence
     index). Of two different feeds, or when a feed version is unknown, the
-    later build wins.
+    later build wins (by build time, not by when HACS unpacked the served one).
     """
     feed = index_feed(durable)
     if feed and feed == index_feed(served):
         return served.stat().st_size + 4096 >= durable.stat().st_size
-    return served.stat().st_mtime > durable.stat().st_mtime
+    return _built_at(served) > _built_at(durable)
 
 
 def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
