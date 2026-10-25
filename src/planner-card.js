@@ -1,4 +1,4 @@
-import { DEFAULT_MINUTES_AFTER, MINUTES_AFTER_PRESETS, clampMinutesAfter, departureStillDue, pad2, tzEpochSec, tzFields, tzShiftYmd } from './config.js';
+import { DEFAULT_MINUTES_AFTER, MINUTES_AFTER_PRESETS, clampMinutesAfter, configDataKey, departureStillDue, normalizeCardConfig, pad2, tzEpochSec, tzFields, tzShiftYmd } from './config.js';
 import { BKKHopCard, NARROW_ROWS_PX } from './hop-card.js';
 import { t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
@@ -88,6 +88,23 @@ export class BKKPlannerCard extends BKKHopCard {
     const idle = !(planned || this._journey || this._journeyLoading || (this._rows && this._rows.length));
     const stale = !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
     return idle || stale;
+  }
+
+  /* The editor (every stop pick) or a dashboard reload hands the card a new
+     pair: the itinerary on screen, and a journey map still opening, belong
+     to the old one. The base class drops the rows; this drops the plan. */
+  setConfig(config) {
+    const prevKey = this._configDataKey != null ? configDataKey(this._config) : null;
+    if (prevKey != null && prevKey !== configDataKey(normalizeCardConfig(config))) {
+      this._pairGen += 1;
+      this._journey = null;
+      this._journeys = [];
+      this._journeyKey = '';
+      this._journeyLoading = false;
+      this._journeysDone = false;
+      this._openJourney = 0;
+    }
+    super.setConfig(config);
   }
 
   /* A new origin, destination or a swap: whatever the running reload or
@@ -587,22 +604,26 @@ export class BKKPlannerCard extends BKKHopCard {
        replace the new pair's journey, paint, or open a map. A reload of
        the same pair (a key showing up, back on the view) does not. */
     const gen = this._pairGen;
+    /* The plan this open draws. A "Mikor" change meanwhile (_applyWhen)
+       drops it for one still to come: without a plan the map would be a
+       bare line from origin to destination under a summary of nothing. */
+    let journey = this._journey;
     const stale = () => {
       if (this._mapStale(seq)) return true;
-      if (gen === this._pairGen) return false;
+      if (gen === this._pairGen && !(journey && !this._journey)) return false;
       this._openingMap = '';
       return true;
     };
     try {
-      await BkkLib.fillJourneyShapes(this._journey);
+      await BkkLib.fillJourneyShapes(journey);
     } catch (_e) { /* draw the endpoint fallback */ }
     if (stale()) return;
-    let segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
+    let segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
     /* Only "now" plans again for a map: a chosen time's open itinerary is
        one of several, and a plan for now would replace it with another. */
     if (!segs.length && cfg.stopId && cfg.destName && !this._timed()) {
       try {
-        const journey = await BkkLib.withIndexes(this._config).planJourney(
+        const planned = await BkkLib.withIndexes(this._config).planJourney(
           this._apiKey(),
           { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon },
           { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
@@ -610,15 +631,15 @@ export class BKKPlannerCard extends BKKHopCard {
           { minutesAfter: clampMinutesAfter(cfg.minutesAfter) },
         );
         if (stale()) return;
-        if (journey) this._journey = journey;
+        if (planned) journey = this._journey = planned;
         try {
-          await BkkLib.fillJourneyShapes(this._journey);
+          await BkkLib.fillJourneyShapes(journey);
         } catch (_e) { /* draw the endpoint fallback */ }
         if (stale()) return;
         /* The card's own box shows the journey the map now draws, not the
            one this replan replaced. */
-        if (journey) this._paintJourney();
-        segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
+        if (planned) this._paintJourney();
+        segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
       } catch (_e) { /* fall through to the no-geometry notice */ }
     }
     if (stale()) return;
@@ -641,10 +662,10 @@ export class BKKPlannerCard extends BKKHopCard {
     overlay.className = 'ht-map-overlay';
     const title = `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
     const footText = t(lang, 'plannerJourneySummary', [
-      this._journey && this._journey.durationMin,
-      this._journey && this._journey.transfers,
-      this._journey && this._journey.walkMin,
-      (this._journey && this._journey.waitMin) || 0,
+      journey && journey.durationMin,
+      journey && journey.transfers,
+      journey && journey.walkMin,
+      (journey && journey.waitMin) || 0,
     ]);
     overlay.innerHTML = `
       <style>${this._mapChromeCss()}</style>

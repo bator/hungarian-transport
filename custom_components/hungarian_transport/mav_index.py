@@ -434,6 +434,9 @@ def write(index: dict[str, Any], out: Path) -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=out.name + ".", dir=str(out.parent))
     try:
+        # mkstemp makes the file 0600; the index is served, and travels into
+        # the release zip, so it gets the mode a plain file would have.
+        os.fchmod(fd, 0o644)
         with os.fdopen(fd, "wb") as fh:
             fh.write(gzip.compress(raw, compresslevel=9))
         os.replace(tmp, out)

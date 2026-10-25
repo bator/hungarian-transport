@@ -121,10 +121,9 @@ class _RateLimit:
 
 
 def station_code_digits(value: str) -> str:
-    digits = re.sub(r"\D", "", str(value or ""))
-    if len(digits) >= 9:
-        return digits[-9:]
-    return digits
+    """The digits of a station code (BKK_005501016 -> 005501016); the caller
+    checks there are nine, so a stray extra digit is refused, not dropped."""
+    return re.sub(r"\D", "", str(value or ""))
 
 
 def _iso_dt(value, tz):

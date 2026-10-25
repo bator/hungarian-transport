@@ -135,7 +135,9 @@ with tempfile.TemporaryDirectory() as tmp_name:
             **env: str) -> subprocess.CompletedProcess:
         e = {k: v for k, v in os.environ.items()
              if k not in ("MAV_GTFS_USER", "MAV_GTFS_PASSWORD", "MAV_GTFS_URL", "MAV_GTFS_ZIP", "OSM_PBF",
-                          "GITHUB_STEP_SUMMARY", "PFAEDLE_TIMEOUT", "MAV_INDEX_OUT")}
+                          "GITHUB_STEP_SUMMARY", "PFAEDLE_TIMEOUT", "MAV_INDEX_OUT")
+             # a proxy in the developer's shell would take curl past connect-to
+             and not k.lower().endswith("_proxy")}
         e["PATH"] = os.pathsep.join([str(p) for p in path_extra] + [str(stub), os.environ["PATH"]])
         e["CURL_HOME"] = str(curl_home)
         e["DOWNLOAD_RETRY_DELAY"] = "1"
