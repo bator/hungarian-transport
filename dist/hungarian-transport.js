@@ -8925,6 +8925,22 @@ var BKKPlannerCard = class extends BKKHopCard {
     const stale = !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
     return idle || stale;
   }
+  /* The editor (every stop pick) or a dashboard reload hands the card a new
+     pair: the itinerary on screen, and a journey map still opening, belong
+     to the old one. The base class drops the rows; this drops the plan. */
+  setConfig(config) {
+    const prevKey = this._configDataKey != null ? configDataKey(this._config) : null;
+    if (prevKey != null && prevKey !== configDataKey(normalizeCardConfig(config))) {
+      this._pairGen += 1;
+      this._journey = null;
+      this._journeys = [];
+      this._journeyKey = "";
+      this._journeyLoading = false;
+      this._journeysDone = false;
+      this._openJourney = 0;
+    }
+    super.setConfig(config);
+  }
   /* A new origin, destination or a swap: whatever the running reload or
      journey lookup still fetches belongs to the old pair and must not paint. */
   _invalidatePlan() {
@@ -9400,21 +9416,22 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._openingMap = "journey";
     const seq = this._mapSeq;
     const gen = this._pairGen;
+    let journey = this._journey;
     const stale = () => {
       if (this._mapStale(seq)) return true;
-      if (gen === this._pairGen) return false;
+      if (gen === this._pairGen && !(journey && !this._journey)) return false;
       this._openingMap = "";
       return true;
     };
     try {
-      await BkkLib.fillJourneyShapes(this._journey);
+      await BkkLib.fillJourneyShapes(journey);
     } catch (_e) {
     }
     if (stale()) return;
-    let segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
+    let segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
     if (!segs.length && cfg.stopId && cfg.destName && !this._timed()) {
       try {
-        const journey = await BkkLib.withIndexes(this._config).planJourney(
+        const planned = await BkkLib.withIndexes(this._config).planJourney(
           this._apiKey(),
           { id: cfg.stopId, name: cfg.stopName || "", lat: cfg.stopLat, lon: cfg.stopLon },
           { id: cfg.destStopId || "", name: cfg.destName || "", lat: cfg.destLat, lon: cfg.destLon },
@@ -9422,14 +9439,14 @@ var BKKPlannerCard = class extends BKKHopCard {
           { minutesAfter: clampMinutesAfter(cfg.minutesAfter) }
         );
         if (stale()) return;
-        if (journey) this._journey = journey;
+        if (planned) journey = this._journey = planned;
         try {
-          await BkkLib.fillJourneyShapes(this._journey);
+          await BkkLib.fillJourneyShapes(journey);
         } catch (_e) {
         }
         if (stale()) return;
-        if (journey) this._paintJourney();
-        segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
+        if (planned) this._paintJourney();
+        segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
       } catch (_e) {
       }
     }
@@ -9453,10 +9470,10 @@ var BKKPlannerCard = class extends BKKHopCard {
     overlay.className = "ht-map-overlay";
     const title = `${cfg.stopName || ""} → ${cfg.destName || ""}`;
     const footText = t(lang, "plannerJourneySummary", [
-      this._journey && this._journey.durationMin,
-      this._journey && this._journey.transfers,
-      this._journey && this._journey.walkMin,
-      this._journey && this._journey.waitMin || 0
+      journey && journey.durationMin,
+      journey && journey.transfers,
+      journey && journey.walkMin,
+      journey && journey.waitMin || 0
     ]);
     overlay.innerHTML = `
       <style>${this._mapChromeCss()}</style>

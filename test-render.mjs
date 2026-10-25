@@ -8888,4 +8888,58 @@ check('a named train does not match a headsign it only begins (Tisza, TiszaÃºjvÃ
   Lib._hass = null;
 }
 
+/* The editor hands the planner a new pair (every stop pick is a setConfig):
+   the old pair's itinerary must not stand under the new title while the new
+   board is still loading, and a journey map still opening for the old pair
+   must not plan or paint it. */
+{
+  const keep = { dep: Lib.departures, plan: Lib.planJourney, fill: Lib.fillTransitousIfEmpty, shapes: Lib.fillJourneyShapes };
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  document.body.appendChild(pc);
+  pc.hass = { states: {}, language: 'hu', connection: null, services: {} };
+  let release = () => {};
+  Lib.departures = () => new Promise((res) => { release = res; });
+  Lib.planJourney = async () => null;
+  Lib.fillTransitousIfEmpty = async (rows) => rows;
+  pc._loadDests = async () => {};
+  pc.setConfig({ language: 'hu', stopId: 'BKK_A', stopName: 'Alpha', destKey: 'beta', destName: 'Beta', destStopId: 'BKK_B' });
+  await settleTicks();
+  const ride = { walk: false, minutes: 10, meters: 0, label: 'OLDLINE', headsign: 'Beta', from: 'Alpha', to: 'Beta', color: '', text: '' };
+  pc._journey = { durationMin: 10, transfers: 0, walkMin: 0, waitMin: 0, legs: [ride] };
+  pc._journeyKey = 'old';
+  pc._paint();
+  const shownBefore = pc.shadowRoot.innerHTML.includes('OLDLINE');
+  const gen0 = pc._pairGen;
+  pc.setConfig({ language: 'hu', stopId: 'BKK_C', stopName: 'Gamma', destKey: 'delta', destName: 'Delta', destStopId: 'BKK_D' });
+  await settleTicks();
+  check('a new pair from the editor drops the old itinerary at once',
+    shownBefore && !pc.shadowRoot.innerHTML.includes('OLDLINE') && pc._journey === null && pc._pairGen === gen0 + 1,
+    JSON.stringify({ shownBefore, journey: !!pc._journey, gen: pc._pairGen - gen0 }));
+  const gen1 = pc._pairGen;
+  pc.setConfig({ language: 'hu', name: 'Only a title', stopId: 'BKK_C', stopName: 'Gamma', destKey: 'delta', destName: 'Delta', destStopId: 'BKK_D' });
+  await settleTicks();
+  check('a title edit keeps the plan state', pc._pairGen === gen1, String(pc._pairGen - gen1));
+  release([]);
+  await settleTicks();
+
+  /* "Mikor" changed while the journey map was still loading its shapes: the
+     plan it was drawing is gone, so no map opens (one for the new plan can). */
+  pc._journey = { durationMin: 10, transfers: 0, walkMin: 0, waitMin: 0, legs: [ride] };
+  const shapes = deferred();
+  Lib.fillJourneyShapes = () => shapes.p;
+  pc._ensureLeaflet = async () => { throw new Error('must not get this far'); };
+  const opening = pc._openJourneyMap();
+  pc._applyWhen({ mode: 'depart', at: Date.now() + 3600 * 1000 });
+  shapes.resolve();
+  await opening;
+  await settleTicks();
+  check('a "Mikor" change while the journey map opens leaves no map of a dropped plan',
+    !document.querySelector('.ht-map-overlay') && pc._openingMap === '' && pc._journey === null,
+    JSON.stringify({ overlay: !!document.querySelector('.ht-map-overlay'), opening: pc._openingMap }));
+  release([]);
+  await settleTicks();
+  pc.remove();
+  Object.assign(Lib, { departures: keep.dep, planJourney: keep.plan, fillTransitousIfEmpty: keep.fill, fillJourneyShapes: keep.shapes });
+}
+
 process.exit(failed ? 1 : 0);
