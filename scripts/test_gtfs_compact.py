@@ -149,6 +149,27 @@ def main() -> int:
         failed |= not check("unknown exception_type ignored", "20260103" not in parts[0]["a"][0] + parts[0]["r"][0])
         failed |= not check("route_type defaults to bus", trip[4] == 3, str(trip))
 
+        # A spreadsheet export: a space after every comma, and a short row.
+        # The card reads days.charAt(dow), so the mask must be seven clean digits.
+        padded_files = dict(files)
+        padded_files["calendar.txt"] = (
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+            "S1, 1, 0, 1, 0, 1, 0, 0, 20200101, 20991231\n"
+            "S2,1,1,1\n"
+        )
+        padded_files["calendar_dates.txt"] = "service_id,date,exception_type\nS1, 20260101, 1\nS1, 20260102, 2\n"
+        pz = gtfs_zip(padded_files)
+        try:
+            pparts = load_parts(pz, lambda short, *_: bool(short), op_id="szeged", op_name="Szeged — SZKT")
+            cal = pparts[0]["c"][0]
+            failed |= not check("padded calendar values are stripped to a seven-day mask and clean dates",
+                                cal == ["1010100", "20200101", "20991231"], str(cal))
+            failed |= not check("padded calendar_dates values are stripped",
+                                pparts[0]["a"][0] == ["20260101"] and pparts[0]["r"][0] == ["20260102"],
+                                str((pparts[0]["a"], pparts[0]["r"])))
+        finally:
+            pz.unlink()
+
         tram_files = dict(files)
         tram_files["routes.txt"] = "route_id,route_short_name,agency_id,route_type\nR1,2,A,0\n"
         tz = gtfs_zip(tram_files)

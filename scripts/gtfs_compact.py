@@ -30,8 +30,11 @@ from typing import Callable, Iterable, Iterator
 RoutePred = Callable[[str, str, str], bool]
 
 UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungarian-transport)"
-MAX_MEMBER = 500 * 1024 * 1024
-MAX_DOWNLOAD = 200 * 1024 * 1024
+# The big members (Volán stop_times.txt, shapes.txt: hundreds of MB) are
+# streamed, never read whole, so the member limit only has to stop a zip
+# bomb, not a feed that grew; the Volán zip itself is ~100 MB.
+MAX_MEMBER = 2 * 1024 * 1024 * 1024
+MAX_DOWNLOAD = 500 * 1024 * 1024
 # 28: trip rows carry GTFS route_type as a fifth element.
 # 29: stop coordinates ("g"), a shape reference per trip and "sh", the
 #     sharded shapes folder next to the index.
@@ -1176,8 +1179,10 @@ def _load_parts(
             sid = row.get("service_id") or ""
             if not sid:
                 continue
+            # Values as a spreadsheet export writes them (" 1"): stripped, one
+            # character per day, seven days; the card reads days.charAt(dow).
             days = "".join(
-                row.get(d, "0")
+                ((row.get(d) or "").strip()[:1] or "0")
                 for d in (
                     "monday",
                     "tuesday",
@@ -1188,7 +1193,11 @@ def _load_parts(
                     "sunday",
                 )
             )
-            cal[sid] = [days, row.get("start_date") or "20200101", row.get("end_date") or "20991231"]
+            cal[sid] = [
+                days,
+                (row.get("start_date") or "").strip() or "20200101",
+                (row.get("end_date") or "").strip() or "20991231",
+            ]
     except FileNotFoundError:
         pass
 
@@ -1197,12 +1206,13 @@ def _load_parts(
     try:
         for row in _open_csv(z, "calendar_dates.txt"):
             sid = row.get("service_id") or ""
-            date = row.get("date") or ""
+            date = (row.get("date") or "").strip()
             if not sid or not date:
                 continue
-            if row.get("exception_type") == "1":
+            kind = (row.get("exception_type") or "").strip()
+            if kind == "1":
                 ex_add[sid].append(date)
-            elif row.get("exception_type") == "2":
+            elif kind == "2":
                 ex_rem[sid].append(date)
     except FileNotFoundError:
         pass
