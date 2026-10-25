@@ -596,7 +596,12 @@ export class BKKPlannerCard extends BKKHopCard {
     const cfg = this._config || {};
     if (this._openingMap === 'journey') return;
     if (this._mapOverlay && this._openMapKey === 'journey') return;
+    /* Focus goes to the dialog's close button and comes back on close, as
+       with the vehicle map; left on the button under the backdrop, Tab
+       would walk the page behind the dialog. */
+    const back = this._mapReturnFocus || this._focusTarget();
     this._closeVehicleMap();
+    this._mapReturnFocus = back;
     this._openingMap = 'journey';
     const seq = this._mapSeq;
     /* A swap or a new origin or destination while this open still waits
@@ -685,7 +690,9 @@ export class BKKPlannerCard extends BKKHopCard {
       if (ev.key === 'Escape') this._closeVehicleMap();
     };
     document.addEventListener('keydown', this._onMapKey);
-    overlay.querySelector('.ht-map-close').addEventListener('click', () => this._closeVehicleMap());
+    const closeBtn = overlay.querySelector('.ht-map-close');
+    closeBtn.addEventListener('click', () => this._closeVehicleMap());
+    try { closeBtn.focus(); } catch (_e) { /* ignore */ }
     overlay.addEventListener('click', (ev) => {
       if (ev.target === overlay) this._closeVehicleMap();
     });

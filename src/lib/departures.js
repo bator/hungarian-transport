@@ -502,7 +502,8 @@ Object.assign(BkkLib, {
       let cityRows = await this.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
       cityRows = await BkkLib.fillTransitousIfEmpty(
         cityRows,
-        { id: stopId, name: opts.originName || '' },
+        /* With the stop's coordinates: by name alone "Kossuth tér" is any town's. */
+        { id: stopId, name: opts.originName || '', lat: opts.originLat, lon: opts.originLon },
         dest,
         opts,
       );
