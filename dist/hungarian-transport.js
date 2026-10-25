@@ -2183,9 +2183,10 @@ Object.assign(BkkLib, {
         toLon: Number.isFinite(toLon) ? toLon : void 0
       };
       if (!walk) {
+        const rail = /RAIL|SUBURBAN/.test(BkkLib.motisLegType(leg.mode));
         const badge = BkkLib.applyRailBadge({
           label: row.label,
-          color: row.color || "4477AA"
+          color: row.color || (rail ? "4477AA" : "")
         });
         row.color = String(badge.color || row.color).replace(/#/g, "");
         if (badge.text) row.text = String(badge.text).replace(/#/g, "");
@@ -5471,7 +5472,8 @@ Object.assign(BkkLib, {
       let cityRows = await this.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
       cityRows = await BkkLib.fillTransitousIfEmpty(
         cityRows,
-        { id: stopId, name: opts.originName || "" },
+        /* With the stop's coordinates: by name alone "Kossuth tér" is any town's. */
+        { id: stopId, name: opts.originName || "", lat: opts.originLat, lon: opts.originLon },
         dest,
         opts
       );
@@ -6393,7 +6395,8 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._probeKey();
     const stopId = this._config.stopId;
     const loading = this._destsLoading && this._loadingStop === stopId;
-    if (stopId && this._canLoadDests() && this._destsStale(stopId) && !loading) {
+    const failed = this._failedStop === stopId;
+    if (stopId && this._canLoadDests() && this._destsStale(stopId) && !loading && !failed) {
       this._loadDests();
     }
   }
@@ -7100,6 +7103,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     const seq = ++this._destSeq;
     this._destsLoading = true;
     this._loadingStop = stopId;
+    this._failedStop = "";
     const box = this._el("destHits");
     if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "destLoading")) + "</span>";
     try {
@@ -7127,6 +7131,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     } catch (err) {
       if (seq !== this._destSeq) return;
       this._loadedStop = "";
+      this._failedStop = stopId;
       this._error(err);
       if (box) box.innerHTML = "";
     } finally {
@@ -7189,12 +7194,13 @@ var BKKHopCardEditor = class extends HTMLElement {
       const dq2 = this._el("dq");
       if (box2) box2.innerHTML = "";
       if (dq2) dq2.value = stop.label || stop.name;
-      const key = stop.key || BkkLib.norm(stop.name);
+      const listKey = stop.key || BkkLib.norm(stop.name);
+      const key = BkkLib.splitCityPrefix(stop.name || "") ? BkkLib.norm(stop.name) : listKey;
       const patch2 = Object.assign({
         destKey: key,
         destName: stop.name,
         destStopId: stop.id ? String(stop.id) : void 0,
-        routeIds: (this._destRoutes[key] || []).slice()
+        routeIds: (this._destRoutes[listKey] || this._destRoutes[key] || []).slice()
       }, this._stopPatch(stop, "dest"));
       if (this._autoName() && this._config.stopName && this._titleIsAuto(this._config.name || "")) {
         patch2.name = this._pairTitle(this._config.stopName, stop.name);
@@ -8729,6 +8735,8 @@ ${this._stopPinCss()}
           dest,
           {
             originName: cfg.stopName || "",
+            originLat: cfg.stopLat,
+            originLon: cfg.stopLon,
             cache: this._tripCache || {},
             mode: this._departMode(),
             city: cfg.city || "",
@@ -9412,7 +9420,9 @@ var BKKPlannerCard = class extends BKKHopCard {
     const cfg = this._config || {};
     if (this._openingMap === "journey") return;
     if (this._mapOverlay && this._openMapKey === "journey") return;
+    const back = this._mapReturnFocus || this._focusTarget();
     this._closeVehicleMap();
+    this._mapReturnFocus = back;
     this._openingMap = "journey";
     const seq = this._mapSeq;
     const gen = this._pairGen;
@@ -9493,7 +9503,12 @@ var BKKPlannerCard = class extends BKKHopCard {
       if (ev.key === "Escape") this._closeVehicleMap();
     };
     document.addEventListener("keydown", this._onMapKey);
-    overlay.querySelector(".ht-map-close").addEventListener("click", () => this._closeVehicleMap());
+    const closeBtn = overlay.querySelector(".ht-map-close");
+    closeBtn.addEventListener("click", () => this._closeVehicleMap());
+    try {
+      closeBtn.focus();
+    } catch (_e) {
+    }
     overlay.addEventListener("click", (ev) => {
       if (ev.target === overlay) this._closeVehicleMap();
     });
