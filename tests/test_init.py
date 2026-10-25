@@ -231,6 +231,8 @@ async def test_elvira_service_shares_concurrent_requests(hass, aioclient_mock, f
     ("data", "key"),
     [
         ({"origin_code": "12345", "dest_code": DEST}, "invalid_station_code"),
+        # ten digits are not a code with a prefix: not silently cut to nine
+        ({"origin_code": "1" + DEST, "dest_code": DEST}, "invalid_station_code"),
         ({"origin_code": ORIGIN, "dest_code": ORIGIN}, "same_station"),
     ],
 )
