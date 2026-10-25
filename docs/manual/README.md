@@ -542,7 +542,7 @@ refresh: 45               # seconds, at least 20
 | `name` | origin → destination | Card title. |
 | `apiKey` | — | The card's own BKK key. Optional when the integration holds one. |
 | `mav` / `volan` / `helyi` | `false` | Mode. At most one is on; none means BKK. |
-| `city` | — | City network id for `helyi` (`szeged`, `pecs`, `miskolc`, `sopron`, …). |
+| `city` | — | City network id for `helyi` (`szeged`, `pecs`, `miskolc`, `szombathely`, …). |
 | `stopId`, `stopName` | — | Origin, set by the editor. |
 | `destKey`, `destName` | — | Destination, set by the editor. |
 | `routeIds` | filled by the editor | Lines that serve the destination. |

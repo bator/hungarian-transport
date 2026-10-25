@@ -128,6 +128,33 @@ def test_index_keeps_every_stop_pattern_and_passes_its_audit(tmp_path: Path) -> 
     assert report["trips"] == 3 and report["trips_bad"] == 0 and report["ok_ratio"] == 1.0
 
 
+def test_index_orders_stops_by_a_float_sequence_or_file_order(tmp_path: Path) -> None:
+    """A feed writing stop_sequence as 10.0 (or leaving it out) must not fall
+    back to the stop ids' alphabet: sequence order, else file order. Both trips
+    run Kelenföld -> Szombathely here, against the ids' order."""
+    feed_bytes = _feed_zip()
+    with zipfile.ZipFile(io.BytesIO(feed_bytes)) as z:
+        files = {name: z.read(name) for name in z.namelist()}
+    files["stop_times.txt"] = (
+        "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+        "T1,06:00:00,06:00:00,4,10.0\nT1,06:20:00,06:20:00,3,20.0\nT1,06:40:00,06:40:00,2,30.0\nT1,08:10:00,08:10:00,1,40.0\n"
+        "T2,07:30:00,07:30:00,4,\nT2,07:50:00,07:50:00,3,\nT2,08:10:00,08:10:00,2,\n"
+        "T3,09:00:00,09:00:00,2,1\nT3,09:20:00,09:20:00,3,2\nT3,09:40:00,09:40:00,4,3\n"
+    ).encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, data in files.items():
+            z.writestr(name, data)
+    feed = tmp_path / "mav.zip"
+    feed.write_bytes(buf.getvalue())
+    index = mav_index.build(feed)
+    names = sorted([index["st"][i][0] for i in v[1]] for v in index["n"]["905"])
+    assert names == sorted([
+        ["Budapest-Kelenföld", "Martonvásár", "Székesfehérvár", "Szombathely"],
+        ["Budapest-Kelenföld", "Martonvásár", "Székesfehérvár"],
+    ])
+
+
 def test_audit_after_build_reads_the_feed_once(tmp_path: Path, monkeypatch) -> None:
     """build hands its parsed feed to audit; stop_times.txt (the big one) is
     streamed once, not twice, and an index read back from disk still audits."""

@@ -1571,6 +1571,8 @@ ${this._stopPinCss()}
           this._apiKey(), cfg.stopId, cfg.routeIds, dest,
           {
             originName: cfg.stopName || '',
+            originLat: cfg.stopLat,
+            originLon: cfg.stopLon,
             cache: this._tripCache || {},
             mode: this._departMode(),
             city: cfg.city || '',

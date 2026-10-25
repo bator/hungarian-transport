@@ -231,19 +231,41 @@ def index_schema(path: Path) -> int | None:
     return int(m.group(1)) if m else None
 
 
+CARD_BUNDLE = "hungarian-transport.js"
+
+
+def card_schema(www: Path) -> int | None:
+    """The index schema the installed card reads, from the served bundle
+    (esbuild keeps the constant's name); None when there is no bundle or the
+    constant is not found."""
+    try:
+        m = re.search(rb"INDEX_SCHEMA = (\d+)", (www / CARD_BUNDLE).read_bytes())
+    except OSError:
+        return None
+    return int(m.group(1)) if m else None
+
+
 def schema_conflict(out: Path) -> str:
     """Why these scripts must not write out, or "": the index in place has a
     newer schema than they build (a release shipped it, and the copies in
-    /config/hungarian-transport are older). Rebuilding it would hand the card
-    an index format it no longer reads; restore_hacs_indexes keeps the
-    shipped one for the same reason."""
+    /config/hungarian-transport are older), or the installed card reads an
+    older schema than they build (scripts copied from main, not from the
+    installed release). Either way a rebuild would hand the card an index
+    format it does not read; restore_hacs_indexes keeps the shipped one for
+    the same reason."""
     shipped = index_schema(out) if out.is_file() else None
-    if shipped is None or shipped <= INDEX_SCHEMA:
-        return ""
-    return (
-        f"{out.name} has index schema {shipped}, these scripts build {INDEX_SCHEMA}:"
-        " not rebuilt, copy the new scripts to /config/hungarian-transport"
-    )
+    if shipped is not None and shipped > INDEX_SCHEMA:
+        return (
+            f"{out.name} has index schema {shipped}, these scripts build {INDEX_SCHEMA}:"
+            " not rebuilt, copy the new scripts to /config/hungarian-transport"
+        )
+    card = card_schema(out.parent)
+    if card is not None and card < INDEX_SCHEMA:
+        return (
+            f"these scripts build index schema {INDEX_SCHEMA}, the installed card reads {card}:"
+            f" {out.name} not rebuilt, copy the scripts of the installed release"
+        )
+    return ""
 
 
 def index_feed(path: Path) -> str:
@@ -323,6 +345,14 @@ def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
                 print(
                     f"warn keep shipped {name}: local schema {local_v} < {shipped_v};"
                     " copy the new scripts to /config/hungarian-transport",
+                    file=sys.stderr,
+                )
+                continue
+            card = card_schema(www)
+            if local_v is not None and card is not None and local_v > card:
+                print(
+                    f"warn keep shipped {name}: local schema {local_v} > the card's {card};"
+                    " copy the scripts of the installed release",
                     file=sys.stderr,
                 )
                 continue
@@ -412,8 +442,14 @@ def headers_of(resp) -> dict:
     return {
         "etag": (get("ETag") or "").strip(),
         "last_modified": last_modified,
-        "content_length": (get("Content-Length") or "").strip(),
+        # 0 is a HEAD without a body, not the zip's size: no fingerprint.
+        "content_length": _content_length(get("Content-Length")),
     }
+
+
+def _content_length(value: str | None) -> str:
+    cl = (value or "").strip()
+    return cl if cl.isdigit() and int(cl) > 0 else ""
 
 
 def merge_meta(head: dict, downloaded: dict | None, size: int | None) -> dict:
@@ -1041,14 +1077,16 @@ def _main() -> int:
         )
         lock.close()
 
+    # What was rebuilt or restored is said even when another index failed:
+    # the indexes fail independently, and the rest of the run went on.
+    if changed:
+        line = "updated " + "; ".join(changed)
+        print(line)
+        notify(f"Új menetrend: {line}")
     if exit_code:
         return exit_code
     if not changed:
         print("unchanged")
-        return 0
-    line = "updated " + "; ".join(changed)
-    print(line)
-    notify(f"Új menetrend: {line}")
     return 0
 
 

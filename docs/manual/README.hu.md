@@ -560,7 +560,7 @@ refresh: 45               # másodperc, legalább 20
 | `name` | forrás → cél | A kártya címe. |
 | `apiKey` | — | A kártya saját BKK kulcsa. Elhagyható, ha az integrációban van kulcs. |
 | `mav` / `volan` / `helyi` | `false` | Üzemmód. Legfeljebb egy lehet bekapcsolva; ha egyik sem, BKK. |
-| `city` | — | A helyi hálózat azonosítója `helyi` módhoz (`szeged`, `pecs`, `miskolc`, `sopron`, …). |
+| `city` | — | A helyi hálózat azonosítója `helyi` módhoz (`szeged`, `pecs`, `miskolc`, `szombathely`, …). |
 | `stopId`, `stopName` | — | A forrás, a szerkesztő állítja be. |
 | `destKey`, `destName` | — | A cél, a szerkesztő állítja be. |
 | `routeIds` | a szerkesztő tölti ki | A célba menő vonalak. |

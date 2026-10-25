@@ -155,6 +155,13 @@ g43 = {
 rows = rows_from_stationinfo([gocsej, gemenc, g43], [], tz, now, latest, "Kelenföld")
 by_num = {r["trainNumber"]: r for r in rows}
 
+# An odd "start" (not a string) must not crash the whole board: the
+# estimated start identifies the run instead.
+odd = dict(g43, start={"x": 1}, actualOrEstimatedStart=g43["start"])
+if not check("a non-string start field is skipped, not a TypeError",
+             [r["trainNumber"] for r in rows_from_stationinfo([odd], [], tz, now, latest, "Kelenföld")] == ["3511"]):
+    failed += 1
+
 if not check("origin rows emit without dest StationInfo", len(rows) == 3):
     failed += 1
 if not check(

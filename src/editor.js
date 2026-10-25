@@ -66,7 +66,10 @@ export class BKKHopCardEditor extends HTMLElement {
        already running for this stop must not be restarted. */
     const stopId = this._config.stopId;
     const loading = this._destsLoading && this._loadingStop === stopId;
-    if (stopId && this._canLoadDests() && this._destsStale(stopId) && !loading) {
+    /* Nor a load that failed for this stop: one request and one banner per
+       keystroke otherwise. A stop pick or a key showing up loads again. */
+    const failed = this._failedStop === stopId;
+    if (stopId && this._canLoadDests() && this._destsStale(stopId) && !loading && !failed) {
       this._loadDests();
     }
   }
@@ -832,6 +835,7 @@ export class BKKHopCardEditor extends HTMLElement {
     const seq = ++this._destSeq;
     this._destsLoading = true;
     this._loadingStop = stopId;
+    this._failedStop = '';
     const box = this._el('destHits');
     if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
     try {
@@ -864,6 +868,7 @@ export class BKKHopCardEditor extends HTMLElement {
     } catch (err) {
       if (seq !== this._destSeq) return;
       this._loadedStop = '';
+      this._failedStop = stopId;
       this._error(err);
       if (box) box.innerHTML = '';
     } finally {
@@ -933,12 +938,16 @@ export class BKKHopCardEditor extends HTMLElement {
       const dq = this._el('dq');
       if (box) box.innerHTML = '';
       if (dq) dq.value = stop.label || stop.name;
-      const key = stop.key || BkkLib.norm(stop.name);
+      const listKey = stop.key || BkkLib.norm(stop.name);
+      /* FUTÁR keys every town's bus station as "aut all": a key without its
+         town matches all of them, so a named town stays in the key (as the
+         planner's _pickDest does); the routes are looked up by the list key. */
+      const key = BkkLib.splitCityPrefix(stop.name || '') ? BkkLib.norm(stop.name) : listKey;
       const patch = Object.assign({
         destKey: key,
         destName: stop.name,
         destStopId: stop.id ? String(stop.id) : undefined,
-        routeIds: (this._destRoutes[key] || []).slice(),
+        routeIds: (this._destRoutes[listKey] || this._destRoutes[key] || []).slice(),
       }, this._stopPatch(stop, 'dest'));
       if (this._autoName() && this._config.stopName && this._titleIsAuto(this._config.name || '')) {
         patch.name = this._pairTitle(this._config.stopName, stop.name);

@@ -315,9 +315,10 @@ def _load(feed: Feed):
         tid = row.get("trip_id") or ""
         if tid in trips:
             try:
-                n = int(row.get("stop_sequence") or 0)
+                n = int(float(row.get("stop_sequence") or ""))
             except ValueError:
-                n = 0
+                # No usable sequence: file order, never the stop id's alphabet.
+                n = seqs[tid][-1][0] + 1 if seqs[tid] else 0
             seqs[tid].append((n, row.get("stop_id") or ""))
     trip_stops: dict[str, tuple[str, ...]] = {}
     for tid, rows in seqs.items():

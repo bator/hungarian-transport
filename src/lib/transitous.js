@@ -840,9 +840,12 @@ Object.assign(BkkLib, {
         toLon: Number.isFinite(toLon) ? toLon : undefined,
       };
       if (!walk) {
+        /* The rail default stands in for a missing colour on trains only; a
+           bus or tram without one keeps "" and the card's own default. */
+        const rail = /RAIL|SUBURBAN/.test(BkkLib.motisLegType(leg.mode));
         const badge = BkkLib.applyRailBadge({
           label: row.label,
-          color: row.color || '4477AA',
+          color: row.color || (rail ? '4477AA' : ''),
         });
         row.color = String(badge.color || row.color).replace(/#/g, '');
         if (badge.text) row.text = String(badge.text).replace(/#/g, '');

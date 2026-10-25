@@ -8942,4 +8942,64 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   Object.assign(Lib, { departures: keep.dep, planJourney: keep.plan, fillTransitousIfEmpty: keep.fill, fillJourneyShapes: keep.shapes });
 }
 
+/* The editor's destination pick: FUTÁR keys every town's bus station as
+   "aut all"; saved as destKey, it matched the first bus station on any trip.
+   The town stays in the key, the routes come from the list's own key. */
+{
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  ed._loadDests = async () => {};
+  let last = null;
+  ed.addEventListener('config-changed', (ev) => { last = ev.detail.config; });
+  ed.setConfig({ language: 'hu', volan: true, stopId: 'BKK_NEP', stopName: 'Népliget' });
+  ed._destRoutes = { 'aut all': ['BKK_1205'] };
+  ed._pickStop({ id: 'BKK_GY', key: 'aut all', name: 'Győr, autóbusz-állomás' }, 'dest');
+  check('the editor keeps the town in a bus-station destination key, with the list key’s routes',
+    last && last.destKey === Lib.norm('Győr, autóbusz-állomás') && last.destKey !== 'aut all'
+    && JSON.stringify(last.routeIds) === '["BKK_1205"]',
+    JSON.stringify(last));
+  check('that key no longer matches another town’s bus station',
+    !Lib.nameEq('Tatabánya, autóbusz-állomás', last.destKey) && Lib.nameEq('Győr, autóbusz-állomás', last.destKey),
+    last.destKey);
+  ed.remove();
+}
+
+/* A failed destination load is not retried on every keystroke in the name field. */
+{
+  const keep = Lib.reachableDests;
+  let calls = 0;
+  Lib.reachableDests = async () => { calls += 1; throw new Error('FUTÁR down'); };
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  ed._canLoadDests = () => true;
+  ed.setConfig({ language: 'hu', volan: true, stopId: 'volan_1', stopName: 'Győr' });
+  await settleTicks();
+  const first = calls;
+  ed.setConfig({ language: 'hu', volan: true, stopId: 'volan_1', stopName: 'Győr', name: 'M' });
+  ed.setConfig({ language: 'hu', volan: true, stopId: 'volan_1', stopName: 'Győr', name: 'Mu' });
+  await settleTicks();
+  const afterTyping = calls;
+  ed.setConfig({ language: 'hu', volan: true, stopId: 'volan_2', stopName: 'Pápa', name: 'Mu' });
+  await settleTicks();
+  check('a failed destination load is tried once per stop, not once per keystroke',
+    first === 1 && afterTyping === 1 && calls === 2, JSON.stringify({ first, afterTyping, calls }));
+  ed.remove();
+  Lib.reachableDests = keep;
+}
+
+/* A MOTIS bus leg without a route colour is not painted in the rail blue. */
+{
+  const j = Lib.motisJourney({ startTime: '2026-10-19T06:00:00Z', legs: [
+    { mode: 'BUS', routeShortName: '7', from: { name: 'A' }, to: { name: 'B' }, startTime: '2026-10-19T06:05:00Z', endTime: '2026-10-19T06:25:00Z', duration: 1200 },
+    { mode: 'RAIL', routeShortName: '905', from: { name: 'B' }, to: { name: 'C' }, startTime: '2026-10-19T06:30:00Z', endTime: '2026-10-19T07:25:00Z', duration: 3300 },
+  ] });
+  check('a bus leg without a colour keeps none, a train leg gets the rail default',
+    j && j.legs.length === 2 && j.legs[0].color === '' && j.legs[1].color.toLowerCase() === '4477aa',
+    JSON.stringify(j && j.legs.map((l) => l.color)));
+}
+
 process.exit(failed ? 1 : 0);

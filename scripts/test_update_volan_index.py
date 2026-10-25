@@ -82,6 +82,19 @@ with tempfile.TemporaryDirectory() as tmp:
           restored == [] and feed_of(www / "volan-index.json.gz") == "release-new-schema",
           repr(restored))
 
+    # Scripts copied from main built a durable index the installed card
+    # (schema 26 in its bundle) does not read: the shipped one stays.
+    write_index(www / "volan-index.json.gz", 26, "release-old-card")
+    (www / "hungarian-transport.js").write_text("var INDEX_SCHEMA = 26;\n")
+    restored = restore_hacs_indexes(base, www)
+    check("a durable index newer than the installed card's schema is not restored over the shipped one",
+          restored == [] and feed_of(www / "volan-index.json.gz") == "release-old-card", repr(restored))
+    (www / "hungarian-transport.js").write_text("var INDEX_SCHEMA = 27;\n")
+    restored = restore_hacs_indexes(base, www)
+    check("with a card that reads it, the durable index is restored again",
+          restored == ["volan-index.json.gz"] and feed_of(www / "volan-index.json.gz") == "local", repr(restored))
+    (www / "hungarian-transport.js").unlink()
+
     mav_base, mav_www = base / "mav-index.json.gz", www / "mav-index.json.gz"
 
     def age(path: Path, seconds: int) -> None:
@@ -389,9 +402,10 @@ with tempfile.TemporaryDirectory() as tmp:
     fake.etag["https://public.example/a.zip"] = "a-5"
     builds = fake.city_builds
     code = fake.run()
-    check("a Volán HEAD failure is reported and the city feeds still update",
+    check("a Volán HEAD failure is reported and the city feeds still update, which is announced too",
           code == uvi.REPORTED and fake.city_builds == builds + 1 and fake.state()["cities"]["a"]["etag"] == "a-5"
-          and len(sent) == 1 and "HEAD" in sent[0], repr((code, sent, fake.state()["cities"])))
+          and len(sent) == 2 and "HEAD" in sent[0] and sent[1].startswith("Új menetrend: updated city"),
+          repr((code, sent, fake.state()["cities"])))
     fake.broken.discard("https://kti.example/volan.zip")
 
     # The primary Volán URL down, the fallback up: no report, the fallback's
@@ -519,7 +533,8 @@ with tempfile.TemporaryDirectory() as tmp:
     code = fake.run()
     check("a failed Volán rebuild is reported and the city feeds still update",
           code == uvi.REPORTED and fake.city_builds == builds + 1 and fake.state()["cities"]["a"]["etag"] == "a-6"
-          and fake.state()["volan"]["etag"] == "volan-1" and len(sent) == 1 and "volan rebuild" in sent[0],
+          and fake.state()["volan"]["etag"] == "volan-1" and len(sent) == 2 and "volan rebuild" in sent[0]
+          and sent[1].startswith("Új menetrend: updated city"),
           repr((code, sent)))
     builds = fake.city_builds
     fake.run()
@@ -701,6 +716,39 @@ with tempfile.TemporaryDirectory() as tmp:
           code == 0 and len(volan_builds) == 1 and fake.city_builds == 1
           and fake.state()["cities"]["a"]["etag"] == "a-2", repr((code, sent, fake.state())))
 
+# The mirror image: scripts copied from main build a newer schema than the
+# installed card reads (its bundle says so). Nothing is rebuilt or downloaded,
+# the run says to copy the installed release's scripts; a card update that
+# reads the schema lets the rebuild through.
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    sent = []
+    uvi.notify = lambda message, *_a, **_k: sent.append(message)
+    volan_builds = []
+    uvi.build_index = lambda z, out: (volan_builds.append(z), out.write_bytes(gzip.compress(b'{"v":29}')),
+                                      {"feed_version": "v2", "trips": 1, "stops": 1})[2]
+    for name in ("volan-index.json.gz", "city-index.json.gz"):
+        write_index(fake.www / name, gtfs_compact.INDEX_SCHEMA, "release")
+    (fake.www / "hungarian-transport.js").write_text(f"var INDEX_SCHEMA = {gtfs_compact.INDEX_SCHEMA - 1};\n")
+    (fake.base / "volanbusz_gtfs.zip").write_bytes(b"PK volan-0")
+    (fake.base / "a.zip").write_bytes(b"PK old")
+    (fake.base / "state.json").write_text(json.dumps({
+        "volan": {"etag": "volan-0"},
+        "cities": {"a": {"etag": "a-1"}},
+    }))
+    code = fake.run()
+    check("scripts newer than the installed card rebuild nothing",
+          code == uvi.REPORTED and volan_builds == [] and fake.city_builds == 0 and fake.downloads == [],
+          repr((code, volan_builds, fake.city_builds, fake.downloads)))
+    check("the card's older schema is reported once per index, naming the installed release's scripts",
+          len(sent) == 2 and all("installed card reads" in m and "installed release" in m for m in sent), repr(sent))
+    (fake.www / "hungarian-transport.js").write_text(f"var INDEX_SCHEMA = {gtfs_compact.INDEX_SCHEMA};\n")
+    sent.clear()
+    code = fake.run()
+    check("once the card reads the schema both indexes are rebuilt",
+          code == 0 and len(volan_builds) == 1 and fake.city_builds == 1, repr((code, sent, fake.state())))
+
 # A city feed (or MAV_GTFS_URL) that keeps failing to download is reported
 # on the third day, then weekly; one bad day only goes to update.log.
 with tempfile.TemporaryDirectory() as tmp:
@@ -845,6 +893,8 @@ check("a new Last-Modified at the same size is no match",
                           {"content_length": "10", "last_modified": "y"}))
 check("the ETag decides when both have one",
       uvi.same_remote({"etag": "e", "content_length": "9"}, {"etag": "e", "content_length": "10"}))
+check("a HEAD answered without a body (Content-Length: 0) gives no size fingerprint",
+      uvi._content_length("0") == "" and uvi._content_length(" 40 ") == "40" and uvi._content_length("x") == "")
 
 with tempfile.TemporaryDirectory() as tmp:
     fake = Fake(Path(tmp))
