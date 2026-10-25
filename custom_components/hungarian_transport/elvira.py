@@ -347,7 +347,8 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
             continue
         tid = str(row.get("trainId") or "")
         code = str(row.get("code") or "").strip()
-        run = (tid or code, row.get("start") or start.isoformat())
+        raw_start = row.get("start")
+        run = (tid or code, raw_start if isinstance(raw_start, str) and raw_start else start.isoformat())
         if run in seen:
             continue
         seen.add(run)
