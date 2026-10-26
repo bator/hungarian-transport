@@ -1901,6 +1901,19 @@ Object.assign(BkkLib, {
     const esc = fa.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     return new RegExp("(?:^|[^a-z0-9])" + esc + "(?:[^a-z0-9]|$)").test(fb);
   },
+  /* True when the Transitous departure lists where it goes (next stops or
+     a terminus) and neither the hop's destination nor the row's headsign
+     is among them. Unknown stops decide nothing. */
+  motisTripElsewhere(m, row, dest) {
+    const known = (m && m.nextNames || []).some(Boolean) || !!(m && m.tripTo);
+    if (!known) return false;
+    const wantDest = !!(dest && (dest.name || dest.key));
+    const head = String(row && (row.head || row.headsign || row.tripTo) || "").trim();
+    if (!wantDest && !head) return false;
+    if (wantDest && BkkLib.destOnMotisRow(m, dest)) return false;
+    if (head && BkkLib.destOnMotisRow(m, { name: head, key: head })) return false;
+    return true;
+  },
   destOnMotisRow(m, dest) {
     const want = BkkLib.fold(dest && (dest.name || dest.key) || "");
     if (!want) return false;
@@ -1963,6 +1976,7 @@ Object.assign(BkkLib, {
       if (dep && dt > 45 * 60 && !sameNum) return;
       const identity = sameNum || sameLabel || sameAlias;
       if (!identity && wantsId) return;
+      if (BkkLib.isTrainRow(row) && BkkLib.motisTripElsewhere(m, row, dest)) return;
       const destNear = destOn && (!dep || dt <= 12 * 60);
       if (!identity && !destNear) return;
       const score = (sameNum ? 1e3 : 0) + (sameLabel ? 400 : 0) + (sameAlias ? 250 : 0) + (destNear ? 50 : 0) - Math.min(dt, 1800) / 60;
@@ -8411,7 +8425,7 @@ ${this._stopPinCss()}
       }
     }
     if (canFutar && BkkLib.isTrainRow(row) && BkkLib.isFutarTripId(geomTrip)) {
-      if (futarShape.length < 2 && motisShape.length < 2 && this._hasFutar()) {
+      if (futarShape.length < 2 && this._hasFutar()) {
         try {
           futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
         } catch (_e) {
@@ -8454,6 +8468,13 @@ ${this._stopPinCss()}
         shape = futarShape;
       } else if (motisGap != null && motisGap > 4e3 && futarShape.length >= 2 && (futarGap == null || futarGap < motisGap)) {
         shape = futarShape;
+      } else if (BkkLib.isTrainRow(row) && futarShape.length >= 2 && motisShape.length >= 2) {
+        const alightPt = futarHop && futarHop.alight || motisMap && motisMap.dest || BkkLib.knownStopCoords({ id: cfg.destStopId, name: cfg.destName, key: cfg.destKey });
+        const motisOff = alightPt && BkkLib.shapeGpsGapMeters(motisShape, alightPt[0], alightPt[1]);
+        const futarOff = alightPt && BkkLib.shapeGpsGapMeters(futarShape, alightPt[0], alightPt[1]);
+        if (motisOff != null && futarOff != null && motisOff > 3e3 && futarOff < 1500) {
+          shape = futarShape;
+        }
       }
     }
     const destPt = await this._rowAlightPoint(row, [futarHop && futarHop.alight, motisMap && motisMap.dest]);

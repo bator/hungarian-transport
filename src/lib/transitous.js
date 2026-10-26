@@ -534,6 +534,19 @@ Object.assign(BkkLib, {
     const esc = fa.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     return new RegExp('(?:^|[^a-z0-9])' + esc + '(?:[^a-z0-9]|$)').test(fb);
   },
+  /* True when the Transitous departure lists where it goes (next stops or
+     a terminus) and neither the hop's destination nor the row's headsign
+     is among them. Unknown stops decide nothing. */
+  motisTripElsewhere(m, row, dest) {
+    const known = ((m && m.nextNames) || []).some(Boolean) || !!(m && m.tripTo);
+    if (!known) return false;
+    const wantDest = !!(dest && (dest.name || dest.key));
+    const head = String((row && (row.head || row.headsign || row.tripTo)) || '').trim();
+    if (!wantDest && !head) return false;
+    if (wantDest && BkkLib.destOnMotisRow(m, dest)) return false;
+    if (head && BkkLib.destOnMotisRow(m, { name: head, key: head })) return false;
+    return true;
+  },
   destOnMotisRow(m, dest) {
     const want = BkkLib.fold((dest && (dest.name || dest.key)) || '');
     if (!want) return false;
@@ -604,6 +617,11 @@ Object.assign(BkkLib, {
       if (dep && dt > 45 * 60 && !sameNum) return;
       const identity = sameNum || sameLabel || sameAlias;
       if (!identity && wantsId) return;
+      /* A train whose listed stops reach neither the alighting station nor
+         the row's own headsign is another train, whatever its number says:
+         the number FUTÁR's trip id implies (BKK_87141 → 8714) can be the
+         Siófok train's while the row runs Ajka → Budapest-Déli. */
+      if (BkkLib.isTrainRow(row) && BkkLib.motisTripElsewhere(m, row, dest)) return;
       const destNear = destOn && (!dep || dt <= 12 * 60);
       if (!identity && !destNear) return;
       const score = (sameNum ? 1000 : 0)
