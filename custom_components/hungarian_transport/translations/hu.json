@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Magyar közlekedés",
-        "description": "A magyar közlekedési kártya és a MÁV ELVIRA szolgáltatás bekapcsolása. Megadhatod a BKK Open Data kulcsodat is ({url}): a kártyák így a Home Assistanton át érik el a BKK FUTÁR-t, és a kulcs nem kerül a dashboardok konfigurációjába.",
+        "description": "A magyar közlekedési kártya és a MÁV ELVIRA szolgáltatás bekapcsolása. Megadhatod a BKK Open Data kulcsodat is ({url}): a kártyák így a Home Assistanton át érik el a BKK FUTÁR-t, és a kulcs nem kerül az irányítópultok konfigurációjába.",
         "data": {
           "api_key": "BKK API kulcs"
         }
@@ -51,7 +51,7 @@
     },
     "futar": {
       "name": "BKK FUTÁR lekérdezés",
-      "description": "BKK FUTÁR végpont hívása az integrációban tárolt kulccsal. A dashboard kártya használja. Ha nincs válasz, a válaszban nincs adat, csak hiba: futar_auth (a BKK elutasította a tárolt kulcsot; frissítsd az integráció beállításaiban), futar_unavailable (a BKK FUTÁR nem érhető el) vagy futar_rate_limited (túl sok lekérés ebből a Home Assistantból; a következő frissítés újra próbálja).",
+      "description": "BKK FUTÁR végpont hívása az integrációban tárolt kulccsal. Az irányítópult-kártya használja. Ha nincs válasz, a válaszban nincs adat, csak hiba: futar_auth (a BKK elutasította a tárolt kulcsot; frissítsd az integráció beállításaiban), futar_unavailable (a BKK FUTÁR nem érhető el) vagy futar_rate_limited (túl sok lekérés ebből a Home Assistantból; a következő frissítés újra próbálja).",
       "fields": {
         "path": {
           "name": "Végpont",

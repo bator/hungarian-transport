@@ -778,8 +778,8 @@ var I18N = {
     apiKeyShow: "Mutat",
     apiKeyHide: "Elrejt",
     apiKeyIntegration: "A BKK API kulcsot a Magyar közlekedés integráció adja.",
-    apiKeyBorrowed: "A BKK API kulcsot egy másik kártya adja ezen a műszerfalon, ebbe a kártyába nem kerül be. A kártyán megadott kulcs elavult: tedd át a Magyar közlekedés integrációba.",
-    apiKeyDeprecated: "A kártyán megadott kulcs elavult: minden bejelentkezett Home Assistant-felhasználó kiolvashatja a műszerfal beállításaiból, és a kérés címében megy a BKK-nak. Add meg inkább a Magyar közlekedés integrációban, és töröld innen.",
+    apiKeyBorrowed: "A BKK API kulcsot egy másik kártya adja ezen az irányítópulton, ebbe a kártyába nem kerül be. A kártyán megadott kulcs elavult: tedd át a Magyar közlekedés integrációba.",
+    apiKeyDeprecated: "A kártyán megadott kulcs elavult: minden bejelentkezett Home Assistant-felhasználó kiolvashatja az irányítópult beállításaiból, és a kérés címében megy a BKK-nak. Add meg inkább a Magyar közlekedés integrációban, és töröld innen.",
     nameLabel: "Név (opcionális)",
     namePlaceholder: "Magyar közlekedés",
     cardTitle: "Magyar közlekedés",
@@ -836,7 +836,9 @@ var I18N = {
     mapTypeFerry: "Hajó",
     mapTypeVehicle: "Jármű",
     errNoApiKey: "Nincs BKK API kulcs: add meg a Magyar közlekedés integrációban vagy a kártyában.",
-    errApiKeyBad: "A BKK API kulcs érvénytelen (401/403).",
+    errApiKeyBad: "A BKK API kulcs érvénytelen (401/403). Kérj újat, és add meg az integráció beállításaiban.",
+    errFutarRateLimited: "Átmenetileg túl sok BKK lekérdezés ment; a következő frissítés újra próbálja.",
+    errFutarDown: (why) => `A BKK FUTÁR nem érhető el (${why}). A kártya a következő frissítésnél újra próbálja.`,
     errApiKeyProbe: "A BKK API kulcsot nem sikerült ellenőrizni.",
     errVolanHttp: (status) => `Volán menetrend HTTP ${status}`,
     errVolanGunzip: "A böngésző nem tudja kicsomagolni a Volán menetrendet.",
@@ -847,12 +849,12 @@ var I18N = {
     errIndexSchema: (v) => `A menetrend-index újabb (v${v}), mint amit ez a kártya ismer. Frissítsd a kártyát.`,
     cityLabel: "Város",
     cityPlaceholder: "Válassz várost",
-    minutesAfterLabel: "Menetrend előre (perc)",
+    minutesAfterLabel: "Előretekintés (perc)",
     minutesAfterHint: ([lo, hi, def]) => `Hány percet nézzen előre az indulásokból. ${lo}–${hi} perc, alapértelmezés ${def}.`,
     plannerTitle: "Tervező",
     plannerStep1: "Forrás",
     plannerStep2: "Cél",
-    plannerStep3: "Meddig",
+    plannerStep3: "Előretekintés",
     plannerSwap: "Csere",
     plannerDepartures: "Indulások",
     plannerSearchPlaceholder: "Utca, házszám, város, megálló...",
@@ -861,11 +863,12 @@ var I18N = {
     plannerAddress: "cím",
     plannerPlace: "hely",
     plannerReset: "Új",
+    plannerSearchFailed: "Az útvonalkeresés most nem érhető el. Próbáld újra.",
     plannerPickAll: "Válassz forrás és cél megállót.",
     plannerJourneyTitle: "Átszállással",
     plannerJourneyDirect: "Átszállás nélkül",
     plannerJourneyWalk: "Gyalog",
-    plannerJourneySummary: (parts) => `${parts[0]} perc · ${parts[1]} átszállás · ${parts[2]} perc gyaloglás · ${parts[3]} perc várakozás`,
+    plannerJourneySummary: (parts) => `${parts[0]} perc · ${I18N.hu.plannerTransfers(parts[1])} · ${parts[2]} perc gyaloglás · ${parts[3]} perc várakozás`,
     plannerWalk: (parts) => `Gyaloglás ${parts[0]} perc, ${parts[1]} m`,
     plannerWait: (min) => `Várakozás ${min} perc`,
     plannerStationWalk: (parts) => `Gyaloglás a vágányhoz ${parts[0]} perc, ${parts[1]} m`,
@@ -877,7 +880,7 @@ var I18N = {
     plannerArriveBy: "Érkezés",
     plannerHorizon: (n) => n < 60 ? `${n} perc` : `${String(n / 60).replace(".", ",")} óra`,
     plannerRoutes: "Útvonalak",
-    plannerRoutesFrom: (when) => `indulás ${when}`,
+    plannerRoutesFrom: (when) => `indulás ${when}-tól`,
     plannerRoutesBy: (when) => `érkezés ${when}-ig`,
     plannerSearching: "Útvonalak keresése…",
     plannerNoJourneys: "Erre az időpontra nem találtam útvonalat.",
@@ -931,7 +934,7 @@ var I18N = {
         originPh: "Keresés, pl. Népliget, Székesfehérvár autóbusz-állomás",
         destPh: "Keresés a forrásból elérhető Volán megállók között",
         empty: "Nincs Volán megálló erre a keresésre.",
-        destEmpty: "Erről a megállóról nincs közvetlen Volán erre a célra.",
+        destEmpty: "Erről a megállóról nincs közvetlen Volán-járat erre a célra.",
         destNeedOrigin: "Előbb válassz forrás megállót.",
         destNone: "Nincs elérhető Volán cél ebből a forrásból."
       },
@@ -1019,7 +1022,9 @@ var I18N = {
     mapTypeFerry: "Ferry",
     mapTypeVehicle: "Vehicle",
     errNoApiKey: "No BKK API key: set it in the Hungarian transport integration or in the card.",
-    errApiKeyBad: "The BKK API key is invalid (401/403).",
+    errApiKeyBad: "The BKK API key is invalid (401/403). Get a new one and enter it in the integration options.",
+    errFutarRateLimited: "Too many BKK requests for a moment; the next refresh tries again.",
+    errFutarDown: (why) => `BKK FUTÁR is unavailable (${why}). The card tries again on the next refresh.`,
     errApiKeyProbe: "Could not verify the BKK API key.",
     errVolanHttp: (status) => `Volán timetable HTTP ${status}`,
     errVolanGunzip: "This browser cannot decompress the Volán timetable.",
@@ -1044,11 +1049,12 @@ var I18N = {
     plannerAddress: "address",
     plannerPlace: "place",
     plannerReset: "Reset",
+    plannerSearchFailed: "Route search is unavailable right now. Try again.",
     plannerPickAll: "Pick an origin and a destination stop.",
     plannerJourneyTitle: "With a transfer",
     plannerJourneyDirect: "Direct",
     plannerJourneyWalk: "On foot",
-    plannerJourneySummary: (parts) => `${parts[0]} min · ${Number(parts[1]) === 1 ? "1 transfer" : `${parts[1]} transfers`} · ${parts[2]} min walking · ${parts[3]} min waiting`,
+    plannerJourneySummary: (parts) => `${parts[0]} min · ${I18N.en.plannerTransfers(parts[1])} · ${parts[2]} min walking · ${parts[3]} min waiting`,
     plannerWalk: (parts) => `Walk ${parts[0]} min, ${parts[1]} m`,
     plannerWait: (min) => `Wait ${min} min`,
     plannerStationWalk: (parts) => `Walk to the platform ${parts[0]} min, ${parts[1]} m`,
@@ -1228,11 +1234,16 @@ Object.assign(BkkLib, {
   hasFutar(apiKey, hass) {
     return !!String(apiKey || "").trim() || BkkLib.integrationHasKey(hass);
   },
-  /* Same messages the service error carried before: "BKK <detail>" for an
-     outage, a key-specific one when FUTÁR rejected the integration's key. */
+  /* The service's error as a translated banner: a rejected key, the
+     integration's own request limit (the card tries again), or an outage
+     with its detail. The code stays for departureBoard's fallback and the
+     editor's key probe. */
   _integrationError(code, detail) {
     const why = String(detail || code);
-    const err = new Error(code === "futar_auth" ? `BKK FUTÁR rejected the configured key (${why}). Update it in the integration options.` : `BKK ${why}`);
+    let err;
+    if (code === "futar_auth") err = codedError("errApiKeyBad");
+    else if (code === "futar_rate_limited") err = codedError("errFutarRateLimited");
+    else err = codedError("errFutarDown", why);
     err.code = String(code);
     return err;
   },
@@ -1291,7 +1302,9 @@ Object.assign(BkkLib, {
       } catch (err) {
         throw new Error(err && err.name === "AbortError" ? "BKK timeout" : `BKK ${err}`);
       }
-      if (!res.ok) throw new Error(`BKK HTTP ${res.status}`);
+      if (res.status === 401 || res.status === 403) throw codedError("errApiKeyBad");
+      if (res.status === 429) throw codedError("errFutarRateLimited");
+      if (!res.ok) throw codedError("errFutarDown", `HTTP ${res.status}`);
       const data = await res.json();
       if (data.status && data.status !== "OK") throw new Error(`BKK ${data.status}`);
       return data;
@@ -3098,7 +3111,7 @@ Object.assign(BkkLib, {
       return { ok: true };
     } catch (err) {
       const msg = String(err && err.message ? err.message : err);
-      if (err && err.code === "futar_auth" || /HTTP 401|HTTP 403/.test(msg)) {
+      if (err && (err.code === "futar_auth" || err.i18nKey === "errApiKeyBad") || /HTTP 401|HTTP 403/.test(msg)) {
         return { ok: false, code: "errApiKeyBad" };
       }
       if (err && err.i18nKey === "errNoApiKey") return { ok: false, code: "errNoApiKey" };
@@ -3609,11 +3622,15 @@ Object.assign(BkkLib, {
   },
   /* Where a vehicle is by its timetable: between the last stop it has left
      and the next one, as far along that run as the time has gone, measured
-     along the shape (both stops projected onto it; a straight line when the
-     shape does not pass them). Standing at a stop between its arrival and
-     departure. Null before the first departure, from the last arrival on,
-     or without two timed stops. timed: [{pt: [lat, lon], arr, dep}] in
-     running order, seconds; arr or dep may be missing. */
+     along the shape (both stops projected onto it, the passes paired in the
+     direction of travel as sliceShapeBetween pairs them: the short, close
+     pair wins on an out-and-back line). Standing at the stop between its
+     arrival and departure, on the shape where the shape serves it. A
+     straight line between the stops when the shape does not pass them
+     (another line's geometry, or a stop outside a clipped hop). Null before
+     the first departure, from the last arrival on, or without two timed
+     stops. timed: [{pt: [lat, lon], arr, dep}] in running order, seconds;
+     arr or dep may be missing. */
   estimateShapePosition(shape, timed, nowSec) {
     const stops = [];
     (Array.isArray(timed) ? timed : []).forEach((s) => {
@@ -3630,43 +3647,49 @@ Object.assign(BkkLib, {
     while (i + 1 < stops.length - 1 && stops[i + 1].dep <= now) i += 1;
     const a = stops[i];
     const b = stops[i + 1];
-    if (now >= b.arr) return { pt: b.pt, from: i, to: i + 1, fraction: 1 };
+    const dwell = now >= b.arr;
     const span = b.arr - a.dep;
-    const f = span > 0 ? Math.max(0, Math.min(1, (now - a.dep) / span)) : 1;
-    const straight = () => ({
-      pt: [a.pt[0] + (b.pt[0] - a.pt[0]) * f, a.pt[1] + (b.pt[1] - a.pt[1]) * f],
-      from: i,
-      to: i + 1,
-      fraction: f
-    });
+    const f = dwell ? 1 : span > 0 ? Math.max(0, Math.min(1, (now - a.dep) / span)) : 1;
+    const result = (pt) => ({ pt, from: i, to: i + 1, fraction: f });
+    const straight = () => result([a.pt[0] + (b.pt[0] - a.pt[0]) * f, a.pt[1] + (b.pt[1] - a.pt[1]) * f]);
     const pts = BkkLib.validMapShape(shape);
     if (pts.length < 2) return straight();
     const { xy, cum } = BkkLib._shapeMetric(pts);
-    const nearest = (list) => list.reduce((m, ft) => ft.d < m.d ? ft : m, list[0]);
+    const total = cum[cum.length - 1];
     const feetA = BkkLib._shapeFeet(xy, cum, a.pt);
     const feetB = BkkLib._shapeFeet(xy, cum, b.pt);
     if (!feetA.length || !feetB.length) return straight();
     let pick = null;
     BkkLib._shapePasses(feetA).forEach((pa) => BkkLib._shapePasses(feetB).forEach((pb) => {
       if (pb.at <= pa.at) return;
-      const cost = pa.d + pb.d;
+      const cost = pb.at - pa.at + SHAPE_PASS_WEIGHT * (pa.d + pb.d);
       if (!pick || cost < pick.cost) pick = { pa, pb, cost };
     }));
-    if (!pick) {
-      const pa = nearest(feetA);
-      const pb = nearest(feetB);
-      if (pb.at <= pa.at) return straight();
-      pick = { pa, pb, cost: pa.d + pb.d };
-    }
+    if (!pick) return straight();
     if (pick.pa.d > SHAPE_STOP_OFF_M || pick.pb.d > SHAPE_STOP_OFF_M) return straight();
-    const at = pick.pa.at + (pick.pb.at - pick.pa.at) * f;
-    let seg = 1;
-    while (seg < cum.length - 1 && cum[seg] < at) seg += 1;
-    const len = cum[seg] - cum[seg - 1];
-    const t2 = len > 0 ? Math.max(0, Math.min(1, (at - cum[seg - 1]) / len)) : 0;
-    const p = pts[seg - 1];
-    const q = pts[seg];
-    return { pt: [p[0] + (q[0] - p[0]) * t2, p[1] + (q[1] - p[1]) * t2], from: i, to: i + 1, fraction: f };
+    const beyondEnd = (p, pt) => {
+      if (p.at > 0 && p.at < total) return false;
+      const q = xy(pt);
+      const s0 = xy.pts[p.at <= 0 ? 0 : xy.pts.length - 2];
+      const s1 = xy.pts[p.at <= 0 ? 1 : xy.pts.length - 1];
+      const dx = s1[0] - s0[0];
+      const dy = s1[1] - s0[1];
+      const len = Math.hypot(dx, dy);
+      if (!len) return false;
+      const along2 = ((q[0] - s0[0]) * dx + (q[1] - s0[1]) * dy) / len;
+      return p.at <= 0 ? along2 < -SHAPE_PASS_M : along2 > len + SHAPE_PASS_M;
+    };
+    if (beyondEnd(pick.pa, a.pt) || beyondEnd(pick.pb, b.pt)) return straight();
+    const along = (at) => {
+      let seg = 1;
+      while (seg < cum.length - 1 && cum[seg] < at) seg += 1;
+      const len = cum[seg] - cum[seg - 1];
+      const t2 = len > 0 ? Math.max(0, Math.min(1, (at - cum[seg - 1]) / len)) : 0;
+      const p = pts[seg - 1];
+      const q = pts[seg];
+      return [p[0] + (q[0] - p[0]) * t2, p[1] + (q[1] - p[1]) * t2];
+    };
+    return result(along(pick.pa.at + (pick.pb.at - pick.pa.at) * f));
   },
   clipShapeToBoardDest(shape, board, dest) {
     const pts = BkkLib.validMapShape(shape);
@@ -5426,16 +5449,22 @@ Object.assign(BkkLib, {
   },
   /* The trip's stops with their (predicted, else scheduled) times, in
      running order, for the timetable position of a vehicle without GPS. */
-  async tripTimedStops(apiKey, cache, tripId) {
+  async tripTimedStops(apiKey, cache, tripId, origin) {
     const { sts, stops } = await BkkLib.tripDetails(apiKey, cache, tripId);
+    const oidx = origin ? BkkLib.originIndex(sts, stops, origin) : -1;
     const out = [];
-    (sts || []).forEach((s) => {
+    (sts || []).forEach((s, i) => {
       const stop = s && stops[s.stopId] || {};
       const pt = BkkLib.mapGpsLatLon(stop.lat, stop.lon);
-      const arr = Number(s.predictedArrivalTime || s.arrivalTime || s.predictedDepartureTime || s.departureTime);
-      const dep = Number(s.predictedDepartureTime || s.departureTime || arr);
+      const pa = Number(s.predictedArrivalTime);
+      const pd = Number(s.predictedDepartureTime);
+      const predicted = pa > 0 || pd > 0;
+      const arr = predicted ? pa > 0 ? pa : pd : Number(s.arrivalTime || s.departureTime);
+      const dep = predicted ? pd > 0 ? pd : pa : Number(s.departureTime || s.arrivalTime);
       if (!pt || !Number.isFinite(arr) || arr <= 0) return;
-      out.push({ pt, arr, dep: Number.isFinite(dep) && dep > 0 ? dep : arr });
+      const entry = { pt, arr, dep: Number.isFinite(dep) && dep > 0 ? dep : arr };
+      if (i === oidx) entry.origin = true;
+      out.push(entry);
     });
     return out;
   },
@@ -8585,6 +8614,10 @@ ${this._stopPinCss()}
         timed = [];
       }
     }
+    if (timed.length < 2 && !hasGps && board && alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
+      const arr = Number(row.depTs) + Number(row.travelMin) * 60;
+      timed = [{ pt: board, arr: Number(row.depTs), dep: Number(row.depTs) }, { pt: alight, arr, dep: arr }];
+    }
     if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
     if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
     if (st.hasGps && this._mapMarker && typeof this._mapMarker.getLatLng === "function") {
@@ -8604,7 +8637,7 @@ ${this._stopPinCss()}
         positionEstimated = true;
       }
     }
-    this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed } : null;
+    this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed, row, board, alight } : null;
     const pos = BkkLib.mapGpsLatLon(lat, lon);
     const hasPosition = !!pos;
     if (hasPosition) {
@@ -8700,14 +8733,39 @@ ${this._stopPinCss()}
       if (hit && BkkLib.isFutarTripId(hit.tripId)) tripId = String(hit.tripId);
     }
     if (!tripId) return [];
-    return BkkLib.tripTimedStops(this._apiKey(), this._tripCache || {}, tripId);
+    const cfg = this._config || {};
+    const timed = await BkkLib.tripTimedStops(
+      this._apiKey(),
+      this._tripCache || {},
+      tripId,
+      { id: cfg.stopId, name: cfg.stopName }
+    );
+    const origin = timed.find((s) => s.origin);
+    const shift = origin && Number(row.depTs) > 0 ? Number(row.depTs) - origin.dep : 0;
+    return shift ? timed.map((s) => ({ pt: s.pt, arr: s.arr + shift, dep: s.dep + shift })) : timed;
   }
-  /* A poll's turn for the dashed marker: the timetable has moved the
-     vehicle on; at its last stop the marker goes. */
-  _syncEstimatedMarker(row, lang) {
+  /* A poll's turn for the dashed marker: the timetable (re-read with this
+     poll's departure: a delay that grew moves it) has moved the vehicle on;
+     at its last stop the marker goes. */
+  async _syncEstimatedMarker(row, lang) {
     const est = this._mapEstimate;
+    if (!est || !this._map) return;
+    if (row && row !== est.row) {
+      try {
+        const timed = await this._rowTimedStops(row);
+        if (this._mapEstimate !== est) return;
+        if (timed.length >= 2) est.timed = timed;
+        else if (est.board && est.alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
+          const arr = Number(row.depTs) + Number(row.travelMin) * 60;
+          est.timed = [{ pt: est.board, arr: Number(row.depTs), dep: Number(row.depTs) }, { pt: est.alight, arr, dep: arr }];
+        }
+        est.row = row;
+      } catch (_e) {
+      }
+    }
     const st = this._mapState;
-    if (!est || !st || !this._map) return;
+    if (!st || !this._map || this._mapEstimate !== est) return;
+    row = row || est.row;
     const got = BkkLib.estimateShapePosition(est.shape, est.timed, Date.now() / 1e3);
     if (!got) {
       if (this._mapMarker) {
@@ -8751,9 +8809,9 @@ ${this._stopPinCss()}
     const st = this._mapState;
     if (!this._map || !this._openMapKey || !st) return;
     const row = this._findMapRow(this._mapRef, this._rows || []);
-    if (!row) return;
-    if (!row.hasGps) {
-      this._syncEstimatedMarker(row, this._lang());
+    if (!row || !row.hasGps) {
+      if (row || this._mapEstimate) this._syncEstimatedMarker(row, this._lang()).catch(() => {
+      });
       return;
     }
     const gps = BkkLib.mapGpsLatLon(row.lat, row.lon);
@@ -9212,6 +9270,7 @@ var BKKPlannerCard = class extends BKKHopCard {
         this._journeyLoading = false;
         this._journeysDone = true;
         this._journeys = list || [];
+        this._journeyFailed = false;
         this._openJourney = 0;
         this._journey = this._journeys[0] || null;
         this._paint();
@@ -9219,6 +9278,7 @@ var BKKPlannerCard = class extends BKKHopCard {
         if (gen !== this._gen) return;
         this._journeyLoading = false;
         this._journeysDone = true;
+        this._journeyFailed = true;
         this._journeys = [];
         this._paint();
       });
@@ -9478,7 +9538,7 @@ var BKKPlannerCard = class extends BKKHopCard {
       if (this._journeyLoading) {
         inner += `<div class="j-msg">${esc(t(lang, "plannerSearching"))}</div>`;
       } else if (!list.length) {
-        inner += `<div class="j-msg">${esc(t(lang, "plannerNoJourneys"))}</div>`;
+        inner += `<div class="j-msg">${esc(t(lang, this._journeyFailed ? "plannerSearchFailed" : "plannerNoJourneys"))}</div>`;
       } else {
         inner += list.map((j, i) => this._itineraryHtml(j, i, i === this._openJourney)).join("");
       }

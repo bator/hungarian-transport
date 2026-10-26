@@ -1320,6 +1320,13 @@ ${this._stopPinCss()}
         timed = await this._rowTimedStops(row);
       } catch (_e) { timed = []; }
     }
+    /* No stop list (a MÁV train known from Transitous and ELVIRA only, or a
+       list that failed to load): the row's own departure and travel time
+       still place it between the boarding and alighting stops. */
+    if (timed.length < 2 && !hasGps && board && alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
+      const arr = Number(row.depTs) + Number(row.travelMin) * 60;
+      timed = [{ pt: board, arr: Number(row.depTs), dep: Number(row.depTs) }, { pt: alight, arr, dep: arr }];
+    }
     /* Same spot as the boarding stop (a loop line, a bad lookup): one pin. */
     if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
     if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
@@ -1341,7 +1348,7 @@ ${this._stopPinCss()}
         positionEstimated = true;
       }
     }
-    this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed } : null;
+    this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed, row, board, alight } : null;
     const pos = BkkLib.mapGpsLatLon(lat, lon);
     const hasPosition = !!pos;
     if (hasPosition) {
@@ -1415,15 +1422,38 @@ ${this._stopPinCss()}
       if (hit && BkkLib.isFutarTripId(hit.tripId)) tripId = String(hit.tripId);
     }
     if (!tripId) return [];
-    return BkkLib.tripTimedStops(this._apiKey(), this._tripCache || {}, tripId);
+    const cfg = this._config || {};
+    const timed = await BkkLib.tripTimedStops(this._apiKey(), this._tripCache || {}, tripId,
+      { id: cfg.stopId, name: cfg.stopName });
+    /* The trip details are cached for the session; the row's departure is
+       this poll's. A delay that grew since the details were read moves
+       every stop by the same amount. */
+    const origin = timed.find((s) => s.origin);
+    const shift = origin && Number(row.depTs) > 0 ? Number(row.depTs) - origin.dep : 0;
+    return shift ? timed.map((s) => ({ pt: s.pt, arr: s.arr + shift, dep: s.dep + shift })) : timed;
   }
 
-  /* A poll's turn for the dashed marker: the timetable has moved the
-     vehicle on; at its last stop the marker goes. */
-  _syncEstimatedMarker(row, lang) {
+  /* A poll's turn for the dashed marker: the timetable (re-read with this
+     poll's departure: a delay that grew moves it) has moved the vehicle on;
+     at its last stop the marker goes. */
+  async _syncEstimatedMarker(row, lang) {
     const est = this._mapEstimate;
+    if (!est || !this._map) return;
+    if (row && row !== est.row) {
+      try {
+        const timed = await this._rowTimedStops(row);
+        if (this._mapEstimate !== est) return;
+        if (timed.length >= 2) est.timed = timed;
+        else if (est.board && est.alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
+          const arr = Number(row.depTs) + Number(row.travelMin) * 60;
+          est.timed = [{ pt: est.board, arr: Number(row.depTs), dep: Number(row.depTs) }, { pt: est.alight, arr, dep: arr }];
+        }
+        est.row = row;
+      } catch (_e) { /* the stored times still place it */ }
+    }
     const st = this._mapState;
-    if (!est || !st || !this._map) return;
+    if (!st || !this._map || this._mapEstimate !== est) return;
+    row = row || est.row;
     const got = BkkLib.estimateShapePosition(est.shape, est.timed, Date.now() / 1000);
     if (!got) {
       if (this._mapMarker) {
@@ -1466,9 +1496,10 @@ ${this._stopPinCss()}
     const st = this._mapState;
     if (!this._map || !this._openMapKey || !st) return;
     const row = this._findMapRow(this._mapRef, this._rows || []);
-    if (!row) return;
-    if (!row.hasGps) {
-      this._syncEstimatedMarker(row, this._lang());
+    /* The row has left the board (departed): the dashed marker still runs
+       on the times it had. */
+    if (!row || !row.hasGps) {
+      if (row || this._mapEstimate) this._syncEstimatedMarker(row, this._lang()).catch(() => {});
       return;
     }
     const gps = BkkLib.mapGpsLatLon(row.lat, row.lon);

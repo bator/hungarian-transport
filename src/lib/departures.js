@@ -364,16 +364,26 @@ Object.assign(BkkLib, {
   },
   /* The trip's stops with their (predicted, else scheduled) times, in
      running order, for the timetable position of a vehicle without GPS. */
-  async tripTimedStops(apiKey, cache, tripId) {
+  async tripTimedStops(apiKey, cache, tripId, origin) {
     const { sts, stops } = await BkkLib.tripDetails(apiKey, cache, tripId);
+    const oidx = origin ? BkkLib.originIndex(sts, stops, origin) : -1;
     const out = [];
-    (sts || []).forEach((s) => {
+    (sts || []).forEach((s, i) => {
       const stop = (s && stops[s.stopId]) || {};
       const pt = BkkLib.mapGpsLatLon(stop.lat, stop.lon);
-      const arr = Number(s.predictedArrivalTime || s.arrivalTime || s.predictedDepartureTime || s.departureTime);
-      const dep = Number(s.predictedDepartureTime || s.departureTime || arr);
+      /* One pair per stop: the predicted one when FUTÁR gives either half of
+         it (a late arrival with a scheduled departure before it would put
+         the vehicle at the next stop), else the scheduled one. */
+      const pa = Number(s.predictedArrivalTime);
+      const pd = Number(s.predictedDepartureTime);
+      const predicted = (pa > 0) || (pd > 0);
+      const arr = predicted ? (pa > 0 ? pa : pd) : Number(s.arrivalTime || s.departureTime);
+      const dep = predicted ? (pd > 0 ? pd : pa) : Number(s.departureTime || s.arrivalTime);
       if (!pt || !Number.isFinite(arr) || arr <= 0) return;
-      out.push({ pt, arr, dep: Number.isFinite(dep) && dep > 0 ? dep : arr });
+      const entry = { pt, arr, dep: Number.isFinite(dep) && dep > 0 ? dep : arr };
+      /* The card's boarding stop, marked: its row's departure is this poll's. */
+      if (i === oidx) entry.origin = true;
+      out.push(entry);
     });
     return out;
   },

@@ -1,6 +1,7 @@
 /* Renders the card in jsdom: it must draw its own rows, with no dependency on
    any other custom element. */
 import { JSDOM } from 'jsdom';
+import { errText } from './src/i18n.js';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
   url: 'http://localhost:8123/local/hungarian-transport/',
@@ -925,7 +926,7 @@ const planHtml = plan.shadowRoot.innerHTML;
 check('planner title is Tervezo', planHtml.includes('Tervez\u0151'));
 check('planner has origin and destination fields',
   planHtml.includes('id="pq"') && planHtml.includes('id="pdq"') && !planHtml.includes('id="routes"'));
-check('planner has look-ahead chips', planHtml.includes('id="pmin"') && planHtml.includes('Meddig'));
+check('planner has look-ahead chips', planHtml.includes('id="pmin"') && planHtml.includes('El\u0151retekint\u00e9s'));
 check('planner has swap button', planHtml.includes('id="pswap"') && planHtml.includes('Csere'));
 const origPlannerSearch = Lib.searchPlannerStops;
 Lib.searchPlannerStops = async () => [];
@@ -3224,24 +3225,26 @@ Lib.mavIndex = origMavIndex;
     }
   };
   const down = await failure(viaWs({ data: null, error: 'futar_unavailable', detail: 'HTTP 503' }));
-  check('futar_unavailable keeps the "BKK <detail>" message',
-    !!down && down.message === 'BKK HTTP 503' && down.code === 'futar_unavailable',
-    down && down.message);
+  check('futar_unavailable is a translated outage banner carrying the detail',
+    !!down && down.code === 'futar_unavailable' && down.i18nKey === 'errFutarDown'
+    && errText('hu', down).includes('HTTP 503') && errText('en', down) === 'BKK FUTÁR is unavailable (HTTP 503). The card tries again on the next refresh.',
+    down && errText('en', down));
   const bare = await failure(viaWs({ data: null, error: 'futar_unavailable' }));
   check('futar error without detail names the error key',
-    !!bare && bare.message === 'BKK futar_unavailable', bare && bare.message);
+    !!bare && errText('hu', bare).includes('futar_unavailable'), bare && bare.message);
   const rejected = await failure(viaWs({ data: null, error: 'futar_auth', detail: 'UNAUTHORIZED' }));
-  check('futar_auth says the integration key was rejected',
-    !!rejected && rejected.code === 'futar_auth'
-    && /^BKK FUTÁR rejected the configured key \(UNAUTHORIZED\)/.test(rejected.message),
+  check('futar_auth is the bad-key banner, in the card\u2019s language',
+    !!rejected && rejected.code === 'futar_auth' && rejected.i18nKey === 'errApiKeyBad'
+    && errText('hu', rejected).startsWith('A BKK API kulcs érvénytelen'),
     rejected && rejected.message);
   Lib._hass = viaWs({ data: null, error: 'futar_auth', detail: 'UNAUTHORIZED' });
   const probe = await Lib.probeApiKey('');
   check('key probe reads futar_auth as a bad key, whatever the detail',
     !probe.ok && probe.code === 'errApiKeyBad', JSON.stringify(probe));
   const limited = await failure(viaWs({ data: null, error: 'futar_rate_limited', detail: 'rate limited' }));
-  check('futar_rate_limited keeps its code for the board fallback',
-    !!limited && limited.code === 'futar_rate_limited', limited && limited.message);
+  check('futar_rate_limited keeps its code for the board fallback and reads as transient',
+    !!limited && limited.code === 'futar_rate_limited' && limited.i18nKey === 'errFutarRateLimited',
+    limited && limited.message);
   const empty = await failure(viaWs({}));
   check('futar response without data or error is still an empty response',
     !!empty && empty.message === 'BKK empty response', empty && empty.message);
@@ -4039,7 +4042,8 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   check('an equal arrival prefers fewer rides', Lib.bestItinerary([change, direct], (it) => Date.parse(it.endTime)) === direct);
   const { t } = await import('./src/i18n.js');
   check('the English journey summary counts transfers',
-    t('en', 'plannerJourneySummary', [30, 0, 2, 0]).includes('0 transfers')
+    t('en', 'plannerJourneySummary', [30, 0, 2, 0]).includes('direct')
+    && t('hu', 'plannerJourneySummary', [30, 0, 2, 0]).includes('átszállás nélkül')
     && t('en', 'plannerJourneySummary', [30, 1, 2, 0]).includes('1 transfer ')
     && t('en', 'plannerJourneySummary', [30, 2, 2, 0]).includes('2 transfers'));
 }
@@ -9104,6 +9108,117 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   check('a Volán coach without GPS is placed by its GTFS times',
     !!coachDot && coachDot.html.includes('ht-veh-dot-est') && coachDot.pt[0] < 47.47 && coachDot.pt[0] > 47.00,
     JSON.stringify(coachDot && coachDot.pt));
+  c._closeVehicleMap();
+  c.remove();
+  window.L = prevL;
+  globalThis.requestAnimationFrame = prevRaf;
+}
+
+/* The timetable position on the shapes that trip it up: an out-and-back
+   line (the stop is passed twice), a hop clipped short of a stop, a stop
+   beside the track, and FUTÁR's half-predicted times. */
+{
+  /* A→B→C and back on a lane 11 m north; the poles are on the outbound lane. */
+  const back = 0.0001;
+  const outAndBack = [[47.50, 19.00], [47.50, 19.10], [47.50, 19.20], [47.50 + back, 19.10], [47.50 + back, 19.00]];
+  const T = 10000;
+  const trip = [
+    { pt: [47.50, 19.00], arr: T, dep: T }, { pt: [47.50, 19.10], arr: T + 100, dep: T + 100 },
+    { pt: [47.50, 19.20], arr: T + 200, dep: T + 200 }, { pt: [47.50, 19.10], arr: T + 300, dep: T + 300 },
+    { pt: [47.50, 19.00], arr: T + 400, dep: T + 400 },
+  ];
+  const outbound = Lib.estimateShapePosition(outAndBack, trip, T + 50);
+  const returning = Lib.estimateShapePosition(outAndBack, trip, T + 350);
+  check('on an out-and-back line the outbound run is drawn on the outbound lane',
+    !!outbound && Math.abs(outbound.pt[1] - 19.05) < 0.002 && Math.abs(outbound.pt[0] - 47.50) < 0.00002, JSON.stringify(outbound));
+  check('and the return run on the return lane, not across the whole line',
+    !!returning && Math.abs(returning.pt[1] - 19.05) < 0.002 && Math.abs(returning.pt[0] - (47.50 + back)) < 0.00002, JSON.stringify(returning));
+  /* The hop's shape starts at 19.10; the stop before it is 750 m west. */
+  const clipped = [[47.50, 19.10], [47.50, 19.20]];
+  const edge = Lib.estimateShapePosition(clipped, [{ pt: [47.50, 19.09], arr: T, dep: T }, { pt: [47.50, 19.101], arr: T + 100, dep: T + 100 }], T + 50);
+  check('a stop outside the clipped hop is not clamped onto its end: the straight line between the stops',
+    !!edge && Math.abs(edge.pt[1] - 19.0955) < 0.0002, JSON.stringify(edge));
+  /* Stations sit 100 m beside the track: while dwelling the marker stays on the track. */
+  const beside = [{ pt: [47.5009, 19.00], arr: T, dep: T }, { pt: [47.5009, 19.10], arr: T + 100, dep: T + 160 }, { pt: [47.5009, 19.20], arr: T + 260, dep: T + 260 }];
+  const dwelling = Lib.estimateShapePosition([[47.50, 19.00], [47.50, 19.10], [47.50, 19.20]], beside, T + 130);
+  check('a dwelling vehicle stands on the track beside its station, not on the station point',
+    !!dwelling && Math.abs(dwelling.pt[0] - 47.50) < 0.00002 && Math.abs(dwelling.pt[1] - 19.10) < 0.0002, JSON.stringify(dwelling));
+  /* FUTÁR: a predicted arrival with a scheduled departure before it. */
+  const keepTD = Lib.tripDetails;
+  Lib.tripDetails = async () => ({
+    sts: [
+      { stopId: 'S1', departureTime: T, arrivalTime: T },
+      { stopId: 'S2', arrivalTime: T + 100, departureTime: T + 120, predictedArrivalTime: T + 300 },
+      { stopId: 'S3', arrivalTime: T + 400, departureTime: T + 400 },
+    ],
+    stops: { S1: { lat: 47.5, lon: 19.0, name: 'A' }, S2: { lat: 47.5, lon: 19.1, name: 'B' }, S3: { lat: 47.5, lon: 19.2, name: 'C' } },
+  });
+  const timed = await Lib.tripTimedStops('k', {}, 'BKK_T', { id: 'S2', name: 'B' });
+  check('a stop with only a predicted arrival takes it for its departure too, and the boarding stop is marked',
+    timed.length === 3 && timed[1].arr === T + 300 && timed[1].dep === T + 300 && timed[1].origin === true && !timed[0].origin,
+    JSON.stringify(timed));
+  Lib.tripDetails = keepTD;
+}
+
+/* On the card: the trip details are cached for the session, so the row's
+   departure of this poll shifts the times; a row that left the board keeps
+   its marker moving; a train known only from Transitous and ELVIRA is placed
+   between the boarding and alighting stops. */
+{
+  const made = [];
+  const layer = () => ({ addTo() { return this; }, setLatLng(p) { this.pt = p; }, setIcon(i) { this.html = i.html; }, redraw() {} });
+  const fakeMap = { setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {} };
+  const fakeL = {
+    map: () => fakeMap, tileLayer: () => layer(), divIcon: (o) => o,
+    marker: (pt, o) => { const m = Object.assign(layer(), { pt, html: o.icon.html }); made.push(m); return m; },
+    polyline: () => layer(), latLngBounds: () => ({ extend() {} }),
+  };
+  const prevL = window.L;
+  window.L = fakeL;
+  const prevRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  const now = Math.floor(Date.now() / 1000);
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c._reloadSafe = () => {};
+  c.setConfig({ language: 'hu', mav: true, stopId: 'BKK_005501024', stopName: 'Kelenföld', destKey: 'szekesfehervar', destName: 'Székesfehérvár' });
+  c._hasFutar = () => true;
+  const shape = [[47.47, 19.02], [47.30, 18.60], [47.19, 18.41]];
+  c._loadRowMapShape = async () => ({ shape, board: shape[0], alight: shape[2] });
+  const keepTTS = Lib.tripTimedStops;
+  Lib.tripTimedStops = async () => [
+    { pt: shape[0], arr: now - 600, dep: now - 600, origin: true },
+    { pt: shape[1], arr: now + 600, dep: now + 600 },
+    { pt: shape[2], arr: now + 1800, dep: now + 1800 },
+  ];
+  /* Cached details say it left 10 min ago; the row says 5 min ago (5 min late). */
+  const row = Lib.asRow({ tripId: 'BKK_9051_1', label: 'IC', head: 'Szombathely', rawType: 'RAIL', dep: now - 300, sched: now - 600, trainNumber: '905' }, 'Székesfehérvár', 'hu');
+  const shifted = await c._rowTimedStops(row);
+  check('a delay grown since the trip details were read shifts every stop by the row\u2019s departure',
+    shifted.length === 3 && shifted[0].dep === now - 300 && shifted[1].arr === now + 900, JSON.stringify(shifted.map((s) => s.arr - now)));
+  c._rows = [row];
+  await c._openVehicleMap(row);
+  const dot = made.find((m) => m.html.includes('ht-veh-dot'));
+  check('the dashed marker sits a quarter of the way into the first run (5 of 20 minutes)',
+    !!dot && dot.html.includes('ht-veh-dot-est') && dot.pt[0] < 47.47 && dot.pt[0] > 47.40, JSON.stringify(dot && dot.pt));
+  /* The row leaves the board a minute after departure: the marker keeps running. */
+  c._rows = [];
+  c._syncOpenMap();
+  await settleTicks();
+  check('a row gone from the board keeps its dashed marker', c._mapMarker === dot && dot.html.includes('ht-veh-dot-est') && !!c._mapEstimate);
+  c._closeVehicleMap();
+  Lib.tripTimedStops = keepTTS;
+  /* ELVIRA-only: a Transitous host row with no stop list, but a departure and a travel time. */
+  made.length = 0;
+  const motis = Lib.asRow({ tripId: 'motis:abc', label: 'IC', head: 'Szombathely', rawType: 'RAIL', dep: now - 300, sched: now - 300, trainNumber: '905', travel: 20 }, 'Székesfehérvár', 'hu');
+  c._rows = [motis];
+  await c._openVehicleMap(motis);
+  const motisDot = made.find((m) => m.html.includes('ht-veh-dot'));
+  const foot = document.querySelector('.ht-map-overlay .ht-map-foot');
+  check('a train known only from Transitous and ELVIRA is placed between its boarding and alighting stops',
+    !!motisDot && motisDot.html.includes('ht-veh-dot-est') && motisDot.pt[0] < 47.47 && motisDot.pt[0] > 47.19
+    && !!foot && foot.textContent.includes('Becsült pozíció (menetrend)'),
+    JSON.stringify({ pt: motisDot && motisDot.pt, foot: foot && foot.textContent }));
   c._closeVehicleMap();
   c.remove();
   window.L = prevL;

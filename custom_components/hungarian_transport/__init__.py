@@ -244,7 +244,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def handle_futar(call: ServiceCall) -> dict[str, Any]:
         # Errors are part of the response, not exceptions: the websocket API
-        # logs every failed call at ERROR, and cards poll every 15 s. The
+        # logs every failed call at ERROR, and cards poll every 45 s. The
         # proxy logs an outage or a rejected key once.
         try:
             data = await proxy.get(call.data["path"], call.data["params"])
