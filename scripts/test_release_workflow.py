@@ -245,6 +245,10 @@ with tempfile.TemporaryDirectory() as tmp_name:
                        GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="1")
         check("a -rev prerelease takes no notes file",
               done.returncode == 0 and (ws / "release-notes.md").stat().st_size == 0, repr(done.stderr[-400:]))
+        done, _ = bash(PACK_STEP, ws, TAG="v1.2.3", REFRESH="true", GITHUB_SHA="0" * 40, GITHUB_EVENT_NAME="schedule",
+                       GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="1")
+        check("a weekly timetable release takes no notes file written for its number",
+              done.returncode == 0 and (ws / "release-notes.md").stat().st_size == 0, repr(done.stderr[-400:]))
 
 if failed:
     print(f"{failed} failed")

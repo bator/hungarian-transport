@@ -79,10 +79,18 @@ def rel(tag: str, created: str, published: str | None = None) -> dict:
 
 
 def run(releases: list[dict], event: str = "schedule", bump: str = "", ref_type: str = "branch",
-        ref_name: str = "main", fail: bool = False, bare: str = "") -> tuple[int, dict, str]:
-    """Run the step; releases are in gh's own order (createdAt, newest first)."""
+        ref_name: str = "main", fail: bool = False, bare: str = "", notes: str = "all") -> tuple[int, dict, str]:
+    """Run the step; releases are in gh's own order (createdAt, newest first).
+    notes: the docs/releases/<version>.md files in the checkout: "all" writes
+    one for every version a stable dispatch could resolve to, "" none."""
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
+        if notes == "all":
+            (tmpdir / "docs" / "releases").mkdir(parents=True)
+            for major in range(1, 3):
+                for minor in range(0, 12):
+                    for patch in range(0, 30):
+                        (tmpdir / "docs" / "releases" / f"{major}.{minor}.{patch}.md").write_text("notes\n")
         bindir = tmpdir / "bin"
         bindir.mkdir()
         for name, body in (("gh", GH_STUB), ("git", GIT_STUB)):
@@ -106,7 +114,7 @@ def run(releases: list[dict], event: str = "schedule", bump: str = "", ref_type:
             "STUB_FAIL": "1" if fail else "0",
             "STUB_BARE_TAGS": bare,
         }
-        proc = subprocess.run(["bash", str(script)], env=env, capture_output=True, text=True, timeout=60)
+        proc = subprocess.run(["bash", str(script)], env=env, cwd=tmpdir, capture_output=True, text=True, timeout=60)
         outputs = dict(ln.split("=", 1) for ln in out.read_text().splitlines() if "=" in ln)
         return proc.returncode, outputs, proc.stdout + proc.stderr
 
@@ -150,6 +158,17 @@ check("rev dispatch continues the open series", code == 0 and o.get("tag") == "v
       and o.get("baseline") == "v1.9.16-rev.3", f"{code} {o} {log}")
 code, o, log = run(revs, event="workflow_dispatch", bump="patch")
 check("patch dispatch takes the open series' number", code == 0 and o.get("tag") == "v1.9.16", f"{code} {o} {log}")
+
+# A stable dispatch without docs/releases/<version>.md on the commit stops in
+# the resolve job (a weekly may have taken the number the notes were written
+# for); a rev dispatch and the weekly need none.
+code, o, log = run(revs, event="workflow_dispatch", bump="patch", notes="")
+check("patch dispatch without release notes for the resolved version fails early",
+      code != 0 and "No release notes" in log and "1.9.16.md" in log and not o.get("tag"), f"{code} {o} {log}")
+code, o, log = run(revs, event="workflow_dispatch", bump="rev", notes="")
+check("rev dispatch needs no release notes", code == 0 and o.get("tag") == "v1.9.16-rev.4", f"{code} {o} {log}")
+code, o, log = run(revs, notes="")
+check("the weekly needs no release notes", code == 0 and o.get("tag") == "v1.9.15", f"{code} {o} {log}")
 minor = [rel("v1.9.20", "2026-10-22T10:00:00Z"), rel("v1.10.0", T)]
 code, o, log = run(minor)
 check("1.10.0 ranks above 1.9.20", code == 0 and o.get("tag") == "v1.10.1", f"{code} {o} {log}")
