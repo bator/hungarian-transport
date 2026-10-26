@@ -4,7 +4,8 @@
 [![release][release-badge]][release-url]
 
 Home Assistant integration and dashboard cards for Hungarian public
-transport: **BKK**, **MÁV**, **Volán** and 16 city networks. See the next
+transport: **BKK**, **MÁV**, **Volán**, 16 city operators and the Volánbusz
+local networks of some 60 towns. See the next
 departures between two stops, follow a vehicle on the map, and plan a trip
 across every network. In Hungarian and English.
 

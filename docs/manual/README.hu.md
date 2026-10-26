@@ -41,7 +41,7 @@ Honnan jönnek az adatok:
 | --- | --- | --- |
 | Budapesti busz, villamos, troli, metró, HÉV, elővárosi vonat | BKK FUTÁR | Igen, valós idejű pozíció és késés |
 | MÁV vonatok | BKK FUTÁR Budapest környékén, a vágány és a helyjegy a MÁV ELVIRA-ból | Késés és vágány |
-| Volán buszok | A KTI országos GTFS-e, a kártyával együtt települ | Menetrend |
+| Volán buszok | Országos Volán GTFS (opendata.utas.hu, tartalékként KTI), a kártyával együtt települ | Menetrend |
 | Helyi hálózatok (Szeged, Pécs, Miskolc, …) | Az üzemeltetők saját GTFS-e, a kártyával együtt települ | Menetrend (Szombathely élőben, a kiegészítő szolgáltatásokkal) |
 | Megállókeresés és átszállás | [Transitous](https://transitous.org/), tartalékként a BKK FUTÁR | — |
 
@@ -119,7 +119,8 @@ Konfigurálás** egyetlen mezőt nyit meg: **BKK API kulcs**.
 
 - Írj be új kulcsot, és ments: az integráció újratölt, és minden kártya az
   új kulcsot használja.
-- Ürítsd ki a mezőt, és ments: a kulcs törlődik.
+- Hagyd üresen a mezőt, és ments: a tárolt kulcs megmarad (nem jelenik meg).
+  A **Tárolt kulcs törlése** jelölőnégyzettel és mentéssel törölheted.
 - A mező gépelés közben is elrejti a kulcsot.
 
 Ha a BKK elutasítja a tárolt kulcsot (visszavonták vagy lejárt), a Home
@@ -198,7 +199,7 @@ A szerkesztő mezői fentről lefelé:
 | **Város** | Csak Helyi módban: melyik város hálózata. |
 | **Forrás megálló** | Keresőmező, a fő csomópontokra gyorsgombokkal. |
 | **Cél megálló** | Csak azok a megállók, ahová a forrásból tényleg eljut egy jármű. |
-| **Menetrend előre (perc)** | Milyen messzire nézzen előre a kártya. 30 és 480 perc között gyorsgombok is vannak. |
+| **Előretekintés (perc)** | Milyen messzire nézzen előre a kártya. 30 és 480 perc között gyorsgombok is vannak. |
 
 ### 4.2 A BKK kulcs a szerkesztőben
 
@@ -279,7 +280,7 @@ Pipáld be a **Helyi** módot, válaszd ki a várost, majd a két megállót.
 
 ![Helyi mód, Szeged kiválasztva, a forrásmegálló keresése](images/hu/editor-city-search.webp)
 
-A **Menetrend előre** gyorsgombjai állítják, milyen messzire nézzen előre a
+Az **Előretekintés** gyorsgombjai állítják, milyen messzire nézzen előre a
 kártya. Itt a *60* egy képernyőn tartja a sűrűn járó villamost:
 
 ![Helyi kártya a szerkesztőben: a szegedi 2-es villamos, 60 perces előretekintéssel](images/hu/editor-city-done.webp)
@@ -375,7 +376,8 @@ hálózatok. Üzemmódot nem kell választani.
 
 Add hozzá a **Hungarian transit stop planner** kártyát. A szerkesztője
 ugyanazokat a mezőket tartalmazza, mint az indulási kártyáé, csak
-üzemmód-kapcsolók nélkül. A megállókat üresen is hagyhatod, és magán a
+üzemmód-kapcsolók és a Város mező nélkül. A megállókat üresen is hagyhatod,
+és magán a
 kártyán választhatod ki őket.
 
 ![A tervező szerkesztője](images/hu/planner-editor.webp)
@@ -414,7 +416,7 @@ választasz a leggyakrabban. Az előttük álló betű a hálózatot jelzi:
 
 **Most** állásban a tervező a két hely közötti összes közvetlen indulást
 mutatja, ugyanabban az elrendezésben, mint az indulási kártya, bármelyik
-üzemeltetőé is. A **Meddig** mező állítja, milyen messzire néz előre. A
+üzemeltetőé is. Az **Előretekintés** mező állítja, milyen messzire néz előre. A
 **Térkép** az első indulás útvonalát rajzolja ki.
 
 ![A tervező élő indulásai Kelenföldről Székesfehérvárra](images/hu/planner-now.webp)
@@ -525,9 +527,9 @@ Egy sikertelen frissítés megtartja az előző menetrendet, és értesítést k
 | --- | --- | --- |
 | *Nincs BKK API kulcs: add meg a Magyar közlekedés integrációban vagy a kártyában.* | Egy BKK vagy MÁV kártyának nincs kulcsa. | Add meg a kulcsot az integráció **Konfigurálás** pontjában vagy a kártyaszerkesztőben. |
 | *A BKK API kulcs érvénytelen (401/403).* | A BKK elutasítja a kulcsot. | Kérj új kulcsot, és add meg **A BKK kulcsot elutasították** ablakban vagy a **Konfigurálás** alatt. |
-| *Nincs közelgő indulás.* | Az előretekintési időben nem indul semmi (gyakran éjjel). | Növeld a **Menetrend előre** értékét, vagy ellenőrizd a megállókat. |
+| *Nincs közelgő indulás.* | Az előretekintési időben nem indul semmi (gyakran éjjel). | Növeld az **Előretekintés** értékét, vagy ellenőrizd a megállókat. |
 | *Nincs közvetlen járat erre a célra. Elérhető célok: …* | A célba nem megy közvetlen járat a forrásból. | Válassz a felsorolt célok közül, vagy használd a tervezőt. |
-| *A menetrend-index nem töltődött le (időtúllépés vagy hálózati hiba).* | A böngésző nem tudta letölteni a Volán vagy a helyi menetrendet. | Töltsd újra az oldalt. Ha marad, nézd meg a **Javítások** alatt, hiányoznak-e fájlok. |
+| *A menetrend-index nem töltődött le (időtúllépés vagy hálózati hiba).* | A böngésző nem tudta letölteni a Volán vagy a helyi menetrendet. | Töltsd újra az oldalt. Ha marad, telepítsd újra a kiadást (HACS → Újraletöltés), és indítsd újra a Home Assistantot. |
 | *A menetrend-index újabb (vN), mint amit ez a kártya ismer. Frissítsd a kártyát.* | A böngésző még a régi kártyát futtatja. | Töltsd újra az oldalt üres gyorsítótárral, vagy frissítsd az integrációt. |
 | Nincs vágány, **H** vagy **OB** jel a MÁV sorokon | A MÁV ELVIRA nem válaszolt. | Nincs teendő: a vonatok így is látszanak, a jelek maguktól visszajönnek. |
 | Egy vonat térképe egyenes vonal az állomások között | Ehhez a vonathoz nincs útvonaladat. | Add hozzá a MÁV menetrendet ([3.4](#34-vonatútvonalak-a-térképen-opcionális)). |
