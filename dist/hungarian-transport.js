@@ -3112,6 +3112,7 @@ var SHAPE_LOOP_CLOSE_M = 100;
 var SHAPE_LOOP_RATIO = 25;
 var SHAPE_PASS_M = 80;
 var SHAPE_PASS_WEIGHT = 4;
+var SHAPE_STOP_OFF_M = 1500;
 Object.assign(BkkLib, {
   hm(ts) {
     if (!ts) return "";
@@ -3593,6 +3594,79 @@ Object.assign(BkkLib, {
       sliced = between(nearest(alights), nearest(boards), false).reverse();
     }
     return sliced.length >= 2 ? sliced : [a, b];
+  },
+  /* Metres along a shape: planar coordinates of its points and the running
+     length at each (what sliceShapeBetween projects with). */
+  _shapeMetric(pts) {
+    const k = Math.cos(pts[0][0] * Math.PI / 180) * 111320;
+    const xy = (p) => [p[1] * k, p[0] * 110540];
+    xy.pts = pts.map(xy);
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) {
+      cum.push(cum[i - 1] + Math.hypot(xy.pts[i][0] - xy.pts[i - 1][0], xy.pts[i][1] - xy.pts[i - 1][1]));
+    }
+    return { xy, cum };
+  },
+  /* Where a vehicle is by its timetable: between the last stop it has left
+     and the next one, as far along that run as the time has gone, measured
+     along the shape (both stops projected onto it; a straight line when the
+     shape does not pass them). Standing at a stop between its arrival and
+     departure. Null before the first departure, from the last arrival on,
+     or without two timed stops. timed: [{pt: [lat, lon], arr, dep}] in
+     running order, seconds; arr or dep may be missing. */
+  estimateShapePosition(shape, timed, nowSec) {
+    const stops = [];
+    (Array.isArray(timed) ? timed : []).forEach((s) => {
+      const pt = s && BkkLib.mapGpsLatLon(s.pt && s.pt[0], s.pt && s.pt[1]);
+      const arr = Number(s && (s.arr != null ? s.arr : s.dep));
+      const dep = Number(s && (s.dep != null ? s.dep : s.arr));
+      if (!pt || !Number.isFinite(arr) || !Number.isFinite(dep) || arr <= 0 || dep <= 0) return;
+      stops.push({ pt, arr: Math.min(arr, dep), dep: Math.max(arr, dep) });
+    });
+    const now = Number(nowSec);
+    if (stops.length < 2 || !Number.isFinite(now)) return null;
+    if (now < stops[0].dep || now >= stops[stops.length - 1].arr) return null;
+    let i = 0;
+    while (i + 1 < stops.length - 1 && stops[i + 1].dep <= now) i += 1;
+    const a = stops[i];
+    const b = stops[i + 1];
+    if (now >= b.arr) return { pt: b.pt, from: i, to: i + 1, fraction: 1 };
+    const span = b.arr - a.dep;
+    const f = span > 0 ? Math.max(0, Math.min(1, (now - a.dep) / span)) : 1;
+    const straight = () => ({
+      pt: [a.pt[0] + (b.pt[0] - a.pt[0]) * f, a.pt[1] + (b.pt[1] - a.pt[1]) * f],
+      from: i,
+      to: i + 1,
+      fraction: f
+    });
+    const pts = BkkLib.validMapShape(shape);
+    if (pts.length < 2) return straight();
+    const { xy, cum } = BkkLib._shapeMetric(pts);
+    const nearest = (list) => list.reduce((m, ft) => ft.d < m.d ? ft : m, list[0]);
+    const feetA = BkkLib._shapeFeet(xy, cum, a.pt);
+    const feetB = BkkLib._shapeFeet(xy, cum, b.pt);
+    if (!feetA.length || !feetB.length) return straight();
+    let pick = null;
+    BkkLib._shapePasses(feetA).forEach((pa) => BkkLib._shapePasses(feetB).forEach((pb) => {
+      if (pb.at <= pa.at) return;
+      const cost = pa.d + pb.d;
+      if (!pick || cost < pick.cost) pick = { pa, pb, cost };
+    }));
+    if (!pick) {
+      const pa = nearest(feetA);
+      const pb = nearest(feetB);
+      if (pb.at <= pa.at) return straight();
+      pick = { pa, pb, cost: pa.d + pb.d };
+    }
+    if (pick.pa.d > SHAPE_STOP_OFF_M || pick.pb.d > SHAPE_STOP_OFF_M) return straight();
+    const at = pick.pa.at + (pick.pb.at - pick.pa.at) * f;
+    let seg = 1;
+    while (seg < cum.length - 1 && cum[seg] < at) seg += 1;
+    const len = cum[seg] - cum[seg - 1];
+    const t2 = len > 0 ? Math.max(0, Math.min(1, (at - cum[seg - 1]) / len)) : 0;
+    const p = pts[seg - 1];
+    const q = pts[seg];
+    return { pt: [p[0] + (q[0] - p[0]) * t2, p[1] + (q[1] - p[1]) * t2], from: i, to: i + 1, fraction: f };
   },
   clipShapeToBoardDest(shape, board, dest) {
     const pts = BkkLib.validMapShape(shape);
@@ -4443,7 +4517,7 @@ Object.assign(BkkLib, {
   /* Where a GTFS trip runs: its stops' coordinates and a reference into the
      sharded shapes folder (trip row element 5), carried on the departure row
      so the map needs neither the index nor Transitous. */
-  gtfsTripGeo(idx, t2, from, to) {
+  gtfsTripGeo(idx, t2, from, to, dayBase) {
     const ps = t2 && t2[2] || [];
     const stops = ps.map((p) => {
       const st = idx.stops[p];
@@ -4451,12 +4525,28 @@ Object.assign(BkkLib, {
     });
     const ref = Number(t2 && t2[5]);
     const sh = idx.sh;
+    const base = Number(dayBase);
     return {
       shape: sh && sh.dir && sh.n > 0 && Number.isInteger(ref) && ref >= 0 ? { base: idx.url, dir: sh.dir, n: sh.n, id: ref } : null,
       stops,
       from,
-      to: to >= 0 ? to : ps.length - 1
+      to: to >= 0 ? to : ps.length - 1,
+      /* The trip's minutes past the service day's base, for the position
+         the timetable gives when no vehicle reports one. */
+      mins: Array.isArray(t2 && t2[3]) ? t2[3] : null,
+      base: Number.isFinite(base) && base > 0 ? base : null
     };
+  },
+  /* The GTFS trip's stops with their times, for estimateShapePosition. */
+  gtfsTimedStops(geo) {
+    if (!geo || !Array.isArray(geo.stops) || !Array.isArray(geo.mins) || !geo.base) return [];
+    const out = [];
+    geo.stops.forEach((pt, i) => {
+      const m = Number(geo.mins[i]);
+      if (!pt || !Number.isFinite(m)) return;
+      out.push({ pt, arr: geo.base + m * 60, dep: geo.base + m * 60 });
+    });
+    return out;
   },
   _shapeShards: /* @__PURE__ */ new Map(),
   async _fetchJsonGz(url, timeoutMs) {
@@ -4581,7 +4671,7 @@ Object.assign(BkkLib, {
         if (!departureStillDue(depTs)) continue;
         const kind = BkkLib.gtfsRouteKind(t2[4], vehicle, rawType);
         rows.push({
-          gtfs: BkkLib.gtfsTripGeo(idx, t2, oidx, didx),
+          gtfs: BkkLib.gtfsTripGeo(idx, t2, oidx, didx, day.base),
           tripId: "gtfs:" + route + ":" + day.ymd + ":" + depMin + ":" + origin.i,
           label: route,
           color,
@@ -5333,6 +5423,21 @@ Object.assign(BkkLib, {
     };
     const hit = destKey ? sts.slice(oidx + 1).find((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey)) : null;
     return { board: at(sts[oidx]), alight: hit ? at(hit) : null };
+  },
+  /* The trip's stops with their (predicted, else scheduled) times, in
+     running order, for the timetable position of a vehicle without GPS. */
+  async tripTimedStops(apiKey, cache, tripId) {
+    const { sts, stops } = await BkkLib.tripDetails(apiKey, cache, tripId);
+    const out = [];
+    (sts || []).forEach((s) => {
+      const stop = s && stops[s.stopId] || {};
+      const pt = BkkLib.mapGpsLatLon(stop.lat, stop.lon);
+      const arr = Number(s.predictedArrivalTime || s.arrivalTime || s.predictedDepartureTime || s.departureTime);
+      const dep = Number(s.predictedDepartureTime || s.departureTime || arr);
+      if (!pt || !Number.isFinite(arr) || arr <= 0) return;
+      out.push({ pt, arr, dep: Number.isFinite(dep) && dep > 0 ? dep : arr });
+    });
+    return out;
   },
   async tripRemainingNames(apiKey, cache, tripId, origin) {
     const { sts, stops } = await BkkLib.tripDetails(apiKey, cache, tripId);
@@ -7273,6 +7378,7 @@ var BKKHopCard = class extends HTMLElement {
     this._mapState = null;
     this._mapL = null;
     this._mapReturnFocus = null;
+    this._mapEstimate = null;
     this._hiddenAt = 0;
     this._pollRun = null;
   }
@@ -7954,6 +8060,7 @@ var BKKHopCard = class extends HTMLElement {
     this._mapRef = null;
     this._mapState = null;
     this._mapL = null;
+    this._mapEstimate = null;
     const back = this._mapReturnFocus;
     this._mapReturnFocus = null;
     if (hadOverlay) this._restoreFocus(back);
@@ -8470,6 +8577,14 @@ ${this._stopPinCss()}
       alight = got.alight || null;
     } catch (_e) {
     }
+    let timed = [];
+    if (!hasGps) {
+      try {
+        timed = await this._rowTimedStops(row);
+      } catch (_e) {
+        timed = [];
+      }
+    }
     if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
     if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
     if (st.hasGps && this._mapMarker && typeof this._mapMarker.getLatLng === "function") {
@@ -8481,6 +8596,15 @@ ${this._stopPinCss()}
         hasGps = true;
       }
     }
+    if (!BkkLib.mapGpsLatLon(lat, lon) && timed.length >= 2) {
+      const est = BkkLib.estimateShapePosition(shape, timed, Date.now() / 1e3);
+      if (est) {
+        lat = est.pt[0];
+        lon = est.pt[1];
+        positionEstimated = true;
+      }
+    }
+    this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed } : null;
     const pos = BkkLib.mapGpsLatLon(lat, lon);
     const hasPosition = !!pos;
     if (hasPosition) {
@@ -8563,6 +8687,58 @@ ${this._stopPinCss()}
     }, 80);
     this._openingMap = "";
   }
+  /* The row's stops with their times, for the timetable position: a GTFS
+     row carries them in its index geometry; a FUTÁR trip (the row's own id,
+     or the sensor vehicle's for an ELVIRA train) has trip-details. */
+  async _rowTimedStops(row) {
+    if (!row) return [];
+    if (row.gtfs) return BkkLib.gtfsTimedStops(row.gtfs);
+    if (!this._hasFutar()) return [];
+    let tripId = BkkLib.isFutarTripId(row.tripId) ? String(row.tripId) : "";
+    if (!tripId && this._hass) {
+      const hit = BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), row);
+      if (hit && BkkLib.isFutarTripId(hit.tripId)) tripId = String(hit.tripId);
+    }
+    if (!tripId) return [];
+    return BkkLib.tripTimedStops(this._apiKey(), this._tripCache || {}, tripId);
+  }
+  /* A poll's turn for the dashed marker: the timetable has moved the
+     vehicle on; at its last stop the marker goes. */
+  _syncEstimatedMarker(row, lang) {
+    const est = this._mapEstimate;
+    const st = this._mapState;
+    if (!est || !st || !this._map) return;
+    const got = BkkLib.estimateShapePosition(est.shape, est.timed, Date.now() / 1e3);
+    if (!got) {
+      if (this._mapMarker) {
+        try {
+          this._map.removeLayer(this._mapMarker);
+        } catch (_e) {
+        }
+        this._mapMarker = null;
+      }
+      st.estimated = false;
+      st.hasPosition = false;
+    } else if (this._mapMarker) {
+      this._mapMarker.setLatLng(got.pt);
+      st.estimated = true;
+      st.hasPosition = true;
+    } else {
+      const L = this._mapL || (typeof window !== "undefined" ? window.L : null);
+      if (!L || typeof L.divIcon !== "function" || typeof L.marker !== "function") return;
+      try {
+        const icon = L.divIcon({ className: "", html: this._dotIcon(row, false, lang), iconSize: [32, 32], iconAnchor: [16, 16] });
+        this._mapMarker = L.marker(got.pt, { icon, zIndexOffset: 600 }).addTo(this._map);
+      } catch (_e) {
+        return;
+      }
+      st.estimated = true;
+      st.hasPosition = true;
+    }
+    if (!st.ready) return;
+    const foot = this._mapOverlay && this._mapOverlay.querySelector(".ht-map-foot");
+    if (foot) foot.textContent = this._mapFoot(row, st, lang);
+  }
   _mapFoot(row, st, lang) {
     if (!st.hasShape && !st.hasBoard && !st.hasPosition) return t(lang, "mapNothingToShow");
     if (!st.hasShape) return t(lang, "mapNoGeometry");
@@ -8575,9 +8751,14 @@ ${this._stopPinCss()}
     const st = this._mapState;
     if (!this._map || !this._openMapKey || !st) return;
     const row = this._findMapRow(this._mapRef, this._rows || []);
-    if (!row || !row.hasGps) return;
+    if (!row) return;
+    if (!row.hasGps) {
+      this._syncEstimatedMarker(row, this._lang());
+      return;
+    }
     const gps = BkkLib.mapGpsLatLon(row.lat, row.lon);
     if (!gps) return;
+    this._mapEstimate = null;
     const lang = this._lang();
     const L = this._mapL || (typeof window !== "undefined" ? window.L : null);
     const icon = L && typeof L.divIcon === "function" ? L.divIcon({

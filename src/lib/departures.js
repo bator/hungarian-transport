@@ -362,6 +362,21 @@ Object.assign(BkkLib, {
       : null;
     return { board: at(sts[oidx]), alight: hit ? at(hit) : null };
   },
+  /* The trip's stops with their (predicted, else scheduled) times, in
+     running order, for the timetable position of a vehicle without GPS. */
+  async tripTimedStops(apiKey, cache, tripId) {
+    const { sts, stops } = await BkkLib.tripDetails(apiKey, cache, tripId);
+    const out = [];
+    (sts || []).forEach((s) => {
+      const stop = (s && stops[s.stopId]) || {};
+      const pt = BkkLib.mapGpsLatLon(stop.lat, stop.lon);
+      const arr = Number(s.predictedArrivalTime || s.arrivalTime || s.predictedDepartureTime || s.departureTime);
+      const dep = Number(s.predictedDepartureTime || s.departureTime || arr);
+      if (!pt || !Number.isFinite(arr) || arr <= 0) return;
+      out.push({ pt, arr, dep: Number.isFinite(dep) && dep > 0 ? dep : arr });
+    });
+    return out;
+  },
   async tripRemainingNames(apiKey, cache, tripId, origin) {
     const { sts, stops } = await BkkLib.tripDetails(apiKey, cache, tripId);
     const oidx = BkkLib.originIndex(sts, stops, origin);
