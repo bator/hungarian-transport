@@ -331,7 +331,7 @@ Click a row or its map pin. A map opens with the vehicle's route.
 | Dot with the line's badge and stop name | Where you board. |
 | White ring with the stop name | Where you get off. |
 | Round vehicle marker with a halo | Live GPS position. |
-| Vehicle marker with a dashed border | Position estimated from the timetable. |
+| Vehicle marker with a dashed border | Position estimated from the timetable; before its first departure the vehicle waits at its first stop ("Waiting to depart"). |
 
 The header names the line, its destination and the vehicle type (and model,
 when BKK knows it). The footer sums up the map: route, boarding, alighting,

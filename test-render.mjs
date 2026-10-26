@@ -9038,8 +9038,10 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   check('while dwelling the vehicle stands at the stop', !!dwell && dwell.pt[1] === 19.10, JSON.stringify(dwell));
   check('the second run is measured from its own departure',
     !!later && Math.abs(later.pt[1] - 19.15) < 0.002 && later.from === 1, JSON.stringify(later));
-  check('no position before the first departure or from the last arrival on',
-    Lib.estimateShapePosition(shape, timed, 999) === null && Lib.estimateShapePosition(shape, timed, 2260) === null);
+  const waiting = Lib.estimateShapePosition(shape, timed, 999);
+  check('before the first departure the vehicle waits at its first stop; none from the last arrival on',
+    !!waiting && waiting.waiting === true && waiting.pt[1] === 19.00 && Lib.estimateShapePosition(shape, timed, 2260) === null,
+    JSON.stringify(waiting));
   /* A stop the shape does not pass (another line's geometry): the straight
      line between the stops, not a point on the far shape. */
   const off = Lib.estimateShapePosition([[46.0, 18.0], [46.0, 18.3]], timed, 1300);
@@ -9220,6 +9222,23 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   c._syncOpenMap();
   await settleTicks();
   check('a row gone from the board keeps its dashed marker', c._mapMarker === dot && dot.html.includes('ht-veh-dot-est') && !!c._mapEstimate);
+  c._closeVehicleMap();
+  /* A train that has not left its first station yet: the marker waits there, and the footer says so. */
+  made.length = 0;
+  Lib.tripTimedStops = async () => [
+    { pt: shape[0], arr: now + 600, dep: now + 600, origin: true },
+    { pt: shape[1], arr: now + 1800, dep: now + 1800 },
+    { pt: shape[2], arr: now + 3000, dep: now + 3000 },
+  ];
+  const later = Lib.asRow({ tripId: 'BKK_9051_1', label: 'IC', head: 'Szombathely', rawType: 'RAIL', dep: now + 600, sched: now + 600, trainNumber: '905' }, 'Székesfehérvár', 'hu');
+  c._rows = [later];
+  await c._openVehicleMap(later);
+  const waitDot = made.find((m) => m.html.includes('ht-veh-dot'));
+  const waitFoot = document.querySelector('.ht-map-overlay .ht-map-foot');
+  check('a train not yet departed waits at its first station with a dashed marker and "Vár az indulásra"',
+    !!waitDot && waitDot.html.includes('ht-veh-dot-est') && Math.abs(waitDot.pt[0] - shape[0][0]) < 0.0005
+    && !!waitFoot && waitFoot.textContent.includes('Vár az indulásra (menetrend)'),
+    JSON.stringify({ pt: waitDot && waitDot.pt, foot: waitFoot && waitFoot.textContent }));
   c._closeVehicleMap();
   Lib.tripTimedStops = keepTTS;
   /* ELVIRA-only: a Transitous host row with no stop list, but a departure and a travel time. */

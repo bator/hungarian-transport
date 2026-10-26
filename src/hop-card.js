@@ -935,6 +935,7 @@ ${this._stopPinCss()}
     if (hasBoard) bits.push('\u25cf ' + t(lang, 'mapBoardStop'));
     if (hasAlight) bits.push('\u25cb ' + t(lang, 'mapAlightStop'));
     if (hasGps) bits.push(t(lang, 'mapLivePos'));
+    else if (estimated === 'waiting') bits.push(t(lang, 'mapWaiting'));
     else if (estimated) bits.push(t(lang, 'mapEstPos'));
     else if (hasShape) bits.push(t(lang, 'mapNoGps'));
     if (row.stopDistancePercent != null && row.stopDistancePercent !== '') {
@@ -1345,7 +1346,8 @@ ${this._stopPinCss()}
       if (est) {
         lat = est.pt[0];
         lon = est.pt[1];
-        positionEstimated = true;
+        /* 'waiting': at its first stop before departure (mapWaiting). */
+        positionEstimated = est.waiting ? 'waiting' : true;
       }
     }
     this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed, row, board, alight } : null;
@@ -1464,7 +1466,7 @@ ${this._stopPinCss()}
       st.hasPosition = false;
     } else if (this._mapMarker) {
       this._mapMarker.setLatLng(got.pt);
-      st.estimated = true;
+      st.estimated = got.waiting ? 'waiting' : true;
       st.hasPosition = true;
     } else {
       const L = this._mapL || (typeof window !== 'undefined' ? window.L : null);
@@ -1475,7 +1477,7 @@ ${this._stopPinCss()}
       } catch (_e) {
         return;
       }
-      st.estimated = true;
+      st.estimated = got.waiting ? 'waiting' : true;
       st.hasPosition = true;
     }
     if (!st.ready) return;

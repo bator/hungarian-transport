@@ -343,7 +343,7 @@ Kattints egy sorra vagy a térképgombjára. Megnyílik a térkép a jármű
 | Pötty a vonaljelzéssel és a megálló nevével | Itt szállsz fel. |
 | Fehér karika a megálló nevével | Itt szállsz le. |
 | Kerek járműjel udvarral | Élő GPS-pozíció. |
-| Szaggatott szélű járműjel | A menetrendből becsült pozíció. |
+| Szaggatott szélű járműjel | A menetrendből becsült pozíció; az első indulása előtt a jármű a kiindulási megállójában vár („Vár az indulásra”). |
 
 A fejléc a vonalat, a célt és a jármű fajtáját mutatja (a BKK-nál a
 jármű típusát is, például Ganz csuklós). A lábléc összefoglal: útvonal, felszállás, leszállás, élő
