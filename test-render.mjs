@@ -3765,6 +3765,20 @@ Lib.mavIndex = origMavIndex;
   const pick = Lib.pickMavVariant(idx2.n['905'], st, 'Székesfehérvár', 'Kelenföld vasútállomás');
   check('MÁV variant: serves both stations in order, BKK naming matches',
     !!pick && pick.variant[0] === 0 && pick.board === 1 && pick.alight === 3, JSON.stringify(pick));
+  /* The number read off a FUTÁR trip id is another train's (8714, Székesfehérvár
+     to Siófok) for an Ajka–Déli train: its patterns serve the boarding station
+     but neither the alighting one nor the headsign, so there is no route from
+     the index, and the trip's own polyline draws instead. */
+  const st3 = st.concat([['Siófok', 4690500, 1805600], ['Budapest-Déli', 4750000, 1902400]]);
+  const collide = [[0, [1, 4]], [0, [3, 1, 4]]];
+  check('MÁV variant: a pattern serving the boarding station only, towards another terminus, is no match',
+    Lib.pickMavVariant(collide, st3, 'Székesfehérvár', 'Budapest-Kelenföld', 'Budapest-Déli') === null);
+  const viaHead = [[0, [1, 4]], [0, [0, 1, 5]]];
+  const byHead = Lib.pickMavVariant(viaHead, st3, 'Székesfehérvár', 'Kelenföld vasútállomás', 'Budapest-Déli');
+  check('MÁV variant: without the alighting station, the pattern ending at the row\u2019s headsign serves',
+    !!byHead && byHead.variant[1][2] === 5 && byHead.board === 1 && byHead.alight === -1, JSON.stringify(byHead));
+  check('MÁV variant: without a boarding station the first pattern is taken',
+    !!Lib.pickMavVariant(collide, st3, '', '', '') && Lib.pickMavVariant([], st3, '', '', '') === null);
   const keepIdx = Lib.mavIndex;
   Lib.mavIndex = async () => idx2;
   const route = await Lib.mavRouteForRow({ label: 'BAKONY', trainNumber: '905', type: 'RAIL' }, 'Székesfehérvár', 'Budapest-Kelenföld');
@@ -9024,8 +9038,10 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   check('while dwelling the vehicle stands at the stop', !!dwell && dwell.pt[1] === 19.10, JSON.stringify(dwell));
   check('the second run is measured from its own departure',
     !!later && Math.abs(later.pt[1] - 19.15) < 0.002 && later.from === 1, JSON.stringify(later));
-  check('no position before the first departure or from the last arrival on',
-    Lib.estimateShapePosition(shape, timed, 999) === null && Lib.estimateShapePosition(shape, timed, 2260) === null);
+  const waiting = Lib.estimateShapePosition(shape, timed, 999);
+  check('before the first departure the vehicle waits at its first stop; none from the last arrival on',
+    !!waiting && waiting.waiting === true && waiting.pt[1] === 19.00 && Lib.estimateShapePosition(shape, timed, 2260) === null,
+    JSON.stringify(waiting));
   /* A stop the shape does not pass (another line's geometry): the straight
      line between the stops, not a point on the far shape. */
   const off = Lib.estimateShapePosition([[46.0, 18.0], [46.0, 18.3]], timed, 1300);
@@ -9206,6 +9222,23 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   c._syncOpenMap();
   await settleTicks();
   check('a row gone from the board keeps its dashed marker', c._mapMarker === dot && dot.html.includes('ht-veh-dot-est') && !!c._mapEstimate);
+  c._closeVehicleMap();
+  /* A train that has not left its first station yet: the marker waits there, and the footer says so. */
+  made.length = 0;
+  Lib.tripTimedStops = async () => [
+    { pt: shape[0], arr: now + 600, dep: now + 600, origin: true },
+    { pt: shape[1], arr: now + 1800, dep: now + 1800 },
+    { pt: shape[2], arr: now + 3000, dep: now + 3000 },
+  ];
+  const later = Lib.asRow({ tripId: 'BKK_9051_1', label: 'IC', head: 'Szombathely', rawType: 'RAIL', dep: now + 600, sched: now + 600, trainNumber: '905' }, 'Székesfehérvár', 'hu');
+  c._rows = [later];
+  await c._openVehicleMap(later);
+  const waitDot = made.find((m) => m.html.includes('ht-veh-dot'));
+  const waitFoot = document.querySelector('.ht-map-overlay .ht-map-foot');
+  check('a train not yet departed waits at its first station with a dashed marker and "Vár az indulásra"',
+    !!waitDot && waitDot.html.includes('ht-veh-dot-est') && Math.abs(waitDot.pt[0] - shape[0][0]) < 0.0005
+    && !!waitFoot && waitFoot.textContent.includes('Vár az indulásra (menetrend)'),
+    JSON.stringify({ pt: waitDot && waitDot.pt, foot: waitFoot && waitFoot.textContent }));
   c._closeVehicleMap();
   Lib.tripTimedStops = keepTTS;
   /* ELVIRA-only: a Transitous host row with no stop list, but a departure and a travel time. */

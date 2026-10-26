@@ -820,6 +820,7 @@ var I18N = {
     mapEndPoint: "Érkezés",
     mapLivePos: "Élő pozíció",
     mapEstPos: "Becsült pozíció (menetrend)",
+    mapWaiting: "Vár az indulásra (menetrend)",
     mapNoGps: "Nincs élő GPS",
     mapUntilStop: (n) => `Megállóig: ${n}%`,
     mapExpected: (hm) => `Várható: ${hm}`,
@@ -1006,6 +1007,7 @@ var I18N = {
     mapEndPoint: "Arrival",
     mapLivePos: "Live position",
     mapEstPos: "Estimated position (timetable)",
+    mapWaiting: "Waiting to depart (timetable)",
     mapNoGps: "No live GPS",
     mapUntilStop: (n) => `To stop: ${n}%`,
     mapExpected: (hm) => `Due: ${hm}`,
@@ -3642,7 +3644,22 @@ Object.assign(BkkLib, {
     });
     const now = Number(nowSec);
     if (stops.length < 2 || !Number.isFinite(now)) return null;
-    if (now < stops[0].dep || now >= stops[stops.length - 1].arr) return null;
+    if (now >= stops[stops.length - 1].arr) return null;
+    const pts = BkkLib.validMapShape(shape);
+    if (now < stops[0].dep) {
+      let pt = stops[0].pt;
+      if (pts.length >= 2) {
+        const { xy: xy2, cum: cum2 } = BkkLib._shapeMetric(pts);
+        const feet = BkkLib._shapeFeet(xy2, cum2, pt);
+        const near = feet.length ? feet.reduce((m, ft) => ft.d < m.d ? ft : m, feet[0]) : null;
+        if (near && near.d <= SHAPE_PASS_M) {
+          const p = pts[near.seg];
+          const q = pts[near.seg + 1];
+          pt = [p[0] + (q[0] - p[0]) * near.t, p[1] + (q[1] - p[1]) * near.t];
+        }
+      }
+      return { pt, from: 0, to: 0, fraction: 0, waiting: true };
+    }
     let i = 0;
     while (i + 1 < stops.length - 1 && stops[i + 1].dep <= now) i += 1;
     const a = stops[i];
@@ -3652,7 +3669,6 @@ Object.assign(BkkLib, {
     const f = dwell ? 1 : span > 0 ? Math.max(0, Math.min(1, (now - a.dep) / span)) : 1;
     const result = (pt) => ({ pt, from: i, to: i + 1, fraction: f });
     const straight = () => result([a.pt[0] + (b.pt[0] - a.pt[0]) * f, a.pt[1] + (b.pt[1] - a.pt[1]) * f]);
-    const pts = BkkLib.validMapShape(shape);
     if (pts.length < 2) return straight();
     const { xy, cum } = BkkLib._shapeMetric(pts);
     const total = cum[cum.length - 1];
@@ -4088,21 +4104,29 @@ Object.assign(BkkLib, {
   },
   /* Schema 2 keeps every stop pattern of a train (936 sometimes runs on to
      Szombathely) with its stations: take the longest one that serves the
-     card's two stations in order, else one serving the boarding station.
-     Pins go on that pattern's own station coordinates. */
-  pickMavVariant(variants, stations, boardName, alightName) {
+     card's two stations in order, else one serving the boarding station
+     whose terminus is the row's headsign. The number came from a FUTÁR
+     trip id by a rule of thumb, and MÁV reuses numbers: a pattern that
+     serves neither the alighting station nor the headsign is another
+     train's (8714 Székesfehérvár–Siófok for an Ajka–Déli train), and null
+     lets the trip's own FUTÁR polyline draw instead. Without a boarding
+     station to check, the first pattern. Pins go on that pattern's own
+     station coordinates. */
+  pickMavVariant(variants, stations, boardName, alightName, headsign) {
     const same = (i, name) => !!name && BkkLib.nameEq(((stations || [])[i] || [])[0] || "", name);
-    let firstBoard = null;
+    if (!boardName) return variants && variants[0] ? { variant: variants[0], board: -1, alight: -1 } : null;
+    let toHeadsign = null;
     for (const variant of variants || []) {
       const ids = variant && variant[1] || [];
       const b = ids.findIndex((i) => same(i, boardName));
       if (b < 0) continue;
       const a = ids.findIndex((i, k) => k > b && same(i, alightName));
       if (a > b) return { variant, board: b, alight: a };
-      if (!firstBoard) firstBoard = { variant, board: b, alight: -1 };
+      if (!toHeadsign && b < ids.length - 1 && same(ids[ids.length - 1], headsign)) {
+        toHeadsign = { variant, board: b, alight: -1 };
+      }
     }
-    if (firstBoard) return firstBoard;
-    return variants && variants[0] ? { variant: variants[0], board: -1, alight: -1 } : null;
+    return toHeadsign;
   },
   async mavRouteForRow(row, boardName, alightName) {
     try {
@@ -4114,7 +4138,13 @@ Object.assign(BkkLib, {
         const shape2 = BkkLib.validMapShape(BkkLib.decodePolyline(idx.p[hit.ix] || ""));
         return shape2.length >= 2 ? { shape: shape2, board: null, alight: null } : null;
       }
-      const pick = BkkLib.pickMavVariant(hit.ix, idx.st, boardName, alightName);
+      const pick = BkkLib.pickMavVariant(
+        hit.ix,
+        idx.st,
+        boardName,
+        alightName,
+        String(row && (row.headsign || row.head) || "")
+      );
       if (!pick) return null;
       const shape = BkkLib.validMapShape(BkkLib.decodePolyline(idx.p[pick.variant[0]] || ""));
       if (shape.length < 2) return null;
@@ -8225,6 +8255,7 @@ ${this._stopPinCss()}
     if (hasBoard) bits.push("● " + t(lang, "mapBoardStop"));
     if (hasAlight) bits.push("○ " + t(lang, "mapAlightStop"));
     if (hasGps) bits.push(t(lang, "mapLivePos"));
+    else if (estimated === "waiting") bits.push(t(lang, "mapWaiting"));
     else if (estimated) bits.push(t(lang, "mapEstPos"));
     else if (hasShape) bits.push(t(lang, "mapNoGps"));
     if (row.stopDistancePercent != null && row.stopDistancePercent !== "") {
@@ -8634,7 +8665,7 @@ ${this._stopPinCss()}
       if (est) {
         lat = est.pt[0];
         lon = est.pt[1];
-        positionEstimated = true;
+        positionEstimated = est.waiting ? "waiting" : true;
       }
     }
     this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed, row, board, alight } : null;
@@ -8779,7 +8810,7 @@ ${this._stopPinCss()}
       st.hasPosition = false;
     } else if (this._mapMarker) {
       this._mapMarker.setLatLng(got.pt);
-      st.estimated = true;
+      st.estimated = got.waiting ? "waiting" : true;
       st.hasPosition = true;
     } else {
       const L = this._mapL || (typeof window !== "undefined" ? window.L : null);
@@ -8790,7 +8821,7 @@ ${this._stopPinCss()}
       } catch (_e) {
         return;
       }
-      st.estimated = true;
+      st.estimated = got.waiting ? "waiting" : true;
       st.hasPosition = true;
     }
     if (!st.ready) return;

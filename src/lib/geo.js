@@ -535,7 +535,24 @@ Object.assign(BkkLib, {
     });
     const now = Number(nowSec);
     if (stops.length < 2 || !Number.isFinite(now)) return null;
-    if (now < stops[0].dep || now >= stops[stops.length - 1].arr) return null;
+    if (now >= stops[stops.length - 1].arr) return null;
+    const pts = BkkLib.validMapShape(shape);
+    /* Before its first departure the vehicle waits at its first stop: on the
+       shape where the shape passes it, else at the stop itself. */
+    if (now < stops[0].dep) {
+      let pt = stops[0].pt;
+      if (pts.length >= 2) {
+        const { xy, cum } = BkkLib._shapeMetric(pts);
+        const feet = BkkLib._shapeFeet(xy, cum, pt);
+        const near = feet.length ? feet.reduce((m, ft) => (ft.d < m.d ? ft : m), feet[0]) : null;
+        if (near && near.d <= SHAPE_PASS_M) {
+          const p = pts[near.seg];
+          const q = pts[near.seg + 1];
+          pt = [p[0] + (q[0] - p[0]) * near.t, p[1] + (q[1] - p[1]) * near.t];
+        }
+      }
+      return { pt, from: 0, to: 0, fraction: 0, waiting: true };
+    }
     let i = 0;
     while (i + 1 < stops.length - 1 && stops[i + 1].dep <= now) i += 1;
     const a = stops[i];
@@ -545,7 +562,6 @@ Object.assign(BkkLib, {
     const f = dwell ? 1 : (span > 0 ? Math.max(0, Math.min(1, (now - a.dep) / span)) : 1);
     const result = (pt) => ({ pt, from: i, to: i + 1, fraction: f });
     const straight = () => result([a.pt[0] + (b.pt[0] - a.pt[0]) * f, a.pt[1] + (b.pt[1] - a.pt[1]) * f]);
-    const pts = BkkLib.validMapShape(shape);
     if (pts.length < 2) return straight();
     const { xy, cum } = BkkLib._shapeMetric(pts);
     const total = cum[cum.length - 1];
