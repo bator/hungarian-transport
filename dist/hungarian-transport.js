@@ -4088,21 +4088,29 @@ Object.assign(BkkLib, {
   },
   /* Schema 2 keeps every stop pattern of a train (936 sometimes runs on to
      Szombathely) with its stations: take the longest one that serves the
-     card's two stations in order, else one serving the boarding station.
-     Pins go on that pattern's own station coordinates. */
-  pickMavVariant(variants, stations, boardName, alightName) {
+     card's two stations in order, else one serving the boarding station
+     whose terminus is the row's headsign. The number came from a FUTÁR
+     trip id by a rule of thumb, and MÁV reuses numbers: a pattern that
+     serves neither the alighting station nor the headsign is another
+     train's (8714 Székesfehérvár–Siófok for an Ajka–Déli train), and null
+     lets the trip's own FUTÁR polyline draw instead. Without a boarding
+     station to check, the first pattern. Pins go on that pattern's own
+     station coordinates. */
+  pickMavVariant(variants, stations, boardName, alightName, headsign) {
     const same = (i, name) => !!name && BkkLib.nameEq(((stations || [])[i] || [])[0] || "", name);
-    let firstBoard = null;
+    if (!boardName) return variants && variants[0] ? { variant: variants[0], board: -1, alight: -1 } : null;
+    let toHeadsign = null;
     for (const variant of variants || []) {
       const ids = variant && variant[1] || [];
       const b = ids.findIndex((i) => same(i, boardName));
       if (b < 0) continue;
       const a = ids.findIndex((i, k) => k > b && same(i, alightName));
       if (a > b) return { variant, board: b, alight: a };
-      if (!firstBoard) firstBoard = { variant, board: b, alight: -1 };
+      if (!toHeadsign && b < ids.length - 1 && same(ids[ids.length - 1], headsign)) {
+        toHeadsign = { variant, board: b, alight: -1 };
+      }
     }
-    if (firstBoard) return firstBoard;
-    return variants && variants[0] ? { variant: variants[0], board: -1, alight: -1 } : null;
+    return toHeadsign;
   },
   async mavRouteForRow(row, boardName, alightName) {
     try {
@@ -4114,7 +4122,13 @@ Object.assign(BkkLib, {
         const shape2 = BkkLib.validMapShape(BkkLib.decodePolyline(idx.p[hit.ix] || ""));
         return shape2.length >= 2 ? { shape: shape2, board: null, alight: null } : null;
       }
-      const pick = BkkLib.pickMavVariant(hit.ix, idx.st, boardName, alightName);
+      const pick = BkkLib.pickMavVariant(
+        hit.ix,
+        idx.st,
+        boardName,
+        alightName,
+        String(row && (row.headsign || row.head) || "")
+      );
       if (!pick) return null;
       const shape = BkkLib.validMapShape(BkkLib.decodePolyline(idx.p[pick.variant[0]] || ""));
       if (shape.length < 2) return null;

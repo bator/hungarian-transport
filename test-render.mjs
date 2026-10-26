@@ -3765,6 +3765,20 @@ Lib.mavIndex = origMavIndex;
   const pick = Lib.pickMavVariant(idx2.n['905'], st, 'Székesfehérvár', 'Kelenföld vasútállomás');
   check('MÁV variant: serves both stations in order, BKK naming matches',
     !!pick && pick.variant[0] === 0 && pick.board === 1 && pick.alight === 3, JSON.stringify(pick));
+  /* The number read off a FUTÁR trip id is another train's (8714, Székesfehérvár
+     to Siófok) for an Ajka–Déli train: its patterns serve the boarding station
+     but neither the alighting one nor the headsign, so there is no route from
+     the index, and the trip's own polyline draws instead. */
+  const st3 = st.concat([['Siófok', 4690500, 1805600], ['Budapest-Déli', 4750000, 1902400]]);
+  const collide = [[0, [1, 4]], [0, [3, 1, 4]]];
+  check('MÁV variant: a pattern serving the boarding station only, towards another terminus, is no match',
+    Lib.pickMavVariant(collide, st3, 'Székesfehérvár', 'Budapest-Kelenföld', 'Budapest-Déli') === null);
+  const viaHead = [[0, [1, 4]], [0, [0, 1, 5]]];
+  const byHead = Lib.pickMavVariant(viaHead, st3, 'Székesfehérvár', 'Kelenföld vasútállomás', 'Budapest-Déli');
+  check('MÁV variant: without the alighting station, the pattern ending at the row\u2019s headsign serves',
+    !!byHead && byHead.variant[1][2] === 5 && byHead.board === 1 && byHead.alight === -1, JSON.stringify(byHead));
+  check('MÁV variant: without a boarding station the first pattern is taken',
+    !!Lib.pickMavVariant(collide, st3, '', '', '') && Lib.pickMavVariant([], st3, '', '', '') === null);
   const keepIdx = Lib.mavIndex;
   Lib.mavIndex = async () => idx2;
   const route = await Lib.mavRouteForRow({ label: 'BAKONY', trainNumber: '905', type: 'RAIL' }, 'Székesfehérvár', 'Budapest-Kelenföld');
