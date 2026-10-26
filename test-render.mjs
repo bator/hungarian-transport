@@ -2232,6 +2232,34 @@ check('pickMotisVehicle matches Adria by dest stop and time without a shared nam
   ], { label: 'ADRIA', trainNumber: '1240', dep, vehicle: 'rail' }, { name: 'Székesfehérvár' });
   return hit && hit.motisTripId === 'agram';
 })());
+check('pickMotisVehicle rejects a same-number train that runs elsewhere', (() => {
+  /* FUTÁR trip BKK_87141 implies number 8714; the real 8714 at Székesfehérvár
+     leaves for Siófok, while the row runs Ajka → Budapest-Déli. */
+  const dep = Math.floor(Date.now() / 1000) + 3540;
+  const list = [
+    {
+      label: 'Sz', trainNumber: '8714', dep: dep + 420, vehicle: 'rail', motisTripId: 'siofok',
+      nextNames: ['Szabadbattyán', 'Siófok'], head: 'Siófok', tripTo: 'Siófok',
+    },
+    {
+      label: 'Sz', trainNumber: '9053', dep, vehicle: 'rail', motisTripId: 'deli',
+      nextNames: ['Velence', 'Kelenföld vasútállomás', 'Budapest-Déli'], head: 'Budapest-Déli', tripTo: 'Budapest-Déli',
+    },
+  ];
+  const row = { label: 'Sz', tripId: 'BKK_87141_212', head: 'Budapest-Déli', dep, vehicle: 'rail' };
+  const hit = Lib.pickMotisVehicle(list, row, { name: 'Budapest-Kelenföld', key: 'budapest-kelenföld' });
+  const alone = Lib.pickMotisVehicle([list[0]], row, { name: 'Budapest-Kelenföld', key: 'budapest-kelenföld' });
+  const blind = Lib.pickMotisVehicle([{ label: 'Sz', trainNumber: '8714', dep: dep + 420, vehicle: 'rail', motisTripId: 'x' }], row, { name: 'Budapest-Kelenföld' });
+  return hit && hit.motisTripId === 'deli' && !alone && blind && blind.motisTripId === 'x';
+})(), 'same number is not the same train when its stops run elsewhere');
+check('motisTripElsewhere decides nothing without listed stops', (() => {
+  const row = { label: 'Sz', head: 'Budapest-Déli', vehicle: 'rail' };
+  return !Lib.motisTripElsewhere({ label: 'Sz' }, row, { name: 'Kelenföld' })
+    && Lib.motisTripElsewhere({ tripTo: 'Siófok' }, row, { name: 'Kelenföld' })
+    && !Lib.motisTripElsewhere({ tripTo: 'Budapest-Déli' }, row, { name: 'Kelenföld' })
+    && !Lib.motisTripElsewhere({ nextNames: ['Kelenföld vasútállomás'] }, row, { name: 'Budapest-Kelenföld' })
+    && !Lib.motisTripElsewhere({ tripTo: 'Siófok' }, { label: 'Sz', vehicle: 'rail' }, null);
+})());
 check('pickMotisVehicle does not treat hop dest headsign as destOn', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
   const hit = Lib.pickMotisVehicle([
@@ -3741,8 +3769,22 @@ Lib.mavIndex = origMavIndex;
     JSON.stringify({ board: got.board, alight: got.alight }));
   futarCalls = 0;
   motisResult = Object.assign({}, motisResult, { shape: [[47.1836, 18.4247], [47.3157, 18.7880], [47.4643, 19.0206]], coversHead: true });
-  await trainCard._loadRowMapShape(train);
-  check('with a Transitous route the FUTÁR trip is not fetched for the shape', futarCalls === 0, String(futarCalls));
+  const viaMotis = await trainCard._loadRowMapShape(train);
+  check('a Transitous route through the alighting station is kept over FUTÁR’s',
+    Lib.validMapShape(viaMotis.shape).length === 3 && viaMotis.shape[0][1] === 18.4247,
+    JSON.stringify({ futarCalls, n: Lib.validMapShape(viaMotis.shape).length }));
+  /* The number FUTÁR's trip id implies can be another train's (BKK_87141 →
+     the Siófok 8714 while the trip runs Ajka → Déli): a Transitous route
+     that misses the alighting station by kilometres gives way to the
+     train's own trip polyline. */
+  motisResult = Object.assign({}, motisResult, {
+    shape: [[47.1836, 18.4247], [47.05, 18.45], [46.91, 18.05]], coversHead: false,
+    hit: { label: 'Sz', trainNumber: '8714', tripTo: 'Siófok' },
+  });
+  const elsewhere = await trainCard._loadRowMapShape(train);
+  check('a Transitous route that misses the alighting station gives way to FUTÁR’s trip',
+    Lib.validMapShape(elsewhere.shape).length === futarLine.length && elsewhere.shape[0][1] === 16.62,
+    JSON.stringify({ n: Lib.validMapShape(elsewhere.shape).length, first: elsewhere.shape[0] }));
   trainCard.remove();
   Object.assign(Lib, keep);
 }

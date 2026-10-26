@@ -1093,7 +1093,10 @@ ${this._stopPinCss()}
       /* When Transitous misses the train (BAKONY 905 from Szombathely),
          FUTÁR's own trip details still carry the whole train route, along
          the tracks. bkk_stop has no trip_shape service to ask instead. */
-      if (futarShape.length < 2 && motisShape.length < 2 && this._hasFutar()) {
+      /* The trip-details response is already cached for the stop pins, so
+         asking for its polyline costs nothing; below it also overrules a
+         Transitous match that runs elsewhere (another train's number). */
+      if (futarShape.length < 2 && this._hasFutar()) {
         try {
           futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
         } catch (_e) { /* the stop pins still show */ }
@@ -1136,6 +1139,16 @@ ${this._stopPinCss()}
       } else if (motisGap != null && motisGap > 4000 && futarShape.length >= 2
           && (futarGap == null || futarGap < motisGap)) {
         shape = futarShape;
+      } else if (BkkLib.isTrainRow(row) && futarShape.length >= 2 && motisShape.length >= 2) {
+        /* The train's own FUTÁR trip passes the alighting station; a
+           Transitous route that misses it by kilometres is another train's. */
+        const alightPt = (futarHop && futarHop.alight) || (motisMap && motisMap.dest)
+          || BkkLib.knownStopCoords({ id: cfg.destStopId, name: cfg.destName, key: cfg.destKey });
+        const motisOff = alightPt && BkkLib.shapeGpsGapMeters(motisShape, alightPt[0], alightPt[1]);
+        const futarOff = alightPt && BkkLib.shapeGpsGapMeters(futarShape, alightPt[0], alightPt[1]);
+        if (motisOff != null && futarOff != null && motisOff > 3000 && futarOff < 1500) {
+          shape = futarShape;
+        }
       }
     }
     /* Published line stays whole (8E Újpalota→Kelenföld, not the hop). */
