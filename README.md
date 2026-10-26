@@ -113,6 +113,11 @@ for t in scripts/test_*.py; do python3 "$t"; done
 pip install -r requirements_test.txt && python -m pytest   # Python 3.13
 ```
 
+A release is published by the Release workflow (`bump: patch` from main).
+Its notes are `docs/releases/<version>.md` when that file exists on the
+commit being released (write it before running the workflow); a weekly
+timetable release or a `-rev` prerelease gets a one-line description.
+
 ## Credits
 
 Timetables and live data: [BKK Open Data](https://opendata.bkk.hu/),
