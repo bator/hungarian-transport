@@ -4,7 +4,8 @@
 [![release][release-badge]][release-url]
 
 Home Assistant integration and dashboard cards for Hungarian public
-transport: **BKK**, **MÁV**, **Volán** and 16 city networks. See the next
+transport: **BKK**, **MÁV**, **Volán**, 16 city operators and the Volánbusz
+local networks of some 60 towns. See the next
 departures between two stops, follow a vehicle on the map, and plan a trip
 across every network. In Hungarian and English.
 
@@ -112,6 +113,11 @@ npm ci && npm run lint && npm run build && npm test
 for t in scripts/test_*.py; do python3 "$t"; done
 pip install -r requirements_test.txt && python -m pytest   # Python 3.13
 ```
+
+A release is published by the Release workflow (`bump: patch` from main).
+Its notes are `docs/releases/<version>.md` when that file exists on the
+commit being released (write it before running the workflow); a weekly
+timetable release or a `-rev` prerelease gets a one-line description.
 
 ## Credits
 

@@ -182,13 +182,17 @@ export class BKKPlannerCard extends BKKHopCard {
         this._journeyLoading = false;
         this._journeysDone = true;
         this._journeys = list || [];
+        this._journeyFailed = false;
         this._openJourney = 0;
         this._journey = this._journeys[0] || null;
         this._paint();
       }).catch(() => {
         if (gen !== this._gen) return;
+        /* A search that failed (Transitous or FUTÁR down) is not "no route
+           for this time": the view says to try again, not another time. */
         this._journeyLoading = false;
         this._journeysDone = true;
+        this._journeyFailed = true;
         this._journeys = [];
         this._paint();
       });
@@ -466,7 +470,7 @@ export class BKKPlannerCard extends BKKHopCard {
       if (this._journeyLoading) {
         inner += `<div class="j-msg">${esc(t(lang, 'plannerSearching'))}</div>`;
       } else if (!list.length) {
-        inner += `<div class="j-msg">${esc(t(lang, 'plannerNoJourneys'))}</div>`;
+        inner += `<div class="j-msg">${esc(t(lang, this._journeyFailed ? 'plannerSearchFailed' : 'plannerNoJourneys'))}</div>`;
       } else {
         inner += list.map((j, i) => this._itineraryHtml(j, i, i === this._openJourney)).join('');
       }

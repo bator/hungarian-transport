@@ -11,6 +11,9 @@ const SHAPE_PASS_M = 80;
 /* Metres of ride one metre of distance from a stop is worth: of two ways
    between the stops, a close fit beats a slightly shorter one. */
 const SHAPE_PASS_WEIGHT = 4;
+/* A stop this far from the shape is not on it: the timetable position is
+   then taken on the straight line between the stops instead. */
+const SHAPE_STOP_OFF_M = 1500;
 
 Object.assign(BkkLib, {
   hm(ts) {
@@ -497,6 +500,92 @@ Object.assign(BkkLib, {
       sliced = between(nearest(alights), nearest(boards), false).reverse();
     }
     return sliced.length >= 2 ? sliced : [a, b];
+  },
+  /* Metres along a shape: planar coordinates of its points and the running
+     length at each (what sliceShapeBetween projects with). */
+  _shapeMetric(pts) {
+    const k = Math.cos((pts[0][0] * Math.PI) / 180) * 111320;
+    const xy = (p) => [p[1] * k, p[0] * 110540];
+    xy.pts = pts.map(xy);
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) {
+      cum.push(cum[i - 1] + Math.hypot(xy.pts[i][0] - xy.pts[i - 1][0], xy.pts[i][1] - xy.pts[i - 1][1]));
+    }
+    return { xy, cum };
+  },
+  /* Where a vehicle is by its timetable: between the last stop it has left
+     and the next one, as far along that run as the time has gone, measured
+     along the shape (both stops projected onto it, the passes paired in the
+     direction of travel as sliceShapeBetween pairs them: the short, close
+     pair wins on an out-and-back line). Standing at the stop between its
+     arrival and departure, on the shape where the shape serves it. A
+     straight line between the stops when the shape does not pass them
+     (another line's geometry, or a stop outside a clipped hop). Null before
+     the first departure, from the last arrival on, or without two timed
+     stops. timed: [{pt: [lat, lon], arr, dep}] in running order, seconds;
+     arr or dep may be missing. */
+  estimateShapePosition(shape, timed, nowSec) {
+    const stops = [];
+    (Array.isArray(timed) ? timed : []).forEach((s) => {
+      const pt = s && BkkLib.mapGpsLatLon(s.pt && s.pt[0], s.pt && s.pt[1]);
+      const arr = Number(s && (s.arr != null ? s.arr : s.dep));
+      const dep = Number(s && (s.dep != null ? s.dep : s.arr));
+      if (!pt || !Number.isFinite(arr) || !Number.isFinite(dep) || arr <= 0 || dep <= 0) return;
+      stops.push({ pt, arr: Math.min(arr, dep), dep: Math.max(arr, dep) });
+    });
+    const now = Number(nowSec);
+    if (stops.length < 2 || !Number.isFinite(now)) return null;
+    if (now < stops[0].dep || now >= stops[stops.length - 1].arr) return null;
+    let i = 0;
+    while (i + 1 < stops.length - 1 && stops[i + 1].dep <= now) i += 1;
+    const a = stops[i];
+    const b = stops[i + 1];
+    const dwell = now >= b.arr;
+    const span = b.arr - a.dep;
+    const f = dwell ? 1 : (span > 0 ? Math.max(0, Math.min(1, (now - a.dep) / span)) : 1);
+    const result = (pt) => ({ pt, from: i, to: i + 1, fraction: f });
+    const straight = () => result([a.pt[0] + (b.pt[0] - a.pt[0]) * f, a.pt[1] + (b.pt[1] - a.pt[1]) * f]);
+    const pts = BkkLib.validMapShape(shape);
+    if (pts.length < 2) return straight();
+    const { xy, cum } = BkkLib._shapeMetric(pts);
+    const total = cum[cum.length - 1];
+    const feetA = BkkLib._shapeFeet(xy, cum, a.pt);
+    const feetB = BkkLib._shapeFeet(xy, cum, b.pt);
+    if (!feetA.length || !feetB.length) return straight();
+    let pick = null;
+    BkkLib._shapePasses(feetA).forEach((pa) => BkkLib._shapePasses(feetB).forEach((pb) => {
+      if (pb.at <= pa.at) return;
+      const cost = (pb.at - pa.at) + SHAPE_PASS_WEIGHT * (pa.d + pb.d);
+      if (!pick || cost < pick.cost) pick = { pa, pb, cost };
+    }));
+    if (!pick) return straight();
+    if (pick.pa.d > SHAPE_STOP_OFF_M || pick.pb.d > SHAPE_STOP_OFF_M) return straight();
+    /* A stop clamped onto the shape's end lies beyond it (outside a clipped
+       hop), or beside it (a terminal station next to the track): only the
+       former is off the shape. Measured along the end segment, in metres. */
+    const beyondEnd = (p, pt) => {
+      if (p.at > 0 && p.at < total) return false;
+      const q = xy(pt);
+      const s0 = xy.pts[p.at <= 0 ? 0 : xy.pts.length - 2];
+      const s1 = xy.pts[p.at <= 0 ? 1 : xy.pts.length - 1];
+      const dx = s1[0] - s0[0];
+      const dy = s1[1] - s0[1];
+      const len = Math.hypot(dx, dy);
+      if (!len) return false;
+      const along = ((q[0] - s0[0]) * dx + (q[1] - s0[1]) * dy) / len;
+      return p.at <= 0 ? along < -SHAPE_PASS_M : along > len + SHAPE_PASS_M;
+    };
+    if (beyondEnd(pick.pa, a.pt) || beyondEnd(pick.pb, b.pt)) return straight();
+    const along = (at) => {
+      let seg = 1;
+      while (seg < cum.length - 1 && cum[seg] < at) seg += 1;
+      const len = cum[seg] - cum[seg - 1];
+      const t = len > 0 ? Math.max(0, Math.min(1, (at - cum[seg - 1]) / len)) : 0;
+      const p = pts[seg - 1];
+      const q = pts[seg];
+      return [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+    };
+    return result(along(pick.pa.at + (pick.pb.at - pick.pa.at) * f));
   },
   clipShapeToBoardDest(shape, board, dest) {
     const pts = BkkLib.validMapShape(shape);

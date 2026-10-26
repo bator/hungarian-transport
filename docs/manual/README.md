@@ -41,7 +41,7 @@ Where the data comes from:
 | --- | --- | --- |
 | Budapest buses, trams, trolleybuses, metro, HÉV, suburban trains | BKK FUTÁR | Yes, real-time positions and delays |
 | MÁV trains | BKK FUTÁR around Budapest, MÁV ELVIRA for platforms and seat reservations | Delays and platforms |
-| Volán coaches | KTI national GTFS, shipped with the card | Timetable |
+| Volán coaches | National Volán GTFS (opendata.utas.hu, KTI as fallback), shipped with the card | Timetable |
 | City networks (Szeged, Pécs, Miskolc, …) | Each operator's GTFS, shipped with the card | Timetable (Szombathely real-time with the companion services) |
 | Stop search and transfers | [Transitous](https://transitous.org/), BKK FUTÁR as fallback | — |
 
@@ -112,10 +112,12 @@ platform and seat-reservation service.
 ### 3.1 Settings
 
 **Settings → Devices & services → Hungarian transport → Configure** opens
-one field: the **BKK API key**.
+the **BKK API key** field and, once a key is stored, a **Remove the stored
+key** checkbox.
 
 - Enter a new key and save: the integration reloads and every card uses it.
-- Clear the field and save to remove the key.
+- Leave the field empty and save to keep the stored key (it is never shown).
+  Tick **Remove the stored key** and save to remove it.
 - The field hides the key while you type.
 
 When BKK rejects the stored key (revoked or expired), Home Assistant asks
@@ -184,7 +186,7 @@ The editor fields, from top to bottom:
 | --- | --- |
 | **Language** | *Automatic* follows your Home Assistant language. You can pin Hungarian or English. |
 | BKK API key line | Shows where the key comes from. *Change* opens the key field. |
-| **Name** | The card title. Empty means "origin → destination". The editor fills it in when you pick stops, and keeps a title you typed yourself. |
+| **Name (optional)** | The card title. Empty means "origin → destination". The editor fills it in when you pick stops, and keeps a title you typed yourself. |
 | **MÁV / Volán / Local** | The mode. None ticked means Budapest BKK. Only one can be on. |
 | **City** | Only in Local mode: which city's network. |
 | **Origin stop** | Search box, with shortcut chips for the main hubs. |
@@ -305,7 +307,7 @@ From left to right:
 | Countdown | Minutes until departure, or *now*. |
 | Grey minutes below | Travel time to your destination. |
 
-Hover over (or tap) any mark to see its explanation, as with **H** above.
+Hover over (or focus with the keyboard) any mark to see its explanation, as with **H** above.
 
 How the card refreshes:
 
@@ -361,7 +363,8 @@ networks. It needs no mode.
 ### 7.1 Adding the planner
 
 Add the card **Hungarian transit stop planner**. Its editor has the same
-fields as the departure card, without the mode switches. You can leave the
+fields as the departure card, without the mode switches and the City field.
+You can leave the
 stops empty and pick them on the card itself.
 
 ![The planner's editor](images/en/planner-editor.webp)
@@ -509,7 +512,7 @@ A failed update keeps the previous timetable and sends a notification (see
 | *The BKK API key is invalid (401/403).* | BKK rejects the key. | Get a new key and enter it in the **BKK key rejected** prompt or under **Configure**. |
 | *No upcoming departures.* | Nothing runs in the look-ahead window (often at night). | Raise **Look-ahead**, or check the stops. |
 | *No direct service to that destination. Reachable destinations: …* | The destination has no direct service from the origin. | Pick one of the listed destinations, or use the planner. |
-| *Could not download the timetable index (timeout or network error).* | The browser could not load the Volán or city timetable. | Reload the page. If it persists, check **Repairs** for missing files. |
+| *Could not download the timetable index (timeout or network error).* | The browser could not load the Volán or city timetable. | Reload the page. If it persists, reinstall the release (HACS → Redownload) and restart Home Assistant. |
 | *The timetable index is newer (vN) than this card understands.* | The browser still runs an old card. | Reload the page with the cache cleared, or update the integration. |
 | No platform, **H** or **OB** marks on MÁV rows | MÁV ELVIRA did not answer. | Nothing to do: the trains are still listed, and the marks come back on their own. |
 | A train's map is a straight line between stations | No route data for that train. | Add the MÁV timetable ([3.4](#34-train-routes-on-the-map-optional)). |

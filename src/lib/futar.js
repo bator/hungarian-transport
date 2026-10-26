@@ -77,13 +77,16 @@ Object.assign(BkkLib, {
   hasFutar(apiKey, hass) {
     return !!String(apiKey || '').trim() || BkkLib.integrationHasKey(hass);
   },
-  /* Same messages the service error carried before: "BKK <detail>" for an
-     outage, a key-specific one when FUTÁR rejected the integration's key. */
+  /* The service's error as a translated banner: a rejected key, the
+     integration's own request limit (the card tries again), or an outage
+     with its detail. The code stays for departureBoard's fallback and the
+     editor's key probe. */
   _integrationError(code, detail) {
     const why = String(detail || code);
-    const err = new Error(code === 'futar_auth'
-      ? `BKK FUTÁR rejected the configured key (${why}). Update it in the integration options.`
-      : `BKK ${why}`);
+    let err;
+    if (code === 'futar_auth') err = codedError('errApiKeyBad');
+    else if (code === 'futar_rate_limited') err = codedError('errFutarRateLimited');
+    else err = codedError('errFutarDown', why);
     err.code = String(code);
     return err;
   },
@@ -142,7 +145,9 @@ Object.assign(BkkLib, {
       } catch (err) {
         throw new Error(err && err.name === 'AbortError' ? 'BKK timeout' : `BKK ${err}`);
       }
-      if (!res.ok) throw new Error(`BKK HTTP ${res.status}`);
+      if (res.status === 401 || res.status === 403) throw codedError('errApiKeyBad');
+      if (res.status === 429) throw codedError('errFutarRateLimited');
+      if (!res.ok) throw codedError('errFutarDown', `HTTP ${res.status}`);
       const data = await res.json();
       if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);
       return data;

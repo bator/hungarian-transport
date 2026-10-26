@@ -260,6 +260,15 @@ jobs:
             exit 1
           fi
           echo "Manual ${bump} from ${stable} -> ${tag}"
+          # A stable release carries the notes written for its version
+          # (docs/releases/<version>.md on this commit, see the pack step). A
+          # weekly timetable release may have taken the number the notes were
+          # written for: said here, before anything is built, not silently
+          # published with the one-line notes.
+          if [ "$bump" != "rev" ] && [ ! -s "docs/releases/${tag#v}.md" ]; then
+            echo "::error title=No release notes::docs/releases/${tag#v}.md is not on ${GITHUB_SHA:0:7}. This run resolved ${tag}; add the notes for it (or rename the file you wrote) and dispatch again."
+            exit 1
+          fi
           emit "$tag" true "" "$latest"
 
   test:
@@ -581,6 +590,7 @@ jobs:
       - name: Stamp release and pack assets
         env:
           TAG: ${{ needs.resolve.outputs.tag }}
+          REFRESH: ${{ needs.resolve.outputs.refresh }}
         run: |
           set -euo pipefail
           tag="$TAG"
@@ -686,6 +696,20 @@ jobs:
               fh.write("\n")
           PY
           cat hungarian-transport-build.json
+          # The release notes written for this version (docs/releases/<version>.md
+          # on the commit being built) go to the publish job with the assets.
+          # A -rev prerelease and a weekly timetable release get the publish
+          # step's one-line notes: the refresh builds a stable tag's commit,
+          # which may already carry the next code release's notes.
+          # Always a file (empty: the one-line notes), so the artifact upload
+          # never misses one of its paths.
+          : > release-notes.md
+          if [[ "$tag" != *-rev.* ]] && [ "${REFRESH:-false}" != "true" ] && [ -s "docs/releases/${ver}.md" ]; then
+            cp "docs/releases/${ver}.md" release-notes.md
+            echo "release notes: docs/releases/${ver}.md ($(wc -c < release-notes.md) bytes)"
+          else
+            echo "release notes: none for ${ver}; the one-line notes"
+          fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -695,6 +719,7 @@ jobs:
             hungarian-transport-frontend.zip
             SHA256SUMS
             hungarian-transport-build.json
+            release-notes.md
           if-no-files-found: error
           retention-days: 7
 
@@ -785,9 +810,15 @@ jobs:
             echo "::error::Release $tag already exists (${state}). A release is not changed after publishing; release the next version instead."
             exit 1
           fi
+          # The notes written for this version (docs/releases/<version>.md,
+          # packed by the build job) when there are any, else the line above.
+          noteargs=(--notes "$notes")
+          if [ -s release-notes.md ]; then
+            noteargs=(--notes-file release-notes.md)
+          fi
           # Tag the commit that was built: main's head for a code release, the
           # stable tag's commit for a timetable refresh.
-          gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS hungarian-transport-build.json --target "$TARGET" --title "$tag" --notes "$notes" "${extra[@]}"
+          gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS hungarian-transport-build.json --target "$TARGET" --title "$tag" "${noteargs[@]}" "${extra[@]}"
 
   # After a weekly timetable release, while a -rev series is open (beta users
   # run it), publish main as the next rev, which starts two patches above

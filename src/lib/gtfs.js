@@ -629,7 +629,7 @@ Object.assign(BkkLib, {
   /* Where a GTFS trip runs: its stops' coordinates and a reference into the
      sharded shapes folder (trip row element 5), carried on the departure row
      so the map needs neither the index nor Transitous. */
-  gtfsTripGeo(idx, t, from, to) {
+  gtfsTripGeo(idx, t, from, to, dayBase) {
     const ps = (t && t[2]) || [];
     const stops = ps.map((p) => {
       const st = idx.stops[p];
@@ -637,6 +637,7 @@ Object.assign(BkkLib, {
     });
     const ref = Number(t && t[5]);
     const sh = idx.sh;
+    const base = Number(dayBase);
     return {
       shape: sh && sh.dir && sh.n > 0 && Number.isInteger(ref) && ref >= 0
         ? { base: idx.url, dir: sh.dir, n: sh.n, id: ref }
@@ -644,7 +645,22 @@ Object.assign(BkkLib, {
       stops,
       from,
       to: to >= 0 ? to : ps.length - 1,
+      /* The trip's minutes past the service day's base, for the position
+         the timetable gives when no vehicle reports one. */
+      mins: Array.isArray(t && t[3]) ? t[3] : null,
+      base: Number.isFinite(base) && base > 0 ? base : null,
     };
+  },
+  /* The GTFS trip's stops with their times, for estimateShapePosition. */
+  gtfsTimedStops(geo) {
+    if (!geo || !Array.isArray(geo.stops) || !Array.isArray(geo.mins) || !geo.base) return [];
+    const out = [];
+    geo.stops.forEach((pt, i) => {
+      const m = Number(geo.mins[i]);
+      if (!pt || !Number.isFinite(m)) return;
+      out.push({ pt, arr: geo.base + m * 60, dep: geo.base + m * 60 });
+    });
+    return out;
   },
   _shapeShards: new Map(),
   async _fetchJsonGz(url, timeoutMs) {
@@ -774,7 +790,7 @@ Object.assign(BkkLib, {
         if (!departureStillDue(depTs)) continue;
         const kind = BkkLib.gtfsRouteKind(t[4], vehicle, rawType);
         rows.push({
-          gtfs: BkkLib.gtfsTripGeo(idx, t, oidx, didx),
+          gtfs: BkkLib.gtfsTripGeo(idx, t, oidx, didx, day.base),
           tripId: 'gtfs:' + route + ':' + day.ymd + ':' + depMin + ':' + origin.i,
           label: route,
           color: color,

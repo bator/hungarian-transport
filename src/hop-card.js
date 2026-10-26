@@ -51,6 +51,9 @@ export class BKKHopCard extends HTMLElement {
     this._mapState = null;
     this._mapL = null;
     this._mapReturnFocus = null;
+    /* The open map's timetable estimate (shape and timed stops), moved on
+       each poll while the vehicle reports no position. */
+    this._mapEstimate = null;
     this._hiddenAt = 0;
     this._pollRun = null;
   }
@@ -782,6 +785,7 @@ export class BKKHopCard extends HTMLElement {
     this._mapRef = null;
     this._mapState = null;
     this._mapL = null;
+    this._mapEstimate = null;
     const back = this._mapReturnFocus;
     this._mapReturnFocus = null;
     if (hadOverlay) this._restoreFocus(back);
@@ -1307,6 +1311,22 @@ ${this._stopPinCss()}
       if (got.board) board = got.board;
       alight = got.alight || null;
     } catch (_e) { /* timetable row still shows the live dot */ }
+    /* No vehicle reports a position (MÁV trains outside BKK's feed, Volán
+       and city rows): the timetable says where it should be, drawn as a
+       dashed marker (mapEstPos). */
+    let timed = [];
+    if (!hasGps) {
+      try {
+        timed = await this._rowTimedStops(row);
+      } catch (_e) { timed = []; }
+    }
+    /* No stop list (a MÁV train known from Transitous and ELVIRA only, or a
+       list that failed to load): the row's own departure and travel time
+       still place it between the boarding and alighting stops. */
+    if (timed.length < 2 && !hasGps && board && alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
+      const arr = Number(row.depTs) + Number(row.travelMin) * 60;
+      timed = [{ pt: board, arr: Number(row.depTs), dep: Number(row.depTs) }, { pt: alight, arr, dep: arr }];
+    }
     /* Same spot as the boarding stop (a loop line, a bad lookup): one pin. */
     if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
     if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
@@ -1320,6 +1340,15 @@ ${this._stopPinCss()}
         hasGps = true;
       }
     }
+    if (!BkkLib.mapGpsLatLon(lat, lon) && timed.length >= 2) {
+      const est = BkkLib.estimateShapePosition(shape, timed, Date.now() / 1000);
+      if (est) {
+        lat = est.pt[0];
+        lon = est.pt[1];
+        positionEstimated = true;
+      }
+    }
+    this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed, row, board, alight } : null;
     const pos = BkkLib.mapGpsLatLon(lat, lon);
     const hasPosition = !!pos;
     if (hasPosition) {
@@ -1380,6 +1409,80 @@ ${this._stopPinCss()}
     this._openingMap = '';
   }
 
+  /* The row's stops with their times, for the timetable position: a GTFS
+     row carries them in its index geometry; a FUTÁR trip (the row's own id,
+     or the sensor vehicle's for an ELVIRA train) has trip-details. */
+  async _rowTimedStops(row) {
+    if (!row) return [];
+    if (row.gtfs) return BkkLib.gtfsTimedStops(row.gtfs);
+    if (!this._hasFutar()) return [];
+    let tripId = BkkLib.isFutarTripId(row.tripId) ? String(row.tripId) : '';
+    if (!tripId && this._hass) {
+      const hit = BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), row);
+      if (hit && BkkLib.isFutarTripId(hit.tripId)) tripId = String(hit.tripId);
+    }
+    if (!tripId) return [];
+    const cfg = this._config || {};
+    const timed = await BkkLib.tripTimedStops(this._apiKey(), this._tripCache || {}, tripId,
+      { id: cfg.stopId, name: cfg.stopName });
+    /* The trip details are cached for the session; the row's departure is
+       this poll's. A delay that grew since the details were read moves
+       every stop by the same amount. */
+    const origin = timed.find((s) => s.origin);
+    const shift = origin && Number(row.depTs) > 0 ? Number(row.depTs) - origin.dep : 0;
+    return shift ? timed.map((s) => ({ pt: s.pt, arr: s.arr + shift, dep: s.dep + shift })) : timed;
+  }
+
+  /* A poll's turn for the dashed marker: the timetable (re-read with this
+     poll's departure: a delay that grew moves it) has moved the vehicle on;
+     at its last stop the marker goes. */
+  async _syncEstimatedMarker(row, lang) {
+    const est = this._mapEstimate;
+    if (!est || !this._map) return;
+    if (row && row !== est.row) {
+      try {
+        const timed = await this._rowTimedStops(row);
+        if (this._mapEstimate !== est) return;
+        if (timed.length >= 2) est.timed = timed;
+        else if (est.board && est.alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
+          const arr = Number(row.depTs) + Number(row.travelMin) * 60;
+          est.timed = [{ pt: est.board, arr: Number(row.depTs), dep: Number(row.depTs) }, { pt: est.alight, arr, dep: arr }];
+        }
+        est.row = row;
+      } catch (_e) { /* the stored times still place it */ }
+    }
+    const st = this._mapState;
+    if (!st || !this._map || this._mapEstimate !== est) return;
+    row = row || est.row;
+    const got = BkkLib.estimateShapePosition(est.shape, est.timed, Date.now() / 1000);
+    if (!got) {
+      if (this._mapMarker) {
+        try { this._map.removeLayer(this._mapMarker); } catch (_e) { /* ignore */ }
+        this._mapMarker = null;
+      }
+      st.estimated = false;
+      st.hasPosition = false;
+    } else if (this._mapMarker) {
+      this._mapMarker.setLatLng(got.pt);
+      st.estimated = true;
+      st.hasPosition = true;
+    } else {
+      const L = this._mapL || (typeof window !== 'undefined' ? window.L : null);
+      if (!L || typeof L.divIcon !== 'function' || typeof L.marker !== 'function') return;
+      try {
+        const icon = L.divIcon({ className: '', html: this._dotIcon(row, false, lang), iconSize: [32, 32], iconAnchor: [16, 16] });
+        this._mapMarker = L.marker(got.pt, { icon, zIndexOffset: 600 }).addTo(this._map);
+      } catch (_e) {
+        return;
+      }
+      st.estimated = true;
+      st.hasPosition = true;
+    }
+    if (!st.ready) return;
+    const foot = this._mapOverlay && this._mapOverlay.querySelector('.ht-map-foot');
+    if (foot) foot.textContent = this._mapFoot(row, st, lang);
+  }
+
   _mapFoot(row, st, lang) {
     if (!st.hasShape && !st.hasBoard && !st.hasPosition) return t(lang, 'mapNothingToShow');
     if (!st.hasShape) return t(lang, 'mapNoGeometry');
@@ -1393,9 +1496,16 @@ ${this._stopPinCss()}
     const st = this._mapState;
     if (!this._map || !this._openMapKey || !st) return;
     const row = this._findMapRow(this._mapRef, this._rows || []);
-    if (!row || !row.hasGps) return;
+    /* The row has left the board (departed): the dashed marker still runs
+       on the times it had. */
+    if (!row || !row.hasGps) {
+      if (row || this._mapEstimate) this._syncEstimatedMarker(row, this._lang()).catch(() => {});
+      return;
+    }
     const gps = BkkLib.mapGpsLatLon(row.lat, row.lon);
     if (!gps) return;
+    /* A reported position replaces the timetable's for good. */
+    this._mapEstimate = null;
     const lang = this._lang();
     const L = this._mapL || (typeof window !== 'undefined' ? window.L : null);
     const icon = L && typeof L.divIcon === 'function' ? L.divIcon({

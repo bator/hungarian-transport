@@ -230,6 +230,25 @@ with tempfile.TemporaryDirectory() as tmp_name:
         check("SHA256SUMS covers both zips",
               hashlib.sha256((ws / "hungarian-transport.zip").read_bytes()).hexdigest() in sums
               and "hungarian-transport-frontend.zip" in sums, sums)
+        check("without docs/releases/<version>.md the packed release notes file is empty",
+              (ws / "release-notes.md").exists() and (ws / "release-notes.md").stat().st_size == 0)
+        # The notes written for the version ride along to the publish job; a
+        # -rev prerelease never takes them.
+        (ws / "docs" / "releases").mkdir(parents=True)
+        (ws / "docs" / "releases" / "1.2.3.md").write_text("Hungarian transport 1.2.3.\n\n## Fixes\n\n- one\n")
+        done, _ = bash(PACK_STEP, ws, TAG="v1.2.3", GITHUB_SHA="0" * 40, GITHUB_EVENT_NAME="workflow_dispatch",
+                       GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="1")
+        check("docs/releases/<version>.md is packed as the release notes",
+              done.returncode == 0 and (ws / "release-notes.md").read_text() == (ws / "docs" / "releases" / "1.2.3.md").read_text(),
+              repr(done.stderr[-400:]))
+        done, _ = bash(PACK_STEP, ws, TAG="v1.2.3-rev.1", GITHUB_SHA="0" * 40, GITHUB_EVENT_NAME="workflow_dispatch",
+                       GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="1")
+        check("a -rev prerelease takes no notes file",
+              done.returncode == 0 and (ws / "release-notes.md").stat().st_size == 0, repr(done.stderr[-400:]))
+        done, _ = bash(PACK_STEP, ws, TAG="v1.2.3", REFRESH="true", GITHUB_SHA="0" * 40, GITHUB_EVENT_NAME="schedule",
+                       GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="1")
+        check("a weekly timetable release takes no notes file written for its number",
+              done.returncode == 0 and (ws / "release-notes.md").stat().st_size == 0, repr(done.stderr[-400:]))
 
 if failed:
     print(f"{failed} failed")
