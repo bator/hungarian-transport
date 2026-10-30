@@ -213,7 +213,7 @@ async def test_failed_probe_does_not_restart_the_rejection_window(
 
     # Refused before any request: not the call that asks again.
     too_long = await _call(hass, params={"query": "x" * (futar.FUTAR_PARAM_MAX_LEN + 1)})
-    assert too_long["detail"] == "parameter too long"
+    assert too_long["error"] == "futar_bad_request"
     assert aioclient_mock.call_count == 1
 
     aioclient_mock.clear_requests()
@@ -380,3 +380,44 @@ async def test_cache_hit_does_not_end_an_outage(hass, aioclient_mock, caplog) ->
     assert [r.getMessage() for r in caplog.records if r.name.endswith(".futar")] == [
         "BKK FUTÁR answers again"
     ]
+
+
+async def test_upstream_429_is_a_rate_limit_not_an_outage(hass, aioclient_mock, caplog) -> None:
+    """FUTÁR refusing the key's calls as too many (HTTP 429) used to come back
+    as futar_unavailable: the card showed the "BKK down" banner instead of
+    keeping its last board for a while, as it does for futar_rate_limited."""
+    aioclient_mock.get(SEARCH, status=429)
+    await _setup(hass)
+
+    for query in ("A", "B"):
+        resp = await _call(hass, params={"query": query})
+        assert resp == {"data": None, "error": "futar_rate_limited", "detail": "HTTP 429"}
+    messages = [r.getMessage() for r in caplog.records if r.name.endswith(".futar")]
+    assert len(messages) == 1 and "too many" in messages[0] and "unavailable" not in messages[0]
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    caplog.clear()
+    assert (await _call(hass, params={"query": "C"}))["data"]["status"] == "OK"
+    assert [r.getMessage() for r in caplog.records if r.name.endswith(".futar")] == [
+        "BKK FUTÁR answers again"
+    ]
+
+
+async def test_too_long_parameter_is_a_bad_request_not_an_outage(hass, aioclient_mock, caplog) -> None:
+    """A parameter longer than FUTAR_PARAM_MAX_LEN is never sent. It used to
+    come back as futar_unavailable, which the card shows as "BKK down"."""
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    await _setup(hass)
+
+    resp = await _call(hass, params={"query": "x" * (futar.FUTAR_PARAM_MAX_LEN + 1)})
+    assert resp == {
+        "data": None,
+        "error": "futar_bad_request",
+        "detail": f"parameter query longer than {futar.FUTAR_PARAM_MAX_LEN} characters",
+    }
+    assert aioclient_mock.call_count == 0
+    assert not [r for r in caplog.records if r.name.endswith(".futar")]
+    # Exactly the limit is fine.
+    resp = await _call(hass, params={"query": "x" * futar.FUTAR_PARAM_MAX_LEN})
+    assert resp["data"]["status"] == "OK"

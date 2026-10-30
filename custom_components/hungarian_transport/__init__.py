@@ -27,7 +27,14 @@ from . import mav
 from .assets import asset_tag
 from .const import CONF_API_KEY, DOMAIN, SERVICE_ELVIRA_BETWEEN, SERVICE_FUTAR, SERVICE_REBUILD_MAV
 from .elvira import ElviraError, ElviraRateLimited, elvira_between, station_code_digits
-from .futar import FUTAR_PATHS, FutarAuthError, FutarError, FutarProxy, FutarRateLimited
+from .futar import (
+    FUTAR_PATHS,
+    FutarAuthError,
+    FutarBadRequest,
+    FutarError,
+    FutarProxy,
+    FutarRateLimited,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -167,7 +174,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     )
     # MÁV GTFS is registration-only, so the rail index is built here from the
     # feed the user supplies (see mav.py), and checked trip by trip.
-    await mav.async_remove_stale_uploads(hass)
+    await mav.async_remove_leftovers(hass, www_path)
     hass.http.register_view(mav.MavGtfsUploadView(www_path, _entry_loaded))
 
     async def handle_rebuild_mav(call: ServiceCall) -> dict[str, Any]:
@@ -256,8 +263,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             entry.async_start_reauth(hass)
             return {"data": None, "error": "futar_auth", "detail": str(err)}
         except FutarRateLimited as err:
-            # The integration's own limit, not BKK being down.
+            # The integration's own limit, or FUTÁR's for the key (HTTP 429):
+            # not BKK being down.
             return {"data": None, "error": "futar_rate_limited", "detail": str(err)}
+        except FutarBadRequest as err:
+            # The call itself is wrong (never sent): not BKK being down.
+            return {"data": None, "error": "futar_bad_request", "detail": str(err)}
         except FutarError as err:
             return {"data": None, "error": "futar_unavailable", "detail": str(err)}
         return {"data": data}

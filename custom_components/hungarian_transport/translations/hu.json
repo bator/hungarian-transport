@@ -51,7 +51,7 @@
     },
     "futar": {
       "name": "BKK FUTÁR lekérdezés",
-      "description": "BKK FUTÁR végpont hívása az integrációban tárolt kulccsal. Az irányítópult-kártya használja. Ha nincs válasz, a válaszban nincs adat, csak hiba: futar_auth (a BKK elutasította a tárolt kulcsot; frissítsd az integráció beállításaiban), futar_unavailable (a BKK FUTÁR nem érhető el) vagy futar_rate_limited (túl sok lekérés ebből a Home Assistantból; a következő frissítés újra próbálja).",
+      "description": "BKK FUTÁR végpont hívása az integrációban tárolt kulccsal. Az irányítópult-kártya használja. Ha nincs válasz, a válaszban nincs adat, csak hiba: futar_auth (a BKK elutasította a tárolt kulcsot; frissítsd az integráció beállításaiban), futar_unavailable (a BKK FUTÁR nem érhető el), futar_rate_limited (túl sok lekérés ebből a Home Assistantból, vagy a BKK utasította el őket túl soknak a kulcshoz; a következő frissítés újra próbálja) vagy futar_bad_request (érvénytelen paraméter, például 256 karakternél hosszabb; a kérés nem ment el).",
       "fields": {
         "path": {
           "name": "Végpont",

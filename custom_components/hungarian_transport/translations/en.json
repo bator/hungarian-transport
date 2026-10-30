@@ -51,7 +51,7 @@
     },
     "futar": {
       "name": "BKK FUTÁR request",
-      "description": "Call a BKK FUTÁR endpoint with the key stored in the integration. Used by the dashboard card. When there is no answer, the response has no data and an error: futar_auth (BKK rejected the stored key; update it in the integration options), futar_unavailable (BKK FUTÁR is down) or futar_rate_limited (too many requests from this Home Assistant; the next refresh tries again).",
+      "description": "Call a BKK FUTÁR endpoint with the key stored in the integration. Used by the dashboard card. When there is no answer, the response has no data and an error: futar_auth (BKK rejected the stored key; update it in the integration options), futar_unavailable (BKK FUTÁR is down), futar_rate_limited (too many requests from this Home Assistant, or BKK refused them as too many for the key; the next refresh tries again) or futar_bad_request (a parameter is invalid, such as one longer than 256 characters; the request was not sent).",
       "fields": {
         "path": {
           "name": "Endpoint",

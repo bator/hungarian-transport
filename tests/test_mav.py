@@ -899,10 +899,14 @@ async def test_stopping_cancels_a_running_build(
         await task
     assert procs[0].returncode == -signal.SIGKILL
     assert not temp.exists()
+    # Not an interruption either: no "building" left for the next start to
+    # count as Home Assistant dying during the build.
     state = mav._read_state(mav.state_path(hass))
-    assert state["building"] and "failed" not in state
+    assert "building" not in state and "failed" not in state and "interrupted" not in state
     assert mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
     assert ir.async_get(hass).async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+    await mav.async_build_if_needed(hass, card_assets)
+    assert "interrupted" not in mav._read_state(mav.state_path(hass))
 
 
 async def test_stopping_cancels_a_queued_build(
@@ -941,11 +945,17 @@ async def test_temp_indexes_go_before_a_build_and_after_a_failed_one(
 ) -> None:
     """www/ is served: a killed Home Assistant's temp index goes before the
     next build, and a build process that dies leaves none behind."""
-    (card_assets / (mav.INDEX_NAME + ".0ld_k1ll")).write_bytes(b"from a killed build")
     await _setup(hass)
+    stale = card_assets / (mav.INDEX_NAME + ".0ld_k1ll")
+    stale.write_bytes(b"from a killed build")
+    os.utime(stale, (1_000_000_000, 1_000_000_000))
+    # One young enough to be the update script's, being written: not ours.
+    fresh = card_assets / (mav.INDEX_NAME + ".wr1t1ng0")
+    fresh.write_bytes(b"being written")
     _write_feed(mav_source)
     await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
-    assert sorted(p.name for p in card_assets.glob("mav-index*")) == [mav.INDEX_NAME]
+    assert sorted(p.name for p in card_assets.glob("mav-index*")) == [mav.INDEX_NAME, fresh.name]
+    fresh.unlink()
 
     runner = tmp_path / "failing_runner.py"
     runner.write_text(FAILING_RUNNER, encoding="utf-8")
@@ -1186,3 +1196,171 @@ def test_stale_local_feed_does_not_replace_a_newer_shipped_index(tmp_path: Path)
     # Without a feed there is nothing to decide.
     src.unlink()
     assert mav._startup_decision(src, out, state, today) is None
+
+
+BAD_FEED_RUNNER = """import sys
+sys.exit("ValueError: not a feed this build can read")
+"""
+
+
+async def test_index_of_a_failed_feed_is_kept_without_a_repairs_issue(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch, tmp_path
+) -> None:
+    """A feed whose local build failed (or kept being interrupted) used to
+    raise the mav_build_failed Repairs issue at every start, also once the
+    index on disk was that very feed's: a HACS update shipping a working
+    index of it, or an earlier build of it that a later rebuild could not
+    repeat. The index is the feed's, so startup keeps it, quietly."""
+    spawned: list[tuple] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def spying_exec(*args, **kwargs):
+        spawned.append(args)
+        return await real_exec(*args, **kwargs)
+
+    monkeypatch.setattr(mav.asyncio, "create_subprocess_exec", spying_exec)
+    monkeypatch.setattr(mav, "_today", lambda: date(2026, 10, 31))
+    issues = ir.async_get(hass)
+    out, state_file = card_assets / mav.INDEX_NAME, mav.state_path(hass)
+    _write_feed(mav_source, "20261030.M2ChangeID", "20261030", "20261231")
+    mav._write_state(state_file, {"failed": mav._fingerprint(mav_source), "error": "boom"})
+    shipped = _ship_index(card_assets, "20261030.M2ChangeID")
+    assert mav._startup_decision(mav_source, out, state_file, date(2026, 10, 31)) == mav.CURRENT
+
+    await _setup(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert not spawned
+    assert out.read_bytes() == shipped
+    assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+    # The same at a start that finds the issue up (a rebuild failed meanwhile).
+    mav._create_failed_issue(hass, "boom")
+    await mav.async_build_if_needed(hass, card_assets)
+    assert not spawned
+    assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+    # A shipped index of another feed does not hide the failure.
+    _ship_index(card_assets, "20261001.M2ChangeID")
+    assert mav._startup_decision(mav_source, out, state_file, date(2026, 10, 31)) == mav.FAILED
+
+    # An index built here from the feed, then a rebuild of it that fails,
+    # or is interrupted again and again: the index is still the feed's.
+    await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert len(spawned) == 1
+    built = out.read_bytes()
+    for runner_text, key in ((BAD_FEED_RUNNER, "failed"), (KILLED_RUNNER, "interrupted")):
+        runner = tmp_path / "rebuild_runner.py"
+        runner.write_text(runner_text, encoding="utf-8")
+        monkeypatch.setattr(mav, "BUILD_RUNNER", runner)
+        for _ in range(mav.INTERRUPTED_LIMIT):
+            with pytest.raises(HomeAssistantError):
+                await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+        assert key in mav._read_state(state_file)
+        assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is not None
+        spawned.clear()
+        await mav.async_build_if_needed(hass, card_assets)
+        assert not spawned
+        assert out.read_bytes() == built
+        assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+
+class _Died(BaseException):
+    """Home Assistant killed mid-build (the OOM killer, the watchdog): no
+    handler of the build runs, the state file keeps what it said then."""
+
+
+async def test_home_assistant_dying_during_builds_stops_them_at_startup(
+    hass: HomeAssistant, card_assets, mav_source, monkeypatch
+) -> None:
+    """When Home Assistant itself (not the build process) is killed during a
+    build, the state keeps "building". Every start used to build again with
+    no interruption counted, so INTERRUPTED_LIMIT never applied: a host the
+    feed is too big for died at every start. Such a leftover now counts as
+    one interruption of the feed, by the same rules as a killed build process."""
+    spawned: list[tuple] = []
+
+    async def dying_build(*args):
+        spawned.append(args)
+        raise _Died
+
+    await _setup(hass)
+    _write_feed(mav_source)
+    real_build = mav._build
+    monkeypatch.setattr(mav, "_build", dying_build)
+    out, state_file = card_assets / mav.INDEX_NAME, mav.state_path(hass)
+    issues = ir.async_get(hass)
+    source = mav._fingerprint(mav_source)
+
+    for start in range(1, mav.INTERRUPTED_LIMIT + 1):
+        with pytest.raises(_Died):
+            await mav._build_locked(hass, card_assets, mav._Job(False))
+        assert len(spawned) == start
+        state = mav._read_state(state_file)
+        assert state["building"] == source
+        assert _interruptions(state, source) == start - 1
+        assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+    # The next start counts the last one too, and stops there.
+    assert await mav._build_locked(hass, card_assets, mav._Job(False)) is None
+    assert len(spawned) == mav.INTERRUPTED_LIMIT
+    state = mav._read_state(state_file)
+    assert "building" not in state
+    assert state["interrupted"] == {
+        "source": source, "count": mav.INTERRUPTED_LIMIT, "error": mav.DIED_DURING_BUILD,
+    }
+    issue = issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED)
+    assert issue is not None
+    assert f"interrupted {mav.INTERRUPTED_LIMIT} times in a row" in issue.translation_placeholders["error"]
+    assert not mav._needs_build(mav_source, out, state_file)
+
+    # The rebuild service still builds, and its success clears it all.
+    monkeypatch.setattr(mav, "_build", real_build)
+    await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
+    assert out.is_file()
+    state = mav._read_state(state_file)
+    assert "interrupted" not in state and "building" not in state
+    assert issues.async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+
+async def test_dead_build_of_another_feed_or_an_upload_is_not_counted(
+    hass: HomeAssistant, card_assets, mav_source
+) -> None:
+    """A leftover "building" of a feed that has changed since (or of an
+    upload's temp file) says nothing about the feed there now."""
+    await _setup(hass)
+    _write_feed(mav_source)
+    state_file = mav.state_path(hass)
+    mav._write_state(state_file, {"building": [1, 2]})
+    await mav.async_build_if_needed(hass, card_assets)
+    state = mav._read_state(state_file)
+    assert "interrupted" not in state and "building" not in state
+    assert (card_assets / mav.INDEX_NAME).is_file()
+
+
+def _interruptions(state: dict, source: list[int]) -> int:
+    return mav._interruptions(state, source)[0]
+
+
+async def test_startup_removes_stale_temp_indexes_even_without_a_build(
+    hass: HomeAssistant, card_assets, mav_source
+) -> None:
+    """A SIGKILL during the index write leaves mav-index.json.gz.XXXXXXXX in
+    www/, which is served. It used to go only before a build, so with an
+    index that needs none it stayed for good. Setup removes it once it is
+    old enough not to be another writer's (the update script's) in progress."""
+    _ship_index(card_assets, "release-feed")
+    old = 1_000_000_000
+    stale = card_assets / (mav.INDEX_NAME + ".0ld_k1ll")
+    stale.write_bytes(b"from a killed write")
+    os.utime(stale, (old, old))
+    fresh = card_assets / (mav.INDEX_NAME + ".wr1t1ng0")
+    fresh.write_bytes(b"another writer's, right now")
+    others = [card_assets / (mav.INDEX_NAME + ".tmp"), card_assets / (mav.INDEX_NAME + ".0ld_k1ll9")]
+    for path in others:
+        path.write_bytes(b"not ours")
+        os.utime(path, (old, old))
+
+    await _setup(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert not stale.exists()
+    assert fresh.exists() and all(p.exists() for p in others)
+    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "release-feed"
