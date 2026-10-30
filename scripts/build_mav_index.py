@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from gtfs_compact import download_feed, load_env_files
+from gtfs_compact import IndexGuardError, download_feed, load_env_files
 
 OUT = Path("mav-index.json.gz")
 # Share of trains that must pass the audit before the index is written; the
@@ -152,30 +152,39 @@ def resolve_mav_feed(base: Path, *, url_errors: list[BaseException] | None = Non
 
 def _mav_module():
     """The integration's builder, so Home Assistant and this script make the
-    same index (schema 2: every stop pattern of a train with its stations)."""
+    same index (schema 2: every stop pattern of a train with its stations).
+    Its audit picks a train's pattern as the card does (mav_variant.py); a
+    set of scripts copied without that file keeps the module's own pick,
+    which gives the same verdict."""
     pkg = Path(__file__).resolve().parent.parent / "custom_components" / "hungarian_transport"
     if str(pkg) not in sys.path:
         sys.path.insert(0, str(pkg))
     import mav_index  # noqa: PLC0415
 
-    return mav_index
+    try:
+        from mav_variant import use_card_picker  # noqa: PLC0415
+    except ImportError:
+        return mav_index
+    return use_card_picker(mav_index)
 
 
 def build_mav_index(zpath: Path, out: Path, *, audit: bool = True, min_ok: float = MIN_OK) -> dict:
     """Build, audit, then write. An index that fails the audit is not
-    written, so the previous one stays in place."""
+    written, so the previous one stays in place. A too small index, or one
+    that fails the audit, raises IndexGuardError (a RuntimeError): the feed
+    is the problem, and the local updater does not build it again daily."""
     mav = _mav_module()
     index = mav.build(zpath)
     stats = dict(index["_stats"])
     if stats["trains"] + stats["lines"] < 50:
-        raise RuntimeError(f"MÁV index too small: {stats['trains']} trains, {stats['lines']} lines")
+        raise IndexGuardError(f"MÁV index too small: {stats['trains']} trains, {stats['lines']} lines")
     if audit:
         report = mav.audit(zpath, index)
         stats["audit"] = {k: v for k, v in report.items() if k != "worst"}
         stats["audit_worst"] = report["worst"][:5]
         if report["ok_ratio"] < min_ok:
             worst = ", ".join(w["train"] for w in stats["audit_worst"])
-            raise RuntimeError(
+            raise IndexGuardError(
                 f"MÁV index failed its audit: {report['trains_ok']}/{report['trains']} trains pass "
                 f"({report['ok_ratio']:.1%} < {min_ok:.0%}); first failing: {worst}"
             )

@@ -39,6 +39,10 @@ FAIL_REPORT_DAYS = 3
 FAIL_REPEAT_DAYS = 7
 # state.json "failing" key of the MÁV source (MAV_GTFS_URL).
 MAV_KEY = "mav"
+# The same for a MÁV feed whose index fails its build or audit, and for a
+# new Volán zip the Volán index does not take.
+MAV_BUILD_KEY = "mav-build"
+VOLAN_KEY = "volan"
 # The "failing" error of a city feed whose new zip build_city_index rejected
 # for its content (no trips, its calendar already ended, most of its trips
 # are gone).
@@ -132,6 +136,7 @@ try:
     from build_volan_index import GTFS_URL, build_index, volan_urls  # noqa: E402
     from gtfs_compact import (  # noqa: E402
         INDEX_SCHEMA,
+        IndexGuardError,
         _urlopen,
         assert_public_http_url,
         download_feed,
@@ -540,6 +545,19 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def source_fingerprint(path: Path) -> str:
+    """What a MÁV source is: a zip's sha256, or for a pfaedle directory a
+    hash of its files' names, sizes and modification times."""
+    if path.is_dir():
+        digest = hashlib.sha256()
+        for p in sorted(path.iterdir()):
+            if p.is_file():
+                st = p.stat()
+                digest.update(f"{p.name}\0{st.st_size}\0{st.st_mtime_ns}\n".encode())
+        return "dir:" + digest.hexdigest()
+    return file_sha256(path)
+
+
 def _today() -> date:
     return date.today()
 
@@ -685,6 +703,8 @@ def _main() -> int:
         if state.get(k)
     }
     city_state = state.get("cities") or {}
+    # The MÁV feed whose index failed its build or audit: {sha256, why, checked}.
+    mav_bad = state.get("mav_rejected") if isinstance(state.get("mav_rejected"), dict) else {}
     # Fingerprints of city zips downloaded this run. They go into state.json
     # only once a city index was built from them; otherwise (failed build,
     # SIGTERM) the next run downloads and rebuilds again.
@@ -697,7 +717,7 @@ def _main() -> int:
     failing = {
         k: v
         for k, v in (state.get("failing") or {}).items()
-        if (k in feed_ids or k == MAV_KEY) and isinstance(v, dict)
+        if (k in feed_ids or k in (MAV_KEY, MAV_BUILD_KEY, VOLAN_KEY)) and isinstance(v, dict)
     }
     # Schema conflicts (see schema_conflict) already sent to the webhook:
     # index name -> message. Reported once, not every day; one that cleared
@@ -762,16 +782,32 @@ def _main() -> int:
             report("Volán GTFS frissítés sikertelen", "error HEAD " + "; ".join(head_errors))
             exit_code = REPORTED
 
-        if volan_meta is not None and not (
-            same_remote(volan_state, volan_meta) and volan_out.exists() and zip_path.exists()
-        ) and (volan_conflict := schema_conflict(volan_out)):
+        # The fingerprint of a new zip build_index rejected (see below): the
+        # same zip is neither downloaded nor rejected again while
+        # rejection_holds(), as for a city feed.
+        volan_bad = volan_state.get("rejected") if isinstance(volan_state.get("rejected"), dict) else {}
+        if volan_bad and not rejection_holds(volan_bad, today):
+            print(f"volan: the zip rejected before ({volan_bad.get('why') or 'no reason kept'}) is checked again")
+            volan_bad = {}
+            volan_state = {k: v for k, v in volan_state.items() if k != "rejected"}
+        # Whether a new Volán zip failed its build this run: REJECTED_ERROR or
+        # BROKEN_ERROR, counted by note_failure below.
+        volan_failed = ""
+        volan_current = (
+            volan_meta is not None and same_remote(volan_state, volan_meta) and volan_out.exists() and zip_path.exists()
+        )
+        if volan_meta is not None and not volan_current and (volan_conflict := schema_conflict(volan_out)):
             # A rebuild would follow, but these scripts must not write this
             # index. Checked before the download: the same 100 MB every day
             # for an index that cannot be written helps nobody.
             exit_code = skip_rebuild("Volán GTFS frissítés kihagyva", volan_out, volan_conflict) or exit_code
-        elif volan_meta is not None and not (
-            same_remote(volan_state, volan_meta) and volan_out.exists() and zip_path.exists()
+        elif (
+            volan_meta is not None and not volan_current
+            and same_remote(volan_bad, volan_meta) and volan_out.exists() and zip_path.exists()
         ):
+            volan_failed = REJECTED_ERROR
+            print("unchanged volan (the rejected zip, previous kept)")
+        elif volan_meta is not None and not volan_current:
             try:
                 downloaded = None
                 last_err: Exception | None = None
@@ -795,34 +831,81 @@ def _main() -> int:
                     break
                 if downloaded is None:
                     raise last_err or RuntimeError("no Volán GTFS URL")
-                digest = file_sha256(new_zip)
-                info = None
-                if digest != volan_state.get("sha256") or not volan_out.exists():
-                    info = build_index(new_zip, volan_out)
-                new_zip.replace(zip_path)
             except Exception as err:
                 new_zip.unlink(missing_ok=True)
-                report("Volán GTFS frissítés sikertelen", f"error volan rebuild: {err}")
+                report("Volán GTFS frissítés sikertelen", f"error volan download: {err}")
                 exit_code = REPORTED
             else:
-                size = zip_path.stat().st_size
-                if info is None:
-                    # The zip the index was built from, byte for byte.
-                    volan_state = merge_meta(volan_meta, volan_state, size)
-                    volan_state["fetched"] = today.isoformat()
-                    print(f"unchanged volan {volan_state.get('feed_version') or '?'} (same zip)")
+                digest = file_sha256(new_zip)
+                size = new_zip.stat().st_size
+                info = None
+                if digest and digest == volan_bad.get("sha256") and volan_out.exists() and zip_path.exists():
+                    # The zip rejected before, byte for byte.
+                    new_zip.unlink()
+                    volan_bad = merge_meta(volan_meta, volan_bad, size)
+                    volan_bad["fetched"] = today.isoformat()
+                    volan_state = {**volan_state, "rejected": volan_bad}
+                    volan_failed = REJECTED_ERROR
+                    print("unchanged volan (the rejected zip, previous kept)")
                 else:
-                    volan_state = merge_meta(volan_meta, downloaded, size)
-                    volan_state["fetched"] = today.isoformat()
-                    volan_state["sha256"] = digest
-                    volan_state["feed_version"] = info["feed_version"]
-                    volan_state["trips"] = info["trips"]
-                    volan_state["stops"] = info["stops"]
-                    persist_index(volan_out, base)
-                    changed.append(f"volan {info['feed_version'] or '?'}")
-                    volan_built = True
+                    try:
+                        if digest != volan_state.get("sha256") or not volan_out.exists():
+                            info = build_index(new_zip, volan_out)
+                    except IndexGuardError as err:
+                        # Rejected for its content: kept apart from the zip in
+                        # use, with the reason, so the same zip is neither
+                        # downloaded nor rejected every day.
+                        new_zip.unlink(missing_ok=True)
+                        print(redact(f"error volan rebuild: {err}"), file=sys.stderr)
+                        volan_state = {**volan_state, "rejected": {
+                            **merge_meta(volan_meta, downloaded, size),
+                            "fetched": today.isoformat(),
+                            "sha256": digest,
+                            "why": redact(str(err))[:200],
+                            "checked": today.isoformat(),
+                        }}
+                        volan_failed = REJECTED_ERROR
+                    except Exception as err:
+                        # Does not load: no fingerprint, downloaded and built
+                        # again next run.
+                        new_zip.unlink(missing_ok=True)
+                        print(redact(f"error volan rebuild: {type(err).__name__}: {err}"), file=sys.stderr)
+                        volan_failed = BROKEN_ERROR
+                    else:
+                        new_zip.replace(zip_path)
+                        failing.pop(VOLAN_KEY, None)
+                        if info is None:
+                            # The zip the index was built from, byte for byte.
+                            volan_state = merge_meta(volan_meta, volan_state, size)
+                            volan_state.pop("rejected", None)
+                            volan_state["fetched"] = today.isoformat()
+                            print(f"unchanged volan {volan_state.get('feed_version') or '?'} (same zip)")
+                        else:
+                            volan_state = merge_meta(volan_meta, downloaded, size)
+                            volan_state["fetched"] = today.isoformat()
+                            volan_state["sha256"] = digest
+                            volan_state["feed_version"] = info["feed_version"]
+                            volan_state["trips"] = info["trips"]
+                            volan_state["stops"] = info["stops"]
+                            persist_index(volan_out, base)
+                            changed.append(f"volan {info['feed_version'] or '?'}")
+                            volan_built = True
         elif volan_meta is not None:
+            # The zip in use again: a rejected one the publisher withdrew no
+            # longer counts.
+            failing.pop(VOLAN_KEY, None)
+            volan_state = {k: v for k, v in volan_state.items() if k != "rejected"}
             print(f"unchanged volan {volan_state.get('feed_version') or '?'}")
+        if volan_failed:
+            # A new zip the index does not take is a feed that does not
+            # update: reported on its third day, then weekly, like a city
+            # feed's (see FAIL_REPORT_DAYS); update.log has the reason.
+            entry = note_failure(failing, VOLAN_KEY, volan_failed, today)
+            if entry is not None:
+                report(
+                    "Volán GTFS frissítés sikertelen",
+                    failure_report({VOLAN_KEY: entry}, today) + "; the Volán index keeps the last zip",
+                )
 
         # A city rebuild that failed (or was killed) last time is retried even
         # when no feed moved since; the Volán local routes come from zip_path.
@@ -1048,15 +1131,46 @@ def _main() -> int:
         else:
             failing.pop(MAV_KEY, None)
         if mav_src is not None and mav_source_newer(mav_src, mav_out):
-            try:
-                info = build_mav_index(mav_src, mav_out)
-                persist_index(mav_out, base)
-                changed.append(
-                    f"mav trains={info['trains']} lines={info.get('lines') or 0}"
-                )
-            except Exception as err:
-                report("MÁV GTFS frissítés sikertelen", f"error mav rebuild: {err}")
-                exit_code = REPORTED
+            # A feed whose index failed its build or audit is not built (and
+            # reported) again every day while it is the same feed, as a
+            # rejected city zip; rejection_holds() lets it go after a week.
+            source = source_fingerprint(mav_src)
+            mav_failed = ""
+            if mav_bad.get("sha256") == source and rejection_holds(mav_bad, today):
+                mav_failed = REJECTED_ERROR
+                print(f"unchanged mav (the feed whose index was rejected: {mav_bad.get('why')})")
+            else:
+                try:
+                    info = build_mav_index(mav_src, mav_out)
+                    persist_index(mav_out, base)
+                except IndexGuardError as err:
+                    print(redact(f"error mav rebuild: {err}"), file=sys.stderr)
+                    mav_bad = {"sha256": source, "why": redact(str(err))[:200], "checked": today.isoformat()}
+                    mav_failed = REJECTED_ERROR
+                except Exception as err:
+                    # Not the feed's fault, perhaps (memory, a kill): built
+                    # again next run, reported as a streak all the same.
+                    print(redact(f"error mav rebuild: {type(err).__name__}: {err}"), file=sys.stderr)
+                    mav_bad = {}
+                    mav_failed = "MÁV index build failed, see update.log"
+                else:
+                    mav_bad = {}
+                    failing.pop(MAV_BUILD_KEY, None)
+                    changed.append(
+                        f"mav trains={info['trains']} lines={info.get('lines') or 0}"
+                    )
+            if mav_failed:
+                entry = note_failure(failing, MAV_BUILD_KEY, mav_failed, today)
+                if entry is not None:
+                    report(
+                        "MÁV GTFS frissítés sikertelen",
+                        failure_report({MAV_BUILD_KEY: entry}, today) + "; the MÁV index stays as it was",
+                    )
+        elif mav_src is not None:
+            # The index is newer than the feed (built here, by the
+            # integration or shipped): a failed build of it is history.
+            mav_bad = {}
+            failing.pop(MAV_BUILD_KEY, None)
     finally:
         # New city zips no index was built from (failed build, SIGTERM):
         # the zips in place stay.
@@ -1073,6 +1187,7 @@ def _main() -> int:
                 "index": str(volan_out),
                 "city_index": str(city_out),
                 "mav_index": str(mav_out),
+                "mav_rejected": mav_bad,
             },
         )
         lock.close()

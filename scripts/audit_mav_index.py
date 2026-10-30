@@ -17,6 +17,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "custom_components" / "hungarian_transport"))
 
 import mav_index  # noqa: E402
+from mav_variant import use_card_picker  # noqa: E402
+
+# The trains are drawn as the card draws them (#77), see mav_variant.py.
+use_card_picker(mav_index)
 
 
 def main() -> None:

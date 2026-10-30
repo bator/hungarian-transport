@@ -34,6 +34,7 @@ from update_volan_index import index_feed, index_schema, persist_index, restore_
 # The real network and builder, before Fake.install() replaces them.
 REAL_DOWNLOAD_FEED = uvi.download_feed
 REAL_BUILD_CITY_INDEX = uvi.build_city_index
+REAL_MAV_SOURCE_NEWER = uvi.mav_source_newer
 
 failed = 0
 
@@ -457,6 +458,28 @@ with tempfile.TemporaryDirectory() as tmp:
           and "https://override.example/volan.zip" in fake.downloads[-2:], repr((code, fake.heads[heads:])))
     check("the Volán URL list: override, then the fallback once",
           uvi.volan_urls(uvi.GTFS_URL, VOLAN_FALLBACK) == ["https://override.example/volan.zip", VOLAN_FALLBACK])
+    # An http:// override is asked and downloaded over https, both: the real
+    # download_zip refuses plain http, so a HEAD over https and a GET of the
+    # http URL never downloaded it, and the fallback's zip came every day.
+    os.environ["VOLAN_GTFS_URL"] = "http://override.example/volan.zip"
+    fake.etag["https://override.example/volan.zip"] = "override-2"
+    real_fake_zip = fake.download_zip
+
+    def https_only_zip(url: str, dest: Path, **kw) -> dict:
+        gtfs_compact.assert_https(url)
+        return real_fake_zip(url, dest, **kw)
+
+    fake.download_zip = https_only_zip
+    uvi.download_zip = https_only_zip
+    heads, downloads = len(fake.heads), len(fake.downloads)
+    code = fake.run()
+    check("an http:// VOLAN_GTFS_URL is asked and downloaded over https",
+          code == 0 and [u for u, _kw in fake.heads[heads:heads + 1]] == ["https://override.example/volan.zip"]
+          and fake.downloads[downloads:downloads + 1] == ["https://override.example/volan.zip"]
+          and fake.state()["volan"].get("etag") == "override-2",
+          repr((code, fake.heads[heads:], fake.downloads[downloads:], fake.state()["volan"])))
+    fake.download_zip = real_fake_zip
+    uvi.download_zip = real_fake_zip
     os.environ["VOLAN_GTFS_URL"] = ""
     fake.broken.add(VOLAN_FALLBACK)
     fake.etag["https://kti.example/volan.zip"] = "volan-1"
@@ -531,14 +554,20 @@ with tempfile.TemporaryDirectory() as tmp:
     uvi.build_index = broken_build
     builds = fake.city_builds
     code = fake.run()
-    check("a failed Volán rebuild is reported and the city feeds still update",
-          code == uvi.REPORTED and fake.city_builds == builds + 1 and fake.state()["cities"]["a"]["etag"] == "a-6"
-          and fake.state()["volan"]["etag"] == "volan-1" and len(sent) == 2 and "volan rebuild" in sent[0]
-          and sent[1].startswith("Új menetrend: updated city"),
-          repr((code, sent)))
-    builds = fake.city_builds
+    check("a rejected Volán zip counts as a failing feed, not yet reported, and the city feeds still update",
+          code == 0 and fake.city_builds == builds + 1 and fake.state()["cities"]["a"]["etag"] == "a-6"
+          and fake.state()["volan"]["etag"] == "volan-1"
+          and fake.state()["volan"]["rejected"].get("etag") == "volan-2"
+          and "12 trips" in fake.state()["volan"]["rejected"].get("why", "")
+          and fake.state()["failing"]["volan"]["runs"] == 1
+          and len(sent) == 1 and sent[0].startswith("Új menetrend: updated city"),
+          repr((code, sent, fake.state())))
+    builds, volan_gets = fake.city_builds, fake.downloads.count("https://kti.example/volan.zip")
     fake.run()
     check("without a new Volán index the city is not rebuilt for it", fake.city_builds == builds)
+    check("the same rejected Volán zip is not downloaded again",
+          fake.downloads.count("https://kti.example/volan.zip") == volan_gets
+          and fake.state()["failing"]["volan"]["runs"] == 2, repr((fake.downloads, fake.state()["failing"])))
     uvi.build_index = real_build_index
     fake.etag["https://kti.example/volan.zip"] = "volan-1"
 
@@ -635,7 +664,7 @@ with tempfile.TemporaryDirectory() as tmp:
     fake.body["https://public.example/a.zip"] = b"PK a newer"
     code = fake.run()
     check("a Volán zip that fails its build does not replace the previous one",
-          code == uvi.REPORTED and zip_path.read_bytes() == good and seen_volan == [b"PK volan broken", good]
+          code == 0 and zip_path.read_bytes() == good and seen_volan == [b"PK volan broken", good]
           and not list(fake.base.glob("*.tmp")) and not list(fake.base.glob("gtfs_*.zip")),
           repr((code, seen_volan, sorted(p.name for p in fake.base.iterdir()))))
     uvi.build_index = fake_build_index
@@ -792,6 +821,146 @@ with tempfile.TemporaryDirectory() as tmp:
     fake.run()
     check("a feed that downloads again leaves the failing list", fake.state()["failing"] == {},
           repr(fake.state().get("failing")))
+    uvi._today = date.today
+
+# A new Volán zip the guard refuses is a rejected city zip: kept apart from
+# the zip in use with its reason, neither downloaded nor built again while
+# the publisher serves it (for REJECT_RECHECK_DAYS), and reported on its
+# third day, not every day with a 100 MB download each.
+KTI = "https://kti.example/volan.zip"
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    sent = []
+    uvi.notify = lambda message, *_a, **_k: sent.append(message)
+
+    def good_volan(_z: Path, out: Path) -> dict:
+        out.write_bytes(gzip.compress(b'{"v":29}'))
+        return {"feed_version": "v-good", "trips": 46000, "stops": 9000}
+
+    uvi.build_index = good_volan
+    fake.run()
+    volan_built: list[bytes] = []
+
+    def refusing_volan(zpath: Path, _out: Path) -> dict:
+        volan_built.append(zpath.read_bytes())
+        raise gtfs_compact.IndexGuardError("refusing to write volan-index.json.gz: 12 trips, expected at least 10000")
+
+    uvi.build_index = refusing_volan
+    fake.etag[KTI] = "volan-2"
+    gets = fake.downloads.count(KTI)
+    start = date(2027, 1, 4)
+    got = []
+    for day in range(9):
+        uvi._today = lambda d=day: start + timedelta(days=d)
+        sent.clear()
+        code = fake.run()
+        got.append((code, [m for m in sent if "Volán" in m]))
+    reported = [d for d, (_c, msgs) in enumerate(got) if msgs]
+    check("a rejected Volán zip is downloaded and built on the first day, and again after REJECT_RECHECK_DAYS",
+          len(volan_built) == 2 and fake.downloads.count(KTI) == gets + 2 and all(c == 0 for c, _m in got),
+          repr((len(volan_built), fake.downloads.count(KTI) - gets, got)))
+    check("a rejected Volán zip is reported on its third day only, naming the reason's kind, not every day",
+          reported == [2] and "volan since 2027-01-04 (3 days, 3 runs, last new zip rejected" in got[2][1][0]
+          and "keeps the last zip" in got[2][1][0], repr(got))
+    check("the zip in use and the index stay; the rejected fingerprint is kept with its reason",
+          fake.state()["volan"]["etag"] == "volan-1" and fake.state()["volan"]["rejected"]["etag"] == "volan-2"
+          and "12 trips" in fake.state()["volan"]["rejected"]["why"]
+          and fake.state()["volan"]["rejected"]["checked"] == (start + timedelta(days=7)).isoformat(),
+          repr(fake.state()["volan"]))
+    # A zip that does not load keeps no fingerprint: downloaded again next run.
+    broken_runs = []
+
+    def unreadable_volan(_z: Path, _out: Path) -> dict:
+        broken_runs.append(1)
+        raise zipfile.BadZipFile("File is not a zip file")
+
+    uvi.build_index = unreadable_volan
+    fake.etag[KTI] = "volan-3"
+    gets = fake.downloads.count(KTI)
+    for day in range(9, 11):
+        uvi._today = lambda d=day: start + timedelta(days=d)
+        fake.run()
+    check("a new Volán zip that does not load is downloaded and built again next run",
+          len(broken_runs) == 2 and fake.downloads.count(KTI) == gets + 2
+          and fake.state()["failing"]["volan"]["error"] == uvi.BROKEN_ERROR
+          and fake.state()["volan"]["rejected"]["etag"] == "volan-2", repr(fake.state()))
+    uvi.build_index = good_volan
+    fake.etag[KTI] = "volan-4"
+    sent.clear()
+    uvi._today = lambda: start + timedelta(days=11)
+    code = fake.run()
+    check("a Volán zip the index takes clears the rejected fingerprint and the failure count",
+          code == 0 and fake.state()["volan"]["etag"] == "volan-4" and "rejected" not in fake.state()["volan"]
+          and "volan" not in fake.state()["failing"] and any("updated volan v-good" in m for m in sent),
+          repr((code, sent, fake.state())))
+    uvi._today = date.today
+
+# The same for MÁV: a feed whose index fails its audit (or is too small) is
+# not built again from the same feed every day, and is reported on its third
+# day; a build that crashed is tried again next run.
+with tempfile.TemporaryDirectory() as tmp:
+    fake = Fake(Path(tmp))
+    fake.install()
+    sent = []
+    uvi.notify = lambda message, *_a, **_k: sent.append(message)
+    uvi.build_index = lambda _z, out: (out.write_bytes(gzip.compress(b'{"v":29}')),
+                                       {"feed_version": "v1", "trips": 46000, "stops": 9000})[1]
+    mav_zip = Path(tmp) / "mav-gtfs.zip"
+    mav_zip.write_bytes(b"PK mav feed 1")
+    uvi.resolve_mav_feed = lambda _base, **_kw: mav_zip
+    uvi.mav_source_newer = REAL_MAV_SOURCE_NEWER
+    mav_builds: list[bytes] = []
+    mav_result: dict = {"raise": gtfs_compact.IndexGuardError("MÁV index failed its audit: 900/1000 trains pass")}
+
+    def fake_mav_build(src: Path, out: Path) -> dict:
+        mav_builds.append(src.read_bytes())
+        if mav_result.get("raise") is not None:
+            raise mav_result["raise"]
+        out.write_bytes(gzip.compress(b'{"v":2,"feed":"m"}'))
+        return {"trains": 900, "lines": 40}
+
+    uvi.build_mav_index = fake_mav_build
+    start = date(2027, 2, 1)
+    got = []
+    for day in range(9):
+        uvi._today = lambda d=day: start + timedelta(days=d)
+        sent.clear()
+        code = fake.run()
+        got.append((code, [m for m in sent if "MÁV" in m]))
+    reported = [d for d, (_c, msgs) in enumerate(got) if msgs]
+    check("a MÁV feed whose index fails its audit is built on the first day and after REJECT_RECHECK_DAYS only",
+          len(mav_builds) == 2 and all(c == 0 for c, _m in got), repr((len(mav_builds), got)))
+    check("a MÁV index that keeps failing its audit is reported on its third day, not daily",
+          reported == [2] and "mav-build since 2027-02-01 (3 days, 3 runs, last new zip rejected" in got[2][1][0]
+          and "stays as it was" in got[2][1][0], repr(got))
+    check("the failed MÁV feed is remembered with its reason",
+          fake.state()["mav_rejected"].get("sha256") == uvi.file_sha256(mav_zip)
+          and "900/1000" in fake.state()["mav_rejected"].get("why", ""), repr(fake.state().get("mav_rejected")))
+    # Another feed is built at once.
+    mav_zip.write_bytes(b"PK mav feed 2")
+    builds = len(mav_builds)
+    uvi._today = lambda: start + timedelta(days=9)
+    fake.run()
+    check("a new MÁV feed is built even while the last one is remembered as rejected",
+          len(mav_builds) == builds + 1, repr(len(mav_builds) - builds))
+    # A crash is not the feed's fault: tried again next run.
+    mav_zip.write_bytes(b"PK mav feed 3")
+    mav_result["raise"] = MemoryError()
+    builds = len(mav_builds)
+    for day in (10, 11):
+        uvi._today = lambda d=day: start + timedelta(days=d)
+        fake.run()
+    check("a MÁV build that crashed is tried again next run, and keeps no rejected feed",
+          len(mav_builds) == builds + 2 and fake.state()["mav_rejected"] == {}
+          and fake.state()["failing"]["mav-build"]["runs"] >= 2, repr(fake.state()))
+    mav_result["raise"] = None
+    sent.clear()
+    uvi._today = lambda: start + timedelta(days=12)
+    code = fake.run()
+    check("a MÁV index that builds clears the failure count and is announced",
+          code == 0 and "mav-build" not in fake.state()["failing"] and fake.state()["mav_rejected"] == {}
+          and any("mav trains=900" in m for m in sent), repr((code, sent, fake.state())))
     uvi._today = date.today
 
 # The daily HEAD of a keyed http:// override goes over https, like its
