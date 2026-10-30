@@ -852,6 +852,7 @@ var I18N = {
     errNoApiKey: "Nincs BKK API kulcs: add meg a Magyar közlekedés integrációban vagy a kártyában.",
     errApiKeyBad: "A BKK API kulcs érvénytelen (401/403). Kérj újat, és add meg az integráció beállításaiban.",
     errFutarRateLimited: "Átmenetileg túl sok BKK lekérdezés ment; a következő frissítés újra próbálja.",
+    errFutarBadRequest: "A kérés túl hosszú, a BKK nem kapta meg.",
     errFutarDown: (why) => `A BKK FUTÁR nem érhető el (${why}). A kártya a következő frissítésnél újra próbálja.`,
     errApiKeyProbe: "A BKK API kulcsot nem sikerült ellenőrizni.",
     errVolanHttp: (status) => `Volán menetrend HTTP ${status}`,
@@ -1041,6 +1042,7 @@ var I18N = {
     errNoApiKey: "No BKK API key: set it in the Hungarian transport integration or in the card.",
     errApiKeyBad: "The BKK API key is invalid (401/403). Get a new one and enter it in the integration options.",
     errFutarRateLimited: "Too many BKK requests for a moment; the next refresh tries again.",
+    errFutarBadRequest: "The request was too long and was not sent to BKK.",
     errFutarDown: (why) => `BKK FUTÁR is unavailable (${why}). The card tries again on the next refresh.`,
     errApiKeyProbe: "Could not verify the BKK API key.",
     errVolanHttp: (status) => `Volán timetable HTTP ${status}`,
@@ -1252,14 +1254,16 @@ Object.assign(BkkLib, {
     return !!String(apiKey || "").trim() || BkkLib.integrationHasKey(hass);
   },
   /* The service's error as a translated banner: a rejected key, the
-     integration's own request limit (the card tries again), or an outage
-     with its detail. The code stays for departureBoard's fallback and the
+     integration's own request limit (the card tries again), a request the
+     integration refused before BKK saw it (futar_bad_request: a parameter
+     over 256 characters, not an outage), or an outage with its detail. The code stays for departureBoard's fallback and the
      editor's key probe. */
   _integrationError(code, detail) {
     const why = String(detail || code);
     let err;
     if (code === "futar_auth") err = codedError("errApiKeyBad");
     else if (code === "futar_rate_limited") err = codedError("errFutarRateLimited");
+    else if (code === "futar_bad_request") err = codedError("errFutarBadRequest");
     else err = codedError("errFutarDown", why);
     err.code = String(code);
     return err;

@@ -3276,6 +3276,13 @@ Lib.mavIndex = origMavIndex;
   check('futar_rate_limited keeps its code for the board fallback and reads as transient',
     !!limited && limited.code === 'futar_rate_limited' && limited.i18nKey === 'errFutarRateLimited',
     limited && limited.message);
+  const tooLong = await failure(viaWs({ data: null, error: 'futar_bad_request', detail: 'parameter query longer than 256 characters' }));
+  check('futar_bad_request is its own message, not a BKK outage',
+    !!tooLong && tooLong.code === 'futar_bad_request' && tooLong.i18nKey === 'errFutarBadRequest'
+    && errText('hu', tooLong) === 'A kérés túl hosszú, a BKK nem kapta meg.'
+    && errText('en', tooLong) === 'The request was too long and was not sent to BKK.'
+    && !errText('hu', tooLong).includes('nem érhető el'),
+    tooLong && errText('en', tooLong));
   const empty = await failure(viaWs({}));
   check('futar response without data or error is still an empty response',
     !!empty && empty.message === 'BKK empty response', empty && empty.message);

@@ -78,14 +78,16 @@ Object.assign(BkkLib, {
     return !!String(apiKey || '').trim() || BkkLib.integrationHasKey(hass);
   },
   /* The service's error as a translated banner: a rejected key, the
-     integration's own request limit (the card tries again), or an outage
-     with its detail. The code stays for departureBoard's fallback and the
+     integration's own request limit (the card tries again), a request the
+     integration refused before BKK saw it (futar_bad_request: a parameter
+     over 256 characters, not an outage), or an outage with its detail. The code stays for departureBoard's fallback and the
      editor's key probe. */
   _integrationError(code, detail) {
     const why = String(detail || code);
     let err;
     if (code === 'futar_auth') err = codedError('errApiKeyBad');
     else if (code === 'futar_rate_limited') err = codedError('errFutarRateLimited');
+    else if (code === 'futar_bad_request') err = codedError('errFutarBadRequest');
     else err = codedError('errFutarDown', why);
     err.code = String(code);
     return err;
