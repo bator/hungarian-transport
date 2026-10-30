@@ -24,7 +24,12 @@ A build that was interrupted (timeout, killed, out of memory) says nothing
 about the feed and is not recorded so: the next start tries again. One that
 is interrupted INTERRUPTED_LIMIT times in a row on the same feed (a host too
 small for it) is not tried again at startup either, with a Repairs issue,
-until the feed changes or the rebuild service builds it.
+until the feed changes or the rebuild service builds it. Home Assistant
+itself dying during a build (the OOM killer, the watchdog) counts as such an
+interruption, found at the next start; a stop that cancels the build does not.
+An index on disk that is the local feed's own (built here, or a release's of
+the same feed_version) is kept at startup, whatever an earlier build of that
+feed did.
 The build (a minute of CPU over stop_times.txt) runs as a separate Python
 process, not in the executor: an executor thread would hold the GIL against
 the event loop right after startup, and the process gives the feed's memory
@@ -44,6 +49,7 @@ import os
 import re
 import stat
 import sys
+import time
 import uuid
 import zipfile
 import zlib
@@ -85,6 +91,9 @@ BUILD_TIMEOUT = 30 * 60
 # mav_index.write's temp file (tempfile.mkstemp): the index name, a dot and
 # eight random characters. A killed build leaves it in www/, which is served.
 TEMP_INDEX_RE = re.compile(re.escape(INDEX_NAME) + r"\.[a-z0-9_]{8}")
+# One older than this is left behind; a younger one may be another writer's
+# (the index update script builds into www/ with mav_index.write too).
+TEMP_INDEX_MIN_AGE = 10 * 60
 # An upload's own temp file next to the feed; one left behind (Home Assistant
 # stopped during the upload or its build) is removed at the next setup.
 UPLOAD_RE = re.compile(re.escape(SOURCE_NAME) + r"\.[0-9a-f]{32}\.upload")
@@ -275,15 +284,18 @@ def _startup_decision(src: Path, out: Path, state_file: Path, today: date | None
 
     None without a feed. SUPERSEDED: the index on disk names a newer feed
     than the local one (a release shipped it), or the local feed has expired;
-    the newer feed wins. FAILED and INTERRUPTED: the feed's build failed, or
+    the newer feed wins. CURRENT: the index on disk is this feed's, also
+    when a build of it failed or kept being interrupted (a release shipped a
+    working index of it). FAILED and INTERRUPTED: the feed's build failed, or
     was interrupted INTERRUPTED_LIMIT times in a row; the rebuild service and
-    an upload force a build. CURRENT: the index on disk is this feed's.
+    an upload force a build.
 
     A build that did not finish leaves "building" in the state file and is
-    done again. An index this integration did not build (a release shipped
-    it, or the update script restored it) is kept when its "feed" is the
-    current feed's feed_version: its mtime says when it was unpacked, not
-    which feed it came from.
+    done again (_build_locked counts it as an interruption first). An index
+    this integration did not build (a release shipped it, or the update
+    script restored it) is this feed's when its "feed" is the current feed's
+    feed_version: its mtime says when it was unpacked, not which feed it
+    came from.
     """
     source = _fingerprint(src)
     if source is None:
@@ -302,15 +314,17 @@ def _startup_decision(src: Path, out: Path, state_file: Path, today: date | None
             version = version or info.version
             if _superseded(info, index_feed, today or _today()):
                 return SUPERSEDED
+    if index is not None and not state.get("building"):
+        # The index this integration built is the feed's it was built from;
+        # another one is the feed's its "feed" names.
+        ours = state.get("index") == index
+        if own if ours else (bool(version) and index_feed == version):
+            return CURRENT
     if state.get("failed") == source:
         return FAILED
     if _interruptions(state, source)[0] >= INTERRUPTED_LIMIT:
         return INTERRUPTED
-    if index is None or state.get("building"):
-        return BUILD
-    if state.get("index") == index:
-        return BUILD if not own else CURRENT
-    return CURRENT if version and index_feed == version else BUILD
+    return BUILD
 
 
 def _needs_build(src: Path, out: Path, state_file: Path, today: date | None = None) -> bool:
@@ -318,10 +332,17 @@ def _needs_build(src: Path, out: Path, state_file: Path, today: date | None = No
     return _startup_decision(src, out, state_file, today) == BUILD
 
 
-def _remove_temp_indexes(out: Path) -> None:
+def _remove_temp_indexes(out: Path, min_age: float = 0.0) -> None:
+    """Remove mav_index.write's temp files next to out, those at least
+    min_age seconds old only."""
+    cutoff = time.time() - min_age
     with contextlib.suppress(OSError):
         for path in out.parent.iterdir():
-            if TEMP_INDEX_RE.fullmatch(path.name):
+            if not TEMP_INDEX_RE.fullmatch(path.name):
+                continue
+            with contextlib.suppress(OSError):
+                if min_age and path.stat().st_mtime > cutoff:
+                    continue
                 path.unlink(missing_ok=True)
 
 
@@ -332,18 +353,22 @@ def _remove_uploads(folder: Path) -> None:
                 path.unlink(missing_ok=True)
 
 
-async def async_remove_stale_uploads(hass: HomeAssistant) -> None:
-    """Setup, before the upload view exists: no upload can be under way."""
+async def async_remove_leftovers(hass: HomeAssistant, www: Path) -> None:
+    """Setup, before the upload view exists: no upload can be under way.
+    A temp index a killed build left in www/ (served there) goes too, also
+    when no build follows; one young enough to be another writer's stays."""
     await hass.async_add_executor_job(_remove_uploads, source_path(hass).parent)
+    await hass.async_add_executor_job(_remove_temp_indexes, www / INDEX_NAME, TEMP_INDEX_MIN_AGE)
 
 
 async def _build(hass: HomeAssistant, src: Path, out: Path) -> dict[str, Any]:
     """mav_index.build_and_audit in its own process; its stats dict.
 
     A temp index left in www/ (served there) by a killed process goes
-    before the build starts, and after one that failed.
+    before the build starts (once it is old enough not to be another
+    writer's), and after one that failed.
     """
-    await hass.async_add_executor_job(_remove_temp_indexes, out)
+    await hass.async_add_executor_job(_remove_temp_indexes, out, TEMP_INDEX_MIN_AGE)
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -514,6 +539,24 @@ def _notify_rejected(hass: HomeAssistant, stats: dict[str, Any]) -> None:
     )
 
 
+DIED_DURING_BUILD = "Home Assistant was killed during the build (out of memory, watchdog)"
+
+
+def _account_dead_build(state: dict[str, Any], feed: list[int] | None) -> dict[str, Any]:
+    """The state without the "building" record of a build Home Assistant
+    died during. A build of the feed (fingerprint feed; an upload's is not
+    counted) counts as one interruption of it, as a killed build process
+    does, with the same rules."""
+    building = state.get("building")
+    state = {k: v for k, v in state.items() if k != "building"}
+    if building is None or building != feed:
+        return state
+    count = _interruptions(state, building)[0] + 1
+    state = {k: v for k, v in state.items() if k not in ("failed", "error")}
+    state["interrupted"] = {"source": building, "count": count, "error": DIED_DURING_BUILD}
+    return state
+
+
 async def _build_locked(hass: HomeAssistant, www: Path, job: _Job) -> dict[str, Any] | None:
     feed = source_path(hass)
     src = job.upload or feed
@@ -523,8 +566,19 @@ async def _build_locked(hass: HomeAssistant, www: Path, job: _Job) -> dict[str, 
     if source is None:
         raise MavSourceMissing(str(src))
     state = await hass.async_add_executor_job(_read_state, state_file)
+    if "building" in state:
+        # No build runs while this lock is held, and a stop that cancels one
+        # takes its record back: Home Assistant itself died during that build.
+        feed_source = source if job.upload is None else await hass.async_add_executor_job(_fingerprint, feed)
+        if state.get("building") == feed_source:
+            _LOGGER.warning("MÁV index build of %s: %s", feed, DIED_DURING_BUILD)
+        state = _account_dead_build(state, feed_source)
+        await hass.async_add_executor_job(_write_state, state_file, state)
     if not job.force:
         decision = await hass.async_add_executor_job(_startup_decision, src, out, state_file, _today())
+        if decision == CURRENT:
+            # An earlier failure of this feed no longer stands in the way.
+            ir.async_delete_issue(hass, DOMAIN, ISSUE_BUILD_FAILED)
         if decision != BUILD:
             interrupted, last_error = _interruptions(state, source)
             if decision == FAILED:
@@ -544,6 +598,13 @@ async def _build_locked(hass: HomeAssistant, www: Path, job: _Job) -> dict[str, 
         if stats.get("rejected"):
             _notify_rejected(hass, stats)
             raise MavIndexRejected(stats["rejected"], stats)
+    except asyncio.CancelledError:
+        # Home Assistant is stopping (it waits for its background tasks):
+        # not an interruption of the feed's build, so its record goes; one
+        # still there at the next start is a Home Assistant that died.
+        unchanged = index_before == await hass.async_add_executor_job(_fingerprint, out)
+        await hass.async_add_executor_job(_write_state, state_file, previous if unchanged else {})
+        raise
     except Exception as err:
         # Nothing was written: what the state said about the index still holds.
         unchanged = index_before == await hass.async_add_executor_job(_fingerprint, out)

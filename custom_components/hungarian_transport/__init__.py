@@ -167,7 +167,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     )
     # MÁV GTFS is registration-only, so the rail index is built here from the
     # feed the user supplies (see mav.py), and checked trip by trip.
-    await mav.async_remove_stale_uploads(hass)
+    await mav.async_remove_leftovers(hass, www_path)
     hass.http.register_view(mav.MavGtfsUploadView(www_path, _entry_loaded))
 
     async def handle_rebuild_mav(call: ServiceCall) -> dict[str, Any]:
