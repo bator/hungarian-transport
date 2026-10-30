@@ -241,19 +241,23 @@ To rebuild them yourself on Home Assistant OS:
    pfaedle directory also rebuilds `mav-index.json.gz`; with `MAV_GTFS_URL`
    set, each daily run downloads the zip again once it is 20 hours old. A MÁV
    index that fails its audit is not written. Volán, city and MÁV fail
-   independently: each failed rebuild notifies and keeps that index as it
-   was, and the rest of the run goes on. A city feed that failed is
+   independently: each failed rebuild keeps that index as it was, and the
+   rest of the run goes on. A city feed that failed is
    downloaded and rebuilt again on the next run; one left out because its
    calendar ended is not, until the publisher posts a new zip. A download
    shorter than its `Content-Length`, or a zip without a readable directory,
-   is a failed download. A new city zip the index does not take leaves the
-   zip in place: one that does not load is downloaded again next run; one
-   the feed guard below refuses (no trips, its calendar ended, most of its
-   trips gone) is not, while the publisher serves it, for up to 7 days and
-   not past the last service day of the zip in place, then it is built
-   again. A feed that fails to download keeps its last zip; once it has
-   failed three days in a row the webhook says so, then weekly while it
-   keeps failing (the same for `MAV_GTFS_URL`). The shapes folders travel with their indexes.
+   is a failed download. A new city or Volán zip the index does not take
+   leaves the zip in place: one that does not load is downloaded again next
+   run; one the feed guard refuses (no trips, its calendar ended, most of its
+   trips gone; for Volán fewer than 10,000 coach trips) is not, while the
+   publisher serves it, for up to 7 days and not past the last service day
+   of the city zip in place, then it is built again. A MÁV feed whose index
+   fails its audit or is too small is likewise not built again for 7 days
+   while it is the same feed; a MÁV build that crashed is tried again next
+   run. A feed that fails to download, or whose new zip (MÁV feed) the index
+   does not take, keeps its last zip; once that has gone on three days in a
+   row the webhook says so, then weekly while it lasts (the same for
+   `MAV_GTFS_URL`). The shapes folders travel with their indexes.
    Simplifying the Volán `shapes.txt` (8 million points) takes about a
    minute on a desktop and longer on a Raspberry Pi; `run_update.sh` allows
    30 minutes.
@@ -273,12 +277,14 @@ The local update sends its failures to the webhook (and so to
 itself. `/config/hungarian-transport/update.log` has the details.
 
 - *… frissítés sikertelen: …* — a feed did not download, did not parse or
-  failed a guard. That index stays as it was and the next run tries again.
-  A city feed or `MAV_GTFS_URL` that does not download is only reported once
-  it has failed three days in a row (`download failing: <id> since …`, then
-  weekly): its URL has probably moved. The last zip stays in the index
-  until its calendar ends. `last new zip rejected` or `last new zip does not
-  load` means the feed downloads, but the index keeps the old zip;
+  failed a guard. That index stays as it was.
+  A city feed or `MAV_GTFS_URL` that does not download, and a city, Volán
+  (`volan`) or MÁV (`mav-build`) feed whose new zip the index does not take,
+  is only reported once that has gone on three days in a row
+  (`download failing: <id> since …`, then weekly): a URL that does not
+  download has probably moved. The last zip stays in the index until its
+  calendar ends. `last new zip rejected` or `last new zip does not load`
+  means the feed downloads, but the index keeps the old zip;
   `update.log` says why.
 - *Új menetrend: … (skipped: …)* — the index was rebuilt without these
   feeds: they failed to download or parse, and are tried again next run.
@@ -349,7 +355,8 @@ The Volán feed comes from <https://opendata.utas.hu/public-gtfs/volanbusz_gtfs.
 the address MÁV announced for it, and from
 <https://gtfs.kti.hu/public-gtfs/volanbusz_gtfs.zip> (the same zip) when
 that fails. `VOLAN_GTFS_URL` (in `.env`, or as a repository variable for
-the release) replaces the first; KTI stays the fallback.
+the release) replaces the first; KTI stays the fallback. An `http://`
+address there is fetched over https.
 
 These feeds still need a form or login:
 

@@ -1,0 +1,73 @@
+{
+  "about": "Which stop pattern of a MÁV train the card draws between two stations: pickMavVariant (src/lib/gtfs.js) and the Python audit's pick_variant (scripts/mav_variant.py) must give the same answer for each case. variants are [polyline, [station index, ...]] as in mav-index.json.gz; expect is null (no route from the index) or the chosen variant's position in variants with the boarding and alighting positions in its station list (-1: none). Station names are ones both name matchers agree on.",
+  "stations": [
+    ["Szombathely", 4723510, 1663160],
+    ["Székesfehérvár", 4718361, 1842472],
+    ["Martonvásár", 4731570, 1878800],
+    ["Budapest-Kelenföld", 4746432, 1902063],
+    ["Siófok", 4690500, 1805600],
+    ["Budapest-Déli", 4750000, 1902400]
+  ],
+  "cases": [
+    {
+      "name": "the longest pattern serving both stations in order; BKK's name for the alighting station",
+      "variants": [[0, [0, 1, 2, 3]], [1, [1, 2, 3]]],
+      "board": "Székesfehérvár", "alight": "Kelenföld vasútállomás", "headsign": "",
+      "expect": {"variant": 0, "board": 1, "alight": 3}
+    },
+    {
+      "name": "a later pattern when the first one does not reach the alighting station",
+      "variants": [[0, [1, 4]], [1, [0, 1, 2, 3]]],
+      "board": "Székesfehérvár", "alight": "Budapest-Kelenföld", "headsign": "",
+      "expect": {"variant": 1, "board": 1, "alight": 3}
+    },
+    {
+      "name": "another train's number (8714 Székesfehérvár–Siófok): boarding station only, towards another terminus, is no match",
+      "variants": [[0, [1, 4]], [0, [3, 1, 4]]],
+      "board": "Székesfehérvár", "alight": "Budapest-Kelenföld", "headsign": "Budapest-Déli",
+      "expect": null
+    },
+    {
+      "name": "without the alighting station, the pattern ending at the row's headsign",
+      "variants": [[0, [1, 4]], [0, [0, 1, 5]]],
+      "board": "Székesfehérvár", "alight": "Kelenföld vasútállomás", "headsign": "Budapest-Déli",
+      "expect": {"variant": 1, "board": 1, "alight": -1}
+    },
+    {
+      "name": "the headsign as the boarding station itself (the pattern's last stop) is no match",
+      "variants": [[0, [0, 1]]],
+      "board": "Székesfehérvár", "alight": "Budapest-Kelenföld", "headsign": "Székesfehérvár",
+      "expect": null
+    },
+    {
+      "name": "the other direction only: the alighting station comes before the boarding one",
+      "variants": [[0, [3, 2, 1]]],
+      "board": "Székesfehérvár", "alight": "Budapest-Kelenföld", "headsign": "",
+      "expect": null
+    },
+    {
+      "name": "no pattern serves the boarding station",
+      "variants": [[0, [0, 4]], [1, [3, 5]]],
+      "board": "Székesfehérvár", "alight": "Budapest-Kelenföld", "headsign": "Budapest-Kelenföld",
+      "expect": null
+    },
+    {
+      "name": "case and accents do not matter",
+      "variants": [[0, [0, 1, 2, 3]]],
+      "board": "SZEKESFEHERVAR", "alight": "martonvasar", "headsign": "",
+      "expect": {"variant": 0, "board": 1, "alight": 2}
+    },
+    {
+      "name": "without a boarding station, the first pattern",
+      "variants": [[0, [1, 4]], [0, [3, 1, 4]]],
+      "board": "", "alight": "", "headsign": "",
+      "expect": {"variant": 0, "board": -1, "alight": -1}
+    },
+    {
+      "name": "without a boarding station and without patterns, nothing",
+      "variants": [],
+      "board": "", "alight": "", "headsign": "",
+      "expect": null
+    }
+  ]
+}

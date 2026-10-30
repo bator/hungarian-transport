@@ -324,6 +324,7 @@ jobs:
           set -euo pipefail
           for t in scripts/test_gtfs_compact.py scripts/test_update_volan_index.py scripts/test_build_guards.py \
               scripts/test_release_resolve.py scripts/test_release_mav_index.py scripts/test_release_workflow.py \
+              scripts/test_mav_variant.py scripts/test_workflows.py \
               ha/test_futar_limits.py ha/test_assets.py docs/manual/tools/test_server.py; do
             # A weekly refresh of an older tag may predate a test file.
             if [ -f "$t" ]; then python3 "$t"; fi

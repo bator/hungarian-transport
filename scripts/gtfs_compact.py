@@ -704,7 +704,8 @@ def _stream_shape_points(z):
     loop runs 8 million times. Shape files are ASCII, so UTF-8 is enough."""
     real = _member(z, "shapes.txt")
     with z.open(real) as fh:
-        rows = csv.reader(io.TextIOWrapper(fh, encoding="utf-8-sig", errors="replace", newline=""))
+        rows = csv.reader(io.TextIOWrapper(fh, encoding="utf-8-sig", errors="replace", newline=""),
+                          skipinitialspace=True)
         header = [h.strip() for h in next(rows, [])]
         try:
             i_id = header.index("shape_id")
@@ -726,7 +727,8 @@ def _stream_shape_points(z):
             # whole feed. NaN fails every comparison, so it is dropped here.
             if not (math.isfinite(seq) and -90 <= lat <= 90 and -180 <= lon <= 180):
                 continue
-            yield row[i_id], seq, lat, lon
+            # trips.txt's shape_id is stripped (_csv_rows): so is this one.
+            yield row[i_id].strip(), seq, lat, lon
 
 
 def simplify_shape(pts: list[tuple[float, float]], tol_m: float) -> list[tuple[float, float]]:
@@ -846,12 +848,23 @@ codecs.register_error("gtfs_legacy", _legacy_bytes)
 
 
 def _csv_rows(z, real: str) -> Iterator[dict[str, str]]:
+    """Rows as dicts, every header and value stripped: an export with a space
+    after each comma (" T1") must give the ids the other files use ("T1"),
+    or trips lose their service and stops and the feed builds empty.
+    csv.reader and a zip, not DictReader: as fast, and this runs once per
+    stop_times row. Fields past the header are dropped."""
     with z.open(real) as fh:
         text = io.TextIOWrapper(fh, encoding="utf-8-sig", errors="gtfs_legacy", newline="")
-        reader = csv.DictReader(text, restval="")
-        if reader.fieldnames:
-            reader.fieldnames = [h.strip() for h in reader.fieldnames]
-        yield from reader
+        reader = csv.reader(text, skipinitialspace=True)
+        header = [h.strip() for h in next(reader, [])]
+        width = len(header)
+        for rec in reader:
+            if not rec:
+                continue
+            vals = [v.strip() for v in rec]
+            if len(vals) < width:
+                vals += [""] * (width - len(vals))
+            yield dict(zip(header, vals))
 
 
 def _open_csv(z, name: str) -> Iterator[dict[str, str]]:
@@ -1022,6 +1035,28 @@ def load_parts(
             zpath=zpath,
             split_platforms_m=split_platforms_m,
         )
+
+
+def _interpolate_times(items: list[tuple[str, int | None]]) -> list[tuple[str, int | None]]:
+    """A stop without a time between two timed ones (GTFS timepoint=0: the
+    consumer interpolates) gets one, evenly spaced by position, rounded to
+    the minute; without it the stop would drop out of the trip's pattern.
+    Untimed stops before the first or after the last timed one stay
+    untimed. A trip whose every stop is timed comes back as it was."""
+    if all(m is not None for _s, m in items):
+        return items
+    out = list(items)
+    prev = -1
+    for i, (_sid, m) in enumerate(items):
+        if m is None:
+            continue
+        if prev >= 0 and i - prev > 1:
+            a = items[prev][1]
+            span = i - prev
+            for k in range(prev + 1, i):
+                out[k] = (items[k][0], a + round((m - a) * (k - prev) / span))
+        prev = i
+    return out
 
 
 def _densest(sids: list[str], sid2ll: dict[str, tuple[float, float]], limit_m: float) -> str:
@@ -1222,6 +1257,7 @@ def _load_parts(
     def flush(tid: str, items: list[tuple[str, int | None]]) -> None:
         if tid not in keep_trips or not items:
             return
+        items = _interpolate_times(items)
         pts: list[tuple[str, int]] = []
         for sid, m in items:
             p = sid2p.get(sid, sid)
