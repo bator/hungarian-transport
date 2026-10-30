@@ -83,6 +83,14 @@ jobs:
       - name: Index guard tests
         run: python3 scripts/test_build_guards.py
 
+      # The MÁV audit's pattern pick against the cases the card shares
+      # (scripts/testdata/mav_variant_cases.json).
+      - name: MÁV variant pick tests
+        run: python3 scripts/test_mav_variant.py
+
+      - name: Workflow coverage tests
+        run: python3 scripts/test_workflows.py
+
       # The release workflow's "Resolve tag" step, against a stub gh and git;
       # release.yml runs it too, but only after a change reached main.
       - name: Release tag resolve tests
@@ -105,6 +113,47 @@ jobs:
 
       - name: Card URL tag tests
         run: python3 ha/test_assets.py
+
+  lint:
+    name: Shell and workflow lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Pinned releases, each checked against the sha256 recorded here before
+      # it runs (actionlint's from its release checksums file, ShellCheck's
+      # from the downloaded tarball, 2026-10-30). Bump both deliberately.
+      # actionlint runs this ShellCheck on every workflow run: block too.
+      - name: Install ShellCheck 0.11.0 and actionlint 1.7.12
+        env:
+          SHELLCHECK_URL: https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz
+          SHELLCHECK_SHA256: 8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198
+          ACTIONLINT_URL: https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          bin="$RUNNER_TEMP/lint-bin"
+          mkdir -p "$bin"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/shellcheck.tar.xz" "$SHELLCHECK_URL"
+          echo "$SHELLCHECK_SHA256  $RUNNER_TEMP/shellcheck.tar.xz" | sha256sum --check --strict
+          tar -xJf "$RUNNER_TEMP/shellcheck.tar.xz" -C "$bin" --strip-components=1 shellcheck-v0.11.0/shellcheck
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/actionlint.tar.gz" "$ACTIONLINT_URL"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$bin" actionlint
+          echo "$bin" >> "$GITHUB_PATH"
+
+      - name: ShellCheck
+        run: |
+          set -euo pipefail
+          shellcheck --version
+          git ls-files -z '*.sh' | xargs -0 --no-run-if-empty shellcheck
+
+      - name: actionlint
+        run: |
+          actionlint -version
+          actionlint
 
   integration:
     name: Integration tests

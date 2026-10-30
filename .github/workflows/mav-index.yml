@@ -12,6 +12,9 @@ on:
       - .github/workflows/mav-index.yml
       - scripts/release_mav_index.sh
       - scripts/build_mav_index.py
+      # build_mav_index.py imports these (scripts/test_workflows.py checks).
+      - scripts/gtfs_compact.py
+      - scripts/mav_variant.py
       - scripts/index_digest.py
       - custom_components/hungarian_transport/mav_index.py
 
@@ -109,12 +112,16 @@ jobs:
             exit 1
           fi
 
+      # Also when a step failed: a build that is not reproducible is exactly
+      # when both indexes are worth a look. A build that failed earlier
+      # leaves fewer files, and that is no error of its own.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: env.MAV_SECRETS == 'true'
+        if: ${{ !cancelled() && env.MAV_SECRETS == 'true' }}
         with:
           name: mav-index
           path: |
             mav-index.json.gz
+            mav-index.again.json.gz
             mav-build.json
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 3
