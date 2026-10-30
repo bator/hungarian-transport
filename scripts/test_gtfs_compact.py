@@ -975,6 +975,8 @@ def main() -> int:
 
     failed |= determinism_checks()
     failed |= digest_checks()
+    failed |= padded_feed_checks()
+    failed |= untimed_stop_checks()
 
     return 1 if failed else 0
 
@@ -1039,6 +1041,82 @@ def determinism_checks() -> bool:
         " | ".join(runs) if len(set(runs)) > 1 or not first else "",
     )
 
+
+
+_SMALL_FEED = {
+    "agency.txt": "agency_id,agency_name\nA,Szeged - Local\n",
+    "stops.txt": "stop_id,stop_name,stop_lat,stop_lon\n1,Alpha,46.25,20.15\n2,Beta,46.26,20.16\n3,Gamma,46.27,20.17\n",
+    "routes.txt": "route_id,route_short_name,agency_id\nR1,12,A\n",
+    "trips.txt": "route_id,service_id,trip_id,shape_id\nR1,S1,T1,SH1\n",
+    "calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+                    "S1,1,1,1,1,1,0,0,20200101,20991231\n",
+    "calendar_dates.txt": "service_id,date,exception_type\nS1,20261224,2\n",
+    "stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+                      "T1,08:00:00,08:00:00,1,1\nT1,08:05:00,08:05:00,2,2\nT1,08:10:00,08:10:00,3,3\n",
+    "shapes.txt": "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\n"
+                  "SH1,46.25,20.15,1\nSH1,46.26,20.16,2\nSH1,46.27,20.17,3\n",
+}
+
+
+def _parts_of(files: dict[str, str]) -> list[dict]:
+    z = gtfs_zip(files)
+    try:
+        return load_parts(z, lambda short, *_: bool(short), op_id="szeged", op_name="Szeged")
+    finally:
+        z.unlink(missing_ok=True)
+
+
+def padded_feed_checks() -> bool:
+    """An export with a space after every comma, and one before it, is the
+    same feed: ids that do not match across files would leave no trip, and
+    the index guard would then refuse every new zip of the feed."""
+    def pad(body: str) -> str:
+        lines = body.split("\n")
+        return "\n".join([lines[0]] + [" , ".join(line.split(",")) if line else line for line in lines[1:]])
+
+    plain = _parts_of(_SMALL_FEED)
+    padded = _parts_of({k: pad(v) for k, v in _SMALL_FEED.items()})
+    p = padded[0] if padded else {}
+    return not check(
+        "a feed padded with spaces around its commas gives the same part, shape and calendar included",
+        bool(plain) and plain == padded and len(p.get("t") or []) == 1 and p["t"][0][5] == 0
+        and p["c"] == [["1111100", "20200101", "20991231"]] and p["r"] == [["20261224"]],
+        repr(padded),
+    )
+
+
+def untimed_stop_checks() -> bool:
+    """A stop between two timed ones without a time of its own (timepoint=0)
+    stays in the pattern at an interpolated time; one before the first or
+    after the last timed stop has nothing to interpolate from."""
+    failed = False
+    header = "trip_id,arrival_time,departure_time,stop_id,stop_sequence,timepoint\n"
+    files = dict(_SMALL_FEED, **{
+        "stops.txt": _SMALL_FEED["stops.txt"] + "4,Delta,46.28,20.18\n5,Epsilon,46.29,20.19\n",
+        "stop_times.txt": header + "T1,08:00:00,08:00:00,1,1,1\nT1,,,2,2,0\nT1,,,4,3,0\n"
+                          "T1,08:09:00,08:09:00,3,4,1\nT1,,,5,5,0\n",
+    })
+    p = _parts_of(files)[0]
+    names = [p["s"][i][1] for i in p["t"][0][2]]
+    failed |= not check(
+        "untimed stops between timed ones are kept at evenly spaced, rounded times",
+        names == ["Alpha", "Beta", "Delta", "Gamma"] and p["t"][0][3] == [480, 483, 486, 489],
+        repr((names, p["t"][0])),
+    )
+    lead = dict(files, **{"stop_times.txt": header + "T1,,,2,1,0\nT1,08:00:00,08:00:00,1,2,1\n"
+                                                    "T1,08:10:00,08:10:00,3,3,1\n"})
+    q = _parts_of(lead)[0]
+    failed |= not check(
+        "an untimed stop before the first timed one has no time to take and is left out",
+        [q["s"][i][1] for i in q["t"][0][2]] == ["Alpha", "Gamma"] and q["t"][0][3] == [480, 490],
+        repr(q["t"][0]),
+    )
+    failed |= not check(
+        "a trip whose stops all have times is untouched",
+        gc._interpolate_times([("1", 480), ("2", 485)]) == [("1", 480), ("2", 485)]
+        and _parts_of(_SMALL_FEED)[0]["t"][0][3] == [480, 485, 490],
+    )
+    return failed
 
 
 def _digest_part(op: str, reverse: bool = False, late: int = 0) -> dict:
