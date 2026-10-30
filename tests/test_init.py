@@ -672,7 +672,8 @@ def test_exception_translations_are_raised_and_error_codes_documented(lang) -> N
     assert set(strings["exceptions"]) == raised
     codes = set(re.findall(r'"error": "(\w+)"', (_PKG / "__init__.py").read_text(encoding="utf-8")))
     assert codes == {
-        "elvira_rate_limited", "elvira_unavailable", "futar_auth", "futar_rate_limited", "futar_unavailable",
+        "elvira_rate_limited", "elvira_unavailable", "futar_auth", "futar_bad_request", "futar_rate_limited",
+        "futar_unavailable",
     }
     for code in codes:
         service = code.split("_")[0]

@@ -104,13 +104,25 @@ class FutarRateLimited(FutarError):
     does not touch the "unavailable / answers again" state."""
 
 
+class FutarUpstreamRateLimited(FutarRateLimited):
+    """FUTÁR itself refused the call as one too many (HTTP 429) for the key.
+    The card answers it like the integration's own limit (an older board for
+    a while), not as an outage."""
+
+
+class FutarBadRequest(FutarError):
+    """The request was not sent: a parameter the card never sends like that
+    (longer than FUTAR_PARAM_MAX_LEN). The caller's mistake, not an outage."""
+
+
 def futar_params(path: str, params: dict[str, Any] | None) -> dict[str, str]:
     """params reduced to the ones the card uses for path, as strings.
-    Raises FutarError for a value longer than FUTAR_PARAM_MAX_LEN."""
+    Raises FutarBadRequest for a value longer than FUTAR_PARAM_MAX_LEN."""
     allowed = FUTAR_PARAMS.get(path, frozenset())
     out = {str(k): str(v) for k, v in (params or {}).items() if str(k) in allowed}
-    if any(len(v) > FUTAR_PARAM_MAX_LEN for v in out.values()):
-        raise FutarError("parameter too long")
+    for name, value in sorted(out.items()):
+        if len(value) > FUTAR_PARAM_MAX_LEN:
+            raise FutarBadRequest(f"parameter {name} longer than {FUTAR_PARAM_MAX_LEN} characters")
     return out
 
 
@@ -131,6 +143,8 @@ async def futar_get(
         ) as resp:
             if resp.status in (401, 403):
                 raise FutarAuthError(f"HTTP {resp.status}")
+            if resp.status == 429:
+                raise FutarUpstreamRateLimited(f"HTTP {resp.status}")
             if resp.status // 100 != 2:
                 raise FutarError(f"HTTP {resp.status}")
             data = await resp.json(content_type=None)
@@ -241,6 +255,17 @@ class FutarProxy:
         key = (path, tuple(sorted(params.items())))
         try:
             data = await self._cache.get(key, lambda: self._upstream(path, params))
+        except FutarUpstreamRateLimited as err:
+            # FUTÁR answers, but not this key for a while: not an outage
+            # either. Said once, until FUTÁR answers a call again.
+            if not self._failing:
+                self._failing = True
+                _LOGGER.warning(
+                    "BKK FUTÁR refuses calls as too many for the configured key (%s); "
+                    "not logged again until it answers",
+                    err,
+                )
+            raise
         except FutarRateLimited:
             # Our own limit, not FUTÁR failing: no outage state, no "answers again".
             raise
