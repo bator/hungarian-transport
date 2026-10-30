@@ -860,9 +860,8 @@ export class BKKHopCardEditor extends HTMLElement {
          rewrite (and dirty) a configured card with them, so only a card
          without routes is filled; a destination pick sets its own. */
       const cur = this._config.routeIds || [];
-      if (this._config.destKey && this._destRoutes[this._config.destKey] && !cur.length) {
-        this._emit({ routeIds: this._destRoutes[this._config.destKey].slice() });
-      }
+      const saved = this._config.destKey ? this._savedDestRoutes() : null;
+      if (saved && !cur.length) this._emit({ routeIds: saved.slice() });
       const dq = this._el('dq');
       this._paintDestHits(dq ? dq.value.trim() : '');
     } catch (err) {
@@ -929,6 +928,20 @@ export class BKKHopCardEditor extends HTMLElement {
      _titleIsAuto can no longer tell it from a typed one. */
   _keepAutoTitle() {
     if (this._config.name && this._titleIsAuto(this._config.name)) this._autoTitle = this._config.name;
+  }
+
+  /* The routes of the configured destination. A town's bus station is
+     saved under its town-prefixed key ("győr, autóbusz-állomás", see
+     _pickStop) while the list keys its routes "aut all": both are tried. */
+  _savedDestRoutes() {
+    const routes = this._destRoutes || {};
+    const key = this._config.destKey;
+    if (routes[key]) return routes[key];
+    const name = this._config.destName || '';
+    if (!name) return null;
+    const hit = (this._dests || []).find((d) => d && d.key && BkkLib.norm(d.name) === BkkLib.norm(name));
+    const listKey = (hit && hit.key) || BkkLib.placeNameKey({ name }) || BkkLib.norm(name);
+    return (listKey && routes[listKey]) || null;
   }
 
   _pickStop(stop, which) {

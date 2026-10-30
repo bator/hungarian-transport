@@ -8,6 +8,10 @@ const HISTORY_KEY = 'hungarian_transport_planner_stops';
 const HISTORY_KEEP = 24;
 /* A stop used often long ago fades: its count halves every 30 days. */
 const HISTORY_HALF_LIFE_DAYS = 30;
+/* A new pick counts 1 against stops used for months: up to this many of the
+   last week's picks keep a place, or the list would never take a new stop. */
+const HISTORY_RECENT_DAYS = 7;
+const HISTORY_RECENT_SLOTS = 8;
 
 /* localStorage is per browser profile, while the history is per Home
    Assistant user: two users of one tablet must not see each other's stops.
@@ -95,11 +99,24 @@ Object.assign(BkkLib, {
     });
     return Array.from(byId.values());
   },
-  /* The most used stops first, at most HISTORY_KEEP of them. */
+  /* The most used stops first, at most HISTORY_KEEP of them; the latest
+     picks of the past week stay even when their count is still low. */
   _rankStopHistory(list, now) {
-    return BkkLib._cleanStopHistory(list.slice()
-      .sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now))
-      .slice(0, HISTORY_KEEP));
+    const at = now || Date.now();
+    const ranked = BkkLib._cleanStopHistory(list.slice()
+      .sort((a, b) => BkkLib.stopHistoryScore(b, at) - BkkLib.stopHistoryScore(a, at)));
+    if (ranked.length <= HISTORY_KEEP) return ranked;
+    const recent = new Set(ranked
+      .filter((e) => at - e.t <= HISTORY_RECENT_DAYS * 86400000)
+      .sort((a, b) => b.t - a.t)
+      .slice(0, HISTORY_RECENT_SLOTS));
+    let room = HISTORY_KEEP - recent.size;
+    return ranked.filter((e) => {
+      if (recent.has(e)) return true;
+      if (room <= 0) return false;
+      room -= 1;
+      return true;
+    });
   },
   /* Whether `local` has a stop the server's list lacks, or a later or more
      counted use of one: picks made while the server could not be read. */

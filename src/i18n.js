@@ -115,7 +115,9 @@ export const I18N = {
     plannerArriveBy: 'Érkezés',
     plannerHorizon: (n) => (n < 60 ? `${n} perc` : `${String(n / 60).replace('.', ',')} óra`),
     plannerRoutes: 'Útvonalak',
-    plannerRoutesFrom: (when) => `indulás ${when}-tól`,
+    /* No case ending after the clock: "-tól" follows how the time is read
+       aloud (07:05-től, 07:45-től, 17:01-től), which a template cannot. */
+    plannerRoutesFrom: (when) => `indulás legkorábban ${when}`,
     plannerRoutesBy: (when) => `érkezés ${when}-ig`,
     plannerSearching: 'Útvonalak keresése…',
     plannerNoJourneys: 'Erre az időpontra nem találtam útvonalat.',

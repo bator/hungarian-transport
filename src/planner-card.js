@@ -189,9 +189,12 @@ export class BKKPlannerCard extends BKKHopCard {
       }).catch(() => {
         if (gen !== this._gen) return;
         /* A search that failed (Transitous or FUTÁR down) is not "no route
-           for this time": the view says to try again, not another time. */
+           for this time": the view says to try again, not another time.
+           It is not done either: the next reload (back on the view, a
+           reconnect) asks again instead of keeping the failure. */
         this._journeyLoading = false;
-        this._journeysDone = true;
+        this._journeysDone = false;
+        this._journeyKey = '';
         this._journeyFailed = true;
         this._journeys = [];
         this._paint();
@@ -621,6 +624,9 @@ export class BKKPlannerCard extends BKKHopCard {
       if (this._mapStale(seq)) return true;
       if (gen === this._pairGen && !(journey && !this._journey)) return false;
       this._openingMap = '';
+      /* No map opened: the button kept for this open must not take the
+         focus when some later map closes. */
+      this._mapReturnFocus = null;
       return true;
     };
     try {

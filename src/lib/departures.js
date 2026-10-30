@@ -11,11 +11,11 @@ Object.assign(BkkLib, {
       idx = null;
     }
     motis.forEach((s) => {
-      if (!s || !s.id || !/^hu-volanbusz_/i.test(s.id)) return;
+      if (!s || !s.id || !BkkLib.isTransitousVolanId(s.id)) return;
       let id = s.id;
       let name = s.name || '';
       if (idx) {
-        const hit = BkkLib.volanMatchStop(idx, { id: s.id, name: s.name }, null);
+        const hit = BkkLib.volanMatchStop(idx, { id: BkkLib.transitousVolanIndexId(s.id) || s.id, name: s.name }, null);
         if (hit && hit.id) {
           id = hit.id;
           name = hit.name || name;
@@ -120,11 +120,8 @@ Object.assign(BkkLib, {
         BkkLib.groupStops(volan),
         city,
       ];
-      hits = [];
-      const max = Math.max(groups[0].length, groups[1].length, groups[2].length, groups[3].length);
-      for (let i = 0; i < max; i++) {
-        groups.forEach((g) => { if (g[i]) hits.push(g[i]); });
-      }
+      /* The sort below orders them by label: no interleaving survives it. */
+      hits = [].concat(...groups);
     } else {
       hits = BkkLib.groupStops(Array.from(byId.values()));
     }

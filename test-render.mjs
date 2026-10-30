@@ -1,7 +1,7 @@
 /* Renders the card in jsdom: it must draw its own rows, with no dependency on
    any other custom element. */
 import { JSDOM } from 'jsdom';
-import { errText } from './src/i18n.js';
+import { errText, t as i18nT } from './src/i18n.js';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
   url: 'http://localhost:8123/local/hungarian-transport/',
@@ -2282,8 +2282,11 @@ check('pickMotisVehicle prefers a same-label S40 over a destOn IC', (() => {
       motisTripId: 'bakony', nextNames: ['Székesfehérvár', 'Szombathely'],
     },
     {
+      /* Transitous lists the stops to the terminus (fetchStops): a list
+         without the alighting station is another train (#78, and the lone
+         train fallback since). */
       label: 'S40', dep, vehicle: 'rail', motisTripId: 's40',
-      nextNames: ['Tárnok'],
+      nextNames: ['Tárnok', 'Martonvásár', 'Székesfehérvár'],
     },
   ], { label: 'S40', trainNumber: '4343', dep, vehicle: 'rail' }, { name: 'Székesfehérvár' });
   return hit && hit.motisTripId === 's40';
@@ -9298,6 +9301,318 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   c.remove();
   window.L = prevL;
   globalThis.requestAnimationFrame = prevRaf;
+}
+
+/* Review 6 (v1.9.22) regressions. Each check fails on v1.9.22 and passes after. */
+{
+  /* 1. Transitous types every MÁV IC, EC, gyors- and sebesvonat as
+     LONG_DISTANCE. Real answers (2026-10-30, Kelenföld → Székesfehérvár plan
+     and Kelenföld stoptimes), trimmed to the fields the cards read. */
+  const realPlan = {"itineraries":[{"transfers":0,"startTime":"2026-10-30T05:57:00Z","endTime":"2026-10-30T06:59:00Z","duration":3720,"legs":[{"mode":"LONG_DISTANCE","startTime":"2026-10-30T06:07:00Z","endTime":"2026-10-30T06:45:00Z","duration":2280,"from":{"name":"Budapest-Kelenföld","stopId":"hu-mav_1:005501024_0","lat":47.464442999999996,"lon":19.02,"departure":"2026-10-30T06:07:00Z","scheduledDeparture":"2026-10-30T06:07:00Z"},"to":{"name":"Székesfehérvár","stopId":"hu-mav_1:005503269_0","lat":47.183613,"lon":18.424722999999997,"arrival":"2026-10-30T06:45:00Z","scheduledArrival":"2026-10-30T06:45:00Z"},"headsign":"Zalaegerszeg","tripId":"20261030_07:00_hu-mav_1:36103629","routeId":"hu-mav_1:E36103629","routeShortName":"","displayName":"gyorsvonat 952","tripShortName":"gyorsvonat 952","routeColor":"fefefe","routeTextColor":"c82227","agencyName":"MÁV Személyszállítási Zrt."}]},{"transfers":0,"startTime":"2026-10-30T06:02:00Z","endTime":"2026-10-30T07:04:00Z","duration":3720,"legs":[{"mode":"LONG_DISTANCE","startTime":"2026-10-30T06:12:00Z","endTime":"2026-10-30T06:50:00Z","duration":2280,"from":{"name":"Budapest-Kelenföld","stopId":"hu-mav_1:005501024_4","lat":47.464442999999996,"lon":19.02,"departure":"2026-10-30T06:12:00Z","scheduledDeparture":"2026-10-30T06:12:00Z"},"to":{"name":"Székesfehérvár","stopId":"hu-mav_1:005503269_1","lat":47.183613,"lon":18.424722999999997,"arrival":"2026-10-30T06:50:00Z","scheduledArrival":"2026-10-30T06:50:00Z"},"headsign":"Tapolca","tripId":"20261030_07:05_hu-mav_1:36103413","routeId":"hu-mav_1:E35883139","routeShortName":"","displayName":"SV 9702","tripShortName":"SV 9702","routeColor":"fefefe","routeTextColor":"29803c","agencyName":"MÁV Személyszállítási Zrt."}]},{"transfers":0,"startTime":"2026-10-30T06:07:00Z","endTime":"2026-10-30T07:23:00Z","duration":4560,"legs":[{"mode":"REGIONAL_RAIL","startTime":"2026-10-30T06:17:00Z","endTime":"2026-10-30T07:09:00Z","duration":3120,"from":{"name":"Budapest-Kelenföld","stopId":"hu-mav_1:005501024_0","lat":47.464442999999996,"lon":19.02,"departure":"2026-10-30T06:17:00Z","scheduledDeparture":"2026-10-30T06:17:00Z"},"to":{"name":"Székesfehérvár","stopId":"hu-mav_1:005503269_0","lat":47.183613,"lon":18.424722999999997,"arrival":"2026-10-30T07:09:00Z","scheduledArrival":"2026-10-30T07:09:00Z"},"headsign":"Székesfehérvár","tripId":"20261030_07:10_hu-mav_1:36017943","routeId":"hu-mav_1:V2990_106","routeShortName":"","displayName":"SZ 4522","tripShortName":"SZ 4522","routeColor":"fecc00","routeTextColor":"000000","agencyName":"MÁV Személyszállítási Zrt."}]},{"transfers":1,"startTime":"2026-10-30T06:07:00Z","endTime":"2026-10-30T07:21:00Z","duration":4440,"legs":[{"mode":"REGIONAL_RAIL","startTime":"2026-10-30T06:17:00Z","endTime":"2026-10-30T07:09:00Z","duration":3120,"from":{"name":"Budapest-Kelenföld","stopId":"hu-mav_1:005501024_0","lat":47.464442999999996,"lon":19.02,"departure":"2026-10-30T06:17:00Z","scheduledDeparture":"2026-10-30T06:17:00Z"},"to":{"name":"Székesfehérvár","stopId":"hu-mav_1:005503269_0","lat":47.183613,"lon":18.424722999999997,"arrival":"2026-10-30T07:09:00Z","scheduledArrival":"2026-10-30T07:09:00Z"},"headsign":"Székesfehérvár","tripId":"20261030_07:10_hu-mav_1:36017943","routeId":"hu-mav_1:V2990_106","routeShortName":"","displayName":"SZ 4522","tripShortName":"SZ 4522","routeColor":"fecc00","routeTextColor":"000000","agencyName":"MÁV Személyszállítási Zrt."},{"mode":"BUS","startTime":"2026-10-30T07:11:00Z","endTime":"2026-10-30T07:12:00Z","duration":60,"from":{"name":"Székesfehérvár, vasútállomás","stopId":"hu-volan-szekesfehervar_hkir:hkir_666084_11","lat":47.183662,"lon":18.42317,"departure":"2026-10-30T07:11:00Z","scheduledDeparture":"2026-10-30T07:11:00Z"},"to":{"name":"Székesfehérvár, Prohászka Ottokár templom","stopId":"hu-volan-szekesfehervar_hkir:hkir_666109_2","lat":47.183482999999995,"lon":18.419176,"arrival":"2026-10-30T07:12:00Z","scheduledArrival":"2026-10-30T07:12:00Z"},"headsign":"Székesfehérvár, Fecskeparti lakótelep","tripId":"20261030_08:10_hu-volan-szekesfehervar_hkir:hkir_H6134_613-1","routeId":"hu-volan-szekesfehervar_hkir:hkir_V-14827-H-3-34","routeShortName":"34","displayName":"34","tripShortName":"34/613","routeColor":"1a3236","routeTextColor":"ffffff","agencyName":"MÁV Személyszállítási Zrt. - Székesfehérvár"}]},{"transfers":0,"startTime":"2026-10-30T06:32:00Z","endTime":"2026-10-30T07:34:00Z","duration":3720,"legs":[{"mode":"LONG_DISTANCE","startTime":"2026-10-30T06:42:00Z","endTime":"2026-10-30T07:20:00Z","duration":2280,"from":{"name":"Budapest-Kelenföld","stopId":"hu-mav_1:005501024_0","lat":47.464442999999996,"lon":19.02,"departure":"2026-10-30T06:42:00Z","scheduledDeparture":"2026-10-30T06:42:00Z"},"to":{"name":"Székesfehérvár","stopId":"hu-mav_1:005503269_0","lat":47.183613,"lon":18.424722999999997,"arrival":"2026-10-30T07:20:00Z","scheduledArrival":"2026-10-30T07:20:00Z"},"headsign":"Nagykanizsa","tripId":"20261030_07:35_hu-mav_1:36362217","routeId":"hu-mav_1:E36016624","routeShortName":"","displayName":"InterCity 842","tripShortName":"InterCity 842","routeColor":"fefefe","routeTextColor":"274f96","agencyName":"MÁV Személyszállítási Zrt."}]}]};
+  const realStopTimes = {"stopTimes":[{"place":{"name":"Budapest-Kelenföld","stopId":"hu-mav_1:005501024_0","lat":47.464442999999996,"lon":19.02,"departure":"2026-10-30T05:57:00Z","scheduledDeparture":"2026-10-30T05:57:00Z"},"mode":"REGIONAL_RAIL","headsign":"Budapest-Déli","tripTo":{"name":"Budapest-Déli"},"tripId":"20261030_05:06_hu-mav_1:36019795","routeShortName":"","displayName":"SZ 4929","tripShortName":"SZ 4929","agencyName":"MÁV Személyszállítási Zrt."},{"place":{"name":"Budapest Kelenföld bus station","stopId":"eu-flixbus_8206a0bb-73a2-4167-b8c4-435b50cbd567","lat":47.463596,"lon":19.022251,"departure":"2026-10-30T06:05:00Z","scheduledDeparture":"2026-10-30T06:05:00Z"},"mode":"COACH","headsign":"Berlin central bus station","tripTo":{"name":"Berlin central bus station"},"tripId":"20261030_05:45_eu-flixbus_260-11-0545102026-BUD#B-00","routeShortName":"FlixBus 260","displayName":"FlixBus 260","tripShortName":"","agencyName":"FlixBus-eu"},{"place":{"name":"Budapest-Kelenföld","stopId":"hu-mav_1:005501024_3","lat":47.464442999999996,"lon":19.02,"departure":"2026-10-30T06:07:00Z","scheduledDeparture":"2026-10-30T06:07:00Z"},"mode":"LONG_DISTANCE","headsign":"Zalaegerszeg","tripTo":{"name":"Zalaegerszeg"},"tripId":"20261030_07:00_hu-mav_1:36103357","routeShortName":"","displayName":"InterCity 952","tripShortName":"InterCity 952","agencyName":"MÁV Személyszállítási Zrt."},{"place":{"name":"Budapest-Kelenföld","stopId":"hu-mav_1:005501024_0","lat":47.464442999999996,"lon":19.02,"departure":"2026-10-30T06:07:00Z","scheduledDeparture":"2026-10-30T06:07:00Z"},"mode":"LONG_DISTANCE","headsign":"Zalaegerszeg","tripTo":{"name":"Zalaegerszeg"},"tripId":"20261030_07:00_hu-mav_1:36103629","routeShortName":"","displayName":"gyorsvonat 952","tripShortName":"gyorsvonat 952","agencyName":"MÁV Személyszállítási Zrt."},{"place":{"name":"Budapest-Kelenföld","stopId":"hu-mav_1:005501024_4","lat":47.464442999999996,"lon":19.02,"departure":"2026-10-30T06:12:00Z","scheduledDeparture":"2026-10-30T06:12:00Z"},"mode":"LONG_DISTANCE","headsign":"Tapolca","tripTo":{"name":"Tapolca"},"tripId":"20261030_07:05_hu-mav_1:36103413","routeShortName":"","displayName":"SV 9702","tripShortName":"SV 9702","agencyName":"MÁV Személyszállítási Zrt."},{"place":{"name":"Budapest-Kelenföld","stopId":"hu-gysev_1:005501024_0","lat":47.464442999999996,"lon":19.02,"departure":"2026-10-30T06:25:00Z","scheduledDeparture":"2026-10-30T06:25:00Z"},"mode":"LONG_DISTANCE","headsign":"Sopron","tripTo":{"name":"Sopron"},"tripId":"20261030_07:25_hu-gysev_1:36225827","routeShortName":"","displayName":"InterCity 982","tripShortName":"InterCity 982","agencyName":"GYSEV Zrt."},{"place":{"name":"Budapest-Kelenföld","stopId":"hu-mav_1:005501024_0","lat":47.464442999999996,"lon":19.02,"departure":"2026-10-30T06:42:00Z","scheduledDeparture":"2026-10-30T06:42:00Z"},"mode":"LONG_DISTANCE","headsign":"Nagykanizsa","tripTo":{"name":"Nagykanizsa"},"tripId":"20261030_07:35_hu-mav_1:36362217","routeShortName":"","displayName":"InterCity 842","tripShortName":"InterCity 842","agencyName":"MÁV Személyszállítási Zrt."}]};
+  check('every MOTIS rail mode is a train',
+    ['LONG_DISTANCE', 'HIGHSPEED_RAIL', 'NIGHT_RAIL', 'REGIONAL_FAST_RAIL', 'REGIONAL_RAIL', 'RAIL'].every((m) => Lib.motisLegType(m) === 'RAIL')
+    && Lib.motisLegType('COACH') === 'COACH' && Lib.motisLegType('BUS') === 'BUS',
+    JSON.stringify(['LONG_DISTANCE', 'HIGHSPEED_RAIL', 'NIGHT_RAIL'].map((m) => Lib.motisLegType(m))));
+  const planNow = Math.round(Date.parse('2026-10-30T06:00:00Z') / 1000);
+  const mavRows = Lib.rowsFromMotis(realPlan, { name: 'Székesfehérvár' }, 'mav', 600, { now: planNow });
+  const byLabel = (rows, re) => rows.find((r) => re.test(r.label));
+  const gyors = byLabel(mavRows, /^gyorsvonat 952$/);
+  const sv = byLabel(mavRows, /^SV 9702$/);
+  const ic = byLabel(mavRows, /^InterCity 842$/);
+  check('a real Transitous plan keeps its MÁV IC, gyors- and sebesvonat on a MÁV board, as trains with numbers',
+    !!gyors && !!sv && !!ic && !!byLabel(mavRows, /^SZ 4522$/)
+    && [gyors, sv, ic].every((r) => r.rawType === 'RAIL' && r.vehicle === 'rail' && Lib.isTrainRow(r))
+    && gyors.trainNumber === '952' && sv.trainNumber === '9702' && ic.trainNumber === '842',
+    JSON.stringify(mavRows.map((r) => [r.label, r.rawType, r.vehicle, r.trainNumber])));
+  const motisSt = Lib.rowsFromMotisStopTimes(realStopTimes);
+  const ic982 = byLabel(motisSt, /^InterCity 982$/);
+  const flix = byLabel(motisSt, /^FlixBus 260$/);
+  check('real Transitous stoptimes type an IC as a numbered train and a FlixBus as a coach',
+    !!ic982 && ic982.rawType === 'RAIL' && ic982.trainNumber === '982'
+    && !!flix && flix.rawType === 'COACH' && !flix.trainNumber,
+    JSON.stringify(motisSt.map((r) => [r.label, r.rawType, r.trainNumber])));
+  const elvira982 = { tripId: 'elvira:982', label: 'IC', trainNumber: '982', rawType: 'RAIL', vehicle: 'rail', dep: ic982 && ic982.dep, sched: ic982 && ic982.dep, headsign: 'Sopron' };
+  const picked982 = Lib.pickMotisVehicle(motisSt, elvira982, null);
+  check('an ELVIRA IC row finds its LONG_DISTANCE Transitous run',
+    !!picked982 && picked982.label === 'InterCity 982', picked982 && picked982.label);
+
+  /* 2. The two-stop fallback (boarding stop at the row's departure) does not
+     start where the trip does: before that departure there is no position.
+     A real first stop waits only within 20 minutes of leaving. */
+  const nowS = Math.floor(Date.now() / 1000);
+  const boardPt = [47.4627, 19.0247];
+  const alightPt = [47.1813, 18.4148];
+  const synthetic = [{ pt: boardPt, arr: nowS + 1200, dep: nowS + 1200, fromBoard: true }, { pt: alightPt, arr: nowS + 4800, dep: nowS + 4800 }];
+  const farAhead = [{ pt: boardPt, arr: nowS + 6 * 3600, dep: nowS + 6 * 3600 }, { pt: alightPt, arr: nowS + 7 * 3600, dep: nowS + 7 * 3600 }];
+  const soon = [{ pt: boardPt, arr: nowS + 600, dep: nowS + 600 }, { pt: alightPt, arr: nowS + 3000, dep: nowS + 3000 }];
+  const synthEst = Lib.estimateShapePosition([], synthetic, nowS);
+  const farEst = Lib.estimateShapePosition([], farAhead, nowS);
+  const soonEst = Lib.estimateShapePosition([], soon, nowS);
+  check('no "waiting" marker at the rider’s own stop, nor 6 hours ahead; a first stop 10 min ahead still waits',
+    synthEst === null && farEst === null && !!soonEst && soonEst.waiting === true,
+    JSON.stringify({ synthEst, farEst, soonEst }));
+
+  const made = [];
+  const layer = () => ({ addTo() { return this; }, setLatLng(p) { this.pt = p; }, getLatLng() { return this.pt ? { lat: this.pt[0], lng: this.pt[1] } : null; }, setIcon(i) { this.html = i.html; }, redraw() {} });
+  const fakeMap = { setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {} };
+  const prevL = window.L;
+  window.L = {
+    map: () => fakeMap, tileLayer: () => layer(), divIcon: (o) => o,
+    marker: (pt, o) => { const m = Object.assign(layer(), { pt, html: o.icon.html }); made.push(m); return m; },
+    polyline: () => layer(), latLngBounds: () => ({ extend() {} }),
+  };
+  const prevRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  const hc = document.createElement('hungarian-transport-card');
+  document.body.appendChild(hc);
+  hc._reloadSafe = () => {};
+  hc.setConfig({ language: 'hu', mav: true, stopId: 'x', stopName: 'Székesfehérvár', destKey: 'kelenfold', destName: 'Budapest-Kelenföld' });
+  const hShape = [[47.1815, 18.4134], [47.3, 18.7], [47.4646, 19.0193]];
+  hc._loadRowMapShape = async () => ({ shape: hShape, board: hShape[0], alight: hShape[2] });
+  const ahead = Lib.asRow({ tripId: 'motis:abc', label: 'IC 905', head: 'Budapest-Déli', rawType: 'RAIL', dep: nowS + 1800, sched: nowS + 1800, travel: 40 }, 'Budapest-Kelenföld', 'hu');
+  hc._rows = [ahead];
+  await hc._openVehicleMap(ahead);
+  const aheadDot = made.find((m) => m.html && m.html.includes('ht-veh-dot'));
+  const aheadFoot = document.querySelector('.ht-map-overlay .ht-map-foot');
+  check('a train known only from Transitous, 30 min before it reaches the stop, has no marker and "Nincs élő GPS"',
+    !aheadDot && !!aheadFoot && aheadFoot.textContent.includes('Nincs élő GPS') && !aheadFoot.textContent.includes('Vár az indulásra'),
+    JSON.stringify({ pt: aheadDot && aheadDot.pt, foot: aheadFoot && aheadFoot.textContent }));
+  hc._closeVehicleMap();
+
+  /* 12. A vehicle that reported GPS and went silent: no frozen "live" marker. */
+  made.length = 0;
+  const keepTTS = Lib.tripTimedStops;
+  Lib.tripTimedStops = async () => [
+    { pt: hShape[0], arr: nowS - 600, dep: nowS - 600 },
+    { pt: hShape[1], arr: nowS + 600, dep: nowS + 600 },
+    { pt: hShape[2], arr: nowS + 1800, dep: nowS + 1800 },
+  ];
+  hc._hasFutar = () => true;
+  const liveRaw = { tripId: 'BKK_9051_7', label: 'IC', head: 'Budapest-Déli', rawType: 'RAIL', dep: nowS - 600, sched: nowS - 600, trainNumber: '905', lat: 47.25, lon: 18.55 };
+  const live = Lib.asRow(liveRaw, 'Budapest-Kelenföld', 'hu');
+  hc._rows = [live];
+  await hc._openVehicleMap(live);
+  const liveFootBefore = document.querySelector('.ht-map-overlay .ht-map-foot').textContent;
+  hc._rows = [Lib.asRow(Object.assign({}, liveRaw, { lat: null, lon: null }), 'Budapest-Kelenföld', 'hu')];
+  hc._syncOpenMap();
+  await settleTicks();
+  const lostFoot = document.querySelector('.ht-map-overlay .ht-map-foot').textContent;
+  const lostDot = hc._mapMarker;
+  check('GPS gone: the footer stops saying live and the timetable moves the marker on',
+    liveFootBefore.includes('Élő pozíció') && !lostFoot.includes('Élő pozíció') && lostFoot.includes('Becsült pozíció')
+    && !!lostDot && lostDot.html.includes('ht-veh-dot-est') && Math.abs(lostDot.pt[0] - 47.25) > 0.001,
+    JSON.stringify({ before: liveFootBefore, after: lostFoot, pt: lostDot && lostDot.pt }));
+  hc._closeVehicleMap();
+
+  /* 14. A displayed row (schedTs/depTs) still finds its sensor train's FUTÁR trip. */
+  const keepCollect = Lib.collectHassVehicles;
+  const depH = nowS + 300;
+  Lib.collectHassVehicles = () => [{ tripId: 'BKK_9999_1', attime: Lib.hm(depH), routeid: 'IC', trainNumber: '' }];
+  let askedTrip = '';
+  Lib.tripTimedStops = async (key, cache, tripId) => { askedTrip = tripId; return []; };
+  hc._hass = { states: {}, language: 'hu' };
+  await hc._rowTimedStops(Lib.asRow({ tripId: 'elvira:123', label: 'IC', rawType: 'RAIL', dep: depH, sched: depH }, '', 'hu'));
+  check('a displayed ELVIRA row matches its sensor vehicle by time', askedTrip === 'BKK_9999_1', askedTrip);
+  Lib.collectHassVehicles = keepCollect;
+  Lib.tripTimedStops = keepTTS;
+
+  /* 14. One open-map sync a poll, after the rows have their GPS. */
+  const keepDep = { departures: Lib.departures, fill: Lib.fillTransitousIfEmpty };
+  let syncs = 0;
+  Lib.departures = async () => [{ tripId: 'BKK_1_1', label: '1', rawType: 'BUS', dep: nowS + 300, sched: nowS + 300 }];
+  Lib.fillTransitousIfEmpty = async (rows) => rows;
+  hc._hass = null;
+  hc._shouldPoll = () => false;
+  hc._syncOpenMap = () => { syncs += 1; };
+  await hc._reload();
+  await settleTicks();
+  check('a reload moves the open map once', syncs === 1, String(syncs));
+  Object.assign(Lib, { departures: keepDep.departures, fillTransitousIfEmpty: keepDep.fill });
+  hc.remove();
+  window.L = prevL;
+  globalThis.requestAnimationFrame = prevRaf;
+
+  /* 3. Transitous renamed the Volán intercity feed: hu-volan-helykozi_hkir:hkir_N. */
+  const newVolan = 'hu-volan-helykozi_hkir:hkir_665908';
+  check('the renamed Transitous Volán feed is Volán; a Volán-run city feed is not',
+    Lib.isVolanStop({ id: newVolan }) && Lib.stopIdFamily({ id: newVolan }) === 'volan' && Lib.stopIdRank(newVolan) === 6
+    && Lib.isVolanStop({ id: 'hu-volanbusz_hkir_665908' })
+    && !Lib.isVolanStop({ id: 'hu-volan-gyor_hkir:hkir_549378_1' })
+    && Lib.transitousVolanIndexId(newVolan) === 'hkir_665908'
+    && Lib.transitousVolanIndexId('hu-volan-helykozi_hkir:hkir_437809_1') === 'hkir_437809',
+    JSON.stringify([Lib.stopIdFamily({ id: newVolan }), Lib.stopIdRank(newVolan)]));
+  const fehStop = { i: 0, id: 'hkir_665908', name: 'Székesfehérvár, autóbusz-állomás', num: '665908', op: 0,
+    key: Lib.norm('Székesfehérvár, autóbusz-állomás'), fold: Lib.fold('Székesfehérvár, autóbusz-állomás') };
+  const keepVolanIdx = Lib.volanIndex;
+  Lib.volanIndex = async () => ({ s: [], t: [], stops: [fehStop], ops: [{ i: 0, id: 'volan', name: 'Volán' }],
+    byNum: new Map([['0:665908', fehStop]]), byKey: new Map([['0:' + fehStop.key, fehStop]]) });
+  const added = new Map();
+  await Lib.addTransitousVolanStops(added, 'Székesfehérvár autóbusz-állomás', [
+    { id: newVolan, name: 'Székesfehérvár, autóbusz-állomás', lat: 47.1905, lon: 18.4123 },
+  ]);
+  Lib.volanIndex = keepVolanIdx;
+  check('a Transitous Volán stop under the new feed name joins the Volán index stop',
+    added.size === 1 && added.has('hkir_665908'), JSON.stringify(Array.from(added.keys())));
+  const volanPick = Lib.pickTransitousHit([
+    { id: 'hu-volan-gyor_hkir:hkir_549378_1', name: 'Győr, autóbusz-állomás', lat: 47.68, lon: 17.63 },
+    { id: 'hu-volan-helykozi_hkir:hkir_549308', name: 'Győr, autóbusz-állomás', lat: 47.68, lon: 17.63 },
+  ], { id: 'hkir_549308', name: 'Győr, autóbusz-állomás' }, 'bus');
+  check('a Volán stop prefers the renamed Volán feed’s hit', volanPick && volanPick.id === 'hu-volan-helykozi_hkir:hkir_549308',
+    volanPick && volanPick.id);
+
+  /* 4. Every source failed: "try again", and a later reload asks again. */
+  const keepFetch = Lib.transitousFetch;
+  Lib.transitousFetch = async () => { throw new Error('HTTP 503'); };
+  let planErr = null;
+  try {
+    await Lib.planJourneys('', { id: 'x', name: 'Budapest-Kelenföld', lat: 47.4627, lon: 19.0247 },
+      { id: 'y', name: 'Székesfehérvár', lat: 47.1813, lon: 18.4148 }, null, { time: Date.now() + 3600e3 });
+  } catch (err) {
+    planErr = err;
+  }
+  Lib.transitousFetch = async () => ({ itineraries: [] });
+  let emptyList = null;
+  try {
+    emptyList = await Lib.planJourneys('', { id: 'x', name: 'A', lat: 47.4627, lon: 19.0247 },
+      { id: 'y', name: 'B', lat: 47.1813, lon: 18.4148 }, null, { time: Date.now() + 3600e3 });
+  } catch { emptyList = 'threw'; }
+  Lib.transitousFetch = keepFetch;
+  check('a planner search with Transitous down rejects; an empty answer is no route',
+    !!planErr && Array.isArray(emptyList) && emptyList.length === 0, JSON.stringify({ planErr: planErr && planErr.message, emptyList }));
+  const keepPJ = Lib.planJourneys;
+  let planCalls = 0;
+  Lib.planJourneys = async () => { planCalls += 1; throw new Error('down'); };
+  const fp = document.createElement('hungarian-transit-stop-card-plan');
+  document.body.appendChild(fp);
+  fp._reloadSafe = () => {};
+  fp.hass = { states: {}, language: 'hu', services: {} };
+  fp.setConfig({ language: 'hu', stopId: 'x', stopName: 'A', stopLat: 47.5, stopLon: 19.0, destKey: 'b', destName: 'B', destLat: 47.4, destLon: 19.1 });
+  fp._when = { mode: 'depart', at: Date.now() + 3600e3 };
+  fp._journeyKey = '';
+  fp._considerJourney();
+  await settleTicks();
+  const failMsg = [...fp.shadowRoot.querySelectorAll('.j-msg')].map((e) => e.textContent).join('|');
+  const reloadAfterFail = fp._shouldReloadOnConnect();
+  fp._considerJourney();
+  await settleTicks();
+  check('a failed search says to try again and is asked again on the next reload',
+    fp._journeyFailed === true && failMsg.includes('Próbáld újra') && reloadAfterFail && planCalls === 2,
+    JSON.stringify({ failMsg, reloadAfterFail, planCalls }));
+  Lib.planJourneys = keepPJ;
+  fp.remove();
+  const keepTripShape = Lib.motisTripShape;
+  let shapeAsks = 0;
+  Lib.motisTripShape = async () => {
+    shapeAsks += 1;
+    if (shapeAsks === 1) throw new Error('HTTP 503');
+    return [[47.5, 19.0], [47.45, 18.8], [47.4, 18.6]];
+  };
+  const jr = { legs: [{ walk: false, tripId: 'T1', fromLat: 47.5, fromLon: 19.0, toLat: 47.4, toLon: 18.6 }] };
+  await Lib.fillJourneyShapes(jr);
+  await Lib.fillJourneyShapes(jr);
+  Lib.motisTripShape = keepTripShape;
+  check('a failed shape fetch is tried again, not kept for the page',
+    shapeAsks === 2 && Array.isArray(jr.legs[0].shape) && jr.legs[0].shape.length >= 2, String(shapeAsks));
+
+  /* 5. The lone-train time fallback keeps the #78 guard. */
+  const depP = 1793340000;
+  const rowP = { tripId: 'BKK_87141', label: 'S', rawType: 'RAIL', vehicle: 'rail', type: 'RAIL', dep: depP, sched: depP, headsign: 'Budapest-Déli' };
+  const siofok = { tripId: 'motis:x', motisTripId: 'x', label: 'SZ 8714', rawType: 'RAIL', vehicle: 'rail', trainNumber: '8714', dep: depP + 60, sched: depP + 60, head: 'Siófok', tripTo: 'Siófok', nextNames: ['Szabadbattyán', 'Lepsény', 'Siófok'], shape: [] };
+  check('the Siófok train is not taken as the lone train due now',
+    Lib.pickMotisVehicle([siofok], rowP, { name: 'Budapest-Kelenföld', key: 'kelenfold' }) === null);
+
+  /* 6. No case ending glued to the clock. */
+  const fromText = ['07:05', '07:45', '17:01'].map((c) => i18nT('hu', 'plannerRoutesFrom', 'ma ' + c));
+  check('the planner’s departure line has no suffix after the time',
+    fromText.every((s, i) => !/-t[oóöő]l/.test(s) && s.includes(['ma 07:05', 'ma 07:45', 'ma 17:01'][i])),
+    JSON.stringify(fromText));
+
+  /* 7. A new pick keeps a place next to 24 stops used more often. */
+  const histNow = Date.now();
+  const hist = Array.from({ length: 24 }, (_, i) => ({ id: 'S' + i, name: 'Stop ' + i, n: 2, t: histNow - 5 * 86400000 }));
+  hist.push({ id: 'NEW', name: 'New stop', n: 1, t: histNow });
+  const ranked = Lib._rankStopHistory(hist, histNow);
+  check('a new stop pick stays in a full history', ranked.length === 24 && ranked.some((e) => e.id === 'NEW'),
+    JSON.stringify(ranked.length));
+
+  /* 8. The editor restores routeIds for a town-prefixed bus station key. */
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  ed.hass = { states: {}, language: 'hu' };
+  ed._probeKey = () => {};
+  const keepReach = Lib.reachableDests;
+  Lib.reachableDests = async () => ({
+    dests: [{ key: 'aut all', name: 'Győr, autóbusz-állomás' }],
+    destRoutes: { 'aut all': ['volan_5'] },
+  });
+  const edEmits = [];
+  ed.addEventListener('config-changed', (ev) => edEmits.push(ev.detail.config));
+  ed.setConfig({ volan: true, stopId: 'volan_1', stopName: 'Pápa', destKey: 'győr, autóbusz-állomás', destName: 'Győr, autóbusz-állomás', name: 'P' });
+  await settleTicks();
+  Lib.reachableDests = keepReach;
+  const restored = edEmits.find((c) => Array.isArray(c.routeIds) && c.routeIds.length);
+  check('the editor fills routeIds for a town-prefixed bus station destination',
+    !!restored && restored.routeIds[0] === 'volan_5', JSON.stringify(edEmits.map((c) => c.routeIds)));
+  ed.remove();
+
+  /* 9. An entry without an id does not blank one that has it. */
+  const keepsStop = Lib.destHitsForQuery([{ name: 'Wien Hbf', id: 'STOP_99', lat: 48.18, lon: 16.37 }, { name: 'Wien Hbf' }], 'wien', []);
+  const keepsAt = Lib.destHitsForQuery([{ name: 'Wien Hbf', id: 'at-xyz:1', lat: 48.18, lon: 16.37 }, { name: 'Wien Hbf' }], 'wien', []);
+  check('a destination without an id keeps the other entry’s id',
+    keepsStop.length === 1 && keepsStop[0].id === 'STOP_99' && keepsAt.length === 1 && keepsAt[0].id === 'at-xyz:1',
+    JSON.stringify([keepsStop, keepsAt]));
+
+  /* 10. On a closed loop the estimate runs on over the seam, as the slice does. */
+  const loop = [];
+  for (let i = 0; i <= 40; i++) { const a = 2 * Math.PI * i / 40; loop.push([47.5 + 0.009 * Math.sin(a), 19.0 + 0.0133 * Math.cos(a)]); }
+  const onLoop = (deg) => { const a = deg * Math.PI / 180; return [47.5 + 0.009 * Math.sin(a), 19.0 + 0.0133 * Math.cos(a)]; };
+  const loopEst = Lib.estimateShapePosition(loop, [{ pt: onLoop(300), arr: 1000, dep: 1000 }, { pt: onLoop(60), arr: 1600, dep: 1600 }], 1300);
+  const ratio = loopEst ? Math.hypot((loopEst.pt[0] - 47.5) / 0.009, (loopEst.pt[1] - 19.0) / 0.0133) : 0;
+  check('a loop line’s estimate stays on the loop across its seam', ratio > 0.97 && ratio < 1.03, ratio.toFixed(3));
+
+  /* 11. The card-key path's 429 carries the rate-limit code: the board keeps its last copy. */
+  const keepGlobalFetch = globalThis.fetch;
+  let futarStatus = 200;
+  globalThis.fetch = async () => ({
+    status: futarStatus, ok: futarStatus === 200,
+    json: async () => ({ status: 'OK', data: { entry: { stopTimes: [] }, references: {} } }),
+  });
+  let rateErr = null;
+  futarStatus = 429;
+  try { await Lib.fetch('k', 'arrivals.json', {}, true); } catch (err) { rateErr = err; }
+  futarStatus = 200;
+  const boardKey = 'k|BKK_F00429|60';
+  const first = await Lib.departureBoard('k', 'BKK_F00429', 60);
+  const entry = Lib._boards.get('key:' + boardKey);
+  if (entry) entry.ts -= 120 * 1000;
+  futarStatus = 429;
+  let fallback = null;
+  try { fallback = await Lib.departureBoard('k', 'BKK_F00429', 60); } catch { fallback = null; }
+  globalThis.fetch = keepGlobalFetch;
+  check('a card-key 429 is futar_rate_limited and the board falls back on its last copy',
+    !!rateErr && rateErr.code === 'futar_rate_limited' && !!first && fallback === first,
+    JSON.stringify({ code: rateErr && rateErr.code, fallback: !!fallback }));
+
+  /* 13. A journey map open dropped as stale leaves no button to focus later. */
+  const sp = document.createElement('hungarian-transit-stop-card-plan');
+  document.body.appendChild(sp);
+  sp._reloadSafe = () => {};
+  sp.setConfig({ language: 'hu', stopId: 'BKK_A', stopName: 'Alpha', destName: 'Beta', routeIds: [] });
+  sp._journey = { legs: [], durationMin: 10, transfers: 0, walkMin: 1, waitMin: 0 };
+  const btn = { el: { focus() {} }, ref: null };
+  sp._focusTarget = () => btn;
+  const keepFill = Lib.fillJourneyShapes;
+  const shapesP = deferred();
+  Lib.fillJourneyShapes = () => shapesP.p;
+  const opening = sp._openJourneyMap();
+  sp._pairGen += 1;
+  shapesP.resolve();
+  await opening;
+  Lib.fillJourneyShapes = keepFill;
+  check('a stale journey map open drops its return focus', sp._mapReturnFocus === null && sp._openingMap === '',
+    JSON.stringify({ focus: sp._mapReturnFocus === btn }));
+  sp.remove();
 }
 
 process.exit(failed ? 1 : 0);

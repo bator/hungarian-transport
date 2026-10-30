@@ -145,8 +145,18 @@ Object.assign(BkkLib, {
       } catch (err) {
         throw new Error(err && err.name === 'AbortError' ? 'BKK timeout' : `BKK ${err}`);
       }
-      if (res.status === 401 || res.status === 403) throw codedError('errApiKeyBad');
-      if (res.status === 429) throw codedError('errFutarRateLimited');
+      if (res.status === 401 || res.status === 403) {
+        const err = codedError('errApiKeyBad');
+        err.code = 'futar_auth';
+        throw err;
+      }
+      /* The same code as the integration's answer: the board falls back on
+         its last copy (departureBoard), whichever path was refused. */
+      if (res.status === 429) {
+        const err = codedError('errFutarRateLimited');
+        err.code = 'futar_rate_limited';
+        throw err;
+      }
       if (!res.ok) throw codedError('errFutarDown', `HTTP ${res.status}`);
       const data = await res.json();
       if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);
