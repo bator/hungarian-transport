@@ -169,6 +169,19 @@ Object.assign(BkkLib, {
   plannerStopKey(stop) {
     return BkkLib.stopCityKey(stop) + "|" + BkkLib.placeNameKey(stop);
   },
+  /* The Volán intercity feed on Transitous: hu-volanbusz_… until autumn
+     2026, hu-volan-helykozi_hkir:hkir_N(_platform) since. hu-volan-gyor_,
+     hu-volan-szeged_ and the like are Volán's city lines, not this feed. */
+  isTransitousVolanId(id) {
+    return /^hu-(?:volanbusz|volan-helykozi)_/i.test(String(id || ""));
+  },
+  /* The Volán index id (hkir_N) a Transitous Volán stop id stands for:
+     hu-volan-helykozi_hkir:hkir_665908_1 and hu-volanbusz_hkir_665908 are
+     both hkir_665908. '' for any other id. */
+  transitousVolanIndexId(id) {
+    const m = String(id || "").match(/^hu-volan[a-z-]*_(?:hkir:)?hkir_(\d+)/i);
+    return m ? "hkir_" + m[1] : "";
+  },
   stopIdRank(id) {
     const s = String(id || "");
     if (/^BKK_CS/i.test(s)) return 1;
@@ -176,7 +189,7 @@ Object.assign(BkkLib, {
     if (/^BKK_/i.test(s) && s.split("_").length <= 2) return 2;
     if (/^BKK_/i.test(s)) return 4;
     if (/^hu-bkk_/i.test(s)) return 5;
-    if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return 6;
+    if (/^(?:volan_|hkir_|AREA_CS)/i.test(s) || BkkLib.isTransitousVolanId(s)) return 6;
     if (/^[a-z][a-z0-9-]*:/i.test(s) && s.indexOf("/") < 0) return 7;
     if (/^hu-/i.test(s)) return 8;
     if (/^(?:geo:|node\/|way\/)/i.test(s)) return 10;
@@ -189,7 +202,7 @@ Object.assign(BkkLib, {
     const s = String(stop && stop.id || "");
     if (/^(?:geo:|node\/|way\/)/i.test(s)) return "osm";
     if (/^BKK_0055/i.test(s) || /(?:^hu-mav_|railway)/i.test(s)) return "mav";
-    if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return "volan";
+    if (/^(?:volan_|hkir_|AREA_CS)/i.test(s) || BkkLib.isTransitousVolanId(s)) return "volan";
     if (/^(?:BKK_|hu-bkk_)/i.test(s)) return "bkk";
     if (/^[a-z][a-z0-9-]*:/i.test(s) && s.indexOf("/") < 0) return "city";
     if (/^hu-/i.test(s)) return "hu";
@@ -366,7 +379,7 @@ Object.assign(BkkLib, {
             prev.fromList = true;
           }
         }
-        if (BkkLib.stopIdRank(id) < BkkLib.stopIdRank(prev.id)) prev.id = id;
+        if (id && (!prev.id || BkkLib.stopIdRank(id) < BkkLib.stopIdRank(prev.id))) prev.id = id;
         if (BkkLib.elviraStationCode(id) && !BkkLib.elviraStationCode(prev.id)) prev.id = id;
         if (/^geo:/i.test(String(prev.id || "")) && id && !/^geo:/i.test(id)) prev.id = id;
         if (BkkLib.finiteLatLon(d.lat, d.lon) && !BkkLib.finiteLatLon(prev.lat, prev.lon)) {
@@ -428,7 +441,7 @@ Object.assign(BkkLib, {
     if (!stop) return false;
     const id = String(stop.id || "");
     if (/^volan_/i.test(id) || /^AREA_CS/i.test(id) || /^hkir_/i.test(id)) return true;
-    if (/^hu-volanbusz_/i.test(id)) return true;
+    if (BkkLib.isTransitousVolanId(id)) return true;
     if (String(stop.type || "").toUpperCase() === "COACH") return true;
     return false;
   },
@@ -839,6 +852,7 @@ var I18N = {
     errNoApiKey: "Nincs BKK API kulcs: add meg a Magyar közlekedés integrációban vagy a kártyában.",
     errApiKeyBad: "A BKK API kulcs érvénytelen (401/403). Kérj újat, és add meg az integráció beállításaiban.",
     errFutarRateLimited: "Átmenetileg túl sok BKK lekérdezés ment; a következő frissítés újra próbálja.",
+    errFutarBadRequest: "A kérés túl hosszú, a BKK nem kapta meg.",
     errFutarDown: (why) => `A BKK FUTÁR nem érhető el (${why}). A kártya a következő frissítésnél újra próbálja.`,
     errApiKeyProbe: "A BKK API kulcsot nem sikerült ellenőrizni.",
     errVolanHttp: (status) => `Volán menetrend HTTP ${status}`,
@@ -881,7 +895,9 @@ var I18N = {
     plannerArriveBy: "Érkezés",
     plannerHorizon: (n) => n < 60 ? `${n} perc` : `${String(n / 60).replace(".", ",")} óra`,
     plannerRoutes: "Útvonalak",
-    plannerRoutesFrom: (when) => `indulás ${when}-tól`,
+    /* No case ending after the clock: "-tól" follows how the time is read
+       aloud (07:05-től, 07:45-től, 17:01-től), which a template cannot. */
+    plannerRoutesFrom: (when) => `indulás legkorábban ${when}`,
     plannerRoutesBy: (when) => `érkezés ${when}-ig`,
     plannerSearching: "Útvonalak keresése…",
     plannerNoJourneys: "Erre az időpontra nem találtam útvonalat.",
@@ -1026,6 +1042,7 @@ var I18N = {
     errNoApiKey: "No BKK API key: set it in the Hungarian transport integration or in the card.",
     errApiKeyBad: "The BKK API key is invalid (401/403). Get a new one and enter it in the integration options.",
     errFutarRateLimited: "Too many BKK requests for a moment; the next refresh tries again.",
+    errFutarBadRequest: "The request was too long and was not sent to BKK.",
     errFutarDown: (why) => `BKK FUTÁR is unavailable (${why}). The card tries again on the next refresh.`,
     errApiKeyProbe: "Could not verify the BKK API key.",
     errVolanHttp: (status) => `Volán timetable HTTP ${status}`,
@@ -1237,14 +1254,16 @@ Object.assign(BkkLib, {
     return !!String(apiKey || "").trim() || BkkLib.integrationHasKey(hass);
   },
   /* The service's error as a translated banner: a rejected key, the
-     integration's own request limit (the card tries again), or an outage
-     with its detail. The code stays for departureBoard's fallback and the
+     integration's own request limit (the card tries again), a request the
+     integration refused before BKK saw it (futar_bad_request: a parameter
+     over 256 characters, not an outage), or an outage with its detail. The code stays for departureBoard's fallback and the
      editor's key probe. */
   _integrationError(code, detail) {
     const why = String(detail || code);
     let err;
     if (code === "futar_auth") err = codedError("errApiKeyBad");
     else if (code === "futar_rate_limited") err = codedError("errFutarRateLimited");
+    else if (code === "futar_bad_request") err = codedError("errFutarBadRequest");
     else err = codedError("errFutarDown", why);
     err.code = String(code);
     return err;
@@ -1304,8 +1323,16 @@ Object.assign(BkkLib, {
       } catch (err) {
         throw new Error(err && err.name === "AbortError" ? "BKK timeout" : `BKK ${err}`);
       }
-      if (res.status === 401 || res.status === 403) throw codedError("errApiKeyBad");
-      if (res.status === 429) throw codedError("errFutarRateLimited");
+      if (res.status === 401 || res.status === 403) {
+        const err = codedError("errApiKeyBad");
+        err.code = "futar_auth";
+        throw err;
+      }
+      if (res.status === 429) {
+        const err = codedError("errFutarRateLimited");
+        err.code = "futar_rate_limited";
+        throw err;
+      }
       if (!res.ok) throw codedError("errFutarDown", `HTTP ${res.status}`);
       const data = await res.json();
       if (data.status && data.status !== "OK") throw new Error(`BKK ${data.status}`);
@@ -1446,10 +1473,18 @@ Object.assign(BkkLib, {
     const s = String(id || "");
     if (/^BKK_0055/i.test(s)) return "hu-mav_";
     if (/^BKK_/i.test(s)) return "hu-bkk_";
-    if (/^(volan_|AREA_CS|hkir_)/i.test(s)) return "hu-volanbusz_";
+    if (/^(volan_|AREA_CS|hkir_)/i.test(s)) return "hu-volan-helykozi_";
     if (/^miskolc:/i.test(s)) return "hu-mvk_";
     if (s.indexOf(":") > 0) return "hu-";
     return "";
+  },
+  /* A Transitous id in the feed transitousFeedWant asked for: the Volán
+     feed under its old name as well. */
+  transitousFeedHit(id, want) {
+    const s = String(id || "");
+    if (!want) return false;
+    if (want === "hu-volan-helykozi_") return BkkLib.isTransitousVolanId(s);
+    return s.indexOf(want) === 0;
   },
   /* A stop does not move: every poll of an empty board geocoded both ends
      again. Answers stay for the page; a failed lookup is asked again, and
@@ -1560,7 +1595,7 @@ Object.assign(BkkLib, {
     try {
       const motis = await BkkLib.searchStopsTransitous(q, { type: "all" });
       motis.forEach((s) => {
-        if (!s || !s.id || /^hu-volanbusz_/i.test(s.id)) return;
+        if (!s || !s.id || BkkLib.isTransitousVolanId(s.id)) return;
         const mapped = String(s.id).replace(/^hu-bkk_/i, "BKK_");
         const row = mapped !== s.id ? Object.assign({}, s, { id: mapped }) : s;
         if (byId.has(row.id)) return;
@@ -1601,7 +1636,7 @@ Object.assign(BkkLib, {
       let score = 0;
       const railWant = want === "hu-mav_" || kind === "rail" || kind === "train";
       if (railWant && (/railway/i.test(hid) || hid.indexOf("hu-mav_") === 0)) score += 8;
-      else if (want && hid.indexOf(want) === 0) score += 5;
+      else if (want && BkkLib.transitousFeedHit(hid, want)) score += 5;
       else if (railWant && hid.indexOf("hu-bkk_") === 0) score += 2;
       else if (/^hu-/.test(hid)) score += 1;
       if (/railway/i.test(hid) && railWant) score += 2;
@@ -1716,10 +1751,16 @@ Object.assign(BkkLib, {
     if (display) return display;
     return String(leg && leg.tripShortName || "").trim();
   },
+  /* MOTIS rail modes: RAIL, HIGHSPEED_RAIL, REGIONAL(_FAST)_RAIL,
+     NIGHT_RAIL, and LONG_DISTANCE, which is how Transitous types every MÁV
+     IC, EC, InterRégió, gyors- and sebesvonat (no RAIL in the name). */
+  motisRailMode(mode) {
+    return /RAIL|TRAIN|SUBURBAN|LONG_DISTANCE/.test(String(mode || "").toUpperCase());
+  },
   motisLegType(mode) {
     const m = String(mode || "").toUpperCase();
     if (m.indexOf("SUBURBAN") >= 0) return "SUBURBAN";
-    if (/RAIL|TRAIN/.test(m)) return "RAIL";
+    if (BkkLib.motisRailMode(m)) return "RAIL";
     if (m.indexOf("TRAM") >= 0) return "TRAM";
     if (m.indexOf("SUBWAY") >= 0 || m.indexOf("METRO") >= 0) return "SUBWAY";
     if (m.indexOf("TROLLEY") >= 0) return "TROLLEYBUS";
@@ -1765,7 +1806,7 @@ Object.assign(BkkLib, {
       const text = String(leg.routeTextColor || "").replace(/#/g, "") || "ffffff";
       const tripRaw = String(leg.tripId || "").trim();
       const tripId = "motis:" + (tripRaw || dep + ":" + label);
-      const trainNumber = /RAIL|SUBURBAN|TRAIN/.test(rawType) ? BkkLib.emmaTrainNumber(leg.tripShortName || label) : "";
+      const trainNumber = BkkLib.motisRailMode(rawType) ? BkkLib.emmaTrainNumber(leg.tripShortName || label) : "";
       const fromStop = leg.from || {};
       const plat = String(
         fromStop.scheduledTrack || fromStop.track || fromStop.platform || ""
@@ -1840,7 +1881,7 @@ Object.assign(BkkLib, {
     if (!row) return "";
     if (typeof row === "string") {
       const s = row.toLowerCase();
-      if (/rail|train|suburban/.test(s)) return "rail";
+      if (BkkLib.motisRailMode(s)) return "rail";
       if (/tram/.test(s)) return "tram";
       if (/subway|metro/.test(s)) return "subway";
       if (/trolley/.test(s)) return "trolley";
@@ -1851,7 +1892,7 @@ Object.assign(BkkLib, {
     }
     const v = String(row.vehicle || "").toLowerCase();
     const typ = String(row.rawType || row.type || row.mode || "").toUpperCase();
-    if (v === "rail" || v === "train" || /RAIL|SUBURBAN|TRAIN/.test(typ)) return "rail";
+    if (v === "rail" || v === "train" || BkkLib.motisRailMode(typ)) return "rail";
     if (/^elvira:/i.test(String(row.tripId || ""))) return "rail";
     if (v === "tram" || typ.indexOf("TRAM") >= 0) return "tram";
     if (v === "subway" || v === "metro" || /SUBWAY|METRO/.test(typ)) return "subway";
@@ -1945,7 +1986,7 @@ Object.assign(BkkLib, {
         head: String(st.headsign || destName || ""),
         tripTo: destName,
         nextNames: (st.nextStops || []).map((p) => p && p.name).filter(Boolean),
-        trainNumber: /RAIL|SUBURBAN|TRAIN/.test(rawType) ? BkkLib.emmaTrainNumber(st.tripShortName || label) : "",
+        trainNumber: BkkLib.motisRailMode(rawType) ? BkkLib.emmaTrainNumber(st.tripShortName || label) : "",
         shape: []
       };
     }).filter((row) => row.motisTripId);
@@ -1986,7 +2027,7 @@ Object.assign(BkkLib, {
       }
     });
     if (!best && dep) {
-      const near = list.filter((m) => usable(m) && Math.abs(Number(m.dep || 0) - dep) <= 8 * 60);
+      const near = list.filter((m) => usable(m) && Math.abs(Number(m.dep || 0) - dep) <= 8 * 60 && !(BkkLib.isTrainRow(row) && BkkLib.motisTripElsewhere(m, row, dest)));
       const toward = dest ? near.filter((m) => BkkLib.destOnMotisRow(m, dest)) : near;
       const pool = toward.length ? toward : near;
       if (pool.length === 1) {
@@ -2212,7 +2253,7 @@ Object.assign(BkkLib, {
         toLon: Number.isFinite(toLon) ? toLon : void 0
       };
       if (!walk) {
-        const rail = /RAIL|SUBURBAN/.test(BkkLib.motisLegType(leg.mode));
+        const rail = BkkLib.motisRailMode(leg.mode);
         const badge = BkkLib.applyRailBadge({
           label: row.label,
           color: row.color || (rail ? "4477AA" : "")
@@ -2267,12 +2308,20 @@ Object.assign(BkkLib, {
     }
   },
   async transitousJourneys(origin, dest, opts) {
+    return (await BkkLib.transitousJourneysResult(origin, dest, opts)).list;
+  },
+  /* The itineraries, and whether Transitous answered at all: failed when
+     the plan request itself failed (an outage), answered when it replied,
+     even with nothing. Neither when the places could not be resolved. */
+  async transitousJourneysResult(origin, dest, opts) {
+    let data;
     try {
-      const data = await BkkLib.transitousPlan(origin, dest, opts);
-      return BkkLib.journeysFromMotis(data).filter((j) => j.legs.some((leg) => !leg.walk));
+      data = await BkkLib.transitousPlan(origin, dest, opts);
     } catch (_e) {
-      return [];
+      return { list: [], failed: true, answered: false };
     }
+    const list = BkkLib.journeysFromMotis(data).filter((j) => j.legs.some((leg) => !leg.walk));
+    return { list, failed: false, answered: data != null };
   },
   /* Direct board rows hide the transfer block unless the itinerary is a
      real transfer that arrives sooner than the fastest listed ride. */
@@ -2435,11 +2484,16 @@ Object.assign(BkkLib, {
     });
   },
   /* Several itineraries for the planner's chosen time: Transitous first,
-     FUTÁR plan-trip when it has none. */
+     FUTÁR plan-trip when it has none. Nothing found because every source
+     that was asked failed (Transitous down, FUTÁR down or not set up)
+     rejects: that is "try again", not "no route for this time". */
   async planJourneys(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
     [origin, dest] = await this.withGtfsCoords([origin, dest]);
-    let list = await BkkLib.transitousJourneys(origin, dest, opts);
+    const motis = await BkkLib.transitousJourneysResult(origin, dest, opts);
+    let list = motis.list;
+    let failed = motis.failed;
+    let answered = motis.answered;
     if (!list.length && BkkLib.hasFutar(apiKey)) {
       const [fromPlace, toPlace] = await Promise.all([
         BkkLib.planPlace(apiKey, origin),
@@ -2454,11 +2508,14 @@ Object.assign(BkkLib, {
             numItineraries: "6"
           }, BkkLib.futarPlanTime(opts)), true);
           list = BkkLib.journeysFromPlan(data).filter((j) => j.legs.some((leg) => !leg.walk));
+          answered = true;
         } catch (_e) {
           list = [];
+          failed = true;
         }
       }
     }
+    if (!list.length && failed && !answered) throw new Error("route search unavailable");
     list.forEach((j) => BkkLib.nameJourneyEnds(j, origin, dest));
     list = BkkLib.dropDominatedJourneys(list);
     const at = Number(opts.time) || Date.now();
@@ -3142,6 +3199,7 @@ var SHAPE_LOOP_RATIO = 25;
 var SHAPE_PASS_M = 80;
 var SHAPE_PASS_WEIGHT = 4;
 var SHAPE_STOP_OFF_M = 1500;
+var SHAPE_WAIT_AHEAD_S = 20 * 60;
 Object.assign(BkkLib, {
   hm(ts) {
     if (!ts) return "";
@@ -3579,8 +3637,7 @@ Object.assign(BkkLib, {
       cum.push(cum[i - 1] + Math.hypot(xy.pts[i][0] - xy.pts[i - 1][0], xy.pts[i][1] - xy.pts[i - 1][1]));
     }
     const total = cum[cum.length - 1];
-    const gap = BkkLib.haversineMeters(pts[0], pts[pts.length - 1]);
-    const loop = gap <= SHAPE_LOOP_CLOSE_M && total >= SHAPE_LOOP_RATIO * Math.max(gap, 20);
+    const loop = BkkLib._shapeIsLoop(pts, total);
     const boards = BkkLib._shapePasses(BkkLib._shapeFeet(xy, cum, a));
     const alights = BkkLib._shapePasses(BkkLib._shapeFeet(xy, cum, b));
     if (!boards.length || !alights.length) return pts;
@@ -3624,6 +3681,11 @@ Object.assign(BkkLib, {
     }
     return sliced.length >= 2 ? sliced : [a, b];
   },
+  /* A closed loop: ends this close, the line many times longer than the gap. */
+  _shapeIsLoop(pts, total) {
+    const gap = BkkLib.haversineMeters(pts[0], pts[pts.length - 1]);
+    return gap <= SHAPE_LOOP_CLOSE_M && total >= SHAPE_LOOP_RATIO * Math.max(gap, 20);
+  },
   /* Metres along a shape: planar coordinates of its points and the running
      length at each (what sliceShapeBetween projects with). */
   _shapeMetric(pts) {
@@ -3646,7 +3708,11 @@ Object.assign(BkkLib, {
      (another line's geometry, or a stop outside a clipped hop). Null before
      the first departure, from the last arrival on, or without two timed
      stops. timed: [{pt: [lat, lon], arr, dep}] in running order, seconds;
-     arr or dep may be missing. */
+     arr or dep may be missing. A list whose first entry is marked fromBoard
+     starts at the rider's boarding stop, not where the trip starts (the
+     card's two-stop fallback): before that departure the vehicle is
+     somewhere up the line, so there is no position. A closed loop runs on
+     over its seam, as sliceShapeBetween slices it. */
   estimateShapePosition(shape, timed, nowSec) {
     const stops = [];
     (Array.isArray(timed) ? timed : []).forEach((s) => {
@@ -3661,6 +3727,8 @@ Object.assign(BkkLib, {
     if (now >= stops[stops.length - 1].arr) return null;
     const pts = BkkLib.validMapShape(shape);
     if (now < stops[0].dep) {
+      if (timed[0] && timed[0].fromBoard) return null;
+      if (stops[0].dep - now > SHAPE_WAIT_AHEAD_S) return null;
       let pt = stops[0].pt;
       if (pts.length >= 2) {
         const { xy: xy2, cum: cum2 } = BkkLib._shapeMetric(pts);
@@ -3686,14 +3754,17 @@ Object.assign(BkkLib, {
     if (pts.length < 2) return straight();
     const { xy, cum } = BkkLib._shapeMetric(pts);
     const total = cum[cum.length - 1];
+    const loop = BkkLib._shapeIsLoop(pts, total);
     const feetA = BkkLib._shapeFeet(xy, cum, a.pt);
     const feetB = BkkLib._shapeFeet(xy, cum, b.pt);
     if (!feetA.length || !feetB.length) return straight();
     let pick = null;
     BkkLib._shapePasses(feetA).forEach((pa) => BkkLib._shapePasses(feetB).forEach((pb) => {
-      if (pb.at <= pa.at) return;
-      const cost = pb.at - pa.at + SHAPE_PASS_WEIGHT * (pa.d + pb.d);
-      if (!pick || cost < pick.cost) pick = { pa, pb, cost };
+      let span2 = pb.at - pa.at;
+      if (span2 <= 0 && loop) span2 += total;
+      if (span2 <= 0) return;
+      const cost = span2 + SHAPE_PASS_WEIGHT * (pa.d + pb.d);
+      if (!pick || cost < pick.cost) pick = { pa, pb, cost, span: span2 };
     }));
     if (!pick) return straight();
     if (pick.pa.d > SHAPE_STOP_OFF_M || pick.pb.d > SHAPE_STOP_OFF_M) return straight();
@@ -3711,6 +3782,7 @@ Object.assign(BkkLib, {
     };
     if (beyondEnd(pick.pa, a.pt) || beyondEnd(pick.pb, b.pt)) return straight();
     const along = (at) => {
+      if (loop && at > total) at -= total;
       let seg = 1;
       while (seg < cum.length - 1 && cum[seg] < at) seg += 1;
       const len = cum[seg] - cum[seg - 1];
@@ -3719,7 +3791,7 @@ Object.assign(BkkLib, {
       const q = pts[seg];
       return [p[0] + (q[0] - p[0]) * t2, p[1] + (q[1] - p[1]) * t2];
     };
-    return result(along(pick.pa.at + (pick.pb.at - pick.pa.at) * f));
+    return result(along(pick.pa.at + pick.span * f));
   },
   clipShapeToBoardDest(shape, board, dest) {
     const pts = BkkLib.validMapShape(shape);
@@ -3740,12 +3812,19 @@ Object.assign(BkkLib, {
     if (!journey || !Array.isArray(journey.legs)) return Promise.resolve(journey);
     let run = BkkLib._journeyFills.get(journey);
     if (!run) {
-      run = BkkLib._fillJourneyShapes(journey);
+      const state = { failed: false };
+      run = BkkLib._fillJourneyShapes(journey, state).then((done) => {
+        if (state.failed && BkkLib._journeyFills.get(journey) === run) BkkLib._journeyFills.delete(journey);
+        return done;
+      });
       BkkLib._journeyFills.set(journey, run);
     }
     return run;
   },
-  async _fillJourneyShapes(journey) {
+  async _fillJourneyShapes(journey, state) {
+    const fail = () => {
+      if (state) state.failed = true;
+    };
     BkkLib.stitchJourneyLegCoords(journey);
     await Promise.all(journey.legs.map(async (leg) => {
       if (!leg || leg.walk) return;
@@ -3760,6 +3839,7 @@ Object.assign(BkkLib, {
           shape = await BkkLib.gtfsShape(g.shape);
         } catch (_e) {
           shape = [];
+          fail();
         }
         if (shape.length >= 2 && a && b) shape = BkkLib.sliceShapeBetween(shape, a, b);
         if (shape.length < 2) shape = BkkLib.validMapShape(pts.slice(g.from, g.to + 1).filter(Boolean));
@@ -3775,6 +3855,7 @@ Object.assign(BkkLib, {
         if (pts.length >= 2 && a && b) pts = BkkLib.sliceShapeBetween(pts, a, b);
         if (pts.length >= 2) leg.shape = pts;
       } catch (_e) {
+        fail();
       }
     }));
     BkkLib.stitchJourneyLegCoords(journey);
@@ -5147,11 +5228,11 @@ Object.assign(BkkLib, {
       idx = null;
     }
     motis.forEach((s) => {
-      if (!s || !s.id || !/^hu-volanbusz_/i.test(s.id)) return;
+      if (!s || !s.id || !BkkLib.isTransitousVolanId(s.id)) return;
       let id = s.id;
       let name = s.name || "";
       if (idx) {
-        const hit = BkkLib.volanMatchStop(idx, { id: s.id, name: s.name }, null);
+        const hit = BkkLib.volanMatchStop(idx, { id: BkkLib.transitousVolanIndexId(s.id) || s.id, name: s.name }, null);
         if (hit && hit.id) {
           id = hit.id;
           name = hit.name || name;
@@ -5258,13 +5339,7 @@ Object.assign(BkkLib, {
         BkkLib.groupStops(volan),
         city2
       ];
-      hits = [];
-      const max = Math.max(groups[0].length, groups[1].length, groups[2].length, groups[3].length);
-      for (let i = 0; i < max; i++) {
-        groups.forEach((g) => {
-          if (g[i]) hits.push(g[i]);
-        });
-      }
+      hits = [].concat(...groups);
     } else {
       hits = BkkLib.groupStops(Array.from(byId.values()));
     }
@@ -6316,6 +6391,8 @@ Object.assign(BkkLib, {
 var HISTORY_KEY = "hungarian_transport_planner_stops";
 var HISTORY_KEEP = 24;
 var HISTORY_HALF_LIFE_DAYS = 30;
+var HISTORY_RECENT_DAYS = 7;
+var HISTORY_RECENT_SLOTS = 8;
 var localKey = (hass) => {
   const uid = hass && hass.user && hass.user.id;
   return uid ? `${HISTORY_KEY}:${uid}` : "";
@@ -6395,9 +6472,20 @@ Object.assign(BkkLib, {
     });
     return Array.from(byId.values());
   },
-  /* The most used stops first, at most HISTORY_KEEP of them. */
+  /* The most used stops first, at most HISTORY_KEEP of them; the latest
+     picks of the past week stay even when their count is still low. */
   _rankStopHistory(list, now) {
-    return BkkLib._cleanStopHistory(list.slice().sort((a, b) => BkkLib.stopHistoryScore(b, now) - BkkLib.stopHistoryScore(a, now)).slice(0, HISTORY_KEEP));
+    const at = now || Date.now();
+    const ranked = BkkLib._cleanStopHistory(list.slice().sort((a, b) => BkkLib.stopHistoryScore(b, at) - BkkLib.stopHistoryScore(a, at)));
+    if (ranked.length <= HISTORY_KEEP) return ranked;
+    const recent = new Set(ranked.filter((e) => at - e.t <= HISTORY_RECENT_DAYS * 864e5).sort((a, b) => b.t - a.t).slice(0, HISTORY_RECENT_SLOTS));
+    let room = HISTORY_KEEP - recent.size;
+    return ranked.filter((e) => {
+      if (recent.has(e)) return true;
+      if (room <= 0) return false;
+      room -= 1;
+      return true;
+    });
   },
   /* Whether `local` has a stop the server's list lacks, or a later or more
      counted use of one: picks made while the server could not be read. */
@@ -7301,9 +7389,8 @@ var BKKHopCardEditor = class extends HTMLElement {
       this._dests = idx.dests || [];
       this._destRoutes = idx.destRoutes || {};
       const cur = this._config.routeIds || [];
-      if (this._config.destKey && this._destRoutes[this._config.destKey] && !cur.length) {
-        this._emit({ routeIds: this._destRoutes[this._config.destKey].slice() });
-      }
+      const saved = this._config.destKey ? this._savedDestRoutes() : null;
+      if (saved && !cur.length) this._emit({ routeIds: saved.slice() });
       const dq = this._el("dq");
       this._paintDestHits(dq ? dq.value.trim() : "");
     } catch (err) {
@@ -7364,6 +7451,19 @@ var BKKHopCardEditor = class extends HTMLElement {
      _titleIsAuto can no longer tell it from a typed one. */
   _keepAutoTitle() {
     if (this._config.name && this._titleIsAuto(this._config.name)) this._autoTitle = this._config.name;
+  }
+  /* The routes of the configured destination. A town's bus station is
+     saved under its town-prefixed key ("győr, autóbusz-állomás", see
+     _pickStop) while the list keys its routes "aut all": both are tried. */
+  _savedDestRoutes() {
+    const routes = this._destRoutes || {};
+    const key = this._config.destKey;
+    if (routes[key]) return routes[key];
+    const name = this._config.destName || "";
+    if (!name) return null;
+    const hit = (this._dests || []).find((d) => d && d.key && BkkLib.norm(d.name) === BkkLib.norm(name));
+    const listKey = hit && hit.key || BkkLib.placeNameKey({ name }) || BkkLib.norm(name);
+    return listKey && routes[listKey] || null;
   }
   _pickStop(stop, which) {
     this._cancelSearches();
@@ -7452,6 +7552,7 @@ var BKKHopCard = class extends HTMLElement {
     this._mapL = null;
     this._mapReturnFocus = null;
     this._mapEstimate = null;
+    this._mapGeo = null;
     this._hiddenAt = 0;
     this._pollRun = null;
   }
@@ -8134,6 +8235,7 @@ var BKKHopCard = class extends HTMLElement {
     this._mapState = null;
     this._mapL = null;
     this._mapEstimate = null;
+    this._mapGeo = null;
     const back = this._mapReturnFocus;
     this._mapReturnFocus = null;
     if (hadOverlay) this._restoreFocus(back);
@@ -8345,7 +8447,7 @@ ${this._stopPinCss()}
     if (canFutar) {
       geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : "";
       if (!geomTrip && this._hass) {
-        const hit = BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), row);
+        const hit = this._hassVehicleFor(row);
         if (hit && BkkLib.isFutarTripId(hit.tripId)) geomTrip = hit.tripId;
       }
     }
@@ -8668,7 +8770,7 @@ ${this._stopPinCss()}
     }
     if (timed.length < 2 && !hasGps && board && alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
       const arr = Number(row.depTs) + Number(row.travelMin) * 60;
-      timed = [{ pt: board, arr: Number(row.depTs), dep: Number(row.depTs) }, { pt: alight, arr, dep: arr }];
+      timed = [{ pt: board, arr: Number(row.depTs), dep: Number(row.depTs), fromBoard: true }, { pt: alight, arr, dep: arr }];
     }
     if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
     if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
@@ -8690,6 +8792,7 @@ ${this._stopPinCss()}
       }
     }
     this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed, row, board, alight } : null;
+    this._mapGeo = { shape, board, alight };
     const pos = BkkLib.mapGpsLatLon(lat, lon);
     const hasPosition = !!pos;
     if (hasPosition) {
@@ -8772,6 +8875,17 @@ ${this._stopPinCss()}
     }, 80);
     this._openingMap = "";
   }
+  /* The sensor vehicle (ELVIRA, with its FUTÁR trip) of a displayed row.
+     matchHassVehicle reads the raw row's sched/dep; a displayed row has
+     them as schedTs/depTs, and without them the time never matched. */
+  _hassVehicleFor(row) {
+    if (!row || !this._hass) return null;
+    const raw = Object.assign({}, row, {
+      sched: row.sched != null ? row.sched : row.schedTs,
+      dep: row.dep != null ? row.dep : row.depTs
+    });
+    return BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), raw);
+  }
   /* The row's stops with their times, for the timetable position: a GTFS
      row carries them in its index geometry; a FUTÁR trip (the row's own id,
      or the sensor vehicle's for an ELVIRA train) has trip-details. */
@@ -8781,7 +8895,7 @@ ${this._stopPinCss()}
     if (!this._hasFutar()) return [];
     let tripId = BkkLib.isFutarTripId(row.tripId) ? String(row.tripId) : "";
     if (!tripId && this._hass) {
-      const hit = BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), row);
+      const hit = this._hassVehicleFor(row);
       if (hit && BkkLib.isFutarTripId(hit.tripId)) tripId = String(hit.tripId);
     }
     if (!tripId) return [];
@@ -8809,7 +8923,7 @@ ${this._stopPinCss()}
         if (timed.length >= 2) est.timed = timed;
         else if (est.board && est.alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
           const arr = Number(row.depTs) + Number(row.travelMin) * 60;
-          est.timed = [{ pt: est.board, arr: Number(row.depTs), dep: Number(row.depTs) }, { pt: est.alight, arr, dep: arr }];
+          est.timed = [{ pt: est.board, arr: Number(row.depTs), dep: Number(row.depTs), fromBoard: true }, { pt: est.alight, arr, dep: arr }];
         }
         est.row = row;
       } catch (_e) {
@@ -8862,6 +8976,19 @@ ${this._stopPinCss()}
     if (!this._map || !this._openMapKey || !st) return;
     const row = this._findMapRow(this._mapRef, this._rows || []);
     if (!row || !row.hasGps) {
+      if (row && st.hasGps && !this._mapEstimate && this._mapGeo) {
+        st.hasGps = false;
+        st.estimated = false;
+        if (this._mapMarker) {
+          try {
+            this._map.removeLayer(this._mapMarker);
+          } catch (_e) {
+          }
+          this._mapMarker = null;
+        }
+        st.hasPosition = false;
+        this._mapEstimate = Object.assign({ timed: [], row: null }, this._mapGeo);
+      }
       if (row || this._mapEstimate) this._syncEstimatedMarker(row, this._lang()).catch(() => {
       });
       return;
@@ -9059,7 +9186,6 @@ ${this._stopPinCss()}
         this._journeyLoading = false;
         earlyRows = rows || [];
         publish();
-        this._syncOpenMap();
         const firstRows = this._rawRows;
         const needsTravel = (row) => row.travel == null && !/^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ""));
         const fillTravel = (list) => Promise.all((list || []).map(async (row) => {
@@ -9079,7 +9205,6 @@ ${this._stopPinCss()}
             this._rawRows = withGps;
             this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
             this._paint();
-            this._syncOpenMap();
           }),
           fillTravel(firstRows)
         ]);
@@ -9329,7 +9454,8 @@ var BKKPlannerCard = class extends BKKHopCard {
       }).catch(() => {
         if (gen !== this._gen) return;
         this._journeyLoading = false;
-        this._journeysDone = true;
+        this._journeysDone = false;
+        this._journeyKey = "";
         this._journeyFailed = true;
         this._journeys = [];
         this._paint();
@@ -9724,6 +9850,7 @@ var BKKPlannerCard = class extends BKKHopCard {
       if (this._mapStale(seq)) return true;
       if (gen === this._pairGen && !(journey && !this._journey)) return false;
       this._openingMap = "";
+      this._mapReturnFocus = null;
       return true;
     };
     try {

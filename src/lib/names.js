@@ -178,6 +178,19 @@ Object.assign(BkkLib, {
   plannerStopKey(stop) {
     return BkkLib.stopCityKey(stop) + '|' + BkkLib.placeNameKey(stop);
   },
+  /* The Volán intercity feed on Transitous: hu-volanbusz_… until autumn
+     2026, hu-volan-helykozi_hkir:hkir_N(_platform) since. hu-volan-gyor_,
+     hu-volan-szeged_ and the like are Volán's city lines, not this feed. */
+  isTransitousVolanId(id) {
+    return /^hu-(?:volanbusz|volan-helykozi)_/i.test(String(id || ''));
+  },
+  /* The Volán index id (hkir_N) a Transitous Volán stop id stands for:
+     hu-volan-helykozi_hkir:hkir_665908_1 and hu-volanbusz_hkir_665908 are
+     both hkir_665908. '' for any other id. */
+  transitousVolanIndexId(id) {
+    const m = String(id || '').match(/^hu-volan[a-z-]*_(?:hkir:)?hkir_(\d+)/i);
+    return m ? 'hkir_' + m[1] : '';
+  },
   stopIdRank(id) {
     const s = String(id || '');
     if (/^BKK_CS/i.test(s)) return 1;
@@ -185,7 +198,7 @@ Object.assign(BkkLib, {
     if (/^BKK_/i.test(s) && s.split('_').length <= 2) return 2;
     if (/^BKK_/i.test(s)) return 4;
     if (/^hu-bkk_/i.test(s)) return 5;
-    if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return 6;
+    if (/^(?:volan_|hkir_|AREA_CS)/i.test(s) || BkkLib.isTransitousVolanId(s)) return 6;
     if (/^[a-z][a-z0-9-]*:/i.test(s) && s.indexOf('/') < 0) return 7;
     if (/^hu-/i.test(s)) return 8;
     if (/^(?:geo:|node\/|way\/)/i.test(s)) return 10;
@@ -198,7 +211,7 @@ Object.assign(BkkLib, {
     const s = String((stop && stop.id) || '');
     if (/^(?:geo:|node\/|way\/)/i.test(s)) return 'osm';
     if (/^BKK_0055/i.test(s) || /(?:^hu-mav_|railway)/i.test(s)) return 'mav';
-    if (/^(?:volan_|hkir_|AREA_CS|hu-volanbusz_)/i.test(s)) return 'volan';
+    if (/^(?:volan_|hkir_|AREA_CS)/i.test(s) || BkkLib.isTransitousVolanId(s)) return 'volan';
     if (/^(?:BKK_|hu-bkk_)/i.test(s)) return 'bkk';
     /* City feeds ("miskolc:…", "volan-gyor:…"). */
     if (/^[a-z][a-z0-9-]*:/i.test(s) && s.indexOf('/') < 0) return 'city';
@@ -391,7 +404,9 @@ Object.assign(BkkLib, {
             prev.fromList = true;
           }
         }
-        if (BkkLib.stopIdRank(id) < BkkLib.stopIdRank(prev.id)) prev.id = id;
+        /* An entry without an id ranks as 9: it must not blank a STOP_ or
+           foreign id (20, 12); an id fills an entry that had none. */
+        if (id && (!prev.id || BkkLib.stopIdRank(id) < BkkLib.stopIdRank(prev.id))) prev.id = id;
         if (BkkLib.elviraStationCode(id) && !BkkLib.elviraStationCode(prev.id)) prev.id = id;
         if (/^geo:/i.test(String(prev.id || '')) && id && !/^geo:/i.test(id)) prev.id = id;
         if (BkkLib.finiteLatLon(d.lat, d.lon) && !BkkLib.finiteLatLon(prev.lat, prev.lon)) {
@@ -451,7 +466,7 @@ Object.assign(BkkLib, {
     if (!stop) return false;
     const id = String(stop.id || '');
     if (/^volan_/i.test(id) || /^AREA_CS/i.test(id) || /^hkir_/i.test(id)) return true;
-    if (/^hu-volanbusz_/i.test(id)) return true;
+    if (BkkLib.isTransitousVolanId(id)) return true;
     if (String(stop.type || '').toUpperCase() === 'COACH') return true;
     return false;
   },

@@ -54,6 +54,9 @@ export class BKKHopCard extends HTMLElement {
     /* The open map's timetable estimate (shape and timed stops), moved on
        each poll while the vehicle reports no position. */
     this._mapEstimate = null;
+    /* The open map's route and stops, kept for a live vehicle whose GPS
+       goes silent: the timetable takes over from them. */
+    this._mapGeo = null;
     this._hiddenAt = 0;
     this._pollRun = null;
   }
@@ -786,6 +789,7 @@ export class BKKHopCard extends HTMLElement {
     this._mapState = null;
     this._mapL = null;
     this._mapEstimate = null;
+    this._mapGeo = null;
     const back = this._mapReturnFocus;
     this._mapReturnFocus = null;
     if (hadOverlay) this._restoreFocus(back);
@@ -1015,7 +1019,7 @@ ${this._stopPinCss()}
     if (canFutar) {
       geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : '';
       if (!geomTrip && this._hass) {
-        const hit = BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), row);
+        const hit = this._hassVehicleFor(row);
         if (hit && BkkLib.isFutarTripId(hit.tripId)) geomTrip = hit.tripId;
       }
     }
@@ -1339,7 +1343,9 @@ ${this._stopPinCss()}
        still place it between the boarding and alighting stops. */
     if (timed.length < 2 && !hasGps && board && alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
       const arr = Number(row.depTs) + Number(row.travelMin) * 60;
-      timed = [{ pt: board, arr: Number(row.depTs), dep: Number(row.depTs) }, { pt: alight, arr, dep: arr }];
+      /* fromBoard: the trip starts somewhere up the line, so before this
+         departure there is no position (not "waiting" at the rider's stop). */
+      timed = [{ pt: board, arr: Number(row.depTs), dep: Number(row.depTs), fromBoard: true }, { pt: alight, arr, dep: arr }];
     }
     /* Same spot as the boarding stop (a loop line, a bad lookup): one pin. */
     if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
@@ -1364,6 +1370,7 @@ ${this._stopPinCss()}
       }
     }
     this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed, row, board, alight } : null;
+    this._mapGeo = { shape, board, alight };
     const pos = BkkLib.mapGpsLatLon(lat, lon);
     const hasPosition = !!pos;
     if (hasPosition) {
@@ -1424,6 +1431,18 @@ ${this._stopPinCss()}
     this._openingMap = '';
   }
 
+  /* The sensor vehicle (ELVIRA, with its FUTÁR trip) of a displayed row.
+     matchHassVehicle reads the raw row's sched/dep; a displayed row has
+     them as schedTs/depTs, and without them the time never matched. */
+  _hassVehicleFor(row) {
+    if (!row || !this._hass) return null;
+    const raw = Object.assign({}, row, {
+      sched: row.sched != null ? row.sched : row.schedTs,
+      dep: row.dep != null ? row.dep : row.depTs,
+    });
+    return BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), raw);
+  }
+
   /* The row's stops with their times, for the timetable position: a GTFS
      row carries them in its index geometry; a FUTÁR trip (the row's own id,
      or the sensor vehicle's for an ELVIRA train) has trip-details. */
@@ -1433,7 +1452,7 @@ ${this._stopPinCss()}
     if (!this._hasFutar()) return [];
     let tripId = BkkLib.isFutarTripId(row.tripId) ? String(row.tripId) : '';
     if (!tripId && this._hass) {
-      const hit = BkkLib.matchHassVehicle(BkkLib.collectHassVehicles(this._hass), row);
+      const hit = this._hassVehicleFor(row);
       if (hit && BkkLib.isFutarTripId(hit.tripId)) tripId = String(hit.tripId);
     }
     if (!tripId) return [];
@@ -1461,7 +1480,7 @@ ${this._stopPinCss()}
         if (timed.length >= 2) est.timed = timed;
         else if (est.board && est.alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
           const arr = Number(row.depTs) + Number(row.travelMin) * 60;
-          est.timed = [{ pt: est.board, arr: Number(row.depTs), dep: Number(row.depTs) }, { pt: est.alight, arr, dep: arr }];
+          est.timed = [{ pt: est.board, arr: Number(row.depTs), dep: Number(row.depTs), fromBoard: true }, { pt: est.alight, arr, dep: arr }];
         }
         est.row = row;
       } catch (_e) { /* the stored times still place it */ }
@@ -1514,6 +1533,18 @@ ${this._stopPinCss()}
     /* The row has left the board (departed): the dashed marker still runs
        on the times it had. */
     if (!row || !row.hasGps) {
+      /* A vehicle that reported a position and went silent: its last fix
+         is not live any more; the timetable places it, or nothing does. */
+      if (row && st.hasGps && !this._mapEstimate && this._mapGeo) {
+        st.hasGps = false;
+        st.estimated = false;
+        if (this._mapMarker) {
+          try { this._map.removeLayer(this._mapMarker); } catch (_e) { /* ignore */ }
+          this._mapMarker = null;
+        }
+        st.hasPosition = false;
+        this._mapEstimate = Object.assign({ timed: [], row: null }, this._mapGeo);
+      }
       if (row || this._mapEstimate) this._syncEstimatedMarker(row, this._lang()).catch(() => {});
       return;
     }
@@ -1729,7 +1760,9 @@ ${this._stopPinCss()}
         this._journeyLoading = false;
         earlyRows = rows || [];
         publish();
-        this._syncOpenMap();
+        /* The open map moves once a poll, at the end, on rows that have
+           their GPS: an earlier pass saw a coach without it as one that lost
+           it, and three passes raced each other on the estimate's times. */
         const firstRows = this._rawRows;
         const needsTravel = (row) => row.travel == null && !/^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ''));
         const fillTravel = (list) => Promise.all((list || []).map(async (row) => {
@@ -1746,7 +1779,6 @@ ${this._stopPinCss()}
             this._rawRows = withGps;
             this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
             this._paint();
-            this._syncOpenMap();
           }),
           fillTravel(firstRows),
         ]);

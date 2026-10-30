@@ -14,6 +14,9 @@ const SHAPE_PASS_WEIGHT = 4;
 /* A stop this far from the shape is not on it: the timetable position is
    then taken on the straight line between the stops instead. */
 const SHAPE_STOP_OFF_M = 1500;
+/* A vehicle due at its first stop within this many seconds waits there on
+   the map; earlier than that it is not shown at all. */
+const SHAPE_WAIT_AHEAD_S = 20 * 60;
 
 Object.assign(BkkLib, {
   hm(ts) {
@@ -454,8 +457,7 @@ Object.assign(BkkLib, {
       cum.push(cum[i - 1] + Math.hypot(xy.pts[i][0] - xy.pts[i - 1][0], xy.pts[i][1] - xy.pts[i - 1][1]));
     }
     const total = cum[cum.length - 1];
-    const gap = BkkLib.haversineMeters(pts[0], pts[pts.length - 1]);
-    const loop = gap <= SHAPE_LOOP_CLOSE_M && total >= SHAPE_LOOP_RATIO * Math.max(gap, 20);
+    const loop = BkkLib._shapeIsLoop(pts, total);
     const boards = BkkLib._shapePasses(BkkLib._shapeFeet(xy, cum, a));
     const alights = BkkLib._shapePasses(BkkLib._shapeFeet(xy, cum, b));
     if (!boards.length || !alights.length) return pts;
@@ -501,6 +503,11 @@ Object.assign(BkkLib, {
     }
     return sliced.length >= 2 ? sliced : [a, b];
   },
+  /* A closed loop: ends this close, the line many times longer than the gap. */
+  _shapeIsLoop(pts, total) {
+    const gap = BkkLib.haversineMeters(pts[0], pts[pts.length - 1]);
+    return gap <= SHAPE_LOOP_CLOSE_M && total >= SHAPE_LOOP_RATIO * Math.max(gap, 20);
+  },
   /* Metres along a shape: planar coordinates of its points and the running
      length at each (what sliceShapeBetween projects with). */
   _shapeMetric(pts) {
@@ -523,7 +530,11 @@ Object.assign(BkkLib, {
      (another line's geometry, or a stop outside a clipped hop). Null before
      the first departure, from the last arrival on, or without two timed
      stops. timed: [{pt: [lat, lon], arr, dep}] in running order, seconds;
-     arr or dep may be missing. */
+     arr or dep may be missing. A list whose first entry is marked fromBoard
+     starts at the rider's boarding stop, not where the trip starts (the
+     card's two-stop fallback): before that departure the vehicle is
+     somewhere up the line, so there is no position. A closed loop runs on
+     over its seam, as sliceShapeBetween slices it. */
   estimateShapePosition(shape, timed, nowSec) {
     const stops = [];
     (Array.isArray(timed) ? timed : []).forEach((s) => {
@@ -538,8 +549,11 @@ Object.assign(BkkLib, {
     if (now >= stops[stops.length - 1].arr) return null;
     const pts = BkkLib.validMapShape(shape);
     /* Before its first departure the vehicle waits at its first stop: on the
-       shape where the shape passes it, else at the stop itself. */
+       shape where the shape passes it, else at the stop itself. Only when
+       that stop is where the trip starts, and only shortly before it leaves. */
     if (now < stops[0].dep) {
+      if (timed[0] && timed[0].fromBoard) return null;
+      if (stops[0].dep - now > SHAPE_WAIT_AHEAD_S) return null;
       let pt = stops[0].pt;
       if (pts.length >= 2) {
         const { xy, cum } = BkkLib._shapeMetric(pts);
@@ -565,14 +579,17 @@ Object.assign(BkkLib, {
     if (pts.length < 2) return straight();
     const { xy, cum } = BkkLib._shapeMetric(pts);
     const total = cum[cum.length - 1];
+    const loop = BkkLib._shapeIsLoop(pts, total);
     const feetA = BkkLib._shapeFeet(xy, cum, a.pt);
     const feetB = BkkLib._shapeFeet(xy, cum, b.pt);
     if (!feetA.length || !feetB.length) return straight();
     let pick = null;
     BkkLib._shapePasses(feetA).forEach((pa) => BkkLib._shapePasses(feetB).forEach((pb) => {
-      if (pb.at <= pa.at) return;
-      const cost = (pb.at - pa.at) + SHAPE_PASS_WEIGHT * (pa.d + pb.d);
-      if (!pick || cost < pick.cost) pick = { pa, pb, cost };
+      let span = pb.at - pa.at;
+      if (span <= 0 && loop) span += total;
+      if (span <= 0) return;
+      const cost = span + SHAPE_PASS_WEIGHT * (pa.d + pb.d);
+      if (!pick || cost < pick.cost) pick = { pa, pb, cost, span };
     }));
     if (!pick) return straight();
     if (pick.pa.d > SHAPE_STOP_OFF_M || pick.pb.d > SHAPE_STOP_OFF_M) return straight();
@@ -593,6 +610,7 @@ Object.assign(BkkLib, {
     };
     if (beyondEnd(pick.pa, a.pt) || beyondEnd(pick.pb, b.pt)) return straight();
     const along = (at) => {
+      if (loop && at > total) at -= total;
       let seg = 1;
       while (seg < cum.length - 1 && cum[seg] < at) seg += 1;
       const len = cum[seg] - cum[seg - 1];
@@ -601,7 +619,7 @@ Object.assign(BkkLib, {
       const q = pts[seg];
       return [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
     };
-    return result(along(pick.pa.at + (pick.pb.at - pick.pa.at) * f));
+    return result(along(pick.pa.at + pick.span * f));
   },
   clipShapeToBoardDest(shape, board, dest) {
     const pts = BkkLib.validMapShape(shape);
@@ -626,12 +644,19 @@ Object.assign(BkkLib, {
     if (!journey || !Array.isArray(journey.legs)) return Promise.resolve(journey);
     let run = BkkLib._journeyFills.get(journey);
     if (!run) {
-      run = BkkLib._fillJourneyShapes(journey);
+      /* A shape fetch that failed (Transitous down for a moment) is asked
+         again next time, not kept as a straight line until a page reload. */
+      const state = { failed: false };
+      run = BkkLib._fillJourneyShapes(journey, state).then((done) => {
+        if (state.failed && BkkLib._journeyFills.get(journey) === run) BkkLib._journeyFills.delete(journey);
+        return done;
+      });
       BkkLib._journeyFills.set(journey, run);
     }
     return run;
   },
-  async _fillJourneyShapes(journey) {
+  async _fillJourneyShapes(journey, state) {
+    const fail = () => { if (state) state.failed = true; };
     BkkLib.stitchJourneyLegCoords(journey);
     await Promise.all(journey.legs.map(async (leg) => {
       if (!leg || leg.walk) return;
@@ -648,6 +673,7 @@ Object.assign(BkkLib, {
           shape = await BkkLib.gtfsShape(g.shape);
         } catch (_e) {
           shape = [];
+          fail();
         }
         if (shape.length >= 2 && a && b) shape = BkkLib.sliceShapeBetween(shape, a, b);
         if (shape.length < 2) shape = BkkLib.validMapShape(pts.slice(g.from, g.to + 1).filter(Boolean));
@@ -662,7 +688,10 @@ Object.assign(BkkLib, {
         const b = BkkLib.finiteLatLon(leg.toLat, leg.toLon);
         if (pts.length >= 2 && a && b) pts = BkkLib.sliceShapeBetween(pts, a, b);
         if (pts.length >= 2) leg.shape = pts;
-      } catch (_e) { /* endpoint fallback in journeyMapSegments */ }
+      } catch (_e) {
+        /* endpoint fallback in journeyMapSegments */
+        fail();
+      }
     }));
     BkkLib.stitchJourneyLegCoords(journey);
     return journey;

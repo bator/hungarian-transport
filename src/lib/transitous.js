@@ -56,10 +56,18 @@ Object.assign(BkkLib, {
     const s = String(id || '');
     if (/^BKK_0055/i.test(s)) return 'hu-mav_';
     if (/^BKK_/i.test(s)) return 'hu-bkk_';
-    if (/^(volan_|AREA_CS|hkir_)/i.test(s)) return 'hu-volanbusz_';
+    if (/^(volan_|AREA_CS|hkir_)/i.test(s)) return 'hu-volan-helykozi_';
     if (/^miskolc:/i.test(s)) return 'hu-mvk_';
     if (s.indexOf(':') > 0) return 'hu-';
     return '';
+  },
+  /* A Transitous id in the feed transitousFeedWant asked for: the Volán
+     feed under its old name as well. */
+  transitousFeedHit(id, want) {
+    const s = String(id || '');
+    if (!want) return false;
+    if (want === 'hu-volan-helykozi_') return BkkLib.isTransitousVolanId(s);
+    return s.indexOf(want) === 0;
   },
   /* A stop does not move: every poll of an empty board geocoded both ends
      again. Answers stay for the page; a failed lookup is asked again, and
@@ -175,7 +183,7 @@ Object.assign(BkkLib, {
     try {
       const motis = await BkkLib.searchStopsTransitous(q, { type: 'all' });
       motis.forEach((s) => {
-        if (!s || !s.id || /^hu-volanbusz_/i.test(s.id)) return;
+        if (!s || !s.id || BkkLib.isTransitousVolanId(s.id)) return;
         const mapped = String(s.id).replace(/^hu-bkk_/i, 'BKK_');
         const row = mapped !== s.id ? Object.assign({}, s, { id: mapped }) : s;
         if (byId.has(row.id)) return;
@@ -219,7 +227,7 @@ Object.assign(BkkLib, {
       let score = 0;
       const railWant = want === 'hu-mav_' || kind === 'rail' || kind === 'train';
       if (railWant && (/railway/i.test(hid) || hid.indexOf('hu-mav_') === 0)) score += 8;
-      else if (want && hid.indexOf(want) === 0) score += 5;
+      else if (want && BkkLib.transitousFeedHit(hid, want)) score += 5;
       else if (railWant && hid.indexOf('hu-bkk_') === 0) score += 2;
       else if (/^hu-/.test(hid)) score += 1;
       if (/railway/i.test(hid) && railWant) score += 2;
@@ -339,10 +347,16 @@ Object.assign(BkkLib, {
     if (display) return display;
     return String((leg && leg.tripShortName) || '').trim();
   },
+  /* MOTIS rail modes: RAIL, HIGHSPEED_RAIL, REGIONAL(_FAST)_RAIL,
+     NIGHT_RAIL, and LONG_DISTANCE, which is how Transitous types every MÁV
+     IC, EC, InterRégió, gyors- and sebesvonat (no RAIL in the name). */
+  motisRailMode(mode) {
+    return /RAIL|TRAIN|SUBURBAN|LONG_DISTANCE/.test(String(mode || '').toUpperCase());
+  },
   motisLegType(mode) {
     const m = String(mode || '').toUpperCase();
     if (m.indexOf('SUBURBAN') >= 0) return 'SUBURBAN';
-    if (/RAIL|TRAIN/.test(m)) return 'RAIL';
+    if (BkkLib.motisRailMode(m)) return 'RAIL';
     if (m.indexOf('TRAM') >= 0) return 'TRAM';
     if (m.indexOf('SUBWAY') >= 0 || m.indexOf('METRO') >= 0) return 'SUBWAY';
     if (m.indexOf('TROLLEY') >= 0) return 'TROLLEYBUS';
@@ -392,7 +406,7 @@ Object.assign(BkkLib, {
       const text = String(leg.routeTextColor || '').replace(/#/g, '') || 'ffffff';
       const tripRaw = String(leg.tripId || '').trim();
       const tripId = 'motis:' + (tripRaw || (dep + ':' + label));
-      const trainNumber = /RAIL|SUBURBAN|TRAIN/.test(rawType)
+      const trainNumber = BkkLib.motisRailMode(rawType)
         ? BkkLib.emmaTrainNumber(leg.tripShortName || label)
         : '';
       const fromStop = leg.from || {};
@@ -470,7 +484,7 @@ Object.assign(BkkLib, {
     if (!row) return '';
     if (typeof row === 'string') {
       const s = row.toLowerCase();
-      if (/rail|train|suburban/.test(s)) return 'rail';
+      if (BkkLib.motisRailMode(s)) return 'rail';
       if (/tram/.test(s)) return 'tram';
       if (/subway|metro/.test(s)) return 'subway';
       if (/trolley/.test(s)) return 'trolley';
@@ -481,7 +495,7 @@ Object.assign(BkkLib, {
     }
     const v = String(row.vehicle || '').toLowerCase();
     const typ = String(row.rawType || row.type || row.mode || '').toUpperCase();
-    if (v === 'rail' || v === 'train' || /RAIL|SUBURBAN|TRAIN/.test(typ)) return 'rail';
+    if (v === 'rail' || v === 'train' || BkkLib.motisRailMode(typ)) return 'rail';
     if (/^elvira:/i.test(String(row.tripId || ''))) return 'rail';
     if (v === 'tram' || typ.indexOf('TRAM') >= 0) return 'tram';
     if (v === 'subway' || v === 'metro' || /SUBWAY|METRO/.test(typ)) return 'subway';
@@ -578,7 +592,7 @@ Object.assign(BkkLib, {
         head: String(st.headsign || destName || ''),
         tripTo: destName,
         nextNames: ((st.nextStops || []).map((p) => p && p.name).filter(Boolean)),
-        trainNumber: /RAIL|SUBURBAN|TRAIN/.test(rawType)
+        trainNumber: BkkLib.motisRailMode(rawType)
           ? BkkLib.emmaTrainNumber(st.tripShortName || label)
           : '',
         shape: [],
@@ -635,7 +649,10 @@ Object.assign(BkkLib, {
       }
     });
     if (!best && dep) {
-      const near = list.filter((m) => usable(m) && Math.abs(Number(m.dep || 0) - dep) <= 8 * 60);
+      /* The same guard as above: the train that runs elsewhere is not the
+         lone train due now either. */
+      const near = list.filter((m) => usable(m) && Math.abs(Number(m.dep || 0) - dep) <= 8 * 60
+        && !(BkkLib.isTrainRow(row) && BkkLib.motisTripElsewhere(m, row, dest)));
       const toward = dest ? near.filter((m) => BkkLib.destOnMotisRow(m, dest)) : near;
       const pool = toward.length ? toward : near;
       if (pool.length === 1) {
@@ -860,7 +877,7 @@ Object.assign(BkkLib, {
       if (!walk) {
         /* The rail default stands in for a missing colour on trains only; a
            bus or tram without one keeps "" and the card's own default. */
-        const rail = /RAIL|SUBURBAN/.test(BkkLib.motisLegType(leg.mode));
+        const rail = BkkLib.motisRailMode(leg.mode);
         const badge = BkkLib.applyRailBadge({
           label: row.label,
           color: row.color || (rail ? '4477AA' : ''),
@@ -915,12 +932,20 @@ Object.assign(BkkLib, {
     }
   },
   async transitousJourneys(origin, dest, opts) {
+    return (await BkkLib.transitousJourneysResult(origin, dest, opts)).list;
+  },
+  /* The itineraries, and whether Transitous answered at all: failed when
+     the plan request itself failed (an outage), answered when it replied,
+     even with nothing. Neither when the places could not be resolved. */
+  async transitousJourneysResult(origin, dest, opts) {
+    let data;
     try {
-      const data = await BkkLib.transitousPlan(origin, dest, opts);
-      return BkkLib.journeysFromMotis(data).filter((j) => j.legs.some((leg) => !leg.walk));
+      data = await BkkLib.transitousPlan(origin, dest, opts);
     } catch (_e) {
-      return [];
+      return { list: [], failed: true, answered: false };
     }
+    const list = BkkLib.journeysFromMotis(data).filter((j) => j.legs.some((leg) => !leg.walk));
+    return { list, failed: false, answered: data != null };
   },
   /* Direct board rows hide the transfer block unless the itinerary is a
      real transfer that arrives sooner than the fastest listed ride. */

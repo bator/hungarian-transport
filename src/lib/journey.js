@@ -145,11 +145,16 @@ Object.assign(BkkLib, {
     });
   },
   /* Several itineraries for the planner's chosen time: Transitous first,
-     FUTÁR plan-trip when it has none. */
+     FUTÁR plan-trip when it has none. Nothing found because every source
+     that was asked failed (Transitous down, FUTÁR down or not set up)
+     rejects: that is "try again", not "no route for this time". */
   async planJourneys(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
     [origin, dest] = await this.withGtfsCoords([origin, dest]);
-    let list = await BkkLib.transitousJourneys(origin, dest, opts);
+    const motis = await BkkLib.transitousJourneysResult(origin, dest, opts);
+    let list = motis.list;
+    let failed = motis.failed;
+    let answered = motis.answered;
     if (!list.length && BkkLib.hasFutar(apiKey)) {
       const [fromPlace, toPlace] = await Promise.all([
         BkkLib.planPlace(apiKey, origin),
@@ -164,11 +169,14 @@ Object.assign(BkkLib, {
             numItineraries: '6',
           }, BkkLib.futarPlanTime(opts)), true);
           list = BkkLib.journeysFromPlan(data).filter((j) => j.legs.some((leg) => !leg.walk));
+          answered = true;
         } catch (_e) {
           list = [];
+          failed = true;
         }
       }
     }
+    if (!list.length && failed && !answered) throw new Error('route search unavailable');
     list.forEach((j) => BkkLib.nameJourneyEnds(j, origin, dest));
     list = BkkLib.dropDominatedJourneys(list);
     const at = Number(opts.time) || Date.now();

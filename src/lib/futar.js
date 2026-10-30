@@ -78,14 +78,16 @@ Object.assign(BkkLib, {
     return !!String(apiKey || '').trim() || BkkLib.integrationHasKey(hass);
   },
   /* The service's error as a translated banner: a rejected key, the
-     integration's own request limit (the card tries again), or an outage
-     with its detail. The code stays for departureBoard's fallback and the
+     integration's own request limit (the card tries again), a request the
+     integration refused before BKK saw it (futar_bad_request: a parameter
+     over 256 characters, not an outage), or an outage with its detail. The code stays for departureBoard's fallback and the
      editor's key probe. */
   _integrationError(code, detail) {
     const why = String(detail || code);
     let err;
     if (code === 'futar_auth') err = codedError('errApiKeyBad');
     else if (code === 'futar_rate_limited') err = codedError('errFutarRateLimited');
+    else if (code === 'futar_bad_request') err = codedError('errFutarBadRequest');
     else err = codedError('errFutarDown', why);
     err.code = String(code);
     return err;
@@ -145,8 +147,18 @@ Object.assign(BkkLib, {
       } catch (err) {
         throw new Error(err && err.name === 'AbortError' ? 'BKK timeout' : `BKK ${err}`);
       }
-      if (res.status === 401 || res.status === 403) throw codedError('errApiKeyBad');
-      if (res.status === 429) throw codedError('errFutarRateLimited');
+      if (res.status === 401 || res.status === 403) {
+        const err = codedError('errApiKeyBad');
+        err.code = 'futar_auth';
+        throw err;
+      }
+      /* The same code as the integration's answer: the board falls back on
+         its last copy (departureBoard), whichever path was refused. */
+      if (res.status === 429) {
+        const err = codedError('errFutarRateLimited');
+        err.code = 'futar_rate_limited';
+        throw err;
+      }
       if (!res.ok) throw codedError('errFutarDown', `HTTP ${res.status}`);
       const data = await res.json();
       if (data.status && data.status !== 'OK') throw new Error(`BKK ${data.status}`);
