@@ -13,6 +13,9 @@ const HISTORY_RETRY_MS = 60 * 1000;
 const MAP_TILES = 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png';
 const MAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
   + ' &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>';
+const SWAP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9,3L5,7H8V14H10V7H13M16,17V10H14V17H11L15,21L19,17H16Z"/></svg>';
+const EDIT_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z"/></svg>';
+const DONE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"/></svg>';
 
 export class BKKPlannerCard extends BKKHopCard {
   constructor() {
@@ -41,6 +44,9 @@ export class BKKPlannerCard extends BKKHopCard {
     this._when = { mode: 'now', at: 0 };
     this._journeys = [];
     this._openJourney = 0;
+    /* With both ends picked the title names the route and the pickers fold
+       away; the edit button opens them again until the next destination. */
+    this._editRoute = false;
   }
 
   static async getConfigElement() {
@@ -376,16 +382,6 @@ export class BKKPlannerCard extends BKKHopCard {
     return `${day} ${clock}`;
   }
 
-  _legChips(journey) {
-    const esc = BkkLib.esc;
-    return (journey.legs || []).map((leg) => {
-      if (leg.walk) {
-        return `<span class="chip-walk"><ha-icon icon="mdi:walk"></ha-icon>${esc(leg.minutes)}</span>`;
-      }
-      return `<span class="j-badge" style="${esc(this._badgeStyle({ color: leg.color, textcolor: leg.text }))}">${esc(leg.label || '?')}</span>`;
-    }).join('<span class="chip-sep">›</span>');
-  }
-
   /* Departure → arrival as a vertical timeline in the line colours. */
   _legTimeline(journey) {
     const lang = this._lang();
@@ -421,12 +417,29 @@ export class BKKPlannerCard extends BKKHopCard {
     return `<ol class="tl">${items.join('')}</ol>`;
   }
 
-  /* One itinerary: a summary row, and when open its inline map, timeline
-     and full-map button. */
+  /* The rides of a journey as badges for its table row; a walk-only trip
+     shows its walk. */
+  _rideChips(journey) {
+    const esc = BkkLib.esc;
+    const legs = journey.legs || [];
+    const rides = legs.filter((leg) => !leg.walk);
+    if (!rides.length) {
+      const min = legs.reduce((n, leg) => n + (Number(leg.minutes) || 0), 0);
+      return `<span class="chip-walk"><ha-icon icon="mdi:walk"></ha-icon>${esc(min)}</span>`;
+    }
+    return rides.map((leg) => (
+      `<span class="j-badge" style="${esc(this._badgeStyle({ color: leg.color, textcolor: leg.text }))}">${esc(leg.label || '?')}</span>`
+    )).join('<span class="chip-sep">\u203a</span>');
+  }
+
+  /* One itinerary as a table row (departure, rides, transfers, arrival,
+     duration); open, it unfolds in place into its summary, inline map,
+     timeline and full-map button. */
   _itineraryHtml(journey, idx, open) {
     const lang = this._lang();
     const esc = BkkLib.esc;
-    let times = '';
+    let start = '';
+    let end = '';
     if (journey.startMs && journey.endMs) {
       /* Name the day when the trip does not start on the asked-for day, and
          mark an arrival after midnight with +1. */
@@ -435,26 +448,41 @@ export class BKKPlannerCard extends BKKHopCard {
         const f = tzFields(new Date(ms));
         return Date.UTC(f.y, f.mo - 1, f.d) / 86400000;
       };
-      const start = day(journey.startMs) === day(ref)
-        ? this._fmtClock(journey.startMs)
-        : this._whenText(journey.startMs);
+      const clock = this._fmtClock(journey.startMs);
+      if (day(journey.startMs) === day(ref)) {
+        start = esc(clock);
+      } else {
+        const label = this._whenText(journey.startMs);
+        start = `<small>${esc(label.slice(0, label.length - clock.length).trim())}</small>${esc(clock)}`;
+      }
       const plus = day(journey.endMs) - day(journey.startMs);
-      times = `<span class="itin-time">${esc(start)} \u2013 ${esc(this._fmtClock(journey.endMs))}`
-        + `${plus > 0 ? `<sup>+${plus}</sup>` : ''}</span>`;
+      end = `${esc(this._fmtClock(journey.endMs))}${plus > 0 ? `<sup>+${plus}</sup>` : ''}`;
     }
     const meta = [t(lang, 'plannerTransfers', journey.transfers)];
     if (journey.walkMin) meta.push(t(lang, 'plannerWalkTotal', journey.walkMin));
     if (journey.waitMin) meta.push(t(lang, 'plannerWait', journey.waitMin));
     const body = open
-      ? `<div class="itin-body"><div id="pjmap" class="j-map" hidden></div>${this._legTimeline(journey)}`
+      ? `<div class="itin-body"><div class="itin-meta">${esc(meta.join(' \u00b7 '))}</div>`
+        + `<div id="pjmap" class="j-map" hidden></div>${this._legTimeline(journey)}`
         + `<button type="button" id="pmap">${esc(t(lang, 'plannerShowMap'))}</button></div>`
       : '';
     return `<div class="itin${open ? ' open' : ''}">`
       + `<button type="button" class="itin-head" data-i="${idx}" aria-expanded="${open ? 'true' : 'false'}">`
-      + `<span class="itin-top">${times}<span class="itin-dur">${esc(t(lang, 'plannerDuration', journey.durationMin))}</span></span>`
-      + `<span class="itin-legs">${this._legChips(journey)}</span>`
-      + `<span class="itin-meta">${esc(meta.join(' · '))}</span>`
+      + `<span class="itin-time">${start}</span>`
+      + `<span class="itin-legs">${this._rideChips(journey)}</span>`
+      + `<span class="itin-x">${esc(Number(journey.transfers) || 0)}</span>`
+      + `<span class="itin-end">${end}</span>`
+      + `<span class="itin-dur">${esc(t(lang, 'plannerDuration', journey.durationMin))}</span>`
       + `</button>${body}</div>`;
+  }
+
+  /* Column heads over the itinerary rows. */
+  _itineraryCols() {
+    const lang = this._lang();
+    const esc = BkkLib.esc;
+    return `<div class="itin-cols"><span>${esc(t(lang, 'plannerColDepart'))}</span>`
+      + `<span>${esc(t(lang, 'plannerColLines'))}</span><span>${esc(t(lang, 'plannerColTransfers'))}</span>`
+      + `<span>${esc(t(lang, 'plannerColArrive'))}</span><span>${esc(t(lang, 'plannerColTime'))}</span></div>`;
   }
 
   /* What the journey box shows: its class and markup, and whether its map
@@ -465,17 +493,16 @@ export class BKKPlannerCard extends BKKHopCard {
     const lang = this._lang();
     const esc = BkkLib.esc;
     if (this._timed()) {
-      const sub = this._when.mode === 'arrive'
-        ? t(lang, 'plannerRoutesBy', this._whenText(this._when.at))
-        : t(lang, 'plannerRoutesFrom', this._whenText(this._when.at));
-      let inner = `<div class="j-title">${esc(t(lang, 'plannerRoutes'))}<span class="j-sub">${esc(sub)}</span></div>`;
+      /* The asked-for time is in the title's second line (_routeMeta). */
+      let inner = '';
       const list = this._journeys || [];
       if (this._journeyLoading) {
         inner += `<div class="j-msg">${esc(t(lang, 'plannerSearching'))}</div>`;
       } else if (!list.length) {
         inner += `<div class="j-msg">${esc(t(lang, this._journeyFailed ? 'plannerSearchFailed' : 'plannerNoJourneys'))}</div>`;
       } else {
-        inner += list.map((j, i) => this._itineraryHtml(j, i, i === this._openJourney)).join('');
+        inner += this._itineraryCols() + '<div class="itins">'
+          + list.map((j, i) => this._itineraryHtml(j, i, i === this._openJourney)).join('') + '</div>';
       }
       return { className: 'journey-plan', html: inner, useBoard: false };
     }
@@ -497,7 +524,8 @@ export class BKKPlannerCard extends BKKHopCard {
     const titleKey = rides > 1 ? 'plannerJourneyTitle' : (rides === 1 ? 'plannerJourneyDirect' : 'plannerJourneyWalk');
     return {
       className: 'journey-plan',
-      html: `<div class="j-title">${esc(t(lang, titleKey))}</div>` + this._itineraryHtml(journey, 0, true),
+      html: `<div class="j-title">${esc(t(lang, titleKey))}</div>` + this._itineraryCols()
+        + `<div class="itins">${this._itineraryHtml(journey, 0, true)}</div>`,
       useBoard: false,
     };
   }
@@ -723,11 +751,65 @@ export class BKKPlannerCard extends BKKHopCard {
     this._openingMap = '';
   }
 
-  /* The pickers name origin and destination already; the card keeps its
-     own name (or "Tervező") as a title. */
+  /* While a pair is still being picked the card keeps its own name (or
+     "Tervező") as a title; see _paintHead for a picked pair. */
   _header() {
     const cfg = this._config || {};
     return cfg.name || t(this._lang(), 'plannerTitle');
+  }
+
+  _routePicked() {
+    const cfg = this._config || {};
+    return !!(cfg.stopName && cfg.destName);
+  }
+
+  /* The title's second line: the live board's look-ahead, or the time the
+     itineraries are for. */
+  _routeMeta() {
+    const lang = this._lang();
+    if (this._timed()) {
+      const when = this._whenText(this._when.at);
+      return this._when.mode === 'arrive' ? t(lang, 'plannerRoutesBy', when) : t(lang, 'plannerRoutesFrom', when);
+    }
+    return t(lang, 'plannerLiveMeta', t(lang, 'plannerHorizon', clampMinutesAfter((this._config || {}).minutesAfter)));
+  }
+
+  /* A picked pair is the title, origin → destination, with swap and edit
+     buttons; the pickers below fold away until edit opens them. */
+  _paintHead() {
+    const head = this._elHead;
+    if (!head) return;
+    const picked = this._pickersMounted && this._routePicked();
+    if (!picked) this._editRoute = false;
+    const plan = this._planEl('pplan');
+    if (plan) plan.classList.toggle('folded', picked && !this._editRoute);
+    head.classList.remove('with-badges');
+    head.classList.toggle('route-head', picked);
+    if (!picked) {
+      head.textContent = this._header();
+      return;
+    }
+    const cfg = this._config || {};
+    const lang = this._lang();
+    const esc = BkkLib.esc;
+    const editKey = this._editRoute ? 'plannerEditDone' : 'plannerEdit';
+    head.innerHTML = `<span class="rt"><span class="rt-a"><span class="rt-n">${esc(cfg.stopName)}</span>`
+      + `<span class="rt-arrow">\u2192</span><span class="rt-n">${esc(cfg.destName)}</span></span>`
+      + `<span class="rt-meta">${esc(this._routeMeta())}</span></span>`
+      + `<button type="button" class="rt-btn" data-act="swap" aria-label="${esc(t(lang, 'plannerSwap'))}" title="${esc(t(lang, 'plannerSwap'))}">${SWAP_SVG}</button>`
+      + `<button type="button" class="rt-btn${this._editRoute ? ' on' : ''}" data-act="edit" aria-pressed="${this._editRoute ? 'true' : 'false'}"`
+      + ` aria-label="${esc(t(lang, editKey))}" title="${esc(t(lang, editKey))}">${this._editRoute ? DONE_SVG : EDIT_SVG}</button>`;
+  }
+
+  _onHeadClick(ev) {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('[data-act]') : null;
+    if (!btn) return;
+    if (btn.getAttribute('data-act') === 'swap') {
+      this._swapPlan();
+      return;
+    }
+    this._editRoute = !this._editRoute;
+    this._paintHead();
   }
 
   /* The planner spans every operator: `operator` keeps Home Assistant's look. */
@@ -740,6 +822,7 @@ export class BKKPlannerCard extends BKKHopCard {
     if (card) card.classList.add('is-planner');
     if (first) this._mountPickers();
     else this._syncPickerLabels();
+    this._paintHead();
     this._ensureDepartureCaption();
     this._ensureDests();
   }
@@ -810,6 +893,24 @@ export class BKKPlannerCard extends BKKHopCard {
       ha-card.is-planner.themed .head {
         margin: -14px -14px 12px; padding: 12px 16px 10px;
       }
+      /* A picked pair: origin → destination as the title, its look-ahead or
+         time under it, swap and edit at the right. */
+      ha-card.is-planner .head.route-head { display: flex; align-items: center; gap: 8px; cursor: default; }
+      .head .rt { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+      .head .rt-a { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 6px; font-size: 19px; line-height: 1.2; }
+      .head .rt-n { overflow-wrap: anywhere; }
+      .head .rt-arrow { color: var(--secondary-text-color); font-weight: 500; }
+      .head .rt-meta { font-size: 12px; font-weight: 500; letter-spacing: 0; color: var(--secondary-text-color); }
+      .head .rt-btn {
+        flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%; padding: 0; cursor: pointer;
+        display: flex; align-items: center; justify-content: center; border: 0;
+        background: var(--secondary-background-color, rgba(127,127,127,.12)); color: var(--secondary-text-color);
+      }
+      .head .rt-btn svg { width: 18px; height: 18px; fill: currentColor; }
+      .head .rt-btn.on { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+      .head .rt-btn:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 1px; }
+      .head .rt-btn[data-act="swap"]:active svg { transform: rotate(180deg); transition: transform .2s; }
+      .plan.folded .route { display: none; }
       ha-card.is-planner .err { margin: 8px 2px 0; }
       ha-card.is-planner .deps-label, .journey-plan .j-title {
         display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
@@ -825,9 +926,17 @@ export class BKKPlannerCard extends BKKHopCard {
         min-width: 2.6em; text-align: center; border-radius: 8px;
         padding: 4px 8px; font-weight: 700;
       }
+      /* The live board as the same striped table as the itineraries. */
+      ha-card.is-planner tr + tr td { border-top: 0; }
+      ha-card.is-planner tbody tr:nth-child(even) td { background: var(--secondary-background-color, rgba(127,127,127,.1)); }
+      ha-card.is-planner td:first-child { border-radius: 10px 0 0 10px; padding-left: 8px; }
+      ha-card.is-planner td:last-child { border-radius: 0 10px 10px 0; padding-right: 8px; }
+      ha-card.is-planner td.when .at { font-size: 17px; }
       @container ht-deps (max-width: ${NARROW_ROWS_PX}px) {
         ha-card.is-planner td { padding: 0; }
-        ha-card.is-planner tr { padding: 9px 0; }
+        ha-card.is-planner tr { padding: 9px 8px; border-radius: 10px; }
+        ha-card.is-planner tbody tr:nth-child(even) td { background: transparent; }
+        ha-card.is-planner tbody tr:nth-child(even) { background: var(--secondary-background-color, rgba(127,127,127,.1)); }
       }
 
       .plan { display: flex; flex-direction: column; gap: 10px; }
@@ -835,8 +944,7 @@ export class BKKPlannerCard extends BKKHopCard {
          board's td.route and td.when and squeezed the headsign to a letter. */
       .plan .route {
         display: grid; grid-template-columns: 14px minmax(0, 1fr) 40px; column-gap: 10px;
-        padding: 10px 8px 10px 12px; border-radius: 16px;
-        background: var(--secondary-background-color, rgba(127,127,127,.12));
+        padding: 0 0 0 4px;
       }
       .rail { display: flex; flex-direction: column; align-items: center; padding: 30px 0 18px; }
       .rail .dot { width: 12px; height: 12px; border-radius: 50%; box-sizing: border-box; flex: 0 0 auto; }
@@ -854,8 +962,8 @@ export class BKKPlannerCard extends BKKHopCard {
       .plan input, .plan select, .plan .picked {
         width: 100%; box-sizing: border-box; height: 40px; margin: 0;
         font: inherit; font-size: 15px; color: var(--primary-text-color);
-        background: var(--card-background-color, #fff);
-        border: 1px solid var(--divider-color); border-radius: 12px; padding: 0 12px;
+        background: var(--secondary-background-color, rgba(127,127,127,.12));
+        border: 1px solid transparent; border-radius: 10px; padding: 0 12px;
       }
       .plan input:focus, .plan select:focus, .plan .picked:focus-visible,
       .seg button:focus-visible, #pswap:focus-visible, .itin-head:focus-visible {
@@ -871,32 +979,33 @@ export class BKKPlannerCard extends BKKHopCard {
         grid-column: 3; align-self: center; justify-self: center;
         width: 40px; height: 40px; border-radius: 50%; padding: 0; cursor: pointer;
         display: flex; align-items: center; justify-content: center;
-        border: 1px solid var(--divider-color); background: var(--card-background-color, #fff);
-        color: var(--primary-color);
+        border: 0; background: var(--secondary-background-color, rgba(127,127,127,.12));
+        color: var(--secondary-text-color);
       }
       #pswap svg { width: 22px; height: 22px; fill: currentColor; }
       #pswap:active { transform: rotate(180deg); transition: transform .2s; }
 
-      .plan .when { display: flex; flex-direction: column; gap: 8px; }
-      .seg {
-        display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; padding: 3px;
-        border-radius: 12px; background: var(--secondary-background-color, rgba(127,127,127,.12));
-      }
-      .seg button {
-        border: 0; border-radius: 9px; padding: 8px 6px; cursor: pointer;
-        font: inherit; font-size: 14px; font-weight: 600;
+      /* When: one row of pills (Most, Indulás, Érkezés, then the look-ahead
+         or the time). */
+      .plan .when { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; }
+      .seg { display: flex; flex-wrap: wrap; gap: 6px; }
+      .seg button, .plan .horizon select, .plan .horizon input {
+        height: 30px; border: 1px solid var(--divider-color); border-radius: 999px; padding: 0 12px; cursor: pointer;
+        font: inherit; font-size: 13px; font-weight: 600; width: auto;
         background: transparent; color: var(--secondary-text-color);
       }
       .seg button.on {
-        background: var(--card-background-color, #fff); color: var(--primary-text-color);
-        box-shadow: 0 1px 3px rgba(0,0,0,.18);
+        background: var(--primary-text-color); border-color: var(--primary-text-color);
+        color: var(--card-background-color, #fff);
       }
-      .plan .horizon { display: flex; flex-direction: row; align-items: center; gap: 8px; }
-      .plan .horizon .label { margin: 0; flex: 0 0 auto; }
-      .plan .horizon select, .plan .horizon input { flex: 1 1 auto; min-width: 0; height: 38px; }
+      .plan .horizon { display: flex; flex-direction: row; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; }
+      .plan .horizon .label {
+        position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+      }
+      .plan .horizon select, .plan .horizon input { flex: 0 1 auto; min-width: 0; }
       .plan .horizon [hidden] { display: none; }
       .plan #preset {
-        flex: 0 0 auto; border: 0; background: transparent; cursor: pointer; padding: 6px 4px;
+        flex: 0 0 auto; margin-left: auto; border: 0; background: transparent; cursor: pointer; padding: 6px 4px;
         font: inherit; font-size: 13px; font-weight: 700; color: var(--primary-color);
       }
 
@@ -923,32 +1032,44 @@ export class BKKPlannerCard extends BKKHopCard {
         display: block; width: 100%; text-align: left; cursor: pointer; margin-top: 4px;
         font: inherit; font-size: 14px; font-weight: 600; padding: 9px 12px;
         background: var(--card-background-color, #fff); color: var(--primary-text-color);
-        border: 1px solid var(--divider-color); border-radius: 10px;
+        border: 0; border-radius: 10px;
       }
+      .plan .list .hit { background: transparent; }
+      .plan .list .hit:nth-child(even) { background: var(--secondary-background-color, rgba(127,127,127,.1)); }
       .plan .hint { display: block; padding: 6px 4px; font-size: 13px; color: var(--secondary-text-color); }
       .plan #pdest.show ~ #pdhits .hint { display: none; }
-      .itin-time sup { font-size: 11px; font-weight: 700; margin-left: 1px; color: var(--secondary-text-color); }
 
       .journey-plan .j-title { margin-top: 16px; }
-      .journey-plan .j-sub { font-weight: 600; text-transform: none; letter-spacing: 0; }
       .journey-plan .j-msg { padding: 12px 2px; font-size: 14px; color: var(--secondary-text-color); }
-      .journey-plan.j-map-only { margin: 12px 0 0; }
-      .itin {
-        border: 1px solid var(--divider-color); border-radius: 14px; overflow: hidden;
-        background: var(--card-background-color, #fff);
+      .journey-plan.j-map-only { margin: 8px 0 0; }
+      /* Itineraries: a striped table, a row per itinerary on shared
+         columns (departure, rides, transfers, arrival, duration); the open
+         one is outlined and unfolds in place. */
+      .itin-cols, .itin-head {
+        display: grid; grid-template-columns: 54px minmax(0, 1fr) 22px 54px 62px;
+        column-gap: 6px; align-items: center;
       }
-      .itin + .itin { margin-top: 8px; }
-      .itin.open { border-color: var(--primary-color); }
+      .itin-cols {
+        padding: 12px 8px 6px; font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+        text-transform: uppercase; color: var(--secondary-text-color);
+      }
+      .itin-cols span:nth-child(3) { text-align: center; }
+      .itin-cols span:last-child { text-align: right; }
+      .itin { border-radius: 10px; }
+      .itins .itin:nth-child(even) { background: var(--secondary-background-color, rgba(127,127,127,.1)); }
+      .itins .itin.open { background: transparent; box-shadow: inset 0 0 0 2px var(--primary-color); }
       .itin-head {
-        display: flex; flex-direction: column; gap: 6px; width: 100%; text-align: left;
-        border: 0; background: transparent; color: inherit; font: inherit;
-        padding: 10px 12px; cursor: pointer;
+        width: 100%; text-align: left; border: 0; background: transparent; color: inherit; font: inherit;
+        padding: 10px 8px; cursor: pointer; border-radius: 10px;
       }
-      .itin-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-      .itin-time { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
-      .itin-dur { font-size: 14px; font-weight: 700; white-space: nowrap; }
-      .itin-legs { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
-      .itin-meta { font-size: 12px; color: var(--secondary-text-color); }
+      .itin-time { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; line-height: 1.1; }
+      .itin-time small { display: block; font-size: 10px; font-weight: 600; color: var(--secondary-text-color); letter-spacing: 0; }
+      .itin-legs { display: flex; align-items: center; gap: 3px; min-width: 0; overflow: hidden; }
+      .itin-x { text-align: center; font-size: 12px; font-weight: 700; color: var(--secondary-text-color); }
+      .itin-end { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .itin-end sup { font-size: 9px; font-weight: 700; margin-left: 1px; color: var(--secondary-text-color); }
+      .itin-dur { text-align: right; font-size: 12px; font-weight: 600; white-space: nowrap; color: var(--secondary-text-color); }
+      .itin-meta { font-size: 12px; color: var(--secondary-text-color); margin: 0 0 10px; }
       .j-badge {
         display: inline-block; flex: 0 0 auto; border-radius: 6px; padding: 2px 7px;
         font-size: 13px; font-weight: 700; line-height: 1.35; white-space: nowrap;
@@ -959,7 +1080,7 @@ export class BKKPlannerCard extends BKKHopCard {
       }
       .chip-walk ha-icon, .tl ha-icon { --mdc-icon-size: 16px; }
       .chip-sep { color: var(--secondary-text-color); font-size: 14px; }
-      .itin-body { padding: 0 12px 12px; }
+      .itin-body { padding: 0 10px 12px; }
       .journey-plan .j-map,
       .journey-plan .j-map.leaflet-container {
         height: 200px; min-height: 200px; margin: 0 0 12px; border-radius: 12px;
@@ -992,7 +1113,10 @@ ${this._stopPinCss()}
         border-radius: 999px; padding: 8px 14px;
         background: var(--primary-color); color: var(--text-primary-color, #fff);
       }
-      .journey-plan.j-map-only #pmap { margin: 0; }
+      .journey-plan.j-map-only #pmap {
+        margin: 0; height: 30px; padding: 0 12px; background: transparent; color: var(--primary-color);
+        border: 1px solid var(--divider-color);
+      }
 
       .tl { list-style: none; margin: 0; padding: 0; }
       .tl li { display: grid; grid-template-columns: 44px minmax(0, 1fr); column-gap: 10px; }
@@ -1026,6 +1150,7 @@ ${this._stopPinCss()}
     const esc = BkkLib.esc;
     const plan = document.createElement('div');
     plan.className = 'plan';
+    plan.id = 'pplan';
     plan.innerHTML = `
       <div class="route journey">
         <div class="rail spine"><span class="dot from"></span><span class="line"></span><span class="dot to"></span></div>
@@ -1063,6 +1188,7 @@ ${this._stopPinCss()}
       </div>
     `;
     wrap.insertBefore(plan, head.nextSibling);
+    head.addEventListener('click', (ev) => this._onHeadClick(ev));
     this._pickersMounted = true;
     this._bindPickers();
     this._syncPickerLabels();
@@ -1188,6 +1314,7 @@ ${this._stopPinCss()}
       at.hidden = !timed;
       if (timed && this.shadowRoot.activeElement !== at) at.value = this._whenInputValue(this._when.at);
     }
+    this._paintHead();
   }
 
   /* A new login reads the suggestions at once; a failed read again only
@@ -1323,6 +1450,7 @@ ${this._stopPinCss()}
       sel.addEventListener('change', () => {
         const n = clampMinutesAfter(sel.value);
         this._config = Object.assign({}, this._config, { minutesAfter: n });
+        this._paintHead();
         this._reloadSafe();
       });
     }
@@ -1361,6 +1489,7 @@ ${this._stopPinCss()}
     this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
+    this._editRoute = false;
     this._clearPickerInputs();
     this._paint();
     /* The swapped pair needs no route list (routeIds is empty): plan now,
@@ -1626,6 +1755,7 @@ ${this._stopPinCss()}
     const hits = this._planEl('pdhits');
     if (dq) dq.value = '';
     if (hits) hits.innerHTML = '';
+    this._editRoute = false;
     this._syncPickerLabels();
     this._reloadSafe();
   }

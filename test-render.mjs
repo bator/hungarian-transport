@@ -3474,8 +3474,24 @@ Lib.mavIndex = origMavIndex;
   const root = pc.shadowRoot;
   const seg = [...root.querySelectorAll('#pwhen button')].map((b) => b.textContent);
   check('planner offers Most, Indulás and Érkezés', JSON.stringify(seg) === JSON.stringify(['Most', 'Indulás', 'Érkezés']), JSON.stringify(seg));
-  check('planner title is the card title, not origin → destination again',
-    root.querySelector('.head').textContent === 'Tervező');
+  const rhead = root.querySelector('.head');
+  check('a picked pair is the title, origin → destination, with its look-ahead under it',
+    rhead.classList.contains('route-head')
+    && [...rhead.querySelectorAll('.rt-n')].map((n) => n.textContent).join('|') === 'Népliget|Székesfehérvár'
+    && rhead.querySelector('.rt-meta').textContent.startsWith('élő indulások')
+    && !!rhead.querySelector('[data-act="swap"]') && !!rhead.querySelector('[data-act="edit"]'),
+    rhead.innerHTML.slice(0, 300));
+  check('with a picked pair the pickers fold away',
+    root.querySelector('#pplan').classList.contains('folded'));
+  rhead.querySelector('[data-act="edit"]').click();
+  check('edit opens the pickers and turns into Kész',
+    !root.querySelector('#pplan').classList.contains('folded')
+    && root.querySelector('.head [data-act="edit"]').getAttribute('aria-pressed') === 'true'
+    && root.querySelector('.head [data-act="edit"]').getAttribute('title') === 'Kész');
+  root.querySelector('.head [data-act="edit"]').click();
+  check('Kész folds the pickers again',
+    root.querySelector('#pplan').classList.contains('folded')
+    && root.querySelector('.head [data-act="edit"]').getAttribute('aria-pressed') === 'false');
   check('now mode shows the look-ahead and hides the time field',
     !root.querySelector('#pmin').hidden && root.querySelector('#pat').hidden);
   root.querySelector('[data-when="depart"]').click();
@@ -3492,12 +3508,20 @@ Lib.mavIndex = origMavIndex;
   const heads = root.querySelectorAll('.itin-head');
   check('itineraries are listed with the first one open',
     heads.length === 2 && root.querySelectorAll('.itin.open').length === 1
-    && !!root.querySelector('.itin.open #pjmap') && root.innerHTML.includes('Útvonalak'),
+    && !!root.querySelector('.itin.open #pjmap')
+    && [...root.querySelectorAll('.itin-cols span')].map((x) => x.textContent).join('|') === 'Indul|Járatok|Át|Érk.|Idő'
+    && root.querySelector('.head .rt-meta').textContent.startsWith('indulás legkorábban'),
     String(heads.length));
   check('itinerary shows times, duration and the line badge',
-    root.querySelector('.itin-time').textContent.includes('–')
+    /* The fixture's day is not today's: the day is named over the clock. */
+    /^\d{2}:\d{2}$/.test(root.querySelector('.itin-time').lastChild.textContent)
+    && !!root.querySelector('.itin-time small')
+    && /^\d{2}:\d{2}$/.test(root.querySelector('.itin-end').textContent)
+    && root.querySelector('.itin-x').textContent === '1'
     && root.querySelector('.itin-dur').textContent === '1 ó 10 p'
-    && root.querySelector('.itin-legs').innerHTML.includes('>1205<'));
+    && root.querySelector('.itin-legs').innerHTML.includes('>1205<')
+    && !root.querySelector('.itin-legs .chip-walk'),
+    root.querySelector('.itin-head').textContent);
   check('timeline lists walk, wait, ride and arrival',
     [...root.querySelectorAll('.itin.open .tl li')].map((li) => li.className).join(',') === 'tl-walk,tl-wait,tl-ride,tl-end'
     && root.querySelector('.tl-ride .tl-stop').textContent === 'Népliget'
