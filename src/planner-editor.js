@@ -18,6 +18,10 @@ export class BKKPlannerCardEditor extends BKKHopCardEditor {
     if (row) row.style.display = 'none';
     const city = this._el('cityWrap');
     if (city) city.style.display = 'none';
+    /* A picked pair is the planner's title: it has no room for line badges. */
+    const hb = this._el('headerBadges');
+    const hbRow = hb && hb.closest('label');
+    if (hbRow) hbRow.style.display = 'none';
   }
 
   _syncMode() {

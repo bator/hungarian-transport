@@ -902,7 +902,6 @@ var I18N = {
     plannerDepartAt: "Indulás",
     plannerArriveBy: "Érkezés",
     plannerHorizon: (n) => n < 60 ? `${n} perc` : `${String(n / 60).replace(".", ",")} óra`,
-    plannerRoutes: "Útvonalak",
     plannerLiveMeta: (horizon) => `élő indulások, ${horizon}`,
     plannerEdit: "Forrás és cél módosítása",
     plannerEditDone: "Kész",
@@ -1107,7 +1106,6 @@ var I18N = {
     plannerDepartAt: "Depart",
     plannerArriveBy: "Arrive",
     plannerHorizon: (n) => n < 60 ? `${n} min` : `${n / 60} h`,
-    plannerRoutes: "Routes",
     plannerLiveMeta: (horizon) => `live departures, ${horizon}`,
     plannerEdit: "Change origin and destination",
     plannerEditDone: "Done",
@@ -9471,6 +9469,7 @@ var PLANNER_STALE_MS = 5 * 60 * 1e3;
 var HISTORY_RETRY_MS = 60 * 1e3;
 var MAP_TILES = "https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png";
 var MAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>';
+var PICK_DEBOUNCE_MS = 300;
 var SWAP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9,3L5,7H8V14H10V7H13M16,17V10H14V17H11L15,21L19,17H16Z"/></svg>';
 var EDIT_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z"/></svg>';
 var DONE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"/></svg>';
@@ -9479,6 +9478,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     super();
     this._searchTimer = null;
     this._destTimer = null;
+    this._pickTimer = null;
     this._searchSeq = 0;
     this._destSeq = 0;
     this._destSearchSeq = 0;
@@ -9548,6 +9548,7 @@ var BKKPlannerCard = class extends BKKHopCard {
       this._journeyLoading = false;
       this._journeysDone = false;
       this._openJourney = 0;
+      this._editRoute = false;
     }
     super.setConfig(config);
   }
@@ -9716,6 +9717,10 @@ var BKKPlannerCard = class extends BKKHopCard {
     if (this._destTimer) {
       clearTimeout(this._destTimer);
       this._destTimer = null;
+    }
+    if (this._pickTimer) {
+      clearTimeout(this._pickTimer);
+      this._pickTimer = null;
     }
     this._teardownPlannerInlineMap();
     super.disconnectedCallback();
@@ -10171,7 +10176,9 @@ var BKKPlannerCard = class extends BKKHopCard {
     return t(lang, "plannerLiveMeta", t(lang, "plannerHorizon", clampMinutesAfter((this._config || {}).minutesAfter)));
   }
   /* A picked pair is the title, origin → destination, with swap and edit
-     buttons; the pickers below fold away until edit opens them. */
+     buttons; the pickers below fold away until edit opens them. The head
+     is built once per pair and then updated in place: every poll repaints
+     it, and rebuilding would drop the keyboard focus from its buttons. */
   _paintHead() {
     const head = this._elHead;
     if (!head) return;
@@ -10179,17 +10186,38 @@ var BKKPlannerCard = class extends BKKHopCard {
     if (!picked) this._editRoute = false;
     const plan = this._planEl("pplan");
     if (plan) plan.classList.toggle("folded", picked && !this._editRoute);
-    head.classList.remove("with-badges");
-    head.classList.toggle("route-head", picked);
     if (!picked) {
-      head.textContent = this._header();
+      head.classList.remove("route-head");
+      super._paintHead();
       return;
     }
     const cfg = this._config || {};
     const lang = this._lang();
-    const esc = BkkLib.esc;
-    const editKey = this._editRoute ? "plannerEditDone" : "plannerEdit";
-    head.innerHTML = `<span class="rt"><span class="rt-a"><span class="rt-n">${esc(cfg.stopName)}</span><span class="rt-arrow">→</span><span class="rt-n">${esc(cfg.destName)}</span></span><span class="rt-meta">${esc(this._routeMeta())}</span></span><button type="button" class="rt-btn" data-act="swap" aria-label="${esc(t(lang, "plannerSwap"))}" title="${esc(t(lang, "plannerSwap"))}">${SWAP_SVG}</button><button type="button" class="rt-btn${this._editRoute ? " on" : ""}" data-act="edit" aria-pressed="${this._editRoute ? "true" : "false"}" aria-label="${esc(t(lang, editKey))}" title="${esc(t(lang, editKey))}">${this._editRoute ? DONE_SVG : EDIT_SVG}</button>`;
+    head.classList.remove("with-badges");
+    if (!head.classList.contains("route-head") || !head.querySelector(".rt")) {
+      head.classList.add("route-head");
+      head.innerHTML = `<span class="rt"><span class="rt-a"><span class="rt-n rt-from"></span><span class="rt-arrow" aria-hidden="true">→</span><span class="rt-n rt-to"></span></span><span class="rt-meta"></span></span><button type="button" class="rt-btn" data-act="swap">${SWAP_SVG}</button><button type="button" class="rt-btn" data-act="edit" aria-controls="pplan"></button>`;
+    }
+    const set = (sel, text) => {
+      const el = head.querySelector(sel);
+      if (el && el.textContent !== text) el.textContent = text;
+    };
+    set(".rt-from", cfg.stopName);
+    set(".rt-to", cfg.destName);
+    set(".rt-meta", this._routeMeta());
+    const swap = head.querySelector('[data-act="swap"]');
+    swap.setAttribute("aria-label", t(lang, "plannerSwap"));
+    swap.setAttribute("title", t(lang, "plannerSwap"));
+    const edit = head.querySelector('[data-act="edit"]');
+    edit.classList.toggle("on", this._editRoute);
+    edit.setAttribute("aria-expanded", this._editRoute ? "true" : "false");
+    edit.setAttribute("aria-label", t(lang, "plannerEdit"));
+    edit.setAttribute("title", t(lang, this._editRoute ? "plannerEditDone" : "plannerEdit"));
+    const icon = this._editRoute ? "done" : "edit";
+    if (edit.getAttribute("data-icon") !== icon) {
+      edit.setAttribute("data-icon", icon);
+      edit.innerHTML = this._editRoute ? DONE_SVG : EDIT_SVG;
+    }
   }
   _onHeadClick(ev) {
     const btn = ev.target && ev.target.closest ? ev.target.closest("[data-act]") : null;
@@ -10278,16 +10306,22 @@ var BKKPlannerCard = class extends BKKHopCard {
       }
       /* A picked pair: origin → destination as the title, its look-ahead or
          time under it, swap and edit at the right. */
-      ha-card.is-planner .head.route-head { display: flex; align-items: center; gap: 8px; cursor: default; }
+      ha-card.is-planner {
+        --ht-stripe: color-mix(in srgb, var(--primary-text-color, #000) 6%, transparent);
+      }
+      ha-card.is-planner .head.route-head {
+        display: flex; align-items: center; gap: 8px; cursor: default;
+        white-space: normal; overflow: visible;
+      }
       .head .rt { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
       .head .rt-a { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 6px; font-size: 19px; line-height: 1.2; }
-      .head .rt-n { overflow-wrap: anywhere; }
+      .head .rt-n { min-width: 0; overflow-wrap: anywhere; }
       .head .rt-arrow { color: var(--secondary-text-color); font-weight: 500; }
       .head .rt-meta { font-size: 12px; font-weight: 500; letter-spacing: 0; color: var(--secondary-text-color); }
       .head .rt-btn {
         flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%; padding: 0; cursor: pointer;
         display: flex; align-items: center; justify-content: center; border: 0;
-        background: var(--secondary-background-color, rgba(127,127,127,.12)); color: var(--secondary-text-color);
+        background: var(--ht-stripe); color: var(--secondary-text-color);
       }
       .head .rt-btn svg { width: 18px; height: 18px; fill: currentColor; }
       .head .rt-btn.on { background: var(--primary-color); color: var(--text-primary-color, #fff); }
@@ -10311,15 +10345,23 @@ var BKKPlannerCard = class extends BKKHopCard {
       }
       /* The live board as the same striped table as the itineraries. */
       ha-card.is-planner tr + tr td { border-top: 0; }
-      ha-card.is-planner tbody tr:nth-child(even) td { background: var(--secondary-background-color, rgba(127,127,127,.1)); }
+      ha-card.is-planner tbody tr:nth-child(even) td { background: var(--ht-stripe); }
+      ha-card.is-planner tbody tr.row-clickable:hover td {
+        background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+      }
       ha-card.is-planner td:first-child { border-radius: 10px 0 0 10px; padding-left: 8px; }
       ha-card.is-planner td:last-child { border-radius: 0 10px 10px 0; padding-right: 8px; }
       ha-card.is-planner td.when .at { font-size: 17px; }
       @container ht-deps (max-width: ${NARROW_ROWS_PX}px) {
         ha-card.is-planner td { padding: 0; }
         ha-card.is-planner tr { padding: 9px 8px; border-radius: 10px; }
-        ha-card.is-planner tbody tr:nth-child(even) td { background: transparent; }
-        ha-card.is-planner tbody tr:nth-child(even) { background: var(--secondary-background-color, rgba(127,127,127,.1)); }
+        ha-card.is-planner tr + tr { border-top: 0; }
+        ha-card.is-planner tbody tr:nth-child(even) td,
+        ha-card.is-planner tbody tr.row-clickable:hover td { background: transparent; }
+        ha-card.is-planner tbody tr:nth-child(even) { background: var(--ht-stripe); }
+        ha-card.is-planner tbody tr.row-clickable:hover {
+          background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+        }
       }
 
       .plan { display: flex; flex-direction: column; gap: 10px; }
@@ -10345,8 +10387,8 @@ var BKKPlannerCard = class extends BKKHopCard {
       .plan input, .plan select, .plan .picked {
         width: 100%; box-sizing: border-box; height: 40px; margin: 0;
         font: inherit; font-size: 15px; color: var(--primary-text-color);
-        background: var(--secondary-background-color, rgba(127,127,127,.12));
-        border: 1px solid transparent; border-radius: 10px; padding: 0 12px;
+        background: var(--ht-stripe);
+        border: 1px solid var(--divider-color); border-radius: 10px; padding: 0 12px;
       }
       .plan input:focus, .plan select:focus, .plan .picked:focus-visible,
       .seg button:focus-visible, #pswap:focus-visible, .itin-head:focus-visible {
@@ -10362,7 +10404,7 @@ var BKKPlannerCard = class extends BKKHopCard {
         grid-column: 3; align-self: center; justify-self: center;
         width: 40px; height: 40px; border-radius: 50%; padding: 0; cursor: pointer;
         display: flex; align-items: center; justify-content: center;
-        border: 0; background: var(--secondary-background-color, rgba(127,127,127,.12));
+        border: 0; background: var(--ht-stripe);
         color: var(--secondary-text-color);
       }
       #pswap svg { width: 22px; height: 22px; fill: currentColor; }
@@ -10372,7 +10414,7 @@ var BKKPlannerCard = class extends BKKHopCard {
          or the time). */
       .plan .when { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; }
       .seg { display: flex; flex-wrap: wrap; gap: 6px; }
-      .seg button, .plan .horizon select, .plan .horizon input {
+      .seg button, .plan .horizon select {
         height: 30px; border: 1px solid var(--divider-color); border-radius: 999px; padding: 0 12px; cursor: pointer;
         font: inherit; font-size: 13px; font-weight: 600; width: auto;
         background: transparent; color: var(--secondary-text-color);
@@ -10381,12 +10423,12 @@ var BKKPlannerCard = class extends BKKHopCard {
         background: var(--primary-text-color); border-color: var(--primary-text-color);
         color: var(--card-background-color, #fff);
       }
-      .plan .horizon { display: flex; flex-direction: row; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; }
+      .plan .horizon { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; }
       .plan .horizon .label {
-        position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+        position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
       }
-      .plan .horizon select, .plan .horizon input { flex: 0 1 auto; min-width: 0; }
-      .plan .horizon .at-pick { display: inline-flex; gap: 6px; min-width: 0; }
+      .plan .horizon select { flex: 0 1 auto; min-width: 0; }
+      .plan .horizon .at-pick { display: inline-flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
       .plan .horizon .at-pick[hidden] { display: none; }
       .plan .horizon [hidden] { display: none; }
       .plan #preset {
@@ -10420,7 +10462,7 @@ var BKKPlannerCard = class extends BKKHopCard {
         border: 0; border-radius: 10px;
       }
       .plan .list .hit { background: transparent; }
-      .plan .list .hit:nth-child(even) { background: var(--secondary-background-color, rgba(127,127,127,.1)); }
+      .plan .list .hit:nth-child(even) { background: var(--ht-stripe); }
       .plan .hint { display: block; padding: 6px 4px; font-size: 13px; color: var(--secondary-text-color); }
       .plan #pdest.show ~ #pdhits .hint { display: none; }
 
@@ -10441,7 +10483,7 @@ var BKKPlannerCard = class extends BKKHopCard {
       .itin-cols span:nth-child(3) { text-align: center; }
       .itin-cols span:last-child { text-align: right; }
       .itin { border-radius: 10px; }
-      .itins .itin:nth-child(even) { background: var(--secondary-background-color, rgba(127,127,127,.1)); }
+      .itins .itin:nth-child(even) { background: var(--ht-stripe); }
       .itins .itin.open { background: transparent; box-shadow: inset 0 0 0 2px var(--primary-color); }
       .itin-head {
         width: 100%; text-align: left; border: 0; background: transparent; color: inherit; font: inherit;
@@ -10449,12 +10491,23 @@ var BKKPlannerCard = class extends BKKHopCard {
       }
       .itin-time { font-size: 18px; font-weight: 700; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; line-height: 1.1; }
       .itin-time small { display: block; font-size: 10px; font-weight: 600; color: var(--secondary-text-color); letter-spacing: 0; }
-      .itin-legs { display: flex; align-items: center; gap: 3px; min-width: 0; overflow: hidden; }
+      /* A third or fourth ride wraps to a second line rather than being cut. */
+      .itin-legs { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; min-width: 0; }
       .itin-x { text-align: center; font-size: 12px; font-weight: 700; color: var(--secondary-text-color); }
       .itin-end { font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
       .itin-end sup { font-size: 9px; font-weight: 700; margin-left: 1px; color: var(--secondary-text-color); }
       .itin-dur { text-align: right; font-size: 12px; font-weight: 600; white-space: nowrap; color: var(--secondary-text-color); }
       .itin-meta { font-size: 12px; color: var(--secondary-text-color); margin: 0 0 10px; }
+      /* A narrow card drops the transfer column (the open row's summary
+         still counts them) and lets the duration take two lines. */
+      .pjourney { container: ht-plan / inline-size; }
+      @container ht-plan (max-width: 360px) {
+        .itin-cols, .itin-head { grid-template-columns: 44px minmax(0, 1fr) 50px 46px; column-gap: 5px; }
+        .itin-cols span:nth-child(3), .itin-x { display: none; }
+        .itin-time { font-size: 16px; }
+        .itin-end { font-size: 14px; }
+        .itin-dur { font-size: 11px; white-space: normal; line-height: 1.2; }
+      }
       .j-badge {
         display: inline-block; flex: 0 0 auto; border-radius: 6px; padding: 2px 7px;
         font-size: 13px; font-weight: 700; line-height: 1.35; white-space: nowrap;
@@ -10631,9 +10684,15 @@ ${this._stopPinCss()}
     const day = this._planEl("pday");
     const time = this._planEl("ptime");
     const onPick = () => {
-      const ms = this._whenFromParts(day.value, time.value);
-      if (!ms) return;
-      this._applyWhen({ mode: this._when.mode === "now" ? "depart" : this._when.mode, at: ms });
+      clearTimeout(this._pickTimer);
+      this._pickTimer = setTimeout(() => {
+        this._pickTimer = null;
+        const ms = this._whenFromParts(day.value, time.value);
+        if (!ms) return;
+        const cur = this._when.at ? this._whenParts(this._when.at) : null;
+        if (cur && cur.ymd === day.value && String(cur.min) === time.value && this._timed()) return;
+        this._applyWhen({ mode: this._when.mode === "now" ? "depart" : this._when.mode, at: ms });
+      }, PICK_DEBOUNCE_MS);
     };
     if (day && time) {
       day.addEventListener("change", onPick);
@@ -11168,6 +11227,9 @@ var BKKPlannerCardEditor = class extends BKKHopCardEditor {
     if (row) row.style.display = "none";
     const city = this._el("cityWrap");
     if (city) city.style.display = "none";
+    const hb = this._el("headerBadges");
+    const hbRow = hb && hb.closest("label");
+    if (hbRow) hbRow.style.display = "none";
   }
   _syncMode() {
     super._syncMode();
