@@ -431,8 +431,9 @@ badge and its destination, the ride time, and where you get off.
 
 ### 7.5 Depart and Arrive: itineraries for a time
 
-Choose **Depart** or **Arrive**, then set the date and time (five-minute
-steps). The planner lists up to six itineraries leaving at or after that
+Choose **Depart** or **Arrive**, then pick the day (today, tomorrow or the
+next days) and the time (24-hour clock, five-minute steps) in the card's
+language. The planner lists up to six itineraries leaving at or after that
 time, or arriving by it. An itinerary that another one beats on both
 departure and arrival is left out.
 

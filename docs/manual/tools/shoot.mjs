@@ -18,7 +18,6 @@ const PLAN = 'hungarian-transit-stop-card-plan';
 const PLAN_ED = 'hungarian-transit-stop-card-plan-editor';
 const TITLE = L('Hungarian transport card configuration', 'Magyar közlekedés kártya beállításai');
 const PTITLE = L('Hungarian transit stop planner card configuration', 'Tervezőkártya beállításai');
-const today = new Date().toLocaleDateString('sv-SE', { timeZone: 'Europe/Budapest' });
 
 const browser = await launch(lang);
 const results = [];
@@ -236,10 +235,10 @@ async function setWhen(page, mode, hhmm) {
   await sleep(300);
   if (hhmm) {
     await page.evaluate((v) => {
-      const at = window.__card.shadowRoot.querySelector('#pat');
-      at.value = v;
-      at.dispatchEvent(new Event('change'));
-    }, `${today}T${hhmm}`);
+      const time = window.__card.shadowRoot.querySelector('#ptime');
+      time.value = String(v);
+      time.dispatchEvent(new Event('change'));
+    }, Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3, 5)));
   }
 }
 

@@ -906,6 +906,8 @@ var I18N = {
     plannerLiveMeta: (horizon) => `élő indulások, ${horizon}`,
     plannerEdit: "Forrás és cél módosítása",
     plannerEditDone: "Kész",
+    plannerDay: "Nap",
+    plannerTime: "Időpont",
     plannerColDepart: "Indul",
     plannerColLines: "Járatok",
     plannerColTransfers: "Át",
@@ -1109,6 +1111,8 @@ var I18N = {
     plannerLiveMeta: (horizon) => `live departures, ${horizon}`,
     plannerEdit: "Change origin and destination",
     plannerEditDone: "Done",
+    plannerDay: "Day",
+    plannerTime: "Time",
     plannerColDepart: "Dep.",
     plannerColLines: "Lines",
     plannerColTransfers: "Chg",
@@ -10382,6 +10386,8 @@ var BKKPlannerCard = class extends BKKHopCard {
         position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
       }
       .plan .horizon select, .plan .horizon input { flex: 0 1 auto; min-width: 0; }
+      .plan .horizon .at-pick { display: inline-flex; gap: 6px; min-width: 0; }
+      .plan .horizon .at-pick[hidden] { display: none; }
       .plan .horizon [hidden] { display: none; }
       .plan #preset {
         flex: 0 0 auto; margin-left: auto; border: 0; background: transparent; cursor: pointer; padding: 6px 4px;
@@ -10561,7 +10567,10 @@ ${this._stopPinCss()}
         <div class="horizon">
           <div class="label" id="plab3">${esc(t(lang, "plannerStep3"))}</div>
           <select id="pmin" aria-label="${esc(t(lang, "plannerStep3"))}"></select>
-          <input id="pat" type="datetime-local" step="300" hidden aria-label="${esc(t(lang, "plannerWhen"))}">
+          <span id="pat" class="at-pick" hidden>
+            <select id="pday" aria-label="${esc(t(lang, "plannerDay"))}"></select>
+            <select id="ptime" aria-label="${esc(t(lang, "plannerTime"))}"></select>
+          </span>
           <button id="preset" type="button">${esc(t(lang, "plannerReset"))}</button>
         </div>
       </div>
@@ -10619,13 +10628,16 @@ ${this._stopPinCss()}
         btn.addEventListener("click", () => this._setWhen(btn.getAttribute("data-when")));
       });
     }
-    const at = this._planEl("pat");
-    if (at) {
-      at.addEventListener("change", () => {
-        const ms = this._parseWhenInput(at.value);
-        if (!ms) return;
-        this._applyWhen({ mode: this._when.mode === "now" ? "depart" : this._when.mode, at: ms });
-      });
+    const day = this._planEl("pday");
+    const time = this._planEl("ptime");
+    const onPick = () => {
+      const ms = this._whenFromParts(day.value, time.value);
+      if (!ms) return;
+      this._applyWhen({ mode: this._when.mode === "now" ? "depart" : this._when.mode, at: ms });
+    };
+    if (day && time) {
+      day.addEventListener("change", onPick);
+      time.addEventListener("change", onPick);
     }
     this._paintMinutesAfter();
   }
@@ -10653,15 +10665,54 @@ ${this._stopPinCss()}
     this._syncWhen();
     this._reloadSafe();
   }
-  /* datetime-local values are Budapest wall clock, like every time here. */
-  _parseWhenInput(value) {
-    const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(value || ""));
-    if (!m) return 0;
-    return tzEpochSec(`${m[1]}${m[2]}${m[3]}`, Number(m[4]) * 60 + Number(m[5])) * 1e3;
-  }
-  _whenInputValue(ms) {
+  /* The time is picked as a day and a clock in the card's language: a
+     datetime-local field follows the browser's locale instead (10/31/2026,
+     09:05 AM on an English browser under a Hungarian card). Both are
+     Budapest wall clock, like every time here. */
+  _whenParts(ms) {
     const f = tzFields(new Date(ms));
-    return `${f.y}-${pad2(f.mo)}-${pad2(f.d)}T${pad2(f.h)}:${pad2(f.mi)}`;
+    return { ymd: `${f.y}${pad2(f.mo)}${pad2(f.d)}`, min: f.h * 60 + f.mi };
+  }
+  _whenFromParts(ymd, min) {
+    const m = Number(min);
+    if (!/^\d{8}$/.test(String(ymd || "")) || !Number.isInteger(m) || m < 0 || m >= 1440) return 0;
+    return tzEpochSec(String(ymd), m) * 1e3;
+  }
+  /* Today and the six days after it ("ma", "holnap", "h 11. 3."), plus the
+     picked day when it lies outside them; every five minutes of the day,
+     plus the picked minute when it is off the grid. */
+  _paintWhenPickers() {
+    const day = this._planEl("pday");
+    const time = this._planEl("ptime");
+    if (!day || !time) return;
+    const lang = this._lang();
+    const cur = this._whenParts(this._when.at || Date.now());
+    const today = this._whenParts(Date.now()).ymd;
+    const fmt = new Intl.DateTimeFormat(lang === "hu" ? "hu-HU" : "en-GB", {
+      timeZone: "Europe/Budapest",
+      weekday: "short",
+      month: "short",
+      day: "numeric"
+    });
+    const days = [];
+    for (let k = 0; k < 7; k += 1) days.push(tzShiftYmd(today, k));
+    if (!days.includes(cur.ymd)) days.push(cur.ymd);
+    days.sort();
+    day.innerHTML = days.map((ymd) => {
+      let label;
+      if (ymd === today) label = t(lang, "plannerToday");
+      else if (ymd === tzShiftYmd(today, 1)) label = t(lang, "plannerTomorrow");
+      else label = fmt.format(new Date(tzEpochSec(ymd, 720) * 1e3));
+      return `<option value="${ymd}">${BkkLib.esc(label)}</option>`;
+    }).join("");
+    day.value = cur.ymd;
+    const mins = [];
+    for (let m = 0; m < 1440; m += 5) mins.push(m);
+    if (cur.min % 5) mins.splice(Math.floor(cur.min / 5) + 1, 0, cur.min);
+    time.innerHTML = mins.map((m) => `<option value="${m}">${pad2(Math.floor(m / 60))}:${pad2(m % 60)}</option>`).join("");
+    time.value = String(cur.min);
+    day.setAttribute("aria-label", t(lang, "plannerDay"));
+    time.setAttribute("aria-label", t(lang, "plannerTime"));
   }
   _syncWhen() {
     const lang = this._lang();
@@ -10685,7 +10736,7 @@ ${this._stopPinCss()}
     if (lab) lab.hidden = timed;
     if (at) {
       at.hidden = !timed;
-      if (timed && this.shadowRoot.activeElement !== at) at.value = this._whenInputValue(this._when.at);
+      if (timed) this._paintWhenPickers();
     }
     this._paintHead();
   }
@@ -10762,8 +10813,6 @@ ${this._stopPinCss()}
     if (fav) fav.classList.toggle("hidden", !!cfg.stopName);
     const sel = this._planEl("pmin");
     if (sel) sel.setAttribute("aria-label", t(lang, "plannerStep3"));
-    const at = this._planEl("pat");
-    if (at) at.setAttribute("aria-label", t(lang, "plannerWhen"));
     if (dest) {
       dest.textContent = cfg.destName || "";
       dest.classList.toggle("show", !!cfg.destName);

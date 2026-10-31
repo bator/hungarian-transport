@@ -3500,11 +3500,24 @@ Lib.mavIndex = origMavIndex;
   check('Indulás plans for the picked time',
     pc._when.mode === 'depart' && pc._when.at > 0 && asked.length === 1
     && asked[0].time === pc._when.at && !asked[0].arriveBy, JSON.stringify(asked));
-  check('time mode shows the time field and hides the look-ahead and live board',
-    !at.hidden && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(at.value)
-    && root.querySelector('#pmin').hidden && root.querySelector('.body').hidden, at.value);
-  check('time field round-trips through Budapest time',
-    pc._parseWhenInput(pc._whenInputValue(iso(6, 5))) === iso(6, 5));
+  const pday = root.querySelector('#pday');
+  const ptime = root.querySelector('#ptime');
+  const dayLabels = [...pday.options].map((o) => o.textContent);
+  check('time mode shows day and clock pickers in the card language and hides the look-ahead and live board',
+    !at.hidden && dayLabels[0] === 'ma' && dayLabels[1] === 'holnap' && dayLabels.length >= 7
+    && /^\d{2}:\d{2}$/.test(ptime.selectedOptions[0].textContent) && ptime.options[0].textContent === '00:00'
+    && ptime.options.length >= 288 && !/AM|PM/.test(ptime.textContent)
+    && root.querySelector('#pmin').hidden && root.querySelector('.body').hidden,
+    JSON.stringify({ dayLabels, t: ptime.selectedOptions[0] && ptime.selectedOptions[0].textContent }));
+  check('day and clock round-trip through Budapest time',
+    (() => { const p = pc._whenParts(iso(6, 5)); return pc._whenFromParts(p.ymd, p.min) === iso(6, 5); })());
+  ptime.value = String(17 * 60 + 30);
+  ptime.dispatchEvent(new Event('change'));
+  await new Promise((r) => setTimeout(r, 20));
+  check('picking a clock plans for that time of the picked day',
+    asked.length === 2 && pc._whenParts(pc._when.at).min === 17 * 60 + 30
+    && pc._whenParts(pc._when.at).ymd === pday.value && asked[1].time === pc._when.at,
+    JSON.stringify(asked.map((x) => x.time)));
   const heads = root.querySelectorAll('.itin-head');
   check('itineraries are listed with the first one open',
     heads.length === 2 && root.querySelectorAll('.itin.open').length === 1
@@ -3533,8 +3546,8 @@ Lib.mavIndex = origMavIndex;
   root.querySelector('[data-when="arrive"]').click();
   await new Promise((r) => setTimeout(r, 20));
   check('Érkezés asks for arrival by the same time',
-    asked.length === 2 && asked[1].arriveBy === true && asked[1].time === pc._when.at
-    && root.innerHTML.includes('-ig'), JSON.stringify(asked[1]));
+    asked.length === 3 && asked[2].arriveBy === true && asked[2].time === pc._when.at
+    && root.innerHTML.includes('-ig'), JSON.stringify(asked[2]));
   root.querySelector('[data-when="now"]').click();
   await new Promise((r) => setTimeout(r, 20));
   check('Most goes back to the live board',

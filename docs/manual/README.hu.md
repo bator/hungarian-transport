@@ -447,8 +447,9 @@ színében:
 
 ### 7.5 Indulás és Érkezés: útvonalak egy időpontra
 
-Válaszd az **Indulás** vagy az **Érkezés** gombot, majd állítsd be a dátumot
-és az időt (ötperces lépésekben). A tervező legfeljebb hat útvonalat
+Válaszd az **Indulás** vagy az **Érkezés** gombot, majd válaszd ki a napot
+(ma, holnap vagy a következő napok) és az időt (24 órás formában, ötperces
+lépésekben), a kártya nyelvén. A tervező legfeljebb hat útvonalat
 listáz, amelyek ekkor vagy később indulnak, illetve addig megérkeznek. Ha
 egy útvonalat egy másik indulásban és érkezésben is megelőz, az kimarad.
 
