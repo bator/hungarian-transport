@@ -483,9 +483,10 @@ The cards use your Home Assistant theme colours:
 
 ### 8.4 Operator colours
 
-The **Theme** field paints the card's title band in an operator's colours,
-taken from its passenger site: BKK purple, MÁV blue with the yellow rule,
-Volán coach yellow, and the city operators (MVK, SZKT, Tüke Busz, V-Busz,
+The **Theme** field tints the card's title band with an operator's colour,
+taken from its passenger site: a soft tint on the card background, the title
+in your theme's text colour and a thin rule in the brand colour. BKK purple,
+MÁV blue with the yellow rule, Volán coach yellow, and the city operators (MVK, SZKT, Tüke Busz, V-Busz,
 Blaguss, Bahart, Kecskeméti Kisvasút, Thury-Busz, HOMM, Paksbusz).
 *By operator* follows the card's own source; a Volánbusz town network gets
 the Volán colours, a city without a theme of its own keeps Home Assistant's.

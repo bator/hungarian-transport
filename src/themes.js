@@ -1,11 +1,12 @@
 /* Operator looks for the cards, taken from each operator's own passenger
-   site (header, buttons, footer) on 2026-10-31. A theme paints the card's
+   site (header, buttons, footer) on 2026-10-31. A theme tints the card's
    title band and sets --primary-color inside the card (row hover, badge
    fallback); the card background, text and status colours stay Home
    Assistant's, so a theme works in light and dark mode alike.
 
-   brand: title band; ink: text on it (WCAG 4.5:1 or better on brand);
-   stripe: optional rule under the band; accent: --primary-color. */
+   brand: tint and rule of the title band; ink: text on a solid brand fill
+   (WCAG 4.5:1 or better); stripe: rule colour when it differs from brand;
+   accent: --primary-color. */
 export const THEMES = {
   bkk: { name: 'BKK', brand: '#4C0E5F', ink: '#FFFFFF', accent: '#005FA8' },
   mav: { name: 'MÁV', brand: '#0057BE', ink: '#FFFFFF', stripe: '#FFD400', accent: '#0057BE' },
@@ -62,14 +63,19 @@ export function themeVars(theme) {
     + `--ht-brand-ink:${theme.ink};--ht-brand-stripe:${theme.stripe || theme.brand};`;
 }
 
-/* The title becomes a band flush with the card's top edge. --ht-band-pad is
-   the card's own .wrap padding, so the band reaches the corners. */
+/* The title sits on a tint of the brand colour over the card's own
+   background, so the band moves with the HA theme (a light tint on light
+   cards, a dark one on dark cards) and the title keeps the theme's text
+   colour. The brand colour itself is the rule under it. --ht-band-* is the
+   card's .wrap padding, so the band reaches the corners. */
+export const THEME_TINT_PCT = 15;
 export const THEME_CSS = `
   ha-card.themed .head {
-    background: var(--ht-brand); color: var(--ht-brand-ink);
+    background: color-mix(in srgb, var(--ht-brand) ${THEME_TINT_PCT}%, var(--card-background-color, #fff));
+    color: var(--primary-text-color);
     margin: calc(-1 * var(--ht-band-top, 10px)) calc(-1 * var(--ht-band-side, 12px)) 9px;
     padding: 9px var(--ht-band-side, 12px) 8px;
-    border-bottom: 3px solid var(--ht-brand-stripe);
+    border-bottom: 2px solid var(--ht-brand-stripe);
     border-radius: var(--ha-card-border-radius, 12px) var(--ha-card-border-radius, 12px) 0 0;
   }
 `;
