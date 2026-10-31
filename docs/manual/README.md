@@ -383,8 +383,12 @@ stops with the same name in different towns stay apart:
 
 ![Searching for "Fő tér" lists squares in many towns](images/en/planner-search.webp)
 
-The swap button (⇅) on the right exchanges origin and destination.
-**Reset** clears both.
+Once both are picked, the fields fold away and the card's title becomes the
+route itself ("Budapest-Keleti → Szeged"), with a small line under it saying
+what the card shows: the live board or the itineraries for a time. The swap
+button (⇅) beside the title exchanges origin and destination. The pencil (✎)
+opens the fields again; the tick (✓), a new destination or a swap folds them
+back. **Reset** clears both.
 
 ### 7.3 Your own suggestions
 
@@ -402,10 +406,13 @@ letter in front shows the network: **B** BKK, **M** MÁV, **V** Volán,
 
 ### 7.4 Now: the live board
 
+The row of pills under the title picks what the planner shows: **Now**,
+**Depart** or **Arrive**, then the look-ahead or the time.
+
 With **Now** selected, the planner shows every direct departure between the
-two places, in the same layout as the departure card, whichever operator
-runs it. **Look-ahead** sets how far ahead it looks. **Map** draws the first
-departure's route.
+two places as a striped table, with the same columns as the departure card,
+whichever operator runs it. The drop-down beside the pills (such as **3 h**)
+sets how far ahead it looks. **Map** draws the first departure's route.
 
 ![The planner's live board from Kelenföld to Székesfehérvár](images/en/planner-now.webp)
 
@@ -431,9 +438,10 @@ departure and arrival is left out.
 
 ![Itineraries leaving at 16:00, folded](images/en/planner-depart.webp)
 
-Each itinerary shows its departure and arrival times, its duration, the
-lines as coloured badges with walks in between, the number of transfers, and
-the walking and waiting time. Click one to open it:
+The itineraries are a striped table, one row each: **Dep.**, the **Lines**
+as coloured badges, the number of transfers (**Chg**), **Arr.** (marked +1
+after midnight) and **Time**. Click a row: it opens in place with a summary
+of transfers, walking and waiting, a small map and the timeline:
 
 ![One itinerary opened with its map and timeline](images/en/planner-itinerary.webp)
 
