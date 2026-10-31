@@ -77,6 +77,7 @@ destKey: szekesfehervar
 destName: Székesfehérvár
 minutesAfter: 180          # look-ahead, 15–480 minutes
 theme: operator            # optional title colours, see below
+headerBadges: true         # optional: the board's line badges beside the title
 ```
 
 ```yaml

@@ -193,6 +193,7 @@ A szerkesztő mezői fentről lefelé:
 | Mező | Mire való |
 | --- | --- |
 | **Nyelv** | Az *Automatikus* a Home Assistant nyelvét követi. Rögzítheted a magyart vagy az angolt. |
+| **Járatjelvények a cím mellett** | A kártya címe mellé kiteszi a táblán szereplő járatok jelvényeit. Alapból kikapcsolva. |
 | **Téma** | A *Home Assistant téma* változatlanul hagyja a kártyát. A *Szolgáltató szerint* a forrás utasoldalának színeit adja a fejlécnek (BKK, MÁV, Volán, városi szolgáltató); vagy választhatsz egy szolgáltatót. |
 | BKK API kulcs sor | Megmutatja, honnan jön a kulcs. A *Módosítás* megnyitja a kulcsmezőt. |
 | **Név (opcionális)** | A kártya címe. Üresen „forrás → cél”. A szerkesztő kitölti a megállók kiválasztásakor, de a magad írta címet megtartja. |
@@ -570,6 +571,7 @@ refresh: 45               # másodperc, legalább 20
 | Kulcs | Alapérték | Leírás |
 | --- | --- | --- |
 | `language` | `auto` | `auto`, `hu` vagy `en`. |
+| `headerBadges` | `false` | A cím mellett a táblán szereplő járatok jelvényei, a saját színükben (négy, utána „+N”). |
 | `theme` | `ha` | Fejlécszínek: `ha`, `operator` vagy `bkk`, `mav`, `volan`, `mvk`, `szkt`, `tuke`, `vbusz`, `blaguss`, `bahart`, `kisvasut`, `thury`, `homm`, `paksbusz`. |
 | `name` | forrás → cél | A kártya címe. |
 | `apiKey` | — | A kártya saját BKK kulcsa. Elhagyható, ha az integrációban van kulcs. |

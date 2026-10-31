@@ -183,6 +183,7 @@ export class BKKHopCardEditor extends HTMLElement {
         .card-config .switch input { width: auto; margin: 0; }
         .card-config .row { display: flex; gap: 18px; flex-wrap: wrap; }
         .card-config .row .switch { margin-right: 8px; }
+        .card-config .hb-switch { margin-top: 8px; }
         .card-config .keyrow { display: flex; gap: 6px; align-items: stretch; }
         .card-config .keyrow input { flex: 1 1 auto; min-width: 0; }
         .card-config .reveal {
@@ -227,6 +228,7 @@ export class BKKHopCardEditor extends HTMLElement {
         <div class="f">
           <label id="lblName" for="name"></label>
           <input id="name" type="text" placeholder="Hungarian transport">
+          <label class="switch hb-switch"><input id="headerBadges" type="checkbox"> <span id="lblHeaderBadges"></span></label>
         </div>
         <div class="f">
           <div class="row" id="modeSwitches">
@@ -262,6 +264,9 @@ export class BKKHopCardEditor extends HTMLElement {
         <div class="err" id="err"></div>
       </div>
     `;
+    this._el('headerBadges').addEventListener('change', (ev) => {
+      this._emit({ headerBadges: ev.target.checked ? true : undefined });
+    });
     this._el('theme').addEventListener('change', (ev) => {
       this._emit({ theme: ev.target.value === THEME_DEFAULT ? undefined : ev.target.value });
     });
@@ -510,6 +515,8 @@ export class BKKHopCardEditor extends HTMLElement {
     });
     const cur = THEME_IDS.indexOf(this._config.theme) >= 0 ? this._config.theme : THEME_DEFAULT;
     if (!this._isEditing(el)) el.value = cur;
+    const hb = this._el('headerBadges');
+    if (hb && !this._isEditing(hb)) hb.checked = this._config.headerBadges === true;
   }
 
   _syncTexts() {
@@ -522,6 +529,7 @@ export class BKKHopCardEditor extends HTMLElement {
     };
     set('lblLang', t(lang, 'langLabel'));
     set('lblTheme', t(lang, 'themeLabel'));
+    set('lblHeaderBadges', t(lang, 'headerBadgesLabel'));
     set('hintTheme', t(lang, 'themeHint'));
     set('lblApiKey', t(lang, 'apiKeyLabel'));
     set('hintApiKey', t(lang, 'apiKeyHint'));

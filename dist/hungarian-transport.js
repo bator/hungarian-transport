@@ -609,6 +609,7 @@ var PRESENTATION_KEYS = [
   "name",
   "language",
   "theme",
+  "headerBadges",
   "type",
   "grid_options",
   "view_layout",
@@ -630,6 +631,7 @@ function normalizeCardConfig(config) {
     cfg[k] = cfg[k] == null ? "" : String(cfg[k]);
   });
   if (cfg.minutesAfter != null && cfg.minutesAfter !== "") cfg.minutesAfter = clampMinutesAfter(cfg.minutesAfter);
+  if ("headerBadges" in cfg) cfg.headerBadges = cfg.headerBadges === true || cfg.headerBadges === "true";
   return cfg;
 }
 function configDataKey(config) {
@@ -785,6 +787,7 @@ var I18N = {
     langEn: "English",
     langLabel: "Nyelv",
     themeLabel: "Téma",
+    headerBadgesLabel: "Járatjelvények a cím mellett",
     themeHa: "Home Assistant téma",
     themeOperator: "Szolgáltató szerint (automatikus)",
     themeHint: "A kártya fejléce a szolgáltató utasoldalának színeit kapja. A háttér és a szöveg a Home Assistant témáját követi.",
@@ -979,6 +982,7 @@ var I18N = {
     langEn: "English",
     langLabel: "Language",
     themeLabel: "Theme",
+    headerBadgesLabel: "Line badges beside the title",
     themeHa: "Home Assistant theme",
     themeOperator: "By operator (automatic)",
     themeHint: "The card's title takes the colours of the operator's passenger site. Background and text follow the Home Assistant theme.",
@@ -6826,6 +6830,7 @@ var BKKHopCardEditor = class extends HTMLElement {
         .card-config .switch input { width: auto; margin: 0; }
         .card-config .row { display: flex; gap: 18px; flex-wrap: wrap; }
         .card-config .row .switch { margin-right: 8px; }
+        .card-config .hb-switch { margin-top: 8px; }
         .card-config .keyrow { display: flex; gap: 6px; align-items: stretch; }
         .card-config .keyrow input { flex: 1 1 auto; min-width: 0; }
         .card-config .reveal {
@@ -6870,6 +6875,7 @@ var BKKHopCardEditor = class extends HTMLElement {
         <div class="f">
           <label id="lblName" for="name"></label>
           <input id="name" type="text" placeholder="Hungarian transport">
+          <label class="switch hb-switch"><input id="headerBadges" type="checkbox"> <span id="lblHeaderBadges"></span></label>
         </div>
         <div class="f">
           <div class="row" id="modeSwitches">
@@ -6905,6 +6911,9 @@ var BKKHopCardEditor = class extends HTMLElement {
         <div class="err" id="err"></div>
       </div>
     `;
+    this._el("headerBadges").addEventListener("change", (ev) => {
+      this._emit({ headerBadges: ev.target.checked ? true : void 0 });
+    });
     this._el("theme").addEventListener("change", (ev) => {
       this._emit({ theme: ev.target.value === THEME_DEFAULT ? void 0 : ev.target.value });
     });
@@ -7132,6 +7141,8 @@ var BKKHopCardEditor = class extends HTMLElement {
     });
     const cur = THEME_IDS.indexOf(this._config.theme) >= 0 ? this._config.theme : THEME_DEFAULT;
     if (!this._isEditing(el)) el.value = cur;
+    const hb = this._el("headerBadges");
+    if (hb && !this._isEditing(hb)) hb.checked = this._config.headerBadges === true;
   }
   _syncTexts() {
     const lang = this._lang();
@@ -7143,6 +7154,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     };
     set("lblLang", t(lang, "langLabel"));
     set("lblTheme", t(lang, "themeLabel"));
+    set("lblHeaderBadges", t(lang, "headerBadgesLabel"));
     set("hintTheme", t(lang, "themeHint"));
     set("lblApiKey", t(lang, "apiKeyLabel"));
     set("hintApiKey", t(lang, "apiKeyHint"));
@@ -7608,6 +7620,7 @@ var leafletPromise = null;
 var NARROW_ROWS_PX = 440;
 var KEY_RETRY_MS = 60 * 1e3;
 var KEY_RETRY_MAX_MS = 15 * 60 * 1e3;
+var HEAD_BADGES_MAX = 4;
 var BKKHopCard = class extends HTMLElement {
   constructor() {
     super();
@@ -7950,6 +7963,12 @@ var BKKHopCard = class extends HTMLElement {
       .wrap { padding: 10px 12px 11px; }
       .head { font-weight: 700; margin-bottom: 7px; overflow: hidden;
         text-overflow: ellipsis; white-space: nowrap; }
+      .head.with-badges { display: flex; align-items: center; gap: 8px; }
+      .head .ttl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      .head .hb { display: flex; gap: 4px; flex: none; }
+      .head .hb .badge { min-width: 2em; padding: 1px 5px; font-size: 10px; }
+      .head .hb .badge.more { background: none; color: var(--secondary-text-color);
+        box-shadow: inset 0 0 0 1px var(--divider-color, rgba(127, 127, 127, 0.5)); }
       .err { font-size: 12px; color: var(--error-color, #e66); margin-bottom: 6px; }
       .msg { font-size: 12px; color: var(--secondary-text-color); }
       .body { pointer-events: auto; container: ht-deps / inline-size; }
@@ -8116,7 +8135,7 @@ var BKKHopCard = class extends HTMLElement {
     if (!this._painted || !this._elBody) return;
     const lang = this._lang();
     const cfg = this._config || {};
-    this._elHead.textContent = this._header();
+    this._paintHead();
     const errMsg = this._errMessage(lang);
     this._elErr.textContent = errMsg;
     this._elErr.style.display = errMsg ? "" : "none";
@@ -8130,6 +8149,31 @@ var BKKHopCard = class extends HTMLElement {
     }
     const msg = this._emptyBodyMessage(lang, cfg);
     this._elBody.innerHTML = msg ? `<div class="msg">${BkkLib.esc(msg)}</div>` : "";
+  }
+  /* With `headerBadges` the title shares its line with the lines on the
+     board, as badges in their own colours: up to four, then "+N". */
+  _paintHead() {
+    const head = this._elHead;
+    const title = this._header();
+    const cfg = this._config || {};
+    const nowSec = Math.floor(Date.now() / 1e3);
+    const seen = /* @__PURE__ */ new Map();
+    if (cfg.headerBadges) {
+      (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec)).forEach((r) => {
+        const key = String(r.label || "");
+        if (key && !seen.has(key)) seen.set(key, r);
+      });
+    }
+    head.classList.toggle("with-badges", seen.size > 0);
+    if (!seen.size) {
+      head.textContent = title;
+      return;
+    }
+    const esc = BkkLib.esc;
+    const lines = Array.from(seen.values());
+    const shown = lines.slice(0, HEAD_BADGES_MAX).map((r) => `<span class="badge" style="${esc(this._badgeStyle(r))}">${esc(r.label)}</span>`).join("");
+    const more = lines.length > HEAD_BADGES_MAX ? `<span class="badge more">+${lines.length - HEAD_BADGES_MAX}</span>` : "";
+    head.innerHTML = `<span class="ttl">${esc(title)}</span><span class="hb">${shown}${more}</span>`;
   }
   _emptyBodyMessage(lang, cfg) {
     if (!cfg.stopId || !cfg.destKey) return t(lang, "cardPickStops");
