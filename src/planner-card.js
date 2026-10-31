@@ -730,6 +730,9 @@ export class BKKPlannerCard extends BKKHopCard {
     return cfg.name || t(this._lang(), 'plannerTitle');
   }
 
+  /* The planner spans every operator: `operator` keeps Home Assistant's look. */
+  _themeMode() { return 'all'; }
+
   _render() {
     const first = !this._painted;
     super._render();
@@ -803,6 +806,9 @@ export class BKKPlannerCard extends BKKHopCard {
       ha-card.is-planner .head {
         font-size: 18px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.25;
         margin: 0 2px 12px; padding: 0;
+      }
+      ha-card.is-planner.themed .head {
+        margin: -14px -14px 12px; padding: 12px 16px 10px;
       }
       ha-card.is-planner .err { margin: 8px 2px 0; }
       ha-card.is-planner .deps-label, .journey-plan .j-title {

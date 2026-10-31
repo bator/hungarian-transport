@@ -1,6 +1,7 @@
 import { DEFAULT_FAVORITES, DEFAULT_MINUTES_AFTER, MAX_MINUTES_AFTER, MINUTES_AFTER_PRESETS, MIN_MINUTES_AFTER, clampMinutesAfter, normalizeCardConfig } from './config.js';
 import { codedError, errText, modeCopy, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
+import { THEMES, THEME_DEFAULT, THEME_IDS, THEME_OPERATOR } from './themes.js';
 
 export class BKKHopCardEditor extends HTMLElement {
   constructor() {
@@ -200,6 +201,11 @@ export class BKKHopCardEditor extends HTMLElement {
             <option value="en"></option>
           </select>
         </div>
+        <div class="f">
+          <label id="lblTheme" for="theme"></label>
+          <select id="theme">${THEME_IDS.map((id) => `<option value="${id}"></option>`).join('')}</select>
+          <div class="hint" id="hintTheme"></div>
+        </div>
         <div class="f" id="apiKeyWrap">
           <label id="lblApiKey" for="apiKey"></label>
           <div class="keyrow">
@@ -256,6 +262,9 @@ export class BKKHopCardEditor extends HTMLElement {
         <div class="err" id="err"></div>
       </div>
     `;
+    this._el('theme').addEventListener('change', (ev) => {
+      this._emit({ theme: ev.target.value === THEME_DEFAULT ? undefined : ev.target.value });
+    });
     this._el('lang').addEventListener('change', (ev) => {
       this._emit({ language: ev.target.value });
       this._syncTexts();
@@ -489,14 +498,31 @@ export class BKKHopCardEditor extends HTMLElement {
     if (!this._isEditing(el)) el.value = pref;
   }
 
+  /* Operator names are proper nouns: only the two generic entries are worded. */
+  _syncTheme() {
+    const el = this._el('theme');
+    if (!el) return;
+    const lang = this._lang();
+    Array.from(el.options).forEach((opt) => {
+      if (opt.value === THEME_DEFAULT) opt.textContent = t(lang, 'themeHa');
+      else if (opt.value === THEME_OPERATOR) opt.textContent = t(lang, 'themeOperator');
+      else opt.textContent = THEMES[opt.value].name;
+    });
+    const cur = THEME_IDS.indexOf(this._config.theme) >= 0 ? this._config.theme : THEME_DEFAULT;
+    if (!this._isEditing(el)) el.value = cur;
+  }
+
   _syncTexts() {
     const lang = this._lang();
     this._syncLang();
+    this._syncTheme();
     const set = (id, text) => {
       const el = this._el(id);
       if (el) el.textContent = text;
     };
     set('lblLang', t(lang, 'langLabel'));
+    set('lblTheme', t(lang, 'themeLabel'));
+    set('hintTheme', t(lang, 'themeHint'));
     set('lblApiKey', t(lang, 'apiKeyLabel'));
     set('hintApiKey', t(lang, 'apiKeyHint'));
     set('apiKeyOkText', t(lang, 'apiKeyOk'));

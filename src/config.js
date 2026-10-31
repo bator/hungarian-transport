@@ -36,10 +36,10 @@ export function clampMinutesAfter(value) {
    Home Assistant hands its own layout keys (sections grid, visibility,
    card-mod) to setConfig too. */
 export const PRESENTATION_KEYS = [
-  'name', 'language', 'type',
+  'name', 'language', 'theme', 'type',
   'grid_options', 'view_layout', 'visibility', 'layout_options', 'card_mod',
 ];
-const STRING_KEYS = ['name', 'stopId', 'stopName', 'destKey', 'destName', 'destStopId', 'city', 'apiKey', 'language', 'stopKind', 'destKind'];
+const STRING_KEYS = ['name', 'stopId', 'stopName', 'destKey', 'destName', 'destStopId', 'city', 'apiKey', 'language', 'theme', 'stopKind', 'destKind'];
 
 /* Hand-written YAML arrives as whatever the user typed: `routeIds: "9,109"`
    would otherwise be split into characters by new Set(). */

@@ -185,6 +185,7 @@ The editor fields, from top to bottom:
 | Field | What it does |
 | --- | --- |
 | **Language** | *Automatic* follows your Home Assistant language. You can pin Hungarian or English. |
+| **Theme** | *Home Assistant theme* keeps the card as it is. *By operator* colours the title like the source's passenger site (BKK, MÁV, Volán, city operator); or pick one operator. |
 | BKK API key line | Shows where the key comes from. *Change* opens the key field. |
 | **Name (optional)** | The card title. Empty means "origin → destination". The editor fills it in when you pick stops, and keeps a title you typed yourself. |
 | **MÁV / Volán / Local** | The mode. None ticked means Budapest BKK. Only one can be on. |
@@ -479,6 +480,16 @@ The cards use your Home Assistant theme colours:
 
 ![The BKK card with a dark theme](images/en/card-dark.webp)
 
+### 8.4 Operator colours
+
+The **Theme** field paints the card's title band in an operator's colours,
+taken from its passenger site: BKK purple, MÁV blue with the yellow rule,
+Volán coach yellow, and the city operators (MVK, SZKT, Tüke Busz, V-Busz,
+Blaguss, Bahart, Kecskeméti Kisvasút, Thury-Busz, HOMM, Paksbusz).
+*By operator* follows the card's own source; a Volánbusz town network gets
+the Volán colours, a city without a theme of its own keeps Home Assistant's.
+The card body stays with your Home Assistant theme, light or dark.
+
 ---
 
 ## 9. Keeping timetables current
@@ -542,6 +553,7 @@ refresh: 45               # seconds, at least 20
 | Option | Default | Description |
 | --- | --- | --- |
 | `language` | `auto` | `auto`, `hu` or `en`. |
+| `theme` | `ha` | Title colours: `ha`, `operator` or `bkk`, `mav`, `volan`, `mvk`, `szkt`, `tuke`, `vbusz`, `blaguss`, `bahart`, `kisvasut`, `thury`, `homm`, `paksbusz`. |
 | `name` | origin → destination | Card title. |
 | `apiKey` | — | The card's own BKK key. Optional when the integration holds one. |
 | `mav` / `volan` / `helyi` | `false` | Mode. At most one is on; none means BKK. |
@@ -562,6 +574,6 @@ language: auto
 minutesAfter: 180
 ```
 
-The planner takes the same `language`, `name`, `apiKey` and `minutesAfter`
+The planner takes the same `language`, `theme`, `name`, `apiKey` and `minutesAfter`
 options. Origin and destination can be set in the editor or left to the
 card.

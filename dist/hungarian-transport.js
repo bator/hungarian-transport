@@ -608,6 +608,7 @@ function clampMinutesAfter(value) {
 var PRESENTATION_KEYS = [
   "name",
   "language",
+  "theme",
   "type",
   "grid_options",
   "view_layout",
@@ -615,7 +616,7 @@ var PRESENTATION_KEYS = [
   "layout_options",
   "card_mod"
 ];
-var STRING_KEYS = ["name", "stopId", "stopName", "destKey", "destName", "destStopId", "city", "apiKey", "language", "stopKind", "destKind"];
+var STRING_KEYS = ["name", "stopId", "stopName", "destKey", "destName", "destStopId", "city", "apiKey", "language", "theme", "stopKind", "destKind"];
 function normalizeRouteIds(value) {
   if (Array.isArray(value)) return value.filter((v) => v != null && v !== "").map((v) => String(v).trim()).filter(Boolean);
   if (typeof value === "string") return value.split(",").map((v) => v.trim()).filter(Boolean);
@@ -783,6 +784,10 @@ var I18N = {
     langHu: "Magyar",
     langEn: "English",
     langLabel: "Nyelv",
+    themeLabel: "Téma",
+    themeHa: "Home Assistant téma",
+    themeOperator: "Szolgáltató szerint (automatikus)",
+    themeHint: "A kártya fejléce a szolgáltató utasoldalának színeit kapja. A háttér és a szöveg a Home Assistant témáját követi.",
     apiKeyLabel: "BKK API kulcs",
     apiKeyPlaceholder: "UUID a BKK Open Datából",
     apiKeyHint: "Ingyenes kulcs, egyszerű regisztráció után:",
@@ -973,6 +978,10 @@ var I18N = {
     langHu: "Magyar",
     langEn: "English",
     langLabel: "Language",
+    themeLabel: "Theme",
+    themeHa: "Home Assistant theme",
+    themeOperator: "By operator (automatic)",
+    themeHint: "The card's title takes the colours of the operator's passenger site. Background and text follow the Home Assistant theme.",
     apiKeyLabel: "BKK API key",
     apiKeyPlaceholder: "UUID from BKK Open Data",
     apiKeyHint: "Free key, after a quick sign-up:",
@@ -6597,6 +6606,66 @@ Object.assign(BkkLib, {
   }
 });
 
+// src/themes.js
+var THEMES = {
+  bkk: { name: "BKK", brand: "#4C0E5F", ink: "#FFFFFF", accent: "#005FA8" },
+  mav: { name: "MÁV", brand: "#0057BE", ink: "#FFFFFF", stripe: "#FFD400", accent: "#0057BE" },
+  /* volanbusz.hu now redirects to mavcsoport.hu: the coach yellow is the
+     Volán route colour of the GTFS boards (gtfs.js), the accent MÁV's blue. */
+  volan: { name: "Volán", brand: "#F9AB13", ink: "#000000", accent: "#0057BE" },
+  mvk: { name: "MVK Miskolc", brand: "#22365A", ink: "#FFFFFF", accent: "#0071B3" },
+  szkt: { name: "SZKT Szeged", brand: "#08203C", ink: "#FFFFFF", stripe: "#2199E8", accent: "#1F5B93" },
+  tuke: { name: "Tüke Busz Pécs", brand: "#2A785B", ink: "#FFFFFF", stripe: "#7EB526", accent: "#2A785B" },
+  vbusz: { name: "V-Busz Veszprém", brand: "#781D7D", ink: "#FFFFFF", accent: "#9D3293" },
+  blaguss: { name: "Blaguss Szombathely", brand: "#B31415", ink: "#FFFFFF", accent: "#0A7DC1" },
+  bahart: { name: "Bahart", brand: "#003399", ink: "#FFFFFF", accent: "#003399" },
+  kisvasut: { name: "Kecskeméti Kisvasút", brand: "#002060", ink: "#FFFFFF", stripe: "#D5AA00", accent: "#9F0000" },
+  thury: { name: "Thury-Busz Várpalota", brand: "#971A1A", ink: "#FFFFFF", accent: "#971A1A" },
+  homm: { name: "HOMM Budaörs", brand: "#03935A", ink: "#000000", accent: "#03935A" },
+  paksbusz: { name: "Paksbusz", brand: "#647A27", ink: "#FFFFFF", stripe: "#9BC31C", accent: "#647A27" }
+};
+var THEME_DEFAULT = "ha";
+var THEME_OPERATOR = "operator";
+var THEME_IDS = [THEME_DEFAULT, THEME_OPERATOR].concat(Object.keys(THEMES));
+var CITY_THEMES = {
+  miskolc: "mvk",
+  szeged: "szkt",
+  pecs: "tuke",
+  veszprem: "vbusz",
+  szombathely: "blaguss",
+  bahart: "bahart",
+  "kecskemet-kisvasut": "kisvasut",
+  varpalota: "thury",
+  budaors: "homm",
+  paks: "paksbusz"
+};
+function operatorTheme(mode, city) {
+  if (mode === "bkk") return "bkk";
+  if (mode === "mav") return "mav";
+  if (mode === "volan") return "volan";
+  if (mode !== "helyi") return "";
+  const key = String(city || "");
+  if (key.startsWith("volan-")) return "volan";
+  return CITY_THEMES[key] || "";
+}
+function resolveTheme(id, mode, city) {
+  const key = id === THEME_OPERATOR ? operatorTheme(mode, city) : String(id || "");
+  return THEMES[key] ? Object.assign({ id: key }, THEMES[key]) : null;
+}
+function themeVars(theme) {
+  if (!theme) return "";
+  return `--primary-color:${theme.accent};--ht-brand:${theme.brand};--ht-brand-ink:${theme.ink};--ht-brand-stripe:${theme.stripe || theme.brand};`;
+}
+var THEME_CSS = `
+  ha-card.themed .head {
+    background: var(--ht-brand); color: var(--ht-brand-ink);
+    margin: calc(-1 * var(--ht-band-top, 10px)) calc(-1 * var(--ht-band-side, 12px)) 9px;
+    padding: 9px var(--ht-band-side, 12px) 8px;
+    border-bottom: 3px solid var(--ht-brand-stripe);
+    border-radius: var(--ha-card-border-radius, 12px) var(--ha-card-border-radius, 12px) 0 0;
+  }
+`;
+
 // src/editor.js
 var BKKHopCardEditor = class extends HTMLElement {
   constructor() {
@@ -6775,6 +6844,11 @@ var BKKHopCardEditor = class extends HTMLElement {
             <option value="en"></option>
           </select>
         </div>
+        <div class="f">
+          <label id="lblTheme" for="theme"></label>
+          <select id="theme">${THEME_IDS.map((id) => `<option value="${id}"></option>`).join("")}</select>
+          <div class="hint" id="hintTheme"></div>
+        </div>
         <div class="f" id="apiKeyWrap">
           <label id="lblApiKey" for="apiKey"></label>
           <div class="keyrow">
@@ -6831,6 +6905,9 @@ var BKKHopCardEditor = class extends HTMLElement {
         <div class="err" id="err"></div>
       </div>
     `;
+    this._el("theme").addEventListener("change", (ev) => {
+      this._emit({ theme: ev.target.value === THEME_DEFAULT ? void 0 : ev.target.value });
+    });
     this._el("lang").addEventListener("change", (ev) => {
       this._emit({ language: ev.target.value });
       this._syncTexts();
@@ -7043,14 +7120,30 @@ var BKKHopCardEditor = class extends HTMLElement {
     const pref = this._config.language === "hu" || this._config.language === "en" ? this._config.language : "auto";
     if (!this._isEditing(el)) el.value = pref;
   }
+  /* Operator names are proper nouns: only the two generic entries are worded. */
+  _syncTheme() {
+    const el = this._el("theme");
+    if (!el) return;
+    const lang = this._lang();
+    Array.from(el.options).forEach((opt) => {
+      if (opt.value === THEME_DEFAULT) opt.textContent = t(lang, "themeHa");
+      else if (opt.value === THEME_OPERATOR) opt.textContent = t(lang, "themeOperator");
+      else opt.textContent = THEMES[opt.value].name;
+    });
+    const cur = THEME_IDS.indexOf(this._config.theme) >= 0 ? this._config.theme : THEME_DEFAULT;
+    if (!this._isEditing(el)) el.value = cur;
+  }
   _syncTexts() {
     const lang = this._lang();
     this._syncLang();
+    this._syncTheme();
     const set = (id, text) => {
       const el = this._el(id);
       if (el) el.textContent = text;
     };
     set("lblLang", t(lang, "langLabel"));
+    set("lblTheme", t(lang, "themeLabel"));
+    set("hintTheme", t(lang, "themeHint"));
     set("lblApiKey", t(lang, "apiKeyLabel"));
     set("hintApiKey", t(lang, "apiKeyHint"));
     set("apiKeyOkText", t(lang, "apiKeyOk"));
@@ -7819,12 +7912,33 @@ var BKKHopCard = class extends HTMLElement {
     if (ready) return `${cfg.stopName || ""} → ${cfg.destName || ""}`;
     return t(this._lang(), "cardTitle");
   }
+  /* The data source the `operator` theme follows. */
+  _themeMode() {
+    return BkkLib.mode(this._config || {});
+  }
+  /* A theme only restyles: the vars go on the host so every rule in the
+     shadow tree (and the editor preview) picks them up on the next paint. */
+  _applyTheme() {
+    const cfg = this._config || {};
+    const theme = resolveTheme(cfg.theme, this._themeMode(), cfg.city);
+    const vars = themeVars(theme);
+    if (vars !== (this._themeVars || "")) {
+      ["--primary-color", "--ht-brand", "--ht-brand-ink", "--ht-brand-stripe"].forEach((k) => this.style.removeProperty(k));
+      vars.split(";").filter(Boolean).forEach((decl) => {
+        const i = decl.indexOf(":");
+        this.style.setProperty(decl.slice(0, i), decl.slice(i + 1));
+      });
+      this._themeVars = vars;
+    }
+    if (this._elCard) this._elCard.classList.toggle("themed", !!theme);
+  }
   _render() {
     if (!this._rows) this._rows = [];
     if (!this._tripCache) this._tripCache = {};
     const root = this.shadowRoot;
     if (!root) return;
     if (this._painted) {
+      this._applyTheme();
       this._paint();
       return;
     }
@@ -7946,8 +8060,9 @@ var BKKHopCard = class extends HTMLElement {
         td.in { grid-area: 1 / 5 / 3 / 6; align-self: start; }
         .sched { display: block; margin-left: 0; }
       }
-    `;
+    ` + THEME_CSS;
     const card = document.createElement("ha-card");
+    this._elCard = card;
     const wrap = document.createElement("div");
     wrap.className = "wrap";
     this._elHead = document.createElement("div");
@@ -7963,6 +8078,7 @@ var BKKHopCard = class extends HTMLElement {
     root.appendChild(style);
     root.appendChild(card);
     this._painted = true;
+    this._applyTheme();
     this._bindMapClicks();
     this._paint();
     this._startTick();
@@ -9954,6 +10070,10 @@ var BKKPlannerCard = class extends BKKHopCard {
     const cfg = this._config || {};
     return cfg.name || t(this._lang(), "plannerTitle");
   }
+  /* The planner spans every operator: `operator` keeps Home Assistant's look. */
+  _themeMode() {
+    return "all";
+  }
   _render() {
     const first = !this._painted;
     super._render();
@@ -10020,6 +10140,9 @@ var BKKPlannerCard = class extends BKKHopCard {
       ha-card.is-planner .head {
         font-size: 18px; font-weight: 700; letter-spacing: -0.01em; line-height: 1.25;
         margin: 0 2px 12px; padding: 0;
+      }
+      ha-card.is-planner.themed .head {
+        margin: -14px -14px 12px; padding: 12px 16px 10px;
       }
       ha-card.is-planner .err { margin: 8px 2px 0; }
       ha-card.is-planner .deps-label, .journey-plan .j-title {

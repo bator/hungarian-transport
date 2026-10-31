@@ -2,6 +2,7 @@ import { ASSET_BASE, DEFAULT_MINUTES_AFTER, clampMinutesAfter, configDataKey, de
 import { codedError, errText, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 import { BKK_HOP_EDITOR } from './tags.js';
+import { THEME_CSS, resolveTheme, themeVars } from './themes.js';
 
 let leafletPromise = null;
 
@@ -347,12 +348,34 @@ export class BKKHopCard extends HTMLElement {
     return t(this._lang(), 'cardTitle');
   }
 
+  /* The data source the `operator` theme follows. */
+  _themeMode() {
+    return BkkLib.mode(this._config || {});
+  }
+
+  /* A theme only restyles: the vars go on the host so every rule in the
+     shadow tree (and the editor preview) picks them up on the next paint. */
+  _applyTheme() {
+    const cfg = this._config || {};
+    const theme = resolveTheme(cfg.theme, this._themeMode(), cfg.city);
+    const vars = themeVars(theme);
+    if (vars !== (this._themeVars || '')) {
+      ['--primary-color', '--ht-brand', '--ht-brand-ink', '--ht-brand-stripe'].forEach((k) => this.style.removeProperty(k));
+      vars.split(';').filter(Boolean).forEach((decl) => {
+        const i = decl.indexOf(':');
+        this.style.setProperty(decl.slice(0, i), decl.slice(i + 1));
+      });
+      this._themeVars = vars;
+    }
+    if (this._elCard) this._elCard.classList.toggle('themed', !!theme);
+  }
+
   _render() {
     if (!this._rows) this._rows = [];
     if (!this._tripCache) this._tripCache = {};
     const root = this.shadowRoot;
     if (!root) return;
-    if (this._painted) { this._paint(); return; }
+    if (this._painted) { this._applyTheme(); this._paint(); return; }
     while (root.firstChild) root.removeChild(root.firstChild);
     const style = document.createElement('style');
     style.textContent = `
@@ -471,8 +494,9 @@ export class BKKHopCard extends HTMLElement {
         td.in { grid-area: 1 / 5 / 3 / 6; align-self: start; }
         .sched { display: block; margin-left: 0; }
       }
-    `;
+    ` + THEME_CSS;
     const card = document.createElement('ha-card');
+    this._elCard = card;
     const wrap = document.createElement('div');
     wrap.className = 'wrap';
     this._elHead = document.createElement('div');
@@ -488,6 +512,7 @@ export class BKKHopCard extends HTMLElement {
     root.appendChild(style);
     root.appendChild(card);
     this._painted = true;
+    this._applyTheme();
     this._bindMapClicks();
     this._paint();
     this._startTick();
