@@ -6474,6 +6474,59 @@ const settle = async (el) => {
     JSON.stringify({ picked, emits }));
 }
 {
+  /* headerBadges: the title shares its line with the board's lines, each
+     once, in its own colours, four at most then "+N"; off by default. */
+  const hbNow = Math.floor(Date.now() / 1000);
+  const hbRow = (label, color, min) => ({ type: 'BUS', label, headsign: 'X', depTs: hbNow + min * 60, schedTs: hbNow + min * 60, attime: '', predicted_attime: '', color, textcolor: 'FFFFFF' });
+  const hb = document.createElement('hungarian-transport-card');
+  document.body.appendChild(hb);
+  hb.hass = { states: {}, language: 'hu' };
+  hb._reloadSafe = () => {};
+  hb.setConfig({ name: 'Miskolci utca → Keleti', language: 'hu' });
+  hb._rows = [hbRow('70', 'E41F18', 3), hbRow('133E', '009EE3', 7), hbRow('70', 'E41F18', 14)];
+  hb._paint();
+  const headOf = () => hb.shadowRoot.querySelector('.head');
+  const off = { badges: headOf().querySelectorAll('.badge').length, text: headOf().textContent };
+  hb.setConfig({ name: 'Miskolci utca → Keleti', language: 'hu', headerBadges: true });
+  hb._rows = [hbRow('70', 'E41F18', 3), hbRow('133E', '009EE3', 7), hbRow('70', 'E41F18', 14)];
+  hb._paint();
+  const on = {
+    labels: [...headOf().querySelectorAll('.hb .badge')].map((b) => b.textContent),
+    bg: headOf().querySelector('.hb .badge').style.background,
+    title: headOf().querySelector('.ttl').textContent,
+  };
+  hb._rows = ['1', '2', '3', '4', '5', '6'].map((l, i) => hbRow(l, '2E5EA8', i + 1));
+  hb._paint();
+  const many = [...headOf().querySelectorAll('.hb .badge')].map((b) => b.textContent);
+  hb._rows = [];
+  hb._paint();
+  const empty = { badges: headOf().querySelectorAll('.badge').length, flex: headOf().classList.contains('with-badges') };
+  hb.remove();
+  check('headerBadges: off by default; lines once, in their colours; four then +N; none on an empty board',
+    off.badges === 0 && off.text === 'Miskolci utca → Keleti'
+      && JSON.stringify(on.labels) === '["70","133E"]' && /rgb\(228, 31, 24\)|#e41f18/i.test(on.bg) && on.title === 'Miskolci utca → Keleti'
+      && JSON.stringify(many) === '["1","2","3","4","+2"]' && empty.badges === 0 && !empty.flex,
+    JSON.stringify({ off, on, many, empty }));
+  const { configDataKey: hbKey, normalizeCardConfig: hbNorm } = await import('./src/config.js');
+  check('headerBadges is cosmetic and YAML "true" counts',
+    hbKey({ stopId: 'a', headerBadges: true }) === hbKey({ stopId: 'a' })
+      && hbNorm({ headerBadges: 'true' }).headerBadges === true && hbNorm({ headerBadges: 'no' }).headerBadges === false);
+
+  const hbEd = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(hbEd);
+  hbEd._probeKey = () => {};
+  hbEd.setConfig({ language: 'hu', headerBadges: true });
+  const box = hbEd.querySelector('#headerBadges');
+  const shown = box.checked;
+  const hbEmits = [];
+  hbEd.addEventListener('config-changed', (ev) => hbEmits.push(ev.detail.config));
+  box.checked = false;
+  box.dispatchEvent(new Event('change'));
+  hbEd.remove();
+  check('the editor shows headerBadges and drops the key when unticked',
+    shown && hbEmits.length === 1 && !('headerBadges' in hbEmits[0]), JSON.stringify({ shown, hbEmits }));
+}
+{
   /* Every editor label names its control. */
   const ed = document.createElement('hungarian-transport-card-editor');
   document.body.appendChild(ed);

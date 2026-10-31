@@ -36,7 +36,7 @@ export function clampMinutesAfter(value) {
    Home Assistant hands its own layout keys (sections grid, visibility,
    card-mod) to setConfig too. */
 export const PRESENTATION_KEYS = [
-  'name', 'language', 'theme', 'type',
+  'name', 'language', 'theme', 'headerBadges', 'type',
   'grid_options', 'view_layout', 'visibility', 'layout_options', 'card_mod',
 ];
 const STRING_KEYS = ['name', 'stopId', 'stopName', 'destKey', 'destName', 'destStopId', 'city', 'apiKey', 'language', 'theme', 'stopKind', 'destKind'];
@@ -57,6 +57,8 @@ export function normalizeCardConfig(config) {
     cfg[k] = cfg[k] == null ? '' : String(cfg[k]);
   });
   if (cfg.minutesAfter != null && cfg.minutesAfter !== '') cfg.minutesAfter = clampMinutesAfter(cfg.minutesAfter);
+  /* YAML may carry "true"/"false" as text. */
+  if ('headerBadges' in cfg) cfg.headerBadges = cfg.headerBadges === true || cfg.headerBadges === 'true';
   return cfg;
 }
 

@@ -15,6 +15,9 @@ export const NARROW_ROWS_PX = 440;
 const KEY_RETRY_MS = 60 * 1000;
 const KEY_RETRY_MAX_MS = 15 * 60 * 1000;
 
+/* Line badges beside the title (`headerBadges`) before the rest folds into "+N". */
+export const HEAD_BADGES_MAX = 4;
+
 export class BKKHopCard extends HTMLElement {
   constructor() {
     super();
@@ -384,6 +387,12 @@ export class BKKHopCard extends HTMLElement {
       .wrap { padding: 10px 12px 11px; }
       .head { font-weight: 700; margin-bottom: 7px; overflow: hidden;
         text-overflow: ellipsis; white-space: nowrap; }
+      .head.with-badges { display: flex; align-items: center; gap: 8px; }
+      .head .ttl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+      .head .hb { display: flex; gap: 4px; flex: none; }
+      .head .hb .badge { min-width: 2em; padding: 1px 5px; font-size: 10px; }
+      .head .hb .badge.more { background: none; color: var(--secondary-text-color);
+        box-shadow: inset 0 0 0 1px var(--divider-color, rgba(127, 127, 127, 0.5)); }
       .err { font-size: 12px; color: var(--error-color, #e66); margin-bottom: 6px; }
       .msg { font-size: 12px; color: var(--secondary-text-color); }
       .body { pointer-events: auto; container: ht-deps / inline-size; }
@@ -553,7 +562,7 @@ export class BKKHopCard extends HTMLElement {
     if (!this._painted || !this._elBody) return;
     const lang = this._lang();
     const cfg = this._config || {};
-    this._elHead.textContent = this._header();
+    this._paintHead();
     const errMsg = this._errMessage(lang);
     this._elErr.textContent = errMsg;
     this._elErr.style.display = errMsg ? '' : 'none';
@@ -571,6 +580,33 @@ export class BKKHopCard extends HTMLElement {
     }
     const msg = this._emptyBodyMessage(lang, cfg);
     this._elBody.innerHTML = msg ? `<div class="msg">${BkkLib.esc(msg)}</div>` : '';
+  }
+
+  /* With `headerBadges` the title shares its line with the lines on the
+     board, as badges in their own colours: up to four, then "+N". */
+  _paintHead() {
+    const head = this._elHead;
+    const title = this._header();
+    const cfg = this._config || {};
+    const nowSec = Math.floor(Date.now() / 1000);
+    const seen = new Map();
+    if (cfg.headerBadges) {
+      (this._rows || []).filter((r) => departureStillDue(r.depTs, nowSec)).forEach((r) => {
+        const key = String(r.label || '');
+        if (key && !seen.has(key)) seen.set(key, r);
+      });
+    }
+    head.classList.toggle('with-badges', seen.size > 0);
+    if (!seen.size) {
+      head.textContent = title;
+      return;
+    }
+    const esc = BkkLib.esc;
+    const lines = Array.from(seen.values());
+    const shown = lines.slice(0, HEAD_BADGES_MAX).map((r) =>
+      `<span class="badge" style="${esc(this._badgeStyle(r))}">${esc(r.label)}</span>`).join('');
+    const more = lines.length > HEAD_BADGES_MAX ? `<span class="badge more">+${lines.length - HEAD_BADGES_MAX}</span>` : '';
+    head.innerHTML = `<span class="ttl">${esc(title)}</span><span class="hb">${shown}${more}</span>`;
   }
 
   _emptyBodyMessage(lang, cfg) {

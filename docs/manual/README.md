@@ -185,6 +185,7 @@ The editor fields, from top to bottom:
 | Field | What it does |
 | --- | --- |
 | **Language** | *Automatic* follows your Home Assistant language. You can pin Hungarian or English. |
+| **Line badges beside the title** | Shows the board's lines as badges next to the card title. Off by default. |
 | **Theme** | *Home Assistant theme* keeps the card as it is. *By operator* colours the title like the source's passenger site (BKK, MÁV, Volán, city operator); or pick one operator. |
 | BKK API key line | Shows where the key comes from. *Change* opens the key field. |
 | **Name (optional)** | The card title. Empty means "origin → destination". The editor fills it in when you pick stops, and keeps a title you typed yourself. |
@@ -553,6 +554,7 @@ refresh: 45               # seconds, at least 20
 | Option | Default | Description |
 | --- | --- | --- |
 | `language` | `auto` | `auto`, `hu` or `en`. |
+| `headerBadges` | `false` | Shows the board's lines as badges beside the title, in their own colours (four, then "+N"). |
 | `theme` | `ha` | Title colours: `ha`, `operator` or `bkk`, `mav`, `volan`, `mvk`, `szkt`, `tuke`, `vbusz`, `blaguss`, `bahart`, `kisvasut`, `thury`, `homm`, `paksbusz`. |
 | `name` | origin → destination | Card title. |
 | `apiKey` | — | The card's own BKK key. Optional when the integration holds one. |
