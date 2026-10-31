@@ -76,11 +76,20 @@ stopName: Budapest-Kelenföld
 destKey: szekesfehervar
 destName: Székesfehérvár
 minutesAfter: 180          # look-ahead, 15–480 minutes
+theme: operator            # optional title colours, see below
 ```
 
 ```yaml
 type: custom:hungarian-transit-stop-card-plan
 ```
+
+`theme` paints the card's title band in an operator's colours, taken from
+its passenger site: `ha` (default, Home Assistant's own look), `operator`
+(follows the card's source: BKK, MÁV, Volán or the city feed), or one of
+`bkk`, `mav`, `volan`, `mvk`, `szkt`, `tuke`, `vbusz`, `blaguss`, `bahart`,
+`kisvasut`, `thury`, `homm`, `paksbusz`. Background, text and status colours
+stay with the Home Assistant theme, so light and dark mode both work. The
+planner card keeps Home Assistant's look under `operator`.
 
 Every option: [configuration reference][manual-config]. A key on the card
 (`apiKey`) still works but is deprecated: every Home Assistant user can read

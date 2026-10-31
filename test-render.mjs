@@ -6422,6 +6422,58 @@ const settle = async (el) => {
     JSON.stringify({ runs: globalThis.__htEvalRuns, warns, errors }));
 }
 {
+  /* Operator themes: a picked theme paints the title band and the accent,
+     `operator` follows the data source, an unknown id keeps HA's look, and
+     a theme change alone does not refetch. */
+  const themed = document.createElement('hungarian-transport-card');
+  document.body.appendChild(themed);
+  themed.hass = { states: {}, language: 'hu' };
+  themed.setConfig({ name: 'T', language: 'hu', theme: 'bkk' });
+  const band = () => !!themed.shadowRoot.querySelector('ha-card.themed');
+  const bkk = { band: band(), brand: themed.style.getPropertyValue('--ht-brand'), accent: themed.style.getPropertyValue('--primary-color') };
+  themed.setConfig({ name: 'T', language: 'hu', theme: 'operator', volan: true });
+  const volan = themed.style.getPropertyValue('--ht-brand');
+  themed.setConfig({ name: 'T', language: 'hu', theme: 'operator', helyi: true, city: 'miskolc' });
+  const mvk = themed.style.getPropertyValue('--ht-brand');
+  themed.setConfig({ name: 'T', language: 'hu', theme: 'operator', helyi: true, city: 'volan-gyor' });
+  const town = themed.style.getPropertyValue('--ht-brand');
+  themed.setConfig({ name: 'T', language: 'hu', theme: 'nincs-ilyen' });
+  const none = { band: band(), brand: themed.style.getPropertyValue('--ht-brand'), accent: themed.style.getPropertyValue('--primary-color') };
+  themed.remove();
+  check('a theme paints the band; operator follows the source; an unknown id keeps HA',
+    bkk.band && bkk.brand === '#4C0E5F' && bkk.accent === '#005FA8'
+      && volan === '#F9AB13' && mvk === '#22365A' && town === '#F9AB13'
+      && !none.band && !none.brand && !none.accent,
+    JSON.stringify({ bkk, volan, mvk, town, none }));
+  const { configDataKey: dataKey } = await import('./src/config.js');
+  check('a theme change alone is cosmetic', dataKey({ stopId: 'a', theme: 'mav' }) === dataKey({ stopId: 'a' }));
+
+  const { THEMES } = await import('./src/themes.js');
+  const lum = (h) => {
+    const c = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255)
+      .map((x) => (x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  };
+  const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((m, n) => n - m); return (x + 0.05) / (y + 0.05); };
+  const weak = Object.entries(THEMES).filter(([, th]) => ratio(th.brand, th.ink) < 4.5).map(([id]) => id);
+  check('every theme title reads at 4.5:1 or better', weak.length === 0, JSON.stringify(weak));
+
+  const tEd = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(tEd);
+  tEd._probeKey = () => {};
+  tEd.setConfig({ language: 'hu', theme: 'mav' });
+  const sel = tEd.querySelector('#theme');
+  const picked = sel && sel.value;
+  const emits = [];
+  tEd.addEventListener('config-changed', (ev) => emits.push(ev.detail.config));
+  sel.value = 'ha';
+  sel.dispatchEvent(new Event('change'));
+  tEd.remove();
+  check('the editor shows the theme and drops the key for the HA default',
+    picked === 'mav' && emits.length === 1 && !('theme' in emits[0]) && sel.options.length === Object.keys(THEMES).length + 2,
+    JSON.stringify({ picked, emits }));
+}
+{
   /* Every editor label names its control. */
   const ed = document.createElement('hungarian-transport-card-editor');
   document.body.appendChild(ed);
@@ -6430,7 +6482,7 @@ const settle = async (el) => {
   const labels = [...ed.querySelectorAll('label[id]')];
   const missing = labels.filter((l) => !l.htmlFor || !ed.querySelector('#' + l.htmlFor)).map((l) => l.id);
   ed.remove();
-  check('editor labels point at their fields', labels.length === 7 && missing.length === 0,
+  check('editor labels point at their fields', labels.length === 8 && missing.length === 0,
     JSON.stringify({ n: labels.length, missing }));
 }
 

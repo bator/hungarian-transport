@@ -193,6 +193,7 @@ A szerkesztő mezői fentről lefelé:
 | Mező | Mire való |
 | --- | --- |
 | **Nyelv** | Az *Automatikus* a Home Assistant nyelvét követi. Rögzítheted a magyart vagy az angolt. |
+| **Téma** | A *Home Assistant téma* változatlanul hagyja a kártyát. A *Szolgáltató szerint* a forrás utasoldalának színeit adja a fejlécnek (BKK, MÁV, Volán, városi szolgáltató); vagy választhatsz egy szolgáltatót. |
 | BKK API kulcs sor | Megmutatja, honnan jön a kulcs. A *Módosítás* megnyitja a kulcsmezőt. |
 | **Név (opcionális)** | A kártya címe. Üresen „forrás → cél”. A szerkesztő kitölti a megállók kiválasztásakor, de a magad írta címet megtartja. |
 | **MÁV / Volán / Helyi** | Az üzemmód. Ha egyik sincs bepipálva, budapesti BKK. Egyszerre csak egy lehet bekapcsolva. |
@@ -495,6 +496,16 @@ A kártyák a Home Assistant témád színeit használják:
 
 ![A BKK kártya sötét témával](images/hu/card-dark.webp)
 
+### 8.4 Szolgáltatói színek
+
+A **Téma** mező a kártya fejlécsávját egy szolgáltató utasoldalának színeire
+festi: BKK lila, MÁV kék a sárga csíkkal, Volán sárga, és a városi
+szolgáltatók (MVK, SZKT, Tüke Busz, V-Busz, Blaguss, Bahart, Kecskeméti
+Kisvasút, Thury-Busz, HOMM, Paksbusz). A *Szolgáltató szerint* a kártya saját
+forrását követi; a Volánbusz városi hálózatai a Volán színeit kapják, a saját
+téma nélküli városok a Home Assistant kinézetét. A kártya törzse a Home
+Assistant témádat követi, világosban és sötétben is.
+
 ---
 
 ## 9. A menetrendek frissen tartása
@@ -559,6 +570,7 @@ refresh: 45               # másodperc, legalább 20
 | Kulcs | Alapérték | Leírás |
 | --- | --- | --- |
 | `language` | `auto` | `auto`, `hu` vagy `en`. |
+| `theme` | `ha` | Fejlécszínek: `ha`, `operator` vagy `bkk`, `mav`, `volan`, `mvk`, `szkt`, `tuke`, `vbusz`, `blaguss`, `bahart`, `kisvasut`, `thury`, `homm`, `paksbusz`. |
 | `name` | forrás → cél | A kártya címe. |
 | `apiKey` | — | A kártya saját BKK kulcsa. Elhagyható, ha az integrációban van kulcs. |
 | `mav` / `volan` / `helyi` | `false` | Üzemmód. Legfeljebb egy lehet bekapcsolva; ha egyik sem, BKK. |
@@ -579,6 +591,6 @@ language: auto
 minutesAfter: 180
 ```
 
-A tervező ugyanazokat a `language`, `name`, `apiKey` és `minutesAfter`
+A tervező ugyanazokat a `language`, `theme`, `name`, `apiKey` és `minutesAfter`
 kulcsokat fogadja. A forrást és a célt a szerkesztőben is megadhatod, vagy
 rábízhatod a kártyára.
