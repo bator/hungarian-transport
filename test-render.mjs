@@ -2,6 +2,7 @@
    any other custom element. */
 import { JSDOM } from 'jsdom';
 import { errText, t as i18nT } from './src/i18n.js';
+import { tzShiftYmd } from './src/config.js';
 
 const dom = new JSDOM('<!doctype html><html><body></body></html>', {
   url: 'http://localhost:8123/local/hungarian-transport/',
@@ -2855,6 +2856,8 @@ check('planner editor hides mode toggles',
 check('planner editor hides city select',
   ped.querySelector('#cityWrap') && ped.querySelector('#cityWrap').style.display === 'none');
 check('planner editor still has hidden mav checkbox', !!ped.querySelector('#mav'));
+check('planner editor hides the line-badge switch: its title is the route',
+  !!ped.querySelector('#headerBadges') && ped.querySelector('#headerBadges').closest('label').style.display === 'none');
 
 check('planner in-card minutesAfter is a select',
   plan.shadowRoot.querySelector('#pmin')
@@ -3474,8 +3477,35 @@ Lib.mavIndex = origMavIndex;
   const root = pc.shadowRoot;
   const seg = [...root.querySelectorAll('#pwhen button')].map((b) => b.textContent);
   check('planner offers Most, Indulás and Érkezés', JSON.stringify(seg) === JSON.stringify(['Most', 'Indulás', 'Érkezés']), JSON.stringify(seg));
-  check('planner title is the card title, not origin → destination again',
-    root.querySelector('.head').textContent === 'Tervező');
+  const rhead = root.querySelector('.head');
+  check('a picked pair is the title, origin → destination, with its look-ahead under it',
+    rhead.classList.contains('route-head')
+    && [...rhead.querySelectorAll('.rt-n')].map((n) => n.textContent).join('|') === 'Népliget|Székesfehérvár'
+    && rhead.querySelector('.rt-meta').textContent.startsWith('élő indulások')
+    && !!rhead.querySelector('[data-act="swap"]') && !!rhead.querySelector('[data-act="edit"]'),
+    rhead.innerHTML.slice(0, 300));
+  check('with a picked pair the pickers fold away',
+    root.querySelector('#pplan').classList.contains('folded'));
+  const editBtn = rhead.querySelector('[data-act="edit"]');
+  editBtn.focus();
+  editBtn.click();
+  check('edit opens the pickers and turns into Kész',
+    !root.querySelector('#pplan').classList.contains('folded')
+    && editBtn.getAttribute('aria-expanded') === 'true' && editBtn.getAttribute('aria-controls') === 'pplan'
+    && editBtn.getAttribute('title') === 'Kész');
+  pc._paint();
+  check('the head buttons survive a click and a repaint, so the keyboard focus stays on them',
+    root.querySelector('.head [data-act="edit"]') === editBtn && root.activeElement === editBtn);
+  editBtn.click();
+  check('Kész folds the pickers again',
+    root.querySelector('#pplan').classList.contains('folded')
+    && editBtn.getAttribute('aria-expanded') === 'false');
+  editBtn.click();
+  pc.setConfig({ language: 'hu', stopId: 'hkir_773521', stopName: 'Népliget', destStopId: 'hkir_000001', destName: 'Tata', destKey: 'tata' });
+  check('a new pair from the editor folds the pickers again',
+    root.querySelector('#pplan').classList.contains('folded') && pc._editRoute === false);
+  pc.setConfig({ language: 'hu', stopId: 'hkir_773521', stopName: 'Népliget', destStopId: 'hkir_665908', destName: 'Székesfehérvár', destKey: 'szekesfehervar' });
+  await new Promise((r) => setTimeout(r, 20));
   check('now mode shows the look-ahead and hides the time field',
     !root.querySelector('#pmin').hidden && root.querySelector('#pat').hidden);
   root.querySelector('[data-when="depart"]').click();
@@ -3484,20 +3514,70 @@ Lib.mavIndex = origMavIndex;
   check('Indulás plans for the picked time',
     pc._when.mode === 'depart' && pc._when.at > 0 && asked.length === 1
     && asked[0].time === pc._when.at && !asked[0].arriveBy, JSON.stringify(asked));
-  check('time mode shows the time field and hides the look-ahead and live board',
-    !at.hidden && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(at.value)
-    && root.querySelector('#pmin').hidden && root.querySelector('.body').hidden, at.value);
-  check('time field round-trips through Budapest time',
-    pc._parseWhenInput(pc._whenInputValue(iso(6, 5))) === iso(6, 5));
+  const pday = root.querySelector('#pday');
+  const ptime = root.querySelector('#ptime');
+  const dayLabels = [...pday.options].map((o) => o.textContent);
+  check('time mode shows day and clock pickers in the card language and hides the look-ahead and live board',
+    !at.hidden && dayLabels[0] === 'ma' && dayLabels[1] === 'holnap' && dayLabels.length >= 7
+    && /^\d{2}:\d{2}$/.test(ptime.selectedOptions[0].textContent) && ptime.options[0].textContent === '00:00'
+    && ptime.options.length >= 288 && !/AM|PM/.test(ptime.textContent)
+    && root.querySelector('#pmin').hidden && root.querySelector('.body').hidden,
+    JSON.stringify({ dayLabels, t: ptime.selectedOptions[0] && ptime.selectedOptions[0].textContent }));
+  check('day and clock round-trip through Budapest time',
+    (() => { const p = pc._whenParts(iso(6, 5)); return pc._whenFromParts(p.ymd, p.min) === iso(6, 5); })());
+  ptime.value = String(17 * 60 + 25);
+  ptime.dispatchEvent(new Event('change'));
+  ptime.value = String(17 * 60 + 30);
+  ptime.dispatchEvent(new Event('change'));
+  await new Promise((r) => setTimeout(r, 380));
+  check('arrow-key steps on the clock plan once, for the last time, on the picked day',
+    asked.length === 2 && pc._whenParts(pc._when.at).min === 17 * 60 + 30
+    && pc._whenParts(pc._when.at).ymd === pday.value && asked[1].time === pc._when.at,
+    JSON.stringify(asked.map((x) => x.time)));
+  const tomorrowYmd = pday.options[1].value;
+  pday.value = tomorrowYmd;
+  pday.dispatchEvent(new Event('change'));
+  await new Promise((r) => setTimeout(r, 380));
+  check('picking another day keeps the clock and plans for that day',
+    asked.length === 3 && pc._whenParts(pc._when.at).ymd === tomorrowYmd
+    && pc._whenParts(pc._when.at).min === 17 * 60 + 30 && asked[2].time === pc._when.at,
+    JSON.stringify(asked.map((x) => x.time)));
+  ptime.dispatchEvent(new Event('change'));
+  await new Promise((r) => setTimeout(r, 380));
+  check('a pick naming the time already set does not plan again', asked.length === 3, String(asked.length));
+  {
+    const saved = pc._when;
+    const far = pc._whenFromParts(tzShiftYmd(pday.options[0].value, 20), 7 * 60 + 7);
+    pc._when = { mode: 'depart', at: far };
+    pc._paintWhenPickers();
+    check('a picked day past the week and an off-grid minute get their own options',
+      pday.value === pc._whenParts(far).ymd && ptime.value === String(7 * 60 + 7)
+      && ptime.selectedOptions[0].textContent === '07:07'
+      && ptime.options[ptime.selectedIndex - 1].value === String(7 * 60 + 5)
+      && ptime.options[ptime.selectedIndex + 1].value === String(7 * 60 + 10));
+    pc._when = saved;
+    pc._paintWhenPickers();
+  }
+  check('a walk-only trip shows its walk instead of badges',
+    pc._rideChips({ legs: [{ walk: true, minutes: 4 }, { walk: true, minutes: 3 }] }).includes('chip-walk')
+    && pc._rideChips({ legs: [{ walk: true, minutes: 4 }, { walk: true, minutes: 3 }] }).includes('>7<'));
   const heads = root.querySelectorAll('.itin-head');
   check('itineraries are listed with the first one open',
     heads.length === 2 && root.querySelectorAll('.itin.open').length === 1
-    && !!root.querySelector('.itin.open #pjmap') && root.innerHTML.includes('Útvonalak'),
+    && !!root.querySelector('.itin.open #pjmap')
+    && [...root.querySelectorAll('.itin-cols span')].map((x) => x.textContent).join('|') === 'Indul|Járatok|Át|Érk.|Idő'
+    && root.querySelector('.head .rt-meta').textContent.startsWith('indulás legkorábban'),
     String(heads.length));
   check('itinerary shows times, duration and the line badge',
-    root.querySelector('.itin-time').textContent.includes('–')
+    /* The fixture's day is not today's: the day is named over the clock. */
+    /^\d{2}:\d{2}$/.test(root.querySelector('.itin-time').lastChild.textContent)
+    && !!root.querySelector('.itin-time small')
+    && /^\d{2}:\d{2}$/.test(root.querySelector('.itin-end').textContent)
+    && root.querySelector('.itin-x').textContent === '1'
     && root.querySelector('.itin-dur').textContent === '1 ó 10 p'
-    && root.querySelector('.itin-legs').innerHTML.includes('>1205<'));
+    && root.querySelector('.itin-legs').innerHTML.includes('>1205<')
+    && !root.querySelector('.itin-legs .chip-walk'),
+    root.querySelector('.itin-head').textContent);
   check('timeline lists walk, wait, ride and arrival',
     [...root.querySelectorAll('.itin.open .tl li')].map((li) => li.className).join(',') === 'tl-walk,tl-wait,tl-ride,tl-end'
     && root.querySelector('.tl-ride .tl-stop').textContent === 'Népliget'
@@ -3509,8 +3589,8 @@ Lib.mavIndex = origMavIndex;
   root.querySelector('[data-when="arrive"]').click();
   await new Promise((r) => setTimeout(r, 20));
   check('Érkezés asks for arrival by the same time',
-    asked.length === 2 && asked[1].arriveBy === true && asked[1].time === pc._when.at
-    && root.innerHTML.includes('-ig'), JSON.stringify(asked[1]));
+    asked.length === 4 && asked[3].arriveBy === true && asked[3].time === pc._when.at
+    && root.innerHTML.includes('-ig'), JSON.stringify(asked[3]));
   root.querySelector('[data-when="now"]').click();
   await new Promise((r) => setTimeout(r, 20));
   check('Most goes back to the live board',

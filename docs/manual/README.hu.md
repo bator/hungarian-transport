@@ -397,8 +397,12 @@ keverednek:
 
 ![A „Fő tér” keresése sok település főterét hozza](images/hu/planner-search.webp)
 
-A jobb oldali csere gomb (⇅) felcseréli a forrást és a célt. Az **Új**
-mindkettőt törli.
+Ha a forrás és a cél is megvan, a mezők összecsukódnak, és a kártya címe
+maga az útvonal lesz („Budapest-Keleti → Szeged”). Alatta kis betűvel áll,
+hogy mit mutat a kártya: az élő indulásokat vagy egy választott időpont
+útvonalait. A cím melletti csere gomb (⇅) felcseréli a forrást és a célt. A
+ceruza (✎) újra kinyitja a mezőket; a pipa (✓), egy új cél vagy egy csere
+ismét összecsukja őket. Az **Új** mindkettőt törli.
 
 ### 7.3 A saját javaslataid
 
@@ -416,10 +420,14 @@ választasz a leggyakrabban. Az előttük álló betű a hálózatot jelzi:
 
 ### 7.4 Most: élő indulások
 
+A cím alatti tablettasor választja ki, mit mutat a tervező: **Most**,
+**Indulás** vagy **Érkezés**, mellette az előretekintés vagy az időpont.
+
 **Most** állásban a tervező a két hely közötti összes közvetlen indulást
-mutatja, ugyanabban az elrendezésben, mint az indulási kártya, bármelyik
-üzemeltetőé is. Az **Előretekintés** mező állítja, milyen messzire néz előre. A
-**Térkép** az első indulás útvonalát rajzolja ki.
+mutatja csíkos táblában, ugyanazokkal az oszlopokkal, mint az indulási
+kártya, bármelyik üzemeltetőé is. A tabletták melletti legördülő (például
+**3 óra**) állítja, milyen messzire néz előre. A **Térkép** az első indulás
+útvonalát rajzolja ki.
 
 ![A tervező élő indulásai Kelenföldről Székesfehérvárra](images/hu/planner-now.webp)
 
@@ -439,16 +447,19 @@ színében:
 
 ### 7.5 Indulás és Érkezés: útvonalak egy időpontra
 
-Válaszd az **Indulás** vagy az **Érkezés** gombot, majd állítsd be a dátumot
-és az időt (ötperces lépésekben). A tervező legfeljebb hat útvonalat
+Válaszd az **Indulás** vagy az **Érkezés** gombot, majd válaszd ki a napot
+(ma, holnap vagy a következő napok) és az időt (24 órás formában, ötperces
+lépésekben), a kártya nyelvén. A tervező legfeljebb hat útvonalat
 listáz, amelyek ekkor vagy később indulnak, illetve addig megérkeznek. Ha
 egy útvonalat egy másik indulásban és érkezésben is megelőz, az kimarad.
 
 ![16:00 után induló útvonalak, összecsukva](images/hu/planner-depart.webp)
 
-Minden útvonalnál látszik az indulás és az érkezés, az időtartam, a
-vonalak színes jelzéssel és köztük a gyaloglás, az átszállások száma,
-valamint a gyaloglás és a várakozás ideje. Kattints egyre, hogy kinyíljon:
+Az útvonalak csíkos táblában állnak, soronként egy útvonal: **Indul**, a
+**Járatok** színes jelzéssel, az átszállások száma (**Át**), az **Érk.**
+(éjfél után +1 jelöléssel) és az **Idő**. Kattints egy sorra: helyben
+kinyílik, és mutatja az átszállások, a gyaloglás és a várakozás összegzését,
+a kis térképet és az idővonalat:
 
 ![Egy kinyitott útvonal térképpel és idővonallal](images/hu/planner-itinerary.webp)
 
