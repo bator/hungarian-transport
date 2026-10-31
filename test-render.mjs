@@ -6457,6 +6457,12 @@ const settle = async (el) => {
   const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((m, n) => n - m); return (x + 0.05) / (y + 0.05); };
   const weak = Object.entries(THEMES).filter(([, th]) => ratio(th.brand, th.ink) < 4.5).map(([id]) => id);
   check('every theme title reads at 4.5:1 or better', weak.length === 0, JSON.stringify(weak));
+  const { THEME_CSS: themeCss } = await import('./src/themes.js');
+  const headRule = (themeCss.match(/ha-card\.themed \.head \{[^}]*\}/) || [''])[0];
+  check('a themed title is a tint over the card background in the HA text colour, not a solid brand fill',
+    /background: color-mix\(in srgb, var\(--ht-brand\) \d+%, var\(--card-background-color/.test(headRule)
+      && /color: var\(--primary-text-color\)/.test(headRule) && !/--ht-brand-ink/.test(headRule),
+    headRule.replace(/\s+/g, ' '));
 
   const tEd = document.createElement('hungarian-transport-card-editor');
   document.body.appendChild(tEd);

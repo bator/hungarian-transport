@@ -499,8 +499,10 @@ A kártyák a Home Assistant témád színeit használják:
 
 ### 8.4 Szolgáltatói színek
 
-A **Téma** mező a kártya fejlécsávját egy szolgáltató utasoldalának színeire
-festi: BKK lila, MÁV kék a sárga csíkkal, Volán sárga, és a városi
+A **Téma** mező a kártya fejlécsávját egy szolgáltató utasoldalának színével
+árnyalja: halvány árnyalat a kártya hátterén, a cím a témád szövegszínében,
+alatta vékony vonal a márkaszínben. BKK lila, MÁV kék a sárga vonallal, Volán
+sárga, és a városi
 szolgáltatók (MVK, SZKT, Tüke Busz, V-Busz, Blaguss, Bahart, Kecskeméti
 Kisvasút, Thury-Busz, HOMM, Paksbusz). A *Szolgáltató szerint* a kártya saját
 forrását követi; a Volánbusz városi hálózatai a Volán színeit kapják, a saját

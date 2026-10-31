@@ -6660,12 +6660,14 @@ function themeVars(theme) {
   if (!theme) return "";
   return `--primary-color:${theme.accent};--ht-brand:${theme.brand};--ht-brand-ink:${theme.ink};--ht-brand-stripe:${theme.stripe || theme.brand};`;
 }
+var THEME_TINT_PCT = 15;
 var THEME_CSS = `
   ha-card.themed .head {
-    background: var(--ht-brand); color: var(--ht-brand-ink);
+    background: color-mix(in srgb, var(--ht-brand) ${THEME_TINT_PCT}%, var(--card-background-color, #fff));
+    color: var(--primary-text-color);
     margin: calc(-1 * var(--ht-band-top, 10px)) calc(-1 * var(--ht-band-side, 12px)) 9px;
     padding: 9px var(--ht-band-side, 12px) 8px;
-    border-bottom: 3px solid var(--ht-brand-stripe);
+    border-bottom: 2px solid var(--ht-brand-stripe);
     border-radius: var(--ha-card-border-radius, 12px) var(--ha-card-border-radius, 12px) 0 0;
   }
 `;

@@ -84,8 +84,9 @@ headerBadges: true         # optional: the board's line badges beside the title
 type: custom:hungarian-transit-stop-card-plan
 ```
 
-`theme` paints the card's title band in an operator's colours, taken from
-its passenger site: `ha` (default, Home Assistant's own look), `operator`
+`theme` tints the card's title band with an operator's colour (a soft tint
+on the card background with a thin brand rule under it), taken from its
+passenger site: `ha` (default, Home Assistant's own look), `operator`
 (follows the card's source: BKK, MÁV, Volán or the city feed), or one of
 `bkk`, `mav`, `volan`, `mvk`, `szkt`, `tuke`, `vbusz`, `blaguss`, `bahart`,
 `kisvasut`, `thury`, `homm`, `paksbusz`. Background, text and status colours
