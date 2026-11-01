@@ -395,13 +395,34 @@ def paths() -> tuple[Path, Path, Path, Path]:
 def mav_source_newer(src: Path, out: Path) -> bool:
     """Whether the MÁV feed is newer than the served index's build.
 
-    By the index's build time (_built_at), not its st_mtime: a HACS unpack and
-    restore_hacs_indexes() set that to "now", which would make a feed whose
-    build failed look built and never be built again. Compared in whole
-    seconds, the gzip header's resolution.
+    A served index of the feed's own feed_version stays by the integration's
+    same-feed rule (mav_index.same_feed_replaces): a build of the feed, not
+    made yet, never replaces a pfaedle-fitted one (the daily index, a
+    release's) nor another of its feed. Only a pfaedle directory, whose
+    build follows the rails, may replace a stop-sequence index of its feed.
+    Otherwise by the index's build time (_built_at), not its st_mtime: a
+    HACS unpack and restore_hacs_indexes() set that to "now", which would
+    make a feed whose build failed look built and never be built again.
+    Compared in whole seconds, the gzip header's resolution.
     """
     if not out.exists():
         return True
+    try:
+        # The integration's own module, as build_mav_index imports it.
+        pkg = Path(__file__).resolve().parent.parent / "custom_components" / "hungarian_transport"
+        if str(pkg) not in sys.path:
+            sys.path.insert(0, str(pkg))
+        import mav_index  # noqa: PLC0415
+
+        with mav_index.Feed(src) as feed:
+            version = mav_index.feed_version(feed)
+        if version and index_feed(out) == version:
+            current = mav_index.read_rank(out)
+            build = mav_index.IndexRank(fitted=True if src.is_dir() else None, size=None)
+            if current is not None and not mav_index.same_feed_replaces(build, current):
+                return False
+    except Exception as err:  # an old integration without the rule, an unreadable feed
+        print(f"warn mav same-feed check: {type(err).__name__}", file=sys.stderr)
     try:
         if src.is_dir():
             times = [p.stat().st_mtime for p in src.iterdir() if p.is_file()]
