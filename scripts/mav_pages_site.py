@@ -26,11 +26,17 @@ object (the zips' sizes and digests). One that cannot be read (no site yet,
 Pages not enabled, a network error) never stops a deploy: publishing the
 same content again is harmless.
 
+A site larger than MAX_SITE_BYTES (GitHub Pages allows 1 GB) is refused:
+the sizes of its files are printed either way.
+
 Usage: mav_pages_site.py --index mav-index.json.gz --stats mav-build.json
          --commit SHA --out SITE_DIR [--gtfs-zip ZIP --pfaedle-dir DIR]
          [--live-url URL | --live-file PATH] [--github-output FILE]
+         [--max-bytes N]
 Prints deploy=true|false (and appends it to --github-output). Exit 1, with
-nothing written, for an index or statistics that do not hold up.
+nothing written, for an index or statistics that do not hold up, a feed
+whose feed_version does not start with a real date (YYYYMMDD, as the
+integration's mav._gtfs_date reads it), or a site over the size limit.
 """
 from __future__ import annotations
 
@@ -70,11 +76,25 @@ OVERLAY_FILES = ("shapes.txt", "stop_times.txt", "trips.txt")
 # A fixed timestamp and mode per member: the zip depends on the content only.
 ZIP_DATE = (1980, 1, 1, 0, 0, 0)
 ZIP_LEVEL = 9
+# Half of GitHub Pages' 1 GB site limit; the site is about 35 MB.
+MAX_SITE_BYTES = 500 * 1024 * 1024
 MAX_MANIFEST = 64 * 1024
 LIVE_TIMEOUT = 20
 # MÁV's feed_version: the feed's date, then an id ("20261030.M2ChangeID").
 # Nothing else gets through: the value goes into a workflow output.
 FEED_RE = re.compile(r"\d{8}(?!\d)[A-Za-z0-9._:+-]{0,64}")
+
+
+def dated_feed(value: object) -> bool:
+    """value is a feed_version the integration accepts (mav_daily.check_manifest):
+    FEED_RE, and its first eight digits a real date (not 20261399)."""
+    if not isinstance(value, str) or not FEED_RE.fullmatch(value):
+        return False
+    try:
+        datetime.strptime(value[:8], "%Y%m%d")
+    except ValueError:
+        return False
+    return True
 
 
 class SiteError(Exception):
@@ -102,7 +122,7 @@ def gtfs_feed_version(path: Path) -> str:
         raise SiteError(f"{path} is not a GTFS zip: {err}") from err
     row = next(csv.DictReader(io.StringIO(text)), None)
     version = ((row or {}).get("feed_version") or "").strip()
-    if not FEED_RE.fullmatch(version):
+    if not dated_feed(version):
         raise SiteError(f"{path.name} names no dated feed_version: {version!r}")
     return version
 
@@ -123,6 +143,13 @@ def write_overlay(pfaedle_dir: Path, out: Path) -> list[str]:
             info.create_system = 3
             info.external_attr = 0o100644 << 16
             info.file_size = src.stat().st_size
+            # z.open(ZipInfo) deflates at the ZipInfo's own level, not the
+            # ZipFile's compresslevel (None: zlib's default, 6). Python 3.13
+            # names it compress_level; 3.12 and older _compresslevel.
+            if hasattr(info, "compress_level"):
+                info.compress_level = ZIP_LEVEL
+            else:
+                info._compresslevel = ZIP_LEVEL
             with src.open("rb") as fh, z.open(info, "w") as dst:
                 shutil.copyfileobj(fh, dst, 1 << 20)
     return names
@@ -153,7 +180,7 @@ def manifest(index: Path, stats: dict, commit: str, built_at: datetime | None = 
     if data.get("v") != mav_index.SCHEMA:
         raise SiteError(f"{index} has schema {data.get('v')!r}, this checkout reads {mav_index.SCHEMA}")
     feed = data.get("feed")
-    if not isinstance(feed, str) or not FEED_RE.fullmatch(feed):
+    if not dated_feed(feed):
         raise SiteError(f"{index} names no dated feed: {feed!r}")
     if stats.get("feed_version") != feed:
         raise SiteError(f"statistics are of feed {stats.get('feed_version')!r}, the index of {feed!r}")
@@ -237,8 +264,9 @@ def attribution(man: dict) -> str:
     if gtfs:
         lines += [
             f"{GTFS_NAME}",
-            "  MÁV's official GTFS feed, byte for byte as downloaded for this build",
-            "  (MÁV-START / MÁV Csoport, https://www.mavcsoport.hu/gtfs). Licence: CC0 1.0.",
+            "  MÁV's official GTFS feed, byte for byte as downloaded for this build.",
+            "  Source: MÁV-csoport (published by MÁV-START), https://www.mavcsoport.hu/gtfs",
+            "  Licence: CC0 1.0, as MÁV-csoport states for its GTFS feed.",
             "",
             f"{OVERLAY_NAME}",
             "  " + ", ".join(gtfs["overlay"]["files"]) + " of the same feed as written by pfaedle",
@@ -283,16 +311,39 @@ def index_html(man: dict) -> str:
     )
 
 
+def site_files(index: Path, man: dict, gtfs_zip: Path | None = None,
+               overlay: Path | None = None) -> dict[str, Path | bytes]:
+    """The site's files by name: a file to copy, or the bytes to write."""
+    files: dict[str, Path | bytes] = {INDEX_NAME: index}
+    if gtfs_zip is not None and overlay is not None:
+        files[GTFS_NAME] = gtfs_zip
+        files[OVERLAY_NAME] = overlay
+    files[ATTRIBUTION_NAME] = attribution(man).encode("utf-8")
+    files["index.html"] = index_html(man).encode("utf-8")
+    files[MANIFEST_NAME] = (json.dumps(man, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
+    return files
+
+
+def site_sizes(files: dict[str, Path | bytes]) -> dict[str, int]:
+    return {name: (src.stat().st_size if isinstance(src, Path) else len(src)) for name, src in files.items()}
+
+
+def check_size(sizes: dict[str, int], limit: int) -> None:
+    """SiteError, naming every file's size, for a site over limit bytes."""
+    total = sum(sizes.values())
+    if total > limit:
+        raise SiteError(f"the site would be {total} bytes, over the {limit} byte limit ("
+                        + ", ".join(f"{n} {b}" for n, b in sizes.items()) + ")")
+
+
 def write_site(index: Path, man: dict, out: Path, gtfs_zip: Path | None = None,
                overlay: Path | None = None) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(index, out / INDEX_NAME)
-    if gtfs_zip is not None and overlay is not None:
-        shutil.copyfile(gtfs_zip, out / GTFS_NAME)
-        shutil.copyfile(overlay, out / OVERLAY_NAME)
-    (out / ATTRIBUTION_NAME).write_text(attribution(man), encoding="utf-8")
-    (out / "index.html").write_text(index_html(man), encoding="utf-8")
-    (out / MANIFEST_NAME).write_text(json.dumps(man, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    for name, src in site_files(index, man, gtfs_zip, overlay).items():
+        if isinstance(src, Path):
+            shutil.copyfile(src, out / name)
+        else:
+            (out / name).write_bytes(src)
 
 
 def main(argv: list[str]) -> int:
@@ -307,6 +358,8 @@ def main(argv: list[str]) -> int:
     live_src.add_argument("--live-url")
     live_src.add_argument("--live-file", type=Path)
     ap.add_argument("--github-output", type=Path)
+    ap.add_argument("--max-bytes", type=int, default=MAX_SITE_BYTES,
+                    help=f"refuse a larger site (default {MAX_SITE_BYTES})")
     args = ap.parse_args(argv)
     if (args.gtfs_zip is None) != (args.pfaedle_dir is None):
         ap.error("--gtfs-zip and --pfaedle-dir go together")
@@ -320,6 +373,10 @@ def main(argv: list[str]) -> int:
             if overlay is not None:
                 files = write_overlay(args.pfaedle_dir, overlay)
                 man["gtfs"] = gtfs_manifest(args.gtfs_zip, overlay, files, man["feed"])
+            sizes = site_sizes(site_files(args.index, man, args.gtfs_zip, overlay))
+            print(f"site: {sum(sizes.values())} bytes (limit {args.max_bytes}): "
+                  + ", ".join(f"{n} {b}" for n, b in sizes.items()))
+            check_size(sizes, args.max_bytes)
         except (OSError, ValueError, SiteError) as err:
             print(f"no site: {err}", file=sys.stderr)
             return 1

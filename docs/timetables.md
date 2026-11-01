@@ -180,13 +180,22 @@ The overlay holds the three tables pfaedle rewrites when it matches every
 train to the OpenStreetMap rails: use them in place of the official feed's
 tables of the same names (for a GTFS consumer such as Dawarich, or anything
 else). It is zipped deterministically (sorted names, fixed timestamps,
-deflate), so an unchanged build gives the same bytes. The site is about
-35 MB.
+deflate at level 9), so an unchanged build gives the same bytes. The site
+is about 35 MB; one over 500 MB (half of GitHub Pages' 1 GB limit) is not
+published, and the run's log lists every file's size.
 
-**Attribution.** The MÁV GTFS is published by MÁV under CC0 1.0. The shapes
-(in the overlay and in the route index) are derived from OpenStreetMap data:
-© OpenStreetMap contributors, Open Database License (ODbL) 1.0; credit them
-when you publish anything built on these files.
+**Attribution.** The MÁV GTFS is published by MÁV-csoport under CC0 1.0;
+`ATTRIBUTION.txt` names MÁV-csoport (<https://www.mavcsoport.hu/gtfs>) as
+its source. The shapes (in the overlay and in the route index) are derived
+from OpenStreetMap data: © OpenStreetMap contributors, Open Database License
+(ODbL) 1.0; credit them when you publish anything built on these files.
+
+**Where the CC0 statement comes from.** From MÁV-csoport's GTFS page,
+<https://www.mavcsoport.hu/gtfs>, which sits behind the same registered
+login as the feed (<https://www.mavcsoport.hu/gtfs-igenybejelento>; without
+one it answers HTTP 401). The site republishes `mav-gtfs.zip` on that
+statement alone, and nothing checks it automatically: the repository owner
+should keep it verified and stop publishing the zip if MÁV's terms change.
 
 The manifest names the manifest `format` (1), the index `schema`, the `feed`
 (`feed_version`), `built_at` (UTC), `size`, `sha256`, the content `digest`
@@ -209,9 +218,14 @@ consumer can fetch the small manifest first and download the zips only when
 `feed_version` or a `sha256` changed.
 
 Nothing is published, and the site keeps the previous day's files, when the
-secrets are missing, the download, pfaedle or the audit fails (the run shows
-a warning), or the index and both zips have the same content as the ones
-already published.
+secrets are missing, the download, pfaedle or the audit fails, the site is
+refused (a feed whose `feed_version` does not start with a real date, a site
+over 500 MB), or the index and both zips have the same content as the ones
+already published. A failure is a warning while the published manifest's
+`built_at` is less than 2 days old; the run fails (red) when it is 2 days
+old or older, or names no build time, and at once when MÁV refuses the login
+(HTTP 401/403, which is never retried: only new credentials help). A
+published manifest that cannot be read leaves the run green with a warning.
 
 The integration reads the manifest about 10 to 20 minutes after Home
 Assistant starts (and after the options are saved, which reloads the
