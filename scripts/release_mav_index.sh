@@ -178,7 +178,7 @@ t_dl=$((SECONDS - t0))
 # The zip as served: the last response's Content-Length (when it sent one)
 # equals what arrived, and it is a GTFS zip with the members the build needs.
 python3 -I - "$work/gtfs/mav-gtfs.zip" "$work/mav-headers.txt" "$work/mav-curl.txt" <<'PY'
-import sys, zipfile
+import os, sys, zipfile
 path, headers, curl_w = sys.argv[1:4]
 code, size, ctype = (open(curl_w).read().split() + ["", "", ""])[:3]
 blocks = open(headers, encoding="latin-1").read().replace("\r", "").strip().split("\n\n")
@@ -187,7 +187,7 @@ for line in blocks[-1].splitlines():
     name, _, value = line.partition(":")
     if name.strip().lower() == "content-length":
         length = int(value.strip())
-actual = len(open(path, "rb").read())
+actual = os.path.getsize(path)
 if code != "200":
     sys.exit(f"MÁV GTFS: HTTP {code}")
 if length is not None and length != actual:
@@ -235,14 +235,28 @@ docker pull -q "$image" >/dev/null
 # removed on exit) and the run fails as on any pfaedle error.
 pfaedle_started=true
 rc=0
+t_run=$SECONDS
 timeout --kill-after=60 "$pfaedle_timeout" \
   docker run --rm --name "$container" --network none \
   -v "$osm":/osm/hungary-latest.osm.pbf:ro \
   -v "$work/gtfs":/gtfs:ro \
   -v "$work/gtfs-out":/gtfs-out \
   "$image" -D -m rail -x /osm/hungary-latest.osm.pbf -i /gtfs/mav-gtfs.zip -o /gtfs-out || rc=$?
-if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+# 124: stopped at the timeout. 137 (SIGKILL) is the timeout's kill only once
+# the limit has passed (pfaedle ignored SIGTERM); earlier it is a kill from
+# outside, the kernel's OOM killer most likely.
+ran=$((SECONDS - t_run))
+limit=$((10#${pfaedle_timeout%[smhd]}))
+case "$pfaedle_timeout" in
+  *m) limit=$((limit * 60)) ;;
+  *h) limit=$((limit * 3600)) ;;
+  *d) limit=$((limit * 86400)) ;;
+esac
+if [ "$rc" -eq 124 ] || { [ "$rc" -eq 137 ] && [ "$limit" -gt 0 ] && [ "$ran" -ge "$limit" ]; }; then
   echo "pfaedle did not finish within $pfaedle_timeout" >&2
+  exit 1
+elif [ "$rc" -eq 137 ]; then
+  echo "pfaedle was killed (exit 137, SIGKILL; out of memory?) after ${ran}s of the $pfaedle_timeout limit" >&2
   exit 1
 elif [ "$rc" -ne 0 ]; then
   echo "pfaedle failed (exit $rc)" >&2

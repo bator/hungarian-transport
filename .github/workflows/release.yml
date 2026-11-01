@@ -162,7 +162,14 @@ jobs:
           # tag to publish, the code to build (ref), the release whose
           # indexes the new ones replace (baseline), the commit the new tag
           # points at (target) and whether this is a timetable-only release.
+          # A tag that is not vX.Y.Z or vX.Y.Z-rev.N (a pushed v1.10, or a
+          # computed one gone wrong) stops the run here, before anything is
+          # built; an empty tag is a skip.
           emit() {
+            if [ -n "$1" ] && [[ ! "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rev\.[0-9]+)?$ ]]; then
+              echo "::error title=Bad tag::'${1}' is not vX.Y.Z or vX.Y.Z-rev.N; nothing is built or published."
+              exit 1
+            fi
             {
               echo "tag=${1}"
               echo "create=${2}"

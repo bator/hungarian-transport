@@ -15,6 +15,7 @@ import http.server
 import io
 import os
 import random
+import re
 import shutil
 import ssl
 import subprocess
@@ -110,7 +111,8 @@ with tempfile.TemporaryDirectory() as tmp_name:
     (checkout / "scripts" / "build_mav_index.py").write_text("")
     (checkout / "custom_components" / "hungarian_transport" / "mav_index.py").write_text("")
 
-    # docker: records its arguments; "run" fails, or hangs with DOCKER_HANG.
+    # docker: records its arguments; "run" fails, hangs with DOCKER_HANG, or
+    # exits with DOCKER_EXIT.
     stub = tmp / "stub"
     stub.mkdir()
     docker_log = tmp / "docker.log"
@@ -119,6 +121,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
         f'printf "%s\\n" "$*" >> "{docker_log}"\n'
         'if [ "$1" = run ]; then\n'
         '  if [ -n "${DOCKER_HANG:-}" ]; then exec sleep 60; fi\n'
+        '  if [ -n "${DOCKER_EXIT:-}" ]; then exit "$DOCKER_EXIT"; fi\n'
         "  exit 3\n"
         "fi\n"
         "exit 0\n"
@@ -230,6 +233,17 @@ with tempfile.TemporaryDirectory() as tmp_name:
     check("a pfaedle run past PFAEDLE_TIMEOUT fails the script",
           done.returncode != 0 and "did not finish within 2s" in done.stderr, repr((done.returncode, done.stderr)))
     check("its container is removed", any(line.startswith("rm -f mav-pfaedle-") for line in log), repr(log))
+
+    # 7. A pfaedle run killed well before PFAEDLE_TIMEOUT (exit 137, the OOM
+    # killer) is reported as a kill with its run time, not as a timeout.
+    docker_log.unlink(missing_ok=True)
+    done = run("rel/work", password=None, MAV_GTFS_ZIP=str(first), PFAEDLE_TIMEOUT="30m", DOCKER_EXIT="137")
+    log = docker_log.read_text().splitlines() if docker_log.exists() else []
+    check("a pfaedle run killed before PFAEDLE_TIMEOUT fails the script as a kill, not a timeout",
+          done.returncode == 1 and "did not finish" not in done.stderr
+          and re.search(r"pfaedle was killed \(exit 137, SIGKILL; out of memory\?\) after \d+s of the 30m limit",
+                        done.stderr) is not None, repr((done.returncode, done.stderr)))
+    check("the killed run's container is removed", any(line.startswith("rm -f mav-pfaedle-") for line in log), repr(log))
 
     server.shutdown()
 

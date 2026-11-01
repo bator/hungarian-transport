@@ -179,6 +179,12 @@ check("GitHub API failure stops the run", code != 0 and "tag" not in o and "Coul
 code, o, log = run(tie, bare="v1.9.16")
 check("a bare tag on the next version stops the weekly run", code != 0 and "tag" not in o
       and "v1.9.16 already exists" in log, f"{code} {o} {log}")
+for bad in ("v1.10", "v1.9.16-beta.1", "v1.9.16-rev.", "1.9.16", "v1.9.16\nv2.0.0"):
+    code, o, log = run(tie, event="push", ref_type="tag", ref_name=bad)
+    check(f"a pushed tag {bad!r} that is not vX.Y.Z(-rev.N) stops the run before any output",
+          code != 0 and o == {} and "is not vX.Y.Z or vX.Y.Z-rev.N" in log, f"{code} {o} {log}")
+code, o, log = run(tie, event="push", ref_type="tag", ref_name="v1.9.17-rev.2")
+check("a pushed -rev.N tag passes the tag check", code == 0 and o.get("tag") == "v1.9.17-rev.2", f"{code} {o} {log}")
 code, o, log = run([rel("v1.9.16-rev.1", T)])
 check("no stable release: nothing to refresh", code == 0 and o.get("tag") == "" and o.get("create") == "false",
       f"{code} {o} {log}")
