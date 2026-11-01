@@ -18,7 +18,7 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from custom_components.hungarian_transport import mav, mav_daily, mav_index
-from custom_components.hungarian_transport.const import CONF_DAILY_MAV, DOMAIN
+from custom_components.hungarian_transport.const import CONF_DAILY_MAV, CONF_DAILY_TIME, DOMAIN
 
 NEW = "20261101.M2ChangeID"
 OLD = "20261025.M2ChangeID"
@@ -334,50 +334,124 @@ def _later(hass: HomeAssistant, seconds: float) -> None:
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=seconds))
 
 
-async def test_runs_after_startup_and_then_every_interval(
-    hass: HomeAssistant, aioclient_mock, card_assets
+async def _at(hass: HomeAssistant, freezer, when: str) -> None:
+    moment = dt_util.parse_datetime(when)
+    freezer.move_to(moment)
+    async_fire_time_changed(hass, moment)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+
+@pytest.fixture
+def budapest(hass: HomeAssistant, freezer):
+    """Local time Europe/Budapest, 03:00 on 1 November 2026 (CET, +01:00)."""
+    freezer.move_to("2026-11-01 03:00:00+01:00")
+    return hass.config.async_set_time_zone("Europe/Budapest")
+
+
+@pytest.fixture
+def max_jitter(monkeypatch):
+    """Every random delay at its upper end."""
+    monkeypatch.setattr(mav_daily.random, "uniform", lambda a, b: b)
+
+
+async def test_runs_after_startup_and_then_daily_at_the_chosen_time(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, max_jitter
 ) -> None:
-    """Each round is scheduled from the loop's clock, which the fired time
-    does not move: the offsets below count from setup."""
+    await budapest
     (card_assets / mav.INDEX_NAME).write_bytes(_index(NEW))
     _serve(aioclient_mock, _index(NEW))
-    entry = await _setup(hass, {})
+    entry = await _setup(hass, {CONF_DAILY_TIME: "05:30:00"})
 
-    # Not right at startup: the startup build goes first.
-    _later(hass, mav_daily.FIRST_DELAY - 60)
-    await hass.async_block_till_done(wait_background_tasks=True)
+    # Not right at startup: the startup build goes first (10 + 10 minutes).
+    await _at(hass, freezer, "2026-11-01 03:19:50+01:00")
     assert aioclient_mock.call_count == 0
-    _later(hass, mav_daily.FIRST_DELAY + mav_daily.FIRST_JITTER + 1)
-    await hass.async_block_till_done(wait_background_tasks=True)
+    await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
     assert aioclient_mock.call_count == 1
 
-    _later(hass, mav_daily.INTERVAL - mav_daily.INTERVAL_JITTER - 60)
-    await hass.async_block_till_done(wait_background_tasks=True)
+    # Then at 05:30 local time, plus up to DAILY_JITTER, once a day.
+    await _at(hass, freezer, "2026-11-01 05:29:59+01:00")
     assert aioclient_mock.call_count == 1
-    _later(hass, mav_daily.INTERVAL + mav_daily.INTERVAL_JITTER + 60)
-    await hass.async_block_till_done(wait_background_tasks=True)
+    await _at(hass, freezer, "2026-11-01 05:30:00+01:00")
+    await _at(hass, freezer, "2026-11-01 05:34:50+01:00")
+    assert aioclient_mock.call_count == 1
+    await _at(hass, freezer, "2026-11-01 05:35:01+01:00")
     assert aioclient_mock.call_count == 2
+    await _at(hass, freezer, "2026-11-01 23:59:00+01:00")
+    assert aioclient_mock.call_count == 2
+    await _at(hass, freezer, "2026-11-02 05:30:00+01:00")
+    await _at(hass, freezer, "2026-11-02 05:35:01+01:00")
+    assert aioclient_mock.call_count == 3
 
     # Unloaded: no further round.
     assert await hass.config_entries.async_unload(entry.entry_id)
-    _later(hass, 3 * mav_daily.INTERVAL)
-    await hass.async_block_till_done(wait_background_tasks=True)
+    await _at(hass, freezer, "2026-11-03 05:30:00+01:00")
+    await _at(hass, freezer, "2026-11-03 05:40:00+01:00")
+    assert aioclient_mock.call_count == 3
+
+
+async def test_default_time_is_six_with_a_small_jitter(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, monkeypatch
+) -> None:
+    await budapest
+    delays = []
+
+    def uniform(a, b):
+        delays.append((a, b))
+        return b
+
+    monkeypatch.setattr(mav_daily.random, "uniform", uniform)
+    (card_assets / mav.INDEX_NAME).write_bytes(_index(NEW))
+    _serve(aioclient_mock, _index(NEW))
+    await _setup(hass, {})
+    await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
+    assert aioclient_mock.call_count == 1
+    await _at(hass, freezer, "2026-11-01 06:00:00+01:00")
+    await _at(hass, freezer, "2026-11-01 06:05:01+01:00")
     assert aioclient_mock.call_count == 2
+    assert delays[-1] == (0, mav_daily.DAILY_JITTER) and mav_daily.DAILY_JITTER <= 5 * 60
 
 
-async def test_turned_off_makes_no_request(hass: HomeAssistant, aioclient_mock, card_assets) -> None:
+async def test_a_new_time_in_the_options_reschedules(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, max_jitter
+) -> None:
+    await budapest
+    (card_assets / mav.INDEX_NAME).write_bytes(_index(NEW))
+    _serve(aioclient_mock, _index(NEW))
+    entry = await _setup(hass, {CONF_DAILY_TIME: "05:30:00"})
+    await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
+    assert aioclient_mock.call_count == 1
+
+    # The update listener reloads the entry with the new time.
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_DAILY_TIME: "07:15:00"})
+    await hass.async_block_till_done(wait_background_tasks=True)
+    count = aioclient_mock.call_count
+    await _at(hass, freezer, "2026-11-01 03:45:00+01:00")  # the reload's own first round
+    count = aioclient_mock.call_count
+    await _at(hass, freezer, "2026-11-01 05:30:00+01:00")
+    await _at(hass, freezer, "2026-11-01 05:40:00+01:00")
+    assert aioclient_mock.call_count == count
+    await _at(hass, freezer, "2026-11-01 07:15:00+01:00")
+    await _at(hass, freezer, "2026-11-01 07:20:01+01:00")
+    assert aioclient_mock.call_count == count + 1
+
+
+async def test_turned_off_makes_no_request(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest
+) -> None:
+    await budapest
     _serve(aioclient_mock, _index(NEW))
     await _setup(hass, {CONF_DAILY_MAV: False})
-    for k in range(1, 4):
-        _later(hass, k * (mav_daily.INTERVAL + mav_daily.FIRST_DELAY + mav_daily.FIRST_JITTER))
-        await hass.async_block_till_done(wait_background_tasks=True)
+    for when in ("2026-11-01 03:30:00+01:00", "2026-11-01 06:00:00+01:00", "2026-11-01 06:10:00+01:00",
+                 "2026-11-02 06:10:00+01:00"):
+        await _at(hass, freezer, when)
     assert aioclient_mock.call_count == 0
     assert not (card_assets / mav.INDEX_NAME).exists()
 
 
 async def test_an_unexpected_error_is_logged_once_and_retried(
-    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch, caplog
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch, caplog, freezer, budapest, max_jitter
 ) -> None:
+    await budapest
     calls = []
 
     async def broken(hass, www):
@@ -386,10 +460,9 @@ async def test_an_unexpected_error_is_logged_once_and_retried(
 
     monkeypatch.setattr(mav_daily, "async_update", broken)
     await _setup(hass, {})
-    _later(hass, mav_daily.FIRST_DELAY + mav_daily.FIRST_JITTER + 1)
-    await hass.async_block_till_done(wait_background_tasks=True)
-    _later(hass, mav_daily.INTERVAL + mav_daily.INTERVAL_JITTER + 60)
-    await hass.async_block_till_done(wait_background_tasks=True)
+    await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
+    await _at(hass, freezer, "2026-11-01 06:00:00+01:00")
+    await _at(hass, freezer, "2026-11-01 06:05:01+01:00")
     assert len(calls) == 2
     assert len(_warnings(caplog)) == 1
 

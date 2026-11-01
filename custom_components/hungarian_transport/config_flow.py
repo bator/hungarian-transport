@@ -14,10 +14,22 @@ from homeassistant.helpers.selector import (
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
+    TimeSelector,
 )
 
-from .const import CONF_API_KEY, CONF_DAILY_MAV, DEFAULT_DAILY_MAV, DOMAIN
+from .const import (
+    CONF_API_KEY,
+    CONF_DAILY_MAV,
+    CONF_DAILY_TIME,
+    CONF_NOTIFY_SERVICE,
+    CONF_NOTIFY_UPDATES,
+    DEFAULT_DAILY_MAV,
+    DEFAULT_DAILY_TIME,
+    DEFAULT_NOTIFY_UPDATES,
+    DOMAIN,
+)
 from .futar import FutarAuthError, FutarError, FutarUpstreamRateLimited, futar_get
+from .timetable_notify import check_service, parse_daily_time
 
 KEY_URL = "https://opendata.bkk.hu/data-sources"
 # Options flow: an empty key field keeps the stored key, this removes it.
@@ -59,10 +71,21 @@ def _key_schema(has_key: bool = False) -> vol.Schema:
     return vol.Schema(fields)
 
 
-def _options_schema(has_key: bool, daily_mav: bool) -> vol.Schema:
-    """The key fields, then the daily MÁV route index from GitHub (mav_daily.py)."""
+def _options_schema(has_key: bool, values: dict[str, Any]) -> vol.Schema:
+    """The key fields, the daily MÁV route index from GitHub (mav_daily.py)
+    and its time, then the update notifications (timetable_notify.py).
+
+    The service is a suggested value, not a default: a default would come
+    back when the field is cleared."""
     return _key_schema(has_key).extend(
-        {vol.Optional(CONF_DAILY_MAV, default=daily_mav): BooleanSelector()}
+        {
+            vol.Optional(CONF_DAILY_MAV, default=values[CONF_DAILY_MAV]): BooleanSelector(),
+            vol.Optional(CONF_DAILY_TIME, default=values[CONF_DAILY_TIME]): TimeSelector(),
+            vol.Optional(CONF_NOTIFY_UPDATES, default=values[CONF_NOTIFY_UPDATES]): BooleanSelector(),
+            vol.Optional(
+                CONF_NOTIFY_SERVICE, description={"suggested_value": values[CONF_NOTIFY_SERVICE]}
+            ): TextSelector(),
+        }
     )
 
 
@@ -140,7 +163,8 @@ class HungarianTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
-    """Set, change or clear the BKK Open Data key; the daily MÁV index on or off."""
+    """Set, change or clear the BKK Open Data key; the daily MÁV index on or
+    off and its time; update notifications."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -150,9 +174,25 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
         entry = self.hass.config_entries.async_get_entry(self.handler)
         options = dict(entry.options) if entry else {}
         current = str(options.get(CONF_API_KEY) or "")
-        daily_mav = bool(options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV))
+        values: dict[str, Any] = {
+            CONF_DAILY_MAV: bool(options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV)),
+            CONF_DAILY_TIME: str(options.get(CONF_DAILY_TIME) or DEFAULT_DAILY_TIME),
+            CONF_NOTIFY_UPDATES: bool(options.get(CONF_NOTIFY_UPDATES, DEFAULT_NOTIFY_UPDATES)),
+            CONF_NOTIFY_SERVICE: str(options.get(CONF_NOTIFY_SERVICE) or ""),
+        }
         errors: dict[str, str] = {}
         if user_input is not None:
+            # What the form shows again on an error: what was submitted.
+            # (The time selector has checked the time already.)
+            service, error = check_service(self.hass, str(user_input.get(CONF_NOTIFY_SERVICE) or "").strip())
+            values = {
+                CONF_DAILY_MAV: bool(user_input.get(CONF_DAILY_MAV, values[CONF_DAILY_MAV])),
+                CONF_DAILY_TIME: parse_daily_time(user_input.get(CONF_DAILY_TIME)).strftime("%H:%M:%S"),
+                CONF_NOTIFY_UPDATES: bool(user_input.get(CONF_NOTIFY_UPDATES, values[CONF_NOTIFY_UPDATES])),
+                CONF_NOTIFY_SERVICE: service,
+            }
+            if error:
+                errors[CONF_NOTIFY_SERVICE] = error
             typed = (user_input.get(CONF_API_KEY) or "").strip()
             if user_input.get(CONF_REMOVE_KEY):
                 # A new key and "remove" at once: saving either one would
@@ -167,10 +207,8 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
                 if error := await _validate_key(self.hass, api_key):
                     errors["base"] = error
             if not errors:
-                new = {
-                    CONF_API_KEY: api_key,
-                    CONF_DAILY_MAV: bool(user_input.get(CONF_DAILY_MAV, daily_mav)),
-                }
+                # Every other option stays as it was.
+                new = {**options, CONF_API_KEY: api_key, **values}
                 if entry is not None and new == options:
                     # Saving the same options fires no update listener, so
                     # the entry is not reloaded: reload it here, or a proxy
@@ -179,7 +217,7 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
                 return self.async_create_entry(data=new)
         return self.async_show_form(
             step_id="init",
-            data_schema=_options_schema(bool(current), daily_mav),
+            data_schema=_options_schema(bool(current), values),
             errors=errors,
             description_placeholders={"url": KEY_URL},
         )
