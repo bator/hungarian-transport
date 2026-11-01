@@ -49,6 +49,9 @@ REQUIRED_FILES = ("routes.txt", "trips.txt", "stops.txt", "stop_times.txt")
 # passing the audit: the same guard as scripts/build_mav_index.py.
 MIN_TRAINS = 50
 MIN_OK = 0.99
+# write's temp file suffix when the caller names it (mkstemp's own is eight
+# characters of the same set, so one pattern finds both).
+TEMP_SUFFIX_RE = re.compile(r"[a-z0-9_]{8}")
 
 
 def train_number(name: str) -> str:
@@ -427,13 +430,23 @@ def build(path: Path) -> dict[str, Any]:
     }
 
 
-def write(index: dict[str, Any], out: Path) -> int:
-    """Atomically write index (without build stats) as gzip JSON; bytes."""
+def write(index: dict[str, Any], out: Path, temp_suffix: str | None = None) -> int:
+    """Atomically write index (without build stats) as gzip JSON; bytes.
+
+    The temp file is out's name, a dot and eight random characters, or
+    temp_suffix (eight of [a-z0-9_]) when given: Home Assistant names it, so
+    after a killed build it removes its own temp file and no one else's."""
     data = {k: v for k, v in index.items() if not k.startswith("_")}
     raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=out.name + ".", dir=str(out.parent))
+    if temp_suffix is None:
+        fd, tmp = tempfile.mkstemp(prefix=out.name + ".", dir=str(out.parent))
+    else:
+        if not TEMP_SUFFIX_RE.fullmatch(temp_suffix):
+            raise ValueError(f"temp suffix must be eight of [a-z0-9_]: {temp_suffix!r}")
+        tmp = str(out.parent / f"{out.name}.{temp_suffix}")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         # mkstemp makes the file 0600; the index is served, and travels into
         # the release zip, so it gets the mode a plain file would have.
@@ -545,7 +558,12 @@ def audit(path: Path, index: dict[str, Any], loaded: tuple | None = None) -> dic
 
 
 def build_and_audit(
-    src: Path, out: Path, *, min_trains: int = MIN_TRAINS, min_ok: float = MIN_OK
+    src: Path,
+    out: Path,
+    *,
+    min_trains: int = MIN_TRAINS,
+    min_ok: float = MIN_OK,
+    temp_suffix: str | None = None,
 ) -> dict[str, Any]:
     """Check, build and audit, then write; the stats dict Home Assistant keeps.
 
@@ -573,7 +591,7 @@ def build_and_audit(
             f"({report['ok_ratio']:.1%}, at least {min_ok:.0%} expected)"
         )
         return stats
-    stats["bytes"] = write(index, out)
+    stats["bytes"] = write(index, out, temp_suffix)
     stats["written"] = True
     return stats
 
@@ -590,6 +608,7 @@ def _main(argv: list[str]) -> int:
     parser.add_argument("out", help="index to write (mav-index.json.gz)")
     parser.add_argument("--min-trains", type=int, default=MIN_TRAINS)
     parser.add_argument("--min-ok", type=float, default=MIN_OK)
+    parser.add_argument("--temp-suffix", help="the temp file's suffix (eight of [a-z0-9_])")
     try:
         args = parser.parse_args(argv[1:])
     except SystemExit as err:
@@ -601,7 +620,11 @@ def _main(argv: list[str]) -> int:
         pass
     try:
         stats = build_and_audit(
-            Path(args.feed), Path(args.out), min_trains=args.min_trains, min_ok=args.min_ok
+            Path(args.feed),
+            Path(args.out),
+            min_trains=args.min_trains,
+            min_ok=args.min_ok,
+            temp_suffix=args.temp_suffix,
         )
     except Exception as err:  # noqa: BLE001 - the parent reads stderr
         print(f"{type(err).__name__}: {err}", file=sys.stderr)
