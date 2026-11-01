@@ -37,23 +37,35 @@ Object.assign(BkkLib, {
     return t;
   },
   nameEq(a, b) {
-    if (!a || !b) return false;
-    if (a === b) return true;
-    const na = BkkLib.norm(a);
-    const nb = BkkLib.norm(b);
-    if (na && nb && na === nb) return true;
-    const sa = BkkLib.stationKey(a);
-    const sb = BkkLib.stationKey(b);
-    if (sa && sb && sa === sb) return true;
-    const fa = BkkLib.fold(sa || a);
-    const fb = BkkLib.fold(sb || b);
-    if (fa && fb && fa === fb) return true;
-    const pa = BkkLib.placeNameKey({ name: a });
-    const pb = BkkLib.placeNameKey({ name: b });
-    if (!pa || !pb || pa !== pb) return false;
-    /* The place key drops the city: "Győr, autóbusz-állomás" and "Szeged,
-       autóbusz-állomás" share it. Two named, different cities are two places. */
-    return !BkkLib.citiesConflict({ name: a }, { name: b });
+    return BkkLib.nameMatcher(b)(a);
+  },
+  /* nameEq against one fixed name `b`: its keys are worked out once (and
+     only when a comparison gets that far), not again for every stop of
+     every trip it is checked against. */
+  nameMatcher(b) {
+    let nb;
+    let sb;
+    let fb;
+    let pb;
+    return (a) => {
+      if (!a || !b) return false;
+      if (a === b) return true;
+      const na = BkkLib.norm(a);
+      if (nb === undefined) nb = BkkLib.norm(b);
+      if (na && nb && na === nb) return true;
+      const sa = BkkLib.stationKey(a);
+      if (sb === undefined) sb = BkkLib.stationKey(b);
+      if (sa && sb && sa === sb) return true;
+      const fa = BkkLib.fold(sa || a);
+      if (fb === undefined) fb = BkkLib.fold(sb || b);
+      if (fa && fb && fa === fb) return true;
+      const pa = BkkLib.placeNameKey({ name: a });
+      if (pb === undefined) pb = BkkLib.placeNameKey({ name: b });
+      if (!pa || !pb || pa !== pb) return false;
+      /* The place key drops the city: "Győr, autóbusz-állomás" and "Szeged,
+         autóbusz-állomás" share it. Two named, different cities are two places. */
+      return !BkkLib.citiesConflict({ name: a }, { name: b });
+    };
   },
   fold(s) {
     return BkkLib.norm(s)

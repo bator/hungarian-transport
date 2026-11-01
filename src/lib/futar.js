@@ -16,7 +16,6 @@ Object.assign(BkkLib, {
   _mem: {},
   _inflight: {},
   _gateActive: 0,
-  _gateCards: 0,
   _gateWaiters: [],
   _gateFgWaiters: [],
   _boards: new Map(),
@@ -26,9 +25,20 @@ Object.assign(BkkLib, {
     const cards = Math.max(1, BkkLib._gateCards || 1);
     return Math.min(24, Math.max(4, cards * 2));
   },
+  /* Hands the free slots to the waiters, boards first: a limit that grew
+     (another card connected) does not leave them queued behind a full one. */
+  _gateDrain() {
+    while (BkkLib._gateActive < BkkLib._gateLimit()) {
+      const next = BkkLib._gateFgWaiters.shift() || BkkLib._gateWaiters.shift();
+      if (!next) break;
+      BkkLib._gateActive += 1;
+      next();
+    }
+  },
   /* Foreground calls are the departure boards. They jump ahead of trip-details
      so one card finishing does not hold up the other cards on the dashboard. */
   async _gate(foreground) {
+    BkkLib._gateDrain();
     const busy = BkkLib._gateActive >= BkkLib._gateLimit();
     const fgWaiting = BkkLib._gateFgWaiters.length > 0;
     if (!busy && (foreground || !fgWaiting)) {
@@ -40,9 +50,8 @@ Object.assign(BkkLib, {
     });
   },
   _ungate() {
-    const next = BkkLib._gateFgWaiters.shift() || BkkLib._gateWaiters.shift();
-    if (next) next();
-    else BkkLib._gateActive = Math.max(0, BkkLib._gateActive - 1);
+    BkkLib._gateActive = Math.max(0, BkkLib._gateActive - 1);
+    BkkLib._gateDrain();
   },
   _cached(cache, key) {
     if (BkkLib._mem[key]) return BkkLib._mem[key];
@@ -242,5 +251,18 @@ Object.assign(BkkLib, {
     } catch (_e) {
       return '';
     }
+  },
+});
+
+/* Cards connecting raise the limit: the change itself wakes the waiters
+   the new limit has room for. */
+let gateCards = 0;
+Object.defineProperty(BkkLib, '_gateCards', {
+  configurable: true,
+  enumerable: true,
+  get() { return gateCards; },
+  set(n) {
+    gateCards = n;
+    BkkLib._gateDrain();
   },
 });

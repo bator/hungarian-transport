@@ -101,6 +101,7 @@ Object.assign(BkkLib, {
         const row = entry.row;
         row.lat = gps[0];
         row.lon = gps[1];
+        row.gpsAt = Math.floor(Date.now() / 1000);
         delete row.gpsCarried;
         if (v.heading != null) row.heading = v.heading;
         if (v.speed != null) row.speed = v.speed;
@@ -132,11 +133,27 @@ Object.assign(BkkLib, {
     if (stripped) add('SZ' + stripped);
     return keys;
   },
+  /* How long a carried coach position (gpsCarried) stands in while the
+     lookup keeps failing: past this it is no live position any more. */
+  COACH_GPS_STALE_S: 120,
   applyCoachGps(rows, vehicles, nowSec) {
     const list = Array.isArray(rows) ? rows : [];
+    const now = Number.isFinite(Number(nowSec)) ? Number(nowSec) : Math.floor(Date.now() / 1000);
     /* null: the lookup failed. The carried positions stay (still marked
-       gpsCarried) until a lookup answers. */
-    if (vehicles === null) return list;
+       gpsCarried) until a lookup answers, but only while their fix (gpsAt)
+       is fresh: an old one is dropped, not shown as live. */
+    if (vehicles === null) {
+      list.forEach((row) => {
+        if (!row || !row.gpsCarried) return;
+        const at = Number(row.gpsAt);
+        if (at > 0 && now - at <= BkkLib.COACH_GPS_STALE_S) return;
+        row.lat = null;
+        row.lon = null;
+        delete row.gpsCarried;
+        delete row.gpsAt;
+      });
+      return list;
+    }
     const vehs = Array.isArray(vehicles) ? vehicles : [];
     const byRoute = new Map();
     const fold = (value) => String(value || '').toLowerCase()
@@ -149,7 +166,6 @@ Object.assign(BkkLib, {
         byRoute.get(key).push(vehicle);
       });
     });
-    const now = Number.isFinite(Number(nowSec)) ? Number(nowSec) : Math.floor(Date.now() / 1000);
     const rowHead = (row) => fold(row.headsign || row.head);
     const vehicleClassOk = (row, vehicle) => {
       const route = String(vehicle.route || '').trim().toUpperCase();
@@ -220,6 +236,7 @@ Object.assign(BkkLib, {
       if (!gps) return;
       list[pair.idx].lat = gps[0];
       list[pair.idx].lon = gps[1];
+      list[pair.idx].gpsAt = now;
       delete list[pair.idx].gpsCarried;
     });
     /* The last poll's position (gpsCarried) only bridged this lookup: a row
@@ -229,6 +246,7 @@ Object.assign(BkkLib, {
       row.lat = null;
       row.lon = null;
       delete row.gpsCarried;
+      delete row.gpsAt;
     });
     return list;
   },
@@ -374,6 +392,7 @@ Object.assign(BkkLib, {
       if (incoming && (row.gpsCarried || !BkkLib.mapGpsLatLon(row.lat, row.lon))) {
         row.lat = incoming[0];
         row.lon = incoming[1];
+        row.gpsAt = Math.floor(Date.now() / 1000);
         delete row.gpsCarried;
       }
     });

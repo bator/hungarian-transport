@@ -39,21 +39,33 @@ Object.assign(BkkLib, {
     return t2;
   },
   nameEq(a, b) {
-    if (!a || !b) return false;
-    if (a === b) return true;
-    const na = BkkLib.norm(a);
-    const nb = BkkLib.norm(b);
-    if (na && nb && na === nb) return true;
-    const sa = BkkLib.stationKey(a);
-    const sb = BkkLib.stationKey(b);
-    if (sa && sb && sa === sb) return true;
-    const fa = BkkLib.fold(sa || a);
-    const fb = BkkLib.fold(sb || b);
-    if (fa && fb && fa === fb) return true;
-    const pa = BkkLib.placeNameKey({ name: a });
-    const pb = BkkLib.placeNameKey({ name: b });
-    if (!pa || !pb || pa !== pb) return false;
-    return !BkkLib.citiesConflict({ name: a }, { name: b });
+    return BkkLib.nameMatcher(b)(a);
+  },
+  /* nameEq against one fixed name `b`: its keys are worked out once (and
+     only when a comparison gets that far), not again for every stop of
+     every trip it is checked against. */
+  nameMatcher(b) {
+    let nb;
+    let sb;
+    let fb;
+    let pb;
+    return (a) => {
+      if (!a || !b) return false;
+      if (a === b) return true;
+      const na = BkkLib.norm(a);
+      if (nb === void 0) nb = BkkLib.norm(b);
+      if (na && nb && na === nb) return true;
+      const sa = BkkLib.stationKey(a);
+      if (sb === void 0) sb = BkkLib.stationKey(b);
+      if (sa && sb && sa === sb) return true;
+      const fa = BkkLib.fold(sa || a);
+      if (fb === void 0) fb = BkkLib.fold(sb || b);
+      if (fa && fb && fa === fb) return true;
+      const pa = BkkLib.placeNameKey({ name: a });
+      if (pb === void 0) pb = BkkLib.placeNameKey({ name: b });
+      if (!pa || !pb || pa !== pb) return false;
+      return !BkkLib.citiesConflict({ name: a }, { name: b });
+    };
   },
   fold(s) {
     return BkkLib.norm(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
@@ -1244,7 +1256,6 @@ Object.assign(BkkLib, {
   _mem: {},
   _inflight: {},
   _gateActive: 0,
-  _gateCards: 0,
   _gateWaiters: [],
   _gateFgWaiters: [],
   _boards: /* @__PURE__ */ new Map(),
@@ -1254,9 +1265,20 @@ Object.assign(BkkLib, {
     const cards = Math.max(1, BkkLib._gateCards || 1);
     return Math.min(24, Math.max(4, cards * 2));
   },
+  /* Hands the free slots to the waiters, boards first: a limit that grew
+     (another card connected) does not leave them queued behind a full one. */
+  _gateDrain() {
+    while (BkkLib._gateActive < BkkLib._gateLimit()) {
+      const next = BkkLib._gateFgWaiters.shift() || BkkLib._gateWaiters.shift();
+      if (!next) break;
+      BkkLib._gateActive += 1;
+      next();
+    }
+  },
   /* Foreground calls are the departure boards. They jump ahead of trip-details
      so one card finishing does not hold up the other cards on the dashboard. */
   async _gate(foreground) {
+    BkkLib._gateDrain();
     const busy = BkkLib._gateActive >= BkkLib._gateLimit();
     const fgWaiting = BkkLib._gateFgWaiters.length > 0;
     if (!busy && (foreground || !fgWaiting)) {
@@ -1268,9 +1290,8 @@ Object.assign(BkkLib, {
     });
   },
   _ungate() {
-    const next = BkkLib._gateFgWaiters.shift() || BkkLib._gateWaiters.shift();
-    if (next) next();
-    else BkkLib._gateActive = Math.max(0, BkkLib._gateActive - 1);
+    BkkLib._gateActive = Math.max(0, BkkLib._gateActive - 1);
+    BkkLib._gateDrain();
   },
   _cached(cache, key) {
     if (BkkLib._mem[key]) return BkkLib._mem[key];
@@ -1467,6 +1488,18 @@ Object.assign(BkkLib, {
     } catch (_e) {
       return "";
     }
+  }
+});
+var gateCards = 0;
+Object.defineProperty(BkkLib, "_gateCards", {
+  configurable: true,
+  enumerable: true,
+  get() {
+    return gateCards;
+  },
+  set(n) {
+    gateCards = n;
+    BkkLib._gateDrain();
   }
 });
 
@@ -1719,18 +1752,16 @@ Object.assign(BkkLib, {
     if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + "," + lon;
     return String(hit.id || "");
   },
+  /* '' when the geocoder knows no such stop; a geocoder that failed
+     (Transitous down) rejects, so a plan says "try again", not "no route". */
   async transitousPlace(stop, kind) {
     if (!stop) return "";
     const pt = BkkLib.mapGpsLatLon(stop.lat, stop.lon);
     if (pt) return pt[0] + "," + pt[1];
     const name = String(stop.name || "").trim();
     if (!name) return String(stop.id || "");
-    try {
-      const hits = await BkkLib.transitousGeocode(name);
-      return BkkLib.transitousCoord(BkkLib.pickTransitousHit(hits, stop, kind));
-    } catch (_e) {
-      return "";
-    }
+    const hits = await BkkLib.transitousGeocode(name);
+    return BkkLib.transitousCoord(BkkLib.pickTransitousHit(hits, stop, kind));
   },
   async transitousStopRef(stop, kind) {
     const name = String(stop && (stop.name || stop.key) || "").trim();
@@ -1770,6 +1801,7 @@ Object.assign(BkkLib, {
     if (stripped && stripped !== name) queries.push(stripped);
     const hits = [];
     const seen = {};
+    let geoFailed = 0;
     for (let i = 0; i < queries.length; i += 1) {
       try {
         const found = await BkkLib.transitousGeocode(queries[i]);
@@ -1780,7 +1812,11 @@ Object.assign(BkkLib, {
           hits.push(hit2);
         });
       } catch (_e) {
+        geoFailed += 1;
       }
+    }
+    if (queries.length && geoFailed === queries.length && !fromStop) {
+      throw new Error("Transitous geocode unavailable");
     }
     let hit = BkkLib.pickTransitousHit(hits, stop, kind);
     if ((kind === "rail" || kind === "train") && hit && !/railway|hu-mav_/i.test(String(hit.id || ""))) {
@@ -1891,10 +1927,16 @@ Object.assign(BkkLib, {
   async transitousDepartures(origin, dest, opts) {
     opts = opts || {};
     if (!dest || !(dest.key || dest.name || dest.id)) return [];
-    const [fromPlace, toPlace] = await Promise.all([
-      BkkLib.transitousPlace(origin),
-      BkkLib.transitousPlace(dest)
-    ]);
+    let fromPlace;
+    let toPlace;
+    try {
+      [fromPlace, toPlace] = await Promise.all([
+        BkkLib.transitousPlace(origin),
+        BkkLib.transitousPlace(dest)
+      ]);
+    } catch (_e) {
+      return [];
+    }
     if (!fromPlace || !toPlace) return [];
     const horizon = clampMinutesAfter(opts.minutesAfter);
     const anchor = Number(opts.anchorDep || 0);
@@ -2362,8 +2404,9 @@ Object.assign(BkkLib, {
     return (await BkkLib.transitousJourneysResult(origin, dest, opts)).list;
   },
   /* The itineraries, and whether Transitous answered at all: failed when
-     the plan request itself failed (an outage), answered when it replied,
-     even with nothing. Neither when the places could not be resolved. */
+     the plan or a stop's geocode request failed (an outage), answered when
+     it replied, even with nothing. Neither when the geocoder knew no such
+     stop. */
   async transitousJourneysResult(origin, dest, opts) {
     let data;
     try {
@@ -2566,6 +2609,10 @@ Object.assign(BkkLib, {
         }
       }
     }
+    if (!list.length) {
+      const viaCity = await this.timedCityRailJourney(apiKey, hass, origin, dest, opts);
+      if (viaCity) list = [viaCity];
+    }
     if (!list.length && failed && !answered) throw new Error("route search unavailable");
     list.forEach((j) => BkkLib.nameJourneyEnds(j, origin, dest));
     list = BkkLib.dropDominatedJourneys(list);
@@ -2576,6 +2623,24 @@ Object.assign(BkkLib, {
       list.reverse();
     }
     return list.slice(0, opts.max || 6);
+  },
+  /* cityRailJourney for a chosen time. Departing: leave then. Arriving:
+     leave an hour, two, three before (never before now) and take the
+     latest start that is there in time. */
+  async timedCityRailJourney(apiKey, hass, origin, dest, opts) {
+    const at = Number(opts && opts.time) || Date.now();
+    if (!(opts && opts.arriveBy)) return this.cityRailJourney(apiKey, hass, origin, dest, { time: at });
+    const starts = [];
+    [60, 120, 180].forEach((back) => {
+      const start = Math.max(at - back * 6e4, Date.now());
+      if (start < at && starts.indexOf(start) < 0) starts.push(start);
+    });
+    for (let i = 0; i < starts.length; i++) {
+      const j = await this.cityRailJourney(apiKey, hass, origin, dest, { time: starts[i] });
+      if (!j) continue;
+      if (j.endMs && j.endMs <= at) return j;
+    }
+    return null;
   },
   async planJourney(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
@@ -2712,12 +2777,12 @@ Object.assign(BkkLib, {
      station (and as many again over tonight's night rides), so the
      nearest one's variants do not crowd out the others; the timetable
      picks among them. */
-  cityHubPaths(idx, originStop, perHub = 6) {
+  cityHubPaths(idx, originStop, perHub = 6, atMs) {
     if (!idx || !originStop) return [];
     const stops = idx.stops || [];
     const op = originStop.op;
-    const { rideAt, nightAt, nightUntil, walkAt } = BkkLib._cityHubGraph(idx, op, BkkLib.volanDay(0).ymd);
-    const night = nightUntil > BkkLib.volanDay(-1).mins;
+    const { rideAt, nightAt, nightUntil, walkAt } = BkkLib._cityHubGraph(idx, op, BkkLib.volanDay(0, atMs).ymd);
+    const night = nightUntil > BkkLib.volanDay(-1, atMs).mins;
     const ridesFrom = (at) => night ? (rideAt.get(at) || []).concat(nightAt.get(at) || []) : rideAt.get(at) || [];
     const hub = (st) => BkkLib.isRailHubName(st && st.name);
     const starts = [];
@@ -2859,8 +2924,10 @@ Object.assign(BkkLib, {
   RAIL_HUB_NAME_M: 2e3,
   /* Only from a city feed's own stop: a BKK or Volán origin matched by
      number or name lands on some other town's stop (BKK_F01020 "Kossuth
-     Lajos utca" was a Miskolc one). */
-  async cityRailJourney(apiKey, hass, origin, dest) {
+     Lajos utca" was a Miskolc one). opts.time (epoch ms) leaves then
+     instead of now. */
+  async cityRailJourney(apiKey, hass, origin, dest, opts) {
+    const atMs = Number(opts && opts.time) > 0 ? Number(opts.time) : void 0;
     if (!BkkLib.isRailDest(dest) || BkkLib.stopIdFamily(origin) !== "city") return null;
     let idx;
     try {
@@ -2875,7 +2942,7 @@ Object.assign(BkkLib, {
       if (opIx >= 0) originStop = BkkLib.volanMatchStop(idx, { id: "", name: origin.name || "" }, opIx);
     }
     if (!originStop || originStop.op == null) return null;
-    const paths = BkkLib.cityHubPaths(idx, originStop).filter((p) => p.edges.length);
+    const paths = BkkLib.cityHubPaths(idx, originStop, 6, atMs).filter((p) => p.edges.length);
     if (!paths.length) return null;
     const op = (idx.ops || [])[originStop.op];
     const cityName = op ? String(op.name).split(" — ")[0] : "";
@@ -2903,11 +2970,11 @@ Object.assign(BkkLib, {
     const isDestHub = destFold || destPt ? [sameName, ownStation, anyStation].map(placed).find((rule) => townHubs.some(rule)) : null;
     const toDest = isDestHub ? paths.filter((path) => path.hubFold && isDestHub({ fold: path.hubFold, lat: path.hubLat, lon: path.hubLon })) : [];
     const destIsHub = toDest.length > 0;
-    const startSec = Math.floor(Date.now() / 1e3);
+    const startSec = Math.floor((atMs || Date.now()) / 1e3);
     const rides = /* @__PURE__ */ new Map();
     const nextRide = (edge, readySec) => {
       const key = edge.fromI + "|" + edge.toI + "|" + edge.routes.join(",") + "|" + readySec;
-      if (!rides.has(key)) rides.set(key, BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.routes, readySec));
+      if (!rides.has(key)) rides.set(key, BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.routes, readySec, atMs));
       return rides.get(key);
     };
     const timeCityPath = (path) => {
@@ -3097,23 +3164,28 @@ Object.assign(BkkLib, {
     });
     return out;
   },
-  nextCityRide(idx, fromI, toI, routes, readySec) {
+  /* `atMs` is the moment whose service days are searched (a planned time;
+     now by default). A loop line passes a stop twice: every visit of
+     `fromI` is a boarding, with the first `toI` after it. */
+  nextCityRide(idx, fromI, toI, routes, readySec, atMs) {
     const trips = BkkLib.cityTripsOf(idx, routes);
     let best = null;
     for (let off = -1; off < 2; off++) {
-      const day = BkkLib.volanDay(off);
+      const day = BkkLib.volanDay(off, atMs);
       for (let n = 0; n < trips.length; n++) {
         const t2 = trips[n];
         if (!BkkLib.volanServiceOk(idx, t2[0], day.ymd, day.dow)) continue;
         const ps = t2[2] || [];
         const ms = t2[3] || [];
-        const o = ps.indexOf(fromI);
-        const d = ps.indexOf(toI);
-        if (o < 0 || d <= o) continue;
-        const dep = day.base + ms[o] * 60;
-        if (dep < readySec - 30) continue;
-        const arr = day.base + ms[d] * 60;
-        if (!best || arr < best.arr || arr === best.arr && dep > best.dep) best = { dep, arr, trip: t2, o, d };
+        let d = -1;
+        for (let o = ps.indexOf(fromI); o >= 0; o = ps.indexOf(fromI, o + 1)) {
+          if (d <= o) d = ps.indexOf(toI, o + 1);
+          if (d < 0) break;
+          const dep = day.base + ms[o] * 60;
+          if (dep < readySec - 30) continue;
+          const arr = day.base + ms[d] * 60;
+          if (!best || arr < best.arr || arr === best.arr && dep > best.dep) best = { dep, arr, trip: t2, o, d };
+        }
       }
     }
     return best;
@@ -3311,10 +3383,12 @@ Object.assign(BkkLib, {
             result2 |= (byte & 31) << shift;
             shift += 5;
           } while (byte >= 32);
+          if (index > encoded.length) break;
           const delta = result2 & 1 ? ~(result2 >> 1) : result2 >> 1;
           if (xy === 0) lat += delta;
           else lng += delta;
         }
+        if (index > encoded.length) break;
         coords.push([lat / factor, lng / factor]);
       }
     } catch (_e) {
@@ -4154,25 +4228,48 @@ Object.assign(BkkLib, {
      Opening a train map must not wait on a stalled server again for a while. */
   _mavEmptyAt: /* @__PURE__ */ new Map(),
   _mavEmptyRetryMs: 10 * 60 * 1e3,
+  /* A loaded index is asked again after this: the URL changes only at
+     midnight, and a wall tablet left open would keep yesterday's until then
+     though a new one is installed at 06:00. The request revalidates
+     (no-cache), so an unchanged index is a 304. */
+  _mavLoadedAt: /* @__PURE__ */ new Map(),
+  _mavMaxAgeMs: 6 * 3600 * 1e3,
   mavIndex() {
     const url = mavIndexUrl(this && this._ix && this._ix.mav);
     const cache = BkkLib._mavP;
     const hit = cache.get(url);
+    let prev = null;
     if (hit) {
       const emptyAt = BkkLib._mavEmptyAt.get(url);
-      if (!emptyAt || Date.now() - emptyAt < BkkLib._mavEmptyRetryMs) return hit;
+      const loadedAt = BkkLib._mavLoadedAt.get(url);
+      const fresh = emptyAt ? Date.now() - emptyAt < BkkLib._mavEmptyRetryMs : !loadedAt || Date.now() - loadedAt < BkkLib._mavMaxAgeMs;
+      if (fresh) return hit;
+      prev = hit;
       cache.delete(url);
       BkkLib._mavEmptyAt.delete(url);
+      BkkLib._mavLoadedAt.delete(url);
     }
     const empty = () => ({ n: {}, l: {}, p: [] });
+    const okIdx = (idx) => !!(idx && typeof idx === "object" && Array.isArray(idx.p) && idx.p.length > 0);
+    const fallback = async (idx) => {
+      const old = prev ? await prev : null;
+      return okIdx(old) ? old : idx;
+    };
     const p = BkkLib._loadMavIndex(url).then((idx) => {
-      const ok = idx && typeof idx === "object" && Array.isArray(idx.p) && idx.p.length > 0;
-      if (ok) BkkLib._mavEmptyAt.delete(url);
-      else BkkLib._mavEmptyAt.set(url, Date.now());
-      return idx && typeof idx === "object" ? idx : empty();
+      const ok = okIdx(idx);
+      if (ok) {
+        BkkLib._mavEmptyAt.delete(url);
+        BkkLib._mavLoadedAt.set(url, Date.now());
+        BkkLib._mavLoadedAt.forEach((_t, k) => {
+          if (!cache.has(k)) BkkLib._mavLoadedAt.delete(k);
+        });
+        return idx;
+      }
+      BkkLib._mavEmptyAt.set(url, Date.now());
+      return fallback(idx && typeof idx === "object" ? idx : empty());
     }).catch(() => {
       BkkLib._mavEmptyAt.set(url, Date.now());
-      return empty();
+      return fallback(empty());
     });
     BkkLib._cacheIndex(cache, url, p, 4);
     return p;
@@ -4673,11 +4770,12 @@ Object.assign(BkkLib, {
     const byKey = /* @__PURE__ */ new Map();
     const destRoutes = {};
     const trips = idx.t || [];
+    const wanted = new Set(indexes);
     for (let i = 0; i < trips.length; i++) {
       const t2 = trips[i];
       const route = t2[1];
       const ps = t2[2] || [];
-      const oidx = ps.findIndex((p) => indexes.indexOf(p) >= 0);
+      const oidx = ps.findIndex((p) => wanted.has(p));
       if (oidx < 0) continue;
       for (let j = oidx + 1; j < ps.length; j++) {
         const st = idx.stops[ps[j]];
@@ -4836,38 +4934,71 @@ Object.assign(BkkLib, {
     const rowCap = maxDepartureRows(horizon);
     const rows = [];
     const trips = idx.t || [];
+    const wanted = new Set(indexes);
+    const hasDest = !!(destKey || destFold);
+    const cands = [];
+    for (let i = 0; i < trips.length; i++) {
+      const ps = trips[i][2] || [];
+      let first = -1;
+      for (let o = 0; o < ps.length; o++) {
+        if (wanted.has(ps[o])) {
+          first = o;
+          break;
+        }
+      }
+      if (first < 0) continue;
+      const hits = [];
+      if (hasDest) {
+        for (let j = first + 1; j < ps.length; j++) {
+          if (BkkLib.volanDestHit(idx.stops[ps[j]], destKey, destFold, destOpts)) hits.push(j);
+        }
+        if (!hits.length) continue;
+      }
+      const visits = [];
+      let h = 0;
+      for (let o = first; o < ps.length; o++) {
+        if (!wanted.has(ps[o])) continue;
+        if (!hasDest) {
+          visits.push([o, -1]);
+          continue;
+        }
+        while (h < hits.length && hits[h] <= o) h++;
+        if (h >= hits.length) break;
+        visits.push([o, hits[h]]);
+      }
+      if (visits.length) cands.push({ t: trips[i], visits });
+    }
     const dayOffsets = [-1, 0, 1];
     for (let n = 0; n < dayOffsets.length; n++) {
       const day = BkkLib.volanDay(dayOffsets[n]);
       const earliest = day.mins - 1;
       const latest = day.mins + horizon;
       if (latest < 0) continue;
-      for (let i = 0; i < trips.length; i++) {
-        const t2 = trips[i];
+      for (let c = 0; c < cands.length; c++) {
+        const t2 = cands[c].t;
         if (!BkkLib.volanServiceOk(idx, t2[0], day.ymd, day.dow)) continue;
         const route = t2[1];
         const ps = t2[2] || [];
         const ms = t2[3] || [];
-        const oidx = ps.findIndex((p) => indexes.indexOf(p) >= 0);
-        if (oidx < 0) continue;
-        const depMin = ms[oidx];
-        if (depMin == null || depMin < earliest) continue;
-        if (depMin > latest) continue;
+        let oidx = -1;
         let didx = -1;
-        if (destKey || destFold) {
-          for (let j = oidx + 1; j < ps.length; j++) {
-            if (BkkLib.volanDestHit(idx.stops[ps[j]], destKey, destFold, destOpts)) {
-              didx = j;
-              break;
-            }
-          }
-          if (didx < 0) continue;
+        let depMin = null;
+        let depTs = 0;
+        for (let v = 0; v < cands[c].visits.length; v++) {
+          const at = ms[cands[c].visits[v][0]];
+          if (at == null || at < earliest || at > latest) continue;
+          const ts = day.base + at * 60;
+          if (!departureStillDue(ts)) continue;
+          oidx = cands[c].visits[v][0];
+          didx = cands[c].visits[v][1];
+          depMin = at;
+          depTs = ts;
+          break;
         }
+        if (oidx < 0) continue;
         const destStop = didx >= 0 ? idx.stops[ps[didx]] : idx.stops[ps[ps.length - 1]];
         const arrMin = didx >= 0 ? ms[didx] : null;
         const travel = arrMin != null && arrMin >= depMin && arrMin - depMin <= 1440 ? arrMin - depMin : null;
-        const depTs = day.base + depMin * 60;
-        if (!departureStillDue(depTs)) continue;
         const kind = BkkLib.gtfsRouteKind(t2[4], vehicle, rawType);
         rows.push({
           gtfs: BkkLib.gtfsTripGeo(idx, t2, oidx, didx, day.base),
@@ -5480,6 +5611,7 @@ Object.assign(BkkLib, {
   },
   polesFromPatterns(patterns, origin, destKey) {
     const poles = /* @__PURE__ */ new Set();
+    const isDest = BkkLib.nameMatcher(destKey);
     (patterns || []).forEach((pat) => {
       if (!pat) return;
       const variants = pat.variants || [];
@@ -5489,7 +5621,7 @@ Object.assign(BkkLib, {
         const oidx = ids.findIndex((id) => BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), origin));
         if (oidx < 0) return;
         if (destKey) {
-          const hits = ids.slice(oidx + 1).some((id) => BkkLib.nameEq((stops[id] || {}).name, destKey));
+          const hits = ids.slice(oidx + 1).some((id) => isDest((stops[id] || {}).name));
           if (!hits) return;
         }
         poles.add(ids[oidx]);
@@ -5587,7 +5719,8 @@ Object.assign(BkkLib, {
     const { sts, stops } = details;
     const oidx = BkkLib.originIndex(sts, stops, origin);
     if (oidx < 0) return false;
-    return sts.slice(oidx + 1).some((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
+    const isDest = BkkLib.nameMatcher(destKey);
+    return sts.slice(oidx + 1).some((s) => isDest((stops[s.stopId] || {}).name));
   },
   async tripGoesTo(apiKey, cache, tripId, origin, destKey) {
     if (!tripId || !destKey) return false;
@@ -5614,7 +5747,8 @@ Object.assign(BkkLib, {
       const stop = s && stops[s.stopId] || {};
       return BkkLib.mapGpsLatLon(stop.lat, stop.lon);
     };
-    const hit = destKey ? sts.slice(oidx + 1).find((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey)) : null;
+    const isDest = BkkLib.nameMatcher(destKey);
+    const hit = destKey ? sts.slice(oidx + 1).find((s) => isDest((stops[s.stopId] || {}).name)) : null;
     return { board: at(sts[oidx]), alight: hit ? at(hit) : null };
   },
   /* The trip's stops with their (predicted, else scheduled) times, in
@@ -5747,7 +5881,8 @@ Object.assign(BkkLib, {
       const { sts, stops } = await BkkLib.tripDetails(apiKey, cache || {}, tripId);
       const oidx = BkkLib.originIndex(sts, stops, origin);
       const start = oidx >= 0 ? oidx + 1 : 0;
-      const dest = sts.slice(start).find((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
+      const isDest = BkkLib.nameMatcher(destKey);
+      const dest = sts.slice(start).find((s) => isDest((stops[s.stopId] || {}).name));
       if (!dest) return null;
       const o = oidx >= 0 ? sts[oidx] : null;
       const oPred = o && (o.predictedDepartureTime || o.predictedArrivalTime);
@@ -6109,6 +6244,7 @@ Object.assign(BkkLib, {
         const row = entry.row;
         row.lat = gps[0];
         row.lon = gps[1];
+        row.gpsAt = Math.floor(Date.now() / 1e3);
         delete row.gpsCarried;
         if (v.heading != null) row.heading = v.heading;
         if (v.speed != null) row.speed = v.speed;
@@ -6140,9 +6276,24 @@ Object.assign(BkkLib, {
     if (stripped) add("SZ" + stripped);
     return keys;
   },
+  /* How long a carried coach position (gpsCarried) stands in while the
+     lookup keeps failing: past this it is no live position any more. */
+  COACH_GPS_STALE_S: 120,
   applyCoachGps(rows, vehicles, nowSec) {
     const list = Array.isArray(rows) ? rows : [];
-    if (vehicles === null) return list;
+    const now = Number.isFinite(Number(nowSec)) ? Number(nowSec) : Math.floor(Date.now() / 1e3);
+    if (vehicles === null) {
+      list.forEach((row) => {
+        if (!row || !row.gpsCarried) return;
+        const at = Number(row.gpsAt);
+        if (at > 0 && now - at <= BkkLib.COACH_GPS_STALE_S) return;
+        row.lat = null;
+        row.lon = null;
+        delete row.gpsCarried;
+        delete row.gpsAt;
+      });
+      return list;
+    }
     const vehs = Array.isArray(vehicles) ? vehicles : [];
     const byRoute = /* @__PURE__ */ new Map();
     const fold = (value) => String(value || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, "");
@@ -6154,7 +6305,6 @@ Object.assign(BkkLib, {
         byRoute.get(key).push(vehicle);
       });
     });
-    const now = Number.isFinite(Number(nowSec)) ? Number(nowSec) : Math.floor(Date.now() / 1e3);
     const rowHead = (row) => fold(row.headsign || row.head);
     const vehicleClassOk = (row, vehicle) => {
       const route = String(vehicle.route || "").trim().toUpperCase();
@@ -6223,6 +6373,7 @@ Object.assign(BkkLib, {
       if (!gps) return;
       list[pair.idx].lat = gps[0];
       list[pair.idx].lon = gps[1];
+      list[pair.idx].gpsAt = now;
       delete list[pair.idx].gpsCarried;
     });
     list.forEach((row) => {
@@ -6230,6 +6381,7 @@ Object.assign(BkkLib, {
       row.lat = null;
       row.lon = null;
       delete row.gpsCarried;
+      delete row.gpsAt;
     });
     return list;
   },
@@ -6363,6 +6515,7 @@ Object.assign(BkkLib, {
       if (incoming && (row.gpsCarried || !BkkLib.mapGpsLatLon(row.lat, row.lon))) {
         row.lat = incoming[0];
         row.lon = incoming[1];
+        row.gpsAt = Math.floor(Date.now() / 1e3);
         delete row.gpsCarried;
       }
     });
@@ -9346,6 +9499,7 @@ ${this._stopPinCss()}
             row.lat = gps[0];
             row.lon = gps[1];
             row.gpsCarried = true;
+            row.gpsAt = Number(old.gpsAt) > 0 ? Number(old.gpsAt) : Math.floor(Date.now() / 1e3);
           }
         }
       });

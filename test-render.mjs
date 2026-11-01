@@ -5084,12 +5084,13 @@ const deferred = () => {
     if (fail) throw new Error('Transitous timeout');
     return [{ id: 'hu-x', name: 'Y', lat: 47.1, lon: 19.1 }];
   };
-  const p1 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' });
+  /* A failed geocode rejects (an outage), it is not "no such stop". */
+  const p1 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' }).catch(() => 'rejected');
   fail = false;
   const p2 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' });
   const p3 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' });
   check('a geocode answer stays for the page, a failed one is asked again',
-    p1 === '' && p2 === '47.1,19.1' && p3 === p2 && geo === 2, JSON.stringify({ p1, p2, p3, geo }));
+    p1 === 'rejected' && p2 === '47.1,19.1' && p3 === p2 && geo === 2, JSON.stringify({ p1, p2, p3, geo }));
   Lib._geocodeCache.clear();
   Lib._transitousEmptyAt.clear();
   Object.assign(Lib, { cityDepartures: keep.cityDepartures, transitousFetch: keep.transitousFetch });
@@ -9967,7 +9968,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   Lib.hasCompanionService = () => true;
   Lib._coachPosCache = null;
   Lib.hassService = async () => { throw new Error('timeout'); };
-  const carried = () => [{ tripId: 'gtfs:1053|x', label: '1053', vehicle: 'coach', dep: at + 300, lat: 47.5, lon: 19.0, gpsCarried: true }];
+  const carried = () => [{ tripId: 'gtfs:1053|x', label: '1053', vehicle: 'coach', dep: at + 300, lat: 47.5, lon: 19.0, gpsCarried: true, gpsAt: Math.floor(Date.now() / 1000) - 30 }];
   let afterFail = null;
   let afterEmpty = null;
   try {
@@ -10082,6 +10083,220 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   check('a numeric routeIds becomes a one-item list',
     JSON.stringify(ncc({ routeIds: 109 }).routeIds) === '["109"]' && JSON.stringify(ncc({ routeIds: NaN }).routeIds) === '[]',
     JSON.stringify(ncc({ routeIds: 109 }).routeIds));
+}
+
+/* Card/planner review, eleventh pass: one regression check per finding. */
+{
+  /* 1. A loop city line passes a same-named stop twice (both sides of a
+     lasso): the bus coming in 5 minutes on the second visit is a ride,
+     though its first visit left 5 minutes ago. */
+  const nowMin = Lib.volanDay(0).mins;
+  const mk = (i, name, lat, lon) => ({ i, name, fold: Lib.fold(name), key: Lib.norm(name), op: 0, lat, lon, id: 'x:' + i });
+  const loopStops = [mk(0, 'Belvaros', 47.10, 17.90), mk(1, 'Korhaz', 47.11, 17.91), mk(2, 'Lakotelep', 47.12, 17.92),
+    mk(3, 'Korhaz', 47.1101, 17.9101), mk(4, 'Belvaros', 47.1001, 17.9001)];
+  const loopIdx = { stops: loopStops, ops: [{ id: 'x', i: 0, name: 'X' }], byNum: new Map(), byKey: new Map(),
+    c: [['1111111', '20000101', '20991231']], a: [], r: [],
+    t: [[0, '7', [0, 1, 2, 3, 4], [nowMin - 15, nowMin - 5, nowMin, nowMin + 5, nowMin + 12], 3]] };
+  const loopRows = Lib.gtfsDepartures(loopIdx, 'x:3', { key: Lib.norm('Belvaros'), name: 'Belvaros' }, 'Korhaz', 0, '', '', 'bus', 'BUS', 60);
+  const loopDep = loopRows[0] ? Math.round((loopRows[0].dep - Lib.volanDay(0).base) / 60) : null;
+  check('a loop line lists the bus at the second visit of a same-named stop',
+    loopRows.length === 1 && loopDep === nowMin + 5 && loopRows[0].travel === 7,
+    JSON.stringify({ rows: loopRows.length, loopDep, nowMin, travel: loopRows[0] && loopRows[0].travel }));
+  /* The same for a planned city ride: stop 1 is visited at -5 and +5, and
+     stop 0 (the start) is before both. */
+  const rideIdx = { stops: loopStops.slice(0, 4), c: [['1111111', '20000101', '20991231']], a: [], r: [],
+    t: [[0, 'L', [0, 1, 2, 1, 3], [nowMin - 15, nowMin - 5, nowMin, nowMin + 5, nowMin + 12], 3],
+      [0, 'B', [0, 1, 2, 1, 0], [nowMin - 15, nowMin - 5, nowMin, nowMin + 5, nowMin + 12], 3]] };
+  const nowSec = Math.floor(Date.now() / 1000);
+  const base = Lib.volanDay(0).base;
+  const later = Lib.nextCityRide(rideIdx, 1, 3, 'L', nowSec);
+  const back = Lib.nextCityRide(rideIdx, 1, 0, 'B', nowSec);
+  check('a planned city ride boards a loop line at its later visit, and reaches a stop before the first one',
+    !!later && later.o === 3 && later.d === 4 && later.dep === base + (nowMin + 5) * 60
+      && !!back && back.o === 3 && back.d === 4 && back.arr === base + (nowMin + 12) * 60,
+    JSON.stringify({ later: later && [later.o, later.d], back: back && [back.o, back.d] }));
+
+  /* 2. A geocoder outage for a stop without coordinates is "try again"
+     (rejects), not "no route for this time". */
+  const keep2 = { transitousGeocode: Lib.transitousGeocode, withGtfsCoords: Lib.withGtfsCoords };
+  Lib.transitousGeocode = async () => { throw new Error('geocode timeout'); };
+  Lib.withGtfsCoords = async (stops) => stops;
+  let planned;
+  let raw;
+  let ref;
+  try {
+    planned = await Lib.planJourneys('', { id: 'x', name: 'Valahol megálló' }, { id: 'y', name: 'Máshol' }, null, { time: Date.now() + 3600e3 })
+      .then((list) => 'resolved ' + JSON.stringify(list), (e) => 'rejected ' + e.message);
+    raw = await Lib.transitousJourneysResult({ name: 'A' }, { name: 'B' }, {});
+    ref = await Lib.transitousStopRef({ name: 'Valahol megálló' }, 'bus').then(() => 'resolved', () => 'rejected');
+  } finally {
+    Object.assign(Lib, keep2);
+  }
+  check('a geocode outage fails the plan (try again), not an empty answer',
+    planned === 'rejected route search unavailable' && raw.failed === true && raw.answered === false && ref === 'rejected',
+    JSON.stringify({ planned, raw, ref }));
+
+  /* 3. A carried coach position whose fix is old is not shown as live
+     while the lookup keeps failing; a fresh one still bridges it. */
+  const now3 = Math.floor(Date.now() / 1000);
+  const coachRow = (gpsAt) => ({ tripId: 'gtfs:123', label: '7xx', head: 'Szeged', vehicle: 'coach', dep: now3 + 300,
+    lat: 47.1, lon: 19.5, gpsCarried: true, gpsAt });
+  const stale = Lib.applyCoachGps([coachRow(now3 - 300)], null, now3)[0];
+  const unstamped = Lib.applyCoachGps([coachRow(undefined)], null, now3)[0];
+  const fresh = Lib.applyCoachGps([coachRow(now3 - 30)], null, now3)[0];
+  const fixed = Lib.applyCoachGps([{ tripId: 'gtfs:123', label: '7xx', head: 'Szeged', vehicle: 'coach', dep: now3 + 300 }],
+    [{ route: '7xx', head: 'Szeged', lat: 47.2, lon: 19.6 }], now3)[0];
+  check('a coach position older than two minutes is dropped when the lookup fails, a fresh one stays, a fix is stamped',
+    !Lib.asRow(stale, 'Szeged', 'hu').hasGps && !Lib.asRow(unstamped, 'Szeged', 'hu').hasGps
+      && Lib.asRow(fresh, 'Szeged', 'hu').hasGps && fixed.lat === 47.2 && fixed.gpsAt === now3,
+    JSON.stringify({ stale: [stale.lat, stale.gpsCarried], fresh: [fresh.lat], fixed: [fixed.lat, fixed.gpsAt] }));
+  check('a carried coach position keeps the time of its fix',
+    /row\.gpsAt = Number\(old\.gpsAt\) > 0 \? Number\(old\.gpsAt\)/.test(src));
+
+  /* 4. A truncated polyline loses its cut pair instead of adding a point
+     shifted along one axis. */
+  const fullLine = '_p~iF~ps|U_ulLnnqC_mqNvxq`@';
+  const fullPts = Lib.decodePolyline(fullLine);
+  const cuts = [fullLine.length - 1, fullLine.length - 3, fullLine.length - 6].map((n) => Lib.decodePolyline(fullLine.slice(0, n)));
+  check('a truncated polyline drops its incomplete last pair',
+    fullPts.length === 3 && cuts.every((pts) => pts.length === 2
+      && pts.every((pt, i) => pt[0] === fullPts[i][0] && pt[1] === fullPts[i][1])),
+    JSON.stringify(cuts));
+
+  /* 5. A timed plan (Depart/Arrive) from a city stop to its station falls
+     back to the city feed when Transitous and FUTÁR have nothing, as
+     "Most" does. */
+  const keep5 = { cityIndex: Lib.cityIndex, transitousJourneysResult: Lib.transitousJourneysResult, withGtfsCoords: Lib.withGtfsCoords };
+  const realNow5 = Date.now;
+  const cityStops = ['Búza tér', 'Tiszai pályaudvar'].map((n, i) => ({
+    i, id: 'miskolc:' + i, name: n, num: '', op: 0, key: Lib.norm(n), fold: Lib.fold(n), lat: 48.1 + i * 0.01, lon: 20.78,
+  }));
+  const cityTrips = [];
+  for (let m = 0; m < 24 * 60; m += 10) cityTrips.push([0, 'Y', [0, 1], [m, m + 10], 3]);
+  const city5 = {
+    stops: cityStops, t: cityTrips, c: [['1111111', '20200101', '20991231']], a: [], r: [],
+    ops: [{ i: 0, id: 'miskolc', name: 'Miskolc — helyi' }],
+    byId: new Map(cityStops.map((st) => [st.id, st])), byNum: new Map(), byKey: new Map(),
+  };
+  const at5 = (h, min) => Date.UTC(2026, 9, 20, h - 2, min);
+  let motisFailed = false;
+  Lib.cityIndex = async () => city5;
+  Lib.withGtfsCoords = async (stops) => stops;
+  Lib.transitousJourneysResult = async () => ({ list: [], failed: motisFailed, answered: !motisFailed });
+  Date.now = () => at5(8, 17);
+  const ride5 = (list) => {
+    const j = Array.isArray(list) ? list[0] : null;
+    const leg = j && j.legs.find((l) => !l.walk);
+    return leg ? [leg.label, leg.startMs, leg.endMs] : null;
+  };
+  let depart5;
+  let arrive5;
+  let downDepart5;
+  try {
+    const o5 = { id: 'miskolc:0', name: 'Búza tér' };
+    const d5 = { id: '', name: 'Tiszai pályaudvar' };
+    depart5 = ride5(await Lib.planJourneys('', o5, d5, null, { time: at5(14, 3) }));
+    arrive5 = ride5(await Lib.planJourneys('', o5, d5, null, { time: at5(14, 0), arriveBy: true }));
+    motisFailed = true;
+    downDepart5 = await Lib.planJourneys('', o5, d5, null, { time: at5(14, 3) }).then(ride5, () => 'rejected');
+  } finally {
+    Date.now = realNow5;
+    Object.assign(Lib, keep5);
+  }
+  check('a timed plan from a city stop to its station rides the city feed when Transitous and FUTÁR have nothing',
+    !!depart5 && depart5[0] === 'Y' && depart5[1] === at5(14, 10) && depart5[2] === at5(14, 20)
+      && !!arrive5 && arrive5[0] === 'Y' && arrive5[2] <= at5(14, 0) && arrive5[1] >= at5(11, 0)
+      && Array.isArray(downDepart5) && downDepart5[1] === at5(14, 10),
+    JSON.stringify({ depart5, arrive5, downDepart5 }));
+
+  /* 6. More cards raise the FUTÁR gate's limit: the waiters it now has
+     room for start at once. */
+  const keep6 = { active: Lib._gateActive, cards: Lib._gateCards, bg: Lib._gateWaiters, fg: Lib._gateFgWaiters };
+  Lib._gateWaiters = [];
+  Lib._gateFgWaiters = [];
+  Lib._gateActive = 0;
+  Lib._gateCards = 1;
+  for (let i = 0; i < 4; i++) await Lib._gate(true);
+  let fgWoke = false;
+  let bgWoke = false;
+  const fgWait = Lib._gate(true).then(() => { fgWoke = true; });
+  const bgWait = Lib._gate(false).then(() => { bgWoke = true; });
+  await settleTicks(2);
+  const queued = !fgWoke && !bgWoke;
+  Lib._gateCards = 12;
+  await settleTicks(2);
+  const gateState = { queued, fgWoke, bgWoke, active: Lib._gateActive, limit: Lib._gateLimit() };
+  Lib._gateWaiters.concat(Lib._gateFgWaiters).forEach((resolve) => resolve());
+  await Promise.all([fgWait, bgWait]);
+  Lib._gateWaiters = keep6.bg;
+  Lib._gateFgWaiters = keep6.fg;
+  Lib._gateActive = keep6.active;
+  Lib._gateCards = keep6.cards;
+  check('a grown FUTÁR gate limit wakes the queued calls',
+    gateState.queued && gateState.fgWoke && gateState.bgWoke && gateState.active === 6,
+    JSON.stringify(gateState));
+
+  /* 7. The MÁV index held in memory is asked again after six hours: a wall
+     tablet left open picks up the 06:00 index the same day. A refresh
+     that fails keeps the one it had. */
+  const keepLoad7 = Lib._loadMavIndex;
+  const realNow7 = Date.now;
+  const clearMav = () => {
+    Lib._mavP.clear();
+    Lib._mavEmptyAt.clear();
+    if (Lib._mavLoadedAt) Lib._mavLoadedAt.clear();
+  };
+  clearMav();
+  let feed7 = 'A';
+  let loads7 = 0;
+  Lib._loadMavIndex = async () => {
+    loads7 += 1;
+    if (feed7 === 'down') throw new Error('stalled');
+    return { v: 2, feed: feed7, st: [], n: {}, l: {}, p: ['x'] };
+  };
+  const t7 = realNow7();
+  const mavAt = async (h) => {
+    Date.now = () => t7 + h * 3600e3;
+    try {
+      return (await Lib.mavIndex()).feed;
+    } finally {
+      Date.now = realNow7;
+    }
+  };
+  let seen7;
+  try {
+    const first7 = await mavAt(0);
+    feed7 = 'B';
+    const hourLater = await mavAt(1);
+    const sevenLater = await mavAt(7);
+    feed7 = 'down';
+    const failedRefresh = await mavAt(14);
+    seen7 = { first7, hourLater, sevenLater, failedRefresh, loads7 };
+  } finally {
+    Lib._loadMavIndex = keepLoad7;
+    Date.now = realNow7;
+    clearMav();
+  }
+  check('the in-memory MÁV index is refreshed after six hours, and a failed refresh keeps it',
+    seen7.first7 === 'A' && seen7.hourLater === 'A' && seen7.sevenLater === 'B' && seen7.failedRefresh === 'B'
+      && seen7.loads7 === 3,
+    JSON.stringify(seen7));
+
+  /* 8. nameMatcher is nameEq with the destination's keys worked out once. */
+  const names8 = ['Kelenföld vasútállomás', 'Kelenföld', 'Budapest-Kelenföld', 'Győr, autóbusz-állomás',
+    'Szeged, autóbusz-állomás', 'Szeged', 'Déli pályaudvar', 'Budapest-Déli', 'Deák Ferenc tér M', 'Deák Ferenc tér', '', null];
+  let same8 = typeof Lib.nameMatcher === 'function';
+  const diffs8 = [];
+  if (same8) {
+    names8.forEach((b) => {
+      const isB = Lib.nameMatcher(b);
+      names8.forEach((a) => {
+        if (isB(a) !== Lib.nameEq(a, b)) diffs8.push([a, b]);
+      });
+    });
+    same8 = diffs8.length === 0;
+  }
+  check('nameMatcher answers as nameEq for every pair', same8, JSON.stringify(diffs8));
 }
 
 process.exit(failed ? 1 : 0);
