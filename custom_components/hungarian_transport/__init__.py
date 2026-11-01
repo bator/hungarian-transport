@@ -244,11 +244,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     frontend.add_extra_js_url(hass, hass.data[DOMAIN]["card_url"])
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     notifier = timetable_notify.UpdateNotifier(hass, entry.options)
+    entry.async_on_unload(notifier.stop)
     # The shipped indexes' feeds are recorded at every setup; a change that
-    # came with an update of the integration notifies (when turned on).
+    # came with an update of the integration notifies (when turned on). Its
+    # service call waits until Home Assistant has started: scripts and
+    # notify.mobile_app_* register theirs later in the startup.
     try:
         integration = await async_get_integration(hass, DOMAIN)
         await notifier.async_check_shipped(WWW_PATH, str(integration.version))
+        await notifier.async_restore()
     except Exception:  # noqa: BLE001 - never a reason not to set up
         _LOGGER.warning("Could not check the shipped timetables for changes", exc_info=True)
     if entry.options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV):

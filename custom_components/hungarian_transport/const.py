@@ -13,3 +13,7 @@ DEFAULT_NOTIFY_UPDATES = False
 CONF_NOTIFY_SERVICE = "notify_service"
 CONF_DAILY_TIME = "daily_time"
 DEFAULT_DAILY_TIME = "06:00:00"
+# The daily MÁV index installs call the notification service too (otherwise
+# only the persistent notification): MÁV publishes almost every day.
+CONF_NOTIFY_DAILY = "notify_daily_installs"
+DEFAULT_NOTIFY_DAILY = False
