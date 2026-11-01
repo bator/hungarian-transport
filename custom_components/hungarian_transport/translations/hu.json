@@ -103,7 +103,7 @@
           "daily_mav_index": "Naponta letölti a projekt által a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet (a bator.github.io-ról), ha újabb a használtnál. Egy újabb helyi MÁV feed továbbra is elsőbbséget kap. Kikapcsolva a heti kiadás indexe marad, és ilyen kérés nem megy ki.",
           "daily_time": "Helyi idő, amikor naponta megnézi, van-e új MÁV útvonal-index (legfeljebb 5 perccel később, a kérések szétszórására). Home Assistant indulása után 10–20 perccel egyszer szintén lefut.",
           "notify_updates": "Állandó értesítés, ha új napi MÁV útvonal-index települt, ha az integráció frissítése új Volán-, városi vagy MÁV-menetrendet hozott, és egyszer, ha a napi MÁV index 3 egymást követő napon nem frissült.",
-          "notify_service": "Nem kötelező, domain.service alakban, például script.ertesit vagy notify.mobile_app_iphone. Minden állandó értesítés mellett meghívja title és message mezőkkel. Üresen csak állandó értesítés lesz."
+          "notify_service": "Nem kötelező. Válassz scriptet vagy notify szolgáltatást a listából, vagy írj be másikat domain.service alakban (például script.ertesit vagy notify.mobile_app_iphone). Minden állandó értesítés mellett meghívja title és message mezőkkel. „— nincs —” vagy üres mező: csak állandó értesítés lesz."
         }
       }
     },
@@ -124,6 +124,13 @@
     "mav_build_failed": {
       "title": "Nem készült el a MÁV útvonalindex",
       "description": "A MÁV útvonalindex nem készült el ebből: `{path}`: {error}\n\nA Home Assistant indításkor nem próbálja újra ezt a feedet. Tegyél oda újat (vagy töltsd fel), vagy hívd meg a `hungarian_transport.rebuild_mav_index` műveletet az újrapróbáláshoz."
+    }
+  },
+  "selector": {
+    "notify_service": {
+      "options": {
+        "none": "— nincs —"
+      }
     }
   }
 }

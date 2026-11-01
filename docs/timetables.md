@@ -237,7 +237,10 @@ new one replaces the old) when:
 
 *Also call this service* (`domain.service`, for example `script.ertesit` or
 `notify.mobile_app_iphone`) is called with `title` and `message` along with
-each notification; the options form refuses a malformed or missing service.
+each notification. The options form lists the scripts and the `notify.*`
+services (not `notify.notify`, `notify.send_message` or
+`notify.persistent_notification`), and takes a typed name as well; it
+refuses a malformed or missing service.
 A service that fails later is logged, never retried. The texts are
 Hungarian when Home Assistant's language is Hungarian, else English.
 

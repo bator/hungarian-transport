@@ -138,7 +138,9 @@ beállításait és a menetrend-értesítéseket nyitja meg.
   3 egymást követő napon nem frissült.
 - **Ezt a szolgáltatást is hívja** (nem kötelező): például `script.ertesit`
   vagy `notify.mobile_app_iphone`, amelyet minden értesítés mellett `title`
-  és `message` mezőkkel hív meg. Az űrlap nem fogad el `domain.service`
+  és `message` mezőkkel hív meg. A scriptek és notify szolgáltatások
+  listájából választható, vagy beírható más is; a **— nincs —** csak
+  állandó értesítést jelent. Az űrlap nem fogad el `domain.service`
   alaktól eltérő nevet vagy nem létező szolgáltatást.
 
 Ha a BKK elutasítja a tárolt kulcsot (visszavonták vagy lejárt), a Home

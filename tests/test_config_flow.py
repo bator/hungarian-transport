@@ -10,11 +10,17 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResultType, InvalidData
-from homeassistant.helpers.selector import BooleanSelector, TextSelector, TextSelectorType, TimeSelector
+from homeassistant.helpers.selector import (
+    BooleanSelector,
+    SelectSelector,
+    TextSelector,
+    TextSelectorType,
+    TimeSelector,
+)
 from homeassistant.setup import async_setup_component
 
 import custom_components.hungarian_transport as integration
-from custom_components.hungarian_transport.config_flow import CONF_REMOVE_KEY
+from custom_components.hungarian_transport.config_flow import CONF_REMOVE_KEY, NO_SERVICE
 from custom_components.hungarian_transport.const import (
     CONF_API_KEY,
     CONF_DAILY_MAV,
@@ -413,8 +419,93 @@ async def test_options_form_has_the_notification_fields(hass) -> None:
     # A suggested value, not a default: clearing the field must clear it.
     service = _field(result, CONF_NOTIFY_SERVICE)
     assert service.default is vol.UNDEFINED
-    assert service.description == {"suggested_value": ""}
-    assert isinstance(schema[service], TextSelector)
+    # Nothing stored: the list shows "none".
+    assert service.description == {"suggested_value": NO_SERVICE}
+    selector = schema[service]
+    assert isinstance(selector, SelectSelector)
+    assert selector.config["custom_value"] is True
+    assert selector.config["mode"] == "dropdown"
+    assert selector.config["translation_key"] == CONF_NOTIFY_SERVICE
+    assert selector.config["options"][0] == {"value": NO_SERVICE, "label": "— none —"}
+
+
+def _options(result) -> list[dict[str, str]]:
+    return result["data_schema"].schema[_field(result, CONF_NOTIFY_SERVICE)].config["options"]
+
+
+async def test_options_list_scripts_and_notify_services(hass) -> None:
+    for name in ("ertesit", "nevtelen", "reload", "turn_on", "turn_off", "toggle"):
+        hass.services.async_register("script", name, lambda call: None)
+    hass.states.async_set("script.ertesit", "off", {"friendly_name": "Központi értesítés"})
+    for name in ("mobile_app_iphone", "discord", "notify", "send_message", "persistent_notification"):
+        hass.services.async_register("notify", name, lambda call: None)
+    hass.services.async_register("light", "turn_on", lambda call: None)
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: ""})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    # "none" first, the rest by label.
+    assert _options(result) == [
+        {"value": NO_SERVICE, "label": "— none —"},
+        {"value": "notify.discord", "label": "discord (notify)"},
+        {"value": "script.ertesit", "label": "Központi értesítés (script.ertesit)"},
+        {"value": "notify.mobile_app_iphone", "label": "mobile_app_iphone (notify)"},
+        {"value": "script.nevtelen", "label": "nevtelen (script)"},
+    ]
+
+
+async def test_options_list_keeps_a_stored_service_that_is_gone(hass) -> None:
+    hass.services.async_register("script", "ertesit", lambda call: None)
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=DOMAIN,
+        options={CONF_API_KEY: "", CONF_NOTIFY_UPDATES: True, CONF_NOTIFY_SERVICE: "notify.mobile_app_old"},
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert _field(result, CONF_NOTIFY_SERVICE).description == {"suggested_value": "notify.mobile_app_old"}
+    assert [o["value"] for o in _options(result)] == [NO_SERVICE, "script.ertesit", "notify.mobile_app_old"]
+    assert {"value": "notify.mobile_app_old", "label": "notify.mobile_app_old"} in _options(result)
+
+    # A stored service that still exists is listed once.
+    hass.services.async_register("notify", "mobile_app_old", lambda call: None)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert [o["value"] for o in _options(result)].count("notify.mobile_app_old") == 1
+
+
+@pytest.mark.parametrize("picked", [NO_SERVICE, " None ", ""])
+async def test_options_none_stores_no_service(hass, picked) -> None:
+    hass.services.async_register("script", "ertesit", lambda call: None)
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=DOMAIN,
+        options={CONF_API_KEY: "", CONF_NOTIFY_UPDATES: True, CONF_NOTIFY_SERVICE: "script.ertesit"},
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_NOTIFY_UPDATES: True, CONF_NOTIFY_SERVICE: picked}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_NOTIFY_SERVICE] == ""
+
+
+async def test_options_typed_service_not_in_the_list(hass) -> None:
+    """A typed service is checked like before; one Home Assistant has is
+    stored even when the list does not show it."""
+    hass.services.async_register("tts", "speak", lambda call: None)
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: ""})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert "tts.speak" not in [o["value"] for o in _options(result)]
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_NOTIFY_SERVICE: "notify.mobile_app_nope"}
+    )
+    assert result["errors"] == {CONF_NOTIFY_SERVICE: "service_not_found"}
+    # Shown again, and listed so the form can show it.
+    assert "notify.mobile_app_nope" in [o["value"] for o in _options(result)]
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_NOTIFY_SERVICE: "TTS.Speak"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_NOTIFY_SERVICE] == "tts.speak"
 
 
 async def test_options_save_notifications_and_keep_other_options(hass) -> None:
@@ -519,6 +610,8 @@ def test_notification_options_are_translated(lang) -> None:
         assert init["data_description"][key]
     for error in ("invalid_service", "service_not_found"):
         assert options["error"][error]
+    selector = json.loads((folder / f"{lang}.json").read_text(encoding="utf-8"))["selector"]
+    assert selector[CONF_NOTIFY_SERVICE]["options"][NO_SERVICE] == {"en": "— none —", "hu": "— nincs —"}[lang]
     assert init["data"][CONF_NOTIFY_UPDATES] == {
         "en": "Notify about timetable updates", "hu": "Értesítés a menetrend-frissítésekről"
     }[lang]

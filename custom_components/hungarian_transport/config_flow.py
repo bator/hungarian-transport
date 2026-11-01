@@ -11,6 +11,10 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -34,6 +38,17 @@ from .timetable_notify import check_service, parse_daily_time
 KEY_URL = "https://opendata.bkk.hu/data-sources"
 # Options flow: an empty key field keeps the stored key, this removes it.
 CONF_REMOVE_KEY = "remove_key"
+# The service list's "none" entry: persistent notifications only, saved as "".
+# Not "": the frontend's combo box ignores picking an option whose value is
+# empty, so a stored service could not be unset from the list. A service is
+# always domain.service, so this never names one.
+NO_SERVICE = "none"
+# Services the list leaves out: notify.* ones that need a target or are not
+# one device, and the script domain's own services.
+SKIP_SERVICES = {
+    "notify": {"notify", "send_message", "persistent_notification"},
+    "script": {"reload", "turn_on", "turn_off", "toggle"},
+}
 
 
 async def _validate_key(hass: HomeAssistant, api_key: str) -> str | None:
@@ -71,20 +86,53 @@ def _key_schema(has_key: bool = False) -> vol.Schema:
     return vol.Schema(fields)
 
 
-def _options_schema(has_key: bool, values: dict[str, Any]) -> vol.Schema:
+def _service_options(hass: HomeAssistant, current: str) -> list[SelectOptionDict]:
+    """The services the notifications can also call, for the options form:
+    "none" first, then every script and notify.* service but SKIP_SERVICES,
+    by label. A script shows its name ("Központi értesítés (script.ertesit)"),
+    a notify service its own ("mobile_app_iphone (notify)"). current (the
+    stored or submitted service) is an option too, even when Home Assistant
+    does not have it (any more), so the form can show it."""
+    found: list[SelectOptionDict] = []
+    for domain in ("script", "notify"):
+        for name in hass.services.async_services_for_domain(domain):
+            if name in SKIP_SERVICES[domain]:
+                continue
+            label = f"{name} ({domain})"
+            if domain == "script" and (state := hass.states.get(f"script.{name}")):
+                if friendly := state.attributes.get("friendly_name"):
+                    label = f"{friendly} (script.{name})"
+            found.append(SelectOptionDict(value=f"{domain}.{name}", label=label))
+    if current and current != NO_SERVICE and all(o["value"] != current for o in found):
+        found.append(SelectOptionDict(value=current, label=current))
+    found.sort(key=lambda o: (o["label"].casefold(), o["value"]))
+    return [SelectOptionDict(value=NO_SERVICE, label="— none —"), *found]
+
+
+def _options_schema(hass: HomeAssistant, has_key: bool, values: dict[str, Any]) -> vol.Schema:
     """The key fields, the daily MÁV route index from GitHub (mav_daily.py)
     and its time, then the update notifications (timetable_notify.py).
 
-    The service is a suggested value, not a default: a default would come
-    back when the field is cleared."""
+    The service is picked from a list (_service_options) or typed. It is a
+    suggested value, not a default: a default would come back when the field
+    is cleared. The list is sorted here, not by the frontend, so that "none"
+    stays first; its label is translated (selector.notify_service)."""
+    service = values[CONF_NOTIFY_SERVICE]
     return _key_schema(has_key).extend(
         {
             vol.Optional(CONF_DAILY_MAV, default=values[CONF_DAILY_MAV]): BooleanSelector(),
             vol.Optional(CONF_DAILY_TIME, default=values[CONF_DAILY_TIME]): TimeSelector(),
             vol.Optional(CONF_NOTIFY_UPDATES, default=values[CONF_NOTIFY_UPDATES]): BooleanSelector(),
             vol.Optional(
-                CONF_NOTIFY_SERVICE, description={"suggested_value": values[CONF_NOTIFY_SERVICE]}
-            ): TextSelector(),
+                CONF_NOTIFY_SERVICE, description={"suggested_value": service or NO_SERVICE}
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=_service_options(hass, service),
+                    mode=SelectSelectorMode.DROPDOWN,
+                    custom_value=True,
+                    translation_key=CONF_NOTIFY_SERVICE,
+                )
+            ),
         }
     )
 
@@ -184,7 +232,11 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             # What the form shows again on an error: what was submitted.
             # (The time selector has checked the time already.)
-            service, error = check_service(self.hass, str(user_input.get(CONF_NOTIFY_SERVICE) or "").strip())
+            # "none" from the list, or the field cleared: no service.
+            picked = str(user_input.get(CONF_NOTIFY_SERVICE) or "").strip()
+            if picked.lower() == NO_SERVICE:
+                picked = ""
+            service, error = check_service(self.hass, picked)
             values = {
                 CONF_DAILY_MAV: bool(user_input.get(CONF_DAILY_MAV, values[CONF_DAILY_MAV])),
                 CONF_DAILY_TIME: parse_daily_time(user_input.get(CONF_DAILY_TIME)).strftime("%H:%M:%S"),
@@ -217,7 +269,7 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
                 return self.async_create_entry(data=new)
         return self.async_show_form(
             step_id="init",
-            data_schema=_options_schema(bool(current), values),
+            data_schema=_options_schema(self.hass, bool(current), values),
             errors=errors,
             description_placeholders={"url": KEY_URL},
         )

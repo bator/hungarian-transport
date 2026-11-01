@@ -134,8 +134,10 @@ key** checkbox.
   daily index fails on 3 days in a row.
 - **Also call this service** (optional): a service such as `script.ertesit`
   or `notify.mobile_app_iphone`, called with `title` and `message` next to
-  each notification. The form refuses a name that is not `domain.service`
-  or a service Home Assistant does not have.
+  each notification. Pick it from the list of scripts and notify services,
+  or type another one; **— none —** means persistent notifications only.
+  The form refuses a name that is not `domain.service` or a service Home
+  Assistant does not have.
 
 When BKK rejects the stored key (revoked or expired), Home Assistant asks
 for a new one: a **BKK key rejected** prompt appears under
