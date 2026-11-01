@@ -97,13 +97,15 @@
           "daily_mav_index": "Napi MÁV útvonal-index a GitHubról",
           "daily_time": "Napi ellenőrzés ideje",
           "notify_updates": "Értesítés a menetrend-frissítésekről",
-          "notify_service": "Ezt a szolgáltatást is hívja"
+          "notify_service": "Ezt a szolgáltatást is hívja",
+          "notify_daily_installs": "Napi MÁV index telepítéséről is értesítsen"
         },
         "data_description": {
           "daily_mav_index": "Naponta letölti a projekt által a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet (a bator.github.io-ról), ha újabb a használtnál. Egy újabb helyi MÁV feed továbbra is elsőbbséget kap. Kikapcsolva a heti kiadás indexe marad, és ilyen kérés nem megy ki.",
-          "daily_time": "Helyi idő, amikor naponta megnézi, van-e új MÁV útvonal-index (legfeljebb 5 perccel később, a kérések szétszórására). Home Assistant indulása után 10–20 perccel egyszer szintén lefut.",
-          "notify_updates": "Állandó értesítés, ha új napi MÁV útvonal-index települt, ha az integráció frissítése új Volán-, városi vagy MÁV-menetrendet hozott, és egyszer, ha a napi MÁV index 3 egymást követő napon nem frissült.",
-          "notify_service": "Nem kötelező. Válassz scriptet vagy notify szolgáltatást a listából, vagy írj be másikat domain.service alakban (például script.ertesit vagy notify.mobile_app_iphone). Minden állandó értesítés mellett meghívja title és message mezőkkel. „— nincs —” vagy üres mező: csak állandó értesítés lesz."
+          "daily_time": "Helyi idő, amikor naponta megnézi, van-e új MÁV útvonal-index (legfeljebb 5 perccel később, a kérések szétszórására). Home Assistant indulása vagy a beállítások mentése után 10–20 perccel egyszer szintén lefut; egy sikertelen ellenőrzést 20 percenként, legfeljebb 6-szor újrapróbál.",
+          "notify_updates": "Állandó értesítés, ha új napi MÁV útvonal-index települt, ha az integráció frissítése új Volán-, városi vagy MÁV-menetrendet hozott, és egyszer, ha a napi MÁV index 3 egymást követő napon nem frissült (a 3 napja nem frissített oldal is hibának számít).",
+          "notify_service": "Nem kötelező. Válassz scriptet vagy notify szolgáltatást a listából, vagy írj be másikat domain.service alakban (például script.ertesit vagy notify.mobile_app_iphone). Minden állandó értesítés mellett meghívja title és message mezőkkel. „— nincs —” vagy üres mező: csak állandó értesítés lesz. A már nem létező tárolt szolgáltatás (hiányzik) jelölést kap, és megmarad, amíg mást nem választasz.",
+          "notify_daily_installs": "A MÁV szinte minden nap új menetrendet ad ki. Kikapcsolva (alapból) az új napi MÁV útvonal-indexről csak állandó értesítés készül. Bekapcsolva az alábbi szolgáltatást is meghívja. A kiadással érkező menetrendek és a hibaértesítés mindig meghívja."
         }
       }
     },

@@ -25,6 +25,7 @@ from custom_components.hungarian_transport.const import (
     CONF_API_KEY,
     CONF_DAILY_MAV,
     CONF_DAILY_TIME,
+    CONF_NOTIFY_DAILY,
     CONF_NOTIFY_SERVICE,
     CONF_NOTIFY_UPDATES,
     DOMAIN,
@@ -37,6 +38,7 @@ DEFAULTS = {
     CONF_DAILY_MAV: True,
     CONF_DAILY_TIME: "06:00:00",
     CONF_NOTIFY_UPDATES: False,
+    CONF_NOTIFY_DAILY: False,
     CONF_NOTIFY_SERVICE: "",
 }
 
@@ -230,7 +232,8 @@ async def test_no_remove_box_without_a_stored_key(hass) -> None:
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert list(result["data_schema"].schema) == [
-        CONF_API_KEY, CONF_DAILY_MAV, CONF_DAILY_TIME, CONF_NOTIFY_UPDATES, CONF_NOTIFY_SERVICE
+        CONF_API_KEY, CONF_DAILY_MAV, CONF_DAILY_TIME, CONF_NOTIFY_UPDATES, CONF_NOTIFY_SERVICE,
+        CONF_NOTIFY_DAILY,
     ]
 
 
@@ -463,7 +466,7 @@ async def test_options_list_keeps_a_stored_service_that_is_gone(hass) -> None:
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert _field(result, CONF_NOTIFY_SERVICE).description == {"suggested_value": "notify.mobile_app_old"}
     assert [o["value"] for o in _options(result)] == [NO_SERVICE, "script.ertesit", "notify.mobile_app_old"]
-    assert {"value": "notify.mobile_app_old", "label": "notify.mobile_app_old"} in _options(result)
+    assert {"value": "notify.mobile_app_old", "label": "notify.mobile_app_old (missing)"} in _options(result)
 
     # A stored service that still exists is listed once.
     hass.services.async_register("notify", "mobile_app_old", lambda call: None)
@@ -471,7 +474,7 @@ async def test_options_list_keeps_a_stored_service_that_is_gone(hass) -> None:
     assert [o["value"] for o in _options(result)].count("notify.mobile_app_old") == 1
 
 
-@pytest.mark.parametrize("picked", [NO_SERVICE, " None ", ""])
+@pytest.mark.parametrize("picked", [NO_SERVICE, f" {NO_SERVICE} ", ""])
 async def test_options_none_stores_no_service(hass, picked) -> None:
     hass.services.async_register("script", "ertesit", lambda call: None)
     entry = MockConfigEntry(
@@ -524,7 +527,7 @@ async def test_options_save_notifications_and_keep_other_options(hass) -> None:
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options == {
         CONF_API_KEY: "kept", CONF_DAILY_MAV: False, "future_option": 7, CONF_NOTIFY_UPDATES: True,
-        CONF_NOTIFY_SERVICE: "script.ertesit", CONF_DAILY_TIME: "05:45:00",
+        CONF_NOTIFY_DAILY: False, CONF_NOTIFY_SERVICE: "script.ertesit", CONF_DAILY_TIME: "05:45:00",
     }
 
     # The form shows what is stored; a cleared service field clears it.
@@ -548,6 +551,9 @@ async def test_options_save_notifications_and_keep_other_options(hass) -> None:
         ("notify mobile", "invalid_service"),
         ("script.nincs_ilyen", "service_not_found"),
         ("notify.mobile_app_nope", "service_not_found"),
+        # Only the list's own "none" entry means no service (the manual).
+        ("None", "invalid_service"),
+        ("NONE", "invalid_service"),
     ],
 )
 async def test_options_refuse_a_bad_notify_service(hass, service, error) -> None:
@@ -605,7 +611,7 @@ def test_notification_options_are_translated(lang) -> None:
     folder = Path(integration.__file__).parent / "translations"
     options = json.loads((folder / f"{lang}.json").read_text(encoding="utf-8"))["options"]
     init = options["step"]["init"]
-    for key in (CONF_NOTIFY_UPDATES, CONF_NOTIFY_SERVICE, CONF_DAILY_TIME):
+    for key in (CONF_NOTIFY_UPDATES, CONF_NOTIFY_DAILY, CONF_NOTIFY_SERVICE, CONF_DAILY_TIME):
         assert init["data"][key]
         assert init["data_description"][key]
     for error in ("invalid_service", "service_not_found"):
@@ -615,3 +621,78 @@ def test_notification_options_are_translated(lang) -> None:
     assert init["data"][CONF_NOTIFY_UPDATES] == {
         "en": "Notify about timetable updates", "hu": "Értesítés a menetrend-frissítésekről"
     }[lang]
+
+
+async def test_options_save_other_fields_while_the_stored_service_is_gone(hass) -> None:
+    """A stored service Home Assistant no longer has (a removed script) does
+    not block the form: it stays stored, marked missing in the list; only a
+    newly picked missing one is refused."""
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=DOMAIN,
+        options={CONF_API_KEY: "", CONF_NOTIFY_UPDATES: True, CONF_NOTIFY_SERVICE: "script.gone"},
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert {"value": "script.gone", "label": "script.gone (missing)"} in _options(result)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_NOTIFY_UPDATES: True, CONF_NOTIFY_SERVICE: "script.gone", CONF_DAILY_TIME: "07:00"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_DAILY_TIME] == "07:00:00"
+    assert entry.options[CONF_NOTIFY_SERVICE] == "script.gone"
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_NOTIFY_UPDATES: True, CONF_NOTIFY_SERVICE: "script.other_gone"}
+    )
+    assert result["errors"] == {CONF_NOTIFY_SERVICE: "service_not_found"}
+
+
+async def test_options_missing_label_in_hungarian(hass) -> None:
+    hass.config.language = "hu"
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: "", CONF_NOTIFY_SERVICE: "script.gone"}
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert {"value": "script.gone", "label": "script.gone (hiányzik)"} in _options(result)
+
+
+async def test_options_script_label_follows_a_renamed_entity(hass) -> None:
+    """The script service is the script's unique_id; its entity_id may have
+    been renamed, so the name comes through the entity registry."""
+    from homeassistant.helpers import entity_registry as er
+
+    hass.services.async_register("script", "ertesit", lambda call: None)
+    registry = er.async_get(hass)
+    registry.async_get_or_create("script", "script", "ertesit", suggested_object_id="kozponti")
+    assert registry.async_get_entity_id("script", "script", "ertesit") == "script.kozponti"
+    hass.states.async_set("script.kozponti", "off", {"friendly_name": "Központi értesítés"})
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: ""})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert {"value": "script.ertesit", "label": "Központi értesítés (script.ertesit)"} in _options(result)
+
+
+async def test_options_list_sorts_accented_labels_with_their_letter(hass) -> None:
+    for name, friendly in (("a", "Fűtés"), ("b", "Értesítés"), ("c", "Ébresztő"), ("d", "Zár"), ("e", "Ajtó")):
+        hass.services.async_register("script", name, lambda call: None)
+        hass.states.async_set(f"script.{name}", "off", {"friendly_name": friendly})
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: ""})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    labels = [o["label"].split(" (")[0] for o in _options(result)[1:]]
+    assert labels == ["Ajtó", "Ébresztő", "Értesítés", "Fűtés", "Zár"]
+
+
+async def test_options_daily_install_notification_switch(hass) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: ""})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert _field(result, CONF_NOTIFY_DAILY).default() is False
+    assert isinstance(result["data_schema"].schema[_field(result, CONF_NOTIFY_DAILY)], BooleanSelector)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_NOTIFY_UPDATES: True, CONF_NOTIFY_DAILY: True}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_NOTIFY_DAILY] is True
