@@ -115,8 +115,8 @@ menetrendek települnek, a MÁV vágány- és helyjegyszolgáltatás nem.
 ### 3.1 Beállítások
 
 A **Beállítások → Eszközök és szolgáltatások → Magyar közlekedés →
-Konfigurálás** a **BKK API kulcs** mezőt és a napi MÁV útvonal-index
-kapcsolóját nyitja meg.
+Konfigurálás** a **BKK API kulcs** mezőt, a napi MÁV útvonal-index
+beállításait és a menetrend-értesítéseket nyitja meg.
 
 - Írj be új kulcsot, és ments: az integráció újratölt, és minden kártya az
   új kulcsot használja.
@@ -124,11 +124,22 @@ kapcsolóját nyitja meg.
   A **Tárolt kulcs törlése** jelölőnégyzettel és mentéssel törölheted.
 - A mező gépelés közben is elrejti a kulcsot.
 - **Napi MÁV útvonal-index a GitHubról** (alapból bekapcsolva): az
-  integráció naponta néhányszor megnézi a `bator.github.io` oldalon az aznap
+  integráció naponta egyszer megnézi a `bator.github.io` oldalon az aznap
   reggel a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet, és
   ha újabb a használtnál, átveszi. Kikapcsolva a heti kiadás indexe marad, és
   a Home Assistant ilyen kérést nem küld. Részletek:
   [The daily index](../timetables.md#the-daily-index-from-github-pages).
+- **Napi ellenőrzés ideje** (alapból 06:00): ennek az ellenőrzésnek a helyi
+  ideje (legfeljebb 5 perccel később); a Home Assistant indulása után
+  10–20 perccel egyszer szintén lefut.
+- **Értesítés a menetrend-frissítésekről** (alapból kikapcsolva): állandó
+  értesítés, ha új napi MÁV index települt, ha az integráció frissítése új
+  Volán-, városi vagy MÁV-menetrendet hozott, és egyszer, ha a napi index
+  3 egymást követő napon nem frissült.
+- **Ezt a szolgáltatást is hívja** (nem kötelező): például `script.ertesit`
+  vagy `notify.mobile_app_iphone`, amelyet minden értesítés mellett `title`
+  és `message` mezőkkel hív meg. Az űrlap nem fogad el `domain.service`
+  alaktól eltérő nevet vagy nem létező szolgáltatást.
 
 Ha a BKK elutasítja a tárolt kulcsot (visszavonták vagy lejárt), a Home
 Assistant újat kér: a **Beállítások → Eszközök és szolgáltatások** oldalon
