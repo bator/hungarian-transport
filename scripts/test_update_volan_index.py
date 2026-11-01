@@ -961,7 +961,36 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a MÁV index that builds clears the failure count and is announced",
           code == 0 and "mav-build" not in fake.state()["failing"] and fake.state()["mav_rejected"] == {}
           and any("mav trains=900" in m for m in sent), repr((code, sent, fake.state())))
+    # A feed whose build crashed is built again after a HACS update, which
+    # sets the served index's st_mtime to "now" but keeps its build time.
+    mav_out = fake.www / "mav-index.json.gz"
+    mav_out.write_bytes(gzip.compress(b'{"v":2,"feed":"m"}', mtime=int(time.time()) - 2 * 86400))
+    mav_zip.write_bytes(b"PK mav feed 4")
+    mav_result["raise"] = MemoryError()
+    builds = len(mav_builds)
+    uvi._today = lambda: start + timedelta(days=13)
+    fake.run()
+    os.utime(mav_out, None)
+    uvi._today = lambda: start + timedelta(days=14)
+    fake.run()
+    check("a MÁV feed whose build crashed is built again after a HACS update touched the index",
+          len(mav_builds) == builds + 2 and fake.state()["failing"].get("mav-build", {}).get("runs") == 2,
+          repr((len(mav_builds) - builds, fake.state().get("failing"))))
+    mav_result["raise"] = None
     uvi._today = date.today
+
+# mav_source_newer goes by the index's build time (gzip header), not st_mtime.
+with tempfile.TemporaryDirectory() as tmp:
+    src, out = Path(tmp) / "mav.zip", Path(tmp) / "mav-index.json.gz"
+    src.write_bytes(b"feed")
+    out.write_bytes(gzip.compress(b'{"v":2,"feed":"old"}', mtime=int(time.time()) - 2 * 86400))
+    os.utime(src, (time.time() - 8 * 3600,) * 2)
+    os.utime(out, None)
+    touched = REAL_MAV_SOURCE_NEWER(src, out)
+    out.write_bytes(gzip.compress(b'{"v":2,"feed":"new"}'))
+    built = REAL_MAV_SOURCE_NEWER(src, out)
+    check("mav_source_newer: a feed newer than the index's build stays newer after an unpack set st_mtime to now,"
+          " and is not newer once an index is built from it", touched and not built, repr((touched, built)))
 
 # The daily HEAD of a keyed http:// override goes over https, like its
 # download; only a feed marked insecure is asked over plain http.

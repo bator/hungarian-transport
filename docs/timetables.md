@@ -254,7 +254,8 @@ To rebuild them yourself on Home Assistant OS:
    of the city zip in place, then it is built again. A MÁV feed whose index
    fails its audit or is too small is likewise not built again for 7 days
    while it is the same feed; a MÁV build that crashed is tried again next
-   run. A feed that fails to download, or whose new zip (MÁV feed) the index
+   run, a HACS update in between included (the feed is compared with the
+   index's build time, not with when HACS unpacked it). A feed that fails to download, or whose new zip (MÁV feed) the index
    does not take, keeps its last zip; once that has gone on three days in a
    row the webhook says so, then weekly while it lasts (the same for
    `MAV_GTFS_URL`). The shapes folders travel with their indexes.

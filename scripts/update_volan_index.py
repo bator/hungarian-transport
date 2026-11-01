@@ -393,6 +393,13 @@ def paths() -> tuple[Path, Path, Path, Path]:
 
 
 def mav_source_newer(src: Path, out: Path) -> bool:
+    """Whether the MÁV feed is newer than the served index's build.
+
+    By the index's build time (_built_at), not its st_mtime: a HACS unpack and
+    restore_hacs_indexes() set that to "now", which would make a feed whose
+    build failed look built and never be built again. Compared in whole
+    seconds, the gzip header's resolution.
+    """
     if not out.exists():
         return True
     try:
@@ -401,7 +408,7 @@ def mav_source_newer(src: Path, out: Path) -> bool:
             newest = max(times) if times else 0
         else:
             newest = src.stat().st_mtime
-        return newest > out.stat().st_mtime
+        return int(newest) > int(_built_at(out))
     except OSError:
         return True
 
@@ -1167,8 +1174,9 @@ def _main() -> int:
                         failure_report({MAV_BUILD_KEY: entry}, today) + "; the MÁV index stays as it was",
                     )
         elif mav_src is not None:
-            # The index is newer than the feed (built here, by the
-            # integration or shipped): a failed build of it is history.
+            # The index was built after the feed was downloaded (here, by
+            # the integration or shipped; by build time, not unpack time):
+            # a failed build of the feed is history.
             mav_bad = {}
             failing.pop(MAV_BUILD_KEY, None)
     finally:
