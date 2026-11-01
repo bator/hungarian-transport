@@ -1,7 +1,9 @@
-import { DEFAULT_FAVORITES, DEFAULT_MINUTES_AFTER, MAX_MINUTES_AFTER, MINUTES_AFTER_PRESETS, MIN_MINUTES_AFTER, clampMinutesAfter, normalizeCardConfig } from './config.js';
+import { DEFAULT_FAVORITES, DEFAULT_MINUTES_AFTER, MAX_MINUTES_AFTER, MINUTES_AFTER_PRESETS, MIN_MINUTES_AFTER, clampMinutesAfter, destRouteIds, normalizeCardConfig } from './config.js';
 import { codedError, errText, modeCopy, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
-import { THEMES, THEME_DEFAULT, THEME_IDS, THEME_OPERATOR } from './themes.js';
+import { THEMES, THEME_DEFAULT, THEME_IDS, THEME_OPERATOR, themeKey } from './themes.js';
+
+const DEST_RETRY_MS = 30 * 1000;
 
 export class BKKHopCardEditor extends HTMLElement {
   constructor() {
@@ -67,9 +69,12 @@ export class BKKHopCardEditor extends HTMLElement {
        already running for this stop must not be restarted. */
     const stopId = this._config.stopId;
     const loading = this._destsLoading && this._loadingStop === stopId;
-    /* Nor a load that failed for this stop: one request and one banner per
-       keystroke otherwise. A stop pick or a key showing up loads again. */
-    const failed = this._failedStop === stopId;
+    /* Nor a load that failed for this stop with the same key access: one
+       request and one banner per keystroke otherwise. A stop pick, a new or
+       fixed key, the integration's key showing up, or an edit after
+       DEST_RETRY_MS (a passing FUTÁR error) loads again. */
+    const failed = this._failedStop === stopId && this._failedAccess === this._keyAccess()
+      && Date.now() - (this._failedAt || 0) < DEST_RETRY_MS;
     if (stopId && this._canLoadDests() && this._destsStale(stopId) && !loading && !failed) {
       this._loadDests();
     }
@@ -95,7 +100,8 @@ export class BKKHopCardEditor extends HTMLElement {
        loaded adds the BKK destinations. Only a loaded list is redone, so a
        failed load does not retry on every state update. */
     const stopId = this._config.stopId;
-    if (stopId && this._loadedStop === stopId && this._destsStale(stopId)
+    const retry = this._failedStop === stopId && this._failedAccess !== this._keyAccess() && this._canLoadDests();
+    if (stopId && (this._loadedStop === stopId || retry) && this._destsStale(stopId)
         && !(this._destsLoading && this._loadingStop === stopId)) this._loadDests();
   }
 
@@ -204,7 +210,7 @@ export class BKKHopCardEditor extends HTMLElement {
         </div>
         <div class="f">
           <label id="lblTheme" for="theme"></label>
-          <select id="theme">${THEME_IDS.map((id) => `<option value="${id}"></option>`).join('')}</select>
+          <select id="theme">${this._themeIds().map((id) => `<option value="${id}"></option>`).join('')}</select>
           <div class="hint" id="hintTheme"></div>
         </div>
         <div class="f" id="apiKeyWrap">
@@ -503,6 +509,11 @@ export class BKKHopCardEditor extends HTMLElement {
     if (!this._isEditing(el)) el.value = pref;
   }
 
+  /* The themes the select offers (the planner drops `operator`). */
+  _themeIds() {
+    return THEME_IDS;
+  }
+
   /* Operator names are proper nouns: only the two generic entries are worded. */
   _syncTheme() {
     const el = this._el('theme');
@@ -513,7 +524,8 @@ export class BKKHopCardEditor extends HTMLElement {
       else if (opt.value === THEME_OPERATOR) opt.textContent = t(lang, 'themeOperator');
       else opt.textContent = THEMES[opt.value].name;
     });
-    const cur = THEME_IDS.indexOf(this._config.theme) >= 0 ? this._config.theme : THEME_DEFAULT;
+    const want = themeKey(this._config.theme);
+    const cur = this._themeIds().indexOf(want) >= 0 ? want : THEME_DEFAULT;
     if (!this._isEditing(el)) el.value = cur;
     const hb = this._el('headerBadges');
     if (hb && !this._isEditing(hb)) hb.checked = this._config.headerBadges === true;
@@ -895,13 +907,15 @@ export class BKKHopCardEditor extends HTMLElement {
          without routes is filled; a destination pick sets its own. */
       const cur = this._config.routeIds || [];
       const saved = this._config.destKey ? this._savedDestRoutes() : null;
-      if (saved && !cur.length) this._emit({ routeIds: saved.slice() });
+      if (saved && !cur.length) this._emit({ routeIds: destRouteIds(saved, this._mode()) });
       const dq = this._el('dq');
       this._paintDestHits(dq ? dq.value.trim() : '');
     } catch (err) {
       if (seq !== this._destSeq) return;
       this._loadedStop = '';
       this._failedStop = stopId;
+      this._failedAccess = this._keyAccess();
+      this._failedAt = Date.now();
       this._error(err);
       if (box) box.innerHTML = '';
     } finally {
@@ -994,7 +1008,7 @@ export class BKKHopCardEditor extends HTMLElement {
         destKey: key,
         destName: stop.name,
         destStopId: stop.id ? String(stop.id) : undefined,
-        routeIds: (this._destRoutes[listKey] || this._destRoutes[key] || []).slice(),
+        routeIds: destRouteIds(this._destRoutes[listKey] || this._destRoutes[key] || [], this._mode()),
       }, this._stopPatch(stop, 'dest'));
       if (this._autoName() && this._config.stopName && this._titleIsAuto(this._config.name || '')) {
         patch.name = this._pairTitle(this._config.stopName, stop.name);

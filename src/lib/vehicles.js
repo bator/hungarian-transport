@@ -134,6 +134,9 @@ Object.assign(BkkLib, {
   },
   applyCoachGps(rows, vehicles, nowSec) {
     const list = Array.isArray(rows) ? rows : [];
+    /* null: the lookup failed. The carried positions stay (still marked
+       gpsCarried) until a lookup answers. */
+    if (vehicles === null) return list;
     const vehs = Array.isArray(vehicles) ? vehicles : [];
     const byRoute = new Map();
     const fold = (value) => String(value || '').toLowerCase()

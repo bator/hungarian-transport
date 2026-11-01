@@ -89,16 +89,18 @@ Object.assign(BkkLib, {
     const hit = BkkLib._coachPosCache;
     if (hit && now - hit.ts < 20000) return hit.vehicles;
     if (BkkLib._coachPosInflight) return BkkLib._coachPosInflight;
+    /* A call that failed returns null, not []: "no vehicles" would wipe
+       the positions carried over from the last poll (applyCoachGps). */
     const run = (async () => {
       try {
         const res = await BkkLib.hassService(hass, 'coach_positions', {});
-        if (!res) return [];
+        if (!res) return null;
         const vehicles = BkkLib.coachVehiclesFromResult(res);
         const list = Array.isArray(vehicles) ? vehicles : [];
         BkkLib._coachPosCache = { ts: Date.now(), vehicles: list };
         return list;
       } catch (err) {
-        return [];
+        return null;
       } finally {
         BkkLib._coachPosInflight = null;
       }
