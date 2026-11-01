@@ -31,8 +31,10 @@ import sys
 import tempfile
 import unicodedata
 import zipfile
+import zlib
 from collections import defaultdict
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -470,6 +472,105 @@ def write_bytes(data: bytes, out: Path, temp_suffix: str | None = None) -> int:
 
 def read(path: Path) -> dict[str, Any]:
     return json.loads(gzip.decompress(Path(path).read_bytes()))
+
+
+# ---- which index wins for the same feed --------------------------------------
+#
+# One feed_version can be indexed twice: from pfaedle's rail-matched feed
+# (releases, the daily index on GitHub Pages) and from MÁV's official zip,
+# whose coarse shapes mostly give the line through the stations. Every place
+# that may replace an index with another of the same feed asks
+# same_feed_replaces: Home Assistant's startup check (mav._startup_decision),
+# the daily index (mav_daily.decide) and the local update script
+# (scripts/update_volan_index.py, mav_source_newer).
+
+# An index is pfaedle-fitted when at least this share of its variants follows
+# a shape rather than its station line (the release guard, MAV_MIN_FITTED in
+# scripts/release_mav_index.sh, publishes none below it).
+FITTED_MIN = 0.9
+# Two gzipped indexes of the same feed and kind closer than this in size are
+# the same index for this rule: the one in place stays.
+SAME_FEED_SLACK = 4096
+
+
+@dataclass(frozen=True)
+class IndexRank:
+    """What same_feed_replaces compares. fitted: fitted_share >= FITTED_MIN,
+    None when not known (a build not made yet); size: gzipped bytes, None
+    when not known."""
+
+    fitted: bool | None
+    size: int | None
+
+
+def _station_line(stations: list[Any], ids: list[Any]) -> str:
+    """The polyline build() gives a variant without a usable shape."""
+    out = []
+    plat = plng = 0
+    for i in ids:
+        lat, lng = int(stations[i][1]), int(stations[i][2])
+        out.append(_encode_signed(lat - plat))
+        out.append(_encode_signed(lng - plng))
+        plat, plng = lat, lng
+    return "".join(out)
+
+
+def fitted_share(index: dict[str, Any]) -> float:
+    """The share of an index's variants whose route is a shape, not the line
+    through their stations (build's "fitted" / "variants", from the index
+    alone). A variant that does not resolve counts as not fitted."""
+    stations, polylines = index.get("st") or [], index.get("p") or []
+    total = fitted = 0
+    for table in (index.get("n") or {}, index.get("l") or {}):
+        if not isinstance(table, dict):
+            continue
+        for variants in table.values():
+            for var in variants if isinstance(variants, list) else ():
+                total += 1
+                try:
+                    if polylines[var[0]] != _station_line(stations, var[1]):
+                        fitted += 1
+                except (IndexError, KeyError, TypeError, ValueError):
+                    pass
+    return fitted / total if total else 0.0
+
+
+def rank(index: dict[str, Any], size: int) -> IndexRank:
+    return IndexRank(fitted_share(index) >= FITTED_MIN, size)
+
+
+def read_rank(path: Path) -> IndexRank | None:
+    """The rank of an index file, or None when it does not read."""
+    try:
+        raw = Path(path).read_bytes()
+        index = json.loads(gzip.decompress(raw))
+    except (OSError, EOFError, ValueError, zlib.error):
+        return None
+    if not isinstance(index, dict):
+        return None
+    return rank(index, len(raw))
+
+
+def same_feed_replaces(new: IndexRank, old: IndexRank) -> bool:
+    """Whether index new replaces index old of the same feed_version.
+
+    1. A pfaedle-fitted old one is replaced only by another fitted one more
+       than SAME_FEED_SLACK bytes larger: never by a stop-sequence index, nor
+       by a build whose kind is not known yet.
+    2. A stop-sequence old one is replaced by a fitted one, and by another
+       stop-sequence one more than SAME_FEED_SLACK bytes larger.
+    An unknown size never wins on size, so a build not made yet (kind and
+    size unknown) never replaces an index of its own feed.
+    """
+    if old.fitted:
+        return new.fitted is True and _larger(new, old)
+    if new.fitted:
+        return True
+    return _larger(new, old)
+
+
+def _larger(new: IndexRank, old: IndexRank) -> bool:
+    return new.size is not None and old.size is not None and new.size > old.size + SAME_FEED_SLACK
 
 
 # ---- the card's choice, and the audit ---------------------------------------

@@ -7,12 +7,15 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from homeassistant.components import persistent_notification
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall
 from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
 
 from custom_components.hungarian_transport import mav, mav_daily, timetable_notify
 from custom_components.hungarian_transport.const import (
     CONF_DAILY_MAV,
+    CONF_NOTIFY_DAILY,
     CONF_NOTIFY_SERVICE,
     CONF_NOTIFY_UPDATES,
     DOMAIN,
@@ -113,6 +116,14 @@ async def _setup(hass: HomeAssistant, options: dict) -> MockConfigEntry:
     return entry
 
 
+def _set_state(hass: HomeAssistant, state: CoreState) -> None:
+    """Home Assistant's core state (set_state where the harness has it)."""
+    if hasattr(hass, "set_state"):
+        hass.set_state(state)
+    else:
+        hass.state = state
+
+
 def _ids(created: list[dict]) -> list[str]:
     return [n["id"] for n in created]
 
@@ -120,15 +131,18 @@ def _ids(created: list[dict]) -> list[str]:
 # ---- the daily MÁV index installed -------------------------------------------
 
 
+@pytest.mark.parametrize("daily", [True, False])
 async def test_installed_daily_index_notifies_with_the_extra_service(
-    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, notes, script_calls, monkeypatch
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, notes, script_calls, monkeypatch, daily
 ) -> None:
+    """MÁV publishes almost daily: the service hears about a daily install
+    only with CONF_NOTIFY_DAILY on; the persistent notification always."""
     await budapest
     monkeypatch.setattr(mav_daily, "async_update", _real_update)
     _ship(card_assets)
     raw = _index(NEW)
     _serve(aioclient_mock, raw, _manifest(raw, trains=812, lines=97))
-    await _setup(hass, {**ON, CONF_NOTIFY_SERVICE: "script.ertesit"})
+    await _setup(hass, {**ON, CONF_NOTIFY_SERVICE: "script.ertesit", CONF_NOTIFY_DAILY: daily})
     created, _ = notes
     assert created == []
 
@@ -139,7 +153,7 @@ async def test_installed_daily_index_notifies_with_the_extra_service(
         "title": "Hungarian transport: new MÁV timetable",
         "message": "The daily MÁV route index of the 2026-11-01 timetable is installed: 812 trains, 97 lines.",
     }]
-    assert script_calls == [{"title": created[0]["title"], "message": created[0]["message"]}]
+    assert script_calls == ([{"title": created[0]["title"], "message": created[0]["message"]}] if daily else [])
 
 
 async def test_installed_daily_index_in_hungarian(
@@ -184,8 +198,8 @@ async def test_up_to_date_round_does_not_notify(
 ) -> None:
     await budapest
     monkeypatch.setattr(mav_daily, "async_update", _real_update)
-    (card_assets / mav.INDEX_NAME).write_bytes(_index(NEW))
-    _serve(aioclient_mock, _index(NEW))
+    (card_assets / mav.INDEX_NAME).write_bytes(_index(NEW, fitted=True))
+    _serve(aioclient_mock, _index(NEW, fitted=True))
     await _setup(hass, ON)
     await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
     assert aioclient_mock.call_count == 1
@@ -321,30 +335,31 @@ async def test_repeated_daily_failure_notifies_once_and_clears(
     hass: HomeAssistant, card_assets, freezer, budapest, notes, monkeypatch, hass_storage
 ) -> None:
     await budapest
-    results = []
+    # Every round of a day (retries too) has that day's result.
+    plan = {"01": mav_daily.FAILED, "02": mav_daily.FAILED, "03": mav_daily.BUSY, "04": mav_daily.FAILED,
+            "05": mav_daily.FAILED, "06": mav_daily.UP_TO_DATE}
+    rounds = []
 
     async def update(hass, www):
         hass.data[DOMAIN]["mav_daily_error"] = "mav-index.json: HTTP 404"
-        return results.pop(0)
+        rounds.append(dt_util.now().date().isoformat())
+        return plan[f"{dt_util.now().day:02d}"]
 
     monkeypatch.setattr(mav_daily, "async_update", update)
     await _setup(hass, ON)
     created, dismissed = notes
 
-    # Two failures on day 1 count as one day; day 3's only round was kept
-    # busy by a local build, which says nothing either way.
-    plan = {"01": [mav_daily.FAILED, mav_daily.FAILED], "02": [mav_daily.FAILED], "03": [mav_daily.BUSY],
-            "04": [mav_daily.FAILED]}
-    results[:] = plan["01"]
+    # Rounds and retries on day 1 count as one day; day 3's rounds were kept
+    # busy by a local build, which neither counts nor breaks the streak.
     await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
     await _at(hass, freezer, "2026-11-01 06:00:00+01:00")
     await _at(hass, freezer, "2026-11-01 06:05:01+01:00")
+    await _at(hass, freezer, "2026-11-01 06:25:02+01:00")
+    assert rounds.count("2026-11-01") >= 3
     for day in ("02", "03", "04"):
         assert created == []
-        results[:] = plan[day]
         await _at(hass, freezer, f"2026-11-{day} 06:00:00+01:00")
         await _at(hass, freezer, f"2026-11-{day} 06:05:01+01:00")
-    assert results == []
     assert created == [{
         "id": timetable_notify.NOTIFICATION_DAILY_FAILED,
         "title": "Hungarian transport: daily MÁV index not updating",
@@ -352,16 +367,14 @@ async def test_repeated_daily_failure_notifies_once_and_clears(
                    "(last error: mav-index.json: HTTP 404). The current index stays in use.",
     }]
     record = hass_storage[timetable_notify.STORAGE_KEY]["data"]["daily_failures"]
-    assert record == {"days": 3, "last": "2026-11-04", "notified": True}
+    assert record == {"days": 3, "last": "2026-11-04", "notified": True, "error": "mav-index.json: HTTP 404"}
 
     # Once per streak, not daily.
-    results[:] = [mav_daily.FAILED]
     await _at(hass, freezer, "2026-11-05 06:00:00+01:00")
     await _at(hass, freezer, "2026-11-05 06:05:01+01:00")
     assert len(created) == 1
 
     # A round that goes through again ends the streak and dismisses it.
-    results[:] = [mav_daily.UP_TO_DATE]
     await _at(hass, freezer, "2026-11-06 06:00:00+01:00")
     await _at(hass, freezer, "2026-11-06 06:05:01+01:00")
     assert dismissed == [timetable_notify.NOTIFICATION_DAILY_FAILED]
@@ -402,3 +415,123 @@ async def test_daily_mav_off_still_checks_the_shipped_indexes(
     await _setup(hass, {**ON, CONF_DAILY_MAV: False})
     assert _ids(notes[0]) == [timetable_notify.NOTIFICATION_SHIPPED]
 
+
+
+async def test_failure_days_must_be_consecutive(hass: HomeAssistant, freezer, budapest, notes) -> None:
+    """Three failures two weeks apart (Home Assistant off between) are no
+    streak: a day without any round starts it over."""
+    await budapest
+    notifier = timetable_notify.UpdateNotifier(hass, ON)
+    for day in ("2026-11-01", "2026-11-08", "2026-11-15"):
+        freezer.move_to(f"{day} 06:00:00+01:00")
+        await notifier.async_daily_result(mav_daily.FAILED)
+    assert notes == ([], [])
+    for day in ("2026-11-16", "2026-11-17"):
+        freezer.move_to(f"{day} 06:00:00+01:00")
+        await notifier.async_daily_result(mav_daily.FAILED)
+    assert _ids(notes[0]) == [timetable_notify.NOTIFICATION_DAILY_FAILED]
+    assert "on 3 days in a row" in notes[0][0]["message"]
+
+
+async def test_busy_days_bridge_a_streak(hass: HomeAssistant, freezer, budapest, notes) -> None:
+    await budapest
+    notifier = timetable_notify.UpdateNotifier(hass, ON)
+    for day, result in (("01", mav_daily.FAILED), ("02", mav_daily.BUSY), ("03", mav_daily.BUSY),
+                        ("04", mav_daily.FAILED), ("05", mav_daily.FAILED)):
+        freezer.move_to(f"2026-11-{day} 06:00:00+01:00")
+        await notifier.async_daily_result(result)
+    assert _ids(notes[0]) == [timetable_notify.NOTIFICATION_DAILY_FAILED]
+
+
+async def test_a_stale_site_counts_as_a_failure(hass: HomeAssistant, freezer, budapest, notes) -> None:
+    """The daily workflow stopped: every round is UP_TO_DATE against a
+    manifest built days ago. Once it is older than STALE_PAGES, that is a
+    failure day, so the streak notification shows it."""
+    await budapest
+    notifier = timetable_notify.UpdateNotifier(hass, ON)
+    built = dt_util.parse_datetime("2026-10-28T04:00:00Z")
+    hass.data.setdefault(DOMAIN, {})["mav_daily_built_at"] = built
+    for day in ("2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"):
+        freezer.move_to(f"{day} 06:00:00+01:00")
+        await notifier.async_daily_result(mav_daily.UP_TO_DATE)
+    # 30.10 is within STALE_PAGES; 31.10, 01.11, 02.11 are not.
+    assert _ids(notes[0]) == [timetable_notify.NOTIFICATION_DAILY_FAILED]
+    assert "last built on 2026-10-28" in notes[0][0]["message"]
+    # A fresh manifest ends the streak.
+    hass.data[DOMAIN]["mav_daily_built_at"] = dt_util.utcnow()
+    freezer.move_to("2026-11-03 06:00:00+01:00")
+    await notifier.async_daily_result(mav_daily.UP_TO_DATE)
+    assert notes[1] == [timetable_notify.NOTIFICATION_DAILY_FAILED]
+
+
+async def test_the_daily_round_records_when_the_manifest_was_built(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    raw = _index(NEW)
+    _serve(aioclient_mock, raw, _manifest(raw, built_at="2026-10-28T04:00:00Z"))
+    await _real_update(hass, card_assets)
+    assert hass.data[DOMAIN]["mav_daily_built_at"] == dt_util.parse_datetime("2026-10-28T04:00:00Z")
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(mav_daily.MANIFEST_URL, status=503)
+    await _real_update(hass, card_assets)
+    assert "mav_daily_built_at" not in hass.data[DOMAIN]
+
+
+async def test_an_open_streak_notification_comes_back_after_a_restart(
+    hass: HomeAssistant, card_assets, notes, hass_storage, script_calls
+) -> None:
+    """Persistent notifications do not outlive a restart; the record says it
+    was shown, so setup shows it again (without calling the service)."""
+    hass_storage[timetable_notify.STORAGE_KEY] = {
+        "version": timetable_notify.STORAGE_VERSION, "minor_version": 1, "key": timetable_notify.STORAGE_KEY,
+        "data": {"daily_failures": {"days": 4, "last": "2026-11-04", "notified": True, "error": "HTTP 404"}},
+    }
+    await _setup(hass, {**ON, CONF_NOTIFY_SERVICE: "script.ertesit"})
+    created, _ = notes
+    assert created == [{
+        "id": timetable_notify.NOTIFICATION_DAILY_FAILED,
+        "title": "Hungarian transport: daily MÁV index not updating",
+        "message": "The daily MÁV route index could not be updated on 4 days in a row "
+                   "(last error: HTTP 404). The current index stays in use.",
+    }]
+    assert script_calls == []
+
+
+async def test_the_shipped_notification_calls_the_service_once_started(
+    hass: HomeAssistant, card_assets, notes, hass_storage, caplog
+) -> None:
+    """At startup the entry is set up before scripts and mobile_app register
+    their services: the persistent notification is created at once, the
+    service called at EVENT_HOMEASSISTANT_STARTED."""
+    _seen(hass_storage, "0.0.1", {"volan": "volan:old", "city": CITY, "mav": OLD})
+    _ship(card_assets)
+    _set_state(hass, CoreState.starting)
+    await _setup(hass, {**ON, CONF_NOTIFY_SERVICE: "script.ertesit"})
+    created, _ = notes
+    assert _ids(created) == [timetable_notify.NOTIFICATION_SHIPPED]
+    calls = []
+
+    async def handle(call: ServiceCall) -> None:
+        calls.append(dict(call.data))
+
+    hass.services.async_register("script", "ertesit", handle)  # the script integration, later
+    assert calls == []
+    _set_state(hass, CoreState.running)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert calls == [{"title": created[0]["title"], "message": created[0]["message"]}]
+    assert "Notification service script.ertesit is not available" not in caplog.text
+
+
+async def test_a_waiting_service_call_is_dropped_when_the_entry_unloads(
+    hass: HomeAssistant, card_assets, notes, hass_storage, script_calls
+) -> None:
+    _seen(hass_storage, "0.0.1", {"volan": "volan:old", "city": CITY, "mav": OLD})
+    _ship(card_assets)
+    _set_state(hass, CoreState.starting)
+    entry = await _setup(hass, {**ON, CONF_NOTIFY_SERVICE: "script.ertesit"})
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    _set_state(hass, CoreState.running)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert script_calls == []

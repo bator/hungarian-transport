@@ -97,13 +97,15 @@
           "daily_mav_index": "Daily MÁV route index from GitHub",
           "daily_time": "Daily check time",
           "notify_updates": "Notify about timetable updates",
-          "notify_service": "Also call this service"
+          "notify_service": "Also call this service",
+          "notify_daily_installs": "Also notify about daily MÁV index installs"
         },
         "data_description": {
           "daily_mav_index": "Once a day, fetch the train route index the project builds from MÁV's newest timetable (from bator.github.io) when it is newer than the one in use. A newer local MÁV feed still wins. Turn it off to keep the weekly release's index and make no such request.",
-          "daily_time": "Local time of the daily check for a new MÁV route index (up to 5 minutes later, to spread the requests). It also runs once 10–20 minutes after Home Assistant starts.",
-          "notify_updates": "A persistent notification when a new daily MÁV route index is installed, when an update of the integration ships new Volán, city or MÁV timetables, and once when the daily MÁV index fails on 3 days in a row.",
-          "notify_service": "Optional, as domain.service, for example script.ertesit or notify.mobile_app_iphone. Called with title and message along with each persistent notification. Leave empty for persistent notifications only."
+          "daily_time": "Local time of the daily check for a new MÁV route index (up to 5 minutes later, to spread the requests). It also runs once 10–20 minutes after Home Assistant starts or these options are saved; a failed check is tried again every 20 minutes, up to 6 times.",
+          "notify_updates": "A persistent notification when a new daily MÁV route index is installed, when an update of the integration ships new Volán, city or MÁV timetables, and once when the daily MÁV index fails on 3 consecutive days (a site not rebuilt for 3 days counts as failing).",
+          "notify_service": "Optional. Pick a script or notify service from the list, or type another one as domain.service (for example script.ertesit or notify.mobile_app_iphone). Called with title and message along with each persistent notification. “— none —” or an empty field: persistent notifications only. A stored service that no longer exists is marked (missing) and kept until you pick another.",
+          "notify_daily_installs": "MÁV publishes a new timetable almost every day. Off (default): a new daily MÁV route index only creates the persistent notification. On: the service below is called for it too. Shipped timetables and the failure notice always call it."
         }
       }
     },
@@ -124,6 +126,13 @@
     "mav_build_failed": {
       "title": "MÁV route index not built",
       "description": "The MÁV route index could not be built from `{path}`: {error}\n\nHome Assistant does not build this feed again at startup. Put a new feed there (or upload one), or call the `hungarian_transport.rebuild_mav_index` action to try again."
+    }
+  },
+  "selector": {
+    "notify_service": {
+      "options": {
+        "none": "— none —"
+      }
     }
   }
 }

@@ -29,7 +29,9 @@ itself dying during a build (the OOM killer, the watchdog) counts as such an
 interruption, found at the next start; a stop that cancels the build does not.
 An index on disk that is the local feed's own (built here, or a release's of
 the same feed_version) is kept at startup, whatever an earlier build of that
-feed did. The daily index from GitHub Pages (mav_daily.py) is installed by
+feed did: of one feed_version, which index wins is mav_index.same_feed_replaces,
+the rule the daily index and the update script follow too, and a build not
+made yet never replaces an index of its own feed. The daily index from GitHub Pages (mav_daily.py) is installed by
 the same rule, under the same lock, and counts as a shipped one here.
 The build (a minute of CPU over stop_times.txt) runs as a separate Python
 process, not in the executor: an executor thread would hold the GIL against
@@ -288,7 +290,9 @@ def _startup_decision(src: Path, out: Path, state_file: Path, today: date | None
     than the local one (a release shipped it), or the local feed has expired;
     the newer feed wins. CURRENT: the index on disk is this feed's, also
     when a build of it failed or kept being interrupted (a release shipped a
-    working index of it). FAILED and INTERRUPTED: the feed's build failed, or
+    working index of it), or is of this feed's feed_version (the same-feed
+    rule, mav_index.same_feed_replaces: a build not made yet never replaces
+    it). FAILED and INTERRUPTED: the feed's build failed, or
     was interrupted INTERRUPTED_LIMIT times in a row; the rebuild service and
     an upload force a build.
 
@@ -318,15 +322,47 @@ def _startup_decision(src: Path, out: Path, state_file: Path, today: date | None
                 return SUPERSEDED
     if index is not None and not state.get("building"):
         # The index this integration built is the feed's it was built from;
-        # another one is the feed's its "feed" names.
-        ours = state.get("index") == index
-        if own if ours else (bool(version) and index_feed == version):
+        # another one is the feed's its "feed" names. An index of the local
+        # feed's own feed_version stays by the same-feed rule (a build of
+        # the feed, not made yet, never replaces one of its own feed), also
+        # when the zip was copied again (a new fingerprint) since this
+        # integration built it.
+        if own and state.get("index") == index:
+            return CURRENT
+        if version and index_feed == version and _same_feed_keeps(out, LOCAL_BUILD):
             return CURRENT
     if state.get("failed") == source:
         return FAILED
     if _interruptions(state, source)[0] >= INTERRUPTED_LIMIT:
         return INTERRUPTED
     return BUILD
+
+
+# A build of the local feed before it is made: its kind and size are not
+# known, so by mav_index.same_feed_replaces it replaces no index of its feed.
+LOCAL_BUILD = mav_index.IndexRank(fitted=None, size=None)
+
+
+def _same_feed_keeps(out: Path, new: mav_index.IndexRank) -> bool:
+    """Whether out, an index of new's own feed, stays (same_feed_replaces)."""
+    current = mav_index.read_rank(out)
+    return current is not None and not mav_index.same_feed_replaces(new, current)
+
+
+def build_lock(hass: HomeAssistant) -> asyncio.Lock:
+    """The lock every writer of the index holds: builds, the daily index."""
+    return hass.data.setdefault(DOMAIN, {}).setdefault("mav_lock", asyncio.Lock())
+
+
+def build_pending(hass: HomeAssistant) -> bool:
+    """Whether a build runs or is queued."""
+    data = hass.data.get(DOMAIN, {})
+    lock: asyncio.Lock | None = data.get("mav_lock")
+    queued: _Job | None = data.get("mav_queued")
+    return bool(
+        (lock is not None and lock.locked())
+        or (queued is not None and queued.task is not None and not queued.task.done())
+    )
 
 
 def _needs_build(src: Path, out: Path, state_file: Path, today: date | None = None) -> bool:
@@ -482,9 +518,8 @@ def _build_task(
 
 async def _run_job(hass: HomeAssistant, www: Path, job: _Job) -> dict[str, Any] | None:
     data = hass.data.setdefault(DOMAIN, {})
-    lock: asyncio.Lock = data.setdefault("mav_lock", asyncio.Lock())
     try:
-        async with lock:
+        async with build_lock(hass):
             job.started = True
             if data.get("mav_queued") is job:
                 del data["mav_queued"]

@@ -130,16 +130,28 @@ beállításait és a menetrend-értesítéseket nyitja meg.
   a Home Assistant ilyen kérést nem küld. Részletek:
   [The daily index](../timetables.md#the-daily-index-from-github-pages).
 - **Napi ellenőrzés ideje** (alapból 06:00): ennek az ellenőrzésnek a helyi
-  ideje (legfeljebb 5 perccel később); a Home Assistant indulása után
-  10–20 perccel egyszer szintén lefut.
+  ideje (legfeljebb 5 perccel később); a Home Assistant indulása és a
+  beállítások mentése után 10–20 perccel egyszer szintén lefut. A sikertelen
+  ellenőrzést (a GitHub nem érhető el, épp a saját feeded indexe készül)
+  20 percenként, legfeljebb 6-szor újrapróbálja.
 - **Értesítés a menetrend-frissítésekről** (alapból kikapcsolva): állandó
   értesítés, ha új napi MÁV index települt, ha az integráció frissítése új
   Volán-, városi vagy MÁV-menetrendet hozott, és egyszer, ha a napi index
-  3 egymást követő napon nem frissült.
+  3 egymást követő napon nem frissült (a GitHubon 3 napja nem frissített
+  index is hibának számít).
 - **Ezt a szolgáltatást is hívja** (nem kötelező): például `script.ertesit`
-  vagy `notify.mobile_app_iphone`, amelyet minden értesítés mellett `title`
-  és `message` mezőkkel hív meg. Az űrlap nem fogad el `domain.service`
-  alaktól eltérő nevet vagy nem létező szolgáltatást.
+  vagy `notify.mobile_app_iphone`, amelyet a kiadással érkező menetrendekről
+  és a hibákról szóló értesítés mellett `title` és `message` mezőkkel hív
+  meg. A scriptek és notify szolgáltatások listájából választható, vagy
+  beírható más is; csak a **— nincs —** jelent kizárólag állandó
+  értesítést. Az űrlap nem fogad el `domain.service` alaktól eltérő nevet
+  (a beírt `None`-t sem) vagy nem létező szolgáltatást. A már nem létező
+  tárolt szolgáltatás *(hiányzik)* jelöléssel látszik, és megmarad, amíg
+  mást nem választasz, így a többi beállítás továbbra is menthető.
+- **Napi MÁV index telepítéséről is értesítsen** (alapból kikapcsolva): a
+  MÁV szinte minden nap új menetrendet ad ki, ezért az új napi indexről
+  csak állandó értesítés készül, hacsak ez nincs bekapcsolva; akkor a
+  szolgáltatást is meghívja.
 
 Ha a BKK elutasítja a tárolt kulcsot (visszavonták vagy lejárt), a Home
 Assistant újat kér: a **Beállítások → Eszközök és szolgáltatások** oldalon
