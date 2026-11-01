@@ -72,6 +72,39 @@ async def test_user_flow_unreachable(hass, aioclient_mock) -> None:
     assert result["errors"] == {"base": "cannot_connect"}
 
 
+async def test_user_flow_rate_limited(hass, aioclient_mock) -> None:
+    """HTTP 429 used to say "Could not reach BKK FUTÁR": FUTÁR answered,
+    it only refuses the key for a while."""
+    aioclient_mock.get(SEARCH, status=429)
+    result = await _start(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_API_KEY: "busy"}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "rate_limited"}
+
+
+async def test_user_flow_error_status_is_not_a_valid_key(hass, aioclient_mock) -> None:
+    """HTTP 200 with {"status": "ERROR"} used to accept the key."""
+    aioclient_mock.get(SEARCH, json={"status": "ERROR", "code": 500})
+    result = await _start(hass)
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_API_KEY: "unknown"}
+    )
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {"base": "cannot_connect"}
+
+
+@pytest.mark.parametrize("lang", ["en", "hu"])
+def test_form_errors_are_translated(lang) -> None:
+    folder = Path(integration.__file__).parent / "translations"
+    data = json.loads((folder / f"{lang}.json").read_text(encoding="utf-8"))
+    for section in ("config", "options"):
+        assert {"invalid_auth", "cannot_connect", "rate_limited"} <= set(data[section]["error"])
+
+
 async def test_second_entry_is_refused(hass) -> None:
     MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN).add_to_hass(hass)
 

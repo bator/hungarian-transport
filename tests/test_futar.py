@@ -421,3 +421,82 @@ async def test_too_long_parameter_is_a_bad_request_not_an_outage(hass, aioclient
     # Exactly the limit is fine.
     resp = await _call(hass, params={"query": "x" * futar.FUTAR_PARAM_MAX_LEN})
     assert resp["data"]["status"] == "OK"
+
+
+async def test_answer_to_a_request_sent_before_a_rejection_keeps_it(monkeypatch, caplog) -> None:
+    """A slow call sent before FUTÁR rejected the key used to clear the
+    rejection when it succeeded: the log flapped ("rejected", "accepts
+    again", "rejected") and the next call spent a 401 instead of failing
+    fast for REJECTED_RETRY. Only an answer to a call sent after the latest
+    rejection (the probe) clears it."""
+    clock = [5000.0]
+    gate = asyncio.Event()
+    calls: list[str] = []
+
+    async def fake_get(session, api_key, path, params, timeout=None):
+        calls.append(path)
+        if path == "plan-trip.json":
+            await gate.wait()
+            return {"status": "OK", "data": {}}
+        if path == "trip-details.json":
+            raise futar.FutarAuthError("HTTP 401")
+        return {"status": "OK", "data": {}}
+
+    monkeypatch.setattr(futar, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(futar, "futar_get", fake_get)
+    proxy = futar.FutarProxy(None, "secret-key")
+    slow = asyncio.ensure_future(proxy.get("plan-trip.json", {"fromPlace": "a", "toPlace": "b"}))
+    await asyncio.sleep(0)
+    with pytest.raises(futar.FutarAuthError):
+        await proxy.get("trip-details.json", {"tripId": "1"})
+    gate.set()
+    assert (await slow)["status"] == "OK"
+
+    assert proxy._rejected == "HTTP 401"
+    with pytest.raises(futar.FutarAuthError):
+        await proxy.get("search.json", {"query": "Keleti"})
+    assert calls == ["plan-trip.json", "trip-details.json"]
+    messages = [r.getMessage() for r in caplog.records if r.name.endswith(".futar")]
+    assert messages == ["BKK FUTÁR rejected the configured key (HTTP 401)"]
+
+    # The probe after REJECTED_RETRY was sent after the rejection: it clears it.
+    clock[0] += futar.REJECTED_RETRY
+    assert (await proxy.get("search.json", {"query": "Keleti"}))["status"] == "OK"
+    assert proxy._rejected is None
+    assert [r.getMessage() for r in caplog.records if r.name.endswith(".futar")][-1] == (
+        "BKK FUTÁR accepts the configured key again"
+    )
+
+
+async def test_error_status_in_a_200_is_an_error_not_data(hass, aioclient_mock, caplog) -> None:
+    """HTTP 200 with a status other than OK used to come back as data: it was
+    cached, cleared the outage state and passed key validation, while the
+    card throws on it. It is an error now, never cached, and not an outage
+    either (FUTÁR answered)."""
+    aioclient_mock.get(SEARCH, status=503)
+    await _setup(hass)
+    assert (await _call(hass, params={"query": "A"}))["error"] == "futar_unavailable"
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "ERROR", "code": 500, "text": "boom"})
+    caplog.clear()
+    for _ in range(2):
+        resp = await _call(hass, params={"query": "B"})
+        assert resp == {"data": None, "error": "futar_unavailable", "detail": "status ERROR"}
+    # Not cached: both calls reached FUTÁR.
+    assert aioclient_mock.call_count == 2
+    # Neither "answers again" nor a second "unavailable" line.
+    assert not [r for r in caplog.records if r.name.endswith(".futar")]
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    assert (await _call(hass, params={"query": "C"}))["data"]["status"] == "OK"
+    assert [r.getMessage() for r in caplog.records if r.name.endswith(".futar")] == [
+        "BKK FUTÁR answers again"
+    ]
+
+
+async def test_missing_status_is_ok_like_on_the_card(hass, aioclient_mock) -> None:
+    aioclient_mock.get(SEARCH, json={"data": {"list": []}})
+    await _setup(hass)
+    assert (await _call(hass))["data"] == {"data": {"list": []}}

@@ -17,7 +17,7 @@ from homeassistant.helpers.selector import (
 )
 
 from .const import CONF_API_KEY, DOMAIN
-from .futar import FutarAuthError, FutarError, futar_get
+from .futar import FutarAuthError, FutarError, FutarUpstreamRateLimited, futar_get
 
 KEY_URL = "https://opendata.bkk.hu/data-sources"
 # Options flow: an empty key field keeps the stored key, this removes it.
@@ -32,6 +32,10 @@ async def _validate_key(hass: HomeAssistant, api_key: str) -> str | None:
         )
     except FutarAuthError:
         return "invalid_auth"
+    except FutarUpstreamRateLimited:
+        # HTTP 429: FUTÁR answers, but refuses this key for a while; not an
+        # outage, and the key may well be good.
+        return "rate_limited"
     except FutarError:
         return "cannot_connect"
     return None
