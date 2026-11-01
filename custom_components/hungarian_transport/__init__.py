@@ -23,7 +23,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
-from . import mav, mav_daily
+from . import mav, mav_daily, timetable_notify
 from .assets import asset_tag
 from .const import (
     CONF_API_KEY,
@@ -243,10 +243,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration entry."""
     frontend.add_extra_js_url(hass, hass.data[DOMAIN]["card_url"])
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+    notifier = timetable_notify.UpdateNotifier(hass, entry.options)
+    # The shipped indexes' feeds are recorded at every setup; a change that
+    # came with an update of the integration notifies (when turned on).
+    try:
+        integration = await async_get_integration(hass, DOMAIN)
+        await notifier.async_check_shipped(WWW_PATH, str(integration.version))
+    except Exception:  # noqa: BLE001 - never a reason not to set up
+        _LOGGER.warning("Could not check the shipped timetables for changes", exc_info=True)
     if entry.options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV):
-        # The daily MÁV index from GitHub Pages (mav_daily.py); turned off in
-        # the options, no request is made.
-        entry.async_on_unload(mav_daily.DailyIndexUpdater(hass, WWW_PATH).start())
+        # The daily MÁV index from GitHub Pages (mav_daily.py), at the time
+        # the options set; turned off in the options, no request is made.
+        entry.async_on_unload(
+            mav_daily.DailyIndexUpdater(
+                hass, WWW_PATH, notifier.daily_time, notifier.async_daily_result
+            ).start()
+        )
 
     api_key = _entry_api_key(entry)
     if not api_key:

@@ -119,12 +119,23 @@ key** checkbox.
 - Leave the field empty and save to keep the stored key (it is never shown).
   Tick **Remove the stored key** and save to remove it.
 - The field hides the key while you type.
-- **Daily MÁV route index from GitHub** (on by default): a few times a day
-  the integration checks `bator.github.io` for the train route index built
-  that morning from MÁV's newest timetable, and uses it when it is newer
-  than the one in use. Untick it to stay on the weekly release's index; Home
+- **Daily MÁV route index from GitHub** (on by default): once a day the
+  integration checks `bator.github.io` for the train route index built that
+  morning from MÁV's newest timetable, and uses it when it is newer than the
+  one in use. Untick it to stay on the weekly release's index; Home
   Assistant then makes no such request. See
   [The daily index](../timetables.md#the-daily-index-from-github-pages).
+- **Daily check time** (06:00 by default): the local time of that check
+  (up to 5 minutes later); it also runs once 10–20 minutes after Home
+  Assistant starts.
+- **Notify about timetable updates** (off by default): a persistent
+  notification when a new daily MÁV index is installed, when an update of
+  the integration ships new Volán, city or MÁV timetables, and once when the
+  daily index fails on 3 days in a row.
+- **Also call this service** (optional): a service such as `script.ertesit`
+  or `notify.mobile_app_iphone`, called with `title` and `message` next to
+  each notification. The form refuses a name that is not `domain.service`
+  or a service Home Assistant does not have.
 
 When BKK rejects the stored key (revoked or expired), Home Assistant asks
 for a new one: a **BKK key rejected** prompt appears under

@@ -94,10 +94,16 @@
         "data": {
           "api_key": "BKK API kulcs",
           "remove_key": "Tárolt kulcs törlése",
-          "daily_mav_index": "Napi MÁV útvonal-index a GitHubról"
+          "daily_mav_index": "Napi MÁV útvonal-index a GitHubról",
+          "daily_time": "Napi ellenőrzés ideje",
+          "notify_updates": "Értesítés a menetrend-frissítésekről",
+          "notify_service": "Ezt a szolgáltatást is hívja"
         },
         "data_description": {
-          "daily_mav_index": "Naponta letölti a projekt által a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet (a bator.github.io-ról), ha újabb a használtnál. Egy újabb helyi MÁV feed továbbra is elsőbbséget kap. Kikapcsolva a heti kiadás indexe marad, és ilyen kérés nem megy ki."
+          "daily_mav_index": "Naponta letölti a projekt által a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet (a bator.github.io-ról), ha újabb a használtnál. Egy újabb helyi MÁV feed továbbra is elsőbbséget kap. Kikapcsolva a heti kiadás indexe marad, és ilyen kérés nem megy ki.",
+          "daily_time": "Helyi idő, amikor naponta megnézi, van-e új MÁV útvonal-index (legfeljebb 5 perccel később, a kérések szétszórására). Home Assistant indulása után 10–20 perccel egyszer szintén lefut.",
+          "notify_updates": "Állandó értesítés, ha új napi MÁV útvonal-index települt, ha az integráció frissítése új Volán-, városi vagy MÁV-menetrendet hozott, és egyszer, ha a napi MÁV index 3 egymást követő napon nem frissült.",
+          "notify_service": "Nem kötelező, domain.service alakban, például script.ertesit vagy notify.mobile_app_iphone. Minden állandó értesítés mellett meghívja title és message mezőkkel. Üresen csak állandó értesítés lesz."
         }
       }
     },
@@ -105,7 +111,9 @@
       "invalid_auth": "A BKK FUTÁR elutasította ezt a kulcsot.",
       "cannot_connect": "Nem érhető el a BKK FUTÁR. Próbáld újra később.",
       "rate_limited": "A BKK FUTÁR most túl sok kérés miatt nem fogadja ezt a kulcsot. Próbáld újra néhány perc múlva.",
-      "remove_and_new_key": "Vagy új kulcsot adj meg, vagy jelöld be a tárolt kulcs törlését, a kettőt egyszerre nem lehet."
+      "remove_and_new_key": "Vagy új kulcsot adj meg, vagy jelöld be a tárolt kulcs törlését, a kettőt egyszerre nem lehet.",
+      "invalid_service": "A szolgáltatást domain.service alakban add meg, például notify.mobile_app_iphone.",
+      "service_not_found": "Nincs ilyen szolgáltatás a Home Assistantban."
     }
   },
   "issues": {

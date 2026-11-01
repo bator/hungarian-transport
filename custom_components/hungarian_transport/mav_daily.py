@@ -4,8 +4,9 @@ MÁV publishes a new GTFS almost every day; releases ship its index once a
 week. The repository's daily workflow (.github/workflows/mav-index-daily.yml)
 builds the same pfaedle-matched, audited index every morning and publishes it
 on GitHub Pages with a manifest (scripts/mav_pages_site.py). This module
-reads the manifest a while after startup and then every INTERVAL, and
-installs the index only when:
+reads the manifest a while after startup and then once a day at the time
+the options set (CONF_DAILY_TIME, 06:00 local time by default, plus up to
+DAILY_JITTER), and installs the index only when:
 
 - the manifest's format is the one this code reads and its index schema is
   mav_index.SCHEMA (else it says so once and installs nothing);
@@ -39,8 +40,8 @@ import random
 import re
 import secrets
 import zlib
-from collections.abc import Callable
-from datetime import date
+from collections.abc import Awaitable, Callable
+from datetime import date, time
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,7 @@ import aiohttp
 
 from homeassistant.core import CALLBACK_TYPE, HassJob, HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_call_later
+from homeassistant.helpers.event import async_call_later, async_track_time_change
 from homeassistant.helpers.start import async_at_started
 
 from . import mav, mav_index
@@ -69,11 +70,11 @@ MAX_INDEX_JSON = 128 * 1024 * 1024
 MANIFEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 INDEX_TIMEOUT = aiohttp.ClientTimeout(total=120)
 # First check a while after startup (the startup build goes first), then
-# every INTERVAL; the jitter spreads every installation's requests.
+# once a day at the chosen time; the jitter spreads every installation's
+# requests.
 FIRST_DELAY = 10 * 60
 FIRST_JITTER = 10 * 60
-INTERVAL = 6 * 3600
-INTERVAL_JITTER = 30 * 60
+DAILY_JITTER = 5 * 60
 FEED_RE = re.compile(r"\d{8}(?!\d)[A-Za-z0-9._:+-]{0,64}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -280,6 +281,12 @@ async def async_update(hass: HomeAssistant, www: Path) -> str:
             _log_failure(hass, f"could not write {out}: {err}")
             return FAILED
     _clear_failure(hass)
+    # What timetable_notify.py tells about it.
+    data["mav_daily_installed"] = {
+        "feed": feed,
+        "trains": man["trains"] if isinstance(man.get("trains"), int) else count,
+        "lines": man["lines"] if isinstance(man.get("lines"), int) else 0,
+    }
     audit = man.get("audit") if isinstance(man.get("audit"), dict) else {}
     _LOGGER.info(
         "Installed the daily MÁV route index of feed %s (%s trains and lines, built %s, audit %s/%s trains)",
@@ -289,12 +296,23 @@ async def async_update(hass: HomeAssistant, www: Path) -> str:
 
 
 class DailyIndexUpdater:
-    """Runs async_update FIRST_DELAY after Home Assistant started, then
-    every INTERVAL, each with jitter, until stopped."""
+    """Runs async_update FIRST_DELAY (plus up to FIRST_JITTER) after Home
+    Assistant started, then every day at daily_time, local time, plus up to
+    DAILY_JITTER, until stopped. A new time in the options reloads the
+    entry, which stops this updater and starts one with the new time.
+    on_result gets each round's result (timetable_notify.py)."""
 
-    def __init__(self, hass: HomeAssistant, www: Path) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        www: Path,
+        daily_time: time = time(6),
+        on_result: Callable[[str], Awaitable[None]] | None = None,
+    ) -> None:
         self._hass = hass
         self._www = www
+        self._time = daily_time
+        self._on_result = on_result
         self._unsub: CALLBACK_TYPE | None = None
         self._task: asyncio.Task[Any] | None = None
         self._stopped = False
@@ -303,11 +321,15 @@ class DailyIndexUpdater:
     @callback
     def start(self) -> Callable[[], None]:
         unsub_started = async_at_started(self._hass, self._at_started)
+        unsub_daily = async_track_time_change(
+            self._hass, self._at_time, hour=self._time.hour, minute=self._time.minute, second=self._time.second
+        )
 
         @callback
         def stop() -> None:
             self._stopped = True
             unsub_started()
+            unsub_daily()
             if self._unsub is not None:
                 self._unsub()
                 self._unsub = None
@@ -320,22 +342,42 @@ class DailyIndexUpdater:
         self._schedule(FIRST_DELAY + random.uniform(0, FIRST_JITTER))
 
     @callback
+    def _at_time(self, _now: Any) -> None:
+        self._schedule(random.uniform(0, DAILY_JITTER))
+
+    @callback
     def _schedule(self, delay: float) -> None:
-        if not self._stopped:
-            self._unsub = async_call_later(self._hass, delay, self._job)
+        if self._stopped:
+            return
+        # One round pending at a time: the daily time replaces a first round
+        # still waiting, and the other way round.
+        if self._unsub is not None:
+            self._unsub()
+        self._unsub = async_call_later(self._hass, delay, self._job)
 
     @callback
     def _fire(self, _now: Any) -> None:
         self._unsub = None
+        if self._task is not None and not self._task.done():
+            # The previous round still runs (a slow download): it is this one.
+            return
         self._task = self._hass.async_create_background_task(self._run(), "hungarian_transport_mav_daily")
 
     async def _run(self) -> None:
         try:
-            await async_update(self._hass, self._www)
+            result = await async_update(self._hass, self._www)
         except asyncio.CancelledError:
             # Stopped (unloaded, Home Assistant stopping): no next round.
             raise
         except Exception as err:  # noqa: BLE001 - logged once, the next round tries again
             _log_failure(self._hass, f"{type(err).__name__}: {err}")
             _LOGGER.debug("Daily MÁV route index round failed", exc_info=True)
-        self._schedule(INTERVAL + random.uniform(-INTERVAL_JITTER, INTERVAL_JITTER))
+            result = FAILED
+        if self._on_result is None:
+            return
+        try:
+            await self._on_result(result)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a notification never stops the updater
+            _LOGGER.warning("Timetable update notification failed", exc_info=True)

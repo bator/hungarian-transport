@@ -141,23 +141,59 @@ as a 3-day artifact without publishing anything.
 
 MÁV publishes a new feed almost every day; releases come once a week. The
 **Daily MÁV index** workflow (`.github/workflows/mav-index-daily.yml`) runs
-the release's pipeline above every morning at 04:30 UTC, after MÁV's nightly
-update, and publishes the index on GitHub Pages:
+the release's pipeline above every morning at 03:15 UTC, after MÁV's nightly
+update (the site is ready before 05:30 Hungarian time), and publishes on
+GitHub Pages, under `https://bator.github.io/hungarian-transport/`:
 
-- `https://bator.github.io/hungarian-transport/mav-index.json.gz`, the index;
-- `https://bator.github.io/hungarian-transport/mav-index.json`, its manifest:
-  the manifest `format`, the index `schema`, the `feed` (`feed_version`),
-  `built_at` (UTC), `size`, `sha256`, the content `digest`
-  (`scripts/index_digest.py`), trains and lines, the audit (trains and trips
-  that passed) and the `commit` it was built from.
+| File | What it is |
+| --- | --- |
+| `mav-index.json.gz` | the integration's train route index |
+| `mav-index.json` | the manifest (below) |
+| `mav-gtfs.zip` | MÁV's official GTFS, byte for byte as downloaded for this build (CC0) |
+| `mav-pfaedle-overlay.zip` | pfaedle's `shapes.txt`, `stop_times.txt` and `trips.txt` of the same feed |
+| `ATTRIBUTION.txt`, `index.html` | what the files are, sources and licences |
 
-Nothing is published, and the site keeps the previous day's index, when the
+The overlay holds the three tables pfaedle rewrites when it matches every
+train to the OpenStreetMap rails: use them in place of the official feed's
+tables of the same names (for a GTFS consumer such as Dawarich, or anything
+else). It is zipped deterministically (sorted names, fixed timestamps,
+deflate), so an unchanged build gives the same bytes. The site is about
+35 MB.
+
+**Attribution.** The MÁV GTFS is published by MÁV under CC0 1.0. The shapes
+(in the overlay and in the route index) are derived from OpenStreetMap data:
+© OpenStreetMap contributors, Open Database License (ODbL) 1.0; credit them
+when you publish anything built on these files.
+
+The manifest names the manifest `format` (1), the index `schema`, the `feed`
+(`feed_version`), `built_at` (UTC), `size`, `sha256`, the content `digest`
+(`scripts/index_digest.py`), trains and lines, the audit (trains and trips
+that passed), the `commit` it was built from, and a `gtfs` object (sizes
+here are examples):
+
+```json
+"gtfs": {
+ "feed_version": "20261101.M2ChangeID",
+ "official": {"name": "mav-gtfs.zip", "size": 31000000, "sha256": "…"},
+ "overlay": {"name": "mav-pfaedle-overlay.zip", "size": 4000000, "sha256": "…",
+             "files": ["shapes.txt", "stop_times.txt", "trips.txt"]},
+ "attribution": "ATTRIBUTION.txt"
+}
+```
+
+`gtfs.feed_version` is the official feed's, always the index's `feed`. A
+consumer can fetch the small manifest first and download the zips only when
+`feed_version` or a `sha256` changed.
+
+Nothing is published, and the site keeps the previous day's files, when the
 secrets are missing, the download, pfaedle or the audit fails (the run shows
-a warning), or the index has the same content as the one already published.
+a warning), or the index and both zips have the same content as the ones
+already published.
 
 The integration reads the manifest about 10 to 20 minutes after Home
-Assistant starts and then every 6 hours or so, and installs the index only
-when all of these hold:
+Assistant starts and then once a day at the **Daily check time** of its
+options (06:00 local time unless changed, plus up to 5 minutes), and
+installs the index only when all of these hold:
 
 - the manifest's format and the index schema are the ones this version reads
   (a newer one is skipped, with one line in the log);
@@ -180,10 +216,30 @@ request to GitHub Pages and keeps the weekly release's index (or the one it
 builds from your feed).
 
 **Privacy.** With the option on, Home Assistant contacts `bator.github.io`
-(GitHub Pages) a few times a day: a plain HTTPS GET of the two files above,
+(GitHub Pages) about once a day: a plain HTTPS GET of the manifest and the
+index (never the GTFS zips),
 no cookies, nothing beyond what any HTTP request carries (your IP address,
 and Home Assistant's user agent with its version). Nothing about your
 configuration is sent.
+
+**Notifications.** With *Notify about timetable updates* on in the same
+options, the integration creates a persistent notification (one per kind; a
+new one replaces the old) when:
+
+- the daily MÁV index was installed (the feed's date, trains and lines);
+- after an update of the integration, the indexes it ships (Volán, city,
+  MÁV) are of other feeds than the ones it saw before, naming which. The
+  first run only records them; changes the integration makes itself (the
+  daily index, a local build) are not news, nor a shipped MÁV index older
+  than the daily one in use;
+- the daily index failed on 3 days in a row: once, and the notification goes
+  away when a round succeeds again.
+
+*Also call this service* (`domain.service`, for example `script.ertesit` or
+`notify.mobile_app_iphone`) is called with `title` and `message` along with
+each notification; the options form refuses a malformed or missing service.
+A service that fails later is logged, never retried. The texts are
+Hungarian when Home Assistant's language is Hungarian, else English.
 
 **For forks.** The integration always reads `bator.github.io`. A fork's
 workflow publishes on its own Pages site; enable Settings → Pages → *Source:

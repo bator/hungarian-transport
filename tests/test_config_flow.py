@@ -9,16 +9,30 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.helpers.selector import BooleanSelector, TextSelector, TextSelectorType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
+from homeassistant.helpers.selector import BooleanSelector, TextSelector, TextSelectorType, TimeSelector
 from homeassistant.setup import async_setup_component
 
 import custom_components.hungarian_transport as integration
 from custom_components.hungarian_transport.config_flow import CONF_REMOVE_KEY
-from custom_components.hungarian_transport.const import CONF_API_KEY, CONF_DAILY_MAV, DOMAIN
+from custom_components.hungarian_transport.const import (
+    CONF_API_KEY,
+    CONF_DAILY_MAV,
+    CONF_DAILY_TIME,
+    CONF_NOTIFY_SERVICE,
+    CONF_NOTIFY_UPDATES,
+    DOMAIN,
+)
 from custom_components.hungarian_transport.futar import BKK_API
 
 SEARCH = f"{BKK_API}/search.json"
+# What the options form saves besides the key when left as shown.
+DEFAULTS = {
+    CONF_DAILY_MAV: True,
+    CONF_DAILY_TIME: "06:00:00",
+    CONF_NOTIFY_UPDATES: False,
+    CONF_NOTIFY_SERVICE: "",
+}
 
 
 async def _start(hass):
@@ -136,14 +150,14 @@ async def test_options_flow_sets_keeps_and_removes_key(hass, aioclient_mock, emp
         result["flow_id"], {CONF_API_KEY: "new-key"}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_DAILY_MAV: True, CONF_API_KEY: "new-key"}
+    assert entry.options == {**DEFAULTS, CONF_API_KEY: "new-key"}
     assert aioclient_mock.call_count == 1
 
     # The field comes back empty: leaving it so keeps the key, unasked.
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(result["flow_id"], empty)
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_DAILY_MAV: True, CONF_API_KEY: "new-key"}
+    assert entry.options == {**DEFAULTS, CONF_API_KEY: "new-key"}
     assert aioclient_mock.call_count == 1
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
@@ -151,7 +165,7 @@ async def test_options_flow_sets_keeps_and_removes_key(hass, aioclient_mock, emp
         result["flow_id"], {**empty, CONF_REMOVE_KEY: True}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_DAILY_MAV: True, CONF_API_KEY: ""}
+    assert entry.options == {**DEFAULTS, CONF_API_KEY: ""}
 
 
 async def test_typed_key_and_remove_together_is_a_form_error(hass, aioclient_mock) -> None:
@@ -180,7 +194,7 @@ async def test_typed_key_and_remove_together_is_a_form_error(hass, aioclient_moc
         result["flow_id"], {CONF_API_KEY: "typed"}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_DAILY_MAV: True, CONF_API_KEY: "typed"}
+    assert entry.options == {**DEFAULTS, CONF_API_KEY: "typed"}
     assert aioclient_mock.call_count == 1
 
 
@@ -209,7 +223,9 @@ async def test_no_remove_box_without_a_stored_key(hass) -> None:
     entry.add_to_hass(hass)
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
-    assert list(result["data_schema"].schema) == [CONF_API_KEY, CONF_DAILY_MAV]
+    assert list(result["data_schema"].schema) == [
+        CONF_API_KEY, CONF_DAILY_MAV, CONF_DAILY_TIME, CONF_NOTIFY_UPDATES, CONF_NOTIFY_SERVICE
+    ]
 
 
 async def test_user_form_has_no_suggested_key(hass) -> None:
@@ -242,7 +258,7 @@ async def test_options_save_reloads_the_entry_once(hass, aioclient_mock, old, ne
         await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_DAILY_MAV: True, CONF_API_KEY: new}
+    assert entry.options == {**DEFAULTS, CONF_API_KEY: new}
     assert setup_entry.call_count == 1
     assert entry.state is config_entries.ConfigEntryState.LOADED
 
@@ -351,7 +367,7 @@ async def test_options_turn_the_daily_mav_index_off_and_on(hass, aioclient_mock)
             )
             await hass.async_block_till_done()
         assert result["type"] is FlowResultType.CREATE_ENTRY
-        assert entry.options == {CONF_API_KEY: "kept", CONF_DAILY_MAV: value}
+        assert entry.options == {**DEFAULTS, CONF_API_KEY: "kept", CONF_DAILY_MAV: value}
         assert setup_entry.call_count == 1
         # The form shows what is stored.
         result = await hass.config_entries.options.async_init(entry.entry_id)
@@ -379,3 +395,130 @@ def test_daily_mav_option_is_translated(lang) -> None:
     init = json.loads((folder / f"{lang}.json").read_text(encoding="utf-8"))["options"]["step"]["init"]
     assert init["data"][CONF_DAILY_MAV]
     assert "bator.github.io" in init["data_description"][CONF_DAILY_MAV]
+
+
+def _field(result, name):
+    return next(k for k in result["data_schema"].schema if k == name)
+
+
+async def test_options_form_has_the_notification_fields(hass) -> None:
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: ""})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    schema = result["data_schema"].schema
+    assert _field(result, CONF_NOTIFY_UPDATES).default() is False
+    assert isinstance(schema[_field(result, CONF_NOTIFY_UPDATES)], BooleanSelector)
+    assert _field(result, CONF_DAILY_TIME).default() == "06:00:00"
+    assert isinstance(schema[_field(result, CONF_DAILY_TIME)], TimeSelector)
+    # A suggested value, not a default: clearing the field must clear it.
+    service = _field(result, CONF_NOTIFY_SERVICE)
+    assert service.default is vol.UNDEFINED
+    assert service.description == {"suggested_value": ""}
+    assert isinstance(schema[service], TextSelector)
+
+
+async def test_options_save_notifications_and_keep_other_options(hass) -> None:
+    hass.services.async_register("script", "ertesit", lambda call: None)
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=DOMAIN,
+        options={CONF_API_KEY: "kept", CONF_DAILY_MAV: False, "future_option": 7},
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        {CONF_DAILY_MAV: False, CONF_NOTIFY_UPDATES: True, CONF_NOTIFY_SERVICE: " script.ertesit ",
+         CONF_DAILY_TIME: "05:45"},
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {
+        CONF_API_KEY: "kept", CONF_DAILY_MAV: False, "future_option": 7, CONF_NOTIFY_UPDATES: True,
+        CONF_NOTIFY_SERVICE: "script.ertesit", CONF_DAILY_TIME: "05:45:00",
+    }
+
+    # The form shows what is stored; a cleared service field clears it.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert _field(result, CONF_NOTIFY_SERVICE).description == {"suggested_value": "script.ertesit"}
+    assert _field(result, CONF_DAILY_TIME).default() == "05:45:00"
+    assert _field(result, CONF_NOTIFY_UPDATES).default() is True
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_DAILY_MAV: False, CONF_NOTIFY_UPDATES: True, CONF_DAILY_TIME: "05:45:00"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_NOTIFY_SERVICE] == ""
+    assert entry.options["future_option"] == 7
+
+
+@pytest.mark.parametrize(
+    ("service", "error"),
+    [
+        ("ertesit", "invalid_service"),
+        ("script.ertesit.extra", "invalid_service"),
+        ("notify mobile", "invalid_service"),
+        ("script.nincs_ilyen", "service_not_found"),
+        ("notify.mobile_app_nope", "service_not_found"),
+    ],
+)
+async def test_options_refuse_a_bad_notify_service(hass, service, error) -> None:
+    hass.services.async_register("script", "ertesit", lambda call: None)
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: ""})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_NOTIFY_UPDATES: True, CONF_NOTIFY_SERVICE: service}
+    )
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_NOTIFY_SERVICE: error}
+    # The form keeps what was typed.
+    assert _field(result, CONF_NOTIFY_SERVICE).description == {"suggested_value": service}
+    assert _field(result, CONF_NOTIFY_UPDATES).default() is True
+    assert entry.options == {CONF_API_KEY: ""}
+
+
+async def test_options_service_is_stored_as_home_assistant_names_it(hass) -> None:
+    hass.services.async_register("script", "ertesit", lambda call: None)
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: ""})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_NOTIFY_SERVICE: "Script.Ertesit"}
+    )
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_NOTIFY_SERVICE] == "script.ertesit"
+
+
+async def test_options_refuse_a_bad_time(hass) -> None:
+    """The time selector refuses it before the step sees it."""
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: ""})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    with pytest.raises(InvalidData):
+        await hass.config_entries.options.async_configure(result["flow_id"], {CONF_DAILY_TIME: "25:99"})
+    assert entry.options == {CONF_API_KEY: ""}
+
+
+async def test_reauth_keeps_the_notification_options(hass, aioclient_mock) -> None:
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    options = {CONF_API_KEY: "old", CONF_NOTIFY_UPDATES: True, CONF_NOTIFY_SERVICE: "script.ertesit",
+               CONF_DAILY_TIME: "05:00:00"}
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options=options)
+    entry.add_to_hass(hass)
+    result = await entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_API_KEY: "new"})
+    assert result["reason"] == "reauth_successful"
+    assert entry.options == {**options, CONF_API_KEY: "new"}
+
+
+@pytest.mark.parametrize("lang", ["en", "hu"])
+def test_notification_options_are_translated(lang) -> None:
+    folder = Path(integration.__file__).parent / "translations"
+    options = json.loads((folder / f"{lang}.json").read_text(encoding="utf-8"))["options"]
+    init = options["step"]["init"]
+    for key in (CONF_NOTIFY_UPDATES, CONF_NOTIFY_SERVICE, CONF_DAILY_TIME):
+        assert init["data"][key]
+        assert init["data_description"][key]
+    for error in ("invalid_service", "service_not_found"):
+        assert options["error"][error]
+    assert init["data"][CONF_NOTIFY_UPDATES] == {
+        "en": "Notify about timetable updates", "hu": "Értesítés a menetrend-frissítésekről"
+    }[lang]

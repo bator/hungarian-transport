@@ -107,7 +107,7 @@ it from the dashboard. Keep it in the integration.
 | City networks | Each operator's GTFS, shipped with each release |
 | Stop search, transfers | [Transitous](https://transitous.org/), BKK FUTÁR as fallback |
 | MÁV train routes on the map | [MÁV GTFS][timetables-mav] matched to the OSM rails with pfaedle, shipped with each release built with the MÁV secrets; or add the feed yourself |
-| MÁV train routes, daily | The same index built every morning from MÁV's newest feed, fetched from GitHub Pages (`bator.github.io`) when it is newer; [opt out][timetables-daily] in the integration's options |
+| MÁV train routes, daily | The same index built every morning from MÁV's newest feed, fetched from GitHub Pages (`bator.github.io`) when it is newer; [opt out][timetables-daily] in the integration's options. The same site serves the day's MÁV GTFS and its pfaedle-matched shapes for other uses |
 
 A weekly job publishes a new patch release when a timetable changed; a
 published release never changes. To refresh the timetables daily on your own

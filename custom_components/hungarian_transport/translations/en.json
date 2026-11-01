@@ -94,10 +94,16 @@
         "data": {
           "api_key": "BKK API key",
           "remove_key": "Remove the stored key",
-          "daily_mav_index": "Daily MÁV route index from GitHub"
+          "daily_mav_index": "Daily MÁV route index from GitHub",
+          "daily_time": "Daily check time",
+          "notify_updates": "Notify about timetable updates",
+          "notify_service": "Also call this service"
         },
         "data_description": {
-          "daily_mav_index": "Once a day, fetch the train route index the project builds from MÁV's newest timetable (from bator.github.io) when it is newer than the one in use. A newer local MÁV feed still wins. Turn it off to keep the weekly release's index and make no such request."
+          "daily_mav_index": "Once a day, fetch the train route index the project builds from MÁV's newest timetable (from bator.github.io) when it is newer than the one in use. A newer local MÁV feed still wins. Turn it off to keep the weekly release's index and make no such request.",
+          "daily_time": "Local time of the daily check for a new MÁV route index (up to 5 minutes later, to spread the requests). It also runs once 10–20 minutes after Home Assistant starts.",
+          "notify_updates": "A persistent notification when a new daily MÁV route index is installed, when an update of the integration ships new Volán, city or MÁV timetables, and once when the daily MÁV index fails on 3 days in a row.",
+          "notify_service": "Optional, as domain.service, for example script.ertesit or notify.mobile_app_iphone. Called with title and message along with each persistent notification. Leave empty for persistent notifications only."
         }
       }
     },
@@ -105,7 +111,9 @@
       "invalid_auth": "BKK FUTÁR rejected this key.",
       "cannot_connect": "Could not reach BKK FUTÁR. Try again later.",
       "rate_limited": "BKK FUTÁR refuses this key for now: too many requests. Try again in a few minutes.",
-      "remove_and_new_key": "Either type a new key or tick the box to remove the stored one, not both."
+      "remove_and_new_key": "Either type a new key or tick the box to remove the stored one, not both.",
+      "invalid_service": "Write the service as domain.service, for example notify.mobile_app_iphone.",
+      "service_not_found": "Home Assistant has no such service."
     }
   },
   "issues": {
