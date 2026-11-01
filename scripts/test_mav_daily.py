@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """The daily MÁV index on GitHub Pages: scripts/mav_pages_site.py (manifest,
-deploy or skip by content digest, refusals) and mav-index-daily.yml's steps
-as written there (run: blocks executed with bash against stubs: the build's
-warning when it fails, the Pages URL, the "Pages enabled" check against a
-stub gh), plus what the workflow text must hold (triggers, permissions per
-job, pinned actions, deploy only after a site was made). No network."""
+deploy or skip by content digest, refusals: a feed date that is no date, a
+site over the size limit; the overlay's deflate level),
+scripts/mav_daily_verdict.py (when a run that published nothing goes red)
+and mav-index-daily.yml's steps as written there (run: blocks executed with
+bash against stubs: the build's warning and failure kind when it fails, the
+Pages URL, the published index's age check, the "Pages enabled" check
+against a stub gh), plus what the workflow text must hold (triggers,
+permissions per job, pinned actions, deploy only after a site was made). No
+network."""
 from __future__ import annotations
 
 import gzip
@@ -16,6 +20,8 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import zlib
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -25,6 +31,7 @@ TEXT = WORKFLOW.read_text(encoding="utf-8")
 sys.path.insert(0, str(HERE))
 
 import index_digest  # noqa: E402
+import mav_daily_verdict as verdict_mod  # noqa: E402
 import mav_pages_site as site  # noqa: E402
 
 failed = 0
@@ -202,6 +209,12 @@ with tempfile.TemporaryDirectory() as tmp_name:
         "no audit": {"st": {**stats(), "audit": None}},
         "too few trains": {"index": index_bytes(trains=3)},
         "undated feed": {"index": index_bytes(feed="latest"), "st": stats("latest")},
+        # FEED_RE passes it; the integration's mav._gtfs_date does not, so
+        # every client would reject the manifest that replaced a good one.
+        "a feed date that is no date (month 13, day 99)": {"index": index_bytes(feed="20261399.M2ChangeID"),
+                                                           "st": stats("20261399.M2ChangeID")},
+        "a feed dated 30 February": {"index": index_bytes(feed="20260230.M2ChangeID"),
+                                     "st": stats("20260230.M2ChangeID")},
         "a feed that could break a workflow output": {"index": index_bytes(feed="20261101\n::x"),
                                                       "st": stats("20261101\n::x")},
         "not a commit": {"commit": "main"},
@@ -233,6 +246,33 @@ with tempfile.TemporaryDirectory() as tmp_name:
                       and (i.external_attr >> 16) == 0o100644 for i in infos)
               and z.read("stop_times.txt") == (pf_a / "stop_times.txt").read_bytes()
               and z.testzip() is None, repr([(i.filename, i.date_time, i.compress_type) for i in infos]))
+    # The overlay deflates at ZIP_LEVEL (9), not zlib's default 6: z.open()
+    # with a ZipInfo ignores the ZipFile's compresslevel. Tables where the
+    # two levels differ, as MÁV's real ones do.
+    pf_l = pfaedle_dir(tmp / "pf-level")
+    rows = [f"t{k % 977},{k * 7919 % 100003},{'abcdefgh'[k % 8] * (1 + k * 31 % 9)},47.{k * 104729 % 99991}"
+            for k in range(40000)]
+    for name in site.OVERLAY_FILES:
+        (pf_l / name).write_text("\n".join(rows) + "\n", encoding="utf-8")
+    ov_l = tmp / "ov-level.zip"
+    site.write_overlay(pf_l, ov_l)
+
+    def deflated(raw: bytes, level: int) -> int:
+        c = zlib.compressobj(level, zlib.DEFLATED, -15)
+        return len(c.compress(raw) + c.flush())
+
+    with zipfile.ZipFile(ov_l) as z:
+        sizes = [(i.compress_size, deflated((pf_l / i.filename).read_bytes(), 9),
+                  deflated((pf_l / i.filename).read_bytes(), 6)) for i in z.infolist()]
+    check("the overlay is deflated at level 9 (the test tables differ between level 6 and 9)",
+          bool(sizes) and all(got == l9 != l6 for got, l9, l6 in sizes), repr(sizes))
+    ov_l2 = tmp / "ov-level-2.zip"
+    site.write_overlay(pf_l, ov_l2)
+    check("the level-9 overlay is deterministic", ov_l.read_bytes() == ov_l2.read_bytes())
+    check("dated_feed takes a real date only, as the integration does",
+          site.dated_feed("20261101.M2ChangeID") and site.dated_feed("20240229")
+          and not any(site.dated_feed(v) for v in ("20261399.M2ChangeID", "20250229", "20261100", "latest", None, 2026)))
+
     (pf_b / "shapes.txt").write_text("shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\nsh1,47.5,19.0,1\n")
     site.write_overlay(pf_b, ov_b)
     check("another shapes.txt gives other overlay bytes", ov_a.read_bytes() != ov_b.read_bytes())
@@ -302,6 +342,24 @@ with tempfile.TemporaryDirectory() as tmp_name:
         check(f"refused, no site, no deploy: {label}",
               rc == 1 and "deploy" not in outputs and not (ws / "site").exists() and "no site:" in err,
               repr((rc, out, err, outputs)))
+    # The size guard: the sizes are printed either way; over the limit, no site.
+    total = sum(p.stat().st_size for p in gsite.iterdir())
+    rc, out, err, outputs = run_site(tmp / "g-default-limit", *gtfs_args)
+    check("the site's size and every file's size are printed, with the 500 MB limit",
+          rc == 0 and f"site: {total} bytes (limit {500 * 1024 * 1024})" in out
+          and all(f"{n} " in out for n in ("mav-gtfs.zip", "mav-pfaedle-overlay.zip", "mav-index.json.gz")),
+          repr((rc, out, err)))
+    rc, out, err, outputs = run_site(tmp / "g-big", *gtfs_args, "--max-bytes", str(total - 1))
+    check("a site over the size limit is refused: no site, no deploy, the sizes in the error",
+          rc == 1 and "deploy" not in outputs and not (tmp / "g-big" / "site").exists()
+          and "no site:" in err and f"would be {total} bytes, over the {total - 1} byte limit" in err
+          and "mav-gtfs.zip " in err, repr((rc, out, err, outputs)))
+    rc, out, err, outputs = run_site(tmp / "g-limit", *gtfs_args, "--max-bytes", str(total))
+    check("a site of exactly the limit is published", rc == 0 and outputs.get("deploy") == "true",
+          repr((rc, out, err)))
+    check("ATTRIBUTION.txt cites MÁV-csoport as the source of the GTFS",
+          "Source: MÁV-csoport" in attribution and "https://www.mavcsoport.hu/gtfs" in attribution, attribution)
+
     rc, out, err, outputs = run_site(tmp / "g-half", "--gtfs-zip", str(official))
     check("--gtfs-zip without --pfaedle-dir is a usage error", rc == 2 and not (tmp / "g-half" / "site").exists(),
           repr((rc, err)))
@@ -313,12 +371,22 @@ with tempfile.TemporaryDirectory() as tmp_name:
     (ws / "scripts" / "release_mav_index.sh").write_text(
         "#!/usr/bin/env bash\nset -euo pipefail\n"
         'if [ "${STUB_MAV:-}" = ok ]; then echo idx > mav-index.json.gz; echo "{}" > mav-build.json; exit 0; fi\n'
-        'echo idx > mav-index.json.gz\necho "stub: pfaedle failed" >&2\nexit 1\n')
+        'echo idx > mav-index.json.gz\n'
+        'if [ "${STUB_MAV:-}" = auth ]; then echo "stub: HTTP 401" >&2; exit 77; fi\n'
+        'echo "stub: pfaedle failed" >&2\nexit 1\n')
     done, outputs = bash(build_step, ws, STUB_MAV="fail")
-    check("a failed build: warning, no index left, built not set, the job goes on",
+    check("a failed build: warning, no index left, built not set, failure=build, the job goes on",
           done.returncode == 0 and "::warning title=Daily MÁV index not built::" in done.stdout
-          and "built" not in outputs and not (ws / "mav-index.json.gz").exists(),
+          and "built" not in outputs and outputs.get("failure") == "build" and not (ws / "mav-index.json.gz").exists(),
           repr((done.returncode, done.stdout, done.stderr, outputs)))
+    done, outputs = bash(build_step, ws, STUB_MAV="auth")
+    check("a refused MÁV login (exit 77): failure=auth, a warning naming the login, the job goes on",
+          done.returncode == 0 and outputs.get("failure") == "auth" and "built" not in outputs
+          and "MÁV refused the login" in done.stdout and not (ws / "mav-index.json.gz").exists(),
+          repr((done.returncode, done.stdout, done.stderr, outputs)))
+    check("the workflow's auth exit status is the verdict's AUTH_EXIT",
+          f'"$rc" -eq {verdict_mod.AUTH_EXIT}' in build_step
+          and f"exit {verdict_mod.AUTH_EXIT} ;;" in (HERE / "release_mav_index.sh").read_text(), build_step)
     done, outputs = bash(build_step, ws, STUB_MAV="ok")
     check("a good build sets built=true", done.returncode == 0 and outputs.get("built") == "true",
           repr((done.returncode, done.stdout, done.stderr)))
@@ -348,6 +416,79 @@ with tempfile.TemporaryDirectory() as tmp_name:
     check("a refused site: warning, no deploy, the run stays green",
           done.returncode == 0 and "deploy" not in outputs
           and "::warning title=Daily MÁV index not published::" in done.stdout, repr((done.returncode, done.stdout)))
+
+    # ---- mav_daily_verdict.py: a run that published nothing --------------
+    now = datetime(2026, 11, 3, 3, 30, tzinfo=timezone.utc)
+
+    def live_at(age: timedelta) -> dict:
+        return {**man, "built_at": (now - age).isoformat().replace("+00:00", "Z")}
+
+    v = verdict_mod.verdict
+    for failure in ("build", "site", "secrets"):
+        fail, line = v(failure, live_at(timedelta(hours=26)), "ok", now)
+        check(f"{failure}: a published index 26 h old stays green, with a warning",
+              not fail and line.startswith("::warning title=Daily MÁV index not published::") and "26 h ago" in line,
+              line)
+        fail, line = v(failure, live_at(timedelta(days=2)), "ok", now)
+        check(f"{failure}: a published index exactly 2 days old fails the run",
+              fail and line.startswith("::error title=Daily MÁV index is stale::") and "48 h ago" in line, line)
+    fail, line = v("build", live_at(timedelta(days=9)), "ok", now)
+    check("a published index 9 days old fails the run, naming its feed and build time",
+          fail and "20261101.M2ChangeID" in line and "216 h ago" in line, line)
+    for label, live_ in (("an unreadable", None), ("a readable", live_at(timedelta(days=9)))):
+        fail, line = v("auth", live_, "HTTP 404", now)
+        check(f"a refused login fails the run at once, with {label} published manifest",
+              fail and line.startswith("::error title=Daily MÁV index: login refused::"), line)
+    fail, line = v("build", None, "HTTP 503", now)
+    check("an unreadable published manifest: age unknown, a warning, green",
+          not fail and "HTTP 503" in line and line.startswith("::warning"), line)
+    for bad in ({**man, "built_at": "yesterday"}, {k: x for k, x in man.items() if k != "built_at"},
+                {**man, "built_at": "2026-11-01T03:20:00"}):
+        fail, line = v("build", bad, "ok", now)
+        check(f"a published manifest without a usable built_at fails the run: {bad.get('built_at')!r}",
+              fail and "no valid built_at" in line, line)
+
+    def run_verdict(*args_: str) -> subprocess.CompletedProcess:
+        return subprocess.run([sys.executable, str(HERE / "mav_daily_verdict.py"), *args_],
+                              capture_output=True, text=True, timeout=60)
+
+    live.write_text(json.dumps(live_at(timedelta(days=3))))
+    done = run_verdict("--failure", "build", "--live-file", str(live), "--now", now.isoformat())
+    check("the verdict CLI exits 1 on a stale published index",
+          done.returncode == 1 and "::error title=Daily MÁV index is stale::" in done.stdout,
+          repr((done.returncode, done.stdout, done.stderr)))
+    live.write_text(json.dumps(live_at(timedelta(hours=5))))
+    done = run_verdict("--failure", "site", "--live-file", str(live), "--now", now.isoformat())
+    check("the verdict CLI exits 0 on a fresh published index", done.returncode == 0 and "5 h ago" in done.stdout,
+          repr((done.returncode, done.stdout, done.stderr)))
+    done = run_verdict("--failure", "auth", "--live-file", str(live), "--now", now.isoformat())
+    check("the verdict CLI exits 1 on a refused login, a fresh index notwithstanding",
+          done.returncode == 1 and "login refused" in done.stdout, repr((done.returncode, done.stdout)))
+    done = run_verdict("--failure", "other", "--live-file", str(live))
+    check("the verdict CLI refuses an unknown failure kind", done.returncode == 2, repr(done.returncode))
+
+    age_step = step_script("Published index age")
+    ws = tmp / "wf-age"
+    (ws / "scripts").mkdir(parents=True)
+    (ws / "scripts" / "mav_daily_verdict.py").write_text(
+        "import os, sys\nopen('args.txt', 'w').write('\\n'.join(sys.argv[1:]))\n"
+        "sys.exit(int(os.environ.get('STUB_RC', '0')))\n")
+    age_cases = (
+        ("no secrets", {"MAV_SECRETS": "false"}, "secrets"),
+        ("a refused login", {"MAV_SECRETS": "true", "BUILD_FAILURE": "auth"}, "auth"),
+        ("a failed build", {"MAV_SECRETS": "true", "BUILD_FAILURE": "build"}, "build"),
+        ("a refused site", {"MAV_SECRETS": "true"}, "site"),
+    )
+    for label, env_, want in age_cases:
+        for stub_rc in ("0", "1"):
+            (ws / "args.txt").unlink(missing_ok=True)
+            done, _ = bash(age_step, ws, STUB_RC=stub_rc, GITHUB_REPOSITORY="Bator/hungarian-transport",
+                           GITHUB_REPOSITORY_OWNER="Bator", **env_)
+            args = (ws / "args.txt").read_text().splitlines() if (ws / "args.txt").exists() else []
+            check(f"the age step after {label}: --failure {want}, the Pages manifest, exit {stub_rc} passed on",
+                  done.returncode == int(stub_rc) and args[:2] == ["--failure", want]
+                  and "https://bator.github.io/hungarian-transport/mav-index.json" in args,
+                  repr((done.returncode, done.stderr, args)))
 
     pages_step = step_script("GitHub Pages enabled")
     stub_bin = tmp / "bin"
@@ -415,6 +556,15 @@ check("every action is pinned to a commit sha",
       bool(uses) and all(re.fullmatch(r"[\w.-]+/[\w.-]+(/[\w.-]+)*@[0-9a-f]{40}", u) for u in uses), repr(uses))
 check("the build reuses the release's MÁV pipeline and OSM cache",
       "bash scripts/release_mav_index.sh" in build and "key: osm-hungary-${{ steps.week.outputs.week }}" in build)
+age_s = step(build, "- name: Published index age")
+steps_order = [ln.strip() for ln in build.splitlines() if ln.strip().startswith("- ")]
+check("the age check runs only when no site was made, as the build job's last step, without secrets",
+      "if: steps.site.outputs.deploy == ''" in age_s and "secrets." not in age_s
+      and "BUILD_FAILURE: ${{ steps.mav.outputs.failure }}" in age_s
+      and steps_order[-1] == "- name: Published index age", repr((age_s, steps_order[-3:])))
+checkout_s = step(build, "actions/checkout@")
+check("the checkout runs without the secrets too (the age check needs the scripts)",
+      bool(checkout_s) and "if:" not in checkout_s and "persist-credentials: false" in checkout_s, checkout_s)
 for ref in ("actions/upload-pages-artifact@", "actions/deploy-pages@"):
     check(f"{ref.rstrip('@')} is used", ref in TEXT)
 

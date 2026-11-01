@@ -12,6 +12,8 @@
 # ships neither): gtfs/mav-gtfs.zip (MÁV's zip as downloaded) and gtfs-out/
 # (pfaedle's feed, plus MÁV's other tables).
 # Exit status non-zero: no index was written (one left from before stays).
+# 77: MÁV refused the login (HTTP 401/403), not retried; mav-index-daily.yml
+# fails the run at once on it (scripts/mav_daily_verdict.py, AUTH_EXIT).
 #
 # Environment:
 #   MAV_GTFS_USER, MAV_GTFS_PASSWORD  required unless MAV_GTFS_ZIP is set;
@@ -156,7 +158,7 @@ while :; do
   case "$code" in
     401 | 403)
       echo "MÁV GTFS: HTTP $code, the login was refused; not retried (check MAV_GTFS_USER / MAV_GTFS_PASSWORD)" >&2
-      exit 1 ;;
+      exit 77 ;;
     408 | 429) ;;
     4??)
       echo "MÁV GTFS: HTTP $code; not retried" >&2

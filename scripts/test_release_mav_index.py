@@ -152,14 +152,16 @@ with tempfile.TemporaryDirectory() as tmp_name:
                               capture_output=True, text=True, timeout=120)
 
     # 1. A refused login is asked once, never retried (each retry is another
-    # login); 403 and other 4xx alike. 5xx is retried, 6 attempts in all.
-    for status, want in ((401, 1), (403, 1), (404, 1), (503, 6)):
+    # login), and exits 77 (mav-index-daily.yml fails the run on it at once);
+    # 403 alike. Other 4xx are not retried either, but exit 1. 5xx is
+    # retried, 6 attempts in all.
+    for status, want, want_rc in ((401, 1, 77), (403, 1, 77), (404, 1, 1), (503, 6, 1)):
         Handler.seen.clear()
         Handler.routes = {MAV_PATH: (status, b"")}
         done = run(str(tmp / f"w{status}"), DOWNLOAD_RETRY_DELAY="0" if status != 503 else "1")
         n = len(requests_to(MAV_PATH))
-        check(f"HTTP {status}: {want} request(s), then the script fails",
-              done.returncode != 0 and n == want, repr((done.returncode, n, done.stderr[-400:])))
+        check(f"HTTP {status}: {want} request(s), then the script fails with exit {want_rc}",
+              done.returncode == want_rc and n == want, repr((done.returncode, n, done.stderr[-400:])))
         check(f"HTTP {status}: the netrc is removed", not (tmp / f"w{status}" / "netrc").exists())
 
     # 2. The netrc round trip: what curl sends is the password as set, for

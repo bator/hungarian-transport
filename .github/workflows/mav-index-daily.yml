@@ -12,11 +12,15 @@ name: Daily MÁV index
 # ODbL), with ATTRIBUTION.txt. 03:15 UTC: ready before 05:30 local time.
 #
 # Nothing is deployed, and the site keeps the previous files, when the
-# secrets are missing, the download, pfaedle or the audit fails (each with a
-# ::warning::), or the index and the GTFS files have the content Pages
-# already serves. GitHub Pages must be enabled with "Source: GitHub Actions";
-# until then the deploy job fails with an error saying so, and nothing else
-# changes.
+# secrets are missing, the download, pfaedle or the audit fails, the site is
+# refused (mav_pages_site.py: a bad feed date, over 500 MB), or the index and
+# the GTFS files have the content Pages already serves. A run that published
+# nothing because something failed stays green with a ::warning:: only while
+# the published manifest is less than 2 days old; it fails at once when MÁV
+# refused the login (401/403: only new credentials help), and when the
+# published index is 2 days old or older (scripts/mav_daily_verdict.py).
+# GitHub Pages must be enabled with "Source: GitHub Actions"; until then the
+# deploy job fails with an error saying so, and nothing else changes.
 on:
   schedule:
     - cron: "15 3 * * *"
@@ -48,13 +52,13 @@ jobs:
         if: env.MAV_SECRETS != 'true'
         run: echo "::warning title=Daily MÁV index not built::No MAV_GTFS_USER / MAV_GTFS_PASSWORD secrets; GitHub Pages keeps the previous index."
 
+      # Also without the secrets: the last step checks how old the
+      # published index is.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        if: env.MAV_SECRETS == 'true'
         with:
           persist-credentials: false
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        if: env.MAV_SECRETS == 'true'
         with:
           python-version: "3.12"
 
@@ -83,12 +87,22 @@ jobs:
         run: |
           set -euo pipefail
           rm -f mav-index.json.gz mav-build.json
-          if bash scripts/release_mav_index.sh "$RUNNER_TEMP/mav"; then
+          rc=0
+          bash scripts/release_mav_index.sh "$RUNNER_TEMP/mav" || rc=$?
+          if [ "$rc" -eq 0 ]; then
             echo "built=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           rm -f mav-index.json.gz
-          echo "::warning title=Daily MÁV index not built::The MÁV download, pfaedle or the audit failed (see this step's log); GitHub Pages keeps the previous index."
+          # 77: MÁV refused the login (release_mav_index.sh); the last step
+          # fails the run on it.
+          if [ "$rc" -eq 77 ]; then
+            echo "failure=auth" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Daily MÁV index not built::MÁV refused the login (HTTP 401/403, see this step's log); GitHub Pages keeps the previous index."
+          else
+            echo "failure=build" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Daily MÁV index not built::The MÁV download, pfaedle or the audit failed (see this step's log); GitHub Pages keeps the previous index."
+          fi
 
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: env.MAV_SECRETS == 'true' && steps.mav.outputs.built == 'true' && steps.osm-cache.outputs.cache-hit != 'true'
@@ -120,6 +134,27 @@ jobs:
         if: steps.site.outputs.deploy == 'true'
         with:
           path: ${{ runner.temp }}/site
+
+      # No site was made (no secrets, a failed build, a refused site): the
+      # previous one stays on Pages, and nothing is deployed. Red at once
+      # for a refused login, and when the published index is 2 days old or
+      # older; a warning otherwise.
+      - name: Published index age
+        if: steps.site.outputs.deploy == ''
+        env:
+          BUILD_FAILURE: ${{ steps.mav.outputs.failure }}
+        run: |
+          set -euo pipefail
+          if [ "$MAV_SECRETS" != true ]; then
+            failure=secrets
+          elif [ -n "${BUILD_FAILURE:-}" ]; then
+            failure="$BUILD_FAILURE"
+          else
+            failure=site
+          fi
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
+          python3 scripts/mav_daily_verdict.py --failure "$failure" --live-url "$pages_url/mav-index.json"
 
   deploy:
     name: Publish on GitHub Pages
