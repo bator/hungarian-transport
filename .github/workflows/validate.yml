@@ -105,6 +105,11 @@ jobs:
       - name: MÁV release script tests
         run: python3 scripts/test_release_mav_index.py
 
+      # mav-index-daily.yml: its manifest script, its steps as written and
+      # its permissions; no network, no secrets.
+      - name: Daily MÁV index workflow tests
+        run: python3 scripts/test_mav_daily.py
+
       - name: FUTÁR proxy limit tests
         run: python3 ha/test_futar_limits.py
 
