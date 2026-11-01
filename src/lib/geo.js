@@ -78,10 +78,14 @@ Object.assign(BkkLib, {
             result |= (byte & 0x1f) << shift;
             shift += 5;
           } while (byte >= 0x20);
+          /* A string cut short ends inside a pair: reading past its end
+             (NaN, a 0 delta) would add a shifted last point. */
+          if (index > encoded.length) break;
           const delta = (result & 1) ? ~(result >> 1) : (result >> 1);
           if (xy === 0) lat += delta;
           else lng += delta;
         }
+        if (index > encoded.length) break;
         coords.push([lat / factor, lng / factor]);
       }
     } catch (_e) {

@@ -262,6 +262,8 @@ Object.assign(BkkLib, {
     if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + ',' + lon;
     return String(hit.id || '');
   },
+  /* '' when the geocoder knows no such stop; a geocoder that failed
+     (Transitous down) rejects, so a plan says "try again", not "no route". */
   async transitousPlace(stop, kind) {
     if (!stop) return '';
     /* A stop without coordinates (lat: null) is not at 0,0. */
@@ -269,12 +271,8 @@ Object.assign(BkkLib, {
     if (pt) return pt[0] + ',' + pt[1];
     const name = String(stop.name || '').trim();
     if (!name) return String(stop.id || '');
-    try {
-      const hits = await BkkLib.transitousGeocode(name);
-      return BkkLib.transitousCoord(BkkLib.pickTransitousHit(hits, stop, kind));
-    } catch (_e) {
-      return '';
-    }
+    const hits = await BkkLib.transitousGeocode(name);
+    return BkkLib.transitousCoord(BkkLib.pickTransitousHit(hits, stop, kind));
   },
   async transitousStopRef(stop, kind) {
     const name = String((stop && (stop.name || stop.key)) || '').trim();
@@ -316,6 +314,7 @@ Object.assign(BkkLib, {
     if (stripped && stripped !== name) queries.push(stripped);
     const hits = [];
     const seen = {};
+    let geoFailed = 0;
     for (let i = 0; i < queries.length; i += 1) {
       try {
         const found = await BkkLib.transitousGeocode(queries[i]);
@@ -325,7 +324,14 @@ Object.assign(BkkLib, {
           seen[id] = true;
           hits.push(hit);
         });
-      } catch (_e) { /* next query */ }
+      } catch (_e) {
+        geoFailed += 1;
+      }
+    }
+    /* Every lookup failed and nothing places the stop: an outage, not an
+       unknown stop. */
+    if (queries.length && geoFailed === queries.length && !fromStop) {
+      throw new Error('Transitous geocode unavailable');
     }
     let hit = BkkLib.pickTransitousHit(hits, stop, kind);
     if ((kind === 'rail' || kind === 'train') && hit && !/railway|hu-mav_/i.test(String(hit.id || ''))) {
@@ -442,10 +448,16 @@ Object.assign(BkkLib, {
   async transitousDepartures(origin, dest, opts) {
     opts = opts || {};
     if (!dest || !(dest.key || dest.name || dest.id)) return [];
-    const [fromPlace, toPlace] = await Promise.all([
-      BkkLib.transitousPlace(origin),
-      BkkLib.transitousPlace(dest),
-    ]);
+    let fromPlace;
+    let toPlace;
+    try {
+      [fromPlace, toPlace] = await Promise.all([
+        BkkLib.transitousPlace(origin),
+        BkkLib.transitousPlace(dest),
+      ]);
+    } catch (_e) {
+      return [];
+    }
     if (!fromPlace || !toPlace) return [];
     const horizon = clampMinutesAfter(opts.minutesAfter);
     const anchor = Number(opts.anchorDep || 0);
@@ -935,8 +947,9 @@ Object.assign(BkkLib, {
     return (await BkkLib.transitousJourneysResult(origin, dest, opts)).list;
   },
   /* The itineraries, and whether Transitous answered at all: failed when
-     the plan request itself failed (an outage), answered when it replied,
-     even with nothing. Neither when the places could not be resolved. */
+     the plan or a stop's geocode request failed (an outage), answered when
+     it replied, even with nothing. Neither when the geocoder knew no such
+     stop. */
   async transitousJourneysResult(origin, dest, opts) {
     let data;
     try {

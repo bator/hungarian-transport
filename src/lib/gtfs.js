@@ -73,25 +73,49 @@ Object.assign(BkkLib, {
      Opening a train map must not wait on a stalled server again for a while. */
   _mavEmptyAt: new Map(),
   _mavEmptyRetryMs: 10 * 60 * 1000,
+  /* A loaded index is asked again after this: the URL changes only at
+     midnight, and a wall tablet left open would keep yesterday's until then
+     though a new one is installed at 06:00. The request revalidates
+     (no-cache), so an unchanged index is a 304. */
+  _mavLoadedAt: new Map(),
+  _mavMaxAgeMs: 6 * 3600 * 1000,
   mavIndex() {
     const url = mavIndexUrl(this && this._ix && this._ix.mav);
     const cache = BkkLib._mavP;
     const hit = cache.get(url);
+    let prev = null;
     if (hit) {
       const emptyAt = BkkLib._mavEmptyAt.get(url);
-      if (!emptyAt || Date.now() - emptyAt < BkkLib._mavEmptyRetryMs) return hit;
+      const loadedAt = BkkLib._mavLoadedAt.get(url);
+      const fresh = emptyAt
+        ? Date.now() - emptyAt < BkkLib._mavEmptyRetryMs
+        : !loadedAt || Date.now() - loadedAt < BkkLib._mavMaxAgeMs;
+      if (fresh) return hit;
+      prev = hit;
       cache.delete(url);
       BkkLib._mavEmptyAt.delete(url);
+      BkkLib._mavLoadedAt.delete(url);
     }
     const empty = () => ({ n: {}, l: {}, p: [] });
+    const okIdx = (idx) => !!(idx && typeof idx === 'object' && Array.isArray(idx.p) && idx.p.length > 0);
+    /* A refresh that fails keeps the index already held. */
+    const fallback = async (idx) => {
+      const old = prev ? await prev : null;
+      return okIdx(old) ? old : idx;
+    };
     const p = BkkLib._loadMavIndex(url).then((idx) => {
-      const ok = idx && typeof idx === 'object' && Array.isArray(idx.p) && idx.p.length > 0;
-      if (ok) BkkLib._mavEmptyAt.delete(url);
-      else BkkLib._mavEmptyAt.set(url, Date.now());
-      return idx && typeof idx === 'object' ? idx : empty();
+      const ok = okIdx(idx);
+      if (ok) {
+        BkkLib._mavEmptyAt.delete(url);
+        BkkLib._mavLoadedAt.set(url, Date.now());
+        BkkLib._mavLoadedAt.forEach((_t, k) => { if (!cache.has(k)) BkkLib._mavLoadedAt.delete(k); });
+        return idx;
+      }
+      BkkLib._mavEmptyAt.set(url, Date.now());
+      return fallback(idx && typeof idx === 'object' ? idx : empty());
     }).catch(() => {
       BkkLib._mavEmptyAt.set(url, Date.now());
-      return empty();
+      return fallback(empty());
     });
     BkkLib._cacheIndex(cache, url, p, 4);
     return p;
@@ -595,11 +619,13 @@ Object.assign(BkkLib, {
     const byKey = new Map();
     const destRoutes = {};
     const trips = idx.t || [];
+    /* The first visit reaches every stop a later one does. */
+    const wanted = new Set(indexes);
     for (let i = 0; i < trips.length; i++) {
       const t = trips[i];
       const route = t[1];
       const ps = t[2] || [];
-      const oidx = ps.findIndex((p) => indexes.indexOf(p) >= 0);
+      const oidx = ps.findIndex((p) => wanted.has(p));
       if (oidx < 0) continue;
       for (let j = oidx + 1; j < ps.length; j++) {
         const st = idx.stops[ps[j]];
@@ -763,6 +789,45 @@ Object.assign(BkkLib, {
     const rowCap = maxDepartureRows(horizon);
     const rows = [];
     const trips = idx.t || [];
+    const wanted = new Set(indexes);
+    const hasDest = !!(destKey || destFold);
+    /* Where each trip can be boarded, and the first destination stop after
+       each boarding: once, not again for every day offset. A loop line passes a
+       same-named stop twice (both sides of the street): every visit is a
+       boarding, and the one in the window that still reaches the
+       destination is the ride. */
+    const cands = [];
+    for (let i = 0; i < trips.length; i++) {
+      const ps = trips[i][2] || [];
+      let first = -1;
+      for (let o = 0; o < ps.length; o++) {
+        if (wanted.has(ps[o])) {
+          first = o;
+          break;
+        }
+      }
+      if (first < 0) continue;
+      const hits = [];
+      if (hasDest) {
+        for (let j = first + 1; j < ps.length; j++) {
+          if (BkkLib.volanDestHit(idx.stops[ps[j]], destKey, destFold, destOpts)) hits.push(j);
+        }
+        if (!hits.length) continue;
+      }
+      const visits = [];
+      let h = 0;
+      for (let o = first; o < ps.length; o++) {
+        if (!wanted.has(ps[o])) continue;
+        if (!hasDest) {
+          visits.push([o, -1]);
+          continue;
+        }
+        while (h < hits.length && hits[h] <= o) h++;
+        if (h >= hits.length) break;
+        visits.push([o, hits[h]]);
+      }
+      if (visits.length) cands.push({ t: trips[i], visits });
+    }
     /* -1 catches yesterday's 24:xx trips, which are still tonight's buses;
        +1 is tomorrow morning when the look-ahead crosses its base. */
     const dayOffsets = [-1, 0, 1];
@@ -771,32 +836,31 @@ Object.assign(BkkLib, {
       const earliest = day.mins - 1;
       const latest = day.mins + horizon;
       if (latest < 0) continue;
-      for (let i = 0; i < trips.length; i++) {
-        const t = trips[i];
+      for (let c = 0; c < cands.length; c++) {
+        const t = cands[c].t;
         if (!BkkLib.volanServiceOk(idx, t[0], day.ymd, day.dow)) continue;
         const route = t[1];
         const ps = t[2] || [];
         const ms = t[3] || [];
-        const oidx = ps.findIndex((p) => indexes.indexOf(p) >= 0);
-        if (oidx < 0) continue;
-        const depMin = ms[oidx];
-        if (depMin == null || depMin < earliest) continue;
-        if (depMin > latest) continue;
+        let oidx = -1;
         let didx = -1;
-        if (destKey || destFold) {
-          for (let j = oidx + 1; j < ps.length; j++) {
-            if (BkkLib.volanDestHit(idx.stops[ps[j]], destKey, destFold, destOpts)) {
-              didx = j;
-              break;
-            }
-          }
-          if (didx < 0) continue;
+        let depMin = null;
+        let depTs = 0;
+        for (let v = 0; v < cands[c].visits.length; v++) {
+          const at = ms[cands[c].visits[v][0]];
+          if (at == null || at < earliest || at > latest) continue;
+          const ts = day.base + at * 60;
+          if (!departureStillDue(ts)) continue;
+          oidx = cands[c].visits[v][0];
+          didx = cands[c].visits[v][1];
+          depMin = at;
+          depTs = ts;
+          break;
         }
+        if (oidx < 0) continue;
         const destStop = didx >= 0 ? idx.stops[ps[didx]] : idx.stops[ps[ps.length - 1]];
         const arrMin = didx >= 0 ? ms[didx] : null;
         const travel = (arrMin != null && arrMin >= depMin && arrMin - depMin <= 1440) ? (arrMin - depMin) : null;
-        const depTs = day.base + depMin * 60;
-        if (!departureStillDue(depTs)) continue;
         const kind = BkkLib.gtfsRouteKind(t[4], vehicle, rawType);
         rows.push({
           gtfs: BkkLib.gtfsTripGeo(idx, t, oidx, didx, day.base),

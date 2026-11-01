@@ -1684,10 +1684,11 @@ ${this._stopPinCss()}
     /* Every poll builds new row objects: a trip's ride time and coach GPS
        from the last list stay on it until this run fills them again, so
        they do not blink out while ELVIRA or the GPS lookup answers. The
-       coach position is marked (gpsCarried): the lookup replaces or drops
-       it, and a sensor or EMMA position (enrichFromHass) replaces it and
-       clears the mark. FUTÁR rows bring their own vehicle position on
-       every poll. */
+       coach position is marked (gpsCarried) and keeps its fix time (gpsAt):
+       the lookup replaces or drops it, a failing lookup drops it once the
+       fix is two minutes old, and a sensor or EMMA position
+       (enrichFromHass) replaces it and clears the mark. FUTÁR rows bring
+       their own vehicle position on every poll. */
     const carryOver = (list) => {
       const prev = new Map();
       (this._rawRows || []).forEach((row) => {
@@ -1704,6 +1705,9 @@ ${this._stopPinCss()}
             row.lat = gps[0];
             row.lon = gps[1];
             row.gpsCarried = true;
+            /* The fix's own time travels with it: a position carried poll
+               after poll ages out (applyCoachGps) instead of staying live. */
+            row.gpsAt = Number(old.gpsAt) > 0 ? Number(old.gpsAt) : Math.floor(Date.now() / 1000);
           }
         }
       });

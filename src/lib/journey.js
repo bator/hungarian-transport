@@ -176,6 +176,12 @@ Object.assign(BkkLib, {
         }
       }
     }
+    /* A city feed's stop to a station has no planner of its own: the
+       city ride to the station and the train, as "Most" finds it. */
+    if (!list.length) {
+      const viaCity = await this.timedCityRailJourney(apiKey, hass, origin, dest, opts);
+      if (viaCity) list = [viaCity];
+    }
     if (!list.length && failed && !answered) throw new Error('route search unavailable');
     list.forEach((j) => BkkLib.nameJourneyEnds(j, origin, dest));
     list = BkkLib.dropDominatedJourneys(list);
@@ -187,6 +193,24 @@ Object.assign(BkkLib, {
       list.reverse();
     }
     return list.slice(0, opts.max || 6);
+  },
+  /* cityRailJourney for a chosen time. Departing: leave then. Arriving:
+     leave an hour, two, three before (never before now) and take the
+     latest start that is there in time. */
+  async timedCityRailJourney(apiKey, hass, origin, dest, opts) {
+    const at = Number(opts && opts.time) || Date.now();
+    if (!(opts && opts.arriveBy)) return this.cityRailJourney(apiKey, hass, origin, dest, { time: at });
+    const starts = [];
+    [60, 120, 180].forEach((back) => {
+      const start = Math.max(at - back * 60000, Date.now());
+      if (start < at && starts.indexOf(start) < 0) starts.push(start);
+    });
+    for (let i = 0; i < starts.length; i++) {
+      const j = await this.cityRailJourney(apiKey, hass, origin, dest, { time: starts[i] });
+      if (!j) continue;
+      if (j.endMs && j.endMs <= at) return j;
+    }
+    return null;
   },
   async planJourney(apiKey, origin, dest, hass, opts) {
     opts = opts || {};
@@ -324,15 +348,15 @@ Object.assign(BkkLib, {
      station (and as many again over tonight's night rides), so the
      nearest one's variants do not crowd out the others; the timetable
      picks among them. */
-  cityHubPaths(idx, originStop, perHub = 6) {
+  cityHubPaths(idx, originStop, perHub = 6, atMs) {
     if (!idx || !originStop) return [];
     const stops = idx.stops || [];
     const op = originStop.op;
-    const { rideAt, nightAt, nightUntil, walkAt } = BkkLib._cityHubGraph(idx, op, BkkLib.volanDay(0).ymd);
+    const { rideAt, nightAt, nightUntil, walkAt } = BkkLib._cityHubGraph(idx, op, BkkLib.volanDay(0, atMs).ymd);
     /* Until yesterday's last night trip ends its rides are offered too,
        and paths on night rides alone have a budget of their own: today's
        day lines are faster by ride time but may not run for hours. */
-    const night = nightUntil > BkkLib.volanDay(-1).mins;
+    const night = nightUntil > BkkLib.volanDay(-1, atMs).mins;
     const ridesFrom = (at) => (night
       ? (rideAt.get(at) || []).concat(nightAt.get(at) || [])
       : (rideAt.get(at) || []));
@@ -454,8 +478,10 @@ Object.assign(BkkLib, {
   RAIL_HUB_NAME_M: 2000,
   /* Only from a city feed's own stop: a BKK or Volán origin matched by
      number or name lands on some other town's stop (BKK_F01020 "Kossuth
-     Lajos utca" was a Miskolc one). */
-  async cityRailJourney(apiKey, hass, origin, dest) {
+     Lajos utca" was a Miskolc one). opts.time (epoch ms) leaves then
+     instead of now. */
+  async cityRailJourney(apiKey, hass, origin, dest, opts) {
+    const atMs = Number(opts && opts.time) > 0 ? Number(opts.time) : undefined;
     if (!BkkLib.isRailDest(dest) || BkkLib.stopIdFamily(origin) !== 'city') return null;
     let idx;
     try { idx = await this.cityIndex(); } catch (_e) { return null; }
@@ -467,7 +493,7 @@ Object.assign(BkkLib, {
       if (opIx >= 0) originStop = BkkLib.volanMatchStop(idx, { id: '', name: origin.name || '' }, opIx);
     }
     if (!originStop || originStop.op == null) return null;
-    const paths = BkkLib.cityHubPaths(idx, originStop).filter((p) => p.edges.length);
+    const paths = BkkLib.cityHubPaths(idx, originStop, 6, atMs).filter((p) => p.edges.length);
     if (!paths.length) return null;
     const op = (idx.ops || [])[originStop.op];
     const cityName = op ? String(op.name).split(' — ')[0] : '';
@@ -519,11 +545,11 @@ Object.assign(BkkLib, {
       ? paths.filter((path) => path.hubFold && isDestHub({ fold: path.hubFold, lat: path.hubLat, lon: path.hubLon }))
       : [];
     const destIsHub = toDest.length > 0;
-    const startSec = Math.floor(Date.now() / 1000);
+    const startSec = Math.floor((atMs || Date.now()) / 1000);
     const rides = new Map();
     const nextRide = (edge, readySec) => {
       const key = edge.fromI + '|' + edge.toI + '|' + edge.routes.join(',') + '|' + readySec;
-      if (!rides.has(key)) rides.set(key, BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.routes, readySec));
+      if (!rides.has(key)) rides.set(key, BkkLib.nextCityRide(idx, edge.fromI, edge.toI, edge.routes, readySec, atMs));
       return rides.get(key);
     };
     const timeCityPath = (path) => {
@@ -720,24 +746,29 @@ Object.assign(BkkLib, {
     });
     return out;
   },
-  nextCityRide(idx, fromI, toI, routes, readySec) {
+  /* `atMs` is the moment whose service days are searched (a planned time;
+     now by default). A loop line passes a stop twice: every visit of
+     `fromI` is a boarding, with the first `toI` after it. */
+  nextCityRide(idx, fromI, toI, routes, readySec, atMs) {
     const trips = BkkLib.cityTripsOf(idx, routes);
     let best = null;
     /* -1: after midnight, yesterday's 24:xx trips are tonight's rides. */
     for (let off = -1; off < 2; off++) {
-      const day = BkkLib.volanDay(off);
+      const day = BkkLib.volanDay(off, atMs);
       for (let n = 0; n < trips.length; n++) {
         const t = trips[n];
         if (!BkkLib.volanServiceOk(idx, t[0], day.ymd, day.dow)) continue;
         const ps = t[2] || [];
         const ms = t[3] || [];
-        const o = ps.indexOf(fromI);
-        const d = ps.indexOf(toI);
-        if (o < 0 || d <= o) continue;
-        const dep = day.base + ms[o] * 60;
-        if (dep < readySec - 30) continue;
-        const arr = day.base + ms[d] * 60;
-        if (!best || arr < best.arr || (arr === best.arr && dep > best.dep)) best = { dep, arr, trip: t, o, d };
+        let d = -1;
+        for (let o = ps.indexOf(fromI); o >= 0; o = ps.indexOf(fromI, o + 1)) {
+          if (d <= o) d = ps.indexOf(toI, o + 1);
+          if (d < 0) break;
+          const dep = day.base + ms[o] * 60;
+          if (dep < readySec - 30) continue;
+          const arr = day.base + ms[d] * 60;
+          if (!best || arr < best.arr || (arr === best.arr && dep > best.dep)) best = { dep, arr, trip: t, o, d };
+        }
       }
       /* No early stop: yesterday's late trip can lose to an earlier one
          today, and today's after-midnight arrival to an earlier ride

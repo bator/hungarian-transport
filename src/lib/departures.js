@@ -215,6 +215,7 @@ Object.assign(BkkLib, {
   },
   polesFromPatterns(patterns, origin, destKey) {
     const poles = new Set();
+    const isDest = BkkLib.nameMatcher(destKey);
     (patterns || []).forEach((pat) => {
       if (!pat) return;
       const variants = pat.variants || [];
@@ -226,9 +227,7 @@ Object.assign(BkkLib, {
         ));
         if (oidx < 0) return;
         if (destKey) {
-          const hits = ids.slice(oidx + 1).some((id) => (
-            BkkLib.nameEq((stops[id] || {}).name, destKey)
-          ));
+          const hits = ids.slice(oidx + 1).some((id) => isDest((stops[id] || {}).name));
           if (!hits) return;
         }
         poles.add(ids[oidx]);
@@ -327,7 +326,8 @@ Object.assign(BkkLib, {
     const { sts, stops } = details;
     const oidx = BkkLib.originIndex(sts, stops, origin);
     if (oidx < 0) return false;
-    return sts.slice(oidx + 1).some((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
+    const isDest = BkkLib.nameMatcher(destKey);
+    return sts.slice(oidx + 1).some((s) => isDest((stops[s.stopId] || {}).name));
   },
   async tripGoesTo(apiKey, cache, tripId, origin, destKey) {
     if (!tripId || !destKey) return false;
@@ -354,8 +354,9 @@ Object.assign(BkkLib, {
       const stop = (s && stops[s.stopId]) || {};
       return BkkLib.mapGpsLatLon(stop.lat, stop.lon);
     };
+    const isDest = BkkLib.nameMatcher(destKey);
     const hit = destKey
-      ? sts.slice(oidx + 1).find((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey))
+      ? sts.slice(oidx + 1).find((s) => isDest((stops[s.stopId] || {}).name))
       : null;
     return { board: at(sts[oidx]), alight: hit ? at(hit) : null };
   },
@@ -491,7 +492,8 @@ Object.assign(BkkLib, {
       const { sts, stops } = await BkkLib.tripDetails(apiKey, cache || {}, tripId);
       const oidx = BkkLib.originIndex(sts, stops, origin);
       const start = oidx >= 0 ? oidx + 1 : 0;
-      const dest = sts.slice(start).find((s) => BkkLib.nameEq((stops[s.stopId] || {}).name, destKey));
+      const isDest = BkkLib.nameMatcher(destKey);
+      const dest = sts.slice(start).find((s) => isDest((stops[s.stopId] || {}).name));
       if (!dest) return null;
       /* Trip details are cached for the session, so their predictions age
          while `dep` is always fresh: a bus that ran late since would lose
