@@ -8,6 +8,9 @@
 # Run from the checkout to build with; it writes there:
 #   mav-index.json.gz  only when every step and both guards passed
 #   mav-build.json     build and audit statistics, timings (no credentials)
+# and keeps in WORK_DIR, for mav-index-daily.yml's Pages site (the release
+# ships neither): gtfs/mav-gtfs.zip (MÁV's zip as downloaded) and gtfs-out/
+# (pfaedle's feed, plus MÁV's other tables).
 # Exit status non-zero: no index was written (one left from before stays).
 #
 # Environment:

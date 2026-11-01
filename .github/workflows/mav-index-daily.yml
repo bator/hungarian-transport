@@ -6,16 +6,20 @@ name: Daily MÁV index
 # and its audit) and publishes it on GitHub Pages with a manifest
 # (scripts/mav_pages_site.py). The integration fetches the manifest, and the
 # index when its feed is newer (custom_components/hungarian_transport/
-# mav_daily.py).
+# mav_daily.py). The site also carries the build's GTFS for other consumers:
+# MÁV's zip as downloaded (mav-gtfs.zip, CC0) and pfaedle's trips, shapes and
+# stop_times (mav-pfaedle-overlay.zip, shapes © OpenStreetMap contributors,
+# ODbL), with ATTRIBUTION.txt. 03:15 UTC: ready before 05:30 local time.
 #
-# Nothing is deployed, and the site keeps the previous index, when the
+# Nothing is deployed, and the site keeps the previous files, when the
 # secrets are missing, the download, pfaedle or the audit fails (each with a
-# ::warning::), or the index has the content Pages already serves. GitHub
-# Pages must be enabled with "Source: GitHub Actions"; until then the deploy
-# job fails with an error saying so, and nothing else changes.
+# ::warning::), or the index and the GTFS files have the content Pages
+# already serves. GitHub Pages must be enabled with "Source: GitHub Actions";
+# until then the deploy job fails with an error saying so, and nothing else
+# changes.
 on:
   schedule:
-    - cron: "30 4 * * *"
+    - cron: "15 3 * * *"
   workflow_dispatch:
 
 permissions:
@@ -93,7 +97,9 @@ jobs:
           key: osm-hungary-${{ steps.week.outputs.week }}
 
       # The manifest, and whether the content differs from what Pages serves
-      # (the live manifest's content digest).
+      # (the live manifest's content digest and GTFS digests). The MÁV zip
+      # and pfaedle's output are the ones release_mav_index.sh left in its
+      # work dir for this build.
       - name: Pages site
         id: site
         if: steps.mav.outputs.built == 'true'
@@ -103,7 +109,9 @@ jobs:
           pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
           if python3 scripts/mav_pages_site.py --index mav-index.json.gz --stats mav-build.json \
               --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/site" --live-url "$pages_url/mav-index.json" \
+              --gtfs-zip "$RUNNER_TEMP/mav/gtfs/mav-gtfs.zip" --pfaedle-dir "$RUNNER_TEMP/mav/gtfs-out" \
               --github-output "$GITHUB_OUTPUT"; then
+            ls -l "$RUNNER_TEMP/site"
             exit 0
           fi
           echo "::warning title=Daily MÁV index not published::The built index did not make a Pages site (see this step's log); GitHub Pages keeps the previous index."

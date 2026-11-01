@@ -17,6 +17,8 @@ on:
       - scripts/mav_variant.py
       - scripts/index_digest.py
       - custom_components/hungarian_transport/mav_index.py
+      # The daily workflow's Pages site from the same build (not published).
+      - scripts/mav_pages_site.py
 
 permissions:
   contents: read
@@ -110,6 +112,43 @@ jobs:
           if [ -z "$first" ] || [ "$first" != "$again" ]; then
             echo "::error title=MÁV index not reproducible::Two builds of the same feed differ (${first} vs ${again}); the weekly release would publish every week."
             exit 1
+          fi
+
+      # What mav-index-daily.yml would publish on GitHub Pages from this build
+      # (scripts/mav_pages_site.py), written to the runner only: the files and
+      # their sizes in the summary, and whether the second pfaedle run gave
+      # the same overlay bytes (if not, the daily site deploys every day).
+      - name: Pages site (not published)
+        if: ${{ !cancelled() && steps.mav.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python3 scripts/mav_pages_site.py --index mav-index.json.gz --stats mav-build.json \
+            --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/site" \
+            --gtfs-zip "$RUNNER_TEMP/mav/gtfs/mav-gtfs.zip" --pfaedle-dir "$RUNNER_TEMP/mav/gtfs-out"
+          {
+            echo
+            echo "### Pages site (not published)"
+            echo
+            echo "| file | bytes |"
+            echo "| --- | --- |"
+            for f in "$RUNNER_TEMP"/site/*; do
+              echo "| $(basename "$f") | $(stat -c %s "$f") |"
+            done
+            echo "| total | $(du -cb "$RUNNER_TEMP"/site/* | tail -n 1 | cut -f1) |"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -d "$RUNNER_TEMP/mav-again/gtfs-out" ]; then
+            python3 - "$RUNNER_TEMP/mav-again/gtfs-out" "$RUNNER_TEMP/site/mav-pfaedle-overlay.zip" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import sys, tempfile
+          from pathlib import Path
+          sys.path.insert(0, "scripts")
+          import mav_pages_site as site
+          with tempfile.TemporaryDirectory() as tmp:
+              again = Path(tmp) / site.OVERLAY_NAME
+              site.write_overlay(Path(sys.argv[1]), again)
+              same = again.read_bytes() == Path(sys.argv[2]).read_bytes()
+          print()
+          print(f"Overlay of the second pfaedle run: same bytes: {same}")
+          PY
           fi
 
       # Also when a step failed: a build that is not reproducible is exactly
