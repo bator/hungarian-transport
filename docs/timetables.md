@@ -19,13 +19,16 @@ MÁV publishes its timetable (GTFS, CC0 licence) only to registered users.
 Releases ship a MÁV index matched to the OSM rails with pfaedle when the
 repository that builds them has a MÁV login (see
 [Releases with the MÁV index](#releases-with-the-máv-index)); such an
-install needs nothing more. Without an index a train's map relies on a live
+install needs nothing more. Between releases the integration fetches the
+same index built every morning from MÁV's newest feed
+([The daily index](#the-daily-index-from-github-pages)), so the routes are at
+most a day behind MÁV, not a week. Without an index a train's map relies on a live
 Transitous lookup, which sometimes finds no trip, and on BKK FUTÁR, which
 only knows trains around Budapest. With one, every train in Hungary draws
 its own route.
 
 To build it on your own Home Assistant instead (a fork's release without
-the secrets, or a feed newer than the last release):
+the secrets, the daily index turned off, or a feed of your own):
 
 1. Register at <https://www.mavcsoport.hu/gtfs-igenybejelento>. MÁV emails
    the download address and a login.
@@ -67,7 +70,8 @@ The integration then builds `mav-index.json.gz` next to the card:
   feed past its `feed_end_date` is never built over a shipped index.
 - **You choose.** An upload or the `rebuild_mav_index` action always builds
   the local feed, whatever its age. That index stays at the next starts; the
-  next update that ships a newer feed's index replaces it again.
+  next update that ships a newer feed's index replaces it again, and so does
+  the daily index once it is of a newer feed than the one you uploaded.
 
 MÁV's own `shapes.txt` is coarse: an 8 km chord cuts across the fields
 between Székesfehérvár and Kelenföld. A route that misses one of its
@@ -93,7 +97,9 @@ curl -X POST -H "Authorization: Bearer $HA_TOKEN" \
 ```
 
 A daily job that downloads (and pfaedle-matches) the feed can end with this
-call, so the card follows timetable changes on its own.
+call. With the [daily index](#the-daily-index-from-github-pages) on (the
+default) such a job is no longer needed to keep the routes current: it only
+matters for a feed of your own, or with the daily index turned off.
 
 ### Releases with the MÁV index
 
@@ -130,6 +136,58 @@ that went through. The **MÁV index** workflow runs the same pipeline on a
 pull request that touches it, or by hand, builds the index a second time
 from the same downloaded zip to check that it is reproducible, and keeps it
 as a 3-day artifact without publishing anything.
+
+### The daily index from GitHub Pages
+
+MÁV publishes a new feed almost every day; releases come once a week. The
+**Daily MÁV index** workflow (`.github/workflows/mav-index-daily.yml`) runs
+the release's pipeline above every morning at 04:30 UTC, after MÁV's nightly
+update, and publishes the index on GitHub Pages:
+
+- `https://bator.github.io/hungarian-transport/mav-index.json.gz`, the index;
+- `https://bator.github.io/hungarian-transport/mav-index.json`, its manifest:
+  the manifest `format`, the index `schema`, the `feed` (`feed_version`),
+  `built_at` (UTC), `size`, `sha256`, the content `digest`
+  (`scripts/index_digest.py`), trains and lines, the audit (trains and trips
+  that passed) and the `commit` it was built from.
+
+Nothing is published, and the site keeps the previous day's index, when the
+secrets are missing, the download, pfaedle or the audit fails (the run shows
+a warning), or the index has the same content as the one already published.
+
+The integration reads the manifest about 10 to 20 minutes after Home
+Assistant starts and then every 6 hours or so, and installs the index only
+when all of these hold:
+
+- the manifest's format and the index schema are the ones this version reads
+  (a newer one is skipped, with one line in the log);
+- its feed is newer, by the date its `feed_version` starts with, than the
+  index in use, and newer than a local `mav-gtfs.zip` by the rule above: a
+  local feed of the same date or newer, or one that cannot be dated, keeps
+  its own index;
+- the download has the manifest's size and sha256, unpacks to that schema
+  and feed, and has at least 50 trains whose routes and stations all resolve.
+
+It is written next to the card the way a build writes it (a temp file, then
+a rename) and never while a local build runs or waits; that round is skipped.
+A failed round leaves the index as it is and logs one warning, not one per
+round; no Repairs issue. Open dashboards pick the new index up at their next
+reload (the card revalidates it, and Home Assistant answers with a new ETag).
+
+**Opting out.** Settings → Devices & services → Hungarian transport →
+Configure → *Daily MÁV route index from GitHub*. Off, Home Assistant makes no
+request to GitHub Pages and keeps the weekly release's index (or the one it
+builds from your feed).
+
+**Privacy.** With the option on, Home Assistant contacts `bator.github.io`
+(GitHub Pages) a few times a day: a plain HTTPS GET of the two files above,
+no cookies, nothing beyond what any HTTP request carries (your IP address,
+and Home Assistant's user agent with its version). Nothing about your
+configuration is sent.
+
+**For forks.** The integration always reads `bator.github.io`. A fork's
+workflow publishes on its own Pages site; enable Settings → Pages → *Source:
+GitHub Actions* first, or its deploy job stops with an error saying so.
 
 ## Live positions and route shapes
 

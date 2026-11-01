@@ -119,6 +119,12 @@ key** checkbox.
 - Leave the field empty and save to keep the stored key (it is never shown).
   Tick **Remove the stored key** and save to remove it.
 - The field hides the key while you type.
+- **Daily MÁV route index from GitHub** (on by default): a few times a day
+  the integration checks `bator.github.io` for the train route index built
+  that morning from MÁV's newest timetable, and uses it when it is newer
+  than the one in use. Untick it to stay on the weekly release's index; Home
+  Assistant then makes no such request. See
+  [The daily index](../timetables.md#the-daily-index-from-github-pages).
 
 When BKK rejects the stored key (revoked or expired), Home Assistant asks
 for a new one: a **BKK key rejected** prompt appears under
@@ -147,9 +153,13 @@ You can try these under **Developer tools → Actions**.
 
 ### 3.4 Train routes on the map (optional)
 
-Without extra data, a train's map uses a live lookup that sometimes finds
-nothing. MÁV publishes its full timetable (GTFS, CC0 licence) to registered
-users. With it, every train in Hungary draws its own route.
+Releases ship a train route index, and with the **Daily MÁV route index**
+option on (see [3.1](#31-settings)) the integration keeps it at most a day
+behind MÁV's timetable: nothing to do. The steps below are for a timetable
+of your own, or with that option off. Without any index, a train's map uses
+a live lookup that sometimes finds nothing. MÁV publishes its full timetable
+(GTFS, CC0 licence) to registered users. With it, every train in Hungary
+draws its own route.
 
 1. Register at <https://www.mavcsoport.hu/gtfs-igenybejelento>. MÁV emails a
    download address and a login.
@@ -510,7 +520,11 @@ rebuilds them, and when a timetable changed it publishes a new patch
 release with the same code and the fresh timetables. HACS then offers it as
 an ordinary update; a release, once out, never changes.
 
-For daily updates on your own Home Assistant, follow
+Train routes follow MÁV's timetable daily without any of this: the
+integration fetches the index built every morning (the **Daily MÁV route
+index** option, [3.1](#31-settings)).
+
+For daily Volán and city updates on your own Home Assistant, follow
 [Keeping the GTFS indexes current](../timetables.md#keeping-the-gtfs-indexes-current)
 in the timetables guide. In short:
 
