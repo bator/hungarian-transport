@@ -266,6 +266,9 @@ async def test_rebuild_service(hass: HomeAssistant, card_assets, mav_source, mon
     # The build ran in its own process, not in Home Assistant's executor.
     assert len(spawned) == 1 and spawned[0][0] == sys.executable
     assert Path(spawned[0][2]) == mav.BUILD_RUNNER
+    # It names its temp file, so a failed build removes that one only.
+    suffix = spawned[0][spawned[0].index("--temp-suffix") + 1]
+    assert mav.TEMP_INDEX_RE.fullmatch(f"{mav.INDEX_NAME}.{suffix}")
 
 
 async def test_rebuild_service_reports_a_failed_build(hass: HomeAssistant, card_assets, mav_source) -> None:
@@ -516,9 +519,16 @@ async def test_waiting_builds_are_shared(hass: HomeAssistant, card_assets, mav_s
     assert results[1] is results[2] and results[0]["trains"] == 2
 
 
-SLOW_RUNNER = """import pathlib, sys, time
+# The temp file a build runner writes: the suffix Home Assistant names
+# (--temp-suffix), else one like mkstemp's.
+RUNNER_TEMP = """import pathlib, sys
 out = pathlib.Path(sys.argv[2])
-(out.parent / (out.name + ".k1ll_me0")).write_bytes(b"half an index")
+suffix = sys.argv[sys.argv.index("--temp-suffix") + 1] if "--temp-suffix" in sys.argv else {fallback!r}
+temp = out.parent / (out.name + "." + suffix)
+"""
+
+SLOW_RUNNER = RUNNER_TEMP.format(fallback="k1ll_me0") + """import time
+temp.write_bytes(b"half an index")
 time.sleep(120)
 """
 
@@ -538,9 +548,11 @@ async def test_build_timeout_kills_the_process_and_its_temp_file(
         return procs[-1]
 
     monkeypatch.setattr(mav.asyncio, "create_subprocess_exec", spying_exec)
-    # The update script's own temp file is not ours to remove.
+    # The update script's own temp files are not ours to remove: neither its
+    # .tmp nor a fresh mav_index.write temp file it is writing right now.
     (card_assets / "mav-index.json.gz.tmp").write_bytes(b"theirs")
     await _setup(hass)
+    (card_assets / "mav-index.json.gz.wr1t1ng0").write_bytes(b"being written")
     _write_feed(mav_source)
 
     with pytest.raises(HomeAssistantError) as err:
@@ -548,7 +560,10 @@ async def test_build_timeout_kills_the_process_and_its_temp_file(
     assert err.value.translation_key == "mav_build_failed"
     assert "timed out after 1.5s" in str(err.value)
     assert procs[0].returncode == -signal.SIGKILL
-    assert sorted(p.name for p in card_assets.glob("mav-index*")) == ["mav-index.json.gz.tmp"]
+    assert sorted(p.name for p in card_assets.glob("mav-index*")) == [
+        "mav-index.json.gz.tmp",
+        "mav-index.json.gz.wr1t1ng0",
+    ]
     # A timeout says nothing about the feed: no failed feed on record, no
     # Repairs issue, and the next start (no index on disk) builds again.
     assert "failed" not in mav._read_state(mav.state_path(hass))
@@ -887,12 +902,13 @@ async def test_stopping_cancels_a_running_build(
     await _setup(hass)
     _write_feed(mav_source)
     task = mav._build_task(hass, card_assets, True)
-    temp = card_assets / (mav.INDEX_NAME + ".k1ll_me0")
     for _ in range(200):
-        if temp.exists():
+        temps = list(card_assets.glob(mav.INDEX_NAME + ".*"))
+        if temps:
             break
         await asyncio.sleep(0.05)
-    assert temp.exists()
+    assert len(temps) == 1 and mav.TEMP_INDEX_RE.fullmatch(temps[0].name)
+    temp = temps[0]
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -933,9 +949,31 @@ async def test_stopping_cancels_a_queued_build(
     assert len(calls) == 2 and later_stats["trains"] == 2
 
 
-FAILING_RUNNER = """import pathlib, sys
-out = pathlib.Path(sys.argv[2])
-(out.parent / (out.name + ".f4iled00")).write_bytes(b"half an index")
+def test_index_write_uses_the_named_temp_file(tmp_path: Path, monkeypatch) -> None:
+    out = tmp_path / mav.INDEX_NAME
+    seen: list[str] = []
+    real_replace = os.replace
+
+    def spying_replace(src, dst):
+        seen.append(Path(src).name)
+        real_replace(src, dst)
+
+    monkeypatch.setattr(mav_index.os, "replace", spying_replace)
+    mav_index.write({"v": 7, "feed": "f"}, out, "ab12cd_9")
+    assert seen == [f"{mav.INDEX_NAME}.ab12cd_9"]
+    assert mav._index_feed(out) == "f"
+    assert out.stat().st_mode & 0o777 == 0o644
+    with pytest.raises(ValueError):
+        mav_index.write({"v": 7}, out, "../x/y/z")
+    # Another writer's file of that name is never written over.
+    (tmp_path / f"{mav.INDEX_NAME}.taken000").write_bytes(b"theirs")
+    with pytest.raises(FileExistsError):
+        mav_index.write({"v": 7}, out, "taken000")
+    assert (tmp_path / f"{mav.INDEX_NAME}.taken000").read_bytes() == b"theirs"
+
+
+FAILING_RUNNER = RUNNER_TEMP.format(fallback="f4iled00") + """
+temp.write_bytes(b"half an index")
 sys.exit("MemoryError")
 """
 
@@ -944,7 +982,9 @@ async def test_temp_indexes_go_before_a_build_and_after_a_failed_one(
     hass: HomeAssistant, card_assets, mav_source, monkeypatch, tmp_path
 ) -> None:
     """www/ is served: a killed Home Assistant's temp index goes before the
-    next build, and a build process that dies leaves none behind."""
+    next build, and a build process that dies leaves none behind. A fresh
+    one of another writer (the index update script) stays, also after a
+    failed build: that sweep removed every temp file at any age."""
     await _setup(hass)
     stale = card_assets / (mav.INDEX_NAME + ".0ld_k1ll")
     stale.write_bytes(b"from a killed build")
@@ -955,7 +995,6 @@ async def test_temp_indexes_go_before_a_build_and_after_a_failed_one(
     _write_feed(mav_source)
     await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
     assert sorted(p.name for p in card_assets.glob("mav-index*")) == [mav.INDEX_NAME, fresh.name]
-    fresh.unlink()
 
     runner = tmp_path / "failing_runner.py"
     runner.write_text(FAILING_RUNNER, encoding="utf-8")
@@ -963,7 +1002,7 @@ async def test_temp_indexes_go_before_a_build_and_after_a_failed_one(
     with pytest.raises(HomeAssistantError) as err:
         await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
     assert "exited 1: MemoryError" in str(err.value)
-    assert sorted(p.name for p in card_assets.glob("mav-index*")) == [mav.INDEX_NAME]
+    assert sorted(p.name for p in card_assets.glob("mav-index*")) == [mav.INDEX_NAME, fresh.name]
 
 
 async def test_setup_removes_uploads_left_behind(hass: HomeAssistant, mav_source) -> None:

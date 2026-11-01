@@ -110,6 +110,12 @@ class FutarUpstreamRateLimited(FutarRateLimited):
     a while), not as an outage."""
 
 
+class FutarStatusError(FutarError):
+    """FUTÁR answered HTTP 2xx, but with a status other than OK in the body
+    (the card throws on those too). Not cached, and not an outage: FUTÁR
+    answered, so it neither starts nor ends the "unavailable" state."""
+
+
 class FutarBadRequest(FutarError):
     """The request was not sent: a parameter the card never sends like that
     (longer than FUTAR_PARAM_MAX_LEN). The caller's mistake, not an outage."""
@@ -152,9 +158,13 @@ async def futar_get(
         raise FutarError(type(err).__name__) from None
     if not isinstance(data, dict):
         raise FutarError("unexpected response")
+    # Like the card (src/lib/futar.js): a missing status is OK, any other
+    # status an error, never data to cache or a key that works.
     status = str(data.get("status") or "OK")
     if status in ("UNAUTHORIZED", "INVALID_API_KEY", "INVALID_KEY"):
         raise FutarAuthError(status)
+    if status != "OK":
+        raise FutarStatusError(f"status {status[:64]}")
     return data
 
 
@@ -178,6 +188,9 @@ class FutarProxy:
         self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX, task_factory)
         self._rejected: str | None = None
         self._rejected_at = 0.0
+        # Counts rejections: an answer to a request sent before the latest
+        # one says nothing about the key now.
+        self._rejections = 0
         self._probing = False
         self._failing = False
         self._tokens = float(FUTAR_BURST)
@@ -231,6 +244,7 @@ class FutarProxy:
             raise
         # The summed sleeps, or the clock when a busy event loop took longer.
         waited = max(slept, _monotonic() - started)
+        rejections = self._rejections
         data = await futar_get(self._session, self._api_key, path, params, futar_timeout(waited))
         # Only an answer from FUTÁR itself ends an outage: a cache hit for
         # another request proves nothing, and clearing the state on one made
@@ -238,6 +252,12 @@ class FutarProxy:
         if self._failing:
             self._failing = False
             _LOGGER.info("BKK FUTÁR answers again")
+        # Only a request sent after the latest rejection proves the key works
+        # again: one sent before it (a slow plan-trip.json) cleared it, so the
+        # log flapped and the next call spent a 401 instead of failing fast.
+        if self._rejected is not None and rejections == self._rejections:
+            _LOGGER.info("BKK FUTÁR accepts the configured key again")
+            self._rejected = None
         return data
 
     async def get(self, path: str, params: dict[str, Any]) -> dict:
@@ -269,11 +289,15 @@ class FutarProxy:
         except FutarRateLimited:
             # Our own limit, not FUTÁR failing: no outage state, no "answers again".
             raise
+        except FutarStatusError:
+            # FUTÁR answered, with an error for this request: not an outage.
+            raise
         except FutarAuthError as err:
             if self._rejected is None:
                 _LOGGER.warning("BKK FUTÁR rejected the configured key (%s)", err)
             self._rejected = str(err)
             self._rejected_at = _monotonic()
+            self._rejections += 1
             raise
         except FutarError as err:
             if not self._failing:
@@ -285,7 +309,4 @@ class FutarProxy:
         finally:
             if probe:
                 self._probing = False
-        if self._rejected is not None:
-            _LOGGER.info("BKK FUTÁR accepts the configured key again")
-            self._rejected = None
         return data

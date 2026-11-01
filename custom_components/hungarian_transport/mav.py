@@ -47,6 +47,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import stat
 import sys
 import time
@@ -90,7 +91,7 @@ BUILD_RUNNER = Path(mav_index.__file__)
 BUILD_TIMEOUT = 30 * 60
 # mav_index.write's temp file (tempfile.mkstemp): the index name, a dot and
 # eight random characters. A killed build leaves it in www/, which is served.
-TEMP_INDEX_RE = re.compile(re.escape(INDEX_NAME) + r"\.[a-z0-9_]{8}")
+TEMP_INDEX_RE = re.compile(re.escape(INDEX_NAME) + r"\." + mav_index.TEMP_SUFFIX_RE.pattern)
 # One older than this is left behind; a younger one may be another writer's
 # (the index update script builds into www/ with mav_index.write too).
 TEMP_INDEX_MIN_AGE = 10 * 60
@@ -346,6 +347,12 @@ def _remove_temp_indexes(out: Path, min_age: float = 0.0) -> None:
                 path.unlink(missing_ok=True)
 
 
+def _remove_own_temp_index(out: Path, suffix: str) -> None:
+    """Remove the temp file of the build that wrote out with this suffix."""
+    with contextlib.suppress(OSError):
+        out.with_name(f"{out.name}.{suffix}").unlink(missing_ok=True)
+
+
 def _remove_uploads(folder: Path) -> None:
     with contextlib.suppress(OSError):
         for path in folder.iterdir():
@@ -366,9 +373,12 @@ async def _build(hass: HomeAssistant, src: Path, out: Path) -> dict[str, Any]:
 
     A temp index left in www/ (served there) by a killed process goes
     before the build starts (once it is old enough not to be another
-    writer's), and after one that failed.
+    writer's). After one that failed, only this build's own goes, at any
+    age: it names its temp file, so a fresh one of the index update script
+    (also writing into www/) is left alone.
     """
     await hass.async_add_executor_job(_remove_temp_indexes, out, TEMP_INDEX_MIN_AGE)
+    suffix = secrets.token_hex(4)
     try:
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
@@ -380,6 +390,8 @@ async def _build(hass: HomeAssistant, src: Path, out: Path) -> dict[str, Any]:
             str(MIN_TRAINS),
             "--min-ok",
             str(MIN_OK),
+            "--temp-suffix",
+            suffix,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -395,12 +407,12 @@ async def _build(hass: HomeAssistant, src: Path, out: Path) -> dict[str, Any]:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
         await proc.wait()
-        await hass.async_add_executor_job(_remove_temp_indexes, out)
+        await hass.async_add_executor_job(_remove_own_temp_index, out, suffix)
         if isinstance(err, TimeoutError):
             raise MavBuildInterrupted(f"index build timed out after {BUILD_TIMEOUT}s") from None
         raise
     if proc.returncode != 0:
-        await hass.async_add_executor_job(_remove_temp_indexes, out)
+        await hass.async_add_executor_job(_remove_own_temp_index, out, suffix)
         tail = stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or ["no output"]
         message = f"index build exited {proc.returncode}: {tail[0]}"
         # Killed by a signal (the OOM killer, a stop) or out of memory: the

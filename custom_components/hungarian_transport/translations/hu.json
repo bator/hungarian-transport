@@ -23,7 +23,8 @@
     },
     "error": {
       "invalid_auth": "A BKK FUTÁR elutasította ezt a kulcsot.",
-      "cannot_connect": "Nem érhető el a BKK FUTÁR. Próbáld újra később."
+      "cannot_connect": "Nem érhető el a BKK FUTÁR. Próbáld újra később.",
+      "rate_limited": "A BKK FUTÁR most túl sok kérés miatt nem fogadja ezt a kulcsot. Próbáld újra néhány perc múlva."
     }
   },
   "services": {
@@ -99,6 +100,7 @@
     "error": {
       "invalid_auth": "A BKK FUTÁR elutasította ezt a kulcsot.",
       "cannot_connect": "Nem érhető el a BKK FUTÁR. Próbáld újra később.",
+      "rate_limited": "A BKK FUTÁR most túl sok kérés miatt nem fogadja ezt a kulcsot. Próbáld újra néhány perc múlva.",
       "remove_and_new_key": "Vagy új kulcsot adj meg, vagy jelöld be a tárolt kulcs törlését, a kettőt egyszerre nem lehet."
     }
   },
