@@ -127,17 +127,27 @@ key** checkbox.
   [The daily index](../timetables.md#the-daily-index-from-github-pages).
 - **Daily check time** (06:00 by default): the local time of that check
   (up to 5 minutes later); it also runs once 10–20 minutes after Home
-  Assistant starts.
+  Assistant starts and after you save these options. A check that fails
+  (GitHub unreachable, a build of your own feed running) is tried again
+  every 20 minutes, up to 6 times.
 - **Notify about timetable updates** (off by default): a persistent
   notification when a new daily MÁV index is installed, when an update of
   the integration ships new Volán, city or MÁV timetables, and once when the
-  daily index fails on 3 days in a row.
+  daily index fails on 3 consecutive days (an index on GitHub not rebuilt
+  for 3 days counts as failing).
 - **Also call this service** (optional): a service such as `script.ertesit`
   or `notify.mobile_app_iphone`, called with `title` and `message` next to
-  each notification. Pick it from the list of scripts and notify services,
-  or type another one; **— none —** means persistent notifications only.
-  The form refuses a name that is not `domain.service` or a service Home
-  Assistant does not have.
+  the notifications about shipped timetables and failures. Pick it from the
+  list of scripts and notify services, or type another one; only
+  **— none —** means persistent notifications only. The form refuses a name
+  that is not `domain.service` (a typed `None` too) or a service Home
+  Assistant does not have. A stored service that is gone shows as
+  *(missing)* and stays until you pick another, so the other options can
+  still be saved.
+- **Also notify about daily MÁV index installs** (off by default): MÁV
+  publishes almost every day, so a new daily index only creates the
+  persistent notification unless this is on; then the service is called for
+  it too.
 
 When BKK rejects the stored key (revoked or expired), Home Assistant asks
 for a new one: a **BKK key rejected** prompt appears under

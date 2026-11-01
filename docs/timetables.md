@@ -62,9 +62,10 @@ The integration then builds `mav-index.json.gz` next to the card:
   is used as it is: nothing is built and nothing is reported. With one, the
   newer feed wins at startup. A feed's date is the one its `feed_version`
   starts with (`20261022.M2ChangeID`), else its `feed_start_date`, else its
-  `feed_end_date`. A shipped index of the same `feed_version` is kept (it
-  follows the rails), and so is one from a newer feed: the log says once
-  that the local feed was not used. A shipped index of an older feed is
+  `feed_end_date`. An index of the local feed's own `feed_version` is kept,
+  whoever built it ([Which index wins for the same
+  feed](#which-index-wins-for-the-same-feed)), and so is one from a newer
+  feed: the log says once that the local feed was not used. A shipped index of an older feed is
   replaced by a build of the local feed, once after each update. A local
   feed that cannot be dated is built, as is one of the same date. A local
   feed past its `feed_end_date` is never built over a shipped index.
@@ -86,6 +87,28 @@ docker run --rm -v "$PWD":/data ghcr.io/ad-freiburg/pfaedle:latest \
 
 Then zip `gtfs-out/` and use that as `mav-gtfs.zip`. With a pfaedle feed
 (October 2026) all 24,994 trips of 2,623 trains passed the check.
+
+### Which index wins for the same feed
+
+One `feed_version` can be indexed twice: from a pfaedle-matched feed
+(releases, the daily index) and from MÁV's official zip, which mostly gives
+the line through the stations. Every place that may replace an index with
+another of the same feed (the startup check, the daily index, the local
+update script) follows one rule (`mav_index.same_feed_replaces`):
+
+1. An index is *pfaedle-fitted* when at least 90% of its variants follow a
+   shape rather than their station line (read from the index itself; the
+   release guard `MAV_MIN_FITTED` publishes none below that).
+2. A fitted index is replaced only by another fitted one more than 4 KiB
+   larger: never by a stop-sequence index, nor by a build not made yet.
+3. A stop-sequence index is replaced by a fitted one, and by another
+   stop-sequence one more than 4 KiB larger.
+4. A build not made yet (its kind and size unknown) replaces no index of its
+   own feed. So startup does not rebuild a feed that was only copied again,
+   and the update script does not build MÁV's zip over the daily index of
+   the same feed; a pfaedle directory (`MAV_PFAEDLE_DIR`) counts as fitted
+   and may replace a stop-sequence index. An upload or the
+   `rebuild_mav_index` action always builds.
 
 **Updating automatically.** An admin can upload the zip instead of copying
 it. The response contains the build and check results:
@@ -191,23 +214,36 @@ a warning), or the index and both zips have the same content as the ones
 already published.
 
 The integration reads the manifest about 10 to 20 minutes after Home
-Assistant starts and then once a day at the **Daily check time** of its
-options (06:00 local time unless changed, plus up to 5 minutes), and
-installs the index only when all of these hold:
+Assistant starts (and after the options are saved, which reloads the
+integration, so a changed option takes effect the same day), then once a
+day at the **Daily check time** of its options (06:00 local time unless
+changed, plus up to 5 minutes), and installs the index only when all of
+these hold:
 
 - the manifest's format and the index schema are the ones this version reads
   (a newer one is skipped, with one line in the log);
-- its feed is newer, by the date its `feed_version` starts with, than the
-  index in use, and newer than a local `mav-gtfs.zip` by the rule above: a
-  local feed of the same date or newer, or one that cannot be dated, keeps
-  its own index;
-- the download has the manifest's size and sha256, unpacks to that schema
-  and feed, and has at least 50 trains whose routes and stations all resolve.
+- its feed is the one of the index in use and the [same-feed
+  rule](#which-index-wins-for-the-same-feed) lets it replace that one (a
+  stop-sequence build of the feed is replaced, a fitted one stays); or its
+  feed is newer, by the date its `feed_version` starts with, than the index
+  in use, and newer than a local `mav-gtfs.zip` by the rule above: a local
+  feed of the same date or newer, or one that cannot be dated, keeps its
+  own index, but only while that index is the one in use (built from the
+  feed as it is now, or of its `feed_version`). A local feed whose build
+  failed, was interrupted or refused by the audit keeps nothing;
+- the download has the manifest's size and sha256, has no data after its
+  gzip stream, unpacks to that schema and feed, and has at least 50 trains
+  whose routes and stations all resolve.
 
-It is written next to the card the way a build writes it (a temp file, then
-a rename) and never while a local build runs or waits; that round is skipped.
-A failed round leaves the index as it is and logs one warning, not one per
-round; no Repairs issue. Open dashboards pick the new index up at their next
+The index is fetched as `mav-index.json.gz?sha=<the manifest's sha256>`, so
+the Pages cache (`max-age=600`) never pairs a fresh manifest with the
+previous index. It is written next to the card the way a build writes it (a
+temp file, then a rename) and never while a local build runs or waits. A
+failed round, or one that found a build running, is tried again 20 minutes
+later, up to 6 times until the next daily round; a daily round that finds a
+manifest older than 20 hours (the workflow ran late) looks once more one to
+two hours later. A failed round leaves the index as it is and logs one
+warning, not one per round; no Repairs issue. Open dashboards pick the new index up at their next
 reload (the card revalidates it, and Home Assistant answers with a new ETag).
 
 **Opting out.** Settings → Devices & services → Hungarian transport →
@@ -226,22 +262,35 @@ configuration is sent.
 options, the integration creates a persistent notification (one per kind; a
 new one replaces the old) when:
 
-- the daily MÁV index was installed (the feed's date, trains and lines);
+- the daily MÁV index was installed (the feed's date, trains and lines).
+  MÁV publishes almost daily, so this one calls the service below only with
+  *Also notify about daily MÁV index installs* on;
 - after an update of the integration, the indexes it ships (Volán, city,
   MÁV) are of other feeds than the ones it saw before, naming which. The
   first run only records them; changes the integration makes itself (the
   daily index, a local build) are not news, nor a shipped MÁV index older
   than the daily one in use;
-- the daily index failed on 3 days in a row: once, and the notification goes
-  away when a round succeeds again.
+- the daily index failed on 3 consecutive days: once, and the notification
+  goes away when a round succeeds again. A day with only rounds that found
+  a build running (or a manifest this version does not read) neither counts
+  nor breaks the streak; a day without any round (Home Assistant off) starts
+  it over. A round that went through while the manifest was built more than
+  3 days ago counts as a failure: the site is no longer rebuilt. The
+  notification is shown again after a restart while its streak is open.
 
 *Also call this service* (`domain.service`, for example `script.ertesit` or
 `notify.mobile_app_iphone`) is called with `title` and `message` along with
-each notification. The options form lists the scripts and the `notify.*`
-services (not `notify.notify`, `notify.send_message` or
-`notify.persistent_notification`), and takes a typed name as well; it
-refuses a malformed or missing service.
-A service that fails later is logged, never retried. The texts are
+each notification (a daily install only with the option above). The call
+waits until Home Assistant has started: at the first start after an update
+scripts and `notify.mobile_app_*` are not registered yet when the
+integration sets up. The options form lists the scripts (by their name,
+also when the entity was renamed) and the `notify.*` services (not
+`notify.notify`, `notify.send_message` or `notify.persistent_notification`),
+and takes a typed name as well; it refuses a malformed or missing service,
+and a typed `None` (only the list's **— none —** means none). A stored
+service that is gone is listed as *(missing)* and kept, so the other
+options can still be saved. A service that fails later is logged, never
+retried. The texts are
 Hungarian when Home Assistant's language is Hungarian, else English.
 
 **For forks.** The integration always reads `bator.github.io`. A fork's
@@ -329,8 +378,10 @@ To rebuild them yourself on Home Assistant OS:
    not OSM rails. To download MÁV's zip there, set `MAV_GTFS_URL`,
    `MAV_GTFS_USER` and `MAV_GTFS_PASSWORD` in
    `/config/hungarian-transport/.env` (HTTP Basic over https only, never
-   sent on after a redirect, never logged). A release's pfaedle index of the
-   same feed beats such a stop-sequence build (see below).
+   sent on after a redirect, never logged). A release's or the daily
+   pfaedle index of the same feed beats such a stop-sequence build, which is
+   then not built at all ([the same-feed
+   rule](#which-index-wins-for-the-same-feed)).
 2. Copy `packages/hungarian_transport.yaml` into a Home Assistant package
    directory (`packages: !include_dir_named packages`).
 3. Restart Home Assistant. The automation runs at 04:30 in Home Assistant's
@@ -355,7 +406,9 @@ To rebuild them yourself on Home Assistant OS:
    `mav-index.json.gz`, of two builds of the same feed the larger
    (pfaedle-based) one wins, otherwise the later build, so an index the
    integration built from an uploaded zip is kept. A local `mav-gtfs.zip` or
-   pfaedle directory also rebuilds `mav-index.json.gz`; with `MAV_GTFS_URL`
+   pfaedle directory also rebuilds `mav-index.json.gz`, unless the served
+   index is of the same `feed_version` and the [same-feed
+   rule](#which-index-wins-for-the-same-feed) keeps it; with `MAV_GTFS_URL`
    set, each daily run downloads the zip again once it is 20 hours old. A MÁV
    index that fails its audit is not written. Volán, city and MÁV fail
    independently: each failed rebuild keeps that index as it was, and the
