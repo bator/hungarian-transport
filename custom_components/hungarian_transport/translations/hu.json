@@ -89,11 +89,15 @@
   "options": {
     "step": {
       "init": {
-        "title": "BKK Open Data kulcs",
-        "description": "A saját kulcs nélküli kártyák ezt használják a Home Assistanton keresztül. A tárolt kulcs nem jelenik meg: üresen hagyva megmarad, a jelölőnégyzettel törölhető. Ingyenes kulcs: {url}",
+        "title": "Magyar közlekedés beállításai",
+        "description": "BKK Open Data kulcs: a saját kulcs nélküli kártyák ezt használják a Home Assistanton keresztül. A tárolt kulcs nem jelenik meg: üresen hagyva megmarad, a jelölőnégyzettel törölhető. Ingyenes kulcs: {url}",
         "data": {
           "api_key": "BKK API kulcs",
-          "remove_key": "Tárolt kulcs törlése"
+          "remove_key": "Tárolt kulcs törlése",
+          "daily_mav_index": "Napi MÁV útvonal-index a GitHubról"
+        },
+        "data_description": {
+          "daily_mav_index": "Naponta letölti a projekt által a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet (a bator.github.io-ról), ha újabb a használtnál. Egy újabb helyi MÁV feed továbbra is elsőbbséget kap. Kikapcsolva a heti kiadás indexe marad, és ilyen kérés nem megy ki."
         }
       }
     },

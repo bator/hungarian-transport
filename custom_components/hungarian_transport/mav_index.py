@@ -438,6 +438,14 @@ def write(index: dict[str, Any], out: Path, temp_suffix: str | None = None) -> i
     after a killed build it removes its own temp file and no one else's."""
     data = {k: v for k, v in index.items() if not k.startswith("_")}
     raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return write_bytes(gzip.compress(raw, compresslevel=9), out, temp_suffix)
+
+
+def write_bytes(data: bytes, out: Path, temp_suffix: str | None = None) -> int:
+    """Atomically replace out with data (an index already gzipped); bytes.
+
+    The temp file is named as in ``write``, so the same sweep finds one a
+    killed writer left behind."""
     out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     if temp_suffix is None:
@@ -452,7 +460,7 @@ def write(index: dict[str, Any], out: Path, temp_suffix: str | None = None) -> i
         # the release zip, so it gets the mode a plain file would have.
         os.fchmod(fd, 0o644)
         with os.fdopen(fd, "wb") as fh:
-            fh.write(gzip.compress(raw, compresslevel=9))
+            fh.write(data)
         os.replace(tmp, out)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)

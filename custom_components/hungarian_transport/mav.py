@@ -29,7 +29,8 @@ itself dying during a build (the OOM killer, the watchdog) counts as such an
 interruption, found at the next start; a stop that cancels the build does not.
 An index on disk that is the local feed's own (built here, or a release's of
 the same feed_version) is kept at startup, whatever an earlier build of that
-feed did.
+feed did. The daily index from GitHub Pages (mav_daily.py) is installed by
+the same rule, under the same lock, and counts as a shipped one here.
 The build (a minute of CPU over stop_times.txt) runs as a separate Python
 process, not in the executor: an executor thread would hold the GIL against
 the event loop right after startup, and the process gives the feed's memory

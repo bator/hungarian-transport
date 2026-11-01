@@ -115,13 +115,20 @@ menetrendek települnek, a MÁV vágány- és helyjegyszolgáltatás nem.
 ### 3.1 Beállítások
 
 A **Beállítások → Eszközök és szolgáltatások → Magyar közlekedés →
-Konfigurálás** egyetlen mezőt nyit meg: **BKK API kulcs**.
+Konfigurálás** a **BKK API kulcs** mezőt és a napi MÁV útvonal-index
+kapcsolóját nyitja meg.
 
 - Írj be új kulcsot, és ments: az integráció újratölt, és minden kártya az
   új kulcsot használja.
 - Hagyd üresen a mezőt, és ments: a tárolt kulcs megmarad (nem jelenik meg).
   A **Tárolt kulcs törlése** jelölőnégyzettel és mentéssel törölheted.
 - A mező gépelés közben is elrejti a kulcsot.
+- **Napi MÁV útvonal-index a GitHubról** (alapból bekapcsolva): az
+  integráció naponta néhányszor megnézi a `bator.github.io` oldalon az aznap
+  reggel a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet, és
+  ha újabb a használtnál, átveszi. Kikapcsolva a heti kiadás indexe marad, és
+  a Home Assistant ilyen kérést nem küld. Részletek:
+  [The daily index](../timetables.md#the-daily-index-from-github-pages).
 
 Ha a BKK elutasítja a tárolt kulcsot (visszavonták vagy lejárt), a Home
 Assistant újat kér: a **Beállítások → Eszközök és szolgáltatások** oldalon
@@ -150,10 +157,13 @@ Ezeket a **Fejlesztői eszközök → Műveletek** alatt próbálhatod ki.
 
 ### 3.4 Vonatútvonalak a térképen (opcionális)
 
-Külön adat nélkül egy vonat térképe élő lekérdezésre támaszkodik, ami néha
-nem talál semmit. A MÁV a teljes menetrendjét (GTFS, CC0 licenc)
-regisztrált felhasználóknak adja ki. Ezzel Magyarország minden vonata a
-saját útvonalát rajzolja.
+A kiadások vonatútvonal-indexet is hoznak, és a **Napi MÁV útvonal-index**
+beállítással (lásd [3.1](#31-beállítások)) az integráció legfeljebb egy
+nappal marad el a MÁV menetrendjétől: nincs teendő. Az alábbi lépések saját
+menetrendhez kellenek, vagy ha a beállítás ki van kapcsolva. Index nélkül
+egy vonat térképe élő lekérdezésre támaszkodik, ami néha nem talál semmit.
+A MÁV a teljes menetrendjét (GTFS, CC0 licenc) regisztrált felhasználóknak
+adja ki. Ezzel Magyarország minden vonata a saját útvonalát rajzolja.
 
 1. Regisztrálj a <https://www.mavcsoport.hu/gtfs-igenybejelento> oldalon.
    A MÁV e-mailben küld letöltési címet és belépési adatokat.
@@ -530,7 +540,12 @@ patch-kiadást ad ki ugyanazzal a kóddal és a friss menetrendekkel. A HACS
 ezt szokásos frissítésként kínálja fel; egy kiadás, ha egyszer kint van, már
 nem változik.
 
-A saját Home Assistantodon napi frissítéshez kövesd a menetrend-útmutató
+A vonatútvonalak ettől függetlenül naponta követik a MÁV menetrendjét: az
+integráció letölti a minden reggel épített indexet (**Napi MÁV
+útvonal-index** beállítás, [3.1](#31-beállítások)).
+
+A Volán és a helyi menetrendek napi frissítéséhez a saját Home
+Assistantodon kövesd a menetrend-útmutató
 [Keeping the GTFS indexes current](../timetables.md#keeping-the-gtfs-indexes-current)
 részét. Röviden:
 

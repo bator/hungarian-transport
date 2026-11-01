@@ -107,6 +107,7 @@ it from the dashboard. Keep it in the integration.
 | City networks | Each operator's GTFS, shipped with each release |
 | Stop search, transfers | [Transitous](https://transitous.org/), BKK FUTÁR as fallback |
 | MÁV train routes on the map | [MÁV GTFS][timetables-mav] matched to the OSM rails with pfaedle, shipped with each release built with the MÁV secrets; or add the feed yourself |
+| MÁV train routes, daily | The same index built every morning from MÁV's newest feed, fetched from GitHub Pages (`bator.github.io`) when it is newer; [opt out][timetables-daily] in the integration's options |
 
 A weekly job publishes a new patch release when a timetable changed; a
 published release never changes. To refresh the timetables daily on your own
@@ -155,6 +156,7 @@ MIT, see [LICENSE](LICENSE).
 [manual-config]: https://github.com/bator/hungarian-transport/blob/main/docs/manual/README.md#11-configuration-reference
 [timetables]: https://github.com/bator/hungarian-transport/blob/main/docs/timetables.md
 [timetables-mav]: https://github.com/bator/hungarian-transport/blob/main/docs/timetables.md#máv-train-routes
+[timetables-daily]: https://github.com/bator/hungarian-transport/blob/main/docs/timetables.md#the-daily-index-from-github-pages
 [img-card-mav]: https://raw.githubusercontent.com/bator/hungarian-transport/main/docs/manual/images/en/card-mav.webp
 [img-map-bkk]: https://raw.githubusercontent.com/bator/hungarian-transport/main/docs/manual/images/en/map-bkk.webp
 [img-planner]: https://raw.githubusercontent.com/bator/hungarian-transport/main/docs/manual/images/en/planner-transfer.webp

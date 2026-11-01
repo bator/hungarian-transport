@@ -23,9 +23,17 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
-from . import mav
+from . import mav, mav_daily
 from .assets import asset_tag
-from .const import CONF_API_KEY, DOMAIN, SERVICE_ELVIRA_BETWEEN, SERVICE_FUTAR, SERVICE_REBUILD_MAV
+from .const import (
+    CONF_API_KEY,
+    CONF_DAILY_MAV,
+    DEFAULT_DAILY_MAV,
+    DOMAIN,
+    SERVICE_ELVIRA_BETWEEN,
+    SERVICE_FUTAR,
+    SERVICE_REBUILD_MAV,
+)
 from .elvira import ElviraError, ElviraRateLimited, elvira_between, station_code_digits
 from .futar import (
     FUTAR_PATHS,
@@ -235,6 +243,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration entry."""
     frontend.add_extra_js_url(hass, hass.data[DOMAIN]["card_url"])
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+    if entry.options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV):
+        # The daily MÁV index from GitHub Pages (mav_daily.py); turned off in
+        # the options, no request is made.
+        entry.async_on_unload(mav_daily.DailyIndexUpdater(hass, WWW_PATH).start())
 
     api_key = _entry_api_key(entry)
     if not api_key:
