@@ -89,11 +89,15 @@
   "options": {
     "step": {
       "init": {
-        "title": "BKK Open Data key",
-        "description": "Cards without their own key use this one through Home Assistant. The stored key is not shown: leave the field empty to keep it, or tick the box to remove it. Free key: {url}",
+        "title": "Hungarian transport options",
+        "description": "BKK Open Data key: cards without their own key use this one through Home Assistant. The stored key is not shown: leave the field empty to keep it, or tick the box to remove it. Free key: {url}",
         "data": {
           "api_key": "BKK API key",
-          "remove_key": "Remove the stored key"
+          "remove_key": "Remove the stored key",
+          "daily_mav_index": "Daily MÁV route index from GitHub"
+        },
+        "data_description": {
+          "daily_mav_index": "Once a day, fetch the train route index the project builds from MÁV's newest timetable (from bator.github.io) when it is newer than the one in use. A newer local MÁV feed still wins. Turn it off to keep the weekly release's index and make no such request."
         }
       }
     },

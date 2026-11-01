@@ -16,7 +16,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from .const import CONF_API_KEY, DOMAIN
+from .const import CONF_API_KEY, CONF_DAILY_MAV, DEFAULT_DAILY_MAV, DOMAIN
 from .futar import FutarAuthError, FutarError, FutarUpstreamRateLimited, futar_get
 
 KEY_URL = "https://opendata.bkk.hu/data-sources"
@@ -57,6 +57,13 @@ def _key_schema(has_key: bool = False) -> vol.Schema:
     if has_key:
         fields[vol.Optional(CONF_REMOVE_KEY, default=False)] = BooleanSelector()
     return vol.Schema(fields)
+
+
+def _options_schema(has_key: bool, daily_mav: bool) -> vol.Schema:
+    """The key fields, then the daily MÁV route index from GitHub (mav_daily.py)."""
+    return _key_schema(has_key).extend(
+        {vol.Optional(CONF_DAILY_MAV, default=daily_mav): BooleanSelector()}
+    )
 
 
 class HungarianTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -120,7 +127,7 @@ class HungarianTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # The same key accepted again changes nothing, so no listener
                 # fires: reload anyway to drop the proxy that saw it rejected.
                 if not self.hass.config_entries.async_update_entry(
-                    entry, options={CONF_API_KEY: api_key}
+                    entry, options={**entry.options, CONF_API_KEY: api_key}
                 ):
                     self.hass.config_entries.async_schedule_reload(entry.entry_id)
                 return self.async_abort(reason="reauth_successful")
@@ -133,7 +140,7 @@ class HungarianTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
-    """Set, change or clear the BKK Open Data key."""
+    """Set, change or clear the BKK Open Data key; the daily MÁV index on or off."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -141,7 +148,9 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
         # self.config_entry is only set automatically from HA 2024.11; the
         # handler is the entry id on every supported version.
         entry = self.hass.config_entries.async_get_entry(self.handler)
-        current = str((entry.options if entry else {}).get(CONF_API_KEY) or "")
+        options = dict(entry.options) if entry else {}
+        current = str(options.get(CONF_API_KEY) or "")
+        daily_mav = bool(options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV))
         errors: dict[str, str] = {}
         if user_input is not None:
             typed = (user_input.get(CONF_API_KEY) or "").strip()
@@ -158,15 +167,19 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
                 if error := await _validate_key(self.hass, api_key):
                     errors["base"] = error
             if not errors:
-                if entry is not None and api_key == current:
-                    # Saving the same key changes no option, so the update
-                    # listener does not reload the entry: reload it here, or
-                    # a proxy that saw the key rejected would keep failing.
+                new = {
+                    CONF_API_KEY: api_key,
+                    CONF_DAILY_MAV: bool(user_input.get(CONF_DAILY_MAV, daily_mav)),
+                }
+                if entry is not None and new == options:
+                    # Saving the same options fires no update listener, so
+                    # the entry is not reloaded: reload it here, or a proxy
+                    # that saw the key rejected would keep failing.
                     self.hass.config_entries.async_schedule_reload(entry.entry_id)
-                return self.async_create_entry(data={CONF_API_KEY: api_key})
+                return self.async_create_entry(data=new)
         return self.async_show_form(
             step_id="init",
-            data_schema=_key_schema(bool(current)),
+            data_schema=_options_schema(bool(current), daily_mav),
             errors=errors,
             description_placeholders={"url": KEY_URL},
         )

@@ -15,7 +15,7 @@ from homeassistant.setup import async_setup_component
 
 import custom_components.hungarian_transport as integration
 from custom_components.hungarian_transport.config_flow import CONF_REMOVE_KEY
-from custom_components.hungarian_transport.const import CONF_API_KEY, DOMAIN
+from custom_components.hungarian_transport.const import CONF_API_KEY, CONF_DAILY_MAV, DOMAIN
 from custom_components.hungarian_transport.futar import BKK_API
 
 SEARCH = f"{BKK_API}/search.json"
@@ -136,14 +136,14 @@ async def test_options_flow_sets_keeps_and_removes_key(hass, aioclient_mock, emp
         result["flow_id"], {CONF_API_KEY: "new-key"}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_API_KEY: "new-key"}
+    assert entry.options == {CONF_DAILY_MAV: True, CONF_API_KEY: "new-key"}
     assert aioclient_mock.call_count == 1
 
     # The field comes back empty: leaving it so keeps the key, unasked.
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(result["flow_id"], empty)
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_API_KEY: "new-key"}
+    assert entry.options == {CONF_DAILY_MAV: True, CONF_API_KEY: "new-key"}
     assert aioclient_mock.call_count == 1
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
@@ -151,7 +151,7 @@ async def test_options_flow_sets_keeps_and_removes_key(hass, aioclient_mock, emp
         result["flow_id"], {**empty, CONF_REMOVE_KEY: True}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_API_KEY: ""}
+    assert entry.options == {CONF_DAILY_MAV: True, CONF_API_KEY: ""}
 
 
 async def test_typed_key_and_remove_together_is_a_form_error(hass, aioclient_mock) -> None:
@@ -180,7 +180,7 @@ async def test_typed_key_and_remove_together_is_a_form_error(hass, aioclient_moc
         result["flow_id"], {CONF_API_KEY: "typed"}
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_API_KEY: "typed"}
+    assert entry.options == {CONF_DAILY_MAV: True, CONF_API_KEY: "typed"}
     assert aioclient_mock.call_count == 1
 
 
@@ -209,7 +209,7 @@ async def test_no_remove_box_without_a_stored_key(hass) -> None:
     entry.add_to_hass(hass)
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
-    assert list(result["data_schema"].schema) == [CONF_API_KEY]
+    assert list(result["data_schema"].schema) == [CONF_API_KEY, CONF_DAILY_MAV]
 
 
 async def test_user_form_has_no_suggested_key(hass) -> None:
@@ -242,7 +242,7 @@ async def test_options_save_reloads_the_entry_once(hass, aioclient_mock, old, ne
         await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options == {CONF_API_KEY: new}
+    assert entry.options == {CONF_DAILY_MAV: True, CONF_API_KEY: new}
     assert setup_entry.call_count == 1
     assert entry.state is config_entries.ConfigEntryState.LOADED
 
@@ -326,3 +326,56 @@ async def test_reauth_reloads_the_entry_once(hass, aioclient_mock, old, new) -> 
     assert entry.options == {CONF_API_KEY: new}
     assert setup_entry.call_count == 1
     assert entry.state is config_entries.ConfigEntryState.LOADED
+
+
+async def test_options_turn_the_daily_mav_index_off_and_on(hass, aioclient_mock) -> None:
+    """On by default; saving the box reloads the entry once, which starts or
+    stops the daily updater. The key stays as it was."""
+    assert await async_setup_component(hass, "http", {})
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: "kept"})
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    daily = next(k for k in result["data_schema"].schema if k == CONF_DAILY_MAV)
+    assert daily.default() is True
+    assert isinstance(result["data_schema"].schema[daily], BooleanSelector)
+    for value in (False, False, True):
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        with patch.object(
+            integration, "async_setup_entry", wraps=integration.async_setup_entry
+        ) as setup_entry:
+            result = await hass.config_entries.options.async_configure(
+                result["flow_id"], {CONF_DAILY_MAV: value}
+            )
+            await hass.async_block_till_done()
+        assert result["type"] is FlowResultType.CREATE_ENTRY
+        assert entry.options == {CONF_API_KEY: "kept", CONF_DAILY_MAV: value}
+        assert setup_entry.call_count == 1
+        # The form shows what is stored.
+        result = await hass.config_entries.options.async_init(entry.entry_id)
+        daily = next(k for k in result["data_schema"].schema if k == CONF_DAILY_MAV)
+        assert daily.default() is value
+        hass.config_entries.options.async_abort(result["flow_id"])
+    assert aioclient_mock.call_count == 0
+
+
+async def test_reauth_keeps_the_daily_mav_choice(hass, aioclient_mock) -> None:
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: "old", CONF_DAILY_MAV: False}
+    )
+    entry.add_to_hass(hass)
+    result = await entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_API_KEY: "new"})
+    assert result["reason"] == "reauth_successful"
+    assert entry.options == {CONF_API_KEY: "new", CONF_DAILY_MAV: False}
+
+
+@pytest.mark.parametrize("lang", ["en", "hu"])
+def test_daily_mav_option_is_translated(lang) -> None:
+    folder = Path(integration.__file__).parent / "translations"
+    init = json.loads((folder / f"{lang}.json").read_text(encoding="utf-8"))["options"]["step"]["init"]
+    assert init["data"][CONF_DAILY_MAV]
+    assert "bator.github.io" in init["data_description"][CONF_DAILY_MAV]
