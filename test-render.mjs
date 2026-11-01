@@ -4616,8 +4616,8 @@ check('a branded suburban train in the same minute stays off another numbered tr
     && JSON.stringify(c._config.routeIds) === '["9","109"]' && c._config.minutesAfter === 480
     && reloads === 1,
     JSON.stringify({ cfg: c._config, reloads }));
-  c.setConfig({ stopId: '42', stopName: 'Fő tér', destKey: 'x', destName: '7', routeIds: 7, volan: true });
-  check('a non-list routeIds becomes an empty list', JSON.stringify(c._config.routeIds) === '[]' && reloads === 2,
+  c.setConfig({ stopId: '42', stopName: 'Fő tér', destKey: 'x', destName: '7', routeIds: { 7: true }, volan: true });
+  check('a routeIds that is no list, text or number becomes an empty list', JSON.stringify(c._config.routeIds) === '[]' && reloads === 2,
     JSON.stringify(c._config.routeIds));
   c._tripCache = { keep: 1 };
   c._rows = [{ label: 'kept', headsign: 'x', depTs: Math.floor(Date.now() / 1000) + 600 }];
@@ -6504,13 +6504,20 @@ const settle = async (el) => {
 {
   /* Operator themes: a picked theme paints the title band and the accent,
      `operator` follows the data source, an unknown id keeps HA's look, and
-     a theme change alone does not refetch. */
+     a theme change alone does not refetch. HA's --primary-color is left
+     alone: the accent goes in --ht-accent and friends. */
   const themed = document.createElement('hungarian-transport-card');
   document.body.appendChild(themed);
   themed.hass = { states: {}, language: 'hu' };
   themed.setConfig({ name: 'T', language: 'hu', theme: 'bkk' });
   const band = () => !!themed.shadowRoot.querySelector('ha-card.themed');
-  const bkk = { band: band(), brand: themed.style.getPropertyValue('--ht-brand'), accent: themed.style.getPropertyValue('--primary-color') };
+  const vars = () => ({
+    band: band(),
+    brand: themed.style.getPropertyValue('--ht-brand'),
+    accent: themed.style.getPropertyValue('--ht-accent'),
+    primary: themed.style.getPropertyValue('--primary-color'),
+  });
+  const bkk = vars();
   themed.setConfig({ name: 'T', language: 'hu', theme: 'operator', volan: true });
   const volan = themed.style.getPropertyValue('--ht-brand');
   themed.setConfig({ name: 'T', language: 'hu', theme: 'operator', helyi: true, city: 'miskolc' });
@@ -6518,30 +6525,114 @@ const settle = async (el) => {
   themed.setConfig({ name: 'T', language: 'hu', theme: 'operator', helyi: true, city: 'volan-gyor' });
   const town = themed.style.getPropertyValue('--ht-brand');
   themed.setConfig({ name: 'T', language: 'hu', theme: 'nincs-ilyen' });
-  const none = { band: band(), brand: themed.style.getPropertyValue('--ht-brand'), accent: themed.style.getPropertyValue('--primary-color') };
+  const none = vars();
+  themed.setConfig({ name: 'T', language: 'hu', theme: 'BKK' });
+  const upper = vars();
+  themed.setConfig({ name: 'T', language: 'hu', theme: 'constructor' });
+  const proto = vars();
   themed.remove();
   check('a theme paints the band; operator follows the source; an unknown id keeps HA',
-    bkk.band && bkk.brand === '#4C0E5F' && bkk.accent === '#005FA8'
+    bkk.band && bkk.brand === '#4C0E5F' && bkk.accent === '#005FA8' && !bkk.primary
       && volan === '#F9AB13' && mvk === '#22365A' && town === '#F9AB13'
       && !none.band && !none.brand && !none.accent,
     JSON.stringify({ bkk, volan, mvk, town, none }));
+  const { resolveTheme, THEMES, THEME_CSS: themeCss } = await import('./src/themes.js');
+  check('a theme id is matched in any case, and Object.prototype keys are no themes',
+    upper.band && upper.brand === '#4C0E5F' && !proto.band && !proto.accent
+      && resolveTheme('__proto__') === null && resolveTheme('constructor') === null
+      && resolveTheme('toString') === null && resolveTheme('operator', 'helyi', 'constructor') === null
+      && resolveTheme(' Mav ').id === 'mav' && resolveTheme('OPERATOR', 'bkk').id === 'bkk',
+    JSON.stringify({ upper, proto }));
   const { configDataKey: dataKey } = await import('./src/config.js');
   check('a theme change alone is cosmetic', dataKey({ stopId: 'a', theme: 'mav' }) === dataKey({ stopId: 'a' }));
 
-  const { THEMES } = await import('./src/themes.js');
-  const lum = (h) => {
-    const c = [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255)
-      .map((x) => (x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
-    return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+  /* Contrast of the pairs a theme actually paints, on Home Assistant's
+     default light (#fff card, #212121 text) and dark (#1c1c1c card, #e1e1e1
+     text) themes: accent text on the card and a label on an accent fill at
+     4.5:1, the title and its secondary text on the tinted band at 4.5:1,
+     accent rings on the band and the head icons at 3:1. */
+  const rgb = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
+  const lum = (c) => {
+    const l = c.map((v) => v / 255).map((x) => (x <= 0.03928 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4));
+    return 0.2126 * l[0] + 0.7152 * l[1] + 0.0722 * l[2];
   };
   const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((m, n) => n - m); return (x + 0.05) / (y + 0.05); };
-  const weak = Object.entries(THEMES).filter(([, th]) => ratio(th.brand, th.ink) < 4.5).map(([id]) => id);
-  check('every theme title reads at 4.5:1 or better', weak.length === 0, JSON.stringify(weak));
-  const { THEME_CSS: themeCss } = await import('./src/themes.js');
+  const mix = (a, b, pct) => a.map((v, i) => Math.round((v * pct + b[i] * (100 - pct)) / 100));
+  const modes = {
+    light: { bg: rgb('#ffffff'), text: rgb('#212121'), sec: rgb('#727272') },
+    dark: { bg: rgb('#1c1c1c'), text: rgb('#e1e1e1'), sec: rgb('#9b9b9b') },
+  };
+  const tintPct = Number((themeCss.match(/color-mix\(in srgb, var\(--ht-brand\) (\d+)%, var\(--card-background-color/) || [])[1]);
+  const probe = document.createElement('hungarian-transit-stop-card-plan');
+  probe._reloadSafe = () => {};
+  document.body.appendChild(probe);
+  probe.hass = { states: {}, language: 'hu' };
+  probe.setConfig({ language: 'hu', theme: 'bkk', stopId: 'BKK_A', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_B' });
+  const planCss = [...probe.shadowRoot.querySelectorAll('style')].map((el) => el.textContent).join('\n');
+  const secPct = Number((planCss.match(/var\(--secondary-text-color\) (\d+)%, var\(--primary-text-color\)\)/) || [])[1]);
+  const stripePct = Number((planCss.match(/--ht-stripe: color-mix\(in srgb, var\(--primary-text-color, #000\) (\d+)%, transparent\)/) || [])[1]);
+  const worst = {};
+  const weak = [];
+  Object.keys(THEMES).forEach((id) => {
+    probe.setConfig({ language: 'hu', theme: id, stopId: 'BKK_A', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_B' });
+    const get = (k) => probe.style.getPropertyValue(k).trim();
+    const m = get('--ht-accent-text').match(/^color-mix\(in srgb, (#[0-9A-Fa-f]{6}) (\d+)%, var\(--primary-text-color, #[0-9A-Fa-f]{6}\)\)$/);
+    if (!m || !/^#[0-9A-Fa-f]{6}$/.test(get('--ht-accent')) || !/^#[0-9A-Fa-f]{6}$/.test(get('--ht-accent-ink'))) {
+      weak.push(`${id}: vars ${JSON.stringify([get('--ht-accent'), get('--ht-accent-ink'), get('--ht-accent-text')])}`);
+      return;
+    }
+    const accent = rgb(get('--ht-accent'));
+    const ink = rgb(get('--ht-accent-ink'));
+    const brand = rgb(get('--ht-brand'));
+    let text = Infinity;
+    let nonText = Infinity;
+    Object.entries(modes).forEach(([mode, c]) => {
+      const tint = mix(brand, c.bg, tintPct);
+      const acText = mix(rgb(m[1]), c.text, Number(m[2]));
+      const headSec = mix(c.sec, c.text, secPct);
+      const pairs = [
+        ['accent text on the card', ratio(acText, c.bg), 4.5],
+        ['label on the accent fill', ratio(ink, accent), 4.5],
+        ['title on the band', ratio(c.text, tint), 4.5],
+        ['secondary text on the band', ratio(headSec, tint), 4.5],
+        ['accent ring on the band', ratio(acText, tint), 3],
+        ['head icon on its button', ratio(headSec, mix(c.text, tint, stripePct)), 3],
+      ];
+      pairs.forEach(([what, r, min]) => {
+        if (min > 3) text = Math.min(text, r); else nonText = Math.min(nonText, r);
+        if (!(r >= min)) weak.push(`${id} ${mode}: ${what} ${r.toFixed(2)} < ${min}`);
+      });
+    });
+    worst[id] = `${text.toFixed(2)}/${nonText.toFixed(2)}`;
+  });
+  probe.remove();
+  check('every theme reads in light and dark mode: text and labels 4.5:1, rings and icons 3:1 (worst text/non-text per theme)',
+    tintPct > 0 && secPct > 0 && stripePct > 0 && Object.keys(worst).length === Object.keys(THEMES).length && weak.length === 0,
+    weak.length ? JSON.stringify(weak) : JSON.stringify(worst));
+
+  /* The card's own CSS paints accents through the theme variables only:
+     --primary-color is the unthemed fallback and nothing reads it as text,
+     ring or fill directly. The dead ink colour is gone. */
+  const hopProbe = document.createElement('hungarian-transport-card');
+  document.body.appendChild(hopProbe);
+  hopProbe.hass = { states: {}, language: 'hu' };
+  hopProbe.setConfig({ name: 'T', language: 'hu', theme: 'homm' });
+  const hopCss = [...hopProbe.shadowRoot.querySelectorAll('style')].map((el) => el.textContent).join('\n');
+  hopProbe.remove();
+  const direct = [];
+  [hopCss, planCss].forEach((css) => {
+    css.replace(/(?:^|[;{\s])((?:color|background|outline|border[\w-]*|box-shadow|fill|stroke)\s*:[^;}]*var\(--primary-color\)[^;}]*)/g, (all, decl) => { direct.push(decl.trim()); return all; });
+  });
+  check('card CSS reads accents through --ht-ac / --ht-fill, not --primary-color, and no ink colour is left',
+    direct.length === 0 && !/--ht-brand-ink/.test(src) && !Object.values(THEMES).some((th) => 'ink' in th),
+    JSON.stringify(direct));
   const headRule = (themeCss.match(/ha-card\.themed \.head \{[^}]*\}/) || [''])[0];
-  check('a themed title is a tint over the card background in the HA text colour, not a solid brand fill',
-    /background: color-mix\(in srgb, var\(--ht-brand\) \d+%, var\(--card-background-color/.test(headRule)
-      && /color: var\(--primary-text-color\)/.test(headRule) && !/--ht-brand-ink/.test(headRule),
+  const mixBlock = themeCss.slice(themeCss.indexOf('@supports (color: color-mix('));
+  check('a themed title is a tint over the card background in the HA text colour, with a plain band where color-mix is missing',
+    /background: var\(--secondary-background-color/.test(headRule) && !/color-mix/.test(headRule)
+      && /color: var\(--primary-text-color\)/.test(headRule)
+      && /ha-card\.themed \.head \{\s*background: color-mix\(in srgb, var\(--ht-brand\) \d+%, var\(--card-background-color/.test(mixBlock)
+      && /ha-card\.themed \{ --ht-ac: var\(--ht-accent-text\); \}/.test(mixBlock),
     headRule.replace(/\s+/g, ' '));
 
   const tEd = document.createElement('hungarian-transport-card-editor');
@@ -6554,10 +6645,31 @@ const settle = async (el) => {
   tEd.addEventListener('config-changed', (ev) => emits.push(ev.detail.config));
   sel.value = 'ha';
   sel.dispatchEvent(new Event('change'));
+  tEd.setConfig({ language: 'hu', theme: 'BKK' });
+  const upperPick = sel.value;
   tEd.remove();
   check('the editor shows the theme and drops the key for the HA default',
-    picked === 'mav' && emits.length === 1 && !('theme' in emits[0]) && sel.options.length === Object.keys(THEMES).length + 2,
-    JSON.stringify({ picked, emits }));
+    picked === 'mav' && upperPick === 'bkk' && emits.length === 1 && !('theme' in emits[0])
+      && sel.options.length === Object.keys(THEMES).length + 2,
+    JSON.stringify({ picked, upperPick, emits }));
+
+  /* The planner spans every operator: `operator` would paint nothing
+     there, so its editor does not offer it. */
+  const pEd = document.createElement('hungarian-transit-stop-card-plan-editor');
+  document.body.appendChild(pEd);
+  pEd._probeKey = () => {};
+  pEd.hass = { states: {}, language: 'hu' };
+  pEd.setConfig({ language: 'hu', theme: 'operator' });
+  const pSel = pEd.querySelector('#theme');
+  const pOpts = [...pSel.options].map((o) => o.value);
+  const pShown = pSel.value;
+  pEd.setConfig({ language: 'hu', theme: 'bahart' });
+  const pBahart = pSel.value;
+  pEd.remove();
+  check('the planner editor does not offer the operator theme; a YAML operator shows as the HA theme',
+    pOpts.indexOf('operator') < 0 && pOpts[0] === 'ha' && pOpts.length === Object.keys(THEMES).length + 1
+      && pShown === 'ha' && pBahart === 'bahart',
+    JSON.stringify({ pOpts, pShown, pBahart }));
 }
 {
   /* headerBadges: the title shares its line with the board's lines, each
@@ -9811,6 +9923,165 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   check('a stale journey map open drops its return focus', sp._mapReturnFocus === null && sp._openingMap === '',
     JSON.stringify({ focus: sp._mapReturnFocus === btn }));
   sp.remove();
+}
+
+/* Review 7: card and planner fixes. */
+{
+  /* 1. A Volán destination picked in the planner's editor keeps its rows on
+     the "Most" board: the editor saves the gtfs: form the "all" filter
+     needs, as the planner's own pick does. */
+  const ped = document.createElement('hungarian-transit-stop-card-plan-editor');
+  ped._probeKey = () => {};
+  document.body.appendChild(ped);
+  ped.hass = { states: {}, language: 'hu' };
+  ped.setConfig({ language: 'hu', stopId: 'volan_1', stopName: 'Budapest, Népliget' });
+  let saved = null;
+  ped.addEventListener('config-changed', (ev) => { saved = ev.detail.config.routeIds; });
+  ped._destRoutes = { 'gyor aut all': ['1053', '1054'] };
+  ped._pickStop({ name: 'Győr, autóbusz-állomás', key: 'gyor aut all', id: 'volan_2' }, 'dest');
+  ped.remove();
+  const plan = document.createElement('hungarian-transit-stop-card-plan');
+  plan._destRoutes = { 'gyor aut all': ['1053', '1054', 'BKK_9'] };
+  const planIds = plan._idsForDest('gyor aut all');
+  const keepVolan = Lib.volanDepartures;
+  const keepCity = Lib.cityIndex;
+  const at = Math.floor(Date.now() / 1000);
+  Lib.volanDepartures = async () => [{ label: '1053', dep: at + 600, sched: 1 }, { label: '1054', dep: at + 900, sched: 2 }];
+  Lib.cityIndex = async () => { throw new Error('none'); };
+  let rows = [];
+  try {
+    rows = await Lib.departures('', 'volan_2x', saved || [], { key: 'gyor aut all' }, { mode: 'all', deferGps: true, originName: 'x' });
+  } finally {
+    Lib.volanDepartures = keepVolan;
+    Lib.cityIndex = keepCity;
+  }
+  check('a Volán destination from the planner editor keeps its rows on the live board',
+    JSON.stringify(saved) === '["1053","gtfs:1053","1054","gtfs:1054"]' && rows.length === 2
+      && JSON.stringify(planIds) === '["1053","gtfs:1053","1054","gtfs:1054","BKK_9"]',
+    JSON.stringify({ saved, rows: rows.length, planIds }));
+
+  /* 3. One failed coach_positions call keeps the positions carried over
+     from the last poll; an answer without the bus still clears them. */
+  const keepHas = Lib.hasCompanionService;
+  const keepSvc = Lib.hassService;
+  Lib.hasCompanionService = () => true;
+  Lib._coachPosCache = null;
+  Lib.hassService = async () => { throw new Error('timeout'); };
+  const carried = () => [{ tripId: 'gtfs:1053|x', label: '1053', vehicle: 'coach', dep: at + 300, lat: 47.5, lon: 19.0, gpsCarried: true }];
+  let afterFail = null;
+  let afterEmpty = null;
+  try {
+    afterFail = (await Lib.attachCoachGps({ states: {} }, carried()))[0];
+    Lib._coachPosCache = null;
+    Lib.hassService = async () => ({ response: { vehicles: [] } });
+    afterEmpty = (await Lib.attachCoachGps({ states: {} }, carried()))[0];
+  } finally {
+    Lib.hasCompanionService = keepHas;
+    Lib.hassService = keepSvc;
+    Lib._coachPosCache = null;
+  }
+  check('a failed coach_positions call keeps the carried bus positions; an empty answer clears them',
+    afterFail.lat === 47.5 && afterFail.lon === 19.0 && afterFail.gpsCarried === true
+      && afterEmpty.lat === null && afterEmpty.lon === null,
+    JSON.stringify({ afterFail, afterEmpty }));
+
+  /* 4. Most (or a reset) right after a day or time pick is not undone by
+     the pick's debounce. */
+  const pt = document.createElement('hungarian-transit-stop-card-plan');
+  pt._reloadSafe = () => {};
+  document.body.appendChild(pt);
+  pt.hass = { states: {}, language: 'hu' };
+  pt.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'Astoria', destKey: 'deak ter', destName: 'Deák tér' });
+  pt._reloadSafe = () => {};
+  const pickThen = async (after) => {
+    pt._setWhen('depart');
+    const time = pt.shadowRoot.querySelector('#ptime');
+    time.selectedIndex = Math.min(time.options.length - 1, time.selectedIndex + 3);
+    time.dispatchEvent(new Event('change'));
+    after();
+    await new Promise((r) => setTimeout(r, 450));
+    return pt._when.mode;
+  };
+  const afterNow = await pickThen(() => pt._setWhen('now'));
+  const afterReset = await pickThen(() => pt._resetPlan());
+  pt.remove();
+  check('Most or a reset within the day/time debounce stays on the live board',
+    afterNow === 'now' && afterReset === 'now', JSON.stringify({ afterNow, afterReset }));
+
+  /* 5. A destination list that failed for a bad key loads once the key is
+     fixed (HA hands the new config back through setConfig). */
+  const keepProbe = Lib.probeApiKey;
+  const keepDash = Lib.apiKeyFromDashboard;
+  const keepIdx = Lib.withIndexes;
+  let destCalls = 0;
+  Lib.probeApiKey = async () => ({ ok: true });
+  Lib.apiKeyFromDashboard = async () => '';
+  Lib.withIndexes = () => ({
+    reachableDests: async (key) => {
+      destCalls += 1;
+      if (key === 'BADKEY') { const e = new Error('errApiKeyBad'); e.code = 'errApiKeyBad'; throw e; }
+      return { dests: [{ key: 'deak ter', name: 'Deák tér' }], destRoutes: { 'deak ter': ['BKK_M1'] } };
+    },
+  });
+  const fe = document.createElement('hungarian-transport-card-editor');
+  let afterBad = null;
+  let afterGood = null;
+  try {
+    document.body.appendChild(fe);
+    fe.addEventListener('config-changed', (ev) => { fe.setConfig(ev.detail.config); });
+    fe.hass = { states: {}, language: 'hu' };
+    fe.setConfig({ language: 'hu', apiKey: 'BADKEY', stopId: 'BKK_F00001', stopName: 'Astoria' });
+    await settleTicks(10);
+    fe.setConfig(Object.assign({}, fe._config, { name: 'typing' }));
+    await settleTicks(10);
+    afterBad = { calls: destCalls, dests: fe._dests.length };
+    const inp = fe.querySelector('#apiKey');
+    inp.value = 'GOODKEY';
+    inp.dispatchEvent(new Event('input'));
+    inp.dispatchEvent(new Event('change'));
+    await settleTicks(10);
+    afterGood = { calls: destCalls, dests: fe._dests.length };
+  } finally {
+    fe.remove();
+    Object.assign(Lib, { probeApiKey: keepProbe, apiKeyFromDashboard: keepDash, withIndexes: keepIdx });
+  }
+  check('a destination list that failed for a bad key loads after the key is fixed, not on every keystroke before',
+    afterBad.calls === 1 && afterBad.dests === 0 && afterGood.calls === 2 && afterGood.dests === 1,
+    JSON.stringify({ afterBad, afterGood }));
+
+  /* 6. A look-ahead off the hour grid reads as hours and minutes. */
+  const hz = [100, 200, 90, 180, 45].map((n) => [i18nT('hu', 'plannerHorizon', n), i18nT('en', 'plannerHorizon', n)]);
+  check('a look-ahead reads as hours and minutes, never a fraction',
+    JSON.stringify(hz) === JSON.stringify([['1 óra 40 perc', '1 h 40 min'], ['3 óra 20 perc', '3 h 20 min'],
+      ['1 óra 30 perc', '1 h 30 min'], ['3 óra', '3 h'], ['45 perc', '45 min']]),
+    JSON.stringify(hz));
+
+  /* 8. A pair from older YAML (no destStopId) cannot be swapped: both swap
+     buttons say so instead of doing nothing. */
+  const ps = document.createElement('hungarian-transit-stop-card-plan');
+  ps._reloadSafe = () => {};
+  ps._loadDests = async () => {};
+  document.body.appendChild(ps);
+  ps.hass = { states: {}, language: 'hu' };
+  ps.setConfig({ language: 'hu', stopId: 'BKK_F01111', stopName: 'Kelenföld vasútállomás', destKey: 'deli palyaudvar', destName: 'Déli pályaudvar' });
+  const swapState = () => {
+    const head = ps.shadowRoot.querySelector('.head [data-act="swap"]');
+    const inner = ps.shadowRoot.querySelector('#pswap');
+    return [head, inner].map((b) => (b ? `${b.disabled}/${b.getAttribute('aria-disabled')}` : 'none'));
+  };
+  const oldYaml = swapState();
+  ps.setConfig({ language: 'hu', stopId: 'BKK_F01111', stopName: 'Kelenföld vasútállomás', destKey: 'deli palyaudvar', destName: 'Déli pályaudvar', destStopId: 'BKK_F02222' });
+  const withId = swapState();
+  ps.remove();
+  check('the swap buttons are disabled for a pair without destStopId and enabled with one',
+    JSON.stringify(oldYaml) === '["true/true","true/true"]' && JSON.stringify(withId) === '["false/false","false/false"]',
+    JSON.stringify({ oldYaml, withId }));
+
+  /* 10. A single numeric routeIds in YAML is a filter, not none. */
+  const { normalizeCardConfig: ncc } = await import('./src/config.js');
+  check('a numeric routeIds becomes a one-item list',
+    JSON.stringify(ncc({ routeIds: 109 }).routeIds) === '["109"]' && JSON.stringify(ncc({ routeIds: NaN }).routeIds) === '[]',
+    JSON.stringify(ncc({ routeIds: 109 }).routeIds));
 }
 
 process.exit(failed ? 1 : 0);

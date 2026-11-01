@@ -119,7 +119,11 @@ export const I18N = {
     plannerNow: 'Most',
     plannerDepartAt: 'Indulás',
     plannerArriveBy: 'Érkezés',
-    plannerHorizon: (n) => (n < 60 ? `${n} perc` : `${String(n / 60).replace('.', ',')} óra`),
+    plannerHorizon: (n) => {
+      const m = Math.max(0, Math.round(Number(n) || 0));
+      if (m < 60) return `${m} perc`;
+      return m % 60 ? `${Math.floor(m / 60)} óra ${m % 60} perc` : `${m / 60} óra`;
+    },
     plannerLiveMeta: (horizon) => `élő indulások, ${horizon}`,
     plannerEdit: 'Forrás és cél módosítása',
     plannerEditDone: 'Kész',
@@ -323,7 +327,11 @@ export const I18N = {
     plannerNow: 'Now',
     plannerDepartAt: 'Depart',
     plannerArriveBy: 'Arrive',
-    plannerHorizon: (n) => (n < 60 ? `${n} min` : `${n / 60} h`),
+    plannerHorizon: (n) => {
+      const m = Math.max(0, Math.round(Number(n) || 0));
+      if (m < 60) return `${m} min`;
+      return m % 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m / 60} h`;
+    },
     plannerLiveMeta: (horizon) => `live departures, ${horizon}`,
     plannerEdit: 'Change origin and destination',
     plannerEditDone: 'Done',

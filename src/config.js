@@ -46,7 +46,24 @@ const STRING_KEYS = ['name', 'stopId', 'stopName', 'destKey', 'destName', 'destS
 export function normalizeRouteIds(value) {
   if (Array.isArray(value)) return value.filter((v) => v != null && v !== '').map((v) => String(v).trim()).filter(Boolean);
   if (typeof value === 'string') return value.split(',').map((v) => v.trim()).filter(Boolean);
+  /* `routeIds: 109` in YAML is a number, not "no filter". */
+  if (typeof value === 'number' && Number.isFinite(value)) return [String(value)];
   return [];
+}
+
+/* The route ids a destination pick saves, from the reachable-destination
+   list's routes. In the "all" mode a GTFS (Volán, city) departure is kept by
+   `gtfs:<label>` (departures.js), so a bare label goes in with that prefix
+   as well; FUTÁR (BKK_), Volán stop (volan_) and HKIR ids stay as they are.
+   The planner and both editors save through here. */
+export function destRouteIds(ids, mode) {
+  const out = [];
+  const add = (v) => { if (v && out.indexOf(v) < 0) out.push(v); };
+  normalizeRouteIds(ids).forEach((id) => {
+    add(id);
+    if (mode === 'all' && id.indexOf('gtfs:') !== 0 && !/^(BKK_|volan_|hkir_)/i.test(id)) add('gtfs:' + id);
+  });
+  return out;
 }
 
 export function normalizeCardConfig(config) {

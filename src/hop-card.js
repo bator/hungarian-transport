@@ -2,7 +2,7 @@ import { ASSET_BASE, DEFAULT_MINUTES_AFTER, clampMinutesAfter, configDataKey, de
 import { codedError, errText, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
 import { BKK_HOP_EDITOR } from './tags.js';
-import { THEME_CSS, resolveTheme, themeVars } from './themes.js';
+import { THEME_CSS, THEME_VAR_KEYS, resolveTheme, themeVars } from './themes.js';
 
 let leafletPromise = null;
 
@@ -363,7 +363,7 @@ export class BKKHopCard extends HTMLElement {
     const theme = resolveTheme(cfg.theme, this._themeMode(), cfg.city);
     const vars = themeVars(theme);
     if (vars !== (this._themeVars || '')) {
-      ['--primary-color', '--ht-brand', '--ht-brand-ink', '--ht-brand-stripe'].forEach((k) => this.style.removeProperty(k));
+      THEME_VAR_KEYS.forEach((k) => this.style.removeProperty(k));
       vars.split(';').filter(Boolean).forEach((decl) => {
         const i = decl.indexOf(':');
         this.style.setProperty(decl.slice(0, i), decl.slice(i + 1));
@@ -398,7 +398,7 @@ export class BKKHopCard extends HTMLElement {
       .body { pointer-events: auto; container: ht-deps / inline-size; }
       table { width: 100%; border-collapse: collapse; font-size: 13px; pointer-events: auto; }
       tbody tr, tr.row-clickable { cursor: pointer; }
-      tr.row-clickable:hover td { background: color-mix(in srgb, var(--primary-color) 8%, transparent); }
+      tr.row-clickable:hover td { background: color-mix(in srgb, var(--ht-fill) 8%, transparent); }
       tr + tr td { border-top: 1px solid var(--divider-color); }
       td { padding: 6px 3px; vertical-align: middle; }
       td.icon { width: 20px; color: var(--secondary-text-color); }
@@ -485,7 +485,7 @@ export class BKKHopCard extends HTMLElement {
         tr + tr { border-top: 1px solid var(--divider-color); }
         tr + tr td { border-top: 0; }
         tr.row-clickable:hover td { background: none; }
-        tr.row-clickable:hover { background: color-mix(in srgb, var(--primary-color) 8%, transparent); }
+        tr.row-clickable:hover { background: color-mix(in srgb, var(--ht-fill) 8%, transparent); }
         td { padding: 0; }
         td.icon, td.route, td.flags, td.mapbtn, td.when, td.in { width: auto; }
         td.route { grid-area: 1 / 1; justify-self: center; }
@@ -621,7 +621,9 @@ export class BKKHopCard extends HTMLElement {
       const s = String(v || '').replace('#', '');
       return /^[0-9a-fA-F]{3}$|^[0-9a-fA-F]{6}$/.test(s) ? '#' + s : fallback;
     };
-    const bg = hex(row.color, 'var(--primary-color)');
+    /* No line colour: the card's accent fill and its label colour. */
+    const bg = hex(row.color, '');
+    if (!bg) return 'background:var(--ht-fill, var(--primary-color));color:var(--ht-fill-ink, #fff)';
     const fg = hex(row.textcolor, '#fff');
     return `background:${bg};color:${fg}`;
   }

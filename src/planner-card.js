@@ -1,6 +1,7 @@
-import { DEFAULT_MINUTES_AFTER, MINUTES_AFTER_PRESETS, clampMinutesAfter, configDataKey, departureStillDue, normalizeCardConfig, pad2, tzEpochSec, tzFields, tzShiftYmd } from './config.js';
+import { DEFAULT_MINUTES_AFTER, MINUTES_AFTER_PRESETS, clampMinutesAfter, configDataKey, departureStillDue, destRouteIds, normalizeCardConfig, pad2, tzEpochSec, tzFields, tzShiftYmd } from './config.js';
 import { BKKHopCard, NARROW_ROWS_PX } from './hop-card.js';
 import { t } from './i18n.js';
+import { MIX_SUPPORTS } from './themes.js';
 import { BkkLib } from './lib/core.js';
 import { BKK_PLANNER_EDITOR } from './tags.js';
 
@@ -15,6 +16,9 @@ const MAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright
   + ' &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>';
 /* Day and clock picks wait this long for the next arrow-key step. */
 const PICK_DEBOUNCE_MS = 300;
+/* Share of the HA secondary text colour in the themed title band's
+   secondary text (the rest is the HA text colour). */
+const HEAD_SEC_PCT = 50;
 const SWAP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9,3L5,7H8V14H10V7H13M16,17V10H14V17H11L15,21L19,17H16Z"/></svg>';
 const EDIT_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z"/></svg>';
 const DONE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z"/></svg>';
@@ -405,7 +409,7 @@ export class BKKPlannerCard extends BKKHopCard {
           + `<div class="tl-b">${esc(t(lang, 'plannerWait', leg.waitMin))}</div></li>`);
       }
       const hex = String(leg.color || '').replace('#', '');
-      const tone = /^[0-9a-fA-F]{6}$/.test(hex) ? `#${hex}` : 'var(--primary-color)';
+      const tone = /^[0-9a-fA-F]{6}$/.test(hex) ? `#${hex}` : 'var(--ht-ac)';
       items.push(`<li class="tl-ride" style="--c:${esc(tone)}">`
         + `<span class="tl-t">${esc(this._fmtClock(leg.startMs))}</span>`
         + `<div class="tl-b"><div class="tl-stop">${esc(leg.from || '')}</div>`
@@ -816,6 +820,7 @@ export class BKKPlannerCard extends BKKHopCard {
     const swap = head.querySelector('[data-act="swap"]');
     swap.setAttribute('aria-label', t(lang, 'plannerSwap'));
     swap.setAttribute('title', t(lang, 'plannerSwap'));
+    this._syncSwapState(swap);
     const edit = head.querySelector('[data-act="edit"]');
     edit.classList.toggle('on', this._editRoute);
     edit.setAttribute('aria-expanded', this._editRoute ? 'true' : 'false');
@@ -922,8 +927,17 @@ export class BKKPlannerCard extends BKKHopCard {
       }
       /* A picked pair: origin → destination as the title, its look-ahead or
          time under it, swap and edit at the right. */
-      ha-card.is-planner {
-        --ht-stripe: color-mix(in srgb, var(--primary-text-color, #000) 6%, transparent);
+      ha-card.is-planner { --ht-stripe: rgba(127, 127, 127, 0.1); }
+      /* On a themed band the HA secondary text is too faint: half of it is
+         the text colour there (the title band's own contrast test). */
+      ha-card.is-planner.themed .head { --ht-head-sec: var(--primary-text-color); }
+      ${MIX_SUPPORTS} {
+        ha-card.is-planner {
+          --ht-stripe: color-mix(in srgb, var(--primary-text-color, #000) 6%, transparent);
+        }
+        ha-card.is-planner.themed .head {
+          --ht-head-sec: color-mix(in srgb, var(--secondary-text-color) ${HEAD_SEC_PCT}%, var(--primary-text-color));
+        }
       }
       ha-card.is-planner .head.route-head {
         display: flex; align-items: center; gap: 8px; cursor: default;
@@ -932,16 +946,17 @@ export class BKKPlannerCard extends BKKHopCard {
       .head .rt { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
       .head .rt-a { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 6px; font-size: 19px; line-height: 1.2; }
       .head .rt-n { min-width: 0; overflow-wrap: anywhere; }
-      .head .rt-arrow { color: var(--secondary-text-color); font-weight: 500; }
-      .head .rt-meta { font-size: 12px; font-weight: 500; letter-spacing: 0; color: var(--secondary-text-color); }
+      .head .rt-arrow { color: var(--ht-head-sec, var(--secondary-text-color)); font-weight: 500; }
+      .head .rt-meta { font-size: 12px; font-weight: 500; letter-spacing: 0; color: var(--ht-head-sec, var(--secondary-text-color)); }
       .head .rt-btn {
         flex: 0 0 auto; width: 34px; height: 34px; border-radius: 50%; padding: 0; cursor: pointer;
         display: flex; align-items: center; justify-content: center; border: 0;
-        background: var(--ht-stripe); color: var(--secondary-text-color);
+        background: var(--ht-stripe); color: var(--ht-head-sec, var(--secondary-text-color));
       }
+      .head .rt-btn:disabled { opacity: .4; cursor: default; }
       .head .rt-btn svg { width: 18px; height: 18px; fill: currentColor; }
-      .head .rt-btn.on { background: var(--primary-color); color: var(--text-primary-color, #fff); }
-      .head .rt-btn:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 1px; }
+      .head .rt-btn.on { background: var(--ht-fill); color: var(--ht-fill-ink); }
+      .head .rt-btn:focus-visible { outline: 2px solid var(--ht-ac); outline-offset: 1px; }
       .head .rt-btn[data-act="swap"]:active svg { transform: rotate(180deg); transition: transform .2s; }
       .plan.folded .route { display: none; }
       ha-card.is-planner .err { margin: 8px 2px 0; }
@@ -963,7 +978,7 @@ export class BKKPlannerCard extends BKKHopCard {
       ha-card.is-planner tr + tr td { border-top: 0; }
       ha-card.is-planner tbody tr:nth-child(even) td { background: var(--ht-stripe); }
       ha-card.is-planner tbody tr.row-clickable:hover td {
-        background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+        background: color-mix(in srgb, var(--ht-fill) 10%, transparent);
       }
       ha-card.is-planner td:first-child { border-radius: 10px 0 0 10px; padding-left: 8px; }
       ha-card.is-planner td:last-child { border-radius: 0 10px 10px 0; padding-right: 8px; }
@@ -976,7 +991,7 @@ export class BKKPlannerCard extends BKKHopCard {
         ha-card.is-planner tbody tr.row-clickable:hover td { background: transparent; }
         ha-card.is-planner tbody tr:nth-child(even) { background: var(--ht-stripe); }
         ha-card.is-planner tbody tr.row-clickable:hover {
-          background: color-mix(in srgb, var(--primary-color) 10%, transparent);
+          background: color-mix(in srgb, var(--ht-fill) 10%, transparent);
         }
       }
 
@@ -989,8 +1004,8 @@ export class BKKPlannerCard extends BKKHopCard {
       }
       .rail { display: flex; flex-direction: column; align-items: center; padding: 30px 0 18px; }
       .rail .dot { width: 12px; height: 12px; border-radius: 50%; box-sizing: border-box; flex: 0 0 auto; }
-      .rail .dot.from { background: var(--primary-color); }
-      .rail .dot.to { border: 3px solid var(--primary-color); background: var(--card-background-color, #fff); }
+      .rail .dot.from { background: var(--ht-ac); }
+      .rail .dot.to { border: 3px solid var(--ht-ac); background: var(--card-background-color, #fff); }
       .rail .line {
         flex: 1 1 auto; width: 0; margin: 4px 0;
         border-left: 2px dotted var(--secondary-text-color); opacity: .55;
@@ -1008,7 +1023,7 @@ export class BKKPlannerCard extends BKKHopCard {
       }
       .plan input:focus, .plan select:focus, .plan .picked:focus-visible,
       .seg button:focus-visible, #pswap:focus-visible, .itin-head:focus-visible {
-        outline: 2px solid var(--primary-color); outline-offset: 1px;
+        outline: 2px solid var(--ht-ac); outline-offset: 1px;
       }
       .plan input.compact-hide { display: none; }
       .plan .picked {
@@ -1023,6 +1038,7 @@ export class BKKPlannerCard extends BKKHopCard {
         border: 0; background: var(--ht-stripe);
         color: var(--secondary-text-color);
       }
+      #pswap:disabled { opacity: .4; cursor: default; }
       #pswap svg { width: 22px; height: 22px; fill: currentColor; }
       #pswap:active { transform: rotate(180deg); transition: transform .2s; }
 
@@ -1049,7 +1065,7 @@ export class BKKPlannerCard extends BKKHopCard {
       .plan .horizon [hidden] { display: none; }
       .plan #preset {
         flex: 0 0 auto; margin-left: auto; border: 0; background: transparent; cursor: pointer; padding: 6px 4px;
-        font: inherit; font-size: 13px; font-weight: 700; color: var(--primary-color);
+        font: inherit; font-size: 13px; font-weight: 700; color: var(--ht-ac);
       }
 
       .plan .suggest { margin-top: 6px; display: flex; flex-direction: row; flex-wrap: wrap; gap: 6px; }
@@ -1066,7 +1082,7 @@ export class BKKPlannerCard extends BKKHopCard {
         display: inline-flex; align-items: center; justify-content: center;
         width: 16px; height: 16px; border-radius: 50%;
         font-size: 9px; font-weight: 800; line-height: 1;
-        background: var(--primary-color); color: var(--text-primary-color, #fff);
+        background: var(--ht-fill); color: var(--ht-fill-ink);
       }
       .plan .suggest-list { display: contents; }
       .plan .list { max-height: 220px; overflow: auto; margin-top: 4px; }
@@ -1100,7 +1116,7 @@ export class BKKPlannerCard extends BKKHopCard {
       .itin-cols span:last-child { text-align: right; }
       .itin { border-radius: 10px; }
       .itins .itin:nth-child(even) { background: var(--ht-stripe); }
-      .itins .itin.open { background: transparent; box-shadow: inset 0 0 0 2px var(--primary-color); }
+      .itins .itin.open { background: transparent; box-shadow: inset 0 0 0 2px var(--ht-ac); }
       .itin-head {
         width: 100%; text-align: left; border: 0; background: transparent; color: inherit; font: inherit;
         padding: 10px 8px; cursor: pointer; border-radius: 10px;
@@ -1165,10 +1181,10 @@ ${this._stopPinCss()}
       .journey-plan #pmap {
         margin-top: 10px; border: 0; cursor: pointer; font: inherit; font-size: 13px; font-weight: 700;
         border-radius: 999px; padding: 8px 14px;
-        background: var(--primary-color); color: var(--text-primary-color, #fff);
+        background: var(--ht-fill); color: var(--ht-fill-ink);
       }
       .journey-plan.j-map-only #pmap {
-        margin: 0; height: 30px; padding: 0 12px; background: transparent; color: var(--primary-color);
+        margin: 0; height: 30px; padding: 0 12px; background: transparent; color: var(--ht-ac);
         border: 1px solid var(--divider-color);
       }
 
@@ -1189,7 +1205,7 @@ ${this._stopPinCss()}
       .tl .tl-walk .tl-b, .tl .tl-wait .tl-b { color: var(--secondary-text-color); font-size: 13px; }
       .tl .tl-walk ha-icon { vertical-align: -3px; margin-right: 2px; }
       .tl .tl-end .tl-b::before {
-        top: 3px; bottom: auto; width: 10px; height: 10px; left: -3px; border: 3px solid var(--primary-color);
+        top: 3px; bottom: auto; width: 10px; height: 10px; left: -3px; border: 3px solid var(--ht-ac);
         border-radius: 50%; box-sizing: border-box; background: var(--card-background-color, #fff);
       }
       .tl .tl-end .tl-b { padding-bottom: 0; }
@@ -1308,11 +1324,13 @@ ${this._stopPinCss()}
       clearTimeout(this._pickTimer);
       this._pickTimer = setTimeout(() => {
         this._pickTimer = null;
+        /* The pickers only show for Indulás / Érkezés. */
+        if (!this._timed()) return;
         const ms = this._whenFromParts(day.value, time.value);
         if (!ms) return;
-        const cur = this._when.at ? this._whenParts(this._when.at) : null;
-        if (cur && cur.ymd === day.value && String(cur.min) === time.value && this._timed()) return;
-        this._applyWhen({ mode: this._when.mode === 'now' ? 'depart' : this._when.mode, at: ms });
+        const cur = this._whenParts(this._when.at);
+        if (cur.ymd === day.value && String(cur.min) === time.value) return;
+        this._applyWhen({ mode: this._when.mode, at: ms });
       }, PICK_DEBOUNCE_MS);
     };
     if (day && time) {
@@ -1338,6 +1356,9 @@ ${this._stopPinCss()}
   }
 
   _applyWhen(when) {
+    /* A day or time pick still waiting out its debounce belongs to the old
+       choice: Most or a reset after it must not be undone 300 ms later. */
+    if (this._pickTimer) { clearTimeout(this._pickTimer); this._pickTimer = null; }
     this._when = when;
     this._journeyKey = '';
     this._journey = null;
@@ -1535,6 +1556,7 @@ ${this._stopPinCss()}
     if (swap) {
       swap.setAttribute('aria-label', t(lang, 'plannerSwap'));
       swap.setAttribute('title', t(lang, 'plannerSwap'));
+      this._syncSwapState(swap);
     }
     if (reset) reset.textContent = t(lang, 'plannerReset');
     this._paintMinutesAfter();
@@ -1572,11 +1594,24 @@ ${this._stopPinCss()}
     sel.value = String(current);
   }
 
+  /* A swap needs the destination's stop id: a pair from older YAML (no
+     destStopId) cannot be turned round, so its swap buttons are off. */
+  _canSwap() {
+    const cfg = this._config || {};
+    return !!(cfg.stopId && cfg.destStopId && cfg.destName);
+  }
+
+  _syncSwapState(btn) {
+    const off = !this._canSwap();
+    btn.disabled = off;
+    btn.setAttribute('aria-disabled', off ? 'true' : 'false');
+  }
+
   _swapPlan() {
     const cfg = this._config || {};
     const newOriginId = cfg.destStopId;
     const newOriginName = cfg.destName;
-    if (!cfg.stopId || !newOriginId || !newOriginName) return;
+    if (!this._canSwap()) return;
     this._config = Object.assign({}, cfg, {
       stopId: newOriginId,
       stopName: newOriginName,
@@ -1604,6 +1639,7 @@ ${this._stopPinCss()}
   }
 
   _resetPlan() {
+    if (this._pickTimer) { clearTimeout(this._pickTimer); this._pickTimer = null; }
     this._when = { mode: 'now', at: 0 };
     this._journeys = [];
     this._dests = [];
@@ -1756,18 +1792,9 @@ ${this._stopPinCss()}
   _idsForDest(keys) {
     const raw = [];
     (Array.isArray(keys) ? keys : [keys]).forEach((key) => {
-      (this._destRoutes[key] || []).forEach((id) => { if (raw.indexOf(id) < 0) raw.push(id); });
+      (this._destRoutes[key] || []).forEach((id) => raw.push(id));
     });
-    const out = [];
-    raw.forEach((id) => {
-      if (!id) return;
-      out.push(id);
-      const s = String(id);
-      if (s.indexOf('gtfs:') !== 0 && !/^BKK_/i.test(s) && !/^volan_/i.test(s) && !/^hkir_/i.test(s)) {
-        out.push('gtfs:' + s);
-      }
-    });
-    return out;
+    return destRouteIds(raw, 'all');
   }
 
   async _searchDest(q) {

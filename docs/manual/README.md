@@ -588,4 +588,5 @@ minutesAfter: 180
 
 The planner takes the same `language`, `theme`, `name`, `apiKey` and `minutesAfter`
 options. Origin and destination can be set in the editor or left to the
-card.
+card. The planner spans every operator, so its editor does not offer
+*By operator*: pick one operator's colours or keep Home Assistant's.

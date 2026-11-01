@@ -608,4 +608,6 @@ minutesAfter: 180
 
 A tervező ugyanazokat a `language`, `theme`, `name`, `apiKey` és `minutesAfter`
 kulcsokat fogadja. A forrást és a célt a szerkesztőben is megadhatod, vagy
-rábízhatod a kártyára.
+rábízhatod a kártyára. A tervező minden szolgáltatót átfog, ezért a
+szerkesztője nem kínálja a *Szolgáltató szerint* témát: válassz egy
+szolgáltatót, vagy maradj a Home Assistant témájánál.

@@ -1,5 +1,6 @@
 import { BKKHopCardEditor } from './editor.js';
 import { t } from './i18n.js';
+import { THEME_IDS, THEME_OPERATOR } from './themes.js';
 
 export class BKKPlannerCardEditor extends BKKHopCardEditor {
   _mode() { return 'all'; }
@@ -7,6 +8,13 @@ export class BKKPlannerCardEditor extends BKKHopCardEditor {
   /* The planner's pair changes in the card itself: an "A → B" name baked
      in here would be wrong after the first pick there. Its title is its own. */
   _autoName() { return false; }
+
+  /* The planner spans every operator, so `operator` would keep Home
+     Assistant's look there: it is not offered (a YAML `operator` shows as
+     the HA theme). */
+  _themeIds() {
+    return THEME_IDS.filter((id) => id !== THEME_OPERATOR);
+  }
 
   setConfig(config) {
     super.setConfig(config);
