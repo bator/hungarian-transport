@@ -580,6 +580,43 @@ részét. Röviden:
 Egy sikertelen frissítés megtartja az előző menetrendet, és értesítést küld
 (lásd [When an update fails](../timetables.md#when-an-update-fails)).
 
+### 9.1 Menetrend-szenzorok
+
+Az integráció *Hungarian transport* eszközén négy szenzor mutatja, melyik
+menetrendet használják a kártyák:
+
+- **MÁV útvonal-index**: a térképek MÁV menetrendjének dátuma, a forrása
+  (`daily`, `local` vagy `release`), a telepítés ideje, a vonatok és a
+  vonalak száma.
+- **Volán menetrend**: a Volán menetrend dátuma, a járatok és a megállók
+  száma és az index készítésének ideje.
+- **Városi menetrendek**: mikor készültek a helyi menetrendek, a
+  szolgáltatók és a járatok számával.
+- **Napi MÁV ellenőrzés**: mikor futott utoljára a napi MÁV index, az
+  eredménye (`installed`, `up_to_date`, `failed`, `disabled` …) és a
+  következő futás.
+
+Egy entitáskártya hozzájuk:
+
+```yaml
+type: entities
+title: Menetrendek
+entities:
+  - sensor.hungarian_transport_mav_route_index
+  - sensor.hungarian_transport_volan_timetable
+  - entity: sensor.hungarian_transport_city_timetables
+    format: relative
+  - entity: sensor.hungarian_transport_daily_mav_check
+    format: relative
+  - type: attribute
+    entity: sensor.hungarian_transport_daily_mav_check
+    attribute: result
+    name: Napi MÁV ellenőrzés eredménye
+```
+
+Az összes attribútum leírása:
+[Timetable sensors](../timetables.md#timetable-sensors).
+
 ---
 
 ## 10. Hibaelhárítás
