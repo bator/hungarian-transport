@@ -10402,6 +10402,17 @@ check('a named train does not match a headsign it only begins (Tisza, Tisza√∫jv√
     gtfsRow.travel === 51 && gtfsRow.travelSched === 50 && gtfsRow.delay === 240,
     JSON.stringify({ travel: gtfsRow.travel, travelSched: gtfsRow.travelSched }));
 
+  /* The feed's predicted time wins over its delay field for the departure;
+     the ride time is counted from that same departure. */
+  {
+    const s0 = 1793605800;
+    const row = { tripId: 'gtfs:rt-time', sched: s0, dep: s0, delay: 0, travel: 30 };
+    Lib.applyRealtimeRow(row, { delay: 60, time: s0 + 120, dest_delay: 180, approx: false }, s0);
+    check('the ride time follows the departure the row shows, not the delay field',
+      row.dep === s0 + 120 && row.delay === 120 && row.travel === 31,
+      JSON.stringify({ dep: row.dep - s0, delay: row.delay, travel: row.travel }));
+  }
+
   /* The same trips towards another stop are another answer (dest_delay). */
   calls.length = 0;
   Lib._rtCache.clear();

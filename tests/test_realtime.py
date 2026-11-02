@@ -264,6 +264,91 @@ def test_canceled_trip() -> None:
     assert hit["canceled"] is True and hit["delay"] is None
 
 
+def _stu(stop: bytes, seq: int, delay: int | None = None, rel: int = 0, when: int | None = None) -> bytes:
+    """A StopTimeUpdate with its departure event (delay, time; small values)."""
+    event = (b"\x08" + bytes([delay]) if delay is not None else b"") + (
+        b"\x10" + _varint(when) if when is not None else b""
+    )
+    return _ld(2, b"\x08" + bytes([seq]) + (_ld(3, event) if event else b"") + _ld(4, stop) + (
+        b"\x28" + bytes([rel]) if rel else b""
+    ))
+
+
+def _varint(value: int) -> bytes:
+    out = b""
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out += bytes([byte | 0x80])
+        else:
+            return out + bytes([byte])
+
+
+def _one_trip(*updates: bytes, trip_rel: int = 0, timestamp: int = NOW) -> list:
+    header = _ld(1, b"\x0a\x032.0" + b"\x18" + _varint(timestamp))
+    desc = _ld(1, _ld(1, b"T1") + (b"\x20" + bytes([trip_rel]) if trip_rel else b""))
+    feed = realtime.decode_feed(header + _ld(2, _ld(1, b"e") + _ld(3, desc + b"".join(updates))))
+    return [(realtime.Source("tu", "", "", ""), feed, None, None)]
+
+
+def test_a_skipped_boarding_stop_has_no_delay_and_says_so() -> None:
+    # The bus is 10 minutes late at A but passes B by (a detour): B gets
+    # neither A's delay nor the current-delay estimate.
+    loaded = _one_trip(_stu(b"A", 1, 120), _stu(b"B", 2, rel=1), _stu(b"C", 3, 90))
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "C"], **{"from": 1, "to": 2})
+    assert (hit["delay"], hit["approx"], hit["skipped"]) == (None, False, True)
+    assert hit["dest_delay"] == 90
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B"], **{"from": 0, "to": 1})
+    assert (hit["delay"], hit["dest_delay"], hit["skipped"]) == (120, None, True)
+    # A skipped stop before a boarding stop the feed does not know is passed
+    # over: the current delay, as before.
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["B", "X"], **{"from": 1})
+    assert (hit["delay"], hit["approx"], hit["skipped"]) == (120, True, False)
+
+
+def test_no_data_at_the_boarding_stop_is_no_estimate_either() -> None:
+    loaded = _one_trip(_stu(b"A", 1, 120), _stu(b"B", 2, rel=2))
+    for stops, frm in ((["A", "B"], 1), (["A", "B", "X"], 2)):
+        hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=stops, **{"from": frm})
+        assert hit is None or (hit["delay"], hit["approx"]) == (None, False)
+
+
+def test_a_loop_trip_takes_each_stops_own_call() -> None:
+    # A ... B ... A: the second A is the alighting stop, 7 minutes late.
+    loaded = _one_trip(_stu(b"A", 1, 0, when=1000), _stu(b"B", 2, 60), _stu(b"A", 3, 120, when=2000))
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], **{"from": 1, "to": 2})
+    assert (hit["delay"], hit["dest_delay"], hit["dest_time"]) == (60, 120, 2000)
+    # Boarding at the loop's last call.
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], **{"from": 2})
+    assert (hit["delay"], hit["time"]) == (120, 2000)
+    # A feed that dropped the calls already served still finds B.
+    loaded = _one_trip(_stu(b"B", 2, 60), _stu(b"A", 3, 120))
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], **{"from": 1, "to": 2})
+    assert (hit["delay"], hit["dest_delay"]) == (60, 120)
+
+
+def test_deleted_trip_is_canceled() -> None:
+    loaded = _one_trip(_stu(b"S1", 1, 60), trip_rel=7)
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["S1"], **{"from": 0})
+    assert hit["canceled"] is True and hit["delay"] is None
+
+
+def test_a_feed_with_too_many_stop_updates_is_refused(monkeypatch) -> None:
+    monkeypatch.setattr(realtime, "MAX_FEED_STOP_UPDATES", 3)
+    with pytest.raises(realtime.RtDecodeError):
+        _one_trip(*(_stu(b"S", i, 0) for i in range(1, 5)))
+    assert len(_one_trip(*(_stu(b"S", i, 0) for i in range(1, 4)))[0][1].trip_updates["T1"].stops) == 3
+
+
+def test_a_stalled_feed_is_not_live() -> None:
+    feed = _one_trip(_stu(b"S1", 1, 60), timestamp=NOW - realtime.MAX_FEED_AGE - 1)[0][1]
+    assert realtime._fresh(feed, NOW) is None
+    assert realtime._fresh(feed, NOW - 2) is feed
+    feed.timestamp = None
+    assert realtime._fresh(feed, NOW) is feed
+
+
 # ---------------------------------------------------------------- the service
 
 

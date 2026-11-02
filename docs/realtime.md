@@ -148,9 +148,17 @@ trips:
     dest_delay: 181     # at stops[to]
     dest_time: null
     approx: false       # true: the vehicle's current delay, not at your stop
-    canceled: false
+    canceled: false     # the trip is CANCELED or DELETED in the feed
+    skipped: false      # true: the trip passes stops[from] or stops[to] by
     vehicle: {lat: 47.19302, lon: 18.403648, bearing: 327.0, speed: 1.9, timestamp: 1793605748, stop_id: hkir_665955_2, status: 1}
 ```
+
+A stop without an update of its own takes the nearest earlier stop's delay.
+A stop the feed marks SKIPPED has no delay (`skipped`), and one marked
+NO_DATA (or after a NO_DATA stop) has none either, not even the approximate
+one. A stop a loop trip calls at twice is matched in trip order. A feed whose
+header timestamp is more than 15 minutes old is a stalled publisher, not live
+data: it answers as unavailable.
 
 A trip may also be asked by `route` and `start` (minutes after the service
 day's midnight, up to 2880) or by `train` (digits). Up to 40 trips of up to
@@ -189,6 +197,7 @@ take about 0.3 s on a laptop.
 - Debrecen and GYSEV as city operators depend on the static feed added
   elsewhere: mapped by the ids `debrecen` (menetbrand's slug; `dkv`, the
   Transitous name, is an alias) and `gysev`.
-- A trip cancelled in the feed is reported (`canceled`) but the card does not
-  yet strike it through.
+- A trip cancelled in the feed (`canceled`) or a stop it skips (`skipped`) is
+  reported, but the card does not yet strike it through: it shows the
+  timetable time there.
 - The planner card does not use the feeds yet.

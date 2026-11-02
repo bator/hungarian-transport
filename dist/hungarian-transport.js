@@ -6799,7 +6799,8 @@ Object.assign(BkkLib, {
       const destDelay = Number(hit.dest_delay);
       if (row.travel != null && hit.dest_delay != null && Number.isFinite(destDelay) && !hit.approx) {
         if (row.travelSched == null) row.travelSched = Number(row.travel);
-        const travel = Math.round(row.travelSched + (destDelay - delay) / 60);
+        const boardDelay = sched > 0 ? row.delay : delay;
+        const travel = Math.round(row.travelSched + (destDelay - boardDelay) / 60);
         if (travel > 0) row.travel = travel;
       }
       changed = true;

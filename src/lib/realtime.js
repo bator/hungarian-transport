@@ -202,7 +202,10 @@ Object.assign(BkkLib, {
         /* From the timetable's ride time, so a row answered twice in one
            poll (or carried to the next) is not shifted twice. */
         if (row.travelSched == null) row.travelSched = Number(row.travel);
-        const travel = Math.round(row.travelSched + (destDelay - delay) / 60);
+        /* Against the departure the row shows (the feed's time, when it
+           gave one), not the delay field beside it. */
+        const boardDelay = sched > 0 ? row.delay : delay;
+        const travel = Math.round(row.travelSched + (destDelay - boardDelay) / 60);
         if (travel > 0) row.travel = travel;
       }
       changed = true;
