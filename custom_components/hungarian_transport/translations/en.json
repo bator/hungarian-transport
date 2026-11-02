@@ -67,6 +67,20 @@
     "rebuild_mav_index": {
       "name": "Rebuild MÁV route index",
       "description": "Build the train route index from /config/hungarian-transport/mav-gtfs.zip and check every trip against it."
+    },
+    "realtime": {
+      "name": "Get live delays and positions",
+      "description": "Look up trips in the operator's public GTFS-Realtime feed: the delay at the card's stops and the vehicle's position. Used by the dashboard card for Volán, city and MÁV departures. The feed is fetched only while a card asks for it, at most once a minute. When nothing can be looked up, the response has no trips and an error: rt_no_feed (the operator has no realtime feed in this integration) or rt_unavailable (its feed cannot be reached now; the next refresh tries again).",
+      "fields": {
+        "feed": {
+          "name": "Operator",
+          "description": "The operator's id in the timetables: volan, a city network (veszprem, volan-szeged) or mav."
+        },
+        "trips": {
+          "name": "Trips",
+          "description": "Up to 40 trips, each with a key returned in the response and trip_id, route and start (minutes past the service day's start), train (train number), date (YYYYMMDD), stops (the trip's stop ids in order) and from and to (indexes into stops)."
+        }
+      }
     }
   },
   "exceptions": {

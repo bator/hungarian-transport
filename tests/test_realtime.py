@@ -1,0 +1,468 @@
+"""GTFS-Realtime decoding, matching, caching and the realtime service.
+
+The .pb fixtures are real feeds of 2026-11-02 07:49 UTC (jbb.ghsq.de),
+trimmed to a few trips with their vehicle descriptors (plates) and entity
+ids removed; mav-static.zip is three rows of that day's MÁV trips.txt plus
+one made-up trip with a reused train number.
+"""
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+import logging
+from pathlib import Path
+import re
+import zipfile
+
+import pytest
+import voluptuous as vol
+
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
+from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+import custom_components.hungarian_transport as integration
+from custom_components.hungarian_transport import realtime
+from custom_components.hungarian_transport.const import DOMAIN, SERVICE_REALTIME
+
+FIX = Path(__file__).parent / "fixtures" / "realtime"
+NOW = 1793605800  # 2026-11-02 07:50:00 UTC
+FROZEN = "2026-11-02T07:50:00+00:00"
+J = "https://jbb.ghsq.de/gtfs/hu/"
+SZFV = J + "hkir_hkir_V-14827/"
+MAV_STATIC = "https://jbb.ghsq.de/gtfs/hu-m%C3%A1v_szem%C3%A9lysz%C3%A1ll%C3%ADt%C3%A1si_zrt..gtfs.zip"
+GYSEV_STATIC = "https://jbb.ghsq.de/gtfs/hu-gysev_zrt..gtfs.zip"
+
+
+def _pb(name: str) -> bytes:
+    return (FIX / f"{name}.pb").read_bytes()
+
+
+def _feed(name: str, prefix: str) -> realtime.Feed:
+    return realtime.decode_feed(_pb(name), prefix)
+
+
+# ---------------------------------------------------------------- decoding
+
+
+def test_decodes_trip_updates_with_negative_delays() -> None:
+    feed = _feed("volan-szekesfehervar-trip-updates", "hkir:")
+    assert feed.timestamp == 1793605797
+    tu = feed.trip_updates["hkir_H6192_619-1"]
+    assert tu.start_date == "20261102"
+    first = tu.stops[0]
+    # Arrived five minutes early, leaves 8 s late: the ten-byte negative varint.
+    assert (first.stop_id, first.seq, first.arr_delay, first.dep_delay) == ("hkir_665935_1", 2, -299, 8)
+    assert len(tu.stops) == 12
+    assert len(feed.trip_updates) == 3 and not feed.vehicles
+
+
+def test_decodes_vehicle_positions() -> None:
+    feed = _feed("volan-szekesfehervar-vehicle-positions", "hkir:")
+    v = feed.vehicles["hkir_H6112_607-1"]
+    assert v.route_id == "hkir_V-14827-H-3-12"
+    assert v.lat == pytest.approx(47.19302, abs=1e-5) and v.lon == pytest.approx(18.40365, abs=1e-5)
+    assert v.bearing == 327.0 and v.timestamp == 1793605748
+    assert (v.stop_id, v.status) == ("hkir_665955_2", 1)
+
+
+def test_fixtures_carry_no_vehicle_plates() -> None:
+    for path in FIX.glob("*.pb"):
+        assert not re.search(rb"[A-Z]{3}\d{3}", path.read_bytes()), path.name
+
+
+@pytest.mark.parametrize(
+    "data",
+    [b"", b"\x0a\x05abc", b"\x12\xff\xff\xff\xff\x0f", b"\x0b", b"<html>not protobuf</html>", b"\x80" * 12],
+)
+def test_garbage_is_a_decode_error(data: bytes) -> None:
+    with pytest.raises(realtime.RtDecodeError):
+        realtime.decode_feed(data)
+
+
+def test_truncated_feed_is_a_decode_error() -> None:
+    data = _pb("volan-trip-updates")
+    with pytest.raises(realtime.RtDecodeError):
+        realtime.decode_feed(data[: len(data) - 7], "hkir:")
+
+
+def _ld(num: int, body: bytes) -> bytes:
+    return bytes([(num << 3) | 2, len(body)]) + body
+
+
+def test_alerts_and_deleted_entities() -> None:
+    header = _ld(1, b"\x0a\x032.0")
+    text = _ld(1, _ld(1, b"Detour") + _ld(2, b"en")) + _ld(1, _ld(1, "Terelés".encode()) + _ld(2, b"hu"))
+    informed = _ld(5, _ld(2, b"hkir:R1") + _ld(5, b"hkir:S1"))
+    alert = _ld(5, informed + _ld(10, text))
+    deleted = _ld(2, _ld(1, b"x") + b"\x10\x01" + _ld(4, _ld(1, _ld(1, b"hkir:T")) + _ld(2, b"\x0d\x00\x00\x3c\x42\x15\x00\x00\x98\x41")))
+    feed = realtime.decode_feed(header + _ld(2, _ld(1, b"a") + alert) + deleted, "hkir:")
+    (a,) = feed.alerts
+    assert (a.header, a.routes, a.stops) == ("Terelés", ["R1"], ["S1"])
+    assert not feed.vehicles
+
+
+def test_train_numbers_from_static() -> None:
+    trains = realtime.train_numbers_from_static((FIX / "mav-static.zip").read_bytes(), "1:")
+    assert trains["822"] == ["35700507"]
+    assert trains["4272"] == ["36016774", "99999999"]
+    assert trains["9442"] == ["36166415"]
+
+
+# ---------------------------------------------------------------- feed table
+
+
+def test_feed_table_covers_the_operators() -> None:
+    table = realtime.load_feed_table()
+    doc = json.loads(realtime.FEEDS_FILE.read_text(encoding="utf-8"))
+    volan_local = [k for k in doc["feeds"] if k.startswith("volan-")]
+    assert len(volan_local) == 59
+    for fid in ("volan", "paks", "veszprem", "miskolc", "debrecen", "oroshaza", "mav", "gysev", "dkv"):
+        assert fid in table, fid
+    assert table["dkv"] is table["debrecen"]
+    assert table["volan"].trip_updates_interval == 120
+    for cfg in table.values():
+        assert cfg.interval >= realtime.MIN_INTERVAL
+        for src in cfg.sources:
+            for url in (src.trip_updates, src.vehicle_positions, src.static):
+                assert not url or url.startswith("https://")
+    assert table["mav"].match == {"train"}
+    assert {s.static for s in table["mav"].sources} == {MAV_STATIC, GYSEV_STATIC}
+
+
+def test_bad_feed_table_entries_are_skipped(caplog) -> None:
+    table = realtime.parse_feed_table(
+        {
+            "feeds": {
+                "ok": {"sources": [{"trip_updates": "https://x/tu.pb", "prefix": "a:"}], "match": ["trip"], "interval": 5},
+                "Bad Id": {"sources": [{"trip_updates": "https://x"}], "match": ["trip"]},
+                "plain": {"sources": [{"trip_updates": "http://x/tu.pb"}], "match": ["trip"]},
+                "nomatch": {"sources": [{"trip_updates": "https://x/tu.pb"}], "match": ["guess"]},
+            },
+            "aliases": {"alias": "ok", "dangling": "missing"},
+        }
+    )
+    assert set(table) == {"ok", "alias"}
+    # Never more often than MIN_INTERVAL, whatever the table says.
+    assert table["ok"].interval == realtime.MIN_INTERVAL
+    assert caplog.text.count("Skipping realtime feed") == 3
+
+
+# ---------------------------------------------------------------- matching
+
+
+def _loaded(name: str, prefix: str, trains: dict | None = None, static: str = ""):
+    src = realtime.Source("tu", "vp", prefix, static)
+    return [(src, _feed(f"{name}-trip-updates", prefix), _feed(f"{name}-vehicle-positions", prefix), trains)]
+
+
+def _cfg(*match: str) -> realtime.FeedConfig:
+    return realtime.FeedConfig("t", (), frozenset(match), 60, 60)
+
+
+def _answer(cfg, loaded, **req):
+    req.setdefault("key", "k")
+    return realtime._answer(cfg, loaded, req, NOW)
+
+
+def test_trip_id_match_gives_the_delay_at_the_boarding_and_alighting_stops() -> None:
+    loaded = _loaded("volan-szekesfehervar", "hkir:")
+    # The card sends parent stop ids; the feed has their platforms (_1, _2, _19).
+    hit = _answer(
+        _cfg("trip"), loaded, trip_id="hkir_H6112_607-1",
+        stops=["hkir_666065", "hkir_666007", "hkir_666083", "hkir_666060", "hkir_665955", "hkir_666225"],
+        **{"from": 4, "to": 5},
+    )
+    assert hit["trip_id"] == "hkir_H6112_607-1"
+    assert (hit["delay"], hit["dest_delay"], hit["approx"]) == (190, 181, False)
+    assert hit["vehicle"]["lat"] == pytest.approx(47.19302, abs=1e-5)
+    assert hit["vehicle"]["timestamp"] == 1793605748
+
+
+def test_a_stop_without_its_own_update_takes_the_earlier_stops_delay() -> None:
+    loaded = _loaded("volan-szekesfehervar", "hkir:")
+    hit = _answer(
+        _cfg("trip"), loaded, trip_id="hkir_H6112_607-1",
+        stops=["hkir_666060", "hkir_999999"], **{"from": 1},
+    )
+    assert (hit["delay"], hit["approx"]) == (119, False)
+
+
+def test_an_implausible_delay_is_dropped_but_the_position_stays() -> None:
+    loaded = _loaded("volan-szekesfehervar", "hkir:")
+    # 611-1 reports -5108 s (85 minutes early) everywhere: a vehicle on the
+    # wrong trip, not a prediction.
+    hit = _answer(_cfg("trip"), loaded, trip_id="hkir_H6112_611-1", stops=["hkir_666065"], **{"from": 0})
+    assert hit["delay"] is None and hit["vehicle"] is not None
+
+
+def test_prefixed_and_unknown_trip_ids() -> None:
+    loaded = _loaded("volan", "hkir:")
+    assert _answer(_cfg("trip"), loaded, trip_id="hkir:hkir_3624_6-2")["trip_id"] == "hkir_3624_6-2"
+    assert _answer(_cfg("trip"), loaded, trip_id="hkir_0000_0-0") is None
+    # Another service day is another run.
+    assert _answer(_cfg("trip"), loaded, trip_id="hkir_3624_6-2", date="20261103") is None
+
+
+def test_stale_position_is_not_live() -> None:
+    loaded = _loaded("volan", "hkir:")
+    hit = realtime._answer(_cfg("trip"), loaded, {"key": "k", "trip_id": "hkir_4194_7-2"}, NOW + 3600)
+    assert hit["vehicle"] is None
+    # Not the stale vehicle's stop either: the first update's delay.
+    assert hit["delay"] == 775 and hit["approx"] is True
+
+
+def test_route_and_start_match_for_feeds_with_other_trip_ids() -> None:
+    loaded = _loaded("veszprem", "VBUSZ:")
+    cfg = _cfg("trip", "route_start")
+    hit = _answer(cfg, loaded, trip_id="1692150", route="5", start=525, date="20261102", stops=["SP1825"], **{"from": 0})
+    assert hit["trip_id"] == "1140_1446_084500_A_HP" and hit["delay"] == 19
+    # Two route 3 trips start at 08:43 from both ends: the card's stop picks one.
+    hit = _answer(cfg, loaded, route="3", start=523, stops=["SP1724"], **{"from": 0})
+    assert hit["trip_id"] == "1140_2058_084300_A_HP" and hit["delay"] == 111
+    hit = _answer(cfg, loaded, route="3", start=523, stops=["SP1826"], **{"from": 0})
+    assert hit["trip_id"] == "1140_1457_084300_A_HP"
+    # Without a stop to tell them apart it is neither.
+    assert _answer(cfg, loaded, route="3", start=523) is None
+    # A trip past midnight (start 1963 = 08:43 next day) is the same clock time.
+    assert _answer(cfg, loaded, route="3", start=523 + 1440, stops=["SP1826"], **{"from": 0}) is not None
+
+
+def test_feed_with_foreign_stop_ids_gives_the_current_delay() -> None:
+    loaded = _loaded("miskolc", "mvkzrt:")
+    hit = _answer(_cfg("route_start"), loaded, route="32", start=515, stops=["638481"], **{"from": 0})
+    assert hit["trip_id"] == "10976_59_083500_B4O"
+    # The update at the vehicle's current stop (SP375).
+    assert hit["approx"] is True and hit["delay"] == -21
+    assert hit["vehicle"]["lat"] == pytest.approx(48.08612, abs=1e-5)
+
+
+def test_train_number_match() -> None:
+    trains = realtime.train_numbers_from_static((FIX / "mav-static.zip").read_bytes(), "1:")
+    loaded = _loaded("mav", "1:", trains)
+    cfg = _cfg("train")
+    # IC 822 from station 005501024 (its _7 platform), 10 minutes late at 005506189.
+    hit = _answer(cfg, loaded, train="822", stops=["005501024", "005506189"], **{"from": 0, "to": 1})
+    assert hit["trip_id"] == "35700507"
+    assert (hit["delay"], hit["dest_delay"], hit["approx"]) == (0, 600, False)
+    # The other 4272 (99999999) is not in the feed; leading zeros are no other train.
+    hit = _answer(cfg, loaded, train="04272", stops=["005505868"], **{"from": 0})
+    assert hit["trip_id"] == "36016774" and hit["delay"] == 60
+    # A station the update list skips: the train's current delay.
+    hit = _answer(cfg, loaded, train="4272", stops=["005599999"], **{"from": 0})
+    assert hit["approx"] is True and hit["delay"] == 60
+    assert _answer(cfg, loaded, train="1") is None
+
+
+def test_canceled_trip() -> None:
+    header = _ld(1, b"\x0a\x032.0")
+    tu = _ld(3, _ld(1, _ld(1, b"T1") + b"\x20\x03") + _ld(2, b"\x08\x01" + _ld(3, b"\x08\x3c") + _ld(4, b"S1")))
+    feed = realtime.decode_feed(header + _ld(2, _ld(1, b"e") + tu))
+    loaded = [(realtime.Source("tu", "", "", ""), feed, None, None)]
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["S1"], **{"from": 0})
+    assert hit["canceled"] is True and hit["delay"] is None
+
+
+# ---------------------------------------------------------------- the service
+
+
+async def _setup(hass: HomeAssistant) -> MockConfigEntry:
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    return entry
+
+
+async def _call(hass: HomeAssistant, data: dict) -> dict:
+    return await hass.services.async_call(DOMAIN, SERVICE_REALTIME, data, blocking=True, return_response=True)
+
+
+def _mock_szfv(aioclient_mock, **kw) -> None:
+    aioclient_mock.get(SZFV + "trip-updates.pb", content=_pb("volan-szekesfehervar-trip-updates"), **kw)
+    aioclient_mock.get(SZFV + "vehicle-positions.pb", content=_pb("volan-szekesfehervar-vehicle-positions"), **kw)
+
+
+SZFV_REQ = {
+    "feed": "volan-szekesfehervar",
+    "trips": [
+        {
+            "key": "a",
+            "trip_id": "hkir_H6112_607-1",
+            "date": "20261102",
+            "stops": ["hkir_666060", "hkir_665955", "hkir_666225"],
+            "from": 1,
+            "to": 2,
+        },
+        {"key": "missing", "trip_id": "hkir_nope"},
+    ],
+}
+
+
+async def test_service_answers_and_shares_one_fetch_per_interval(hass, aioclient_mock, freezer) -> None:
+    freezer.move_to(FROZEN)
+    await _setup(hass)
+    _mock_szfv(aioclient_mock)
+    resp = await _call(hass, SZFV_REQ)
+    assert resp["feed"] == "volan-szekesfehervar"
+    assert resp["updated"] == 1793605797
+    assert set(resp["trips"]) == {"a"}
+    assert resp["trips"]["a"]["delay"] == 190
+    assert resp["trips"]["a"]["dest_delay"] == 181
+    assert aioclient_mock.call_count == 2
+    for _method, _url, _data, headers in aioclient_mock.mock_calls:
+        assert "github.com/bator/hungarian-transport" in headers["User-Agent"]
+    # Every card asking within the interval shares the copy.
+    await _call(hass, SZFV_REQ)
+    freezer.tick(59)
+    await _call(hass, SZFV_REQ)
+    assert aioclient_mock.call_count == 2
+    freezer.tick(2)
+    await _call(hass, SZFV_REQ)
+    assert aioclient_mock.call_count == 4
+
+
+async def test_conditional_requests_keep_the_cached_feed(hass, aioclient_mock, freezer) -> None:
+    freezer.move_to(FROZEN)
+    await _setup(hass)
+    _mock_szfv(aioclient_mock, headers={"ETag": '"abc"', "Last-Modified": "Mon, 02 Nov 2026 07:49:00 GMT"})
+    await _call(hass, SZFV_REQ)
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SZFV + "trip-updates.pb", status=304)
+    aioclient_mock.get(SZFV + "vehicle-positions.pb", status=304)
+    freezer.tick(61)
+    resp = await _call(hass, SZFV_REQ)
+    assert resp["trips"]["a"]["delay"] == 190
+    for _method, _url, _data, headers in aioclient_mock.mock_calls:
+        assert headers["If-None-Match"] == '"abc"'
+        assert headers["If-Modified-Since"] == "Mon, 02 Nov 2026 07:49:00 GMT"
+
+
+async def test_outage_is_logged_once_and_backs_off(hass, aioclient_mock, freezer, caplog) -> None:
+    freezer.move_to(FROZEN)
+    await _setup(hass)
+    aioclient_mock.get(SZFV + "trip-updates.pb", status=502)
+    aioclient_mock.get(SZFV + "vehicle-positions.pb", status=502)
+    resp = await _call(hass, SZFV_REQ)
+    assert resp == {"feed": "volan-szekesfehervar", "trips": {}, "error": "rt_unavailable"}
+    await _call(hass, SZFV_REQ)
+    assert aioclient_mock.call_count == 2
+    freezer.tick(realtime.FAIL_BACKOFF + 1)
+    await _call(hass, SZFV_REQ)
+    assert aioclient_mock.call_count == 4
+    assert caplog.text.count("unavailable") == 2  # one line per feed URL
+    aioclient_mock.clear_requests()
+    _mock_szfv(aioclient_mock)
+    freezer.tick(realtime.FAIL_BACKOFF + 1)
+    with caplog.at_level(logging.INFO):
+        resp = await _call(hass, SZFV_REQ)
+    assert resp["trips"]["a"]["delay"] == 190
+    assert caplog.text.count("answers again") == 2
+
+
+async def test_garbage_and_oversized_feeds_are_outages(hass, aioclient_mock, freezer, monkeypatch) -> None:
+    freezer.move_to(FROZEN)
+    await _setup(hass)
+    monkeypatch.setattr(realtime, "MAX_FEED_BYTES", 1000)
+    aioclient_mock.get(SZFV + "trip-updates.pb", content=_pb("volan-szekesfehervar-trip-updates"))
+    aioclient_mock.get(SZFV + "vehicle-positions.pb", content=b"<html>proxy error</html>")
+    resp = await _call(hass, SZFV_REQ)
+    assert resp["error"] == "rt_unavailable"
+
+
+async def test_unknown_feed_is_no_feed_without_a_request(hass, aioclient_mock) -> None:
+    await _setup(hass)
+    resp = await _call(hass, {"feed": "kecskemet", "trips": [{"key": "a", "trip_id": "x"}]})
+    assert resp == {"feed": "kecskemet", "trips": {}, "error": "rt_no_feed"}
+    assert aioclient_mock.call_count == 0
+
+
+async def test_mav_matches_by_train_number(hass, aioclient_mock, freezer) -> None:
+    freezer.move_to(FROZEN)
+    await _setup(hass)
+    aioclient_mock.get(J + "1_198/trip-updates.pb", content=_pb("mav-trip-updates"))
+    aioclient_mock.get(J + "1_198/vehicle-positions.pb", content=_pb("mav-vehicle-positions"))
+    aioclient_mock.get(MAV_STATIC, content=(FIX / "mav-static.zip").read_bytes())
+    # GYSEV down: MÁV still answers.
+    aioclient_mock.get(J + "1_134/trip-updates.pb", status=503)
+    aioclient_mock.get(J + "1_134/vehicle-positions.pb", status=503)
+    aioclient_mock.get(GYSEV_STATIC, status=503)
+    req = {"feed": "mav", "trips": [{"key": "ic", "train": "822", "stops": ["005501024", "005506189"], "from": 0, "to": 1}]}
+    resp = await _call(hass, req)
+    hit = resp["trips"]["ic"]
+    assert (hit["trip_id"], hit["delay"], hit["dest_delay"]) == ("35700507", 0, 600)
+    assert hit["vehicle"]["lat"] == pytest.approx(46.50523, abs=1e-5)
+    # The static feed is asked again only after STATIC_INTERVAL.
+    freezer.tick(120)
+    await _call(hass, req)
+    assert sum(1 for c in aioclient_mock.mock_calls if str(c[1]) == MAV_STATIC) == 1
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"feed": "Volan", "trips": []},
+        {"feed": "volan", "trips": [{"key": "a"}] * (realtime.MAX_TRIPS + 1)},
+        {"feed": "volan", "trips": [{"trip_id": "x"}]},
+        {"feed": "volan", "trips": [{"key": "a", "stops": ["s"] * (realtime.MAX_STOPS + 1)}]},
+        {"feed": "volan", "trips": [{"key": "a", "start": 9999}]},
+        {"feed": "volan", "trips": [{"key": "a", "date": "2026-11-02"}]},
+        {"feed": "volan", "trips": [{"key": "a", "train": "IC 822"}]},
+        {"feed": "volan", "trips": [{"key": "a", "trip_id": "x" * 200}]},
+        {"feed": "volan", "trips": [{"key": "a", "from": realtime.MAX_STOPS}]},
+    ],
+)
+async def test_service_validates_input(hass, aioclient_mock, data) -> None:
+    await _setup(hass)
+    with pytest.raises(vol.Invalid):
+        await _call(hass, data)
+    assert aioclient_mock.call_count == 0
+
+
+async def test_service_refuses_while_the_entry_is_unloaded(hass, aioclient_mock) -> None:
+    entry = await _setup(hass)
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    with pytest.raises(ServiceValidationError) as err:
+        await _call(hass, SZFV_REQ)
+    assert err.value.translation_key == "not_loaded"
+    assert aioclient_mock.call_count == 0
+
+
+async def test_fetches_are_rate_limited(aioclient_mock, freezer, caplog) -> None:
+    """A loop over every feed id must not become a stream of requests."""
+    freezer.move_to(FROZEN)
+    feeds = {
+        f"f{i}": realtime.FeedConfig(
+            f"f{i}", (realtime.Source(f"https://x.test/{i}/tu.pb", "", "", ""),), frozenset({"trip"}), 60, 60
+        )
+        for i in range(realtime.FETCH_BURST + 5)
+    }
+    for i in range(realtime.FETCH_BURST + 5):
+        aioclient_mock.get(f"https://x.test/{i}/tu.pb", content=_pb("volan-trip-updates"))
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    hub = realtime.RealtimeHub(session, feeds=feeds)
+    answers = [await hub.query(fid, []) for fid in feeds]
+    await session.close()
+    assert aioclient_mock.call_count == realtime.FETCH_BURST
+    assert sum(1 for a in answers if a.get("error") == "rt_unavailable") == 5
+    assert "rate limit" in caplog.text
+
+
+def test_error_codes_are_documented() -> None:
+    pkg = Path(integration.__file__).parent
+    codes = set(re.findall(r'"error": "(rt_\w+)"', (pkg / "realtime.py").read_text(encoding="utf-8")))
+    assert codes == {"rt_no_feed", "rt_unavailable"}
+    for lang in ("en", "hu"):
+        strings = json.loads((pkg / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
+        for code in codes:
+            assert code in strings["services"]["realtime"]["description"], (lang, code)
+
+
+def test_static_zip_member_cap(monkeypatch) -> None:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("trips.txt", "trip_id,trip_short_name\n" + "1:1,SZ 1\n" * 100)
+    monkeypatch.setattr(realtime, "MAX_STATIC_MEMBER", 50)
+    with pytest.raises(ValueError):
+        realtime.train_numbers_from_static(buf.getvalue(), "1:")

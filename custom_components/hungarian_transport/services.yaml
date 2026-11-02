@@ -35,3 +35,15 @@ futar:
       selector:
         object:
 rebuild_mav_index:
+realtime:
+  fields:
+    feed:
+      required: true
+      example: volan
+      selector:
+        text:
+    trips:
+      required: true
+      example: '[{"key": "1", "trip_id": "hkir_1010_10-5", "stops": ["hkir_109755"], "from": 0}]'
+      selector:
+        object:
