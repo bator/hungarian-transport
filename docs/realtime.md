@@ -158,8 +158,9 @@ A stop without an update of its own takes the nearest earlier stop's delay.
 A stop the feed marks SKIPPED has no delay (`skipped`), and one marked
 NO_DATA (or after a NO_DATA stop) has none either, not even the approximate
 one. A stop a loop trip calls at twice (listed in `repeat`) takes its first
-update after the last stop the trip calls at once: the feed may have dropped
-the calls already served. A stop with a predicted time but no delay answers
+update after the previous stop's, or its first one when there is none after
+it (a feed that dropped the calls already served); a stop the trip calls at
+once sets the order. A stop with a predicted time but no delay answers
 with `time` and a null `delay`. A feed whose
 header timestamp is more than 15 minutes old is a stalled publisher, not live
 data: it answers as unavailable.

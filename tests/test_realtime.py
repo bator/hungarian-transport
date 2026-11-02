@@ -328,19 +328,21 @@ def test_a_loop_trip_takes_each_stops_own_call() -> None:
     assert (hit["delay"], hit["dest_delay"]) == (60, 120)
 
 
-def test_a_repeated_stop_alone_does_not_skip_the_next_call() -> None:
-    # The trip runs A X B C X B; the feed has dropped A and the first X. The
-    # card's slice before B is A, X: B's next call is the first one.
-    loaded = _one_trip(_stu(b"B", 3, 50), _stu(b"C", 4, 40), _stu(b"X", 5, 30), _stu(b"B", 6, 10))
-    hit = _answer(
-        _cfg("trip"), loaded, trip_id="T1", stops=["A", "X", "B", "C"], repeat=[1, 2], **{"from": 2, "to": 3}
-    )
-    assert (hit["delay"], hit["dest_delay"]) == (50, 40)
-    # With every call in the feed, a stop called at once anchors the second B.
+def test_an_out_and_back_trip_takes_each_calls_own_update() -> None:
+    # A B C B A: every stop but the turn (C) is called at twice.
     loaded = _one_trip(*(_stu(s, i, d) for i, (s, d) in enumerate(
-        [(b"A", 0), (b"X", 10), (b"B", 20), (b"C", 30), (b"X", 40), (b"B", 50)], start=1)))
-    assert _answer(_cfg("trip"), loaded, trip_id="T1", stops=["C", "X", "B"], repeat=[1, 2], **{"from": 2})["delay"] == 50
-    assert _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "X", "B"], repeat=[1, 2], **{"from": 2})["delay"] == 20
+        [(b"A", 0), (b"B", 10), (b"C", 20), (b"B", 30), (b"A", 40)], start=1)))
+    cfg = _cfg("trip")
+    hit = _answer(cfg, loaded, trip_id="T1", stops=["A", "B", "C", "B", "A"], repeat=[0, 1, 3, 4], **{"from": 3, "to": 4})
+    assert (hit["delay"], hit["dest_delay"]) == (30, 40)
+    # A slice of the return leg alone, without the turn: still the return calls.
+    hit = _answer(cfg, loaded, trip_id="T1", stops=["B", "A"], repeat=[0, 1], **{"from": 0, "to": 1})
+    assert (hit["delay"], hit["dest_delay"]) == (10, 40)
+    # A stop called three times: A X A X A, boarding at the second X.
+    loaded = _one_trip(*(_stu(s, i, d) for i, (s, d) in enumerate(
+        [(b"A", 0), (b"X", 10), (b"A", 20), (b"X", 30), (b"A", 40)], start=1)))
+    hit = _answer(cfg, loaded, trip_id="T1", stops=["A", "X", "A", "X", "A"], repeat=[0, 1, 2, 3, 4], **{"from": 3, "to": 4})
+    assert (hit["delay"], hit["dest_delay"]) == (30, 40)
 
 
 def test_a_predicted_time_without_a_delay_is_answered() -> None:

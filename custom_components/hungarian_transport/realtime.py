@@ -792,12 +792,13 @@ def _plausible(delay: int | None) -> int | None:
 def _match_stops(
     tu: TripUpdate, stops: list[str], upto: int, repeat: frozenset[int] = frozenset()
 ) -> list[StopUpdate | None]:
-    """The update of each of stops[: upto + 1]. A stop the trip calls at
-    once (not in repeat, the card's indices of the stops its trip calls at
-    more than once) with one update is certain and anchors the order; a
-    repeated stop takes its first update after the last anchor. A repeated
-    stop is no anchor even with one update: a feed may have dropped the
-    calls already served, so its first update there is the next call."""
+    """The update of each of stops[: upto + 1], in trip order. A stop the
+    trip calls at once (not in repeat, the card's indices of the stops its
+    trip calls at more than once) with one update is certain: it sets the
+    order wherever its update is. Any other stop takes its first update
+    after the previous stop's (a loop's later call its own update), or its
+    first one when there is none after it (a feed that dropped the calls
+    already served)."""
     ups = tu.stops
     out: list[StopUpdate | None] = []
     pos = 0
@@ -810,7 +811,11 @@ def _match_stops(
             k = calls[0]
             pos = k + 1
         else:
-            k = next((c for c in calls if c >= pos), calls[0])
+            k = next((c for c in calls if c >= pos), None)
+            if k is None:
+                k = calls[0]
+            else:
+                pos = k + 1
         out.append(ups[k])
     return out
 
