@@ -328,8 +328,17 @@ feed's own `shapes.txt`. The shapes are simplified (10 m) and shipped next to
 the indexes in `volan-shapes-<hash>/` and `city-shapes-<hash>/`, split into 64
 small files, so opening a map downloads one file of at most ~140 kB and no
 third-party service is involved. A trip without a shape falls back to
-Transitous, and then to a line through its stops. City trams, trolleybuses and
-the Bahart ferry keep their GTFS vehicle type.
+Transitous, and then to a line through its stops. City trams, trolleybuses,
+the ferries, the Sikló (funicular) and the Libegő (aerial lift) keep their
+GTFS vehicle type.
+
+A feed that runs from `frequencies.txt` (the Sikló every 10 minutes, the
+Dunakeszi ferry every 20) is expanded into one trip per start: from each
+`start_time`, every `headway_secs`, while before `end_time`, as GTFS
+specifies for both `exact_times` values. Service more frequent than every
+5 minutes (the Libegő's chairs, every 20 seconds) is listed every 5 minutes:
+the board shows that the lift runs and how long the ride takes, not every
+chair.
 
 ## Keeping the GTFS indexes current
 
@@ -566,14 +575,37 @@ reflects the official GTFS, so it will not invent a connection.
 
 ## Feed sources
 
-Debrecen DKV is marked not public on the [menetbrand catalog](https://gtfs.menetbrand.com/letoltes/),
-so it stays out of the city picker. Weekendbus (Csömör/Pécel) still hosts a
-zip, but the calendar ended 2025-12-31, so it is not wired. Those lines now
-run as Volán / MÁV.
+Where the publisher has no fixed zip URL, or one behind a login, the city
+index uses the public menetbrand `/download/<slug>` proxy (Debrecen DKV,
+Kecskemét KeKo, Kaposvár, Hódmezővásárhely, Kiskunhalas, Székesfehérvár,
+Tatabánya, Várpalota). The [menetbrand catalog](https://gtfs.menetbrand.com/letoltes/)
+lists DKV as *Nem publikus* and KeKo as *Igénylés* (on request), and neither
+feed states a licence; KeKo's own address
+(<https://timetable.keko.hu/Kecskemet_GTFS.zip>) answers 401. Orosháza's
+local buses come from the town's own export at gpspositions.net.
 
-Where the publisher has no fixed zip URL, the city index uses the public
-menetbrand `/download/<slug>` proxy (Kaposvár, Hódmezővásárhely,
-Kiskunhalas, Székesfehérvár, Tatabánya, Várpalota). Bahart prefers the
+The Budavári Sikló, the Zugligeti Libegő, the Dunakeszi–Horány ferry, the
+Pásztor ferry (Szentendre–Szigetmonostor) and the Üröm minibus come from
+[Máté Gyöngyösi's feeds](https://github.com/gy-mate/gtfs-feeds) on
+`gy-mate.hu/gtfs`, under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/):
+credit them when you publish anything built on these files. BKK's own GTFS
+(and so FUTÁR) has neither the Sikló nor the Libegő.
+
+Not wired:
+
+- Weekendbus (Csömör/Pécel) still hosts a zip (`apps.weekendbus.hu`, the same
+  one menetbrand serves), but its calendar ended 2025-12-31 (`feed_version`
+  20250119). Those lines now run as Volán / MÁV.
+- GYSEV: its trains run in MÁV's GTFS (the MÁV index). The separate GYSEV
+  zip (a mirror at jbb.ghsq.de, no shapes, no licence) adds only services in
+  Austria (Wien–Deutschkreutz, Graz–Fehring, Graz–Szentgotthárd, whose only
+  Hungarian station is Szentgotthárd) and rail replacement buses.
+
+Same-town networks stay apart: a city feed and Volánbusz's local lines of
+the same town (Székesfehérvár, Szeged) are separate operators in the picker,
+with their own stop ids, and a card reads one operator, so no departure is
+listed twice. Debrecen, Kecskemét and Orosháza have no Volánbusz local
+lines in the Volán feed. Bahart prefers the
 official keyed NAP URL from `BAHART_GTFS_URL` in a gitignored `.env`
 (`/config/hungarian-transport/.env` on Home Assistant). Transitland v2 and
 Mobility Database keys in the same file are a catalog fallback. Without
@@ -593,7 +625,6 @@ These feeds still need a form or login:
   See [MÁV train routes](#máv-train-routes); releases build it with the
   repository's MÁV secrets.
 - National Access Point (SZKT official dump and others): <https://napportal.kozut.hu/>
-- Kecskemét KEKO city buses: <https://timetable.keko.hu/Kecskemet_GTFS.zip> (auth)
 
 BKK static GTFS is public, but Budapest already uses live FUTÁR, so that zip
 is not folded into `city-index.json.gz`. The BKK Open Data key is only for

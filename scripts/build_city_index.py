@@ -34,11 +34,17 @@ MIN_GUARDED_TRIPS = 50
 # Comma-separated feed ids (or "all") that may be missing from a rebuild.
 ALLOW_MISSING_ENV = "HUNGARIAN_TRANSPORT_ALLOW_MISSING"
 
-# Debrecen DKV is listed as "Nem publikus" on menetbrand. Skip.
-# Weekendbus (Csömör/Pécel) still hosts a zip, but the calendar ended 2025-12-31.
-# Feeds that still need a form or login: MÁV, NAP, KEKO.
+# Weekendbus (Csömör/Pécel) still hosts a zip, but its calendar ended
+# 2025-12-31. GYSEV trains are in MÁV's feed (the MÁV index); the GYSEV zip
+# adds only Austrian services and replacement buses. Neither is wired.
+# Feeds that still need a form or login: MÁV, NAP. KeKo's own zip
+# (timetable.keko.hu) answers 401; menetbrand serves it.
 # Menetbrand /download/<slug> is the public zip when the publisher has no fixed
-# filename (Kaposvár), a CAPTCHA (Kiskunhalas), or until a keyed URL is in .env.
+# filename (Kaposvár), a CAPTCHA (Kiskunhalas), a login (Kecskemét KeKo, DKV),
+# or until a keyed URL is in .env.
+# gy-mate.hu: Máté Gyöngyösi's hand-made feeds (CC BY 4.0) of the Budavári
+# Sikló, the Zugliget Libegő, two Danube ferries and the Üröm minibus; the
+# first three run from frequencies.txt (load_parts expands it).
 # Bahart: official NAP URL via BAHART_GTFS_URL; Transitland / Mobility Database
 # as catalog fallback; menetbrand if neither is set.
 # "insecure": the publisher still serves plain http. HTTPS is tried first;
@@ -144,6 +150,54 @@ CITY_FEEDS = [
         "name": "Várpalota — THURY-BUSZ",
         "url": "https://gtfs.menetbrand.com/download/varpalota/",
         "file": "varpalota.zip",
+    },
+    {
+        "id": "debrecen",
+        "name": "Debrecen — DKV",
+        "url": "https://gtfs.menetbrand.com/download/debrecen/",
+        "file": "debrecen.zip",
+    },
+    {
+        "id": "kecskemet",
+        "name": "Kecskemét — KeKo",
+        "url": "https://gtfs.menetbrand.com/download/kecskemet/",
+        "file": "kecskemet.zip",
+    },
+    {
+        "id": "oroshaza",
+        "name": "Orosháza — helyi",
+        "url": "https://gtfs.gpspositions.net/storage/exports/OROSH_V_ONK/gtfs_latest.zip",
+        "file": "oroshaza.zip",
+    },
+    {
+        "id": "urom",
+        "name": "Üröm — helyi",
+        "url": "https://gy-mate.hu/gtfs/gtfs_hu_urom.zip",
+        "file": "urom.zip",
+    },
+    {
+        "id": "budapest-siklo",
+        "name": "Budapest — Budavári Sikló",
+        "url": "https://gy-mate.hu/gtfs/gtfs_hu_funicular.zip",
+        "file": "budapest-siklo.zip",
+    },
+    {
+        "id": "budapest-libego",
+        "name": "Budapest — Zugligeti Libegő",
+        "url": "https://gy-mate.hu/gtfs/gtfs_hu_chairlift.zip",
+        "file": "budapest-libego.zip",
+    },
+    {
+        "id": "dunakeszi-komp",
+        "name": "Dunakeszi — Horány komp",
+        "url": "https://gy-mate.hu/gtfs/gtfs_hu_dunakeszi-ferry.zip",
+        "file": "dunakeszi-komp.zip",
+    },
+    {
+        "id": "szentendre-rev",
+        "name": "Szentendre — Pásztor rév",
+        "url": "https://gy-mate.hu/gtfs/gtfs_hu_pasztor-ferry.zip",
+        "file": "szentendre-rev.zip",
     },
 ]
 

@@ -706,7 +706,10 @@ var VEHICLE_ICONS = {
   METRO: "mdi:subway-variant",
   RAIL: "mdi:train",
   TRAIN: "mdi:train",
-  FERRY: "mdi:ferry"
+  FERRY: "mdi:ferry",
+  /* MDI has no funicular: the Sikló's car on its rails reads as a tram. */
+  FUNICULAR: "mdi:tram",
+  AERIAL_LIFT: "mdi:gondola"
 };
 function vehicleIcon(type) {
   const key = String(type || "").toUpperCase();
@@ -880,6 +883,8 @@ var I18N = {
     mapTypeRail: "Vonat",
     mapTypeCoach: "Távolsági busz",
     mapTypeFerry: "Hajó",
+    mapTypeFunicular: "Sikló",
+    mapTypeAerial: "Kötélpálya",
     mapTypeVehicle: "Jármű",
     errNoApiKey: "Nincs BKK API kulcs: add meg a Magyar közlekedés integrációban vagy a kártyában.",
     errApiKeyBad: "A BKK API kulcs érvénytelen (401/403). Kérj újat, és add meg az integráció beállításaiban.",
@@ -1088,6 +1093,8 @@ var I18N = {
     mapTypeRail: "Train",
     mapTypeCoach: "Coach",
     mapTypeFerry: "Ferry",
+    mapTypeFunicular: "Funicular",
+    mapTypeAerial: "Aerial lift",
     mapTypeVehicle: "Vehicle",
     errNoApiKey: "No BKK API key: set it in the Hungarian transport integration or in the card.",
     errApiKeyBad: "The BKK API key is invalid (401/403). Get a new one and enter it in the integration options.",
@@ -1979,6 +1986,8 @@ Object.assign(BkkLib, {
       if (/subway|metro/.test(s)) return "subway";
       if (/trolley/.test(s)) return "trolley";
       if (/ferry|boat/.test(s)) return "ferry";
+      if (/funicular/.test(s)) return "funicular";
+      if (/aerial|areal|gondola|cable_car/.test(s)) return "aerial";
       if (/coach/.test(s)) return "coach";
       if (/bus/.test(s)) return "bus";
       return s;
@@ -1991,6 +2000,8 @@ Object.assign(BkkLib, {
     if (v === "subway" || v === "metro" || /SUBWAY|METRO/.test(typ)) return "subway";
     if (v === "trolley" || v === "trolleybus" || typ.indexOf("TROLLEY") >= 0) return "trolley";
     if (v === "ferry" || typ.indexOf("FERRY") >= 0) return "ferry";
+    if (v === "funicular" || typ.indexOf("FUNICULAR") >= 0) return "funicular";
+    if (v === "aerial" || /AERIAL|AREAL|GONDOLA|CABLE_CAR/.test(typ)) return "aerial";
     if (v === "coach" || typ === "COACH" || /^gtfs:/i.test(String(row.tripId || ""))) return "coach";
     if (v === "bus" || typ === "BUS") return "bus";
     if (BkkLib.rowTrainNumber(row) && !/bus|tram|subway|trolley|coach/i.test(v)) return "rail";
@@ -4800,11 +4811,15 @@ Object.assign(BkkLib, {
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), "#0F6FC6", "#ffffff", "bus", "BUS", minutesAfter);
   },
   /* GTFS route_type (basic and extended codes) to the card's vehicle kind.
-     Buses keep the caller's default: coach for Volán, bus for city feeds. */
+     Buses keep the caller's default: coach for Volán, bus for city feeds.
+     A cable tram (5) is a tram; the Libegő (6, aerial lift) and the Sikló
+     (7, funicular) have kinds of their own. */
   gtfsRouteKind(routeType, vehicle, rawType) {
     const rt = Number(routeType);
     if (!Number.isFinite(rt)) return { vehicle, rawType };
-    if (rt === 0 || rt >= 900 && rt < 1e3) return { vehicle: "tram", rawType: "TRAM" };
+    if (rt === 0 || rt === 5 || rt >= 900 && rt < 1e3) return { vehicle: "tram", rawType: "TRAM" };
+    if (rt === 6 || rt >= 1300 && rt < 1400) return { vehicle: "aerial", rawType: "AERIAL_LIFT" };
+    if (rt === 7 || rt >= 1400 && rt < 1500) return { vehicle: "funicular", rawType: "FUNICULAR" };
     if (rt === 1 || rt >= 400 && rt < 500) return { vehicle: "subway", rawType: "SUBWAY" };
     if (rt === 2 || rt >= 100 && rt < 200 || rt === 300) return { vehicle: "rail", rawType: "RAIL" };
     if (rt === 4 || rt >= 1e3 && rt < 1100 || rt === 1200) return { vehicle: "ferry", rawType: "FERRY" };
@@ -8546,6 +8561,8 @@ var BKKHopCard = class extends HTMLElement {
     if (k === "coach") return t(lang, "mapTypeCoach");
     if (k === "bus") return t(lang, "mapTypeBus");
     if (k === "ferry") return t(lang, "mapTypeFerry");
+    if (k === "funicular") return t(lang, "mapTypeFunicular");
+    if (k === "aerial") return t(lang, "mapTypeAerial");
     return t(lang, "mapTypeVehicle");
   }
   _mapGlyph(kind) {
@@ -8556,6 +8573,8 @@ var BKKHopCard = class extends HTMLElement {
     if (k === "rail" || k === "train") return "🚆";
     if (k === "bus" || k === "coach") return "🚌";
     if (k === "ferry") return "⛴";
+    if (k === "funicular") return "🚞";
+    if (k === "aerial") return "🚡";
     return "📍";
   }
   _ensureLeaflet() {

@@ -310,11 +310,13 @@ The **Look-ahead** chips set how far ahead the card lists departures. Here
 
 ![Local card in the editor: tram 2 in Szeged, 60-minute look-ahead](images/en/editor-city-done.webp)
 
-The available cities include Miskolc, Pécs, Szeged, Szombathely, Veszprém,
-Paks, Dombóvár, Budaörs, Hódmezővásárhely, Kaposvár, Kiskunhalas,
-Székesfehérvár, Tatabánya, Várpalota, the Kecskemét narrow-gauge railway,
-the Bahart Balaton ferries, and Volánbusz local networks such as Sopron or
-Eger.
+The available cities include Debrecen, Miskolc, Pécs, Szeged, Kecskemét,
+Szombathely, Veszprém, Paks, Dombóvár, Budaörs, Hódmezővásárhely, Kaposvár,
+Kiskunhalas, Orosháza, Székesfehérvár, Tatabánya, Várpalota, Üröm, the
+Kecskemét narrow-gauge railway, the Budavári Sikló and the Zugliget Libegő
+(under Budapest), the Bahart Balaton ferries, the Dunakeszi–Horány and the
+Pásztor (Szentendre–Szigetmonostor) ferries, and Volánbusz local networks such
+as Sopron or Eger.
 
 ![Szeged tram 2 from Széchenyi tér to Európa liget](images/en/card-city.webp)
 
@@ -328,7 +330,7 @@ From left to right:
 
 | Part | Meaning |
 | --- | --- |
-| Vehicle icon | Bus, tram, trolleybus, metro, train or ferry. |
+| Vehicle icon | Bus, tram, trolleybus, metro, train, ferry or aerial lift (the Libegő; the Sikló shows the tram). |
 | Line badge | The line in its own colours (Budapest suburban train colours for S, G and Z lines). |
 | Headsign | Where the vehicle goes. MÁV rows add the train number in grey. |
 | Blue box | The platform (MÁV, from ELVIRA). |
