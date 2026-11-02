@@ -1842,12 +1842,19 @@ ${this._stopPinCss()}
             this._apiKey(), row.tripId, cfg.destKey, row.dep, origin, this._tripCache || {},
           );
         }));
+        /* Live delays and positions from the GTFS-Realtime feeds, after the
+           coach GPS so a bkk_stop position keeps its place (realtime.js). */
+        const rtCtx = { mode, stopId: cfg.stopId, destStopId: cfg.destStopId || '' };
         const gpsTravel = Promise.all([
-          BkkLib.attachCoachGps(this._hass, firstRows).then((withGps) => {
+          BkkLib.attachCoachGps(this._hass, firstRows).then(async (withGps) => {
             /* A newer list (the through-check) must not be replaced by this
                older one; it gets its GPS on the last pass below. */
             if (gen !== this._gen || this._rawRows !== firstRows) return;
             this._rawRows = withGps;
+            this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
+            this._paint();
+            const live = await BkkLib.attachRealtime(this._hass, withGps, rtCtx);
+            if (!live || gen !== this._gen || this._rawRows !== withGps) return;
             this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
             this._paint();
           }),
@@ -1894,6 +1901,8 @@ ${this._stopPinCss()}
             BkkLib.attachCoachGps(this._hass, latest),
             fillTravel(latest),
           ]);
+          if (gen !== this._gen || this._rawRows !== latest) return;
+          await BkkLib.attachRealtime(this._hass, withGps, rtCtx);
           if (gen !== this._gen || this._rawRows !== latest) return;
           this._rawRows = withGps;
         }

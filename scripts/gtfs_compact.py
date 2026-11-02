@@ -37,7 +37,9 @@ MAX_MEMBER = 2 * 1024 * 1024 * 1024
 MAX_DOWNLOAD = 500 * 1024 * 1024
 # 28: trip rows carry GTFS route_type as a fifth element.
 # 29: stop coordinates ("g"), a shape reference per trip and "sh", the
-#     sharded shapes folder next to the index.
+#     sharded shapes folder next to the index. A trip row may carry the
+#     feed's trip_id as a seventh element (for GTFS-Realtime): readers of 29
+#     ignore it, so it is no new schema.
 INDEX_SCHEMA = 29
 # Shapes are split into this many files so opening one map downloads one
 # small shard (shape id % n), not every route of the feed.
@@ -1435,6 +1437,9 @@ def _load_parts(
                     # Tram, trolleybus and ferry rows must not be matched as buses.
                     route_types.get(rid, 3),
                     ref,
+                    # The feed's own trip_id: GTFS-Realtime trip updates and
+                    # vehicle positions name the trip by it (realtime.py).
+                    tid,
                 ]
             )
         coords: list[int] = []
@@ -1779,6 +1784,8 @@ def write_index(
             row = [t[0] + c_off, t[1], [p + s_off for p in t[2]], t[3], *t[4:5]]
             if len(t) > 5:
                 row.append(remap[t[5]] if t[5] is not None and t[5] >= 0 else -1)
+            if len(t) > 6 and t[6]:
+                row.append(str(t[6]))
             all_t.append(row)
         if part.get("feed"):
             feeds.append(f"{oid}:{part['feed']}")

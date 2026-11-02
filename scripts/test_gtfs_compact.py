@@ -1227,6 +1227,21 @@ def digest_checks() -> bool:
             raw_differs and index_shapes(a) != index_shapes(b) and index_digest.digest(a) == index_digest.digest(b),
         )
         failed |= not check("index digest: a changed time is a change", index_digest.digest(a) != index_digest.digest(c))
+        # The realtime feeds' trip_id (row element 6) is kept by write_index
+        # and counts: a feed that renamed its trips is a release.
+        named = [Path(tmp) / d for d in ("n1", "n2")]
+        for k, d in enumerate(named):
+            d.mkdir()
+            part = _digest_part("x")
+            part["t"] = [[*t, f"T{n}" if k == 0 or n else "renamed"] for n, t in enumerate(part["t"])]
+            write_index([part], d / "city-index.json.gz", with_operators=True)
+        n1, n2 = (d / "city-index.json.gz" for d in named)
+        rows = json.loads(gzip.decompress(n1.read_bytes()))["t"]
+        failed |= not check(
+            "trip rows keep the feed's trip_id as element 6; a renamed trip_id is a change",
+            [r[6] for r in rows] == [f"T{n}" for n in range(6)] and index_digest.digest(n1) != index_digest.digest(n2),
+            str(rows[:2]),
+        )
         shutil.rmtree(dirs[1] / index_shapes(b))
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             status = index_digest.main([str(b)])

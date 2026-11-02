@@ -24,7 +24,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
-from . import mav, mav_daily, timetable_notify, timetables
+from . import mav, mav_daily, realtime, timetable_notify, timetables
 from .assets import asset_tag
 from .const import (
     CONF_API_KEY,
@@ -33,6 +33,7 @@ from .const import (
     DOMAIN,
     SERVICE_ELVIRA_BETWEEN,
     SERVICE_FUTAR,
+    SERVICE_REALTIME,
     SERVICE_REBUILD_MAV,
 )
 from .elvira import ElviraError, ElviraRateLimited, elvira_between, station_code_digits
@@ -62,6 +63,33 @@ FUTAR_SERVICE_SCHEMA = vol.Schema(
         vol.Required("path"): vol.In(FUTAR_PATHS),
         vol.Optional("params", default=dict): vol.Schema(
             {cv.string: vol.Any(cv.string, int, float, bool)}
+        ),
+    }
+)
+# What the cards send for each departure row (src/lib/realtime.js); anything
+# longer or larger is refused before a feed is touched.
+REALTIME_TRIP_SCHEMA = vol.Schema(
+    {
+        vol.Required("key"): vol.All(cv.string, vol.Length(min=1, max=96)),
+        vol.Optional("trip_id"): vol.All(cv.string, vol.Length(min=1, max=128)),
+        vol.Optional("route"): vol.All(cv.string, vol.Length(min=1, max=32)),
+        vol.Optional("start"): vol.All(vol.Coerce(int), vol.Range(min=0, max=2880)),
+        vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{8}$")),
+        vol.Optional("train"): vol.All(cv.string, vol.Match(r"^\d{1,6}$")),
+        vol.Optional("stops", default=list): vol.All(
+            cv.ensure_list,
+            vol.Length(max=realtime.MAX_STOPS),
+            [vol.All(cv.string, vol.Length(min=1, max=64))],
+        ),
+        vol.Optional("from"): vol.All(vol.Coerce(int), vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
+        vol.Optional("to"): vol.All(vol.Coerce(int), vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
+    }
+)
+REALTIME_SERVICE_SCHEMA = vol.Schema(
+    {
+        vol.Required("feed"): vol.All(cv.string, vol.Match(realtime.FEED_ID_RE)),
+        vol.Required("trips"): vol.All(
+            cv.ensure_list, vol.Length(max=realtime.MAX_TRIPS), [REALTIME_TRIP_SCHEMA]
         ),
     }
 )
@@ -180,6 +208,30 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         SERVICE_ELVIRA_BETWEEN,
         handle_elvira_between,
         schema=ELVIRA_SERVICE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    # GTFS-Realtime delays and positions (realtime.py): fetched only while a
+    # card asks, shared by every card. Reading needs no admin, like the
+    # timetables the cards read anyway.
+    hub = realtime.RealtimeHub(
+        session,
+        executor=hass.async_add_executor_job,
+        task_factory=lambda coro: hass.async_create_background_task(
+            coro, "hungarian_transport_realtime", eager_start=False
+        ),
+    )
+
+    async def handle_realtime(call: ServiceCall) -> dict[str, Any]:
+        _require_entry(hass)
+        # Feed outages are part of the response (rt_unavailable, rt_no_feed),
+        # not exceptions: the websocket API logs every failed call at ERROR.
+        return await hub.query(call.data["feed"], call.data["trips"])
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REALTIME,
+        handle_realtime,
+        schema=REALTIME_SERVICE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
     )
     # MÁV GTFS is registration-only, so the rail index is built here from the

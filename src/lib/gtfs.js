@@ -835,9 +835,13 @@ Object.assign(BkkLib, {
     /* -1 catches yesterday's 24:xx trips, which are still tonight's buses;
        +1 is tomorrow morning when the look-ahead crosses its base. */
     const dayOffsets = [-1, 0, 1];
+    /* A trip the realtime feed reported late stays on the board after its
+       timetable time, at the time the feed gave (rtKnownDelay). */
+    const lateMin = BkkLib.rtLateWindowMin();
+    const knownDelay = (key) => (BkkLib._rtKnown.size ? BkkLib.rtKnownDelay(key) : 0);
     for (let n = 0; n < dayOffsets.length; n++) {
       const day = BkkLib.volanDay(dayOffsets[n]);
-      const earliest = day.mins - 1;
+      const earliest = day.mins - 1 - lateMin;
       const latest = day.mins + horizon;
       if (latest < 0) continue;
       for (let c = 0; c < cands.length; c++) {
@@ -850,15 +854,18 @@ Object.assign(BkkLib, {
         let didx = -1;
         let depMin = null;
         let depTs = 0;
+        let late = 0;
         for (let v = 0; v < cands[c].visits.length; v++) {
           const at = ms[cands[c].visits[v][0]];
           if (at == null || at < earliest || at > latest) continue;
           const ts = day.base + at * 60;
-          if (!departureStillDue(ts)) continue;
+          const known = knownDelay('gtfs:' + route + ':' + day.ymd + ':' + at + ':' + origin.i);
+          if (!departureStillDue(ts + known)) continue;
           oidx = cands[c].visits[v][0];
           didx = cands[c].visits[v][1];
           depMin = at;
           depTs = ts;
+          late = known;
           break;
         }
         if (oidx < 0) continue;
@@ -866,17 +873,22 @@ Object.assign(BkkLib, {
         const arrMin = didx >= 0 ? ms[didx] : null;
         const travel = (arrMin != null && arrMin >= depMin && arrMin - depMin <= 1440) ? (arrMin - depMin) : null;
         const kind = BkkLib.gtfsRouteKind(t[4], vehicle, rawType);
+        const boardStop = idx.stops[ps[oidx]];
+        const op = opIx == null ? null : (idx.ops || [])[boardStop ? boardStop.op : -1];
+        const feed = opIx == null ? 'volan' : (op && op.id) || '';
         rows.push({
           gtfs: BkkLib.gtfsTripGeo(idx, t, oidx, didx, day.base),
+          rt: BkkLib.rtGtfsDescriptor(feed, idx, t, oidx, didx, day.ymd),
           tripId: 'gtfs:' + route + ':' + day.ymd + ':' + depMin + ':' + origin.i,
           label: route,
           color: color,
           text: text,
           vehicle: kind.vehicle,
           rawType: kind.rawType,
-          dep: depTs,
+          dep: depTs + late,
           sched: depTs,
-          delay: 0,
+          delay: late,
+          rtDelay: late !== 0,
           head: (dest && dest.name) || (destStop && destStop.name) || '',
           platform: '',
           wheelchair: false,

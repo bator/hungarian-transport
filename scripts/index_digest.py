@@ -86,6 +86,10 @@ def canonical(index: Path) -> dict:
         ]
         if len(t) > 5:
             trip.append(shapes[t[5]] if t[5] is not None and t[5] >= 0 else None)
+        if len(t) > 6:
+            # The trip_id the realtime feeds use: a feed that renamed its
+            # trips is a change to ship, or live data stops matching.
+            trip.append(t[6])
         trips.append(json.dumps(trip, ensure_ascii=False, separators=(",", ":")))
     return {
         "v": idx.get("v"),
