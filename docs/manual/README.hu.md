@@ -41,9 +41,16 @@ Honnan jönnek az adatok:
 | --- | --- | --- |
 | Budapesti busz, villamos, troli, metró, HÉV, elővárosi vonat | BKK FUTÁR | Igen, valós idejű pozíció és késés |
 | MÁV vonatok | BKK FUTÁR Budapest környékén, a vágány és a helyjegy a MÁV ELVIRA-ból | Késés és vágány |
-| Volán buszok | Országos Volán GTFS (opendata.utas.hu, tartalékként KTI), a kártyával együtt települ | Menetrend |
+| Volán buszok | Országos Volán GTFS (opendata.utas.hu, tartalékként KTI), a kártyával együtt települ | Késés és pozíció a GTFS-Realtime adatból, egyébként menetrend |
 | Helyi hálózatok (Szeged, Pécs, Miskolc, …) | Az üzemeltetők saját GTFS-e, a kártyával együtt települ | Menetrend (Szombathely élőben, a kiegészítő szolgáltatásokkal) |
 | Megállókeresés és átszállás | [Transitous](https://transitous.org/), tartalékként a BKK FUTÁR | — |
+
+A Volán buszok, a Volánbusz városi hálózatai, Veszprém, Miskolc, Paks,
+Debrecen, Orosháza és a BKK területén kívüli MÁV vonatok élő késést és
+járműpozíciót is kapnak nyilvános GTFS-Realtime adatokból, az integráción át
+(`hungarian_transport.realtime` művelet). Ahol nincs élő adat, a menetrend
+marad. Források, feltételek, és milyen gyakran kérdezi le:
+[Live delays and positions](../realtime.md).
 
 ---
 
@@ -177,6 +184,7 @@ Ezeket a **Fejlesztői eszközök → Műveletek** alatt próbálhatod ki.
 | `hungarian_transport.elvira_between` | **MÁV indulások lekérése** két állomás között, vágánnyal és helyjegyjelzéssel. Két kilencjegyű MÁV állomáskódot és egy előretekintést vár percben (15–480). |
 | `hungarian_transport.futar` | **BKK FUTÁR lekérdezés** az integráció kulcsával. A kártyák használják; csak akkor létezik, ha van beállított kulcs. |
 | `hungarian_transport.rebuild_mav_index` | **MÁV útvonalindex újraépítése** a `/config/hungarian-transport/mav-gtfs.zip` fájlból, minden járat ellenőrzésével. |
+| `hungarian_transport.realtime` | **Élő késések és járműpozíciók**: egy üzemeltető legfeljebb 40 járatának késése a megadott megállóknál és a jármű helyzete, a GTFS-Realtime adatából. A kártyák használják; lásd: [Live delays and positions](../realtime.md). |
 
 ### 3.4 Vonatútvonalak a térképen (opcionális)
 
@@ -377,7 +385,7 @@ Kattints egy sorra vagy a térképgombjára. Megnyílik a térkép a jármű
 | Színes vonal | A járat teljes útvonala, a vonal színében. |
 | Pötty a vonaljelzéssel és a megálló nevével | Itt szállsz fel. |
 | Fehér karika a megálló nevével | Itt szállsz le. |
-| Kerek járműjel udvarral | Élő GPS-pozíció. |
+| Kerek járműjel udvarral | Élő GPS-pozíció (BKK FUTÁR, vagy Volán-, helyi és MÁV-soroknál az üzemeltető GTFS-Realtime adata). |
 | Szaggatott szélű járműjel | A menetrendből becsült pozíció; az első indulása előtt a jármű a kiindulási megállójában vár („Vár az indulásra”). |
 
 A fejléc a vonalat, a célt és a jármű fajtáját mutatja (a BKK-nál a

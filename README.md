@@ -104,6 +104,7 @@ it from the dashboard. Keep it in the integration.
 | Budapest buses, trams, metro, HÉV, suburban trains | [BKK FUTÁR](https://opendata.bkk.hu/), live |
 | MÁV trains | BKK FUTÁR, MÁV ELVIRA (platforms, seat reservations) |
 | Volán coaches | National Volán GTFS ([opendata.utas.hu](https://opendata.utas.hu/), [KTI](https://gtfs.kti.hu/) as fallback), shipped with each release |
+| Live delays and positions outside Budapest (Volán, the Volánbusz towns, Veszprém, Miskolc, Paks, Debrecen, Orosháza, MÁV trains) | The public GTFS-Realtime feeds [Transitous](https://github.com/public-transport/transitous/blob/main/feeds/hu.json) lists, most of them from [jbb.ghsq.de](https://jbb.ghsq.de/gtfs-feeds); fetched by the integration only while a card shows them, at most once a minute. See [Live delays and positions](docs/realtime.md) |
 | City networks | Each operator's GTFS, shipped with each release |
 | Stop search, transfers | [Transitous](https://transitous.org/), BKK FUTÁR as fallback |
 | MÁV train routes on the map | [MÁV GTFS][timetables-mav] matched to the OSM rails with pfaedle, shipped with each release built with the MÁV secrets; or add the feed yourself |

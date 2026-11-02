@@ -41,9 +41,16 @@ Where the data comes from:
 | --- | --- | --- |
 | Budapest buses, trams, trolleybuses, metro, HÉV, suburban trains | BKK FUTÁR | Yes, real-time positions and delays |
 | MÁV trains | BKK FUTÁR around Budapest, MÁV ELVIRA for platforms and seat reservations | Delays and platforms |
-| Volán coaches | National Volán GTFS (opendata.utas.hu, KTI as fallback), shipped with the card | Timetable |
+| Volán coaches | National Volán GTFS (opendata.utas.hu, KTI as fallback), shipped with the card | Delays and positions from the GTFS-Realtime feed, else the timetable |
 | City networks (Szeged, Pécs, Miskolc, …) | Each operator's GTFS, shipped with the card | Timetable (Szombathely real-time with the companion services) |
 | Stop search and transfers | [Transitous](https://transitous.org/), BKK FUTÁR as fallback | — |
+
+Volán coaches, the Volánbusz town networks, Veszprém, Miskolc, Paks,
+Debrecen, Orosháza and MÁV trains outside BKK's area also get live delays and
+vehicle positions from public GTFS-Realtime feeds, through the integration
+(the `hungarian_transport.realtime` action). Rows without live data keep the
+timetable. Sources, terms and how often the feeds are asked:
+[Live delays and positions](../realtime.md).
 
 ---
 
@@ -173,6 +180,7 @@ You can try these under **Developer tools → Actions**.
 | `hungarian_transport.elvira_between` | MÁV departures between two stations, with platforms and seat-reservation flags. Takes two nine-digit MÁV station codes and a look-ahead in minutes (15–480). |
 | `hungarian_transport.futar` | A BKK FUTÁR request with the integration's key. The cards use it; it exists only while a key is set. |
 | `hungarian_transport.rebuild_mav_index` | Builds the train route index from `/config/hungarian-transport/mav-gtfs.zip` and checks every trip against it. |
+| `hungarian_transport.realtime` | **Get live delays and positions**: the delay at given stops and the vehicle's position for up to 40 trips of one operator, from its GTFS-Realtime feed. The cards use it; see [Live delays and positions](../realtime.md). |
 
 ### 3.4 Train routes on the map (optional)
 
@@ -365,7 +373,7 @@ Click a row or its map pin. A map opens with the vehicle's route.
 | Coloured line | The trip's full route, in the line's colour. |
 | Dot with the line's badge and stop name | Where you board. |
 | White ring with the stop name | Where you get off. |
-| Round vehicle marker with a halo | Live GPS position. |
+| Round vehicle marker with a halo | Live GPS position (BKK FUTÁR, or the operator's GTFS-Realtime feed for Volán, city and MÁV rows). |
 | Vehicle marker with a dashed border | Position estimated from the timetable; before its first departure the vehicle waits at its first stop ("Waiting to depart"). |
 
 The header names the line, its destination and the vehicle type (and model,
