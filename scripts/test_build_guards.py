@@ -116,6 +116,9 @@ with tempfile.TemporaryDirectory() as tmp:
           raises(lambda: bci.guard_feeds(out, [part("miskolc", 100), part("volan-szeged", 60)], {"pecs"})) is None)
     check("no previous index, nothing to compare",
           raises(lambda: bci.guard_feeds(Path(tmp) / "none.json.gz", [part("miskolc", 1)], set())) is None)
+    check("a feed the previous index did not have is an addition, never refused",
+          raises(lambda: bci.guard_feeds(out, good + [part("debrecen", 5000), part("budapest-siklo", 250)],
+                                         set())) is None)
 
 with tempfile.TemporaryDirectory() as tmp:
     base = Path(tmp)
@@ -200,6 +203,28 @@ with tempfile.TemporaryDirectory() as tmp:
           isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
     shutil.copy(fixtures / "b.zip", base / "b.zip")
     staged.unlink()
+
+    # A feed added to CITY_FEEDS (the first release with it): the previous
+    # index does not have it, so neither its arrival nor a failed first
+    # download trips the guard. Once in the index, losing it does.
+    gtfs_zip(fixtures / "c.zip", city_feed("9"))
+    bci.CITY_FEEDS = bci.CITY_FEEDS + [{"id": "c", "name": "C", "url": "https://new.example/c.zip", "file": "c.zip"}]
+    bad_urls["https://new.example/c.zip"] = None
+    err = raises(lambda: bci.build_city_index(base, out))
+    info = bci.build_city_index(base, out)
+    check("a new feed whose first download fails is skipped, not refused",
+          err is None and info["skipped"] == ["c", "volan-local"] and set(operator_trips(out)) == {"a", "b"},
+          repr((err, info)))
+    del bad_urls["https://new.example/c.zip"]
+    info = bci.build_city_index(base, out)
+    check("a new feed joins the index as an addition",
+          "c" not in info["skipped"] and set(operator_trips(out)) == {"a", "b", "c"}, repr(info))
+    (base / "c.zip").write_bytes(b"<html>gone</html>")
+    err = raises(lambda: bci.build_city_index(base, out))
+    check("once in the index, the new feed is guarded like the others",
+          isinstance(err, IndexGuardError) and "c missing" in str(err), repr(err))
+    (base / "c.zip").unlink()
+    bci.CITY_FEEDS = bci.CITY_FEEDS[:2]
 
     # The http:// publishers are the only ones allowed to fall back to http.
     seen_kw: list[dict] = []

@@ -49,6 +49,10 @@ SHAPE_TOLERANCE_M = 10.0
 # a city index: Szentes, Damjanich utca has platforms on another street,
 # 550 m away. City cards group stops by name, so departures stay together.
 PLATFORM_SPLIT_M = 100.0
+# A frequencies.txt trip (the Sikló every 10 minutes) becomes one trip per
+# start. Service more frequent than this (the Libegő's chairs, every 20 s)
+# is listed at this headway: a board of the service, not of every chair.
+FREQUENCY_MIN_HEADWAY_S = 300
 _SHAPES_MEMO: dict[tuple, dict[str, str]] = {}
 _BLOCKED_HOSTS = frozenset(
     {
@@ -1113,6 +1117,83 @@ def _split_platforms(
             pll[p] = (sum(ll[0] for ll in kept) / len(kept), sum(ll[1] for ll in kept) / len(kept))
 
 
+def _secs(t: str | None) -> int | None:
+    """GTFS time (H:MM:SS, hours may pass 24) in seconds; None if malformed."""
+    parts = (t or "").strip().split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        h, m, sec = (int(x) for x in parts)
+    except ValueError:
+        return None
+    if h < 0 or not 0 <= m < 60 or not 0 <= sec < 60:
+        return None
+    return h * 3600 + m * 60 + sec
+
+
+def _frequencies(z: zipfile.ZipFile) -> dict[str, list[tuple[int, int, int]]]:
+    """frequencies.txt: trip id -> its (start, end, headway) windows in
+    seconds. Rows that cannot run (no headway, end not after start) are
+    dropped, but their trip stays listed (with no window, it runs no
+    trip); a feed without the file has none."""
+    out: dict[str, list[tuple[int, int, int]]] = {}
+    try:
+        rows = list(_open_csv(z, "frequencies.txt"))
+    except FileNotFoundError:
+        return {}
+    for row in rows:
+        tid = row.get("trip_id") or ""
+        if not tid:
+            continue
+        windows = out.setdefault(tid, [])
+        start, end = _secs(row.get("start_time")), _secs(row.get("end_time"))
+        try:
+            headway = int((row.get("headway_secs") or "").strip())
+        except ValueError:
+            continue
+        if start is None or end is None or headway <= 0 or end <= start:
+            continue
+        windows.append((start, end, headway))
+    return out
+
+
+def _expand_frequencies(
+    freqs: dict[str, list[tuple[int, int, int]]],
+    seqs: dict[str, list[tuple[str, int]]],
+    trips_meta: dict[str, tuple[str, str]],
+    trip_shape: dict[str, str],
+    keep_trips: set[str],
+) -> None:
+    """Replace every frequencies.txt trip by one trip per start (in place).
+
+    Its stop_times only give the stops and the times between them; the
+    trip starts at start_time, then every headway_secs (at least
+    FREQUENCY_MIN_HEADWAY_S) while before end_time, as GTFS says for both
+    exact_times values. A copy keeps the trip's route, service and shape,
+    and is named <trip id>@<start minute>, so the order stays the same
+    for the same feed. A trip of frequencies.txt whose windows give no
+    start runs no trip at all: its own times are only a template."""
+    for tid in sorted(freqs):
+        if tid not in keep_trips:
+            continue
+        keep_trips.discard(tid)
+        pts = seqs.pop(tid, None)
+        if not pts:
+            continue
+        starts: set[int] = set()
+        for start, end, headway in freqs[tid]:
+            step = max(headway, FREQUENCY_MIN_HEADWAY_S)
+            starts.update(t // 60 for t in range(start, end, step))
+        base = pts[0][1]
+        for minute in sorted(starts):
+            new = f"{tid}@{minute:04d}"
+            seqs[new] = [(p, minute + m - base) for p, m in pts]
+            trips_meta[new] = trips_meta[tid]
+            if tid in trip_shape:
+                trip_shape[new] = trip_shape[tid]
+            keep_trips.add(new)
+
+
 def _load_parts(
     z: zipfile.ZipFile,
     include_route: RoutePred,
@@ -1299,6 +1380,9 @@ def _load_parts(
         seq.append((sid, m))
     if cur:
         flush(cur, seq)
+    freqs = _frequencies(z)
+    if freqs:
+        _expand_frequencies(freqs, seqs, trips_meta, trip_shape, keep_trips)
 
     shapes: dict[str, str] = {}
     if any(tid in trip_shape for tid in keep_trips):

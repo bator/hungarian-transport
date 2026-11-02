@@ -98,10 +98,29 @@ def main() -> int:
         "szekesfehervar",
         "tatabanya",
         "varpalota",
+        "debrecen",
+        "kecskemet",
+        "oroshaza",
+        "urom",
+        "budapest-siklo",
+        "budapest-libego",
+        "dunakeszi-komp",
+        "szentendre-rev",
     ):
         failed |= not check(f"city feed {expected}", expected in ids)
+    # Weekendbus: calendar ended 2025-12-31. GYSEV: its trains are in MÁV's feed.
     failed |= not check("weekendbus stays out", "weekendbus" not in ids)
-    failed |= not check("debrecen stays out", "debrecen" not in ids)
+    failed |= not check("gysev stays out", "gysev" not in ids)
+    failed |= not check(
+        "city feed ids are not Volán local ids (the guard groups volan-* as one feed)",
+        not any(i.startswith("volan-") for i in ids),
+        str(ids),
+    )
+    failed |= not check(
+        "city feed names are 'Town — operator' (the card takes the town before ' — ')",
+        all(len(f["name"].split(" — ")) == 2 and all(f["name"].split(" — ")) for f in CITY_FEEDS),
+        str([f["name"] for f in CITY_FEEDS]),
+    )
 
     os.environ["HUNGARIAN_TRANSPORT_SKIP_CATALOG"] = "1"
     bahart = next(f for f in CITY_FEEDS if f["id"] == "bahart")
@@ -977,6 +996,7 @@ def main() -> int:
     failed |= digest_checks()
     failed |= padded_feed_checks()
     failed |= untimed_stop_checks()
+    failed |= frequency_checks()
 
     return 1 if failed else 0
 
@@ -1116,6 +1136,54 @@ def untimed_stop_checks() -> bool:
         gc._interpolate_times([("1", 480), ("2", 485)]) == [("1", 480), ("2", 485)]
         and _parts_of(_SMALL_FEED)[0]["t"][0][3] == [480, 485, 490],
     )
+    return failed
+
+
+def frequency_checks() -> bool:
+    """frequencies.txt (the Sikló, the Libegő, the Dunakeszi ferry): a trip
+    runs from each window's start every headway while before its end, its
+    own stop_times only giving the times between the stops."""
+    failed = False
+    freq = "trip_id,start_time,end_time,headway_secs,exact_times\n"
+    files = dict(_SMALL_FEED, **{
+        "trips.txt": _SMALL_FEED["trips.txt"] + "R1,S1,T2,SH1\n",
+        # T1 is a template at 00:00 (as gy-mate.hu writes them), T2 a plain trip.
+        "stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+                          "T1,00:00:00,00:00:00,1,1\nT1,00:01:35,00:01:35,2,2\nT1,00:04:00,00:04:00,3,3\n"
+                          "T2,09:00:00,09:00:00,1,1\nT2,09:05:00,09:05:00,3,2\n",
+        "frequencies.txt": freq + "T1,08:10:00,08:40:00,600,0\nT1,20:00:00,20:20:01,1200,1\n",
+    })
+    p = _parts_of(files)[0]
+    times = sorted(t[3] for t in p["t"])
+    failed |= not check(
+        "a frequencies.txt trip runs every headway from start_time while before end_time",
+        times == [[490, 491, 494], [500, 501, 504], [510, 511, 514], [540, 545],
+                  [1200, 1201, 1204], [1220, 1221, 1224]],
+        repr(times),
+    )
+    failed |= not check(
+        "every copy keeps the trip's route and shape",
+        all(t[1] == "12" and t[5] == 0 for t in p["t"]) and len(p["shapes"]) == 1,
+        repr(p["t"]),
+    )
+    fast = dict(files, **{"frequencies.txt": freq + "T1,10:00:00,10:30:00,20,0\n"})
+    q = _parts_of(fast)[0]
+    starts = sorted(t[3][0] for t in q["t"] if len(t[3]) == 3)
+    failed |= not check(
+        f"a headway under {gc.FREQUENCY_MIN_HEADWAY_S} s (Libegő: 20 s) is listed every {gc.FREQUENCY_MIN_HEADWAY_S // 60} minutes",
+        starts == list(range(600, 630, gc.FREQUENCY_MIN_HEADWAY_S // 60)),
+        repr(starts),
+    )
+    dead = dict(files, **{"frequencies.txt": freq + "T1,10:00:00,09:00:00,600,0\nT1,10:00:00,11:00:00,0,0\n"})
+    r = _parts_of(dead)[0]
+    failed |= not check(
+        "a frequencies.txt trip whose windows cannot run is not kept at its template time",
+        [t[3] for t in r["t"]] == [[540, 545]],
+        repr(r["t"]),
+    )
+    a = _parts_of(files)
+    b = _parts_of(files)
+    failed |= not check("frequency expansion gives the same part every time", a == b)
     return failed
 
 
