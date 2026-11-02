@@ -23,6 +23,9 @@ const RT_RETRY_MS = 5 * 60000;
    feed has not confirmed it for this long. */
 const RT_KNOWN_MS = 3 * 60000;
 const RT_LATE_MAX_MIN = 60;
+/* The service's plausible delay range (realtime.py MIN_DELAY, MAX_DELAY). */
+const RT_EARLY_MAX_S = -20 * 60;
+const RT_LATE_MAX_S = 6 * 3600;
 
 Object.assign(BkkLib, {
   hasRealtime(hass) {
@@ -78,9 +81,15 @@ Object.assign(BkkLib, {
     const lo = Math.max(0, oidx - RT_STOPS_BEFORE);
     const pre = feed + ':';
     const stops = [];
+    /* The stops the trip calls at more than once (a loop): the integration
+       takes their order from the others. */
+    const calls = new Map();
+    ps.forEach((p) => calls.set(p, (calls.get(p) || 0) + 1));
+    const repeat = [];
     for (let i = lo; i <= hi && stops.length < RT_MAX_STOPS; i++) {
       const st = idx.stops[ps[i]];
       const id = String((st && st.id) || '');
+      if (calls.get(ps[i]) > 1) repeat.push(stops.length);
       stops.push(id.indexOf(pre) === 0 ? id.slice(pre.length) : id);
     }
     const out = {
@@ -91,6 +100,7 @@ Object.assign(BkkLib, {
       stops,
       from: oidx - lo,
     };
+    if (repeat.length) out.repeat = repeat;
     if (typeof t[6] === 'string' && t[6]) out.trip = t[6];
     if (hi === didx && didx >= 0) out.to = didx - lo;
     return out;
@@ -111,6 +121,8 @@ Object.assign(BkkLib, {
         req.stops = stops.map(String);
         if (Number.isInteger(rt.from) && rt.from < stops.length) req.from = rt.from;
         if (Number.isInteger(rt.to) && rt.to < stops.length) req.to = rt.to;
+        const repeat = (rt.repeat || []).filter((i) => Number.isInteger(i) && i >= 0 && i < stops.length);
+        if (repeat.length) req.repeat = repeat;
       }
       return { feed: rt.feed, req };
     }
@@ -176,6 +188,8 @@ Object.assign(BkkLib, {
   _rtMayDelay(row) {
     if (row.rtDelay) return true;
     if (Number(row.delay || 0) !== 0) return false;
+    /* A Transitous row with real-time data already has the live time. */
+    if (row.motisLive) return false;
     return !(BkkLib.isFutarTripId(row.tripId) && BkkLib.mapGpsLatLon(row.lat, row.lon));
   },
   _rtMayPosition(row) {
@@ -187,11 +201,16 @@ Object.assign(BkkLib, {
     let changed = false;
     const now = nowSec == null ? Math.floor(Date.now() / 1000) : nowSec;
     const delay = Number(hit.delay);
-    if (hit.delay != null && Number.isFinite(delay) && BkkLib._rtMayDelay(row)) {
-      const sched = Number(row.sched || row.dep || 0);
-      const at = Number(hit.time);
+    const hasDelay = hit.delay != null && Number.isFinite(delay);
+    const sched = Number(row.sched || row.dep || 0);
+    const at = Number(hit.time);
+    /* The predicted time alone (a feed without delays) is enough when it is
+       a plausible distance from the timetable's. */
+    const hasTime = hit.time != null && Number.isFinite(at) && at > 0 && !hit.approx
+      && sched > 0 && at - sched >= RT_EARLY_MAX_S && at - sched <= RT_LATE_MAX_S;
+    if ((hasDelay || hasTime) && BkkLib._rtMayDelay(row)) {
       if (sched > 0) {
-        row.dep = hit.time != null && Number.isFinite(at) && at > 0 && !hit.approx ? at : sched + delay;
+        row.dep = hasTime ? at : sched + delay;
         row.delay = row.dep - sched;
       }
       row.rtDelay = true;
@@ -202,7 +221,10 @@ Object.assign(BkkLib, {
         /* From the timetable's ride time, so a row answered twice in one
            poll (or carried to the next) is not shifted twice. */
         if (row.travelSched == null) row.travelSched = Number(row.travel);
-        const travel = Math.round(row.travelSched + (destDelay - delay) / 60);
+        /* Against the departure the row shows (the feed's time, when it
+           gave one), not the delay field beside it. */
+        const boardDelay = sched > 0 ? row.delay : delay;
+        const travel = Math.round(row.travelSched + (destDelay - boardDelay) / 60);
         if (travel > 0) row.travel = travel;
       }
       changed = true;

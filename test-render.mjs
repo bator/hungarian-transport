@@ -10402,6 +10402,50 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     gtfsRow.travel === 51 && gtfsRow.travelSched === 50 && gtfsRow.delay === 240,
     JSON.stringify({ travel: gtfsRow.travel, travelSched: gtfsRow.travelSched }));
 
+  /* The feed's predicted time wins over its delay field for the departure;
+     the ride time is counted from that same departure. */
+  {
+    const s0 = 1793605800;
+    const row = { tripId: 'gtfs:rt-time', sched: s0, dep: s0, delay: 0, travel: 30 };
+    Lib.applyRealtimeRow(row, { delay: 60, time: s0 + 120, dest_delay: 180, approx: false }, s0);
+    check('the ride time follows the departure the row shows, not the delay field',
+      row.dep === s0 + 120 && row.delay === 120 && row.travel === 31,
+      JSON.stringify({ dep: row.dep - s0, delay: row.delay, travel: row.travel }));
+  }
+
+  /* A loop trip: the card tells the integration which stops of its slice the
+     trip calls at more than once, so their order comes from the others. */
+  {
+    const idx = { stops: [{ id: 'paks:A' }, { id: 'paks:X' }, { id: 'paks:B' }, { id: 'paks:C' }] };
+    const t = [0, '1', [0, 1, 2, 3, 1, 2], [480, 482, 484, 486, 488, 490], 3, -1, 'T9'];
+    const d = Lib.rtGtfsDescriptor('paks', idx, t, 2, 3, '20261102');
+    const ask = Lib.rtRequest({ tripId: 'gtfs:1:20261102:484:0', rt: d }, {});
+    check('a loop trip’s repeated stops are sent as repeat',
+      JSON.stringify(d.stops) === '["A","X","B","C"]' && JSON.stringify(d.repeat) === '[1,2]'
+        && JSON.stringify(ask.req.repeat) === '[1,2]' && ask.req.from === 2 && ask.req.to === 3,
+      JSON.stringify({ d, req: ask.req }));
+    const plain = Lib.rtGtfsDescriptor('paks', idx, [0, '1', [0, 1, 2, 3], [480, 482, 484, 486], 3, -1, 'T8'], 1, 3, '20261102');
+    check('a trip without repeated stops sends no repeat', plain.repeat === undefined, JSON.stringify(plain));
+  }
+
+  /* A feed that gives only the predicted time moves the row too; a Transitous
+     row that is live already keeps its time (no second delay). */
+  {
+    const s0 = 1793605800;
+    const timeOnly = { tripId: 'gtfs:rt-only-time', sched: s0, dep: s0, delay: 0 };
+    Lib.applyRealtimeRow(timeOnly, { delay: null, time: s0 + 180, approx: false }, s0);
+    const far = { tripId: 'gtfs:rt-far-time', sched: s0, dep: s0, delay: 0 };
+    Lib.applyRealtimeRow(far, { delay: null, time: s0 + 8 * 3600, approx: false }, s0);
+    const live = { tripId: 'motis:1:1', sched: s0 + 600, dep: s0 + 600, delay: 0, motisLive: true };
+    Lib.applyRealtimeRow(live, { delay: 600, time: null, approx: false }, s0);
+    const plain = { tripId: 'motis:1:2', sched: s0, dep: s0, delay: 0, motisLive: false };
+    Lib.applyRealtimeRow(plain, { delay: 600, time: null, approx: false }, s0);
+    check('a time-only answer moves the row, a live Transitous row keeps its own time',
+      timeOnly.dep === s0 + 180 && timeOnly.delay === 180 && far.dep === s0
+        && live.dep === s0 + 600 && live.delay === 0 && plain.dep === s0 + 600,
+      JSON.stringify({ timeOnly: timeOnly.dep - s0, far: far.dep - s0, live: live.dep - s0, plain: plain.dep - s0 }));
+  }
+
   /* The same trips towards another stop are another answer (dest_delay). */
   calls.length = 0;
   Lib._rtCache.clear();

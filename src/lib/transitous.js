@@ -437,6 +437,7 @@ Object.assign(BkkLib, {
         booking: !!(leg.mayRequireBooking || fromStop.mayRequireBooking || leg.booking),
         trainNumber,
         travel,
+        motisLive: !!leg.realTime,
         shape: BkkLib.decodePolyline(leg.legGeometry),
       };
       BkkLib.applyRailBadge(row);
@@ -609,6 +610,7 @@ Object.assign(BkkLib, {
         head: String(st.headsign || destName || ''),
         tripTo: destName,
         nextNames: ((st.nextStops || []).map((p) => p && p.name).filter(Boolean)),
+        motisLive: !!st.realTime,
         trainNumber: BkkLib.motisRailMode(rawType)
           ? BkkLib.emmaTrainNumber(st.tripShortName || label)
           : '',

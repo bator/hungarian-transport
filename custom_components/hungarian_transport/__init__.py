@@ -81,6 +81,12 @@ REALTIME_TRIP_SCHEMA = vol.Schema(
             vol.Length(max=realtime.MAX_STOPS),
             [vol.All(cv.string, vol.Length(min=1, max=64))],
         ),
+        # Indices of the stops the trip calls at more than once (loops).
+        vol.Optional("repeat"): vol.All(
+            cv.ensure_list,
+            vol.Length(max=realtime.MAX_STOPS),
+            [vol.All(vol.Coerce(int), vol.Range(min=0, max=realtime.MAX_STOPS - 1))],
+        ),
         vol.Optional("from"): vol.All(vol.Coerce(int), vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
         vol.Optional("to"): vol.All(vol.Coerce(int), vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
     }
