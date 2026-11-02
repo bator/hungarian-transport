@@ -650,11 +650,15 @@ Object.assign(BkkLib, {
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), '#0F6FC6', '#ffffff', 'bus', 'BUS', minutesAfter);
   },
   /* GTFS route_type (basic and extended codes) to the card's vehicle kind.
-     Buses keep the caller's default: coach for Volán, bus for city feeds. */
+     Buses keep the caller's default: coach for Volán, bus for city feeds.
+     A cable tram (5) is a tram; the Libegő (6, aerial lift) and the Sikló
+     (7, funicular) have kinds of their own. */
   gtfsRouteKind(routeType, vehicle, rawType) {
     const rt = Number(routeType);
     if (!Number.isFinite(rt)) return { vehicle, rawType };
-    if (rt === 0 || (rt >= 900 && rt < 1000)) return { vehicle: 'tram', rawType: 'TRAM' };
+    if (rt === 0 || rt === 5 || (rt >= 900 && rt < 1000)) return { vehicle: 'tram', rawType: 'TRAM' };
+    if (rt === 6 || (rt >= 1300 && rt < 1400)) return { vehicle: 'aerial', rawType: 'AERIAL_LIFT' };
+    if (rt === 7 || (rt >= 1400 && rt < 1500)) return { vehicle: 'funicular', rawType: 'FUNICULAR' };
     if (rt === 1 || (rt >= 400 && rt < 500)) return { vehicle: 'subway', rawType: 'SUBWAY' };
     if (rt === 2 || (rt >= 100 && rt < 200) || rt === 300) return { vehicle: 'rail', rawType: 'RAIL' };
     if (rt === 4 || (rt >= 1000 && rt < 1100) || rt === 1200) return { vehicle: 'ferry', rawType: 'FERRY' };

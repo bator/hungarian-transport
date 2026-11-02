@@ -141,6 +141,9 @@ export const VEHICLE_ICONS = {
   RAIL: 'mdi:train',
   TRAIN: 'mdi:train',
   FERRY: 'mdi:ferry',
+  /* MDI has no funicular: the Sikló's car on its rails reads as a tram. */
+  FUNICULAR: 'mdi:tram',
+  AERIAL_LIFT: 'mdi:gondola',
 };
 
 export function vehicleIcon(type) {

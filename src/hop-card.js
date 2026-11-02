@@ -747,6 +747,8 @@ export class BKKHopCard extends HTMLElement {
     if (k === 'coach') return t(lang, 'mapTypeCoach');
     if (k === 'bus') return t(lang, 'mapTypeBus');
     if (k === 'ferry') return t(lang, 'mapTypeFerry');
+    if (k === 'funicular') return t(lang, 'mapTypeFunicular');
+    if (k === 'aerial') return t(lang, 'mapTypeAerial');
     return t(lang, 'mapTypeVehicle');
   }
 
@@ -758,6 +760,8 @@ export class BKKHopCard extends HTMLElement {
     if (k === 'rail' || k === 'train') return '\ud83d\ude86';
     if (k === 'bus' || k === 'coach') return '\ud83d\ude8c';
     if (k === 'ferry') return '\u26f4';
+    if (k === 'funicular') return '\ud83d\ude9e';
+    if (k === 'aerial') return '\ud83d\udea1';
     return '\ud83d\udccd';
   }
 

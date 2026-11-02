@@ -501,6 +501,8 @@ Object.assign(BkkLib, {
       if (/subway|metro/.test(s)) return 'subway';
       if (/trolley/.test(s)) return 'trolley';
       if (/ferry|boat/.test(s)) return 'ferry';
+      if (/funicular/.test(s)) return 'funicular';
+      if (/aerial|areal|gondola|cable_car/.test(s)) return 'aerial';
       if (/coach/.test(s)) return 'coach';
       if (/bus/.test(s)) return 'bus';
       return s;
@@ -513,6 +515,9 @@ Object.assign(BkkLib, {
     if (v === 'subway' || v === 'metro' || /SUBWAY|METRO/.test(typ)) return 'subway';
     if (v === 'trolley' || v === 'trolleybus' || typ.indexOf('TROLLEY') >= 0) return 'trolley';
     if (v === 'ferry' || typ.indexOf('FERRY') >= 0) return 'ferry';
+    /* Not a bus (Zugliget, Libegő is also the 291's stop). */
+    if (v === 'funicular' || typ.indexOf('FUNICULAR') >= 0) return 'funicular';
+    if (v === 'aerial' || /AERIAL|AREAL|GONDOLA|CABLE_CAR/.test(typ)) return 'aerial';
     if (v === 'coach' || typ === 'COACH' || /^gtfs:/i.test(String(row.tripId || ''))) return 'coach';
     if (v === 'bus' || typ === 'BUS') return 'bus';
     if (BkkLib.rowTrainNumber(row) && !/bus|tram|subway|trolley|coach/i.test(v)) return 'rail';

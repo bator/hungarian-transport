@@ -3366,6 +3366,22 @@ Lib.mavIndex = origMavIndex;
   check('GTFS route_type picks tram, trolleybus, ferry, or keeps the bus default',
     JSON.stringify(kinds) === JSON.stringify(['tram', 'trolleybus', 'ferry', 'bus', 'bus', 'tram']),
     JSON.stringify(kinds));
+  const lifts = [5, 6, 1307, 7, 1400].map((rt) => Lib.gtfsRouteKind(rt, 'bus', 'BUS'));
+  check('GTFS route_type: a cable tram is a tram, the Libegő an aerial lift, the Sikló a funicular',
+    JSON.stringify(lifts.map((k) => k.vehicle)) === JSON.stringify(['tram', 'aerial', 'aerial', 'funicular', 'funicular'])
+    && lifts[1].rawType === 'AERIAL_LIFT' && lifts[3].rawType === 'FUNICULAR',
+    JSON.stringify(lifts));
+  const libego = { label: 'Libegő', dep, vehicle: 'aerial', rawType: 'AERIAL_LIFT', tripId: 'gtfs:budapest-libego' };
+  const siklo = { label: 'Sikló', dep, vehicle: 'funicular', rawType: 'FUNICULAR', tripId: 'gtfs:budapest-siklo' };
+  check('the Libegő and the Sikló are not matched with a bus at the same stop',
+    Lib.vehicleBucket(libego) === 'aerial' && Lib.vehicleBucket(siklo) === 'funicular'
+    && Lib.vehicleBucket('AREAL_LIFT') === 'aerial' && Lib.vehicleBucket('FUNICULAR') === 'funicular'
+    && Lib.pickMotisVehicle([{ label: '291', dep: dep + 20, vehicle: 'bus', shape: shp }], libego, null) === null
+    && Lib.pickMotisVehicle([{ label: '16', dep: dep + 20, vehicle: 'bus', shape: shp }], siklo, null) === null);
+  check('the Libegő and the Sikló rows get their own icons',
+    Lib.asRow(Object.assign({}, libego), 'János-hegy', 'hu').icon === 'mdi:gondola'
+    && Lib.asRow(Object.assign({}, siklo), 'Szent György tér', 'hu').icon === 'mdi:tram',
+    JSON.stringify([Lib.asRow(Object.assign({}, libego), '', 'hu').icon, Lib.asRow(Object.assign({}, siklo), '', 'hu').icon]));
   const hits = [
     { id: 'hu-bkk_F00867', name: 'Béla utca', lat: 47.58, lon: 19.08, areas: [{ name: 'Budapest' }] },
     { id: 'hu-volanbusz_hkir_665919', name: 'Székesfehérvár, Béla utca', lat: 47.22, lon: 18.46,
