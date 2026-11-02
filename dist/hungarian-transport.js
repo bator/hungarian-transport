@@ -6741,7 +6741,7 @@ Object.assign(BkkLib, {
   async realtimeFetch(hass, feed, trips) {
     if (!BkkLib.hasRealtime(hass) || BkkLib._rtNoFeed.has(feed)) return null;
     if (Date.now() < BkkLib._rtDownUntil) return null;
-    const sig = feed + "|" + trips.map((t2) => t2.key).join("|");
+    const sig = feed + "|" + JSON.stringify(trips);
     const hit = BkkLib._rtCache.get(sig);
     if (hit && Date.now() - hit.at < RT_CACHE_MS) return hit.out;
     const running = BkkLib._rtInflight.get(sig);
@@ -6798,7 +6798,8 @@ Object.assign(BkkLib, {
       BkkLib._rtRemember(row.tripId, row.delay, now * 1e3);
       const destDelay = Number(hit.dest_delay);
       if (row.travel != null && hit.dest_delay != null && Number.isFinite(destDelay) && !hit.approx) {
-        const travel = Math.round(Number(row.travel) + (destDelay - delay) / 60);
+        if (row.travelSched == null) row.travelSched = Number(row.travel);
+        const travel = Math.round(row.travelSched + (destDelay - delay) / 60);
         if (travel > 0) row.travel = travel;
       }
       changed = true;
@@ -9751,7 +9752,9 @@ ${this._stopPinCss()}
       list.forEach((row) => {
         const old = row && row.tripId ? prev.get(String(row.tripId)) : null;
         if (!old || old === row) return;
-        if (row.travel == null && old.travel != null) row.travel = old.travel;
+        if (row.travel == null && old.travel != null) {
+          row.travel = old.travelSched != null ? old.travelSched : old.travel;
+        }
         if (/^(gtfs:|motis:)/.test(String(row.tripId)) && !BkkLib.mapGpsLatLon(row.lat, row.lon)) {
           const gps = BkkLib.mapGpsLatLon(old.lat, old.lon);
           if (gps) {

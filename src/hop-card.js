@@ -1702,7 +1702,9 @@ ${this._stopPinCss()}
       list.forEach((row) => {
         const old = row && row.tripId ? prev.get(String(row.tripId)) : null;
         if (!old || old === row) return;
-        if (row.travel == null && old.travel != null) row.travel = old.travel;
+        if (row.travel == null && old.travel != null) {
+          row.travel = old.travelSched != null ? old.travelSched : old.travel;
+        }
         if (/^(gtfs:|motis:)/.test(String(row.tripId)) && !BkkLib.mapGpsLatLon(row.lat, row.lon)) {
           const gps = BkkLib.mapGpsLatLon(old.lat, old.lon);
           if (gps) {

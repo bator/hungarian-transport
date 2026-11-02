@@ -10395,6 +10395,24 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     foot.includes('\u00c9l\u0151 poz\u00edci\u00f3') && !foot.includes('Becs\u00fclt') && estFoot.includes('Becs\u00fclt'),
     JSON.stringify({ foot, estFoot }));
 
+  /* The card answers the same rows twice in one poll (before and after
+     ELVIRA/FUTÁR republish them): the ride time moves once. */
+  await Lib.attachRealtime(hass, [gtfsRow], { mode: 'volan' });
+  check('a row answered twice keeps one ride-time correction',
+    gtfsRow.travel === 51 && gtfsRow.travelSched === 50 && gtfsRow.delay === 240,
+    JSON.stringify({ travel: gtfsRow.travel, travelSched: gtfsRow.travelSched }));
+
+  /* The same trips towards another stop are another answer (dest_delay). */
+  calls.length = 0;
+  Lib._rtCache.clear();
+  const toNear = [{ key: 'k', trip_id: 'hkir_1000_7-1', stops: ['hkir_1', 'hkir_2', 'hkir_3'], from: 0, to: 1 }];
+  const toFar = [{ ...toNear[0], to: 2 }];
+  await Lib.realtimeFetch(hass, 'volan', toNear);
+  await Lib.realtimeFetch(hass, 'volan', toFar);
+  await Lib.realtimeFetch(hass, 'volan', toFar);
+  check('cards asking the same trips for other destinations do not share an answer; the same request does',
+    calls.length === 2, String(calls.length));
+
   /* The next poll's rows come from the timetable again: the known delay is on
      them at once, and a trip four minutes late stays after its timetable time. */
   const lateIdx = { ...volanIdx, t: [[0, '1000', [0, 1, 2], [nowMin - 2, nowMin + 43, nowMin + 48], 3, -1, 'hkir_1000_9-1']] };
