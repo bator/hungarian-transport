@@ -320,11 +320,13 @@ kártya. Itt a *60* egy képernyőn tartja a sűrűn járó villamost:
 
 ![Helyi kártya a szerkesztőben: a szegedi 2-es villamos, 60 perces előretekintéssel](images/hu/editor-city-done.webp)
 
-Választható többek között Miskolc, Pécs, Szeged, Szombathely, Veszprém,
-Paks, Dombóvár, Budaörs, Hódmezővásárhely, Kaposvár, Kiskunhalas,
-Székesfehérvár, Tatabánya, Várpalota, a Kecskeméti Kisvasút, a Bahart
-balatoni hajói, valamint a Volánbusz helyi hálózatai, például Sopron vagy
-Eger.
+Választható többek között Debrecen, Miskolc, Pécs, Szeged, Kecskemét,
+Szombathely, Veszprém, Paks, Dombóvár, Budaörs, Hódmezővásárhely, Kaposvár,
+Kiskunhalas, Orosháza, Székesfehérvár, Tatabánya, Várpalota, Üröm, a
+Kecskeméti Kisvasút, a Budavári Sikló és a Zugligeti Libegő (Budapest alatt),
+a Bahart balatoni hajói, a Dunakeszi–Horány és a Pásztor-rév
+(Szentendre–Szigetmonostor) kompja, valamint a Volánbusz helyi hálózatai,
+például Sopron vagy Eger.
 
 ![A szegedi 2-es villamos a Széchenyi térről az Európa ligethez](images/hu/card-city.webp)
 
@@ -338,7 +340,7 @@ Balról jobbra:
 
 | Elem | Jelentése |
 | --- | --- |
-| Járműikon | Busz, villamos, troli, metró, vonat vagy hajó. |
+| Járműikon | Busz, villamos, troli, metró, vonat, hajó vagy kötélpálya (a Libegő; a Sikló villamosként látszik). |
 | Vonaljelzés | A vonal a saját színeiben (az S, G és Z vonatoknál a budapesti elővárosi színekkel). |
 | Célállomás | Merre megy a jármű. MÁV soroknál szürkével a vonatszám is. |
 | Kék doboz | A vágány (MÁV, az ELVIRA-ból). |

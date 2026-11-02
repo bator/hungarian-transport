@@ -4,7 +4,7 @@
 [![release][release-badge]][release-url]
 
 Home Assistant integration and dashboard cards for Hungarian public
-transport: **BKK**, **MÁV**, **Volán**, 16 city operators and the Volánbusz
+transport: **BKK**, **MÁV**, **Volán**, 24 city operators and the Volánbusz
 local networks of some 60 towns. See the next
 departures between two stops, follow a vehicle on the map, and plan a trip
 across every network. In Hungarian and English.
@@ -26,8 +26,9 @@ every screen, step by step, with screenshots.
   delays, platforms, seat-reservation and national-pass marks, accessibility
   and bike icons, and the travel time to your stop.
 - **Four modes:** Budapest (BKK FUTÁR, live), MÁV trains, Volán coaches, and
-  city networks (Miskolc, Pécs, Szeged, Szombathely, Veszprém, Kecskemét
-  narrow-gauge railway, Balaton ferries and more).
+  city networks (Debrecen, Miskolc, Pécs, Szeged, Kecskemét, Szombathely,
+  Veszprém, the Budavári Sikló and the Zugliget Libegő, Balaton and Danube
+  ferries and more).
 - **Route map:** the trip's own route, where you get on and off, and the
   vehicle's live or estimated position.
 - **Planner:** search any stop, street or town; live board, or itineraries
@@ -137,7 +138,14 @@ Timetables and live data: [BKK Open Data](https://opendata.bkk.hu/),
 [KTI](https://gtfs.kti.hu/), [MÁV-csoport](https://www.mavcsoport.hu/gtfs-igenybejelento)
 (CC0), [Transitous](https://transitous.org/), and the city operators MVK,
 Tüke Busz, SZKT, Blaguss, V-Busz, Paksbusz, PTKE, Kecskeméti Kisvasút, HOMM,
-Bahart, HVSZ, KKZRT, Halasbusz, Székesfehérvár helyi, T-Busz and THURY-BUSZ.
+Bahart, HVSZ, KKZRT, Halasbusz, Székesfehérvár helyi, T-Busz, THURY-BUSZ,
+DKV (Debrecen), KeKo (Kecskemét) and Orosháza Önkormányzat (its
+gpspositions.net export). The timetables of the Budavári Sikló, the
+Zugligeti Libegő, the Dunakeszi–Horány and Pásztor (Szentendre–Szigetmonostor)
+ferries and the Üröm minibus are
+[Máté Gyöngyösi's feeds](https://github.com/gy-mate/gtfs-feeds)
+([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)). Several city
+feeds are fetched through [menetbrand](https://gtfs.menetbrand.com/).
 Train routes matched to the rails with
 [pfaedle](https://github.com/ad-freiburg/pfaedle) on
 [OpenStreetMap](https://www.openstreetmap.org/copyright) data
