@@ -73,7 +73,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.http import KEY_HASS
 from homeassistant.util import dt as dt_util
 
-from . import mav_index
+from . import mav_index, storage
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -687,6 +687,10 @@ async def _build_locked(hass: HomeAssistant, www: Path, job: _Job) -> dict[str, 
     ir.async_delete_issue(hass, DOMAIN, ISSUE_BUILD_FAILED)
     persistent_notification.async_dismiss(hass, NOTIFICATION_ID)
     audit = stats["audit"]
+    # For the sensors: a local build (or upload) is what www/ serves now.
+    await storage.async_record_mav_install(
+        hass, storage.SOURCE_LOCAL, stats.get("feed_version"), index[0] if index else None, audit.get("ok_ratio")
+    )
     _LOGGER.info(
         "MÁV index %s: %s trains, %s variants (%s on the station line), audit %s/%s trains",
         stats["feed_version"], stats["trains"] + stats["lines"], stats["variants"],

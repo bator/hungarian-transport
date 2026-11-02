@@ -134,5 +134,108 @@
         "none": "— nincs —"
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "mav_route_index": {
+        "name": "MÁV útvonal-index",
+        "state_attributes": {
+          "feed_version": {
+            "name": "Feed verzió"
+          },
+          "source": {
+            "name": "Forrás",
+            "state": {
+              "release": "Kiadás",
+              "daily": "Napi index",
+              "local": "Helyi build"
+            }
+          },
+          "installed_at": {
+            "name": "Telepítve"
+          },
+          "trains": {
+            "name": "Vonatok"
+          },
+          "lines": {
+            "name": "Vonalak"
+          },
+          "fitted_share": {
+            "name": "Illesztett arány"
+          },
+          "audit_ok_ratio": {
+            "name": "Audit OK arány"
+          }
+        }
+      },
+      "volan_timetable": {
+        "name": "Volán menetrend",
+        "state_attributes": {
+          "feed_version": {
+            "name": "Feed verzió"
+          },
+          "trips": {
+            "name": "Járatok"
+          },
+          "stops": {
+            "name": "Megállók"
+          },
+          "updated_at": {
+            "name": "Készült"
+          },
+          "source": {
+            "name": "Forrás",
+            "state": {
+              "release": "Kiadás",
+              "local_updater": "Helyi frissítő"
+            }
+          }
+        }
+      },
+      "city_timetables": {
+        "name": "Városi menetrendek",
+        "state_attributes": {
+          "operators": {
+            "name": "Szolgáltatók"
+          },
+          "trips": {
+            "name": "Járatok"
+          },
+          "feeds": {
+            "name": "Feedek"
+          }
+        }
+      },
+      "daily_mav_check": {
+        "name": "Napi MÁV ellenőrzés",
+        "state_attributes": {
+          "result": {
+            "name": "Eredmény",
+            "state": {
+              "installed": "Telepítve",
+              "up_to_date": "Naprakész",
+              "local_wins": "Helyi feed marad",
+              "superseded": "Újabb index marad",
+              "busy": "Build fut",
+              "failed": "Sikertelen",
+              "unsupported": "Nem támogatott",
+              "disabled": "Kikapcsolva"
+            }
+          },
+          "manifest_feed": {
+            "name": "Manifest feed"
+          },
+          "manifest_built_at": {
+            "name": "Manifest készült"
+          },
+          "next_run": {
+            "name": "Következő futás"
+          },
+          "failure_streak": {
+            "name": "Hibás napok sorozata"
+          }
+        }
+      }
+    }
   }
 }

@@ -1,0 +1,18 @@
+{
+  "entity": {
+    "sensor": {
+      "mav_route_index": {
+        "default": "mdi:train"
+      },
+      "volan_timetable": {
+        "default": "mdi:bus"
+      },
+      "city_timetables": {
+        "default": "mdi:bus-multiple"
+      },
+      "daily_mav_check": {
+        "default": "mdi:calendar-sync"
+      }
+    }
+  }
+}

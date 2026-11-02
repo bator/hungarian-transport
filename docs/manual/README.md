@@ -559,6 +559,41 @@ in the timetables guide. In short:
 A failed update keeps the previous timetable and sends a notification (see
 [When an update fails](../timetables.md#when-an-update-fails)).
 
+### 9.1 Timetable sensors
+
+The integration's device, *Hungarian transport*, has four sensors that
+say which timetables the cards use:
+
+- **MÁV route index**: the date of the MÁV timetable on the maps, with
+  its source (`daily`, `local` or `release`), install time, trains and lines.
+- **Volán timetable**: the date of the Volán timetable, with its trips,
+  stops and build time.
+- **City timetables**: when the city timetables were built, with the
+  number of operators and trips.
+- **Daily MÁV check**: when the daily MÁV index last ran, its result
+  (`installed`, `up_to_date`, `failed`, `disabled` …) and the next run.
+
+An entities card for them:
+
+```yaml
+type: entities
+title: Timetables
+entities:
+  - sensor.hungarian_transport_mav_route_index
+  - sensor.hungarian_transport_volan_timetable
+  - entity: sensor.hungarian_transport_city_timetables
+    format: relative
+  - entity: sensor.hungarian_transport_daily_mav_check
+    format: relative
+  - type: attribute
+    entity: sensor.hungarian_transport_daily_mav_check
+    attribute: result
+    name: Daily MÁV check result
+```
+
+Every attribute is listed in
+[Timetable sensors](../timetables.md#timetable-sensors).
+
 ---
 
 ## 10. Troubleshooting

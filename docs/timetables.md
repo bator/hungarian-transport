@@ -9,6 +9,7 @@ current. The [user manual](manual/README.md) covers the cards themselves.
 - [MÁV train routes](#máv-train-routes)
 - [Live positions and route shapes](#live-positions-and-route-shapes)
 - [Keeping the GTFS indexes current](#keeping-the-gtfs-indexes-current)
+- [Timetable sensors](#timetable-sensors)
 - [When an update fails](#when-an-update-fails)
 - [Feed sources](#feed-sources)
 - [Card-only install and building the indexes](#card-only-install-and-building-the-indexes)
@@ -454,6 +455,49 @@ installed the card somewhere else, for example
 `run_update.sh` included, to another webhook URL. That file wins over a
 `/config/.env`; `export KEY=value` and `# comments` after a value are fine.
 Point `notify.admins` at whatever notifier you use, or drop that automation.
+
+## Timetable sensors
+
+The integration has four sensors on one service device, *Hungarian
+transport*, so a dashboard or an automation can tell which timetables the
+cards use and when they changed:
+
+| Entity | State | Attributes |
+| --- | --- | --- |
+| `sensor.hungarian_transport_mav_route_index` (MÁV route index) | date of the served MÁV index's feed (`20261030.M2ChangeID` → 2026-10-30) | `feed_version`; `source`: `daily` (the daily index installed it), `local` (a build of `/config/hungarian-transport/mav-gtfs.zip`, an upload, or the local updater, whose durable copy is this index) or `release`; `installed_at` (UTC); `trains`, `lines`; `fitted_share` (the share of routes that follow the rails rather than the line through the stations); `audit_ok_ratio` when the build or the manifest gave one |
+| `sensor.hungarian_transport_volan_timetable` (Volán timetable) | date in the Volán index's feed version (`volan:01716.20261102` → 2026-11-02) | `feed_version`, `trips`, `stops`, `updated_at` (the index's build time from its gzip header, else the file's time), `source`: `local_updater` when the updater's copy in `/config/hungarian-transport` is this index, else `release` |
+| `sensor.hungarian_transport_city_timetables` (City timetables) | when the city index was built (timestamp) | `operators`, `trips`, and `feeds` (operator → feed version) when there are at most 10 |
+| `sensor.hungarian_transport_daily_mav_check` (Daily MÁV check) | when the daily MÁV index last ran (timestamp; unknown before its first round) | `result`: `installed`, `up_to_date`, `superseded` (www/ serves a newer feed than the manifest's), `local_wins`, `busy`, `failed`, `unsupported`, or `disabled` with the option off; `manifest_feed`, `manifest_built_at`, `next_run` (UTC), `failure_streak` (days in a row) |
+
+An index sensor is unavailable while its index is missing from www/. The
+sensors update right after the daily index or a local MÁV build changed
+something, and every 30 minutes otherwise, which catches the local
+updater and HACS. Each index is read again only when its file changed
+(size or time), in the background: the Volán and city indexes are
+streamed, not loaded.
+
+An entities card for a dashboard:
+
+```yaml
+type: entities
+title: Timetables
+entities:
+  - entity: sensor.hungarian_transport_mav_route_index
+    secondary_info: last-changed
+  - type: attribute
+    entity: sensor.hungarian_transport_mav_route_index
+    attribute: source
+    name: MÁV index source
+  - entity: sensor.hungarian_transport_volan_timetable
+  - entity: sensor.hungarian_transport_city_timetables
+    format: relative
+  - entity: sensor.hungarian_transport_daily_mav_check
+    format: relative
+  - type: attribute
+    entity: sensor.hungarian_transport_daily_mav_check
+    attribute: result
+    name: Daily MÁV check result
+```
 
 ## When an update fails
 
