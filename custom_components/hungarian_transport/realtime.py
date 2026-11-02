@@ -789,27 +789,34 @@ def _plausible(delay: int | None) -> int | None:
     return int(delay)
 
 
-def _match_stops(tu: TripUpdate, stops: list[str], upto: int) -> list[StopUpdate | None]:
-    """The update of each of stops[: upto + 1], in trip order: a stop the trip
-    calls at twice (a loop's first and last stop) takes its update after the
-    previous stop's, not always the first one."""
+def _match_stops(
+    tu: TripUpdate, stops: list[str], upto: int, repeat: frozenset[int] = frozenset()
+) -> list[StopUpdate | None]:
+    """The update of each of stops[: upto + 1]. A stop the trip calls at
+    once (not in repeat, the card's indices of the stops its trip calls at
+    more than once) with one update is certain and anchors the order; a
+    repeated stop takes its first update after the last anchor. A repeated
+    stop is no anchor even with one update: a feed may have dropped the
+    calls already served, so its first update there is the next call."""
     ups = tu.stops
     out: list[StopUpdate | None] = []
     pos = 0
-    for s in stops[: upto + 1]:
-        k = next((i for i in range(pos, len(ups)) if _stop_hit(ups[i].stop_id, s)), None)
-        if k is None:
-            # None after the previous stop's (a feed that dropped the stops
-            # already served): its first update, if any.
-            k = next((i for i in range(len(ups)) if _stop_hit(ups[i].stop_id, s)), None)
-        out.append(None if k is None else ups[k])
-        if k is not None:
+    for i, s in enumerate(stops[: upto + 1]):
+        calls = [k for k, u in enumerate(ups) if _stop_hit(u.stop_id, s)]
+        if not calls:
+            out.append(None)
+            continue
+        if len(calls) == 1 and i not in repeat:
+            k = calls[0]
             pos = k + 1
+        else:
+            k = next((c for c in calls if c >= pos), calls[0])
+        out.append(ups[k])
     return out
 
 
 def _at_stop(
-    tu: TripUpdate, stops: list[str], index: int, arriving: bool
+    tu: TripUpdate, stops: list[str], index: int, arriving: bool, repeat: frozenset[int] = frozenset()
 ) -> tuple[int | None, int | None, int | None]:
     """(delay, predicted epoch, relationship) at stops[index]: its own
     update, else the nearest earlier stop's delay (GTFS-RT delays propagate
@@ -819,7 +826,7 @@ def _at_stop(
     relationship 2. Neither has a delay. 0 when a delay or time was found."""
     if not 0 <= index < len(stops):
         return None, None, None
-    by_stop = _match_stops(tu, stops, index)
+    by_stop = _match_stops(tu, stops, index, repeat)
     own = by_stop[index]
     if own is not None and own.relationship == 1:
         return None, None, 1
@@ -830,9 +837,11 @@ def _at_stop(
         if u.relationship == 2:
             return None, None, 2
         first, second = ((u.arr_delay, u.dep_delay) if arriving else (u.dep_delay, u.arr_delay))
-        delay = _plausible(first if first is not None else second)
+        raw = first if first is not None else second
+        delay = _plausible(raw)
         when = None
-        if j == index:
+        if j == index and (raw is None or delay is not None):
+            # The predicted time, unless its delay was a glitch.
             when = (u.arr_time if arriving else u.dep_time) or (u.dep_time if arriving else u.arr_time)
         if delay is None and when is None:
             continue
@@ -890,11 +899,12 @@ def _answer(cfg: FeedConfig, loaded, req: dict[str, Any], now: float) -> dict[st
     canceled = bool(tu and tu.relationship in (3, 7))
     vehicle = _vehicle_json(vp, now)
     if tu is not None and not canceled:
+        repeat = frozenset(int(i) for i in req.get("repeat") or ())
         if src is not None:
-            delay, when, board_rel = _at_stop(tu, stops, int(src), arriving=False)
+            delay, when, board_rel = _at_stop(tu, stops, int(src), False, repeat)
         if dst is not None:
-            dest_delay, dest_when, dest_rel = _at_stop(tu, stops, int(dst), arriving=True)
-        if delay is None and board_rel is None:
+            dest_delay, dest_when, dest_rel = _at_stop(tu, stops, int(dst), True, repeat)
+        if delay is None and when is None and board_rel is None:
             # No update at or before the boarding stop the card knows (a
             # feed with other stop ids, or a sparse one): the delay where
             # the vehicle is now, marked approximate. Not when the feed
@@ -902,7 +912,10 @@ def _answer(cfg: FeedConfig, loaded, req: dict[str, Any], now: float) -> dict[st
             delay = _current_delay(tu, vp if vehicle is not None else None)
             approx = delay is not None
     skipped = board_rel == 1 or dest_rel == 1
-    if delay is None and dest_delay is None and vehicle is None and not canceled and not skipped:
+    if (
+        delay is None and when is None and dest_delay is None and dest_when is None
+        and vehicle is None and not canceled and not skipped
+    ):
         return None
     return {
         "trip_id": tid,

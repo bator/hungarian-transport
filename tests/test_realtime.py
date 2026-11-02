@@ -265,8 +265,8 @@ def test_canceled_trip() -> None:
 
 
 def _stu(stop: bytes, seq: int, delay: int | None = None, rel: int = 0, when: int | None = None) -> bytes:
-    """A StopTimeUpdate with its departure event (delay, time; small values)."""
-    event = (b"\x08" + bytes([delay]) if delay is not None else b"") + (
+    """A StopTimeUpdate with its departure event (delay and time not negative)."""
+    event = (b"\x08" + _varint(delay) if delay is not None else b"") + (
         b"\x10" + _varint(when) if when is not None else b""
     )
     return _ld(2, b"\x08" + bytes([seq]) + (_ld(3, event) if event else b"") + _ld(4, stop) + (
@@ -317,15 +317,40 @@ def test_no_data_at_the_boarding_stop_is_no_estimate_either() -> None:
 def test_a_loop_trip_takes_each_stops_own_call() -> None:
     # A ... B ... A: the second A is the alighting stop, 7 minutes late.
     loaded = _one_trip(_stu(b"A", 1, 0, when=1000), _stu(b"B", 2, 60), _stu(b"A", 3, 120, when=2000))
-    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], **{"from": 1, "to": 2})
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], repeat=[0, 2], **{"from": 1, "to": 2})
     assert (hit["delay"], hit["dest_delay"], hit["dest_time"]) == (60, 120, 2000)
     # Boarding at the loop's last call.
-    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], **{"from": 2})
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], repeat=[0, 2], **{"from": 2})
     assert (hit["delay"], hit["time"]) == (120, 2000)
     # A feed that dropped the calls already served still finds B.
     loaded = _one_trip(_stu(b"B", 2, 60), _stu(b"A", 3, 120))
-    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], **{"from": 1, "to": 2})
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], repeat=[0, 2], **{"from": 1, "to": 2})
     assert (hit["delay"], hit["dest_delay"]) == (60, 120)
+
+
+def test_a_repeated_stop_alone_does_not_skip_the_next_call() -> None:
+    # The trip runs A X B C X B; the feed has dropped A and the first X. The
+    # card's slice before B is A, X: B's next call is the first one.
+    loaded = _one_trip(_stu(b"B", 3, 50), _stu(b"C", 4, 40), _stu(b"X", 5, 30), _stu(b"B", 6, 10))
+    hit = _answer(
+        _cfg("trip"), loaded, trip_id="T1", stops=["A", "X", "B", "C"], repeat=[1, 2], **{"from": 2, "to": 3}
+    )
+    assert (hit["delay"], hit["dest_delay"]) == (50, 40)
+    # With every call in the feed, a stop called at once anchors the second B.
+    loaded = _one_trip(*(_stu(s, i, d) for i, (s, d) in enumerate(
+        [(b"A", 0), (b"X", 10), (b"B", 20), (b"C", 30), (b"X", 40), (b"B", 50)], start=1)))
+    assert _answer(_cfg("trip"), loaded, trip_id="T1", stops=["C", "X", "B"], repeat=[1, 2], **{"from": 2})["delay"] == 50
+    assert _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "X", "B"], repeat=[1, 2], **{"from": 2})["delay"] == 20
+
+
+def test_a_predicted_time_without_a_delay_is_answered() -> None:
+    loaded = _one_trip(_stu(b"A", 1, 60), _stu(b"B", 2, when=NOW + 600))
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B"], **{"from": 1})
+    assert (hit["delay"], hit["time"], hit["approx"]) == (None, NOW + 600, False)
+    # A glitch delay (seven hours) takes its time along.
+    loaded = _one_trip(_stu(b"A", 1, 7 * 3600, when=NOW + 7 * 3600))
+    hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A"], **{"from": 0})
+    assert hit is None or hit["time"] is None
 
 
 def test_deleted_trip_is_canceled() -> None:
@@ -377,6 +402,7 @@ SZFV_REQ = {
             "trip_id": "hkir_H6112_607-1",
             "date": "20261102",
             "stops": ["hkir_666060", "hkir_665955", "hkir_666225"],
+            "repeat": [0],
             "from": 1,
             "to": 2,
         },
@@ -496,6 +522,8 @@ async def test_mav_matches_by_train_number(hass, aioclient_mock, freezer) -> Non
         {"feed": "volan", "trips": [{"key": "a", "train": "IC 822"}]},
         {"feed": "volan", "trips": [{"key": "a", "trip_id": "x" * 200}]},
         {"feed": "volan", "trips": [{"key": "a", "from": realtime.MAX_STOPS}]},
+        {"feed": "volan", "trips": [{"key": "a", "repeat": [realtime.MAX_STOPS]}]},
+        {"feed": "volan", "trips": [{"key": "a", "repeat": ["x"]}]},
     ],
 )
 async def test_service_validates_input(hass, aioclient_mock, data) -> None:

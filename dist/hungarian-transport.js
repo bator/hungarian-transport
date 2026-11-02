@@ -1923,6 +1923,7 @@ Object.assign(BkkLib, {
         booking: !!(leg.mayRequireBooking || fromStop.mayRequireBooking || leg.booking),
         trainNumber,
         travel,
+        motisLive: !!leg.realTime,
         shape: BkkLib.decodePolyline(leg.legGeometry)
       };
       BkkLib.applyRailBadge(row);
@@ -2090,6 +2091,7 @@ Object.assign(BkkLib, {
         head: String(st.headsign || destName || ""),
         tripTo: destName,
         nextNames: (st.nextStops || []).map((p) => p && p.name).filter(Boolean),
+        motisLive: !!st.realTime,
         trainNumber: BkkLib.motisRailMode(rawType) ? BkkLib.emmaTrainNumber(st.tripShortName || label) : "",
         shape: []
       };
@@ -6625,6 +6627,8 @@ var RT_CACHE_MS = 25e3;
 var RT_RETRY_MS = 5 * 6e4;
 var RT_KNOWN_MS = 3 * 6e4;
 var RT_LATE_MAX_MIN = 60;
+var RT_EARLY_MAX_S = -20 * 60;
+var RT_LATE_MAX_S = 6 * 3600;
 Object.assign(BkkLib, {
   hasRealtime(hass) {
     const domain = hass && hass.services && hass.services.hungarian_transport;
@@ -6679,9 +6683,13 @@ Object.assign(BkkLib, {
     const lo = Math.max(0, oidx - RT_STOPS_BEFORE);
     const pre = feed + ":";
     const stops = [];
+    const calls = /* @__PURE__ */ new Map();
+    ps.forEach((p) => calls.set(p, (calls.get(p) || 0) + 1));
+    const repeat = [];
     for (let i = lo; i <= hi && stops.length < RT_MAX_STOPS; i++) {
       const st = idx.stops[ps[i]];
       const id = String(st && st.id || "");
+      if (calls.get(ps[i]) > 1) repeat.push(stops.length);
       stops.push(id.indexOf(pre) === 0 ? id.slice(pre.length) : id);
     }
     const out = {
@@ -6692,6 +6700,7 @@ Object.assign(BkkLib, {
       stops,
       from: oidx - lo
     };
+    if (repeat.length) out.repeat = repeat;
     if (typeof t2[6] === "string" && t2[6]) out.trip = t2[6];
     if (hi === didx && didx >= 0) out.to = didx - lo;
     return out;
@@ -6712,6 +6721,8 @@ Object.assign(BkkLib, {
         req2.stops = stops.map(String);
         if (Number.isInteger(rt.from) && rt.from < stops.length) req2.from = rt.from;
         if (Number.isInteger(rt.to) && rt.to < stops.length) req2.to = rt.to;
+        const repeat = (rt.repeat || []).filter((i) => Number.isInteger(i) && i >= 0 && i < stops.length);
+        if (repeat.length) req2.repeat = repeat;
       }
       return { feed: rt.feed, req: req2 };
     }
@@ -6775,6 +6786,7 @@ Object.assign(BkkLib, {
   _rtMayDelay(row) {
     if (row.rtDelay) return true;
     if (Number(row.delay || 0) !== 0) return false;
+    if (row.motisLive) return false;
     return !(BkkLib.isFutarTripId(row.tripId) && BkkLib.mapGpsLatLon(row.lat, row.lon));
   },
   _rtMayPosition(row) {
@@ -6786,11 +6798,13 @@ Object.assign(BkkLib, {
     let changed = false;
     const now = nowSec == null ? Math.floor(Date.now() / 1e3) : nowSec;
     const delay = Number(hit.delay);
-    if (hit.delay != null && Number.isFinite(delay) && BkkLib._rtMayDelay(row)) {
-      const sched = Number(row.sched || row.dep || 0);
-      const at = Number(hit.time);
+    const hasDelay = hit.delay != null && Number.isFinite(delay);
+    const sched = Number(row.sched || row.dep || 0);
+    const at = Number(hit.time);
+    const hasTime = hit.time != null && Number.isFinite(at) && at > 0 && !hit.approx && sched > 0 && at - sched >= RT_EARLY_MAX_S && at - sched <= RT_LATE_MAX_S;
+    if ((hasDelay || hasTime) && BkkLib._rtMayDelay(row)) {
       if (sched > 0) {
-        row.dep = hit.time != null && Number.isFinite(at) && at > 0 && !hit.approx ? at : sched + delay;
+        row.dep = hasTime ? at : sched + delay;
         row.delay = row.dep - sched;
       }
       row.rtDelay = true;
