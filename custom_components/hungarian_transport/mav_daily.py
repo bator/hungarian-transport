@@ -66,7 +66,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_chang
 from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
-from . import mav, mav_index
+from . import mav, mav_index, storage
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -109,6 +109,10 @@ LOCAL_WINS = "local_wins"
 BUSY = "busy"
 UNSUPPORTED = "unsupported"
 FAILED = "failed"
+# Only in what a round records for the sensors (storage.DAILY_ROUND):
+# UP_TO_DATE because www/ serves an index of another feed that is not older
+# (a local build, a release's newer one), not this manifest's own.
+SUPERSEDED = "superseded"
 _INSTALL = "install"
 
 
@@ -316,6 +320,7 @@ async def async_update(hass: HomeAssistant, www: Path) -> str:
     # When this round's manifest was built (timetable_notify.py tells a
     # stale site; DailyIndexUpdater looks again later): this round's only.
     data.pop("mav_daily_built_at", None)
+    data.pop("mav_daily_feed", None)
     try:
         man = check_manifest(await _get(session, MANIFEST_URL, MAX_MANIFEST, MANIFEST_TIMEOUT))
     except _Unsupported as err:
@@ -326,6 +331,7 @@ async def async_update(hass: HomeAssistant, www: Path) -> str:
         return FAILED
     data["mav_daily_built_at"] = built_at(man)
     feed = man["feed"]
+    data["mav_daily_feed"] = feed
     decision = await hass.async_add_executor_job(
         partial(decide, feed, out, src, mav._today(), state_file=state_file, rank=manifest_rank(man))
     )
@@ -371,6 +377,7 @@ async def async_update(hass: HomeAssistant, www: Path) -> str:
         "lines": man["lines"] if isinstance(man.get("lines"), int) else 0,
     }
     audit = man.get("audit") if isinstance(man.get("audit"), dict) else {}
+    await storage.async_record_mav_install(hass, storage.SOURCE_DAILY, feed, len(raw), audit.get("ok_ratio"))
     _LOGGER.info(
         "Installed the daily MÁV route index of feed %s (%s trains and lines, built %s, audit %s/%s trains)",
         feed, count, man.get("built_at"), audit.get("trains_ok"), audit.get("trains"),
@@ -397,7 +404,9 @@ class DailyIndexUpdater:
     (or one of its retries) that went through while the manifest was older
     than STALE_MANIFEST is tried once more, LATE_DELAY later. One round is
     pending at a time: the daily time replaces a retry still waiting.
-    on_result gets each round's result (timetable_notify.py)."""
+    on_result gets each round's result (timetable_notify.py); then the round
+    is recorded for the sensors (storage.DAILY_ROUND), and next_run says
+    when the next one is due."""
 
     def __init__(
         self,
@@ -411,6 +420,7 @@ class DailyIndexUpdater:
         self._time = daily_time
         self._on_result = on_result
         self._unsub: CALLBACK_TYPE | None = None
+        self._pending_at: datetime | None = None
         self._task: asyncio.Task[Any] | None = None
         self._stopped = False
         self._next = _FIRST
@@ -434,6 +444,7 @@ class DailyIndexUpdater:
             if self._unsub is not None:
                 self._unsub()
                 self._unsub = None
+            self._pending_at = None
             if self._task is not None and not self._task.done():
                 self._task.cancel()
 
@@ -456,10 +467,28 @@ class DailyIndexUpdater:
             self._unsub()
         self._next = kind
         self._unsub = async_call_later(self._hass, delay, self._job)
+        self._pending_at = dt_util.utcnow() + timedelta(seconds=delay)
+        storage.async_signal(self._hass)
+
+    @property
+    def next_run(self) -> datetime | None:
+        """When the next round is due (UTC): the one pending, else the next
+        daily time (without its jitter); None once stopped."""
+        if self._stopped:
+            return None
+        if self._pending_at is not None:
+            return self._pending_at
+        now = dt_util.now()
+        day = now.date()
+        at = datetime.combine(day, self._time, tzinfo=now.tzinfo)
+        if at <= now:
+            at = datetime.combine(day + timedelta(days=1), self._time, tzinfo=now.tzinfo)
+        return dt_util.as_utc(at)
 
     @callback
     def _fire(self, _now: Any) -> None:
         self._unsub = None
+        self._pending_at = None
         if self._task is not None and not self._task.done():
             # The previous round still runs (a slow download): it is this one.
             return
@@ -500,11 +529,21 @@ class DailyIndexUpdater:
             _LOGGER.debug("Daily MÁV route index round failed", exc_info=True)
             result = FAILED
         self._after(result)
-        if self._on_result is None:
-            return
-        try:
-            await self._on_result(result)
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - a notification never stops the updater
-            _LOGGER.warning("Timetable update notification failed", exc_info=True)
+        if self._on_result is not None:
+            try:
+                await self._on_result(result)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a notification never stops the updater
+                _LOGGER.warning("Timetable update notification failed", exc_info=True)
+        await self._record(result)
+
+    async def _record(self, result: str) -> None:
+        """The round for the sensors, after on_result (its failure streak)."""
+        data = self._hass.data.get(DOMAIN, {})
+        feed = data.get("mav_daily_feed")
+        if result == UP_TO_DATE and feed:
+            served = await self._hass.async_add_executor_job(mav._index_feed, self._www / mav.INDEX_NAME)
+            if served and served != feed:
+                result = SUPERSEDED
+        await storage.async_record_daily_round(self._hass, result, feed, data.get("mav_daily_built_at"))

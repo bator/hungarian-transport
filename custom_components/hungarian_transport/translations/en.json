@@ -134,5 +134,108 @@
         "none": "— none —"
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "mav_route_index": {
+        "name": "MÁV route index",
+        "state_attributes": {
+          "feed_version": {
+            "name": "Feed version"
+          },
+          "source": {
+            "name": "Source",
+            "state": {
+              "release": "Release",
+              "daily": "Daily index",
+              "local": "Local build"
+            }
+          },
+          "installed_at": {
+            "name": "Installed"
+          },
+          "trains": {
+            "name": "Trains"
+          },
+          "lines": {
+            "name": "Lines"
+          },
+          "fitted_share": {
+            "name": "Fitted share"
+          },
+          "audit_ok_ratio": {
+            "name": "Audit OK ratio"
+          }
+        }
+      },
+      "volan_timetable": {
+        "name": "Volán timetable",
+        "state_attributes": {
+          "feed_version": {
+            "name": "Feed version"
+          },
+          "trips": {
+            "name": "Trips"
+          },
+          "stops": {
+            "name": "Stops"
+          },
+          "updated_at": {
+            "name": "Built"
+          },
+          "source": {
+            "name": "Source",
+            "state": {
+              "release": "Release",
+              "local_updater": "Local updater"
+            }
+          }
+        }
+      },
+      "city_timetables": {
+        "name": "City timetables",
+        "state_attributes": {
+          "operators": {
+            "name": "Operators"
+          },
+          "trips": {
+            "name": "Trips"
+          },
+          "feeds": {
+            "name": "Feeds"
+          }
+        }
+      },
+      "daily_mav_check": {
+        "name": "Daily MÁV check",
+        "state_attributes": {
+          "result": {
+            "name": "Result",
+            "state": {
+              "installed": "Installed",
+              "up_to_date": "Up to date",
+              "local_wins": "Local feed kept",
+              "superseded": "Newer index kept",
+              "busy": "Build running",
+              "failed": "Failed",
+              "unsupported": "Unsupported",
+              "disabled": "Disabled"
+            }
+          },
+          "manifest_feed": {
+            "name": "Manifest feed"
+          },
+          "manifest_built_at": {
+            "name": "Manifest built"
+          },
+          "next_run": {
+            "name": "Next run"
+          },
+          "failure_streak": {
+            "name": "Failure streak (days)"
+          }
+        }
+      }
+    }
   }
 }

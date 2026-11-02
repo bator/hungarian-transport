@@ -667,7 +667,8 @@ def test_exception_translations_are_raised_and_error_codes_documented(lang) -> N
     HomeAssistantError; a service response's "error" code is not looked up
     there, so it is explained in the service description instead."""
     strings = json.loads((_PKG / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
-    source = "\n".join(p.read_text(encoding="utf-8") for p in _PKG.glob("*.py"))
+    # sensor.py's translation keys are entity names (tests/test_sensor.py).
+    source = "\n".join(p.read_text(encoding="utf-8") for p in _PKG.glob("*.py") if p.name != "sensor.py")
     raised = set(re.findall(r'translation_key="(\w+)"', source))
     assert set(strings["exceptions"]) == raised
     codes = set(re.findall(r'"error": "(\w+)"', (_PKG / "__init__.py").read_text(encoding="utf-8")))

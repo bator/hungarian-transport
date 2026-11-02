@@ -46,10 +46,9 @@ from homeassistant.components import persistent_notification
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.start import async_at_started
-from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from . import mav, mav_daily
+from . import mav, mav_daily, storage
 from .const import (
     CONF_DAILY_TIME,
     CONF_NOTIFY_DAILY,
@@ -63,8 +62,8 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-STORAGE_KEY = f"{DOMAIN}.updates"
-STORAGE_VERSION = 1
+STORAGE_KEY = storage.STORAGE_KEY
+STORAGE_VERSION = storage.STORAGE_VERSION
 NOTIFICATION_MAV_DAILY = f"{DOMAIN}_mav_daily"
 NOTIFICATION_SHIPPED = f"{DOMAIN}_shipped_indexes"
 NOTIFICATION_DAILY_FAILED = f"{DOMAIN}_mav_daily_failed"
@@ -183,28 +182,10 @@ def changed_indexes(seen: Mapping[str, Any] | None, version: str, feeds: Mapping
     return changed
 
 
-def _store(hass: HomeAssistant) -> Store:
-    data = hass.data.setdefault(DOMAIN, {})
-    if "update_store" not in data:
-        data["update_store"] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
-    return data["update_store"]
-
-
-async def _load(hass: HomeAssistant) -> dict[str, Any]:
-    """The stored record, loaded once per Home Assistant run."""
-    data = hass.data.setdefault(DOMAIN, {})
-    if "update_state" not in data:
-        try:
-            stored = await _store(hass).async_load()
-        except Exception as err:  # noqa: BLE001 - a broken file starts over
-            _LOGGER.warning("Could not read the timetable update record: %s", err)
-            stored = None
-        data["update_state"] = stored if isinstance(stored, dict) else {}
-    return data["update_state"]
-
-
-async def _save(hass: HomeAssistant, state: dict[str, Any]) -> None:
-    await _store(hass).async_save(state)
+# The record lives in storage.py, shared with the timetable sensors.
+_store = storage.store
+_load = storage.async_load
+_save = storage.async_save
 
 
 class UpdateNotifier:

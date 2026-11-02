@@ -9,6 +9,7 @@ import voluptuous as vol
 from homeassistant.components import frontend
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import (
     HomeAssistantError,
@@ -23,7 +24,7 @@ from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 
-from . import mav, mav_daily, timetable_notify
+from . import mav, mav_daily, timetable_notify, timetables
 from .assets import asset_tag
 from .const import (
     CONF_API_KEY,
@@ -72,6 +73,7 @@ LOADER_FILE = "hungarian-transport-loader.js"
 LOADER_URL = f"/hungarian-transport/{LOADER_FILE}"
 WWW_PATH = Path(__file__).parent / "www"
 ISSUE_MISSING_ASSETS = "missing_assets"
+PLATFORMS = [Platform.SENSOR]
 
 
 def _entry_loaded(hass: HomeAssistant) -> bool:
@@ -255,14 +257,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await notifier.async_restore()
     except Exception:  # noqa: BLE001 - never a reason not to set up
         _LOGGER.warning("Could not check the shipped timetables for changes", exc_info=True)
-    if entry.options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV):
+    updater: mav_daily.DailyIndexUpdater | None = None
+    daily = bool(entry.options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV))
+    if daily:
         # The daily MÁV index from GitHub Pages (mav_daily.py), at the time
         # the options set; turned off in the options, no request is made.
-        entry.async_on_unload(
-            mav_daily.DailyIndexUpdater(
-                hass, WWW_PATH, notifier.daily_time, notifier.async_daily_result
-            ).start()
+        updater = mav_daily.DailyIndexUpdater(
+            hass, WWW_PATH, notifier.daily_time, notifier.async_daily_result
         )
+        entry.async_on_unload(updater.start())
+    # The timetable sensors (sensor.py): read once now, then on every change
+    # the integration makes and every 30 minutes (timetables.py).
+    status = timetables.TimetableStatus(
+        hass, WWW_PATH, daily_enabled=daily, next_run=(lambda: updater.next_run) if updater else None
+    )
+    await status.async_refresh()
+    entry.async_on_unload(status.start())
+    entry.runtime_data = status
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     api_key = _entry_api_key(entry)
     if not api_key:
@@ -318,6 +330,8 @@ async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload the integration."""
+    if not await hass.config_entries.async_unload_platforms(entry, PLATFORMS):
+        return False
     card_url = hass.data[DOMAIN].get("card_url")
     if card_url is None:
         return True
