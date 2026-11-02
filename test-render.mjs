@@ -10299,4 +10299,160 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   check('nameMatcher answers as nameEq for every pair', same8, JSON.stringify(diffs8));
 }
 
+/* GTFS-Realtime (realtime.js): which trips the card asks the integration
+   about, what it copies onto the rows, and what it leaves alone. */
+{
+  const nowMin = Lib.volanDay(0).mins;
+  const day = Lib.volanDay(0);
+  const mk = (i, id, name, lat, lon) => ({ i, id, name, fold: Lib.fold(name), key: Lib.norm(name), op: 0, num: String(i), lat, lon });
+  const volanIdx = {
+    stops: [mk(0, 'hkir_1', 'Budapest, Népliget', 47.47, 19.1), mk(1, 'hkir_2', 'Tata, Kórház tér', 47.64, 18.31),
+      mk(2, 'hkir_3', 'Tata, autóbusz-állomás', 47.65, 18.32)],
+    ops: [], byNum: new Map(), byKey: new Map(),
+    c: [['1111111', '20000101', '20991231']], a: [[]], r: [[]],
+    t: [[0, '1000', [0, 1, 2], [nowMin + 5, nowMin + 50, nowMin + 55], 3, -1, 'hkir_1000_7-1'],
+      [0, '1000', [0, 1, 2], [nowMin - 6, nowMin + 39, nowMin + 44], 3, -1, 'hkir_1000_5-1']],
+  };
+  Lib._rtKnown.clear();
+  const rows = Lib.gtfsDepartures(volanIdx, 'hkir_1', { key: Lib.norm('Tata, autóbusz-állomás'), name: 'Tata, autóbusz-állomás' },
+    'Budapest, Népliget', null, '#F9AB13', '#000000', 'coach', 'COACH', 120);
+  const rt0 = rows[0] && rows[0].rt;
+  check('a Volán row asks the volan feed about its index trip, with its stops up to the alighting one',
+    rows.length === 1 && rt0 && rt0.feed === 'volan' && rt0.trip === 'hkir_1000_7-1' && rt0.route === '1000'
+      && rt0.start === nowMin + 5 && rt0.date === day.ymd && JSON.stringify(rt0.stops) === '["hkir_1","hkir_2","hkir_3"]'
+      && rt0.from === 0 && rt0.to === 2,
+    JSON.stringify(rt0));
+
+  const cityIdx = {
+    stops: [{ ...mk(0, 'veszprem:SP1', 'Agroker', 47.1, 17.9), op: 1 }, { ...mk(1, 'veszprem:SP2', 'Almádi út', 47.11, 17.91), op: 1 }],
+    ops: [{ i: 0, id: 'miskolc', name: 'Miskolc' }, { i: 1, id: 'veszprem', name: 'Veszprém' }],
+    byNum: new Map(), byKey: new Map(),
+    c: [['1111111', '20000101', '20991231']], a: [[]], r: [[]],
+    t: [[0, '5', [0, 1], [nowMin + 3, nowMin + 9], 3, -1]],
+  };
+  const cityRows = Lib.gtfsDepartures(cityIdx, 'veszprem:SP1', { key: Lib.norm('Almádi út'), name: 'Almádi út' }, 'Agroker', 1,
+    '', '', 'bus', 'BUS', 60);
+  const crt = cityRows[0] && cityRows[0].rt;
+  check('a city row asks its operator’s feed, without the operator prefix, and an index without trip ids sends route and start',
+    crt && crt.feed === 'veszprem' && !('trip' in crt) && JSON.stringify(crt.stops) === '["SP1","SP2"]' && crt.start === nowMin + 3,
+    JSON.stringify(crt));
+
+  const calls = [];
+  let answer = {};
+  const hass = {
+    states: {},
+    services: { hungarian_transport: { realtime: {} } },
+    connection: {
+      sendMessagePromise: async (msg) => {
+        calls.push(msg);
+        return { context: {}, response: typeof answer === 'function' ? answer(msg) : answer };
+      },
+    },
+  };
+  const nowSec = Math.floor(Date.now() / 1000);
+  const gtfsRow = rows[0];
+  const sched = gtfsRow.sched;
+  answer = (msg) => ({
+    feed: msg.service_data.feed,
+    trips: { [gtfsRow.tripId]: { trip_id: 'hkir_1000_7-1', delay: 240, dest_delay: 300, approx: false,
+      vehicle: { lat: 47.5, lon: 19.0, bearing: 90, timestamp: nowSec - 20 } } },
+  });
+  Lib._rtCache.clear();
+  Lib._rtNoFeed.clear();
+  Lib._rtDownUntil = 0;
+  const changed = await Lib.attachRealtime(hass, [gtfsRow], { mode: 'volan' });
+  const sent = calls[0] && calls[0].service_data;
+  check('the card calls hungarian_transport.realtime once with the row’s trip',
+    calls.length === 1 && calls[0].service === 'realtime' && calls[0].return_response === true
+      && sent.feed === 'volan' && sent.trips.length === 1 && sent.trips[0].trip_id === 'hkir_1000_7-1'
+      && sent.trips[0].from === 0 && sent.trips[0].to === 2,
+    JSON.stringify(sent));
+  const shown = Lib.asRow(gtfsRow, 'Tata', 'hu');
+  check('a reported delay moves the departure like a BKK live delay, and the vehicle is a live position',
+    changed && gtfsRow.delay === 240 && gtfsRow.dep === sched + 240 && shown.delay === 240
+      && shown.predicted_attime !== shown.attime && shown.hasGps && shown.lat === 47.5 && gtfsRow.rtPos === true
+      && gtfsRow.travel === 51,
+    JSON.stringify({ delay: gtfsRow.delay, travel: gtfsRow.travel, hasGps: shown.hasGps }));
+  const foot = card._mapFootText(shown, true, shown.hasGps, false, 'hu', true, true);
+  const estFoot = card._mapFootText(Lib.asRow({ ...rows[0], lat: null, lon: null }, '', 'hu'), true, false, true, 'hu', true, true);
+  check('the map labels the feed’s vehicle as the live position, a row without one as the timetable estimate',
+    foot.includes('\u00c9l\u0151 poz\u00edci\u00f3') && !foot.includes('Becs\u00fclt') && estFoot.includes('Becs\u00fclt'),
+    JSON.stringify({ foot, estFoot }));
+
+  /* The next poll's rows come from the timetable again: the known delay is on
+     them at once, and a trip four minutes late stays after its timetable time. */
+  const lateIdx = { ...volanIdx, t: [[0, '1000', [0, 1, 2], [nowMin - 2, nowMin + 43, nowMin + 48], 3, -1, 'hkir_1000_9-1']] };
+  const lateKey = 'gtfs:1000:' + day.ymd + ':' + (nowMin - 2) + ':0';
+  const before = Lib.gtfsDepartures(lateIdx, 'hkir_1', { key: Lib.norm('Tata, autóbusz-állomás'), name: 'Tata' },
+    'Budapest, Népliget', null, '', '', 'coach', 'COACH', 120);
+  Lib._rtRemember(lateKey, 240);
+  const after = Lib.gtfsDepartures(lateIdx, 'hkir_1', { key: Lib.norm('Tata, autóbusz-állomás'), name: 'Tata' },
+    'Budapest, Népliget', null, '', '', 'coach', 'COACH', 120);
+  check('a late trip stays on the board at the time the feed gave, and only while the feed confirms it',
+    before.length === 0 && after.length === 1 && after[0].delay === 240 && after[0].rtDelay === true
+      && Lib.rtKnownDelay(lateKey, Date.now() + 4 * 60000) === 0,
+    JSON.stringify({ before: before.length, after: after.map((r) => r.delay) }));
+
+  /* FUTÁR's own live row and an ELVIRA delay keep their data. */
+  const futar = { tripId: 'BKK_1000_1', label: '1000', sched: nowSec + 600, dep: nowSec + 660, delay: 60, lat: 47.4, lon: 19.2,
+    rt: { feed: 'volan', trip: 'x', stops: ['hkir_1'], from: 0 } };
+  const elvira = { tripId: 'elvira:IC822', label: 'IC', vehicle: 'rail', rawType: 'RAIL', trainNumber: '822',
+    sched: nowSec + 900, dep: nowSec + 1200, delay: 300 };
+  answer = (msg) => ({ feed: msg.service_data.feed, trips: Object.fromEntries(msg.service_data.trips.map((t) => [t.key, {
+    delay: 30, approx: false, vehicle: { lat: 46.5, lon: 18.4, timestamp: nowSec } }])) });
+  calls.length = 0;
+  Lib._rtCache.clear();
+  await Lib.attachRealtime(hass, [futar, elvira], { mode: 'mav', stopId: 'BKK_005501024', destStopId: 'BKK_005506189' });
+  const mavSent = calls.find((c) => c.service_data.feed === 'mav');
+  check('a train row is asked by train number with its station codes',
+    mavSent && mavSent.service_data.trips[0].train === '822'
+      && JSON.stringify(mavSent.service_data.trips[0].stops) === '["005501024","005506189"]',
+    JSON.stringify(mavSent && mavSent.service_data));
+  check('FUTÁR’s live delay and position and an ELVIRA delay are not replaced; a train without a position gets one',
+    futar.delay === 60 && futar.lat === 47.4 && elvira.delay === 300 && elvira.lat === 46.5,
+    JSON.stringify({ futar: [futar.delay, futar.lat], elvira: [elvira.delay, elvira.lat] }));
+
+  /* Nothing in the feed for the trip: the row keeps the timetable (the map
+     then draws the estimate); no service: no call at all. */
+  Lib._rtKnown.clear();
+  const plain = Lib.gtfsDepartures(volanIdx, 'hkir_1', { key: Lib.norm('Tata, autóbusz-állomás'), name: 'Tata' },
+    'Budapest, Népliget', null, '', '', 'coach', 'COACH', 120)[0];
+  answer = { feed: 'volan', trips: {} };
+  Lib._rtCache.clear();
+  const none = await Lib.attachRealtime(hass, [plain], { mode: 'volan' });
+  calls.length = 0;
+  const bare = await Lib.attachRealtime({ states: {}, services: { hungarian_transport: {} } }, [plain], { mode: 'volan' });
+  check('without an answer for the trip the row keeps its timetable time and no position; without the service no call',
+    !none && !bare && plain.delay === 0 && !Lib.asRow(plain, '', 'hu').hasGps && calls.length === 0);
+
+  /* rt_no_feed: that operator is not asked again; a failing call backs off. */
+  answer = { feed: 'veszprem', trips: {}, error: 'rt_no_feed' };
+  calls.length = 0;
+  Lib._rtCache.clear();
+  await Lib.attachRealtime(hass, [cityRows[0]], { mode: 'helyi' });
+  Lib._rtCache.clear();
+  await Lib.attachRealtime(hass, [cityRows[0]], { mode: 'helyi' });
+  check('an operator without a feed is asked once', calls.length === 1, String(calls.length));
+  Lib._rtNoFeed.clear();
+  const keepWarn = console.warn;
+  let warned = 0;
+  console.warn = () => { warned += 1; };
+  const failing = { ...hass, connection: { sendMessagePromise: async () => { calls.push(1); throw new Error('down'); } } };
+  calls.length = 0;
+  Lib._rtCache.clear();
+  try {
+    await Lib.attachRealtime(failing, [cityRows[0]], { mode: 'helyi' });
+    Lib._rtCache.clear();
+    await Lib.attachRealtime(failing, [cityRows[0]], { mode: 'helyi' });
+  } finally {
+    console.warn = keepWarn;
+    Lib._rtDownUntil = 0;
+    Lib._rtWarned = false;
+  }
+  check('a failing realtime call is warned about once and not repeated at every poll', calls.length === 1 && warned === 1,
+    JSON.stringify({ calls: calls.length, warned }));
+  Lib._rtKnown.clear();
+  Lib._rtCache.clear();
+}
+
 process.exit(failed ? 1 : 0);
