@@ -140,7 +140,9 @@ Object.assign(BkkLib, {
   async realtimeFetch(hass, feed, trips) {
     if (!BkkLib.hasRealtime(hass) || BkkLib._rtNoFeed.has(feed)) return null;
     if (Date.now() < BkkLib._rtDownUntil) return null;
-    const sig = feed + '|' + trips.map((t) => t.key).join('|');
+    /* The whole request: the same trips with another destination are
+       another answer (dest_delay). */
+    const sig = feed + '|' + JSON.stringify(trips);
     const hit = BkkLib._rtCache.get(sig);
     if (hit && Date.now() - hit.at < RT_CACHE_MS) return hit.out;
     const running = BkkLib._rtInflight.get(sig);
@@ -197,7 +199,10 @@ Object.assign(BkkLib, {
       BkkLib._rtRemember(row.tripId, row.delay, now * 1000);
       const destDelay = Number(hit.dest_delay);
       if (row.travel != null && hit.dest_delay != null && Number.isFinite(destDelay) && !hit.approx) {
-        const travel = Math.round(Number(row.travel) + (destDelay - delay) / 60);
+        /* From the timetable's ride time, so a row answered twice in one
+           poll (or carried to the next) is not shifted twice. */
+        if (row.travelSched == null) row.travelSched = Number(row.travel);
+        const travel = Math.round(row.travelSched + (destDelay - delay) / 60);
         if (travel > 0) row.travel = travel;
       }
       changed = true;

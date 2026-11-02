@@ -29,6 +29,7 @@ import struct
 import time
 from typing import Any
 import zipfile
+import zlib
 
 import aiohttp
 
@@ -407,19 +408,24 @@ def train_numbers_from_static(data: bytes, prefix: str = "") -> dict[str, list[s
     """Train number -> trip ids (prefix taken off) from a GTFS zip's
     trips.txt trip_short_name (SZ 4510, InterCity 181)."""
     out: dict[str, list[str]] = {}
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        info = zf.getinfo("trips.txt")
-        if info.file_size > MAX_STATIC_MEMBER:
-            raise ValueError("trips.txt too large")
-        with zf.open(info) as fh:
-            reader = csv.DictReader(io.TextIOWrapper(fh, "utf-8-sig", newline=""))
-            for row in reader:
-                trip_id = _strip((row.get("trip_id") or "").strip(), prefix)
-                found = _DIGITS.findall(row.get("trip_short_name") or "")
-                if not trip_id or not found:
-                    continue
-                number = found[-1].lstrip("0") or found[-1]
-                out.setdefault(number, []).append(trip_id)
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            info = zf.getinfo("trips.txt")
+            if info.file_size > MAX_STATIC_MEMBER:
+                raise ValueError("trips.txt too large")
+            with zf.open(info) as fh:
+                reader = csv.DictReader(io.TextIOWrapper(fh, "utf-8-sig", newline=""))
+                for row in reader:
+                    trip_id = _strip((row.get("trip_id") or "").strip(), prefix)
+                    found = _DIGITS.findall(row.get("trip_short_name") or "")
+                    if not trip_id or not found:
+                        continue
+                    number = found[-1].lstrip("0") or found[-1]
+                    out.setdefault(number, []).append(trip_id)
+    # A member that is corrupt, encrypted or packed with a method zipfile
+    # lacks, or a CSV line it can't read: an outage like a bad download.
+    except (zlib.error, EOFError, RuntimeError, NotImplementedError, csv.Error) as err:
+        raise ValueError(f"unreadable static GTFS: {err or type(err).__name__}") from err
     return out
 
 

@@ -466,3 +466,61 @@ def test_static_zip_member_cap(monkeypatch) -> None:
     monkeypatch.setattr(realtime, "MAX_STATIC_MEMBER", 50)
     with pytest.raises(ValueError):
         realtime.train_numbers_from_static(buf.getvalue(), "1:")
+
+
+def _zip_with_method(method: int) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("trips.txt", "trip_id,trip_short_name\n" + "1:1,SZ 4510\n" * 50)
+    data = bytearray(buf.getvalue())
+    # Compression method in the central directory entry (offset 10).
+    cd = data.rfind(b"PK\x01\x02")
+    data[cd + 10 : cd + 12] = method.to_bytes(2, "little")
+    return bytes(data)
+
+
+def _corrupt_deflate() -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("trips.txt", "trip_id,trip_short_name\n" + "1:1,SZ 4510\n" * 50)
+    data = bytearray(buf.getvalue())
+    start = 30 + len("trips.txt")  # first local header, no extra field
+    data[start : start + 8] = b"\xff" * 8
+    return bytes(data)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        _corrupt_deflate(),
+        _zip_with_method(9),  # deflate64: NotImplementedError
+    ],
+    ids=["corrupt-deflate", "deflate64"],
+)
+def test_unreadable_static_zip_is_a_value_error(data: bytes) -> None:
+    with pytest.raises(ValueError, match="unreadable static GTFS"):
+        realtime.train_numbers_from_static(data, "1:")
+
+
+def test_static_csv_error_is_a_value_error() -> None:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("trips.txt", "trip_id,trip_short_name\n1:1,\"" + "x" * 200_000 + "\"\n")
+    with pytest.raises(ValueError, match="unreadable static GTFS"):
+        realtime.train_numbers_from_static(buf.getvalue(), "1:")
+
+
+async def test_unreadable_static_zip_is_an_outage_that_backs_off(hass, aioclient_mock, freezer) -> None:
+    freezer.move_to(FROZEN)
+    await _setup(hass)
+    aioclient_mock.get(J + "1_198/trip-updates.pb", content=_pb("mav-trip-updates"))
+    aioclient_mock.get(J + "1_198/vehicle-positions.pb", content=_pb("mav-vehicle-positions"))
+    aioclient_mock.get(MAV_STATIC, content=_corrupt_deflate())
+    aioclient_mock.get(J + "1_134/trip-updates.pb", status=503)
+    aioclient_mock.get(J + "1_134/vehicle-positions.pb", status=503)
+    aioclient_mock.get(GYSEV_STATIC, status=503)
+    req = {"feed": "mav", "trips": [{"key": "ic", "train": "822", "stops": ["005501024", "005506189"], "from": 0, "to": 1}]}
+    resp = await _call(hass, req)
+    assert resp["feed"] == "mav"
+    await _call(hass, req)
+    assert sum(1 for c in aioclient_mock.mock_calls if str(c[1]) == MAV_STATIC) == 1
