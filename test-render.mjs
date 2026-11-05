@@ -4355,49 +4355,72 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     JSON.stringify({ tramHu: (tramHu.match(/<span class="plat[^<]*<\/span>/) || [''])[0], trainHu: (trainHu.match(/<span class="plat[^<]*<\/span>/) || [''])[0] }));
 }
 {
-  /* The MÁV hop card end to end: ELVIRA lands on the first FUTÁR rows, then
-     the through-check's fresh FUTÁR copies (numbers read off the trip id
-     again) merge onto those rows and ELVIRA once more. */
-  const keep = { departures: Lib.departures, elviraBetween: Lib.elviraBetween, travelMin: Lib.travelMin };
+  /* The MÁV hop card end to end: its rows are ELVIRA's departures, FUTÁR is
+     not asked, and a train FUTÁR lacks (IC 849 TÓPART) is on the board. */
+  const keep = { departures: Lib.departures, elviraBetween: Lib.elviraBetween };
   const t0 = Math.floor(Date.now() / 1000) + 1200;
   const t1 = t0 + 25 * 60;
-  const board = () => [
-    icFutar({ tripId: 'BKK_8624_67', trainNumber: '8624', head: 'Keszthely', dep: t0, sched: t0, travel: null }),
-    icFutar({ tripId: 'BKK_2461_311', trainNumber: '2461', head: 'Ljubljana', dep: t1, sched: t1, travel: null }),
-  ];
+  let askedFutar = null;
   Lib.departures = async (_k, _s, _r, _d, opts) => {
-    opts.armThroughCheck(() => { setTimeout(() => opts.onFutarUpdate(board()), 30); });
-    return board();
+    askedFutar = !opts.skipFutar;
+    return [];
   };
   Lib.elviraBetween = async () => [
-    icElvira({ tripId: 'elvira:balaton', label: 'BALATON', trainNumber: '862', dep: t0, sched: t0, travel: 45 }),
-    icElvira({ tripId: 'elvira:citadella', label: 'CITADELLA', trainNumber: '246', dep: t1, sched: t1, travel: 42 }),
+    icElvira({ tripId: 'elvira:topart', label: 'TÓPART', trainNumber: '849', dep: t0, sched: t0, travel: 39, destHit: true }),
+    icElvira({ tripId: 'elvira:evening', label: 'BALATON', trainNumber: '871', dep: t1, sched: t1, travel: 39, destHit: true }),
+    /* The rest of the board goes elsewhere. */
+    icElvira({ tripId: 'elvira:other', label: 'GEMENC', trainNumber: '8312', dep: t1, sched: t1, travel: null, destHit: false }),
   ];
-  Lib.travelMin = async () => 45;
   const hop = document.createElement('hungarian-transport-card');
   hop.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
   document.body.appendChild(hop);
   hop.setConfig({
-    language: 'hu', apiKey: 'test-key', mav: true, routeIds: [],
+    language: 'hu', mav: true, routeIds: ['BKK_S'],
     stopId: 'BKK_005501024', stopName: 'Budapest-Kelenföld',
     destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
   });
   hop._considerJourney = () => {};
   for (let i = 0; i < 50; i++) {
-    if (!hop._reloadActive && (hop._rawRows || []).some((r) => r.platform === '4')) break;
+    if (!hop._reloadActive && (hop._rawRows || []).length) break;
     await new Promise((r) => setTimeout(r, 20));
   }
   const raw = hop._rawRows || [];
   const at = (tripId) => raw.findIndex((r) => r.tripId === tripId);
   const html = (tripId) => (at(tripId) >= 0 ? hop._rowHtml(hop._rows[at(tripId)], 'hu', at(tripId)) : '');
-  const shows = (tripId, num) => html(tripId).includes('class="plat"') && html(tripId).includes('>4<')
-    && html(tripId).includes('class="picto booking"') && html(tripId).includes(`>${num}</span>`);
-  check('MÁV hop card shows platform 4 and the reservation mark on both trip-id ICs',
-    raw.length === 2 && shows('BKK_8624_67', '862') && shows('BKK_2461_311', '246')
-    && raw[at('BKK_8624_67')].label === 'BALATON' && raw[at('BKK_2461_311')].label === 'CITADELLA',
-    JSON.stringify(raw.map((r) => ({ id: r.tripId, label: r.label, n: r.trainNumber, p: r.platform, b: r.booking }))));
+  check('MÁV hop card lists ELVIRA’s departures towards the destination, without FUTÁR or an API key',
+    askedFutar === false && raw.map((r) => r.tripId).join() === 'elvira:topart,elvira:evening'
+    && html('elvira:topart').includes('class="plat"') && html('elvira:topart').includes('class="picto booking"')
+    && html('elvira:topart').includes('>849</span>'),
+    JSON.stringify({ askedFutar, raw: raw.map((r) => ({ id: r.tripId, label: r.label, n: r.trainNumber })) }));
   hop.remove();
+  /* Without the integration there is no ELVIRA: the card reads FUTÁR as before. */
+  const old = document.createElement('hungarian-transport-card');
+  old.hass = { states: {}, language: 'hu', services: {} };
+  document.body.appendChild(old);
+  askedFutar = null;
+  old.setConfig({
+    language: 'hu', apiKey: 'test-key', mav: true, routeIds: [],
+    stopId: 'BKK_005501024', stopName: 'Budapest-Kelenföld',
+    destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
+  });
+  old._considerJourney = () => {};
+  for (let i = 0; i < 50 && askedFutar === null; i++) await new Promise((r) => setTimeout(r, 20));
+  check('a MÁV card without the integration still reads FUTÁR', askedFutar === true, String(askedFutar));
+  old.remove();
   Object.assign(Lib, keep);
+}
+{
+  const now = Math.floor(Date.now() / 1000);
+  const board = Lib.mavBoardRows([
+    { tripId: 'a', dep: now + 600, destHit: true, label: '9009', railKind: 'S', trainNumber: '9009' },
+    { tripId: 'b', dep: now + 600, destHit: false, label: '871', trainNumber: '871' },
+    { tripId: 'c', dep: now - 600, destHit: true, label: '872', trainNumber: '872' },
+    { tripId: 'd', dep: now + 900, destHit: true, label: 'TÓPART', railKind: 'IC', trainNumber: '849' },
+  ]);
+  check('a MÁV board keeps the trains its destination lists, a number-only train shows its kind, a departed one goes',
+    board.map((r) => r.tripId).join() === 'a,d' && board[0].label === 'S' && board[0].trainNumber === '9009'
+      && board[1].label === 'TÓPART',
+    JSON.stringify(board));
 }
 {
   /* Planner, Kelenföld → Székesfehérvár (2026-10-19 21:33): ELVIRA answers

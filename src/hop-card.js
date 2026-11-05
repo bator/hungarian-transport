@@ -1660,7 +1660,10 @@ ${this._stopPinCss()}
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     this._pollRun = null;
     const mode = this._departMode();
-    const ready = cfg.stopId && cfg.destKey && (this._hasFutar() || mode === 'volan' || mode === 'helyi' || mode === 'all');
+    /* A MÁV card reads MÁV's own board (ELVIRA); FUTÁR only without the integration. */
+    const mavBoard = mode === 'mav' && BkkLib.hasElvira(this._hass);
+    const ready = cfg.stopId && cfg.destKey
+      && (this._hasFutar() || mavBoard || mode === 'volan' || mode === 'helyi' || mode === 'all');
     if (!ready) {
       this._rows = [];
       this._loading = false;
@@ -1766,6 +1769,12 @@ ${this._stopPinCss()}
         let elviraRows = [];
         const publish = () => {
           if (gen !== this._gen) return;
+          /* An empty board goes on to the Transitous fill below, not to
+             "no departures" first. */
+          if (mavBoard) {
+            if (elviraRows.length) paintRows(elviraRows);
+            return;
+          }
           let list = futarFull
             ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
             : earlyRows.slice();
@@ -1809,6 +1818,7 @@ ${this._stopPinCss()}
             deferTravel: true,
             deferGps: true,
             hass: this._hass,
+            skipFutar: mavBoard,
             /* The GTFS rows come before FUTÁR answers: the last run's FUTÁR
                rows stay beside them until then, instead of vanishing. */
             onPartial: (list) => {
@@ -1832,6 +1842,10 @@ ${this._stopPinCss()}
         this._journeyKey = '';
         this._journeyLoading = false;
         earlyRows = rows || [];
+        if (mavBoard) {
+          elviraRows = BkkLib.mavBoardRows(await elviraP).slice(0, cap);
+          if (gen !== this._gen) return;
+        }
         publish();
         /* The open map moves once a poll, at the end, on rows that have
            their GPS: an earlier pass saw a coach without it as one that lost
@@ -1867,15 +1881,22 @@ ${this._stopPinCss()}
         } else {
           throughResolve();
         }
-        elviraRows = await elviraP;
-        if (gen !== this._gen) return;
-        publish();
+        if (!mavBoard) {
+          elviraRows = await elviraP;
+          if (gen !== this._gen) return;
+          publish();
+        }
         await throughWait;
         if (gen !== this._gen) return;
-        let merged = futarFull
-          ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
-          : earlyRows.slice();
-        merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
+        let merged;
+        if (mavBoard) {
+          merged = elviraRows;
+        } else {
+          merged = futarFull
+            ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
+            : earlyRows.slice();
+          merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
+        }
         /* A city board is filled from Transitous inside departures() already:
            a second fill here only repeated the same lookups on every poll. */
         if (!merged.length && mode !== 'helyi') {

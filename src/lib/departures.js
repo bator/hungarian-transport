@@ -544,7 +544,7 @@ Object.assign(BkkLib, {
     let rows = [];
     /* ELVIRA's trains and an empty board's Transitous fill are the card's
        own steps (hop-card _reload), not this one's. */
-    const queryFutar = mode === 'bkk' || mode === 'mav' || /^BKK_/i.test(String(stopId || ''));
+    const queryFutar = !opts.skipFutar && (mode === 'bkk' || mode === 'mav' || /^BKK_/i.test(String(stopId || '')));
     const futarTask = queryFutar ? (async () => {
     let candidates = [];
     try {

@@ -4384,6 +4384,12 @@ Object.assign(BkkLib, {
     }
     return toHeadsign;
   },
+  /* A MÁV card's departures: ELVIRA's board of the boarding station, the
+     trains its destination's arrival board also lists. The rest of the board
+     goes elsewhere. A train with only a number shows its kind, like FUTÁR's rows. */
+  mavBoardRows(rows) {
+    return (Array.isArray(rows) ? rows : []).filter((row) => row && row.destHit && departureStillDue(row.dep)).map((row) => row.railKind && /^\d+$/.test(String(row.label || "")) ? Object.assign({}, row, { label: row.railKind }) : row);
+  },
   async mavRouteForRow(row, boardName, alightName) {
     try {
       const idx = await this.mavIndex();
@@ -5954,7 +5960,7 @@ Object.assign(BkkLib, {
     const now = Math.floor(Date.now() / 1e3);
     const latest = now + horizon * 60;
     let rows = [];
-    const queryFutar = mode === "bkk" || mode === "mav" || /^BKK_/i.test(String(stopId || ""));
+    const queryFutar = !opts.skipFutar && (mode === "bkk" || mode === "mav" || /^BKK_/i.test(String(stopId || "")));
     const futarTask = queryFutar ? (async () => {
       let candidates = [];
       try {
@@ -9736,7 +9742,8 @@ ${this._stopPinCss()}
     }
     this._pollRun = null;
     const mode = this._departMode();
-    const ready = cfg.stopId && cfg.destKey && (this._hasFutar() || mode === "volan" || mode === "helyi" || mode === "all");
+    const mavBoard = mode === "mav" && BkkLib.hasElvira(this._hass);
+    const ready = cfg.stopId && cfg.destKey && (this._hasFutar() || mavBoard || mode === "volan" || mode === "helyi" || mode === "all");
     if (!ready) {
       this._rows = [];
       this._loading = false;
@@ -9826,6 +9833,10 @@ ${this._stopPinCss()}
         let elviraRows = [];
         const publish = () => {
           if (gen !== this._gen) return;
+          if (mavBoard) {
+            if (elviraRows.length) paintRows(elviraRows);
+            return;
+          }
           let list = futarFull ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap) : earlyRows.slice();
           list = BkkLib.mergeVolanRows(list, elviraRows, cap, { overlayOnly: true });
           if (!list.length && startThrough && !futarFull) {
@@ -9865,6 +9876,7 @@ ${this._stopPinCss()}
             deferTravel: true,
             deferGps: true,
             hass: this._hass,
+            skipFutar: mavBoard,
             /* The GTFS rows come before FUTÁR answers: the last run's FUTÁR
                rows stay beside them until then, instead of vanishing. */
             onPartial: (list) => {
@@ -9888,6 +9900,10 @@ ${this._stopPinCss()}
         this._journeyKey = "";
         this._journeyLoading = false;
         earlyRows = rows || [];
+        if (mavBoard) {
+          elviraRows = BkkLib.mavBoardRows(await elviraP).slice(0, cap);
+          if (gen !== this._gen) return;
+        }
         publish();
         const firstRows = this._rawRows;
         const needsTravel = (row) => row.travel == null && !/^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ""));
@@ -9921,13 +9937,20 @@ ${this._stopPinCss()}
         } else {
           throughResolve();
         }
-        elviraRows = await elviraP;
-        if (gen !== this._gen) return;
-        publish();
+        if (!mavBoard) {
+          elviraRows = await elviraP;
+          if (gen !== this._gen) return;
+          publish();
+        }
         await throughWait;
         if (gen !== this._gen) return;
-        let merged = futarFull ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap) : earlyRows.slice();
-        merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
+        let merged;
+        if (mavBoard) {
+          merged = elviraRows;
+        } else {
+          merged = futarFull ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap) : earlyRows.slice();
+          merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
+        }
         if (!merged.length && mode !== "helyi") {
           merged = await BkkLib.fillTransitousIfEmpty(merged, origin, dest, {
             mode: this._departMode(),

@@ -40,7 +40,7 @@ Honnan jönnek az adatok:
 | Szolgáltatás | Forrás | Élő? |
 | --- | --- | --- |
 | Budapesti busz, villamos, troli, metró, HÉV, elővárosi vonat | BKK FUTÁR | Igen, valós idejű pozíció és késés |
-| MÁV vonatok | BKK FUTÁR Budapest környékén, a vágány és a helyjegy a MÁV ELVIRA-ból | Késés és vágány |
+| MÁV vonatok | MÁV ELVIRA: indulások, vágány és helyjegy (BKK FUTÁR csak az integráció nélkül) | Késés és vágány |
 | Volán buszok | Országos Volán GTFS (opendata.utas.hu, tartalékként KTI), a kártyával együtt települ | Késés és pozíció a GTFS-Realtime adatból, egyébként menetrend |
 | Helyi hálózatok (Szeged, Pécs, Miskolc, …) | Az üzemeltetők saját GTFS-e, a kártyával együtt települ | Menetrend (Szombathely élőben, a kiegészítő szolgáltatásokkal) |
 | Megállókeresés és átszállás | [Transitous](https://transitous.org/), tartalékként a BKK FUTÁR | — |
@@ -641,7 +641,7 @@ Az összes attribútum leírása:
 | *Nincs közvetlen járat erre a célra. Elérhető célok: …* | A célba nem megy közvetlen járat a forrásból. | Válassz a felsorolt célok közül, vagy használd a tervezőt. |
 | *A menetrend-index nem töltődött le (időtúllépés vagy hálózati hiba).* | A böngésző nem tudta letölteni a Volán vagy a helyi menetrendet. | Töltsd újra az oldalt. Ha marad, telepítsd újra a kiadást (HACS → Újraletöltés), és indítsd újra a Home Assistantot. |
 | *A menetrend-index újabb (vN), mint amit ez a kártya ismer. Frissítsd a kártyát.* | A böngésző még a régi kártyát futtatja. | Töltsd újra az oldalt üres gyorsítótárral, vagy frissítsd az integrációt. |
-| Nincs vágány, **H** vagy **OB** jel a MÁV sorokon | A MÁV ELVIRA nem válaszolt. | Nincs teendő: a vonatok így is látszanak, a jelek maguktól visszajönnek. |
+| Nincs vágány, **H** vagy **OB** jel a MÁV sorokon | A MÁV ELVIRA nem válaszolt. | Nincs teendő: addig a vonatok a Transitousból jönnek, a jelek maguktól visszajönnek. |
 | Egy vonat térképe egyenes vonal az állomások között | Ehhez a vonathoz nincs útvonaladat. | Add hozzá a MÁV menetrendet ([3.4](#34-vonatútvonalak-a-térképen-opcionális)). |
 | „Custom element doesn't exist” frissítés után | A böngésző az új kártya előtt töltötte be az oldalt. | Frissítés után indítsd újra a Home Assistantot, aztán töltsd újra az oldalt. |
 | Hiányzik egy buszjárat, amiről tudsz | A hivatalos menetrendben nincs ilyen közvetlen járat (például a székesfehérvári buszok a Népligetről indulnak, nem Kelenföldről). | A kártya csak a hivatalos menetrendet mutatja. Átszállásos útért próbáld a tervezőt. |

@@ -50,14 +50,14 @@ def svc(**kwargs):
 failed = 0
 
 if not check(
-    "StationInfo maxCount is 500 (Kelenföld evening origin overlay)",
-    STATIONINFO_MAX_COUNT == "500",
+    "StationInfo maxCount holds a whole day of Kelenföld (500 cuts it at 22:30)",
+    STATIONINFO_MAX_COUNT == "2000",
     repr(STATIONINFO_MAX_COUNT),
 ):
     failed += 1
 if not check(
-    "Python row cap matches maxCount (evening overlay not sliced at 200)",
-    ELVIRA_ROW_CAP == int(STATIONINFO_MAX_COUNT) == 500,
+    "Python row cap holds the longest window's rows (evening rows not sliced at 200)",
+    ELVIRA_ROW_CAP == 500 and ELVIRA_ROW_CAP <= int(STATIONINFO_MAX_COUNT),
     repr(ELVIRA_ROW_CAP),
 ):
     failed += 1
