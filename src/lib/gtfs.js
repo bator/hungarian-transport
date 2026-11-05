@@ -221,6 +221,16 @@ Object.assign(BkkLib, {
     }
     return toHeadsign;
   },
+  /* A MÁV card's departures: ELVIRA's board of the boarding station, the
+     trains its destination's arrival board also lists. The rest of the board
+     goes elsewhere. A train with only a number shows its kind, like FUTÁR's rows. */
+  mavBoardRows(rows) {
+    return (Array.isArray(rows) ? rows : [])
+      .filter((row) => row && row.destHit && departureStillDue(row.dep))
+      .map((row) => (
+        row.railKind && /^\d+$/.test(String(row.label || '')) ? Object.assign({}, row, { label: row.railKind }) : row
+      ));
+  },
   async mavRouteForRow(row, boardName, alightName) {
     try {
       const idx = await this.mavIndex();

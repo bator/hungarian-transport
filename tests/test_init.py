@@ -206,6 +206,35 @@ async def test_elvira_service_returns_rows(hass, aioclient_mock, freezer) -> Non
     assert asked == expected
 
 
+def test_elvira_train_kind_for_a_row_with_only_a_number() -> None:
+    assert elvira._kind_from_row({"kind": {"name": "sebesvonat", "sortName": None}}) == "S"
+    assert elvira._kind_from_row({"kind": {"name": "személyvonat", "sortName": "Sz"}}) == "Sz"
+    assert elvira._kind_from_row({"kind": {"name": "InterCity", "sortName": "IC"}}) == "IC"
+    assert elvira._kind_from_row({"kind": None}) == ""
+
+
+async def test_elvira_asks_for_whole_boards_and_tomorrows_arrivals_in_the_evening(
+    hass, aioclient_mock, freezer
+) -> None:
+    freezer.move_to("2026-11-06T21:30:00+00:00")  # 22:30 in Budapest
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {"departureScheduler": [], "arrivalScheduler": []}})
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_ELVIRA_BETWEEN,
+        {"origin_code": "005501024", "dest_code": "005503269", "minutes_after": 30},
+        blocking=True,
+        return_response=True,
+    )
+    asked = {(c[2]["stationNumberCode"], c[2]["travelDate"][:10], c[2]["maxCount"]) for c in aioclient_mock.mock_calls}
+    # 500 cuts Kelenföld's boards at 22:30; a train leaving by 23:00 arrives past midnight.
+    assert asked == {
+        ("005501024", "2026-11-06", "2000"),
+        ("005503269", "2026-11-06", "2000"),
+        ("005503269", "2026-11-07", "2000"),
+    }
+
+
 async def test_elvira_service_shares_concurrent_requests(hass, aioclient_mock, freezer) -> None:
     freezer.move_to(NOON)
     await _setup(hass)

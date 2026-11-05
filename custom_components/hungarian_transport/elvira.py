@@ -55,8 +55,13 @@ LATE_TRAIN_WINDOW = timedelta(hours=3)
 MAX_TRAVEL = timedelta(hours=12)
 # Kelenföld midnight StationInfo truncates ~11:32 at 200 (moreResult=false).
 # 500 reaches ~22:32 so evening origin overlay still has #3880 to copy.
-STATIONINFO_MAX_COUNT = "500"
+# Far above a day of the busiest station: at 500 ELVIRA cuts Kelenföld's boards
+# (about 460 rows a day) at 22:30, and its evening trains went missing.
+STATIONINFO_MAX_COUNT = "2000"
 ELVIRA_ROW_CAP = 500
+# A train leaving by `latest` can arrive this much later: past midnight it is
+# on tomorrow's arrival board.
+ARRIVAL_WINDOW = timedelta(hours=6)
 ELVIRA_TIMEOUT = aiohttp.ClientTimeout(total=30)
 # StationInfo requests (cache misses only; shared requests count once) per
 # second and the burst allowed on top. Any logged-in user can call
@@ -227,6 +232,19 @@ def _label_from_row(row: dict) -> str:
     return str(row.get("code") or "IC")
 
 
+# ELVIRA's train kinds that come without a short name.
+_KIND_LABELS = {"sebesvonat": "S", "szemelyvonat": "Sz", "gyorsvonat": "Gy"}
+
+
+def _kind_from_row(row: dict) -> str:
+    """The train's kind (IC, S, Sz), for a row whose label is only its number."""
+    kind = row.get("kind")
+    if not isinstance(kind, dict):
+        return ""
+    short = str(kind.get("sortName") or "").strip()
+    return short or _KIND_LABELS.get(_fold_hu(str(kind.get("name") or "")), "")
+
+
 def service_days(now: datetime, latest: datetime) -> list[date]:
     """Service days whose StationInfo can hold a departure in [now, latest]."""
     days = []
@@ -302,11 +320,11 @@ async def _station_legs(session, hass, station_code: str, day: date):
 def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
     """Origin departures with optional dest hit (travel time only).
 
-    Booking and startTrack come from the origin StationInfo row. A missing dest
-    board (Kelenföld truncates ~11:36, or the board failed and arrives here
-    empty) must not drop evening ICs. The card overlays these onto FUTÁR/MOTIS
-    hop rows and must not append unmatched origin-only trains (GEMENC Baja, …).
-    Times are compared and subtracted in UTC (see _iso_dt).
+    Booking and startTrack come from the origin StationInfo row. A MÁV card lists
+    the rows with a dest hit; other cards overlay all of them onto their FUTÁR or
+    MOTIS rows (a failed dest board arrives here empty and must not drop their
+    booking flags) and must not append origin-only trains (GEMENC Baja, …). Times
+    are compared and subtracted in UTC (see _iso_dt).
     """
     now = now.astimezone(UTC)
     latest = latest.astimezone(UTC)
@@ -373,6 +391,7 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
         out.append({
             "tripId": "elvira:" + (tid or code or str(int(sched.timestamp()))),
             "label": _label_from_row(row),
+            "railKind": _kind_from_row(row),
             "head": dest_name or _end_station(row),
             "dep": int(start.timestamp()),
             "sched": int(sched.timestamp()),
@@ -422,7 +441,7 @@ def _log_outage(hass, code: str, err: Exception | None, now: float | None = None
 
 
 async def elvira_between(session, hass, origin_code, dest_code, minutes_after=180, dest_name=""):
-    """Origin departures towards dest, for the card to overlay on its rows.
+    """Origin departures towards dest: a MÁV card's rows, an overlay for others.
 
     Every station and service day is its own StationInfo board, and the rows
     come from the origin boards only: ElviraError when today's did not
@@ -440,12 +459,13 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     # Real minutes ahead, not wall-clock ones, on the night the clocks change.
     latest = (now.astimezone(UTC) + timedelta(minutes=int(minutes_after or 180))).astimezone(tz)
     days = service_days(now, latest)
+    dest_days = service_days(now, latest + ARRIVAL_WINDOW)
     # Today's origin board first: the call fails without it, so with the
     # rate limit's last token left it is the board that gets it.
     wanted = [(origin_code, now.date())] + [
         (code, day)
-        for code in (origin_code, dest_code)
-        for day in days
+        for code, code_days in ((origin_code, days), (dest_code, dest_days))
+        for day in code_days
         if (code, day) != (origin_code, now.date())
     ]
     results = await asyncio.gather(
@@ -458,12 +478,11 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
             raise board
     boards = dict(zip(wanted, results))
     origin = [boards[(origin_code, day)] for day in days]
-    dest = [boards[(dest_code, day)] for day in days]
-    today_index = days.index(now.date())
-    for code, part in ((origin_code, origin), (dest_code, dest)):
+    dest = [boards[(dest_code, day)] for day in dest_days]
+    for code, part, part_days in ((origin_code, origin, days), (dest_code, dest, dest_days)):
         errors = [b for b in part if isinstance(b, ElviraError)]
         outages = [b for b in errors if not isinstance(b, ElviraRateLimited)]
-        today_board = part[today_index]
+        today_board = part[part_days.index(now.date())]
         if isinstance(today_board, ElviraError) and not isinstance(today_board, ElviraRateLimited):
             # Today's board is the one the rows need.
             outage = today_board
@@ -471,7 +490,7 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
             # A board arrived: the station answers, even when yesterday's or
             # tomorrow's did not (only a few late trains are missing then).
             outage = None
-            for board, day in zip(part, days):
+            for board, day in zip(part, part_days):
                 if isinstance(board, ElviraError) and not isinstance(board, ElviraRateLimited):
                     _LOGGER.debug("ELVIRA StationInfo %s for %s unavailable (%s)", code, day, board)
         elif outages:
@@ -481,7 +500,7 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
             # station either way.
             continue
         _log_outage(hass, code, outage)
-    today = origin[today_index]
+    today = origin[days.index(now.date())]
     if isinstance(today, ElviraError):
         # A rate limit stays one for the service response.
         raise type(today)(str(today))

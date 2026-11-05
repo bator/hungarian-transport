@@ -34,8 +34,8 @@ every screen, step by step, with screenshots.
 - **Planner:** search any stop, street or town; live board, or itineraries
   with transfers for a time you pick, with a map and a timeline. It suggests
   the stops you use most.
-- **Integration:** keeps your BKK key out of dashboards, and adds MÁV
-  platforms and seat reservations (ELVIRA).
+- **Integration:** keeps your BKK key out of dashboards, and gives MÁV cards
+  their departures, platforms and seat reservations (ELVIRA).
 
 ## Install
 
@@ -103,7 +103,7 @@ it from the dashboard. Keep it in the integration.
 | What | Source |
 | --- | --- |
 | Budapest buses, trams, metro, HÉV, suburban trains | [BKK FUTÁR](https://opendata.bkk.hu/), live |
-| MÁV trains | BKK FUTÁR, MÁV ELVIRA (platforms, seat reservations) |
+| MÁV trains | MÁV ELVIRA (departures, platforms, seat reservations); BKK FUTÁR only without the integration |
 | Volán coaches | National Volán GTFS ([opendata.utas.hu](https://opendata.utas.hu/), [KTI](https://gtfs.kti.hu/) as fallback), shipped with each release |
 | Live delays and positions outside Budapest (Volán, the Volánbusz towns, Veszprém, Miskolc, Paks, Debrecen, Orosháza, MÁV trains) | The public GTFS-Realtime feeds [Transitous](https://github.com/public-transport/transitous/blob/main/feeds/hu.json) lists, most of them from [jbb.ghsq.de](https://jbb.ghsq.de/gtfs-feeds); fetched by the integration only while a card shows them, at most once a minute. See [Live delays and positions](docs/realtime.md) |
 | City networks | Each operator's GTFS, shipped with each release |

@@ -40,7 +40,7 @@ Where the data comes from:
 | Service | Source | Live? |
 | --- | --- | --- |
 | Budapest buses, trams, trolleybuses, metro, HÉV, suburban trains | BKK FUTÁR | Yes, real-time positions and delays |
-| MÁV trains | BKK FUTÁR around Budapest, MÁV ELVIRA for platforms and seat reservations | Delays and platforms |
+| MÁV trains | MÁV ELVIRA: departures, platforms and seat reservations (BKK FUTÁR only without the integration) | Delays and platforms |
 | Volán coaches | National Volán GTFS (opendata.utas.hu, KTI as fallback), shipped with the card | Delays and positions from the GTFS-Realtime feed, else the timetable |
 | City networks (Szeged, Pécs, Miskolc, …) | Each operator's GTFS, shipped with the card | Timetable (Szombathely real-time with the companion services) |
 | Stop search and transfers | [Transitous](https://transitous.org/), BKK FUTÁR as fallback | — |
@@ -618,7 +618,7 @@ Every attribute is listed in
 | *No direct service to that destination. Reachable destinations: …* | The destination has no direct service from the origin. | Pick one of the listed destinations, or use the planner. |
 | *Could not download the timetable index (timeout or network error).* | The browser could not load the Volán or city timetable. | Reload the page. If it persists, reinstall the release (HACS → Redownload) and restart Home Assistant. |
 | *The timetable index is newer (vN) than this card understands.* | The browser still runs an old card. | Reload the page with the cache cleared, or update the integration. |
-| No platform, **H** or **OB** marks on MÁV rows | MÁV ELVIRA did not answer. | Nothing to do: the trains are still listed, and the marks come back on their own. |
+| No platform, **H** or **OB** marks on MÁV rows | MÁV ELVIRA did not answer. | Nothing to do: the trains come from Transitous meanwhile, and the marks come back on their own. |
 | A train's map is a straight line between stations | No route data for that train. | Add the MÁV timetable ([3.4](#34-train-routes-on-the-map-optional)). |
 | "Custom element doesn't exist" after an update | The browser loaded the page before the new card. | Restart Home Assistant after updating, then reload the page. |
 | A coach connection you know of is missing | The official timetable has no such direct service (for example, coaches to Székesfehérvár leave from Népliget, not Kelenföld). | The card shows the official timetable only. Try the planner for a route with a transfer. |
