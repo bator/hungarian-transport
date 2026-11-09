@@ -99,8 +99,23 @@ export class BKKPlannerCard extends BKKHopCard {
   _shouldReloadOnConnect() {
     const planned = this._timed() && ((this._journeys && this._journeys.length) || this._journeysDone);
     const idle = !(planned || this._journey || this._journeyLoading || (this._rows && this._rows.length));
-    const stale = !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
-    return idle || stale;
+    return idle || this._nowPlanStale();
+  }
+
+  _nowPlanStale() {
+    return !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
+  }
+
+  /* A board left in front (a wall tablet, a tab kept open) goes stale too:
+     with no poll, its rows run out one by one and the itinerary under them has
+     left long ago. "Now" plans again on the countdown tick once the plan
+     is as stale as one seen again after a while away. */
+  _tickPaint() {
+    super._tickPaint();
+    const cfg = this._config || {};
+    if (!cfg.stopId || !cfg.destKey || !this._nowPlanStale()) return;
+    if (this._reloadActive || !this.isConnected || this._pageHidden()) return;
+    this._reloadSafe();
   }
 
   /* The editor (every stop pick) or a dashboard reload hands the card a new
@@ -638,7 +653,9 @@ export class BKKPlannerCard extends BKKHopCard {
   async _openJourneyMap() {
     const lang = this._lang();
     const cfg = this._config || {};
-    if (this._openingMap === 'journey') return;
+    /* A Map click on another itinerary than the one still opening is a
+       new open: it bumps _mapSeq, so the old one stops at its next check. */
+    if (this._openingMap === 'journey' && this._openingJourney === this._journey) return;
     if (this._mapOverlay && this._openMapKey === 'journey') return;
     /* Focus goes to the dialog's close button and comes back on close, as
        with the vehicle map; left on the button under the backdrop, Tab
@@ -655,11 +672,14 @@ export class BKKPlannerCard extends BKKHopCard {
     const gen = this._pairGen;
     /* The plan this open draws. A "Mikor" change meanwhile (_applyWhen)
        drops it for one still to come: without a plan the map would be a
-       bare line from origin to destination under a summary of nothing. */
+       bare line from origin to destination under a summary of nothing.
+       Another itinerary opened meanwhile, or a new plan for now, replaces
+       it: the map would draw one the card no longer shows. */
     let journey = this._journey;
+    this._openingJourney = journey;
     const stale = () => {
       if (this._mapStale(seq)) return true;
-      if (gen === this._pairGen && !(journey && !this._journey)) return false;
+      if (gen === this._pairGen && this._journey === journey) return false;
       this._openingMap = '';
       /* No map opened: the button kept for this open must not take the
          focus when some later map closes. */
@@ -683,7 +703,7 @@ export class BKKPlannerCard extends BKKHopCard {
           { minutesAfter: clampMinutesAfter(cfg.minutesAfter) },
         );
         if (stale()) return;
-        if (planned) journey = this._journey = planned;
+        if (planned) journey = this._openingJourney = this._journey = planned;
         try {
           await BkkLib.fillJourneyShapes(journey);
         } catch (_e) { /* draw the endpoint fallback */ }
@@ -842,6 +862,7 @@ export class BKKPlannerCard extends BKKHopCard {
     }
     this._editRoute = !this._editRoute;
     this._paintHead();
+    this._ensureDests();
   }
 
   /* The planner spans every operator: `operator` keeps Home Assistant's look. */
@@ -860,10 +881,13 @@ export class BKKPlannerCard extends BKKHopCard {
   }
 
   /* An origin from the YAML or the editor needs its reachable destinations
-     too, not only one picked in the card. */
+     too, not only one picked in the card. The list only feeds the
+     destination picker, and it costs a board and dozens of trip and route
+     lookups: a picked pair, its pickers folded, waits until edit opens them. */
   _ensureDests() {
     const cfg = this._config || {};
     if (!this._pickersMounted || !this._hass || !cfg.stopId) return;
+    if (this._routePicked() && !this._editRoute) return;
     if (this._destsFor === cfg.stopId) {
       /* Losing access (the service gone for a moment) keeps the list. */
       const access = this._futarAccess();
@@ -1629,13 +1653,16 @@ ${this._stopPinCss()}
     this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
+    /* The new origin's destinations load when edit opens the pickers; a
+       load still running belongs to the old one. */
+    this._destsFor = '';
+    this._destSeq += 1;
+    this._destsLoading = false;
     this._editRoute = false;
     this._clearPickerInputs();
     this._paint();
-    /* The swapped pair needs no route list (routeIds is empty): plan now,
-       and load the new origin's destinations alongside. */
+    /* The swapped pair needs no route list (routeIds is empty): plan now. */
     this._reloadSafe();
-    this._loadDests();
   }
 
   _resetPlan() {
