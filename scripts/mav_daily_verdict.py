@@ -29,7 +29,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from mav_pages_site import fetch_live, parse_live  # noqa: E402
+from mav_pages_site import built_time, fetch_live, parse_live  # noqa: E402
 
 # release_mav_index.sh's exit status for a refused login (401/403).
 AUTH_EXIT = 77
@@ -40,17 +40,6 @@ FAILURES = {
     "site": "the built index did not make a Pages site",
     "secrets": "there are no MAV_GTFS_USER / MAV_GTFS_PASSWORD secrets",
 }
-
-
-def _built_at(live: dict) -> datetime | None:
-    value = live.get("built_at")
-    if not isinstance(value, str):
-        return None
-    try:
-        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return when if when.tzinfo is not None else None
 
 
 def verdict(failure: str, live: dict | None, why: str, now: datetime) -> tuple[bool, str]:
@@ -66,7 +55,7 @@ def verdict(failure: str, live: dict | None, why: str, now: datetime) -> tuple[b
     if live is None:
         return False, (f"::warning title=Daily MÁV index not published::Nothing published: {cause}. The published "
                        f"manifest could not be read ({why}), so its age is unknown; GitHub Pages keeps what it has.")
-    built = _built_at(live)
+    built = built_time(live)
     feed = live.get("feed")
     if built is None:
         return True, (f"::error title=Daily MÁV index: published manifest has no build time::Nothing published: "

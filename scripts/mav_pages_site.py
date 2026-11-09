@@ -22,9 +22,12 @@ always did.
 
 Whether to deploy: not when the published manifest names the same content
 digest (index_digest.py), manifest format and schema, and the same "gtfs"
-object (the zips' sizes and digests). One that cannot be read (no site yet,
-Pages not enabled, a network error) never stops a deploy: publishing the
-same content again is harmless.
+object (the zips' sizes and digests), and was built less than REFRESH_AFTER
+ago. Older, the same content is deployed again for its new built_at: the
+daily verdict and the integration read built_at as the last build that went
+through, and a feed MÁV leaves alone for days is not a stale index. One that
+cannot be read (no site yet, Pages not enabled, a network error) never stops
+a deploy: publishing the same content again is harmless.
 
 A site larger than MAX_SITE_BYTES (GitHub Pages allows 1 GB) is refused:
 the sizes of its files are printed either way.
@@ -54,7 +57,7 @@ import tempfile
 import urllib.error
 import urllib.request
 import zipfile
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -79,6 +82,12 @@ ZIP_LEVEL = 9
 # Half of GitHub Pages' 1 GB site limit; the site is about 35 MB.
 MAX_SITE_BYTES = 500 * 1024 * 1024
 MAX_MANIFEST = 64 * 1024
+# The same content is deployed again once the published manifest is this old,
+# so its built_at says the daily run went through: mav_daily_verdict.py fails
+# a run that published nothing on a built_at STALE_AFTER (2 days) old, and
+# the integration tries late on one older than mav_daily.STALE_MANIFEST (20 h).
+# Under a day, so each daily run refreshes it; a rerun that morning does not.
+REFRESH_AFTER = timedelta(hours=12)
 LIVE_TIMEOUT = 20
 # MÁV's feed_version: the feed's date, then an id ("20261030.M2ChangeID").
 # Nothing else gets through: the value goes into a workflow output.
@@ -245,6 +254,25 @@ def parse_live(body: bytes) -> tuple[dict | None, str]:
     return live, "ok"
 
 
+def built_time(man: dict) -> datetime | None:
+    """A manifest's built_at, or None when it names no time with an offset."""
+    value = man.get("built_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        when = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else None
+
+
+def refresh_due(new: dict, live: dict) -> bool:
+    """The published manifest was built REFRESH_AFTER or longer before new, or
+    names no build time: deploy the same content again for new's built_at."""
+    built, now = built_time(live), built_time(new)
+    return built is None or now is None or now - built >= REFRESH_AFTER
+
+
 def same_content(new: dict, live: dict | None) -> bool:
     """The published site serves this content already. Not the sha256: the
     gzip header carries the build time, so every build's bytes differ."""
@@ -390,7 +418,9 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
         live, why = fetch_live(args.live_url)
     else:
         live, why = None, "not asked"
-    deploy = not same_content(man, live)
+    same = same_content(man, live)
+    refresh = same and refresh_due(man, live)
+    deploy = not same or refresh
     write_site(args.index, man, args.out, args.gtfs_zip, overlay)
     audit = man["audit"]
     print(f"feed {man['feed']}, {man['size']} bytes, sha256 {man['sha256'][:12]}, digest {man['digest'][:12]}, "
@@ -401,9 +431,16 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
               f"{gtfs['overlay']['size']} bytes, sha256 {gtfs['overlay']['sha256'][:12]}")
     if live is None:
         print(f"published manifest: none ({why}); deploying")
-    elif deploy:
+    elif not same:
         print(f"published manifest: feed {live.get('feed')!r}, digest {str(live.get('digest'))[:12]}"
               f"{'' if live.get('digest') != man['digest'] else ', other GTFS files'}; deploying")
+    elif refresh:
+        # The age, not the published value: it goes into an annotation.
+        built = built_time(live)
+        age = "no valid build time" if built is None else \
+            f"built {int((built_time(man) - built).total_seconds() // 3600)} h ago"
+        print(f"::notice title=Daily MÁV index unchanged::Feed {man['feed']} has the content GitHub Pages "
+              f"already serves ({age}); deploying it again to refresh built_at.")
     else:
         print(f"::notice title=Daily MÁV index unchanged::Feed {man['feed']} has the content GitHub Pages "
               "already serves; nothing is deployed.")
