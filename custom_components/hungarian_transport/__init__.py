@@ -10,7 +10,7 @@ from homeassistant.components import frontend
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import (
     HomeAssistantError,
     ServiceValidationError,
@@ -107,12 +107,28 @@ LOADER_FILE = "hungarian-transport-loader.js"
 LOADER_URL = f"/hungarian-transport/{LOADER_FILE}"
 WWW_PATH = Path(__file__).parent / "www"
 ISSUE_MISSING_ASSETS = "missing_assets"
+# The detail of a card's answer while the entry is reloading or starting.
+NOT_READY = "Hungarian transport is starting or reloading"
 PLATFORMS = [Platform.SENSOR]
 
 
 def _entry_loaded(hass: HomeAssistant) -> bool:
     return any(
         entry.state is ConfigEntryState.LOADED
+        for entry in hass.config_entries.async_entries(DOMAIN)
+    )
+
+
+def _entry_coming_up(hass: HomeAssistant) -> bool:
+    """An enabled entry on its way to LOADED: a reload (an options save, a
+    reauth) holds its setup lock from the unload to the end of the setup,
+    and at startup the services exist before the entry is set up."""
+    return not _entry_loaded(hass) and any(
+        entry.disabled_by is None
+        and (
+            entry.setup_lock.locked()
+            or (entry.state is ConfigEntryState.NOT_LOADED and hass.state is not CoreState.running)
+        )
         for entry in hass.config_entries.async_entries(DOMAIN)
     )
 
@@ -182,6 +198,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     session = async_get_clientsession(hass)
 
     async def handle_elvira_between(call: ServiceCall) -> dict[str, Any]:
+        if _entry_coming_up(hass):
+            # Every open card polls through a reload or the startup: an
+            # answer, as for an outage, not an ERROR line per poll.
+            return {"departures": [], "error": "elvira_unavailable", "detail": NOT_READY}
         _require_entry(hass)
         origin = _station_code(call, "origin_code")
         dest = _station_code(call, "dest_code")
@@ -228,6 +248,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     )
 
     async def handle_realtime(call: ServiceCall) -> dict[str, Any]:
+        if _entry_coming_up(hass):
+            # As for elvira_between: the cards retry on their next poll.
+            return {"feed": call.data["feed"], "trips": {}, "error": "rt_unavailable"}
         _require_entry(hass)
         # Feed outages are part of the response (rt_unavailable, rt_no_feed),
         # not exceptions: the websocket API logs every failed call at ERROR.
