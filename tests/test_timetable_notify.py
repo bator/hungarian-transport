@@ -324,6 +324,31 @@ def test_a_shipped_mav_index_newer_than_the_installed_one_is_news() -> None:
     assert timetable_notify.changed_indexes(seen, "0.0.2", {"mav": OLD}, installed_mav=None) == ["mav"]
 
 
+async def test_an_install_a_release_replaced_hides_no_later_release(
+    hass: HomeAssistant, tmp_path, hass_storage
+) -> None:
+    """The install record stays after a release overwrote its index: the
+    next release is measured against what was served, not against it."""
+    _seen(hass_storage, "1.10.13", {"mav": "20261112.M2ChangeID"})
+    hass_storage[timetable_notify.STORAGE_KEY]["data"][storage.MAV_INSTALL] = {
+        "source": storage.SOURCE_DAILY, "feed": "20261112.M2ChangeID", "size": 1,
+        "installed_at": "2026-11-12T05:00:00+00:00",
+    }
+    notifier = timetable_notify.UpdateNotifier(hass, {})
+
+    async def release(version: str, feed: str) -> list[str]:
+        (tmp_path / mav.INDEX_NAME).write_bytes(_index(feed))
+        return await notifier.async_check_shipped(tmp_path, version)
+
+    # Older than the installed daily index it replaces: no news.
+    assert await release("1.10.14", "20261109.M2ChangeID") == []
+    # Newer than the one that release served: news, whatever the record says.
+    assert await release("1.10.15", "20261111.M2ChangeID") == ["mav"]
+    # A new install counts again.
+    await storage.async_record_mav_install(hass, storage.SOURCE_DAILY, "20261114.M2ChangeID", 1)
+    assert await release("1.10.16", "20261113.M2ChangeID") == []
+
+
 async def test_a_new_version_with_the_same_feeds_is_no_news(hass: HomeAssistant, card_assets, notes, hass_storage):
     _seen(hass_storage, "0.0.1", {"volan": VOLAN, "city": CITY, "mav": OLD})
     _ship(card_assets)
