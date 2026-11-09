@@ -4668,6 +4668,17 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   old.remove();
   Object.assign(Lib, keep);
 }
+/* A card's first load is slower on a busy machine: wait for its poll on
+   that condition, with a deadline far past it, and fail one check if it
+   never comes, instead of calling a missing _pollRun and ending the suite. */
+const waitForPoll = async (hop, ms) => {
+  const end = Date.now() + (ms || 10000);
+  while (!(!hop._reloadActive && hop._pollRun)) {
+    if (Date.now() > end) return false;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return true;
+};
 {
   /* ELVIRA is the MÁV card's only source: a poll it does not answer (an
      outage, the integration's rate limit, a failed call, a destination board
@@ -4703,7 +4714,7 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
         if (msg.type !== 'call_service') return {};
         asked += 1;
         const next = answers.shift();
-        if (next instanceof Error || (next && next.code)) throw next;
+        if (next instanceof Error || typeof next === 'number' || (next && (next.code || next.success === false))) throw next;
         if (next === 'hang') return new Promise(() => {});
         return { context: {}, response: next };
       },
@@ -4719,20 +4730,18 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
       destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
     }, cfg || {}));
     hop._considerJourney = () => {};
-    for (let i = 0; i < 50; i++) {
-      await new Promise((r) => setTimeout(r, 10));
-      if (!hop._reloadActive && hop._pollRun) break;
-    }
+    await waitForPoll(hop);
     return hop;
   };
   const ids = (hop) => (hop._rawRows || []).map((r) => r.tripId).join();
   const errKey = (hop) => (hop._err && hop._err.i18nKey) || '';
   answers.push({ departures: [topart, balaton] });
   const hop = await mavCard();
+  check('the MÁV card finished its first load', !!hop._pollRun);
   const good = { ids: ids(hop), err: errKey(hop) };
   const pollWith = async (answer) => {
     answers.push(answer);
-    await hop._pollRun.run();
+    if (hop._pollRun) await hop._pollRun.run();
     return { ids: ids(hop), err: errKey(hop), filled, html: hop.shadowRoot.innerHTML };
   };
   const down = await pollWith({ departures: [], error: 'elvira_unavailable', detail: 'HTTP 503' });
@@ -4757,6 +4766,19 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   check('a dest_error answer keeps the trains it could not confirm, under the banner',
     destDown.ids === 'elvira:849,elvira:871' && destDown.err === 'errElviraDown' && destDown.filled === 0,
     JSON.stringify([destDown.ids, destDown.err, destDown.filled]));
+  /* home-assistant-js-websocket rejects a call the dropped socket cut off
+     with {error: {code: 3, message}}, and one sent while it is down with
+     the bare 3: the banner says why, not "[object Object]" or "(3)". */
+  await pollWith({ departures: [topart, balaton] });
+  const cut = await pollWith({ type: 'result', success: false, error: { code: 3, message: 'Connection lost' } });
+  const offline = await pollWith(3);
+  check('a dropped websocket shows a readable reason in the MÁV banner',
+    [cut, offline].every((s) => s.err === 'errElviraDown' && s.html.includes('(Connection lost)')
+      && !s.html.includes('[object Object]') && !s.html.includes('(3)')),
+    JSON.stringify([cut.err, offline.err, (hop._err && hop._err.message) || '']));
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
   hop.remove();
   /* No board yet: Transitous fills it as before, now under the banner. */
   fillRows = [{ tripId: 'motis:hu-mav_9702', label: '9702', trainNumber: '9702', vehicle: 'rail', rawType: 'RAIL', dep: t0, sched: t0 }];
@@ -4778,6 +4800,20 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     JSON.stringify({ loading: hung._loading, ids: ids(hung), err: errKey(hung), filled }));
   hung.remove();
   Lib._elviraTimeoutMs = keep._elviraTimeoutMs;
+  /* The card's limit covers the integration's worst case: every board
+     round of elvira_between, one after the other, each up to
+     ELVIRA_TIMEOUT. A slow but whole answer is not cut off as "did not
+     answer". */
+  {
+    const { readFile: rf } = await import('node:fs/promises');
+    const py = await rf('./custom_components/hungarian_transport/elvira.py', 'utf8');
+    const total = Number((py.match(/^ELVIRA_TIMEOUT = aiohttp\.ClientTimeout\(total=(\d+)\)/m) || [])[1]);
+    const body = (py.match(/\nasync def elvira_between\([\s\S]*?(?=\n(?:async )?def |\n[A-Z_]+ = |$)/) || [''])[0];
+    const rounds = (body.match(/await _fetch_boards\(/g) || []).length;
+    check('the card waits for elvira_between past the integration\'s worst case',
+      total > 0 && rounds >= 1 && keep._elviraTimeoutMs > rounds * total * 1000,
+      JSON.stringify({ total, rounds, timeoutMs: keep._elviraTimeoutMs }));
+  }
   /* Without a 9-digit id and outside the few names the card knows, the
      destination has no ELVIRA code without FUTÁR: say so, not "no departures". */
   fillRows = [];
@@ -4788,6 +4824,19 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     && noCode.shadowRoot.innerHTML.includes('Győr'),
     JSON.stringify({ err: errKey(noCode), asked: asked - askedNoCode }));
   noCode.remove();
+  /* With a key the name is searched on FUTÁR: a search that failed (a rate
+     limit, a timeout) is FUTÁR's outage for one poll, not "pick the
+     station in the card editor" on a card set up right. */
+  const keepSearch = Lib.searchStops;
+  Lib.searchStops = async () => { throw Object.assign(new Error('BKK rate limited'), { code: 'futar_rate_limited' }); };
+  const askedSearch = asked;
+  const searchDown = await mavCard({ apiKey: 'test-key', destKey: 'gyor', destName: 'Győrkeresx', destStopId: 'BKK_F0GYRX' });
+  Lib.searchStops = keepSearch;
+  check('a failed FUTÁR station search is no "no MÁV station code" banner',
+    errKey(searchDown) === 'errFutarDown' && asked === askedSearch
+    && searchDown.shadowRoot.innerHTML.includes('Győrkeresx'),
+    JSON.stringify({ err: errKey(searchDown), asked: asked - askedSearch }));
+  searchDown.remove();
   console.warn = realWarn;
   Object.assign(Lib, keep);
   Lib._elviraDownUntil = 0;
@@ -4809,6 +4858,9 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   const futarAsked = [];
   Lib.departures = async (_k, _s, _r, _d, opts) => {
     futarAsked.push(!opts.skipFutar);
+    /* The first load slower than the old fixed 500 ms wait (a busy
+       machine): the checks below wait for it, and never call a missing poll. */
+    if (futarAsked.length === 1) await new Promise((r) => setTimeout(r, 600));
     return opts.skipFutar ? [] : [icElvira({ tripId: 'BKK_8494_1', label: 'IC', trainNumber: '849', dep: t0, sched: t0 })];
   };
   Lib.fillTransitousIfEmpty = async (rows) => rows || [];
@@ -4832,10 +4884,8 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
   });
   hop._considerJourney = () => {};
-  for (let i = 0; i < 50; i++) {
-    await new Promise((r) => setTimeout(r, 10));
-    if (!hop._reloadActive && hop._pollRun) break;
-  }
+  const loaded = await waitForPoll(hop);
+  check('a MÁV card whose first load is slow still gets its poll', loaded);
   const first = (hop._rawRows || []).map((r) => r.tripId).join();
   /* The switch to FUTÁR reuses the not_loaded answer it got: one call. */
   const askedFirst = elviraAsked;
@@ -4846,10 +4896,10 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   let t = realNow();
   Date.now = () => t;
   t += 20000;
-  await hop._pollRun.run();
+  if (hop._pollRun) await hop._pollRun.run();
   hop._mavViaFutarUntil = 0;
   t += 20000;
-  await hop._pollRun.run();
+  if (hop._pollRun) await hop._pollRun.run();
   const later = (hop._rawRows || []).map((r) => r.tripId).join();
   const paused = Lib._elviraDownUntil > Date.now();
   Date.now = realNow;
@@ -4898,6 +4948,24 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     before === 'errNoApiKey' && asked === 1 && !hop._err && !!hop._poll
     && (hop._rawRows || []).map((r) => r.tripId).join() === 'elvira:849',
     JSON.stringify({ before, asked, err: hop._err && hop._err.i18nKey, rows: (hop._rawRows || []).map((r) => r.tripId) }));
+  /* HA restarting again: the service list comes back without the
+     integration for a moment. That poll keeps the MÁV board's trains under
+     the ELVIRA banner; it does not ask FUTÁR, nor say "no API key". */
+  let futarAsked = 0;
+  Lib.departures = async (_k, _s, _r, _d, opts) => {
+    if (!opts.skipFutar) {
+      futarAsked += 1;
+      throw Object.assign(new Error('Nincs BKK API kulcs'), { i18nKey: 'errNoApiKey' });
+    }
+    return [];
+  };
+  await waitForPoll(hop);
+  hop.hass = { states: {}, language: 'hu', services: {} };
+  if (hop._pollRun) await hop._pollRun.run();
+  const gap = { err: (hop._err && hop._err.i18nKey) || '', rows: (hop._rawRows || []).map((r) => r.tripId).join(), futarAsked };
+  check('a key-less MÁV card polled while elvira_between is briefly gone keeps its trains, no "no API key"',
+    gap.err === 'errElviraDown' && gap.rows === 'elvira:849' && futarAsked === 0 && asked === 1,
+    JSON.stringify(Object.assign(gap, { asked })));
   hop.remove();
   Object.assign(Lib, keep);
 }
@@ -5033,6 +5101,42 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     && now2[1].id === 'elvira:847' && now2[1].label === 'TÓPART' && now2[1].head === 'Budapest-Déli',
     JSON.stringify(now2));
   pn.remove();
+  /* No FUTÁR, Volán or city row for the pair (a key-less planner,
+     Kelenföld → Érd): the one train ELVIRA confirms must not stand in for
+     the Transitous fill, which brings bus 187 beside it. */
+  let fills = 0;
+  Lib.departures = async () => [];
+  Lib.fillTransitousIfEmpty = async (rows) => {
+    if ((rows || []).length) return rows;
+    fills += 1;
+    return [
+      { tripId: 'motis:bus187', label: '187', vehicle: 'bus', rawType: 'BUS', head: 'Érd', dep: t0 + 60, sched: t0 + 60 },
+      rail({ tripId: 'motis:hu-mav_4011', label: '4011', trainNumber: '4011', head: 'Érd', dep: t0, sched: t0 }),
+    ];
+  };
+  Lib.elviraBoard = async () => ({ error: '', detail: '', rows: [
+    rail({ tripId: 'elvira:4011', label: 'S36', railKind: 'Sz', trainNumber: '4011', head: 'Érd', end: 'Esztergom', platform: '2', dep: t0, sched: t0, destHit: true }),
+  ] });
+  const pe = document.createElement('hungarian-transit-stop-card-plan');
+  pe.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
+  pe._considerJourney = () => {};
+  pe._loadDests = async () => {};
+  document.body.appendChild(pe);
+  pe.setConfig({
+    language: 'hu', routeIds: [],
+    stopId: 'hu-mav_005501024', stopName: 'Kelenföld vasútállomás',
+    destKey: 'érd', destName: 'Érd', destStopId: 'hu-mav_005501180',
+  });
+  for (let i = 0; i < 100; i++) {
+    if (!pe._reloadActive && (pe._rawRows || []).length > 1) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const erd = (pe._rawRows || []).map((r) => ({ id: r.tripId, label: r.label, p: r.platform }));
+  check('a planner Now board with only an ELVIRA-confirmed train is still filled from Transitous (bus 187 too)',
+    fills === 1 && erd.length === 2 && erd.some((r) => r.id === 'motis:bus187')
+    && erd.some((r) => r.id === 'motis:hu-mav_4011' && r.p === '2'),
+    JSON.stringify({ fills, erd }));
+  pe.remove();
   Object.assign(Lib, keep);
 }
 check('a branded suburban train in the same minute stays off another numbered train', (() => {
@@ -7099,6 +7203,54 @@ const settle = async (el) => {
     JSON.stringify({ errors: dropped.map((b) => b.error), pausedAfterDrop, askedBack, back: back.map((b) => b.error) }));
   check('three failed poll rounds pause ELVIRA for every card',
     pausedAfterRounds, String(pausedAfterRounds));
+}
+{
+  /* A call that timed out went through a live websocket to an integration
+     still working on it (a second board round past midnight): it shows the
+     banner, but is no strike towards pausing ELVIRA for every card. */
+  const realNow = Date.now;
+  const keep = { callServiceResponse: Lib.callServiceResponse, _elviraTimeoutMs: Lib._elviraTimeoutMs };
+  const keepWarn = console.warn;
+  let calls = 0;
+  Lib.callServiceResponse = () => { calls += 1; return new Promise(() => {}); };
+  Lib._elviraTimeoutMs = 5;
+  console.warn = () => {};
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  Lib._elviraWarned = false;
+  let t = realNow();
+  Date.now = () => t;
+  const hass = { states: {}, services: { hungarian_transport: { elvira_between: {} } } };
+  const boards = [];
+  for (let round = 0; round < 4; round++) {
+    t += 20000;
+    boards.push(await Lib.elviraBoard(hass, 'BKK_005501024', 'BKK_005503269', 60, '', {}));
+  }
+  const paused = Date.now() < Lib._elviraDownUntil;
+  Date.now = realNow;
+  console.warn = keepWarn;
+  Object.assign(Lib, keep);
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  Lib._elviraWarned = false;
+  check('timed-out ELVIRA calls show the banner but do not pause ELVIRA for every card',
+    boards.every((b) => b.error === 'elvira_timeout') && calls === 4 && !paused,
+    JSON.stringify({ errors: boards.map((b) => b.error), calls, paused }));
+  /* The reason of a failed call, as home-assistant-js-websocket and HA give it. */
+  const reasonOf = (e) => (typeof Lib.elviraErrText === 'function' ? Lib.elviraErrText(e) : String(e));
+  const texts = [
+    reasonOf({ type: 'result', success: false, error: { code: 3, message: 'Connection lost' } }),
+    reasonOf(3),
+    reasonOf(new Error('unavailable')),
+    reasonOf({ code: 'home_assistant_error', message: 'Timeout' }),
+    reasonOf({ error: { code: 'unknown_error' } }),
+    reasonOf({}),
+  ];
+  check('a failed ELVIRA call\'s reason is readable text',
+    JSON.stringify(texts) === JSON.stringify(['Connection lost', 'Connection lost', 'unavailable', 'Timeout', 'unknown_error', '']),
+    JSON.stringify(texts));
 }
 {
   /* One scan of hass.states per change, and one pattern per row. */
@@ -9875,7 +10027,7 @@ check('a city stop number is not an ELVIRA station code',
   calls.length = 0;
   const c2 = await Lib.elviraResolveCode('KEY', 'szeged:7123', 'Szegedx7');
   check('an ELVIRA code search that failed is asked again once FUTÁR answers',
-    c1 === '' && c2 === '005517228' && calls.length > 0, JSON.stringify({ c1, c2, calls }));
+    c1 === null && c2 === '005517228' && calls.length > 0, JSON.stringify({ c1, c2, calls }));
   /* A real "no such station" is still kept. */
   Lib.fetch = async (_k, _path, params) => { calls.push(params && params.query); return { data: { references: { stops: {} } } }; };
   await Lib.elviraResolveCode('KEY', 'szeged:7124', 'Nowherex7');
@@ -9930,6 +10082,32 @@ check('a city stop number is not an ELVIRA station code',
     JSON.stringify({ together, reloaded, firstCalls, calls }));
 }
 
+/* A search in flight is shared only by cards with the same FUTÁR access:
+   a card with its own revoked key, asking first, must not leave the card
+   that goes through the integration without its station code. */
+{
+  const keep = { fetch: Lib.fetch, isMavStop: Lib.isMavStop, _hass: Lib._hass };
+  const calls = [];
+  Lib._hass = { states: {}, services: { hungarian_transport: { futar: {} } } };
+  Lib.fetch = async (k, _path, params) => {
+    calls.push(`${k || 'integration'}:${params && params.query}`);
+    await new Promise((r) => setTimeout(r, 5));
+    if (k === 'REVOKED') throw Object.assign(new Error('BKK 401'), { code: 'futar_auth' });
+    return { data: { references: { stops: { BKK_005510009: { id: 'BKK_005510009', name: 'Budapest-Nyugati', type: 'RAIL' } } } } };
+  };
+  Lib.isMavStop = () => true;
+  Lib._elviraCodes.clear();
+  const both = await Promise.all([
+    Lib.elviraResolveCode('REVOKED', 'BKK_CSF01NYX', 'Nyugatix pályaudvar M'),
+    Lib.elviraResolveCode('', 'BKK_CSF01NYX', 'Nyugatix pályaudvar M'),
+  ]);
+  Lib._elviraCodes.clear();
+  Object.assign(Lib, keep);
+  check('an ELVIRA code search in flight is not shared across FUTÁR credentials',
+    both[0] === null && both[1] === '005510009' && calls.some((c) => c.startsWith('integration:')),
+    JSON.stringify({ both, calls }));
+}
+
 /* A name whose alias query failed is no "no such station": it is not
    kept, and the next lookup asks again. */
 {
@@ -9965,7 +10143,7 @@ check('a city stop number is not an ELVIRA station code',
   delete globalThis.localStorage;
   Object.assign(Lib, keep);
   check('a failed alias query keeps no ELVIRA "no such station"',
-    first === '' && firstCalls === 2 && kept === 0 && second === '005599001' && calls.length === 4,
+    first === null && firstCalls === 2 && kept === 0 && second === '005599001' && calls.length === 4,
     JSON.stringify({ first, firstCalls, kept, second, calls }));
 }
 

@@ -1762,7 +1762,12 @@ ${this._stopPinCss()}
       if (gen !== this._gen) return;
       /* This card's own index URLs, for every lookup of this run (J-2): never a module-wide setting. */
       const lib = BkkLib.withIndexes(cfg);
-      const mavBoard = mode === 'mav' && BkkLib.hasElvira(this._hass)
+      /* A key-less MÁV card got here with elvira_between listed (_reload).
+         It drops out of hass.services for a moment while HA restarts: that
+         poll stays on the MÁV board, as one ELVIRA did not answer, not on
+         FUTÁR the card has no key for ("no API key" over its trains). */
+      const elviraGone = mode === 'mav' && !BkkLib.hasElvira(this._hass) && !this._hasFutar();
+      const mavBoard = mode === 'mav' && (BkkLib.hasElvira(this._hass) || elviraGone)
         && !(Date.now() < this._mavViaFutarUntil && this._hasFutar());
       try {
         if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
@@ -1778,7 +1783,9 @@ ${this._stopPinCss()}
           return;
         }
         const wantElvira = (mode === 'mav' || mode === 'all') && BkkLib.hasElvira(this._hass);
-        const elviraP = knownBoard ? Promise.resolve(knownBoard) : wantElvira
+        const elviraP = knownBoard ? Promise.resolve(knownBoard) : elviraGone
+          ? Promise.resolve({ rows: [], error: 'not_loaded', detail: '' })
+          : wantElvira
           ? lib.elviraBoard(
             this._hass,
             cfg.stopId,
@@ -1787,7 +1794,7 @@ ${this._stopPinCss()}
             clampMinutesAfter(cfg.minutesAfter),
             cfg.destName || '',
             { apiKey: this._apiKey(), originName: cfg.stopName || '' },
-          ).catch((err) => ({ rows: [], error: 'elvira_call_failed', detail: String((err && err.message) || err || '') }))
+          ).catch((err) => ({ rows: [], error: 'elvira_call_failed', detail: BkkLib.elviraErrText(err) }))
           : Promise.resolve({ rows: [], error: '', detail: '' });
         const cap = maxDepartureRows(cfg.minutesAfter);
         let earlyRows = [];
@@ -1889,9 +1896,11 @@ ${this._stopPinCss()}
           }
           elviraRows = BkkLib.mavBoardRows(board.rows);
           if (board.error) {
-            mavErr = board.error === 'no_code'
-              ? codedError('errElviraNoCode', board.detail)
-              : codedError('errElviraDown', board.detail || board.error);
+            /* Only a stop FUTÁR has no station for asks for the editor; a
+               station search that failed is FUTÁR's outage, for one poll. */
+            if (board.error === 'no_code') mavErr = codedError('errElviraNoCode', board.detail);
+            else if (board.error === 'code_search_failed') mavErr = codedError('errFutarDown', board.detail);
+            else mavErr = codedError('errElviraDown', board.detail || board.error);
             elviraRows = keepMavRows(elviraRows);
           }
           elviraRows = elviraRows.slice(0, cap);
@@ -1942,28 +1951,33 @@ ${this._stopPinCss()}
         await throughWait;
         if (gen !== this._gen) return;
         let merged;
+        /* The board's own rows, without the trains ELVIRA added: one train
+           the destination confirms is no reason to skip the fill, which
+           brings the buses and trams beside it (the planner's mode all). */
+        let hosts;
         if (mavBoard) {
           merged = elviraRows;
+          hosts = merged;
         } else {
-          merged = futarFull
+          hosts = futarFull
             ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
             : earlyRows.slice();
-          merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, elviraMerge);
+          merged = BkkLib.mergeVolanRows(hosts, elviraRows, cap, elviraMerge);
         }
         /* A city board is filled from Transitous inside departures() already:
            a second fill here only repeated the same lookups on every poll. */
-        if (!merged.length && mode !== 'helyi') {
-          merged = await BkkLib.fillTransitousIfEmpty(merged, origin, dest, {
+        if (!hosts.length && mode !== 'helyi') {
+          const filled = await BkkLib.fillTransitousIfEmpty(hosts, origin, dest, {
             mode: this._departMode(),
             minutesAfter: cfg.minutesAfter,
           });
           if (gen !== this._gen) return;
-          merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, elviraMerge);
+          merged = BkkLib.mergeVolanRows(filled, elviraRows, cap, elviraMerge);
           earlyRows = merged;
           paintBoard(merged);
           /* Transitous rows, not this board's own: a failed poll replaces
              them instead of keeping them as if FUTÁR had sent them. */
-          if (merged.length) this._rowsFilled = true;
+          if (filled.length) this._rowsFilled = true;
         }
         if (typeof this._considerJourney === 'function') this._considerJourney();
         await gpsTravel;

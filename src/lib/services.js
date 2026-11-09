@@ -1,6 +1,16 @@
 import { DEFAULT_MINUTES_AFTER } from '../config.js';
 import { BkkLib } from '../lib/core.js';
 
+/* What the integration's elvira_between may take (elvira.py): each MÁV board
+   gives up after ELVIRA_TIMEOUT (30 s), and one call asks its boards in at
+   most two rounds, one after the other (tomorrow's destination board after
+   today's, around midnight). The card waits for that and a little more:
+   cutting a slow but whole answer off showed "did not answer" over it. If
+   the integration ever asks a third round, or a longer board, this has to
+   grow with it. */
+const ELVIRA_BOARD_TIMEOUT_MS = 30000;
+const ELVIRA_BOARD_ROUNDS = 2;
+
 Object.assign(BkkLib, {
   elviraRowsFromResult(res) {
     if (!res) return [];
@@ -33,18 +43,20 @@ Object.assign(BkkLib, {
   _elviraWarned: false,
   _elviraLastCode: '',
   _elviraLastErr: '',
-  /* A call that never answers ends here, not with the websocket: the
-     integration gives up on a board after 30 s. */
-  _elviraTimeoutMs: 35000,
+  /* A call that never answers ends here, not with the websocket: past the
+     integration's own worst case, so only a call it no longer works on is
+     cut off. */
+  _elviraTimeoutMs: ELVIRA_BOARD_ROUNDS * ELVIRA_BOARD_TIMEOUT_MS + 10000,
   /* The service schema's own limit on dest_name. */
   _elviraDestNameMax: 100,
   /* The trains between two stations, as {rows, error, detail}. error is ''
      for a full answer, else what went wrong: the integration's code
      (elvira_unavailable, elvira_rate_limited), a destination board that did
      not arrive (dest_error: the rows are there, their destHit is not sure),
-     a call that failed or timed out, not_loaded, or no_code for a stop with
-     no station code (detail is its name). A MÁV card tells these from an
-     empty board; elviraBetween is only the rows. */
+     a call that failed or timed out, not_loaded, no_code for a stop with
+     no station code, or code_search_failed for one whose FUTÁR station
+     search failed this time (detail is its name). A MÁV card tells these
+     from an empty board; elviraBetween is only the rows. */
   async elviraBoard(hass, originId, destId, minutesAfter, destName, opts) {
     opts = opts || {};
     const none = (error, detail) => ({ rows: [], error: error || '', detail: detail || '' });
@@ -54,6 +66,12 @@ Object.assign(BkkLib, {
     let dest = BkkLib.elviraStationCode(destId);
     if (!origin) origin = await this.elviraResolveCode(opts.apiKey, originId, opts.originName || '');
     if (!dest) dest = await this.elviraResolveCode(opts.apiKey, destId, destName || '');
+    /* A station search that failed (null: FUTÁR timed out or rate-limited)
+       is no "no station code": the card is set up right, and the next
+       poll searches again. */
+    if (origin === null || dest === null) {
+      return none('code_search_failed', origin === null ? (opts.originName || originId) : (destName || destId));
+    }
     if (!origin || !dest) {
       return none('no_code', !origin ? (opts.originName || originId) : (destName || destId));
     }
@@ -74,20 +92,25 @@ Object.assign(BkkLib, {
     try {
       res = await BkkLib._elviraCall(hass, serviceData);
     } catch (err) {
-      const detail = String((err && (err.message || err.code)) || err || '');
+      const detail = BkkLib.elviraErrText(err);
       /* The entry unloaded (disabled, reloading): its services stay listed. */
       let code = 'elvira_call_failed';
       if (err && err.translation_key === 'not_loaded') code = 'not_loaded';
       else if (err && err.code === 'elvira_timeout') code = 'elvira_timeout';
-      const now = Date.now();
-      if (now - BkkLib._elviraLastFailAt >= BkkLib._elviraFailRoundMs) {
-        BkkLib._elviraFails += 1;
-        BkkLib._elviraLastFailAt = now;
-      }
-      BkkLib._elviraLastCode = code;
-      BkkLib._elviraLastErr = detail;
-      if (BkkLib._elviraFails >= BkkLib._elviraFailLimit) {
-        BkkLib._elviraDownUntil = now + BkkLib._elviraRetryMs;
+      /* A call that timed out went through a websocket that is up, to an
+         integration still at work on it: that one is no strike towards
+         pausing ELVIRA for every card. A dropped websocket rejects instead. */
+      if (code !== 'elvira_timeout') {
+        const now = Date.now();
+        if (now - BkkLib._elviraLastFailAt >= BkkLib._elviraFailRoundMs) {
+          BkkLib._elviraFails += 1;
+          BkkLib._elviraLastFailAt = now;
+        }
+        BkkLib._elviraLastCode = code;
+        BkkLib._elviraLastErr = detail;
+        if (BkkLib._elviraFails >= BkkLib._elviraFailLimit) {
+          BkkLib._elviraDownUntil = now + BkkLib._elviraRetryMs;
+        }
       }
       if (!BkkLib._elviraWarned) {
         BkkLib._elviraWarned = true;
@@ -120,6 +143,20 @@ Object.assign(BkkLib, {
   },
   async elviraBetween(hass, originId, destId, minutesAfter, destName, opts) {
     return (await this.elviraBoard(hass, originId, destId, minutesAfter, destName, opts)).rows;
+  },
+  /* A failed call's reason, as text for the banner. home-assistant-js-
+     websocket does not reject with an Error: a call the dropped socket cut
+     off is {error: {code, message}}, one sent while it was down the bare
+     ERR_CONNECTION_LOST (3). Neither may show as "[object Object]" or "3". */
+  elviraErrText(err) {
+    const inner = err && typeof err === 'object' && err.error && typeof err.error === 'object' ? err.error : null;
+    const why = err && typeof err === 'object'
+      ? [err.message, inner && inner.message, err.code, inner && inner.code]
+        .find((v) => (typeof v === 'string' && v.trim()) || Number.isFinite(v))
+      : err;
+    if (why == null || why === '') return '';
+    if (typeof why === 'number') return why === 3 ? 'Connection lost' : `websocket error ${why}`;
+    return String(why);
   },
   _elviraCall(hass, serviceData) {
     let timer = null;
