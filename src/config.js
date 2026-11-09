@@ -171,6 +171,13 @@ export const BKK_RAIL_BADGE = {
   SZ: ['5C6B7A', 'FFFFFF'],
 };
 
+/* ELVIRA's train kinds a number-only train shows (sebesvonat, gyorsvonat,
+   mavBoardRows), in MÁV's own colours for them. Train rows only. */
+export const RAIL_KIND_BADGE = {
+  SV: ['29803C', 'FFFFFF'],
+  GY: ['C82227', 'FFFFFF'],
+};
+
 /* Assets live next to this module, so the card works from /hacsfiles/, /local/
    or wherever the Lovelace resource points. Requires `type: module`. */
 export const ASSET_BASE = new URL('.', import.meta.url).href;

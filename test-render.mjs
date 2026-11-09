@@ -1730,6 +1730,46 @@ check('overlayOnly matches ELVIRA booking when scheduled departures differ by mi
     && merged[1].booking === true
     && merged[1].tripId === 'BKK_914_2';
 })());
+{
+  /* Mode 'all' (the planner's Now board): an ELVIRA train its destination's
+     board confirms is added when no FUTÁR row has it. It pairs as strictly
+     as an overlay row: not by named/generic IC or label at the same minute,
+     which would put its booking and name on another train. A FUTÁR trip
+     with no number (an ad-hoc timestamp id) of the same kind, minute and
+     terminus is the same train, not a second row. */
+  const dep = Math.floor(Date.now() / 1000) + 1800;
+  const rail = (extra) => Object.assign({ vehicle: 'rail', rawType: 'RAIL', dep, sched: dep }, extra);
+  const elvira = (extra) => rail(Object.assign({
+    color: '#4477aa', text: '#ffffff', head: 'Székesfehérvár', platform: '4', booking: true, destHit: true,
+  }, extra));
+  const allMode = { overlayOnly: true, addUnmatched: (row) => Lib.mavBoardRows([row])[0] || null };
+  const merge = (futar, rows) => Lib.mergeVolanRows(futar, rows, 12, allMode);
+  const show = (rows) => JSON.stringify(rows.map((r) => [r.tripId, r.label, r.trainNumber || '', r.platform || '', !!r.booking]));
+  const sv = elvira({ tripId: 'elvira:9702', label: '9702', railKind: 'S', trainNumber: '9702', end: 'Székesfehérvár' });
+  const adHoc = rail({ tripId: 'BKK_1792439004037', label: 'S', head: 'Székesfehérvár' });
+  const one = merge([adHoc], [sv]);
+  check('mode all: a number-only ELVIRA train is one row with a same-minute FUTÁR S without a number',
+    one.length === 1 && one[0].tripId === 'BKK_1792439004037' && one[0].trainNumber === '9702'
+    && one[0].platform === '4', show(one));
+  const otherEnd = merge([rail({ tripId: 'BKK_1792439004037', label: 'S', head: 'Siófok' })], [sv]);
+  const otherKind = merge([rail({ tripId: 'BKK_1792439004038', label: 'IC', head: 'Székesfehérvár' })], [sv]);
+  const numbered = merge([rail({ tripId: 'BKK_4561_108', label: 'S', trainNumber: '4561', head: 'Székesfehérvár' })], [sv]);
+  check('mode all: another terminus, kind or train number at that minute keeps the ELVIRA train its own row',
+    [otherEnd, otherKind, numbered].every((m) => m.length === 2 && m.some((r) => r.tripId === 'elvira:9702')
+      && m.every((r) => r.tripId === 'elvira:9702' || (r.platform !== '4' && r.booking !== true))),
+    show([].concat(otherEnd, otherKind, numbered)));
+  const icHost = () => rail({ tripId: 'BKK_1792439004039', label: 'IC', head: 'Keszthely' });
+  const named = merge([icHost()], [elvira({
+    tripId: 'elvira:847', label: 'TÓPART', railKind: 'IC', trainNumber: '847', end: 'Budapest-Déli',
+  })]);
+  const generic = merge([icHost()], [elvira({
+    tripId: 'elvira:856', label: 'IC', railKind: 'IC', trainNumber: '856', end: 'Nagykanizsa',
+  })]);
+  check('mode all: an ELVIRA train to add pairs with no same-minute FUTÁR IC by name or label',
+    named.length === 2 && named.some((r) => r.tripId === 'BKK_1792439004039' && r.label === 'IC' && r.booking !== true)
+    && generic.length === 2 && generic.some((r) => r.tripId === 'BKK_1792439004039' && r.booking !== true && r.platform !== '4'),
+    show([].concat(named, generic)));
+}
 check('Székesfehérvár name maps to ELVIRA station code',
   Lib.elviraCodeFromName('Székesfehérvár') === '005503269');
 check('MOTIS scheduledTrack becomes the row platform', (() => {
@@ -4889,6 +4929,13 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     JSON.stringify(kinds) === JSON.stringify([['SV', '29803C'], ['Gy', 'C82227'], ['Sz', '5C6B7A']])
     && JSON.stringify(futarS) === JSON.stringify(['Sz', '5C6B7A']),
     JSON.stringify({ kinds, futarS }));
+  /* SV and Gy are train kinds: a bus line named so keeps the default colour. */
+  const busKinds = ['SV', 'Gy'].map((label) => {
+    const r = Lib.asRow({ tripId: 'volan_1', label, vehicle: 'bus', rawType: 'BUS', color: '#4477aa', text: '#ffffff' }, 'Székesfehérvár', 'hu');
+    return String(r.color).replace('#', '').toUpperCase();
+  });
+  check('a bus row labelled SV or Gy takes no train-kind badge',
+    busKinds.every((c) => c === '4477AA'), JSON.stringify(busKinds));
   /* Each train is headed by its own terminus (row end), not the card's destination. */
   const heads = Lib.mavBoardRows([
     { tripId: 'elvira:849', dep: now + 600, destHit: true, label: 'TÓPART', head: 'Budapest-Kelenföld', end: 'Budapest-Déli' },
@@ -9699,6 +9746,34 @@ check('a city stop number is not an ELVIRA station code',
     !dropped.overlay && dropped.opening === '' && /63/.test(reopened) && !/41/.test(reopened) && pc._openingMap === '',
     JSON.stringify({ dropped, reopened, opening: pc._openingMap }));
   pc._closeVehicleMap();
+  /* The same, from the itineraries' own Map buttons: the first open kept
+     its button, which opening the third itinerary repainted away. Closing
+     the map puts the focus on the Map button the card shows now. */
+  const pmap = () => pc.shadowRoot.querySelector('#pmap');
+  pick(0);
+  pc._paintJourney();
+  const btnA = pmap();
+  pc._focusTarget = () => ({ el: btnA, ref: null });
+  held = deferred();
+  const fromA = pc._openJourneyMap();
+  await settleTicks();
+  pick(2);
+  pc._paintJourney();
+  const btnB = pmap();
+  let focused = '';
+  btnB.focus = () => { focused = 'B'; };
+  pc._focusTarget = () => ({ el: btnB, ref: null });
+  await pc._openJourneyMap();
+  held.resolve();
+  await fromA;
+  await settleTicks();
+  const opened = /63/.test(foot());
+  pc._closeVehicleMap();
+  check('a journey map that replaced one still opening gives the focus back to the Map button shown now',
+    opened && !!btnA && btnA !== btnB && !btnA.isConnected && focused === 'B',
+    JSON.stringify({ opened, focused, detached: !!btnA && !btnA.isConnected }));
+  check('a new planner starts with no itinerary opening',
+    document.createElement('hungarian-transit-stop-card-plan')._openingJourney === null);
   Object.assign(Lib, keep);
   pc.remove();
 }
@@ -10134,6 +10209,23 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   check('a same-pair reload during the journey map’s replan still opens the map with the replanned journey',
     !!pc._mapOverlay && pc._journey && pc._journey.legs[0].label === 'REPLANNED8' && !notices.length,
     JSON.stringify({ overlay: !!pc._mapOverlay, opening: pc._openingMap, notices, label: pc._journey && pc._journey.legs[0].label }));
+  pc._closeVehicleMap();
+  /* "Now": the card's own plan lands while the map's replan still waits
+     (_considerJourney sets it after its shapes). The Map click is not
+     dropped: the map opens for the plan the card shows. */
+  pc._journey = mk('NOSHAPE8');
+  const landed = Object.assign(mk('REPLANNED8'), { durationMin: 27 });
+  Lib.planJourney = () => new Promise((r) => { release = () => r(mk('REPLANNED8')); });
+  const following = pc._openJourneyMap();
+  await settleTicks();
+  pc._journey = landed;
+  release();
+  await following;
+  await settleTicks();
+  const footNow = pc._mapOverlay ? pc._mapOverlay.querySelector('.ht-map-foot').textContent : '';
+  check('a "now" plan landing during the journey map’s replan opens the map for that plan, not nothing',
+    !!pc._mapOverlay && pc._journey === landed && /27/.test(footNow) && !notices.length && pc._openingMap === '',
+    JSON.stringify({ overlay: !!pc._mapOverlay, foot: footNow, notices, label: pc._journey && pc._journey.legs[0].label }));
   pc._closeVehicleMap();
   Object.assign(Lib, keep);
   pc.remove();

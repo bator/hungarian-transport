@@ -51,6 +51,8 @@ export class BKKPlannerCard extends BKKHopCard {
     this._when = { mode: 'now', at: 0 };
     this._journeys = [];
     this._openJourney = 0;
+    /* The itinerary a journey map open still waiting draws (_openJourneyMap). */
+    this._openingJourney = null;
     /* With both ends picked the title names the route and the pickers fold
        away; the edit button opens them again until the next destination. */
     this._editRoute = false;
@@ -651,16 +653,38 @@ export class BKKPlannerCard extends BKKHopCard {
   }
 
   async _openJourneyMap() {
+    /* "Now" has one plan: when the card's changes while the map opens (its
+       own plan landing, a newer one), the map opens for the one it shows. */
+    let again = true;
+    while (again) again = await this._openJourneyMapOnce();
+  }
+
+  /* A journey map's button may be gone when it closes: an open that
+     replaced one still waiting kept that one's button, and another
+     itinerary or a new plan repaints the box. Focus goes to the Map button
+     the box has now. */
+  _restoreFocus(back) {
+    if (back && back.journey && back.el && !back.el.isConnected) {
+      const el = this._journeyHost && this._journeyHost.querySelector('#pmap');
+      super._restoreFocus(el ? { el, ref: null } : null);
+      return;
+    }
+    super._restoreFocus(back);
+  }
+
+  /* True when the open has to start again for the card's new "now" plan. */
+  async _openJourneyMapOnce() {
     const lang = this._lang();
     const cfg = this._config || {};
     /* A Map click on another itinerary than the one still opening is a
        new open: it bumps _mapSeq, so the old one stops at its next check. */
-    if (this._openingMap === 'journey' && this._openingJourney === this._journey) return;
-    if (this._mapOverlay && this._openMapKey === 'journey') return;
+    if (this._openingMap === 'journey' && this._openingJourney === this._journey) return false;
+    if (this._mapOverlay && this._openMapKey === 'journey') return false;
     /* Focus goes to the dialog's close button and comes back on close, as
        with the vehicle map; left on the button under the backdrop, Tab
        would walk the page behind the dialog. */
     const back = this._mapReturnFocus || this._focusTarget();
+    if (back) back.journey = true;
     this._closeVehicleMap();
     this._mapReturnFocus = back;
     this._openingMap = 'journey';
@@ -670,17 +694,23 @@ export class BKKPlannerCard extends BKKHopCard {
        replace the new pair's journey, paint, or open a map. A reload of
        the same pair (a key showing up, back on the view) does not. */
     const gen = this._pairGen;
+    const timed = this._timed();
     /* The plan this open draws. A "Mikor" change meanwhile (_applyWhen)
        drops it for one still to come: without a plan the map would be a
        bare line from origin to destination under a summary of nothing.
-       Another itinerary opened meanwhile, or a new plan for now, replaces
-       it: the map would draw one the card no longer shows. */
+       Another itinerary opened meanwhile replaces it: the map would draw
+       one the card no longer shows. A new plan for now starts it again. */
     let journey = this._journey;
     this._openingJourney = journey;
+    let again = false;
     const stale = () => {
       if (this._mapStale(seq)) return true;
       if (gen === this._pairGen && this._journey === journey) return false;
       this._openingMap = '';
+      if (gen === this._pairGen && !timed && !this._timed()) {
+        again = true;
+        return true;
+      }
       /* No map opened: the button kept for this open must not take the
          focus when some later map closes. */
       this._mapReturnFocus = null;
@@ -689,7 +719,7 @@ export class BKKPlannerCard extends BKKHopCard {
     try {
       await BkkLib.fillJourneyShapes(journey);
     } catch (_e) { /* draw the endpoint fallback */ }
-    if (stale()) return;
+    if (stale()) return again;
     let segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
     /* Only "now" plans again for a map: a chosen time's open itinerary is
        one of several, and a plan for now would replace it with another. */
@@ -702,34 +732,34 @@ export class BKKPlannerCard extends BKKHopCard {
           this._hass,
           { minutesAfter: clampMinutesAfter(cfg.minutesAfter) },
         );
-        if (stale()) return;
+        if (stale()) return again;
         if (planned) journey = this._openingJourney = this._journey = planned;
         try {
           await BkkLib.fillJourneyShapes(journey);
         } catch (_e) { /* draw the endpoint fallback */ }
-        if (stale()) return;
+        if (stale()) return again;
         /* The card's own box shows the journey the map now draws, not the
            one this replan replaced. */
         if (planned) this._paintJourney();
         segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
       } catch (_e) { /* fall through to the no-geometry notice */ }
     }
-    if (stale()) return;
+    if (stale()) return again;
     if (!segs.length) {
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapNoData'));
-      return;
+      return false;
     }
     let L;
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
-      if (stale()) return;
+      if (stale()) return again;
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapLeafletFail'));
-      return;
+      return false;
     }
-    if (stale()) return;
+    if (stale()) return again;
     const overlay = document.createElement('div');
     overlay.className = 'ht-map-overlay';
     const title = `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
@@ -772,12 +802,13 @@ export class BKKPlannerCard extends BKKHopCard {
     } catch (_e) {
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapLeafletFail'));
-      return;
+      return false;
     }
     this._map = map;
     const allPts = this._drawJourneyPolylines(L, map, segs, { labels: true });
     this._fitJourneyView(L, map, allPts, 36, () => this._map === map);
     this._openingMap = '';
+    return false;
   }
 
   /* While a pair is still being picked the card keeps its own name (or
