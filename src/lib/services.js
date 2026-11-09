@@ -17,54 +17,107 @@ Object.assign(BkkLib, {
     const domain = hass && hass.services && hass.services.hungarian_transport;
     return !!(domain && typeof domain === 'object' && domain.elvira_between);
   },
-  /* After a failed call ELVIRA is left alone this long, and the outage is
-     logged once, not on every poll of every MÁV card. */
+  /* A failed call (a websocket that dropped, HA restarting) is asked again
+     on the next poll; only calls that keep failing leave ELVIRA alone this
+     long. The outage is logged once, not on every poll of every MÁV card. */
   _elviraRetryMs: 3 * 60000,
+  _elviraFailLimit: 3,
+  _elviraFails: 0,
   _elviraDownUntil: 0,
   _elviraWarned: false,
-  async elviraBetween(hass, originId, destId, minutesAfter, destName, opts) {
+  _elviraLastCode: '',
+  _elviraLastErr: '',
+  /* A call that never answers ends here, not with the websocket: the
+     integration gives up on a board after 30 s. */
+  _elviraTimeoutMs: 35000,
+  /* The trains between two stations, as {rows, error, detail}. error is ''
+     for a full answer, else what went wrong: the integration's code
+     (elvira_unavailable, elvira_rate_limited), a destination board that did
+     not arrive (dest_error: the rows are there, their destHit is not sure),
+     a call that failed or timed out, not_loaded, or no_code for a stop with
+     no station code (detail is its name). A MÁV card tells these from an
+     empty board; elviraBetween is only the rows. */
+  async elviraBoard(hass, originId, destId, minutesAfter, destName, opts) {
     opts = opts || {};
-    if (!BkkLib.hasElvira(hass) || Date.now() < BkkLib._elviraDownUntil) return [];
+    const none = (error, detail) => ({ rows: [], error: error || '', detail: detail || '' });
+    if (!BkkLib.hasElvira(hass)) return none();
+    if (Date.now() < BkkLib._elviraDownUntil) return none(BkkLib._elviraLastCode, BkkLib._elviraLastErr);
     let origin = BkkLib.elviraStationCode(originId);
     let dest = BkkLib.elviraStationCode(destId);
     if (!origin) origin = await this.elviraResolveCode(opts.apiKey, originId, opts.originName || '');
     if (!dest) dest = await this.elviraResolveCode(opts.apiKey, destId, destName || '');
-    if (!origin || !dest || origin === dest) {
-      return [];
+    if (!origin || !dest) {
+      return none('no_code', !origin ? (opts.originName || originId) : (destName || destId));
     }
+    if (origin === dest) return none();
     const serviceData = {
       origin_code: origin,
       dest_code: dest,
       minutes_after: minutesAfter || DEFAULT_MINUTES_AFTER,
       dest_name: destName || '',
     };
+    /* A planned time starts the window there (the planner's timed search);
+       one already past is the service's own "from now". */
+    const at = Math.floor(Number(opts.at));
+    if (Number.isFinite(at) && at > Math.floor(Date.now() / 1000)) serviceData.at = at;
     const pair = `${origin}>${dest}`;
+    let res;
     try {
-      const res = await BkkLib.callServiceResponse(hass, 'hungarian_transport', 'elvira_between', serviceData);
-      BkkLib._elviraWarned = false;
-      if (!res) return [];
-      /* ELVIRA itself being down is {departures: [], error, detail}, not a
-         service error: the integration answered, so only this pair's
-         outage is noted and no backoff applies to the other pairs. */
-      const payload = BkkLib.servicePayload(res);
-      /* The integration's own request limit, not MÁV being down: no rows
-         this poll, no outage warning, and the pair's outage state stays. */
-      if (payload && payload.error === 'elvira_rate_limited') return [];
-      if (payload && payload.error) {
-        BkkLib._elviraDown(pair, `${payload.error}${payload.detail ? ` (${payload.detail})` : ''}`);
-        return [];
-      }
-      BkkLib._elviraOutages.delete(pair);
-      const rows = BkkLib.elviraRowsFromResult(res);
-      return Array.isArray(rows) ? rows : [];
+      res = await BkkLib._elviraCall(hass, serviceData);
     } catch (err) {
-      BkkLib._elviraDownUntil = Date.now() + BkkLib._elviraRetryMs;
+      const detail = String((err && (err.message || err.code)) || err || '');
+      /* The entry unloaded (disabled, reloading): its services stay listed. */
+      let code = 'elvira_call_failed';
+      if (err && err.translation_key === 'not_loaded') code = 'not_loaded';
+      else if (err && err.code === 'elvira_timeout') code = 'elvira_timeout';
+      BkkLib._elviraFails += 1;
+      BkkLib._elviraLastCode = code;
+      BkkLib._elviraLastErr = detail;
+      if (BkkLib._elviraFails >= BkkLib._elviraFailLimit) {
+        BkkLib._elviraDownUntil = Date.now() + BkkLib._elviraRetryMs;
+      }
       if (!BkkLib._elviraWarned) {
         BkkLib._elviraWarned = true;
-        console.warn('MÁV ELVIRA reservation data unavailable, retrying in a few minutes:', err);
+        console.warn('MÁV ELVIRA reservation data unavailable, retrying:', err);
       }
-      return [];
+      return none(code, detail);
     }
+    BkkLib._elviraFails = 0;
+    BkkLib._elviraWarned = false;
+    if (!res) return none();
+    /* ELVIRA itself being down is {departures: [], error, detail}, not a
+       service error: the integration answered, so only this pair's
+       outage is noted and no backoff applies to the other pairs. */
+    const payload = BkkLib.servicePayload(res);
+    /* The integration's own request limit, not MÁV being down: no rows
+       this poll, no outage warning, and the pair's outage state stays. */
+    if (payload && payload.error === 'elvira_rate_limited') return none(payload.error, payload.detail);
+    if (payload && payload.error) {
+      BkkLib._elviraDown(pair, `${payload.error}${payload.detail ? ` (${payload.detail})` : ''}`);
+      return none(String(payload.error), payload.detail);
+    }
+    BkkLib._elviraOutages.delete(pair);
+    const rows = BkkLib.elviraRowsFromResult(res);
+    const list = Array.isArray(rows) ? rows : [];
+    if (payload && payload.dest_error) {
+      return { rows: list, error: String(payload.dest_error), detail: `${destName || dest}: ${payload.dest_error}` };
+    }
+    return { rows: list, error: '', detail: '' };
+  },
+  async elviraBetween(hass, originId, destId, minutesAfter, destName, opts) {
+    return (await this.elviraBoard(hass, originId, destId, minutesAfter, destName, opts)).rows;
+  },
+  _elviraCall(hass, serviceData) {
+    let timer = null;
+    const timeout = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const err = new Error('elvira_between did not answer in time');
+        err.code = 'elvira_timeout';
+        reject(err);
+      }, BkkLib._elviraTimeoutMs);
+    });
+    const call = Promise.resolve(BkkLib.callServiceResponse(hass, 'hungarian_transport', 'elvira_between', serviceData));
+    return Promise.race([call, timeout]).finally(() => clearTimeout(timer));
   },
   /* Cards poll every 15–45 s: warn when a station pair's ELVIRA outage
      starts, not on every poll; its next good answer ends the outage. */

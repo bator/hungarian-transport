@@ -851,10 +851,11 @@ Object.assign(BkkLib, {
     if (hass && dest && dest.id) {
       try {
         /* With the station code resolved here, ELVIRA is not handed the
-           destination's name, and heads each train with its own terminus. */
+           destination's name, and heads each train with its own terminus.
+           Its window starts at the walk's end, the planned time's, not now. */
         const destCode = await this.elviraResolveCode(apiKey, dest.id, dest.name || '');
         const rows = destCode ? await this.elviraBetween(
-          hass, station.id, destCode, 480, '', { apiKey, originName: station.name || '' },
+          hass, station.id, destCode, 480, '', { apiKey, originName: station.name || '', at: walkEnd - 30 },
         ) : [];
         const next = (rows || []).filter((row) => row.destHit !== false && Number(row.dep) >= walkEnd - 30)
           .sort((a, b) => a.dep - b.dep)[0];

@@ -223,13 +223,22 @@ Object.assign(BkkLib, {
   },
   /* A MÁV card's departures: ELVIRA's board of the boarding station, the
      trains its destination's arrival board also lists. The rest of the board
-     goes elsewhere. A train with only a number shows its kind, like FUTÁR's rows. */
+     goes elsewhere. A train with only a number shows its kind, like FUTÁR's
+     rows: ELVIRA's S (sebesvonat) as SV, since a bare S on these cards is
+     FUTÁR's személyvonat (applyRailBadge). Each train is headed by its own
+     terminus, not by the card's destination it was asked with. */
   mavBoardRows(rows) {
     return (Array.isArray(rows) ? rows : [])
       .filter((row) => row && row.destHit && departureStillDue(row.dep))
-      .map((row) => (
-        row.railKind && /^\d+$/.test(String(row.label || '')) ? Object.assign({}, row, { label: row.railKind }) : row
-      ));
+      .map((row) => {
+        const out = Object.assign({}, row);
+        if (row.railKind && /^\d+$/.test(String(row.label || ''))) {
+          out.label = row.railKind === 'S' ? 'SV' : row.railKind;
+        }
+        const end = String(row.end || '').trim();
+        if (end) out.head = end;
+        return out;
+      });
   },
   async mavRouteForRow(row, boardName, alightName) {
     try {
@@ -1064,7 +1073,7 @@ Object.assign(BkkLib, {
       && !BkkLib.numberedRailBadge(row)
       && (BkkLib.suburbanLineLabel(row && row.label)
         || (!BkkLib.genericRailLabel(row && row.label) && String((row && row.label) || '').trim()));
-    const add = (row, skipUnmatched) => {
+    const add = (row, skipUnmatched, asNew) => {
       if (!row || !departureStillDue(row.dep || row.sched)) return;
       const n = BkkLib.rowTrainNumber(row);
       const min = minuteOf(row);
@@ -1124,7 +1133,7 @@ Object.assign(BkkLib, {
       }
       if (skipUnmatched) return;
       const idx = out.length;
-      out.push(row);
+      out.push(asNew || row);
       byTime.set(tk, idx);
       registerNumber(n, idx);
       registerNumber(looseNumber(row), idx, byLoose);
@@ -1132,8 +1141,15 @@ Object.assign(BkkLib, {
     const overlayOnly = !!(opts && opts.overlayOnly);
     const hosts = overlayOnly ? (gtfs || []) : (otp || []);
     const extra = overlayOnly ? (otp || []) : (gtfs || []);
+    /* overlayOnly with addUnmatched: an extra row it maps to a row of its
+       own (an ELVIRA train the destination's board confirms) pairs like a
+       host row would, and is added, as that row, when no host has it. */
+    const addUnmatched = overlayOnly && opts && typeof opts.addUnmatched === 'function' ? opts.addUnmatched : null;
     hosts.forEach((row) => add(row, false));
-    extra.forEach((row) => add(row, overlayOnly));
+    extra.forEach((row) => {
+      const own = addUnmatched ? addUnmatched(row) : null;
+      add(row, overlayOnly && !own, own);
+    });
     out.sort((a, b) => (a.dep || 0) - (b.dep || 0));
     const cap = Number(limit);
     return out.slice(0, (Number.isFinite(cap) && cap > 0) ? cap : 12);
