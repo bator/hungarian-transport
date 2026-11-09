@@ -105,11 +105,12 @@ def built_ago(age: timedelta) -> str:
     return when.isoformat().replace("+00:00", "Z")
 
 
-def integration_stale_manifest() -> timedelta:
-    """mav_daily.STALE_MANIFEST, read from the source (it imports Home Assistant)."""
-    src = (ROOT / "custom_components" / "hungarian_transport" / "mav_daily.py").read_text(encoding="utf-8")
-    m = re.search(r"^STALE_MANIFEST = timedelta\(hours=(\d+)\)$", src, re.M)
-    return timedelta(hours=int(m.group(1))) if m else timedelta(0)
+def integration_timedelta(module: str, name: str) -> timedelta:
+    """An integration module's `NAME = timedelta(hours=N)` (or days=N), read
+    from the source (it imports Home Assistant); 0 when it is not there."""
+    src = (ROOT / "custom_components" / "hungarian_transport" / module).read_text(encoding="utf-8")
+    m = re.search(rf"^{name} = timedelta\((hours|days)=(\d+)\)$", src, re.M)
+    return timedelta(**{m.group(1): int(m.group(2))}) if m else timedelta(0)
 
 
 def gtfs_zip(path: Path, feed: str = "20261101.M2ChangeID") -> Path:
@@ -207,19 +208,23 @@ with tempfile.TemporaryDirectory() as tmp_name:
     # Unchanged content is deployed again once the published built_at is a
     # day's run old: the verdict and the integration read built_at as the
     # last build, so a feed MÁV leaves alone must not look like a stale index.
-    for label, when in (("yesterday's run (26 h ago)", built_ago(timedelta(hours=26))),
-                        ("REFRESH_AFTER ago", built_ago(site.REFRESH_AFTER)),
-                        ("no valid time", "yesterday")):
+    for n, (label, when) in enumerate((("yesterday's run (26 h ago)", built_ago(timedelta(hours=26))),
+                                       ("REFRESH_AFTER ago", built_ago(site.REFRESH_AFTER)),
+                                       ("no valid time", "yesterday"))):
         live.write_text(json.dumps({**man, "sha256": "f" * 64, "built_at": when}))
-        rc, out, err, outputs = run_site(tmp / f"b-old-{len(label)}", "--live-file", str(live))
-        rman = tmp / f"b-old-{len(label)}" / "site" / "mav-index.json"
+        rc, out, err, outputs = run_site(tmp / f"b-old-{n}", "--live-file", str(live))
+        rman = tmp / f"b-old-{n}" / "site" / "mav-index.json"
         check(f"the same content, published manifest built {label}: deployed again with a new built_at",
               rc == 0 and outputs.get("deploy") == "true" and "refresh" in out
               and rman.is_file() and json.loads(rman.read_text()).get("built_at") != when,
               repr((rc, out, err, outputs)))
+    # Every reader of built_at: the verdict, the integration's manifest
+    # check, and its "the daily workflow has stopped" notification.
+    stale = (verdict_mod.STALE_AFTER, integration_timedelta("mav_daily.py", "STALE_MANIFEST"),
+             integration_timedelta("timetable_notify.py", "STALE_PAGES"))
     check("an unchanged index is deployed again well before the verdict or the integration calls it stale",
-          timedelta(hours=1) < site.REFRESH_AFTER < min(verdict_mod.STALE_AFTER, integration_stale_manifest())
-          < timedelta(days=1) + site.REFRESH_AFTER, repr(site.REFRESH_AFTER))
+          timedelta(hours=1) < site.REFRESH_AFTER < min(stale) < timedelta(days=1) + site.REFRESH_AFTER,
+          repr((site.REFRESH_AFTER, stale)))
 
     for label, changed in (("digest", {"digest": "0" * 64}), ("format", {"format": 0}), ("schema", {"schema": 1})):
         live.write_text(json.dumps({**man, **changed}))

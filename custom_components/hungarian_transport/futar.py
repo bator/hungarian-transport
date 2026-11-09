@@ -15,7 +15,7 @@ from typing import Any
 
 import aiohttp
 
-from .cache import SharedTTLCache, TaskFactory
+from .cache import CallLater, SharedTTLCache, TaskFactory
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -182,10 +182,11 @@ class FutarProxy:
         session: aiohttp.ClientSession,
         api_key: str,
         task_factory: TaskFactory | None = None,
+        call_later: CallLater | None = None,
     ) -> None:
         self._session = session
         self._api_key = api_key
-        self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX, task_factory)
+        self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX, task_factory, call_later)
         self._rejected: str | None = None
         self._rejected_at = 0.0
         # Counts rejections: an answer to a request sent before the latest
@@ -259,6 +260,11 @@ class FutarProxy:
             _LOGGER.info("BKK FUTÁR accepts the configured key again")
             self._rejected = None
         return data
+
+    def close(self) -> None:
+        """The cache's expiry timer goes (entry unloaded, Home Assistant
+        stopping)."""
+        self._cache.close()
 
     async def get(self, path: str, params: dict[str, Any]) -> dict:
         # Before the rejected-key check: a call refused here never reaches

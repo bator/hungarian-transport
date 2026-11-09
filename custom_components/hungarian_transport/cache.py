@@ -17,8 +17,10 @@ CallLater = Callable[[float, Callable[[], None]], Callable[[], None]]
 
 
 def hass_call_later(hass: HomeAssistant) -> CallLater:
-    """The expiry timer inside Home Assistant: cancelled at shutdown, like
-    the fetch tasks, instead of a timer left behind."""
+    """The expiry timer inside Home Assistant. Home Assistant does not cancel
+    an async_call_later timer at shutdown (a HassJob's cancel_on_shutdown
+    covers only timers that hand the job to the loop themselves), so the
+    cache's owner closes the cache then: close_on_stop."""
     # Imported here: this module and elvira.py load without Home Assistant
     # (ha/test_elvira.py).
     from homeassistant.core import HassJob, callback
@@ -29,11 +31,23 @@ def hass_call_later(hass: HomeAssistant) -> CallLater:
         def _run(_now: datetime) -> None:
             action()
 
-        return async_call_later(
-            hass, delay, HassJob(_run, "hungarian_transport cache expiry", cancel_on_shutdown=True)
-        )
+        return async_call_later(hass, delay, HassJob(_run, "hungarian_transport cache expiry"))
 
     return call_later
+
+
+def close_on_stop(hass: HomeAssistant, close: Callable[[], None]) -> Callable[[], None]:
+    """Call close (SharedTTLCache.close) when Home Assistant stops; returns
+    the listener's remove, for an owner that goes before that (an entry
+    unloaded)."""
+    from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+    from homeassistant.core import Event, callback
+
+    @callback
+    def _stop(_event: Event) -> None:
+        close()
+
+    return hass.bus.async_listen(EVENT_HOMEASSISTANT_STOP, _stop)
 
 
 class SharedTTLCache:
@@ -48,7 +62,8 @@ class SharedTTLCache:
     ``task_factory`` creates the task of a miss; inside Home Assistant it is
     ``hass.async_create_background_task`` so the request is tracked and
     cancelled at shutdown instead of lingering as an untracked future.
-    ``call_later`` is ``hass_call_later(hass)`` there for the same reason.
+    ``call_later`` is ``hass_call_later(hass)`` there, and ``close`` cancels
+    its timer for good when Home Assistant stops or the owner unloads.
     """
 
     def __init__(
@@ -65,6 +80,7 @@ class SharedTTLCache:
         self._task_factory: TaskFactory = task_factory or asyncio.ensure_future
         self._call_later = call_later
         self._cancel_expiry: Callable[[], None] | None = None
+        self._closed = False
 
     def __len__(self) -> int:
         return len(self._data)
@@ -100,9 +116,24 @@ class SharedTTLCache:
         self._data[key] = (now, task.result())
         self._schedule_expiry()
 
+    def close(self) -> None:
+        """No expiry timer from now on: the pending one is cancelled, and a
+        fetch that ends later (shutdown cancels it, or it is past that) does
+        not start another. The cache still answers; stale entries then go
+        on the next miss or store, as without ``call_later``."""
+        self._closed = True
+        if self._cancel_expiry is not None:
+            self._cancel_expiry()
+            self._cancel_expiry = None
+
     def _schedule_expiry(self) -> None:
         """One timer at a time, for when the oldest entry expires."""
-        if self._call_later is None or self._cancel_expiry is not None or not self._data:
+        if (
+            self._call_later is None
+            or self._closed
+            or self._cancel_expiry is not None
+            or not self._data
+        ):
             return
         oldest = min(ts for ts, _ in self._data.values())
         delay = max(0.0, oldest + self._ttl - time.monotonic())

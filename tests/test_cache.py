@@ -6,6 +6,7 @@ from datetime import timedelta
 import pytest
 from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import HassJob
 from homeassistant.util import dt as dt_util
 from homeassistant.util.async_ import get_scheduled_timer_handles
@@ -103,9 +104,19 @@ async def test_expired_entries_go_without_another_call(monkeypatch) -> None:
     assert timers == []
 
 
-async def test_hass_expiry_timer_is_cancelled_at_shutdown(hass, monkeypatch) -> None:
-    """Inside Home Assistant the timer is a HassJob cancelled at shutdown,
-    not a timer left behind."""
+def expiry_timers(hass) -> list:
+    """The cache's expiry timers still scheduled on Home Assistant's loop."""
+    return [
+        handle
+        for handle in get_scheduled_timer_handles(hass.loop)
+        if not handle.cancelled()
+        and handle._args
+        and isinstance(job := handle._args[-1], HassJob)
+        and job.name == "hungarian_transport cache expiry"
+    ]
+
+
+async def test_hass_expiry_timer_purges_the_cache(hass, monkeypatch) -> None:
     clock = [1000.0]
     monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock[0])
     cache = SharedTTLCache(ttl=15, max_entries=8, call_later=cache_mod.hass_call_later(hass))
@@ -114,14 +125,61 @@ async def test_hass_expiry_timer_is_cancelled_at_shutdown(hass, monkeypatch) -> 
         return v
 
     await cache.get("k", lambda: value("v"))
-    jobs = [h._args[-1] for h in get_scheduled_timer_handles(hass.loop) if h._args and not h.cancelled()]
-    ours = [job for job in jobs if isinstance(job, HassJob) and job.name == "hungarian_transport cache expiry"]
-    assert [job.cancel_on_shutdown for job in ours] == [True]
+    assert len(expiry_timers(hass)) == 1
 
     clock[0] += 15
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=15), fire_all=True)
     await hass.async_block_till_done()
     assert len(cache) == 0
+    assert expiry_timers(hass) == []
+
+
+async def test_hass_expiry_timer_is_cancelled_when_home_assistant_stops(hass) -> None:
+    """Home Assistant does not cancel an async_call_later timer at shutdown
+    (a HassJob's cancel_on_shutdown notwithstanding): close_on_stop does,
+    and no timer comes back for a fetch that ends after it."""
+    cache = SharedTTLCache(ttl=15, max_entries=8, call_later=cache_mod.hass_call_later(hass))
+    cache_mod.close_on_stop(hass, cache.close)
+    gate = asyncio.Event()
+
+    async def value(v):
+        await gate.wait()
+        return v
+
+    gate.set()
+    await cache.get("k", lambda: value("v"))
+    assert len(expiry_timers(hass)) == 1
+
+    gate.clear()
+    late = asyncio.ensure_future(cache.get("late", lambda: value("v")))
+    await asyncio.sleep(0)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert expiry_timers(hass) == []
+
+    gate.set()
+    assert await late == "v"
+    assert expiry_timers(hass) == []
+
+
+async def test_closed_cache_still_answers_without_a_timer() -> None:
+    timers: list[object] = []
+
+    def call_later(delay, action):
+        timers.append(action)
+        return lambda: timers.remove(action)
+
+    cache = SharedTTLCache(ttl=15, max_entries=8, call_later=call_later)
+
+    async def value(v):
+        return v
+
+    await cache.get("a", lambda: value("a"))
+    assert len(timers) == 1
+    cache.close()
+    assert timers == []
+    assert await cache.get("b", lambda: value("b")) == "b"
+    assert timers == []
 
 
 async def test_size_cap_and_errors_are_not_cached() -> None:

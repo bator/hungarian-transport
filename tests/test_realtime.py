@@ -598,6 +598,42 @@ async def test_a_failed_static_refresh_keeps_the_train_numbers(hass, aioclient_m
     assert call[3]["If-None-Match"] == '"z1"'
 
 
+async def test_a_bad_static_body_does_not_take_the_kept_copys_validators(
+    hass, aioclient_mock, freezer, monkeypatch, caplog
+) -> None:
+    """A 200 whose body does not parse leaves the copy from before, and with
+    it the validators that name that copy: the retry is not answered 304 for
+    the bad body, nor logged as answering again."""
+    freezer.move_to(FROZEN)
+    monkeypatch.setattr(realtime, "STATIC_INTERVAL", 200)
+    monkeypatch.setattr(realtime, "STATIC_FAIL_BACKOFF", 300)
+    await _setup(hass)
+
+    def mock(static: bytes, etag: str) -> None:
+        aioclient_mock.clear_requests()
+        aioclient_mock.get(J + "1_198/trip-updates.pb", content=_pb("mav-trip-updates"))
+        aioclient_mock.get(J + "1_198/vehicle-positions.pb", content=_pb("mav-vehicle-positions"))
+        aioclient_mock.get(MAV_STATIC, content=static, headers={"ETag": etag, "Last-Modified": etag})
+        for path in ("1_134/trip-updates.pb", "1_134/vehicle-positions.pb"):
+            aioclient_mock.get(J + path, status=503)
+        aioclient_mock.get(GYSEV_STATIC, status=503)
+
+    req = {"feed": "mav", "trips": [{"key": "ic", "train": "822", "stops": ["005501024", "005506189"], "from": 0, "to": 1}]}
+    mock((FIX / "mav-static.zip").read_bytes(), '"z1"')
+    assert (await _call(hass, req))["trips"]["ic"]["dest_delay"] == 600
+    mock(_corrupt_deflate(), '"z2"')
+    freezer.tick(realtime.STATIC_INTERVAL + 1)
+    assert (await _call(hass, req))["trips"]["ic"]["dest_delay"] == 600
+
+    mock(_corrupt_deflate(), '"z2"')
+    freezer.tick(realtime.STATIC_FAIL_BACKOFF + 1)
+    caplog.clear()
+    assert (await _call(hass, req))["trips"]["ic"]["dest_delay"] == 600
+    (call,) = [c for c in aioclient_mock.mock_calls if str(c[1]) == MAV_STATIC]
+    assert call[3]["If-None-Match"] == '"z1"' and call[3]["If-Modified-Since"] == '"z1"'
+    assert not [r for r in caplog.records if "answers again" in r.getMessage()]
+
+
 @pytest.mark.parametrize(
     "data",
     [
