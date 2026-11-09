@@ -4379,6 +4379,84 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     JSON.stringify({ first, second, cold, counts }));
 }
 {
+  /* A route pattern that says "never there" is proof only while fresh: a
+     dashboard left open past a timetable change reads it again and shows
+     the trips that now reach the destination. A trip whose headsign ends
+     none of its variants (a detour, an added trip) is asked trip-details
+     even when the pattern is fresh. */
+  const realNow = Date.now;
+  const base = new Date();
+  base.setHours(8, 0, 0, 0);
+  let offset = 0;
+  Date.now = () => base.getTime() + offset;
+  const S = {
+    AZS_P: { id: 'AZS_P', name: 'Azshub' },
+    AZS_D: { id: 'AZS_D', name: 'Azscel' },
+    AZS_E: { id: 'AZS_E', name: 'Azsvege' },
+  };
+  let changed = false;
+  const counts = { route: 0, trip: 0 };
+  const keepFetch = Lib.fetch;
+  Lib.fetch = async (_k, path, params) => {
+    const t0 = Math.floor(Date.now() / 1000);
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      const stopTimes = [];
+      const trips = {};
+      for (let i = 0; i < 3; i++) {
+        stopTimes.push({ tripId: `AZS_T${i}`, stopId: 'AZS_P', departureTime: t0 + 300 + i * 600 });
+        trips[`AZS_T${i}`] = { routeId: 'AZS_R', tripHeadsign: 'Azsvege' };
+      }
+      stopTimes.push({ tripId: 'AZS_DETOUR', stopId: 'AZS_P', departureTime: t0 + 400 });
+      trips.AZS_DETOUR = { routeId: 'AZS_R', tripHeadsign: 'Azskerulo' };
+      return { data: { entry: { stopTimes }, references: { trips, routes: { AZS_R: { id: 'AZS_R', shortName: '4', type: 'BUS' } }, stops: S } } };
+    }
+    if (path === 'route-details.json') {
+      counts.route += 1;
+      const ids = changed ? ['AZS_P', 'AZS_D', 'AZS_E'] : ['AZS_P', 'AZS_E'];
+      return { data: { entry: { variants: [{ name: 'Azsvege', stopIds: ids }] }, references: { stops: S } } };
+    }
+    if (path === 'trip-details.json') {
+      counts.trip += 1;
+      const ids = (changed || params.tripId === 'AZS_DETOUR') ? ['AZS_P', 'AZS_D', 'AZS_E'] : ['AZS_P', 'AZS_E'];
+      return { data: { entry: { stopTimes: ids.map((id, k) => ({ stopId: id, arrivalTime: t0 + 300 + k * 120, departureTime: t0 + 300 + k * 120 })) }, references: { stops: S } } };
+    }
+    return { data: {} };
+  };
+  const cache = {};
+  const run = async () => {
+    let armed = null;
+    let full = null;
+    Lib._boards.clear();
+    const early = await Lib.departures('k', 'AZS_P', [], { key: 'azscel', name: 'Azscel' }, {
+      mode: 'bkk', minutesAfter: 180, cache, deferGps: true,
+      armThroughCheck: (fn) => { armed = fn; },
+      onFutarUpdate: (rows) => { full = rows; },
+    });
+    if (armed) armed();
+    for (let i = 0; i < 50 && armed && !full; i++) await new Promise((r) => setTimeout(r, 5));
+    return (full || early).map((r) => r.tripId).join(',') + '|' + counts.route + '/' + counts.trip;
+  };
+  const seen = [];
+  try {
+    seen.push(await run());
+    /* The timetable changes on the server; an hour later the pattern is
+       still taken as it is. */
+    changed = true;
+    offset = 3600000;
+    seen.push(await run());
+    offset = 4 * 3600000;
+    seen.push(await run());
+  } finally {
+    Date.now = realNow;
+    Lib.fetch = keepFetch;
+    Lib._boards.clear();
+  }
+  check('a stale route pattern is read again before it rules trips out; a trip off its variants is asked',
+    JSON.stringify(seen) === JSON.stringify(['AZS_DETOUR|1/1', 'AZS_DETOUR|1/1',
+      'AZS_T0,AZS_DETOUR,AZS_T1,AZS_T2|2/4']),
+    JSON.stringify(seen));
+}
+{
   /* Trips go first when the cache is full: the route patterns and child
      pole lists every poll needs again stay, so no route-details goes out
      again for them on a dashboard left open all day. */
@@ -8044,7 +8122,7 @@ const settle = async (el) => {
 }
 
 /* A sibling pole listed before the stop itself still leaves the stop's own
-   board first, so a capped board discovers the rest of the hub. */
+   board first, and discovery from it finds the rest of the hub. */
 {
   const keepFetch = Lib.fetch;
   const t0 = Math.floor(Date.now() / 1000);
@@ -8069,20 +8147,10 @@ const settle = async (el) => {
     if (path === 'arrivals-and-departures-for-stop.json') {
       boards.push(params.stopId);
       const [tid, rid, at] = boardTrip[params.stopId] || [];
-      const stopTimes = tid ? [{ tripId: tid, stopId: params.stopId, departureTime: t0 + at }] : [];
-      const trips = tid ? { [tid]: { routeId: rid, tripHeadsign: 'Azqcel' } } : {};
-      /* The stop's own board is at FUTÁR's ~60-row cap, well short of the
-         horizon: only that one sends discovery to the other poles. */
-      if (params.stopId === 'AZQ_P1') {
-        for (let i = 0; i < 59; i++) {
-          stopTimes.push({ tripId: `AZQ_TX${i}`, stopId: 'AZQ_P1', departureTime: t0 + 720 + i * 10 });
-          trips[`AZQ_TX${i}`] = { routeId: 'AZQ_X', tripHeadsign: 'Azqmashol' };
-        }
-      }
       return { data: {
-        entry: { stopTimes },
+        entry: { stopTimes: tid ? [{ tripId: tid, stopId: params.stopId, departureTime: t0 + at }] : [] },
         references: {
-          trips,
+          trips: tid ? { [tid]: { routeId: rid, tripHeadsign: 'Azqcel' } } : {},
           routes: { AZQ_A: { id: 'AZQ_A', shortName: '1', type: 'BUS' }, AZQ_D7: { id: 'AZQ_D7', shortName: '7', type: 'BUS' } },
           stops: S,
         },
@@ -8356,7 +8424,8 @@ const settle = async (el) => {
     } };
   };
   const counts = [];
-  /* Discovery first: the saved route's own pattern lookup is expected. */
+  /* Discovery looks the board's route up once, for poles of the same name
+     elsewhere; with a saved route its own pattern lookup is expected. */
   for (const saved of [[], ['AZQK_R']]) {
     for (let poll = 0; poll < 2; poll++) {
       calls.length = 0;
@@ -8366,10 +8435,110 @@ const settle = async (el) => {
       counts.push(rows.length + ':' + calls.filter((c) => c !== 'route:AZQK_R' || !saved.length).join(','));
     }
   }
-  check('a complete parent board is read alone on every poll, with no route lookups',
-    counts.every((c) => c === '11:board:AZQK_CSF'), JSON.stringify(counts));
+  check('a complete parent board is read alone on every poll, its routes looked up once',
+    JSON.stringify(counts) === JSON.stringify(['11:board:AZQK_CSF,route:AZQK_R', '11:board:AZQK_CSF',
+      '11:board:AZQK_CSF', '11:board:AZQK_CSF']), JSON.stringify(counts));
   Lib.fetch = keepFetch;
   Lib._boards.clear();
+}
+
+/* A complete board still finds a pole of the same name in another stop
+   area: line 7 leaves the stop's own pole away from the destination, its
+   other variant leaves the other area's pole towards it. Only the stop's
+   own child pole, whose rows are on the board, is not read again. */
+{
+  const keepFetch = Lib.fetch;
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZWA_F1: { id: 'AZWA_F1', name: 'Azwhub', parentStationId: 'AZWA_CS' },
+    AZWB_F9: { id: 'AZWB_F9', name: 'Azwhub', parentStationId: 'AZWB_CS' },
+    AZW_X: { id: 'AZW_X', name: 'Azwmashol' },
+    AZW_D: { id: 'AZW_D', name: 'Azwcel' },
+  };
+  const calls = [];
+  Lib._boards.clear();
+  Lib.fetch = async (key, path, params) => {
+    calls.push(path === 'route-details.json' ? 'route:' + params.routeId
+      : path === 'trip-details.json' ? 'trip:' + params.tripId : 'board:' + params.stopId);
+    if (path === 'route-details.json') {
+      return { data: { entry: { variants: [
+        { name: 'Azwmashol', stopIds: ['AZWA_F1', 'AZW_X'] },
+        { name: 'Azwcel', stopIds: ['AZWB_F9', 'AZW_D'] },
+      ] }, references: { stops: S } } };
+    }
+    if (path !== 'arrivals-and-departures-for-stop.json') return { data: {} };
+    const far = params.stopId === 'AZWB_F9';
+    const stopTimes = [];
+    const trips = {};
+    for (let i = 0; i < 4; i++) {
+      const tid = (far ? 'AZW_TC' : 'AZW_TA') + i;
+      stopTimes.push({ tripId: tid, stopId: far ? 'AZWB_F9' : 'AZWA_F1', departureTime: t0 + 300 + i * 600 });
+      trips[tid] = { routeId: 'AZW_R7', tripHeadsign: far ? 'Azwcel' : 'Azwmashol' };
+    }
+    return { data: {
+      entry: { stopTimes },
+      references: { trips, routes: { AZW_R7: { id: 'AZW_R7', shortName: '7', type: 'BUS' } }, stops: S },
+    } };
+  };
+  const cache = {};
+  const polls = [];
+  for (let poll = 0; poll < 2; poll++) {
+    calls.length = 0;
+    Lib._boards.clear();
+    const rows = await Lib.departures('k', 'AZWA_CS', [], { key: 'azwcel', name: 'Azwcel' },
+      { originName: 'Azwhub', mode: 'bkk', minutesAfter: 180, deferGps: true, cache });
+    polls.push({ rows: rows.map((r) => r.tripId).join(','), calls: calls.join(',') });
+  }
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+  check('a complete board still reads a same-named pole of another stop area, not its own child pole',
+    polls.every((p) => p.rows === 'AZW_TC0,AZW_TC1,AZW_TC2,AZW_TC3')
+    && polls[0].calls === 'board:AZWA_CS,route:AZW_R7,board:AZWB_F9'
+    && polls[1].calls === 'board:AZWA_CS,board:AZWB_F9',
+    JSON.stringify(polls));
+}
+
+/* A parent board a few rows short of 60 that ends well before the horizon
+   is still cut off: its saved route's child pole fills the rest. */
+{
+  const keepFetch = Lib.fetch;
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZV_P1: { id: 'AZV_P1', name: 'Azvhub', parentStationId: 'AZV_CSF' },
+    AZV_D: { id: 'AZV_D', name: 'Azvcel' },
+  };
+  const boards = [];
+  Lib._boards.clear();
+  Lib.fetch = async (key, path, params) => {
+    if (path === 'route-details.json') {
+      return { data: { entry: { variants: [{ name: 'v', stopIds: ['AZV_P1', 'AZV_D'] }] }, references: { stops: S } } };
+    }
+    if (path !== 'arrivals-and-departures-for-stop.json') return { data: {} };
+    boards.push(params.stopId);
+    const pole = params.stopId === 'AZV_P1';
+    const stopTimes = [];
+    const trips = {};
+    if (pole) {
+      stopTimes.push({ tripId: 'AZV_LATE', stopId: 'AZV_P1', departureTime: t0 + 50 * 60 });
+      trips.AZV_LATE = { routeId: 'AZV_R', tripHeadsign: 'Azvcel' };
+    } else {
+      for (let i = 0; i < 57; i++) {
+        stopTimes.push({ tripId: `AZV_X${i}`, stopId: 'AZV_PX', departureTime: t0 + 120 + i * 20 });
+        trips[`AZV_X${i}`] = { routeId: 'AZV_OTHER', tripHeadsign: 'Azvmashol' };
+      }
+    }
+    return { data: {
+      entry: { stopTimes },
+      references: { trips, routes: { AZV_R: { id: 'AZV_R', shortName: '5', type: 'BUS' }, AZV_OTHER: { id: 'AZV_OTHER', shortName: '6', type: 'BUS' } }, stops: S },
+    } };
+  };
+  const rows = await Lib.departures('k', 'AZV_CSF', ['AZV_R'], { key: 'azvcel', name: 'Azvcel' },
+    { originName: 'Azvhub', mode: 'bkk', minutesAfter: 90, deferGps: true, cache: {} });
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+  check('a parent board a few rows under the 60-row cap still has its child poles read',
+    boards.join(',') === 'AZV_CSF,AZV_P1' && rows.some((r) => r.tripId === 'AZV_LATE'),
+    JSON.stringify({ boards, rows: rows.map((r) => r.tripId) }));
 }
 
 /* ---- Planner review, fifth round: city → rail ---- */
@@ -9596,6 +9765,45 @@ check('a city stop number is not an ELVIRA station code',
     JSON.stringify(together) === '["","","005517299"]' && JSON.stringify(reloaded) === '["","005517299"]'
     && JSON.stringify(firstCalls) === '["Azvbusz tér","Azvszeged"]' && calls.length === 0,
     JSON.stringify({ together, reloaded, firstCalls, calls }));
+}
+
+/* A name whose alias query failed is no "no such station": it is not
+   kept, and the next lookup asks again. */
+{
+  const keep = { fetch: Lib.fetch, isMavStop: Lib.isMavStop };
+  const store = new Map();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    },
+  });
+  let limited = true;
+  const calls = [];
+  Lib.fetch = async (_k, _path, params) => {
+    calls.push(params.query);
+    /* The typed name finds only a bus stop; the station key names the station. */
+    if (params.query === 'Azkhely vasútállomás') {
+      return { data: { references: { stops: { BKK_F00AZK: { id: 'BKK_F00AZK', name: 'Azkhely vasútállomás', type: 'BUS' } } } } };
+    }
+    if (limited) throw Object.assign(new Error('rate limited'), { code: 'futar_rate_limited' });
+    return { data: { references: { stops: { BKK_005599001: { id: 'BKK_005599001', name: 'Azkhely', type: 'RAIL' } } } } };
+  };
+  Lib.isMavStop = () => true;
+  Lib._elviraCodes.clear();
+  const first = await Lib.elviraResolveCode('KEY', 'BKK_F00AZK', 'Azkhely vasútállomás');
+  const firstCalls = calls.length;
+  const kept = store.size;
+  limited = false;
+  const second = await Lib.elviraResolveCode('KEY', 'BKK_F00AZK', 'Azkhely vasútállomás');
+  Lib._elviraCodes.clear();
+  delete globalThis.localStorage;
+  Object.assign(Lib, keep);
+  check('a failed alias query keeps no ELVIRA "no such station"',
+    first === '' && firstCalls === 2 && kept === 0 && second === '005599001' && calls.length === 4,
+    JSON.stringify({ first, firstCalls, kept, second, calls }));
 }
 
 /* At the shortest poll (20 s) every poll gets a new board, not every

@@ -622,9 +622,10 @@ Object.assign(BkkLib, {
      failed and nothing was found: that one is asked again next time. */
   async _searchElviraCode(apiKey, n) {
     /* searchStops asks the name's aliases (its station key too) itself. */
+    const how = {};
     let hits;
     try {
-      hits = (await this.searchStops(apiKey, n, 'mav')) || [];
+      hits = (await this.searchStops(apiKey, n, 'mav', null, how)) || [];
     } catch (_e) {
       return null;
     }
@@ -632,7 +633,9 @@ Object.assign(BkkLib, {
       const c = BkkLib.elviraStationCode(hits[j].id);
       if (c) return c;
     }
-    return '';
+    /* A failed alias query may be the one that names the station: no
+       "no such station" for hours on its word. */
+    return how.partial ? null : '';
   },
   sameStop(id, originId) {
     if (!id || !originId) return false;

@@ -1,6 +1,14 @@
 import { DEPART_MINUTES_AFTER, clampMinutesAfter, departureStillDue, maxDepartureRows } from '../config.js';
 import { BkkLib } from '../lib/core.js';
 
+/* FUTÁR cuts a busy board off at about 60 rows; a few under that, ending
+   well before the horizon, is taken as cut off too. */
+const BOARD_CAP_ROWS = 55;
+/* A route pattern rules a trip out without its trip-details only while it
+   is this young and from the same day: a timetable change, a weekend or
+   construction variant is in the next one. Finding poles takes any age. */
+const PATTERN_PROOF_MS = 3 * 3600000;
+
 Object.assign(BkkLib, {
   async addTransitousVolanStops(byId, q, motisHits) {
     const motis = motisHits || await BkkLib.searchStopsTransitous(q);
@@ -82,8 +90,10 @@ Object.assign(BkkLib, {
           data = await BkkLib.fetch(apiKey, 'search.json', { query: queries[i] }, true);
         } catch (err) {
           /* An alias (a rate limit on the second request, say) does not
-             take back what the typed name found already. */
+             take back what the typed name found already. The caller's
+             opts.partial says the list may lack the alias's stops. */
           if (!byId.size || (i === 0 && mode !== 'volan' && mode !== 'all')) throw err;
+          if (opts) opts.partial = true;
           break;
         }
         const stops = ((((data || {}).data || {}).references) || {}).stops || {};
@@ -187,9 +197,9 @@ Object.assign(BkkLib, {
   /* Parent stop-areas (BKK_CSF…) cap live departures at ~60 rows, which is
      only ~15 min at Keleti. Query the child poles that actually serve the
      selected routes so minutesAfter can fill. */
-  async loadRoutePattern(apiKey, cache, routeId, background) {
+  async loadRoutePattern(apiKey, cache, routeId, background, fresh) {
     const hit = BkkLib._cached(cache, routeId);
-    if (hit && hit.variants) return hit;
+    if (hit && hit.variants && (!fresh || BkkLib.patternFresh(hit))) return hit;
     if (BkkLib._inflight[routeId]) return BkkLib._inflight[routeId];
     const p = (async () => {
       try {
@@ -201,9 +211,11 @@ Object.assign(BkkLib, {
         const packed = {
           variants: (entry.variants || []).map((v) => ({
             name: v.name,
+            headsign: v.headsign || '',
             ids: v.stopIds || [],
           })),
           stops: ((data.data || {}).references || {}).stops || {},
+          at: Date.now(),
         };
         return BkkLib._store(cache, routeId, packed);
       } finally {
@@ -235,13 +247,33 @@ Object.assign(BkkLib, {
     });
     return Array.from(poles);
   },
+  patternFresh(pat, nowMs) {
+    if (!pat || !pat.variants || typeof pat.at !== 'number') return false;
+    const now = nowMs === undefined ? Date.now() : nowMs;
+    return now - pat.at < PATTERN_PROOF_MS
+      && new Date(pat.at).toDateString() === new Date(now).toDateString();
+  },
   /* A route none of whose variants through the origin reaches the
-     destination answers for every one of its trips, with no trip-details.
-     Only a pattern that passes the origin at all can say so. */
-  patternMissesDest(pat, origin, destKey) {
-    if (!pat || !pat.variants || !destKey) return false;
-    return BkkLib.polesFromPatterns([pat], origin, '').length > 0
-      && !BkkLib.polesFromPatterns([pat], origin, destKey).length;
+     destination answers for its trips with no trip-details. Only a fresh
+     pattern says so, and only of a trip whose headsign ends one of those
+     variants: a detour or an added trip it does not list is asked. */
+  patternMissesDest(pat, origin, destKey, head) {
+    if (!destKey || !head || !BkkLib.patternFresh(pat)) return false;
+    const stops = pat.stops || {};
+    const isDest = BkkLib.nameMatcher(destKey);
+    const isHead = BkkLib.nameMatcher(head);
+    let known = false;
+    for (const v of pat.variants) {
+      const ids = v.ids || [];
+      const oidx = ids.findIndex((id) => (
+        BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), origin)
+      ));
+      if (oidx < 0) continue;
+      if (ids.slice(oidx + 1).some((id) => isDest((stops[id] || {}).name))) return false;
+      const last = (stops[ids[ids.length - 1]] || {}).name;
+      if (isHead(v.headsign) || isHead(v.name) || isHead(last)) known = true;
+    }
+    return known;
   },
   /* Poles of the loaded route patterns that belong to the stop area parentId. */
   childPolesOf(cache, routeIds, parentId) {
@@ -614,15 +646,14 @@ Object.assign(BkkLib, {
           spanMin: Math.max(best.spanMin, cur.spanMin),
         };
       }, { count: 0, spanMin: 0 });
-      /* A failed parent board (its child poles stood in) has no span: it is
-         not "capped", or every outage or rate limit set off discovery's
-         extra route and board requests. Nor is one under the ~60-row cap,
-         or one reaching the horizon's end: a complete board's last
-         departure is just the last one before the horizon, and its child
-         poles' rows are on it already. */
-      const capped = usedParentOnly && !!payloads[0]
-        && span.count >= 60 && span.spanMin + 2 < horizon;
-      if (capped) {
+      /* A failed parent board (its child poles stood in) has no span: it
+         sends no discovery, or every outage or rate limit set off its extra
+         route and board requests. A board under the row cap, or reaching
+         the horizon's end, is complete: its last departure is just the last
+         one before the horizon, and its child poles' rows are on it. */
+      const discover = usedParentOnly && !!payloads[0];
+      const capped = discover && span.count >= BOARD_CAP_ROWS && span.spanMin + 2 < horizon;
+      if (discover) {
         const discovered = [];
         payloads.forEach((data) => {
           const refs = ((data && data.data || {}).references) || {};
@@ -648,6 +679,17 @@ Object.assign(BkkLib, {
           } catch (_e) {
             extra = [];
           }
+        }
+        /* Discovery still runs on a complete board (its routes' patterns are
+           read once per session): a pole of the same name in another stop
+           area is on no board of this stop. Only its own child poles wait
+           for a capped board. */
+        if (!capped) {
+          const own = BkkLib.childPolesOf(cache, discovered, stopId);
+          const listed = BkkLib._cached(cache, 'children:' + stopId);
+          if (Array.isArray(listed)) listed.forEach((id) => own.add(id));
+          extra = extra.filter((id) => !own.has(id));
+          near = [];
         }
         const fresh = Array.from(new Set(near.concat(extra))).filter((id) => poles.indexOf(id) < 0);
         if (fresh.length) {
@@ -730,11 +772,11 @@ Object.assign(BkkLib, {
     const headHitsDest = (row) => !!(dest && (
       BkkLib.nameEq(row.head, dest.name) || BkkLib.nameEq(row.head, dest.key)
     ));
-    /* A loaded route pattern that never reaches the destination from here
+    /* A fresh route pattern that never reaches the destination from here
        rules the trip out without its own request. */
     const ruledOut = (row) => {
       const rid = routeOfTrip.get(row.tripId);
-      return !!rid && BkkLib.patternMissesDest(BkkLib._cached(cache, rid), origin, destKey);
+      return !!rid && BkkLib.patternMissesDest(BkkLib._cached(cache, rid), origin, destKey, row.head);
     };
     if (destKey && candidates.length) {
       /* Trips already checked on an earlier poll are answered from the
@@ -759,16 +801,17 @@ Object.assign(BkkLib, {
     if (destKey && pool.length && typeof opts.armThroughCheck === 'function') {
       opts.armThroughCheck(() => {
         const pending = (async () => {
-          /* One route-details per route, kept for the session, stands in for
-             a trip-details per departure of every route that never gets
-             there; the rest are still checked trip by trip. */
+          /* One route-details per route, read again once it is a few hours
+             old, stands in for a trip-details per departure of every route
+             that never gets there; the rest are still checked trip by trip,
+             and so is every trip when its route's pattern could not be read. */
           const unloaded = new Set();
           pool.forEach((row) => {
             const rid = routeOfTrip.get(row.tripId);
-            if (rid && !(BkkLib._cached(cache, rid) || {}).variants) unloaded.add(rid);
+            if (rid && !BkkLib.patternFresh(BkkLib._cached(cache, rid))) unloaded.add(rid);
           });
           await Promise.all(Array.from(unloaded).map((rid) => (
-            BkkLib.loadRoutePattern(apiKey, cache, rid, true).catch(() => null)
+            BkkLib.loadRoutePattern(apiKey, cache, rid, true, true).catch(() => null)
           )));
           const open = pool.filter((row) => !ruledOut(row));
           const picked = sure.slice();
