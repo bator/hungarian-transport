@@ -1730,6 +1730,46 @@ check('overlayOnly matches ELVIRA booking when scheduled departures differ by mi
     && merged[1].booking === true
     && merged[1].tripId === 'BKK_914_2';
 })());
+{
+  /* Mode 'all' (the planner's Now board): an ELVIRA train its destination's
+     board confirms is added when no FUTÁR row has it. It pairs as strictly
+     as an overlay row: not by named/generic IC or label at the same minute,
+     which would put its booking and name on another train. A FUTÁR trip
+     with no number (an ad-hoc timestamp id) of the same kind, minute and
+     terminus is the same train, not a second row. */
+  const dep = Math.floor(Date.now() / 1000) + 1800;
+  const rail = (extra) => Object.assign({ vehicle: 'rail', rawType: 'RAIL', dep, sched: dep }, extra);
+  const elvira = (extra) => rail(Object.assign({
+    color: '#4477aa', text: '#ffffff', head: 'Székesfehérvár', platform: '4', booking: true, destHit: true,
+  }, extra));
+  const allMode = { overlayOnly: true, addUnmatched: (row) => Lib.mavBoardRows([row])[0] || null };
+  const merge = (futar, rows) => Lib.mergeVolanRows(futar, rows, 12, allMode);
+  const show = (rows) => JSON.stringify(rows.map((r) => [r.tripId, r.label, r.trainNumber || '', r.platform || '', !!r.booking]));
+  const sv = elvira({ tripId: 'elvira:9702', label: '9702', railKind: 'S', trainNumber: '9702', end: 'Székesfehérvár' });
+  const adHoc = rail({ tripId: 'BKK_1792439004037', label: 'S', head: 'Székesfehérvár' });
+  const one = merge([adHoc], [sv]);
+  check('mode all: a number-only ELVIRA train is one row with a same-minute FUTÁR S without a number',
+    one.length === 1 && one[0].tripId === 'BKK_1792439004037' && one[0].trainNumber === '9702'
+    && one[0].platform === '4', show(one));
+  const otherEnd = merge([rail({ tripId: 'BKK_1792439004037', label: 'S', head: 'Siófok' })], [sv]);
+  const otherKind = merge([rail({ tripId: 'BKK_1792439004038', label: 'IC', head: 'Székesfehérvár' })], [sv]);
+  const numbered = merge([rail({ tripId: 'BKK_4561_108', label: 'S', trainNumber: '4561', head: 'Székesfehérvár' })], [sv]);
+  check('mode all: another terminus, kind or train number at that minute keeps the ELVIRA train its own row',
+    [otherEnd, otherKind, numbered].every((m) => m.length === 2 && m.some((r) => r.tripId === 'elvira:9702')
+      && m.every((r) => r.tripId === 'elvira:9702' || (r.platform !== '4' && r.booking !== true))),
+    show([].concat(otherEnd, otherKind, numbered)));
+  const icHost = () => rail({ tripId: 'BKK_1792439004039', label: 'IC', head: 'Keszthely' });
+  const named = merge([icHost()], [elvira({
+    tripId: 'elvira:847', label: 'TÓPART', railKind: 'IC', trainNumber: '847', end: 'Budapest-Déli',
+  })]);
+  const generic = merge([icHost()], [elvira({
+    tripId: 'elvira:856', label: 'IC', railKind: 'IC', trainNumber: '856', end: 'Nagykanizsa',
+  })]);
+  check('mode all: an ELVIRA train to add pairs with no same-minute FUTÁR IC by name or label',
+    named.length === 2 && named.some((r) => r.tripId === 'BKK_1792439004039' && r.label === 'IC' && r.booking !== true)
+    && generic.length === 2 && generic.some((r) => r.tripId === 'BKK_1792439004039' && r.booking !== true && r.platform !== '4'),
+    show([].concat(named, generic)));
+}
 check('Székesfehérvár name maps to ELVIRA station code',
   Lib.elviraCodeFromName('Székesfehérvár') === '005503269');
 check('MOTIS scheduledTrack becomes the row platform', (() => {
@@ -3046,6 +3086,16 @@ Lib.elviraBetween = async () => {
 const withRail = await Lib.railAfterCity(
   'k', { states: {} }, 'Miskolc', hubPath, destKelenf, Math.floor(Date.now() / 1000),
 );
+{
+  let askedAt = null;
+  const prevBetween = Lib.elviraBetween;
+  Lib.elviraBetween = async (_h, _o, _d, _m, _n, opts) => { askedAt = opts && opts.at; return []; };
+  const ready = Math.floor(Date.now() / 1000) + 11 * 3600;
+  await Lib.railAfterCity('k', { states: {} }, 'Miskolc', hubPath, destKelenf, ready);
+  Lib.elviraBetween = prevBetween;
+  check('railAfterCity asks ELVIRA from the planned time, not from now',
+    askedAt === ready + 6 * 60 - 30, JSON.stringify({ askedAt, want: ready + 6 * 60 - 30 }));
+}
 check('railAfterCity picks Tiszai not G\u00f6m\u00f6ri',
   withRail && withRail.train && withRail.walk.from === 'Tiszai p\u00e1lyaudvar'
   && withRail.walk.to === 'Miskolc-Tiszai'
@@ -3339,6 +3389,25 @@ Lib.mavIndex = origMavIndex;
     await poll();
     check('a rate-limited answer does not mark a pair that was fine as down',
       warns.length === 3 && Lib._elviraOutages.size === 0, JSON.stringify(warns));
+    /* A planned time is the window's start: from then, not from now. A time
+       already past adds nothing, the service starts from now itself. */
+    const sent = [];
+    hass.connection.sendMessagePromise = async (msg) => { sent.push(msg.service_data); return { context: {}, response: { departures: [] } }; };
+    const later = Math.floor(Date.now() / 1000) + 10 * 3600;
+    await Lib.elviraBetween(hass, 'BKK_005510009', 'BKK_005501024', 480, '', { at: later });
+    await Lib.elviraBetween(hass, 'BKK_005510009', 'BKK_005501024', 480, '', { at: later - 11 * 3600 });
+    await Lib.elviraBetween(hass, 'BKK_005510009', 'BKK_005501024', 480, '');
+    check('elvira_between gets the planned time as at, and no at for now or the past',
+      sent.length === 3 && sent[0].at === later && !('at' in sent[1]) && !('at' in sent[2]),
+      JSON.stringify(sent));
+    /* The service takes at most 100 characters of dest_name: a longer one
+       is cut here, not rejected by the schema as a failed call. */
+    sent.length = 0;
+    const longName = 'Székesfehérvár '.repeat(10);
+    await Lib.elviraBetween(hass, 'BKK_005510009', 'BKK_005501024', 60, longName);
+    check('a destination name over 100 characters goes to elvira_between cut to 100',
+      sent.length === 1 && sent[0].dest_name === longName.slice(0, 100),
+      JSON.stringify(sent.map((d) => d.dest_name && d.dest_name.length)));
   } finally {
     console.warn = realWarn;
     Lib._elviraOutages.clear();
@@ -4256,9 +4325,10 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   stopTimes.push({ tripId: 'B1', departureTime: now + 150 });
   trips.B1 = { routeId: 'R_B', tripHeadsign: 'Rákospalota' };
   const board = { data: { entry: { stopTimes }, references: { trips, routes: { R_A: { shortName: '7', type: 'BUS' }, R_B: { shortName: '9', type: 'BUS' } }, stops: {} } } };
-  const keep = { departureBoard: Lib.departureBoard, tripGoesTo: Lib.tripGoesTo, originPoles: Lib.originPoles };
+  const keep = { departureBoard: Lib.departureBoard, tripGoesTo: Lib.tripGoesTo, originPoles: Lib.originPoles, loadRoutePattern: Lib.loadRoutePattern };
   Lib.departureBoard = async () => board;
   Lib.originPoles = async () => [];
+  Lib.loadRoutePattern = async () => null;
   Lib.tripGoesTo = async (_k, _c, tripId) => tripId === 'B1';
   let armed = null;
   let full = null;
@@ -4274,6 +4344,262 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     !!armed && !!full && full.length === early.length && full.some((r) => r.tripId === 'B1')
     && full.map((r) => r.dep).every((d, i, a) => i === 0 || a[i - 1] <= d),
     JSON.stringify({ armed: !!armed, early: early.length, full: full && full.length, b1: !!(full && full.some((r) => r.tripId === 'B1')) }));
+}
+{
+  /* A hub's eight lines, six departures each; only line 1 passes the
+     destination (mid-route, headed elsewhere), and line 2 only on one of
+     its two variants. The other routes' patterns rule their trips out:
+     one route-details per route, not a trip-details per departure. */
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZR_P: { id: 'AZR_P', name: 'Azrhub' },
+    AZR_X: { id: 'AZR_X', name: 'Azrkoz' },
+    AZR_D: { id: 'AZR_D', name: 'Azrcel' },
+    AZR_E: { id: 'AZR_E', name: 'Azrvege' },
+  };
+  const reachIds = ['AZR_P', 'AZR_X', 'AZR_D', 'AZR_E'];
+  const shortIds = ['AZR_P', 'AZR_X', 'AZR_E'];
+  const stopTimes = [];
+  const trips = {};
+  const routes = {};
+  for (let r = 1; r <= 8; r++) {
+    routes[`AZR_R${r}`] = { id: `AZR_R${r}`, shortName: String(r), type: 'BUS' };
+    for (let i = 0; i < 6; i++) {
+      const tid = `AZR_T${r}_${i}`;
+      stopTimes.push({ tripId: tid, stopId: 'AZR_P', departureTime: t0 + 300 + i * 600 + r * 30 });
+      trips[tid] = { routeId: `AZR_R${r}`, tripHeadsign: 'Azrvege' };
+    }
+  }
+  const tripStops = (tid) => {
+    const [, r, i] = tid.match(/^AZR_T(\d)_(\d)$/).map(Number);
+    return (r === 1 || (r === 2 && i % 2 === 0)) ? reachIds : shortIds;
+  };
+  const counts = { board: 0, route: 0, trip: 0 };
+  const keepFetch = Lib.fetch;
+  Lib._boards.clear();
+  Lib.fetch = async (_k, path, params) => {
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      counts.board += 1;
+      return { data: { entry: { stopTimes }, references: { trips, routes, stops: S } } };
+    }
+    if (path === 'route-details.json') {
+      counts.route += 1;
+      const variants = params.routeId === 'AZR_R1' ? [{ name: 'a', stopIds: reachIds }]
+        : params.routeId === 'AZR_R2' ? [{ name: 'a', stopIds: reachIds }, { name: 'b', stopIds: shortIds }]
+          : [{ name: 'b', stopIds: shortIds }];
+      return { data: { entry: { variants }, references: { stops: S } } };
+    }
+    if (path === 'trip-details.json') {
+      counts.trip += 1;
+      const ids = tripStops(params.tripId);
+      return { data: { entry: { stopTimes: ids.map((id, k) => ({ stopId: id, arrivalTime: t0 + 300 + k * 120, departureTime: t0 + 300 + k * 120 })) }, references: { stops: S } } };
+    }
+    return { data: {} };
+  };
+  const cache = {};
+  const run = async () => {
+    let armed = null;
+    let full = null;
+    Lib._boards.clear();
+    const early = await Lib.departures('k', 'AZR_P', [], { key: 'azrcel', name: 'Azrcel' }, {
+      mode: 'bkk', minutesAfter: 180, cache, deferGps: true,
+      armThroughCheck: (fn) => { armed = fn; },
+      onFutarUpdate: (rows) => { full = rows; },
+    });
+    if (armed) armed();
+    for (let i = 0; i < 50 && armed && !full; i++) await new Promise((r) => setTimeout(r, 5));
+    /* Trips checked on the first run answer the second from the cache. */
+    return (full || early).map((r) => r.tripId);
+  };
+  const first = await run();
+  const cold = Object.assign({}, counts);
+  const second = await run();
+  const want = [];
+  for (let i = 0; i < 6; i++) {
+    want.push(`AZR_T1_${i}`);
+    if (i % 2 === 0) want.push(`AZR_T2_${i}`);
+  }
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+  check('the through-check asks trip-details only of the routes whose pattern can reach the destination',
+    JSON.stringify(first) === JSON.stringify(want) && JSON.stringify(second) === JSON.stringify(want)
+    && cold.route === 8 && cold.trip === 12 && counts.route === 8 && counts.trip === 12,
+    JSON.stringify({ first, second, cold, counts }));
+}
+{
+  /* A route pattern that says "never there" is proof only while fresh: a
+     dashboard left open past a timetable change reads it again and shows
+     the trips that now reach the destination. A trip whose headsign ends
+     none of its variants (a detour, an added trip) is asked trip-details
+     even when the pattern is fresh. */
+  const realNow = Date.now;
+  const base = new Date();
+  base.setHours(8, 0, 0, 0);
+  let offset = 0;
+  Date.now = () => base.getTime() + offset;
+  const S = {
+    AZS_P: { id: 'AZS_P', name: 'Azshub' },
+    AZS_D: { id: 'AZS_D', name: 'Azscel' },
+    AZS_E: { id: 'AZS_E', name: 'Azsvege' },
+  };
+  let changed = false;
+  const counts = { route: 0, trip: 0 };
+  const keepFetch = Lib.fetch;
+  Lib.fetch = async (_k, path, params) => {
+    const t0 = Math.floor(Date.now() / 1000);
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      const stopTimes = [];
+      const trips = {};
+      for (let i = 0; i < 3; i++) {
+        stopTimes.push({ tripId: `AZS_T${i}`, stopId: 'AZS_P', departureTime: t0 + 300 + i * 600 });
+        trips[`AZS_T${i}`] = { routeId: 'AZS_R', tripHeadsign: 'Azsvege' };
+      }
+      stopTimes.push({ tripId: 'AZS_DETOUR', stopId: 'AZS_P', departureTime: t0 + 400 });
+      trips.AZS_DETOUR = { routeId: 'AZS_R', tripHeadsign: 'Azskerulo' };
+      return { data: { entry: { stopTimes }, references: { trips, routes: { AZS_R: { id: 'AZS_R', shortName: '4', type: 'BUS' } }, stops: S } } };
+    }
+    if (path === 'route-details.json') {
+      counts.route += 1;
+      const ids = changed ? ['AZS_P', 'AZS_D', 'AZS_E'] : ['AZS_P', 'AZS_E'];
+      return { data: { entry: { variants: [{ name: 'Azsvege', stopIds: ids }] }, references: { stops: S } } };
+    }
+    if (path === 'trip-details.json') {
+      counts.trip += 1;
+      const ids = (changed || params.tripId === 'AZS_DETOUR') ? ['AZS_P', 'AZS_D', 'AZS_E'] : ['AZS_P', 'AZS_E'];
+      return { data: { entry: { stopTimes: ids.map((id, k) => ({ stopId: id, arrivalTime: t0 + 300 + k * 120, departureTime: t0 + 300 + k * 120 })) }, references: { stops: S } } };
+    }
+    return { data: {} };
+  };
+  const cache = {};
+  const run = async () => {
+    let armed = null;
+    let full = null;
+    Lib._boards.clear();
+    const early = await Lib.departures('k', 'AZS_P', [], { key: 'azscel', name: 'Azscel' }, {
+      mode: 'bkk', minutesAfter: 180, cache, deferGps: true,
+      armThroughCheck: (fn) => { armed = fn; },
+      onFutarUpdate: (rows) => { full = rows; },
+    });
+    if (armed) armed();
+    for (let i = 0; i < 50 && armed && !full; i++) await new Promise((r) => setTimeout(r, 5));
+    return (full || early).map((r) => r.tripId).join(',') + '|' + counts.route + '/' + counts.trip;
+  };
+  const seen = [];
+  try {
+    seen.push(await run());
+    /* The timetable changes on the server; an hour later the pattern is
+       still taken as it is. */
+    changed = true;
+    offset = 3600000;
+    seen.push(await run());
+    offset = 4 * 3600000;
+    seen.push(await run());
+  } finally {
+    Date.now = realNow;
+    Lib.fetch = keepFetch;
+    Lib._boards.clear();
+  }
+  check('a stale route pattern is read again before it rules trips out; a trip off its variants is asked',
+    JSON.stringify(seen) === JSON.stringify(['AZS_DETOUR|1/1', 'AZS_DETOUR|1/1',
+      'AZS_T0,AZS_DETOUR,AZS_T1,AZS_T2|2/4']),
+    JSON.stringify(seen));
+}
+{
+  /* A headsign that ends a listed variant does not make the trip that
+     variant. An ad-hoc FUTÁR trip (a numeric timestamp id) is not in the
+     route's pattern at all, and a trip leaving from a pole no variant
+     calls at runs some other way: both are asked trip-details, and both
+     pass the destination here. The scheduled trips stay ruled out. */
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZTP: { id: 'AZTP', name: 'Azthub', parentStationId: 'AZTCS' },
+    AZTQ: { id: 'AZTQ', name: 'Azthub', parentStationId: 'AZTCS' },
+    AZTX: { id: 'AZTX', name: 'Aztkoz' },
+    AZTD: { id: 'AZTD', name: 'Aztcel' },
+    AZTE: { id: 'AZTE', name: 'Aztvege' },
+  };
+  const counts = { route: 0, trip: 0 };
+  const asked = [];
+  const keepFetch = Lib.fetch;
+  Lib.fetch = async (_k, path, params) => {
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      const stopTimes = [];
+      const trips = {};
+      for (let i = 0; i < 4; i++) {
+        stopTimes.push({ tripId: `AZT_T${i}`, stopId: 'AZTP', departureTime: t0 + 300 + i * 600 });
+        trips[`AZT_T${i}`] = { routeId: 'AZT_R', tripHeadsign: 'Aztvege' };
+      }
+      stopTimes.push({ tripId: 'BKK_1792439004037', stopId: 'AZTP', departureTime: t0 + 400 });
+      trips.BKK_1792439004037 = { routeId: 'AZT_R', tripHeadsign: 'Aztvege' };
+      stopTimes.push({ tripId: 'AZT_MOVED', stopId: 'AZTQ', departureTime: t0 + 500 });
+      trips.AZT_MOVED = { routeId: 'AZT_R', tripHeadsign: 'Aztvege' };
+      return { data: { entry: { stopTimes }, references: { trips, routes: { AZT_R: { id: 'AZT_R', shortName: '9', type: 'BUS' } }, stops: S } } };
+    }
+    if (path === 'route-details.json') {
+      counts.route += 1;
+      return { data: { entry: { variants: [{ name: 'Aztvege', headsign: 'Aztvege', stopIds: ['AZTP', 'AZTX', 'AZTE'] }] }, references: { stops: S } } };
+    }
+    if (path === 'trip-details.json') {
+      counts.trip += 1;
+      asked.push(params.tripId);
+      const ids = params.tripId === 'BKK_1792439004037' ? ['AZTP', 'AZTD', 'AZTE']
+        : params.tripId === 'AZT_MOVED' ? ['AZTQ', 'AZTD', 'AZTE'] : ['AZTP', 'AZTX', 'AZTE'];
+      return { data: { entry: { stopTimes: ids.map((id, k) => ({ stopId: id, arrivalTime: t0 + 300 + k * 120, departureTime: t0 + 300 + k * 120 })) }, references: { stops: S } } };
+    }
+    return { data: {} };
+  };
+  let armed = null;
+  let full = null;
+  let early = [];
+  try {
+    Lib._boards.clear();
+    early = await Lib.departures('k', 'AZTCS', [], { key: 'aztcel', name: 'Aztcel' }, {
+      originName: 'Azthub', mode: 'bkk', minutesAfter: 180, cache: {}, deferGps: true,
+      armThroughCheck: (fn) => { armed = fn; },
+      onFutarUpdate: (rows) => { full = rows; },
+    });
+    if (armed) armed();
+    for (let i = 0; i < 50 && armed && !full; i++) await new Promise((r) => setTimeout(r, 5));
+  } finally {
+    Lib.fetch = keepFetch;
+    Lib._boards.clear();
+  }
+  const shown = (full || early).map((r) => r.tripId);
+  check('a fresh route pattern rules out only the trips that run its variants, not an ad-hoc or moved trip with the same headsign',
+    JSON.stringify(shown) === JSON.stringify(['BKK_1792439004037', 'AZT_MOVED'])
+    && JSON.stringify(asked.slice().sort()) === JSON.stringify(['AZT_MOVED', 'BKK_1792439004037'])
+    && counts.route === 1,
+    JSON.stringify({ shown, asked, counts }));
+}
+{
+  /* Trips go first when the cache is full: the route patterns and child
+     pole lists every poll needs again stay, so no route-details goes out
+     again for them on a dashboard left open all day. */
+  const keepFetch = Lib.fetch;
+  const keepMem = Lib._mem;
+  Lib._mem = {};
+  const counts = { route: 0, trip: 0 };
+  Lib.fetch = async (_k, path) => {
+    if (path === 'route-details.json') counts.route += 1;
+    if (path === 'trip-details.json') counts.trip += 1;
+    return { data: { entry: { variants: [{ name: 'v', stopIds: ['AZM_P'] }], stopTimes: [] }, references: { stops: {} } } };
+  };
+  const cache = {};
+  const routes = [];
+  for (let i = 0; i < 30; i++) routes.push(`AZM_R${i}`);
+  await Promise.all(routes.map((rid) => Lib.loadRoutePattern('k', cache, rid)));
+  Lib._store(cache, 'children:AZM_CSF', ['AZM_P']);
+  for (let i = 0; i < 500; i++) await Lib.tripDetails('k', cache, `AZM_T${i}`);
+  const before = counts.route;
+  await Promise.all(routes.map((rid) => Lib.loadRoutePattern('k', cache, rid)));
+  const kept = Array.isArray(Lib._cached(cache, 'children:AZM_CSF'));
+  const sizes = [Object.keys(cache).length, Object.keys(Lib._mem).length];
+  const newest = !!Lib._cached(cache, 'trip:AZM_T499');
+  Lib.fetch = keepFetch;
+  Lib._mem = keepMem;
+  check('a full trip cache drops old trips, not the route patterns and child poles',
+    before === 30 && counts.route === 30 && kept && newest && sizes.every((n) => n <= 400),
+    JSON.stringify({ before, after: counts.route, kept, newest, sizes }));
 }
 {
   /* A through-check row is a new object: it still gets its ride time. */
@@ -4357,7 +4683,7 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
 {
   /* The MÁV hop card end to end: its rows are ELVIRA's departures, FUTÁR is
      not asked, and a train FUTÁR lacks (IC 849 TÓPART) is on the board. */
-  const keep = { departures: Lib.departures, elviraBetween: Lib.elviraBetween };
+  const keep = { departures: Lib.departures, elviraBoard: Lib.elviraBoard };
   const t0 = Math.floor(Date.now() / 1000) + 1200;
   const t1 = t0 + 25 * 60;
   let askedFutar = null;
@@ -4365,12 +4691,12 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     askedFutar = !opts.skipFutar;
     return [];
   };
-  Lib.elviraBetween = async () => [
+  Lib.elviraBoard = async () => ({ error: '', detail: '', rows: [
     icElvira({ tripId: 'elvira:topart', label: 'TÓPART', trainNumber: '849', dep: t0, sched: t0, travel: 39, destHit: true }),
     icElvira({ tripId: 'elvira:evening', label: 'BALATON', trainNumber: '871', dep: t1, sched: t1, travel: 39, destHit: true }),
     /* The rest of the board goes elsewhere. */
     icElvira({ tripId: 'elvira:other', label: 'GEMENC', trainNumber: '8312', dep: t1, sched: t1, travel: null, destHit: false }),
-  ];
+  ] });
   const hop = document.createElement('hungarian-transport-card');
   hop.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
   document.body.appendChild(hop);
@@ -4409,6 +4735,307 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   old.remove();
   Object.assign(Lib, keep);
 }
+/* A card's first load is slower on a busy machine: wait for its poll on
+   that condition, with a deadline far past it, and fail one check if it
+   never comes, instead of calling a missing _pollRun and ending the suite. */
+const waitForPoll = async (hop, ms) => {
+  const end = Date.now() + (ms || 10000);
+  while (!(!hop._reloadActive && hop._pollRun)) {
+    if (Date.now() > end) return false;
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  return true;
+};
+{
+  /* ELVIRA is the MÁV card's only source: a poll it does not answer (an
+     outage, the integration's rate limit, a failed call, a destination board
+     that did not arrive) keeps the trains still due under the banner, instead
+     of the Transitous fill or "no departures". One failed call is asked
+     again on the next poll, not three minutes later on every MÁV card. */
+  const keep = {
+    departures: Lib.departures, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty,
+    _elviraTimeoutMs: Lib._elviraTimeoutMs,
+  };
+  const realWarn = console.warn;
+  console.warn = () => {};
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  Lib._elviraWarned = false;
+  const t0 = Math.floor(Date.now() / 1000) + 1200;
+  const t1 = t0 + 25 * 60;
+  const topart = icElvira({ tripId: 'elvira:849', label: 'TÓPART', trainNumber: '849', dep: t0, sched: t0, travel: 39 });
+  const balaton = icElvira({ tripId: 'elvira:871', label: 'BALATON', trainNumber: '871', dep: t1, sched: t1, travel: 39 });
+  let filled = 0;
+  let fillRows = [];
+  Lib.departures = async () => [];
+  Lib.fillTransitousIfEmpty = async () => { filled += 1; return fillRows.map((r) => Object.assign({}, r)); };
+  const answers = [];
+  let asked = 0;
+  const hass = {
+    states: {},
+    language: 'hu',
+    services: { hungarian_transport: { elvira_between: {} } },
+    connection: {
+      sendMessagePromise: async (msg) => {
+        if (msg.type !== 'call_service') return {};
+        asked += 1;
+        const next = answers.shift();
+        if (next instanceof Error || typeof next === 'number' || (next && (next.code || next.success === false))) throw next;
+        if (next === 'hang') return new Promise(() => {});
+        return { context: {}, response: next };
+      },
+    },
+  };
+  const mavCard = async (cfg) => {
+    const hop = document.createElement('hungarian-transport-card');
+    hop.hass = hass;
+    document.body.appendChild(hop);
+    hop.setConfig(Object.assign({
+      language: 'hu', mav: true, routeIds: [],
+      stopId: 'BKK_005501024', stopName: 'Budapest-Kelenföld',
+      destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
+    }, cfg || {}));
+    hop._considerJourney = () => {};
+    await waitForPoll(hop);
+    return hop;
+  };
+  const ids = (hop) => (hop._rawRows || []).map((r) => r.tripId).join();
+  const errKey = (hop) => (hop._err && hop._err.i18nKey) || '';
+  answers.push({ departures: [topart, balaton] });
+  const hop = await mavCard();
+  check('the MÁV card finished its first load', !!hop._pollRun);
+  const good = { ids: ids(hop), err: errKey(hop) };
+  const pollWith = async (answer) => {
+    answers.push(answer);
+    if (hop._pollRun) await hop._pollRun.run();
+    return { ids: ids(hop), err: errKey(hop), filled, html: hop.shadowRoot.innerHTML };
+  };
+  const down = await pollWith({ departures: [], error: 'elvira_unavailable', detail: 'HTTP 503' });
+  const limited = await pollWith({ departures: [], error: 'elvira_rate_limited', detail: 'rate limited' });
+  const thrown = await pollWith(new Error('Connection lost'));
+  const askedBefore = asked;
+  const back = await pollWith({ departures: [balaton] });
+  check('a MÁV board keeps its trains under the banner when ELVIRA is down, rate-limited or the call fails',
+    good.ids === 'elvira:849,elvira:871' && good.err === ''
+    && [down, limited, thrown].every((s) => s.ids === 'elvira:849,elvira:871' && s.err === 'errElviraDown' && s.filled === 0)
+    && down.html.includes('HTTP 503'),
+    JSON.stringify({ good, down: [down.ids, down.err, down.filled], limited: [limited.ids, limited.err], thrown: [thrown.ids, thrown.err] }));
+  check('one failed ELVIRA call is asked again on the next poll, and a good answer clears the banner',
+    asked === askedBefore + 1 && back.ids === 'elvira:871' && back.err === '' && Lib._elviraDownUntil === 0,
+    JSON.stringify({ asked, askedBefore, back: [back.ids, back.err], until: Lib._elviraDownUntil }));
+  /* A destination board that did not arrive: its trains have no destHit
+     this poll. The ones still listed stay, the rest come from the last board. */
+  await pollWith({ departures: [topart, balaton] });
+  const destDown = await pollWith({
+    departures: [Object.assign({}, topart, { destHit: false }), balaton], dest_error: 'elvira_unavailable',
+  });
+  check('a dest_error answer keeps the trains it could not confirm, under the banner',
+    destDown.ids === 'elvira:849,elvira:871' && destDown.err === 'errElviraDown' && destDown.filled === 0,
+    JSON.stringify([destDown.ids, destDown.err, destDown.filled]));
+  /* home-assistant-js-websocket rejects a call the dropped socket cut off
+     with {error: {code: 3, message}}, and one sent while it is down with
+     the bare 3: the banner says why, not "[object Object]" or "(3)". */
+  await pollWith({ departures: [topart, balaton] });
+  const cut = await pollWith({ type: 'result', success: false, error: { code: 3, message: 'Connection lost' } });
+  const offline = await pollWith(3);
+  check('a dropped websocket shows a readable reason in the MÁV banner',
+    [cut, offline].every((s) => s.err === 'errElviraDown' && s.html.includes('(Connection lost)')
+      && !s.html.includes('[object Object]') && !s.html.includes('(3)')),
+    JSON.stringify([cut.err, offline.err, (hop._err && hop._err.message) || '']));
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  hop.remove();
+  /* No board yet: Transitous fills it as before, now under the banner. */
+  fillRows = [{ tripId: 'motis:hu-mav_9702', label: '9702', trainNumber: '9702', vehicle: 'rail', rawType: 'RAIL', dep: t0, sched: t0 }];
+  answers.push({ departures: [], error: 'elvira_unavailable', detail: 'TimeoutError' });
+  filled = 0;
+  const fresh = await mavCard();
+  check('a MÁV card whose first ELVIRA answer failed shows Transitous rows under the banner',
+    ids(fresh) === 'motis:hu-mav_9702' && errKey(fresh) === 'errElviraDown' && filled === 1 && fresh._rowsFilled === true,
+    JSON.stringify({ ids: ids(fresh), err: errKey(fresh), filled }));
+  fresh.remove();
+  /* A call that never answers ends at the card's own timeout: the first
+     paint is not a spinner for as long as the websocket stays up. */
+  Lib._elviraTimeoutMs = 40;
+  answers.push('hang');
+  filled = 0;
+  const hung = await mavCard();
+  check('a hung elvira_between call times out: the first paint is the Transitous fill under the banner',
+    !hung._loading && ids(hung) === 'motis:hu-mav_9702' && errKey(hung) === 'errElviraDown' && filled === 1,
+    JSON.stringify({ loading: hung._loading, ids: ids(hung), err: errKey(hung), filled }));
+  hung.remove();
+  Lib._elviraTimeoutMs = keep._elviraTimeoutMs;
+  /* The card's limit covers the integration's worst case: every board
+     round of elvira_between, one after the other, each up to
+     ELVIRA_TIMEOUT. A slow but whole answer is not cut off as "did not
+     answer". */
+  {
+    const { readFile: rf } = await import('node:fs/promises');
+    const py = await rf('./custom_components/hungarian_transport/elvira.py', 'utf8');
+    const total = Number((py.match(/^ELVIRA_TIMEOUT = aiohttp\.ClientTimeout\(total=(\d+)\)/m) || [])[1]);
+    const body = (py.match(/\nasync def elvira_between\([\s\S]*?(?=\n(?:async )?def |\n[A-Z_]+ = |$)/) || [''])[0];
+    const rounds = (body.match(/await _fetch_boards\(/g) || []).length;
+    check('the card waits for elvira_between past the integration\'s worst case',
+      total > 0 && rounds >= 1 && keep._elviraTimeoutMs > rounds * total * 1000,
+      JSON.stringify({ total, rounds, timeoutMs: keep._elviraTimeoutMs }));
+  }
+  /* Without a 9-digit id and outside the few names the card knows, the
+     destination has no ELVIRA code without FUTÁR: say so, not "no departures". */
+  fillRows = [];
+  const askedNoCode = asked;
+  const noCode = await mavCard({ destKey: 'gyor', destName: 'Győr', destStopId: '' });
+  check('a key-less MÁV card whose destination has no ELVIRA code says so',
+    errKey(noCode) === 'errElviraNoCode' && asked === askedNoCode
+    && noCode.shadowRoot.innerHTML.includes('Győr'),
+    JSON.stringify({ err: errKey(noCode), asked: asked - askedNoCode }));
+  noCode.remove();
+  /* With a key the name is searched on FUTÁR: a search that failed (a rate
+     limit, a timeout) is FUTÁR's outage for one poll, not "pick the
+     station in the card editor" on a card set up right. */
+  const keepSearch = Lib.searchStops;
+  Lib.searchStops = async () => { throw Object.assign(new Error('BKK rate limited'), { code: 'futar_rate_limited' }); };
+  const askedSearch = asked;
+  const searchDown = await mavCard({ apiKey: 'test-key', destKey: 'gyor', destName: 'Győrkeresx', destStopId: 'BKK_F0GYRX' });
+  Lib.searchStops = keepSearch;
+  check('a failed FUTÁR station search is no "no MÁV station code" banner',
+    errKey(searchDown) === 'errFutarDown' && asked === askedSearch
+    && searchDown.shadowRoot.innerHTML.includes('Győrkeresx'),
+    JSON.stringify({ err: errKey(searchDown), asked: asked - askedSearch }));
+  searchDown.remove();
+  console.warn = realWarn;
+  Object.assign(Lib, keep);
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  Lib._elviraWarned = false;
+  Lib._elviraOutages.clear();
+}
+{
+  /* The entry unloaded (disabled, reloading) leaves its services listed, and
+     each call answers not_loaded: a card with its own key reads FUTÁR then. */
+  const keep = { departures: Lib.departures, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty };
+  const realWarn = console.warn;
+  console.warn = () => {};
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  const t0 = Math.floor(Date.now() / 1000) + 1200;
+  const futarAsked = [];
+  Lib.departures = async (_k, _s, _r, _d, opts) => {
+    futarAsked.push(!opts.skipFutar);
+    /* The first load slower than the old fixed 500 ms wait (a busy
+       machine): the checks below wait for it, and never call a missing poll. */
+    if (futarAsked.length === 1) await new Promise((r) => setTimeout(r, 600));
+    return opts.skipFutar ? [] : [icElvira({ tripId: 'BKK_8494_1', label: 'IC', trainNumber: '849', dep: t0, sched: t0 })];
+  };
+  Lib.fillTransitousIfEmpty = async (rows) => rows || [];
+  let elviraAsked = 0;
+  const hop = document.createElement('hungarian-transport-card');
+  hop.hass = {
+    states: {},
+    language: 'hu',
+    services: { hungarian_transport: { elvira_between: {} } },
+    connection: {
+      sendMessagePromise: async (msg) => {
+        if (msg.type === 'call_service') elviraAsked += 1;
+        throw { code: 'service_validation_error', message: 'Hungarian transport is not loaded', translation_key: 'not_loaded' };
+      },
+    },
+  };
+  document.body.appendChild(hop);
+  hop.setConfig({
+    language: 'hu', apiKey: 'test-key', mav: true, routeIds: [],
+    stopId: 'BKK_005501024', stopName: 'Budapest-Kelenföld',
+    destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
+  });
+  hop._considerJourney = () => {};
+  const loaded = await waitForPoll(hop);
+  check('a MÁV card whose first load is slow still gets its poll', loaded);
+  const first = (hop._rawRows || []).map((r) => r.tripId).join();
+  /* The switch to FUTÁR reuses the not_loaded answer it got: one call. */
+  const askedFirst = elviraAsked;
+  /* Later, with ELVIRA paused after the calls kept failing (a poll every
+     20 s), the card asks its board again and still reads FUTÁR, not
+     Transitous. */
+  const realNow = Date.now;
+  let t = realNow();
+  Date.now = () => t;
+  t += 20000;
+  if (hop._pollRun) await hop._pollRun.run();
+  hop._mavViaFutarUntil = 0;
+  t += 20000;
+  if (hop._pollRun) await hop._pollRun.run();
+  const later = (hop._rawRows || []).map((r) => r.tripId).join();
+  const paused = Lib._elviraDownUntil > Date.now();
+  Date.now = realNow;
+  check('a MÁV card with a key reads FUTÁR while the integration answers not_loaded',
+    futarAsked.includes(true) && first === 'BKK_8494_1' && later === 'BKK_8494_1'
+    && paused && !hop._err,
+    JSON.stringify({ futarAsked, first, later, paused, err: hop._err && hop._err.i18nKey }));
+  check('a MÁV card switching to FUTÁR on not_loaded asks elvira_between once, not twice',
+    askedFirst === 1, String(askedFirst));
+  hop.remove();
+  console.warn = realWarn;
+  Object.assign(Lib, keep);
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  Lib._elviraWarned = false;
+}
+{
+  /* A key-less MÁV card loaded while HA was starting (no elvira_between
+     yet) says "no API key"; the service showing up reloads it. */
+  const keep = { departures: Lib.departures, elviraBoard: Lib.elviraBoard };
+  const t0 = Math.floor(Date.now() / 1000) + 1200;
+  let asked = 0;
+  Lib.departures = async () => [];
+  Lib.elviraBoard = async () => {
+    asked += 1;
+    return { rows: [icElvira({ tripId: 'elvira:849', label: 'TÓPART', trainNumber: '849', dep: t0, sched: t0 })], error: '', detail: '' };
+  };
+  const hop = document.createElement('hungarian-transport-card');
+  hop.hass = { states: {}, language: 'hu', services: { hungarian_transport: {} } };
+  document.body.appendChild(hop);
+  hop.setConfig({
+    language: 'hu', mav: true, routeIds: [],
+    stopId: 'BKK_005501024', stopName: 'Budapest-Kelenföld',
+    destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
+  });
+  hop._considerJourney = () => {};
+  await new Promise((r) => setTimeout(r, 30));
+  const before = (hop._err && hop._err.i18nKey) || '';
+  hop.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
+  for (let i = 0; i < 50; i++) {
+    await new Promise((r) => setTimeout(r, 10));
+    if (!hop._reloadActive && (hop._rawRows || []).length) break;
+  }
+  check('a key-less MÁV card reloads once elvira_between registers',
+    before === 'errNoApiKey' && asked === 1 && !hop._err && !!hop._poll
+    && (hop._rawRows || []).map((r) => r.tripId).join() === 'elvira:849',
+    JSON.stringify({ before, asked, err: hop._err && hop._err.i18nKey, rows: (hop._rawRows || []).map((r) => r.tripId) }));
+  /* HA restarting again: the service list comes back without the
+     integration for a moment. That poll keeps the MÁV board's trains under
+     the ELVIRA banner; it does not ask FUTÁR, nor say "no API key". */
+  let futarAsked = 0;
+  Lib.departures = async (_k, _s, _r, _d, opts) => {
+    if (!opts.skipFutar) {
+      futarAsked += 1;
+      throw Object.assign(new Error('Nincs BKK API kulcs'), { i18nKey: 'errNoApiKey' });
+    }
+    return [];
+  };
+  await waitForPoll(hop);
+  hop.hass = { states: {}, language: 'hu', services: {} };
+  if (hop._pollRun) await hop._pollRun.run();
+  const gap = { err: (hop._err && hop._err.i18nKey) || '', rows: (hop._rawRows || []).map((r) => r.tripId).join(), futarAsked };
+  check('a key-less MÁV card polled while elvira_between is briefly gone keeps its trains, no "no API key"',
+    gap.err === 'errElviraDown' && gap.rows === 'elvira:849' && futarAsked === 0 && asked === 1,
+    JSON.stringify(Object.assign(gap, { asked })));
+  hop.remove();
+  Object.assign(Lib, keep);
+}
 {
   const now = Math.floor(Date.now() / 1000);
   const board = Lib.mavBoardRows([
@@ -4418,9 +5045,39 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     { tripId: 'd', dep: now + 900, destHit: true, label: 'TÓPART', railKind: 'IC', trainNumber: '849' },
   ]);
   check('a MÁV board keeps the trains its destination lists, a number-only train shows its kind, a departed one goes',
-    board.map((r) => r.tripId).join() === 'a,d' && board[0].label === 'S' && board[0].trainNumber === '9009'
+    board.map((r) => r.tripId).join() === 'a,d' && board[0].label === 'SV' && board[0].trainNumber === '9009'
       && board[1].label === 'TÓPART',
     JSON.stringify(board));
+  /* ELVIRA's S is a sebesvonat; FUTÁR's bare S (a személyvonat) still
+     becomes Sz. Each kind keeps its own badge on the painted row. */
+  const painted = (row) => {
+    const r = Lib.asRow(Object.assign({ vehicle: 'rail', rawType: 'RAIL', color: '#4477aa', text: '#ffffff' }, row), 'Székesfehérvár', 'hu');
+    return [r.label, String(r.color).replace('#', '').toUpperCase()];
+  };
+  const kinds = Lib.mavBoardRows([
+    { tripId: 'elvira:9702', dep: now + 600, destHit: true, label: '9702', railKind: 'S', trainNumber: '9702' },
+    { tripId: 'elvira:952', dep: now + 700, destHit: true, label: '952', railKind: 'Gy', trainNumber: '952' },
+    { tripId: 'elvira:4522', dep: now + 800, destHit: true, label: '4522', railKind: 'Sz', trainNumber: '4522' },
+  ]).map(painted);
+  const futarS = painted({ tripId: 'BKK_4522_1', label: 'S' });
+  check('an ELVIRA sebesvonat is SV with its own badge, not Sz; gyorsvonat has its own; FUTÁR S stays Sz',
+    JSON.stringify(kinds) === JSON.stringify([['SV', '29803C'], ['Gy', 'C82227'], ['Sz', '5C6B7A']])
+    && JSON.stringify(futarS) === JSON.stringify(['Sz', '5C6B7A']),
+    JSON.stringify({ kinds, futarS }));
+  /* SV and Gy are train kinds: a bus line named so keeps the default colour. */
+  const busKinds = ['SV', 'Gy'].map((label) => {
+    const r = Lib.asRow({ tripId: 'volan_1', label, vehicle: 'bus', rawType: 'BUS', color: '#4477aa', text: '#ffffff' }, 'Székesfehérvár', 'hu');
+    return String(r.color).replace('#', '').toUpperCase();
+  });
+  check('a bus row labelled SV or Gy takes no train-kind badge',
+    busKinds.every((c) => c === '4477AA'), JSON.stringify(busKinds));
+  /* Each train is headed by its own terminus (row end), not the card's destination. */
+  const heads = Lib.mavBoardRows([
+    { tripId: 'elvira:849', dep: now + 600, destHit: true, label: 'TÓPART', head: 'Budapest-Kelenföld', end: 'Budapest-Déli' },
+    { tripId: 'elvira:9009', dep: now + 700, destHit: true, label: '9009', head: 'Budapest-Kelenföld', end: '' },
+  ]).map((r) => r.head);
+  check('a MÁV board row shows the train’s terminus, the destination only when ELVIRA has none',
+    heads.join() === 'Budapest-Déli,Budapest-Kelenföld', heads.join());
 }
 {
   /* Planner, Kelenföld → Székesfehérvár (2026-10-19 21:33): ELVIRA answers
@@ -4430,7 +5087,7 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
      train number as their label (Transitous): the branded G44/S30 row must
      not land on them, and each takes its own ELVIRA platform, like the hop card. */
   const keep = {
-    departures: Lib.departures, elviraBetween: Lib.elviraBetween, travelMin: Lib.travelMin,
+    departures: Lib.departures, elviraBoard: Lib.elviraBoard, travelMin: Lib.travelMin,
     fillTransitousIfEmpty: Lib.fillTransitousIfEmpty, attachCoachGps: Lib.attachCoachGps,
   };
   const t0 = Math.floor(Date.now() / 1000) + 1200;
@@ -4445,12 +5102,12 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   Lib.departures = async () => board();
   Lib.fillTransitousIfEmpty = async (rows) => rows || [];
   Lib.attachCoachGps = async (_h, rows) => rows;
-  Lib.elviraBetween = async () => [
+  Lib.elviraBoard = async () => ({ error: '', detail: '', rows: [
     rail({ tripId: 'elvira:4711', label: 'G44', trainNumber: '4711', head: 'Budapest-Déli', platform: '2', dep: t0, sched: t0 }),
     rail({ tripId: 'elvira:8738', label: '8738', trainNumber: '8738', head: 'Siófok', platform: '4', dep: t0 + 30, sched: t0, destHit: true }),
     rail({ tripId: 'elvira:4541', label: 'S30', trainNumber: '4541', head: 'Budapest-Déli', platform: '2', dep: t1, sched: t1 }),
     rail({ tripId: 'elvira:9068', label: '9068', trainNumber: '9068', head: 'Veszprém', platform: '4', dep: t1 + 30, sched: t1, destHit: true }),
-  ];
+  ] });
   Lib.travelMin = async () => null;
   const pc = document.createElement('hungarian-transit-stop-card-plan');
   pc.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
@@ -4475,6 +5132,78 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     && !raw.some((r) => /^(G44|S30)$/.test(r.label)),
     JSON.stringify(raw.map((r) => ({ id: r.tripId, label: r.label, n: r.trainNumber, p: r.platform }))));
   pc.remove();
+  /* The planner's Now board (mode 'all') lists the trains FUTÁR lacks too
+     (TÓPART 847 at :37 from Székesfehérvár): an ELVIRA row its destination's
+     board confirms is added once, a train FUTÁR has is not doubled, and a
+     row without destHit (GEMENC to Baja) stays overlay-only. */
+  Lib.departures = async () => [
+    rail({ tripId: 'BKK_8738_1', label: '8738', trainNumber: '8738', head: 'Siófok', dep: t0 + 30, sched: t0 }),
+  ];
+  Lib.elviraBoard = async () => ({
+    rows: [
+      rail({ tripId: 'elvira:8738', label: '8738', trainNumber: '8738', head: 'Székesfehérvár', end: 'Siófok', platform: '4', dep: t0 + 30, sched: t0, destHit: true }),
+      rail({ tripId: 'elvira:847', label: 'TÓPART', trainNumber: '847', head: 'Székesfehérvár', end: 'Budapest-Déli', platform: '3', dep: t1, sched: t1, destHit: true, travel: 39 }),
+      rail({ tripId: 'elvira:8312', label: 'GEMENC', trainNumber: '8312', head: 'Székesfehérvár', end: 'Baja', platform: '5', dep: t1 + 60, sched: t1 + 60 }),
+    ],
+    error: '',
+    detail: '',
+  });
+  const pn = document.createElement('hungarian-transit-stop-card-plan');
+  pn.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
+  pn._considerJourney = () => {};
+  pn._loadDests = async () => {};
+  document.body.appendChild(pn);
+  pn.setConfig({
+    language: 'hu', apiKey: 'test-key', routeIds: [],
+    stopId: 'hu-mav_005501024', stopName: 'Kelenföld vasútállomás',
+    destKey: 'székesfehérvár', destName: 'Székesfehérvár', destStopId: 'hu-mav_005503269',
+  });
+  for (let i = 0; i < 50; i++) {
+    if (!pn._reloadActive && (pn._rawRows || []).length > 1) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const now2 = (pn._rawRows || []).map((r) => ({ id: r.tripId, label: r.label, head: r.head, p: r.platform }));
+  check('the planner Now board adds a train only ELVIRA lists, once, and not one without destHit',
+    now2.length === 2 && now2[0].id === 'BKK_8738_1' && now2[0].p === '4'
+    && now2[1].id === 'elvira:847' && now2[1].label === 'TÓPART' && now2[1].head === 'Budapest-Déli',
+    JSON.stringify(now2));
+  pn.remove();
+  /* No FUTÁR, Volán or city row for the pair (a key-less planner,
+     Kelenföld → Érd): the one train ELVIRA confirms must not stand in for
+     the Transitous fill, which brings bus 187 beside it. */
+  let fills = 0;
+  Lib.departures = async () => [];
+  Lib.fillTransitousIfEmpty = async (rows) => {
+    if ((rows || []).length) return rows;
+    fills += 1;
+    return [
+      { tripId: 'motis:bus187', label: '187', vehicle: 'bus', rawType: 'BUS', head: 'Érd', dep: t0 + 60, sched: t0 + 60 },
+      rail({ tripId: 'motis:hu-mav_4011', label: '4011', trainNumber: '4011', head: 'Érd', dep: t0, sched: t0 }),
+    ];
+  };
+  Lib.elviraBoard = async () => ({ error: '', detail: '', rows: [
+    rail({ tripId: 'elvira:4011', label: 'S36', railKind: 'Sz', trainNumber: '4011', head: 'Érd', end: 'Esztergom', platform: '2', dep: t0, sched: t0, destHit: true }),
+  ] });
+  const pe = document.createElement('hungarian-transit-stop-card-plan');
+  pe.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
+  pe._considerJourney = () => {};
+  pe._loadDests = async () => {};
+  document.body.appendChild(pe);
+  pe.setConfig({
+    language: 'hu', routeIds: [],
+    stopId: 'hu-mav_005501024', stopName: 'Kelenföld vasútállomás',
+    destKey: 'érd', destName: 'Érd', destStopId: 'hu-mav_005501180',
+  });
+  for (let i = 0; i < 100; i++) {
+    if (!pe._reloadActive && (pe._rawRows || []).length > 1) break;
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const erd = (pe._rawRows || []).map((r) => ({ id: r.tripId, label: r.label, p: r.platform }));
+  check('a planner Now board with only an ELVIRA-confirmed train is still filled from Transitous (bus 187 too)',
+    fills === 1 && erd.length === 2 && erd.some((r) => r.id === 'motis:bus187')
+    && erd.some((r) => r.id === 'motis:hu-mav_4011' && r.p === '2'),
+    JSON.stringify({ fills, erd }));
+  pe.remove();
   Object.assign(Lib, keep);
 }
 check('a branded suburban train in the same minute stays off another numbered train', (() => {
@@ -4547,6 +5276,25 @@ check('a branded suburban train in the same minute stays off another numbered tr
   pc._loadedAt = Date.now() - 10 * 60 * 1000;
   const stale = pc._shouldReloadOnConnect();
   check('the planner plans again when shown after a while', fresh === false && stale === true);
+  {
+    /* Left in front: no poll, so the countdown tick plans "now" again. */
+    pc._reloadActive = false;
+    pc._rows = [];
+    const r0 = reloads;
+    pc._loadedAt = Date.now();
+    pc._tickPaint();
+    const freshTick = reloads - r0;
+    pc._loadedAt = Date.now() - 10 * 60 * 1000;
+    pc._tickPaint();
+    const staleTick = reloads - r0;
+    pc._when = { mode: 'depart', at: Date.now() + 3600000 };
+    pc._tickPaint();
+    const timedTick = reloads - r0;
+    pc._when = { mode: 'now', at: 0 };
+    check('a planner left in front plans "now" again on the tick once its plan is stale, not a chosen time',
+      freshTick === 0 && staleTick === 1 && timedTick === 1,
+      JSON.stringify({ freshTick, staleTick, timedTick, destKey: pc._config.destKey }));
+  }
   pc._paintMinutesAfter();
   const sel = pc._planEl('pmin');
   check('a look-ahead that is not a preset still shows in the select',
@@ -5900,6 +6648,23 @@ const shapeLen = (pts) => pts.reduce((m, p, i) => (i ? m + Lib.haversineMeters(p
   check('a new origin from the editor drops the old destinations while its own load',
     during.dests === 0 && during.routes === 0 && during.loading && pc._dests.length === 1 && pc._dests[0].key === 'new',
     JSON.stringify(during));
+  /* A picked pair folds its pickers: their destination list waits for
+     edit, and a swap does not fetch the new origin's either. */
+  let scans = 0;
+  Lib.reachableDests = async () => { scans += 1; return { dests: [{ key: 'x', name: 'X' }], destRoutes: {} }; };
+  pc.setConfig({ language: 'en', stopId: 'BKK_P1', stopName: 'P1', destKey: 'p2', destName: 'P2', destStopId: 'BKK_P2' });
+  pc.hass = { states: {}, language: 'en' };
+  await settleTicks();
+  const unopened = scans;
+  pc._swapPlan();
+  await settleTicks();
+  const swapped = scans;
+  pc._onHeadClick({ target: { closest: () => ({ getAttribute: () => 'edit' }) } });
+  await settleTicks();
+  check('a picked pair loads its destination list only when edit opens the pickers',
+    unopened === 0 && swapped === 0 && scans === 1 && pc._destsFor === 'BKK_P2' && pc._dests.length === 1,
+    JSON.stringify({ unopened, swapped, scans, destsFor: pc._destsFor }));
+  pc._editRoute = false;
   Lib.reachableDests = keep.reachableDests;
   pc.remove();
 }
@@ -6396,8 +7161,9 @@ const settle = async (el) => {
     JSON.stringify(urls));
 }
 {
-  /* ELVIRA only when the integration has the service; after a failure, a
-     pause and one warning. */
+  /* ELVIRA only when the integration has the service; one failed call is
+     asked again on the next poll, calls that keep failing pause it, with
+     one warning. */
   const realNow = Date.now;
   const keep = { callServiceResponse: Lib.callServiceResponse };
   const keepWarn = console.warn;
@@ -6411,17 +7177,27 @@ const settle = async (el) => {
   };
   console.warn = (...a) => warns.push(a.map(String).join(' '));
   Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
   Lib._elviraWarned = false;
-  const ask = (hass) => Lib.elviraBetween(hass, 'BKK_005510017', 'BKK_005503269', 60, 'Székesfehérvár', {});
+  /* One poll every 20 s, the shortest refresh a card takes. */
+  let t = realNow();
+  Date.now = () => t;
+  const ask = (hass) => {
+    t += 20000;
+    return Lib.elviraBetween(hass, 'BKK_005510017', 'BKK_005503269', 60, 'Székesfehérvár', {});
+  };
   const without = { states: {}, services: { hungarian_transport: { futar: {} } } };
   const withSvc = { states: {}, services: { hungarian_transport: { elvira_between: {} } } };
   await ask(without);
   const noService = calls;
   await ask(withSvc);
   await ask(withSvc);
+  const askedAgain = calls;
+  await ask(withSvc);
+  await ask(withSvc);
   const backedOff = calls;
-  let t = realNow() + 4 * 60000;
-  Date.now = () => t;
+  t += 4 * 60000;
   await ask(withSvc);
   const retried = calls;
   t += 4 * 60000;
@@ -6431,12 +7207,117 @@ const settle = async (el) => {
   console.warn = keepWarn;
   Object.assign(Lib, keep);
   Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
   Lib._elviraWarned = false;
   check('ELVIRA is not called without the elvira_between service',
     noService === 0, String(noService));
-  check('a failed ELVIRA call pauses ELVIRA for minutes and warns once',
-    backedOff === 1 && retried === 2 && warns.length === 1 && rows.length === 1,
-    JSON.stringify({ backedOff, retried, warns: warns.length, rows: rows.length }));
+  check('a failed ELVIRA call is asked again; calls that keep failing pause ELVIRA for minutes and warn once',
+    askedAgain === 2 && backedOff === 3 && retried === 4 && warns.length === 1 && rows.length === 1,
+    JSON.stringify({ askedAgain, backedOff, retried, warns: warns.length, rows: rows.length }));
+}
+{
+  /* Several MÁV cards (or cards and a planner) fail in the same moment when
+     the websocket drops or HA restarts: that is one failed poll round, not
+     three, so it must not pause ELVIRA for every card for minutes. */
+  const realNow = Date.now;
+  const keep = { callServiceResponse: Lib.callServiceResponse };
+  const keepWarn = console.warn;
+  let calls = 0;
+  let fail = true;
+  Lib.callServiceResponse = async () => {
+    calls += 1;
+    if (fail) throw { code: 'unknown_error', message: 'Connection lost' };
+    return { response: { departures: [{ tripId: 'elvira:1' }] } };
+  };
+  console.warn = () => {};
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  Lib._elviraWarned = false;
+  let t = realNow();
+  Date.now = () => t;
+  const hass = { states: {}, services: { hungarian_transport: { elvira_between: {} } } };
+  const pairs = [['BKK_005501024', 'BKK_005503269'], ['BKK_005510009', 'BKK_005501024'], ['BKK_005501024', 'BKK_005510017']];
+  const pollAll = () => Promise.all(pairs.map(([o, d]) => Lib.elviraBoard(hass, o, d, 60, '', {})));
+  const dropped = await pollAll();
+  const pausedAfterDrop = Date.now() < Lib._elviraDownUntil;
+  /* HA is back by the next poll: every card asks, and gets its trains. */
+  t += 20000;
+  fail = false;
+  const before = calls;
+  const back = await pollAll();
+  const askedBack = calls - before;
+  /* Failing rounds a poll apart still pause it, however many cards ask. */
+  fail = true;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  for (let round = 0; round < 3; round++) {
+    t += 20000;
+    await pollAll();
+  }
+  const pausedAfterRounds = Date.now() < Lib._elviraDownUntil;
+  Date.now = realNow;
+  console.warn = keepWarn;
+  Object.assign(Lib, keep);
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  Lib._elviraWarned = false;
+  check('three MÁV cards failing in one poll do not pause ELVIRA; the next poll asks again',
+    dropped.every((b) => b.error === 'elvira_call_failed') && !pausedAfterDrop
+    && askedBack === 3 && back.every((b) => b.error === '' && b.rows.length === 1),
+    JSON.stringify({ errors: dropped.map((b) => b.error), pausedAfterDrop, askedBack, back: back.map((b) => b.error) }));
+  check('three failed poll rounds pause ELVIRA for every card',
+    pausedAfterRounds, String(pausedAfterRounds));
+}
+{
+  /* A call that timed out went through a live websocket to an integration
+     still working on it (a second board round past midnight): it shows the
+     banner, but is no strike towards pausing ELVIRA for every card. */
+  const realNow = Date.now;
+  const keep = { callServiceResponse: Lib.callServiceResponse, _elviraTimeoutMs: Lib._elviraTimeoutMs };
+  const keepWarn = console.warn;
+  let calls = 0;
+  Lib.callServiceResponse = () => { calls += 1; return new Promise(() => {}); };
+  Lib._elviraTimeoutMs = 5;
+  console.warn = () => {};
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  Lib._elviraWarned = false;
+  let t = realNow();
+  Date.now = () => t;
+  const hass = { states: {}, services: { hungarian_transport: { elvira_between: {} } } };
+  const boards = [];
+  for (let round = 0; round < 4; round++) {
+    t += 20000;
+    boards.push(await Lib.elviraBoard(hass, 'BKK_005501024', 'BKK_005503269', 60, '', {}));
+  }
+  const paused = Date.now() < Lib._elviraDownUntil;
+  Date.now = realNow;
+  console.warn = keepWarn;
+  Object.assign(Lib, keep);
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  Lib._elviraWarned = false;
+  check('timed-out ELVIRA calls show the banner but do not pause ELVIRA for every card',
+    boards.every((b) => b.error === 'elvira_timeout') && calls === 4 && !paused,
+    JSON.stringify({ errors: boards.map((b) => b.error), calls, paused }));
+  /* The reason of a failed call, as home-assistant-js-websocket and HA give it. */
+  const reasonOf = (e) => (typeof Lib.elviraErrText === 'function' ? Lib.elviraErrText(e) : String(e));
+  const texts = [
+    reasonOf({ type: 'result', success: false, error: { code: 3, message: 'Connection lost' } }),
+    reasonOf(3),
+    reasonOf(new Error('unavailable')),
+    reasonOf({ code: 'home_assistant_error', message: 'Timeout' }),
+    reasonOf({ error: { code: 'unknown_error' } }),
+    reasonOf({}),
+  ];
+  check('a failed ELVIRA call\'s reason is readable text',
+    JSON.stringify(texts) === JSON.stringify(['Connection lost', 'Connection lost', 'unavailable', 'Timeout', 'unknown_error', '']),
+    JSON.stringify(texts));
 }
 {
   /* One scan of hass.states per change, and one pattern per row. */
@@ -7473,12 +8354,16 @@ const settle = async (el) => {
       return { data: { entry: { variants: [{ name: 'v', stopIds: [pole, 'AZP_D'] }] }, references: { stops: S } } };
     }
     if (path === 'arrivals-and-departures-for-stop.json') {
+      /* The parent's board lists its child poles' rows too, as FUTÁR's does. */
+      const parent = params.stopId === 'AZP_CSF1';
       const day = params.stopId !== 'AZP_P1';
       const tid = day ? 'AZP_DAY1' : 'AZP_NIGHT1';
+      const stopTimes = [{ tripId: tid, stopId: parent ? 'AZP_P2' : params.stopId, departureTime: t0 + 600 }];
+      if (parent) stopTimes.push({ tripId: 'AZP_NIGHT1', stopId: 'AZP_P1', departureTime: t0 + 900 });
       return { data: {
-        entry: { stopTimes: [{ tripId: tid, stopId: params.stopId === 'AZP_CSF1' ? 'AZP_P2' : params.stopId, departureTime: t0 + 600 }] },
+        entry: { stopTimes },
         references: {
-          trips: { [tid]: { routeId: day ? 'AZP_D7' : 'AZP_N', tripHeadsign: 'Azpcel' } },
+          trips: { [tid]: { routeId: day ? 'AZP_D7' : 'AZP_N', tripHeadsign: 'Azpcel' }, AZP_NIGHT1: { routeId: 'AZP_N', tripHeadsign: 'Azpcel' } },
           routes: { AZP_D7: { id: 'AZP_D7', shortName: '7', type: 'BUS' }, AZP_N: { id: 'AZP_N', shortName: '907', type: 'BUS' } },
           stops: S,
         },
@@ -7591,7 +8476,7 @@ const settle = async (el) => {
 }
 
 /* A sibling pole listed before the stop itself still leaves the stop's own
-   board first, so a capped board discovers the rest of the hub. */
+   board first, and discovery from it finds the rest of the hub. */
 {
   const keepFetch = Lib.fetch;
   const t0 = Math.floor(Date.now() / 1000);
@@ -7630,7 +8515,7 @@ const settle = async (el) => {
   const rows = await Lib.departures('k', 'AZQ_P1', ['AZQ_A', 'AZQ_B'], { key: 'azqcel', name: 'Azqcel' },
     { originName: 'Azqhub', mode: 'bkk', minutesAfter: 180, deferGps: true });
   check('the stop\'s own board goes first even when a sibling pole is listed before it',
-    boards[0] === 'AZQ_P1' && boards.includes('AZQ_P3') && rows.length === 3,
+    boards[0] === 'AZQ_P1' && boards.includes('AZQ_P3') && rows.length === 3 && rows.every((r) => r.head === 'Azqcel'),
     JSON.stringify({ boards, rows: rows.map((r) => r.label) }));
   Lib.fetch = keepFetch;
   Lib._boards.clear();
@@ -7862,6 +8747,152 @@ const settle = async (el) => {
     boards.length === 1 && rows.length === 2, JSON.stringify({ boards: boards.length, rows: rows.length }));
   Lib.fetch = keepFetch;
   Lib._boards.clear();
+}
+
+/* A quiet parent board's last departure is well before the horizon's end
+   (one bus every 15 minutes): it is complete, not capped, so no poll
+   reads its child poles again or looks up the routes on it. */
+{
+  const keepFetch = Lib.fetch;
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZQK_P1: { id: 'AZQK_P1', name: 'Azqkhub', parentStationId: 'AZQK_CSF' },
+    AZQK_D: { id: 'AZQK_D', name: 'Azqkcel' },
+  };
+  const calls = [];
+  Lib._boards.clear();
+  Lib.fetch = async (key, path, params) => {
+    calls.push(path === 'route-details.json' ? 'route:' + params.routeId : 'board:' + params.stopId);
+    if (path === 'route-details.json') {
+      return { data: { entry: { variants: [{ name: 'v', stopIds: ['AZQK_P1', 'AZQK_D'] }] }, references: { stops: S } } };
+    }
+    const stopTimes = [];
+    const trips = {};
+    for (let i = 0; i < 11; i++) {
+      stopTimes.push({ tripId: `AZQK_T${i}`, stopId: 'AZQK_P1', departureTime: t0 + 300 + i * 15 * 60 });
+      trips[`AZQK_T${i}`] = { routeId: 'AZQK_R', tripHeadsign: 'Azqkcel' };
+    }
+    return { data: {
+      entry: { stopTimes },
+      references: { trips, routes: { AZQK_R: { id: 'AZQK_R', shortName: '9', type: 'BUS' } }, stops: S },
+    } };
+  };
+  const counts = [];
+  /* Discovery looks the board's route up once, for poles of the same name
+     elsewhere; with a saved route its own pattern lookup is expected. */
+  for (const saved of [[], ['AZQK_R']]) {
+    for (let poll = 0; poll < 2; poll++) {
+      calls.length = 0;
+      Lib._boards.clear();
+      const rows = await Lib.departures('k', 'AZQK_CSF', saved, { key: 'azqkcel', name: 'Azqkcel' },
+        { originName: 'Azqkhub', mode: 'bkk', minutesAfter: 180, deferGps: true, cache: {} });
+      counts.push(rows.length + ':' + calls.filter((c) => c !== 'route:AZQK_R' || !saved.length).join(','));
+    }
+  }
+  check('a complete parent board is read alone on every poll, its routes looked up once',
+    JSON.stringify(counts) === JSON.stringify(['11:board:AZQK_CSF,route:AZQK_R', '11:board:AZQK_CSF',
+      '11:board:AZQK_CSF', '11:board:AZQK_CSF']), JSON.stringify(counts));
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+}
+
+/* A complete board still finds a pole of the same name in another stop
+   area: line 7 leaves the stop's own pole away from the destination, its
+   other variant leaves the other area's pole towards it. Only the stop's
+   own child pole, whose rows are on the board, is not read again. */
+{
+  const keepFetch = Lib.fetch;
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZWA_F1: { id: 'AZWA_F1', name: 'Azwhub', parentStationId: 'AZWA_CS' },
+    AZWB_F9: { id: 'AZWB_F9', name: 'Azwhub', parentStationId: 'AZWB_CS' },
+    AZW_X: { id: 'AZW_X', name: 'Azwmashol' },
+    AZW_D: { id: 'AZW_D', name: 'Azwcel' },
+  };
+  const calls = [];
+  Lib._boards.clear();
+  Lib.fetch = async (key, path, params) => {
+    calls.push(path === 'route-details.json' ? 'route:' + params.routeId
+      : path === 'trip-details.json' ? 'trip:' + params.tripId : 'board:' + params.stopId);
+    if (path === 'route-details.json') {
+      return { data: { entry: { variants: [
+        { name: 'Azwmashol', stopIds: ['AZWA_F1', 'AZW_X'] },
+        { name: 'Azwcel', stopIds: ['AZWB_F9', 'AZW_D'] },
+      ] }, references: { stops: S } } };
+    }
+    if (path !== 'arrivals-and-departures-for-stop.json') return { data: {} };
+    const far = params.stopId === 'AZWB_F9';
+    const stopTimes = [];
+    const trips = {};
+    for (let i = 0; i < 4; i++) {
+      const tid = (far ? 'AZW_TC' : 'AZW_TA') + i;
+      stopTimes.push({ tripId: tid, stopId: far ? 'AZWB_F9' : 'AZWA_F1', departureTime: t0 + 300 + i * 600 });
+      trips[tid] = { routeId: 'AZW_R7', tripHeadsign: far ? 'Azwcel' : 'Azwmashol' };
+    }
+    return { data: {
+      entry: { stopTimes },
+      references: { trips, routes: { AZW_R7: { id: 'AZW_R7', shortName: '7', type: 'BUS' } }, stops: S },
+    } };
+  };
+  const cache = {};
+  const polls = [];
+  for (let poll = 0; poll < 2; poll++) {
+    calls.length = 0;
+    Lib._boards.clear();
+    const rows = await Lib.departures('k', 'AZWA_CS', [], { key: 'azwcel', name: 'Azwcel' },
+      { originName: 'Azwhub', mode: 'bkk', minutesAfter: 180, deferGps: true, cache });
+    polls.push({ rows: rows.map((r) => r.tripId).join(','), calls: calls.join(',') });
+  }
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+  check('a complete board still reads a same-named pole of another stop area, not its own child pole',
+    polls.every((p) => p.rows === 'AZW_TC0,AZW_TC1,AZW_TC2,AZW_TC3')
+    && polls[0].calls === 'board:AZWA_CS,route:AZW_R7,board:AZWB_F9'
+    && polls[1].calls === 'board:AZWA_CS,board:AZWB_F9',
+    JSON.stringify(polls));
+}
+
+/* A parent board a few rows short of 60 that ends well before the horizon
+   is still cut off: its saved route's child pole fills the rest. */
+{
+  const keepFetch = Lib.fetch;
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZV_P1: { id: 'AZV_P1', name: 'Azvhub', parentStationId: 'AZV_CSF' },
+    AZV_D: { id: 'AZV_D', name: 'Azvcel' },
+  };
+  const boards = [];
+  Lib._boards.clear();
+  Lib.fetch = async (key, path, params) => {
+    if (path === 'route-details.json') {
+      return { data: { entry: { variants: [{ name: 'v', stopIds: ['AZV_P1', 'AZV_D'] }] }, references: { stops: S } } };
+    }
+    if (path !== 'arrivals-and-departures-for-stop.json') return { data: {} };
+    boards.push(params.stopId);
+    const pole = params.stopId === 'AZV_P1';
+    const stopTimes = [];
+    const trips = {};
+    if (pole) {
+      stopTimes.push({ tripId: 'AZV_LATE', stopId: 'AZV_P1', departureTime: t0 + 50 * 60 });
+      trips.AZV_LATE = { routeId: 'AZV_R', tripHeadsign: 'Azvcel' };
+    } else {
+      for (let i = 0; i < 57; i++) {
+        stopTimes.push({ tripId: `AZV_X${i}`, stopId: 'AZV_PX', departureTime: t0 + 120 + i * 20 });
+        trips[`AZV_X${i}`] = { routeId: 'AZV_OTHER', tripHeadsign: 'Azvmashol' };
+      }
+    }
+    return { data: {
+      entry: { stopTimes },
+      references: { trips, routes: { AZV_R: { id: 'AZV_R', shortName: '5', type: 'BUS' }, AZV_OTHER: { id: 'AZV_OTHER', shortName: '6', type: 'BUS' } }, stops: S },
+    } };
+  };
+  const rows = await Lib.departures('k', 'AZV_CSF', ['AZV_R'], { key: 'azvcel', name: 'Azvcel' },
+    { originName: 'Azvhub', mode: 'bkk', minutesAfter: 90, deferGps: true, cache: {} });
+  Lib.fetch = keepFetch;
+  Lib._boards.clear();
+  check('a parent board a few rows under the 60-row cap still has its child poles read',
+    boards.join(',') === 'AZV_CSF,AZV_P1' && rows.some((r) => r.tripId === 'AZV_LATE'),
+    JSON.stringify({ boards, rows: rows.map((r) => r.tripId) }));
 }
 
 /* ---- Planner review, fifth round: city → rail ---- */
@@ -8402,6 +9433,65 @@ check('a city stop number is not an ELVIRA station code',
   Object.assign(Lib, { _fetchIndexBytes: keep.bytes, _fetchJsonGz: keep.gz });
 }
 
+/* A corrupt or truncated gzip index is a lasting failure with its own
+   message, not a bare TypeError downloaded again on every lookup. */
+{
+  const keep = Lib._fetchIndexBytes;
+  /* A gzip header cut off two bytes into the deflate stream. */
+  const cut = new Uint8Array([0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 0x03, 0xab, 0x56]);
+  let fetches = 0;
+  Lib._fetchIndexBytes = async () => {
+    fetches += 1;
+    return { status: 200, bytes: cut };
+  };
+  const bad = Lib.withIndexes({ volanIndex: 'http://localhost:8123/local/azzgz/volan-index.json.gz' });
+  const errs = [];
+  for (let i = 0; i < 3; i++) {
+    try {
+      await bad.volanIndex();
+    } catch (err) {
+      errs.push(err && err.i18nKey);
+    }
+  }
+  check('a corrupt gzip index fails with a coded error and is not refetched',
+    fetches === 1 && errs.length === 3 && errs.every((k) => k === 'errIndexParse'),
+    JSON.stringify({ fetches, errs }));
+  Lib._fetchIndexBytes = keep;
+}
+
+/* A shapes folder that answers 404 was replaced by a newer index's (a HACS
+   update swaps the whole folder): the index is loaded again, so the next
+   poll's rows name the new folder, but not on every map open. */
+{
+  const keep = { bytes: Lib._fetchIndexBytes, gz: Lib._fetchJsonGz };
+  let dir = 'volan-shapes-old';
+  const fetched = [];
+  Lib._fetchIndexBytes = async (url) => {
+    fetched.push(url);
+    return { status: 200, bytes: new TextEncoder().encode(JSON.stringify({ v: 1, sh: { dir, n: 64 }, s: [], t: [] })) };
+  };
+  Lib._fetchJsonGz = async (url) => {
+    if (/volan-shapes-old/.test(url)) {
+      const err = new Error('HTTP 404');
+      err.status = 404;
+      throw err;
+    }
+    return { p: [] };
+  };
+  const lib = Lib.withIndexes({ volanIndex: 'http://localhost:8123/local/azzsh/volan-index.json.gz' });
+  const before = await lib.volanIndex();
+  dir = 'volan-shapes-new';
+  const ref = { base: before.url, dir: before.sh.dir, n: 64, id: 3 };
+  for (let i = 0; i < 2; i++) await Lib.gtfsShape({ ...ref, id: 3 + i }).catch(() => null);
+  const after = await lib.volanIndex();
+  await Lib.gtfsShape({ ...ref, id: 5 }).catch(() => null);
+  await lib.volanIndex();
+  check('a 404 shapes folder reloads the index once',
+    after.sh.dir === 'volan-shapes-new' && fetched.length === 2,
+    JSON.stringify({ dir: after.sh.dir, fetched: fetched.length }));
+  Object.assign(Lib, { _fetchIndexBytes: keep.bytes, _fetchJsonGz: keep.gz });
+}
+
 /* ---- Sixth review: hop card and its libraries ---- */
 
 /* A failed poll keeps only FUTÁR rows still due: an outage longer than
@@ -8817,6 +9907,96 @@ check('a city stop number is not an ELVIRA station code',
   pc.remove();
 }
 
+/* Another itinerary opened while the journey map still loads: the map must
+   not draw the one the card no longer shows, and the new one's Map click
+   is not dropped. */
+{
+  const keep = { fillJourneyShapes: Lib.fillJourneyShapes, journeyMapSegments: Lib.journeyMapSegments };
+  const layer = () => ({ addTo() { return this; }, on() { return this; }, bindTooltip() { return this; } });
+  const L = {
+    map: () => ({
+      setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {},
+    }),
+    tileLayer: () => layer(),
+    polyline: () => layer(),
+    marker: () => layer(),
+    divIcon: (o) => o,
+    latLngBounds: (pts) => ({ pts }),
+  };
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  pc._loadDests = async () => {};
+  pc._ensureLeaflet = async () => L;
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'en', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+  const mk = (label, min) => ({
+    durationMin: min, transfers: 0, walkMin: 0, waitMin: 0,
+    legs: [{ walk: false, label, color: '009EE3', minutes: min, from: 'x', to: 'y', shape: [[47.5, 19.0], [47.52, 19.05]] }],
+  });
+  const j1 = mk('FIRST1', 41);
+  const j3 = mk('THIRD3', 63);
+  pc._when = { mode: 'depart', at: Date.now() + 3600000 };
+  pc._journeys = [j1, mk('SECOND2', 52), j3];
+  Lib.journeyMapSegments = (j) => (j ? [{ walk: false, color: '#009EE3', shape: j.legs[0].shape, from: 'x', to: 'y' }] : []);
+  const pick = (i) => { pc._openJourney = i; pc._journey = pc._journeys[i]; };
+  const foot = () => (pc._mapOverlay ? pc._mapOverlay.querySelector('.ht-map-foot').textContent : '');
+  pick(0);
+  let held = deferred();
+  Lib.fillJourneyShapes = (j) => (j === j1 ? held.p : Promise.resolve());
+  const first = pc._openJourneyMap();
+  await settleTicks();
+  pick(2);
+  held.resolve();
+  await first;
+  await settleTicks();
+  const dropped = { overlay: !!pc._mapOverlay, foot: foot(), opening: pc._openingMap };
+  pc._closeVehicleMap();
+  pick(0);
+  held = deferred();
+  const again = pc._openJourneyMap();
+  await settleTicks();
+  pick(2);
+  await pc._openJourneyMap();
+  held.resolve();
+  await again;
+  await settleTicks();
+  const reopened = foot();
+  check('a journey map still loading when another itinerary opens draws neither the old one nor drops the new click',
+    !dropped.overlay && dropped.opening === '' && /63/.test(reopened) && !/41/.test(reopened) && pc._openingMap === '',
+    JSON.stringify({ dropped, reopened, opening: pc._openingMap }));
+  pc._closeVehicleMap();
+  /* The same, from the itineraries' own Map buttons: the first open kept
+     its button, which opening the third itinerary repainted away. Closing
+     the map puts the focus on the Map button the card shows now. */
+  const pmap = () => pc.shadowRoot.querySelector('#pmap');
+  pick(0);
+  pc._paintJourney();
+  const btnA = pmap();
+  pc._focusTarget = () => ({ el: btnA, ref: null });
+  held = deferred();
+  const fromA = pc._openJourneyMap();
+  await settleTicks();
+  pick(2);
+  pc._paintJourney();
+  const btnB = pmap();
+  let focused = '';
+  btnB.focus = () => { focused = 'B'; };
+  pc._focusTarget = () => ({ el: btnB, ref: null });
+  await pc._openJourneyMap();
+  held.resolve();
+  await fromA;
+  await settleTicks();
+  const opened = /63/.test(foot());
+  pc._closeVehicleMap();
+  check('a journey map that replaced one still opening gives the focus back to the Map button shown now',
+    opened && !!btnA && btnA !== btnB && !btnA.isConnected && focused === 'B',
+    JSON.stringify({ opened, focused, detached: !!btnA && !btnA.isConnected }));
+  check('a new planner starts with no itinerary opening',
+    document.createElement('hungarian-transit-stop-card-plan')._openingJourney === null);
+  Object.assign(Lib, keep);
+  pc.remove();
+}
+
 /* A city feed's destination with a place takes only a station by that
    place: Szeged's station 4.8 km from "Kiskundorozsma vasútállomás" is no
    train to it. */
@@ -8914,7 +10094,7 @@ check('a city stop number is not an ELVIRA station code',
   calls.length = 0;
   const c2 = await Lib.elviraResolveCode('KEY', 'szeged:7123', 'Szegedx7');
   check('an ELVIRA code search that failed is asked again once FUTÁR answers',
-    c1 === '' && c2 === '005517228' && calls.length > 0, JSON.stringify({ c1, c2, calls }));
+    c1 === null && c2 === '005517228' && calls.length > 0, JSON.stringify({ c1, c2, calls }));
   /* A real "no such station" is still kept. */
   Lib.fetch = async (_k, _path, params) => { calls.push(params && params.query); return { data: { references: { stops: {} } } }; };
   await Lib.elviraResolveCode('KEY', 'szeged:7124', 'Nowherex7');
@@ -8922,6 +10102,116 @@ check('a city stop number is not an ELVIRA station code',
   await Lib.elviraResolveCode('KEY', 'szeged:7124', 'Nowherex7');
   check('a station FUTÁR does not know is still kept as none', calls.length === 0, JSON.stringify(calls));
   Object.assign(Lib, keep);
+}
+
+/* Cards loading together share one search per name, whichever of the
+   name's stop ids they hold, and the answer outlives the page: the next
+   page load does not search again for a stop that is no station. */
+{
+  const keep = { fetch: Lib.fetch, isMavStop: Lib.isMavStop };
+  const store = new Map();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    },
+  });
+  const calls = [];
+  Lib.fetch = async (_k, _path, params) => {
+    calls.push(params && params.query);
+    await new Promise((r) => setTimeout(r, 5));
+    const stops = params.query === 'Azvszeged'
+      ? { BKK_005517299: { id: 'BKK_005517299', name: 'Azvszeged', type: 'RAIL' } } : {};
+    return { data: { references: { stops } } };
+  };
+  Lib.isMavStop = (s) => /^BKK_0055/.test(String(s.id || ''));
+  const together = await Promise.all([
+    Lib.elviraResolveCode('KEY', 'BKK_F00AZV1', 'Azvbusz tér'),
+    Lib.elviraResolveCode('KEY', 'BKK_CSF00AZV', 'Azvbusz tér'),
+    Lib.elviraResolveCode('KEY', 'szeged:azv1', 'Azvszeged'),
+  ]);
+  const firstCalls = calls.slice();
+  /* A new page load: the page's memo is gone, the browser's copy is not. */
+  Lib._elviraCodes.clear();
+  calls.length = 0;
+  const reloaded = await Promise.all([
+    Lib.elviraResolveCode('KEY', 'BKK_F00AZV1', 'Azvbusz tér'),
+    Lib.elviraResolveCode('KEY', 'szeged:azv1', 'Azvszeged'),
+  ]);
+  Lib._elviraCodes.clear();
+  delete globalThis.localStorage;
+  Object.assign(Lib, keep);
+  check('ELVIRA code searches are shared between cards and kept across page loads',
+    JSON.stringify(together) === '["","","005517299"]' && JSON.stringify(reloaded) === '["","005517299"]'
+    && JSON.stringify(firstCalls) === '["Azvbusz tér","Azvszeged"]' && calls.length === 0,
+    JSON.stringify({ together, reloaded, firstCalls, calls }));
+}
+
+/* A search in flight is shared only by cards with the same FUTÁR access:
+   a card with its own revoked key, asking first, must not leave the card
+   that goes through the integration without its station code. */
+{
+  const keep = { fetch: Lib.fetch, isMavStop: Lib.isMavStop, _hass: Lib._hass };
+  const calls = [];
+  Lib._hass = { states: {}, services: { hungarian_transport: { futar: {} } } };
+  Lib.fetch = async (k, _path, params) => {
+    calls.push(`${k || 'integration'}:${params && params.query}`);
+    await new Promise((r) => setTimeout(r, 5));
+    if (k === 'REVOKED') throw Object.assign(new Error('BKK 401'), { code: 'futar_auth' });
+    return { data: { references: { stops: { BKK_005510009: { id: 'BKK_005510009', name: 'Budapest-Nyugati', type: 'RAIL' } } } } };
+  };
+  Lib.isMavStop = () => true;
+  Lib._elviraCodes.clear();
+  const both = await Promise.all([
+    Lib.elviraResolveCode('REVOKED', 'BKK_CSF01NYX', 'Nyugatix pályaudvar M'),
+    Lib.elviraResolveCode('', 'BKK_CSF01NYX', 'Nyugatix pályaudvar M'),
+  ]);
+  Lib._elviraCodes.clear();
+  Object.assign(Lib, keep);
+  check('an ELVIRA code search in flight is not shared across FUTÁR credentials',
+    both[0] === null && both[1] === '005510009' && calls.some((c) => c.startsWith('integration:')),
+    JSON.stringify({ both, calls }));
+}
+
+/* A name whose alias query failed is no "no such station": it is not
+   kept, and the next lookup asks again. */
+{
+  const keep = { fetch: Lib.fetch, isMavStop: Lib.isMavStop };
+  const store = new Map();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    },
+  });
+  let limited = true;
+  const calls = [];
+  Lib.fetch = async (_k, _path, params) => {
+    calls.push(params.query);
+    /* The typed name finds only a bus stop; the station key names the station. */
+    if (params.query === 'Azkhely vasútállomás') {
+      return { data: { references: { stops: { BKK_F00AZK: { id: 'BKK_F00AZK', name: 'Azkhely vasútállomás', type: 'BUS' } } } } };
+    }
+    if (limited) throw Object.assign(new Error('rate limited'), { code: 'futar_rate_limited' });
+    return { data: { references: { stops: { BKK_005599001: { id: 'BKK_005599001', name: 'Azkhely', type: 'RAIL' } } } } };
+  };
+  Lib.isMavStop = () => true;
+  Lib._elviraCodes.clear();
+  const first = await Lib.elviraResolveCode('KEY', 'BKK_F00AZK', 'Azkhely vasútállomás');
+  const firstCalls = calls.length;
+  const kept = store.size;
+  limited = false;
+  const second = await Lib.elviraResolveCode('KEY', 'BKK_F00AZK', 'Azkhely vasútállomás');
+  Lib._elviraCodes.clear();
+  delete globalThis.localStorage;
+  Object.assign(Lib, keep);
+  check('a failed alias query keeps no ELVIRA "no such station"',
+    first === null && firstCalls === 2 && kept === 0 && second === '005599001' && calls.length === 4,
+    JSON.stringify({ first, firstCalls, kept, second, calls }));
 }
 
 /* At the shortest poll (20 s) every poll gets a new board, not every
@@ -9165,6 +10455,159 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     !!pc._mapOverlay && pc._journey && pc._journey.legs[0].label === 'REPLANNED8' && !notices.length,
     JSON.stringify({ overlay: !!pc._mapOverlay, opening: pc._openingMap, notices, label: pc._journey && pc._journey.legs[0].label }));
   pc._closeVehicleMap();
+  /* "Now": the card's own plan lands while the map's replan still waits
+     (_considerJourney sets it after its shapes). The Map click is not
+     dropped: the map opens for the plan the card shows. */
+  pc._journey = mk('NOSHAPE8');
+  const landed = Object.assign(mk('REPLANNED8'), { durationMin: 27 });
+  Lib.planJourney = () => new Promise((r) => { release = () => r(mk('REPLANNED8')); });
+  const following = pc._openJourneyMap();
+  await settleTicks();
+  pc._journey = landed;
+  release();
+  await following;
+  await settleTicks();
+  const footNow = pc._mapOverlay ? pc._mapOverlay.querySelector('.ht-map-foot').textContent : '';
+  check('a "now" plan landing during the journey map’s replan opens the map for that plan, not nothing',
+    !!pc._mapOverlay && pc._journey === landed && /27/.test(footNow) && !notices.length && pc._openingMap === '',
+    JSON.stringify({ overlay: !!pc._mapOverlay, foot: footNow, notices, label: pc._journey && pc._journey.legs[0].label }));
+  pc._closeVehicleMap();
+  Object.assign(Lib, keep);
+  pc.remove();
+}
+
+/* A "now" planner plans again (the 5-minute tick, a reconnect, Most once
+   more): the itinerary on screen stays, with its box and inline map, until
+   the new plan lands. In between the card never reads "No upcoming
+   departures." or "Loading…" over a route that needs a transfer, and a
+   journey map opening meanwhile draws the plan the card still shows, not a
+   bare line from origin to destination under "null min". */
+{
+  const keep = {
+    departures: Lib.departures, planJourney: Lib.planJourney, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty,
+    fillJourneyShapes: Lib.fillJourneyShapes, attachCoachGps: Lib.attachCoachGps, attachRealtime: Lib.attachRealtime,
+  };
+  const layer = () => ({ addTo() { return this; }, on() { return this; }, bindTooltip() { return this; } });
+  const L = {
+    map: () => ({
+      setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {},
+    }),
+    tileLayer: () => layer(),
+    polyline: () => layer(),
+    marker: () => layer(),
+    divIcon: (o) => o,
+    latLngBounds: (pts) => ({ pts }),
+  };
+  const mkJ = (label, min) => ({
+    durationMin: min, transfers: 1, walkMin: 3, waitMin: 4,
+    legs: [
+      { walk: false, label, color: '009EE3', minutes: 20, from: 'A', to: 'X', depTs: Math.floor(Date.now() / 1000) + 600 },
+      { walk: false, label: `${label}B`, color: 'AA0000', minutes: 30, from: 'X', to: 'B' },
+    ],
+  });
+  let fill = { p: Promise.resolve([]) };
+  let plan = { p: Promise.resolve(mkJ('PLANONE', 41)) };
+  let plans = 0;
+  Lib.departures = async () => [];
+  Lib.fillTransitousIfEmpty = () => fill.p;
+  Lib.planJourney = () => { plans += 1; return plan.p; };
+  Lib.fillJourneyShapes = async () => {};
+  Lib.attachCoachGps = async (_h, rows) => rows || [];
+  Lib.attachRealtime = async () => null;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._loadDests = async () => {};
+  pc._ensureLeaflet = async () => L;
+  pc.hass = { states: {}, language: 'en', services: {} };
+  document.body.appendChild(pc);
+  pc.setConfig({
+    language: 'en', stopId: 'BKK_F00001', stopName: 'A', stopLat: 47.5, stopLon: 19.0,
+    destKey: 'b', destName: 'B', destStopId: 'BKK_F00002', destLat: 47.6, destLon: 19.1,
+  });
+  await settleTicks(10);
+  const boxOf = () => pc._journeyHost && pc._journeyHost.firstChild;
+  const state = () => ({
+    box: (pc._journeyHost ? pc._journeyHost.textContent : '').replace(/\s+/g, ' ').trim().slice(0, 48),
+    body: pc._elBody ? pc._elBody.textContent.trim().slice(0, 40) : '',
+  });
+  const box0 = boxOf();
+  const loaded = state();
+
+  /* The tick, five minutes on: the run clears the plan after departures()
+     and plans again only at its end. */
+  fill = deferred();
+  plan = deferred();
+  pc._loadedAt = Date.now() - 6 * 60 * 1000;
+  pc._tickPaint();
+  await settleTicks();
+  const inRun = Object.assign(state(), { same: boxOf() === box0 });
+  fill.resolve([]);
+  await settleTicks();
+  const planning = Object.assign(state(), { same: boxOf() === box0, loading: pc._journeyLoading, plans });
+  plan.resolve(mkJ('PLANTWO', 43));
+  await settleTicks();
+  const landed = state();
+  check('a "now" replan on the tick keeps the itinerary on screen until the new plan lands',
+    /PLANONE/.test(loaded.box) && !loaded.body
+      && inRun.same && /PLANONE/.test(inRun.box) && !inRun.body
+      && planning.same && planning.loading && planning.plans === 2 && /PLANONE/.test(planning.box) && !planning.body
+      && /PLANTWO/.test(landed.box) && !/PLANONE/.test(landed.box) && !landed.body,
+    JSON.stringify({ loaded, inRun, planning, landed }));
+
+  /* Map clicked while its shapes still load, then the card plans again for
+     the same pair: the map opens on the plan the box shows. */
+  const foot = () => (pc._mapOverlay ? pc._mapOverlay.querySelector('.ht-map-foot').textContent : '');
+  const openDuring = async (replan) => {
+    const shown = pc._journey;
+    const shapes = deferred();
+    Lib.fillJourneyShapes = (j) => (j === shown ? shapes.p : Promise.resolve());
+    fill = { p: Promise.resolve([]) };
+    plan = deferred();
+    const opening = pc._openJourneyMap();
+    await settleTicks();
+    replan();
+    await settleTicks();
+    shapes.resolve();
+    await Promise.race([opening, settleTicks(20)]);
+    await settleTicks();
+    const seen = { overlay: !!pc._mapOverlay, foot: foot(), box: state().box };
+    pc._closeVehicleMap();
+    return seen;
+  };
+  const onReload = await openDuring(() => pc._reloadSafe());
+  plan.resolve(mkJ('PLANTHREE', 45));
+  await settleTicks();
+  check('a journey map opening while "now" plans again draws the plan on screen, not a bare line under "null min"',
+    onReload.overlay && /43 min/.test(onReload.foot) && !/null/.test(onReload.foot) && /PLANTWO/.test(onReload.box)
+      && /PLANTHREE/.test(state().box),
+    JSON.stringify({ onReload, after: state() }));
+  const onMost = await openDuring(() => pc._setWhen('now'));
+  plan.resolve(mkJ('PLANFOUR', 47));
+  await settleTicks();
+  check('Most pressed again while the journey map opens keeps the plan on screen and the map draws it',
+    onMost.overlay && /45 min/.test(onMost.foot) && !/null/.test(onMost.foot) && /PLANTHREE/.test(onMost.box)
+      && /PLANFOUR/.test(state().box),
+    JSON.stringify({ onMost, after: state() }));
+  /* The new plan finds no route while the map still waits: there is no plan
+     to draw, so no map opens and its button does not take the focus later. */
+  {
+    const shown = pc._journey;
+    const shapes = deferred();
+    Lib.fillJourneyShapes = (j) => (j === shown ? shapes.p : Promise.resolve());
+    fill = { p: Promise.resolve([]) };
+    plan = { p: Promise.resolve(null) };
+    const opening = pc._openJourneyMap();
+    await settleTicks();
+    pc._reloadSafe();
+    await settleTicks();
+    shapes.resolve();
+    await Promise.race([opening, settleTicks(20)]);
+    await settleTicks();
+    check('a "now" replan finding no route while the journey map opens opens no map of nothing',
+      !pc._mapOverlay && !document.querySelector('.ht-map-overlay') && pc._openingMap === '' && pc._mapReturnFocus === null
+        && pc._journey === null,
+      JSON.stringify({ overlay: !!pc._mapOverlay, foot: foot(), opening: pc._openingMap, journey: !!pc._journey }));
+    pc._closeVehicleMap();
+  }
   Object.assign(Lib, keep);
   pc.remove();
 }
@@ -9664,6 +11107,22 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     ['LONG_DISTANCE', 'HIGHSPEED_RAIL', 'NIGHT_RAIL', 'REGIONAL_FAST_RAIL', 'REGIONAL_RAIL', 'RAIL'].every((m) => Lib.motisLegType(m) === 'RAIL')
     && Lib.motisLegType('COACH') === 'COACH' && Lib.motisLegType('BUS') === 'BUS',
     JSON.stringify(['LONG_DISTANCE', 'HIGHSPEED_RAIL', 'NIGHT_RAIL'].map((m) => Lib.motisLegType(m))));
+  /* A D-boat, the Sikló and the Libegő are not buses: their Transitous rows
+     keep their own icon and match the FUTÁR row of the same boat or car. */
+  {
+    const nonRoad = ['FERRY', 'FUNICULAR', 'AERIAL_LIFT', 'CABLE_CAR'].map((m) => Lib.motisLegType(m));
+    const stRows = Lib.rowsFromMotisStopTimes({ stopTimes: [
+      { place: { name: 'Petőfi tér', departure: '2026-10-30T06:00:00Z' }, mode: 'FERRY', displayName: 'D11', tripId: 't-d11' },
+      { place: { name: 'Clark Ádám tér', departure: '2026-10-30T06:05:00Z' }, mode: 'FUNICULAR', displayName: 'Sikló', tripId: 't-sik' },
+    ] });
+    const futarFerry = { vehicle: 'bus', rawType: 'FERRY', label: 'D11' };
+    check('MOTIS ferry, funicular and aerial lift legs are not buses',
+      JSON.stringify(nonRoad) === JSON.stringify(['FERRY', 'FUNICULAR', 'AERIAL_LIFT', 'AERIAL_LIFT'])
+      && stRows[0].rawType === 'FERRY' && stRows[0].vehicle === 'ferry'
+      && stRows[1].rawType === 'FUNICULAR' && stRows[1].vehicle === 'funicular'
+      && Lib.sameVehicleBucket(futarFerry, stRows[0]),
+      JSON.stringify({ nonRoad, st: stRows.map((r) => [r.rawType, r.vehicle]) }));
+  }
   const planNow = Math.round(Date.parse('2026-10-30T06:00:00Z') / 1000);
   const mavRows = Lib.rowsFromMotis(realPlan, { name: 'Székesfehérvár' }, 'mav', 600, { now: planNow });
   const byLabel = (rows, re) => rows.find((r) => re.test(r.label));

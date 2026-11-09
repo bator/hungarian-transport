@@ -367,7 +367,18 @@ Object.assign(BkkLib, {
     if (m.indexOf('SUBWAY') >= 0 || m.indexOf('METRO') >= 0) return 'SUBWAY';
     if (m.indexOf('TROLLEY') >= 0) return 'TROLLEYBUS';
     if (m === 'COACH') return 'COACH';
+    /* The D-boats, the Sikló and the Libegő: not buses, as their GTFS rows
+       are not (gtfsRouteKind). CABLE_CAR is an aerial lift, as vehicleBucket
+       reads it. */
+    if (m === 'FERRY') return 'FERRY';
+    if (m === 'FUNICULAR') return 'FUNICULAR';
+    if (m === 'AERIAL_LIFT' || m === 'CABLE_CAR') return 'AERIAL_LIFT';
     return 'BUS';
+  },
+  /* Row vehicle for a motisLegType: the non-road kinds named as on GTFS rows. */
+  motisVehicle(rawType, tripRaw) {
+    const own = { FERRY: 'ferry', FUNICULAR: 'funicular', AERIAL_LIFT: 'aerial' }[rawType];
+    return own || BkkLib.vehicleKind({ type: rawType, id: tripRaw });
   },
   motisMatchesMode(leg, mode) {
     if (mode === 'all' || mode === 'helyi') return true;
@@ -425,7 +436,7 @@ Object.assign(BkkLib, {
         label,
         color: '#' + color,
         text: '#' + text,
-        vehicle: BkkLib.vehicleKind({ type: rawType, id: tripRaw }),
+        vehicle: BkkLib.motisVehicle(rawType, tripRaw),
         rawType,
         dep,
         sched: dep,
@@ -603,7 +614,7 @@ Object.assign(BkkLib, {
         tripId: tripRaw ? ('motis:' + tripRaw) : '',
         motisTripId: tripRaw,
         label,
-        vehicle: BkkLib.vehicleKind({ type: rawType, id: tripRaw }),
+        vehicle: BkkLib.motisVehicle(rawType, tripRaw),
         rawType,
         dep: startMs ? Math.round(startMs / 1000) : 0,
         sched: startMs ? Math.round(startMs / 1000) : 0,

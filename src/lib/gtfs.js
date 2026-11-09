@@ -223,13 +223,22 @@ Object.assign(BkkLib, {
   },
   /* A MÁV card's departures: ELVIRA's board of the boarding station, the
      trains its destination's arrival board also lists. The rest of the board
-     goes elsewhere. A train with only a number shows its kind, like FUTÁR's rows. */
+     goes elsewhere. A train with only a number shows its kind, like FUTÁR's
+     rows: ELVIRA's S (sebesvonat) as SV, since a bare S on these cards is
+     FUTÁR's személyvonat (applyRailBadge). Each train is headed by its own
+     terminus, not by the card's destination it was asked with. */
   mavBoardRows(rows) {
     return (Array.isArray(rows) ? rows : [])
       .filter((row) => row && row.destHit && departureStillDue(row.dep))
-      .map((row) => (
-        row.railKind && /^\d+$/.test(String(row.label || '')) ? Object.assign({}, row, { label: row.railKind }) : row
-      ));
+      .map((row) => {
+        const out = Object.assign({}, row);
+        if (row.railKind && /^\d+$/.test(String(row.label || ''))) {
+          out.label = row.railKind === 'S' ? 'SV' : row.railKind;
+        }
+        const end = String(row.end || '').trim();
+        if (end) out.head = end;
+        return out;
+      });
   },
   async mavRouteForRow(row, boardName, alightName) {
     try {
@@ -263,7 +272,14 @@ Object.assign(BkkLib, {
       throw codedError('errIndexFetch');
     }
     if (!got.bytes) throw codedError(httpKey, got.status);
-    const text = await BkkLib._indexText(got.bytes);
+    let text;
+    try {
+      text = await BkkLib._indexText(got.bytes);
+    } catch (_e) {
+      /* Corrupt or truncated gzip: as unreadable as an HTML page, and as
+         lasting. */
+      throw codedError('errIndexParse');
+    }
     if (text == null) throw codedError(gunzipKey);
     let idx;
     try {
@@ -717,7 +733,7 @@ Object.assign(BkkLib, {
     const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs || 20000) : null;
     try {
       const res = await fetch(url, { signal: ctrl ? ctrl.signal : undefined });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
       const buf = await res.arrayBuffer();
       const u8 = new Uint8Array(buf);
       if (u8.length >= 2 && u8[0] === 0x1f && u8[1] === 0x8b) {
@@ -730,6 +746,22 @@ Object.assign(BkkLib, {
       if (timer) clearTimeout(timer);
     }
   },
+  /* A shapes folder that answers 404 belongs to an index that was replaced
+     (a HACS update swaps the whole folder): the index is loaded again, so
+     the next poll's rows name the new folder instead of the dead one until
+     midnight. At most once per retry period, should the new index name a
+     missing folder too. */
+  _idxReloadAt: new Map(),
+  _reloadIndexOf(abs) {
+    const last = BkkLib._idxReloadAt.get(abs);
+    if (last && Date.now() - last < BkkLib._idxFailRetryMs) return;
+    BkkLib._idxReloadAt.delete(abs);
+    BkkLib._idxReloadAt.set(abs, Date.now());
+    while (BkkLib._idxReloadAt.size > 8) BkkLib._idxReloadAt.delete(BkkLib._idxReloadAt.keys().next().value);
+    Array.from(BkkLib._idx.keys()).forEach((k) => {
+      if (BkkLib._absoluteUrl(k) === abs) BkkLib._idx.delete(k);
+    });
+  },
   /* One trip's shapes.txt polyline. Shard id % n holds it at id / n; the
      folder name carries a content hash, so the browser cache can keep it. */
   async gtfsShape(ref) {
@@ -740,6 +772,7 @@ Object.assign(BkkLib, {
     if (!p) {
       p = BkkLib._fetchJsonGz(url).catch((err) => {
         BkkLib._shapeShards.delete(url);
+        if (err && err.status === 404) BkkLib._reloadIndexOf(ref.base);
         throw err;
       });
       BkkLib._shapeShards.set(url, p);
@@ -1064,7 +1097,28 @@ Object.assign(BkkLib, {
       && !BkkLib.numberedRailBadge(row)
       && (BkkLib.suburbanLineLabel(row && row.label)
         || (!BkkLib.genericRailLabel(row && row.label) && String((row && row.label) || '').trim()));
-    const add = (row, skipUnmatched) => {
+    /* The kind a row's train is: ELVIRA's railKind, FUTÁR's label. FUTÁR's
+       bare S is a személyvonat and ELVIRA's S a sebesvonat, so S, Sz, SV
+       and Gy are one kind here; a number for a label is no kind at all. */
+    const railKindOf = (row) => {
+      const elvira = /^elvira:/i.test(String((row && row.tripId) || ''));
+      const k = String((elvira && row.railKind) || (row && row.label) || '').trim().toUpperCase().normalize('NFC');
+      if (!k || /^\d+$/.test(k)) return '';
+      return /^(S|SZ|SV|GY)$/.test(k) ? 'S' : k;
+    };
+    const terminusOf = (row) => String((/^elvira:/i.test(String(row.tripId || '')) ? row.end : row.head) || '').trim();
+    /* An ELVIRA train the card would add stands for a host row with no
+       number to pair by (an ad-hoc FUTÁR trip) only when both leave in the
+       same minute, of the same kind, for the same terminus. */
+    const sameTrain = (p, row) => BkkLib.isTrainRow(p) && minuteOf(p) === minuteOf(row)
+      && !!railKindOf(p) && railKindOf(p) === railKindOf(row)
+      && !!terminusOf(p) && BkkLib.nameEq(terminusOf(p), terminusOf(row))
+      && !otherTrain(p, row);
+    /* skipUnmatched: an overlay-only row, dropped when nothing pairs it.
+       asNew: the row added in its place when nothing does; it pairs as
+       strictly as an overlay-only row, plus sameTrain. */
+    const add = (row, skipUnmatched, asNew) => {
+      const strict = skipUnmatched || !!asNew;
       if (!row || !departureStillDue(row.dep || row.sched)) return;
       const n = BkkLib.rowTrainNumber(row);
       const min = minuteOf(row);
@@ -1094,7 +1148,7 @@ Object.assign(BkkLib, {
          train number on one side did not parse. Suburban G43/Z30 stay out.
          overlayOnly must not use this: GEMENC at the same minute would steal
          a FUTÁR IC and copy booking. Spec is trainNumber (+ minute). */
-      if (!skipUnmatched && BkkLib.isTrainRow(row) && min) {
+      if (!strict && BkkLib.isTrainRow(row) && min) {
         const namedIc = (r) => BkkLib.isTrainRow(r)
           && !BkkLib.suburbanLineLabel(r && r.label)
           && !BkkLib.genericRailLabel(r && r.label)
@@ -1118,13 +1172,21 @@ Object.assign(BkkLib, {
          minute would copy booking onto the other FUTÁR train. Spec is
          trainNumber (byNum) plus branded/numbered pairing above. */
       const tk = timeOf(row);
-      if (!skipUnmatched && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
+      if (!strict && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
         overlay(out[byTime.get(tk)], row);
         return;
       }
       if (skipUnmatched) return;
+      if (asNew && BkkLib.isTrainRow(row) && min) {
+        const same = out.findIndex((p) => sameTrain(p, row));
+        if (same >= 0) {
+          overlay(out[same], row);
+          registerNumber(n, same);
+          return;
+        }
+      }
       const idx = out.length;
-      out.push(row);
+      out.push(asNew || row);
       byTime.set(tk, idx);
       registerNumber(n, idx);
       registerNumber(looseNumber(row), idx, byLoose);
@@ -1132,8 +1194,16 @@ Object.assign(BkkLib, {
     const overlayOnly = !!(opts && opts.overlayOnly);
     const hosts = overlayOnly ? (gtfs || []) : (otp || []);
     const extra = overlayOnly ? (otp || []) : (gtfs || []);
+    /* overlayOnly with addUnmatched: an extra row it maps to a row of its
+       own (an ELVIRA train the destination's board confirms) pairs by
+       number like any overlay row, or as the same train (sameTrain), and is
+       added, as that row, when no host has it. */
+    const addUnmatched = overlayOnly && opts && typeof opts.addUnmatched === 'function' ? opts.addUnmatched : null;
     hosts.forEach((row) => add(row, false));
-    extra.forEach((row) => add(row, overlayOnly));
+    extra.forEach((row) => {
+      const own = addUnmatched ? addUnmatched(row) : null;
+      add(row, overlayOnly && !own, own);
+    });
     out.sort((a, b) => (a.dep || 0) - (b.dep || 0));
     const cap = Number(limit);
     return out.slice(0, (Number.isFinite(cap) && cap > 0) ? cap : 12);

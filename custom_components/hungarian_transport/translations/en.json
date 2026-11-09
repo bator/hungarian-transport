@@ -30,7 +30,7 @@
   "services": {
     "elvira_between": {
       "name": "Get MÁV departures",
-      "description": "Fetch MÁV timetable and mandatory seat reservation information between two stations. When MÁV ELVIRA cannot be reached, the response has no departures and an error: elvira_unavailable (MÁV is down) or elvira_rate_limited (too many requests from this Home Assistant; the next refresh tries again).",
+      "description": "Fetch MÁV timetable and mandatory seat reservation information between two stations. When MÁV ELVIRA cannot be reached, the response has no departures and an error: elvira_unavailable (MÁV is down) or elvira_rate_limited (too many requests from this Home Assistant; the next refresh tries again). When a destination arrival board did not arrive, the departures still come with dest_error (elvira_unavailable or elvira_rate_limited): their destHit cannot be trusted then.",
       "fields": {
         "origin_code": {
           "name": "Origin station code",
@@ -46,7 +46,11 @@
         },
         "dest_name": {
           "name": "Destination name",
-          "description": "Optional display name for the destination."
+          "description": "Optional display name for the destination (at most 100 characters)."
+        },
+        "at": {
+          "name": "Start time",
+          "description": "Optional start of the window as Unix time in seconds (within a day back and eight days ahead); departures from then, or from now if that is later."
         }
       }
     },

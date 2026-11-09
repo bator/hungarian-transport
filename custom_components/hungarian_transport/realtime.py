@@ -47,7 +47,10 @@ DEFAULT_INTERVAL = 60
 MIN_INTERVAL = 30
 # A feed that failed is not asked again for this long.
 FAIL_BACKOFF = 60
-# The MÁV and GYSEV static feeds (train numbers) change weekly.
+# The MÁV and GYSEV static feeds (train numbers) change weekly. A refresh
+# that fails keeps the copy from before: its trip ids stay valid for the
+# whole timetable period, and they only name trips for the live feeds,
+# which are never kept past a failure.
 STATIC_INTERVAL = 12 * 3600
 STATIC_FAIL_BACKOFF = 15 * 60
 FETCH_TIMEOUT = aiohttp.ClientTimeout(total=20)
@@ -79,11 +82,17 @@ MAX_FEED_AGE = 15 * 60
 # Service request limits.
 MAX_TRIPS = 40
 MAX_STOPS = 120
+# Trip id patterns whose route a source remembers (see _learn_routes).
+MAX_ROUTE_KEYS = 20000
 
 FEED_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 # OTP-exported city feeds (mvkzrt, VBUSZ, debrecen) carry the trip's start
 # time in its id: 10842_1943_081900_AZN starts at 08:19.
 _START_IN_TRIP_ID = re.compile(r"^[^_]+_[^_]+_(\d{2})(\d{2})(\d{2})(?:_|$)")
+# The part before the start time is the trip's pattern (10842_1943): every
+# trip of a pattern has the same route_id (VBUSZ, mvkzrt, debrecen checked
+# 2026-11-09, no pattern on two routes).
+_PATTERN_IN_TRIP_ID = re.compile(r"^([^_]+_[^_]+)_\d{6}(?:_|$)")
 _DIGITS = re.compile(r"\d+")
 
 TaskFactory = Callable[[Coroutine[Any, Any, Any]], "asyncio.Future[Any]"]
@@ -190,6 +199,8 @@ class TripUpdate:
     relationship: int
     delay: int | None
     stops: list[StopUpdate]
+    # route_id is one _fill_routes remembered for its pattern, not its own.
+    route_learned: bool = False
 
 
 @dataclass(slots=True)
@@ -533,6 +544,8 @@ class RealtimeHub:
         self._task_factory: TaskFactory = task_factory or asyncio.ensure_future
         self._feeds = feeds
         self._entries: dict[str, _Entry] = {}
+        # Per vehicle positions URL: trip id pattern -> route (_learn_routes).
+        self._routes: dict[str, dict[str, str]] = {}
         self._inflight: dict[str, asyncio.Future] = {}
         self._tokens = float(FETCH_BURST)
         self._tokens_at = _monotonic()
@@ -570,16 +583,21 @@ class RealtimeHub:
             self._refused_logged = now
         raise RealtimeRateLimited
 
-    async def _download(self, url: str, entry: _Entry, cap: int) -> bytes | None:
-        """The body, or None for 304 Not Modified."""
+    async def _download(self, url: str, entry: _Entry, cap: int) -> tuple[bytes | None, str, str]:
+        """(body, ETag, Last-Modified), body None for 304 Not Modified. The
+        validators are the caller's to keep once the body parses."""
         headers = {"User-Agent": USER_AGENT, "Accept": "application/x-protobuf, application/octet-stream, */*"}
-        if entry.ok and entry.etag:
+        # Conditional only while there is a copy the validators belong to:
+        # they are stored with the copy (_refresh), so a body that does not
+        # parse leaves those of the copy kept.
+        held = entry.data is not None
+        if held and entry.etag:
             headers["If-None-Match"] = entry.etag
-        if entry.ok and entry.last_modified:
+        if held and entry.last_modified:
             headers["If-Modified-Since"] = entry.last_modified
         async with self._session.get(url, headers=headers, timeout=FETCH_TIMEOUT, allow_redirects=False) as resp:
-            if resp.status == 304 and entry.ok:
-                return None
+            if resp.status == 304 and held:
+                return None, entry.etag, entry.last_modified
             if resp.status != 200:
                 raise ValueError(f"HTTP {resp.status}")
             length = getattr(resp, "content_length", None)
@@ -592,9 +610,11 @@ class RealtimeHub:
                 if total > cap:
                     raise ValueError(f"over {cap} bytes")
                 chunks.append(chunk)
-            entry.etag = resp.headers.get("ETag", "") or ""
-            entry.last_modified = resp.headers.get("Last-Modified", "") or ""
-            return b"".join(chunks)
+            return (
+                b"".join(chunks),
+                resp.headers.get("ETag", "") or "",
+                resp.headers.get("Last-Modified", "") or "",
+            )
 
     async def _cached(
         self,
@@ -604,40 +624,49 @@ class RealtimeHub:
         cap: int,
         parse: Callable[[bytes], Any],
         what: str,
+        keep: bool = False,
     ) -> Any:
         """The parsed body of url, at most one fetch per interval; None while
-        it fails (one warning when it starts failing, one line when it
-        answers again)."""
+        it fails, or with keep the last good copy (one warning when it starts
+        failing, one line when it answers again)."""
         entry = self._entries.setdefault(url, _Entry())
         age = _monotonic() - entry.at
         if age < (interval if entry.ok else backoff):
-            return entry.data if entry.ok else None
+            return entry.data if entry.ok or keep else None
         task = self._inflight.get(url)
         if task is None:
-            task = self._task_factory(self._refresh(url, entry, cap, parse, what))
+            task = self._task_factory(self._refresh(url, entry, cap, parse, what, keep))
             self._inflight[url] = task
             task.add_done_callback(lambda _t: self._inflight.pop(url, None))
         return await asyncio.shield(task)
 
-    async def _refresh(self, url: str, entry: _Entry, cap: int, parse: Callable[[bytes], Any], what: str) -> Any:
+    async def _refresh(
+        self, url: str, entry: _Entry, cap: int, parse: Callable[[bytes], Any], what: str, keep: bool = False
+    ) -> Any:
         try:
             self._take_token()
         except RealtimeRateLimited:
-            return entry.data if entry.ok else None
+            return entry.data if entry.ok or keep else None
         try:
-            body = await self._download(url, entry, cap)
+            body, etag, last_modified = await self._download(url, entry, cap)
             data = entry.data if body is None else await self._run(parse, body)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError, zipfile.BadZipFile) as err:
             entry.at = _monotonic()
             entry.ok = False
-            entry.data = None
+            if not keep:
+                entry.data = None
             if not entry.down:
                 entry.down = True
-                _LOGGER.warning("%s %s unavailable: %s", what, url, err or type(err).__name__)
-            return None
+                _LOGGER.warning(
+                    "%s %s unavailable: %s%s", what, url, err or type(err).__name__,
+                    "; keeping the copy from before" if entry.data is not None else "",
+                )
+            return entry.data
         entry.at = _monotonic()
         entry.ok = True
         entry.data = data
+        entry.etag = etag
+        entry.last_modified = last_modified
         if entry.down:
             entry.down = False
             _LOGGER.info("%s %s answers again", what, url)
@@ -660,6 +689,7 @@ class RealtimeHub:
             MAX_STATIC_BYTES,
             lambda body: train_numbers_from_static(body, src.prefix),
             "Realtime static feed",
+            keep=True,
         )
 
     async def query(self, feed_id: str, trips: list[dict[str, Any]], now: float | None = None) -> dict[str, Any]:
@@ -688,6 +718,11 @@ class RealtimeHub:
             self._feed(src.vehicle_positions, src.prefix, cfg.interval),
             self._trains(src) if "train" in cfg.match else _none(),
         )
+        if "route_start" in cfg.match and src.vehicle_positions:
+            known = self._routes.setdefault(src.vehicle_positions, {})
+            # A stalled positions feed still names the routes right.
+            _learn_routes(known, vp)
+            _fill_routes(known, tu)
         return src, _fresh(tu, now), _fresh(vp, now), trains
 
 
@@ -704,6 +739,49 @@ def _fresh(feed: Feed | None, now: float) -> Feed | None:
 
 # --------------------------------------------------------------------------
 # Matching a card's trip to the feed's.
+
+
+def _route_key(trip_id: str) -> str:
+    """The pattern part of an OTP city trip id, else the whole id."""
+    m = _PATTERN_IN_TRIP_ID.match(trip_id)
+    return m.group(1) if m else trip_id
+
+
+def _route_of(known: dict[str, str], trip_id: str) -> str:
+    return known.get(_route_key(trip_id), "")
+
+
+def _learn_routes(known: dict[str, str], vp: Feed | None) -> None:
+    """Remember each vehicle's route by its trip id's pattern. The OTP city
+    feeds name the route only in the vehicle's descriptor, so a trip update
+    takes it from here while the positions feed is down, or for a trip
+    whose own vehicle was never seen. A pattern seen on two routes is ""
+    from then on: neither."""
+    if vp is None:
+        return
+    if len(known) > MAX_ROUTE_KEYS:
+        known.clear()
+    for tid, v in vp.vehicles.items():
+        if not v.route_id:
+            continue
+        key = _route_key(tid)
+        known[key] = v.route_id if known.get(key, v.route_id) == v.route_id else ""
+
+
+def _fill_routes(known: dict[str, str], tu: Feed | None) -> None:
+    """The remembered route of each trip update that names none.
+
+    Filled in on the cached copy: a pattern that becomes "" later keeps
+    its route on the trips filled before until the trip updates are fetched
+    again, at most trip_updates_interval on, and a vehicle's own route wins
+    in _find_trip anyway. Not worth keeping a second, unfilled copy for:
+    no pattern was on two routes when this was written (_PATTERN_IN_TRIP_ID)."""
+    if tu is None or not known:
+        return
+    for tid, t in tu.trip_updates.items():
+        if not t.route_id:
+            t.route_id = _route_of(known, tid)
+            t.route_learned = bool(t.route_id)
 
 
 def _start_minutes(trip_id: str) -> int | None:
@@ -909,7 +987,12 @@ def _answer(cfg: FeedConfig, loaded, req: dict[str, Any], now: float) -> dict[st
             delay, when, board_rel = _at_stop(tu, stops, int(src), False, repeat)
         if dst is not None:
             dest_delay, dest_when, dest_rel = _at_stop(tu, stops, int(dst), True, repeat)
-        if delay is None and when is None and board_rel is None:
+        # A trip matched on a learned route has no vehicle naming it here
+        # (the positions feed is down, stale, or without it). Its updates
+        # then say nothing of where it is: mvkzrt keeps the stops already
+        # served at delay 0, so the first one is an on-time it never said.
+        unplaced = tu.route_learned and vehicle is None and not (vp and vp.route_id)
+        if delay is None and when is None and board_rel is None and not unplaced:
             # No update at or before the boarding stop the card knows (a
             # feed with other stop ids, or a sparse one): the delay where
             # the vehicle is now, marked approximate. Not when the feed

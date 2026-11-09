@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_city_index as bci  # noqa: E402
 import gtfs_compact  # noqa: E402
 import update_volan_index as uvi  # noqa: E402
-from gtfs_compact import operator_trips  # noqa: E402
+from gtfs_compact import SHAPES_GRACE_S, SHAPES_RETIRED, operator_trips, prune_shapes  # noqa: E402
 from update_volan_index import index_feed, index_schema, persist_index, restore_hacs_indexes  # noqa: E402
 
 # The real network and builder, before Fake.install() replaces them.
@@ -174,8 +174,16 @@ with tempfile.TemporaryDirectory() as tmp:
     check("restore brings the durable index together with its shapes folder",
           restored == ["volan-index.json.gz"] and (www / "volan-shapes-new" / "00.json.gz").is_file(),
           repr(restored))
-    check("the release shapes folder nobody points at is removed",
-          not (www / "volan-shapes-release").exists(), repr(sorted(p.name for p in www.iterdir())))
+    # A dashboard that loaded the release index before the restore still
+    # asks for its shards until midnight.
+    check("the release shapes folder nobody points at stays served for a day",
+          (www / "volan-shapes-release" / "00.json.gz").is_file()
+          and (www / "volan-shapes-release" / SHAPES_RETIRED).is_file(),
+          repr(sorted(p.name for p in www.iterdir())))
+    prune_shapes(www / "volan-index.json.gz", "volan-shapes-new", now=time.time() + SHAPES_GRACE_S + 1)
+    check("the release shapes folder is removed once the day is over",
+          not (www / "volan-shapes-release").exists() and (www / "volan-shapes-new" / "00.json.gz").is_file(),
+          repr(sorted(p.name for p in www.iterdir())))
 
 
 

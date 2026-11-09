@@ -1,5 +1,39 @@
 import { BkkLib } from '../lib/core.js';
 
+/* ELVIRA station codes found by name, kept in the browser between page
+   loads: a code for a month, "no such station" for six hours. */
+const ELVIRA_CODES_KEY = 'hungarian_transport_elvira_codes';
+const ELVIRA_HIT_MS = 30 * 86400000;
+const ELVIRA_MISS_MS = 6 * 3600000;
+const ELVIRA_CODES_KEEP = 200;
+
+const elviraFresh = (hit, now) => !!hit && typeof hit.ts === 'number'
+  && typeof hit.code === 'string' && /^(\d{9})?$/.test(hit.code)
+  && now - hit.ts < (hit.code ? ELVIRA_HIT_MS : ELVIRA_MISS_MS);
+
+const elviraStored = () => {
+  try {
+    const all = JSON.parse(globalThis.localStorage.getItem(ELVIRA_CODES_KEY) || '{}');
+    return all && typeof all === 'object' ? all : {};
+  } catch (_e) {
+    return {};
+  }
+};
+
+const elviraStore = (nameKey, entry) => {
+  try {
+    const now = Date.now();
+    const all = elviraStored();
+    all[nameKey] = entry;
+    const out = {};
+    Object.keys(all).filter((k) => elviraFresh(all[k], now))
+      .sort((a, b) => all[b].ts - all[a].ts)
+      .slice(0, ELVIRA_CODES_KEEP)
+      .forEach((k) => { out[k] = all[k]; });
+    globalThis.localStorage.setItem(ELVIRA_CODES_KEY, JSON.stringify(out));
+  } catch (_e) { /* private window or storage off: the page's memo still holds it */ }
+};
+
 Object.assign(BkkLib, {
   esc(s) {
     return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => (
@@ -543,9 +577,16 @@ Object.assign(BkkLib, {
     return BkkLib.isRailHubName(dest.name);
   },
   /* A stop whose id carries no ELVIRA code is looked up by name, which is a
-     few FUTÁR searches: on every poll without this memo. A found code is
-     kept for the page, a miss for ten minutes. */
+     few FUTÁR searches: on every poll, and for every card, without this
+     memo. The search goes by the name alone, so the memo does too: a stop
+     area and its poles, or the cards loading together, share one search,
+     and the browser's copy spares the next page load another. A search in
+     flight is shared only by cards with the same FUTÁR access: a card with
+     its own (revoked) key must not fail the search of one that goes
+     through the integration, nor the other way round. Resolves to '' for a
+     stop with no code, null when the search failed (asked again next time). */
   _elviraCodes: new Map(),
+  _elviraSearches: new Map(),
   async elviraResolveCode(apiKey, id, name) {
     const direct = BkkLib.elviraStationCode(id);
     if (direct) return direct;
@@ -553,23 +594,43 @@ Object.assign(BkkLib, {
     if (mapped) return mapped;
     const n = String(name || '').trim();
     if (!BkkLib.hasFutar(apiKey) || !n) return '';
-    const memoKey = String(id || '') + '|' + n;
-    const hit = BkkLib._elviraCodes.get(memoKey);
-    if (hit && (hit.code || Date.now() - hit.ts < 600000)) return hit.code;
-    const code = await this._searchElviraCode(apiKey, n);
-    /* A search that failed (a FUTÁR timeout) is no answer: only a real
-       "no such station" is kept for ten minutes. */
-    if (code === null) return '';
-    BkkLib._elviraCodes.set(memoKey, { code, ts: Date.now() });
-    return code;
+    /* FUTÁR's search ignores case. */
+    const memoKey = n.normalize('NFC').toLowerCase().replace(/\s+/g, ' ');
+    const now = Date.now();
+    let hit = BkkLib._elviraCodes.get(memoKey);
+    if (!elviraFresh(hit, now)) {
+      hit = elviraStored()[memoKey];
+      if (elviraFresh(hit, now)) BkkLib._elviraCodes.set(memoKey, hit);
+    }
+    if (elviraFresh(hit, now)) return hit.code;
+    const via = String(apiKey || '').trim();
+    const searchKey = (via ? 'key:' + via : 'integration') + '|' + memoKey;
+    let search = BkkLib._elviraSearches.get(searchKey);
+    if (!search) {
+      search = this._searchElviraCode(apiKey, n).then((code) => {
+        /* A search that failed (a FUTÁR timeout) is no answer: only a real
+           "no such station" is kept. */
+        if (code !== null) {
+          const entry = { code, ts: Date.now() };
+          BkkLib._elviraCodes.set(memoKey, entry);
+          elviraStore(memoKey, entry);
+        }
+        return code;
+      }).finally(() => {
+        BkkLib._elviraSearches.delete(searchKey);
+      });
+      BkkLib._elviraSearches.set(searchKey, search);
+    }
+    return search;
   },
   /* The station code by name, '' when FUTÁR has none, null when a search
      failed and nothing was found: that one is asked again next time. */
   async _searchElviraCode(apiKey, n) {
     /* searchStops asks the name's aliases (its station key too) itself. */
+    const how = {};
     let hits;
     try {
-      hits = (await this.searchStops(apiKey, n, 'mav')) || [];
+      hits = (await this.searchStops(apiKey, n, 'mav', null, how)) || [];
     } catch (_e) {
       return null;
     }
@@ -577,7 +638,9 @@ Object.assign(BkkLib, {
       const c = BkkLib.elviraStationCode(hits[j].id);
       if (c) return c;
     }
-    return '';
+    /* A failed alias query may be the one that names the station: no
+       "no such station" for hours on its word. */
+    return how.partial ? null : '';
   },
   sameStop(id, originId) {
     if (!id || !originId) return false;

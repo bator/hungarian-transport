@@ -181,7 +181,7 @@ Ezeket a **Fejlesztői eszközök → Műveletek** alatt próbálhatod ki.
 
 | Művelet | Mit csinál |
 | --- | --- |
-| `hungarian_transport.elvira_between` | **MÁV indulások lekérése** két állomás között, vágánnyal és helyjegyjelzéssel. Két kilencjegyű MÁV állomáskódot és egy előretekintést vár percben (15–480). |
+| `hungarian_transport.elvira_between` | **MÁV indulások lekérése** két állomás között, vágánnyal és helyjegyjelzéssel. Két kilencjegyű MÁV állomáskódot és egy előretekintést vár percben (15–480), igény szerint egy későbbi kezdőidőtől (`at`, Unix-idő) a mostani helyett. |
 | `hungarian_transport.futar` | **BKK FUTÁR lekérdezés** az integráció kulcsával. A kártyák használják; csak akkor létezik, ha van beállított kulcs. |
 | `hungarian_transport.rebuild_mav_index` | **MÁV útvonalindex újraépítése** a `/config/hungarian-transport/mav-gtfs.zip` fájlból, minden járat ellenőrzésével. |
 | `hungarian_transport.realtime` | **Élő késések és járműpozíciók**: egy üzemeltető legfeljebb 40 járatának késése a megadott megállóknál és a jármű helyzete, a GTFS-Realtime adatából. A kártyák használják; lásd: [Live delays and positions](../realtime.md). |
@@ -293,7 +293,10 @@ Kattints a **Mentés** gombra. A kártya a dashboardon így néz ki:
 
 Minden vonat szerepel, amely mindkét állomáson megáll: az elővárosiak (Z30,
 G43), az InterCityk és a tovább közlekedő nevesített vonatok (TÓPART,
-BAKONY) is.
+BAKONY) is. Minden sorban a vonat saját végállomása áll. Ha a MÁV egy
+vonatot csak a számával ad meg, a kártya a fajtáját mutatja: **SV**
+sebesvonat, **Gy** gyorsvonat, **Sz** személyvonat. Ha a MÁV egy frissítésre
+nem válaszol, a még el nem ment vonatok maradnak, fölöttük az ok.
 
 ### 4.5 BKK kártya
 
@@ -641,7 +644,9 @@ Az összes attribútum leírása:
 | *Nincs közvetlen járat erre a célra. Elérhető célok: …* | A célba nem megy közvetlen járat a forrásból. | Válassz a felsorolt célok közül, vagy használd a tervezőt. |
 | *A menetrend-index nem töltődött le (időtúllépés vagy hálózati hiba).* | A böngésző nem tudta letölteni a Volán vagy a helyi menetrendet. | Töltsd újra az oldalt. Ha marad, telepítsd újra a kiadást (HACS → Újraletöltés), és indítsd újra a Home Assistantot. |
 | *A menetrend-index újabb (vN), mint amit ez a kártya ismer. Frissítsd a kártyát.* | A böngésző még a régi kártyát futtatja. | Töltsd újra az oldalt üres gyorsítótárral, vagy frissítsd az integrációt. |
-| Nincs vágány, **H** vagy **OB** jel a MÁV sorokon | A MÁV ELVIRA nem válaszolt. | Nincs teendő: addig a vonatok a Transitousból jönnek, a jelek maguktól visszajönnek. |
+| *A MÁV ELVIRA most nem válaszolt (…). A kártya a következő frissítésnél újra próbálja.* | A MÁV szervere lassú volt vagy nem érhető el, az integráció visszatartott egy kérést, vagy a Home Assistant éppen újraindult. | Nincs teendő: a még el nem ment vonatok a kártyán maradnak, a sor a következő jó válasszal eltűnik. |
+| *Győr: nincs MÁV állomáskód. Válaszd ki az állomást a kártyaszerkesztőben.* | Egy YAML-ben írt kártya azonosító nélkül nevez meg egy állomást, és BKK kulcs nélkül a kártya nem tudja kikeresni. | Válaszd ki az állomást a kártyaszerkesztőben, vagy add meg az azonosítóját (`destStopId: BKK_005…`). |
+| Nincs vágány, **H** vagy **OB** jel a MÁV sorokon | A MÁV ELVIRA nem válaszolt, és a kártyán még nem volt saját vonat. | Nincs teendő: addig a vonatok a Transitousból jönnek, a jelek maguktól visszajönnek. |
 | Egy vonat térképe egyenes vonal az állomások között | Ehhez a vonathoz nincs útvonaladat. | Add hozzá a MÁV menetrendet ([3.4](#34-vonatútvonalak-a-térképen-opcionális)). |
 | „Custom element doesn't exist” frissítés után | A böngésző az új kártya előtt töltötte be az oldalt. | Frissítés után indítsd újra a Home Assistantot, aztán töltsd újra az oldalt. |
 | Hiányzik egy buszjárat, amiről tudsz | A hivatalos menetrendben nincs ilyen közvetlen járat (például a székesfehérvári buszok a Népligetről indulnak, nem Kelenföldről). | A kártya csak a hivatalos menetrendet mutatja. Átszállásos útért próbáld a tervezőt. |

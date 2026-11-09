@@ -63,6 +63,8 @@ export class BKKHopCard extends HTMLElement {
     this._mapGeo = null;
     this._hiddenAt = 0;
     this._pollRun = null;
+    /* Until then a MÁV card with a key reads FUTÁR: the entry was not loaded. */
+    this._mavViaFutarUntil = 0;
   }
 
   static async getConfigElement() {
@@ -171,6 +173,12 @@ export class BKKHopCard extends HTMLElement {
        (key added in the options flow): reload once it shows up. */
     this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
     if (this._viaIntegration && !viaBefore && this._painted && !this._reloadActive && this.isConnected) this._reloadSafe();
+    /* So can elvira_between, a MÁV card's own source (a key-less one said
+       "no API key" without it): reload once that shows up too. */
+    const elviraBefore = this._viaElvira;
+    this._viaElvira = BkkLib.hasElvira(hass);
+    if (this._viaElvira && !elviraBefore && this._departMode() === 'mav'
+        && this._painted && !this._reloadActive && this.isConnected) this._reloadSafe();
     if (first && this._rawRows && this._rawRows.length) {
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       const cfg = this._config || {};
@@ -1660,10 +1668,11 @@ ${this._stopPinCss()}
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     this._pollRun = null;
     const mode = this._departMode();
-    /* A MÁV card reads MÁV's own board (ELVIRA); FUTÁR only without the integration. */
-    const mavBoard = mode === 'mav' && BkkLib.hasElvira(this._hass);
+    /* A MÁV card reads MÁV's own board (ELVIRA); FUTÁR only without the
+       integration, or while its entry is not loaded and the card has a key. */
     const ready = cfg.stopId && cfg.destKey
-      && (this._hasFutar() || mavBoard || mode === 'volan' || mode === 'helyi' || mode === 'all');
+      && (this._hasFutar() || (mode === 'mav' && BkkLib.hasElvira(this._hass))
+        || mode === 'volan' || mode === 'helyi' || mode === 'all');
     if (!ready) {
       this._rows = [];
       this._loading = false;
@@ -1734,10 +1743,32 @@ ${this._stopPinCss()}
       this._loading = false;
       this._paint();
     };
-    const run = async () => {
+    /* A MÁV board ELVIRA did not refresh (an outage, the integration's rate
+       limit, a failed or timed-out call, a destination board that did not
+       arrive) keeps the trains still due from the last one, beside those
+       this answer did list, like a failed FUTÁR poll keeps its rows. */
+    const keepMavRows = (fresh) => {
+      if (this._rowsFilled) return fresh;
+      const have = new Set(fresh.map((row) => String(row.tripId || '')));
+      const kept = (this._rawRows || [])
+        .filter((row) => row && /^elvira:/.test(String(row.tripId || '')) && !have.has(String(row.tripId))
+          && departureStillDue(row.dep))
+        .map((row) => Object.assign({}, row));
+      return fresh.concat(kept).sort((a, b) => (a.dep || 0) - (b.dep || 0));
+    };
+    /* knownBoard: the ELVIRA answer this poll already has (the not_loaded
+       switch to FUTÁR below), not asked for a second time. */
+    const run = async (knownBoard) => {
       if (gen !== this._gen) return;
       /* This card's own index URLs, for every lookup of this run (J-2): never a module-wide setting. */
       const lib = BkkLib.withIndexes(cfg);
+      /* A key-less MÁV card got here with elvira_between listed (_reload).
+         It drops out of hass.services for a moment while HA restarts: that
+         poll stays on the MÁV board, as one ELVIRA did not answer, not on
+         FUTÁR the card has no key for ("no API key" over its trains). */
+      const elviraGone = mode === 'mav' && !BkkLib.hasElvira(this._hass) && !this._hasFutar();
+      const mavBoard = mode === 'mav' && (BkkLib.hasElvira(this._hass) || elviraGone)
+        && !(Date.now() < this._mavViaFutarUntil && this._hasFutar());
       try {
         if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
           this._rows = [];
@@ -1752,8 +1783,10 @@ ${this._stopPinCss()}
           return;
         }
         const wantElvira = (mode === 'mav' || mode === 'all') && BkkLib.hasElvira(this._hass);
-        const elviraP = wantElvira
-          ? lib.elviraBetween(
+        const elviraP = knownBoard ? Promise.resolve(knownBoard) : elviraGone
+          ? Promise.resolve({ rows: [], error: 'not_loaded', detail: '' })
+          : wantElvira
+          ? lib.elviraBoard(
             this._hass,
             cfg.stopId,
             cfg.destStopId || '',
@@ -1761,24 +1794,34 @@ ${this._stopPinCss()}
             clampMinutesAfter(cfg.minutesAfter),
             cfg.destName || '',
             { apiKey: this._apiKey(), originName: cfg.stopName || '' },
-          ).catch(() => [])
-          : Promise.resolve([]);
+          ).catch((err) => ({ rows: [], error: 'elvira_call_failed', detail: BkkLib.elviraErrText(err) }))
+          : Promise.resolve({ rows: [], error: '', detail: '' });
         const cap = maxDepartureRows(cfg.minutesAfter);
         let earlyRows = [];
         let futarFull = null;
         let elviraRows = [];
+        /* Why this poll's MÁV board is not ELVIRA's whole answer: the banner. */
+        let mavErr = null;
+        /* Beside FUTÁR's rows ELVIRA only overlays, except a train the
+           destination's board confirms that FUTÁR lacks (IC TÓPART at :37
+           from Székesfehérvár): that one is listed as on a MÁV card. */
+        const elviraMerge = { overlayOnly: true, addUnmatched: (row) => BkkLib.mavBoardRows([row])[0] || null };
+        const paintBoard = (list) => {
+          paintRows(list);
+          if (mavErr && gen === this._gen) this._showErr(mavErr);
+        };
         const publish = () => {
           if (gen !== this._gen) return;
           /* An empty board goes on to the Transitous fill below, not to
              "no departures" first. */
           if (mavBoard) {
-            if (elviraRows.length) paintRows(elviraRows);
+            if (elviraRows.length) paintBoard(elviraRows);
             return;
           }
           let list = futarFull
             ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
             : earlyRows.slice();
-          list = BkkLib.mergeVolanRows(list, elviraRows, cap, { overlayOnly: true });
+          list = BkkLib.mergeVolanRows(list, elviraRows, cap, elviraMerge);
           /* Through trips (the destination mid-route) come only from the
              through-check: an empty list before it answers is not "no
              departures". The first load keeps its spinner, a poll its rows. */
@@ -1843,8 +1886,24 @@ ${this._stopPinCss()}
         this._journeyLoading = false;
         earlyRows = rows || [];
         if (mavBoard) {
-          elviraRows = BkkLib.mavBoardRows(await elviraP).slice(0, cap);
+          const board = await elviraP;
           if (gen !== this._gen) return;
+          if (board.error === 'not_loaded' && this._hasFutar()) {
+            /* The entry is unloaded (disabled, reloading) and its services
+               stay listed: a card with a key reads FUTÁR until it is back. */
+            this._mavViaFutarUntil = Date.now() + BkkLib._elviraRetryMs;
+            return run(board);
+          }
+          elviraRows = BkkLib.mavBoardRows(board.rows);
+          if (board.error) {
+            /* Only a stop FUTÁR has no station for asks for the editor; a
+               station search that failed is FUTÁR's outage, for one poll. */
+            if (board.error === 'no_code') mavErr = codedError('errElviraNoCode', board.detail);
+            else if (board.error === 'code_search_failed') mavErr = codedError('errFutarDown', board.detail);
+            else mavErr = codedError('errElviraDown', board.detail || board.error);
+            elviraRows = keepMavRows(elviraRows);
+          }
+          elviraRows = elviraRows.slice(0, cap);
         }
         publish();
         /* The open map moves once a poll, at the end, on rows that have
@@ -1882,35 +1941,43 @@ ${this._stopPinCss()}
           throughResolve();
         }
         if (!mavBoard) {
-          elviraRows = await elviraP;
+          const board = await elviraP;
           if (gen !== this._gen) return;
+          elviraRows = board.rows;
+          /* ELVIRA answers again: the MÁV card goes back to its board. */
+          if (!board.error && mode === 'mav') this._mavViaFutarUntil = 0;
           publish();
         }
         await throughWait;
         if (gen !== this._gen) return;
         let merged;
+        /* The board's own rows, without the trains ELVIRA added: one train
+           the destination confirms is no reason to skip the fill, which
+           brings the buses and trams beside it (the planner's mode all). */
+        let hosts;
         if (mavBoard) {
           merged = elviraRows;
+          hosts = merged;
         } else {
-          merged = futarFull
+          hosts = futarFull
             ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
             : earlyRows.slice();
-          merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
+          merged = BkkLib.mergeVolanRows(hosts, elviraRows, cap, elviraMerge);
         }
         /* A city board is filled from Transitous inside departures() already:
            a second fill here only repeated the same lookups on every poll. */
-        if (!merged.length && mode !== 'helyi') {
-          merged = await BkkLib.fillTransitousIfEmpty(merged, origin, dest, {
+        if (!hosts.length && mode !== 'helyi') {
+          const filled = await BkkLib.fillTransitousIfEmpty(hosts, origin, dest, {
             mode: this._departMode(),
             minutesAfter: cfg.minutesAfter,
           });
           if (gen !== this._gen) return;
-          merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
+          merged = BkkLib.mergeVolanRows(filled, elviraRows, cap, elviraMerge);
           earlyRows = merged;
-          paintRows(merged);
+          paintBoard(merged);
           /* Transitous rows, not this board's own: a failed poll replaces
              them instead of keeping them as if FUTÁR had sent them. */
-          if (merged.length) this._rowsFilled = true;
+          if (filled.length) this._rowsFilled = true;
         }
         if (typeof this._considerJourney === 'function') this._considerJourney();
         await gpsTravel;

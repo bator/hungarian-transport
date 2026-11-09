@@ -4,6 +4,32 @@
 var BkkLib = {};
 
 // src/lib/names.js
+var ELVIRA_CODES_KEY = "hungarian_transport_elvira_codes";
+var ELVIRA_HIT_MS = 30 * 864e5;
+var ELVIRA_MISS_MS = 6 * 36e5;
+var ELVIRA_CODES_KEEP = 200;
+var elviraFresh = (hit, now) => !!hit && typeof hit.ts === "number" && typeof hit.code === "string" && /^(\d{9})?$/.test(hit.code) && now - hit.ts < (hit.code ? ELVIRA_HIT_MS : ELVIRA_MISS_MS);
+var elviraStored = () => {
+  try {
+    const all = JSON.parse(globalThis.localStorage.getItem(ELVIRA_CODES_KEY) || "{}");
+    return all && typeof all === "object" ? all : {};
+  } catch (_e) {
+    return {};
+  }
+};
+var elviraStore = (nameKey, entry) => {
+  try {
+    const now = Date.now();
+    const all = elviraStored();
+    all[nameKey] = entry;
+    const out = {};
+    Object.keys(all).filter((k) => elviraFresh(all[k], now)).sort((a, b) => all[b].ts - all[a].ts).slice(0, ELVIRA_CODES_KEEP).forEach((k) => {
+      out[k] = all[k];
+    });
+    globalThis.localStorage.setItem(ELVIRA_CODES_KEY, JSON.stringify(out));
+  } catch (_e) {
+  }
+};
 Object.assign(BkkLib, {
   esc(s) {
     return String(s === null || s === void 0 ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -517,9 +543,16 @@ Object.assign(BkkLib, {
     return BkkLib.isRailHubName(dest.name);
   },
   /* A stop whose id carries no ELVIRA code is looked up by name, which is a
-     few FUTÁR searches: on every poll without this memo. A found code is
-     kept for the page, a miss for ten minutes. */
+     few FUTÁR searches: on every poll, and for every card, without this
+     memo. The search goes by the name alone, so the memo does too: a stop
+     area and its poles, or the cards loading together, share one search,
+     and the browser's copy spares the next page load another. A search in
+     flight is shared only by cards with the same FUTÁR access: a card with
+     its own (revoked) key must not fail the search of one that goes
+     through the integration, nor the other way round. Resolves to '' for a
+     stop with no code, null when the search failed (asked again next time). */
   _elviraCodes: /* @__PURE__ */ new Map(),
+  _elviraSearches: /* @__PURE__ */ new Map(),
   async elviraResolveCode(apiKey, id, name) {
     const direct = BkkLib.elviraStationCode(id);
     if (direct) return direct;
@@ -527,20 +560,39 @@ Object.assign(BkkLib, {
     if (mapped) return mapped;
     const n = String(name || "").trim();
     if (!BkkLib.hasFutar(apiKey) || !n) return "";
-    const memoKey = String(id || "") + "|" + n;
-    const hit = BkkLib._elviraCodes.get(memoKey);
-    if (hit && (hit.code || Date.now() - hit.ts < 6e5)) return hit.code;
-    const code = await this._searchElviraCode(apiKey, n);
-    if (code === null) return "";
-    BkkLib._elviraCodes.set(memoKey, { code, ts: Date.now() });
-    return code;
+    const memoKey = n.normalize("NFC").toLowerCase().replace(/\s+/g, " ");
+    const now = Date.now();
+    let hit = BkkLib._elviraCodes.get(memoKey);
+    if (!elviraFresh(hit, now)) {
+      hit = elviraStored()[memoKey];
+      if (elviraFresh(hit, now)) BkkLib._elviraCodes.set(memoKey, hit);
+    }
+    if (elviraFresh(hit, now)) return hit.code;
+    const via = String(apiKey || "").trim();
+    const searchKey = (via ? "key:" + via : "integration") + "|" + memoKey;
+    let search = BkkLib._elviraSearches.get(searchKey);
+    if (!search) {
+      search = this._searchElviraCode(apiKey, n).then((code) => {
+        if (code !== null) {
+          const entry = { code, ts: Date.now() };
+          BkkLib._elviraCodes.set(memoKey, entry);
+          elviraStore(memoKey, entry);
+        }
+        return code;
+      }).finally(() => {
+        BkkLib._elviraSearches.delete(searchKey);
+      });
+      BkkLib._elviraSearches.set(searchKey, search);
+    }
+    return search;
   },
   /* The station code by name, '' when FUTÁR has none, null when a search
      failed and nothing was found: that one is asked again next time. */
   async _searchElviraCode(apiKey, n) {
+    const how = {};
     let hits;
     try {
-      hits = await this.searchStops(apiKey, n, "mav") || [];
+      hits = await this.searchStops(apiKey, n, "mav", null, how) || [];
     } catch (_e) {
       return null;
     }
@@ -548,7 +600,7 @@ Object.assign(BkkLib, {
       const c = BkkLib.elviraStationCode(hits[j].id);
       if (c) return c;
     }
-    return "";
+    return how.partial ? null : "";
   },
   sameStop(id, originId) {
     if (!id || !originId) return false;
@@ -732,6 +784,10 @@ var BKK_RAIL_BADGE = {
   EC: ["2E5EA8", "FFFFFF"],
   SZ: ["5C6B7A", "FFFFFF"]
 };
+var RAIL_KIND_BADGE = {
+  SV: ["29803C", "FFFFFF"],
+  GY: ["C82227", "FFFFFF"]
+};
 var ASSET_BASE = new URL(".", import.meta.url).href;
 var VOLAN_INDEX_OVERRIDE = "";
 var CITY_INDEX_OVERRIDE = "";
@@ -891,6 +947,8 @@ var I18N = {
     errFutarRateLimited: "Átmenetileg túl sok BKK lekérdezés ment; a következő frissítés újra próbálja.",
     errFutarBadRequest: "A kérés túl hosszú, a BKK nem kapta meg.",
     errFutarDown: (why) => `A BKK FUTÁR nem érhető el (${why}). A kártya a következő frissítésnél újra próbálja.`,
+    errElviraDown: (why) => `A MÁV ELVIRA most nem válaszolt (${why}). A kártya a következő frissítésnél újra próbálja.`,
+    errElviraNoCode: (name) => `${name}: nincs MÁV állomáskód. Válaszd ki az állomást a kártyaszerkesztőben.`,
     errApiKeyProbe: "A BKK API kulcsot nem sikerült ellenőrizni.",
     errVolanHttp: (status) => `Volán menetrend HTTP ${status}`,
     errVolanGunzip: "A böngésző nem tudja kicsomagolni a Volán menetrendet.",
@@ -1101,6 +1159,8 @@ var I18N = {
     errFutarRateLimited: "Too many BKK requests for a moment; the next refresh tries again.",
     errFutarBadRequest: "The request was too long and was not sent to BKK.",
     errFutarDown: (why) => `BKK FUTÁR is unavailable (${why}). The card tries again on the next refresh.`,
+    errElviraDown: (why) => `MÁV ELVIRA did not answer (${why}). The card tries again on the next refresh.`,
+    errElviraNoCode: (name) => `${name}: no MÁV station code. Pick the station in the card editor.`,
     errApiKeyProbe: "Could not verify the BKK API key.",
     errVolanHttp: (status) => `Volán timetable HTTP ${status}`,
     errVolanGunzip: "This browser cannot decompress the Volán timetable.",
@@ -1859,7 +1919,15 @@ Object.assign(BkkLib, {
     if (m.indexOf("SUBWAY") >= 0 || m.indexOf("METRO") >= 0) return "SUBWAY";
     if (m.indexOf("TROLLEY") >= 0) return "TROLLEYBUS";
     if (m === "COACH") return "COACH";
+    if (m === "FERRY") return "FERRY";
+    if (m === "FUNICULAR") return "FUNICULAR";
+    if (m === "AERIAL_LIFT" || m === "CABLE_CAR") return "AERIAL_LIFT";
     return "BUS";
+  },
+  /* Row vehicle for a motisLegType: the non-road kinds named as on GTFS rows. */
+  motisVehicle(rawType, tripRaw) {
+    const own = { FERRY: "ferry", FUNICULAR: "funicular", AERIAL_LIFT: "aerial" }[rawType];
+    return own || BkkLib.vehicleKind({ type: rawType, id: tripRaw });
   },
   motisMatchesMode(leg, mode) {
     if (mode === "all" || mode === "helyi") return true;
@@ -1911,7 +1979,7 @@ Object.assign(BkkLib, {
         label,
         color: "#" + color,
         text: "#" + text,
-        vehicle: BkkLib.vehicleKind({ type: rawType, id: tripRaw }),
+        vehicle: BkkLib.motisVehicle(rawType, tripRaw),
         rawType,
         dep,
         sched: dep,
@@ -2084,7 +2152,7 @@ Object.assign(BkkLib, {
         tripId: tripRaw ? "motis:" + tripRaw : "",
         motisTripId: tripRaw,
         label,
-        vehicle: BkkLib.vehicleKind({ type: rawType, id: tripRaw }),
+        vehicle: BkkLib.motisVehicle(rawType, tripRaw),
         rawType,
         dep: startMs ? Math.round(startMs / 1e3) : 0,
         sched: startMs ? Math.round(startMs / 1e3) : 0,
@@ -3277,7 +3345,7 @@ Object.assign(BkkLib, {
           destCode,
           480,
           "",
-          { apiKey, originName: station.name || "" }
+          { apiKey, originName: station.name || "", at: walkEnd - 30 }
         ) : [];
         const next = (rows || []).filter((row) => row.destHit !== false && Number(row.dep) >= walkEnd - 30).sort((a, b) => a.dep - b.dep)[0];
         if (next && next.dep) {
@@ -4386,9 +4454,20 @@ Object.assign(BkkLib, {
   },
   /* A MÁV card's departures: ELVIRA's board of the boarding station, the
      trains its destination's arrival board also lists. The rest of the board
-     goes elsewhere. A train with only a number shows its kind, like FUTÁR's rows. */
+     goes elsewhere. A train with only a number shows its kind, like FUTÁR's
+     rows: ELVIRA's S (sebesvonat) as SV, since a bare S on these cards is
+     FUTÁR's személyvonat (applyRailBadge). Each train is headed by its own
+     terminus, not by the card's destination it was asked with. */
   mavBoardRows(rows) {
-    return (Array.isArray(rows) ? rows : []).filter((row) => row && row.destHit && departureStillDue(row.dep)).map((row) => row.railKind && /^\d+$/.test(String(row.label || "")) ? Object.assign({}, row, { label: row.railKind }) : row);
+    return (Array.isArray(rows) ? rows : []).filter((row) => row && row.destHit && departureStillDue(row.dep)).map((row) => {
+      const out = Object.assign({}, row);
+      if (row.railKind && /^\d+$/.test(String(row.label || ""))) {
+        out.label = row.railKind === "S" ? "SV" : row.railKind;
+      }
+      const end = String(row.end || "").trim();
+      if (end) out.head = end;
+      return out;
+    });
   },
   async mavRouteForRow(row, boardName, alightName) {
     try {
@@ -4427,7 +4506,12 @@ Object.assign(BkkLib, {
       throw codedError("errIndexFetch");
     }
     if (!got.bytes) throw codedError(httpKey, got.status);
-    const text = await BkkLib._indexText(got.bytes);
+    let text;
+    try {
+      text = await BkkLib._indexText(got.bytes);
+    } catch (_e) {
+      throw codedError("errIndexParse");
+    }
     if (text == null) throw codedError(gunzipKey);
     let idx;
     try {
@@ -4874,7 +4958,7 @@ Object.assign(BkkLib, {
     const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs || 2e4) : null;
     try {
       const res = await fetch(url, { signal: ctrl ? ctrl.signal : void 0 });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
       const buf = await res.arrayBuffer();
       const u8 = new Uint8Array(buf);
       if (u8.length >= 2 && u8[0] === 31 && u8[1] === 139) {
@@ -4887,6 +4971,22 @@ Object.assign(BkkLib, {
       if (timer) clearTimeout(timer);
     }
   },
+  /* A shapes folder that answers 404 belongs to an index that was replaced
+     (a HACS update swaps the whole folder): the index is loaded again, so
+     the next poll's rows name the new folder instead of the dead one until
+     midnight. At most once per retry period, should the new index name a
+     missing folder too. */
+  _idxReloadAt: /* @__PURE__ */ new Map(),
+  _reloadIndexOf(abs) {
+    const last = BkkLib._idxReloadAt.get(abs);
+    if (last && Date.now() - last < BkkLib._idxFailRetryMs) return;
+    BkkLib._idxReloadAt.delete(abs);
+    BkkLib._idxReloadAt.set(abs, Date.now());
+    while (BkkLib._idxReloadAt.size > 8) BkkLib._idxReloadAt.delete(BkkLib._idxReloadAt.keys().next().value);
+    Array.from(BkkLib._idx.keys()).forEach((k) => {
+      if (BkkLib._absoluteUrl(k) === abs) BkkLib._idx.delete(k);
+    });
+  },
   /* One trip's shapes.txt polyline. Shard id % n holds it at id / n; the
      folder name carries a content hash, so the browser cache can keep it. */
   async gtfsShape(ref) {
@@ -4897,6 +4997,7 @@ Object.assign(BkkLib, {
     if (!p) {
       p = BkkLib._fetchJsonGz(url).catch((err) => {
         BkkLib._shapeShards.delete(url);
+        if (err && err.status === 404) BkkLib._reloadIndexOf(ref.base);
         throw err;
       });
       BkkLib._shapeShards.set(url, p);
@@ -5188,7 +5289,16 @@ Object.assign(BkkLib, {
       return !!x.length && !!y.length && !x.some((n) => y.indexOf(n) >= 0);
     };
     const brandedHost = (row) => BkkLib.isTrainRow(row) && !BkkLib.numberedRailBadge(row) && (BkkLib.suburbanLineLabel(row && row.label) || !BkkLib.genericRailLabel(row && row.label) && String(row && row.label || "").trim());
-    const add = (row, skipUnmatched) => {
+    const railKindOf = (row) => {
+      const elvira = /^elvira:/i.test(String(row && row.tripId || ""));
+      const k = String(elvira && row.railKind || row && row.label || "").trim().toUpperCase().normalize("NFC");
+      if (!k || /^\d+$/.test(k)) return "";
+      return /^(S|SZ|SV|GY)$/.test(k) ? "S" : k;
+    };
+    const terminusOf = (row) => String((/^elvira:/i.test(String(row.tripId || "")) ? row.end : row.head) || "").trim();
+    const sameTrain = (p, row) => BkkLib.isTrainRow(p) && minuteOf(p) === minuteOf(row) && !!railKindOf(p) && railKindOf(p) === railKindOf(row) && !!terminusOf(p) && BkkLib.nameEq(terminusOf(p), terminusOf(row)) && !otherTrain(p, row);
+    const add = (row, skipUnmatched, asNew) => {
+      const strict = skipUnmatched || !!asNew;
       if (!row || !departureStillDue(row.dep || row.sched)) return;
       const n = BkkLib.rowTrainNumber(row);
       const min = minuteOf(row);
@@ -5213,7 +5323,7 @@ Object.assign(BkkLib, {
           return;
         }
       }
-      if (!skipUnmatched && BkkLib.isTrainRow(row) && min) {
+      if (!strict && BkkLib.isTrainRow(row) && min) {
         const namedIc = (r) => BkkLib.isTrainRow(r) && !BkkLib.suburbanLineLabel(r && r.label) && !BkkLib.genericRailLabel(r && r.label) && !/^\d+$/.test(String(r && r.label || "").trim());
         const genericIc = (r) => BkkLib.isTrainRow(r) && BkkLib.genericRailLabel(r && r.label);
         let pair = -1;
@@ -5231,13 +5341,21 @@ Object.assign(BkkLib, {
         }
       }
       const tk = timeOf(row);
-      if (!skipUnmatched && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
+      if (!strict && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
         overlay(out[byTime.get(tk)], row);
         return;
       }
       if (skipUnmatched) return;
+      if (asNew && BkkLib.isTrainRow(row) && min) {
+        const same = out.findIndex((p) => sameTrain(p, row));
+        if (same >= 0) {
+          overlay(out[same], row);
+          registerNumber(n, same);
+          return;
+        }
+      }
       const idx = out.length;
-      out.push(row);
+      out.push(asNew || row);
       byTime.set(tk, idx);
       registerNumber(n, idx);
       registerNumber(looseNumber(row), idx, byLoose);
@@ -5245,8 +5363,12 @@ Object.assign(BkkLib, {
     const overlayOnly = !!(opts && opts.overlayOnly);
     const hosts = overlayOnly ? gtfs || [] : otp || [];
     const extra = overlayOnly ? otp || [] : gtfs || [];
+    const addUnmatched = overlayOnly && opts && typeof opts.addUnmatched === "function" ? opts.addUnmatched : null;
     hosts.forEach((row) => add(row, false));
-    extra.forEach((row) => add(row, overlayOnly));
+    extra.forEach((row) => {
+      const own = addUnmatched ? addUnmatched(row) : null;
+      add(row, overlayOnly && !own, own);
+    });
     out.sort((a, b) => (a.dep || 0) - (b.dep || 0));
     const cap = Number(limit);
     return out.slice(0, Number.isFinite(cap) && cap > 0 ? cap : 12);
@@ -5254,6 +5376,8 @@ Object.assign(BkkLib, {
 });
 
 // src/lib/services.js
+var ELVIRA_BOARD_TIMEOUT_MS = 3e4;
+var ELVIRA_BOARD_ROUNDS = 2;
 Object.assign(BkkLib, {
   elviraRowsFromResult(res) {
     if (!res) return [];
@@ -5270,49 +5394,131 @@ Object.assign(BkkLib, {
     const domain = hass && hass.services && hass.services.hungarian_transport;
     return !!(domain && typeof domain === "object" && domain.elvira_between);
   },
-  /* After a failed call ELVIRA is left alone this long, and the outage is
-     logged once, not on every poll of every MÁV card. */
+  /* A failed call (a websocket that dropped, HA restarting) is asked again
+     on the next poll; only calls that keep failing leave ELVIRA alone this
+     long. The outage is logged once, not on every poll of every MÁV card. */
   _elviraRetryMs: 3 * 6e4,
+  _elviraFailLimit: 3,
+  _elviraFails: 0,
+  /* The limit counts failed poll rounds, not calls: every MÁV card (and the
+     planner) fails in the same moment when the websocket drops, and that is
+     one round. A card polls every 20 s at the most, so failures closer than
+     this to the last one counted are the same round. */
+  _elviraFailRoundMs: 15e3,
+  _elviraLastFailAt: 0,
   _elviraDownUntil: 0,
   _elviraWarned: false,
-  async elviraBetween(hass, originId, destId, minutesAfter, destName, opts) {
+  _elviraLastCode: "",
+  _elviraLastErr: "",
+  /* A call that never answers ends here, not with the websocket: past the
+     integration's own worst case, so only a call it no longer works on is
+     cut off. */
+  _elviraTimeoutMs: ELVIRA_BOARD_ROUNDS * ELVIRA_BOARD_TIMEOUT_MS + 1e4,
+  /* The service schema's own limit on dest_name. */
+  _elviraDestNameMax: 100,
+  /* The trains between two stations, as {rows, error, detail}. error is ''
+     for a full answer, else what went wrong: the integration's code
+     (elvira_unavailable, elvira_rate_limited), a destination board that did
+     not arrive (dest_error: the rows are there, their destHit is not sure),
+     a call that failed or timed out, not_loaded, no_code for a stop with
+     no station code, or code_search_failed for one whose FUTÁR station
+     search failed this time (detail is its name). A MÁV card tells these
+     from an empty board; elviraBetween is only the rows. */
+  async elviraBoard(hass, originId, destId, minutesAfter, destName, opts) {
     opts = opts || {};
-    if (!BkkLib.hasElvira(hass) || Date.now() < BkkLib._elviraDownUntil) return [];
+    const none = (error, detail) => ({ rows: [], error: error || "", detail: detail || "" });
+    if (!BkkLib.hasElvira(hass)) return none();
+    if (Date.now() < BkkLib._elviraDownUntil) return none(BkkLib._elviraLastCode, BkkLib._elviraLastErr);
     let origin = BkkLib.elviraStationCode(originId);
     let dest = BkkLib.elviraStationCode(destId);
     if (!origin) origin = await this.elviraResolveCode(opts.apiKey, originId, opts.originName || "");
     if (!dest) dest = await this.elviraResolveCode(opts.apiKey, destId, destName || "");
-    if (!origin || !dest || origin === dest) {
-      return [];
+    if (origin === null || dest === null) {
+      return none("code_search_failed", origin === null ? opts.originName || originId : destName || destId);
     }
+    if (!origin || !dest) {
+      return none("no_code", !origin ? opts.originName || originId : destName || destId);
+    }
+    if (origin === dest) return none();
     const serviceData = {
       origin_code: origin,
       dest_code: dest,
       minutes_after: minutesAfter || DEFAULT_MINUTES_AFTER,
-      dest_name: destName || ""
+      /* The service rejects a longer one as an invalid call. */
+      dest_name: String(destName || "").slice(0, BkkLib._elviraDestNameMax)
     };
+    const at = Math.floor(Number(opts.at));
+    if (Number.isFinite(at) && at > Math.floor(Date.now() / 1e3)) serviceData.at = at;
     const pair = `${origin}>${dest}`;
+    let res;
     try {
-      const res = await BkkLib.callServiceResponse(hass, "hungarian_transport", "elvira_between", serviceData);
-      BkkLib._elviraWarned = false;
-      if (!res) return [];
-      const payload = BkkLib.servicePayload(res);
-      if (payload && payload.error === "elvira_rate_limited") return [];
-      if (payload && payload.error) {
-        BkkLib._elviraDown(pair, `${payload.error}${payload.detail ? ` (${payload.detail})` : ""}`);
-        return [];
-      }
-      BkkLib._elviraOutages.delete(pair);
-      const rows = BkkLib.elviraRowsFromResult(res);
-      return Array.isArray(rows) ? rows : [];
+      res = await BkkLib._elviraCall(hass, serviceData);
     } catch (err) {
-      BkkLib._elviraDownUntil = Date.now() + BkkLib._elviraRetryMs;
+      const detail = BkkLib.elviraErrText(err);
+      let code = "elvira_call_failed";
+      if (err && err.translation_key === "not_loaded") code = "not_loaded";
+      else if (err && err.code === "elvira_timeout") code = "elvira_timeout";
+      if (code !== "elvira_timeout") {
+        const now = Date.now();
+        if (now - BkkLib._elviraLastFailAt >= BkkLib._elviraFailRoundMs) {
+          BkkLib._elviraFails += 1;
+          BkkLib._elviraLastFailAt = now;
+        }
+        BkkLib._elviraLastCode = code;
+        BkkLib._elviraLastErr = detail;
+        if (BkkLib._elviraFails >= BkkLib._elviraFailLimit) {
+          BkkLib._elviraDownUntil = now + BkkLib._elviraRetryMs;
+        }
+      }
       if (!BkkLib._elviraWarned) {
         BkkLib._elviraWarned = true;
-        console.warn("MÁV ELVIRA reservation data unavailable, retrying in a few minutes:", err);
+        console.warn("MÁV ELVIRA reservation data unavailable, retrying:", err);
       }
-      return [];
+      return none(code, detail);
     }
+    BkkLib._elviraFails = 0;
+    BkkLib._elviraLastFailAt = 0;
+    BkkLib._elviraWarned = false;
+    if (!res) return none();
+    const payload = BkkLib.servicePayload(res);
+    if (payload && payload.error === "elvira_rate_limited") return none(payload.error, payload.detail);
+    if (payload && payload.error) {
+      BkkLib._elviraDown(pair, `${payload.error}${payload.detail ? ` (${payload.detail})` : ""}`);
+      return none(String(payload.error), payload.detail);
+    }
+    BkkLib._elviraOutages.delete(pair);
+    const rows = BkkLib.elviraRowsFromResult(res);
+    const list = Array.isArray(rows) ? rows : [];
+    if (payload && payload.dest_error) {
+      return { rows: list, error: String(payload.dest_error), detail: `${destName || dest}: ${payload.dest_error}` };
+    }
+    return { rows: list, error: "", detail: "" };
+  },
+  async elviraBetween(hass, originId, destId, minutesAfter, destName, opts) {
+    return (await this.elviraBoard(hass, originId, destId, minutesAfter, destName, opts)).rows;
+  },
+  /* A failed call's reason, as text for the banner. home-assistant-js-
+     websocket does not reject with an Error: a call the dropped socket cut
+     off is {error: {code, message}}, one sent while it was down the bare
+     ERR_CONNECTION_LOST (3). Neither may show as "[object Object]" or "3". */
+  elviraErrText(err) {
+    const inner = err && typeof err === "object" && err.error && typeof err.error === "object" ? err.error : null;
+    const why = err && typeof err === "object" ? [err.message, inner && inner.message, err.code, inner && inner.code].find((v) => typeof v === "string" && v.trim() || Number.isFinite(v)) : err;
+    if (why == null || why === "") return "";
+    if (typeof why === "number") return why === 3 ? "Connection lost" : `websocket error ${why}`;
+    return String(why);
+  },
+  _elviraCall(hass, serviceData) {
+    let timer = null;
+    const timeout = new Promise((_resolve, reject) => {
+      timer = setTimeout(() => {
+        const err = new Error("elvira_between did not answer in time");
+        err.code = "elvira_timeout";
+        reject(err);
+      }, BkkLib._elviraTimeoutMs);
+    });
+    const call = Promise.resolve(BkkLib.callServiceResponse(hass, "hungarian_transport", "elvira_between", serviceData));
+    return Promise.race([call, timeout]).finally(() => clearTimeout(timer));
   },
   /* Cards poll every 15–45 s: warn when a station pair's ELVIRA outage
      starts, not on every poll; its next good answer ends the outage. */
@@ -5433,6 +5639,8 @@ Object.assign(BkkLib, {
 });
 
 // src/lib/departures.js
+var BOARD_CAP_ROWS = 55;
+var PATTERN_PROOF_MS = 3 * 36e5;
 Object.assign(BkkLib, {
   async addTransitousVolanStops(byId, q, motisHits) {
     const motis = motisHits || await BkkLib.searchStopsTransitous(q);
@@ -5518,6 +5726,7 @@ Object.assign(BkkLib, {
           data = await BkkLib.fetch(apiKey, "search.json", { query: queries[i] }, true);
         } catch (err) {
           if (!byId.size || i === 0 && mode !== "volan" && mode !== "all") throw err;
+          if (opts) opts.partial = true;
           break;
         }
         const stops = (((data || {}).data || {}).references || {}).stops || {};
@@ -5616,23 +5825,25 @@ Object.assign(BkkLib, {
   /* Parent stop-areas (BKK_CSF…) cap live departures at ~60 rows, which is
      only ~15 min at Keleti. Query the child poles that actually serve the
      selected routes so minutesAfter can fill. */
-  async loadRoutePattern(apiKey, cache, routeId) {
+  async loadRoutePattern(apiKey, cache, routeId, background, fresh) {
     const hit = BkkLib._cached(cache, routeId);
-    if (hit && hit.variants) return hit;
+    if (hit && hit.variants && (!fresh || BkkLib.patternFresh(hit))) return hit;
     if (BkkLib._inflight[routeId]) return BkkLib._inflight[routeId];
     const p = (async () => {
       try {
         const data = await BkkLib.fetch(apiKey, "route-details.json", {
           routeId,
           includeReferences: "true"
-        }, true);
+        }, !background);
         const entry = (data.data || {}).entry || {};
         const packed = {
           variants: (entry.variants || []).map((v) => ({
             name: v.name,
+            headsign: v.headsign || "",
             ids: v.stopIds || []
           })),
-          stops: ((data.data || {}).references || {}).stops || {}
+          stops: ((data.data || {}).references || {}).stops || {},
+          at: Date.now()
         };
         return BkkLib._store(cache, routeId, packed);
       } finally {
@@ -5661,6 +5872,41 @@ Object.assign(BkkLib, {
       });
     });
     return Array.from(poles);
+  },
+  patternFresh(pat, nowMs) {
+    if (!pat || !pat.variants || typeof pat.at !== "number") return false;
+    const now = nowMs === void 0 ? Date.now() : nowMs;
+    return now - pat.at < PATTERN_PROOF_MS && new Date(pat.at).toDateString() === new Date(now).toDateString();
+  },
+  /* An ad-hoc FUTÁR trip: the id body is a millisecond timestamp
+     (BKK_1792439004037), not a scheduled trip of the route's pattern. */
+  isAdHocTripId(tripId) {
+    return /^BKK_\d{10,}$/.test(String(tripId || ""));
+  },
+  /* A route none of whose variants through the origin reaches the
+     destination answers for its trips with no trip-details. Only a fresh
+     pattern says so, and only of a trip it can tie to one of those
+     variants: the headsign ends it and the trip leaves from a pole on it.
+     A headsign alone is not that tie (a detour or an added trip keeps the
+     usual terminus), so an ad-hoc trip, a trip from a pole no variant
+     calls at, or one whose pole the board does not give is asked. */
+  patternMissesDest(pat, origin, destKey, head, tripId, pole) {
+    if (!destKey || !head || !pole || !BkkLib.patternFresh(pat)) return false;
+    if (BkkLib.isAdHocTripId(tripId)) return false;
+    const stops = pat.stops || {};
+    const isDest = BkkLib.nameMatcher(destKey);
+    const isHead = BkkLib.nameMatcher(head);
+    let known = false;
+    for (const v of pat.variants) {
+      const ids = v.ids || [];
+      const oidx = ids.findIndex((id) => BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), origin));
+      if (oidx < 0) continue;
+      if (ids.slice(oidx + 1).some((id) => isDest((stops[id] || {}).name))) return false;
+      const last = (stops[ids[ids.length - 1]] || {}).name;
+      if (!(isHead(v.headsign) || isHead(v.name) || isHead(last))) continue;
+      if (ids.slice(oidx).some((id) => BkkLib.sameStop(id, pole))) known = true;
+    }
+    return known;
   },
   /* Poles of the loaded route patterns that belong to the stop area parentId. */
   childPolesOf(cache, routeIds, parentId) {
@@ -5713,12 +5959,16 @@ Object.assign(BkkLib, {
     return p;
   },
   /* A dashboard left open for a day would otherwise accumulate every trip it
-     ever looked at, each with its full stop list. Oldest entries go first. */
+     ever looked at, each with its full stop list. Trips go first, oldest
+     first: they come and go with the board, while a route's pattern and a
+     stop area's child poles are read again on every poll. */
   cachePut(cache, key, value) {
     if (!cache) return value;
     const keys = Object.keys(cache);
     if (keys.length >= 400) {
-      keys.slice(0, keys.length - 399).forEach((k) => {
+      const isTrip = (k) => k.indexOf("trip:") === 0;
+      const order = keys.filter(isTrip).concat(keys.filter((k) => !isTrip(k)));
+      order.slice(0, keys.length - 399).forEach((k) => {
         delete cache[k];
       });
     }
@@ -5963,6 +6213,8 @@ Object.assign(BkkLib, {
     const queryFutar = !opts.skipFutar && (mode === "bkk" || mode === "mav" || /^BKK_/i.test(String(stopId || "")));
     const futarTask = queryFutar ? (async () => {
       let candidates = [];
+      const routeOfTrip = /* @__PURE__ */ new Map();
+      const poleOfTrip = /* @__PURE__ */ new Map();
       try {
         let poles = [];
         const poleRoutes = Array.from(selected);
@@ -6006,8 +6258,9 @@ Object.assign(BkkLib, {
             spanMin: Math.max(best.spanMin, cur.spanMin)
           };
         }, { count: 0, spanMin: 0 });
-        const capped = usedParentOnly && !!payloads[0] && (span.count >= 60 || span.spanMin + 2 < horizon);
-        if (capped) {
+        const discover = usedParentOnly && !!payloads[0];
+        const capped = discover && span.count >= BOARD_CAP_ROWS && span.spanMin + 2 < horizon;
+        if (discover) {
           const discovered = [];
           payloads.forEach((data) => {
             const refs = (data && data.data || {}).references || {};
@@ -6033,6 +6286,13 @@ Object.assign(BkkLib, {
             } catch (_e) {
               extra = [];
             }
+          }
+          if (!capped) {
+            const own = BkkLib.childPolesOf(cache, discovered, stopId);
+            const listed = BkkLib._cached(cache, "children:" + stopId);
+            if (Array.isArray(listed)) listed.forEach((id) => own.add(id));
+            extra = extra.filter((id) => !own.has(id));
+            near = [];
           }
           const fresh = Array.from(new Set(near.concat(extra))).filter((id) => poles.indexOf(id) < 0);
           if (fresh.length) {
@@ -6060,6 +6320,8 @@ Object.assign(BkkLib, {
             if (dep && dep > latest + 60) return;
             if (dep && !departureStillDue(dep, now)) return;
             seenTrip.add(st.tripId);
+            if (rid) routeOfTrip.set(st.tripId, rid);
+            if (st.stopId || entry.stopId) poleOfTrip.set(st.tripId, st.stopId || entry.stopId);
             const fallbackColor = mode === "volan" ? "F9AB13" : "4477aa";
             const fallbackText = mode === "volan" ? "000000" : "ffffff";
             const veh = st.vehicle || {};
@@ -6103,11 +6365,22 @@ Object.assign(BkkLib, {
       let sure = [];
       let maybe = [];
       const headHitsDest = (row) => !!(dest && (BkkLib.nameEq(row.head, dest.name) || BkkLib.nameEq(row.head, dest.key)));
+      const ruledOut = (row) => {
+        const rid = routeOfTrip.get(row.tripId);
+        return !!rid && BkkLib.patternMissesDest(
+          BkkLib._cached(cache, rid),
+          origin,
+          destKey,
+          row.head,
+          row.tripId,
+          poleOfTrip.get(row.tripId)
+        );
+      };
       if (destKey && candidates.length) {
         candidates.forEach((row) => {
           const known = headHitsDest(row) || BkkLib.knownTripGoesTo(cache, row.tripId, origin, destKey);
           if (known === true) sure.push(row);
-          else if (known === void 0) maybe.push(row);
+          else if (known === void 0 && !ruledOut(row)) maybe.push(row);
         });
         sure = sure.slice(0, maxRows);
       } else {
@@ -6121,10 +6394,17 @@ Object.assign(BkkLib, {
       if (destKey && pool.length && typeof opts.armThroughCheck === "function") {
         opts.armThroughCheck(() => {
           const pending = (async () => {
+            const unloaded = /* @__PURE__ */ new Set();
+            pool.forEach((row) => {
+              const rid = routeOfTrip.get(row.tripId);
+              if (rid && !BkkLib.patternFresh(BkkLib._cached(cache, rid))) unloaded.add(rid);
+            });
+            await Promise.all(Array.from(unloaded).map((rid) => BkkLib.loadRoutePattern(apiKey, cache, rid, true, true).catch(() => null)));
+            const open = pool.filter((row) => !ruledOut(row));
             const picked = sure.slice();
             let found = 0;
-            for (let i = 0; i < pool.length && (sureFull ? found < maxRows : picked.length < maxRows); i += 16) {
-              const chunk = pool.slice(i, i + 16);
+            for (let i = 0; i < open.length && (sureFull ? found < maxRows : picked.length < maxRows); i += 16) {
+              const chunk = open.slice(i, i + 16);
               const flags = await Promise.all(chunk.map((row) => BkkLib.tripGoesTo(apiKey, cache, row.tripId, origin, destKey)));
               flags.forEach((ok, j) => {
                 if (!ok) return;
@@ -6555,6 +6835,9 @@ Object.assign(BkkLib, {
     BkkLib._applyEmmaKeyed(rows, BkkLib._hassEmmaKeyed(hass, pool));
     return rows;
   },
+  /* FUTÁR labels a személyvonat S (1.4.5): it shows as Sz. ELVIRA's kinds
+     come as SV (sebesvonat) and Gy (gyorsvonat, mavBoardRows), in MÁV's
+     own colours for them, the ones its GTFS gives. */
   applyRailBadge(row) {
     if (!row) return row;
     let key = String(row.label || "").trim().toUpperCase().normalize("NFC");
@@ -6562,7 +6845,7 @@ Object.assign(BkkLib, {
       row.label = "Sz";
       key = "SZ";
     }
-    let badge = BKK_RAIL_BADGE[key];
+    let badge = BKK_RAIL_BADGE[key] || (BkkLib.isTrainRow(row) ? RAIL_KIND_BADGE[key] : null);
     if (!badge && BkkLib.isTrainRow(row) && key && !BkkLib.suburbanLineLabel(key) && !BkkLib.genericRailLabel(key) && !/^\d+$/.test(key)) {
       badge = BKK_RAIL_BADGE.IC;
     }
@@ -8202,6 +8485,7 @@ var BKKHopCard = class extends HTMLElement {
     this._mapGeo = null;
     this._hiddenAt = 0;
     this._pollRun = null;
+    this._mavViaFutarUntil = 0;
   }
   static async getConfigElement() {
     if (!customElements.get(BKK_HOP_EDITOR)) await customElements.whenDefined(BKK_HOP_EDITOR);
@@ -8292,6 +8576,9 @@ var BKKHopCard = class extends HTMLElement {
     if (this._lang() !== langBefore) this._langChanged();
     this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
     if (this._viaIntegration && !viaBefore && this._painted && !this._reloadActive && this.isConnected) this._reloadSafe();
+    const elviraBefore = this._viaElvira;
+    this._viaElvira = BkkLib.hasElvira(hass);
+    if (this._viaElvira && !elviraBefore && this._departMode() === "mav" && this._painted && !this._reloadActive && this.isConnected) this._reloadSafe();
     if (first && this._rawRows && this._rawRows.length) {
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       const cfg = this._config || {};
@@ -9742,8 +10029,7 @@ ${this._stopPinCss()}
     }
     this._pollRun = null;
     const mode = this._departMode();
-    const mavBoard = mode === "mav" && BkkLib.hasElvira(this._hass);
-    const ready = cfg.stopId && cfg.destKey && (this._hasFutar() || mavBoard || mode === "volan" || mode === "helyi" || mode === "all");
+    const ready = cfg.stopId && cfg.destKey && (this._hasFutar() || mode === "mav" && BkkLib.hasElvira(this._hass) || mode === "volan" || mode === "helyi" || mode === "all");
     if (!ready) {
       this._rows = [];
       this._loading = false;
@@ -9801,9 +10087,17 @@ ${this._stopPinCss()}
       this._loading = false;
       this._paint();
     };
-    const run = async () => {
+    const keepMavRows = (fresh) => {
+      if (this._rowsFilled) return fresh;
+      const have = new Set(fresh.map((row) => String(row.tripId || "")));
+      const kept = (this._rawRows || []).filter((row) => row && /^elvira:/.test(String(row.tripId || "")) && !have.has(String(row.tripId)) && departureStillDue(row.dep)).map((row) => Object.assign({}, row));
+      return fresh.concat(kept).sort((a, b) => (a.dep || 0) - (b.dep || 0));
+    };
+    const run = async (knownBoard) => {
       if (gen !== this._gen) return;
       const lib = BkkLib.withIndexes(cfg);
+      const elviraGone = mode === "mav" && !BkkLib.hasElvira(this._hass) && !this._hasFutar();
+      const mavBoard = mode === "mav" && (BkkLib.hasElvira(this._hass) || elviraGone) && !(Date.now() < this._mavViaFutarUntil && this._hasFutar());
       try {
         if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
           this._rows = [];
@@ -9818,7 +10112,7 @@ ${this._stopPinCss()}
           return;
         }
         const wantElvira = (mode === "mav" || mode === "all") && BkkLib.hasElvira(this._hass);
-        const elviraP = wantElvira ? lib.elviraBetween(
+        const elviraP = knownBoard ? Promise.resolve(knownBoard) : elviraGone ? Promise.resolve({ rows: [], error: "not_loaded", detail: "" }) : wantElvira ? lib.elviraBoard(
           this._hass,
           cfg.stopId,
           cfg.destStopId || "",
@@ -9826,19 +10120,25 @@ ${this._stopPinCss()}
           clampMinutesAfter(cfg.minutesAfter),
           cfg.destName || "",
           { apiKey: this._apiKey(), originName: cfg.stopName || "" }
-        ).catch(() => []) : Promise.resolve([]);
+        ).catch((err) => ({ rows: [], error: "elvira_call_failed", detail: BkkLib.elviraErrText(err) })) : Promise.resolve({ rows: [], error: "", detail: "" });
         const cap = maxDepartureRows(cfg.minutesAfter);
         let earlyRows = [];
         let futarFull = null;
         let elviraRows = [];
+        let mavErr = null;
+        const elviraMerge = { overlayOnly: true, addUnmatched: (row) => BkkLib.mavBoardRows([row])[0] || null };
+        const paintBoard = (list) => {
+          paintRows(list);
+          if (mavErr && gen === this._gen) this._showErr(mavErr);
+        };
         const publish = () => {
           if (gen !== this._gen) return;
           if (mavBoard) {
-            if (elviraRows.length) paintRows(elviraRows);
+            if (elviraRows.length) paintBoard(elviraRows);
             return;
           }
           let list = futarFull ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap) : earlyRows.slice();
-          list = BkkLib.mergeVolanRows(list, elviraRows, cap, { overlayOnly: true });
+          list = BkkLib.mergeVolanRows(list, elviraRows, cap, elviraMerge);
           if (!list.length && startThrough && !futarFull) {
             if (this._err) {
               this._err = "";
@@ -9901,8 +10201,20 @@ ${this._stopPinCss()}
         this._journeyLoading = false;
         earlyRows = rows || [];
         if (mavBoard) {
-          elviraRows = BkkLib.mavBoardRows(await elviraP).slice(0, cap);
+          const board = await elviraP;
           if (gen !== this._gen) return;
+          if (board.error === "not_loaded" && this._hasFutar()) {
+            this._mavViaFutarUntil = Date.now() + BkkLib._elviraRetryMs;
+            return run(board);
+          }
+          elviraRows = BkkLib.mavBoardRows(board.rows);
+          if (board.error) {
+            if (board.error === "no_code") mavErr = codedError("errElviraNoCode", board.detail);
+            else if (board.error === "code_search_failed") mavErr = codedError("errFutarDown", board.detail);
+            else mavErr = codedError("errElviraDown", board.detail || board.error);
+            elviraRows = keepMavRows(elviraRows);
+          }
+          elviraRows = elviraRows.slice(0, cap);
         }
         publish();
         const firstRows = this._rawRows;
@@ -9938,29 +10250,33 @@ ${this._stopPinCss()}
           throughResolve();
         }
         if (!mavBoard) {
-          elviraRows = await elviraP;
+          const board = await elviraP;
           if (gen !== this._gen) return;
+          elviraRows = board.rows;
+          if (!board.error && mode === "mav") this._mavViaFutarUntil = 0;
           publish();
         }
         await throughWait;
         if (gen !== this._gen) return;
         let merged;
+        let hosts;
         if (mavBoard) {
           merged = elviraRows;
+          hosts = merged;
         } else {
-          merged = futarFull ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap) : earlyRows.slice();
-          merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
+          hosts = futarFull ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap) : earlyRows.slice();
+          merged = BkkLib.mergeVolanRows(hosts, elviraRows, cap, elviraMerge);
         }
-        if (!merged.length && mode !== "helyi") {
-          merged = await BkkLib.fillTransitousIfEmpty(merged, origin, dest, {
+        if (!hosts.length && mode !== "helyi") {
+          const filled = await BkkLib.fillTransitousIfEmpty(hosts, origin, dest, {
             mode: this._departMode(),
             minutesAfter: cfg.minutesAfter
           });
           if (gen !== this._gen) return;
-          merged = BkkLib.mergeVolanRows(merged, elviraRows, cap, { overlayOnly: true });
+          merged = BkkLib.mergeVolanRows(filled, elviraRows, cap, elviraMerge);
           earlyRows = merged;
-          paintRows(merged);
-          if (merged.length) this._rowsFilled = true;
+          paintBoard(merged);
+          if (filled.length) this._rowsFilled = true;
         }
         if (typeof this._considerJourney === "function") this._considerJourney();
         await gpsTravel;
@@ -10047,6 +10363,8 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._when = { mode: "now", at: 0 };
     this._journeys = [];
     this._openJourney = 0;
+    this._openingJourney = null;
+    this._heldJourney = null;
     this._editRoute = false;
   }
   static async getConfigElement() {
@@ -10085,9 +10403,31 @@ var BKKPlannerCard = class extends BKKHopCard {
      itineraries when all are folded or none was found. */
   _shouldReloadOnConnect() {
     const planned = this._timed() && (this._journeys && this._journeys.length || this._journeysDone);
-    const idle = !(planned || this._journey || this._journeyLoading || this._rows && this._rows.length);
-    const stale = !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
-    return idle || stale;
+    const idle = !(planned || this._shownJourney() || this._journeyLoading || this._rows && this._rows.length);
+    return idle || this._nowPlanStale();
+  }
+  /* The "now" plan the card shows: its own, or the one held over while a
+     reload of the same pair plans again. The 5-minute tick, a reconnect or
+     Most once more would otherwise blank the itinerary for the whole run,
+     reading "No upcoming departures." and then "Loading…" over a route that
+     needs a transfer, and a journey map opening meanwhile would lose it. */
+  _shownJourney() {
+    if (this._journey) return this._journey;
+    return this._timed() ? null : this._heldJourney;
+  }
+  _nowPlanStale() {
+    return !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
+  }
+  /* A board left in front (a wall tablet, a tab kept open) goes stale too:
+     with no poll, its rows run out one by one and the itinerary under them has
+     left long ago. "Now" plans again on the countdown tick once the plan
+     is as stale as one seen again after a while away. */
+  _tickPaint() {
+    super._tickPaint();
+    const cfg = this._config || {};
+    if (!cfg.stopId || !cfg.destKey || !this._nowPlanStale()) return;
+    if (this._reloadActive || !this.isConnected || this._pageHidden()) return;
+    this._reloadSafe();
   }
   /* The editor (every stop pick) or a dashboard reload hands the card a new
      pair: the itinerary on screen, and a journey map still opening, belong
@@ -10097,6 +10437,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     if (prevKey != null && prevKey !== configDataKey(normalizeCardConfig(config))) {
       this._pairGen += 1;
       this._journey = null;
+      this._heldJourney = null;
       this._journeys = [];
       this._journeyKey = "";
       this._journeyLoading = false;
@@ -10130,6 +10471,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._rawRows = [];
     this._err = "";
     this._journey = null;
+    this._heldJourney = null;
     this._journeys = [];
     this._journeyKey = "";
     this._journeyLoading = false;
@@ -10144,7 +10486,11 @@ var BKKPlannerCard = class extends BKKHopCard {
      for the present. */
   async _reload() {
     this._loadedAt = Date.now();
-    if (!this._timed()) return super._reload();
+    if (!this._timed()) {
+      if (this._journey) this._heldJourney = this._journey;
+      return super._reload();
+    }
+    this._heldJourney = null;
     const gen = ++this._gen;
     this._reloadActive = true;
     if (this._poll) {
@@ -10212,6 +10558,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     ).then(async (journey) => {
       if (gen !== this._gen) return;
       this._journeyLoading = false;
+      this._heldJourney = null;
       this._journey = journey;
       this._paint();
       if (!journey) return;
@@ -10225,6 +10572,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     }).catch(() => {
       if (gen !== this._gen) return;
       this._journeyLoading = false;
+      this._heldJourney = null;
       this._paint();
     });
   }
@@ -10259,7 +10607,8 @@ var BKKPlannerCard = class extends BKKHopCard {
   _emptyBodyMessage(lang, cfg) {
     if (this._timed()) return "";
     if (!cfg.stopId || !cfg.destKey) return "";
-    if (this._journey && this._journey.legs && this._journey.legs.length) return "";
+    const journey = this._shownJourney();
+    if (journey && journey.legs && journey.legs.length) return "";
     if (this._journeyLoading) return t(lang, "cardLoading");
     return super._emptyBodyMessage(lang, cfg);
   }
@@ -10484,7 +10833,7 @@ var BKKPlannerCard = class extends BKKHopCard {
       return { className: "journey-plan", html: inner, useBoard: false };
     }
     const visible = this._visibleRows();
-    const journey = this._journey;
+    const journey = this._shownJourney();
     const showJourney = !!(journey && journey.legs && journey.legs.length && (!visible.length || BkkLib.journeyBeatsBoard(journey, visible)));
     if (visible.length && !showJourney) {
       return {
@@ -10513,9 +10862,10 @@ var BKKPlannerCard = class extends BKKHopCard {
     if (!host) return;
     const view = this._journeyView();
     const sig = view ? view.className + "\n" + view.html : "";
-    if (sig === this._journeySig && this._journeySigOf === this._journey && host.childNodes.length === (view ? 1 : 0)) return;
+    const shown = this._shownJourney();
+    if (sig === this._journeySig && this._journeySigOf === shown && host.childNodes.length === (view ? 1 : 0)) return;
     this._journeySig = sig;
-    this._journeySigOf = this._journey;
+    this._journeySigOf = shown;
     this._teardownPlannerInlineMap();
     host.innerHTML = "";
     if (!view) return;
@@ -10552,12 +10902,13 @@ var BKKPlannerCard = class extends BKKHopCard {
     if (!el) return;
     try {
       const cfg = this._config || {};
+      const journey = this._shownJourney();
       try {
-        await BkkLib.fillJourneyShapes(this._journey);
+        await BkkLib.fillJourneyShapes(journey);
       } catch (_e) {
       }
       if (!el.isConnected) return;
-      const segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
+      const segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
       if (!segs.length) {
         el.hidden = true;
         return;
@@ -10596,21 +10947,46 @@ var BKKPlannerCard = class extends BKKHopCard {
     }
   }
   async _openJourneyMap() {
+    let again = true;
+    while (again) again = await this._openJourneyMapOnce();
+  }
+  /* A journey map's button may be gone when it closes: an open that
+     replaced one still waiting kept that one's button, and another
+     itinerary or a new plan repaints the box. Focus goes to the Map button
+     the box has now. */
+  _restoreFocus(back) {
+    if (back && back.journey && back.el && !back.el.isConnected) {
+      const el = this._journeyHost && this._journeyHost.querySelector("#pmap");
+      super._restoreFocus(el ? { el, ref: null } : null);
+      return;
+    }
+    super._restoreFocus(back);
+  }
+  /* True when the open has to start again for the card's new "now" plan. */
+  async _openJourneyMapOnce() {
     const lang = this._lang();
     const cfg = this._config || {};
-    if (this._openingMap === "journey") return;
-    if (this._mapOverlay && this._openMapKey === "journey") return;
+    if (this._openingMap === "journey" && this._openingJourney === this._shownJourney()) return false;
+    if (this._mapOverlay && this._openMapKey === "journey") return false;
     const back = this._mapReturnFocus || this._focusTarget();
+    if (back) back.journey = true;
     this._closeVehicleMap();
     this._mapReturnFocus = back;
     this._openingMap = "journey";
     const seq = this._mapSeq;
     const gen = this._pairGen;
-    let journey = this._journey;
+    const timed = this._timed();
+    let journey = this._shownJourney();
+    this._openingJourney = journey;
+    let again = false;
     const stale = () => {
       if (this._mapStale(seq)) return true;
-      if (gen === this._pairGen && !(journey && !this._journey)) return false;
+      if (gen === this._pairGen && this._shownJourney() === journey) return false;
       this._openingMap = "";
+      if (gen === this._pairGen && !timed && !this._timed() && this._shownJourney()) {
+        again = true;
+        return true;
+      }
       this._mapReturnFocus = null;
       return true;
     };
@@ -10618,7 +10994,7 @@ var BKKPlannerCard = class extends BKKHopCard {
       await BkkLib.fillJourneyShapes(journey);
     } catch (_e) {
     }
-    if (stale()) return;
+    if (stale()) return again;
     let segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
     if (!segs.length && cfg.stopId && cfg.destName && !this._timed()) {
       try {
@@ -10629,34 +11005,37 @@ var BKKPlannerCard = class extends BKKHopCard {
           this._hass,
           { minutesAfter: clampMinutesAfter(cfg.minutesAfter) }
         );
-        if (stale()) return;
-        if (planned) journey = this._journey = planned;
+        if (stale()) return again;
+        if (planned) {
+          journey = this._openingJourney = this._journey = planned;
+          if (this._heldJourney) this._heldJourney = planned;
+        }
         try {
           await BkkLib.fillJourneyShapes(journey);
         } catch (_e) {
         }
-        if (stale()) return;
+        if (stale()) return again;
         if (planned) this._paintJourney();
         segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
       } catch (_e) {
       }
     }
-    if (stale()) return;
+    if (stale()) return again;
     if (!segs.length) {
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapNoData"));
-      return;
+      return false;
     }
     let L;
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
-      if (stale()) return;
+      if (stale()) return again;
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapLeafletFail"));
-      return;
+      return false;
     }
-    if (stale()) return;
+    if (stale()) return again;
     const overlay = document.createElement("div");
     overlay.className = "ht-map-overlay";
     const title = `${cfg.stopName || ""} → ${cfg.destName || ""}`;
@@ -10702,12 +11081,13 @@ var BKKPlannerCard = class extends BKKHopCard {
     } catch (_e) {
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapLeafletFail"));
-      return;
+      return false;
     }
     this._map = map;
     const allPts = this._drawJourneyPolylines(L, map, segs, { labels: true });
     this._fitJourneyView(L, map, allPts, 36, () => this._map === map);
     this._openingMap = "";
+    return false;
   }
   /* While a pair is still being picked the card keeps its own name (or
      "Tervező") as a title; see _paintHead for a picked pair. */
@@ -10783,6 +11163,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     }
     this._editRoute = !this._editRoute;
     this._paintHead();
+    this._ensureDests();
   }
   /* The planner spans every operator: `operator` keeps Home Assistant's look. */
   _themeMode() {
@@ -10800,10 +11181,13 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._ensureDests();
   }
   /* An origin from the YAML or the editor needs its reachable destinations
-     too, not only one picked in the card. */
+     too, not only one picked in the card. The list only feeds the
+     destination picker, and it costs a board and dozens of trip and route
+     lookups: a picked pair, its pickers folded, waits until edit opens them. */
   _ensureDests() {
     const cfg = this._config || {};
     if (!this._pickersMounted || !this._hass || !cfg.stopId) return;
+    if (this._routePicked() && !this._editRoute) return;
     if (this._destsFor === cfg.stopId) {
       const access = this._futarAccess();
       if (!access || access === this._destsAccess) return;
@@ -11286,9 +11670,11 @@ ${this._stopPinCss()}
       clearTimeout(this._pickTimer);
       this._pickTimer = null;
     }
+    const held = !this._timed() && when.mode === "now" ? this._shownJourney() : null;
     this._when = when;
     this._journeyKey = "";
     this._journey = null;
+    this._heldJourney = held;
     this._journeys = [];
     this._journeysDone = false;
     this._journeyLoading = false;
@@ -11540,11 +11926,13 @@ ${this._stopPinCss()}
     this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
+    this._destsFor = "";
+    this._destSeq += 1;
+    this._destsLoading = false;
     this._editRoute = false;
     this._clearPickerInputs();
     this._paint();
     this._reloadSafe();
-    this._loadDests();
   }
   _resetPlan() {
     if (this._pickTimer) {

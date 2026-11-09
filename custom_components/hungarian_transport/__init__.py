@@ -10,7 +10,7 @@ from homeassistant.components import frontend
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import (
     HomeAssistantError,
     ServiceValidationError,
@@ -23,9 +23,11 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
+from homeassistant.util import dt as dt_util
 
 from . import mav, mav_daily, realtime, timetable_notify, timetables
 from .assets import asset_tag
+from .cache import close_on_stop, hass_call_later
 from .const import (
     CONF_API_KEY,
     CONF_DAILY_MAV,
@@ -48,6 +50,26 @@ from .futar import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# How far a planner's timed search may start from now: its day picker offers
+# today and the next six days.
+ELVIRA_AT_BACK = 86400
+ELVIRA_AT_AHEAD = 8 * 86400
+
+
+def _elvira_at(value: Any) -> int:
+    """The window's start in epoch seconds, near enough to now to be a search."""
+    message = "at must be within a day before and eight days after now"
+    try:
+        at = vol.Coerce(int)(value)
+    except OverflowError:
+        # Coerce passes it on: int() of a YAML .inf.
+        raise vol.Invalid(message) from None
+    now = dt_util.utcnow().timestamp()
+    if not now - ELVIRA_AT_BACK <= at <= now + ELVIRA_AT_AHEAD:
+        raise vol.Invalid(message)
+    return at
+
+
 ELVIRA_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Required("origin_code"): cv.string,
@@ -55,7 +77,9 @@ ELVIRA_SERVICE_SCHEMA = vol.Schema(
         vol.Optional(
             "minutes_after", default=180
         ): vol.All(cv.positive_int, vol.Range(min=15, max=480)),
-        vol.Optional("dest_name", default=""): cv.string,
+        # Copied into every row: a station name, not a payload.
+        vol.Optional("dest_name", default=""): vol.All(cv.string, vol.Length(max=100)),
+        vol.Optional("at"): _elvira_at,
     }
 )
 FUTAR_SERVICE_SCHEMA = vol.Schema(
@@ -107,12 +131,28 @@ LOADER_FILE = "hungarian-transport-loader.js"
 LOADER_URL = f"/hungarian-transport/{LOADER_FILE}"
 WWW_PATH = Path(__file__).parent / "www"
 ISSUE_MISSING_ASSETS = "missing_assets"
+# The detail of a card's answer while the entry is reloading or starting.
+NOT_READY = "Hungarian transport is starting or reloading"
 PLATFORMS = [Platform.SENSOR]
 
 
 def _entry_loaded(hass: HomeAssistant) -> bool:
     return any(
         entry.state is ConfigEntryState.LOADED
+        for entry in hass.config_entries.async_entries(DOMAIN)
+    )
+
+
+def _entry_coming_up(hass: HomeAssistant) -> bool:
+    """An enabled entry on its way to LOADED: a reload (an options save, a
+    reauth) holds its setup lock from the unload to the end of the setup,
+    and at startup the services exist before the entry is set up."""
+    return not _entry_loaded(hass) and any(
+        entry.disabled_by is None
+        and (
+            entry.setup_lock.locked()
+            or (entry.state is ConfigEntryState.NOT_LOADED and hass.state is not CoreState.running)
+        )
         for entry in hass.config_entries.async_entries(DOMAIN)
     )
 
@@ -182,6 +222,10 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     session = async_get_clientsession(hass)
 
     async def handle_elvira_between(call: ServiceCall) -> dict[str, Any]:
+        if _entry_coming_up(hass):
+            # Every open card polls through a reload or the startup: an
+            # answer, as for an outage, not an ERROR line per poll.
+            return {"departures": [], "error": "elvira_unavailable", "detail": NOT_READY}
         _require_entry(hass)
         origin = _station_code(call, "origin_code")
         dest = _station_code(call, "dest_code")
@@ -191,13 +235,14 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 translation_key="same_station",
             )
         try:
-            rows = await elvira_between(
+            rows, dest_failure = await elvira_between(
                 session,
                 hass,
                 origin,
                 dest,
                 call.data["minutes_after"],
                 call.data["dest_name"],
+                call.data.get("at"),
             )
         except ElviraRateLimited as err:
             # The integration's own limit, not MÁV being down.
@@ -207,7 +252,12 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
             # websocket API logs every failed call at ERROR, and every card
             # polls every 45 s. elvira.py logs the outage once.
             return {"departures": [], "error": "elvira_unavailable", "detail": str(err)}
-        return {"departures": rows}
+        if dest_failure is None:
+            return {"departures": rows}
+        # The rows still come, but without the destination's arrivals their
+        # destHit is not to be trusted.
+        code = "elvira_rate_limited" if isinstance(dest_failure, ElviraRateLimited) else "elvira_unavailable"
+        return {"departures": rows, "dest_error": code}
 
     hass.services.async_register(
         DOMAIN,
@@ -228,6 +278,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     )
 
     async def handle_realtime(call: ServiceCall) -> dict[str, Any]:
+        if _entry_coming_up(hass):
+            # As for elvira_between: the cards retry on their next poll.
+            return {"feed": call.data["feed"], "trips": {}, "error": "rt_unavailable"}
         _require_entry(hass)
         # Feed outages are part of the response (rt_unavailable, rt_no_feed),
         # not exceptions: the websocket API logs every failed call at ERROR.
@@ -345,7 +398,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         task_factory=lambda coro: hass.async_create_background_task(
             coro, "hungarian_transport_futar", eager_start=False
         ),
+        call_later=hass_call_later(hass),
     )
+    entry.async_on_unload(proxy.close)
+    entry.async_on_unload(close_on_stop(hass, proxy.close))
 
     async def handle_futar(call: ServiceCall) -> dict[str, Any]:
         # Errors are part of the response, not exceptions: the websocket API

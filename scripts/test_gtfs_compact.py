@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -28,6 +29,8 @@ from build_city_index import CITY_FEEDS  # noqa: E402
 from gtfs_compact import (  # noqa: E402
     INDEX_SCHEMA,
     SHAPE_SHARDS,
+    SHAPES_GRACE_S,
+    SHAPES_RETIRED,
     assert_public_http_url,
     index_shapes,
     simplify_shape,
@@ -38,6 +41,7 @@ from gtfs_compact import (  # noqa: E402
     line_code,
     load_parts,
     open_gtfs,
+    prune_shapes,
     resolved_url,
     train_number,
     write_index,
@@ -248,15 +252,29 @@ def main() -> int:
             pts = decode_polyline(shard0["p"][0])
             failed |= not check("straight midpoint simplified away", len(pts) == 2, str(pts))
             failed |= not check("only used shapes are written", sinfo["shapes"] == 1, str(sinfo))
-            # A rebuild with other shapes swaps the folder and removes the old one.
+            # A rebuild with other shapes swaps the folder. The old one stays
+            # a day for dashboards that still hold the old index, then goes.
             shape_files["shapes.txt"] = shape_files["shapes.txt"].replace("46.26000,20.16000,3", "46.27000,20.17000,3")
             sz2 = gtfs_zip(shape_files)
             try:
                 write_index(load_parts(sz2, lambda short, *_: bool(short), op_id="szeged", op_name="Szeged — SZKT"),
                             sout, with_operators=True)
+                new_folder = index_shapes(sout)
+                folders = sorted(p.name for p in sdir.iterdir() if p.is_dir())
+                failed |= not check("old shapes folder kept a day after swap",
+                                    folders == sorted([folder, new_folder]) and new_folder != folder
+                                    and (sdir / folder / "00.json.gz").is_file()
+                                    and (sdir / folder / SHAPES_RETIRED).is_file()
+                                    and not (sdir / new_folder / SHAPES_RETIRED).exists(), str(folders))
+                (sdir / "city-shapes-0000000000.tmpab").mkdir()
+                prune_shapes(sout, new_folder, now=time.time() + 3600)
+                folders = sorted(p.name for p in sdir.iterdir() if p.is_dir())
+                failed |= not check("an interrupted temp folder goes at once, the old one within the day stays",
+                                    folders == sorted([folder, new_folder]), str(folders))
+                prune_shapes(sout, new_folder, now=time.time() + SHAPES_GRACE_S + 1)
                 folders = [p.name for p in sdir.iterdir() if p.is_dir()]
-                failed |= not check("old shapes folder pruned after swap",
-                                    len(folders) == 1 and folders[0] == index_shapes(sout) != folder, str(folders))
+                failed |= not check("old shapes folder pruned once the day is over",
+                                    folders == [new_folder], str(folders))
             finally:
                 sz2.unlink()
         finally:

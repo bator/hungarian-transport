@@ -238,6 +238,54 @@ def test_feed_with_foreign_stop_ids_gives_the_current_delay() -> None:
     assert hit["vehicle"]["lat"] == pytest.approx(48.08612, abs=1e-5)
 
 
+def test_trip_updates_take_the_route_their_pattern_had_in_a_vehicle() -> None:
+    # The OTP city feeds put route_id only in the vehicle's descriptor.
+    (src, tu, vp, _tr) = _loaded("miskolc", "mvkzrt:")[0]
+    assert all(not t.route_id for t in tu.trip_updates.values())
+    # 08:28's vehicle was never seen; 08:19's, of the same pattern, was.
+    del vp.vehicles["10842_1943_082800_AZN"]
+    known: dict[str, str] = {}
+    realtime._learn_routes(known, vp)
+    realtime._fill_routes(known, tu)
+    loaded = [(src, tu, None, None)]
+    # A stop of the feed's own: its update says the delay there.
+    hit = _answer(_cfg("route_start"), loaded, route="1V", start=508, stops=["SP490"], **{"from": 0})
+    assert hit["trip_id"] == "10842_1943_082800_AZN" and hit["vehicle"] is None
+    assert (hit["delay"], hit["approx"]) == (12, False)
+    assert _answer(_cfg("route_start"), loaded, route="1", start=508) is None
+    # A pattern seen on two routes names neither.
+    known = {}
+    realtime._learn_routes(known, vp)
+    vp.vehicles["10842_1943_081900_AZN"].route_id = "2"
+    realtime._learn_routes(known, vp)
+    assert realtime._route_of(known, "10842_1943_082800_AZN") == ""
+    # An id without the OTP shape is its own key.
+    assert realtime._route_key("hkir_3624_6-2") == "hkir_3624_6-2"
+
+
+def test_a_learned_route_without_its_vehicle_gives_no_current_delay() -> None:
+    """mvkzrt reports 0 for every stop the bus has already served and its
+    delay from its current stop on: without the vehicle there is no telling
+    which, so no live on-time over the card's remembered delay."""
+    (src, tu, vp, _tr) = _loaded("miskolc", "mvkzrt:")[0]
+    cfg = _cfg("route_start")
+    known: dict[str, str] = {}
+    realtime._learn_routes(known, vp)
+    realtime._fill_routes(known, tu)
+    req = {"route": "1V", "start": 508, "stops": ["638481"], "from": 0}
+    # The vehicle at SP492, 12 s late; the stops before it say 0.
+    hit = _answer(cfg, [(src, tu, vp, None)], **req)
+    assert hit["trip_id"] == "10842_1943_082800_AZN" and (hit["delay"], hit["approx"]) == (12, True)
+    # The positions feed down (or stale): the timetable, not a delay of 0.
+    assert _answer(cfg, [(src, tu, None, None)], **req) is None
+    # Its vehicle missing from a feed that still answers: the same.
+    del vp.vehicles["10842_1943_082800_AZN"]
+    assert _answer(cfg, [(src, tu, vp, None)], **req) is None
+    # A cancellation needs no position.
+    tu.trip_updates["10842_1943_082800_AZN"].relationship = 3
+    assert _answer(cfg, [(src, tu, None, None)], **req)["canceled"] is True
+
+
 def test_train_number_match() -> None:
     trains = realtime.train_numbers_from_static((FIX / "mav-static.zip").read_bytes(), "1:")
     loaded = _loaded("mav", "1:", trains)
@@ -474,6 +522,26 @@ async def test_outage_is_logged_once_and_backs_off(hass, aioclient_mock, freezer
     assert caplog.text.count("answers again") == 2
 
 
+async def test_route_start_matches_while_the_positions_feed_is_down(hass, aioclient_mock, freezer) -> None:
+    freezer.move_to(FROZEN)
+    await _setup(hass)
+    vbusz = J + "VBUSZ/"
+    aioclient_mock.get(vbusz + "trip-updates.pb", content=_pb("veszprem-trip-updates"))
+    aioclient_mock.get(vbusz + "vehicle-positions.pb", content=_pb("veszprem-vehicle-positions"))
+    req = {"feed": "veszprem", "trips": [{"key": "a", "route": "5", "start": 525, "stops": ["SP1825"], "from": 0}]}
+    resp = await _call(hass, req)
+    assert resp["trips"]["a"]["delay"] == 19 and resp["trips"]["a"]["vehicle"] is not None
+    # The trip updates carry no route_id: the one the vehicle had still names it.
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(vbusz + "trip-updates.pb", content=_pb("veszprem-trip-updates"))
+    aioclient_mock.get(vbusz + "vehicle-positions.pb", status=503)
+    freezer.tick(realtime.DEFAULT_INTERVAL + 1)
+    resp = await _call(hass, req)
+    assert aioclient_mock.call_count == 2
+    hit = resp["trips"]["a"]
+    assert (hit["trip_id"], hit["delay"], hit["vehicle"]) == ("1140_1446_084500_A_HP", 19, None)
+
+
 async def test_garbage_and_oversized_feeds_are_outages(hass, aioclient_mock, freezer, monkeypatch) -> None:
     freezer.move_to(FROZEN)
     await _setup(hass)
@@ -510,6 +578,85 @@ async def test_mav_matches_by_train_number(hass, aioclient_mock, freezer) -> Non
     freezer.tick(120)
     await _call(hass, req)
     assert sum(1 for c in aioclient_mock.mock_calls if str(c[1]) == MAV_STATIC) == 1
+
+
+async def test_a_failed_static_refresh_keeps_the_train_numbers(hass, aioclient_mock, freezer, monkeypatch) -> None:
+    freezer.move_to(FROZEN)
+    # Short enough for the fixtures' headers to stay fresh.
+    monkeypatch.setattr(realtime, "STATIC_INTERVAL", 200)
+    monkeypatch.setattr(realtime, "STATIC_FAIL_BACKOFF", 300)
+    await _setup(hass)
+
+    def mock(static_status: int) -> None:
+        aioclient_mock.clear_requests()
+        aioclient_mock.get(J + "1_198/trip-updates.pb", content=_pb("mav-trip-updates"))
+        aioclient_mock.get(J + "1_198/vehicle-positions.pb", content=_pb("mav-vehicle-positions"))
+        if static_status == 200:
+            aioclient_mock.get(MAV_STATIC, content=(FIX / "mav-static.zip").read_bytes(), headers={"ETag": '"z1"'})
+        else:
+            aioclient_mock.get(MAV_STATIC, status=static_status)
+        for path in ("1_134/trip-updates.pb", "1_134/vehicle-positions.pb"):
+            aioclient_mock.get(J + path, status=503)
+        aioclient_mock.get(GYSEV_STATIC, status=503)
+
+    def static_calls() -> list:
+        return [c for c in aioclient_mock.mock_calls if str(c[1]) == MAV_STATIC]
+
+    req = {"feed": "mav", "trips": [{"key": "ic", "train": "822", "stops": ["005501024", "005506189"], "from": 0, "to": 1}]}
+    mock(200)
+    assert (await _call(hass, req))["trips"]["ic"]["dest_delay"] == 600
+    # The periodic refresh fails: the index from before still matches the
+    # live feeds, which are fine.
+    mock(503)
+    freezer.tick(realtime.STATIC_INTERVAL + 1)
+    assert (await _call(hass, req))["trips"]["ic"]["dest_delay"] == 600
+    assert len(static_calls()) == 1
+    # Asked again after STATIC_FAIL_BACKOFF, not every minute, and
+    # conditionally: the copy kept is the one the ETag names.
+    freezer.tick(realtime.DEFAULT_INTERVAL + 1)
+    assert (await _call(hass, req))["trips"]["ic"]["dest_delay"] == 600
+    assert len(static_calls()) == 1
+    mock(304)
+    freezer.tick(realtime.STATIC_FAIL_BACKOFF)
+    assert (await _call(hass, req))["trips"]["ic"]["dest_delay"] == 600
+    (call,) = static_calls()
+    assert call[3]["If-None-Match"] == '"z1"'
+
+
+async def test_a_bad_static_body_does_not_take_the_kept_copys_validators(
+    hass, aioclient_mock, freezer, monkeypatch, caplog
+) -> None:
+    """A 200 whose body does not parse leaves the copy from before, and with
+    it the validators that name that copy: the retry is not answered 304 for
+    the bad body, nor logged as answering again."""
+    freezer.move_to(FROZEN)
+    monkeypatch.setattr(realtime, "STATIC_INTERVAL", 200)
+    monkeypatch.setattr(realtime, "STATIC_FAIL_BACKOFF", 300)
+    await _setup(hass)
+
+    def mock(static: bytes, etag: str) -> None:
+        aioclient_mock.clear_requests()
+        aioclient_mock.get(J + "1_198/trip-updates.pb", content=_pb("mav-trip-updates"))
+        aioclient_mock.get(J + "1_198/vehicle-positions.pb", content=_pb("mav-vehicle-positions"))
+        aioclient_mock.get(MAV_STATIC, content=static, headers={"ETag": etag, "Last-Modified": etag})
+        for path in ("1_134/trip-updates.pb", "1_134/vehicle-positions.pb"):
+            aioclient_mock.get(J + path, status=503)
+        aioclient_mock.get(GYSEV_STATIC, status=503)
+
+    req = {"feed": "mav", "trips": [{"key": "ic", "train": "822", "stops": ["005501024", "005506189"], "from": 0, "to": 1}]}
+    mock((FIX / "mav-static.zip").read_bytes(), '"z1"')
+    assert (await _call(hass, req))["trips"]["ic"]["dest_delay"] == 600
+    mock(_corrupt_deflate(), '"z2"')
+    freezer.tick(realtime.STATIC_INTERVAL + 1)
+    assert (await _call(hass, req))["trips"]["ic"]["dest_delay"] == 600
+
+    mock(_corrupt_deflate(), '"z2"')
+    freezer.tick(realtime.STATIC_FAIL_BACKOFF + 1)
+    caplog.clear()
+    assert (await _call(hass, req))["trips"]["ic"]["dest_delay"] == 600
+    (call,) = [c for c in aioclient_mock.mock_calls if str(c[1]) == MAV_STATIC]
+    assert call[3]["If-None-Match"] == '"z1"' and call[3]["If-Modified-Since"] == '"z1"'
+    assert not [r for r in caplog.records if "answers again" in r.getMessage()]
 
 
 @pytest.mark.parametrize(

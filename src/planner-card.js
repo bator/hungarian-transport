@@ -51,6 +51,12 @@ export class BKKPlannerCard extends BKKHopCard {
     this._when = { mode: 'now', at: 0 };
     this._journeys = [];
     this._openJourney = 0;
+    /* The itinerary a journey map open still waiting draws (_openJourneyMap). */
+    this._openingJourney = null;
+    /* The "now" plan on screen while a reload of the same pair plans again:
+       the base run drops _journey as soon as its departures answer, and the
+       new plan lands only at its end (_shownJourney). */
+    this._heldJourney = null;
     /* With both ends picked the title names the route and the pickers fold
        away; the edit button opens them again until the next destination. */
     this._editRoute = false;
@@ -98,9 +104,34 @@ export class BKKPlannerCard extends BKKHopCard {
      itineraries when all are folded or none was found. */
   _shouldReloadOnConnect() {
     const planned = this._timed() && ((this._journeys && this._journeys.length) || this._journeysDone);
-    const idle = !(planned || this._journey || this._journeyLoading || (this._rows && this._rows.length));
-    const stale = !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
-    return idle || stale;
+    const idle = !(planned || this._shownJourney() || this._journeyLoading || (this._rows && this._rows.length));
+    return idle || this._nowPlanStale();
+  }
+
+  /* The "now" plan the card shows: its own, or the one held over while a
+     reload of the same pair plans again. The 5-minute tick, a reconnect or
+     Most once more would otherwise blank the itinerary for the whole run,
+     reading "No upcoming departures." and then "Loading…" over a route that
+     needs a transfer, and a journey map opening meanwhile would lose it. */
+  _shownJourney() {
+    if (this._journey) return this._journey;
+    return this._timed() ? null : this._heldJourney;
+  }
+
+  _nowPlanStale() {
+    return !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
+  }
+
+  /* A board left in front (a wall tablet, a tab kept open) goes stale too:
+     with no poll, its rows run out one by one and the itinerary under them has
+     left long ago. "Now" plans again on the countdown tick once the plan
+     is as stale as one seen again after a while away. */
+  _tickPaint() {
+    super._tickPaint();
+    const cfg = this._config || {};
+    if (!cfg.stopId || !cfg.destKey || !this._nowPlanStale()) return;
+    if (this._reloadActive || !this.isConnected || this._pageHidden()) return;
+    this._reloadSafe();
   }
 
   /* The editor (every stop pick) or a dashboard reload hands the card a new
@@ -111,6 +142,7 @@ export class BKKPlannerCard extends BKKHopCard {
     if (prevKey != null && prevKey !== configDataKey(normalizeCardConfig(config))) {
       this._pairGen += 1;
       this._journey = null;
+      this._heldJourney = null;
       this._journeys = [];
       this._journeyKey = '';
       this._journeyLoading = false;
@@ -138,6 +170,7 @@ export class BKKPlannerCard extends BKKHopCard {
     this._rawRows = [];
     this._err = '';
     this._journey = null;
+    this._heldJourney = null;
     this._journeys = [];
     this._journeyKey = '';
     this._journeyLoading = false;
@@ -154,7 +187,13 @@ export class BKKPlannerCard extends BKKHopCard {
      for the present. */
   async _reload() {
     this._loadedAt = Date.now();
-    if (!this._timed()) return super._reload();
+    if (!this._timed()) {
+      /* A new pair or "Mikor" dropped the plan before this; a reload of the
+         same pair keeps it on screen until the new one lands. */
+      if (this._journey) this._heldJourney = this._journey;
+      return super._reload();
+    }
+    this._heldJourney = null;
     const gen = ++this._gen;
     this._reloadActive = true;
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
@@ -224,6 +263,7 @@ export class BKKPlannerCard extends BKKHopCard {
     ).then(async (journey) => {
       if (gen !== this._gen) return;
       this._journeyLoading = false;
+      this._heldJourney = null;
       this._journey = journey;
       this._paint();
       if (!journey) return;
@@ -236,6 +276,8 @@ export class BKKPlannerCard extends BKKHopCard {
     }).catch(() => {
       if (gen !== this._gen) return;
       this._journeyLoading = false;
+      /* The held plan is the one this replaced: a stale one is no answer. */
+      this._heldJourney = null;
       /* The planner does not poll: an empty board left on "Loading…" would
          stay there. */
       this._paint();
@@ -281,7 +323,8 @@ export class BKKPlannerCard extends BKKHopCard {
     if (this._timed()) return '';
     /* The pickers above already ask for both stops. */
     if (!cfg.stopId || !cfg.destKey) return '';
-    if (this._journey && this._journey.legs && this._journey.legs.length) return '';
+    const journey = this._shownJourney();
+    if (journey && journey.legs && journey.legs.length) return '';
     if (this._journeyLoading) return t(lang, 'cardLoading');
     return super._emptyBodyMessage(lang, cfg);
   }
@@ -516,7 +559,7 @@ export class BKKPlannerCard extends BKKHopCard {
       return { className: 'journey-plan', html: inner, useBoard: false };
     }
     const visible = this._visibleRows();
-    const journey = this._journey;
+    const journey = this._shownJourney();
     const showJourney = !!(journey && journey.legs && journey.legs.length
       && (!visible.length || BkkLib.journeyBeatsBoard(journey, visible)));
     if (visible.length && !showJourney) {
@@ -551,9 +594,10 @@ export class BKKPlannerCard extends BKKHopCard {
     if (!host) return;
     const view = this._journeyView();
     const sig = view ? view.className + '\n' + view.html : '';
-    if (sig === this._journeySig && this._journeySigOf === this._journey && host.childNodes.length === (view ? 1 : 0)) return;
+    const shown = this._shownJourney();
+    if (sig === this._journeySig && this._journeySigOf === shown && host.childNodes.length === (view ? 1 : 0)) return;
     this._journeySig = sig;
-    this._journeySigOf = this._journey;
+    this._journeySigOf = shown;
     this._teardownPlannerInlineMap();
     host.innerHTML = '';
     if (!view) return;
@@ -592,11 +636,12 @@ export class BKKPlannerCard extends BKKHopCard {
     if (!el) return;
     try {
       const cfg = this._config || {};
+      const journey = this._shownJourney();
       try {
-        await BkkLib.fillJourneyShapes(this._journey);
+        await BkkLib.fillJourneyShapes(journey);
       } catch (_e) { /* draw the endpoint fallback */ }
       if (!el.isConnected) return;
-      const segs = BkkLib.journeyMapSegments(this._journey, cfg, cfg);
+      const segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
       if (!segs.length) {
         el.hidden = true;
         return;
@@ -636,14 +681,38 @@ export class BKKPlannerCard extends BKKHopCard {
   }
 
   async _openJourneyMap() {
+    /* "Now" has one plan: when the card's changes while the map opens (its
+       own plan landing, a newer one), the map opens for the one it shows. */
+    let again = true;
+    while (again) again = await this._openJourneyMapOnce();
+  }
+
+  /* A journey map's button may be gone when it closes: an open that
+     replaced one still waiting kept that one's button, and another
+     itinerary or a new plan repaints the box. Focus goes to the Map button
+     the box has now. */
+  _restoreFocus(back) {
+    if (back && back.journey && back.el && !back.el.isConnected) {
+      const el = this._journeyHost && this._journeyHost.querySelector('#pmap');
+      super._restoreFocus(el ? { el, ref: null } : null);
+      return;
+    }
+    super._restoreFocus(back);
+  }
+
+  /* True when the open has to start again for the card's new "now" plan. */
+  async _openJourneyMapOnce() {
     const lang = this._lang();
     const cfg = this._config || {};
-    if (this._openingMap === 'journey') return;
-    if (this._mapOverlay && this._openMapKey === 'journey') return;
+    /* A Map click on another itinerary than the one still opening is a
+       new open: it bumps _mapSeq, so the old one stops at its next check. */
+    if (this._openingMap === 'journey' && this._openingJourney === this._shownJourney()) return false;
+    if (this._mapOverlay && this._openMapKey === 'journey') return false;
     /* Focus goes to the dialog's close button and comes back on close, as
        with the vehicle map; left on the button under the backdrop, Tab
        would walk the page behind the dialog. */
     const back = this._mapReturnFocus || this._focusTarget();
+    if (back) back.journey = true;
     this._closeVehicleMap();
     this._mapReturnFocus = back;
     this._openingMap = 'journey';
@@ -653,14 +722,25 @@ export class BKKPlannerCard extends BKKHopCard {
        replace the new pair's journey, paint, or open a map. A reload of
        the same pair (a key showing up, back on the view) does not. */
     const gen = this._pairGen;
+    const timed = this._timed();
     /* The plan this open draws. A "Mikor" change meanwhile (_applyWhen)
        drops it for one still to come: without a plan the map would be a
-       bare line from origin to destination under a summary of nothing. */
-    let journey = this._journey;
+       bare line from origin to destination under a summary of nothing.
+       Another itinerary opened meanwhile replaces it: the map would draw
+       one the card no longer shows. A new plan for now starts it again; a
+       reload of the same pair still planning keeps the one on screen
+       (_shownJourney), and one that found no route leaves nothing to draw. */
+    let journey = this._shownJourney();
+    this._openingJourney = journey;
+    let again = false;
     const stale = () => {
       if (this._mapStale(seq)) return true;
-      if (gen === this._pairGen && !(journey && !this._journey)) return false;
+      if (gen === this._pairGen && this._shownJourney() === journey) return false;
       this._openingMap = '';
+      if (gen === this._pairGen && !timed && !this._timed() && this._shownJourney()) {
+        again = true;
+        return true;
+      }
       /* No map opened: the button kept for this open must not take the
          focus when some later map closes. */
       this._mapReturnFocus = null;
@@ -669,7 +749,7 @@ export class BKKPlannerCard extends BKKHopCard {
     try {
       await BkkLib.fillJourneyShapes(journey);
     } catch (_e) { /* draw the endpoint fallback */ }
-    if (stale()) return;
+    if (stale()) return again;
     let segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
     /* Only "now" plans again for a map: a chosen time's open itinerary is
        one of several, and a plan for now would replace it with another. */
@@ -682,34 +762,38 @@ export class BKKPlannerCard extends BKKHopCard {
           this._hass,
           { minutesAfter: clampMinutesAfter(cfg.minutesAfter) },
         );
-        if (stale()) return;
-        if (planned) journey = this._journey = planned;
+        if (stale()) return again;
+        if (planned) {
+          journey = this._openingJourney = this._journey = planned;
+          /* A reload still running drops _journey: the box keeps this one. */
+          if (this._heldJourney) this._heldJourney = planned;
+        }
         try {
           await BkkLib.fillJourneyShapes(journey);
         } catch (_e) { /* draw the endpoint fallback */ }
-        if (stale()) return;
+        if (stale()) return again;
         /* The card's own box shows the journey the map now draws, not the
            one this replan replaced. */
         if (planned) this._paintJourney();
         segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
       } catch (_e) { /* fall through to the no-geometry notice */ }
     }
-    if (stale()) return;
+    if (stale()) return again;
     if (!segs.length) {
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapNoData'));
-      return;
+      return false;
     }
     let L;
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
-      if (stale()) return;
+      if (stale()) return again;
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapLeafletFail'));
-      return;
+      return false;
     }
-    if (stale()) return;
+    if (stale()) return again;
     const overlay = document.createElement('div');
     overlay.className = 'ht-map-overlay';
     const title = `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
@@ -752,12 +836,13 @@ export class BKKPlannerCard extends BKKHopCard {
     } catch (_e) {
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapLeafletFail'));
-      return;
+      return false;
     }
     this._map = map;
     const allPts = this._drawJourneyPolylines(L, map, segs, { labels: true });
     this._fitJourneyView(L, map, allPts, 36, () => this._map === map);
     this._openingMap = '';
+    return false;
   }
 
   /* While a pair is still being picked the card keeps its own name (or
@@ -842,6 +927,7 @@ export class BKKPlannerCard extends BKKHopCard {
     }
     this._editRoute = !this._editRoute;
     this._paintHead();
+    this._ensureDests();
   }
 
   /* The planner spans every operator: `operator` keeps Home Assistant's look. */
@@ -860,10 +946,13 @@ export class BKKPlannerCard extends BKKHopCard {
   }
 
   /* An origin from the YAML or the editor needs its reachable destinations
-     too, not only one picked in the card. */
+     too, not only one picked in the card. The list only feeds the
+     destination picker, and it costs a board and dozens of trip and route
+     lookups: a picked pair, its pickers folded, waits until edit opens them. */
   _ensureDests() {
     const cfg = this._config || {};
     if (!this._pickersMounted || !this._hass || !cfg.stopId) return;
+    if (this._routePicked() && !this._editRoute) return;
     if (this._destsFor === cfg.stopId) {
       /* Losing access (the service gone for a moment) keeps the list. */
       const access = this._futarAccess();
@@ -1359,9 +1448,13 @@ ${this._stopPinCss()}
     /* A day or time pick still waiting out its debounce belongs to the old
        choice: Most or a reset after it must not be undone 300 ms later. */
     if (this._pickTimer) { clearTimeout(this._pickTimer); this._pickTimer = null; }
+    /* Most once more plans "now" again: the plan on screen stays until the
+       new one lands, as on the tick. A chosen time has other itineraries. */
+    const held = !this._timed() && when.mode === 'now' ? this._shownJourney() : null;
     this._when = when;
     this._journeyKey = '';
     this._journey = null;
+    this._heldJourney = held;
     this._journeys = [];
     this._journeysDone = false;
     this._journeyLoading = false;
@@ -1629,13 +1722,16 @@ ${this._stopPinCss()}
     this._invalidatePlan();
     this._dests = [];
     this._destRoutes = {};
+    /* The new origin's destinations load when edit opens the pickers; a
+       load still running belongs to the old one. */
+    this._destsFor = '';
+    this._destSeq += 1;
+    this._destsLoading = false;
     this._editRoute = false;
     this._clearPickerInputs();
     this._paint();
-    /* The swapped pair needs no route list (routeIds is empty): plan now,
-       and load the new origin's destinations alongside. */
+    /* The swapped pair needs no route list (routeIds is empty): plan now. */
     this._reloadSafe();
-    this._loadDests();
   }
 
   _resetPlan() {

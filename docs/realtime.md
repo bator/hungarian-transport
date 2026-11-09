@@ -26,7 +26,7 @@ Jonah Brüchert and served from his server at `jbb.ghsq.de`:
 | Debrecen, DKV (`debrecen`, alias `dkv`) | `jbb.ghsq.de/gtfs/hu/debrecen/` | trip_id, else route + start | 56 of 56 trip ids are in menetbrand's `debrecen` GTFS |
 | Orosháza (`oroshaza`) | `gtfs.gpspositions.net/storage/realtime/OROSH_V_ONK/` | trip_id | 1 of 1 (its own GTFS) |
 | Veszprém, V-Busz (`veszprem`) | `jbb.ghsq.de/gtfs/hu/VBUSZ/` | route + start | 10 of 11 |
-| Miskolc, MVK (`miskolc`) | `jbb.ghsq.de/gtfs/hu/mvkzrt/` | route + start | 29 of 40; the delay is the vehicle's current one |
+| Miskolc, MVK (`miskolc`) | `jbb.ghsq.de/gtfs/hu/mvkzrt/` | route + start | 29 of 40; the delay is the vehicle's current one, none without the vehicle |
 | MÁV trains (`mav`) | `jbb.ghsq.de/gtfs/hu/1_198/`, `…/1_134/` (GYSEV) | train number | 137 of 151 running trains |
 | GYSEV as its own feed (`gysev`) | `jbb.ghsq.de/gtfs/hu/1_134/` | trip_id, else train number | — |
 
@@ -50,16 +50,33 @@ on the server, but they were empty when this was written.
   (`1140_1446_084500_A_HP` starts at 08:45) and their `route_id` is the line
   number. The card sends the line and its trip's first time; two trips of a
   line starting at the same minute (both ends of the line) are told apart by
-  the card's stops, else neither is used. Veszprém's stop ids are the card's,
-  so its delay is the one at your stop; Miskolc's are not, so its delay is
-  the vehicle's current one.
+  the card's stops, else neither is used. Only the positions feed names the
+  route, in each vehicle; the trip updates do not. The integration remembers
+  the route of each trip id's pattern (`1140_1446` of
+  `1140_1446_084500_A_HP`) from the vehicles it has seen, and a trip update
+  without a route takes it from there: a trip whose vehicle is not on the
+  map, or every trip while the positions feed is down, still matches. A
+  pattern seen on two routes is used for neither. Nothing is remembered
+  until the positions feed has answered once since Home Assistant started:
+  if it has been down since then, route + start finds no trip update and
+  those cards keep the timetable (Debrecen's trip ids still match).
+  Veszprém's stop ids are the card's, so its delay is the one at your stop;
+  Miskolc's are not, so its delay is the vehicle's current one: the update
+  at the stop the vehicle is at. A Miskolc trip without its vehicle (the
+  positions feed down or stale, or the vehicle not in it) gets no delay and
+  keeps the timetable and the delay the card remembers. Its trip update
+  alone cannot say where the bus is, since it reports 0 for every stop
+  already served. A cancellation still comes through.
 - **Train number.** The MÁV feed's trip ids are not the MÁV GTFS's
   (`1:36166415` against `28178227_2158.`), and its trip updates carry no
   train number. The integration reads the train numbers from the same
   server's static MÁV and GYSEV GTFS (`trip_short_name`, "SZ 4510"; 1.4 MB
   and 0.1 MB, refreshed every 12 hours with a conditional request) and the
   station codes from the stop ids (`005501024_5` is a platform of
-  Budapest-Kelenföld, 005501024).
+  Budapest-Kelenföld, 005501024). A refresh that fails, or a zip that does
+  not read, keeps the train numbers from before: they still match the live
+  feeds. It is asked again after 15 minutes, conditionally for the copy
+  kept, not for the zip that did not read.
 
 A stop without its own update takes the nearest earlier stop's delay
 (GTFS-Realtime delays propagate down the trip). Delays more than 20 minutes
@@ -117,7 +134,8 @@ Should either side object, removing the operator from `realtime_feeds.json`
   one every two seconds after that, whatever the cards ask.
 - **Outages.** A failing feed is not asked again for a minute (a static zip
   for 15 minutes), is logged once when it starts failing and once when it
-  answers again, and the cards keep the timetable meanwhile.
+  answers again, and the cards keep the timetable meanwhile (a static zip's
+  train numbers from before stay in use, see above).
 
 ## The action
 

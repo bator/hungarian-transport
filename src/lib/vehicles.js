@@ -1,4 +1,4 @@
-import { BKK_RAIL_BADGE, PLATFORM_IN_HEAD, PLATFORM_STRIP, vehicleIcon } from '../config.js';
+import { BKK_RAIL_BADGE, PLATFORM_IN_HEAD, PLATFORM_STRIP, RAIL_KIND_BADGE, vehicleIcon } from '../config.js';
 import { BkkLib } from '../lib/core.js';
 
 Object.assign(BkkLib, {
@@ -399,6 +399,9 @@ Object.assign(BkkLib, {
     BkkLib._applyEmmaKeyed(rows, BkkLib._hassEmmaKeyed(hass, pool));
     return rows;
   },
+  /* FUTÁR labels a személyvonat S (1.4.5): it shows as Sz. ELVIRA's kinds
+     come as SV (sebesvonat) and Gy (gyorsvonat, mavBoardRows), in MÁV's
+     own colours for them, the ones its GTFS gives. */
   applyRailBadge(row) {
     if (!row) return row;
     let key = String(row.label || '').trim().toUpperCase().normalize('NFC');
@@ -406,7 +409,8 @@ Object.assign(BkkLib, {
       row.label = 'Sz';
       key = 'SZ';
     }
-    let badge = BKK_RAIL_BADGE[key];
+    /* SV and Gy are train kinds only: a bus line of that name keeps its own colour. */
+    let badge = BKK_RAIL_BADGE[key] || (BkkLib.isTrainRow(row) ? RAIL_KIND_BADGE[key] : null);
     if (!badge && BkkLib.isTrainRow(row) && key
         && !BkkLib.suburbanLineLabel(key)
         && !BkkLib.genericRailLabel(key)

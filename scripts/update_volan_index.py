@@ -220,7 +220,8 @@ def persist_index(www_path: Path, base: Path) -> None:
             return
         _copy_shapes(www_path, www_path.parent, base)
         _atomic_copy(www_path, dest)
-        prune_shapes(dest, index_shapes(dest))
+        # Nobody is served from the durable copy: no grace for its old shapes.
+        prune_shapes(dest, index_shapes(dest), grace_s=0)
     except OSError as err:
         print(f"warn persist {www_path.name}: {type(err).__name__}", file=sys.stderr)
 

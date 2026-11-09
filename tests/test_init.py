@@ -8,11 +8,14 @@ from pathlib import Path
 import re
 
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+import voluptuous as vol
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
 
 from homeassistant.components.frontend import DATA_EXTRA_MODULE_URL
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntryDisabler
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
@@ -20,13 +23,17 @@ from homeassistant.util import dt as dt_util
 
 import custom_components.hungarian_transport as integration
 from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS, elvira, mav
+from custom_components.hungarian_transport import cache as cache_mod
 from custom_components.hungarian_transport.assets import asset_tag
 from custom_components.hungarian_transport.const import (
     DOMAIN,
     SERVICE_ELVIRA_BETWEEN,
+    SERVICE_REALTIME,
     SERVICE_REBUILD_MAV,
 )
 from custom_components.hungarian_transport.elvira import ELVIRA_URL, service_days
+
+from .test_cache import expiry_timers
 
 ORIGIN = "005510009"
 BUDAPEST = dt_util.get_time_zone("Europe/Budapest")
@@ -181,6 +188,7 @@ async def test_elvira_service_returns_rows(hass, aioclient_mock, freezer) -> Non
     now = dt_util.now(BUDAPEST).replace(microsecond=0)
     start = now + timedelta(minutes=30)
     dep, arr = _board(start, start + timedelta(minutes=62))
+    dep["endStation"] = {"name": "Szombathely"}
     aioclient_mock.post(
         ELVIRA_URL,
         json={"stationSchedulerDetails": {"departureScheduler": [dep], "arrivalScheduler": [arr]}},
@@ -189,13 +197,16 @@ async def test_elvira_service_returns_rows(hass, aioclient_mock, freezer) -> Non
     resp = await hass.services.async_call(
         DOMAIN,
         SERVICE_ELVIRA_BETWEEN,
-        {"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": 60},
+        {"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": 60, "dest_name": "Kelenföld"},
         blocking=True,
         return_response=True,
     )
 
+    assert "dest_error" not in resp
     rows = resp["departures"]
     assert len(rows) == 1
+    # The card's destination heads the row; the train's own terminus comes along.
+    assert rows[0]["head"] == "Kelenföld" and rows[0]["end"] == "Szombathely"
     assert rows[0]["booking"] is True
     assert rows[0]["platform"] == "6"
     assert rows[0]["travel"] == 62
@@ -233,6 +244,58 @@ async def test_elvira_asks_for_whole_boards_and_tomorrows_arrivals_in_the_evenin
         ("005503269", "2026-11-06", "2000"),
         ("005503269", "2026-11-07", "2000"),
     }
+
+
+@pytest.mark.parametrize(
+    ("moment", "minutes", "run", "tomorrow", "rounds"),
+    [
+        # Today's 62-minute run says a train leaving by 18:00 is in by 19:02.
+        ("2026-10-19 15:00:00+02:00", 180, True, False, 1),
+        # Leaving by 23:00 it can arrive past midnight, however short the
+        # run: asked for with the other boards, not after them.
+        ("2026-10-19 22:30:00+02:00", 30, True, True, 1),
+        # No run on today's boards to go by: ARRIVAL_WINDOW reaches midnight,
+        # which only today's boards could have ruled out.
+        ("2026-10-19 15:00:00+02:00", 180, False, True, 2),
+    ],
+)
+async def test_elvira_asks_tomorrows_arrivals_only_when_a_train_can_arrive_by_then(
+    hass, aioclient_mock, freezer, monkeypatch, moment, minutes, run, tomorrow, rounds
+) -> None:
+    """Tomorrow's destination board is several MB every ELVIRA_CACHE_TTL; it
+    holds only the trains arriving past midnight."""
+    freezer.move_to(moment)
+    fetches = []
+    fetch_boards = elvira._fetch_boards
+
+    async def counted(session, hass, wanted):
+        fetches.append(wanted)
+        return await fetch_boards(session, hass, wanted)
+
+    monkeypatch.setattr(elvira, "_fetch_boards", counted)
+    await _setup(hass)
+    now = dt_util.now(BUDAPEST).replace(microsecond=0)
+    start = now.replace(hour=12)
+    dep, arr = _board(start, start + timedelta(minutes=62))
+    aioclient_mock.post(ELVIRA_URL, side_effect=_boards(set(), [dep], [arr] if run else []))
+
+    resp = await hass.services.async_call(
+        DOMAIN,
+        SERVICE_ELVIRA_BETWEEN,
+        {"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": minutes},
+        blocking=True,
+        return_response=True,
+    )
+
+    assert "dest_error" not in resp
+    asked = {(c[2]["stationNumberCode"], c[2]["travelDate"][:10]) for c in aioclient_mock.mock_calls}
+    today = now.date().isoformat()
+    expected = {(ORIGIN, today), (DEST, today)}
+    if tomorrow:
+        expected.add((DEST, (now + timedelta(days=1)).date().isoformat()))
+    assert asked == expected
+    # Each round is one more ELVIRA round trip on a cold call.
+    assert len(fetches) == rounds
 
 
 async def test_elvira_service_shares_concurrent_requests(hass, aioclient_mock, freezer) -> None:
@@ -275,6 +338,174 @@ async def test_elvira_service_rejects_bad_codes(hass, aioclient_mock, data, key)
 
     assert err.value.translation_key == key
     assert aioclient_mock.call_count == 0
+
+
+async def test_elvira_service_rejects_a_long_dest_name(hass, aioclient_mock, freezer) -> None:
+    """dest_name heads every row: an unbounded one is the response times the
+    row count."""
+    freezer.move_to(NOON)
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+
+    def call(name):
+        return hass.services.async_call(
+            DOMAIN,
+            SERVICE_ELVIRA_BETWEEN,
+            {"origin_code": ORIGIN, "dest_code": DEST, "dest_name": name},
+            blocking=True,
+            return_response=True,
+        )
+
+    with pytest.raises(vol.Invalid):
+        await call("x" * 101)
+    assert aioclient_mock.call_count == 0
+    assert await call("x" * 100) == {"departures": []}
+
+
+async def test_elvira_at_moves_the_window(hass, aioclient_mock, freezer) -> None:
+    """A planner search for tomorrow 07:00 gets tomorrow's trains, not the
+    next eight hours from now; a time already past starts from now."""
+    freezer.move_to(NOON)
+    await _setup(hass)
+    now = dt_util.now(BUDAPEST).replace(microsecond=0)
+    at = (now + timedelta(days=1)).replace(hour=7, minute=0)
+    dep, arr = _board(at + timedelta(minutes=20), at + timedelta(minutes=82))
+    soon, _ = _board(now + timedelta(minutes=20), code="968")
+    aioclient_mock.post(ELVIRA_URL, side_effect=_boards(set(), [dep, soon], [arr]))
+
+    def call(when):
+        return hass.services.async_call(
+            DOMAIN,
+            SERVICE_ELVIRA_BETWEEN,
+            {"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": 60, "at": when},
+            blocking=True,
+            return_response=True,
+        )
+
+    resp = await call(int(at.timestamp()))
+    assert [(r["trainNumber"], r["dep"], r["travel"]) for r in resp["departures"]] == [
+        ("966", int((at + timedelta(minutes=20)).timestamp()), 62)
+    ]
+    asked = {(c[2]["stationNumberCode"], c[2]["travelDate"][:10]) for c in aioclient_mock.mock_calls}
+    assert asked == {(code, at.date().isoformat()) for code in (ORIGIN, DEST)}
+
+    # The card's clock may be behind: an hour ago is now.
+    resp = await call(str(int((now - timedelta(hours=1)).timestamp())))
+    assert [r["trainNumber"] for r in resp["departures"]] == ["968"]
+
+    for when in (now + timedelta(days=9), now - timedelta(days=2)):
+        with pytest.raises(vol.Invalid):
+            await call(int(when.timestamp()))
+    # A YAML .inf is out of range too, not an OverflowError out of the schema.
+    for when in (float("inf"), float("-inf")):
+        with pytest.raises(vol.Invalid):
+            await call(when)
+
+
+async def test_elvira_later_start_leaves_out_trains_leaving_before_it(hass, aioclient_mock, freezer) -> None:
+    """Against the clock a train that left and arrives later is under way;
+    before a later `at` it is one the search starts after."""
+    freezer.move_to(NOON)
+    await _setup(hass)
+    now = dt_util.now(BUDAPEST).replace(microsecond=0)
+    at = (now + timedelta(days=3)).replace(hour=10, minute=0)
+    early, early_arr = _board(at - timedelta(minutes=30), at + timedelta(minutes=20), code="900")
+    soon, soon_arr = _board(at + timedelta(minutes=1), at + timedelta(minutes=61), code="901")
+    later, later_arr = _board(at + timedelta(minutes=30), at + timedelta(minutes=90), code="902")
+    for i, row in enumerate((early, early_arr, soon, soon_arr, later, later_arr)):
+        row["trainId"] = f"t{i // 2}"
+    aioclient_mock.post(
+        ELVIRA_URL, side_effect=_boards(set(), [early, soon, later], [early_arr, soon_arr, later_arr])
+    )
+
+    resp = await hass.services.async_call(
+        DOMAIN,
+        SERVICE_ELVIRA_BETWEEN,
+        {"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": 60, "at": int(at.timestamp())},
+        blocking=True,
+        return_response=True,
+    )
+    assert [(r["trainNumber"], r["destHit"]) for r in resp["departures"]] == [("901", True), ("902", True)]
+
+
+@pytest.mark.parametrize(
+    ("days", "yesterday"),
+    [
+        # Tomorrow 01:30: a late train of today's can still be due then.
+        (1, True),
+        # Three days ahead nothing of the day before runs yet: no estimates,
+        # and its board ends at its midnight.
+        (3, False),
+    ],
+)
+async def test_elvira_later_start_after_midnight_asks_the_day_before_only_when_it_runs(
+    hass, aioclient_mock, freezer, days, yesterday
+) -> None:
+    freezer.move_to(NOON)
+    await _setup(hass)
+    now = dt_util.now(BUDAPEST).replace(microsecond=0)
+    at = (now + timedelta(days=days)).replace(hour=1, minute=30)
+    aioclient_mock.post(ELVIRA_URL, side_effect=_boards(set(), []))
+
+    await hass.services.async_call(
+        DOMAIN,
+        SERVICE_ELVIRA_BETWEEN,
+        {"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": 60, "at": int(at.timestamp())},
+        blocking=True,
+        return_response=True,
+    )
+    asked = {(c[2]["stationNumberCode"], c[2]["travelDate"][:10]) for c in aioclient_mock.mock_calls}
+    expected = {(code, at.date().isoformat()) for code in (ORIGIN, DEST)}
+    if yesterday:
+        expected |= {(code, (at - timedelta(days=1)).date().isoformat()) for code in (ORIGIN, DEST)}
+    assert asked == expected
+
+
+async def test_elvira_answers_within_its_budget(hass, aioclient_mock, freezer, monkeypatch) -> None:
+    """The second round (tomorrow's arrival board) gets what is left of
+    ELVIRA_CALL_BUDGET: one past it is a destination board that did not
+    arrive, and it still lands in the cache for the next poll."""
+    freezer.move_to("2026-10-19 15:00:00+02:00")
+    monkeypatch.setattr(elvira, "ELVIRA_CALL_BUDGET", 5)
+    await _setup(hass)
+    now = dt_util.now(BUDAPEST).replace(microsecond=0)
+    tomorrow = (now + timedelta(days=1)).date().isoformat()
+    dep, _arr = _board(now.replace(hour=12))
+    answer = _boards(set(), [dep])
+    release = asyncio.Event()
+
+    async def side_effect(method, url, data):
+        if data["travelDate"][:10] == tomorrow:
+            # Without a run on today's boards the second round asks for
+            # it, and ELVIRA takes its time.
+            freezer.tick(6)
+            await release.wait()
+        return await answer(method, url, data)
+
+    aioclient_mock.post(ELVIRA_URL, side_effect=side_effect)
+    data = {"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": 180}
+
+    def call():
+        return hass.services.async_call(
+            DOMAIN, SERVICE_ELVIRA_BETWEEN, data, blocking=True, return_response=True
+        )
+
+    task = asyncio.ensure_future(call())
+    for _ in range(50):
+        await asyncio.sleep(0)
+    done = task.done()
+    release.set()
+    resp = await task
+    assert done
+    assert resp["dest_error"] == "elvira_unavailable"
+
+    # The board's request went on without the answer.
+    await hass.async_block_till_done(wait_background_tasks=True)
+    asked = {(c[2]["stationNumberCode"], c[2]["travelDate"][:10]) for c in aioclient_mock.mock_calls}
+    assert (DEST, tomorrow) in asked
+    calls = aioclient_mock.call_count
+    assert "dest_error" not in await call()
+    assert aioclient_mock.call_count == calls
 
 
 async def _elvira_call(hass):
@@ -343,7 +574,7 @@ async def test_elvira_skips_malformed_rows(hass, aioclient_mock, freezer) -> Non
 
     rows = (await _elvira_call(hass))["departures"]
     assert [(row["trainNumber"], row["booking"]) for row in rows] == [("966", True), ("968", False)]
-    assert rows[1]["label"] == "GÖCSEJ" and rows[1]["head"] == ""
+    assert rows[1]["label"] == "GÖCSEJ" and rows[1]["head"] == "" and rows[1]["end"] == ""
 
 
 async def test_elvira_timeout_is_an_error(hass, aioclient_mock) -> None:
@@ -381,17 +612,18 @@ async def test_elvira_outage_is_not_an_error_line_per_poll(
     assert len(_elvira_warnings(caplog)) == 2
 
 
-def _boards(failing, departures):
+def _boards(failing, departures, arrivals=()):
     """aioclient_mock side effect: 503 for the (station, day) boards in
     ``failing`` (a bare station code fails all its days), else the origin's
-    ``departures`` of that day."""
+    ``departures`` and the destination's ``arrivals`` of that day."""
 
     async def side_effect(method, url, data):
         code, day = data["stationNumberCode"], data["travelDate"][:10]
         if code in failing or (code, day) in failing:
             return AiohttpClientMockResponse(method, url, status=503)
         deps = [dep for dep in departures if code == ORIGIN and dep["start"][:10] == day]
-        details = {"departureScheduler": deps, "arrivalScheduler": []}
+        arrs = [arr for arr in arrivals if code == DEST and arr["arrive"][:10] == day]
+        details = {"departureScheduler": deps, "arrivalScheduler": arrs}
         return AiohttpClientMockResponse(method, url, json={"stationSchedulerDetails": details})
 
     return side_effect
@@ -417,10 +649,13 @@ async def test_elvira_failed_destination_board_counts_as_empty(
     aioclient_mock.post(ELVIRA_URL, side_effect=_boards({DEST}, [dep]))
 
     for _ in range(3):
-        rows = (await _elvira_call(hass))["departures"]
+        resp = await _elvira_call(hass)
+        rows = resp["departures"]
         assert len(rows) == 1
         assert rows[0]["platform"] == "6" and rows[0]["booking"] is True
         assert rows[0]["travel"] is None and rows[0]["destHit"] is False
+        # No destHit can be trusted: a MÁV card lists only those rows.
+        assert resp["dest_error"] == "elvira_unavailable"
     warnings = _elvira_warnings(caplog)
     assert len(warnings) == 1 and DEST in warnings[0] and "HTTP 503" in warnings[0]
 
@@ -428,7 +663,7 @@ async def test_elvira_failed_destination_board_counts_as_empty(
     aioclient_mock.post(ELVIRA_URL, side_effect=_boards(set(), [dep]))
     caplog.clear()
     await _elvira_call(hass)
-    await _elvira_call(hass)
+    assert "dest_error" not in await _elvira_call(hass)
     assert [r.getMessage() for r in caplog.records if "answers again" in r.getMessage()] == [
         f"ELVIRA StationInfo {DEST} answers again"
     ]
@@ -448,8 +683,44 @@ async def test_elvira_failed_extra_day_board_counts_as_empty(hass, aioclient_moc
     dep, _arr = _board(now + timedelta(minutes=10))
     aioclient_mock.post(ELVIRA_URL, side_effect=_boards({(ORIGIN, yesterday)}, [dep]))
 
-    rows = (await _elvira_call(hass))["departures"]
-    assert [row["platform"] for row in rows] == ["6"]
+    resp = await _elvira_call(hass)
+    assert [row["platform"] for row in resp["departures"]] == ["6"]
+    assert "dest_error" not in resp
+
+
+@pytest.mark.parametrize(
+    ("late", "dest_error"),
+    [
+        # Yesterday's origin board has nothing left to leave: its arrivals
+        # are no destHit of any row, so no dest_error for them.
+        (None, False),
+        # A train of yesterday's still to leave (23:50, 40 minutes late):
+        # its arrival is on yesterday's destination board, which failed.
+        (timedelta(minutes=40), True),
+    ],
+)
+async def test_elvira_failed_yesterdays_dest_board_matters_only_for_yesterdays_trains(
+    hass, aioclient_mock, freezer, late, dest_error
+) -> None:
+    """A train on today's origin board arrives on today's or tomorrow's
+    destination board, never yesterday's."""
+    freezer.move_to("2026-10-19 00:30:00+02:00")
+    await _setup(hass)
+    now = dt_util.now(BUDAPEST).replace(microsecond=0)
+    yesterday = (now - timedelta(days=1)).date().isoformat()
+    dep, arr = _board(now + timedelta(minutes=10), now + timedelta(minutes=50))
+    old_dep, _arr = _board(now.replace(hour=0, minute=0) - timedelta(minutes=10), code="955")
+    old_dep["trainId"] = "t0"
+    if late is not None:
+        old_dep["actualOrEstimatedStart"] = (now.replace(hour=0, minute=0) + timedelta(minutes=30)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+    aioclient_mock.post(ELVIRA_URL, side_effect=_boards({(DEST, yesterday)}, [old_dep, dep], [arr]))
+
+    resp = await _elvira_call(hass)
+    assert [row["trainNumber"] for row in resp["departures"]] == (["955", "966"] if late else ["966"])
+    assert resp["departures"][-1]["destHit"] is True
+    assert ("dest_error" in resp) is dest_error
 
 
 async def test_elvira_failed_extra_day_board_is_not_an_outage(
@@ -467,7 +738,11 @@ async def test_elvira_failed_extra_day_board_is_not_an_outage(
         ELVIRA_URL, side_effect=_boards({(ORIGIN, yesterday), (DEST, yesterday)}, [dep])
     )
 
-    assert len((await _elvira_call(hass))["departures"]) == 1
+    resp = await _elvira_call(hass)
+    assert len(resp["departures"]) == 1
+    # Without yesterday's origin board no row is a train of yesterday's, so
+    # yesterday's arrivals are nobody's destHit.
+    assert "dest_error" not in resp
     assert _elvira_warnings(caplog) == []
 
     aioclient_mock.clear_requests()
@@ -581,6 +856,106 @@ async def test_services_refuse_while_the_entry_is_unloaded(
     assert await _elvira_call(hass) == {"departures": []}
 
 
+@pytest.mark.parametrize("starting", [False, True], ids=["reload", "startup"])
+async def test_services_answer_without_an_error_while_the_entry_comes_up(
+    hass, aioclient_mock, caplog, monkeypatch, starting
+) -> None:
+    """A reload (an options save) or Home Assistant's startup is no outage:
+    the cards' polls get an error code in the answer, not an exception the
+    websocket API logs at ERROR."""
+    entry = await _setup(hass)
+    answers: list[tuple] = []
+    gate = asyncio.Event()
+    real_setup_entry = integration.async_setup_entry
+
+    async def slow_setup_entry(hass, entry):
+        # The window: async_setup_entry still reading the indexes.
+        answers.append((await _elvira_call(hass), await _realtime_call(hass)))
+        gate.set()
+        return await real_setup_entry(hass, entry)
+
+    monkeypatch.setattr(integration, "async_setup_entry", slow_setup_entry)
+    if starting:
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        _set_state(hass, CoreState.not_running)
+        # Before the entry's setup has begun, as well as during it.
+        answers.append((await _elvira_call(hass), await _realtime_call(hass)))
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        _set_state(hass, CoreState.running)
+    else:
+        assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert gate.is_set()
+    assert len(answers) == (2 if starting else 1)
+    for elvira_answer, rt_answer in answers:
+        assert elvira_answer["departures"] == [] and elvira_answer["error"] == "elvira_unavailable"
+        assert rt_answer == {"feed": "volan", "trips": {}, "error": "rt_unavailable"}
+    assert aioclient_mock.call_count == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+async def test_services_refuse_while_home_assistant_starts_with_the_entry_disabled(hass) -> None:
+    entry = await _setup(hass)
+    assert await hass.config_entries.async_set_disabled_by(
+        entry.entry_id, ConfigEntryDisabler.USER
+    )
+    _set_state(hass, CoreState.not_running)
+    try:
+        with pytest.raises(ServiceValidationError) as err:
+            await _elvira_call(hass)
+    finally:
+        _set_state(hass, CoreState.running)
+    assert err.value.translation_key == "not_loaded"
+
+
+async def test_elvira_boards_leave_memory_when_their_ttl_ends(hass, aioclient_mock, monkeypatch) -> None:
+    """Megabytes per board: once the dashboards close nobody polls again,
+    so the boards go at the end of their TTL, not at some later call."""
+    clock = [1000.0]
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock[0])
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+    await _elvira_call(hass)
+    cache = hass.data[DOMAIN]["elvira_cache"]
+    assert len(cache)
+
+    clock[0] += elvira.ELVIRA_CACHE_TTL
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=elvira.ELVIRA_CACHE_TTL), fire_all=True)
+    await hass.async_block_till_done()
+    assert len(cache) == 0
+
+
+async def test_elvira_expiry_timer_goes_when_home_assistant_stops(hass, aioclient_mock, freezer) -> None:
+    freezer.move_to(NOON)
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+    await _elvira_call(hass)
+    assert len(expiry_timers(hass)) == 1
+
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert expiry_timers(hass) == []
+
+
+async def _realtime_call(hass):
+    return await hass.services.async_call(
+        DOMAIN,
+        SERVICE_REALTIME,
+        {"feed": "volan", "trips": [{"key": "a"}]},
+        blocking=True,
+        return_response=True,
+    )
+
+
+def _set_state(hass: HomeAssistant, state: CoreState) -> None:
+    """Home Assistant's core state (set_state where the harness has it)."""
+    if hasattr(hass, "set_state"):
+        hass.set_state(state)
+    else:
+        hass.state = state
+
+
 def _station(n: int) -> str:
     return f"0055{n:05d}"
 
@@ -646,7 +1021,7 @@ async def test_station_answering_again_is_logged_despite_a_refused_board(
 
     aioclient_mock.clear_requests()
     aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
-    assert await _elvira_call(hass) == {"departures": []}
+    assert await _elvira_call(hass) == {"departures": [], "dest_error": "elvira_rate_limited"}
     assert aioclient_mock.call_count == 3
     again = [r.getMessage() for r in caplog.records if "answers again" in r.getMessage()]
     assert sorted(again) == sorted(f"ELVIRA StationInfo {code} answers again" for code in (ORIGIN, DEST))
@@ -665,7 +1040,7 @@ async def test_todays_origin_board_gets_the_last_token(
     limit._tokens = 1.0
     hass.data[DOMAIN]["elvira_rate"] = limit
 
-    assert await _elvira_call(hass) == {"departures": []}
+    assert await _elvira_call(hass) == {"departures": [], "dest_error": "elvira_rate_limited"}
     assert [(c[2]["stationNumberCode"], c[2]["travelDate"][:10]) for c in aioclient_mock.mock_calls] == [
         (ORIGIN, "2026-10-21")
     ]
@@ -703,9 +1078,9 @@ def test_exception_translations_are_raised_and_error_codes_documented(lang) -> N
     codes = set(re.findall(r'"error": "(\w+)"', (_PKG / "__init__.py").read_text(encoding="utf-8")))
     assert codes == {
         "elvira_rate_limited", "elvira_unavailable", "futar_auth", "futar_bad_request", "futar_rate_limited",
-        "futar_unavailable",
+        "futar_unavailable", "rt_unavailable",
     }
     for code in codes:
         service = code.split("_")[0]
-        service = "elvira_between" if service == "elvira" else service
+        service = {"elvira": "elvira_between", "rt": "realtime"}.get(service, service)
         assert code in strings["services"][service]["description"], code

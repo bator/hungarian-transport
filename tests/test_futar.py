@@ -1,20 +1,25 @@
 """The FUTÁR proxy service keeps the BKK key in Home Assistant."""
 
 import asyncio
+from datetime import timedelta
 import re
 from pathlib import Path
 import logging
 
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.setup import async_setup_component
+from homeassistant.util import dt as dt_util
 
-from custom_components.hungarian_transport import futar
+from custom_components.hungarian_transport import cache as cache_mod, futar
 from custom_components.hungarian_transport.const import CONF_API_KEY, DOMAIN, SERVICE_FUTAR
 from custom_components.hungarian_transport.futar import BKK_API
+
+from .test_cache import expiry_timers
 
 SEARCH = f"{BKK_API}/search.json"
 
@@ -97,6 +102,41 @@ async def test_shares_and_caches_identical_requests(hass, aioclient_mock) -> Non
 
     await _call(hass, params={"query": "Deli"})
     assert aioclient_mock.call_count == 2
+
+
+async def test_cached_answers_go_when_their_ttl_ends(hass, aioclient_mock, monkeypatch) -> None:
+    """Like ELVIRA's boards: once the dashboards close nobody polls again,
+    so the answers go at the end of their TTL, and the timer goes with the
+    entry or when Home Assistant stops."""
+    clock = [1000.0]
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock[0])
+    caches = []
+    monkeypatch.setattr(
+        futar, "SharedTTLCache", lambda *args: caches.append(cache_mod.SharedTTLCache(*args)) or caches[-1]
+    )
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    entry = await _setup(hass)
+
+    await _call(hass)
+    (cache,) = caches
+    assert len(cache) == 1 and len(expiry_timers(hass)) == 1
+    clock[0] += futar.FUTAR_CACHE_TTL
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=futar.FUTAR_CACHE_TTL), fire_all=True)
+    await hass.async_block_till_done()
+    assert len(cache) == 0 and expiry_timers(hass) == []
+
+    await _call(hass)
+    assert len(expiry_timers(hass)) == 1
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    assert expiry_timers(hass) == []
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    await _call(hass)
+    assert len(expiry_timers(hass)) == 1
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert expiry_timers(hass) == []
 
 
 async def test_only_card_endpoints_are_allowed(hass, aioclient_mock) -> None:
