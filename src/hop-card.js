@@ -1756,7 +1756,9 @@ ${this._stopPinCss()}
         .map((row) => Object.assign({}, row));
       return fresh.concat(kept).sort((a, b) => (a.dep || 0) - (b.dep || 0));
     };
-    const run = async () => {
+    /* knownBoard: the ELVIRA answer this poll already has (the not_loaded
+       switch to FUTÁR below), not asked for a second time. */
+    const run = async (knownBoard) => {
       if (gen !== this._gen) return;
       /* This card's own index URLs, for every lookup of this run (J-2): never a module-wide setting. */
       const lib = BkkLib.withIndexes(cfg);
@@ -1776,7 +1778,7 @@ ${this._stopPinCss()}
           return;
         }
         const wantElvira = (mode === 'mav' || mode === 'all') && BkkLib.hasElvira(this._hass);
-        const elviraP = wantElvira
+        const elviraP = knownBoard ? Promise.resolve(knownBoard) : wantElvira
           ? lib.elviraBoard(
             this._hass,
             cfg.stopId,
@@ -1883,7 +1885,7 @@ ${this._stopPinCss()}
             /* The entry is unloaded (disabled, reloading) and its services
                stay listed: a card with a key reads FUTÁR until it is back. */
             this._mavViaFutarUntil = Date.now() + BkkLib._elviraRetryMs;
-            return run();
+            return run(board);
           }
           elviraRows = BkkLib.mavBoardRows(board.rows);
           if (board.error) {
