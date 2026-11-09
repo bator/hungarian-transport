@@ -4602,6 +4602,77 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     JSON.stringify({ before, after: counts.route, kept, newest, sizes }));
 }
 {
+  /* A dashboard opened again reads its route patterns from the browser: no
+     route-details while they may still prove a trip, again once they are
+     three hours old or from yesterday, and storage that fails costs nothing. */
+  const keepFetch = Lib.fetch;
+  const keepMem = Lib._mem;
+  const store = new Map();
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => { store.set(k, String(v)); },
+      removeItem: (k) => { store.delete(k); },
+    },
+  });
+  let routeCalls = 0;
+  Lib.fetch = async (_k, path) => {
+    if (path === 'route-details.json') routeCalls += 1;
+    return {
+      data: {
+        entry: { variants: [{ name: 'Kelenföld', headsign: 'Kelenföld', stopIds: ['AZP_1', 'AZP_2'] }] },
+        references: { stops: {
+          AZP_1: { id: 'AZP_1', name: 'Keleti', parentStationId: 'AZP_CS', lat: 47.5, lon: 19.08, code: 'F01131' },
+          AZP_2: { id: 'AZP_2', name: 'Kelenföld', lat: 47.46, lon: 19.02 },
+        } },
+      },
+    };
+  };
+  /* A page load: the page's memos are new, the browser's storage is not. */
+  const page = async (rid = 'AZP_R1') => {
+    Lib.flushRoutePatterns();
+    Lib._mem = {};
+    Lib._storedPatterns = null;
+    return Lib.loadRoutePattern('k', {}, rid);
+  };
+  let writes = 0;
+  const first = await page();
+  const second = await page();
+  const saved = JSON.parse(store.get('hungarian_transport_route_patterns') || '{}').AZP_R1 || {};
+  const afterReload = routeCalls;
+  saved.at -= 4 * 3600000;
+  store.set('hungarian_transport_route_patterns', JSON.stringify({ AZP_R1: saved }));
+  await page();
+  const afterStale = routeCalls;
+  /* Many routes in one page load: one write, not one per route. */
+  const setItem = globalThis.localStorage.setItem;
+  globalThis.localStorage.setItem = (k, v) => { writes += 1; setItem(k, v); };
+  Lib.flushRoutePatterns();
+  Lib._mem = {};
+  Lib._storedPatterns = null;
+  writes = 0;
+  await Promise.all(['AZP_A', 'AZP_B', 'AZP_C', 'AZP_D'].map((rid) => Lib.loadRoutePattern('k', {}, rid)));
+  Lib.flushRoutePatterns();
+  const batched = writes;
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: { getItem: () => { throw new Error('denied'); }, setItem: () => { throw new Error('denied'); } },
+  });
+  const noStorage = await page('AZP_E');
+  Lib.flushRoutePatterns();
+  Lib.fetch = keepFetch;
+  Lib._mem = keepMem;
+  Lib._storedPatterns = null;
+  delete globalThis.localStorage;
+  check('a route pattern from an earlier page load spares its route-details until it is three hours old',
+    afterReload === 1 && afterStale === 2 && routeCalls === 7 && batched === 1
+      && second.stops.AZP_1.parentStationId === 'AZP_CS' && second.variants[0].ids.join() === 'AZP_1,AZP_2'
+      && Lib.patternFresh(second) && !('lat' in saved.stops.AZP_1) && !('code' in saved.stops.AZP_1)
+      && !!first && !!noStorage && noStorage.variants.length === 1,
+    JSON.stringify({ afterReload, afterStale, routeCalls, batched, stop: saved.stops && saved.stops.AZP_1 }));
+}
+{
   /* A through-check row is a new object: it still gets its ride time. */
   const keep = { departures: Lib.departures, travelMin: Lib.travelMin };
   const now = Math.floor(Date.now() / 1000);

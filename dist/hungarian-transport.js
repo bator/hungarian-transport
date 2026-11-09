@@ -5641,7 +5641,52 @@ Object.assign(BkkLib, {
 // src/lib/departures.js
 var BOARD_CAP_ROWS = 55;
 var PATTERN_PROOF_MS = 3 * 36e5;
+var ROUTE_PATTERNS_KEY = "hungarian_transport_route_patterns";
+var ROUTE_PATTERNS_KEEP = 120;
+var patternsStored = () => {
+  if (BkkLib._storedPatterns) return BkkLib._storedPatterns;
+  let all = {};
+  try {
+    all = JSON.parse(globalThis.localStorage.getItem(ROUTE_PATTERNS_KEY) || "{}");
+  } catch (_e) {
+  }
+  BkkLib._storedPatterns = all && typeof all === "object" ? all : {};
+  return BkkLib._storedPatterns;
+};
+var patternsWrite = () => {
+  BkkLib._patternsWriteTimer = null;
+  try {
+    const all = patternsStored();
+    const out = {};
+    Object.keys(all).filter((k) => BkkLib.patternFresh(all[k])).sort((a, b) => all[b].at - all[a].at).slice(0, ROUTE_PATTERNS_KEEP).forEach((k) => {
+      out[k] = all[k];
+    });
+    BkkLib._storedPatterns = out;
+    globalThis.localStorage.setItem(ROUTE_PATTERNS_KEY, JSON.stringify(out));
+  } catch (_e) {
+  }
+};
+var patternStore = (routeId, packed) => {
+  const stops = {};
+  Object.keys(packed.stops || {}).forEach((id) => {
+    const st = packed.stops[id] || {};
+    stops[id] = { id: st.id || id, name: st.name || "", parentStationId: st.parentStationId || "" };
+  });
+  patternsStored()[routeId] = { variants: packed.variants, stops, at: packed.at };
+  if (!BkkLib._patternsWriteTimer) BkkLib._patternsWriteTimer = setTimeout(patternsWrite, 2e3);
+};
+if (typeof globalThis.addEventListener === "function") {
+  globalThis.addEventListener("pagehide", () => BkkLib.flushRoutePatterns());
+}
 Object.assign(BkkLib, {
+  _storedPatterns: null,
+  _patternsWriteTimer: null,
+  /* The pending write now (tests, and a page about to go). */
+  flushRoutePatterns() {
+    if (!BkkLib._patternsWriteTimer) return;
+    clearTimeout(BkkLib._patternsWriteTimer);
+    patternsWrite();
+  },
   async addTransitousVolanStops(byId, q, motisHits) {
     const motis = motisHits || await BkkLib.searchStopsTransitous(q);
     let idx = null;
@@ -5828,6 +5873,10 @@ Object.assign(BkkLib, {
   async loadRoutePattern(apiKey, cache, routeId, background, fresh) {
     const hit = BkkLib._cached(cache, routeId);
     if (hit && hit.variants && (!fresh || BkkLib.patternFresh(hit))) return hit;
+    const kept = patternsStored()[routeId];
+    if (BkkLib.patternFresh(kept) && Array.isArray(kept.variants) && kept.stops && typeof kept.stops === "object") {
+      return BkkLib._store(cache, routeId, kept);
+    }
     if (BkkLib._inflight[routeId]) return BkkLib._inflight[routeId];
     const p = (async () => {
       try {
@@ -5845,6 +5894,7 @@ Object.assign(BkkLib, {
           stops: ((data.data || {}).references || {}).stops || {},
           at: Date.now()
         };
+        patternStore(routeId, packed);
         return BkkLib._store(cache, routeId, packed);
       } finally {
         delete BkkLib._inflight[routeId];
