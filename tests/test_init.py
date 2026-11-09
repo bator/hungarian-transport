@@ -247,22 +247,32 @@ async def test_elvira_asks_for_whole_boards_and_tomorrows_arrivals_in_the_evenin
 
 
 @pytest.mark.parametrize(
-    ("moment", "minutes", "run", "tomorrow"),
+    ("moment", "minutes", "run", "tomorrow", "rounds"),
     [
         # Today's 62-minute run says a train leaving by 18:00 is in by 19:02.
-        ("2026-10-19 15:00:00+02:00", 180, True, False),
-        # Leaving by 23:00 it can arrive past midnight.
-        ("2026-10-19 22:30:00+02:00", 30, True, True),
-        # No run on today's boards to go by: ARRIVAL_WINDOW reaches midnight.
-        ("2026-10-19 15:00:00+02:00", 180, False, True),
+        ("2026-10-19 15:00:00+02:00", 180, True, False, 1),
+        # Leaving by 23:00 it can arrive past midnight, however short the
+        # run: asked for with the other boards, not after them.
+        ("2026-10-19 22:30:00+02:00", 30, True, True, 1),
+        # No run on today's boards to go by: ARRIVAL_WINDOW reaches midnight,
+        # which only today's boards could have ruled out.
+        ("2026-10-19 15:00:00+02:00", 180, False, True, 2),
     ],
 )
 async def test_elvira_asks_tomorrows_arrivals_only_when_a_train_can_arrive_by_then(
-    hass, aioclient_mock, freezer, moment, minutes, run, tomorrow
+    hass, aioclient_mock, freezer, monkeypatch, moment, minutes, run, tomorrow, rounds
 ) -> None:
     """Tomorrow's destination board is several MB every ELVIRA_CACHE_TTL; it
     holds only the trains arriving past midnight."""
     freezer.move_to(moment)
+    fetches = []
+    fetch_boards = elvira._fetch_boards
+
+    async def counted(session, hass, wanted):
+        fetches.append(wanted)
+        return await fetch_boards(session, hass, wanted)
+
+    monkeypatch.setattr(elvira, "_fetch_boards", counted)
     await _setup(hass)
     now = dt_util.now(BUDAPEST).replace(microsecond=0)
     start = now.replace(hour=12)
@@ -284,6 +294,8 @@ async def test_elvira_asks_tomorrows_arrivals_only_when_a_train_can_arrive_by_th
     if tomorrow:
         expected.add((DEST, (now + timedelta(days=1)).date().isoformat()))
     assert asked == expected
+    # Each round is one more ELVIRA round trip on a cold call.
+    assert len(fetches) == rounds
 
 
 async def test_elvira_service_shares_concurrent_requests(hass, aioclient_mock, freezer) -> None:
@@ -566,6 +578,41 @@ async def test_elvira_failed_extra_day_board_counts_as_empty(hass, aioclient_moc
     assert "dest_error" not in resp
 
 
+@pytest.mark.parametrize(
+    ("late", "dest_error"),
+    [
+        # Yesterday's origin board has nothing left to leave: its arrivals
+        # are no destHit of any row, so no dest_error for them.
+        (None, False),
+        # A train of yesterday's still to leave (23:50, 40 minutes late):
+        # its arrival is on yesterday's destination board, which failed.
+        (timedelta(minutes=40), True),
+    ],
+)
+async def test_elvira_failed_yesterdays_dest_board_matters_only_for_yesterdays_trains(
+    hass, aioclient_mock, freezer, late, dest_error
+) -> None:
+    """A train on today's origin board arrives on today's or tomorrow's
+    destination board, never yesterday's."""
+    freezer.move_to("2026-10-19 00:30:00+02:00")
+    await _setup(hass)
+    now = dt_util.now(BUDAPEST).replace(microsecond=0)
+    yesterday = (now - timedelta(days=1)).date().isoformat()
+    dep, arr = _board(now + timedelta(minutes=10), now + timedelta(minutes=50))
+    old_dep, _arr = _board(now.replace(hour=0, minute=0) - timedelta(minutes=10), code="955")
+    old_dep["trainId"] = "t0"
+    if late is not None:
+        old_dep["actualOrEstimatedStart"] = (now.replace(hour=0, minute=0) + timedelta(minutes=30)).strftime(
+            "%Y-%m-%dT%H:%M:%S"
+        )
+    aioclient_mock.post(ELVIRA_URL, side_effect=_boards({(DEST, yesterday)}, [old_dep, dep], [arr]))
+
+    resp = await _elvira_call(hass)
+    assert [row["trainNumber"] for row in resp["departures"]] == (["955", "966"] if late else ["966"])
+    assert resp["departures"][-1]["destHit"] is True
+    assert ("dest_error" in resp) is dest_error
+
+
 async def test_elvira_failed_extra_day_board_is_not_an_outage(
     hass, aioclient_mock, freezer, caplog
 ) -> None:
@@ -583,8 +630,9 @@ async def test_elvira_failed_extra_day_board_is_not_an_outage(
 
     resp = await _elvira_call(hass)
     assert len(resp["departures"]) == 1
-    # Yesterday's late arrivals are missing from the destHit rows.
-    assert resp["dest_error"] == "elvira_unavailable"
+    # Without yesterday's origin board no row is a train of yesterday's, so
+    # yesterday's arrivals are nobody's destHit.
+    assert "dest_error" not in resp
     assert _elvira_warnings(caplog) == []
 
     aioclient_mock.clear_requests()

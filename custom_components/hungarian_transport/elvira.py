@@ -489,6 +489,22 @@ async def _fetch_boards(session, hass, wanted) -> list:
     return results
 
 
+def _dest_board_needed(day: date, now: datetime, origin: list, days: list[date], tz) -> bool:
+    """Whether the destination's board of this day can hold the arrival of
+    a row. One before today's only can for a train of an origin board of
+    before today still to leave (a late one): a train of today's origin
+    board arrives today or later, and one that already left is no row."""
+    if day >= now.date():
+        return True
+    return any(
+        start is not None and start >= now - ARRIVAL_GRACE
+        for board, origin_day in zip(origin, days)
+        if origin_day <= day and not isinstance(board, ElviraError)
+        for row in board[0]
+        for start in (_iso_dt(row.get("actualOrEstimatedStart") or row.get("start"), tz),)
+    )
+
+
 async def elvira_between(session, hass, origin_code, dest_code, minutes_after=180, dest_name="", at=None):
     """Origin departures towards dest: a MÁV card's rows, an overlay for others.
 
@@ -501,7 +517,9 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
 
     Returns (rows, dest_failure): dest_failure is the ElviraError of a
     destination board the window needed and did not get (an outage before a
-    refusal), None when every one arrived. Without it the rows' destHit
+    refusal), None when every one arrived. Yesterday's is needed only while
+    yesterday's origin board has a train still to leave
+    (_dest_board_needed). Without it the rows' destHit
     cannot be trusted, and a MÁV card lists only the destHit rows.
 
     `at` (epoch seconds) starts the window later, for a planner's timed
@@ -518,24 +536,30 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     # Real minutes ahead, not wall-clock ones, on the night the clocks change.
     latest = (now.astimezone(UTC) + timedelta(minutes=int(minutes_after or 180))).astimezone(tz)
     days = service_days(now, latest)
+    tomorrow = latest.date() + timedelta(days=1)
+    # Tomorrow's arrival board only holds trains that get in past midnight;
+    # it is several MB every ELVIRA_CACHE_TTL. Even the shortest run gets a
+    # train leaving by `latest` in past midnight when LATE_RUN_MARGIN does:
+    # that board comes with the others. Otherwise today's boards say how long
+    # this pair's trains take, and a second round asks for it if needed.
+    dest_days = list(days)
+    if (latest + LATE_RUN_MARGIN).date() >= tomorrow:
+        dest_days.append(tomorrow)
     # Today's origin board first: the call fails without it, so with the
-    # rate limit's last token left it is the board that gets it.
+    # rate limit's last token left it is the board that gets it. Tomorrow's
+    # last, the board the rate limit refuses first.
     wanted = [(origin_code, now.date())] + [
         (code, day)
-        for code in (origin_code, dest_code)
-        for day in days
+        for code, code_days in ((origin_code, days), (dest_code, dest_days))
+        for day in code_days
         if (code, day) != (origin_code, now.date())
     ]
     boards = dict(zip(wanted, await _fetch_boards(session, hass, wanted)))
-    dest_days = list(days)
-    tomorrow = latest.date() + timedelta(days=1)
-    if (latest + ARRIVAL_WINDOW).date() >= tomorrow and not isinstance(
-        boards[(origin_code, now.date())], ElviraError
+    if (
+        tomorrow not in dest_days
+        and (latest + ARRIVAL_WINDOW).date() >= tomorrow
+        and not isinstance(boards[(origin_code, now.date())], ElviraError)
     ):
-        # Tomorrow's arrival board only holds trains that get in past
-        # midnight; it is several MB every ELVIRA_CACHE_TTL. Today's boards
-        # say how long this pair's trains take. Asked for last, so it is the
-        # board the rate limit refuses first.
         arrived = {key: board for key, board in boards.items() if not isinstance(board, ElviraError)}
         odep = [row for day in days for row in arrived.get((origin_code, day), ([], []))[0]]
         darr = [row for day in days for row in arrived.get((dest_code, day), ([], []))[1]]
@@ -574,7 +598,11 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     arrived = [board for board in origin if not isinstance(board, ElviraError)]
     odep = [row for dep, _arr in arrived for row in dep]
     darr = [row for board in dest if not isinstance(board, ElviraError) for row in board[1]]
-    dest_failed = [board for board in dest if isinstance(board, ElviraError)]
+    dest_failed = [
+        board
+        for board, day in zip(dest, dest_days)
+        if isinstance(board, ElviraError) and _dest_board_needed(day, now, origin, days, tz)
+    ]
     dest_failure = next(
         (b for b in dest_failed if not isinstance(b, ElviraRateLimited)),
         dest_failed[0] if dest_failed else None,
