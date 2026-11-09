@@ -6,10 +6,10 @@ from collections.abc import Awaitable, Callable, Coroutine, Hashable
 from datetime import datetime
 from functools import partial
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import CALLBACK_TYPE, HassJob, HomeAssistant, callback
-from homeassistant.helpers.event import async_call_later
+if TYPE_CHECKING:
+    from homeassistant.core import HomeAssistant
 
 TaskFactory = Callable[[Coroutine[Any, Any, Any]], "asyncio.Future[Any]"]
 # call_later(delay, action) runs action after delay seconds; returns the cancel.
@@ -19,8 +19,12 @@ CallLater = Callable[[float, Callable[[], None]], Callable[[], None]]
 def hass_call_later(hass: HomeAssistant) -> CallLater:
     """The expiry timer inside Home Assistant: cancelled at shutdown, like
     the fetch tasks, instead of a timer left behind."""
+    # Imported here: this module and elvira.py load without Home Assistant
+    # (ha/test_elvira.py).
+    from homeassistant.core import HassJob, callback
+    from homeassistant.helpers.event import async_call_later
 
-    def call_later(delay: float, action: Callable[[], None]) -> CALLBACK_TYPE:
+    def call_later(delay: float, action: Callable[[], None]) -> Callable[[], None]:
         @callback
         def _run(_now: datetime) -> None:
             action()
