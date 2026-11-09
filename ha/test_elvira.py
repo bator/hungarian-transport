@@ -206,6 +206,18 @@ if not check(
 ):
     failed += 1
 
+# 966 left 20 minutes ago and has yet to arrive: under way against the clock,
+# but before a planner's later start it is a train the search starts after.
+gone = dict(gocsej, start=(now - timedelta(minutes=20)).strftime("%Y-%m-%dT%H:%M:%S"))
+gone["actualOrEstimatedStart"] = gone["start"]
+if not check(
+    "a train under way stays a row against the clock, not before a later start",
+    [r["trainNumber"] for r in rows_from_stationinfo([gone], dest_arr, tz, now, latest)] == ["966"]
+    and rows_from_stationinfo([gone], dest_arr, tz, now, latest, later=True) == []
+    and len(rows_from_stationinfo([gocsej], dest_arr, tz, now, latest, later=True)) == 1,
+):
+    failed += 1
+
 if not check(
     "the longest run on the boards is the matched train's travel time, none without a match",
     longest_run([gocsej, gemenc], dest_arr, tz) == timedelta(minutes=62)
@@ -243,6 +255,14 @@ night = datetime(2026, 10, 1, 0, 40, tzinfo=tz)
 if not check(
     "after midnight yesterday's board still holds delayed trains",
     [d.isoformat() for d in service_days(night, night + timedelta(minutes=60))]
+    == ["2026-09-30", "2026-10-01"],
+):
+    failed += 1
+if not check(
+    "a later start after a later midnight asks no day before it: nothing of it runs yet",
+    [d.isoformat() for d in service_days(night, night + timedelta(minutes=60), night.date() - timedelta(days=2))]
+    == ["2026-10-01"]
+    and [d.isoformat() for d in service_days(night, night + timedelta(minutes=60), night.date() - timedelta(days=1))]
     == ["2026-09-30", "2026-10-01"],
 ):
     failed += 1

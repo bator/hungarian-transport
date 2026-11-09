@@ -58,10 +58,15 @@ ELVIRA_AT_AHEAD = 8 * 86400
 
 def _elvira_at(value: Any) -> int:
     """The window's start in epoch seconds, near enough to now to be a search."""
-    at = vol.Coerce(int)(value)
+    message = "at must be within a day before and eight days after now"
+    try:
+        at = vol.Coerce(int)(value)
+    except OverflowError:
+        # Coerce passes it on: int() of a YAML .inf.
+        raise vol.Invalid(message) from None
     now = dt_util.utcnow().timestamp()
     if not now - ELVIRA_AT_BACK <= at <= now + ELVIRA_AT_AHEAD:
-        raise vol.Invalid("at must be within a day before and eight days after now")
+        raise vol.Invalid(message)
     return at
 
 
