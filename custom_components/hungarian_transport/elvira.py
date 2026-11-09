@@ -60,8 +60,16 @@ MAX_TRAVEL = timedelta(hours=12)
 STATIONINFO_MAX_COUNT = "2000"
 ELVIRA_ROW_CAP = 500
 # A train leaving by `latest` can arrive this much later: past midnight it is
-# on tomorrow's arrival board.
+# on tomorrow's arrival board (StationInfo is per calendar day at the station).
+# The earliest a train leaves and still arrives past midnight is 5 h 10 min
+# before it (Gyékényes 18:50 to Budapest-Keleti 00:24, MÁV GTFS of 2026-10-30,
+# leaving out the IC round trip from Budapest-Keleti back to Nyugati).
 ARRIVAL_WINDOW = timedelta(hours=6)
+# Tomorrow's arrival board is asked for only when a train leaving by `latest`
+# can get in past midnight: when it takes as long as the pair's longest run on
+# today's boards, plus this much for a slower or late-running train. Without a
+# run to go by, ARRIVAL_WINDOW.
+LATE_RUN_MARGIN = timedelta(hours=1)
 ELVIRA_TIMEOUT = aiohttp.ClientTimeout(total=30)
 # StationInfo requests (cache misses only; shared requests count once) per
 # second and the burst allowed on top. Any logged-in user can call
@@ -317,17 +325,9 @@ async def _station_legs(session, hass, station_code: str, day: date):
     return await cache.get((station_code, day.isoformat()), fetch)
 
 
-def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
-    """Origin departures with optional dest hit (travel time only).
-
-    Booking and startTrack come from the origin StationInfo row. A MÁV card lists
-    the rows with a dest hit; other cards overlay all of them onto their FUTÁR or
-    MOTIS rows (a failed dest board arrives here empty and must not drop their
-    booking flags) and must not append origin-only trains (GEMENC Baja, …). Times
-    are compared and subtracted in UTC (see _iso_dt).
-    """
-    now = now.astimezone(UTC)
-    latest = latest.astimezone(UTC)
+def _dest_matcher(darr, tz):
+    """dest_hit(trainId, code, start): this run's (arrival, row) on the
+    destination's arrival boards, (None, None) without one."""
     dest_by_id: dict[str, list] = {}
     dest_by_code: dict[str, list] = {}
     for row in darr or []:
@@ -357,6 +357,37 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
                 return min(after, key=lambda c: c[0])
         return None, None
 
+    return dest_hit
+
+
+def longest_run(odep, darr, tz) -> timedelta | None:
+    """The longest origin-to-destination run on these boards, whatever the
+    time of day; None when no train of the origin's reaches the destination."""
+    dest_hit = _dest_matcher(darr, tz)
+    longest = None
+    for row in odep or []:
+        start = _iso_dt(row.get("actualOrEstimatedStart") or row.get("start"), tz)
+        if start is None:
+            continue
+        arr, _hit = dest_hit(str(row.get("trainId") or ""), str(row.get("code") or "").strip(), start)
+        if arr is not None and (longest is None or arr - start > longest):
+            longest = arr - start
+    return longest
+
+
+def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
+    """Origin departures with optional dest hit (travel time only).
+
+    Booking and startTrack come from the origin StationInfo row. A MÁV card lists
+    the rows with a dest hit; other cards overlay all of them onto their FUTÁR or
+    MOTIS rows (a failed dest board arrives here empty and must not drop their
+    booking flags) and must not append origin-only trains (GEMENC Baja, …). Times
+    are compared and subtracted in UTC (see _iso_dt). `head` is dest_name when
+    given, else the terminus; `end` is always the terminus.
+    """
+    now = now.astimezone(UTC)
+    latest = latest.astimezone(UTC)
+    dest_hit = _dest_matcher(darr, tz)
     out = []
     seen = set()
     for row in odep or []:
@@ -393,6 +424,7 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
             "label": _label_from_row(row),
             "railKind": _kind_from_row(row),
             "head": dest_name or _end_station(row),
+            "end": _end_station(row),
             "dep": int(start.timestamp()),
             "sched": int(sched.timestamp()),
             "platform": track_from_elvira_row(row),
@@ -440,34 +472,9 @@ def _log_outage(hass, code: str, err: Exception | None, now: float | None = None
         _LOGGER.info("ELVIRA StationInfo %s answers again", code)
 
 
-async def elvira_between(session, hass, origin_code, dest_code, minutes_after=180, dest_name=""):
-    """Origin departures towards dest: a MÁV card's rows, an overlay for others.
-
-    Every station and service day is its own StationInfo board, and the rows
-    come from the origin boards only: ElviraError when today's did not
-    arrive, since without it every train of the day would be missing. A
-    failed destination board, or a failed board of yesterday or tomorrow,
-    counts as empty. The rows then lack a travel time or a few late trains,
-    instead of every platform and booking flag.
-    """
-    origin_code = station_code_digits(origin_code)
-    dest_code = station_code_digits(dest_code)
-    if len(origin_code) < 9 or len(dest_code) < 9 or origin_code == dest_code:
-        return []
-    tz = MAV_TZ
-    now = datetime.now(tz)
-    # Real minutes ahead, not wall-clock ones, on the night the clocks change.
-    latest = (now.astimezone(UTC) + timedelta(minutes=int(minutes_after or 180))).astimezone(tz)
-    days = service_days(now, latest)
-    dest_days = service_days(now, latest + ARRIVAL_WINDOW)
-    # Today's origin board first: the call fails without it, so with the
-    # rate limit's last token left it is the board that gets it.
-    wanted = [(origin_code, now.date())] + [
-        (code, day)
-        for code, code_days in ((origin_code, days), (dest_code, dest_days))
-        for day in code_days
-        if (code, day) != (origin_code, now.date())
-    ]
+async def _fetch_boards(session, hass, wanted) -> list:
+    """The boards for these (station, day) pairs, an ElviraError in place of
+    each one that did not arrive."""
     results = await asyncio.gather(
         *(_station_legs(session, hass, code, day) for code, day in wanted),
         return_exceptions=True,
@@ -476,7 +483,64 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
         # Only an unreachable board is an empty one; a bug or a cancellation is not.
         if isinstance(board, BaseException) and not isinstance(board, ElviraError):
             raise board
-    boards = dict(zip(wanted, results))
+    return results
+
+
+async def elvira_between(session, hass, origin_code, dest_code, minutes_after=180, dest_name="", at=None):
+    """Origin departures towards dest: a MÁV card's rows, an overlay for others.
+
+    Every station and service day is its own StationInfo board, and the rows
+    come from the origin boards only: ElviraError when today's did not
+    arrive, since without it every train of the day would be missing. A
+    failed destination board, or a failed board of yesterday or tomorrow,
+    counts as empty. The rows then lack a travel time or a few late trains,
+    instead of every platform and booking flag.
+
+    Returns (rows, dest_failure): dest_failure is the ElviraError of a
+    destination board the window needed and did not get (an outage before a
+    refusal), None when every one arrived. Without it the rows' destHit
+    cannot be trusted, and a MÁV card lists only the destHit rows.
+
+    `at` (epoch seconds) starts the window later, for a planner's timed
+    search; never before now, since a train that left is gone.
+    """
+    origin_code = station_code_digits(origin_code)
+    dest_code = station_code_digits(dest_code)
+    if len(origin_code) < 9 or len(dest_code) < 9 or origin_code == dest_code:
+        return [], None
+    tz = MAV_TZ
+    now = datetime.now(tz)
+    if at is not None:
+        now = max(now, datetime.fromtimestamp(at, tz))
+    # Real minutes ahead, not wall-clock ones, on the night the clocks change.
+    latest = (now.astimezone(UTC) + timedelta(minutes=int(minutes_after or 180))).astimezone(tz)
+    days = service_days(now, latest)
+    # Today's origin board first: the call fails without it, so with the
+    # rate limit's last token left it is the board that gets it.
+    wanted = [(origin_code, now.date())] + [
+        (code, day)
+        for code in (origin_code, dest_code)
+        for day in days
+        if (code, day) != (origin_code, now.date())
+    ]
+    boards = dict(zip(wanted, await _fetch_boards(session, hass, wanted)))
+    dest_days = list(days)
+    tomorrow = latest.date() + timedelta(days=1)
+    if (latest + ARRIVAL_WINDOW).date() >= tomorrow and not isinstance(
+        boards[(origin_code, now.date())], ElviraError
+    ):
+        # Tomorrow's arrival board only holds trains that get in past
+        # midnight; it is several MB every ELVIRA_CACHE_TTL. Today's boards
+        # say how long this pair's trains take. Asked for last, so it is the
+        # board the rate limit refuses first.
+        arrived = {key: board for key, board in boards.items() if not isinstance(board, ElviraError)}
+        odep = [row for day in days for row in arrived.get((origin_code, day), ([], []))[0]]
+        darr = [row for day in days for row in arrived.get((dest_code, day), ([], []))[1]]
+        run = longest_run(odep, darr, tz)
+        reach = ARRIVAL_WINDOW if run is None else min(ARRIVAL_WINDOW, run + LATE_RUN_MARGIN)
+        if (latest + reach).date() >= tomorrow:
+            (boards[(dest_code, tomorrow)],) = await _fetch_boards(session, hass, [(dest_code, tomorrow)])
+            dest_days.append(tomorrow)
     origin = [boards[(origin_code, day)] for day in days]
     dest = [boards[(dest_code, day)] for day in dest_days]
     for code, part, part_days in ((origin_code, origin, days), (dest_code, dest, dest_days)):
@@ -507,4 +571,9 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     arrived = [board for board in origin if not isinstance(board, ElviraError)]
     odep = [row for dep, _arr in arrived for row in dep]
     darr = [row for board in dest if not isinstance(board, ElviraError) for row in board[1]]
-    return rows_from_stationinfo(odep, darr, tz, now, latest, dest_name)
+    dest_failed = [board for board in dest if isinstance(board, ElviraError)]
+    dest_failure = next(
+        (b for b in dest_failed if not isinstance(b, ElviraRateLimited)),
+        dest_failed[0] if dest_failed else None,
+    )
+    return rows_from_stationinfo(odep, darr, tz, now, latest, dest_name), dest_failure

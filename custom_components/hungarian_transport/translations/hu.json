@@ -30,7 +30,7 @@
   "services": {
     "elvira_between": {
       "name": "MÁV indulások lekérése",
-      "description": "MÁV menetrend és kötelező helyjegy információ két állomás között. Ha a MÁV ELVIRA nem érhető el, a válaszban nincs indulás, csak hiba: elvira_unavailable (a MÁV nem válaszol) vagy elvira_rate_limited (túl sok lekérés ebből a Home Assistantból; a következő frissítés újra próbálja).",
+      "description": "MÁV menetrend és kötelező helyjegy információ két állomás között. Ha a MÁV ELVIRA nem érhető el, a válaszban nincs indulás, csak hiba: elvira_unavailable (a MÁV nem válaszol) vagy elvira_rate_limited (túl sok lekérés ebből a Home Assistantból; a következő frissítés újra próbálja). Ha egy célállomási érkezési tábla nem jött meg, az indulások megjönnek, de dest_error is van (elvira_unavailable vagy elvira_rate_limited): ilyenkor a destHit nem megbízható.",
       "fields": {
         "origin_code": {
           "name": "Indulási állomás kódja",
@@ -46,7 +46,11 @@
         },
         "dest_name": {
           "name": "Célállomás neve",
-          "description": "Opcionális megjelenítendő név a célállomáshoz."
+          "description": "Opcionális megjelenítendő név a célállomáshoz (legfeljebb 100 karakter)."
+        },
+        "at": {
+          "name": "Kezdő időpont",
+          "description": "Opcionális: az időablak kezdete Unix-időben, másodpercben (legfeljebb egy nappal korábbi és nyolc nappal későbbi); az indulások ettől, vagy ha az későbbi, mostantól."
         }
       }
     },

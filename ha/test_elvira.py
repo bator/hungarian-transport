@@ -28,6 +28,7 @@ from hungarian_transport.elvira import (  # noqa: E402
     ELVIRA_ROW_CAP,
     _log_outage,
     STATIONINFO_MAX_COUNT,
+    longest_run,
     parse_elvira_services,
     rows_from_stationinfo,
     service_days,
@@ -175,6 +176,14 @@ if not check(
 ):
     failed += 1
 if not check(
+    "every row carries its train's terminus; head stays the card's destination",
+    by_num.get("966", {}).get("end") == "Szombathely"
+    and by_num.get("966", {}).get("head") == "Kelenföld"
+    and by_num.get("3511", {}).get("end") == "Budapest-Déli",
+    repr(by_num.get("966")),
+):
+    failed += 1
+if not check(
     "G43 does not get booking from #94345",
     by_num.get("3511", {}).get("booking") is False,
     repr(by_num.get("3511")),
@@ -194,6 +203,13 @@ if not check(
     and hit_rows[0]["travel"] == 62
     and hit_rows[0]["booking"] is True,
     repr(hit_rows[:1]),
+):
+    failed += 1
+
+if not check(
+    "the longest run on the boards is the matched train's travel time, none without a match",
+    longest_run([gocsej, gemenc], dest_arr, tz) == timedelta(minutes=62)
+    and longest_run([gemenc], dest_arr, tz) is None,
 ):
     failed += 1
 
