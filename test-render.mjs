@@ -9489,6 +9489,34 @@ check('a city stop number is not an ELVIRA station code',
     !dropped.overlay && dropped.opening === '' && /63/.test(reopened) && !/41/.test(reopened) && pc._openingMap === '',
     JSON.stringify({ dropped, reopened, opening: pc._openingMap }));
   pc._closeVehicleMap();
+  /* The same, from the itineraries' own Map buttons: the first open kept
+     its button, which opening the third itinerary repainted away. Closing
+     the map puts the focus on the Map button the card shows now. */
+  const pmap = () => pc.shadowRoot.querySelector('#pmap');
+  pick(0);
+  pc._paintJourney();
+  const btnA = pmap();
+  pc._focusTarget = () => ({ el: btnA, ref: null });
+  held = deferred();
+  const fromA = pc._openJourneyMap();
+  await settleTicks();
+  pick(2);
+  pc._paintJourney();
+  const btnB = pmap();
+  let focused = '';
+  btnB.focus = () => { focused = 'B'; };
+  pc._focusTarget = () => ({ el: btnB, ref: null });
+  await pc._openJourneyMap();
+  held.resolve();
+  await fromA;
+  await settleTicks();
+  const opened = /63/.test(foot());
+  pc._closeVehicleMap();
+  check('a journey map that replaced one still opening gives the focus back to the Map button shown now',
+    opened && !!btnA && btnA !== btnB && !btnA.isConnected && focused === 'B',
+    JSON.stringify({ opened, focused, detached: !!btnA && !btnA.isConnected }));
+  check('a new planner starts with no itinerary opening',
+    document.createElement('hungarian-transit-stop-card-plan')._openingJourney === null);
   Object.assign(Lib, keep);
   pc.remove();
 }
@@ -9885,6 +9913,23 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   check('a same-pair reload during the journey map’s replan still opens the map with the replanned journey',
     !!pc._mapOverlay && pc._journey && pc._journey.legs[0].label === 'REPLANNED8' && !notices.length,
     JSON.stringify({ overlay: !!pc._mapOverlay, opening: pc._openingMap, notices, label: pc._journey && pc._journey.legs[0].label }));
+  pc._closeVehicleMap();
+  /* "Now": the card's own plan lands while the map's replan still waits
+     (_considerJourney sets it after its shapes). The Map click is not
+     dropped: the map opens for the plan the card shows. */
+  pc._journey = mk('NOSHAPE8');
+  const landed = Object.assign(mk('REPLANNED8'), { durationMin: 27 });
+  Lib.planJourney = () => new Promise((r) => { release = () => r(mk('REPLANNED8')); });
+  const following = pc._openJourneyMap();
+  await settleTicks();
+  pc._journey = landed;
+  release();
+  await following;
+  await settleTicks();
+  const footNow = pc._mapOverlay ? pc._mapOverlay.querySelector('.ht-map-foot').textContent : '';
+  check('a "now" plan landing during the journey map’s replan opens the map for that plan, not nothing',
+    !!pc._mapOverlay && pc._journey === landed && /27/.test(footNow) && !notices.length && pc._openingMap === '',
+    JSON.stringify({ overlay: !!pc._mapOverlay, foot: footNow, notices, label: pc._journey && pc._journey.legs[0].label }));
   pc._closeVehicleMap();
   Object.assign(Lib, keep);
   pc.remove();
