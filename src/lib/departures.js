@@ -253,12 +253,21 @@ Object.assign(BkkLib, {
     return now - pat.at < PATTERN_PROOF_MS
       && new Date(pat.at).toDateString() === new Date(now).toDateString();
   },
+  /* An ad-hoc FUTÁR trip: the id body is a millisecond timestamp
+     (BKK_1792439004037), not a scheduled trip of the route's pattern. */
+  isAdHocTripId(tripId) {
+    return /^BKK_\d{10,}$/.test(String(tripId || ''));
+  },
   /* A route none of whose variants through the origin reaches the
      destination answers for its trips with no trip-details. Only a fresh
-     pattern says so, and only of a trip whose headsign ends one of those
-     variants: a detour or an added trip it does not list is asked. */
-  patternMissesDest(pat, origin, destKey, head) {
-    if (!destKey || !head || !BkkLib.patternFresh(pat)) return false;
+     pattern says so, and only of a trip it can tie to one of those
+     variants: the headsign ends it and the trip leaves from a pole on it.
+     A headsign alone is not that tie (a detour or an added trip keeps the
+     usual terminus), so an ad-hoc trip, a trip from a pole no variant
+     calls at, or one whose pole the board does not give is asked. */
+  patternMissesDest(pat, origin, destKey, head, tripId, pole) {
+    if (!destKey || !head || !pole || !BkkLib.patternFresh(pat)) return false;
+    if (BkkLib.isAdHocTripId(tripId)) return false;
     const stops = pat.stops || {};
     const isDest = BkkLib.nameMatcher(destKey);
     const isHead = BkkLib.nameMatcher(head);
@@ -271,7 +280,8 @@ Object.assign(BkkLib, {
       if (oidx < 0) continue;
       if (ids.slice(oidx + 1).some((id) => isDest((stops[id] || {}).name))) return false;
       const last = (stops[ids[ids.length - 1]] || {}).name;
-      if (isHead(v.headsign) || isHead(v.name) || isHead(last)) known = true;
+      if (!(isHead(v.headsign) || isHead(v.name) || isHead(last))) continue;
+      if (ids.slice(oidx).some((id) => BkkLib.sameStop(id, pole))) known = true;
     }
     return known;
   },
@@ -591,8 +601,10 @@ Object.assign(BkkLib, {
     const queryFutar = !opts.skipFutar && (mode === 'bkk' || mode === 'mav' || /^BKK_/i.test(String(stopId || '')));
     const futarTask = queryFutar ? (async () => {
     let candidates = [];
-    /* Each candidate's route, for its pattern in the through-check. */
+    /* Each candidate's route and the pole it leaves from, for its pattern
+       in the through-check. */
     const routeOfTrip = new Map();
+    const poleOfTrip = new Map();
     try {
       let poles = [];
       const poleRoutes = Array.from(selected);
@@ -718,6 +730,7 @@ Object.assign(BkkLib, {
           if (dep && !departureStillDue(dep, now)) return;
           seenTrip.add(st.tripId);
           if (rid) routeOfTrip.set(st.tripId, rid);
+          if (st.stopId || entry.stopId) poleOfTrip.set(st.tripId, st.stopId || entry.stopId);
           const fallbackColor = mode === 'volan' ? 'F9AB13' : '4477aa';
           const fallbackText = mode === 'volan' ? '000000' : 'ffffff';
           const veh = st.vehicle || {};
@@ -776,7 +789,8 @@ Object.assign(BkkLib, {
        rules the trip out without its own request. */
     const ruledOut = (row) => {
       const rid = routeOfTrip.get(row.tripId);
-      return !!rid && BkkLib.patternMissesDest(BkkLib._cached(cache, rid), origin, destKey, row.head);
+      return !!rid && BkkLib.patternMissesDest(BkkLib._cached(cache, rid), origin, destKey,
+        row.head, row.tripId, poleOfTrip.get(row.tripId));
     };
     if (destKey && candidates.length) {
       /* Trips already checked on an earlier poll are answered from the
