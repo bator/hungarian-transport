@@ -23,6 +23,12 @@ Object.assign(BkkLib, {
   _elviraRetryMs: 3 * 60000,
   _elviraFailLimit: 3,
   _elviraFails: 0,
+  /* The limit counts failed poll rounds, not calls: every MÁV card (and the
+     planner) fails in the same moment when the websocket drops, and that is
+     one round. A card polls every 20 s at the most, so failures closer than
+     this to the last one counted are the same round. */
+  _elviraFailRoundMs: 15000,
+  _elviraLastFailAt: 0,
   _elviraDownUntil: 0,
   _elviraWarned: false,
   _elviraLastCode: '',
@@ -30,6 +36,8 @@ Object.assign(BkkLib, {
   /* A call that never answers ends here, not with the websocket: the
      integration gives up on a board after 30 s. */
   _elviraTimeoutMs: 35000,
+  /* The service schema's own limit on dest_name. */
+  _elviraDestNameMax: 100,
   /* The trains between two stations, as {rows, error, detail}. error is ''
      for a full answer, else what went wrong: the integration's code
      (elvira_unavailable, elvira_rate_limited), a destination board that did
@@ -54,7 +62,8 @@ Object.assign(BkkLib, {
       origin_code: origin,
       dest_code: dest,
       minutes_after: minutesAfter || DEFAULT_MINUTES_AFTER,
-      dest_name: destName || '',
+      /* The service rejects a longer one as an invalid call. */
+      dest_name: String(destName || '').slice(0, BkkLib._elviraDestNameMax),
     };
     /* A planned time starts the window there (the planner's timed search);
        one already past is the service's own "from now". */
@@ -70,11 +79,15 @@ Object.assign(BkkLib, {
       let code = 'elvira_call_failed';
       if (err && err.translation_key === 'not_loaded') code = 'not_loaded';
       else if (err && err.code === 'elvira_timeout') code = 'elvira_timeout';
-      BkkLib._elviraFails += 1;
+      const now = Date.now();
+      if (now - BkkLib._elviraLastFailAt >= BkkLib._elviraFailRoundMs) {
+        BkkLib._elviraFails += 1;
+        BkkLib._elviraLastFailAt = now;
+      }
       BkkLib._elviraLastCode = code;
       BkkLib._elviraLastErr = detail;
       if (BkkLib._elviraFails >= BkkLib._elviraFailLimit) {
-        BkkLib._elviraDownUntil = Date.now() + BkkLib._elviraRetryMs;
+        BkkLib._elviraDownUntil = now + BkkLib._elviraRetryMs;
       }
       if (!BkkLib._elviraWarned) {
         BkkLib._elviraWarned = true;
@@ -83,6 +96,7 @@ Object.assign(BkkLib, {
       return none(code, detail);
     }
     BkkLib._elviraFails = 0;
+    BkkLib._elviraLastFailAt = 0;
     BkkLib._elviraWarned = false;
     if (!res) return none();
     /* ELVIRA itself being down is {departures: [], error, detail}, not a

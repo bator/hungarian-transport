@@ -3360,6 +3360,14 @@ Lib.mavIndex = origMavIndex;
     check('elvira_between gets the planned time as at, and no at for now or the past',
       sent.length === 3 && sent[0].at === later && !('at' in sent[1]) && !('at' in sent[2]),
       JSON.stringify(sent));
+    /* The service takes at most 100 characters of dest_name: a longer one
+       is cut here, not rejected by the schema as a failed call. */
+    sent.length = 0;
+    const longName = 'Székesfehérvár '.repeat(10);
+    await Lib.elviraBetween(hass, 'BKK_005510009', 'BKK_005501024', 60, longName);
+    check('a destination name over 100 characters goes to elvira_between cut to 100',
+      sent.length === 1 && sent[0].dest_name === longName.slice(0, 100),
+      JSON.stringify(sent.map((d) => d.dest_name && d.dest_name.length)));
   } finally {
     console.warn = realWarn;
     Lib._elviraOutages.clear();
@@ -4556,6 +4564,7 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   console.warn = () => {};
   Lib._elviraDownUntil = 0;
   Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
   Lib._elviraWarned = false;
   const t0 = Math.floor(Date.now() / 1000) + 1200;
   const t1 = t0 + 25 * 60;
@@ -4665,6 +4674,7 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   Object.assign(Lib, keep);
   Lib._elviraDownUntil = 0;
   Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
   Lib._elviraWarned = false;
   Lib._elviraOutages.clear();
 }
@@ -4676,6 +4686,7 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   console.warn = () => {};
   Lib._elviraDownUntil = 0;
   Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
   const t0 = Math.floor(Date.now() / 1000) + 1200;
   const futarAsked = [];
   Lib.departures = async (_k, _s, _r, _d, opts) => {
@@ -4683,13 +4694,15 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     return opts.skipFutar ? [] : [icElvira({ tripId: 'BKK_8494_1', label: 'IC', trainNumber: '849', dep: t0, sched: t0 })];
   };
   Lib.fillTransitousIfEmpty = async (rows) => rows || [];
+  let elviraAsked = 0;
   const hop = document.createElement('hungarian-transport-card');
   hop.hass = {
     states: {},
     language: 'hu',
     services: { hungarian_transport: { elvira_between: {} } },
     connection: {
-      sendMessagePromise: async () => {
+      sendMessagePromise: async (msg) => {
+        if (msg.type === 'call_service') elviraAsked += 1;
         throw { code: 'service_validation_error', message: 'Hungarian transport is not loaded', translation_key: 'not_loaded' };
       },
     },
@@ -4706,21 +4719,34 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     if (!hop._reloadActive && hop._pollRun) break;
   }
   const first = (hop._rawRows || []).map((r) => r.tripId).join();
-  /* Later, with ELVIRA paused after the calls kept failing, the card asks
-     its board again and still reads FUTÁR, not Transitous. */
+  /* The switch to FUTÁR reuses the not_loaded answer it got: one call. */
+  const askedFirst = elviraAsked;
+  /* Later, with ELVIRA paused after the calls kept failing (a poll every
+     20 s), the card asks its board again and still reads FUTÁR, not
+     Transitous. */
+  const realNow = Date.now;
+  let t = realNow();
+  Date.now = () => t;
+  t += 20000;
   await hop._pollRun.run();
   hop._mavViaFutarUntil = 0;
+  t += 20000;
   await hop._pollRun.run();
   const later = (hop._rawRows || []).map((r) => r.tripId).join();
+  const paused = Lib._elviraDownUntil > Date.now();
+  Date.now = realNow;
   check('a MÁV card with a key reads FUTÁR while the integration answers not_loaded',
     futarAsked.includes(true) && first === 'BKK_8494_1' && later === 'BKK_8494_1'
-    && Lib._elviraDownUntil > Date.now() && !hop._err,
-    JSON.stringify({ futarAsked, first, later, err: hop._err && hop._err.i18nKey }));
+    && paused && !hop._err,
+    JSON.stringify({ futarAsked, first, later, paused, err: hop._err && hop._err.i18nKey }));
+  check('a MÁV card switching to FUTÁR on not_loaded asks elvira_between once, not twice',
+    askedFirst === 1, String(askedFirst));
   hop.remove();
   console.warn = realWarn;
   Object.assign(Lib, keep);
   Lib._elviraDownUntil = 0;
   Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
   Lib._elviraWarned = false;
 }
 {
@@ -6856,8 +6882,15 @@ const settle = async (el) => {
   console.warn = (...a) => warns.push(a.map(String).join(' '));
   Lib._elviraDownUntil = 0;
   Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
   Lib._elviraWarned = false;
-  const ask = (hass) => Lib.elviraBetween(hass, 'BKK_005510017', 'BKK_005503269', 60, 'Székesfehérvár', {});
+  /* One poll every 20 s, the shortest refresh a card takes. */
+  let t = realNow();
+  Date.now = () => t;
+  const ask = (hass) => {
+    t += 20000;
+    return Lib.elviraBetween(hass, 'BKK_005510017', 'BKK_005503269', 60, 'Székesfehérvár', {});
+  };
   const without = { states: {}, services: { hungarian_transport: { futar: {} } } };
   const withSvc = { states: {}, services: { hungarian_transport: { elvira_between: {} } } };
   await ask(without);
@@ -6868,8 +6901,7 @@ const settle = async (el) => {
   await ask(withSvc);
   await ask(withSvc);
   const backedOff = calls;
-  let t = realNow() + 4 * 60000;
-  Date.now = () => t;
+  t += 4 * 60000;
   await ask(withSvc);
   const retried = calls;
   t += 4 * 60000;
@@ -6880,12 +6912,68 @@ const settle = async (el) => {
   Object.assign(Lib, keep);
   Lib._elviraDownUntil = 0;
   Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
   Lib._elviraWarned = false;
   check('ELVIRA is not called without the elvira_between service',
     noService === 0, String(noService));
   check('a failed ELVIRA call is asked again; calls that keep failing pause ELVIRA for minutes and warn once',
     askedAgain === 2 && backedOff === 3 && retried === 4 && warns.length === 1 && rows.length === 1,
     JSON.stringify({ askedAgain, backedOff, retried, warns: warns.length, rows: rows.length }));
+}
+{
+  /* Several MÁV cards (or cards and a planner) fail in the same moment when
+     the websocket drops or HA restarts: that is one failed poll round, not
+     three, so it must not pause ELVIRA for every card for minutes. */
+  const realNow = Date.now;
+  const keep = { callServiceResponse: Lib.callServiceResponse };
+  const keepWarn = console.warn;
+  let calls = 0;
+  let fail = true;
+  Lib.callServiceResponse = async () => {
+    calls += 1;
+    if (fail) throw { code: 'unknown_error', message: 'Connection lost' };
+    return { response: { departures: [{ tripId: 'elvira:1' }] } };
+  };
+  console.warn = () => {};
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  Lib._elviraWarned = false;
+  let t = realNow();
+  Date.now = () => t;
+  const hass = { states: {}, services: { hungarian_transport: { elvira_between: {} } } };
+  const pairs = [['BKK_005501024', 'BKK_005503269'], ['BKK_005510009', 'BKK_005501024'], ['BKK_005501024', 'BKK_005510017']];
+  const pollAll = () => Promise.all(pairs.map(([o, d]) => Lib.elviraBoard(hass, o, d, 60, '', {})));
+  const dropped = await pollAll();
+  const pausedAfterDrop = Date.now() < Lib._elviraDownUntil;
+  /* HA is back by the next poll: every card asks, and gets its trains. */
+  t += 20000;
+  fail = false;
+  const before = calls;
+  const back = await pollAll();
+  const askedBack = calls - before;
+  /* Failing rounds a poll apart still pause it, however many cards ask. */
+  fail = true;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  for (let round = 0; round < 3; round++) {
+    t += 20000;
+    await pollAll();
+  }
+  const pausedAfterRounds = Date.now() < Lib._elviraDownUntil;
+  Date.now = realNow;
+  console.warn = keepWarn;
+  Object.assign(Lib, keep);
+  Lib._elviraDownUntil = 0;
+  Lib._elviraFails = 0;
+  Lib._elviraLastFailAt = 0;
+  Lib._elviraWarned = false;
+  check('three MÁV cards failing in one poll do not pause ELVIRA; the next poll asks again',
+    dropped.every((b) => b.error === 'elvira_call_failed') && !pausedAfterDrop
+    && askedBack === 3 && back.every((b) => b.error === '' && b.rows.length === 1),
+    JSON.stringify({ errors: dropped.map((b) => b.error), pausedAfterDrop, askedBack, back: back.map((b) => b.error) }));
+  check('three failed poll rounds pause ELVIRA for every card',
+    pausedAfterRounds, String(pausedAfterRounds));
 }
 {
   /* One scan of hass.states per change, and one pattern per row. */
