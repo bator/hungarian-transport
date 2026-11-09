@@ -177,7 +177,7 @@ You can try these under **Developer tools → Actions**.
 
 | Action | What it does |
 | --- | --- |
-| `hungarian_transport.elvira_between` | MÁV departures between two stations, with platforms and seat-reservation flags. Takes two nine-digit MÁV station codes and a look-ahead in minutes (15–480). |
+| `hungarian_transport.elvira_between` | MÁV departures between two stations, with platforms and seat-reservation flags. Takes two nine-digit MÁV station codes and a look-ahead in minutes (15–480), optionally from a later start (`at`, Unix time) instead of now. |
 | `hungarian_transport.futar` | A BKK FUTÁR request with the integration's key. The cards use it; it exists only while a key is set. |
 | `hungarian_transport.rebuild_mav_index` | Builds the train route index from `/config/hungarian-transport/mav-gtfs.zip` and checks every trip against it. |
 | `hungarian_transport.realtime` | **Get live delays and positions**: the delay at given stops and the vehicle's position for up to 40 trips of one operator, from its GTFS-Realtime feed. The cards use it; see [Live delays and positions](../realtime.md). |
@@ -284,6 +284,10 @@ Click **Save**. The card on the dashboard looks like this:
 
 Every train that stops at both stations is listed: suburban trains (Z30,
 G43), InterCity trains and named trains (TÓPART, BAKONY) that run further.
+Each row shows the train's own terminus. A train MÁV lists only by its
+number shows its kind: **SV** sebesvonat, **Gy** gyorsvonat, **Sz**
+személyvonat. When MÁV does not answer a refresh, the card keeps the trains
+that are still due and says why above them.
 
 ### 4.5 A BKK card
 
@@ -618,7 +622,9 @@ Every attribute is listed in
 | *No direct service to that destination. Reachable destinations: …* | The destination has no direct service from the origin. | Pick one of the listed destinations, or use the planner. |
 | *Could not download the timetable index (timeout or network error).* | The browser could not load the Volán or city timetable. | Reload the page. If it persists, reinstall the release (HACS → Redownload) and restart Home Assistant. |
 | *The timetable index is newer (vN) than this card understands.* | The browser still runs an old card. | Reload the page with the cache cleared, or update the integration. |
-| No platform, **H** or **OB** marks on MÁV rows | MÁV ELVIRA did not answer. | Nothing to do: the trains come from Transitous meanwhile, and the marks come back on their own. |
+| *MÁV ELVIRA did not answer (…). The card tries again on the next refresh.* | MÁV's server was slow or down, the integration held back a request, or Home Assistant was restarting. | Nothing to do: the trains still due stay on the card, and the line goes with the next good answer. |
+| *Győr: no MÁV station code. Pick the station in the card editor.* | A card written in YAML names a station without its id, and with no BKK key the card cannot look it up. | Pick the station in the card editor, or add its id (`destStopId: BKK_005…`). |
+| No platform, **H** or **OB** marks on MÁV rows | MÁV ELVIRA did not answer, and the card had no trains of its own yet. | Nothing to do: the trains come from Transitous meanwhile, and the marks come back on their own. |
 | A train's map is a straight line between stations | No route data for that train. | Add the MÁV timetable ([3.4](#34-train-routes-on-the-map-optional)). |
 | "Custom element doesn't exist" after an update | The browser loaded the page before the new card. | Restart Home Assistant after updating, then reload the page. |
 | A coach connection you know of is missing | The official timetable has no such direct service (for example, coaches to Székesfehérvár leave from Népliget, not Kelenföld). | The card shows the official timetable only. Try the planner for a route with a transfer. |
