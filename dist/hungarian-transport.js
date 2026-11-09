@@ -584,9 +584,10 @@ Object.assign(BkkLib, {
   /* The station code by name, '' when FUTÁR has none, null when a search
      failed and nothing was found: that one is asked again next time. */
   async _searchElviraCode(apiKey, n) {
+    const how = {};
     let hits;
     try {
-      hits = await this.searchStops(apiKey, n, "mav") || [];
+      hits = await this.searchStops(apiKey, n, "mav", null, how) || [];
     } catch (_e) {
       return null;
     }
@@ -594,7 +595,7 @@ Object.assign(BkkLib, {
       const c = BkkLib.elviraStationCode(hits[j].id);
       if (c) return c;
     }
-    return "";
+    return how.partial ? null : "";
   },
   sameStop(id, originId) {
     if (!id || !originId) return false;
@@ -777,6 +778,10 @@ var BKK_RAIL_BADGE = {
   IC: ["2E5EA8", "FFFFFF"],
   EC: ["2E5EA8", "FFFFFF"],
   SZ: ["5C6B7A", "FFFFFF"]
+};
+var RAIL_KIND_BADGE = {
+  SV: ["29803C", "FFFFFF"],
+  GY: ["C82227", "FFFFFF"]
 };
 var ASSET_BASE = new URL(".", import.meta.url).href;
 var VOLAN_INDEX_OVERRIDE = "";
@@ -5279,7 +5284,16 @@ Object.assign(BkkLib, {
       return !!x.length && !!y.length && !x.some((n) => y.indexOf(n) >= 0);
     };
     const brandedHost = (row) => BkkLib.isTrainRow(row) && !BkkLib.numberedRailBadge(row) && (BkkLib.suburbanLineLabel(row && row.label) || !BkkLib.genericRailLabel(row && row.label) && String(row && row.label || "").trim());
+    const railKindOf = (row) => {
+      const elvira = /^elvira:/i.test(String(row && row.tripId || ""));
+      const k = String(elvira && row.railKind || row && row.label || "").trim().toUpperCase().normalize("NFC");
+      if (!k || /^\d+$/.test(k)) return "";
+      return /^(S|SZ|SV|GY)$/.test(k) ? "S" : k;
+    };
+    const terminusOf = (row) => String((/^elvira:/i.test(String(row.tripId || "")) ? row.end : row.head) || "").trim();
+    const sameTrain = (p, row) => BkkLib.isTrainRow(p) && minuteOf(p) === minuteOf(row) && !!railKindOf(p) && railKindOf(p) === railKindOf(row) && !!terminusOf(p) && BkkLib.nameEq(terminusOf(p), terminusOf(row)) && !otherTrain(p, row);
     const add = (row, skipUnmatched, asNew) => {
+      const strict = skipUnmatched || !!asNew;
       if (!row || !departureStillDue(row.dep || row.sched)) return;
       const n = BkkLib.rowTrainNumber(row);
       const min = minuteOf(row);
@@ -5304,7 +5318,7 @@ Object.assign(BkkLib, {
           return;
         }
       }
-      if (!skipUnmatched && BkkLib.isTrainRow(row) && min) {
+      if (!strict && BkkLib.isTrainRow(row) && min) {
         const namedIc = (r) => BkkLib.isTrainRow(r) && !BkkLib.suburbanLineLabel(r && r.label) && !BkkLib.genericRailLabel(r && r.label) && !/^\d+$/.test(String(r && r.label || "").trim());
         const genericIc = (r) => BkkLib.isTrainRow(r) && BkkLib.genericRailLabel(r && r.label);
         let pair = -1;
@@ -5322,11 +5336,19 @@ Object.assign(BkkLib, {
         }
       }
       const tk = timeOf(row);
-      if (!skipUnmatched && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
+      if (!strict && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
         overlay(out[byTime.get(tk)], row);
         return;
       }
       if (skipUnmatched) return;
+      if (asNew && BkkLib.isTrainRow(row) && min) {
+        const same = out.findIndex((p) => sameTrain(p, row));
+        if (same >= 0) {
+          overlay(out[same], row);
+          registerNumber(n, same);
+          return;
+        }
+      }
       const idx = out.length;
       out.push(asNew || row);
       byTime.set(tk, idx);
@@ -5371,6 +5393,12 @@ Object.assign(BkkLib, {
   _elviraRetryMs: 3 * 6e4,
   _elviraFailLimit: 3,
   _elviraFails: 0,
+  /* The limit counts failed poll rounds, not calls: every MÁV card (and the
+     planner) fails in the same moment when the websocket drops, and that is
+     one round. A card polls every 20 s at the most, so failures closer than
+     this to the last one counted are the same round. */
+  _elviraFailRoundMs: 15e3,
+  _elviraLastFailAt: 0,
   _elviraDownUntil: 0,
   _elviraWarned: false,
   _elviraLastCode: "",
@@ -5378,6 +5406,8 @@ Object.assign(BkkLib, {
   /* A call that never answers ends here, not with the websocket: the
      integration gives up on a board after 30 s. */
   _elviraTimeoutMs: 35e3,
+  /* The service schema's own limit on dest_name. */
+  _elviraDestNameMax: 100,
   /* The trains between two stations, as {rows, error, detail}. error is ''
      for a full answer, else what went wrong: the integration's code
      (elvira_unavailable, elvira_rate_limited), a destination board that did
@@ -5402,7 +5432,8 @@ Object.assign(BkkLib, {
       origin_code: origin,
       dest_code: dest,
       minutes_after: minutesAfter || DEFAULT_MINUTES_AFTER,
-      dest_name: destName || ""
+      /* The service rejects a longer one as an invalid call. */
+      dest_name: String(destName || "").slice(0, BkkLib._elviraDestNameMax)
     };
     const at = Math.floor(Number(opts.at));
     if (Number.isFinite(at) && at > Math.floor(Date.now() / 1e3)) serviceData.at = at;
@@ -5415,11 +5446,15 @@ Object.assign(BkkLib, {
       let code = "elvira_call_failed";
       if (err && err.translation_key === "not_loaded") code = "not_loaded";
       else if (err && err.code === "elvira_timeout") code = "elvira_timeout";
-      BkkLib._elviraFails += 1;
+      const now = Date.now();
+      if (now - BkkLib._elviraLastFailAt >= BkkLib._elviraFailRoundMs) {
+        BkkLib._elviraFails += 1;
+        BkkLib._elviraLastFailAt = now;
+      }
       BkkLib._elviraLastCode = code;
       BkkLib._elviraLastErr = detail;
       if (BkkLib._elviraFails >= BkkLib._elviraFailLimit) {
-        BkkLib._elviraDownUntil = Date.now() + BkkLib._elviraRetryMs;
+        BkkLib._elviraDownUntil = now + BkkLib._elviraRetryMs;
       }
       if (!BkkLib._elviraWarned) {
         BkkLib._elviraWarned = true;
@@ -5428,6 +5463,7 @@ Object.assign(BkkLib, {
       return none(code, detail);
     }
     BkkLib._elviraFails = 0;
+    BkkLib._elviraLastFailAt = 0;
     BkkLib._elviraWarned = false;
     if (!res) return none();
     const payload = BkkLib.servicePayload(res);
@@ -5578,6 +5614,8 @@ Object.assign(BkkLib, {
 });
 
 // src/lib/departures.js
+var BOARD_CAP_ROWS = 55;
+var PATTERN_PROOF_MS = 3 * 36e5;
 Object.assign(BkkLib, {
   async addTransitousVolanStops(byId, q, motisHits) {
     const motis = motisHits || await BkkLib.searchStopsTransitous(q);
@@ -5663,6 +5701,7 @@ Object.assign(BkkLib, {
           data = await BkkLib.fetch(apiKey, "search.json", { query: queries[i] }, true);
         } catch (err) {
           if (!byId.size || i === 0 && mode !== "volan" && mode !== "all") throw err;
+          if (opts) opts.partial = true;
           break;
         }
         const stops = (((data || {}).data || {}).references || {}).stops || {};
@@ -5761,9 +5800,9 @@ Object.assign(BkkLib, {
   /* Parent stop-areas (BKK_CSF…) cap live departures at ~60 rows, which is
      only ~15 min at Keleti. Query the child poles that actually serve the
      selected routes so minutesAfter can fill. */
-  async loadRoutePattern(apiKey, cache, routeId, background) {
+  async loadRoutePattern(apiKey, cache, routeId, background, fresh) {
     const hit = BkkLib._cached(cache, routeId);
-    if (hit && hit.variants) return hit;
+    if (hit && hit.variants && (!fresh || BkkLib.patternFresh(hit))) return hit;
     if (BkkLib._inflight[routeId]) return BkkLib._inflight[routeId];
     const p = (async () => {
       try {
@@ -5775,9 +5814,11 @@ Object.assign(BkkLib, {
         const packed = {
           variants: (entry.variants || []).map((v) => ({
             name: v.name,
+            headsign: v.headsign || "",
             ids: v.stopIds || []
           })),
-          stops: ((data.data || {}).references || {}).stops || {}
+          stops: ((data.data || {}).references || {}).stops || {},
+          at: Date.now()
         };
         return BkkLib._store(cache, routeId, packed);
       } finally {
@@ -5807,12 +5848,30 @@ Object.assign(BkkLib, {
     });
     return Array.from(poles);
   },
+  patternFresh(pat, nowMs) {
+    if (!pat || !pat.variants || typeof pat.at !== "number") return false;
+    const now = nowMs === void 0 ? Date.now() : nowMs;
+    return now - pat.at < PATTERN_PROOF_MS && new Date(pat.at).toDateString() === new Date(now).toDateString();
+  },
   /* A route none of whose variants through the origin reaches the
-     destination answers for every one of its trips, with no trip-details.
-     Only a pattern that passes the origin at all can say so. */
-  patternMissesDest(pat, origin, destKey) {
-    if (!pat || !pat.variants || !destKey) return false;
-    return BkkLib.polesFromPatterns([pat], origin, "").length > 0 && !BkkLib.polesFromPatterns([pat], origin, destKey).length;
+     destination answers for its trips with no trip-details. Only a fresh
+     pattern says so, and only of a trip whose headsign ends one of those
+     variants: a detour or an added trip it does not list is asked. */
+  patternMissesDest(pat, origin, destKey, head) {
+    if (!destKey || !head || !BkkLib.patternFresh(pat)) return false;
+    const stops = pat.stops || {};
+    const isDest = BkkLib.nameMatcher(destKey);
+    const isHead = BkkLib.nameMatcher(head);
+    let known = false;
+    for (const v of pat.variants) {
+      const ids = v.ids || [];
+      const oidx = ids.findIndex((id) => BkkLib.stopMatchesOrigin(Object.assign({ id }, stops[id] || {}), origin));
+      if (oidx < 0) continue;
+      if (ids.slice(oidx + 1).some((id) => isDest((stops[id] || {}).name))) return false;
+      const last = (stops[ids[ids.length - 1]] || {}).name;
+      if (isHead(v.headsign) || isHead(v.name) || isHead(last)) known = true;
+    }
+    return known;
   },
   /* Poles of the loaded route patterns that belong to the stop area parentId. */
   childPolesOf(cache, routeIds, parentId) {
@@ -6163,8 +6222,9 @@ Object.assign(BkkLib, {
             spanMin: Math.max(best.spanMin, cur.spanMin)
           };
         }, { count: 0, spanMin: 0 });
-        const capped = usedParentOnly && !!payloads[0] && span.count >= 60 && span.spanMin + 2 < horizon;
-        if (capped) {
+        const discover = usedParentOnly && !!payloads[0];
+        const capped = discover && span.count >= BOARD_CAP_ROWS && span.spanMin + 2 < horizon;
+        if (discover) {
           const discovered = [];
           payloads.forEach((data) => {
             const refs = (data && data.data || {}).references || {};
@@ -6190,6 +6250,13 @@ Object.assign(BkkLib, {
             } catch (_e) {
               extra = [];
             }
+          }
+          if (!capped) {
+            const own = BkkLib.childPolesOf(cache, discovered, stopId);
+            const listed = BkkLib._cached(cache, "children:" + stopId);
+            if (Array.isArray(listed)) listed.forEach((id) => own.add(id));
+            extra = extra.filter((id) => !own.has(id));
+            near = [];
           }
           const fresh = Array.from(new Set(near.concat(extra))).filter((id) => poles.indexOf(id) < 0);
           if (fresh.length) {
@@ -6263,7 +6330,7 @@ Object.assign(BkkLib, {
       const headHitsDest = (row) => !!(dest && (BkkLib.nameEq(row.head, dest.name) || BkkLib.nameEq(row.head, dest.key)));
       const ruledOut = (row) => {
         const rid = routeOfTrip.get(row.tripId);
-        return !!rid && BkkLib.patternMissesDest(BkkLib._cached(cache, rid), origin, destKey);
+        return !!rid && BkkLib.patternMissesDest(BkkLib._cached(cache, rid), origin, destKey, row.head);
       };
       if (destKey && candidates.length) {
         candidates.forEach((row) => {
@@ -6286,9 +6353,9 @@ Object.assign(BkkLib, {
             const unloaded = /* @__PURE__ */ new Set();
             pool.forEach((row) => {
               const rid = routeOfTrip.get(row.tripId);
-              if (rid && !(BkkLib._cached(cache, rid) || {}).variants) unloaded.add(rid);
+              if (rid && !BkkLib.patternFresh(BkkLib._cached(cache, rid))) unloaded.add(rid);
             });
-            await Promise.all(Array.from(unloaded).map((rid) => BkkLib.loadRoutePattern(apiKey, cache, rid, true).catch(() => null)));
+            await Promise.all(Array.from(unloaded).map((rid) => BkkLib.loadRoutePattern(apiKey, cache, rid, true, true).catch(() => null)));
             const open = pool.filter((row) => !ruledOut(row));
             const picked = sure.slice();
             let found = 0;
@@ -6352,10 +6419,6 @@ Object.assign(BkkLib, {
 });
 
 // src/lib/vehicles.js
-var RAIL_KIND_BADGE = {
-  SV: ["29803C", "FFFFFF"],
-  GY: ["C82227", "FFFFFF"]
-};
 Object.assign(BkkLib, {
   trainNumberFromTripId(tripId) {
     const s = String(tripId || "");
@@ -6738,7 +6801,7 @@ Object.assign(BkkLib, {
       row.label = "Sz";
       key = "SZ";
     }
-    let badge = BKK_RAIL_BADGE[key] || RAIL_KIND_BADGE[key];
+    let badge = BKK_RAIL_BADGE[key] || (BkkLib.isTrainRow(row) ? RAIL_KIND_BADGE[key] : null);
     if (!badge && BkkLib.isTrainRow(row) && key && !BkkLib.suburbanLineLabel(key) && !BkkLib.genericRailLabel(key) && !/^\d+$/.test(key)) {
       badge = BKK_RAIL_BADGE.IC;
     }
@@ -9986,7 +10049,7 @@ ${this._stopPinCss()}
       const kept = (this._rawRows || []).filter((row) => row && /^elvira:/.test(String(row.tripId || "")) && !have.has(String(row.tripId)) && departureStillDue(row.dep)).map((row) => Object.assign({}, row));
       return fresh.concat(kept).sort((a, b) => (a.dep || 0) - (b.dep || 0));
     };
-    const run = async () => {
+    const run = async (knownBoard) => {
       if (gen !== this._gen) return;
       const lib = BkkLib.withIndexes(cfg);
       const mavBoard = mode === "mav" && BkkLib.hasElvira(this._hass) && !(Date.now() < this._mavViaFutarUntil && this._hasFutar());
@@ -10004,7 +10067,7 @@ ${this._stopPinCss()}
           return;
         }
         const wantElvira = (mode === "mav" || mode === "all") && BkkLib.hasElvira(this._hass);
-        const elviraP = wantElvira ? lib.elviraBoard(
+        const elviraP = knownBoard ? Promise.resolve(knownBoard) : wantElvira ? lib.elviraBoard(
           this._hass,
           cfg.stopId,
           cfg.destStopId || "",
@@ -10097,7 +10160,7 @@ ${this._stopPinCss()}
           if (gen !== this._gen) return;
           if (board.error === "not_loaded" && this._hasFutar()) {
             this._mavViaFutarUntil = Date.now() + BkkLib._elviraRetryMs;
-            return run();
+            return run(board);
           }
           elviraRows = BkkLib.mavBoardRows(board.rows);
           if (board.error) {
@@ -10251,6 +10314,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._when = { mode: "now", at: 0 };
     this._journeys = [];
     this._openJourney = 0;
+    this._openingJourney = null;
     this._editRoute = false;
   }
   static async getConfigElement() {
@@ -10813,22 +10877,46 @@ var BKKPlannerCard = class extends BKKHopCard {
     }
   }
   async _openJourneyMap() {
+    let again = true;
+    while (again) again = await this._openJourneyMapOnce();
+  }
+  /* A journey map's button may be gone when it closes: an open that
+     replaced one still waiting kept that one's button, and another
+     itinerary or a new plan repaints the box. Focus goes to the Map button
+     the box has now. */
+  _restoreFocus(back) {
+    if (back && back.journey && back.el && !back.el.isConnected) {
+      const el = this._journeyHost && this._journeyHost.querySelector("#pmap");
+      super._restoreFocus(el ? { el, ref: null } : null);
+      return;
+    }
+    super._restoreFocus(back);
+  }
+  /* True when the open has to start again for the card's new "now" plan. */
+  async _openJourneyMapOnce() {
     const lang = this._lang();
     const cfg = this._config || {};
-    if (this._openingMap === "journey" && this._openingJourney === this._journey) return;
-    if (this._mapOverlay && this._openMapKey === "journey") return;
+    if (this._openingMap === "journey" && this._openingJourney === this._journey) return false;
+    if (this._mapOverlay && this._openMapKey === "journey") return false;
     const back = this._mapReturnFocus || this._focusTarget();
+    if (back) back.journey = true;
     this._closeVehicleMap();
     this._mapReturnFocus = back;
     this._openingMap = "journey";
     const seq = this._mapSeq;
     const gen = this._pairGen;
+    const timed = this._timed();
     let journey = this._journey;
     this._openingJourney = journey;
+    let again = false;
     const stale = () => {
       if (this._mapStale(seq)) return true;
       if (gen === this._pairGen && this._journey === journey) return false;
       this._openingMap = "";
+      if (gen === this._pairGen && !timed && !this._timed()) {
+        again = true;
+        return true;
+      }
       this._mapReturnFocus = null;
       return true;
     };
@@ -10836,7 +10924,7 @@ var BKKPlannerCard = class extends BKKHopCard {
       await BkkLib.fillJourneyShapes(journey);
     } catch (_e) {
     }
-    if (stale()) return;
+    if (stale()) return again;
     let segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
     if (!segs.length && cfg.stopId && cfg.destName && !this._timed()) {
       try {
@@ -10847,34 +10935,34 @@ var BKKPlannerCard = class extends BKKHopCard {
           this._hass,
           { minutesAfter: clampMinutesAfter(cfg.minutesAfter) }
         );
-        if (stale()) return;
+        if (stale()) return again;
         if (planned) journey = this._openingJourney = this._journey = planned;
         try {
           await BkkLib.fillJourneyShapes(journey);
         } catch (_e) {
         }
-        if (stale()) return;
+        if (stale()) return again;
         if (planned) this._paintJourney();
         segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
       } catch (_e) {
       }
     }
-    if (stale()) return;
+    if (stale()) return again;
     if (!segs.length) {
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapNoData"));
-      return;
+      return false;
     }
     let L;
     try {
       L = await this._ensureLeaflet();
     } catch (_e) {
-      if (stale()) return;
+      if (stale()) return again;
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapLeafletFail"));
-      return;
+      return false;
     }
-    if (stale()) return;
+    if (stale()) return again;
     const overlay = document.createElement("div");
     overlay.className = "ht-map-overlay";
     const title = `${cfg.stopName || ""} → ${cfg.destName || ""}`;
@@ -10920,12 +11008,13 @@ var BKKPlannerCard = class extends BKKHopCard {
     } catch (_e) {
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapLeafletFail"));
-      return;
+      return false;
     }
     this._map = map;
     const allPts = this._drawJourneyPolylines(L, map, segs, { labels: true });
     this._fitJourneyView(L, map, allPts, 36, () => this._map === map);
     this._openingMap = "";
+    return false;
   }
   /* While a pair is still being picked the card keeps its own name (or
      "Tervező") as a title; see _paintHead for a picked pair. */
