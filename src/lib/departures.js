@@ -30,7 +30,16 @@ const patternsStored = () => {
 const patternsWrite = () => {
   BkkLib._patternsWriteTimer = null;
   try {
+    /* Another tab may have written since this page read the list: its
+       patterns stay, the newer copy of a route wins. */
     const all = patternsStored();
+    let disk = {};
+    try {
+      disk = JSON.parse(globalThis.localStorage.getItem(ROUTE_PATTERNS_KEY) || '{}') || {};
+    } catch (_e) { /* unreadable: this page's list alone */ }
+    Object.keys(disk).forEach((k) => {
+      if (disk[k] && (!all[k] || disk[k].at > all[k].at)) all[k] = disk[k];
+    });
     const out = {};
     Object.keys(all).filter((k) => BkkLib.patternFresh(all[k]))
       .sort((a, b) => all[b].at - all[a].at)

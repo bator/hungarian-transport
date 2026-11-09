@@ -4655,6 +4655,13 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   await Promise.all(['AZP_A', 'AZP_B', 'AZP_C', 'AZP_D'].map((rid) => Lib.loadRoutePattern('k', {}, rid)));
   Lib.flushRoutePatterns();
   const batched = writes;
+  /* Another tab wrote a route since this page read the list: it stays. */
+  const other = JSON.parse(store.get('hungarian_transport_route_patterns'));
+  other.AZP_TAB = Object.assign({}, other.AZP_A, { at: Date.now() });
+  store.set('hungarian_transport_route_patterns', JSON.stringify(other));
+  await Lib.loadRoutePattern('k', {}, 'AZP_F');
+  Lib.flushRoutePatterns();
+  const bothTabs = Object.keys(JSON.parse(store.get('hungarian_transport_route_patterns'))).sort().join();
   Object.defineProperty(globalThis, 'localStorage', {
     configurable: true,
     value: { getItem: () => { throw new Error('denied'); }, setItem: () => { throw new Error('denied'); } },
@@ -4666,11 +4673,12 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   Lib._storedPatterns = null;
   delete globalThis.localStorage;
   check('a route pattern from an earlier page load spares its route-details until it is three hours old',
-    afterReload === 1 && afterStale === 2 && routeCalls === 7 && batched === 1
+    afterReload === 1 && afterStale === 2 && routeCalls === 8 && batched === 1
+      && bothTabs.includes('AZP_TAB') && bothTabs.includes('AZP_F')
       && second.stops.AZP_1.parentStationId === 'AZP_CS' && second.variants[0].ids.join() === 'AZP_1,AZP_2'
       && Lib.patternFresh(second) && !('lat' in saved.stops.AZP_1) && !('code' in saved.stops.AZP_1)
       && !!first && !!noStorage && noStorage.variants.length === 1,
-    JSON.stringify({ afterReload, afterStale, routeCalls, batched, stop: saved.stops && saved.stops.AZP_1 }));
+    JSON.stringify({ afterReload, afterStale, routeCalls, batched, bothTabs, stop: saved.stops && saved.stops.AZP_1 }));
 }
 {
   /* A through-check row is a new object: it still gets its ride time. */

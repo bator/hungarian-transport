@@ -5657,6 +5657,14 @@ var patternsWrite = () => {
   BkkLib._patternsWriteTimer = null;
   try {
     const all = patternsStored();
+    let disk = {};
+    try {
+      disk = JSON.parse(globalThis.localStorage.getItem(ROUTE_PATTERNS_KEY) || "{}") || {};
+    } catch (_e) {
+    }
+    Object.keys(disk).forEach((k) => {
+      if (disk[k] && (!all[k] || disk[k].at > all[k].at)) all[k] = disk[k];
+    });
     const out = {};
     Object.keys(all).filter((k) => BkkLib.patternFresh(all[k])).sort((a, b) => all[b].at - all[a].at).slice(0, ROUTE_PATTERNS_KEEP).forEach((k) => {
       out[k] = all[k];
