@@ -10231,6 +10231,142 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   pc.remove();
 }
 
+/* A "now" planner plans again (the 5-minute tick, a reconnect, Most once
+   more): the itinerary on screen stays, with its box and inline map, until
+   the new plan lands. In between the card never reads "No upcoming
+   departures." or "Loading…" over a route that needs a transfer, and a
+   journey map opening meanwhile draws the plan the card still shows, not a
+   bare line from origin to destination under "null min". */
+{
+  const keep = {
+    departures: Lib.departures, planJourney: Lib.planJourney, fillTransitousIfEmpty: Lib.fillTransitousIfEmpty,
+    fillJourneyShapes: Lib.fillJourneyShapes, attachCoachGps: Lib.attachCoachGps, attachRealtime: Lib.attachRealtime,
+  };
+  const layer = () => ({ addTo() { return this; }, on() { return this; }, bindTooltip() { return this; } });
+  const L = {
+    map: () => ({
+      setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {},
+    }),
+    tileLayer: () => layer(),
+    polyline: () => layer(),
+    marker: () => layer(),
+    divIcon: (o) => o,
+    latLngBounds: (pts) => ({ pts }),
+  };
+  const mkJ = (label, min) => ({
+    durationMin: min, transfers: 1, walkMin: 3, waitMin: 4,
+    legs: [
+      { walk: false, label, color: '009EE3', minutes: 20, from: 'A', to: 'X', depTs: Math.floor(Date.now() / 1000) + 600 },
+      { walk: false, label: `${label}B`, color: 'AA0000', minutes: 30, from: 'X', to: 'B' },
+    ],
+  });
+  let fill = { p: Promise.resolve([]) };
+  let plan = { p: Promise.resolve(mkJ('PLANONE', 41)) };
+  let plans = 0;
+  Lib.departures = async () => [];
+  Lib.fillTransitousIfEmpty = () => fill.p;
+  Lib.planJourney = () => { plans += 1; return plan.p; };
+  Lib.fillJourneyShapes = async () => {};
+  Lib.attachCoachGps = async (_h, rows) => rows || [];
+  Lib.attachRealtime = async () => null;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._loadDests = async () => {};
+  pc._ensureLeaflet = async () => L;
+  pc.hass = { states: {}, language: 'en', services: {} };
+  document.body.appendChild(pc);
+  pc.setConfig({
+    language: 'en', stopId: 'BKK_F00001', stopName: 'A', stopLat: 47.5, stopLon: 19.0,
+    destKey: 'b', destName: 'B', destStopId: 'BKK_F00002', destLat: 47.6, destLon: 19.1,
+  });
+  await settleTicks(10);
+  const boxOf = () => pc._journeyHost && pc._journeyHost.firstChild;
+  const state = () => ({
+    box: (pc._journeyHost ? pc._journeyHost.textContent : '').replace(/\s+/g, ' ').trim().slice(0, 48),
+    body: pc._elBody ? pc._elBody.textContent.trim().slice(0, 40) : '',
+  });
+  const box0 = boxOf();
+  const loaded = state();
+
+  /* The tick, five minutes on: the run clears the plan after departures()
+     and plans again only at its end. */
+  fill = deferred();
+  plan = deferred();
+  pc._loadedAt = Date.now() - 6 * 60 * 1000;
+  pc._tickPaint();
+  await settleTicks();
+  const inRun = Object.assign(state(), { same: boxOf() === box0 });
+  fill.resolve([]);
+  await settleTicks();
+  const planning = Object.assign(state(), { same: boxOf() === box0, loading: pc._journeyLoading, plans });
+  plan.resolve(mkJ('PLANTWO', 43));
+  await settleTicks();
+  const landed = state();
+  check('a "now" replan on the tick keeps the itinerary on screen until the new plan lands',
+    /PLANONE/.test(loaded.box) && !loaded.body
+      && inRun.same && /PLANONE/.test(inRun.box) && !inRun.body
+      && planning.same && planning.loading && planning.plans === 2 && /PLANONE/.test(planning.box) && !planning.body
+      && /PLANTWO/.test(landed.box) && !/PLANONE/.test(landed.box) && !landed.body,
+    JSON.stringify({ loaded, inRun, planning, landed }));
+
+  /* Map clicked while its shapes still load, then the card plans again for
+     the same pair: the map opens on the plan the box shows. */
+  const foot = () => (pc._mapOverlay ? pc._mapOverlay.querySelector('.ht-map-foot').textContent : '');
+  const openDuring = async (replan) => {
+    const shown = pc._journey;
+    const shapes = deferred();
+    Lib.fillJourneyShapes = (j) => (j === shown ? shapes.p : Promise.resolve());
+    fill = { p: Promise.resolve([]) };
+    plan = deferred();
+    const opening = pc._openJourneyMap();
+    await settleTicks();
+    replan();
+    await settleTicks();
+    shapes.resolve();
+    await Promise.race([opening, settleTicks(20)]);
+    await settleTicks();
+    const seen = { overlay: !!pc._mapOverlay, foot: foot(), box: state().box };
+    pc._closeVehicleMap();
+    return seen;
+  };
+  const onReload = await openDuring(() => pc._reloadSafe());
+  plan.resolve(mkJ('PLANTHREE', 45));
+  await settleTicks();
+  check('a journey map opening while "now" plans again draws the plan on screen, not a bare line under "null min"',
+    onReload.overlay && /43 min/.test(onReload.foot) && !/null/.test(onReload.foot) && /PLANTWO/.test(onReload.box)
+      && /PLANTHREE/.test(state().box),
+    JSON.stringify({ onReload, after: state() }));
+  const onMost = await openDuring(() => pc._setWhen('now'));
+  plan.resolve(mkJ('PLANFOUR', 47));
+  await settleTicks();
+  check('Most pressed again while the journey map opens keeps the plan on screen and the map draws it',
+    onMost.overlay && /45 min/.test(onMost.foot) && !/null/.test(onMost.foot) && /PLANTHREE/.test(onMost.box)
+      && /PLANFOUR/.test(state().box),
+    JSON.stringify({ onMost, after: state() }));
+  /* The new plan finds no route while the map still waits: there is no plan
+     to draw, so no map opens and its button does not take the focus later. */
+  {
+    const shown = pc._journey;
+    const shapes = deferred();
+    Lib.fillJourneyShapes = (j) => (j === shown ? shapes.p : Promise.resolve());
+    fill = { p: Promise.resolve([]) };
+    plan = { p: Promise.resolve(null) };
+    const opening = pc._openJourneyMap();
+    await settleTicks();
+    pc._reloadSafe();
+    await settleTicks();
+    shapes.resolve();
+    await Promise.race([opening, settleTicks(20)]);
+    await settleTicks();
+    check('a "now" replan finding no route while the journey map opens opens no map of nothing',
+      !pc._mapOverlay && !document.querySelector('.ht-map-overlay') && pc._openingMap === '' && pc._mapReturnFocus === null
+        && pc._journey === null,
+      JSON.stringify({ overlay: !!pc._mapOverlay, foot: foot(), opening: pc._openingMap, journey: !!pc._journey }));
+    pc._closeVehicleMap();
+  }
+  Object.assign(Lib, keep);
+  pc.remove();
+}
+
 /* "Now" mode: a failed journey plan over an empty board does not leave the
    planner (which does not poll) on "Loading…". */
 {
