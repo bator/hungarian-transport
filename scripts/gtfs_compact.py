@@ -18,6 +18,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import time
 import unicodedata
 import urllib.parse
 import urllib.request
@@ -44,6 +45,13 @@ INDEX_SCHEMA = 29
 # Shapes are split into this many files so opening one map downloads one
 # small shard (shape id % n), not every route of the feed.
 SHAPE_SHARDS = 64
+# A dashboard left open keeps the index it loaded until midnight (the card's
+# daily cache-buster) and asks for that index's shards all day. A shapes
+# folder the index stopped using is served this much longer: a day, plus a
+# DST day's extra hour and some slack.
+SHAPES_GRACE_S = 26 * 3600
+# Written into a folder when the index stops using it; its mtime says when.
+SHAPES_RETIRED = ".retired"
 # Douglas–Peucker tolerance: 10 m keeps streets recognisable at city zoom
 # and drops ~60 % of the points.
 SHAPE_TOLERANCE_M = 10.0
@@ -1671,11 +1679,40 @@ def write_shapes(shapes: list[str], out: Path) -> dict | None:
     return {"dir": name, "n": SHAPE_SHARDS}
 
 
-def prune_shapes(out: Path, keep: str | None) -> None:
-    """Drop shapes folders (and interrupted temp folders) the index no longer uses."""
+def prune_shapes(out: Path, keep: str | None, grace_s: float = SHAPES_GRACE_S,
+                 now: float | None = None) -> None:
+    """Drop shapes folders the index no longer uses, grace_s after it stopped.
+
+    The first prune that finds a folder unused marks it (SHAPES_RETIRED);
+    a later one past the grace removes it. Interrupted temp folders
+    (write_shapes' mkdtemp, _copy_shapes' .copy) go at once, and so does
+    everything with grace_s 0 (a copy nobody serves).
+    """
     prefix = shapes_stem(out) + "-shapes-"
+    now = time.time() if now is None else now
     for entry in out.parent.glob(prefix + "*"):
-        if entry.is_dir() and entry.name != keep:
+        if not entry.is_dir():
+            continue
+        marker = entry / SHAPES_RETIRED
+        if entry.name == keep:
+            # In use again (an index rolled back to these shapes).
+            marker.unlink(missing_ok=True)
+            continue
+        if grace_s <= 0 or "." in entry.name[len(prefix):]:
+            shutil.rmtree(entry, ignore_errors=True)
+            continue
+        try:
+            retired = marker.stat().st_mtime
+        except FileNotFoundError:
+            try:
+                marker.touch()
+            except OSError:
+                # Cannot say when it retired: drop it, as before the grace.
+                shutil.rmtree(entry, ignore_errors=True)
+            continue
+        except OSError:
+            continue
+        if now - retired >= grace_s:
             shutil.rmtree(entry, ignore_errors=True)
 
 
