@@ -16,7 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 import aiohttp
 import zoneinfo
 
-from .cache import SharedTTLCache, hass_call_later
+from .cache import SharedTTLCache, close_on_stop, hass_call_later
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -313,6 +313,8 @@ async def _station_legs(session, hass, station_code: str, day: date):
             ),
             call_later=hass_call_later(hass),
         )
+        # For Home Assistant's lifetime (async_setup registers the service).
+        close_on_stop(hass, cache.close)
     limit = data.get("elvira_rate")
     if limit is None:
         limit = data["elvira_rate"] = _RateLimit()

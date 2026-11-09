@@ -14,6 +14,7 @@ from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClien
 
 from homeassistant.components.frontend import DATA_EXTRA_MODULE_URL
 from homeassistant.config_entries import ConfigEntryDisabler
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
@@ -31,6 +32,8 @@ from custom_components.hungarian_transport.const import (
     SERVICE_REBUILD_MAV,
 )
 from custom_components.hungarian_transport.elvira import ELVIRA_URL, service_days
+
+from .test_cache import expiry_timers
 
 ORIGIN = "005510009"
 BUDAPEST = dt_util.get_time_zone("Europe/Budapest")
@@ -763,6 +766,18 @@ async def test_elvira_boards_leave_memory_when_their_ttl_ends(hass, aioclient_mo
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=elvira.ELVIRA_CACHE_TTL), fire_all=True)
     await hass.async_block_till_done()
     assert len(cache) == 0
+
+
+async def test_elvira_expiry_timer_goes_when_home_assistant_stops(hass, aioclient_mock, freezer) -> None:
+    freezer.move_to(NOON)
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+    await _elvira_call(hass)
+    assert len(expiry_timers(hass)) == 1
+
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert expiry_timers(hass) == []
 
 
 async def _realtime_call(hass):

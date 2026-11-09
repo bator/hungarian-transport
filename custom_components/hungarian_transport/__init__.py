@@ -27,6 +27,7 @@ from homeassistant.util import dt as dt_util
 
 from . import mav, mav_daily, realtime, timetable_notify, timetables
 from .assets import asset_tag
+from .cache import close_on_stop, hass_call_later
 from .const import (
     CONF_API_KEY,
     CONF_DAILY_MAV,
@@ -392,7 +393,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         task_factory=lambda coro: hass.async_create_background_task(
             coro, "hungarian_transport_futar", eager_start=False
         ),
+        call_later=hass_call_later(hass),
     )
+    entry.async_on_unload(proxy.close)
+    entry.async_on_unload(close_on_stop(hass, proxy.close))
 
     async def handle_futar(call: ServiceCall) -> dict[str, Any]:
         # Errors are part of the response, not exceptions: the websocket API
