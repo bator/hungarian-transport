@@ -187,7 +187,7 @@ Object.assign(BkkLib, {
   /* Parent stop-areas (BKK_CSF…) cap live departures at ~60 rows, which is
      only ~15 min at Keleti. Query the child poles that actually serve the
      selected routes so minutesAfter can fill. */
-  async loadRoutePattern(apiKey, cache, routeId) {
+  async loadRoutePattern(apiKey, cache, routeId, background) {
     const hit = BkkLib._cached(cache, routeId);
     if (hit && hit.variants) return hit;
     if (BkkLib._inflight[routeId]) return BkkLib._inflight[routeId];
@@ -196,7 +196,7 @@ Object.assign(BkkLib, {
         const data = await BkkLib.fetch(apiKey, 'route-details.json', {
           routeId,
           includeReferences: 'true',
-        }, true);
+        }, !background);
         const entry = (data.data || {}).entry || {};
         const packed = {
           variants: (entry.variants || []).map((v) => ({
@@ -234,6 +234,14 @@ Object.assign(BkkLib, {
       });
     });
     return Array.from(poles);
+  },
+  /* A route none of whose variants through the origin reaches the
+     destination answers for every one of its trips, with no trip-details.
+     Only a pattern that passes the origin at all can say so. */
+  patternMissesDest(pat, origin, destKey) {
+    if (!pat || !pat.variants || !destKey) return false;
+    return BkkLib.polesFromPatterns([pat], origin, '').length > 0
+      && !BkkLib.polesFromPatterns([pat], origin, destKey).length;
   },
   /* Poles of the loaded route patterns that belong to the stop area parentId. */
   childPolesOf(cache, routeIds, parentId) {
@@ -289,12 +297,16 @@ Object.assign(BkkLib, {
     return p;
   },
   /* A dashboard left open for a day would otherwise accumulate every trip it
-     ever looked at, each with its full stop list. Oldest entries go first. */
+     ever looked at, each with its full stop list. Trips go first, oldest
+     first: they come and go with the board, while a route's pattern and a
+     stop area's child poles are read again on every poll. */
   cachePut(cache, key, value) {
     if (!cache) return value;
     const keys = Object.keys(cache);
     if (keys.length >= 400) {
-      keys.slice(0, keys.length - 399).forEach((k) => { delete cache[k]; });
+      const isTrip = (k) => k.indexOf('trip:') === 0;
+      const order = keys.filter(isTrip).concat(keys.filter((k) => !isTrip(k)));
+      order.slice(0, keys.length - 399).forEach((k) => { delete cache[k]; });
     }
     cache[key] = value;
     return value;
@@ -547,6 +559,8 @@ Object.assign(BkkLib, {
     const queryFutar = !opts.skipFutar && (mode === 'bkk' || mode === 'mav' || /^BKK_/i.test(String(stopId || '')));
     const futarTask = queryFutar ? (async () => {
     let candidates = [];
+    /* Each candidate's route, for its pattern in the through-check. */
+    const routeOfTrip = new Map();
     try {
       let poles = [];
       const poleRoutes = Array.from(selected);
@@ -602,9 +616,12 @@ Object.assign(BkkLib, {
       }, { count: 0, spanMin: 0 });
       /* A failed parent board (its child poles stood in) has no span: it is
          not "capped", or every outage or rate limit set off discovery's
-         extra route and board requests. */
+         extra route and board requests. Nor is one under the ~60-row cap,
+         or one reaching the horizon's end: a complete board's last
+         departure is just the last one before the horizon, and its child
+         poles' rows are on it already. */
       const capped = usedParentOnly && !!payloads[0]
-        && (span.count >= 60 || span.spanMin + 2 < horizon);
+        && span.count >= 60 && span.spanMin + 2 < horizon;
       if (capped) {
         const discovered = [];
         payloads.forEach((data) => {
@@ -658,6 +675,7 @@ Object.assign(BkkLib, {
           if (dep && dep > latest + 60) return;
           if (dep && !departureStillDue(dep, now)) return;
           seenTrip.add(st.tripId);
+          if (rid) routeOfTrip.set(st.tripId, rid);
           const fallbackColor = mode === 'volan' ? 'F9AB13' : '4477aa';
           const fallbackText = mode === 'volan' ? '000000' : 'ffffff';
           const veh = st.vehicle || {};
@@ -712,6 +730,12 @@ Object.assign(BkkLib, {
     const headHitsDest = (row) => !!(dest && (
       BkkLib.nameEq(row.head, dest.name) || BkkLib.nameEq(row.head, dest.key)
     ));
+    /* A loaded route pattern that never reaches the destination from here
+       rules the trip out without its own request. */
+    const ruledOut = (row) => {
+      const rid = routeOfTrip.get(row.tripId);
+      return !!rid && BkkLib.patternMissesDest(BkkLib._cached(cache, rid), origin, destKey);
+    };
     if (destKey && candidates.length) {
       /* Trips already checked on an earlier poll are answered from the
          cache, so a through trip stays in the first paint instead of
@@ -719,7 +743,7 @@ Object.assign(BkkLib, {
       candidates.forEach((row) => {
         const known = headHitsDest(row) || BkkLib.knownTripGoesTo(cache, row.tripId, origin, destKey);
         if (known === true) sure.push(row);
-        else if (known === undefined) maybe.push(row);
+        else if (known === undefined && !ruledOut(row)) maybe.push(row);
       });
       sure = sure.slice(0, maxRows);
     } else {
@@ -735,10 +759,22 @@ Object.assign(BkkLib, {
     if (destKey && pool.length && typeof opts.armThroughCheck === 'function') {
       opts.armThroughCheck(() => {
         const pending = (async () => {
+          /* One route-details per route, kept for the session, stands in for
+             a trip-details per departure of every route that never gets
+             there; the rest are still checked trip by trip. */
+          const unloaded = new Set();
+          pool.forEach((row) => {
+            const rid = routeOfTrip.get(row.tripId);
+            if (rid && !(BkkLib._cached(cache, rid) || {}).variants) unloaded.add(rid);
+          });
+          await Promise.all(Array.from(unloaded).map((rid) => (
+            BkkLib.loadRoutePattern(apiKey, cache, rid, true).catch(() => null)
+          )));
+          const open = pool.filter((row) => !ruledOut(row));
           const picked = sure.slice();
           let found = 0;
-          for (let i = 0; i < pool.length && (sureFull ? found < maxRows : picked.length < maxRows); i += 16) {
-            const chunk = pool.slice(i, i + 16);
+          for (let i = 0; i < open.length && (sureFull ? found < maxRows : picked.length < maxRows); i += 16) {
+            const chunk = open.slice(i, i + 16);
             const flags = await Promise.all(chunk.map((row) => (
               BkkLib.tripGoesTo(apiKey, cache, row.tripId, origin, destKey)
             )));
