@@ -4505,6 +4505,73 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     JSON.stringify(seen));
 }
 {
+  /* A headsign that ends a listed variant does not make the trip that
+     variant. An ad-hoc FUTÁR trip (a numeric timestamp id) is not in the
+     route's pattern at all, and a trip leaving from a pole no variant
+     calls at runs some other way: both are asked trip-details, and both
+     pass the destination here. The scheduled trips stay ruled out. */
+  const t0 = Math.floor(Date.now() / 1000);
+  const S = {
+    AZTP: { id: 'AZTP', name: 'Azthub', parentStationId: 'AZTCS' },
+    AZTQ: { id: 'AZTQ', name: 'Azthub', parentStationId: 'AZTCS' },
+    AZTX: { id: 'AZTX', name: 'Aztkoz' },
+    AZTD: { id: 'AZTD', name: 'Aztcel' },
+    AZTE: { id: 'AZTE', name: 'Aztvege' },
+  };
+  const counts = { route: 0, trip: 0 };
+  const asked = [];
+  const keepFetch = Lib.fetch;
+  Lib.fetch = async (_k, path, params) => {
+    if (path === 'arrivals-and-departures-for-stop.json') {
+      const stopTimes = [];
+      const trips = {};
+      for (let i = 0; i < 4; i++) {
+        stopTimes.push({ tripId: `AZT_T${i}`, stopId: 'AZTP', departureTime: t0 + 300 + i * 600 });
+        trips[`AZT_T${i}`] = { routeId: 'AZT_R', tripHeadsign: 'Aztvege' };
+      }
+      stopTimes.push({ tripId: 'BKK_1792439004037', stopId: 'AZTP', departureTime: t0 + 400 });
+      trips.BKK_1792439004037 = { routeId: 'AZT_R', tripHeadsign: 'Aztvege' };
+      stopTimes.push({ tripId: 'AZT_MOVED', stopId: 'AZTQ', departureTime: t0 + 500 });
+      trips.AZT_MOVED = { routeId: 'AZT_R', tripHeadsign: 'Aztvege' };
+      return { data: { entry: { stopTimes }, references: { trips, routes: { AZT_R: { id: 'AZT_R', shortName: '9', type: 'BUS' } }, stops: S } } };
+    }
+    if (path === 'route-details.json') {
+      counts.route += 1;
+      return { data: { entry: { variants: [{ name: 'Aztvege', headsign: 'Aztvege', stopIds: ['AZTP', 'AZTX', 'AZTE'] }] }, references: { stops: S } } };
+    }
+    if (path === 'trip-details.json') {
+      counts.trip += 1;
+      asked.push(params.tripId);
+      const ids = params.tripId === 'BKK_1792439004037' ? ['AZTP', 'AZTD', 'AZTE']
+        : params.tripId === 'AZT_MOVED' ? ['AZTQ', 'AZTD', 'AZTE'] : ['AZTP', 'AZTX', 'AZTE'];
+      return { data: { entry: { stopTimes: ids.map((id, k) => ({ stopId: id, arrivalTime: t0 + 300 + k * 120, departureTime: t0 + 300 + k * 120 })) }, references: { stops: S } } };
+    }
+    return { data: {} };
+  };
+  let armed = null;
+  let full = null;
+  let early = [];
+  try {
+    Lib._boards.clear();
+    early = await Lib.departures('k', 'AZTCS', [], { key: 'aztcel', name: 'Aztcel' }, {
+      originName: 'Azthub', mode: 'bkk', minutesAfter: 180, cache: {}, deferGps: true,
+      armThroughCheck: (fn) => { armed = fn; },
+      onFutarUpdate: (rows) => { full = rows; },
+    });
+    if (armed) armed();
+    for (let i = 0; i < 50 && armed && !full; i++) await new Promise((r) => setTimeout(r, 5));
+  } finally {
+    Lib.fetch = keepFetch;
+    Lib._boards.clear();
+  }
+  const shown = (full || early).map((r) => r.tripId);
+  check('a fresh route pattern rules out only the trips that run its variants, not an ad-hoc or moved trip with the same headsign',
+    JSON.stringify(shown) === JSON.stringify(['BKK_1792439004037', 'AZT_MOVED'])
+    && JSON.stringify(asked.slice().sort()) === JSON.stringify(['AZT_MOVED', 'BKK_1792439004037'])
+    && counts.route === 1,
+    JSON.stringify({ shown, asked, counts }));
+}
+{
   /* Trips go first when the cache is full: the route patterns and child
      pole lists every poll needs again stay, so no route-details goes out
      again for them on a dashboard left open all day. */
