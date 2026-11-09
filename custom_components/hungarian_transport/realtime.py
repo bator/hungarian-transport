@@ -199,6 +199,8 @@ class TripUpdate:
     relationship: int
     delay: int | None
     stops: list[StopUpdate]
+    # route_id is one _fill_routes remembered for its pattern, not its own.
+    route_learned: bool = False
 
 
 @dataclass(slots=True)
@@ -779,6 +781,7 @@ def _fill_routes(known: dict[str, str], tu: Feed | None) -> None:
     for tid, t in tu.trip_updates.items():
         if not t.route_id:
             t.route_id = _route_of(known, tid)
+            t.route_learned = bool(t.route_id)
 
 
 def _start_minutes(trip_id: str) -> int | None:
@@ -984,7 +987,12 @@ def _answer(cfg: FeedConfig, loaded, req: dict[str, Any], now: float) -> dict[st
             delay, when, board_rel = _at_stop(tu, stops, int(src), False, repeat)
         if dst is not None:
             dest_delay, dest_when, dest_rel = _at_stop(tu, stops, int(dst), True, repeat)
-        if delay is None and when is None and board_rel is None:
+        # A trip matched on a learned route has no vehicle naming it here
+        # (the positions feed is down, stale, or without it). Its updates
+        # then say nothing of where it is: mvkzrt keeps the stops already
+        # served at delay 0, so the first one is an on-time it never said.
+        unplaced = tu.route_learned and vehicle is None and not (vp and vp.route_id)
+        if delay is None and when is None and board_rel is None and not unplaced:
             # No update at or before the boarding stop the card knows (a
             # feed with other stop ids, or a sparse one): the delay where
             # the vehicle is now, marked approximate. Not when the feed

@@ -71,6 +71,14 @@ ARRIVAL_WINDOW = timedelta(hours=6)
 # run to go by, ARRIVAL_WINDOW.
 LATE_RUN_MARGIN = timedelta(hours=1)
 ELVIRA_TIMEOUT = aiohttp.ClientTimeout(total=30)
+# elvira_between answers within this many seconds, whatever ELVIRA does: a
+# caller (the card) can time its wait by it. The first round of boards is
+# bounded by ELVIRA_TIMEOUT (a board shared with an earlier call is too: its
+# request started before this call did); the second round, tomorrow's
+# arrival board alone, gets what is left. A board that does not make it
+# counts as one that did not arrive, and its request goes on into the cache
+# for the next poll.
+ELVIRA_CALL_BUDGET = 40
 # StationInfo requests (cache misses only; shared requests count once) per
 # second and the burst allowed on top. Any logged-in user can call
 # elvira_between, and every new station pair is up to four POSTs to
@@ -253,11 +261,18 @@ def _kind_from_row(row: dict) -> str:
     return short or _KIND_LABELS.get(_fold_hu(str(kind.get("name") or "")), "")
 
 
-def service_days(now: datetime, latest: datetime) -> list[date]:
-    """Service days whose StationInfo can hold a departure in [now, latest]."""
+def service_days(now: datetime, latest: datetime, today: date | None = None) -> list[date]:
+    """Service days whose StationInfo can hold a departure in [now, latest].
+
+    The day before now's holds one only for a late train of it, and only
+    a day that already runs (today, or before: `today`, when now is a
+    planner's later start) has a late train: a day ahead has no estimates,
+    and its own board ends at its midnight (StationInfo is per calendar day
+    at the station)."""
     days = []
-    if (now - LATE_TRAIN_WINDOW).date() < now.date():
-        days.append(now.date() - timedelta(days=1))
+    yesterday = now.date() - timedelta(days=1)
+    if (now - LATE_TRAIN_WINDOW).date() < now.date() and (today is None or yesterday <= today):
+        days.append(yesterday)
     day = now.date()
     while day <= latest.date():
         days.append(day)
@@ -378,8 +393,12 @@ def longest_run(odep, darr, tz) -> timedelta | None:
     return longest
 
 
-def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
+def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name="", later=False):
     """Origin departures with optional dest hit (travel time only).
+
+    `later`: now is a planner's start ahead of the clock (elvira_between's
+    `at`). A train leaving before it is then no row even when it arrives
+    after it: not one under way, but one the search starts after.
 
     Booking and startTrack come from the origin StationInfo row. A MÁV card lists
     the rows with a dest hit; other cards overlay all of them onto their FUTÁR or
@@ -410,7 +429,7 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name=""):
         if arr is not None and arr < now - ARRIVAL_GRACE:
             hit = None
             arr = None
-        if arr is None and start < now - ARRIVAL_GRACE:
+        if start < now - ARRIVAL_GRACE and (arr is None or later):
             continue
         if start > latest and (arr is None or arr > latest):
             continue
@@ -523,19 +542,25 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
     cannot be trusted, and a MÁV card lists only the destHit rows.
 
     `at` (epoch seconds) starts the window later, for a planner's timed
-    search; never before now, since a train that left is gone.
+    search; never before now, since a train that left is gone. A later
+    start gets the trains leaving from it on (ARRIVAL_GRACE before it, as
+    for now), not the ones leaving before it that arrive after it.
+
+    Answers within ELVIRA_CALL_BUDGET seconds.
     """
     origin_code = station_code_digits(origin_code)
     dest_code = station_code_digits(dest_code)
     if len(origin_code) < 9 or len(dest_code) < 9 or origin_code == dest_code:
         return [], None
+    deadline = asyncio.get_running_loop().time() + ELVIRA_CALL_BUDGET
     tz = MAV_TZ
-    now = datetime.now(tz)
+    now = clock = datetime.now(tz)
     if at is not None:
         now = max(now, datetime.fromtimestamp(at, tz))
+    later = now > clock
     # Real minutes ahead, not wall-clock ones, on the night the clocks change.
     latest = (now.astimezone(UTC) + timedelta(minutes=int(minutes_after or 180))).astimezone(tz)
-    days = service_days(now, latest)
+    days = service_days(now, latest, clock.date())
     tomorrow = latest.date() + timedelta(days=1)
     # Tomorrow's arrival board only holds trains that get in past midnight;
     # it is several MB every ELVIRA_CACHE_TTL. Even the shortest run gets a
@@ -566,7 +591,14 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
         run = longest_run(odep, darr, tz)
         reach = ARRIVAL_WINDOW if run is None else min(ARRIVAL_WINDOW, run + LATE_RUN_MARGIN)
         if (latest + reach).date() >= tomorrow:
-            (boards[(dest_code, tomorrow)],) = await _fetch_boards(session, hass, [(dest_code, tomorrow)])
+            try:
+                async with asyncio.timeout_at(deadline):
+                    (board,) = await _fetch_boards(session, hass, [(dest_code, tomorrow)])
+            except TimeoutError:
+                # Its request goes on (the cache shields it); this answer
+                # does without it, and says so in dest_error.
+                board = ElviraError("TimeoutError")
+            boards[(dest_code, tomorrow)] = board
             dest_days.append(tomorrow)
     origin = [boards[(origin_code, day)] for day in days]
     dest = [boards[(dest_code, day)] for day in dest_days]
@@ -607,4 +639,4 @@ async def elvira_between(session, hass, origin_code, dest_code, minutes_after=18
         (b for b in dest_failed if not isinstance(b, ElviraRateLimited)),
         dest_failed[0] if dest_failed else None,
     )
-    return rows_from_stationinfo(odep, darr, tz, now, latest, dest_name), dest_failure
+    return rows_from_stationinfo(odep, darr, tz, now, latest, dest_name, later), dest_failure

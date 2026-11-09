@@ -26,7 +26,7 @@ Jonah Brüchert and served from his server at `jbb.ghsq.de`:
 | Debrecen, DKV (`debrecen`, alias `dkv`) | `jbb.ghsq.de/gtfs/hu/debrecen/` | trip_id, else route + start | 56 of 56 trip ids are in menetbrand's `debrecen` GTFS |
 | Orosháza (`oroshaza`) | `gtfs.gpspositions.net/storage/realtime/OROSH_V_ONK/` | trip_id | 1 of 1 (its own GTFS) |
 | Veszprém, V-Busz (`veszprem`) | `jbb.ghsq.de/gtfs/hu/VBUSZ/` | route + start | 10 of 11 |
-| Miskolc, MVK (`miskolc`) | `jbb.ghsq.de/gtfs/hu/mvkzrt/` | route + start | 29 of 40; the delay is the vehicle's current one |
+| Miskolc, MVK (`miskolc`) | `jbb.ghsq.de/gtfs/hu/mvkzrt/` | route + start | 29 of 40; the delay is the vehicle's current one, none without the vehicle |
 | MÁV trains (`mav`) | `jbb.ghsq.de/gtfs/hu/1_198/`, `…/1_134/` (GYSEV) | train number | 137 of 151 running trains |
 | GYSEV as its own feed (`gysev`) | `jbb.ghsq.de/gtfs/hu/1_134/` | trip_id, else train number | — |
 
@@ -61,7 +61,12 @@ on the server, but they were empty when this was written.
   if it has been down since then, route + start finds no trip update and
   those cards keep the timetable (Debrecen's trip ids still match).
   Veszprém's stop ids are the card's, so its delay is the one at your stop;
-  Miskolc's are not, so its delay is the vehicle's current one.
+  Miskolc's are not, so its delay is the vehicle's current one: the update
+  at the stop the vehicle is at. A Miskolc trip without its vehicle (the
+  positions feed down or stale, or the vehicle not in it) gets no delay and
+  keeps the timetable and the delay the card remembers. Its trip update
+  alone cannot say where the bus is, since it reports 0 for every stop
+  already served. A cancellation still comes through.
 - **Train number.** The MÁV feed's trip ids are not the MÁV GTFS's
   (`1:36166415` against `28178227_2158.`), and its trip updates carry no
   train number. The integration reads the train numbers from the same

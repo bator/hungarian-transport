@@ -175,7 +175,8 @@ def changed_indexes(
     """The shipped indexes that changed since seen (None on the first run).
 
     installed_mav is the MÁV feed this integration installed last (the daily
-    index, a local build): seen as well, though after the last setup."""
+    index, a local build): seen as well, though after the last check
+    (async_check_shipped passes it to one check only)."""
     if not isinstance(seen, Mapping) or not isinstance(seen.get("feeds"), Mapping):
         return []
     if seen.get("version") == version:
@@ -271,10 +272,18 @@ class UpdateNotifier:
         hass = self._hass
         feeds = await hass.async_add_executor_job(shipped_feeds, www)
         state = await _load(hass)
+        seen = state.get("shipped")
         installed = state.get(storage.MAV_INSTALL)
-        installed_feed = installed.get("feed") if isinstance(installed, Mapping) else None
-        changed = changed_indexes(state.get("shipped"), version, feeds, installed_feed)
-        new = {"version": version, "feeds": feeds}
+        install = (
+            [installed.get("feed"), installed.get("installed_at")] if isinstance(installed, Mapping) else None
+        )
+        # The install counts once: the check that saw it records it, and
+        # from then on it is in that check's feeds, or a release replaced it.
+        # The record itself stays until the next install, naming a feed www/
+        # may no longer serve.
+        unseen = install is not None and not (isinstance(seen, Mapping) and seen.get("mav_install") == install)
+        changed = changed_indexes(seen, version, feeds, install[0] if unseen else None)
+        new = {"version": version, "feeds": feeds, "mav_install": install}
         if state.get("shipped") != new:
             state["shipped"] = new
             await _save(hass, state)

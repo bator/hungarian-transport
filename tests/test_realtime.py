@@ -248,8 +248,10 @@ def test_trip_updates_take_the_route_their_pattern_had_in_a_vehicle() -> None:
     realtime._learn_routes(known, vp)
     realtime._fill_routes(known, tu)
     loaded = [(src, tu, None, None)]
-    hit = _answer(_cfg("route_start"), loaded, route="1V", start=508, stops=["x"], **{"from": 0})
+    # A stop of the feed's own: its update says the delay there.
+    hit = _answer(_cfg("route_start"), loaded, route="1V", start=508, stops=["SP490"], **{"from": 0})
     assert hit["trip_id"] == "10842_1943_082800_AZN" and hit["vehicle"] is None
+    assert (hit["delay"], hit["approx"]) == (12, False)
     assert _answer(_cfg("route_start"), loaded, route="1", start=508) is None
     # A pattern seen on two routes names neither.
     known = {}
@@ -259,6 +261,29 @@ def test_trip_updates_take_the_route_their_pattern_had_in_a_vehicle() -> None:
     assert realtime._route_of(known, "10842_1943_082800_AZN") == ""
     # An id without the OTP shape is its own key.
     assert realtime._route_key("hkir_3624_6-2") == "hkir_3624_6-2"
+
+
+def test_a_learned_route_without_its_vehicle_gives_no_current_delay() -> None:
+    """mvkzrt reports 0 for every stop the bus has already served and its
+    delay from its current stop on: without the vehicle there is no telling
+    which, so no live on-time over the card's remembered delay."""
+    (src, tu, vp, _tr) = _loaded("miskolc", "mvkzrt:")[0]
+    cfg = _cfg("route_start")
+    known: dict[str, str] = {}
+    realtime._learn_routes(known, vp)
+    realtime._fill_routes(known, tu)
+    req = {"route": "1V", "start": 508, "stops": ["638481"], "from": 0}
+    # The vehicle at SP492, 12 s late; the stops before it say 0.
+    hit = _answer(cfg, [(src, tu, vp, None)], **req)
+    assert hit["trip_id"] == "10842_1943_082800_AZN" and (hit["delay"], hit["approx"]) == (12, True)
+    # The positions feed down (or stale): the timetable, not a delay of 0.
+    assert _answer(cfg, [(src, tu, None, None)], **req) is None
+    # Its vehicle missing from a feed that still answers: the same.
+    del vp.vehicles["10842_1943_082800_AZN"]
+    assert _answer(cfg, [(src, tu, vp, None)], **req) is None
+    # A cancellation needs no position.
+    tu.trip_updates["10842_1943_082800_AZN"].relationship = 3
+    assert _answer(cfg, [(src, tu, None, None)], **req)["canceled"] is True
 
 
 def test_train_number_match() -> None:
