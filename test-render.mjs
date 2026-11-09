@@ -8402,6 +8402,65 @@ check('a city stop number is not an ELVIRA station code',
   Object.assign(Lib, { _fetchIndexBytes: keep.bytes, _fetchJsonGz: keep.gz });
 }
 
+/* A corrupt or truncated gzip index is a lasting failure with its own
+   message, not a bare TypeError downloaded again on every lookup. */
+{
+  const keep = Lib._fetchIndexBytes;
+  /* A gzip header cut off two bytes into the deflate stream. */
+  const cut = new Uint8Array([0x1f, 0x8b, 0x08, 0, 0, 0, 0, 0, 0, 0x03, 0xab, 0x56]);
+  let fetches = 0;
+  Lib._fetchIndexBytes = async () => {
+    fetches += 1;
+    return { status: 200, bytes: cut };
+  };
+  const bad = Lib.withIndexes({ volanIndex: 'http://localhost:8123/local/azzgz/volan-index.json.gz' });
+  const errs = [];
+  for (let i = 0; i < 3; i++) {
+    try {
+      await bad.volanIndex();
+    } catch (err) {
+      errs.push(err && err.i18nKey);
+    }
+  }
+  check('a corrupt gzip index fails with a coded error and is not refetched',
+    fetches === 1 && errs.length === 3 && errs.every((k) => k === 'errIndexParse'),
+    JSON.stringify({ fetches, errs }));
+  Lib._fetchIndexBytes = keep;
+}
+
+/* A shapes folder that answers 404 was replaced by a newer index's (a HACS
+   update swaps the whole folder): the index is loaded again, so the next
+   poll's rows name the new folder, but not on every map open. */
+{
+  const keep = { bytes: Lib._fetchIndexBytes, gz: Lib._fetchJsonGz };
+  let dir = 'volan-shapes-old';
+  const fetched = [];
+  Lib._fetchIndexBytes = async (url) => {
+    fetched.push(url);
+    return { status: 200, bytes: new TextEncoder().encode(JSON.stringify({ v: 1, sh: { dir, n: 64 }, s: [], t: [] })) };
+  };
+  Lib._fetchJsonGz = async (url) => {
+    if (/volan-shapes-old/.test(url)) {
+      const err = new Error('HTTP 404');
+      err.status = 404;
+      throw err;
+    }
+    return { p: [] };
+  };
+  const lib = Lib.withIndexes({ volanIndex: 'http://localhost:8123/local/azzsh/volan-index.json.gz' });
+  const before = await lib.volanIndex();
+  dir = 'volan-shapes-new';
+  const ref = { base: before.url, dir: before.sh.dir, n: 64, id: 3 };
+  for (let i = 0; i < 2; i++) await Lib.gtfsShape({ ...ref, id: 3 + i }).catch(() => null);
+  const after = await lib.volanIndex();
+  await Lib.gtfsShape({ ...ref, id: 5 }).catch(() => null);
+  await lib.volanIndex();
+  check('a 404 shapes folder reloads the index once',
+    after.sh.dir === 'volan-shapes-new' && fetched.length === 2,
+    JSON.stringify({ dir: after.sh.dir, fetched: fetched.length }));
+  Object.assign(Lib, { _fetchIndexBytes: keep.bytes, _fetchJsonGz: keep.gz });
+}
+
 /* ---- Sixth review: hop card and its libraries ---- */
 
 /* A failed poll keeps only FUTÁR rows still due: an outage longer than
@@ -9664,6 +9723,22 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     ['LONG_DISTANCE', 'HIGHSPEED_RAIL', 'NIGHT_RAIL', 'REGIONAL_FAST_RAIL', 'REGIONAL_RAIL', 'RAIL'].every((m) => Lib.motisLegType(m) === 'RAIL')
     && Lib.motisLegType('COACH') === 'COACH' && Lib.motisLegType('BUS') === 'BUS',
     JSON.stringify(['LONG_DISTANCE', 'HIGHSPEED_RAIL', 'NIGHT_RAIL'].map((m) => Lib.motisLegType(m))));
+  /* A D-boat, the Sikló and the Libegő are not buses: their Transitous rows
+     keep their own icon and match the FUTÁR row of the same boat or car. */
+  {
+    const nonRoad = ['FERRY', 'FUNICULAR', 'AERIAL_LIFT', 'CABLE_CAR'].map((m) => Lib.motisLegType(m));
+    const stRows = Lib.rowsFromMotisStopTimes({ stopTimes: [
+      { place: { name: 'Petőfi tér', departure: '2026-10-30T06:00:00Z' }, mode: 'FERRY', displayName: 'D11', tripId: 't-d11' },
+      { place: { name: 'Clark Ádám tér', departure: '2026-10-30T06:05:00Z' }, mode: 'FUNICULAR', displayName: 'Sikló', tripId: 't-sik' },
+    ] });
+    const futarFerry = { vehicle: 'bus', rawType: 'FERRY', label: 'D11' };
+    check('MOTIS ferry, funicular and aerial lift legs are not buses',
+      JSON.stringify(nonRoad) === JSON.stringify(['FERRY', 'FUNICULAR', 'AERIAL_LIFT', 'AERIAL_LIFT'])
+      && stRows[0].rawType === 'FERRY' && stRows[0].vehicle === 'ferry'
+      && stRows[1].rawType === 'FUNICULAR' && stRows[1].vehicle === 'funicular'
+      && Lib.sameVehicleBucket(futarFerry, stRows[0]),
+      JSON.stringify({ nonRoad, st: stRows.map((r) => [r.rawType, r.vehicle]) }));
+  }
   const planNow = Math.round(Date.parse('2026-10-30T06:00:00Z') / 1000);
   const mavRows = Lib.rowsFromMotis(realPlan, { name: 'Székesfehérvár' }, 'mav', 600, { now: planNow });
   const byLabel = (rows, re) => rows.find((r) => re.test(r.label));

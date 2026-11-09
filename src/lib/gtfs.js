@@ -263,7 +263,14 @@ Object.assign(BkkLib, {
       throw codedError('errIndexFetch');
     }
     if (!got.bytes) throw codedError(httpKey, got.status);
-    const text = await BkkLib._indexText(got.bytes);
+    let text;
+    try {
+      text = await BkkLib._indexText(got.bytes);
+    } catch (_e) {
+      /* Corrupt or truncated gzip: as unreadable as an HTML page, and as
+         lasting. */
+      throw codedError('errIndexParse');
+    }
     if (text == null) throw codedError(gunzipKey);
     let idx;
     try {
@@ -717,7 +724,7 @@ Object.assign(BkkLib, {
     const timer = ctrl ? setTimeout(() => ctrl.abort(), timeoutMs || 20000) : null;
     try {
       const res = await fetch(url, { signal: ctrl ? ctrl.signal : undefined });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
       const buf = await res.arrayBuffer();
       const u8 = new Uint8Array(buf);
       if (u8.length >= 2 && u8[0] === 0x1f && u8[1] === 0x8b) {
@@ -730,6 +737,22 @@ Object.assign(BkkLib, {
       if (timer) clearTimeout(timer);
     }
   },
+  /* A shapes folder that answers 404 belongs to an index that was replaced
+     (a HACS update swaps the whole folder): the index is loaded again, so
+     the next poll's rows name the new folder instead of the dead one until
+     midnight. At most once per retry period, should the new index name a
+     missing folder too. */
+  _idxReloadAt: new Map(),
+  _reloadIndexOf(abs) {
+    const last = BkkLib._idxReloadAt.get(abs);
+    if (last && Date.now() - last < BkkLib._idxFailRetryMs) return;
+    BkkLib._idxReloadAt.delete(abs);
+    BkkLib._idxReloadAt.set(abs, Date.now());
+    while (BkkLib._idxReloadAt.size > 8) BkkLib._idxReloadAt.delete(BkkLib._idxReloadAt.keys().next().value);
+    Array.from(BkkLib._idx.keys()).forEach((k) => {
+      if (BkkLib._absoluteUrl(k) === abs) BkkLib._idx.delete(k);
+    });
+  },
   /* One trip's shapes.txt polyline. Shard id % n holds it at id / n; the
      folder name carries a content hash, so the browser cache can keep it. */
   async gtfsShape(ref) {
@@ -740,6 +763,7 @@ Object.assign(BkkLib, {
     if (!p) {
       p = BkkLib._fetchJsonGz(url).catch((err) => {
         BkkLib._shapeShards.delete(url);
+        if (err && err.status === 404) BkkLib._reloadIndexOf(ref.base);
         throw err;
       });
       BkkLib._shapeShards.set(url, p);
