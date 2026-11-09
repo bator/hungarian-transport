@@ -1,6 +1,14 @@
 """SharedTTLCache: request sharing, expiry and size cap."""
 
 import asyncio
+from datetime import timedelta
+
+import pytest
+from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+from homeassistant.core import HassJob
+from homeassistant.util import dt as dt_util
+from homeassistant.util.async_ import get_scheduled_timer_handles
 
 from custom_components.hungarian_transport import cache as cache_mod
 from custom_components.hungarian_transport.cache import SharedTTLCache
@@ -39,6 +47,81 @@ async def test_expired_entries_are_dropped_on_store(monkeypatch) -> None:
     await cache.get("new", lambda: value("fresh"))
 
     assert len(cache) == 1
+
+
+async def test_an_expired_entry_is_dropped_when_read(monkeypatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock[0])
+    cache = SharedTTLCache(ttl=15, max_entries=100)
+
+    async def value(v):
+        return v
+
+    await cache.get("old", lambda: value("big payload"))
+    await cache.get("other", lambda: value("big payload"))
+    clock[0] += 60
+
+    async def boom():
+        raise RuntimeError("upstream down")
+
+    # A miss whose fetch fails stores nothing, but the stale boards go.
+    with pytest.raises(RuntimeError):
+        await cache.get("old", boom)
+    assert len(cache) == 0
+
+
+async def test_expired_entries_go_without_another_call(monkeypatch) -> None:
+    """Nobody polls once the dashboards close: the last boards are dropped
+    when their TTL ends, not at some later store."""
+    clock = [1000.0]
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock[0])
+    timers: list[tuple[float, object]] = []
+
+    def call_later(delay, action):
+        timers.append((delay, action))
+        return lambda: timers.remove((delay, action))
+
+    cache = SharedTTLCache(ttl=15, max_entries=100, call_later=call_later)
+
+    async def value(v):
+        return v
+
+    await cache.get("a", lambda: value("big payload"))
+    clock[0] += 5
+    await cache.get("b", lambda: value("big payload"))
+    # One timer at a time, for the oldest entry.
+    assert [delay for delay, _ in timers] == [15]
+
+    clock[0] += 10
+    timers.pop()[1]()
+    assert len(cache) == 1
+    assert [delay for delay, _ in timers] == [5]
+
+    clock[0] += 5
+    timers.pop()[1]()
+    assert len(cache) == 0
+    assert timers == []
+
+
+async def test_hass_expiry_timer_is_cancelled_at_shutdown(hass, monkeypatch) -> None:
+    """Inside Home Assistant the timer is a HassJob cancelled at shutdown,
+    not a timer left behind."""
+    clock = [1000.0]
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock[0])
+    cache = SharedTTLCache(ttl=15, max_entries=8, call_later=cache_mod.hass_call_later(hass))
+
+    async def value(v):
+        return v
+
+    await cache.get("k", lambda: value("v"))
+    jobs = [h._args[-1] for h in get_scheduled_timer_handles(hass.loop) if h._args and not h.cancelled()]
+    ours = [job for job in jobs if isinstance(job, HassJob) and job.name == "hungarian_transport cache expiry"]
+    assert [job.cancel_on_shutdown for job in ours] == [True]
+
+    clock[0] += 15
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=15), fire_all=True)
+    await hass.async_block_till_done()
+    assert len(cache) == 0
 
 
 async def test_size_cap_and_errors_are_not_cached() -> None:
