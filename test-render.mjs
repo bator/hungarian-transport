@@ -4825,6 +4825,13 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     JSON.stringify(kinds) === JSON.stringify([['SV', '29803C'], ['Gy', 'C82227'], ['Sz', '5C6B7A']])
     && JSON.stringify(futarS) === JSON.stringify(['Sz', '5C6B7A']),
     JSON.stringify({ kinds, futarS }));
+  /* SV and Gy are train kinds: a bus line named so keeps the default colour. */
+  const busKinds = ['SV', 'Gy'].map((label) => {
+    const r = Lib.asRow({ tripId: 'volan_1', label, vehicle: 'bus', rawType: 'BUS', color: '#4477aa', text: '#ffffff' }, 'Székesfehérvár', 'hu');
+    return String(r.color).replace('#', '').toUpperCase();
+  });
+  check('a bus row labelled SV or Gy takes no train-kind badge',
+    busKinds.every((c) => c === '4477AA'), JSON.stringify(busKinds));
   /* Each train is headed by its own terminus (row end), not the card's destination. */
   const heads = Lib.mavBoardRows([
     { tripId: 'elvira:849', dep: now + 600, destHit: true, label: 'TÓPART', head: 'Budapest-Kelenföld', end: 'Budapest-Déli' },

@@ -1,11 +1,5 @@
-import { BKK_RAIL_BADGE, PLATFORM_IN_HEAD, PLATFORM_STRIP, vehicleIcon } from '../config.js';
+import { BKK_RAIL_BADGE, PLATFORM_IN_HEAD, PLATFORM_STRIP, RAIL_KIND_BADGE, vehicleIcon } from '../config.js';
 import { BkkLib } from '../lib/core.js';
-
-/* ELVIRA's train kinds a number-only train shows (sebesvonat, gyorsvonat). */
-const RAIL_KIND_BADGE = {
-  SV: ['29803C', 'FFFFFF'],
-  GY: ['C82227', 'FFFFFF'],
-};
 
 Object.assign(BkkLib, {
   trainNumberFromTripId(tripId) {
@@ -415,7 +409,8 @@ Object.assign(BkkLib, {
       row.label = 'Sz';
       key = 'SZ';
     }
-    let badge = BKK_RAIL_BADGE[key] || RAIL_KIND_BADGE[key];
+    /* SV and Gy are train kinds only: a bus line of that name keeps its own colour. */
+    let badge = BKK_RAIL_BADGE[key] || (BkkLib.isTrainRow(row) ? RAIL_KIND_BADGE[key] : null);
     if (!badge && BkkLib.isTrainRow(row) && key
         && !BkkLib.suburbanLineLabel(key)
         && !BkkLib.genericRailLabel(key)
