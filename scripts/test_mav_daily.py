@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The daily MÁV index on GitHub Pages: scripts/mav_pages_site.py (manifest,
-deploy or skip by content digest, refusals: a feed date that is no date, a
-site over the size limit; the overlay's deflate level),
+deploy or skip by content digest and the published built_at's age,
+refusals: a feed date that is no date, a site over the size limit; the
+overlay's deflate level),
 scripts/mav_daily_verdict.py (when a run that published nothing goes red)
 and mav-index-daily.yml's steps as written there (run: blocks executed with
 bash against stubs: the build's warning and failure kind when it fails, the
@@ -98,6 +99,19 @@ def stats(feed: str = "20261101.M2ChangeID") -> dict:
     }
 
 
+def built_ago(age: timedelta) -> str:
+    """A manifest built_at age ago (the site's own built_at is now)."""
+    when = datetime.now(timezone.utc).replace(microsecond=0) - age
+    return when.isoformat().replace("+00:00", "Z")
+
+
+def integration_stale_manifest() -> timedelta:
+    """mav_daily.STALE_MANIFEST, read from the source (it imports Home Assistant)."""
+    src = (ROOT / "custom_components" / "hungarian_transport" / "mav_daily.py").read_text(encoding="utf-8")
+    m = re.search(r"^STALE_MANIFEST = timedelta\(hours=(\d+)\)$", src, re.M)
+    return timedelta(hours=int(m.group(1))) if m else timedelta(0)
+
+
 def gtfs_zip(path: Path, feed: str = "20261101.M2ChangeID") -> Path:
     """A MÁV-like zip (stored, as MÁV's own writer would not matter here)."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -185,11 +199,27 @@ with tempfile.TemporaryDirectory() as tmp_name:
           not any(s in man_path.read_text() for s in ("netrc", "PASSWORD", "/tmp", "runner")) if man else False)
 
     live = tmp / "live.json"
-    live.write_text(json.dumps({**man, "sha256": "f" * 64, "built_at": "2026-10-31T04:40:00Z"}))
+    live.write_text(json.dumps({**man, "sha256": "f" * 64, "built_at": built_ago(timedelta(hours=2))}))
     rc, out, err, outputs = run_site(tmp / "b", "--live-file", str(live))
-    check("the same content digest as the published manifest: no deploy, with a notice",
+    check("the same content digest as a manifest published 2 h ago: no deploy, with a notice",
           rc == 0 and outputs.get("deploy") == "false" and "::notice title=Daily MÁV index unchanged::" in out,
           repr((rc, out, err, outputs)))
+    # Unchanged content is deployed again once the published built_at is a
+    # day's run old: the verdict and the integration read built_at as the
+    # last build, so a feed MÁV leaves alone must not look like a stale index.
+    for label, when in (("yesterday's run (26 h ago)", built_ago(timedelta(hours=26))),
+                        ("REFRESH_AFTER ago", built_ago(site.REFRESH_AFTER)),
+                        ("no valid time", "yesterday")):
+        live.write_text(json.dumps({**man, "sha256": "f" * 64, "built_at": when}))
+        rc, out, err, outputs = run_site(tmp / f"b-old-{len(label)}", "--live-file", str(live))
+        rman = tmp / f"b-old-{len(label)}" / "site" / "mav-index.json"
+        check(f"the same content, published manifest built {label}: deployed again with a new built_at",
+              rc == 0 and outputs.get("deploy") == "true" and "refresh" in out
+              and rman.is_file() and json.loads(rman.read_text()).get("built_at") != when,
+              repr((rc, out, err, outputs)))
+    check("an unchanged index is deployed again well before the verdict or the integration calls it stale",
+          timedelta(hours=1) < site.REFRESH_AFTER < min(verdict_mod.STALE_AFTER, integration_stale_manifest())
+          < timedelta(days=1) + site.REFRESH_AFTER, repr(site.REFRESH_AFTER))
 
     for label, changed in (("digest", {"digest": "0" * 64}), ("format", {"format": 0}), ("schema", {"schema": 1})):
         live.write_text(json.dumps({**man, **changed}))
@@ -314,7 +344,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
     check("no build paths in the published text files",
           not any(str(tmp) in t for t in (attribution, page, json.dumps(gman))))
 
-    live.write_text(json.dumps({**gman, "built_at": "2026-10-31T03:20:00Z"}))
+    live.write_text(json.dumps({**gman, "built_at": built_ago(timedelta(hours=3))}))
     rc, out, err, outputs = run_site(tmp / "g-same", *gtfs_args, "--live-file", str(live))
     check("the same index and GTFS files as published: no deploy",
           rc == 0 and outputs.get("deploy") == "false", repr((rc, out, err, outputs)))
