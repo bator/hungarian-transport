@@ -580,7 +580,11 @@ Object.assign(BkkLib, {
      few FUTÁR searches: on every poll, and for every card, without this
      memo. The search goes by the name alone, so the memo does too: a stop
      area and its poles, or the cards loading together, share one search,
-     and the browser's copy spares the next page load another. */
+     and the browser's copy spares the next page load another. A search in
+     flight is shared only by cards with the same FUTÁR access: a card with
+     its own (revoked) key must not fail the search of one that goes
+     through the integration, nor the other way round. Resolves to '' for a
+     stop with no code, null when the search failed (asked again next time). */
   _elviraCodes: new Map(),
   _elviraSearches: new Map(),
   async elviraResolveCode(apiKey, id, name) {
@@ -599,7 +603,9 @@ Object.assign(BkkLib, {
       if (elviraFresh(hit, now)) BkkLib._elviraCodes.set(memoKey, hit);
     }
     if (elviraFresh(hit, now)) return hit.code;
-    let search = BkkLib._elviraSearches.get(memoKey);
+    const via = String(apiKey || '').trim();
+    const searchKey = (via ? 'key:' + via : 'integration') + '|' + memoKey;
+    let search = BkkLib._elviraSearches.get(searchKey);
     if (!search) {
       search = this._searchElviraCode(apiKey, n).then((code) => {
         /* A search that failed (a FUTÁR timeout) is no answer: only a real
@@ -611,12 +617,11 @@ Object.assign(BkkLib, {
         }
         return code;
       }).finally(() => {
-        BkkLib._elviraSearches.delete(memoKey);
+        BkkLib._elviraSearches.delete(searchKey);
       });
-      BkkLib._elviraSearches.set(memoKey, search);
+      BkkLib._elviraSearches.set(searchKey, search);
     }
-    const code = await search;
-    return code === null ? '' : code;
+    return search;
   },
   /* The station code by name, '' when FUTÁR has none, null when a search
      failed and nothing was found: that one is asked again next time. */
