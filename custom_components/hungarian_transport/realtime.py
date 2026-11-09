@@ -581,10 +581,13 @@ class RealtimeHub:
             self._refused_logged = now
         raise RealtimeRateLimited
 
-    async def _download(self, url: str, entry: _Entry, cap: int) -> bytes | None:
-        """The body, or None for 304 Not Modified."""
+    async def _download(self, url: str, entry: _Entry, cap: int) -> tuple[bytes | None, str, str]:
+        """(body, ETag, Last-Modified), body None for 304 Not Modified. The
+        validators are the caller's to keep once the body parses."""
         headers = {"User-Agent": USER_AGENT, "Accept": "application/x-protobuf, application/octet-stream, */*"}
-        # Conditional only while there is a copy the validators belong to.
+        # Conditional only while there is a copy the validators belong to:
+        # they are stored with the copy (_refresh), so a body that does not
+        # parse leaves those of the copy kept.
         held = entry.data is not None
         if held and entry.etag:
             headers["If-None-Match"] = entry.etag
@@ -592,7 +595,7 @@ class RealtimeHub:
             headers["If-Modified-Since"] = entry.last_modified
         async with self._session.get(url, headers=headers, timeout=FETCH_TIMEOUT, allow_redirects=False) as resp:
             if resp.status == 304 and held:
-                return None
+                return None, entry.etag, entry.last_modified
             if resp.status != 200:
                 raise ValueError(f"HTTP {resp.status}")
             length = getattr(resp, "content_length", None)
@@ -605,9 +608,11 @@ class RealtimeHub:
                 if total > cap:
                     raise ValueError(f"over {cap} bytes")
                 chunks.append(chunk)
-            entry.etag = resp.headers.get("ETag", "") or ""
-            entry.last_modified = resp.headers.get("Last-Modified", "") or ""
-            return b"".join(chunks)
+            return (
+                b"".join(chunks),
+                resp.headers.get("ETag", "") or "",
+                resp.headers.get("Last-Modified", "") or "",
+            )
 
     async def _cached(
         self,
@@ -641,7 +646,7 @@ class RealtimeHub:
         except RealtimeRateLimited:
             return entry.data if entry.ok or keep else None
         try:
-            body = await self._download(url, entry, cap)
+            body, etag, last_modified = await self._download(url, entry, cap)
             data = entry.data if body is None else await self._run(parse, body)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError, zipfile.BadZipFile) as err:
             entry.at = _monotonic()
@@ -658,6 +663,8 @@ class RealtimeHub:
         entry.at = _monotonic()
         entry.ok = True
         entry.data = data
+        entry.etag = etag
+        entry.last_modified = last_modified
         if entry.down:
             entry.down = False
             _LOGGER.info("%s %s answers again", what, url)
@@ -760,7 +767,13 @@ def _learn_routes(known: dict[str, str], vp: Feed | None) -> None:
 
 
 def _fill_routes(known: dict[str, str], tu: Feed | None) -> None:
-    """The remembered route of each trip update that names none."""
+    """The remembered route of each trip update that names none.
+
+    Filled in on the cached copy: a pattern that becomes "" later keeps
+    its route on the trips filled before until the trip updates are fetched
+    again, at most trip_updates_interval on, and a vehicle's own route wins
+    in _find_trip anyway. Not worth keeping a second, unfilled copy for:
+    no pattern was on two routes when this was written (_PATTERN_IN_TRIP_ID)."""
     if tu is None or not known:
         return
     for tid, t in tu.trip_updates.items():
