@@ -11,7 +11,8 @@ What notifies, only with the option on:
   first run (and turning notifications on later) only records. Within one
   version the files change only by the integration itself (the daily index,
   a local MÁV build): recorded, never notified. A shipped MÁV index older
-  than the one last seen (the daily index of a later day) is no news either;
+  than the one last seen or installed since (the daily index of a later
+  day) is no news either;
 - the daily MÁV index failed on FAILED_DAYS consecutive days: once per
   streak, dismissed when a round goes through again. A day with only BUSY
   or UNSUPPORTED rounds neither counts nor breaks the streak; a day without
@@ -19,7 +20,8 @@ What notifies, only with the option on:
   the site's manifest was built more than STALE_PAGES ago counts as a
   failure: a daily workflow that stopped would otherwise stay quiet. The
   notification, which does not outlive a restart, is created again at setup
-  while its streak is open.
+  while its streak is open. With the daily index turned off no round can
+  close a streak: setup ends it, and dismisses its notice.
 
 Each creates a persistent notification with a stable id per kind (a new one
 replaces the old) and, when CONF_NOTIFY_SERVICE names one, calls that
@@ -50,10 +52,12 @@ from homeassistant.util import dt as dt_util
 
 from . import mav, mav_daily, storage
 from .const import (
+    CONF_DAILY_MAV,
     CONF_DAILY_TIME,
     CONF_NOTIFY_DAILY,
     CONF_NOTIFY_SERVICE,
     CONF_NOTIFY_UPDATES,
+    DEFAULT_DAILY_MAV,
     DEFAULT_DAILY_TIME,
     DEFAULT_NOTIFY_DAILY,
     DEFAULT_NOTIFY_UPDATES,
@@ -162,8 +166,16 @@ def shipped_feeds(www: Path) -> dict[str, str | None]:
     return {key: (_head_feed(www / name) if (www / name).is_file() else None) for key, name in SHIPPED.items()}
 
 
-def changed_indexes(seen: Mapping[str, Any] | None, version: str, feeds: Mapping[str, str | None]) -> list[str]:
-    """The shipped indexes that changed since seen (None on the first run)."""
+def changed_indexes(
+    seen: Mapping[str, Any] | None,
+    version: str,
+    feeds: Mapping[str, str | None],
+    installed_mav: str | None = None,
+) -> list[str]:
+    """The shipped indexes that changed since seen (None on the first run).
+
+    installed_mav is the MÁV feed this integration installed last (the daily
+    index, a local build): seen as well, though after the last setup."""
     if not isinstance(seen, Mapping) or not isinstance(seen.get("feeds"), Mapping):
         return []
     if seen.get("version") == version:
@@ -174,9 +186,12 @@ def changed_indexes(seen: Mapping[str, Any] | None, version: str, feeds: Mapping
         new, old = feeds.get(key), old_feeds.get(key)
         if new is None or new == old:
             continue
-        if key == "mav" and old is not None:
-            new_day, old_day = mav._gtfs_date(new), mav._gtfs_date(old)
-            if new_day is not None and old_day is not None and new_day <= old_day:
+        if key == "mav":
+            if new == installed_mav:
+                continue
+            new_day = mav._gtfs_date(new)
+            seen_days = [mav._gtfs_date(f) for f in (old, installed_mav) if isinstance(f, str)]
+            if new_day is not None and any(day is not None and new_day <= day for day in seen_days):
                 continue
         changed.append(key)
     return changed
@@ -196,6 +211,7 @@ class UpdateNotifier:
         self.enabled = bool(options.get(CONF_NOTIFY_UPDATES, DEFAULT_NOTIFY_UPDATES))
         self.service = str(options.get(CONF_NOTIFY_SERVICE) or "").strip()
         self.notify_daily = bool(options.get(CONF_NOTIFY_DAILY, DEFAULT_NOTIFY_DAILY))
+        self.daily = bool(options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV))
         self.daily_time = parse_daily_time(options.get(CONF_DAILY_TIME, DEFAULT_DAILY_TIME))
         self._waiting: list[CALLBACK_TYPE] = []
 
@@ -255,7 +271,9 @@ class UpdateNotifier:
         hass = self._hass
         feeds = await hass.async_add_executor_job(shipped_feeds, www)
         state = await _load(hass)
-        changed = changed_indexes(state.get("shipped"), version, feeds)
+        installed = state.get(storage.MAV_INSTALL)
+        installed_feed = installed.get("feed") if isinstance(installed, Mapping) else None
+        changed = changed_indexes(state.get("shipped"), version, feeds, installed_feed)
         new = {"version": version, "feeds": feeds}
         if state.get("shipped") != new:
             state["shipped"] = new
@@ -272,10 +290,20 @@ class UpdateNotifier:
 
     async def async_restore(self) -> None:
         """Setup: the failure notification of a streak still open again
-        (persistent notifications do not outlive a restart); no service call."""
+        (persistent notifications do not outlive a restart); no service call.
+        With the daily index off the streak ends here instead: only a round
+        could close it."""
+        hass = self._hass
+        state = await _load(hass)
+        if not self.daily:
+            if "daily_failures" in state:
+                persistent_notification.async_dismiss(hass, NOTIFICATION_DAILY_FAILED)
+                state.pop("daily_failures")
+                await _save(hass, state)
+            return
         if not self.enabled:
             return
-        streak = (await _load(self._hass)).get("daily_failures") or {}
+        streak = state.get("daily_failures") or {}
         if isinstance(streak, dict) and streak.get("notified"):
             title, message = self._failed_text(streak)
             persistent_notification.async_create(

@@ -9,11 +9,12 @@ import re
 
 import pytest
 import voluptuous as vol
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
 
 from homeassistant.components.frontend import DATA_EXTRA_MODULE_URL
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntryDisabler
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
@@ -21,10 +22,12 @@ from homeassistant.util import dt as dt_util
 
 import custom_components.hungarian_transport as integration
 from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS, elvira, mav
+from custom_components.hungarian_transport import cache as cache_mod
 from custom_components.hungarian_transport.assets import asset_tag
 from custom_components.hungarian_transport.const import (
     DOMAIN,
     SERVICE_ELVIRA_BETWEEN,
+    SERVICE_REALTIME,
     SERVICE_REBUILD_MAV,
 )
 from custom_components.hungarian_transport.elvira import ELVIRA_URL, service_days
@@ -692,6 +695,94 @@ async def test_services_refuse_while_the_entry_is_unloaded(
     assert await _elvira_call(hass) == {"departures": []}
 
 
+@pytest.mark.parametrize("starting", [False, True], ids=["reload", "startup"])
+async def test_services_answer_without_an_error_while_the_entry_comes_up(
+    hass, aioclient_mock, caplog, monkeypatch, starting
+) -> None:
+    """A reload (an options save) or Home Assistant's startup is no outage:
+    the cards' polls get an error code in the answer, not an exception the
+    websocket API logs at ERROR."""
+    entry = await _setup(hass)
+    answers: list[tuple] = []
+    gate = asyncio.Event()
+    real_setup_entry = integration.async_setup_entry
+
+    async def slow_setup_entry(hass, entry):
+        # The window: async_setup_entry still reading the indexes.
+        answers.append((await _elvira_call(hass), await _realtime_call(hass)))
+        gate.set()
+        return await real_setup_entry(hass, entry)
+
+    monkeypatch.setattr(integration, "async_setup_entry", slow_setup_entry)
+    if starting:
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        _set_state(hass, CoreState.not_running)
+        # Before the entry's setup has begun, as well as during it.
+        answers.append((await _elvira_call(hass), await _realtime_call(hass)))
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        _set_state(hass, CoreState.running)
+    else:
+        assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert gate.is_set()
+    assert len(answers) == (2 if starting else 1)
+    for elvira_answer, rt_answer in answers:
+        assert elvira_answer["departures"] == [] and elvira_answer["error"] == "elvira_unavailable"
+        assert rt_answer == {"feed": "volan", "trips": {}, "error": "rt_unavailable"}
+    assert aioclient_mock.call_count == 0
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+async def test_services_refuse_while_home_assistant_starts_with_the_entry_disabled(hass) -> None:
+    entry = await _setup(hass)
+    assert await hass.config_entries.async_set_disabled_by(
+        entry.entry_id, ConfigEntryDisabler.USER
+    )
+    _set_state(hass, CoreState.not_running)
+    try:
+        with pytest.raises(ServiceValidationError) as err:
+            await _elvira_call(hass)
+    finally:
+        _set_state(hass, CoreState.running)
+    assert err.value.translation_key == "not_loaded"
+
+
+async def test_elvira_boards_leave_memory_when_their_ttl_ends(hass, aioclient_mock, monkeypatch) -> None:
+    """Megabytes per board: once the dashboards close nobody polls again,
+    so the boards go at the end of their TTL, not at some later call."""
+    clock = [1000.0]
+    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock[0])
+    await _setup(hass)
+    aioclient_mock.post(ELVIRA_URL, json={"stationSchedulerDetails": {}})
+    await _elvira_call(hass)
+    cache = hass.data[DOMAIN]["elvira_cache"]
+    assert len(cache)
+
+    clock[0] += elvira.ELVIRA_CACHE_TTL
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=elvira.ELVIRA_CACHE_TTL), fire_all=True)
+    await hass.async_block_till_done()
+    assert len(cache) == 0
+
+
+async def _realtime_call(hass):
+    return await hass.services.async_call(
+        DOMAIN,
+        SERVICE_REALTIME,
+        {"feed": "volan", "trips": [{"key": "a"}]},
+        blocking=True,
+        return_response=True,
+    )
+
+
+def _set_state(hass: HomeAssistant, state: CoreState) -> None:
+    """Home Assistant's core state (set_state where the harness has it)."""
+    if hasattr(hass, "set_state"):
+        hass.set_state(state)
+    else:
+        hass.state = state
+
+
 def _station(n: int) -> str:
     return f"0055{n:05d}"
 
@@ -814,9 +905,9 @@ def test_exception_translations_are_raised_and_error_codes_documented(lang) -> N
     codes = set(re.findall(r'"error": "(\w+)"', (_PKG / "__init__.py").read_text(encoding="utf-8")))
     assert codes == {
         "elvira_rate_limited", "elvira_unavailable", "futar_auth", "futar_bad_request", "futar_rate_limited",
-        "futar_unavailable",
+        "futar_unavailable", "rt_unavailable",
     }
     for code in codes:
         service = code.split("_")[0]
-        service = "elvira_between" if service == "elvira" else service
+        service = {"elvira": "elvira_between", "rt": "realtime"}.get(service, service)
         assert code in strings["services"][service]["description"], code

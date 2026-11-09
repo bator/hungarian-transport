@@ -16,7 +16,7 @@ from datetime import UTC, date, datetime, timedelta
 import aiohttp
 import zoneinfo
 
-from .cache import SharedTTLCache
+from .cache import SharedTTLCache, hass_call_later
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -311,6 +311,7 @@ async def _station_legs(session, hass, station_code: str, day: date):
             task_factory=lambda coro: hass.async_create_background_task(
                 coro, "hungarian_transport_elvira", eager_start=False
             ),
+            call_later=hass_call_later(hass),
         )
     limit = data.get("elvira_rate")
     if limit is None:
