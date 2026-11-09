@@ -4842,6 +4842,25 @@ check('a branded suburban train in the same minute stays off another numbered tr
   pc._loadedAt = Date.now() - 10 * 60 * 1000;
   const stale = pc._shouldReloadOnConnect();
   check('the planner plans again when shown after a while', fresh === false && stale === true);
+  {
+    /* Left in front: no poll, so the countdown tick plans "now" again. */
+    pc._reloadActive = false;
+    pc._rows = [];
+    const r0 = reloads;
+    pc._loadedAt = Date.now();
+    pc._tickPaint();
+    const freshTick = reloads - r0;
+    pc._loadedAt = Date.now() - 10 * 60 * 1000;
+    pc._tickPaint();
+    const staleTick = reloads - r0;
+    pc._when = { mode: 'depart', at: Date.now() + 3600000 };
+    pc._tickPaint();
+    const timedTick = reloads - r0;
+    pc._when = { mode: 'now', at: 0 };
+    check('a planner left in front plans "now" again on the tick once its plan is stale, not a chosen time',
+      freshTick === 0 && staleTick === 1 && timedTick === 1,
+      JSON.stringify({ freshTick, staleTick, timedTick, destKey: pc._config.destKey }));
+  }
   pc._paintMinutesAfter();
   const sel = pc._planEl('pmin');
   check('a look-ahead that is not a preset still shows in the select',
@@ -6195,6 +6214,23 @@ const shapeLen = (pts) => pts.reduce((m, p, i) => (i ? m + Lib.haversineMeters(p
   check('a new origin from the editor drops the old destinations while its own load',
     during.dests === 0 && during.routes === 0 && during.loading && pc._dests.length === 1 && pc._dests[0].key === 'new',
     JSON.stringify(during));
+  /* A picked pair folds its pickers: their destination list waits for
+     edit, and a swap does not fetch the new origin's either. */
+  let scans = 0;
+  Lib.reachableDests = async () => { scans += 1; return { dests: [{ key: 'x', name: 'X' }], destRoutes: {} }; };
+  pc.setConfig({ language: 'en', stopId: 'BKK_P1', stopName: 'P1', destKey: 'p2', destName: 'P2', destStopId: 'BKK_P2' });
+  pc.hass = { states: {}, language: 'en' };
+  await settleTicks();
+  const unopened = scans;
+  pc._swapPlan();
+  await settleTicks();
+  const swapped = scans;
+  pc._onHeadClick({ target: { closest: () => ({ getAttribute: () => 'edit' }) } });
+  await settleTicks();
+  check('a picked pair loads its destination list only when edit opens the pickers',
+    unopened === 0 && swapped === 0 && scans === 1 && pc._destsFor === 'BKK_P2' && pc._dests.length === 1,
+    JSON.stringify({ unopened, swapped, scans, destsFor: pc._destsFor }));
+  pc._editRoute = false;
   Lib.reachableDests = keep.reachableDests;
   pc.remove();
 }
@@ -9113,6 +9149,68 @@ check('a city stop number is not an ELVIRA station code',
     /NEW_B_TO_A/.test(mid) && /NEW_B_TO_A/.test(after) && !/OLD_A_TO_B/.test(after)
     && pc._journey && pc._journey.legs[0].label === 'NEW_B_TO_A' && !pc._mapOverlay && pc._openingMap === '',
     JSON.stringify({ calls, mid, after, label: pc._journey && pc._journey.legs[0].label, overlay: !!pc._mapOverlay }));
+  pc._closeVehicleMap();
+  Object.assign(Lib, keep);
+  pc.remove();
+}
+
+/* Another itinerary opened while the journey map still loads: the map must
+   not draw the one the card no longer shows, and the new one's Map click
+   is not dropped. */
+{
+  const keep = { fillJourneyShapes: Lib.fillJourneyShapes, journeyMapSegments: Lib.journeyMapSegments };
+  const layer = () => ({ addTo() { return this; }, on() { return this; }, bindTooltip() { return this; } });
+  const L = {
+    map: () => ({
+      setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {},
+    }),
+    tileLayer: () => layer(),
+    polyline: () => layer(),
+    marker: () => layer(),
+    divIcon: (o) => o,
+    latLngBounds: (pts) => ({ pts }),
+  };
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc._reloadSafe = () => {};
+  pc._loadDests = async () => {};
+  pc._ensureLeaflet = async () => L;
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'en', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+  const mk = (label, min) => ({
+    durationMin: min, transfers: 0, walkMin: 0, waitMin: 0,
+    legs: [{ walk: false, label, color: '009EE3', minutes: min, from: 'x', to: 'y', shape: [[47.5, 19.0], [47.52, 19.05]] }],
+  });
+  const j1 = mk('FIRST1', 41);
+  const j3 = mk('THIRD3', 63);
+  pc._when = { mode: 'depart', at: Date.now() + 3600000 };
+  pc._journeys = [j1, mk('SECOND2', 52), j3];
+  Lib.journeyMapSegments = (j) => (j ? [{ walk: false, color: '#009EE3', shape: j.legs[0].shape, from: 'x', to: 'y' }] : []);
+  const pick = (i) => { pc._openJourney = i; pc._journey = pc._journeys[i]; };
+  const foot = () => (pc._mapOverlay ? pc._mapOverlay.querySelector('.ht-map-foot').textContent : '');
+  pick(0);
+  let held = deferred();
+  Lib.fillJourneyShapes = (j) => (j === j1 ? held.p : Promise.resolve());
+  const first = pc._openJourneyMap();
+  await settleTicks();
+  pick(2);
+  held.resolve();
+  await first;
+  await settleTicks();
+  const dropped = { overlay: !!pc._mapOverlay, foot: foot(), opening: pc._openingMap };
+  pc._closeVehicleMap();
+  pick(0);
+  held = deferred();
+  const again = pc._openJourneyMap();
+  await settleTicks();
+  pick(2);
+  await pc._openJourneyMap();
+  held.resolve();
+  await again;
+  await settleTicks();
+  const reopened = foot();
+  check('a journey map still loading when another itinerary opens draws neither the old one nor drops the new click',
+    !dropped.overlay && dropped.opening === '' && /63/.test(reopened) && !/41/.test(reopened) && pc._openingMap === '',
+    JSON.stringify({ dropped, reopened, opening: pc._openingMap }));
   pc._closeVehicleMap();
   Object.assign(Lib, keep);
   pc.remove();
