@@ -12,7 +12,7 @@ from homeassistant.core import CoreState, HomeAssistant, ServiceCall
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
-from custom_components.hungarian_transport import mav, mav_daily, timetable_notify
+from custom_components.hungarian_transport import mav, mav_daily, storage, timetable_notify
 from custom_components.hungarian_transport.const import (
     CONF_DAILY_MAV,
     CONF_NOTIFY_DAILY,
@@ -303,6 +303,27 @@ async def test_a_shipped_mav_index_older_than_the_one_seen_is_no_news(
     )]
 
 
+async def test_a_shipped_mav_index_older_than_the_daily_one_installed_is_no_news(
+    hass: HomeAssistant, card_assets, notes, hass_storage
+) -> None:
+    """The daily index installed since the last setup was seen too: a release
+    whose index is older replaces it, which is not news."""
+    _seen(hass_storage, "0.0.1", {"volan": VOLAN, "city": CITY, "mav": "20261020.M2ChangeID"})
+    hass_storage[timetable_notify.STORAGE_KEY]["data"][storage.MAV_INSTALL] = {
+        "source": storage.SOURCE_DAILY, "feed": NEW, "size": 1, "installed_at": "2026-11-01T05:00:00+00:00",
+    }
+    _ship(card_assets, mav_feed=OLD)
+    await _setup(hass, ON)
+    assert notes == ([], [])
+
+
+def test_a_shipped_mav_index_newer_than_the_installed_one_is_news() -> None:
+    seen = {"version": "0.0.1", "feeds": {"mav": "20261020.M2ChangeID"}}
+    assert timetable_notify.changed_indexes(seen, "0.0.2", {"mav": NEW}, installed_mav=OLD) == ["mav"]
+    assert timetable_notify.changed_indexes(seen, "0.0.2", {"mav": OLD}, installed_mav=OLD) == []
+    assert timetable_notify.changed_indexes(seen, "0.0.2", {"mav": OLD}, installed_mav=None) == ["mav"]
+
+
 async def test_a_new_version_with_the_same_feeds_is_no_news(hass: HomeAssistant, card_assets, notes, hass_storage):
     _seen(hass_storage, "0.0.1", {"volan": VOLAN, "city": CITY, "mav": OLD})
     _ship(card_assets)
@@ -495,6 +516,27 @@ async def test_an_open_streak_notification_comes_back_after_a_restart(
                    "(last error: HTTP 404). The current index stays in use.",
     }]
     assert script_calls == []
+
+
+async def test_turning_the_daily_index_off_ends_an_open_streak(
+    hass: HomeAssistant, card_assets, notes, hass_storage
+) -> None:
+    """No round can close the streak with the daily index off: setup ends it
+    (and its notice) instead of showing the notice again at every setup."""
+    hass_storage[timetable_notify.STORAGE_KEY] = {
+        "version": timetable_notify.STORAGE_VERSION, "minor_version": 1, "key": timetable_notify.STORAGE_KEY,
+        "data": {"daily_failures": {"days": 4, "last": "2026-11-04", "notified": True, "error": "HTTP 404"}},
+    }
+    entry = await _setup(hass, {**ON, CONF_DAILY_MAV: False})
+    created, dismissed = notes
+    assert created == []
+    assert dismissed == [timetable_notify.NOTIFICATION_DAILY_FAILED]
+    assert "daily_failures" not in hass_storage[timetable_notify.STORAGE_KEY]["data"]
+
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert created == []
+    assert dismissed == [timetable_notify.NOTIFICATION_DAILY_FAILED]
 
 
 async def test_the_shipped_notification_calls_the_service_once_started(
