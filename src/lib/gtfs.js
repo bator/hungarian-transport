@@ -1097,7 +1097,28 @@ Object.assign(BkkLib, {
       && !BkkLib.numberedRailBadge(row)
       && (BkkLib.suburbanLineLabel(row && row.label)
         || (!BkkLib.genericRailLabel(row && row.label) && String((row && row.label) || '').trim()));
+    /* The kind a row's train is: ELVIRA's railKind, FUTÁR's label. FUTÁR's
+       bare S is a személyvonat and ELVIRA's S a sebesvonat, so S, Sz, SV
+       and Gy are one kind here; a number for a label is no kind at all. */
+    const railKindOf = (row) => {
+      const elvira = /^elvira:/i.test(String((row && row.tripId) || ''));
+      const k = String((elvira && row.railKind) || (row && row.label) || '').trim().toUpperCase().normalize('NFC');
+      if (!k || /^\d+$/.test(k)) return '';
+      return /^(S|SZ|SV|GY)$/.test(k) ? 'S' : k;
+    };
+    const terminusOf = (row) => String((/^elvira:/i.test(String(row.tripId || '')) ? row.end : row.head) || '').trim();
+    /* An ELVIRA train the card would add stands for a host row with no
+       number to pair by (an ad-hoc FUTÁR trip) only when both leave in the
+       same minute, of the same kind, for the same terminus. */
+    const sameTrain = (p, row) => BkkLib.isTrainRow(p) && minuteOf(p) === minuteOf(row)
+      && !!railKindOf(p) && railKindOf(p) === railKindOf(row)
+      && !!terminusOf(p) && BkkLib.nameEq(terminusOf(p), terminusOf(row))
+      && !otherTrain(p, row);
+    /* skipUnmatched: an overlay-only row, dropped when nothing pairs it.
+       asNew: the row added in its place when nothing does; it pairs as
+       strictly as an overlay-only row, plus sameTrain. */
     const add = (row, skipUnmatched, asNew) => {
+      const strict = skipUnmatched || !!asNew;
       if (!row || !departureStillDue(row.dep || row.sched)) return;
       const n = BkkLib.rowTrainNumber(row);
       const min = minuteOf(row);
@@ -1127,7 +1148,7 @@ Object.assign(BkkLib, {
          train number on one side did not parse. Suburban G43/Z30 stay out.
          overlayOnly must not use this: GEMENC at the same minute would steal
          a FUTÁR IC and copy booking. Spec is trainNumber (+ minute). */
-      if (!skipUnmatched && BkkLib.isTrainRow(row) && min) {
+      if (!strict && BkkLib.isTrainRow(row) && min) {
         const namedIc = (r) => BkkLib.isTrainRow(r)
           && !BkkLib.suburbanLineLabel(r && r.label)
           && !BkkLib.genericRailLabel(r && r.label)
@@ -1151,11 +1172,19 @@ Object.assign(BkkLib, {
          minute would copy booking onto the other FUTÁR train. Spec is
          trainNumber (byNum) plus branded/numbered pairing above. */
       const tk = timeOf(row);
-      if (!skipUnmatched && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
+      if (!strict && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
         overlay(out[byTime.get(tk)], row);
         return;
       }
       if (skipUnmatched) return;
+      if (asNew && BkkLib.isTrainRow(row) && min) {
+        const same = out.findIndex((p) => sameTrain(p, row));
+        if (same >= 0) {
+          overlay(out[same], row);
+          registerNumber(n, same);
+          return;
+        }
+      }
       const idx = out.length;
       out.push(asNew || row);
       byTime.set(tk, idx);
@@ -1166,8 +1195,9 @@ Object.assign(BkkLib, {
     const hosts = overlayOnly ? (gtfs || []) : (otp || []);
     const extra = overlayOnly ? (otp || []) : (gtfs || []);
     /* overlayOnly with addUnmatched: an extra row it maps to a row of its
-       own (an ELVIRA train the destination's board confirms) pairs like a
-       host row would, and is added, as that row, when no host has it. */
+       own (an ELVIRA train the destination's board confirms) pairs by
+       number like any overlay row, or as the same train (sameTrain), and is
+       added, as that row, when no host has it. */
     const addUnmatched = overlayOnly && opts && typeof opts.addUnmatched === 'function' ? opts.addUnmatched : null;
     hosts.forEach((row) => add(row, false));
     extra.forEach((row) => {
