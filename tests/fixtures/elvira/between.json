@@ -1,0 +1,201 @@
+{
+  "about": "One elvira_between case both sides check: Python (tests/test_elvira_contract.py) builds rows from these StationInfo boards, the cards (test-rows.mjs) turn rows into the MÁV board's departure rows.",
+  "tz": "Europe/Budapest",
+  "now": "2026-09-30T17:20:00+02:00",
+  "minutes_after": 180,
+  "dest_name": "Székesfehérvár",
+  "origin_departures": [
+    {
+      "trainId": "2975814",
+      "code": "966",
+      "name": "GÖCSEJ",
+      "start": "2026-09-30T18:00:00",
+      "actualOrEstimatedStart": "2026-09-30T18:00:00",
+      "startTrack": "6",
+      "endStation": {
+        "name": "Szombathely"
+      },
+      "kind": {
+        "sortName": "IC",
+        "name": "InterCity"
+      },
+      "services": [
+        {
+          "code": "3880",
+          "description": "Helyjegy váltása kötelező"
+        }
+      ]
+    },
+    {
+      "trainId": "1",
+      "code": "800",
+      "name": "GEMENC",
+      "start": "2026-09-30T18:10:00",
+      "startTrack": "3",
+      "endStation": {
+        "name": "Baja"
+      },
+      "kind": {
+        "sortName": "IC",
+        "name": "InterCity"
+      },
+      "services": [
+        {
+          "code": "3880"
+        }
+      ]
+    },
+    {
+      "trainId": "3",
+      "code": "2512",
+      "start": "2026-09-30T18:30:00",
+      "actualOrEstimatedStart": "2026-09-30T18:33:00",
+      "startTrack": "4",
+      "endStation": {
+        "name": "Siófok"
+      },
+      "kind": {
+        "name": "Sebesvonat"
+      },
+      "services": [
+        {
+          "code": "3857",
+          "description": "Kerékpár szállítható"
+        }
+      ]
+    }
+  ],
+  "dest_arrivals": [
+    {
+      "trainId": "2975814",
+      "code": "966",
+      "arrive": "2026-09-30T19:02:00"
+    },
+    {
+      "trainId": "3",
+      "code": "2512",
+      "arrive": "2026-09-30T19:13:00"
+    }
+  ],
+  "rows": [
+    {
+      "tripId": "elvira:2975814",
+      "label": "GÖCSEJ",
+      "railKind": "IC",
+      "head": "Székesfehérvár",
+      "end": "Szombathely",
+      "dep": 1790784000,
+      "sched": 1790784000,
+      "platform": "6",
+      "vehicle": "rail",
+      "rawType": "RAIL",
+      "trainNumber": "966",
+      "travel": 62,
+      "destHit": true,
+      "booking": true,
+      "bikesAllowed": false,
+      "wheelchair": false,
+      "nationalPass": false,
+      "reservationFreeSection": false,
+      "color": "#4477aa",
+      "text": "#ffffff",
+      "delay": 0
+    },
+    {
+      "tripId": "elvira:1",
+      "label": "GEMENC",
+      "railKind": "IC",
+      "head": "Székesfehérvár",
+      "end": "Baja",
+      "dep": 1790784600,
+      "sched": 1790784600,
+      "platform": "3",
+      "vehicle": "rail",
+      "rawType": "RAIL",
+      "trainNumber": "800",
+      "travel": null,
+      "destHit": false,
+      "booking": true,
+      "bikesAllowed": false,
+      "wheelchair": false,
+      "nationalPass": false,
+      "reservationFreeSection": false,
+      "color": "#4477aa",
+      "text": "#ffffff",
+      "delay": 0
+    },
+    {
+      "tripId": "elvira:3",
+      "label": "2512",
+      "railKind": "S",
+      "head": "Székesfehérvár",
+      "end": "Siófok",
+      "dep": 1790785980,
+      "sched": 1790785800,
+      "platform": "4",
+      "vehicle": "rail",
+      "rawType": "RAIL",
+      "trainNumber": "2512",
+      "travel": 40,
+      "destHit": true,
+      "booking": false,
+      "bikesAllowed": true,
+      "wheelchair": false,
+      "nationalPass": false,
+      "reservationFreeSection": false,
+      "color": "#4477aa",
+      "text": "#ffffff",
+      "delay": 180
+    }
+  ],
+  "board_rows": [
+    {
+      "tripId": "elvira:2975814",
+      "label": "GÖCSEJ",
+      "railKind": "IC",
+      "head": "Szombathely",
+      "end": "Szombathely",
+      "dep": 1790784000,
+      "sched": 1790784000,
+      "platform": "6",
+      "vehicle": "rail",
+      "rawType": "RAIL",
+      "trainNumber": "966",
+      "travel": 62,
+      "destHit": true,
+      "booking": true,
+      "bikesAllowed": false,
+      "wheelchair": false,
+      "nationalPass": false,
+      "reservationFreeSection": false,
+      "color": "#4477aa",
+      "text": "#ffffff",
+      "delay": 0,
+      "source": "elvira"
+    },
+    {
+      "tripId": "elvira:3",
+      "label": "SV",
+      "railKind": "S",
+      "head": "Siófok",
+      "end": "Siófok",
+      "dep": 1790785980,
+      "sched": 1790785800,
+      "platform": "4",
+      "vehicle": "rail",
+      "rawType": "RAIL",
+      "trainNumber": "2512",
+      "travel": 40,
+      "destHit": true,
+      "booking": false,
+      "bikesAllowed": true,
+      "wheelchair": false,
+      "nationalPass": false,
+      "reservationFreeSection": false,
+      "color": "#4477aa",
+      "text": "#ffffff",
+      "delay": 180,
+      "source": "elvira"
+    }
+  ]
+}
