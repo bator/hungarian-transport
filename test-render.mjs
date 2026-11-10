@@ -4563,19 +4563,17 @@ const waitForPoll = async (hop, ms) => {
     && asked === askedBefore + 1 && back.ids === 'elvira:871' && back.err === '' && filled === 0,
     JSON.stringify({ good, down: [down.ids, down.err], back: [back.ids, back.err], filled }));
   hop.remove();
-  /* The card's limit covers the integration's worst case: every board
-     round of elvira_between, one after the other, each up to
-     ELVIRA_TIMEOUT. A slow but whole answer is not cut off as "did not
-     answer". */
+  /* The card's limit covers the integration's worst case, which elvira.py
+     names (ELVIRA_WORST_CASE_SEC; tests/test_elvira.py ties it to the
+     rounds a call asks). A slow but whole answer is not cut off as "did
+     not answer". */
   {
     const { readFile: rf } = await import('node:fs/promises');
     const py = await rf('./custom_components/hungarian_transport/elvira.py', 'utf8');
-    const total = Number((py.match(/^ELVIRA_TIMEOUT = aiohttp\.ClientTimeout\(total=(\d+)\)/m) || [])[1]);
-    const body = (py.match(/\nasync def elvira_between\([\s\S]*?(?=\n(?:async )?def |\n[A-Z_]+ = |$)/) || [''])[0];
-    const rounds = (body.match(/await _fetch_boards\(/g) || []).length;
+    const worst = Number((py.match(/^ELVIRA_WORST_CASE_SEC = (\d+)$/m) || [])[1]);
     check('the card waits for elvira_between past the integration\'s worst case',
-      total > 0 && rounds >= 1 && Lib._elviraTimeoutMs > rounds * total * 1000,
-      JSON.stringify({ total, rounds, timeoutMs: Lib._elviraTimeoutMs }));
+      worst > 0 && Lib._elviraTimeoutMs > worst * 1000,
+      JSON.stringify({ worst, timeoutMs: Lib._elviraTimeoutMs }));
   }
   /* With a key the name is searched on FUTÁR: a search that failed (a rate
      limit, a timeout) is FUTÁR's outage for one poll, not "pick the
