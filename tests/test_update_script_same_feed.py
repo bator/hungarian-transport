@@ -1,10 +1,11 @@
 """The local update script follows the same-feed rule
-(scripts/update_volan_index.py, mav_source_newer)."""
+(scripts/update_volan_index.py, mav_source_newer and served_mav_wins)."""
 
 import gzip
 import importlib
 import json
 import os
+import random
 import sys
 import time
 import zipfile
@@ -72,3 +73,45 @@ def test_a_pfaedle_directory_rebuilds_only_a_stop_sequence_index(uvi, downloaded
     assert uvi.mav_source_newer(gtfs_out, out) is True
     _index(out, FEED, True, built)
     assert uvi.mav_source_newer(gtfs_out, out) is False
+
+
+def _padded(path: Path, feed: str, fitted: bool, pad: int, built: int = 0) -> int:
+    """An index of feed with pad incompressible bytes; its gzipped size."""
+    rnd = random.Random(pad)
+    body = {"v": 2, "feed": feed, "st": STATIONS, "p": [mav_index.encode_polyline(RAIL if fitted else LINE)],
+            "n": {"905": [[0, [0, 1]]]}, "l": {}, "pad": "".join(rnd.choice("0123456789abcdef") for _ in range(pad))}
+    path.write_bytes(gzip.compress(json.dumps(body, separators=(",", ":")).encode(), mtime=built))
+    return path.stat().st_size
+
+
+@pytest.mark.parametrize(
+    ("served_fitted", "durable_fitted", "served_pad", "durable_pad", "served_wins"),
+    [
+        # The fitted rank decides before the size: a fitted served index
+        # stays against a much larger stop-sequence copy, and a fitted
+        # durable copy replaces a much larger stop-sequence one.
+        (True, False, 0, 200_000, True),
+        (False, True, 200_000, 0, False),
+        # Of one kind, only a copy clearly larger replaces the served one.
+        (False, False, 0, 200_000, False),
+        (False, False, 200_000, 0, True),
+        (True, True, 0, 200_000, False),
+        (True, True, 1000, 1000, True),
+    ],
+)
+def test_served_mav_wins_by_the_same_feed_rule(
+    uvi, tmp_path, served_fitted, durable_fitted, served_pad, durable_pad, served_wins
+) -> None:
+    served, durable = tmp_path / "served.json.gz", tmp_path / "durable.json.gz"
+    _padded(served, FEED, served_fitted, served_pad)
+    _padded(durable, FEED, durable_fitted, durable_pad)
+    assert uvi.served_mav_wins(durable, served) is served_wins
+
+
+def test_served_mav_wins_of_another_feed_by_build_time(uvi, tmp_path) -> None:
+    served, durable = tmp_path / "served.json.gz", tmp_path / "durable.json.gz"
+    _padded(served, "20261031.M2ChangeID", True, 0, built=1_700_000_000)
+    _padded(durable, FEED, False, 0, built=1_700_003_600)
+    assert uvi.served_mav_wins(durable, served) is False
+    _padded(served, "20261031.M2ChangeID", False, 0, built=1_700_007_200)
+    assert uvi.served_mav_wins(durable, served) is True

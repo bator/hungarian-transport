@@ -16,8 +16,9 @@ built. Which feed (size, mtime) built which index is kept in STATE_NAME next
 to the feed, and so is a feed whose build failed: that one is not built again
 at every start, a Repairs issue says so, and the rebuild service tries again.
 Releases ship an index too. At startup the newer feed wins: an index on disk
-from a newer feed than the local one (by the date its feed_version starts
-with) is kept, and so is any index while the local feed has expired. An
+from a newer feed than the local one (by the date its feed_version names,
+served_index.superseded) is kept, and so is any index while the local feed
+has expired. An
 upload or the rebuild service always builds the local feed; that index then
 stays until the next update unpacks a release's index over it.
 A build that was interrupted (timeout, killed, out of memory) says nothing
@@ -29,9 +30,10 @@ itself dying during a build (the OOM killer, the watchdog) counts as such an
 interruption, found at the next start; a stop that cancels the build does not.
 An index on disk that is the local feed's own (built here, or a release's of
 the same feed_version) is kept at startup, whatever an earlier build of that
-feed did: of one feed_version, which index wins is mav_index.same_feed_replaces,
-the rule the daily index and the update script follow too, and a build not
-made yet never replaces an index of its own feed. The daily index from GitHub Pages (mav_daily.py) is installed by
+feed did: of one feed_version, which index wins is served_index.replaces
+(mav_index.same_feed_replaces), the rule the daily index and the update
+script follow too, and a build not made yet never replaces an index of its
+own feed. The daily index from GitHub Pages (mav_daily.py) is installed by
 the same rule, under the same lock, and counts as a shipped one here.
 The build (a minute of CPU over stop_times.txt) runs as a separate Python
 process, not in the executor: an executor thread would hold the GIL against
@@ -43,9 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import csv
 from dataclasses import dataclass
-import gzip
 import json
 import logging
 import os
@@ -55,10 +55,8 @@ import stat
 import sys
 import time
 import uuid
-import zipfile
-import zlib
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date
 from functools import partial
 from http import HTTPStatus
 from pathlib import Path
@@ -73,7 +71,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.http import KEY_HASS
 from homeassistant.util import dt as dt_util
 
-from . import mav_index, storage
+from . import mav_index, served_index, storage
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -105,8 +103,6 @@ UPLOAD_RE = re.compile(re.escape(SOURCE_NAME) + r"\.[0-9a-f]{32}\.upload")
 # script (scripts/update_volan_index.py, sweep_temps) deletes those in this
 # folder, which could take this file between its write and its rename.
 STATE_TEMP_RE = re.compile(re.escape(STATE_NAME) + r"\.[0-9a-f]{32}\.writing")
-# mav_index.write puts "feed" right after "v", so the head of the file has it.
-INDEX_FEED_RE = re.compile(rb'"feed":("(?:[^"\\]|\\.)*"|null)')
 # State keys about the index on disk, the feed that last failed and the
 # interruptions in a row of the current feed's build; a new build record
 # ("building") keeps them, so a build that fails can put them back.
@@ -115,8 +111,6 @@ STATE_KEEP = ("source", "index", "feed_version", "failed", "error", "interrupted
 # it: an OOM kill on a small host, or the timeout, happens again at every
 # start, each time costing BUILD_TIMEOUT of CPU or memory pressure.
 INTERRUPTED_LIMIT = 2
-# MÁV's feed_version starts with the feed's date: "20261022.M2ChangeID".
-FEED_DATE_RE = re.compile(r"(\d{8})(?!\d)")
 # What the startup check decides about the local feed.
 BUILD = "build"
 CURRENT = "current"
@@ -186,23 +180,6 @@ def _write_state(path: Path, state: dict[str, Any]) -> None:
         raise
 
 
-def _index_feed(path: Path) -> str | None:
-    """The feed_version an index file was built from ("feed"), or None."""
-    try:
-        with gzip.open(path, "rb") as fh:
-            head = fh.read(4096)
-    except (OSError, EOFError, zlib.error):
-        return None
-    match = INDEX_FEED_RE.search(head)
-    if match is None:
-        return None
-    try:
-        feed = json.loads(match.group(1))
-    except ValueError:
-        return None
-    return feed if isinstance(feed, str) else None
-
-
 def _interruptions(state: dict[str, Any], source: list[int]) -> tuple[int, str]:
     """How many builds of the feed with fingerprint source were interrupted
     in a row, and the last one's error."""
@@ -219,68 +196,22 @@ def _interrupted_message(count: int, error: str) -> str:
     return f"the build was interrupted {count} times in a row, last: {error}"
 
 
-@dataclass(frozen=True)
-class _FeedInfo:
-    """feed_info.txt's first row: feed_version, feed_start_date, feed_end_date."""
-
-    version: str = ""
-    start: str = ""
-    end: str = ""
-
-
-def _source_info(src: Path) -> _FeedInfo:
-    """The feed's feed_info.txt; empty fields when it has none."""
-    try:
-        with mav_index.Feed(src) as feed:
-            for row in feed.rows("feed_info.txt"):
-                return _FeedInfo(
-                    (row.get("feed_version") or "").strip(),
-                    (row.get("feed_start_date") or "").strip(),
-                    (row.get("feed_end_date") or "").strip(),
-                )
-    except (OSError, ValueError, zipfile.BadZipFile, csv.Error):
-        pass
-    return _FeedInfo()
-
-
-def _gtfs_date(value: str | None) -> date | None:
-    """The date a GTFS date (YYYYMMDD) or a feed_version starting with one names."""
-    match = FEED_DATE_RE.match(value or "")
-    if match is None:
-        return None
-    try:
-        return datetime.strptime(match.group(1), "%Y%m%d").date()
-    except ValueError:
-        return None
-
-
-def _feed_date(info: _FeedInfo) -> date | None:
-    """How recent a feed is: its feed_version's date, else its start, else its end."""
-    for value in (info.version, info.start, info.end):
-        if (day := _gtfs_date(value)) is not None:
-            return day
-    return None
-
-
 def _today() -> date:
     """Today in Home Assistant's time zone: a feed ends at the end of its day."""
     return dt_util.now().date()
 
 
-def _superseded(info: _FeedInfo, index_feed: str | None, today: date) -> bool:
-    """Whether the index on disk, built from index_feed, beats the local feed.
-
-    Only an index that names its feed can. It does when the local feed has
-    expired, or when the index's feed_version dates a newer feed. A local feed
-    that cannot be dated is built, as is one of the same date.
-    """
-    if not index_feed or index_feed == info.version:
-        return False
-    end = _gtfs_date(info.end)
-    if end is not None and end < today:
-        return True
-    local, current = _feed_date(info), _gtfs_date(index_feed)
-    return local is not None and current is not None and current > local
+def serves_local_build(src: Path, out: Path, state_file: Path) -> bool:
+    """Whether out is the index this integration built from the feed at src
+    as it is now (the build state's fingerprints), with no build under way."""
+    state = _read_state(state_file)
+    index = _fingerprint(out)
+    return (
+        not state.get("building")
+        and index is not None
+        and state.get("source") == _fingerprint(src)
+        and state.get("index") == index
+    )
 
 
 def _startup_decision(src: Path, out: Path, state_file: Path, today: date | None = None) -> str | None:
@@ -291,7 +222,7 @@ def _startup_decision(src: Path, out: Path, state_file: Path, today: date | None
     the newer feed wins. CURRENT: the index on disk is this feed's, also
     when a build of it failed or kept being interrupted (a release shipped a
     working index of it), or is of this feed's feed_version (the same-feed
-    rule, mav_index.same_feed_replaces: a build not made yet never replaces
+    rule, served_index.replaces: a build not made yet never replaces
     it). FAILED and INTERRUPTED: the feed's build failed, or
     was interrupted INTERRUPTED_LIMIT times in a row; the rebuild service and
     an upload force a build.
@@ -314,11 +245,11 @@ def _startup_decision(src: Path, out: Path, state_file: Path, today: date | None
     index_feed: str | None = None
     if index is not None and not (own and state.get("index") == index):
         # The index on disk was not built from this feed: the newer one wins.
-        index_feed = _index_feed(out)
+        index_feed = served_index.read_feed(out)
         if not version or index_feed != version:
-            info = _source_info(src)
+            info = served_index.source_info(src)
             version = version or info.version
-            if _superseded(info, index_feed, today or _today()):
+            if served_index.superseded(info, index_feed, today or _today()):
                 return SUPERSEDED
     if index is not None and not state.get("building"):
         # The index this integration built is the feed's it was built from;
@@ -329,24 +260,13 @@ def _startup_decision(src: Path, out: Path, state_file: Path, today: date | None
         # integration built it.
         if own and state.get("index") == index:
             return CURRENT
-        if version and index_feed == version and _same_feed_keeps(out, LOCAL_BUILD):
+        if version and index_feed == version and not served_index.replaces(served_index.LOCAL_BUILD, out):
             return CURRENT
     if state.get("failed") == source:
         return FAILED
     if _interruptions(state, source)[0] >= INTERRUPTED_LIMIT:
         return INTERRUPTED
     return BUILD
-
-
-# A build of the local feed before it is made: its kind and size are not
-# known, so by mav_index.same_feed_replaces it replaces no index of its feed.
-LOCAL_BUILD = mav_index.IndexRank(fitted=None, size=None)
-
-
-def _same_feed_keeps(out: Path, new: mav_index.IndexRank) -> bool:
-    """Whether out, an index of new's own feed, stays (same_feed_replaces)."""
-    current = mav_index.read_rank(out)
-    return current is not None and not mav_index.same_feed_replaces(new, current)
 
 
 def build_lock(hass: HomeAssistant) -> asyncio.Lock:
@@ -548,9 +468,9 @@ async def _log_superseded(hass: HomeAssistant, src: Path, out: Path, source: lis
     if data.get("mav_superseded") == (source, index):
         return
     data["mav_superseded"] = (source, index)
-    info = await hass.async_add_executor_job(_source_info, src)
-    current = await hass.async_add_executor_job(_index_feed, out)
-    end = _gtfs_date(info.end)
+    info = await hass.async_add_executor_job(served_index.source_info, src)
+    current = await hass.async_add_executor_job(served_index.read_feed, out)
+    end = served_index.feed_date(info.end)
     why = f"expired on {end.isoformat()}" if end and end < _today() else "is older"
     _LOGGER.info(
         "Keeping the MÁV index of feed %s: the local feed %s (%s) %s. Upload it "

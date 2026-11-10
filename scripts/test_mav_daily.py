@@ -244,7 +244,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
         "no audit": {"st": {**stats(), "audit": None}},
         "too few trains": {"index": index_bytes(trains=3)},
         "undated feed": {"index": index_bytes(feed="latest"), "st": stats("latest")},
-        # FEED_RE passes it; the integration's mav._gtfs_date does not, so
+        # FEED_RE passes it; the integration's served_index.feed_date does not, so
         # every client would reject the manifest that replaced a good one.
         "a feed date that is no date (month 13, day 99)": {"index": index_bytes(feed="20261399.M2ChangeID"),
                                                            "st": stats("20261399.M2ChangeID")},

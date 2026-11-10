@@ -39,7 +39,7 @@ Usage: mav_pages_site.py --index mav-index.json.gz --stats mav-build.json
 Prints deploy=true|false (and appends it to --github-output). Exit 1, with
 nothing written, for an index or statistics that do not hold up, a feed
 whose feed_version does not start with a real date (YYYYMMDD, as the
-integration's mav._gtfs_date reads it), or a site over the size limit.
+integration's served_index.feed_date reads it), or a site over the size limit.
 """
 from __future__ import annotations
 

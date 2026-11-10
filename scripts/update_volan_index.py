@@ -274,46 +274,40 @@ def schema_conflict(out: Path) -> str:
     return ""
 
 
-def index_feed(path: Path) -> str:
-    """Feed version from the head of a gzipped MÁV index (`{"v":N,"feed":"..."`)."""
-    try:
-        with gzip.open(path, "rb") as fh:
-            head = fh.read(512)
-    except (OSError, EOFError):
-        return ""
-    m = re.match(rb'\{"v":\d+,"feed":"((?:[^"\\]|\\.)*)"', head)
-    return m.group(1).decode("utf-8", errors="replace") if m else ""
+def _served_index():
+    """The integration's served_index (what an index file is, which one
+    wins), imported by path as build_mav_index imports mav_index. ImportError
+    when the installed integration is older than these scripts."""
+    pkg = Path(__file__).resolve().parent.parent / "custom_components" / "hungarian_transport"
+    if str(pkg) not in sys.path:
+        sys.path.insert(0, str(pkg))
+    import served_index  # noqa: PLC0415
 
-
-def _built_at(path: Path) -> float:
-    """When a gzipped index was built: the gzip header's mtime, which a copy
-    and a HACS unpack keep, unlike st_mtime (the unpack time). st_mtime when
-    the header carries none (mtime=0, as the Volán and city indexes are written)."""
-    try:
-        with path.open("rb") as fh:
-            head = fh.read(8)
-    except OSError:
-        head = b""
-    if len(head) == 8 and head[:2] == b"\x1f\x8b":
-        built = int.from_bytes(head[4:8], "little")
-        if built:
-            return float(built)
-    return path.stat().st_mtime
+    return served_index
 
 
 def served_mav_wins(durable: Path, served: Path) -> bool:
     """Whether the served MÁV index beats the durable copy.
 
     The integration also builds the served one, from an uploaded or copied
-    feed, without touching the durable copy. Of two builds of the same feed
-    the larger, pfaedle-based one wins (an official zip gives a stop-sequence
-    index). Of two different feeds, or when a feed version is unknown, the
-    later build wins (by build time, not by when HACS unpacked the served one).
+    feed, without touching the durable copy. Of two indexes of the same feed
+    the integration's same-feed rule decides (served_index.replaces): a
+    pfaedle-fitted one beats a stop-sequence one whatever their sizes, and
+    of one kind the durable copy wins only when clearly larger. Of two
+    different feeds, or when a feed version is unknown, the later build wins
+    (served_index.built_at, not when HACS unpacked the served one). An
+    integration older than these scripts keeps the served index.
     """
-    feed = index_feed(durable)
-    if feed and feed == index_feed(served):
-        return served.stat().st_size + 4096 >= durable.stat().st_size
-    return _built_at(served) > _built_at(durable)
+    try:
+        si = _served_index()
+    except ImportError as err:
+        print(f"warn mav restore: {type(err).__name__}, the served index stays", file=sys.stderr)
+        return True
+    feed = si.read_feed(durable)
+    if feed and feed == si.read_feed(served):
+        rank = si.read_rank(durable)
+        return rank is None or not si.replaces(rank, served)
+    return si.built_at(served) > si.built_at(durable)
 
 
 def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
@@ -397,32 +391,34 @@ def mav_source_newer(src: Path, out: Path) -> bool:
     """Whether the MÁV feed is newer than the served index's build.
 
     A served index of the feed's own feed_version stays by the integration's
-    same-feed rule (mav_index.same_feed_replaces): a build of the feed, not
-    made yet, never replaces a pfaedle-fitted one (the daily index, a
-    release's) nor another of its feed. Only a pfaedle directory, whose
-    build follows the rails, may replace a stop-sequence index of its feed.
-    Otherwise by the index's build time (_built_at), not its st_mtime: a
-    HACS unpack and restore_hacs_indexes() set that to "now", which would
-    make a feed whose build failed look built and never be built again.
-    Compared in whole seconds, the gzip header's resolution.
+    same-feed rule (served_index.replaces): a build of the feed, not made
+    yet, never replaces a pfaedle-fitted one (the daily index, a release's)
+    nor another of its feed. Only a pfaedle directory, whose build follows
+    the rails, may replace a stop-sequence index of its feed. Otherwise by
+    the index's build time (served_index.built_at), not its st_mtime: a HACS
+    unpack and restore_hacs_indexes() set that to "now", which would make a
+    feed whose build failed look built and never be built again. Compared
+    in whole seconds, the gzip header's resolution. An integration older
+    than these scripts builds nothing here; its own startup build covers
+    the feed.
     """
     if not out.exists():
         return True
     try:
-        # The integration's own module, as build_mav_index imports it.
-        pkg = Path(__file__).resolve().parent.parent / "custom_components" / "hungarian_transport"
-        if str(pkg) not in sys.path:
-            sys.path.insert(0, str(pkg))
-        import mav_index  # noqa: PLC0415
+        si = _served_index()
+    except ImportError as err:
+        print(f"warn mav same-feed check: {type(err).__name__}, not built", file=sys.stderr)
+        return False
+    try:
+        import mav_index  # noqa: PLC0415 - next to served_index, as build_mav_index imports it
 
         with mav_index.Feed(src) as feed:
             version = mav_index.feed_version(feed)
-        if version and index_feed(out) == version:
-            current = mav_index.read_rank(out)
+        if version and si.read_feed(out) == version:
             build = mav_index.IndexRank(fitted=True if src.is_dir() else None, size=None)
-            if current is not None and not mav_index.same_feed_replaces(build, current):
+            if not si.replaces(build, out):
                 return False
-    except Exception as err:  # an old integration without the rule, an unreadable feed
+    except Exception as err:  # an unreadable feed
         print(f"warn mav same-feed check: {type(err).__name__}", file=sys.stderr)
     try:
         if src.is_dir():
@@ -430,7 +426,7 @@ def mav_source_newer(src: Path, out: Path) -> bool:
             newest = max(times) if times else 0
         else:
             newest = src.stat().st_mtime
-        return int(newest) > int(_built_at(out))
+        return int(newest) > int(si.built_at(out))
     except OSError:
         return True
 
