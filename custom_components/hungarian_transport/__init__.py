@@ -1,8 +1,10 @@
 """Home Assistant integration for Hungarian transport services and card assets."""
 
 from collections.abc import Awaitable, Callable
+from functools import partial
 import logging
 from pathlib import Path
+import time
 from typing import Any
 
 import voluptuous as vol
@@ -39,7 +41,14 @@ from .const import (
     SERVICE_REALTIME,
     SERVICE_REBUILD_MAV,
 )
-from .elvira import ElviraError, ElviraRateLimited, elvira_between, station_code_digits
+from .elvira import (
+    ElviraBoards,
+    ElviraError,
+    ElviraRateLimited,
+    elvira_between,
+    fetch_station,
+    station_code_digits,
+)
 from .futar import (
     FUTAR_PATHS,
     FutarAuthError,
@@ -268,6 +277,18 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ]
     )
     session = async_get_clientsession(hass)
+    # ELVIRA's boards (elvira.py), shared by every card for Home Assistant's
+    # lifetime: the services stay registered while the entry is unloaded.
+    boards = ElviraBoards(
+        partial(fetch_station, session),
+        task_factory=lambda coro: hass.async_create_background_task(
+            coro, "hungarian_transport_elvira", eager_start=False
+        ),
+        call_later=hass_call_later(hass),
+        now=dt_util.now,
+        monotonic=time.monotonic,
+    )
+    close_on_stop(hass, boards.close)
 
     # An outage is an answer (elvira.py logs it once), and so is the
     # integration's own request limit, which is not MÁV being down.
@@ -287,8 +308,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 translation_key="same_station",
             )
         rows, dest_failure = await elvira_between(
-            session,
-            hass,
+            boards,
             origin,
             dest,
             call.data["minutes_after"],
