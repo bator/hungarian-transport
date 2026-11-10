@@ -17,13 +17,13 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 import logging
 import re
-import time
 import unicodedata
 from datetime import UTC, date, datetime, timedelta
 
 import aiohttp
 import zoneinfo
 
+from . import upstream
 from .cache import CallLater, SharedTTLCache, TaskFactory
 
 _LOGGER = logging.getLogger(__name__)
@@ -122,47 +122,7 @@ class ElviraRateLimited(ElviraError):
     its own and does not touch the "unavailable / answers again" state."""
 
 
-class RateLimit:
-    """Token bucket in front of ELVIRA, shared by every caller."""
-
-    def __init__(
-        self,
-        rate: float = ELVIRA_RATE,
-        burst: int = ELVIRA_BURST,
-        monotonic: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._rate = rate
-        self._burst = burst
-        self._monotonic = monotonic
-        self._tokens = float(burst)
-        self._at = monotonic()
-        self._refused = 0
-        self._logged_at: float | None = None
-
-    def take(self) -> None:
-        """One token, or ElviraRateLimited at once: the card polls again in
-        ELVIRA_CACHE_TTL seconds anyway."""
-        now = self._monotonic()
-        self._tokens = min(float(self._burst), self._tokens + max(0.0, now - self._at) * self._rate)
-        self._at = now
-        if self._tokens >= 1.0:
-            self._tokens -= 1.0
-            return
-        self._refused += 1
-        if self._logged_at is None or now - self._logged_at >= ELVIRA_RATE_LOG_EVERY:
-            _LOGGER.warning(
-                "ELVIRA requests over the integration's rate limit (%.0f/s, burst %d): %d boards refused"
-                " since the last such line; cards may miss MÁV rows",
-                self._rate,
-                self._burst,
-                self._refused,
-            )
-            self._refused = 0
-            self._logged_at = now
-        raise ElviraRateLimited("rate limited")
-
-
-class OutageLog:
+class OutageLog(upstream.OutageLog):
     """One warning when a station's boards start failing, one line when they
     answer again; every card polls every 45 s, so not one line per poll.
 
@@ -172,35 +132,25 @@ class OutageLog:
 
     def __init__(
         self,
-        monotonic: Callable[[], float] = time.monotonic,
+        monotonic: upstream.Monotonic = upstream.monotonic,
         ttl: float = ELVIRA_DOWN_TTL,
         max_entries: int = ELVIRA_DOWN_MAX,
     ) -> None:
-        self._monotonic = monotonic
-        self._ttl = ttl
-        self._max = max_entries
-        # Station code -> when its outage began.
-        self.down: dict[str, float] = {}
+        super().__init__(_LOGGER, monotonic=monotonic, ttl=ttl, max_entries=max_entries)
+        self._hours = ttl // 3600
 
     def report(self, code: str, err: Exception | None) -> None:
         """What the station's boards said this call: err, or None when it answered."""
-        now = self._monotonic()
-        down = self.down
-        for stale in [c for c, since in down.items() if now - since >= self._ttl]:
-            del down[stale]
-        if err is not None and code not in down:
-            while len(down) >= self._max:
-                del down[min(down, key=down.get)]
-            down[code] = now
-            _LOGGER.warning(
+        if err is None:
+            self.answered(code, "ELVIRA StationInfo %s answers again", code)
+        else:
+            self.failed(
+                code,
                 "ELVIRA StationInfo %s unavailable (%s); not logged again until it answers (or for %d h)",
                 code,
                 err,
-                self._ttl // 3600,
+                self._hours,
             )
-        elif err is None and code in down:
-            del down[code]
-            _LOGGER.info("ELVIRA StationInfo %s answers again", code)
 
 
 def station_code_digits(value: str) -> str:
@@ -520,7 +470,7 @@ class ElviraBoards:
         task_factory: TaskFactory | None = None,
         call_later: CallLater | None = None,
         now: Callable[[], datetime] | None = None,
-        monotonic: Callable[[], float] = time.monotonic,
+        monotonic: upstream.Monotonic = upstream.monotonic,
         burst: int = ELVIRA_BURST,
         call_budget: float = ELVIRA_CALL_BUDGET,
     ) -> None:
@@ -528,7 +478,22 @@ class ElviraBoards:
         self._cache = SharedTTLCache(
             ELVIRA_CACHE_TTL, ELVIRA_CACHE_MAX, task_factory, call_later, monotonic
         )
-        self._rate = RateLimit(ELVIRA_RATE, burst, monotonic)
+        # A refused board fails at once: the card polls again in
+        # ELVIRA_CACHE_TTL seconds anyway.
+        self._rate = upstream.TokenBucket(
+            ELVIRA_RATE,
+            burst,
+            refused=lambda: ElviraRateLimited("rate limited"),
+            log_refused=lambda count: _LOGGER.warning(
+                "ELVIRA requests over the integration's rate limit (%.0f/s, burst %d): %d boards refused"
+                " since the last such line; cards may miss MÁV rows",
+                ELVIRA_RATE,
+                burst,
+                count,
+            ),
+            log_every=ELVIRA_RATE_LOG_EVERY,
+            monotonic=monotonic,
+        )
         self.outages = OutageLog(monotonic)
         self.now = now or (lambda: datetime.now(MAV_TZ))
         self.monotonic = monotonic

@@ -25,6 +25,8 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.hungarian_transport import realtime
 from custom_components.hungarian_transport.const import DOMAIN, SERVICE_REALTIME
 
+from .test_upstream import FakeClock
+
 FIX = Path(__file__).parent / "fixtures" / "realtime"
 NOW = 1793605800  # 2026-11-02 07:50:00 UTC
 FROZEN = "2026-11-02T07:50:00+00:00"
@@ -700,7 +702,9 @@ async def test_service_refuses_while_the_entry_is_unloaded(hass, aioclient_mock)
 
 
 async def test_fetches_are_rate_limited(aioclient_mock, freezer, caplog) -> None:
-    """A loop over every feed id must not become a stream of requests."""
+    """A loop over every feed id must not become a stream of requests: on a
+    stopped clock nothing refills past the burst. (The frozen wall clock
+    keeps the feeds fresh.)"""
     freezer.move_to(FROZEN)
     feeds = {
         f"f{i}": realtime.FeedConfig(
@@ -711,7 +715,7 @@ async def test_fetches_are_rate_limited(aioclient_mock, freezer, caplog) -> None
     for i in range(realtime.FETCH_BURST + 5):
         aioclient_mock.get(f"https://x.test/{i}/tu.pb", content=_pb("volan-trip-updates"))
     session = aioclient_mock.create_session(asyncio.get_running_loop())
-    hub = realtime.RealtimeHub(session, feeds=feeds)
+    hub = realtime.RealtimeHub(session, feeds=feeds, monotonic=FakeClock().monotonic)
     answers = [await hub.query(fid, []) for fid in feeds]
     await session.close()
     assert aioclient_mock.call_count == realtime.FETCH_BURST

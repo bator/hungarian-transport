@@ -33,7 +33,7 @@ import zlib
 
 import aiohttp
 
-from . import gtfs_feed
+from . import gtfs_feed, upstream
 from .responses import RT_NO_FEED, RT_UNAVAILABLE, error_answer
 
 _LOGGER = logging.getLogger(__name__)
@@ -99,7 +99,6 @@ _PATTERN_IN_TRIP_ID = re.compile(r"^([^_]+_[^_]+)_\d{6}(?:_|$)")
 _DIGITS = re.compile(r"\d+")
 
 TaskFactory = Callable[[Coroutine[Any, Any, Any]], "asyncio.Future[Any]"]
-_monotonic = time.monotonic
 
 
 class RtDecodeError(ValueError):
@@ -528,11 +527,17 @@ class _Entry:
     data: Any = None
     etag: str = ""
     last_modified: str = ""
-    down: bool = False
 
 
 class RealtimeHub:
-    """On-demand GTFS-Realtime fetches, shared by every card and browser."""
+    """On-demand GTFS-Realtime fetches, shared by every card and browser.
+
+    `monotonic` is the clock of the fetch intervals and the rate limit.
+    Its own request sharing (_cached), not cache.SharedTTLCache: a feed's
+    entry outlives its interval (the validators and the last good copy),
+    a failure is cached too (for its backoff), and a refused fetch serves
+    the copy without starting a new interval.
+    """
 
     def __init__(
         self,
@@ -541,6 +546,7 @@ class RealtimeHub:
         executor: Callable[..., "asyncio.Future[Any]"] | None = None,
         task_factory: TaskFactory | None = None,
         feeds: dict[str, FeedConfig] | None = None,
+        monotonic: upstream.Monotonic = upstream.monotonic,
     ) -> None:
         self._session = session
         self._executor = executor
@@ -550,10 +556,20 @@ class RealtimeHub:
         # Per vehicle positions URL: trip id pattern -> route (_learn_routes).
         self._routes: dict[str, dict[str, str]] = {}
         self._inflight: dict[str, asyncio.Future] = {}
-        self._tokens = float(FETCH_BURST)
-        self._tokens_at = _monotonic()
-        self._refused = 0
-        self._refused_logged: float | None = None
+        self._monotonic = monotonic
+        # A refused fetch serves the copy there is (_refresh).
+        self._rate = upstream.TokenBucket(
+            FETCH_RATE,
+            FETCH_BURST,
+            refused=RealtimeRateLimited,
+            log_refused=lambda count: _LOGGER.warning(
+                "Realtime feed requests over the integration's rate limit: %d refused since the last such line",
+                count,
+            ),
+            monotonic=monotonic,
+        )
+        # Per feed URL.
+        self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic)
 
     async def _run(self, func: Callable[..., Any], *args: Any) -> Any:
         if self._executor is None:
@@ -568,23 +584,6 @@ class RealtimeHub:
                 _LOGGER.error("Cannot read %s: %s", FEEDS_FILE, err)
                 self._feeds = {}
         return self._feeds
-
-    def _take_token(self) -> None:
-        now = _monotonic()
-        self._tokens = min(float(FETCH_BURST), self._tokens + max(0.0, now - self._tokens_at) * FETCH_RATE)
-        self._tokens_at = now
-        if self._tokens >= 1.0:
-            self._tokens -= 1.0
-            return
-        self._refused += 1
-        if self._refused_logged is None or now - self._refused_logged >= 300:
-            _LOGGER.warning(
-                "Realtime feed requests over the integration's rate limit: %d refused since the last such line",
-                self._refused,
-            )
-            self._refused = 0
-            self._refused_logged = now
-        raise RealtimeRateLimited
 
     async def _download(self, url: str, entry: _Entry, cap: int) -> tuple[bytes | None, str, str]:
         """(body, ETag, Last-Modified), body None for 304 Not Modified. The
@@ -633,7 +632,7 @@ class RealtimeHub:
         it fails, or with keep the last good copy (one warning when it starts
         failing, one line when it answers again)."""
         entry = self._entries.setdefault(url, _Entry())
-        age = _monotonic() - entry.at
+        age = self._monotonic() - entry.at
         if age < (interval if entry.ok else backoff):
             return entry.data if entry.ok or keep else None
         task = self._inflight.get(url)
@@ -647,32 +646,28 @@ class RealtimeHub:
         self, url: str, entry: _Entry, cap: int, parse: Callable[[bytes], Any], what: str, keep: bool = False
     ) -> Any:
         try:
-            self._take_token()
+            self._rate.take()
         except RealtimeRateLimited:
             return entry.data if entry.ok or keep else None
         try:
             body, etag, last_modified = await self._download(url, entry, cap)
             data = entry.data if body is None else await self._run(parse, body)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError, zipfile.BadZipFile) as err:
-            entry.at = _monotonic()
+            entry.at = self._monotonic()
             entry.ok = False
             if not keep:
                 entry.data = None
-            if not entry.down:
-                entry.down = True
-                _LOGGER.warning(
-                    "%s %s unavailable: %s%s", what, url, err or type(err).__name__,
-                    "; keeping the copy from before" if entry.data is not None else "",
-                )
+            self._outages.failed(
+                url, "%s %s unavailable: %s%s", what, url, err or type(err).__name__,
+                "; keeping the copy from before" if entry.data is not None else "",
+            )
             return entry.data
-        entry.at = _monotonic()
+        entry.at = self._monotonic()
         entry.ok = True
         entry.data = data
         entry.etag = etag
         entry.last_modified = last_modified
-        if entry.down:
-            entry.down = False
-            _LOGGER.info("%s %s answers again", what, url)
+        self._outages.answered(url, "%s %s answers again", what, url)
         return data
 
     async def _feed(self, url: str, prefix: str, interval: int) -> Feed | None:

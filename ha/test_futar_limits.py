@@ -4,8 +4,9 @@ No network, no Home Assistant."""
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 import sys
-import time
 import types
 from pathlib import Path
 
@@ -42,11 +43,25 @@ async def fake_get(_session, _key, path, params, _timeout=None):
 
 futar.futar_get = fake_get
 clock = [1000.0]
-futar._monotonic = lambda: clock[0]
+messages: list[str] = []
+
+
+class _Collect(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        messages.append(record.getMessage())
+
+
+logging.getLogger(futar.__name__).addHandler(_Collect())
+logging.getLogger(futar.__name__).setLevel(logging.INFO)
+
+
+def refused_counts() -> list[int]:
+    """The counts of the "over the rate limit" lines so far."""
+    return [int(m.group(1)) for line in messages if (m := re.search(r": (\d+) refused since", line))]
 
 
 async def main() -> None:
-    proxy = futar.FutarProxy(None, "secret")
+    proxy = futar.FutarProxy(None, "secret", monotonic=lambda: clock[0])
     await proxy.get("search.json", {"query": "Keleti", "limit": 5, "nonce": "1", "key": "from-browser"})
     check("unknown parameters (and a browser key) do not reach FUTÁR",
           calls[-1] == ("search.json", {"query": "Keleti", "limit": "5"}), repr(calls[-1]))
@@ -82,8 +97,7 @@ async def main() -> None:
     async def virtual_sleep(seconds):
         clock[0] += seconds
 
-    futar._sleep = virtual_sleep
-    proxy = futar.FutarProxy(None, "secret")
+    proxy = futar.FutarProxy(None, "secret", monotonic=lambda: clock[0], sleep=virtual_sleep)
     calls.clear()
     start = clock[0]
     for i in range(futar.FUTAR_BURST + 10):
@@ -96,8 +110,13 @@ async def main() -> None:
     await proxy.get("search.json", {"query": f"q{futar.FUTAR_BURST + 9}"})
     check("cache hits do not need a token", len(calls) == hits)
     clock[0] += 3600
-    await proxy.get("search.json", {"query": "after an hour"})
-    check("the bucket refills to FUTAR_BURST, not beyond", proxy._tokens == futar.FUTAR_BURST - 1, repr(proxy._tokens))
+    start = clock[0]
+    for i in range(futar.FUTAR_BURST):
+        await proxy.get("search.json", {"query": f"after an hour {i}"})
+    refilled = clock[0] == start
+    await proxy.get("search.json", {"query": "one more"})
+    check("the bucket refills to FUTAR_BURST, not beyond",
+          refilled and abs((clock[0] - start) - 1 / futar.FUTAR_RATE) < 0.05, repr((refilled, clock[0] - start)))
 
     # A clock that does not move (nothing refills): refused after FUTAR_TOKEN_WAIT_SEC of sleeping.
     slept: list[float] = []
@@ -105,9 +124,8 @@ async def main() -> None:
     async def stuck_sleep(seconds):
         slept.append(seconds)
 
-    futar._sleep = stuck_sleep
-    proxy._tokens = 0.0
-    proxy._tokens_at = clock[0]
+    proxy = futar.FutarProxy(None, "secret", monotonic=lambda: clock[0], sleep=stuck_sleep, burst=0)
+    messages.clear()
     try:
         await proxy.get("search.json", {"query": "starved"})
         err = None
@@ -116,28 +134,28 @@ async def main() -> None:
     check("a call that cannot get a token in FUTAR_TOKEN_WAIT_SEC is refused",
           err is not None and sum(slept) <= futar.FUTAR_TOKEN_WAIT_SEC and sum(slept) > futar.FUTAR_TOKEN_WAIT_SEC - 0.5,
           repr((err, sum(slept))))
-    check("a refusal is not an outage: no unavailable state", proxy._failing is False)
+    check("a refusal is not an outage: only the rate limit line",
+          refused_counts() == [1] and not [m for m in messages if "unavailable" in m], repr(messages))
 
     # Callers sharing one refused request: one refusal in the log's count,
-    # not one per card waiting for it.
-    proxy._tokens = 0.0
-    proxy._tokens_at = clock[0]
-    proxy._limited = 0
-    proxy._limited_logged_at = clock[0]
+    # not one per card waiting for it (the next line says how many since).
     shared = await asyncio.gather(
         *(proxy.get("search.json", {"query": "shared"}) for _ in range(5)), return_exceptions=True
     )
+    clock[0] += futar.FUTAR_RATE_LOG_EVERY
+    try:
+        await proxy.get("search.json", {"query": "after the log interval"})
+    except futar.FutarRateLimited:
+        pass
     check("callers sharing one refused request count it once",
-          all(isinstance(r, futar.FutarRateLimited) for r in shared) and proxy._limited == 1,
-          repr((shared, proxy._limited)))
-    futar._sleep = asyncio.sleep
+          all(isinstance(r, futar.FutarRateLimited) for r in shared) and refused_counts() == [1, 2],
+          repr((shared, refused_counts())))
 
 
 async def load_pattern(delay: float, gate: int) -> tuple[int, int]:
     """One destination list on a cold cache (departures.js:361-405): 1 board,
     40 trip-details, 32 route-details, through the card's concurrency gate,
     on the real clock. Returns (refused, sent)."""
-    futar._monotonic = time.monotonic
     sent = [0]
 
     async def slow_get(_session, _key, path, params, _timeout=None):

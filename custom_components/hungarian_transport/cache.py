@@ -5,8 +5,9 @@ import asyncio
 from collections.abc import Awaitable, Callable, Coroutine, Hashable
 from datetime import datetime
 from functools import partial
-import time
 from typing import TYPE_CHECKING, Any
+
+from . import upstream
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -64,8 +65,8 @@ class SharedTTLCache:
     cancelled at shutdown instead of lingering as an untracked future.
     ``call_later`` is ``hass_call_later(hass)`` there, and ``close`` cancels
     its timer for good when Home Assistant stops or the owner unloads.
-    ``monotonic`` is the clock of the TTL, ``time.monotonic`` by default (an
-    owner with an injected clock passes its own).
+    ``monotonic`` is the clock of the TTL (the owner's, upstream.monotonic
+    by default).
     """
 
     def __init__(
@@ -84,8 +85,7 @@ class SharedTTLCache:
         self._call_later = call_later
         self._cancel_expiry: Callable[[], None] | None = None
         self._closed = False
-        # Looked up on every read without one: tests patch time.monotonic.
-        self._monotonic = monotonic or (lambda: time.monotonic())
+        self._monotonic = monotonic or upstream.monotonic
 
     def __len__(self) -> int:
         return len(self._data)

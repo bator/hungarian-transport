@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from typing import Any
 
 import aiohttp
 
+from . import upstream
 from .cache import CallLater, SharedTTLCache, TaskFactory
 
 _LOGGER = logging.getLogger(__name__)
@@ -80,8 +80,6 @@ FUTAR_MIN_TIMEOUT_SEC = 1.0
 # then one call asks again, so a 401 given by mistake (an upstream hiccup)
 # does not switch FUTÁR off until Home Assistant restarts.
 REJECTED_RETRY = 15 * 60
-_monotonic = time.monotonic
-_sleep = asyncio.sleep
 
 
 def futar_timeout(waited: float = 0.0) -> aiohttp.ClientTimeout:
@@ -175,6 +173,10 @@ class FutarProxy:
     asking upstream, until REJECTED_RETRY has passed and one call asks again.
     Saving a key in the options (the same one too) reloads the entry with a
     new proxy at once. An outage is logged once, not on every card poll.
+
+    `monotonic` is the clock of the cache, the rate limit and the rejected
+    key; `sleep` is the one a call waits for a token with. `burst` is the
+    rate limit's (FUTAR_BURST).
     """
 
     def __init__(
@@ -183,76 +185,55 @@ class FutarProxy:
         api_key: str,
         task_factory: TaskFactory | None = None,
         call_later: CallLater | None = None,
+        *,
+        monotonic: upstream.Monotonic = upstream.monotonic,
+        sleep: upstream.Sleep = upstream.sleep,
+        burst: int = FUTAR_BURST,
     ) -> None:
         self._session = session
         self._api_key = api_key
-        self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX, task_factory, call_later)
+        self._monotonic = monotonic
+        self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX, task_factory, call_later, monotonic)
         self._rejected: str | None = None
         self._rejected_at = 0.0
         # Counts rejections: an answer to a request sent before the latest
         # one says nothing about the key now.
         self._rejections = 0
         self._probing = False
-        self._failing = False
-        self._tokens = float(FUTAR_BURST)
-        self._tokens_at = _monotonic()
-        self._limited = 0
-        self._limited_logged_at: float | None = None
-
-    def _take_token(self) -> bool:
-        now = _monotonic()
-        self._tokens = min(float(FUTAR_BURST), self._tokens + max(0.0, now - self._tokens_at) * FUTAR_RATE)
-        self._tokens_at = now
-        if self._tokens < 1.0:
-            return False
-        self._tokens -= 1.0
-        return True
-
-    async def _acquire(self) -> float:
-        """A token, waiting up to FUTAR_TOKEN_WAIT_SEC for one; the seconds
-        slept for it. FutarRateLimited after that."""
-        slept = 0.0
-        while not self._take_token():
-            wait = max((1.0 - self._tokens) / FUTAR_RATE, 0.01)
-            if slept + wait > FUTAR_TOKEN_WAIT_SEC:
-                raise FutarRateLimited("rate limited")
-            await _sleep(wait)
-            slept += wait
-        return slept
-
-    def _note_rate_limited(self) -> None:
-        self._limited += 1
-        now = _monotonic()
-        if self._limited_logged_at is None or now - self._limited_logged_at >= FUTAR_RATE_LOG_EVERY:
-            _LOGGER.warning(
+        # A call over the limit waits for a token: the card swallows a
+        # refused call (an incomplete list), so waiting is the better answer.
+        self._rate = upstream.TokenBucket(
+            FUTAR_RATE,
+            burst,
+            refused=lambda: FutarRateLimited("rate limited"),
+            log_refused=lambda count: _LOGGER.warning(
                 "BKK FUTÁR calls over the integration's rate limit (%.0f/s, burst %d): %d refused"
                 " since the last such line; cards may miss rows",
                 FUTAR_RATE,
-                FUTAR_BURST,
-                self._limited,
-            )
-            self._limited = 0
-            self._limited_logged_at = now
+                burst,
+                count,
+            ),
+            log_every=FUTAR_RATE_LOG_EVERY,
+            max_wait=FUTAR_TOKEN_WAIT_SEC,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
+        # FUTÁR has one "unavailable / answers again" state (key None).
+        self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic)
 
     async def _upstream(self, path: str, params: dict[str, str]) -> dict:
-        started = _monotonic()
-        try:
-            slept = await self._acquire()
-        except FutarRateLimited:
-            # Counted here, once per refused request: every caller sharing
-            # it gets the same error.
-            self._note_rate_limited()
-            raise
+        started = self._monotonic()
+        # Refused here, once per refused request (and counted once): every
+        # caller sharing it gets the same error.
+        slept = await self._rate.acquire()
         # The summed sleeps, or the clock when a busy event loop took longer.
-        waited = max(slept, _monotonic() - started)
+        waited = max(slept, self._monotonic() - started)
         rejections = self._rejections
         data = await futar_get(self._session, self._api_key, path, params, futar_timeout(waited))
         # Only an answer from FUTÁR itself ends an outage: a cache hit for
         # another request proves nothing, and clearing the state on one made
         # the log flap between "unavailable" and "answers again".
-        if self._failing:
-            self._failing = False
-            _LOGGER.info("BKK FUTÁR answers again")
+        self._outages.answered(None, "BKK FUTÁR answers again")
         # Only a request sent after the latest rejection proves the key works
         # again: one sent before it (a slow plan-trip.json) cleared it, so the
         # log flapped and the next call spent a 401 instead of failing fast.
@@ -272,7 +253,7 @@ class FutarProxy:
         params = futar_params(path, params)
         probe = False
         if self._rejected is not None:
-            if self._probing or _monotonic() - self._rejected_at < REJECTED_RETRY:
+            if self._probing or self._monotonic() - self._rejected_at < REJECTED_RETRY:
                 raise FutarAuthError(self._rejected)
             # This call asks again; the others keep failing fast meanwhile.
             # Only another rejection starts a new REJECTED_RETRY: after a
@@ -284,13 +265,12 @@ class FutarProxy:
         except FutarUpstreamRateLimited as err:
             # FUTÁR answers, but not this key for a while: not an outage
             # either. Said once, until FUTÁR answers a call again.
-            if not self._failing:
-                self._failing = True
-                _LOGGER.warning(
-                    "BKK FUTÁR refuses calls as too many for the configured key (%s); "
-                    "not logged again until it answers",
-                    err,
-                )
+            self._outages.failed(
+                None,
+                "BKK FUTÁR refuses calls as too many for the configured key (%s); "
+                "not logged again until it answers",
+                err,
+            )
             raise
         except FutarRateLimited:
             # Our own limit, not FUTÁR failing: no outage state, no "answers again".
@@ -302,15 +282,13 @@ class FutarProxy:
             if self._rejected is None:
                 _LOGGER.warning("BKK FUTÁR rejected the configured key (%s)", err)
             self._rejected = str(err)
-            self._rejected_at = _monotonic()
+            self._rejected_at = self._monotonic()
             self._rejections += 1
             raise
         except FutarError as err:
-            if not self._failing:
-                self._failing = True
-                _LOGGER.warning(
-                    "BKK FUTÁR unavailable (%s); not logged again until it answers", err
-                )
+            self._outages.failed(
+                None, "BKK FUTÁR unavailable (%s); not logged again until it answers", err
+            )
             raise
         finally:
             if probe:
