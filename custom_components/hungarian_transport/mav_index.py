@@ -13,16 +13,15 @@ misses one of its own stations by more than STOP_TOLERANCE_M uses the station
 sequence instead, so a train never draws a route that skips its stops.
 
 ``audit`` checks every trip of the feed against the index the way the card
-uses it. Standard library only: it runs inside Home Assistant, and as its own
-process (``python mav_index.py FEED OUT``) so a minute of CPU on stop_times
-does not hold Home Assistant's GIL right after startup.
+uses it. The feed is read by gtfs_feed, as the release scripts read it.
+Standard library only: it runs inside Home Assistant, and as its own process
+(``python mav_index.py FEED OUT``) so a minute of CPU on stop_times does not
+hold Home Assistant's GIL right after startup.
 """
 from __future__ import annotations
 
 import argparse
-import csv
 import gzip
-import io
 import json
 import math
 import os
@@ -33,10 +32,17 @@ import unicodedata
 import zipfile
 import zlib
 from collections import defaultdict
-from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    from . import gtfs_feed
+except ImportError:  # its own process (python -I mav_index.py), or imported by path (scripts)
+    _HERE = str(Path(__file__).resolve().parent)
+    if _HERE not in sys.path:
+        sys.path.insert(0, _HERE)
+    import gtfs_feed  # type: ignore[no-redef]
 
 SCHEMA = 2
 SIMPLIFY_M = 10.0
@@ -44,7 +50,6 @@ SIMPLIFY_M = 10.0
 # platforms 100-200 m around the station point.
 STOP_TOLERANCE_M = 300.0
 RAIL_ROUTE_TYPES = {"2"} | {str(t) for t in range(100, 118)}
-LINE_CODE_RE = re.compile(r"^[GSZHM]\d{2}$", re.I)
 REQUIRED_FILES = ("routes.txt", "trips.txt", "stops.txt", "stop_times.txt")
 # build_and_audit writes no index with fewer trains and lines than this (a
 # bus-only GTFS passes check_feed), or with fewer than MIN_OK of the trains
@@ -54,26 +59,6 @@ MIN_OK = 0.99
 # write's temp file suffix when the caller names it (mkstemp's own is eight
 # characters of the same set, so one pattern finds both).
 TEMP_SUFFIX_RE = re.compile(r"[a-z0-9_]{8}")
-
-
-def train_number(name: str) -> str:
-    """'IC 856 TÓPART' -> '856'. A suburban code like 'G43' has none."""
-    s = (name or "").strip()
-    if not s or LINE_CODE_RE.fullmatch(s):
-        return ""
-    m = re.search(r"(?<!\d)(\d{3,5})(?!\d)", s)
-    if not m:
-        return ""
-    return m.group(1).lstrip("0") or m.group(1)
-
-
-def line_code(short: str, long_name: str = "") -> str:
-    """Suburban product code (G43, S30), not a train number."""
-    for raw in (short, long_name):
-        s = (raw or "").strip().upper()
-        if LINE_CODE_RE.fullmatch(s):
-            return s
-    return ""
 
 
 def fold(name: str) -> str:
@@ -95,57 +80,10 @@ def fold(name: str) -> str:
 # ---- GTFS access ---------------------------------------------------------
 
 
-class Feed:
-    """A GTFS feed in a zip or an unzipped directory (pfaedle's gtfs-out)."""
-
-    def __init__(self, path: Path):
-        self.path = Path(path)
-        self._zip = zipfile.ZipFile(self.path) if self.path.is_file() else None
-
-    def close(self) -> None:
-        if self._zip is not None:
-            self._zip.close()
-
-    def __enter__(self) -> "Feed":
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
-
-    def names(self) -> set[str]:
-        if self._zip is not None:
-            return {Path(n).name.lower() for n in self._zip.namelist()}
-        return {p.name.lower() for p in self.path.iterdir() if p.is_file()}
-
-    def _member(self, name: str) -> str | None:
-        if self._zip is None:
-            p = self.path / name
-            return str(p) if p.is_file() else None
-        for n in self._zip.namelist():
-            if Path(n).name.lower() == name:
-                return n
-        return None
-
-    def rows(self, name: str) -> Iterator[dict[str, str]]:
-        member = self._member(name)
-        if member is None:
-            return iter(())
-        if self._zip is None:
-            fh = open(member, encoding="utf-8-sig", newline="")
-        else:
-            fh = io.TextIOWrapper(self._zip.open(member), encoding="utf-8-sig", newline="")
-        return _rows(fh)
-
-
-def _rows(fh) -> Iterator[dict[str, str]]:
-    with fh:
-        yield from csv.DictReader(fh)
-
-
 def check_feed(path: Path) -> None:
     """Raise ValueError unless path is a readable GTFS feed."""
     try:
-        with Feed(path) as feed:
+        with gtfs_feed.Feed(path) as feed:
             missing = [n for n in REQUIRED_FILES if n not in feed.names()]
     except (zipfile.BadZipFile, OSError) as err:
         raise ValueError(f"not a GTFS zip: {err}") from err
@@ -153,57 +91,7 @@ def check_feed(path: Path) -> None:
         raise ValueError("GTFS feed lacks " + ", ".join(missing))
 
 
-def feed_version(feed: Feed) -> str:
-    for row in feed.rows("feed_info.txt"):
-        return (row.get("feed_version") or "").strip()
-    return ""
-
-
 # ---- geometry -------------------------------------------------------------
-
-
-def _encode_signed(value: int) -> str:
-    value = ~(value << 1) if value < 0 else (value << 1)
-    out = []
-    while value >= 0x20:
-        out.append(chr((0x20 | (value & 0x1F)) + 63))
-        value >>= 5
-    out.append(chr(value + 63))
-    return "".join(out)
-
-
-def encode_polyline(pts: list[tuple[float, float]]) -> str:
-    """Google encoded polyline, precision 5 (the card's decodePolyline)."""
-    plat = plng = 0
-    out = []
-    for lat, lng in pts:
-        ilat, ilng = int(round(lat * 1e5)), int(round(lng * 1e5))
-        out.append(_encode_signed(ilat - plat))
-        out.append(_encode_signed(ilng - plng))
-        plat, plng = ilat, ilng
-    return "".join(out)
-
-
-def decode_polyline(encoded: str) -> list[tuple[float, float]]:
-    pts: list[tuple[float, float]] = []
-    index = lat = lng = 0
-    while index < len(encoded):
-        for coord in (0, 1):
-            shift = result = 0
-            while True:
-                b = ord(encoded[index]) - 63
-                index += 1
-                result |= (b & 0x1F) << shift
-                shift += 5
-                if b < 0x20:
-                    break
-            delta = ~(result >> 1) if result & 1 else result >> 1
-            if coord == 0:
-                lat += delta
-            else:
-                lng += delta
-        pts.append((lat / 1e5, lng / 1e5))
-    return pts
 
 
 def simplify(pts: list[tuple[float, float]], tol_m: float = SIMPLIFY_M) -> list[tuple[float, float]]:
@@ -288,15 +176,15 @@ class RouteGrid:
 # ---- build ----------------------------------------------------------------
 
 
-def _load(feed: Feed):
+def _load(feed: gtfs_feed.Feed):
     routes: dict[str, tuple[str, str]] = {}
     for row in feed.rows("routes.txt"):
         if (row.get("route_type") or "").strip() not in RAIL_ROUTE_TYPES:
             continue
         short = (row.get("route_short_name") or "").strip()
         long_name = (row.get("route_long_name") or "").strip()
-        num = train_number(long_name) or train_number(short)
-        code = line_code(short, long_name)
+        num = gtfs_feed.train_number(long_name) or gtfs_feed.train_number(short)
+        code = gtfs_feed.line_code(short, long_name)
         if num:
             routes[row.get("route_id") or ""] = ("n", num)
         elif code:
@@ -336,7 +224,7 @@ def _load(feed: Feed):
     return trips, stops, trip_stops
 
 
-def _shapes(feed: Feed, wanted: set[str]) -> dict[str, list[tuple[float, float]]]:
+def _shapes(feed: gtfs_feed.Feed, wanted: set[str]) -> dict[str, list[tuple[float, float]]]:
     raw: dict[str, list[tuple[int, float, float]]] = defaultdict(list)
     if not wanted:
         return {}
@@ -358,8 +246,8 @@ def build(path: Path) -> dict[str, Any]:
     so the audit right after a build does not read stop_times.txt again.
     ``write`` drops every "_" key.
     """
-    with Feed(path) as feed:
-        version = feed_version(feed)
+    with gtfs_feed.Feed(path) as feed:
+        version = gtfs_feed.feed_version(feed)
         trips, stops, trip_stops = _load(feed)
         # key -> stop pattern -> shape ids seen with it
         patterns: dict[tuple[str, str], dict[tuple[str, ...], list[str]]] = defaultdict(lambda: defaultdict(list))
@@ -385,7 +273,7 @@ def build(path: Path) -> dict[str, Any]:
         return stop_ix[sid]
 
     def pix(pts: list[tuple[float, float]]) -> int:
-        enc = encode_polyline(pts)
+        enc = gtfs_feed.encode_polyline(pts)
         if enc not in poly_ix:
             poly_ix[enc] = len(polylines)
             polylines.append(enc)
@@ -510,8 +398,8 @@ def _station_line(stations: list[Any], ids: list[Any]) -> str:
     plat = plng = 0
     for i in ids:
         lat, lng = int(stations[i][1]), int(stations[i][2])
-        out.append(_encode_signed(lat - plat))
-        out.append(_encode_signed(lng - plng))
+        out.append(gtfs_feed.encode_signed(lat - plat))
+        out.append(gtfs_feed.encode_signed(lng - plng))
         plat, plng = lat, lng
     return "".join(out)
 
@@ -577,27 +465,41 @@ def _larger(new: IndexRank, old: IndexRank) -> bool:
 # ---- the card's choice, and the audit ---------------------------------------
 
 
-def pick_variant(index: dict[str, Any], key: tuple[str, str], board: str, alight: str):
-    """The variant the card draws for a train between two stations: the
-    first (longest) one that serves board before alight, else one serving
-    board, else the first. Returns (variant, board_pos, alight_pos)."""
+def pick_variant(
+    index: dict[str, Any], key: tuple[str, str], board: str, alight: str, headsign: str | None = None
+):
+    """The variant the card draws for train key between board and alight,
+    pickMavVariant (src/lib/gtfs.js, #77) in Python: the first (longest)
+    pattern serving board and then alight; else the first serving board,
+    before its end, whose last station is headsign; else none: (None, -1,
+    -1). Without board, the first pattern. headsign defaults to alight, as
+    for a trip drawn to its own last station (the audit). Returns
+    (variant, board_pos, alight_pos). scripts/testdata/mav_variant_cases.json
+    holds the cases both must answer alike."""
     kind, value = key
     variants = (index.get("n" if kind == "n" else "l") or {}).get(value) or []
-    if not variants:
-        return None, -1, -1
+    if not board:
+        return (variants[0], -1, -1) if variants else (None, -1, -1)
     stations = index.get("st") or []
-    fb, fa = fold(board), fold(alight)
-    first_board = None
+    fb, fa = fold(board), fold(alight) if alight else ""
+    head = alight if headsign is None else headsign
+    fh = fold(head) if head else ""
+
+    def name(i: int) -> str:
+        return fold(stations[i][0]) if 0 <= i < len(stations) else ""
+
+    to_head = None
     for var in variants:
-        names = [fold(stations[i][0]) for i in var[1]]
-        bpos = names.index(fb) if fb in names else -1
-        if bpos >= 0:
-            apos = names.index(fa, bpos + 1) if fa in names[bpos + 1:] else -1
-            if apos > bpos:
-                return var, bpos, apos
-            if first_board is None:
-                first_board = (var, bpos, -1)
-    return first_board or (variants[0], -1, -1)
+        names = [name(i) for i in var[1]]
+        if fb not in names:
+            continue
+        bpos = names.index(fb)
+        apos = names.index(fa, bpos + 1) if fa and fa in names[bpos + 1:] else -1
+        if apos > bpos:
+            return var, bpos, apos
+        if to_head is None and fh and bpos < len(names) - 1 and names[-1] == fh:
+            to_head = (var, bpos, -1)
+    return to_head or (None, -1, -1)
 
 
 def audit(path: Path, index: dict[str, Any], loaded: tuple | None = None) -> dict[str, Any]:
@@ -610,7 +512,7 @@ def audit(path: Path, index: dict[str, Any], loaded: tuple | None = None) -> dic
     if loaded is None:
         loaded = index.get("_loaded")
     if loaded is None:
-        with Feed(path) as feed:
+        with gtfs_feed.Feed(path) as feed:
             loaded = _load(feed)
     trips, stops, trip_stops = loaded
     polys: dict[int, RouteGrid] = {}
@@ -633,7 +535,7 @@ def audit(path: Path, index: dict[str, Any], loaded: tuple | None = None) -> dic
         else:
             ix = var[0]
             if ix not in polys:
-                polys[ix] = RouteGrid(decode_polyline(index["p"][ix]))
+                polys[ix] = RouteGrid(gtfs_feed.decode_polyline(index["p"][ix]))
             worst_m, worst_stop = 0.0, ""
             for sid in ids:
                 ck = (ix, sid)

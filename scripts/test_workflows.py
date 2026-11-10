@@ -67,7 +67,7 @@ paths_block = mav.split("paths:", 1)[1].split("\n\n", 1)[0] if "paths:" in mav e
 listed = set(re.findall(r"^\s+- (\S+)$", paths_block, re.M))
 needed = {p.relative_to(ROOT).as_posix() for p in local_imports(ROOT / "scripts" / "build_mav_index.py", set())}
 needed |= {"scripts/release_mav_index.sh", "custom_components/hungarian_transport/mav_index.py",
-           ".github/workflows/mav-index.yml"}
+           "custom_components/hungarian_transport/gtfs_feed.py", ".github/workflows/mav-index.yml"}
 check("mav-index.yml runs for a change to every file the MÁV build imports",
       needed <= listed, repr(sorted(needed - listed)))
 

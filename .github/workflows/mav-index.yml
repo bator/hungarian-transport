@@ -14,9 +14,9 @@ on:
       - scripts/build_mav_index.py
       # build_mav_index.py imports these (scripts/test_workflows.py checks).
       - scripts/gtfs_compact.py
-      - scripts/mav_variant.py
       - scripts/index_digest.py
       - custom_components/hungarian_transport/mav_index.py
+      - custom_components/hungarian_transport/gtfs_feed.py
       # The daily workflow's Pages site from the same build (not published).
       - scripts/mav_pages_site.py
 

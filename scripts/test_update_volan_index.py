@@ -1673,6 +1673,10 @@ with tempfile.TemporaryDirectory() as tmp:
     # The webhook may come from .env, as for the script itself.
     (base / ".env").write_text("export HUNGARIAN_TRANSPORT_WEBHOOK=http://127.0.0.1:2/api/webhook/from-env  # test\n")
     shutil.copy(Path(__file__).resolve().parent / "gtfs_compact.py", base / "gtfs_compact.py")
+    # Next to the integration, as /config/hungarian-transport is: gtfs_compact reads GTFS with its gtfs_feed.
+    pkg = root / "custom_components" / "hungarian_transport"
+    pkg.mkdir(parents=True)
+    shutil.copy(Path(__file__).resolve().parent.parent / pkg.relative_to(root) / "gtfs_feed.py", pkg / "gtfs_feed.py")
     no_hook = {k: v for k, v in env.items() if k != "HUNGARIAN_TRANSPORT_WEBHOOK"}
     curl_log.unlink(missing_ok=True)
     done = subprocess.run(["bash", str(script), "--worker"],

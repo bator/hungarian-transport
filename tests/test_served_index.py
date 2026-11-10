@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.hungarian_transport import mav_index, served_index
+from custom_components.hungarian_transport import gtfs_feed, mav_index, served_index
 
 FEED = "20261101.M2ChangeID"
 STATIONS = [["Székesfehérvár", 4718361, 1842472], ["Budapest-Kelenföld", 4746432, 1902063]]
@@ -30,7 +30,7 @@ def _index(path: Path, feed: str | None = FEED, *, fitted: bool = False, pad: in
         "v": mav_index.SCHEMA,
         "feed": feed,
         "st": STATIONS,
-        "p": [mav_index.encode_polyline(RAIL if fitted else LINE)],
+        "p": [gtfs_feed.encode_polyline(RAIL if fitted else LINE)],
         "n": {"905": [[0, [0, 1]]]},
         "l": {},
         "pad": "".join(rnd.choice("0123456789abcdef") for _ in range(pad)),

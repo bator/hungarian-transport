@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.hungarian_transport import mav_index
+from custom_components.hungarian_transport import gtfs_feed
 
 SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 FEED = "20261101.M2ChangeID"
@@ -32,7 +32,7 @@ def uvi():
 
 
 def _index(path: Path, feed: str, fitted: bool, built: int) -> None:
-    body = {"v": 2, "feed": feed, "st": STATIONS, "p": [mav_index.encode_polyline(RAIL if fitted else LINE)],
+    body = {"v": 2, "feed": feed, "st": STATIONS, "p": [gtfs_feed.encode_polyline(RAIL if fitted else LINE)],
             "n": {"905": [[0, [0, 1]]]}, "l": {}}
     path.write_bytes(gzip.compress(json.dumps(body, separators=(",", ":")).encode(), mtime=built))
 
@@ -78,7 +78,7 @@ def test_a_pfaedle_directory_rebuilds_only_a_stop_sequence_index(uvi, downloaded
 def _padded(path: Path, feed: str, fitted: bool, pad: int, built: int = 0) -> int:
     """An index of feed with pad incompressible bytes; its gzipped size."""
     rnd = random.Random(pad)
-    body = {"v": 2, "feed": feed, "st": STATIONS, "p": [mav_index.encode_polyline(RAIL if fitted else LINE)],
+    body = {"v": 2, "feed": feed, "st": STATIONS, "p": [gtfs_feed.encode_polyline(RAIL if fitted else LINE)],
             "n": {"905": [[0, [0, 1]]]}, "l": {}, "pad": "".join(rnd.choice("0123456789abcdef") for _ in range(pad))}
     path.write_bytes(gzip.compress(json.dumps(body, separators=(",", ":")).encode(), mtime=built))
     return path.stat().st_size

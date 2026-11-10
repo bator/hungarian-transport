@@ -36,7 +36,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.http import KEY_HASS
 from homeassistant.setup import async_setup_component
 
-from custom_components.hungarian_transport import mav, mav_index, served_index
+from custom_components.hungarian_transport import gtfs_feed, mav, mav_index, served_index
 from custom_components.hungarian_transport.const import DOMAIN, SERVICE_REBUILD_MAV
 
 SZF = (47.18361, 18.42472)
@@ -123,7 +123,7 @@ def test_index_keeps_every_stop_pattern_and_passes_its_audit(tmp_path: Path) -> 
     ]
     # The 858 chord misses Martonvásár by kilometres: station line instead.
     assert index["_stats"]["stop_lines"] == 1
-    assert len(mav_index.decode_polyline(index["p"][index["n"]["858"][0][0]])) == 3
+    assert len(gtfs_feed.decode_polyline(index["p"][index["n"]["858"][0][0]])) == 3
     report = mav_index.audit(feed, index)
     assert report["trips"] == 3 and report["trips_bad"] == 0 and report["ok_ratio"] == 1.0
 
@@ -161,13 +161,13 @@ def test_audit_after_build_reads_the_feed_once(tmp_path: Path, monkeypatch) -> N
     feed = tmp_path / "mav.zip"
     feed.write_bytes(_feed_zip())
     reads: list[str] = []
-    real_rows = mav_index.Feed.rows
+    real_rows = gtfs_feed.Feed.rows
 
     def counting_rows(self, name):
         reads.append(name)
         return real_rows(self, name)
 
-    monkeypatch.setattr(mav_index.Feed, "rows", counting_rows)
+    monkeypatch.setattr(gtfs_feed.Feed, "rows", counting_rows)
     index = mav_index.build(feed)
     report = mav_index.audit(feed, index)
     assert report["ok_ratio"] == 1.0

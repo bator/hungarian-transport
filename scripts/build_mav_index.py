@@ -152,20 +152,14 @@ def resolve_mav_feed(base: Path, *, url_errors: list[BaseException] | None = Non
 
 def _mav_module():
     """The integration's builder, so Home Assistant and this script make the
-    same index (schema 2: every stop pattern of a train with its stations).
-    Its audit picks a train's pattern as the card does (mav_variant.py); a
-    set of scripts copied without that file keeps the module's own pick,
-    which gives the same verdict."""
+    same index (schema 2: every stop pattern of a train with its stations)
+    and audit it alike, picking a train's pattern as the card does."""
     pkg = Path(__file__).resolve().parent.parent / "custom_components" / "hungarian_transport"
     if str(pkg) not in sys.path:
         sys.path.insert(0, str(pkg))
     import mav_index  # noqa: PLC0415
 
-    try:
-        from mav_variant import use_card_picker  # noqa: PLC0415
-    except ImportError:
-        return mav_index
-    return use_card_picker(mav_index)
+    return mav_index
 
 
 def build_mav_index(zpath: Path, out: Path, *, audit: bool = True, min_ok: float = MIN_OK) -> dict:

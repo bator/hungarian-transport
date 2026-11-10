@@ -109,6 +109,15 @@ def test_train_numbers_from_static() -> None:
     assert trains["9442"] == ["36166415"]
 
 
+def test_train_numbers_read_as_every_builder_does() -> None:
+    """trips.txt in a folder of the zip, a space after each comma, cp1250:
+    the reading of the index builders (gtfs_feed)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("gtfs/Trips.txt", "route_id, trip_id, trip_short_name\nR, 1:7, Győr ".encode("cp1250") + b"SZ 4510\n")
+    assert realtime.train_numbers_from_static(buf.getvalue(), "1:") == {"4510": ["7"]}
+
+
 # ---------------------------------------------------------------- feed table
 
 

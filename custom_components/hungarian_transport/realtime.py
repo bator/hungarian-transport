@@ -33,6 +33,7 @@ import zlib
 
 import aiohttp
 
+from . import gtfs_feed
 from .responses import RT_NO_FEED, RT_UNAVAILABLE, error_answer
 
 _LOGGER = logging.getLogger(__name__)
@@ -430,22 +431,22 @@ def decode_feed(data: bytes, prefix: str = "") -> Feed:
 
 def train_numbers_from_static(data: bytes, prefix: str = "") -> dict[str, list[str]]:
     """Train number -> trip ids (prefix taken off) from a GTFS zip's
-    trips.txt trip_short_name (SZ 4510, InterCity 181)."""
+    trips.txt trip_short_name (SZ 4510, InterCity 181), read as every
+    builder reads a feed (gtfs_feed). A zip without trips.txt raises
+    FileNotFoundError."""
     out: dict[str, list[str]] = {}
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            info = zf.getinfo("trips.txt")
-            if info.file_size > MAX_STATIC_MEMBER:
+            real = gtfs_feed.member(zf, "trips.txt")
+            if zf.getinfo(real).file_size > MAX_STATIC_MEMBER:
                 raise ValueError("trips.txt too large")
-            with zf.open(info) as fh:
-                reader = csv.DictReader(io.TextIOWrapper(fh, "utf-8-sig", newline=""))
-                for row in reader:
-                    trip_id = _strip((row.get("trip_id") or "").strip(), prefix)
-                    found = _DIGITS.findall(row.get("trip_short_name") or "")
-                    if not trip_id or not found:
-                        continue
-                    number = found[-1].lstrip("0") or found[-1]
-                    out.setdefault(number, []).append(trip_id)
+            for row in gtfs_feed.csv_rows(zf, real):
+                trip_id = _strip(row.get("trip_id") or "", prefix)
+                found = _DIGITS.findall(row.get("trip_short_name") or "")
+                if not trip_id or not found:
+                    continue
+                number = found[-1].lstrip("0") or found[-1]
+                out.setdefault(number, []).append(trip_id)
     # A member that is corrupt, encrypted or packed with a method zipfile
     # lacks, or a CSV line it can't read: an outage like a bad download.
     except (zlib.error, EOFError, RuntimeError, NotImplementedError, csv.Error) as err:

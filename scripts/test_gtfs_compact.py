@@ -35,18 +35,15 @@ from gtfs_compact import (  # noqa: E402
     index_shapes,
     simplify_shape,
     catalog_url,
-    decode_polyline,
-    encode_polyline,
     hm,
-    line_code,
     load_parts,
     open_gtfs,
     prune_shapes,
     resolved_url,
-    train_number,
     write_index,
 )
 from build_mav_index import _mav_module  # noqa: E402
+from gtfs_feed import decode_polyline, encode_polyline  # noqa: E402  (gtfs_compact put it on sys.path)
 
 
 def gtfs_zip(files: dict[str, str]) -> Path:
@@ -70,18 +67,6 @@ def main() -> int:
     failed |= not check("hm short", hm("8") is None)
     failed |= not check("hm garbage", hm("ab:cd") is None)
     failed |= not check("hm overnight", hm("25:10:00") == 1510)
-    failed |= not check("train_number IC 856", train_number("IC 856 TÓPART") == "856")
-    failed |= not check("train_number 9400", train_number("9400") == "9400")
-    failed |= not check("train_number ignores G43", train_number("G43") == "")
-    failed |= not check("line_code G43", line_code("G43", "") == "G43")
-    failed |= not check("line_code S40 from long", line_code("", "S40") == "S40")
-    rt = encode_polyline([(47.49889, 19.025), (47.18361, 18.42472), (46.44083, 16.98667)])
-    dec = decode_polyline(rt)
-    failed |= not check(
-        "polyline roundtrip 3 pts",
-        len(dec) == 3 and abs(dec[0][0] - 47.49889) < 1e-5 and abs(dec[-1][1] - 16.98667) < 1e-5,
-        str(dec),
-    )
 
     ids = [f["id"] for f in CITY_FEEDS]
     failed |= not check("city feeds unique ids", len(ids) == len(set(ids)), str(ids))

@@ -33,8 +33,9 @@ from datetime import date, datetime
 from pathlib import Path
 
 try:
-    from . import mav_index
+    from . import gtfs_feed, mav_index
 except ImportError:  # imported by path (scripts/update_volan_index.py)
+    import gtfs_feed  # type: ignore[no-redef]
     import mav_index  # type: ignore[no-redef]
 
 # mav_index.write puts "feed" right after "v"; the city index joins every
@@ -145,7 +146,7 @@ class FeedInfo:
 def source_info(src: Path) -> FeedInfo:
     """The feed_info.txt of the GTFS zip at src."""
     try:
-        with mav_index.Feed(src) as feed:
+        with gtfs_feed.Feed(src) as feed:
             for row in feed.rows("feed_info.txt"):
                 return FeedInfo(
                     (row.get("feed_version") or "").strip(),
