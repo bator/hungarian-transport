@@ -35,7 +35,8 @@ from homeassistant.util import dt as dt_util
 
 from . import storage
 from .const import DOMAIN
-from .timetables import MAX_LISTED_FEEDS, TimetableStatus, city_feeds, feed_date
+from .served_index import feed_date
+from .timetables import MAX_LISTED_FEEDS, TimetableStatus, city_feeds
 
 DISABLED = "disabled"
 

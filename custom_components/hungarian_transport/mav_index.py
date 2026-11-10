@@ -480,9 +480,10 @@ def read(path: Path) -> dict[str, Any]:
 # (releases, the daily index on GitHub Pages) and from MÁV's official zip,
 # whose coarse shapes mostly give the line through the stations. Every place
 # that may replace an index with another of the same feed asks
-# same_feed_replaces: Home Assistant's startup check (mav._startup_decision),
-# the daily index (mav_daily.decide) and the local update script
-# (scripts/update_volan_index.py, mav_source_newer).
+# same_feed_replaces, through served_index.replaces: Home Assistant's startup
+# check (mav._startup_decision), the daily index (mav_daily.decide) and the
+# local update script (scripts/update_volan_index.py, mav_source_newer and
+# served_mav_wins).
 
 # An index is pfaedle-fitted when at least this share of its variants follows
 # a shape rather than its station line (the release guard, MAV_MIN_FITTED in

@@ -11,14 +11,14 @@ DAILY_JITTER), and installs the index only when:
 - the manifest's format is the one this code reads and its index schema is
   mav_index.SCHEMA (else it says so once and installs nothing);
 - its feed is the one of the index www/ serves and the same-feed rule
-  (mav_index.same_feed_replaces) lets it replace that one: a pfaedle-fitted
+  (served_index.replaces) lets it replace that one: a pfaedle-fitted
   daily index replaces a stop-sequence build of its own feed, and is never
   replaced by one;
-- or its feed is newer, by the date its feed_version starts with, than the
+- or its feed is newer, by the date its feed_version names, than the
   index www/ serves (one of another feed of the same date stays: a local
   build of that day wins), and newer than the local feed (/config/
-  hungarian-transport/mav-gtfs.zip) by mav._superseded, the rule startup
-  uses. A local feed of the same date, or one that cannot be dated, keeps
+  hungarian-transport/mav-gtfs.zip) by served_index.superseded, the rule
+  startup uses. A local feed of the same date, or one that cannot be dated, keeps
   its index, but only while that index is the one served (by the build
   state's fingerprints, or its feed_version): a local feed whose build
   failed, was interrupted or refused by the audit keeps nothing;
@@ -36,7 +36,8 @@ manifest older than STALE_MANIFEST (today's build is late) is tried once
 more LATE_DELAY later. The index is fetched with the manifest's sha256 in its
 query, so a cache in front of Pages (max-age=600) never pairs a new manifest
 with an old index. The options flow can turn it off (CONF_DAILY_MAV); then
-no request is made at all.
+no request is made at all. Each round returns a DailyRound, which the
+updater hands to timetable_notify.py and records for the sensors.
 
 The card fetches mav-index.json.gz with a day-stamped URL and "no-cache":
 Home Assistant's static files answer with an ETag of the file's mtime and
@@ -45,6 +46,7 @@ size, so a replaced index is downloaded on the next load of the dashboard.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 import hashlib
 import json
 import logging
@@ -66,7 +68,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_chang
 from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
-from . import mav, mav_index, storage
+from . import mav, mav_index, served_index, storage
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -116,6 +118,22 @@ SUPERSEDED = "superseded"
 _INSTALL = "install"
 
 
+@dataclass(frozen=True)
+class DailyRound:
+    """What one round did (result), and what it saw of the manifest."""
+
+    result: str
+    # The manifest's feed and when its index was built; None before the
+    # manifest was read (or without a built_at).
+    feed: str | None = None
+    built_at: datetime | None = None
+    # Why the round FAILED or was UNSUPPORTED.
+    error: str | None = None
+    # INSTALLED: the installed index's trains and lines.
+    trains: int | None = None
+    lines: int | None = None
+
+
 class DailyIndexError(Exception):
     """The manifest or the index could not be fetched or did not check out."""
 
@@ -161,7 +179,7 @@ def check_manifest(raw: bytes) -> dict[str, Any]:
     if man.get("schema") != mav_index.SCHEMA:
         raise _Unsupported(f"index schema {man.get('schema')!r}, this version reads {mav_index.SCHEMA}")
     feed, size, sha = man.get("feed"), man.get("size"), man.get("sha256")
-    if not isinstance(feed, str) or not FEED_RE.fullmatch(feed) or mav._gtfs_date(feed) is None:
+    if not isinstance(feed, str) or not FEED_RE.fullmatch(feed) or served_index.feed_date(feed) is None:
         raise DailyIndexError(f"manifest names no dated feed: {feed!r}")
     if not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= MAX_INDEX:
         raise DailyIndexError(f"manifest size {size!r} out of range")
@@ -251,53 +269,43 @@ def decide(
     """Whether the daily index of feed (of rank, by default of unknown kind
     and size) replaces what out holds.
 
-    Of the same feed, the same-feed rule decides (mav_index.same_feed_replaces):
+    Of the same feed, the same-feed rule decides (served_index.replaces):
     UP_TO_DATE unless the daily index beats out. Of another feed:
     UP_TO_DATE when out is of one of the same date or newer; LOCAL_WINS when
-    the local feed at src is not older (mav._superseded, as at startup: same
-    date, undated or newer keeps it; an expired one does not) and its index
-    is the one out holds (_local_served).
+    the local feed at src is not older (served_index.superseded, as at
+    startup: same date, undated or newer keeps it; an expired one does not)
+    and its index is the one out holds: out is of the feed's feed_version,
+    or this integration built it from the feed as it is now (a feed whose
+    build failed, was interrupted or was refused by the audit has none, and
+    keeps nothing from the daily index).
     """
-    current = mav._index_feed(out) if out.is_file() else None
+    current = served_index.read_feed(out)
     if current == feed:
-        new = rank or mav_index.IndexRank(None, None)
-        return UP_TO_DATE if mav._same_feed_keeps(out, new) else _INSTALL
-    new_day, current_day = mav._gtfs_date(feed), mav._gtfs_date(current)
-    if new_day is None or (current_day is not None and new_day <= current_day):
+        new = rank or served_index.LOCAL_BUILD
+        return _INSTALL if served_index.replaces(new, out) else UP_TO_DATE
+    if not served_index.newer_feed(feed, current):
         return UP_TO_DATE
-    if mav._fingerprint(src) is not None:
-        info = mav._source_info(src)
-        if not mav._superseded(info, feed, today) and _local_served(
-            src, out, state_file or src.with_name(mav.STATE_NAME), info, current
+    if src.is_file():
+        info = served_index.source_info(src)
+        if not served_index.superseded(info, feed, today) and (
+            (info.version and current == info.version)
+            or mav.serves_local_build(src, out, state_file or src.with_name(mav.STATE_NAME))
         ):
             return LOCAL_WINS
     return _INSTALL
 
 
-def _local_served(src: Path, out: Path, state_file: Path, info: Any, current: str | None) -> bool:
-    """Whether out is the local feed's index: this integration built it from
-    the feed as it is now (the build state's fingerprints), or it is of the
-    feed's feed_version. A feed whose build failed, was interrupted or was
-    refused by the audit has none, and keeps nothing from the daily index."""
-    if info.version and current == info.version:
-        return True
-    state = mav._read_state(state_file)
-    index = mav._fingerprint(out)
-    return (
-        not state.get("building")
-        and index is not None
-        and state.get("source") == mav._fingerprint(src)
-        and state.get("index") == index
-    )
+# The failure last logged as a warning, kept across rounds: only this module reads it.
+_LOGGED = "mav_daily_logged"
 
 
 def _log_failure(hass: HomeAssistant, message: str, unsupported: bool = False) -> None:
     """Once per kind of failure; the same one again goes to debug."""
     data = hass.data.setdefault(DOMAIN, {})
-    if data.get("mav_daily_error") == message:
+    if data.get(_LOGGED) == message:
         _LOGGER.debug("Daily MÁV route index: %s", message)
         return
-    data["mav_daily_error"] = message
+    data[_LOGGED] = message
     if unsupported:
         _LOGGER.info("Daily MÁV route index skipped: %s. Update Hungarian transport to use it", message)
     else:
@@ -307,41 +315,67 @@ def _log_failure(hass: HomeAssistant, message: str, unsupported: bool = False) -
 
 
 def _clear_failure(hass: HomeAssistant) -> None:
-    hass.data.setdefault(DOMAIN, {}).pop("mav_daily_error", None)
+    hass.data.setdefault(DOMAIN, {}).pop(_LOGGED, None)
 
 
-async def async_update(hass: HomeAssistant, www: Path) -> str:
+def _crashed(hass: HomeAssistant, err: Exception, feed: str | None = None, built: datetime | None = None) -> DailyRound:
+    """A round that raised: FAILED, logged once like any failure."""
+    message = f"{type(err).__name__}: {err}"
+    _log_failure(hass, message)
+    _LOGGER.debug("Daily MÁV route index round failed", exc_info=err)
+    return DailyRound(FAILED, feed, built, error=message)
+
+
+async def async_update(hass: HomeAssistant, www: Path) -> DailyRound:
     """One round: fetch the manifest and, when its feed wins, install its index."""
     session = async_get_clientsession(hass)
     out = www / mav.INDEX_NAME
     src = mav.source_path(hass)
     state_file = mav.state_path(hass)
-    data = hass.data.setdefault(DOMAIN, {})
-    # When this round's manifest was built (timetable_notify.py tells a
-    # stale site; DailyIndexUpdater looks again later): this round's only.
-    data.pop("mav_daily_built_at", None)
-    data.pop("mav_daily_feed", None)
     try:
         man = check_manifest(await _get(session, MANIFEST_URL, MAX_MANIFEST, MANIFEST_TIMEOUT))
     except _Unsupported as err:
         _log_failure(hass, str(err), unsupported=True)
-        return UNSUPPORTED
+        return DailyRound(UNSUPPORTED, error=str(err))
     except DailyIndexError as err:
         _log_failure(hass, str(err))
-        return FAILED
-    data["mav_daily_built_at"] = built_at(man)
+        return DailyRound(FAILED, error=str(err))
+    # When this round's manifest was built (timetable_notify.py tells a
+    # stale site; DailyIndexUpdater looks again later).
+    built = built_at(man)
+    try:
+        return await _install(hass, session, man, built, out, src, state_file)
+    except asyncio.CancelledError:
+        raise
+    except Exception as err:  # noqa: BLE001 - a round that crashed is a failed one
+        return _crashed(hass, err, man["feed"], built)
+
+
+async def _install(
+    hass: HomeAssistant,
+    session: aiohttp.ClientSession,
+    man: dict[str, Any],
+    built: datetime | None,
+    out: Path,
+    src: Path,
+    state_file: Path,
+) -> DailyRound:
+    """The rest of a round, once the manifest checked out."""
     feed = man["feed"]
-    data["mav_daily_feed"] = feed
+
+    def done(result: str, error: str | None = None, **installed: int) -> DailyRound:
+        return DailyRound(result, feed, built, error, **installed)
+
     decision = await hass.async_add_executor_job(
-        partial(decide, feed, out, src, mav._today(), state_file=state_file, rank=manifest_rank(man))
+        partial(decide, feed, out, src, _today(), state_file=state_file, rank=manifest_rank(man))
     )
     if decision != _INSTALL:
         _clear_failure(hass)
         _LOGGER.debug("Daily MÁV route index of feed %s: %s", feed, decision)
-        return decision
+        return done(decision)
     if mav.build_pending(hass):
         _LOGGER.debug("Daily MÁV route index of feed %s: a local build runs; trying again later", feed)
-        return BUSY
+        return done(BUSY)
     try:
         # The sha256 in the query: a cache in front of Pages never serves
         # another generation's index for this manifest.
@@ -349,40 +383,45 @@ async def async_update(hass: HomeAssistant, www: Path) -> str:
         count, rank = await hass.async_add_executor_job(check_index, raw, man, mav.MIN_TRAINS)
     except DailyIndexError as err:
         _log_failure(hass, str(err))
-        return FAILED
+        return done(FAILED, str(err))
     # Checked again with nothing awaited before the lock is taken: a build
     # (an upload) that started during the download goes first.
     if mav.build_pending(hass):
         _LOGGER.debug("Daily MÁV route index of feed %s: a local build runs; trying again later", feed)
-        return BUSY
+        return done(BUSY)
     async with mav.build_lock(hass):
         # The index or the local feed may have changed during the download;
         # the rank is the downloaded index's own now.
         decision = await hass.async_add_executor_job(
-            partial(decide, feed, out, src, mav._today(), state_file=state_file, rank=rank)
+            partial(decide, feed, out, src, _today(), state_file=state_file, rank=rank)
         )
         if decision != _INSTALL:
             _clear_failure(hass)
-            return decision
+            return done(decision)
         try:
             await hass.async_add_executor_job(mav_index.write_bytes, raw, out, secrets.token_hex(4))
         except OSError as err:
-            _log_failure(hass, f"could not write {out}: {err}")
-            return FAILED
+            message = f"could not write {out}: {err}"
+            _log_failure(hass, message)
+            return done(FAILED, message)
     _clear_failure(hass)
-    # What timetable_notify.py tells about it.
-    data["mav_daily_installed"] = {
-        "feed": feed,
-        "trains": man["trains"] if isinstance(man.get("trains"), int) else count,
-        "lines": man["lines"] if isinstance(man.get("lines"), int) else 0,
-    }
     audit = man.get("audit") if isinstance(man.get("audit"), dict) else {}
     await storage.async_record_mav_install(hass, storage.SOURCE_DAILY, feed, len(raw), audit.get("ok_ratio"))
     _LOGGER.info(
         "Installed the daily MÁV route index of feed %s (%s trains and lines, built %s, audit %s/%s trains)",
         feed, count, man.get("built_at"), audit.get("trains_ok"), audit.get("trains"),
     )
-    return INSTALLED
+    # What timetable_notify.py tells about it.
+    return done(
+        INSTALLED,
+        trains=man["trains"] if isinstance(man.get("trains"), int) else count,
+        lines=man["lines"] if isinstance(man.get("lines"), int) else 0,
+    )
+
+
+def _today() -> date:
+    """Today in Home Assistant's time zone: a feed ends at the end of its day."""
+    return dt_util.now().date()
 
 
 # What scheduled a round.
@@ -404,16 +443,16 @@ class DailyIndexUpdater:
     (or one of its retries) that went through while the manifest was older
     than STALE_MANIFEST is tried once more, LATE_DELAY later. One round is
     pending at a time: the daily time replaces a retry still waiting.
-    on_result gets each round's result (timetable_notify.py); then the round
-    is recorded for the sensors (storage.DAILY_ROUND), and next_run says
-    when the next one is due."""
+    on_result gets each round's DailyRound (timetable_notify.py); then the
+    round is recorded for the sensors (storage.DAILY_ROUND), and next_run
+    says when the next one is due."""
 
     def __init__(
         self,
         hass: HomeAssistant,
         www: Path,
         daily_time: time = time(6),
-        on_result: Callable[[str], Awaitable[None]] | None = None,
+        on_result: Callable[[DailyRound], Awaitable[None]] | None = None,
     ) -> None:
         self._hass = hass
         self._www = www
@@ -501,11 +540,12 @@ class DailyIndexUpdater:
         self._task = self._hass.async_create_background_task(self._run(), "hungarian_transport_mav_daily")
 
     @callback
-    def _after(self, result: str) -> None:
+    def _after(self, done: DailyRound) -> None:
         """Schedule a retry or a late look after a round, unless another
         round is already pending (the daily time came during this one)."""
         if self._stopped or self._unsub is not None:
             return
+        result = done.result
         if result in (BUSY, FAILED):
             if self._retries < RETRY_LIMIT:
                 self._retries += 1
@@ -513,37 +553,34 @@ class DailyIndexUpdater:
             return
         if self._cycle != _DAILY or self._late_done or result == UNSUPPORTED:
             return
-        built = self._hass.data.get(DOMAIN, {}).get("mav_daily_built_at")
+        built = done.built_at
         if built is not None and dt_util.utcnow() - built > STALE_MANIFEST:
             self._late_done = True
             self._schedule(random.uniform(*LATE_DELAY), _LATE)
 
     async def _run(self) -> None:
         try:
-            result = await async_update(self._hass, self._www)
+            done = await async_update(self._hass, self._www)
         except asyncio.CancelledError:
             # Stopped (unloaded, Home Assistant stopping): no next round.
             raise
         except Exception as err:  # noqa: BLE001 - logged once, the next round tries again
-            _log_failure(self._hass, f"{type(err).__name__}: {err}")
-            _LOGGER.debug("Daily MÁV route index round failed", exc_info=True)
-            result = FAILED
-        self._after(result)
+            done = _crashed(self._hass, err)
+        self._after(done)
         if self._on_result is not None:
             try:
-                await self._on_result(result)
+                await self._on_result(done)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - a notification never stops the updater
                 _LOGGER.warning("Timetable update notification failed", exc_info=True)
-        await self._record(result)
+        await self._record(done)
 
-    async def _record(self, result: str) -> None:
+    async def _record(self, done: DailyRound) -> None:
         """The round for the sensors, after on_result (its failure streak)."""
-        data = self._hass.data.get(DOMAIN, {})
-        feed = data.get("mav_daily_feed")
+        result, feed = done.result, done.feed
         if result == UP_TO_DATE and feed:
-            served = await self._hass.async_add_executor_job(mav._index_feed, self._www / mav.INDEX_NAME)
+            served = await self._hass.async_add_executor_job(served_index.read_feed, self._www / mav.INDEX_NAME)
             if served and served != feed:
                 result = SUPERSEDED
-        await storage.async_record_daily_round(self._hass, result, feed, data.get("mav_daily_built_at"))
+        await storage.async_record_daily_round(self._hass, result, feed, done.built_at)
