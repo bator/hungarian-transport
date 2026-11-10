@@ -18,16 +18,20 @@ import zoneinfo
 from custom_components.hungarian_transport import elvira
 from custom_components.hungarian_transport.elvira import (
     ELVIRA_CACHE_TTL,
+    ELVIRA_CALL_BUDGET,
     ELVIRA_DOWN_MAX,
     ELVIRA_DOWN_TTL,
+    ELVIRA_ROUNDS,
     ELVIRA_ROW_CAP,
+    ELVIRA_TIMEOUT,
+    ELVIRA_TIMEOUT_SEC,
     ELVIRA_URL,
+    ELVIRA_WORST_CASE_SEC,
     STATIONINFO_MAX_COUNT,
     ElviraBoards,
     ElviraError,
     ElviraRateLimited,
     OutageLog,
-    elvira_between,
     fetch_station,
     longest_run,
     next_boards,
@@ -100,7 +104,7 @@ def _source(upstream: Upstream, clock: Clock, **kwargs) -> ElviraBoards:
 
 
 async def _between(source, minutes=15, origin=ORIGIN, dest=DEST, dest_name="", at=None):
-    return await elvira_between(source, origin, dest, minutes, dest_name, at)
+    return await source.between(origin, dest, minutes, dest_name, at)
 
 
 def _board(start, arrive=None, code="966"):
@@ -268,7 +272,7 @@ def test_rate_limit_leaves_room_for_cards() -> None:
     assert boards <= elvira.ELVIRA_BURST
 
 
-# --- The board source: elvira_between over a fake StationInfo ---
+# --- The board source: between() over a fake StationInfo ---
 
 
 async def test_rows_from_the_origin_and_destination_boards() -> None:
@@ -387,6 +391,55 @@ async def test_answers_within_its_budget() -> None:
     calls = len(upstream.calls)
     assert (await _between(source, 180))[1] is None
     assert len(upstream.calls) == calls
+
+
+class Rounds(Upstream):
+    """The StationInfo request, counting a call's rounds: a board asked for
+    while no other is under way starts a new one."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.rounds = 0
+        self._busy = 0
+
+    async def __call__(self, code: str, day: date):
+        if not self._busy:
+            self.rounds += 1
+        self._busy += 1
+        try:
+            await asyncio.sleep(0)
+            return await super().__call__(code, day)
+        finally:
+            self._busy -= 1
+
+
+def test_the_worst_case_the_cards_wait_for_is_every_round_at_its_timeout() -> None:
+    """test-render.mjs reads ELVIRA_WORST_CASE_SEC: the card's own limit on
+    an elvira_between call must be past it."""
+    assert ELVIRA_TIMEOUT.total == ELVIRA_TIMEOUT_SEC
+    assert ELVIRA_WORST_CASE_SEC == ELVIRA_ROUNDS * ELVIRA_TIMEOUT_SEC
+    # The budget only cuts the last round short.
+    assert ELVIRA_TIMEOUT_SEC <= ELVIRA_CALL_BUDGET <= ELVIRA_WORST_CASE_SEC
+
+
+async def test_a_call_asks_at_most_elvira_rounds_rounds() -> None:
+    """Around the clock, short and long windows, with and without a run on
+    today's boards to go by: no call asks more rounds than ELVIRA_ROUNDS,
+    and some need them all."""
+    seen = set()
+    for hour in range(24):
+        for minute in (0, 30):
+            when = datetime(2026, 10, 19, hour, minute, tzinfo=TZ)
+            for minutes in (15, 180, 480):
+                for run in (True, False):
+                    dep, arr = _board(when + timedelta(minutes=10), when + timedelta(minutes=72))
+                    upstream = Rounds([dep], [arr] if run else [])
+                    source = _source(upstream, Clock(when.isoformat()))
+                    await _between(source, minutes)
+                    source.close()
+                    seen.add(upstream.rounds)
+    assert max(seen) == ELVIRA_ROUNDS
+    assert min(seen) == 1
 
 
 async def test_outage_is_an_error_logged_once_and_not_cached(caplog) -> None:

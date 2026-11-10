@@ -14,6 +14,7 @@ import './src/lib/services.js';
 import './src/lib/departures.js';
 import './src/lib/vehicles.js';
 import './src/lib/rows.js';
+import './src/lib/context.js';
 import { rideGeometry } from './src/lib/ride-map.js';
 
 const M_PER_DEG = 6371000 * Math.PI / 180;
@@ -395,7 +396,7 @@ test('a destination without coordinates is a known station, else looked up on Tr
 
 /* Production adapters */
 
-test('rideMapSources hands each source its own arguments, read from BkkLib at call time', async () => {
+test('rideMapSources hands each source its own arguments and the card’s context, read from BkkLib at call time', async () => {
   const names = ['mavRouteForRow', 'gtfsRowShape', 'futarTripShape', 'tripHopStops', 'stopArea', 'motisShapeForHop', 'coachShape', 'transitousStopRef'];
   const keep = {};
   const got = {};
@@ -407,11 +408,14 @@ test('rideMapSources hands each source its own arguments, read from BkkLib at ca
     const cfg = { mavIndex: '/local/mav.json.gz' };
     const cache = {};
     const hass = { states: {} };
-    const src = BkkLib.rideMapSources({ cfg, apiKey: 'k', tripCache: cache, hass });
+    const ix = { volan: async () => null, city: async () => null, mav: async () => null };
+    const ctx = BkkLib.cardContext({
+      cfg: () => cfg, apiKey: () => 'k', tripCache: () => cache, hass: () => hass, indexes: () => ix,
+    });
+    const src = BkkLib.rideMapSources(ctx);
     const row = { tripId: 'BKK_1' };
     await src.mavRoute(row, 'A', 'B');
-    assert.deepEqual(got.mavRouteForRow.args, [row, 'A', 'B']);
-    assert.equal(got.mavRouteForRow.self._ix.mav, '/local/mav.json.gz');
+    assert.deepEqual(got.mavRouteForRow.args, [ix, row, 'A', 'B']);
     await src.gtfsRow(row);
     assert.deepEqual(got.gtfsRowShape.args, [row]);
     await src.futarShape('BKK_1');
@@ -420,14 +424,14 @@ test('rideMapSources hands each source its own arguments, read from BkkLib at ca
     await src.futarHop('BKK_1', { id: 'a' }, 'omega');
     assert.deepEqual(got.tripHopStops.args, ['k', cache, 'BKK_1', { id: 'a' }, 'omega']);
     await src.stopArea(cfg);
-    assert.deepEqual(got.stopArea.args, [cfg]);
+    assert.deepEqual(got.stopArea.args, [ix, cfg]);
     await src.motisHop(row, { id: 'a' }, { id: 'b' }, { mode: 'all' });
     assert.deepEqual(got.motisShapeForHop.args, [row, { id: 'a' }, { id: 'b' }, { mode: 'all' }]);
     await src.coachShape('1234', 'Omega');
     assert.deepEqual(got.coachShape.args, [hass, '1234', 'Omega']);
     await src.stopRef({ name: 'Omega' }, 'bus');
     assert.deepEqual(got.transitousStopRef.args, [{ name: 'Omega' }, 'bus']);
-    assert.equal(BkkLib.rideMapSources({ cfg }).coachShape, null);
+    assert.equal(BkkLib.rideMapSources(BkkLib.cardContext({ cfg: () => cfg })).coachShape, null);
   } finally {
     Object.assign(BkkLib, keep);
   }

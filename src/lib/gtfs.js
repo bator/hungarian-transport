@@ -1,13 +1,14 @@
 import { cityIndexUrl, clampMinutesAfter, departureStillDue, mavIndexUrl, maxDepartureRows, tzDow, tzEpochSec, tzParts, tzShiftYmd, volanIndexUrl } from '../config.js';
 import { codedError } from '../i18n.js';
-import { BkkLib } from '../lib/core.js';
+import { needIndexes } from '../lib/context.js';
+import { BkkLib, register } from '../lib/core.js';
 import { INDEX_SCHEMA } from '../tags.js';
 
 /* A destination stop of a trip lies no farther than this from the picked
    destination's own coordinates. */
 const DEST_NEAR_M = 1500;
 
-Object.assign(BkkLib, {
+register({
   /* Cached per resolved URL, so two cards pointing at different index files do
      not serve each other's data. The URL carries a daily cache-buster, which
      also expires the entry on a dashboard left open overnight; the day before's
@@ -51,22 +52,20 @@ Object.assign(BkkLib, {
     BkkLib._cacheIndex(cache, url, p, 8);
     return p;
   },
-  /* One card's view of the library: the same functions, with that card's own
-     index URLs (volanIndex / cityIndex / mavIndex from its config). The lookups
-     reach the indexes through `this`, so a card's override follows its own
-     calls across every await and never leaks to another card (review J-2).
-     A card without overrides gets the library itself. */
-  withIndexes(cfg) {
+  /* A card's index resolver (context.js): its own volanIndex / cityIndex /
+     mavIndex from its config, else the integration's. Every index-reading
+     function takes one, so a card's override follows its own calls across
+     every await and never leaks to another card (review J-2), and none
+     falls back to the default by leaving it out. indexResolver() is the
+     default's, for callers outside the cards. */
+  indexResolver(cfg) {
     const c = cfg || {};
-    const ix = { volan: String(c.volanIndex || ''), city: String(c.cityIndex || ''), mav: String(c.mavIndex || '') };
-    if (!ix.volan && !ix.city && !ix.mav) return BkkLib;
-    return Object.create(BkkLib, { _ix: { value: ix } });
-  },
-  volanIndex() {
-    return BkkLib._indexCached(volanIndexUrl(this && this._ix && this._ix.volan), 'errVolanHttp', 'errVolanGunzip');
-  },
-  cityIndex() {
-    return BkkLib._indexCached(cityIndexUrl(this && this._ix && this._ix.city), 'errCityHttp', 'errCityGunzip');
+    const own = { volan: String(c.volanIndex || ''), city: String(c.cityIndex || ''), mav: String(c.mavIndex || '') };
+    return Object.freeze({
+      volan: () => BkkLib._indexCached(volanIndexUrl(own.volan), 'errVolanHttp', 'errVolanGunzip'),
+      city: () => BkkLib._indexCached(cityIndexUrl(own.city), 'errCityHttp', 'errCityGunzip'),
+      mav: () => BkkLib._mavIndexAt(mavIndexUrl(own.mav)),
+    });
   },
   _mavP: new Map(),
   /* When the index came back empty or failed: url -> the time of that answer.
@@ -79,8 +78,7 @@ Object.assign(BkkLib, {
      (no-cache), so an unchanged index is a 304. */
   _mavLoadedAt: new Map(),
   _mavMaxAgeMs: 6 * 3600 * 1000,
-  mavIndex() {
-    const url = mavIndexUrl(this && this._ix && this._ix.mav);
+  _mavIndexAt(url) {
     const cache = BkkLib._mavP;
     const hit = cache.get(url);
     let prev = null;
@@ -221,9 +219,10 @@ Object.assign(BkkLib, {
     }
     return toHeadsign;
   },
-  async mavRouteForRow(row, boardName, alightName) {
+  async mavRouteForRow(ix, row, boardName, alightName) {
+    needIndexes(ix);
     try {
-      const idx = await this.mavIndex();
+      const idx = await ix.mav();
       if (!idx || !Array.isArray(idx.p)) return null;
       const hit = BkkLib.mavShapeIndexKey(row, idx);
       if (!hit) return null;
@@ -344,7 +343,8 @@ Object.assign(BkkLib, {
   /* Picked stops that came without coordinates (a city search hit, an
      older history entry, a YAML origin) get them from the index they
      belong to. Anything else passes through. */
-  async withGtfsCoords(stops) {
+  async withGtfsCoords(ix, stops) {
+    needIndexes(ix);
     const list = Array.isArray(stops) ? stops : [];
     const need = (s) => s && s.id && !BkkLib.finiteLatLon(s.lat, s.lon);
     const cityish = (s) => need(s) && BkkLib.stopIdFamily(s) === 'city';
@@ -354,8 +354,8 @@ Object.assign(BkkLib, {
       try { return await get(); } catch (_e) { return null; }
     };
     const [city, volan] = await Promise.all([
-      load(cityish, () => this.cityIndex()),
-      load(volanish, () => this.volanIndex()),
+      load(cityish, () => ix.city()),
+      load(volanish, () => ix.volan()),
     ]);
     return list.map((s) => {
       const idx = cityish(s) ? city : (volanish(s) ? volan : null);
@@ -521,12 +521,14 @@ Object.assign(BkkLib, {
     const split = BkkLib.splitCityPrefix(name);
     return split ? BkkLib.fold(split.city) : '';
   },
-  async volanSearchStops(q) {
-    const idx = await this.volanIndex();
+  async volanSearchStops(ix, q) {
+    needIndexes(ix);
+    const idx = await ix.volan();
     return BkkLib.gtfsSearchStops(idx, q, null);
   },
-  async volanRoutesAtStop(stop) {
-    const idx = await this.volanIndex();
+  async volanRoutesAtStop(ix, stop) {
+    needIndexes(ix);
+    const idx = await ix.volan();
     const origin = BkkLib.volanMatchStop(idx, stop, null);
     if (!origin) return [];
     const seen = new Set();
@@ -550,8 +552,9 @@ Object.assign(BkkLib, {
     out.sort((a, b) => a.label.localeCompare(b.label, 'hu', { numeric: true }));
     return out;
   },
-  async volanRemainingNames(stop, routeLabel) {
-    const idx = await this.volanIndex();
+  async volanRemainingNames(ix, stop, routeLabel) {
+    needIndexes(ix);
+    const idx = await ix.volan();
     const origin = BkkLib.volanMatchStop(idx, stop, null);
     if (!origin || !routeLabel) return [];
     const want = String(routeLabel);
@@ -587,9 +590,10 @@ Object.assign(BkkLib, {
     });
     return Array.from(best.values()).map((row) => row.stop);
   },
-  async citySearchStops(q, city) {
+  async citySearchStops(ix, q, city) {
+    needIndexes(ix);
     if (!city) return [];
-    const idx = await this.cityIndex();
+    const idx = await ix.city();
     return BkkLib.gtfsSearchStops(idx, q, BkkLib.opIx(idx, city));
   },
   gtfsSearchStops(idx, q, opIx) {
@@ -608,13 +612,15 @@ Object.assign(BkkLib, {
     });
     return hits.slice(0, 20).map((s) => BkkLib.gtfsHit(idx, s, { label: s.name, type: 'BUS' }));
   },
-  async volanReachableDests(stop) {
-    const idx = await this.volanIndex();
+  async volanReachableDests(ix, stop) {
+    needIndexes(ix);
+    const idx = await ix.volan();
     return BkkLib.gtfsReachableDests(idx, stop, null);
   },
-  async cityReachableDests(stop, city) {
+  async cityReachableDests(ix, stop, city) {
+    needIndexes(ix);
     if (!city) return { dests: [], destRoutes: {} };
-    const idx = await this.cityIndex();
+    const idx = await ix.city();
     return BkkLib.gtfsReachableDests(idx, stop, BkkLib.opIx(idx, city));
   },
   gtfsReachableDests(idx, stop, opIx) {
@@ -647,13 +653,15 @@ Object.assign(BkkLib, {
     dests.sort((a, b) => a.name.localeCompare(b.name, 'hu'));
     return { dests, destRoutes };
   },
-  async volanDepartures(stopId, dest, originName, minutesAfter) {
-    const idx = await this.volanIndex();
+  async volanDepartures(ix, stopId, dest, originName, minutesAfter) {
+    needIndexes(ix);
+    const idx = await ix.volan();
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, null, '#F9AB13', '#000000', 'coach', 'COACH', minutesAfter);
   },
-  async cityDepartures(stopId, dest, originName, city, minutesAfter) {
+  async cityDepartures(ix, stopId, dest, originName, city, minutesAfter) {
+    needIndexes(ix);
     if (!city) return [];
-    const idx = await this.cityIndex();
+    const idx = await ix.city();
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), '#0F6FC6', '#ffffff', 'bus', 'BUS', minutesAfter);
   },
   /* GTFS route_type (basic and extended codes) to the card's vehicle kind.
@@ -786,10 +794,11 @@ Object.assign(BkkLib, {
   },
   /* City name of a local operator ("Székesfehérvár — helyi" → Székesfehérvár),
      so Transitous stop lookups stay inside that city. */
-  async stopArea(cfg) {
+  async stopArea(ix, cfg) {
+    needIndexes(ix);
     if (BkkLib.mode(cfg || {}) !== 'helyi' || !cfg.city) return '';
     try {
-      const idx = await this.cityIndex();
+      const idx = await ix.city();
       const op = (idx.ops || []).find((o) => o.id === cfg.city);
       return op ? String(op.name || '').split(' \u2014 ')[0].trim() : '';
     } catch (_e) {

@@ -701,11 +701,10 @@ async def test_service_refuses_while_the_entry_is_unloaded(hass, aioclient_mock)
     assert aioclient_mock.call_count == 0
 
 
-async def test_fetches_are_rate_limited(aioclient_mock, freezer, caplog) -> None:
+async def test_fetches_are_rate_limited(aioclient_mock, caplog) -> None:
     """A loop over every feed id must not become a stream of requests: on a
-    stopped clock nothing refills past the burst. (The frozen wall clock
+    stopped clock nothing refills past the burst. (The wall clock at NOW
     keeps the feeds fresh.)"""
-    freezer.move_to(FROZEN)
     feeds = {
         f"f{i}": realtime.FeedConfig(
             f"f{i}", (realtime.Source(f"https://x.test/{i}/tu.pb", "", "", ""),), frozenset({"trip"}), 60, 60
@@ -715,12 +714,30 @@ async def test_fetches_are_rate_limited(aioclient_mock, freezer, caplog) -> None
     for i in range(realtime.FETCH_BURST + 5):
         aioclient_mock.get(f"https://x.test/{i}/tu.pb", content=_pb("volan-trip-updates"))
     session = aioclient_mock.create_session(asyncio.get_running_loop())
-    hub = realtime.RealtimeHub(session, feeds=feeds, monotonic=FakeClock().monotonic)
+    hub = realtime.RealtimeHub(session, feeds=feeds, monotonic=FakeClock().monotonic, wall=lambda: NOW)
     answers = [await hub.query(fid, []) for fid in feeds]
     await session.close()
     assert aioclient_mock.call_count == realtime.FETCH_BURST
     assert sum(1 for a in answers if a.get("error") == "rt_unavailable") == 5
     assert "rate limit" in caplog.text
+
+
+async def test_a_feed_ages_by_the_hubs_wall_clock(aioclient_mock) -> None:
+    """The copy a fetch interval keeps is no answer once its header is
+    MAX_FEED_AGE old by the hub's own wall clock, without a new request."""
+    url = "https://x.test/age/tu.pb"
+    feeds = {"f": realtime.FeedConfig("f", (realtime.Source(url, "", "", ""),), frozenset({"trip"}), 60, 60)}
+    aioclient_mock.get(url, content=_pb("volan-trip-updates"))
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    wall = [NOW]
+    hub = realtime.RealtimeHub(session, feeds=feeds, monotonic=FakeClock().monotonic, wall=lambda: wall[0])
+    fresh = await hub.query("f", [])
+    wall[0] = NOW + realtime.MAX_FEED_AGE + 3600
+    stale = await hub.query("f", [])
+    await session.close()
+    assert "error" not in fresh and fresh["updated"]
+    assert stale.get("error") == "rt_unavailable"
+    assert aioclient_mock.call_count == 1
 
 
 def test_static_zip_member_cap(monkeypatch) -> None:

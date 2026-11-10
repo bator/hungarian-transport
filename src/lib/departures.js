@@ -1,83 +1,22 @@
-import { DEPART_MINUTES_AFTER, clampMinutesAfter, departureStillDue, maxDepartureRows, tzParts } from '../config.js';
-import { BkkLib } from '../lib/core.js';
+import { DEPART_MINUTES_AFTER, clampMinutesAfter, departureStillDue, maxDepartureRows } from '../config.js';
+import { needIndexes } from '../lib/context.js';
+import { BkkLib, register } from '../lib/core.js';
+import { routePatternStore } from '../lib/route-patterns.js';
 
 /* FUTÁR cuts a busy board off at about 60 rows; a few under that, ending
    well before the horizon, is taken as cut off too. */
 const BOARD_CAP_ROWS = 55;
-/* A route pattern rules a trip out without its trip-details only while it
-   is this young and from the same day: a timetable change, a weekend or
-   construction variant is in the next one. Finding poles takes any age. */
-const PATTERN_PROOF_MS = 3 * 3600000;
-/* Route patterns kept in the browser between page loads, for as long as
-   they may prove a trip (above): a dashboard opened again does not ask
-   route-details for every route of every card. Only what the cards read
-   of a stop is kept, and only the newest few patterns. */
-const ROUTE_PATTERNS_KEY = 'hungarian_transport_route_patterns';
-const ROUTE_PATTERNS_KEEP = 120;
 
-/* Read once per page; the patterns fetched meanwhile go back in one write,
-   not one read and write of the whole list per route. */
-const patternsStored = () => {
-  if (BkkLib._storedPatterns) return BkkLib._storedPatterns;
-  let all = {};
-  try {
-    all = JSON.parse(globalThis.localStorage.getItem(ROUTE_PATTERNS_KEY) || '{}');
-  } catch (_e) { /* private window or storage off: nothing kept */ }
-  BkkLib._storedPatterns = all && typeof all === 'object' ? all : {};
-  return BkkLib._storedPatterns;
-};
-
-const patternsWrite = () => {
-  BkkLib._patternsWriteTimer = null;
-  try {
-    /* Another tab may have written since this page read the list: its
-       patterns stay, the newer copy of a route wins. */
-    const all = patternsStored();
-    let disk = {};
-    try {
-      disk = JSON.parse(globalThis.localStorage.getItem(ROUTE_PATTERNS_KEY) || '{}') || {};
-    } catch (_e) { /* unreadable: this page's list alone */ }
-    Object.keys(disk).forEach((k) => {
-      if (disk[k] && (!all[k] || disk[k].at > all[k].at)) all[k] = disk[k];
-    });
-    const out = {};
-    Object.keys(all).filter((k) => BkkLib.patternFresh(all[k]))
-      .sort((a, b) => all[b].at - all[a].at)
-      .slice(0, ROUTE_PATTERNS_KEEP)
-      .forEach((k) => { out[k] = all[k]; });
-    BkkLib._storedPatterns = out;
-    globalThis.localStorage.setItem(ROUTE_PATTERNS_KEY, JSON.stringify(out));
-  } catch (_e) { /* private window, storage off or full: the page's memo still holds them */ }
-};
-
-const patternStore = (routeId, packed) => {
-  const stops = {};
-  Object.keys(packed.stops || {}).forEach((id) => {
-    const st = packed.stops[id] || {};
-    stops[id] = { id: st.id || id, name: st.name || '', parentStationId: st.parentStationId || '' };
-  });
-  patternsStored()[routeId] = { variants: packed.variants, stops, at: packed.at };
-  if (!BkkLib._patternsWriteTimer) BkkLib._patternsWriteTimer = setTimeout(patternsWrite, 2000);
-};
-/* A tab closed within those two seconds still keeps what it fetched. */
-if (typeof globalThis.addEventListener === 'function') {
-  globalThis.addEventListener('pagehide', () => BkkLib.flushRoutePatterns());
-}
-
-Object.assign(BkkLib, {
-  _storedPatterns: null,
-  _patternsWriteTimer: null,
-  /* The pending write now (tests, and a page about to go). */
-  flushRoutePatterns() {
-    if (!BkkLib._patternsWriteTimer) return;
-    clearTimeout(BkkLib._patternsWriteTimer);
-    patternsWrite();
-  },
-  async addTransitousVolanStops(byId, q, motisHits) {
+register({
+  /* The page's route patterns, kept in the browser between page loads
+     (route-patterns.js). */
+  routePatterns: routePatternStore(),
+  async addTransitousVolanStops(ix, byId, q, motisHits) {
+    needIndexes(ix);
     const motis = motisHits || await BkkLib.searchStopsTransitous(q);
     let idx = null;
     try {
-      idx = await this.volanIndex();
+      idx = await ix.volan();
     } catch (_e) {
       idx = null;
     }
@@ -107,21 +46,22 @@ Object.assign(BkkLib, {
       });
     });
   },
-  async searchStops(apiKey, q, mode, city, opts) {
+  async searchStops(ix, apiKey, q, mode, city, opts) {
+    needIndexes(ix);
     const byId = new Map();
     if (mode === 'volan' || mode === 'all') {
       try {
-        (await this.volanSearchStops(q)).forEach((s) => byId.set(s.id, s));
+        (await BkkLib.volanSearchStops(ix, q)).forEach((s) => byId.set(s.id, s));
       } catch (_e) { /* GTFS index optional */ }
       try {
         if (!(opts && opts.skipTransitousVolan)) {
-          await this.addTransitousVolanStops(byId, q);
+          await BkkLib.addTransitousVolanStops(ix, byId, q);
         }
       } catch (_e) { /* Transitous names are extra coverage */ }
     }
     if (mode === 'all') {
       try {
-        const idx = await this.cityIndex();
+        const idx = await ix.city();
         const seenFold = new Set();
         BkkLib.citySearchAll(idx, q).forEach((s) => {
           const opId = BkkLib.cityOpId(idx, s);
@@ -141,7 +81,7 @@ Object.assign(BkkLib, {
     }
     if (mode === 'helyi') {
       try {
-        (await this.citySearchStops(q, city)).forEach((s) => byId.set(s.id, s));
+        (await BkkLib.citySearchStops(ix, q, city)).forEach((s) => byId.set(s.id, s));
       } catch (_e) { /* GTFS index optional */ }
       return BkkLib.groupStops(Array.from(byId.values())).slice(0, 20);
     }
@@ -262,12 +202,10 @@ Object.assign(BkkLib, {
      selected routes so minutesAfter can fill. */
   async loadRoutePattern(apiKey, cache, routeId, background, fresh) {
     const hit = BkkLib._cached(cache, routeId);
-    if (hit && hit.variants && (!fresh || BkkLib.patternFresh(hit))) return hit;
+    if (hit && hit.variants && (!fresh || BkkLib.routePatterns.fresh(hit))) return hit;
     /* An earlier page load's copy, while it may still prove a trip. */
-    const kept = patternsStored()[routeId];
-    if (BkkLib.patternFresh(kept) && Array.isArray(kept.variants) && kept.stops && typeof kept.stops === 'object') {
-      return BkkLib._store(cache, routeId, kept);
-    }
+    const kept = BkkLib.routePatterns.kept(routeId);
+    if (kept) return BkkLib._store(cache, routeId, kept);
     if (BkkLib._inflight[routeId]) return BkkLib._inflight[routeId];
     const p = (async () => {
       try {
@@ -276,16 +214,14 @@ Object.assign(BkkLib, {
           includeReferences: 'true',
         }, !background);
         const entry = (data.data || {}).entry || {};
-        const packed = {
+        const packed = BkkLib.routePatterns.put(routeId, {
           variants: (entry.variants || []).map((v) => ({
             name: v.name,
             headsign: v.headsign || '',
             ids: v.stopIds || [],
           })),
           stops: ((data.data || {}).references || {}).stops || {},
-          at: Date.now(),
-        };
-        patternStore(routeId, packed);
+        });
         return BkkLib._store(cache, routeId, packed);
       } finally {
         delete BkkLib._inflight[routeId];
@@ -316,14 +252,7 @@ Object.assign(BkkLib, {
     });
     return Array.from(poles);
   },
-  patternFresh(pat, nowMs) {
-    if (!pat || !pat.variants || typeof pat.at !== 'number') return false;
-    const now = nowMs === undefined ? Date.now() : nowMs;
-    /* "The same day" is Budapest's, as everywhere the timetable is read,
-       not the browser's own time zone. */
-    return now - pat.at < PATTERN_PROOF_MS
-      && tzParts(new Date(pat.at)).ymd === tzParts(new Date(now)).ymd;
-  },
+
   /* An ad-hoc FUTÁR trip: the id body is a millisecond timestamp
      (BKK_1792439004037), not a scheduled trip of the route's pattern. */
   isAdHocTripId(tripId) {
@@ -337,7 +266,7 @@ Object.assign(BkkLib, {
      usual terminus), so an ad-hoc trip, a trip from a pole no variant
      calls at, or one whose pole the board does not give is asked. */
   patternMissesDest(pat, origin, destKey, head, tripId, pole) {
-    if (!destKey || !head || !pole || !BkkLib.patternFresh(pat)) return false;
+    if (!destKey || !head || !pole || !BkkLib.routePatterns.fresh(pat)) return false;
     if (BkkLib.isAdHocTripId(tripId)) return false;
     const stops = pat.stops || {};
     const isDest = BkkLib.nameMatcher(destKey);
@@ -525,9 +454,10 @@ Object.assign(BkkLib, {
     });
     return names;
   },
-  async reachableDests(apiKey, cache, stop, mode, city) {
+  async reachableDests(ix, apiKey, cache, stop, mode, city) {
+    needIndexes(ix);
     if (mode === 'helyi') {
-      return this.cityReachableDests(stop, city);
+      return BkkLib.cityReachableDests(ix, stop, city);
     }
     let out = { dests: [], destRoutes: {} };
     try {
@@ -599,14 +529,14 @@ Object.assign(BkkLib, {
     }
     if (mode === 'volan' || mode === 'all') {
       try {
-        out = BkkLib.mergeDestIndex(await this.volanReachableDests(stop), out);
+        out = BkkLib.mergeDestIndex(await BkkLib.volanReachableDests(ix, stop), out);
       } catch (_e) { /* GTFS index optional */ }
     }
     if (mode === 'all') {
       try {
-        const idx = await this.cityIndex();
+        const idx = await ix.city();
         const cityId = BkkLib.cityOpId(idx, stop);
-        if (cityId) out = BkkLib.mergeDestIndex(await this.cityReachableDests(stop, cityId), out);
+        if (cityId) out = BkkLib.mergeDestIndex(await BkkLib.cityReachableDests(ix, stop, cityId), out);
       } catch (_e) { /* city index optional */ }
     }
     return out;
@@ -643,12 +573,13 @@ Object.assign(BkkLib, {
       return null;
     }
   },
-  async departures(apiKey, stopId, routeIds, dest, opts) {
+  async departures(ix, apiKey, stopId, routeIds, dest, opts) {
+    needIndexes(ix);
     opts = opts || {};
     const mode = opts.mode || (opts.mav ? 'mav' : 'bkk');
     const horizon = clampMinutesAfter(opts.minutesAfter);
     if (mode === 'helyi') {
-      let cityRows = await this.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
+      let cityRows = await BkkLib.cityDepartures(ix, stopId, dest, opts.originName, opts.city, horizon);
       cityRows = await BkkLib.fillTransitousIfEmpty(
         cityRows,
         /* With the stop's coordinates: by name alone "Kossuth tér" is any town's. */
@@ -895,7 +826,7 @@ Object.assign(BkkLib, {
           const unloaded = new Set();
           pool.forEach((row) => {
             const rid = routeOfTrip.get(row.tripId);
-            if (rid && !BkkLib.patternFresh(BkkLib._cached(cache, rid))) unloaded.add(rid);
+            if (rid && !BkkLib.routePatterns.fresh(BkkLib._cached(cache, rid))) unloaded.add(rid);
           });
           await Promise.all(Array.from(unloaded).map((rid) => (
             BkkLib.loadRoutePattern(apiKey, cache, rid, true, true).catch(() => null)
@@ -930,7 +861,7 @@ Object.assign(BkkLib, {
       let extraCity = [];
       if (mode === 'volan' || mode === 'all') {
         try {
-          extraVolan = await this.volanDepartures(stopId, dest, opts.originName, horizon);
+          extraVolan = await BkkLib.volanDepartures(ix, stopId, dest, opts.originName, horizon);
           if (mode === 'all' && selected.size) {
             extraVolan = extraVolan.filter((row) => selected.has('gtfs:' + row.label));
           }
@@ -940,10 +871,10 @@ Object.assign(BkkLib, {
       }
       if (mode === 'all') {
         try {
-          const idx = await this.cityIndex();
+          const idx = await ix.city();
           const cityId = BkkLib.cityOpId(idx, { id: stopId, name: opts.originName || '' });
           if (cityId) {
-            extraCity = await this.cityDepartures(stopId, dest, opts.originName, cityId, horizon);
+            extraCity = await BkkLib.cityDepartures(ix, stopId, dest, opts.originName, cityId, horizon);
           }
         } catch (_e) { /* city index optional */ }
       }

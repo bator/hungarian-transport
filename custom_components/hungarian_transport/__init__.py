@@ -45,7 +45,6 @@ from .elvira import (
     ElviraBoards,
     ElviraError,
     ElviraRateLimited,
-    elvira_between,
     fetch_station,
     station_code_digits,
 )
@@ -307,8 +306,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 translation_domain=DOMAIN,
                 translation_key="same_station",
             )
-        rows, dest_failure = await elvira_between(
-            boards,
+        rows, dest_failure = await boards.between(
             origin,
             dest,
             call.data["minutes_after"],

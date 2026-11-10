@@ -532,7 +532,8 @@ class _Entry:
 class RealtimeHub:
     """On-demand GTFS-Realtime fetches, shared by every card and browser.
 
-    `monotonic` is the clock of the fetch intervals and the rate limit.
+    `monotonic` is the clock of the fetch intervals and the rate limit,
+    `wall` (epoch seconds) the one a feed's and a position's age is read by.
     Its own request sharing (_cached), not cache.SharedTTLCache: a feed's
     entry outlives its interval (the validators and the last good copy),
     a failure is cached too (for its backoff), and a refused fetch serves
@@ -547,6 +548,7 @@ class RealtimeHub:
         task_factory: TaskFactory | None = None,
         feeds: dict[str, FeedConfig] | None = None,
         monotonic: upstream.Monotonic = upstream.monotonic,
+        wall: Callable[[], float] | None = None,
     ) -> None:
         self._session = session
         self._executor = executor
@@ -557,6 +559,8 @@ class RealtimeHub:
         self._routes: dict[str, dict[str, str]] = {}
         self._inflight: dict[str, asyncio.Future] = {}
         self._monotonic = monotonic
+        # Looked up per call, so a frozen test clock reaches it too.
+        self._wall = wall or (lambda: time.time())
         # A refused fetch serves the copy there is (_refresh).
         self._rate = upstream.TokenBucket(
             FETCH_RATE,
@@ -690,13 +694,13 @@ class RealtimeHub:
             keep=True,
         )
 
-    async def query(self, feed_id: str, trips: list[dict[str, Any]], now: float | None = None) -> dict[str, Any]:
+    async def query(self, feed_id: str, trips: list[dict[str, Any]]) -> dict[str, Any]:
         """The service's answer: per requested trip key, what the feed knows."""
         feeds = await self.feeds()
         cfg = feeds.get(feed_id)
         if cfg is None:
             return error_answer({"feed": feed_id, "trips": {}}, RT_NO_FEED)
-        now = time.time() if now is None else now
+        now = self._wall()
         # Every source at once: MÁV has two, each up to FETCH_TIMEOUT cold.
         loaded = await asyncio.gather(*(self._source(cfg, src, now) for src in cfg.sources))
         if all(tu is None and vp is None for _src, tu, vp, _tr in loaded):

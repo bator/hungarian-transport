@@ -1,4 +1,4 @@
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* The planner's origin suggestions are the stops this Home Assistant user
    picks, not a fixed list. They live in the user's own frontend storage
@@ -41,7 +41,7 @@ const localWrite = (hass, list) => {
   } catch (_e) { /* private window or storage off: the HA copy still holds it */ }
 };
 
-Object.assign(BkkLib, {
+register({
   STOP_HISTORY_KEY: HISTORY_KEY,
   stopHistoryLocalKey: localKey,
   _stopHistory: null,

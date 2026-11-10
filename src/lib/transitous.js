@@ -1,8 +1,9 @@
 import { TRANSITOUS, clampMinutesAfter, departureStillDue, maxDepartureRows } from '../config.js';
 import { t } from '../i18n.js';
-import { BkkLib } from '../lib/core.js';
+import { needIndexes } from '../lib/context.js';
+import { BkkLib, register } from '../lib/core.js';
 
-Object.assign(BkkLib, {
+register({
   /* FUTÁR plan-trip times are epoch milliseconds. Values below 1e11 are seconds. */
   epochMs(value) {
     const n = Number(value);
@@ -178,7 +179,8 @@ Object.assign(BkkLib, {
     }
     return out;
   },
-  async searchPlannerStops(apiKey, q) {
+  async searchPlannerStops(ix, apiKey, q) {
+    needIndexes(ix);
     const byId = new Map();
     try {
       const motis = await BkkLib.searchStopsTransitous(q, { type: 'all' });
@@ -189,10 +191,10 @@ Object.assign(BkkLib, {
         if (byId.has(row.id)) return;
         byId.set(row.id, row);
       });
-      await this.addTransitousVolanStops(byId, q, motis);
+      await BkkLib.addTransitousVolanStops(ix, byId, q, motis);
     } catch (_e) { /* GTFS / BKK still fill the list */ }
     try {
-      (await this.searchStops(apiKey, q, 'all', '', { skipTransitousVolan: true })).forEach((s) => {
+      (await BkkLib.searchStops(ix, apiKey, q, 'all', '', { skipTransitousVolan: true })).forEach((s) => {
         if (!s || !s.id || byId.has(s.id)) return;
         byId.set(s.id, s);
       });
@@ -200,7 +202,7 @@ Object.assign(BkkLib, {
     /* City and Volán index hits get their coordinates first: the collapse
        tells two towns' same-named stops apart by them, and a picked stop
        is planned from where it is. */
-    const placed = await this.withGtfsCoords(Array.from(byId.values()));
+    const placed = await BkkLib.withGtfsCoords(ix, Array.from(byId.values()));
     const collapsed = BkkLib.collapseSameNameStops(placed);
     return BkkLib.capPlannerHits(collapsed, 24);
   },

@@ -1,4 +1,4 @@
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* The ride map's geometry (GLOSSARY.md): the route one departure row runs
    between the stop pair, and where the rider boards and alights. Which
@@ -256,22 +256,22 @@ export async function rideGeometry(ride, src) {
   };
 }
 
-Object.assign(BkkLib, {
-  /* The production adapters of a ride map: the card's index URLs
-     (withIndexes) for the MÁV index and the city area, its FUTÁR key and
-     trip cache, Transitous, and Home Assistant's coach_shape (null without
-     HA). Each calls BkkLib at call time. */
-  rideMapSources(opts) {
-    const o = opts || {};
-    const cfg = o.cfg || {};
-    const lib = BkkLib.withIndexes(cfg);
-    const hass = o.hass;
+register({
+  /* The production adapters of a ride map (ctx: the card's context,
+     context.js): its index resolver for the MÁV index and the city area,
+     its FUTÁR key and trip cache, Transitous, and Home Assistant's
+     coach_shape (null without HA). Each calls BkkLib at call time. */
+  rideMapSources(ctx) {
+    const ix = ctx.indexes();
+    const hass = ctx.hass();
+    const apiKey = ctx.apiKey();
+    const cache = ctx.tripCache();
     return {
-      mavRoute: (row, boardName, alightName) => lib.mavRouteForRow(row, boardName, alightName),
+      mavRoute: (row, boardName, alightName) => BkkLib.mavRouteForRow(ix, row, boardName, alightName),
       gtfsRow: (row) => BkkLib.gtfsRowShape(row),
-      futarShape: (tripId) => BkkLib.futarTripShape(o.apiKey, o.tripCache || {}, tripId),
-      futarHop: (tripId, origin, destKey) => BkkLib.tripHopStops(o.apiKey, o.tripCache || {}, tripId, origin, destKey),
-      stopArea: (c) => lib.stopArea(c),
+      futarShape: (tripId) => BkkLib.futarTripShape(apiKey, cache, tripId),
+      futarHop: (tripId, origin, destKey) => BkkLib.tripHopStops(apiKey, cache, tripId, origin, destKey),
+      stopArea: (c) => BkkLib.stopArea(ix, c),
       motisHop: (row, origin, dest, hopOpts) => BkkLib.motisShapeForHop(row, origin, dest, hopOpts),
       coachShape: hass ? (route, headsign) => BkkLib.coachShape(hass, route, headsign) : null,
       stopRef: (stop, bucket) => BkkLib.transitousStopRef(stop, bucket),
@@ -282,9 +282,9 @@ Object.assign(BkkLib, {
      stand-in line, board and alight the stop pins (alight null without a
      destination). ride: row and cfg (the stop pair), hasFutar (a FUTÁR key
      or the integration's), vehicle (the HA sensor vehicle matched to the
-     row, or null), and sources, or apiKey, tripCache and hass for the
+     row, or null), and sources, or ctx (the card's context) for the
      production ones. */
   rideMap(ride) {
-    return rideGeometry(ride, ride.sources || BkkLib.rideMapSources(ride));
+    return rideGeometry(ride, ride.sources || BkkLib.rideMapSources(ride.ctx));
   },
 });

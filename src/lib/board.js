@@ -1,6 +1,7 @@
 import { DEFAULT_MINUTES_AFTER, clampMinutesAfter, departureStillDue, maxDepartureRows } from '../config.js';
 import { codedError } from '../i18n.js';
-import { BkkLib } from '../lib/core.js';
+import { needIndexes } from '../lib/context.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* The departure board (GLOSSARY.md): which sources a stop pair's board
    reads, how their rows merge, what a failed source leaves on screen, and
@@ -33,8 +34,9 @@ const ELVIRA_DEST_NAME_MAX = 100;
    (every MÁV card and the planner): calls that keep failing pause ELVIRA
    for all of them, and an outage is logged once, not on every poll.
    deps: call(hass, serviceData) is the elvira_between call, now() the
-   clock in ms, warn(...) the log. lib is whose station search resolves a
-   stop without a code (the card's own index URLs). */
+   clock in ms, warn(...) the log, resolve(ix, apiKey, stopId, name) the
+   station code of a stop without one (names.js elviraResolveCode), with
+   the asking card's index resolver ix (context.js). */
 export function elviraSource(deps) {
   const st = {
     fails: 0, lastFailAt: 0, downUntil: 0, warned: false, lastCode: '', lastErr: '',
@@ -48,14 +50,14 @@ export function elviraSource(deps) {
     deps.warn('MÁV ELVIRA reservation data unavailable:', reason);
   };
   return {
-    async board(lib, hass, originId, destId, minutesAfter, destName, opts) {
+    async board(ix, hass, originId, destId, minutesAfter, destName, opts) {
       opts = opts || {};
       if (!BkkLib.hasElvira(hass)) return none();
       if (deps.now() < st.downUntil) return none(st.lastCode, st.lastErr);
       let origin = BkkLib.elviraStationCode(originId);
       let dest = BkkLib.elviraStationCode(destId);
-      if (!origin) origin = await lib.elviraResolveCode(opts.apiKey, originId, opts.originName || '');
-      if (!dest) dest = await lib.elviraResolveCode(opts.apiKey, destId, destName || '');
+      if (!origin) origin = await deps.resolve(ix, opts.apiKey, originId, opts.originName || '');
+      if (!dest) dest = await deps.resolve(ix, opts.apiKey, destId, destName || '');
       /* A station search that failed (null: FUTÁR timed out or rate-limited)
          is no "no station code": the card is set up right, and the next
          poll searches again. */
@@ -138,6 +140,7 @@ const sharedElvira = elviraSource({
   call: (hass, serviceData) => BkkLib._elviraCall(hass, serviceData),
   now: () => Date.now(),
   warn: (...args) => console.warn(...args),
+  resolve: (ix, apiKey, stopId, name) => BkkLib.elviraResolveCode(ix, apiKey, stopId, name),
 });
 
 /* Why a MÁV board is not ELVIRA's whole answer: the banner. Only a stop
@@ -165,17 +168,19 @@ function elviraBanner(answer) {
    A snapshot is {phase, rows, banner, loading, filled, quiet}: quiet ones
    are not painted. Once poll.current() is false (a newer reload) nothing
    more is shown or fetched.
-   poll: cfg (the card's config), mode, hass() and apiKey() (read when
-   used: both change during a poll), tripCache, state (the card's memory
-   across polls: {viaFutarUntil}), board(), show(snapshot), current(), and
-   sources (boardSources(cfg) when left out). */
+   poll: ctx (the card's context, context.js: its config is read once per
+   poll, hass() and apiKey() when used, as both change during a poll),
+   mode, state (the card's memory across polls: {viaFutarUntil}), board(),
+   show(snapshot), current(), and sources (boardSources(ctx) when left
+   out). */
 async function runBoard(poll, src, knownElvira) {
   const live = poll.current;
   if (!live()) return;
-  const cfg = poll.cfg;
+  const ctx = poll.ctx;
+  const cfg = ctx.cfg();
   const mode = poll.mode;
-  const hass = () => poll.hass();
-  const apiKey = () => poll.apiKey();
+  const hass = () => ctx.hass();
+  const apiKey = () => ctx.apiKey();
   const shown = () => poll.board();
   const hasFutar = () => BkkLib.hasFutar(apiKey(), hass());
   const nowSec = () => Math.floor(src.now() / 1000);
@@ -335,7 +340,7 @@ async function runBoard(poll, src, knownElvira) {
         originName: cfg.stopName || '',
         originLat: cfg.stopLat,
         originLon: cfg.stopLon,
-        cache: poll.tripCache,
+        cache: ctx.tripCache(),
         mode,
         city: cfg.city || '',
         minutesAfter: cfg.minutesAfter,
@@ -392,7 +397,7 @@ async function runBoard(poll, src, knownElvira) {
     const needsTravel = (row) => row.travel == null && BkkLib.rowSource(row) === 'futar';
     const fillTravel = (list) => Promise.all((list || []).map(async (row) => {
       if (!needsTravel(row)) return;
-      row.travel = await src.rideTime(apiKey(), row.tripId, cfg.destKey, row.dep, origin, poll.tripCache);
+      row.travel = await src.rideTime(apiKey(), row.tripId, cfg.destKey, row.dep, origin, ctx.tripCache());
     }));
     /* Live delays and positions from the GTFS-Realtime feeds, after the
        coach GPS so a bkk_stop position keeps its place (realtime.js). */
@@ -496,32 +501,34 @@ async function runBoard(poll, src, knownElvira) {
   }
 }
 
-Object.assign(BkkLib, {
-  /* The production adapters of a card's board: its index URLs for the
-     timetables and the station search (withIndexes), Home Assistant for
-     ELVIRA, the coach and realtime lookups and the sensors. */
-  boardSources(cfg) {
-    const lib = BkkLib.withIndexes(cfg);
+register({
+  /* The production adapters of a card's board (ctx: its context,
+     context.js): its index resolver for the timetables and the station
+     search, its clock, Home Assistant for ELVIRA, the coach and realtime
+     lookups and the sensors. */
+  boardSources(ctx) {
+    const ix = ctx.indexes();
     return {
-      now: () => Date.now(),
+      now: () => ctx.now(),
       /* FUTÁR and the GTFS indexes (departures.js). */
-      timetables: (key, stopId, routeIds, dest, opts) => lib.departures(key, stopId, routeIds, dest, opts),
+      timetables: (key, stopId, routeIds, dest, opts) => BkkLib.departures(ix, key, stopId, routeIds, dest, opts),
       elvira: (hass, originId, destId, minutesAfter, destName, opts) => (
-        lib.elviraBoard(hass, originId, destId, minutesAfter, destName, opts)),
+        BkkLib.elviraBoard(ix, hass, originId, destId, minutesAfter, destName, opts)),
       transitous: (rows, origin, dest, opts) => BkkLib.fillTransitousIfEmpty(rows, origin, dest, opts),
       coachGps: (hass, rows) => BkkLib.attachCoachGps(hass, rows),
-      realtime: (hass, rows, ctx) => BkkLib.attachRealtime(hass, rows, ctx),
+      realtime: (hass, rows, rtCtx) => BkkLib.attachRealtime(hass, rows, rtCtx),
       rideTime: (key, tripId, destKey, dep, origin, cache) => BkkLib.travelMin(key, tripId, destKey, dep, origin, cache),
       sensors: (hass, rows) => BkkLib.enrichFromHass(hass, rows),
     };
   },
   /* One poll of a departure board (runBoard above). */
   nextBoard(poll) {
-    return runBoard(poll, poll.sources || BkkLib.boardSources(poll.cfg));
+    return runBoard(poll, poll.sources || BkkLib.boardSources(poll.ctx));
   },
   /* The trains between two stations (elviraSource above), through the
      page's one ELVIRA source; elviraBetween is only the rows. */
-  elviraBoard(hass, originId, destId, minutesAfter, destName, opts) {
-    return sharedElvira.board(this || BkkLib, hass, originId, destId, minutesAfter, destName, opts);
+  elviraBoard(ix, hass, originId, destId, minutesAfter, destName, opts) {
+    needIndexes(ix);
+    return sharedElvira.board(ix, hass, originId, destId, minutesAfter, destName, opts);
   },
 });

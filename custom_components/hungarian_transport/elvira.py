@@ -6,9 +6,10 @@ CORS blocks jegy.mav.hu from the browser, so the card calls
 
 ElviraBoards is the board source: the StationInfo fetch (fetch_station in
 Home Assistant, a fake in tests), the shared board cache, the rate limit,
-the outage log and the clock. elvira_between plans the boards a window
-needs (plan_window, next_boards), asks the source for them and settles the
-answer (settle); all three are pure. Nothing here needs Home Assistant.
+the outage log and the clock. Its between() is the service's answer: it
+plans the boards a window needs (plan_window, next_boards), asks for them
+and settles the answer (settle); all three are pure. Nothing here needs
+Home Assistant.
 """
 from __future__ import annotations
 
@@ -77,8 +78,19 @@ ARRIVAL_WINDOW = timedelta(hours=6)
 # today's boards, plus this much for a slower or late-running train. Without a
 # run to go by, ARRIVAL_WINDOW.
 LATE_RUN_MARGIN = timedelta(hours=1)
-ELVIRA_TIMEOUT = aiohttp.ClientTimeout(total=30)
-# elvira_between answers within this many seconds, whatever ELVIRA does: a
+ELVIRA_TIMEOUT_SEC = 30
+ELVIRA_TIMEOUT = aiohttp.ClientTimeout(total=ELVIRA_TIMEOUT_SEC)
+# between() asks its boards in at most this many rounds, one after the other:
+# today's boards, then tomorrow's arrival board when they say a train may
+# arrive past midnight (next_boards).
+ELVIRA_ROUNDS = 2
+# The longest an elvira_between call takes, whatever ELVIRA does: every round
+# one after the other, each up to ELVIRA_TIMEOUT. The cards wait a little
+# past it (src/lib/services.js; test-render.mjs reads this number), so a slow
+# but whole answer is not cut off. tests/test_elvira.py checks it against the
+# rounds a call really asks.
+ELVIRA_WORST_CASE_SEC = 60
+# between() answers within this many seconds, whatever ELVIRA does: a
 # caller (the card) can time its wait by it. The first round of boards is
 # bounded by ELVIRA_TIMEOUT (a board shared with an earlier call is too: its
 # request started before this call did); the second round, tomorrow's
@@ -451,7 +463,8 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name="", later=False
 
 
 class ElviraBoards:
-    """The source of elvira_between's boards, and what lives across calls.
+    """The elvira_between service's answer (between) and its boards, and what
+    lives across calls.
 
     Every card on every open dashboard polls the service, so a board is
     cached for ELVIRA_CACHE_TTL and concurrent calls for it share one
@@ -504,7 +517,7 @@ class ElviraBoards:
 
         def fetch():
             # The token goes on the miss itself, in the order the boards are
-            # asked for (see elvira_between), not when the request task starts.
+            # asked for (see between), not when the request task starts.
             self._rate.take()
             return self._fetch(station_code, day)
 
@@ -513,19 +526,60 @@ class ElviraBoards:
     def close(self) -> None:
         self._cache.close()
 
+    async def between(self, origin_code, dest_code, minutes_after=180, dest_name="", at=None):
+        """Origin departures towards dest: a MÁV card's rows, an overlay for others.
 
-async def _fetch_boards(source: ElviraBoards, wanted: list[BoardKey]) -> list:
-    """The boards for these (station, day) pairs, an ElviraError in place of
-    each one that did not arrive."""
-    results = await asyncio.gather(
-        *(source.board(code, day) for code, day in wanted),
-        return_exceptions=True,
-    )
-    for board in results:
-        # Only an unreachable board is an empty one; a bug or a cancellation is not.
-        if isinstance(board, BaseException) and not isinstance(board, ElviraError):
-            raise board
-    return results
+        Returns (rows, dest_failure) (settle); ElviraError when today's origin
+        board did not arrive. `at` (epoch seconds) starts the window later
+        (plan_window): a later start gets the trains leaving from it on
+        (ARRIVAL_GRACE before it, as for now), not the ones leaving before it
+        that arrive after it.
+
+        Answers within self.call_budget seconds (ELVIRA_CALL_BUDGET), in at
+        most ELVIRA_ROUNDS rounds of boards.
+        """
+        origin_code = station_code_digits(origin_code)
+        dest_code = station_code_digits(dest_code)
+        if len(origin_code) < 9 or len(dest_code) < 9 or origin_code == dest_code:
+            return [], None
+        deadline = self.monotonic() + self.call_budget
+        win = plan_window(self.now(), minutes_after, at)
+        boards: dict[BoardKey, Board | ElviraError] = {}
+        wanted = next_boards(win, origin_code, dest_code, boards)
+        boards.update(zip(wanted, await self._round(wanted)))
+        # A second round, tomorrow's arrival board alone, gets what is left of
+        # the budget.
+        wanted = next_boards(win, origin_code, dest_code, boards)
+        if wanted:
+            try:
+                async with asyncio.timeout(deadline - self.monotonic()):
+                    boards.update(zip(wanted, await self._round(wanted)))
+            except TimeoutError:
+                # Its request goes on (the cache shields it); this answer
+                # does without it, and says so in dest_error.
+                boards.update((key, ElviraError("TimeoutError")) for key in wanted)
+        answer = settle(win, origin_code, dest_code, boards, dest_name)
+        for code, outage in answer.stations:
+            for day, err in ((day, err) for missed, day, err in answer.missed if missed == code):
+                _LOGGER.debug("ELVIRA StationInfo %s for %s unavailable (%s)", code, day, err)
+            self.outages.report(code, outage)
+        if answer.origin_failure is not None:
+            # A rate limit stays one for the service response.
+            raise type(answer.origin_failure)(str(answer.origin_failure))
+        return answer.rows, answer.dest_failure
+
+    async def _round(self, wanted: list[BoardKey]) -> list:
+        """One round: the boards for these (station, day) pairs at once, an
+        ElviraError in place of each one that did not arrive."""
+        results = await asyncio.gather(
+            *(self.board(code, day) for code, day in wanted),
+            return_exceptions=True,
+        )
+        for board in results:
+            # Only an unreachable board is an empty one; a bug or a cancellation is not.
+            if isinstance(board, BaseException) and not isinstance(board, ElviraError):
+                raise board
+        return results
 
 
 @dataclass(frozen=True)
@@ -702,47 +756,3 @@ def settle(
     darr = [row for board in dest_boards if not isinstance(board, ElviraError) for row in board[1]]
     rows = rows_from_stationinfo(odep, darr, MAV_TZ, now, win.latest, dest_name, win.later)
     return Answer(rows, dest_failure, None, stations, missed)
-
-
-async def elvira_between(
-    source: ElviraBoards, origin_code, dest_code, minutes_after=180, dest_name="", at=None
-):
-    """Origin departures towards dest: a MÁV card's rows, an overlay for others.
-
-    Returns (rows, dest_failure) (settle); ElviraError when today's origin
-    board did not arrive. `at` (epoch seconds) starts the window later
-    (plan_window): a later start gets the trains leaving from it on
-    (ARRIVAL_GRACE before it, as for now), not the ones leaving before it
-    that arrive after it.
-
-    Answers within source.call_budget seconds (ELVIRA_CALL_BUDGET).
-    """
-    origin_code = station_code_digits(origin_code)
-    dest_code = station_code_digits(dest_code)
-    if len(origin_code) < 9 or len(dest_code) < 9 or origin_code == dest_code:
-        return [], None
-    deadline = source.monotonic() + source.call_budget
-    win = plan_window(source.now(), minutes_after, at)
-    boards: dict[BoardKey, Board | ElviraError] = {}
-    wanted = next_boards(win, origin_code, dest_code, boards)
-    boards.update(zip(wanted, await _fetch_boards(source, wanted)))
-    # A second round, tomorrow's arrival board alone, gets what is left of
-    # the budget.
-    wanted = next_boards(win, origin_code, dest_code, boards)
-    if wanted:
-        try:
-            async with asyncio.timeout(deadline - source.monotonic()):
-                boards.update(zip(wanted, await _fetch_boards(source, wanted)))
-        except TimeoutError:
-            # Its request goes on (the cache shields it); this answer
-            # does without it, and says so in dest_error.
-            boards.update((key, ElviraError("TimeoutError")) for key in wanted)
-    answer = settle(win, origin_code, dest_code, boards, dest_name)
-    for code, outage in answer.stations:
-        for day, err in ((day, err) for missed, day, err in answer.missed if missed == code):
-            _LOGGER.debug("ELVIRA StationInfo %s for %s unavailable (%s)", code, day, err)
-        source.outages.report(code, outage)
-    if answer.origin_failure is not None:
-        # A rate limit stays one for the service response.
-        raise type(answer.origin_failure)(str(answer.origin_failure))
-    return answer.rows, answer.dest_failure

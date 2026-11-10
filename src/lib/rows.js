@@ -1,5 +1,5 @@
 import { departureStillDue, vehicleIcon } from '../config.js';
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* A departure row is one departure towards the destination, whichever
    source listed it (GLOSSARY.md). Its `source` says whose trip it is:
@@ -245,7 +245,7 @@ function combine(hosts, extra, limit, overlayOnly, addUnmatched) {
   return out.slice(0, (Number.isFinite(cap) && cap > 0) ? cap : 12);
 }
 
-Object.assign(BkkLib, {
+register({
   /* The source of a trip id, by its prefix: '' for none. */
   tripIdSource(tripId) {
     const t = String(tripId || '');

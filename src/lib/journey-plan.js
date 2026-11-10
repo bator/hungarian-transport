@@ -1,4 +1,4 @@
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 import { generation } from './generation.js';
 
 /* After this long the "now" plan is stale: the planner plans again on its
@@ -201,18 +201,19 @@ export function journeyPlan(deps) {
   };
 }
 
-Object.assign(BkkLib, {
+register({
   journeyPlan,
-  /* The production planner of a card's journey plan: Transitous, FUTÁR
-     and the timetables (journey.js) with the card's index URLs, FUTÁR key
-     and Home Assistant, each read when a plan starts. */
-  journeyPlanSources(card) {
+  /* The production planner of a card's journey plan (ctx: the card's
+     context, context.js): Transitous, FUTÁR and the timetables (journey.js)
+     with the card's index resolver, FUTÁR key and Home Assistant, each read
+     when a plan starts. */
+  journeyPlanSources(ctx) {
     const stops = (pair) => [pair.origin, pair.dest];
     return {
-      now: (pair) => BkkLib.withIndexes(card.cfg()).planJourney(
-        card.apiKey(), ...stops(pair), card.hass(), { minutesAfter: pair.horizon }),
-      at: (pair, when) => BkkLib.withIndexes(card.cfg()).planJourneys(
-        card.apiKey(), ...stops(pair), card.hass(), {
+      now: (pair) => BkkLib.planJourney(ctx.indexes(),
+        ctx.apiKey(), ...stops(pair), ctx.hass(), { minutesAfter: pair.horizon }),
+      at: (pair, when) => BkkLib.planJourneys(ctx.indexes(),
+        ctx.apiKey(), ...stops(pair), ctx.hass(), {
           time: when.at,
           arriveBy: when.mode === 'arrive',
           minutesAfter: TIMED_WINDOW_MIN,

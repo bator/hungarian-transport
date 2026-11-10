@@ -1,5 +1,6 @@
 import { ASSET_BASE, DEFAULT_MINUTES_AFTER, MAP_TILES, MAP_TILE_OPTIONS, configDataKey, departureStillDue, normalizeCardConfig, refreshSeconds } from './config.js';
 import { codedError, errText, resolveLang, t } from './i18n.js';
+import { cardContext } from './lib/context.js';
 import { BkkLib } from './lib/core.js';
 import { generation } from './lib/generation.js';
 import { BKK_HOP_EDITOR } from './tags.js';
@@ -30,6 +31,14 @@ export class BKKHopCard extends HTMLElement {
     this._onVisibility = null;
     this._hass = null;
     this._tripCache = {};
+    /* What the library reads of this card (lib/context.js): its config,
+       key, Home Assistant, trip cache and index URLs. */
+    this._ctx = cardContext({
+      cfg: () => this._config,
+      apiKey: () => this._apiKey(),
+      hass: () => this._hass,
+      tripCache: () => this._tripCache,
+    });
     this._rows = [];
     this._rawRows = [];
     this._err = '';
@@ -1063,16 +1072,14 @@ ${this._stopPinCss()}
   }
 
   /* The ride map's geometry (lib/ride-map.js) from this card's stop pair,
-     FUTÁR key, trip cache and sensor vehicle; the card only draws it. */
+     context and sensor vehicle; the card only draws it. */
   async _loadRowMapShape(row) {
     return BkkLib.rideMap({
       row,
       cfg: this._config || {},
       hasFutar: this._hasFutar(),
       vehicle: this._hassVehicleFor(row),
-      apiKey: this._apiKey(),
-      tripCache: this._tripCache,
-      hass: this._hass,
+      ctx: this._ctx,
     });
   }
 
@@ -1497,11 +1504,8 @@ ${this._stopPinCss()}
       if (board.phase === 'done') this._syncOpenMap();
     };
     const run = () => BkkLib.nextBoard({
-      cfg,
+      ctx: this._ctx,
       mode,
-      hass: () => this._hass,
-      apiKey: () => this._apiKey(),
-      tripCache: this._tripCache || {},
       state,
       board: () => ({
         rows: this._rawRows, banner: this._err, loading: this._loading, filled: this._rowsFilled,

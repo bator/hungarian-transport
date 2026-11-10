@@ -210,8 +210,9 @@ export function setMavIndexUrl(url) {
 /* DEPRECATED, kept for callers outside this bundle: sets the module-wide
    fallback. The cards no longer use it: a module-wide setting read after an
    await could hand one card's index to another (review J-2, 2026-10-19).
-   Each card now looks its indexes up through BkkLib.withIndexes(config),
-   which carries that card's own volanIndex / cityIndex / mavIndex. */
+   Each card now hands its own index resolver (lib/context.js) to every
+   index-reading function, with that card's volanIndex / cityIndex /
+   mavIndex. */
 export function applyIndexOverrides(cfg) {
   const c = cfg || {};
   setVolanIndexUrl(c.volanIndex);
@@ -290,7 +291,7 @@ export function dayBuster(base) {
   return `${base}${base.includes('?') ? '&' : '?'}v=${tzParts(new Date()).ymd}`;
 }
 
-/* `own` is the looking-up card's override (BkkLib.withIndexes); the module-wide
+/* `own` is the looking-up card's override (BkkLib.indexResolver); the module-wide
    one is only a fallback for callers outside the cards. */
 export function volanIndexUrl(own) {
   const base = own || VOLAN_INDEX_OVERRIDE || new URL('volan-index.json.gz', ASSET_BASE).href;

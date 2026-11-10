@@ -1,16 +1,14 @@
-import { BkkLib } from '../lib/core.js';
+import { needIndexes } from '../lib/context.js';
+import { BkkLib, register } from '../lib/core.js';
 
-/* What the integration's elvira_between may take (elvira.py): each MÁV board
-   gives up after ELVIRA_TIMEOUT (30 s), and one call asks its boards in at
-   most two rounds, one after the other (tomorrow's destination board after
-   today's, around midnight). The card waits for that and a little more:
-   cutting a slow but whole answer off showed "did not answer" over it. If
-   the integration ever asks a third round, or a longer board, this has to
-   grow with it. */
-const ELVIRA_BOARD_TIMEOUT_MS = 30000;
-const ELVIRA_BOARD_ROUNDS = 2;
+/* What the integration's elvira_between may take: ELVIRA_WORST_CASE_SEC in
+   elvira.py (every round of MÁV boards one after the other, each up to its
+   timeout). The card waits for that and a little more: cutting a slow but
+   whole answer off showed "did not answer" over it. test-render.mjs checks
+   this against the integration's number. */
+const ELVIRA_WORST_CASE_MS = 60000;
 
-Object.assign(BkkLib, {
+register({
   /* The integration registers elvira_between; without it (an older or
      unloaded integration) every poll was one failing call_service. */
   hasElvira(hass) {
@@ -20,10 +18,11 @@ Object.assign(BkkLib, {
   /* A call that never answers ends here, not with the websocket: past the
      integration's own worst case, so only a call it no longer works on is
      cut off. */
-  _elviraTimeoutMs: ELVIRA_BOARD_ROUNDS * ELVIRA_BOARD_TIMEOUT_MS + 10000,
+  _elviraTimeoutMs: ELVIRA_WORST_CASE_MS + 10000,
   /* The rows of elviraBoard (board.js): the trains between two stations. */
-  async elviraBetween(hass, originId, destId, minutesAfter, destName, opts) {
-    return (await this.elviraBoard(hass, originId, destId, minutesAfter, destName, opts)).rows;
+  async elviraBetween(ix, hass, originId, destId, minutesAfter, destName, opts) {
+    needIndexes(ix);
+    return (await BkkLib.elviraBoard(ix, hass, originId, destId, minutesAfter, destName, opts)).rows;
   },
   /* A failed call's reason, as text for the banner. home-assistant-js-
      websocket does not reject with an Error: a call the dropped socket cut
