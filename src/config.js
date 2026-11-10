@@ -172,7 +172,7 @@ export const BKK_RAIL_BADGE = {
 };
 
 /* ELVIRA's train kinds a number-only train shows (sebesvonat, gyorsvonat,
-   mavBoardRows), in MÁV's own colours for them. Train rows only. */
+   elviraBoardRows), in MÁV's own colours for them. Train rows only. */
 export const RAIL_KIND_BADGE = {
   SV: ['29803C', 'FFFFFF'],
   GY: ['C82227', 'FFFFFF'],

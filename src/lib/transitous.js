@@ -432,6 +432,7 @@ Object.assign(BkkLib, {
       ).trim();
       const row = {
         tripId,
+        source: 'motis',
         motisTripId: tripRaw,
         label,
         color: '#' + color,
@@ -522,7 +523,8 @@ Object.assign(BkkLib, {
     const v = String(row.vehicle || '').toLowerCase();
     const typ = String(row.rawType || row.type || row.mode || '').toUpperCase();
     if (v === 'rail' || v === 'train' || BkkLib.motisRailMode(typ)) return 'rail';
-    if (/^elvira:/i.test(String(row.tripId || ''))) return 'rail';
+    const source = BkkLib.rowSource(row);
+    if (source === 'elvira') return 'rail';
     if (v === 'tram' || typ.indexOf('TRAM') >= 0) return 'tram';
     if (v === 'subway' || v === 'metro' || /SUBWAY|METRO/.test(typ)) return 'subway';
     if (v === 'trolley' || v === 'trolleybus' || typ.indexOf('TROLLEY') >= 0) return 'trolley';
@@ -530,7 +532,7 @@ Object.assign(BkkLib, {
     /* Not a bus (Zugliget, Libegő is also the 291's stop). */
     if (v === 'funicular' || typ.indexOf('FUNICULAR') >= 0) return 'funicular';
     if (v === 'aerial' || /AERIAL|AREAL|GONDOLA|CABLE_CAR/.test(typ)) return 'aerial';
-    if (v === 'coach' || typ === 'COACH' || /^gtfs:/i.test(String(row.tripId || ''))) return 'coach';
+    if (v === 'coach' || typ === 'COACH' || source === 'gtfs') return 'coach';
     if (v === 'bus' || typ === 'BUS') return 'bus';
     if (BkkLib.rowTrainNumber(row) && !/bus|tram|subway|trolley|coach/i.test(v)) return 'rail';
     return v || 'bus';
@@ -612,6 +614,7 @@ Object.assign(BkkLib, {
       const destName = (st.tripTo && st.tripTo.name) || '';
       return {
         tripId: tripRaw ? ('motis:' + tripRaw) : '',
+        source: 'motis',
         motisTripId: tripRaw,
         label,
         vehicle: BkkLib.motisVehicle(rawType, tripRaw),
@@ -833,7 +836,7 @@ Object.assign(BkkLib, {
       const extra = await BkkLib.transitousDepartures(origin, dest, opts);
       if (extra.length) empties.delete(key);
       else empties.set(key, Date.now());
-      return BkkLib.mergeVolanRows(extra, list, maxDepartureRows(opts && opts.minutesAfter));
+      return BkkLib.mergeRows(list, extra, maxDepartureRows(opts && opts.minutesAfter));
     } catch (_e) {
       return list;
     }

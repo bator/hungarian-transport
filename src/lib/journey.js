@@ -857,7 +857,10 @@ Object.assign(BkkLib, {
         const rows = destCode ? await this.elviraBetween(
           hass, station.id, destCode, 480, '', { apiKey, originName: station.name || '', at: walkEnd - 30 },
         ) : [];
-        const next = (rows || []).filter((row) => row.destHit !== false && Number(row.dep) >= walkEnd - 30)
+        /* The MÁV board's rule for a train that reaches the destination.
+           The leg keeps ELVIRA's own label (a number-only train shows its
+           number, not its kind) and head (the terminus: no dest_name). */
+        const next = (rows || []).filter((row) => BkkLib.elviraReaches(row) && Number(row.dep) >= walkEnd - 30)
           .sort((a, b) => a.dep - b.dep)[0];
         if (next && next.dep) {
           const rideMin = Number(next.travel) > 0 ? Number(next.travel) : 0;

@@ -190,7 +190,7 @@ Object.assign(BkkLib, {
     if (Number(row.delay || 0) !== 0) return false;
     /* A Transitous row with real-time data already has the live time. */
     if (row.motisLive) return false;
-    return !(BkkLib.isFutarTripId(row.tripId) && BkkLib.mapGpsLatLon(row.lat, row.lon));
+    return !(BkkLib.rowSource(row) === 'futar' && BkkLib.mapGpsLatLon(row.lat, row.lon));
   },
   _rtMayPosition(row) {
     return !!(row.rtPos || row.gpsCarried || !BkkLib.mapGpsLatLon(row.lat, row.lon));
