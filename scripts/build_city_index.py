@@ -41,7 +41,8 @@ ALLOW_MISSING_ENV = "HUNGARIAN_TRANSPORT_ALLOW_MISSING"
 # (timetable.keko.hu) answers 401; menetbrand serves it.
 # Menetbrand /download/<slug> is the public zip when the publisher has no fixed
 # filename (Kaposvár), a CAPTCHA (Kiskunhalas), a login (Kecskemét KeKo, DKV),
-# or until a keyed URL is in .env.
+# no host any more (dombovar.ptke.hu stopped resolving in November 2026), or
+# until a keyed URL is in .env.
 # gy-mate.hu: Máté Gyöngyösi's hand-made feeds (CC BY 4.0) of the Budavári
 # Sikló, the Zugliget Libegő, two Danube ferries and the Üröm minibus; the
 # first three run from frequencies.txt (load_parts expands it).
@@ -92,7 +93,7 @@ CITY_FEEDS = [
     {
         "id": "dombovar",
         "name": "Dombóvár — PTKE",
-        "url": "https://dombovar.ptke.hu/gtfs/",
+        "url": "https://gtfs.menetbrand.com/download/dombovar/",
         "file": "dombovar.zip",
     },
     {
