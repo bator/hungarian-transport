@@ -76,9 +76,15 @@ async def test_setup_serves_card_and_registers_service(hass, hass_client) -> Non
 
 
 
+def _lovelace_resources(hass: HomeAssistant):
+    data = hass.data["lovelace"]
+    # A dataclass from 2024.11, a dict before (the oldest supported release).
+    return data["resources"] if isinstance(data, dict) else data.resources
+
+
 def _our_resources(hass: HomeAssistant) -> list[dict]:
     return [
-        item for item in hass.data["lovelace"].resources.async_items()
+        item for item in _lovelace_resources(hass).async_items()
         if item["url"].startswith("/hungarian-transport/")
     ]
 
@@ -87,7 +93,7 @@ async def test_cards_are_a_lovelace_resource_too(hass, hass_client) -> None:
     """A page served while Home Assistant starts has no extra modules: the
     same URL as a storage-mode Lovelace resource still loads the cards."""
     assert await async_setup_component(hass, "lovelace", {})
-    resources = hass.data["lovelace"].resources
+    resources = _lovelace_resources(hass)
     if not resources.loaded:
         await resources.async_load()
         resources.loaded = True
@@ -117,7 +123,7 @@ async def test_yaml_mode_resources_are_left_alone(hass) -> None:
     assert await async_setup_component(hass, "lovelace", {"lovelace": {key: "yaml"}})
     await _setup(hass)
     assert integration.lovelace_resource._storage_resources(hass) is None
-    assert [item for item in hass.data["lovelace"].resources.async_items() if "hungarian" in item["url"]] == []
+    assert [item for item in _lovelace_resources(hass).async_items() if "hungarian" in item["url"]] == []
 
 
 async def test_card_url_changes_with_the_bundle(hass, card_assets) -> None:
