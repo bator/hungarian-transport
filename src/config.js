@@ -181,6 +181,16 @@ export const RAIL_KIND_BADGE = {
 /* Assets live next to this module, so the card works from /hacsfiles/, /local/
    or wherever the Lovelace resource points. Requires `type: module`. */
 export const ASSET_BASE = new URL('.', import.meta.url).href;
+
+/* Every map (a ride's, a journey's, the inline one): OpenStreetMap France
+   tiles, credited as they ask. */
+export const MAP_TILES = 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png';
+export const MAP_TILE_OPTIONS = Object.freeze({
+  maxZoom: 20,
+  subdomains: 'abc',
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    + ' &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>',
+});
 export let VOLAN_INDEX_OVERRIDE = '';
 export let CITY_INDEX_OVERRIDE = '';
 export let MAV_INDEX_OVERRIDE = '';
