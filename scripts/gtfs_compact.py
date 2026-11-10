@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import codecs
 import csv
 import gzip
 import hashlib
@@ -27,6 +26,13 @@ from collections import defaultdict
 from datetime import date
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
+
+# The integration's GTFS reader, so a feed reads the same here and in Home
+# Assistant; imported by path as build_mav_index imports mav_index.
+_PKG = Path(__file__).resolve().parent.parent / "custom_components" / "hungarian_transport"
+if str(_PKG) not in sys.path:
+    sys.path.insert(0, str(_PKG))
+from gtfs_feed import GtfsDir, encode_polyline, feed_version, member, open_csv  # noqa: E402
 
 RoutePred = Callable[[str, str, str], bool]
 
@@ -554,82 +560,6 @@ def slug(text: str) -> str:
     return folded or "local"
 
 
-LINE_CODE_RE = re.compile(r"^[GSZHM]\d{2}$", re.I)
-
-
-def line_code(short: str, long_name: str = "") -> str:
-    """Suburban product code (G43, S40). Not a train number."""
-    for raw in (short, long_name):
-        s = (raw or "").strip().upper()
-        if LINE_CODE_RE.fullmatch(s):
-            return s
-    return ""
-
-
-def train_number(name: str) -> str:
-    """Train number from a MÁV name: 'IC 856 TÓPART' → '856'. Not 'G43' → '43'."""
-    s = (name or "").strip()
-    if not s or LINE_CODE_RE.fullmatch(s):
-        return ""
-    m = re.search(r"(?<!\d)(\d{3,5})(?!\d)", s)
-    if not m:
-        return ""
-    raw = m.group(1)
-    return raw.lstrip("0") or raw
-
-
-def _encode_signed(value: int) -> str:
-    value = ~(value << 1) if value < 0 else (value << 1)
-    chars: list[str] = []
-    while value >= 0x20:
-        chars.append(chr((0x20 | (value & 0x1F)) + 63))
-        value >>= 5
-    chars.append(chr(value + 63))
-    return "".join(chars)
-
-
-def encode_polyline(pts: Iterable[tuple[float, float]], precision: int = 5) -> str:
-    """Google encoded polyline; matches the card's decodePolyline (precision 5)."""
-    factor = 10 ** precision
-    plat = 0
-    plng = 0
-    out: list[str] = []
-    for lat, lng in pts:
-        ilat = int(round(float(lat) * factor))
-        ilng = int(round(float(lng) * factor))
-        out.append(_encode_signed(ilat - plat))
-        out.append(_encode_signed(ilng - plng))
-        plat, plng = ilat, ilng
-    return "".join(out)
-
-
-def decode_polyline(encoded: str, precision: int = 5) -> list[tuple[float, float]]:
-    factor = 10 ** precision
-    coords: list[tuple[float, float]] = []
-    index = 0
-    lat = 0
-    lng = 0
-    text = encoded or ""
-    while index < len(text):
-        for xy in (0, 1):
-            result = 0
-            shift = 0
-            while True:
-                byte = ord(text[index]) - 63
-                index += 1
-                result |= (byte & 0x1F) << shift
-                shift += 5
-                if byte < 0x20:
-                    break
-            delta = ~(result >> 1) if result & 1 else (result >> 1)
-            if xy == 0:
-                lat += delta
-            else:
-                lng += delta
-        coords.append((lat / factor, lng / factor))
-    return coords
-
-
 def _zip_magic(path: Path) -> bool:
     with Path(path).open("rb") as fh:
         return fh.read(4)[:2] == b"PK"
@@ -651,31 +581,6 @@ def open_gtfs_zip(zpath: Path) -> zipfile.ZipFile:
     return z
 
 
-class GtfsDir:
-    """Unzipped GTFS folder (pfaedle output). Same read/namelist surface as ZipFile."""
-
-    def __init__(self, path: Path):
-        self.path = Path(path)
-
-    def namelist(self) -> list[str]:
-        return [p.name for p in self.path.iterdir() if p.is_file()]
-
-    def read(self, name: str) -> bytes:
-        return (self.path / name).read_bytes()
-
-    def open(self, name: str):
-        return (self.path / name).open("rb")
-
-    def close(self) -> None:
-        return None
-
-    def __enter__(self) -> "GtfsDir":
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
-
-
 def open_gtfs(path: Path):
     """Open a GTFS zip or an unzipped directory."""
     path = Path(path)
@@ -687,36 +592,11 @@ def open_gtfs(path: Path):
     return open_gtfs_zip(path)
 
 
-def feed_version(z: zipfile.ZipFile) -> str:
-    try:
-        rows = list(_open_csv(z, "feed_info.txt"))
-        if rows:
-            return (rows[0].get("feed_version") or "").strip()
-    except FileNotFoundError:
-        pass
-    return ""
-
-
-def _member(z, name: str) -> str:
-    wanted = name.lower()
-    members = list(z.namelist())
-    by_lower = {n.lower(): n for n in members}
-    real = by_lower.get(wanted)
-    if real is None:
-        for member in members:
-            if member.lower().rsplit("/", 1)[-1] == wanted:
-                real = member
-                break
-    if not real:
-        raise FileNotFoundError(name)
-    return real
-
-
 def _stream_shape_points(z):
     """(shape_id, seq, lat, lon) from shapes.txt without reading the member
     into memory (388 MB in the Volán feed). csv.reader, not DictReader: this
     loop runs 8 million times. Shape files are ASCII, so UTF-8 is enough."""
-    real = _member(z, "shapes.txt")
+    real = member(z, "shapes.txt")
     with z.open(real) as fh:
         rows = csv.reader(io.TextIOWrapper(fh, encoding="utf-8-sig", errors="replace", newline=""),
                           skipinitialspace=True)
@@ -741,7 +621,7 @@ def _stream_shape_points(z):
             # whole feed. NaN fails every comparison, so it is dropped here.
             if not (math.isfinite(seq) and -90 <= lat <= 90 and -180 <= lon <= 180):
                 continue
-            # trips.txt's shape_id is stripped (_csv_rows): so is this one.
+            # trips.txt's shape_id is stripped (gtfs_feed.csv_rows): so is this one.
             yield row[i_id].strip(), seq, lat, lon
 
 
@@ -841,52 +721,6 @@ def load_shapes(z, memo_key: tuple | None = None) -> dict[str, str]:
     if memo_key is not None:
         _SHAPES_MEMO[memo_key] = out
     return out
-
-
-def _legacy_bytes(err: UnicodeError) -> tuple[str, int]:
-    """Decode error handler: bytes that are not UTF-8 are read as cp1250
-    (iso-8859-2 for the five bytes cp1250 leaves undefined). Hungarian feeds
-    are UTF-8 or cp1250, so a streamed member needs no encoding pre-pass."""
-    if not isinstance(err, UnicodeDecodeError):
-        raise err
-    out = []
-    for b in err.object[err.start:err.end]:
-        try:
-            out.append(bytes([b]).decode("cp1250"))
-        except UnicodeDecodeError:
-            out.append(bytes([b]).decode("iso-8859-2"))
-    return "".join(out), err.end
-
-
-codecs.register_error("gtfs_legacy", _legacy_bytes)
-
-
-def _csv_rows(z, real: str) -> Iterator[dict[str, str]]:
-    """Rows as dicts, every header and value stripped: an export with a space
-    after each comma (" T1") must give the ids the other files use ("T1"),
-    or trips lose their service and stops and the feed builds empty.
-    csv.reader and a zip, not DictReader: as fast, and this runs once per
-    stop_times row. Fields past the header are dropped."""
-    with z.open(real) as fh:
-        text = io.TextIOWrapper(fh, encoding="utf-8-sig", errors="gtfs_legacy", newline="")
-        reader = csv.reader(text, skipinitialspace=True)
-        header = [h.strip() for h in next(reader, [])]
-        width = len(header)
-        for rec in reader:
-            if not rec:
-                continue
-            vals = [v.strip() for v in rec]
-            if len(vals) < width:
-                vals += [""] * (width - len(vals))
-            yield dict(zip(header, vals))
-
-
-def _open_csv(z, name: str) -> Iterator[dict[str, str]]:
-    """Rows of a GTFS member, streamed: stop_times.txt of the Volán feed is
-    several hundred MB, too much to hold in memory on a Home Assistant host.
-    Header names are stripped; a short row gets "" for its missing columns.
-    A missing member raises FileNotFoundError here, not on first iteration."""
-    return _csv_rows(z, _member(z, name))
 
 
 def _check_zip_directory(path: Path, name: str) -> None:
@@ -1148,7 +982,7 @@ def _frequencies(z: zipfile.ZipFile) -> dict[str, list[tuple[int, int, int]]]:
     trip); a feed without the file has none."""
     out: dict[str, list[tuple[int, int, int]]] = {}
     try:
-        rows = list(_open_csv(z, "frequencies.txt"))
+        rows = list(open_csv(z, "frequencies.txt"))
     except FileNotFoundError:
         return {}
     for row in rows:
@@ -1220,7 +1054,7 @@ def _load_parts(
 
     agencies: dict[str, str] = {}
     try:
-        for row in _open_csv(z, "agency.txt"):
+        for row in open_csv(z, "agency.txt"):
             aid = row.get("agency_id") or ""
             agencies[aid] = (row.get("agency_name") or aid or op_name).strip()
     except FileNotFoundError:
@@ -1229,7 +1063,7 @@ def _load_parts(
     sid2p: dict[str, str] = {}
     sid2n: dict[str, str] = {}
     sid2ll: dict[str, tuple[float, float]] = {}
-    for row in _open_csv(z, "stops.txt"):
+    for row in open_csv(z, "stops.txt"):
         raw = row.get("stop_id") or ""
         if not raw:
             continue
@@ -1266,7 +1100,7 @@ def _load_parts(
     route_types: dict[str, int] = {}
     route_agency: dict[str, str] = {}
     keep_routes: set[str] = set()
-    for row in _open_csv(z, "routes.txt"):
+    for row in open_csv(z, "routes.txt"):
         rid = row.get("route_id") or ""
         if not rid:
             continue
@@ -1288,7 +1122,7 @@ def _load_parts(
     trips_meta: dict[str, tuple[str, str]] = {}
     trip_shape: dict[str, str] = {}
     keep_trips: set[str] = set()
-    for row in _open_csv(z, "trips.txt"):
+    for row in open_csv(z, "trips.txt"):
         rid = row.get("route_id") or ""
         tid = row.get("trip_id") or ""
         if not tid:
@@ -1301,7 +1135,7 @@ def _load_parts(
 
     cal: dict[str, list[str]] = {}
     try:
-        for row in _open_csv(z, "calendar.txt"):
+        for row in open_csv(z, "calendar.txt"):
             sid = row.get("service_id") or ""
             if not sid:
                 continue
@@ -1330,7 +1164,7 @@ def _load_parts(
     ex_add: dict[str, list[str]] = defaultdict(list)
     ex_rem: dict[str, list[str]] = defaultdict(list)
     try:
-        for row in _open_csv(z, "calendar_dates.txt"):
+        for row in open_csv(z, "calendar_dates.txt"):
             sid = row.get("service_id") or ""
             date = (row.get("date") or "").strip()
             if not sid or not date:
@@ -1361,7 +1195,7 @@ def _load_parts(
             seqs[tid] = pts
 
     timed: list[tuple[str, int, str, int | None]] = []
-    for row in _open_csv(z, "stop_times.txt"):
+    for row in open_csv(z, "stop_times.txt"):
         tid = row.get("trip_id") or ""
         if tid not in keep_trips:
             continue

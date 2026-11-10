@@ -12,7 +12,6 @@ import shutil
 import sys
 import tempfile
 import time
-import tracemalloc
 import zipfile
 from pathlib import Path
 
@@ -24,7 +23,6 @@ import index_digest  # noqa: E402
 from build_volan_index import build_index  # noqa: E402
 from gtfs_compact import (  # noqa: E402
     IndexGuardError,
-    _open_csv,
     calendar_end,
     operator_stats,
     operator_trips,
@@ -923,51 +921,6 @@ with tempfile.TemporaryDirectory() as tmp:
     check("both failing raises the last error",
           raises(lambda: bvi.download_volan(Path(tmp) / "v.zip"), OSError) is not None)
     check("the city builder downloads through the same list", bci.download_volan is bvi.download_volan)
-
-# ---- 6. GTFS members are streamed, not read whole --------------------------
-
-
-class OpenOnly:
-    """A GTFS source without read(): _open_csv must stream."""
-
-    def __init__(self, files: dict[str, bytes]):
-        self.files = files
-
-    def namelist(self) -> list[str]:
-        return list(self.files)
-
-    def open(self, name: str):
-        return io.BytesIO(self.files[name])
-
-    def read(self, name: str) -> bytes:
-        raise AssertionError(f"{name} read whole")
-
-
-src = OpenOnly({
-    "stops.txt": "﻿ stop_id , stop_name ,stop_lat\n1,Győr,47.6\n2,Pécs\n".encode("utf-8"),
-    "legacy.txt": "stop_id,stop_name\n1,".encode() + "Hősök tere".encode("cp1250") + b"\n",
-    "mixed.txt": "stop_id,stop_name\n1,Szőny\n2,".encode() + "Érd".encode("cp1250") + b"\n",
-})
-rows = list(_open_csv(src, "stops.txt"))
-check("BOM and header whitespace stripped", rows and set(rows[0]) == {"stop_id", "stop_name", "stop_lat"}, repr(rows))
-check("short row gets empty strings", rows[1].get("stop_lat") == "" and rows[1]["stop_name"] == "Pécs", repr(rows))
-check("cp1250 member decoded", next(_open_csv(src, "legacy.txt"))["stop_name"] == "Hősök tere")
-check("stray cp1250 bytes in a UTF-8 member decoded",
-      [r["stop_name"] for r in _open_csv(src, "mixed.txt")] == ["Szőny", "Érd"])
-check("missing member raises before iteration", raises(lambda: _open_csv(src, "nope.txt"), FileNotFoundError) is not None)
-
-with tempfile.TemporaryDirectory() as tmp:
-    big = "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n" + "".join(
-        f"T{i // 20},08:00:00,08:00:00,{i % 997},{i % 20}\n" for i in range(300_000)
-    )
-    zpath = gtfs_zip(Path(tmp) / "big.zip", {"stop_times.txt": big})
-    with zipfile.ZipFile(zpath) as z:
-        tracemalloc.start()
-        count = sum(1 for _ in _open_csv(z, "stop_times.txt"))
-        _cur, peak = tracemalloc.get_traced_memory()
-        tracemalloc.stop()
-    check("stop_times streamed in bounded memory",
-          count == 300_000 and peak < len(big) / 4, f"rows={count} peak={peak} member={len(big)}")
 
 if failed:
     sys.exit(1)

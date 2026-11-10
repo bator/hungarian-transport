@@ -1,5 +1,5 @@
 {
-  "about": "Which stop pattern of a MÁV train the card draws between two stations: pickMavVariant (src/lib/gtfs.js) and the Python audit's pick_variant (scripts/mav_variant.py) must give the same answer for each case. variants are [polyline, [station index, ...]] as in mav-index.json.gz; expect is null (no route from the index) or the chosen variant's position in variants with the boarding and alighting positions in its station list (-1: none). Station names are ones both name matchers agree on.",
+  "about": "Which stop pattern of a MÁV train the card draws between two stations: pickMavVariant (src/lib/gtfs.js) and the integration's pick_variant (custom_components/hungarian_transport/mav_index.py), which its audit and the scripts' audits use, must give the same answer for each case. variants are [polyline, [station index, ...]] as in mav-index.json.gz; expect is null (no route from the index) or the chosen variant's position in variants with the boarding and alighting positions in its station list (-1: none). Station names are ones both name matchers agree on.",
   "stations": [
     ["Szombathely", 4723510, 1663160],
     ["Székesfehérvár", 4718361, 1842472],

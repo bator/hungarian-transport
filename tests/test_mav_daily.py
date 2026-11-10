@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
-from custom_components.hungarian_transport import mav, mav_daily, mav_index
+from custom_components.hungarian_transport import gtfs_feed, mav, mav_daily, mav_index
 from custom_components.hungarian_transport.const import CONF_DAILY_MAV, CONF_DAILY_TIME, DOMAIN
 
 NEW = "20261101.M2ChangeID"
@@ -46,7 +46,7 @@ def _index(feed: str, schema: int = mav_index.SCHEMA, fitted: bool = False) -> b
         "v": schema,
         "feed": feed,
         "st": [["Székesfehérvár", 4718361, 1842472], ["Budapest-Kelenföld", 4746432, 1902063]],
-        "p": [mav_index.encode_polyline(RAIL if fitted else STATION_LINE)],
+        "p": [gtfs_feed.encode_polyline(RAIL if fitted else STATION_LINE)],
         "n": {"905": [[0, [0, 1]]]},
         "l": {},
     }

@@ -410,10 +410,11 @@ def mav_source_newer(src: Path, out: Path) -> bool:
         print(f"warn mav same-feed check: {type(err).__name__}, not built", file=sys.stderr)
         return False
     try:
-        import mav_index  # noqa: PLC0415 - next to served_index, as build_mav_index imports it
+        import gtfs_feed  # noqa: PLC0415 - next to served_index, as build_mav_index imports mav_index
+        import mav_index  # noqa: PLC0415
 
-        with mav_index.Feed(src) as feed:
-            version = mav_index.feed_version(feed)
+        with gtfs_feed.Feed(src) as feed:
+            version = gtfs_feed.feed_version(feed)
         if version and si.read_feed(out) == version:
             build = mav_index.IndexRank(fitted=True if src.is_dir() else None, size=None)
             if not si.replaces(build, out):
