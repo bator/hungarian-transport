@@ -667,8 +667,9 @@ Object.assign(BkkLib, {
     const now = Math.floor(Date.now() / 1000);
     const latest = now + horizon * 60;
     let rows = [];
-    /* ELVIRA's trains and an empty board's Transitous fill are the card's
-       own steps (hop-card _reload), not this one's. */
+    /* ELVIRA's trains and an empty board's Transitous fill are the
+       departure board's own steps (board.js), not this one's; so is the
+       order of the callbacks (onPartial, armThroughCheck, onFutarUpdate). */
     const queryFutar = !opts.skipFutar && (mode === 'bkk' || mode === 'mav' || /^BKK_/i.test(String(stopId || '')));
     const futarTask = queryFutar ? (async () => {
     let candidates = [];
