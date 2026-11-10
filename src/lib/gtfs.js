@@ -1,13 +1,13 @@
 import { cityIndexUrl, clampMinutesAfter, departureStillDue, mavIndexUrl, maxDepartureRows, tzDow, tzEpochSec, tzParts, tzShiftYmd, volanIndexUrl } from '../config.js';
 import { codedError } from '../i18n.js';
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 import { INDEX_SCHEMA } from '../tags.js';
 
 /* A destination stop of a trip lies no farther than this from the picked
    destination's own coordinates. */
 const DEST_NEAR_M = 1500;
 
-Object.assign(BkkLib, {
+register({
   /* Cached per resolved URL, so two cards pointing at different index files do
      not serve each other's data. The URL carries a daily cache-buster, which
      also expires the entry on a dashboard left open overnight; the day before's

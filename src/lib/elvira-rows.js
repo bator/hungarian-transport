@@ -1,12 +1,12 @@
 import { departureStillDue } from '../config.js';
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* The integration's elvira_between answer as departure rows (elvira.py
    rows_from_stationinfo builds them; tests/fixtures/elvira holds one case
    both sides are checked against). Every row of the origin's board comes,
    each marked destHit when the destination's arrival board lists the
    train: only those reach the destination. */
-Object.assign(BkkLib, {
+register({
   elviraRowsFromResult(res) {
     const tag = (rows) => rows.map((row) => (row && typeof row === 'object'
       ? Object.assign({}, row, { source: 'elvira' }) : row));

@@ -4343,20 +4343,18 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     JSON.stringify({ before, after: counts.route, kept, newest, sizes }));
 }
 {
-  /* A dashboard opened again reads its route patterns from the browser: no
-     route-details while they may still prove a trip, again once they are
-     three hours old or from yesterday, and storage that fails costs nothing. */
+  /* A dashboard opened again reads its route patterns from the browser
+     (the store: test-route-patterns.mjs): no route-details while a kept
+     one may still prove a trip, again once it is three hours old. */
+  const { routePatternStore } = await import('./src/lib/route-patterns.js');
   const keepFetch = Lib.fetch;
   const keepMem = Lib._mem;
+  const keepStore = Lib.routePatterns;
   const store = new Map();
-  Object.defineProperty(globalThis, 'localStorage', {
-    configurable: true,
-    value: {
-      getItem: (k) => (store.has(k) ? store.get(k) : null),
-      setItem: (k, v) => { store.set(k, String(v)); },
-      removeItem: (k) => { store.delete(k); },
-    },
-  });
+  const disk = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => { store.set(k, String(v)); },
+  };
   let routeCalls = 0;
   Lib.fetch = async (_k, path) => {
     if (path === 'route-details.json') routeCalls += 1;
@@ -4371,62 +4369,28 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     };
   };
   /* A page load: the page's memos are new, the browser's storage is not. */
-  const page = async (rid = 'AZP_R1') => {
-    Lib.flushRoutePatterns();
+  const page = async () => {
+    Lib.routePatterns.flush();
     Lib._mem = {};
-    Lib._storedPatterns = null;
-    return Lib.loadRoutePattern('k', {}, rid);
+    Lib.routePatterns = routePatternStore({ storage: () => disk, events: null });
+    return Lib.loadRoutePattern('k', {}, 'AZP_R1');
   };
-  let writes = 0;
   const first = await page();
   const second = await page();
-  const saved = JSON.parse(store.get('hungarian_transport_route_patterns') || '{}').AZP_R1 || {};
   const afterReload = routeCalls;
+  const saved = JSON.parse(store.get('hungarian_transport_route_patterns') || '{}').AZP_R1 || {};
   saved.at -= 4 * 3600000;
   store.set('hungarian_transport_route_patterns', JSON.stringify({ AZP_R1: saved }));
   await page();
   const afterStale = routeCalls;
-  /* Many routes in one page load: one write, not one per route. */
-  const setItem = globalThis.localStorage.setItem;
-  globalThis.localStorage.setItem = (k, v) => { writes += 1; setItem(k, v); };
-  Lib.flushRoutePatterns();
-  Lib._mem = {};
-  Lib._storedPatterns = null;
-  writes = 0;
-  await Promise.all(['AZP_A', 'AZP_B', 'AZP_C', 'AZP_D'].map((rid) => Lib.loadRoutePattern('k', {}, rid)));
-  Lib.flushRoutePatterns();
-  const batched = writes;
-  /* Another tab wrote a route since this page read the list: it stays. */
-  const other = JSON.parse(store.get('hungarian_transport_route_patterns'));
-  other.AZP_TAB = Object.assign({}, other.AZP_A, { at: Date.now() });
-  store.set('hungarian_transport_route_patterns', JSON.stringify(other));
-  await Lib.loadRoutePattern('k', {}, 'AZP_F');
-  Lib.flushRoutePatterns();
-  const bothTabs = Object.keys(JSON.parse(store.get('hungarian_transport_route_patterns'))).sort().join();
-  Object.defineProperty(globalThis, 'localStorage', {
-    configurable: true,
-    value: { getItem: () => { throw new Error('denied'); }, setItem: () => { throw new Error('denied'); } },
-  });
-  const noStorage = await page('AZP_E');
-  Lib.flushRoutePatterns();
   Lib.fetch = keepFetch;
   Lib._mem = keepMem;
-  Lib._storedPatterns = null;
-  delete globalThis.localStorage;
+  Lib.routePatterns = keepStore;
   check('a route pattern from an earlier page load spares its route-details until it is three hours old',
-    afterReload === 1 && afterStale === 2 && routeCalls === 8 && batched === 1
-      && bothTabs.includes('AZP_TAB') && bothTabs.includes('AZP_F')
-      && second.stops.AZP_1.parentStationId === 'AZP_CS' && second.variants[0].ids.join() === 'AZP_1,AZP_2'
-      && Lib.patternFresh(second) && !('lat' in saved.stops.AZP_1) && !('code' in saved.stops.AZP_1)
-      && !!first && !!noStorage && noStorage.variants.length === 1,
-    JSON.stringify({ afterReload, afterStale, routeCalls, batched, bothTabs, stop: saved.stops && saved.stops.AZP_1 }));
-}
-{
-  /* Budapest's day, not the browser's: 23:30 and 00:10 (CET) share a UTC day. */
-  const at = Date.UTC(2026, 10, 10, 22, 30);
-  const pat = { at, variants: [{ ids: ['A'] }], stops: {} };
-  check('a route pattern proved before Budapest midnight is not fresh after it',
-    Lib.patternFresh(pat, at + 20 * 60000) && !Lib.patternFresh(pat, at + 40 * 60000));
+    afterReload === 1 && afterStale === 2
+      && first.stops.AZP_1.lat === 47.5 && second.stops.AZP_1.parentStationId === 'AZP_CS'
+      && !('lat' in second.stops.AZP_1) && second.variants[0].ids.join() === 'AZP_1,AZP_2',
+    JSON.stringify({ afterReload, afterStale, stop: second.stops.AZP_1 }));
 }
 {
   /* Móricz Zsigmond körtér (2026-10-21): FUTÁR gives the tram poles a stand

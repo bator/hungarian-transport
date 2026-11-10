@@ -1,7 +1,7 @@
 import { BKK_RAIL_BADGE, PLATFORM_IN_HEAD, PLATFORM_STRIP, RAIL_KIND_BADGE } from '../config.js';
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
-Object.assign(BkkLib, {
+register({
   trainNumberFromTripId(tripId) {
     const s = String(tripId || '');
     /* BKK_90681_106 is train 9068 (trailing 1 on a 5-digit body).

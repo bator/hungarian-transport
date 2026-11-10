@@ -1,7 +1,7 @@
 import { clampMinutesAfter, pad2, tzDow, tzFields, tzShiftYmd } from '../config.js';
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
-Object.assign(BkkLib, {
+register({
   /* FUTÁR plan-trip: itinerary duration and walkTime are seconds.
      Each leg duration is milliseconds. */
   journeyFromPlan(payload) {

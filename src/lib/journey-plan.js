@@ -1,4 +1,4 @@
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 import { generation } from './generation.js';
 
 /* After this long the "now" plan is stale: the planner plans again on its
@@ -201,7 +201,7 @@ export function journeyPlan(deps) {
   };
 }
 
-Object.assign(BkkLib, {
+register({
   journeyPlan,
   /* The production planner of a card's journey plan: Transitous, FUTÁR
      and the timetables (journey.js) with the card's index URLs, FUTÁR key

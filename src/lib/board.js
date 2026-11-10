@@ -1,6 +1,6 @@
 import { DEFAULT_MINUTES_AFTER, clampMinutesAfter, departureStillDue, maxDepartureRows } from '../config.js';
 import { codedError } from '../i18n.js';
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* The departure board (GLOSSARY.md): which sources a stop pair's board
    reads, how their rows merge, what a failed source leaves on screen, and
@@ -496,7 +496,7 @@ async function runBoard(poll, src, knownElvira) {
   }
 }
 
-Object.assign(BkkLib, {
+register({
   /* The production adapters of a card's board: its index URLs for the
      timetables and the station search (withIndexes), Home Assistant for
      ELVIRA, the coach and realtime lookups and the sensors. */

@@ -1,4 +1,4 @@
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* The ride map's geometry (GLOSSARY.md): the route one departure row runs
    between the stop pair, and where the rider boards and alights. Which
@@ -256,7 +256,7 @@ export async function rideGeometry(ride, src) {
   };
 }
 
-Object.assign(BkkLib, {
+register({
   /* The production adapters of a ride map: the card's index URLs
      (withIndexes) for the MÁV index and the city area, its FUTÁR key and
      trip cache, Transitous, and Home Assistant's coach_shape (null without

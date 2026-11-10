@@ -1,4 +1,4 @@
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* What the integration's elvira_between may take (elvira.py): each MÁV board
    gives up after ELVIRA_TIMEOUT (30 s), and one call asks its boards in at
@@ -10,7 +10,7 @@ import { BkkLib } from '../lib/core.js';
 const ELVIRA_BOARD_TIMEOUT_MS = 30000;
 const ELVIRA_BOARD_ROUNDS = 2;
 
-Object.assign(BkkLib, {
+register({
   /* The integration registers elvira_between; without it (an older or
      unloaded integration) every poll was one failing call_service. */
   hasElvira(hass) {

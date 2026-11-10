@@ -1,8 +1,8 @@
 import { TRANSITOUS, clampMinutesAfter, departureStillDue, maxDepartureRows } from '../config.js';
 import { t } from '../i18n.js';
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
-Object.assign(BkkLib, {
+register({
   /* FUTÁR plan-trip times are epoch milliseconds. Values below 1e11 are seconds. */
   epochMs(value) {
     const n = Number(value);

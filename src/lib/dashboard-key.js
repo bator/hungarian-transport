@@ -1,7 +1,7 @@
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 import { OWN_CARD_TYPES } from '../tags.js';
 
-Object.assign(BkkLib, {
+register({
   /* DEPRECATED card-level key (review J-3, 2026-10-19). A key in the card YAML
      is sent to BKK as a query parameter (futar.js), and any logged-in Home
      Assistant user, admin or not, can read it with the lovelace/config call

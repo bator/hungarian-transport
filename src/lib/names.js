@@ -1,4 +1,4 @@
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* ELVIRA station codes found by name, kept in the browser between page
    loads: a code for a month, "no such station" for six hours. */
@@ -34,7 +34,7 @@ const elviraStore = (nameKey, entry) => {
   } catch (_e) { /* private window or storage off: the page's memo still holds it */ }
 };
 
-Object.assign(BkkLib, {
+register({
   esc(s) {
     return String(s === null || s === undefined ? '' : s).replace(/[&<>"']/g, (c) => (
       { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
