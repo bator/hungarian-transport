@@ -22,7 +22,7 @@ def hass_call_later(hass: HomeAssistant) -> CallLater:
     covers only timers that hand the job to the loop themselves), so the
     cache's owner closes the cache then: close_on_stop."""
     # Imported here: this module and elvira.py load without Home Assistant
-    # (ha/test_elvira.py).
+    # (their tests drive them without it).
     from homeassistant.core import HassJob, callback
     from homeassistant.helpers.event import async_call_later
 
@@ -64,6 +64,8 @@ class SharedTTLCache:
     cancelled at shutdown instead of lingering as an untracked future.
     ``call_later`` is ``hass_call_later(hass)`` there, and ``close`` cancels
     its timer for good when Home Assistant stops or the owner unloads.
+    ``monotonic`` is the clock of the TTL, ``time.monotonic`` by default (an
+    owner with an injected clock passes its own).
     """
 
     def __init__(
@@ -72,6 +74,7 @@ class SharedTTLCache:
         max_entries: int,
         task_factory: TaskFactory | None = None,
         call_later: CallLater | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self._ttl = ttl
         self._max = max_entries
@@ -81,12 +84,14 @@ class SharedTTLCache:
         self._call_later = call_later
         self._cancel_expiry: Callable[[], None] | None = None
         self._closed = False
+        # Looked up on every read without one: tests patch time.monotonic.
+        self._monotonic = monotonic or (lambda: time.monotonic())
 
     def __len__(self) -> int:
         return len(self._data)
 
     async def get(self, key: Hashable, fetch: Callable[[], Awaitable[Any]]) -> Any:
-        now = time.monotonic()
+        now = self._monotonic()
         hit = self._data.get(key)
         if hit is not None and now - hit[0] < self._ttl:
             return hit[1]
@@ -109,7 +114,7 @@ class SharedTTLCache:
         self._inflight.pop(key, None)
         if task.cancelled() or task.exception() is not None:
             return
-        now = time.monotonic()
+        now = self._monotonic()
         self._purge(now)
         while len(self._data) >= self._max:
             self._data.pop(next(iter(self._data)))
@@ -136,10 +141,10 @@ class SharedTTLCache:
         ):
             return
         oldest = min(ts for ts, _ in self._data.values())
-        delay = max(0.0, oldest + self._ttl - time.monotonic())
+        delay = max(0.0, oldest + self._ttl - self._monotonic())
         self._cancel_expiry = self._call_later(delay, self._expire)
 
     def _expire(self) -> None:
         self._cancel_expiry = None
-        self._purge(time.monotonic())
+        self._purge(self._monotonic())
         self._schedule_expiry()
