@@ -1,5 +1,6 @@
 import { DEFAULT_FAVORITES, DEFAULT_MINUTES_AFTER, MAX_MINUTES_AFTER, MINUTES_AFTER_PRESETS, MIN_MINUTES_AFTER, clampMinutesAfter, destRouteIds, normalizeCardConfig } from './config.js';
 import { codedError, errText, modeCopy, resolveLang, t } from './i18n.js';
+import { cardContext } from './lib/context.js';
 import { BkkLib } from './lib/core.js';
 import { generation } from './lib/generation.js';
 import { THEMES, THEME_DEFAULT, THEME_IDS, THEME_OPERATOR, themeKey } from './themes.js';
@@ -10,6 +11,14 @@ export class BKKHopCardEditor extends HTMLElement {
   constructor() {
     super();
     this._config = { routeIds: [] };
+    /* What the library's searches read of the card being edited
+       (lib/context.js): its config (index URLs), key and Home Assistant. */
+    this._ctx = cardContext({
+      cfg: () => this._config,
+      apiKey: () => this._apiKey(),
+      hass: () => this._hass,
+      tripCache: () => this._cache,
+    });
     this._built = false;
     this._searchTimer = null;
     this._destTimer = null;
@@ -651,7 +660,7 @@ export class BKKHopCardEditor extends HTMLElement {
     if (!sel || this._isEditing(sel)) return;
     const seq = this._cityLoad.bump();
     try {
-      const idx = await BkkLib.withIndexes(this._config).cityIndex();
+      const idx = await this._ctx.indexes().city();
       if (this._cityLoad.stale(seq)) return;
       const ops = (idx.ops || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'hu'));
       const cur = this._config.city || '';
@@ -791,7 +800,7 @@ export class BKKHopCardEditor extends HTMLElement {
         return;
       }
       const mode = this._mode();
-      const hits = await BkkLib.withIndexes(this._config).searchStops(this._apiKey(), q, mode, this._config.city);
+      const hits = await BkkLib.searchStops(this._ctx.indexes(), this._apiKey(), q, mode, this._config.city);
       if (this._stopSearch.stale(seq)) return;
       if (!hits.length) {
         box.innerHTML = '<span class="hint">' + BkkLib.esc(this._modeCopy(mode).empty) + '</span>';
@@ -889,7 +898,8 @@ export class BKKHopCardEditor extends HTMLElement {
     if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
     try {
       this._error('');
-      const idx = await BkkLib.withIndexes(this._config).reachableDests(
+      const idx = await BkkLib.reachableDests(
+        this._ctx.indexes(),
         this._apiKey(),
         this._cache,
         { id: this._config.stopId, name: this._config.stopName },

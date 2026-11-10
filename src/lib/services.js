@@ -1,3 +1,4 @@
+import { needIndexes } from '../lib/context.js';
 import { BkkLib, register } from '../lib/core.js';
 
 /* What the integration's elvira_between may take (elvira.py): each MÁV board
@@ -22,8 +23,9 @@ register({
      cut off. */
   _elviraTimeoutMs: ELVIRA_BOARD_ROUNDS * ELVIRA_BOARD_TIMEOUT_MS + 10000,
   /* The rows of elviraBoard (board.js): the trains between two stations. */
-  async elviraBetween(hass, originId, destId, minutesAfter, destName, opts) {
-    return (await this.elviraBoard(hass, originId, destId, minutesAfter, destName, opts)).rows;
+  async elviraBetween(ix, hass, originId, destId, minutesAfter, destName, opts) {
+    needIndexes(ix);
+    return (await BkkLib.elviraBoard(ix, hass, originId, destId, minutesAfter, destName, opts)).rows;
   },
   /* A failed call's reason, as text for the banner. home-assistant-js-
      websocket does not reject with an Error: a call the dropped socket cut

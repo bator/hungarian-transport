@@ -43,14 +43,10 @@ export class BKKPlannerCard extends BKKHopCard {
     /* The journey plan (lib/journey-plan.js): the plan for now or for a
        chosen time, and which answer is current. The planning time lives on
        the card only: a saved time would be stale on the next visit. */
-    this._planner = BkkLib.journeyPlanSources({
-      cfg: () => this._config,
-      apiKey: () => this._apiKey(),
-      hass: () => this._hass,
-    });
+    this._planner = BkkLib.journeyPlanSources(this._ctx);
     this._plan = BkkLib.journeyPlan({
       planner: this._planner,
-      now: () => Date.now(),
+      now: () => this._ctx.now(),
       changed: (part) => (part === 'journey' ? this._paintJourney() : this._paint()),
     });
     /* The itinerary a journey map open still waiting draws (_openJourneyMap). */
@@ -1670,7 +1666,7 @@ ${this._stopPinCss()}
       this._err = '';
       if (!this._hasFutar()) await this._fillKey();
       if (this._originSearch.stale(seq)) return;
-      const hits = await BkkLib.withIndexes(this._config).searchPlannerStops(this._apiKey(), q);
+      const hits = await BkkLib.searchPlannerStops(this._ctx.indexes(), this._apiKey(), q);
       if (this._originSearch.stale(seq)) return;
       if (!hits.length) {
         this._hint(box, 'mode.empty');
@@ -1747,7 +1743,8 @@ ${this._stopPinCss()}
         this._dests = [];
         this._destRoutes = {};
       } else {
-        const out = await BkkLib.withIndexes(this._config).reachableDests(
+        const out = await BkkLib.reachableDests(
+          this._ctx.indexes(),
           this._apiKey(),
           this._tripCache || {},
           { id: cfg.stopId, name: cfg.stopName || '' },
@@ -1794,7 +1791,7 @@ ${this._stopPinCss()}
     }
     try {
       if (!this._hasFutar()) await this._fillKey();
-      const extras = await BkkLib.withIndexes(this._config).searchPlannerStops(this._apiKey(), q);
+      const extras = await BkkLib.searchPlannerStops(this._ctx.indexes(), this._apiKey(), q);
       if (this._destSearch.stale(seq)) return;
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
       if (!hits.length && this._destsLoading) {

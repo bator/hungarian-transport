@@ -1,4 +1,5 @@
 import { DEPART_MINUTES_AFTER, clampMinutesAfter, departureStillDue, maxDepartureRows } from '../config.js';
+import { needIndexes } from '../lib/context.js';
 import { BkkLib, register } from '../lib/core.js';
 import { routePatternStore } from '../lib/route-patterns.js';
 
@@ -10,11 +11,12 @@ register({
   /* The page's route patterns, kept in the browser between page loads
      (route-patterns.js). */
   routePatterns: routePatternStore(),
-  async addTransitousVolanStops(byId, q, motisHits) {
+  async addTransitousVolanStops(ix, byId, q, motisHits) {
+    needIndexes(ix);
     const motis = motisHits || await BkkLib.searchStopsTransitous(q);
     let idx = null;
     try {
-      idx = await this.volanIndex();
+      idx = await ix.volan();
     } catch (_e) {
       idx = null;
     }
@@ -44,21 +46,22 @@ register({
       });
     });
   },
-  async searchStops(apiKey, q, mode, city, opts) {
+  async searchStops(ix, apiKey, q, mode, city, opts) {
+    needIndexes(ix);
     const byId = new Map();
     if (mode === 'volan' || mode === 'all') {
       try {
-        (await this.volanSearchStops(q)).forEach((s) => byId.set(s.id, s));
+        (await BkkLib.volanSearchStops(ix, q)).forEach((s) => byId.set(s.id, s));
       } catch (_e) { /* GTFS index optional */ }
       try {
         if (!(opts && opts.skipTransitousVolan)) {
-          await this.addTransitousVolanStops(byId, q);
+          await BkkLib.addTransitousVolanStops(ix, byId, q);
         }
       } catch (_e) { /* Transitous names are extra coverage */ }
     }
     if (mode === 'all') {
       try {
-        const idx = await this.cityIndex();
+        const idx = await ix.city();
         const seenFold = new Set();
         BkkLib.citySearchAll(idx, q).forEach((s) => {
           const opId = BkkLib.cityOpId(idx, s);
@@ -78,7 +81,7 @@ register({
     }
     if (mode === 'helyi') {
       try {
-        (await this.citySearchStops(q, city)).forEach((s) => byId.set(s.id, s));
+        (await BkkLib.citySearchStops(ix, q, city)).forEach((s) => byId.set(s.id, s));
       } catch (_e) { /* GTFS index optional */ }
       return BkkLib.groupStops(Array.from(byId.values())).slice(0, 20);
     }
@@ -451,9 +454,10 @@ register({
     });
     return names;
   },
-  async reachableDests(apiKey, cache, stop, mode, city) {
+  async reachableDests(ix, apiKey, cache, stop, mode, city) {
+    needIndexes(ix);
     if (mode === 'helyi') {
-      return this.cityReachableDests(stop, city);
+      return BkkLib.cityReachableDests(ix, stop, city);
     }
     let out = { dests: [], destRoutes: {} };
     try {
@@ -525,14 +529,14 @@ register({
     }
     if (mode === 'volan' || mode === 'all') {
       try {
-        out = BkkLib.mergeDestIndex(await this.volanReachableDests(stop), out);
+        out = BkkLib.mergeDestIndex(await BkkLib.volanReachableDests(ix, stop), out);
       } catch (_e) { /* GTFS index optional */ }
     }
     if (mode === 'all') {
       try {
-        const idx = await this.cityIndex();
+        const idx = await ix.city();
         const cityId = BkkLib.cityOpId(idx, stop);
-        if (cityId) out = BkkLib.mergeDestIndex(await this.cityReachableDests(stop, cityId), out);
+        if (cityId) out = BkkLib.mergeDestIndex(await BkkLib.cityReachableDests(ix, stop, cityId), out);
       } catch (_e) { /* city index optional */ }
     }
     return out;
@@ -569,12 +573,13 @@ register({
       return null;
     }
   },
-  async departures(apiKey, stopId, routeIds, dest, opts) {
+  async departures(ix, apiKey, stopId, routeIds, dest, opts) {
+    needIndexes(ix);
     opts = opts || {};
     const mode = opts.mode || (opts.mav ? 'mav' : 'bkk');
     const horizon = clampMinutesAfter(opts.minutesAfter);
     if (mode === 'helyi') {
-      let cityRows = await this.cityDepartures(stopId, dest, opts.originName, opts.city, horizon);
+      let cityRows = await BkkLib.cityDepartures(ix, stopId, dest, opts.originName, opts.city, horizon);
       cityRows = await BkkLib.fillTransitousIfEmpty(
         cityRows,
         /* With the stop's coordinates: by name alone "Kossuth tér" is any town's. */
@@ -856,7 +861,7 @@ register({
       let extraCity = [];
       if (mode === 'volan' || mode === 'all') {
         try {
-          extraVolan = await this.volanDepartures(stopId, dest, opts.originName, horizon);
+          extraVolan = await BkkLib.volanDepartures(ix, stopId, dest, opts.originName, horizon);
           if (mode === 'all' && selected.size) {
             extraVolan = extraVolan.filter((row) => selected.has('gtfs:' + row.label));
           }
@@ -866,10 +871,10 @@ register({
       }
       if (mode === 'all') {
         try {
-          const idx = await this.cityIndex();
+          const idx = await ix.city();
           const cityId = BkkLib.cityOpId(idx, { id: stopId, name: opts.originName || '' });
           if (cityId) {
-            extraCity = await this.cityDepartures(stopId, dest, opts.originName, cityId, horizon);
+            extraCity = await BkkLib.cityDepartures(ix, stopId, dest, opts.originName, cityId, horizon);
           }
         } catch (_e) { /* city index optional */ }
       }

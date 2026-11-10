@@ -1,3 +1,4 @@
+import { needIndexes } from '../lib/context.js';
 import { BkkLib, register } from '../lib/core.js';
 
 /* ELVIRA station codes found by name, kept in the browser between page
@@ -587,7 +588,8 @@ register({
      stop with no code, null when the search failed (asked again next time). */
   _elviraCodes: new Map(),
   _elviraSearches: new Map(),
-  async elviraResolveCode(apiKey, id, name) {
+  async elviraResolveCode(ix, apiKey, id, name) {
+    needIndexes(ix);
     const direct = BkkLib.elviraStationCode(id);
     if (direct) return direct;
     const mapped = BkkLib.elviraCodeFromName(name);
@@ -607,7 +609,7 @@ register({
     const searchKey = (via ? 'key:' + via : 'integration') + '|' + memoKey;
     let search = BkkLib._elviraSearches.get(searchKey);
     if (!search) {
-      search = this._searchElviraCode(apiKey, n).then((code) => {
+      search = BkkLib._searchElviraCode(ix, apiKey, n).then((code) => {
         /* A search that failed (a FUTÁR timeout) is no answer: only a real
            "no such station" is kept. */
         if (code !== null) {
@@ -625,12 +627,13 @@ register({
   },
   /* The station code by name, '' when FUTÁR has none, null when a search
      failed and nothing was found: that one is asked again next time. */
-  async _searchElviraCode(apiKey, n) {
+  async _searchElviraCode(ix, apiKey, n) {
+    needIndexes(ix);
     /* searchStops asks the name's aliases (its station key too) itself. */
     const how = {};
     let hits;
     try {
-      hits = (await this.searchStops(apiKey, n, 'mav', null, how)) || [];
+      hits = (await BkkLib.searchStops(ix, apiKey, n, 'mav', null, how)) || [];
     } catch (_e) {
       return null;
     }

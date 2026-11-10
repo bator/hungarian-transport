@@ -13,6 +13,7 @@ import './src/lib/services.js';
 import './src/lib/vehicles.js';
 import './src/lib/rows.js';
 import './src/lib/elvira-rows.js';
+import './src/lib/context.js';
 import { elviraSource } from './src/lib/board.js';
 
 /* Row helpers compare departures with the real clock (still due?), so the
@@ -20,6 +21,9 @@ import { elviraSource } from './src/lib/board.js';
 const T0 = Math.floor(Date.now() / 1000);
 const ELVIRA_HASS = { states: {}, services: { hungarian_transport: { elvira_between: {} } } };
 const NO_SERVICES = { states: {}, services: {} };
+/* An index resolver with no index: the ELVIRA source only hands it on. */
+const noIndex = async () => { throw new Error('no index here'); };
+const NO_INDEXES = { volan: noIndex, city: noIndex, mav: noIndex };
 const KELENFOLD = {
   stopId: 'BKK_005501024', stopName: 'Budapest-Kelenföld',
   destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269', routeIds: [],
@@ -68,12 +72,15 @@ function screen(cfg, opts) {
   const state = opts.state || { viaFutarUntil: 0 };
   const poll = (src, mine) => {
     const own = mine || gen.now;
+    const tripCache = {};
     return BkkLib.nextBoard({
-      cfg,
+      ctx: BkkLib.cardContext({
+        cfg: () => cfg,
+        hass: () => opts.hass || NO_SERVICES,
+        apiKey: () => opts.apiKey || '',
+        tripCache: () => tripCache,
+      }),
       mode: opts.mode || BkkLib.mode(cfg),
-      hass: () => opts.hass || NO_SERVICES,
-      apiKey: () => opts.apiKey || '',
-      tripCache: {},
       state,
       board: () => board,
       show: (b) => {
@@ -431,7 +438,7 @@ test('a place as origin has no board of its own', async () => {
 
 /* The ELVIRA source (elviraSource): one per page, shared by every MÁV
    card and the planner. */
-function elvira(answer) {
+function elvira(answer, resolve) {
   const sent = [];
   const warns = [];
   const clock = { ms: T0 * 1000 };
@@ -444,14 +451,15 @@ function elvira(answer) {
     },
     now: () => clock.ms,
     warn: (...args) => warns.push(args.map(String).join(' ')),
+    resolve: resolve || (async () => { throw new Error('every stop here has its station code'); }),
   });
-  const ask = (destId, opts) => source.board(BkkLib, ELVIRA_HASS, 'BKK_005501024', destId || 'BKK_005503269', 60, 'Székesfehérvár', opts || {});
+  const ask = (destId, opts) => source.board(NO_INDEXES, ELVIRA_HASS, 'BKK_005501024', destId || 'BKK_005503269', 60, 'Székesfehérvár', opts || {});
   return { source, sent, warns, clock, ask };
 }
 
 test('ELVIRA is not asked without the elvira_between service', async () => {
   const e = elvira({ response: { departures: [] } });
-  const board = await e.source.board(BkkLib, { states: {}, services: { hungarian_transport: { futar: {} } } }, 'BKK_005501024', 'BKK_005503269', 60, '', {});
+  const board = await e.source.board(NO_INDEXES, { states: {}, services: { hungarian_transport: { futar: {} } } }, 'BKK_005501024', 'BKK_005503269', 60, '', {});
   assert.deepEqual([board.error, e.sent.length], ['', 0]);
 });
 
@@ -541,15 +549,20 @@ test('elvira_between gets a planned time as at, and a destination name cut to 10
   assert.equal(e.sent[0].at, later);
   assert.ok(!('at' in e.sent[1]) && !('at' in e.sent[2]));
   const longName = 'Székesfehérvár '.repeat(10);
-  await e.source.board(BkkLib, ELVIRA_HASS, 'BKK_005501024', 'BKK_005503269', 60, longName, {});
+  await e.source.board(NO_INDEXES, ELVIRA_HASS, 'BKK_005501024', 'BKK_005503269', 60, longName, {});
   assert.equal(e.sent[3].dest_name, longName.slice(0, 100));
 });
 
 test('a stop without a station code says so; a station search that failed is not that', async () => {
-  const e = elvira({ response: { departures: [] } });
-  const lib = (code) => ({ elviraResolveCode: async () => code });
-  const noCode = await e.source.board(lib(''), ELVIRA_HASS, 'BKK_005501024', '', 60, 'Győr', {});
-  const failed = await e.source.board(lib(null), ELVIRA_HASS, 'BKK_005501024', 'BKK_F0GYRX', 60, 'Győrkeresx', {});
+  const codes = { Győr: '', Győrkeresx: null };
+  const asked = [];
+  const e = elvira({ response: { departures: [] } }, async (ix, _key, _id, name) => {
+    asked.push(ix);
+    return codes[name];
+  });
+  const noCode = await e.source.board(NO_INDEXES, ELVIRA_HASS, 'BKK_005501024', '', 60, 'Győr', {});
+  const failed = await e.source.board(NO_INDEXES, ELVIRA_HASS, 'BKK_005501024', 'BKK_F0GYRX', 60, 'Győrkeresx', {});
+  assert.ok(asked.length === 2 && asked.every((ix) => ix === NO_INDEXES));
   assert.deepEqual([noCode.error, noCode.detail], ['no_code', 'Győr']);
   assert.deepEqual([failed.error, failed.detail], ['code_search_failed', 'Győrkeresx']);
   assert.equal(e.sent.length, 0);
