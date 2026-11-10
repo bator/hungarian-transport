@@ -144,6 +144,22 @@ Object.assign(BkkLib, {
       });
     });
   },
+  /* FUTÁR plan-trip between two stops, with the request's own parameters
+     (how many itineraries, the window or the time). Null when either end
+     has no FUTÁR place, or without FUTÁR; a request that fails throws. */
+  async futarPlanTrip(apiKey, origin, dest, params) {
+    if (!BkkLib.hasFutar(apiKey)) return null;
+    const [fromPlace, toPlace] = await Promise.all([
+      BkkLib.planPlace(apiKey, origin),
+      BkkLib.planPlace(apiKey, dest),
+    ]);
+    if (!fromPlace || !toPlace) return null;
+    return BkkLib.fetch(apiKey, 'plan-trip.json', Object.assign({
+      fromPlace,
+      toPlace,
+      mode: 'TRANSIT,WALK',
+    }, params), true);
+  },
   /* Several itineraries for the planner's chosen time: Transitous first,
      FUTÁR plan-trip when it has none. Nothing found because every source
      that was asked failed (Transitous down, FUTÁR down or not set up)
@@ -155,25 +171,17 @@ Object.assign(BkkLib, {
     let list = motis.list;
     let failed = motis.failed;
     let answered = motis.answered;
-    if (!list.length && BkkLib.hasFutar(apiKey)) {
-      const [fromPlace, toPlace] = await Promise.all([
-        BkkLib.planPlace(apiKey, origin),
-        BkkLib.planPlace(apiKey, dest),
-      ]);
-      if (fromPlace && toPlace) {
-        try {
-          const data = await BkkLib.fetch(apiKey, 'plan-trip.json', Object.assign({
-            fromPlace,
-            toPlace,
-            mode: 'TRANSIT,WALK',
-            numItineraries: '6',
-          }, BkkLib.futarPlanTime(opts)), true);
+    if (!list.length) {
+      try {
+        const data = await BkkLib.futarPlanTrip(apiKey, origin, dest,
+          Object.assign({ numItineraries: '6' }, BkkLib.futarPlanTime(opts)));
+        if (data) {
           list = BkkLib.journeysFromPlan(data).filter((j) => j.legs.some((leg) => !leg.walk));
           answered = true;
-        } catch (_e) {
-          list = [];
-          failed = true;
         }
+      } catch (_e) {
+        list = [];
+        failed = true;
       }
     }
     /* A city feed's stop to a station has no planner of its own: the
@@ -218,26 +226,15 @@ Object.assign(BkkLib, {
     const motis = await BkkLib.transitousJourney(origin, dest, opts);
     if (motis && motis.legs.some((leg) => !leg.walk)) return BkkLib.nameJourneyEnds(motis, origin, dest);
     let futar = null;
-    if (BkkLib.hasFutar(apiKey)) {
-      const [fromPlace, toPlace] = await Promise.all([
-        BkkLib.planPlace(apiKey, origin),
-        BkkLib.planPlace(apiKey, dest),
-      ]);
-      if (fromPlace && toPlace) {
-        try {
-          const horizon = clampMinutesAfter(opts.minutesAfter);
-          const data = await BkkLib.fetch(apiKey, 'plan-trip.json', {
-            fromPlace,
-            toPlace,
-            mode: 'TRANSIT,WALK',
-            numItineraries: String(Math.min(12, Math.max(5, Math.round(horizon / 40)))),
-            searchWindow: String(horizon * 60),
-          }, true);
-          futar = BkkLib.journeyFromPlan(data);
-        } catch (_e) {
-          futar = null;
-        }
-      }
+    try {
+      const horizon = clampMinutesAfter(opts.minutesAfter);
+      const data = await BkkLib.futarPlanTrip(apiKey, origin, dest, {
+        numItineraries: String(Math.min(12, Math.max(5, Math.round(horizon / 40)))),
+        searchWindow: String(horizon * 60),
+      });
+      if (data) futar = BkkLib.journeyFromPlan(data);
+    } catch (_e) {
+      futar = null;
     }
     if (futar && futar.legs.some((leg) => !leg.walk)) return BkkLib.nameJourneyEnds(futar, origin, dest);
     const viaCity = await this.cityRailJourney(apiKey, hass, origin, dest);
