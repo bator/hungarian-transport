@@ -627,6 +627,7 @@ Every attribute is listed in
 | No platform, **H** or **OB** marks on MÁV rows | MÁV ELVIRA did not answer, and the card had no trains of its own yet. | Nothing to do: the trains come from Transitous meanwhile, and the marks come back on their own. |
 | A train's map is a straight line between stations | No route data for that train. | Add the MÁV timetable ([3.4](#34-train-routes-on-the-map-optional)). |
 | "Custom element doesn't exist" after an update | The browser loaded the page before the new card. | Restart Home Assistant after updating, then reload the page. |
+| "Configuration error" on every card after a Home Assistant restart | The page was loaded while Home Assistant was still starting, before the integration had added the cards. | The integration also keeps the cards as a Lovelace resource (Settings → Dashboards → Resources, a `/hungarian-transport/` entry), which such a page still loads; it is set after every start. With resources in YAML mode, add `/hungarian-transport/hungarian-transport-loader.js` as a module yourself, or reload the page. |
 | A coach connection you know of is missing | The official timetable has no such direct service (for example, coaches to Székesfehérvár leave from Népliget, not Kelenföld). | The card shows the official timetable only. Try the planner for a route with a transfer. |
 
 ---

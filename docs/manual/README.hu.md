@@ -649,6 +649,7 @@ Az összes attribútum leírása:
 | Nincs vágány, **H** vagy **OB** jel a MÁV sorokon | A MÁV ELVIRA nem válaszolt, és a kártyán még nem volt saját vonat. | Nincs teendő: addig a vonatok a Transitousból jönnek, a jelek maguktól visszajönnek. |
 | Egy vonat térképe egyenes vonal az állomások között | Ehhez a vonathoz nincs útvonaladat. | Add hozzá a MÁV menetrendet ([3.4](#34-vonatútvonalak-a-térképen-opcionális)). |
 | „Custom element doesn't exist” frissítés után | A böngésző az új kártya előtt töltötte be az oldalt. | Frissítés után indítsd újra a Home Assistantot, aztán töltsd újra az oldalt. |
+| „Configuration error” minden kártyán egy Home Assistant-újraindítás után | Az oldal még az indulás közben töltődött be, mielőtt az integráció hozzáadta a kártyákat. | Az integráció a kártyákat Lovelace-erőforrásként is felveszi (Beállítások → Irányítópultok → Erőforrások, egy `/hungarian-transport/` bejegyzés), ezt az ilyen oldal is betölti; minden indulás után beállítja. Ha az erőforrások YAML-módban vannak, vedd fel kézzel a `/hungarian-transport/hungarian-transport-loader.js` modult, vagy töltsd újra az oldalt. |
 | Hiányzik egy buszjárat, amiről tudsz | A hivatalos menetrendben nincs ilyen közvetlen járat (például a székesfehérvári buszok a Népligetről indulnak, nem Kelenföldről). | A kártya csak a hivatalos menetrendet mutatja. Átszállásos útért próbáld a tervezőt. |
 
 ---

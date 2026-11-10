@@ -25,7 +25,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 from homeassistant.util import dt as dt_util
 
-from . import mav, mav_daily, realtime, timetable_notify, timetables
+from . import lovelace_resource, mav, mav_daily, realtime, timetable_notify, timetables
 from .assets import asset_tag
 from .cache import close_on_stop, hass_call_later
 from .const import (
@@ -344,6 +344,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     card_url = f"{entry_url}?v={integration.version}" + (f"-{tag}" if tag else "")
     hass.data.setdefault(DOMAIN, {})["card_url"] = card_url
     frontend.add_extra_js_url(hass, card_url)
+
+    # A page served before this point has no extra module at all: the same
+    # URL as a Lovelace resource reaches it (lovelace_resource.py). Lovelace
+    # is surely up once Home Assistant has started.
+    async def _sync_resource(_hass: HomeAssistant) -> None:
+        try:
+            await lovelace_resource.async_sync_resource(hass, card_url)
+        except Exception:  # noqa: BLE001 - the extra module still loads the cards
+            _LOGGER.warning("Could not keep the cards as a Lovelace resource", exc_info=True)
+
+    async_at_started(hass, _sync_resource)
     return True
 
 
@@ -451,6 +462,14 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return True
     frontend.remove_extra_js_url(hass, card_url)
     return True
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """The integration is removed: so is its Lovelace resource."""
+    try:
+        await lovelace_resource.async_remove_resource(hass)
+    except Exception:  # noqa: BLE001 - removal goes on
+        _LOGGER.warning("Could not remove the cards' Lovelace resource", exc_info=True)
 
 
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)

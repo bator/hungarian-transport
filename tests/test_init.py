@@ -76,6 +76,50 @@ async def test_setup_serves_card_and_registers_service(hass, hass_client) -> Non
 
 
 
+def _our_resources(hass: HomeAssistant) -> list[dict]:
+    return [
+        item for item in hass.data["lovelace"].resources.async_items()
+        if item["url"].startswith("/hungarian-transport/")
+    ]
+
+
+async def test_cards_are_a_lovelace_resource_too(hass, hass_client) -> None:
+    """A page served while Home Assistant starts has no extra modules: the
+    same URL as a storage-mode Lovelace resource still loads the cards."""
+    assert await async_setup_component(hass, "lovelace", {})
+    resources = hass.data["lovelace"].resources
+    if not resources.loaded:
+        await resources.async_load()
+        resources.loaded = True
+    # Someone else's resource, and two stale ones of ours (an old version).
+    await resources.async_create_item({"res_type": "module", "url": "/local/other-card.js"})
+    await resources.async_create_item({"res_type": "js", "url": "/hungarian-transport/hungarian-transport.js?v=1.0"})
+    await resources.async_create_item({"res_type": "module", "url": "/hungarian-transport/hungarian-transport-loader.js?v=0.9"})
+    entry = await _setup(hass)
+    card_url = hass.data[DOMAIN]["card_url"]
+    ours = _our_resources(hass)
+    assert [(item["type"], item["url"]) for item in ours] == [("module", card_url)]
+    assert any(item["url"] == "/local/other-card.js" for item in resources.async_items())
+    # The next start keeps the one resource as it is.
+    item_id = ours[0]["id"]
+    await integration.lovelace_resource.async_sync_resource(hass, card_url)
+    assert [item["id"] for item in _our_resources(hass)] == [item_id]
+    # Removing the integration removes its resource, not the others.
+    await integration.async_remove_entry(hass, entry)
+    assert _our_resources(hass) == []
+    assert any(item["url"] == "/local/other-card.js" for item in resources.async_items())
+
+
+async def test_yaml_mode_resources_are_left_alone(hass) -> None:
+    from homeassistant.components.lovelace import const as lovelace_const
+
+    key = "resource_mode" if hasattr(lovelace_const, "CONF_RESOURCE_MODE") else "mode"
+    assert await async_setup_component(hass, "lovelace", {"lovelace": {key: "yaml"}})
+    await _setup(hass)
+    assert integration.lovelace_resource._storage_resources(hass) is None
+    assert [item for item in hass.data["lovelace"].resources.async_items() if "hungarian" in item["url"]] == []
+
+
 async def test_card_url_changes_with_the_bundle(hass, card_assets) -> None:
     """?v carries the release version and a hash of the bundle and loader, so
     a www/ rebuilt from source (same manifest version) is a new URL."""
