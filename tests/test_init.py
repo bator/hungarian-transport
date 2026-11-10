@@ -22,7 +22,7 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 import custom_components.hungarian_transport as integration
-from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS, elvira, mav
+from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS, elvira, mav, responses
 from custom_components.hungarian_transport import cache as cache_mod
 from custom_components.hungarian_transport.assets import asset_tag
 from custom_components.hungarian_transport.const import (
@@ -939,8 +939,11 @@ async def test_services_answer_without_an_error_while_the_entry_comes_up(
     assert gate.is_set()
     assert len(answers) == (2 if starting else 1)
     for elvira_answer, rt_answer in answers:
-        assert elvira_answer["departures"] == [] and elvira_answer["error"] == "elvira_unavailable"
-        assert rt_answer == {"feed": "volan", "trips": {}, "error": "rt_unavailable"}
+        # As JSON, the cards' view: the same keys in the same order.
+        assert json.dumps(elvira_answer) == json.dumps(
+            {"departures": [], "error": "elvira_unavailable", "detail": integration.NOT_READY}
+        )
+        assert json.dumps(rt_answer) == '{"feed": "volan", "trips": {}, "error": "rt_unavailable"}'
     assert aioclient_mock.call_count == 0
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
@@ -1125,13 +1128,10 @@ def test_exception_translations_are_raised_and_error_codes_documented(lang) -> N
     source = "\n".join(p.read_text(encoding="utf-8") for p in _PKG.glob("*.py") if p.name != "sensor.py")
     raised = set(re.findall(r'translation_key="(\w+)"', source))
     assert set(strings["exceptions"]) == raised
-    # Every module that answers a card can set a response code, not only __init__.py.
-    codes = set(re.findall(r'"error": "(\w+)"', source))
-    assert codes == {
-        "elvira_rate_limited", "elvira_unavailable", "futar_auth", "futar_bad_request", "futar_rate_limited",
-        "futar_unavailable", "rt_no_feed", "rt_unavailable",
-    }
-    for code in codes:
-        service = code.split("_")[0]
-        service = {"elvira": "elvira_between", "rt": "realtime"}.get(service, service)
-        assert code in strings["services"][service]["description"], code
+    # A card's response codes come from one table (responses.py), each
+    # explained in its own service's description; one written out by hand
+    # would slip past it.
+    assert not re.search(r'"(?:error|dest_error)": "', source)
+    for service, codes in responses.CODES.items():
+        for code in codes:
+            assert code in strings["services"][service]["description"], (service, code)

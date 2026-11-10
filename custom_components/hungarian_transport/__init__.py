@@ -1,5 +1,6 @@
 """Home Assistant integration for Hungarian transport services and card assets."""
 
+from collections.abc import Awaitable, Callable
 import logging
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,16 @@ from .futar import (
     FutarError,
     FutarProxy,
     FutarRateLimited,
+)
+from .responses import (
+    ELVIRA_RATE_LIMITED,
+    ELVIRA_UNAVAILABLE,
+    FUTAR_AUTH,
+    FUTAR_BAD_REQUEST,
+    FUTAR_RATE_LIMITED,
+    FUTAR_UNAVAILABLE,
+    RT_UNAVAILABLE,
+    error_answer,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -176,6 +187,43 @@ async def _require_admin(hass: HomeAssistant, call: ServiceCall) -> None:
         raise Unauthorized(context=call.context)
 
 
+CardHandler = Callable[[ServiceCall], Awaitable[dict[str, Any]]]
+
+
+def _card_service(
+    hass: HomeAssistant,
+    empty: Callable[[ServiceCall], dict[str, Any]],
+    errors: tuple[tuple[type[Exception], str], ...] = (),
+    *,
+    starting: str | None = None,
+    starting_detail: str | None = None,
+) -> Callable[[CardHandler], CardHandler]:
+    """What every card service does around its handler (responses.py).
+
+    `starting`: the code a card gets while the entry is starting or
+    reloading (every open card polls through it: an answer, not an ERROR
+    line per poll); such a service refuses while the entry is unloaded.
+    None for a service that exists only while the entry is loaded.
+    `errors`: an exception of the handler's, answered as its code (the
+    first class that matches). `empty` is the answer's data part then."""
+
+    def wrap(handler: CardHandler) -> CardHandler:
+        async def handle(call: ServiceCall) -> dict[str, Any]:
+            if starting is not None:
+                if _entry_coming_up(hass):
+                    return error_answer(empty(call), starting, starting_detail)
+                _require_entry(hass)
+            try:
+                return await handler(call)
+            except tuple(exc for exc, _code in errors) as err:
+                code = next(code for exc, code in errors if isinstance(err, exc))
+                return error_answer(empty(call), code, str(err))
+
+        return handle
+
+    return wrap
+
+
 def _station_code(call: ServiceCall, field: str) -> str:
     code = station_code_digits(call.data[field])
     if len(code) != 9:
@@ -221,12 +269,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     )
     session = async_get_clientsession(hass)
 
+    # An outage is an answer (elvira.py logs it once), and so is the
+    # integration's own request limit, which is not MÁV being down.
+    @_card_service(
+        hass,
+        lambda _call: {"departures": []},
+        ((ElviraRateLimited, ELVIRA_RATE_LIMITED), (ElviraError, ELVIRA_UNAVAILABLE)),
+        starting=ELVIRA_UNAVAILABLE,
+        starting_detail=NOT_READY,
+    )
     async def handle_elvira_between(call: ServiceCall) -> dict[str, Any]:
-        if _entry_coming_up(hass):
-            # Every open card polls through a reload or the startup: an
-            # answer, as for an outage, not an ERROR line per poll.
-            return {"departures": [], "error": "elvira_unavailable", "detail": NOT_READY}
-        _require_entry(hass)
         origin = _station_code(call, "origin_code")
         dest = _station_code(call, "dest_code")
         if origin == dest:
@@ -234,29 +286,20 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
                 translation_domain=DOMAIN,
                 translation_key="same_station",
             )
-        try:
-            rows, dest_failure = await elvira_between(
-                session,
-                hass,
-                origin,
-                dest,
-                call.data["minutes_after"],
-                call.data["dest_name"],
-                call.data.get("at"),
-            )
-        except ElviraRateLimited as err:
-            # The integration's own limit, not MÁV being down.
-            return {"departures": [], "error": "elvira_rate_limited", "detail": str(err)}
-        except ElviraError as err:
-            # An outage, not an empty board, but no exception either: the
-            # websocket API logs every failed call at ERROR, and every card
-            # polls every 45 s. elvira.py logs the outage once.
-            return {"departures": [], "error": "elvira_unavailable", "detail": str(err)}
+        rows, dest_failure = await elvira_between(
+            session,
+            hass,
+            origin,
+            dest,
+            call.data["minutes_after"],
+            call.data["dest_name"],
+            call.data.get("at"),
+        )
         if dest_failure is None:
             return {"departures": rows}
         # The rows still come, but without the destination's arrivals their
         # destHit is not to be trusted.
-        code = "elvira_rate_limited" if isinstance(dest_failure, ElviraRateLimited) else "elvira_unavailable"
+        code = ELVIRA_RATE_LIMITED if isinstance(dest_failure, ElviraRateLimited) else ELVIRA_UNAVAILABLE
         return {"departures": rows, "dest_error": code}
 
     hass.services.async_register(
@@ -277,13 +320,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
         ),
     )
 
+    # Feed outages are part of the hub's answer (rt_unavailable, rt_no_feed).
+    @_card_service(hass, lambda call: {"feed": call.data["feed"], "trips": {}}, starting=RT_UNAVAILABLE)
     async def handle_realtime(call: ServiceCall) -> dict[str, Any]:
-        if _entry_coming_up(hass):
-            # As for elvira_between: the cards retry on their next poll.
-            return {"feed": call.data["feed"], "trips": {}, "error": "rt_unavailable"}
-        _require_entry(hass)
-        # Feed outages are part of the response (rt_unavailable, rt_no_feed),
-        # not exceptions: the websocket API logs every failed call at ERROR.
         return await hub.query(call.data["feed"], call.data["trips"])
 
     hass.services.async_register(
@@ -414,28 +453,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(proxy.close)
     entry.async_on_unload(close_on_stop(hass, proxy.close))
 
+    # The proxy logs an outage or a rejected key once. A rate limit is the
+    # integration's own or FUTÁR's for the key (HTTP 429), and a bad request
+    # was never sent: neither is BKK being down.
+    @_card_service(
+        hass,
+        lambda _call: {"data": None},
+        (
+            (FutarAuthError, FUTAR_AUTH),
+            (FutarRateLimited, FUTAR_RATE_LIMITED),
+            (FutarBadRequest, FUTAR_BAD_REQUEST),
+            (FutarError, FUTAR_UNAVAILABLE),
+        ),
+    )
     async def handle_futar(call: ServiceCall) -> dict[str, Any]:
-        # Errors are part of the response, not exceptions: the websocket API
-        # logs every failed call at ERROR, and cards poll every 45 s. The
-        # proxy logs an outage or a rejected key once.
         try:
             data = await proxy.get(call.data["path"], call.data["params"])
-        except FutarAuthError as err:
+        except FutarAuthError:
             # The stored key stopped working (revoked, expired): ask for a new
             # one in the UI instead of failing every card poll quietly. The
             # proxy fails fast for a while, or until a key saved in the
             # options reloads the entry.
             entry.async_start_reauth(hass)
-            return {"data": None, "error": "futar_auth", "detail": str(err)}
-        except FutarRateLimited as err:
-            # The integration's own limit, or FUTÁR's for the key (HTTP 429):
-            # not BKK being down.
-            return {"data": None, "error": "futar_rate_limited", "detail": str(err)}
-        except FutarBadRequest as err:
-            # The call itself is wrong (never sent): not BKK being down.
-            return {"data": None, "error": "futar_bad_request", "detail": str(err)}
-        except FutarError as err:
-            return {"data": None, "error": "futar_unavailable", "detail": str(err)}
+            raise
         return {"data": data}
 
     hass.services.async_register(

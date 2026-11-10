@@ -22,7 +22,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-import custom_components.hungarian_transport as integration
 from custom_components.hungarian_transport import realtime
 from custom_components.hungarian_transport.const import DOMAIN, SERVICE_REALTIME
 
@@ -709,16 +708,6 @@ async def test_fetches_are_rate_limited(aioclient_mock, freezer, caplog) -> None
     assert aioclient_mock.call_count == realtime.FETCH_BURST
     assert sum(1 for a in answers if a.get("error") == "rt_unavailable") == 5
     assert "rate limit" in caplog.text
-
-
-def test_error_codes_are_documented() -> None:
-    pkg = Path(integration.__file__).parent
-    codes = set(re.findall(r'"error": "(rt_\w+)"', (pkg / "realtime.py").read_text(encoding="utf-8")))
-    assert codes == {"rt_no_feed", "rt_unavailable"}
-    for lang in ("en", "hu"):
-        strings = json.loads((pkg / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
-        for code in codes:
-            assert code in strings["services"]["realtime"]["description"], (lang, code)
 
 
 def test_static_zip_member_cap(monkeypatch) -> None:

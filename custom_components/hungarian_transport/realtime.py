@@ -33,6 +33,8 @@ import zlib
 
 import aiohttp
 
+from .responses import RT_NO_FEED, RT_UNAVAILABLE, error_answer
+
 _LOGGER = logging.getLogger(__name__)
 
 FEEDS_FILE = Path(__file__).parent / "realtime_feeds.json"
@@ -697,12 +699,12 @@ class RealtimeHub:
         feeds = await self.feeds()
         cfg = feeds.get(feed_id)
         if cfg is None:
-            return {"feed": feed_id, "trips": {}, "error": "rt_no_feed"}
+            return error_answer({"feed": feed_id, "trips": {}}, RT_NO_FEED)
         now = time.time() if now is None else now
         # Every source at once: MÁV has two, each up to FETCH_TIMEOUT cold.
         loaded = await asyncio.gather(*(self._source(cfg, src, now) for src in cfg.sources))
         if all(tu is None and vp is None for _src, tu, vp, _tr in loaded):
-            return {"feed": feed_id, "trips": {}, "error": "rt_unavailable"}
+            return error_answer({"feed": feed_id, "trips": {}}, RT_UNAVAILABLE)
         stamps = [f.timestamp for _s, tu, vp, _t in loaded for f in (tu, vp) if f is not None and f.timestamp]
         out: dict[str, Any] = {}
         for req in trips:
