@@ -12,15 +12,6 @@ const ELVIRA_BOARD_TIMEOUT_MS = 30000;
 const ELVIRA_BOARD_ROUNDS = 2;
 
 Object.assign(BkkLib, {
-  elviraRowsFromResult(res) {
-    if (!res) return [];
-    if (Array.isArray(res)) return res;
-    if (Array.isArray(res.departures)) return res.departures;
-    const payload = res.response || res.service_response;
-    if (payload && Array.isArray(payload.departures)) return payload.departures;
-    if (Array.isArray(payload)) return payload;
-    return [];
-  },
   /* The integration registers elvira_between; without it (an older or
      unloaded integration) every poll was one failing call_service. */
   hasElvira(hass) {

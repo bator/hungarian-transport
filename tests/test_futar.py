@@ -1,6 +1,7 @@
 """The FUTÁR proxy service keeps the BKK key in Home Assistant."""
 
 import asyncio
+import json
 from datetime import timedelta
 import re
 from pathlib import Path
@@ -87,6 +88,7 @@ async def test_upstream_calls_are_rate_limited(hass, aioclient_mock, monkeypatch
     assert aioclient_mock.call_count == futar.FUTAR_BURST
     # Its own error code: the card keeps quiet on it, unlike an outage.
     assert results[-3:] == [{"data": None, "error": "futar_rate_limited", "detail": "rate limited"}] * 3
+    assert json.dumps(results[-1]) == '{"data": null, "error": "futar_rate_limited", "detail": "rate limited"}'
     messages = [r.getMessage() for r in caplog.records if r.name.endswith(".futar")]
     assert len(messages) == 1 and "rate limit" in messages[0]
     assert not any("unavailable" in m or "answers again" in m for m in messages)

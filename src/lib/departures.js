@@ -612,7 +612,7 @@ Object.assign(BkkLib, {
     return out;
   },
   async travelMin(apiKey, tripId, destKey, dep, origin, cache) {
-    if (!tripId || !destKey || /^(gtfs:|elvira:|motis:)/.test(String(tripId))) return null;
+    if (!destKey || !BkkLib.isFutarTripId(tripId)) return null;
     try {
       const { sts, stops } = await BkkLib.tripDetails(apiKey, cache || {}, tripId);
       const oidx = BkkLib.originIndex(sts, stops, origin);
@@ -809,6 +809,7 @@ Object.assign(BkkLib, {
           const vehicle = BkkLib.vehicleKind(rt);
           candidates.push({
             tripId: st.tripId,
+            source: 'futar',
             label: rt.iconDisplayText || rt.shortName || '?',
             color: '#' + String(rt.color || fallbackColor).replace('#', ''),
             text: '#' + String(rt.textColor || fallbackText).replace('#', ''),
@@ -946,16 +947,16 @@ Object.assign(BkkLib, {
         } catch (_e) { /* city index optional */ }
       }
       if ((extraVolan.length || extraCity.length) && typeof opts.onPartial === 'function') {
-        let partial = BkkLib.mergeVolanRows(extraVolan, rows, maxRows);
-        partial = BkkLib.mergeVolanRows(extraCity, partial, maxRows);
+        let partial = BkkLib.mergeRows(rows, extraVolan, maxRows);
+        partial = BkkLib.mergeRows(partial, extraCity, maxRows);
         opts.onPartial(partial);
       }
       return { extraVolan, extraCity };
     })();
     const [futar, gtfs] = await Promise.all([futarTask, gtfsTask]);
-    rows = BkkLib.mergeVolanRows(futar, rows, maxRows);
-    rows = BkkLib.mergeVolanRows(gtfs.extraVolan, rows, maxRows);
-    rows = BkkLib.mergeVolanRows(gtfs.extraCity, rows, maxRows);
+    rows = BkkLib.mergeRows(rows, futar, maxRows);
+    rows = BkkLib.mergeRows(rows, gtfs.extraVolan, maxRows);
+    rows = BkkLib.mergeRows(rows, gtfs.extraCity, maxRows);
     if (opts.deferGps) return rows;
     return BkkLib.attachCoachGps(opts.hass, rows);
   },

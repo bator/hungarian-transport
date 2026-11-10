@@ -1088,7 +1088,7 @@ ${this._stopPinCss()}
     }
     const tripId = (row && row.tripId) || '';
     const canFutar = this._hasFutar() && (
-      !/^motis:/i.test(String(tripId || '')) || !!BkkLib.rowTrainNumber(row)
+      BkkLib.rowSource(row) !== 'motis' || !!BkkLib.rowTrainNumber(row)
     );
     let geomTrip = '';
     if (canFutar) {
@@ -1162,7 +1162,7 @@ ${this._stopPinCss()}
     if (!board) {
       board = BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
     }
-    if (!published && shape.length < 2 && /^gtfs:/i.test(String((row && row.tripId) || '')) && this._hass) {
+    if (!published && shape.length < 2 && BkkLib.rowSource(row) === 'gtfs' && this._hass) {
       try {
         const points = await BkkLib.coachShape(this._hass, row.label, row.headsign || '');
         shape = BkkLib.validMapShape(BkkLib.decodePolyline(points));
@@ -1717,7 +1717,7 @@ ${this._stopPinCss()}
         if (row.travel == null && old.travel != null) {
           row.travel = old.travelSched != null ? old.travelSched : old.travel;
         }
-        if (/^(gtfs:|motis:)/.test(String(row.tripId)) && !BkkLib.mapGpsLatLon(row.lat, row.lon)) {
+        if (['gtfs', 'motis'].includes(BkkLib.rowSource(row)) && !BkkLib.mapGpsLatLon(row.lat, row.lon)) {
           const gps = BkkLib.mapGpsLatLon(old.lat, old.lon);
           if (gps) {
             row.lat = gps[0];
@@ -1751,7 +1751,7 @@ ${this._stopPinCss()}
       if (this._rowsFilled) return fresh;
       const have = new Set(fresh.map((row) => String(row.tripId || '')));
       const kept = (this._rawRows || [])
-        .filter((row) => row && /^elvira:/.test(String(row.tripId || '')) && !have.has(String(row.tripId))
+        .filter((row) => BkkLib.rowSource(row) === 'elvira' && !have.has(String(row.tripId))
           && departureStillDue(row.dep))
         .map((row) => Object.assign({}, row));
       return fresh.concat(kept).sort((a, b) => (a.dep || 0) - (b.dep || 0));
@@ -1805,7 +1805,7 @@ ${this._stopPinCss()}
         /* Beside FUTÁR's rows ELVIRA only overlays, except a train the
            destination's board confirms that FUTÁR lacks (IC TÓPART at :37
            from Székesfehérvár): that one is listed as on a MÁV card. */
-        const elviraMerge = { overlayOnly: true, addUnmatched: (row) => BkkLib.mavBoardRows([row])[0] || null };
+        const addElvira = (row) => BkkLib.elviraBoardRows([row])[0] || null;
         const paintBoard = (list) => {
           paintRows(list);
           if (mavErr && gen === this._gen) this._showErr(mavErr);
@@ -1819,9 +1819,9 @@ ${this._stopPinCss()}
             return;
           }
           let list = futarFull
-            ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
+            ? BkkLib.mergeRows(earlyRows, futarFull, cap)
             : earlyRows.slice();
-          list = BkkLib.mergeVolanRows(list, elviraRows, cap, elviraMerge);
+          list = BkkLib.overlayRows(list, elviraRows, cap, addElvira);
           /* Through trips (the destination mid-route) come only from the
              through-check: an empty list before it answers is not "no
              departures". The first load keeps its spinner, a poll its rows. */
@@ -1867,9 +1867,9 @@ ${this._stopPinCss()}
             onPartial: (list) => {
               if (gen !== this._gen) return;
               const kept = (this._rowsFilled ? [] : (this._rawRows || []))
-                .filter((row) => BkkLib.isFutarTripId(row && row.tripId))
+                .filter((row) => BkkLib.rowSource(row) === 'futar')
                 .map((row) => Object.assign({}, row));
-              paintRows(kept.length ? BkkLib.mergeVolanRows(list, kept, cap) : list);
+              paintRows(kept.length ? BkkLib.mergeRows(kept, list, cap) : list);
             },
             armThroughCheck: (fn) => { startThrough = fn; },
             onFutarUpdate: (full) => {
@@ -1894,7 +1894,7 @@ ${this._stopPinCss()}
             this._mavViaFutarUntil = Date.now() + BkkLib._elviraRetryMs;
             return run(board);
           }
-          elviraRows = BkkLib.mavBoardRows(board.rows);
+          elviraRows = BkkLib.elviraBoardRows(board.rows);
           if (board.error) {
             /* Only a stop FUTÁR has no station for asks for the editor; a
                station search that failed is FUTÁR's outage, for one poll. */
@@ -1910,7 +1910,8 @@ ${this._stopPinCss()}
            their GPS: an earlier pass saw a coach without it as one that lost
            it, and three passes raced each other on the estimate's times. */
         const firstRows = this._rawRows;
-        const needsTravel = (row) => row.travel == null && !/^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ''));
+        /* Only a FUTÁR trip has trip details to time the ride by. */
+        const needsTravel = (row) => row.travel == null && BkkLib.rowSource(row) === 'futar';
         const fillTravel = (list) => Promise.all((list || []).map(async (row) => {
           if (!needsTravel(row)) return;
           row.travel = await BkkLib.travelMin(
@@ -1960,9 +1961,9 @@ ${this._stopPinCss()}
           hosts = merged;
         } else {
           hosts = futarFull
-            ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
+            ? BkkLib.mergeRows(earlyRows, futarFull, cap)
             : earlyRows.slice();
-          merged = BkkLib.mergeVolanRows(hosts, elviraRows, cap, elviraMerge);
+          merged = BkkLib.overlayRows(hosts, elviraRows, cap, addElvira);
         }
         /* A city board is filled from Transitous inside departures() already:
            a second fill here only repeated the same lookups on every poll. */
@@ -1972,7 +1973,7 @@ ${this._stopPinCss()}
             minutesAfter: cfg.minutesAfter,
           });
           if (gen !== this._gen) return;
-          merged = BkkLib.mergeVolanRows(filled, elviraRows, cap, elviraMerge);
+          merged = BkkLib.overlayRows(filled, elviraRows, cap, addElvira);
           earlyRows = merged;
           paintBoard(merged);
           /* Transitous rows, not this board's own: a failed poll replaces

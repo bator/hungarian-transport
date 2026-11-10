@@ -1439,52 +1439,52 @@ check('elvira result parser reads top-level departures',
     vehicle: 'rail', rawType: 'RAIL', dep: dep, sched: dep,
   }, extra);
   check('numbered through express stays on the hop',
-    Lib.mergeVolanRows([], [rail({
+    Lib.mergeRows([rail({
       label: '16907', trainNumber: '16907', booking: true, tripId: 'elvira:3640191',
-    })], 12)[0].label === '16907');
+    })], [], 12)[0].label === '16907');
   check('numbered through személy stays on the hop',
-    Lib.mergeVolanRows([], [rail({
+    Lib.mergeRows([rail({
       label: '9792', trainNumber: '9792', booking: false, tripId: 'elvira:2888904',
-    })], 12)[0].label === '9792');
+    })], [], 12)[0].label === '9792');
   check('another numbered személy stays the same way',
-    Lib.mergeVolanRows([], [rail({
+    Lib.mergeRows([rail({
       label: '9704', trainNumber: '9704', booking: false, tripId: 'elvira:2888905',
-    })], 12)[0].label === '9704');
+    })], [], 12)[0].label === '9704');
   check('generic EX plus a long train number stays as EX',
-    Lib.mergeVolanRows([], [rail({
+    Lib.mergeRows([rail({
       label: 'EX', trainNumber: '16907', booking: true, tripId: 'elvira:1',
-    })], 12)[0].label === 'EX');
+    })], [], 12)[0].label === 'EX');
   check('generic EN plus a long train number stays as EN',
-    Lib.mergeVolanRows([], [rail({
+    Lib.mergeRows([rail({
       label: 'EN', trainNumber: '4240', booking: true, tripId: 'elvira:2',
-    })], 12)[0].label === 'EN');
+    })], [], 12)[0].label === 'EN');
   check('generic IC keeps a named overlay slot',
-    Lib.mergeVolanRows([], [rail({
+    Lib.mergeRows([rail({
       label: 'IC', trainNumber: '852', booking: true, tripId: 'elvira:1',
-    })], 12)[0].label === 'IC');
+    })], [], 12)[0].label === 'IC');
   check('named IC stays on the hop',
-    Lib.mergeVolanRows([], [rail({
+    Lib.mergeRows([rail({
       label: 'BAKONY', trainNumber: '904', booking: true, tripId: 'elvira:2931213',
-    })], 12)[0].label === 'BAKONY');
+    })], [], 12)[0].label === 'BAKONY');
   check('suburban Z30 stays on the hop',
-    Lib.mergeVolanRows([], [rail({
+    Lib.mergeRows([rail({
       label: 'Z30', trainNumber: '4542', booking: false, tripId: 'elvira:2887496',
-    })], 12)[0].label === 'Z30');
+    })], [], 12)[0].label === 'Z30');
   check('numbered FUTAR overlay does not replace G43',
-    Lib.mergeVolanRows([rail({
-      label: '19707', trainNumber: '19707', dep: dep, sched: dep,
-    })], [rail({
+    Lib.mergeRows([rail({
       label: 'G43', trainNumber: '19707', dep: dep, sched: dep, color: '#AACD46',
+    })], [rail({
+      label: '19707', trainNumber: '19707', dep: dep, sched: dep,
     })], 12).length === 1
-    && Lib.mergeVolanRows([rail({
-      label: '19707', trainNumber: '19707', dep: dep, sched: dep,
-    })], [rail({
+    && Lib.mergeRows([rail({
       label: 'G43', trainNumber: '19707', dep: dep, sched: dep, color: '#AACD46',
+    })], [rail({
+      label: '19707', trainNumber: '19707', dep: dep, sched: dep,
     })], 12)[0].label === 'G43');
   check('city bus number is not treated as a rail badge',
-    Lib.mergeVolanRows([], [{
+    Lib.mergeRows([{
       label: '7', vehicle: 'bus', dep: dep, sched: dep, tripId: 'BKK_X',
-    }], 12)[0].label === '7');
+    }], [], 12)[0].label === '7');
 }
 {
   const g = Lib.applyRailBadge({
@@ -1519,14 +1519,14 @@ check('elvira result parser reads top-level departures',
 }
 check('elvira placeholder blue takes FUTAR G43/Z30 brand colors on merge', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
-  const merged = Lib.mergeVolanRows(
-    [
-      { label: 'G43', dep: dep, sched: dep, color: '#AACD46', text: '#FFFFFF' },
-      { label: 'Z30', dep: dep + 120, sched: dep + 120, color: '#FFCD28', text: '#3C3C3C' },
-    ],
+  const merged = Lib.mergeRows(
     [
       { label: 'G43', dep: dep, sched: dep, color: '#4477aa', text: '#ffffff', platform: '5' },
       { label: 'Z30', dep: dep + 120, sched: dep + 120, color: '#4477aa', text: '#ffffff', platform: '7' },
+    ],
+    [
+      { label: 'G43', dep: dep, sched: dep, color: '#AACD46', text: '#FFFFFF' },
+      { label: 'Z30', dep: dep + 120, sched: dep + 120, color: '#FFCD28', text: '#3C3C3C' },
     ],
     12,
   );
@@ -1539,13 +1539,13 @@ check('elvira placeholder blue takes FUTAR G43/Z30 brand colors on merge', (() =
 })());
 check('overlay copies ELVIRA platform and booking onto a FUTAR host', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.mergeRows(
+    [{
+      label: 'IC', dep, sched: dep, color: '#4477aa', tripId: 'BKK_914_1',
+    }],
     [{
       label: 'IC', dep, sched: dep, color: '#2E5EA8',
       platform: '4', booking: true, trainNumber: '914', tripId: 'elvira:1',
-    }],
-    [{
-      label: 'IC', dep, sched: dep, color: '#4477aa', tripId: 'BKK_914_1',
     }],
     12,
   );
@@ -1557,14 +1557,14 @@ check('overlay copies ELVIRA platform and booking onto a FUTAR host', (() => {
 })());
 check('GÖCSEJ ELVIRA platform merges onto FUTAR IC 955 even without trainNumber on FUTAR', (() => {
   const dep = Math.floor(Date.now() / 1000) + 3600;
-  const merged = Lib.mergeVolanRows(
-    [{
-      label: 'IC', vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
-      color: '#2E5EA8', tripId: 'BKK_955_313',
-    }],
+  const merged = Lib.mergeRows(
     [{
       label: 'GÖCSEJ', vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
       color: '#4477aa', platform: '6', trainNumber: '955', tripId: 'elvira:2975814',
+    }],
+    [{
+      label: 'IC', vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
+      color: '#2E5EA8', tripId: 'BKK_955_313',
     }],
     12,
   );
@@ -1575,14 +1575,14 @@ check('GÖCSEJ ELVIRA platform merges onto FUTAR IC 955 even without trainNumber
 })());
 check('GÖCSEJ 967 same-minute merge keeps origin vágány', (() => {
   const dep = Math.floor(Date.now() / 1000) + 120;
-  const merged = Lib.mergeVolanRows(
-    [{
-      label: 'IC', vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
-      color: '#2E5EA8', trainNumber: '967', tripId: 'BKK_967_313',
-    }],
+  const merged = Lib.mergeRows(
     [{
       label: 'GÖCSEJ', vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
       color: '#4477aa', platform: '6', trainNumber: '967', tripId: 'elvira:2939299',
+    }],
+    [{
+      label: 'IC', vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
+      color: '#2E5EA8', trainNumber: '967', tripId: 'BKK_967_313',
     }],
     12,
   );
@@ -1593,7 +1593,7 @@ check('origin overlayOnly copies booking onto FUTAR without dest hit and drops G
   const rail = (extra) => Object.assign({
     vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
   }, extra);
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.overlayRows(
     [
       rail({ label: 'IC', trainNumber: '966', tripId: 'BKK_966_313' }),
       rail({
@@ -1624,7 +1624,6 @@ check('origin overlayOnly copies booking onto FUTAR without dest hit and drops G
       }),
     ],
     12,
-    { overlayOnly: true },
   );
   const gocsej = merged.find((r) => Lib.rowTrainNumber(r) === '966');
   const g43 = merged.find((r) => r.label === 'G43');
@@ -1640,14 +1639,13 @@ check('overlayOnly does not pair GEMENC onto a same-minute FUTAR IC', (() => {
   const rail = (extra) => Object.assign({
     vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
   }, extra);
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.overlayRows(
     [rail({ label: 'IC', trainNumber: '966', tripId: 'BKK_966_313' })],
     [rail({
       label: 'GEMENC', trainNumber: '800', booking: true,
       platform: '3', tripId: 'elvira:gemenc', destHit: false,
     })],
     12,
-    { overlayOnly: true },
   );
   return merged.length === 1
     && merged[0].label === 'IC'
@@ -1660,14 +1658,13 @@ check('overlayOnly does not byTime-merge two ICs at the same minute', (() => {
   const rail = (extra) => Object.assign({
     vehicle: 'rail', rawType: 'RAIL', dep, sched: dep,
   }, extra);
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.overlayRows(
     [rail({ label: 'IC', tripId: 'BKK_966_313' })],
     [rail({
       label: 'IC', booking: true, platform: '3',
       tripId: 'elvira:other-ic', destHit: false,
     })],
     12,
-    { overlayOnly: true },
   );
   return merged.length === 1
     && merged[0].label === 'IC'
@@ -1680,7 +1677,7 @@ check('overlayOnly matches repeated train numbers to the correct departure', (()
   const rail = (extra) => Object.assign({
     vehicle: 'rail', rawType: 'RAIL',
   }, extra);
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.overlayRows(
     [
       rail({ label: 'IC', trainNumber: 'IC 914', dep, sched: dep, tripId: 'BKK_914_1' }),
       rail({
@@ -1695,7 +1692,6 @@ check('overlayOnly matches repeated train numbers to the correct departure', (()
       }),
     ],
     12,
-    { overlayOnly: true },
   );
   return merged.length === 2
     && merged[0].booking !== true
@@ -1708,7 +1704,7 @@ check('overlayOnly matches ELVIRA booking when scheduled departures differ by mi
   const rail = (extra) => Object.assign({
     vehicle: 'rail', rawType: 'RAIL',
   }, extra);
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.overlayRows(
     [
       rail({ label: 'IC', trainNumber: 'IC 914', dep, sched: dep, tripId: 'BKK_914_1' }),
       rail({
@@ -1723,7 +1719,6 @@ check('overlayOnly matches ELVIRA booking when scheduled departures differ by mi
       }),
     ],
     12,
-    { overlayOnly: true },
   );
   return merged.length === 2
     && merged[0].booking !== true
@@ -1742,8 +1737,8 @@ check('overlayOnly matches ELVIRA booking when scheduled departures differ by mi
   const elvira = (extra) => rail(Object.assign({
     color: '#4477aa', text: '#ffffff', head: 'Székesfehérvár', platform: '4', booking: true, destHit: true,
   }, extra));
-  const allMode = { overlayOnly: true, addUnmatched: (row) => Lib.mavBoardRows([row])[0] || null };
-  const merge = (futar, rows) => Lib.mergeVolanRows(futar, rows, 12, allMode);
+  const addElvira = (row) => Lib.elviraBoardRows([row])[0] || null;
+  const merge = (futar, rows) => Lib.overlayRows(futar, rows, 12, addElvira);
   const show = (rows) => JSON.stringify(rows.map((r) => [r.tripId, r.label, r.trainNumber || '', r.platform || '', !!r.booking]));
   const sv = elvira({ tripId: 'elvira:9702', label: '9702', railKind: 'S', trainNumber: '9702', end: 'Székesfehérvár' });
   const adHoc = rail({ tripId: 'BKK_1792439004037', label: 'S', head: 'Székesfehérvár' });
@@ -1822,15 +1817,15 @@ check('ELVIRA-only G43/Z30 get BKK badge colours', (() => {
 })());
 check('ELVIRA named IC keeps label and takes FUTAR GPS by train number', (() => {
   const dep = Math.floor(Date.now() / 1000) + 900;
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.mergeRows(
+    [{
+      label: 'BAKONY', tripId: 'elvira:2974501', trainNumber: '913',
+      dep: dep, sched: dep, color: '#4477aa', text: '#ffffff',
+    }],
     [{
       label: 'IC', tripId: 'BKK_913_316', trainNumber: '913',
       dep: dep + 60, sched: dep, color: '#2E5EA8', text: '#FFFFFF',
       lat: 47.19751, lon: 18.16734,
-    }],
-    [{
-      label: 'BAKONY', tripId: 'elvira:2974501', trainNumber: '913',
-      dep: dep, sched: dep, color: '#4477aa', text: '#ffffff',
     }],
     12,
   );
@@ -1842,14 +1837,14 @@ check('ELVIRA named IC keeps label and takes FUTAR GPS by train number', (() => 
 })());
 check('ELVIRA Tópart takes FUTAR GPS from BKK trip id train number', (() => {
   const dep = Math.floor(Date.now() / 1000) + 1200;
-  const merged = Lib.mergeVolanRows(
-    [{
-      label: 'IC', tripId: 'BKK_853_87', dep: dep, sched: dep,
-      lat: 46.90843, lon: 18.05495,
-    }],
+  const merged = Lib.mergeRows(
     [{
       label: 'TÓPART', tripId: 'elvira:2888051', trainNumber: '853',
       dep: dep, sched: dep, color: '#4477aa',
+    }],
+    [{
+      label: 'IC', tripId: 'BKK_853_87', dep: dep, sched: dep,
+      lat: 46.90843, lon: 18.05495,
     }],
     12,
   );
@@ -1938,7 +1933,7 @@ const icElvira = (extra) => Object.assign({
 check('FUTÁR ICs BKK_8624_67 and BKK_2461_311 take ELVIRA BALATON 862 and CITADELLA 246', (() => {
   const t0 = Math.floor(Date.now() / 1000) + 1200;
   const t1 = t0 + 25 * 60;
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.overlayRows(
     [
       icFutar({ tripId: 'BKK_8624_67', trainNumber: '8624', head: 'Keszthely', dep: t0, sched: t0 }),
       icFutar({ tripId: 'BKK_2461_311', trainNumber: '2461', head: 'Ljubljana', dep: t1, sched: t1 }),
@@ -1948,7 +1943,6 @@ check('FUTÁR ICs BKK_8624_67 and BKK_2461_311 take ELVIRA BALATON 862 and CITAD
       icElvira({ tripId: 'elvira:citadella', label: 'CITADELLA', trainNumber: '246', dep: t1, sched: t1 }),
     ],
     12,
-    { overlayOnly: true },
   );
   const balaton = merged.find((r) => r.tripId === 'BKK_8624_67');
   const citadella = merged.find((r) => r.tripId === 'BKK_2461_311');
@@ -1962,14 +1956,13 @@ check('FUTÁR ICs BKK_8624_67 and BKK_2461_311 take ELVIRA BALATON 862 and CITAD
 })());
 check('a trip-id IC takes no ELVIRA train one digit shorter outside the 5-minute window', (() => {
   const t0 = Math.floor(Date.now() / 1000) + 1200;
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.overlayRows(
     [icFutar({ tripId: 'BKK_8624_67', trainNumber: '8624', head: 'Keszthely', dep: t0, sched: t0 })],
     [icElvira({
       tripId: 'elvira:balaton', label: 'BALATON', trainNumber: '862',
       dep: t0 + 6 * 60, sched: t0 + 6 * 60,
     })],
     12,
-    { overlayOnly: true },
   );
   return merged.length === 1 && merged[0].label === 'IC' && merged[0].trainNumber === '8624'
     && merged[0].platform === '' && merged[0].booking !== true;
@@ -1978,8 +1971,8 @@ check('an IC ELVIRA renumbered stays one row when FUTÁR and ELVIRA merge onto i
   const t0 = Math.floor(Date.now() / 1000) + 1200;
   const futar = () => [icFutar({ tripId: 'BKK_8624_67', trainNumber: '8624', head: 'Keszthely', dep: t0, sched: t0 })];
   const elvira = [icElvira({ tripId: 'elvira:862', label: 'IC', trainNumber: '862', dep: t0, sched: t0 })];
-  const first = Lib.mergeVolanRows(futar(), elvira, 12, { overlayOnly: true });
-  const again = Lib.mergeVolanRows(Lib.mergeVolanRows(futar(), first, 12), elvira, 12, { overlayOnly: true });
+  const first = Lib.overlayRows(futar(), elvira, 12);
+  const again = Lib.overlayRows(Lib.mergeRows(first, futar(), 12), elvira, 12);
   return first.length === 1 && first[0].trainNumber === '862' && first[0].platform === '4'
     && again.length === 1 && again[0].trainNumber === '862' && again[0].platform === '4'
     && again[0].booking === true && again[0].tripId === 'BKK_8624_67';
@@ -1987,7 +1980,7 @@ check('an IC ELVIRA renumbered stays one row when FUTÁR and ELVIRA merge onto i
 check('suburban 4-digit trip ids take no 3-digit ELVIRA train in the same minute', (() => {
   const t0 = Math.floor(Date.now() / 1000) + 1200;
   const t1 = t0 + 30 * 60;
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.overlayRows(
     [
       icFutar({
         label: 'Z30', color: '#FFCD28', tripId: 'BKK_4541_108', trainNumber: '4541',
@@ -2003,7 +1996,6 @@ check('suburban 4-digit trip ids take no 3-digit ELVIRA train in the same minute
       icElvira({ tripId: 'elvira:456', label: 'IC', trainNumber: '456', platform: '2', dep: t1, sched: t1 }),
     ],
     12,
-    { overlayOnly: true },
   );
   return merged.length === 2
     && merged.every((r) => r.platform === '' && r.booking !== true)
@@ -2048,14 +2040,14 @@ check('BALATON does not match a Balatonfured headsign',
   ));
 check('BALATON 866 merges onto FUTAR BKK_8661_47', (() => {
   const dep = Math.floor(Date.now() / 1000) + 900;
-  const merged = Lib.mergeVolanRows(
-    [{
-      label: 'IC', tripId: 'BKK_8661_47', trainNumber: '',
-      dep: dep, sched: dep, color: '#2E5EA8',
-    }],
+  const merged = Lib.mergeRows(
     [{
       label: 'BALATON', tripId: 'elvira:2891044', trainNumber: '866',
       dep: dep, sched: dep, color: '#4477aa',
+    }],
+    [{
+      label: 'IC', tripId: 'BKK_8661_47', trainNumber: '',
+      dep: dep, sched: dep, color: '#2E5EA8',
     }],
     12,
   );
@@ -2095,16 +2087,16 @@ check('applyEmmaPositions replaces an existing FUTAR pin with EMMA', (() => {
 })());
 check('ELVIRA GPS is kept over FUTAR overlay', (() => {
   const dep = Math.floor(Date.now() / 1000) + 900;
-  const merged = Lib.mergeVolanRows(
-    [{
-      label: 'IC', tripId: 'BKK_861_74', trainNumber: '861',
-      dep: dep, sched: dep, color: '#2E5EA8',
-      lat: 47.5, lon: 19.05,
-    }],
+  const merged = Lib.mergeRows(
     [{
       label: 'BALATON', tripId: 'elvira:2890602', trainNumber: '861',
       dep: dep, sched: dep, color: '#4477aa',
       lat: 47.2290993, lon: 18.6682205,
+    }],
+    [{
+      label: 'IC', tripId: 'BKK_861_74', trainNumber: '861',
+      dep: dep, sched: dep, color: '#2E5EA8',
+      lat: 47.5, lon: 19.05,
     }],
     12,
   );
@@ -2117,16 +2109,16 @@ check('ELVIRA GPS is kept over FUTAR overlay', (() => {
 })());
 check('ELVIRA GPS still wins if FUTAR was added first', (() => {
   const dep = Math.floor(Date.now() / 1000) + 900;
-  const merged = Lib.mergeVolanRows(
-    [{
-      label: 'BALATON', tripId: 'elvira:2890602', trainNumber: '861',
-      dep: dep, sched: dep, color: '#4477aa',
-      lat: 47.2290993, lon: 18.6682205,
-    }],
+  const merged = Lib.mergeRows(
     [{
       label: 'IC', tripId: 'BKK_861_74', trainNumber: '861',
       dep: dep, sched: dep, color: '#2E5EA8',
       lat: 47.5, lon: 19.05,
+    }],
+    [{
+      label: 'BALATON', tripId: 'elvira:2890602', trainNumber: '861',
+      dep: dep, sched: dep, color: '#4477aa',
+      lat: 47.2290993, lon: 18.6682205,
     }],
     12,
   );
@@ -2589,14 +2581,14 @@ check('coach GPS does not overwrite an existing train coordinate', (() => {
 })());
 check('ELVIRA S30 takes FUTAR trip id by train number', (() => {
   const dep = Math.floor(Date.now() / 1000) + 1800;
-  const merged = Lib.mergeVolanRows(
-    [{
-      label: 'S30', tripId: 'BKK_4541_108', trainNumber: '4541',
-      dep: dep, sched: dep, color: '#00AFF0',
-    }],
+  const merged = Lib.mergeRows(
     [{
       label: 'S30', tripId: 'elvira:2889849', trainNumber: '4541',
       dep: dep, sched: dep, color: '#4477aa',
+    }],
+    [{
+      label: 'S30', tripId: 'BKK_4541_108', trainNumber: '4541',
+      dep: dep, sched: dep, color: '#00AFF0',
     }],
     12,
   );
@@ -2606,14 +2598,14 @@ check('ELVIRA S30 takes FUTAR trip id by train number', (() => {
 })());
 check('GPS ELVIRA 9068 still takes FUTAR trip id', (() => {
   const dep = Math.floor(Date.now() / 1000) + 1800;
-  const merged = Lib.mergeVolanRows(
-    [{
-      label: 'Sz', tripId: 'BKK_90681_106', trainNumber: '9068',
-      dep: dep, sched: dep, color: '#2E5EA8',
-    }],
+  const merged = Lib.mergeRows(
     [{
       label: 'Sz', tripId: 'elvira:9068', trainNumber: '9068',
       dep: dep, sched: dep, lat: 47.464, lon: 19.021, color: '#4477aa',
+    }],
+    [{
+      label: 'Sz', tripId: 'BKK_90681_106', trainNumber: '9068',
+      dep: dep, sched: dep, color: '#2E5EA8',
     }],
     12,
   );
@@ -3081,7 +3073,7 @@ const rail = await Lib.railAfterCity(
 check('railAfterCity is null when ELVIRA is empty', rail == null);
 Lib.elviraBetween = async () => {
   const dep = Math.floor(Date.now() / 1000) + 20 * 60;
-  return [{ label: 'IC', trainNumber: '163', dep, travel: 120, headsign: 'Kelenf\u00f6ld' }];
+  return [{ label: 'IC', trainNumber: '163', dep, travel: 120, headsign: 'Kelenf\u00f6ld', destHit: true }];
 };
 const withRail = await Lib.railAfterCity(
   'k', { states: {} }, 'Miskolc', hubPath, destKelenf, Math.floor(Date.now() / 1000),
@@ -3693,11 +3685,10 @@ Lib.mavIndex = origMavIndex;
 {
   const dep = Math.floor(Date.now() / 1000) + 3600;
   const rail = (extra) => Object.assign({ vehicle: 'rail', rawType: 'RAIL', dep, sched: dep }, extra);
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.overlayRows(
     [rail({ label: 'IC', trainNumber: '950', tripId: 'BKK_950_313' })],
     [rail({ label: 'GÖCSEJ', trainNumber: '950', booking: true, nationalPass: true, reservationFreeSection: true, tripId: 'elvira:950', destHit: false })],
     12,
-    { overlayOnly: true },
   );
   check('ELVIRA overlay copies the national-pass flags onto the FUTÁR train',
     merged.length === 1 && merged[0].booking === true && merged[0].nationalPass === true
@@ -4750,7 +4741,8 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   const fromPole = (await load('BKK_F02203')).find((r) => r.tripId === 'T_POLE');
   Object.assign(Lib, keep);
   check('a tram row has its pole\'s stand code from the parent board and from the pole\'s own board alike',
-    !!fromParent && !!fromPole && fromParent.platform === 'B1' && fromPole.platform === 'B1',
+    !!fromParent && !!fromPole && fromParent.platform === 'B1' && fromPole.platform === 'B1'
+      && fromParent.source === 'futar' && fromPole.source === 'futar',
     JSON.stringify({ parent: fromParent && fromParent.platform, pole: fromPole && fromPole.platform }));
   const card = document.createElement('hungarian-transport-card');
   card.setConfig({ language: 'hu' });
@@ -5123,49 +5115,6 @@ const waitForPoll = async (hop, ms) => {
   Object.assign(Lib, keep);
 }
 {
-  const now = Math.floor(Date.now() / 1000);
-  const board = Lib.mavBoardRows([
-    { tripId: 'a', dep: now + 600, destHit: true, label: '9009', railKind: 'S', trainNumber: '9009' },
-    { tripId: 'b', dep: now + 600, destHit: false, label: '871', trainNumber: '871' },
-    { tripId: 'c', dep: now - 600, destHit: true, label: '872', trainNumber: '872' },
-    { tripId: 'd', dep: now + 900, destHit: true, label: 'TÓPART', railKind: 'IC', trainNumber: '849' },
-  ]);
-  check('a MÁV board keeps the trains its destination lists, a number-only train shows its kind, a departed one goes',
-    board.map((r) => r.tripId).join() === 'a,d' && board[0].label === 'SV' && board[0].trainNumber === '9009'
-      && board[1].label === 'TÓPART',
-    JSON.stringify(board));
-  /* ELVIRA's S is a sebesvonat; FUTÁR's bare S (a személyvonat) still
-     becomes Sz. Each kind keeps its own badge on the painted row. */
-  const painted = (row) => {
-    const r = Lib.asRow(Object.assign({ vehicle: 'rail', rawType: 'RAIL', color: '#4477aa', text: '#ffffff' }, row), 'Székesfehérvár', 'hu');
-    return [r.label, String(r.color).replace('#', '').toUpperCase()];
-  };
-  const kinds = Lib.mavBoardRows([
-    { tripId: 'elvira:9702', dep: now + 600, destHit: true, label: '9702', railKind: 'S', trainNumber: '9702' },
-    { tripId: 'elvira:952', dep: now + 700, destHit: true, label: '952', railKind: 'Gy', trainNumber: '952' },
-    { tripId: 'elvira:4522', dep: now + 800, destHit: true, label: '4522', railKind: 'Sz', trainNumber: '4522' },
-  ]).map(painted);
-  const futarS = painted({ tripId: 'BKK_4522_1', label: 'S' });
-  check('an ELVIRA sebesvonat is SV with its own badge, not Sz; gyorsvonat has its own; FUTÁR S stays Sz',
-    JSON.stringify(kinds) === JSON.stringify([['SV', '29803C'], ['Gy', 'C82227'], ['Sz', '5C6B7A']])
-    && JSON.stringify(futarS) === JSON.stringify(['Sz', '5C6B7A']),
-    JSON.stringify({ kinds, futarS }));
-  /* SV and Gy are train kinds: a bus line named so keeps the default colour. */
-  const busKinds = ['SV', 'Gy'].map((label) => {
-    const r = Lib.asRow({ tripId: 'volan_1', label, vehicle: 'bus', rawType: 'BUS', color: '#4477aa', text: '#ffffff' }, 'Székesfehérvár', 'hu');
-    return String(r.color).replace('#', '').toUpperCase();
-  });
-  check('a bus row labelled SV or Gy takes no train-kind badge',
-    busKinds.every((c) => c === '4477AA'), JSON.stringify(busKinds));
-  /* Each train is headed by its own terminus (row end), not the card's destination. */
-  const heads = Lib.mavBoardRows([
-    { tripId: 'elvira:849', dep: now + 600, destHit: true, label: 'TÓPART', head: 'Budapest-Kelenföld', end: 'Budapest-Déli' },
-    { tripId: 'elvira:9009', dep: now + 700, destHit: true, label: '9009', head: 'Budapest-Kelenföld', end: '' },
-  ]).map((r) => r.head);
-  check('a MÁV board row shows the train’s terminus, the destination only when ELVIRA has none',
-    heads.join() === 'Budapest-Déli,Budapest-Kelenföld', heads.join());
-}
-{
   /* Planner, Kelenföld → Székesfehérvár (2026-10-19 21:33): ELVIRA answers
      with the whole Kelenföld StationInfo, so G44 4711 to Budapest-Déli
      (platform 2) leaves in the same minute as Sz 8738 to Siófok (platform 4),
@@ -5297,16 +5246,15 @@ check('a branded suburban train in the same minute stays off another numbered tr
   const host = (n, head) => ({
     tripId: 'motis:' + n, label: n, trainNumber: n, head, vehicle: 'rail', rawType: 'RAIL', platform: '', dep: t0, sched: t0,
   });
-  const merged = Lib.mergeVolanRows(
+  const merged = Lib.overlayRows(
     [host('8738', 'Siófok')],
     [{ tripId: 'elvira:4711', label: 'G44', trainNumber: '4711', head: 'Budapest-Déli', vehicle: 'rail', rawType: 'RAIL', platform: '2', dep: t0, sched: t0 }],
     12,
-    { overlayOnly: true },
   );
   /* Without a number of its own, the branded row is still the same departure. */
-  const unnumbered = Lib.mergeVolanRows(
-    [host('8738', 'Siófok')],
+  const unnumbered = Lib.mergeRows(
     [{ tripId: 'gtfs:G44:1', label: 'G44', trainNumber: '', head: 'Siófok', vehicle: 'rail', rawType: 'RAIL', platform: '', dep: t0, sched: t0 }],
+    [host('8738', 'Siófok')],
     12,
   );
   return merged.length === 1 && merged[0].label === '8738' && merged[0].platform === ''
@@ -8177,7 +8125,7 @@ const settle = async (el) => {
   Lib.searchStops = async () => [{ id: 'BKK_005510009', name: 'Miskolc-Tiszai', lat: 48.1035, lon: 20.8104 }];
   Lib.elviraResolveCode = async () => '005501024';
   Lib.elviraBetween = async () => [{
-    label: 'IC', trainNumber: '563', dep: Math.floor(Date.now() / 1000) + 3600, travel: 140, head: 'Kelenföld',
+    label: 'IC', trainNumber: '563', dep: Math.floor(Date.now() / 1000) + 3600, travel: 140, head: 'Kelenföld', destHit: true,
   }];
   const j = await Lib.cityRailJourney('k', { states: {} },
     { id: 'miskolc:0', name: 'Búza tér', lat: 48.10, lon: 20.78 },
@@ -10796,7 +10744,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   const at = Math.floor(Date.now() / 1000) + 600;
   const a = { tripId: 'BKK_A1', label: '7', head: 'Bosnyák tér', dep: at, sched: at, color: '#009EE3', vehicle: 'bus' };
   const b = { tripId: 'BKK_B2', label: '7', head: 'Albertfalva', dep: at, sched: at, color: '#009EE3', vehicle: 'bus' };
-  const out = Lib.mergeVolanRows([a, b], [], 12);
+  const out = Lib.mergeRows([], [a, b], 12);
   const pairs = out.map((r) => r.tripId + ' ' + r.head).sort();
   check('two FUTÁR trips of one line in the same minute stay two rows with their own headsigns',
     out.length === 2 && pairs[0] === 'BKK_A1 Bosnyák tér' && pairs[1] === 'BKK_B2 Albertfalva',
@@ -11955,7 +11903,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   check('a reported delay moves the departure like a BKK live delay, and the vehicle is a live position',
     changed && gtfsRow.delay === 240 && gtfsRow.dep === sched + 240 && shown.delay === 240
       && shown.predicted_attime !== shown.attime && shown.hasGps && shown.lat === 47.5 && gtfsRow.rtPos === true
-      && gtfsRow.travel === 51,
+      && gtfsRow.travel === 51 && gtfsRow.source === 'gtfs' && shown.source === 'gtfs',
     JSON.stringify({ delay: gtfsRow.delay, travel: gtfsRow.travel, hasGps: shown.hasGps }));
   const foot = card._mapFootText(shown, true, shown.hasGps, false, 'hu', true, true);
   const estFoot = card._mapFootText(Lib.asRow({ ...rows[0], lat: null, lon: null }, '', 'hu'), true, false, true, 'hu', true, true);
