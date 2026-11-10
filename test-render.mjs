@@ -4681,6 +4681,13 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     JSON.stringify({ afterReload, afterStale, routeCalls, batched, bothTabs, stop: saved.stops && saved.stops.AZP_1 }));
 }
 {
+  /* Budapest's day, not the browser's: 23:30 and 00:10 (CET) share a UTC day. */
+  const at = Date.UTC(2026, 10, 10, 22, 30);
+  const pat = { at, variants: [{ ids: ['A'] }], stops: {} };
+  check('a route pattern proved before Budapest midnight is not fresh after it',
+    Lib.patternFresh(pat, at + 20 * 60000) && !Lib.patternFresh(pat, at + 40 * 60000));
+}
+{
   /* A through-check row is a new object: it still gets its ride time. */
   const keep = { departures: Lib.departures, travelMin: Lib.travelMin };
   const now = Math.floor(Date.now() / 1000);

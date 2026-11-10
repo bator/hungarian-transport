@@ -1,4 +1,4 @@
-import { DEPART_MINUTES_AFTER, clampMinutesAfter, departureStillDue, maxDepartureRows } from '../config.js';
+import { DEPART_MINUTES_AFTER, clampMinutesAfter, departureStillDue, maxDepartureRows, tzParts } from '../config.js';
 import { BkkLib } from '../lib/core.js';
 
 /* FUTÁR cuts a busy board off at about 60 rows; a few under that, ending
@@ -319,8 +319,10 @@ Object.assign(BkkLib, {
   patternFresh(pat, nowMs) {
     if (!pat || !pat.variants || typeof pat.at !== 'number') return false;
     const now = nowMs === undefined ? Date.now() : nowMs;
+    /* "The same day" is Budapest's, as everywhere the timetable is read,
+       not the browser's own time zone. */
     return now - pat.at < PATTERN_PROOF_MS
-      && new Date(pat.at).toDateString() === new Date(now).toDateString();
+      && tzParts(new Date(pat.at)).ymd === tzParts(new Date(now)).ymd;
   },
   /* An ad-hoc FUTÁR trip: the id body is a millisecond timestamp
      (BKK_1792439004037), not a scheduled trip of the route's pattern. */

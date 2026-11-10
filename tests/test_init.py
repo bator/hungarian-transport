@@ -1125,10 +1125,11 @@ def test_exception_translations_are_raised_and_error_codes_documented(lang) -> N
     source = "\n".join(p.read_text(encoding="utf-8") for p in _PKG.glob("*.py") if p.name != "sensor.py")
     raised = set(re.findall(r'translation_key="(\w+)"', source))
     assert set(strings["exceptions"]) == raised
-    codes = set(re.findall(r'"error": "(\w+)"', (_PKG / "__init__.py").read_text(encoding="utf-8")))
+    # Every module that answers a card can set a response code, not only __init__.py.
+    codes = set(re.findall(r'"error": "(\w+)"', source))
     assert codes == {
         "elvira_rate_limited", "elvira_unavailable", "futar_auth", "futar_bad_request", "futar_rate_limited",
-        "futar_unavailable", "rt_unavailable",
+        "futar_unavailable", "rt_no_feed", "rt_unavailable",
     }
     for code in codes:
         service = code.split("_")[0]
