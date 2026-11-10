@@ -33,10 +33,7 @@ Hungarian when Home Assistant's language is, else English.
 """
 from __future__ import annotations
 
-import gzip
-import json
 import logging
-import zlib
 from collections.abc import Mapping
 from datetime import time, timedelta
 from pathlib import Path
@@ -50,7 +47,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
-from . import mav, mav_daily, storage
+from . import mav, mav_daily, served_index, storage
 from .const import (
     CONF_DAILY_MAV,
     CONF_DAILY_TIME,
@@ -76,8 +73,6 @@ FAILED_DAYS = 3
 STALE_PAGES = timedelta(days=3)
 # The indexes a release ships in www/, in the order a message names them.
 SHIPPED = {"volan": "volan-index.json.gz", "city": "city-index.json.gz", "mav": mav.INDEX_NAME}
-# "feed" is the index's second key; the city index joins every feed's version.
-FEED_HEAD = 256 * 1024
 # A round that says nothing about failing or not (mav_daily).
 _NEUTRAL = (mav_daily.BUSY, mav_daily.UNSUPPORTED)
 
@@ -141,29 +136,12 @@ def _text(hass: HomeAssistant) -> dict[str, str]:
 
 
 def _feed_day(feed: str | None, text: dict[str, str]) -> str:
-    day = mav._gtfs_date(feed)
+    day = served_index.feed_date(feed)
     return day.isoformat() if day is not None else (feed or text["unknown"])
 
 
-def _head_feed(path: Path) -> str | None:
-    """An index's "feed" from the head of its gzip, or None."""
-    try:
-        with gzip.open(path, "rb") as fh:
-            head = fh.read(FEED_HEAD)
-    except (OSError, EOFError, zlib.error):
-        return None
-    match = mav.INDEX_FEED_RE.search(head)
-    if match is None:
-        return None
-    try:
-        feed = json.loads(match.group(1))
-    except ValueError:
-        return None
-    return feed if isinstance(feed, str) else None
-
-
 def shipped_feeds(www: Path) -> dict[str, str | None]:
-    return {key: (_head_feed(www / name) if (www / name).is_file() else None) for key, name in SHIPPED.items()}
+    return {key: served_index.read_feed(www / name) for key, name in SHIPPED.items()}
 
 
 def changed_indexes(
@@ -190,8 +168,8 @@ def changed_indexes(
         if key == "mav":
             if new == installed_mav:
                 continue
-            new_day = mav._gtfs_date(new)
-            seen_days = [mav._gtfs_date(f) for f in (old, installed_mav) if isinstance(f, str)]
+            new_day = served_index.feed_date(new)
+            seen_days = [served_index.feed_date(f) for f in (old, installed_mav) if isinstance(f, str)]
             if new_day is not None and any(day is not None and new_day <= day for day in seen_days):
                 continue
         changed.append(key)
@@ -325,35 +303,35 @@ class UpdateNotifier:
             days=streak.get("days", FAILED_DAYS), error=streak.get("error") or text["unknown"]
         )
 
-    def _stale_error(self, result: str) -> str | None:
+    def _stale_error(self, done: mav_daily.DailyRound) -> str | None:
         """Why a round that went through still counts as a failure: the
         site's manifest is older than STALE_PAGES."""
-        if result not in (mav_daily.UP_TO_DATE, mav_daily.INSTALLED):
+        if done.result not in (mav_daily.UP_TO_DATE, mav_daily.INSTALLED):
             return None
-        built = self._hass.data.get(DOMAIN, {}).get("mav_daily_built_at")
+        built = done.built_at
         if built is None or dt_util.utcnow() - built <= STALE_PAGES:
             return None
         return _text(self._hass)["stale_error"].format(date=dt_util.as_local(built).date().isoformat())
 
-    async def async_daily_result(self, result: str) -> None:
+    async def async_daily_result(self, done: mav_daily.DailyRound) -> None:
         """After a round of the daily MÁV index (mav_daily.DailyIndexUpdater)."""
         hass = self._hass
         text = _text(hass)
+        result = done.result
         if result == mav_daily.INSTALLED and self.enabled:
-            info = hass.data.get(DOMAIN, {}).get("mav_daily_installed") or {}
             await self.async_notify(
                 NOTIFICATION_MAV_DAILY,
                 text["mav_daily_title"],
                 text["mav_daily_message"].format(
-                    date=_feed_day(info.get("feed"), text),
-                    trains=info.get("trains", text["unknown"]),
-                    lines=info.get("lines", text["unknown"]),
+                    date=_feed_day(done.feed, text),
+                    trains=text["unknown"] if done.trains is None else done.trains,
+                    lines=text["unknown"] if done.lines is None else done.lines,
                 ),
                 service=self.notify_daily,
             )
-        error = self._stale_error(result)
+        error = self._stale_error(done)
         if error is None and result == mav_daily.FAILED:
-            error = hass.data.get(DOMAIN, {}).get("mav_daily_error") or text["unknown"]
+            error = done.error or text["unknown"]
         state = await _load(hass)
         streak = dict(state.get("daily_failures") or {})
         today = dt_util.now().date()

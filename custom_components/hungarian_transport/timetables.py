@@ -24,7 +24,7 @@ import re
 import stat
 import zlib
 from collections.abc import Callable
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -32,7 +32,7 @@ from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.event import async_track_time_interval
 
-from . import mav, mav_index, storage
+from . import mav, mav_index, served_index, storage
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,7 +54,6 @@ MAX_TAIL = 256 * 1024
 CHUNK = 256 * 1024
 # A city index of at most this many feeds lists them (feeds attribute).
 MAX_LISTED_FEEDS = 10
-DATE_RE = re.compile(r"(?<!\d)(\d{8})(?!\d)")
 
 
 def _fingerprint(path: Path) -> tuple[int, int] | None:
@@ -69,17 +68,6 @@ def _fingerprint(path: Path) -> tuple[int, int] | None:
 
 def _utc(timestamp: float) -> datetime:
     return datetime.fromtimestamp(timestamp, tz=timezone.utc)
-
-
-def feed_date(feed: str | None) -> date | None:
-    """The first date (YYYYMMDD) in a feed version: "20261030.M2ChangeID",
-    "volan:01716.20261102"."""
-    for match in DATE_RE.finditer(feed or ""):
-        try:
-            return datetime.strptime(match.group(1), "%Y%m%d").date()
-        except ValueError:
-            continue
-    return None
 
 
 def read_mav(path: Path) -> dict[str, Any] | None:
@@ -98,7 +86,7 @@ def read_mav(path: Path) -> dict[str, Any] | None:
     lines = index.get("l") if isinstance(index.get("l"), dict) else {}
     return {
         "feed": feed,
-        "date": mav._gtfs_date(feed),
+        "date": served_index.feed_date(feed),
         "trains": len(numbers),
         "lines": len(lines),
         "fitted_share": round(mav_index.fitted_share(index), 4),
@@ -109,8 +97,8 @@ def read_mav(path: Path) -> dict[str, Any] | None:
 
 def scan_index(path: Path, *, operators: bool = False) -> dict[str, Any] | None:
     """A Volán or city index, streamed: its feed, trips, stops, build time
-    (the gzip header's mtime, else the file's) and, with operators, the
-    operator count from the "o" list; None when it does not read."""
+    (served_index.built_at) and, with operators, the operator count from
+    the "o" list; None when it does not read."""
     unzip = zlib.decompressobj(16 + zlib.MAX_WBITS)
     head = bytearray()
     head_done = False
@@ -119,10 +107,8 @@ def scan_index(path: Path, *, operators: bool = False) -> dict[str, Any] | None:
     trips = 0
     try:
         st = path.stat()
+        built = served_index.built_at(path)
         with path.open("rb") as fh:
-            header = fh.read(10)
-            built = int.from_bytes(header[4:8], "little") if header[:2] == b"\x1f\x8b" else 0
-            fh.seek(0)
             while chunk := fh.read(CHUNK):
                 data = unzip.decompress(chunk)
                 if not head_done:
@@ -145,20 +131,12 @@ def scan_index(path: Path, *, operators: bool = False) -> dict[str, Any] | None:
         return None
     trips += len(TRIP_RE.findall(carry))
     head_bytes = bytes(head[:MAX_HEAD])
-    match = mav.INDEX_FEED_RE.search(head_bytes)
-    feed: str | None = None
-    if match is not None:
-        try:
-            value = json.loads(match.group(1))
-        except ValueError:
-            value = None
-        feed = value if isinstance(value, str) else None
     info: dict[str, Any] = {
-        "feed": feed,
+        "feed": served_index.head_feed(head_bytes),
         "trips": trips,
         "stops": _stops(head_bytes),
         "size": st.st_size,
-        "updated_at": _utc(built if built else st.st_mtime),
+        "updated_at": _utc(built),
     }
     if operators:
         info["operators"] = _operators(tail)
@@ -197,10 +175,6 @@ def city_feeds(feed: str | None) -> dict[str, str]:
     return out
 
 
-def _head_feed(path: Path) -> str | None:
-    return mav._index_feed(path) if path.is_file() else None
-
-
 class _Reader:
     """The executor side: each index read again only when its file changed."""
 
@@ -229,7 +203,7 @@ class _Reader:
         key = _fingerprint(copy)
         if info is None or key is None or key[1] != info["size"]:
             return False
-        return self._cached(copy, _head_feed) == info["feed"]
+        return self._cached(copy, served_index.read_feed) == info["feed"]
 
     def read(self) -> dict[str, Any]:
         mav_info = self._cached(self.www / mav.INDEX_NAME, read_mav)

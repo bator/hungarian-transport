@@ -358,13 +358,6 @@ def test_scan_of_a_broken_file(tmp_path: Path) -> None:
     assert timetables.scan_index(path) is None
 
 
-def test_feed_dates() -> None:
-    assert str(timetables.feed_date(VOLAN)) == "2026-11-02"
-    assert str(timetables.feed_date("20261030.M2ChangeID")) == "2026-10-30"
-    assert timetables.feed_date("volan:01716") is None
-    assert timetables.feed_date(None) is None
-
-
 @pytest.mark.parametrize("lang", ["en", "hu"])
 def test_every_sensor_has_a_name_and_an_icon(lang) -> None:
     pkg = Path(sensor.__file__).parent

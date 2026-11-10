@@ -1,13 +1,14 @@
 import { cityIndexUrl, clampMinutesAfter, departureStillDue, mavIndexUrl, maxDepartureRows, tzDow, tzEpochSec, tzParts, tzShiftYmd, volanIndexUrl } from '../config.js';
 import { codedError } from '../i18n.js';
-import { BkkLib } from '../lib/core.js';
+import { needIndexes } from '../lib/context.js';
+import { BkkLib, register } from '../lib/core.js';
 import { INDEX_SCHEMA } from '../tags.js';
 
 /* A destination stop of a trip lies no farther than this from the picked
    destination's own coordinates. */
 const DEST_NEAR_M = 1500;
 
-Object.assign(BkkLib, {
+register({
   /* Cached per resolved URL, so two cards pointing at different index files do
      not serve each other's data. The URL carries a daily cache-buster, which
      also expires the entry on a dashboard left open overnight; the day before's
@@ -51,22 +52,20 @@ Object.assign(BkkLib, {
     BkkLib._cacheIndex(cache, url, p, 8);
     return p;
   },
-  /* One card's view of the library: the same functions, with that card's own
-     index URLs (volanIndex / cityIndex / mavIndex from its config). The lookups
-     reach the indexes through `this`, so a card's override follows its own
-     calls across every await and never leaks to another card (review J-2).
-     A card without overrides gets the library itself. */
-  withIndexes(cfg) {
+  /* A card's index resolver (context.js): its own volanIndex / cityIndex /
+     mavIndex from its config, else the integration's. Every index-reading
+     function takes one, so a card's override follows its own calls across
+     every await and never leaks to another card (review J-2), and none
+     falls back to the default by leaving it out. indexResolver() is the
+     default's, for callers outside the cards. */
+  indexResolver(cfg) {
     const c = cfg || {};
-    const ix = { volan: String(c.volanIndex || ''), city: String(c.cityIndex || ''), mav: String(c.mavIndex || '') };
-    if (!ix.volan && !ix.city && !ix.mav) return BkkLib;
-    return Object.create(BkkLib, { _ix: { value: ix } });
-  },
-  volanIndex() {
-    return BkkLib._indexCached(volanIndexUrl(this && this._ix && this._ix.volan), 'errVolanHttp', 'errVolanGunzip');
-  },
-  cityIndex() {
-    return BkkLib._indexCached(cityIndexUrl(this && this._ix && this._ix.city), 'errCityHttp', 'errCityGunzip');
+    const own = { volan: String(c.volanIndex || ''), city: String(c.cityIndex || ''), mav: String(c.mavIndex || '') };
+    return Object.freeze({
+      volan: () => BkkLib._indexCached(volanIndexUrl(own.volan), 'errVolanHttp', 'errVolanGunzip'),
+      city: () => BkkLib._indexCached(cityIndexUrl(own.city), 'errCityHttp', 'errCityGunzip'),
+      mav: () => BkkLib._mavIndexAt(mavIndexUrl(own.mav)),
+    });
   },
   _mavP: new Map(),
   /* When the index came back empty or failed: url -> the time of that answer.
@@ -79,8 +78,7 @@ Object.assign(BkkLib, {
      (no-cache), so an unchanged index is a 304. */
   _mavLoadedAt: new Map(),
   _mavMaxAgeMs: 6 * 3600 * 1000,
-  mavIndex() {
-    const url = mavIndexUrl(this && this._ix && this._ix.mav);
+  _mavIndexAt(url) {
     const cache = BkkLib._mavP;
     const hit = cache.get(url);
     let prev = null;
@@ -221,28 +219,10 @@ Object.assign(BkkLib, {
     }
     return toHeadsign;
   },
-  /* A MÁV card's departures: ELVIRA's board of the boarding station, the
-     trains its destination's arrival board also lists. The rest of the board
-     goes elsewhere. A train with only a number shows its kind, like FUTÁR's
-     rows: ELVIRA's S (sebesvonat) as SV, since a bare S on these cards is
-     FUTÁR's személyvonat (applyRailBadge). Each train is headed by its own
-     terminus, not by the card's destination it was asked with. */
-  mavBoardRows(rows) {
-    return (Array.isArray(rows) ? rows : [])
-      .filter((row) => row && row.destHit && departureStillDue(row.dep))
-      .map((row) => {
-        const out = Object.assign({}, row);
-        if (row.railKind && /^\d+$/.test(String(row.label || ''))) {
-          out.label = row.railKind === 'S' ? 'SV' : row.railKind;
-        }
-        const end = String(row.end || '').trim();
-        if (end) out.head = end;
-        return out;
-      });
-  },
-  async mavRouteForRow(row, boardName, alightName) {
+  async mavRouteForRow(ix, row, boardName, alightName) {
+    needIndexes(ix);
     try {
-      const idx = await this.mavIndex();
+      const idx = await ix.mav();
       if (!idx || !Array.isArray(idx.p)) return null;
       const hit = BkkLib.mavShapeIndexKey(row, idx);
       if (!hit) return null;
@@ -363,7 +343,8 @@ Object.assign(BkkLib, {
   /* Picked stops that came without coordinates (a city search hit, an
      older history entry, a YAML origin) get them from the index they
      belong to. Anything else passes through. */
-  async withGtfsCoords(stops) {
+  async withGtfsCoords(ix, stops) {
+    needIndexes(ix);
     const list = Array.isArray(stops) ? stops : [];
     const need = (s) => s && s.id && !BkkLib.finiteLatLon(s.lat, s.lon);
     const cityish = (s) => need(s) && BkkLib.stopIdFamily(s) === 'city';
@@ -373,8 +354,8 @@ Object.assign(BkkLib, {
       try { return await get(); } catch (_e) { return null; }
     };
     const [city, volan] = await Promise.all([
-      load(cityish, () => this.cityIndex()),
-      load(volanish, () => this.volanIndex()),
+      load(cityish, () => ix.city()),
+      load(volanish, () => ix.volan()),
     ]);
     return list.map((s) => {
       const idx = cityish(s) ? city : (volanish(s) ? volan : null);
@@ -540,12 +521,14 @@ Object.assign(BkkLib, {
     const split = BkkLib.splitCityPrefix(name);
     return split ? BkkLib.fold(split.city) : '';
   },
-  async volanSearchStops(q) {
-    const idx = await this.volanIndex();
+  async volanSearchStops(ix, q) {
+    needIndexes(ix);
+    const idx = await ix.volan();
     return BkkLib.gtfsSearchStops(idx, q, null);
   },
-  async volanRoutesAtStop(stop) {
-    const idx = await this.volanIndex();
+  async volanRoutesAtStop(ix, stop) {
+    needIndexes(ix);
+    const idx = await ix.volan();
     const origin = BkkLib.volanMatchStop(idx, stop, null);
     if (!origin) return [];
     const seen = new Set();
@@ -569,8 +552,9 @@ Object.assign(BkkLib, {
     out.sort((a, b) => a.label.localeCompare(b.label, 'hu', { numeric: true }));
     return out;
   },
-  async volanRemainingNames(stop, routeLabel) {
-    const idx = await this.volanIndex();
+  async volanRemainingNames(ix, stop, routeLabel) {
+    needIndexes(ix);
+    const idx = await ix.volan();
     const origin = BkkLib.volanMatchStop(idx, stop, null);
     if (!origin || !routeLabel) return [];
     const want = String(routeLabel);
@@ -606,9 +590,10 @@ Object.assign(BkkLib, {
     });
     return Array.from(best.values()).map((row) => row.stop);
   },
-  async citySearchStops(q, city) {
+  async citySearchStops(ix, q, city) {
+    needIndexes(ix);
     if (!city) return [];
-    const idx = await this.cityIndex();
+    const idx = await ix.city();
     return BkkLib.gtfsSearchStops(idx, q, BkkLib.opIx(idx, city));
   },
   gtfsSearchStops(idx, q, opIx) {
@@ -627,13 +612,15 @@ Object.assign(BkkLib, {
     });
     return hits.slice(0, 20).map((s) => BkkLib.gtfsHit(idx, s, { label: s.name, type: 'BUS' }));
   },
-  async volanReachableDests(stop) {
-    const idx = await this.volanIndex();
+  async volanReachableDests(ix, stop) {
+    needIndexes(ix);
+    const idx = await ix.volan();
     return BkkLib.gtfsReachableDests(idx, stop, null);
   },
-  async cityReachableDests(stop, city) {
+  async cityReachableDests(ix, stop, city) {
+    needIndexes(ix);
     if (!city) return { dests: [], destRoutes: {} };
-    const idx = await this.cityIndex();
+    const idx = await ix.city();
     return BkkLib.gtfsReachableDests(idx, stop, BkkLib.opIx(idx, city));
   },
   gtfsReachableDests(idx, stop, opIx) {
@@ -666,13 +653,15 @@ Object.assign(BkkLib, {
     dests.sort((a, b) => a.name.localeCompare(b.name, 'hu'));
     return { dests, destRoutes };
   },
-  async volanDepartures(stopId, dest, originName, minutesAfter) {
-    const idx = await this.volanIndex();
+  async volanDepartures(ix, stopId, dest, originName, minutesAfter) {
+    needIndexes(ix);
+    const idx = await ix.volan();
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, null, '#F9AB13', '#000000', 'coach', 'COACH', minutesAfter);
   },
-  async cityDepartures(stopId, dest, originName, city, minutesAfter) {
+  async cityDepartures(ix, stopId, dest, originName, city, minutesAfter) {
+    needIndexes(ix);
     if (!city) return [];
-    const idx = await this.cityIndex();
+    const idx = await ix.city();
     return BkkLib.gtfsDepartures(idx, stopId, dest, originName, BkkLib.opIx(idx, city), '#0F6FC6', '#ffffff', 'bus', 'BUS', minutesAfter);
   },
   /* GTFS route_type (basic and extended codes) to the card's vehicle kind.
@@ -805,10 +794,11 @@ Object.assign(BkkLib, {
   },
   /* City name of a local operator ("Székesfehérvár — helyi" → Székesfehérvár),
      so Transitous stop lookups stay inside that city. */
-  async stopArea(cfg) {
+  async stopArea(ix, cfg) {
+    needIndexes(ix);
     if (BkkLib.mode(cfg || {}) !== 'helyi' || !cfg.city) return '';
     try {
-      const idx = await this.cityIndex();
+      const idx = await ix.city();
       const op = (idx.ops || []).find((o) => o.id === cfg.city);
       return op ? String(op.name || '').split(' \u2014 ')[0].trim() : '';
     } catch (_e) {
@@ -923,6 +913,7 @@ Object.assign(BkkLib, {
           gtfs: BkkLib.gtfsTripGeo(idx, t, oidx, didx, day.base),
           rt: BkkLib.rtGtfsDescriptor(feed, idx, t, oidx, didx, day.ymd),
           tripId: 'gtfs:' + route + ':' + day.ymd + ':' + depMin + ':' + origin.i,
+          source: 'gtfs',
           label: route,
           color: color,
           text: text,
@@ -970,242 +961,5 @@ Object.assign(BkkLib, {
     const dests = Array.from(byKey.values());
     dests.sort((x, y) => x.name.localeCompare(y.name, 'hu'));
     return { dests, destRoutes };
-  },
-  rowTrainNumber(row) {
-    const direct = String((row && row.trainNumber) || '').trim();
-    if (direct) return direct.replace(/^0+/, '') || direct;
-    return BkkLib.trainNumberFromTripId(row && row.tripId);
-  },
-  mergeVolanRows(gtfs, otp, limit, opts) {
-    const out = [];
-    const byTime = new Map();
-    const byNum = new Map();
-    const byLoose = new Map();
-    const trainNumberMatchWindowMin = 5;
-    const generic = (c) => {
-      const x = String(c || '').replace('#', '').toLowerCase();
-      return !x || x === '4477aa';
-    };
-    const timeOf = (row) => `${String(row.label || '').toUpperCase()}|${Math.round(Number(row.sched || row.dep || 0) / 60)}`;
-    const overlay = (prev, row) => {
-      if (!prev || !row) return;
-      const prevNum = String(prev.trainNumber || '').trim();
-      const prevNumFromId = !!prevNum && BkkLib.isFutarTripId(prev.tripId)
-        && prevNum === BkkLib.trainNumberFromTripId(prev.tripId);
-      if (generic(prev.color) && row.color && !generic(row.color)) {
-        prev.color = row.color;
-        if (row.text) prev.text = row.text;
-      }
-      const prevLab = String(prev.label || '');
-      const rowLab = String(row.label || '');
-      const brandedLab = (lab) => {
-        const s = String(lab || '').trim();
-        return !!(s && !BkkLib.genericRailLabel(s) && !/^\d+$/.test(s));
-      };
-      if (!brandedLab(prevLab) && brandedLab(rowLab)) {
-        prev.label = rowLab;
-      }
-      const prevHasGps = !!BkkLib.mapGpsLatLon(prev.lat, prev.lon);
-      const rowHasGps = !!BkkLib.mapGpsLatLon(row.lat, row.lon);
-      const rowElvira = /^elvira:/i.test(String(row.tripId || ''));
-      if (rowHasGps && (!prevHasGps || rowElvira)) {
-        prev.lat = Number(row.lat);
-        prev.lon = Number(row.lon);
-      }
-      const tid = String(row.tripId || '');
-      if (BkkLib.isFutarTripId(tid)) prev.tripId = tid;
-      else if (tid && !/^(elvira:|gtfs:)/.test(tid) && !prevHasGps) prev.tripId = tid;
-      if ((!Array.isArray(prev.shape) || prev.shape.length < 2)
-          && Array.isArray(row.shape) && row.shape.length >= 2) {
-        prev.shape = row.shape;
-      }
-      ['vehicleId', 'licensePlate', 'model', 'vehicleStatus', 'stopDistancePercent'].forEach((k) => {
-        if ((prev[k] == null || prev[k] === '') && row[k] != null && row[k] !== '') prev[k] = row[k];
-      });
-      if (!prev.platform && row.platform) prev.platform = String(row.platform);
-      if (row.booking) prev.booking = true;
-      if (row.nationalPass) prev.nationalPass = true;
-      if (row.reservationFreeSection) prev.reservationFreeSection = true;
-      /* ELVIRA's number is the train's own; one read off a FUTÁR trip id
-         may carry a digit too many (BKK_8624_67 is IC 862). */
-      if (row.trainNumber && (!prevNum || (rowElvira && prevNumFromId))) {
-        prev.trainNumber = String(row.trainNumber);
-      }
-      if (prev.travel == null && row.travel != null) prev.travel = row.travel;
-      if (row.wheelchair) prev.wheelchair = true;
-      if (row.bikesAllowed) prev.bikesAllowed = true;
-    };
-    const minuteOf = (row) => Math.round(Number((row && (row.sched || row.dep)) || 0) / 60);
-    const numberKey = (number) => {
-      const raw = String(number || '').trim();
-      return BkkLib.emmaTrainNumber(raw) || raw.replace(/^0+/, '') || raw;
-    };
-    const registerNumber = (number, index, map = byNum) => {
-      const key = numberKey(number);
-      if (!key) return;
-      const rows = map.get(key) || [];
-      if (rows.indexOf(index) < 0) rows.push(index);
-      map.set(key, rows);
-    };
-    const findNumberMatch = (number, minute, map = byNum) => {
-      const rows = map.get(numberKey(number)) || [];
-      if (!minute || !rows.length) return -1;
-      let best = -1;
-      let distance = trainNumberMatchWindowMin + 1;
-      rows.forEach((index) => {
-        const delta = Math.abs(minuteOf(out[index]) - minute);
-        if (delta < distance) {
-          best = index;
-          distance = delta;
-        }
-      });
-      return distance <= trainNumberMatchWindowMin ? best : -1;
-    };
-    /* A FUTÁR IC/EC whose only number is its trip id is also filed under
-       the id less its last digit (BKK_8624_67: 862), for a number of the
-       train's own (ELVIRA) to find within the same window. Suburban and Sz
-       ids stay whole: BKK_4541_108 is train 4541, not 454. */
-    const looseNumber = (row) => {
-      if (!BkkLib.isTrainRow(row)) return '';
-      if (!/^(IC|EC|IR|RJX)$/i.test(String(row.label || '').trim())) return '';
-      const fromId = BkkLib.trainNumberFromTripId(row.tripId);
-      const direct = String(row.trainNumber || '').trim();
-      if (!fromId || (direct && direct !== fromId)) return '';
-      return BkkLib.trainNumberLooseFromTripId(row.tripId);
-    };
-    const ownNumber = (row) => BkkLib.isTrainRow(row)
-      && !!String(row.trainNumber || '').trim()
-      && !BkkLib.isFutarTripId(row.tripId)
-      && !BkkLib.suburbanLineLabel(row.label);
-    /* Pairing by minute (branded/numbered, named IC, label) is for one
-       departure seen twice. Two rows with train numbers of their own that
-       differ are two trains: ELVIRA lists the whole station, so G44 4711 to
-       Budapest-Déli leaves Kelenföld in the same minute as 8738 to Siófok. */
-    const numbersOf = (row) => [BkkLib.rowTrainNumber(row), looseNumber(row)]
-      .map(numberKey).filter(Boolean);
-    /* Two FUTÁR trips are two departures, whatever their label and minute:
-       paired, one row would carry one's trip id under the other's headsign. */
-    const otherTrain = (a, b) => {
-      const ta = String((a && a.tripId) || '');
-      const tb = String((b && b.tripId) || '');
-      if (ta !== tb && BkkLib.isFutarTripId(ta) && BkkLib.isFutarTripId(tb)) return true;
-      const x = numbersOf(a);
-      const y = numbersOf(b);
-      return !!x.length && !!y.length && !x.some((n) => y.indexOf(n) >= 0);
-    };
-    const brandedHost = (row) => BkkLib.isTrainRow(row)
-      && !BkkLib.numberedRailBadge(row)
-      && (BkkLib.suburbanLineLabel(row && row.label)
-        || (!BkkLib.genericRailLabel(row && row.label) && String((row && row.label) || '').trim()));
-    /* The kind a row's train is: ELVIRA's railKind, FUTÁR's label. FUTÁR's
-       bare S is a személyvonat and ELVIRA's S a sebesvonat, so S, Sz, SV
-       and Gy are one kind here; a number for a label is no kind at all. */
-    const railKindOf = (row) => {
-      const elvira = /^elvira:/i.test(String((row && row.tripId) || ''));
-      const k = String((elvira && row.railKind) || (row && row.label) || '').trim().toUpperCase().normalize('NFC');
-      if (!k || /^\d+$/.test(k)) return '';
-      return /^(S|SZ|SV|GY)$/.test(k) ? 'S' : k;
-    };
-    const terminusOf = (row) => String((/^elvira:/i.test(String(row.tripId || '')) ? row.end : row.head) || '').trim();
-    /* An ELVIRA train the card would add stands for a host row with no
-       number to pair by (an ad-hoc FUTÁR trip) only when both leave in the
-       same minute, of the same kind, for the same terminus. */
-    const sameTrain = (p, row) => BkkLib.isTrainRow(p) && minuteOf(p) === minuteOf(row)
-      && !!railKindOf(p) && railKindOf(p) === railKindOf(row)
-      && !!terminusOf(p) && BkkLib.nameEq(terminusOf(p), terminusOf(row))
-      && !otherTrain(p, row);
-    /* skipUnmatched: an overlay-only row, dropped when nothing pairs it.
-       asNew: the row added in its place when nothing does; it pairs as
-       strictly as an overlay-only row, plus sameTrain. */
-    const add = (row, skipUnmatched, asNew) => {
-      const strict = skipUnmatched || !!asNew;
-      if (!row || !departureStillDue(row.dep || row.sched)) return;
-      const n = BkkLib.rowTrainNumber(row);
-      const min = minuteOf(row);
-      let numberMatch = n ? findNumberMatch(n, min) : -1;
-      if (numberMatch < 0 && n && ownNumber(row)) numberMatch = findNumberMatch(n, min, byLoose);
-      if (numberMatch >= 0) {
-        overlay(out[numberMatch], row);
-        return;
-      }
-      if (BkkLib.numberedRailBadge(row) && min) {
-        const host = out.findIndex((p) => brandedHost(p) && minuteOf(p) === min && !otherTrain(p, row));
-        if (host >= 0) {
-          overlay(out[host], row);
-          registerNumber(n, host);
-          return;
-        }
-      } else if (brandedHost(row) && min) {
-        const numbered = out.findIndex((p) => BkkLib.numberedRailBadge(p) && minuteOf(p) === min
-          && !otherTrain(p, row));
-        if (numbered >= 0) {
-          overlay(out[numbered], row);
-          registerNumber(n, numbered);
-          return;
-        }
-      }
-      /* Named IC (GÖCSEJ) vs generic FUTÁR IC at the same minute, when the
-         train number on one side did not parse. Suburban G43/Z30 stay out.
-         overlayOnly must not use this: GEMENC at the same minute would steal
-         a FUTÁR IC and copy booking. Spec is trainNumber (+ minute). */
-      if (!strict && BkkLib.isTrainRow(row) && min) {
-        const namedIc = (r) => BkkLib.isTrainRow(r)
-          && !BkkLib.suburbanLineLabel(r && r.label)
-          && !BkkLib.genericRailLabel(r && r.label)
-          && !/^\d+$/.test(String((r && r.label) || '').trim());
-        const genericIc = (r) => BkkLib.isTrainRow(r) && BkkLib.genericRailLabel(r && r.label);
-        let pair = -1;
-        if (namedIc(row)) {
-          pair = out.findIndex((p) => genericIc(p) && minuteOf(p) === min && !otherTrain(p, row));
-        } else if (genericIc(row)) {
-          pair = out.findIndex((p) => namedIc(p) && minuteOf(p) === min && !otherTrain(p, row));
-        }
-        if (pair >= 0) {
-          overlay(out[pair], row);
-          const pn = BkkLib.rowTrainNumber(out[pair]) || n;
-          registerNumber(pn, pair);
-          registerNumber(n, pair);
-          return;
-        }
-      }
-      /* overlayOnly must not pair by label+minute: two ICs at the same
-         minute would copy booking onto the other FUTÁR train. Spec is
-         trainNumber (byNum) plus branded/numbered pairing above. */
-      const tk = timeOf(row);
-      if (!strict && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
-        overlay(out[byTime.get(tk)], row);
-        return;
-      }
-      if (skipUnmatched) return;
-      if (asNew && BkkLib.isTrainRow(row) && min) {
-        const same = out.findIndex((p) => sameTrain(p, row));
-        if (same >= 0) {
-          overlay(out[same], row);
-          registerNumber(n, same);
-          return;
-        }
-      }
-      const idx = out.length;
-      out.push(asNew || row);
-      byTime.set(tk, idx);
-      registerNumber(n, idx);
-      registerNumber(looseNumber(row), idx, byLoose);
-    };
-    const overlayOnly = !!(opts && opts.overlayOnly);
-    const hosts = overlayOnly ? (gtfs || []) : (otp || []);
-    const extra = overlayOnly ? (otp || []) : (gtfs || []);
-    /* overlayOnly with addUnmatched: an extra row it maps to a row of its
-       own (an ELVIRA train the destination's board confirms) pairs by
-       number like any overlay row, or as the same train (sameTrain), and is
-       added, as that row, when no host has it. */
-    const addUnmatched = overlayOnly && opts && typeof opts.addUnmatched === 'function' ? opts.addUnmatched : null;
-    hosts.forEach((row) => add(row, false));
-    extra.forEach((row) => {
-      const own = addUnmatched ? addUnmatched(row) : null;
-      add(row, overlayOnly && !own, own);
-    });
-    out.sort((a, b) => (a.dep || 0) - (b.dep || 0));
-    const cap = Number(limit);
-    return out.slice(0, (Number.isFinite(cap) && cap > 0) ? cap : 12);
   },
 });

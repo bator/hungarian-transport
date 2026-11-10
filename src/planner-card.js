@@ -1,19 +1,14 @@
-import { DEFAULT_MINUTES_AFTER, MINUTES_AFTER_PRESETS, clampMinutesAfter, configDataKey, departureStillDue, destRouteIds, normalizeCardConfig, pad2, tzEpochSec, tzFields, tzShiftYmd } from './config.js';
+import { DEFAULT_MINUTES_AFTER, MAP_TILES, MAP_TILE_OPTIONS, MINUTES_AFTER_PRESETS, clampMinutesAfter, configDataKey, departureStillDue, destRouteIds, normalizeCardConfig, pad2, tzEpochSec, tzFields, tzShiftYmd } from './config.js';
 import { BKKHopCard, NARROW_ROWS_PX } from './hop-card.js';
 import { t } from './i18n.js';
 import { MIX_SUPPORTS } from './themes.js';
 import { BkkLib } from './lib/core.js';
+import { generation } from './lib/generation.js';
 import { BKK_PLANNER_EDITOR } from './tags.js';
 
-/* After this long off screen the planner plans again on return. */
-const PLANNER_STALE_MS = 5 * 60 * 1000;
 /* After a failed stop-history read, the next one waits this long: hass
    changes many times a minute. */
 const HISTORY_RETRY_MS = 60 * 1000;
-/* Both journey maps: OpenStreetMap France tiles, credited as they ask. */
-const MAP_TILES = 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png';
-const MAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-  + ' &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>';
 /* Day and clock picks wait this long for the next arrow-key step. */
 const PICK_DEBOUNCE_MS = 300;
 /* Share of the HA secondary text colour in the themed title band's
@@ -29,9 +24,11 @@ export class BKKPlannerCard extends BKKHopCard {
     this._searchTimer = null;
     this._destTimer = null;
     this._pickTimer = null;
-    this._searchSeq = 0;
-    this._destSeq = 0;
-    this._destSearchSeq = 0;
+    /* The origin search, the destination search and the destination list
+       load: a newer one (or a pick) makes the one still running stale. */
+    this._originSearch = generation();
+    this._destSearch = generation();
+    this._destLoad = generation();
     this._dests = [];
     this._destRoutes = {};
     this._destHits = [];
@@ -42,21 +39,18 @@ export class BKKPlannerCard extends BKKHopCard {
        integration's service showed up (HA starting, an entry reload) lacks
        the BKK destinations, and loads again when it does. */
     this._destsAccess = '';
-    /* Bumped only by a new origin, destination or swap (_invalidatePlan),
-       not by a reload of the same pair: a map opening waits on this. */
-    this._pairGen = 0;
     this._pickersMounted = false;
-    /* Planning time lives on the card only: a saved time would be stale on
-       the next visit. mode: now | depart | arrive; at: epoch ms. */
-    this._when = { mode: 'now', at: 0 };
-    this._journeys = [];
-    this._openJourney = 0;
+    /* The journey plan (lib/journey-plan.js): the plan for now or for a
+       chosen time, and which answer is current. The planning time lives on
+       the card only: a saved time would be stale on the next visit. */
+    this._planner = BkkLib.journeyPlanSources(this._ctx);
+    this._plan = BkkLib.journeyPlan({
+      planner: this._planner,
+      now: () => this._ctx.now(),
+      changed: (part) => (part === 'journey' ? this._paintJourney() : this._paint()),
+    });
     /* The itinerary a journey map open still waiting draws (_openJourneyMap). */
     this._openingJourney = null;
-    /* The "now" plan on screen while a reload of the same pair plans again:
-       the base run drops _journey as soon as its departures answer, and the
-       new plan lands only at its end (_shownJourney). */
-    this._heldJourney = null;
     /* With both ends picked the title names the route and the pickers fold
        away; the edit button opens them again until the next destination. */
     this._editRoute = false;
@@ -100,26 +94,9 @@ export class BKKPlannerCard extends BKKHopCard {
   }
 
   /* Back on the view after a while, the departures and countdowns on screen
-     are stale: plan again. A chosen time does not go stale, nor do its
-     itineraries when all are folded or none was found. */
+     are stale: plan again (the journey plan's rule). */
   _shouldReloadOnConnect() {
-    const planned = this._timed() && ((this._journeys && this._journeys.length) || this._journeysDone);
-    const idle = !(planned || this._shownJourney() || this._journeyLoading || (this._rows && this._rows.length));
-    return idle || this._nowPlanStale();
-  }
-
-  /* The "now" plan the card shows: its own, or the one held over while a
-     reload of the same pair plans again. The 5-minute tick, a reconnect or
-     Most once more would otherwise blank the itinerary for the whole run,
-     reading "No upcoming departures." and then "Loading…" over a route that
-     needs a transfer, and a journey map opening meanwhile would lose it. */
-  _shownJourney() {
-    if (this._journey) return this._journey;
-    return this._timed() ? null : this._heldJourney;
-  }
-
-  _nowPlanStale() {
-    return !this._timed() && this._loadedAt > 0 && Date.now() - this._loadedAt > PLANNER_STALE_MS;
+    return this._plan.wantsReload(!!(this._rows && this._rows.length));
   }
 
   /* A board left in front (a wall tablet, a tab kept open) goes stale too:
@@ -129,7 +106,7 @@ export class BKKPlannerCard extends BKKHopCard {
   _tickPaint() {
     super._tickPaint();
     const cfg = this._config || {};
-    if (!cfg.stopId || !cfg.destKey || !this._nowPlanStale()) return;
+    if (!cfg.stopId || !cfg.destKey || !this._plan.stale) return;
     if (this._reloadActive || !this.isConnected || this._pageHidden()) return;
     this._reloadSafe();
   }
@@ -140,14 +117,7 @@ export class BKKPlannerCard extends BKKHopCard {
   setConfig(config) {
     const prevKey = this._configDataKey != null ? configDataKey(this._config) : null;
     if (prevKey != null && prevKey !== configDataKey(normalizeCardConfig(config))) {
-      this._pairGen += 1;
-      this._journey = null;
-      this._heldJourney = null;
-      this._journeys = [];
-      this._journeyKey = '';
-      this._journeyLoading = false;
-      this._journeysDone = false;
-      this._openJourney = 0;
+      this._plan.reset();
       this._editRoute = false;
     }
     super.setConfig(config);
@@ -156,132 +126,56 @@ export class BKKPlannerCard extends BKKHopCard {
   /* A new origin, destination or a swap: whatever the running reload or
      journey lookup still fetches belongs to the old pair and must not paint. */
   _invalidatePlan() {
-    this._gen += 1;
-    this._pairGen += 1;
+    this._runs.bump();
+    this._plan.reset();
     /* So do the searches typed or still running: their hits would paint
        under a field that was just picked or cleared. */
     if (this._searchTimer) { clearTimeout(this._searchTimer); this._searchTimer = null; }
     if (this._destTimer) { clearTimeout(this._destTimer); this._destTimer = null; }
-    this._searchSeq += 1;
-    this._destSearchSeq += 1;
+    this._originSearch.bump();
+    this._destSearch.bump();
     this._reloadActive = false;
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     this._rows = [];
     this._rawRows = [];
     this._err = '';
-    this._journey = null;
-    this._heldJourney = null;
-    this._journeys = [];
-    this._journeyKey = '';
-    this._journeyLoading = false;
-    this._journeysDone = false;
-    this._openJourney = 0;
-  }
-
-  _timed() {
-    return this._when && this._when.mode !== 'now' && this._when.at > 0;
   }
 
   /* A chosen time plans itineraries for that moment. The live departure
      board stays for "now": FUTÁR, the GTFS indexes and ELVIRA all answer
-     for the present. */
+     for the present, and the plan for now starts once its rows are in
+     (_boardSettled). */
   async _reload() {
-    this._loadedAt = Date.now();
-    if (!this._timed()) {
-      /* A new pair or "Mikor" dropped the plan before this; a reload of the
-         same pair keeps it on screen until the new one lands. */
-      if (this._journey) this._heldJourney = this._journey;
-      return super._reload();
-    }
-    this._heldJourney = null;
-    const gen = ++this._gen;
+    this._plan.begin();
+    if (!this._plan.timed) return super._reload();
+    const gen = this._runs.bump();
     this._reloadActive = true;
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
     this._rows = [];
     this._rawRows = [];
     this._err = '';
     this._loading = false;
-    this._journeyKey = '';
     this._paint();
     this._considerJourney();
-    if (gen === this._gen) this._reloadActive = false;
+    if (!this._runs.stale(gen)) this._reloadActive = false;
+  }
+
+  _boardSettled() {
+    this._considerJourney();
+  }
+
+  /* The stop pair as the journey plan takes it. */
+  _planPair() {
+    const cfg = this._config || {};
+    return {
+      origin: { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon },
+      dest: { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
+      horizon: clampMinutesAfter(cfg.minutesAfter),
+    };
   }
 
   _considerJourney() {
-    const cfg = this._config || {};
-    const horizon = clampMinutesAfter(cfg.minutesAfter);
-    const timed = this._timed();
-    const when = timed ? `${this._when.mode}@${this._when.at}` : 'now';
-    const key = [cfg.stopId, cfg.destStopId || '', cfg.destName, horizon, when].join('|');
-    if (!cfg.stopId || !cfg.destName) return;
-    if (this._journeyKey === key && (this._journeyLoading || this._journey || (timed && this._journeysDone))) return;
-    const gen = this._gen;
-    this._journeyKey = key;
-    this._journeyLoading = true;
-    this._journeysDone = false;
-    const origin = { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon };
-    const dest = { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon };
-    if (timed) {
-      this._journeys = [];
-      this._journey = null;
-      this._openJourney = 0;
-      this._paintJourney();
-      BkkLib.withIndexes(this._config).planJourneys(this._apiKey(), origin, dest, this._hass, {
-        time: this._when.at,
-        arriveBy: this._when.mode === 'arrive',
-        minutesAfter: 120,
-      }).then((list) => {
-        if (gen !== this._gen) return;
-        this._journeyLoading = false;
-        this._journeysDone = true;
-        this._journeys = list || [];
-        this._journeyFailed = false;
-        this._openJourney = 0;
-        this._journey = this._journeys[0] || null;
-        this._paint();
-      }).catch(() => {
-        if (gen !== this._gen) return;
-        /* A search that failed (Transitous or FUTÁR down) is not "no route
-           for this time": the view says to try again, not another time.
-           It is not done either: the next reload (back on the view, a
-           reconnect) asks again instead of keeping the failure. */
-        this._journeyLoading = false;
-        this._journeysDone = false;
-        this._journeyKey = '';
-        this._journeyFailed = true;
-        this._journeys = [];
-        this._paint();
-      });
-      return;
-    }
-    BkkLib.withIndexes(this._config).planJourney(
-      this._apiKey(),
-      origin,
-      dest,
-      this._hass,
-      { minutesAfter: horizon },
-    ).then(async (journey) => {
-      if (gen !== this._gen) return;
-      this._journeyLoading = false;
-      this._heldJourney = null;
-      this._journey = journey;
-      this._paint();
-      if (!journey) return;
-      try {
-        await BkkLib.fillJourneyShapes(journey);
-      } catch (_e) { /* draw the endpoint fallback */ }
-      if (gen !== this._gen) return;
-      this._journey = journey;
-      this._paintJourney();
-    }).catch(() => {
-      if (gen !== this._gen) return;
-      this._journeyLoading = false;
-      /* The held plan is the one this replaced: a stale one is no answer. */
-      this._heldJourney = null;
-      /* The planner does not poll: an empty board left on "Loading…" would
-         stay there. */
-      this._paint();
-    });
+    this._plan.consider(this._planPair());
   }
 
   set hass(hass) {
@@ -320,12 +214,12 @@ export class BKKPlannerCard extends BKKHopCard {
   }
 
   _emptyBodyMessage(lang, cfg) {
-    if (this._timed()) return '';
+    if (this._plan.timed) return '';
     /* The pickers above already ask for both stops. */
     if (!cfg.stopId || !cfg.destKey) return '';
-    const journey = this._shownJourney();
+    const journey = this._plan.shown;
     if (journey && journey.legs && journey.legs.length) return '';
-    if (this._journeyLoading) return t(lang, 'cardLoading');
+    if (this._plan.loading) return t(lang, 'cardLoading');
     return super._emptyBodyMessage(lang, cfg);
   }
 
@@ -495,7 +389,7 @@ export class BKKPlannerCard extends BKKHopCard {
     if (journey.startMs && journey.endMs) {
       /* Name the day when the trip does not start on the asked-for day, and
          mark an arrival after midnight with +1. */
-      const ref = this._timed() ? this._when.at : Date.now();
+      const ref = this._plan.timed ? this._plan.when.at : Date.now();
       const day = (ms) => {
         const f = tzFields(new Date(ms));
         return Date.UTC(f.y, f.mo - 1, f.d) / 86400000;
@@ -544,22 +438,23 @@ export class BKKPlannerCard extends BKKHopCard {
     if (!cfg.stopId || !cfg.destName) return null;
     const lang = this._lang();
     const esc = BkkLib.esc;
-    if (this._timed()) {
+    const plan = this._plan;
+    if (plan.timed) {
       /* The asked-for time is in the title's second line (_routeMeta). */
       let inner = '';
-      const list = this._journeys || [];
-      if (this._journeyLoading) {
+      const list = plan.list;
+      if (plan.loading) {
         inner += `<div class="j-msg">${esc(t(lang, 'plannerSearching'))}</div>`;
       } else if (!list.length) {
-        inner += `<div class="j-msg">${esc(t(lang, this._journeyFailed ? 'plannerSearchFailed' : 'plannerNoJourneys'))}</div>`;
+        inner += `<div class="j-msg">${esc(t(lang, plan.failed ? 'plannerSearchFailed' : 'plannerNoJourneys'))}</div>`;
       } else {
         inner += this._itineraryCols() + '<div class="itins">'
-          + list.map((j, i) => this._itineraryHtml(j, i, i === this._openJourney)).join('') + '</div>';
+          + list.map((j, i) => this._itineraryHtml(j, i, i === plan.openIndex)).join('') + '</div>';
       }
       return { className: 'journey-plan', html: inner, useBoard: false };
     }
     const visible = this._visibleRows();
-    const journey = this._shownJourney();
+    const journey = plan.shown;
     const showJourney = !!(journey && journey.legs && journey.legs.length
       && (!visible.length || BkkLib.journeyBeatsBoard(journey, visible)));
     if (visible.length && !showJourney) {
@@ -594,7 +489,7 @@ export class BKKPlannerCard extends BKKHopCard {
     if (!host) return;
     const view = this._journeyView();
     const sig = view ? view.className + '\n' + view.html : '';
-    const shown = this._shownJourney();
+    const shown = this._plan.shown;
     if (sig === this._journeySig && this._journeySigOf === shown && host.childNodes.length === (view ? 1 : 0)) return;
     this._journeySig = sig;
     this._journeySigOf = shown;
@@ -620,11 +515,11 @@ export class BKKPlannerCard extends BKKHopCard {
     }
     box.querySelectorAll('.itin-head').forEach((head) => {
       head.addEventListener('click', () => {
-        if (!this._timed()) return;
+        const plan = this._plan;
+        if (!plan.timed) return;
         const i = Number(head.getAttribute('data-i'));
-        if (!Number.isInteger(i) || !this._journeys[i]) return;
-        this._openJourney = this._openJourney === i ? -1 : i;
-        this._journey = this._journeys[this._openJourney] || null;
+        if (!Number.isInteger(i) || !plan.list[i]) return;
+        plan.openItinerary(plan.openIndex === i ? -1 : i);
         this._paintJourney();
       });
     });
@@ -636,7 +531,7 @@ export class BKKPlannerCard extends BKKHopCard {
     if (!el) return;
     try {
       const cfg = this._config || {};
-      const journey = this._shownJourney();
+      const journey = this._plan.shown;
       try {
         await BkkLib.fillJourneyShapes(journey);
       } catch (_e) { /* draw the endpoint fallback */ }
@@ -670,7 +565,7 @@ export class BKKPlannerCard extends BKKHopCard {
         zoomAnimation: false,
       }).setView(start, 8);
       this._plannerMap = map;
-      L.tileLayer(MAP_TILES, { maxZoom: 20, subdomains: 'abc', attribution: MAP_ATTRIBUTION }).addTo(map);
+      L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
       const allPts = this._drawJourneyPolylines(L, map, segs, { interactive: false });
       map.on('click', () => this._openJourneyMap());
       this._fitJourneyView(L, map, allPts, 16, () => this._plannerMap === map);
@@ -704,9 +599,10 @@ export class BKKPlannerCard extends BKKHopCard {
   async _openJourneyMapOnce() {
     const lang = this._lang();
     const cfg = this._config || {};
+    const plan = this._plan;
     /* A Map click on another itinerary than the one still opening is a
-       new open: it bumps _mapSeq, so the old one stops at its next check. */
-    if (this._openingMap === 'journey' && this._openingJourney === this._shownJourney()) return false;
+       new open: it makes the old one stale, which stops at its next check. */
+    if (this._openingMap === 'journey' && this._openingJourney === plan.shown) return false;
     if (this._mapOverlay && this._openMapKey === 'journey') return false;
     /* Focus goes to the dialog's close button and comes back on close, as
        with the vehicle map; left on the button under the backdrop, Tab
@@ -716,28 +612,29 @@ export class BKKPlannerCard extends BKKHopCard {
     this._closeVehicleMap();
     this._mapReturnFocus = back;
     this._openingMap = 'journey';
-    const seq = this._mapSeq;
+    const seq = this._mapOpens.token();
     /* A swap or a new origin or destination while this open still waits
        (_invalidatePlan) makes it one for the old pair: its plan must not
        replace the new pair's journey, paint, or open a map. A reload of
        the same pair (a key showing up, back on the view) does not. */
-    const gen = this._pairGen;
-    const timed = this._timed();
+    const pair = plan.pairToken();
+    const timed = plan.timed;
     /* The plan this open draws. A "Mikor" change meanwhile (_applyWhen)
        drops it for one still to come: without a plan the map would be a
        bare line from origin to destination under a summary of nothing.
        Another itinerary opened meanwhile replaces it: the map would draw
        one the card no longer shows. A new plan for now starts it again; a
        reload of the same pair still planning keeps the one on screen
-       (_shownJourney), and one that found no route leaves nothing to draw. */
-    let journey = this._shownJourney();
+       (the journey plan's shown one), and one that found no route leaves
+       nothing to draw. */
+    let journey = plan.shown;
     this._openingJourney = journey;
     let again = false;
     const stale = () => {
       if (this._mapStale(seq)) return true;
-      if (gen === this._pairGen && this._shownJourney() === journey) return false;
+      if (plan.samePair(pair) && plan.shown === journey) return false;
       this._openingMap = '';
-      if (gen === this._pairGen && !timed && !this._timed() && this._shownJourney()) {
+      if (plan.samePair(pair) && !timed && !plan.timed && plan.shown) {
         again = true;
         return true;
       }
@@ -753,20 +650,14 @@ export class BKKPlannerCard extends BKKHopCard {
     let segs = BkkLib.journeyMapSegments(journey, cfg, cfg);
     /* Only "now" plans again for a map: a chosen time's open itinerary is
        one of several, and a plan for now would replace it with another. */
-    if (!segs.length && cfg.stopId && cfg.destName && !this._timed()) {
+    if (!segs.length && cfg.stopId && cfg.destName && !plan.timed) {
       try {
-        const planned = await BkkLib.withIndexes(this._config).planJourney(
-          this._apiKey(),
-          { id: cfg.stopId, name: cfg.stopName || '', lat: cfg.stopLat, lon: cfg.stopLon },
-          { id: cfg.destStopId || '', name: cfg.destName || '', lat: cfg.destLat, lon: cfg.destLon },
-          this._hass,
-          { minutesAfter: clampMinutesAfter(cfg.minutesAfter) },
-        );
+        const planned = await this._planner.now(this._planPair());
         if (stale()) return again;
         if (planned) {
-          journey = this._openingJourney = this._journey = planned;
-          /* A reload still running drops _journey: the box keeps this one. */
-          if (this._heldJourney) this._heldJourney = planned;
+          journey = this._openingJourney = planned;
+          /* Held over too: a reload still running keeps this one in the box. */
+          plan.adopt(planned);
         }
         try {
           await BkkLib.fillJourneyShapes(journey);
@@ -832,7 +723,7 @@ export class BKKPlannerCard extends BKKHopCard {
     let map;
     try {
       map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView(start, 8);
-      L.tileLayer(MAP_TILES, { maxZoom: 20, subdomains: 'abc', attribution: MAP_ATTRIBUTION }).addTo(map);
+      L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
     } catch (_e) {
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapLeafletFail'));
@@ -861,9 +752,10 @@ export class BKKPlannerCard extends BKKHopCard {
      itineraries are for. */
   _routeMeta() {
     const lang = this._lang();
-    if (this._timed()) {
-      const when = this._whenText(this._when.at);
-      return this._when.mode === 'arrive' ? t(lang, 'plannerRoutesBy', when) : t(lang, 'plannerRoutesFrom', when);
+    const plan = this._plan;
+    if (plan.timed) {
+      const when = this._whenText(plan.when.at);
+      return plan.when.mode === 'arrive' ? t(lang, 'plannerRoutesBy', when) : t(lang, 'plannerRoutesFrom', when);
     }
     return t(lang, 'plannerLiveMeta', t(lang, 'plannerHorizon', clampMinutesAfter((this._config || {}).minutesAfter)));
   }
@@ -987,7 +879,7 @@ export class BKKPlannerCard extends BKKHopCard {
 
   _paint() {
     super._paint();
-    const timed = this._timed();
+    const timed = this._plan.timed;
     const cap = this._planEl('pdeps');
     if (cap) cap.hidden = timed || !(this._rows || []).length;
     if (this._elBody) this._elBody.hidden = timed;
@@ -1414,12 +1306,13 @@ ${this._stopPinCss()}
       this._pickTimer = setTimeout(() => {
         this._pickTimer = null;
         /* The pickers only show for Indulás / Érkezés. */
-        if (!this._timed()) return;
+        const when = this._plan.when;
+        if (!this._plan.timed) return;
         const ms = this._whenFromParts(day.value, time.value);
         if (!ms) return;
-        const cur = this._whenParts(this._when.at);
+        const cur = this._whenParts(when.at);
         if (cur.ymd === day.value && String(cur.min) === time.value) return;
-        this._applyWhen({ mode: this._when.mode, at: ms });
+        this._applyWhen({ mode: when.mode, at: ms });
       }, PICK_DEBOUNCE_MS);
     };
     if (day && time) {
@@ -1436,7 +1329,7 @@ ${this._stopPinCss()}
       this._applyWhen({ mode: 'now', at: 0 });
       return;
     }
-    let at = this._when.at;
+    let at = this._plan.when.at;
     if (!(at > Date.now() - 3600000)) {
       const step = 5 * 60000;
       at = Math.ceil(Date.now() / step) * step;
@@ -1448,16 +1341,7 @@ ${this._stopPinCss()}
     /* A day or time pick still waiting out its debounce belongs to the old
        choice: Most or a reset after it must not be undone 300 ms later. */
     if (this._pickTimer) { clearTimeout(this._pickTimer); this._pickTimer = null; }
-    /* Most once more plans "now" again: the plan on screen stays until the
-       new one lands, as on the tick. A chosen time has other itineraries. */
-    const held = !this._timed() && when.mode === 'now' ? this._shownJourney() : null;
-    this._when = when;
-    this._journeyKey = '';
-    this._journey = null;
-    this._heldJourney = held;
-    this._journeys = [];
-    this._journeysDone = false;
-    this._journeyLoading = false;
+    this._plan.setWhen(when);
     this._syncWhen();
     this._reloadSafe();
   }
@@ -1479,13 +1363,14 @@ ${this._stopPinCss()}
 
   /* Today and the six days after it ("ma", "holnap", "h 11. 3."), plus the
      picked day when it lies outside them; every five minutes of the day,
-     plus the picked minute when it is off the grid. */
-  _paintWhenPickers() {
+     plus the picked minute when it is off the grid. The picked time is
+     the plan's unless given. */
+  _paintWhenPickers(at) {
     const day = this._planEl('pday');
     const time = this._planEl('ptime');
     if (!day || !time) return;
     const lang = this._lang();
-    const cur = this._whenParts(this._when.at || Date.now());
+    const cur = this._whenParts(at || this._plan.when.at || Date.now());
     const today = this._whenParts(Date.now()).ymd;
     const fmt = new Intl.DateTimeFormat(lang === 'hu' ? 'hu-HU' : 'en-GB', {
       timeZone: 'Europe/Budapest', weekday: 'short', month: 'short', day: 'numeric',
@@ -1513,14 +1398,14 @@ ${this._stopPinCss()}
 
   _syncWhen() {
     const lang = this._lang();
-    const timed = this._timed();
+    const timed = this._plan.timed;
     const labels = { now: 'plannerNow', depart: 'plannerDepartAt', arrive: 'plannerArriveBy' };
     const seg = this._planEl('pwhen');
     if (seg) {
       seg.setAttribute('aria-label', t(lang, 'plannerWhen'));
       seg.querySelectorAll('button[data-when]').forEach((btn) => {
         const mode = btn.getAttribute('data-when');
-        const on = mode === (this._when.mode || 'now');
+        const on = mode === (this._plan.when.mode || 'now');
         btn.textContent = t(lang, labels[mode]);
         btn.classList.toggle('on', on);
         btn.setAttribute('aria-checked', on ? 'true' : 'false');
@@ -1725,7 +1610,7 @@ ${this._stopPinCss()}
     /* The new origin's destinations load when edit opens the pickers; a
        load still running belongs to the old one. */
     this._destsFor = '';
-    this._destSeq += 1;
+    this._destLoad.bump();
     this._destsLoading = false;
     this._editRoute = false;
     this._clearPickerInputs();
@@ -1736,13 +1621,12 @@ ${this._stopPinCss()}
 
   _resetPlan() {
     if (this._pickTimer) { clearTimeout(this._pickTimer); this._pickTimer = null; }
-    this._when = { mode: 'now', at: 0 };
-    this._journeys = [];
+    this._plan.setWhen({ mode: 'now', at: 0 });
     this._dests = [];
     this._destRoutes = {};
     this._destsFor = '';
     /* A destination load still running belongs to the cleared origin. */
-    this._destSeq += 1;
+    this._destLoad.bump();
     this._destsLoading = false;
     this._config = Object.assign({}, this._config, {
       stopId: '',
@@ -1776,14 +1660,14 @@ ${this._stopPinCss()}
     const box = this._planEl('phits');
     if (!box) return;
     /* A cleared or too short query also cancels the search still running. */
-    const seq = ++this._searchSeq;
+    const seq = this._originSearch.bump();
     if (!q || q.length < 2) { box.innerHTML = ''; return; }
     try {
       this._err = '';
       if (!this._hasFutar()) await this._fillKey();
-      if (seq !== this._searchSeq) return;
-      const hits = await BkkLib.withIndexes(this._config).searchPlannerStops(this._apiKey(), q);
-      if (seq !== this._searchSeq) return;
+      if (this._originSearch.stale(seq)) return;
+      const hits = await BkkLib.searchPlannerStops(this._ctx.indexes(), this._apiKey(), q);
+      if (this._originSearch.stale(seq)) return;
       if (!hits.length) {
         this._hint(box, 'mode.empty');
         return;
@@ -1799,7 +1683,7 @@ ${this._stopPinCss()}
         });
       });
     } catch (err) {
-      if (seq !== this._searchSeq) return;
+      if (this._originSearch.stale(seq)) return;
       this._showErr(err);
     }
   }
@@ -1844,7 +1728,7 @@ ${this._stopPinCss()}
     if (!cfg.stopId) return;
     this._destsFor = cfg.stopId;
     this._destsAccess = this._futarAccess();
-    const seq = ++this._destSeq;
+    const seq = this._destLoad.bump();
     /* The last origin's destinations must not be offered while this
        one's load (an origin changed in the editor). */
     this._dests = [];
@@ -1854,31 +1738,30 @@ ${this._stopPinCss()}
     try {
       if (!this._hasFutar()) await this._fillKey();
       /* A key borrowed just now is what this list loads with. */
-      if (seq === this._destSeq) this._destsAccess = this._futarAccess();
-      const placeOrigin = /^(geo:|node\/|way\/)/i.test(String(cfg.stopId || ''))
-        || cfg.stopKind === 'address' || cfg.stopKind === 'place';
-      if (placeOrigin) {
+      if (!this._destLoad.stale(seq)) this._destsAccess = this._futarAccess();
+      if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
         this._dests = [];
         this._destRoutes = {};
       } else {
-        const out = await BkkLib.withIndexes(this._config).reachableDests(
+        const out = await BkkLib.reachableDests(
+          this._ctx.indexes(),
           this._apiKey(),
           this._tripCache || {},
           { id: cfg.stopId, name: cfg.stopName || '' },
           'all',
           '',
         );
-        if (seq !== this._destSeq) return;
+        if (this._destLoad.stale(seq)) return;
         this._dests = (out && out.dests) || [];
         this._destRoutes = (out && out.destRoutes) || {};
       }
     } catch (err) {
-      if (seq !== this._destSeq) return;
+      if (this._destLoad.stale(seq)) return;
       this._showErr(err);
       this._dests = [];
       this._destRoutes = {};
     } finally {
-      if (seq === this._destSeq) {
+      if (!this._destLoad.stale(seq)) {
         this._destsLoading = false;
         this._searchDest((this._planEl('pdq') || {}).value || '');
       }
@@ -1901,15 +1784,15 @@ ${this._stopPinCss()}
       this._hint(box, 'plannerPickAll');
       return;
     }
-    const seq = ++this._destSearchSeq;
+    const seq = this._destSearch.bump();
     if (!q || q.length < 2) {
       this._paintDestHits(q || '');
       return;
     }
     try {
       if (!this._hasFutar()) await this._fillKey();
-      const extras = await BkkLib.withIndexes(this._config).searchPlannerStops(this._apiKey(), q);
-      if (seq !== this._destSearchSeq) return;
+      const extras = await BkkLib.searchPlannerStops(this._ctx.indexes(), this._apiKey(), q);
+      if (this._destSearch.stale(seq)) return;
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
       if (!hits.length && this._destsLoading) {
         this._hint(box, 'destLoading');
@@ -1917,7 +1800,7 @@ ${this._stopPinCss()}
       }
       this._renderDestHits(hits, 'mode.empty');
     } catch (err) {
-      if (seq !== this._destSearchSeq) return;
+      if (this._destSearch.stale(seq)) return;
       this._showErr(err);
     }
   }

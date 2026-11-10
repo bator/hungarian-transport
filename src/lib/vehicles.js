@@ -1,7 +1,7 @@
-import { BKK_RAIL_BADGE, PLATFORM_IN_HEAD, PLATFORM_STRIP, RAIL_KIND_BADGE, vehicleIcon } from '../config.js';
-import { BkkLib } from '../lib/core.js';
+import { BKK_RAIL_BADGE, PLATFORM_IN_HEAD, PLATFORM_STRIP, RAIL_KIND_BADGE } from '../config.js';
+import { BkkLib, register } from '../lib/core.js';
 
-Object.assign(BkkLib, {
+register({
   trainNumberFromTripId(tripId) {
     const s = String(tripId || '');
     /* BKK_90681_106 is train 9068 (trailing 1 on a 5-digit body).
@@ -19,17 +19,13 @@ Object.assign(BkkLib, {
   /* The other reading of a 4–5 digit id body: the train number plus one
      digit, where the rule above kept every digit (BKK_8624_67 is IC 862,
      BKK_2461_311 is EC 246). '' when both readings agree. Ambiguous on its
-     own: mergeVolanRows tries it only for long-distance rows, within its
+     own: mergeRows tries it only for long-distance rows, within its
      train-number window, against a number from another source. */
   trainNumberLooseFromTripId(tripId) {
     const m = String(tripId || '').match(/^BKK_(\d{4,5})(?:_|$)/);
     if (!m) return '';
     const loose = m[1].slice(0, -1);
     return loose === BkkLib.trainNumberFromTripId(tripId) ? '' : loose;
-  },
-  isFutarTripId(tripId) {
-    const t = String(tripId || '');
-    return !!t && !/^(elvira:|gtfs:|motis:)/.test(t);
   },
   emmaTrainNumber(text) {
     const s = String(text || '').trim();
@@ -187,7 +183,8 @@ Object.assign(BkkLib, {
     };
     const groups = new Map();
     list.forEach((row, idx) => {
-      if (!row || !/^(gtfs:|motis:)/.test(String(row.tripId || ''))) return;
+      const source = BkkLib.rowSource(row);
+      if (source !== 'gtfs' && source !== 'motis') return;
       if (BkkLib.mapGpsLatLon(row.lat, row.lon) && !row.gpsCarried) return;
       let key = '';
       BkkLib.coachRouteKeys(row.label).some((candidate) => {
@@ -253,7 +250,7 @@ Object.assign(BkkLib, {
   async attachCoachGps(hass, rows) {
     const list = Array.isArray(rows) ? rows : [];
     const needs = list.some((row) => row
-      && /^(gtfs:|motis:)/.test(String(row.tripId || ''))
+      && ['gtfs', 'motis'].includes(BkkLib.rowSource(row))
       && (row.gpsCarried || !BkkLib.mapGpsLatLon(row.lat, row.lon)));
     if (!hass || !needs) return list;
     return BkkLib.applyCoachGps(list, await BkkLib.coachPositions(hass));
@@ -381,8 +378,9 @@ Object.assign(BkkLib, {
       }
       if (v.booking) row.booking = true;
       if (!row.trainNumber && v.trainNumber) row.trainNumber = String(v.trainNumber);
-      if (v.tripId && BkkLib.isFutarTripId(v.tripId) && !BkkLib.isFutarTripId(row.tripId)) {
+      if (v.tripId && BkkLib.isFutarTripId(v.tripId) && BkkLib.rowSource(row) !== 'futar') {
         row.tripId = String(v.tripId);
+        row.source = 'futar';
       }
       if (v.bikesAllowed === true || v.bikesallowed === true) row.bikesAllowed = true;
       /* A carried coach position (gpsCarried) is only the last poll's: the
@@ -400,7 +398,7 @@ Object.assign(BkkLib, {
     return rows;
   },
   /* FUTÁR labels a személyvonat S (1.4.5): it shows as Sz. ELVIRA's kinds
-     come as SV (sebesvonat) and Gy (gyorsvonat, mavBoardRows), in MÁV's
+     come as SV (sebesvonat) and Gy (gyorsvonat, elviraBoardRows), in MÁV's
      own colours for them, the ones its GTFS gives. */
   applyRailBadge(row) {
     if (!row) return row;
@@ -424,55 +422,5 @@ Object.assign(BkkLib, {
       row.text = '#' + badge[1];
     }
     return row;
-  },
-
-  /* One departure in the shape the card renders: display strings plus the raw
-     epoch seconds, so the countdown can tick without refetching. */
-  asRow(r, destName, lang) {
-    BkkLib.applyRailBadge(r);
-    const dep = r.dep;
-    let type = String(r.rawType || r.vehicle || 'BUS').toUpperCase();
-    if (type.indexOf('SUBURBAN') >= 0 || type === 'TRAIN' || type === 'RAILWAY') type = 'RAIL';
-    let head = String(r.head || destName || '').trim();
-    const plat = r.platform ? String(r.platform) : BkkLib.platformFromText(head);
-    head = BkkLib.stripPlatform(head);
-    const lat = Number(r.lat);
-    const lon = Number(r.lon);
-    const gps = BkkLib.mapGpsLatLon(lat, lon);
-    const hasGps = !!gps;
-    const shape = Array.isArray(r.shape) ? r.shape : undefined;
-    return {
-      type: type,
-      icon: vehicleIcon(type),
-      label: r.label,
-      headsign: head,
-      tripId: r.tripId || '',
-      depTs: dep || 0,
-      schedTs: r.sched || dep || 0,
-      attime: BkkLib.hm(r.sched || dep),
-      predicted_attime: BkkLib.hm(dep),
-      wheelchair: !!r.wheelchair,
-      bikesAllowed: !!r.bikesAllowed,
-      color: String(r.color || '').replace('#', ''),
-      textcolor: String(r.text || r.textcolor || '').replace('#', ''),
-      platform: plat || '',
-      trainNumber: r.trainNumber || '',
-      delay: Number(r.delay || 0),
-      booking: !!r.booking,
-      nationalPass: !!r.nationalPass,
-      reservationFreeSection: !!r.reservationFreeSection,
-      travelMin: r.travel,
-      lat: hasGps ? gps[0] : null,
-      lon: hasGps ? gps[1] : null,
-      hasGps: hasGps,
-      shape: shape,
-      gtfs: r.gtfs || null,
-      vehicle: r.vehicle || '',
-      vehicleId: r.vehicleId || '',
-      licensePlate: r.licensePlate || '',
-      model: r.model || '',
-      vehicleStatus: r.vehicleStatus || '',
-      stopDistancePercent: r.stopDistancePercent,
-    };
   },
 });

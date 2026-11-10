@@ -49,8 +49,10 @@ def no_daily_mav_index(monkeypatch):
     """No test reaches GitHub Pages for the daily MÁV index unless it asks
     (tests/test_mav_daily.py overrides this fixture)."""
 
+    from custom_components.hungarian_transport import mav_daily
+
     async def _no_update(hass, www):
-        return "up_to_date"
+        return mav_daily.DailyRound(mav_daily.UP_TO_DATE)
 
     monkeypatch.setattr(
         "custom_components.hungarian_transport.mav_daily.async_update", _no_update

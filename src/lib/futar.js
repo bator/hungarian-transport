@@ -1,6 +1,6 @@
 import { BKK_API, MIN_REFRESH_S } from '../config.js';
 import { codedError } from '../i18n.js';
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* A departure board is shared between cards for this long: well under the
    shortest poll, and timed from the request, so a card polling at the floor
@@ -12,7 +12,7 @@ const BOARD_TTL_MS = Math.max(1, MIN_REFRESH_S - 5) * 1000;
    departures it lists still leave on time. Kept no longer than this. */
 const BOARD_STALE_MS = 5 * 60 * 1000;
 
-Object.assign(BkkLib, {
+register({
   _mem: {},
   _inflight: {},
   _gateActive: 0,

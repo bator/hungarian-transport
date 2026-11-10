@@ -35,10 +35,9 @@ async def test_concurrent_misses_share_one_fetch() -> None:
     assert results == [{"n": 1}] * 3
 
 
-async def test_expired_entries_are_dropped_on_store(monkeypatch) -> None:
+async def test_expired_entries_are_dropped_on_store() -> None:
     clock = [1000.0]
-    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock[0])
-    cache = SharedTTLCache(ttl=15, max_entries=100)
+    cache = SharedTTLCache(ttl=15, max_entries=100, monotonic=lambda: clock[0])
 
     async def value(v):
         return v
@@ -50,10 +49,9 @@ async def test_expired_entries_are_dropped_on_store(monkeypatch) -> None:
     assert len(cache) == 1
 
 
-async def test_an_expired_entry_is_dropped_when_read(monkeypatch) -> None:
+async def test_an_expired_entry_is_dropped_when_read() -> None:
     clock = [1000.0]
-    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock[0])
-    cache = SharedTTLCache(ttl=15, max_entries=100)
+    cache = SharedTTLCache(ttl=15, max_entries=100, monotonic=lambda: clock[0])
 
     async def value(v):
         return v
@@ -71,18 +69,17 @@ async def test_an_expired_entry_is_dropped_when_read(monkeypatch) -> None:
     assert len(cache) == 0
 
 
-async def test_expired_entries_go_without_another_call(monkeypatch) -> None:
+async def test_expired_entries_go_without_another_call() -> None:
     """Nobody polls once the dashboards close: the last boards are dropped
     when their TTL ends, not at some later store."""
     clock = [1000.0]
-    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock[0])
     timers: list[tuple[float, object]] = []
 
     def call_later(delay, action):
         timers.append((delay, action))
         return lambda: timers.remove((delay, action))
 
-    cache = SharedTTLCache(ttl=15, max_entries=100, call_later=call_later)
+    cache = SharedTTLCache(ttl=15, max_entries=100, call_later=call_later, monotonic=lambda: clock[0])
 
     async def value(v):
         return v
@@ -116,10 +113,11 @@ def expiry_timers(hass) -> list:
     ]
 
 
-async def test_hass_expiry_timer_purges_the_cache(hass, monkeypatch) -> None:
+async def test_hass_expiry_timer_purges_the_cache(hass) -> None:
     clock = [1000.0]
-    monkeypatch.setattr(cache_mod.time, "monotonic", lambda: clock[0])
-    cache = SharedTTLCache(ttl=15, max_entries=8, call_later=cache_mod.hass_call_later(hass))
+    cache = SharedTTLCache(
+        ttl=15, max_entries=8, call_later=cache_mod.hass_call_later(hass), monotonic=lambda: clock[0]
+    )
 
     async def value(v):
         return v

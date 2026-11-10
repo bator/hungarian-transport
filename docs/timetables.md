@@ -397,7 +397,11 @@ runs), not the tagged commit the zips are built from;
 To rebuild them yourself on Home Assistant OS:
 
 1. Copy `scripts/*.py` and `scripts/run_update.sh` to `/config/hungarian-transport/`
-   (`build_mav_index.py` included). pfaedle output stays on the builder host,
+   (`build_mav_index.py` included). The scripts read GTFS with the
+   integration's `gtfs_feed.py` in `/config/custom_components/hungarian_transport/`,
+   so copy the scripts of the installed release; without the integration
+   installed, copy `custom_components/hungarian_transport/gtfs_feed.py` next
+   to them. pfaedle output stays on the builder host,
    not on Home Assistant OS — without it the official zip is stop-sequence,
    not OSM rails. To download MÁV's zip there, set `MAV_GTFS_URL`,
    `MAV_GTFS_USER` and `MAV_GTFS_PASSWORD` in

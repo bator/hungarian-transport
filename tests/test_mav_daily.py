@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
-from custom_components.hungarian_transport import mav, mav_daily, mav_index
+from custom_components.hungarian_transport import gtfs_feed, mav, mav_daily, mav_index
 from custom_components.hungarian_transport.const import CONF_DAILY_MAV, CONF_DAILY_TIME, DOMAIN
 
 NEW = "20261101.M2ChangeID"
@@ -46,11 +46,11 @@ def _index(feed: str, schema: int = mav_index.SCHEMA, fitted: bool = False) -> b
         "v": schema,
         "feed": feed,
         "st": [["Székesfehérvár", 4718361, 1842472], ["Budapest-Kelenföld", 4746432, 1902063]],
-        "p": [mav_index.encode_polyline(RAIL if fitted else STATION_LINE)],
+        "p": [gtfs_feed.encode_polyline(RAIL if fitted else STATION_LINE)],
         "n": {"905": [[0, [0, 1]]]},
         "l": {},
     }
-    # Compact, as mav_index.write: mav._index_feed reads "feed" from the head.
+    # Compact, as mav_index.write: served_index.read_feed reads "feed" from the head.
     raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return gzip.compress(raw, mtime=0)
 
@@ -105,7 +105,7 @@ async def test_newer_feed_installs(hass: HomeAssistant, aioclient_mock, card_ass
     _serve(aioclient_mock, raw)
     caplog.set_level(logging.INFO)
 
-    assert await mav_daily.async_update(hass, card_assets) == mav_daily.INSTALLED
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
     # Byte for byte what the manifest describes, served like a plain file.
     assert out.read_bytes() == raw
     assert out.stat().st_mode & 0o777 == 0o644
@@ -121,7 +121,7 @@ async def test_newer_feed_installs(hass: HomeAssistant, aioclient_mock, card_ass
 async def test_missing_index_installs(hass: HomeAssistant, aioclient_mock, card_assets) -> None:
     raw = _index(NEW)
     _serve(aioclient_mock, raw)
-    assert await mav_daily.async_update(hass, card_assets) == mav_daily.INSTALLED
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
     assert (card_assets / mav.INDEX_NAME).read_bytes() == raw
 
 
@@ -135,7 +135,7 @@ async def test_older_or_equal_feed_skips(hass: HomeAssistant, aioclient_mock, ca
     out.write_bytes(before)
     _serve(aioclient_mock, _index(NEW))
 
-    assert await mav_daily.async_update(hass, card_assets) == mav_daily.UP_TO_DATE
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.UP_TO_DATE
     assert out.read_bytes() == before
     assert aioclient_mock.call_count == 1
 
@@ -163,7 +163,7 @@ async def test_local_feed_wins_unless_older(
     raw = _index(NEW)
     _serve(aioclient_mock, raw)
 
-    assert await mav_daily.async_update(hass, card_assets) == expected
+    assert (await mav_daily.async_update(hass, card_assets)).result == expected
     assert out.read_bytes() == (raw if expected == mav_daily.INSTALLED else before)
 
 
@@ -200,7 +200,7 @@ async def test_local_feed_without_its_index_does_not_win(
     raw = _index(NEW)
     _serve(aioclient_mock, raw)
 
-    assert await mav_daily.async_update(hass, card_assets) == mav_daily.INSTALLED
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
     assert out.read_bytes() == raw
 
 
@@ -214,7 +214,7 @@ async def test_local_feed_whose_index_is_another_build_does_not_win(
     _built_here(hass, mav_source, out)
     out.write_bytes(_index(OLD))
     _serve(aioclient_mock, _index(NEW))
-    assert await mav_daily.async_update(hass, card_assets) == mav_daily.INSTALLED
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
 
 
 @pytest.mark.parametrize(
@@ -240,7 +240,7 @@ async def test_same_feed_rule(
     raw = _index(NEW, fitted=daily_fitted)
     _serve(aioclient_mock, raw, _manifest(raw, fitted_share=share))
 
-    assert await mav_daily.async_update(hass, card_assets) == expected
+    assert (await mav_daily.async_update(hass, card_assets)).result == expected
     assert out.read_bytes() == (raw if expected == mav_daily.INSTALLED else before)
     # The startup check keeps whichever stayed: a build of the same feed
     # never replaces it.
@@ -262,7 +262,7 @@ async def test_a_stop_sequence_daily_index_never_replaces_a_fitted_one(
     big["pad"] = "".join(f"{i:05d}" for i in range(4000))
     raw = gzip.compress(json.dumps(big, separators=(",", ":")).encode(), mtime=0)
     _serve(aioclient_mock, raw, _manifest(raw, fitted_share=0.99))
-    assert await mav_daily.async_update(hass, card_assets) == mav_daily.UP_TO_DATE
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.UP_TO_DATE
     assert out.read_bytes() == before
 
 
@@ -348,7 +348,7 @@ async def test_bad_download_keeps_the_index_and_logs_once(
     _serve(aioclient_mock, raw, man, **index_kw)
 
     for _ in range(3):
-        assert await mav_daily.async_update(hass, card_assets) == mav_daily.FAILED
+        assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.FAILED
     assert out.read_bytes() == before
     assert len(_warnings(caplog)) == 1, _warnings(caplog)
     assert not [p for p in card_assets.iterdir() if p.name != mav.INDEX_NAME and p.name.startswith(mav.INDEX_NAME)]
@@ -376,7 +376,7 @@ async def test_bad_manifest_keeps_the_index_and_logs_once(
     caplog.set_level(logging.INFO)
 
     for _ in range(3):
-        assert await mav_daily.async_update(hass, card_assets) == expected
+        assert (await mav_daily.async_update(hass, card_assets)).result == expected
     assert out.read_bytes() == before
     assert aioclient_mock.call_count == 3
     said = [r for r in caplog.records if r.name == mav_daily.__name__ and r.levelno >= logging.INFO]
@@ -390,7 +390,7 @@ async def test_failure_logs_again_after_a_success(hass: HomeAssistant, aioclient
     await mav_daily.async_update(hass, card_assets)
     aioclient_mock.clear_requests()
     _serve(aioclient_mock, _index(NEW))
-    assert await mav_daily.async_update(hass, card_assets) == mav_daily.INSTALLED
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
     aioclient_mock.clear_requests()
     aioclient_mock.get(mav_daily.MANIFEST_URL, status=503)
     await mav_daily.async_update(hass, card_assets)
@@ -406,14 +406,14 @@ async def test_no_write_while_a_build_runs(hass: HomeAssistant, aioclient_mock, 
 
     await lock.acquire()
     try:
-        assert await mav_daily.async_update(hass, card_assets) == mav_daily.BUSY
+        assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.BUSY
     finally:
         lock.release()
     assert out.read_bytes() == before
     # Not even downloaded: the next round decides again.
     assert aioclient_mock.call_count == 1
 
-    assert await mav_daily.async_update(hass, card_assets) == mav_daily.INSTALLED
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
 
 
 async def test_no_write_when_a_build_starts_during_the_download(
@@ -434,7 +434,7 @@ async def test_no_write_when_a_build_starts_during_the_download(
     aioclient_mock.get(mav_daily.MANIFEST_URL, json=_manifest(raw))
     aioclient_mock.get(mav_daily.INDEX_URL, side_effect=build_starts)
     try:
-        assert await mav_daily.async_update(hass, card_assets) == mav_daily.BUSY
+        assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.BUSY
     finally:
         lock.release()
     assert out.read_bytes() == before
@@ -449,7 +449,7 @@ async def test_no_write_while_a_build_is_queued(hass: HomeAssistant, aioclient_m
     task = hass.async_create_task(never.wait())
     hass.data.setdefault(DOMAIN, {})["mav_queued"] = mav._Job(force=False, task=task)
     try:
-        assert await mav_daily.async_update(hass, card_assets) == mav_daily.BUSY
+        assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.BUSY
     finally:
         never.set()
         await task
@@ -474,7 +474,7 @@ async def test_upload_during_download_wins(hass: HomeAssistant, aioclient_mock, 
 
     aioclient_mock.get(mav_daily.MANIFEST_URL, json=_manifest(raw))
     aioclient_mock.get(mav_daily.INDEX_URL, side_effect=upload_arrives)
-    assert await mav_daily.async_update(hass, card_assets) == mav_daily.UP_TO_DATE
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.UP_TO_DATE
     assert out.read_bytes() == local
 
 
@@ -495,7 +495,7 @@ async def test_a_local_build_of_an_older_feed_date_during_the_download_loses(
 
     aioclient_mock.get(mav_daily.MANIFEST_URL, json=_manifest(raw))
     aioclient_mock.get(mav_daily.INDEX_URL, side_effect=copied)
-    assert await mav_daily.async_update(hass, card_assets) == mav_daily.INSTALLED
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
     assert mav._startup_decision(mav_source, out, mav.state_path(hass), dt_util.now().date()) == mav.BUILD
 
 
@@ -505,7 +505,7 @@ async def test_startup_keeps_the_daily_index_over_an_older_feed(
     """After an install, the startup check (the newer feed wins) keeps it."""
     _local_feed(mav_source, "20261020.Local")
     _serve(aioclient_mock, _index(NEW))
-    assert await mav_daily.async_update(hass, card_assets) == mav_daily.INSTALLED
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
     out = card_assets / mav.INDEX_NAME
     decision = mav._startup_decision(mav_source, out, mav.state_path(hass), dt_util.now().date())
     assert decision == mav.SUPERSEDED
@@ -741,8 +741,9 @@ async def test_busy_at_the_daily_round_is_retried_after_the_build(
     real = mav_daily.async_update
 
     async def spy(h, w):
-        results.append(await real(h, w))
-        return results[-1]
+        done = await real(h, w)
+        results.append(done.result)
+        return done
 
     monkeypatch.setattr(mav_daily, "async_update", spy)
     lock = mav.build_lock(hass)

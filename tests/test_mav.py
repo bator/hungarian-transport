@@ -36,7 +36,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.http import KEY_HASS
 from homeassistant.setup import async_setup_component
 
-from custom_components.hungarian_transport import mav, mav_index
+from custom_components.hungarian_transport import gtfs_feed, mav, mav_index, served_index
 from custom_components.hungarian_transport.const import DOMAIN, SERVICE_REBUILD_MAV
 
 SZF = (47.18361, 18.42472)
@@ -123,7 +123,7 @@ def test_index_keeps_every_stop_pattern_and_passes_its_audit(tmp_path: Path) -> 
     ]
     # The 858 chord misses Martonvásár by kilometres: station line instead.
     assert index["_stats"]["stop_lines"] == 1
-    assert len(mav_index.decode_polyline(index["p"][index["n"]["858"][0][0]])) == 3
+    assert len(gtfs_feed.decode_polyline(index["p"][index["n"]["858"][0][0]])) == 3
     report = mav_index.audit(feed, index)
     assert report["trips"] == 3 and report["trips_bad"] == 0 and report["ok_ratio"] == 1.0
 
@@ -161,13 +161,13 @@ def test_audit_after_build_reads_the_feed_once(tmp_path: Path, monkeypatch) -> N
     feed = tmp_path / "mav.zip"
     feed.write_bytes(_feed_zip())
     reads: list[str] = []
-    real_rows = mav_index.Feed.rows
+    real_rows = gtfs_feed.Feed.rows
 
     def counting_rows(self, name):
         reads.append(name)
         return real_rows(self, name)
 
-    monkeypatch.setattr(mav_index.Feed, "rows", counting_rows)
+    monkeypatch.setattr(gtfs_feed.Feed, "rows", counting_rows)
     index = mav_index.build(feed)
     report = mav_index.audit(feed, index)
     assert report["ok_ratio"] == 1.0
@@ -361,7 +361,7 @@ async def test_startup_rebuilds_a_missing_index(hass: HomeAssistant, card_assets
     await _setup(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert (card_assets / "mav-index.json.gz").is_file()
-    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "test-feed"
+    assert served_index.read_feed(card_assets / mav.INDEX_NAME) == "test-feed"
     # Built from this very feed: the next start leaves it alone.
     assert await mav.async_build(hass, card_assets) is None
 
@@ -961,7 +961,7 @@ def test_index_write_uses_the_named_temp_file(tmp_path: Path, monkeypatch) -> No
     monkeypatch.setattr(mav_index.os, "replace", spying_replace)
     mav_index.write({"v": 7, "feed": "f"}, out, "ab12cd_9")
     assert seen == [f"{mav.INDEX_NAME}.ab12cd_9"]
-    assert mav._index_feed(out) == "f"
+    assert served_index.read_feed(out) == "f"
     assert out.stat().st_mode & 0o777 == 0o644
     with pytest.raises(ValueError):
         mav_index.write({"v": 7}, out, "../x/y/z")
@@ -1091,7 +1091,7 @@ async def test_shipped_index_with_and_without_a_local_feed(
     _write_feed(mav_source, "20261101.local", "20261101", "20261231")
     await mav.async_build_if_needed(hass, card_assets)
     assert len(spawned) == 1
-    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "20261101.local"
+    assert served_index.read_feed(card_assets / mav.INDEX_NAME) == "20261101.local"
     await mav.async_build_if_needed(hass, card_assets)
     assert len(spawned) == 1
 
@@ -1100,7 +1100,7 @@ async def test_shipped_index_with_and_without_a_local_feed(
     _ship_index(card_assets, "20261030.release")
     await mav.async_build_if_needed(hass, card_assets)
     assert len(spawned) == 2
-    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "20261101.local"
+    assert served_index.read_feed(card_assets / mav.INDEX_NAME) == "20261101.local"
     for _ in range(2):
         await mav.async_build_if_needed(hass, card_assets)
     assert len(spawned) == 2
@@ -1116,7 +1116,7 @@ async def test_shipped_index_with_and_without_a_local_feed(
     # after it do not flip back to the release's index.
     await hass.services.async_call(DOMAIN, SERVICE_REBUILD_MAV, {}, blocking=True, return_response=True)
     assert len(spawned) == 3
-    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "20261101.local"
+    assert served_index.read_feed(card_assets / mav.INDEX_NAME) == "20261101.local"
     for _ in range(2):
         await mav.async_build_if_needed(hass, card_assets)
     assert len(spawned) == 3
@@ -1126,7 +1126,7 @@ async def test_shipped_index_with_and_without_a_local_feed(
     resp = await client.post(mav.UPLOAD_URL, data=_feed_zip("20260901.upload", start="20260901", end="20261231"))
     assert resp.status == 200, await resp.text()
     assert len(spawned) == 4
-    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "20260901.upload"
+    assert served_index.read_feed(card_assets / mav.INDEX_NAME) == "20260901.upload"
     await mav.async_build_if_needed(hass, card_assets)
     assert len(spawned) == 4
     newer = _ship_index(card_assets, "20261113.release")
@@ -1146,9 +1146,9 @@ async def test_shipped_index_with_and_without_a_local_feed(
 
 
 def test_newer_feed_wins_at_startup(tmp_path: Path) -> None:
-    """The local feed is built at startup unless the index on disk names a
-    newer feed (by the date its feed_version starts with) or the local feed
-    has expired. A local feed that cannot be dated is built, as before."""
+    """The local feed is built at startup unless the index on disk beats it
+    (served_index.superseded: a newer feed, or the local one expired;
+    tests/test_served_index.py has the dates)."""
     src, out, state = tmp_path / "mav-gtfs.zip", tmp_path / mav.INDEX_NAME, tmp_path / mav.STATE_NAME
     today = date(2026, 10, 23)
 
@@ -1163,38 +1163,10 @@ def test_newer_feed_wins_at_startup(tmp_path: Path) -> None:
     # Local newer: built.
     _write_feed(src, "20261030.M2ChangeID", "20261030", "20261231")
     assert decision() == mav.BUILD
-    # The same date, another version: built.
-    _write_feed(src, "20261023.other", "20261023", "20261231")
-    assert decision() == mav.BUILD
     # Local newer, but expired: never over a shipped index.
     _write_feed(src, "20261030.M2ChangeID", "20261001", "20261022")
     assert decision() == mav.SUPERSEDED
-    # Ends today: still running.
-    _write_feed(src, "20261030.M2ChangeID", "20261001", "20261023")
-    assert decision() == mav.BUILD
-    # Undated local feed (no date in feed_version, no start or end): built.
-    _write_feed(src, "local-feed")
-    assert decision() == mav.BUILD
-    # A feed_version without a date is dated by feed_start_date, then by
-    # feed_end_date.
-    _write_feed(src, "local-feed", "20260601", "20261231")
-    assert decision() == mav.SUPERSEDED
-    _write_feed(src, "local-feed", "20261101", "20261231")
-    assert decision() == mav.BUILD
-    _write_feed(src, "local-feed", "", "20261030")
-    assert decision() == mav.BUILD
-    _write_feed(src, "local-feed", "", "20261022")
-    assert decision() == mav.SUPERSEDED
-    # Not a real date: undated.
-    _write_feed(src, "20261399.M2ChangeID")
-    assert decision() == mav.BUILD
-
-    # An index that cannot be dated (another build, no feed) does not win
-    # over a dated local feed; an index that names no feed never wins, not
-    # even over an expired one.
-    _ship_index(tmp_path, "release")
-    _write_feed(src, "20260601.M2ChangeID", "20260601", "20261231")
-    assert decision() == mav.BUILD
+    # An index on disk that does not read names no feed: it never wins.
     out.write_bytes(b"index")
     _write_feed(src, "20260601.M2ChangeID", "20260101", "20260601")
     assert decision() == mav.BUILD
@@ -1402,4 +1374,4 @@ async def test_startup_removes_stale_temp_indexes_even_without_a_build(
     await hass.async_block_till_done(wait_background_tasks=True)
     assert not stale.exists()
     assert fresh.exists() and all(p.exists() for p in others)
-    assert mav._index_feed(card_assets / mav.INDEX_NAME) == "release-feed"
+    assert served_index.read_feed(card_assets / mav.INDEX_NAME) == "release-feed"

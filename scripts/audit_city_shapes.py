@@ -24,7 +24,9 @@ from collections import defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from gtfs_compact import decode_polyline, shapes_stem  # noqa: E402
+from gtfs_compact import shapes_stem  # noqa: E402
+# gtfs_compact put the integration's folder on sys.path.
+from gtfs_feed import decode_polyline  # noqa: E402
 
 TOLERANCE_M = 100.0
 LONG_SEGMENT_M = 3000.0

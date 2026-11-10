@@ -172,7 +172,7 @@ export const BKK_RAIL_BADGE = {
 };
 
 /* ELVIRA's train kinds a number-only train shows (sebesvonat, gyorsvonat,
-   mavBoardRows), in MÁV's own colours for them. Train rows only. */
+   elviraBoardRows), in MÁV's own colours for them. Train rows only. */
 export const RAIL_KIND_BADGE = {
   SV: ['29803C', 'FFFFFF'],
   GY: ['C82227', 'FFFFFF'],
@@ -181,6 +181,16 @@ export const RAIL_KIND_BADGE = {
 /* Assets live next to this module, so the card works from /hacsfiles/, /local/
    or wherever the Lovelace resource points. Requires `type: module`. */
 export const ASSET_BASE = new URL('.', import.meta.url).href;
+
+/* Every map (a ride's, a journey's, the inline one): OpenStreetMap France
+   tiles, credited as they ask. */
+export const MAP_TILES = 'https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png';
+export const MAP_TILE_OPTIONS = Object.freeze({
+  maxZoom: 20,
+  subdomains: 'abc',
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+    + ' &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>',
+});
 export let VOLAN_INDEX_OVERRIDE = '';
 export let CITY_INDEX_OVERRIDE = '';
 export let MAV_INDEX_OVERRIDE = '';
@@ -200,8 +210,9 @@ export function setMavIndexUrl(url) {
 /* DEPRECATED, kept for callers outside this bundle: sets the module-wide
    fallback. The cards no longer use it: a module-wide setting read after an
    await could hand one card's index to another (review J-2, 2026-10-19).
-   Each card now looks its indexes up through BkkLib.withIndexes(config),
-   which carries that card's own volanIndex / cityIndex / mavIndex. */
+   Each card now hands its own index resolver (lib/context.js) to every
+   index-reading function, with that card's volanIndex / cityIndex /
+   mavIndex. */
 export function applyIndexOverrides(cfg) {
   const c = cfg || {};
   setVolanIndexUrl(c.volanIndex);
@@ -280,7 +291,7 @@ export function dayBuster(base) {
   return `${base}${base.includes('?') ? '&' : '?'}v=${tzParts(new Date()).ymd}`;
 }
 
-/* `own` is the looking-up card's override (BkkLib.withIndexes); the module-wide
+/* `own` is the looking-up card's override (BkkLib.indexResolver); the module-wide
    one is only a fallback for callers outside the cards. */
 export function volanIndexUrl(own) {
   const base = own || VOLAN_INDEX_OVERRIDE || new URL('volan-index.json.gz', ASSET_BASE).href;

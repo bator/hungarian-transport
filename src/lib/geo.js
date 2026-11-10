@@ -1,5 +1,5 @@
 import { PLATFORM_STRIP, pad2, tzFields } from '../config.js';
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* A shape whose ends lie this close is a closed loop, when it is also at
    least this many times longer than that gap. */
@@ -18,7 +18,7 @@ const SHAPE_STOP_OFF_M = 1500;
    the map; earlier than that it is not shown at all. */
 const SHAPE_WAIT_AHEAD_S = 20 * 60;
 
-Object.assign(BkkLib, {
+register({
   hm(ts) {
     if (!ts) return '';
     const f = tzFields(new Date(ts * 1000));

@@ -387,9 +387,8 @@ async def test_repeated_daily_failure_notifies_once_and_clears(
     rounds = []
 
     async def update(hass, www):
-        hass.data[DOMAIN]["mav_daily_error"] = "mav-index.json: HTTP 404"
         rounds.append(dt_util.now().date().isoformat())
-        return plan[f"{dt_util.now().day:02d}"]
+        return mav_daily.DailyRound(plan[f"{dt_util.now().day:02d}"], error="mav-index.json: HTTP 404")
 
     monkeypatch.setattr(mav_daily, "async_update", update)
     await _setup(hass, ON)
@@ -432,15 +431,15 @@ async def test_failure_streak_counts_days_not_rounds(hass: HomeAssistant, freeze
     await budapest
     notifier = timetable_notify.UpdateNotifier(hass, ON)
     for _ in range(5):
-        await notifier.async_daily_result(mav_daily.FAILED)
+        await notifier.async_daily_result(mav_daily.DailyRound(mav_daily.FAILED))
     freezer.move_to("2026-11-02 06:00:00+01:00")
-    await notifier.async_daily_result(mav_daily.FAILED)
+    await notifier.async_daily_result(mav_daily.DailyRound(mav_daily.FAILED))
     assert notes == ([], [])
     freezer.move_to("2026-11-03 06:00:00+01:00")
-    await notifier.async_daily_result(mav_daily.FAILED)
+    await notifier.async_daily_result(mav_daily.DailyRound(mav_daily.FAILED))
     assert _ids(notes[0]) == [timetable_notify.NOTIFICATION_DAILY_FAILED]
     freezer.move_to("2026-11-04 06:00:00+01:00")
-    await notifier.async_daily_result(mav_daily.FAILED)
+    await notifier.async_daily_result(mav_daily.DailyRound(mav_daily.FAILED))
     assert len(notes[0]) == 1
 
 
@@ -449,7 +448,7 @@ async def test_an_unsupported_manifest_is_not_a_failure(hass: HomeAssistant, fre
     notifier = timetable_notify.UpdateNotifier(hass, ON)
     for day in ("01", "02", "03", "04"):
         freezer.move_to(f"2026-11-{day} 06:00:00+01:00")
-        await notifier.async_daily_result(mav_daily.UNSUPPORTED)
+        await notifier.async_daily_result(mav_daily.DailyRound(mav_daily.UNSUPPORTED))
     assert notes == ([], [])
 
 
@@ -470,11 +469,11 @@ async def test_failure_days_must_be_consecutive(hass: HomeAssistant, freezer, bu
     notifier = timetable_notify.UpdateNotifier(hass, ON)
     for day in ("2026-11-01", "2026-11-08", "2026-11-15"):
         freezer.move_to(f"{day} 06:00:00+01:00")
-        await notifier.async_daily_result(mav_daily.FAILED)
+        await notifier.async_daily_result(mav_daily.DailyRound(mav_daily.FAILED))
     assert notes == ([], [])
     for day in ("2026-11-16", "2026-11-17"):
         freezer.move_to(f"{day} 06:00:00+01:00")
-        await notifier.async_daily_result(mav_daily.FAILED)
+        await notifier.async_daily_result(mav_daily.DailyRound(mav_daily.FAILED))
     assert _ids(notes[0]) == [timetable_notify.NOTIFICATION_DAILY_FAILED]
     assert "on 3 days in a row" in notes[0][0]["message"]
 
@@ -485,7 +484,7 @@ async def test_busy_days_bridge_a_streak(hass: HomeAssistant, freezer, budapest,
     for day, result in (("01", mav_daily.FAILED), ("02", mav_daily.BUSY), ("03", mav_daily.BUSY),
                         ("04", mav_daily.FAILED), ("05", mav_daily.FAILED)):
         freezer.move_to(f"2026-11-{day} 06:00:00+01:00")
-        await notifier.async_daily_result(result)
+        await notifier.async_daily_result(mav_daily.DailyRound(result))
     assert _ids(notes[0]) == [timetable_notify.NOTIFICATION_DAILY_FAILED]
 
 
@@ -496,17 +495,15 @@ async def test_a_stale_site_counts_as_a_failure(hass: HomeAssistant, freezer, bu
     await budapest
     notifier = timetable_notify.UpdateNotifier(hass, ON)
     built = dt_util.parse_datetime("2026-10-28T04:00:00Z")
-    hass.data.setdefault(DOMAIN, {})["mav_daily_built_at"] = built
     for day in ("2026-10-30", "2026-10-31", "2026-11-01", "2026-11-02"):
         freezer.move_to(f"{day} 06:00:00+01:00")
-        await notifier.async_daily_result(mav_daily.UP_TO_DATE)
+        await notifier.async_daily_result(mav_daily.DailyRound(mav_daily.UP_TO_DATE, built_at=built))
     # 30.10 is within STALE_PAGES; 31.10, 01.11, 02.11 are not.
     assert _ids(notes[0]) == [timetable_notify.NOTIFICATION_DAILY_FAILED]
     assert "last built on 2026-10-28" in notes[0][0]["message"]
     # A fresh manifest ends the streak.
-    hass.data[DOMAIN]["mav_daily_built_at"] = dt_util.utcnow()
     freezer.move_to("2026-11-03 06:00:00+01:00")
-    await notifier.async_daily_result(mav_daily.UP_TO_DATE)
+    await notifier.async_daily_result(mav_daily.DailyRound(mav_daily.UP_TO_DATE, built_at=dt_util.utcnow()))
     assert notes[1] == [timetable_notify.NOTIFICATION_DAILY_FAILED]
 
 
@@ -515,12 +512,13 @@ async def test_the_daily_round_records_when_the_manifest_was_built(
 ) -> None:
     raw = _index(NEW)
     _serve(aioclient_mock, raw, _manifest(raw, built_at="2026-10-28T04:00:00Z"))
-    await _real_update(hass, card_assets)
-    assert hass.data[DOMAIN]["mav_daily_built_at"] == dt_util.parse_datetime("2026-10-28T04:00:00Z")
+    done = await _real_update(hass, card_assets)
+    assert done.built_at == dt_util.parse_datetime("2026-10-28T04:00:00Z")
     aioclient_mock.clear_requests()
     aioclient_mock.get(mav_daily.MANIFEST_URL, status=503)
-    await _real_update(hass, card_assets)
-    assert "mav_daily_built_at" not in hass.data[DOMAIN]
+    done = await _real_update(hass, card_assets)
+    assert done.built_at is None
+    assert done.error == "mav-index.json: HTTP 503"
 
 
 async def test_an_open_streak_notification_comes_back_after_a_restart(

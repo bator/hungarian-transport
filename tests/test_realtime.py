@@ -22,9 +22,10 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-import custom_components.hungarian_transport as integration
 from custom_components.hungarian_transport import realtime
 from custom_components.hungarian_transport.const import DOMAIN, SERVICE_REALTIME
+
+from .test_upstream import FakeClock
 
 FIX = Path(__file__).parent / "fixtures" / "realtime"
 NOW = 1793605800  # 2026-11-02 07:50:00 UTC
@@ -108,6 +109,15 @@ def test_train_numbers_from_static() -> None:
     assert trains["822"] == ["35700507"]
     assert trains["4272"] == ["36016774", "99999999"]
     assert trains["9442"] == ["36166415"]
+
+
+def test_train_numbers_read_as_every_builder_does() -> None:
+    """trips.txt in a folder of the zip, a space after each comma, cp1250:
+    the reading of the index builders (gtfs_feed)."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("gtfs/Trips.txt", "route_id, trip_id, trip_short_name\nR, 1:7, Győr ".encode("cp1250") + b"SZ 4510\n")
+    assert realtime.train_numbers_from_static(buf.getvalue(), "1:") == {"4510": ["7"]}
 
 
 # ---------------------------------------------------------------- feed table
@@ -691,9 +701,10 @@ async def test_service_refuses_while_the_entry_is_unloaded(hass, aioclient_mock)
     assert aioclient_mock.call_count == 0
 
 
-async def test_fetches_are_rate_limited(aioclient_mock, freezer, caplog) -> None:
-    """A loop over every feed id must not become a stream of requests."""
-    freezer.move_to(FROZEN)
+async def test_fetches_are_rate_limited(aioclient_mock, caplog) -> None:
+    """A loop over every feed id must not become a stream of requests: on a
+    stopped clock nothing refills past the burst. (The wall clock at NOW
+    keeps the feeds fresh.)"""
     feeds = {
         f"f{i}": realtime.FeedConfig(
             f"f{i}", (realtime.Source(f"https://x.test/{i}/tu.pb", "", "", ""),), frozenset({"trip"}), 60, 60
@@ -703,7 +714,7 @@ async def test_fetches_are_rate_limited(aioclient_mock, freezer, caplog) -> None
     for i in range(realtime.FETCH_BURST + 5):
         aioclient_mock.get(f"https://x.test/{i}/tu.pb", content=_pb("volan-trip-updates"))
     session = aioclient_mock.create_session(asyncio.get_running_loop())
-    hub = realtime.RealtimeHub(session, feeds=feeds)
+    hub = realtime.RealtimeHub(session, feeds=feeds, monotonic=FakeClock().monotonic, wall=lambda: NOW)
     answers = [await hub.query(fid, []) for fid in feeds]
     await session.close()
     assert aioclient_mock.call_count == realtime.FETCH_BURST
@@ -711,14 +722,22 @@ async def test_fetches_are_rate_limited(aioclient_mock, freezer, caplog) -> None
     assert "rate limit" in caplog.text
 
 
-def test_error_codes_are_documented() -> None:
-    pkg = Path(integration.__file__).parent
-    codes = set(re.findall(r'"error": "(rt_\w+)"', (pkg / "realtime.py").read_text(encoding="utf-8")))
-    assert codes == {"rt_no_feed", "rt_unavailable"}
-    for lang in ("en", "hu"):
-        strings = json.loads((pkg / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
-        for code in codes:
-            assert code in strings["services"]["realtime"]["description"], (lang, code)
+async def test_a_feed_ages_by_the_hubs_wall_clock(aioclient_mock) -> None:
+    """The copy a fetch interval keeps is no answer once its header is
+    MAX_FEED_AGE old by the hub's own wall clock, without a new request."""
+    url = "https://x.test/age/tu.pb"
+    feeds = {"f": realtime.FeedConfig("f", (realtime.Source(url, "", "", ""),), frozenset({"trip"}), 60, 60)}
+    aioclient_mock.get(url, content=_pb("volan-trip-updates"))
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    wall = [NOW]
+    hub = realtime.RealtimeHub(session, feeds=feeds, monotonic=FakeClock().monotonic, wall=lambda: wall[0])
+    fresh = await hub.query("f", [])
+    wall[0] = NOW + realtime.MAX_FEED_AGE + 3600
+    stale = await hub.query("f", [])
+    await session.close()
+    assert "error" not in fresh and fresh["updated"]
+    assert stale.get("error") == "rt_unavailable"
+    assert aioclient_mock.call_count == 1
 
 
 def test_static_zip_member_cap(monkeypatch) -> None:

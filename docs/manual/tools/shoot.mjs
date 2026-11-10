@@ -193,7 +193,7 @@ async function seedHistory(page) {
     const hass = window.__card._hass;
     const picks = [['Keleti', /Keleti pályaudvar \(Budapest\)/, 5], ['Széll Kálmán', /^Széll Kálmán tér/, 4], ['Kelenföld vasútállomás', /Kelenföld/, 3], ['Népliget', /Népliget/, 2], ['Székesfehérvár', /^Székesfehérvár/, 2], ['Móricz Zsigmond', /Móricz/, 1]];
     for (const [q, re, n] of picks) {
-      const hits = await lib.searchPlannerStops('', q);
+      const hits = await lib.searchPlannerStops(lib.indexResolver(), '', q);
       const hit = hits.find((h) => re.test(lib.plannerHitLabel(h, 'hu'))) || hits[0];
       if (!hit) continue;
       for (let i = 0; i < n; i++) await lib.recordStop(hass, hit);

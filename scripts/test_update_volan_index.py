@@ -29,7 +29,7 @@ import build_city_index as bci  # noqa: E402
 import gtfs_compact  # noqa: E402
 import update_volan_index as uvi  # noqa: E402
 from gtfs_compact import SHAPES_GRACE_S, SHAPES_RETIRED, operator_trips, prune_shapes  # noqa: E402
-from update_volan_index import index_feed, index_schema, persist_index, restore_hacs_indexes  # noqa: E402
+from update_volan_index import index_schema, persist_index, restore_hacs_indexes  # noqa: E402
 
 # The real network and builder, before Fake.install() replaces them.
 REAL_DOWNLOAD_FEED = uvi.download_feed
@@ -105,7 +105,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # Same feed: the pfaedle build (larger) beats the official zip's.
     write_index(mav_base, 2, "20261001", pad=50_000)
     write_index(mav_www, 2, "20261001")
-    check("feed version read from the mav index head", index_feed(mav_www) == "20261001")
+    check("feed version read from the mav index head", uvi._served_index().read_feed(mav_www) == "20261001")
     restored = restore_hacs_indexes(base, www)
     check("larger local mav index of the same feed wins", "mav-index.json.gz" in restored
           and len(mav_www.read_bytes()) == len(mav_base.read_bytes()), repr(restored))
@@ -1673,6 +1673,10 @@ with tempfile.TemporaryDirectory() as tmp:
     # The webhook may come from .env, as for the script itself.
     (base / ".env").write_text("export HUNGARIAN_TRANSPORT_WEBHOOK=http://127.0.0.1:2/api/webhook/from-env  # test\n")
     shutil.copy(Path(__file__).resolve().parent / "gtfs_compact.py", base / "gtfs_compact.py")
+    # Next to the integration, as /config/hungarian-transport is: gtfs_compact reads GTFS with its gtfs_feed.
+    pkg = root / "custom_components" / "hungarian_transport"
+    pkg.mkdir(parents=True)
+    shutil.copy(Path(__file__).resolve().parent.parent / pkg.relative_to(root) / "gtfs_feed.py", pkg / "gtfs_feed.py")
     no_hook = {k: v for k, v in env.items() if k != "HUNGARIAN_TRANSPORT_WEBHOOK"}
     curl_log.unlink(missing_ok=True)
     done = subprocess.run(["bash", str(script), "--worker"],

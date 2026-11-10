@@ -1,6 +1,8 @@
-import { ASSET_BASE, DEFAULT_MINUTES_AFTER, clampMinutesAfter, configDataKey, departureStillDue, maxDepartureRows, normalizeCardConfig, refreshSeconds } from './config.js';
+import { ASSET_BASE, DEFAULT_MINUTES_AFTER, MAP_TILES, MAP_TILE_OPTIONS, configDataKey, departureStillDue, normalizeCardConfig, refreshSeconds } from './config.js';
 import { codedError, errText, resolveLang, t } from './i18n.js';
+import { cardContext } from './lib/context.js';
 import { BkkLib } from './lib/core.js';
+import { generation } from './lib/generation.js';
 import { BKK_HOP_EDITOR } from './tags.js';
 import { THEME_CSS, THEME_VAR_KEYS, resolveTheme, themeVars } from './themes.js';
 
@@ -29,6 +31,14 @@ export class BKKHopCard extends HTMLElement {
     this._onVisibility = null;
     this._hass = null;
     this._tripCache = {};
+    /* What the library reads of this card (lib/context.js): its config,
+       key, Home Assistant, trip cache and index URLs. */
+    this._ctx = cardContext({
+      cfg: () => this._config,
+      apiKey: () => this._apiKey(),
+      hass: () => this._hass,
+      tripCache: () => this._tripCache,
+    });
     this._rows = [];
     this._rawRows = [];
     this._err = '';
@@ -36,7 +46,8 @@ export class BKKHopCard extends HTMLElement {
     /* The shown rows are a Transitous fill under an error banner. */
     this._rowsFilled = false;
     this._painted = false;
-    this._gen = 0;
+    /* Board runs: a reload makes the one before it stale. */
+    this._runs = generation();
     this._keyRetryAt = 0;
     this._keyBackoff = 0;
     this._keyFilling = false;
@@ -55,6 +66,8 @@ export class BKKHopCard extends HTMLElement {
     this._mapState = null;
     this._mapL = null;
     this._mapReturnFocus = null;
+    /* Map opens: a close (and so every new open) makes one still loading stale. */
+    this._mapOpens = generation();
     /* The open map's timetable estimate (shape and timed stops), moved on
        each poll while the vehicle reports no position. */
     this._mapEstimate = null;
@@ -64,7 +77,8 @@ export class BKKHopCard extends HTMLElement {
     this._hiddenAt = 0;
     this._pollRun = null;
     /* Until then a MÁV card with a key reads FUTÁR: the entry was not loaded. */
-    this._mavViaFutarUntil = 0;
+    /* The board module's memory across polls (lib/board.js). */
+    this._boardState = { viaFutarUntil: 0 };
   }
 
   static async getConfigElement() {
@@ -102,9 +116,9 @@ export class BKKHopCard extends HTMLElement {
        ticks and fetches; connectedCallback starts all three. */
     if (this.isConnected) this._holdGate();
     const next = normalizeCardConfig(config);
-    /* Against the config the card shows now, not the one last set: the
-       planner's in-card picks change it, and re-applying the configured
-       stops (a title edit in the editor preview) must bring them back. */
+    /* Against the config the card shows now, not the one last set: picks
+       made in the card change it, and re-applying the configured stops (a
+       title edit in the editor preview) must bring them back. */
     const prevKey = this._configDataKey != null ? configDataKey(this._config) : null;
     const nextKey = configDataKey(next);
     this._config = next;
@@ -140,7 +154,7 @@ export class BKKHopCard extends HTMLElement {
       return;
     }
     /* A run still in flight from before a detach is for the old config. */
-    this._gen += 1;
+    this._runs.bump();
     this._reloadActive = false;
   }
 
@@ -300,7 +314,7 @@ export class BKKHopCard extends HTMLElement {
   /* The poll of the current reload again, if there is one to pick up. */
   _resumePoll() {
     const p = this._pollRun;
-    if (!p || p.gen !== this._gen || !this._shouldPoll()) return false;
+    if (!p || this._runs.stale(p.gen) || !this._shouldPoll()) return false;
     this._armPoll(p);
     return true;
   }
@@ -820,11 +834,11 @@ export class BKKHopCard extends HTMLElement {
     return leafletPromise;
   }
 
-  /* Every close (and so every new open) bumps the map sequence. An open that
-     is still awaiting Leaflet or a route checks it after each await, so a
+  /* Every close (and so every new open) makes the open before it stale. An
+     open still awaiting Leaflet or a route checks after each await, so a
      superseded open never adds a second overlay that nothing can close. */
   _closeVehicleMap() {
-    this._mapSeq = (this._mapSeq || 0) + 1;
+    this._mapOpens.bump();
     const hadOverlay = !!this._mapOverlay;
     if (this._onMapKey && typeof document !== 'undefined') {
       document.removeEventListener('keydown', this._onMapKey);
@@ -871,7 +885,7 @@ export class BKKHopCard extends HTMLElement {
   }
 
   _mapStale(seq) {
-    return seq !== this._mapSeq || !this.isConnected;
+    return this._mapOpens.stale(seq) || !this.isConnected;
   }
 
   _mapKey(row) {
@@ -949,8 +963,8 @@ export class BKKHopCard extends HTMLElement {
     });
   }
 
-  /* The card's own map overlay lives outside the shadow root; the planner's
-     inline map lives inside it. Both include these rules. */
+  /* The card's own map overlay lives outside the shadow root, an inline
+     map inside it: both include these rules. */
   _stopPinCss() {
     return `
         .ht-stop-pin{position:relative;width:20px;height:20px;display:flex;align-items:center;justify-content:center}
@@ -1057,225 +1071,16 @@ ${this._stopPinCss()}
     try { ok.focus(); } catch (_e) { /* ignore */ }
   }
 
+  /* The ride map's geometry (lib/ride-map.js) from this card's stop pair,
+     context and sensor vehicle; the card only draws it. */
   async _loadRowMapShape(row) {
-    const cfg = this._config || {};
-    let shape = BkkLib.validMapShape(row && row.shape);
-    let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon)
-      || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
-    /* MÁV nationwide rails from pfaedle OSM rails (not official 8 km chords
-       on Székesfehérvár–Kelenföld, and not the Transitous hop cut). */
-    if (BkkLib.isTrainRow(row)) {
-      try {
-        const mav = await BkkLib.withIndexes(cfg).mavRouteForRow(row, cfg.stopName || '', cfg.destName || cfg.destKey || '');
-        if (mav && mav.shape.length >= 2) {
-          /* The train's own stations, on its own route (MÁV GTFS). */
-          const ownBoard = mav.board || board;
-          const ownAlight = mav.alight || await this._rowAlightPoint(row, []);
-          return {
-            shape: mav.shape,
-            board: BkkLib.pinOnRoute(ownBoard, [], mav.shape),
-            alight: ownAlight && BkkLib.pinOnRoute(ownAlight, [], mav.shape),
-          };
-        }
-      } catch (_e) { /* MOTIS / FUTÁR still fill */ }
-    }
-    /* GTFS rows (Volán, city feeds) carry their own stops and shapes.txt
-       route: no network beyond one shape shard, and no guessing. */
-    const gtfsGeo = await BkkLib.gtfsRowShape(row);
-    if (gtfsGeo && gtfsGeo.board) board = gtfsGeo.board;
-    if (gtfsGeo && gtfsGeo.shape.length >= 2) {
-      return { shape: gtfsGeo.shape, board, alight: await this._rowAlightPoint(row, [gtfsGeo.dest]) };
-    }
-    const tripId = (row && row.tripId) || '';
-    const canFutar = this._hasFutar() && (
-      !/^motis:/i.test(String(tripId || '')) || !!BkkLib.rowTrainNumber(row)
-    );
-    let geomTrip = '';
-    if (canFutar) {
-      geomTrip = BkkLib.isFutarTripId(tripId) ? tripId : '';
-      if (!geomTrip && this._hass) {
-        const hit = this._hassVehicleFor(row);
-        if (hit && BkkLib.isFutarTripId(hit.tripId)) geomTrip = hit.tripId;
-      }
-    }
-    let futarShape = [];
-    /* City buses/trams: decode FUTÁR trip-details polyline here.
-       hass trip_shape does not exist on bkk_stop. */
-    if (geomTrip && this._hasFutar() && !BkkLib.isTrainRow(row)) {
-      try {
-        futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
-      } catch (_e) { /* MOTIS hop still fills */ }
-    }
-    /* Same trip-details response (cached): the exact board and alight stops. */
-    let futarHop = null;
-    if (geomTrip && this._hasFutar() && cfg.destKey) {
-      try {
-        futarHop = await BkkLib.tripHopStops(this._apiKey(), this._tripCache || {}, geomTrip,
-          { id: cfg.stopId, name: cfg.stopName }, cfg.destKey);
-      } catch (_e) { /* Transitous and the config still place the stops */ }
-    }
-    const published = BkkLib.keepsFullLineShape(row) && !BkkLib.isTrainRow(row)
-      && futarShape.length >= 8;
-    let motisShape = [];
-    let motisCoversHead = true;
-    let motisMap = null;
-    let motisBoardPt = null;
-    const area = await BkkLib.withIndexes(cfg).stopArea(cfg);
-    if (!published) {
-      try {
-        motisMap = await BkkLib.motisShapeForHop(
-          row,
-          {
-            id: cfg.stopId,
-            name: cfg.stopName,
-            lat: cfg.stopLat != null ? cfg.stopLat : (gtfsGeo && gtfsGeo.board && gtfsGeo.board[0]),
-            lon: cfg.stopLon != null ? cfg.stopLon : (gtfsGeo && gtfsGeo.board && gtfsGeo.board[1]),
-            area,
-          },
-          {
-            id: cfg.destStopId,
-            name: cfg.destName,
-            key: cfg.destKey,
-            lat: gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[0] : undefined,
-            lon: gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[1] : undefined,
-            area,
-          },
-          { minutesAfter: cfg.minutesAfter, mode: 'all' },
-        );
-        motisShape = BkkLib.validMapShape(motisMap && motisMap.shape);
-        motisCoversHead = !!(motisMap && motisMap.coversHead);
-        if (motisMap && motisMap.board) {
-          const motisBoard = BkkLib.mapGpsLatLon(motisMap.board[0], motisMap.board[1]);
-          motisBoardPt = motisBoard;
-          if (motisBoard) {
-            const orig = board;
-            if (!orig || BkkLib.haversineMeters(orig, motisBoard) <= 300) {
-              board = motisBoard;
-            }
-          }
-        }
-      } catch (_e) { /* row shape / GPS still draw */ }
-    }
-    if (futarHop && futarHop.board && (!board || BkkLib.haversineMeters(board, futarHop.board) <= 300)) {
-      board = futarHop.board;
-    }
-    if (!board) {
-      board = BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
-    }
-    if (!published && shape.length < 2 && /^gtfs:/i.test(String((row && row.tripId) || '')) && this._hass) {
-      try {
-        const points = await BkkLib.coachShape(this._hass, row.label, row.headsign || '');
-        shape = BkkLib.validMapShape(BkkLib.decodePolyline(points));
-      } catch (_e) { /* FUTAR / MOTIS still fill */ }
-    }
-    if (canFutar && BkkLib.isTrainRow(row) && BkkLib.isFutarTripId(geomTrip)) {
-      /* When Transitous misses the train (BAKONY 905 from Szombathely),
-         FUTÁR's own trip details still carry the whole train route, along
-         the tracks. bkk_stop has no trip_shape service to ask instead. */
-      /* The trip-details response is already cached for the stop pins, so
-         asking for its polyline costs nothing; below it also overrules a
-         Transitous match that runs elsewhere (another train's number). */
-      if (futarShape.length < 2 && this._hasFutar()) {
-        try {
-          futarShape = await BkkLib.futarTripShape(this._apiKey(), this._tripCache || {}, geomTrip);
-        } catch (_e) { /* the stop pins still show */ }
-      }
-    }
-    /* Direction-aware clip only when this mode does not keep the published line. */
-    const clipForeignFutar = (pts) => {
-      const valid = BkkLib.validMapShape(pts);
-      if (BkkLib.keepsFullLineShape(row)) return valid;
-      if (!board || valid.length < 2) return valid;
-      const startGap = BkkLib.haversineMeters(valid[0], board);
-      if (startGap <= 2500) return valid;
-      return BkkLib.clipRideShape(
-        valid,
-        board,
-        BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon)
-          || BkkLib.knownStopCoords({
-            id: cfg.destStopId, name: cfg.destName, key: cfg.destKey,
-          }),
-        row,
-      );
-    };
-    if (!BkkLib.keepsFullLineShape(row)) {
-      futarShape = clipForeignFutar(futarShape);
-    }
-    if (published) {
-      shape = BkkLib.pickPublishedLineShape(motisShape, futarShape, row, motisCoversHead);
-    } else {
-      shape = BkkLib.combineHopShapes(
-        motisShape,
-        futarShape,
-        motisCoversHead,
-        /* The row's own line, or the coach_shape service's for a GTFS row. */
-        BkkLib.isTrainRow(row) ? clipForeignFutar(shape) : shape,
-      );
-      const motisGap = BkkLib.shapeGpsGapMeters(motisShape, row && row.lat, row && row.lon);
-      const futarGap = BkkLib.shapeGpsGapMeters(futarShape, row && row.lat, row && row.lon);
-      if (motisGap != null && futarGap != null && futarGap + 400 < motisGap && futarGap < 3000) {
-        shape = futarShape;
-      } else if (motisGap != null && motisGap > 4000 && futarShape.length >= 2
-          && (futarGap == null || futarGap < motisGap)) {
-        shape = futarShape;
-      } else if (BkkLib.isTrainRow(row) && futarShape.length >= 2 && motisShape.length >= 2) {
-        /* The train's own FUTÁR trip passes the alighting station; a
-           Transitous route that misses it by kilometres is another train's. */
-        const alightPt = (futarHop && futarHop.alight) || (motisMap && motisMap.dest)
-          || BkkLib.knownStopCoords({ id: cfg.destStopId, name: cfg.destName, key: cfg.destKey });
-        const motisOff = alightPt && BkkLib.shapeGpsGapMeters(motisShape, alightPt[0], alightPt[1]);
-        const futarOff = alightPt && BkkLib.shapeGpsGapMeters(futarShape, alightPt[0], alightPt[1]);
-        if (motisOff != null && futarOff != null && motisOff > 3000 && futarOff < 1500) {
-          shape = futarShape;
-        }
-      }
-    }
-    /* Published line stays whole (8E Újpalota→Kelenföld, not the hop). */
-    const destPt = await this._rowAlightPoint(row, [futarHop && futarHop.alight, motisMap && motisMap.dest]);
-    const clipped = BkkLib.clipRideShape(shape, board, destPt, row);
-    if (clipped.length >= 2) shape = clipped;
-    shape = BkkLib.validMapShape(shape);
-    /* No shapes.txt route and nothing from Transitous: join the GTFS stops. */
-    if (shape.length < 2 && gtfsGeo && gtfsGeo.stopLine.length >= 2) shape = gtfsGeo.stopLine;
-    /* Every source came back empty: still show where the ride goes, as a
-       line marked approximate, rather than no route at all. */
-    let approx = false;
-    if (shape.length < 2 && board && destPt && BkkLib.haversineMeters(board, destPt) > 30) {
-      shape = [board, destPt];
-      approx = true;
-    }
-    return {
-      shape,
-      approx,
-      board: BkkLib.pinOnRoute(board, [futarHop && futarHop.board, motisBoardPt], shape),
-      alight: destPt && BkkLib.pinOnRoute(destPt, [futarHop && futarHop.alight, motisMap && motisMap.dest], shape),
-    };
-  }
-
-  /* Where the rider gets off: the trip's own stop (GTFS or FUTÁR) first, then
-     Transitous's hop end, the configured stop, and a Transitous lookup.
-     Cards without a destination have no alighting stop. */
-  async _rowAlightPoint(row, candidates) {
-    const cfg = this._config || {};
-    if (!cfg.destKey && !cfg.destName && !cfg.destStopId) return null;
-    const asPt = (p) => (Array.isArray(p) ? BkkLib.mapGpsLatLon(p[0], p[1]) : null);
-    const known = (candidates || []).map(asPt).find(Boolean)
-      || BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon)
-      || BkkLib.knownStopCoords({ id: cfg.destStopId, name: cfg.destName, key: cfg.destKey });
-    if (known || !cfg.destName) return known || null;
-    try {
-      const ref = await BkkLib.transitousStopRef({
-        id: cfg.destStopId,
-        name: cfg.destName,
-        key: cfg.destKey,
-        lat: cfg.destLat,
-        lon: cfg.destLon,
-        area: await BkkLib.withIndexes(cfg).stopArea(cfg),
-      }, BkkLib.vehicleBucket(row));
-      return (ref && BkkLib.mapGpsLatLon(ref.lat, ref.lon)) || null;
-    } catch (_e) {
-      return null;
-    }
+    return BkkLib.rideMap({
+      row,
+      cfg: this._config || {},
+      hasFutar: this._hasFutar(),
+      vehicle: this._hassVehicleFor(row),
+      ctx: this._ctx,
+    });
   }
 
   async _openVehicleMap(row) {
@@ -1289,7 +1094,7 @@ ${this._stopPinCss()}
     if (back && !back.ref) back.ref = this._mapRefOf(row);
     this._mapReturnFocus = back;
     this._openingMap = key;
-    const seq = this._mapSeq;
+    const seq = this._mapOpens.token();
     const gps0 = BkkLib.mapGpsLatLon(row.lat, row.lon);
     let lat = gps0 ? gps0[0] : NaN;
     let lon = gps0 ? gps0[1] : NaN;
@@ -1357,11 +1162,7 @@ ${this._stopPinCss()}
     let map;
     try {
       map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView([startLat, startLon], hasGps ? 12 : 8);
-      L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
-        maxZoom: 20,
-        subdomains: 'abc',
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>',
-      }).addTo(map);
+      L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
     } catch (_e) {
       this._showMapNotice(t(lang, 'mapLeafletFail'));
       return;
@@ -1662,7 +1463,7 @@ ${this._stopPinCss()}
   async _reload() {
     /* Overlapping reloads (config edits, reconnects) must not leave an orphan
        interval behind, so every run is tagged with the generation that owns it. */
-    const gen = ++this._gen;
+    const gen = this._runs.bump();
     this._reloadActive = true;
     const cfg = this._config || {};
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
@@ -1681,367 +1482,52 @@ ${this._stopPinCss()}
          instead of "no departures". */
       if (cfg.stopId && cfg.destKey) this._err = codedError('errNoApiKey');
       this._paint();
-      if (gen === this._gen) this._reloadActive = false;
+      if (!this._runs.stale(gen)) this._reloadActive = false;
       return;
     }
-    const dest = {
-      key: cfg.destKey,
-      name: cfg.destName,
-      id: cfg.destStopId || '',
-      lat: cfg.destLat,
-      lon: cfg.destLon,
-    };
-    const origin = {
-      id: cfg.stopId,
-      name: cfg.stopName || '',
-      lat: cfg.stopLat,
-      lon: cfg.stopLon,
-    };
-    /* Every poll builds new row objects: a trip's ride time and coach GPS
-       from the last list stay on it until this run fills them again, so
-       they do not blink out while ELVIRA or the GPS lookup answers. The
-       coach position is marked (gpsCarried) and keeps its fix time (gpsAt):
-       the lookup replaces or drops it, a failing lookup drops it once the
-       fix is two minutes old, and a sensor or EMMA position
-       (enrichFromHass) replaces it and clears the mark. FUTÁR rows bring
-       their own vehicle position on every poll. */
-    const carryOver = (list) => {
-      const prev = new Map();
-      (this._rawRows || []).forEach((row) => {
-        if (row && row.tripId) prev.set(String(row.tripId), row);
-      });
-      if (!prev.size) return;
-      list.forEach((row) => {
-        const old = row && row.tripId ? prev.get(String(row.tripId)) : null;
-        if (!old || old === row) return;
-        if (row.travel == null && old.travel != null) {
-          row.travel = old.travelSched != null ? old.travelSched : old.travel;
-        }
-        if (/^(gtfs:|motis:)/.test(String(row.tripId)) && !BkkLib.mapGpsLatLon(row.lat, row.lon)) {
-          const gps = BkkLib.mapGpsLatLon(old.lat, old.lon);
-          if (gps) {
-            row.lat = gps[0];
-            row.lon = gps[1];
-            row.gpsCarried = true;
-            /* The fix's own time travels with it: a position carried poll
-               after poll ages out (applyCoachGps) instead of staying live. */
-            row.gpsAt = Number(old.gpsAt) > 0 ? Number(old.gpsAt) : Math.floor(Date.now() / 1000);
-          }
-        }
-      });
-    };
-    const paintRows = (list) => {
-      if (gen !== this._gen) return;
-      const merged = list || [];
-      merged.forEach((row) => BkkLib.applyRailBadge(row));
-      carryOver(merged);
-      this._rawRows = merged;
-      BkkLib.enrichFromHass(this._hass, this._rawRows);
-      this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
-      this._rowsFilled = false;
-      this._err = '';
-      this._loading = false;
-      this._paint();
-    };
-    /* A MÁV board ELVIRA did not refresh (an outage, the integration's rate
-       limit, a failed or timed-out call, a destination board that did not
-       arrive) keeps the trains still due from the last one, beside those
-       this answer did list, like a failed FUTÁR poll keeps its rows. */
-    const keepMavRows = (fresh) => {
-      if (this._rowsFilled) return fresh;
-      const have = new Set(fresh.map((row) => String(row.tripId || '')));
-      const kept = (this._rawRows || [])
-        .filter((row) => row && /^elvira:/.test(String(row.tripId || '')) && !have.has(String(row.tripId))
-          && departureStillDue(row.dep))
-        .map((row) => Object.assign({}, row));
-      return fresh.concat(kept).sort((a, b) => (a.dep || 0) - (b.dep || 0));
-    };
-    /* knownBoard: the ELVIRA answer this poll already has (the not_loaded
-       switch to FUTÁR below), not asked for a second time. */
-    const run = async (knownBoard) => {
-      if (gen !== this._gen) return;
-      /* This card's own index URLs, for every lookup of this run (J-2): never a module-wide setting. */
-      const lib = BkkLib.withIndexes(cfg);
-      /* A key-less MÁV card got here with elvira_between listed (_reload).
-         It drops out of hass.services for a moment while HA restarts: that
-         poll stays on the MÁV board, as one ELVIRA did not answer, not on
-         FUTÁR the card has no key for ("no API key" over its trains). */
-      const elviraGone = mode === 'mav' && !BkkLib.hasElvira(this._hass) && !this._hasFutar();
-      const mavBoard = mode === 'mav' && (BkkLib.hasElvira(this._hass) || elviraGone)
-        && !(Date.now() < this._mavViaFutarUntil && this._hasFutar());
-      try {
-        if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
-          this._rows = [];
-          this._rawRows = [];
-          this._loading = false;
-          this._err = '';
-          this._journey = null;
-          this._journeyKey = '';
-          this._journeyLoading = false;
-          this._paint();
-          if (typeof this._considerJourney === 'function') this._considerJourney();
-          return;
-        }
-        const wantElvira = (mode === 'mav' || mode === 'all') && BkkLib.hasElvira(this._hass);
-        const elviraP = knownBoard ? Promise.resolve(knownBoard) : elviraGone
-          ? Promise.resolve({ rows: [], error: 'not_loaded', detail: '' })
-          : wantElvira
-          ? lib.elviraBoard(
-            this._hass,
-            cfg.stopId,
-            cfg.destStopId || '',
-            /* The service takes 15..480 and rejects the call otherwise. */
-            clampMinutesAfter(cfg.minutesAfter),
-            cfg.destName || '',
-            { apiKey: this._apiKey(), originName: cfg.stopName || '' },
-          ).catch((err) => ({ rows: [], error: 'elvira_call_failed', detail: BkkLib.elviraErrText(err) }))
-          : Promise.resolve({ rows: [], error: '', detail: '' });
-        const cap = maxDepartureRows(cfg.minutesAfter);
-        let earlyRows = [];
-        let futarFull = null;
-        let elviraRows = [];
-        /* Why this poll's MÁV board is not ELVIRA's whole answer: the banner. */
-        let mavErr = null;
-        /* Beside FUTÁR's rows ELVIRA only overlays, except a train the
-           destination's board confirms that FUTÁR lacks (IC TÓPART at :37
-           from Székesfehérvár): that one is listed as on a MÁV card. */
-        const elviraMerge = { overlayOnly: true, addUnmatched: (row) => BkkLib.mavBoardRows([row])[0] || null };
-        const paintBoard = (list) => {
-          paintRows(list);
-          if (mavErr && gen === this._gen) this._showErr(mavErr);
-        };
-        const publish = () => {
-          if (gen !== this._gen) return;
-          /* An empty board goes on to the Transitous fill below, not to
-             "no departures" first. */
-          if (mavBoard) {
-            if (elviraRows.length) paintBoard(elviraRows);
-            return;
-          }
-          let list = futarFull
-            ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
-            : earlyRows.slice();
-          list = BkkLib.mergeVolanRows(list, elviraRows, cap, elviraMerge);
-          /* Through trips (the destination mid-route) come only from the
-             through-check: an empty list before it answers is not "no
-             departures". The first load keeps its spinner, a poll its rows. */
-          if (!list.length && startThrough && !futarFull) {
-            /* FUTÁR answers again: the last run's banner goes. Its
-               Transitous fill-ins are not this board's rows (back to the
-               spinner); FUTÁR rows it kept stay until the check answers. */
-            if (this._err) {
-              this._err = '';
-              if (this._rowsFilled) {
-                this._rows = [];
-                this._rawRows = [];
-                this._rowsFilled = false;
-              }
-              /* Nothing on the board (the failed run left none): the
-                 spinner, not "no departures", until the check answers. */
-              if (!(this._rawRows || []).length) this._loading = true;
-              this._paint();
-            }
-            return;
-          }
-          paintRows(list);
-        };
-        let startThrough = null;
-        let throughResolve = () => {};
-        const throughWait = new Promise((resolve) => { throughResolve = resolve; });
-        const rows = await lib.departures(
-          this._apiKey(), cfg.stopId, cfg.routeIds, dest,
-          {
-            originName: cfg.stopName || '',
-            originLat: cfg.stopLat,
-            originLon: cfg.stopLon,
-            cache: this._tripCache || {},
-            mode: this._departMode(),
-            city: cfg.city || '',
-            minutesAfter: cfg.minutesAfter,
-            deferTravel: true,
-            deferGps: true,
-            hass: this._hass,
-            skipFutar: mavBoard,
-            /* The GTFS rows come before FUTÁR answers: the last run's FUTÁR
-               rows stay beside them until then, instead of vanishing. */
-            onPartial: (list) => {
-              if (gen !== this._gen) return;
-              const kept = (this._rowsFilled ? [] : (this._rawRows || []))
-                .filter((row) => BkkLib.isFutarTripId(row && row.tripId))
-                .map((row) => Object.assign({}, row));
-              paintRows(kept.length ? BkkLib.mergeVolanRows(list, kept, cap) : list);
-            },
-            armThroughCheck: (fn) => { startThrough = fn; },
-            onFutarUpdate: (full) => {
-              throughResolve();
-              if (gen !== this._gen) return;
-              futarFull = full || [];
-              publish();
-            },
-          },
-        );
-        if (gen !== this._gen) return;
-        this._journey = null;
-        this._journeyKey = '';
-        this._journeyLoading = false;
-        earlyRows = rows || [];
-        if (mavBoard) {
-          const board = await elviraP;
-          if (gen !== this._gen) return;
-          if (board.error === 'not_loaded' && this._hasFutar()) {
-            /* The entry is unloaded (disabled, reloading) and its services
-               stay listed: a card with a key reads FUTÁR until it is back. */
-            this._mavViaFutarUntil = Date.now() + BkkLib._elviraRetryMs;
-            return run(board);
-          }
-          elviraRows = BkkLib.mavBoardRows(board.rows);
-          if (board.error) {
-            /* Only a stop FUTÁR has no station for asks for the editor; a
-               station search that failed is FUTÁR's outage, for one poll. */
-            if (board.error === 'no_code') mavErr = codedError('errElviraNoCode', board.detail);
-            else if (board.error === 'code_search_failed') mavErr = codedError('errFutarDown', board.detail);
-            else mavErr = codedError('errElviraDown', board.detail || board.error);
-            elviraRows = keepMavRows(elviraRows);
-          }
-          elviraRows = elviraRows.slice(0, cap);
-        }
-        publish();
-        /* The open map moves once a poll, at the end, on rows that have
-           their GPS: an earlier pass saw a coach without it as one that lost
-           it, and three passes raced each other on the estimate's times. */
-        const firstRows = this._rawRows;
-        const needsTravel = (row) => row.travel == null && !/^(gtfs:|elvira:|motis:)/.test(String(row.tripId || ''));
-        const fillTravel = (list) => Promise.all((list || []).map(async (row) => {
-          if (!needsTravel(row)) return;
-          row.travel = await BkkLib.travelMin(
-            this._apiKey(), row.tripId, cfg.destKey, row.dep, origin, this._tripCache || {},
-          );
-        }));
-        /* Live delays and positions from the GTFS-Realtime feeds, after the
-           coach GPS so a bkk_stop position keeps its place (realtime.js). */
-        const rtCtx = { mode, stopId: cfg.stopId, destStopId: cfg.destStopId || '' };
-        const gpsTravel = Promise.all([
-          BkkLib.attachCoachGps(this._hass, firstRows).then(async (withGps) => {
-            /* A newer list (the through-check) must not be replaced by this
-               older one; it gets its GPS on the last pass below. */
-            if (gen !== this._gen || this._rawRows !== firstRows) return;
-            this._rawRows = withGps;
-            this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
-            this._paint();
-            const live = await BkkLib.attachRealtime(this._hass, withGps, rtCtx);
-            if (!live || gen !== this._gen || this._rawRows !== withGps) return;
-            this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
-            this._paint();
-          }),
-          fillTravel(firstRows),
-        ]);
-        if (startThrough) {
-          startThrough();
-        } else {
-          throughResolve();
-        }
-        if (!mavBoard) {
-          const board = await elviraP;
-          if (gen !== this._gen) return;
-          elviraRows = board.rows;
-          /* ELVIRA answers again: the MÁV card goes back to its board. */
-          if (!board.error && mode === 'mav') this._mavViaFutarUntil = 0;
-          publish();
-        }
-        await throughWait;
-        if (gen !== this._gen) return;
-        let merged;
-        /* The board's own rows, without the trains ELVIRA added: one train
-           the destination confirms is no reason to skip the fill, which
-           brings the buses and trams beside it (the planner's mode all). */
-        let hosts;
-        if (mavBoard) {
-          merged = elviraRows;
-          hosts = merged;
-        } else {
-          hosts = futarFull
-            ? BkkLib.mergeVolanRows(futarFull, earlyRows, cap)
-            : earlyRows.slice();
-          merged = BkkLib.mergeVolanRows(hosts, elviraRows, cap, elviraMerge);
-        }
-        /* A city board is filled from Transitous inside departures() already:
-           a second fill here only repeated the same lookups on every poll. */
-        if (!hosts.length && mode !== 'helyi') {
-          const filled = await BkkLib.fillTransitousIfEmpty(hosts, origin, dest, {
-            mode: this._departMode(),
-            minutesAfter: cfg.minutesAfter,
-          });
-          if (gen !== this._gen) return;
-          merged = BkkLib.mergeVolanRows(filled, elviraRows, cap, elviraMerge);
-          earlyRows = merged;
-          paintBoard(merged);
-          /* Transitous rows, not this board's own: a failed poll replaces
-             them instead of keeping them as if FUTÁR had sent them. */
-          if (filled.length) this._rowsFilled = true;
-        }
-        if (typeof this._considerJourney === 'function') this._considerJourney();
-        await gpsTravel;
-        if (gen !== this._gen) return;
-        /* Rows the through-check added (the destination mid-route) are new
-           objects: their ride time and coach GPS are filled here. Trip
-           details are cached by then, so this costs no request. */
-        if (this._rawRows !== firstRows) {
-          const latest = this._rawRows;
-          const [withGps] = await Promise.all([
-            BkkLib.attachCoachGps(this._hass, latest),
-            fillTravel(latest),
-          ]);
-          if (gen !== this._gen || this._rawRows !== latest) return;
-          await BkkLib.attachRealtime(this._hass, withGps, rtCtx);
-          if (gen !== this._gen || this._rawRows !== latest) return;
-          this._rawRows = withGps;
-        }
-        this._rows = this._rawRows.map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
+    /* The board's rules are the board module's (lib/board.js): this card
+       only keeps the board on screen, paints what a poll sends, and drops
+       what a reload since made stale. */
+    const state = this._boardState || (this._boardState = { viaFutarUntil: 0 });
+    const current = () => !this._runs.stale(gen);
+    const show = (board) => {
+      if (!current()) return;
+      this._rawRows = board.rows;
+      this._rowsFilled = board.filled;
+      this._err = board.banner;
+      this._loading = board.loading;
+      if (!board.quiet) {
+        this._rows = (this._rawRows || []).map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
         this._paint();
-        this._syncOpenMap();
-      } catch (err) {
-        if (gen !== this._gen) return;
-        this._loading = false;
-        /* FUTÁR failing (a revoked key, an outage) used to look like an
-           empty board, which Transitous then filled. It still fills it,
-           now under the error banner instead of in silence. A poll that
-           fails keeps the FUTÁR rows it had (_showErr): only an empty
-           board, or one Transitous filled before, is filled again. Rows
-           that have all left by now count as an empty board: an outage
-           longer than the kept rows must not leave only the banner. */
-        const nowSec = Math.floor(Date.now() / 1000);
-        const keepRows = !this._rowsFilled
-          && (this._rows || []).some((row) => row && departureStillDue(row.depTs, nowSec));
-        if ((mode === 'bkk' || mode === 'mav') && !keepRows) {
-          let filled = [];
-          try {
-            filled = await BkkLib.fillTransitousIfEmpty([], origin, dest, {
-              mode,
-              minutesAfter: cfg.minutesAfter,
-            });
-          } catch (_e) {
-            filled = [];
-          }
-          if (gen !== this._gen) return;
-          if (filled.length) {
-            paintRows(filled);
-            this._rowsFilled = true;
-          }
-        }
-        this._showErr(err);
       }
+      if (board.phase === 'place' || board.phase === 'settled') this._boardSettled();
+      if (board.phase === 'done') this._syncOpenMap();
     };
+    const run = () => BkkLib.nextBoard({
+      ctx: this._ctx,
+      mode,
+      state,
+      board: () => ({
+        rows: this._rawRows, banner: this._err, loading: this._loading, filled: this._rowsFilled,
+      }),
+      show,
+      current,
+    });
     this._loading = !(this._rows || []).length;
     this._paint();
     try {
       await run();
-      if (!this.isConnected || gen !== this._gen || !this._shouldPoll()) return;
+      if (!this.isConnected || !current() || !this._shouldPoll()) return;
       this._pollRun = { gen, run, busy: false };
       /* Hidden tab: the visibilitychange handler picks the poll up again. */
       if (this._pageHidden()) return;
       this._armPoll(this._pollRun);
     } finally {
-      if (gen === this._gen) this._reloadActive = false;
+      if (current()) this._reloadActive = false;
     }
   }
+
+  /* The rows on screen are this poll's, or the origin is a place with no
+     board of its own: a card that builds on the board starts from here. */
+  _boardSettled() {}
 }

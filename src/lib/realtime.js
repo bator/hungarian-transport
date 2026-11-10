@@ -1,4 +1,4 @@
-import { BkkLib } from '../lib/core.js';
+import { BkkLib, register } from '../lib/core.js';
 
 /* GTFS-Realtime delays and vehicle positions from the integration's
    `hungarian_transport.realtime` service (realtime.py): Volán, the city
@@ -27,7 +27,7 @@ const RT_LATE_MAX_MIN = 60;
 const RT_EARLY_MAX_S = -20 * 60;
 const RT_LATE_MAX_S = 6 * 3600;
 
-Object.assign(BkkLib, {
+register({
   hasRealtime(hass) {
     const domain = hass && hass.services && hass.services.hungarian_transport;
     return !!(domain && typeof domain === 'object' && domain.realtime);
@@ -190,7 +190,7 @@ Object.assign(BkkLib, {
     if (Number(row.delay || 0) !== 0) return false;
     /* A Transitous row with real-time data already has the live time. */
     if (row.motisLive) return false;
-    return !(BkkLib.isFutarTripId(row.tripId) && BkkLib.mapGpsLatLon(row.lat, row.lon));
+    return !(BkkLib.rowSource(row) === 'futar' && BkkLib.mapGpsLatLon(row.lat, row.lon));
   },
   _rtMayPosition(row) {
     return !!(row.rtPos || row.gpsCarried || !BkkLib.mapGpsLatLon(row.lat, row.lon));
