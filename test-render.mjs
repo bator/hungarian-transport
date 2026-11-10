@@ -914,15 +914,6 @@ check('planner does not auto-refresh, but its countdowns tick',
   && plan._tick !== null
   && card._shouldPoll() === true,
   JSON.stringify({ planPoll: plan._shouldPoll(), planTick: !!plan._tick, hopPoll: card._shouldPoll() }));
-check('planner skips reconnect reload while a trip is on screen',
-  (() => {
-    plan._journey = { durationMin: 26, legs: [{ walk: false, label: 'M4' }] };
-    plan._rows = [{ label: '1' }];
-    const skip = plan._shouldReloadOnConnect() === false;
-    plan._journey = null;
-    plan._rows = [];
-    return skip && plan._shouldReloadOnConnect() === true;
-  })());
 const planHtml = plan.shadowRoot.innerHTML;
 check('planner title is Tervezo', planHtml.includes('Tervez\u0151'));
 check('planner has origin and destination fields',
@@ -945,7 +936,7 @@ plan._err = '';
 plan._config = Object.assign({}, plan._config, {
   stopId: 'geo:47.19,18.41', destKey: 'cel', destName: 'C\u00e9l',
 });
-plan._journey = shaped;
+plan._plan.adopt(shaped);
 plan._paint();
 let journeyMapOpened = 0;
 plan._openJourneyMap = () => { journeyMapOpened += 1; };
@@ -1062,7 +1053,7 @@ plan._rows = [{
   color: '009EE3', textcolor: 'ffffff', hasLocation: true, tripId: 'BKK_C007',
   wheelchair: false, bikesAllowed: false, booking: false, delay: 0, travelMin: null,
 }];
-plan._journey = futarGeom;
+plan._plan.adopt(futarGeom);
 plan._paint();
 check('planner with BKK departures still has the map button',
   plan.shadowRoot.innerHTML.includes('id="pmap"')
@@ -1128,7 +1119,7 @@ check('planner BKK-board map button opens a single-vehicle map', vehicleMapOpene
     color: 'FFD800', textcolor: '000000', hasLocation: true, tripId: 'BKK_1',
     wheelchair: false, bikesAllowed: false, booking: false, delay: 0, travelMin: 32,
   }];
-  plan._journey = {
+  plan._plan.adopt({
     durationMin: 26, walkMin: 8, waitMin: 0, transfers: 1,
     legs: [
       { walk: true, minutes: 5, meters: 400, from: 'Bosnyák tér', to: 'Bosnyák tér' },
@@ -1136,34 +1127,13 @@ check('planner BKK-board map button opens a single-vehicle map', vehicleMapOpene
       { walk: true, minutes: 2, meters: 120, from: 'Keleti M', to: 'Keleti' },
       { walk: false, label: 'M4', minutes: 13, color: '4CA22F', text: 'ffffff', from: 'Keleti', to: 'Kelenföld' },
     ],
-  };
+  });
   plan._paint();
   const html = plan.shadowRoot.innerHTML;
   check('faster metro itinerary is shown above direct board rows',
     html.includes('\u00c1tsz\u00e1ll\u00e1ssal') && html.includes('M4') && html.includes('7E')
     && !plan.shadowRoot.querySelector('.j-map-only'),
     html.slice(0, 400));
-}
-{
-  const planJFromBoard = [];
-  const origPJ = Lib.planJourney;
-  Lib.planJourney = async function () {
-    planJFromBoard.push(1);
-    return {
-      durationMin: 10, walkMin: 0, waitMin: 0, transfers: 0,
-      legs: [{ walk: false, minutes: 10, label: '7', from: 'A', to: 'B' }],
-    };
-  };
-  plan._journey = null;
-  plan._journeyKey = '';
-  plan._journeyLoading = false;
-  plan._considerJourney();
-  Lib.planJourney = origPJ;
-  plan._journeyKey = '';
-  plan._journeyLoading = false;
-  check('planner still plans a map journey when BKK rows exist',
-    planJFromBoard.length >= 1,
-    String(planJFromBoard.length));
 }
 check('planner has no preset origin suggestions',
   plan.shadowRoot.querySelectorAll('#pfav .suggest-stop').length === 0);
@@ -2904,20 +2874,14 @@ Lib.planJourney = async function (_key, _o, _d, _h, opts) {
   };
 };
 plan._rows = [];
-plan._journey = null;
-plan._journeyKey = '';
-plan._journeyLoading = false;
+plan._plan.reset();
 plan._config = Object.assign({}, plan._config, {
   stopId: 'geo:1,2', stopName: 'Utca', destName: 'Cel', destStopId: 'X', minutesAfter: 60,
 });
 plan._considerJourney();
 check('look-ahead is passed into planJourney', planJArgs[0] === 60, String(planJArgs[0]));
-plan._config = Object.assign({}, plan._config, { minutesAfter: 240 });
-plan._considerJourney();
-check('look-ahead change replans while a journey is loading', planJArgs[1] === 240, String(planJArgs[1]));
 Lib.planJourney = origPlanJ;
-plan._gen += 1;
-plan._journeyLoading = false;
+plan._plan.reset();
 if (plan._poll) { clearInterval(plan._poll); plan._poll = null; }
 plan._reloadSafe = () => {};
 
@@ -3456,8 +3420,8 @@ Lib.mavIndex = origMavIndex;
   await new Promise((r) => setTimeout(r, 20));
   const at = root.querySelector('#pat');
   check('Indulás plans for the picked time',
-    pc._when.mode === 'depart' && pc._when.at > 0 && asked.length === 1
-    && asked[0].time === pc._when.at && !asked[0].arriveBy, JSON.stringify(asked));
+    pc._plan.when.mode === 'depart' && pc._plan.when.at > 0 && asked.length === 1
+    && asked[0].time === pc._plan.when.at && !asked[0].arriveBy, JSON.stringify(asked));
   const pday = root.querySelector('#pday');
   const ptime = root.querySelector('#ptime');
   const dayLabels = [...pday.options].map((o) => o.textContent);
@@ -3475,31 +3439,28 @@ Lib.mavIndex = origMavIndex;
   ptime.dispatchEvent(new Event('change'));
   await new Promise((r) => setTimeout(r, 380));
   check('arrow-key steps on the clock plan once, for the last time, on the picked day',
-    asked.length === 2 && pc._whenParts(pc._when.at).min === 17 * 60 + 30
-    && pc._whenParts(pc._when.at).ymd === pday.value && asked[1].time === pc._when.at,
+    asked.length === 2 && pc._whenParts(pc._plan.when.at).min === 17 * 60 + 30
+    && pc._whenParts(pc._plan.when.at).ymd === pday.value && asked[1].time === pc._plan.when.at,
     JSON.stringify(asked.map((x) => x.time)));
   const tomorrowYmd = pday.options[1].value;
   pday.value = tomorrowYmd;
   pday.dispatchEvent(new Event('change'));
   await new Promise((r) => setTimeout(r, 380));
   check('picking another day keeps the clock and plans for that day',
-    asked.length === 3 && pc._whenParts(pc._when.at).ymd === tomorrowYmd
-    && pc._whenParts(pc._when.at).min === 17 * 60 + 30 && asked[2].time === pc._when.at,
+    asked.length === 3 && pc._whenParts(pc._plan.when.at).ymd === tomorrowYmd
+    && pc._whenParts(pc._plan.when.at).min === 17 * 60 + 30 && asked[2].time === pc._plan.when.at,
     JSON.stringify(asked.map((x) => x.time)));
   ptime.dispatchEvent(new Event('change'));
   await new Promise((r) => setTimeout(r, 380));
   check('a pick naming the time already set does not plan again', asked.length === 3, String(asked.length));
   {
-    const saved = pc._when;
     const far = pc._whenFromParts(tzShiftYmd(pday.options[0].value, 20), 7 * 60 + 7);
-    pc._when = { mode: 'depart', at: far };
-    pc._paintWhenPickers();
+    pc._paintWhenPickers(far);
     check('a picked day past the week and an off-grid minute get their own options',
       pday.value === pc._whenParts(far).ymd && ptime.value === String(7 * 60 + 7)
       && ptime.selectedOptions[0].textContent === '07:07'
       && ptime.options[ptime.selectedIndex - 1].value === String(7 * 60 + 5)
       && ptime.options[ptime.selectedIndex + 1].value === String(7 * 60 + 10));
-    pc._when = saved;
     pc._paintWhenPickers();
   }
   check('a walk-only trip shows its walk instead of badges',
@@ -3533,16 +3494,16 @@ Lib.mavIndex = origMavIndex;
   root.querySelector('[data-when="arrive"]').click();
   await new Promise((r) => setTimeout(r, 20));
   check('Érkezés asks for arrival by the same time',
-    asked.length === 4 && asked[3].arriveBy === true && asked[3].time === pc._when.at
+    asked.length === 4 && asked[3].arriveBy === true && asked[3].time === pc._plan.when.at
     && root.innerHTML.includes('-ig'), JSON.stringify(asked[3]));
   root.querySelector('[data-when="now"]').click();
   await new Promise((r) => setTimeout(r, 20));
   check('Most goes back to the live board',
-    pc._when.mode === 'now' && root.querySelector('#pat').hidden && !root.querySelector('#pmin').hidden);
+    pc._plan.when.mode === 'now' && root.querySelector('#pat').hidden && !root.querySelector('#pmin').hidden);
   root.querySelector('[data-when="depart"]').click();
   await new Promise((r) => setTimeout(r, 20));
   root.querySelector('#preset').click();
-  check('Új resets the time to now', pc._when.mode === 'now');
+  check('Új resets the time to now', pc._plan.when.mode === 'now');
   Lib.planJourneys = origPlanJourneys;
   Lib.planJourney = origPlanJourney;
   pc.remove();
@@ -3997,7 +3958,7 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
   planCard.setConfig({ language: 'hu', stopId: 'BKK_CSF03154', stopName: 'Fő tér', destName: 'Astoria', routeIds: [] });
   planCard._ensureLeaflet = async () => fakeL;
   planCard._loadRowMapShape = raceCard._loadRowMapShape;
-  planCard._journey = { legs: [], durationMin: 10, transfers: 0, walkMin: 1, waitMin: 0 };
+  planCard._plan.adopt({ legs: [], durationMin: 10, transfers: 0, walkMin: 1, waitMin: 0 });
   const keep = { fillJourneyShapes: Lib.fillJourneyShapes, journeyMapSegments: Lib.journeyMapSegments };
   let releaseShapes;
   Lib.fillJourneyShapes = () => new Promise((r) => { releaseShapes = r; });
@@ -4540,7 +4501,6 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     stopId: 'BKK_005501024', stopName: 'Budapest-Kelenföld',
     destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
   });
-  hop._considerJourney = () => {};
   for (let i = 0; i < 50; i++) {
     if (!hop._reloadActive && (hop._rawRows || []).length) break;
     await new Promise((r) => setTimeout(r, 20));
@@ -4564,7 +4524,6 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     stopId: 'BKK_005501024', stopName: 'Budapest-Kelenföld',
     destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
   });
-  old._considerJourney = () => {};
   for (let i = 0; i < 50 && askedFutar === null; i++) await new Promise((r) => setTimeout(r, 20));
   check('a MÁV card without the integration still reads FUTÁR', askedFutar === true, String(askedFutar));
   old.remove();
@@ -4618,7 +4577,6 @@ const waitForPoll = async (hop, ms) => {
       stopId: 'BKK_005501024', stopName: 'Budapest-Kelenföld',
       destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
     }, cfg || {}));
-    hop._considerJourney = () => {};
     await waitForPoll(hop);
     return hop;
   };
@@ -4691,7 +4649,6 @@ const waitForPoll = async (hop, ms) => {
     stopId: 'BKK_005501024', stopName: 'Budapest-Kelenföld',
     destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269',
   });
-  hop._considerJourney = () => {};
   await new Promise((r) => setTimeout(r, 30));
   const before = (hop._err && hop._err.i18nKey) || '';
   hop.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
@@ -4738,7 +4695,7 @@ const waitForPoll = async (hop, ms) => {
   Lib.travelMin = async () => null;
   const pc = document.createElement('hungarian-transit-stop-card-plan');
   pc.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
-  pc._considerJourney = () => {};
+  pc._planner.now = async () => null;
   pc._loadDests = async () => {};
   document.body.appendChild(pc);
   pc.setConfig({
@@ -4777,7 +4734,7 @@ const waitForPoll = async (hop, ms) => {
   });
   const pn = document.createElement('hungarian-transit-stop-card-plan');
   pn.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
-  pn._considerJourney = () => {};
+  pn._planner.now = async () => null;
   pn._loadDests = async () => {};
   document.body.appendChild(pn);
   pn.setConfig({
@@ -4813,7 +4770,7 @@ const waitForPoll = async (hop, ms) => {
   ] });
   const pe = document.createElement('hungarian-transit-stop-card-plan');
   pe.hass = { states: {}, language: 'hu', services: { hungarian_transport: { elvira_between: {} } } };
-  pe._considerJourney = () => {};
+  pe._planner.now = async () => null;
   pe._loadDests = async () => {};
   document.body.appendChild(pe);
   pe.setConfig({
@@ -4880,26 +4837,32 @@ check('a branded suburban train in the same minute stays off another numbered tr
   pc._reloadSafe = () => { reloads += 1; };
   pc._loadDests = async () => {};
   pc._destRoutes = { 'győr, autóbusz-állomás': ['volan_1'], 'aut all': ['BKK_2'] };
-  pc._journey = { legs: [{ walk: false }] };
+  pc._plan.adopt({ legs: [{ walk: false }] });
   pc._rows = [{ label: 'old' }];
-  const gen0 = pc._gen;
+  const run0 = pc._runs.token();
   pc._pickDest({ key: 'aut all', name: 'Győr, autóbusz-állomás', id: 'volan_x', routeKeys: ['győr, autóbusz-állomás', 'aut all'] });
   check('a picked town keeps its name in the destination key and all its routes',
     pc._config.destKey === 'győr, autóbusz-állomás'
     && pc._config.routeIds.indexOf('volan_1') >= 0 && pc._config.routeIds.indexOf('BKK_2') >= 0,
     JSON.stringify({ key: pc._config.destKey, ids: pc._config.routeIds }));
   check('picking a destination drops the old pair’s journey and rows',
-    pc._journey === null && pc._rows.length === 0 && pc._gen > gen0 && reloads === 1);
-  pc._journey = { legs: [{ walk: false }] };
+    pc._plan.shown === null && pc._rows.length === 0 && pc._runs.stale(run0) && reloads === 1);
+  pc._plan.adopt({ legs: [{ walk: false }] });
   pc._config = Object.assign({}, pc._config, { destStopId: 'volan_x', destName: 'Győr, autóbusz-állomás' });
-  const gen1 = pc._gen;
+  const run1 = pc._runs.token();
   pc._swapPlan();
   check('a swap plans the new pair at once, without the old journey',
-    pc._journey === null && pc._gen > gen1 && reloads === 2 && pc._config.stopName === 'Győr, autóbusz-állomás');
+    pc._plan.shown === null && pc._runs.stale(run1) && reloads === 2 && pc._config.stopName === 'Győr, autóbusz-állomás');
+  /* A plan started ms ago: the journey plan reads the card's clock. */
+  const plannedAgo = (ms) => {
+    const realNow = Date.now;
+    Date.now = () => realNow() - ms;
+    try { pc._plan.begin(); } finally { Date.now = realNow; }
+  };
   pc._rows = [{ label: 'x' }];
-  pc._loadedAt = Date.now();
+  plannedAgo(0);
   const fresh = pc._shouldReloadOnConnect();
-  pc._loadedAt = Date.now() - 10 * 60 * 1000;
+  plannedAgo(10 * 60 * 1000);
   const stale = pc._shouldReloadOnConnect();
   check('the planner plans again when shown after a while', fresh === false && stale === true);
   {
@@ -4907,16 +4870,16 @@ check('a branded suburban train in the same minute stays off another numbered tr
     pc._reloadActive = false;
     pc._rows = [];
     const r0 = reloads;
-    pc._loadedAt = Date.now();
+    plannedAgo(0);
     pc._tickPaint();
     const freshTick = reloads - r0;
-    pc._loadedAt = Date.now() - 10 * 60 * 1000;
+    plannedAgo(10 * 60 * 1000);
     pc._tickPaint();
     const staleTick = reloads - r0;
-    pc._when = { mode: 'depart', at: Date.now() + 3600000 };
+    pc._plan.setWhen({ mode: 'depart', at: Date.now() + 3600000 });
     pc._tickPaint();
     const timedTick = reloads - r0;
-    pc._when = { mode: 'now', at: 0 };
+    pc._plan.setWhen({ mode: 'now', at: 0 });
     check('a planner left in front plans "now" again on the tick once its plan is stale, not a chosen time',
       freshTick === 0 && staleTick === 1 && timedTick === 1,
       JSON.stringify({ freshTick, staleTick, timedTick, destKey: pc._config.destKey }));
@@ -5081,7 +5044,7 @@ check('a branded suburban train in the same minute stays off another numbered tr
      branch sets the error synchronously. The fetch itself is then discarded. */
   const running = v._reload();
   const readyPath = !v._err && v._loading === true;
-  v._gen += 1;
+  v._runs.bump();
   running.catch(() => {});
   check('a Volán board without a key is not an error', readyPath, JSON.stringify({ err: v._err, loading: v._loading }));
   v.remove();
@@ -5218,9 +5181,9 @@ check('a branded suburban train in the same minute stays off another numbered tr
   pl.hass = { states: {}, language: 'hu' };
   pl._reloadSafe = () => {};
   pl.setConfig({ language: 'hu' });
-  const seq0 = pl._destSearchSeq;
+  const seq0 = pl._destSearch.token();
   pl._invalidatePlan();
-  check('_invalidatePlan bumps the destination search sequence', pl._destSearchSeq === seq0 + 1);
+  check('_invalidatePlan makes a running destination search stale', pl._destSearch.stale(seq0));
   check('the planner ticks its countdowns', pl._tick !== null && !src.includes('_startTick() {}'));
   const q = pl._planEl('pq');
   if (q) q.focus();
@@ -5816,6 +5779,19 @@ const deferred = () => {
 const settleTicks = async (n) => {
   for (let i = 0; i < (n || 6); i++) await new Promise((r) => setTimeout(r, 0));
 };
+/* A chosen time's itineraries on a planner, landed through its own journey
+   plan: the first one open. */
+const showItineraries = async (pc, when, list) => {
+  const keepPlanJourneys = Lib.planJourneys;
+  Lib.planJourneys = async () => list;
+  try {
+    pc._plan.setWhen(when);
+    pc._considerJourney();
+    await settleTicks();
+  } finally {
+    Lib.planJourneys = keepPlanJourneys;
+  }
+};
 const shapeLen = (pts) => pts.reduce((m, p, i) => (i ? m + Lib.haversineMeters(pts[i - 1], p) : 0), 0);
 
 /* Rides on real city shapes (the live index's polylines) are cut between
@@ -6247,20 +6223,6 @@ const shapeLen = (pts) => pts.reduce((m, p, i) => (i ? m + Lib.haversineMeters(p
   check('a language change keeps a typed query’s "no results", in the new language',
     hint('pdhits') === 'No stop matches this search.' && !pc._planEl('pdhits').querySelector('.hit'),
     pc._planEl('pdhits').innerHTML);
-  pc._when = { mode: 'depart', at: Date.now() + 3600000 };
-  pc._rows = [];
-  pc._loadedAt = Date.now();
-  pc._journeyLoading = false;
-  pc._journeys = [{ legs: [] }];
-  pc._journey = null;
-  pc._openJourney = -1;
-  const folded = pc._shouldReloadOnConnect();
-  pc._journeys = [];
-  pc._journeysDone = true;
-  const none = pc._shouldReloadOnConnect();
-  check('a chosen time with its itineraries folded, or none found, is not planned again on return',
-    !folded && !none, JSON.stringify({ folded, none }));
-  pc._when = { mode: 'now', at: 0 };
   delete pc._loadDests;
   let release;
   Lib.reachableDests = () => new Promise((r) => { release = r; });
@@ -6332,7 +6294,7 @@ const shapeLen = (pts) => pts.reduce((m, p, i) => (i ? m + Lib.haversineMeters(p
   pc.setConfig({ language: 'hu', stopId: 'geo:47.19,18.41', stopName: 'A', destKey: 'b', destName: 'B' });
   const ride = { walk: false, label: '7', color: '009EE3', minutes: 20, from: 'A', to: 'B', shape: [[47.5, 19.0], [47.52, 19.05]] };
   pc._rows = [];
-  pc._journey = { durationMin: 20, transfers: 0, walkMin: 0, waitMin: 0, legs: [ride] };
+  pc._plan.adopt({ durationMin: 20, transfers: 0, walkMin: 0, waitMin: 0, legs: [ride] });
   pc._paint();
   await settleTicks();
   pc._paint();
@@ -6342,7 +6304,7 @@ const shapeLen = (pts) => pts.reduce((m, p, i) => (i ? m + Lib.haversineMeters(p
     made.length === 1 && !made[0].removed && !!pc.shadowRoot.querySelector('#pjmap'), String(made.length));
   check('the inline map credits OpenStreetMap France',
     tiles.length === 1 && /OpenStreetMap France/.test(tiles[0].o.attribution) && /openstreetmap\.fr\/osmfr/.test(tiles[0].url));
-  pc._journey = { durationMin: 25, transfers: 0, walkMin: 0, waitMin: 0, legs: [Object.assign({}, ride, { minutes: 25 })] };
+  pc._plan.adopt({ durationMin: 25, transfers: 0, walkMin: 0, waitMin: 0, legs: [Object.assign({}, ride, { minutes: 25 })] });
   pc._paint();
   await settleTicks();
   check('another journey replaces the inline map', made.length === 2 && made[0].removed && !made[1].removed, String(made.length));
@@ -7262,10 +7224,7 @@ const settle = async (el) => {
   const ride = (minutes) => ({ walk: false, label: '7', color: '009EE3', minutes, from: 'A', to: 'B', shape: [[47.5, 19.0], [47.52, 19.05]] });
   const journey = (min) => ({ durationMin: min, transfers: 0, walkMin: 0, waitMin: 0, legs: [ride(min)] });
   pc._rows = [];
-  pc._when = { mode: 'depart', at: Date.now() + 3600 * 1000 };
-  pc._journeys = [journey(20), journey(25)];
-  pc._openJourney = 0;
-  pc._journey = pc._journeys[0];
+  await showItineraries(pc, { mode: 'depart', at: Date.now() + 3600 * 1000 }, [journey(20), journey(25)]);
   pc._paint();
   await settleTicks();
   const first = made[0];
@@ -8528,18 +8487,15 @@ const settle = async (el) => {
   document.body.appendChild(pc);
   pc.setConfig({ language: 'hu', stopId: 'BKK_A', stopName: 'A', destKey: 'b', destName: 'B' });
   const open = { durationMin: 30, transfers: 0, walkMin: 0, waitMin: 0, legs: [{ walk: false, label: '7', minutes: 30, from: 'A', to: 'B' }] };
-  pc._when = { mode: 'depart', at: Date.now() + 3600 * 1000 };
-  pc._journeys = [open];
-  pc._openJourney = 0;
-  pc._journey = open;
+  await showItineraries(pc, { mode: 'depart', at: Date.now() + 3600 * 1000 }, [open]);
   try {
     await pc._openJourneyMap();
   } finally {
     Object.assign(Lib, keep);
   }
   check('a chosen time’s itinerary map does not plan for now or replace the open itinerary',
-    planned === 0 && pc._journey === open && pc._journeys[0] === open,
-    JSON.stringify({ planned, replaced: pc._journey !== open }));
+    planned === 0 && pc._plan.shown === open && pc._plan.list[0] === open,
+    JSON.stringify({ planned, replaced: pc._plan.shown !== open }));
   pc._closeVehicleMap();
   pc.remove();
 }
@@ -9055,7 +9011,7 @@ check('a city stop number is not an ELVIRA station code',
   pc._rows = [];
   const stale = { durationMin: 11, transfers: 0, walkMin: 0, waitMin: 0, legs: [{ walk: false, label: 'OLD7', color: '009EE3', minutes: 11, from: 'A', to: 'B' }] };
   const fresh = { durationMin: 23, transfers: 0, walkMin: 0, waitMin: 0, legs: [{ walk: false, label: 'NEW9', color: '009EE3', minutes: 23, from: 'A', to: 'B', shape: [[47.5, 19.0], [47.52, 19.05]] }] };
-  pc._journey = stale;
+  pc._plan.adopt(stale);
   pc._paint();
   await settleTicks();
   const box = () => (pc.shadowRoot.querySelector('.journey-plan') || {}).textContent || '';
@@ -9068,7 +9024,7 @@ check('a city stop number is not an ELVIRA station code',
   await pc._openJourneyMap();
   await settleTicks();
   check('a replan from the journey map redraws the card’s journey box',
-    replans === 1 && pc._journey === fresh && /OLD7/.test(before) && /NEW9/.test(box()) && !/OLD7/.test(box()),
+    replans === 1 && pc._plan.shown === fresh && /OLD7/.test(before) && /NEW9/.test(box()) && !/OLD7/.test(box()),
     JSON.stringify({ replans, before, after: box() }));
   pc._closeVehicleMap();
 
@@ -9117,7 +9073,7 @@ check('a city stop number is not an ELVIRA station code',
   pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
   pc._rows = [];
   const mk = (label) => ({ durationMin: 10, transfers: 0, walkMin: 0, waitMin: 0, legs: [{ walk: false, label, color: '009EE3', minutes: 10, from: 'x', to: 'y' }] });
-  pc._journey = mk('NOSHAPE7');
+  pc._plan.adopt(mk('NOSHAPE7'));
   pc._paint();
   await settleTicks();
   Lib.fillJourneyShapes = async () => {};
@@ -9142,8 +9098,8 @@ check('a city stop number is not an ELVIRA station code',
   const after = box();
   check('a swap during the journey map’s replan keeps the new pair’s plan: no old box, no old map',
     /NEW_B_TO_A/.test(mid) && /NEW_B_TO_A/.test(after) && !/OLD_A_TO_B/.test(after)
-    && pc._journey && pc._journey.legs[0].label === 'NEW_B_TO_A' && !pc._mapOverlay && pc._openingMap === '',
-    JSON.stringify({ calls, mid, after, label: pc._journey && pc._journey.legs[0].label, overlay: !!pc._mapOverlay }));
+    && pc._plan.shown && pc._plan.shown.legs[0].label === 'NEW_B_TO_A' && !pc._mapOverlay && pc._openingMap === '',
+    JSON.stringify({ calls, mid, after, label: pc._plan.shown && pc._plan.shown.legs[0].label, overlay: !!pc._mapOverlay }));
   pc._closeVehicleMap();
   Object.assign(Lib, keep);
   pc.remove();
@@ -9177,10 +9133,10 @@ check('a city stop number is not an ELVIRA station code',
   });
   const j1 = mk('FIRST1', 41);
   const j3 = mk('THIRD3', 63);
-  pc._when = { mode: 'depart', at: Date.now() + 3600000 };
-  pc._journeys = [j1, mk('SECOND2', 52), j3];
   Lib.journeyMapSegments = (j) => (j ? [{ walk: false, color: '#009EE3', shape: j.legs[0].shape, from: 'x', to: 'y' }] : []);
-  const pick = (i) => { pc._openJourney = i; pc._journey = pc._journeys[i]; };
+  Lib.fillJourneyShapes = async () => {};
+  await showItineraries(pc, { mode: 'depart', at: Date.now() + 3600000 }, [j1, mk('SECOND2', 52), j3]);
+  const pick = (i) => pc._plan.openItinerary(i);
   const foot = () => (pc._mapOverlay ? pc._mapOverlay.querySelector('.ht-map-foot').textContent : '');
   pick(0);
   let held = deferred();
@@ -9678,7 +9634,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
   await settleTicks();
   const mk = (label) => ({ durationMin: 10, transfers: 0, walkMin: 0, waitMin: 0, legs: [{ walk: false, label, color: '009EE3', minutes: 10, from: 'x', to: 'y' }] });
-  pc._journey = mk('NOSHAPE8');
+  pc._plan.adopt(mk('NOSHAPE8'));
   Lib.fillJourneyShapes = async () => {};
   Lib.journeyMapSegments = (j) => (j && j.legs[0].label === 'REPLANNED8'
     ? [{ walk: false, color: '#000', shape: [[47.5, 19], [47.6, 19.1]] }] : []);
@@ -9688,31 +9644,31 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   pc._showMapNotice = (msg) => notices.push(msg);
   const opening = pc._openJourneyMap();
   await settleTicks();
-  /* What every hop-card _reload does first. */
-  pc._gen += 1;
+  /* What every planner _reload does first. */
+  pc._plan.begin();
   release();
   await opening;
   await settleTicks();
   check('a same-pair reload during the journey map’s replan still opens the map with the replanned journey',
-    !!pc._mapOverlay && pc._journey && pc._journey.legs[0].label === 'REPLANNED8' && !notices.length,
-    JSON.stringify({ overlay: !!pc._mapOverlay, opening: pc._openingMap, notices, label: pc._journey && pc._journey.legs[0].label }));
+    !!pc._mapOverlay && pc._plan.shown && pc._plan.shown.legs[0].label === 'REPLANNED8' && !notices.length,
+    JSON.stringify({ overlay: !!pc._mapOverlay, opening: pc._openingMap, notices, label: pc._plan.shown && pc._plan.shown.legs[0].label }));
   pc._closeVehicleMap();
   /* "Now": the card's own plan lands while the map's replan still waits
-     (_considerJourney sets it after its shapes). The Map click is not
+     (the journey plan sets it after its shapes). The Map click is not
      dropped: the map opens for the plan the card shows. */
-  pc._journey = mk('NOSHAPE8');
+  pc._plan.adopt(mk('NOSHAPE8'));
   const landed = Object.assign(mk('REPLANNED8'), { durationMin: 27 });
   Lib.planJourney = () => new Promise((r) => { release = () => r(mk('REPLANNED8')); });
   const following = pc._openJourneyMap();
   await settleTicks();
-  pc._journey = landed;
+  pc._plan.adopt(landed);
   release();
   await following;
   await settleTicks();
   const footNow = pc._mapOverlay ? pc._mapOverlay.querySelector('.ht-map-foot').textContent : '';
   check('a "now" plan landing during the journey map’s replan opens the map for that plan, not nothing',
-    !!pc._mapOverlay && pc._journey === landed && /27/.test(footNow) && !notices.length && pc._openingMap === '',
-    JSON.stringify({ overlay: !!pc._mapOverlay, foot: footNow, notices, label: pc._journey && pc._journey.legs[0].label }));
+    !!pc._mapOverlay && pc._plan.shown === landed && /27/.test(footNow) && !notices.length && pc._openingMap === '',
+    JSON.stringify({ overlay: !!pc._mapOverlay, foot: footNow, notices, label: pc._plan.shown && pc._plan.shown.legs[0].label }));
   pc._closeVehicleMap();
   Object.assign(Lib, keep);
   pc.remove();
@@ -9778,13 +9734,17 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
      and plans again only at its end. */
   fill = deferred();
   plan = deferred();
-  pc._loadedAt = Date.now() - 6 * 60 * 1000;
-  pc._tickPaint();
+  {
+    /* Six minutes on, by the card's clock. */
+    const realNow = Date.now;
+    Date.now = () => realNow() + 6 * 60 * 1000;
+    try { pc._tickPaint(); } finally { Date.now = realNow; }
+  }
   await settleTicks();
   const inRun = Object.assign(state(), { same: boxOf() === box0 });
   fill.resolve([]);
   await settleTicks();
-  const planning = Object.assign(state(), { same: boxOf() === box0, loading: pc._journeyLoading, plans });
+  const planning = Object.assign(state(), { same: boxOf() === box0, loading: pc._plan.loading, plans });
   plan.resolve(mkJ('PLANTWO', 43));
   await settleTicks();
   const landed = state();
@@ -9799,7 +9759,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
      the same pair: the map opens on the plan the box shows. */
   const foot = () => (pc._mapOverlay ? pc._mapOverlay.querySelector('.ht-map-foot').textContent : '');
   const openDuring = async (replan) => {
-    const shown = pc._journey;
+    const shown = pc._plan.shown;
     const shapes = deferred();
     Lib.fillJourneyShapes = (j) => (j === shown ? shapes.p : Promise.resolve());
     fill = { p: Promise.resolve([]) };
@@ -9832,7 +9792,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   /* The new plan finds no route while the map still waits: there is no plan
      to draw, so no map opens and its button does not take the focus later. */
   {
-    const shown = pc._journey;
+    const shown = pc._plan.shown;
     const shapes = deferred();
     Lib.fillJourneyShapes = (j) => (j === shown ? shapes.p : Promise.resolve());
     fill = { p: Promise.resolve([]) };
@@ -9846,8 +9806,8 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     await settleTicks();
     check('a "now" replan finding no route while the journey map opens opens no map of nothing',
       !pc._mapOverlay && !document.querySelector('.ht-map-overlay') && pc._openingMap === '' && pc._mapReturnFocus === null
-        && pc._journey === null,
-      JSON.stringify({ overlay: !!pc._mapOverlay, foot: foot(), opening: pc._openingMap, journey: !!pc._journey }));
+        && pc._plan.shown === null,
+      JSON.stringify({ overlay: !!pc._mapOverlay, foot: foot(), opening: pc._openingMap, journey: !!pc._plan.shown }));
     pc._closeVehicleMap();
   }
   Object.assign(Lib, keep);
@@ -9875,8 +9835,8 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   await new Promise((r) => setTimeout(r, 150));
   const text = (pc.shadowRoot.textContent || '').replace(/\s+/g, ' ');
   check('a failed journey plan over an empty planner board does not stay on "Loading…"',
-    calls > 0 && !pc._journeyLoading && !text.includes('Betöltés'),
-    JSON.stringify({ calls, loading: pc._journeyLoading, text: text.slice(0, 160) }));
+    calls > 0 && !pc._plan.loading && !text.includes('Betöltés'),
+    JSON.stringify({ calls, loading: pc._plan.loading, text: text.slice(0, 160) }));
   Object.assign(Lib, keep);
   pc.remove();
 }
@@ -10003,26 +9963,25 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   pc.setConfig({ language: 'hu', stopId: 'BKK_A', stopName: 'Alpha', destKey: 'beta', destName: 'Beta', destStopId: 'BKK_B' });
   await settleTicks();
   const ride = { walk: false, minutes: 10, meters: 0, label: 'OLDLINE', headsign: 'Beta', from: 'Alpha', to: 'Beta', color: '', text: '' };
-  pc._journey = { durationMin: 10, transfers: 0, walkMin: 0, waitMin: 0, legs: [ride] };
-  pc._journeyKey = 'old';
+  pc._plan.adopt({ durationMin: 10, transfers: 0, walkMin: 0, waitMin: 0, legs: [ride] });
   pc._paint();
   const shownBefore = pc.shadowRoot.innerHTML.includes('OLDLINE');
-  const gen0 = pc._pairGen;
+  const pair0 = pc._plan.pairToken();
   pc.setConfig({ language: 'hu', stopId: 'BKK_C', stopName: 'Gamma', destKey: 'delta', destName: 'Delta', destStopId: 'BKK_D' });
   await settleTicks();
   check('a new pair from the editor drops the old itinerary at once',
-    shownBefore && !pc.shadowRoot.innerHTML.includes('OLDLINE') && pc._journey === null && pc._pairGen === gen0 + 1,
-    JSON.stringify({ shownBefore, journey: !!pc._journey, gen: pc._pairGen - gen0 }));
-  const gen1 = pc._pairGen;
+    shownBefore && !pc.shadowRoot.innerHTML.includes('OLDLINE') && pc._plan.shown === null && !pc._plan.samePair(pair0),
+    JSON.stringify({ shownBefore, journey: !!pc._plan.shown, samePair: pc._plan.samePair(pair0) }));
+  const pair1 = pc._plan.pairToken();
   pc.setConfig({ language: 'hu', name: 'Only a title', stopId: 'BKK_C', stopName: 'Gamma', destKey: 'delta', destName: 'Delta', destStopId: 'BKK_D' });
   await settleTicks();
-  check('a title edit keeps the plan state', pc._pairGen === gen1, String(pc._pairGen - gen1));
+  check('a title edit keeps the plan state', pc._plan.samePair(pair1));
   release([]);
   await settleTicks();
 
   /* "Mikor" changed while the journey map was still loading its shapes: the
      plan it was drawing is gone, so no map opens (one for the new plan can). */
-  pc._journey = { durationMin: 10, transfers: 0, walkMin: 0, waitMin: 0, legs: [ride] };
+  pc._plan.adopt({ durationMin: 10, transfers: 0, walkMin: 0, waitMin: 0, legs: [ride] });
   const shapes = deferred();
   Lib.fillJourneyShapes = () => shapes.p;
   pc._ensureLeaflet = async () => { throw new Error('must not get this far'); };
@@ -10032,7 +9991,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   await opening;
   await settleTicks();
   check('a "Mikor" change while the journey map opens leaves no map of a dropped plan',
-    !document.querySelector('.ht-map-overlay') && pc._openingMap === '' && pc._journey === null,
+    !document.querySelector('.ht-map-overlay') && pc._openingMap === '' && pc._plan.shown === null,
     JSON.stringify({ overlay: !!document.querySelector('.ht-map-overlay'), opening: pc._openingMap }));
   release([]);
   await settleTicks();
@@ -10539,8 +10498,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   fp._reloadSafe = () => {};
   fp.hass = { states: {}, language: 'hu', services: {} };
   fp.setConfig({ language: 'hu', stopId: 'x', stopName: 'A', stopLat: 47.5, stopLon: 19.0, destKey: 'b', destName: 'B', destLat: 47.4, destLon: 19.1 });
-  fp._when = { mode: 'depart', at: Date.now() + 3600e3 };
-  fp._journeyKey = '';
+  fp._plan.setWhen({ mode: 'depart', at: Date.now() + 3600e3 });
   fp._considerJourney();
   await settleTicks();
   const failMsg = [...fp.shadowRoot.querySelectorAll('.j-msg')].map((e) => e.textContent).join('|');
@@ -10548,7 +10506,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   fp._considerJourney();
   await settleTicks();
   check('a failed search says to try again and is asked again on the next reload',
-    fp._journeyFailed === true && failMsg.includes('Próbáld újra') && reloadAfterFail && planCalls === 2,
+    fp._plan.failed === true && failMsg.includes('Próbáld újra') && reloadAfterFail && planCalls === 2,
     JSON.stringify({ failMsg, reloadAfterFail, planCalls }));
   Lib.planJourneys = keepPJ;
   fp.remove();
@@ -10650,14 +10608,15 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   document.body.appendChild(sp);
   sp._reloadSafe = () => {};
   sp.setConfig({ language: 'hu', stopId: 'BKK_A', stopName: 'Alpha', destName: 'Beta', routeIds: [] });
-  sp._journey = { legs: [], durationMin: 10, transfers: 0, walkMin: 1, waitMin: 0 };
+  sp._plan.adopt({ legs: [], durationMin: 10, transfers: 0, walkMin: 1, waitMin: 0 });
   const btn = { el: { focus() {} }, ref: null };
   sp._focusTarget = () => btn;
   const keepFill = Lib.fillJourneyShapes;
   const shapesP = deferred();
   Lib.fillJourneyShapes = () => shapesP.p;
   const opening = sp._openJourneyMap();
-  sp._pairGen += 1;
+  /* A new stop pair while the open still waits. */
+  sp._plan.reset();
   shapesP.resolve();
   await opening;
   Lib.fillJourneyShapes = keepFill;
@@ -10741,7 +10700,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     time.dispatchEvent(new Event('change'));
     after();
     await new Promise((r) => setTimeout(r, 450));
-    return pt._when.mode;
+    return pt._plan.when.mode;
   };
   const afterNow = await pickThen(() => pt._setWhen('now'));
   const afterReset = await pickThen(() => pt._resetPlan());

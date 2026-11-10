@@ -15,6 +15,7 @@ import './lib/stop-history.js';
 import './lib/rows.js';
 import './lib/elvira-rows.js';
 import './lib/board.js';
+import './lib/journey-plan.js';
 import './lib/ride-map.js';
 import { BKK_PLANNER_TAG, BKK_PLANNER_TAG_ALIAS, CARD_VERSION } from './config.js';
 import { BKKHopCardEditor } from './editor.js';

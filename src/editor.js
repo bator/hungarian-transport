@@ -1,6 +1,7 @@
 import { DEFAULT_FAVORITES, DEFAULT_MINUTES_AFTER, MAX_MINUTES_AFTER, MINUTES_AFTER_PRESETS, MIN_MINUTES_AFTER, clampMinutesAfter, destRouteIds, normalizeCardConfig } from './config.js';
 import { codedError, errText, modeCopy, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
+import { generation } from './lib/generation.js';
 import { THEMES, THEME_DEFAULT, THEME_IDS, THEME_OPERATOR, themeKey } from './themes.js';
 
 const DEST_RETRY_MS = 30 * 1000;
@@ -31,9 +32,11 @@ export class BKKHopCardEditor extends HTMLElement {
     this._userEditedKey = false;
     this._keyReveal = false;
     this._keyVisible = false;
-    this._searchSeq = 0;
-    this._destSeq = 0;
-    this._citySeq = 0;
+    /* The stop search, the destination list load and the city list: a
+       newer one makes the one still running stale. */
+    this._stopSearch = generation();
+    this._destLoad = generation();
+    this._cityLoad = generation();
     this._autoTitle = '';
   }
 
@@ -46,7 +49,7 @@ export class BKKHopCardEditor extends HTMLElement {
   _cancelSearches() {
     if (this._searchTimer) { clearTimeout(this._searchTimer); this._searchTimer = null; }
     if (this._destTimer) { clearTimeout(this._destTimer); this._destTimer = null; }
-    this._searchSeq += 1;
+    this._stopSearch.bump();
   }
 
   setConfig(config) {
@@ -646,10 +649,10 @@ export class BKKHopCardEditor extends HTMLElement {
   async _fillCities() {
     const sel = this._el('city');
     if (!sel || this._isEditing(sel)) return;
-    const seq = ++this._citySeq;
+    const seq = this._cityLoad.bump();
     try {
       const idx = await BkkLib.withIndexes(this._config).cityIndex();
-      if (seq !== this._citySeq) return;
+      if (this._cityLoad.stale(seq)) return;
       const ops = (idx.ops || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'hu'));
       const cur = this._config.city || '';
       const lang = this._lang();
@@ -666,7 +669,7 @@ export class BKKHopCardEditor extends HTMLElement {
       sel.dataset.ops = signature;
       if (cur) sel.value = cur;
     } catch (err) {
-      if (seq !== this._citySeq) return;
+      if (this._cityLoad.stale(seq)) return;
       this._error(err);
     }
   }
@@ -771,7 +774,7 @@ export class BKKHopCardEditor extends HTMLElement {
       return;
     }
     /* A cleared or too short query also cancels the search still running. */
-    const seq = ++this._searchSeq;
+    const seq = this._stopSearch.bump();
     if (!q || q.length < 2) {
       box.innerHTML = '';
       return;
@@ -779,7 +782,7 @@ export class BKKHopCardEditor extends HTMLElement {
     try {
       this._error('');
       if (!this._hasFutar() && !this._userEditedKey) await this._fillKey();
-      if (seq !== this._searchSeq) return;
+      if (this._stopSearch.stale(seq)) return;
       /* No key on the card, in the integration or on a sibling card: say
          so, instead of "no stops found" for a search that never ran. */
       if (!this._hasFutar() && this._needsKey()) {
@@ -789,7 +792,7 @@ export class BKKHopCardEditor extends HTMLElement {
       }
       const mode = this._mode();
       const hits = await BkkLib.withIndexes(this._config).searchStops(this._apiKey(), q, mode, this._config.city);
-      if (seq !== this._searchSeq) return;
+      if (this._stopSearch.stale(seq)) return;
       if (!hits.length) {
         box.innerHTML = '<span class="hint">' + BkkLib.esc(this._modeCopy(mode).empty) + '</span>';
         return;
@@ -805,7 +808,7 @@ export class BKKHopCardEditor extends HTMLElement {
         });
       });
     } catch (err) {
-      if (seq !== this._searchSeq) return;
+      if (this._stopSearch.stale(seq)) return;
       this._error(err);
     }
   }
@@ -878,7 +881,7 @@ export class BKKHopCardEditor extends HTMLElement {
     if (!this._canLoadDests()) return;
     const stopId = this._config.stopId;
     const access = this._keyAccess();
-    const seq = ++this._destSeq;
+    const seq = this._destLoad.bump();
     this._destsLoading = true;
     this._loadingStop = stopId;
     this._failedStop = '';
@@ -893,7 +896,7 @@ export class BKKHopCardEditor extends HTMLElement {
         this._mode(),
         this._config.city,
       );
-      if (seq !== this._destSeq || this._config.stopId !== stopId) return;
+      if (this._destLoad.stale(seq) || this._config.stopId !== stopId) return;
       this._loadedStop = stopId;
       this._loadedAccess = access;
       /* Done before the paint below, or it repaints the loading hint. */
@@ -911,7 +914,7 @@ export class BKKHopCardEditor extends HTMLElement {
       const dq = this._el('dq');
       this._paintDestHits(dq ? dq.value.trim() : '');
     } catch (err) {
-      if (seq !== this._destSeq) return;
+      if (this._destLoad.stale(seq)) return;
       this._loadedStop = '';
       this._failedStop = stopId;
       this._failedAccess = this._keyAccess();
@@ -919,7 +922,7 @@ export class BKKHopCardEditor extends HTMLElement {
       this._error(err);
       if (box) box.innerHTML = '';
     } finally {
-      if (seq === this._destSeq) {
+      if (!this._destLoad.stale(seq)) {
         this._destsLoading = false;
         this._loadingStop = '';
       }

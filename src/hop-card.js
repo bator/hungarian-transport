@@ -1,6 +1,7 @@
-import { ASSET_BASE, DEFAULT_MINUTES_AFTER, configDataKey, departureStillDue, normalizeCardConfig, refreshSeconds } from './config.js';
+import { ASSET_BASE, DEFAULT_MINUTES_AFTER, MAP_TILES, MAP_TILE_OPTIONS, configDataKey, departureStillDue, normalizeCardConfig, refreshSeconds } from './config.js';
 import { codedError, errText, resolveLang, t } from './i18n.js';
 import { BkkLib } from './lib/core.js';
+import { generation } from './lib/generation.js';
 import { BKK_HOP_EDITOR } from './tags.js';
 import { THEME_CSS, THEME_VAR_KEYS, resolveTheme, themeVars } from './themes.js';
 
@@ -36,7 +37,8 @@ export class BKKHopCard extends HTMLElement {
     /* The shown rows are a Transitous fill under an error banner. */
     this._rowsFilled = false;
     this._painted = false;
-    this._gen = 0;
+    /* Board runs: a reload makes the one before it stale. */
+    this._runs = generation();
     this._keyRetryAt = 0;
     this._keyBackoff = 0;
     this._keyFilling = false;
@@ -55,6 +57,8 @@ export class BKKHopCard extends HTMLElement {
     this._mapState = null;
     this._mapL = null;
     this._mapReturnFocus = null;
+    /* Map opens: a close (and so every new open) makes one still loading stale. */
+    this._mapOpens = generation();
     /* The open map's timetable estimate (shape and timed stops), moved on
        each poll while the vehicle reports no position. */
     this._mapEstimate = null;
@@ -103,9 +107,9 @@ export class BKKHopCard extends HTMLElement {
        ticks and fetches; connectedCallback starts all three. */
     if (this.isConnected) this._holdGate();
     const next = normalizeCardConfig(config);
-    /* Against the config the card shows now, not the one last set: the
-       planner's in-card picks change it, and re-applying the configured
-       stops (a title edit in the editor preview) must bring them back. */
+    /* Against the config the card shows now, not the one last set: picks
+       made in the card change it, and re-applying the configured stops (a
+       title edit in the editor preview) must bring them back. */
     const prevKey = this._configDataKey != null ? configDataKey(this._config) : null;
     const nextKey = configDataKey(next);
     this._config = next;
@@ -141,7 +145,7 @@ export class BKKHopCard extends HTMLElement {
       return;
     }
     /* A run still in flight from before a detach is for the old config. */
-    this._gen += 1;
+    this._runs.bump();
     this._reloadActive = false;
   }
 
@@ -301,7 +305,7 @@ export class BKKHopCard extends HTMLElement {
   /* The poll of the current reload again, if there is one to pick up. */
   _resumePoll() {
     const p = this._pollRun;
-    if (!p || p.gen !== this._gen || !this._shouldPoll()) return false;
+    if (!p || this._runs.stale(p.gen) || !this._shouldPoll()) return false;
     this._armPoll(p);
     return true;
   }
@@ -821,11 +825,11 @@ export class BKKHopCard extends HTMLElement {
     return leafletPromise;
   }
 
-  /* Every close (and so every new open) bumps the map sequence. An open that
-     is still awaiting Leaflet or a route checks it after each await, so a
+  /* Every close (and so every new open) makes the open before it stale. An
+     open still awaiting Leaflet or a route checks after each await, so a
      superseded open never adds a second overlay that nothing can close. */
   _closeVehicleMap() {
-    this._mapSeq = (this._mapSeq || 0) + 1;
+    this._mapOpens.bump();
     const hadOverlay = !!this._mapOverlay;
     if (this._onMapKey && typeof document !== 'undefined') {
       document.removeEventListener('keydown', this._onMapKey);
@@ -872,7 +876,7 @@ export class BKKHopCard extends HTMLElement {
   }
 
   _mapStale(seq) {
-    return seq !== this._mapSeq || !this.isConnected;
+    return this._mapOpens.stale(seq) || !this.isConnected;
   }
 
   _mapKey(row) {
@@ -950,8 +954,8 @@ export class BKKHopCard extends HTMLElement {
     });
   }
 
-  /* The card's own map overlay lives outside the shadow root; the planner's
-     inline map lives inside it. Both include these rules. */
+  /* The card's own map overlay lives outside the shadow root, an inline
+     map inside it: both include these rules. */
   _stopPinCss() {
     return `
         .ht-stop-pin{position:relative;width:20px;height:20px;display:flex;align-items:center;justify-content:center}
@@ -1083,7 +1087,7 @@ ${this._stopPinCss()}
     if (back && !back.ref) back.ref = this._mapRefOf(row);
     this._mapReturnFocus = back;
     this._openingMap = key;
-    const seq = this._mapSeq;
+    const seq = this._mapOpens.token();
     const gps0 = BkkLib.mapGpsLatLon(row.lat, row.lon);
     let lat = gps0 ? gps0[0] : NaN;
     let lon = gps0 ? gps0[1] : NaN;
@@ -1151,11 +1155,7 @@ ${this._stopPinCss()}
     let map;
     try {
       map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView([startLat, startLon], hasGps ? 12 : 8);
-      L.tileLayer('https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png', {
-        maxZoom: 20,
-        subdomains: 'abc',
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://www.openstreetmap.fr/">OpenStreetMap France</a>',
-      }).addTo(map);
+      L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
     } catch (_e) {
       this._showMapNotice(t(lang, 'mapLeafletFail'));
       return;
@@ -1456,7 +1456,7 @@ ${this._stopPinCss()}
   async _reload() {
     /* Overlapping reloads (config edits, reconnects) must not leave an orphan
        interval behind, so every run is tagged with the generation that owns it. */
-    const gen = ++this._gen;
+    const gen = this._runs.bump();
     this._reloadActive = true;
     const cfg = this._config || {};
     if (this._poll) { clearInterval(this._poll); this._poll = null; }
@@ -1475,34 +1475,25 @@ ${this._stopPinCss()}
          instead of "no departures". */
       if (cfg.stopId && cfg.destKey) this._err = codedError('errNoApiKey');
       this._paint();
-      if (gen === this._gen) this._reloadActive = false;
+      if (!this._runs.stale(gen)) this._reloadActive = false;
       return;
     }
     /* The board's rules are the board module's (lib/board.js): this card
        only keeps the board on screen, paints what a poll sends, and drops
        what a reload since made stale. */
     const state = this._boardState || (this._boardState = { viaFutarUntil: 0 });
-    const current = () => gen === this._gen;
+    const current = () => !this._runs.stale(gen);
     const show = (board) => {
       if (!current()) return;
       this._rawRows = board.rows;
       this._rowsFilled = board.filled;
       this._err = board.banner;
       this._loading = board.loading;
-      /* A new plan for the journey once the timetables answered (or the
-         origin is a place, which has no board of its own). */
-      if (board.phase === 'listed' || board.phase === 'place') {
-        this._journey = null;
-        this._journeyKey = '';
-        this._journeyLoading = false;
-      }
       if (!board.quiet) {
         this._rows = (this._rawRows || []).map((r) => BkkLib.asRow(r, cfg.destName, this._lang()));
         this._paint();
       }
-      if ((board.phase === 'place' || board.phase === 'settled') && typeof this._considerJourney === 'function') {
-        this._considerJourney();
-      }
+      if (board.phase === 'place' || board.phase === 'settled') this._boardSettled();
       if (board.phase === 'done') this._syncOpenMap();
     };
     const run = () => BkkLib.nextBoard({
@@ -1522,13 +1513,17 @@ ${this._stopPinCss()}
     this._paint();
     try {
       await run();
-      if (!this.isConnected || gen !== this._gen || !this._shouldPoll()) return;
+      if (!this.isConnected || !current() || !this._shouldPoll()) return;
       this._pollRun = { gen, run, busy: false };
       /* Hidden tab: the visibilitychange handler picks the poll up again. */
       if (this._pageHidden()) return;
       this._armPoll(this._pollRun);
     } finally {
-      if (gen === this._gen) this._reloadActive = false;
+      if (current()) this._reloadActive = false;
     }
   }
+
+  /* The rows on screen are this poll's, or the origin is a place with no
+     board of its own: a card that builds on the board starts from here. */
+  _boardSettled() {}
 }
