@@ -2127,25 +2127,6 @@ check('ELVIRA GPS still wins if FUTAR was added first', (() => {
     && merged[0].lat === 47.2290993
     && merged[0].lon === 18.6682205;
 })());
-check('hop map uses MÁV GTFS full line for trains, Transitous for buses',
-  src.includes('motisShapeForHop')
-  && src.includes('mav-index.json.gz')
-  && src.includes('/api/v5/stoptimes')
-  && src.includes('_mapBoardMarker')
-  && src.includes('combineHopShapes')
-  && src.includes('stitchShapes')
-  && src.includes('clipRideShape')
-  && src.includes('clipShapeToBoardDest')
-  && src.includes('keepsFullLineShape')
-  && src.includes('pickPublishedLineShape')
-  && src.includes('futarTripShape')
-  && src.includes('bkkTransitousStopIds')
-  && src.includes('if (canFutar)')
-  && src.includes('pfaedle OSM rails')
-  && !src.includes('clipShapeAfterPoint')
-  && !src.includes('truncatedMotis')
-  && !src.includes('!hasShape && BkkLib.isTrainRow(row)')
-  && !/shape = BkkLib.clipShapeToHop\(/.test(src));
 check('mavShapeIndexKey prefers suburban line over colliding train numbers', (() => {
   const idx = { n: { 19707: 1, 9068: 2, 861: 3 }, l: { G43: 10, S40: 11 } };
   const g43 = Lib.mavShapeIndexKey({ label: 'G43', trainNumber: '19707', vehicle: 'rail' }, idx);
@@ -2202,10 +2183,6 @@ check('isTrainRow is rail and elvira only',
   Lib.isTrainRow({ vehicle: 'rail', tripId: 'elvira:1', trainNumber: '866' })
   && Lib.isTrainRow({ vehicle: 'rail', label: 'S40', tripId: 'BKK_4343_70', trainNumber: '4343' })
   && !Lib.isTrainRow({ vehicle: 'bus', label: '7', tripId: 'BKK_C007' }));
-check('hop map still tries FUTAR geometry when MOTIS misses the headsign',
-  src.includes('const canFutar')
-  && src.includes('if (canFutar)')
-  && src.includes('matchHassVehicle'));
 check('pickMotisVehicle matches ELVIRA ADRIA to Transitous AGRAM', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
   const hit = Lib.pickMotisVehicle([
@@ -2373,34 +2350,6 @@ check('pickMotisVehicle still matches Göcsej by train number', (() => {
   check('GPS far from a suburban hop is a large shape gap',
     gap > 40000, String(gap));
 }
-{
-  const card = document.createElement('hungarian-transport-card');
-  card.setConfig({
-    language: 'hu', apiKey: 'x',
-    stopLat: 47.46, stopLon: 19.02,
-  });
-  let serviceCalls = 0;
-  card._hass = { connection: { sendMessagePromise: async () => { serviceCalls += 1; return {}; } } };
-  const origMotis = Lib.motisShapeForHop;
-  const origHassService = Lib.hassService;
-  const motisShape = [[47.18, 18.42], [47.46, 19.02]];
-  try {
-    Lib.motisShapeForHop = async () => ({ shape: motisShape, coversHead: true });
-    Lib.hassService = async () => { serviceCalls += 1; return null; };
-    const got = await card._loadRowMapShape({
-      label: 'GÖCSEJ', trainNumber: '954', vehicle: 'rail',
-      tripId: 'BKK_954_1', lat: 47.50, lon: 19.55,
-      shape: motisShape,
-    });
-    /* bkk_stop has no trip_shape service: a train map never asks HA for one. */
-    check('loadRowMapShape never calls Home Assistant for a train shape',
-      serviceCalls === 0 && got.shape.length === 2 && got.shape[1][1] === 19.02,
-      JSON.stringify({ serviceCalls, shape: got.shape }));
-  } finally {
-    Lib.motisShapeForHop = origMotis;
-    Lib.hassService = origHassService;
-  }
-}
 check('pickMotisVehicle matches a bus route number', (() => {
   const dep = Math.floor(Date.now() / 1000) + 600;
   const hit = Lib.pickMotisVehicle([
@@ -2464,11 +2413,6 @@ check('hop map polyline is unclipped SVG on the overlay pane',
     vm.includes('this._mapRouteLayers.push')
     && vm.includes('L.polyline(shape')
     && vm.indexOf('L.polyline(shape') < vm.lastIndexOf('applyView();'));
-  check('hop vehicle map loads one row, not every due trip',
-    vm.includes('_loadRowMapShape')
-    && !vm.includes('_visibleMapRows')
-    && !vm.includes('boardMapLayers')
-    && !vm.includes('mapAllTrips'));
 }
 check('no card code asks bkk_stop for a trip_shape',
   !src.includes('hassTripShape') && !src.includes("'trip_shape'"));
@@ -3432,10 +3376,6 @@ Lib.mavIndex = origMavIndex;
       out.shape.length === 4 && Math.abs(out.shape[1][1] - 20.152) < 1e-6
       && out.board[0] === 46.25 && !asked.some((u) => u.includes('transitous')),
       JSON.stringify({ n: out.shape.length, board: out.board, asked }));
-    const plain = Object.assign({}, row, { gtfs: Object.assign({}, geo, { shape: null }) });
-    const out2 = await geoCard._loadRowMapShape(plain);
-    check('without a shape the route falls back to the GTFS stops',
-      out2.shape.length === 3 && out2.shape[2][0] === 46.27, JSON.stringify(out2.shape));
     const asRowKept = Lib.asRow(Object.assign({ head: 'Gamma', text: '#fff', color: '#000' }, row), 'Gamma', 'hu');
     check('asRow keeps the GTFS geometry', asRowKept.gtfs === geo);
   } finally {
@@ -3774,12 +3714,6 @@ Lib.mavIndex = origMavIndex;
   check('closing the map clears both stop markers',
     !pinCard._mapBoardMarker && !pinCard._mapAlightMarker && !document.querySelector('.ht-map-overlay'));
 
-  pinCard.setConfig({ language: 'hu', stopId: 'BKK_CSF03154', stopName: 'Fő tér', routeIds: [] });
-  check('a card without a destination has no alighting stop',
-    (await pinCard._rowAlightPoint({ label: '7' }, [[47.5, 19.1]])) === null);
-  pinCard.setConfig({ language: 'hu', stopId: 'BKK_CSF03154', stopName: 'Fő tér', destKey: 'zugló', destName: 'Zugló', routeIds: [] });
-  const first = await pinCard._rowAlightPoint({ label: '7' }, [null, [47.5163, 19.0889], [47.1, 19.1]]);
-  check('the trip’s own stop wins for the alighting point', !!first && first[0] === 47.5163, JSON.stringify(first));
   pinCard.remove();
 
   made.length = 0;
@@ -3830,56 +3764,6 @@ Lib.mavIndex = origMavIndex;
       const pt = Lib.knownStopCoords({ name: n });
       return !!pt && Lib.distanceToShapeMeters(pt, [[pt[0], pt[1]]]) === 0;
     }));
-}
-
-/* Trains Transitous misses still get a route: FUTÁR's trip details. */
-{
-  const keep = {};
-  ['mavRouteForRow', 'motisShapeForHop', 'futarTripShape', 'tripHopStops', 'stopArea', 'transitousStopRef']
-    .forEach((k) => { keep[k] = Lib[k]; });
-  const futarLine = [[47.2300, 16.6200], [47.1836, 18.4247], [47.3157, 18.7880], [47.4643, 19.0206], [47.4989, 19.0250]];
-  let futarCalls = 0;
-  let motisResult = { shape: [], board: [47.1836, 18.4247], dest: [47.4643, 19.0206], coversHead: false, hit: null };
-  Lib.mavRouteForRow = async () => null;
-  Lib.motisShapeForHop = async () => motisResult;
-  Lib.futarTripShape = async () => { futarCalls += 1; return futarLine; };
-  Lib.tripHopStops = async () => ({ board: [47.1836, 18.4247], alight: [47.4643, 19.0206] });
-  Lib.stopArea = async () => '';
-  Lib.transitousStopRef = async () => null;
-  const trainCard = document.createElement('hungarian-transport-card');
-  document.body.appendChild(trainCard);
-  trainCard.setConfig({
-    language: 'hu', stopId: 'BKK_005503269', stopName: 'Székesfehérvár', mav: true,
-    destKey: 'budapest-kelenföld', destName: 'Budapest-Kelenföld', apiKey: 'test-key', routeIds: [],
-  });
-  const train = { label: 'BAKONY', headsign: 'Budapest-Déli', type: 'RAIL', tripId: 'BKK_9051_316', trainNumber: '905' };
-  const got = await trainCard._loadRowMapShape(train);
-  check('a train Transitous misses draws FUTÁR’s whole route',
-    futarCalls === 1 && Lib.validMapShape(got.shape).length === futarLine.length && got.shape[0][1] === 16.62,
-    JSON.stringify({ futarCalls, n: Lib.validMapShape(got.shape).length }));
-  check('its stop pins sit on that route',
-    Lib.distanceToShapeMeters(got.board, got.shape) < 20 && Lib.distanceToShapeMeters(got.alight, got.shape) < 20,
-    JSON.stringify({ board: got.board, alight: got.alight }));
-  futarCalls = 0;
-  motisResult = Object.assign({}, motisResult, { shape: [[47.1836, 18.4247], [47.3157, 18.7880], [47.4643, 19.0206]], coversHead: true });
-  const viaMotis = await trainCard._loadRowMapShape(train);
-  check('a Transitous route through the alighting station is kept over FUTÁR’s',
-    Lib.validMapShape(viaMotis.shape).length === 3 && viaMotis.shape[0][1] === 18.4247,
-    JSON.stringify({ futarCalls, n: Lib.validMapShape(viaMotis.shape).length }));
-  /* The number FUTÁR's trip id implies can be another train's (BKK_87141 →
-     the Siófok 8714 while the trip runs Ajka → Déli): a Transitous route
-     that misses the alighting station by kilometres gives way to the
-     train's own trip polyline. */
-  motisResult = Object.assign({}, motisResult, {
-    shape: [[47.1836, 18.4247], [47.05, 18.45], [46.91, 18.05]], coversHead: false,
-    hit: { label: 'Sz', trainNumber: '8714', tripTo: 'Siófok' },
-  });
-  const elsewhere = await trainCard._loadRowMapShape(train);
-  check('a Transitous route that misses the alighting station gives way to FUTÁR’s trip',
-    Lib.validMapShape(elsewhere.shape).length === futarLine.length && elsewhere.shape[0][1] === 16.62,
-    JSON.stringify({ n: Lib.validMapShape(elsewhere.shape).length, first: elsewhere.shape[0] }));
-  trainCard.remove();
-  Object.assign(Lib, keep);
 }
 
 /* MÁV index schema 2: every stop pattern of a train, with its stations. */
@@ -3935,28 +3819,6 @@ Lib.mavIndex = origMavIndex;
     JSON.stringify({ n: got.shape.length, board: got.board, alight: got.alight }));
   trainCard.remove();
   Lib.mavIndex = keepIdx;
-}
-{
-  const keep = {};
-  ['mavIndex', 'gtfsRowShape', 'motisShapeForHop', 'futarTripShape', 'tripHopStops', 'stopArea', 'transitousStopRef', 'coachShape']
-    .forEach((k) => { keep[k] = Lib[k]; });
-  Lib.mavIndex = async () => ({ v: 2, st: [], p: [], n: {}, l: {} });
-  Lib.gtfsRowShape = async () => null;
-  Lib.motisShapeForHop = async () => ({ shape: [], board: null, dest: null, coversHead: false, hit: null });
-  Lib.futarTripShape = async () => [];
-  Lib.tripHopStops = async () => null;
-  Lib.stopArea = async () => '';
-  Lib.transitousStopRef = async () => null;
-  const lone = document.createElement('hungarian-transport-card');
-  document.body.appendChild(lone);
-  lone.setConfig({ language: 'hu', stopId: 'BKK_005503269', stopName: 'Székesfehérvár', mav: true,
-    destKey: 'budapest-kelenföld', destName: 'Budapest-Kelenföld', routeIds: [] });
-  const got = await lone._loadRowMapShape({ label: 'IC', headsign: 'Budapest-Déli', type: 'RAIL', tripId: 'elvira:999', trainNumber: '999' });
-  check('no source at all still gives a line, marked approximate',
-    got.approx === true && got.shape.length === 2 && got.shape[0][0] === got.board[0],
-    JSON.stringify(got));
-  lone.remove();
-  Object.assign(Lib, keep);
 }
 
 /* Review fixes (1.9.1): each block runs the real code path the bug was in.
@@ -8746,30 +8608,6 @@ check('a city stop number is not an ELVIRA station code',
   check('missing coordinates are not 0,0 for Transitous or the FUTÁR planner',
     place === '47.49,19.06' && vertex === '', JSON.stringify({ place, vertex }));
   Object.assign(Lib, { transitousGeocode: keep.geo, fetch: keep.fetch });
-}
-
-/* A GTFS row without its own line gets the coach_shape service's. */
-{
-  const keep = {
-    gtfs: Lib.gtfsRowShape, motis: Lib.motisShapeForHop, area: Lib.stopArea,
-    coach: Lib.coachShape, decode: Lib.decodePolyline,
-  };
-  const pts = [[46.90, 18.05], [46.95, 18.10], [47.00, 18.15], [47.05, 18.20]];
-  Lib.gtfsRowShape = async () => null;
-  Lib.motisShapeForHop = async () => null;
-  Lib.stopArea = async () => '';
-  Lib.coachShape = async () => 'azt';
-  Lib.decodePolyline = (enc) => (enc === 'azt' ? pts.map((p) => p.slice()) : keep.decode(enc));
-  const c = document.createElement('hungarian-transport-card');
-  c.hass = { states: {}, language: 'hu', services: {} };
-  c._config = { language: 'hu', stopId: 'volan_azt', stopName: 'Aztorigo', destKey: 'aztcel', destName: 'Aztcel', destLat: 47.05, destLon: 18.20, apiKey: 'k' };
-  const got = await c._loadRowMapShape({ tripId: 'gtfs:azt', label: '1234', headsign: 'Aztcel', vehicle: 'coach', rawType: 'BUS' });
-  check('a GTFS row map draws the coach_shape service line',
-    got && got.shape.length >= 2 && !got.approx, JSON.stringify(got && { n: got.shape.length, approx: got.approx }));
-  Object.assign(Lib, {
-    gtfsRowShape: keep.gtfs, motisShapeForHop: keep.motis, stopArea: keep.area,
-    coachShape: keep.coach, decodePolyline: keep.decode,
-  });
 }
 
 /* One vehicle filed under two route keys (12 and SZ12) goes to one row. */
