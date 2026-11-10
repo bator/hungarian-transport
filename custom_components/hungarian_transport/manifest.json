@@ -1,6 +1,7 @@
 {
   "domain": "hungarian_transport",
   "name": "Hungarian transport",
+  "after_dependencies": ["lovelace"],
   "codeowners": ["@bator"],
   "config_flow": true,
   "dependencies": ["frontend", "http"],
