@@ -22,6 +22,7 @@ import asyncio
 from collections.abc import Callable, Coroutine
 import csv
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 import io
 import json
 import logging
@@ -1036,7 +1037,7 @@ def _pick(cands: list[tuple[str, TripUpdate | None, Vehicle | None]], stops: lis
     return cands[0] if len(cands) == 1 else None
 
 
-def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], strict: bool = False):
+def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], now: float, strict: bool = False):
     """(trip id, TripUpdate, Vehicle) of the request's trip, or None;
     strict as in _pick, for a route + start."""
     wanted_date = req.get("date") or ""
@@ -1069,13 +1070,20 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], strict: bool = Fals
             return hit
     if "train" in cfg.match and req.get("train"):
         number = req["train"].lstrip("0") or req["train"]
+        # The cards send no date for a train: today's run, or last night's
+        # still on its way, never another day's of the same trip id.
+        day = datetime.fromtimestamp(now, mavplusz.BUDAPEST).date()
+        today, yesterday = day.strftime("%Y%m%d"), (day - timedelta(days=1)).strftime("%Y%m%d")
         cands = []
         for _src, tu, vp, trains in loaded:
             for tid in (trains or {}).get(number, ()):
-                t = tu.trip_update(tid, wanted_date) if tu else None
-                v = vp.vehicle(tid, wanted_date) if vp else None
+                t = tu.trip_update(tid, wanted_date or today) if tu else None
+                v = vp.vehicle(tid, wanted_date or today) if vp else None
                 sd = (t.start_date if t else "") or (v.start_date if v else "")
-                if (t or v) and _date_ok(sd, wanted_date):
+                if (
+                    (t or v) and _date_ok(sd, wanted_date)
+                    and (wanted_date or not sd or sd in (today, yesterday))
+                ):
                     cands.append((tid, t, v))
         hit = _pick(sorted(cands, key=lambda c: c[0]), stops)
         if hit:
@@ -1193,7 +1201,7 @@ def _vehicle_json(v: Vehicle | None, now: float) -> dict[str, Any] | None:
 def _answer(
     cfg: FeedConfig, loaded, req: dict[str, Any], now: float, *, strict: bool = False
 ) -> dict[str, Any] | None:
-    found = _find_trip(cfg, loaded, req, strict)
+    found = _find_trip(cfg, loaded, req, now, strict)
     if found is None:
         return None
     tid, tu, vp = found

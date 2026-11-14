@@ -471,6 +471,17 @@ def test_two_service_days_of_a_trip_id_stay_apart() -> None:
     assert planner.trip_update("T1", "20261102") is tus[1] and planner.trip_update("T1", "20261101") is tus[0]
 
 
+@pytest.mark.parametrize(("day", "found"), [(b"20261102", True), (b"20261101", True), (b"20261030", False), (b"", True)])
+def test_a_train_is_todays_or_last_nights_run(day, found) -> None:
+    """The cards send no date for a train: a run of its trip id on another
+    day is not it."""
+    loaded = [(realtime.Source("tu", "", "", ""), _runs((day, 120)), None, {"822": ["T1"]})]
+    hit = _answer(_cfg("train"), loaded, train="822", stops=["S1"], **{"from": 0})
+    assert (hit is not None) is found
+    # A date the request names is matched as it is.
+    assert (_answer(_cfg("train"), loaded, train="822", date="20261030") is not None) is (day in (b"20261030", b""))
+
+
 def test_a_feed_with_too_many_stop_updates_is_refused(monkeypatch) -> None:
     monkeypatch.setattr(realtime, "MAX_FEED_STOP_UPDATES", 3)
     with pytest.raises(realtime.RtDecodeError):

@@ -150,7 +150,9 @@ its stops likewise). Sources marked `"mavplusz": true` in
   server's static MÁV and GYSEV GTFS (`trip_short_name`, "SZ 4510"; 1.4 MB
   and 0.1 MB, refreshed every 12 hours with a conditional request) and the
   station codes from the stop ids (`005501024_5` is a platform of
-  Budapest-Kelenföld, 005501024). A refresh that fails, or a zip that does
+  Budapest-Kelenföld, 005501024). The card sends no date for a train, so
+  only a run of today or yesterday (Budapest; a night train still on its
+  way) is matched. A refresh that fails, or a zip that does
   not read, keeps the train numbers from before: they still match the live
   feeds. It is asked again after 15 minutes, conditionally for the copy
   kept, not for the zip that did not read.
