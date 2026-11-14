@@ -28,7 +28,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.hungarian_transport import realtime
+from custom_components.hungarian_transport import mavplusz, realtime
 from custom_components.hungarian_transport.const import DOMAIN, SERVICE_REALTIME
 
 from .test_upstream import FakeClock
@@ -441,6 +441,34 @@ def test_deleted_trip_is_canceled() -> None:
     loaded = _one_trip(_stu(b"S1", 1, 60), trip_rel=7)
     hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["S1"], **{"from": 0})
     assert hit["canceled"] is True and hit["delay"] is None
+
+
+def _runs(*runs: tuple[bytes, int]) -> realtime.Feed:
+    """Trip updates of trip T1 at stop S1, one per (start_date, delay)."""
+    header = _ld(1, b"\x0a\x032.0" + b"\x18" + _varint(NOW))
+    entities = b"".join(
+        _ld(2, _ld(1, b"e%d" % n) + _ld(3, _ld(1, _ld(1, b"T1") + _ld(3, day)) + _stu(b"S1", 1, delay)))
+        for n, (day, delay) in enumerate(runs)
+    )
+    return realtime.decode_feed(header + entities)
+
+
+def test_two_service_days_of_a_trip_id_stay_apart() -> None:
+    """Last night's run past midnight beside today's: the card's date picks
+    its own, not whichever came last in the feed."""
+    feed = _runs((b"20261101", 600), (b"20261102", 60))
+    loaded = [(realtime.Source("tu", "", "", ""), feed, None, None)]
+    req = {"trip_id": "T1", "stops": ["S1"], "from": 0}
+    assert _answer(_cfg("trip"), loaded, date="20261102", **req)["delay"] == 60
+    assert _answer(_cfg("trip"), loaded, date="20261101", **req)["delay"] == 600
+    assert _answer(_cfg("trip"), loaded, date="20261103", **req) is None
+    # Without a date, the first run seen; the same run twice is one.
+    assert _answer(_cfg("trip"), loaded, **req)["delay"] == 600
+    assert not _runs((b"20261102", 60), (b"20261102", 90)).trip_days
+    # The planner's answer for two dates of one trip is kept the same way.
+    tus = [realtime.TripUpdate("T1", day, "", 0, None, []) for day in ("20261101", "20261102")]
+    planner = mavplusz.to_feed([mavplusz.TripResult(t, None) for t in tus], NOW)
+    assert planner.trip_update("T1", "20261102") is tus[1] and planner.trip_update("T1", "20261101") is tus[0]
 
 
 def test_a_feed_with_too_many_stop_updates_is_refused(monkeypatch) -> None:

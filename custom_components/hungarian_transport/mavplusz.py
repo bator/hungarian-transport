@@ -348,7 +348,7 @@ def to_feed(
             tu = res.trip_update
             if route_learned:
                 tu = dataclasses.replace(tu, route_learned=True)
-            feed.trip_updates[tu.trip_id] = tu
+            feed.add_trip_update(tu)
         if res.vehicle is not None:
-            feed.vehicles[res.vehicle.trip_id] = res.vehicle
+            feed.add_vehicle(res.vehicle)
     return feed

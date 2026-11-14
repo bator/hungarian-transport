@@ -230,6 +230,43 @@ class Feed:
     timestamp: int | None = None
     trip_updates: dict[str, TripUpdate] = field(default_factory=dict)
     vehicles: dict[str, Vehicle] = field(default_factory=dict)
+    # A trip id with runs on two service days (last night's run past
+    # midnight beside today's): each run by (trip id, start_date) here too,
+    # the first one seen also under the plain id.
+    trip_days: dict[tuple[str, str], TripUpdate] = field(default_factory=dict)
+    vehicle_days: dict[tuple[str, str], Vehicle] = field(default_factory=dict)
+
+    def add_trip_update(self, tu: TripUpdate) -> None:
+        _keep(self.trip_updates, self.trip_days, tu)
+
+    def add_vehicle(self, v: Vehicle) -> None:
+        _keep(self.vehicles, self.vehicle_days, v)
+
+    def trip_update(self, trip_id: str, date: str = "") -> TripUpdate | None:
+        """The trip's update, the run of date when the id has several."""
+        return (self.trip_days.get((trip_id, date)) if date and self.trip_days else None) or self.trip_updates.get(
+            trip_id
+        )
+
+    def vehicle(self, trip_id: str, date: str = "") -> Vehicle | None:
+        return (self.vehicle_days.get((trip_id, date)) if date and self.vehicle_days else None) or self.vehicles.get(
+            trip_id
+        )
+
+
+def _keep(plain: dict[str, Any], days: dict[tuple[str, str], Any], item: TripUpdate | Vehicle) -> None:
+    tid = item.trip_id
+    have = plain.get(tid)
+    if have is None:
+        plain[tid] = item
+    elif have.start_date == item.start_date:
+        # The same run again: the later one, as before.
+        plain[tid] = item
+        if (tid, item.start_date) in days:
+            days[tid, item.start_date] = item
+    else:
+        days.setdefault((tid, have.start_date), have)
+        days[tid, item.start_date] = item
 
 
 def _strip(value: str, prefix: str) -> str:
@@ -365,11 +402,11 @@ def decode_feed(data: bytes, prefix: str = "") -> Feed:
                         stop_updates += len(tu.stops)
                         if stop_updates > MAX_FEED_STOP_UPDATES:
                             raise RtDecodeError(f"over {MAX_FEED_STOP_UPDATES} stop updates")
-                        feed.trip_updates[tu.trip_id] = tu
+                        feed.add_trip_update(tu)
                 elif enum == 4 and ewire == 2:
                     vp = _vehicle_position(eval_, prefix)
                     if vp is not None:
-                        feed.vehicles[vp.trip_id] = vp
+                        feed.add_vehicle(vp)
                 # Alerts (5) are not read: no card shows them.
     if not has_header:
         raise RtDecodeError("no FeedHeader")
@@ -959,9 +996,9 @@ def _fill_routes(known: dict[str, str], tu: Feed | None) -> None:
     no pattern was on two routes when this was written (_PATTERN_IN_TRIP_ID)."""
     if tu is None or not known:
         return
-    for tid, t in tu.trip_updates.items():
+    for t in [*tu.trip_updates.values(), *tu.trip_days.values()]:
         if not t.route_id:
-            t.route_id = _route_of(known, tid)
+            t.route_id = _route_of(known, t.trip_id)
             t.route_learned = bool(t.route_id)
 
 
@@ -1008,8 +1045,8 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], strict: bool = Fals
         raw = req["trip_id"]
         for src, tu, vp, _tr in loaded:
             for tid in dict.fromkeys((raw, _strip(raw, src.prefix))):
-                t = tu.trip_updates.get(tid) if tu else None
-                v = vp.vehicles.get(tid) if vp else None
+                t = tu.trip_update(tid, wanted_date) if tu else None
+                v = vp.vehicle(tid, wanted_date) if vp else None
                 start = (t.start_date if t else "") or (v.start_date if v else "")
                 if (t or v) and _date_ok(start, wanted_date):
                     return tid, t, v
@@ -1020,8 +1057,8 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], strict: bool = Fals
         for _src, tu, vp, _tr in loaded:
             ids = set(tu.trip_updates if tu else ()) | set(vp.vehicles if vp else ())
             for tid in ids:
-                t = tu.trip_updates.get(tid) if tu else None
-                v = vp.vehicles.get(tid) if vp else None
+                t = tu.trip_update(tid, wanted_date) if tu else None
+                v = vp.vehicle(tid, wanted_date) if vp else None
                 rid = (v.route_id if v else "") or (t.route_id if t else "")
                 sm = _start_minutes(tid)
                 sd = (t.start_date if t else "") or (v.start_date if v else "")
@@ -1035,8 +1072,8 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], strict: bool = Fals
         cands = []
         for _src, tu, vp, trains in loaded:
             for tid in (trains or {}).get(number, ()):
-                t = tu.trip_updates.get(tid) if tu else None
-                v = vp.vehicles.get(tid) if vp else None
+                t = tu.trip_update(tid, wanted_date) if tu else None
+                v = vp.vehicle(tid, wanted_date) if vp else None
                 sd = (t.start_date if t else "") or (v.start_date if v else "")
                 if (t or v) and _date_ok(sd, wanted_date):
                     cands.append((tid, t, v))
