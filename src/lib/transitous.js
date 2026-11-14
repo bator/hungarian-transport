@@ -972,9 +972,6 @@ register({
       return null;
     }
   },
-  async transitousJourneys(origin, dest, opts) {
-    return (await BkkLib.transitousJourneysResult(origin, dest, opts)).list;
-  },
   /* The itineraries, and whether Transitous answered at all: failed when
      the plan or a stop's geocode request failed (an outage), answered when
      it replied, even with nothing. Neither when the geocoder knew no such

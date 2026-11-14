@@ -228,7 +228,6 @@ register({
         row.delay = row.dep - sched;
       }
       row.rtDelay = true;
-      row.rtApprox = !!hit.approx;
       BkkLib._rtRemember(row.tripId, row.delay, now * 1000);
       const destDelay = Number(hit.dest_delay);
       if (row.travel != null && hit.dest_delay != null && Number.isFinite(destDelay) && !hit.approx) {

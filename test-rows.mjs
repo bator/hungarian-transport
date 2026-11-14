@@ -558,7 +558,7 @@ test('FUTÁR ICs BKK_8624_67 and BKK_2461_311 take ELVIRA BALATON 862 and CITADE
     && !!citadella && citadella.label === 'CITADELLA' && citadella.platform === '4'
     && citadella.booking === true && citadella.trainNumber === '246'
     /* EMMA GPS goes by the number: 8624 never met "862 BALATON". */
-    && BkkLib.matchEmmaVehicle(balaton, { trip: { tripShortName: '862 BALATON InterCity' } }));
+    && BkkLib._emmaKeysMatch(BkkLib._emmaRowKey(balaton), BkkLib._emmaVehicleKey({ trip: { tripShortName: '862 BALATON InterCity' } })));
 });
 
 test('a trip-id IC takes no ELVIRA train one digit shorter outside the 5-minute window', () => {

@@ -285,6 +285,10 @@ minSel.dispatchEvent(new Event('change', { bubbles: true }));
 check('select change emits minutesAfter', emitted === 60, String(emitted));
 
 const Lib = globalThis.HungarianTransportLib;
+/* EMMA matching as enrichFromHass runs it: a row's keys against a vehicle's,
+   and the positions onto the rows, one vehicle to one row. */
+const matchEmma = (row, vehicle) => Lib._emmaKeysMatch(Lib._emmaRowKey(row), Lib._emmaVehicleKey(vehicle));
+const applyEmma = (rows, vehicles) => Lib._applyEmmaKeyed(rows, Lib._emmaKeyed(vehicles));
 /* Index resolvers for direct lib calls (lib/context.js): the indexes a check
    gives (ix.city = ...), every other one missing. IX gives none. */
 const noIndex = async () => { throw new Error('no such index in this check'); };
@@ -777,7 +781,7 @@ const cityIdx = {
     [0, '2', [0, 4], [0, 5]],
   ],
 };
-const hubPath = Lib.cityHubPath(cityIdx, cityIdx.stops[0]);
+const hubPath = Lib.cityHubPaths(cityIdx, cityIdx.stops[0], 1)[0];
 check('city feed reaches the station in two rides',
   hubPath && hubPath.hubName === 'Tiszai p\u00e1lyaudvar'
   && hubPath.edges.some((edge) => edge.route === 'ZOO')
@@ -1597,39 +1601,39 @@ check('pickMotisVehicle matches generic IC to IC 856 TÓPART', (() => {
   return hit && hit.trainNumber === '856';
 })());
 check('BALATON 861 matches EMMA vehicle by train number',
-  Lib.matchEmmaVehicle(
+  matchEmma(
     { label: 'BALATON', trainNumber: '861', tripId: 'elvira:2890602' },
     { lat: 47.229, lon: 18.668, trip: { tripShortName: '861 BALATON InterCity' } },
   ));
 check('BALATON does not match a Balatonfured headsign',
-  !Lib.matchEmmaVehicle(
+  !matchEmma(
     { label: 'BALATON', tripId: 'elvira:1' },
     { lat: 46.9, lon: 17.8, trip: { tripShortName: '9724 szemelyvonat', tripHeadsign: 'Balatonf\u00fcred' } },
   ));
 check('BAKONY 901 matches EMMA named IC by number',
-  Lib.matchEmmaVehicle(
+  matchEmma(
     { label: 'BAKONY', trainNumber: '901', tripId: 'elvira:1' },
     { lat: 47.15, lon: 18.04, trip: { tripShortName: '901 BAKONY InterCity', route: { longName: 'IC BAKONY' } } },
   ));
 check('BAKONY does not match a different train number',
-  !Lib.matchEmmaVehicle(
+  !matchEmma(
     { label: 'BAKONY', trainNumber: '901', tripId: 'elvira:1' },
     { lat: 47.18, lon: 18.56, trip: { tripShortName: '918 BAKONY InterCity' } },
   ));
-check('applyEmmaPositions fills ELVIRA lat/lon from EMMA', (() => {
+check('EMMA positions fill ELVIRA lat/lon from EMMA', (() => {
   const rows = [{ label: 'BALATON', trainNumber: '861', tripId: 'elvira:2890602' }];
-  Lib.applyEmmaPositions(rows, [{
+  applyEmma(rows, [{
     lat: 47.2290993, lon: 18.6682205, heading: 12,
     trip: { tripShortName: '861 BALATON InterCity' },
   }]);
   return rows[0].lat === 47.2290993 && rows[0].lon === 18.6682205 && rows[0].tripId === 'elvira:2890602';
 })());
-check('applyEmmaPositions replaces an existing FUTAR pin with EMMA', (() => {
+check('an EMMA position replaces an existing FUTAR pin with EMMA', (() => {
   const rows = [{
     label: 'BALATON', trainNumber: '861', tripId: 'elvira:2890602',
     lat: 47.5, lon: 19.05,
   }];
-  Lib.applyEmmaPositions(rows, [{
+  applyEmma(rows, [{
     lat: 47.2290993, lon: 18.6682205,
     trip: { tripShortName: '861 BALATON InterCity' },
   }]);
@@ -2511,7 +2515,7 @@ Lib.nextCityRide = origRide;
 Lib.searchStops = origSearch;
 Lib.elviraBetween = origElvira;
 
-check('enrichFromHass fills GPS via applyEmmaPositions', (() => {
+check('enrichFromHass fills GPS from EMMA vehicles', (() => {
   const rows = [{ label: 'BALATON', trainNumber: '861', tripId: 'elvira:1' }];
   Lib.enrichFromHass({
     states: {
@@ -5621,9 +5625,9 @@ const shapeLen = (pts) => pts.reduce((m, p, i) => (i ? m + Lib.haversineMeters(p
   let serviceChecks = 0;
   Lib.volanServiceOk = (...args) => { serviceChecks += 1; return keep.volanServiceOk(...args); };
   const fresh = Object.assign({}, szfIdx);
-  const p1 = Lib.cityHubPath(fresh, fresh.stops[0]);
+  const p1 = Lib.cityHubPaths(fresh, fresh.stops[0], 1)[0];
   const built = serviceChecks;
-  const p2 = Lib.cityHubPath(fresh, fresh.stops[0]);
+  const p2 = Lib.cityHubPaths(fresh, fresh.stops[0], 1)[0];
   check('a city feed’s ride graph is built once a day, not on every question',
     built > 0 && serviceChecks === built && p1 && p2 && p2.hubName === p1.hubName && p1.hubLat === 47.1838,
     JSON.stringify({ built, after: serviceChecks }));
@@ -8397,12 +8401,12 @@ check('a city stop number is not an ELVIRA station code',
     { tripId: 'gtfs:BAF1', label: 'BAFNEV', vehicle: 'rail', dep: t0 + 300 },
     { tripId: 'gtfs:BAF2', label: 'BAFNEV', vehicle: 'rail', dep: t0 + 3900 },
   ];
-  Lib.applyEmmaPositions(twin, [{ label: 'BAFNEV', lat: 46.9, lon: 17.9, trip: { tripShortName: 'BAFNEV' } }]);
+  applyEmma(twin, [{ label: 'BAFNEV', lat: 46.9, lon: 17.9, trip: { tripShortName: 'BAFNEV' } }]);
   const numbered = [
     { tripId: 'gtfs:BAG1', label: 'BAGNEV', vehicle: 'rail', dep: t0 + 300 },
     { tripId: 'gtfs:BAG2', label: 'BAGNEV', trainNumber: '1952', vehicle: 'rail', dep: t0 + 3900 },
   ];
-  Lib.applyEmmaPositions(numbered, [{ label: 'BAGNEV', lat: 46.8, lon: 17.8, trip: { tripShortName: '1952 BAGNEV' } }]);
+  applyEmma(numbered, [{ label: 'BAGNEV', lat: 46.8, lon: 17.8, trip: { tripShortName: '1952 BAGNEV' } }]);
   const pos = (list) => list.map((r) => (Lib.mapGpsLatLon(r.lat, r.lon) ? r.lat : null));
   check('one EMMA vehicle is given to one row only',
     JSON.stringify(pos(twin)) === '[46.9,null]' && JSON.stringify(pos(numbered)) === '[null,46.8]',
@@ -8996,10 +9000,10 @@ check('a city stop number is not an ELVIRA station code',
 /* An accented capital is part of the word: the TISZA train is not one
    heading for Tiszaújváros. */
 check('a named train does not match a headsign it only begins (Tisza, Tiszaújváros)',
-  !Lib.matchEmmaVehicle({ label: 'Tisza' }, { trip: { tripShortName: '', tripHeadsign: 'Tiszaújváros' } })
-  && Lib.matchEmmaVehicle({ label: 'Tisza' }, { trip: { tripShortName: '', tripHeadsign: 'Tisza Budapest-Keleti' } })
-  && Lib.matchEmmaVehicle({ label: 'Hernád' }, { trip: { tripShortName: '', tripHeadsign: 'Hernád (Kassa)' } })
-  && !Lib.matchEmmaVehicle({ label: 'Balaton' }, { trip: { tripHeadsign: 'Balatonfüred' } }));
+  !matchEmma({ label: 'Tisza' }, { trip: { tripShortName: '', tripHeadsign: 'Tiszaújváros' } })
+  && matchEmma({ label: 'Tisza' }, { trip: { tripShortName: '', tripHeadsign: 'Tisza Budapest-Keleti' } })
+  && matchEmma({ label: 'Hernád' }, { trip: { tripShortName: '', tripHeadsign: 'Hernád (Kassa)' } })
+  && !matchEmma({ label: 'Balaton' }, { trip: { tripHeadsign: 'Balatonfüred' } }));
 
 /* A sibling card's key whose lovelace/config read failed once is looked for
    again later, not never (the card stayed on "no API key"). */
