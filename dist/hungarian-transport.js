@@ -282,12 +282,6 @@ register({
     if (!pa || !pb) return false;
     return BkkLib.haversineMeters(pa, pb) > (maxM || 400);
   },
-  stopsCloseEnough(a, b) {
-    const pa = BkkLib.finiteLatLon(a && a.lat, a && a.lon);
-    const pb = BkkLib.finiteLatLon(b && b.lat, b && b.lon);
-    if (!pa || !pb) return true;
-    return BkkLib.haversineMeters(pa, pb) <= 300;
-  },
   /* Two named towns, or two cross streets ("Szeged, Londoni körút (Bakay
      Nándor utca)" and "… (Kálvária sugárút)"), are two places. */
   citiesConflict(a, b) {
@@ -1462,8 +1456,8 @@ register({
       const call = BkkLib.callServiceResponse(hass, "hungarian_transport", "futar", serviceData);
       res = await Promise.race([call, timeout]);
     } catch (err) {
-      const msg = err && (err.message || err.code);
-      throw new Error(msg && /^BKK /.test(String(msg)) ? String(msg) : `BKK ${msg || err}`);
+      const msg = BkkLib.elviraErrText(err) || "connection lost";
+      throw new Error(/^BKK /.test(msg) ? msg : `BKK ${msg}`);
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -2044,6 +2038,9 @@ register({
     out.sort((a, b) => (a.dep || 0) - (b.dep || 0));
     return out;
   },
+  /* The departures Transitous plans from origin to dest: [] for none (or
+     a stop it does not know), null when it could not be asked (a failed
+     request), so a caller tells "no departures" from "try again". */
   async transitousDepartures(origin, dest, opts) {
     opts = opts || {};
     if (!dest || !(dest.key || dest.name || dest.id)) return [];
@@ -2055,7 +2052,7 @@ register({
         BkkLib.transitousPlace(dest)
       ]);
     } catch (_e) {
-      return [];
+      return null;
     }
     if (!fromPlace || !toPlace) return [];
     const horizon = clampMinutesAfter(opts.minutesAfter);
@@ -2075,7 +2072,7 @@ register({
       const parseOpts = anchor > 0 ? { now: anchor, keepPast: true } : {};
       return BkkLib.rowsFromMotis(data, dest, opts.mode || "all", horizon, parseOpts);
     } catch (_e) {
-      return [];
+      return null;
     }
   },
   isTrainRow(row) {
@@ -2334,7 +2331,7 @@ register({
     }
     if (!hit) {
       const motis = await BkkLib.transitousDepartures(origin, dest, opts);
-      hit = BkkLib.pickMotisVehicle(motis, row, dest);
+      hit = BkkLib.pickMotisVehicle(motis || [], row, dest);
       hopShape = BkkLib.validMapShape(hit && hit.shape);
       if (hit) source = "plan";
     } else {
@@ -2372,8 +2369,10 @@ register({
     };
   },
   /* An empty board (a city line at night) stays empty for a while: after a
-     fill that found nothing (or failed), the same pair is not asked again
-     for ten minutes, instead of a plan on every poll. */
+     fill that found nothing, the same pair is not asked again for ten
+     minutes, instead of a plan on every poll. A fill that failed is asked
+     again on the next poll, and returns null: the caller keeps what it
+     showed instead of "no departures". */
   _transitousEmptyAt: /* @__PURE__ */ new Map(),
   _transitousEmptyRetryMs: 10 * 60 * 1e3,
   _transitousFillKey(origin, dest, opts) {
@@ -2401,11 +2400,12 @@ register({
     });
     try {
       const extra = await BkkLib.transitousDepartures(origin, dest, opts);
+      if (!Array.isArray(extra)) return null;
       if (extra.length) empties.delete(key);
       else empties.set(key, Date.now());
       return BkkLib.mergeRows(list, extra, maxDepartureRows(opts && opts.minutesAfter));
     } catch (_e) {
-      return list;
+      return null;
     }
   },
   /* MOTIS v5: itinerary duration is seconds; leg duration is seconds;
@@ -2526,9 +2526,6 @@ register({
     } catch (_e) {
       return null;
     }
-  },
-  async transitousJourneys(origin, dest, opts) {
-    return (await BkkLib.transitousJourneysResult(origin, dest, opts)).list;
   },
   /* The itineraries, and whether Transitous answered at all: failed when
      the plan or a stop's geocode request failed (an outage), answered when
@@ -3041,9 +3038,6 @@ register({
         edges
       };
     });
-  },
-  cityHubPath(idx, originStop) {
-    return BkkLib.cityHubPaths(idx, originStop, 1)[0] || null;
   },
   /* How far a city hub may be from a destination with coordinates and
      still be it: a bus stand by its station, not the next station along
@@ -4811,53 +4805,6 @@ register({
     const idx = await ix.volan();
     return BkkLib.gtfsSearchStops(idx, q, null);
   },
-  async volanRoutesAtStop(ix, stop) {
-    needIndexes(ix);
-    const idx = await ix.volan();
-    const origin = BkkLib.volanMatchStop(idx, stop, null);
-    if (!origin) return [];
-    const seen = /* @__PURE__ */ new Set();
-    const out = [];
-    const trips = idx.t || [];
-    for (let i = 0; i < trips.length; i++) {
-      const route = trips[i][1];
-      if (!route || seen.has(route)) continue;
-      const ps = trips[i][2] || [];
-      if (ps.indexOf(origin.i) < 0) continue;
-      seen.add(route);
-      out.push({
-        id: "gtfs:" + route,
-        label: String(route),
-        color: "#F9AB13",
-        text: "#000000",
-        type: "COACH",
-        source: "gtfs"
-      });
-    }
-    out.sort((a, b) => a.label.localeCompare(b.label, "hu", { numeric: true }));
-    return out;
-  },
-  async volanRemainingNames(ix, stop, routeLabel) {
-    needIndexes(ix);
-    const idx = await ix.volan();
-    const origin = BkkLib.volanMatchStop(idx, stop, null);
-    if (!origin || !routeLabel) return [];
-    const want = String(routeLabel);
-    const byKey = /* @__PURE__ */ new Map();
-    const trips = idx.t || [];
-    for (let i = 0; i < trips.length; i++) {
-      if (String(trips[i][1]) !== want) continue;
-      const ps = trips[i][2] || [];
-      const oidx = ps.indexOf(origin.i);
-      if (oidx < 0) continue;
-      for (let j = oidx + 1; j < ps.length; j++) {
-        const st = idx.stops[ps[j]];
-        if (!st || !st.key || byKey.has(st.key)) continue;
-        byKey.set(st.key, { key: st.key, name: st.name, id: st.id });
-      }
-    }
-    return Array.from(byKey.values());
-  },
   citySearchAll(idx, q) {
     const f = BkkLib.fold(q);
     if (!f || !idx) return [];
@@ -6035,7 +5982,7 @@ register({
         { id: stopId, name: opts.originName || "", lat: opts.originLat, lon: opts.originLon },
         dest,
         opts
-      );
+      ) || cityRows;
       if (opts.deferGps) return cityRows;
       return BkkLib.attachCoachGps(opts.hass, cityRows);
     }
@@ -6361,10 +6308,6 @@ register({
     if (!rk.re || !rk.re.test(vk.blob)) return false;
     return !rk.num || !vk.n;
   },
-  matchEmmaVehicle(row, vehicle) {
-    if (!row || !vehicle) return false;
-    return BkkLib._emmaKeysMatch(BkkLib._emmaRowKey(row), BkkLib._emmaVehicleKey(vehicle));
-  },
   _emmaKeyed(vehicles) {
     return (Array.isArray(vehicles) ? vehicles : []).filter(Boolean).map((v) => ({ v, k: BkkLib._emmaVehicleKey(v) }));
   },
@@ -6403,10 +6346,6 @@ register({
     assign(true);
     assign(false);
     return list;
-  },
-  applyEmmaPositions(rows, vehicles) {
-    const list = Array.isArray(rows) ? rows : [];
-    return BkkLib._applyEmmaKeyed(list, BkkLib._emmaKeyed(vehicles));
   },
   coachRouteKeys(route) {
     const raw = String(route || "").trim().toUpperCase();
@@ -6700,6 +6639,8 @@ var RT_MAX_TRIPS = 40;
 var RT_MAX_STOPS = 120;
 var RT_STOPS_BEFORE = 20;
 var RT_CACHE_MS = 25e3;
+var RT_FAIL_LIMIT = 3;
+var RT_FAIL_ROUND_MS = 15e3;
 var RT_RETRY_MS = 5 * 6e4;
 var RT_KNOWN_MS = 3 * 6e4;
 var RT_LATE_MAX_MIN = 60;
@@ -6713,6 +6654,8 @@ register({
   _rtCache: /* @__PURE__ */ new Map(),
   _rtInflight: /* @__PURE__ */ new Map(),
   _rtDownUntil: 0,
+  _rtFails: 0,
+  _rtLastFailAt: 0,
   _rtWarned: false,
   /* Feeds the integration has no realtime data for: not asked again until
      the page reloads. */
@@ -6837,13 +6780,20 @@ register({
       try {
         const res = await BkkLib.callServiceResponse(hass, "hungarian_transport", "realtime", { feed, trips });
         BkkLib._rtWarned = false;
+        BkkLib._rtFails = 0;
+        BkkLib._rtLastFailAt = 0;
         const out = BkkLib.rtTripsFromResult(res);
         if (out && out.noFeed) BkkLib._rtNoFeed.add(feed);
         BkkLib._rtCache.set(sig, { at: Date.now(), out });
         while (BkkLib._rtCache.size > 32) BkkLib._rtCache.delete(BkkLib._rtCache.keys().next().value);
         return out;
       } catch (err) {
-        BkkLib._rtDownUntil = Date.now() + RT_RETRY_MS;
+        const now = Date.now();
+        if (now - BkkLib._rtLastFailAt >= RT_FAIL_ROUND_MS) {
+          BkkLib._rtFails += 1;
+          BkkLib._rtLastFailAt = now;
+        }
+        if (BkkLib._rtFails >= RT_FAIL_LIMIT) BkkLib._rtDownUntil = now + RT_RETRY_MS;
         if (!BkkLib._rtWarned) {
           BkkLib._rtWarned = true;
           console.warn("Live delays and positions (hungarian_transport.realtime) unavailable, retrying in a few minutes:", err);
@@ -6884,7 +6834,6 @@ register({
         row.delay = row.dep - sched;
       }
       row.rtDelay = true;
-      row.rtApprox = !!hit.approx;
       BkkLib._rtRemember(row.tripId, row.delay, now * 1e3);
       const destDelay = Number(hit.dest_delay);
       if (row.travel != null && hit.dest_delay != null && Number.isFinite(destDelay) && !hit.approx) {
@@ -7263,6 +7212,16 @@ function combine(hosts, extra, limit, overlayOnly, addUnmatched) {
   };
   const terminusOf = (row) => String((BkkLib.rowSource(row) === "elvira" ? row.end : row.head) || "").trim();
   const sameTrain = (p, row) => BkkLib.isTrainRow(p) && minuteOf(p) === minuteOf(row) && !!railKindOf(p) && railKindOf(p) === railKindOf(row) && !!terminusOf(p) && BkkLib.nameEq(terminusOf(p), terminusOf(row)) && !otherTrain(p, row);
+  const byTimePaired = /* @__PURE__ */ new Set();
+  const timeMatch = (tk, row) => {
+    const rows = (byTime.get(tk) || []).filter((i) => !otherTrain(out[i], row));
+    const tid = String(row.tripId || "");
+    const own = tid ? rows.find((i) => String(out[i].tripId || "") === tid) : void 0;
+    if (own !== void 0) return own;
+    const free = rows.find((i) => !byTimePaired.has(i));
+    if (free !== void 0) return free;
+    return rows.length ? rows[0] : -1;
+  };
   const add = (row, skipUnmatched, asNew) => {
     const strict = skipUnmatched || !!asNew;
     if (!row || !departureStillDue(row.dep || row.sched)) return;
@@ -7307,8 +7266,10 @@ function combine(hosts, extra, limit, overlayOnly, addUnmatched) {
       }
     }
     const tk = timeOf(row);
-    if (!strict && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
-      overlay(out[byTime.get(tk)], row);
+    const timed = strict ? -1 : timeMatch(tk, row);
+    if (timed >= 0) {
+      overlay(out[timed], row);
+      byTimePaired.add(timed);
       return;
     }
     if (skipUnmatched) return;
@@ -7322,7 +7283,7 @@ function combine(hosts, extra, limit, overlayOnly, addUnmatched) {
     }
     const idx = out.length;
     out.push(asNew || row);
-    byTime.set(tk, idx);
+    byTime.set(tk, (byTime.get(tk) || []).concat(idx));
     registerNumber(n, idx);
     registerNumber(looseNumber(row), idx, byLoose);
   };
@@ -7655,6 +7616,7 @@ async function runBoard(poll, src, knownElvira) {
       return;
     }
     const wantElvira = (mode === "mav" || mode === "all") && BkkLib.hasElvira(hass());
+    const asksElvira = !!knownElvira || elviraGone || wantElvira;
     const elviraP = knownElvira ? Promise.resolve(knownElvira) : elviraGone ? Promise.resolve({ rows: [], error: "not_loaded", detail: "" }) : wantElvira ? src.elvira(
       hass(),
       cfg.stopId,
@@ -7670,6 +7632,7 @@ async function runBoard(poll, src, knownElvira) {
     let elviraRows = [];
     let mavErr = null;
     const addElvira = (row) => BkkLib.elviraBoardRows([row], nowSec())[0] || null;
+    const fillsEmpty = mode !== "helyi";
     const publish = () => {
       if (!live()) return;
       if (mavBoard) {
@@ -7691,6 +7654,7 @@ async function runBoard(poll, src, knownElvira) {
         }
         return;
       }
+      if (!list.length && fillsEmpty) return;
       listed("board", list);
     };
     let startThrough = null;
@@ -7772,12 +7736,14 @@ async function runBoard(poll, src, knownElvira) {
       }),
       fillTravel(firstRows)
     ]);
+    gpsTravel.catch(() => {
+    });
     if (startThrough) {
       startThrough();
     } else {
       throughResolve();
     }
-    if (!mavBoard) {
+    if (!mavBoard && asksElvira) {
       const answer = await elviraP;
       if (!live()) return;
       elviraRows = answer.rows;
@@ -7787,12 +7753,17 @@ async function runBoard(poll, src, knownElvira) {
     await throughWait;
     if (!live()) return;
     const hosts = mavBoard ? elviraRows : futarFull ? BkkLib.mergeRows(earlyRows, futarFull, cap) : earlyRows.slice();
-    if (!hosts.length && mode !== "helyi") {
-      const filled = await src.transitous(hosts, origin, dest, {
+    if (!hosts.length && fillsEmpty) {
+      let filled = await src.transitous(hosts, origin, dest, {
         mode,
         minutesAfter: cfg.minutesAfter
       });
       if (!live()) return;
+      if (!Array.isArray(filled)) {
+        const cur = shown();
+        const now = nowSec();
+        filled = (cur.filled ? cur.rows || [] : []).filter((row) => row && departureStillDue(row.dep, now)).map((row) => Object.assign({}, row));
+      }
       const merged = BkkLib.overlayRows(filled, elviraRows, cap, addElvira);
       earlyRows = merged;
       listed("filled", merged, { banner: mavErr || "", filled: filled.length > 0 });
@@ -7825,7 +7796,7 @@ async function runBoard(poll, src, knownElvira) {
         filled = await src.transitous([], origin, dest, {
           mode,
           minutesAfter: cfg.minutesAfter
-        });
+        }) || [];
       } catch (_e) {
         filled = [];
       }
@@ -9468,6 +9439,7 @@ var BKKHopCard = class extends HTMLElement {
     this._mapOpens = generation();
     this._mapEstimate = null;
     this._mapGeo = null;
+    this._mapRow = null;
     this._hiddenAt = 0;
     this._pollRun = null;
     this._boardState = { viaFutarUntil: 0 };
@@ -9677,7 +9649,9 @@ var BKKHopCard = class extends HTMLElement {
     this._poll = setInterval(() => {
       if (pollRun.busy) return;
       pollRun.busy = true;
-      pollRun.run().finally(() => {
+      pollRun.run().catch((err) => {
+        if (!this._runs.stale(pollRun.gen)) this._showErr(err);
+      }).finally(() => {
         pollRun.busy = false;
       });
     }, every);
@@ -9903,6 +9877,7 @@ var BKKHopCard = class extends HTMLElement {
     this._elErr.className = "err";
     this._elBody = document.createElement("div");
     this._elBody.className = "body";
+    this._bodyHtml = null;
     wrap.appendChild(this._elHead);
     wrap.appendChild(this._elErr);
     wrap.appendChild(this._elBody);
@@ -9941,7 +9916,10 @@ var BKKHopCard = class extends HTMLElement {
       const cell = tr.querySelector(".cd");
       if (!row || !cell) return;
       const text = this._countdown(row.depTs, lang);
-      if (cell.textContent !== text) cell.textContent = text;
+      if (cell.textContent !== text) {
+        cell.textContent = text;
+        this._bodyHtml = null;
+      }
     });
   }
   _paint() {
@@ -9956,12 +9934,16 @@ var BKKHopCard = class extends HTMLElement {
     const allRows = this._rows || [];
     const rows = allRows.filter((r) => departureStillDue(r.depTs, nowSec));
     this._shownRows = rows;
+    let html;
     if (rows.length) {
-      this._elBody.innerHTML = `<table><tbody>${rows.map((r, i) => this._rowHtml(r, lang, i)).join("")}</tbody></table>`;
-      return;
+      html = `<table><tbody>${rows.map((r, i) => this._rowHtml(r, lang, i)).join("")}</tbody></table>`;
+    } else {
+      const msg = this._emptyBodyMessage(lang, cfg);
+      html = msg ? `<div class="msg">${BkkLib.esc(msg)}</div>` : "";
     }
-    const msg = this._emptyBodyMessage(lang, cfg);
-    this._elBody.innerHTML = msg ? `<div class="msg">${BkkLib.esc(msg)}</div>` : "";
+    if (html === this._bodyHtml) return;
+    this._bodyHtml = html;
+    this._elBody.innerHTML = html;
   }
   /* With `headerBadges` the title shares its line with the lines on the
      board, as badges in their own colours: up to four, then "+N". */
@@ -10214,6 +10196,7 @@ var BKKHopCard = class extends HTMLElement {
     this._mapL = null;
     this._mapEstimate = null;
     this._mapGeo = null;
+    this._mapRow = null;
     const back = this._mapReturnFocus;
     this._mapReturnFocus = null;
     if (hadOverlay) this._restoreFocus(back);
@@ -10438,225 +10421,232 @@ ${this._stopPinCss()}
       return;
     }
     if (this._mapStale(seq)) return;
-    const overlay = document.createElement("div");
-    overlay.className = "ht-map-overlay";
-    const sub = this._mapTypeLabel(row.vehicle || row.type, lang) + (row.model ? " · " + row.model : "");
-    overlay.innerHTML = `
-      <style>${this._mapChromeCss()}</style>
-      <div class="ht-map-panel" role="dialog" aria-modal="true">
-        <div class="ht-map-head">
-          <div class="meta">
-            <div>${BkkLib.esc(this._mapGlyph(row.vehicle || row.type))} ${BkkLib.esc(row.label || "")} → ${BkkLib.esc(row.headsign || "")}</div>
-            <div class="sub">${BkkLib.esc(sub)}</div>
+    try {
+      const overlay = document.createElement("div");
+      overlay.className = "ht-map-overlay";
+      const sub = this._mapTypeLabel(row.vehicle || row.type, lang) + (row.model ? " · " + row.model : "");
+      overlay.innerHTML = `
+        <style>${this._mapChromeCss()}</style>
+        <div class="ht-map-panel" role="dialog" aria-modal="true">
+          <div class="ht-map-head">
+            <div class="meta">
+              <div>${BkkLib.esc(this._mapGlyph(row.vehicle || row.type))} ${BkkLib.esc(row.label || "")} → ${BkkLib.esc(row.headsign || "")}</div>
+              <div class="sub">${BkkLib.esc(sub)}</div>
+            </div>
+            <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, "mapClose"))}">×</button>
           </div>
-          <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, "mapClose"))}">×</button>
+          <div class="ht-map-canvas"></div>
+          <div class="ht-map-foot">${BkkLib.esc(t(lang, "mapLoadingRoute"))}</div>
         </div>
-        <div class="ht-map-canvas"></div>
-        <div class="ht-map-foot">${BkkLib.esc(t(lang, "mapLoadingRoute"))}</div>
-      </div>
-    `;
-    (document.documentElement || document.body).appendChild(overlay);
-    this._mapOverlay = overlay;
-    this._openMapKey = key;
-    this._mapRef = this._mapRefOf(row);
-    this._mapL = L;
-    const st = {
-      ready: false,
-      hasShape: false,
-      approx: false,
-      hasGps,
-      estimated: false,
-      hasBoard: false,
-      hasAlight: false,
-      hasPosition: hasGps
-    };
-    this._mapState = st;
-    this._onMapKey = (ev) => {
-      if (ev.key === "Escape") this._closeVehicleMap();
-    };
-    document.addEventListener("keydown", this._onMapKey);
-    const closeBtn = overlay.querySelector(".ht-map-close");
-    closeBtn.addEventListener("click", () => this._closeVehicleMap());
-    overlay.addEventListener("click", (ev) => {
-      if (ev.target === overlay) this._closeVehicleMap();
-    });
-    try {
-      closeBtn.focus();
-    } catch (_e) {
-    }
-    const canvas = overlay.querySelector(".ht-map-canvas");
-    const foot = overlay.querySelector(".ht-map-foot");
-    const startLat = hasGps ? lat : 47.5;
-    const startLon = hasGps ? lon : 19.05;
-    let map;
-    try {
-      map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView([startLat, startLon], hasGps ? 12 : 8);
-      L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
-    } catch (_e) {
-      this._showMapNotice(t(lang, "mapLeafletFail"));
-      return;
-    }
-    this._map = map;
-    this._mapRouteLayers = [];
-    const resizeMap = () => {
-      if (this._map !== map) return;
+      `;
+      (document.documentElement || document.body).appendChild(overlay);
+      this._mapOverlay = overlay;
+      this._openMapKey = key;
+      this._mapRef = this._mapRefOf(row);
+      this._mapRow = row;
+      this._mapL = L;
+      const st = {
+        ready: false,
+        hasShape: false,
+        approx: false,
+        hasGps,
+        estimated: false,
+        hasBoard: false,
+        hasAlight: false,
+        hasPosition: hasGps
+      };
+      this._mapState = st;
+      this._onMapKey = (ev) => {
+        if (ev.key === "Escape") this._closeVehicleMap();
+      };
+      document.addEventListener("keydown", this._onMapKey);
+      const closeBtn = overlay.querySelector(".ht-map-close");
+      closeBtn.addEventListener("click", () => this._closeVehicleMap());
+      overlay.addEventListener("click", (ev) => {
+        if (ev.target === overlay) this._closeVehicleMap();
+      });
       try {
-        map.invalidateSize();
+        closeBtn.focus();
       } catch (_e) {
       }
-    };
-    requestAnimationFrame(() => {
-      resizeMap();
-      requestAnimationFrame(resizeMap);
-    });
-    const drawMarker = () => {
-      if (!this._map || this._map !== map) return;
-      const here = BkkLib.mapGpsLatLon(lat, lon);
-      if (!here) return;
-      if (this._mapMarker) {
+      const canvas = overlay.querySelector(".ht-map-canvas");
+      const foot = overlay.querySelector(".ht-map-foot");
+      const startLat = hasGps ? lat : 47.5;
+      const startLon = hasGps ? lon : 19.05;
+      let map;
+      try {
+        map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView([startLat, startLon], hasGps ? 12 : 8);
+        L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
+      } catch (_e) {
+        this._showMapNotice(t(lang, "mapLeafletFail"));
+        return;
+      }
+      this._map = map;
+      this._mapRouteLayers = [];
+      const resizeMap = () => {
+        if (this._map !== map) return;
         try {
-          this._map.removeLayer(this._mapMarker);
+          map.invalidateSize();
         } catch (_e) {
         }
-      }
-      const icon = L.divIcon({
-        className: "",
-        html: this._dotIcon(row, hasGps && !positionEstimated, lang),
-        iconSize: [32, 32],
-        iconAnchor: [16, 16]
+      };
+      requestAnimationFrame(() => {
+        resizeMap();
+        requestAnimationFrame(resizeMap);
       });
-      this._mapMarker = L.marker(here, { icon, zIndexOffset: 600 }).addTo(map);
-    };
-    if (hasGps) {
-      drawMarker();
-      foot.textContent = this._mapFootText(row, false, true, false, lang);
-    }
-    let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon) || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
-    let alight = null;
-    let approx = false;
-    try {
-      const got = await this._loadRowMapShape(row);
-      shape = BkkLib.validMapShape(got.shape);
-      hasShape = shape.length >= 2;
-      approx = hasShape && !!got.approx;
-      if (got.board) board = got.board;
-      alight = got.alight || null;
-    } catch (_e) {
-    }
-    let timed = [];
-    if (!hasGps) {
-      try {
-        timed = await this._rowTimedStops(row);
-      } catch (_e) {
-        timed = [];
-      }
-    }
-    if (timed.length < 2 && !hasGps && board && alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
-      const arr = Number(row.depTs) + Number(row.travelMin) * 60;
-      timed = [{ pt: board, arr: Number(row.depTs), dep: Number(row.depTs), fromBoard: true }, { pt: alight, arr, dep: arr }];
-    }
-    if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
-    if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
-    if (st.hasGps && this._mapMarker && typeof this._mapMarker.getLatLng === "function") {
-      const at = this._mapMarker.getLatLng();
-      const got = at && BkkLib.mapGpsLatLon(at.lat, at.lng);
-      if (got) {
-        lat = got[0];
-        lon = got[1];
-        hasGps = true;
-      }
-    }
-    if (!BkkLib.mapGpsLatLon(lat, lon) && timed.length >= 2) {
-      const est = BkkLib.estimateShapePosition(shape, timed, Date.now() / 1e3);
-      if (est) {
-        lat = est.pt[0];
-        lon = est.pt[1];
-        positionEstimated = est.waiting ? "waiting" : true;
-      }
-    }
-    this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed, row, board, alight } : null;
-    this._mapGeo = { shape, board, alight };
-    const pos = BkkLib.mapGpsLatLon(lat, lon);
-    const hasPosition = !!pos;
-    if (hasPosition) {
-      lat = pos[0];
-      lon = pos[1];
-    }
-    const routeColor = BkkLib.mapRouteColor(row, {});
-    const lineBase = {
-      lineJoin: "round",
-      lineCap: "round",
-      noClip: true,
-      pane: "overlayPane"
-    };
-    const applyView = () => {
-      try {
-        map.invalidateSize();
-      } catch (_e) {
-      }
-      const points = [board, alight, hasPosition ? [lat, lon] : null].filter(Boolean);
-      if (hasShape) {
-        const bounds = L.latLngBounds(shape);
-        points.forEach((pt) => bounds.extend(pt));
-        map.fitBounds(bounds, { padding: [36, 36], maxZoom: 12, animate: false });
-      } else if (points.length >= 2) {
-        map.fitBounds(L.latLngBounds(points), { padding: [36, 36], maxZoom: 12, animate: false });
-      } else if (points.length) {
-        map.setView(points[0], 13, { animate: false });
-      }
-      (this._mapRouteLayers || []).forEach((layer) => {
-        if (layer && typeof layer.redraw === "function") {
+      const drawMarker = () => {
+        if (!this._map || this._map !== map) return;
+        const here = BkkLib.mapGpsLatLon(lat, lon);
+        if (!here) return;
+        if (this._mapMarker) {
           try {
-            layer.redraw();
+            this._map.removeLayer(this._mapMarker);
           } catch (_e) {
           }
         }
+        const icon = L.divIcon({
+          className: "",
+          html: this._dotIcon(row, hasGps && !positionEstimated, lang),
+          iconSize: [32, 32],
+          iconAnchor: [16, 16]
+        });
+        this._mapMarker = L.marker(here, { icon, zIndexOffset: 600 }).addTo(map);
+      };
+      if (hasGps) {
+        drawMarker();
+        foot.textContent = this._mapFootText(row, false, true, false, lang);
+      }
+      let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon) || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
+      let alight = null;
+      let approx = false;
+      try {
+        const got = await this._loadRowMapShape(row);
+        shape = BkkLib.validMapShape(got.shape);
+        hasShape = shape.length >= 2;
+        approx = hasShape && !!got.approx;
+        if (got.board) board = got.board;
+        alight = got.alight || null;
+      } catch (_e) {
+      }
+      let timed = [];
+      if (!hasGps) {
+        try {
+          timed = await this._rowTimedStops(row);
+        } catch (_e) {
+          timed = [];
+        }
+      }
+      if (timed.length < 2 && !hasGps && board && alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
+        const arr = Number(row.depTs) + Number(row.travelMin) * 60;
+        timed = [{ pt: board, arr: Number(row.depTs), dep: Number(row.depTs), fromBoard: true }, { pt: alight, arr, dep: arr }];
+      }
+      if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
+      if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
+      if (st.hasGps && this._mapMarker && typeof this._mapMarker.getLatLng === "function") {
+        const at = this._mapMarker.getLatLng();
+        const got = at && BkkLib.mapGpsLatLon(at.lat, at.lng);
+        if (got) {
+          lat = got[0];
+          lon = got[1];
+          hasGps = true;
+        }
+      }
+      if (!BkkLib.mapGpsLatLon(lat, lon) && timed.length >= 2) {
+        const est = BkkLib.estimateShapePosition(shape, timed, Date.now() / 1e3);
+        if (est) {
+          lat = est.pt[0];
+          lon = est.pt[1];
+          positionEstimated = est.waiting ? "waiting" : true;
+        }
+      }
+      this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed, row, board, alight } : null;
+      this._mapGeo = { shape, board, alight };
+      const pos = BkkLib.mapGpsLatLon(lat, lon);
+      const hasPosition = !!pos;
+      if (hasPosition) {
+        lat = pos[0];
+        lon = pos[1];
+      }
+      const routeColor = BkkLib.mapRouteColor(row, {});
+      const lineBase = {
+        lineJoin: "round",
+        lineCap: "round",
+        noClip: true,
+        pane: "overlayPane"
+      };
+      const applyView = () => {
+        try {
+          map.invalidateSize();
+        } catch (_e) {
+        }
+        const points = [board, alight, hasPosition ? [lat, lon] : null].filter(Boolean);
+        if (hasShape) {
+          const bounds = L.latLngBounds(shape);
+          points.forEach((pt) => bounds.extend(pt));
+          map.fitBounds(bounds, { padding: [36, 36], maxZoom: 12, animate: false });
+        } else if (points.length >= 2) {
+          map.fitBounds(L.latLngBounds(points), { padding: [36, 36], maxZoom: 12, animate: false });
+        } else if (points.length) {
+          map.setView(points[0], 13, { animate: false });
+        }
+        (this._mapRouteLayers || []).forEach((layer) => {
+          if (layer && typeof layer.redraw === "function") {
+            try {
+              layer.redraw();
+            } catch (_e) {
+            }
+          }
+        });
+      };
+      if (hasShape) {
+        const dash = approx ? { dashArray: "10 10" } : {};
+        const outline = L.polyline(shape, Object.assign({
+          color: "#1a1a1a",
+          weight: 7,
+          opacity: 0.45,
+          interactive: false
+        }, lineBase, dash)).addTo(map);
+        const line2 = L.polyline(shape, Object.assign({
+          color: routeColor,
+          weight: 5,
+          opacity: 0.98
+        }, lineBase, dash)).addTo(map);
+        this._mapRouteLayers.push(outline, line2);
+        this._mapRouteOutline = outline;
+        this._mapRoute = line2;
+      }
+      const stopPin = (pin) => L.marker(pin.pt, {
+        icon: this._stopPinIcon(L, pin, lang, true),
+        zIndexOffset: 500,
+        keyboard: false
+      }).addTo(map);
+      const line = { color: routeColor, label: row.label || "", text: row.textcolor || "" };
+      if (alight) {
+        this._mapAlightMarker = stopPin({ kind: "alight", pt: alight, name: cfg.destName || "", color: routeColor });
+      }
+      if (board) this._mapBoardMarker = stopPin(Object.assign({ kind: "board", pt: board, name: cfg.stopName || "" }, line));
+      if (hasPosition && !this._mapMarker) drawMarker();
+      applyView();
+      Object.assign(st, {
+        ready: true,
+        hasShape,
+        approx,
+        hasGps,
+        estimated: positionEstimated,
+        hasBoard: !!board,
+        hasAlight: !!alight,
+        hasPosition
       });
-    };
-    if (hasShape) {
-      const dash = approx ? { dashArray: "10 10" } : {};
-      const outline = L.polyline(shape, Object.assign({
-        color: "#1a1a1a",
-        weight: 7,
-        opacity: 0.45,
-        interactive: false
-      }, lineBase, dash)).addTo(map);
-      const line2 = L.polyline(shape, Object.assign({
-        color: routeColor,
-        weight: 5,
-        opacity: 0.98
-      }, lineBase, dash)).addTo(map);
-      this._mapRouteLayers.push(outline, line2);
-      this._mapRouteOutline = outline;
-      this._mapRoute = line2;
+      foot.textContent = this._mapFoot(row, st, lang);
+      setTimeout(() => {
+        if (this._map === map) applyView();
+      }, 80);
+      this._openingMap = "";
+    } catch (_e) {
+      if (this._mapStale(seq)) return;
+      this._openingMap = "";
+      this._showMapNotice(t(lang, "mapLeafletFail"));
     }
-    const stopPin = (pin) => L.marker(pin.pt, {
-      icon: this._stopPinIcon(L, pin, lang, true),
-      zIndexOffset: 500,
-      keyboard: false
-    }).addTo(map);
-    const line = { color: routeColor, label: row.label || "", text: row.textcolor || "" };
-    if (alight) {
-      this._mapAlightMarker = stopPin({ kind: "alight", pt: alight, name: cfg.destName || "", color: routeColor });
-    }
-    if (board) this._mapBoardMarker = stopPin(Object.assign({ kind: "board", pt: board, name: cfg.stopName || "" }, line));
-    if (hasPosition && !this._mapMarker) drawMarker();
-    applyView();
-    Object.assign(st, {
-      ready: true,
-      hasShape,
-      approx,
-      hasGps,
-      estimated: positionEstimated,
-      hasBoard: !!board,
-      hasAlight: !!alight,
-      hasPosition
-    });
-    foot.textContent = this._mapFoot(row, st, lang);
-    setTimeout(() => {
-      if (this._map === map) applyView();
-    }, 80);
-    this._openingMap = "";
   }
   /* The sensor vehicle (ELVIRA, with its FUTÁR trip) of a displayed row.
      matchHassVehicle reads the raw row's sched/dep; a displayed row has
@@ -10758,8 +10748,10 @@ ${this._stopPinCss()}
     const st = this._mapState;
     if (!this._map || !this._openMapKey || !st) return;
     const row = this._findMapRow(this._mapRef, this._rows || []);
+    if (row) this._mapRow = row;
     if (!row || !row.hasGps) {
-      if (row && st.hasGps && !this._mapEstimate && this._mapGeo) {
+      const known = row || this._mapRow;
+      if (known && st.hasGps && !this._mapEstimate && this._mapGeo) {
         st.hasGps = false;
         st.estimated = false;
         if (this._mapMarker) {
@@ -10772,7 +10764,7 @@ ${this._stopPinCss()}
         st.hasPosition = false;
         this._mapEstimate = Object.assign({ timed: [], row: null }, this._mapGeo);
       }
-      if (row || this._mapEstimate) this._syncEstimatedMarker(row, this._lang()).catch(() => {
+      if (row || this._mapEstimate) this._syncEstimatedMarker(known, this._lang()).catch(() => {
       });
       return;
     }
@@ -11480,58 +11472,65 @@ var BKKPlannerCard = class extends BKKHopCard {
       return false;
     }
     if (stale()) return again;
-    const overlay = document.createElement("div");
-    overlay.className = "ht-map-overlay";
-    const title = `${cfg.stopName || ""} → ${cfg.destName || ""}`;
-    const footText = t(lang, "plannerJourneySummary", [
-      journey && journey.durationMin,
-      journey && journey.transfers,
-      journey && journey.walkMin,
-      journey && journey.waitMin || 0
-    ]);
-    overlay.innerHTML = `
-      <style>${this._mapChromeCss()}</style>
-      <div class="ht-map-panel" role="dialog" aria-modal="true">
-        <div class="ht-map-head">
-          <div class="meta">${BkkLib.esc(title)}</div>
-          <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, "mapClose"))}">×</button>
+    try {
+      const overlay = document.createElement("div");
+      overlay.className = "ht-map-overlay";
+      const title = `${cfg.stopName || ""} → ${cfg.destName || ""}`;
+      const footText = t(lang, "plannerJourneySummary", [
+        journey && journey.durationMin,
+        journey && journey.transfers,
+        journey && journey.walkMin,
+        journey && journey.waitMin || 0
+      ]);
+      overlay.innerHTML = `
+        <style>${this._mapChromeCss()}</style>
+        <div class="ht-map-panel" role="dialog" aria-modal="true">
+          <div class="ht-map-head">
+            <div class="meta">${BkkLib.esc(title)}</div>
+            <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, "mapClose"))}">×</button>
+          </div>
+          <div class="ht-map-canvas"></div>
+          <div class="ht-map-foot">${BkkLib.esc(footText)}</div>
         </div>
-        <div class="ht-map-canvas"></div>
-        <div class="ht-map-foot">${BkkLib.esc(footText)}</div>
-      </div>
-    `;
-    (document.documentElement || document.body).appendChild(overlay);
-    this._mapOverlay = overlay;
-    this._openMapKey = "journey";
-    this._onMapKey = (ev) => {
-      if (ev.key === "Escape") this._closeVehicleMap();
-    };
-    document.addEventListener("keydown", this._onMapKey);
-    const closeBtn = overlay.querySelector(".ht-map-close");
-    closeBtn.addEventListener("click", () => this._closeVehicleMap());
-    try {
-      closeBtn.focus();
+      `;
+      (document.documentElement || document.body).appendChild(overlay);
+      this._mapOverlay = overlay;
+      this._openMapKey = "journey";
+      this._onMapKey = (ev) => {
+        if (ev.key === "Escape") this._closeVehicleMap();
+      };
+      document.addEventListener("keydown", this._onMapKey);
+      const closeBtn = overlay.querySelector(".ht-map-close");
+      closeBtn.addEventListener("click", () => this._closeVehicleMap());
+      try {
+        closeBtn.focus();
+      } catch (_e) {
+      }
+      overlay.addEventListener("click", (ev) => {
+        if (ev.target === overlay) this._closeVehicleMap();
+      });
+      const canvas = overlay.querySelector(".ht-map-canvas");
+      const start = segs[0].shape[0];
+      let map;
+      try {
+        map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView(start, 8);
+        L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
+      } catch (_e) {
+        this._openingMap = "";
+        this._showMapNotice(t(lang, "mapLeafletFail"));
+        return false;
+      }
+      this._map = map;
+      const allPts = this._drawJourneyPolylines(L, map, segs, { labels: true });
+      this._fitJourneyView(L, map, allPts, 36, () => this._map === map);
+      this._openingMap = "";
+      return false;
     } catch (_e) {
-    }
-    overlay.addEventListener("click", (ev) => {
-      if (ev.target === overlay) this._closeVehicleMap();
-    });
-    const canvas = overlay.querySelector(".ht-map-canvas");
-    const start = segs[0].shape[0];
-    let map;
-    try {
-      map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView(start, 8);
-      L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
-    } catch (_e) {
+      if (this._mapStale(seq)) return false;
       this._openingMap = "";
       this._showMapNotice(t(lang, "mapLeafletFail"));
       return false;
     }
-    this._map = map;
-    const allPts = this._drawJourneyPolylines(L, map, segs, { labels: true });
-    this._fitJourneyView(L, map, allPts, 36, () => this._map === map);
-    this._openingMap = "";
-    return false;
   }
   /* While a pair is still being picked the card keeps its own name (or
      "Tervező") as a title; see _paintHead for a picked pair. */
