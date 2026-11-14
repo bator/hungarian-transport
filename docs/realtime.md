@@ -83,9 +83,11 @@ its stops likewise). Sources marked `"mavplusz": true` in
   feeds) are then asked for with the trip ids. Two trips of a line at the
   same minute (both ends of Miskolc line 14 at 07:10) are both asked for
   and told apart by the card's stops exactly as on the feeds, else neither
-  is used. The planner's trip updates count as ones whose route was
-  learned from a vehicle, as the feeds' are, so a Miskolc trip without its
-  vehicle still gets no delay; its delay is the vehicle's current one.
+  is used; when only one of the two is in the planner's answer or the
+  feeds, it is used only if it calls at the card's stops. The planner's
+  trip updates count as ones whose route was learned from a vehicle, as
+  the feeds' are, so a Miskolc trip without its vehicle still gets no
+  delay; its delay is the vehicle's current one.
 - **What it answers.** A call without realtime data has no delay (the
   planner's scheduled time is no prediction). Every call CANCELED is a
   canceled trip, one CANCELED call among updated ones a skipped stop. A

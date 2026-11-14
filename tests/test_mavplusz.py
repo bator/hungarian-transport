@@ -661,6 +661,26 @@ async def test_a_shared_start_is_told_apart_by_the_stops(aioclient_mock, stops, 
     assert not _calls(aioclient_mock, "get")
 
 
+@pytest.mark.parametrize(("stops", "picked"), [(["SPA1"], "10949_731_071000_AWD"), (["SPB1"], None), ([], None)])
+async def test_one_of_two_trips_at_a_shared_start_must_call_at_the_stops(aioclient_mock, stops, picked) -> None:
+    """Both ends of line 14 at 07:10, only one with realtime data: a card on
+    the other one gets no answer, not this one's delay and vehicle."""
+    quiet = _line14("mvkzrt:10949_644_071000_AWD", ["SPB1", "SPB2"])
+    for st in quiet["stoptimesForDate"]:
+        st["realtime"] = False
+    planner = Planner({
+        "mvkzrt:10949_731_071000_AWD": _line14("mvkzrt:10949_731_071000_AWD", ["SPA1", "SPA2"]),
+        "mvkzrt:10949_644_071000_AWD": quiet,
+    })
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    hub, session, _clock = await _hub(aioclient_mock, _city_cfg("mvkzrt:"), wall=CITY_WALL)
+    req = {"key": "d", "route": "14", "start": 430, "date": "20261114", "stops": stops, "from": 0}
+    resp = await hub.query("v", [req])
+    await session.close()
+    assert resp["trips"].get("d", {}).get("trip_id") == picked
+    assert not _calls(aioclient_mock, "get")
+
+
 async def test_route_lists_are_cached_for_hours_and_trips_for_the_interval(aioclient_mock) -> None:
     planner = Planner()
     aioclient_mock.post(mavplusz.URL, side_effect=planner)

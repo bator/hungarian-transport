@@ -839,7 +839,10 @@ class RealtimeHub:
                     loaded.append(mine)
                 elif theirs is not None:
                     loaded.append(theirs)
-            hit = _answer(cfg, loaded, req, now)
+            # Two trips of the line at that minute: the one in the feeds must
+            # call at the card's stops, the other may be the card's.
+            strict = any(len(cands.get((i, n), ())) > 1 for i in mav_idx)
+            hit = _answer(cfg, loaded, req, now, strict=strict)
             if hit is not None:
                 out[req["key"]] = hit
         return {"feed": feed_id, "updated": max(stamps) if stamps else None, "trips": out}
@@ -1044,16 +1047,20 @@ def _date_ok(start_date: str, wanted: str) -> bool:
     return not wanted or not start_date or start_date == wanted
 
 
-def _pick(cands: list[tuple[str, TripUpdate | None, Vehicle | None]], stops: list[str]):
-    if len(cands) > 1 and stops:
+def _pick(cands: list[tuple[str, TripUpdate | None, Vehicle | None]], stops: list[str], strict: bool = False):
+    """The one candidate, or the one of several calling at the card's
+    stops. strict: a trip not among cands may be the card's (the planner
+    listed two at that minute), so even a single one must call there."""
+    if len(cands) > 1 or strict:
         with_stop = [c for c in cands if _has_stop(c[1], stops)]
-        if with_stop:
+        if with_stop or strict:
             cands = with_stop
     return cands[0] if len(cands) == 1 else None
 
 
-def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any]):
-    """(trip id, TripUpdate, Vehicle) of the request's trip, or None."""
+def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], strict: bool = False):
+    """(trip id, TripUpdate, Vehicle) of the request's trip, or None;
+    strict as in _pick, for a route + start."""
     wanted_date = req.get("date") or ""
     stops = req.get("stops") or []
     if "trip" in cfg.match and req.get("trip_id"):
@@ -1079,7 +1086,7 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any]):
                 sd = (t.start_date if t else "") or (v.start_date if v else "")
                 if rid == route and sm is not None and sm % 1440 == start and _date_ok(sd, wanted_date):
                     cands.append((tid, t, v))
-        hit = _pick(sorted(cands, key=lambda c: c[0]), stops)
+        hit = _pick(sorted(cands, key=lambda c: c[0]), stops, strict)
         if hit:
             return hit
     if "train" in cfg.match and req.get("train"):
@@ -1205,8 +1212,10 @@ def _vehicle_json(v: Vehicle | None, now: float) -> dict[str, Any] | None:
     }
 
 
-def _answer(cfg: FeedConfig, loaded, req: dict[str, Any], now: float) -> dict[str, Any] | None:
-    found = _find_trip(cfg, loaded, req)
+def _answer(
+    cfg: FeedConfig, loaded, req: dict[str, Any], now: float, *, strict: bool = False
+) -> dict[str, Any] | None:
+    found = _find_trip(cfg, loaded, req, strict)
     if found is None:
         return None
     tid, tu, vp = found
