@@ -3,7 +3,8 @@
   "Static operator id (volan, a city-index operator id, mav) -> its GTFS-Realtime feeds.",
   "Generated from public-transport/transitous feeds/hu.json and the Volan agency ids; see docs/realtime.md.",
   "match: trip = the card's static trip_id (index trip element 6) is the feed's trip_id without prefix;",
-  "route_start = route_id (without prefix) and the HHMMSS start in the trip_id; train = the train number from the source's static GTFS (trip_short_name)."
+  "route_start = route_id (without prefix) and the HHMMSS start in the trip_id; train = the train number from the source's static GTFS (trip_short_name).",
+  "mavplusz: true = ask mavplusz.hu (M\u00c1V's OpenTripPlanner) first for the trips a card names by trip_id, these feeds only when it fails; remove the key to read only these feeds (docs/realtime.md)."
  ],
  "aliases": {
   "dkv": "debrecen",
@@ -15,7 +16,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -29,7 +31,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06673/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06673/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -41,7 +44,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-03522/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-03522/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -53,7 +57,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-13657/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-13657/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -65,7 +70,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-21175/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-21175/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -77,7 +83,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-02219/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-02219/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -89,7 +96,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-02918/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-02918/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -101,7 +109,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-08864/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-08864/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -113,7 +122,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-33534/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-33534/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -125,7 +135,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-15200/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-15200/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -137,7 +148,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06497/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06497/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -149,7 +161,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05111/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05111/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -161,7 +174,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-21315/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-21315/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -173,7 +187,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-03115/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-03115/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -185,7 +200,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-20491/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-20491/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -197,7 +213,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-23603/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-23603/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -209,7 +226,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30988/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30988/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -221,7 +239,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25131/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25131/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -233,7 +252,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14632/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14632/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -245,7 +265,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-32559/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-32559/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -257,7 +278,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05236/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05236/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -269,7 +291,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25584/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25584/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -281,7 +304,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05032/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05032/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -293,7 +317,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05175/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05175/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -305,7 +330,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-18209/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-18209/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -317,7 +343,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04923/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04923/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -329,7 +356,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06691/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06691/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -341,7 +369,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-18421/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-18421/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -353,7 +382,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05449/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05449/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -365,7 +395,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-26408/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-26408/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -377,7 +408,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-13532/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-13532/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -389,7 +421,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-12575/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-12575/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -401,7 +434,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-07357/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-07357/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -413,7 +447,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-19433/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-19433/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -425,7 +460,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04260/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04260/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -437,7 +473,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-23959/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-23959/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -449,7 +486,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04349/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04349/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -461,7 +499,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04783/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04783/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -473,7 +512,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17941/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17941/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -485,7 +525,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30933/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30933/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -497,7 +538,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17206/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17206/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -509,7 +551,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30766/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30766/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -521,7 +564,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14492/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14492/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -533,7 +577,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-31945/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-31945/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -545,7 +590,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25788/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25788/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -557,7 +603,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05519/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05519/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -569,7 +616,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17631/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17631/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -581,7 +629,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-08518/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-08518/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -593,7 +642,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-33367/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-33367/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -605,7 +655,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14827/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14827/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -617,7 +668,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-22761/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-22761/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -629,7 +681,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14456/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14456/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -641,7 +694,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-26578/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-26578/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -653,7 +707,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-27854/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-27854/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -665,7 +720,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-20127/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-20127/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -677,7 +733,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-29726/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-29726/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -689,7 +746,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-28352/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-28352/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -701,7 +759,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-15291/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-15291/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -713,7 +772,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-24934/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-24934/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -725,7 +785,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-32054/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-32054/vehicle-positions.pb",
-     "prefix": "hkir:"
+     "prefix": "hkir:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -737,7 +798,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/paks/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/paks/vehicle-positions.pb",
-     "prefix": "paks:"
+     "prefix": "paks:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -749,7 +811,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/VBUSZ/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/VBUSZ/vehicle-positions.pb",
-     "prefix": "VBUSZ:"
+     "prefix": "VBUSZ:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -762,7 +825,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/mvkzrt/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/mvkzrt/vehicle-positions.pb",
-     "prefix": "mvkzrt:"
+     "prefix": "mvkzrt:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -775,7 +839,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/debrecen/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/debrecen/vehicle-positions.pb",
-     "prefix": "debrecen:"
+     "prefix": "debrecen:",
+     "mavplusz": true
     }
    ],
    "match": [

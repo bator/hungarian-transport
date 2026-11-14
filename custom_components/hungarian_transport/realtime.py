@@ -5,6 +5,8 @@ For the operators listed in realtime_feeds.json this module fetches their
 public GTFS-Realtime feeds on demand, when a card calls the
 `hungarian_transport.realtime` service, and answers with the delay at the
 card's stops and the vehicle's position for the trips the card asks about.
+Sources marked "mavplusz" ask MÁV's journey planner (mavplusz.py) first for
+the trips a card names by trip_id, and read their feeds only as its backup.
 
 Nothing is polled in the background: a feed is fetched only while a card
 asks for it, at most once per its interval (60 s by default, the feeds' own
@@ -33,7 +35,7 @@ import zlib
 
 import aiohttp
 
-from . import gtfs_feed, upstream
+from . import gtfs_feed, mavplusz, upstream
 from .responses import RT_NO_FEED, RT_UNAVAILABLE, error_answer
 
 _LOGGER = logging.getLogger(__name__)
@@ -85,6 +87,8 @@ MAX_FEED_AGE = 15 * 60
 # Service request limits.
 MAX_TRIPS = 40
 MAX_STOPS = 120
+# The OutageLog key of mavplusz.hu (feed URLs are the others).
+MAVPLUSZ_OUTAGE = "mavplusz"
 # Trip id patterns whose route a source remembers (see _learn_routes).
 MAX_ROUTE_KEYS = 20000
 
@@ -463,6 +467,9 @@ class Source:
     vehicle_positions: str
     prefix: str
     static: str
+    # Ask mavplusz.hu first for the trips a card names by trip_id, these
+    # feeds only when it fails (mavplusz.py, docs/realtime.md).
+    mavplusz: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,7 +499,15 @@ def parse_feed_table(doc: dict[str, Any]) -> dict[str, FeedConfig]:
                 tu, vp = _https(src.get("trip_updates")), _https(src.get("vehicle_positions"))
                 if not tu and not vp:
                     raise ValueError("source without https URLs")
-                sources.append(Source(tu, vp, str(src.get("prefix") or ""), _https(src.get("static"))))
+                sources.append(
+                    Source(
+                        tu,
+                        vp,
+                        str(src.get("prefix") or ""),
+                        _https(src.get("static")),
+                        src.get("mavplusz") is True,
+                    )
+                )
             match = frozenset(str(m) for m in raw.get("match") or ()) & {"trip", "route_start", "train"}
             if not sources or not match:
                 raise ValueError("no sources or match")
@@ -572,8 +587,14 @@ class RealtimeHub:
             ),
             monotonic=monotonic,
         )
-        # Per feed URL.
+        # Per feed URL, and MAVPLUSZ_OUTAGE for mavplusz.hu.
         self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic)
+        # mavplusz.hu answers per (trip, date): (monotonic expiry, wall time
+        # of the request, the trip's result or None for a trip it does not
+        # know). One request at a time, so cards polling together share it.
+        self._mav_cache: dict[tuple[str, str], tuple[float, float, mavplusz.TripResult | None]] = {}
+        self._mav_lock = asyncio.Lock()
+        self._mav_retry_at = -1e18
 
     async def _run(self, func: Callable[..., Any], *args: Any) -> Any:
         if self._executor is None:
@@ -701,6 +722,8 @@ class RealtimeHub:
         if cfg is None:
             return error_answer({"feed": feed_id, "trips": {}}, RT_NO_FEED)
         now = self._wall()
+        if "trip" in cfg.match and any(s.mavplusz for s in cfg.sources) and any(r.get("trip_id") for r in trips):
+            return await self._query_mavplusz(feed_id, cfg, trips, now)
         # Every source at once: MÁV has two, each up to FETCH_TIMEOUT cold.
         loaded = await asyncio.gather(*(self._source(cfg, src, now) for src in cfg.sources))
         if all(tu is None and vp is None for _src, tu, vp, _tr in loaded):
@@ -713,6 +736,103 @@ class RealtimeHub:
                 out[req["key"]] = hit
         return {"feed": feed_id, "updated": max(stamps) if stamps else None, "trips": out}
 
+    async def _query_mavplusz(
+        self, feed_id: str, cfg: FeedConfig, trips: list[dict[str, Any]], now: float
+    ) -> dict[str, Any]:
+        """query() for a feed with a mavplusz source and a trip_id to ask
+        for. Per mavplusz source: the planner's answer for the requested
+        trip ids, and its jbb feeds only when the planner failed (an error,
+        the rate limit, its backoff), knew none of them (ids it does not
+        share with the cards' timetable), or a request has no trip_id and
+        the feed matches by route_start or train too. Other sources as in
+        query()."""
+        by_src: dict[int, list[mavplusz.TripKey]] = {}
+        for i, src in enumerate(cfg.sources):
+            if src.mavplusz:
+                keys = [
+                    mavplusz.TripKey(
+                        mavplusz.gtfs_id(r["trip_id"], src.prefix), mavplusz.service_date(r.get("date"), now), src.prefix
+                    )
+                    for r in trips
+                    if r.get("trip_id")
+                ]
+                by_src[i] = list(dict.fromkeys(keys))
+        asked = list(dict.fromkeys(k for keys in by_src.values() for k in keys))[: mavplusz.MAX_TRIPS_PER_REQUEST]
+        answered = await self._mavplusz(asked, cfg.interval)
+        others = bool(cfg.match - {"trip"}) and any(not r.get("trip_id") for r in trips)
+        planner: dict[int, tuple[Source, Feed, Feed, None]] = {}
+        for i, keys in by_src.items():
+            got = [answered[k] for k in keys if k in answered] if answered is not None else []
+            if any(res is not None for _at, res in got):
+                feed = mavplusz.to_feed([res for _at, res in got], int(max(at for at, _res in got)))
+                planner[i] = (cfg.sources[i], feed, feed, None)
+        jbb_idx = [i for i in range(len(cfg.sources)) if i not in planner or others]
+        jbb = dict(zip(jbb_idx, await asyncio.gather(*(self._source(cfg, cfg.sources[i], now) for i in jbb_idx))))
+        if not planner and all(tu is None and vp is None for _src, tu, vp, _tr in jbb.values()):
+            return error_answer({"feed": feed_id, "trips": {}}, RT_UNAVAILABLE)
+        used = [*planner.values(), *jbb.values()]
+        stamps = [f.timestamp for _s, tu, vp, _t in used for f in (tu, vp) if f is not None and f.timestamp]
+        out: dict[str, Any] = {}
+        for req in trips:
+            if req.get("trip_id"):
+                loaded = []
+                for i in range(len(cfg.sources)):
+                    mine, theirs = planner.get(i), jbb.get(i)
+                    if mine is not None and (theirs is None or _knows(mine, req)):
+                        loaded.append(mine)
+                    elif theirs is not None:
+                        loaded.append(theirs)
+            else:
+                loaded = [jbb[i] for i in sorted(jbb)]
+            hit = _answer(cfg, loaded, req, now)
+            if hit is not None:
+                out[req["key"]] = hit
+        return {"feed": feed_id, "updated": max(stamps) if stamps else None, "trips": out}
+
+    async def _mavplusz(
+        self, keys: list[mavplusz.TripKey], interval: int
+    ) -> dict[mavplusz.TripKey, tuple[float, mavplusz.TripResult | None]] | None:
+        """Per key: (wall time of the answer, its result), from the cache
+        while within interval of the request, the rest in one request.
+        None when that request is not made (the rate limit, the backoff
+        after a failure) or fails: the caller reads the jbb feeds."""
+        async with self._mav_lock:
+            mono = self._monotonic()
+            for k in [k for k, (exp, _at, _res) in self._mav_cache.items() if exp <= mono]:
+                del self._mav_cache[k]
+            out: dict[mavplusz.TripKey, tuple[float, mavplusz.TripResult | None]] = {}
+            todo: list[mavplusz.TripKey] = []
+            for k in keys:
+                hit = self._mav_cache.get((k.gtfs_id, k.date))
+                if hit is not None:
+                    out[k] = (hit[1], hit[2])
+                else:
+                    todo.append(k)
+            if not todo:
+                return out
+            if mono < self._mav_retry_at:
+                return None
+            try:
+                self._rate.take()
+            except RealtimeRateLimited:
+                return None
+            at = self._wall()
+            try:
+                doc = await mavplusz.fetch(self._session, mavplusz.build_query(todo))
+                results = mavplusz.parse_response(doc, todo)
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError, TypeError) as err:
+                self._mav_retry_at = self._monotonic() + FAIL_BACKOFF
+                self._outages.failed(
+                    MAVPLUSZ_OUTAGE, "Realtime source %s unavailable: %s; reading the GTFS-Realtime feeds",
+                    mavplusz.URL, err or type(err).__name__,
+                )
+                return None
+            self._outages.answered(MAVPLUSZ_OUTAGE, "Realtime source %s answers again", mavplusz.URL)
+            expiry = self._monotonic() + interval
+            for k, res in results.items():
+                self._mav_cache[(k.gtfs_id, k.date)] = (expiry, at, res)
+                out[k] = (at, res)
+            return out
 
     async def _source(self, cfg: FeedConfig, src: Source, now: float):
         tu, vp, trains = await asyncio.gather(
@@ -730,6 +850,13 @@ class RealtimeHub:
 
 async def _none() -> None:
     return None
+
+
+def _knows(entry, req: dict[str, Any]) -> bool:
+    """A loaded source's feed has the request's trip id (either form)."""
+    src, tu, vp, _tr = entry
+    raw = req.get("trip_id") or ""
+    return any(tid in tu.trip_updates or tid in vp.vehicles for tid in (raw, _strip(raw, src.prefix)))
 
 
 def _fresh(feed: Feed | None, now: float) -> Feed | None:
