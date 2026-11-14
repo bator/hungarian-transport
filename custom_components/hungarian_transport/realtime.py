@@ -88,6 +88,9 @@ MAX_FEED_AGE = 15 * 60
 # Service request limits.
 MAX_TRIPS = 40
 MAX_STOPS = 120
+# A card's planner round (the route list and the trips, one request at a
+# time for every card): at most one request's timeout, waiting included.
+PLANNER_TIMEOUT = FETCH_TIMEOUT.total
 # The OutageLog key of mavplusz.hu (feed URLs are the others).
 MAVPLUSZ_OUTAGE = "mavplusz"
 # A route's trip list on mavplusz.hu (for route + start) is kept this long:
@@ -743,7 +746,19 @@ class RealtimeHub:
                 for n, r in enumerate(trips):
                     if r.get("route") and r.get("start") is not None:
                         route_keys[i, n] = mavplusz.RouteKey(prefix + _strip(str(r["route"]), prefix), dates[n], prefix)
-        listed = await self._mav_routes(list(dict.fromkeys(route_keys.values()))) if route_keys else {}
+        # The whole planner round, the wait for _mav_lock included: past it
+        # the planner counts as failed, and the jbb feeds answer.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + PLANNER_TIMEOUT
+
+        async def bounded(coro: Coroutine[Any, Any, Any]) -> Any:
+            try:
+                return await asyncio.wait_for(coro, max(0.0, deadline - loop.time()))
+            except asyncio.TimeoutError:
+                _LOGGER.debug("Realtime source %s: no answer within %s s", mavplusz.URL, PLANNER_TIMEOUT)
+                return None
+
+        listed = await bounded(self._mav_routes(list(dict.fromkeys(route_keys.values())))) if route_keys else {}
         cands: dict[tuple[int, int], list[mavplusz.TripKey]] = {}
         for (i, n), rk in route_keys.items():
             ids = (listed or {}).get(rk)
@@ -766,7 +781,7 @@ class RealtimeHub:
         # not cached yet is cut at MAX_TRIPS_PER_REQUEST (_mavplusz).
         resolved = [k for ks in cands.values() for k in ks]
         asked = list(dict.fromkeys([*resolved, *(k for keys in by_src.values() for k in keys)]))
-        answered = await self._mavplusz(asked, cfg.interval) if asked else {}
+        answered = await bounded(self._mavplusz(asked, cfg.interval)) if asked else {}
         planner: dict[int, tuple[Source, Feed, Feed, None]] = {}
         for i, keys in by_src.items():
             got = [answered[k] for k in keys if k in answered] if answered is not None else []

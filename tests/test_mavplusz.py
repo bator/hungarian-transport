@@ -370,6 +370,28 @@ async def test_a_failing_planner_falls_back_to_jbb(aioclient_mock, failure) -> N
     assert (resp["trips"]["s"]["delay"], resp["trips"]["s"]["dest_delay"]) == (190, 181)
 
 
+async def test_a_slow_planner_round_falls_back_to_jbb(aioclient_mock, monkeypatch) -> None:
+    """The planner round, the wait for the other cards' requests included,
+    has one deadline: past it the jbb feeds answer."""
+    monkeypatch.setattr(realtime, "PLANNER_TIMEOUT", 0.05)
+    planner = Planner()
+
+    async def slow(method, url, data):
+        await asyncio.sleep(5)
+        return await planner(method, url, data)
+
+    aioclient_mock.post(mavplusz.URL, side_effect=slow)
+    _jbb(aioclient_mock)
+    hub, session, _clock = await _hub(aioclient_mock, _cfg(), wall=JBB_WALL)
+    resp = await asyncio.wait_for(hub.query("v", [SZFV_REQ]), 2)
+    # Another card's request holding the lock: this one waits no longer.
+    async with hub._mav_lock:
+        second = await asyncio.wait_for(hub.query("v", [SZFV_REQ]), 2)
+    await session.close()
+    assert resp["trips"]["s"]["delay"] == 190 and second["trips"]["s"]["delay"] == 190
+    assert len(_calls(aioclient_mock, "post")) == 1
+
+
 async def test_a_planner_outage_is_logged_once_backs_off_and_recovers_once(aioclient_mock, caplog) -> None:
     aioclient_mock.post(mavplusz.URL, status=503)
     _jbb(aioclient_mock)

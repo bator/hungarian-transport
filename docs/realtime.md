@@ -98,7 +98,8 @@ its stops likewise). Sources marked `"mavplusz": true` in
 - **When the feeds are read instead.** For a source whose planner request
   fails (an HTTP error, a timeout, an answer that is not JSON, any GraphQL
   error), is refused by the integration's rate limit, or falls in the
-  minute's backoff after a failure; and when the planner knows **none** of
+  minute's backoff after a failure; when the call's planner requests,
+  waiting for other cards' ones included, take over 20 s; and when the planner knows **none** of
   the requested trips (a null answer for every one: ids the card's
   timetable does not share with the planner). A trip the planner does not
   know among ones it does is simply not answered: reading the 1.9 MB feeds
