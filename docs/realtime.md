@@ -13,12 +13,13 @@ exactly as before.
 
 ## Sources
 
-For the Volán, Volánbusz local, Paks, Debrecen, Veszprém and Miskolc cards
+For the Volán, Volánbusz local, Paks and Debrecen cards
 the **primary source is mavplusz.hu**, MÁV's own journey planner, asked for
 just the trips the card shows (see
 [mavplusz.hu first](#mavpluszhu-first-jbbghsqde-as-backup)). The
 GTFS-Realtime feeds below are its **backup** for those operators, and the
-only source for the MÁV trains, GYSEV and Orosháza.
+only source for Veszprém and Miskolc (their cards' trip ids are not the
+planner's), the MÁV trains, GYSEV and Orosháza.
 
 The feeds are the ones Transitous lists in
 [`feeds/hu.json`](https://github.com/public-transport/transitous/blob/main/feeds/hu.json).
@@ -50,8 +51,9 @@ updates of the operators above; the `jbb.ghsq.de` feeds are exported from
 it, so its ids are the feeds' ids with their prefix kept (feed trip
 `hkir_2036_1-3` of the `hkir:` feed is the planner's `hkir:hkir_2036_1-3`,
 its stops likewise). Sources marked `"mavplusz": true` in
-`realtime_feeds.json` (all 64 with the prefixes `hkir:`, `paks:`,
-`debrecen:`, `mvkzrt:`, `VBUSZ:`) are read this way:
+`realtime_feeds.json` (all 62 with the prefixes `hkir:`, `paks:` and
+`debrecen:`; not `VBUSZ:` and `mvkzrt:`, whose cards send their own static
+trip ids) are read this way:
 
 - **What is asked.** Only requests with a `trip_id`, on a feed matched by
   trip_id. One GraphQL request (`POST

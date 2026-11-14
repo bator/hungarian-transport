@@ -208,10 +208,10 @@ def test_malformed_calls_and_positions_are_dropped() -> None:
 def test_feed_table_opts_in_the_planners_feeds() -> None:
     table = realtime.load_feed_table()
     flagged = {(fid, s.prefix) for fid, cfg in table.items() for s in cfg.sources if s.mavplusz}
-    assert {p for _f, p in flagged} == {"hkir:", "paks:", "debrecen:", "mvkzrt:", "VBUSZ:"}
+    assert {p for _f, p in flagged} == {"hkir:", "paks:", "debrecen:"}
     doc = json.loads(realtime.FEEDS_FILE.read_text(encoding="utf-8"))
-    assert sum(1 for f in doc["feeds"].values() for s in f["sources"] if s.get("mavplusz") is True) == 64
-    for fid in ("mav", "gysev", "oroshaza"):
+    assert sum(1 for f in doc["feeds"].values() for s in f["sources"] if s.get("mavplusz") is True) == 62
+    for fid in ("mav", "gysev", "oroshaza", "veszprem", "miskolc"):
         assert not any(s.mavplusz for s in table[fid].sources), fid
     for fid, cfg in table.items():
         if any(s.mavplusz for s in cfg.sources):
