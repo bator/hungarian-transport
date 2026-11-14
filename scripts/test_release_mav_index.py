@@ -39,6 +39,16 @@ def check(name: str, ok: bool, detail: str = "") -> None:
         failed.append(name)
 
 
+# Every download is bounded: a host that accepts the connection and then
+# stalls (the OSM .md5 had no limit) must not hold the runner until the job
+# timeout. Continuation lines are joined, so each entry is one curl command.
+_commands = re.sub(r"\\\n\s*", " ", SCRIPT.read_text(encoding="utf-8")).splitlines()
+_curls = [c.strip() for c in _commands if c.strip().startswith("curl ")]
+check("the script has its three curl downloads", len(_curls) == 3, repr(_curls))
+for _c in _curls:
+    check(f"curl -o {re.search(r'-o (\S+)', _c).group(1)} has --connect-timeout and --max-time",
+          "--connect-timeout " in _c and "--max-time " in _c, _c)
+
 for tool in ("bash", "curl", "openssl", "timeout"):
     if shutil.which(tool) is None:
         print(f"skip release_mav_index tests: no {tool}")
