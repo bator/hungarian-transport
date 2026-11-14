@@ -15,7 +15,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "release.yml"
+HERE = Path(__file__).resolve().parent
+WORKFLOW = HERE.parent / ".github" / "workflows" / "release.yml"
 
 failed = 0
 
@@ -66,7 +67,12 @@ PACK_STEP = step_script("Stamp release and pack assets")
 MAV_SCRIPT_STUB = """#!/usr/bin/env bash
 set -euo pipefail
 if [ "${STUB_MAV:-}" = ok ]; then
-  python3 -c 'import gzip, json; open("mav-index.json.gz", "wb").write(gzip.compress(json.dumps({"v": 7, "feed": "new"}).encode(), mtime=0))'
+  python3 -c 'import gzip, json, os
+body = {"v": 7, "feed": "new"}
+n = int(os.environ.get("STUB_MAV_TRAINS") or 0)
+if n:
+    body["n"] = {str(i): [] for i in range(n)}
+open("mav-index.json.gz", "wb").write(gzip.compress(json.dumps(body).encode(), mtime=0))'
   exit 0
 fi
 echo "stub: MÁV download failed" >&2
@@ -92,6 +98,8 @@ def workspace(root: Path, *, baseline_mav: dict | None, schema: int = 7) -> Path
     tools.mkdir(parents=True)
     (tools / "release_mav_index.sh").write_text(MAV_SCRIPT_STUB)
     (tools / "index_digest.py").write_text(DIGEST_STUB)
+    # The real guard: standard library only, as in .release-tools.
+    (tools / "mav_shrink_guard.py").write_text((HERE / "mav_shrink_guard.py").read_text(encoding="utf-8"))
     pkg = ws / "custom_components" / "hungarian_transport"
     pkg.mkdir(parents=True)
     (pkg / "mav_index.py").write_text(f"SCHEMA = {schema}\n")
@@ -176,6 +184,32 @@ with tempfile.TemporaryDirectory() as tmp_name:
     done, out = bash(CHANGED_STEP, ws, REFRESH="true")
     check("a new MÁV feed is a timetable change", out.get("changed") == "true"
           and "mav-index.json.gz changed" in done.stdout, repr((out, done.stdout)))
+
+    # A build with under half the previous release's trains and lines (a
+    # truncated feed that passed the build's checks) does not ship: the
+    # previous index does, as on a failed build. MAV_ALLOW_SHRINK takes it.
+    trains = {str(i): [] for i in range(100)}
+    big = {"v": 7, "feed": "old", "n": trains}
+    for label, n, env, want_new in (
+        ("49 of 100 trains: the previous index ships, with a warning", 49, {}, False),
+        ("50 of 100 trains: the new index ships", 50, {}, True),
+        ("49 of 100 trains with MAV_ALLOW_SHRINK=1: the new index ships", 49, {"MAV_ALLOW_SHRINK": "1"}, True),
+    ):
+        ws = workspace(tmp / f"shrink-{n}-{len(env)}", baseline_mav=big)
+        done, out = bash(MAV_STEP, ws, MAV_SECRETS="true", STUB_MAV="ok", STUB_MAV_TRAINS=str(n), **env)
+        got = dist_mav(ws) or {}
+        if want_new:
+            ok = got.get("feed") == "new" and len(got.get("n") or {}) == n and out.get("built") == "true"
+        else:
+            ok = (got == big and "built" not in out and "under half the trains" in done.stdout
+                  and not (ws / "mav-index.json.gz").exists())
+        check(f"secrets, {label}", done.returncode == 0 and ok,
+              repr((done.returncode, out, done.stdout, done.stderr)))
+    ws = workspace(tmp / "shrink-old-schema", baseline_mav={"v": 6, "feed": "old", "n": trains})
+    done, out = bash(MAV_STEP, ws, MAV_SECRETS="true", STUB_MAV="ok", STUB_MAV_TRAINS="10")
+    check("secrets, a smaller build than a previous index this code cannot read: the new index ships",
+          done.returncode == 0 and (dist_mav(ws) or {}).get("feed") == "new" and out.get("built") == "true",
+          repr((done.returncode, out, done.stdout, done.stderr)))
 
     ws = workspace(tmp / "f", baseline_mav=None)
     bash(MAV_STEP, ws, MAV_SECRETS="true", STUB_MAV="ok")

@@ -63,6 +63,12 @@ loop = step(release, "- name: GTFS script and helper tests")
 missing = [t for t in tests if t not in loop]
 check("release.yml's GTFS test step runs every scripts/test_*.py", not missing, repr(missing))
 
+sparse = step(release, "path: .release-tools")
+used = set(re.findall(r"\.release-tools/(scripts/[\w.-]+)", release))
+checked_out = set(re.findall(r"^\s+(scripts/[\w.-]+)$", sparse, re.M))
+check("release.yml checks out every .release-tools script it runs",
+      bool(used) and used <= checked_out, repr(sorted(used - checked_out)))
+
 paths_block = mav.split("paths:", 1)[1].split("\n\n", 1)[0] if "paths:" in mav else ""
 listed = set(re.findall(r"^\s+- (\S+)$", paths_block, re.M))
 needed = {p.relative_to(ROOT).as_posix() for p in local_imports(ROOT / "scripts" / "build_mav_index.py", set())}

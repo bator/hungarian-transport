@@ -35,11 +35,13 @@ the sizes of its files are printed either way.
 Usage: mav_pages_site.py --index mav-index.json.gz --stats mav-build.json
          --commit SHA --out SITE_DIR [--gtfs-zip ZIP --pfaedle-dir DIR]
          [--live-url URL | --live-file PATH] [--github-output FILE]
-         [--max-bytes N]
+         [--max-bytes N] [--allow-shrink]
 Prints deploy=true|false (and appends it to --github-output). Exit 1, with
 nothing written, for an index or statistics that do not hold up, a feed
 whose feed_version does not start with a real date (YYYYMMDD, as the
-integration's served_index.feed_date reads it), or a site over the size limit.
+integration's served_index.feed_date reads it), a site over the size limit,
+or an index with fewer than half the trains and lines of the published one
+(mav_shrink_guard.py; --allow-shrink or MAV_ALLOW_SHRINK=1 accepts it).
 """
 from __future__ import annotations
 
@@ -65,6 +67,7 @@ sys.path.insert(1, str(HERE.parent / "custom_components" / "hungarian_transport"
 
 import gtfs_feed  # noqa: E402
 import mav_index  # noqa: E402
+import mav_shrink_guard  # noqa: E402
 from index_digest import digest  # noqa: E402
 
 # Bump when the manifest changes in a way an older integration must not read.
@@ -273,6 +276,23 @@ def refresh_due(new: dict, live: dict) -> bool:
     return built is None or now is None or now - built >= REFRESH_AFTER
 
 
+def check_shrink(man: dict, live: dict | None, allow: bool = False) -> None:
+    """SiteError when the index has fewer than half the trains and lines of
+    the published one (mav_shrink_guard): a truncated feed that is
+    consistent in itself and names a newer feed would replace it. allow
+    (--allow-shrink, MAV_ALLOW_SHRINK) accepts an intended reduction."""
+    if live is None:
+        return
+    why = mav_shrink_guard.shrink_problem(man["trains"], man["lines"], live.get("trains"), live.get("lines"))
+    if not why:
+        return
+    if allow:
+        print(f"::warning title=MÁV index shrank::{why}; published, the shrink guard is relaxed.")
+        return
+    raise SiteError(f"refusing to replace the published index: {why}; --allow-shrink or"
+                    f" {mav_shrink_guard.ALLOW_ENV}=1 accepts it")
+
+
 def same_content(new: dict, live: dict | None) -> bool:
     """The published site serves this content already. Not the sha256: the
     gzip header carries the build time, so every build's bytes differ."""
@@ -388,6 +408,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--github-output", type=Path)
     ap.add_argument("--max-bytes", type=int, default=MAX_SITE_BYTES,
                     help=f"refuse a larger site (default {MAX_SITE_BYTES})")
+    ap.add_argument("--allow-shrink", action="store_true", default=mav_shrink_guard.allowed(),
+                    help="publish an index with under half the trains and lines of the published one"
+                         f" (default: {mav_shrink_guard.ALLOW_ENV} set)")
     args = ap.parse_args(argv)
     if (args.gtfs_zip is None) != (args.pfaedle_dir is None):
         ap.error("--gtfs-zip and --pfaedle-dir go together")
@@ -418,6 +441,11 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
         live, why = fetch_live(args.live_url)
     else:
         live, why = None, "not asked"
+    try:
+        check_shrink(man, live, args.allow_shrink)
+    except SiteError as err:
+        print(f"no site: {err}", file=sys.stderr)
+        return 1
     same = same_content(man, live)
     refresh = same and refresh_due(man, live)
     deploy = not same or refresh
