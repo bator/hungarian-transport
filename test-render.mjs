@@ -4870,7 +4870,31 @@ const deferred = () => {
   check('an empty fill pauses that pair for ten minutes; another pair, and a fill with rows, ask again',
     paused === 1 && otherPair === 2 && after.length === 1 && plans === 4,
     JSON.stringify({ paused, otherPair, plans, after: after.length }));
+  /* A fill that failed is no empty answer: null, and asked again next poll. */
+  Lib._transitousEmptyAt.clear();
+  plans = 0;
+  answer = null;
+  const failedFill = await Lib.fillTransitousIfEmpty([], o, d, opts);
+  answer = [{ label: '7', dep: Math.floor(Date.now() / 1000) + 900 }];
+  const retried = await Lib.fillTransitousIfEmpty([], o, d, opts);
+  check('a failed Transitous fill returns null and sets no ten-minute pause',
+    failedFill === null && plans === 2 && retried.length === 1,
+    JSON.stringify({ failedFill, plans, retried: retried && retried.length }));
   Lib.transitousDepartures = keepDeps;
+  const keepFetch = Lib.transitousFetch;
+  const keepPlace = Lib.transitousPlace;
+  Lib.transitousPlace = async () => '47.5,19.0';
+  Lib.transitousFetch = async () => { throw new TypeError('network'); };
+  const downDeps = await Lib.transitousDepartures(o, d, opts);
+  Lib.transitousPlace = async () => { throw new TypeError('network'); };
+  const downPlace = await Lib.transitousDepartures(o, d, opts);
+  Lib.transitousPlace = async () => '';
+  const unknown = await Lib.transitousDepartures(o, d, opts);
+  Lib.transitousFetch = keepFetch;
+  Lib.transitousPlace = keepPlace;
+  check('transitousDepartures: null when Transitous failed, [] for a stop it does not know',
+    downDeps === null && downPlace === null && Array.isArray(unknown) && !unknown.length,
+    JSON.stringify({ downDeps, downPlace, unknown }));
 
   Lib._geocodeCache.clear();
   let geo = 0;

@@ -460,6 +460,9 @@ register({
     out.sort((a, b) => (a.dep || 0) - (b.dep || 0));
     return out;
   },
+  /* The departures Transitous plans from origin to dest: [] for none (or
+     a stop it does not know), null when it could not be asked (a failed
+     request), so a caller tells "no departures" from "try again". */
   async transitousDepartures(origin, dest, opts) {
     opts = opts || {};
     if (!dest || !(dest.key || dest.name || dest.id)) return [];
@@ -471,7 +474,7 @@ register({
         BkkLib.transitousPlace(dest),
       ]);
     } catch (_e) {
-      return [];
+      return null;
     }
     if (!fromPlace || !toPlace) return [];
     const horizon = clampMinutesAfter(opts.minutesAfter);
@@ -491,7 +494,7 @@ register({
       const parseOpts = anchor > 0 ? { now: anchor, keepPast: true } : {};
       return BkkLib.rowsFromMotis(data, dest, opts.mode || 'all', horizon, parseOpts);
     } catch (_e) {
-      return [];
+      return null;
     }
   },
   isTrainRow(row) {
@@ -775,7 +778,7 @@ register({
     } catch (_e) { /* hop plan is the fallback */ }
     if (!hit) {
       const motis = await BkkLib.transitousDepartures(origin, dest, opts);
-      hit = BkkLib.pickMotisVehicle(motis, row, dest);
+      hit = BkkLib.pickMotisVehicle(motis || [], row, dest);
       hopShape = BkkLib.validMapShape(hit && hit.shape);
       if (hit) source = 'plan';
     } else {
@@ -816,8 +819,10 @@ register({
     };
   },
   /* An empty board (a city line at night) stays empty for a while: after a
-     fill that found nothing (or failed), the same pair is not asked again
-     for ten minutes, instead of a plan on every poll. */
+     fill that found nothing, the same pair is not asked again for ten
+     minutes, instead of a plan on every poll. A fill that failed is asked
+     again on the next poll, and returns null: the caller keeps what it
+     showed instead of "no departures". */
   _transitousEmptyAt: new Map(),
   _transitousEmptyRetryMs: 10 * 60 * 1000,
   _transitousFillKey(origin, dest, opts) {
@@ -836,11 +841,12 @@ register({
     empties.forEach((ts, k) => { if (now - ts >= BkkLib._transitousEmptyRetryMs) empties.delete(k); });
     try {
       const extra = await BkkLib.transitousDepartures(origin, dest, opts);
+      if (!Array.isArray(extra)) return null;
       if (extra.length) empties.delete(key);
       else empties.set(key, Date.now());
       return BkkLib.mergeRows(list, extra, maxDepartureRows(opts && opts.minutesAfter));
     } catch (_e) {
-      return list;
+      return null;
     }
   },
   /* MOTIS v5: itinerary duration is seconds; leg duration is seconds;

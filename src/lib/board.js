@@ -443,11 +443,20 @@ async function runBoard(poll, src, knownElvira) {
     /* A city board is filled from Transitous inside departures() already:
        a second fill here only repeated the same lookups on every poll. */
     if (!hosts.length && fillsEmpty) {
-      const filled = await src.transitous(hosts, origin, dest, {
+      let filled = await src.transitous(hosts, origin, dest, {
         mode,
         minutesAfter: cfg.minutesAfter,
       });
       if (!live()) return;
+      /* null: Transitous could not be asked. The fill-ins on screen that
+         are still due stay, instead of "no departures" until it answers. */
+      if (!Array.isArray(filled)) {
+        const cur = shown();
+        const now = nowSec();
+        filled = (cur.filled ? (cur.rows || []) : [])
+          .filter((row) => row && departureStillDue(row.dep, now))
+          .map((row) => Object.assign({}, row));
+      }
       const merged = BkkLib.overlayRows(filled, elviraRows, cap, addElvira);
       earlyRows = merged;
       /* Transitous rows, not this board's own: a failed poll replaces
@@ -490,10 +499,10 @@ async function runBoard(poll, src, knownElvira) {
     if ((mode === 'bkk' || mode === 'mav') && !keepRows) {
       let filled = [];
       try {
-        filled = await src.transitous([], origin, dest, {
+        filled = (await src.transitous([], origin, dest, {
           mode,
           minutesAfter: cfg.minutesAfter,
-        });
+        })) || [];
       } catch (_e) {
         filled = [];
       }

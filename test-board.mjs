@@ -292,6 +292,24 @@ test('an empty board is not listed before its Transitous fill answers: no "no de
   assert.deepEqual([first.board.loading, ids(first.board.rows)], [false, '']);
 });
 
+test('a Transitous fill that failed keeps the fill-ins still due instead of blanking the board', async () => {
+  const { src } = sources({ transitous: async () => null });
+  const card = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), {
+    apiKey: 'k', board: { rows: [bus('motis:7', 9), bus('motis:gone', -60)], filled: true },
+  });
+  await card.poll(src);
+  assert.equal(ids(card.board.rows), 'motis:7');
+  assert.equal(card.board.filled, true);
+  /* A board FUTÁR listed is no fill to keep. */
+  const own = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), { apiKey: 'k', board: { rows: [bus('BKK_T1', -60)] } });
+  await own.poll(sources({ transitous: async () => null }).src);
+  assert.deepEqual([ids(own.board.rows), own.board.filled], ['', false]);
+  /* A failed poll whose fill failed too shows the banner alone. */
+  const failing = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), { apiKey: 'k' });
+  await failing.poll(sources({ timetables: async () => { throw new Error('HTTP 503'); }, transitous: async () => null }).src);
+  assert.deepEqual([ids(failing.board.rows), failing.board.banner.message], ['', 'HTTP 503']);
+});
+
 test('a failed poll keeps the FUTÁR rows still due; an empty, departed or filled board is filled under the banner', async () => {
   const fail = () => sources({
     timetables: async () => { throw new Error('HTTP 503'); },
