@@ -922,6 +922,47 @@ with tempfile.TemporaryDirectory() as tmp:
           raises(lambda: bvi.download_volan(Path(tmp) / "v.zip"), OSError) is not None)
     check("the city builder downloads through the same list", bci.download_volan is bvi.download_volan)
 
+# ---- Volán index: every intercity route, the 3-digit agglomeration lines too (#121)
+
+HELYKOZI = "MÁV Személyszállítási Zrt. - Helyközi busz"
+TOWN = "MÁV Személyszállítási Zrt. - Balatonfűzfő helyi"
+for short, agency in (("1234", HELYKOZI), ("318", HELYKOZI), ("223", HELYKOZI), ("1", TOWN), ("12A", TOWN)):
+    check(f"route {short} of {agency.split(' - ')[1]} is in exactly one index",
+          bvi.include_long(short, agency, "") != bci.include_volan_local(short, agency, ""))
+check("318 Budapest - Erdőkertes is a Volán index route", bvi.include_long("318", HELYKOZI, ""))
+check("a town network's line stays out of the Volán index", not bvi.include_long("1", TOWN, ""))
+with tempfile.TemporaryDirectory() as tmp:
+    zpath = gtfs_zip(Path(tmp) / "volanbusz_gtfs.zip", {
+        "agency.txt": f"agency_id,agency_name\nhkir_V,{HELYKOZI}\nhkir_V-02219,{TOWN}\n",
+        "stops.txt": "stop_id,stop_name,location_type,parent_station\n"
+        "hkir_777764,\"Erdőkertes, Katona József utca\",1,\n"
+        "hkir_777764_1,\"Erdőkertes, Katona József utca\",,hkir_777764\n"
+        "hkir_777764_2,\"Erdőkertes, Katona József utca\",,hkir_777764\n"
+        "hkir_300001,\"Budapest, Újpest-Városkapu\",1,\n"
+        "hkir_300001_1,\"Budapest, Újpest-Városkapu\",,hkir_300001\n"
+        "hkir_900001,\"Balatonfűzfő, Fövenyfürdő\",,\n"
+        "hkir_900002,\"Balatonfűzfő, Gyártelep\",,\n",
+        "routes.txt": "route_id,route_short_name,agency_id\n"
+        "hkir_V-R-200-318,318,hkir_V\nhkir_V-02219-H-3-1,1,hkir_V-02219\n",
+        "trips.txt": "route_id,service_id,trip_id\n"
+        "hkir_V-R-200-318,S1,T318\nhkir_V-02219-H-3-1,S1,TLOCAL\n",
+        "calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+        "S1,1,1,1,1,1,1,1,20260101,20271231\n",
+        "stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+        "T318,07:10:00,07:10:00,hkir_777764_2,1\nT318,07:55:00,07:55:00,hkir_300001_1,2\n"
+        "TLOCAL,08:00:00,08:00:00,hkir_900001,1\nTLOCAL,08:10:00,08:10:00,hkir_900002,2\n",
+    })
+    out = Path(tmp) / "volan-index.json.gz"
+    with contextlib.redirect_stdout(io.StringIO()):
+        build_index(zpath, out, min_trips=1)
+    built = json.loads(gzip.decompress(out.read_bytes()))
+    names = [s[1] for s in built["s"]]
+    erd = names.index("Erdőkertes, Katona József utca") if "Erdőkertes, Katona József utca" in names else -1
+    routes = [t[1] for t in built["t"]]
+    check("the 318 trip and its Erdőkertes stop are in the Volán index",
+          routes == ["318"] and erd >= 0 and erd in built["t"][0][2], repr((routes, names)))
+    check("the town line's stops are not", "Balatonfűzfő, Fövenyfürdő" not in names, repr(names))
+
 if failed:
     sys.exit(1)
 print("index guard tests passed")

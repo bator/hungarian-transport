@@ -568,6 +568,26 @@ test('a stop without a station code says so; a station search that failed is not
   assert.equal(e.sent.length, 0);
 });
 
+/* Issue #121: FUTÁR names some halts with a pole suffix (Erdőkertes is
+   BKK_005510579_0, its area BKK_CS005510579_0, both picked by the MÁV
+   editor). The code is the nine digits before it: the board asks ELVIRA
+   with it, not "no station code". */
+test('a FUTÁR station id with a pole suffix still carries its ELVIRA code (Erdőkertes, #121)', async () => {
+  const e = elvira({ response: { departures: [] } });
+  const fromArea = await e.source.board(NO_INDEXES, ELVIRA_HASS, 'BKK_CS005510579_0', 'BKK_005510009', 60, 'Budapest-Nyugati',
+    { originName: 'Erdőkertes' });
+  const fromPole = await e.source.board(NO_INDEXES, ELVIRA_HASS, 'BKK_005510579_0', 'BKK_005510009', 60, 'Budapest-Nyugati',
+    { originName: 'Erdőkertes' });
+  assert.deepEqual([fromArea.error, fromPole.error], ['', '']);
+  assert.deepEqual(e.sent.map((d) => [d.origin_code, d.dest_code]),
+    [['005510579', '005510009'], ['005510579', '005510009']]);
+  assert.equal(BkkLib.elviraStationCode('hu-mav_005501289_4'), '005501289');
+  /* Still nine digits exactly, and only behind a station prefix. */
+  assert.equal(BkkLib.elviraStationCode('BKK_0055105790_0'), '');
+  assert.equal(BkkLib.elviraStationCode('005510579_0'), '');
+  assert.equal(BkkLib.elviraStationCode('volan_777770_1'), '');
+});
+
 test('an elvira_between call that never answers ends at the card’s own timeout, as elvira_timeout', async () => {
   const hung = { connection: { sendMessagePromise: () => new Promise(() => {}) } };
   const keep = BkkLib._elviraTimeoutMs;

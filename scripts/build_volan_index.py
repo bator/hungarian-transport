@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Build the compact Volán GTFS index used by Hungarian transport (4-digit coach routes)."""
+"""Build the compact Volán GTFS index used by Hungarian transport: the
+intercity routes (4-digit coach lines and every other "Helyközi" route)."""
 from __future__ import annotations
 
 import os
@@ -22,8 +23,20 @@ OUT = Path("volan-index.json.gz")
 MIN_TRIPS = 10_000
 
 
-def include_long(short: str, _agency: str, _aid: str) -> bool:
-    return bool(re.fullmatch(r"\d{4}", short))
+def is_helykozi(agency: str) -> bool:
+    """The feed's intercity agency ("MÁV Személyszállítási Zrt. - Helyközi
+    busz"), not one of its town networks."""
+    low = (agency or "").lower()
+    return "helyközi" in low or "helykozi" in low
+
+
+def include_long(short: str, agency: str, _aid: str) -> bool:
+    """Every intercity route: the 4-digit coach lines, and the rest of the
+    Helyközi agency, the Budapest agglomeration's 3-digit lines (318
+    Budapest - Fót - Veresegyház - Erdőkertes, issue #121) among them. The
+    city index takes exactly the others (build_city_index.include_volan_local),
+    so a route of the feed is in one of the two and never in both."""
+    return bool(re.fullmatch(r"\d{4}", short)) or (bool(short) and is_helykozi(agency))
 
 
 def build_index(zpath: Path, out: Path, *, min_trips: int = MIN_TRIPS) -> dict:
