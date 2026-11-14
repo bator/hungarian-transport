@@ -17,6 +17,7 @@ both alike. No Home Assistant imports: tests/test_mavplusz.py runs it bare.
 from __future__ import annotations
 
 from collections.abc import Sequence
+import dataclasses
 from datetime import datetime
 import json
 import re
@@ -60,6 +61,15 @@ class TripKey(NamedTuple):
     prefix: str
 
 
+class RouteKey(NamedTuple):
+    """One route's trips to list: the planner's route id (prefix + the
+    card's route), the service date, the feed prefix."""
+
+    gtfs_id: str
+    date: str
+    prefix: str
+
+
 class TripResult(NamedTuple):
     """What the planner said of one trip; both None for a trip it runs with
     no realtime data on that date."""
@@ -97,6 +107,66 @@ def build_query(trips: Sequence[TripKey]) -> dict[str, Any]:
         variables[f"t{i}"] = t.gtfs_id
         parts.append(f"t{i}: trip(id: $t{i}) {{ {_TRIP_FIELDS % dates[t.date]} }}")
     return {"query": f"query({', '.join(decl)}) {{ {' '.join(parts)} }}", "variables": variables}
+
+
+def build_route_query(routes: Sequence[RouteKey]) -> dict[str, Any]:
+    """The aliased request listing each route's trip ids on its service
+    date (alias rN is routes[N]): every pattern's tripsForDate. The OTP city
+    trip ids carry their start (10842_1943_081900_AZN starts at 08:19), so
+    the ids alone match a card's route + start, as on the jbb feeds."""
+    dates: dict[str, str] = {}
+    decl: list[str] = []
+    parts: list[str] = []
+    variables: dict[str, str] = {}
+    for date in dict.fromkeys(r.date for r in routes):
+        name = f"d{len(dates)}"
+        dates[date] = name
+        decl.append(f"${name}: String")
+        variables[name] = date
+    for i, r in enumerate(routes):
+        decl.append(f"$r{i}: String!")
+        variables[f"r{i}"] = r.gtfs_id
+        parts.append(f"r{i}: route(id: $r{i}) {{ patterns {{ tripsForDate(serviceDate: ${dates[r.date]}) {{ gtfsId }} }} }}")
+    return {"query": f"query({', '.join(decl)}) {{ {' '.join(parts)} }}", "variables": variables}
+
+
+def parse_routes(doc: Any, routes: Sequence[RouteKey]) -> dict[RouteKey, tuple[str, ...] | None]:
+    """Per route of build_route_query(routes): its trip ids that day (the
+    planner's, prefix kept), or None for a route the planner does not know.
+    Errors and missing aliases as in parse_response."""
+    data = _data(doc)
+    out: dict[RouteKey, tuple[str, ...] | None] = {}
+    for i, key in enumerate(routes):
+        alias = f"r{i}"
+        if alias not in data:
+            raise ValueError(f"answer without {alias}")
+        route = data[alias]
+        if route is None:
+            out[key] = None
+            continue
+        if not isinstance(route, dict):
+            raise ValueError("route is not an object")
+        ids: list[str] = []
+        patterns = route.get("patterns")
+        for pattern in patterns if isinstance(patterns, list) else ():
+            trips = pattern.get("tripsForDate") if isinstance(pattern, dict) else None
+            for trip in trips if isinstance(trips, list) else ():
+                gid = _gid(trip)
+                if gid:
+                    ids.append(gid)
+        out[key] = tuple(dict.fromkeys(ids))
+    return out
+
+
+def trips_starting(trip_ids: Sequence[str], prefix: str, start: int) -> list[str]:
+    """The trip ids whose start (HHMMSS in the id, realtime._start_minutes)
+    is start minutes after midnight, modulo a day as on the jbb feeds."""
+    out = []
+    for gid in trip_ids:
+        minutes = realtime._start_minutes(realtime._strip(gid, prefix))
+        if minutes is not None and minutes % 1440 == start % 1440:
+            out.append(gid)
+    return out
 
 
 async def fetch(
@@ -233,10 +303,7 @@ def parse_trip(trip: Any, key: TripKey) -> TripResult:
     return TripResult(tu, _vehicle(trip, key, route_id))
 
 
-def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResult | None]:
-    """Per trip of build_query(trips): its TripResult, or None when the
-    planner does not know the trip (a null alias). Any GraphQL error or a
-    missing alias is a ValueError: the whole answer is not trusted."""
+def _data(doc: Any) -> dict[str, Any]:
     if not isinstance(doc, dict):
         raise ValueError("answer is not an object")
     if doc.get("errors"):
@@ -246,6 +313,14 @@ def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResu
     data = doc.get("data")
     if not isinstance(data, dict):
         raise ValueError("answer without data")
+    return data
+
+
+def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResult | None]:
+    """Per trip of build_query(trips): its TripResult, or None when the
+    planner does not know the trip (a null alias). Any GraphQL error or a
+    missing alias is a ValueError: the whole answer is not trusted."""
+    data = _data(doc)
     out: dict[TripKey, TripResult | None] = {}
     for i, key in enumerate(trips):
         alias = f"t{i}"
@@ -256,15 +331,23 @@ def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResu
     return out
 
 
-def to_feed(results: Sequence[TripResult | None], timestamp: int | None) -> realtime.Feed:
+def to_feed(
+    results: Sequence[TripResult | None], timestamp: int | None, *, route_learned: bool = False
+) -> realtime.Feed:
     """A realtime.Feed of the trips the planner knows; timestamp is when it
-    said so (the hub's wall clock at the request)."""
+    said so (the hub's wall clock at the request). route_learned marks the
+    trip updates as the jbb feeds of a route_start feed have them (their
+    route only from a vehicle), so a trip without its vehicle gets no
+    current delay there either (realtime._answer, Miskolc)."""
     feed = realtime.Feed(timestamp=timestamp)
     for res in results:
         if res is None:
             continue
         if res.trip_update is not None:
-            feed.trip_updates[res.trip_update.trip_id] = res.trip_update
+            tu = res.trip_update
+            if route_learned:
+                tu = dataclasses.replace(tu, route_learned=True)
+            feed.trip_updates[tu.trip_id] = tu
         if res.vehicle is not None:
             feed.vehicles[res.vehicle.trip_id] = res.vehicle
     return feed

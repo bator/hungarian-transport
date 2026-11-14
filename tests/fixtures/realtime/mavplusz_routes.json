@@ -1,0 +1,1071 @@
+{
+ "_comment": "mavplusz.hu OTP2 GraphQL answers, captured 2026-11-14 07:4x CET for the queries mavplusz.build_route_query and build_query make (variables below): the trips of Veszprem line 2 and Miskolc lines 32 and 14 that day, an unknown route, and the realtime of one running trip of Veszprem 2 (07:34) and Miskolc 32 (07:37). Public timetable and vehicle position data only.",
+ "routes": {
+  "variables": {
+   "d0": "20261114",
+   "r0": "VBUSZ:2",
+   "r1": "mvkzrt:32",
+   "r2": "mvkzrt:14",
+   "r3": "mvkzrt:nope"
+  },
+  "response": {
+   "data": {
+    "r0": {
+     "patterns": [
+      {
+       "tripsForDate": [
+        {
+         "gtfsId": "VBUSZ:1131_2034_062000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_092000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_102000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_132000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_162000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_192000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_122000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_182000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_072000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_112000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_082000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_172000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_152000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_202000_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2034_142000_SZ"
+        }
+       ]
+      },
+      {
+       "tripsForDate": [
+        {
+         "gtfsId": "VBUSZ:1131_1651_214000_SZ"
+        }
+       ]
+      },
+      {
+       "tripsForDate": [
+        {
+         "gtfsId": "VBUSZ:1131_2085_052500_SZ"
+        }
+       ]
+      },
+      {
+       "tripsForDate": [
+        {
+         "gtfsId": "VBUSZ:1131_2084_123600_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_203400_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_173600_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_113600_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_193400_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_183600_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_073400_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_083600_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_133600_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_163600_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_103600_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_143600_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_063400_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_093600_SZ"
+        },
+        {
+         "gtfsId": "VBUSZ:1131_2084_153600_SZ"
+        }
+       ]
+      }
+     ]
+    },
+    "r1": {
+     "patterns": [
+      {
+       "tripsForDate": [
+        {
+         "gtfsId": "mvkzrt:10977_59_193000_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_59_203500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_59_120500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_59_183000_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_060500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_59_223500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_063500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11000_59_213500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_59_131500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_59_153000_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_070500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_043500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_110500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_053500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11000_59_083500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_59_080500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_59_093500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_090500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_100500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_59_073500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_59_162500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11000_59_143500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_123500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_59_103500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_173000_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_135500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_59_113500_B4P"
+        }
+       ]
+      },
+      {
+       "tripsForDate": [
+        {
+         "gtfsId": "mvkzrt:11000_1368_220000_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_1368_225500_B4P"
+        }
+       ]
+      },
+      {
+       "tripsForDate": [
+        {
+         "gtfsId": "mvkzrt:11030_60_110700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_073700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_60_210500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_60_170200_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_60_123700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_063700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_180200_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_60_134700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_093700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_60_160200_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_60_100700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11000_60_090700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_070700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_060200_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_103700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_60_080700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_60_083700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_050200_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_113700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_120700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_142700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_200500_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11030_60_190200_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:10977_60_130700_B4P"
+        },
+        {
+         "gtfsId": "mvkzrt:11000_60_150700_B4P"
+        }
+       ]
+      },
+      {
+       "tripsForDate": []
+      }
+     ]
+    },
+    "r2": {
+     "patterns": [
+      {
+       "tripsForDate": [
+        {
+         "gtfsId": "mvkzrt:10766_731_154000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_114300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_130300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_061000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_080300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_151000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_104300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_213500_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_112300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_132300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_054000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_191000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_051000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_144000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_094300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_134300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_211000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_164000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_084300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_171000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_201000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_064000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_124300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_074000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_092300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_120300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_071000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_161000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_181000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_102300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_100300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_122300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_082300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10992_731_141000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_184000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:11025_731_204000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_194000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_174000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_731_110300_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_731_090300_AWD"
+        }
+       ]
+      },
+      {
+       "tripsForDate": []
+      },
+      {
+       "tripsForDate": []
+      },
+      {
+       "tripsForDate": [
+        {
+         "gtfsId": "mvkzrt:10949_644_154000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_105000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_191000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_083000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_071000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_101000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_123000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_164000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_044000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_081000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_111000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10992_644_134000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_171000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_174000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_125000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_181000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_121000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_211000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_085000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_103000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_091000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_151000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_095000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_051000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_075000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_115000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_064000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_073000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_113000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_141000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_204000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_093000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_061000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_161000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:11025_644_201000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_131000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_184000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_054000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10766_644_144000_AWD"
+        },
+        {
+         "gtfsId": "mvkzrt:10949_644_194000_AWD"
+        }
+       ]
+      }
+     ]
+    },
+    "r3": null
+   }
+  }
+ },
+ "trips": {
+  "variables": {
+   "d0": "20261114",
+   "t0": "VBUSZ:1131_2084_073400_SZ",
+   "t1": "mvkzrt:10977_60_073700_B4P"
+  },
+  "response": {
+   "data": {
+    "t0": {
+     "gtfsId": "VBUSZ:1131_2084_073400_SZ",
+     "route": {
+      "gtfsId": "VBUSZ:2"
+     },
+     "stoptimesForDate": [
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27386,
+       "realtimeDeparture": 27391,
+       "arrivalDelay": 146,
+       "departureDelay": 151,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1736"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27416,
+       "realtimeDeparture": 27472,
+       "arrivalDelay": 116,
+       "departureDelay": 172,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1751"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27505,
+       "realtimeDeparture": 27517,
+       "arrivalDelay": 145,
+       "departureDelay": 157,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1752"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27534,
+       "realtimeDeparture": 27602,
+       "arrivalDelay": 114,
+       "departureDelay": 182,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1753"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27636,
+       "realtimeDeparture": 27666,
+       "arrivalDelay": 156,
+       "departureDelay": 186,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1754"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27721,
+       "realtimeDeparture": 27721,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1668"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27781,
+       "realtimeDeparture": 27781,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP2185"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27841,
+       "realtimeDeparture": 27841,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1661"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27961,
+       "realtimeDeparture": 27961,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1694"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28021,
+       "realtimeDeparture": 28021,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1696"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28081,
+       "realtimeDeparture": 28081,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1699"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28141,
+       "realtimeDeparture": 28141,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1619"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28201,
+       "realtimeDeparture": 28201,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1701"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28261,
+       "realtimeDeparture": 28261,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1704"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28321,
+       "realtimeDeparture": 28321,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1706"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28381,
+       "realtimeDeparture": 28381,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1708"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28441,
+       "realtimeDeparture": 28441,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1710"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28561,
+       "realtimeDeparture": 28561,
+       "arrivalDelay": 181,
+       "departureDelay": 181,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "VBUSZ:SP1860"
+       }
+      }
+     ],
+     "pattern": {
+      "vehiclePositions": [
+       {
+        "lat": 47.089283,
+        "lon": 17.9046478,
+        "heading": 134.0,
+        "speed": 4.0,
+        "lastUpdated": 1794638469,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "VBUSZ:SP1668"
+         }
+        },
+        "trip": {
+         "gtfsId": "VBUSZ:1131_2084_073400_SZ"
+        }
+       }
+      ]
+     }
+    },
+    "t1": {
+     "gtfsId": "mvkzrt:10977_60_073700_B4P",
+     "route": {
+      "gtfsId": "mvkzrt:32"
+     },
+     "stoptimesForDate": [
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27420,
+       "realtimeDeparture": 27420,
+       "arrivalDelay": 0,
+       "departureDelay": 0,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP159"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27480,
+       "realtimeDeparture": 27480,
+       "arrivalDelay": 0,
+       "departureDelay": 0,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP580"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27540,
+       "realtimeDeparture": 27540,
+       "arrivalDelay": 0,
+       "departureDelay": 0,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP172"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27634,
+       "realtimeDeparture": 27634,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP70"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27754,
+       "realtimeDeparture": 27754,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP37"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27814,
+       "realtimeDeparture": 27814,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP450"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27874,
+       "realtimeDeparture": 27874,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP239"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 27994,
+       "realtimeDeparture": 27994,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP303"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28114,
+       "realtimeDeparture": 28114,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP374"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28234,
+       "realtimeDeparture": 28234,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP428"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28294,
+       "realtimeDeparture": 28294,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP86"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28354,
+       "realtimeDeparture": 28354,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP334"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28474,
+       "realtimeDeparture": 28474,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP29"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28594,
+       "realtimeDeparture": 28594,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP189"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28654,
+       "realtimeDeparture": 28654,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP263"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28714,
+       "realtimeDeparture": 28714,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP168"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28774,
+       "realtimeDeparture": 28774,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP233"
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "realtimeArrival": 28834,
+       "realtimeDeparture": 28834,
+       "arrivalDelay": 34,
+       "departureDelay": 34,
+       "serviceDay": 1794610800,
+       "stop": {
+        "gtfsId": "mvkzrt:SP22"
+       }
+      }
+     ],
+     "pattern": {
+      "vehiclePositions": [
+       {
+        "lat": 48.1056519,
+        "lon": 20.7903709,
+        "heading": 152.86000061035156,
+        "speed": 4.0,
+        "lastUpdated": 1794638483,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "mvkzrt:SP70"
+         }
+        },
+        "trip": {
+         "gtfsId": "mvkzrt:10977_60_073700_B4P"
+        }
+       }
+      ]
+     }
+    }
+   }
+  }
+ }
+}

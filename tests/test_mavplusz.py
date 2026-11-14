@@ -5,11 +5,16 @@ fixtures/realtime/mavplusz_trips.json is a real planner answer of
 realtime data (t1's pattern has a second vehicle, on another trip), t2 is
 asked for a later date (no realtime; its pattern's vehicle is today's run),
 t3 does not exist. The canceled and skipped cases are that answer edited.
+fixtures/realtime/mavplusz_routes.json (2026-11-14 07:4x CET) lists the
+trips of Veszprém line 2 and Miskolc lines 32 and 14 that day (14 has two
+trips at 07:10, from both ends) and the realtime of a running trip of
+Veszprém 2 and of Miskolc 32, for the route + start path.
 """
 from __future__ import annotations
 
 import asyncio
 import copy
+import dataclasses
 import json
 import logging
 from pathlib import Path
@@ -27,6 +32,11 @@ from .test_upstream import FakeClock
 FIX = Path(__file__).parent / "fixtures" / "realtime"
 DOC = json.loads((FIX / "mavplusz_trips.json").read_text(encoding="utf-8"))
 ANSWER = DOC["response"]
+ROUTES_DOC = json.loads((FIX / "mavplusz_routes.json").read_text(encoding="utf-8"))
+ROUTES = ROUTES_DOC["routes"]["response"]["data"]
+CITY_TRIPS = ROUTES_DOC["trips"]["response"]["data"]
+# Just after the route fixture's newest vehicle.
+CITY_WALL = 1794638500
 # The fixture's request time (its newest vehicle is 10 s older).
 WALL = 1794637020
 # The jbb fixtures' time (test_realtime.NOW).
@@ -208,10 +218,12 @@ def test_malformed_calls_and_positions_are_dropped() -> None:
 def test_feed_table_opts_in_the_planners_feeds() -> None:
     table = realtime.load_feed_table()
     flagged = {(fid, s.prefix) for fid, cfg in table.items() for s in cfg.sources if s.mavplusz}
-    assert {p for _f, p in flagged} == {"hkir:", "paks:", "debrecen:"}
+    assert {p for _f, p in flagged} == {"hkir:", "paks:", "debrecen:", "mvkzrt:", "VBUSZ:"}
     doc = json.loads(realtime.FEEDS_FILE.read_text(encoding="utf-8"))
-    assert sum(1 for f in doc["feeds"].values() for s in f["sources"] if s.get("mavplusz") is True) == 62
-    for fid in ("mav", "gysev", "oroshaza", "veszprem", "miskolc"):
+    assert sum(1 for f in doc["feeds"].values() for s in f["sources"] if s.get("mavplusz") is True) == 64
+    for fid in ("veszprem", "miskolc"):
+        assert "route_start" in table[fid].match and all(s.mavplusz for s in table[fid].sources), fid
+    for fid in ("mav", "gysev", "oroshaza"):
         assert not any(s.mavplusz for s in table[fid].sources), fid
     for fid, cfg in table.items():
         if any(s.mavplusz for s in cfg.sources):
@@ -232,19 +244,29 @@ def _cfg(*match: str, opt_in: bool = True) -> realtime.FeedConfig:
 
 
 class Planner:
-    """A fake mavplusz.hu: answers each asked trip id from trips (null for
-    the others), and records the variables of every request."""
+    """A fake mavplusz.hu: answers each asked trip id from trips and each
+    asked route from routes (null for the others), and records the
+    variables of every request (routes ones in route_asks too)."""
 
-    def __init__(self, trips: dict[str, dict] | None = None) -> None:
+    def __init__(self, trips: dict[str, dict] | None = None, routes: dict[str, dict] | None = None) -> None:
         self.trips = {"hkir:hkir_2036_1-3": _trip("t0"), "hkir:hkir_2511_15-6": _trip("t1")}
+        self.trips.update({t["gtfsId"]: copy.deepcopy(t) for t in CITY_TRIPS.values()})
         self.trips.update(trips or {})
+        self.routes = {v: copy.deepcopy(ROUTES[k]) for k, v in ROUTES_DOC["routes"]["variables"].items() if k[0] == "r"}
+        self.routes.update(routes or {})
         self.asked: list[dict[str, str]] = []
+        self.route_asks: list[dict[str, str]] = []
 
     async def __call__(self, method, url, data):
         body = json.loads(data)
         self.asked.append(body["variables"])
-        aliases = [k for k in body["variables"] if k.startswith("t")]
-        answer = {"data": {a: self.trips.get(body["variables"][a]) for a in aliases}}
+        if "route(id:" in body["query"]:
+            self.route_asks.append(body["variables"])
+            table, kind = self.routes, "r"
+        else:
+            table, kind = self.trips, "t"
+        aliases = [k for k in body["variables"] if k[0] == kind]
+        answer = {"data": {a: table.get(body["variables"][a]) for a in aliases}}
         return AiohttpClientMockResponse(method, url, json=answer)
 
 
@@ -428,13 +450,12 @@ async def test_the_planner_takes_a_token(aioclient_mock) -> None:
 @pytest.mark.parametrize(
     "req",
     [
-        {"key": "r", "route": "x", "start": 480},
         {"key": "t", "train": "4510"},
         {"key": "none"},
     ],
-    ids=["route_start", "train", "nothing"],
+    ids=["train", "nothing"],
 )
-async def test_requests_without_a_trip_id_read_only_jbb(aioclient_mock, req) -> None:
+async def test_requests_without_a_trip_id_or_route_read_only_jbb(aioclient_mock, req) -> None:
     _jbb(aioclient_mock)
     hub, session, _clock = await _hub(aioclient_mock, _cfg("trip", "route_start", "train"), wall=JBB_WALL)
     await hub.query("v", [req])
@@ -442,14 +463,16 @@ async def test_requests_without_a_trip_id_read_only_jbb(aioclient_mock, req) -> 
     assert len(_calls(aioclient_mock, "get")) == 2 and not _calls(aioclient_mock, "post")
 
 
-async def test_route_start_requests_beside_trip_ids_read_both(aioclient_mock) -> None:
+async def test_an_unresolved_route_beside_trip_ids_reads_both(aioclient_mock) -> None:
     planner = Planner()
     aioclient_mock.post(mavplusz.URL, side_effect=planner)
     _jbb(aioclient_mock)
     hub, session, _clock = await _hub(aioclient_mock, _cfg("trip", "route_start"), wall=JBB_WALL)
     resp = await hub.query("v", [T0_REQ, {"key": "r", "route": "x", "start": 480}])
     await session.close()
-    assert len(planner.asked) == 1 and len(_calls(aioclient_mock, "get")) == 2
+    # The route the planner does not know is matched on the feeds.
+    assert planner.route_asks == [{"d0": mavplusz.service_date(None, JBB_WALL), "r0": "hkir:x"}]
+    assert len(planner.asked) == 2 and len(_calls(aioclient_mock, "get")) == 2
     # The trip id is the planner's; the newest stamp is jbb's here.
     assert resp["trips"]["a"]["delay"] == 103
     assert resp["updated"] == JBB_WALL
@@ -478,3 +501,177 @@ async def test_the_service_asks_the_planner_for_an_opted_in_feed(hass, aioclient
     )
     assert resp["trips"]["a"]["delay"] == 103
     assert aioclient_mock.call_count == 1 and len(planner.asked) == 1
+
+
+# ---------------------------------------------------------------- route + start
+
+
+VB = J + "VBUSZ/"
+MV = J + "mvkzrt/"
+VB_REQ = {"key": "v", "route": "2", "start": 454, "date": "20261114", "stops": ["SP1751", "SP1753"], "from": 0, "to": 1}
+# Miskolc's cards send their own static trip id and stop ids too.
+MV_REQ = {
+    "key": "m", "trip_id": "10977_60_073700_static", "route": "32", "start": 457, "date": "20261114",
+    "stops": ["mvk_1", "mvk_2"], "from": 0, "to": 1,
+}
+
+
+def _city_cfg(prefix: str) -> realtime.FeedConfig:
+    base = VB if prefix == "VBUSZ:" else MV
+    src = realtime.Source(base + "trip-updates.pb", base + "vehicle-positions.pb", prefix, "", True)
+    return realtime.FeedConfig("c", (src,), frozenset({"trip", "route_start"}), 60, 60)
+
+
+def _jbb_like(cfg: realtime.FeedConfig, req: dict) -> dict | None:
+    """What the jbb path answers for req, given the same data as GTFS-RT
+    feeds give it: trip updates without a route, the route learned from
+    each trip's vehicle."""
+    keys = [
+        mavplusz.TripKey(v, ROUTES_DOC["trips"]["variables"]["d0"], v.split(":")[0] + ":")
+        for k, v in ROUTES_DOC["trips"]["variables"].items() if k[0] == "t"
+    ]
+    planner = mavplusz.to_feed(list(mavplusz.parse_response(ROUTES_DOC["trips"]["response"], keys).values()), CITY_WALL)
+    tu = realtime.Feed(CITY_WALL, {k: dataclasses.replace(t, route_id="") for k, t in planner.trip_updates.items()})
+    vp = realtime.Feed(CITY_WALL, vehicles=dict(planner.vehicles))
+    known: dict[str, str] = {}
+    realtime._learn_routes(known, vp)
+    realtime._fill_routes(known, tu)
+    return realtime._answer(cfg, [(cfg.sources[0], tu, vp, None)], req, CITY_WALL)
+
+
+def test_route_query_asks_by_variables() -> None:
+    keys = [mavplusz.RouteKey("VBUSZ:2", "20261114", "VBUSZ:"), mavplusz.RouteKey("mvkzrt:14", "20261114", "mvkzrt:")]
+    body = mavplusz.build_route_query(keys)
+    assert body["variables"] == {"d0": "20261114", "r0": "VBUSZ:2", "r1": "mvkzrt:14"}
+    assert body["query"] == (
+        "query($d0: String, $r0: String!, $r1: String!) { "
+        "r0: route(id: $r0) { patterns { tripsForDate(serviceDate: $d0) { gtfsId } } } "
+        "r1: route(id: $r1) { patterns { tripsForDate(serviceDate: $d0) { gtfsId } } } }"
+    )
+
+
+def test_route_trips_and_their_starts() -> None:
+    keys = [mavplusz.RouteKey(v, "20261114", v.split(":")[0] + ":") for k, v in ROUTES_DOC["routes"]["variables"].items() if k[0] == "r"]
+    listed = mavplusz.parse_routes(ROUTES_DOC["routes"]["response"], keys)
+    vb2, mv32, mv14, nope = (listed[k] for k in keys)
+    assert nope is None and len(vb2) == 32 and len(set(vb2)) == len(vb2)
+    assert mavplusz.trips_starting(vb2, "VBUSZ:", 454) == ["VBUSZ:1131_2084_073400_SZ"]
+    assert mavplusz.trips_starting(mv32, "mvkzrt:", 457) == ["mvkzrt:10977_60_073700_B4P"]
+    # Both ends of line 14 at 07:10; and the start is read modulo a day.
+    both = mavplusz.trips_starting(mv14, "mvkzrt:", 430)
+    assert sorted(both) == ["mvkzrt:10949_644_071000_AWD", "mvkzrt:10949_731_071000_AWD"]
+    assert mavplusz.trips_starting(mv14, "mvkzrt:", 430 + 1440) == both
+    with pytest.raises(ValueError):
+        mavplusz.parse_routes({"data": {"r0": None}}, keys)
+
+
+async def test_veszprem_route_start_on_the_planner_answers_as_jbb_would(aioclient_mock) -> None:
+    planner = Planner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    cfg = _city_cfg("VBUSZ:")
+    hub, session, _clock = await _hub(aioclient_mock, cfg, wall=CITY_WALL)
+    resp = await hub.query("v", [VB_REQ])
+    await session.close()
+    assert planner.route_asks == [{"d0": "20261114", "r0": "VBUSZ:2"}]
+    assert planner.asked[1] == {"d0": "20261114", "t0": "VBUSZ:1131_2084_073400_SZ"}
+    assert not _calls(aioclient_mock, "get")
+    hit = resp["trips"]["v"]
+    assert (hit["trip_id"], hit["delay"], hit["dest_delay"], hit["approx"]) == ("1131_2084_073400_SZ", 172, 114, False)
+    assert hit == _jbb_like(cfg, VB_REQ)
+
+
+async def test_miskolc_route_start_gives_the_vehicles_current_delay(aioclient_mock) -> None:
+    planner = Planner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    cfg = _city_cfg("mvkzrt:")
+    hub, session, _clock = await _hub(aioclient_mock, cfg, wall=CITY_WALL)
+    resp = await hub.query("v", [MV_REQ])
+    await session.close()
+    # The card's own trip id goes along (unknown to the planner), and the
+    # resolved one.
+    assert planner.asked[1] == {"d0": "20261114", "t0": "mvkzrt:10977_60_073700_static", "t1": "mvkzrt:10977_60_073700_B4P"}
+    assert not _calls(aioclient_mock, "get")
+    hit = resp["trips"]["m"]
+    assert (hit["delay"], hit["approx"], hit["vehicle"]["stop_id"]) == (34, True, "SP70")
+    assert hit == _jbb_like(cfg, MV_REQ)
+
+
+async def test_miskolc_without_its_vehicle_has_no_delay(aioclient_mock) -> None:
+    trip = copy.deepcopy(CITY_TRIPS["t1"])
+    trip["pattern"]["vehiclePositions"] = []
+    aioclient_mock.post(mavplusz.URL, side_effect=Planner({trip["gtfsId"]: trip}))
+    hub, session, _clock = await _hub(aioclient_mock, _city_cfg("mvkzrt:"), wall=CITY_WALL)
+    resp = await hub.query("v", [MV_REQ])
+    await session.close()
+    # Its updates say 0 for the stops already served: no on-time it never said.
+    assert resp["trips"] == {} and not _calls(aioclient_mock, "get")
+
+
+def _line14(gtfs_id: str, stops: list[str]) -> dict:
+    trip = _as(copy.deepcopy(CITY_TRIPS["t1"]), gtfs_id)
+    trip["route"]["gtfsId"] = "mvkzrt:14"
+    for st, stop in zip(trip["stoptimesForDate"], stops):
+        st["stop"]["gtfsId"] = "mvkzrt:" + stop
+    return trip
+
+
+@pytest.mark.parametrize(("stops", "picked"), [(["SPA1"], "10949_731_071000_AWD"), (["SPB1"], "10949_644_071000_AWD"), ([], None)])
+async def test_a_shared_start_is_told_apart_by_the_stops(aioclient_mock, stops, picked) -> None:
+    planner = Planner({
+        "mvkzrt:10949_731_071000_AWD": _line14("mvkzrt:10949_731_071000_AWD", ["SPA1", "SPA2"]),
+        "mvkzrt:10949_644_071000_AWD": _line14("mvkzrt:10949_644_071000_AWD", ["SPB1", "SPB2"]),
+    })
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    hub, session, _clock = await _hub(aioclient_mock, _city_cfg("mvkzrt:"), wall=CITY_WALL)
+    req = {"key": "d", "route": "14", "start": 430, "date": "20261114", "stops": stops, "from": 0}
+    resp = await hub.query("v", [req])
+    await session.close()
+    assert sorted(v for k, v in planner.asked[1].items() if k[0] == "t") == [
+        "mvkzrt:10949_644_071000_AWD", "mvkzrt:10949_731_071000_AWD"
+    ]
+    assert resp["trips"].get("d", {}).get("trip_id") == picked
+    assert not _calls(aioclient_mock, "get")
+
+
+async def test_route_lists_are_cached_for_hours_and_trips_for_the_interval(aioclient_mock) -> None:
+    planner = Planner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    hub, session, clock = await _hub(aioclient_mock, _city_cfg("VBUSZ:"), wall=CITY_WALL)
+    await hub.query("v", [VB_REQ])
+    clock.now += 30
+    await hub.query("v", [VB_REQ])
+    assert (len(planner.route_asks), len(planner.asked)) == (1, 2)
+    clock.now += 31
+    await hub.query("v", [VB_REQ])
+    assert (len(planner.route_asks), len(planner.asked)) == (1, 3)
+    clock.now += realtime.ROUTE_INTERVAL
+    await hub.query("v", [VB_REQ])
+    await session.close()
+    assert (len(planner.route_asks), len(planner.asked)) == (2, 5)
+    assert not _calls(aioclient_mock, "get")
+
+
+@pytest.mark.parametrize("route", ["nope", "2"], ids=["unknown-route", "no-trip-at-that-start"])
+async def test_an_unresolved_route_start_reads_jbb(aioclient_mock, route) -> None:
+    planner = Planner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    aioclient_mock.get(VB + "trip-updates.pb", content=_pb("veszprem-trip-updates"))
+    aioclient_mock.get(VB + "vehicle-positions.pb", content=_pb("veszprem-vehicle-positions"))
+    hub, session, _clock = await _hub(aioclient_mock, _city_cfg("VBUSZ:"), wall=JBB_WALL)
+    await hub.query("v", [{**VB_REQ, "route": route, "start": 1}])
+    await session.close()
+    # One route request, no trip request, the feeds.
+    assert len(planner.route_asks) == 1 and len(planner.asked) == 1
+    assert len(_calls(aioclient_mock, "get")) == 2
+
+
+async def test_a_failing_route_list_reads_jbb(aioclient_mock) -> None:
+    aioclient_mock.post(mavplusz.URL, status=502)
+    aioclient_mock.get(VB + "trip-updates.pb", content=_pb("veszprem-trip-updates"))
+    aioclient_mock.get(VB + "vehicle-positions.pb", content=_pb("veszprem-vehicle-positions"))
+    hub, session, _clock = await _hub(aioclient_mock, _city_cfg("VBUSZ:"), wall=JBB_WALL)
+    resp = await hub.query("v", [VB_REQ])
+    await session.close()
+    # The backoff keeps the trip request from going out too.
+    assert len(_calls(aioclient_mock, "post")) == 1 and len(_calls(aioclient_mock, "get")) == 2
+    assert "error" not in resp

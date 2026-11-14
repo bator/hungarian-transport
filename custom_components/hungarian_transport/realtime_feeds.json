@@ -4,7 +4,7 @@
   "Generated from public-transport/transitous feeds/hu.json and the Volan agency ids; see docs/realtime.md.",
   "match: trip = the card's static trip_id (index trip element 6) is the feed's trip_id without prefix;",
   "route_start = route_id (without prefix) and the HHMMSS start in the trip_id; train = the train number from the source's static GTFS (trip_short_name).",
-  "mavplusz: true = ask mavplusz.hu (M\u00c1V's OpenTripPlanner) first for the trips a card names by trip_id, these feeds only when it fails; remove the key to read only these feeds (docs/realtime.md)."
+  "mavplusz: true = ask mavplusz.hu (M\u00c1V's OpenTripPlanner) first for the trips a card names by trip_id or by route + start, these feeds only when it fails; remove the key to read only these feeds (docs/realtime.md)."
  ],
  "aliases": {
   "dkv": "debrecen",
@@ -811,7 +811,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/VBUSZ/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/VBUSZ/vehicle-positions.pb",
-     "prefix": "VBUSZ:"
+     "prefix": "VBUSZ:",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -824,7 +825,8 @@
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/mvkzrt/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/mvkzrt/vehicle-positions.pb",
-     "prefix": "mvkzrt:"
+     "prefix": "mvkzrt:",
+     "mavplusz": true
     }
    ],
    "match": [
