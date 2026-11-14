@@ -808,6 +808,33 @@ async def test_a_feed_ages_by_the_hubs_wall_clock(aioclient_mock) -> None:
     assert aioclient_mock.call_count == 1
 
 
+async def test_a_feed_no_card_asks_for_leaves_memory(aioclient_mock) -> None:
+    """A decoded feed is dropped once no card has asked for it in
+    IDLE_INTERVALS of its interval; the static train numbers (keep) stay."""
+    a, b, static = "https://x.test/a/tu.pb", "https://x.test/b/tu.pb", "https://x.test/static.zip"
+    feeds = {
+        "a": realtime.FeedConfig("a", (realtime.Source(a, "", "", static),), frozenset({"trip", "train"}), 60, 60),
+        "b": realtime.FeedConfig("b", (realtime.Source(b, "", "", ""),), frozenset({"trip"}), 60, 60),
+    }
+    aioclient_mock.get(a, content=_pb("volan-trip-updates"))
+    aioclient_mock.get(b, content=_pb("volan-trip-updates"))
+    aioclient_mock.get(static, content=(FIX / "mav-static.zip").read_bytes())
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    clock = FakeClock()
+    hub = realtime.RealtimeHub(session, feeds=feeds, monotonic=clock.monotonic, wall=lambda: NOW)
+    await hub.query("a", [])
+    for _ in range(realtime.IDLE_INTERVALS + 1):
+        clock.now += 60
+        await hub.query("b", [])
+    assert hub._entries[a].data is None and not hub._entries[a].etag
+    assert hub._entries[static].data and hub._entries[b].data is not None
+    # Asked for again: fetched anew, unconditionally.
+    calls = aioclient_mock.call_count
+    resp = await hub.query("a", [{"key": "k", "trip_id": "hkir:hkir_3624_6-2"}])
+    await session.close()
+    assert aioclient_mock.call_count == calls + 1 and "k" in resp["trips"]
+
+
 def test_static_zip_member_cap(monkeypatch) -> None:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:

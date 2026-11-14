@@ -215,7 +215,9 @@ Should either side object, removing the operator from `realtime_feeds.json`
   2026-11-02), so each feed is fetched at most every 60 seconds (never under
   30), the Volán intercity trip updates (~500 kB compressed, 1.9 MB
   decoded) every 120 seconds. Every card and browser of one Home Assistant
-  shares the copy.
+  shares the copy. A copy no card has asked for in five of its intervals
+  is dropped from memory (the static zips' train numbers are kept); the
+  next ask fetches the feed anew.
 - **Polite requests.** A descriptive User-Agent with the project's address;
   gzip; `If-None-Match` / `If-Modified-Since` where the server sends an ETag
   or Last-Modified (`gtfs.gpspositions.net` and the static zips do; the

@@ -53,6 +53,10 @@ DEFAULT_INTERVAL = 60
 MIN_INTERVAL = 30
 # A feed that failed is not asked again for this long.
 FAIL_BACKOFF = 60
+# A decoded feed no card has asked for in this many of its intervals is
+# dropped from memory (the Volán intercity one is tens of MB of objects);
+# the next ask fetches it anew. Not the static feeds' train numbers (keep).
+IDLE_INTERVALS = 5
 # The MÁV and GYSEV static feeds (train numbers) change weekly. A refresh
 # that fails keeps the copy from before: its trip ids stay valid for the
 # whole timetable period, and they only name trips for the live feeds,
@@ -527,6 +531,10 @@ class _Entry:
     data: Any = None
     etag: str = ""
     last_modified: str = ""
+    # When a card last asked for it, its interval and keep (_drop_idle).
+    asked: float = -1e18
+    interval: float = 0.0
+    keep: bool = False
 
 
 class RealtimeHub:
@@ -644,7 +652,12 @@ class RealtimeHub:
         it fails, or with keep the last good copy (one warning when it starts
         failing, one line when it answers again)."""
         entry = self._entries.setdefault(url, _Entry())
-        age = self._monotonic() - entry.at
+        now = self._monotonic()
+        entry.asked = now
+        entry.interval = interval
+        entry.keep = keep
+        self._drop_idle(now)
+        age = now - entry.at
         if age < (interval if entry.ok else backoff):
             return entry.data if entry.ok or keep else None
         task = self._inflight.get(url)
@@ -653,6 +666,19 @@ class RealtimeHub:
             self._inflight[url] = task
             task.add_done_callback(lambda _t: self._inflight.pop(url, None))
         return await asyncio.shield(task)
+
+    def _drop_idle(self, now: float) -> None:
+        """Drop the copies no card has asked for in IDLE_INTERVALS of their
+        interval, with their validators; keep entries are never dropped."""
+        for url, entry in self._entries.items():
+            if (
+                entry.data is not None and not entry.keep
+                and now - entry.asked > IDLE_INTERVALS * entry.interval
+                and url not in self._inflight
+            ):
+                entry.data = None
+                entry.ok = False
+                entry.etag = entry.last_modified = ""
 
     async def _refresh(
         self, url: str, entry: _Entry, cap: int, parse: Callable[[bytes], Any], what: str, keep: bool = False
