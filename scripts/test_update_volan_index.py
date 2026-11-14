@@ -728,6 +728,42 @@ with tempfile.TemporaryDirectory() as tmp:
           and fake.downloads.count("https://kti.example/volan.zip") == downloads + 1,
           repr((fake.downloads, len(volan_builds) - builds)))
 
+# A state.json that is no object, has non-object entries or is not UTF-8
+# reads as empty (or those entries as empty), never stopping the run.
+with tempfile.TemporaryDirectory() as tmp:
+    sp = Path(tmp) / "state.json"
+    for raw, want in [
+        (b"null", {}),
+        (b"[]", {}),
+        (b'"x"', {}),
+        (b"\xff\xfe{}", {}),
+        (b'{"volan": [], "cities": {"a": "x", "b": {"etag": "b-1"}}, "failing": 3, "schema_reported": null,'
+         b' "city_retry": true}',
+         {"volan": {}, "cities": {"a": {}, "b": {"etag": "b-1"}}, "failing": {}, "schema_reported": {},
+          "city_retry": True}),
+        (b'{"cities": []}', {"cities": {}}),
+    ]:
+        sp.write_bytes(raw)
+        try:
+            got = uvi.load_state(sp)
+        except Exception as err:  # noqa: BLE001 - the regression is an exception
+            got = err
+        check(f"load_state({raw[:40]!r}) == {want!r}", got == want, repr(got))
+
+    (Path(tmp) / "run").mkdir()
+    fake = Fake(Path(tmp) / "run")
+    fake.install()
+    uvi.build_index = lambda _z, out: (out.write_bytes(gzip.compress(b'{"v":29}')),
+                                       {"feed_version": "v1", "trips": 46000, "stops": 9000})[1]
+    for raw in (b"null", b'{"volan": "x", "cities": {"a": []}, "failing": []}', b"\xc3\x28"):
+        (fake.base / "state.json").write_bytes(raw)
+        try:
+            code = fake.run()
+        except Exception as err:  # noqa: BLE001
+            code = err
+        check(f"a run with state.json {raw!r} goes on and writes a good state",
+              code == 0 and isinstance(fake.state().get("cities"), dict), repr(code))
+
 # Older scripts in /config/hungarian-transport do not overwrite an index a
 # release shipped with a newer schema (restore_hacs_indexes kept it): the
 # run says so and leaves both indexes, and the pending city zips, as they are.

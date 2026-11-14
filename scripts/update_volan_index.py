@@ -471,13 +471,29 @@ def mav_source_newer(src: Path, out: Path) -> bool:
         return True
 
 
+# state.json entries that are objects; one that is not (a hand edit, a
+# truncated write) reads as empty rather than stopping every run.
+STATE_OBJECTS = ("volan", "cities", "failing", "schema_reported")
+
+
 def load_state(path: Path) -> dict:
+    """state.json, or {} when it is missing or unreadable (not JSON, not
+    UTF-8, not an object). Its object entries, and each city's entry, are
+    objects: anything else there reads as {}."""
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # UnicodeDecodeError and JSONDecodeError are ValueErrors
         return {}
+    if not isinstance(state, dict):
+        return {}
+    for key in STATE_OBJECTS:
+        if key in state and not isinstance(state[key], dict):
+            state[key] = {}
+    if "cities" in state:
+        state["cities"] = {k: v if isinstance(v, dict) else {} for k, v in state["cities"].items()}
+    return state
 
 
 def save_state(path: Path, state: dict) -> None:
