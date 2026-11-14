@@ -6208,6 +6208,22 @@ const settle = async (el) => {
   check('a failed ELVIRA call\'s reason is readable text',
     JSON.stringify(texts) === JSON.stringify(['Connection lost', 'Connection lost', 'unavailable', 'Timeout', 'unknown_error', '']),
     JSON.stringify(texts));
+  /* FUTÁR through the integration reads the same rejections. */
+  const keepHass = Lib._hass;
+  const banners = [];
+  for (const rej of [{ type: 'result', success: false, error: { code: 3, message: 'Connection lost' } }, 3, {}, new Error('BKK timeout')]) {
+    Lib._hass = { states: {}, services: { hungarian_transport: { futar: {} } }, connection: { sendMessagePromise: async () => { throw rej; } } };
+    try {
+      await Lib._fetchViaIntegration('arrivals-and-departures-for-stop.json', { stopId: 'BKK_F1' });
+      banners.push('resolved');
+    } catch (e) {
+      banners.push(e.message);
+    }
+  }
+  Lib._hass = keepHass;
+  check('a FUTÁR call the websocket rejected says why, not "BKK [object Object]" or "BKK 3"',
+    JSON.stringify(banners) === JSON.stringify(['BKK Connection lost', 'BKK Connection lost', 'BKK connection lost', 'BKK timeout']),
+    JSON.stringify(banners));
 }
 {
   /* One scan of hass.states per change, and one pattern per row. */

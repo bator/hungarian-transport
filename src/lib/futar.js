@@ -114,8 +114,9 @@ register({
       const call = BkkLib.callServiceResponse(hass, 'hungarian_transport', 'futar', serviceData);
       res = await Promise.race([call, timeout]);
     } catch (err) {
-      const msg = err && (err.message || err.code);
-      throw new Error(msg && /^BKK /.test(String(msg)) ? String(msg) : `BKK ${msg || err}`);
+      /* A websocket rejection is no Error: {error: {code, message}} or 3. */
+      const msg = BkkLib.elviraErrText(err) || 'connection lost';
+      throw new Error(/^BKK /.test(msg) ? msg : `BKK ${msg}`);
     } finally {
       if (timer) clearTimeout(timer);
     }
