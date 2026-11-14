@@ -19,6 +19,7 @@ on:
       - custom_components/hungarian_transport/gtfs_feed.py
       # The daily workflow's Pages site from the same build (not published).
       - scripts/mav_pages_site.py
+      - scripts/mav_shrink_guard.py
 
 permissions:
   contents: read

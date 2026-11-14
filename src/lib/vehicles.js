@@ -63,10 +63,6 @@ register({
     if (!rk.re || !rk.re.test(vk.blob)) return false;
     return !rk.num || !vk.n;
   },
-  matchEmmaVehicle(row, vehicle) {
-    if (!row || !vehicle) return false;
-    return BkkLib._emmaKeysMatch(BkkLib._emmaRowKey(row), BkkLib._emmaVehicleKey(vehicle));
-  },
   _emmaKeyed(vehicles) {
     return (Array.isArray(vehicles) ? vehicles : [])
       .filter(Boolean)
@@ -109,10 +105,6 @@ register({
     assign(true);
     assign(false);
     return list;
-  },
-  applyEmmaPositions(rows, vehicles) {
-    const list = Array.isArray(rows) ? rows : [];
-    return BkkLib._applyEmmaKeyed(list, BkkLib._emmaKeyed(vehicles));
   },
   coachRouteKeys(route) {
     const raw = String(route || '').trim().toUpperCase();

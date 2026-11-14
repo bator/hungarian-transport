@@ -580,13 +580,14 @@ register({
     const horizon = clampMinutesAfter(opts.minutesAfter);
     if (mode === 'helyi') {
       let cityRows = await BkkLib.cityDepartures(ix, stopId, dest, opts.originName, opts.city, horizon);
-      cityRows = await BkkLib.fillTransitousIfEmpty(
+      /* null: the fill failed, and the board stays as it is. */
+      cityRows = (await BkkLib.fillTransitousIfEmpty(
         cityRows,
         /* With the stop's coordinates: by name alone "Kossuth tér" is any town's. */
         { id: stopId, name: opts.originName || '', lat: opts.originLat, lon: opts.originLon },
         dest,
         opts,
-      );
+      )) || cityRows;
       if (opts.deferGps) return cityRows;
       return BkkLib.attachCoachGps(opts.hass, cityRows);
     }

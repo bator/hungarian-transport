@@ -28,7 +28,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.hungarian_transport import realtime
+from custom_components.hungarian_transport import mavplusz, realtime
 from custom_components.hungarian_transport.const import DOMAIN, SERVICE_REALTIME
 
 from .test_upstream import FakeClock
@@ -117,16 +117,15 @@ def _ld(num: int, body: bytes) -> bytes:
     return bytes([(num << 3) | 2, len(body)]) + body
 
 
-def test_alerts_and_deleted_entities() -> None:
+def test_alerts_are_skipped_and_deleted_entities_dropped() -> None:
     header = _ld(1, b"\x0a\x032.0")
     text = _ld(1, _ld(1, b"Detour") + _ld(2, b"en")) + _ld(1, _ld(1, "Terelés".encode()) + _ld(2, b"hu"))
     informed = _ld(5, _ld(2, b"hkir:R1") + _ld(5, b"hkir:S1"))
     alert = _ld(5, informed + _ld(10, text))
     deleted = _ld(2, _ld(1, b"x") + b"\x10\x01" + _ld(4, _ld(1, _ld(1, b"hkir:T")) + _ld(2, b"\x0d\x00\x00\x3c\x42\x15\x00\x00\x98\x41")))
     feed = realtime.decode_feed(header + _ld(2, _ld(1, b"a") + alert) + deleted, "hkir:")
-    (a,) = feed.alerts
-    assert (a.header, a.routes, a.stops) == ("Terelés", ["R1"], ["S1"])
-    assert not feed.vehicles
+    assert not feed.vehicles and not feed.trip_updates
+    assert not hasattr(feed, "alerts")
 
 
 def test_train_numbers_from_static() -> None:
@@ -444,6 +443,45 @@ def test_deleted_trip_is_canceled() -> None:
     assert hit["canceled"] is True and hit["delay"] is None
 
 
+def _runs(*runs: tuple[bytes, int]) -> realtime.Feed:
+    """Trip updates of trip T1 at stop S1, one per (start_date, delay)."""
+    header = _ld(1, b"\x0a\x032.0" + b"\x18" + _varint(NOW))
+    entities = b"".join(
+        _ld(2, _ld(1, b"e%d" % n) + _ld(3, _ld(1, _ld(1, b"T1") + _ld(3, day)) + _stu(b"S1", 1, delay)))
+        for n, (day, delay) in enumerate(runs)
+    )
+    return realtime.decode_feed(header + entities)
+
+
+def test_two_service_days_of_a_trip_id_stay_apart() -> None:
+    """Last night's run past midnight beside today's: the card's date picks
+    its own, not whichever came last in the feed."""
+    feed = _runs((b"20261101", 600), (b"20261102", 60))
+    loaded = [(realtime.Source("tu", "", "", ""), feed, None, None)]
+    req = {"trip_id": "T1", "stops": ["S1"], "from": 0}
+    assert _answer(_cfg("trip"), loaded, date="20261102", **req)["delay"] == 60
+    assert _answer(_cfg("trip"), loaded, date="20261101", **req)["delay"] == 600
+    assert _answer(_cfg("trip"), loaded, date="20261103", **req) is None
+    # Without a date, the first run seen; the same run twice is one.
+    assert _answer(_cfg("trip"), loaded, **req)["delay"] == 600
+    assert not _runs((b"20261102", 60), (b"20261102", 90)).trip_days
+    # The planner's answer for two dates of one trip is kept the same way.
+    tus = [realtime.TripUpdate("T1", day, "", 0, None, []) for day in ("20261101", "20261102")]
+    planner = mavplusz.to_feed([mavplusz.TripResult(t, None) for t in tus], NOW)
+    assert planner.trip_update("T1", "20261102") is tus[1] and planner.trip_update("T1", "20261101") is tus[0]
+
+
+@pytest.mark.parametrize(("day", "found"), [(b"20261102", True), (b"20261101", True), (b"20261030", False), (b"", True)])
+def test_a_train_is_todays_or_last_nights_run(day, found) -> None:
+    """The cards send no date for a train: a run of its trip id on another
+    day is not it."""
+    loaded = [(realtime.Source("tu", "", "", ""), _runs((day, 120)), None, {"822": ["T1"]})]
+    hit = _answer(_cfg("train"), loaded, train="822", stops=["S1"], **{"from": 0})
+    assert (hit is not None) is found
+    # A date the request names is matched as it is.
+    assert (_answer(_cfg("train"), loaded, train="822", date="20261030") is not None) is (day in (b"20261030", b""))
+
+
 def test_a_feed_with_too_many_stop_updates_is_refused(monkeypatch) -> None:
     monkeypatch.setattr(realtime, "MAX_FEED_STOP_UPDATES", 3)
     with pytest.raises(realtime.RtDecodeError):
@@ -708,6 +746,11 @@ async def test_a_bad_static_body_does_not_take_the_kept_copys_validators(
         {"feed": "volan", "trips": [{"key": "a", "from": realtime.MAX_STOPS}]},
         {"feed": "volan", "trips": [{"key": "a", "repeat": [realtime.MAX_STOPS]}]},
         {"feed": "volan", "trips": [{"key": "a", "repeat": ["x"]}]},
+        # A YAML .inf: invalid, not an OverflowError out of the schema.
+        {"feed": "volan", "trips": [{"key": "a", "start": float("inf")}]},
+        {"feed": "volan", "trips": [{"key": "a", "from": float("inf")}]},
+        {"feed": "volan", "trips": [{"key": "a", "to": float("-inf")}]},
+        {"feed": "volan", "trips": [{"key": "a", "repeat": [float("inf")]}]},
     ],
 )
 async def test_service_validates_input(hass, aioclient_mock, data) -> None:
@@ -763,6 +806,33 @@ async def test_a_feed_ages_by_the_hubs_wall_clock(aioclient_mock) -> None:
     assert "error" not in fresh and fresh["updated"]
     assert stale.get("error") == "rt_unavailable"
     assert aioclient_mock.call_count == 1
+
+
+async def test_a_feed_no_card_asks_for_leaves_memory(aioclient_mock) -> None:
+    """A decoded feed is dropped once no card has asked for it in
+    IDLE_INTERVALS of its interval; the static train numbers (keep) stay."""
+    a, b, static = "https://x.test/a/tu.pb", "https://x.test/b/tu.pb", "https://x.test/static.zip"
+    feeds = {
+        "a": realtime.FeedConfig("a", (realtime.Source(a, "", "", static),), frozenset({"trip", "train"}), 60, 60),
+        "b": realtime.FeedConfig("b", (realtime.Source(b, "", "", ""),), frozenset({"trip"}), 60, 60),
+    }
+    aioclient_mock.get(a, content=_pb("volan-trip-updates"))
+    aioclient_mock.get(b, content=_pb("volan-trip-updates"))
+    aioclient_mock.get(static, content=(FIX / "mav-static.zip").read_bytes())
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    clock = FakeClock()
+    hub = realtime.RealtimeHub(session, feeds=feeds, monotonic=clock.monotonic, wall=lambda: NOW)
+    await hub.query("a", [])
+    for _ in range(realtime.IDLE_INTERVALS + 1):
+        clock.now += 60
+        await hub.query("b", [])
+    assert hub._entries[a].data is None and not hub._entries[a].etag
+    assert hub._entries[static].data and hub._entries[b].data is not None
+    # Asked for again: fetched anew, unconditionally.
+    calls = aioclient_mock.call_count
+    resp = await hub.query("a", [{"key": "k", "trip_id": "hkir:hkir_3624_6-2"}])
+    await session.close()
+    assert aioclient_mock.call_count == calls + 1 and "k" in resp["trips"]
 
 
 def test_static_zip_member_cap(monkeypatch) -> None:

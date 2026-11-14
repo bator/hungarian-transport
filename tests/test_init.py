@@ -114,6 +114,27 @@ async def test_cards_are_a_lovelace_resource_too(hass, hass_client) -> None:
     await integration.async_remove_entry(hass, entry)
     assert _our_resources(hass) == []
     assert any(item["url"] == "/local/other-card.js" for item in resources.async_items())
+    # Added again without a restart: the resource comes back.
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    again = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN)
+    again.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(again.entry_id)
+    await hass.async_block_till_done()
+    assert [(item["type"], item["url"]) for item in _our_resources(hass)] == [("module", card_url)]
+
+
+async def test_removal_takes_the_update_record_along(hass, hass_storage) -> None:
+    entry = await _setup(hass)
+    await integration.storage.async_save(hass, {"mav_install": {"source": "daily"}})
+    await integration.storage.async_load(hass)
+    await hass.async_block_till_done()
+    assert integration.storage.STORAGE_KEY in hass_storage
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert integration.storage.STORAGE_KEY not in hass_storage
+    assert "update_state" not in hass.data[DOMAIN]
+    # A new entry starts from an empty record.
+    assert await integration.storage.async_load(hass) == {}
 
 
 async def test_yaml_mode_resources_are_left_alone(hass) -> None:
@@ -283,6 +304,7 @@ async def test_elvira_service_returns_rows(hass, aioclient_mock, freezer) -> Non
         # A YAML .inf is out of range too, not an OverflowError out of the schema.
         ({"origin_code": ORIGIN, "dest_code": DEST, "at": float("inf")}, vol.Invalid),
         ({"origin_code": ORIGIN, "dest_code": DEST, "at": float("-inf")}, vol.Invalid),
+        ({"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": float("inf")}, vol.Invalid),
     ],
 )
 async def test_elvira_service_rejects_bad_input(hass, aioclient_mock, data, error) -> None:

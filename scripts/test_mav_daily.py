@@ -34,6 +34,10 @@ sys.path.insert(0, str(HERE))
 import index_digest  # noqa: E402
 import mav_daily_verdict as verdict_mod  # noqa: E402
 import mav_pages_site as site  # noqa: E402
+import mav_shrink_guard  # noqa: E402
+
+# The shrink guard's override, should the developer's shell have it.
+os.environ.pop(mav_shrink_guard.ALLOW_ENV, None)
 
 failed = 0
 
@@ -238,6 +242,65 @@ with tempfile.TemporaryDirectory() as tmp_name:
           rc == 0 and outputs.get("deploy") == "true" and "deploying" in out, repr((rc, out, err)))
     check("an http:// live URL is not fetched", site.fetch_live("http://example.invalid/m.json")[0] is None)
 
+    # A truncated feed, consistent in itself and newer, must not replace a
+    # published index with more than twice its trains and lines (60 here).
+    for n, (label, prev, ok) in enumerate((
+        ("121 trains and lines", {"trains": 100, "lines": 21}, False),
+        ("120 trains and lines (exactly half)", {"trains": 100, "lines": 20}, True),
+        ("49 trains and lines (under the floor)", {"trains": 49, "lines": 0}, True),
+        ("no integer counts", {"trains": "many", "lines": None}, True),
+        ("no counts", {"trains": None, "lines": None}, True),
+    )):
+        live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64, **prev}))
+        rc, out, err, outputs = run_site(tmp / f"shrink-{n}", "--live-file", str(live))
+        if ok:
+            check(f"a published index of {label}: deployed", rc == 0 and outputs.get("deploy") == "true",
+                  repr((rc, out, err)))
+        else:
+            check(f"a published index of {label}: refused, nothing written",
+                  rc == 1 and "60 trains and 0 lines vs 100 and 21" in err and "MAV_ALLOW_SHRINK" in err
+                  and not (tmp / f"shrink-{n}" / "site").exists() and "deploy" not in outputs,
+                  repr((rc, out, err, outputs)))
+    live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64, "trains": 121}))
+    rc, out, err, outputs = run_site(tmp / "shrink-flag", "--live-file", str(live), "--allow-shrink")
+    check("--allow-shrink publishes it, with a warning",
+          rc == 0 and outputs.get("deploy") == "true" and "::warning title=MÁV index shrank::" in out,
+          repr((rc, out, err)))
+    os.environ[mav_shrink_guard.ALLOW_ENV] = "1"
+    try:
+        rc, out, err, outputs = run_site(tmp / "shrink-env", "--live-file", str(live))
+    finally:
+        os.environ.pop(mav_shrink_guard.ALLOW_ENV, None)
+    check("MAV_ALLOW_SHRINK=1 publishes it", rc == 0 and outputs.get("deploy") == "true", repr((rc, out, err)))
+
+    # The script release.yml runs on the previous release's index.
+    def mav_gz(path: Path, trains: int, lines: int = 0) -> Path:
+        path.write_bytes(gzip.compress(json.dumps(
+            {"v": 1, "n": {str(i): [] for i in range(trains)}, "l": {str(i): [] for i in range(lines)}}).encode()))
+        return path
+
+    guard = HERE / "mav_shrink_guard.py"
+    small, big = mav_gz(tmp / "g-small.gz", 40, 10), mav_gz(tmp / "g-big.gz", 90, 11)
+    mid = mav_gz(tmp / "g-mid.gz", 90, 10)
+    junk = tmp / "g-junk.gz"
+    junk.write_bytes(b"not gzip")
+    no_allow = {k: v for k, v in os.environ.items() if k != mav_shrink_guard.ALLOW_ENV}
+    for label, args, want in (
+        ("50 vs 101: refused", (small, big), 1),
+        ("50 vs 100: taken", (small, mid), 0),
+        ("101 vs 50: taken", (big, small), 0),
+        ("an unreadable previous index: nothing compared", (small, junk), 0),
+        ("an unreadable new index: nothing compared", (junk, big), 0),
+    ):
+        done = subprocess.run([sys.executable, str(guard), *map(str, args)], capture_output=True, text=True,
+                              timeout=30, env=no_allow)
+        check(f"mav_shrink_guard.py {label}", done.returncode == want,
+              repr((done.returncode, done.stdout, done.stderr)))
+    done = subprocess.run([sys.executable, str(guard), str(small), str(big)], capture_output=True, text=True,
+                          timeout=30, env={**no_allow, mav_shrink_guard.ALLOW_ENV: "true"})
+    check("mav_shrink_guard.py with MAV_ALLOW_SHRINK=true takes the smaller index",
+          done.returncode == 0 and "accepted" in done.stdout, repr((done.returncode, done.stdout, done.stderr)))
+
     refusals = {
         "another schema": {"index": index_bytes(schema=site.mav_index.SCHEMA + 1)},
         "statistics of another feed": {"st": stats("20261031.M2ChangeID")},
@@ -312,8 +375,35 @@ with tempfile.TemporaryDirectory() as tmp_name:
     site.write_overlay(pf_b, ov_b)
     check("another shapes.txt gives other overlay bytes", ov_a.read_bytes() != ov_b.read_bytes())
 
+    # feed_info.txt as the index builder reads it (gtfs_feed): a publisher
+    # name in cp1250, a space after the header's commas, a folder in the zip.
+    odd = tmp / "odd-feed-info.zip"
+    with zipfile.ZipFile(odd, "w") as z:
+        z.writestr("mav/feed_info.txt", "feed_publisher_name, feed_version, feed_start_date\n".encode()
+                   + "MÁV-START Zrt.,".encode("cp1250") + b" 20261101.M2ChangeID , 20261101\n")
+    try:
+        odd_version = site.gtfs_feed_version(odd)
+    except site.SiteError as err:
+        odd_version = repr(err)
+    check("gtfs_feed_version reads a cp1250 feed_info.txt with spaces after the commas",
+          odd_version == "20261101.M2ChangeID", odd_version)
+    for name, body, why in [
+        ("no-feed-info.zip", {"routes.txt": "route_id\nr1\n"}, "has no feed_info.txt"),
+        ("undated.zip", {"feed_info.txt": "feed_publisher_name,feed_version\nMÁV-START,latest\n"},
+         "names no dated feed_version"),
+    ]:
+        with zipfile.ZipFile(tmp / name, "w") as z:
+            for member, text in body.items():
+                z.writestr(member, text)
+        try:
+            site.gtfs_feed_version(tmp / name)
+            refused = ""
+        except site.SiteError as err:
+            refused = str(err)
+        check(f"gtfs_feed_version refuses a zip that {why}", why in refused, refused)
+
     official = gtfs_zip(tmp / "dl" / "gtfs" / "mav-gtfs.zip")
-    gtfs_args = ("--gtfs-zip", str(official), "--pfaedle-dir", str(pf_a))
+    gtfs_args =("--gtfs-zip", str(official), "--pfaedle-dir", str(pf_a))
     rc, out, err, outputs = run_site(tmp / "g", *gtfs_args)
     gsite = tmp / "g" / "site"
     gman = json.loads((gsite / "mav-index.json").read_text()) if (gsite / "mav-index.json").is_file() else {}

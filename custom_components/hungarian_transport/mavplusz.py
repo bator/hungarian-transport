@@ -29,9 +29,11 @@ import aiohttp
 from . import realtime
 
 URL = "https://mavplusz.hu/otp2-backend/otp/routers/default/index/graphql"
-# Trips in one request. The service takes at most realtime.MAX_TRIPS (40)
-# trips a call, so one request always covers a call; a longer list (the hub
-# used directly) is cut here, never split into more requests.
+# Trips in one request, of the ones not cached yet; the rest are cut, never
+# split into more requests. A call of realtime.MAX_TRIPS (40) rows can need
+# more: a route + start row asks for its resolved trips and its card's own
+# trip id. The hub asks the resolved ones first (realtime._query_mavplusz),
+# and the ones cut go out on a later poll, while the others are cached.
 MAX_TRIPS_PER_REQUEST = 40
 # Decompressed answer cap: 40 long trips are ~250 KB.
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024
@@ -274,7 +276,6 @@ def _vehicle(trip: dict[str, Any], key: TripKey, route_id: str) -> realtime.Vehi
             _num(vp.get("speed")),
             ts,
             realtime._strip(_gid(rel.get("stop")), key.prefix),
-            None,
             _STATUS.get(rel.get("status")),
         )
     return best
@@ -296,10 +297,10 @@ def parse_trip(trip: Any, key: TripKey) -> TripResult:
         return TripResult(None, None)
     trip_id = realtime._strip(key.gtfs_id, key.prefix)
     if all(c.get("realtimeState") == "CANCELED" for c in calls):
-        tu = realtime.TripUpdate(trip_id, key.date, "", route_id, 3, None, [])
+        tu = realtime.TripUpdate(trip_id, key.date, route_id, 3, None, [])
         return TripResult(tu, None)
     stops = [_stop_update(c, key.prefix) for c in calls]
-    tu = realtime.TripUpdate(trip_id, key.date, "", route_id, 0, None, stops)
+    tu = realtime.TripUpdate(trip_id, key.date, route_id, 0, None, stops)
     return TripResult(tu, _vehicle(trip, key, route_id))
 
 
@@ -347,7 +348,7 @@ def to_feed(
             tu = res.trip_update
             if route_learned:
                 tu = dataclasses.replace(tu, route_learned=True)
-            feed.trip_updates[tu.trip_id] = tu
+            feed.add_trip_update(tu)
         if res.vehicle is not None:
-            feed.vehicles[res.vehicle.trip_id] = res.vehicle
+            feed.add_vehicle(res.vehicle)
     return feed

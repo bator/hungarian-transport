@@ -685,55 +685,64 @@ export class BKKPlannerCard extends BKKHopCard {
       return false;
     }
     if (stale()) return again;
-    const overlay = document.createElement('div');
-    overlay.className = 'ht-map-overlay';
-    const title = `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
-    const footText = t(lang, 'plannerJourneySummary', [
-      journey && journey.durationMin,
-      journey && journey.transfers,
-      journey && journey.walkMin,
-      (journey && journey.waitMin) || 0,
-    ]);
-    overlay.innerHTML = `
-      <style>${this._mapChromeCss()}</style>
-      <div class="ht-map-panel" role="dialog" aria-modal="true">
-        <div class="ht-map-head">
-          <div class="meta">${BkkLib.esc(title)}</div>
-          <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, 'mapClose'))}">\u00d7</button>
-        </div>
-        <div class="ht-map-canvas"></div>
-        <div class="ht-map-foot">${BkkLib.esc(footText)}</div>
-      </div>
-    `;
-    (document.documentElement || document.body).appendChild(overlay);
-    this._mapOverlay = overlay;
-    this._openMapKey = 'journey';
-    this._onMapKey = (ev) => {
-      if (ev.key === 'Escape') this._closeVehicleMap();
-    };
-    document.addEventListener('keydown', this._onMapKey);
-    const closeBtn = overlay.querySelector('.ht-map-close');
-    closeBtn.addEventListener('click', () => this._closeVehicleMap());
-    try { closeBtn.focus(); } catch (_e) { /* ignore */ }
-    overlay.addEventListener('click', (ev) => {
-      if (ev.target === overlay) this._closeVehicleMap();
-    });
-    const canvas = overlay.querySelector('.ht-map-canvas');
-    const start = segs[0].shape[0];
-    let map;
+    /* Leaflet throwing while it draws is the failed-map notice, not an
+       unhandled rejection with the open still marked as running. */
     try {
-      map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView(start, 8);
-      L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
+      const overlay = document.createElement('div');
+      overlay.className = 'ht-map-overlay';
+      const title = `${cfg.stopName || ''} \u2192 ${cfg.destName || ''}`;
+      const footText = t(lang, 'plannerJourneySummary', [
+        journey && journey.durationMin,
+        journey && journey.transfers,
+        journey && journey.walkMin,
+        (journey && journey.waitMin) || 0,
+      ]);
+      overlay.innerHTML = `
+        <style>${this._mapChromeCss()}</style>
+        <div class="ht-map-panel" role="dialog" aria-modal="true">
+          <div class="ht-map-head">
+            <div class="meta">${BkkLib.esc(title)}</div>
+            <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, 'mapClose'))}">\u00d7</button>
+          </div>
+          <div class="ht-map-canvas"></div>
+          <div class="ht-map-foot">${BkkLib.esc(footText)}</div>
+        </div>
+      `;
+      (document.documentElement || document.body).appendChild(overlay);
+      this._mapOverlay = overlay;
+      this._openMapKey = 'journey';
+      this._onMapKey = (ev) => {
+        if (ev.key === 'Escape') this._closeVehicleMap();
+      };
+      document.addEventListener('keydown', this._onMapKey);
+      const closeBtn = overlay.querySelector('.ht-map-close');
+      closeBtn.addEventListener('click', () => this._closeVehicleMap());
+      try { closeBtn.focus(); } catch (_e) { /* ignore */ }
+      overlay.addEventListener('click', (ev) => {
+        if (ev.target === overlay) this._closeVehicleMap();
+      });
+      const canvas = overlay.querySelector('.ht-map-canvas');
+      const start = segs[0].shape[0];
+      let map;
+      try {
+        map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView(start, 8);
+        L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
+      } catch (_e) {
+        this._openingMap = '';
+        this._showMapNotice(t(lang, 'mapLeafletFail'));
+        return false;
+      }
+      this._map = map;
+      const allPts = this._drawJourneyPolylines(L, map, segs, { labels: true });
+      this._fitJourneyView(L, map, allPts, 36, () => this._map === map);
+      this._openingMap = '';
+      return false;
     } catch (_e) {
+      if (this._mapStale(seq)) return false;
       this._openingMap = '';
       this._showMapNotice(t(lang, 'mapLeafletFail'));
       return false;
     }
-    this._map = map;
-    const allPts = this._drawJourneyPolylines(L, map, segs, { labels: true });
-    this._fitJourneyView(L, map, allPts, 36, () => this._map === map);
-    this._openingMap = '';
-    return false;
   }
 
   /* While a pair is still being picked the card keeps its own name (or

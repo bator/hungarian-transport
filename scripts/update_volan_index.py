@@ -310,6 +310,40 @@ def served_mav_wins(durable: Path, served: Path) -> bool:
     return si.built_at(served) > si.built_at(durable)
 
 
+def _feed_days(si, feed: str | None) -> dict[str, date | None]:
+    """Operator -> the date its feed_version names, from a Volán or city
+    index's "feed" ("volan:01716.20261102", operators joined by ";")."""
+    days: dict[str, date | None] = {}
+    for item in (feed or "").split(";"):
+        op, sep, version = item.partition(":")
+        if sep and op:
+            days[op] = si.feed_date(version)
+    return days
+
+
+def served_feeds_newer(durable: Path, served: Path) -> bool:
+    """Whether the served Volán or city index was built from newer feeds
+    than the durable copy (a release shipped feeds this machine has not
+    fetched yet): every operator of the durable copy is in the served one,
+    none of its feeds is older there and at least one is later. An operator
+    whose feed names no date, on either side, keeps the durable copy, as
+    does an integration older than these scripts."""
+    try:
+        si = _served_index()
+    except ImportError:
+        return False
+    old, new = _feed_days(si, si.read_feed(durable)), _feed_days(si, si.read_feed(served))
+    if not old:
+        return False
+    later = False
+    for op, day in old.items():
+        other = new.get(op)
+        if day is None or other is None or other < day:
+            return False
+        later |= other > day
+    return later
+
+
 def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
     """Put the durable indexes back after HACS replaced the served folder.
 
@@ -318,9 +352,10 @@ def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
     exactly that feed; if the feed has moved since, this same run rebuilds.
     So the durable copy wins over whatever a release shipped, unless it was
     built with an older index schema than the shipped one (stale scripts in
-    /config/hungarian-transport). For mav-index see served_mav_wins(); a
-    served index that wins becomes the durable copy, so the next HACS update
-    restores it and not an older feed.
+    /config/hungarian-transport) or from older feeds (served_feeds_newer: a
+    release that shipped feeds this machine has not fetched yet). For
+    mav-index see served_mav_wins(); a served index that wins becomes the
+    durable copy, so the next HACS update restores it and not an older feed.
     """
     restored: list[str] = []
     if not base.is_dir():
@@ -336,6 +371,10 @@ def restore_hacs_indexes(base: Path, www: Path) -> list[str]:
                 if filecmp.cmp(src, dest, shallow=False):
                     continue
                 if name == MAV_INDEX and served_mav_wins(src, dest):
+                    persist_index(dest, base)
+                    continue
+                if name != MAV_INDEX and served_feeds_newer(src, dest):
+                    print(f"keep shipped {name}: its feeds are newer than the durable copy's")
                     persist_index(dest, base)
                     continue
             except OSError:
@@ -432,13 +471,29 @@ def mav_source_newer(src: Path, out: Path) -> bool:
         return True
 
 
+# state.json entries that are objects; one that is not (a hand edit, a
+# truncated write) reads as empty rather than stopping every run.
+STATE_OBJECTS = ("volan", "cities", "failing", "schema_reported")
+
+
 def load_state(path: Path) -> dict:
+    """state.json, or {} when it is missing or unreadable (not JSON, not
+    UTF-8, not an object). Its object entries, and each city's entry, are
+    objects: anything else there reads as {}."""
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):  # UnicodeDecodeError and JSONDecodeError are ValueErrors
         return {}
+    if not isinstance(state, dict):
+        return {}
+    for key in STATE_OBJECTS:
+        if key in state and not isinstance(state[key], dict):
+            state[key] = {}
+    if "cities" in state:
+        state["cities"] = {k: v if isinstance(v, dict) else {} for k, v in state["cities"].items()}
+    return state
 
 
 def save_state(path: Path, state: dict) -> None:

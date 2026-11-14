@@ -236,6 +236,18 @@ check('card size grows with the rows', card.getCardSize() >= 2, String(card.getC
     !!picked && picked.headsign === 'Clicked train', picked && picked.headsign);
   card._rows = saved;
   card._paint();
+  /* A poll's next snapshot of the same rows (new row objects) keeps the table. */
+  const kept = firstRow();
+  card._rows = saved.map((r) => Object.assign({}, r));
+  card._paint();
+  const same = firstRow();
+  card._rows = saved.map((r, i) => (i ? r : Object.assign({}, r, { headsign: 'Elsewhere' })));
+  card._paint();
+  check('the same rows painted again keep the table; a changed row repaints it',
+    same === kept && firstRow() !== kept && card._shownRows[0].headsign === 'Elsewhere',
+    JSON.stringify({ same: same === kept }));
+  card._rows = saved;
+  card._paint();
 }
 
 card._showErr(new Error('boom'));
@@ -273,6 +285,10 @@ minSel.dispatchEvent(new Event('change', { bubbles: true }));
 check('select change emits minutesAfter', emitted === 60, String(emitted));
 
 const Lib = globalThis.HungarianTransportLib;
+/* EMMA matching as enrichFromHass runs it: a row's keys against a vehicle's,
+   and the positions onto the rows, one vehicle to one row. */
+const matchEmma = (row, vehicle) => Lib._emmaKeysMatch(Lib._emmaRowKey(row), Lib._emmaVehicleKey(vehicle));
+const applyEmma = (rows, vehicles) => Lib._applyEmmaKeyed(rows, Lib._emmaKeyed(vehicles));
 /* Index resolvers for direct lib calls (lib/context.js): the indexes a check
    gives (ix.city = ...), every other one missing. IX gives none. */
 const noIndex = async () => { throw new Error('no such index in this check'); };
@@ -765,7 +781,7 @@ const cityIdx = {
     [0, '2', [0, 4], [0, 5]],
   ],
 };
-const hubPath = Lib.cityHubPath(cityIdx, cityIdx.stops[0]);
+const hubPath = Lib.cityHubPaths(cityIdx, cityIdx.stops[0], 1)[0];
 check('city feed reaches the station in two rides',
   hubPath && hubPath.hubName === 'Tiszai p\u00e1lyaudvar'
   && hubPath.edges.some((edge) => edge.route === 'ZOO')
@@ -1585,39 +1601,39 @@ check('pickMotisVehicle matches generic IC to IC 856 TÓPART', (() => {
   return hit && hit.trainNumber === '856';
 })());
 check('BALATON 861 matches EMMA vehicle by train number',
-  Lib.matchEmmaVehicle(
+  matchEmma(
     { label: 'BALATON', trainNumber: '861', tripId: 'elvira:2890602' },
     { lat: 47.229, lon: 18.668, trip: { tripShortName: '861 BALATON InterCity' } },
   ));
 check('BALATON does not match a Balatonfured headsign',
-  !Lib.matchEmmaVehicle(
+  !matchEmma(
     { label: 'BALATON', tripId: 'elvira:1' },
     { lat: 46.9, lon: 17.8, trip: { tripShortName: '9724 szemelyvonat', tripHeadsign: 'Balatonf\u00fcred' } },
   ));
 check('BAKONY 901 matches EMMA named IC by number',
-  Lib.matchEmmaVehicle(
+  matchEmma(
     { label: 'BAKONY', trainNumber: '901', tripId: 'elvira:1' },
     { lat: 47.15, lon: 18.04, trip: { tripShortName: '901 BAKONY InterCity', route: { longName: 'IC BAKONY' } } },
   ));
 check('BAKONY does not match a different train number',
-  !Lib.matchEmmaVehicle(
+  !matchEmma(
     { label: 'BAKONY', trainNumber: '901', tripId: 'elvira:1' },
     { lat: 47.18, lon: 18.56, trip: { tripShortName: '918 BAKONY InterCity' } },
   ));
-check('applyEmmaPositions fills ELVIRA lat/lon from EMMA', (() => {
+check('EMMA positions fill ELVIRA lat/lon from EMMA', (() => {
   const rows = [{ label: 'BALATON', trainNumber: '861', tripId: 'elvira:2890602' }];
-  Lib.applyEmmaPositions(rows, [{
+  applyEmma(rows, [{
     lat: 47.2290993, lon: 18.6682205, heading: 12,
     trip: { tripShortName: '861 BALATON InterCity' },
   }]);
   return rows[0].lat === 47.2290993 && rows[0].lon === 18.6682205 && rows[0].tripId === 'elvira:2890602';
 })());
-check('applyEmmaPositions replaces an existing FUTAR pin with EMMA', (() => {
+check('an EMMA position replaces an existing FUTAR pin with EMMA', (() => {
   const rows = [{
     label: 'BALATON', trainNumber: '861', tripId: 'elvira:2890602',
     lat: 47.5, lon: 19.05,
   }];
-  Lib.applyEmmaPositions(rows, [{
+  applyEmma(rows, [{
     lat: 47.2290993, lon: 18.6682205,
     trip: { tripShortName: '861 BALATON InterCity' },
   }]);
@@ -2499,7 +2515,7 @@ Lib.nextCityRide = origRide;
 Lib.searchStops = origSearch;
 Lib.elviraBetween = origElvira;
 
-check('enrichFromHass fills GPS via applyEmmaPositions', (() => {
+check('enrichFromHass fills GPS from EMMA vehicles', (() => {
   const rows = [{ label: 'BALATON', trainNumber: '861', tripId: 'elvira:1' }];
   Lib.enrichFromHass({
     states: {
@@ -3396,6 +3412,27 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     refreshSeconds(5) === 20 && refreshSeconds(15) === 20 && refreshSeconds('60') === 60 && refreshSeconds(99999) === 3600);
   check('the card polls with the parsed refresh, one run at a time',
     /refreshSeconds\(cfg\.refresh\)/.test(src) && /if \(pollRun\.busy\) return;/.test(src) && /\}, every\);/.test(src));
+  /* A poll run that rejects shows its error and frees the poll for the next tick. */
+  const pc = document.createElement('hungarian-transport-card');
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'en', stopId: 'BKK_F1', stopName: 'A', routeIds: [] });
+  const keepInterval = globalThis.setInterval;
+  let tick = null;
+  globalThis.setInterval = (fn) => { tick = fn; return 1; };
+  const pollRun = { gen: pc._runs.token(), run: async () => { throw new Error('poll broke'); }, busy: false };
+  try {
+    pc._armPoll(pollRun);
+  } finally {
+    globalThis.setInterval = keepInterval;
+  }
+  pc._poll = null;
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  pollRun.gen = pc._runs.token();
+  tick();
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  check('a rejected poll run shows its error and frees the poll',
+    !pollRun.busy && pc._err && pc._err.message === 'poll broke', JSON.stringify({ busy: pollRun.busy, err: String(pc._err), stale: pc._runs.stale(pollRun.gen) }));
+  pc.remove();
 }
 {
   /* Two opens racing the first Leaflet load leave one overlay, and it closes. */
@@ -3447,6 +3484,26 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     overlays() === 1 && planCard._openMapKey !== 'journey', String(overlays()));
   planCard._closeVehicleMap();
   check('the row map still closes', overlays() === 0, String(overlays()));
+  /* Leaflet throwing mid-draw: the failed-map notice, no rejection, no open left running. */
+  const brokenL = Object.assign({}, fakeL, { polyline: () => { throw new Error('leaflet broke'); } });
+  planCard._ensureLeaflet = async () => brokenL;
+  let threw = null;
+  try {
+    await planCard._openVehicleMap({ label: '7', headsign: 'Albertfalva', tripId: 'BKK_BROKEN_A' });
+  } catch (e) { threw = e; }
+  const rowNotice = document.querySelector('.ht-map-notice');
+  const rowOk = !threw && !!rowNotice && rowNotice.textContent.includes(i18nT('hu', 'mapLeafletFail')) && planCard._openingMap === '';
+  planCard._closeVehicleMap();
+  Lib.fillJourneyShapes = async () => {};
+  try {
+    await planCard._openJourneyMap();
+  } catch (e) { threw = e; }
+  const journeyNotice = document.querySelector('.ht-map-notice');
+  check('Leaflet failing while it draws shows the map notice and clears the open (row and journey map)',
+    rowOk && !threw && !!journeyNotice && journeyNotice.textContent.includes(i18nT('hu', 'mapLeafletFail'))
+      && planCard._openingMap === '',
+    String(threw));
+  planCard._closeVehicleMap();
   Object.assign(Lib, keep);
   planCard.remove();
 }
@@ -4870,7 +4927,31 @@ const deferred = () => {
   check('an empty fill pauses that pair for ten minutes; another pair, and a fill with rows, ask again',
     paused === 1 && otherPair === 2 && after.length === 1 && plans === 4,
     JSON.stringify({ paused, otherPair, plans, after: after.length }));
+  /* A fill that failed is no empty answer: null, and asked again next poll. */
+  Lib._transitousEmptyAt.clear();
+  plans = 0;
+  answer = null;
+  const failedFill = await Lib.fillTransitousIfEmpty([], o, d, opts);
+  answer = [{ label: '7', dep: Math.floor(Date.now() / 1000) + 900 }];
+  const retried = await Lib.fillTransitousIfEmpty([], o, d, opts);
+  check('a failed Transitous fill returns null and sets no ten-minute pause',
+    failedFill === null && plans === 2 && retried.length === 1,
+    JSON.stringify({ failedFill, plans, retried: retried && retried.length }));
   Lib.transitousDepartures = keepDeps;
+  const keepFetch = Lib.transitousFetch;
+  const keepPlace = Lib.transitousPlace;
+  Lib.transitousPlace = async () => '47.5,19.0';
+  Lib.transitousFetch = async () => { throw new TypeError('network'); };
+  const downDeps = await Lib.transitousDepartures(o, d, opts);
+  Lib.transitousPlace = async () => { throw new TypeError('network'); };
+  const downPlace = await Lib.transitousDepartures(o, d, opts);
+  Lib.transitousPlace = async () => '';
+  const unknown = await Lib.transitousDepartures(o, d, opts);
+  Lib.transitousFetch = keepFetch;
+  Lib.transitousPlace = keepPlace;
+  check('transitousDepartures: null when Transitous failed, [] for a stop it does not know',
+    downDeps === null && downPlace === null && Array.isArray(unknown) && !unknown.length,
+    JSON.stringify({ downDeps, downPlace, unknown }));
 
   Lib._geocodeCache.clear();
   let geo = 0;
@@ -5544,9 +5625,9 @@ const shapeLen = (pts) => pts.reduce((m, p, i) => (i ? m + Lib.haversineMeters(p
   let serviceChecks = 0;
   Lib.volanServiceOk = (...args) => { serviceChecks += 1; return keep.volanServiceOk(...args); };
   const fresh = Object.assign({}, szfIdx);
-  const p1 = Lib.cityHubPath(fresh, fresh.stops[0]);
+  const p1 = Lib.cityHubPaths(fresh, fresh.stops[0], 1)[0];
   const built = serviceChecks;
-  const p2 = Lib.cityHubPath(fresh, fresh.stops[0]);
+  const p2 = Lib.cityHubPaths(fresh, fresh.stops[0], 1)[0];
   check('a city feed’s ride graph is built once a day, not on every question',
     built > 0 && serviceChecks === built && p1 && p2 && p2.hubName === p1.hubName && p1.hubLat === 47.1838,
     JSON.stringify({ built, after: serviceChecks }));
@@ -6184,6 +6265,22 @@ const settle = async (el) => {
   check('a failed ELVIRA call\'s reason is readable text',
     JSON.stringify(texts) === JSON.stringify(['Connection lost', 'Connection lost', 'unavailable', 'Timeout', 'unknown_error', '']),
     JSON.stringify(texts));
+  /* FUTÁR through the integration reads the same rejections. */
+  const keepHass = Lib._hass;
+  const banners = [];
+  for (const rej of [{ type: 'result', success: false, error: { code: 3, message: 'Connection lost' } }, 3, {}, new Error('BKK timeout')]) {
+    Lib._hass = { states: {}, services: { hungarian_transport: { futar: {} } }, connection: { sendMessagePromise: async () => { throw rej; } } };
+    try {
+      await Lib._fetchViaIntegration('arrivals-and-departures-for-stop.json', { stopId: 'BKK_F1' });
+      banners.push('resolved');
+    } catch (e) {
+      banners.push(e.message);
+    }
+  }
+  Lib._hass = keepHass;
+  check('a FUTÁR call the websocket rejected says why, not "BKK [object Object]" or "BKK 3"',
+    JSON.stringify(banners) === JSON.stringify(['BKK Connection lost', 'BKK Connection lost', 'BKK connection lost', 'BKK timeout']),
+    JSON.stringify(banners));
 }
 {
   /* One scan of hass.states per change, and one pattern per row. */
@@ -8304,12 +8401,12 @@ check('a city stop number is not an ELVIRA station code',
     { tripId: 'gtfs:BAF1', label: 'BAFNEV', vehicle: 'rail', dep: t0 + 300 },
     { tripId: 'gtfs:BAF2', label: 'BAFNEV', vehicle: 'rail', dep: t0 + 3900 },
   ];
-  Lib.applyEmmaPositions(twin, [{ label: 'BAFNEV', lat: 46.9, lon: 17.9, trip: { tripShortName: 'BAFNEV' } }]);
+  applyEmma(twin, [{ label: 'BAFNEV', lat: 46.9, lon: 17.9, trip: { tripShortName: 'BAFNEV' } }]);
   const numbered = [
     { tripId: 'gtfs:BAG1', label: 'BAGNEV', vehicle: 'rail', dep: t0 + 300 },
     { tripId: 'gtfs:BAG2', label: 'BAGNEV', trainNumber: '1952', vehicle: 'rail', dep: t0 + 3900 },
   ];
-  Lib.applyEmmaPositions(numbered, [{ label: 'BAGNEV', lat: 46.8, lon: 17.8, trip: { tripShortName: '1952 BAGNEV' } }]);
+  applyEmma(numbered, [{ label: 'BAGNEV', lat: 46.8, lon: 17.8, trip: { tripShortName: '1952 BAGNEV' } }]);
   const pos = (list) => list.map((r) => (Lib.mapGpsLatLon(r.lat, r.lon) ? r.lat : null));
   check('one EMMA vehicle is given to one row only',
     JSON.stringify(pos(twin)) === '[46.9,null]' && JSON.stringify(pos(numbered)) === '[null,46.8]',
@@ -8903,10 +9000,10 @@ check('a city stop number is not an ELVIRA station code',
 /* An accented capital is part of the word: the TISZA train is not one
    heading for Tiszaújváros. */
 check('a named train does not match a headsign it only begins (Tisza, Tiszaújváros)',
-  !Lib.matchEmmaVehicle({ label: 'Tisza' }, { trip: { tripShortName: '', tripHeadsign: 'Tiszaújváros' } })
-  && Lib.matchEmmaVehicle({ label: 'Tisza' }, { trip: { tripShortName: '', tripHeadsign: 'Tisza Budapest-Keleti' } })
-  && Lib.matchEmmaVehicle({ label: 'Hernád' }, { trip: { tripShortName: '', tripHeadsign: 'Hernád (Kassa)' } })
-  && !Lib.matchEmmaVehicle({ label: 'Balaton' }, { trip: { tripHeadsign: 'Balatonfüred' } }));
+  !matchEmma({ label: 'Tisza' }, { trip: { tripShortName: '', tripHeadsign: 'Tiszaújváros' } })
+  && matchEmma({ label: 'Tisza' }, { trip: { tripShortName: '', tripHeadsign: 'Tisza Budapest-Keleti' } })
+  && matchEmma({ label: 'Hernád' }, { trip: { tripShortName: '', tripHeadsign: 'Hernád (Kassa)' } })
+  && !matchEmma({ label: 'Balaton' }, { trip: { tripHeadsign: 'Balatonfüred' } }));
 
 /* A sibling card's key whose lovelace/config read failed once is looked for
    again later, not never (the card stayed on "no API key"). */
@@ -9828,6 +9925,20 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     && !!lostDot && lostDot.html.includes('ht-veh-dot-est') && Math.abs(lostDot.pt[0] - 47.25) > 0.001,
     JSON.stringify({ before: liveFootBefore, after: lostFoot, pt: lostDot && lostDot.pt }));
   hc._closeVehicleMap();
+  /* 12b. The live vehicle's row leaves the board: the same, from the row as last listed. */
+  hc._rows = [live];
+  await hc._openVehicleMap(live);
+  const goneFootBefore = document.querySelector('.ht-map-overlay .ht-map-foot').textContent;
+  hc._rows = [];
+  hc._syncOpenMap();
+  await settleTicks();
+  const goneFoot = document.querySelector('.ht-map-overlay .ht-map-foot').textContent;
+  const goneDot = hc._mapMarker;
+  check('a live row that left the board: the footer stops saying live and the timetable moves the marker on',
+    goneFootBefore.includes('Élő pozíció') && !goneFoot.includes('Élő pozíció') && goneFoot.includes('Becsült pozíció')
+    && !!goneDot && goneDot.html.includes('ht-veh-dot-est') && !hc._mapState.hasGps,
+    JSON.stringify({ before: goneFootBefore, after: goneFoot, pt: goneDot && goneDot.pt }));
+  hc._closeVehicleMap();
 
   /* 14. A displayed row (schedTs/depTs) still finds its sensor train's FUTÁR trip. */
   const keepCollect = Lib.collectHassVehicles;
@@ -10611,17 +10722,39 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   const failing = { ...hass, connection: { sendMessagePromise: async () => { calls.push(1); throw new Error('down'); } } };
   calls.length = 0;
   Lib._rtCache.clear();
+  const keepNow = Date.now;
+  const t0 = keepNow();
+  let callsAfterOne = 0;
+  let callsInRound = 0;
   try {
+    /* One poll that failed (a dropped websocket) pauses nothing; a second
+       call in the same round is no second strike. */
+    Date.now = () => t0;
     await Lib.attachRealtime(failing, [cityRows[0]], { mode: 'helyi' });
     Lib._rtCache.clear();
     await Lib.attachRealtime(failing, [cityRows[0]], { mode: 'helyi' });
+    callsInRound = calls.length;
+    Lib._rtCache.clear();
+    Date.now = () => t0 + 30000;
+    await Lib.attachRealtime(failing, [cityRows[0]], { mode: 'helyi' });
+    callsAfterOne = calls.length;
+    /* The third failed poll in a row pauses the calls. */
+    for (const at of [60000, 90000, 120000]) {
+      Lib._rtCache.clear();
+      Date.now = () => t0 + at;
+      await Lib.attachRealtime(failing, [cityRows[0]], { mode: 'helyi' });
+    }
   } finally {
+    Date.now = keepNow;
     console.warn = keepWarn;
     Lib._rtDownUntil = 0;
+    Lib._rtFails = 0;
+    Lib._rtLastFailAt = 0;
     Lib._rtWarned = false;
   }
-  check('a failing realtime call is warned about once and not repeated at every poll', calls.length === 1 && warned === 1,
-    JSON.stringify({ calls: calls.length, warned }));
+  check('a failing realtime call is warned about once and paused only after three failed polls in a row',
+    callsInRound === 2 && callsAfterOne === 3 && calls.length === 4 && warned === 1,
+    JSON.stringify({ callsInRound, callsAfterOne, calls: calls.length, warned }));
   Lib._rtKnown.clear();
   Lib._rtCache.clear();
 }

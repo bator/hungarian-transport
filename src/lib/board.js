@@ -274,6 +274,8 @@ async function runBoard(poll, src, knownElvira) {
       return;
     }
     const wantElvira = (mode === 'mav' || mode === 'all') && BkkLib.hasElvira(hass());
+    /* Whether this poll has an ELVIRA answer to wait for at all. */
+    const asksElvira = !!knownElvira || elviraGone || wantElvira;
     /* knownElvira: the ELVIRA answer this poll already has (the not_loaded
        switch to FUTÁR below), not asked for a second time. */
     const elviraP = knownElvira ? Promise.resolve(knownElvira) : elviraGone
@@ -299,6 +301,9 @@ async function runBoard(poll, src, knownElvira) {
        destination's board confirms that FUTÁR lacks (IC TÓPART at :37
        from Székesfehérvár): that one is listed as on a MÁV card. */
     const addElvira = (row) => BkkLib.elviraBoardRows([row], nowSec())[0] || null;
+    /* A board with no rows of its own is filled from Transitous once the
+       through-check answered, except a city one (departures() fills it). */
+    const fillsEmpty = mode !== 'helyi';
     const publish = () => {
       if (!live()) return;
       /* An empty board goes on to the Transitous fill below, not to
@@ -329,6 +334,9 @@ async function runBoard(poll, src, knownElvira) {
         }
         return;
       }
+      /* Nor is one the Transitous fill follows (below): its answer is
+         listed then, with no "no departures" before it on every poll. */
+      if (!list.length && fillsEmpty) return;
       listed('board', list);
     };
     let startThrough = null;
@@ -414,12 +422,16 @@ async function runBoard(poll, src, knownElvira) {
       }),
       fillTravel(firstRows),
     ]);
+    /* Awaited below, unless the poll returns first (a reload, a failed
+       ELVIRA wait): a rejection then is no unhandled one. */
+    gpsTravel.catch(() => {});
     if (startThrough) {
       startThrough();
     } else {
       throughResolve();
     }
-    if (!mavBoard) {
+    /* A board ELVIRA was not asked for has nothing new to list here. */
+    if (!mavBoard && asksElvira) {
       const answer = await elviraP;
       if (!live()) return;
       elviraRows = answer.rows;
@@ -436,12 +448,21 @@ async function runBoard(poll, src, knownElvira) {
       : (futarFull ? BkkLib.mergeRows(earlyRows, futarFull, cap) : earlyRows.slice());
     /* A city board is filled from Transitous inside departures() already:
        a second fill here only repeated the same lookups on every poll. */
-    if (!hosts.length && mode !== 'helyi') {
-      const filled = await src.transitous(hosts, origin, dest, {
+    if (!hosts.length && fillsEmpty) {
+      let filled = await src.transitous(hosts, origin, dest, {
         mode,
         minutesAfter: cfg.minutesAfter,
       });
       if (!live()) return;
+      /* null: Transitous could not be asked. The fill-ins on screen that
+         are still due stay, instead of "no departures" until it answers. */
+      if (!Array.isArray(filled)) {
+        const cur = shown();
+        const now = nowSec();
+        filled = (cur.filled ? (cur.rows || []) : [])
+          .filter((row) => row && departureStillDue(row.dep, now))
+          .map((row) => Object.assign({}, row));
+      }
       const merged = BkkLib.overlayRows(filled, elviraRows, cap, addElvira);
       earlyRows = merged;
       /* Transitous rows, not this board's own: a failed poll replaces
@@ -484,10 +505,10 @@ async function runBoard(poll, src, knownElvira) {
     if ((mode === 'bkk' || mode === 'mav') && !keepRows) {
       let filled = [];
       try {
-        filled = await src.transitous([], origin, dest, {
+        filled = (await src.transitous([], origin, dest, {
           mode,
           minutesAfter: cfg.minutesAfter,
-        });
+        })) || [];
       } catch (_e) {
         filled = [];
       }

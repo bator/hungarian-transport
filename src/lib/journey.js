@@ -466,9 +466,6 @@ register({
       };
     });
   },
-  cityHubPath(idx, originStop) {
-    return BkkLib.cityHubPaths(idx, originStop, 1)[0] || null;
-  },
   /* How far a city hub may be from a destination with coordinates and
      still be it: a bus stand by its station, not the next station along
      (Sopron-Déli is ~1.3 km from Sopron, Győr-Szabadhegy 2.2 km from Győr). */

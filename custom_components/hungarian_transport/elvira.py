@@ -187,7 +187,11 @@ def _iso_dt(value, tz):
         return None
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=tz)
-    return dt.astimezone(UTC)
+    try:
+        return dt.astimezone(UTC)
+    except OverflowError:
+        # 0001-01-01T00:00 in Budapest is before the year 1 in UTC.
+        return None
 
 
 def _fold_hu(text: str) -> str:

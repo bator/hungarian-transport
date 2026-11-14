@@ -733,6 +733,11 @@ async def test_malformed_rows_are_skipped() -> None:
     assert rows[1]["label"] == "GÖCSEJ" and rows[1]["head"] == "" and rows[1]["end"] == ""
 
 
+@pytest.mark.parametrize("value", ["0001-01-01T00:00:00", "9999-12-31T23:59:59-05:00", "2026-13-01T00:00:00", "soon"])
+def test_a_time_out_of_range_is_no_time(value) -> None:
+    assert elvira._iso_dt(value, TZ) is None
+
+
 # --- Rows and service flags (pure) ---
 
 

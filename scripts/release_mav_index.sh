@@ -219,7 +219,8 @@ if [ ! -s "$osm" ]; then
     --retry 5 --retry-delay "$retry_delay" --retry-all-errors --connect-timeout 30 --max-time 1200 \
     -o "$osm.part" "$osm_url"
   curl --fail --silent --show-error --location --proto =https --proto-redir =https \
-    --retry 5 --retry-delay "$retry_delay" --retry-all-errors -o "$osm.md5" "$osm_url.md5"
+    --retry 5 --retry-delay "$retry_delay" --retry-all-errors --connect-timeout 30 --max-time 120 \
+    -o "$osm.md5" "$osm_url.md5"
   want="$(cut -d' ' -f1 "$osm.md5")"
   got="$(md5sum "$osm.part" | cut -d' ' -f1)"
   if [ -z "$want" ] || [ "$want" != "$got" ]; then

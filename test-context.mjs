@@ -97,8 +97,6 @@ const ENTRIES = {
   mavRouteForRow: (ix) => BkkLib.mavRouteForRow(ix, { tripId: 'elvira:1', trainNumber: '849' }, 'A', 'B'),
   stopArea: (ix) => BkkLib.stopArea(ix, { helyi: true, city: 'szfvar' }),
   volanDepartures: (ix) => BkkLib.volanDepartures(ix, 'volan_1', STATION, 'Volán', 60),
-  volanRoutesAtStop: (ix) => BkkLib.volanRoutesAtStop(ix, { id: 'volan_1' }),
-  volanRemainingNames: (ix) => BkkLib.volanRemainingNames(ix, { id: 'volan_1' }, '7'),
   elviraBetween: (ix) => BkkLib.elviraBetween(ix, ELVIRA_HASS, CITY_STOP.id, STATION.id, 60, STATION.name, { originName: CITY_STOP.name }),
 };
 

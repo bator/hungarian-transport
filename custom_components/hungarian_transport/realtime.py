@@ -22,6 +22,7 @@ import asyncio
 from collections.abc import Callable, Coroutine
 import csv
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 import io
 import json
 import logging
@@ -52,6 +53,10 @@ DEFAULT_INTERVAL = 60
 MIN_INTERVAL = 30
 # A feed that failed is not asked again for this long.
 FAIL_BACKOFF = 60
+# A decoded feed no card has asked for in this many of its intervals is
+# dropped from memory (the Volán intercity one is tens of MB of objects);
+# the next ask fetches it anew. Not the static feeds' train numbers (keep).
+IDLE_INTERVALS = 5
 # The MÁV and GYSEV static feeds (train numbers) change weekly. A refresh
 # that fails keeps the copy from before: its trip ids stay valid for the
 # whole timetable period, and they only name trips for the live feeds,
@@ -87,6 +92,9 @@ MAX_FEED_AGE = 15 * 60
 # Service request limits.
 MAX_TRIPS = 40
 MAX_STOPS = 120
+# A card's planner round (the route list and the trips, one request at a
+# time for every card): at most one request's timeout, waiting included.
+PLANNER_TIMEOUT = FETCH_TIMEOUT.total
 # The OutageLog key of mavplusz.hu (feed URLs are the others).
 MAVPLUSZ_OUTAGE = "mavplusz"
 # A route's trip list on mavplusz.hu (for route + start) is kept this long:
@@ -202,7 +210,6 @@ class StopUpdate:
 class TripUpdate:
     trip_id: str
     start_date: str
-    start_time: str
     route_id: str
     # TripDescriptor.schedule_relationship: 3 = CANCELED.
     relationship: int
@@ -223,18 +230,7 @@ class Vehicle:
     speed: float | None
     timestamp: int | None
     stop_id: str
-    current_seq: int | None
     status: int | None
-
-
-@dataclass(slots=True)
-class Alert:
-    header: str
-    start: int | None
-    end: int | None
-    routes: list[str]
-    stops: list[str]
-    trips: list[str]
 
 
 @dataclass(slots=True)
@@ -242,7 +238,43 @@ class Feed:
     timestamp: int | None = None
     trip_updates: dict[str, TripUpdate] = field(default_factory=dict)
     vehicles: dict[str, Vehicle] = field(default_factory=dict)
-    alerts: list[Alert] = field(default_factory=list)
+    # A trip id with runs on two service days (last night's run past
+    # midnight beside today's): each run by (trip id, start_date) here too,
+    # the first one seen also under the plain id.
+    trip_days: dict[tuple[str, str], TripUpdate] = field(default_factory=dict)
+    vehicle_days: dict[tuple[str, str], Vehicle] = field(default_factory=dict)
+
+    def add_trip_update(self, tu: TripUpdate) -> None:
+        _keep(self.trip_updates, self.trip_days, tu)
+
+    def add_vehicle(self, v: Vehicle) -> None:
+        _keep(self.vehicles, self.vehicle_days, v)
+
+    def trip_update(self, trip_id: str, date: str = "") -> TripUpdate | None:
+        """The trip's update, the run of date when the id has several."""
+        return (self.trip_days.get((trip_id, date)) if date and self.trip_days else None) or self.trip_updates.get(
+            trip_id
+        )
+
+    def vehicle(self, trip_id: str, date: str = "") -> Vehicle | None:
+        return (self.vehicle_days.get((trip_id, date)) if date and self.vehicle_days else None) or self.vehicles.get(
+            trip_id
+        )
+
+
+def _keep(plain: dict[str, Any], days: dict[tuple[str, str], Any], item: TripUpdate | Vehicle) -> None:
+    tid = item.trip_id
+    have = plain.get(tid)
+    if have is None:
+        plain[tid] = item
+    elif have.start_date == item.start_date:
+        # The same run again: the later one, as before.
+        plain[tid] = item
+        if (tid, item.start_date) in days:
+            days[tid, item.start_date] = item
+    else:
+        days.setdefault((tid, have.start_date), have)
+        days[tid, item.start_date] = item
 
 
 def _strip(value: str, prefix: str) -> str:
@@ -250,12 +282,10 @@ def _strip(value: str, prefix: str) -> str:
 
 
 def _trip_descriptor(buf: bytes, prefix: str) -> dict[str, Any]:
-    out: dict[str, Any] = {"trip_id": "", "start_time": "", "start_date": "", "route_id": "", "rel": 0}
+    out: dict[str, Any] = {"trip_id": "", "start_date": "", "route_id": "", "rel": 0}
     for num, wire, val in _fields(buf):
         if num == 1 and wire == 2:
             out["trip_id"] = _strip(_text(val), prefix)
-        elif num == 2 and wire == 2:
-            out["start_time"] = _text(val)
         elif num == 3 and wire == 2:
             out["start_date"] = _text(val)
         elif num == 4 and wire == 0:
@@ -309,14 +339,14 @@ def _trip_update(buf: bytes, prefix: str) -> TripUpdate | None:
     if not desc or not desc["trip_id"]:
         return None
     return TripUpdate(
-        desc["trip_id"], desc["start_date"], desc["start_time"], desc["route_id"], desc["rel"], delay, stops
+        desc["trip_id"], desc["start_date"], desc["route_id"], desc["rel"], delay, stops
     )
 
 
 def _vehicle_position(buf: bytes, prefix: str) -> Vehicle | None:
     desc: dict[str, Any] | None = None
     lat = lon = bearing = speed = None
-    ts = seq = status = None
+    ts = status = None
     stop_id = ""
     for num, wire, val in _fields(buf):
         if num == 1 and wire == 2:
@@ -333,8 +363,6 @@ def _vehicle_position(buf: bytes, prefix: str) -> Vehicle | None:
                     bearing = _float(pval)
                 elif pnum == 5:
                     speed = _float(pval)
-        elif num == 3 and wire == 0:
-            seq = val
         elif num == 4 and wire == 0:
             status = val
         elif num == 5 and wire == 0:
@@ -346,53 +374,12 @@ def _vehicle_position(buf: bytes, prefix: str) -> Vehicle | None:
     if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0) or (lat == 0.0 and lon == 0.0):
         return None
     return Vehicle(
-        desc["trip_id"], desc["start_date"], desc["route_id"], lat, lon, bearing, speed, ts, stop_id, seq, status
+        desc["trip_id"], desc["start_date"], desc["route_id"], lat, lon, bearing, speed, ts, stop_id, status
     )
 
 
-def _translated(buf: bytes) -> str:
-    first = ""
-    for num, wire, val in _fields(buf):
-        if num != 1 or wire != 2:
-            continue
-        text = lang = ""
-        for tnum, twire, tval in _fields(val):
-            if tnum == 1 and twire == 2:
-                text = _text(tval)
-            elif tnum == 2 and twire == 2:
-                lang = _text(tval)
-        if lang.lower().startswith("hu") and text:
-            return text
-        first = first or text
-    return first
-
-
-def _alert(buf: bytes, prefix: str) -> Alert:
-    out = Alert("", None, None, [], [], [])
-    for num, wire, val in _fields(buf):
-        if num == 1 and wire == 2 and out.start is None and out.end is None:
-            for rnum, rwire, rval in _fields(val):
-                if rnum == 1 and rwire == 0:
-                    out.start = rval
-                elif rnum == 2 and rwire == 0:
-                    out.end = rval
-        elif num == 5 and wire == 2:
-            for snum, swire, sval in _fields(val):
-                if snum == 2 and swire == 2:
-                    out.routes.append(_strip(_text(sval), prefix))
-                elif snum == 4 and swire == 2:
-                    trip = _trip_descriptor(sval, prefix)["trip_id"]
-                    if trip:
-                        out.trips.append(trip)
-                elif snum == 5 and swire == 2:
-                    out.stops.append(_strip(_text(sval), prefix))
-        elif num == 10 and wire == 2:
-            out.header = _translated(val)
-    return out
-
-
 def decode_feed(data: bytes, prefix: str = "") -> Feed:
-    """A FeedMessage's trip updates, vehicle positions and alerts, keyed by
+    """A FeedMessage's trip updates and vehicle positions, keyed by
     trip id with the feed's own prefix (hkir:, 1:) taken off. Raises
     RtDecodeError on anything that is not a well-formed message."""
     if not isinstance(data, (bytes, bytearray)):
@@ -423,13 +410,12 @@ def decode_feed(data: bytes, prefix: str = "") -> Feed:
                         stop_updates += len(tu.stops)
                         if stop_updates > MAX_FEED_STOP_UPDATES:
                             raise RtDecodeError(f"over {MAX_FEED_STOP_UPDATES} stop updates")
-                        feed.trip_updates[tu.trip_id] = tu
+                        feed.add_trip_update(tu)
                 elif enum == 4 and ewire == 2:
                     vp = _vehicle_position(eval_, prefix)
                     if vp is not None:
-                        feed.vehicles[vp.trip_id] = vp
-                elif enum == 5 and ewire == 2:
-                    feed.alerts.append(_alert(eval_, prefix))
+                        feed.add_vehicle(vp)
+                # Alerts (5) are not read: no card shows them.
     if not has_header:
         raise RtDecodeError("no FeedHeader")
     return feed
@@ -545,6 +531,10 @@ class _Entry:
     data: Any = None
     etag: str = ""
     last_modified: str = ""
+    # When a card last asked for it, its interval and keep (_drop_idle).
+    asked: float = -1e18
+    interval: float = 0.0
+    keep: bool = False
 
 
 class RealtimeHub:
@@ -662,7 +652,12 @@ class RealtimeHub:
         it fails, or with keep the last good copy (one warning when it starts
         failing, one line when it answers again)."""
         entry = self._entries.setdefault(url, _Entry())
-        age = self._monotonic() - entry.at
+        now = self._monotonic()
+        entry.asked = now
+        entry.interval = interval
+        entry.keep = keep
+        self._drop_idle(now)
+        age = now - entry.at
         if age < (interval if entry.ok else backoff):
             return entry.data if entry.ok or keep else None
         task = self._inflight.get(url)
@@ -671,6 +666,19 @@ class RealtimeHub:
             self._inflight[url] = task
             task.add_done_callback(lambda _t: self._inflight.pop(url, None))
         return await asyncio.shield(task)
+
+    def _drop_idle(self, now: float) -> None:
+        """Drop the copies no card has asked for in IDLE_INTERVALS of their
+        interval, with their validators; keep entries are never dropped."""
+        for url, entry in self._entries.items():
+            if (
+                entry.data is not None and not entry.keep
+                and now - entry.asked > IDLE_INTERVALS * entry.interval
+                and url not in self._inflight
+            ):
+                entry.data = None
+                entry.ok = False
+                entry.etag = entry.last_modified = ""
 
     async def _refresh(
         self, url: str, entry: _Entry, cap: int, parse: Callable[[bytes], Any], what: str, keep: bool = False
@@ -764,7 +772,19 @@ class RealtimeHub:
                 for n, r in enumerate(trips):
                     if r.get("route") and r.get("start") is not None:
                         route_keys[i, n] = mavplusz.RouteKey(prefix + _strip(str(r["route"]), prefix), dates[n], prefix)
-        listed = await self._mav_routes(list(dict.fromkeys(route_keys.values()))) if route_keys else {}
+        # The whole planner round, the wait for _mav_lock included: past it
+        # the planner counts as failed, and the jbb feeds answer.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + PLANNER_TIMEOUT
+
+        async def bounded(coro: Coroutine[Any, Any, Any]) -> Any:
+            try:
+                return await asyncio.wait_for(coro, max(0.0, deadline - loop.time()))
+            except asyncio.TimeoutError:
+                _LOGGER.debug("Realtime source %s: no answer within %s s", mavplusz.URL, PLANNER_TIMEOUT)
+                return None
+
+        listed = await bounded(self._mav_routes(list(dict.fromkeys(route_keys.values())))) if route_keys else {}
         cands: dict[tuple[int, int], list[mavplusz.TripKey]] = {}
         for (i, n), rk in route_keys.items():
             ids = (listed or {}).get(rk)
@@ -782,8 +802,12 @@ class RealtimeHub:
             ]
             keys += [k for n in range(len(trips)) for k in cands.get((i, n), ())]
             by_src[i] = list(dict.fromkeys(keys))
-        asked = list(dict.fromkeys(k for keys in by_src.values() for k in keys))[: mavplusz.MAX_TRIPS_PER_REQUEST]
-        answered = await self._mavplusz(asked, cfg.interval) if asked else {}
+        # The resolved trips first: a card's own trip id on a route + start
+        # feed is often not the planner's (Veszprém, Miskolc), and what is
+        # not cached yet is cut at MAX_TRIPS_PER_REQUEST (_mavplusz).
+        resolved = [k for ks in cands.values() for k in ks]
+        asked = list(dict.fromkeys([*resolved, *(k for keys in by_src.values() for k in keys)]))
+        answered = await bounded(self._mavplusz(asked, cfg.interval)) if asked else {}
         planner: dict[int, tuple[Source, Feed, Feed, None]] = {}
         for i, keys in by_src.items():
             got = [answered[k] for k in keys if k in answered] if answered is not None else []
@@ -795,11 +819,15 @@ class RealtimeHub:
 
         def covered(i: int, n: int) -> bool:
             """The planner answers trips[n] for source i: it knows its trip
-            id, or resolved its route + start."""
+            id, or resolved its route + start and answered for one of those
+            trips (one cut from the request is matched on the feeds)."""
             mine = planner.get(i)
             if mine is None:
                 return False
-            return (by_trip and bool(trips[n].get("trip_id")) and _knows(mine, trips[n])) or (i, n) in cands
+            if by_trip and trips[n].get("trip_id") and _knows(mine, trips[n]):
+                return True
+            got = answered or {}
+            return any(k in got and got[k][1] is not None for k in cands.get((i, n), ()))
 
         def needs_feeds(i: int, n: int) -> bool:
             """trips[n] is matched on source i's feeds: a route + start the
@@ -831,7 +859,10 @@ class RealtimeHub:
                     loaded.append(mine)
                 elif theirs is not None:
                     loaded.append(theirs)
-            hit = _answer(cfg, loaded, req, now)
+            # Two trips of the line at that minute: the one in the feeds must
+            # call at the card's stops, the other may be the card's.
+            strict = any(len(cands.get((i, n), ())) > 1 for i in mav_idx)
+            hit = _answer(cfg, loaded, req, now, strict=strict)
             if hit is not None:
                 out[req["key"]] = hit
         return {"feed": feed_id, "updated": max(stamps) if stamps else None, "trips": out}
@@ -895,9 +926,11 @@ class RealtimeHub:
         self, keys: list[mavplusz.TripKey], interval: int
     ) -> dict[mavplusz.TripKey, tuple[float, mavplusz.TripResult | None]] | None:
         """Per key: (wall time of the answer, its result), from the cache
-        while within interval of the request, the rest in one request.
-        None when that request is not made (the rate limit, the backoff
-        after a failure) or fails: the caller reads the jbb feeds."""
+        while within interval of the request, the rest in one request of at
+        most MAX_TRIPS_PER_REQUEST trips (the first ones; a key cut is not
+        in the answer). None when that request is not made (the rate limit,
+        the backoff after a failure) or fails: the caller reads the jbb
+        feeds."""
         async with self._mav_lock:
             mono = self._monotonic()
             for k in [k for k, (exp, _at, _res) in self._mav_cache.items() if exp <= mono]:
@@ -910,6 +943,7 @@ class RealtimeHub:
                     out[k] = (hit[1], hit[2])
                 else:
                     todo.append(k)
+            todo = todo[: mavplusz.MAX_TRIPS_PER_REQUEST]
             if not todo:
                 return out
             at = self._wall()
@@ -1004,9 +1038,9 @@ def _fill_routes(known: dict[str, str], tu: Feed | None) -> None:
     no pattern was on two routes when this was written (_PATTERN_IN_TRIP_ID)."""
     if tu is None or not known:
         return
-    for tid, t in tu.trip_updates.items():
+    for t in [*tu.trip_updates.values(), *tu.trip_days.values()]:
         if not t.route_id:
-            t.route_id = _route_of(known, tid)
+            t.route_id = _route_of(known, t.trip_id)
             t.route_learned = bool(t.route_id)
 
 
@@ -1033,24 +1067,28 @@ def _date_ok(start_date: str, wanted: str) -> bool:
     return not wanted or not start_date or start_date == wanted
 
 
-def _pick(cands: list[tuple[str, TripUpdate | None, Vehicle | None]], stops: list[str]):
-    if len(cands) > 1 and stops:
+def _pick(cands: list[tuple[str, TripUpdate | None, Vehicle | None]], stops: list[str], strict: bool = False):
+    """The one candidate, or the one of several calling at the card's
+    stops. strict: a trip not among cands may be the card's (the planner
+    listed two at that minute), so even a single one must call there."""
+    if len(cands) > 1 or strict:
         with_stop = [c for c in cands if _has_stop(c[1], stops)]
-        if with_stop:
+        if with_stop or strict:
             cands = with_stop
     return cands[0] if len(cands) == 1 else None
 
 
-def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any]):
-    """(trip id, TripUpdate, Vehicle) of the request's trip, or None."""
+def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], now: float, strict: bool = False):
+    """(trip id, TripUpdate, Vehicle) of the request's trip, or None;
+    strict as in _pick, for a route + start."""
     wanted_date = req.get("date") or ""
     stops = req.get("stops") or []
     if "trip" in cfg.match and req.get("trip_id"):
         raw = req["trip_id"]
         for src, tu, vp, _tr in loaded:
             for tid in dict.fromkeys((raw, _strip(raw, src.prefix))):
-                t = tu.trip_updates.get(tid) if tu else None
-                v = vp.vehicles.get(tid) if vp else None
+                t = tu.trip_update(tid, wanted_date) if tu else None
+                v = vp.vehicle(tid, wanted_date) if vp else None
                 start = (t.start_date if t else "") or (v.start_date if v else "")
                 if (t or v) and _date_ok(start, wanted_date):
                     return tid, t, v
@@ -1061,25 +1099,32 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any]):
         for _src, tu, vp, _tr in loaded:
             ids = set(tu.trip_updates if tu else ()) | set(vp.vehicles if vp else ())
             for tid in ids:
-                t = tu.trip_updates.get(tid) if tu else None
-                v = vp.vehicles.get(tid) if vp else None
+                t = tu.trip_update(tid, wanted_date) if tu else None
+                v = vp.vehicle(tid, wanted_date) if vp else None
                 rid = (v.route_id if v else "") or (t.route_id if t else "")
                 sm = _start_minutes(tid)
                 sd = (t.start_date if t else "") or (v.start_date if v else "")
                 if rid == route and sm is not None and sm % 1440 == start and _date_ok(sd, wanted_date):
                     cands.append((tid, t, v))
-        hit = _pick(sorted(cands, key=lambda c: c[0]), stops)
+        hit = _pick(sorted(cands, key=lambda c: c[0]), stops, strict)
         if hit:
             return hit
     if "train" in cfg.match and req.get("train"):
         number = req["train"].lstrip("0") or req["train"]
+        # The cards send no date for a train: today's run, or last night's
+        # still on its way, never another day's of the same trip id.
+        day = datetime.fromtimestamp(now, mavplusz.BUDAPEST).date()
+        today, yesterday = day.strftime("%Y%m%d"), (day - timedelta(days=1)).strftime("%Y%m%d")
         cands = []
         for _src, tu, vp, trains in loaded:
             for tid in (trains or {}).get(number, ()):
-                t = tu.trip_updates.get(tid) if tu else None
-                v = vp.vehicles.get(tid) if vp else None
+                t = tu.trip_update(tid, wanted_date or today) if tu else None
+                v = vp.vehicle(tid, wanted_date or today) if vp else None
                 sd = (t.start_date if t else "") or (v.start_date if v else "")
-                if (t or v) and _date_ok(sd, wanted_date):
+                if (
+                    (t or v) and _date_ok(sd, wanted_date)
+                    and (wanted_date or not sd or sd in (today, yesterday))
+                ):
                     cands.append((tid, t, v))
         hit = _pick(sorted(cands, key=lambda c: c[0]), stops)
         if hit:
@@ -1194,8 +1239,10 @@ def _vehicle_json(v: Vehicle | None, now: float) -> dict[str, Any] | None:
     }
 
 
-def _answer(cfg: FeedConfig, loaded, req: dict[str, Any], now: float) -> dict[str, Any] | None:
-    found = _find_trip(cfg, loaded, req)
+def _answer(
+    cfg: FeedConfig, loaded, req: dict[str, Any], now: float, *, strict: bool = False
+) -> dict[str, Any] | None:
+    found = _find_trip(cfg, loaded, req, now, strict)
     if found is None:
         return None
     tid, tu, vp = found

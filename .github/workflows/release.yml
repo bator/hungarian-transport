@@ -378,6 +378,7 @@ jobs:
           path: .release-tools
           sparse-checkout: |
             scripts/index_digest.py
+            scripts/mav_shrink_guard.py
             scripts/release_mav_index.sh
           sparse-checkout-cone-mode: false
           persist-credentials: false
@@ -484,6 +485,7 @@ jobs:
           MAV_GTFS_USER: ${{ secrets.MAV_GTFS_USER }}
           MAV_GTFS_PASSWORD: ${{ secrets.MAV_GTFS_PASSWORD }}
           MAV_GTFS_URL: ${{ vars.MAV_GTFS_URL }}
+          MAV_ALLOW_SHRINK: ${{ vars.MAV_ALLOW_SHRINK || '' }}
           OSM_PBF: ${{ github.workspace }}/.osm/hungary-latest.osm.pbf
         run: |
           set -euo pipefail
@@ -510,6 +512,16 @@ jobs:
             exit 0
           fi
           if bash .release-tools/scripts/release_mav_index.sh "$RUNNER_TEMP/mav"; then
+            # Under half the previous release's trains and lines: a truncated
+            # feed that passed the build's own checks. The previous index
+            # ships again; one this code cannot read is no comparison.
+            if [ -f .baseline/mav-index.json.gz ] \
+                && ! python3 .release-tools/scripts/mav_shrink_guard.py mav-index.json.gz .baseline/mav-index.json.gz \
+                && keep_baseline; then
+              rm -f mav-index.json.gz
+              echo "::warning title=MÁV index not rebuilt::The new MÁV index has under half the trains and lines of the previous release's (see this step's log); the previous release's mav-index.json.gz ships again. MAV_ALLOW_SHRINK=1 (repository variable) accepts it."
+              exit 0
+            fi
             cp -f mav-index.json.gz dist/
             ls -lh dist/mav-index.json.gz
             echo "built=true" >> "$GITHUB_OUTPUT"

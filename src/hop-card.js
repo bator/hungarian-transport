@@ -74,6 +74,9 @@ export class BKKHopCard extends HTMLElement {
     /* The open map's route and stops, kept for a live vehicle whose GPS
        goes silent: the timetable takes over from them. */
     this._mapGeo = null;
+    /* The open map's row as the last poll listed it: once it has left the
+       board, the timetable places it from there. */
+    this._mapRow = null;
     this._hiddenAt = 0;
     this._pollRun = null;
     /* Until then a MÁV card with a key reads FUTÁR: the entry was not loaded. */
@@ -307,7 +310,9 @@ export class BKKHopCard extends HTMLElement {
     this._poll = setInterval(() => {
       if (pollRun.busy) return;
       pollRun.busy = true;
-      pollRun.run().finally(() => { pollRun.busy = false; });
+      pollRun.run()
+        .catch((err) => { if (!this._runs.stale(pollRun.gen)) this._showErr(err); })
+        .finally(() => { pollRun.busy = false; });
     }, every);
   }
 
@@ -536,6 +541,7 @@ export class BKKHopCard extends HTMLElement {
     this._elErr.className = 'err';
     this._elBody = document.createElement('div');
     this._elBody.className = 'body';
+    this._bodyHtml = null;
     wrap.appendChild(this._elHead);
     wrap.appendChild(this._elErr);
     wrap.appendChild(this._elBody);
@@ -576,7 +582,11 @@ export class BKKHopCard extends HTMLElement {
       const cell = tr.querySelector('.cd');
       if (!row || !cell) return;
       const text = this._countdown(row.depTs, lang);
-      if (cell.textContent !== text) cell.textContent = text;
+      if (cell.textContent !== text) {
+        cell.textContent = text;
+        /* The body is no longer what _paint last wrote. */
+        this._bodyHtml = null;
+      }
     });
   }
 
@@ -594,14 +604,20 @@ export class BKKHopCard extends HTMLElement {
     /* data-row-index points into this list, not into _rows: departed rows
        are filtered out, so the two indexes differ once a bus has left. */
     this._shownRows = rows;
+    let html;
     if (rows.length) {
-      this._elBody.innerHTML = `<table><tbody>${
+      html = `<table><tbody>${
         rows.map((r, i) => this._rowHtml(r, lang, i)).join('')
       }</tbody></table>`;
-      return;
+    } else {
+      const msg = this._emptyBodyMessage(lang, cfg);
+      html = msg ? `<div class="msg">${BkkLib.esc(msg)}</div>` : '';
     }
-    const msg = this._emptyBodyMessage(lang, cfg);
-    this._elBody.innerHTML = msg ? `<div class="msg">${BkkLib.esc(msg)}</div>` : '';
+    /* A poll sends several snapshots of the same rows: the same table is
+       not written again, which would drop hover and keyboard focus. */
+    if (html === this._bodyHtml) return;
+    this._bodyHtml = html;
+    this._elBody.innerHTML = html;
   }
 
   /* With `headerBadges` the title shares its line with the lines on the
@@ -879,6 +895,7 @@ export class BKKHopCard extends HTMLElement {
     this._mapL = null;
     this._mapEstimate = null;
     this._mapGeo = null;
+    this._mapRow = null;
     const back = this._mapReturnFocus;
     this._mapReturnFocus = null;
     if (hadOverlay) this._restoreFocus(back);
@@ -1115,196 +1132,206 @@ ${this._stopPinCss()}
       return;
     }
     if (this._mapStale(seq)) return;
-    const overlay = document.createElement('div');
-    overlay.className = 'ht-map-overlay';
-    const sub = this._mapTypeLabel(row.vehicle || row.type, lang)
-      + (row.model ? ' \u00b7 ' + row.model : '');
-    overlay.innerHTML = `
-      <style>${this._mapChromeCss()}</style>
-      <div class="ht-map-panel" role="dialog" aria-modal="true">
-        <div class="ht-map-head">
-          <div class="meta">
-            <div>${BkkLib.esc(this._mapGlyph(row.vehicle || row.type))} ${BkkLib.esc(row.label || '')} \u2192 ${BkkLib.esc(row.headsign || '')}</div>
-            <div class="sub">${BkkLib.esc(sub)}</div>
+    /* Leaflet throwing while it draws (a map closed under it, a tile or
+       marker it cannot place) is the failed-map notice, not an unhandled
+       rejection with the open still marked as running. */
+    try {
+      const overlay = document.createElement('div');
+      overlay.className = 'ht-map-overlay';
+      const sub = this._mapTypeLabel(row.vehicle || row.type, lang)
+        + (row.model ? ' \u00b7 ' + row.model : '');
+      overlay.innerHTML = `
+        <style>${this._mapChromeCss()}</style>
+        <div class="ht-map-panel" role="dialog" aria-modal="true">
+          <div class="ht-map-head">
+            <div class="meta">
+              <div>${BkkLib.esc(this._mapGlyph(row.vehicle || row.type))} ${BkkLib.esc(row.label || '')} \u2192 ${BkkLib.esc(row.headsign || '')}</div>
+              <div class="sub">${BkkLib.esc(sub)}</div>
+            </div>
+            <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, 'mapClose'))}">\u00d7</button>
           </div>
-          <button type="button" class="ht-map-close" aria-label="${BkkLib.esc(t(lang, 'mapClose'))}">\u00d7</button>
+          <div class="ht-map-canvas"></div>
+          <div class="ht-map-foot">${BkkLib.esc(t(lang, 'mapLoadingRoute'))}</div>
         </div>
-        <div class="ht-map-canvas"></div>
-        <div class="ht-map-foot">${BkkLib.esc(t(lang, 'mapLoadingRoute'))}</div>
-      </div>
-    `;
-    (document.documentElement || document.body).appendChild(overlay);
-    this._mapOverlay = overlay;
-    this._openMapKey = key;
-    this._mapRef = this._mapRefOf(row);
-    this._mapL = L;
-    /* What the footer says, filled in as the open learns it; a poll's GPS
-       update rewords it from the same state. */
-    const st = {
-      ready: false, hasShape: false, approx: false, hasGps, estimated: false,
-      hasBoard: false, hasAlight: false, hasPosition: hasGps,
-    };
-    this._mapState = st;
-    this._onMapKey = (ev) => {
-      if (ev.key === 'Escape') this._closeVehicleMap();
-    };
-    document.addEventListener('keydown', this._onMapKey);
-    const closeBtn = overlay.querySelector('.ht-map-close');
-    closeBtn.addEventListener('click', () => this._closeVehicleMap());
-    overlay.addEventListener('click', (ev) => {
-      if (ev.target === overlay) this._closeVehicleMap();
-    });
-    try { closeBtn.focus(); } catch (_e) { /* ignore */ }
-    const canvas = overlay.querySelector('.ht-map-canvas');
-    const foot = overlay.querySelector('.ht-map-foot');
-    const startLat = hasGps ? lat : 47.5;
-    const startLon = hasGps ? lon : 19.05;
-    let map;
-    try {
-      map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView([startLat, startLon], hasGps ? 12 : 8);
-      L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
-    } catch (_e) {
-      this._showMapNotice(t(lang, 'mapLeafletFail'));
-      return;
-    }
-    this._map = map;
-    this._mapRouteLayers = [];
-    const resizeMap = () => {
-      if (this._map !== map) return;
-      try { map.invalidateSize(); } catch (_e) { /* ignore */ }
-    };
-    requestAnimationFrame(() => { resizeMap(); requestAnimationFrame(resizeMap); });
-    const drawMarker = () => {
-      if (!this._map || this._map !== map) return;
-      const here = BkkLib.mapGpsLatLon(lat, lon);
-      if (!here) return;
-      if (this._mapMarker) {
-        try { this._map.removeLayer(this._mapMarker); } catch (_e) { /* ignore */ }
-      }
-      const icon = L.divIcon({
-        className: '',
-        html: this._dotIcon(row, hasGps && !positionEstimated, lang),
-        iconSize: [32, 32],
-        iconAnchor: [16, 16],
+      `;
+      (document.documentElement || document.body).appendChild(overlay);
+      this._mapOverlay = overlay;
+      this._openMapKey = key;
+      this._mapRef = this._mapRefOf(row);
+      this._mapRow = row;
+      this._mapL = L;
+      /* What the footer says, filled in as the open learns it; a poll's GPS
+         update rewords it from the same state. */
+      const st = {
+        ready: false, hasShape: false, approx: false, hasGps, estimated: false,
+        hasBoard: false, hasAlight: false, hasPosition: hasGps,
+      };
+      this._mapState = st;
+      this._onMapKey = (ev) => {
+        if (ev.key === 'Escape') this._closeVehicleMap();
+      };
+      document.addEventListener('keydown', this._onMapKey);
+      const closeBtn = overlay.querySelector('.ht-map-close');
+      closeBtn.addEventListener('click', () => this._closeVehicleMap());
+      overlay.addEventListener('click', (ev) => {
+        if (ev.target === overlay) this._closeVehicleMap();
       });
-      this._mapMarker = L.marker(here, { icon: icon, zIndexOffset: 600 }).addTo(map);
-    };
-    if (hasGps) {
-      drawMarker();
-      foot.textContent = this._mapFootText(row, false, true, false, lang);
-    }
-    let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon)
-      || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
-    let alight = null;
-    let approx = false;
-    try {
-      const got = await this._loadRowMapShape(row);
-      shape = BkkLib.validMapShape(got.shape);
-      hasShape = shape.length >= 2;
-      approx = hasShape && !!got.approx;
-      if (got.board) board = got.board;
-      alight = got.alight || null;
-    } catch (_e) { /* timetable row still shows the live dot */ }
-    /* No vehicle reports a position (MÁV trains outside BKK's feed, Volán
-       and city rows): the timetable says where it should be, drawn as a
-       dashed marker (mapEstPos). */
-    let timed = [];
-    if (!hasGps) {
+      try { closeBtn.focus(); } catch (_e) { /* ignore */ }
+      const canvas = overlay.querySelector('.ht-map-canvas');
+      const foot = overlay.querySelector('.ht-map-foot');
+      const startLat = hasGps ? lat : 47.5;
+      const startLon = hasGps ? lon : 19.05;
+      let map;
       try {
-        timed = await this._rowTimedStops(row);
-      } catch (_e) { timed = []; }
-    }
-    /* No stop list (a MÁV train known from Transitous and ELVIRA only, or a
-       list that failed to load): the row's own departure and travel time
-       still place it between the boarding and alighting stops. */
-    if (timed.length < 2 && !hasGps && board && alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
-      const arr = Number(row.depTs) + Number(row.travelMin) * 60;
-      /* fromBoard: the trip starts somewhere up the line, so before this
-         departure there is no position (not "waiting" at the rider's stop). */
-      timed = [{ pt: board, arr: Number(row.depTs), dep: Number(row.depTs), fromBoard: true }, { pt: alight, arr, dep: arr }];
-    }
-    /* Same spot as the boarding stop (a loop line, a bad lookup): one pin. */
-    if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
-    if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
-    /* A poll may have placed or moved the vehicle while the route loaded. */
-    if (st.hasGps && this._mapMarker && typeof this._mapMarker.getLatLng === 'function') {
-      const at = this._mapMarker.getLatLng();
-      const got = at && BkkLib.mapGpsLatLon(at.lat, at.lng);
-      if (got) {
-        lat = got[0];
-        lon = got[1];
-        hasGps = true;
+        map = L.map(canvas, { scrollWheelZoom: true, preferCanvas: false }).setView([startLat, startLon], hasGps ? 12 : 8);
+        L.tileLayer(MAP_TILES, MAP_TILE_OPTIONS).addTo(map);
+      } catch (_e) {
+        this._showMapNotice(t(lang, 'mapLeafletFail'));
+        return;
       }
-    }
-    if (!BkkLib.mapGpsLatLon(lat, lon) && timed.length >= 2) {
-      const est = BkkLib.estimateShapePosition(shape, timed, Date.now() / 1000);
-      if (est) {
-        lat = est.pt[0];
-        lon = est.pt[1];
-        /* 'waiting': at its first stop before departure (mapWaiting). */
-        positionEstimated = est.waiting ? 'waiting' : true;
-      }
-    }
-    this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed, row, board, alight } : null;
-    this._mapGeo = { shape, board, alight };
-    const pos = BkkLib.mapGpsLatLon(lat, lon);
-    const hasPosition = !!pos;
-    if (hasPosition) {
-      lat = pos[0];
-      lon = pos[1];
-    }
-    const routeColor = BkkLib.mapRouteColor(row, {});
-    const lineBase = {
-      lineJoin: 'round', lineCap: 'round', noClip: true, pane: 'overlayPane',
-    };
-    const applyView = () => {
-      try { map.invalidateSize(); } catch (_e) { /* ignore */ }
-      const points = [board, alight, hasPosition ? [lat, lon] : null].filter(Boolean);
-      if (hasShape) {
-        const bounds = L.latLngBounds(shape);
-        points.forEach((pt) => bounds.extend(pt));
-        map.fitBounds(bounds, { padding: [36, 36], maxZoom: 12, animate: false });
-      } else if (points.length >= 2) {
-        map.fitBounds(L.latLngBounds(points), { padding: [36, 36], maxZoom: 12, animate: false });
-      } else if (points.length) {
-        map.setView(points[0], 13, { animate: false });
-      }
-      (this._mapRouteLayers || []).forEach((layer) => {
-        if (layer && typeof layer.redraw === 'function') {
-          try { layer.redraw(); } catch (_e) { /* ignore */ }
+      this._map = map;
+      this._mapRouteLayers = [];
+      const resizeMap = () => {
+        if (this._map !== map) return;
+        try { map.invalidateSize(); } catch (_e) { /* ignore */ }
+      };
+      requestAnimationFrame(() => { resizeMap(); requestAnimationFrame(resizeMap); });
+      const drawMarker = () => {
+        if (!this._map || this._map !== map) return;
+        const here = BkkLib.mapGpsLatLon(lat, lon);
+        if (!here) return;
+        if (this._mapMarker) {
+          try { this._map.removeLayer(this._mapMarker); } catch (_e) { /* ignore */ }
         }
+        const icon = L.divIcon({
+          className: '',
+          html: this._dotIcon(row, hasGps && !positionEstimated, lang),
+          iconSize: [32, 32],
+          iconAnchor: [16, 16],
+        });
+        this._mapMarker = L.marker(here, { icon: icon, zIndexOffset: 600 }).addTo(map);
+      };
+      if (hasGps) {
+        drawMarker();
+        foot.textContent = this._mapFootText(row, false, true, false, lang);
+      }
+      let board = BkkLib.mapGpsLatLon(cfg.stopLat, cfg.stopLon)
+        || BkkLib.knownStopCoords({ id: cfg.stopId, name: cfg.stopName });
+      let alight = null;
+      let approx = false;
+      try {
+        const got = await this._loadRowMapShape(row);
+        shape = BkkLib.validMapShape(got.shape);
+        hasShape = shape.length >= 2;
+        approx = hasShape && !!got.approx;
+        if (got.board) board = got.board;
+        alight = got.alight || null;
+      } catch (_e) { /* timetable row still shows the live dot */ }
+      /* No vehicle reports a position (MÁV trains outside BKK's feed, Volán
+         and city rows): the timetable says where it should be, drawn as a
+         dashed marker (mapEstPos). */
+      let timed = [];
+      if (!hasGps) {
+        try {
+          timed = await this._rowTimedStops(row);
+        } catch (_e) { timed = []; }
+      }
+      /* No stop list (a MÁV train known from Transitous and ELVIRA only, or a
+         list that failed to load): the row's own departure and travel time
+         still place it between the boarding and alighting stops. */
+      if (timed.length < 2 && !hasGps && board && alight && Number(row.depTs) > 0 && Number(row.travelMin) > 0) {
+        const arr = Number(row.depTs) + Number(row.travelMin) * 60;
+        /* fromBoard: the trip starts somewhere up the line, so before this
+           departure there is no position (not "waiting" at the rider's stop). */
+        timed = [{ pt: board, arr: Number(row.depTs), dep: Number(row.depTs), fromBoard: true }, { pt: alight, arr, dep: arr }];
+      }
+      /* Same spot as the boarding stop (a loop line, a bad lookup): one pin. */
+      if (alight && board && BkkLib.haversineMeters(board, alight) < 30) alight = null;
+      if (this._mapStale(seq) || !this._map || this._map !== map || !this._mapOverlay) return;
+      /* A poll may have placed or moved the vehicle while the route loaded. */
+      if (st.hasGps && this._mapMarker && typeof this._mapMarker.getLatLng === 'function') {
+        const at = this._mapMarker.getLatLng();
+        const got = at && BkkLib.mapGpsLatLon(at.lat, at.lng);
+        if (got) {
+          lat = got[0];
+          lon = got[1];
+          hasGps = true;
+        }
+      }
+      if (!BkkLib.mapGpsLatLon(lat, lon) && timed.length >= 2) {
+        const est = BkkLib.estimateShapePosition(shape, timed, Date.now() / 1000);
+        if (est) {
+          lat = est.pt[0];
+          lon = est.pt[1];
+          /* 'waiting': at its first stop before departure (mapWaiting). */
+          positionEstimated = est.waiting ? 'waiting' : true;
+        }
+      }
+      this._mapEstimate = !hasGps && timed.length >= 2 ? { shape, timed, row, board, alight } : null;
+      this._mapGeo = { shape, board, alight };
+      const pos = BkkLib.mapGpsLatLon(lat, lon);
+      const hasPosition = !!pos;
+      if (hasPosition) {
+        lat = pos[0];
+        lon = pos[1];
+      }
+      const routeColor = BkkLib.mapRouteColor(row, {});
+      const lineBase = {
+        lineJoin: 'round', lineCap: 'round', noClip: true, pane: 'overlayPane',
+      };
+      const applyView = () => {
+        try { map.invalidateSize(); } catch (_e) { /* ignore */ }
+        const points = [board, alight, hasPosition ? [lat, lon] : null].filter(Boolean);
+        if (hasShape) {
+          const bounds = L.latLngBounds(shape);
+          points.forEach((pt) => bounds.extend(pt));
+          map.fitBounds(bounds, { padding: [36, 36], maxZoom: 12, animate: false });
+        } else if (points.length >= 2) {
+          map.fitBounds(L.latLngBounds(points), { padding: [36, 36], maxZoom: 12, animate: false });
+        } else if (points.length) {
+          map.setView(points[0], 13, { animate: false });
+        }
+        (this._mapRouteLayers || []).forEach((layer) => {
+          if (layer && typeof layer.redraw === 'function') {
+            try { layer.redraw(); } catch (_e) { /* ignore */ }
+          }
+        });
+      };
+      if (hasShape) {
+        const dash = approx ? { dashArray: '10 10' } : {};
+        const outline = L.polyline(shape, Object.assign({
+          color: '#1a1a1a', weight: 7, opacity: 0.45, interactive: false,
+        }, lineBase, dash)).addTo(map);
+        const line = L.polyline(shape, Object.assign({
+          color: routeColor, weight: 5, opacity: 0.98,
+        }, lineBase, dash)).addTo(map);
+        this._mapRouteLayers.push(outline, line);
+        this._mapRouteOutline = outline;
+        this._mapRoute = line;
+      }
+      const stopPin = (pin) => L.marker(pin.pt, {
+        icon: this._stopPinIcon(L, pin, lang, true), zIndexOffset: 500, keyboard: false,
+      }).addTo(map);
+      const line = { color: routeColor, label: row.label || '', text: row.textcolor || '' };
+      if (alight) {
+        this._mapAlightMarker = stopPin({ kind: 'alight', pt: alight, name: cfg.destName || '', color: routeColor });
+      }
+      if (board) this._mapBoardMarker = stopPin(Object.assign({ kind: 'board', pt: board, name: cfg.stopName || '' }, line));
+      if (hasPosition && !this._mapMarker) drawMarker();
+      applyView();
+      Object.assign(st, {
+        ready: true, hasShape, approx, hasGps, estimated: positionEstimated,
+        hasBoard: !!board, hasAlight: !!alight, hasPosition,
       });
-    };
-    if (hasShape) {
-      const dash = approx ? { dashArray: '10 10' } : {};
-      const outline = L.polyline(shape, Object.assign({
-        color: '#1a1a1a', weight: 7, opacity: 0.45, interactive: false,
-      }, lineBase, dash)).addTo(map);
-      const line = L.polyline(shape, Object.assign({
-        color: routeColor, weight: 5, opacity: 0.98,
-      }, lineBase, dash)).addTo(map);
-      this._mapRouteLayers.push(outline, line);
-      this._mapRouteOutline = outline;
-      this._mapRoute = line;
+      foot.textContent = this._mapFoot(row, st, lang);
+      /* Closed within these 80 ms, the map is gone: fitBounds on it throws. */
+      setTimeout(() => { if (this._map === map) applyView(); }, 80);
+      this._openingMap = '';
+    } catch (_e) {
+      if (this._mapStale(seq)) return;
+      this._openingMap = '';
+      this._showMapNotice(t(lang, 'mapLeafletFail'));
     }
-    const stopPin = (pin) => L.marker(pin.pt, {
-      icon: this._stopPinIcon(L, pin, lang, true), zIndexOffset: 500, keyboard: false,
-    }).addTo(map);
-    const line = { color: routeColor, label: row.label || '', text: row.textcolor || '' };
-    if (alight) {
-      this._mapAlightMarker = stopPin({ kind: 'alight', pt: alight, name: cfg.destName || '', color: routeColor });
-    }
-    if (board) this._mapBoardMarker = stopPin(Object.assign({ kind: 'board', pt: board, name: cfg.stopName || '' }, line));
-    if (hasPosition && !this._mapMarker) drawMarker();
-    applyView();
-    Object.assign(st, {
-      ready: true, hasShape, approx, hasGps, estimated: positionEstimated,
-      hasBoard: !!board, hasAlight: !!alight, hasPosition,
-    });
-    foot.textContent = this._mapFoot(row, st, lang);
-    /* Closed within these 80 ms, the map is gone: fitBounds on it throws. */
-    setTimeout(() => { if (this._map === map) applyView(); }, 80);
-    this._openingMap = '';
   }
 
   /* The sensor vehicle (ELVIRA, with its FUTÁR trip) of a displayed row.
@@ -1406,12 +1433,15 @@ ${this._stopPinCss()}
     const st = this._mapState;
     if (!this._map || !this._openMapKey || !st) return;
     const row = this._findMapRow(this._mapRef, this._rows || []);
+    if (row) this._mapRow = row;
     /* The row has left the board (departed): the dashed marker still runs
        on the times it had. */
     if (!row || !row.hasGps) {
-      /* A vehicle that reported a position and went silent: its last fix
-         is not live any more; the timetable places it, or nothing does. */
-      if (row && st.hasGps && !this._mapEstimate && this._mapGeo) {
+      /* A vehicle that reported a position and went silent, or left the
+         board with it: its last fix is not live any more; the timetable
+         places it (from the row as last listed), or nothing does. */
+      const known = row || this._mapRow;
+      if (known && st.hasGps && !this._mapEstimate && this._mapGeo) {
         st.hasGps = false;
         st.estimated = false;
         if (this._mapMarker) {
@@ -1421,7 +1451,7 @@ ${this._stopPinCss()}
         st.hasPosition = false;
         this._mapEstimate = Object.assign({ timed: [], row: null }, this._mapGeo);
       }
-      if (row || this._mapEstimate) this._syncEstimatedMarker(row, this._lang()).catch(() => {});
+      if (row || this._mapEstimate) this._syncEstimatedMarker(known, this._lang()).catch(() => {});
       return;
     }
     const gps = BkkLib.mapGpsLatLon(row.lat, row.lon);

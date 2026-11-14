@@ -264,6 +264,86 @@ test('an empty board is filled from Transitous once; a city board (helyi) is not
   assert.equal(planner.board.rows[0].platform, '2');
 });
 
+test('an empty board is not listed before its Transitous fill answers: no "no departures" flash', async () => {
+  let release = null;
+  const { src } = sources({
+    transitous: async () => { await new Promise((r) => { release = r; }); return [bus('motis:7', 9)]; },
+  });
+  const card = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), {
+    apiKey: 'k', board: { rows: [bus('motis:7', 9)], filled: true },
+  });
+  const done = card.poll(src);
+  for (let i = 0; i < 20 && !release; i++) await Promise.resolve();
+  assert.ok(card.shown.every((b) => b.rows.length), JSON.stringify(card.phases()));
+  release();
+  await done;
+  assert.ok(!card.phases().includes('board'));
+  assert.equal(ids(card.board.rows), 'motis:7');
+  /* The first load keeps its spinner until the fill answers. */
+  let open = null;
+  const first = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), { apiKey: 'k', board: { loading: true } });
+  const loading = first.poll(sources({
+    transitous: async () => { await new Promise((r) => { open = r; }); return []; },
+  }).src);
+  for (let i = 0; i < 20 && !open; i++) await Promise.resolve();
+  assert.equal(first.board.loading, true);
+  open();
+  await loading;
+  assert.deepEqual([first.board.loading, ids(first.board.rows)], [false, '']);
+});
+
+test('a board ELVIRA is not asked for lists its rows once: one GPS and realtime pass', async () => {
+  const { src, count } = sources({
+    timetables: async () => [bus('BKK_C1', 1), bus('BKK_C2', 5)],
+    realtime: async () => true,
+  });
+  const card = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), { apiKey: 'k' });
+  await card.poll(src);
+  assert.deepEqual(card.phases().filter((p) => p === 'board'), ['board']);
+  assert.deepEqual([count('coachGps'), count('realtime'), count('sensors'), count('elvira')], [1, 1, 1, 0]);
+  assert.equal(ids(card.board.rows), 'BKK_C1,BKK_C2');
+});
+
+test('a coach GPS lookup that fails after the poll went stale is no unhandled rejection', async () => {
+  const unhandled = [];
+  const onUnhandled = (err) => { unhandled.push(err); };
+  process.on('unhandledRejection', onUnhandled);
+  let answer = null;
+  const { src, count } = sources({
+    timetables: async () => [bus('BKK_C1', 1)],
+    elvira: () => new Promise((r) => { answer = r; }),
+    coachGps: async () => { throw new Error('gps broke'); },
+  });
+  const card = screen(KELENFOLD, { mode: 'all', hass: ELVIRA_HASS });
+  const done = card.poll(src);
+  for (let i = 0; i < 50 && !count('coachGps'); i++) await Promise.resolve();
+  card.gen.now += 1;
+  answer({ rows: [], error: '', detail: '' });
+  await done;
+  await new Promise((r) => setTimeout(r, 10));
+  process.off('unhandledRejection', onUnhandled);
+  assert.equal(count('coachGps'), 1);
+  assert.deepEqual(unhandled, []);
+});
+
+test('a Transitous fill that failed keeps the fill-ins still due instead of blanking the board', async () => {
+  const { src } = sources({ transitous: async () => null });
+  const card = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), {
+    apiKey: 'k', board: { rows: [bus('motis:7', 9), bus('motis:gone', -60)], filled: true },
+  });
+  await card.poll(src);
+  assert.equal(ids(card.board.rows), 'motis:7');
+  assert.equal(card.board.filled, true);
+  /* A board FUTÁR listed is no fill to keep. */
+  const own = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), { apiKey: 'k', board: { rows: [bus('BKK_T1', -60)] } });
+  await own.poll(sources({ transitous: async () => null }).src);
+  assert.deepEqual([ids(own.board.rows), own.board.filled], ['', false]);
+  /* A failed poll whose fill failed too shows the banner alone. */
+  const failing = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), { apiKey: 'k' });
+  await failing.poll(sources({ timetables: async () => { throw new Error('HTTP 503'); }, transitous: async () => null }).src);
+  assert.deepEqual([ids(failing.board.rows), failing.board.banner.message], ['', 'HTTP 503']);
+});
+
 test('a failed poll keeps the FUTÁR rows still due; an empty, departed or filled board is filled under the banner', async () => {
   const fail = () => sources({
     timetables: async () => { throw new Error('HTTP 503'); },

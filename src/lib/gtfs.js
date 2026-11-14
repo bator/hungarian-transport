@@ -526,53 +526,6 @@ register({
     const idx = await ix.volan();
     return BkkLib.gtfsSearchStops(idx, q, null);
   },
-  async volanRoutesAtStop(ix, stop) {
-    needIndexes(ix);
-    const idx = await ix.volan();
-    const origin = BkkLib.volanMatchStop(idx, stop, null);
-    if (!origin) return [];
-    const seen = new Set();
-    const out = [];
-    const trips = idx.t || [];
-    for (let i = 0; i < trips.length; i++) {
-      const route = trips[i][1];
-      if (!route || seen.has(route)) continue;
-      const ps = trips[i][2] || [];
-      if (ps.indexOf(origin.i) < 0) continue;
-      seen.add(route);
-      out.push({
-        id: 'gtfs:' + route,
-        label: String(route),
-        color: '#F9AB13',
-        text: '#000000',
-        type: 'COACH',
-        source: 'gtfs',
-      });
-    }
-    out.sort((a, b) => a.label.localeCompare(b.label, 'hu', { numeric: true }));
-    return out;
-  },
-  async volanRemainingNames(ix, stop, routeLabel) {
-    needIndexes(ix);
-    const idx = await ix.volan();
-    const origin = BkkLib.volanMatchStop(idx, stop, null);
-    if (!origin || !routeLabel) return [];
-    const want = String(routeLabel);
-    const byKey = new Map();
-    const trips = idx.t || [];
-    for (let i = 0; i < trips.length; i++) {
-      if (String(trips[i][1]) !== want) continue;
-      const ps = trips[i][2] || [];
-      const oidx = ps.indexOf(origin.i);
-      if (oidx < 0) continue;
-      for (let j = oidx + 1; j < ps.length; j++) {
-        const st = idx.stops[ps[j]];
-        if (!st || !st.key || byKey.has(st.key)) continue;
-        byKey.set(st.key, { key: st.key, name: st.name, id: st.id });
-      }
-    }
-    return Array.from(byKey.values());
-  },
   citySearchAll(idx, q) {
     const f = BkkLib.fold(q);
     if (!f || !idx) return [];

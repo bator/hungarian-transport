@@ -67,6 +67,9 @@ def main() -> int:
     failed |= not check("hm short", hm("8") is None)
     failed |= not check("hm garbage", hm("ab:cd") is None)
     failed |= not check("hm overnight", hm("25:10:00") == 1510)
+    failed |= not check("hm negative hour", hm("-1:10:00") is None)
+    failed |= not check("hm minutes out of range", hm("08:60:00") is None and hm("08:-5:00") is None)
+    failed |= not check("hm last minute of an hour", hm("08:59:00") == 539)
 
     ids = [f["id"] for f in CITY_FEEDS]
     failed |= not check("city feeds unique ids", len(ids) == len(set(ids)), str(ids))
@@ -592,6 +595,59 @@ def main() -> int:
         failed |= not check("catalog falls back to the producer url", gc._mdb_url("bahart") == "https://bahart.example/gtfs.zip")
     finally:
         gc._http_json, gc._mdb_access = real_json, real_access
+
+    # _http_json: an API credential goes to the URL asked for only (not along
+    # a redirect), and an answer past MAX_JSON is refused, not read whole.
+    class FakeResp:
+        def __init__(self, body: bytes) -> None:
+            self.body, self.asked = body, None
+
+        def read(self, n: int = -1) -> bytes:
+            self.asked = n
+            return self.body if n < 0 else self.body[:n]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            return None
+
+    real_urlopen_json = urllib.request.urlopen
+    seen: dict = {}
+
+    def fake_json_urlopen(req, timeout=None):
+        seen["req"] = req
+        return seen.setdefault("resp", FakeResp(b'{"ok": 1}'))
+
+    urllib.request.urlopen = fake_json_urlopen
+    try:
+        got = gc._http_json("https://api.example/x", headers={"apikey": "k1", "X-Other": "o"})
+        req = seen["req"]
+        failed |= not check("_http_json sends apikey unredirected",
+                            got == {"ok": 1} and req.unredirected_hdrs.get("Apikey") == "k1"
+                            and "Apikey" not in req.headers and req.headers.get("X-other") == "o",
+                            repr((req.headers, req.unredirected_hdrs)))
+        moved = urllib.request.HTTPRedirectHandler().redirect_request(
+            req, None, 302, "Found", {}, "https://elsewhere.example/y")
+        failed |= not check("a redirect of an _http_json request carries no apikey",
+                            moved is not None and not moved.has_header("Apikey"),
+                            repr(moved and moved.header_items()))
+        seen.clear()
+        gc._http_json("https://api.example/x", headers={"Authorization": "Bearer t"})
+        failed |= not check("_http_json sends Authorization unredirected",
+                            seen["req"].unredirected_hdrs.get("Authorization") == "Bearer t"
+                            and not seen["req"].headers.get("Authorization"))
+        failed |= not check("_http_json reads at most MAX_JSON + 1 bytes", seen["resp"].asked == gc.MAX_JSON + 1)
+        seen.clear()
+        seen["resp"] = FakeResp(b" " * (gc.MAX_JSON + 1))
+        try:
+            gc._http_json("https://api.example/x")
+            too_big = False
+        except ValueError:
+            too_big = True
+        failed |= not check("_http_json refuses an answer larger than MAX_JSON", too_big)
+    finally:
+        urllib.request.urlopen = real_urlopen_json
 
     # .env: `export KEY=…`, comments after a value, quotes; a `#` inside a
     # URL stays. The Home Assistant file wins over /config/.env.

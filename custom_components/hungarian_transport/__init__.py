@@ -28,7 +28,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 from homeassistant.util import dt as dt_util
 
-from . import lovelace_resource, mav, mav_daily, realtime, timetable_notify, timetables
+from . import lovelace_resource, mav, mav_daily, realtime, storage, timetable_notify, timetables
 from .assets import asset_tag
 from .cache import close_on_stop, hass_call_later
 from .const import (
@@ -75,13 +75,21 @@ ELVIRA_AT_BACK = 86400
 ELVIRA_AT_AHEAD = 8 * 86400
 
 
+def _finite_int(value: Any) -> int:
+    """vol.Coerce(int), with a YAML .inf invalid too: Coerce passes on the
+    OverflowError of int(inf)."""
+    try:
+        return vol.Coerce(int)(value)
+    except OverflowError:
+        raise vol.Invalid("expected a finite integer") from None
+
+
 def _elvira_at(value: Any) -> int:
     """The window's start in epoch seconds, near enough to now to be a search."""
     message = "at must be within a day before and eight days after now"
     try:
-        at = vol.Coerce(int)(value)
-    except OverflowError:
-        # Coerce passes it on: int() of a YAML .inf.
+        at = _finite_int(value)
+    except vol.Invalid:
         raise vol.Invalid(message) from None
     now = dt_util.utcnow().timestamp()
     if not now - ELVIRA_AT_BACK <= at <= now + ELVIRA_AT_AHEAD:
@@ -95,18 +103,26 @@ ELVIRA_SERVICE_SCHEMA = vol.Schema(
         vol.Required("dest_code"): cv.string,
         vol.Optional(
             "minutes_after", default=180
-        ): vol.All(cv.positive_int, vol.Range(min=15, max=480)),
+        ): vol.All(_finite_int, vol.Range(min=15, max=480)),
         # Copied into every row: a station name, not a payload.
         vol.Optional("dest_name", default=""): vol.All(cv.string, vol.Length(max=100)),
         vol.Optional("at"): _elvira_at,
     }
 )
+
+
+def _futar_value(value: Any) -> str:
+    """A FUTÁR query value as a string; a YAML true is "true" as the cards
+    send it, not Python's "True"."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return cv.string(value)
+
+
 FUTAR_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Required("path"): vol.In(FUTAR_PATHS),
-        vol.Optional("params", default=dict): vol.Schema(
-            {cv.string: vol.Any(cv.string, int, float, bool)}
-        ),
+        vol.Optional("params", default=dict): vol.Schema({cv.string: _futar_value}),
     }
 )
 # What the cards send for each departure row (src/lib/realtime.js); anything
@@ -116,7 +132,7 @@ REALTIME_TRIP_SCHEMA = vol.Schema(
         vol.Required("key"): vol.All(cv.string, vol.Length(min=1, max=96)),
         vol.Optional("trip_id"): vol.All(cv.string, vol.Length(min=1, max=128)),
         vol.Optional("route"): vol.All(cv.string, vol.Length(min=1, max=32)),
-        vol.Optional("start"): vol.All(vol.Coerce(int), vol.Range(min=0, max=2880)),
+        vol.Optional("start"): vol.All(_finite_int, vol.Range(min=0, max=2880)),
         vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{8}$")),
         vol.Optional("train"): vol.All(cv.string, vol.Match(r"^\d{1,6}$")),
         vol.Optional("stops", default=list): vol.All(
@@ -128,10 +144,10 @@ REALTIME_TRIP_SCHEMA = vol.Schema(
         vol.Optional("repeat"): vol.All(
             cv.ensure_list,
             vol.Length(max=realtime.MAX_STOPS),
-            [vol.All(vol.Coerce(int), vol.Range(min=0, max=realtime.MAX_STOPS - 1))],
+            [vol.All(_finite_int, vol.Range(min=0, max=realtime.MAX_STOPS - 1))],
         ),
-        vol.Optional("from"): vol.All(vol.Coerce(int), vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
-        vol.Optional("to"): vol.All(vol.Coerce(int), vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
+        vol.Optional("from"): vol.All(_finite_int, vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
+        vol.Optional("to"): vol.All(_finite_int, vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
     }
 )
 REALTIME_SERVICE_SCHEMA = vol.Schema(
@@ -423,6 +439,13 @@ def _entry_api_key(entry: ConfigEntry) -> str:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration entry."""
     frontend.add_extra_js_url(hass, hass.data[DOMAIN]["card_url"])
+    if hass.is_running:
+        # Added after the start (again, after a removal took the resource
+        # away): async_setup's sync at the start has run already.
+        try:
+            await lovelace_resource.async_sync_resource(hass, hass.data[DOMAIN]["card_url"])
+        except Exception:  # noqa: BLE001 - the extra module still loads the cards
+            _LOGGER.warning("Could not keep the cards as a Lovelace resource", exc_info=True)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     notifier = timetable_notify.UpdateNotifier(hass, entry.options)
     entry.async_on_unload(notifier.stop)
@@ -523,11 +546,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """The integration is removed: so is its Lovelace resource."""
+    """The integration is removed: so are its Lovelace resource and its
+    record in .storage (storage.py), and the copy of it in memory."""
     try:
         await lovelace_resource.async_remove_resource(hass)
     except Exception:  # noqa: BLE001 - removal goes on
         _LOGGER.warning("Could not remove the cards' Lovelace resource", exc_info=True)
+    try:
+        await storage.store(hass).async_remove()
+    except Exception:  # noqa: BLE001 - removal goes on
+        _LOGGER.warning("Could not remove the timetable update record", exc_info=True)
+    hass.data.get(DOMAIN, {}).pop("update_state", None)
 
 
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)

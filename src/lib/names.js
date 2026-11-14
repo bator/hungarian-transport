@@ -271,12 +271,6 @@ register({
     if (!pa || !pb) return false;
     return BkkLib.haversineMeters(pa, pb) > (maxM || 400);
   },
-  stopsCloseEnough(a, b) {
-    const pa = BkkLib.finiteLatLon(a && a.lat, a && a.lon);
-    const pb = BkkLib.finiteLatLon(b && b.lat, b && b.lon);
-    if (!pa || !pb) return true;
-    return BkkLib.haversineMeters(pa, pb) <= 300;
-  },
   /* Two named towns, or two cross streets ("Szeged, Londoni körút (Bakay
      Nándor utca)" and "… (Kálvária sugárút)"), are two places. */
   citiesConflict(a, b) {

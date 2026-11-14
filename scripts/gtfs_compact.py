@@ -42,6 +42,11 @@ UA = "Hungarian-transport/1.0 (Home Assistant; +https://github.com/bator/hungari
 # bomb, not a feed that grew; the Volán zip itself is ~100 MB.
 MAX_MEMBER = 2 * 1024 * 1024 * 1024
 MAX_DOWNLOAD = 500 * 1024 * 1024
+# A catalog API answer (Transitland, Mobility Database) larger than this is refused.
+MAX_JSON = 5 * 1024 * 1024
+# Headers that carry an API credential: sent to the URL asked for only, never
+# along a redirect.
+_CREDENTIAL_HEADERS = frozenset({"apikey", "authorization"})
 # 28: trip rows carry GTFS route_type as a fifth element.
 # 29: stop coordinates ("g"), a shape reference per trip and "sh", the
 #     sharded shapes folder next to the index. A trip row may carry the
@@ -380,15 +385,20 @@ def _urlopen(req: urllib.request.Request, timeout: int = 120, *, allow_insecure:
 
 def _http_json(url: str, *, method: str = "GET", data: dict | None = None, headers: dict | None = None, timeout: int = 20):
     hdrs = {"User-Agent": UA, "Accept": "application/json"}
-    if headers:
-        hdrs.update(headers)
+    secret = {}
+    for name, value in (headers or {}).items():
+        (secret if name.lower() in _CREDENTIAL_HEADERS else hdrs)[name] = value
     body = None
     if data is not None:
         body = json.dumps(data).encode("utf-8")
         hdrs.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(url, data=body, method=method, headers=hdrs)
+    for name, value in secret.items():
+        req.add_unredirected_header(name, value)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
+        raw = resp.read(MAX_JSON + 1)
+    if len(raw) > MAX_JSON:
+        raise ValueError(f"{urllib.parse.urlsplit(url).netloc}: answer larger than {MAX_JSON} bytes")
     if not raw:
         return None
     return json.loads(raw.decode("utf-8"))
@@ -536,9 +546,12 @@ def hm(t: str | None) -> int | None:
     if len(a) < 2:
         return None
     try:
-        return int(a[0]) * 60 + int(a[1])
+        h, m = int(a[0]), int(a[1])
     except ValueError:
         return None
+    if h < 0 or not 0 <= m < 60:
+        return None
+    return h * 60 + m
 
 
 def _meters(a: tuple[float, float], b: tuple[float, float]) -> float:

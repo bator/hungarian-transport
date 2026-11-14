@@ -116,10 +116,14 @@ jobs:
       # (the live manifest's content digest and GTFS digests) or the live
       # manifest is old enough to refresh (REFRESH_AFTER). The MÁV zip
       # and pfaedle's output are the ones release_mav_index.sh left in its
-      # work dir for this build.
+      # work dir for this build. An index with under half the trains and
+      # lines of the published one is refused (mav_shrink_guard.py); the
+      # repository variable MAV_ALLOW_SHRINK=1 accepts an intended reduction.
       - name: Pages site
         id: site
         if: steps.mav.outputs.built == 'true'
+        env:
+          MAV_ALLOW_SHRINK: ${{ vars.MAV_ALLOW_SHRINK || '' }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
