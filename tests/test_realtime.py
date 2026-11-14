@@ -4,10 +4,16 @@ The .pb fixtures are real feeds of 2026-11-02 07:49 UTC (jbb.ghsq.de),
 trimmed to a few trips with their vehicle descriptors (plates) and entity
 ids removed; mav-static.zip is three rows of that day's MÁV trips.txt plus
 one made-up trip with a reused train number.
+
+These are the jbb.ghsq.de paths: every test here reads the shipped feed
+table without its "mavplusz" keys (_jbb_only), as a user who removed them
+would. mavplusz.hu, the first source of the sources with the key, is
+tests/test_mavplusz.py's.
 """
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import io
 import json
 import logging
@@ -34,6 +40,25 @@ J = "https://jbb.ghsq.de/gtfs/hu/"
 SZFV = J + "hkir_hkir_V-14827/"
 MAV_STATIC = "https://jbb.ghsq.de/gtfs/hu-m%C3%A1v_szem%C3%A9lysz%C3%A1ll%C3%ADt%C3%A1si_zrt..gtfs.zip"
 GYSEV_STATIC = "https://jbb.ghsq.de/gtfs/hu-gysev_zrt..gtfs.zip"
+
+
+@pytest.fixture(autouse=True)
+def _jbb_only(monkeypatch):
+    real = realtime.load_feed_table
+
+    def without_mavplusz(path=realtime.FEEDS_FILE):
+        # One copy per config, so an alias stays the same object.
+        copies: dict[int, realtime.FeedConfig] = {}
+        out = {}
+        for fid, cfg in real(path).items():
+            if id(cfg) not in copies:
+                copies[id(cfg)] = dataclasses.replace(
+                    cfg, sources=tuple(dataclasses.replace(src, mavplusz=False) for src in cfg.sources)
+                )
+            out[fid] = copies[id(cfg)]
+        return out
+
+    monkeypatch.setattr(realtime, "load_feed_table", without_mavplusz)
 
 
 def _pb(name: str) -> bytes:

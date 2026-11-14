@@ -1,0 +1,272 @@
+{
+ "_comment": "mavplusz.hu OTP2 GraphQL answer, captured 2026-11-14 07:2x CET for the query mavplusz.build_query makes (variables below); stoptimes trimmed to the first few per trip. Public timetable and vehicle position data only.",
+ "variables": {
+  "d0": "20261114",
+  "d1": "20261116",
+  "t0": "hkir:hkir_2036_1-3",
+  "t1": "hkir:hkir_2511_15-6",
+  "t2": "hkir:hkir_4440_273-3",
+  "t3": "hkir:hkir_nope_0-0"
+ },
+ "response": {
+  "data": {
+   "t0": {
+    "gtfsId": "hkir:hkir_2036_1-3",
+    "route": {
+     "gtfsId": "hkir:hkir_V-R-200-329"
+    },
+    "stoptimesForDate": [
+     {
+      "realtime": true,
+      "realtimeState": "UPDATED",
+      "realtimeArrival": 22346,
+      "realtimeDeparture": 22962,
+      "arrivalDelay": -454,
+      "departureDelay": 162,
+      "serviceDay": 1794610800,
+      "stop": {
+       "gtfsId": "hkir:hkir_779365_6"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "UPDATED",
+      "realtimeArrival": 23023,
+      "realtimeDeparture": 23023,
+      "arrivalDelay": 103,
+      "departureDelay": 103,
+      "serviceDay": 1794610800,
+      "stop": {
+       "gtfsId": "hkir:hkir_779410_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "UPDATED",
+      "realtimeArrival": 23031,
+      "realtimeDeparture": 23031,
+      "arrivalDelay": 51,
+      "departureDelay": 51,
+      "serviceDay": 1794610800,
+      "stop": {
+       "gtfsId": "hkir:hkir_779389_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "UPDATED",
+      "realtimeArrival": 23132,
+      "realtimeDeparture": 23132,
+      "arrivalDelay": 92,
+      "departureDelay": 92,
+      "serviceDay": 1794610800,
+      "stop": {
+       "gtfsId": "hkir:hkir_779367_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "UPDATED",
+      "realtimeArrival": 23222,
+      "realtimeDeparture": 23222,
+      "arrivalDelay": 122,
+      "departureDelay": 122,
+      "serviceDay": 1794610800,
+      "stop": {
+       "gtfsId": "hkir:hkir_779405_1"
+      }
+     }
+    ],
+    "pattern": {
+     "vehiclePositions": [
+      {
+       "lat": 47.9231834,
+       "lon": 19.1795349,
+       "heading": null,
+       "speed": 8.05555534362793,
+       "lastUpdated": 1794637068,
+       "stopRelationship": {
+        "status": "IN_TRANSIT_TO",
+        "stop": {
+         "gtfsId": "hkir:hkir_109055_2"
+        }
+       },
+       "trip": {
+        "gtfsId": "hkir:hkir_2036_1-3"
+       }
+      }
+     ]
+    }
+   },
+   "t1": {
+    "gtfsId": "hkir:hkir_2511_15-6",
+    "route": {
+     "gtfsId": "hkir:hkir_V-R-200-632"
+    },
+    "stoptimesForDate": [
+     {
+      "realtime": true,
+      "realtimeState": "UPDATED",
+      "realtimeArrival": 22874,
+      "realtimeDeparture": 22982,
+      "arrivalDelay": 74,
+      "departureDelay": 182,
+      "serviceDay": 1794610800,
+      "stop": {
+       "gtfsId": "hkir:hkir_773521_17"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "UPDATED",
+      "realtimeArrival": 23201,
+      "realtimeDeparture": 23201,
+      "arrivalDelay": 41,
+      "departureDelay": 41,
+      "serviceDay": 1794610800,
+      "stop": {
+       "gtfsId": "hkir:hkir_773517_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "UPDATED",
+      "realtimeArrival": 23435,
+      "realtimeDeparture": 23474,
+      "arrivalDelay": -25,
+      "departureDelay": 14,
+      "serviceDay": 1794610800,
+      "stop": {
+       "gtfsId": "hkir:hkir_773523_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "UPDATED",
+      "realtimeArrival": 23592,
+      "realtimeDeparture": 23616,
+      "arrivalDelay": 12,
+      "departureDelay": 36,
+      "serviceDay": 1794610800,
+      "stop": {
+       "gtfsId": "hkir:hkir_773606_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "UPDATED",
+      "realtimeArrival": 23683,
+      "realtimeDeparture": 23686,
+      "arrivalDelay": -17,
+      "departureDelay": -14,
+      "serviceDay": 1794610800,
+      "stop": {
+       "gtfsId": "hkir:hkir_773607_1"
+      }
+     }
+    ],
+    "pattern": {
+     "vehiclePositions": [
+      {
+       "lat": 47.2271271,
+       "lon": 19.1754055,
+       "heading": 290.0,
+       "speed": 1.3888888359069824,
+       "lastUpdated": 1794636949,
+       "stopRelationship": {
+        "status": "IN_TRANSIT_TO",
+        "stop": {
+         "gtfsId": "hkir:hkir_777244_1"
+        }
+       },
+       "trip": {
+        "gtfsId": "hkir:hkir_2511_15-6"
+       }
+      },
+      {
+       "lat": 47.4745941,
+       "lon": 19.0987282,
+       "heading": 209.0,
+       "speed": 0.0,
+       "lastUpdated": 1794637054,
+       "stopRelationship": {
+        "status": "STOPPED_AT",
+        "stop": {
+         "gtfsId": "hkir:hkir_773521_17"
+        }
+       },
+       "trip": {
+        "gtfsId": "hkir:hkir_2511_5-3"
+       }
+      }
+     ]
+    }
+   },
+   "t2": {
+    "gtfsId": "hkir:hkir_4440_273-3",
+    "route": {
+     "gtfsId": "hkir:hkir_V-R-200-4440"
+    },
+    "stoptimesForDate": [
+     {
+      "realtime": false,
+      "realtimeState": "SCHEDULED",
+      "realtimeArrival": 25200,
+      "realtimeDeparture": 25200,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794783600,
+      "stop": {
+       "gtfsId": "hkir:hkir_217136_11"
+      }
+     },
+     {
+      "realtime": false,
+      "realtimeState": "SCHEDULED",
+      "realtimeArrival": 25380,
+      "realtimeDeparture": 25380,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794783600,
+      "stop": {
+       "gtfsId": "hkir:hkir_217159_1"
+      }
+     },
+     {
+      "realtime": false,
+      "realtimeState": "SCHEDULED",
+      "realtimeArrival": 25620,
+      "realtimeDeparture": 25620,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794783600,
+      "stop": {
+       "gtfsId": "hkir:hkir_217200_1"
+      }
+     }
+    ],
+    "pattern": {
+     "vehiclePositions": [
+      {
+       "lat": 47.4405899,
+       "lon": 21.5161877,
+       "heading": 213.0,
+       "speed": 4.722222328186035,
+       "lastUpdated": 1794637077,
+       "stopRelationship": {
+        "status": "IN_TRANSIT_TO",
+        "stop": {
+         "gtfsId": "hkir:hkir_217439_1"
+        }
+       },
+       "trip": {
+        "gtfsId": "hkir:hkir_4440_273-3"
+       }
+      }
+     ]
+    }
+   },
+   "t3": null
+  }
+ }
+}

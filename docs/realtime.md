@@ -13,6 +13,13 @@ exactly as before.
 
 ## Sources
 
+For the Volán, Volánbusz local, Paks, Debrecen, Veszprém and Miskolc cards
+the **primary source is mavplusz.hu**, MÁV's own journey planner, asked for
+just the trips the card shows (see
+[mavplusz.hu first](#mavpluszhu-first-jbbghsqde-as-backup)). The
+GTFS-Realtime feeds below are its **backup** for those operators, and the
+only source for the MÁV trains, GYSEV and Orosháza.
+
 The feeds are the ones Transitous lists in
 [`feeds/hu.json`](https://github.com/public-transport/transitous/blob/main/feeds/hu.json).
 Most of them are exported from MÁV's journey planner (OpenTripPlanner) by
@@ -36,6 +43,71 @@ matched). An operator that is not in it is simply not asked about. Kecskemét,
 Pécs, Szeged (SZKT), Szombathely, Tatabánya, Kaposvár and BAHART have paths
 on the server, but they were empty when this was written.
 
+### mavplusz.hu first, jbb.ghsq.de as backup
+
+`mavplusz.hu` runs OpenTripPlanner 2 with the timetables and realtime
+updates of the operators above; the `jbb.ghsq.de` feeds are exported from
+it, so its ids are the feeds' ids with their prefix kept (feed trip
+`hkir_2036_1-3` of the `hkir:` feed is the planner's `hkir:hkir_2036_1-3`,
+its stops likewise). Sources marked `"mavplusz": true` in
+`realtime_feeds.json` (all 64 with the prefixes `hkir:`, `paks:`,
+`debrecen:`, `VBUSZ:` and `mvkzrt:`) are read this way:
+
+- **What is asked.** Requests with a `trip_id` on a feed matched by
+  trip_id, and requests with a `route` and `start` on a feed matched by
+  route + start (Veszprém, Miskolc, Debrecen). One GraphQL request (`POST
+  https://mavplusz.hu/otp2-backend/otp/routers/default/index/graphql`, no key)
+  per action call, for the trips of that call not cached yet: per trip its
+  route, its calls on the service date (the card's `date`, else today in
+  Budapest) with realtime delays and times, and the positions of the
+  vehicles on its pattern, of which only the one on this trip is kept. The
+  ids go in as GraphQL variables; vehicle ids (plate numbers) are not
+  asked for. At most 40 trips a request: the action takes at most 40 trips
+  a call, so one request always covers it (a longer list, possible only
+  when the hub is called directly, is cut, not split). 20 trips take
+  0.2–0.5 s and about 5 KiB gzipped, against 1.9 MB of trip updates for the
+  Volán intercity feed. On 2026-11-14, 25 of 25 sampled feed trips were in
+  the planner with delays within 60 s of the feed's, and their vehicles 20
+  of 20.
+- **Route + start.** The planner's trip ids are the feeds' ones, start
+  time included (`VBUSZ:1131_2084_073400_SZ` starts at 07:34), and its
+  route ids are the prefix plus the card's route (`VBUSZ:2`, `mvkzrt:14`;
+  checked live on 2026-11-14 for four lines of each). So a route + start
+  request is first resolved to the planner's trips: one more request lists
+  the trip ids of every asked route on the service date (`route(id:) {
+  patterns { tripsForDate(serviceDate:) { gtfsId } } }`, at most 40 routes;
+  8 routes are about 16 kB), kept for three hours per route and date. The
+  trips whose id starts at the card's minute (modulo a day, as on the
+  feeds) are then asked for with the trip ids. Two trips of a line at the
+  same minute (both ends of Miskolc line 14 at 07:10) are both asked for
+  and told apart by the card's stops exactly as on the feeds, else neither
+  is used. The planner's trip updates count as ones whose route was learned
+  from a vehicle, as the feeds' are, so a Miskolc trip without its vehicle
+  still gets no delay; its delay is the vehicle's current one.
+- **What it answers.** A call without realtime data has no delay (the
+  planner's scheduled time is no prediction). Every call CANCELED is a
+  canceled trip, one CANCELED call among updated ones a skipped stop. A
+  trip with no realtime call on the date has no update and no vehicle (the
+  pattern's vehicle is then another day's run of it). The answer has the
+  same shape as from the feeds; `updated` is the time of the planner's
+  answer, or the newest feed header when a feed was read too.
+- **When the feeds are read instead.** For a source whose planner request
+  fails (an HTTP error, a timeout, an answer that is not JSON, any GraphQL
+  error), is refused by the integration's rate limit, or falls in the
+  minute's backoff after a failure; and when the planner knows **none** of
+  the requested trips (a null answer for every one: ids the card's
+  timetable does not share with the planner). A trip the planner does not
+  know among ones it does is simply not answered: reading the 1.9 MB feeds
+  every minute for it would undo the point, and the feeds, exported from
+  the planner, would not know it either. A trip the planner knows but has
+  no realtime data for is no reason to read the feeds either. A route +
+  start the planner does not resolve (a route it does not know, no trip at
+  that minute, or the route list failing) is matched on the feeds, which
+  are then read too. Trains are always matched on the feeds.
+- **Caching.** Each trip's answer, a miss included, is kept per trip and
+  service date for the feed's `interval` (60 s), each route's trip list for
+  three hours, shared by every card and browser; one request at a time.
+
 ### How trips are matched
 
 - **trip_id.** The Volán, Paks, Debrecen and Orosháza feeds name trips and
@@ -45,8 +117,9 @@ on the server, but they were empty when this was written.
   its row, so the card sends it and the integration looks it up. An index
   built before this change has no trip ids: those cards keep the timetable
   until the next timetable release.
-- **route + start.** The Veszprém and Miskolc feeds use other trip ids than
-  the GTFS the card ships, but their ids carry the start time
+- **route + start.** (The same rule on mavplusz.hu, see above.) The
+  Veszprém and Miskolc feeds use other trip ids than the GTFS the card
+  ships, but their ids carry the start time
   (`1140_1446_084500_A_HP` starts at 08:45) and their `route_id` is the line
   number. The card sends the line and its trip's first time; two trips of a
   line starting at the same minute (both ends of the line) are told apart by
@@ -107,9 +180,19 @@ none.
   the request page names no licence or terms for redistribution or for
   real-time data. Transitous lists MÁV's own feed as CC0-1.0. Orosháza's feed
   (`gtfs.gpspositions.net`) also states no terms.
-- **Not redistributed.** The integration does not republish any feed: each
-  Home Assistant fetches it for its own cards, keeps it in memory only, and
-  shows the derived delay and position.
+- **mavplusz.hu.** MÁV's legal notice
+  ([mavcsoport.hu/mav-csoport/bemutatkozas/jogi-utmutatas](https://www.mavcsoport.hu/mav-csoport/bemutatkozas/jogi-utmutatas)),
+  which covers mav.hu and its subdomains and mavplusz.hu, requires MÁV's
+  prior written permission for downloading or reusing its content. The
+  planner's GraphQL endpoint states no terms of its own and asks for no
+  key. The integration asks it only for the trips a card shows, while the
+  card is shown, at most once a minute per trip; it keeps nothing beyond
+  that minute's in-memory cache and republishes nothing. Removing the
+  `"mavplusz": true` keys from `realtime_feeds.json` turns this source off:
+  the cards then read only the feeds, as before 1.10.19.
+- **Not redistributed.** The integration does not republish any feed or
+  planner answer: each Home Assistant fetches it for its own cards, keeps
+  it in memory only, and shows the derived delay and position.
 
 Should either side object, removing the operator from `realtime_feeds.json`
 (or the whole file) turns the feature off without touching the cards.
@@ -132,10 +215,18 @@ Should either side object, removing the operator from `realtime_feeds.json`
   `jbb.ghsq.de` feeds do not); no redirects; a 20-second timeout; 8 MB per
   feed and 30 MB per static zip at most; at most 30 fetches in a burst and
   one every two seconds after that, whatever the cards ask.
+- **The planner.** One request per action call at most for the trips not
+  cached (each kept for the feed's interval), plus one for the route lists
+  of route + start requests not cached (each kept three hours), counted
+  against the same
+  rate limit as the feeds; JSON in, gzip, the same User-Agent, no
+  redirects, a 20-second timeout, 4 MB per answer at most.
 - **Outages.** A failing feed is not asked again for a minute (a static zip
   for 15 minutes), is logged once when it starts failing and once when it
   answers again, and the cards keep the timetable meanwhile (a static zip's
-  train numbers from before stay in use, see above).
+  train numbers from before stay in use, see above). A failing planner
+  likewise: a minute's backoff, one warning, one line when it answers
+  again, and the feeds meanwhile.
 
 ## The action
 
@@ -192,10 +283,14 @@ be reached now).
 
 ## Privacy
 
-The request carries no personal data: the User-Agent names the project, not
-the installation, and the feed is asked for as a whole, not for the trips a
-card shows. The vehicles' plate numbers in the feeds are not passed on to
-the cards. The test fixtures (`tests/fixtures/realtime/`) are real feeds of
+The requests carry no personal data: the User-Agent names the project, not
+the installation. A feed is asked for as a whole, not for the trips a card
+shows; the planner is asked for the trips a card shows (trip ids and a
+date, nothing else), so mavplusz.hu can tell which timetable rows some
+Home Assistant displays, as it can for anyone using its own site. The
+vehicles' plate numbers in the feeds are not passed on to the cards, and
+are not asked of the planner. `tests/fixtures/realtime/mavplusz_trips.json`
+is a real planner answer of 2026-11-14 for four trips, trimmed. The test fixtures (`tests/fixtures/realtime/`) are real feeds of
 2026-11-02 trimmed to a few trips, with the vehicle descriptors and entity
 ids (plates) removed.
 
@@ -211,6 +306,9 @@ executor: the Volán intercity trip updates (1,584 trips, 48,000 stop updates)
 take about 0.3 s on a laptop.
 
 ## Limits
+
+- mavplusz.hu answers trip_id and route + start requests. Train numbers
+  (MÁV, GYSEV) are matched on the feeds alone.
 
 - Cards with an index from before this change (no trip ids) get live data
   for Veszprém, Miskolc and MÁV only, until the next timetable release.
