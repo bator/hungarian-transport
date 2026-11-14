@@ -312,8 +312,35 @@ with tempfile.TemporaryDirectory() as tmp_name:
     site.write_overlay(pf_b, ov_b)
     check("another shapes.txt gives other overlay bytes", ov_a.read_bytes() != ov_b.read_bytes())
 
+    # feed_info.txt as the index builder reads it (gtfs_feed): a publisher
+    # name in cp1250, a space after the header's commas, a folder in the zip.
+    odd = tmp / "odd-feed-info.zip"
+    with zipfile.ZipFile(odd, "w") as z:
+        z.writestr("mav/feed_info.txt", "feed_publisher_name, feed_version, feed_start_date\n".encode()
+                   + "MÁV-START Zrt.,".encode("cp1250") + b" 20261101.M2ChangeID , 20261101\n")
+    try:
+        odd_version = site.gtfs_feed_version(odd)
+    except site.SiteError as err:
+        odd_version = repr(err)
+    check("gtfs_feed_version reads a cp1250 feed_info.txt with spaces after the commas",
+          odd_version == "20261101.M2ChangeID", odd_version)
+    for name, body, why in [
+        ("no-feed-info.zip", {"routes.txt": "route_id\nr1\n"}, "has no feed_info.txt"),
+        ("undated.zip", {"feed_info.txt": "feed_publisher_name,feed_version\nMÁV-START,latest\n"},
+         "names no dated feed_version"),
+    ]:
+        with zipfile.ZipFile(tmp / name, "w") as z:
+            for member, text in body.items():
+                z.writestr(member, text)
+        try:
+            site.gtfs_feed_version(tmp / name)
+            refused = ""
+        except site.SiteError as err:
+            refused = str(err)
+        check(f"gtfs_feed_version refuses a zip that {why}", why in refused, refused)
+
     official = gtfs_zip(tmp / "dl" / "gtfs" / "mav-gtfs.zip")
-    gtfs_args = ("--gtfs-zip", str(official), "--pfaedle-dir", str(pf_a))
+    gtfs_args =("--gtfs-zip", str(official), "--pfaedle-dir", str(pf_a))
     rc, out, err, outputs = run_site(tmp / "g", *gtfs_args)
     gsite = tmp / "g" / "site"
     gman = json.loads((gsite / "mav-index.json").read_text()) if (gsite / "mav-index.json").is_file() else {}

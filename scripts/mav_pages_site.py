@@ -48,7 +48,6 @@ import csv
 import gzip
 import hashlib
 import html
-import io
 import json
 import re
 import shutil
@@ -64,6 +63,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(1, str(HERE.parent / "custom_components" / "hungarian_transport"))
 
+import gtfs_feed  # noqa: E402
 import mav_index  # noqa: E402
 from index_digest import digest  # noqa: E402
 
@@ -119,18 +119,18 @@ def _sha256(path: Path) -> str:
 
 
 def gtfs_feed_version(path: Path) -> str:
-    """feed_info.txt's feed_version in the MÁV zip at path."""
+    """feed_info.txt's feed_version in the MÁV zip at path, read as the
+    index builder reads it (gtfs_feed: a cp1250 publisher name, spaces
+    around the header's names)."""
     try:
         with zipfile.ZipFile(path) as z:
-            info = next((i for i in z.infolist()
-                         if not i.is_dir() and Path(i.filename).name.lower() == "feed_info.txt"), None)
-            if info is None:
-                raise SiteError(f"{path.name} has no feed_info.txt")
-            text = z.read(info).decode("utf-8-sig")
-    except (OSError, zipfile.BadZipFile) as err:
+            try:
+                gtfs_feed.member(z, "feed_info.txt")
+            except FileNotFoundError:
+                raise SiteError(f"{path.name} has no feed_info.txt") from None
+            version = gtfs_feed.feed_version(z).strip()
+    except (OSError, zipfile.BadZipFile, csv.Error) as err:
         raise SiteError(f"{path} is not a GTFS zip: {err}") from err
-    row = next(csv.DictReader(io.StringIO(text)), None)
-    version = ((row or {}).get("feed_version") or "").strip()
     if not dated_feed(version):
         raise SiteError(f"{path.name} names no dated feed_version: {version!r}")
     return version
