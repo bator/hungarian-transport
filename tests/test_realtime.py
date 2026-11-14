@@ -708,6 +708,11 @@ async def test_a_bad_static_body_does_not_take_the_kept_copys_validators(
         {"feed": "volan", "trips": [{"key": "a", "from": realtime.MAX_STOPS}]},
         {"feed": "volan", "trips": [{"key": "a", "repeat": [realtime.MAX_STOPS]}]},
         {"feed": "volan", "trips": [{"key": "a", "repeat": ["x"]}]},
+        # A YAML .inf: invalid, not an OverflowError out of the schema.
+        {"feed": "volan", "trips": [{"key": "a", "start": float("inf")}]},
+        {"feed": "volan", "trips": [{"key": "a", "from": float("inf")}]},
+        {"feed": "volan", "trips": [{"key": "a", "to": float("-inf")}]},
+        {"feed": "volan", "trips": [{"key": "a", "repeat": [float("inf")]}]},
     ],
 )
 async def test_service_validates_input(hass, aioclient_mock, data) -> None:

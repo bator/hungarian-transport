@@ -75,13 +75,21 @@ ELVIRA_AT_BACK = 86400
 ELVIRA_AT_AHEAD = 8 * 86400
 
 
+def _finite_int(value: Any) -> int:
+    """vol.Coerce(int), with a YAML .inf invalid too: Coerce passes on the
+    OverflowError of int(inf)."""
+    try:
+        return vol.Coerce(int)(value)
+    except OverflowError:
+        raise vol.Invalid("expected a finite integer") from None
+
+
 def _elvira_at(value: Any) -> int:
     """The window's start in epoch seconds, near enough to now to be a search."""
     message = "at must be within a day before and eight days after now"
     try:
-        at = vol.Coerce(int)(value)
-    except OverflowError:
-        # Coerce passes it on: int() of a YAML .inf.
+        at = _finite_int(value)
+    except vol.Invalid:
         raise vol.Invalid(message) from None
     now = dt_util.utcnow().timestamp()
     if not now - ELVIRA_AT_BACK <= at <= now + ELVIRA_AT_AHEAD:
@@ -95,7 +103,7 @@ ELVIRA_SERVICE_SCHEMA = vol.Schema(
         vol.Required("dest_code"): cv.string,
         vol.Optional(
             "minutes_after", default=180
-        ): vol.All(cv.positive_int, vol.Range(min=15, max=480)),
+        ): vol.All(_finite_int, vol.Range(min=15, max=480)),
         # Copied into every row: a station name, not a payload.
         vol.Optional("dest_name", default=""): vol.All(cv.string, vol.Length(max=100)),
         vol.Optional("at"): _elvira_at,
@@ -116,7 +124,7 @@ REALTIME_TRIP_SCHEMA = vol.Schema(
         vol.Required("key"): vol.All(cv.string, vol.Length(min=1, max=96)),
         vol.Optional("trip_id"): vol.All(cv.string, vol.Length(min=1, max=128)),
         vol.Optional("route"): vol.All(cv.string, vol.Length(min=1, max=32)),
-        vol.Optional("start"): vol.All(vol.Coerce(int), vol.Range(min=0, max=2880)),
+        vol.Optional("start"): vol.All(_finite_int, vol.Range(min=0, max=2880)),
         vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{8}$")),
         vol.Optional("train"): vol.All(cv.string, vol.Match(r"^\d{1,6}$")),
         vol.Optional("stops", default=list): vol.All(
@@ -128,10 +136,10 @@ REALTIME_TRIP_SCHEMA = vol.Schema(
         vol.Optional("repeat"): vol.All(
             cv.ensure_list,
             vol.Length(max=realtime.MAX_STOPS),
-            [vol.All(vol.Coerce(int), vol.Range(min=0, max=realtime.MAX_STOPS - 1))],
+            [vol.All(_finite_int, vol.Range(min=0, max=realtime.MAX_STOPS - 1))],
         ),
-        vol.Optional("from"): vol.All(vol.Coerce(int), vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
-        vol.Optional("to"): vol.All(vol.Coerce(int), vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
+        vol.Optional("from"): vol.All(_finite_int, vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
+        vol.Optional("to"): vol.All(_finite_int, vol.Range(min=0, max=realtime.MAX_STOPS - 1)),
     }
 )
 REALTIME_SERVICE_SCHEMA = vol.Schema(

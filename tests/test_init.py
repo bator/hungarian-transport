@@ -283,6 +283,7 @@ async def test_elvira_service_returns_rows(hass, aioclient_mock, freezer) -> Non
         # A YAML .inf is out of range too, not an OverflowError out of the schema.
         ({"origin_code": ORIGIN, "dest_code": DEST, "at": float("inf")}, vol.Invalid),
         ({"origin_code": ORIGIN, "dest_code": DEST, "at": float("-inf")}, vol.Invalid),
+        ({"origin_code": ORIGIN, "dest_code": DEST, "minutes_after": float("inf")}, vol.Invalid),
     ],
 )
 async def test_elvira_service_rejects_bad_input(hass, aioclient_mock, data, error) -> None:
