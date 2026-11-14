@@ -274,6 +274,8 @@ async function runBoard(poll, src, knownElvira) {
       return;
     }
     const wantElvira = (mode === 'mav' || mode === 'all') && BkkLib.hasElvira(hass());
+    /* Whether this poll has an ELVIRA answer to wait for at all. */
+    const asksElvira = !!knownElvira || elviraGone || wantElvira;
     /* knownElvira: the ELVIRA answer this poll already has (the not_loaded
        switch to FUTÁR below), not asked for a second time. */
     const elviraP = knownElvira ? Promise.resolve(knownElvira) : elviraGone
@@ -425,7 +427,8 @@ async function runBoard(poll, src, knownElvira) {
     } else {
       throughResolve();
     }
-    if (!mavBoard) {
+    /* A board ELVIRA was not asked for has nothing new to list here. */
+    if (!mavBoard && asksElvira) {
       const answer = await elviraP;
       if (!live()) return;
       elviraRows = answer.rows;

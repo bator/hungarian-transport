@@ -292,6 +292,18 @@ test('an empty board is not listed before its Transitous fill answers: no "no de
   assert.deepEqual([first.board.loading, ids(first.board.rows)], [false, '']);
 });
 
+test('a board ELVIRA is not asked for lists its rows once: one GPS and realtime pass', async () => {
+  const { src, count } = sources({
+    timetables: async () => [bus('BKK_C1', 1), bus('BKK_C2', 5)],
+    realtime: async () => true,
+  });
+  const card = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), { apiKey: 'k' });
+  await card.poll(src);
+  assert.deepEqual(card.phases().filter((p) => p === 'board'), ['board']);
+  assert.deepEqual([count('coachGps'), count('realtime'), count('sensors'), count('elvira')], [1, 1, 1, 0]);
+  assert.equal(ids(card.board.rows), 'BKK_C1,BKK_C2');
+});
+
 test('a Transitous fill that failed keeps the fill-ins still due instead of blanking the board', async () => {
   const { src } = sources({ transitous: async () => null });
   const card = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), {
