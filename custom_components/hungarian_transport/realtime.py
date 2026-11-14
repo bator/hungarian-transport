@@ -202,7 +202,6 @@ class StopUpdate:
 class TripUpdate:
     trip_id: str
     start_date: str
-    start_time: str
     route_id: str
     # TripDescriptor.schedule_relationship: 3 = CANCELED.
     relationship: int
@@ -223,18 +222,7 @@ class Vehicle:
     speed: float | None
     timestamp: int | None
     stop_id: str
-    current_seq: int | None
     status: int | None
-
-
-@dataclass(slots=True)
-class Alert:
-    header: str
-    start: int | None
-    end: int | None
-    routes: list[str]
-    stops: list[str]
-    trips: list[str]
 
 
 @dataclass(slots=True)
@@ -242,7 +230,6 @@ class Feed:
     timestamp: int | None = None
     trip_updates: dict[str, TripUpdate] = field(default_factory=dict)
     vehicles: dict[str, Vehicle] = field(default_factory=dict)
-    alerts: list[Alert] = field(default_factory=list)
 
 
 def _strip(value: str, prefix: str) -> str:
@@ -250,12 +237,10 @@ def _strip(value: str, prefix: str) -> str:
 
 
 def _trip_descriptor(buf: bytes, prefix: str) -> dict[str, Any]:
-    out: dict[str, Any] = {"trip_id": "", "start_time": "", "start_date": "", "route_id": "", "rel": 0}
+    out: dict[str, Any] = {"trip_id": "", "start_date": "", "route_id": "", "rel": 0}
     for num, wire, val in _fields(buf):
         if num == 1 and wire == 2:
             out["trip_id"] = _strip(_text(val), prefix)
-        elif num == 2 and wire == 2:
-            out["start_time"] = _text(val)
         elif num == 3 and wire == 2:
             out["start_date"] = _text(val)
         elif num == 4 and wire == 0:
@@ -309,14 +294,14 @@ def _trip_update(buf: bytes, prefix: str) -> TripUpdate | None:
     if not desc or not desc["trip_id"]:
         return None
     return TripUpdate(
-        desc["trip_id"], desc["start_date"], desc["start_time"], desc["route_id"], desc["rel"], delay, stops
+        desc["trip_id"], desc["start_date"], desc["route_id"], desc["rel"], delay, stops
     )
 
 
 def _vehicle_position(buf: bytes, prefix: str) -> Vehicle | None:
     desc: dict[str, Any] | None = None
     lat = lon = bearing = speed = None
-    ts = seq = status = None
+    ts = status = None
     stop_id = ""
     for num, wire, val in _fields(buf):
         if num == 1 and wire == 2:
@@ -333,8 +318,6 @@ def _vehicle_position(buf: bytes, prefix: str) -> Vehicle | None:
                     bearing = _float(pval)
                 elif pnum == 5:
                     speed = _float(pval)
-        elif num == 3 and wire == 0:
-            seq = val
         elif num == 4 and wire == 0:
             status = val
         elif num == 5 and wire == 0:
@@ -346,53 +329,12 @@ def _vehicle_position(buf: bytes, prefix: str) -> Vehicle | None:
     if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0) or (lat == 0.0 and lon == 0.0):
         return None
     return Vehicle(
-        desc["trip_id"], desc["start_date"], desc["route_id"], lat, lon, bearing, speed, ts, stop_id, seq, status
+        desc["trip_id"], desc["start_date"], desc["route_id"], lat, lon, bearing, speed, ts, stop_id, status
     )
 
 
-def _translated(buf: bytes) -> str:
-    first = ""
-    for num, wire, val in _fields(buf):
-        if num != 1 or wire != 2:
-            continue
-        text = lang = ""
-        for tnum, twire, tval in _fields(val):
-            if tnum == 1 and twire == 2:
-                text = _text(tval)
-            elif tnum == 2 and twire == 2:
-                lang = _text(tval)
-        if lang.lower().startswith("hu") and text:
-            return text
-        first = first or text
-    return first
-
-
-def _alert(buf: bytes, prefix: str) -> Alert:
-    out = Alert("", None, None, [], [], [])
-    for num, wire, val in _fields(buf):
-        if num == 1 and wire == 2 and out.start is None and out.end is None:
-            for rnum, rwire, rval in _fields(val):
-                if rnum == 1 and rwire == 0:
-                    out.start = rval
-                elif rnum == 2 and rwire == 0:
-                    out.end = rval
-        elif num == 5 and wire == 2:
-            for snum, swire, sval in _fields(val):
-                if snum == 2 and swire == 2:
-                    out.routes.append(_strip(_text(sval), prefix))
-                elif snum == 4 and swire == 2:
-                    trip = _trip_descriptor(sval, prefix)["trip_id"]
-                    if trip:
-                        out.trips.append(trip)
-                elif snum == 5 and swire == 2:
-                    out.stops.append(_strip(_text(sval), prefix))
-        elif num == 10 and wire == 2:
-            out.header = _translated(val)
-    return out
-
-
 def decode_feed(data: bytes, prefix: str = "") -> Feed:
-    """A FeedMessage's trip updates, vehicle positions and alerts, keyed by
+    """A FeedMessage's trip updates and vehicle positions, keyed by
     trip id with the feed's own prefix (hkir:, 1:) taken off. Raises
     RtDecodeError on anything that is not a well-formed message."""
     if not isinstance(data, (bytes, bytearray)):
@@ -428,8 +370,7 @@ def decode_feed(data: bytes, prefix: str = "") -> Feed:
                     vp = _vehicle_position(eval_, prefix)
                     if vp is not None:
                         feed.vehicles[vp.trip_id] = vp
-                elif enum == 5 and ewire == 2:
-                    feed.alerts.append(_alert(eval_, prefix))
+                # Alerts (5) are not read: no card shows them.
     if not has_header:
         raise RtDecodeError("no FeedHeader")
     return feed

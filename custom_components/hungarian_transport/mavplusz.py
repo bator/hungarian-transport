@@ -276,7 +276,6 @@ def _vehicle(trip: dict[str, Any], key: TripKey, route_id: str) -> realtime.Vehi
             _num(vp.get("speed")),
             ts,
             realtime._strip(_gid(rel.get("stop")), key.prefix),
-            None,
             _STATUS.get(rel.get("status")),
         )
     return best
@@ -298,10 +297,10 @@ def parse_trip(trip: Any, key: TripKey) -> TripResult:
         return TripResult(None, None)
     trip_id = realtime._strip(key.gtfs_id, key.prefix)
     if all(c.get("realtimeState") == "CANCELED" for c in calls):
-        tu = realtime.TripUpdate(trip_id, key.date, "", route_id, 3, None, [])
+        tu = realtime.TripUpdate(trip_id, key.date, route_id, 3, None, [])
         return TripResult(tu, None)
     stops = [_stop_update(c, key.prefix) for c in calls]
-    tu = realtime.TripUpdate(trip_id, key.date, "", route_id, 0, None, stops)
+    tu = realtime.TripUpdate(trip_id, key.date, route_id, 0, None, stops)
     return TripResult(tu, _vehicle(trip, key, route_id))
 
 

@@ -305,7 +305,7 @@ it is only a version pin in `package_constraints.txt`, not a dependency. The
 integration reads the fields it needs with a small wire-format decoder in
 `realtime.py` (FeedHeader timestamp; TripUpdate trip, stop_time_update
 delays and times, schedule relationships; VehiclePosition trip, position,
-timestamp, current stop; Alert header and informed entities), run in the
+timestamp, current stop; alerts are skipped), run in the
 executor: the Volán intercity trip updates (1,584 trips, 48,000 stop updates)
 take about 0.3 s on a laptop.
 

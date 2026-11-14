@@ -117,16 +117,15 @@ def _ld(num: int, body: bytes) -> bytes:
     return bytes([(num << 3) | 2, len(body)]) + body
 
 
-def test_alerts_and_deleted_entities() -> None:
+def test_alerts_are_skipped_and_deleted_entities_dropped() -> None:
     header = _ld(1, b"\x0a\x032.0")
     text = _ld(1, _ld(1, b"Detour") + _ld(2, b"en")) + _ld(1, _ld(1, "Terelés".encode()) + _ld(2, b"hu"))
     informed = _ld(5, _ld(2, b"hkir:R1") + _ld(5, b"hkir:S1"))
     alert = _ld(5, informed + _ld(10, text))
     deleted = _ld(2, _ld(1, b"x") + b"\x10\x01" + _ld(4, _ld(1, _ld(1, b"hkir:T")) + _ld(2, b"\x0d\x00\x00\x3c\x42\x15\x00\x00\x98\x41")))
     feed = realtime.decode_feed(header + _ld(2, _ld(1, b"a") + alert) + deleted, "hkir:")
-    (a,) = feed.alerts
-    assert (a.header, a.routes, a.stops) == ("Terelés", ["R1"], ["S1"])
-    assert not feed.vehicles
+    assert not feed.vehicles and not feed.trip_updates
+    assert not hasattr(feed, "alerts")
 
 
 def test_train_numbers_from_static() -> None:
