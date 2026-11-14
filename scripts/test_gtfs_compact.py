@@ -67,6 +67,9 @@ def main() -> int:
     failed |= not check("hm short", hm("8") is None)
     failed |= not check("hm garbage", hm("ab:cd") is None)
     failed |= not check("hm overnight", hm("25:10:00") == 1510)
+    failed |= not check("hm negative hour", hm("-1:10:00") is None)
+    failed |= not check("hm minutes out of range", hm("08:60:00") is None and hm("08:-5:00") is None)
+    failed |= not check("hm last minute of an hour", hm("08:59:00") == 539)
 
     ids = [f["id"] for f in CITY_FEEDS]
     failed |= not check("city feeds unique ids", len(ids) == len(set(ids)), str(ids))

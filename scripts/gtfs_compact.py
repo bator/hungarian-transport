@@ -536,9 +536,12 @@ def hm(t: str | None) -> int | None:
     if len(a) < 2:
         return None
     try:
-        return int(a[0]) * 60 + int(a[1])
+        h, m = int(a[0]), int(a[1])
     except ValueError:
         return None
+    if h < 0 or not 0 <= m < 60:
+        return None
+    return h * 60 + m
 
 
 def _meters(a: tuple[float, float], b: tuple[float, float]) -> float:
