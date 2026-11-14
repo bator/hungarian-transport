@@ -17,6 +17,7 @@ venv (it needs aiohttp):
 
 import asyncio
 import os
+import re
 import sys
 
 import aiohttp
@@ -54,6 +55,13 @@ async def local_only(request: web.Request, handler):
     return await handler(request)
 
 
+def futar_path_ok(path: str) -> bool:
+    """A FUTÁR endpoint name such as arrivals-and-departures-for-stop.json:
+    letters, digits, - and _ in /-separated segments. Nothing else, so no
+    ".." in any spelling (aiohttp's URL decodes %2e%2e and normalises it)."""
+    return re.fullmatch(r"[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\.json", path) is not None
+
+
 def outage(code: str, detail: str) -> web.Response:
     """An expected outage, shaped like the integration's service response."""
     return web.json_response({"response": {"data": None, "error": code, "detail": detail}})
@@ -63,7 +71,7 @@ async def futar(session: aiohttp.ClientSession, data: dict) -> web.Response:
     if not BKK_API_KEY:
         return outage("futar_auth", "no BKK_API_KEY")
     path = str(data.get("path") or "")
-    if not path or ".." in path or path.startswith("/"):
+    if not futar_path_ok(path):
         return web.json_response({"error": "bad path"}, status=400)
     query = {k: str(v) for k, v in (data.get("params") or {}).items()}
     query.update({"key": BKK_API_KEY, "version": "4", "appVersion": "apiary-1.0"})

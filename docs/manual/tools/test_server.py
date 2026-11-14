@@ -81,6 +81,36 @@ check("the middleware passes a loopback request on", asyncio.run(run({"Host": "1
 blocked = asyncio.run(run({"Host": "evil.example:8765", "Origin": "http://evil.example:8765"}))
 check("the middleware answers 403 to a rebound name", getattr(blocked, "status", None) == 403, repr(blocked))
 
+# FUTÁR paths: only endpoint names reach go.bkk.hu. "%2e%2e" passed the old
+# ".." check, and the client's URL decodes and normalises it to "..".
+for path, want in [
+    ("arrivals-and-departures-for-stop.json", True),
+    ("plan-trip.json", True),
+    ("sub/route_details.json", True),
+    ("", False),
+    ("../x.json", False),
+    ("%2e%2e/x.json", False),
+    ("%2E%2E%2Fx.json", False),
+    ("a/%2e%2e/b.json", False),
+    ("/search.json", False),
+    ("search.json?key=x", False),
+    ("search.json\n", False),
+    ("search", False),
+    ("a//b.json", False),
+]:
+    check(f"FUTÁR path {path!r} -> {want}", server.futar_path_ok(path) is want)
+
+
+class NoSession:
+    def get(self, *_a, **_kw):
+        raise AssertionError("a bad path reached the upstream call")
+
+
+server.BKK_API_KEY = "test-key"
+refused = asyncio.run(server.futar(NoSession(), {"path": "%2e%2e/%2e%2e/x.json"}))
+check("futar answers 400 to an encoded .. without calling FUTÁR", getattr(refused, "status", None) == 400,
+      repr(refused))
+
 if failed:
     sys.exit(1)
 print("manual server tests passed")
