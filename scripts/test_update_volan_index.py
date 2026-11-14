@@ -96,6 +96,43 @@ with tempfile.TemporaryDirectory() as tmp:
           restored == ["volan-index.json.gz"] and feed_of(www / "volan-index.json.gz") == "local", repr(restored))
     (www / "hungarian-transport.js").unlink()
 
+    # A release shipped newer feeds than this machine's last build (the
+    # feed_version's date per operator): the shipped index stays and becomes
+    # the durable copy. Older, undated or missing an operator: durable wins.
+    city_base, city_www = base / "city-index.json.gz", www / "city-index.json.gz"
+    write_index(base / "volan-index.json.gz", 27, "volan:01716.20261102")
+    write_index(www / "volan-index.json.gz", 27, "volan:01716.20261109", pad=10)
+    restored = restore_hacs_indexes(base, www)
+    check("a shipped Volán index of a newer feed is kept",
+          "volan-index.json.gz" not in restored and feed_of(www / "volan-index.json.gz") == "volan:01716.20261109",
+          repr(restored))
+    check("the kept Volán index becomes the durable copy",
+          feed_of(base / "volan-index.json.gz") == "volan:01716.20261109")
+    write_index(www / "volan-index.json.gz", 27, "volan:01716.20261026")
+    restored = restore_hacs_indexes(base, www)
+    check("a shipped Volán index of an older feed is replaced by the durable one",
+          "volan-index.json.gz" in restored and feed_of(www / "volan-index.json.gz") == "volan:01716.20261109",
+          repr(restored))
+    write_index(city_base, 27, "bkk:20261101;szeged:20261020")
+    for shipped, wins, why in [
+        ("bkk:20261108;szeged:20261020", True, "one feed later, none older"),
+        ("bkk:20261108;szeged:20261020;pecs:20261101", True, "later, with an operator more"),
+        ("bkk:20261108;szeged:20261013", False, "one feed later, another older"),
+        ("bkk:20261108", False, "an operator of the durable copy missing"),
+        ("bkk:20261101;szeged:20261020", False, "the same feeds"),
+        ("bkk:release;szeged:20261027", False, "an undated feed"),
+    ]:
+        write_index(city_www, 27, shipped, pad=20)
+        restored = restore_hacs_indexes(base, www)
+        kept = "city-index.json.gz" not in restored and feed_of(city_www) == shipped
+        check(f"city index: shipped {'kept' if wins else 'replaced'} ({why})",
+              kept if wins else feed_of(city_www) == "bkk:20261101;szeged:20261020", repr((restored, feed_of(city_www))))
+        write_index(city_base, 27, "bkk:20261101;szeged:20261020")
+    city_base.unlink()
+    city_www.unlink()
+    write_index(base / "volan-index.json.gz", 27, "local")
+    restore_hacs_indexes(base, www)
+
     mav_base, mav_www = base / "mav-index.json.gz", www / "mav-index.json.gz"
 
     def age(path: Path, seconds: int) -> None:
