@@ -29,9 +29,11 @@ import aiohttp
 from . import realtime
 
 URL = "https://mavplusz.hu/otp2-backend/otp/routers/default/index/graphql"
-# Trips in one request. The service takes at most realtime.MAX_TRIPS (40)
-# trips a call, so one request always covers a call; a longer list (the hub
-# used directly) is cut here, never split into more requests.
+# Trips in one request, of the ones not cached yet; the rest are cut, never
+# split into more requests. A call of realtime.MAX_TRIPS (40) rows can need
+# more: a route + start row asks for its resolved trips and its card's own
+# trip id. The hub asks the resolved ones first (realtime._query_mavplusz),
+# and the ones cut go out on a later poll, while the others are cached.
 MAX_TRIPS_PER_REQUEST = 40
 # Decompressed answer cap: 40 long trips are ~250 KB.
 MAX_RESPONSE_BYTES = 4 * 1024 * 1024

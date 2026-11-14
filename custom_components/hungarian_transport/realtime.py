@@ -782,7 +782,11 @@ class RealtimeHub:
             ]
             keys += [k for n in range(len(trips)) for k in cands.get((i, n), ())]
             by_src[i] = list(dict.fromkeys(keys))
-        asked = list(dict.fromkeys(k for keys in by_src.values() for k in keys))[: mavplusz.MAX_TRIPS_PER_REQUEST]
+        # The resolved trips first: a card's own trip id on a route + start
+        # feed is often not the planner's (Veszprém, Miskolc), and what is
+        # not cached yet is cut at MAX_TRIPS_PER_REQUEST (_mavplusz).
+        resolved = [k for ks in cands.values() for k in ks]
+        asked = list(dict.fromkeys([*resolved, *(k for keys in by_src.values() for k in keys)]))
         answered = await self._mavplusz(asked, cfg.interval) if asked else {}
         planner: dict[int, tuple[Source, Feed, Feed, None]] = {}
         for i, keys in by_src.items():
@@ -795,11 +799,15 @@ class RealtimeHub:
 
         def covered(i: int, n: int) -> bool:
             """The planner answers trips[n] for source i: it knows its trip
-            id, or resolved its route + start."""
+            id, or resolved its route + start and answered for one of those
+            trips (one cut from the request is matched on the feeds)."""
             mine = planner.get(i)
             if mine is None:
                 return False
-            return (by_trip and bool(trips[n].get("trip_id")) and _knows(mine, trips[n])) or (i, n) in cands
+            if by_trip and trips[n].get("trip_id") and _knows(mine, trips[n]):
+                return True
+            got = answered or {}
+            return any(k in got and got[k][1] is not None for k in cands.get((i, n), ()))
 
         def needs_feeds(i: int, n: int) -> bool:
             """trips[n] is matched on source i's feeds: a route + start the
@@ -895,9 +903,11 @@ class RealtimeHub:
         self, keys: list[mavplusz.TripKey], interval: int
     ) -> dict[mavplusz.TripKey, tuple[float, mavplusz.TripResult | None]] | None:
         """Per key: (wall time of the answer, its result), from the cache
-        while within interval of the request, the rest in one request.
-        None when that request is not made (the rate limit, the backoff
-        after a failure) or fails: the caller reads the jbb feeds."""
+        while within interval of the request, the rest in one request of at
+        most MAX_TRIPS_PER_REQUEST trips (the first ones; a key cut is not
+        in the answer). None when that request is not made (the rate limit,
+        the backoff after a failure) or fails: the caller reads the jbb
+        feeds."""
         async with self._mav_lock:
             mono = self._monotonic()
             for k in [k for k, (exp, _at, _res) in self._mav_cache.items() if exp <= mono]:
@@ -910,6 +920,7 @@ class RealtimeHub:
                     out[k] = (hit[1], hit[2])
                 else:
                     todo.append(k)
+            todo = todo[: mavplusz.MAX_TRIPS_PER_REQUEST]
             if not todo:
                 return out
             at = self._wall()

@@ -32,8 +32,8 @@ Jonah Brüchert and served from his server at `jbb.ghsq.de`:
 | Paks (`paks`) | `jbb.ghsq.de/gtfs/hu/paks/` | trip_id | 4 of 4 |
 | Debrecen, DKV (`debrecen`, alias `dkv`) | `jbb.ghsq.de/gtfs/hu/debrecen/` | trip_id, else route + start | 56 of 56 trip ids are in menetbrand's `debrecen` GTFS |
 | Orosháza (`oroshaza`) | `gtfs.gpspositions.net/storage/realtime/OROSH_V_ONK/` | trip_id | 1 of 1 (its own GTFS) |
-| Veszprém, V-Busz (`veszprem`) | `jbb.ghsq.de/gtfs/hu/VBUSZ/` | route + start | 10 of 11 |
-| Miskolc, MVK (`miskolc`) | `jbb.ghsq.de/gtfs/hu/mvkzrt/` | route + start | 29 of 40; the delay is the vehicle's current one, none without the vehicle |
+| Veszprém, V-Busz (`veszprem`) | `jbb.ghsq.de/gtfs/hu/VBUSZ/` | trip_id, else route + start (the card's trip ids are not the feed's: route + start in practice) | 10 of 11 |
+| Miskolc, MVK (`miskolc`) | `jbb.ghsq.de/gtfs/hu/mvkzrt/` | trip_id, else route + start (the card's trip ids are not the feed's: route + start in practice) | 29 of 40; the delay is the vehicle's current one, none without the vehicle |
 | MÁV trains (`mav`) | `jbb.ghsq.de/gtfs/hu/1_198/`, `…/1_134/` (GYSEV) | train number | 137 of 151 running trains |
 | GYSEV as its own feed (`gysev`) | `jbb.ghsq.de/gtfs/hu/1_134/` | trip_id, else train number | — |
 
@@ -62,9 +62,11 @@ its stops likewise). Sources marked `"mavplusz": true` in
   Budapest) with realtime delays and times, and the positions of the
   vehicles on its pattern, of which only the one on this trip is kept. The
   ids go in as GraphQL variables; vehicle ids (plate numbers) are not
-  asked for. At most 40 trips a request: the action takes at most 40 trips
-  a call, so one request always covers it (a longer list, possible only
-  when the hub is called directly, is cut, not split). 20 trips take
+  asked for. At most 40 trips a request, of the ones not cached yet; the
+  rest are cut, not split. A call of 40 rows can need more: a route + start
+  row asks for its resolved trips and the card's own trip id too, so the
+  resolved trips go first, and a row whose trip was cut is matched on the
+  feeds until a later poll asks for it. 20 trips take
   0.2–0.5 s and about 5 KiB gzipped, against 1.9 MB of trip updates for the
   Volán intercity feed. On 2026-11-14, 25 of 25 sampled feed trips were in
   the planner with delays within 60 s of the feed's, and their vehicles 20
@@ -81,9 +83,9 @@ its stops likewise). Sources marked `"mavplusz": true` in
   feeds) are then asked for with the trip ids. Two trips of a line at the
   same minute (both ends of Miskolc line 14 at 07:10) are both asked for
   and told apart by the card's stops exactly as on the feeds, else neither
-  is used. The planner's trip updates count as ones whose route was learned
-  from a vehicle, as the feeds' are, so a Miskolc trip without its vehicle
-  still gets no delay; its delay is the vehicle's current one.
+  is used. The planner's trip updates count as ones whose route was
+  learned from a vehicle, as the feeds' are, so a Miskolc trip without its
+  vehicle still gets no delay; its delay is the vehicle's current one.
 - **What it answers.** A call without realtime data has no delay (the
   planner's scheduled time is no prediction). Every call CANCELED is a
   canceled trip, one CANCELED call among updated ones a skipped stop. A
