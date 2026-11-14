@@ -109,12 +109,20 @@ ELVIRA_SERVICE_SCHEMA = vol.Schema(
         vol.Optional("at"): _elvira_at,
     }
 )
+
+
+def _futar_value(value: Any) -> str:
+    """A FUTÁR query value as a string; a YAML true is "true" as the cards
+    send it, not Python's "True"."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return cv.string(value)
+
+
 FUTAR_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Required("path"): vol.In(FUTAR_PATHS),
-        vol.Optional("params", default=dict): vol.Schema(
-            {cv.string: vol.Any(cv.string, int, float, bool)}
-        ),
+        vol.Optional("params", default=dict): vol.Schema({cv.string: _futar_value}),
     }
 )
 # What the cards send for each departure row (src/lib/realtime.js); anything

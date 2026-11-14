@@ -81,6 +81,17 @@ async def test_proxies_with_stored_key(hass, aioclient_mock) -> None:
     assert query["version"] == "4"
 
 
+def test_param_values_are_strings_and_booleans_are_lowercase() -> None:
+    """A YAML true goes to FUTÁR as the cards send it ("true"), not "True"."""
+    params = {"stopId": "BKK_F01111", "includeReferences": True, "onlyDepartures": False, "minutesAfter": 30}
+    data = integration.FUTAR_SERVICE_SCHEMA({"path": "arrivals-and-departures-for-stop.json", "params": params})
+    assert data["params"] == {
+        "stopId": "BKK_F01111", "includeReferences": "true", "onlyDepartures": "false", "minutesAfter": "30"
+    }
+    with pytest.raises(vol.Invalid):
+        integration.FUTAR_SERVICE_SCHEMA({"path": "search.json", "params": {"query": ["a"]}})
+
+
 async def test_unknown_params_are_dropped_and_share_the_cache(hass, aioclient_mock) -> None:
     aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
     await _setup(hass)
