@@ -3408,6 +3408,27 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     refreshSeconds(5) === 20 && refreshSeconds(15) === 20 && refreshSeconds('60') === 60 && refreshSeconds(99999) === 3600);
   check('the card polls with the parsed refresh, one run at a time',
     /refreshSeconds\(cfg\.refresh\)/.test(src) && /if \(pollRun\.busy\) return;/.test(src) && /\}, every\);/.test(src));
+  /* A poll run that rejects shows its error and frees the poll for the next tick. */
+  const pc = document.createElement('hungarian-transport-card');
+  document.body.appendChild(pc);
+  pc.setConfig({ language: 'en', stopId: 'BKK_F1', stopName: 'A', routeIds: [] });
+  const keepInterval = globalThis.setInterval;
+  let tick = null;
+  globalThis.setInterval = (fn) => { tick = fn; return 1; };
+  const pollRun = { gen: pc._runs.token(), run: async () => { throw new Error('poll broke'); }, busy: false };
+  try {
+    pc._armPoll(pollRun);
+  } finally {
+    globalThis.setInterval = keepInterval;
+  }
+  pc._poll = null;
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  pollRun.gen = pc._runs.token();
+  tick();
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  check('a rejected poll run shows its error and frees the poll',
+    !pollRun.busy && pc._err && pc._err.message === 'poll broke', JSON.stringify({ busy: pollRun.busy, err: String(pc._err), stale: pc._runs.stale(pollRun.gen) }));
+  pc.remove();
 }
 {
   /* Two opens racing the first Leaflet load leave one overlay, and it closes. */
@@ -3459,6 +3480,26 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     overlays() === 1 && planCard._openMapKey !== 'journey', String(overlays()));
   planCard._closeVehicleMap();
   check('the row map still closes', overlays() === 0, String(overlays()));
+  /* Leaflet throwing mid-draw: the failed-map notice, no rejection, no open left running. */
+  const brokenL = Object.assign({}, fakeL, { polyline: () => { throw new Error('leaflet broke'); } });
+  planCard._ensureLeaflet = async () => brokenL;
+  let threw = null;
+  try {
+    await planCard._openVehicleMap({ label: '7', headsign: 'Albertfalva', tripId: 'BKK_BROKEN_A' });
+  } catch (e) { threw = e; }
+  const rowNotice = document.querySelector('.ht-map-notice');
+  const rowOk = !threw && !!rowNotice && rowNotice.textContent.includes(i18nT('hu', 'mapLeafletFail')) && planCard._openingMap === '';
+  planCard._closeVehicleMap();
+  Lib.fillJourneyShapes = async () => {};
+  try {
+    await planCard._openJourneyMap();
+  } catch (e) { threw = e; }
+  const journeyNotice = document.querySelector('.ht-map-notice');
+  check('Leaflet failing while it draws shows the map notice and clears the open (row and journey map)',
+    rowOk && !threw && !!journeyNotice && journeyNotice.textContent.includes(i18nT('hu', 'mapLeafletFail'))
+      && planCard._openingMap === '',
+    String(threw));
+  planCard._closeVehicleMap();
   Object.assign(Lib, keep);
   planCard.remove();
 }

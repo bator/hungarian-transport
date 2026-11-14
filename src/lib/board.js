@@ -422,6 +422,9 @@ async function runBoard(poll, src, knownElvira) {
       }),
       fillTravel(firstRows),
     ]);
+    /* Awaited below, unless the poll returns first (a reload, a failed
+       ELVIRA wait): a rejection then is no unhandled one. */
+    gpsTravel.catch(() => {});
     if (startThrough) {
       startThrough();
     } else {

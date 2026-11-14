@@ -304,6 +304,28 @@ test('a board ELVIRA is not asked for lists its rows once: one GPS and realtime 
   assert.equal(ids(card.board.rows), 'BKK_C1,BKK_C2');
 });
 
+test('a coach GPS lookup that fails after the poll went stale is no unhandled rejection', async () => {
+  const unhandled = [];
+  const onUnhandled = (err) => { unhandled.push(err); };
+  process.on('unhandledRejection', onUnhandled);
+  let answer = null;
+  const { src, count } = sources({
+    timetables: async () => [bus('BKK_C1', 1)],
+    elvira: () => new Promise((r) => { answer = r; }),
+    coachGps: async () => { throw new Error('gps broke'); },
+  });
+  const card = screen(KELENFOLD, { mode: 'all', hass: ELVIRA_HASS });
+  const done = card.poll(src);
+  for (let i = 0; i < 50 && !count('coachGps'); i++) await Promise.resolve();
+  card.gen.now += 1;
+  answer({ rows: [], error: '', detail: '' });
+  await done;
+  await new Promise((r) => setTimeout(r, 10));
+  process.off('unhandledRejection', onUnhandled);
+  assert.equal(count('coachGps'), 1);
+  assert.deepEqual(unhandled, []);
+});
+
 test('a Transitous fill that failed keeps the fill-ins still due instead of blanking the board', async () => {
   const { src } = sources({ transitous: async () => null });
   const card = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), {
