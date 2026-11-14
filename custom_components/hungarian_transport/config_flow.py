@@ -302,6 +302,13 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
                     # the entry is not reloaded: reload it here, or a proxy
                     # that saw the key rejected would keep failing.
                     self.hass.config_entries.async_schedule_reload(entry.entry_id)
+                if entry is not None and (user_input.get(CONF_REMOVE_KEY) or (api_key and api_key == typed)):
+                    # A checked or removed key answers a pending reauth:
+                    # its notification would stay until dismissed.
+                    for flow in self.hass.config_entries.flow.async_progress_by_handler(
+                        DOMAIN, match_context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id}
+                    ):
+                        self.hass.config_entries.flow.async_abort(flow["flow_id"])
                 return self.async_create_entry(data=new)
         return self.async_show_form(
             step_id="init",

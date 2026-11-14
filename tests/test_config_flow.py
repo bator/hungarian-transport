@@ -311,6 +311,36 @@ async def test_reauth_unreachable_keeps_the_form(hass, aioclient_mock) -> None:
     assert entry.options == {CONF_API_KEY: "old"}
 
 
+@pytest.mark.parametrize(
+    ("answer", "pending"),
+    [
+        ({CONF_API_KEY: "new-key"}, False),
+        ({CONF_REMOVE_KEY: True}, False),
+        # The stored key saved again, unchecked: the reauth stays.
+        ({}, True),
+    ],
+    ids=["new-key", "removed", "kept"],
+)
+async def test_options_key_answers_a_pending_reauth(hass, aioclient_mock, answer, pending) -> None:
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: "old"})
+    entry.add_to_hass(hass)
+    other = MockConfigEntry(domain=DOMAIN, unique_id="other", options={CONF_API_KEY: "x"})
+    other.add_to_hass(hass)
+    await entry.start_reauth_flow(hass)
+    await other.start_reauth_flow(hass)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], answer)
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    flows = hass.config_entries.flow.async_progress_by_handler(
+        DOMAIN, match_context={"source": config_entries.SOURCE_REAUTH}
+    )
+    assert sorted(f["context"]["entry_id"] for f in flows) == sorted(
+        [other.entry_id, *([entry.entry_id] if pending else [])]
+    )
+
+
 @pytest.mark.parametrize("cleared", [{}, {CONF_API_KEY: "  "}])
 async def test_reauth_with_no_key_removes_it(hass, aioclient_mock, cleared) -> None:
     """No key at all is a valid answer: FUTÁR access goes, nothing is asked upstream."""
