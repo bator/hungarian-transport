@@ -9868,6 +9868,20 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     && !!lostDot && lostDot.html.includes('ht-veh-dot-est') && Math.abs(lostDot.pt[0] - 47.25) > 0.001,
     JSON.stringify({ before: liveFootBefore, after: lostFoot, pt: lostDot && lostDot.pt }));
   hc._closeVehicleMap();
+  /* 12b. The live vehicle's row leaves the board: the same, from the row as last listed. */
+  hc._rows = [live];
+  await hc._openVehicleMap(live);
+  const goneFootBefore = document.querySelector('.ht-map-overlay .ht-map-foot').textContent;
+  hc._rows = [];
+  hc._syncOpenMap();
+  await settleTicks();
+  const goneFoot = document.querySelector('.ht-map-overlay .ht-map-foot').textContent;
+  const goneDot = hc._mapMarker;
+  check('a live row that left the board: the footer stops saying live and the timetable moves the marker on',
+    goneFootBefore.includes('Élő pozíció') && !goneFoot.includes('Élő pozíció') && goneFoot.includes('Becsült pozíció')
+    && !!goneDot && goneDot.html.includes('ht-veh-dot-est') && !hc._mapState.hasGps,
+    JSON.stringify({ before: goneFootBefore, after: goneFoot, pt: goneDot && goneDot.pt }));
+  hc._closeVehicleMap();
 
   /* 14. A displayed row (schedTs/depTs) still finds its sensor train's FUTÁR trip. */
   const keepCollect = Lib.collectHassVehicles;

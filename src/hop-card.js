@@ -74,6 +74,9 @@ export class BKKHopCard extends HTMLElement {
     /* The open map's route and stops, kept for a live vehicle whose GPS
        goes silent: the timetable takes over from them. */
     this._mapGeo = null;
+    /* The open map's row as the last poll listed it: once it has left the
+       board, the timetable places it from there. */
+    this._mapRow = null;
     this._hiddenAt = 0;
     this._pollRun = null;
     /* Until then a MÁV card with a key reads FUTÁR: the entry was not loaded. */
@@ -879,6 +882,7 @@ export class BKKHopCard extends HTMLElement {
     this._mapL = null;
     this._mapEstimate = null;
     this._mapGeo = null;
+    this._mapRow = null;
     const back = this._mapReturnFocus;
     this._mapReturnFocus = null;
     if (hadOverlay) this._restoreFocus(back);
@@ -1137,6 +1141,7 @@ ${this._stopPinCss()}
     this._mapOverlay = overlay;
     this._openMapKey = key;
     this._mapRef = this._mapRefOf(row);
+    this._mapRow = row;
     this._mapL = L;
     /* What the footer says, filled in as the open learns it; a poll's GPS
        update rewords it from the same state. */
@@ -1406,12 +1411,15 @@ ${this._stopPinCss()}
     const st = this._mapState;
     if (!this._map || !this._openMapKey || !st) return;
     const row = this._findMapRow(this._mapRef, this._rows || []);
+    if (row) this._mapRow = row;
     /* The row has left the board (departed): the dashed marker still runs
        on the times it had. */
     if (!row || !row.hasGps) {
-      /* A vehicle that reported a position and went silent: its last fix
-         is not live any more; the timetable places it, or nothing does. */
-      if (row && st.hasGps && !this._mapEstimate && this._mapGeo) {
+      /* A vehicle that reported a position and went silent, or left the
+         board with it: its last fix is not live any more; the timetable
+         places it (from the row as last listed), or nothing does. */
+      const known = row || this._mapRow;
+      if (known && st.hasGps && !this._mapEstimate && this._mapGeo) {
         st.hasGps = false;
         st.estimated = false;
         if (this._mapMarker) {
@@ -1421,7 +1429,7 @@ ${this._stopPinCss()}
         st.hasPosition = false;
         this._mapEstimate = Object.assign({ timed: [], row: null }, this._mapGeo);
       }
-      if (row || this._mapEstimate) this._syncEstimatedMarker(row, this._lang()).catch(() => {});
+      if (row || this._mapEstimate) this._syncEstimatedMarker(known, this._lang()).catch(() => {});
       return;
     }
     const gps = BkkLib.mapGpsLatLon(row.lat, row.lon);
