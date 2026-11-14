@@ -16,7 +16,12 @@ const RT_STOPS_BEFORE = 20;
 /* Cards on one dashboard asking about the same feed and trips within this
    long share one call; a card polls every 15–45 s. */
 const RT_CACHE_MS = 25000;
-/* A failed call (no integration answer at all) is not repeated for this long. */
+/* Calls that failed (no integration answer at all) in this many polls in a
+   row are not repeated for RT_RETRY_MS: one dropped websocket is no outage.
+   The calls failing within one round (the cards of one dashboard, the feeds
+   of one poll) are one strike. */
+const RT_FAIL_LIMIT = 3;
+const RT_FAIL_ROUND_MS = 15000;
 const RT_RETRY_MS = 5 * 60000;
 /* A delay the feed reported keeps its row on the board after its timetable
    time, and is shown from the first paint of the next poll on, until the
@@ -35,6 +40,8 @@ register({
   _rtCache: new Map(),
   _rtInflight: new Map(),
   _rtDownUntil: 0,
+  _rtFails: 0,
+  _rtLastFailAt: 0,
   _rtWarned: false,
   /* Feeds the integration has no realtime data for: not asked again until
      the page reloads. */
@@ -163,13 +170,20 @@ register({
       try {
         const res = await BkkLib.callServiceResponse(hass, 'hungarian_transport', 'realtime', { feed, trips });
         BkkLib._rtWarned = false;
+        BkkLib._rtFails = 0;
+        BkkLib._rtLastFailAt = 0;
         const out = BkkLib.rtTripsFromResult(res);
         if (out && out.noFeed) BkkLib._rtNoFeed.add(feed);
         BkkLib._rtCache.set(sig, { at: Date.now(), out });
         while (BkkLib._rtCache.size > 32) BkkLib._rtCache.delete(BkkLib._rtCache.keys().next().value);
         return out;
       } catch (err) {
-        BkkLib._rtDownUntil = Date.now() + RT_RETRY_MS;
+        const now = Date.now();
+        if (now - BkkLib._rtLastFailAt >= RT_FAIL_ROUND_MS) {
+          BkkLib._rtFails += 1;
+          BkkLib._rtLastFailAt = now;
+        }
+        if (BkkLib._rtFails >= RT_FAIL_LIMIT) BkkLib._rtDownUntil = now + RT_RETRY_MS;
         if (!BkkLib._rtWarned) {
           BkkLib._rtWarned = true;
           console.warn('Live delays and positions (hungarian_transport.realtime) unavailable, retrying in a few minutes:', err);

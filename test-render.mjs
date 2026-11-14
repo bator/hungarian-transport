@@ -10651,17 +10651,39 @@ check('a named train does not match a headsign it only begins (Tisza, TiszaÃºjvÃ
   const failing = { ...hass, connection: { sendMessagePromise: async () => { calls.push(1); throw new Error('down'); } } };
   calls.length = 0;
   Lib._rtCache.clear();
+  const keepNow = Date.now;
+  const t0 = keepNow();
+  let callsAfterOne = 0;
+  let callsInRound = 0;
   try {
+    /* One poll that failed (a dropped websocket) pauses nothing; a second
+       call in the same round is no second strike. */
+    Date.now = () => t0;
     await Lib.attachRealtime(failing, [cityRows[0]], { mode: 'helyi' });
     Lib._rtCache.clear();
     await Lib.attachRealtime(failing, [cityRows[0]], { mode: 'helyi' });
+    callsInRound = calls.length;
+    Lib._rtCache.clear();
+    Date.now = () => t0 + 30000;
+    await Lib.attachRealtime(failing, [cityRows[0]], { mode: 'helyi' });
+    callsAfterOne = calls.length;
+    /* The third failed poll in a row pauses the calls. */
+    for (const at of [60000, 90000, 120000]) {
+      Lib._rtCache.clear();
+      Date.now = () => t0 + at;
+      await Lib.attachRealtime(failing, [cityRows[0]], { mode: 'helyi' });
+    }
   } finally {
+    Date.now = keepNow;
     console.warn = keepWarn;
     Lib._rtDownUntil = 0;
+    Lib._rtFails = 0;
+    Lib._rtLastFailAt = 0;
     Lib._rtWarned = false;
   }
-  check('a failing realtime call is warned about once and not repeated at every poll', calls.length === 1 && warned === 1,
-    JSON.stringify({ calls: calls.length, warned }));
+  check('a failing realtime call is warned about once and paused only after three failed polls in a row',
+    callsInRound === 2 && callsAfterOne === 3 && calls.length === 4 && warned === 1,
+    JSON.stringify({ callsInRound, callsAfterOne, calls: calls.length, warned }));
   Lib._rtKnown.clear();
   Lib._rtCache.clear();
 }
