@@ -299,6 +299,9 @@ async function runBoard(poll, src, knownElvira) {
        destination's board confirms that FUTÁR lacks (IC TÓPART at :37
        from Székesfehérvár): that one is listed as on a MÁV card. */
     const addElvira = (row) => BkkLib.elviraBoardRows([row], nowSec())[0] || null;
+    /* A board with no rows of its own is filled from Transitous once the
+       through-check answered, except a city one (departures() fills it). */
+    const fillsEmpty = mode !== 'helyi';
     const publish = () => {
       if (!live()) return;
       /* An empty board goes on to the Transitous fill below, not to
@@ -329,6 +332,9 @@ async function runBoard(poll, src, knownElvira) {
         }
         return;
       }
+      /* Nor is one the Transitous fill follows (below): its answer is
+         listed then, with no "no departures" before it on every poll. */
+      if (!list.length && fillsEmpty) return;
       listed('board', list);
     };
     let startThrough = null;
@@ -436,7 +442,7 @@ async function runBoard(poll, src, knownElvira) {
       : (futarFull ? BkkLib.mergeRows(earlyRows, futarFull, cap) : earlyRows.slice());
     /* A city board is filled from Transitous inside departures() already:
        a second fill here only repeated the same lookups on every poll. */
-    if (!hosts.length && mode !== 'helyi') {
+    if (!hosts.length && fillsEmpty) {
       const filled = await src.transitous(hosts, origin, dest, {
         mode,
         minutesAfter: cfg.minutesAfter,

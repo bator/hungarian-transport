@@ -264,6 +264,34 @@ test('an empty board is filled from Transitous once; a city board (helyi) is not
   assert.equal(planner.board.rows[0].platform, '2');
 });
 
+test('an empty board is not listed before its Transitous fill answers: no "no departures" flash', async () => {
+  let release = null;
+  const { src } = sources({
+    transitous: async () => { await new Promise((r) => { release = r; }); return [bus('motis:7', 9)]; },
+  });
+  const card = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), {
+    apiKey: 'k', board: { rows: [bus('motis:7', 9)], filled: true },
+  });
+  const done = card.poll(src);
+  for (let i = 0; i < 20 && !release; i++) await Promise.resolve();
+  assert.ok(card.shown.every((b) => b.rows.length), JSON.stringify(card.phases()));
+  release();
+  await done;
+  assert.ok(!card.phases().includes('board'));
+  assert.equal(ids(card.board.rows), 'motis:7');
+  /* The first load keeps its spinner until the fill answers. */
+  let open = null;
+  const first = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), { apiKey: 'k', board: { loading: true } });
+  const loading = first.poll(sources({
+    transitous: async () => { await new Promise((r) => { open = r; }); return []; },
+  }).src);
+  for (let i = 0; i < 20 && !open; i++) await Promise.resolve();
+  assert.equal(first.board.loading, true);
+  open();
+  await loading;
+  assert.deepEqual([first.board.loading, ids(first.board.rows)], [false, '']);
+});
+
 test('a failed poll keeps the FUTÁR rows still due; an empty, departed or filled board is filled under the banner', async () => {
   const fail = () => sources({
     timetables: async () => { throw new Error('HTTP 503'); },
