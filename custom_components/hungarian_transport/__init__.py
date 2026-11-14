@@ -28,7 +28,7 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 from homeassistant.util import dt as dt_util
 
-from . import lovelace_resource, mav, mav_daily, realtime, timetable_notify, timetables
+from . import lovelace_resource, mav, mav_daily, realtime, storage, timetable_notify, timetables
 from .assets import asset_tag
 from .cache import close_on_stop, hass_call_later
 from .const import (
@@ -439,6 +439,13 @@ def _entry_api_key(entry: ConfigEntry) -> str:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up the integration entry."""
     frontend.add_extra_js_url(hass, hass.data[DOMAIN]["card_url"])
+    if hass.is_running:
+        # Added after the start (again, after a removal took the resource
+        # away): async_setup's sync at the start has run already.
+        try:
+            await lovelace_resource.async_sync_resource(hass, hass.data[DOMAIN]["card_url"])
+        except Exception:  # noqa: BLE001 - the extra module still loads the cards
+            _LOGGER.warning("Could not keep the cards as a Lovelace resource", exc_info=True)
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     notifier = timetable_notify.UpdateNotifier(hass, entry.options)
     entry.async_on_unload(notifier.stop)
@@ -539,11 +546,17 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """The integration is removed: so is its Lovelace resource."""
+    """The integration is removed: so are its Lovelace resource and its
+    record in .storage (storage.py), and the copy of it in memory."""
     try:
         await lovelace_resource.async_remove_resource(hass)
     except Exception:  # noqa: BLE001 - removal goes on
         _LOGGER.warning("Could not remove the cards' Lovelace resource", exc_info=True)
+    try:
+        await storage.store(hass).async_remove()
+    except Exception:  # noqa: BLE001 - removal goes on
+        _LOGGER.warning("Could not remove the timetable update record", exc_info=True)
+    hass.data.get(DOMAIN, {}).pop("update_state", None)
 
 
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
