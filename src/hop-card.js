@@ -539,6 +539,7 @@ export class BKKHopCard extends HTMLElement {
     this._elErr.className = 'err';
     this._elBody = document.createElement('div');
     this._elBody.className = 'body';
+    this._bodyHtml = null;
     wrap.appendChild(this._elHead);
     wrap.appendChild(this._elErr);
     wrap.appendChild(this._elBody);
@@ -579,7 +580,11 @@ export class BKKHopCard extends HTMLElement {
       const cell = tr.querySelector('.cd');
       if (!row || !cell) return;
       const text = this._countdown(row.depTs, lang);
-      if (cell.textContent !== text) cell.textContent = text;
+      if (cell.textContent !== text) {
+        cell.textContent = text;
+        /* The body is no longer what _paint last wrote. */
+        this._bodyHtml = null;
+      }
     });
   }
 
@@ -597,14 +602,20 @@ export class BKKHopCard extends HTMLElement {
     /* data-row-index points into this list, not into _rows: departed rows
        are filtered out, so the two indexes differ once a bus has left. */
     this._shownRows = rows;
+    let html;
     if (rows.length) {
-      this._elBody.innerHTML = `<table><tbody>${
+      html = `<table><tbody>${
         rows.map((r, i) => this._rowHtml(r, lang, i)).join('')
       }</tbody></table>`;
-      return;
+    } else {
+      const msg = this._emptyBodyMessage(lang, cfg);
+      html = msg ? `<div class="msg">${BkkLib.esc(msg)}</div>` : '';
     }
-    const msg = this._emptyBodyMessage(lang, cfg);
-    this._elBody.innerHTML = msg ? `<div class="msg">${BkkLib.esc(msg)}</div>` : '';
+    /* A poll sends several snapshots of the same rows: the same table is
+       not written again, which would drop hover and keyboard focus. */
+    if (html === this._bodyHtml) return;
+    this._bodyHtml = html;
+    this._elBody.innerHTML = html;
   }
 
   /* With `headerBadges` the title shares its line with the lines on the

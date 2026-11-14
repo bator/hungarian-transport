@@ -236,6 +236,18 @@ check('card size grows with the rows', card.getCardSize() >= 2, String(card.getC
     !!picked && picked.headsign === 'Clicked train', picked && picked.headsign);
   card._rows = saved;
   card._paint();
+  /* A poll's next snapshot of the same rows (new row objects) keeps the table. */
+  const kept = firstRow();
+  card._rows = saved.map((r) => Object.assign({}, r));
+  card._paint();
+  const same = firstRow();
+  card._rows = saved.map((r, i) => (i ? r : Object.assign({}, r, { headsign: 'Elsewhere' })));
+  card._paint();
+  check('the same rows painted again keep the table; a changed row repaints it',
+    same === kept && firstRow() !== kept && card._shownRows[0].headsign === 'Elsewhere',
+    JSON.stringify({ same: same === kept }));
+  card._rows = saved;
+  card._paint();
 }
 
 card._showErr(new Error('boom'));
