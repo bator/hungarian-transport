@@ -551,9 +551,13 @@ register({
   },
   /* Only a MÁV station's id carries one (BKK_005511387, BKK_CS…,
      hu-mav_…, the bare code): a city stop's longer number (szeged:2430584836)
-     is not a station code. */
+     is not a station code. Behind a station prefix the code may carry a
+     pole suffix: FUTÁR names some halts so (Erdőkertes is BKK_005510579_0
+     and BKK_CS005510579_0, issue #121), Transitous its platforms
+     (hu-mav_005501289_4). */
   elviraStationCode(id) {
-    const m = String(id || "").match(/^(?:BKK_(?:CS)?|hu-mav_)?(\d{9})$/i);
+    const s = String(id || "");
+    const m = s.match(/^(?:BKK_(?:CS)?|hu-mav_)(\d{9})(?:_\d{1,3})?$/i) || s.match(/^(\d{9})$/);
     return m ? m[1] : "";
   },
   /* BKK street/metro parents (CSF…) sit next to MÁV stations but have no

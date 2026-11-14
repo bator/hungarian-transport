@@ -8,7 +8,7 @@ import sys
 from datetime import date
 from pathlib import Path
 
-from build_volan_index import download_volan
+from build_volan_index import download_volan, is_helykozi
 from gtfs_compact import (
     PLATFORM_SPLIT_M,
     IndexGuardError,
@@ -208,17 +208,15 @@ def include_all(short: str, _agency: str, _aid: str) -> bool:
 
 
 def include_volan_local(short: str, agency: str, _aid: str) -> bool:
+    """A Volán town network's route: what the Volán index
+    (build_volan_index.include_long) leaves."""
     if re.fullmatch(r"\d{4}", short):
         return False
-    low = (agency or "").lower()
-    if "helyközi" in low or "helykozi" in low:
-        return False
-    return True
+    return not is_helykozi(agency)
 
 
 def skip_helykozi(agency: str) -> bool:
-    low = (agency or "").lower()
-    return "helyközi" in low or "helykozi" in low
+    return is_helykozi(agency)
 
 
 def _load_feed(base: Path, feed: dict, zpath: Path | None = None) -> list[dict]:
