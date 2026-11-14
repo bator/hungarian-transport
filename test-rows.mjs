@@ -59,6 +59,18 @@ test('mergeRows lists the hosts and fills them from the same departure of anothe
   assert.equal(BkkLib.mergeRows(Array.from({ length: 20 }, (_, i) => ({ label: String(i), dep: now + i * 60 }))).length, 12);
 });
 
+test('two trips of one line in the same minute merge each onto its own row', () => {
+  const at = (Math.floor(now / 60) + 10) * 60;
+  const bus = (id, s) => ({ tripId: id, source: 'futar', label: '7', head: 'Újpalota', vehicle: 'bus', dep: at + s, sched: at + s });
+  const early = [bus('BKK_C1', 0), bus('BKK_C2', 20)];
+  const full = early.map((r) => Object.assign({}, r));
+  assert.deepEqual(BkkLib.mergeRows(early, full, 40).map((r) => r.tripId), ['BKK_C1', 'BKK_C2']);
+  /* Two timetable trips at one minute take one FUTÁR trip each. */
+  const gtfs = (id, s) => ({ tripId: id, source: 'gtfs', label: '7', vehicle: 'bus', dep: at + s, sched: at + s });
+  const merged = BkkLib.mergeRows([gtfs('gtfs:7:1', 0), gtfs('gtfs:7:2', 20)], [bus('BKK_C1', 0), bus('BKK_C2', 20)], 40);
+  assert.deepEqual(merged.map((r) => r.tripId), ['BKK_C1', 'BKK_C2']);
+});
+
 test('a Transitous trip id goes only onto a host without GPS; ELVIRA’s and a timetable’s never', () => {
   const host = (extra) => Object.assign({ tripId: 'gtfs:6990:1', source: 'gtfs', label: '6990', vehicle: 'bus', dep: now + 600, sched: now + 600 }, extra);
   const motis = { tripId: 'motis:hu-volan_1', source: 'motis', label: '6990', vehicle: 'bus', dep: now + 600, sched: now + 600 };

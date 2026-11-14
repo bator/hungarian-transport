@@ -158,6 +158,19 @@ function combine(hosts, extra, limit, overlayOnly, addUnmatched) {
     && !!railKindOf(p) && railKindOf(p) === railKindOf(row)
     && !!terminusOf(p) && BkkLib.nameEq(terminusOf(p), terminusOf(row))
     && !otherTrain(p, row);
+  /* Two trips of one line can leave in the same minute: byTime keeps
+     every row under its label and minute, and a row pairs with the one
+     of its own trip id, else one not paired yet, else any it may be. */
+  const byTimePaired = new Set();
+  const timeMatch = (tk, row) => {
+    const rows = (byTime.get(tk) || []).filter((i) => !otherTrain(out[i], row));
+    const tid = String(row.tripId || '');
+    const own = tid ? rows.find((i) => String(out[i].tripId || '') === tid) : undefined;
+    if (own !== undefined) return own;
+    const free = rows.find((i) => !byTimePaired.has(i));
+    if (free !== undefined) return free;
+    return rows.length ? rows[0] : -1;
+  };
   /* skipUnmatched: an overlay-only row, dropped when nothing pairs it.
      asNew: the row added in its place when nothing does; it pairs as
      strictly as an overlay-only row, plus sameTrain. */
@@ -216,8 +229,10 @@ function combine(hosts, extra, limit, overlayOnly, addUnmatched) {
        minute would copy booking onto the other FUTÁR train. Spec is
        trainNumber (byNum) plus branded/numbered pairing above. */
     const tk = timeOf(row);
-    if (!strict && byTime.has(tk) && !otherTrain(out[byTime.get(tk)], row)) {
-      overlay(out[byTime.get(tk)], row);
+    const timed = strict ? -1 : timeMatch(tk, row);
+    if (timed >= 0) {
+      overlay(out[timed], row);
+      byTimePaired.add(timed);
       return;
     }
     if (skipUnmatched) return;
@@ -231,7 +246,7 @@ function combine(hosts, extra, limit, overlayOnly, addUnmatched) {
     }
     const idx = out.length;
     out.push(asNew || row);
-    byTime.set(tk, idx);
+    byTime.set(tk, (byTime.get(tk) || []).concat(idx));
     registerNumber(n, idx);
     registerNumber(looseNumber(row), idx, byLoose);
   };
