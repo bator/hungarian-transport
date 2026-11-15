@@ -699,8 +699,9 @@ with tempfile.TemporaryDirectory() as tmp_name:
 
 # ---- the workflow text ------------------------------------------------------
 on_block = TEXT.split("\non:\n", 1)[1].split("\n\n", 1)[0]
-check("runs daily at 03:15 UTC and by hand, never for pull requests (secrets, deploy)",
-      '- cron: "15 3 * * *"' in on_block and "workflow_dispatch:" in on_block
+check("runs daily at 03:15 and, after MÁV's feed of the day is out, 10:30 UTC, and by hand,"
+      " never for pull requests (secrets, deploy)",
+      '- cron: "15 3 * * *"' in on_block and '- cron: "30 10 * * *"' in on_block and "workflow_dispatch:" in on_block
       and "pull_request" not in on_block and "push:" not in on_block, on_block)
 top = TEXT.split("\njobs:\n", 1)[0]
 check("the workflow token reads contents only",

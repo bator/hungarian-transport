@@ -165,9 +165,13 @@ as a 3-day artifact without publishing anything.
 
 MÁV publishes a new feed almost every day; releases come once a week. The
 **Daily MÁV index** workflow (`.github/workflows/mav-index-daily.yml`) runs
-the release's pipeline above every morning at 03:15 UTC, after MÁV's nightly
-update (the site is ready before 05:30 Hungarian time), and publishes on
-GitHub Pages, under `https://bator.github.io/hungarian-transport/`:
+the release's pipeline above twice a day, at 03:15 and 10:30 UTC, and
+publishes on GitHub Pages, under `https://bator.github.io/hungarian-transport/`.
+MÁV's feed of the day is not out at 03:15 (in November 2026 it appeared
+between about 03:20 and 10:00 UTC, once only in the afternoon), so it is
+usually the 10:30 run that builds it; GitHub may start a scheduled run hours
+late, and a run that finds the content already published deploys nothing.
+The files:
 
 | File | What it is |
 | --- | --- |

@@ -1,15 +1,24 @@
 name: Daily MÁV index
 
 # MÁV publishes a new GTFS almost every day; releases ship its index weekly.
-# Every morning, after MÁV's nightly feed update, this builds the index the
-# release builds (release_mav_index.sh: MÁV GTFS, pfaedle, build_mav_index.py
-# and its audit) and publishes it on GitHub Pages with a manifest
-# (scripts/mav_pages_site.py). The integration fetches the manifest, and the
-# index when its feed is newer (custom_components/hungarian_transport/
-# mav_daily.py). The site also carries the build's GTFS for other consumers:
-# MÁV's zip as downloaded (mav-gtfs.zip, CC0) and pfaedle's trips, shapes and
-# stop_times (mav-pfaedle-overlay.zip, shapes © OpenStreetMap contributors,
-# ODbL), with ATTRIBUTION.txt. 03:15 UTC: ready before 05:30 local time.
+# This builds the index the release builds (release_mav_index.sh: MÁV GTFS,
+# pfaedle, build_mav_index.py and its audit) and publishes it on GitHub
+# Pages with a manifest (scripts/mav_pages_site.py). The integration fetches
+# the manifest, and the index when its feed is newer
+# (custom_components/hungarian_transport/mav_daily.py). The site also
+# carries the build's GTFS for other consumers: MÁV's zip as downloaded
+# (mav-gtfs.zip, CC0) and pfaedle's trips, shapes and stop_times
+# (mav-pfaedle-overlay.zip, shapes © OpenStreetMap contributors, ODbL), with
+# ATTRIBUTION.txt.
+#
+# When: MÁV's feed of the day (feed_version YYYYMMDD) is not out at 03:15
+# UTC. Every run of 3-15 November 2026 that started at 03:15 built an older
+# feed, and every one that started at 10:03-11:28 UTC built the day's; on
+# 3 November it was still missing at 13:54. The 03:15 run stays (it
+# refreshes built_at, and would catch a feed published overnight); the
+# 10:30 run is the one meant to build the day's feed. GitHub starts
+# scheduled runs late, by hours at times (the 03:15 one started after 10:00
+# all through November), so neither time is a promise.
 #
 # Nothing is deployed, and the site keeps the previous files, when the
 # secrets are missing, the download, pfaedle or the audit fails, the site is
@@ -27,6 +36,7 @@ name: Daily MÁV index
 on:
   schedule:
     - cron: "15 3 * * *"
+    - cron: "30 10 * * *"
   workflow_dispatch:
 
 permissions:
