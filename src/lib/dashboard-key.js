@@ -21,7 +21,9 @@ register({
   },
   /* Only a key that sits on one of our own cards may be reused. A dashboard can
      hold apiKey values belonging to entirely unrelated cards, and those must
-     never end up in a request to BKK. */
+     never end up in a request to BKK. A key of only spaces is none (as the
+     integration's Repairs check reads it), so it cannot hide a sibling
+     card's real one. */
   findApiKey(node, acc) {
     if (!acc) acc = [];
     if (!node || typeof node !== 'object') return acc;
@@ -30,9 +32,8 @@ register({
       return acc;
     }
     const type = String(node.type || '').replace(/^custom:/, '');
-    if (typeof node.apiKey === 'string' && node.apiKey && OWN_CARD_TYPES.indexOf(type) >= 0) {
-      acc.push(node.apiKey);
-    }
+    const key = typeof node.apiKey === 'string' ? node.apiKey.trim() : '';
+    if (key && OWN_CARD_TYPES.indexOf(type) >= 0) acc.push(key);
     Object.keys(node).forEach((k) => {
       if (k === 'apiKey') return;
       BkkLib.findApiKey(node[k], acc);
