@@ -10579,7 +10579,7 @@ check('a named train does not match a headsign it only begins (Tisza, TiszaÃºjvÃ
   });
   Lib._rtCache.clear();
   Lib._rtNoFeed.clear();
-  Lib._rtDownUntil = 0;
+  Lib._rtFeeds.clear();
   const changed = await Lib.attachRealtime(hass, [gtfsRow], { mode: 'volan' });
   const sent = calls[0] && calls[0].service_data;
   check('the card calls hungarian_transport.realtime once with the rowâ€™s trip',
@@ -10747,16 +10747,53 @@ check('a named train does not match a headsign it only begins (Tisza, TiszaÃºjvÃ
   } finally {
     Date.now = keepNow;
     console.warn = keepWarn;
-    Lib._rtDownUntil = 0;
-    Lib._rtFails = 0;
-    Lib._rtLastFailAt = 0;
-    Lib._rtWarned = false;
+    Lib._rtFeeds.clear();
   }
   check('a failing realtime call is warned about once and paused only after three failed polls in a row',
     callsInRound === 2 && callsAfterOne === 3 && calls.length === 4 && warned === 1,
     JSON.stringify({ callsInRound, callsAfterOne, calls: calls.length, warned }));
   Lib._rtKnown.clear();
   Lib._rtCache.clear();
+}
+
+/* GTFS-Realtime per feed (realtime.js): one feed answering does not end
+   another's failure streak, so the feed that keeps rejecting is paused
+   and warned about once, while the one that answers is still asked. */
+{
+  const keepCall = Lib.callServiceResponse;
+  const keepWarn = console.warn;
+  const keepNow = Date.now;
+  const asked = { a: 0, b: 0 };
+  let warned = 0;
+  const hass = { services: { hungarian_transport: { realtime: {} } } };
+  Lib._rtFeeds.clear();
+  Lib._rtCache.clear();
+  Lib._rtNoFeed.clear();
+  Lib.callServiceResponse = async (_h, _d, _s, data) => {
+    asked[data.feed] += 1;
+    if (data.feed === 'b') throw new Error('feed b rejects');
+    return { response: { trips: {} } };
+  };
+  console.warn = () => { warned += 1; };
+  const t0 = keepNow();
+  try {
+    for (let i = 0; i < 10; i += 1) {
+      Date.now = () => t0 + i * 30000;
+      /* b fails first, then a answers: a's answer used to end b's streak. */
+      await Promise.all([
+        Lib.realtimeFetch(hass, 'b', [{ key: 'k' + i }]),
+        Lib.realtimeFetch(hass, 'a', [{ key: 'k' + i }]),
+      ]);
+    }
+  } finally {
+    Date.now = keepNow;
+    console.warn = keepWarn;
+    Lib.callServiceResponse = keepCall;
+    Lib._rtFeeds.clear();
+    Lib._rtCache.clear();
+  }
+  check('a realtime feed that keeps rejecting is paused after three polls and warned about once, while another feed answers',
+    asked.b === 3 && asked.a === 10 && warned === 1, JSON.stringify({ asked, warned }));
 }
 
 process.exit(failed ? 1 : 0);
