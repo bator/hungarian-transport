@@ -11840,4 +11840,238 @@ const review5Planner = async (now) => {
     inPause === 2 && requests === 4 && results.every((r) => r === null), JSON.stringify({ inPause, requests, results }));
 }
 
+
+/* ---- Card review-8 fixes: destination lists for stops FUTÁR does not
+   know, and a retry that does not end ---- */
+
+/* FUTÁR only knows BKK's stops: in the GTFS modes a Volán, city or MÁV
+   stop is not asked, and its list is not partial. A request the
+   integration did not send is no blip either; a BKK stop's timeout still
+   is. */
+{
+  const keep = { fetch: Lib.fetch, volanReachableDests: Lib.volanReachableDests, cityOpId: Lib.cityOpId };
+  const asked = [];
+  const results = {};
+  try {
+    Lib.volanReachableDests = async () => ({ dests: [{ key: 'v', name: 'V' }], destRoutes: {} });
+    Lib.cityOpId = () => '';
+    let err = Lib._integrationError('futar_unavailable', 'status NOT_FOUND');
+    Lib.fetch = async (_key, _path, params) => { asked.push(params && params.stopId); throw err; };
+    for (const id of ['volan_12345', 'szeged:4711', 'hu-mav_005510009']) {
+      for (const mode of ['volan', 'all']) {
+        const out = await Lib.reachableDests(R7_IX, '', {}, { id, name: 'X' }, mode, '');
+        results[id + '/' + mode] = { dests: out.dests.map((d) => d.key).join(), partial: !!out.partial };
+      }
+    }
+    err = Lib._integrationError('futar_bad_request', 'stopId too long');
+    const bad = await Lib.reachableDests(R7_IX, '', {}, { id: 'BKK_F00001', name: 'A' }, 'all', '');
+    results.badRequest = { dests: bad.dests.map((d) => d.key).join(), partial: !!bad.partial };
+    err = new Error('BKK timeout');
+    const blip = await Lib.reachableDests(R7_IX, '', {}, { id: 'BKK_F00001', name: 'A' }, 'volan', '');
+    results.blip = { partial: !!blip.partial };
+  } finally {
+    Object.assign(Lib, keep);
+  }
+  const gtfs = Object.keys(results).filter((k) => k.includes('/'));
+  check('a destination list for a stop FUTÁR does not know, or after a request the integration did not send, is whole; a BKK timeout is not',
+    gtfs.length === 6 && gtfs.every((k) => results[k].dests === 'v' && !results[k].partial)
+    && asked.join() === 'BKK_F00001,BKK_F00001'
+    && results.badRequest.dests === 'v' && !results.badRequest.partial && results.blip.partial,
+    JSON.stringify({ asked, results }));
+}
+
+/* A planner on a Volán stop, FUTÁR answering errors for any stop: its
+   list is the GTFS one, and ten minutes of hass updates ask FUTÁR nothing. */
+{
+  const keep = {
+    nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard, fetch: Lib.fetch,
+    volanReachableDests: Lib.volanReachableDests, cityOpId: Lib.cityOpId,
+  };
+  const realNow = Date.now;
+  const t0 = realNow();
+  let now = t0;
+  Date.now = () => now;
+  const asked = [];
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    Lib.cityOpId = () => '';
+    Lib.volanReachableDests = async () => ({ dests: [{ key: 'szekesfehervar', name: 'Székesfehérvár' }], destRoutes: {} });
+    Lib.fetch = async (_key, _path, params) => {
+      asked.push(params && params.stopId);
+      throw Lib._integrationError('futar_unavailable', 'status NOT_FOUND');
+    };
+    pc.setConfig({ language: 'hu', stopId: 'volan_12345', stopName: 'Bicske, autóbusz-állomás' });
+    pc._ctx.indexes = () => R7_IX;
+    document.body.appendChild(pc);
+    const hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } }, connection: {} };
+    pc.hass = hass;
+    await settleTicks(12);
+    const first = { dests: pc._dests.map((d) => d.key).join(), failedAt: pc._destsFailedAt };
+    for (let s = 5; s <= 600; s += 5) {
+      now = t0 + s * 1000;
+      pc.hass = Object.assign({}, hass);
+      await settleTicks();
+    }
+    check('a planner on a Volán stop offers its GTFS destinations and asks FUTÁR nothing over ten minutes of hass updates',
+      first.dests === 'szekesfehervar' && !first.failedAt && asked.length === 0,
+      JSON.stringify({ first, asked }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* A planner on a BKK stop whose FUTÁR part keeps failing with a blip: the
+   list loads again 30 s later, then after twice as long each time, and
+   stops after DEST_RETRIES (6) retries; a new origin starts over. */
+{
+  const keep = {
+    nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+    reachableDests: Lib.reachableDests,
+  };
+  const realNow = Date.now;
+  const t0 = realNow();
+  let now = t0;
+  Date.now = () => now;
+  const at = [];
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    Lib.reachableDests = async (_ix, _k, _c, stop) => {
+      at.push([stop.id, Math.round((now - t0) / 1000)]);
+      return { dests: [{ key: 'v', name: 'V' }], destRoutes: {}, partial: true };
+    };
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A' });
+    document.body.appendChild(pc);
+    const hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } }, connection: {} };
+    pc.hass = hass;
+    await settleTicks();
+    for (let s = 10; s <= 7200; s += 10) {
+      now = t0 + s * 1000;
+      pc.hass = Object.assign({}, hass);
+      await settleTicks();
+    }
+    const offered = pc._dests.map((d) => d.key).join();
+    const before = at.length;
+    pc._pickOrigin({ id: 'BKK_F00002', name: 'B' });
+    await settleTicks();
+    now += 31 * 1000;
+    pc.hass = Object.assign({}, hass);
+    await settleTicks();
+    const secs = at.filter(([id]) => id === 'BKK_F00001').map(([, s]) => s);
+    const fresh = at.slice(before).map(([id]) => id);
+    check('a planner list whose FUTÁR part keeps failing loads again after 30, 60, 120 … s and stops after six retries; a new origin starts over',
+      secs.join() === '0,30,90,210,450,930,1890' && offered === 'v'
+      && fresh.join() === 'BKK_F00002,BKK_F00002',
+      JSON.stringify({ secs, offered, fresh }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* The editor on a Volán stop, FUTÁR answering errors for any stop: the
+   GTFS list is whole, nothing reloads it, FUTÁR is not asked. */
+{
+  const keep = {
+    fetch: Lib.fetch, apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+    volanReachableDests: Lib.volanReachableDests,
+  };
+  const realNow = Date.now;
+  const t0 = realNow();
+  let now = t0;
+  Date.now = () => now;
+  let asked = 0;
+  const ed = document.createElement('hungarian-transport-card-editor');
+  try {
+    Lib.apiKeyFromDashboard = async () => '';
+    Lib.volanReachableDests = async () => ({ dests: [{ key: 'szekesfehervar', name: 'Székesfehérvár' }, { key: 'tata', name: 'Tata' }], destRoutes: {} });
+    Lib.fetch = async (_key, path) => {
+      if (!String(path).startsWith('arrivals')) return { data: {} };
+      asked += 1;
+      throw Lib._integrationError('futar_unavailable', 'status NOT_FOUND');
+    };
+    document.body.appendChild(ed);
+    const hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } }, connection: {} };
+    ed.hass = hass;
+    ed.setConfig({ type: 'custom:hungarian-transport-card', volan: true, language: 'hu', stopId: 'volan_12345', stopName: 'Bicske' });
+    await settleTicks(12);
+    const first = { dests: ed._dests.map((d) => d.key).join(), partialAt: ed._loadedPartialAt };
+    for (let s = 5; s <= 600; s += 5) {
+      now = t0 + s * 1000;
+      ed.hass = Object.assign({}, hass);
+      await settleTicks();
+    }
+    check('an editor on a Volán stop offers its GTFS destinations as a whole list and asks FUTÁR nothing over ten minutes of hass updates',
+      first.dests === 'szekesfehervar,tata' && !first.partialAt && asked === 0,
+      JSON.stringify({ first, asked }));
+  } finally {
+    Date.now = realNow;
+    ed.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* The editor's partial list for a BKK stop: a reload keeps the list on
+   screen (no loading hint), the wait doubles each time, and it stops after
+   DEST_RETRIES (6) retries. */
+{
+  const keep = { reachableDests: Lib.reachableDests };
+  const realNow = Date.now;
+  const t0 = realNow();
+  let now = t0;
+  Date.now = () => now;
+  const at = [];
+  let release = null;
+  let hintSeen = 0;
+  let listSeen = 0;
+  const ed = document.createElement('hungarian-transport-card-editor');
+  try {
+    Lib.reachableDests = () => {
+      at.push(Math.round((now - t0) / 1000));
+      const out = { dests: [{ key: 'v', name: 'V' }, { key: 'w', name: 'W' }], destRoutes: {}, partial: true };
+      if (at.length === 1) return Promise.resolve(out);
+      return new Promise((r) => { release = () => r(out); });
+    };
+    document.body.appendChild(ed);
+    const hass = { states: {}, language: 'hu' };
+    ed.hass = hass;
+    ed._probeKey = () => {};
+    ed._canLoadDests = () => true;
+    ed.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A' });
+    await settleTicks();
+    const loadingText = i18nT('hu', 'destLoading');
+    for (let s = 10; s <= 7200; s += 10) {
+      now = t0 + s * 1000;
+      ed.hass = Object.assign({}, hass);
+      await settleTicks();
+      if (release) {
+        const box = ed._el('destHits').textContent;
+        if (box.includes(loadingText)) hintSeen += 1;
+        if (box.includes('V') && box.includes('W')) listSeen += 1;
+        const r = release;
+        release = null;
+        r();
+        await settleTicks();
+      }
+    }
+    check('an editor partial list stays on screen while it loads again, after 30, 60, 120 … s, and stops after six retries',
+      at.join() === '0,30,90,210,450,930,1890' && hintSeen === 0 && listSeen === 6,
+      JSON.stringify({ at, hintSeen, listSeen }));
+  } finally {
+    Date.now = realNow;
+    ed.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 process.exit(failed ? 1 : 0);

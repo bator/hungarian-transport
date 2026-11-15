@@ -19,6 +19,11 @@ const SEARCH_ERR_MS = 30 * 1000;
    editor's DEST_RETRY_MS): a passing FUTÁR or index error must not leave
    the destination picker empty until the origin is picked again. */
 const DEST_RETRY_MS = 30 * 1000;
+/* Each failure in a row for the same origin doubles that wait, and after
+   this many retries the list stays as it is until the origin or the FUTÁR
+   access changes: an error that does not pass (one FUTÁR keeps answering
+   for that stop) must not reload the list for as long as the page is open. */
+const DEST_RETRIES = 6;
 /* Share of the HA secondary text colour in the themed title band's
    secondary text (the rest is the HA text colour). */
 const HEAD_SEC_PCT = 50;
@@ -56,8 +61,10 @@ export class BKKPlannerCard extends BKKHopCard {
        integration's service showed up (HA starting, an entry reload) lacks
        the BKK destinations, and loads again when it does. */
     this._destsAccess = '';
-    /* When the load for _destsFor failed (0: it did not). */
+    /* When the load for _destsFor failed (0: it did not), and how many
+       loads in a row for it have (the retry back-off). */
     this._destsFailedAt = 0;
+    this._destsFailures = 0;
     this._pickersMounted = false;
     /* The journey plan (lib/journey-plan.js): the plan for now or for a
        chosen time, and which answer is current. The planning time lives on
@@ -915,10 +922,13 @@ export class BKKPlannerCard extends BKKHopCard {
     if (this._routePicked() && !this._editRoute) return;
     if (this._destsFor === cfg.stopId) {
       /* Losing access (the service gone for a moment) keeps the list; a
-         load that failed is tried again DEST_RETRY_MS later, not on every
-         hass update. */
+         load that failed is tried again DEST_RETRY_MS later, twice that
+         after a second failure and so on, DEST_RETRIES times at most: not
+         on every hass update. */
       const access = this._futarAccess();
-      const retry = this._destsFailedAt && Date.now() - this._destsFailedAt >= DEST_RETRY_MS;
+      const fails = this._destsFailures;
+      const retry = this._destsFailedAt && fails <= DEST_RETRIES
+        && Date.now() - this._destsFailedAt >= DEST_RETRY_MS * 2 ** Math.max(0, fails - 1);
       if (!retry && (!access || access === this._destsAccess)) return;
     }
     this._loadDests();
@@ -1846,8 +1856,11 @@ ${this._stopPinCss()}
     const cfg = this._config || {};
     if (!cfg.stopId) return;
     const again = this._destsFor === cfg.stopId;
+    const access = this._futarAccess();
+    /* Another origin or FUTÁR access starts the retry back-off over. */
+    if (!again || access !== this._destsAccess) this._destsFailures = 0;
     this._destsFor = cfg.stopId;
-    this._destsAccess = this._futarAccess();
+    this._destsAccess = access;
     this._destsFailedAt = 0;
     const seq = this._destLoad.bump();
     /* The last origin's destinations must not be offered while this
@@ -1869,6 +1882,7 @@ ${this._stopPinCss()}
       if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
         this._dests = [];
         this._destRoutes = {};
+        this._destsFailures = 0;
       } else {
         const out = await BkkLib.reachableDests(
           this._ctx.indexes(),
@@ -1883,8 +1897,10 @@ ${this._stopPinCss()}
         this._destRoutes = (out && out.destRoutes) || {};
         /* FUTÁR's part failed (a 429, a timeout): the GTFS destinations
            are offered meanwhile, and the list loads again DEST_RETRY_MS
-           later, as a failed one does, for the BKK destinations. */
-        if (out && out.partial) this._destsFailedAt = Date.now();
+           later (longer after each failure in a row), as a failed one
+           does, for the BKK destinations. */
+        if (out && out.partial) this._destsFailed();
+        else this._destsFailures = 0;
       }
       this._showSearchErr('');
     } catch (err) {
@@ -1892,13 +1908,19 @@ ${this._stopPinCss()}
       this._showSearchErr(err);
       this._dests = [];
       this._destRoutes = {};
-      this._destsFailedAt = Date.now();
+      this._destsFailed();
     } finally {
       if (!this._destLoad.stale(seq)) {
         this._destsLoading = false;
         this._searchDest((this._planEl('pdq') || {}).value || '');
       }
     }
+  }
+
+  /* The load for _destsFor failed, or lacked FUTÁR's part. */
+  _destsFailed() {
+    this._destsFailedAt = Date.now();
+    this._destsFailures += 1;
   }
 
   _idsForDest(keys) {
