@@ -2942,9 +2942,14 @@ check('mavRouteForRow G43 uses the line code',
     (() => { const p = pc._whenParts(iso(6, 5)); return pc._whenFromParts(p.ymd, p.min) === iso(6, 5); })());
   /* The clock and day picked are never the ones already set (the next
      five-minute mark from now, which may be tomorrow's 00:00 just before
-     midnight): a pick naming the time already set plans nothing. */
+     midnight): a pick naming the time already set plans nothing. Nor do
+     they (or the arrow-key step before them) fall in 02:00-02:59, the hour
+     Budapest skips in spring and repeats in autumn: those clocks have no
+     single instant, so the round trip through Budapest time would not give
+     the minute back. Two hours on, or four when that lands there. */
   const setMin = pc._whenParts(pc._plan.when.at).min;
-  const pickMin = (Math.floor(setMin / 5) * 5 + 120) % 1440;
+  const setMark = Math.floor(setMin / 5) * 5;
+  const pickMin = (setMark + (setMark < 65 ? 240 : 120)) % 1440;
   ptime.value = String((pickMin + 1435) % 1440);
   ptime.dispatchEvent(new Event('change'));
   ptime.value = String(pickMin);
