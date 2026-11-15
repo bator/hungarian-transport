@@ -471,6 +471,35 @@ def test_two_service_days_of_a_trip_id_stay_apart() -> None:
     assert planner.trip_update("T1", "20261102") is tus[1] and planner.trip_update("T1", "20261101") is tus[0]
 
 
+def _vehicle_on(day: str) -> realtime.Vehicle:
+    return realtime.Vehicle("T1", day, "", 47.5, 19.0, None, None, NOW, "S1", 2)
+
+
+def test_one_feeds_other_run_is_not_the_days_vehicle() -> None:
+    """Both runs in the trip updates, only last night's in the positions:
+    today's row gets today's delay without last night's vehicle."""
+    tu = _runs((b"20261101", 600), (b"20261102", 60))
+    vp = realtime.Feed(timestamp=NOW)
+    vp.add_vehicle(_vehicle_on("20261101"))
+    loaded = [(realtime.Source("tu", "vp", "", ""), tu, vp, {"822": ["T1"]})]
+    req = {"trip_id": "T1", "stops": ["S1"], "from": 0}
+    hit = _answer(_cfg("trip"), loaded, date="20261102", **req)
+    assert (hit["delay"], hit["vehicle"]) == (60, None)
+    hit = _answer(_cfg("trip"), loaded, date="20261101", **req)
+    assert hit["delay"] == 600 and hit["vehicle"]["lat"] == 47.5
+    # A train (no date: today's run first) the same way.
+    hit = _answer(_cfg("train"), loaded, train="822", stops=["S1"], **{"from": 0})
+    assert (hit["delay"], hit["vehicle"]) == (60, None)
+    # The other way round: last night's update only, both vehicles.
+    tu = _runs((b"20261101", 600))
+    vp.add_vehicle(_vehicle_on("20261102"))
+    loaded = [(realtime.Source("tu", "vp", "", ""), tu, vp, {"822": ["T1"]})]
+    hit = _answer(_cfg("trip"), loaded, date="20261102", **req)
+    assert hit["delay"] is None and hit["vehicle"] is not None
+    assert vp.vehicle("T1", "20261102").start_date == "20261102"
+    assert tu.trip_update("T1", "20261102") is None and tu.trip_update("T1", "20261101").start_date == "20261101"
+
+
 @pytest.mark.parametrize(("day", "found"), [(b"20261102", True), (b"20261101", True), (b"20261030", False), (b"", True)])
 def test_a_train_is_todays_or_last_nights_run(day, found) -> None:
     """The cards send no date for a train: a run of its trip id on another

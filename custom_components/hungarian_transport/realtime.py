@@ -251,15 +251,25 @@ class Feed:
         _keep(self.vehicles, self.vehicle_days, v)
 
     def trip_update(self, trip_id: str, date: str = "") -> TripUpdate | None:
-        """The trip's update, the run of date when the id has several."""
-        return (self.trip_days.get((trip_id, date)) if date and self.trip_days else None) or self.trip_updates.get(
-            trip_id
-        )
+        """The trip's update; with a date, only that day's run (or one that
+        names no day)."""
+        return _run(self.trip_updates, self.trip_days, trip_id, date)
 
     def vehicle(self, trip_id: str, date: str = "") -> Vehicle | None:
-        return (self.vehicle_days.get((trip_id, date)) if date and self.vehicle_days else None) or self.vehicles.get(
-            trip_id
-        )
+        return _run(self.vehicles, self.vehicle_days, trip_id, date)
+
+
+def _run(plain: dict[str, Any], days: dict[tuple[str, str], Any], trip_id: str, date: str) -> Any:
+    """The run of trip_id on date. The days are only filled for an id with
+    two runs in this feed, so the plain entry can be another day's run while
+    the other feed holds this day's: today's trip update beside last night's
+    vehicle is not one trip."""
+    if not date:
+        return plain.get(trip_id)
+    item = days.get((trip_id, date)) if days else None
+    if item is None:
+        item = plain.get(trip_id)
+    return item if item is None or not item.start_date or item.start_date == date else None
 
 
 def _keep(plain: dict[str, Any], days: dict[tuple[str, str], Any], item: TripUpdate | Vehicle) -> None:
@@ -1063,10 +1073,6 @@ def _has_stop(tu: TripUpdate | None, stops: list[str]) -> bool:
     return any(_stop_hit(u.stop_id, s) for u in tu.stops for s in stops)
 
 
-def _date_ok(start_date: str, wanted: str) -> bool:
-    return not wanted or not start_date or start_date == wanted
-
-
 def _pick(cands: list[tuple[str, TripUpdate | None, Vehicle | None]], stops: list[str], strict: bool = False):
     """The one candidate, or the one of several calling at the card's
     stops. strict: a trip not among cands may be the card's (the planner
@@ -1089,8 +1095,7 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], now: float, strict:
             for tid in dict.fromkeys((raw, _strip(raw, src.prefix))):
                 t = tu.trip_update(tid, wanted_date) if tu else None
                 v = vp.vehicle(tid, wanted_date) if vp else None
-                start = (t.start_date if t else "") or (v.start_date if v else "")
-                if (t or v) and _date_ok(start, wanted_date):
+                if t or v:
                     return tid, t, v
     if "route_start" in cfg.match and req.get("route") and req.get("start") is not None:
         route = req["route"]
@@ -1103,8 +1108,7 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], now: float, strict:
                 v = vp.vehicle(tid, wanted_date) if vp else None
                 rid = (v.route_id if v else "") or (t.route_id if t else "")
                 sm = _start_minutes(tid)
-                sd = (t.start_date if t else "") or (v.start_date if v else "")
-                if rid == route and sm is not None and sm % 1440 == start and _date_ok(sd, wanted_date):
+                if rid == route and sm is not None and sm % 1440 == start:
                     cands.append((tid, t, v))
         hit = _pick(sorted(cands, key=lambda c: c[0]), stops, strict)
         if hit:
@@ -1115,17 +1119,18 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], now: float, strict:
         # still on its way, never another day's of the same trip id.
         day = datetime.fromtimestamp(now, mavplusz.BUDAPEST).date()
         today, yesterday = day.strftime("%Y%m%d"), (day - timedelta(days=1)).strftime("%Y%m%d")
+        days = (wanted_date,) if wanted_date else (today, yesterday)
         cands = []
         for _src, tu, vp, trains in loaded:
             for tid in (trains or {}).get(number, ()):
-                t = tu.trip_update(tid, wanted_date or today) if tu else None
-                v = vp.vehicle(tid, wanted_date or today) if vp else None
-                sd = (t.start_date if t else "") or (v.start_date if v else "")
-                if (
-                    (t or v) and _date_ok(sd, wanted_date)
-                    and (wanted_date or not sd or sd in (today, yesterday))
-                ):
-                    cands.append((tid, t, v))
+                # One day's run from both feeds: today's update and last
+                # night's vehicle are two trains.
+                for d in days:
+                    t = tu.trip_update(tid, d) if tu else None
+                    v = vp.vehicle(tid, d) if vp else None
+                    if t or v:
+                        cands.append((tid, t, v))
+                        break
         hit = _pick(sorted(cands, key=lambda c: c[0]), stops)
         if hit:
             return hit
