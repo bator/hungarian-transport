@@ -716,3 +716,13 @@ async def test_the_proxy_decodes_in_home_assistants_executor(hass, aioclient_moc
     await _setup(hass)
     assert made["executor"] == hass.async_add_executor_job
 
+
+@pytest.mark.parametrize("size", [100_000, 600_000])
+async def test_an_answer_nested_too_deep_is_an_outage_not_a_failed_call(hass, aioclient_mock, size) -> None:
+    """json.loads raises RecursionError, not ValueError, on an answer nested
+    deeper than it goes: the service call failed with that instead of the
+    card's "unavailable" answer. On the event loop and in the executor alike."""
+    assert (size >= futar.FUTAR_EXECUTOR_BYTES) == (size == 600_000)
+    aioclient_mock.get(SEARCH, text="[" * size)
+    await _setup(hass)
+    assert await _call(hass) == {"data": None, "error": "futar_unavailable", "detail": "RecursionError"}

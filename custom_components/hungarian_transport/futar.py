@@ -214,7 +214,9 @@ async def futar_get(
             data = json.loads(body)
         else:
             data = await _in_executor(executor, _decode, body)
-    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+    # RecursionError: an answer nested deeper than the decoder goes (a broken
+    # or hostile one), which is no answer either, not a failed service call.
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, RecursionError) as err:
         raise FutarError(type(err).__name__) from None
     if not isinstance(data, dict):
         raise FutarError("unexpected response")
