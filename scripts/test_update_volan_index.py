@@ -1647,12 +1647,37 @@ for raw, want in [
     ("x-api-key: S7", "x-api-key: …"),
     ('{"access_token": "S8"}', '{"access_token": "…"}'),
     ("monkey=fine, what? ok", "monkey=fine, what? ok"),
+    # A name of many segments keeps them all; only the value goes.
+    ("my_very_long_custom_api_key=S13", "my_very_long_custom_api_key=…"),
+    ("a_b_c_d_e_f_g_token: S14", "a_b_c_d_e_f_g_token: …"),
+    ("X-Client-Secret: S15, next", "X-Client-Secret: …, next"),
+    ("PASSWORD=S16", "PASSWORD=…"),
+    ("db-passwd='S17'", "db-passwd='…'"),
+    ("url_sig=S18;x", "url_sig=…;x"),
+    ("user_credentials=S19 ok", "user_credentials=… ok"),
+    ("monkey_keys=fine xapikey=fine", "monkey_keys=fine xapikey=fine"),
+    ("tokenizer=fine, key-value: fine", "tokenizer=fine, key-value: fine"),
+    # A URL right after a word character, or after a long run of scheme
+    # characters, still loses its query and credentials.
+    ("cache_https://u:pw@h.example/f.zip?k=S20", "cache_https://…@h.example/f.zip?…"),
+    ("x" * 40 + "https://h.example/f.zip?k=S21", "x" * 40 + "https://h.example/f.zip?…"),
 ]:
     check(f"redact({raw!r})", uvi.redact(raw) == want, repr(uvi.redact(raw)))
-_t0 = time.monotonic()
 _long = uvi.redact("a." * 8000 + " apikey=S9")
-check("redact() of a long text is quick and capped at REDACT_MAX",
-      time.monotonic() - _t0 < 0.5 and len(_long) <= uvi.REDACT_MAX + 2, repr((time.monotonic() - _t0, len(_long))))
+check("redact() of a long text is capped at REDACT_MAX", len(_long) <= uvi.REDACT_MAX + 2, repr(len(_long)))
+# Runs of name separators once made the secret-name pattern backtrack over
+# every segment from every start (0.4 to 1.3 s for "a_" * 2048), and runs of
+# scheme characters the URL patterns (0.1 s for "a." * 2048). Linear now:
+# about a millisecond; the limit leaves a slow runner a hundred times that,
+# and the best of three runs ignores a pause of the machine.
+for _label, _text in (("a_", "a_" * 8000), ("a-", "a-" * 8000), ("a.", "a." * 8000), ("a+", "a+" * 8000),
+                      ("key words", "key " * 2000), ("names ending in a secret word", "x_token_" * 1000)):
+    _best = float("inf")
+    for _ in range(3):
+        _t0 = time.perf_counter()
+        uvi.redact(_text + " apikey=S9")
+        _best = min(_best, time.perf_counter() - _t0)
+    check(f"redact() of a long text of {_label} runs is quick", _best < 0.1, f"{_best:.3f} s")
 check("a secret at the start of a long text is still redacted", "S10" not in uvi.redact("apikey=S10 " + "x" * 9000))
 
 # O-3: the traceback of a broken sibling goes through the same redaction.
