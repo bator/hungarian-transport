@@ -58,6 +58,32 @@ SKIP_SERVICES = {
 }
 
 
+# hass.data[DOMAIN][REAUTH_CHECKING]: the reauth flows whose step is
+# checking a typed key with FUTÁR (flow id: whether the stored key was
+# found working meanwhile). Such a flow cannot be aborted under its step:
+# the step's answer would raise UnknownFlow, after a new key was saved too.
+REAUTH_CHECKING = "reauth_checking"
+
+
+def _reauth_checking(hass: HomeAssistant) -> dict[str, bool]:
+    return hass.data.setdefault(DOMAIN, {}).setdefault(REAUTH_CHECKING, {})
+
+
+@callback
+def async_end_reauth(hass: HomeAssistant, entry_id: str) -> None:
+    """End the entry's reauth flows: the stored key works, or the options
+    flow has just answered them. A flow checking a typed key is told to,
+    and ends itself when its check is done."""
+    checking = _reauth_checking(hass)
+    for flow in hass.config_entries.flow.async_progress_by_handler(
+        DOMAIN, match_context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry_id}
+    ):
+        if flow["flow_id"] in checking:
+            checking[flow["flow_id"]] = True
+        else:
+            hass.config_entries.flow.async_abort(flow["flow_id"])
+
+
 async def _validate_key(hass: HomeAssistant, api_key: str) -> str | None:
     """Return an error key, or None when FUTÁR accepts the key."""
     try:
@@ -219,7 +245,19 @@ class HungarianTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
         if user_input is not None:
             api_key = (user_input.get(CONF_API_KEY) or "").strip()
-            if api_key and (error := await _validate_key(self.hass, api_key)):
+            error = None
+            if api_key:
+                checking = _reauth_checking(self.hass)
+                checking[self.flow_id] = False
+                try:
+                    error = await _validate_key(self.hass, api_key)
+                finally:
+                    ended = checking.pop(self.flow_id, False)
+                if error and ended:
+                    # The stored key works again (async_end_reauth): it
+                    # stays, and the reauth has nothing left to ask.
+                    return self.async_abort(reason="key_accepted_again")
+            if error:
                 errors["base"] = error
             else:
                 # The entry's update listener reloads it once; reloading here
@@ -305,10 +343,7 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
                 if entry is not None and (user_input.get(CONF_REMOVE_KEY) or (api_key and api_key == typed)):
                     # A checked or removed key answers a pending reauth:
                     # its notification would stay until dismissed.
-                    for flow in self.hass.config_entries.flow.async_progress_by_handler(
-                        DOMAIN, match_context={"source": config_entries.SOURCE_REAUTH, "entry_id": entry.entry_id}
-                    ):
-                        self.hass.config_entries.flow.async_abort(flow["flow_id"])
+                    async_end_reauth(self.hass, entry.entry_id)
                 return self.async_create_entry(data=new)
         return self.async_show_form(
             step_id="init",

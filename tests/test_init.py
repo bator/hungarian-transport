@@ -52,6 +52,32 @@ async def _setup(hass: HomeAssistant) -> MockConfigEntry:
     return entry
 
 
+async def test_setup_wires_the_idle_drop_timer_and_the_executor(hass: HomeAssistant, monkeypatch) -> None:
+    """The realtime hub drops idle feeds on HA's timer (closed when HA
+    stops), and ELVIRA's boards are decoded and settled in the executor."""
+    made: dict[str, dict] = {}
+    real_hub, real_boards = integration.realtime.RealtimeHub, integration.ElviraBoards
+
+    def hub(*args, **kwargs):
+        made["hub"] = kwargs
+        made["hub_obj"] = real_hub(*args, **kwargs)
+        return made["hub_obj"]
+
+    def boards(fetch, **kwargs):
+        made["boards"] = {**kwargs, "fetch": fetch}
+        return real_boards(fetch, **kwargs)
+
+    monkeypatch.setattr(integration.realtime, "RealtimeHub", hub)
+    monkeypatch.setattr(integration, "ElviraBoards", boards)
+    await _setup(hass)
+    assert made["hub"].get("call_later") is not None
+    assert made["boards"].get("executor") is not None
+    assert made["boards"]["fetch"].keywords.get("executor") is not None
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert made["hub_obj"]._closed
+
+
 def _card_urls(hass: HomeAssistant) -> set[str]:
     return set(hass.data[DATA_EXTRA_MODULE_URL].urls)
 
@@ -165,6 +191,111 @@ async def test_removal_dismisses_the_integrations_notifications(hass, monkeypatc
         notify.NOTIFICATION_DAILY_FAILED,
         mav.NOTIFICATION_ID,
     ])
+
+
+async def test_removal_takes_the_mav_build_issue_along(hass) -> None:
+    """A failed MÁV build's Repairs issue ends with the next build; once the
+    integration is removed none comes, so the removal ends it."""
+    entry = await _setup(hass)
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        mav.ISSUE_BUILD_FAILED,
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key=mav.ISSUE_BUILD_FAILED,
+    )
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+
+def _dashboards(hass: HomeAssistant) -> dict:
+    data = hass.data["lovelace"]
+    return data["dashboards"] if isinstance(data, dict) else data.dashboards
+
+
+def _card_key_issue(hass: HomeAssistant):
+    return ir.async_get(hass).async_get_issue(DOMAIN, integration.lovelace_resource.ISSUE_CARD_API_KEY)
+
+
+def _view(*cards) -> dict:
+    return {"views": [{"type": "sections", "sections": [{"type": "grid", "cards": list(cards)}]}]}
+
+
+async def test_card_level_key_on_a_dashboard_is_a_repairs_issue(hass) -> None:
+    """Any logged-in user can read a card's own key from lovelace/config:
+    a Repairs issue names the dashboards holding one, follows their saves,
+    and goes with the last such card or with the integration."""
+    from homeassistant.components.lovelace.dashboard import LovelaceStorage
+
+    assert await async_setup_component(hass, "lovelace", {})
+    default = _dashboards(hass)[None]
+    hub = LovelaceStorage(hass, {"id": "hub", "url_path": "dashboard-hub", "mode": "storage"})
+    _dashboards(hass)["dashboard-hub"] = hub
+    await default.async_save(_view({"type": "custom:hungarian-transport-card", "apiKey": "card-key"}))
+    # Someone else's card with an apiKey is not ours to report.
+    await hub.async_save(_view({"type": "custom:other-card", "apiKey": "theirs"}))
+    entry = await _setup(hass)
+    issue = _card_key_issue(hass)
+    assert issue is not None
+    assert issue.translation_placeholders == {"dashboards": "lovelace"}
+    assert issue.severity is ir.IssueSeverity.WARNING
+
+    # Nested in a stack, under its alias: found once the dashboard is saved.
+    stack = {"type": "vertical-stack", "cards": [{"type": "custom:bkk-stop-card-plan", "apiKey": "k"}]}
+    await hub.async_save(_view(stack))
+    await hass.async_block_till_done()
+    assert _card_key_issue(hass).translation_placeholders == {"dashboards": "dashboard-hub, lovelace"}
+
+    await default.async_save(_view({"type": "custom:hungarian-transport-card", "apiKey": "  "}))
+    await hub.async_save(_view({"type": "custom:bkk-stop-card-plan"}))
+    await hass.async_block_till_done()
+    assert _card_key_issue(hass) is None
+
+    await default.async_save(_view({"type": "custom:hungarian-transport-card", "apiKey": "card-key"}))
+    await hass.async_block_till_done()
+    assert _card_key_issue(hass) is not None
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert _card_key_issue(hass) is None
+
+
+async def test_card_key_check_skips_what_it_cannot_read(hass, monkeypatch) -> None:
+    """Lovelace's dashboards are its internals: a dashboard that cannot be
+    read is skipped, and a check that fails as a whole changes nothing."""
+    lovelace = integration.lovelace_resource
+    assert await async_setup_component(hass, "lovelace", {})
+
+    async def unreadable(_force):
+        raise RuntimeError("changed internals")
+
+    default = _dashboards(hass)[None]
+    await default.async_save(_view({"type": "custom:hungarian-transport-card", "apiKey": "card-key"}))
+    monkeypatch.setattr(default, "async_load", unreadable)
+    await _setup(hass)
+    assert _card_key_issue(hass) is None
+
+    ir.async_create_issue(
+        hass, DOMAIN, lovelace.ISSUE_CARD_API_KEY, is_fixable=False,
+        severity=ir.IssueSeverity.WARNING, translation_key=lovelace.ISSUE_CARD_API_KEY,
+    )
+
+    async def broken(_hass):
+        raise AttributeError("no dashboards")
+
+    monkeypatch.setattr(lovelace, "async_dashboards_with_card_key", broken)
+    await lovelace.async_check_card_keys(hass)
+    assert _card_key_issue(hass) is not None
+
+
+def test_card_api_key_is_found_only_on_our_cards() -> None:
+    found = integration.lovelace_resource.has_card_api_key
+    assert found({"type": "hungarian-transit-stop-card-plan", "apiKey": "k"})
+    assert found([{"type": "conditional", "card": {"type": "custom:bkk-stop-card-r3", "apiKey": "k"}}])
+    assert not found({"type": "custom:hungarian-transport-card", "apiKey": ""})
+    assert not found({"type": "custom:hungarian-transport-card", "apiKey": 5})
+    assert not found({"type": "custom:other", "apiKey": "k", "cards": [{"type": "custom:hungarian-transport-card"}]})
 
 
 async def test_yaml_mode_resources_are_left_alone(hass) -> None:

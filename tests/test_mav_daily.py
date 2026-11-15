@@ -691,6 +691,31 @@ def test_the_urls_are_fixed_https_on_github_pages() -> None:
         assert url.startswith("https://bator.github.io/hungarian-transport/")
 
 
+@pytest.mark.parametrize("which", ["manifest", "index"])
+async def test_a_redirect_says_it_is_not_followed(
+    hass: HomeAssistant, aioclient_mock, card_assets, caplog, which
+) -> None:
+    """A custom Pages domain redirects every github.io URL: the round fails
+    with a warning naming the redirect, not a bare "HTTP 301"."""
+    out = card_assets / mav.INDEX_NAME
+    out.write_bytes(_index(OLD))
+    raw = _index(NEW)
+    moved = "https://transit.example.org/hungarian-transport/mav-index.json"
+    if which == "manifest":
+        aioclient_mock.get(mav_daily.MANIFEST_URL, status=301, headers={"Location": moved})
+    else:
+        aioclient_mock.get(mav_daily.MANIFEST_URL, json=_manifest(raw))
+        aioclient_mock.get(mav_daily.INDEX_URL, status=302, headers={"Location": moved + ".gz"})
+
+    done = await mav_daily.async_update(hass, card_assets)
+    assert done.result == mav_daily.FAILED
+    assert f"redirected to '{moved}" in done.error and "custom GitHub Pages domain" in done.error
+    assert [w for w in _warnings(caplog) if "redirects are not followed" in w and moved in w]
+    assert out.read_bytes() == _index(OLD)
+    # Nothing was fetched from where it pointed.
+    assert all(str(c[1]).startswith(mav_daily.PAGES_BASE + "/") for c in aioclient_mock.mock_calls)
+
+
 def test_the_manifest_format_matches_the_site_script() -> None:
     """mav_daily reads the manifest scripts/mav_pages_site.py writes."""
     script = Path(__file__).resolve().parent.parent / "scripts" / "mav_pages_site.py"
@@ -789,32 +814,78 @@ async def test_a_mixed_deploy_is_retried_and_asks_for_the_manifest_s_index(
     assert out.read_bytes() == new_gen
 
 
-async def test_a_late_manifest_is_looked_at_once_more(
+async def test_a_manifest_of_yesterday_is_looked_at_again_until_the_day_s_feed(
     hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, max_jitter
 ) -> None:
-    """At 06:00 the manifest is yesterday's (the workflow ran late): one more
-    round LATE_DELAY later picks up today's."""
+    """At 06:00 Pages still has yesterday's feed, built yesterday around
+    midday (the workflow builds the day's feed around midday, not before
+    06:00): looks LATE_DELAY apart pick up today's the same day, then stop."""
     await budapest
     out = card_assets / mav.INDEX_NAME
     yesterday = _index("20261031.M2ChangeID", fitted=True)
     out.write_bytes(yesterday)
     _serve(aioclient_mock, yesterday, _manifest(yesterday, feed="20261031.M2ChangeID",
-                                                built_at="2026-10-31T03:50:00Z"))
+                                                built_at="2026-10-31T11:50:00Z"))
     await _setup(hass, {})
     await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
+    # No late look after the first round: it would come after the daily round.
+    await _at(hass, freezer, "2026-11-01 05:59:59+01:00")
+    assert aioclient_mock.call_count == 1
     await _at(hass, freezer, "2026-11-01 06:00:00+01:00")
     await _at(hass, freezer, "2026-11-01 06:05:01+01:00")
     assert aioclient_mock.call_count == 2
+    await _at(hass, freezer, "2026-11-01 09:05:00+01:00")
+    assert aioclient_mock.call_count == 2
+    await _at(hass, freezer, "2026-11-01 09:05:02+01:00")
+    assert aioclient_mock.call_count == 3
+    assert out.read_bytes() == yesterday
+    # The day's build is out by the next look.
     aioclient_mock.clear_requests()
     raw = _index(NEW)
-    _serve(aioclient_mock, raw, _manifest(raw, built_at="2026-11-01T06:30:00Z"))
-    await _at(hass, freezer, "2026-11-01 08:05:00+01:00")
-    assert aioclient_mock.call_count == 0
-    await _at(hass, freezer, "2026-11-01 08:05:02+01:00")
+    _serve(aioclient_mock, raw, _manifest(raw, built_at="2026-11-01T10:52:00Z"))
+    await _at(hass, freezer, "2026-11-01 12:05:03+01:00")
     assert out.read_bytes() == raw
-    # Once a day only.
-    await _at(hass, freezer, "2026-11-01 12:00:00+01:00")
     assert aioclient_mock.call_count == 2
+    # Today's feed: no more looks until the next daily round.
+    await _at(hass, freezer, "2026-11-01 15:05:04+01:00")
+    await _at(hass, freezer, "2026-11-01 23:59:00+01:00")
+    assert aioclient_mock.call_count == 2
+
+
+async def test_late_looks_are_bounded_and_end_at_midnight(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, max_jitter
+) -> None:
+    """A day MÁV publishes nothing: LATE_LIMIT looks after the daily round,
+    none on the next day; a daily time late in the evening gets none."""
+    await budapest
+    yesterday = _index("20261031.M2ChangeID", fitted=True)
+    (card_assets / mav.INDEX_NAME).write_bytes(yesterday)
+    man = _manifest(yesterday, feed="20261031.M2ChangeID", built_at="2026-11-01T02:00:00Z")
+    _serve(aioclient_mock, yesterday, man)
+    entry = await _setup(hass, {})
+    await _at(hass, freezer, "2026-11-01 06:00:00+01:00")
+    await _at(hass, freezer, "2026-11-01 06:05:01+01:00")
+    # (clear_requests drops the answers too.)
+    aioclient_mock.clear_requests()
+    _serve(aioclient_mock, yesterday, man)
+    moment = dt_util.parse_datetime("2026-11-01 06:05:01+01:00")
+    while moment < dt_util.parse_datetime("2026-11-02 05:59:00+01:00"):
+        moment += timedelta(minutes=30)
+        await _at(hass, freezer, moment.isoformat())
+    assert aioclient_mock.call_count == mav_daily.LATE_LIMIT
+    # Every look is the manifest alone: the index is not downloaded again.
+    assert {str(c[1]) for c in aioclient_mock.mock_calls} == {mav_daily.MANIFEST_URL}
+
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_DAILY_TIME: "22:00:00"})
+    await hass.async_block_till_done(wait_background_tasks=True)
+    await _at(hass, freezer, "2026-11-02 06:30:00+01:00")  # the reload's own first round, and its looks
+    for when in ("2026-11-02 18:59:00+01:00", "2026-11-02 22:00:00+01:00", "2026-11-02 22:05:01+01:00"):
+        await _at(hass, freezer, when)
+    aioclient_mock.clear_requests()
+    _serve(aioclient_mock, yesterday, man)
+    for when in ("2026-11-03 00:30:00+01:00", "2026-11-03 01:05:02+01:00", "2026-11-03 05:00:00+01:00"):
+        await _at(hass, freezer, when)
+    assert aioclient_mock.call_count == 0
 
 
 async def test_startup_keeps_an_index_of_the_same_feed_when_the_zip_is_copied_again(

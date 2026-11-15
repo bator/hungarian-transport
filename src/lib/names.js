@@ -103,7 +103,11 @@ register({
     };
   },
   fold(s) {
-    return BkkLib.norm(s)
+    return BkkLib.foldNormed(BkkLib.norm(s));
+  },
+  /* fold() of a name already through norm(): an index build has both. */
+  foldNormed(normed) {
+    return String(normed || '')
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-z0-9]+/g, ' ')

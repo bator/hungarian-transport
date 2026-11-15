@@ -124,7 +124,11 @@ register({
     };
   },
   fold(s) {
-    return BkkLib.norm(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+    return BkkLib.foldNormed(BkkLib.norm(s));
+  },
+  /* fold() of a name already through norm(): an index build has both. */
+  foldNormed(normed) {
+    return String(normed || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
   },
   foldTokens(s) {
     const stop = /^(a|az|es|palyaudvar|vasutallomas|allomas|pu|megallo|ter|utca|ut|varos|budapest)$/;
@@ -1607,6 +1611,8 @@ Object.defineProperty(BkkLib, "_gateCards", {
 });
 
 // src/lib/transitous.js
+var MOTIS_BOARD_WALK_M = 250;
+var MOTIS_BOARD_WALK_S = 180;
 register({
   /* FUTÁR plan-trip times are epoch milliseconds. Values below 1e11 are seconds. */
   epochMs(value) {
@@ -1987,6 +1993,18 @@ register({
       agencyId: id
     }, mode || "all");
   },
+  /* A walk to the boarding stop that still counts as boarding here: the
+     platforms of one stop lie within this distance (MOTIS gives the
+     walk's metres), or, without a distance, this many seconds' walk. */
+  motisShortWalk(leg) {
+    const meters = Number(leg && leg.distance);
+    if (Number.isFinite(meters) && meters > 0) return meters <= MOTIS_BOARD_WALK_M;
+    const sec = Number(leg && leg.duration);
+    if (Number.isFinite(sec) && sec > 0) return sec <= MOTIS_BOARD_WALK_S;
+    const startMs = BkkLib.isoMs(leg && leg.startTime);
+    const endMs = BkkLib.isoMs(leg && leg.endTime);
+    return !(startMs && endMs && endMs - startMs > MOTIS_BOARD_WALK_S * 1e3);
+  },
   rowsFromMotis(payload, dest, mode, horizon, parseOpts) {
     const its = payload && payload.itineraries || [];
     parseOpts = parseOpts || {};
@@ -1997,9 +2015,12 @@ register({
     const out = [];
     its.forEach((it) => {
       if (Number(it.transfers || 0) > 0) return;
-      const ride = (it.legs || []).filter((leg2) => String(leg2.mode || "").toUpperCase() !== "WALK");
+      const legs = it.legs || [];
+      const ride = legs.filter((leg2) => String(leg2.mode || "").toUpperCase() !== "WALK");
       if (ride.length !== 1) return;
       const leg = ride[0];
+      const walks = legs.slice(0, legs.indexOf(leg));
+      if (walks.some((walk) => !BkkLib.motisShortWalk(walk))) return;
       if (!BkkLib.motisMatchesMode(leg, mode || "all")) return;
       const startMs = BkkLib.isoMs(leg.startTime || it.startTime);
       const dep = startMs ? Math.round(startMs / 1e3) : 0;
@@ -2383,17 +2404,28 @@ register({
      minutes, instead of a plan on every poll. A fill that failed returns
      null, so the caller keeps what it showed instead of "no departures",
      and the pair is not asked again for a minute and a half, twice as
-     long after each further failure up to the ten minutes: an outage of
-     the volunteer-run Transitous is no reason for two requests on every
-     poll of every empty card. */
+     long after each further failed round up to the ten minutes: an outage
+     of the volunteer-run Transitous is no reason for two requests on every
+     poll of every empty card. Failures within one round (several cards,
+     or a card and its preview, failing at once) count once, as the
+     realtime feeds' do. A fill that found departures is kept for two
+     minutes, and cards asking for the same pair at once share one plan:
+     every poll of every card on the empty board used to send its own. */
   _transitousEmptyAt: /* @__PURE__ */ new Map(),
   _transitousEmptyRetryMs: 10 * 60 * 1e3,
   _transitousFailed: /* @__PURE__ */ new Map(),
   _transitousFailRetryMs: 90 * 1e3,
+  _transitousFailRoundMs: 15 * 1e3,
+  _transitousFilled: /* @__PURE__ */ new Map(),
+  _transitousFilledMs: 2 * 60 * 1e3,
+  _transitousFilledMax: 50,
+  _transitousFillInflight: /* @__PURE__ */ new Map(),
   _transitousFillFailed(key) {
+    const now = Date.now();
     const last = BkkLib._transitousFailed.get(key);
+    if (last && now - last.at < BkkLib._transitousFailRoundMs) return null;
     const wait = last ? Math.min(last.wait * 2, BkkLib._transitousEmptyRetryMs) : BkkLib._transitousFailRetryMs;
-    BkkLib._transitousFailed.set(key, { at: Date.now(), wait });
+    BkkLib._transitousFailed.set(key, { at: now, wait });
     return null;
   },
   _transitousFillKey(origin, dest, opts) {
@@ -2409,32 +2441,69 @@ register({
       clampMinutesAfter(opts && opts.minutesAfter)
     ].join("|");
   },
+  /* One plan for the pair: its rows ([] for none), or null when it
+     failed. It never rejects, so every caller sharing it reads one
+     answer. */
+  async _transitousFillPlan(key, origin, dest, opts) {
+    const empties = BkkLib._transitousEmptyAt;
+    const filled = BkkLib._transitousFilled;
+    let extra;
+    try {
+      extra = await BkkLib.transitousDepartures(origin, dest, opts);
+    } catch (_e) {
+      extra = null;
+    }
+    if (!Array.isArray(extra)) return BkkLib._transitousFillFailed(key);
+    BkkLib._transitousFailed.delete(key);
+    filled.delete(key);
+    if (extra.length) {
+      empties.delete(key);
+      filled.set(key, { at: Date.now(), rows: extra });
+      while (filled.size > BkkLib._transitousFilledMax) filled.delete(filled.keys().next().value);
+    } else {
+      empties.set(key, Date.now());
+    }
+    return extra;
+  },
   async fillTransitousIfEmpty(rows, origin, dest, opts) {
     const list = Array.isArray(rows) ? rows : [];
     if (list.length) return list;
     const key = BkkLib._transitousFillKey(origin, dest, opts);
     const empties = BkkLib._transitousEmptyAt;
     const failed = BkkLib._transitousFailed;
+    const filled = BkkLib._transitousFilled;
     const now = Date.now();
+    const limit = maxDepartureRows(opts && opts.minutesAfter);
+    const own = (extra2) => BkkLib.mergeRows(list, extra2.map((row) => Object.assign({}, row)), limit);
     if (now - (empties.get(key) || 0) < BkkLib._transitousEmptyRetryMs) return list;
     const lastFail = failed.get(key);
     if (lastFail && now - lastFail.at < lastFail.wait) return null;
+    const hit = filled.get(key);
+    if (hit && now - hit.at < BkkLib._transitousFilledMs) {
+      const nowSec = Math.floor(now / 1e3);
+      const due = hit.rows.filter((row) => row && departureStillDue(row.dep, nowSec));
+      if (due.length) return own(due);
+    }
     empties.forEach((ts, k) => {
       if (now - ts >= BkkLib._transitousEmptyRetryMs) empties.delete(k);
+    });
+    filled.forEach((f, k) => {
+      if (now - f.at >= BkkLib._transitousFilledMs) filled.delete(k);
     });
     failed.forEach((f, k) => {
       if (now - f.at >= f.wait + BkkLib._transitousEmptyRetryMs) failed.delete(k);
     });
-    try {
-      const extra = await BkkLib.transitousDepartures(origin, dest, opts);
-      if (!Array.isArray(extra)) return BkkLib._transitousFillFailed(key);
-      failed.delete(key);
-      if (extra.length) empties.delete(key);
-      else empties.set(key, Date.now());
-      return BkkLib.mergeRows(list, extra, maxDepartureRows(opts && opts.minutesAfter));
-    } catch (_e) {
-      return BkkLib._transitousFillFailed(key);
+    const inflight = BkkLib._transitousFillInflight;
+    let plan = inflight.get(key);
+    if (!plan) {
+      plan = BkkLib._transitousFillPlan(key, origin, dest, opts);
+      inflight.set(key, plan);
+      plan.then(() => {
+        if (inflight.get(key) === plan) inflight.delete(key);
+      });
     }
+    const extra = await plan;
+    return Array.isArray(extra) ? own(extra) : null;
   },
   /* MOTIS v5: itinerary duration is seconds; leg duration is seconds;
      startTime/endTime are ISO-8601. */
@@ -4319,6 +4388,40 @@ register({
 
 // src/lib/gtfs.js
 var DEST_NEAR_M = 1500;
+function indexWorkerMain(scope) {
+  scope.onmessage = async (ev) => {
+    const { bytes, slice } = ev.data || {};
+    try {
+      let text;
+      if (bytes.length >= 2 && bytes[0] === 31 && bytes[1] === 139) {
+        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"));
+        text = await new Response(stream).text();
+      } else {
+        text = new TextDecoder().decode(bytes);
+      }
+      const idx = JSON.parse(text);
+      if (!idx || typeof idx !== "object" || Array.isArray(idx)) throw new Error("not an index");
+      const head = {};
+      const long = {};
+      Object.keys(idx).forEach((k) => {
+        const v = idx[k];
+        if (Array.isArray(v) && v.length > slice) {
+          long[k] = v.length;
+          head[k] = null;
+        } else {
+          head[k] = v;
+        }
+      });
+      scope.postMessage({ head, long });
+      Object.keys(long).forEach((k) => {
+        for (let i = 0; i < idx[k].length; i += slice) scope.postMessage({ key: k, rows: idx[k].slice(i, i + slice) });
+      });
+      scope.postMessage({ done: true });
+    } catch (err) {
+      scope.postMessage({ failed: String(err && err.message || err) });
+    }
+  };
+}
 register({
   /* Cached per resolved URL, so two cards pointing at different index files do
      not serve each other's data. The URL carries a daily cache-buster, which
@@ -4563,50 +4666,163 @@ register({
       throw codedError("errIndexFetch");
     }
     if (!got.bytes) throw codedError(httpKey, got.status);
-    let text;
-    try {
-      text = await BkkLib._indexText(got.bytes);
-    } catch (_e) {
-      throw codedError("errIndexParse");
-    }
-    if (text == null) throw codedError(gunzipKey);
-    let idx;
-    try {
-      idx = JSON.parse(text);
-    } catch (_e) {
-      throw codedError("errIndexParse");
+    let idx = await BkkLib._parseIndexInWorker(got.bytes);
+    if (idx == null) {
+      let text;
+      try {
+        text = await BkkLib._indexText(got.bytes);
+      } catch (_e) {
+        throw codedError("errIndexParse");
+      }
+      if (text == null) throw codedError(gunzipKey);
+      try {
+        idx = JSON.parse(text);
+      } catch (_e) {
+        throw codedError("errIndexParse");
+      }
     }
     if (!idx || typeof idx !== "object" || !Array.isArray(idx.s) || !Array.isArray(idx.t)) {
       throw codedError("errIndexParse");
     }
     if (idx.v && Number(idx.v) > INDEX_SCHEMA) throw codedError("errIndexSchema", idx.v);
     const g = Array.isArray(idx.g) && idx.g.length === 2 * idx.s.length ? idx.g : null;
-    idx.stops = (idx.s || []).map((row, i) => ({
-      i,
-      id: row[0],
-      name: row[1],
-      num: String(row[2] || ""),
-      op: row.length > 3 ? Number(row[3]) : 0,
-      key: BkkLib.norm(row[1]),
-      fold: BkkLib.fold(row[1]),
-      lat: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i] / 1e5 : null,
-      lon: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i + 1] / 1e5 : null
-    }));
-    idx.g = null;
-    idx.s = null;
     idx.url = BkkLib._absoluteUrl(url);
     idx.ops = (idx.o || []).map((row, i) => ({ i, id: row[0], name: row[1] }));
     idx.byNum = /* @__PURE__ */ new Map();
     idx.byKey = /* @__PURE__ */ new Map();
     idx.byId = /* @__PURE__ */ new Map();
-    idx.stops.forEach((st) => {
+    const rows = idx.s || [];
+    const stops = new Array(rows.length);
+    await BkkLib._sliced(rows.length, (i) => {
+      const row = rows[i];
+      const key = BkkLib.norm(row[1]);
+      const st = {
+        i,
+        id: row[0],
+        name: row[1],
+        num: String(row[2] || ""),
+        op: row.length > 3 ? Number(row[3]) : 0,
+        key,
+        /* fold() of the name, from its norm() already at hand. */
+        fold: BkkLib.foldNormed(key),
+        lat: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i] / 1e5 : null,
+        lon: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i + 1] / 1e5 : null
+      };
+      stops[i] = st;
       const nk = st.op + ":" + st.num;
       const kk = st.op + ":" + st.key;
       if (st.num && !idx.byNum.has(nk)) idx.byNum.set(nk, st);
       if (st.key && !idx.byKey.has(kk)) idx.byKey.set(kk, st);
       if (st.id && !idx.byId.has(st.id)) idx.byId.set(st.id, st);
     });
+    idx.stops = stops;
+    idx.g = null;
+    idx.s = null;
     return idx;
+  },
+  /* The index file's JSON, gunzipped and parsed in a Web Worker started
+     from a Blob URL (the bundle stays one file): the 11 MB indexes took
+     the page 60–130 ms in one task on a laptop, most of a second on a
+     wall tablet. The parsed index comes back in slices of its long
+     arrays, each message its own short task: one message with the whole
+     index would cost the page more to copy than the parse it saves.
+     null when there is no worker to ask (no Worker or Blob URLs, a
+     Content-Security-Policy that blocks them, a worker that does not
+     answer: no worker is started again on this page) or the worker could
+     not read the file; the caller then reads it on the page. */
+  _indexWorkerSlice: 1e3,
+  _indexWorkerTimeoutMs: 2e4,
+  _indexWorkerUrl: "",
+  _indexWorkerBroken: false,
+  _indexWorkerMain: indexWorkerMain,
+  _parseIndexInWorker(bytes) {
+    const can = !BkkLib._indexWorkerBroken && typeof Worker === "function" && typeof Blob === "function" && typeof URL !== "undefined" && typeof URL.createObjectURL === "function";
+    if (!can) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      let worker = null;
+      let idx = null;
+      let timer = null;
+      const finish = (out, broken) => {
+        if (timer) clearTimeout(timer);
+        timer = null;
+        if (broken) BkkLib._indexWorkerBroken = true;
+        if (worker) {
+          worker.onmessage = null;
+          worker.onerror = null;
+          try {
+            worker.terminate();
+          } catch (_e) {
+          }
+        }
+        resolve(out);
+      };
+      try {
+        if (!BkkLib._indexWorkerUrl) {
+          const code = "(" + BkkLib._indexWorkerMain.toString() + ")(self);";
+          BkkLib._indexWorkerUrl = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+        }
+        worker = new Worker(BkkLib._indexWorkerUrl);
+      } catch (_e) {
+        finish(null, true);
+        return;
+      }
+      timer = setTimeout(() => finish(null, true), BkkLib._indexWorkerTimeoutMs);
+      worker.onerror = () => finish(null, true);
+      worker.onmessage = (ev) => {
+        const msg = ev && ev.data || {};
+        if (msg.head) {
+          idx = msg.head;
+          Object.keys(msg.long || {}).forEach((k) => {
+            idx[k] = [];
+          });
+        } else if (msg.key) {
+          const into = idx && idx[msg.key];
+          const rows = msg.rows || [];
+          if (Array.isArray(into)) for (let i = 0; i < rows.length; i += 1) into.push(rows[i]);
+        } else {
+          finish(msg.done ? idx : null, false);
+        }
+      };
+      try {
+        worker.postMessage({ bytes, slice: BkkLib._indexWorkerSlice });
+      } catch (_e) {
+        finish(null, true);
+      }
+    });
+  },
+  /* Runs step(0) … step(n - 1), handing the event loop back whenever a
+     slice has run for _sliceMs, so a long build is no single long task
+     that freezes taps and animations. */
+  _sliceMs: 8,
+  async _sliced(n, step) {
+    const clock = typeof performance !== "undefined" && performance && typeof performance.now === "function" ? () => performance.now() : () => Date.now();
+    let start = clock();
+    for (let i = 0; i < n; i += 1) {
+      step(i);
+      if (i + 1 < n && clock() - start >= BkkLib._sliceMs) {
+        await BkkLib._nextTask();
+        start = clock();
+      }
+    }
+  },
+  /* A new task: scheduler.yield() where the browser has it, else a
+     message to the page itself, which a background tab does not
+     throttle to once a second as it does timers; a timer without
+     either. */
+  _nextTask() {
+    const sched = globalThis.scheduler;
+    if (sched && typeof sched.yield === "function") return sched.yield();
+    if (typeof MessageChannel === "function") {
+      return new Promise((resolve) => {
+        const ch = new MessageChannel();
+        ch.port1.onmessage = () => {
+          ch.port1.close();
+          resolve();
+        };
+        ch.port2.postMessage(0);
+      });
+    }
+    return new Promise((resolve) => setTimeout(resolve, 0));
   },
   _absoluteUrl(url) {
     const doc = typeof document !== "undefined" ? document : null;
@@ -7847,7 +8063,23 @@ register({
       /* FUTÁR and the GTFS indexes (departures.js). */
       timetables: (key, stopId, routeIds, dest, opts) => BkkLib.departures(ix, key, stopId, routeIds, dest, opts),
       elvira: (hass, originId, destId, minutesAfter, destName, opts) => BkkLib.elviraBoard(ix, hass, originId, destId, minutesAfter, destName, opts),
-      transitous: (rows, origin, dest, opts) => BkkLib.fillTransitousIfEmpty(rows, origin, dest, opts),
+      /* A city board's stop the config gives no coordinates for takes
+         them (and its town) from the city index, as the planner's do, and
+         one not in the index (a destination by name) the board's town: by
+         name alone a city board's "Kossuth tér" is any town's. Volán stop
+         names carry their town already. */
+      transitous: async (rows, origin, dest, opts) => {
+        if (Array.isArray(rows) && rows.length || BkkLib.mode(ctx.cfg()) !== "helyi") {
+          return BkkLib.fillTransitousIfEmpty(rows, origin, dest, opts);
+        }
+        let stops = await BkkLib.withGtfsCoords(ix, [origin, dest]);
+        const bare = (s) => !!s && !s.area && !BkkLib.finiteLatLon(s.lat, s.lon);
+        if (stops.some(bare)) {
+          const area = await BkkLib.stopArea(ix, ctx.cfg());
+          if (area) stops = stops.map((s) => bare(s) ? Object.assign({}, s, { area }) : s);
+        }
+        return BkkLib.fillTransitousIfEmpty(rows, stops[0], stops[1], opts);
+      },
       coachGps: (hass, rows) => BkkLib.attachCoachGps(hass, rows),
       realtime: (hass, rows, rtCtx) => BkkLib.attachRealtime(hass, rows, rtCtx),
       rideTime: (key, tripId, destKey, dep, origin, cache) => BkkLib.travelMin(key, tripId, destKey, dep, origin, cache),
@@ -8104,10 +8336,10 @@ var TRAIN_MISS_M = 3e3;
 var TRAIN_HIT_M = 1500;
 var SAME_SPOT_M = 30;
 var PUBLISHED_MIN_POINTS = 8;
-async function alightPoint(row, cfg, candidates, src) {
+async function alightPoint(row, cfg, own, src, transitous) {
   if (!cfg.destKey && !cfg.destName && !cfg.destStopId) return null;
   const asPt = (p) => Array.isArray(p) ? BkkLib.mapGpsLatLon(p[0], p[1]) : null;
-  const known = (candidates || []).map(asPt).find(Boolean) || BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon) || BkkLib.knownStopCoords({ id: cfg.destStopId, name: cfg.destName, key: cfg.destKey });
+  const known = (own || []).map(asPt).find(Boolean) || BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon) || asPt(transitous) || BkkLib.knownStopCoords({ id: cfg.destStopId, name: cfg.destName, key: cfg.destKey });
   if (known || !cfg.destName) return known || null;
   try {
     const ref = await src.stopRef({
@@ -8193,8 +8425,10 @@ async function rideGeometry(ride, src) {
           id: cfg.destStopId,
           name: cfg.destName,
           key: cfg.destKey,
-          lat: gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[0] : void 0,
-          lon: gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[1] : void 0,
+          /* The configured stop's coordinates, else the GTFS trip's own:
+             by name alone Transitous may plan to another town's stop. */
+          lat: cfg.destLat != null ? cfg.destLat : gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[0] : void 0,
+          lon: cfg.destLon != null ? cfg.destLon : gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[1] : void 0,
           area
         },
         { minutesAfter: cfg.minutesAfter, mode: "all" }
@@ -8280,7 +8514,7 @@ async function rideGeometry(ride, src) {
       }
     }
   }
-  const destPt = await alightPoint(row, cfg, [futarHop && futarHop.alight, motisMap && motisMap.dest], src);
+  const destPt = await alightPoint(row, cfg, [futarHop && futarHop.alight], src, motisMap && motisMap.dest);
   const clipped = BkkLib.clipRideShape(shape, board, destPt, row);
   if (clipped.length >= 2) shape = clipped;
   shape = BkkLib.validMapShape(shape);
@@ -8509,6 +8743,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._stopSearch.bump();
   }
   setConfig(config) {
+    const prev = this._config;
     this._config = normalizeCardConfig(config);
     BkkLib.warnCardApiKey(this._config);
     if (!this._cache) this._cache = {};
@@ -8524,6 +8759,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._syncApiKey();
     this._syncMode();
     this._probeKey();
+    if (prev && (String(prev.stopId || "") !== String(this._config.stopId || "") || this._destScope(prev) !== this._destScope())) this._dropDestLoad();
     const stopId = this._config.stopId;
     const loading = this._loadingDestsFor(stopId);
     const failed = this._failedStop === stopId && this._failedAccess === this._keyAccess() && Date.now() - (this._failedAt || 0) < DEST_RETRY_MS;
@@ -8547,8 +8783,9 @@ var BKKHopCardEditor = class extends HTMLElement {
     if (stopId && (this._loadedStop === stopId || retry) && this._destsStale(stopId) && !this._loadingDestsFor(stopId)) this._loadDests();
   }
   /* What a destination list depends on besides the stop. */
-  _destScope() {
-    return `${this._mode()}|${this._config.city || ""}`;
+  _destScope(cfg) {
+    const c = cfg || this._config;
+    return `${this._mode(c)}|${c.city || ""}`;
   }
   /* A load in flight for this stop in the current mode and city. */
   _loadingDestsFor(stopId) {
@@ -8565,6 +8802,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._dests = [];
     this._destRoutes = {};
     this._loadedStop = "";
+    this._failedStop = "";
   }
   _apiKey() {
     return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
@@ -8581,8 +8819,9 @@ var BKKHopCardEditor = class extends HTMLElement {
   _lang() {
     return resolveLang(this._config.language, this._hass);
   }
-  _mode() {
-    return BkkLib.mode(this._config);
+  /* The card's mode, or the one a given config would have. */
+  _mode(cfg) {
+    return BkkLib.mode(cfg || this._config);
   }
   /* Volán and city boards come from the GTFS indexes: no FUTÁR key, and
      none copied in from a sibling card (the card itself never asks). */
@@ -9258,7 +9497,7 @@ var BKKHopCardEditor = class extends HTMLElement {
       box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "destLoading")) + "</span>";
       return;
     }
-    if (!this._dests.length) {
+    if (!this._dests.length || this._loadedScope !== this._destScope()) {
       box.innerHTML = '<span class="hint">' + BkkLib.esc(copy.destNone) + "</span>";
       return;
     }
@@ -9578,10 +9817,15 @@ var BKKHopCard = class extends HTMLElement {
     this._accessArrived = false;
     this._reloadSafe();
   }
-  /* The integration's futar service or elvira_between just showed up. */
+  /* The integration's futar service or elvira_between just showed up.
+     Home Assistant keeps handing hass to a card it has taken out of the
+     page (a card hidden by a visibility condition stays in its hui-card
+     wrapper, detached), so access can show up while the card is away:
+     that is remembered for connectedCallback, which otherwise reloads the
+     planner only once its plan is stale. */
   _accessShowedUp() {
-    if (!this._painted || !this.isConnected) return;
-    if (this._reloadActive) {
+    if (!this._painted) return;
+    if (this._reloadActive || !this.isConnected) {
       this._accessArrived = true;
       return;
     }
@@ -9606,7 +9850,8 @@ var BKKHopCard = class extends HTMLElement {
     if (this._viaIntegration && !viaBefore) this._accessShowedUp();
     const elviraBefore = this._viaElvira;
     this._viaElvira = BkkLib.hasElvira(hass);
-    if (this._viaElvira && !elviraBefore && this._departMode() === "mav") this._accessShowedUp();
+    const mode = this._departMode();
+    if (this._viaElvira && !elviraBefore && (mode === "mav" || mode === "all")) this._accessShowedUp();
     if (first && this._rawRows && this._rawRows.length) {
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       const cfg = this._config || {};
@@ -9664,7 +9909,8 @@ var BKKHopCard = class extends HTMLElement {
     if (!this._painted) return;
     this._startTick();
     this._bindMapClicks();
-    if (!this._poll && !this._reloadActive && this._shouldReloadOnConnect()) this._reloadSafe();
+    if (this._poll || this._reloadActive) return;
+    if (this._accessArrived || this._shouldReloadOnConnect()) this._reloadSafe();
   }
   _pageHidden() {
     return typeof document !== "undefined" && document.visibilityState === "hidden";
@@ -12180,10 +12426,11 @@ ${this._stopPinCss()}
         this._pickTimer = null;
         const when = this._plan.when;
         if (!this._plan.timed) return;
-        const ms = this._whenFromParts(day.value, time.value);
+        const ymd = this._pickedDay(day.value);
+        const ms = this._whenFromParts(ymd, time.value);
         if (!ms) return;
         const cur = this._whenParts(when.at);
-        if (cur.ymd === day.value && String(cur.min) === time.value) return;
+        if (cur.ymd === ymd && String(cur.min) === time.value) return;
         this._applyWhen({ mode: when.mode, at: ms });
       }, PICK_DEBOUNCE_MS);
     };
@@ -12271,17 +12518,35 @@ ${this._stopPinCss()}
      Budapest midnight "ma" would be yesterday, and a time picked under it
      would plan yesterday. The tick paints them again for the new day; the
      planned time stays selected (as a dated day once it is no longer
-     today). Not while the user is picking: a pick waiting out its
-     debounce, or a picker with focus, would lose what was chosen. */
+     today). The title's line and the itinerary box say "ma" and "holnap"
+     too, so they are painted again with them.
+     A picker with focus is rolled as well: a native select keeps the focus
+     after a pick, so on a wall tablet it would keep yesterday's "ma" until
+     someone tapped elsewhere. With no pick waiting, the pickers hold the
+     plan's time, and painting them again keeps it. Only a pick still
+     waiting out its debounce is left alone; it reads its day against the
+     day the pickers were painted for (_pickedDay). */
   _rollWhenPickers() {
     if (!this._plan.timed || !this._whenPaintedFor) return;
     if (this._whenParts(Date.now()).ymd === this._whenPaintedFor) return;
+    this._paintHead();
+    this._paintJourney();
     const day = this._planEl("pday");
     const time = this._planEl("ptime");
     if (!day || !time || this._pickTimer) return;
-    const focused = this.shadowRoot && this.shadowRoot.activeElement;
-    if (focused === day || focused === time) return;
     this._paintWhenPickers();
+  }
+  /* The day a pick means. Picked before the tick rolled the pickers past
+     midnight, "ma" and "holnap" are read as the user read them, today and
+     tomorrow, not as the day they were painted on and the one after;
+     a dated day is that date. */
+  _pickedDay(ymd) {
+    const painted = this._whenPaintedFor;
+    const today = this._whenParts(Date.now()).ymd;
+    if (!painted || painted === today) return ymd;
+    if (ymd === painted) return today;
+    if (ymd === tzShiftYmd(painted, 1)) return tzShiftYmd(today, 1);
+    return ymd;
   }
   _syncWhen() {
     const lang = this._lang();

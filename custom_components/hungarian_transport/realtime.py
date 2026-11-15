@@ -37,6 +37,7 @@ import zlib
 import aiohttp
 
 from . import gtfs_feed, mavplusz, upstream
+from .cache import CallLater
 from .responses import RT_NO_FEED, RT_UNAVAILABLE, error_answer
 
 _LOGGER = logging.getLogger(__name__)
@@ -80,6 +81,11 @@ MAX_STRING = 256
 # turn into a stream of requests to a volunteer's server.
 FETCH_RATE = 0.5
 FETCH_BURST = 30
+# The same for mavplusz.hu's planner, in a bucket of its own: a user calling
+# the service with trips no card asks for must not use up the tokens every
+# card's feed refresh needs (nor a loop over feed ids the planner's).
+MAV_RATE = FETCH_RATE
+MAV_BURST = FETCH_BURST
 # Delays outside this range are a feed glitch (a vehicle logged on to the
 # wrong trip), not a prediction worth showing.
 MIN_DELAY = -20 * 60
@@ -95,6 +101,11 @@ MAX_STOPS = 120
 # A card's planner round (the route list and the trips, one request at a
 # time for every card): at most one request's timeout, waiting included.
 PLANNER_TIMEOUT = FETCH_TIMEOUT.total
+# A planner request is begun only with at least this share of the round
+# left: one begun late (the round spent waiting for other cards' requests)
+# would be cut before a healthy planner answers, and a cut request backs
+# off as an outage. Cut after this long, it did hang.
+PLANNER_MIN_SHARE = 0.5
 # The OutageLog key of mavplusz.hu (feed URLs are the others).
 MAVPLUSZ_OUTAGE = "mavplusz"
 # A route's trip list on mavplusz.hu (for route + start) is kept this long:
@@ -556,6 +567,11 @@ class RealtimeHub:
     entry outlives its interval (the validators and the last good copy),
     a failure is cached too (for its backoff), and a refused fetch serves
     the copy without starting a new interval.
+
+    `call_later` (cache.hass_call_later in Home Assistant) drops the idle
+    copies (_drop_idle) once no card asks any more: every call does too,
+    but none comes after the dashboards close. close() stops that timer
+    for good (cache.close_on_stop).
     """
 
     def __init__(
@@ -567,6 +583,7 @@ class RealtimeHub:
         feeds: dict[str, FeedConfig] | None = None,
         monotonic: upstream.Monotonic = upstream.monotonic,
         wall: Callable[[], float] | None = None,
+        call_later: CallLater | None = None,
     ) -> None:
         self._session = session
         self._executor = executor
@@ -590,6 +607,20 @@ class RealtimeHub:
             ),
             monotonic=monotonic,
         )
+        # The planner's own (MAV_RATE): a refused request reads the feeds.
+        self._mav_rate = upstream.TokenBucket(
+            MAV_RATE,
+            MAV_BURST,
+            refused=RealtimeRateLimited,
+            log_refused=lambda count: _LOGGER.warning(
+                "Realtime planner requests over the integration's rate limit: %d refused since the last such line",
+                count,
+            ),
+            monotonic=monotonic,
+        )
+        self._call_later = call_later
+        self._cancel_drop: Callable[[], None] | None = None
+        self._closed = False
         # Per feed URL, and MAVPLUSZ_OUTAGE for mavplusz.hu.
         self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic)
         # mavplusz.hu answers per (trip, date): (monotonic expiry, wall time
@@ -693,6 +724,33 @@ class RealtimeHub:
                 entry.ok = False
                 entry.etag = entry.last_modified = ""
 
+    def close(self) -> None:
+        """No idle-drop timer from now on: the pending one is cancelled and
+        none is started again. Calls still drop idle copies."""
+        self._closed = True
+        if self._cancel_drop is not None:
+            self._cancel_drop()
+            self._cancel_drop = None
+
+    def _schedule_drop(self) -> None:
+        """One timer at a time, for when the first copy held goes idle (not
+        sooner than MIN_INTERVAL: one being fetched waits for the next)."""
+        if self._call_later is None or self._closed or self._cancel_drop is not None:
+            return
+        due = [
+            entry.asked + IDLE_INTERVALS * entry.interval
+            for entry in self._entries.values()
+            if entry.data is not None and not entry.keep
+        ]
+        if due:
+            delay = max(float(MIN_INTERVAL), min(due) - self._monotonic())
+            self._cancel_drop = self._call_later(delay, self._drop_timer)
+
+    def _drop_timer(self) -> None:
+        self._cancel_drop = None
+        self._drop_idle(self._monotonic())
+        self._schedule_drop()
+
     async def _refresh(
         self, url: str, entry: _Entry, cap: int, parse: Callable[[bytes], Any], what: str, keep: bool = False
     ) -> Any:
@@ -719,6 +777,7 @@ class RealtimeHub:
         entry.etag = etag
         entry.last_modified = last_modified
         self._outages.answered(url, "%s %s answers again", what, url)
+        self._schedule_drop()
         return data
 
     async def _feed(self, url: str, prefix: str, interval: int) -> Feed | None:
@@ -743,6 +802,9 @@ class RealtimeHub:
 
     async def query(self, feed_id: str, trips: list[dict[str, Any]]) -> dict[str, Any]:
         """The service's answer: per requested trip key, what the feed knows."""
+        # Here, not only in _cached: a call the planner answers reads no
+        # feed, and the copies an outage of it loaded must go all the same.
+        self._drop_idle(self._monotonic())
         feeds = await self.feeds()
         cfg = feeds.get(feed_id)
         if cfg is None:
@@ -786,7 +848,8 @@ class RealtimeHub:
                     if r.get("route") and r.get("start") is not None:
                         route_keys[i, n] = mavplusz.RouteKey(prefix + _strip(str(r["route"]), prefix), dates[n], prefix)
         # The whole planner round, the wait for _mav_lock included: past it
-        # the planner counts as failed, and the jbb feeds answer.
+        # the jbb feeds answer. A request is begun only with half of it left or more
+        # (_mav_post, PLANNER_MIN_SHARE), so one cut by it did hang.
         loop = asyncio.get_running_loop()
         deadline = loop.time() + PLANNER_TIMEOUT
 
@@ -817,7 +880,9 @@ class RealtimeHub:
                 if self._mav_cut is task:
                     self._mav_cut = None
 
-        listed = await bounded(self._mav_routes(list(dict.fromkeys(route_keys.values())))) if route_keys else {}
+        listed = (
+            await bounded(self._mav_routes(list(dict.fromkeys(route_keys.values())), deadline)) if route_keys else {}
+        )
         cands: dict[tuple[int, int], list[mavplusz.TripKey]] = {}
         for (i, n), rk in route_keys.items():
             ids = (listed or {}).get(rk)
@@ -840,7 +905,7 @@ class RealtimeHub:
         # not cached yet is cut at MAX_TRIPS_PER_REQUEST (_mavplusz).
         resolved = [k for ks in cands.values() for k in ks]
         asked = list(dict.fromkeys([*resolved, *(k for keys in by_src.values() for k in keys)]))
-        answered = await bounded(self._mavplusz(asked, cfg.interval)) if asked else {}
+        answered = await bounded(self._mavplusz(asked, cfg.interval, deadline)) if asked else {}
         planner: dict[int, tuple[Source, Feed, Feed, None]] = {}
         for i, keys in by_src.items():
             got = [answered[k] for k in keys if k in answered] if answered is not None else []
@@ -900,14 +965,24 @@ class RealtimeHub:
                 out[req["key"]] = hit
         return {"feed": feed_id, "updated": max(stamps) if stamps else None, "trips": out}
 
-    async def _mav_post(self, body: dict[str, Any], parse: Callable[[Any], Any]) -> Any:
+    async def _mav_post(
+        self, body: dict[str, Any], parse: Callable[[Any], Any], deadline: float | None = None
+    ) -> Any:
         """One planner request (the caller holds _mav_lock): parse(answer),
         or None when it is not made (the rate limit, the backoff after a
-        failure) or fails, logged once per outage."""
+        failure, under PLANNER_MIN_SHARE of the round left before the
+        event loop's `deadline`) or fails, logged once per outage."""
         if self._monotonic() < self._mav_retry_at:
             return None
+        if deadline is not None:
+            left = deadline - asyncio.get_running_loop().time()
+            if left < PLANNER_TIMEOUT * PLANNER_MIN_SHARE:
+                # The round went on waiting for other cards' requests: the
+                # feeds answer this one, and the planner is no worse for it.
+                _LOGGER.debug("Realtime source %s: %.1f s of the round left, not asked", mavplusz.URL, left)
+                return None
         try:
-            self._rate.take()
+            self._mav_rate.take()
         except RealtimeRateLimited:
             return None
         try:
@@ -933,7 +1008,7 @@ class RealtimeHub:
         )
 
     async def _mav_routes(
-        self, keys: list[mavplusz.RouteKey]
+        self, keys: list[mavplusz.RouteKey], deadline: float | None = None
     ) -> dict[mavplusz.RouteKey, tuple[str, ...] | None] | None:
         """Per route key: the planner's trip ids that day (None: no such
         route), cached for ROUTE_INTERVAL, the rest in one request of at
@@ -955,7 +1030,7 @@ class RealtimeHub:
             if not todo:
                 return out
             results = await self._mav_post(
-                mavplusz.build_route_query(todo), lambda doc: mavplusz.parse_routes(doc, todo)
+                mavplusz.build_route_query(todo), lambda doc: mavplusz.parse_routes(doc, todo), deadline
             )
             if results is None:
                 return None
@@ -966,7 +1041,7 @@ class RealtimeHub:
             return out
 
     async def _mavplusz(
-        self, keys: list[mavplusz.TripKey], interval: int
+        self, keys: list[mavplusz.TripKey], interval: int, deadline: float | None = None
     ) -> dict[mavplusz.TripKey, tuple[float, mavplusz.TripResult | None]] | None:
         """Per key: (wall time of the answer, its result), from the cache
         while within interval of the request, the rest in one request of at
@@ -990,7 +1065,9 @@ class RealtimeHub:
             if not todo:
                 return out
             at = self._wall()
-            results = await self._mav_post(mavplusz.build_query(todo), lambda doc: mavplusz.parse_response(doc, todo))
+            results = await self._mav_post(
+                mavplusz.build_query(todo), lambda doc: mavplusz.parse_response(doc, todo), deadline
+            )
             if results is None:
                 return None
             expiry = self._monotonic() + interval

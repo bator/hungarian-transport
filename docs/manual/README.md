@@ -101,7 +101,7 @@ configuration or in the browser, and several cards share one request.
 
 You can also give one card its own key in the card editor (see
 [4.2](#42-the-bkk-key-in-the-editor)). A card's own key wins over the
-integration's.
+integration's. It is deprecated and will be removed in 2.0.
 
 ### 2.3 Manual install (card only)
 
@@ -128,7 +128,7 @@ key** checkbox.
 - The field hides the key while you type.
 - **Daily MÁV route index from GitHub** (on by default): once a day the
   integration checks `bator.github.io` for the train route index built that
-  morning from MÁV's newest timetable, and uses it when it is newer than the
+  day from MÁV's newest timetable, and uses it when it is newer than the
   one in use. Untick it to stay on the weekly release's index; Home
   Assistant then makes no such request. See
   [The daily index](../timetables.md#the-daily-index-from-github-pages).
@@ -136,7 +136,9 @@ key** checkbox.
   (up to 5 minutes later); it also runs once 10–20 minutes after Home
   Assistant starts and after you save these options. A check that fails
   (GitHub unreachable, a build of your own feed running) is tried again
-  every 20 minutes, up to 6 times.
+  every 20 minutes, up to 6 times. The day's index is usually on GitHub
+  around midday, so while the one there is still of an earlier day the
+  check looks again every 2–3 hours, up to 4 times, until midnight.
 - **Notify about timetable updates** (off by default): a persistent
   notification when a new daily MÁV index is installed, when an update of
   the integration ships new Volán, city or MÁV timetables, and once when the
@@ -172,6 +174,7 @@ These appear under **Settings → Repairs**.
 | --- | --- | --- |
 | **Frontend assets missing** | The card files are not where the integration expects them. | Reinstall the release from HACS (or the `hungarian-transport.zip` release asset), then restart. |
 | **MÁV route index not built** | The MÁV timetable you added could not be turned into train routes. | Add a new feed, upload one, or run the **Rebuild MÁV route index** action. |
+| **BKK key on a dashboard card** | A card on the dashboards it names still holds its own key (`apiKey`), which every logged-in user can read. | Enter the key under **Configure** and remove `apiKey` from those cards; the message goes once none is left. |
 
 ### 3.3 Actions
 
@@ -251,8 +254,9 @@ rejects the key, the field comes back with an error.
 
 Without a key in the integration, the editor borrows the key of another card
 on the same dashboard for its searches and says so; it does not save that key
-into the new card. A key on a card is deprecated: the editor shows a note
-while the card's YAML holds one, in every mode.
+into the new card. A key on a card is deprecated and will be removed in 2.0:
+the editor shows a note while the card's YAML holds one, in every mode, and
+**Settings → Repairs** names the dashboards that still hold one.
 
 ### 4.3 The four modes
 
@@ -658,7 +662,7 @@ refresh: 45               # seconds, at least 20
 | `headerBadges` | `false` | Shows the board's lines as badges beside the title, in their own colours (four, then "+N"). |
 | `theme` | `ha` | Title colours: `ha`, `operator` or `bkk`, `mav`, `volan`, `mvk`, `szkt`, `tuke`, `vbusz`, `blaguss`, `bahart`, `kisvasut`, `thury`, `homm`, `paksbusz`. |
 | `name` | origin → destination | Card title. |
-| `apiKey` | — | The card's own BKK key. Optional when the integration holds one. |
+| `apiKey` | — | The card's own BKK key. Deprecated, removed in 2.0: keep the key in the integration. |
 | `mav` / `volan` / `helyi` | `false` | Mode. At most one is on; none means BKK. |
 | `city` | — | City network id for `helyi` (`szeged`, `pecs`, `miskolc`, `szombathely`, …). |
 | `stopId`, `stopName` | — | Origin, set by the editor. |

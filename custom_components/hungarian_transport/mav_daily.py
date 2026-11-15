@@ -2,11 +2,12 @@
 
 MÁV publishes a new GTFS almost every day; releases ship its index once a
 week. The repository's daily workflow (.github/workflows/mav-index-daily.yml)
-builds the same pfaedle-matched, audited index every morning and publishes it
-on GitHub Pages with a manifest (scripts/mav_pages_site.py). This module
+builds the same pfaedle-matched, audited index every day and publishes it on
+GitHub Pages with a manifest (scripts/mav_pages_site.py). This module
 reads the manifest a while after startup and then once a day at the time
 the options set (CONF_DAILY_TIME, 06:00 local time by default, plus up to
-DAILY_JITTER), and installs the index only when:
+DAILY_JITTER), looks again later that day while the manifest's feed is not
+the day's, and installs the index only when:
 
 - the manifest's format is the one this code reads and its index schema is
   mav_index.SCHEMA (else it says so once and installs nothing);
@@ -31,10 +32,12 @@ build lock, never while a local build runs or is queued. A failed round
 keeps the index on disk and logs once per kind of failure (a warning), not
 at every round, and opens no Repairs issue. After a round that failed or
 found a build running, the round is tried again RETRY_DELAY later, up to
-RETRY_LIMIT times until the next daily round; a daily round that finds a
-manifest older than STALE_MANIFEST (today's build is late) is tried once
-more LATE_DELAY later. The index is fetched with the manifest's sha256 in its
-query, so a cache in front of Pages (max-age=600) never pairs a new manifest
+RETRY_LIMIT times until the next daily round. A round that finds a manifest
+whose feed is not of today, or one older than STALE_MANIFEST, is looked at
+again LATE_DELAY later, up to LATE_LIMIT times after a first or daily round
+and only that day: the workflow builds the day's feed around midday or in the
+afternoon, not before the 06:00 check. The index is fetched with the
+manifest's sha256 in its query, so a cache in front of Pages (max-age=600) never pairs a new manifest
 with an old index. The options flow can turn it off (CONF_DAILY_MAV); then
 no request is made at all. Each round returns a DailyRound, which the
 updater hands to timetable_notify.py and records for the sensors.
@@ -96,11 +99,18 @@ DAILY_JITTER = 5 * 60
 # the lock): again this much later, at most RETRY_LIMIT times a day.
 RETRY_DELAY = 20 * 60
 RETRY_LIMIT = 6
-# The workflow builds before 06:00 local time; a daily round that finds a
-# manifest older than this (the run was late) looks once more, LATE_DELAY
-# (one to two hours) later.
+# MÁV publishes the day's feed in the morning, by 10:00 UTC on most days,
+# sometimes in the afternoon, and GitHub starts the workflow's crons (04:45
+# and 14:20 UTC) hours late: Pages has the day's feed around midday local
+# time, or later. A round that finds the manifest's feed older than today
+# (or a manifest older than STALE_MANIFEST) looks again LATE_DELAY (two to
+# three hours) later, up to LATE_LIMIT times a day, never past local
+# midnight nor past the next daily round: from 06:00, the last look is in
+# the afternoon. A look is one manifest request (about 1 kB); the index is
+# downloaded only when the feed is newer.
 STALE_MANIFEST = timedelta(hours=20)
-LATE_DELAY = (60 * 60, 2 * 60 * 60)
+LATE_DELAY = (2 * 60 * 60, 3 * 60 * 60)
+LATE_LIMIT = 4
 FEED_RE = re.compile(r"\d{8}(?!\d)[A-Za-z0-9._:+-]{0,64}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -149,6 +159,17 @@ async def _get(session: aiohttp.ClientSession, url: str, limit: int, timeout: ai
         async with session.get(
             url, timeout=timeout, allow_redirects=False, headers={"Cache-Control": "no-cache"}
         ) as res:
+            if 300 <= res.status < 400:
+                # Redirects are not followed: the files are taken from
+                # PAGES_BASE only. GitHub Pages redirects every github.io URL
+                # once the repository has a custom domain; this says so,
+                # rather than a bare status, until a version reads it there.
+                where = str((res.headers or {}).get("Location", ""))[:200]
+                raise DailyIndexError(
+                    f"{what}: HTTP {res.status}, redirected to {where or 'nowhere'!r}; redirects are not "
+                    f"followed (only {PAGES_BASE} is read; a custom GitHub Pages domain needs an update "
+                    "of Hungarian transport)"
+                )
             if res.status != 200:
                 raise DailyIndexError(f"{what}: HTTP {res.status}")
             length = (res.headers or {}).get("Content-Length")
@@ -424,6 +445,16 @@ def _today() -> date:
     return dt_util.now().date()
 
 
+def _behind(done: DailyRound) -> bool:
+    """Whether the round saw a manifest that is not yet the day's: its feed is
+    of an earlier day than today (local time), or it was built more than
+    STALE_MANIFEST ago."""
+    day = served_index.feed_date(done.feed)
+    if day is not None and day < _today():
+        return True
+    return done.built_at is not None and dt_util.utcnow() - done.built_at > STALE_MANIFEST
+
+
 # What scheduled a round.
 _FIRST = "first"
 _DAILY = "daily"
@@ -439,10 +470,12 @@ class DailyIndexUpdater:
     updater and starts one with the new time.
 
     A round that FAILED or was BUSY is tried again RETRY_DELAY later, at most
-    RETRY_LIMIT times since the last first or daily round. A daily round
-    (or one of its retries) that went through while the manifest was older
-    than STALE_MANIFEST is tried once more, LATE_DELAY later. One round is
-    pending at a time: the daily time replaces a retry still waiting.
+    RETRY_LIMIT times since the last first or daily round. A round that went
+    through while the manifest's feed was not of today (or the manifest
+    older than STALE_MANIFEST) is looked at again LATE_DELAY later, at most
+    LATE_LIMIT times since the last first or daily round, only the same
+    local day and before the next daily time. One round is pending at a time: the daily time replaces a
+    retry or a late look still waiting.
     on_result gets each round's DailyRound (timetable_notify.py); then the
     round is recorded for the sensors (storage.DAILY_ROUND), and next_run
     says when the next one is due."""
@@ -463,9 +496,8 @@ class DailyIndexUpdater:
         self._task: asyncio.Task[Any] | None = None
         self._stopped = False
         self._next = _FIRST
-        self._cycle = _FIRST
         self._retries = 0
-        self._late_done = False
+        self._late = 0
         self._job = HassJob(self._fire, "hungarian_transport_mav_daily", cancel_on_shutdown=True)
 
     @callback
@@ -517,12 +549,15 @@ class DailyIndexUpdater:
             return None
         if self._pending_at is not None:
             return self._pending_at
-        now = dt_util.now()
+        return dt_util.as_utc(self._next_daily(dt_util.now()))
+
+    def _next_daily(self, now: datetime) -> datetime:
+        """The next daily time after now (local, without its jitter)."""
         day = now.date()
         at = datetime.combine(day, self._time, tzinfo=now.tzinfo)
         if at <= now:
             at = datetime.combine(day + timedelta(days=1), self._time, tzinfo=now.tzinfo)
-        return dt_util.as_utc(at)
+        return at
 
     @callback
     def _fire(self, _now: Any) -> None:
@@ -533,10 +568,9 @@ class DailyIndexUpdater:
             return
         kind = self._next
         if kind in (_FIRST, _DAILY):
-            # A new cycle: its own retries, and at most one late look.
-            self._cycle = kind
+            # A new cycle: its own retries and late looks.
             self._retries = 0
-            self._late_done = False
+            self._late = 0
         self._task = self._hass.async_create_background_task(self._run(), "hungarian_transport_mav_daily")
 
     @callback
@@ -551,12 +585,17 @@ class DailyIndexUpdater:
                 self._retries += 1
                 self._schedule(RETRY_DELAY, _RETRY)
             return
-        if self._cycle != _DAILY or self._late_done or result == UNSUPPORTED:
+        if result == UNSUPPORTED or self._late >= LATE_LIMIT or not _behind(done):
             return
-        built = done.built_at
-        if built is not None and dt_util.utcnow() - built > STALE_MANIFEST:
-            self._late_done = True
-            self._schedule(random.uniform(*LATE_DELAY), _LATE)
+        delay = random.uniform(*LATE_DELAY)
+        now = dt_util.now()
+        at = now + timedelta(seconds=delay)
+        if at.date() != now.date() or at >= self._next_daily(now):
+            # The daily round looks first; and after midnight a feed of the
+            # day is not out before morning.
+            return
+        self._late += 1
+        self._schedule(delay, _LATE)
 
     async def _run(self) -> None:
         try:

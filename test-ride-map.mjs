@@ -124,10 +124,17 @@ test('without a shapes.txt route the GTFS stops are joined, still with their boa
   assert.deepEqual(got.shape, stops);
   assert.equal(got.approx, false);
   assert.ok(near(got.board, at(47.49)));
-  /* Transitous is asked from the GTFS stop's coordinates and towards its alighting stop. */
+  /* Transitous is asked between the configured stops' coordinates. */
   const [, origin, dest] = f.args('motisHop');
   assert.equal(origin.lat, BOARD[0]);
-  assert.equal(dest.lat, at(47.61)[0]);
+  assert.equal(dest.lat, DEST[0]);
+  /* A stop without coordinates takes the GTFS trip's own. */
+  const bare = Object.assign({}, PAIR, { stopLat: null, stopLon: null, destLat: null, destLon: null });
+  const g = sources({ gtfsRow: async () => ({ shape: [], board: at(47.49), dest: at(47.61), stopLine: stops }) });
+  await rideGeometry(ride(bus({ tripId: 'gtfs:1' }), { hasFutar: false, cfg: bare }), g.src);
+  const [, bareOrigin, bareDest] = g.args('motisHop');
+  assert.equal(bareOrigin.lat, at(47.49)[0]);
+  assert.equal(bareDest.lat, at(47.61)[0]);
 });
 
 /* 3 · FUTÁR trip shape */
@@ -205,7 +212,7 @@ test('Transitous’s hop draws when FUTÁR has nothing, asked with the stop pair
   const [row, origin, dest, opts] = f.args('motisHop');
   assert.equal(row.tripId, 'BKK_C1');
   assert.deepEqual(origin, { id: 'BKK_A', name: 'Alpha', lat: BOARD[0], lon: LON, area: 'Testváros' });
-  assert.deepEqual(dest, { id: 'BKK_O', name: 'Omega', key: 'omega', lat: undefined, lon: undefined, area: 'Testváros' });
+  assert.deepEqual(dest, { id: 'BKK_O', name: 'Omega', key: 'omega', lat: DEST[0], lon: LON, area: 'Testváros' });
   assert.deepEqual(opts, { minutesAfter: 45, mode: 'all' });
 });
 
@@ -364,11 +371,19 @@ test('a Transitous train route missing the alighting station by 3000 m gives way
 
 /* The alighting stop */
 
-test('the trip’s own alighting stop wins over Transitous’s and the configured one', async () => {
+test('the trip’s own alighting stop wins over the configured one, and that over Transitous’s', async () => {
   const f = sources({ futarHop: async () => ({ board: null, alight: at(47.61) }), motisHop: async () => ({ shape: [], dest: at(47.62) }) });
   assert.ok(near((await rideGeometry(ride(bus()), f.src)).alight, at(47.61)));
-  const g = sources({ motisHop: async () => ({ shape: [], dest: at(47.62) }) });
-  assert.ok(near((await rideGeometry(ride(bus(), { hasFutar: false }), g.src)).alight, at(47.62)));
+  /* Transitous's stop is found by name: another town's "Omega" is no
+     reason to move the configured pin. */
+  const far = [46.0, 20.0];
+  const g = sources({ motisHop: async () => ({ shape: [], dest: far }) });
+  assert.ok(near((await rideGeometry(ride(bus(), { hasFutar: false }), g.src)).alight, DEST));
+  /* Without the configured stop's coordinates Transitous's stop places it. */
+  const bare = Object.assign({}, PAIR, { destLat: null, destLon: null });
+  const h = sources({ motisHop: async () => ({ shape: [], dest: at(47.62) }) });
+  assert.ok(near((await rideGeometry(ride(bus(), { hasFutar: false, cfg: bare }), h.src)).alight, at(47.62)));
+  assert.equal(h.count('stopRef'), 0);
 });
 
 test('a destination without coordinates is a known station, else looked up on Transitous', async () => {

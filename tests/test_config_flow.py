@@ -125,6 +125,7 @@ def test_form_errors_are_translated(lang) -> None:
     data = json.loads((folder / f"{lang}.json").read_text(encoding="utf-8"))
     for section in ("config", "options"):
         assert {"invalid_auth", "cannot_connect", "rate_limited"} <= set(data[section]["error"])
+    assert "key_accepted_again" in data["config"]["abort"]
 
 
 async def test_second_entry_is_refused(hass) -> None:
@@ -726,3 +727,45 @@ async def test_options_daily_install_notification_switch(hass) -> None:
     )
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_NOTIFY_DAILY] is True
+
+
+@pytest.mark.parametrize(
+    ("check", "reason", "saved"),
+    [(None, "reauth_successful", "new-key"), ("invalid_auth", "key_accepted_again", "secret-key")],
+    ids=["new-key-works", "new-key-refused"],
+)
+async def test_reauth_answered_while_the_stored_key_works_again(
+    hass, aioclient_mock, monkeypatch, check, reason, saved
+) -> None:
+    """The typed key is checked for up to 18 s; meanwhile a card's call can
+    find the stored key working again, which ends the reauth. Ended under
+    the running step, the step's answer raised UnknownFlow (Home Assistant
+    2024.10 even after the new key was saved). The step ends the flow
+    itself instead: with the new key when it works, else with the stored
+    one, which works."""
+    from custom_components.hungarian_transport import config_flow, futar
+
+    from .test_futar import _call, _inject, _setup
+    from .test_upstream import FakeClock
+
+    clock = _inject(monkeypatch, FakeClock())
+    aioclient_mock.get(SEARCH, status=401)
+    entry = await _setup(hass)
+    assert (await _call(hass))["error"] == "futar_auth"
+    await hass.async_block_till_done()
+    (flow,) = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+
+    async def check_meanwhile(_hass, api_key):
+        aioclient_mock.clear_requests()
+        aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+        clock.now += futar.REJECTED_RETRY + 1
+        assert (await _call(hass, params={"query": "Deli"}))["data"]["status"] == "OK"
+        return check
+
+    monkeypatch.setattr(config_flow, "_validate_key", check_meanwhile)
+    result = await hass.config_entries.flow.async_configure(flow["flow_id"], {CONF_API_KEY: "new-key"})
+    await hass.async_block_till_done()
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == reason
+    assert entry.options[CONF_API_KEY] == saved
+    assert hass.config_entries.flow.async_progress_by_handler(DOMAIN) == []

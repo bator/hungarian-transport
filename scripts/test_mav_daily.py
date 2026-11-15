@@ -7,13 +7,17 @@ scripts/mav_daily_verdict.py (when a run that published nothing goes red)
 and mav-index-daily.yml's steps as written there (run: blocks executed with
 bash against stubs: the build's warning and failure kind when it fails, the
 Pages URL, the published index's age check, the "Pages enabled" check
-against a stub gh), plus what the workflow text must hold (triggers,
-permissions per job, pinned actions, deploy only after a site was made). No
-network."""
+against a stub gh, the unpacking of the deployed site for its attestation),
+plus what the workflow text must hold (triggers and the schedule's bounds,
+permissions per job, pinned actions, deploy only after a site was made, the
+attestation after the deploy). No network."""
 from __future__ import annotations
 
+import contextlib
 import gzip
 import hashlib
+import http.client
+import io
 import json
 import os
 import re
@@ -306,6 +310,48 @@ with tempfile.TemporaryDirectory() as tmp_name:
               rc == 0 and outputs.get("deploy") == "true" and "::warning title=MÁV shrink guard skipped::" in out,
               repr((rc, out, err)))
     check("the release index is only an https URL", site.fetch_baseline("http://example.invalid/z.zip")[0] is None)
+
+    # A connection cut mid-body (IncompleteRead) or a garbled status line
+    # (BadStatusLine) is an http.client.HTTPException, not an OSError: it
+    # must read as "could not fetch", never stop the deploy or the verdict.
+    class CutShort:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def geturl(self):
+            return "https://example.invalid/z.zip"
+
+        def read(self, *size):
+            raise http.client.IncompleteRead(b'{"feed":', 64)
+
+    def garbled(*_a, **_k):
+        raise http.client.BadStatusLine("HTTP/1.1 2OO OK")
+
+    real_urlopen = site.urllib.request.urlopen
+    try:
+        for label, opener in (("a body cut short", lambda *_a, **_k: CutShort()), ("a garbled status line", garbled)):
+            site.urllib.request.urlopen = opener
+            try:
+                got = (site.fetch_live("https://example.invalid/mav-index.json"),
+                       site.fetch_baseline("https://example.invalid/z.zip"))
+            except Exception as err:  # noqa: BLE001 - the failure this checks for
+                got = err
+            check(f"{label} from the published manifest or the release zip is a reason, not an exception",
+                  isinstance(got, tuple) and all(r[0] is None and r[1] for r in got), repr(got))
+            out_buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out_buf):
+                    rc = verdict_mod.main(["--failure", "build", "--live-url", "https://example.invalid/m.json"])
+            except Exception as err:  # noqa: BLE001 - the failure this checks for
+                rc = err
+            check(f"{label} from the published manifest: the verdict warns and stays green",
+                  rc == 0 and out_buf.getvalue().startswith("::warning title=Daily MÁV index not published::"),
+                  repr((rc, out_buf.getvalue())))
+    finally:
+        site.urllib.request.urlopen = real_urlopen
     live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64,
                                 "trains": 60, "lines": 0}))
     rc, out, err, outputs = run_site(tmp / "shrink-base-live", "--live-file", str(live),
@@ -697,12 +743,52 @@ with tempfile.TemporaryDirectory() as tmp_name:
         check(f"Pages check, {gh_case}: exit {want_rc} with a clear message",
               done.returncode == want_rc and want_text in done.stdout, repr((done.returncode, done.stdout, done.stderr)))
 
+    # The attest step's input: the artifact upload-pages-artifact made (a
+    # tar of the site's top level, as its action.yml writes it).
+    unpack_step = step_script("Unpack the deployed site")
+    site_names = ("mav-index.json.gz", "mav-index.json", "mav-gtfs.zip", "mav-pfaedle-overlay.zip")
+    for label, names in (("the whole site", (*site_names, "ATTRIBUTION.txt", "index.html")),
+                         ("a site without the overlay", site_names[:3])):
+        ws = tmp / f"wf-unpack-{len(names)}"
+        (ws / "built").mkdir(parents=True)
+        (ws / "runner" / "pages").mkdir(parents=True)
+        for name in names:
+            (ws / "built" / name).write_bytes(name.encode())
+        subprocess.run(["tar", "--directory", str(ws / "built"), "-cf", str(ws / "runner" / "pages" / "artifact.tar"),
+                        "."], check=True)
+        done, _ = bash(unpack_step, ws, RUNNER_TEMP=str(ws / "runner"))
+        unpacked = ws / "runner" / "site"
+        whole = len(names) > 3
+        check(f"the deployed site unpacked for its attestation, {label}: "
+              + ("every attested file" if whole else "an error naming the missing file"),
+              (done.returncode == 0 and all((unpacked / n).read_bytes() == n.encode() for n in site_names))
+              if whole else (done.returncode == 1 and "mav-pfaedle-overlay.zip is not in the deployed site" in done.stdout),
+              repr((done.returncode, done.stdout, done.stderr)))
+
 # ---- the workflow text ------------------------------------------------------
 on_block = TEXT.split("\non:\n", 1)[1].split("\n\n", 1)[0]
-check("runs daily at 03:15 and, after MÁV's feed of the day is out, 10:30 UTC, and by hand,"
-      " never for pull requests (secrets, deploy)",
-      '- cron: "15 3 * * *"' in on_block and '- cron: "30 10 * * *"' in on_block and "workflow_dispatch:" in on_block
+check("runs daily and by hand, never for pull requests (secrets, deploy)",
+      "schedule:" in on_block and "workflow_dispatch:" in on_block
       and "pull_request" not in on_block and "push:" not in on_block, on_block)
+# The schedule against what November 2026 showed: MÁV's feed of the day out
+# between 03:17 and 10:03 UTC, on 3 November still missing at 13:54; GitHub
+# starting the 03:15 cron 6 h 48 min to 8 h 13 min late; the owner's dispatch
+# at 11:30 Budapest time (09:30-10:30 UTC). The concurrency group keeps one
+# running and one pending run, and a third arrival cancels the pending one.
+crons = [(int(m.group(2)) * 60 + int(m.group(1)))
+         for m in re.finditer(r'- cron: "(\d+) (\d+) \* \* \*"', on_block)]
+check("two daily crons, nothing else on a schedule",
+      len(crons) == 2 and on_block.count("- cron:") == 2, repr(crons))
+dispatch_end, published_by, missing_at, budapest_midnight = 11 * 60 + 30, 10 * 60 + 3, 13 * 60 + 54, 23 * 60
+late_most = 8 * 60 + 13
+check("at most one cron can meet the dispatch, however late GitHub starts it (it never starts one early):"
+      " with the dispatch, two runs at most, none cancelled",
+      sum(c < dispatch_end for c in crons) <= 1, repr(crons))
+check("a cron after the feed seen missing at 13:54 UTC, starting the same Budapest day (winter) even 8 h late",
+      any(missing_at < c and c + late_most < budapest_midnight for c in crons), repr(crons))
+check("the morning cron, started as late as the 03:15 one was, lands after the dispatch window and after"
+      " the latest morning publication: installations without the dispatch get the day's feed by midday",
+      any(c < dispatch_end and c + 6 * 60 + 48 >= max(dispatch_end, published_by) for c in crons), repr(crons))
 top = TEXT.split("\njobs:\n", 1)[0]
 check("the workflow token reads contents only",
       re.search(r"^permissions:\n  contents: read\n\n", top, re.M) is not None, top)
@@ -749,6 +835,24 @@ check("the checkout runs without the secrets too (the age check needs the script
       bool(checkout_s) and "if:" not in checkout_s and "persist-credentials: false" in checkout_s, checkout_s)
 for ref in ("actions/upload-pages-artifact@", "actions/deploy-pages@"):
     check(f"{ref.rstrip('@')} is used", ref in TEXT)
+deploy_steps = [ln.strip() for ln in deploy.splitlines() if ln.strip().startswith("- ")]
+attest = step(deploy, "actions/attest@")
+fetched = step(deploy, "actions/download-artifact@")
+check("only the deploy job may write attestations",
+      "attestations: write" not in build
+      and re.search(r"^    permissions:\n      pages: write\n      id-token: write\n      attestations: write\n",
+                    deploy, re.M) is not None, deploy)
+check("the deployed files are attested after the deploy, from the artifact Pages deployed",
+      len(deploy_steps) >= 4 and deploy_steps[-1].startswith("- uses: actions/attest@")
+      and any(s_.startswith("- uses: actions/deploy-pages@") for s_ in deploy_steps[:-3])
+      and "name: github-pages" in fetched and "path: ${{ runner.temp }}/pages" in fetched
+      and all(f"${{{{ runner.temp }}}}/site/{n}" in attest
+              for n in ("mav-index.json.gz", "mav-index.json", "mav-gtfs.zip", "mav-pfaedle-overlay.zip")),
+      repr((deploy_steps, attest)))
+check("the attestation is the one the release uses (same action, same pin)",
+      re.search(r"uses: (actions/attest@[0-9a-f]{40})", attest) is not None
+      and re.search(r"uses: (actions/attest@[0-9a-f]{40})", attest).group(1)
+      in (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8"), attest)
 
 if failed:
     print(f"{failed} failed")

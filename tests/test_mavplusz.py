@@ -430,6 +430,69 @@ async def test_a_round_spent_waiting_for_the_lock_is_no_outage(aioclient_mock, m
     assert not _calls(aioclient_mock, "post")
 
 
+async def test_a_request_begun_late_in_the_round_is_not_begun_and_no_outage(
+    aioclient_mock, monkeypatch, caplog
+) -> None:
+    """Another card's request holds the lock for most of the round: this
+    card's is not begun only to be cut before a healthy planner answers
+    (which would back off every card for FAIL_BACKOFF as an outage). The
+    feeds answer this round, and the next one asks the planner."""
+    monkeypatch.setattr(realtime, "PLANNER_TIMEOUT", 0.3)
+    planner = Planner({"hkir:hkir_H6112_607-1": _as(_trip("t0"), "hkir:hkir_H6112_607-1")})
+
+    async def slowish(method, url, data):
+        await asyncio.sleep(0.1)
+        return await planner(method, url, data)
+
+    aioclient_mock.post(mavplusz.URL, side_effect=slowish)
+    _jbb(aioclient_mock)
+    hub, session, clock = await _hub(aioclient_mock, _cfg(), wall=JBB_WALL)
+
+    async def holder():
+        async with hub._mav_lock:
+            await asyncio.sleep(0.25)
+
+    held = asyncio.create_task(holder())
+    await asyncio.sleep(0)
+    resp = await asyncio.wait_for(hub.query("v", [SZFV_REQ]), 2)
+    await held
+    assert resp["trips"]["s"]["delay"] == 190
+    assert not planner.asked and len(_calls(aioclient_mock, "get")) == 2
+    assert hub._mav_retry_at < clock.now and "unavailable" not in caplog.text
+    resp = await asyncio.wait_for(hub.query("v", [SZFV_REQ]), 2)
+    await session.close()
+    assert len(planner.asked) == 1 and resp["trips"]["s"]["trip_id"] == "hkir_H6112_607-1"
+
+
+async def test_a_jbb_copy_from_a_planner_outage_leaves_memory_while_the_planner_answers(aioclient_mock) -> None:
+    """A planner outage loads the jbb feeds. Once the planner answers again
+    no call reads them, and the decoded copies go all the same after
+    IDLE_INTERVALS of their interval."""
+    state = {"fail": True}
+    planner = Planner({"hkir:hkir_H6112_607-1": _as(_trip("t0"), "hkir:hkir_H6112_607-1")})
+
+    async def flaky(method, url, data):
+        if state["fail"]:
+            return AiohttpClientMockResponse(method, url, status=503)
+        return await planner(method, url, data)
+
+    aioclient_mock.post(mavplusz.URL, side_effect=flaky)
+    _jbb(aioclient_mock)
+    hub, session, clock = await _hub(aioclient_mock, _cfg(), wall=JBB_WALL)
+    await hub.query("v", [SZFV_REQ])
+    assert all(e.data is not None for e in hub._entries.values())
+    state["fail"] = False
+    clock.now += realtime.FAIL_BACKOFF + 1
+    for _ in range(realtime.IDLE_INTERVALS + 1):
+        resp = await hub.query("v", [SZFV_REQ])
+        assert resp["trips"]["s"]["trip_id"] == "hkir_H6112_607-1"
+        clock.now += 60
+    await hub.query("v", [SZFV_REQ])
+    await session.close()
+    assert len(_calls(aioclient_mock, "get")) == 2
+    assert all(e.data is None for e in hub._entries.values())
+
+
 async def test_a_planner_outage_is_logged_once_backs_off_and_recovers_once(aioclient_mock, caplog) -> None:
     aioclient_mock.post(mavplusz.URL, status=503)
     _jbb(aioclient_mock)
@@ -485,26 +548,55 @@ async def test_a_trip_the_planner_lacks_among_known_ones_reads_no_jbb(aioclient_
 
 async def test_a_rate_limited_planner_is_not_asked(aioclient_mock) -> None:
     aioclient_mock.post(mavplusz.URL, side_effect=Planner())
-    hub, session, _clock = await _hub(aioclient_mock, _cfg(), clock=FakeClock(stopped=True))
-    for _ in range(realtime.FETCH_BURST):
-        hub._rate.take()
-    resp = await hub.query("v", [T0_REQ])
+    _jbb(aioclient_mock)
+    hub, session, _clock = await _hub(aioclient_mock, _cfg(), wall=JBB_WALL, clock=FakeClock(stopped=True))
+    for _ in range(realtime.MAV_BURST):
+        hub._mav_rate.take()
+    resp = await hub.query("v", [SZFV_REQ])
     await session.close()
-    # Nothing goes out (jbb is refused by the same bucket): no answer yet.
-    assert aioclient_mock.call_count == 0
-    assert resp == {"feed": "v", "trips": {}, "error": "rt_unavailable"}
+    # Nothing goes to the planner; the feeds, in a bucket of their own, answer.
+    assert not _calls(aioclient_mock, "post") and len(_calls(aioclient_mock, "get")) == 2
+    assert resp["trips"]["s"]["delay"] == 190
 
 
 async def test_the_planner_takes_a_token(aioclient_mock) -> None:
     aioclient_mock.post(mavplusz.URL, side_effect=Planner())
     hub, session, _clock = await _hub(aioclient_mock, _cfg(), clock=FakeClock(stopped=True))
-    for _ in range(realtime.FETCH_BURST - 1):
-        hub._rate.take()
+    for _ in range(realtime.MAV_BURST - 1):
+        hub._mav_rate.take()
     await hub.query("v", [T0_REQ])
     await session.close()
     assert aioclient_mock.call_count == 1
     with pytest.raises(realtime.RealtimeRateLimited):
+        hub._mav_rate.take()
+    # Not the feeds' token.
+    for _ in range(realtime.FETCH_BURST):
         hub._rate.take()
+
+
+async def test_planner_requests_cannot_use_up_the_feed_fetches(aioclient_mock) -> None:
+    """Any logged-in user can ask the planner for trips no card shows, each
+    a request: that uses up the planner's tokens only, and a card of a feed
+    without the planner still gets its fetch."""
+    ids = [f"hkir:hkir_x{i}_1-1" for i in range(realtime.MAV_BURST + 1)]
+    planner = Planner({gid: _as(_trip("t0"), gid) for gid in ids})
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _jbb(aioclient_mock)
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    jbb_only = _cfg(opt_in=False)
+    hub = realtime.RealtimeHub(
+        session,
+        feeds={"v": _cfg(), "j": dataclasses.replace(jbb_only, feed_id="j")},
+        monotonic=FakeClock(stopped=True).monotonic,
+        wall=lambda: JBB_WALL,
+    )
+    for gid in ids:
+        await hub.query("v", [{"key": "k", "trip_id": gid, "date": "20261114"}])
+    resp = await hub.query("j", [SZFV_REQ])
+    await session.close()
+    assert len(planner.asked) == realtime.MAV_BURST
+    assert len(_calls(aioclient_mock, "get")) == 2
+    assert resp["trips"]["s"]["delay"] == 190
 
 
 @pytest.mark.parametrize(

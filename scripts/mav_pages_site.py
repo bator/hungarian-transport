@@ -59,6 +59,7 @@ import csv
 import gzip
 import hashlib
 import html
+import http.client
 import json
 import re
 import shutil
@@ -97,9 +98,12 @@ MAX_MANIFEST = 64 * 1024
 # The same content is deployed again once the published manifest is this old,
 # so its built_at says the daily run went through: mav_daily_verdict.py fails
 # a run that published nothing on a built_at STALE_AFTER (2 days) old, and
-# the integration tries late on one older than mav_daily.STALE_MANIFEST (20 h).
-# Under a day, so the 03:15 run refreshes it every day; the 10:30 run with
-# unchanged content (MÁV published nothing new) and a rerun do not.
+# the integration looks again later on one older than mav_daily.STALE_MANIFEST
+# (20 h), as on one of an earlier day's feed.
+# Under a day, so one of a day's runs (the 04:45 and 14:20 UTC crons, a
+# dispatch) refreshes it every day even when MÁV published nothing new; a
+# run a few hours after another with the same content (a rerun, the
+# afternoon catch-up, a dispatch after the morning build) deploys nothing.
 REFRESH_AFTER = timedelta(hours=12)
 LIVE_TIMEOUT = 20
 # The shrink guard's fallback: a release's frontend zip (about 15 MB) and
@@ -255,7 +259,9 @@ def fetch_live(url: str) -> tuple[dict | None, str]:
             body = res.read(MAX_MANIFEST + 1)
     except urllib.error.HTTPError as err:
         return None, f"HTTP {err.code}"
-    except (urllib.error.URLError, OSError) as err:
+    # http.client.HTTPException: a body cut short (IncompleteRead) or a
+    # garbled answer (BadStatusLine) is a network error like any other.
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
         return None, f"{type(err).__name__}: {err}"
     if len(body) > MAX_MANIFEST:
         return None, "larger than a manifest"
@@ -330,7 +336,7 @@ def fetch_baseline(url: str) -> tuple[tuple[int, int] | None, str]:
                         fh.write(chunk)
         except urllib.error.HTTPError as err:
             return None, f"HTTP {err.code}"
-        except (urllib.error.URLError, OSError) as err:
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
             return None, f"{type(err).__name__}: {err}"
         found = baseline_counts(dest)
         return found, "ok" if found is not None else f"no readable {INDEX_NAME} in it"
