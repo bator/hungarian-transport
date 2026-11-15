@@ -2940,22 +2940,27 @@ check('mavRouteForRow G43 uses the line code',
     JSON.stringify({ dayLabels, t: ptime.selectedOptions[0] && ptime.selectedOptions[0].textContent }));
   check('day and clock round-trip through Budapest time',
     (() => { const p = pc._whenParts(iso(6, 5)); return pc._whenFromParts(p.ymd, p.min) === iso(6, 5); })());
-  ptime.value = String(17 * 60 + 25);
+  /* The clock and day picked are never the ones already set (the next
+     five-minute mark from now, which may be tomorrow's 00:00 just before
+     midnight): a pick naming the time already set plans nothing. */
+  const setMin = pc._whenParts(pc._plan.when.at).min;
+  const pickMin = (Math.floor(setMin / 5) * 5 + 120) % 1440;
+  ptime.value = String((pickMin + 1435) % 1440);
   ptime.dispatchEvent(new Event('change'));
-  ptime.value = String(17 * 60 + 30);
+  ptime.value = String(pickMin);
   ptime.dispatchEvent(new Event('change'));
   await new Promise((r) => setTimeout(r, 380));
   check('arrow-key steps on the clock plan once, for the last time, on the picked day',
-    asked.length === 2 && pc._whenParts(pc._plan.when.at).min === 17 * 60 + 30
+    asked.length === 2 && pc._whenParts(pc._plan.when.at).min === pickMin
     && pc._whenParts(pc._plan.when.at).ymd === pday.value && asked[1].time === pc._plan.when.at,
     JSON.stringify(asked.map((x) => x.time)));
-  const tomorrowYmd = pday.options[1].value;
-  pday.value = tomorrowYmd;
+  const otherYmd = [...pday.options].map((o) => o.value).find((v) => v !== pday.value);
+  pday.value = otherYmd;
   pday.dispatchEvent(new Event('change'));
   await new Promise((r) => setTimeout(r, 380));
   check('picking another day keeps the clock and plans for that day',
-    asked.length === 3 && pc._whenParts(pc._plan.when.at).ymd === tomorrowYmd
-    && pc._whenParts(pc._plan.when.at).min === 17 * 60 + 30 && asked[2].time === pc._plan.when.at,
+    asked.length === 3 && pc._whenParts(pc._plan.when.at).ymd === otherYmd
+    && pc._whenParts(pc._plan.when.at).min === pickMin && asked[2].time === pc._plan.when.at,
     JSON.stringify(asked.map((x) => x.time)));
   ptime.dispatchEvent(new Event('change'));
   await new Promise((r) => setTimeout(r, 380));
