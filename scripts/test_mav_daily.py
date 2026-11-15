@@ -12,8 +12,11 @@ permissions per job, pinned actions, deploy only after a site was made). No
 network."""
 from __future__ import annotations
 
+import contextlib
 import gzip
 import hashlib
+import http.client
+import io
 import json
 import os
 import re
@@ -306,6 +309,48 @@ with tempfile.TemporaryDirectory() as tmp_name:
               rc == 0 and outputs.get("deploy") == "true" and "::warning title=MÁV shrink guard skipped::" in out,
               repr((rc, out, err)))
     check("the release index is only an https URL", site.fetch_baseline("http://example.invalid/z.zip")[0] is None)
+
+    # A connection cut mid-body (IncompleteRead) or a garbled status line
+    # (BadStatusLine) is an http.client.HTTPException, not an OSError: it
+    # must read as "could not fetch", never stop the deploy or the verdict.
+    class CutShort:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def geturl(self):
+            return "https://example.invalid/z.zip"
+
+        def read(self, *size):
+            raise http.client.IncompleteRead(b'{"feed":', 64)
+
+    def garbled(*_a, **_k):
+        raise http.client.BadStatusLine("HTTP/1.1 2OO OK")
+
+    real_urlopen = site.urllib.request.urlopen
+    try:
+        for label, opener in (("a body cut short", lambda *_a, **_k: CutShort()), ("a garbled status line", garbled)):
+            site.urllib.request.urlopen = opener
+            try:
+                got = (site.fetch_live("https://example.invalid/mav-index.json"),
+                       site.fetch_baseline("https://example.invalid/z.zip"))
+            except Exception as err:  # noqa: BLE001 - the failure this checks for
+                got = err
+            check(f"{label} from the published manifest or the release zip is a reason, not an exception",
+                  isinstance(got, tuple) and all(r[0] is None and r[1] for r in got), repr(got))
+            out_buf = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out_buf):
+                    rc = verdict_mod.main(["--failure", "build", "--live-url", "https://example.invalid/m.json"])
+            except Exception as err:  # noqa: BLE001 - the failure this checks for
+                rc = err
+            check(f"{label} from the published manifest: the verdict warns and stays green",
+                  rc == 0 and out_buf.getvalue().startswith("::warning title=Daily MÁV index not published::"),
+                  repr((rc, out_buf.getvalue())))
+    finally:
+        site.urllib.request.urlopen = real_urlopen
     live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64,
                                 "trains": 60, "lines": 0}))
     rc, out, err, outputs = run_site(tmp / "shrink-base-live", "--live-file", str(live),

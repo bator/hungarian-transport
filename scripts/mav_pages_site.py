@@ -59,6 +59,7 @@ import csv
 import gzip
 import hashlib
 import html
+import http.client
 import json
 import re
 import shutil
@@ -255,7 +256,9 @@ def fetch_live(url: str) -> tuple[dict | None, str]:
             body = res.read(MAX_MANIFEST + 1)
     except urllib.error.HTTPError as err:
         return None, f"HTTP {err.code}"
-    except (urllib.error.URLError, OSError) as err:
+    # http.client.HTTPException: a body cut short (IncompleteRead) or a
+    # garbled answer (BadStatusLine) is a network error like any other.
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
         return None, f"{type(err).__name__}: {err}"
     if len(body) > MAX_MANIFEST:
         return None, "larger than a manifest"
@@ -330,7 +333,7 @@ def fetch_baseline(url: str) -> tuple[tuple[int, int] | None, str]:
                         fh.write(chunk)
         except urllib.error.HTTPError as err:
             return None, f"HTTP {err.code}"
-        except (urllib.error.URLError, OSError) as err:
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
             return None, f"{type(err).__name__}: {err}"
         found = baseline_counts(dest)
         return found, "ok" if found is not None else f"no readable {INDEX_NAME} in it"
