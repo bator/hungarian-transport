@@ -9981,6 +9981,46 @@ const R7_IX = Object.freeze({ volan: async () => null, city: async () => null, m
   }
 }
 
+/* "Now" past Budapest midnight: an itinerary painted at 23:59 as "holnap
+   00:10" says 00:10 on the first countdown tick of the new day, not only
+   with the next plan up to five minutes later. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 57); /* 23:57 in Budapest (CET) */
+  Date.now = () => now;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc._planner.now = async () => null;
+    pc.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    document.body.appendChild(pc);
+    await settleTicks();
+    const startMs = Date.UTC(2026, 10, 15, 23, 10); /* 00:10 on the 16th */
+    pc._plan.adopt({ startMs, endMs: startMs + 20 * 60000, transfers: 0, legs: [{ walk: true, minutes: 20 }] });
+    now = Date.UTC(2026, 10, 15, 22, 59);
+    pc._paintJourney();
+    const time = () => {
+      const el = pc.shadowRoot.querySelector('.itin-time');
+      return el ? el.textContent : null;
+    };
+    const before = time();
+    now = Date.UTC(2026, 10, 15, 23, 1); /* 00:01: the plan is four minutes old, not stale */
+    pc._tickPaint();
+    const after = time();
+    check('in "now" mode the itinerary drops "holnap" on the first tick past Budapest midnight',
+      before === `${i18nT('hu', 'plannerTomorrow')}00:10` && after === '00:10' && !pc._plan.stale,
+      JSON.stringify({ before, after, stale: pc._plan.stale }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* A failed poll keeps the rows it had, and with them their last GPS fix:
    the open map stops calling it live and the timetable places the
    vehicle until a poll brings a fresh one. */

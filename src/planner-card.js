@@ -34,6 +34,8 @@ export class BKKPlannerCard extends BKKHopCard {
     this._pickTimer = null;
     /* The Budapest day the time pickers' "ma" and "holnap" were painted on. */
     this._whenPaintedFor = '';
+    /* The Budapest day the itinerary box was painted on. */
+    this._journeyPaintedFor = '';
     /* A failed stop search or destination load, kept apart from the
        board's error: the board's banner stays while a search fails or
        succeeds, and the search's own goes away on its own. */
@@ -537,6 +539,8 @@ export class BKKPlannerCard extends BKKHopCard {
   _paintJourney() {
     const host = this._journeyHost;
     if (!host) return;
+    /* The Budapest day its "ma" and "holnap" are read against. */
+    this._journeyPaintedFor = this._whenParts(Date.now()).ymd;
     const view = this._journeyView();
     const sig = view ? view.className + '\n' + view.html : '';
     const shown = this._plan.shown;
@@ -1476,10 +1480,20 @@ ${this._stopPinCss()}
      someone tapped elsewhere. With no pick waiting, the pickers hold the
      plan's time, and painting them again keeps it. Only a pick still
      waiting out its debounce is left alone; it reads its day against the
-     day the pickers were painted for (_pickedDay). */
+     day the pickers were painted for (_pickedDay).
+     "Now" has no pickers to roll, but its itinerary says "holnap 00:10"
+     as well: on a new day it is painted again, not only with the next
+     plan up to five minutes later. */
   _rollWhenPickers() {
-    if (!this._plan.timed || !this._whenPaintedFor) return;
-    if (this._whenParts(Date.now()).ymd === this._whenPaintedFor) return;
+    const today = this._whenParts(Date.now()).ymd;
+    if (!this._plan.timed) {
+      if (this._journeyPaintedFor && this._journeyPaintedFor !== today) {
+        this._paintHead();
+        this._paintJourney();
+      }
+      return;
+    }
+    if (!this._whenPaintedFor || today === this._whenPaintedFor) return;
     this._paintHead();
     this._paintJourney();
     const day = this._planEl('pday');
