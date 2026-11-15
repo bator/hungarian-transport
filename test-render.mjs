@@ -11292,6 +11292,22 @@ const review5Planner = async (now) => {
     check('a trip without repeated stops sends no repeat', plain.repeat === undefined, JSON.stringify(plain));
   }
 
+  /* The request keeps within the service schema: a field at its limit is
+     sent, one past it is trimmed or left out, so the call is not refused. */
+  {
+    const at = Lib.rtRequest({ tripId: 'k'.repeat(96), rt: {
+      feed: 'paks', trip: 't'.repeat(128), route: 'r'.repeat(32), start: 2880, stops: ['s'.repeat(64)],
+    } }, {}).req;
+    const past = Lib.rtRequest({ tripId: 'k'.repeat(97), rt: {
+      feed: 'paks', trip: 't'.repeat(129), route: 'r'.repeat(33), start: 2881, stops: ['s'.repeat(65)],
+    } }, {}).req;
+    check('a request field at the schema limit is sent, one past it is trimmed or dropped',
+      at.key.length === 96 && at.trip_id.length === 128 && at.route.length === 32 && at.start === 2880
+        && at.stops.length === 1 && past.key.length === 96 && past.trip_id.length === 128
+        && past.route.length === 32 && past.start === undefined && past.stops === undefined,
+      JSON.stringify({ at: Object.keys(at), past: Object.keys(past) }));
+  }
+
   /* A feed that gives only the predicted time moves the row too; a Transitous
      row that is live already keeps its time (no second delay). */
   {

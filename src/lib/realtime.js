@@ -10,6 +10,14 @@ import { BkkLib, register } from '../lib/core.js';
 /* What one card asks for at once; the service refuses more. */
 const RT_MAX_TRIPS = 40;
 const RT_MAX_STOPS = 120;
+/* The service schema's length and range limits (REALTIME_TRIP_SCHEMA in
+   __init__.py): a field past them would make the service refuse the whole
+   call, so the card trims or drops it here. */
+const RT_KEY_MAX = 96;
+const RT_TRIP_ID_MAX = 128;
+const RT_ROUTE_MAX = 32;
+const RT_START_MAX = 2880;
+const RT_STOP_ID_MAX = 64;
 /* Stops before the boarding stop sent along: a stop without an update of
    its own takes the nearest earlier one's delay. */
 const RT_STOPS_BEFORE = 20;
@@ -125,12 +133,12 @@ register({
     if (!row || !row.tripId) return null;
     const rt = row.rt;
     if (rt && rt.feed) {
-      const req = { key: String(row.tripId).slice(0, 96) };
-      if (rt.trip) req.trip_id = String(rt.trip).slice(0, 128);
-      if (rt.route) req.route = String(rt.route).slice(0, 32);
-      if (Number.isInteger(rt.start) && rt.start >= 0 && rt.start <= 2880) req.start = rt.start;
+      const req = { key: String(row.tripId).slice(0, RT_KEY_MAX) };
+      if (rt.trip) req.trip_id = String(rt.trip).slice(0, RT_TRIP_ID_MAX);
+      if (rt.route) req.route = String(rt.route).slice(0, RT_ROUTE_MAX);
+      if (Number.isInteger(rt.start) && rt.start >= 0 && rt.start <= RT_START_MAX) req.start = rt.start;
       if (/^\d{8}$/.test(rt.date || '')) req.date = rt.date;
-      const stops = (rt.stops || []).filter((s) => s && String(s).length <= 64).slice(0, RT_MAX_STOPS);
+      const stops = (rt.stops || []).filter((s) => s && String(s).length <= RT_STOP_ID_MAX).slice(0, RT_MAX_STOPS);
       if (stops.length === (rt.stops || []).length && stops.length) {
         req.stops = stops.map(String);
         if (Number.isInteger(rt.from) && rt.from < stops.length) req.from = rt.from;
@@ -144,7 +152,7 @@ register({
     if ((mode !== 'mav' && mode !== 'all') || !BkkLib.isTrainRow(row)) return null;
     const num = String(BkkLib.rowTrainNumber(row) || '').replace(/^0+/, '');
     if (!/^\d{1,6}$/.test(num)) return null;
-    const req = { key: ('t:' + num + ':' + String(row.tripId)).slice(0, 96), train: num };
+    const req = { key: ('t:' + num + ':' + String(row.tripId)).slice(0, RT_KEY_MAX), train: num };
     const from = BkkLib.elviraStationCode(ctx.stopId);
     const to = BkkLib.elviraStationCode(ctx.destStopId);
     if (from) {
