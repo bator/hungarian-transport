@@ -744,10 +744,28 @@ with tempfile.TemporaryDirectory() as tmp_name:
 
 # ---- the workflow text ------------------------------------------------------
 on_block = TEXT.split("\non:\n", 1)[1].split("\n\n", 1)[0]
-check("runs daily at 03:15 and, after MÁV's feed of the day is out, 10:30 UTC, and by hand,"
-      " never for pull requests (secrets, deploy)",
-      '- cron: "15 3 * * *"' in on_block and '- cron: "30 10 * * *"' in on_block and "workflow_dispatch:" in on_block
+check("runs daily and by hand, never for pull requests (secrets, deploy)",
+      "schedule:" in on_block and "workflow_dispatch:" in on_block
       and "pull_request" not in on_block and "push:" not in on_block, on_block)
+# The schedule against what November 2026 showed: MÁV's feed of the day out
+# between 03:17 and 10:03 UTC, on 3 November still missing at 13:54; GitHub
+# starting the 03:15 cron 6 h 48 min to 8 h 13 min late; the owner's dispatch
+# at 11:30 Budapest time (09:30-10:30 UTC). The concurrency group keeps one
+# running and one pending run, and a third arrival cancels the pending one.
+crons = [(int(m.group(2)) * 60 + int(m.group(1)))
+         for m in re.finditer(r'- cron: "(\d+) (\d+) \* \* \*"', on_block)]
+check("two daily crons, nothing else on a schedule",
+      len(crons) == 2 and on_block.count("- cron:") == 2, repr(crons))
+dispatch_end, published_by, missing_at, budapest_midnight = 11 * 60 + 30, 10 * 60 + 3, 13 * 60 + 54, 23 * 60
+late_most = 8 * 60 + 13
+check("at most one cron can meet the dispatch, however late GitHub starts it (it never starts one early):"
+      " with the dispatch, two runs at most, none cancelled",
+      sum(c < dispatch_end for c in crons) <= 1, repr(crons))
+check("a cron after the feed seen missing at 13:54 UTC, starting the same Budapest day (winter) even 8 h late",
+      any(missing_at < c and c + late_most < budapest_midnight for c in crons), repr(crons))
+check("the morning cron, started as late as the 03:15 one was, lands after the dispatch window and after"
+      " the latest morning publication: installations without the dispatch get the day's feed by midday",
+      any(c < dispatch_end and c + 6 * 60 + 48 >= max(dispatch_end, published_by) for c in crons), repr(crons))
 top = TEXT.split("\njobs:\n", 1)[0]
 check("the workflow token reads contents only",
       re.search(r"^permissions:\n  contents: read\n\n", top, re.M) is not None, top)

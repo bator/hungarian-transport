@@ -11,14 +11,25 @@ name: Daily MÁV index
 # (mav-pfaedle-overlay.zip, shapes © OpenStreetMap contributors, ODbL), with
 # ATTRIBUTION.txt.
 #
-# When: MÁV's feed of the day (feed_version YYYYMMDD) is not out at 03:15
-# UTC. Every run of 3-15 November 2026 that started at 03:15 built an older
-# feed, and every one that started at 10:03-11:28 UTC built the day's; on
-# 3 November it was still missing at 13:54. The 03:15 run stays (it
-# refreshes built_at, and would catch a feed published overnight); the
-# 10:30 run is the one meant to build the day's feed. GitHub starts
-# scheduled runs late, by hours at times (the 03:15 one started after 10:00
-# all through November), so neither time is a promise.
+# When: MÁV's feed of the day (feed_version YYYYMMDD) appeared between about
+# 03:17 and 10:03 UTC in November 2026, and on 3 November it was still
+# missing at 13:54. GitHub starts scheduled runs late: the 03:15 cron of 2-15
+# November started at 10:03-11:28 UTC, 7 to 8 hours late, so no time here is
+# a promise. Two crons:
+# - 04:45 UTC, the morning build. On time it may find yesterday's feed;
+#   started as late as the 03:15 one was, it lands around 11:30-13:00 UTC,
+#   when the day's feed is out. Public installations (HACS) have only these
+#   runs.
+# - 14:20 UTC, the catch-up for a feed MÁV publishes in the afternoon (after
+#   13:54); even 8 hours late it starts before midnight in Budapest in
+#   winter.
+# A workflow_dispatch may come on top (the repository owner's own server
+# sends one at 11:30 Budapest time: 10:30 UTC in winter, 09:30 in summer).
+# The concurrency group below holds one running and one pending run, and a
+# third arrival cancels the pending one: so at most one cron may start before
+# 11:30 UTC (a run never starts early, and any of them may start late enough
+# to meet the dispatch). Only the 04:45 one can reach 09:30-11:30; the 14:20
+# one never does.
 #
 # Nothing is deployed, and the site keeps the previous files, when the
 # secrets are missing, the download, pfaedle or the audit fails, the site is
@@ -35,8 +46,8 @@ name: Daily MÁV index
 # deploy job fails with an error saying so, and nothing else changes.
 on:
   schedule:
-    - cron: "15 3 * * *"
-    - cron: "30 10 * * *"
+    - cron: "45 4 * * *"
+    - cron: "20 14 * * *"
   workflow_dispatch:
 
 permissions:

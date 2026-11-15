@@ -99,8 +99,10 @@ MAX_MANIFEST = 64 * 1024
 # so its built_at says the daily run went through: mav_daily_verdict.py fails
 # a run that published nothing on a built_at STALE_AFTER (2 days) old, and
 # the integration tries late on one older than mav_daily.STALE_MANIFEST (20 h).
-# Under a day, so the 03:15 run refreshes it every day; the 10:30 run with
-# unchanged content (MÁV published nothing new) and a rerun do not.
+# Under a day, so one of a day's runs (the 04:45 and 14:20 UTC crons, a
+# dispatch) refreshes it every day even when MÁV published nothing new; a
+# run a few hours after another with the same content (a rerun, the
+# afternoon catch-up, a dispatch after the morning build) deploys nothing.
 REFRESH_AFTER = timedelta(hours=12)
 LIVE_TIMEOUT = 20
 # The shrink guard's fallback: a release's frontend zip (about 15 MB) and
