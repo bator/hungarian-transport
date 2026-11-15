@@ -61,6 +61,9 @@ LATE_TRAIN_WINDOW = timedelta(hours=3)
 # the same train number a day later (the next run, or one in the opposite
 # direction passing the destination first) is 24 hours on.
 MAX_TRAVEL = timedelta(hours=12)
+# The years an ELVIRA time can be in. One far outside is a placeholder or a
+# glitch, and near 9999 adding MAX_TRAVEL to it would overflow datetime.
+TIME_YEARS = range(2000, 2101)
 # Kelenföld midnight StationInfo truncates ~11:32 at 200 (moreResult=false).
 # 500 reaches ~22:32 so evening origin overlay still has #3880 to copy.
 # Far above a day of the busiest station: at 500 ELVIRA cuts Kelenföld's boards
@@ -188,10 +191,13 @@ def _iso_dt(value, tz):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=tz)
     try:
-        return dt.astimezone(UTC)
+        dt = dt.astimezone(UTC)
     except OverflowError:
         # 0001-01-01T00:00 in Budapest is before the year 1 in UTC.
         return None
+    # No train runs in 9999: such a row is skipped, not the whole call
+    # failed on an OverflowError when its run's time window is reckoned.
+    return dt if dt.year in TIME_YEARS else None
 
 
 def _fold_hu(text: str) -> str:
