@@ -1104,6 +1104,107 @@ test('a worker past its time is asked again next load; the page reads alongside 
   }
 });
 
+/* A worker program that sends the head of an index and two slices of
+   its stops, then nothing more for now: one still busy on a slow tablet. */
+function stallingIndexWorker(scope) {
+  scope.onmessage = () => {
+    scope.postMessage({ head: { v: 1, s: null, t: [] }, long: { s: 200 } });
+    scope.postMessage({ key: 's', rows: [['city:0', 'from the worker']] });
+    scope.postMessage({ key: 's', rows: [['city:1', 'from the worker']] });
+  };
+}
+
+test('a worker still sending slices is stopped before the page parses the index, not after', async () => {
+  const keep = {
+    fetch: BkkLib._fetchIndexBytes, Worker: globalThis.Worker, broken: BkkLib._indexWorkerBroken,
+    url: BkkLib._indexWorkerUrl, timeout: BkkLib._indexWorkerTimeoutMs, text: BkkLib._indexText,
+    main: BkkLib._indexWorkerMain,
+  };
+  const raw = {
+    v: 1,
+    s: Array.from({ length: 200 }, (_v, i) => [`city:${i}`, `Megálló ${i}`]),
+    t: Array.from({ length: 200 }, (_v, i) => [i, 'x', [0, 1], [0, 5]]),
+  };
+  BkkLib._fetchIndexBytes = async () => ({ status: 200, bytes: new TextEncoder().encode(JSON.stringify(raw)) });
+  const load = () => BkkLib._loadGtfsIndex('http://x/city-index.json?v=20260101', 'errCityHttp', 'errCityGunzip');
+  const realParse = JSON.parse;
+  try {
+    BkkLib._indexWorkerBroken = false;
+    BkkLib._indexWorkerUrl = '';
+    BkkLib._indexWorkerTimeoutMs = 20;
+    BkkLib._indexWorkerMain = stallingIndexWorker;
+    /* The worker starts past its time, as the page starts reading; the
+       page finishes gunzipping while the worker is a few slices in. */
+    let release;
+    const late = new Promise((r) => { release = r; });
+    const workers = fakeWorkers({ late });
+    globalThis.Worker = workers.FakeWorker;
+    const pageText = JSON.stringify({ ...raw, s: [['city:0', 'from the page'], ...raw.s.slice(1)] });
+    BkkLib._indexText = async () => {
+      release();
+      while (workers.made[0].delivered < 3) await new Promise((r) => setTimeout(r, 0));
+      return pageText;
+    };
+    let atParse = null;
+    JSON.parse = (text, ...rest) => {
+      if (text === pageText) {
+        const w = workers.made[0];
+        atParse = { terminated: w.terminated, delivered: w.delivered };
+      }
+      return realParse(text, ...rest);
+    };
+    const idx = await load();
+    JSON.parse = realParse;
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(atParse, 'the page parsed its own text');
+    assert.equal(atParse.delivered, 3);
+    assert.equal(atParse.terminated, true);
+    assert.equal(workers.made[0].delivered, atParse.delivered);
+    assert.equal(idx.stops[0].name, 'from the page');
+    assert.equal(idx.stops.length, 200);
+    assert.equal(BkkLib._indexWorkerBroken, false);
+  } finally {
+    JSON.parse = realParse;
+    Object.assign(BkkLib, {
+      _fetchIndexBytes: keep.fetch, _indexWorkerBroken: keep.broken, _indexWorkerUrl: keep.url,
+      _indexWorkerTimeoutMs: keep.timeout, _indexText: keep.text, _indexWorkerMain: keep.main,
+    });
+    globalThis.Worker = keep.Worker;
+  }
+});
+
+test('stopping an index worker tells whether it had finished with the index', async () => {
+  const keep = { Worker: globalThis.Worker, broken: BkkLib._indexWorkerBroken, url: BkkLib._indexWorkerUrl, main: BkkLib._indexWorkerMain };
+  const raw = { v: 1, s: Array.from({ length: 50 }, (_v, i) => [`city:${i}`, 'A']), t: [] };
+  const bytes = new TextEncoder().encode(JSON.stringify(raw));
+  try {
+    BkkLib._indexWorkerBroken = false;
+    BkkLib._indexWorkerUrl = '';
+    BkkLib._indexWorkerMain = stallingIndexWorker;
+    /* Stopped a few slices in: no index, and the worker had not won. */
+    const midway = fakeWorkers();
+    globalThis.Worker = midway.FakeWorker;
+    const job = BkkLib._startIndexWorker(bytes);
+    while (midway.made[0].delivered < 3) await new Promise((r) => setTimeout(r, 0));
+    assert.equal(job.stop(), false);
+    assert.equal(await job.done, null);
+    assert.equal(midway.made[0].terminated, true);
+    assert.equal(midway.made[0].onmessage, null);
+    /* Stopped after its answer: stop() says the worker has the index. */
+    BkkLib._indexWorkerMain = keep.main;
+    BkkLib._indexWorkerUrl = '';
+    const whole = fakeWorkers();
+    globalThis.Worker = whole.FakeWorker;
+    const job2 = BkkLib._startIndexWorker(bytes);
+    const idx = await job2.done;
+    assert.equal(idx.s.length, 50);
+    assert.equal(job2.stop(), true);
+  } finally {
+    Object.assign(BkkLib, { _indexWorkerBroken: keep.broken, _indexWorkerUrl: keep.url, _indexWorkerMain: keep.main });
+    globalThis.Worker = keep.Worker;
+  }
+});
+
 /* What Transitous answered for a bare "Vasútállomás" (2026-11): ten stops,
    none in Győr, Eger or Pécs; the bare name is listed in Kecskemét first. */
 const VASUTALLOMAS = [
@@ -1180,6 +1281,38 @@ test('a failed town query is no stop in another town: with nothing in the town t
   await placing(() => down, async () => {
     await assert.rejects(BkkLib.transitousPlace(stop));
   });
+});
+
+test('a feed area that is no town (Bahart’s Balaton) is not put in the query, and the bare answer stands', async () => {
+  const siofok = {
+    type: 'STOP', name: 'Siófok', id: 'hu-bahart_1', lat: 46.9077, lon: 18.0496,
+    areas: [{ name: 'Siófok', adminLevel: 8 }],
+  };
+  const port = { id: 'bahart:SIO', name: 'Siófok', area: 'Balaton' };
+  /* The town query would fail: it is not asked, and the bare name's stop
+     is the answer, not a "try again". */
+  await placing((q) => (q === 'Siófok' ? [siofok] : new Error('HTTP 503')), async (asked) => {
+    assert.equal(await BkkLib.transitousPlace(port), '46.9077,18.0496');
+    assert.deepEqual(asked, ['Siófok']);
+  });
+  await placing((q) => (q === 'Siófok' ? [siofok] : new Error('HTTP 503')), async (asked) => {
+    assert.equal((await BkkLib.transitousStopRef(port, 'ferry')).lat, 46.9077);
+    assert.deepEqual(asked, ['Siófok']);
+  });
+  /* A feed whose id names its town keeps the town-first query. */
+  for (const stop of [
+    { id: 'kecskemet-kisvasut:1', name: 'Vasútállomás', area: 'Kecskemét' },
+    { id: 'volan-eger:5', name: 'Vasútállomás', area: 'Eger' },
+    { id: 'hodmezovasarhely:9', name: 'Vasútállomás', area: 'Hódmezővásárhely' },
+  ]) {
+    await placing(() => VASUTALLOMAS, async (asked) => {
+      await BkkLib.transitousPlace(stop);
+      assert.equal(asked[0], `Vasútállomás ${stop.area}`);
+    });
+  }
+  assert.equal(BkkLib.transitousTown({ id: 'volan-helyi:3', area: 'Volán helyi' }), '');
+  assert.equal(BkkLib.transitousTown({ id: 'budapest-siklo:1', area: 'Budapest' }), 'Budapest');
+  assert.equal(BkkLib.transitousTown({ id: 'hkir_123', area: 'Tata' }), 'Tata');
 });
 
 test('an apiKey of only spaces is no key and does not hide a sibling card’s real one', () => {

@@ -9,6 +9,7 @@ import gzip
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -283,6 +284,30 @@ with tempfile.TemporaryDirectory() as tmp_name:
                        GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="1")
         check("a weekly timetable release takes no notes file written for its number",
               done.returncode == 0 and (ws / "release-notes.md").stat().st_size == 0, repr(done.stderr[-400:]))
+
+# The documented check pins the release workflow and the ref the run started
+# from: without --signer-workflow any workflow of the repository passes (the
+# daily MÁV one signs with the same repository), and the refs are the ones
+# the workflow runs from: main for the weekly and the manual runs, which make
+# the releases (a manual run from another branch is refused), the tag on a
+# push. The example uses main: a refs/tags/ one passed no release there is
+# (v1.9.3 has no attestation; v1.9.10 to v1.10.20 started on main).
+_wf_text = WORKFLOW.read_text(encoding="utf-8")
+for _where, _text in {"release.yml": _wf_text,
+                      "docs/timetables.md": (HERE.parent / "docs" / "timetables.md").read_text(encoding="utf-8")}.items():
+    _cmds = [c.replace("#", "") for c in re.findall(r"gh attestation verify hungarian-transport\.zip(?:[^\n]*\\\n)*[^\n]*", _text)]
+    check(f"{_where}: the documented release check pins the release workflow and a source ref",
+          bool(_cmds) and all(re.search(r"--signer-workflow \S+/\.github/workflows/release\.yml(\s|$)", c)
+                              and re.search(r"--source-ref refs/(heads/main|tags/\S+)(\s|$)", c) for c in _cmds),
+          repr(_cmds))
+    check(f"{_where}: the documented release check uses refs/heads/main, where the releases start",
+          bool(_cmds) and all(re.search(r"--source-ref refs/heads/main(\s|$)", c) for c in _cmds), repr(_cmds))
+    _at = _text.find("gh attestation verify hungarian-transport.zip")
+    check(f"{_where}: next to the check, refs/tags/<tag> is named for a release cut by pushing its tag",
+          "refs/tags/<tag>" in _text[_at:_at + 900], _text[_at:_at + 900])
+check("the release runs from a v* tag push or from main",
+      re.search(r"^  push:\n    tags:\n      - \"v\*\"$", _wf_text, re.M) is not None
+      and '[ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]' in _wf_text)
 
 if failed:
     print(f"{failed} failed")

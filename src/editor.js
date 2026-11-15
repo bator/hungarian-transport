@@ -6,6 +6,12 @@ import { generation } from './lib/generation.js';
 import { THEMES, THEME_DEFAULT, THEME_IDS, THEME_OPERATOR, themeKey } from './themes.js';
 
 const DEST_RETRY_MS = 30 * 1000;
+/* A list loaded without FUTÁR's part waits twice as long after each such
+   load in a row for the same stop, and after this many retries stays as it
+   is: an error FUTÁR keeps answering for that stop must not reload the list
+   for as long as the editor is open. Another stop, mode, city or FUTÁR
+   access starts over. */
+const DEST_RETRIES = 6;
 
 export class BKKHopCardEditor extends HTMLElement {
   constructor() {
@@ -28,6 +34,10 @@ export class BKKHopCardEditor extends HTMLElement {
     this._destRoutes = {};
     this._loadedStop = '';
     this._loadedAccess = '';
+    /* When the list loaded lacked FUTÁR's destinations (0: it did not),
+       and how many loads in a row for it have (the retry back-off). */
+    this._loadedPartialAt = 0;
+    this._loadedPartials = 0;
     this._loadingStop = '';
     /* The mode and city a list was loaded (or is loading) for: the same
        stop gives other destinations in another mode. */
@@ -117,7 +127,7 @@ export class BKKHopCardEditor extends HTMLElement {
        never written into this card's config: a card-level key is deprecated,
        and keeping it out of dashboards is the point. */
     const viaIntegration = BkkLib.integrationHasKey(hass);
-    if (!this._userEditedKey && !this._config.apiKey && !this._borrowedKey && !this._loadingKey
+    if (!this._userEditedKey && !this._ownApiKey() && !this._borrowedKey && !this._loadingKey
         && !viaIntegration && !this._keyless()) this._fillKey();
     else if (this._hasFutar()) this._probeKey();
     /* The integration's FUTÁR coming up after a keyless ("all") list was
@@ -133,6 +143,14 @@ export class BKKHopCardEditor extends HTMLElement {
   _destScope(cfg) {
     const c = cfg || this._config;
     return `${this._mode(c)}|${c.city || ''}`;
+  }
+
+  /* The list on screen is the current stop's, mode's and city's: a load
+     again for it (a retry, new FUTÁR access) keeps it offered meanwhile
+     instead of the loading hint, as the planner does. */
+  _destsShown() {
+    return this._dests.length > 0 && this._loadedStop === this._config.stopId
+      && this._loadedScope === this._destScope();
   }
 
   /* A load in flight for this stop in the current mode and city. */
@@ -159,6 +177,12 @@ export class BKKHopCardEditor extends HTMLElement {
 
   _apiKey() {
     return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
+  }
+
+  /* The card's own key, trimmed as cardApiKey reads it: a whitespace-only
+     apiKey does not stop a sibling's key from being borrowed. */
+  _ownApiKey() {
+    return String(this._config.apiKey || '').trim();
   }
 
   _hasFutar() {
@@ -197,6 +221,12 @@ export class BKKHopCardEditor extends HTMLElement {
 
   _destsStale(stopId) {
     if (this._loadedStop !== stopId || this._loadedScope !== this._destScope()) return true;
+    /* Loaded while FUTÁR failed: the next edit or hass update after
+       DEST_RETRY_MS (doubled for each partial load in a row, DEST_RETRIES
+       times at most) asks again for the BKK destinations. */
+    const partials = this._loadedPartials;
+    if (this._loadedPartialAt && partials <= DEST_RETRIES
+        && Date.now() - this._loadedPartialAt >= DEST_RETRY_MS * 2 ** Math.max(0, partials - 1)) return true;
     /* Loaded before any key was there ("all" needs none): a key borrowed
        or set later adds the BKK destinations. */
     return !this._loadedAccess && !this._keyless() && !!this._keyAccess();
@@ -761,7 +791,7 @@ export class BKKHopCardEditor extends HTMLElement {
     this._loadingKey = true;
     try {
       const key = await BkkLib.apiKeyFromDashboard(this._hass);
-      if (key && !this._config.apiKey && !this._userEditedKey) {
+      if (key && !this._ownApiKey() && !this._userEditedKey) {
         /* Kept in memory, like the card's own borrowed key: the card reads
            the sibling's key again at runtime, so nothing needs saving here. */
         this._borrowedKey = key;
@@ -887,7 +917,7 @@ export class BKKHopCardEditor extends HTMLElement {
       box.innerHTML = '<span class="hint">' + BkkLib.esc(copy.destNeedOrigin) + '</span>';
       return;
     }
-    if (this._destsLoading) {
+    if (this._destsLoading && !this._destsShown()) {
       box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
       return;
     }
@@ -937,7 +967,7 @@ export class BKKHopCardEditor extends HTMLElement {
     this._loadingScope = scope;
     this._failedStop = '';
     const box = this._el('destHits');
-    if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
+    if (box && !this._destsShown()) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
     try {
       this._error('');
       const idx = await BkkLib.reachableDests(
@@ -951,9 +981,17 @@ export class BKKHopCardEditor extends HTMLElement {
       /* Accepted for the stop, mode and city it was asked for only. */
       if (this._destLoad.stale(seq) || this._config.stopId !== stopId
           || this._destScope() !== scope) return;
+      const sameList = this._loadedStop === stopId && this._loadedScope === scope
+        && this._loadedAccess === access;
       this._loadedStop = stopId;
       this._loadedScope = scope;
       this._loadedAccess = access;
+      /* FUTÁR's part failed (lib reachableDests): the GTFS destinations are
+         offered, and the list counts as stale DEST_RETRY_MS later (longer
+         after each partial load in a row), as a failed load is tried again
+         then. */
+      this._loadedPartials = idx.partial ? (sameList && this._loadedPartialAt ? this._loadedPartials + 1 : 1) : 0;
+      this._loadedPartialAt = idx.partial ? Date.now() : 0;
       /* Done before the paint below, or it repaints the loading hint. */
       this._destsLoading = false;
       this._loadingStop = '';

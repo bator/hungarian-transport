@@ -56,7 +56,6 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import hashlib
-import json
 import logging
 import random
 import re
@@ -76,7 +75,7 @@ from homeassistant.helpers.event import async_call_later, async_track_time_chang
 from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
-from . import mav, mav_index, served_index, storage
+from . import jsonsafe, mav, mav_index, served_index, storage
 from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -215,8 +214,8 @@ async def _get(session: aiohttp.ClientSession, url: str, limit: int, timeout: ai
 def check_manifest(raw: bytes) -> dict[str, Any]:
     """The manifest's fields this module uses, checked."""
     try:
-        man = json.loads(raw)
-    except ValueError as err:
+        man = jsonsafe.loads(raw)
+    except (ValueError, RecursionError) as err:
         raise DailyIndexError(f"manifest is not JSON: {err}") from err
     if not isinstance(man, dict):
         raise DailyIndexError("manifest is not a JSON object")
@@ -250,8 +249,9 @@ def check_index(raw: bytes, man: dict[str, Any], min_trains: int) -> tuple[int, 
             # Another gzip member (or junk) after the first: checked would be
             # only the first, served would be the whole file.
             raise DailyIndexError("index has data after its gzip stream")
-        index = json.loads(text)
-    except (zlib.error, ValueError) as err:
+        # In the executor: jsonsafe refuses what nests deep enough to kill it.
+        index = jsonsafe.loads(text)
+    except (zlib.error, ValueError, RecursionError) as err:
         raise DailyIndexError(f"index does not unpack: {err}") from err
     if not isinstance(index, dict):
         raise DailyIndexError("index is not a JSON object")

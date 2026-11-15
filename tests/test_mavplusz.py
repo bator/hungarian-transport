@@ -236,6 +236,16 @@ async def test_an_answer_over_the_cap_is_a_value_error_and_not_read_whole(aiocli
     await session.close()
 
 
+async def test_an_answer_nested_too_deep_is_a_value_error(aioclient_mock) -> None:
+    """The decoder gives up on it with a RecursionError: the caller's
+    failure path (backoff, one log line) is the one for ValueError."""
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    aioclient_mock.post(mavplusz.URL, content=b"[" * 100_000 + b"]" * 100_000)
+    with pytest.raises(ValueError, match="nested too deep"):
+        await mavplusz.fetch(session, mavplusz.build_query(KEYS[:1]))
+    await session.close()
+
+
 def test_feed_table_opts_in_the_planners_feeds() -> None:
     table = realtime.load_feed_table()
     flagged = {(fid, s.prefix) for fid, cfg in table.items() for s in cfg.sources if s.mavplusz}

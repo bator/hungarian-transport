@@ -826,6 +826,21 @@ check("the deploy job checks out and runs nothing from the repository, and sees 
       "actions/checkout" not in deploy and "secrets." not in deploy and "scripts/" not in deploy)
 upload = step(build, "actions/upload-pages-artifact@")
 check("only a site that differs is uploaded", "if: steps.site.outputs.deploy == 'true'" in upload, upload)
+# The attest job reads this artifact; a re-run of it after a Sigstore outage
+# failed with "artifact not found" once the action's default of one day was
+# over. A weekend's worth now, and the docs say how long.
+_keep = re.search(r"^ +retention-days: (\d+)$", upload, re.M)
+check("the Pages artifact is kept 3 days or more, for a re-run of the attestation",
+      _keep is not None and int(_keep.group(1)) >= 3, upload)
+_docs = (ROOT / "docs" / "timetables.md").read_text(encoding="utf-8")
+check("docs/timetables.md says how long the artifact is kept for a re-run",
+      _keep is not None and "Pages artifact is kept (three days)" in _docs and int(_keep.group(1)) == 3,
+      repr(_keep and _keep.group(1)))
+# A re-run waits in the concurrency group too, and may cancel a waiting run
+# (the dispatch): the workflow and the docs say when to re-run.
+check("the workflow and the docs say a re-run joins the concurrency group and when to make one",
+      "Re-run when no run of this workflow is queued." in TEXT and "joins the concurrency group" in TEXT
+      and "re-run when no run of the workflow is queued" in _docs)
 site_s = step(build, "- name: Pages site")
 check("the site is made only from a build that went through",
       "if: steps.mav.outputs.built == 'true'" in site_s and "secrets." not in site_s, site_s)
