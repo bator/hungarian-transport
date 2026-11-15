@@ -29,6 +29,10 @@ export class BKKHopCardEditor extends HTMLElement {
     this._loadedStop = '';
     this._loadedAccess = '';
     this._loadingStop = '';
+    /* The mode and city a list was loaded (or is loading) for: the same
+       stop gives other destinations in another mode. */
+    this._loadedScope = '';
+    this._loadingScope = '';
     this._destsLoading = false;
     this._keyOk = null;
     this._probingKey = false;
@@ -80,7 +84,7 @@ export class BKKHopCardEditor extends HTMLElement {
     /* Every keystroke in the name field comes back as a setConfig: a load
        already running for this stop must not be restarted. */
     const stopId = this._config.stopId;
-    const loading = this._destsLoading && this._loadingStop === stopId;
+    const loading = this._loadingDestsFor(stopId);
     /* Nor a load that failed for this stop with the same key access: one
        request and one banner per keystroke otherwise. A stop pick, a new or
        fixed key, the integration's key showing up, or an edit after
@@ -114,7 +118,31 @@ export class BKKHopCardEditor extends HTMLElement {
     const stopId = this._config.stopId;
     const retry = this._failedStop === stopId && this._failedAccess !== this._keyAccess() && this._canLoadDests();
     if (stopId && (this._loadedStop === stopId || retry) && this._destsStale(stopId)
-        && !(this._destsLoading && this._loadingStop === stopId)) this._loadDests();
+        && !this._loadingDestsFor(stopId)) this._loadDests();
+  }
+
+  /* What a destination list depends on besides the stop. */
+  _destScope() {
+    return `${this._mode()}|${this._config.city || ''}`;
+  }
+
+  /* A load in flight for this stop in the current mode and city. */
+  _loadingDestsFor(stopId) {
+    return this._destsLoading && this._loadingStop === stopId
+      && this._loadingScope === this._destScope();
+  }
+
+  /* A mode or city change: a list still loading is for the old one, and
+     picking from it would save the old mode's routes (BKK route ids on a
+     MÁV card). It must neither paint nor block the new mode's load. */
+  _dropDestLoad() {
+    this._destLoad.bump();
+    this._destsLoading = false;
+    this._loadingStop = '';
+    this._loadingScope = '';
+    this._dests = [];
+    this._destRoutes = {};
+    this._loadedStop = '';
   }
 
   _apiKey() {
@@ -155,7 +183,7 @@ export class BKKHopCardEditor extends HTMLElement {
   }
 
   _destsStale(stopId) {
-    if (this._loadedStop !== stopId) return true;
+    if (this._loadedStop !== stopId || this._loadedScope !== this._destScope()) return true;
     /* Loaded before any key was there ("all" needs none): a key borrowed
        or set later adds the BKK destinations. */
     return !this._loadedAccess && !this._keyless() && !!this._keyAccess();
@@ -327,9 +355,8 @@ export class BKKHopCardEditor extends HTMLElement {
     this._el('city').addEventListener('change', (ev) => {
       this._cancelSearches();
       this._keepAutoTitle();
+      this._dropDestLoad();
       this._emit(Object.assign({ city: ev.target.value }, this._noStops()));
-      this._dests = [];
-      this._loadedStop = '';
       this._syncStopLabel();
       this._syncDestLabel();
     });
@@ -639,10 +666,8 @@ export class BKKHopCardEditor extends HTMLElement {
     if (hits) hits.innerHTML = '';
     if (destHits) destHits.innerHTML = '';
     this._cancelSearches();
-    this._dests = [];
-    this._destRoutes = {};
+    this._dropDestLoad();
     this._cache = {};
-    this._loadedStop = '';
     this._keepAutoTitle();
     this._emit(Object.assign({
       mav: mav,
@@ -890,9 +915,11 @@ export class BKKHopCardEditor extends HTMLElement {
     if (!this._canLoadDests()) return;
     const stopId = this._config.stopId;
     const access = this._keyAccess();
+    const scope = this._destScope();
     const seq = this._destLoad.bump();
     this._destsLoading = true;
     this._loadingStop = stopId;
+    this._loadingScope = scope;
     this._failedStop = '';
     const box = this._el('destHits');
     if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
@@ -906,8 +933,11 @@ export class BKKHopCardEditor extends HTMLElement {
         this._mode(),
         this._config.city,
       );
-      if (this._destLoad.stale(seq) || this._config.stopId !== stopId) return;
+      /* Accepted for the stop, mode and city it was asked for only. */
+      if (this._destLoad.stale(seq) || this._config.stopId !== stopId
+          || this._destScope() !== scope) return;
       this._loadedStop = stopId;
+      this._loadedScope = scope;
       this._loadedAccess = access;
       /* Done before the paint below, or it repaints the loading hint. */
       this._destsLoading = false;
