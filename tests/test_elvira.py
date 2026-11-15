@@ -918,7 +918,7 @@ async def test_an_oversized_board_is_an_elvira_error_and_not_read_whole(monkeypa
     assert str(err.value) == "5000 bytes, over 1000"
 
 
-async def test_boards_are_asked_and_decoded_two_at_a_time() -> None:
+async def test_boards_are_asked_and_decoded_elvira_fetches_at_a_time() -> None:
     """A busy station's board is tens of MB until it is parsed: the misses
     of many calls at once wait for a turn, and every board still arrives."""
     clock = Clock(NOON)
@@ -941,39 +941,11 @@ async def test_boards_are_asked_and_decoded_two_at_a_time() -> None:
     asked = asyncio.gather(*(source.board(code, now.date()) for code in codes))
     for _ in range(5):
         await asyncio.sleep(0)
-    assert len(under_way) == 2
+    assert len(under_way) == elvira.ELVIRA_FETCHES
     gate.set()
     boards = await asked
-    assert most == 2 and not under_way
+    assert most == elvira.ELVIRA_FETCHES and not under_way
     assert [departures[0]["code"] for departures, _arrivals in boards] == [code[-3:] for code in codes]
-    source.close()
-
-
-async def test_a_board_waiting_for_its_turn_counts_the_wait_in_its_timeout(monkeypatch) -> None:
-    """Its ELVIRA_TIMEOUT runs from when it is asked: a call's first round
-    stays within it however many boards are ahead (ELVIRA_CALL_BUDGET)."""
-    clock = Clock(NOON)
-    today = clock.now().date()
-    gate = asyncio.Event()
-    asked = []
-
-    async def fetch(code: str, day: date, max_count: str):
-        asked.append(code)
-        if code != DEST:
-            await gate.wait()
-        return [], []
-
-    source = ElviraBoards(fetch, now=clock.now, monotonic=clock.monotonic)
-    # Two slow boards take both turns.
-    slow = asyncio.gather(*(source.board(code, today) for code in ("005510001", "005510002")))
-    for _ in range(3):
-        await asyncio.sleep(0)
-    monkeypatch.setattr(elvira, "ELVIRA_TIMEOUT_SEC", 0.05)
-    with pytest.raises(ElviraError) as err:
-        await asyncio.wait_for(source.board(DEST, today), 1)
-    assert str(err.value) == "TimeoutError" and DEST not in asked
-    gate.set()
-    assert await slow == [([], []), ([], [])]
     source.close()
 
 

@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+import contextlib
 from typing import Any
 from dataclasses import dataclass
+import heapq
+import itertools
 import json
 import logging
 import re
@@ -27,7 +30,7 @@ from datetime import UTC, date, datetime, timedelta
 import aiohttp
 import zoneinfo
 
-from . import upstream
+from . import jsonsafe, upstream
 from .cache import CallLater, SharedTTLCache, TaskFactory
 
 _LOGGER = logging.getLogger(__name__)
@@ -107,19 +110,18 @@ ELVIRA_TIMEOUT = aiohttp.ClientTimeout(total=ELVIRA_TIMEOUT_SEC)
 # arrive past midnight (next_boards).
 ELVIRA_ROUNDS = 2
 # The longest an elvira_between call takes, whatever ELVIRA does: every round
-# one after the other, each up to ELVIRA_TIMEOUT. The cards wait a little
-# past it (src/lib/services.js; test-render.mjs reads this number), so a slow
-# but whole answer is not cut off. tests/test_elvira.py checks it against the
+# one after the other, each waited for ELVIRA_TIMEOUT at most. The cards wait
+# a little past it (src/lib/services.js; test-render.mjs reads this number),
+# so a slow but whole answer is not cut off. tests/test_elvira.py checks it against the
 # rounds a call really asks.
 ELVIRA_WORST_CASE_SEC = 60
 # between() answers within this many seconds, whatever ELVIRA does: a
 # caller (the card) can time its wait by it. The first round of boards is
-# bounded by ELVIRA_TIMEOUT (a board shared with an earlier call is too: its
-# request started before this call did, and one waiting for a turn among
-# ELVIRA_FETCHES counts the wait); the second round, tomorrow's
-# arrival board alone, gets what is left. A board that does not make it
-# counts as one that did not arrive, and its request goes on into the cache
-# for the next poll.
+# waited for ELVIRA_TIMEOUT at most, the second round, tomorrow's arrival
+# board alone, what is left. A board that does not make it counts as one
+# that did not arrive (ElviraBusy when it was still waiting for its turn,
+# or only got one late), and its request goes on into the cache for the
+# next poll.
 ELVIRA_CALL_BUDGET = 40
 # StationInfo requests (cache misses only; shared requests count once) per
 # second and the burst allowed on top. Any logged-in user can call
@@ -131,12 +133,18 @@ ELVIRA_CALL_BUDGET = 40
 ELVIRA_RATE = 1.0
 ELVIRA_BURST = 60
 # StationInfo requests (with their decoding) under way at once; the others
-# wait for a turn. A busy station's board is its body and that decoded to a
-# str (about three times its 7.4 MB at Kelenföld) until it is parsed, so
-# twenty boards at once were half a gigabyte, and four decodings at once
-# stalled the event loop for 100 to 160 ms again (_parse_board). The board's
-# ELVIRA_TIMEOUT runs from when it is asked, the wait for a turn included.
-ELVIRA_FETCHES = 2
+# wait for a turn, today's origin boards first (_priority). A busy
+# station's board is its body and that decoded to a str (about three times
+# its 7.4 MB at Kelenföld) until it is parsed, so twenty boards at once were
+# half a gigabyte, and four decodings at once stalled the event loop for 100
+# to 160 ms again (_parse_board). Three: eight Kelenföld boards at once peak
+# at 61 MB traced (48 MB with two) and stall the loop 52 ms at the most (49
+# ms), while ten cards on a slow ELVIRA (8 s a board) miss their
+# destination board about half as often as with two. A board's
+# ELVIRA_TIMEOUT runs from when it gets its turn, and the turn is held until
+# its decoding ends, even past the timeout: the executor's thread decodes
+# on whatever the request does.
+ELVIRA_FETCHES = 3
 # A refused board is logged at most this often, with the count since.
 ELVIRA_RATE_LOG_EVERY = 300
 # The largest StationInfo answer read: Kelenföld's day is 7.4 MB, and a
@@ -187,6 +195,48 @@ class ElviraRateLimited(ElviraError):
     """Over the integration's own limit; this board was not asked for. An
     ElviraError for the service response, but not an outage: it is logged on
     its own and does not touch the "unavailable / answers again" state."""
+
+
+class ElviraBusy(ElviraRateLimited):
+    """The call's wait for this board ended while the board was still
+    waiting for its turn among ELVIRA_FETCHES, or had got one only after
+    waiting: the integration is busy with other boards, ELVIRA is not down.
+    The board is still asked for, and lands in the cache for the next poll.
+    Like a refused board, no outage (elvira_rate_limited for the card)."""
+
+
+# The order boards waiting for a turn get one (lowest first, then in the
+# order asked): today's origin board, without which a call fails; the
+# call's other boards of today and before, without which it lacks travel
+# times or a few late trains; tomorrow's, for the few trains past midnight.
+# A board shared by calls waits with the most urgent of them.
+_PRIORITY_ORIGIN, _PRIORITY_OTHER, _PRIORITY_TOMORROW = 0, 1, 2
+
+
+def _priority(key: BoardKey, origin: str, today: date) -> int:
+    if key == (origin, today):
+        return _PRIORITY_ORIGIN
+    return _PRIORITY_TOMORROW if key[1] > today else _PRIORITY_OTHER
+
+
+class _Turn:
+    """A board's place among the fetches: `waited` once it had to wait for
+    its turn (in the queue, or since), `future` its turn handed over."""
+
+    __slots__ = ("priority", "seq", "waited", "future")
+
+    def __init__(self, priority: int, seq: int) -> None:
+        self.priority = priority
+        self.seq = seq
+        self.waited = False
+        self.future: asyncio.Future | None = None
+
+    def __lt__(self, other: _Turn) -> bool:
+        return (self.priority, self.seq) < (other.priority, other.seq)
+
+    @property
+    def queued(self) -> bool:
+        return self.future is not None and not self.future.done()
 
 
 class OutageLog(upstream.OutageLog):
@@ -377,7 +427,12 @@ async def fetch_station(
     """The StationInfo board of one station and service day, its first
     max_count rows from midnight (the POST ElviraBoards makes in Home
     Assistant, with its session). The body is read up to MAX_BOARD_BYTES
-    and decoded in `executor` (_parse_board)."""
+    and decoded in `executor` (_parse_board).
+
+    A cancellation (ElviraBoards' timeout) during the decoding takes
+    effect once the decoding ends: the executor's thread cannot be stopped,
+    and until then it holds the board's memory, so the board's turn among
+    ELVIRA_FETCHES is held as long."""
     payload = {
         "type": "StationInfo",
         "travelDate": f"{day.isoformat()}T00:00:00",
@@ -405,7 +460,18 @@ async def fetch_station(
                     raise ElviraError(f"over {MAX_BOARD_BYTES} bytes")
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
         raise ElviraError(type(err).__name__) from None
-    return await _in_executor(executor, _parse_board, body)
+    decoding = asyncio.ensure_future(_in_executor(executor, _parse_board, body))
+    del body
+    try:
+        return await asyncio.shield(decoding)
+    except asyncio.CancelledError:
+        while not decoding.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait([decoding])
+        if not decoding.cancelled():
+            # Nobody waits for it any more; seen, so asyncio does not log it.
+            decoding.exception()
+        raise
 
 
 # The fields of a StationInfo row the rows are made of (rows_from_stationinfo,
@@ -451,6 +517,9 @@ def _parse_board(body: bytes | bytearray) -> Board:
     3.13).
     """
     try:
+        # Its nesting first: a thread of Home Assistant's executor would
+        # die nested some 9000 deep, not raise RecursionError (jsonsafe).
+        jsonsafe.check_depth(body)
         # As json.loads decodes bytes, but with the bytes let go of first.
         text = body.decode(json.detect_encoding(body), "surrogatepass")
         if isinstance(body, bytearray):
@@ -658,14 +727,18 @@ def _board_bytes(board: Any) -> int:
 class _BoardCache(SharedTTLCache):
     """The board cache: SharedTTLCache, and its boards under max_bytes
     (Board.nbytes) too, the oldest dropped first; the newest stays even
-    alone over it (a call is waiting for it)."""
+    alone over it (a call is waiting for it). `done(key)` is called when a
+    board's request has ended, however (one cancelled before it started
+    too)."""
 
-    def __init__(self, *args: Any, max_bytes: int, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, max_bytes: int, done: Callable[[Any], None], **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._max_bytes = max_bytes
+        self._done = done
 
     def _store(self, key: Any, task: asyncio.Future) -> None:
         super()._store(key, task)
+        self._done(key)
         data = self._data
         total = sum(_board_bytes(board) for _ts, board in data.values())
         while total > self._max_bytes and len(data) > 1:
@@ -683,7 +756,8 @@ class ElviraBoards:
     miss takes a rate limit token first, and waits for one of ELVIRA_FETCHES
     turns (`fetches`) to be asked and decoded. The outage log and the
     clock (`now`: wall time, any time zone; `monotonic`: the cache, the rate
-    limit, the outage log and the call budget) are the source's too.
+    limit, the outage log and the call budget) are the source's too. A board
+    asked for goes on into the cache whoever still waits for it.
     `fetch` is the StationInfo request (fetch_station with a session in
     Home Assistant). `task_factory` and `call_later` are the cache's
     (cache.SharedTTLCache); close() stops its expiry timer for good.
@@ -706,10 +780,21 @@ class ElviraBoards:
         fetches: int = ELVIRA_FETCHES,
     ) -> None:
         self._fetch = fetch
-        self._fetching = asyncio.Semaphore(fetches)
+        # The turns among `fetches` (_take_turn): the free ones, the boards
+        # waiting for one (a heap of _Turn), and every board under way.
+        self._free_turns = fetches
+        self._waiting: list[_Turn] = []
+        self._turns: dict[tuple[str, str, str], _Turn] = {}
+        self._seq = itertools.count()
         self._executor = executor
         self._cache = _BoardCache(
-            ELVIRA_CACHE_TTL, ELVIRA_CACHE_MAX, task_factory, call_later, monotonic, max_bytes=ELVIRA_CACHE_BYTES
+            ELVIRA_CACHE_TTL,
+            ELVIRA_CACHE_MAX,
+            task_factory,
+            call_later,
+            monotonic,
+            max_bytes=ELVIRA_CACHE_BYTES,
+            done=lambda key: self._turns.pop(key, None),
         )
         # A refused board fails at once: the card polls again in
         # ELVIRA_CACHE_TTL seconds anyway.
@@ -732,26 +817,72 @@ class ElviraBoards:
         self.monotonic = monotonic
         self.call_budget = call_budget
 
-    async def board(self, station_code: str, day: date, max_count: str = STATIONINFO_MAX_COUNT) -> Board:
+    async def board(
+        self,
+        station_code: str,
+        day: date,
+        max_count: str = STATIONINFO_MAX_COUNT,
+        priority: int = _PRIORITY_OTHER,
+    ) -> Board:
         """StationInfo for one station and service day (its first max_count
-        rows), cached and shared."""
+        rows), cached and shared; `priority` its place in the wait for a
+        turn (_PRIORITY)."""
+        key = (station_code, day.isoformat(), max_count)
+        turn = self._turns.get(key)
+        if turn is not None and priority < turn.priority:
+            # Shared with a call that needs it sooner.
+            turn.priority = priority
+            if turn.queued:
+                heapq.heapify(self._waiting)
 
         def fetch():
             # The token goes on the miss itself, in the order the boards are
             # asked for (see between), not when the request task starts.
             self._rate.take()
-            return self._fetch_in_turn(station_code, day, max_count)
+            turn = self._turns[key] = _Turn(priority, next(self._seq))
+            return self._fetch_in_turn(turn, station_code, day, max_count)
 
-        return await self._cache.get((station_code, day.isoformat(), max_count), fetch)
+        return await self._cache.get(key, fetch)
 
-    async def _fetch_in_turn(self, station_code: str, day: date, max_count: str) -> Board:
-        """The request with its decoding, at most ELVIRA_FETCHES at once,
-        within ELVIRA_TIMEOUT from now (a wait for a turn included)."""
+    async def _fetch_in_turn(self, turn: _Turn, station_code: str, day: date, max_count: str) -> Board:
+        """The request with its decoding, at most ELVIRA_FETCHES at once:
+        within ELVIRA_TIMEOUT from when it gets its turn, which it holds
+        until the decoding ends (fetch_station). Its entry in _turns goes
+        when the request ends (the cache's done)."""
+        await self._take_turn(turn)
         try:
-            async with asyncio.timeout(ELVIRA_TIMEOUT_SEC), self._fetching:
+            async with asyncio.timeout(ELVIRA_TIMEOUT_SEC):
                 return await self._fetch(station_code, day, max_count)
         except TimeoutError:
             raise ElviraError("TimeoutError") from None
+        finally:
+            self._give_turn()
+
+    async def _take_turn(self, turn: _Turn) -> None:
+        if self._free_turns > 0:
+            # Free turns and waiting boards never meet: a turn given back
+            # goes to a waiting board first (_give_turn).
+            self._free_turns -= 1
+            return
+        turn.waited = True
+        turn.future = asyncio.get_running_loop().create_future()
+        heapq.heappush(self._waiting, turn)
+        try:
+            await turn.future
+        except asyncio.CancelledError:
+            if turn.future.done() and not turn.future.cancelled():
+                # Handed the turn just as it was cancelled: the next one's.
+                self._give_turn()
+            raise
+
+    def _give_turn(self) -> None:
+        while self._waiting:
+            turn = heapq.heappop(self._waiting)
+            # A board cancelled while it waited is skipped.
+            if turn.future is not None and not turn.future.done():
+                turn.future.set_result(None)
+                return
+        self._free_turns += 1
 
     def close(self) -> None:
         self._cache.close()
@@ -774,20 +905,19 @@ class ElviraBoards:
             return [], None
         deadline = self.monotonic() + self.call_budget
         win = plan_window(self.now(), minutes_after, at)
+        today = win.now.date()
         boards: dict[BoardKey, Board | ElviraError] = {}
         wanted = next_boards(win, origin_code, dest_code, boards)
-        boards.update(zip(wanted, await self._round(wanted)))
+        # The first round is waited for ELVIRA_TIMEOUT at most (within the
+        # budget), as long as a board asked at once could take.
+        first = min(ELVIRA_TIMEOUT_SEC, self.call_budget)
+        boards.update(await self._round(wanted, first, origin_code, today))
         # A second round, tomorrow's arrival board alone, gets what is left of
         # the budget. Deciding it reads every row of today's boards.
         wanted = await _in_executor(self._executor, next_boards, win, origin_code, dest_code, boards)
         if wanted:
-            try:
-                async with asyncio.timeout(deadline - self.monotonic()):
-                    boards.update(zip(wanted, await self._round(wanted)))
-            except TimeoutError:
-                # Its request goes on (the cache shields it); this answer
-                # does without it, and says so in dest_error.
-                boards.update((key, ElviraError("TimeoutError")) for key in wanted)
+            # Without it this answer says so in dest_error.
+            boards.update(await self._round(wanted, deadline - self.monotonic(), origin_code, today))
         answer = await _in_executor(self._executor, settle, win, origin_code, dest_code, boards, dest_name)
         for code, outage in answer.stations:
             for day, err in ((day, err) for missed, day, err in answer.missed if missed == code):
@@ -798,15 +928,42 @@ class ElviraBoards:
             raise type(answer.origin_failure)(str(answer.origin_failure))
         return answer.rows, answer.dest_failure
 
-    async def _round(self, wanted: list[BoardKey]) -> list:
+    async def _round(
+        self, wanted: list[BoardKey], budget: float, origin: str, today: date
+    ) -> dict[BoardKey, Board | ElviraError]:
         """One round: the boards for these (station, day) pairs at once, an
-        ElviraError in place of each one that did not arrive."""
-        results = await asyncio.gather(*(self.board(code, day) for code, day in wanted), return_exceptions=True)
-        for board in results:
-            # Only an unreachable board is an empty one; a bug or a cancellation is not.
-            if isinstance(board, BaseException) and not isinstance(board, ElviraError):
-                raise board
-        return results
+        ElviraError in place of each one that did not arrive, waited for
+        `budget` seconds at most. A board not there by then goes on into the
+        cache (shielded there) for the next poll; for this answer it is
+        ElviraBusy when it waited for its turn (the integration is busy with
+        other boards), else a TimeoutError (ELVIRA is slow)."""
+        got: dict[BoardKey, Board | ElviraError] = {}
+
+        async def one(key: BoardKey) -> None:
+            code, day = key
+            try:
+                got[key] = await self.board(code, day, priority=_priority(key, origin, today))
+            except ElviraError as err:
+                got[key] = err
+
+        tasks = [asyncio.ensure_future(one(key)) for key in wanted]
+        try:
+            await asyncio.wait(tasks, timeout=max(budget, 0.0))
+        finally:
+            for task in tasks:
+                task.cancel()
+        for task in tasks:
+            # Only an unreachable board is an empty one; a bug is not.
+            if task.done() and not task.cancelled() and task.exception() is not None:
+                raise task.exception()
+        for code, day in wanted:
+            if (code, day) not in got:
+                turn = self._turns.get((code, day.isoformat(), STATIONINFO_MAX_COUNT))
+                if turn is None or turn.waited:
+                    got[(code, day)] = ElviraBusy("busy: waiting for a turn among the integration's ELVIRA requests")
+                else:
+                    got[(code, day)] = ElviraError("TimeoutError")
+        return {key: got[key] for key in wanted}
 
 
 @dataclass(frozen=True)

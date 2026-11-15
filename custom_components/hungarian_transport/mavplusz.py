@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
-from . import realtime
+from . import jsonsafe, realtime
 
 URL = "https://mavplusz.hu/otp2-backend/otp/routers/default/index/graphql"
 # Trips in one request, of the ones not cached yet; the rest are cut, never
@@ -209,7 +209,7 @@ async def fetch(
                 raise ValueError(f"over {cap} bytes")
             chunks.append(chunk)
     try:
-        return json.loads(b"".join(chunks))
+        return jsonsafe.loads(b"".join(chunks))
     except RecursionError:
         # Nested deeper than the decoder goes: not an answer, and the
         # caller's failure path is the one for ValueError.
