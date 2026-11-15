@@ -808,3 +808,43 @@ test('three cards failing at once pause the pair a minute and a half, not six mi
     bench.restore();
   }
 });
+
+test('a city board without stop coordinates fills from its GTFS stop’s coordinates and its town', async () => {
+  const keep = { cityDepartures: BkkLib.cityDepartures, fillTransitousIfEmpty: BkkLib.fillTransitousIfEmpty };
+  const asked = [];
+  BkkLib.cityDepartures = async () => [];
+  BkkLib.fillTransitousIfEmpty = async (rows, origin, dest) => {
+    if (rows.length) return rows;
+    asked.push([origin, dest]);
+    return [];
+  };
+  const town = { i: 0, id: 'szfv', name: 'Székesfehérvár — helyi' };
+  const stop = { id: 'szfv:1', name: 'Kossuth tér', op: 0, lat: 47.19, lon: 18.41 };
+  const cityIx = { ops: [town], stops: [stop], byId: new Map([['szfv:1', stop]]) };
+  let loads = 0;
+  const indexes = Object.assign({}, NO_INDEXES, { city: async () => { loads += 1; return cityIx; } });
+  const cfg = {
+    helyi: true, city: 'szfv', stopId: 'szfv:1', stopName: 'Kossuth tér', destKey: 'piac', destName: 'Piac', routeIds: [],
+  };
+  try {
+    const src = BkkLib.boardSources(BkkLib.cardContext({ cfg: () => cfg, indexes: () => indexes }));
+    await src.transitous([], { id: 'szfv:1', name: 'Kossuth tér' }, { key: 'piac', name: 'Piac', id: '' }, { mode: 'helyi' });
+    const [origin, dest] = asked[0];
+    assert.deepEqual([origin.lat, origin.lon, origin.area], [47.19, 18.41, 'Székesfehérvár']);
+    /* The destination by name only: no coordinates, but the board's town. */
+    assert.deepEqual([dest.lat, dest.area], [undefined, 'Székesfehérvár']);
+    /* A board with rows of its own asks nothing. */
+    const before = loads;
+    const own = [bus('gtfs:1', 5)];
+    assert.equal(await src.transitous(own, origin, dest, { mode: 'helyi' }), own);
+    assert.equal(loads, before);
+    assert.equal(asked.length, 1);
+    /* A Volán board's stop names carry their town: passed on as they are. */
+    const volan = BkkLib.boardSources(BkkLib.cardContext({ cfg: () => ({ volan: true }), indexes: () => indexes }));
+    const bare = { id: 'volan_1', name: 'Győr, autóbusz-állomás' };
+    await volan.transitous([], bare, FILL_TO, { mode: 'volan' });
+    assert.equal(asked[1][0], bare);
+  } finally {
+    Object.assign(BkkLib, keep);
+  }
+});

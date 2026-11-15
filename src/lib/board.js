@@ -532,7 +532,23 @@ register({
       timetables: (key, stopId, routeIds, dest, opts) => BkkLib.departures(ix, key, stopId, routeIds, dest, opts),
       elvira: (hass, originId, destId, minutesAfter, destName, opts) => (
         BkkLib.elviraBoard(ix, hass, originId, destId, minutesAfter, destName, opts)),
-      transitous: (rows, origin, dest, opts) => BkkLib.fillTransitousIfEmpty(rows, origin, dest, opts),
+      /* A city board's stop the config gives no coordinates for takes
+         them (and its town) from the city index, as the planner's do, and
+         one not in the index (a destination by name) the board's town: by
+         name alone a city board's "Kossuth tér" is any town's. Volán stop
+         names carry their town already. */
+      transitous: async (rows, origin, dest, opts) => {
+        if ((Array.isArray(rows) && rows.length) || BkkLib.mode(ctx.cfg()) !== 'helyi') {
+          return BkkLib.fillTransitousIfEmpty(rows, origin, dest, opts);
+        }
+        let stops = await BkkLib.withGtfsCoords(ix, [origin, dest]);
+        const bare = (s) => !!s && !s.area && !BkkLib.finiteLatLon(s.lat, s.lon);
+        if (stops.some(bare)) {
+          const area = await BkkLib.stopArea(ix, ctx.cfg());
+          if (area) stops = stops.map((s) => (bare(s) ? Object.assign({}, s, { area }) : s));
+        }
+        return BkkLib.fillTransitousIfEmpty(rows, stops[0], stops[1], opts);
+      },
       coachGps: (hass, rows) => BkkLib.attachCoachGps(hass, rows),
       realtime: (hass, rows, rtCtx) => BkkLib.attachRealtime(hass, rows, rtCtx),
       rideTime: (key, tripId, destKey, dep, origin, cache) => BkkLib.travelMin(key, tripId, destKey, dep, origin, cache),
