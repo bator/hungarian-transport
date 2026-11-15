@@ -11,7 +11,7 @@ import voluptuous as vol
 
 from homeassistant.components import frontend, persistent_notification
 from homeassistant.components.http import StaticPathConfig
-from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import CoreState, HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.exceptions import (
@@ -31,6 +31,7 @@ from homeassistant.util import dt as dt_util
 from . import lovelace_resource, mav, mav_daily, realtime, storage, timetable_notify, timetables
 from .assets import asset_tag
 from .cache import close_on_stop, hass_call_later
+from .config_flow import async_end_reauth
 from .const import (
     CONF_API_KEY,
     CONF_DAILY_MAV,
@@ -483,13 +484,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return True
 
     @callback
-    def _key_accepted_again() -> None:
-        # The rejection was a mistake (an upstream hiccup): the reauth it
-        # started goes too. Left open, answering it empty removes the key.
-        for flow in hass.config_entries.flow.async_progress_by_handler(
-            DOMAIN, match_context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id}
-        ):
-            hass.config_entries.flow.async_abort(flow["flow_id"])
+    def _key_accepted() -> None:
+        # The key works: a reauth a rejection started goes, whether this
+        # proxy saw the rejection (a mistake, an upstream hiccup) or the one
+        # a reload replaced did. Home Assistant 2024.10 keeps a reauth open
+        # across a reload. Left open, answering it empty removes the key.
+        async_end_reauth(hass, entry.entry_id)
 
     # The card switches to this service when it exists, so it is registered
     # only while a key is configured.
@@ -500,7 +500,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             coro, "hungarian_transport_futar", eager_start=False
         ),
         call_later=hass_call_later(hass),
-        on_recovered=_key_accepted_again,
+        on_accepted=_key_accepted,
     )
     entry.async_on_unload(proxy.close)
     entry.async_on_unload(close_on_stop(hass, proxy.close))
@@ -526,7 +526,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # one in the UI instead of failing every card poll quietly. The
             # proxy fails fast for a while, or until a key saved in the
             # options reloads the entry; a key FUTÁR accepts again later
-            # ends the reauth (_key_accepted_again).
+            # ends the reauth (_key_accepted).
             entry.async_start_reauth(hass)
             raise
         return {"data": data}

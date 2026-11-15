@@ -177,8 +177,10 @@ class FutarProxy:
 
     `monotonic` is the clock of the cache, the rate limit and the rejected
     key; `sleep` is the one a call waits for a token with. `burst` is the
-    rate limit's (FUTAR_BURST). `on_recovered` is called when FUTÁR accepts
-    the key again after rejecting it (the rejection was a mistake).
+    rate limit's (FUTAR_BURST). `on_accepted` is called when FUTÁR first
+    accepts the key, and again whenever it accepts it after rejecting it
+    (the rejection was a mistake): a reauth started before this proxy (by
+    the one a reload replaced) is answered by a key that works as well.
     """
 
     def __init__(
@@ -191,10 +193,12 @@ class FutarProxy:
         monotonic: upstream.Monotonic = upstream.monotonic,
         sleep: upstream.Sleep = upstream.sleep,
         burst: int = FUTAR_BURST,
-        on_recovered: Callable[[], None] | None = None,
+        on_accepted: Callable[[], None] | None = None,
     ) -> None:
         self._session = session
-        self._on_recovered = on_recovered
+        self._on_accepted = on_accepted
+        # Whether FUTÁR has accepted the key since this proxy was made.
+        self._accepted = False
         self._api_key = api_key
         self._monotonic = monotonic
         self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX, task_factory, call_later, monotonic)
@@ -239,13 +243,17 @@ class FutarProxy:
         # the log flap between "unavailable" and "answers again".
         self._outages.answered(None, "BKK FUTÁR answers again")
         # Only a request sent after the latest rejection proves the key works
-        # again: one sent before it (a slow plan-trip.json) cleared it, so the
-        # log flapped and the next call spent a 401 instead of failing fast.
-        if self._rejected is not None and rejections == self._rejections:
-            _LOGGER.info("BKK FUTÁR accepts the configured key again")
-            self._rejected = None
-            if self._on_recovered is not None:
-                self._on_recovered()
+        # (again): one sent before it (a slow plan-trip.json) cleared it, so
+        # the log flapped and the next call spent a 401 instead of failing fast.
+        if rejections == self._rejections:
+            accepted = not self._accepted
+            if self._rejected is not None:
+                _LOGGER.info("BKK FUTÁR accepts the configured key again")
+                self._rejected = None
+                accepted = True
+            self._accepted = True
+            if accepted and self._on_accepted is not None:
+                self._on_accepted()
         return data
 
     def close(self) -> None:

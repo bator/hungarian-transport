@@ -19,7 +19,8 @@
     "abort": {
       "single_instance_allowed": "Hungarian transport is already set up.",
       "already_configured": "Hungarian transport is already set up.",
-      "reauth_successful": "The BKK key was updated."
+      "reauth_successful": "The BKK key was updated.",
+      "key_accepted_again": "BKK FUTÁR accepts the stored key again, so it stays; the key entered here was not saved."
     },
     "error": {
       "invalid_auth": "BKK FUTÁR rejected this key.",

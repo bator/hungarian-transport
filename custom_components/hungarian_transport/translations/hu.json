@@ -19,7 +19,8 @@
     "abort": {
       "single_instance_allowed": "A Magyar közlekedés integráció már be van állítva.",
       "already_configured": "A Magyar közlekedés integráció már be van állítva.",
-      "reauth_successful": "A BKK kulcs frissült."
+      "reauth_successful": "A BKK kulcs frissült.",
+      "key_accepted_again": "A BKK FUTÁR ismét elfogadja a tárolt kulcsot, ezért az marad; az itt megadott kulcs nem lett elmentve."
     },
     "error": {
       "invalid_auth": "A BKK FUTÁR elutasította ezt a kulcsot.",

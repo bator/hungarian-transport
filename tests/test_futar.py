@@ -283,6 +283,59 @@ async def test_a_key_accepted_again_ends_the_reauth(hass, aioclient_mock, clock)
     assert _reauth_flows(hass) == []
 
 
+async def test_a_key_that_works_after_a_reload_ends_the_reauth(hass, aioclient_mock) -> None:
+    """A reload (the UI's Reload, the options saved) makes a new proxy that
+    never saw the rejection; Home Assistant 2024.10 keeps the reauth open
+    across it. The new proxy's first answer from FUTÁR ends it, or it would
+    stay until answered, and answered empty it removes a key that works."""
+    aioclient_mock.get(SEARCH, status=401)
+    entry = await _setup(hass)
+    assert (await _call(hass))["error"] == "futar_auth"
+    await hass.async_block_till_done()
+    assert len(_reauth_flows(hass)) == 1
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    if not _reauth_flows(hass):
+        # A newer Home Assistant ends the reauth at the reload itself: the
+        # one 2024.10 keeps, started again.
+        entry.async_start_reauth(hass)
+        await hass.async_block_till_done()
+    assert len(_reauth_flows(hass)) == 1
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    assert (await _call(hass, params={"query": "Deli"}))["data"]["status"] == "OK"
+    await hass.async_block_till_done()
+    assert _reauth_flows(hass) == []
+
+
+async def test_only_the_first_answer_of_a_proxy_looks_for_a_reauth(monkeypatch) -> None:
+    """The key is known to work after the first answer: the reauth flows
+    are not looked up on every upstream call, only again after a rejection."""
+    clock = FakeClock()
+    rejected = False
+
+    async def fake_get(session, api_key, path, params, timeout=None):
+        if rejected:
+            raise futar.FutarAuthError("HTTP 401")
+        return {"status": "OK", "data": {}}
+
+    monkeypatch.setattr(futar, "futar_get", fake_get)
+    accepted: list[bool] = []
+    proxy = futar.FutarProxy(None, "secret-key", monotonic=clock.monotonic, on_accepted=lambda: accepted.append(True))
+    for query in ("A", "B", "C"):
+        await proxy.get("search.json", {"query": query})
+    assert accepted == [True]
+    rejected = True
+    with pytest.raises(futar.FutarAuthError):
+        await proxy.get("search.json", {"query": "D"})
+    rejected = False
+    clock.now += futar.REJECTED_RETRY
+    await proxy.get("search.json", {"query": "E"})
+    await proxy.get("search.json", {"query": "F"})
+    assert accepted == [True, True]
+
+
 async def test_failed_probe_does_not_restart_the_rejection_window(
     hass, aioclient_mock, monkeypatch
 ) -> None:
@@ -514,7 +567,7 @@ async def test_answer_to_a_request_sent_before_a_rejection_keeps_it(monkeypatch,
     monkeypatch.setattr(futar, "futar_get", fake_get)
     recovered: list[bool] = []
     proxy = futar.FutarProxy(
-        None, "secret-key", monotonic=clock.monotonic, on_recovered=lambda: recovered.append(True)
+        None, "secret-key", monotonic=clock.monotonic, on_accepted=lambda: recovered.append(True)
     )
     slow = asyncio.ensure_future(proxy.get("plan-trip.json", {"fromPlace": "a", "toPlace": "b"}))
     await asyncio.sleep(0)
