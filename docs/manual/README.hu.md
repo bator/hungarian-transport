@@ -164,7 +164,9 @@ Ha a BKK elutasítja a tárolt kulcsot (visszavonták vagy lejárt), a Home
 Assistant újat kér: a **Beállítások → Eszközök és szolgáltatások** oldalon
 megjelenik **A BKK kulcsot elutasították** ablak. Ott add meg az új
 kulcsot, vagy hagyd üresen, és a BKK-elérés kikapcsol. Addig a kártyák a
-hibát mutatják, és nem küldik újra meg újra az elutasított kulcsot.
+hibát mutatják, és nem küldik újra meg újra az elutasított kulcsot. A kulcsot
+15 percenként újra kipróbálja: ha a BKK ismét elfogadja (az elutasítás
+átmeneti hiba volt), az ablak magától eltűnik.
 
 ### 3.2 Javítási üzenetek
 

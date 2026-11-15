@@ -11,9 +11,9 @@ import voluptuous as vol
 
 from homeassistant.components import frontend
 from homeassistant.components.http import StaticPathConfig
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
-from homeassistant.core import CoreState, HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.exceptions import (
     HomeAssistantError,
     ServiceValidationError,
@@ -481,6 +481,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     api_key = _entry_api_key(entry)
     if not api_key:
         return True
+
+    @callback
+    def _key_accepted_again() -> None:
+        # The rejection was a mistake (an upstream hiccup): the reauth it
+        # started goes too. Left open, answering it empty removes the key.
+        for flow in hass.config_entries.flow.async_progress_by_handler(
+            DOMAIN, match_context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id}
+        ):
+            hass.config_entries.flow.async_abort(flow["flow_id"])
+
     # The card switches to this service when it exists, so it is registered
     # only while a key is configured.
     proxy = FutarProxy(
@@ -490,6 +500,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             coro, "hungarian_transport_futar", eager_start=False
         ),
         call_later=hass_call_later(hass),
+        on_recovered=_key_accepted_again,
     )
     entry.async_on_unload(proxy.close)
     entry.async_on_unload(close_on_stop(hass, proxy.close))
@@ -514,7 +525,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # The stored key stopped working (revoked, expired): ask for a new
             # one in the UI instead of failing every card poll quietly. The
             # proxy fails fast for a while, or until a key saved in the
-            # options reloads the entry.
+            # options reloads the entry; a key FUTÁR accepts again later
+            # ends the reauth (_key_accepted_again).
             entry.async_start_reauth(hass)
             raise
         return {"data": data}
