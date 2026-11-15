@@ -273,6 +273,46 @@ with tempfile.TemporaryDirectory() as tmp_name:
         os.environ.pop(mav_shrink_guard.ALLOW_ENV, None)
     check("MAV_ALLOW_SHRINK=1 publishes it", rc == 0 and outputs.get("deploy") == "true", repr((rc, out, err)))
 
+    # A published manifest that does not read (Pages down, a network error)
+    # must not let a truncated feed through: the latest stable release's
+    # MÁV index (its frontend zip, or the index itself) stands in for it.
+    live.write_text("<html>503</html>")
+    release_zip = tmp / "release" / "hungarian-transport-frontend.zip"
+    release_zip.parent.mkdir()
+    with zipfile.ZipFile(release_zip, "w") as z:
+        z.writestr("volan-index.json.gz", b"not this one")
+        z.writestr("mav-index.json.gz", index_bytes(trains=121))
+    (tmp / "release" / "mav-index.json.gz").write_bytes(index_bytes(trains=121))
+    for n, (label, baseline) in enumerate((("frontend zip", release_zip),
+                                           ("MÁV index", tmp / "release" / "mav-index.json.gz"))):
+        rc, out, err, outputs = run_site(tmp / f"shrink-base-{n}", "--live-file", str(live),
+                                         "--baseline-file", str(baseline))
+        check(f"an unreadable published manifest: a release {label} of 121 trains refuses 60",
+              rc == 1 and "the latest release's index" in err and "60 trains and 0 lines vs 121 and 0" in err
+              and not (tmp / f"shrink-base-{n}" / "site").exists() and "deploy" not in outputs,
+              repr((rc, out, err, outputs)))
+    with zipfile.ZipFile(tmp / "release" / "small.zip", "w") as z:
+        z.writestr("mav-index.json.gz", index_bytes(trains=60))
+    rc, out, err, outputs = run_site(tmp / "shrink-base-ok", "--live-file", str(live),
+                                     "--baseline-file", str(tmp / "release" / "small.zip"))
+    check("an unreadable published manifest: a release index of as many trains lets it deploy",
+          rc == 0 and outputs.get("deploy") == "true" and "60 trains and 0 lines" in out, repr((rc, out, err)))
+    with zipfile.ZipFile(tmp / "release" / "no-mav.zip", "w") as z:
+        z.writestr("volan-index.json.gz", b"x")
+    for n, extra in enumerate((("--baseline-file", str(tmp / "release" / "no-mav.zip")), ())):
+        rc, out, err, outputs = run_site(tmp / f"shrink-base-none-{n}", "--live-file", str(live), *extra)
+        check("an unreadable published manifest and no release MÁV index"
+              f"{' in the zip' if extra else ' asked'}: deployed, with a warning that nothing was compared",
+              rc == 0 and outputs.get("deploy") == "true" and "::warning title=MÁV shrink guard skipped::" in out,
+              repr((rc, out, err)))
+    check("the release index is only an https URL", site.fetch_baseline("http://example.invalid/z.zip")[0] is None)
+    live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64,
+                                "trains": 60, "lines": 0}))
+    rc, out, err, outputs = run_site(tmp / "shrink-base-live", "--live-file", str(live),
+                                     "--baseline-file", str(release_zip))
+    check("a readable published manifest is compared, not the release index",
+          rc == 0 and outputs.get("deploy") == "true" and "release index" not in out, repr((rc, out, err)))
+
     # The script release.yml runs on the previous release's index.
     def mav_gz(path: Path, trains: int, lines: int = 0) -> Path:
         path.write_bytes(gzip.compress(json.dumps(
@@ -548,6 +588,10 @@ with tempfile.TemporaryDirectory() as tmp_name:
           args[args.index("--gtfs-zip") + 1:args.index("--gtfs-zip") + 2] == [f"{rt}/mav/gtfs/mav-gtfs.zip"]
           and args[args.index("--pfaedle-dir") + 1:args.index("--pfaedle-dir") + 2] == [f"{rt}/mav/gtfs-out"]
           if "--gtfs-zip" in args and "--pfaedle-dir" in args else False, repr(args))
+    check("the Pages site step names the latest stable release's frontend zip as the shrink guard's fallback",
+          args[args.index("--baseline-url") + 1:args.index("--baseline-url") + 2]
+          == ["https://github.com/Bator/hungarian-transport/releases/latest/download/hungarian-transport-frontend.zip"]
+          if "--baseline-url" in args else False, repr(args))
     done, outputs = bash(site_step, ws, STUB_SITE="fail", GITHUB_REPOSITORY="bator/hungarian-transport",
                          GITHUB_REPOSITORY_OWNER="bator", GITHUB_SHA="b" * 40)
     check("a refused site: warning, no deploy, the run stays green",

@@ -120,7 +120,9 @@ jobs:
       # The MÁV zip and pfaedle's output are the ones release_mav_index.sh
       # left in its work dir for this build. An index with under half the
       # trains and lines of the published one is refused
-      # (mav_shrink_guard.py); the repository variable MAV_ALLOW_SHRINK=1
+      # (mav_shrink_guard.py); when the published manifest does not read,
+      # it is compared with the latest stable release's MÁV index instead
+      # (fetched only then). The repository variable MAV_ALLOW_SHRINK=1
       # accepts an intended reduction.
       - name: Pages site
         id: site
@@ -134,6 +136,7 @@ jobs:
           if python3 scripts/mav_pages_site.py --index mav-index.json.gz --stats mav-build.json \
               --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/site" --live-url "$pages_url/mav-index.json" \
               --gtfs-zip "$RUNNER_TEMP/mav/gtfs/mav-gtfs.zip" --pfaedle-dir "$RUNNER_TEMP/mav/gtfs-out" \
+              --baseline-url "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/hungarian-transport-frontend.zip" \
               --github-output "$GITHUB_OUTPUT"; then
             ls -l "$RUNNER_TEMP/site"
             exit 0

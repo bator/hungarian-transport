@@ -40,12 +40,17 @@ Usage: mav_pages_site.py --index mav-index.json.gz --stats mav-build.json
          --commit SHA --out SITE_DIR [--gtfs-zip ZIP --pfaedle-dir DIR]
          [--live-url URL | --live-file PATH] [--github-output FILE]
          [--max-bytes N] [--allow-shrink]
+         [--baseline-url URL | --baseline-file PATH]
 Prints deploy=true|false (and appends it to --github-output). Exit 1, with
 nothing written, for an index or statistics that do not hold up, a feed
 whose feed_version does not start with a real date (YYYYMMDD, as the
 integration's served_index.feed_date reads it), a site over the size limit,
 or an index with fewer than half the trains and lines of the published one
 (mav_shrink_guard.py; --allow-shrink or MAV_ALLOW_SHRINK=1 accepts it).
+When the published manifest does not read, the shrink guard compares with
+the MÁV index of --baseline-url (the latest stable release's frontend zip,
+fetched only then) or --baseline-file (such a zip, or a mav-index.json.gz);
+without one either, it warns and compares with nothing.
 """
 from __future__ import annotations
 
@@ -96,6 +101,11 @@ MAX_MANIFEST = 64 * 1024
 # Under a day, so each daily run refreshes it; a rerun that morning does not.
 REFRESH_AFTER = timedelta(hours=12)
 LIVE_TIMEOUT = 20
+# The shrink guard's fallback: a release's frontend zip (about 15 MB) and
+# the MÁV index in it (about 0.25 MB).
+BASELINE_TIMEOUT = 120
+MAX_BASELINE_ZIP = 200 * 1024 * 1024
+MAX_BASELINE_INDEX = 32 * 1024 * 1024
 # MÁV's feed_version: the feed's date, then an id ("20261030.M2ChangeID").
 # Nothing else gets through: the value goes into a workflow output.
 FEED_RE = re.compile(r"\d{8}(?!\d)[A-Za-z0-9._:+-]{0,64}")
@@ -280,20 +290,78 @@ def refresh_due(new: dict, live: dict) -> bool:
     return built is None or now is None or now - built >= REFRESH_AFTER
 
 
-def check_shrink(man: dict, live: dict | None, allow: bool = False) -> None:
+def baseline_counts(path: Path) -> tuple[int, int] | None:
+    """(trains, lines) of the MÁV index at path, or of the mav-index.json.gz
+    in the zip at path (a release's frontend zip); None when there is none
+    or it does not read."""
+    try:
+        if not zipfile.is_zipfile(path):
+            return mav_shrink_guard.counts(path)
+        with zipfile.ZipFile(path) as z, tempfile.TemporaryDirectory() as tmp:
+            info = z.getinfo(INDEX_NAME)
+            if info.file_size > MAX_BASELINE_INDEX:
+                return None
+            index = Path(tmp) / INDEX_NAME
+            with z.open(info) as src, index.open("wb") as dst:
+                shutil.copyfileobj(src, dst, 1 << 20)
+            return mav_shrink_guard.counts(index)
+    except (OSError, KeyError, zipfile.BadZipFile, ValueError):
+        return None
+
+
+def fetch_baseline(url: str) -> tuple[tuple[int, int] | None, str]:
+    """baseline_counts of the zip at url (https only, redirects included),
+    or None and why not."""
+    if not url.startswith("https://"):
+        return None, f"not an https URL: {url}"
+    with tempfile.TemporaryDirectory() as tmp:
+        dest = Path(tmp) / "baseline.zip"
+        try:
+            with urllib.request.urlopen(url, timeout=BASELINE_TIMEOUT) as res:  # noqa: S310 - https only
+                if not res.geturl().startswith("https://"):
+                    return None, "redirected away from https"
+                with dest.open("wb") as fh:
+                    got = 0
+                    for chunk in iter(lambda: res.read(1 << 20), b""):
+                        got += len(chunk)
+                        if got > MAX_BASELINE_ZIP:
+                            return None, "larger than a release zip"
+                        fh.write(chunk)
+        except urllib.error.HTTPError as err:
+            return None, f"HTTP {err.code}"
+        except (urllib.error.URLError, OSError) as err:
+            return None, f"{type(err).__name__}: {err}"
+        found = baseline_counts(dest)
+        return found, "ok" if found is not None else f"no readable {INDEX_NAME} in it"
+
+
+def check_shrink(man: dict, live: dict | None, allow: bool = False,
+                 baseline: tuple[int, int] | None = None) -> None:
     """SiteError when the index has fewer than half the trains and lines of
     the published one (mav_shrink_guard): a truncated feed that is
     consistent in itself and names a newer feed would replace it. allow
-    (--allow-shrink, MAV_ALLOW_SHRINK) accepts an intended reduction."""
-    if live is None:
+    (--allow-shrink, MAV_ALLOW_SHRINK) accepts an intended reduction.
+
+    Without a published manifest that reads (Pages down, a network error,
+    no site yet), the index is compared with baseline, (trains, lines) of
+    the latest stable release's MÁV index: an outage must not let a
+    truncated feed through. Without that either, a warning says that
+    nothing was compared."""
+    if live is not None:
+        prev, what = (live.get("trains"), live.get("lines")), "the published index"
+    elif baseline is not None:
+        prev, what = baseline, "the latest release's index"
+    else:
+        print("::warning title=MÁV shrink guard skipped::Neither the published manifest nor a release's MÁV"
+              " index could be read; the index was not compared with a previous one.")
         return
-    why = mav_shrink_guard.shrink_problem(man["trains"], man["lines"], live.get("trains"), live.get("lines"))
+    why = mav_shrink_guard.shrink_problem(man["trains"], man["lines"], *prev)
     if not why:
         return
     if allow:
-        print(f"::warning title=MÁV index shrank::{why}; published, the shrink guard is relaxed.")
+        print(f"::warning title=MÁV index shrank::{why} ({what}); published, the shrink guard is relaxed.")
         return
-    raise SiteError(f"refusing to replace the published index: {why}; --allow-shrink or"
+    raise SiteError(f"refusing to replace {what}: {why}; --allow-shrink or"
                     f" {mav_shrink_guard.ALLOW_ENV}=1 accepts it")
 
 
@@ -427,6 +495,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--github-output", type=Path)
     ap.add_argument("--max-bytes", type=int, default=MAX_SITE_BYTES,
                     help=f"refuse a larger site (default {MAX_SITE_BYTES})")
+    base_src = ap.add_mutually_exclusive_group()
+    base_src.add_argument("--baseline-url", help="a release's frontend zip: the shrink guard's comparison"
+                          " when the published manifest does not read")
+    base_src.add_argument("--baseline-file", type=Path, help="as --baseline-url, a local zip or mav-index.json.gz")
     ap.add_argument("--allow-shrink", action="store_true", default=mav_shrink_guard.allowed(),
                     help="publish an index with under half the trains and lines of the published one"
                          f" (default: {mav_shrink_guard.ALLOW_ENV} set)")
@@ -460,8 +532,17 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
         live, why = fetch_live(args.live_url)
     else:
         live, why = None, "not asked"
+    baseline = None
+    if live is None and (args.baseline_url or args.baseline_file is not None):
+        if args.baseline_file is not None:
+            baseline = baseline_counts(args.baseline_file)
+            got = "ok" if baseline is not None else f"no readable {INDEX_NAME}"
+        else:
+            baseline, got = fetch_baseline(args.baseline_url)
+        print(f"published manifest: none ({why}); release index for the shrink guard: "
+              + (f"{baseline[0]} trains and {baseline[1]} lines" if baseline is not None else f"none ({got})"))
     try:
-        check_shrink(man, live, args.allow_shrink)
+        check_shrink(man, live, args.allow_shrink, baseline)
     except SiteError as err:
         print(f"no site: {err}", file=sys.stderr)
         return 1
