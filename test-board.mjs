@@ -15,6 +15,7 @@ import './src/lib/rows.js';
 import './src/lib/elvira-rows.js';
 import './src/lib/context.js';
 import './src/lib/departures.js';
+import './src/lib/dashboard-key.js';
 import { elviraSource } from './src/lib/board.js';
 
 /* Row helpers compare departures with the real clock (still due?), so the
@@ -952,7 +953,9 @@ function fakeWorkers(over) {
     postMessage(msg) {
       if (over && over.silent) return;
       const copy = structuredClone(msg);
-      this.ready.then(() => this.scope.onmessage({ data: copy }));
+      const run = () => this.ready.then(() => this.scope.onmessage({ data: copy }));
+      if (over && over.late) over.late.then(run);
+      else run();
     }
     terminate() { this.terminated = true; }
   }
@@ -1003,7 +1006,7 @@ test('an index is parsed in a worker when the page can start one, and comes back
   }
 });
 
-test('a file the worker cannot read keeps its error; a worker that cannot start or answer is not asked again', async () => {
+test('a file the worker cannot read keeps its error; a worker that cannot start is not asked again', async () => {
   const keep = {
     fetch: BkkLib._fetchIndexBytes, Worker: globalThis.Worker, broken: BkkLib._indexWorkerBroken,
     url: BkkLib._indexWorkerUrl, timeout: BkkLib._indexWorkerTimeoutMs,
@@ -1032,18 +1035,163 @@ test('a file the worker cannot read keeps its error; a worker that cannot start 
     globalThis.Worker = later.FakeWorker;
     assert.equal((await load()).stops.length, 1);
     assert.equal(later.made.length, 0);
-    /* A worker that never answers is given up on after its time. */
-    BkkLib._indexWorkerBroken = false;
-    BkkLib._indexWorkerTimeoutMs = 20;
-    const silent = fakeWorkers({ silent: true });
-    globalThis.Worker = silent.FakeWorker;
-    assert.equal((await load()).stops.length, 1);
-    assert.ok(silent.made[0].terminated);
-    assert.equal(BkkLib._indexWorkerBroken, true);
   } finally {
     Object.assign(BkkLib, {
       _fetchIndexBytes: keep.fetch, _indexWorkerBroken: keep.broken, _indexWorkerUrl: keep.url, _indexWorkerTimeoutMs: keep.timeout,
     });
     globalThis.Worker = keep.Worker;
   }
+});
+
+test('a worker past its time is asked again next load; the page reads alongside it and the first answer wins', async () => {
+  const keep = {
+    fetch: BkkLib._fetchIndexBytes, Worker: globalThis.Worker, broken: BkkLib._indexWorkerBroken,
+    url: BkkLib._indexWorkerUrl, timeout: BkkLib._indexWorkerTimeoutMs, text: BkkLib._indexText,
+  };
+  const body = JSON.stringify({ v: 1, s: [['city:1', 'A']], t: [] });
+  BkkLib._fetchIndexBytes = async () => ({ status: 200, bytes: new TextEncoder().encode(body) });
+  const load = () => BkkLib._loadGtfsIndex('http://x/city-index.json?v=20260101', 'errCityHttp', 'errCityGunzip');
+  try {
+    BkkLib._indexWorkerBroken = false;
+    BkkLib._indexWorkerUrl = '';
+    BkkLib._indexWorkerTimeoutMs = 20;
+    /* A worker that does not answer in time: the page's parse is used, the
+       worker stopped, and workers stay in use. */
+    const silent = fakeWorkers({ silent: true });
+    globalThis.Worker = silent.FakeWorker;
+    assert.equal((await load()).stops[0].name, 'A');
+    assert.ok(silent.made[0].terminated);
+    assert.equal(BkkLib._indexWorkerBroken, false);
+    /* The next load asks a worker again; this one answers late, while the
+       page is still reading: its index is the one used, and the page's
+       own text is never parsed. */
+    let release;
+    const late = new Promise((r) => { release = r; });
+    const slowPage = fakeWorkers({ late });
+    globalThis.Worker = slowPage.FakeWorker;
+    let pageRead;
+    const pageDone = new Promise((r) => { pageRead = r; });
+    BkkLib._indexText = async () => {
+      release();
+      await new Promise((r) => setTimeout(r, 80));
+      pageRead();
+      return JSON.stringify({ v: 1, s: [['city:1', 'from the page']], t: [] });
+    };
+    const realParse = JSON.parse;
+    let pageParsed = 0;
+    JSON.parse = (text, ...rest) => {
+      if (String(text).indexOf('from the page') >= 0) pageParsed += 1;
+      return realParse(text, ...rest);
+    };
+    try {
+      const idx = await load();
+      assert.equal(slowPage.made.length, 1);
+      assert.equal(idx.stops[0].name, 'A');
+      assert.ok(slowPage.made[0].terminated);
+      await pageDone;
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(pageParsed, 0);
+    } finally {
+      JSON.parse = realParse;
+    }
+    assert.equal(BkkLib._indexWorkerBroken, false);
+  } finally {
+    Object.assign(BkkLib, {
+      _fetchIndexBytes: keep.fetch, _indexWorkerBroken: keep.broken, _indexWorkerUrl: keep.url,
+      _indexWorkerTimeoutMs: keep.timeout, _indexText: keep.text,
+    });
+    globalThis.Worker = keep.Worker;
+  }
+});
+
+/* What Transitous answered for a bare "Vasútállomás" (2026-11): ten stops,
+   none in Győr, Eger or Pécs; the bare name is listed in Kecskemét first. */
+const VASUTALLOMAS = [
+  ['Szob, Vasútállomás', 'de-DELFI_000005500006', 47.821, 18.862057, 'Szob'],
+  ['Dorog, vasútállomás', 'hu-volan-helykozi_hkir:hkir_669153_11', 47.723915, 18.73174, 'Dorog'],
+  ['Vasútállomás', 'hu-Kecskemét_SA2536', 46.913128, 19.700514, 'Kecskemét'],
+  ['Vasútállomás', 'hu-Tatabánya_SA8987', 47.5826, 18.3965, 'Tatabánya'],
+  ['Vasútállomás', 'hu-Várpalota_26', 47.1878, 18.1391, 'Várpalota'],
+  ['Vasútállomás', 'hu-blaguss-agora_51150', 47.2381, 16.6276, 'Szombathely'],
+  ['Vasútállomás', 'hu-kaposvár_632312', 46.3553, 17.7887, 'Kaposvár'],
+  ['Vasútállomás', 'hu-kiskunhalas_KHL_M_37', 46.4321, 19.4776, 'Kiskunhalas'],
+  ['Sárvár, vasútállomás', 'hu-volan-helykozi_hkir:hkir_553625', 47.2514, 16.9318, 'Sárvár'],
+  ['Monor, vasútállomás', 'hu-volan-helykozi_hkir:hkir_778298', 47.3488, 19.4442, 'Monor'],
+].map(([name, id, lat, lon, town]) => ({
+  type: 'STOP', name, id, lat, lon, country: 'HU',
+  areas: [{ name: 'Magyarország', adminLevel: 2 }, { name: town, adminLevel: 8 }],
+}));
+const GYOR_STATION = {
+  type: 'STOP', name: 'Vasútállomás', id: 'hu-gyor_120', lat: 47.6838, lon: 17.6340, country: 'HU',
+  areas: [{ name: 'Magyarország', adminLevel: 2 }, { name: 'Győr', adminLevel: 8 }],
+};
+
+async function placing(answers, run) {
+  const keep = BkkLib.transitousGeocode;
+  const asked = [];
+  BkkLib.transitousGeocode = async (q) => {
+    asked.push(q);
+    const a = answers(q);
+    if (a instanceof Error) throw a;
+    return a;
+  };
+  try {
+    return await run(asked);
+  } finally {
+    BkkLib.transitousGeocode = keep;
+  }
+}
+
+test('a name-only stop is geocoded with its town first: a Győr "Vasútállomás" is not Kecskemét’s', async () => {
+  const stop = { id: '', name: 'Vasútállomás', key: 'vasutallomas', area: 'Győr' };
+  await placing((q) => (q === 'Vasútállomás Győr' ? [GYOR_STATION, ...VASUTALLOMAS] : VASUTALLOMAS), async (asked) => {
+    assert.equal(await BkkLib.transitousPlace(stop), '47.6838,17.634');
+    assert.deepEqual(asked, ['Vasútállomás Győr']);
+  });
+  /* A town answer with nothing in the town: the bare name is asked, and a
+     stop in the town there is taken. */
+  await placing((q) => (q === 'Vasútállomás' ? [...VASUTALLOMAS, GYOR_STATION] : VASUTALLOMAS), async (asked) => {
+    assert.equal(await BkkLib.transitousPlace(stop), '47.6838,17.634');
+    assert.deepEqual(asked, ['Vasútállomás Győr', 'Vasútállomás']);
+  });
+  /* A name that already names its town is asked as it is. */
+  await placing(() => [GYOR_STATION], async (asked) => {
+    await BkkLib.transitousPlace({ name: 'Győr, vasútállomás', area: 'Győr' });
+    assert.deepEqual(asked, ['Győr, vasútállomás']);
+  });
+  /* Szombathely is in the bare answer: its town query finds it too. */
+  await placing(() => VASUTALLOMAS, async () => {
+    assert.equal(await BkkLib.transitousPlace({ name: 'Vasútállomás', area: 'Szombathely' }), '47.2381,16.6276');
+  });
+});
+
+test('a failed town query is no stop in another town: with nothing in the town the place rejects', async () => {
+  const down = new Error('HTTP 503');
+  const stop = { name: 'Vasútállomás', area: 'Eger' };
+  await placing((q) => (q === 'Vasútállomás Eger' ? down : VASUTALLOMAS), async () => {
+    await assert.rejects(BkkLib.transitousPlace(stop), (err) => err === down);
+  });
+  /* The bare answer has the town's stop: that is good enough. */
+  const eger = Object.assign({}, GYOR_STATION, { id: 'hu-eger_1', lat: 47.8892, lon: 20.3733, areas: [{ name: 'Eger', adminLevel: 8 }] });
+  await placing((q) => (q === 'Vasútállomás Eger' ? down : [...VASUTALLOMAS, eger]), async () => {
+    assert.equal(await BkkLib.transitousPlace(stop), '47.8892,20.3733');
+  });
+  /* Both failed: the outage still rejects, as before. */
+  await placing(() => down, async () => {
+    await assert.rejects(BkkLib.transitousPlace(stop));
+  });
+});
+
+test('an apiKey of only spaces is no key and does not hide a sibling card’s real one', () => {
+  const dash = {
+    views: [{
+      cards: [
+        { type: 'custom:hungarian-transport-card', apiKey: '   ' },
+        { type: 'custom:hungarian-transport-card', apiKey: 'real-key' },
+        { type: 'custom:someone-else', apiKey: 'not-ours' },
+      ],
+    }],
+  };
+  assert.deepEqual(BkkLib.findApiKey(dash), ['real-key']);
+  assert.deepEqual(BkkLib.findApiKey({ type: 'hungarian-transport-card', apiKey: '\t\n' }), []);
 });

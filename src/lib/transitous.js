@@ -291,7 +291,28 @@ register({
     if (pt) return pt[0] + ',' + pt[1];
     const name = String(stop.name || '').trim();
     if (!name) return String(stop.id || '');
+    /* A bare "Vasútállomás" is a stop in dozens of towns, and the
+       geocoder's first ten need not hold the card's own: its town goes
+       into the query, as in transitousStopRef. The bare name is asked
+       only when that answer has nothing in the town. A town query that
+       failed is no answer: if the bare name has nothing in the town
+       either, the plan says "try again", not a stop in another town. */
+    const area = String(stop.area || '').trim();
+    const foldedArea = BkkLib.fold(area);
+    const inArea = (hit) => ((hit && hit.areas) || []).some((a) => BkkLib.fold(a && a.name) === foldedArea);
+    let townFailed = null;
+    if (foldedArea && BkkLib.fold(name).indexOf(foldedArea) < 0) {
+      try {
+        const townHits = await BkkLib.transitousGeocode(`${name} ${area}`);
+        if ((townHits || []).some(inArea)) {
+          return BkkLib.transitousCoord(BkkLib.pickTransitousHit(townHits, stop, kind));
+        }
+      } catch (err) {
+        townFailed = err;
+      }
+    }
     const hits = await BkkLib.transitousGeocode(name);
+    if (townFailed && !(hits || []).some(inArea)) throw townFailed;
     return BkkLib.transitousCoord(BkkLib.pickTransitousHit(hits, stop, kind));
   },
   async transitousStopRef(stop, kind) {
