@@ -10907,6 +10907,43 @@ const review5Planner = async (now) => {
   }
 }
 
+/* The editor: MÁV switched on in the YAML (not with the toggle) drops the
+   BKK list, so a failed MÁV load does not offer it and a pick from it does
+   not save BKK route ids on a MÁV card. */
+{
+  const keep = { reachableDests: Lib.reachableDests, probeApiKey: Lib.probeApiKey, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  Lib.probeApiKey = async () => ({ ok: true });
+  Lib.apiKeyFromDashboard = async () => '';
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  try {
+    ed.hass = { states: {}, language: 'en', services: { hungarian_transport: { futar: {} } }, connection: {} };
+    Lib.reachableDests = async () => ({ dests: [{ key: 'gyor', name: 'Győr', id: 'volan_9' }], destRoutes: { gyor: ['volan_R1', 'BKK_9'] } });
+    const base = { type: 'custom:hungarian-transport-card', stopId: 'BKK_005501024', stopName: 'Kelenföld', destKey: '', destName: '', routeIds: [] };
+    ed.setConfig(base);
+    await settleTicks();
+    const loaded = ed._dests.map((d) => d.name);
+    Lib.reachableDests = async () => { throw new Error('FUTÁR 503'); };
+    ed.setConfig(Object.assign({}, base, { mav: true }));
+    await settleTicks();
+    ed._paintDestHits('');
+    const offered = [...ed.querySelectorAll('#destHits .hit')].map((b) => b.textContent);
+    check('a mode switched in the YAML drops the old mode\'s destination list, and a failed load offers nothing',
+      loaded.join() === 'Győr' && offered.length === 0 && ed._dests.length === 0,
+      JSON.stringify({ loaded, offered, dests: ed._dests.length }));
+    /* A list left behind for another mode or city is not painted. */
+    ed._dests = [{ key: 'gyor', name: 'Győr' }];
+    ed._loadedScope = 'bkk|';
+    ed._paintDestHits('');
+    check('the destination hits never paint a list loaded for another mode',
+      !ed.querySelector('#destHits .hit'), ed.querySelector('#destHits').innerHTML);
+  } finally {
+    ed.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* GTFS-Realtime (realtime.js): which trips the card asks the integration
    about, what it copies onto the rows, and what it leaves alone. */
 {
