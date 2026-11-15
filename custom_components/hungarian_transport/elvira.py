@@ -20,6 +20,7 @@ from dataclasses import dataclass
 import json
 import logging
 import re
+import sys
 import unicodedata
 from datetime import UTC, date, datetime, timedelta
 
@@ -44,6 +45,12 @@ ELVIRA_HEADERS = {
 # wall-clock time, whatever time zone Home Assistant itself runs in.
 MAV_TZ = zoneinfo.ZoneInfo("Europe/Budapest")
 ELVIRA_CACHE_MAX = 64
+# The boards' memory (Board.nbytes), whatever their number: the oldest go
+# first past it. Kelenföld's whole day is about 0.45 MB as kept (7.4 MB of
+# JSON on Monday 2026-11-16), so ELVIRA_CACHE_MAX of the busiest boards
+# fit; it holds when an odd answer (any logged-in user can ask for any
+# station and up to eight days ahead) keeps long strings.
+ELVIRA_CACHE_BYTES = 32 * 1024 * 1024
 # A station whose boards fail is remembered so the warning is not repeated
 # every poll; the entry ends when it answers again, or after this long (a
 # station nobody asks for any more would otherwise stay for good). Bounded
@@ -66,11 +73,19 @@ MAX_TRAVEL = timedelta(hours=12)
 # The years an ELVIRA time can be in. One far outside is a placeholder or a
 # glitch, and near 9999 adding MAX_TRAVEL to it would overflow datetime.
 TIME_YEARS = range(2000, 2101)
-# Kelenföld midnight StationInfo truncates ~11:32 at 200 (moreResult=false).
-# 500 reaches ~22:32 so evening origin overlay still has #3880 to copy.
 # Far above a day of the busiest station: at 500 ELVIRA cuts Kelenföld's boards
-# (about 460 rows a day) at 22:30, and its evening trains went missing.
+# (about 450 departures and as many arrivals a day) at 22:30, and its evening
+# trains went missing. A day's board is asked from midnight whatever the
+# window: StationInfo from a later travelDate drops the trains that already
+# left the origin, delayed ones still due included, and one board serves
+# every card and window of that day (the cache).
 STATIONINFO_MAX_COUNT = "2000"
+# Tomorrow's arrival board (Window.tomorrow) only holds the trains that get
+# in past midnight, all of them by early morning: a train leaving before
+# midnight is in within eight hours. Its first 200 rows reach 11:36 even at
+# Kelenföld (2.8 MB of JSON instead of the day's 7.4 MB, Monday 2026-11-16;
+# moreResult stays false when it is cut).
+STATIONINFO_HEAD_COUNT = "200"
 ELVIRA_ROW_CAP = 500
 # A train leaving by `latest` can arrive this much later: past midnight it is
 # on tomorrow's arrival board (StationInfo is per calendar day at the station).
@@ -114,16 +129,29 @@ ELVIRA_RATE = 1.0
 ELVIRA_BURST = 60
 # A refused board is logged at most this often, with the count since.
 ELVIRA_RATE_LOG_EVERY = 300
-# The largest StationInfo answer read: Kelenföld's day is a few MB, and a
+# The largest StationInfo answer read: Kelenföld's day is 7.4 MB, and a
 # body past this is not a board but something to stop reading.
 MAX_BOARD_BYTES = 16 * 1024 * 1024
 
-# One StationInfo board: its departures and its arrivals.
-Board = tuple[list[dict], list[dict]]
+
+class Board(tuple):
+    """One StationInfo board: (departures, arrivals), each row with only the
+    fields the rows are made of (_parse_board), and nbytes, about what it
+    holds in memory (the board cache's budget)."""
+
+    nbytes: int
+
+    def __new__(cls, departures: list[dict], arrivals: list[dict], nbytes: int | None = None) -> Board:
+        board = super().__new__(cls, (departures, arrivals))
+        board.nbytes = _footprint(board) if nbytes is None else nbytes
+        return board
+
+
 # A board's (station code, service day).
 BoardKey = tuple[str, date]
-# The StationInfo request behind ElviraBoards: a board, or ElviraError.
-FetchBoard = Callable[[str, date], Awaitable[Board]]
+# The StationInfo request behind ElviraBoards: fetch(station code, service
+# day, maxCount) is a board (a pair of row lists will do), or ElviraError.
+FetchBoard = Callable[[str, date, str], Awaitable[tuple[list[dict], list[dict]]]]
 # executor(func, *args): func(*args) off the event loop (Home Assistant's
 # hass.async_add_executor_job); the loop's default executor without one.
 Executor = Callable[..., Awaitable[Any]]
@@ -329,18 +357,23 @@ def service_days(now: datetime, latest: datetime, today: date | None = None) -> 
 
 
 async def fetch_station(
-    session: aiohttp.ClientSession, station_code: str, day: date, *, executor: Executor | None = None
+    session: aiohttp.ClientSession,
+    station_code: str,
+    day: date,
+    max_count: str = STATIONINFO_MAX_COUNT,
+    *,
+    executor: Executor | None = None,
 ) -> Board:
-    """The StationInfo board of one station and service day (the POST
-    ElviraBoards makes in Home Assistant, with its session). The body is
-    read up to MAX_BOARD_BYTES and decoded in `executor`: a busy station's
-    day is megabytes of JSON, too much to parse on the event loop."""
+    """The StationInfo board of one station and service day, its first
+    max_count rows from midnight (the POST ElviraBoards makes in Home
+    Assistant, with its session). The body is read up to MAX_BOARD_BYTES
+    and decoded in `executor` (_parse_board)."""
     payload = {
         "type": "StationInfo",
         "travelDate": f"{day.isoformat()}T00:00:00",
         "stationNumberCode": station_code,
         "minCount": "0",
-        "maxCount": STATIONINFO_MAX_COUNT,
+        "maxCount": max_count,
     }
     try:
         async with session.post(
@@ -366,21 +399,115 @@ async def fetch_station(
     return await _in_executor(executor, _parse_board, b"".join(chunks))
 
 
+# The fields of a StationInfo row the rows are made of (rows_from_stationinfo,
+# longest_run, _dest_board_needed and the helpers they call), by board.
+_DEPARTURE_KEYS = (
+    "actualOrEstimatedStart", "start", "trainId", "code", "name", "fullShortType", "startTrack", "endTrack",
+)
+_ARRIVAL_KEYS = ("actualOrEstimatedArrive", "arrive", "start", "trainId", "code")
+# A departure's objects, and the fields read of them.
+_DEPARTURE_PARTS = {"viszonylatiJel": ("jel",), "kind": ("sortName", "name"), "endStation": ("name",)}
+_SERVICE_KEYS = ("description", "name", "shortName", "code", "key", "id")
+# Every key read at any depth of an answer, the answer's own included.
+_READ_KEYS = frozenset(
+    {"stationSchedulerDetails", "departureScheduler", "arrivalScheduler", "services"}
+    | set(_DEPARTURE_KEYS) | set(_ARRIVAL_KEYS) | set(_DEPARTURE_PARTS) | set(_SERVICE_KEYS)
+    | {key for keys in _DEPARTURE_PARTS.values() for key in keys}
+)
+
+
+def _read_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """An object of the answer with only the keys something reads (a null
+    one is as good as none: every field is read with .get)."""
+    return {key: value for key, value in pairs if key in _READ_KEYS and value is not None}
+
+
 def _parse_board(body: bytes) -> Board:
-    """A StationInfo answer's board; ElviraError when it is none."""
+    """A StationInfo answer's board; ElviraError when it is none.
+
+    A row has some fifty fields, its stations, kinds and services objects
+    of their own; the rows read a dozen. The answer is decoded with only the
+    keys read at any depth (_read_keys), and the rows keep the fields read
+    of them, an equal part (a service, a train kind, a terminus) shared by
+    the rows that have it: Kelenföld's day is 7.4 MB of JSON, 23 MB decoded
+    whole and about 0.45 MB as kept.
+
+    json.loads holds the GIL while it runs in C, so running it in the
+    executor alone does not keep the event loop going: Kelenföld's day
+    stalled it for 110 to 180 ms. Called back for every object, the
+    interpreter switches to the loop in between: its longest stall is 12 to
+    22 ms then, for a decoding a fifth to a third longer (Python 3.12 and
+    3.13).
+    """
     try:
-        data = json.loads(body)
+        data = json.loads(body, object_pairs_hook=_read_keys)
     except ValueError as err:
         raise ElviraError(type(err).__name__) from None
     details = data.get("stationSchedulerDetails") if isinstance(data, dict) else None
     if not isinstance(details, dict):
         # An error page or a changed API, not a day without trains.
         raise ElviraError("unexpected response")
-    return _board_rows(details.get("departureScheduler")), _board_rows(details.get("arrivalScheduler"))
+    shared: dict[Any, Any] = {}
+    departures = [_departure_row(row, shared) for row in _board_rows(details.get("departureScheduler"))]
+    arrivals = [
+        {key: row[key] for key in _ARRIVAL_KEYS if key in row} for row in _board_rows(details.get("arrivalScheduler"))
+    ]
+    return Board(departures, arrivals)
 
 
 def _board_rows(rows) -> list[dict]:
     return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+
+
+def _shared(shared: dict[Any, Any], key: Any, value: Any) -> Any:
+    """The one value of this key on the board; value itself when the key
+    cannot be one (an odd field that is no string)."""
+    try:
+        return shared.setdefault(key, value)
+    except TypeError:
+        return value
+
+
+def _part(value: Any, keys: tuple[str, ...], shared: dict[Any, Any]) -> Any:
+    if not isinstance(value, dict):
+        # The rows skip what is no object.
+        return value
+    part = {key: value[key] for key in keys if key in value}
+    return _shared(shared, tuple(part.items()), part)
+
+
+def _departure_row(row: dict, shared: dict[Any, Any]) -> dict:
+    out = {key: row[key] for key in _DEPARTURE_KEYS if key in row}
+    for key, keys in _DEPARTURE_PARTS.items():
+        if key in row:
+            out[key] = _part(row[key], keys, shared)
+    services = row.get("services")
+    if isinstance(services, list):
+        parts = [_part(svc, _SERVICE_KEYS, shared) for svc in services]
+        # The parts are shared already: equal lists are lists of the same ones.
+        services = _shared(shared, ("services", *map(id, parts)), parts)
+    if services is not None:
+        out["services"] = services
+    return out
+
+
+def _footprint(board: Any) -> int:
+    """About the memory a board holds: its containers and values, each
+    shared one once (the keys are the module's own strings)."""
+    seen: set[int] = set()
+    total = 0
+    stack = [board]
+    while stack:
+        obj = stack.pop()
+        if id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        total += sys.getsizeof(obj)
+        if isinstance(obj, dict):
+            stack.extend(obj.values())
+        elif isinstance(obj, (list, tuple)):
+            stack.extend(obj)
+    return total
 
 
 def _dest_matcher(darr, tz):
@@ -508,20 +635,44 @@ def rows_from_stationinfo(odep, darr, tz, now, latest, dest_name="", later=False
     return out[:ELVIRA_ROW_CAP]
 
 
+def _board_bytes(board: Any) -> int:
+    return board.nbytes if isinstance(board, Board) else _footprint(board)
+
+
+class _BoardCache(SharedTTLCache):
+    """The board cache: SharedTTLCache, and its boards under max_bytes
+    (Board.nbytes) too, the oldest dropped first; the newest stays even
+    alone over it (a call is waiting for it)."""
+
+    def __init__(self, *args: Any, max_bytes: int, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._max_bytes = max_bytes
+
+    def _store(self, key: Any, task: asyncio.Future) -> None:
+        super()._store(key, task)
+        data = self._data
+        total = sum(_board_bytes(board) for _ts, board in data.values())
+        while total > self._max_bytes and len(data) > 1:
+            _ts, board = data.pop(next(iter(data)))
+            total -= _board_bytes(board)
+
+
 class ElviraBoards:
     """The elvira_between service's answer (between) and its boards, and what
     lives across calls.
 
     Every card on every open dashboard polls the service, so a board is
-    cached for ELVIRA_CACHE_TTL and concurrent calls for it share one
-    request; a miss takes a rate limit token first. The outage log and the
+    cached for ELVIRA_CACHE_TTL (at most ELVIRA_CACHE_MAX of them, and
+    ELVIRA_CACHE_BYTES) and concurrent calls for it share one request; a
+    miss takes a rate limit token first. The outage log and the
     clock (`now`: wall time, any time zone; `monotonic`: the cache, the rate
     limit, the outage log and the call budget) are the source's too.
     `fetch` is the StationInfo request (fetch_station with a session in
     Home Assistant). `task_factory` and `call_later` are the cache's
     (cache.SharedTTLCache); close() stops its expiry timer for good.
     `executor` runs the rows over the boards (settle, next_boards) off the
-    event loop, as fetch_station does the decoding.
+    event loop, as fetch_station does the decoding (which also lets the
+    loop run in between, _parse_board).
     """
 
     def __init__(
@@ -538,8 +689,8 @@ class ElviraBoards:
     ) -> None:
         self._fetch = fetch
         self._executor = executor
-        self._cache = SharedTTLCache(
-            ELVIRA_CACHE_TTL, ELVIRA_CACHE_MAX, task_factory, call_later, monotonic
+        self._cache = _BoardCache(
+            ELVIRA_CACHE_TTL, ELVIRA_CACHE_MAX, task_factory, call_later, monotonic, max_bytes=ELVIRA_CACHE_BYTES
         )
         # A refused board fails at once: the card polls again in
         # ELVIRA_CACHE_TTL seconds anyway.
@@ -562,16 +713,17 @@ class ElviraBoards:
         self.monotonic = monotonic
         self.call_budget = call_budget
 
-    async def board(self, station_code: str, day: date) -> Board:
-        """StationInfo for one station and service day, cached and shared."""
+    async def board(self, station_code: str, day: date, max_count: str = STATIONINFO_MAX_COUNT) -> Board:
+        """StationInfo for one station and service day (its first max_count
+        rows), cached and shared."""
 
         def fetch():
             # The token goes on the miss itself, in the order the boards are
             # asked for (see between), not when the request task starts.
             self._rate.take()
-            return self._fetch(station_code, day)
+            return self._fetch(station_code, day, max_count)
 
-        return await self._cache.get((station_code, day.isoformat()), fetch)
+        return await self._cache.get((station_code, day.isoformat(), max_count), fetch)
 
     def close(self) -> None:
         self._cache.close()
@@ -596,14 +748,14 @@ class ElviraBoards:
         win = plan_window(self.now(), minutes_after, at)
         boards: dict[BoardKey, Board | ElviraError] = {}
         wanted = next_boards(win, origin_code, dest_code, boards)
-        boards.update(zip(wanted, await self._round(wanted)))
+        boards.update(zip(wanted, await self._round(wanted, win)))
         # A second round, tomorrow's arrival board alone, gets what is left of
         # the budget. Deciding it reads every row of today's boards.
         wanted = await _in_executor(self._executor, next_boards, win, origin_code, dest_code, boards)
         if wanted:
             try:
                 async with asyncio.timeout(deadline - self.monotonic()):
-                    boards.update(zip(wanted, await self._round(wanted)))
+                    boards.update(zip(wanted, await self._round(wanted, win)))
             except TimeoutError:
                 # Its request goes on (the cache shields it); this answer
                 # does without it, and says so in dest_error.
@@ -618,11 +770,16 @@ class ElviraBoards:
             raise type(answer.origin_failure)(str(answer.origin_failure))
         return answer.rows, answer.dest_failure
 
-    async def _round(self, wanted: list[BoardKey]) -> list:
+    async def _round(self, wanted: list[BoardKey], win: Window) -> list:
         """One round: the boards for these (station, day) pairs at once, an
-        ElviraError in place of each one that did not arrive."""
+        ElviraError in place of each one that did not arrive. Tomorrow's
+        (the destination's arrival board past midnight) only to its
+        STATIONINFO_HEAD_COUNT."""
         results = await asyncio.gather(
-            *(self.board(code, day) for code, day in wanted),
+            *(
+                self.board(code, day, STATIONINFO_HEAD_COUNT if day == win.tomorrow else STATIONINFO_MAX_COUNT)
+                for code, day in wanted
+            ),
             return_exceptions=True,
         )
         for board in results:
