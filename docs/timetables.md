@@ -247,8 +247,10 @@ The attestation is made after the deploy, in a job of its own, so a
 Sigstore outage never holds back the day's index; the run is then red, and
 the files it deployed have none (the check fails, it never passes) until a
 later run deploys again, or "Re-run failed jobs" attests them while the
-run's Pages artifact is kept (one day). That re-run repeats only the
-attestation, never the deploy.
+run's Pages artifact is kept (three days). That re-run repeats only the
+attestation, never the deploy. It waits in the workflow's concurrency group
+like any run, and made while another run waits there, it cancels that one:
+re-run when no run of the workflow is queued.
 The integration does not check the attestation: Home Assistant has no
 Sigstore client, and the integration takes no new dependency for one. It
 checks the index against the manifest's size and sha256, which come from the
