@@ -1880,7 +1880,22 @@ register({
     if (pt) return pt[0] + "," + pt[1];
     const name = String(stop.name || "").trim();
     if (!name) return String(stop.id || "");
+    const area = String(stop.area || "").trim();
+    const foldedArea = BkkLib.fold(area);
+    const inArea = (hit) => (hit && hit.areas || []).some((a) => BkkLib.fold(a && a.name) === foldedArea);
+    let townFailed = null;
+    if (foldedArea && BkkLib.fold(name).indexOf(foldedArea) < 0) {
+      try {
+        const townHits = await BkkLib.transitousGeocode(`${name} ${area}`);
+        if ((townHits || []).some(inArea)) {
+          return BkkLib.transitousCoord(BkkLib.pickTransitousHit(townHits, stop, kind));
+        }
+      } catch (err) {
+        townFailed = err;
+      }
+    }
     const hits = await BkkLib.transitousGeocode(name);
+    if (townFailed && !(hits || []).some(inArea)) throw townFailed;
     return BkkLib.transitousCoord(BkkLib.pickTransitousHit(hits, stop, kind));
   },
   async transitousStopRef(stop, kind) {
@@ -4324,7 +4339,9 @@ register({
   },
   /* Only a key that sits on one of our own cards may be reused. A dashboard can
      hold apiKey values belonging to entirely unrelated cards, and those must
-     never end up in a request to BKK. */
+     never end up in a request to BKK. A key of only spaces is none (as the
+     integration's Repairs check reads it), so it cannot hide a sibling
+     card's real one. */
   findApiKey(node, acc) {
     if (!acc) acc = [];
     if (!node || typeof node !== "object") return acc;
@@ -4333,9 +4350,8 @@ register({
       return acc;
     }
     const type = String(node.type || "").replace(/^custom:/, "");
-    if (typeof node.apiKey === "string" && node.apiKey && OWN_CARD_TYPES.indexOf(type) >= 0) {
-      acc.push(node.apiKey);
-    }
+    const key = typeof node.apiKey === "string" ? node.apiKey.trim() : "";
+    if (key && OWN_CARD_TYPES.indexOf(type) >= 0) acc.push(key);
     Object.keys(node).forEach((k) => {
       if (k === "apiKey") return;
       BkkLib.findApiKey(node[k], acc);
@@ -4666,21 +4682,14 @@ register({
       throw codedError("errIndexFetch");
     }
     if (!got.bytes) throw codedError(httpKey, got.status);
-    let idx = await BkkLib._parseIndexInWorker(got.bytes);
-    if (idx == null) {
-      let text;
-      try {
-        text = await BkkLib._indexText(got.bytes);
-      } catch (_e) {
-        throw codedError("errIndexParse");
-      }
-      if (text == null) throw codedError(gunzipKey);
-      try {
-        idx = JSON.parse(text);
-      } catch (_e) {
-        throw codedError("errIndexParse");
-      }
+    let idx = null;
+    const job = BkkLib._startIndexWorker(got.bytes);
+    if (job) {
+      const late = {};
+      idx = await Promise.race([job.done, job.slow.then(() => late)]);
+      if (idx === late) idx = await BkkLib._raceIndexParse(got.bytes, job, gunzipKey);
     }
+    if (idx == null) idx = await BkkLib._parseIndexOnPage(got.bytes, gunzipKey);
     if (!idx || typeof idx !== "object" || !Array.isArray(idx.s) || !Array.isArray(idx.t)) {
       throw codedError("errIndexParse");
     }
@@ -4720,75 +4729,133 @@ register({
     idx.s = null;
     return idx;
   },
+  /* The index file's JSON, read on the page: null when a worker that ran
+     alongside (beaten()) already has it, so its text is not parsed twice. */
+  async _parseIndexOnPage(bytes, gunzipKey, beaten) {
+    let text;
+    try {
+      text = await BkkLib._indexText(bytes);
+    } catch (_e) {
+      throw codedError("errIndexParse");
+    }
+    if (beaten && beaten()) return null;
+    if (text == null) throw codedError(gunzipKey);
+    try {
+      return JSON.parse(text);
+    } catch (_e) {
+      throw codedError("errIndexParse");
+    }
+  },
+  /* A worker past its time is not given up on: a wall tablet busy
+     painting may simply be slow. The page reads the file as well, the
+     first of the two to have the index is used and the other stopped (the
+     page skips its parse; the worker is terminated). */
+  async _raceIndexParse(bytes, job, gunzipKey) {
+    let workerIdx = null;
+    const fromWorker = job.done.then((out) => {
+      if (out == null) return new Promise(() => {
+      });
+      workerIdx = out;
+      return { idx: out };
+    });
+    const fromPage = BkkLib._parseIndexOnPage(bytes, gunzipKey, () => workerIdx != null).then((out) => ({ idx: out, page: true }), (err) => ({ err, page: true }));
+    const first = await Promise.race([fromWorker, fromPage]);
+    if (!first.page) return first.idx;
+    if (first.err) {
+      job.stop();
+      throw first.err;
+    }
+    if (first.idx == null) return workerIdx;
+    job.stop();
+    return first.idx;
+  },
   /* The index file's JSON, gunzipped and parsed in a Web Worker started
      from a Blob URL (the bundle stays one file): the 11 MB indexes took
      the page 60–130 ms in one task on a laptop, most of a second on a
      wall tablet. The parsed index comes back in slices of its long
      arrays, each message its own short task: one message with the whole
      index would cost the page more to copy than the parse it saves.
-     null when there is no worker to ask (no Worker or Blob URLs, a
-     Content-Security-Policy that blocks them, a worker that does not
-     answer: no worker is started again on this page) or the worker could
-     not read the file; the caller then reads it on the page. */
+     null when there is no worker to ask (no Worker or Blob URLs, or a
+     worker that could not start or broke, as a Content-Security-Policy
+     that blocks it does: no worker is started again on this page). Else
+     {done, slow, stop}: done gives the index, or null for a file the
+     worker could not read (the caller then reads it on the page, and its
+     error is the one it always was); slow settles once the worker is
+     past _indexWorkerTimeoutMs, which leaves it running and is no reason
+     to give up on workers; stop() ends it. */
   _indexWorkerSlice: 1e3,
   _indexWorkerTimeoutMs: 2e4,
   _indexWorkerUrl: "",
   _indexWorkerBroken: false,
   _indexWorkerMain: indexWorkerMain,
-  _parseIndexInWorker(bytes) {
+  _startIndexWorker(bytes) {
     const can = !BkkLib._indexWorkerBroken && typeof Worker === "function" && typeof Blob === "function" && typeof URL !== "undefined" && typeof URL.createObjectURL === "function";
-    if (!can) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      let worker = null;
-      let idx = null;
-      let timer = null;
-      const finish = (out, broken) => {
-        if (timer) clearTimeout(timer);
-        timer = null;
-        if (broken) BkkLib._indexWorkerBroken = true;
-        if (worker) {
-          worker.onmessage = null;
-          worker.onerror = null;
-          try {
-            worker.terminate();
-          } catch (_e) {
-          }
-        }
-        resolve(out);
-      };
-      try {
-        if (!BkkLib._indexWorkerUrl) {
-          const code = "(" + BkkLib._indexWorkerMain.toString() + ")(self);";
-          BkkLib._indexWorkerUrl = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
-        }
-        worker = new Worker(BkkLib._indexWorkerUrl);
-      } catch (_e) {
-        finish(null, true);
-        return;
-      }
-      timer = setTimeout(() => finish(null, true), BkkLib._indexWorkerTimeoutMs);
-      worker.onerror = () => finish(null, true);
-      worker.onmessage = (ev) => {
-        const msg = ev && ev.data || {};
-        if (msg.head) {
-          idx = msg.head;
-          Object.keys(msg.long || {}).forEach((k) => {
-            idx[k] = [];
-          });
-        } else if (msg.key) {
-          const into = idx && idx[msg.key];
-          const rows = msg.rows || [];
-          if (Array.isArray(into)) for (let i = 0; i < rows.length; i += 1) into.push(rows[i]);
-        } else {
-          finish(msg.done ? idx : null, false);
-        }
-      };
-      try {
-        worker.postMessage({ bytes, slice: BkkLib._indexWorkerSlice });
-      } catch (_e) {
-        finish(null, true);
-      }
+    if (!can) return null;
+    let worker = null;
+    let idx = null;
+    let timer = null;
+    let over = false;
+    let resolveDone;
+    let resolveSlow;
+    const done = new Promise((resolve) => {
+      resolveDone = resolve;
     });
+    const slow = new Promise((resolve) => {
+      resolveSlow = resolve;
+    });
+    const finish = (out, broken) => {
+      if (over) return;
+      over = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      if (broken) BkkLib._indexWorkerBroken = true;
+      if (worker) {
+        worker.onmessage = null;
+        worker.onerror = null;
+        try {
+          worker.terminate();
+        } catch (_e) {
+        }
+      }
+      resolveDone(out);
+    };
+    const job = { done, slow, stop: () => finish(null, false) };
+    try {
+      if (!BkkLib._indexWorkerUrl) {
+        const code = "(" + BkkLib._indexWorkerMain.toString() + ")(self);";
+        BkkLib._indexWorkerUrl = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+      }
+      worker = new Worker(BkkLib._indexWorkerUrl);
+    } catch (_e) {
+      finish(null, true);
+      return job;
+    }
+    timer = setTimeout(() => {
+      timer = null;
+      resolveSlow();
+    }, BkkLib._indexWorkerTimeoutMs);
+    worker.onerror = () => finish(null, true);
+    worker.onmessage = (ev) => {
+      const msg = ev && ev.data || {};
+      if (msg.head) {
+        idx = msg.head;
+        Object.keys(msg.long || {}).forEach((k) => {
+          idx[k] = [];
+        });
+      } else if (msg.key) {
+        const into = idx && idx[msg.key];
+        const rows = msg.rows || [];
+        if (Array.isArray(into)) for (let i = 0; i < rows.length; i += 1) into.push(rows[i]);
+      } else {
+        finish(msg.done ? idx : null, false);
+      }
+    };
+    try {
+      worker.postMessage({ bytes, slice: BkkLib._indexWorkerSlice });
+    } catch (_e) {
+      finish(null, true);
+    }
+    return job;
   },
   /* Runs step(0) … step(n - 1), handing the event loop back whenever a
      slice has run for _sliceMs, so a long build is no single long task
@@ -6784,6 +6851,22 @@ register({
     if (memo && memo.all === pool) memo.emma = keyed;
     return keyed;
   },
+  /* Whether a sensor train's time is the row's own departure: true, false,
+     or null for no evidence either way. A time with its date and offset
+     ("2027-10-31T02:10:00+02:00") is an instant and compared as one. A
+     bare "HH:MM" is read on the wall clock, and in the hour the clocks go
+     back it names two instants an hour apart: there it is no evidence, so
+     the 02:10 before the change cannot pass for the 02:10 after it. */
+  hassTimeAgrees(v, ts) {
+    const at = String(v && v.attime || "").trim();
+    if (!at || !ts) return false;
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}.*(?:Z|[+-]\d{2}:?\d{2})$/.test(at)) {
+      const ms = Date.parse(at);
+      if (Number.isFinite(ms)) return Math.floor(ms / 6e4) === Math.floor(ts / 60);
+    }
+    if (at !== BkkLib.hm(ts)) return false;
+    return BkkLib.hm(ts - 3600) === at || BkkLib.hm(ts + 3600) === at ? null : true;
+  },
   matchHassVehicle(pool, row) {
     const trip = String(row.tripId || "");
     const num = String(row.trainNumber || BkkLib.trainNumberFromTripId(row.tripId) || "");
@@ -6795,10 +6878,11 @@ register({
     let bestScore = 0;
     pool.forEach((v) => {
       const sameTrip = !!trip && !!v.tripId && String(v.tripId) === trip;
-      const timeHit = !!hm && !!v.attime && String(v.attime) === hm;
       const vNum = BkkLib.emmaTrainNumber(v.trainNumber);
       const looseHit = !!looseKey && vNum === looseKey;
       if (numKey && vNum && vNum !== numKey && !looseHit && !sameTrip) return;
+      const agrees = BkkLib.hassTimeAgrees(v, row.sched || row.dep);
+      const timeHit = agrees === true || agrees === null && !(looseHit && vNum !== numKey);
       let s = 0;
       if (sameTrip) s += 5;
       if (numKey && vNum === numKey || looseHit && timeHit) s += 3;
@@ -11191,6 +11275,7 @@ ${this._stopPinCss()}
 var HISTORY_RETRY_MS = 60 * 1e3;
 var PICK_DEBOUNCE_MS = 300;
 var SEARCH_ERR_MS = 30 * 1e3;
+var DEST_RETRY_MS2 = 30 * 1e3;
 var HEAD_SEC_PCT = 50;
 var SWAP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9,3L5,7H8V14H10V7H13M16,17V10H14V17H11L15,21L19,17H16Z"/></svg>';
 var EDIT_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z"/></svg>';
@@ -11213,6 +11298,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._destsLoading = false;
     this._destsFor = "";
     this._destsAccess = "";
+    this._destsFailedAt = 0;
     this._pickersMounted = false;
     this._planner = BkkLib.journeyPlanSources(this._ctx);
     this._plan = BkkLib.journeyPlan({
@@ -11413,7 +11499,9 @@ var BKKPlannerCard = class extends BKKHopCard {
   }
   connectedCallback() {
     super.connectedCallback();
-    if (!this._painted || this._plannerMap) return;
+    if (!this._painted) return;
+    this._rollWhenPickers();
+    if (this._plannerMap) return;
     const host = this._journeyHost && this._journeyHost.querySelector(".journey-plan");
     if (host && host.querySelector("#pjmap")) this._mountPlannerInlineMap(host);
   }
@@ -11977,7 +12065,8 @@ var BKKPlannerCard = class extends BKKHopCard {
     if (this._routePicked() && !this._editRoute) return;
     if (this._destsFor === cfg.stopId) {
       const access = this._futarAccess();
-      if (!access || access === this._destsAccess) return;
+      const retry = this._destsFailedAt && Date.now() - this._destsFailedAt >= DEST_RETRY_MS2;
+      if (!retry && (!access || access === this._destsAccess)) return;
     }
     this._loadDests();
   }
@@ -12858,6 +12947,7 @@ ${this._stopPinCss()}
     if (!cfg.stopId) return;
     this._destsFor = cfg.stopId;
     this._destsAccess = this._futarAccess();
+    this._destsFailedAt = 0;
     const seq = this._destLoad.bump();
     this._dests = [];
     this._destRoutes = {};
@@ -12888,6 +12978,7 @@ ${this._stopPinCss()}
       this._showSearchErr(err);
       this._dests = [];
       this._destRoutes = {};
+      this._destsFailedAt = Date.now();
     } finally {
       if (!this._destLoad.stale(seq)) {
         this._destsLoading = false;
