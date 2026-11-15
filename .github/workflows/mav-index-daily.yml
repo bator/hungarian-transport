@@ -14,9 +14,10 @@ name: Daily MÁV index
 # Nothing is deployed, and the site keeps the previous files, when the
 # secrets are missing, the download, pfaedle or the audit fails, the site is
 # refused (mav_pages_site.py: a bad feed date, over 500 MB), or the index and
-# the GTFS files have the content Pages already serves and its manifest was
-# built less than 12 hours ago (older, the same content is deployed again, so
-# built_at stays the last run that went through). A run that published
+# MÁV's zip are the ones Pages already serves and its manifest was built less
+# than 12 hours ago (older, the same content is deployed again, so built_at
+# stays the last run that went through). pfaedle's overlay is not compared:
+# its bytes differ on every run, even for the same feed. A run that published
 # nothing because something failed stays green with a ::warning:: only while
 # the published manifest is less than 2 days old; it fails at once when MÁV
 # refused the login (401/403: only new credentials help), and when the
@@ -113,12 +114,14 @@ jobs:
           key: osm-hungary-${{ steps.week.outputs.week }}
 
       # The manifest, and whether the content differs from what Pages serves
-      # (the live manifest's content digest and GTFS digests) or the live
-      # manifest is old enough to refresh (REFRESH_AFTER). The MÁV zip
-      # and pfaedle's output are the ones release_mav_index.sh left in its
-      # work dir for this build. An index with under half the trains and
-      # lines of the published one is refused (mav_shrink_guard.py); the
-      # repository variable MAV_ALLOW_SHRINK=1 accepts an intended reduction.
+      # (the live manifest's content digest and the MÁV zip's size and
+      # sha256; not the overlay's, which pfaedle never writes the same
+      # twice) or the live manifest is old enough to refresh (REFRESH_AFTER).
+      # The MÁV zip and pfaedle's output are the ones release_mav_index.sh
+      # left in its work dir for this build. An index with under half the
+      # trains and lines of the published one is refused
+      # (mav_shrink_guard.py); the repository variable MAV_ALLOW_SHRINK=1
+      # accepts an intended reduction.
       - name: Pages site
         id: site
         if: steps.mav.outputs.built == 'true'

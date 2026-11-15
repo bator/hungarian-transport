@@ -443,11 +443,23 @@ with tempfile.TemporaryDirectory() as tmp_name:
     rc, out, err, outputs = run_site(tmp / "g-same", *gtfs_args, "--live-file", str(live))
     check("the same index and GTFS files as published: no deploy",
           rc == 0 and outputs.get("deploy") == "false", repr((rc, out, err, outputs)))
-    for label, changed in (("official zip", "official"), ("overlay", "overlay")):
-        live.write_text(json.dumps({**gman, "gtfs": {**g, changed: {**g[changed], "sha256": "e" * 64}}}))
-        rc, out, err, outputs = run_site(tmp / f"g-{changed}", *gtfs_args, "--live-file", str(live))
+    for n, (label, changed, value) in enumerate((("official zip's sha256", "official", {"sha256": "e" * 64}),
+                                                 ("official zip's size", "official", {"size": 1}),
+                                                 ("overlay's tables", "overlay", {"files": ["shapes.txt"]}))):
+        live.write_text(json.dumps({**gman, "built_at": built_ago(timedelta(hours=3)),
+                                    "gtfs": {**g, changed: {**g[changed], **value}}}))
+        rc, out, err, outputs = run_site(tmp / f"g-changed-{n}", *gtfs_args, "--live-file", str(live))
         check(f"only the {label} changed: deploy", rc == 0 and outputs.get("deploy") == "true"
               and "other GTFS files" in out, repr((rc, out, err, outputs)))
+    # pfaedle writes other bytes for the same feed and OSM extract on every
+    # run (every daily run of November 2026 did): an overlay that differs
+    # only in its size and sha256 is no new content, or every run deploys.
+    live.write_text(json.dumps({**gman, "built_at": built_ago(timedelta(hours=3)),
+                                "gtfs": {**g, "overlay": {**g["overlay"], "size": 1, "sha256": "e" * 64}}}))
+    rc, out, err, outputs = run_site(tmp / "g-overlay-bytes", *gtfs_args, "--live-file", str(live))
+    check("only the overlay's bytes changed, published 3 h ago: no deploy",
+          rc == 0 and outputs.get("deploy") == "false" and "::notice title=Daily MÁV index unchanged::" in out,
+          repr((rc, out, err, outputs)))
     live.write_text(json.dumps(man))
     rc, out, err, outputs = run_site(tmp / "g-first", *gtfs_args, "--live-file", str(live))
     check("a published manifest without GTFS files: deploy", rc == 0 and outputs.get("deploy") == "true",

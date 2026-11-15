@@ -22,8 +22,12 @@ always did.
 
 Whether to deploy: not when the published manifest names the same content
 digest (index_digest.py), manifest format and schema, and the same "gtfs"
-object (the zips' sizes and digests), and was built less than REFRESH_AFTER
-ago. Older, the same content is deployed again for its new built_at: the
+object apart from the overlay's bytes (same_content: MÁV's zip by size and
+sha256, the overlay by name and tables), and was built less than
+REFRESH_AFTER ago. pfaedle does not write the same tables twice for the
+same feed and OSM extract, so the overlay's size and sha256 differ on every
+run and would deploy each one; a new overlay ships with the next deploy
+that a changed index, MÁV zip or refresh makes. Older, the same content is deployed again for its new built_at: the
 daily verdict and the integration read built_at as the last build that went
 through, and a feed MÁV leaves alone for days is not a stale index. One that
 cannot be read (no site yet, Pages not enabled, a network error) never stops
@@ -293,11 +297,26 @@ def check_shrink(man: dict, live: dict | None, allow: bool = False) -> None:
                     f" {mav_shrink_guard.ALLOW_ENV}=1 accepts it")
 
 
+def _gtfs_identity(gtfs: object) -> object:
+    """What of a manifest's "gtfs" object same_content compares: all of it
+    but the overlay's size and sha256, which change with every pfaedle run
+    (its tables are not reproducible), while the official zip's identity and
+    the overlay's name and tables say what the site serves."""
+    if not isinstance(gtfs, dict):
+        return gtfs
+    out = dict(gtfs)
+    overlay = out.get("overlay")
+    if isinstance(overlay, dict):
+        out["overlay"] = {k: v for k, v in overlay.items() if k not in ("size", "sha256")}
+    return out
+
+
 def same_content(new: dict, live: dict | None) -> bool:
     """The published site serves this content already. Not the sha256: the
-    gzip header carries the build time, so every build's bytes differ."""
+    gzip header carries the build time, so every build's bytes differ. Nor
+    the overlay's bytes (_gtfs_identity)."""
     return live is not None and all(live.get(k) == new[k] for k in ("format", "schema", "digest")) \
-        and live.get("gtfs") == new.get("gtfs")
+        and _gtfs_identity(live.get("gtfs")) == _gtfs_identity(new.get("gtfs"))
 
 
 def attribution(man: dict) -> str:
