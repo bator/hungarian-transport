@@ -149,6 +149,17 @@ async def _get(session: aiohttp.ClientSession, url: str, limit: int, timeout: ai
         async with session.get(
             url, timeout=timeout, allow_redirects=False, headers={"Cache-Control": "no-cache"}
         ) as res:
+            if 300 <= res.status < 400:
+                # Redirects are not followed: the files are taken from
+                # PAGES_BASE only. GitHub Pages redirects every github.io URL
+                # once the repository has a custom domain; this says so,
+                # rather than a bare status, until a version reads it there.
+                where = str((res.headers or {}).get("Location", ""))[:200]
+                raise DailyIndexError(
+                    f"{what}: HTTP {res.status}, redirected to {where or 'nowhere'!r}; redirects are not "
+                    f"followed (only {PAGES_BASE} is read; a custom GitHub Pages domain needs an update "
+                    "of Hungarian transport)"
+                )
             if res.status != 200:
                 raise DailyIndexError(f"{what}: HTTP {res.status}")
             length = (res.headers or {}).get("Content-Length")

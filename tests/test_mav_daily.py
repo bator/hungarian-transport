@@ -691,6 +691,31 @@ def test_the_urls_are_fixed_https_on_github_pages() -> None:
         assert url.startswith("https://bator.github.io/hungarian-transport/")
 
 
+@pytest.mark.parametrize("which", ["manifest", "index"])
+async def test_a_redirect_says_it_is_not_followed(
+    hass: HomeAssistant, aioclient_mock, card_assets, caplog, which
+) -> None:
+    """A custom Pages domain redirects every github.io URL: the round fails
+    with a warning naming the redirect, not a bare "HTTP 301"."""
+    out = card_assets / mav.INDEX_NAME
+    out.write_bytes(_index(OLD))
+    raw = _index(NEW)
+    moved = "https://transit.example.org/hungarian-transport/mav-index.json"
+    if which == "manifest":
+        aioclient_mock.get(mav_daily.MANIFEST_URL, status=301, headers={"Location": moved})
+    else:
+        aioclient_mock.get(mav_daily.MANIFEST_URL, json=_manifest(raw))
+        aioclient_mock.get(mav_daily.INDEX_URL, status=302, headers={"Location": moved + ".gz"})
+
+    done = await mav_daily.async_update(hass, card_assets)
+    assert done.result == mav_daily.FAILED
+    assert f"redirected to '{moved}" in done.error and "custom GitHub Pages domain" in done.error
+    assert [w for w in _warnings(caplog) if "redirects are not followed" in w and moved in w]
+    assert out.read_bytes() == _index(OLD)
+    # Nothing was fetched from where it pointed.
+    assert all(str(c[1]).startswith(mav_daily.PAGES_BASE + "/") for c in aioclient_mock.mock_calls)
+
+
 def test_the_manifest_format_matches_the_site_script() -> None:
     """mav_daily reads the manifest scripts/mav_pages_site.py writes."""
     script = Path(__file__).resolve().parent.parent / "scripts" / "mav_pages_site.py"
