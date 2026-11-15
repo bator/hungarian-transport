@@ -439,7 +439,21 @@ Every release also publishes `SHA256SUMS`, `hungarian-transport-build.json`
 and a build provenance attestation: check a download with
 `sha256sum -c SHA256SUMS`
 (next to the zips) or
-`gh attestation verify hungarian-transport.zip --repo bator/hungarian-transport`.
+
+```sh
+gh attestation verify hungarian-transport.zip --repo bator/hungarian-transport \
+  --signer-workflow bator/hungarian-transport/.github/workflows/release.yml \
+  --source-ref refs/tags/v1.9.3
+```
+
+`--signer-workflow` pins the release workflow: another workflow of the
+repository signs with the same repository, and its files do not pass.
+`--source-ref` is the ref the run started from: `refs/tags/<tag>` for a
+release cut by pushing its tag (`"event": "push"` in
+`hungarian-transport-build.json`), `refs/heads/main` for one the workflow
+tagged itself, the weekly timetable release and a manual run (`"schedule"`,
+`"workflow_dispatch"`; a manual run from another branch stops before it
+builds anything).
 The attestation names the commit of the workflow run that built the zip. On
 a weekly timetable release that is the head of `main` (where the workflow
 runs), not the tagged commit the zips are built from;
