@@ -1,6 +1,6 @@
 import { DEFAULT_MINUTES_AFTER, MAP_TILES, MAP_TILE_OPTIONS, MINUTES_AFTER_PRESETS, clampMinutesAfter, configDataKey, departureStillDue, destRouteIds, normalizeCardConfig, pad2, tzEpochSec, tzFields, tzShiftYmd } from './config.js';
 import { BKKHopCard, NARROW_ROWS_PX } from './hop-card.js';
-import { t } from './i18n.js';
+import { errText, t } from './i18n.js';
 import { MIX_SUPPORTS } from './themes.js';
 import { BkkLib } from './lib/core.js';
 import { generation } from './lib/generation.js';
@@ -11,6 +11,9 @@ import { BKK_PLANNER_EDITOR } from './tags.js';
 const HISTORY_RETRY_MS = 60 * 1000;
 /* Day and clock picks wait this long for the next arrow-key step. */
 const PICK_DEBOUNCE_MS = 300;
+/* A failed stop search or destination list load says so for this long
+   (cleared on the countdown tick), or until a search or load succeeds. */
+const SEARCH_ERR_MS = 30 * 1000;
 /* Share of the HA secondary text colour in the themed title band's
    secondary text (the rest is the HA text colour). */
 const HEAD_SEC_PCT = 50;
@@ -26,6 +29,11 @@ export class BKKPlannerCard extends BKKHopCard {
     this._pickTimer = null;
     /* The Budapest day the time pickers' "ma" and "holnap" were painted on. */
     this._whenPaintedFor = '';
+    /* A failed stop search or destination load, kept apart from the
+       board's error: the board's banner stays while a search fails or
+       succeeds, and the search's own goes away on its own. */
+    this._searchErr = '';
+    this._searchErrAt = 0;
     /* The origin search, the destination search and the destination list
        load: a newer one (or a pick) makes the one still running stale. */
     this._originSearch = generation();
@@ -108,6 +116,7 @@ export class BKKPlannerCard extends BKKHopCard {
   _tickPaint() {
     super._tickPaint();
     this._rollWhenPickers();
+    if (this._searchErr && Date.now() - this._searchErrAt >= SEARCH_ERR_MS) this._showSearchErr('');
     const cfg = this._config || {};
     if (!cfg.stopId || !cfg.destKey || !this._plan.stale) return;
     if (this._reloadActive || !this.isConnected || this._pageHidden()) return;
@@ -142,6 +151,24 @@ export class BKKPlannerCard extends BKKHopCard {
     this._rows = [];
     this._rawRows = [];
     this._err = '';
+    this._searchErr = '';
+  }
+
+  /* A search or destination load that failed: worded at paint, like the
+     board's error. An empty err clears it (repainting only if one was up). */
+  _showSearchErr(err) {
+    if (!err && !this._searchErr) return;
+    this._searchErr = err || '';
+    this._searchErrAt = err ? Date.now() : 0;
+    this._paint();
+  }
+
+  /* The board's error and a search's, both when both are up. */
+  _errMessage(lang) {
+    const board = super._errMessage(lang);
+    const search = this._searchErr ? errText(lang || this._lang(), this._searchErr) : '';
+    if (!search || search === board) return board;
+    return board ? `${board} \u00b7 ${search}` : search;
   }
 
   /* A chosen time plans itineraries for that moment. The live departure
@@ -1693,11 +1720,11 @@ ${this._stopPinCss()}
     const seq = this._originSearch.bump();
     if (!q || q.length < 2) { box.innerHTML = ''; return; }
     try {
-      this._err = '';
       if (!this._hasFutar()) await this._fillKey();
       if (this._originSearch.stale(seq)) return;
       const hits = await BkkLib.searchPlannerStops(this._ctx.indexes(), this._apiKey(), q);
       if (this._originSearch.stale(seq)) return;
+      this._showSearchErr('');
       if (!hits.length) {
         this._hint(box, 'mode.empty');
         return;
@@ -1714,7 +1741,7 @@ ${this._stopPinCss()}
       });
     } catch (err) {
       if (this._originSearch.stale(seq)) return;
-      this._showErr(err);
+      this._showSearchErr(err);
     }
   }
 
@@ -1785,9 +1812,10 @@ ${this._stopPinCss()}
         this._dests = (out && out.dests) || [];
         this._destRoutes = (out && out.destRoutes) || {};
       }
+      this._showSearchErr('');
     } catch (err) {
       if (this._destLoad.stale(seq)) return;
-      this._showErr(err);
+      this._showSearchErr(err);
       this._dests = [];
       this._destRoutes = {};
     } finally {
@@ -1823,6 +1851,7 @@ ${this._stopPinCss()}
       if (!this._hasFutar()) await this._fillKey();
       const extras = await BkkLib.searchPlannerStops(this._ctx.indexes(), this._apiKey(), q);
       if (this._destSearch.stale(seq)) return;
+      this._showSearchErr('');
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
       if (!hits.length && this._destsLoading) {
         this._hint(box, 'destLoading');
@@ -1831,7 +1860,7 @@ ${this._stopPinCss()}
       this._renderDestHits(hits, 'mode.empty');
     } catch (err) {
       if (this._destSearch.stale(seq)) return;
-      this._showErr(err);
+      this._showSearchErr(err);
     }
   }
 

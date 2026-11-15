@@ -9591,6 +9591,63 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   }
 }
 
+/* The planner's search errors are its own: a search does not drop the
+   board's banner, and a failed search's banner goes once a search
+   succeeds or after a while, not only on the next pick. */
+{
+  const keep = {
+    nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+    searchPlannerStops: Lib.searchPlannerStops, reachableDests: Lib.reachableDests,
+  };
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async (poll) => {
+      poll.show({ phase: 'failed', rows: [], banner: Object.assign(new Error('x'), { code: 'futar_rate_limited' }), loading: false, filled: false, quiet: false });
+    };
+    Lib.apiKeyFromDashboard = async () => '';
+    Lib.reachableDests = async () => ({ dests: [], destRoutes: {} });
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc.hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } }, connection: {} };
+    pc._planner.now = async () => null;
+    document.body.appendChild(pc);
+    await settleTicks();
+    const banner = () => {
+      const el = pc._elErr;
+      return el && el.style.display !== 'none' ? el.textContent : '';
+    };
+    const boardBanner = banner();
+    Lib.searchPlannerStops = async () => [{ id: 'BKK_F00009', name: 'Deák Ferenc tér' }];
+    await pc._searchOrigin('Deák');
+    pc._paint();
+    const afterSearch = banner();
+    Lib.searchPlannerStops = async () => { throw new Error('search broke'); };
+    await pc._searchOrigin('Deák');
+    const failed = banner();
+    Lib.searchPlannerStops = async () => [{ id: 'BKK_F00009', name: 'Deák Ferenc tér' }];
+    await pc._searchOrigin('Deák');
+    const recovered = banner();
+    Lib.searchPlannerStops = async () => { throw new Error('search broke'); };
+    await pc._searchOrigin('Deák');
+    now += 31 * 1000;
+    pc._tickPaint();
+    const aged = banner();
+    check('a stop search keeps the board\'s error banner up',
+      !!boardBanner && afterSearch === boardBanner, JSON.stringify({ boardBanner, afterSearch }));
+    check('a failed search shows its error beside the board\'s, gone after a search that succeeds or half a minute',
+      failed.includes(boardBanner) && failed.length > boardBanner.length
+      && recovered === boardBanner && aged === boardBanner,
+      JSON.stringify({ failed, recovered, aged }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* The editor: an integration gone for a moment (an entry reload) and back
    probes its key again, not taken as refused with the key field left up. */
 {
