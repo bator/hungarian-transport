@@ -369,6 +369,8 @@ test('a city board whose Transitous fill failed keeps its fill-ins still due, as
     await card.poll(src);
     const first = [ids(card.board.rows), card.board.filled];
     answer = null;
+    /* The next poll after the fill's two minutes. */
+    BkkLib._transitousFilled.clear();
     card.gen.now += 1;
     await card.poll(src);
     assert.deepEqual(first, ['motis:hu-x_12,motis:hu-x_13', true]);
@@ -377,6 +379,7 @@ test('a city board whose Transitous fill failed keeps its fill-ins still due, as
     Object.assign(BkkLib, keep);
     BkkLib._transitousEmptyAt.clear();
     BkkLib._transitousFailed.clear();
+    BkkLib._transitousFilled.clear();
   }
 });
 
@@ -712,5 +715,96 @@ test('an elvira_between call that never answers ends at the card’s own timeout
     await assert.rejects(BkkLib._elviraCall(hung, {}), (err) => err.code === 'elvira_timeout');
   } finally {
     BkkLib._elviraTimeoutMs = keep;
+  }
+});
+
+/* The Transitous fill (fillTransitousIfEmpty): what it asks the
+   volunteer-run service for, and how often. */
+
+/* A clean fill state, Date.now standing at ms, and transitousDepartures
+   answering answer() and counting. */
+function fillBench(answer) {
+  const keep = { transitousDepartures: BkkLib.transitousDepartures, now: Date.now };
+  const bench = { asked: 0, ms: T0 * 1000 };
+  [BkkLib._transitousEmptyAt, BkkLib._transitousFailed, BkkLib._transitousFilled, BkkLib._transitousFillInflight]
+    .forEach((m) => m.clear());
+  Date.now = () => bench.ms;
+  BkkLib.transitousDepartures = async () => { bench.asked += 1; return answer(); };
+  bench.restore = () => {
+    BkkLib.transitousDepartures = keep.transitousDepartures;
+    Date.now = keep.now;
+    [BkkLib._transitousEmptyAt, BkkLib._transitousFailed, BkkLib._transitousFilled, BkkLib._transitousFillInflight]
+      .forEach((m) => m.clear());
+  };
+  return bench;
+}
+const FILL_FROM = { id: 'szfv:1', name: 'Kossuth tér' };
+const FILL_TO = { key: 'piac', name: 'Piac' };
+const FILL_OPTS = { mode: 'helyi', minutesAfter: 60 };
+
+test('a fill that found departures serves the polls of the next two minutes without asking again', async () => {
+  const bench = fillBench(() => [bus('motis:hu-x_12', 10), bus('motis:hu-x_13', 25)]);
+  try {
+    const polls = [];
+    for (let i = 0; i < 3; i += 1) {
+      bench.ms = (T0 + i * 45) * 1000;
+      polls.push(await BkkLib.fillTransitousIfEmpty([], FILL_FROM, FILL_TO, FILL_OPTS));
+    }
+    assert.equal(bench.asked, 1);
+    assert.deepEqual(polls.map(ids), Array(3).fill('motis:hu-x_12,motis:hu-x_13'));
+    /* Each poll has row objects of its own to write ride times onto. */
+    assert.notEqual(polls[0][0], polls[1][0]);
+    /* After the two minutes it asks again. */
+    bench.ms = (T0 + 121) * 1000;
+    await BkkLib.fillTransitousIfEmpty([], FILL_FROM, FILL_TO, FILL_OPTS);
+    assert.equal(bench.asked, 2);
+  } finally {
+    bench.restore();
+  }
+});
+
+test('a kept fill whose departures have all left asks again, and another pair is no hit', async () => {
+  const bench = fillBench(() => [bus('motis:hu-x_12', -5)]);
+  try {
+    await BkkLib.fillTransitousIfEmpty([], FILL_FROM, FILL_TO, FILL_OPTS);
+    await BkkLib.fillTransitousIfEmpty([], FILL_FROM, FILL_TO, FILL_OPTS);
+    assert.equal(bench.asked, 2);
+    await BkkLib.fillTransitousIfEmpty([], FILL_FROM, { key: 'vasutallomas', name: 'Vasútállomás' }, FILL_OPTS);
+    assert.equal(bench.asked, 3);
+  } finally {
+    bench.restore();
+  }
+});
+
+test('three cards filling the same pair at once share one plan', async () => {
+  const bench = fillBench(() => [bus('motis:hu-x_12', 10)]);
+  try {
+    const got = await Promise.all([1, 2, 3].map(() => BkkLib.fillTransitousIfEmpty([], FILL_FROM, FILL_TO, FILL_OPTS)));
+    assert.equal(bench.asked, 1);
+    assert.deepEqual(got.map(ids), Array(3).fill('motis:hu-x_12'));
+    assert.equal(BkkLib._transitousFillInflight.size, 0);
+  } finally {
+    bench.restore();
+  }
+});
+
+test('three cards failing at once pause the pair a minute and a half, not six minutes', async () => {
+  const bench = fillBench(() => null);
+  try {
+    const got = await Promise.all([1, 2, 3].map(() => BkkLib.fillTransitousIfEmpty([], FILL_FROM, FILL_TO, FILL_OPTS)));
+    assert.deepEqual(got, [null, null, null]);
+    const key = BkkLib._transitousFillKey(FILL_FROM, FILL_TO, FILL_OPTS);
+    assert.equal(BkkLib._transitousFailed.get(key).wait, 90 * 1000);
+    /* Failures within one round count once, however they come in; the
+       next round's doubles the pause. */
+    BkkLib._transitousFillFailed(key);
+    BkkLib._transitousFillFailed(key);
+    assert.equal(BkkLib._transitousFailed.get(key).wait, 90 * 1000);
+    bench.ms += 91 * 1000;
+    assert.equal(await BkkLib.fillTransitousIfEmpty([], FILL_FROM, FILL_TO, FILL_OPTS), null);
+    assert.equal(BkkLib._transitousFailed.get(key).wait, 180 * 1000);
+    assert.equal(bench.asked, 2);
+  } finally {
+    bench.restore();
   }
 });

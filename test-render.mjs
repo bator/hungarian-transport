@@ -4923,6 +4923,9 @@ const deferred = () => {
   answer = [{ label: '7', dep: Math.floor(t0 / 1000) + 900 }];
   const after = await Lib.fillTransitousIfEmpty([], o, d, opts);
   await Lib.fillTransitousIfEmpty([], o, d, opts);
+  /* A fill with rows is kept two minutes, then asked again. */
+  Date.now = () => t0 + 13 * 60 * 1000 + 1000;
+  await Lib.fillTransitousIfEmpty([], o, d, opts);
   Date.now = realNow;
   check('an empty fill pauses that pair for ten minutes; another pair, and a fill with rows, ask again',
     paused === 1 && otherPair === 2 && after.length === 1 && plans === 4,
@@ -4931,6 +4934,7 @@ const deferred = () => {
      short pause, not the ten minutes. */
   Lib._transitousEmptyAt.clear();
   Lib._transitousFailed.clear();
+  Lib._transitousFilled.clear();
   plans = 0;
   answer = null;
   Date.now = () => t0;
