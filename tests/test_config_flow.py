@@ -10,6 +10,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.data_entry_flow import FlowResultType, InvalidData
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.selector import (
     BooleanSelector,
     SelectSelector,
@@ -328,18 +329,30 @@ async def test_options_key_answers_a_pending_reauth(hass, aioclient_mock, answer
     entry.add_to_hass(hass)
     other = MockConfigEntry(domain=DOMAIN, unique_id="other", options={CONF_API_KEY: "x"})
     other.add_to_hass(hass)
-    await entry.start_reauth_flow(hass)
-    await other.start_reauth_flow(hass)
+    # Started as the integration starts them, with their Repairs issues.
+    entry.async_start_reauth(hass)
+    other.async_start_reauth(hass)
+    await hass.async_block_till_done()
+    issues = ir.async_get(hass)
+
+    def issue(e):
+        return issues.async_get_issue("homeassistant", f"config_entry_reauth_{DOMAIN}_{e.entry_id}")
+
+    assert issue(entry) is not None and issue(other) is not None
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     result = await hass.config_entries.options.async_configure(result["flow_id"], answer)
     assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
     flows = hass.config_entries.flow.async_progress_by_handler(
         DOMAIN, match_context={"source": config_entries.SOURCE_REAUTH}
     )
     assert sorted(f["context"]["entry_id"] for f in flows) == sorted(
         [other.entry_id, *([entry.entry_id] if pending else [])]
     )
+    # An answered reauth takes its Repairs issue along (HA 2024.10 does not).
+    assert (issue(entry) is not None) == pending
+    assert issue(other) is not None
 
 
 @pytest.mark.parametrize("cleared", [{}, {CONF_API_KEY: "  "}])
