@@ -52,6 +52,32 @@ async def _setup(hass: HomeAssistant) -> MockConfigEntry:
     return entry
 
 
+async def test_setup_wires_the_idle_drop_timer_and_the_executor(hass: HomeAssistant, monkeypatch) -> None:
+    """The realtime hub drops idle feeds on HA's timer (closed when HA
+    stops), and ELVIRA's boards are decoded and settled in the executor."""
+    made: dict[str, dict] = {}
+    real_hub, real_boards = integration.realtime.RealtimeHub, integration.ElviraBoards
+
+    def hub(*args, **kwargs):
+        made["hub"] = kwargs
+        made["hub_obj"] = real_hub(*args, **kwargs)
+        return made["hub_obj"]
+
+    def boards(fetch, **kwargs):
+        made["boards"] = {**kwargs, "fetch": fetch}
+        return real_boards(fetch, **kwargs)
+
+    monkeypatch.setattr(integration.realtime, "RealtimeHub", hub)
+    monkeypatch.setattr(integration, "ElviraBoards", boards)
+    await _setup(hass)
+    assert made["hub"].get("call_later") is not None
+    assert made["boards"].get("executor") is not None
+    assert made["boards"]["fetch"].keywords.get("executor") is not None
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STOP)
+    await hass.async_block_till_done()
+    assert made["hub_obj"]._closed
+
+
 def _card_urls(hass: HomeAssistant) -> set[str]:
     return set(hass.data[DATA_EXTRA_MODULE_URL].urls)
 

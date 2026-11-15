@@ -295,14 +295,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     session = async_get_clientsession(hass)
     # ELVIRA's boards (elvira.py), shared by every card for Home Assistant's
     # lifetime: the services stay registered while the entry is unloaded.
+    # Boards are decoded, and their rows settled, in HA's executor: a busy
+    # station's day is megabytes of JSON.
     boards = ElviraBoards(
-        partial(fetch_station, session),
+        partial(fetch_station, session, executor=hass.async_add_executor_job),
         task_factory=lambda coro: hass.async_create_background_task(
             coro, "hungarian_transport_elvira", eager_start=False
         ),
         call_later=hass_call_later(hass),
         now=dt_util.now,
         monotonic=time.monotonic,
+        executor=hass.async_add_executor_job,
     )
     close_on_stop(hass, boards.close)
 
@@ -347,13 +350,17 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # GTFS-Realtime delays and positions (realtime.py): fetched only while a
     # card asks, shared by every card. Reading needs no admin, like the
     # timetables the cards read anyway.
+    # call_later: decoded feeds no card asks for leave memory on a timer,
+    # also when no card asks at all; the timer stops with HA.
     hub = realtime.RealtimeHub(
         session,
         executor=hass.async_add_executor_job,
         task_factory=lambda coro: hass.async_create_background_task(
             coro, "hungarian_transport_realtime", eager_start=False
         ),
+        call_later=hass_call_later(hass),
     )
+    close_on_stop(hass, hub.close)
 
     # Feed outages are part of the hub's answer (rt_unavailable, rt_no_feed).
     @_card_service(hass, lambda call: {"feed": call.data["feed"], "trips": {}}, starting=RT_UNAVAILABLE)
