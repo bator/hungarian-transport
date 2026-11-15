@@ -373,7 +373,12 @@ register({
   /* A worker past its time is not given up on: a wall tablet busy
      painting may simply be slow. The page reads the file as well, the
      first of the two to have the index is used and the other stopped (the
-     page skips its parse; the worker is terminated). */
+     page skips its parse; the worker is terminated). The worker can only
+     win while the page is still gunzipping: the page's JSON.parse is one
+     task, and its answer is in before the next worker message is handled.
+     So the worker is stopped as the page's parse starts, not after it:
+     the slices it sent so far are dropped before the page builds its own
+     index, and a slow tablet holds one index at its peak, not two. */
   async _raceIndexParse(bytes, job, gunzipKey) {
     let workerIdx = null;
     const fromWorker = job.done.then((out) => {
@@ -381,7 +386,10 @@ register({
       workerIdx = out;
       return { idx: out };
     });
-    const fromPage = BkkLib._parseIndexOnPage(bytes, gunzipKey, () => workerIdx != null)
+    /* true when the worker has the index already (stop() says so when its
+       answer is in but not yet seen here); else the worker is stopped. */
+    const beaten = () => workerIdx != null || job.stop() === true;
+    const fromPage = BkkLib._parseIndexOnPage(bytes, gunzipKey, beaten)
       .then((out) => ({ idx: out, page: true }), (err) => ({ err, page: true }));
     const first = await Promise.race([fromWorker, fromPage]);
     if (!first.page) return first.idx;
@@ -389,7 +397,7 @@ register({
       job.stop();
       throw first.err;
     }
-    if (first.idx == null) return workerIdx;
+    if (first.idx == null) return (await fromWorker).idx;
     job.stop();
     return first.idx;
   },
@@ -406,7 +414,8 @@ register({
      worker could not read (the caller then reads it on the page, and its
      error is the one it always was); slow settles once the worker is
      past _indexWorkerTimeoutMs, which leaves it running and is no reason
-     to give up on workers; stop() ends it. */
+     to give up on workers; stop() ends it and drops what it sent so far,
+     and is true when the worker had finished with the index already. */
   _indexWorkerSlice: 1000,
   _indexWorkerTimeoutMs: 20000,
   _indexWorkerUrl: '',
@@ -421,6 +430,7 @@ register({
     let idx = null;
     let timer = null;
     let over = false;
+    let won = false;
     let resolveDone;
     let resolveSlow;
     const done = new Promise((resolve) => { resolveDone = resolve; });
@@ -428,6 +438,10 @@ register({
     const finish = (out, broken) => {
       if (over) return;
       over = true;
+      won = out != null;
+      /* The caller keeps the job until its race is over: the slices a
+         stopped worker sent are let go here, not with the job. */
+      idx = null;
       if (timer) clearTimeout(timer);
       timer = null;
       if (broken) BkkLib._indexWorkerBroken = true;
@@ -438,7 +452,14 @@ register({
       }
       resolveDone(out);
     };
-    const job = { done, slow, stop: () => finish(null, false) };
+    const job = {
+      done,
+      slow,
+      stop: () => {
+        finish(null, false);
+        return won;
+      },
+    };
     try {
       if (!BkkLib._indexWorkerUrl) {
         const code = '(' + BkkLib._indexWorkerMain.toString() + ')(self);';

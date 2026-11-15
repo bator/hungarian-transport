@@ -282,6 +282,20 @@ register({
     if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + ',' + lon;
     return String(hit.id || '');
   },
+  /* The stop's area when it names the town the stop is in, else ''. A
+     city feed's stop id starts with the feed's id, which names its town
+     ("pecs:…", "kecskemet-kisvasut:…", "volan-eger:…"), and its area comes
+     from the feed's operator ("Pécs — Tüke Busz"). A feed whose id does
+     not name its area serves a region: Bahart's "Balaton" ("bahart:…") is
+     no town to geocode a stop in. Any other area (a Volán stop's, the
+     board's own town) is a town. */
+  transitousTown(stop) {
+    const area = String((stop && stop.area) || '').trim();
+    if (!area || BkkLib.stopIdFamily(stop) !== 'city') return area;
+    const feed = String(stop.id).split(':')[0].toLowerCase().replace(/^volan-/, '');
+    const slug = BkkLib.fold(area).replace(/ /g, '-');
+    return slug && (feed === slug || feed.indexOf(slug + '-') === 0) ? area : '';
+  },
   /* '' when the geocoder knows no such stop; a geocoder that failed
      (Transitous down) rejects, so a plan says "try again", not "no route". */
   async transitousPlace(stop, kind) {
@@ -296,8 +310,9 @@ register({
        into the query, as in transitousStopRef. The bare name is asked
        only when that answer has nothing in the town. A town query that
        failed is no answer: if the bare name has nothing in the town
-       either, the plan says "try again", not a stop in another town. */
-    const area = String(stop.area || '').trim();
+       either, the plan says "try again", not a stop in another town. An
+       area that is no town asks the bare name only. */
+    const area = BkkLib.transitousTown(stop);
     const foldedArea = BkkLib.fold(area);
     const inArea = (hit) => ((hit && hit.areas) || []).some((a) => BkkLib.fold(a && a.name) === foldedArea);
     let townFailed = null;
@@ -344,7 +359,7 @@ register({
       } catch (_e) { /* parent CSF ids 404; child F ids usually work */ }
     }
     const queries = [];
-    const area = String((stop && stop.area) || '').trim();
+    const area = BkkLib.transitousTown(stop);
     if (name && area && BkkLib.fold(name).indexOf(BkkLib.fold(area)) < 0) queries.push(`${name} ${area}`);
     if (name) queries.push(name);
     let stripped = name;
