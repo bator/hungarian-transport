@@ -105,7 +105,7 @@ böngészőbe, és a kártyák közösen használnak egy-egy lekérdezést.
 
 Egy kártyának saját kulcsot is adhatsz a kártyaszerkesztőben (lásd
 [4.2](#42-a-bkk-kulcs-a-szerkesztőben)). A kártya saját kulcsa erősebb az
-integrációénál.
+integrációénál. Ez elavult, a 2.0-s verzióban megszűnik.
 
 ### 2.3 Kézi telepítés (csak a kártya)
 
@@ -176,6 +176,7 @@ Ezek a **Beállítások → Javítások** alatt jelennek meg.
 | --- | --- | --- |
 | **Hiányoznak a kártya fájljai** | A kártya fájljai nincsenek ott, ahol az integráció keresi őket. | Telepítsd újra a kiadást a HACS-ból (vagy a kiadás `hungarian-transport.zip` fájljából), majd indítsd újra a rendszert. |
 | **Nem készült el a MÁV útvonalindex** | A feltöltött MÁV menetrendből nem sikerült vonatútvonalakat építeni. | Tegyél be új feedet, tölts fel egyet, vagy futtasd a **MÁV útvonalindex újraépítése** műveletet. |
+| **BKK kulcs egy dashboard kártyáján** | A felsorolt dashboardokon egy kártya még saját kulcsot tárol (`apiKey`), amelyet minden bejelentkezett felhasználó kiolvashat. | Add meg a kulcsot a **Konfigurálás** alatt, és töröld az `apiKey` sort ezekből a kártyákból; az üzenet eltűnik, ha már egyiken sincs. |
 
 ### 3.3 Műveletek
 
@@ -259,8 +260,10 @@ Ha a BKK elutasítja, a mező hibaüzenettel visszajön.
 
 Ha az integrációban nincs kulcs, a szerkesztő a keresésekhez kölcsönveszi egy
 másik kártya kulcsát ugyanezen a műszerfalon, és ezt ki is írja; az új
-kártyába nem menti el. A kártyán megadott kulcs elavult: amíg a kártya
-YAML-jében van kulcs, a szerkesztő minden módban figyelmeztet erre.
+kártyába nem menti el. A kártyán megadott kulcs elavult, a 2.0-s verzióban
+megszűnik: amíg a kártya YAML-jében van kulcs, a szerkesztő minden módban
+figyelmeztet erre, a **Beállítások → Javítások** pedig felsorolja azokat a
+dashboardokat, amelyeken még van ilyen kártya.
 
 ### 4.3 A négy üzemmód
 
@@ -680,7 +683,7 @@ refresh: 45               # másodperc, legalább 20
 | `headerBadges` | `false` | A cím mellett a táblán szereplő járatok jelvényei, a saját színükben (négy, utána „+N”). |
 | `theme` | `ha` | Fejlécszínek: `ha`, `operator` vagy `bkk`, `mav`, `volan`, `mvk`, `szkt`, `tuke`, `vbusz`, `blaguss`, `bahart`, `kisvasut`, `thury`, `homm`, `paksbusz`. |
 | `name` | forrás → cél | A kártya címe. |
-| `apiKey` | — | A kártya saját BKK kulcsa. Elhagyható, ha az integrációban van kulcs. |
+| `apiKey` | — | A kártya saját BKK kulcsa. Elavult, a 2.0-s verzióban megszűnik: a kulcs helye az integráció. |
 | `mav` / `volan` / `helyi` | `false` | Üzemmód. Legfeljebb egy lehet bekapcsolva; ha egyik sem, BKK. |
 | `city` | — | A helyi hálózat azonosítója `helyi` módhoz (`szeged`, `pecs`, `miskolc`, `szombathely`, …). |
 | `stopId`, `stopName` | — | A forrás, a szerkesztő állítja be. |
