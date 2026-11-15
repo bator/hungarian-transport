@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping
+from typing import Any
 from dataclasses import dataclass
+import json
 import logging
 import re
 import unicodedata
@@ -112,6 +114,9 @@ ELVIRA_RATE = 1.0
 ELVIRA_BURST = 60
 # A refused board is logged at most this often, with the count since.
 ELVIRA_RATE_LOG_EVERY = 300
+# The largest StationInfo answer read: Kelenföld's day is a few MB, and a
+# body past this is not a board but something to stop reading.
+MAX_BOARD_BYTES = 16 * 1024 * 1024
 
 # One StationInfo board: its departures and its arrivals.
 Board = tuple[list[dict], list[dict]]
@@ -119,6 +124,15 @@ Board = tuple[list[dict], list[dict]]
 BoardKey = tuple[str, date]
 # The StationInfo request behind ElviraBoards: a board, or ElviraError.
 FetchBoard = Callable[[str, date], Awaitable[Board]]
+# executor(func, *args): func(*args) off the event loop (Home Assistant's
+# hass.async_add_executor_job); the loop's default executor without one.
+Executor = Callable[..., Awaitable[Any]]
+
+
+def _in_executor(executor: Executor | None, func: Callable[..., Any], *args: Any) -> Awaitable[Any]:
+    if executor is not None:
+        return executor(func, *args)
+    return asyncio.get_running_loop().run_in_executor(None, func, *args)
 
 
 class ElviraError(Exception):
@@ -314,9 +328,13 @@ def service_days(now: datetime, latest: datetime, today: date | None = None) -> 
     return days
 
 
-async def fetch_station(session: aiohttp.ClientSession, station_code: str, day: date) -> Board:
+async def fetch_station(
+    session: aiohttp.ClientSession, station_code: str, day: date, *, executor: Executor | None = None
+) -> Board:
     """The StationInfo board of one station and service day (the POST
-    ElviraBoards makes in Home Assistant, with its session)."""
+    ElviraBoards makes in Home Assistant, with its session). The body is
+    read up to MAX_BOARD_BYTES and decoded in `executor`: a busy station's
+    day is megabytes of JSON, too much to parse on the event loop."""
     payload = {
         "type": "StationInfo",
         "travelDate": f"{day.isoformat()}T00:00:00",
@@ -333,8 +351,26 @@ async def fetch_station(session: aiohttp.ClientSession, station_code: str, day: 
         ) as resp:
             if resp.status // 100 != 2:
                 raise ElviraError(f"HTTP {resp.status}")
-            data = await resp.json(content_type=None)
+            length = getattr(resp, "content_length", None)
+            if length is not None and length > MAX_BOARD_BYTES:
+                raise ElviraError(f"{length} bytes, over {MAX_BOARD_BYTES}")
+            chunks = []
+            total = 0
+            async for chunk in resp.content.iter_chunked(65536):
+                total += len(chunk)
+                if total > MAX_BOARD_BYTES:
+                    raise ElviraError(f"over {MAX_BOARD_BYTES} bytes")
+                chunks.append(chunk)
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+        raise ElviraError(type(err).__name__) from None
+    return await _in_executor(executor, _parse_board, b"".join(chunks))
+
+
+def _parse_board(body: bytes) -> Board:
+    """A StationInfo answer's board; ElviraError when it is none."""
+    try:
+        data = json.loads(body)
+    except ValueError as err:
         raise ElviraError(type(err).__name__) from None
     details = data.get("stationSchedulerDetails") if isinstance(data, dict) else None
     if not isinstance(details, dict):
@@ -484,6 +520,8 @@ class ElviraBoards:
     `fetch` is the StationInfo request (fetch_station with a session in
     Home Assistant). `task_factory` and `call_later` are the cache's
     (cache.SharedTTLCache); close() stops its expiry timer for good.
+    `executor` runs the rows over the boards (settle, next_boards) off the
+    event loop, as fetch_station does the decoding.
     """
 
     def __init__(
@@ -496,8 +534,10 @@ class ElviraBoards:
         monotonic: upstream.Monotonic = upstream.monotonic,
         burst: int = ELVIRA_BURST,
         call_budget: float = ELVIRA_CALL_BUDGET,
+        executor: Executor | None = None,
     ) -> None:
         self._fetch = fetch
+        self._executor = executor
         self._cache = SharedTTLCache(
             ELVIRA_CACHE_TTL, ELVIRA_CACHE_MAX, task_factory, call_later, monotonic
         )
@@ -558,8 +598,8 @@ class ElviraBoards:
         wanted = next_boards(win, origin_code, dest_code, boards)
         boards.update(zip(wanted, await self._round(wanted)))
         # A second round, tomorrow's arrival board alone, gets what is left of
-        # the budget.
-        wanted = next_boards(win, origin_code, dest_code, boards)
+        # the budget. Deciding it reads every row of today's boards.
+        wanted = await _in_executor(self._executor, next_boards, win, origin_code, dest_code, boards)
         if wanted:
             try:
                 async with asyncio.timeout(deadline - self.monotonic()):
@@ -568,7 +608,7 @@ class ElviraBoards:
                 # Its request goes on (the cache shields it); this answer
                 # does without it, and says so in dest_error.
                 boards.update((key, ElviraError("TimeoutError")) for key in wanted)
-        answer = settle(win, origin_code, dest_code, boards, dest_name)
+        answer = await _in_executor(self._executor, settle, win, origin_code, dest_code, boards, dest_name)
         for code, outage in answer.stations:
             for day, err in ((day, err) for missed, day, err in answer.missed if missed == code):
                 _LOGGER.debug("ELVIRA StationInfo %s for %s unavailable (%s)", code, day, err)

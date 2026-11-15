@@ -864,6 +864,62 @@ async def test_a_feed_no_card_asks_for_leaves_memory(aioclient_mock) -> None:
     assert aioclient_mock.call_count == calls + 1 and "k" in resp["trips"]
 
 
+class Timers:
+    """call_later for the hub: the pending timers, fired by the test."""
+
+    def __init__(self) -> None:
+        self.pending: list[list] = []
+
+    def __call__(self, delay, action):
+        timer = [delay, action, False]
+        self.pending.append(timer)
+
+        def cancel() -> None:
+            timer[2] = True
+
+        return cancel
+
+    def fire(self) -> None:
+        live = [t for t in self.pending if not t[2]]
+        self.pending = []
+        for _delay, action, _cancelled in live:
+            action()
+
+
+async def test_a_feed_leaves_memory_after_the_last_card_stops_asking(aioclient_mock) -> None:
+    """Without any call after it (the dashboards closed), a timer drops the
+    copy once it is idle, and goes quiet with nothing left to drop; the
+    static train numbers (keep) stay. close() cancels the pending one."""
+    tu, static = "https://x.test/a/tu.pb", "https://x.test/static.zip"
+    feeds = {"a": realtime.FeedConfig("a", (realtime.Source(tu, "", "", static),), frozenset({"trip", "train"}), 60, 60)}
+    aioclient_mock.get(tu, content=_pb("volan-trip-updates"))
+    aioclient_mock.get(static, content=(FIX / "mav-static.zip").read_bytes())
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    clock = FakeClock()
+    timers = Timers()
+    hub = realtime.RealtimeHub(
+        session, feeds=feeds, monotonic=clock.monotonic, wall=lambda: NOW, call_later=timers
+    )
+    await hub.query("a", [])
+    await session.close()
+    ((delay, _action, _c),) = timers.pending
+    assert delay == realtime.IDLE_INTERVALS * 60
+    clock.now += delay - 1
+    timers.fire()  # early (an ask moved it on): not yet idle, set again
+    assert hub._entries[tu].data is not None and len(timers.pending) == 1
+    clock.now += realtime.MIN_INTERVAL
+    timers.fire()
+    assert hub._entries[tu].data is None and hub._entries[static].data
+    assert not timers.pending
+    # A new copy sets a timer again, which close() cancels for good.
+    hub._entries[tu].data, hub._entries[tu].asked = object(), clock.now
+    hub._schedule_drop()
+    hub.close()
+    assert all(t[2] for t in timers.pending)
+    hub._schedule_drop()
+    assert len(timers.pending) == 1
+
+
 def test_static_zip_member_cap(monkeypatch) -> None:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:

@@ -99,7 +99,9 @@ its stops likewise). Sources marked `"mavplusz": true` in
   fails (an HTTP error, a timeout, an answer that is not JSON, any GraphQL
   error), is refused by the integration's rate limit, or falls in the
   minute's backoff after a failure; when the call's planner requests,
-  waiting for other cards' ones included, take over 20 s; and when the planner knows **none** of
+  waiting for other cards' ones included, take over 20 s (a request is
+  begun only with at least 10 s of that left, so waiting alone is no
+  outage); and when the planner knows **none** of
   the requested trips (a null answer for every one: ids the card's
   timetable does not share with the planner). A trip the planner does not
   know among ones it does is simply not answered: reading the 1.9 MB feeds
@@ -216,8 +218,9 @@ Should either side object, removing the operator from `realtime_feeds.json`
   30), the Volán intercity trip updates (~500 kB compressed, 1.9 MB
   decoded) every 120 seconds. Every card and browser of one Home Assistant
   shares the copy. A copy no card has asked for in five of its intervals
-  is dropped from memory (the static zips' train numbers are kept); the
-  next ask fetches the feed anew.
+  is dropped from memory (the static zips' train numbers are kept), also
+  when the planner answers every call meanwhile or no card asks at all;
+  the next ask fetches the feed anew.
 - **Polite requests.** A descriptive User-Agent with the project's address;
   gzip; `If-None-Match` / `If-Modified-Since` where the server sends an ETag
   or Last-Modified (`gtfs.gpspositions.net` and the static zips do; the
@@ -227,8 +230,8 @@ Should either side object, removing the operator from `realtime_feeds.json`
 - **The planner.** One request per action call at most for the trips not
   cached (each kept for the feed's interval), plus one for the route lists
   of route + start requests not cached (each kept three hours), counted
-  against the same
-  rate limit as the feeds; JSON in, gzip, the same User-Agent, no
+  against a rate limit of its own as strict as the feeds' one (asking the
+  planner for many trips does not hold back the feeds' fetches); JSON in, gzip, the same User-Agent, no
   redirects, a 20-second timeout, 4 MB per answer at most.
 - **Outages.** A failing feed is not asked again for a minute (a static zip
   for 15 minutes), is logged once when it starts failing and once when it
