@@ -2942,9 +2942,14 @@ check('mavRouteForRow G43 uses the line code',
     (() => { const p = pc._whenParts(iso(6, 5)); return pc._whenFromParts(p.ymd, p.min) === iso(6, 5); })());
   /* The clock and day picked are never the ones already set (the next
      five-minute mark from now, which may be tomorrow's 00:00 just before
-     midnight): a pick naming the time already set plans nothing. */
+     midnight): a pick naming the time already set plans nothing. Nor do
+     they (or the arrow-key step before them) fall in 02:00-02:59, the hour
+     Budapest skips in spring and repeats in autumn: those clocks have no
+     single instant, so the round trip through Budapest time would not give
+     the minute back. Two hours on, or four when that lands there. */
   const setMin = pc._whenParts(pc._plan.when.at).min;
-  const pickMin = (Math.floor(setMin / 5) * 5 + 120) % 1440;
+  const setMark = Math.floor(setMin / 5) * 5;
+  const pickMin = (setMark + (setMark < 65 ? 240 : 120)) % 1440;
   ptime.value = String((pickMin + 1435) % 1440);
   ptime.dispatchEvent(new Event('change'));
   ptime.value = String(pickMin);
@@ -9553,6 +9558,100 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     check('"ma" 08:00 picked after midnight plans today, not yesterday',
       new Date(pc._plan.when.at).toISOString() === '2026-11-16T07:00:00.000Z',
       new Date(pc._plan.when.at).toISOString());
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* ---- Card review-6 fixes: the planner's destination list after a failed
+   load, and its pickers after a detach across midnight ---- */
+
+/* A destination list load that fails (an index or FUTÁR blip) is tried
+   again: not on every hass update, but once DEST_RETRY_MS has passed. */
+{
+  const keep = {
+    nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+    reachableDests: Lib.reachableDests,
+  };
+  const realNow = Date.now;
+  const t0 = realNow();
+  Date.now = () => t0;
+  let calls = 0;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    Lib.reachableDests = async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('index blip');
+      return { dests: [{ key: 'b', name: 'B' }], destRoutes: {} };
+    };
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A' });
+    const hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    pc.hass = hass;
+    document.body.appendChild(pc);
+    await settleTicks();
+    const failed = { calls, dests: pc._dests.length };
+    for (const sec of [5, 15, 29]) {
+      Date.now = () => t0 + sec * 1000;
+      pc.hass = Object.assign({}, hass);
+      await settleTicks();
+    }
+    const held = calls;
+    Date.now = () => t0 + 31 * 1000;
+    pc.hass = Object.assign({}, hass);
+    await settleTicks();
+    const retried = { calls, dests: pc._dests.map((d) => d.key) };
+    Date.now = () => t0 + 120 * 1000;
+    pc.hass = Object.assign({}, hass);
+    await settleTicks();
+    check('a failed destination list is loaded again 30 s later, not on every hass update before, and not again once loaded',
+      failed.calls === 1 && failed.dests === 0 && held === 1
+      && retried.calls === 2 && retried.dests.join() === 'b' && calls === 2,
+      JSON.stringify({ failed, held, retried, calls }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* Detached before Budapest midnight and attached again after it (another
+   view, a dashboard opened again), the planner says today's "ma" at once,
+   not only on the first countdown tick. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 50); /* 23:50 in Budapest (CET) */
+  Date.now = () => now;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    document.body.appendChild(pc);
+    await settleTicks();
+    pc._planner.at = async () => [];
+    pc._planner.now = async () => null;
+    pc._setWhen('depart');
+    await settleTicks();
+    const day = pc.shadowRoot.getElementById('pday');
+    const label = (ymd) => ([...day.options].find((o) => o.value === ymd) || {}).textContent;
+    const before = label('20261115');
+    pc.remove();
+    now += 20 * 60000; /* 00:10 on the 16th */
+    document.body.appendChild(pc);
+    const today = label('20261116');
+    const old = label('20261115');
+    check('attached again past Budapest midnight, the planner paints "ma" for the new day at once',
+      before === i18nT('hu', 'plannerToday') && today === i18nT('hu', 'plannerToday')
+      && old !== i18nT('hu', 'plannerToday') && pc._whenPaintedFor === '20261116',
+      JSON.stringify({ before, today, old, painted: pc._whenPaintedFor }));
   } finally {
     Date.now = realNow;
     pc.remove();
