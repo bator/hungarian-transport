@@ -9620,6 +9620,46 @@ check('a named train does not match a headsign it only begins (Tisza, TiszaÃºjvÃ
   }
 }
 
+/* Detached before Budapest midnight and attached again after it (another
+   view, a dashboard opened again), the planner says today's "ma" at once,
+   not only on the first countdown tick. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 50); /* 23:50 in Budapest (CET) */
+  Date.now = () => now;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    document.body.appendChild(pc);
+    await settleTicks();
+    pc._planner.at = async () => [];
+    pc._planner.now = async () => null;
+    pc._setWhen('depart');
+    await settleTicks();
+    const day = pc.shadowRoot.getElementById('pday');
+    const label = (ymd) => ([...day.options].find((o) => o.value === ymd) || {}).textContent;
+    const before = label('20261115');
+    pc.remove();
+    now += 20 * 60000; /* 00:10 on the 16th */
+    document.body.appendChild(pc);
+    const today = label('20261116');
+    const old = label('20261115');
+    check('attached again past Budapest midnight, the planner paints "ma" for the new day at once',
+      before === i18nT('hu', 'plannerToday') && today === i18nT('hu', 'plannerToday')
+      && old !== i18nT('hu', 'plannerToday') && pc._whenPaintedFor === '20261116',
+      JSON.stringify({ before, today, old, painted: pc._whenPaintedFor }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* A failed poll keeps the rows it had, and with them their last GPS fix:
    the open map stops calling it live and the timetable places the
    vehicle until a poll brings a fresh one. */

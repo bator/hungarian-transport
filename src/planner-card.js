@@ -270,7 +270,12 @@ export class BKKPlannerCard extends BKKHopCard {
 
   connectedCallback() {
     super.connectedCallback();
-    if (!this._painted || this._plannerMap) return;
+    if (!this._painted) return;
+    /* Detached across Budapest midnight (another view, a closed dashboard),
+       the title and the pickers still say yesterday's "ma": roll them now,
+       not on the first tick up to 15 s later. */
+    this._rollWhenPickers();
+    if (this._plannerMap) return;
     const host = this._journeyHost && this._journeyHost.querySelector('.journey-plan');
     if (host && host.querySelector('#pjmap')) this._mountPlannerInlineMap(host);
   }
