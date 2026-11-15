@@ -83,8 +83,18 @@ FUTAR_MIN_TIMEOUT_SEC = 1.0
 # does not switch FUTÁR off until Home Assistant restarts.
 REJECTED_RETRY = 15 * 60
 # An answer is read into memory before it is parsed: one larger than this is
-# refused while it is read, as an outage. The largest answers the cards ask
-# for (plan-trip.json, route-details.json with references) are far smaller.
+# refused while it is read, as an outage. json.loads then runs on the event
+# loop (an executor would not help: the C decoder holds the GIL), about 10 ms
+# per MB on a laptop, several times that on a Raspberry Pi, so this caps one
+# answer's stall and FUTAR_RATE how often it can come. It is not lower
+# because the largest answer the cards ask for is not small: schedule-for-
+# stop.json of a parent station (departures.js, its child stops) holds the
+# whole day of every child stop, about 200 bytes a stop time and 230 a trip
+# reference, so a hub with 6000-8000 departures a day answers an estimated
+# 2.5-3.5 MB. A cap of 4 MB would leave such a hub too little margin, and a
+# refused answer fails the same way on every try. The other answers are far
+# smaller: route-details and plan-trip tens to a few hundred kB, a stop's
+# board less than that.
 FUTAR_MAX_BYTES = 8 * 1024 * 1024
 FUTAR_READ_CHUNK = 65536
 
