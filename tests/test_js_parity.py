@@ -21,8 +21,19 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 # [list]). Only a top-level one: an indented const of the same name inside a
 # function would otherwise stand in for it.
 _CONST = re.compile(r"^(?:export\s+)?const\s+([A-Z][A-Z0-9_]*)\s*=\s*([^;]+);", re.M)
-# Comments, left out before a constant's use is looked for.
-_COMMENT = re.compile(r"/\*.*?\*/|^\s*//[^\n]*", re.S | re.M)
+# Comments, left out before a constant's use is looked for: block comments,
+# and line comments also at the end of a line of code. Quoted strings and
+# template literals are kept whole, so the // of a URL in one is no comment.
+_CODE_TOKEN = re.compile(
+    r"""(?P<str>'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"|`(?:[^`\\]|\\.)*`)"""
+    r"|(?P<comment>/\*.*?\*/|//[^\n]*)",
+    re.S,
+)
+
+
+def _code_of(text: str) -> str:
+    """The text without its comments."""
+    return _CODE_TOKEN.sub(lambda m: m.group("str") or "", text)
 
 
 def _consts_of(text: str) -> dict[str, str]:
@@ -42,9 +53,24 @@ def _js_uses(name: str, *patterns: str) -> None:
     comments left out: a mirrored constant that is still defined but no
     longer what the card's code limits with compares equal and proves
     nothing."""
-    code = _COMMENT.sub("", (SRC / name).read_text(encoding="utf-8"))
+    code = _code_of((SRC / name).read_text(encoding="utf-8"))
     for pattern in patterns:
         assert re.search(pattern, code), f"src/{name} no longer has {pattern!r}: update this test"
+
+
+def test_a_use_left_in_a_comment_is_no_use() -> None:
+    """A use that only a comment still shows, at the end of a line or in a
+    block, does not count; a // inside a string is no comment."""
+    text = (
+        "const a = x; // b.slice(0, LIMIT)\n"
+        "/* c.slice(0, LIMIT) */\n"
+        "const url = 'https://example.org/x'; const d = e.slice(0, OTHER);\n"
+        "const t = `a // b`; f.slice(0, THIRD);\n"
+    )
+    code = _code_of(text)
+    assert "LIMIT" not in code
+    assert "'https://example.org/x'" in code and "e.slice(0, OTHER)" in code
+    assert "`a // b`" in code and "f.slice(0, THIRD)" in code
 
 
 def test_only_top_level_constants_are_read() -> None:
