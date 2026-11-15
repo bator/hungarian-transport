@@ -95,8 +95,9 @@ stay with the Home Assistant theme, so light and dark mode both work. The
 planner card keeps Home Assistant's look under `operator`.
 
 Every option: [configuration reference][manual-config]. A key on the card
-(`apiKey`) still works but is deprecated: every Home Assistant user can read
-it from the dashboard. Keep it in the integration.
+(`apiKey`) still works but is deprecated and will be removed in 2.0: every
+Home Assistant user can read it from the dashboard, and Repairs lists the
+dashboards that still hold one. Keep it in the integration.
 
 ## Data
 

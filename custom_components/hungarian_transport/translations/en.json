@@ -138,6 +138,10 @@
     }
   },
   "issues": {
+    "card_api_key": {
+      "title": "BKK key on a dashboard card",
+      "description": "A Hungarian transport card on these dashboards still holds its own BKK key (`apiKey`): {dashboards}.\n\nEvery logged-in Home Assistant user, admin or not, can read it from the dashboard configuration, and the card sends it to BKK in the request URL. The card-level key is deprecated and will be removed in 2.0. Enter the key in the integration (Settings → Devices & services → Hungarian transport → Configure) and remove `apiKey` from these cards; this issue then goes by itself."
+    },
     "missing_assets": {
       "title": "Frontend assets missing",
       "description": "Hungarian transport found no card files at `{path}`. The source tree has none; install the release zip (HACS or the hungarian-transport.zip asset of a GitHub release) and restart Home Assistant."

@@ -478,6 +478,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(status.start())
     entry.runtime_data = status
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # A card with its own (deprecated) key is a Repairs issue: checked once
+    # Lovelace is up, and again whenever a dashboard is saved.
+    card_keys = lovelace_resource.CardKeyCheck(hass)
+    entry.async_on_unload(card_keys.close)
+    entry.async_on_unload(
+        hass.bus.async_listen(lovelace_resource.EVENT_LOVELACE_UPDATED, card_keys.schedule)
+    )
+    entry.async_on_unload(async_at_started(hass, card_keys.schedule))
 
     api_key = _entry_api_key(entry)
     if not api_key:
@@ -582,6 +590,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         persistent_notification.async_dismiss(hass, notification_id)
     # So would its Repairs issue: nothing builds the index any more to end it.
     ir.async_delete_issue(hass, DOMAIN, mav.ISSUE_BUILD_FAILED)
+    ir.async_delete_issue(hass, DOMAIN, lovelace_resource.ISSUE_CARD_API_KEY)
     try:
         state = await storage.async_load(hass)
         install = state.get(storage.MAV_INSTALL)

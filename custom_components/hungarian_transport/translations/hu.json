@@ -138,6 +138,10 @@
     }
   },
   "issues": {
+    "card_api_key": {
+      "title": "BKK kulcs egy dashboard kártyáján",
+      "description": "Ezeken a dashboardokon egy Magyar közlekedés kártya még saját BKK kulcsot tárol (`apiKey`): {dashboards}.\n\nEzt minden bejelentkezett Home Assistant felhasználó kiolvashatja a dashboard konfigurációjából, admin jog nélkül is, és a kártya a kérés URL-jében küldi el a BKK-nak. A kártyaszintű kulcs elavult, a 2.0-s verzióban megszűnik. Add meg a kulcsot az integrációban (Beállítások → Eszközök és szolgáltatások → Magyar közlekedés → Konfigurálás), és töröld az `apiKey` sort ezekből a kártyákból; ez a jelzés ezután magától eltűnik."
+    },
     "missing_assets": {
       "title": "Hiányoznak a kártya fájljai",
       "description": "A Magyar közlekedés integráció nem találta a kártya fájljait itt: `{path}`. A forráskódban nincsenek benne; telepítsd a kiadás zipjét (HACS vagy a GitHub-kiadás hungarian-transport.zip fájlja), majd indítsd újra a Home Assistantot."
