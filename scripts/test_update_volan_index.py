@@ -1683,13 +1683,21 @@ for raw, want in [
     ("https://key=S44@host.example/p HTTP Error 500", "https://…@host.example/p HTTP Error 500"),
     ("https://token:S45@h.example/f?apikey=S46", "https://…@h.example/f?…"),
     ("https://u:pw@h.example/x/apikey=S47 ok", "https://…@h.example/x/apikey=… ok"),
+    # The userinfo ends at its last "@", and a password with an "@" in it
+    # goes as a whole, after a secret name or not.
+    ("https://token:p@S48@h.example/x", "https://…@h.example/x"),
+    ("https://apikey=a@S49@h.example/", "https://…@h.example/"),
+    ("https://user:p@S50@h.example/x", "https://…@h.example/x"),
+    ("https://apikey:S51@T@h.example/v1 ok", "https://…@h.example/v1 ok"),
+    ("https://u:p@S52@w@h.example/x?k=1", "https://…@h.example/x?…"),
 ]:
     check(f"redact({raw!r})", uvi.redact(raw) == want, repr(uvi.redact(raw)))
 # Every secret form after every context, with and without a space: what came before
 # (a query, an auth scheme, a name) never lets the value through.
 _contexts = ("https://h.example/f?", "/f.zip?x=1&", "Bearer ", "Basic ", "key=", "Authorization: ", "")
 _secrets = ("client_secret: S40", "apikey = S40", "password: 'S40'", "Bearer S40", "x-api-key=S40", "token=S40",
-            '"access_token": "S40"', "https://u:S40@h.example/", "https://h.example/f?k=S40")
+            '"access_token": "S40"', "https://u:S40@h.example/", "https://h.example/f?k=S40",
+            "https://u:p@S40@h.example/", "https://token:p@S40@h.example/", "https://apikey=S40@x@h.example/")
 _leaks = [t for t in (f"{c}{sep}{x}" for c in _contexts for sep in ("", " ") for x in _secrets)
           if "S40" in uvi.redact(t)]
 check("no secret form leaks after any query, auth scheme or name", not _leaks, repr(_leaks[:5]))

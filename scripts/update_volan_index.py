@@ -94,7 +94,10 @@ _SCHEME = re.compile(r"(?i)[a-z][a-z0-9+.-]{0,31}://")
 _QUERY_RUN = re.compile(r"(?<![^\s?#'\"<>])([^\s?#'\"<>]*)\?")
 _QUERY_STOP = re.compile(r"[\s#'\"<>]")
 _BARE_QUERY = re.compile(r"\?((?=[A-Za-z0-9_.%-]+=)[^\s#'\"<>]*)")
-_URL_USERINFO = re.compile(r"(?i)[a-z][a-z0-9+.-]{0,31}://([^\s/@'\"<>]+)@")
+# The userinfo runs to the last "@" before the path, as urllib.parse takes it
+# (netloc.rpartition("@")): a password with an "@" in it (u:p@ss@host) goes
+# as a whole, not up to its first "@".
+_URL_USERINFO = re.compile(r"(?i)[a-z][a-z0-9+.-]{0,31}://([^\s/'\"<>]+)@")
 _AUTH_SCHEME = re.compile(r"(?i)\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+/=-]+)")
 _SECRET_WORD = r"(?:api[_-]?key|apikey|key|token|secret|password|passwd|pwd|sig|signature|credentials?|authorization)"
 # The match starts at the secret word itself: the _ or - before it is the
@@ -156,8 +159,9 @@ def _redact_once(text: str) -> str:
         start = m.start(1)
         end = value_end(start)
         # A name in a URL's user:password part ("https://apikey:S@host/f")
-        # has a value that ends where the userinfo does: the host and the path
-        # after the "@" are no part of it, and the userinfo goes as a whole.
+        # has a value that ends where the userinfo does, at its last "@": the
+        # host and the path after it are no part of the value, and the
+        # userinfo goes as a whole, an "@" in the password included.
         i = bisect.bisect_right(starts, start) - 1
         if i >= 0 and start < userinfo[i][1]:
             end = min(end, userinfo[i][1])
