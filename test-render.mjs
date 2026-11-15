@@ -7078,9 +7078,20 @@ const settle = async (el) => {
   Lib.elviraBetween = async () => [{
     label: 'IC', trainNumber: '563', dep: Math.floor(Date.now() / 1000) + 3600, travel: 140, head: 'Kelenföld', destHit: true,
   }];
-  const j = await Lib.cityRailJourney(IX, 'k', { states: {} },
-    { id: 'miskolc:0', name: 'Búza tér', lat: 48.10, lon: 20.78 },
-    { id: 'BKK_005501024', name: 'Kelenföld', lat: 47.4643, lon: 19.0206 });
+  /* A fixed weekday morning, not the wall clock: the trips above fill one
+     service day of 24 hours counted from noon - 12 h, and the 25-hour day
+     the clocks go back starts at 01:00, so its eve has an hour after
+     midnight with no tram at all. */
+  const realNow = Date.now;
+  Date.now = () => Date.UTC(2026, 9, 20, 8, 17);
+  let j;
+  try {
+    j = await Lib.cityRailJourney(IX, 'k', { states: {} },
+      { id: 'miskolc:0', name: 'Búza tér', lat: 48.10, lon: 20.78 },
+      { id: 'BKK_005501024', name: 'Kelenföld', lat: 47.4643, lon: 19.0206 });
+  } finally {
+    Date.now = realNow;
+  }
   if (j) await Lib.fillJourneyShapes(j);
   const segs = j ? Lib.journeyMapSegments(j, {}, {}) : [];
   const walk = j && j.legs.find((l) => l.stationWalk);
@@ -9081,7 +9092,9 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
    still takes the sensor's train 862: platform, seat marks and position
    before ELVIRA answers, or when it does not. */
 {
-  const dep = Math.floor(Date.now() / 1000) + 600;
+  /* Off the hour the clocks go back, where a bare 02:10 is two times. */
+  let dep = Math.floor(Date.now() / 1000) + 600;
+  while (Lib.hm(dep) === Lib.hm(dep + 3600) || Lib.hm(dep) === Lib.hm(dep - 3600)) dep += 3600;
   const row = { tripId: 'BKK_8624_67', label: 'IC', sched: dep, dep, trainNumber: '' };
   const sameTrip = { tripId: 'BKK_8624_67', trainNumber: '862', attime: Lib.hm(dep), routeid: 'IC', platform: '7', booking: true };
   const byTime = { trainNumber: '862', attime: Lib.hm(dep), routeid: 'IC', platform: '8' };
@@ -9099,6 +9112,26 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     Lib.matchHassVehicle([otherTime], row) === null
     && Lib.matchHassVehicle([sameTripOtherNum], numbered) === sameTripOtherNum,
     JSON.stringify([Lib.matchHassVehicle([otherTime], row), Lib.matchHassVehicle([sameTripOtherNum], numbered)]));
+  /* 2027-10-31: 02:10 CEST and, an hour later, 02:10 CET. A bare "02:10"
+     is either, so the shorter number finds no train by it; a time with
+     its offset still names one, and the full number needs no time. */
+  const cest = Date.UTC(2027, 9, 31, 0, 10) / 1000;
+  const cet = cest + 3600;
+  const night = { tripId: 'BKK_8624_67', label: 'IC', sched: cet, dep: cet, trainNumber: '' };
+  const bare = { trainNumber: '862', attime: '02:10', routeid: 'IC' };
+  const beforeChange = { trainNumber: '862', attime: '2027-10-31T02:10:00+02:00', routeid: 'IC' };
+  const afterChange = { trainNumber: '862', attime: '2027-10-31T02:10:00+01:00', routeid: 'IC' };
+  const fullNumber = { trainNumber: '8624', attime: '02:10', routeid: 'IC' };
+  const noNumber = { trainNumber: '', attime: '02:10', routeid: 'IC' };
+  check('in the hour the clocks go back a bare time is no proof of the shorter number: 02:10 CEST is not 02:10 CET',
+    Lib.hm(cest) === '02:10' && Lib.hm(cet) === '02:10'
+    && Lib.matchHassVehicle([bare], night) === null
+    && Lib.matchHassVehicle([beforeChange], night) === null
+    && Lib.matchHassVehicle([afterChange], night) === afterChange
+    && Lib.matchHassVehicle([fullNumber], night) === fullNumber
+    && Lib.matchHassVehicle([noNumber], night) === noNumber,
+    JSON.stringify([Lib.hm(cest), Lib.hm(cet), Lib.matchHassVehicle([bare], night), Lib.matchHassVehicle([beforeChange], night),
+      Lib.matchHassVehicle([afterChange], night), Lib.matchHassVehicle([fullNumber], night), Lib.matchHassVehicle([noNumber], night)]));
 }
 
 /* A hub with a place takes a station by name only near it: a tram to
