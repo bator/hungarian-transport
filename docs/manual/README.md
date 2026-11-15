@@ -160,7 +160,9 @@ When BKK rejects the stored key (revoked or expired), Home Assistant asks
 for a new one: a **BKK key rejected** prompt appears under
 **Settings → Devices & services**. Enter a new key there, or leave it empty
 to switch BKK access off. Until then the cards show the error instead of
-sending the rejected key again and again.
+sending the rejected key again and again. The key is tried again every 15
+minutes: if BKK takes it again (the rejection was a passing error), the
+prompt goes away by itself.
 
 ### 3.2 Repairs messages
 

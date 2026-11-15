@@ -260,6 +260,29 @@ async def test_rejection_is_asked_again_after_a_while(hass, aioclient_mock, cloc
     assert (await _call(hass, params={"query": "Nyugati"}))["data"]["status"] == "OK"
 
 
+def _reauth_flows(hass) -> list:
+    return hass.config_entries.flow.async_progress_by_handler(
+        DOMAIN, match_context={"source": config_entries.SOURCE_REAUTH}
+    )
+
+
+async def test_a_key_accepted_again_ends_the_reauth(hass, aioclient_mock, clock) -> None:
+    """The reauth a mistaken 401 started goes once FUTÁR takes the key again:
+    answered empty, it would remove a key that works."""
+    aioclient_mock.get(SEARCH, status=401)
+    await _setup(hass)
+    assert (await _call(hass))["error"] == "futar_auth"
+    await hass.async_block_till_done()
+    assert len(_reauth_flows(hass)) == 1
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    clock.now += futar.REJECTED_RETRY + 1
+    assert (await _call(hass, params={"query": "Deli"}))["data"]["status"] == "OK"
+    await hass.async_block_till_done()
+    assert _reauth_flows(hass) == []
+
+
 async def test_failed_probe_does_not_restart_the_rejection_window(
     hass, aioclient_mock, monkeypatch
 ) -> None:
@@ -489,7 +512,10 @@ async def test_answer_to_a_request_sent_before_a_rejection_keeps_it(monkeypatch,
         return {"status": "OK", "data": {}}
 
     monkeypatch.setattr(futar, "futar_get", fake_get)
-    proxy = futar.FutarProxy(None, "secret-key", monotonic=clock.monotonic)
+    recovered: list[bool] = []
+    proxy = futar.FutarProxy(
+        None, "secret-key", monotonic=clock.monotonic, on_recovered=lambda: recovered.append(True)
+    )
     slow = asyncio.ensure_future(proxy.get("plan-trip.json", {"fromPlace": "a", "toPlace": "b"}))
     await asyncio.sleep(0)
     with pytest.raises(futar.FutarAuthError):
@@ -498,6 +524,7 @@ async def test_answer_to_a_request_sent_before_a_rejection_keeps_it(monkeypatch,
     assert (await slow)["status"] == "OK"
 
     assert proxy._rejected == "HTTP 401"
+    assert recovered == []
     with pytest.raises(futar.FutarAuthError):
         await proxy.get("search.json", {"query": "Keleti"})
     assert calls == ["plan-trip.json", "trip-details.json"]
@@ -508,6 +535,7 @@ async def test_answer_to_a_request_sent_before_a_rejection_keeps_it(monkeypatch,
     clock.now += futar.REJECTED_RETRY
     assert (await proxy.get("search.json", {"query": "Keleti"}))["status"] == "OK"
     assert proxy._rejected is None
+    assert recovered == [True]
     assert [r.getMessage() for r in caplog.records if r.name.endswith(".futar")][-1] == (
         "BKK FUTÁR accepts the configured key again"
     )

@@ -13,6 +13,7 @@ import voluptuous as vol
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.frontend import DATA_EXTRA_MODULE_URL
 from homeassistant.config_entries import ConfigEntryDisabler
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
@@ -125,8 +126,7 @@ async def test_cards_are_a_lovelace_resource_too(hass, hass_client) -> None:
 
 async def test_removal_takes_the_update_record_along(hass, hass_storage) -> None:
     entry = await _setup(hass)
-    await integration.storage.async_save(hass, {"mav_install": {"source": "daily"}})
-    await integration.storage.async_load(hass)
+    await integration.storage.async_record_daily_round(hass, "failed", None, None)
     await hass.async_block_till_done()
     assert integration.storage.STORAGE_KEY in hass_storage
     await hass.config_entries.async_remove(entry.entry_id)
@@ -135,6 +135,36 @@ async def test_removal_takes_the_update_record_along(hass, hass_storage) -> None
     assert "update_state" not in hass.data[DOMAIN]
     # A new entry starts from an empty record.
     assert await integration.storage.async_load(hass) == {}
+
+
+async def test_removal_keeps_what_installed_the_mav_index(hass, hass_storage) -> None:
+    """The MÁV index stays in www/ after a removal: so does the record of
+    what installed it, and nothing else."""
+    storage = integration.storage
+    entry = await _setup(hass)
+    await storage.async_record_mav_install(hass, storage.SOURCE_DAILY, "20261101.M2ChangeID", 1234)
+    await storage.async_record_daily_round(hass, "installed", "20261101.M2ChangeID", None)
+    install = (await storage.async_load(hass))[storage.MAV_INSTALL]
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass_storage[storage.STORAGE_KEY]["data"] == {storage.MAV_INSTALL: install}
+    assert "update_state" not in hass.data[DOMAIN]
+    assert await storage.async_load(hass) == {storage.MAV_INSTALL: install}
+
+
+async def test_removal_dismisses_the_integrations_notifications(hass, monkeypatch) -> None:
+    entry = await _setup(hass)
+    dismissed: list[str] = []
+    monkeypatch.setattr(persistent_notification, "async_dismiss", lambda _hass, nid: dismissed.append(nid))
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    notify = integration.timetable_notify
+    assert sorted(dismissed) == sorted([
+        notify.NOTIFICATION_SHIPPED,
+        notify.NOTIFICATION_MAV_DAILY,
+        notify.NOTIFICATION_DAILY_FAILED,
+        mav.NOTIFICATION_ID,
+    ])
 
 
 async def test_yaml_mode_resources_are_left_alone(hass) -> None:

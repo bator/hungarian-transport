@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import aiohttp
@@ -176,7 +177,8 @@ class FutarProxy:
 
     `monotonic` is the clock of the cache, the rate limit and the rejected
     key; `sleep` is the one a call waits for a token with. `burst` is the
-    rate limit's (FUTAR_BURST).
+    rate limit's (FUTAR_BURST). `on_recovered` is called when FUTÁR accepts
+    the key again after rejecting it (the rejection was a mistake).
     """
 
     def __init__(
@@ -189,8 +191,10 @@ class FutarProxy:
         monotonic: upstream.Monotonic = upstream.monotonic,
         sleep: upstream.Sleep = upstream.sleep,
         burst: int = FUTAR_BURST,
+        on_recovered: Callable[[], None] | None = None,
     ) -> None:
         self._session = session
+        self._on_recovered = on_recovered
         self._api_key = api_key
         self._monotonic = monotonic
         self._cache = SharedTTLCache(FUTAR_CACHE_TTL, FUTAR_CACHE_MAX, task_factory, call_later, monotonic)
@@ -240,6 +244,8 @@ class FutarProxy:
         if self._rejected is not None and rejections == self._rejections:
             _LOGGER.info("BKK FUTÁR accepts the configured key again")
             self._rejected = None
+            if self._on_recovered is not None:
+                self._on_recovered()
         return data
 
     def close(self) -> None:

@@ -324,6 +324,29 @@ def test_a_shipped_mav_index_newer_than_the_installed_one_is_news() -> None:
     assert timetable_notify.changed_indexes(seen, "0.0.2", {"mav": OLD}, installed_mav=None) == ["mav"]
 
 
+def test_a_shipped_volan_index_older_than_the_one_seen_is_no_news() -> None:
+    seen = {"version": "0.0.1", "feeds": {"volan": "volan:01700.20261110", "city": CITY, "mav": OLD}}
+    assert timetable_notify.changed_indexes(seen, "0.0.2", {"volan": VOLAN, "city": CITY, "mav": OLD}) == []
+    assert timetable_notify.changed_indexes(seen, "0.0.2", {"volan": "volan:01701.20261111"}) == ["volan"]
+    # An undated feed that differs is news, as before.
+    assert timetable_notify.changed_indexes(seen, "0.0.2", {"volan": "volan:next"}) == ["volan"]
+
+
+def test_a_shipped_city_index_is_news_only_for_an_operator_that_moved_forward() -> None:
+    seen = {"version": "0.0.1", "feeds": {"city": "miskolc:1.3;szeged:20261001;veszprem:20260831-1"}}
+
+    def changed(city: str) -> list[str]:
+        return timetable_notify.changed_indexes(seen, "0.0.2", {"city": city})
+
+    # Szeged went back to an older feed, Veszprém left: no news.
+    assert changed("miskolc:1.3;szeged:20260901") == []
+    # Szeged is newer: news, though Veszprém went back.
+    assert changed("miskolc:1.3;szeged:20261101;veszprem:20260801") == ["city"]
+    # A new operator, and an undated feed that changed, are news.
+    assert changed("miskolc:1.3;szeged:20261001;veszprem:20260831-1;pecs:20261001") == ["city"]
+    assert changed("miskolc:1.4;szeged:20261001;veszprem:20260831-1") == ["city"]
+
+
 async def test_an_install_a_release_replaced_hides_no_later_release(
     hass: HomeAssistant, tmp_path, hass_storage
 ) -> None:
