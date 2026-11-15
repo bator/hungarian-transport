@@ -8,7 +8,7 @@ import { INDEX_SCHEMA } from '../tags.js';
    destination's own coordinates. */
 const DEST_NEAR_M = 1500;
 
-/* The index worker's whole program (BkkLib._parseIndexInWorker): its
+/* The index worker's whole program (BkkLib._startIndexWorker): its
    source text is the worker's script, so it uses nothing from outside
    itself. It answers {head, long} (the index with its long arrays
    empty, and their lengths), then {key, rows} for each slice of them,
@@ -295,24 +295,14 @@ register({
     /* Off the page where a Web Worker can be started; here otherwise,
        and for a file the worker could not read, so every error below is
        the one it always was. */
-    let idx = await BkkLib._parseIndexInWorker(got.bytes);
-    if (idx == null) {
-      let text;
-      try {
-        text = await BkkLib._indexText(got.bytes);
-      } catch (_e) {
-        /* Corrupt or truncated gzip: as unreadable as an HTML page, and as
-           lasting. */
-        throw codedError('errIndexParse');
-      }
-      if (text == null) throw codedError(gunzipKey);
-      try {
-        idx = JSON.parse(text);
-      } catch (_e) {
-        /* Usually an HTML error page served in place of the index. */
-        throw codedError('errIndexParse');
-      }
+    let idx = null;
+    const job = BkkLib._startIndexWorker(got.bytes);
+    if (job) {
+      const late = {};
+      idx = await Promise.race([job.done, job.slow.then(() => late)]);
+      if (idx === late) idx = await BkkLib._raceIndexParse(got.bytes, job, gunzipKey);
     }
+    if (idx == null) idx = await BkkLib._parseIndexOnPage(got.bytes, gunzipKey);
     if (!idx || typeof idx !== 'object' || !Array.isArray(idx.s) || !Array.isArray(idx.t)) {
       throw codedError('errIndexParse');
     }
@@ -360,73 +350,130 @@ register({
     idx.s = null;
     return idx;
   },
+  /* The index file's JSON, read on the page: null when a worker that ran
+     alongside (beaten()) already has it, so its text is not parsed twice. */
+  async _parseIndexOnPage(bytes, gunzipKey, beaten) {
+    let text;
+    try {
+      text = await BkkLib._indexText(bytes);
+    } catch (_e) {
+      /* Corrupt or truncated gzip: as unreadable as an HTML page, and as
+         lasting. */
+      throw codedError('errIndexParse');
+    }
+    if (beaten && beaten()) return null;
+    if (text == null) throw codedError(gunzipKey);
+    try {
+      return JSON.parse(text);
+    } catch (_e) {
+      /* Usually an HTML error page served in place of the index. */
+      throw codedError('errIndexParse');
+    }
+  },
+  /* A worker past its time is not given up on: a wall tablet busy
+     painting may simply be slow. The page reads the file as well, the
+     first of the two to have the index is used and the other stopped (the
+     page skips its parse; the worker is terminated). */
+  async _raceIndexParse(bytes, job, gunzipKey) {
+    let workerIdx = null;
+    const fromWorker = job.done.then((out) => {
+      if (out == null) return new Promise(() => {}); /* the page's answer decides */
+      workerIdx = out;
+      return { idx: out };
+    });
+    const fromPage = BkkLib._parseIndexOnPage(bytes, gunzipKey, () => workerIdx != null)
+      .then((out) => ({ idx: out, page: true }), (err) => ({ err, page: true }));
+    const first = await Promise.race([fromWorker, fromPage]);
+    if (!first.page) return first.idx;
+    if (first.err) {
+      job.stop();
+      throw first.err;
+    }
+    if (first.idx == null) return workerIdx;
+    job.stop();
+    return first.idx;
+  },
   /* The index file's JSON, gunzipped and parsed in a Web Worker started
      from a Blob URL (the bundle stays one file): the 11 MB indexes took
      the page 60–130 ms in one task on a laptop, most of a second on a
      wall tablet. The parsed index comes back in slices of its long
      arrays, each message its own short task: one message with the whole
      index would cost the page more to copy than the parse it saves.
-     null when there is no worker to ask (no Worker or Blob URLs, a
-     Content-Security-Policy that blocks them, a worker that does not
-     answer: no worker is started again on this page) or the worker could
-     not read the file; the caller then reads it on the page. */
+     null when there is no worker to ask (no Worker or Blob URLs, or a
+     worker that could not start or broke, as a Content-Security-Policy
+     that blocks it does: no worker is started again on this page). Else
+     {done, slow, stop}: done gives the index, or null for a file the
+     worker could not read (the caller then reads it on the page, and its
+     error is the one it always was); slow settles once the worker is
+     past _indexWorkerTimeoutMs, which leaves it running and is no reason
+     to give up on workers; stop() ends it. */
   _indexWorkerSlice: 1000,
   _indexWorkerTimeoutMs: 20000,
   _indexWorkerUrl: '',
   _indexWorkerBroken: false,
   _indexWorkerMain: indexWorkerMain,
-  _parseIndexInWorker(bytes) {
+  _startIndexWorker(bytes) {
     const can = !BkkLib._indexWorkerBroken
       && typeof Worker === 'function' && typeof Blob === 'function'
       && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
-    if (!can) return Promise.resolve(null);
-    return new Promise((resolve) => {
-      let worker = null;
-      let idx = null;
-      let timer = null;
-      const finish = (out, broken) => {
-        if (timer) clearTimeout(timer);
-        timer = null;
-        if (broken) BkkLib._indexWorkerBroken = true;
-        if (worker) {
-          worker.onmessage = null;
-          worker.onerror = null;
-          try { worker.terminate(); } catch (_e) { /* already gone */ }
-        }
-        resolve(out);
-      };
-      try {
-        if (!BkkLib._indexWorkerUrl) {
-          const code = '(' + BkkLib._indexWorkerMain.toString() + ')(self);';
-          BkkLib._indexWorkerUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
-        }
-        worker = new Worker(BkkLib._indexWorkerUrl);
-      } catch (_e) {
-        finish(null, true);
-        return;
+    if (!can) return null;
+    let worker = null;
+    let idx = null;
+    let timer = null;
+    let over = false;
+    let resolveDone;
+    let resolveSlow;
+    const done = new Promise((resolve) => { resolveDone = resolve; });
+    const slow = new Promise((resolve) => { resolveSlow = resolve; });
+    const finish = (out, broken) => {
+      if (over) return;
+      over = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+      if (broken) BkkLib._indexWorkerBroken = true;
+      if (worker) {
+        worker.onmessage = null;
+        worker.onerror = null;
+        try { worker.terminate(); } catch (_e) { /* already gone */ }
       }
-      timer = setTimeout(() => finish(null, true), BkkLib._indexWorkerTimeoutMs);
-      /* A worker script the page's policy refused, or one that broke. */
-      worker.onerror = () => finish(null, true);
-      worker.onmessage = (ev) => {
-        const msg = (ev && ev.data) || {};
-        if (msg.head) {
-          idx = msg.head;
-          Object.keys(msg.long || {}).forEach((k) => { idx[k] = []; });
-        } else if (msg.key) {
-          const into = idx && idx[msg.key];
-          const rows = msg.rows || [];
-          if (Array.isArray(into)) for (let i = 0; i < rows.length; i += 1) into.push(rows[i]);
-        } else {
-          finish(msg.done ? idx : null, false);
-        }
-      };
-      try {
-        worker.postMessage({ bytes, slice: BkkLib._indexWorkerSlice });
-      } catch (_e) {
-        finish(null, true);
+      resolveDone(out);
+    };
+    const job = { done, slow, stop: () => finish(null, false) };
+    try {
+      if (!BkkLib._indexWorkerUrl) {
+        const code = '(' + BkkLib._indexWorkerMain.toString() + ')(self);';
+        BkkLib._indexWorkerUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
       }
-    });
+      worker = new Worker(BkkLib._indexWorkerUrl);
+    } catch (_e) {
+      finish(null, true);
+      return job;
+    }
+    timer = setTimeout(() => {
+      timer = null;
+      resolveSlow();
+    }, BkkLib._indexWorkerTimeoutMs);
+    /* A worker script the page's policy refused, or one that broke. */
+    worker.onerror = () => finish(null, true);
+    worker.onmessage = (ev) => {
+      const msg = (ev && ev.data) || {};
+      if (msg.head) {
+        idx = msg.head;
+        Object.keys(msg.long || {}).forEach((k) => { idx[k] = []; });
+      } else if (msg.key) {
+        const into = idx && idx[msg.key];
+        const rows = msg.rows || [];
+        if (Array.isArray(into)) for (let i = 0; i < rows.length; i += 1) into.push(rows[i]);
+      } else {
+        finish(msg.done ? idx : null, false);
+      }
+    };
+    try {
+      worker.postMessage({ bytes, slice: BkkLib._indexWorkerSlice });
+    } catch (_e) {
+      finish(null, true);
+    }
+    return job;
   },
   /* Runs step(0) … step(n - 1), handing the event loop back whenever a
      slice has run for _sliceMs, so a long build is no single long task

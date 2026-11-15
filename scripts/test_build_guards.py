@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -55,7 +56,15 @@ def gtfs_zip(path: Path, files: dict[str, str | bytes]) -> Path:
     return path
 
 
-def city_feed(route: str = "12", trips: int = 1, end: str = "20271231") -> dict[str, str]:
+# The test feeds run until two years after today. Many builds below run on
+# the real day (no today=): a fixed last day would turn into a calendar that
+# ended once that day passed, and the guard's refusal would stop the whole
+# file (validate, every release and the weekly refresh run it).
+FAR_END = (date.today() + timedelta(days=730)).strftime("%Y%m%d")
+FAR_END_ISO = f"{FAR_END[:4]}-{FAR_END[4:6]}-{FAR_END[6:]}"
+
+
+def city_feed(route: str = "12", trips: int = 1, end: str = FAR_END) -> dict[str, str]:
     stop_times = ["trip_id,arrival_time,departure_time,stop_id,stop_sequence"]
     trip_rows = ["route_id,service_id,trip_id"]
     for i in range(trips):
@@ -73,7 +82,7 @@ def city_feed(route: str = "12", trips: int = 1, end: str = "20271231") -> dict[
     }
 
 
-def part(op_id: str, trips: int, end: str = "20271231") -> dict:
+def part(op_id: str, trips: int, end: str = FAR_END) -> dict:
     return {
         "op_id": op_id,
         "op_name": op_id,
@@ -270,7 +279,7 @@ with tempfile.TemporaryDirectory() as tmp:
         # The reason goes with it, and the last day of the zip kept: once
         # that one ends, the updater offers the new zip to the guard again.
         check(f"a new zip {label} is rejected for its content, until the zip in place ends",
-              set(info.get("refused") or {}) == {"a"} and info["refused"]["a"]["until"] == "20271231"
+              set(info.get("refused") or {}) == {"a"} and info["refused"]["a"]["until"] == FAR_END
               and ("calendar ended" in info["refused"]["a"]["why"] or "10 trips vs 60" in info["refused"]["a"]["why"]),
               repr(info.get("refused")))
     first = index_digest.digest(out)
@@ -352,7 +361,7 @@ bci.CITY_FEEDS = real_feeds
 
 # ---- 1b. a feed whose calendar already ended is not an index ----------------
 
-check("calendar_end takes the latest end_date", calendar_end(part("x", 1)) == "20271231")
+check("calendar_end takes the latest end_date", calendar_end(part("x", 1)) == FAR_END)
 late = part("x", 1)
 late["c"] = [["0000000", "20200101", "20991231"], ["1111100", "20260101", "20260630"]]
 late["a"] = [[], ["20260705", "20260820"]]
@@ -406,7 +415,7 @@ with tempfile.TemporaryDirectory() as tmp:
     err = raises(lambda: bci.build_city_index(base, cout, today="20260301"))
     check("an ended feed the previous index still runs is refused, and the message says why",
           isinstance(err, IndexGuardError) and "b calendar ended 2025-01-31" in str(err)
-          and "runs until 2027-12-31" in str(err) and cout.read_bytes() == before, repr(err))
+          and f"runs until {FAR_END_ISO}" in str(err) and cout.read_bytes() == before, repr(err))
     os.environ[bci.ALLOW_MISSING_ENV] = "b"
     info = bci.build_city_index(base, cout, today="20260301")
     check("allowed, the ended feed is dropped and the rest is written",
@@ -417,7 +426,7 @@ with tempfile.TemporaryDirectory() as tmp:
     # ended. Nothing that still runs is lost, so the other feeds go ahead.
     write_index([part("a", 5), part("b", 5, end="20250131")], cout, with_operators=True, today="20250101")
     check("operator_stats reads the last service day per operator",
-          operator_stats(cout) == {"a": (5, "20271231"), "b": (5, "20250131")}, repr(operator_stats(cout)))
+          operator_stats(cout) == {"a": (5, FAR_END), "b": (5, "20250131")}, repr(operator_stats(cout)))
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr):
         info = bci.build_city_index(base, cout, today="20260301")
@@ -1078,7 +1087,7 @@ with tempfile.TemporaryDirectory() as tmp:
         "trips.txt": "route_id,service_id,trip_id\n"
         "hkir_V-R-200-318,S1,T318\nhkir_V-02219-H-3-1,S1,TLOCAL\n",
         "calendar.txt": "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
-        "S1,1,1,1,1,1,1,1,20260101,20271231\n",
+        f"S1,1,1,1,1,1,1,1,20260101,{FAR_END}\n",
         "stop_times.txt": "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
         "T318,07:10:00,07:10:00,hkir_777764_2,1\nT318,07:55:00,07:55:00,hkir_300001_1,2\n"
         "TLOCAL,08:00:00,08:00:00,hkir_900001,1\nTLOCAL,08:10:00,08:10:00,hkir_900002,2\n",

@@ -14,6 +14,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
@@ -266,14 +267,23 @@ def _reauth_flows(hass) -> list:
     )
 
 
+def _reauth_issue(hass, entry) -> ir.IssueEntry | None:
+    """The Repairs issue Home Assistant raises with an entry's reauth."""
+    return ir.async_get(hass).async_get_issue(
+        "homeassistant", f"config_entry_reauth_{DOMAIN}_{entry.entry_id}"
+    )
+
+
 async def test_a_key_accepted_again_ends_the_reauth(hass, aioclient_mock, clock) -> None:
     """The reauth a mistaken 401 started goes once FUTÁR takes the key again:
-    answered empty, it would remove a key that works."""
+    answered empty, it would remove a key that works. Its Repairs issue goes
+    with it, which Home Assistant 2024.10 leaves to the integration."""
     aioclient_mock.get(SEARCH, status=401)
-    await _setup(hass)
+    entry = await _setup(hass)
     assert (await _call(hass))["error"] == "futar_auth"
     await hass.async_block_till_done()
     assert len(_reauth_flows(hass)) == 1
+    assert _reauth_issue(hass, entry) is not None
 
     aioclient_mock.clear_requests()
     aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
@@ -281,6 +291,7 @@ async def test_a_key_accepted_again_ends_the_reauth(hass, aioclient_mock, clock)
     assert (await _call(hass, params={"query": "Deli"}))["data"]["status"] == "OK"
     await hass.async_block_till_done()
     assert _reauth_flows(hass) == []
+    assert _reauth_issue(hass, entry) is None, "the reauth Repairs issue stayed"
 
 
 async def test_a_key_that_works_after_a_reload_ends_the_reauth(hass, aioclient_mock) -> None:
@@ -307,6 +318,7 @@ async def test_a_key_that_works_after_a_reload_ends_the_reauth(hass, aioclient_m
     assert (await _call(hass, params={"query": "Deli"}))["data"]["status"] == "OK"
     await hass.async_block_till_done()
     assert _reauth_flows(hass) == []
+    assert _reauth_issue(hass, entry) is None, "the reauth Repairs issue stayed"
 
 
 async def test_only_the_first_answer_of_a_proxy_looks_for_a_reauth(monkeypatch) -> None:

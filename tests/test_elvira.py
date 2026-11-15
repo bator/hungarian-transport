@@ -10,6 +10,7 @@ import asyncio
 from datetime import UTC, date, datetime, timedelta
 import json
 import logging
+from pathlib import Path
 import threading
 
 import aiohttp
@@ -18,6 +19,7 @@ import zoneinfo
 
 from custom_components.hungarian_transport import elvira
 from custom_components.hungarian_transport.elvira import (
+    ELVIRA_CACHE_MAX,
     ELVIRA_CACHE_TTL,
     ELVIRA_CALL_BUDGET,
     ELVIRA_DOWN_MAX,
@@ -28,7 +30,9 @@ from custom_components.hungarian_transport.elvira import (
     ELVIRA_TIMEOUT_SEC,
     ELVIRA_URL,
     ELVIRA_WORST_CASE_SEC,
+    STATIONINFO_HEAD_COUNT,
     STATIONINFO_MAX_COUNT,
+    Board,
     ElviraBoards,
     ElviraError,
     ElviraRateLimited,
@@ -79,6 +83,8 @@ class Upstream:
         self.arrivals = list(arrivals)
         self.failing = set(failing)
         self.calls: list[tuple[str, str]] = []
+        # The maxCount each (station, day) was last asked with.
+        self.max_counts: dict[tuple[str, str], str] = {}
         self.hold: dict[tuple[str, str], asyncio.Event] = {}
 
     def answer(self, code: str, day: date):
@@ -89,8 +95,9 @@ class Upstream:
         arrs = [arr for arr in self.arrivals if code == DEST and arr["arrive"][:10] == iso]
         return deps, arrs
 
-    async def __call__(self, code: str, day: date):
+    async def __call__(self, code: str, day: date, max_count: str = STATIONINFO_MAX_COUNT):
         self.calls.append((code, day.isoformat()))
+        self.max_counts[(code, day.isoformat())] = max_count
         gate = self.hold.get((code, day.isoformat()))
         if gate is not None:
             await gate.wait()
@@ -164,6 +171,24 @@ def test_evening_asks_tomorrows_arrivals_with_the_others_and_last() -> None:
     assert _rounds("2026-11-06T22:30:00+01:00", 30) == [
         [(ORIGIN, "2026-11-06"), (DEST, "2026-11-06"), (DEST, "2026-11-07")]
     ]
+
+
+async def test_tomorrows_arrival_board_is_asked_only_to_the_early_morning() -> None:
+    """It holds only the trains that get in past midnight: its first
+    STATIONINFO_HEAD_COUNT rows reach late morning even at Kelenföld, a
+    third of the day's board. Today's boards stay whole."""
+    clock = Clock("2026-11-06T22:30:00+01:00")
+    now = clock.now()
+    dep, arr = _board(now + timedelta(minutes=20), now + timedelta(minutes=110))
+    upstream = Upstream([dep], [arr])
+    rows, dest_failure = await _between(_source(upstream, clock), 30)
+    assert [(row["trainNumber"], row["travel"]) for row in rows] == [("966", 90)] and dest_failure is None
+    assert upstream.max_counts == {
+        (ORIGIN, "2026-11-06"): STATIONINFO_MAX_COUNT,
+        (DEST, "2026-11-06"): STATIONINFO_MAX_COUNT,
+        (DEST, "2026-11-07"): STATIONINFO_HEAD_COUNT,
+    }
+    assert int(STATIONINFO_HEAD_COUNT) < int(STATIONINFO_MAX_COUNT)
 
 
 def test_after_midnight_todays_origin_board_comes_first() -> None:
@@ -403,13 +428,13 @@ class Rounds(Upstream):
         self.rounds = 0
         self._busy = 0
 
-    async def __call__(self, code: str, day: date):
+    async def __call__(self, code: str, day: date, max_count: str = STATIONINFO_MAX_COUNT):
         if not self._busy:
             self.rounds += 1
         self._busy += 1
         try:
             await asyncio.sleep(0)
-            return await super().__call__(code, day)
+            return await super().__call__(code, day, max_count)
         finally:
             self._busy -= 1
 
@@ -651,6 +676,31 @@ async def test_boards_leave_memory_by_the_cache_timer_and_close_stops_it() -> No
     assert cancelled == [True]
 
 
+async def test_the_board_cache_keeps_to_its_byte_budget(monkeypatch) -> None:
+    """ELVIRA_CACHE_MAX boards are not a bound on memory: a station's board
+    can hold long strings, and any logged-in user can ask for any station
+    and day. Past ELVIRA_CACHE_BYTES the oldest board goes first."""
+    monkeypatch.setattr(elvira, "ELVIRA_CACHE_BYTES", 1_000_000)
+    calls: list[str] = []
+
+    async def fetch(code, day, max_count=STATIONINFO_MAX_COUNT):
+        calls.append(code)
+        # Some 300 kB a board.
+        return [{"code": code, "name": code * (300_000 // len(code))}], []
+
+    source = ElviraBoards(fetch, now=Clock(NOON).now, monotonic=Clock(NOON).monotonic)
+    day = date(2026, 10, 19)
+    codes = [f"0055{n:05d}" for n in range(6)]
+    for code in codes:
+        await source.board(code, day)
+    assert len(source._cache) == 3
+    # The newest three are kept: asked again, only the oldest goes out.
+    for code in [*codes[3:], codes[0]]:
+        await source.board(code, day)
+    assert calls == [*codes, codes[0]]
+    assert len(source._cache) <= ELVIRA_CACHE_MAX
+
+
 # --- The StationInfo request (fetch_station) ---
 
 
@@ -705,6 +755,96 @@ async def test_fetch_station_asks_for_a_whole_service_day() -> None:
         "minCount": "0",
         "maxCount": "2000",
     }
+    # Or its first rows from midnight.
+    await fetch_station(session, ORIGIN, date(2026, 11, 7), STATIONINFO_HEAD_COUNT)
+    assert session.posts[1][1]["maxCount"] == STATIONINFO_HEAD_COUNT == "200"
+
+
+# Fields of a whole StationInfo row (2026-11-16) that no row is made of.
+_STATION = {
+    "id": 2216, "isAlias": False, "name": "Budapest-Déli", "code": "005501016", "baseCode": "3639",
+    "isInternational": False, "country": "Magyarország", "coutryIso": "HU",
+    "modalities": [{"code": 100, "name": None, "defaultColor": "#1C4281", "sign": {"fontName": "MNR2007"}}],
+}
+_UNREAD = {
+    "aggregatedServiceIds": [], "seatReservationCode": "4770", "companyCode": None, "route": None,
+    "startStation": _STATION, "startDate": "2026-11-16T00:00:00+01:00", "origStartStation": None,
+    "virtualStart": False, "modality": _STATION["modalities"][0], "distance": 0, "fullName": "4770",
+    "kinds": [{"name": "személyvonat", "sortName": "BEG", "code": "3038", "startStation": _STATION}],
+    "kindsToDisplay": [{"name": "személyvonat", "sortName": "BEG", "endStation": _STATION}],
+    "viszonylatObject": {"jel": "G44", "startStation": _STATION}, "havarianInfok": {"aktualis": []},
+    "jeEszkozAlapId": 4.0, "startTimeZone": "+01:00", "actualStart": None, "estimatedStart": None,
+}
+
+
+def _whole(row: dict) -> dict:
+    """A row as StationInfo sends it: the fields read, and the rest."""
+    out = {**_UNREAD, **row}
+    for key in ("endStation", "kind"):
+        if isinstance(out.get(key), dict):
+            out[key] = {**_STATION, "sign": {"character": "x"}, **out[key]}
+    if isinstance(out.get("services"), list):
+        out["services"] = [
+            {"id": None, "sign": {"fontName": "MNR2007", "character": "y"}, "foreignNames": {"en": "x"}, **svc}
+            for svc in out["services"]
+        ]
+    return out
+
+
+async def _fetched(departures, arrivals) -> Board:
+    body = {"stationSchedulerDetails": {
+        "station": _STATION, "services": [], "moreResult": False, "havariaInfos": [],
+        "departureScheduler": departures, "arrivalScheduler": arrivals,
+    }, "trainSchedulerDetails": None, "maintenance": None}
+    return await fetch_station(_Session(_Response(body=body)), ORIGIN, date(2026, 9, 30))
+
+
+async def test_a_board_keeps_only_the_fields_its_rows_are_made_of() -> None:
+    """A busy station's day is megabytes of JSON, several times that
+    decoded: the cache keeps a dozen fields of a row, and one copy of a
+    service, a kind or a terminus the rows share."""
+    now = datetime.fromisoformat(NOON)
+    dep, arr = _board(now + timedelta(minutes=10), now + timedelta(minutes=50))
+    dep = dict(dep, viszonylatiJel={"jel": "G44", "sign": {"fontName": "x"}}, endStation={"name": "Szombathely"},
+               kind={"name": "InterCity", "sortName": "IC"}, services=[{"code": "3880", "description": "Helyjegy"}],
+               fullShortType="IC", endTrack="7", actualOrEstimatedStart=dep["start"])
+    later = dict(dep, trainId="t2", code="968")
+    departures, arrivals = board = await _fetched([_whole(dep), _whole(later)], [_whole(arr)])
+    assert departures == [dict(dep, viszonylatiJel={"jel": "G44"}), dict(later, viszonylatiJel={"jel": "G44"})]
+    assert arrivals == [arr]
+    for key in ("services", "kind", "endStation", "viszonylatiJel"):
+        assert departures[0][key] is departures[1][key]
+    whole = len(json.dumps({"d": [_whole(dep), _whole(later)], "a": [_whole(arr)]}).encode())
+    assert isinstance(board, Board) and 0 < board.nbytes < whole / 2
+
+
+async def test_rows_from_a_kept_board_are_the_whole_board_s() -> None:
+    """The shared ELVIRA case (tests/fixtures/elvira) from whole StationInfo
+    rows: the same rows, and the same answer of between() (settle,
+    next_boards) as from the rows themselves."""
+    case = json.loads((Path(__file__).parent / "fixtures" / "elvira" / "between.json").read_text(encoding="utf-8"))
+    now = datetime.fromisoformat(case["now"])
+    odep, _ = await _fetched([_whole(row) for row in case["origin_departures"]], [])
+    _, darr = await _fetched([], [_whole(row) for row in case["dest_arrivals"]])
+    rows = rows_from_stationinfo(odep, darr, TZ, now, now + timedelta(minutes=case["minutes_after"]), case["dest_name"])
+    assert json.dumps(rows, ensure_ascii=False) == json.dumps(case["rows"], ensure_ascii=False)
+
+    class Boards(Upstream):
+        def __init__(self, departures, arrivals) -> None:
+            super().__init__()
+            self.boards = departures, arrivals
+
+        def answer(self, code: str, day: date):
+            if day != now.date():
+                return [], []
+            return (self.boards[0], []) if code == ORIGIN else ([], self.boards[1])
+
+    answers = []
+    for departures, arrivals in ((case["origin_departures"], case["dest_arrivals"]), (odep, darr)):
+        source = _source(Boards(departures, arrivals), Clock(case["now"]))
+        answers.append(await _between(source, case["minutes_after"], dest_name=case["dest_name"]))
+        source.close()
+    assert answers[0][0] == answers[1][0] == case["rows"] and answers[0][1] is answers[1][1] is None
 
 
 @pytest.mark.parametrize(

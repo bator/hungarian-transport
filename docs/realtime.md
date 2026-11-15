@@ -232,7 +232,7 @@ Should either side object, removing the operator from `realtime_feeds.json`
   of route + start requests not cached (each kept three hours), counted
   against a rate limit of its own as strict as the feeds' one (asking the
   planner for many trips does not hold back the feeds' fetches); JSON in, gzip, the same User-Agent, no
-  redirects, a 20-second timeout, 4 MB per answer at most.
+  redirects, a 20-second timeout, 1 MB per answer at most.
 - **Outages.** A failing feed is not asked again for a minute (a static zip
   for 15 minutes), is logged once when it starts failing and once when it
   answers again, and the cards keep the timetable meanwhile (a static zip's

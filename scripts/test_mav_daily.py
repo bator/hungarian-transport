@@ -10,7 +10,7 @@ Pages URL, the published index's age check, the "Pages enabled" check
 against a stub gh, the unpacking of the deployed site for its attestation),
 plus what the workflow text must hold (triggers and the schedule's bounds,
 permissions per job, pinned actions, deploy only after a site was made, the
-attestation after the deploy). No network."""
+attestation in a job of its own after the deploy). No network."""
 from __future__ import annotations
 
 import contextlib
@@ -68,8 +68,10 @@ def step_script(name: str) -> str:
 
 
 def job(name: str) -> str:
-    """The block of job name under jobs:."""
+    """The block of job name under jobs:, empty without one."""
     lines = TEXT.splitlines()
+    if f"  {name}:" not in lines:
+        return ""
     start = lines.index(f"  {name}:")
     end = next((i for i in range(start + 1, len(lines)) if re.match(r"^  \S", lines[i]) or re.match(r"^\S", lines[i])),
                len(lines))
@@ -794,13 +796,28 @@ check("the workflow token reads contents only",
       re.search(r"^permissions:\n  contents: read\n\n", top, re.M) is not None, top)
 check("one run at a time, none cancelled half-way",
       re.search(r"^concurrency:\n  group: mav-index-daily\n  cancel-in-progress: false$", top, re.M) is not None)
-build, deploy = job("build"), job("deploy")
-check("both jobs have a time limit",
-      re.search(r"^    timeout-minutes: \d+$", build, re.M) is not None
-      and re.search(r"^    timeout-minutes: \d+$", deploy, re.M) is not None)
-check("only the deploy job may write Pages and mint an OIDC token",
-      "pages: write" not in build and "id-token" not in build
-      and re.search(r"^    permissions:\n      pages: write\n      id-token: write\n", deploy, re.M) is not None, deploy)
+build, deploy, attest_job = job("build"), job("deploy"), job("attest")
+jobs_block = TEXT.split("\njobs:\n", 1)[1]
+check("three jobs: build, deploy, attest",
+      re.findall(r"^  ([\w-]+):$", jobs_block, re.M) == ["build", "deploy", "attest"],
+      repr(re.findall(r"^  ([\w-]+):$", jobs_block, re.M)))
+
+
+def minutes(block: str) -> int | None:
+    m = re.search(r"^    timeout-minutes: (\d+)$", block, re.M)
+    return int(m.group(1)) if m else None
+
+
+# deploy-pages waits for the deployment up to its own timeout input, 600000
+# ms by default: a job limit of 10 minutes cut it short before it gave up.
+check("every job has a time limit, the deploy job's above deploy-pages' own 10 minutes",
+      all(minutes(b) for b in (build, deploy, attest_job)) and minutes(deploy) >= 15
+      and "timeout:" not in step(deploy, "actions/deploy-pages@"),
+      repr((minutes(build), minutes(deploy), minutes(attest_job))))
+check("only the deploy job may write Pages, only it and the attest job mint an OIDC token",
+      "pages: write" not in build and "id-token" not in build and "pages: write" not in attest_job
+      and re.search(r"^    permissions:\n      pages: write\n      id-token: write\n    \S", deploy, re.M) is not None,
+      deploy)
 check("the deploy job runs after a build that made a site, in the github-pages environment",
       "    needs: build" in deploy and "    if: needs.build.outputs.deploy == 'true'" in deploy
       and "      name: github-pages" in deploy
@@ -836,19 +853,38 @@ check("the checkout runs without the secrets too (the age check needs the script
 for ref in ("actions/upload-pages-artifact@", "actions/deploy-pages@"):
     check(f"{ref.rstrip('@')} is used", ref in TEXT)
 deploy_steps = [ln.strip() for ln in deploy.splitlines() if ln.strip().startswith("- ")]
-attest = step(deploy, "actions/attest@")
-fetched = step(deploy, "actions/download-artifact@")
-check("only the deploy job may write attestations",
-      "attestations: write" not in build
-      and re.search(r"^    permissions:\n      pages: write\n      id-token: write\n      attestations: write\n",
-                    deploy, re.M) is not None, deploy)
-check("the deployed files are attested after the deploy, from the artifact Pages deployed",
-      len(deploy_steps) >= 4 and deploy_steps[-1].startswith("- uses: actions/attest@")
-      and any(s_.startswith("- uses: actions/deploy-pages@") for s_ in deploy_steps[:-3])
+attest_steps = [ln.strip() for ln in attest_job.splitlines() if ln.strip().startswith("- ")]
+attest = step(attest_job, "actions/attest@")
+fetched = step(attest_job, "actions/download-artifact@")
+check("only the attest job may write attestations, with an OIDC token and nothing else",
+      "attestations: write" not in build and "attestations: write" not in deploy
+      and re.search(r"^    permissions:\n      id-token: write\n      attestations: write\n    \S",
+                    attest_job, re.M) is not None, attest_job)
+# "Re-run failed jobs" after a failed attestation reruns the failed job and
+# the ones that need it: were the attestation in the deploy job, the re-run
+# would deploy this run's artifact again, maybe over a newer run's index.
+check("the deploy job ends with the deploy: no attestation step a re-run would deploy again with",
+      deploy_steps[-1].startswith("- uses: actions/deploy-pages@") and "actions/attest@" not in deploy
+      and "download-artifact" not in deploy, repr(deploy_steps))
+check("the attest job runs after the deploy, never deploys, and runs nothing from the repository",
+      "    needs: deploy" in attest_job and "    if:" not in attest_job and "environment:" not in attest_job
+      and "deploy-pages" not in attest_job and "actions/checkout" not in attest_job
+      and "secrets." not in attest_job and "scripts/" not in attest_job, attest_job)
+check("the deployed files are attested from the artifact Pages deployed",
+      [s_.split("@")[0] for s_ in attest_steps] == [
+          "- uses: actions/download-artifact", "- name: Unpack the deployed site", "- uses: actions/attest"]
       and "name: github-pages" in fetched and "path: ${{ runner.temp }}/pages" in fetched
       and all(f"${{{{ runner.temp }}}}/site/{n}" in attest
               for n in ("mav-index.json.gz", "mav-index.json", "mav-gtfs.zip", "mav-pfaedle-overlay.zip")),
-      repr((deploy_steps, attest)))
+      repr((attest_steps, attest)))
+# The documented check pins the branch: a dispatch from another branch signs
+# with a workflow file of the same path.
+verify_docs = {"the workflow": TEXT, "docs/timetables.md": (ROOT / "docs" / "timetables.md").read_text(encoding="utf-8")}
+for where, text in verify_docs.items():
+    cmds = re.findall(r"gh attestation verify mav-(?:[^\n]*\\\n)*[^\n]*", text)
+    check(f"{where}: the documented attestation check pins the workflow and the main branch",
+          bool(cmds) and all("--signer-workflow bator/hungarian-transport/.github/workflows/mav-index-daily.yml" in c
+                             and "--source-ref refs/heads/main" in c for c in cmds), repr(cmds))
 check("the attestation is the one the release uses (same action, same pin)",
       re.search(r"uses: (actions/attest@[0-9a-f]{40})", attest) is not None
       and re.search(r"uses: (actions/attest@[0-9a-f]{40})", attest).group(1)

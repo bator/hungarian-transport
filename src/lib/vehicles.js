@@ -315,6 +315,22 @@ register({
     if (memo && memo.all === pool) memo.emma = keyed;
     return keyed;
   },
+  /* Whether a sensor train's time is the row's own departure: true, false,
+     or null for no evidence either way. A time with its date and offset
+     ("2027-10-31T02:10:00+02:00") is an instant and compared as one. A
+     bare "HH:MM" is read on the wall clock, and in the hour the clocks go
+     back it names two instants an hour apart: there it is no evidence, so
+     the 02:10 before the change cannot pass for the 02:10 after it. */
+  hassTimeAgrees(v, ts) {
+    const at = String((v && v.attime) || '').trim();
+    if (!at || !ts) return false;
+    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}.*(?:Z|[+-]\d{2}:?\d{2})$/.test(at)) {
+      const ms = Date.parse(at);
+      if (Number.isFinite(ms)) return Math.floor(ms / 60000) === Math.floor(ts / 60);
+    }
+    if (at !== BkkLib.hm(ts)) return false;
+    return BkkLib.hm(ts - 3600) === at || BkkLib.hm(ts + 3600) === at ? null : true;
+  },
   matchHassVehicle(pool, row) {
     const trip = String(row.tripId || '');
     const num = String(row.trainNumber || BkkLib.trainNumberFromTripId(row.tripId) || '');
@@ -331,13 +347,18 @@ register({
     let bestScore = 0;
     pool.forEach((v) => {
       const sameTrip = !!trip && !!v.tripId && String(v.tripId) === trip;
-      const timeHit = !!hm && !!v.attime && String(v.attime) === hm;
       /* Another train number is another train, whatever its time and
          route: 2620 does not take 2621's platform or position. The same
          trip id is the same train whatever number either side read. */
       const vNum = BkkLib.emmaTrainNumber(v.trainNumber);
       const looseHit = !!looseKey && vNum === looseKey;
       if (numKey && vNum && vNum !== numKey && !looseHit && !sameTrip) return;
+      /* A bare time in the hour the clocks go back still pairs a train
+         with no number, or the same one, as on any night; the shorter
+         reading of a number rests on the time alone, and needs a time
+         that names one instant. */
+      const agrees = BkkLib.hassTimeAgrees(v, row.sched || row.dep);
+      const timeHit = agrees === true || (agrees === null && !(looseHit && vNum !== numKey));
       let s = 0;
       if (sameTrip) s += 5;
       if ((numKey && vNum === numKey) || (looseHit && timeHit)) s += 3;

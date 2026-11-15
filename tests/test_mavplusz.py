@@ -215,6 +215,27 @@ def test_malformed_calls_and_positions_are_dropped() -> None:
     assert res.vehicle is None
 
 
+def test_the_largest_answer_fits_under_the_cap() -> None:
+    """40 trips of 100 calls, 15 vehicles on each one's pattern: more than
+    any trip has, yet under MAX_RESPONSE_BYTES, which keeps the decoding on
+    the event loop short."""
+    trip = _trip("t1")
+    trip["stoptimesForDate"] = [trip["stoptimesForDate"][0]] * 100
+    trip["pattern"]["vehiclePositions"] = [trip["pattern"]["vehiclePositions"][0]] * 15
+    answer = {"data": {f"t{i}": _as(trip, f"hkir:hkir_{i}_100-{i}") for i in range(mavplusz.MAX_TRIPS_PER_REQUEST)}}
+    size = len(json.dumps(answer).encode())
+    assert 0.6 * mavplusz.MAX_RESPONSE_BYTES < size < mavplusz.MAX_RESPONSE_BYTES <= 1024 * 1024
+
+
+async def test_an_answer_over_the_cap_is_a_value_error_and_not_read_whole(aioclient_mock) -> None:
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    body = json.dumps({"data": {"t0": None}, "pad": "x" * (2 * 1024 * 1024)}).encode()
+    aioclient_mock.post(mavplusz.URL, content=body)
+    with pytest.raises(ValueError, match="over 1048576"):
+        await mavplusz.fetch(session, mavplusz.build_query(KEYS[:1]))
+    await session.close()
+
+
 def test_feed_table_opts_in_the_planners_feeds() -> None:
     table = realtime.load_feed_table()
     flagged = {(fid, s.prefix) for fid, cfg in table.items() for s in cfg.sources if s.mavplusz}
@@ -436,8 +457,14 @@ async def test_a_request_begun_late_in_the_round_is_not_begun_and_no_outage(
     """Another card's request holds the lock for most of the round: this
     card's is not begun only to be cut before a healthy planner answers
     (which would back off every card for FAIL_BACKOFF as an outage). The
-    feeds answer this round, and the next one asks the planner."""
-    monkeypatch.setattr(realtime, "PLANNER_TIMEOUT", 0.3)
+    feeds answer this round, and the next one asks the planner.
+
+    The lock is let go three quarters of a round after this card's request
+    came to it, so a quarter of the round is left (under PLANNER_MIN_SHARE)
+    however late the event loop runs the steps up to then; the planner
+    answers in a tenth of one."""
+    monkeypatch.setattr(realtime, "PLANNER_TIMEOUT", 1.0)
+    caplog.set_level(logging.DEBUG, logger=realtime.__name__)
     planner = Planner({"hkir:hkir_H6112_607-1": _as(_trip("t0"), "hkir:hkir_H6112_607-1")})
 
     async def slowish(method, url, data):
@@ -448,18 +475,34 @@ async def test_a_request_begun_late_in_the_round_is_not_begun_and_no_outage(
     _jbb(aioclient_mock)
     hub, session, clock = await _hub(aioclient_mock, _cfg(), wall=JBB_WALL)
 
+    class Lock(asyncio.Lock):
+        """The planner's lock, telling when a request comes to it held."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.waited = asyncio.Event()
+
+        async def acquire(self) -> bool:
+            if self.locked():
+                self.waited.set()
+            return await super().acquire()
+
+    hub._mav_lock = lock = Lock()
+
     async def holder():
-        async with hub._mav_lock:
-            await asyncio.sleep(0.25)
+        async with lock:
+            await asyncio.wait_for(lock.waited.wait(), 5)
+            await asyncio.sleep(0.75 * realtime.PLANNER_TIMEOUT)
 
     held = asyncio.create_task(holder())
     await asyncio.sleep(0)
-    resp = await asyncio.wait_for(hub.query("v", [SZFV_REQ]), 2)
+    resp = await asyncio.wait_for(hub.query("v", [SZFV_REQ]), 5)
     await held
     assert resp["trips"]["s"]["delay"] == 190
     assert not planner.asked and len(_calls(aioclient_mock, "get")) == 2
+    assert "of the round left, not asked" in caplog.text
     assert hub._mav_retry_at < clock.now and "unavailable" not in caplog.text
-    resp = await asyncio.wait_for(hub.query("v", [SZFV_REQ]), 2)
+    resp = await asyncio.wait_for(hub.query("v", [SZFV_REQ]), 5)
     await session.close()
     assert len(planner.asked) == 1 and resp["trips"]["s"]["trip_id"] == "hkir_H6112_607-1"
 

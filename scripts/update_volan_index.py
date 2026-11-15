@@ -66,19 +66,28 @@ REJECT_RECHECK_DAYS = 7
 # - the value of a name whose last _/- segment is a secret word (key, token,
 #   secret, password ...: apikey, client_secret, refresh_token, x-api-key),
 #   with = or :, spaces and quotes around it (apikey = x, "access_token": "x").
-_URL_QUERY = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s?#'\"<>]*)\?[^\s#'\"<>]*")
+# A scheme is at most 32 characters, and need not start a word: an unbounded
+# one after \b backtracked over every run of scheme characters from every
+# start (50 ms per pattern on "a." * 2048), and one longer than 32 is still
+# found, from its last 32 characters.
+_URL_QUERY = re.compile(r"(?i)([a-z][a-z0-9+.-]{0,31}://[^\s?#'\"<>]*)\?[^\s#'\"<>]*")
 _BARE_QUERY = re.compile(r"\?(?=[A-Za-z0-9_.%-]+=)[^\s#'\"<>]*")
-_URL_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^\s/@'\"<>]+@")
+_URL_USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.-]{0,31}://)[^\s/@'\"<>]+@")
 _AUTH_SCHEME = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
 _SECRET_WORD = r"(?:api[_-]?key|apikey|key|token|secret|password|passwd|pwd|sig|signature|credentials?|authorization)"
+# The match starts at the secret word itself: the _ or - before it is the
+# non-alphanumeric character that opens a match, and the earlier segments
+# of the name (client_ in client_secret, x- in x-api-key) stay in the text.
+# Matching them too, as (?:[a-z0-9]+[_-])* did, changed no output but
+# backtracked over every segment from every start: quadratic, 1.3 s on
+# "a_" * 2048.
 _SECRET_PARAM = re.compile(
-    r"(?i)(^|[^a-z0-9])((?:[a-z0-9]+[_-])*" + _SECRET_WORD + r")([\"']?\s*[:=]\s*[\"']?)"
+    r"(?i)(^|[^a-z0-9])(" + _SECRET_WORD + r")([\"']?\s*[:=]\s*[\"']?)"
     # an Authorization scheme word stays (its credentials went with _AUTH_SCHEME)
     r"(?!(?:Bearer|Basic)\s)[^\s&'\"<>,;]+"
 )
-# Redaction runs on this much of a text at most: the name pattern backtracks
-# on long runs of separators ("a." * 8000 took 1.8 s), and a webhook or log
-# line has no use for more.
+# Redaction runs on this much of a text at most: a webhook or log line has
+# no use for more, and it bounds the time the patterns above take.
 REDACT_MAX = 4096
 
 
