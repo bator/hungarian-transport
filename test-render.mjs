@@ -4898,7 +4898,7 @@ const deferred = () => {
   Lib.volanDepartures = async () => [];
   await v._reload();
   Lib.volanDepartures = keepVolan;
-  check('the hop card leaves a city board’s fill to departures(), and still fills a Volán board itself',
+  check('the hop card fills a city board from Transitous once, and a Volán board as well',
     helyiFills === 1 && fills === 2, JSON.stringify({ helyiFills, fills }));
   if (v._tick) { clearInterval(v._tick); v._tick = null; }
   Lib.fillTransitousIfEmpty = keep.fillTransitousIfEmpty;
