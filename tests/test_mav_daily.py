@@ -111,11 +111,9 @@ async def test_newer_feed_installs(hass: HomeAssistant, aioclient_mock, card_ass
     assert out.stat().st_mode & 0o777 == 0o644
     assert not [p for p in card_assets.iterdir() if p.name.startswith(mav.INDEX_NAME + ".")]
     assert f"Installed the daily MÁV route index of feed {NEW}" in caplog.text
-    # Requested from the fixed host only; the index with the manifest's
-    # sha256, so a cache never pairs this manifest with another index.
-    assert [str(c[1]) for c in aioclient_mock.mock_calls] == [
-        mav_daily.MANIFEST_URL, f"{mav_daily.INDEX_URL}?sha={hashlib.sha256(raw).hexdigest()}"
-    ]
+    # Requested from the fixed host only, by the plain URLs: Pages' cache
+    # ignores a query (PAGES_MAX_AGE).
+    assert [str(c[1]) for c in aioclient_mock.mock_calls] == [mav_daily.MANIFEST_URL, mav_daily.INDEX_URL]
 
 
 async def test_missing_index_installs(hass: HomeAssistant, aioclient_mock, card_assets) -> None:
@@ -347,8 +345,11 @@ async def test_bad_download_keeps_the_index_and_logs_once(
     out.write_bytes(before)
     _serve(aioclient_mock, raw, man, **index_kw)
 
-    for _ in range(3):
-        assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.FAILED
+    results = [(await mav_daily.async_update(hass, card_assets)).result for _ in range(3)]
+    # A download that does not match its manifest is first taken for the
+    # Pages cache (test_a_mixed_deploy_is_no_round_and_looked_at_again).
+    first = mav_daily.SETTLING if case.endswith("mismatch") else mav_daily.FAILED
+    assert results == [first, mav_daily.FAILED, mav_daily.FAILED]
     assert out.read_bytes() == before
     assert len(_warnings(caplog)) == 1, _warnings(caplog)
     assert not [p for p in card_assets.iterdir() if p.name != mav.INDEX_NAME and p.name.startswith(mav.INDEX_NAME)]
@@ -786,32 +787,98 @@ async def test_busy_at_the_daily_round_is_retried_after_the_build(
     assert results == [mav_daily.BUSY, mav_daily.INSTALLED]
 
 
-async def test_a_mixed_deploy_is_retried_and_asks_for_the_manifest_s_index(
-    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, max_jitter
+def _deploy(answers: list[tuple[bytes, dict]], aioclient_mock) -> None:
+    """GitHub Pages around a deploy: each round gets the next (index,
+    manifest) of answers, the last one from then on. The cache keys on the
+    path alone, so either can be another generation's."""
+    from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
+
+    rounds = {"manifest": 0, "index": 0}
+
+    def serve(what):
+        async def answer(method, url, data):
+            raw, man = answers[min(rounds[what], len(answers) - 1)]
+            rounds[what] += 1
+            if what == "manifest":
+                return AiohttpClientMockResponse(method, url, json=man)
+            return AiohttpClientMockResponse(method, url, response=raw)
+
+        return answer
+
+    aioclient_mock.get(mav_daily.MANIFEST_URL, side_effect=serve("manifest"))
+    aioclient_mock.get(mav_daily.INDEX_URL, side_effect=serve("index"))
+
+
+def _recorded(monkeypatch) -> list[str]:
+    """The rounds recorded for the sensors (and handed to timetable_notify
+    before)."""
+    results: list[str] = []
+    real = mav_daily.storage.async_record_daily_round
+
+    async def record(hass, result, feed, built):
+        results.append(result)
+        await real(hass, result, feed, built)
+
+    monkeypatch.setattr(mav_daily.storage, "async_record_daily_round", record)
+    return results
+
+
+OLD_GEN = _index("20261031.M2ChangeID")
+NEW_GEN = _index(NEW)
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        # The new manifest, the cache's previous index.
+        (OLD_GEN, _manifest(NEW_GEN)),
+        # The cache's previous manifest, the new index.
+        (NEW_GEN, _manifest(OLD_GEN, feed="20261031.M2ChangeID")),
+    ],
+    ids=["old index", "old manifest"],
+)
+async def test_a_mixed_deploy_is_no_round_and_looked_at_again(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, max_jitter, monkeypatch, caplog, first
 ) -> None:
-    """Right after a deploy a cache may still serve the old index for the
-    new manifest: FAILED, retried with the sha256 in the URL."""
+    """Right after a deploy Pages' cache can pair the manifest with the
+    other generation's index for up to PAGES_MAX_AGE, whatever the query
+    or no-cache: no warning, no failed round, a look PAGES_SETTLE_DELAY
+    later installs."""
     await budapest
     out = card_assets / mav.INDEX_NAME
     out.write_bytes(_index(OLD))
-    old_gen, new_gen = _index("20261031.M2ChangeID"), _index(NEW)
-    sha = hashlib.sha256(new_gen).hexdigest()
-    # The first answer is the stale generation, the next the right one.
-    answers = [old_gen, new_gen]
-
-    async def cache(method, url, data):
-        from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
-
-        assert str(url).endswith(f"?sha={sha}")
-        return AiohttpClientMockResponse(method, url, response=answers.pop(0))
-
+    recorded = _recorded(monkeypatch)
+    _deploy([first, (NEW_GEN, _manifest(NEW_GEN))], aioclient_mock)
     await _setup(hass, {})
-    aioclient_mock.get(mav_daily.MANIFEST_URL, json=_manifest(new_gen))
-    aioclient_mock.get(mav_daily.INDEX_URL, side_effect=cache)
     await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
-    assert out.read_bytes() == _index(OLD)
-    await _at(hass, freezer, "2026-11-01 03:40:02+01:00")
-    assert out.read_bytes() == new_gen
+    assert out.read_bytes() == _index(OLD) and aioclient_mock.call_count == 2
+    assert recorded == [] and _warnings(caplog) == []
+    assert "GitHub Pages cache may still hold another generation" in caplog.text
+    await _at(hass, freezer, "2026-11-01 03:31:00+01:00")
+    assert aioclient_mock.call_count == 2
+    await _at(hass, freezer, "2026-11-01 03:31:02+01:00")
+    assert out.read_bytes() == NEW_GEN
+    assert recorded == [mav_daily.INSTALLED] and _warnings(caplog) == []
+
+
+async def test_an_index_that_still_does_not_match_its_manifest_fails(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, max_jitter, monkeypatch, caplog
+) -> None:
+    """Past PAGES_MAX_AGE the cache is no excuse: the same manifest's index
+    not matching again is a FAILED round, retried RETRY_DELAY later."""
+    await budapest
+    out = card_assets / mav.INDEX_NAME
+    out.write_bytes(_index(OLD))
+    recorded = _recorded(monkeypatch)
+    _deploy([(OLD_GEN, _manifest(NEW_GEN))], aioclient_mock)
+    await _setup(hass, {})
+    await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
+    await _at(hass, freezer, "2026-11-01 03:31:02+01:00")
+    assert recorded == [mav_daily.FAILED]
+    assert [w for w in _warnings(caplog) if "the manifest says" in w]
+    assert aioclient_mock.call_count == 4
+    await _at(hass, freezer, "2026-11-01 03:51:03+01:00")
+    assert recorded == [mav_daily.FAILED, mav_daily.FAILED] and out.read_bytes() == _index(OLD)
 
 
 async def test_a_manifest_of_yesterday_is_looked_at_again_until_the_day_s_feed(
