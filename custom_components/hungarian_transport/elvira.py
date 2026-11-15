@@ -27,7 +27,7 @@ from datetime import UTC, date, datetime, timedelta
 import aiohttp
 import zoneinfo
 
-from . import upstream
+from . import jsonsafe, upstream
 from .cache import CallLater, SharedTTLCache, TaskFactory
 
 _LOGGER = logging.getLogger(__name__)
@@ -451,6 +451,9 @@ def _parse_board(body: bytes | bytearray) -> Board:
     3.13).
     """
     try:
+        # Its nesting first: a thread of Home Assistant's executor would
+        # die nested some 9000 deep, not raise RecursionError (jsonsafe).
+        jsonsafe.check_depth(body)
         # As json.loads decodes bytes, but with the bytes let go of first.
         text = body.decode(json.detect_encoding(body), "surrogatepass")
         if isinstance(body, bytearray):

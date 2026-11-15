@@ -704,6 +704,27 @@ async def test_a_large_answer_is_decoded_off_the_event_loop_with_the_same_result
     assert used == ["_decode"]
 
 
+async def test_a_large_answer_reaches_the_decoder_as_its_one_buffer_emptied_once_decoded(hass, aioclient_mock) -> None:
+    """The chunks read used to stay alive, joined into a second copy of the
+    body, while the executor decoded it: an 8 MB answer was held twice. Now
+    the decoder gets the one buffer the chunks went into, and empties it
+    once it is text."""
+    large = _schedule_answer(6000)
+    aioclient_mock.get(SEARCH, text=large)
+    seen: list = []
+
+    async def executor(func, *args):
+        seen.append((type(args[0]), len(args[0])))
+        result = func(*args)
+        seen.append(len(args[0]))
+        return result
+
+    session = async_get_clientsession(hass)
+    data = await futar.futar_get(session, "secret-key", "search.json", {"query": "Large"}, executor=executor)
+    assert data == json.loads(large)
+    assert seen == [(bytearray, len(large.encode())), 0]
+
+
 async def test_the_proxy_decodes_in_home_assistants_executor(hass, aioclient_mock, monkeypatch) -> None:
     made: dict = {}
     real = integration.FutarProxy

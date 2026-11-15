@@ -16,7 +16,7 @@ from typing import Any
 
 import aiohttp
 
-from . import upstream
+from . import jsonsafe, upstream
 from .cache import CallLater, SharedTTLCache, TaskFactory
 
 _LOGGER = logging.getLogger(__name__)
@@ -122,9 +122,16 @@ def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return dict(pairs)
 
 
-def _decode(body: bytes) -> Any:
-    """A large answer, decoded with _object called back for every object."""
-    return json.loads(body, object_pairs_hook=_object)
+def _decode(body: bytearray) -> Any:
+    """A large answer, decoded with _object called back for every object.
+    The body is emptied once it is decoded to text, before the text is
+    decoded to objects (as elvira._parse_board does): it is not needed past
+    there. Its nesting is checked first: this runs in Home Assistant's
+    executor, whose threads die on JSON nested some 9000 deep (jsonsafe)."""
+    jsonsafe.check_depth(body)
+    text = body.decode(json.detect_encoding(body), "surrogatepass")
+    body.clear()
+    return json.loads(text, object_pairs_hook=_object)
 
 
 def _in_executor(executor: Executor | None, func: Callable[..., Any], *args: Any) -> Awaitable[Any]:
@@ -202,16 +209,15 @@ async def futar_get(
             length = getattr(resp, "content_length", None)
             if length is not None and length > FUTAR_MAX_BYTES:
                 raise FutarError(f"answer over {FUTAR_MAX_BYTES} bytes")
-            chunks: list[bytes] = []
-            total = 0
+            # One buffer, not chunks joined into a second copy of the body
+            # that the chunks outlive while it is decoded.
+            body = bytearray()
             async for chunk in resp.content.iter_chunked(FUTAR_READ_CHUNK):
-                total += len(chunk)
-                if total > FUTAR_MAX_BYTES:
+                body += chunk
+                if len(body) > FUTAR_MAX_BYTES:
                     raise FutarError(f"answer over {FUTAR_MAX_BYTES} bytes")
-                chunks.append(chunk)
-        body = b"".join(chunks)
         if len(body) < FUTAR_EXECUTOR_BYTES:
-            data = json.loads(body)
+            data = jsonsafe.loads(body)
         else:
             data = await _in_executor(executor, _decode, body)
     # RecursionError: an answer nested deeper than the decoder goes (a broken
