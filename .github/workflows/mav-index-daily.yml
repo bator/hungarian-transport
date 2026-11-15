@@ -67,11 +67,11 @@ jobs:
 
       # Also without the secrets: the last step checks how old the
       # published index is.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -82,7 +82,7 @@ jobs:
         if: env.MAV_SECRETS == 'true'
         run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: osm-cache
         if: env.MAV_SECRETS == 'true'
         with:
@@ -117,7 +117,7 @@ jobs:
             echo "::warning title=Daily MÁV index not built::The MÁV download, pfaedle or the audit failed (see this step's log); GitHub Pages keeps the previous index."
           fi
 
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: env.MAV_SECRETS == 'true' && steps.mav.outputs.built == 'true' && steps.osm-cache.outputs.cache-hit != 'true'
         with:
           path: .osm
