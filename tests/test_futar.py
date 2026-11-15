@@ -626,3 +626,17 @@ async def test_missing_status_is_ok_like_on_the_card(hass, aioclient_mock) -> No
     aioclient_mock.get(SEARCH, json={"data": {"list": []}})
     await _setup(hass)
     assert (await _call(hass))["data"] == {"data": {"list": []}}
+
+
+async def test_an_answer_over_the_byte_cap_is_an_outage_not_read_whole(hass, aioclient_mock, monkeypatch) -> None:
+    """The answer used to be read whole into memory however large it was.
+    Past FUTAR_MAX_BYTES it is refused, as an outage, while being read."""
+    monkeypatch.setattr(futar, "FUTAR_MAX_BYTES", 100)
+    monkeypatch.setattr(futar, "FUTAR_READ_CHUNK", 16)
+    aioclient_mock.get(SEARCH, params={"query": "Big"}, json={"status": "OK", "data": {"list": ["x" * 200]}})
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {"list": ["x" * 20]}})
+    await _setup(hass)
+
+    resp = await _call(hass, params={"query": "Big"})
+    assert resp == {"data": None, "error": "futar_unavailable", "detail": "answer over 100 bytes"}
+    assert (await _call(hass, params={"query": "Small"}))["data"]["data"] == {"list": ["x" * 20]}

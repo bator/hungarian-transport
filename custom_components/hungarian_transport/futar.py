@@ -9,6 +9,7 @@ several cards and browsers share one upstream call.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -81,6 +82,11 @@ FUTAR_MIN_TIMEOUT_SEC = 1.0
 # then one call asks again, so a 401 given by mistake (an upstream hiccup)
 # does not switch FUTÁR off until Home Assistant restarts.
 REJECTED_RETRY = 15 * 60
+# An answer is read into memory before it is parsed: one larger than this is
+# refused while it is read, as an outage. The largest answers the cards ask
+# for (plan-trip.json, route-details.json with references) are far smaller.
+FUTAR_MAX_BYTES = 8 * 1024 * 1024
+FUTAR_READ_CHUNK = 65536
 
 
 def futar_timeout(waited: float = 0.0) -> aiohttp.ClientTimeout:
@@ -152,7 +158,17 @@ async def futar_get(
                 raise FutarUpstreamRateLimited(f"HTTP {resp.status}")
             if resp.status // 100 != 2:
                 raise FutarError(f"HTTP {resp.status}")
-            data = await resp.json(content_type=None)
+            length = getattr(resp, "content_length", None)
+            if length is not None and length > FUTAR_MAX_BYTES:
+                raise FutarError(f"answer over {FUTAR_MAX_BYTES} bytes")
+            chunks: list[bytes] = []
+            total = 0
+            async for chunk in resp.content.iter_chunked(FUTAR_READ_CHUNK):
+                total += len(chunk)
+                if total > FUTAR_MAX_BYTES:
+                    raise FutarError(f"answer over {FUTAR_MAX_BYTES} bytes")
+                chunks.append(chunk)
+        data = json.loads(b"".join(chunks))
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
         raise FutarError(type(err).__name__) from None
     if not isinstance(data, dict):
