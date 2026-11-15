@@ -9,7 +9,7 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.components import frontend
+from homeassistant.components import frontend, persistent_notification
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
@@ -558,8 +558,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """The integration is removed: so are its Lovelace resource and its
-    record in .storage (storage.py), and the copy of it in memory.
+    """The integration is removed: so are its Lovelace resource, its
+    notifications and its record in .storage (storage.py), and the copy of
+    it in memory. There is one entry at most (its unique_id is the domain),
+    so nothing is shared with another.
 
     Only what installed the MÁV index stays (storage.MAV_INSTALL): the index
     stays in www/ and the cards keep drawing from it, so an entry added
@@ -570,6 +572,14 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         await lovelace_resource.async_remove_resource(hass)
     except Exception:  # noqa: BLE001 - removal goes on
         _LOGGER.warning("Could not remove the cards' Lovelace resource", exc_info=True)
+    # A notice about timetables or a failed MÁV build would outlive it.
+    for notification_id in (
+        timetable_notify.NOTIFICATION_SHIPPED,
+        timetable_notify.NOTIFICATION_MAV_DAILY,
+        timetable_notify.NOTIFICATION_DAILY_FAILED,
+        mav.NOTIFICATION_ID,
+    ):
+        persistent_notification.async_dismiss(hass, notification_id)
     try:
         state = await storage.async_load(hass)
         install = state.get(storage.MAV_INSTALL)

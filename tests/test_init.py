@@ -13,6 +13,7 @@ import voluptuous as vol
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
 
+from homeassistant.components import persistent_notification
 from homeassistant.components.frontend import DATA_EXTRA_MODULE_URL
 from homeassistant.config_entries import ConfigEntryDisabler
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
@@ -149,6 +150,21 @@ async def test_removal_keeps_what_installed_the_mav_index(hass, hass_storage) ->
     assert hass_storage[storage.STORAGE_KEY]["data"] == {storage.MAV_INSTALL: install}
     assert "update_state" not in hass.data[DOMAIN]
     assert await storage.async_load(hass) == {storage.MAV_INSTALL: install}
+
+
+async def test_removal_dismisses_the_integrations_notifications(hass, monkeypatch) -> None:
+    entry = await _setup(hass)
+    dismissed: list[str] = []
+    monkeypatch.setattr(persistent_notification, "async_dismiss", lambda _hass, nid: dismissed.append(nid))
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    notify = integration.timetable_notify
+    assert sorted(dismissed) == sorted([
+        notify.NOTIFICATION_SHIPPED,
+        notify.NOTIFICATION_MAV_DAILY,
+        notify.NOTIFICATION_DAILY_FAILED,
+        mav.NOTIFICATION_ID,
+    ])
 
 
 async def test_yaml_mode_resources_are_left_alone(hass) -> None:
