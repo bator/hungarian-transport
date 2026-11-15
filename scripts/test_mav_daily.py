@@ -7,9 +7,10 @@ scripts/mav_daily_verdict.py (when a run that published nothing goes red)
 and mav-index-daily.yml's steps as written there (run: blocks executed with
 bash against stubs: the build's warning and failure kind when it fails, the
 Pages URL, the published index's age check, the "Pages enabled" check
-against a stub gh), plus what the workflow text must hold (triggers,
-permissions per job, pinned actions, deploy only after a site was made). No
-network."""
+against a stub gh, the unpacking of the deployed site for its attestation),
+plus what the workflow text must hold (triggers and the schedule's bounds,
+permissions per job, pinned actions, deploy only after a site was made, the
+attestation after the deploy). No network."""
 from __future__ import annotations
 
 import contextlib
@@ -742,6 +743,28 @@ with tempfile.TemporaryDirectory() as tmp_name:
         check(f"Pages check, {gh_case}: exit {want_rc} with a clear message",
               done.returncode == want_rc and want_text in done.stdout, repr((done.returncode, done.stdout, done.stderr)))
 
+    # The attest step's input: the artifact upload-pages-artifact made (a
+    # tar of the site's top level, as its action.yml writes it).
+    unpack_step = step_script("Unpack the deployed site")
+    site_names = ("mav-index.json.gz", "mav-index.json", "mav-gtfs.zip", "mav-pfaedle-overlay.zip")
+    for label, names in (("the whole site", (*site_names, "ATTRIBUTION.txt", "index.html")),
+                         ("a site without the overlay", site_names[:3])):
+        ws = tmp / f"wf-unpack-{len(names)}"
+        (ws / "built").mkdir(parents=True)
+        (ws / "runner" / "pages").mkdir(parents=True)
+        for name in names:
+            (ws / "built" / name).write_bytes(name.encode())
+        subprocess.run(["tar", "--directory", str(ws / "built"), "-cf", str(ws / "runner" / "pages" / "artifact.tar"),
+                        "."], check=True)
+        done, _ = bash(unpack_step, ws, RUNNER_TEMP=str(ws / "runner"))
+        unpacked = ws / "runner" / "site"
+        whole = len(names) > 3
+        check(f"the deployed site unpacked for its attestation, {label}: "
+              + ("every attested file" if whole else "an error naming the missing file"),
+              (done.returncode == 0 and all((unpacked / n).read_bytes() == n.encode() for n in site_names))
+              if whole else (done.returncode == 1 and "mav-pfaedle-overlay.zip is not in the deployed site" in done.stdout),
+              repr((done.returncode, done.stdout, done.stderr)))
+
 # ---- the workflow text ------------------------------------------------------
 on_block = TEXT.split("\non:\n", 1)[1].split("\n\n", 1)[0]
 check("runs daily and by hand, never for pull requests (secrets, deploy)",
@@ -812,6 +835,24 @@ check("the checkout runs without the secrets too (the age check needs the script
       bool(checkout_s) and "if:" not in checkout_s and "persist-credentials: false" in checkout_s, checkout_s)
 for ref in ("actions/upload-pages-artifact@", "actions/deploy-pages@"):
     check(f"{ref.rstrip('@')} is used", ref in TEXT)
+deploy_steps = [ln.strip() for ln in deploy.splitlines() if ln.strip().startswith("- ")]
+attest = step(deploy, "actions/attest@")
+fetched = step(deploy, "actions/download-artifact@")
+check("only the deploy job may write attestations",
+      "attestations: write" not in build
+      and re.search(r"^    permissions:\n      pages: write\n      id-token: write\n      attestations: write\n",
+                    deploy, re.M) is not None, deploy)
+check("the deployed files are attested after the deploy, from the artifact Pages deployed",
+      len(deploy_steps) >= 4 and deploy_steps[-1].startswith("- uses: actions/attest@")
+      and any(s_.startswith("- uses: actions/deploy-pages@") for s_ in deploy_steps[:-3])
+      and "name: github-pages" in fetched and "path: ${{ runner.temp }}/pages" in fetched
+      and all(f"${{{{ runner.temp }}}}/site/{n}" in attest
+              for n in ("mav-index.json.gz", "mav-index.json", "mav-gtfs.zip", "mav-pfaedle-overlay.zip")),
+      repr((deploy_steps, attest)))
+check("the attestation is the one the release uses (same action, same pin)",
+      re.search(r"uses: (actions/attest@[0-9a-f]{40})", attest) is not None
+      and re.search(r"uses: (actions/attest@[0-9a-f]{40})", attest).group(1)
+      in (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8"), attest)
 
 if failed:
     print(f"{failed} failed")

@@ -229,6 +229,24 @@ here are examples):
 consumer can fetch the small manifest first and download the zips only when
 `feed_version` or a `sha256` changed.
 
+**Checking a download.** Each deploy attests `mav-index.json.gz`,
+`mav-index.json`, `mav-gtfs.zip` and `mav-pfaedle-overlay.zip` (a build
+provenance attestation, as for the release zips), taken from the very files
+Pages deployed:
+
+```sh
+gh attestation verify mav-gtfs.zip --repo bator/hungarian-transport \
+  --signer-workflow bator/hungarian-transport/.github/workflows/mav-index-daily.yml
+```
+
+The attestation is made after the deploy, so a Sigstore outage never holds
+back the day's index; the run is then red, and the files it deployed have
+none (the check fails, it never passes) until a later run deploys again.
+The integration does not check the attestation: Home Assistant has no
+Sigstore client, and the integration takes no new dependency for one. It
+checks the index against the manifest's size and sha256, which come from the
+same site, so it trusts GitHub Pages and this repository's workflow.
+
 Nothing is published, and the site keeps the previous day's files, when the
 secrets are missing, the download, pfaedle or the audit fails, the site is
 refused (a feed whose `feed_version` does not start with a real date, a site
@@ -265,8 +283,13 @@ these hold:
 
 The index is fetched as `mav-index.json.gz?sha=<the manifest's sha256>`, so
 the Pages cache (`max-age=600`) never pairs a fresh manifest with the
-previous index. It is written next to the card the way a build writes it (a
-temp file, then a rename) and never while a local build runs or waits. A
+previous index. Both come from `https://bator.github.io/hungarian-transport/`
+only, and no redirect is followed: should the site move (GitHub Pages
+redirects every `github.io` URL once a custom domain is set), each round
+fails with a warning naming the redirect until an update of the integration
+reads the new address. The index is written next to the card the way a
+build writes it (a temp file, then a rename) and never while a local build
+runs or waits. A
 failed round, or one that found a build running, is tried again 20 minutes
 later, up to 6 times until the next daily round; a daily round that finds a
 manifest older than 20 hours (the workflow ran late) looks once more one to
