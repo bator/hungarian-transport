@@ -166,9 +166,40 @@ def load_env_files() -> None:
             _parse_env_file(path)
 
 
+# feed_error's message. A keyed feed URL (BAHART_GTFS_URL=...?apikey=..., a
+# key in the path) can end up in an exception text: of a URL only its scheme
+# and host stay, and a query, an Authorization scheme's credentials or the
+# value of a secret-named parameter go (update_volan_index.redact does the
+# same, more thoroughly, for its log and webhook; it must not import this
+# module, which may be the broken sibling it reports).
+_ERR_URL = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)(?:[^\s/@'\"<>]*@)?([^\s/?#'\"<>@]*)[^\s'\"<>]*")
+_ERR_QUERY = re.compile(r"\?[^\s#'\"<>]*")
+_ERR_AUTH = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+_ERR_SECRET = re.compile(
+    r"(?i)((?:api[_-]?key|apikey|key|token|secret|password|passwd|pwd|sig|signature|credentials?)"
+    r"[\"']?\s*[:=]\s*[\"']?)[^\s&'\"<>,;]+"
+)
+ERR_MAX = 300
+
+
+def _url_host(m: re.Match) -> str:
+    """An _ERR_URL match as its scheme and host, "/…" for anything cut."""
+    kept = m.group(1) + m.group(2)
+    return kept + ("/…" if len(m.group(0)) > len(kept) else "")
+
+
 def feed_error(feed_id: str, err: BaseException) -> str:
-    """Log a download failure without echoing keyed NAP / catalog URLs."""
-    return f"{feed_id}: {type(err).__name__}"
+    """A download or load failure for the log: the exception's type and its
+    message ("HTTP Error 404: Not Found", "blocked url host"), on one line,
+    at most ERR_MAX characters, without echoing keyed NAP / catalog URLs."""
+    text = " ".join(str(err).split())[: ERR_MAX * 4]
+    text = _ERR_URL.sub(_url_host, text)
+    text = _ERR_QUERY.sub("?…", text)
+    text = _ERR_AUTH.sub(r"\1 …", text)
+    text = _ERR_SECRET.sub(r"\1…", text)
+    if len(text) > ERR_MAX:
+        text = text[:ERR_MAX] + " …"
+    return f"{feed_id}: {type(err).__name__}" + (f": {text}" if text else "")
 
 
 def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -1463,6 +1494,95 @@ def operator_stats(out: Path) -> dict[str, tuple[int, str]] | None:
             })
             out_stats[op] = (n, end)
         return out_stats
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _index_shapes_reader(path: Path, idx: dict) -> Callable[[int], str | None]:
+    """Shape id -> encoded shape of an index's sharded shapes folder (next
+    to the index, as write_shapes puts it); None for one that cannot be read."""
+    sh = idx.get("sh") if isinstance(idx.get("sh"), dict) else {}
+    folder = path.parent / str(sh.get("dir") or "")
+    n = sh.get("n")
+    shards: dict[int, list | None] = {}
+
+    def shape(ix: int) -> str | None:
+        if not sh.get("dir") or not isinstance(n, int) or n <= 0 or not isinstance(ix, int) or ix < 0:
+            return None
+        k = ix % n
+        if k not in shards:
+            try:
+                body = json.loads(gzip.decompress((folder / f"{k:02d}.json.gz").read_bytes()))
+                shards[k] = body.get("p") if isinstance(body, dict) and isinstance(body.get("p"), list) else None
+            except (OSError, EOFError, ValueError):
+                shards[k] = None
+        got = shards[k]
+        pos = ix // n
+        return got[pos] if got is not None and pos < len(got) and isinstance(got[pos], str) else None
+
+    return shape
+
+
+def index_parts(path: Path, op_ids: Iterable[str]) -> list[dict] | None:
+    """The parts of the operators op_ids in an existing index with
+    operators, packed as load_parts packs them, so that write_index puts
+    them back as they were: one part per operator, with its stops, their
+    coordinates, its services, trips, shapes (from the index's shapes
+    folder next to it) and feed_version. An operator the index lacks has
+    no part. None when the index does not read, or one of the trips names a
+    shape its folder does not have (the timetable would lose its lines)."""
+    idx = _read_index(path)
+    if idx is None:
+        return None
+    wanted = set(op_ids)
+    try:
+        ops = idx.get("o") or []
+        stops = idx["s"]
+        coords = idx.get("g") or []
+        cal, added, removed = idx["c"], idx.get("a") or [], idx.get("r") or []
+        versions = {}
+        for item in str(idx.get("feed") or "").split(";"):
+            op, sep, version = item.partition(":")
+            if sep and op:
+                versions[op] = version
+        trips_of: dict[int, list] = defaultdict(list)
+        for t in idx.get("t") or []:
+            op_ix = stops[t[2][0]][3]
+            if ops[op_ix][0] in wanted:
+                trips_of[op_ix].append(t)
+        shape = _index_shapes_reader(path, idx)
+        parts = []
+        for op_ix in sorted(trips_of):
+            trips = trips_of[op_ix]
+            own = [i for i, row in enumerate(stops) if row[3] == op_ix]
+            s_map = {i: n for n, i in enumerate(own)}
+            services = sorted({t[0] for t in trips})
+            c_map = {sv: n for n, sv in enumerate(services)}
+            shape_ids = sorted({t[5] for t in trips if len(t) > 5 and isinstance(t[5], int) and t[5] >= 0})
+            encoded = [shape(i) for i in shape_ids]
+            if any(e is None for e in encoded):
+                return None
+            sh_map = {i: n for n, i in enumerate(shape_ids)}
+            rows = []
+            for t in trips:
+                row = [c_map[t[0]], t[1], [s_map[p] for p in t[2]], t[3], *t[4:]]
+                if len(t) > 5:
+                    row[5] = sh_map.get(t[5], -1) if isinstance(t[5], int) and t[5] >= 0 else -1
+                rows.append(row)
+            oid, name = ops[op_ix][0], ops[op_ix][1]
+            parts.append({
+                "op_id": oid,
+                "op_name": name,
+                "feed": versions.get(oid, ""),
+                "s": [list(stops[i][:3]) for i in own],
+                "g": [v for i in own for v in coords[2 * i:2 * i + 2]] if len(coords) == 2 * len(stops) else [],
+                "shapes": encoded,
+                "c": [cal[sv] for sv in services],
+                "a": [added[sv] if sv < len(added) else [] for sv in services],
+                "r": [removed[sv] if sv < len(removed) else [] for sv in services],
+                "t": rows,
+            })
+        return parts
     except (IndexError, KeyError, TypeError):
         return None
 
