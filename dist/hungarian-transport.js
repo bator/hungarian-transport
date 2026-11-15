@@ -5764,6 +5764,13 @@ function routePatternStore(deps) {
 
 // src/lib/departures.js
 var BOARD_CAP_ROWS = 55;
+var FUTAR_LASTING_ERRORS = /* @__PURE__ */ new Set([
+  "errNoApiKey",
+  "futar_auth",
+  "errApiKeyBad",
+  "futar_bad_request",
+  "errFutarBadRequest"
+]);
 register({
   /* The page's route patterns, kept in the browser between page loads
      (route-patterns.js). */
@@ -6194,83 +6201,91 @@ register({
     });
     return names;
   },
+  /* The destinations FUTÁR's board for the stop reaches in the next hours:
+     each trip's and each route's stops after this one. */
+  async futarReachableDests(apiKey, cache, stop, mode) {
+    const data = await BkkLib.fetch(apiKey, "arrivals-and-departures-for-stop.json", {
+      stopId: stop.id,
+      minutesAfter: DEPART_MINUTES_AFTER,
+      minutesBefore: "0",
+      onlyDepartures: "true",
+      includeReferences: "true"
+    }, true);
+    const refs = (data.data || {}).references || {};
+    const routes = refs.routes || {};
+    const trips = refs.trips || {};
+    const times = ((data.data || {}).entry || {}).stopTimes || [];
+    const seenTrip = /* @__PURE__ */ new Set();
+    const seenRoute = /* @__PURE__ */ new Set();
+    const tripJobs = [];
+    const routeIds = [];
+    for (let i = 0; i < times.length; i++) {
+      const st = times[i];
+      const trip = trips[st.tripId] || {};
+      const rid = trip.routeId;
+      const rt = routes[rid] || { id: rid, type: "" };
+      if (!BkkLib.routeMatchesMode(rt, mode)) continue;
+      if (rid && !seenRoute.has(rid)) {
+        seenRoute.add(rid);
+        routeIds.push(rid);
+      }
+      if (st.tripId && !seenTrip.has(st.tripId) && tripJobs.length < 40) {
+        seenTrip.add(st.tripId);
+        tripJobs.push({ tripId: st.tripId, routeId: rid });
+      }
+    }
+    const fromTrips = await Promise.all(tripJobs.map(async (job) => {
+      try {
+        const names = await BkkLib.tripRemainingNames(apiKey, cache, job.tripId, stop);
+        return { routeId: job.routeId, names };
+      } catch (_e) {
+        return { routeId: job.routeId, names: [] };
+      }
+    }));
+    const fromRoutes = await Promise.all(routeIds.slice(0, 32).map(async (rid) => {
+      try {
+        const names = await BkkLib.remainingNames(apiKey, cache, stop, rid);
+        return { routeId: rid, names };
+      } catch (_e) {
+        return { routeId: rid, names: [] };
+      }
+    }));
+    const byKey = /* @__PURE__ */ new Map();
+    const destRoutes = {};
+    fromTrips.concat(fromRoutes).forEach(({ routeId, names }) => {
+      (names || []).forEach((n) => {
+        if (!n || !n.key) return;
+        const prev = byKey.get(n.key);
+        if (!prev) byKey.set(n.key, n);
+        else if (BkkLib.isMetroSuffixName(prev.name) && !BkkLib.isMetroSuffixName(n.name)) {
+          byKey.set(n.key, n);
+        }
+        if (!destRoutes[n.key]) destRoutes[n.key] = [];
+        if (routeId && destRoutes[n.key].indexOf(routeId) < 0) destRoutes[n.key].push(routeId);
+      });
+    });
+    const dests = Array.from(byKey.values());
+    dests.sort((a, b) => a.name.localeCompare(b.name, "hu"));
+    return { dests, destRoutes };
+  },
   async reachableDests(ix, apiKey, cache, stop, mode, city) {
     needIndexes(ix);
     if (mode === "helyi") {
       return BkkLib.cityReachableDests(ix, stop, city);
     }
+    const gtfsModes = mode === "volan" || mode === "all";
     let out = { dests: [], destRoutes: {} };
     let futarFailed = false;
-    try {
-      const data = await BkkLib.fetch(apiKey, "arrivals-and-departures-for-stop.json", {
-        stopId: stop.id,
-        minutesAfter: DEPART_MINUTES_AFTER,
-        minutesBefore: "0",
-        onlyDepartures: "true",
-        includeReferences: "true"
-      }, true);
-      const refs = (data.data || {}).references || {};
-      const routes = refs.routes || {};
-      const trips = refs.trips || {};
-      const times = ((data.data || {}).entry || {}).stopTimes || [];
-      const seenTrip = /* @__PURE__ */ new Set();
-      const seenRoute = /* @__PURE__ */ new Set();
-      const tripJobs = [];
-      const routeIds = [];
-      for (let i = 0; i < times.length; i++) {
-        const st = times[i];
-        const trip = trips[st.tripId] || {};
-        const rid = trip.routeId;
-        const rt = routes[rid] || { id: rid, type: "" };
-        if (!BkkLib.routeMatchesMode(rt, mode)) continue;
-        if (rid && !seenRoute.has(rid)) {
-          seenRoute.add(rid);
-          routeIds.push(rid);
-        }
-        if (st.tripId && !seenTrip.has(st.tripId) && tripJobs.length < 40) {
-          seenTrip.add(st.tripId);
-          tripJobs.push({ tripId: st.tripId, routeId: rid });
-        }
+    if (!gtfsModes || /^BKK_/i.test(String(stop && stop.id || ""))) {
+      try {
+        out = await BkkLib.futarReachableDests(apiKey, cache, stop, mode);
+      } catch (err) {
+        if (!gtfsModes) throw err;
+        const code = err && (err.code || err.i18nKey);
+        futarFailed = !FUTAR_LASTING_ERRORS.has(code);
       }
-      const fromTrips = await Promise.all(tripJobs.map(async (job) => {
-        try {
-          const names = await BkkLib.tripRemainingNames(apiKey, cache, job.tripId, stop);
-          return { routeId: job.routeId, names };
-        } catch (_e) {
-          return { routeId: job.routeId, names: [] };
-        }
-      }));
-      const fromRoutes = await Promise.all(routeIds.slice(0, 32).map(async (rid) => {
-        try {
-          const names = await BkkLib.remainingNames(apiKey, cache, stop, rid);
-          return { routeId: rid, names };
-        } catch (_e) {
-          return { routeId: rid, names: [] };
-        }
-      }));
-      const byKey = /* @__PURE__ */ new Map();
-      const destRoutes = {};
-      fromTrips.concat(fromRoutes).forEach(({ routeId, names }) => {
-        (names || []).forEach((n) => {
-          if (!n || !n.key) return;
-          const prev = byKey.get(n.key);
-          if (!prev) byKey.set(n.key, n);
-          else if (BkkLib.isMetroSuffixName(prev.name) && !BkkLib.isMetroSuffixName(n.name)) {
-            byKey.set(n.key, n);
-          }
-          if (!destRoutes[n.key]) destRoutes[n.key] = [];
-          if (routeId && destRoutes[n.key].indexOf(routeId) < 0) destRoutes[n.key].push(routeId);
-        });
-      });
-      const dests = Array.from(byKey.values());
-      dests.sort((a, b) => a.name.localeCompare(b.name, "hu"));
-      out = { dests, destRoutes };
-    } catch (err) {
-      if (mode !== "volan" && mode !== "all") throw err;
-      const code = err && (err.code || err.i18nKey);
-      futarFailed = code !== "errNoApiKey" && code !== "futar_auth" && code !== "errApiKeyBad";
     }
-    if (mode === "volan" || mode === "all") {
+    if (gtfsModes) {
       try {
         out = BkkLib.mergeDestIndex(await BkkLib.volanReachableDests(ix, stop), out);
       } catch (_e) {
@@ -8813,6 +8828,7 @@ var THEME_CSS = `
 
 // src/editor.js
 var DEST_RETRY_MS = 30 * 1e3;
+var DEST_RETRIES = 6;
 var BKKHopCardEditor = class extends HTMLElement {
   constructor() {
     super();
@@ -8833,6 +8849,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._loadedStop = "";
     this._loadedAccess = "";
     this._loadedPartialAt = 0;
+    this._loadedPartials = 0;
     this._loadingStop = "";
     this._loadedScope = "";
     this._loadingScope = "";
@@ -8912,6 +8929,12 @@ var BKKHopCardEditor = class extends HTMLElement {
     const c = cfg || this._config;
     return `${this._mode(c)}|${c.city || ""}`;
   }
+  /* The list on screen is the current stop's, mode's and city's: a load
+     again for it (a retry, new FUTÁR access) keeps it offered meanwhile
+     instead of the loading hint, as the planner does. */
+  _destsShown() {
+    return this._dests.length > 0 && this._loadedStop === this._config.stopId && this._loadedScope === this._destScope();
+  }
   /* A load in flight for this stop in the current mode and city. */
   _loadingDestsFor(stopId) {
     return this._destsLoading && this._loadingStop === stopId && this._loadingScope === this._destScope();
@@ -8970,7 +8993,8 @@ var BKKHopCardEditor = class extends HTMLElement {
   }
   _destsStale(stopId) {
     if (this._loadedStop !== stopId || this._loadedScope !== this._destScope()) return true;
-    if (this._loadedPartialAt && Date.now() - this._loadedPartialAt >= DEST_RETRY_MS) return true;
+    const partials = this._loadedPartials;
+    if (this._loadedPartialAt && partials <= DEST_RETRIES && Date.now() - this._loadedPartialAt >= DEST_RETRY_MS * 2 ** Math.max(0, partials - 1)) return true;
     return !this._loadedAccess && !this._keyless() && !!this._keyAccess();
   }
   _build() {
@@ -9624,7 +9648,7 @@ var BKKHopCardEditor = class extends HTMLElement {
       box.innerHTML = '<span class="hint">' + BkkLib.esc(copy.destNeedOrigin) + "</span>";
       return;
     }
-    if (this._destsLoading) {
+    if (this._destsLoading && !this._destsShown()) {
       box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "destLoading")) + "</span>";
       return;
     }
@@ -9663,7 +9687,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._loadingScope = scope;
     this._failedStop = "";
     const box = this._el("destHits");
-    if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "destLoading")) + "</span>";
+    if (box && !this._destsShown()) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "destLoading")) + "</span>";
     try {
       this._error("");
       const idx = await BkkLib.reachableDests(
@@ -9675,9 +9699,11 @@ var BKKHopCardEditor = class extends HTMLElement {
         this._config.city
       );
       if (this._destLoad.stale(seq) || this._config.stopId !== stopId || this._destScope() !== scope) return;
+      const sameList = this._loadedStop === stopId && this._loadedScope === scope && this._loadedAccess === access;
       this._loadedStop = stopId;
       this._loadedScope = scope;
       this._loadedAccess = access;
+      this._loadedPartials = idx.partial ? sameList && this._loadedPartialAt ? this._loadedPartials + 1 : 1 : 0;
       this._loadedPartialAt = idx.partial ? Date.now() : 0;
       this._destsLoading = false;
       this._loadingStop = "";
@@ -11330,6 +11356,7 @@ var HISTORY_RETRY_MS = 60 * 1e3;
 var PICK_DEBOUNCE_MS = 300;
 var SEARCH_ERR_MS = 30 * 1e3;
 var DEST_RETRY_MS2 = 30 * 1e3;
+var DEST_RETRIES2 = 6;
 var HEAD_SEC_PCT = 50;
 var SWAP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9,3L5,7H8V14H10V7H13M16,17V10H14V17H11L15,21L19,17H16Z"/></svg>';
 var EDIT_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z"/></svg>';
@@ -11354,6 +11381,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._destsFor = "";
     this._destsAccess = "";
     this._destsFailedAt = 0;
+    this._destsFailures = 0;
     this._pickersMounted = false;
     this._planner = BkkLib.journeyPlanSources(this._ctx);
     this._plan = BkkLib.journeyPlan({
@@ -12133,7 +12161,8 @@ var BKKPlannerCard = class extends BKKHopCard {
     if (this._routePicked() && !this._editRoute) return;
     if (this._destsFor === cfg.stopId) {
       const access = this._futarAccess();
-      const retry = this._destsFailedAt && Date.now() - this._destsFailedAt >= DEST_RETRY_MS2;
+      const fails = this._destsFailures;
+      const retry = this._destsFailedAt && fails <= DEST_RETRIES2 && Date.now() - this._destsFailedAt >= DEST_RETRY_MS2 * 2 ** Math.max(0, fails - 1);
       if (!retry && (!access || access === this._destsAccess)) return;
     }
     this._loadDests();
@@ -13024,8 +13053,10 @@ ${this._stopPinCss()}
     const cfg = this._config || {};
     if (!cfg.stopId) return;
     const again = this._destsFor === cfg.stopId;
+    const access = this._futarAccess();
+    if (!again || access !== this._destsAccess) this._destsFailures = 0;
     this._destsFor = cfg.stopId;
-    this._destsAccess = this._futarAccess();
+    this._destsAccess = access;
     this._destsFailedAt = 0;
     const seq = this._destLoad.bump();
     if (!again) {
@@ -13041,6 +13072,7 @@ ${this._stopPinCss()}
       if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
         this._dests = [];
         this._destRoutes = {};
+        this._destsFailures = 0;
       } else {
         const out = await BkkLib.reachableDests(
           this._ctx.indexes(),
@@ -13053,7 +13085,8 @@ ${this._stopPinCss()}
         if (this._destLoad.stale(seq)) return;
         this._dests = out && out.dests || [];
         this._destRoutes = out && out.destRoutes || {};
-        if (out && out.partial) this._destsFailedAt = Date.now();
+        if (out && out.partial) this._destsFailed();
+        else this._destsFailures = 0;
       }
       this._showSearchErr("");
     } catch (err) {
@@ -13061,13 +13094,18 @@ ${this._stopPinCss()}
       this._showSearchErr(err);
       this._dests = [];
       this._destRoutes = {};
-      this._destsFailedAt = Date.now();
+      this._destsFailed();
     } finally {
       if (!this._destLoad.stale(seq)) {
         this._destsLoading = false;
         this._searchDest((this._planEl("pdq") || {}).value || "");
       }
     }
+  }
+  /* The load for _destsFor failed, or lacked FUTÁR's part. */
+  _destsFailed() {
+    this._destsFailedAt = Date.now();
+    this._destsFailures += 1;
   }
   _idsForDest(keys) {
     const raw = [];
