@@ -98,6 +98,9 @@ def _elvira_at(value: Any) -> int:
     return at
 
 
+# The longest dest_name elvira_between takes; the card cuts it to the same
+# length (src/lib/board.js ELVIRA_DEST_NAME_MAX, kept equal by a test).
+ELVIRA_DEST_NAME_MAX = 100
 ELVIRA_SERVICE_SCHEMA = vol.Schema(
     {
         vol.Required("origin_code"): cv.string,
@@ -106,7 +109,7 @@ ELVIRA_SERVICE_SCHEMA = vol.Schema(
             "minutes_after", default=180
         ): vol.All(_finite_int, vol.Range(min=15, max=480)),
         # Copied into every row: a station name, not a payload.
-        vol.Optional("dest_name", default=""): vol.All(cv.string, vol.Length(max=100)),
+        vol.Optional("dest_name", default=""): vol.All(cv.string, vol.Length(max=ELVIRA_DEST_NAME_MAX)),
         vol.Optional("at"): _elvira_at,
     }
 )

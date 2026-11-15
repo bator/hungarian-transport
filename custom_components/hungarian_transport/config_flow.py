@@ -8,8 +8,8 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.config_entries import ConfigFlowResult
-from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
+from homeassistant.core import DOMAIN as HOMEASSISTANT_DOMAIN, HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
     BooleanSelector,
@@ -82,6 +82,13 @@ def async_end_reauth(hass: HomeAssistant, entry_id: str) -> None:
             checking[flow["flow_id"]] = True
         else:
             hass.config_entries.flow.async_abort(flow["flow_id"])
+            # The reauth Repairs issue HA raised with the flow: newer HA
+            # deletes it whenever the flow is removed, but HA 2024.10 only
+            # when the flow itself finishes, so an abort from outside would
+            # leave it standing. Deleting a missing issue is a no-op.
+            ir.async_delete_issue(
+                hass, HOMEASSISTANT_DOMAIN, f"config_entry_reauth_{DOMAIN}_{entry_id}"
+            )
 
 
 async def _validate_key(hass: HomeAssistant, api_key: str) -> str | None:
