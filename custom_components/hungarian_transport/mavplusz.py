@@ -35,8 +35,13 @@ URL = "https://mavplusz.hu/otp2-backend/otp/routers/default/index/graphql"
 # trip id. The hub asks the resolved ones first (realtime._query_mavplusz),
 # and the ones cut go out on a later poll, while the others are cached.
 MAX_TRIPS_PER_REQUEST = 40
-# Decompressed answer cap: 40 long trips are ~250 KB.
-MAX_RESPONSE_BYTES = 4 * 1024 * 1024
+# Decompressed answer cap. The answer is decoded on the event loop, which
+# json.loads holds for as long as it runs (about 11 ms a MB), so the cap is
+# near the largest real answer: a call is 210 bytes and a vehicle 250, and 40
+# Miskolc city trips (17 calls each) were 134 KB on 2026-11-15; 40 trips of
+# 100 calls with 15 vehicles on each pattern, more than any Volán trip has,
+# would be 0.96 MiB. The route lists are 40 bytes a trip, 4 KB a route.
+MAX_RESPONSE_BYTES = 1024 * 1024
 BUDAPEST = ZoneInfo("Europe/Budapest")
 _DATE = re.compile(r"^\d{8}$")
 # stopRelationship.status -> VehiclePosition.VehicleStopStatus.

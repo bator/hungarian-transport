@@ -215,6 +215,27 @@ def test_malformed_calls_and_positions_are_dropped() -> None:
     assert res.vehicle is None
 
 
+def test_the_largest_answer_fits_under_the_cap() -> None:
+    """40 trips of 100 calls, 15 vehicles on each one's pattern: more than
+    any trip has, yet under MAX_RESPONSE_BYTES, which keeps the decoding on
+    the event loop short."""
+    trip = _trip("t1")
+    trip["stoptimesForDate"] = [trip["stoptimesForDate"][0]] * 100
+    trip["pattern"]["vehiclePositions"] = [trip["pattern"]["vehiclePositions"][0]] * 15
+    answer = {"data": {f"t{i}": _as(trip, f"hkir:hkir_{i}_100-{i}") for i in range(mavplusz.MAX_TRIPS_PER_REQUEST)}}
+    size = len(json.dumps(answer).encode())
+    assert 0.6 * mavplusz.MAX_RESPONSE_BYTES < size < mavplusz.MAX_RESPONSE_BYTES <= 1024 * 1024
+
+
+async def test_an_answer_over_the_cap_is_a_value_error_and_not_read_whole(aioclient_mock) -> None:
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    body = json.dumps({"data": {"t0": None}, "pad": "x" * (2 * 1024 * 1024)}).encode()
+    aioclient_mock.post(mavplusz.URL, content=body)
+    with pytest.raises(ValueError, match="over 1048576"):
+        await mavplusz.fetch(session, mavplusz.build_query(KEYS[:1]))
+    await session.close()
+
+
 def test_feed_table_opts_in_the_planners_feeds() -> None:
     table = realtime.load_feed_table()
     flagged = {(fid, s.prefix) for fid, cfg in table.items() for s in cfg.sources if s.mavplusz}
