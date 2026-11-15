@@ -71,12 +71,16 @@ register({
     return s.indexOf(want) === 0;
   },
   /* A stop does not move: every poll of an empty board geocoded both ends
-     again. Answers stay for the page; a failed lookup is asked again, and
-     an empty answer after ten minutes (a geocoder that had no data yet). */
+     again. Answers stay for the page; an empty answer is asked again after
+     ten minutes (a geocoder that had no data yet), and a failed lookup
+     after a minute and a half: Transitous is run by volunteers, and every
+     card polling it again in its outage only adds to the load. */
   _geocodeCache: new Map(),
   _geocodeCacheMax: 200,
   _geocodeEmptyAt: new Map(),
   _geocodeEmptyRetryMs: 10 * 60 * 1000,
+  _geocodeFailedAt: new Map(),
+  _geocodeFailRetryMs: 90 * 1000,
   transitousGeocode(text, opts) {
     const q = String(text || '').trim();
     if (!q) return Promise.resolve([]);
@@ -90,22 +94,30 @@ register({
     const key = `${params.type || 'all'}|${q}`;
     const cache = BkkLib._geocodeCache;
     const empties = BkkLib._geocodeEmptyAt;
+    const fails = BkkLib._geocodeFailedAt;
     const hit = cache.get(key);
     const emptyAt = empties.get(key);
-    if (hit && !(emptyAt && Date.now() - emptyAt >= BkkLib._geocodeEmptyRetryMs)) return hit;
+    const failedAt = fails.get(key);
+    const now = Date.now();
+    const stale = (emptyAt && now - emptyAt >= BkkLib._geocodeEmptyRetryMs)
+      || (failedAt && now - failedAt >= BkkLib._geocodeFailRetryMs);
+    if (hit && !stale) return hit;
     if (hit) cache.delete(key);
     empties.delete(key);
+    fails.delete(key);
     const run = BkkLib.transitousFetch('/api/v1/geocode', params)
       .then((data) => {
         const list = Array.isArray(data) ? data : [];
         if (!list.length && cache.get(key) === run) empties.set(key, Date.now());
         return list;
       });
-    run.catch(() => { if (cache.get(key) === run) cache.delete(key); });
+    /* The failed lookup stays, rejecting, until its retry time. */
+    run.catch(() => { if (cache.get(key) === run) fails.set(key, Date.now()); });
     if (cache.size >= BkkLib._geocodeCacheMax) {
       const oldest = cache.keys().next().value;
       cache.delete(oldest);
       empties.delete(oldest);
+      fails.delete(oldest);
     }
     cache.set(key, run);
     return run;
@@ -820,11 +832,24 @@ register({
   },
   /* An empty board (a city line at night) stays empty for a while: after a
      fill that found nothing, the same pair is not asked again for ten
-     minutes, instead of a plan on every poll. A fill that failed is asked
-     again on the next poll, and returns null: the caller keeps what it
-     showed instead of "no departures". */
+     minutes, instead of a plan on every poll. A fill that failed returns
+     null, so the caller keeps what it showed instead of "no departures",
+     and the pair is not asked again for a minute and a half, twice as
+     long after each further failure up to the ten minutes: an outage of
+     the volunteer-run Transitous is no reason for two requests on every
+     poll of every empty card. */
   _transitousEmptyAt: new Map(),
   _transitousEmptyRetryMs: 10 * 60 * 1000,
+  _transitousFailed: new Map(),
+  _transitousFailRetryMs: 90 * 1000,
+  _transitousFillFailed(key) {
+    const last = BkkLib._transitousFailed.get(key);
+    const wait = last
+      ? Math.min(last.wait * 2, BkkLib._transitousEmptyRetryMs)
+      : BkkLib._transitousFailRetryMs;
+    BkkLib._transitousFailed.set(key, { at: Date.now(), wait });
+    return null;
+  },
   _transitousFillKey(origin, dest, opts) {
     const o = origin || {};
     const d = dest || {};
@@ -836,17 +861,23 @@ register({
     if (list.length) return list;
     const key = BkkLib._transitousFillKey(origin, dest, opts);
     const empties = BkkLib._transitousEmptyAt;
+    const failed = BkkLib._transitousFailed;
     const now = Date.now();
     if (now - (empties.get(key) || 0) < BkkLib._transitousEmptyRetryMs) return list;
+    const lastFail = failed.get(key);
+    if (lastFail && now - lastFail.at < lastFail.wait) return null;
     empties.forEach((ts, k) => { if (now - ts >= BkkLib._transitousEmptyRetryMs) empties.delete(k); });
+    /* A pair not asked again long after its retry time (its card is gone). */
+    failed.forEach((f, k) => { if (now - f.at >= f.wait + BkkLib._transitousEmptyRetryMs) failed.delete(k); });
     try {
       const extra = await BkkLib.transitousDepartures(origin, dest, opts);
-      if (!Array.isArray(extra)) return null;
+      if (!Array.isArray(extra)) return BkkLib._transitousFillFailed(key);
+      failed.delete(key);
       if (extra.length) empties.delete(key);
       else empties.set(key, Date.now());
       return BkkLib.mergeRows(list, extra, maxDepartureRows(opts && opts.minutesAfter));
     } catch (_e) {
-      return null;
+      return BkkLib._transitousFillFailed(key);
     }
   },
   /* MOTIS v5: itinerary duration is seconds; leg duration is seconds;
