@@ -36,11 +36,16 @@ RETRY_LIMIT times until the next daily round. A round that finds a manifest
 whose feed is not of today, or one older than STALE_MANIFEST, is looked at
 again LATE_DELAY later, up to LATE_LIMIT times after a first or daily round
 and only that day: the workflow builds the day's feed around midday or in the
-afternoon, not before the 06:00 check. The index is fetched with the
-manifest's sha256 in its query, so a cache in front of Pages (max-age=600) never pairs a new manifest
-with an old index. The options flow can turn it off (CONF_DAILY_MAV); then
-no request is made at all. Each round returns a DailyRound, which the
-updater hands to timetable_notify.py and records for the sensors.
+afternoon, not before the 06:00 check. GitHub Pages' cache (Fastly,
+max-age=600) keys on the path alone, ignoring a query and a request's
+no-cache, so for up to PAGES_MAX_AGE after a deploy the manifest and the
+index can be of two generations: the first download that does not match its
+manifest (by size or sha256) is looked at again PAGES_SETTLE_DELAY later,
+with a debug line, and is no round (nothing recorded, nothing notified, no
+retry used up); the same manifest's index mismatching again is a FAILED
+round. The options flow can turn it off (CONF_DAILY_MAV); then no request
+is made at all. Each round returns a DailyRound, which the updater hands to
+timetable_notify.py and records for the sensors.
 
 The card fetches mav-index.json.gz with a day-stamped URL and "no-cache":
 Home Assistant's static files answer with an ETag of the file's mtime and
@@ -111,6 +116,15 @@ RETRY_LIMIT = 6
 STALE_MANIFEST = timedelta(hours=20)
 LATE_DELAY = (2 * 60 * 60, 3 * 60 * 60)
 LATE_LIMIT = 4
+# GitHub Pages serves the site through Fastly with Cache-Control:
+# max-age=600, cached by the path alone: neither a query (?sha=...) nor a
+# request's no-cache reaches past it (2026-11-15: every variant the same
+# object of the same Age, x-cache HIT). For up to this long after a deploy
+# the manifest and the index can be of two generations, either way round.
+PAGES_MAX_AGE = 600
+# A download that does not match its manifest is looked at again this much
+# later, when both are the deploy's, before it counts as a failed round.
+PAGES_SETTLE_DELAY = PAGES_MAX_AGE + 60
 FEED_RE = re.compile(r"\d{8}(?!\d)[A-Za-z0-9._:+-]{0,64}")
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 
@@ -125,6 +139,10 @@ FAILED = "failed"
 # UP_TO_DATE because www/ serves an index of another feed that is not older
 # (a local build, a release's newer one), not this manifest's own.
 SUPERSEDED = "superseded"
+# Only between async_update and the updater, never recorded nor handed on:
+# the download did not match its manifest for the first time, which right
+# after a deploy is the Pages cache (PAGES_MAX_AGE).
+SETTLING = "settling"
 _INSTALL = "install"
 
 
@@ -152,10 +170,17 @@ class _Unsupported(DailyIndexError):
     """A manifest format or index schema this version does not read."""
 
 
+class _Mismatch(DailyIndexError):
+    """The download is not the index the manifest describes (its size or
+    sha256): another generation's, or a broken file."""
+
+
 async def _get(session: aiohttp.ClientSession, url: str, limit: int, timeout: aiohttp.ClientTimeout) -> bytes:
     """GET url's body, at most limit bytes; DailyIndexError otherwise."""
     what = url.split("?", 1)[0].rsplit("/", 1)[-1]
     try:
+        # no-cache for a cache between here and Pages; Pages' own ignores
+        # it (PAGES_MAX_AGE).
         async with session.get(
             url, timeout=timeout, allow_redirects=False, headers={"Cache-Control": "no-cache"}
         ) as res:
@@ -213,9 +238,9 @@ def check_index(raw: bytes, man: dict[str, Any], min_trains: int) -> tuple[int, 
     """Raise DailyIndexError unless raw is the index man describes; its
     trains and lines, and its rank for the same-feed rule."""
     if len(raw) != man["size"]:
-        raise DailyIndexError(f"index is {len(raw)} bytes, the manifest says {man['size']}")
+        raise _Mismatch(f"index is {len(raw)} bytes, the manifest says {man['size']}")
     if hashlib.sha256(raw).hexdigest() != man["sha256"]:
-        raise DailyIndexError("index sha256 does not match the manifest")
+        raise _Mismatch("index sha256 does not match the manifest")
     try:
         unzip = zlib.decompressobj(16 + zlib.MAX_WBITS)
         text = unzip.decompress(raw, MAX_INDEX_JSON)
@@ -318,6 +343,17 @@ def decide(
 
 # The failure last logged as a warning, kept across rounds: only this module reads it.
 _LOGGED = "mav_daily_logged"
+# The sha256 of the last manifest whose download did not match it.
+_MISMATCHED = "mav_daily_mismatched"
+
+
+def _first_mismatch(hass: HomeAssistant, sha: str) -> bool:
+    """Whether this manifest's download did not match it for the first time."""
+    data = hass.data.setdefault(DOMAIN, {})
+    if data.get(_MISMATCHED) == sha:
+        return False
+    data[_MISMATCHED] = sha
+    return True
 
 
 def _log_failure(hass: HomeAssistant, message: str, unsupported: bool = False) -> None:
@@ -398,10 +434,19 @@ async def _install(
         _LOGGER.debug("Daily MÁV route index of feed %s: a local build runs; trying again later", feed)
         return done(BUSY)
     try:
-        # The sha256 in the query: a cache in front of Pages never serves
-        # another generation's index for this manifest.
-        raw = await _get(session, f"{INDEX_URL}?sha={man['sha256']}", MAX_INDEX, INDEX_TIMEOUT)
+        raw = await _get(session, INDEX_URL, MAX_INDEX, INDEX_TIMEOUT)
         count, rank = await hass.async_add_executor_job(check_index, raw, man, mav.MIN_TRAINS)
+    except _Mismatch as err:
+        if not _first_mismatch(hass, man["sha256"]):
+            _log_failure(hass, str(err))
+            return done(FAILED, str(err))
+        # Right after a deploy the Pages cache can still hold the other
+        # generation of one of the two files (PAGES_MAX_AGE).
+        _LOGGER.debug(
+            "Daily MÁV route index of feed %s: %s; the GitHub Pages cache may still hold another"
+            " generation, looking again in %d s", feed, err, PAGES_SETTLE_DELAY,
+        )
+        return done(SETTLING, str(err))
     except DailyIndexError as err:
         _log_failure(hass, str(err))
         return done(FAILED, str(err))
@@ -474,8 +519,10 @@ class DailyIndexUpdater:
     through while the manifest's feed was not of today (or the manifest
     older than STALE_MANIFEST) is looked at again LATE_DELAY later, at most
     LATE_LIMIT times since the last first or daily round, only the same
-    local day and before the next daily time. One round is pending at a time: the daily time replaces a
-    retry or a late look still waiting.
+    local day and before the next daily time. A SETTLING one is no round:
+    it is looked at again PAGES_SETTLE_DELAY later, using up no retry, and
+    neither handed to on_result nor recorded. One round is pending at a
+    time: the daily time replaces a retry or a late look still waiting.
     on_result gets each round's DailyRound (timetable_notify.py); then the
     round is recorded for the sensors (storage.DAILY_ROUND), and next_run
     says when the next one is due."""
@@ -605,6 +652,10 @@ class DailyIndexUpdater:
             raise
         except Exception as err:  # noqa: BLE001 - logged once, the next round tries again
             done = _crashed(self._hass, err)
+        if done.result == SETTLING:
+            if not self._stopped and self._unsub is None:
+                self._schedule(PAGES_SETTLE_DELAY, _RETRY)
+            return
         self._after(done)
         if self._on_result is not None:
             try:

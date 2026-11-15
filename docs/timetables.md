@@ -281,9 +281,13 @@ these hold:
   gzip stream, unpacks to that schema and feed, and has at least 50 trains
   whose routes and stations all resolve.
 
-The index is fetched as `mav-index.json.gz?sha=<the manifest's sha256>`, so
-the Pages cache (`max-age=600`) never pairs a fresh manifest with the
-previous index. Both come from `https://bator.github.io/hungarian-transport/`
+The Pages cache (Fastly, `max-age=600`) keys on the path alone, ignoring a
+query string and `Cache-Control: no-cache`, so for up to ten minutes after a
+deploy it can hand out the new manifest with the previous index, or the
+other way round. A download that does not match its manifest (size or
+sha256) is therefore looked at again 11 minutes later with only a debug
+line, and is not a round; only the same manifest's index failing to match
+again is a failed round. Both files come from `https://bator.github.io/hungarian-transport/`
 only, and no redirect is followed: should the site move (GitHub Pages
 redirects every `github.io` URL once a custom domain is set), each round
 fails with a warning naming the redirect until an update of the integration
