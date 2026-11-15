@@ -1676,6 +1676,13 @@ for raw, want in [
     # The userinfo took the "#" that kept the query from its URL: a second
     # round redacts the query it joined.
     ("http://a#u:pw@h.example/f?;k=S41", "http://…@h.example/f?…"),
+    # A secret name in the userinfo: its value ends with the userinfo, and
+    # the host and the path after the "@" stay.
+    ("https://apikey:S42@api.example.com/v1/feed.zip failed: 403", "https://…@api.example.com/v1/feed.zip failed: 403"),
+    ("https://token:S43@gtfs.example.hu/path/x.zip", "https://…@gtfs.example.hu/path/x.zip"),
+    ("https://key=S44@host.example/p HTTP Error 500", "https://…@host.example/p HTTP Error 500"),
+    ("https://token:S45@h.example/f?apikey=S46", "https://…@h.example/f?…"),
+    ("https://u:pw@h.example/x/apikey=S47 ok", "https://…@h.example/x/apikey=… ok"),
 ]:
     check(f"redact({raw!r})", uvi.redact(raw) == want, repr(uvi.redact(raw)))
 # Every secret form after every context, with and without a space: what came before
@@ -1691,9 +1698,8 @@ check("redact() of a long text is capped at REDACT_MAX", len(_long) <= uvi.REDAC
 # Runs of name separators once made the secret-name pattern backtrack over
 # every segment from every start (0.4 to 1.3 s for "a_" * 2048), and runs of
 # scheme characters the URL patterns (0.1 s for "a." * 2048). Linear now:
-# about a millisecond (a chain of names, quadratic, some 15 ms); the limit
-# leaves a slow runner several times that, and the best of three runs
-# ignores a pause of the machine.
+# about a millisecond; the limit leaves a slow runner many times that, and
+# the best of three runs ignores a pause of the machine.
 for _label, _text in (("a_", "a_" * 8000), ("a-", "a-" * 8000), ("a.", "a." * 8000), ("a+", "a+" * 8000),
                       ("key words", "key " * 2000), ("names ending in a secret word", "x_token_" * 1000),
                       ("names in each other's values", "key=-" * 1000)):
@@ -1703,6 +1709,22 @@ for _label, _text in (("a_", "a_" * 8000), ("a-", "a-" * 8000), ("a.", "a." * 80
         uvi.redact(_text + " apikey=S9")
         _best = min(_best, time.perf_counter() - _t0)
     check(f"redact() of a long text of {_label} runs is quick", _best < 0.1, f"{_best:.3f} s")
+# A value or a query that runs to the end of the text, found again from
+# every name or scheme in it, made one round quadratic: 25 to 40 ms for a
+# chain of names ("key=" * 1100), 130 ms for "https://a@" * 500, and on four
+# times REDACT_MAX 0.3 to 2 s. REDACT_MAX no longer has to bound that: one
+# round over such a text, not cut, takes a few milliseconds.
+for _label, _run in (("key=", "key="), ("key=-", "key=-"), ("?key=", "?key="), ("key=key=:", "key=key=:"),
+                     ("https://key=", "https://key="), ("https://a@", "https://a@"), ("x://", "x://"),
+                     ("token=a/", "token=a/"), ("https://h?", "https://h?"), ("Bearer key=", "Bearer key=")):
+    _text = _run * (4 * uvi.REDACT_MAX // len(_run))
+    _best = float("inf")
+    for _ in range(3):
+        _t0 = time.perf_counter()
+        uvi._redact_once(_text)
+        _best = min(_best, time.perf_counter() - _t0)
+    check(f"one redaction round over {4 * uvi.REDACT_MAX} characters of {_label!r} runs is quick", _best < 0.1,
+          f"{_best:.3f} s")
 check("a secret at the start of a long text is still redacted", "S10" not in uvi.redact("apikey=S10 " + "x" * 9000))
 
 # O-3: the traceback of a broken sibling goes through the same redaction.

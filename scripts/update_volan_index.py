@@ -2,6 +2,7 @@
 """Daily KTI Volán + municipal GTFS check for Hungarian transport on HA OS."""
 from __future__ import annotations
 
+import bisect
 import fcntl
 import filecmp
 import gzip
@@ -71,14 +72,27 @@ REJECT_RECHECK_DAYS = 7
 # start (50 ms per pattern on "a." * 2048), and one longer than 32 is still
 # found, from its last 32 characters.
 #
-# Every pattern has one group, the part that goes, and every pattern looks at
-# the same text: a round of redact() replaces the union of what they found,
-# and spans that overlap or touch become one "…". Run one after another, as
-# they once were, an earlier pattern swallowed the context a later one needs:
-# a URL query ends at whitespace, so "?client_secret: S" lost
-# "client_secret:" to the query and the secret-name pattern no longer saw a
-# name before "S" ("?Bearer S" the same).
-_URL_QUERY = re.compile(r"(?i)[a-z][a-z0-9+.-]{0,31}://[^\s?#'\"<>]*\?([^\s#'\"<>]*)")
+# Every pattern looks at the same text and finds a part that goes (its group,
+# or what follows it: a query, a secret's value): a round of redact()
+# replaces the union of what they found, and spans that overlap or touch
+# become one "…". Run one after another, as they once were, an earlier
+# pattern swallowed the context a later one needs: a URL query ends at
+# whitespace, so "?client_secret: S" lost "client_secret:" to the query and
+# the secret-name pattern no longer saw a name before "S" ("?Bearer S" the
+# same).
+#
+# No pattern scans to the end of a value or a query itself: from every start
+# that is the rest of the text again ("key=" * 1100, where each value holds
+# all the names after it, or "x://" * 1100, a URL at every scheme that ends at
+# no "?"), quadratic. _redact_once() finds where they end with _stop_finder(),
+# which searches each stretch of the text once.
+_SCHEME = re.compile(r"(?i)[a-z][a-z0-9+.-]{0,31}://")
+# A URL query: a "?" after a scheme, in the same run of characters a URL may
+# hold, up to whitespace, a "#" or a quote (_QUERY_STOP). The run starts after
+# such a character or at the start of the text (the lookbehind), so no run is
+# scanned from every character in it.
+_QUERY_RUN = re.compile(r"(?<![^\s?#'\"<>])([^\s?#'\"<>]*)\?")
+_QUERY_STOP = re.compile(r"[\s#'\"<>]")
 _BARE_QUERY = re.compile(r"\?((?=[A-Za-z0-9_.%-]+=)[^\s#'\"<>]*)")
 _URL_USERINFO = re.compile(r"(?i)[a-z][a-z0-9+.-]{0,31}://([^\s/@'\"<>]+)@")
 _AUTH_SCHEME = re.compile(r"(?i)\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+/=-]+)")
@@ -88,34 +102,67 @@ _SECRET_WORD = r"(?:api[_-]?key|apikey|key|token|secret|password|passwd|pwd|sig|
 # of the name (client_ in client_secret, x- in x-api-key) stay in the text.
 # Matching them too, as (?:[a-z0-9]+[_-])* did, changed no output but
 # backtracked over every segment from every start: quadratic, 1.3 s on
-# "a_" * 2048.
+# "a_" * 2048. Its group is empty, at the start of the value; the value runs
+# up to _VALUE_STOP.
 _SECRET_PARAM = re.compile(
     r"(?i)(?:^|[^a-z0-9])" + _SECRET_WORD + r"[\"']?\s*[:=]\s*[\"']?"
     # an Authorization scheme word stays (its credentials go with _AUTH_SCHEME)
-    r"(?!(?:Bearer|Basic)\s)([^\s&'\"<>,;]+)"
+    r"(?!(?:Bearer|Basic)\s)()(?=[^\s&'\"<>,;])"
 )
-_REDACTED = (_URL_USERINFO, _URL_QUERY, _BARE_QUERY)
-# These two may find a name inside the value of a match of their own ("key
-# ="token = S": the value of key is token, and token's is S), so their search
-# goes on from the character before that value, not after it (the patterns
-# in turn hid this: "Basic key" had gone to the Bearer/Basic one before the
-# secret-name one ran). Quadratic only in a chain of names (some 15 ms on
-# "key=-" * 1000), linear otherwise.
-_REDACTED_NESTED = (_AUTH_SCHEME, _SECRET_PARAM)
+_VALUE_STOP = re.compile(r"[\s&'\"<>,;]")
 # Redaction runs on this much of a text at most: a webhook or log line has
 # no use for more, and it bounds the time the patterns above take.
 REDACT_MAX = 4096
 REDACT_ROUNDS = 4
 
 
+def _stop_finder(text: str, stop: re.Pattern[str]):
+    """A function of a position: where the first match of stop at or after it
+    starts in text (len(text) if none). For positions that only grow it
+    searches each part of the text once: the stretch from the last position
+    asked to the stop found has no stop in it."""
+    found = [-1, -1]
+
+    def end(pos: int) -> int:
+        if not found[0] <= pos <= found[1]:
+            m = stop.search(text, pos)
+            found[:] = pos, (m.start() if m else len(text))
+        return found[1]
+
+    return end
+
+
 def _redact_once(text: str) -> str:
     """text with every span the patterns above found in it replaced by "…"."""
-    spans = [m.span(1) for pattern in _REDACTED for m in pattern.finditer(text)]
-    for pattern in _REDACTED_NESTED:
-        pos = 0
-        while m := pattern.search(text, pos):
-            spans.append(m.span(1))
-            pos = max(m.start(1) - 1, m.start() + 1)
+    userinfo = [m.span(1) for m in _URL_USERINFO.finditer(text)]
+    spans = userinfo + [m.span(1) for m in _BARE_QUERY.finditer(text)]
+    query_end = _stop_finder(text, _QUERY_STOP)
+    for m in _QUERY_RUN.finditer(text):
+        if _SCHEME.search(text, m.start(1), m.end(1)):
+            spans.append((m.end(), query_end(m.end())))
+    # These two may find a name inside the value of a match of their own
+    # ("key ="token = S": the value of key is token, and token's is S), so
+    # their search goes on from the character before that value, not after it
+    # (the patterns in turn hid this: "Basic key" had gone to the Bearer/Basic
+    # one before the secret-name one ran).
+    pos = 0
+    while m := _AUTH_SCHEME.search(text, pos):
+        spans.append(m.span(1))
+        pos = max(m.start(1) - 1, m.start() + 1)
+    value_end = _stop_finder(text, _VALUE_STOP)
+    starts = [start for start, _ in userinfo]
+    pos = 0
+    while m := _SECRET_PARAM.search(text, pos):
+        start = m.start(1)
+        end = value_end(start)
+        # A name in a URL's user:password part ("https://apikey:S@host/f")
+        # has a value that ends where the userinfo does: the host and the path
+        # after the "@" are no part of it, and the userinfo goes as a whole.
+        i = bisect.bisect_right(starts, start) - 1
+        if i >= 0 and start < userinfo[i][1]:
+            end = min(end, userinfo[i][1])
+        spans.append((start, end))
+        pos = max(start - 1, m.start() + 1)
     spans.sort()
     merged: list[list[int]] = []
     for start, end in spans:
