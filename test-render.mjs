@@ -11840,4 +11840,44 @@ const review5Planner = async (now) => {
     inPause === 2 && requests === 4 && results.every((r) => r === null), JSON.stringify({ inPause, requests, results }));
 }
 
+
+/* ---- Card review-8 fixes: destination lists for stops FUTÁR does not
+   know, and a retry that does not end ---- */
+
+/* FUTÁR only knows BKK's stops: in the GTFS modes a Volán, city or MÁV
+   stop is not asked, and its list is not partial. A request the
+   integration did not send is no blip either; a BKK stop's timeout still
+   is. */
+{
+  const keep = { fetch: Lib.fetch, volanReachableDests: Lib.volanReachableDests, cityOpId: Lib.cityOpId };
+  const asked = [];
+  const results = {};
+  try {
+    Lib.volanReachableDests = async () => ({ dests: [{ key: 'v', name: 'V' }], destRoutes: {} });
+    Lib.cityOpId = () => '';
+    let err = Lib._integrationError('futar_unavailable', 'status NOT_FOUND');
+    Lib.fetch = async (_key, _path, params) => { asked.push(params && params.stopId); throw err; };
+    for (const id of ['volan_12345', 'szeged:4711', 'hu-mav_005510009']) {
+      for (const mode of ['volan', 'all']) {
+        const out = await Lib.reachableDests(R7_IX, '', {}, { id, name: 'X' }, mode, '');
+        results[id + '/' + mode] = { dests: out.dests.map((d) => d.key).join(), partial: !!out.partial };
+      }
+    }
+    err = Lib._integrationError('futar_bad_request', 'stopId too long');
+    const bad = await Lib.reachableDests(R7_IX, '', {}, { id: 'BKK_F00001', name: 'A' }, 'all', '');
+    results.badRequest = { dests: bad.dests.map((d) => d.key).join(), partial: !!bad.partial };
+    err = new Error('BKK timeout');
+    const blip = await Lib.reachableDests(R7_IX, '', {}, { id: 'BKK_F00001', name: 'A' }, 'volan', '');
+    results.blip = { partial: !!blip.partial };
+  } finally {
+    Object.assign(Lib, keep);
+  }
+  const gtfs = Object.keys(results).filter((k) => k.includes('/'));
+  check('a destination list for a stop FUTÁR does not know, or after a request the integration did not send, is whole; a BKK timeout is not',
+    gtfs.length === 6 && gtfs.every((k) => results[k].dests === 'v' && !results[k].partial)
+    && asked.join() === 'BKK_F00001,BKK_F00001'
+    && results.badRequest.dests === 'v' && !results.badRequest.partial && results.blip.partial,
+    JSON.stringify({ asked, results }));
+}
+
 process.exit(failed ? 1 : 0);

@@ -6,6 +6,11 @@ import { routePatternStore } from '../lib/route-patterns.js';
 /* FUTÁR cuts a busy board off at about 60 rows; a few under that, ending
    well before the horizon, is taken as cut off too. */
 const BOARD_CAP_ROWS = 55;
+/* FUTÁR failures that another try would only repeat (lib/futar.js): no
+   access, a refused key, or a request the integration did not send. */
+const FUTAR_LASTING_ERRORS = new Set([
+  'errNoApiKey', 'futar_auth', 'errApiKeyBad', 'futar_bad_request', 'errFutarBadRequest',
+]);
 
 register({
   /* The page's route patterns, kept in the browser between page loads
@@ -454,88 +459,100 @@ register({
     });
     return names;
   },
+  /* The destinations FUTÁR's board for the stop reaches in the next hours:
+     each trip's and each route's stops after this one. */
+  async futarReachableDests(apiKey, cache, stop, mode) {
+    const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
+      stopId: stop.id,
+      minutesAfter: DEPART_MINUTES_AFTER,
+      minutesBefore: '0',
+      onlyDepartures: 'true',
+      includeReferences: 'true',
+    }, true);
+    const refs = (data.data || {}).references || {};
+    const routes = refs.routes || {};
+    const trips = refs.trips || {};
+    const times = ((data.data || {}).entry || {}).stopTimes || [];
+    const seenTrip = new Set();
+    const seenRoute = new Set();
+    const tripJobs = [];
+    const routeIds = [];
+    for (let i = 0; i < times.length; i++) {
+      const st = times[i];
+      const trip = trips[st.tripId] || {};
+      const rid = trip.routeId;
+      const rt = routes[rid] || { id: rid, type: '' };
+      if (!BkkLib.routeMatchesMode(rt, mode)) continue;
+      if (rid && !seenRoute.has(rid)) {
+        seenRoute.add(rid);
+        routeIds.push(rid);
+      }
+      if (st.tripId && !seenTrip.has(st.tripId) && tripJobs.length < 40) {
+        seenTrip.add(st.tripId);
+        tripJobs.push({ tripId: st.tripId, routeId: rid });
+      }
+    }
+    const fromTrips = await Promise.all(tripJobs.map(async (job) => {
+      try {
+        const names = await BkkLib.tripRemainingNames(apiKey, cache, job.tripId, stop);
+        return { routeId: job.routeId, names };
+      } catch (_e) {
+        return { routeId: job.routeId, names: [] };
+      }
+    }));
+    const fromRoutes = await Promise.all(routeIds.slice(0, 32).map(async (rid) => {
+      try {
+        const names = await BkkLib.remainingNames(apiKey, cache, stop, rid);
+        return { routeId: rid, names };
+      } catch (_e) {
+        return { routeId: rid, names: [] };
+      }
+    }));
+    const byKey = new Map();
+    const destRoutes = {};
+    fromTrips.concat(fromRoutes).forEach(({ routeId, names }) => {
+      (names || []).forEach((n) => {
+        if (!n || !n.key) return;
+        const prev = byKey.get(n.key);
+        if (!prev) byKey.set(n.key, n);
+        else if (BkkLib.isMetroSuffixName(prev.name) && !BkkLib.isMetroSuffixName(n.name)) {
+          byKey.set(n.key, n);
+        }
+        if (!destRoutes[n.key]) destRoutes[n.key] = [];
+        if (routeId && destRoutes[n.key].indexOf(routeId) < 0) destRoutes[n.key].push(routeId);
+      });
+    });
+    const dests = Array.from(byKey.values());
+    dests.sort((a, b) => a.name.localeCompare(b.name, 'hu'));
+    return { dests, destRoutes };
+  },
   async reachableDests(ix, apiKey, cache, stop, mode, city) {
     needIndexes(ix);
     if (mode === 'helyi') {
       return BkkLib.cityReachableDests(ix, stop, city);
     }
+    const gtfsModes = mode === 'volan' || mode === 'all';
     let out = { dests: [], destRoutes: {} };
     let futarFailed = false;
-    try {
-      const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
-        stopId: stop.id,
-        minutesAfter: DEPART_MINUTES_AFTER,
-        minutesBefore: '0',
-        onlyDepartures: 'true',
-        includeReferences: 'true',
-      }, true);
-      const refs = (data.data || {}).references || {};
-      const routes = refs.routes || {};
-      const trips = refs.trips || {};
-      const times = ((data.data || {}).entry || {}).stopTimes || [];
-      const seenTrip = new Set();
-      const seenRoute = new Set();
-      const tripJobs = [];
-      const routeIds = [];
-      for (let i = 0; i < times.length; i++) {
-        const st = times[i];
-        const trip = trips[st.tripId] || {};
-        const rid = trip.routeId;
-        const rt = routes[rid] || { id: rid, type: '' };
-        if (!BkkLib.routeMatchesMode(rt, mode)) continue;
-        if (rid && !seenRoute.has(rid)) {
-          seenRoute.add(rid);
-          routeIds.push(rid);
-        }
-        if (st.tripId && !seenTrip.has(st.tripId) && tripJobs.length < 40) {
-          seenTrip.add(st.tripId);
-          tripJobs.push({ tripId: st.tripId, routeId: rid });
-        }
+    /* FUTÁR only knows BKK's stops (the departure board's rule): a Volán,
+       city or MÁV stop id is not asked, and its list is no less complete
+       for it. The BKK modes ask with whatever stop they are given. */
+    if (!gtfsModes || /^BKK_/i.test(String((stop && stop.id) || ''))) {
+      try {
+        out = await BkkLib.futarReachableDests(apiKey, cache, stop, mode);
+      } catch (err) {
+        if (!gtfsModes) throw err;
+        /* These modes still list the GTFS indexes' destinations, but a
+           FUTÁR blip (a 429, a timeout) must not pass for a complete list:
+           it comes back marked partial, and the caller shows it and loads
+           again later. No FUTÁR access at all, a refused key, or a request
+           the integration refused before BKK saw it is no blip: loading
+           again would not change it. */
+        const code = err && (err.code || err.i18nKey);
+        futarFailed = !FUTAR_LASTING_ERRORS.has(code);
       }
-      const fromTrips = await Promise.all(tripJobs.map(async (job) => {
-        try {
-          const names = await BkkLib.tripRemainingNames(apiKey, cache, job.tripId, stop);
-          return { routeId: job.routeId, names };
-        } catch (_e) {
-          return { routeId: job.routeId, names: [] };
-        }
-      }));
-      const fromRoutes = await Promise.all(routeIds.slice(0, 32).map(async (rid) => {
-        try {
-          const names = await BkkLib.remainingNames(apiKey, cache, stop, rid);
-          return { routeId: rid, names };
-        } catch (_e) {
-          return { routeId: rid, names: [] };
-        }
-      }));
-      const byKey = new Map();
-      const destRoutes = {};
-      fromTrips.concat(fromRoutes).forEach(({ routeId, names }) => {
-        (names || []).forEach((n) => {
-          if (!n || !n.key) return;
-          const prev = byKey.get(n.key);
-          if (!prev) byKey.set(n.key, n);
-          else if (BkkLib.isMetroSuffixName(prev.name) && !BkkLib.isMetroSuffixName(n.name)) {
-            byKey.set(n.key, n);
-          }
-          if (!destRoutes[n.key]) destRoutes[n.key] = [];
-          if (routeId && destRoutes[n.key].indexOf(routeId) < 0) destRoutes[n.key].push(routeId);
-        });
-      });
-      const dests = Array.from(byKey.values());
-      dests.sort((a, b) => a.name.localeCompare(b.name, 'hu'));
-      out = { dests, destRoutes };
-    } catch (err) {
-      if (mode !== 'volan' && mode !== 'all') throw err;
-      /* These modes still list the GTFS indexes' destinations, but a FUTÁR
-         blip (a 429, a timeout) must not pass for a complete list: it comes
-         back marked partial, and the caller shows it and loads again later.
-         No FUTÁR access at all, or a refused key, is no blip: loading again
-         would not change it. */
-      const code = err && (err.code || err.i18nKey);
-      futarFailed = code !== 'errNoApiKey' && code !== 'futar_auth' && code !== 'errApiKeyBad';
     }
-    if (mode === 'volan' || mode === 'all') {
+    if (gtfsModes) {
       try {
         out = BkkLib.mergeDestIndex(await BkkLib.volanReachableDests(ix, stop), out);
       } catch (_e) { /* GTFS index optional */ }
