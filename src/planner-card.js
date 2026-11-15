@@ -14,6 +14,11 @@ const PICK_DEBOUNCE_MS = 300;
 /* A failed stop search or destination list load says so for this long
    (cleared on the countdown tick), or until a search or load succeeds. */
 const SEARCH_ERR_MS = 30 * 1000;
+/* A destination list load that failed for the origin still picked is tried
+   again this long after the failure, on the next hass update or paint (the
+   editor's DEST_RETRY_MS): a passing FUTÁR or index error must not leave
+   the destination picker empty until the origin is picked again. */
+const DEST_RETRY_MS = 30 * 1000;
 /* Share of the HA secondary text colour in the themed title band's
    secondary text (the rest is the HA text colour). */
 const HEAD_SEC_PCT = 50;
@@ -49,6 +54,8 @@ export class BKKPlannerCard extends BKKHopCard {
        integration's service showed up (HA starting, an entry reload) lacks
        the BKK destinations, and loads again when it does. */
     this._destsAccess = '';
+    /* When the load for _destsFor failed (0: it did not). */
+    this._destsFailedAt = 0;
     this._pickersMounted = false;
     /* The journey plan (lib/journey-plan.js): the plan for now or for a
        chosen time, and which answer is current. The planning time lives on
@@ -885,9 +892,12 @@ export class BKKPlannerCard extends BKKHopCard {
     if (!this._pickersMounted || !this._hass || !cfg.stopId) return;
     if (this._routePicked() && !this._editRoute) return;
     if (this._destsFor === cfg.stopId) {
-      /* Losing access (the service gone for a moment) keeps the list. */
+      /* Losing access (the service gone for a moment) keeps the list; a
+         load that failed is tried again DEST_RETRY_MS later, not on every
+         hass update. */
       const access = this._futarAccess();
-      if (!access || access === this._destsAccess) return;
+      const retry = this._destsFailedAt && Date.now() - this._destsFailedAt >= DEST_RETRY_MS;
+      if (!retry && (!access || access === this._destsAccess)) return;
     }
     this._loadDests();
   }
@@ -1805,6 +1815,7 @@ ${this._stopPinCss()}
     if (!cfg.stopId) return;
     this._destsFor = cfg.stopId;
     this._destsAccess = this._futarAccess();
+    this._destsFailedAt = 0;
     const seq = this._destLoad.bump();
     /* The last origin's destinations must not be offered while this
        one's load (an origin changed in the editor). */
@@ -1838,6 +1849,7 @@ ${this._stopPinCss()}
       this._showSearchErr(err);
       this._dests = [];
       this._destRoutes = {};
+      this._destsFailedAt = Date.now();
     } finally {
       if (!this._destLoad.stale(seq)) {
         this._destsLoading = false;

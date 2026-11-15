@@ -9566,6 +9566,60 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   }
 }
 
+/* ---- Card review-6 fixes: the planner's destination list after a failed
+   load, and its pickers after a detach across midnight ---- */
+
+/* A destination list load that fails (an index or FUTÁR blip) is tried
+   again: not on every hass update, but once DEST_RETRY_MS has passed. */
+{
+  const keep = {
+    nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+    reachableDests: Lib.reachableDests,
+  };
+  const realNow = Date.now;
+  const t0 = realNow();
+  Date.now = () => t0;
+  let calls = 0;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    Lib.reachableDests = async () => {
+      calls += 1;
+      if (calls === 1) throw new Error('index blip');
+      return { dests: [{ key: 'b', name: 'B' }], destRoutes: {} };
+    };
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A' });
+    const hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    pc.hass = hass;
+    document.body.appendChild(pc);
+    await settleTicks();
+    const failed = { calls, dests: pc._dests.length };
+    for (const sec of [5, 15, 29]) {
+      Date.now = () => t0 + sec * 1000;
+      pc.hass = Object.assign({}, hass);
+      await settleTicks();
+    }
+    const held = calls;
+    Date.now = () => t0 + 31 * 1000;
+    pc.hass = Object.assign({}, hass);
+    await settleTicks();
+    const retried = { calls, dests: pc._dests.map((d) => d.key) };
+    Date.now = () => t0 + 120 * 1000;
+    pc.hass = Object.assign({}, hass);
+    await settleTicks();
+    check('a failed destination list is loaded again 30 s later, not on every hass update before, and not again once loaded',
+      failed.calls === 1 && failed.dests === 0 && held === 1
+      && retried.calls === 2 && retried.dests.join() === 'b' && calls === 2,
+      JSON.stringify({ failed, held, retried, calls }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* A failed poll keeps the rows it had, and with them their last GPS fix:
    the open map stops calling it live and the timetable places the
    vehicle until a poll brings a fresh one. */
