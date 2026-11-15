@@ -460,6 +460,7 @@ register({
       return BkkLib.cityReachableDests(ix, stop, city);
     }
     let out = { dests: [], destRoutes: {} };
+    let futarFailed = false;
     try {
       const data = await BkkLib.fetch(apiKey, 'arrivals-and-departures-for-stop.json', {
         stopId: stop.id,
@@ -526,6 +527,13 @@ register({
       out = { dests, destRoutes };
     } catch (err) {
       if (mode !== 'volan' && mode !== 'all') throw err;
+      /* These modes still list the GTFS indexes' destinations, but a FUTÁR
+         blip (a 429, a timeout) must not pass for a complete list: it comes
+         back marked partial, and the caller shows it and loads again later.
+         No FUTÁR access at all, or a refused key, is no blip: loading again
+         would not change it. */
+      const code = err && (err.code || err.i18nKey);
+      futarFailed = code !== 'errNoApiKey' && code !== 'futar_auth' && code !== 'errApiKeyBad';
     }
     if (mode === 'volan' || mode === 'all') {
       try {
@@ -539,6 +547,7 @@ register({
         if (cityId) out = BkkLib.mergeDestIndex(await BkkLib.cityReachableDests(ix, stop, cityId), out);
       } catch (_e) { /* city index optional */ }
     }
+    if (futarFailed) out.partial = true;
     return out;
   },
   async travelMin(apiKey, tripId, destKey, dep, origin, cache) {

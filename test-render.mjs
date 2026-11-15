@@ -9693,6 +9693,334 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   }
 }
 
+/* ---- Card review-7 fixes: a destination list that lacks FUTÁR's part, a
+   planner kept out of the page, a whitespace card key, and "now" past
+   midnight ---- */
+
+/* The GTFS index resolver of the destination list tests: every index is
+   empty, and the lib's own index readers are stubbed per test. */
+const R7_IX = Object.freeze({ volan: async () => null, city: async () => null, mav: async () => null });
+
+/* In the modes that list the GTFS indexes' destinations too ("volan",
+   "all"), a FUTÁR failure keeps those but marks the list partial; no FUTÁR
+   access, or a refused key, is not a passing failure, and BKK's own mode
+   still fails. */
+{
+  const keep = { fetch: Lib.fetch, volanReachableDests: Lib.volanReachableDests, cityOpId: Lib.cityOpId };
+  const stop = { id: 'BKK_F00001', name: 'A' };
+  const results = {};
+  try {
+    Lib.volanReachableDests = async () => ({ dests: [{ key: 'v', name: 'V' }], destRoutes: { v: ['VOLAN_1'] } });
+    Lib.cityOpId = () => '';
+    const run = async (err, mode) => {
+      Lib.fetch = async () => { throw err; };
+      try {
+        const out = await Lib.reachableDests(R7_IX, 'k', {}, stop, mode, '');
+        return { dests: out.dests.map((d) => d.key).join(), partial: !!out.partial };
+      } catch (e) {
+        return { threw: String(e.message) };
+      }
+    };
+    const rateLimited = Object.assign(new Error('429'), { code: 'futar_rate_limited' });
+    results.blipAll = await run(new Error('BKK timeout'), 'all');
+    results.blipVolan = await run(rateLimited, 'volan');
+    results.noKey = await run(Object.assign(new Error('no key'), { i18nKey: 'errNoApiKey' }), 'all');
+    results.badKey = await run(Object.assign(new Error('401'), { code: 'futar_auth', i18nKey: 'errApiKeyBad' }), 'all');
+    results.badKeyIntegration = await run(Object.assign(new Error('401'), { i18nKey: 'errApiKeyBad' }), 'volan');
+    results.bkk = await run(new Error('BKK timeout'), 'bkk');
+    Lib.fetch = async () => ({ data: { entry: { stopTimes: [] }, references: {} } });
+    const ok = await Lib.reachableDests(R7_IX, 'k', {}, stop, 'all', '');
+    results.ok = { dests: ok.dests.map((d) => d.key).join(), partial: !!ok.partial };
+  } finally {
+    Object.assign(Lib, keep);
+  }
+  check('a FUTÁR failure in the GTFS modes keeps the GTFS destinations and marks the list partial, unless there is no key or it was refused',
+    results.blipAll.dests === 'v' && results.blipAll.partial
+    && results.blipVolan.dests === 'v' && results.blipVolan.partial
+    && results.noKey.dests === 'v' && !results.noKey.partial
+    && results.badKey.dests === 'v' && !results.badKey.partial
+    && !results.badKeyIntegration.partial
+    && results.bkk.threw === 'BKK timeout'
+    && results.ok.dests === 'v' && !results.ok.partial,
+    JSON.stringify(results));
+}
+
+/* The planner (mode "all") on a FUTÁR blip: the GTFS destinations are
+   offered at once, and the list loads again DEST_RETRY_MS later for the
+   BKK ones, as a load that failed outright does. */
+{
+  const keep = {
+    nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard, fetch: Lib.fetch,
+    volanReachableDests: Lib.volanReachableDests, cityOpId: Lib.cityOpId,
+    tripRemainingNames: Lib.tripRemainingNames, remainingNames: Lib.remainingNames,
+  };
+  const realNow = Date.now;
+  const t0 = realNow();
+  Date.now = () => t0;
+  let arrivals = 0;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    Lib.volanReachableDests = async () => ({ dests: [{ key: 'v', name: 'V' }], destRoutes: {} });
+    Lib.cityOpId = () => '';
+    Lib.fetch = async (_key, path) => {
+      if (!path.startsWith('arrivals')) throw new Error('unexpected ' + path);
+      arrivals += 1;
+      if (arrivals === 1) throw new Error('BKK timeout');
+      return { data: { entry: { stopTimes: [{ tripId: 'T1' }] }, references: { trips: { T1: { routeId: 'R1' } }, routes: { R1: { id: 'R1', type: 3 } } } } };
+    };
+    Lib.tripRemainingNames = async () => [{ key: 'b', name: 'B', id: 'BKK_F00002' }];
+    Lib.remainingNames = async () => [];
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', apiKey: 'k' });
+    pc._ctx.indexes = () => R7_IX;
+    const hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    document.body.appendChild(pc);
+    pc.hass = hass;
+    await settleTicks(12);
+    const first = { arrivals, dests: pc._dests.map((d) => d.key).join(), hits: pc._planEl('pdhits').textContent };
+    Date.now = () => t0 + 20 * 1000;
+    pc.hass = Object.assign({}, hass);
+    await settleTicks(12);
+    const held = arrivals;
+    Date.now = () => t0 + 31 * 1000;
+    pc.hass = Object.assign({}, hass);
+    await settleTicks(12);
+    const retried = { arrivals, dests: pc._dests.map((d) => d.key).join() };
+    Date.now = () => t0 + 120 * 1000;
+    pc.hass = Object.assign({}, hass);
+    await settleTicks(12);
+    check('a planner destination list without its FUTÁR part shows the GTFS destinations and loads again 30 s later for the BKK ones',
+      first.arrivals === 1 && first.dests === 'v' && first.hits.includes('V')
+      && held === 1 && retried.arrivals === 2 && retried.dests === 'b,v' && arrivals === 2,
+      JSON.stringify({ first, held, retried, arrivals }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* The editor does the same with a partial list: it is offered, an edit or
+   hass update within DEST_RETRY_MS does not load it again, one after does. */
+{
+  const keep = { reachableDests: Lib.reachableDests };
+  const realNow = Date.now;
+  const t0 = realNow();
+  Date.now = () => t0;
+  let calls = 0;
+  const ed = document.createElement('hungarian-transport-card-editor');
+  try {
+    Lib.reachableDests = async () => {
+      calls += 1;
+      if (calls === 1) return { dests: [{ key: 'v', name: 'V' }], destRoutes: {}, partial: true };
+      return { dests: [{ key: 'b', name: 'B' }, { key: 'v', name: 'V' }], destRoutes: {} };
+    };
+    document.body.appendChild(ed);
+    const hass = { states: {}, language: 'hu' };
+    ed.hass = hass;
+    ed._probeKey = () => {};
+    ed._canLoadDests = () => true;
+    const cfg = { language: 'hu', volan: true, stopId: 'volan_1', stopName: 'Győr' };
+    ed.setConfig(cfg);
+    await settleTicks();
+    const first = { calls, dests: ed._dests.map((d) => d.key).join() };
+    Date.now = () => t0 + 10 * 1000;
+    ed.setConfig(Object.assign({}, cfg, { name: 'M' }));
+    ed.hass = Object.assign({}, hass);
+    await settleTicks();
+    const held = calls;
+    Date.now = () => t0 + 31 * 1000;
+    ed.hass = Object.assign({}, hass);
+    await settleTicks();
+    const retried = { calls, dests: ed._dests.map((d) => d.key).join() };
+    Date.now = () => t0 + 120 * 1000;
+    ed.setConfig(Object.assign({}, cfg, { name: 'Mu' }));
+    ed.hass = Object.assign({}, hass);
+    await settleTicks();
+    check('an editor destination list without its FUTÁR part is offered and loaded again 30 s later, not before, and not again once whole',
+      first.calls === 1 && first.dests === 'v' && held === 1
+      && retried.calls === 2 && retried.dests === 'b,v' && calls === 2,
+      JSON.stringify({ first, held, retried, calls }));
+  } finally {
+    Date.now = realNow;
+    ed.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* Home Assistant hands hass to a planner it keeps out of the page (a
+   visibility condition) and to one in a background tab: neither loads or
+   retries its destination list. Attached and in front, it does. */
+{
+  const keep = {
+    nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+    reachableDests: Lib.reachableDests,
+  };
+  const realNow = Date.now;
+  const t0 = realNow();
+  let now = t0;
+  Date.now = () => now;
+  let vis = 'visible';
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => vis });
+  let calls = 0;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    Lib.reachableDests = async () => { calls += 1; throw new Error('FUTÁR 429'); };
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A' });
+    const hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    for (let s = 0; s <= 600; s += 5) {
+      now = t0 + s * 1000;
+      pc.hass = Object.assign({}, hass);
+      await settleTicks();
+    }
+    const detached = calls;
+    vis = 'hidden';
+    document.body.appendChild(pc);
+    pc.hass = Object.assign({}, hass);
+    await settleTicks();
+    const hidden = calls;
+    vis = 'visible';
+    document.dispatchEvent(new Event('visibilitychange'));
+    await settleTicks();
+    const front = calls;
+    vis = 'hidden';
+    document.dispatchEvent(new Event('visibilitychange'));
+    for (let s = 5; s <= 120; s += 5) {
+      now = t0 + (600 + s) * 1000;
+      pc.hass = Object.assign({}, hass);
+      await settleTicks();
+    }
+    const background = calls;
+    vis = 'visible';
+    document.dispatchEvent(new Event('visibilitychange'));
+    await settleTicks();
+    check('a planner out of the page or in a background tab neither loads nor retries its destination list, and does once in front',
+      detached === 0 && hidden === 0 && front === 1 && background === 1 && calls === 2,
+      JSON.stringify({ detached, hidden, front, background, calls }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    delete document.visibilityState;
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* A destination load made stale while it waited for the dashboard key (the
+   integration's service showed up meanwhile) leaves the list to the newer
+   load: one reachableDests call, not two. */
+{
+  const keep = {
+    nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+    reachableDests: Lib.reachableDests,
+  };
+  let calls = 0;
+  let release = () => {};
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = () => new Promise((r) => { release = () => r(''); });
+    Lib.reachableDests = async () => { calls += 1; return { dests: [{ key: 'b', name: 'B' }], destRoutes: {} }; };
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A' });
+    document.body.appendChild(pc);
+    pc.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    await settleTicks();
+    pc.hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } }, connection: {} };
+    await settleTicks();
+    release();
+    await settleTicks(12);
+    check('a destination load made stale while it reads the dashboard key does not ask for the list itself',
+      calls === 1 && pc._dests.map((d) => d.key).join() === 'b',
+      JSON.stringify({ calls, dests: pc._dests.map((d) => d.key) }));
+  } finally {
+    release();
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* A whitespace-only card apiKey is no key (as cardApiKey reads it): the
+   card still borrows a sibling's key, or goes through the integration, and
+   so does its editor. */
+{
+  const keep = { apiKeyFromDashboard: Lib.apiKeyFromDashboard, nextBoard: Lib.nextBoard, probeApiKey: Lib.probeApiKey };
+  const card = document.createElement('hungarian-transport-card');
+  const viaCard = document.createElement('hungarian-transport-card');
+  const ed = document.createElement('hungarian-transport-card-editor');
+  try {
+    Lib.apiKeyFromDashboard = async () => 'sibling-key';
+    Lib.nextBoard = async () => {};
+    Lib.probeApiKey = async () => ({ ok: true });
+    card._reloadSafe = () => {};
+    card.setConfig({ language: 'hu', apiKey: '   ', stopId: 'BKK_F00001', stopName: 'A' });
+    card.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    await settleTicks();
+    viaCard._reloadSafe = () => {};
+    viaCard.setConfig({ language: 'hu', apiKey: ' ', stopId: 'BKK_F00001', stopName: 'A' });
+    viaCard.hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } }, connection: {} };
+    ed._probeKey = () => {};
+    ed.setConfig({ language: 'hu', apiKey: '  ', stopId: '', stopName: '' });
+    ed.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    await settleTicks();
+    check('a whitespace-only card apiKey still borrows a sibling key or uses the integration, in the card and its editor',
+      card._borrowedKey === 'sibling-key' && card._apiKey() === 'sibling-key'
+      && viaCard._viaIntegration === true && ed._borrowedKey === 'sibling-key',
+      JSON.stringify({ borrowed: card._borrowedKey, via: viaCard._viaIntegration, ed: ed._borrowedKey }));
+  } finally {
+    card.remove();
+    viaCard.remove();
+    ed.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* "Now" past Budapest midnight: an itinerary painted at 23:59 as "holnap
+   00:10" says 00:10 on the first countdown tick of the new day, not only
+   with the next plan up to five minutes later. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 57); /* 23:57 in Budapest (CET) */
+  Date.now = () => now;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc._planner.now = async () => null;
+    pc.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    document.body.appendChild(pc);
+    await settleTicks();
+    const startMs = Date.UTC(2026, 10, 15, 23, 10); /* 00:10 on the 16th */
+    pc._plan.adopt({ startMs, endMs: startMs + 20 * 60000, transfers: 0, legs: [{ walk: true, minutes: 20 }] });
+    now = Date.UTC(2026, 10, 15, 22, 59);
+    pc._paintJourney();
+    const time = () => {
+      const el = pc.shadowRoot.querySelector('.itin-time');
+      return el ? el.textContent : null;
+    };
+    const before = time();
+    now = Date.UTC(2026, 10, 15, 23, 1); /* 00:01: the plan is four minutes old, not stale */
+    pc._tickPaint();
+    const after = time();
+    check('in "now" mode the itinerary drops "holnap" on the first tick past Budapest midnight',
+      before === `${i18nT('hu', 'plannerTomorrow')}00:10` && after === '00:10' && !pc._plan.stale,
+      JSON.stringify({ before, after, stale: pc._plan.stale }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* A failed poll keeps the rows it had, and with them their last GPS fix:
    the open map stops calling it live and the timetable places the
    vehicle until a poll brings a fresh one. */
