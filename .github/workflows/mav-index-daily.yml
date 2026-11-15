@@ -29,7 +29,9 @@ name: Daily MÁV index
 # third arrival cancels the pending one: so at most one cron may start before
 # 11:30 UTC (a run never starts early, and any of them may start late enough
 # to meet the dispatch). Only the 04:45 one can reach 09:30-11:30; the 14:20
-# one never does.
+# one never does. A re-run (of the attest job, say) joins the same group: made
+# while one run is in progress and another waits, it cancels the waiting one,
+# which may be the dispatch. Re-run when no run of this workflow is queued.
 #
 # Nothing is deployed, and the site keeps the previous files, when the
 # secrets are missing, the download, pfaedle or the audit fails, the site is
@@ -164,10 +166,14 @@ jobs:
           fi
           echo "::warning title=Daily MÁV index not published::The built index did not make a Pages site (see this step's log); GitHub Pages keeps the previous index."
 
+      # Kept 3 days, not the action's 1: the attest job reads this artifact,
+      # and "Re-run failed jobs" after a Sigstore outage finds it over a
+      # weekend (after 1 day the re-run failed with "artifact not found").
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         if: steps.site.outputs.deploy == 'true'
         with:
           path: ${{ runner.temp }}/site
+          retention-days: 3
 
       # No site was made (no secrets, a failed build, a refused site): the
       # previous one stays on Pages, and nothing is deployed. Red at once
@@ -242,7 +248,9 @@ jobs:
   # its own: a Sigstore outage turns the run red but never holds back the
   # day's index, and "Re-run failed jobs" runs only this job, never the
   # deploy, which would put this run's artifact back on Pages over a newer
-  # run's index. A file without an attestation fails that check, it never
+  # run's index. That re-run works while the artifact is kept (3 days, see
+  # the upload) and joins the concurrency group (see the top: re-run when no
+  # run is queued). A file without an attestation fails that check, it never
   # passes it. The integration does not verify it (it would need a Sigstore
   # client in Home Assistant); it checks the index against the manifest's
   # sha256 (mav_daily.py).
