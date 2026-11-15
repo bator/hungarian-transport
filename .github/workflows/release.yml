@@ -420,6 +420,11 @@ jobs:
           ALLOW_MISSING_INPUT: ${{ github.event.inputs.allow_missing || '' }}
           ALLOW_MISSING_VAR: ${{ vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}
           VOLAN_GTFS_URL: ${{ vars.VOLAN_GTFS_URL || '' }}
+          # The weekly refresh: a city feed whose download fails keeps the
+          # previous release's part (build_city_index.py, CARRY_ENV; its
+          # shapes are in .baseline too), so one publisher's outage does not
+          # stop the release. A tag older than that ignores it.
+          HUNGARIAN_TRANSPORT_CARRY_INDEX: ${{ needs.resolve.outputs.refresh == 'true' && '.baseline/city-index.json.gz' || '' }}
         run: |
           set -euo pipefail
           # Both values end up in workflow commands below (::warning::,

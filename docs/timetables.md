@@ -562,6 +562,13 @@ single feed, compared the same way: it is refused with fewer than half the
 trips of the one in place. The message names the feed:
 
 - `<id> missing (had N trips)` — the feed did not download or parse.
+  On the weekly timetable release such a feed keeps the previous
+  release's timetable instead, with a *City feed carried over* warning that
+  names the error, as long as no more than three feeds failed at once (more
+  is the network, not one publisher) and the previous release has a running
+  timetable of it; a feed listed in `HUNGARIAN_TRANSPORT_ALLOW_MISSING` is
+  left out as before. This takes effect once a stable release has the
+  builder that does it: the weekly release builds the stable tag's scripts.
 - `<id> calendar ended YYYY-MM-DD (had N trips, the previous index runs until
   YYYY-MM-DD)` — the publisher's new zip ends before the timetable already
   in the index.
