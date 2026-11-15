@@ -36,7 +36,7 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 calls: list[tuple[str, dict]] = []
 
 
-async def fake_get(_session, _key, path, params, _timeout=None):
+async def fake_get(_session, _key, path, params, _timeout=None, executor=None):
     calls.append((path, dict(params)))
     return {"status": "OK", "n": len(calls)}
 
@@ -158,7 +158,7 @@ async def load_pattern(delay: float, gate: int) -> tuple[int, int]:
     on the real clock. Returns (refused, sent)."""
     sent = [0]
 
-    async def slow_get(_session, _key, path, params, _timeout=None):
+    async def slow_get(_session, _key, path, params, _timeout=None, executor=None):
         sent[0] += 1
         await asyncio.sleep(delay)
         return {"status": "OK"}
