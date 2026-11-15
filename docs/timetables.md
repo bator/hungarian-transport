@@ -236,12 +236,19 @@ Pages deployed:
 
 ```sh
 gh attestation verify mav-gtfs.zip --repo bator/hungarian-transport \
-  --signer-workflow bator/hungarian-transport/.github/workflows/mav-index-daily.yml
+  --signer-workflow bator/hungarian-transport/.github/workflows/mav-index-daily.yml \
+  --source-ref refs/heads/main
 ```
 
-The attestation is made after the deploy, so a Sigstore outage never holds
-back the day's index; the run is then red, and the files it deployed have
-none (the check fails, it never passes) until a later run deploys again.
+`--source-ref` pins the branch: a run started by hand from another branch
+signs with a workflow file of the same name, and its files do not pass.
+
+The attestation is made after the deploy, in a job of its own, so a
+Sigstore outage never holds back the day's index; the run is then red, and
+the files it deployed have none (the check fails, it never passes) until a
+later run deploys again, or "Re-run failed jobs" attests them while the
+run's Pages artifact is kept (one day). That re-run repeats only the
+attestation, never the deploy.
 The integration does not check the attestation: Home Assistant has no
 Sigstore client, and the integration takes no new dependency for one. It
 checks the index against the manifest's size and sha256, which come from the
