@@ -129,20 +129,28 @@ FUTAR_SERVICE_SCHEMA = vol.Schema(
         vol.Optional("params", default=dict): vol.Schema({cv.string: _futar_value}),
     }
 )
-# What the cards send for each departure row (src/lib/realtime.js); anything
-# longer or larger is refused before a feed is touched.
+# What the cards send for each departure row (src/lib/realtime.js rtRequest,
+# its RT_KEY_MAX, RT_TRIP_ID_MAX, RT_ROUTE_MAX, RT_START_MAX and
+# RT_STOP_ID_MAX); anything longer or larger is refused before a feed is
+# touched. The start is the trip's first time in minutes from its service
+# day's midnight: GTFS times run past 24:00, so up to two days.
+REALTIME_KEY_MAX = 96
+REALTIME_TRIP_ID_MAX = 128
+REALTIME_ROUTE_MAX = 32
+REALTIME_START_MAX = 2880
+REALTIME_STOP_ID_MAX = 64
 REALTIME_TRIP_SCHEMA = vol.Schema(
     {
-        vol.Required("key"): vol.All(cv.string, vol.Length(min=1, max=96)),
-        vol.Optional("trip_id"): vol.All(cv.string, vol.Length(min=1, max=128)),
-        vol.Optional("route"): vol.All(cv.string, vol.Length(min=1, max=32)),
-        vol.Optional("start"): vol.All(_finite_int, vol.Range(min=0, max=2880)),
+        vol.Required("key"): vol.All(cv.string, vol.Length(min=1, max=REALTIME_KEY_MAX)),
+        vol.Optional("trip_id"): vol.All(cv.string, vol.Length(min=1, max=REALTIME_TRIP_ID_MAX)),
+        vol.Optional("route"): vol.All(cv.string, vol.Length(min=1, max=REALTIME_ROUTE_MAX)),
+        vol.Optional("start"): vol.All(_finite_int, vol.Range(min=0, max=REALTIME_START_MAX)),
         vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{8}$")),
         vol.Optional("train"): vol.All(cv.string, vol.Match(r"^\d{1,6}$")),
         vol.Optional("stops", default=list): vol.All(
             cv.ensure_list,
             vol.Length(max=realtime.MAX_STOPS),
-            [vol.All(cv.string, vol.Length(min=1, max=64))],
+            [vol.All(cv.string, vol.Length(min=1, max=REALTIME_STOP_ID_MAX))],
         ),
         # Indices of the stops the trip calls at more than once (loops).
         vol.Optional("repeat"): vol.All(
