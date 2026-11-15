@@ -128,6 +128,31 @@ with tempfile.TemporaryDirectory() as tmp:
         check(f"city index: shipped {'kept' if wins else 'replaced'} ({why})",
               kept if wins else feed_of(city_www) == "bkk:20261101;szeged:20261020", repr((restored, feed_of(city_www))))
         write_index(city_base, 27, "bkk:20261101;szeged:20261020")
+    # A city index names feeds without a date ("miskolc:1.3", "budaors:25":
+    # ten of them in v1.10.20's): those cannot be ordered, so they must be
+    # the same on both sides, and the dated ones decide.
+    durable_feed = "bkk:20261101;miskolc:1.3;budaors:25"
+    write_index(city_base, 27, durable_feed)
+    for shipped, wins, why in [
+        ("bkk:20261108;miskolc:1.3;budaors:25", True, "a dated feed later, the undated ones unchanged"),
+        ("bkk:20261108;miskolc:1.4;budaors:25", False, "an undated feed changed"),
+        ("bkk:20261108;miskolc:20261105;budaors:25", False, "an undated feed dated on one side only"),
+        ("bkk:20261101;miskolc:1.3;budaors:25", False, "the same feeds"),
+        ("bkk:20261025;miskolc:1.3;budaors:25", False, "a dated feed older"),
+        ("bkk:20261108;miskolc:1.3", False, "an undated operator missing"),
+    ]:
+        write_index(city_www, 27, shipped, pad=20)
+        restored = restore_hacs_indexes(base, www)
+        kept = "city-index.json.gz" not in restored and feed_of(city_www) == shipped
+        check(f"city index with undated feeds: shipped {'kept' if wins else 'replaced'} ({why})",
+              kept if wins else feed_of(city_www) == durable_feed, repr((restored, feed_of(city_www))))
+        write_index(city_base, 27, durable_feed)
+    only_undated = "miskolc:1.3;budaors:25"
+    write_index(city_base, 27, only_undated)
+    write_index(city_www, 27, only_undated, pad=20)
+    restored = restore_hacs_indexes(base, www)
+    check("city index with undated feeds only: nothing is later, the durable copy wins",
+          "city-index.json.gz" in restored and feed_of(city_www) == only_undated, repr(restored))
     city_base.unlink()
     city_www.unlink()
     write_index(base / "volan-index.json.gz", 27, "local")
