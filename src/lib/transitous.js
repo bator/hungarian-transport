@@ -3,6 +3,12 @@ import { t } from '../i18n.js';
 import { needIndexes } from '../lib/context.js';
 import { BkkLib, register } from '../lib/core.js';
 
+/* The longest walk from the planned start to the boarding stop that is
+   still this stop (rowsFromMotis): 250 m, or 3 minutes when MOTIS gives
+   no distance. */
+const MOTIS_BOARD_WALK_M = 250;
+const MOTIS_BOARD_WALK_S = 180;
+
 register({
   /* FUTÁR plan-trip times are epoch milliseconds. Values below 1e11 are seconds. */
   epochMs(value) {
@@ -405,6 +411,18 @@ register({
       agencyId: id,
     }, mode || 'all');
   },
+  /* A walk to the boarding stop that still counts as boarding here: the
+     platforms of one stop lie within this distance (MOTIS gives the
+     walk's metres), or, without a distance, this many seconds' walk. */
+  motisShortWalk(leg) {
+    const meters = Number(leg && leg.distance);
+    if (Number.isFinite(meters) && meters > 0) return meters <= MOTIS_BOARD_WALK_M;
+    const sec = Number(leg && leg.duration);
+    if (Number.isFinite(sec) && sec > 0) return sec <= MOTIS_BOARD_WALK_S;
+    const startMs = BkkLib.isoMs(leg && leg.startTime);
+    const endMs = BkkLib.isoMs(leg && leg.endTime);
+    return !(startMs && endMs && endMs - startMs > MOTIS_BOARD_WALK_S * 1000);
+  },
   rowsFromMotis(payload, dest, mode, horizon, parseOpts) {
     const its = (payload && payload.itineraries) || [];
     parseOpts = parseOpts || {};
@@ -417,9 +435,15 @@ register({
     const out = [];
     its.forEach((it) => {
       if (Number(it.transfers || 0) > 0) return;
-      const ride = (it.legs || []).filter((leg) => String(leg.mode || '').toUpperCase() !== 'WALK');
+      const legs = it.legs || [];
+      const ride = legs.filter((leg) => String(leg.mode || '').toUpperCase() !== 'WALK');
       if (ride.length !== 1) return;
       const leg = ride[0];
+      /* The plan starts at the stop's coordinates: a walk of a few steps
+         to its platform is this stop, a longer one boards at another
+         stop, at that stop's time, which is no row of this board. */
+      const walks = legs.slice(0, legs.indexOf(leg));
+      if (walks.some((walk) => !BkkLib.motisShortWalk(walk))) return;
       if (!BkkLib.motisMatchesMode(leg, mode || 'all')) return;
       const startMs = BkkLib.isoMs(leg.startTime || it.startTime);
       const dep = startMs ? Math.round(startMs / 1000) : 0;
@@ -835,19 +859,30 @@ register({
      minutes, instead of a plan on every poll. A fill that failed returns
      null, so the caller keeps what it showed instead of "no departures",
      and the pair is not asked again for a minute and a half, twice as
-     long after each further failure up to the ten minutes: an outage of
-     the volunteer-run Transitous is no reason for two requests on every
-     poll of every empty card. */
+     long after each further failed round up to the ten minutes: an outage
+     of the volunteer-run Transitous is no reason for two requests on every
+     poll of every empty card. Failures within one round (several cards,
+     or a card and its preview, failing at once) count once, as the
+     realtime feeds' do. A fill that found departures is kept for two
+     minutes, and cards asking for the same pair at once share one plan:
+     every poll of every card on the empty board used to send its own. */
   _transitousEmptyAt: new Map(),
   _transitousEmptyRetryMs: 10 * 60 * 1000,
   _transitousFailed: new Map(),
   _transitousFailRetryMs: 90 * 1000,
+  _transitousFailRoundMs: 15 * 1000,
+  _transitousFilled: new Map(),
+  _transitousFilledMs: 2 * 60 * 1000,
+  _transitousFilledMax: 50,
+  _transitousFillInflight: new Map(),
   _transitousFillFailed(key) {
+    const now = Date.now();
     const last = BkkLib._transitousFailed.get(key);
+    if (last && now - last.at < BkkLib._transitousFailRoundMs) return null;
     const wait = last
       ? Math.min(last.wait * 2, BkkLib._transitousEmptyRetryMs)
       : BkkLib._transitousFailRetryMs;
-    BkkLib._transitousFailed.set(key, { at: Date.now(), wait });
+    BkkLib._transitousFailed.set(key, { at: now, wait });
     return null;
   },
   _transitousFillKey(origin, dest, opts) {
@@ -856,29 +891,64 @@ register({
     return [o.id || '', o.name || '', d.id || '', d.key || '', d.name || '',
       (opts && opts.mode) || 'all', clampMinutesAfter(opts && opts.minutesAfter)].join('|');
   },
+  /* One plan for the pair: its rows ([] for none), or null when it
+     failed. It never rejects, so every caller sharing it reads one
+     answer. */
+  async _transitousFillPlan(key, origin, dest, opts) {
+    const empties = BkkLib._transitousEmptyAt;
+    const filled = BkkLib._transitousFilled;
+    let extra;
+    try {
+      extra = await BkkLib.transitousDepartures(origin, dest, opts);
+    } catch (_e) {
+      extra = null;
+    }
+    if (!Array.isArray(extra)) return BkkLib._transitousFillFailed(key);
+    BkkLib._transitousFailed.delete(key);
+    filled.delete(key);
+    if (extra.length) {
+      empties.delete(key);
+      filled.set(key, { at: Date.now(), rows: extra });
+      while (filled.size > BkkLib._transitousFilledMax) filled.delete(filled.keys().next().value);
+    } else {
+      empties.set(key, Date.now());
+    }
+    return extra;
+  },
   async fillTransitousIfEmpty(rows, origin, dest, opts) {
     const list = Array.isArray(rows) ? rows : [];
     if (list.length) return list;
     const key = BkkLib._transitousFillKey(origin, dest, opts);
     const empties = BkkLib._transitousEmptyAt;
     const failed = BkkLib._transitousFailed;
+    const filled = BkkLib._transitousFilled;
     const now = Date.now();
+    const limit = maxDepartureRows(opts && opts.minutesAfter);
+    /* Each caller gets row objects of its own: a board writes ride
+       times and positions onto its rows. */
+    const own = (extra) => BkkLib.mergeRows(list, extra.map((row) => Object.assign({}, row)), limit);
     if (now - (empties.get(key) || 0) < BkkLib._transitousEmptyRetryMs) return list;
     const lastFail = failed.get(key);
     if (lastFail && now - lastFail.at < lastFail.wait) return null;
+    const hit = filled.get(key);
+    if (hit && now - hit.at < BkkLib._transitousFilledMs) {
+      const nowSec = Math.floor(now / 1000);
+      const due = hit.rows.filter((row) => row && departureStillDue(row.dep, nowSec));
+      if (due.length) return own(due);
+    }
     empties.forEach((ts, k) => { if (now - ts >= BkkLib._transitousEmptyRetryMs) empties.delete(k); });
+    filled.forEach((f, k) => { if (now - f.at >= BkkLib._transitousFilledMs) filled.delete(k); });
     /* A pair not asked again long after its retry time (its card is gone). */
     failed.forEach((f, k) => { if (now - f.at >= f.wait + BkkLib._transitousEmptyRetryMs) failed.delete(k); });
-    try {
-      const extra = await BkkLib.transitousDepartures(origin, dest, opts);
-      if (!Array.isArray(extra)) return BkkLib._transitousFillFailed(key);
-      failed.delete(key);
-      if (extra.length) empties.delete(key);
-      else empties.set(key, Date.now());
-      return BkkLib.mergeRows(list, extra, maxDepartureRows(opts && opts.minutesAfter));
-    } catch (_e) {
-      return BkkLib._transitousFillFailed(key);
+    const inflight = BkkLib._transitousFillInflight;
+    let plan = inflight.get(key);
+    if (!plan) {
+      plan = BkkLib._transitousFillPlan(key, origin, dest, opts);
+      inflight.set(key, plan);
+      plan.then(() => { if (inflight.get(key) === plan) inflight.delete(key); });
     }
+    const extra = await plan;
+    return Array.isArray(extra) ? own(extra) : null;
   },
   /* MOTIS v5: itinerary duration is seconds; leg duration is seconds;
      startTime/endTime are ISO-8601. */

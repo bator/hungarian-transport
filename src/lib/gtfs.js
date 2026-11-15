@@ -8,6 +8,46 @@ import { INDEX_SCHEMA } from '../tags.js';
    destination's own coordinates. */
 const DEST_NEAR_M = 1500;
 
+/* The index worker's whole program (BkkLib._parseIndexInWorker): its
+   source text is the worker's script, so it uses nothing from outside
+   itself. It answers {head, long} (the index with its long arrays
+   empty, and their lengths), then {key, rows} for each slice of them,
+   then {done}; or {failed} for a file it could not read. */
+function indexWorkerMain(scope) {
+  scope.onmessage = async (ev) => {
+    const { bytes, slice } = ev.data || {};
+    try {
+      let text;
+      if (bytes.length >= 2 && bytes[0] === 0x1f && bytes[1] === 0x8b) {
+        const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+        text = await new Response(stream).text();
+      } else {
+        text = new TextDecoder().decode(bytes);
+      }
+      const idx = JSON.parse(text);
+      if (!idx || typeof idx !== 'object' || Array.isArray(idx)) throw new Error('not an index');
+      const head = {};
+      const long = {};
+      Object.keys(idx).forEach((k) => {
+        const v = idx[k];
+        if (Array.isArray(v) && v.length > slice) {
+          long[k] = v.length;
+          head[k] = null;
+        } else {
+          head[k] = v;
+        }
+      });
+      scope.postMessage({ head, long });
+      Object.keys(long).forEach((k) => {
+        for (let i = 0; i < idx[k].length; i += slice) scope.postMessage({ key: k, rows: idx[k].slice(i, i + slice) });
+      });
+      scope.postMessage({ done: true });
+    } catch (err) {
+      scope.postMessage({ failed: String((err && err.message) || err) });
+    }
+  };
+}
+
 register({
   /* Cached per resolved URL, so two cards pointing at different index files do
      not serve each other's data. The URL carries a daily cache-buster, which
@@ -252,21 +292,26 @@ register({
       throw codedError('errIndexFetch');
     }
     if (!got.bytes) throw codedError(httpKey, got.status);
-    let text;
-    try {
-      text = await BkkLib._indexText(got.bytes);
-    } catch (_e) {
-      /* Corrupt or truncated gzip: as unreadable as an HTML page, and as
-         lasting. */
-      throw codedError('errIndexParse');
-    }
-    if (text == null) throw codedError(gunzipKey);
-    let idx;
-    try {
-      idx = JSON.parse(text);
-    } catch (_e) {
-      /* Usually an HTML error page served in place of the index. */
-      throw codedError('errIndexParse');
+    /* Off the page where a Web Worker can be started; here otherwise,
+       and for a file the worker could not read, so every error below is
+       the one it always was. */
+    let idx = await BkkLib._parseIndexInWorker(got.bytes);
+    if (idx == null) {
+      let text;
+      try {
+        text = await BkkLib._indexText(got.bytes);
+      } catch (_e) {
+        /* Corrupt or truncated gzip: as unreadable as an HTML page, and as
+           lasting. */
+        throw codedError('errIndexParse');
+      }
+      if (text == null) throw codedError(gunzipKey);
+      try {
+        idx = JSON.parse(text);
+      } catch (_e) {
+        /* Usually an HTML error page served in place of the index. */
+        throw codedError('errIndexParse');
+      }
     }
     if (!idx || typeof idx !== 'object' || !Array.isArray(idx.s) || !Array.isArray(idx.t)) {
       throw codedError('errIndexParse');
@@ -274,21 +319,6 @@ register({
     if (idx.v && Number(idx.v) > INDEX_SCHEMA) throw codedError('errIndexSchema', idx.v);
     /* Schema 29: "g" holds lat, lon per stop in 1e-5 degrees (0, 0 = unknown). */
     const g = Array.isArray(idx.g) && idx.g.length === 2 * idx.s.length ? idx.g : null;
-    idx.stops = (idx.s || []).map((row, i) => ({
-      i,
-      id: row[0],
-      name: row[1],
-      num: String(row[2] || ''),
-      op: row.length > 3 ? Number(row[3]) : 0,
-      key: BkkLib.norm(row[1]),
-      fold: BkkLib.fold(row[1]),
-      lat: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i] / 1e5 : null,
-      lon: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i + 1] / 1e5 : null,
-    }));
-    /* The raw rows are in idx.stops now; a wall tablet keeps the index for
-       the page, so the copy goes. */
-    idx.g = null;
-    idx.s = null;
     /* The shapes folder ("sh") sits next to the index file. A card's own
        index URL may be relative (/local/…): shape URLs resolve against it. */
     idx.url = BkkLib._absoluteUrl(url);
@@ -296,14 +326,143 @@ register({
     idx.byNum = new Map();
     idx.byKey = new Map();
     idx.byId = new Map();
-    idx.stops.forEach((st) => {
+    /* Tens of thousands of stops, each name normalised and folded: built
+       in slices that leave the page to its other work in between, as a
+       wall tablet spends a good part of a second on it. */
+    const rows = idx.s || [];
+    const stops = new Array(rows.length);
+    await BkkLib._sliced(rows.length, (i) => {
+      const row = rows[i];
+      const key = BkkLib.norm(row[1]);
+      const st = {
+        i,
+        id: row[0],
+        name: row[1],
+        num: String(row[2] || ''),
+        op: row.length > 3 ? Number(row[3]) : 0,
+        key,
+        /* fold() of the name, from its norm() already at hand. */
+        fold: BkkLib.foldNormed(key),
+        lat: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i] / 1e5 : null,
+        lon: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i + 1] / 1e5 : null,
+      };
+      stops[i] = st;
       const nk = st.op + ':' + st.num;
       const kk = st.op + ':' + st.key;
       if (st.num && !idx.byNum.has(nk)) idx.byNum.set(nk, st);
       if (st.key && !idx.byKey.has(kk)) idx.byKey.set(kk, st);
       if (st.id && !idx.byId.has(st.id)) idx.byId.set(st.id, st);
     });
+    idx.stops = stops;
+    /* The raw rows are in idx.stops now; a wall tablet keeps the index for
+       the page, so the copy goes. */
+    idx.g = null;
+    idx.s = null;
     return idx;
+  },
+  /* The index file's JSON, gunzipped and parsed in a Web Worker started
+     from a Blob URL (the bundle stays one file): the 11 MB indexes took
+     the page 60–130 ms in one task on a laptop, most of a second on a
+     wall tablet. The parsed index comes back in slices of its long
+     arrays, each message its own short task: one message with the whole
+     index would cost the page more to copy than the parse it saves.
+     null when there is no worker to ask (no Worker or Blob URLs, a
+     Content-Security-Policy that blocks them, a worker that does not
+     answer: no worker is started again on this page) or the worker could
+     not read the file; the caller then reads it on the page. */
+  _indexWorkerSlice: 1000,
+  _indexWorkerTimeoutMs: 20000,
+  _indexWorkerUrl: '',
+  _indexWorkerBroken: false,
+  _indexWorkerMain: indexWorkerMain,
+  _parseIndexInWorker(bytes) {
+    const can = !BkkLib._indexWorkerBroken
+      && typeof Worker === 'function' && typeof Blob === 'function'
+      && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
+    if (!can) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      let worker = null;
+      let idx = null;
+      let timer = null;
+      const finish = (out, broken) => {
+        if (timer) clearTimeout(timer);
+        timer = null;
+        if (broken) BkkLib._indexWorkerBroken = true;
+        if (worker) {
+          worker.onmessage = null;
+          worker.onerror = null;
+          try { worker.terminate(); } catch (_e) { /* already gone */ }
+        }
+        resolve(out);
+      };
+      try {
+        if (!BkkLib._indexWorkerUrl) {
+          const code = '(' + BkkLib._indexWorkerMain.toString() + ')(self);';
+          BkkLib._indexWorkerUrl = URL.createObjectURL(new Blob([code], { type: 'text/javascript' }));
+        }
+        worker = new Worker(BkkLib._indexWorkerUrl);
+      } catch (_e) {
+        finish(null, true);
+        return;
+      }
+      timer = setTimeout(() => finish(null, true), BkkLib._indexWorkerTimeoutMs);
+      /* A worker script the page's policy refused, or one that broke. */
+      worker.onerror = () => finish(null, true);
+      worker.onmessage = (ev) => {
+        const msg = (ev && ev.data) || {};
+        if (msg.head) {
+          idx = msg.head;
+          Object.keys(msg.long || {}).forEach((k) => { idx[k] = []; });
+        } else if (msg.key) {
+          const into = idx && idx[msg.key];
+          const rows = msg.rows || [];
+          if (Array.isArray(into)) for (let i = 0; i < rows.length; i += 1) into.push(rows[i]);
+        } else {
+          finish(msg.done ? idx : null, false);
+        }
+      };
+      try {
+        worker.postMessage({ bytes, slice: BkkLib._indexWorkerSlice });
+      } catch (_e) {
+        finish(null, true);
+      }
+    });
+  },
+  /* Runs step(0) … step(n - 1), handing the event loop back whenever a
+     slice has run for _sliceMs, so a long build is no single long task
+     that freezes taps and animations. */
+  _sliceMs: 8,
+  async _sliced(n, step) {
+    const clock = typeof performance !== 'undefined' && performance && typeof performance.now === 'function'
+      ? () => performance.now()
+      : () => Date.now();
+    let start = clock();
+    for (let i = 0; i < n; i += 1) {
+      step(i);
+      if (i + 1 < n && clock() - start >= BkkLib._sliceMs) {
+        await BkkLib._nextTask();
+        start = clock();
+      }
+    }
+  },
+  /* A new task: scheduler.yield() where the browser has it, else a
+     message to the page itself, which a background tab does not
+     throttle to once a second as it does timers; a timer without
+     either. */
+  _nextTask() {
+    const sched = globalThis.scheduler;
+    if (sched && typeof sched.yield === 'function') return sched.yield();
+    if (typeof MessageChannel === 'function') {
+      return new Promise((resolve) => {
+        const ch = new MessageChannel();
+        ch.port1.onmessage = () => {
+          ch.port1.close();
+          resolve();
+        };
+        ch.port2.postMessage(0);
+      });
+    }
+    return new Promise((resolve) => setTimeout(resolve, 0));
   },
   _absoluteUrl(url) {
     const doc = typeof document !== 'undefined' ? document : null;

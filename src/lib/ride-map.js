@@ -33,13 +33,17 @@ const SAME_SPOT_M = 30;
 const PUBLISHED_MIN_POINTS = 8;
 
 /* Where the rider gets off: the trip's own stop (GTFS or FUTÁR) first, then
-   Transitous's hop end, the configured stop, and a Transitous lookup.
-   Cards without a destination have no alighting stop. */
-async function alightPoint(row, cfg, candidates, src) {
+   the configured stop, Transitous's hop end, and a Transitous lookup. The
+   configured stop goes before Transitous's, as it does for the boarding
+   pin: Transitous finds a stop without coordinates by its name, and the
+   name may be another town's stop. Cards without a destination have no
+   alighting stop. */
+async function alightPoint(row, cfg, own, src, transitous) {
   if (!cfg.destKey && !cfg.destName && !cfg.destStopId) return null;
   const asPt = (p) => (Array.isArray(p) ? BkkLib.mapGpsLatLon(p[0], p[1]) : null);
-  const known = (candidates || []).map(asPt).find(Boolean)
+  const known = (own || []).map(asPt).find(Boolean)
     || BkkLib.mapGpsLatLon(cfg.destLat, cfg.destLon)
+    || asPt(transitous)
     || BkkLib.knownStopCoords({ id: cfg.destStopId, name: cfg.destName, key: cfg.destKey });
   if (known || !cfg.destName) return known || null;
   try {
@@ -139,8 +143,10 @@ export async function rideGeometry(ride, src) {
           id: cfg.destStopId,
           name: cfg.destName,
           key: cfg.destKey,
-          lat: gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[0] : undefined,
-          lon: gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[1] : undefined,
+          /* The configured stop's coordinates, else the GTFS trip's own:
+             by name alone Transitous may plan to another town's stop. */
+          lat: cfg.destLat != null ? cfg.destLat : (gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[0] : undefined),
+          lon: cfg.destLon != null ? cfg.destLon : (gtfsGeo && gtfsGeo.dest ? gtfsGeo.dest[1] : undefined),
           area,
         },
         { minutesAfter: cfg.minutesAfter, mode: 'all' },
@@ -235,7 +241,7 @@ export async function rideGeometry(ride, src) {
     }
   }
   /* Published line stays whole (8E Újpalota→Kelenföld, not the hop). */
-  const destPt = await alightPoint(row, cfg, [futarHop && futarHop.alight, motisMap && motisMap.dest], src);
+  const destPt = await alightPoint(row, cfg, [futarHop && futarHop.alight], src, motisMap && motisMap.dest);
   const clipped = BkkLib.clipRideShape(shape, board, destPt, row);
   if (clipped.length >= 2) shape = clipped;
   shape = BkkLib.validMapShape(shape);

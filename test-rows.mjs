@@ -773,3 +773,35 @@ test('ELVIRA overlay copies the national-pass flags onto the FUTÁR train, and a
   const asRow = BkkLib.asRow(merged[0], 'Székesfehérvár', 'hu');
   ok('asRow keeps the national-pass flags', asRow.nationalPass === true && asRow.reservationFreeSection === true);
 });
+
+/* Transitous's plans as board rows (rowsFromMotis) */
+
+test('a plan that walks to another stop first is no row of this board; a few steps to the platform are', () => {
+  const iso = (s) => new Date(s * 1000).toISOString();
+  const plan = (walk) => ({
+    itineraries: [{
+      transfers: 0,
+      startTime: iso(now + 60),
+      legs: [
+        Object.assign({ mode: 'WALK', startTime: iso(now + 60), from: { name: 'START' }, to: { name: 'Platform' } }, walk),
+        {
+          mode: 'TRAM', duration: 900, routeShortName: '1', tripId: 'hu-x_1',
+          startTime: iso(now + 720), endTime: iso(now + 1620), from: { name: 'Platform' }, to: { name: 'Dest' },
+        },
+      ],
+    }],
+  });
+  const labels = (walk) => BkkLib.rowsFromMotis(plan(walk), { name: 'Dest' }, 'helyi', 60).map((r) => r.label);
+  /* MOTIS gives the walk's metres: 250 m is still this stop. */
+  assert.deepEqual(labels({ duration: 600, distance: 700, endTime: iso(now + 660) }), []);
+  assert.deepEqual(labels({ duration: 200, distance: 240, endTime: iso(now + 260) }), ['1']);
+  /* Without metres, three minutes' walk. */
+  assert.deepEqual(labels({ duration: 600, endTime: iso(now + 660) }), []);
+  assert.deepEqual(labels({ duration: 120, endTime: iso(now + 180) }), ['1']);
+  assert.deepEqual(labels({ endTime: iso(now + 660) }), []);
+  assert.deepEqual(labels({ endTime: iso(now + 100) }), ['1']);
+  /* A walk after the ride (to the destination's coordinates) is no matter here. */
+  const after = plan({ duration: 30 });
+  after.itineraries[0].legs.push({ mode: 'WALK', duration: 900, distance: 1200 });
+  assert.deepEqual(BkkLib.rowsFromMotis(after, { name: 'Dest' }, 'helyi', 60).map((r) => r.label), ['1']);
+});
