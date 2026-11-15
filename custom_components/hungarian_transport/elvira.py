@@ -79,13 +79,15 @@ TIME_YEARS = range(2000, 2101)
 # window: StationInfo from a later travelDate drops the trains that already
 # left the origin, delayed ones still due included, and one board serves
 # every card and window of that day (the cache).
+# Tomorrow's arrival board (Window.tomorrow) is asked whole too, though only
+# the trains that get in past midnight are read of it: when ELVIRA cuts a
+# StationInfo answer short it leaves out every row whose train started the
+# day before, and those are the very trains it is asked for (Kelenföld on
+# Monday 2026-11-16: with maxCount 200 the five of Sunday's trains arriving
+# after midnight, the S10 4951 from Győr at 00:24 among them, are gone, and
+# moreResult stays false). Kept, its rows are as slim as any board's
+# (_parse_board), and it is the next day's board in the cache.
 STATIONINFO_MAX_COUNT = "2000"
-# Tomorrow's arrival board (Window.tomorrow) only holds the trains that get
-# in past midnight, all of them by early morning: a train leaving before
-# midnight is in within eight hours. Its first 200 rows reach 11:36 even at
-# Kelenföld (2.8 MB of JSON instead of the day's 7.4 MB, Monday 2026-11-16;
-# moreResult stays false when it is cut).
-STATIONINFO_HEAD_COUNT = "200"
 ELVIRA_ROW_CAP = 500
 # A train leaving by `latest` can arrive this much later: past midnight it is
 # on tomorrow's arrival board (StationInfo is per calendar day at the station).
@@ -113,7 +115,8 @@ ELVIRA_WORST_CASE_SEC = 60
 # between() answers within this many seconds, whatever ELVIRA does: a
 # caller (the card) can time its wait by it. The first round of boards is
 # bounded by ELVIRA_TIMEOUT (a board shared with an earlier call is too: its
-# request started before this call did); the second round, tomorrow's
+# request started before this call did, and one waiting for a turn among
+# ELVIRA_FETCHES counts the wait); the second round, tomorrow's
 # arrival board alone, gets what is left. A board that does not make it
 # counts as one that did not arrive, and its request goes on into the cache
 # for the next poll.
@@ -127,6 +130,13 @@ ELVIRA_CALL_BUDGET = 40
 # 24 boards (0.53/s), all of them at once when a dashboard opens.
 ELVIRA_RATE = 1.0
 ELVIRA_BURST = 60
+# StationInfo requests (with their decoding) under way at once; the others
+# wait for a turn. A busy station's board is its body and that decoded to a
+# str (about three times its 7.4 MB at Kelenföld) until it is parsed, so
+# twenty boards at once were half a gigabyte, and four decodings at once
+# stalled the event loop for 100 to 160 ms again (_parse_board). The board's
+# ELVIRA_TIMEOUT runs from when it is asked, the wait for a turn included.
+ELVIRA_FETCHES = 2
 # A refused board is logged at most this often, with the count since.
 ELVIRA_RATE_LOG_EVERY = 300
 # The largest StationInfo answer read: Kelenföld's day is 7.4 MB, and a
@@ -387,16 +397,15 @@ async def fetch_station(
             length = getattr(resp, "content_length", None)
             if length is not None and length > MAX_BOARD_BYTES:
                 raise ElviraError(f"{length} bytes, over {MAX_BOARD_BYTES}")
-            chunks = []
-            total = 0
+            # One buffer, not chunks joined into a second copy of the body.
+            body = bytearray()
             async for chunk in resp.content.iter_chunked(65536):
-                total += len(chunk)
-                if total > MAX_BOARD_BYTES:
+                body += chunk
+                if len(body) > MAX_BOARD_BYTES:
                     raise ElviraError(f"over {MAX_BOARD_BYTES} bytes")
-                chunks.append(chunk)
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
         raise ElviraError(type(err).__name__) from None
-    return await _in_executor(executor, _parse_board, b"".join(chunks))
+    return await _in_executor(executor, _parse_board, body)
 
 
 # The fields of a StationInfo row the rows are made of (rows_from_stationinfo,
@@ -422,8 +431,10 @@ def _read_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return {key: value for key, value in pairs if key in _READ_KEYS and value is not None}
 
 
-def _parse_board(body: bytes) -> Board:
-    """A StationInfo answer's board; ElviraError when it is none.
+def _parse_board(body: bytes | bytearray) -> Board:
+    """A StationInfo answer's board; ElviraError when it is none. A
+    bytearray body is emptied once it is decoded to text, before the text is
+    decoded to objects: it is not needed past there.
 
     A row has some fifty fields, its stations, kinds and services objects
     of their own; the rows read a dozen. The answer is decoded with only the
@@ -440,8 +451,13 @@ def _parse_board(body: bytes) -> Board:
     3.13).
     """
     try:
-        data = json.loads(body, object_pairs_hook=_read_keys)
-    except ValueError as err:
+        # As json.loads decodes bytes, but with the bytes let go of first.
+        text = body.decode(json.detect_encoding(body), "surrogatepass")
+        if isinstance(body, bytearray):
+            body.clear()
+        data = json.loads(text, object_pairs_hook=_read_keys)
+    except (ValueError, RecursionError) as err:
+        # RecursionError: nested deeper than the decoder goes, no board either.
         raise ElviraError(type(err).__name__) from None
     details = data.get("stationSchedulerDetails") if isinstance(data, dict) else None
     if not isinstance(details, dict):
@@ -664,7 +680,8 @@ class ElviraBoards:
     Every card on every open dashboard polls the service, so a board is
     cached for ELVIRA_CACHE_TTL (at most ELVIRA_CACHE_MAX of them, and
     ELVIRA_CACHE_BYTES) and concurrent calls for it share one request; a
-    miss takes a rate limit token first. The outage log and the
+    miss takes a rate limit token first, and waits for one of ELVIRA_FETCHES
+    turns (`fetches`) to be asked and decoded. The outage log and the
     clock (`now`: wall time, any time zone; `monotonic`: the cache, the rate
     limit, the outage log and the call budget) are the source's too.
     `fetch` is the StationInfo request (fetch_station with a session in
@@ -686,8 +703,10 @@ class ElviraBoards:
         burst: int = ELVIRA_BURST,
         call_budget: float = ELVIRA_CALL_BUDGET,
         executor: Executor | None = None,
+        fetches: int = ELVIRA_FETCHES,
     ) -> None:
         self._fetch = fetch
+        self._fetching = asyncio.Semaphore(fetches)
         self._executor = executor
         self._cache = _BoardCache(
             ELVIRA_CACHE_TTL, ELVIRA_CACHE_MAX, task_factory, call_later, monotonic, max_bytes=ELVIRA_CACHE_BYTES
@@ -721,9 +740,18 @@ class ElviraBoards:
             # The token goes on the miss itself, in the order the boards are
             # asked for (see between), not when the request task starts.
             self._rate.take()
-            return self._fetch(station_code, day, max_count)
+            return self._fetch_in_turn(station_code, day, max_count)
 
         return await self._cache.get((station_code, day.isoformat(), max_count), fetch)
+
+    async def _fetch_in_turn(self, station_code: str, day: date, max_count: str) -> Board:
+        """The request with its decoding, at most ELVIRA_FETCHES at once,
+        within ELVIRA_TIMEOUT from now (a wait for a turn included)."""
+        try:
+            async with asyncio.timeout(ELVIRA_TIMEOUT_SEC), self._fetching:
+                return await self._fetch(station_code, day, max_count)
+        except TimeoutError:
+            raise ElviraError("TimeoutError") from None
 
     def close(self) -> None:
         self._cache.close()
@@ -748,14 +776,14 @@ class ElviraBoards:
         win = plan_window(self.now(), minutes_after, at)
         boards: dict[BoardKey, Board | ElviraError] = {}
         wanted = next_boards(win, origin_code, dest_code, boards)
-        boards.update(zip(wanted, await self._round(wanted, win)))
+        boards.update(zip(wanted, await self._round(wanted)))
         # A second round, tomorrow's arrival board alone, gets what is left of
         # the budget. Deciding it reads every row of today's boards.
         wanted = await _in_executor(self._executor, next_boards, win, origin_code, dest_code, boards)
         if wanted:
             try:
                 async with asyncio.timeout(deadline - self.monotonic()):
-                    boards.update(zip(wanted, await self._round(wanted, win)))
+                    boards.update(zip(wanted, await self._round(wanted)))
             except TimeoutError:
                 # Its request goes on (the cache shields it); this answer
                 # does without it, and says so in dest_error.
@@ -770,18 +798,10 @@ class ElviraBoards:
             raise type(answer.origin_failure)(str(answer.origin_failure))
         return answer.rows, answer.dest_failure
 
-    async def _round(self, wanted: list[BoardKey], win: Window) -> list:
+    async def _round(self, wanted: list[BoardKey]) -> list:
         """One round: the boards for these (station, day) pairs at once, an
-        ElviraError in place of each one that did not arrive. Tomorrow's
-        (the destination's arrival board past midnight) only to its
-        STATIONINFO_HEAD_COUNT."""
-        results = await asyncio.gather(
-            *(
-                self.board(code, day, STATIONINFO_HEAD_COUNT if day == win.tomorrow else STATIONINFO_MAX_COUNT)
-                for code, day in wanted
-            ),
-            return_exceptions=True,
-        )
+        ElviraError in place of each one that did not arrive."""
+        results = await asyncio.gather(*(self.board(code, day) for code, day in wanted), return_exceptions=True)
         for board in results:
             # Only an unreachable board is an empty one; a bug or a cancellation is not.
             if isinstance(board, BaseException) and not isinstance(board, ElviraError):

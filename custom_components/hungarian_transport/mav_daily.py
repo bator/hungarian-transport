@@ -216,7 +216,7 @@ def check_manifest(raw: bytes) -> dict[str, Any]:
     """The manifest's fields this module uses, checked."""
     try:
         man = json.loads(raw)
-    except ValueError as err:
+    except (ValueError, RecursionError) as err:
         raise DailyIndexError(f"manifest is not JSON: {err}") from err
     if not isinstance(man, dict):
         raise DailyIndexError("manifest is not a JSON object")
@@ -251,7 +251,7 @@ def check_index(raw: bytes, man: dict[str, Any], min_trains: int) -> tuple[int, 
             # only the first, served would be the whole file.
             raise DailyIndexError("index has data after its gzip stream")
         index = json.loads(text)
-    except (zlib.error, ValueError) as err:
+    except (zlib.error, ValueError, RecursionError) as err:
         raise DailyIndexError(f"index does not unpack: {err}") from err
     if not isinstance(index, dict):
         raise DailyIndexError("index is not a JSON object")

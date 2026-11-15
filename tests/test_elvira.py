@@ -30,7 +30,6 @@ from custom_components.hungarian_transport.elvira import (
     ELVIRA_TIMEOUT_SEC,
     ELVIRA_URL,
     ELVIRA_WORST_CASE_SEC,
-    STATIONINFO_HEAD_COUNT,
     STATIONINFO_MAX_COUNT,
     Board,
     ElviraBoards,
@@ -173,22 +172,60 @@ def test_evening_asks_tomorrows_arrivals_with_the_others_and_last() -> None:
     ]
 
 
-async def test_tomorrows_arrival_board_is_asked_only_to_the_early_morning() -> None:
-    """It holds only the trains that get in past midnight: its first
-    STATIONINFO_HEAD_COUNT rows reach late morning even at Kelenföld, a
-    third of the day's board. Today's boards stay whole."""
-    clock = Clock("2026-11-06T22:30:00+01:00")
-    now = clock.now()
-    dep, arr = _board(now + timedelta(minutes=20), now + timedelta(minutes=110))
-    upstream = Upstream([dep], [arr])
-    rows, dest_failure = await _between(_source(upstream, clock), 30)
-    assert [(row["trainNumber"], row["travel"]) for row in rows] == [("966", 90)] and dest_failure is None
+# Budapest-Kelenföld's arrivals past midnight on Monday 2026-11-16 (the
+# fields read of them and startDate), as ELVIRA answered with maxCount 2000.
+# The first four trains started on Sunday: an answer cut short (maxCount 200)
+# lists none of them.
+KELENFOLD_PAST_MIDNIGHT = [
+    {"trainId": "2890967", "code": "4241", "startDate": "2026-11-15T00:00:00+01:00",
+     "start": "2026-11-16T00:02:00+01:00", "arrive": "2026-11-16T00:01:00+01:00"},
+    {"trainId": "2824280", "code": "261", "startDate": "2026-11-15T00:00:00+01:00",
+     "start": "2026-11-16T00:11:00+01:00", "arrive": "2026-11-16T00:02:00+01:00"},
+    {"trainId": "2890744", "code": "1811", "startDate": "2026-11-15T00:00:00+01:00",
+     "start": "2026-11-16T00:07:00+01:00", "arrive": "2026-11-16T00:05:00+01:00"},
+    {"trainId": "2889494", "code": "4951", "startDate": "2026-11-15T00:00:00+01:00",
+     "start": "2026-11-16T00:27:00+01:00", "arrive": "2026-11-16T00:24:00+01:00"},
+    {"trainId": "2890698", "code": "4770", "startDate": "2026-11-16T00:00:00+01:00",
+     "start": "2026-11-16T00:27:00+01:00", "arrive": "2026-11-16T00:26:00+01:00"},
+    {"trainId": "2887552", "code": "4810", "startDate": "2026-11-16T00:00:00+01:00",
+     "start": "2026-11-16T00:32:00+01:00", "arrive": "2026-11-16T00:31:00+01:00"},
+]
+# Kelenföld's arrivals that Monday, all of them.
+KELENFOLD_DAY_ARRIVALS = 447
+
+
+class CutBoards(Upstream):
+    """ELVIRA as it cuts a StationInfo answer: with a maxCount under the
+    day's rows it leaves out the trains that started the day before."""
+
+    async def __call__(self, code: str, day: date, max_count: str = STATIONINFO_MAX_COUNT):
+        deps, arrs = await super().__call__(code, day, max_count)
+        if int(max_count) < KELENFOLD_DAY_ARRIVALS:
+            arrs = [arr for arr in arrs if arr["startDate"][:10] == day.isoformat()]
+        return deps, arrs
+
+
+async def test_a_train_arriving_past_midnight_keeps_its_arrival() -> None:
+    """The S10 4951 leaves Győr at 22:38 on Sunday and gets to Kelenföld at
+    00:24: tomorrow's arrival board is asked for it alone, so it is asked
+    whole (a cut one lists none of the day before's trains), and it is the
+    next day's board in the cache, not a second request."""
+    clock = Clock("2026-11-15T22:30:00+01:00")
+    dep = {"trainId": "2889494", "code": "4951", "start": "2026-11-15T22:38:00+01:00", "startTrack": "3"}
+    upstream = CutBoards([dep], KELENFOLD_PAST_MIDNIGHT)
+    source = _source(upstream, clock)
+    rows, dest_failure = await _between(source, 30)
+    assert [(row["trainNumber"], row["destHit"], row["travel"]) for row in rows] == [("4951", True, 106)]
+    assert dest_failure is None
     assert upstream.max_counts == {
-        (ORIGIN, "2026-11-06"): STATIONINFO_MAX_COUNT,
-        (DEST, "2026-11-06"): STATIONINFO_MAX_COUNT,
-        (DEST, "2026-11-07"): STATIONINFO_HEAD_COUNT,
+        (ORIGIN, "2026-11-15"): STATIONINFO_MAX_COUNT,
+        (DEST, "2026-11-15"): STATIONINFO_MAX_COUNT,
+        (DEST, "2026-11-16"): STATIONINFO_MAX_COUNT,
     }
-    assert int(STATIONINFO_HEAD_COUNT) < int(STATIONINFO_MAX_COUNT)
+    calls = len(upstream.calls)
+    _deps, arrivals = await source.board(DEST, date(2026, 11, 16))
+    assert len(upstream.calls) == calls and arrivals == KELENFOLD_PAST_MIDNIGHT
+    source.close()
 
 
 def test_after_midnight_todays_origin_board_comes_first() -> None:
@@ -755,9 +792,6 @@ async def test_fetch_station_asks_for_a_whole_service_day() -> None:
         "minCount": "0",
         "maxCount": "2000",
     }
-    # Or its first rows from midnight.
-    await fetch_station(session, ORIGIN, date(2026, 11, 7), STATIONINFO_HEAD_COUNT)
-    assert session.posts[1][1]["maxCount"] == STATIONINFO_HEAD_COUNT == "200"
 
 
 # Fields of a whole StationInfo row (2026-11-16) that no row is made of.
@@ -862,6 +896,8 @@ async def test_rows_from_a_kept_board_are_the_whole_board_s() -> None:
         (_Response(body={}), "unexpected response"),
         (_Response(body={"stationSchedulerDetails": None}), "unexpected response"),
         (_Response(body={"message": "Hiba"}), "unexpected response"),
+        # Nested deeper than the decoder goes: RecursionError, not a ValueError.
+        (_Response(body=b"[" * 100_000 + b"]" * 100_000), "RecursionError"),
     ],
 )
 async def test_fetch_station_failures_are_elvira_errors(response, detail) -> None:
@@ -880,6 +916,88 @@ async def test_an_oversized_board_is_an_elvira_error_and_not_read_whole(monkeypa
     with pytest.raises(ElviraError) as err:
         await fetch_station(_Session(_Response(body=b"{}", content_length=5000)), ORIGIN, date(2026, 10, 19))
     assert str(err.value) == "5000 bytes, over 1000"
+
+
+async def test_boards_are_asked_and_decoded_two_at_a_time() -> None:
+    """A busy station's board is tens of MB until it is parsed: the misses
+    of many calls at once wait for a turn, and every board still arrives."""
+    clock = Clock(NOON)
+    now = clock.now()
+    under_way = []
+    most = 0
+    gate = asyncio.Event()
+
+    async def fetch(code: str, day: date, max_count: str):
+        nonlocal most
+        under_way.append(code)
+        most = max(most, len(under_way))
+        await gate.wait()
+        under_way.remove(code)
+        dep, arr = _board(now + timedelta(minutes=10), now + timedelta(minutes=50), code=code[-3:])
+        return [dep], [arr]
+
+    source = ElviraBoards(fetch, now=clock.now, monotonic=clock.monotonic)
+    codes = [f"005510{i:03d}" for i in range(6)]
+    asked = asyncio.gather(*(source.board(code, now.date()) for code in codes))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(under_way) == 2
+    gate.set()
+    boards = await asked
+    assert most == 2 and not under_way
+    assert [departures[0]["code"] for departures, _arrivals in boards] == [code[-3:] for code in codes]
+    source.close()
+
+
+async def test_a_board_waiting_for_its_turn_counts_the_wait_in_its_timeout(monkeypatch) -> None:
+    """Its ELVIRA_TIMEOUT runs from when it is asked: a call's first round
+    stays within it however many boards are ahead (ELVIRA_CALL_BUDGET)."""
+    clock = Clock(NOON)
+    today = clock.now().date()
+    gate = asyncio.Event()
+    asked = []
+
+    async def fetch(code: str, day: date, max_count: str):
+        asked.append(code)
+        if code != DEST:
+            await gate.wait()
+        return [], []
+
+    source = ElviraBoards(fetch, now=clock.now, monotonic=clock.monotonic)
+    # Two slow boards take both turns.
+    slow = asyncio.gather(*(source.board(code, today) for code in ("005510001", "005510002")))
+    for _ in range(3):
+        await asyncio.sleep(0)
+    monkeypatch.setattr(elvira, "ELVIRA_TIMEOUT_SEC", 0.05)
+    with pytest.raises(ElviraError) as err:
+        await asyncio.wait_for(source.board(DEST, today), 1)
+    assert str(err.value) == "TimeoutError" and DEST not in asked
+    gate.set()
+    assert await slow == [([], []), ([], [])]
+    source.close()
+
+
+async def test_a_board_s_body_is_let_go_of_before_it_is_decoded_to_objects() -> None:
+    """Kelenföld's 7.4 MB body is 14.6 MB as text: the body is one buffer
+    (not chunks and their join), emptied once it is text."""
+    bodies = []
+    sizes = []
+    real_loads = json.loads
+
+    async def executor(func, body):
+        bodies.append(body)
+        return func(body)
+
+    def loads(text, *args, **kwargs):
+        sizes.append(len(bodies[0]))
+        return real_loads(text, *args, **kwargs)
+
+    session = _Session(_Response(body={"stationSchedulerDetails": {"arrivalScheduler": [{"code": "4951"}]}}))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(elvira.json, "loads", loads)
+        board = await fetch_station(session, ORIGIN, date(2026, 11, 16), executor=executor)
+    assert board == ([], [{"code": "4951"}])
+    assert isinstance(bodies[0], bytearray) and sizes == [0]
 
 
 async def test_a_board_is_decoded_off_the_event_loop() -> None:

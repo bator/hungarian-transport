@@ -313,6 +313,17 @@ def test_check_index_rejects_a_second_gzip_member() -> None:
         mav_daily.check_index(raw, _manifest(raw), 1)
 
 
+def test_json_nested_too_deep_is_a_daily_index_error() -> None:
+    """The decoder gives up on it with a RecursionError, not a ValueError:
+    still a manifest or an index that is not one."""
+    deep = b"[" * 100_000 + b"]" * 100_000
+    with pytest.raises(mav_daily.DailyIndexError, match="manifest is not JSON"):
+        mav_daily.check_manifest(deep)
+    raw = gzip.compress(deep)
+    with pytest.raises(mav_daily.DailyIndexError, match="index does not unpack"):
+        mav_daily.check_index(raw, _manifest(raw), 1)
+
+
 def test_build_helpers(hass: HomeAssistant) -> None:
     lock = mav.build_lock(hass)
     assert mav.build_lock(hass) is lock

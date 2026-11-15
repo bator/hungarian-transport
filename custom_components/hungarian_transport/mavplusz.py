@@ -208,7 +208,12 @@ async def fetch(
             if total > cap:
                 raise ValueError(f"over {cap} bytes")
             chunks.append(chunk)
-    return json.loads(b"".join(chunks))
+    try:
+        return json.loads(b"".join(chunks))
+    except RecursionError:
+        # Nested deeper than the decoder goes: not an answer, and the
+        # caller's failure path is the one for ValueError.
+        raise ValueError("answer nested too deep") from None
 
 
 def _str(value: Any) -> str:
