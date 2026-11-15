@@ -10,9 +10,11 @@ What notifies, only with the option on:
   recorded at every setup of the entry, notifications on or off, so the
   first run (and turning notifications on later) only records. Within one
   version the files change only by the integration itself (the daily index,
-  a local MÁV build): recorded, never notified. A shipped MÁV index older
-  than the one last seen or installed since (the daily index of a later
-  day) is no news either;
+  a local MÁV build): recorded, never notified. A shipped index older
+  than the one last seen is no news either: for MÁV, older than the one
+  installed since too (the daily index of a later day); for the city
+  index, which joins one feed per operator, news is an operator's feed
+  newer than the one seen (or a new operator), not one that went;
 - the daily MÁV index failed on FAILED_DAYS consecutive days: once per
   streak, dismissed when a round goes through again. A day with only BUSY
   or UNSUPPORTED rounds neither counts nor breaks the streak; a day without
@@ -47,7 +49,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
-from . import mav, mav_daily, served_index, storage
+from . import mav, mav_daily, served_index, storage, timetables
 from .const import (
     CONF_DAILY_MAV,
     CONF_DAILY_TIME,
@@ -165,15 +167,31 @@ def changed_indexes(
         new, old = feeds.get(key), old_feeds.get(key)
         if new is None or new == old:
             continue
-        if key == "mav":
-            if new == installed_mav:
+        if key == "city":
+            # One feed per operator: news when some operator's feed is new
+            # to us and not older than the one seen. Only an operator that
+            # went is no news.
+            old_city = timetables.city_feeds(old if isinstance(old, str) else None)
+            if not any(
+                _newer(feed, [old_city.get(oid)]) for oid, feed in timetables.city_feeds(new).items()
+            ):
                 continue
-            new_day = served_index.feed_date(new)
-            seen_days = [served_index.feed_date(f) for f in (old, installed_mav) if isinstance(f, str)]
-            if new_day is not None and any(day is not None and new_day <= day for day in seen_days):
-                continue
+        elif not _newer(new, [old, installed_mav] if key == "mav" else [old]):
+            continue
         changed.append(key)
     return changed
+
+
+def _newer(new: str, seen: list[str | None]) -> bool:
+    """Whether feed new is news against the feeds seen: none of them, and
+    not dated on or before the day of one (a release can ship an older feed
+    than the one seen or installed since). An undated feed that differs is
+    news."""
+    if new in seen:
+        return False
+    new_day = served_index.feed_date(new)
+    seen_days = [served_index.feed_date(f) for f in seen if isinstance(f, str)]
+    return new_day is None or not any(day is not None and new_day <= day for day in seen_days)
 
 
 # The record lives in storage.py, shared with the timetable sensors.
