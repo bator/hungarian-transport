@@ -559,9 +559,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """The integration is removed: so are its Lovelace resource, its
-    notifications and its record in .storage (storage.py), and the copy of
-    it in memory. There is one entry at most (its unique_id is the domain),
-    so nothing is shared with another.
+    notifications, its Repairs issues and its record in .storage
+    (storage.py), and the copy of it in memory. There is one entry at most
+    (its unique_id is the domain), so nothing is shared with another.
 
     Only what installed the MÁV index stays (storage.MAV_INSTALL): the index
     stays in www/ and the cards keep drawing from it, so an entry added
@@ -580,6 +580,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         mav.NOTIFICATION_ID,
     ):
         persistent_notification.async_dismiss(hass, notification_id)
+    # So would its Repairs issue: nothing builds the index any more to end it.
+    ir.async_delete_issue(hass, DOMAIN, mav.ISSUE_BUILD_FAILED)
     try:
         state = await storage.async_load(hass)
         install = state.get(storage.MAV_INSTALL)

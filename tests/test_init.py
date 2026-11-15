@@ -167,6 +167,23 @@ async def test_removal_dismisses_the_integrations_notifications(hass, monkeypatc
     ])
 
 
+async def test_removal_takes_the_mav_build_issue_along(hass) -> None:
+    """A failed MÁV build's Repairs issue ends with the next build; once the
+    integration is removed none comes, so the removal ends it."""
+    entry = await _setup(hass)
+    ir.async_create_issue(
+        hass,
+        DOMAIN,
+        mav.ISSUE_BUILD_FAILED,
+        is_fixable=False,
+        severity=ir.IssueSeverity.ERROR,
+        translation_key=mav.ISSUE_BUILD_FAILED,
+    )
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert ir.async_get(hass).async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+
+
 async def test_yaml_mode_resources_are_left_alone(hass) -> None:
     from homeassistant.components.lovelace import const as lovelace_const
 
