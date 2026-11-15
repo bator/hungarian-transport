@@ -9397,6 +9397,51 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   Lib._hass = null;
 }
 
+/* ---- Card review fixes: late FUTÁR access, the editor's mode switch,
+   the time pickers past midnight, the map after a failed poll, and the
+   planner's search errors ---- */
+
+/* The integration's futar service registering while the planner's first
+   board run is in flight: that run decided without BKK, and the planner
+   does not poll, so it runs once more when it ends. */
+{
+  const keep = {
+    nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+    reachableDests: Lib.reachableDests,
+  };
+  const runs = [];
+  const pending = [];
+  Lib.nextBoard = (poll) => {
+    runs.push(Lib.integrationHasKey(poll.ctx.hass()) ? 'futar' : 'none');
+    return new Promise((r) => pending.push(() => {
+      poll.show({ phase: 'settled', rows: [], banner: '', loading: false, filled: false, quiet: false });
+      r();
+    }));
+  };
+  Lib.apiKeyFromDashboard = async () => '';
+  Lib.reachableDests = async () => ({ dests: [], destRoutes: {} });
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+  pc._planner.now = async () => null;
+  const base = { language: 'hu', states: {}, callWS: async () => ({}), callService: async () => ({}) };
+  pc.hass = Object.assign({}, base, { services: { hungarian_transport: { elvira_between: {} } } });
+  document.body.appendChild(pc);
+  await settleTicks();
+  const before = runs.slice();
+  pc.hass = Object.assign({}, base, { services: { hungarian_transport: { elvira_between: {}, futar: {} } } });
+  await settleTicks();
+  pending.splice(0).forEach((f) => f());
+  await settleTicks();
+  pending.splice(0).forEach((f) => f());
+  await settleTicks();
+  check('FUTÁR showing up during the planner\'s board run runs the board once more, with BKK',
+    before.join() === 'none' && runs.join() === 'none,futar' && !pc._reloadActive,
+    JSON.stringify({ before, runs, active: pc._reloadActive }));
+  pc.remove();
+  Object.assign(Lib, keep);
+  Lib._hass = null;
+}
+
 /* The editor: an integration gone for a moment (an entry reload) and back
    probes its key again, not taken as refused with the key field left up. */
 {

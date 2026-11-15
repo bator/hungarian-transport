@@ -52,6 +52,8 @@ export class BKKHopCard extends HTMLElement {
     this._keyBackoff = 0;
     this._keyFilling = false;
     this._reloadActive = false;
+    /* FUTÁR or ELVIRA access showed up while a run was in flight. */
+    this._accessArrived = false;
     this._mapOverlay = null;
     this._map = null;
     this._mapMarker = null;
@@ -166,7 +168,35 @@ export class BKKHopCard extends HTMLElement {
      re-parenting a card) must not start a second fetch. */
   _reloadSafe() {
     this._reloadActive = true;
-    Promise.resolve().then(() => this._reload()).catch((err) => this._showErr(err));
+    Promise.resolve()
+      .then(() => {
+        /* A run that starts now sees whatever access is there by now. */
+        this._accessArrived = false;
+        return this._reload();
+      })
+      .catch((err) => this._showErr(err))
+      .then(() => this._reloadForNewAccess());
+  }
+
+  /* FUTÁR access (or ELVIRA) that showed up while a run was in flight came
+     too late for it: the run decided without it ("no API key", no BKK rows).
+     A card that polls would pick it up on the next tick, the planner does
+     not poll, so the run is repeated once it ends, unless a newer one is
+     already on its way (that one sees the access). */
+  _reloadForNewAccess() {
+    if (!this._accessArrived || this._reloadActive || !this.isConnected) return;
+    this._accessArrived = false;
+    this._reloadSafe();
+  }
+
+  /* The integration's futar service or elvira_between just showed up. */
+  _accessShowedUp() {
+    if (!this._painted || !this.isConnected) return;
+    if (this._reloadActive) {
+      this._accessArrived = true;
+      return;
+    }
+    this._reloadSafe();
   }
 
   /* The card's own key, or a key borrowed from a sibling card while the
@@ -189,13 +219,12 @@ export class BKKHopCard extends HTMLElement {
     /* The integration's futar service can register after the first paint
        (key added in the options flow): reload once it shows up. */
     this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
-    if (this._viaIntegration && !viaBefore && this._painted && !this._reloadActive && this.isConnected) this._reloadSafe();
+    if (this._viaIntegration && !viaBefore) this._accessShowedUp();
     /* So can elvira_between, a MÁV card's own source (a key-less one said
        "no API key" without it): reload once that shows up too. */
     const elviraBefore = this._viaElvira;
     this._viaElvira = BkkLib.hasElvira(hass);
-    if (this._viaElvira && !elviraBefore && this._departMode() === 'mav'
-        && this._painted && !this._reloadActive && this.isConnected) this._reloadSafe();
+    if (this._viaElvira && !elviraBefore && this._departMode() === 'mav') this._accessShowedUp();
     if (first && this._rawRows && this._rawRows.length) {
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       const cfg = this._config || {};
