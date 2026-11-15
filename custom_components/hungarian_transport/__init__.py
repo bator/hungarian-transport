@@ -547,13 +547,24 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """The integration is removed: so are its Lovelace resource and its
-    record in .storage (storage.py), and the copy of it in memory."""
+    record in .storage (storage.py), and the copy of it in memory.
+
+    Only what installed the MÁV index stays (storage.MAV_INSTALL): the index
+    stays in www/ and the cards keep drawing from it, so an entry added
+    again would otherwise call it a release's, with the file's time. The
+    sensor matches the record to the served file (feed and size), so a
+    record of an index replaced since says nothing."""
     try:
         await lovelace_resource.async_remove_resource(hass)
     except Exception:  # noqa: BLE001 - removal goes on
         _LOGGER.warning("Could not remove the cards' Lovelace resource", exc_info=True)
     try:
-        await storage.store(hass).async_remove()
+        state = await storage.async_load(hass)
+        install = state.get(storage.MAV_INSTALL)
+        if isinstance(install, dict):
+            await storage.async_save(hass, {storage.MAV_INSTALL: install})
+        else:
+            await storage.store(hass).async_remove()
     except Exception:  # noqa: BLE001 - removal goes on
         _LOGGER.warning("Could not remove the timetable update record", exc_info=True)
     hass.data.get(DOMAIN, {}).pop("update_state", None)
