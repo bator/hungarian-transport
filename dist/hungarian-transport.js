@@ -1872,6 +1872,20 @@ register({
     if (Number.isFinite(lat) && Number.isFinite(lon)) return lat + "," + lon;
     return String(hit.id || "");
   },
+  /* The stop's area when it names the town the stop is in, else ''. A
+     city feed's stop id starts with the feed's id, which names its town
+     ("pecs:…", "kecskemet-kisvasut:…", "volan-eger:…"), and its area comes
+     from the feed's operator ("Pécs — Tüke Busz"). A feed whose id does
+     not name its area serves a region: Bahart's "Balaton" ("bahart:…") is
+     no town to geocode a stop in. Any other area (a Volán stop's, the
+     board's own town) is a town. */
+  transitousTown(stop) {
+    const area = String(stop && stop.area || "").trim();
+    if (!area || BkkLib.stopIdFamily(stop) !== "city") return area;
+    const feed = String(stop.id).split(":")[0].toLowerCase().replace(/^volan-/, "");
+    const slug = BkkLib.fold(area).replace(/ /g, "-");
+    return slug && (feed === slug || feed.indexOf(slug + "-") === 0) ? area : "";
+  },
   /* '' when the geocoder knows no such stop; a geocoder that failed
      (Transitous down) rejects, so a plan says "try again", not "no route". */
   async transitousPlace(stop, kind) {
@@ -1880,7 +1894,7 @@ register({
     if (pt) return pt[0] + "," + pt[1];
     const name = String(stop.name || "").trim();
     if (!name) return String(stop.id || "");
-    const area = String(stop.area || "").trim();
+    const area = BkkLib.transitousTown(stop);
     const foldedArea = BkkLib.fold(area);
     const inArea = (hit) => (hit && hit.areas || []).some((a) => BkkLib.fold(a && a.name) === foldedArea);
     let townFailed = null;
@@ -1925,7 +1939,7 @@ register({
       }
     }
     const queries = [];
-    const area = String(stop && stop.area || "").trim();
+    const area = BkkLib.transitousTown(stop);
     if (name && area && BkkLib.fold(name).indexOf(BkkLib.fold(area)) < 0) queries.push(`${name} ${area}`);
     if (name) queries.push(name);
     let stripped = name;
@@ -4749,7 +4763,12 @@ register({
   /* A worker past its time is not given up on: a wall tablet busy
      painting may simply be slow. The page reads the file as well, the
      first of the two to have the index is used and the other stopped (the
-     page skips its parse; the worker is terminated). */
+     page skips its parse; the worker is terminated). The worker can only
+     win while the page is still gunzipping: the page's JSON.parse is one
+     task, and its answer is in before the next worker message is handled.
+     So the worker is stopped as the page's parse starts, not after it:
+     the slices it sent so far are dropped before the page builds its own
+     index, and a slow tablet holds one index at its peak, not two. */
   async _raceIndexParse(bytes, job, gunzipKey) {
     let workerIdx = null;
     const fromWorker = job.done.then((out) => {
@@ -4758,14 +4777,15 @@ register({
       workerIdx = out;
       return { idx: out };
     });
-    const fromPage = BkkLib._parseIndexOnPage(bytes, gunzipKey, () => workerIdx != null).then((out) => ({ idx: out, page: true }), (err) => ({ err, page: true }));
+    const beaten = () => workerIdx != null || job.stop() === true;
+    const fromPage = BkkLib._parseIndexOnPage(bytes, gunzipKey, beaten).then((out) => ({ idx: out, page: true }), (err) => ({ err, page: true }));
     const first = await Promise.race([fromWorker, fromPage]);
     if (!first.page) return first.idx;
     if (first.err) {
       job.stop();
       throw first.err;
     }
-    if (first.idx == null) return workerIdx;
+    if (first.idx == null) return (await fromWorker).idx;
     job.stop();
     return first.idx;
   },
@@ -4782,7 +4802,8 @@ register({
      worker could not read (the caller then reads it on the page, and its
      error is the one it always was); slow settles once the worker is
      past _indexWorkerTimeoutMs, which leaves it running and is no reason
-     to give up on workers; stop() ends it. */
+     to give up on workers; stop() ends it and drops what it sent so far,
+     and is true when the worker had finished with the index already. */
   _indexWorkerSlice: 1e3,
   _indexWorkerTimeoutMs: 2e4,
   _indexWorkerUrl: "",
@@ -4795,6 +4816,7 @@ register({
     let idx = null;
     let timer = null;
     let over = false;
+    let won = false;
     let resolveDone;
     let resolveSlow;
     const done = new Promise((resolve) => {
@@ -4806,6 +4828,8 @@ register({
     const finish = (out, broken) => {
       if (over) return;
       over = true;
+      won = out != null;
+      idx = null;
       if (timer) clearTimeout(timer);
       timer = null;
       if (broken) BkkLib._indexWorkerBroken = true;
@@ -4819,7 +4843,14 @@ register({
       }
       resolveDone(out);
     };
-    const job = { done, slow, stop: () => finish(null, false) };
+    const job = {
+      done,
+      slow,
+      stop: () => {
+        finish(null, false);
+        return won;
+      }
+    };
     try {
       if (!BkkLib._indexWorkerUrl) {
         const code = "(" + BkkLib._indexWorkerMain.toString() + ")(self);";
@@ -6169,6 +6200,7 @@ register({
       return BkkLib.cityReachableDests(ix, stop, city);
     }
     let out = { dests: [], destRoutes: {} };
+    let futarFailed = false;
     try {
       const data = await BkkLib.fetch(apiKey, "arrivals-and-departures-for-stop.json", {
         stopId: stop.id,
@@ -6235,6 +6267,8 @@ register({
       out = { dests, destRoutes };
     } catch (err) {
       if (mode !== "volan" && mode !== "all") throw err;
+      const code = err && (err.code || err.i18nKey);
+      futarFailed = code !== "errNoApiKey" && code !== "futar_auth" && code !== "errApiKeyBad";
     }
     if (mode === "volan" || mode === "all") {
       try {
@@ -6250,6 +6284,7 @@ register({
       } catch (_e) {
       }
     }
+    if (futarFailed) out.partial = true;
     return out;
   },
   async travelMin(apiKey, tripId, destKey, dep, origin, cache) {
@@ -6958,6 +6993,11 @@ register({
 // src/lib/realtime.js
 var RT_MAX_TRIPS = 40;
 var RT_MAX_STOPS = 120;
+var RT_KEY_MAX = 96;
+var RT_TRIP_ID_MAX = 128;
+var RT_ROUTE_MAX = 32;
+var RT_START_MAX = 2880;
+var RT_STOP_ID_MAX = 64;
 var RT_STOPS_BEFORE = 20;
 var RT_CACHE_MS = 25e3;
 var RT_FAIL_LIMIT = 3;
@@ -7058,12 +7098,12 @@ register({
     if (!row || !row.tripId) return null;
     const rt = row.rt;
     if (rt && rt.feed) {
-      const req2 = { key: String(row.tripId).slice(0, 96) };
-      if (rt.trip) req2.trip_id = String(rt.trip).slice(0, 128);
-      if (rt.route) req2.route = String(rt.route).slice(0, 32);
-      if (Number.isInteger(rt.start) && rt.start >= 0 && rt.start <= 2880) req2.start = rt.start;
+      const req2 = { key: String(row.tripId).slice(0, RT_KEY_MAX) };
+      if (rt.trip) req2.trip_id = String(rt.trip).slice(0, RT_TRIP_ID_MAX);
+      if (rt.route) req2.route = String(rt.route).slice(0, RT_ROUTE_MAX);
+      if (Number.isInteger(rt.start) && rt.start >= 0 && rt.start <= RT_START_MAX) req2.start = rt.start;
       if (/^\d{8}$/.test(rt.date || "")) req2.date = rt.date;
-      const stops = (rt.stops || []).filter((s) => s && String(s).length <= 64).slice(0, RT_MAX_STOPS);
+      const stops = (rt.stops || []).filter((s) => s && String(s).length <= RT_STOP_ID_MAX).slice(0, RT_MAX_STOPS);
       if (stops.length === (rt.stops || []).length && stops.length) {
         req2.stops = stops.map(String);
         if (Number.isInteger(rt.from) && rt.from < stops.length) req2.from = rt.from;
@@ -7077,7 +7117,7 @@ register({
     if (mode !== "mav" && mode !== "all" || !BkkLib.isTrainRow(row)) return null;
     const num = String(BkkLib.rowTrainNumber(row) || "").replace(/^0+/, "");
     if (!/^\d{1,6}$/.test(num)) return null;
-    const req = { key: ("t:" + num + ":" + String(row.tripId)).slice(0, 96), train: num };
+    const req = { key: ("t:" + num + ":" + String(row.tripId)).slice(0, RT_KEY_MAX), train: num };
     const from = BkkLib.elviraStationCode(ctx.stopId);
     const to = BkkLib.elviraStationCode(ctx.destStopId);
     if (from) {
@@ -8792,6 +8832,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._destRoutes = {};
     this._loadedStop = "";
     this._loadedAccess = "";
+    this._loadedPartialAt = 0;
     this._loadingStop = "";
     this._loadedScope = "";
     this._loadingScope = "";
@@ -8860,7 +8901,7 @@ var BKKHopCardEditor = class extends HTMLElement {
       this._syncMode();
     }
     const viaIntegration = BkkLib.integrationHasKey(hass);
-    if (!this._userEditedKey && !this._config.apiKey && !this._borrowedKey && !this._loadingKey && !viaIntegration && !this._keyless()) this._fillKey();
+    if (!this._userEditedKey && !this._ownApiKey() && !this._borrowedKey && !this._loadingKey && !viaIntegration && !this._keyless()) this._fillKey();
     else if (this._hasFutar()) this._probeKey();
     const stopId = this._config.stopId;
     const retry = this._failedStop === stopId && this._failedAccess !== this._keyAccess() && this._canLoadDests();
@@ -8890,6 +8931,11 @@ var BKKHopCardEditor = class extends HTMLElement {
   }
   _apiKey() {
     return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
+  }
+  /* The card's own key, trimmed as cardApiKey reads it: a whitespace-only
+     apiKey does not stop a sibling's key from being borrowed. */
+  _ownApiKey() {
+    return String(this._config.apiKey || "").trim();
   }
   _hasFutar() {
     return BkkLib.hasFutar(this._apiKey(), this._hass);
@@ -8924,6 +8970,7 @@ var BKKHopCardEditor = class extends HTMLElement {
   }
   _destsStale(stopId) {
     if (this._loadedStop !== stopId || this._loadedScope !== this._destScope()) return true;
+    if (this._loadedPartialAt && Date.now() - this._loadedPartialAt >= DEST_RETRY_MS) return true;
     return !this._loadedAccess && !this._keyless() && !!this._keyAccess();
   }
   _build() {
@@ -9463,7 +9510,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._loadingKey = true;
     try {
       const key = await BkkLib.apiKeyFromDashboard(this._hass);
-      if (key && !this._config.apiKey && !this._userEditedKey) {
+      if (key && !this._ownApiKey() && !this._userEditedKey) {
         this._borrowedKey = key;
         const stopId = this._config.stopId;
         if (stopId && this._destsStale(stopId)) this._loadDests();
@@ -9631,6 +9678,7 @@ var BKKHopCardEditor = class extends HTMLElement {
       this._loadedStop = stopId;
       this._loadedScope = scope;
       this._loadedAccess = access;
+      this._loadedPartialAt = idx.partial ? Date.now() : 0;
       this._destsLoading = false;
       this._loadingStop = "";
       this._dests = idx.dests || [];
@@ -9920,6 +9968,12 @@ var BKKHopCard = class extends HTMLElement {
   _apiKey() {
     return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
   }
+  /* The key set on this card itself, as cardApiKey reads it: a blank or
+     whitespace-only apiKey is no key, so the card still borrows one or
+     goes through the integration. */
+  _ownApiKey() {
+    return String((this._config || {}).apiKey || "").trim();
+  }
   _hasFutar() {
     return BkkLib.hasFutar(this._apiKey(), this._hass);
   }
@@ -9930,7 +9984,7 @@ var BKKHopCard = class extends HTMLElement {
     this._hass = hass;
     BkkLib._hass = hass;
     if (this._lang() !== langBefore) this._langChanged();
-    this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
+    this._viaIntegration = !this._ownApiKey() && BkkLib.integrationHasKey(hass);
     if (this._viaIntegration && !viaBefore) this._accessShowedUp();
     const elviraBefore = this._viaElvira;
     this._viaElvira = BkkLib.hasElvira(hass);
@@ -9957,7 +10011,7 @@ var BKKHopCard = class extends HTMLElement {
   _maybeFillKey() {
     const mode = BkkLib.mode(this._config || {});
     if (mode === "volan" || mode === "helyi") return;
-    if (this._config.apiKey || BkkLib.integrationHasKey(this._hass)) return;
+    if (this._ownApiKey() || BkkLib.integrationHasKey(this._hass)) return;
     if (this._keyFilling || Date.now() < this._keyRetryAt) return;
     this._keyFilling = true;
     this._fillKey().catch(() => {
@@ -10101,7 +10155,7 @@ var BKKHopCard = class extends HTMLElement {
      up (HA still starting, entry reloading), it wins over a borrowed key. */
   async _fillKey() {
     const key = await BkkLib.apiKeyFromDashboard(this._hass);
-    if (!key || this._config.apiKey) return;
+    if (!key || this._ownApiKey()) return;
     if (key === this._borrowedKey) return;
     this._borrowedKey = key;
     if (this.isConnected) this._reloadSafe();
@@ -11287,6 +11341,7 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._destTimer = null;
     this._pickTimer = null;
     this._whenPaintedFor = "";
+    this._journeyPaintedFor = "";
     this._searchErr = "";
     this._searchErrAt = 0;
     this._originSearch = generation();
@@ -11501,9 +11556,16 @@ var BKKPlannerCard = class extends BKKHopCard {
     super.connectedCallback();
     if (!this._painted) return;
     this._rollWhenPickers();
+    this._ensureDests();
     if (this._plannerMap) return;
     const host = this._journeyHost && this._journeyHost.querySelector(".journey-plan");
     if (host && host.querySelector("#pjmap")) this._mountPlannerInlineMap(host);
+  }
+  /* A destination list held back while the tab was in the background
+     (_ensureDests) loads once it is in front again. */
+  _visibilityChanged() {
+    super._visibilityChanged();
+    if (!this._pageHidden()) this._ensureDests();
   }
   _teardownPlannerInlineMap() {
     const map = this._plannerMap;
@@ -11732,6 +11794,7 @@ var BKKPlannerCard = class extends BKKHopCard {
   _paintJourney() {
     const host = this._journeyHost;
     if (!host) return;
+    this._journeyPaintedFor = this._whenParts(Date.now()).ymd;
     const view = this._journeyView();
     const sig = view ? view.className + "\n" + view.html : "";
     const shown = this._plan.shown;
@@ -12058,10 +12121,15 @@ var BKKPlannerCard = class extends BKKHopCard {
   /* An origin from the YAML or the editor needs its reachable destinations
      too, not only one picked in the card. The list only feeds the
      destination picker, and it costs a board and dozens of trip and route
-     lookups: a picked pair, its pickers folded, waits until edit opens them. */
+     lookups: a picked pair, its pickers folded, waits until edit opens them.
+     Only a card on the page loads it: Home Assistant hands hass to cards it
+     keeps out of the page (a visibility condition) as well, and a card in a
+     background tab has nobody to offer it to. connectedCallback and the tab
+     coming back to the front ask again. */
   _ensureDests() {
     const cfg = this._config || {};
     if (!this._pickersMounted || !this._hass || !cfg.stopId) return;
+    if (!this.isConnected || this._pageHidden()) return;
     if (this._routePicked() && !this._editRoute) return;
     if (this._destsFor === cfg.stopId) {
       const access = this._futarAccess();
@@ -12614,10 +12682,20 @@ ${this._stopPinCss()}
      someone tapped elsewhere. With no pick waiting, the pickers hold the
      plan's time, and painting them again keeps it. Only a pick still
      waiting out its debounce is left alone; it reads its day against the
-     day the pickers were painted for (_pickedDay). */
+     day the pickers were painted for (_pickedDay).
+     "Now" has no pickers to roll, but its itinerary says "holnap 00:10"
+     as well: on a new day it is painted again, not only with the next
+     plan up to five minutes later. */
   _rollWhenPickers() {
-    if (!this._plan.timed || !this._whenPaintedFor) return;
-    if (this._whenParts(Date.now()).ymd === this._whenPaintedFor) return;
+    const today = this._whenParts(Date.now()).ymd;
+    if (!this._plan.timed) {
+      if (this._journeyPaintedFor && this._journeyPaintedFor !== today) {
+        this._paintHead();
+        this._paintJourney();
+      }
+      return;
+    }
+    if (!this._whenPaintedFor || today === this._whenPaintedFor) return;
     this._paintHead();
     this._paintJourney();
     const day = this._planEl("pday");
@@ -12945,17 +13023,21 @@ ${this._stopPinCss()}
   async _loadDests() {
     const cfg = this._config || {};
     if (!cfg.stopId) return;
+    const again = this._destsFor === cfg.stopId;
     this._destsFor = cfg.stopId;
     this._destsAccess = this._futarAccess();
     this._destsFailedAt = 0;
     const seq = this._destLoad.bump();
-    this._dests = [];
-    this._destRoutes = {};
+    if (!again) {
+      this._dests = [];
+      this._destRoutes = {};
+    }
     this._destsLoading = true;
     this._paintDestHits("");
     try {
       if (!this._hasFutar()) await this._fillKey();
-      if (!this._destLoad.stale(seq)) this._destsAccess = this._futarAccess();
+      if (this._destLoad.stale(seq)) return;
+      this._destsAccess = this._futarAccess();
       if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
         this._dests = [];
         this._destRoutes = {};
@@ -12971,6 +13053,7 @@ ${this._stopPinCss()}
         if (this._destLoad.stale(seq)) return;
         this._dests = out && out.dests || [];
         this._destRoutes = out && out.destRoutes || {};
+        if (out && out.partial) this._destsFailedAt = Date.now();
       }
       this._showSearchErr("");
     } catch (err) {
@@ -13047,7 +13130,7 @@ ${this._stopPinCss()}
       this._hint(box, "plannerPickAll");
       return;
     }
-    if (this._destsLoading) {
+    if (this._destsLoading && !this._dests.length) {
       this._hint(box, "destLoading");
       return;
     }
