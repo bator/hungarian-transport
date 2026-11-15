@@ -30,7 +30,6 @@ from custom_components.hungarian_transport.elvira import (
     ELVIRA_TIMEOUT_SEC,
     ELVIRA_URL,
     ELVIRA_WORST_CASE_SEC,
-    STATIONINFO_HEAD_COUNT,
     STATIONINFO_MAX_COUNT,
     Board,
     ElviraBoards,
@@ -173,22 +172,60 @@ def test_evening_asks_tomorrows_arrivals_with_the_others_and_last() -> None:
     ]
 
 
-async def test_tomorrows_arrival_board_is_asked_only_to_the_early_morning() -> None:
-    """It holds only the trains that get in past midnight: its first
-    STATIONINFO_HEAD_COUNT rows reach late morning even at Kelenföld, a
-    third of the day's board. Today's boards stay whole."""
-    clock = Clock("2026-11-06T22:30:00+01:00")
-    now = clock.now()
-    dep, arr = _board(now + timedelta(minutes=20), now + timedelta(minutes=110))
-    upstream = Upstream([dep], [arr])
-    rows, dest_failure = await _between(_source(upstream, clock), 30)
-    assert [(row["trainNumber"], row["travel"]) for row in rows] == [("966", 90)] and dest_failure is None
+# Budapest-Kelenföld's arrivals past midnight on Monday 2026-11-16 (the
+# fields read of them and startDate), as ELVIRA answered with maxCount 2000.
+# The first four trains started on Sunday: an answer cut short (maxCount 200)
+# lists none of them.
+KELENFOLD_PAST_MIDNIGHT = [
+    {"trainId": "2890967", "code": "4241", "startDate": "2026-11-15T00:00:00+01:00",
+     "start": "2026-11-16T00:02:00+01:00", "arrive": "2026-11-16T00:01:00+01:00"},
+    {"trainId": "2824280", "code": "261", "startDate": "2026-11-15T00:00:00+01:00",
+     "start": "2026-11-16T00:11:00+01:00", "arrive": "2026-11-16T00:02:00+01:00"},
+    {"trainId": "2890744", "code": "1811", "startDate": "2026-11-15T00:00:00+01:00",
+     "start": "2026-11-16T00:07:00+01:00", "arrive": "2026-11-16T00:05:00+01:00"},
+    {"trainId": "2889494", "code": "4951", "startDate": "2026-11-15T00:00:00+01:00",
+     "start": "2026-11-16T00:27:00+01:00", "arrive": "2026-11-16T00:24:00+01:00"},
+    {"trainId": "2890698", "code": "4770", "startDate": "2026-11-16T00:00:00+01:00",
+     "start": "2026-11-16T00:27:00+01:00", "arrive": "2026-11-16T00:26:00+01:00"},
+    {"trainId": "2887552", "code": "4810", "startDate": "2026-11-16T00:00:00+01:00",
+     "start": "2026-11-16T00:32:00+01:00", "arrive": "2026-11-16T00:31:00+01:00"},
+]
+# Kelenföld's arrivals that Monday, all of them.
+KELENFOLD_DAY_ARRIVALS = 447
+
+
+class CutBoards(Upstream):
+    """ELVIRA as it cuts a StationInfo answer: with a maxCount under the
+    day's rows it leaves out the trains that started the day before."""
+
+    async def __call__(self, code: str, day: date, max_count: str = STATIONINFO_MAX_COUNT):
+        deps, arrs = await super().__call__(code, day, max_count)
+        if int(max_count) < KELENFOLD_DAY_ARRIVALS:
+            arrs = [arr for arr in arrs if arr["startDate"][:10] == day.isoformat()]
+        return deps, arrs
+
+
+async def test_a_train_arriving_past_midnight_keeps_its_arrival() -> None:
+    """The S10 4951 leaves Győr at 22:38 on Sunday and gets to Kelenföld at
+    00:24: tomorrow's arrival board is asked for it alone, so it is asked
+    whole (a cut one lists none of the day before's trains), and it is the
+    next day's board in the cache, not a second request."""
+    clock = Clock("2026-11-15T22:30:00+01:00")
+    dep = {"trainId": "2889494", "code": "4951", "start": "2026-11-15T22:38:00+01:00", "startTrack": "3"}
+    upstream = CutBoards([dep], KELENFOLD_PAST_MIDNIGHT)
+    source = _source(upstream, clock)
+    rows, dest_failure = await _between(source, 30)
+    assert [(row["trainNumber"], row["destHit"], row["travel"]) for row in rows] == [("4951", True, 106)]
+    assert dest_failure is None
     assert upstream.max_counts == {
-        (ORIGIN, "2026-11-06"): STATIONINFO_MAX_COUNT,
-        (DEST, "2026-11-06"): STATIONINFO_MAX_COUNT,
-        (DEST, "2026-11-07"): STATIONINFO_HEAD_COUNT,
+        (ORIGIN, "2026-11-15"): STATIONINFO_MAX_COUNT,
+        (DEST, "2026-11-15"): STATIONINFO_MAX_COUNT,
+        (DEST, "2026-11-16"): STATIONINFO_MAX_COUNT,
     }
-    assert int(STATIONINFO_HEAD_COUNT) < int(STATIONINFO_MAX_COUNT)
+    calls = len(upstream.calls)
+    _deps, arrivals = await source.board(DEST, date(2026, 11, 16))
+    assert len(upstream.calls) == calls and arrivals == KELENFOLD_PAST_MIDNIGHT
+    source.close()
 
 
 def test_after_midnight_todays_origin_board_comes_first() -> None:
@@ -755,9 +792,6 @@ async def test_fetch_station_asks_for_a_whole_service_day() -> None:
         "minCount": "0",
         "maxCount": "2000",
     }
-    # Or its first rows from midnight.
-    await fetch_station(session, ORIGIN, date(2026, 11, 7), STATIONINFO_HEAD_COUNT)
-    assert session.posts[1][1]["maxCount"] == STATIONINFO_HEAD_COUNT == "200"
 
 
 # Fields of a whole StationInfo row (2026-11-16) that no row is made of.

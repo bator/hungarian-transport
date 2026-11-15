@@ -79,13 +79,15 @@ TIME_YEARS = range(2000, 2101)
 # window: StationInfo from a later travelDate drops the trains that already
 # left the origin, delayed ones still due included, and one board serves
 # every card and window of that day (the cache).
+# Tomorrow's arrival board (Window.tomorrow) is asked whole too, though only
+# the trains that get in past midnight are read of it: when ELVIRA cuts a
+# StationInfo answer short it leaves out every row whose train started the
+# day before, and those are the very trains it is asked for (Kelenföld on
+# Monday 2026-11-16: with maxCount 200 the five of Sunday's trains arriving
+# after midnight, the S10 4951 from Győr at 00:24 among them, are gone, and
+# moreResult stays false). Kept, its rows are as slim as any board's
+# (_parse_board), and it is the next day's board in the cache.
 STATIONINFO_MAX_COUNT = "2000"
-# Tomorrow's arrival board (Window.tomorrow) only holds the trains that get
-# in past midnight, all of them by early morning: a train leaving before
-# midnight is in within eight hours. Its first 200 rows reach 11:36 even at
-# Kelenföld (2.8 MB of JSON instead of the day's 7.4 MB, Monday 2026-11-16;
-# moreResult stays false when it is cut).
-STATIONINFO_HEAD_COUNT = "200"
 ELVIRA_ROW_CAP = 500
 # A train leaving by `latest` can arrive this much later: past midnight it is
 # on tomorrow's arrival board (StationInfo is per calendar day at the station).
@@ -748,14 +750,14 @@ class ElviraBoards:
         win = plan_window(self.now(), minutes_after, at)
         boards: dict[BoardKey, Board | ElviraError] = {}
         wanted = next_boards(win, origin_code, dest_code, boards)
-        boards.update(zip(wanted, await self._round(wanted, win)))
+        boards.update(zip(wanted, await self._round(wanted)))
         # A second round, tomorrow's arrival board alone, gets what is left of
         # the budget. Deciding it reads every row of today's boards.
         wanted = await _in_executor(self._executor, next_boards, win, origin_code, dest_code, boards)
         if wanted:
             try:
                 async with asyncio.timeout(deadline - self.monotonic()):
-                    boards.update(zip(wanted, await self._round(wanted, win)))
+                    boards.update(zip(wanted, await self._round(wanted)))
             except TimeoutError:
                 # Its request goes on (the cache shields it); this answer
                 # does without it, and says so in dest_error.
@@ -770,18 +772,10 @@ class ElviraBoards:
             raise type(answer.origin_failure)(str(answer.origin_failure))
         return answer.rows, answer.dest_failure
 
-    async def _round(self, wanted: list[BoardKey], win: Window) -> list:
+    async def _round(self, wanted: list[BoardKey]) -> list:
         """One round: the boards for these (station, day) pairs at once, an
-        ElviraError in place of each one that did not arrive. Tomorrow's
-        (the destination's arrival board past midnight) only to its
-        STATIONINFO_HEAD_COUNT."""
-        results = await asyncio.gather(
-            *(
-                self.board(code, day, STATIONINFO_HEAD_COUNT if day == win.tomorrow else STATIONINFO_MAX_COUNT)
-                for code, day in wanted
-            ),
-            return_exceptions=True,
-        )
+        ElviraError in place of each one that did not arrive."""
+        results = await asyncio.gather(*(self.board(code, day) for code, day in wanted), return_exceptions=True)
         for board in results:
             # Only an unreachable board is an empty one; a bug or a cancellation is not.
             if isinstance(board, BaseException) and not isinstance(board, ElviraError):
