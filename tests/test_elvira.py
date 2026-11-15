@@ -10,6 +10,7 @@ import asyncio
 from datetime import UTC, date, datetime, timedelta
 import json
 import logging
+import threading
 
 import aiohttp
 import pytest
@@ -653,11 +654,25 @@ async def test_boards_leave_memory_by_the_cache_timer_and_close_stops_it() -> No
 # --- The StationInfo request (fetch_station) ---
 
 
-class _Response:
-    def __init__(self, status=200, body=None, exc=None) -> None:
-        self.status = status
+class _Content:
+    def __init__(self, body: bytes) -> None:
         self._body = body
+
+    async def iter_chunked(self, size: int):
+        for start in range(0, len(self._body), size):
+            yield self._body[start : start + size]
+
+
+class _Response:
+    """A StationInfo answer: body is JSON-encoded unless it is bytes
+    already; content_length as a server would send it, or none."""
+
+    def __init__(self, status=200, body=None, exc=None, content_length=None) -> None:
+        self.status = status
         self._exc = exc
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+        self.content = _Content(raw)
+        self.content_length = content_length
 
     async def __aenter__(self):
         if self._exc is not None:
@@ -666,11 +681,6 @@ class _Response:
 
     async def __aexit__(self, *_exc) -> bool:
         return False
-
-    async def json(self, content_type=None):
-        if isinstance(self._body, Exception):
-            raise self._body
-        return self._body
 
 
 class _Session:
@@ -703,7 +713,8 @@ async def test_fetch_station_asks_for_a_whole_service_day() -> None:
         (_Response(status=503), "HTTP 503"),
         (_Response(exc=asyncio.TimeoutError()), "TimeoutError"),
         (_Response(exc=aiohttp.ClientConnectionError()), "ClientConnectionError"),
-        (_Response(body=json.JSONDecodeError("x", "", 0)), "JSONDecodeError"),
+        (_Response(body=b"<html>Karbantartas</html>"), "JSONDecodeError"),
+        (_Response(body=b"\xff\xfe{"), "UnicodeDecodeError"),
         (_Response(body=[1, 2]), "unexpected response"),
         (_Response(body="nope"), "unexpected response"),
         # A 200 without stationSchedulerDetails is an error page or a
@@ -717,6 +728,69 @@ async def test_fetch_station_failures_are_elvira_errors(response, detail) -> Non
     with pytest.raises(ElviraError) as err:
         await fetch_station(_Session(response), ORIGIN, date(2026, 10, 19))
     assert type(err.value) is ElviraError and str(err.value) == detail
+
+
+async def test_an_oversized_board_is_an_elvira_error_and_not_read_whole(monkeypatch) -> None:
+    monkeypatch.setattr(elvira, "MAX_BOARD_BYTES", 1000)
+    body = json.dumps({"stationSchedulerDetails": {"departureScheduler": [{"code": "1" * 2000}]}}).encode()
+    with pytest.raises(ElviraError) as err:
+        await fetch_station(_Session(_Response(body=body)), ORIGIN, date(2026, 10, 19))
+    assert str(err.value) == "over 1000 bytes"
+    # A Content-Length over it is refused before the body is read.
+    with pytest.raises(ElviraError) as err:
+        await fetch_station(_Session(_Response(body=b"{}", content_length=5000)), ORIGIN, date(2026, 10, 19))
+    assert str(err.value) == "5000 bytes, over 1000"
+
+
+async def test_a_board_is_decoded_off_the_event_loop() -> None:
+    """A busy station's day is megabytes of JSON: json.loads and the rows
+    run in the executor, not on the event loop."""
+    loop_thread = threading.get_ident()
+    seen: list[tuple[str, int]] = []
+    real_loads = json.loads
+
+    def loads(body, *args, **kwargs):
+        seen.append(("loads", threading.get_ident()))
+        return real_loads(body, *args, **kwargs)
+
+    session = _Session(_Response(body={"stationSchedulerDetails": {}}))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(elvira.json, "loads", loads)
+        assert await fetch_station(session, ORIGIN, date(2026, 11, 6)) == ([], [])
+    assert seen and all(thread != loop_thread for _what, thread in seen)
+
+    # The executor given is the one used (Home Assistant's in production).
+    used: list[str] = []
+
+    async def executor(func, *args):
+        used.append(func.__name__)
+        return func(*args)
+
+    await fetch_station(session, ORIGIN, date(2026, 11, 6), executor=executor)
+    assert used == ["_parse_board"]
+
+
+async def test_the_rows_over_the_boards_are_settled_off_the_event_loop(monkeypatch) -> None:
+    """settle and the second round's next_boards read every row of the
+    boards; the first next_boards (no board yet) is only a list of keys."""
+    loop_thread = threading.get_ident()
+    threads: dict[str, int] = {}
+    for name in ("settle", "next_boards"):
+        real = getattr(elvira, name)
+
+        def spy(*args, _real=real, _name=name):
+            # The last call's thread.
+            threads[_name] = threading.get_ident()
+            return _real(*args)
+
+        monkeypatch.setattr(elvira, name, spy)
+    clock = Clock(NOON)
+    dep, arr = _board(clock.now() + timedelta(minutes=10), clock.now() + timedelta(minutes=50))
+    source = _source(Upstream([dep], [arr]), clock)
+    rows, dest_failure = await _between(source)
+    assert [row["trainNumber"] for row in rows] == ["966"] and dest_failure is None
+    assert set(threads) == {"settle", "next_boards"}
+    assert loop_thread not in threads.values()
 
 
 async def test_malformed_rows_are_skipped() -> None:
