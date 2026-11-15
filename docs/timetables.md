@@ -165,9 +165,13 @@ as a 3-day artifact without publishing anything.
 
 MÁV publishes a new feed almost every day; releases come once a week. The
 **Daily MÁV index** workflow (`.github/workflows/mav-index-daily.yml`) runs
-the release's pipeline above every morning at 03:15 UTC, after MÁV's nightly
-update (the site is ready before 05:30 Hungarian time), and publishes on
-GitHub Pages, under `https://bator.github.io/hungarian-transport/`:
+the release's pipeline above twice a day, at 03:15 and 10:30 UTC, and
+publishes on GitHub Pages, under `https://bator.github.io/hungarian-transport/`.
+MÁV's feed of the day is not out at 03:15 (in November 2026 it appeared
+between about 03:20 and 10:00 UTC, once only in the afternoon), so it is
+usually the 10:30 run that builds it; GitHub may start a scheduled run hours
+late, and a run that finds the content already published deploys nothing.
+The files:
 
 | File | What it is |
 | --- | --- |
@@ -181,7 +185,9 @@ The overlay holds the three tables pfaedle rewrites when it matches every
 train to the OpenStreetMap rails: use them in place of the official feed's
 tables of the same names (for a GTFS consumer such as Dawarich, or anything
 else). It is zipped deterministically (sorted names, fixed timestamps,
-deflate at level 9), so an unchanged build gives the same bytes. The site
+deflate at level 9), so the same three tables give the same bytes; pfaedle
+itself writes slightly different tables on every run, even for the same feed,
+so the overlay's bytes do not decide whether to publish (below). The site
 is about 35 MB; one over 500 MB (half of GitHub Pages' 1 GB limit) is not
 published, and the run's log lists every file's size.
 
@@ -221,8 +227,10 @@ consumer can fetch the small manifest first and download the zips only when
 Nothing is published, and the site keeps the previous day's files, when the
 secrets are missing, the download, pfaedle or the audit fails, the site is
 refused (a feed whose `feed_version` does not start with a real date, a site
-over 500 MB), or the index and both zips have the same content as the ones
-already published. A failure is a warning while the published manifest's
+over 500 MB), or the index and MÁV's zip are the ones already published
+(the overlay's bytes are not compared) and the published manifest is under
+12 hours old; older, the same content is published again for its new
+`built_at`. A failure is a warning while the published manifest's
 `built_at` is less than 2 days old; the run fails (red) when it is 2 days
 old or older, or names no build time, and at once when MÁV refuses the login
 (HTTP 401/403, which is never retried: only new credentials help). A
@@ -554,6 +562,13 @@ single feed, compared the same way: it is refused with fewer than half the
 trips of the one in place. The message names the feed:
 
 - `<id> missing (had N trips)` — the feed did not download or parse.
+  On the weekly timetable release such a feed keeps the previous
+  release's timetable instead, with a *City feed carried over* warning that
+  names the error, as long as no more than three feeds failed at once (more
+  is the network, not one publisher) and the previous release has a running
+  timetable of it; a feed listed in `HUNGARIAN_TRANSPORT_ALLOW_MISSING` is
+  left out as before. This takes effect once a stable release has the
+  builder that does it: the weekly release builds the stable tag's scripts.
 - `<id> calendar ended YYYY-MM-DD (had N trips, the previous index runs until
   YYYY-MM-DD)` — the publisher's new zip ends before the timetable already
   in the index.

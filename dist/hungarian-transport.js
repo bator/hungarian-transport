@@ -1674,12 +1674,16 @@ register({
     return s.indexOf(want) === 0;
   },
   /* A stop does not move: every poll of an empty board geocoded both ends
-     again. Answers stay for the page; a failed lookup is asked again, and
-     an empty answer after ten minutes (a geocoder that had no data yet). */
+     again. Answers stay for the page; an empty answer is asked again after
+     ten minutes (a geocoder that had no data yet), and a failed lookup
+     after a minute and a half: Transitous is run by volunteers, and every
+     card polling it again in its outage only adds to the load. */
   _geocodeCache: /* @__PURE__ */ new Map(),
   _geocodeCacheMax: 200,
   _geocodeEmptyAt: /* @__PURE__ */ new Map(),
   _geocodeEmptyRetryMs: 10 * 60 * 1e3,
+  _geocodeFailedAt: /* @__PURE__ */ new Map(),
+  _geocodeFailRetryMs: 90 * 1e3,
   transitousGeocode(text, opts) {
     const q = String(text || "").trim();
     if (!q) return Promise.resolve([]);
@@ -1692,23 +1696,29 @@ register({
     const key = `${params.type || "all"}|${q}`;
     const cache = BkkLib._geocodeCache;
     const empties = BkkLib._geocodeEmptyAt;
+    const fails = BkkLib._geocodeFailedAt;
     const hit = cache.get(key);
     const emptyAt = empties.get(key);
-    if (hit && !(emptyAt && Date.now() - emptyAt >= BkkLib._geocodeEmptyRetryMs)) return hit;
+    const failedAt = fails.get(key);
+    const now = Date.now();
+    const stale = emptyAt && now - emptyAt >= BkkLib._geocodeEmptyRetryMs || failedAt && now - failedAt >= BkkLib._geocodeFailRetryMs;
+    if (hit && !stale) return hit;
     if (hit) cache.delete(key);
     empties.delete(key);
+    fails.delete(key);
     const run = BkkLib.transitousFetch("/api/v1/geocode", params).then((data) => {
       const list = Array.isArray(data) ? data : [];
       if (!list.length && cache.get(key) === run) empties.set(key, Date.now());
       return list;
     });
     run.catch(() => {
-      if (cache.get(key) === run) cache.delete(key);
+      if (cache.get(key) === run) fails.set(key, Date.now());
     });
     if (cache.size >= BkkLib._geocodeCacheMax) {
       const oldest = cache.keys().next().value;
       cache.delete(oldest);
       empties.delete(oldest);
+      fails.delete(oldest);
     }
     cache.set(key, run);
     return run;
@@ -2370,11 +2380,22 @@ register({
   },
   /* An empty board (a city line at night) stays empty for a while: after a
      fill that found nothing, the same pair is not asked again for ten
-     minutes, instead of a plan on every poll. A fill that failed is asked
-     again on the next poll, and returns null: the caller keeps what it
-     showed instead of "no departures". */
+     minutes, instead of a plan on every poll. A fill that failed returns
+     null, so the caller keeps what it showed instead of "no departures",
+     and the pair is not asked again for a minute and a half, twice as
+     long after each further failure up to the ten minutes: an outage of
+     the volunteer-run Transitous is no reason for two requests on every
+     poll of every empty card. */
   _transitousEmptyAt: /* @__PURE__ */ new Map(),
   _transitousEmptyRetryMs: 10 * 60 * 1e3,
+  _transitousFailed: /* @__PURE__ */ new Map(),
+  _transitousFailRetryMs: 90 * 1e3,
+  _transitousFillFailed(key) {
+    const last = BkkLib._transitousFailed.get(key);
+    const wait = last ? Math.min(last.wait * 2, BkkLib._transitousEmptyRetryMs) : BkkLib._transitousFailRetryMs;
+    BkkLib._transitousFailed.set(key, { at: Date.now(), wait });
+    return null;
+  },
   _transitousFillKey(origin, dest, opts) {
     const o = origin || {};
     const d = dest || {};
@@ -2393,19 +2414,26 @@ register({
     if (list.length) return list;
     const key = BkkLib._transitousFillKey(origin, dest, opts);
     const empties = BkkLib._transitousEmptyAt;
+    const failed = BkkLib._transitousFailed;
     const now = Date.now();
     if (now - (empties.get(key) || 0) < BkkLib._transitousEmptyRetryMs) return list;
+    const lastFail = failed.get(key);
+    if (lastFail && now - lastFail.at < lastFail.wait) return null;
     empties.forEach((ts, k) => {
       if (now - ts >= BkkLib._transitousEmptyRetryMs) empties.delete(k);
     });
+    failed.forEach((f, k) => {
+      if (now - f.at >= f.wait + BkkLib._transitousEmptyRetryMs) failed.delete(k);
+    });
     try {
       const extra = await BkkLib.transitousDepartures(origin, dest, opts);
-      if (!Array.isArray(extra)) return null;
+      if (!Array.isArray(extra)) return BkkLib._transitousFillFailed(key);
+      failed.delete(key);
       if (extra.length) empties.delete(key);
       else empties.set(key, Date.now());
       return BkkLib.mergeRows(list, extra, maxDepartureRows(opts && opts.minutesAfter));
     } catch (_e) {
-      return null;
+      return BkkLib._transitousFillFailed(key);
     }
   },
   /* MOTIS v5: itinerary duration is seconds; leg duration is seconds;
@@ -5975,14 +6003,7 @@ register({
     const mode = opts.mode || (opts.mav ? "mav" : "bkk");
     const horizon = clampMinutesAfter(opts.minutesAfter);
     if (mode === "helyi") {
-      let cityRows = await BkkLib.cityDepartures(ix, stopId, dest, opts.originName, opts.city, horizon);
-      cityRows = await BkkLib.fillTransitousIfEmpty(
-        cityRows,
-        /* With the stop's coordinates: by name alone "Kossuth tér" is any town's. */
-        { id: stopId, name: opts.originName || "", lat: opts.originLat, lon: opts.originLon },
-        dest,
-        opts
-      ) || cityRows;
+      const cityRows = await BkkLib.cityDepartures(ix, stopId, dest, opts.originName, opts.city, horizon);
       if (opts.deferGps) return cityRows;
       return BkkLib.attachCoachGps(opts.hass, cityRows);
     }
@@ -6653,10 +6674,17 @@ register({
   },
   _rtCache: /* @__PURE__ */ new Map(),
   _rtInflight: /* @__PURE__ */ new Map(),
-  _rtDownUntil: 0,
-  _rtFails: 0,
-  _rtLastFailAt: 0,
-  _rtWarned: false,
+  /* Each feed's failure streak, pause and warning, by feed id: one feed
+     answering says nothing about another that keeps rejecting. */
+  _rtFeeds: /* @__PURE__ */ new Map(),
+  _rtFeed(feed) {
+    let st = BkkLib._rtFeeds.get(feed);
+    if (!st) {
+      st = { fails: 0, lastFailAt: 0, downUntil: 0, warned: false };
+      BkkLib._rtFeeds.set(feed, st);
+    }
+    return st;
+  },
   /* Feeds the integration has no realtime data for: not asked again until
      the page reloads. */
   _rtNoFeed: /* @__PURE__ */ new Set(),
@@ -6770,7 +6798,8 @@ register({
      ask the same within RT_CACHE_MS. Null when the call failed. */
   async realtimeFetch(hass, feed, trips) {
     if (!BkkLib.hasRealtime(hass) || BkkLib._rtNoFeed.has(feed)) return null;
-    if (Date.now() < BkkLib._rtDownUntil) return null;
+    const st = BkkLib._rtFeed(feed);
+    if (Date.now() < st.downUntil) return null;
     const sig = feed + "|" + JSON.stringify(trips);
     const hit = BkkLib._rtCache.get(sig);
     if (hit && Date.now() - hit.at < RT_CACHE_MS) return hit.out;
@@ -6779,9 +6808,9 @@ register({
     const run = (async () => {
       try {
         const res = await BkkLib.callServiceResponse(hass, "hungarian_transport", "realtime", { feed, trips });
-        BkkLib._rtWarned = false;
-        BkkLib._rtFails = 0;
-        BkkLib._rtLastFailAt = 0;
+        st.warned = false;
+        st.fails = 0;
+        st.lastFailAt = 0;
         const out = BkkLib.rtTripsFromResult(res);
         if (out && out.noFeed) BkkLib._rtNoFeed.add(feed);
         BkkLib._rtCache.set(sig, { at: Date.now(), out });
@@ -6789,14 +6818,14 @@ register({
         return out;
       } catch (err) {
         const now = Date.now();
-        if (now - BkkLib._rtLastFailAt >= RT_FAIL_ROUND_MS) {
-          BkkLib._rtFails += 1;
-          BkkLib._rtLastFailAt = now;
+        if (now - st.lastFailAt >= RT_FAIL_ROUND_MS) {
+          st.fails += 1;
+          st.lastFailAt = now;
         }
-        if (BkkLib._rtFails >= RT_FAIL_LIMIT) BkkLib._rtDownUntil = now + RT_RETRY_MS;
-        if (!BkkLib._rtWarned) {
-          BkkLib._rtWarned = true;
-          console.warn("Live delays and positions (hungarian_transport.realtime) unavailable, retrying in a few minutes:", err);
+        if (st.fails >= RT_FAIL_LIMIT) st.downUntil = now + RT_RETRY_MS;
+        if (!st.warned) {
+          st.warned = true;
+          console.warn(`Live delays and positions (hungarian_transport.realtime, feed ${feed}) unavailable, retrying in a few minutes:`, err);
         }
         return null;
       } finally {
@@ -7632,7 +7661,6 @@ async function runBoard(poll, src, knownElvira) {
     let elviraRows = [];
     let mavErr = null;
     const addElvira = (row) => BkkLib.elviraBoardRows([row], nowSec())[0] || null;
-    const fillsEmpty = mode !== "helyi";
     const publish = () => {
       if (!live()) return;
       if (mavBoard) {
@@ -7654,7 +7682,7 @@ async function runBoard(poll, src, knownElvira) {
         }
         return;
       }
-      if (!list.length && fillsEmpty) return;
+      if (!list.length) return;
       listed("board", list);
     };
     let startThrough = null;
@@ -7670,8 +7698,6 @@ async function runBoard(poll, src, knownElvira) {
       dest,
       {
         originName: cfg.stopName || "",
-        originLat: cfg.stopLat,
-        originLon: cfg.stopLon,
         cache: ctx.tripCache(),
         mode,
         city: cfg.city || "",
@@ -7753,7 +7779,7 @@ async function runBoard(poll, src, knownElvira) {
     await throughWait;
     if (!live()) return;
     const hosts = mavBoard ? elviraRows : futarFull ? BkkLib.mergeRows(earlyRows, futarFull, cap) : earlyRows.slice();
-    if (!hosts.length && fillsEmpty) {
+    if (!hosts.length) {
       let filled = await src.transitous(hosts, origin, dest, {
         mode,
         minutesAfter: cfg.minutesAfter
@@ -8449,6 +8475,8 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._loadedStop = "";
     this._loadedAccess = "";
     this._loadingStop = "";
+    this._loadedScope = "";
+    this._loadingScope = "";
     this._destsLoading = false;
     this._keyOk = null;
     this._probingKey = false;
@@ -8497,7 +8525,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._syncMode();
     this._probeKey();
     const stopId = this._config.stopId;
-    const loading = this._destsLoading && this._loadingStop === stopId;
+    const loading = this._loadingDestsFor(stopId);
     const failed = this._failedStop === stopId && this._failedAccess === this._keyAccess() && Date.now() - (this._failedAt || 0) < DEST_RETRY_MS;
     if (stopId && this._canLoadDests() && this._destsStale(stopId) && !loading && !failed) {
       this._loadDests();
@@ -8516,7 +8544,27 @@ var BKKHopCardEditor = class extends HTMLElement {
     else if (this._hasFutar()) this._probeKey();
     const stopId = this._config.stopId;
     const retry = this._failedStop === stopId && this._failedAccess !== this._keyAccess() && this._canLoadDests();
-    if (stopId && (this._loadedStop === stopId || retry) && this._destsStale(stopId) && !(this._destsLoading && this._loadingStop === stopId)) this._loadDests();
+    if (stopId && (this._loadedStop === stopId || retry) && this._destsStale(stopId) && !this._loadingDestsFor(stopId)) this._loadDests();
+  }
+  /* What a destination list depends on besides the stop. */
+  _destScope() {
+    return `${this._mode()}|${this._config.city || ""}`;
+  }
+  /* A load in flight for this stop in the current mode and city. */
+  _loadingDestsFor(stopId) {
+    return this._destsLoading && this._loadingStop === stopId && this._loadingScope === this._destScope();
+  }
+  /* A mode or city change: a list still loading is for the old one, and
+     picking from it would save the old mode's routes (BKK route ids on a
+     MÁV card). It must neither paint nor block the new mode's load. */
+  _dropDestLoad() {
+    this._destLoad.bump();
+    this._destsLoading = false;
+    this._loadingStop = "";
+    this._loadingScope = "";
+    this._dests = [];
+    this._destRoutes = {};
+    this._loadedStop = "";
   }
   _apiKey() {
     return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
@@ -8552,7 +8600,7 @@ var BKKHopCardEditor = class extends HTMLElement {
     return this._hasFutar() || !this._needsKey();
   }
   _destsStale(stopId) {
-    if (this._loadedStop !== stopId) return true;
+    if (this._loadedStop !== stopId || this._loadedScope !== this._destScope()) return true;
     return !this._loadedAccess && !this._keyless() && !!this._keyAccess();
   }
   _build() {
@@ -8721,9 +8769,8 @@ var BKKHopCardEditor = class extends HTMLElement {
     this._el("city").addEventListener("change", (ev) => {
       this._cancelSearches();
       this._keepAutoTitle();
+      this._dropDestLoad();
       this._emit(Object.assign({ city: ev.target.value }, this._noStops()));
-      this._dests = [];
-      this._loadedStop = "";
       this._syncStopLabel();
       this._syncDestLabel();
     });
@@ -9016,10 +9063,8 @@ var BKKHopCardEditor = class extends HTMLElement {
     if (hits) hits.innerHTML = "";
     if (destHits) destHits.innerHTML = "";
     this._cancelSearches();
-    this._dests = [];
-    this._destRoutes = {};
+    this._dropDestLoad();
     this._cache = {};
-    this._loadedStop = "";
     this._keepAutoTitle();
     this._emit(Object.assign({
       mav,
@@ -9241,9 +9286,11 @@ var BKKHopCardEditor = class extends HTMLElement {
     if (!this._canLoadDests()) return;
     const stopId = this._config.stopId;
     const access = this._keyAccess();
+    const scope = this._destScope();
     const seq = this._destLoad.bump();
     this._destsLoading = true;
     this._loadingStop = stopId;
+    this._loadingScope = scope;
     this._failedStop = "";
     const box = this._el("destHits");
     if (box) box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), "destLoading")) + "</span>";
@@ -9257,8 +9304,9 @@ var BKKHopCardEditor = class extends HTMLElement {
         this._mode(),
         this._config.city
       );
-      if (this._destLoad.stale(seq) || this._config.stopId !== stopId) return;
+      if (this._destLoad.stale(seq) || this._config.stopId !== stopId || this._destScope() !== scope) return;
       this._loadedStop = stopId;
+      this._loadedScope = scope;
       this._loadedAccess = access;
       this._destsLoading = false;
       this._loadingStop = "";
@@ -9422,6 +9470,7 @@ var BKKHopCard = class extends HTMLElement {
     this._keyBackoff = 0;
     this._keyFilling = false;
     this._reloadActive = false;
+    this._accessArrived = false;
     this._mapOverlay = null;
     this._map = null;
     this._mapMarker = null;
@@ -9514,7 +9563,29 @@ var BKKHopCard = class extends HTMLElement {
      re-parenting a card) must not start a second fetch. */
   _reloadSafe() {
     this._reloadActive = true;
-    Promise.resolve().then(() => this._reload()).catch((err) => this._showErr(err));
+    Promise.resolve().then(() => {
+      this._accessArrived = false;
+      return this._reload();
+    }).catch((err) => this._showErr(err)).then(() => this._reloadForNewAccess());
+  }
+  /* FUTÁR access (or ELVIRA) that showed up while a run was in flight came
+     too late for it: the run decided without it ("no API key", no BKK rows).
+     A card that polls would pick it up on the next tick, the planner does
+     not poll, so the run is repeated once it ends, unless a newer one is
+     already on its way (that one sees the access). */
+  _reloadForNewAccess() {
+    if (!this._accessArrived || this._reloadActive || !this.isConnected) return;
+    this._accessArrived = false;
+    this._reloadSafe();
+  }
+  /* The integration's futar service or elvira_between just showed up. */
+  _accessShowedUp() {
+    if (!this._painted || !this.isConnected) return;
+    if (this._reloadActive) {
+      this._accessArrived = true;
+      return;
+    }
+    this._reloadSafe();
   }
   /* The card's own key, or a key borrowed from a sibling card while the
      integration has none. Empty when FUTÁR goes through the integration. */
@@ -9532,10 +9603,10 @@ var BKKHopCard = class extends HTMLElement {
     BkkLib._hass = hass;
     if (this._lang() !== langBefore) this._langChanged();
     this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
-    if (this._viaIntegration && !viaBefore && this._painted && !this._reloadActive && this.isConnected) this._reloadSafe();
+    if (this._viaIntegration && !viaBefore) this._accessShowedUp();
     const elviraBefore = this._viaElvira;
     this._viaElvira = BkkLib.hasElvira(hass);
-    if (this._viaElvira && !elviraBefore && this._departMode() === "mav" && this._painted && !this._reloadActive && this.isConnected) this._reloadSafe();
+    if (this._viaElvira && !elviraBefore && this._departMode() === "mav") this._accessShowedUp();
     if (first && this._rawRows && this._rawRows.length) {
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       const cfg = this._config || {};
@@ -10743,13 +10814,16 @@ ${this._stopPinCss()}
     return st.approx ? t(lang, "mapApproxLine") + " · " + text : text;
   }
   /* A poll moves the vehicle on the open map, and puts it there once GPS
-     shows up for a row that had none when the map opened. */
-  _syncOpenMap() {
+     shows up for a row that had none when the map opened. After a failed
+     poll (noFix) the row's position is the one an earlier poll got, so it
+     counts as gone silent: the timetable places the vehicle until a poll
+     brings a fresh fix. */
+  _syncOpenMap(noFix) {
     const st = this._mapState;
     if (!this._map || !this._openMapKey || !st) return;
     const row = this._findMapRow(this._mapRef, this._rows || []);
     if (row) this._mapRow = row;
-    if (!row || !row.hasGps) {
+    if (!row || !row.hasGps || noFix) {
       const known = row || this._mapRow;
       if (known && st.hasGps && !this._mapEstimate && this._mapGeo) {
         st.hasGps = false;
@@ -10834,6 +10908,7 @@ ${this._stopPinCss()}
       }
       if (board.phase === "place" || board.phase === "settled") this._boardSettled();
       if (board.phase === "done") this._syncOpenMap();
+      if (board.phase === "failed") this._syncOpenMap(true);
     };
     const run = () => BkkLib.nextBoard({
       ctx: this._ctx,
@@ -10869,6 +10944,7 @@ ${this._stopPinCss()}
 // src/planner-card.js
 var HISTORY_RETRY_MS = 60 * 1e3;
 var PICK_DEBOUNCE_MS = 300;
+var SEARCH_ERR_MS = 30 * 1e3;
 var HEAD_SEC_PCT = 50;
 var SWAP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9,3L5,7H8V14H10V7H13M16,17V10H14V17H11L15,21L19,17H16Z"/></svg>';
 var EDIT_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18,2.9 17.35,2.9 16.96,3.29L15.12,5.12L18.87,8.87M3,17.25V21H6.75L17.81,9.93L14.06,6.18L3,17.25Z"/></svg>';
@@ -10879,6 +10955,9 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._searchTimer = null;
     this._destTimer = null;
     this._pickTimer = null;
+    this._whenPaintedFor = "";
+    this._searchErr = "";
+    this._searchErrAt = 0;
     this._originSearch = generation();
     this._destSearch = generation();
     this._destLoad = generation();
@@ -10940,6 +11019,8 @@ var BKKPlannerCard = class extends BKKHopCard {
      is as stale as one seen again after a while away. */
   _tickPaint() {
     super._tickPaint();
+    this._rollWhenPickers();
+    if (this._searchErr && Date.now() - this._searchErrAt >= SEARCH_ERR_MS) this._showSearchErr("");
     const cfg = this._config || {};
     if (!cfg.stopId || !cfg.destKey || !this._plan.stale) return;
     if (this._reloadActive || !this.isConnected || this._pageHidden()) return;
@@ -10979,6 +11060,22 @@ var BKKPlannerCard = class extends BKKHopCard {
     this._rows = [];
     this._rawRows = [];
     this._err = "";
+    this._searchErr = "";
+  }
+  /* A search or destination load that failed: worded at paint, like the
+     board's error. An empty err clears it (repainting only if one was up). */
+  _showSearchErr(err) {
+    if (!err && !this._searchErr) return;
+    this._searchErr = err || "";
+    this._searchErrAt = err ? Date.now() : 0;
+    this._paint();
+  }
+  /* The board's error and a search's, both when both are up. */
+  _errMessage(lang) {
+    const board = super._errMessage(lang);
+    const search = this._searchErr ? errText(lang || this._lang(), this._searchErr) : "";
+    if (!search || search === board) return board;
+    return board ? `${board} · ${search}` : search;
   }
   /* A chosen time plans itineraries for that moment. The live departure
      board stays for "now": FUTÁR, the GTFS indexes and ELVIRA all answer
@@ -12143,6 +12240,7 @@ ${this._stopPinCss()}
     const lang = this._lang();
     const cur = this._whenParts(at || this._plan.when.at || Date.now());
     const today = this._whenParts(Date.now()).ymd;
+    this._whenPaintedFor = today;
     const fmt = new Intl.DateTimeFormat(lang === "hu" ? "hu-HU" : "en-GB", {
       timeZone: "Europe/Budapest",
       weekday: "short",
@@ -12168,6 +12266,22 @@ ${this._stopPinCss()}
     time.value = String(cur.min);
     day.setAttribute("aria-label", t(lang, "plannerDay"));
     time.setAttribute("aria-label", t(lang, "plannerTime"));
+  }
+  /* "ma" and "holnap" are the days the pickers were painted on: past
+     Budapest midnight "ma" would be yesterday, and a time picked under it
+     would plan yesterday. The tick paints them again for the new day; the
+     planned time stays selected (as a dated day once it is no longer
+     today). Not while the user is picking: a pick waiting out its
+     debounce, or a picker with focus, would lose what was chosen. */
+  _rollWhenPickers() {
+    if (!this._plan.timed || !this._whenPaintedFor) return;
+    if (this._whenParts(Date.now()).ymd === this._whenPaintedFor) return;
+    const day = this._planEl("pday");
+    const time = this._planEl("ptime");
+    if (!day || !time || this._pickTimer) return;
+    const focused = this.shadowRoot && this.shadowRoot.activeElement;
+    if (focused === day || focused === time) return;
+    this._paintWhenPickers();
   }
   _syncWhen() {
     const lang = this._lang();
@@ -12419,11 +12533,11 @@ ${this._stopPinCss()}
       return;
     }
     try {
-      this._err = "";
       if (!this._hasFutar()) await this._fillKey();
       if (this._originSearch.stale(seq)) return;
       const hits = await BkkLib.searchPlannerStops(this._ctx.indexes(), this._apiKey(), q);
       if (this._originSearch.stale(seq)) return;
+      this._showSearchErr("");
       if (!hits.length) {
         this._hint(box, "mode.empty");
         return;
@@ -12438,7 +12552,7 @@ ${this._stopPinCss()}
       });
     } catch (err) {
       if (this._originSearch.stale(seq)) return;
-      this._showErr(err);
+      this._showSearchErr(err);
     }
   }
   /* Every picked stop counts towards the user's suggestions. */
@@ -12503,9 +12617,10 @@ ${this._stopPinCss()}
         this._dests = out && out.dests || [];
         this._destRoutes = out && out.destRoutes || {};
       }
+      this._showSearchErr("");
     } catch (err) {
       if (this._destLoad.stale(seq)) return;
-      this._showErr(err);
+      this._showSearchErr(err);
       this._dests = [];
       this._destRoutes = {};
     } finally {
@@ -12539,6 +12654,7 @@ ${this._stopPinCss()}
       if (!this._hasFutar()) await this._fillKey();
       const extras = await BkkLib.searchPlannerStops(this._ctx.indexes(), this._apiKey(), q);
       if (this._destSearch.stale(seq)) return;
+      this._showSearchErr("");
       const hits = BkkLib.destHitsForQuery(this._dests, q, extras);
       if (!hits.length && this._destsLoading) {
         this._hint(box, "destLoading");
@@ -12547,7 +12663,7 @@ ${this._stopPinCss()}
       this._renderDestHits(hits, "mode.empty");
     } catch (err) {
       if (this._destSearch.stale(seq)) return;
-      this._showErr(err);
+      this._showSearchErr(err);
     }
   }
   _renderDestHits(hits, emptyKey) {

@@ -744,6 +744,20 @@ test('two FUTÁR trips of one line in the same minute stay two rows with their o
     JSON.stringify(pairs));
 });
 
+/* Every poll merges FUTÁR's answer over the rows the last one listed: the
+   same two trips again must not pair across (A with B), which left each
+   one unmatched and listed both twice. */
+test('two FUTÁR trips of one line in the same minute, merged over themselves, stay two rows', () => {
+  const at = Math.floor(Date.now() / 1000) + 600;
+  const mk = (tripId, head) => ({ tripId, label: '7', head, dep: at, sched: at, color: '#009EE3', vehicle: 'bus' });
+  const out = BkkLib.mergeRows(
+    [mk('BKK_A1', 'Bosnyák tér'), mk('BKK_B2', 'Albertfalva')],
+    [mk('BKK_A1', 'Bosnyák tér'), mk('BKK_B2', 'Albertfalva')],
+    12,
+  );
+  assert.deepEqual(out.map((r) => r.tripId + ' ' + r.head).sort(), ['BKK_A1 Bosnyák tér', 'BKK_B2 Albertfalva']);
+});
+
 /* National pass (Országbérlet) on seat-reservation trains. */
 test('ELVIRA overlay copies the national-pass flags onto the FUTÁR train, and asRow keeps them', () => {
   const dep = Math.floor(Date.now() / 1000) + 3600;

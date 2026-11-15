@@ -310,37 +310,47 @@ def served_mav_wins(durable: Path, served: Path) -> bool:
     return si.built_at(served) > si.built_at(durable)
 
 
-def _feed_days(si, feed: str | None) -> dict[str, date | None]:
-    """Operator -> the date its feed_version names, from a Volán or city
-    index's "feed" ("volan:01716.20261102", operators joined by ";")."""
-    days: dict[str, date | None] = {}
+def _feed_versions(feed: str | None) -> dict[str, str]:
+    """Operator -> its feed_version, from a Volán or city index's "feed"
+    ("volan:01716.20261102", operators joined by ";")."""
+    versions: dict[str, str] = {}
     for item in (feed or "").split(";"):
         op, sep, version = item.partition(":")
         if sep and op:
-            days[op] = si.feed_date(version)
-    return days
+            versions[op] = version
+    return versions
 
 
 def served_feeds_newer(durable: Path, served: Path) -> bool:
     """Whether the served Volán or city index was built from newer feeds
     than the durable copy (a release shipped feeds this machine has not
     fetched yet): every operator of the durable copy is in the served one,
-    none of its feeds is older there and at least one is later. An operator
-    whose feed names no date, on either side, keeps the durable copy, as
-    does an integration older than these scripts."""
+    and of those whose feed_version names a date on both sides none is
+    older there and at least one is later. An operator whose feed names no
+    date (the city index has a dozen: "miskolc:1.3", "budaors:25") cannot
+    be ordered, so it must be the very same feed_version on both sides;
+    one that changed, or is dated on one side only, keeps the durable copy,
+    as does an integration older than these scripts."""
     try:
         si = _served_index()
     except ImportError:
         return False
-    old, new = _feed_days(si, si.read_feed(durable)), _feed_days(si, si.read_feed(served))
+    old, new = _feed_versions(si.read_feed(durable)), _feed_versions(si.read_feed(served))
     if not old:
         return False
     later = False
-    for op, day in old.items():
+    for op, version in old.items():
         other = new.get(op)
-        if day is None or other is None or other < day:
+        if other is None:
             return False
-        later |= other > day
+        day, other_day = si.feed_date(version), si.feed_date(other)
+        if day is None or other_day is None:
+            if other != version:
+                return False
+            continue
+        if other_day < day:
+            return False
+        later |= other_day > day
     return later
 
 

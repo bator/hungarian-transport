@@ -9,11 +9,11 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.components import frontend
+from homeassistant.components import frontend, persistent_notification
 from homeassistant.components.http import StaticPathConfig
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntry, ConfigEntryState
 from homeassistant.const import Platform
-from homeassistant.core import CoreState, HomeAssistant, ServiceCall, SupportsResponse
+from homeassistant.core import CoreState, HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.exceptions import (
     HomeAssistantError,
     ServiceValidationError,
@@ -481,6 +481,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     api_key = _entry_api_key(entry)
     if not api_key:
         return True
+
+    @callback
+    def _key_accepted_again() -> None:
+        # The rejection was a mistake (an upstream hiccup): the reauth it
+        # started goes too. Left open, answering it empty removes the key.
+        for flow in hass.config_entries.flow.async_progress_by_handler(
+            DOMAIN, match_context={"source": SOURCE_REAUTH, "entry_id": entry.entry_id}
+        ):
+            hass.config_entries.flow.async_abort(flow["flow_id"])
+
     # The card switches to this service when it exists, so it is registered
     # only while a key is configured.
     proxy = FutarProxy(
@@ -490,6 +500,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             coro, "hungarian_transport_futar", eager_start=False
         ),
         call_later=hass_call_later(hass),
+        on_recovered=_key_accepted_again,
     )
     entry.async_on_unload(proxy.close)
     entry.async_on_unload(close_on_stop(hass, proxy.close))
@@ -514,7 +525,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # The stored key stopped working (revoked, expired): ask for a new
             # one in the UI instead of failing every card poll quietly. The
             # proxy fails fast for a while, or until a key saved in the
-            # options reloads the entry.
+            # options reloads the entry; a key FUTÁR accepts again later
+            # ends the reauth (_key_accepted_again).
             entry.async_start_reauth(hass)
             raise
         return {"data": data}
@@ -546,14 +558,35 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """The integration is removed: so are its Lovelace resource and its
-    record in .storage (storage.py), and the copy of it in memory."""
+    """The integration is removed: so are its Lovelace resource, its
+    notifications and its record in .storage (storage.py), and the copy of
+    it in memory. There is one entry at most (its unique_id is the domain),
+    so nothing is shared with another.
+
+    Only what installed the MÁV index stays (storage.MAV_INSTALL): the index
+    stays in www/ and the cards keep drawing from it, so an entry added
+    again would otherwise call it a release's, with the file's time. The
+    sensor matches the record to the served file (feed and size), so a
+    record of an index replaced since says nothing."""
     try:
         await lovelace_resource.async_remove_resource(hass)
     except Exception:  # noqa: BLE001 - removal goes on
         _LOGGER.warning("Could not remove the cards' Lovelace resource", exc_info=True)
+    # A notice about timetables or a failed MÁV build would outlive it.
+    for notification_id in (
+        timetable_notify.NOTIFICATION_SHIPPED,
+        timetable_notify.NOTIFICATION_MAV_DAILY,
+        timetable_notify.NOTIFICATION_DAILY_FAILED,
+        mav.NOTIFICATION_ID,
+    ):
+        persistent_notification.async_dismiss(hass, notification_id)
     try:
-        await storage.store(hass).async_remove()
+        state = await storage.async_load(hass)
+        install = state.get(storage.MAV_INSTALL)
+        if isinstance(install, dict):
+            await storage.async_save(hass, {storage.MAV_INSTALL: install})
+        else:
+            await storage.store(hass).async_remove()
     except Exception:  # noqa: BLE001 - removal goes on
         _LOGGER.warning("Could not remove the timetable update record", exc_info=True)
     hass.data.get(DOMAIN, {}).pop("update_state", None)

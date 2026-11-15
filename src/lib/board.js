@@ -301,9 +301,8 @@ async function runBoard(poll, src, knownElvira) {
        destination's board confirms that FUTÁR lacks (IC TÓPART at :37
        from Székesfehérvár): that one is listed as on a MÁV card. */
     const addElvira = (row) => BkkLib.elviraBoardRows([row], nowSec())[0] || null;
-    /* A board with no rows of its own is filled from Transitous once the
-       through-check answered, except a city one (departures() fills it). */
-    const fillsEmpty = mode !== 'helyi';
+    /* A board with no rows of its own (a city one too) is filled from
+       Transitous once the through-check answered. */
     const publish = () => {
       if (!live()) return;
       /* An empty board goes on to the Transitous fill below, not to
@@ -336,7 +335,7 @@ async function runBoard(poll, src, knownElvira) {
       }
       /* Nor is one the Transitous fill follows (below): its answer is
          listed then, with no "no departures" before it on every poll. */
-      if (!list.length && fillsEmpty) return;
+      if (!list.length) return;
       listed('board', list);
     };
     let startThrough = null;
@@ -346,8 +345,6 @@ async function runBoard(poll, src, knownElvira) {
       apiKey(), cfg.stopId, cfg.routeIds, dest,
       {
         originName: cfg.stopName || '',
-        originLat: cfg.stopLat,
-        originLon: cfg.stopLon,
         cache: ctx.tripCache(),
         mode,
         city: cfg.city || '',
@@ -446,9 +443,9 @@ async function runBoard(poll, src, knownElvira) {
        brings the buses and trams beside it (the planner's mode all). */
     const hosts = mavBoard ? elviraRows
       : (futarFull ? BkkLib.mergeRows(earlyRows, futarFull, cap) : earlyRows.slice());
-    /* A city board is filled from Transitous inside departures() already:
-       a second fill here only repeated the same lookups on every poll. */
-    if (!hosts.length && fillsEmpty) {
+    /* With the stop's coordinates (origin): by name alone a city stop's
+       "Kossuth tér" is any town's. */
+    if (!hosts.length) {
       let filled = await src.transitous(hosts, origin, dest, {
         mode,
         minutesAfter: cfg.minutesAfter,

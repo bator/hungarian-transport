@@ -1,22 +1,32 @@
 name: Daily MÁV index
 
 # MÁV publishes a new GTFS almost every day; releases ship its index weekly.
-# Every morning, after MÁV's nightly feed update, this builds the index the
-# release builds (release_mav_index.sh: MÁV GTFS, pfaedle, build_mav_index.py
-# and its audit) and publishes it on GitHub Pages with a manifest
-# (scripts/mav_pages_site.py). The integration fetches the manifest, and the
-# index when its feed is newer (custom_components/hungarian_transport/
-# mav_daily.py). The site also carries the build's GTFS for other consumers:
-# MÁV's zip as downloaded (mav-gtfs.zip, CC0) and pfaedle's trips, shapes and
-# stop_times (mav-pfaedle-overlay.zip, shapes © OpenStreetMap contributors,
-# ODbL), with ATTRIBUTION.txt. 03:15 UTC: ready before 05:30 local time.
+# This builds the index the release builds (release_mav_index.sh: MÁV GTFS,
+# pfaedle, build_mav_index.py and its audit) and publishes it on GitHub
+# Pages with a manifest (scripts/mav_pages_site.py). The integration fetches
+# the manifest, and the index when its feed is newer
+# (custom_components/hungarian_transport/mav_daily.py). The site also
+# carries the build's GTFS for other consumers: MÁV's zip as downloaded
+# (mav-gtfs.zip, CC0) and pfaedle's trips, shapes and stop_times
+# (mav-pfaedle-overlay.zip, shapes © OpenStreetMap contributors, ODbL), with
+# ATTRIBUTION.txt.
+#
+# When: MÁV's feed of the day (feed_version YYYYMMDD) is not out at 03:15
+# UTC. Every run of 3-15 November 2026 that started at 03:15 built an older
+# feed, and every one that started at 10:03-11:28 UTC built the day's; on
+# 3 November it was still missing at 13:54. The 03:15 run stays (it
+# refreshes built_at, and would catch a feed published overnight); the
+# 10:30 run is the one meant to build the day's feed. GitHub starts
+# scheduled runs late, by hours at times (the 03:15 one started after 10:00
+# all through November), so neither time is a promise.
 #
 # Nothing is deployed, and the site keeps the previous files, when the
 # secrets are missing, the download, pfaedle or the audit fails, the site is
 # refused (mav_pages_site.py: a bad feed date, over 500 MB), or the index and
-# the GTFS files have the content Pages already serves and its manifest was
-# built less than 12 hours ago (older, the same content is deployed again, so
-# built_at stays the last run that went through). A run that published
+# MÁV's zip are the ones Pages already serves and its manifest was built less
+# than 12 hours ago (older, the same content is deployed again, so built_at
+# stays the last run that went through). pfaedle's overlay is not compared:
+# its bytes differ on every run, even for the same feed. A run that published
 # nothing because something failed stays green with a ::warning:: only while
 # the published manifest is less than 2 days old; it fails at once when MÁV
 # refused the login (401/403: only new credentials help), and when the
@@ -26,6 +36,7 @@ name: Daily MÁV index
 on:
   schedule:
     - cron: "15 3 * * *"
+    - cron: "30 10 * * *"
   workflow_dispatch:
 
 permissions:
@@ -56,11 +67,11 @@ jobs:
 
       # Also without the secrets: the last step checks how old the
       # published index is.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
 
@@ -71,7 +82,7 @@ jobs:
         if: env.MAV_SECRETS == 'true'
         run: echo "week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         id: osm-cache
         if: env.MAV_SECRETS == 'true'
         with:
@@ -106,19 +117,23 @@ jobs:
             echo "::warning title=Daily MÁV index not built::The MÁV download, pfaedle or the audit failed (see this step's log); GitHub Pages keeps the previous index."
           fi
 
-      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: env.MAV_SECRETS == 'true' && steps.mav.outputs.built == 'true' && steps.osm-cache.outputs.cache-hit != 'true'
         with:
           path: .osm
           key: osm-hungary-${{ steps.week.outputs.week }}
 
       # The manifest, and whether the content differs from what Pages serves
-      # (the live manifest's content digest and GTFS digests) or the live
-      # manifest is old enough to refresh (REFRESH_AFTER). The MÁV zip
-      # and pfaedle's output are the ones release_mav_index.sh left in its
-      # work dir for this build. An index with under half the trains and
-      # lines of the published one is refused (mav_shrink_guard.py); the
-      # repository variable MAV_ALLOW_SHRINK=1 accepts an intended reduction.
+      # (the live manifest's content digest and the MÁV zip's size and
+      # sha256; not the overlay's, which pfaedle never writes the same
+      # twice) or the live manifest is old enough to refresh (REFRESH_AFTER).
+      # The MÁV zip and pfaedle's output are the ones release_mav_index.sh
+      # left in its work dir for this build. An index with under half the
+      # trains and lines of the published one is refused
+      # (mav_shrink_guard.py); when the published manifest does not read,
+      # it is compared with the latest stable release's MÁV index instead
+      # (fetched only then). The repository variable MAV_ALLOW_SHRINK=1
+      # accepts an intended reduction.
       - name: Pages site
         id: site
         if: steps.mav.outputs.built == 'true'
@@ -131,6 +146,7 @@ jobs:
           if python3 scripts/mav_pages_site.py --index mav-index.json.gz --stats mav-build.json \
               --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/site" --live-url "$pages_url/mav-index.json" \
               --gtfs-zip "$RUNNER_TEMP/mav/gtfs/mav-gtfs.zip" --pfaedle-dir "$RUNNER_TEMP/mav/gtfs-out" \
+              --baseline-url "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/hungarian-transport-frontend.zip" \
               --github-output "$GITHUB_OUTPUT"; then
             ls -l "$RUNNER_TEMP/site"
             exit 0

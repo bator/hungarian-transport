@@ -17,6 +17,7 @@ from gtfs_compact import (
     feed_error,
     feed_urls,
     guard_basis,
+    index_parts,
     load_env_files,
     load_parts,
     operator_running_trips,
@@ -33,6 +34,16 @@ MIN_TRIP_RATIO = 0.5
 MIN_GUARDED_TRIPS = 50
 # Comma-separated feed ids (or "all") that may be missing from a rebuild.
 ALLOW_MISSING_ENV = "HUNGARIAN_TRANSPORT_ALLOW_MISSING"
+# The weekly refresh (release.yml) downloads every city feed afresh, and
+# one publisher's outage would leave its feed out, so the guard refused the
+# whole release. With this naming the previous release's city index (its
+# shapes folder next to it), a feed that fails to download or load keeps
+# that index's part instead, with a ::warning::. A feed the previous index
+# lacks has nothing to keep and is left out as before.
+CARRY_ENV = "HUNGARIAN_TRANSPORT_CARRY_INDEX"
+# More feeds failing at once is the network or the runner, not a publisher:
+# none is carried, and the guard decides as without CARRY_ENV.
+MAX_CARRIED = 3
 
 # Weekendbus (Csömör/Pécel) still hosts a zip, but its calendar ended
 # 2025-12-31. GYSEV trains are in MÁV's feed (the MÁV index); the GYSEV zip
@@ -292,14 +303,21 @@ def collect_parts(
     out: Path | None = None,
     previous: Previous | None | object = _UNREAD,
     allow: set[str] | None = None,
-) -> tuple[list[dict], list[str], dict[str, str], list[str], dict[str, dict[str, str]]]:
+    carry: Path | None = None,
+) -> tuple[list[dict], list[str], dict[str, str], list[str], dict[str, dict[str, str]], dict[str, str]]:
     """Operator parts with trips, the feed ids that failed, had none or
     whose calendar already ended, of the last: feed id -> last service
-    day, the feed ids whose new zip was rejected, and of those the ones
+    day, the feed ids whose new zip was rejected, of those the ones
     rejected for their content: feed id -> {"why": the reason, "until":
-    the last service day (YYYYMMDD, "" = unknown) of the zip kept instead}.
+    the last service day (YYYYMMDD, "" = unknown) of the zip kept instead},
+    and the feeds carried from carry: feed id -> why its own zip failed.
     A feed that only lost some operators to an ended calendar (Volán local
     agencies) is neither failed nor ended.
+
+    carry: the previous release's city index (CARRY_ENV). A feed whose zip
+    fails to download or load takes its part from there, unless allow
+    names it (it is meant to go), the index lacks it or its calendar ended
+    there too; with more than MAX_CARRIED such feeds, none is carried.
 
     zips: feed id -> a newly downloaded zip to read instead of the one in
     base. One that fails to load or has no trips is rejected and the feed
@@ -320,7 +338,7 @@ def collect_parts(
     today = today or date.today().strftime("%Y%m%d")
     if previous is _UNREAD:
         previous = _previous(out, today) if zips else None
-    if zips and allow is None:
+    if (zips or carry is not None) and allow is None:
         allow = allowed_missing()
     allow = allow or set()
     parts: list[dict] = []
@@ -328,6 +346,8 @@ def collect_parts(
     expired: dict[str, str] = {}
     rejected: list[str] = []
     refused: dict[str, dict[str, str]] = {}
+    # Feeds whose zip did not download or load: id -> (why, where in parts).
+    unloaded: dict[str, tuple[str, int]] = {}
     for feed in CITY_FEEDS:
         fid = feed["id"]
         new_zip = (zips or {}).get(fid)
@@ -373,7 +393,9 @@ def collect_parts(
                 got = _with_trips(_load_feed(base, feed))
             except Exception as err:
                 failed.append(fid)
-                print(f"warn {feed_error(fid, err)}", file=sys.stderr)
+                why = feed_error(fid, err)
+                print(f"warn {why}", file=sys.stderr)
+                unloaded[fid] = (why, len(parts))
                 continue
         if not got:
             failed.append(fid)
@@ -384,6 +406,7 @@ def collect_parts(
                 failed.append(fid)
                 expired[fid] = end
         parts.extend(got)
+    carried = _carry(parts, failed, unloaded, carry, allow, today) if carry is not None else {}
     if volan_zip and volan_zip.exists():
         try:
             print("volan local", volan_zip)
@@ -413,7 +436,38 @@ def collect_parts(
         raise RuntimeError("no city GTFS parts" + (f" ({', '.join(failed)})" if failed else ""))
     if failed:
         print("partial city index, skipped:", ", ".join(failed), file=sys.stderr)
-    return parts, failed, expired, rejected, refused
+    return parts, failed, expired, rejected, refused, carried
+
+
+def _carry(parts: list[dict], failed: list[str], unloaded: dict[str, tuple[str, int]], carry: Path,
+           allow: set[str], today: str) -> dict[str, str]:
+    """Put the previous index's part of each unloaded feed (id -> (why, its
+    place in parts)) into parts, in its place, and off failed; feed id ->
+    why for those carried (collect_parts' carry)."""
+    todo = {fid: v for fid, v in unloaded.items() if fid not in allow and "all" not in allow}
+    if not todo:
+        return {}
+    if len(todo) > MAX_CARRIED:
+        print(f"::warning title=City feeds not carried over::{len(todo)} city feeds failed to download"
+              f" ({', '.join(sorted(todo))}); more than {MAX_CARRIED} at once is not one publisher's outage,"
+              " so none keeps the previous release's timetable.")
+        return {}
+    carried: dict[str, str] = {}
+    # From the last place to the first, so the earlier places still hold.
+    for fid, (why, at) in reversed(list(todo.items())):
+        old = index_parts(carry, {fid})
+        got, _end = _fresh(_with_trips(old or []), fid, today)
+        if not got:
+            print(f"warn {fid}: {carry.name} has no running timetable of it either; nothing to carry over",
+                  file=sys.stderr)
+            continue
+        parts[at:at] = got
+        failed.remove(fid)
+        carried[fid] = why
+        trips = sum(len(p["t"]) for p in got)
+        print(f"::warning title=City feed carried over::{why}; the previous release's {fid} timetable"
+              f" ({trips} trips) ships again.")
+    return carried
 
 
 def _feed_group(op_id: str) -> str | None:
@@ -566,18 +620,21 @@ def build_city_index(
     *,
     today: str | None = None,
     zips: dict[str, Path] | None = None,
+    carry: Path | None = None,
 ) -> dict:
     """Build and write the city index; info["skipped"] lists the feeds left
     out, info["expired"] those of them whose calendar ended (id -> last day),
-    info["rejected"] the new zips (zips, see collect_parts) not used and
+    info["rejected"] the new zips (zips, see collect_parts) not used,
     info["refused"] those of them rejected for their content (id -> why,
-    until)."""
+    until) and info["carried"] the feeds taken from carry (the previous
+    release's index, see collect_parts) because their own zip failed (id ->
+    why)."""
     today = today or date.today().strftime("%Y%m%d")
     # Read once for both: about a second on the release index.
     previous = _previous(out, today)
     allow = allowed_missing()
-    parts, failed, expired, rejected, refused = collect_parts(
-        base, volan_zip, today=today, zips=zips, out=out, previous=previous, allow=allow
+    parts, failed, expired, rejected, refused, carried = collect_parts(
+        base, volan_zip, today=today, zips=zips, out=out, previous=previous, allow=allow, carry=carry
     )
     guard_feeds(out, parts, allow, expired=expired, today=today, previous=previous)
     # guard_feeds is the city index's guard: write_index's overall count
@@ -588,6 +645,7 @@ def build_city_index(
     info["expired"] = expired
     info["rejected"] = rejected
     info["refused"] = refused
+    info["carried"] = carried
     return info
 
 
@@ -596,7 +654,8 @@ def main() -> None:
     volan = Path("volanbusz_gtfs.zip")
     if not volan.exists():
         download_volan(volan)
-    info = build_city_index(base, OUT, volan)
+    carry = (os.environ.get(CARRY_ENV) or "").strip()
+    info = build_city_index(base, OUT, volan, carry=Path(carry) if carry else None)
     print("wrote", OUT, info)
 
 

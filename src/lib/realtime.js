@@ -16,10 +16,10 @@ const RT_STOPS_BEFORE = 20;
 /* Cards on one dashboard asking about the same feed and trips within this
    long share one call; a card polls every 15–45 s. */
 const RT_CACHE_MS = 25000;
-/* Calls that failed (no integration answer at all) in this many polls in a
-   row are not repeated for RT_RETRY_MS: one dropped websocket is no outage.
-   The calls failing within one round (the cards of one dashboard, the feeds
-   of one poll) are one strike. */
+/* Calls to one feed that failed (no integration answer at all) in this
+   many polls in a row are not repeated for RT_RETRY_MS: one dropped
+   websocket is no outage. The calls to it failing within one round (the
+   cards of one dashboard) are one strike. Every feed counts on its own. */
 const RT_FAIL_LIMIT = 3;
 const RT_FAIL_ROUND_MS = 15000;
 const RT_RETRY_MS = 5 * 60000;
@@ -39,10 +39,17 @@ register({
   },
   _rtCache: new Map(),
   _rtInflight: new Map(),
-  _rtDownUntil: 0,
-  _rtFails: 0,
-  _rtLastFailAt: 0,
-  _rtWarned: false,
+  /* Each feed's failure streak, pause and warning, by feed id: one feed
+     answering says nothing about another that keeps rejecting. */
+  _rtFeeds: new Map(),
+  _rtFeed(feed) {
+    let st = BkkLib._rtFeeds.get(feed);
+    if (!st) {
+      st = { fails: 0, lastFailAt: 0, downUntil: 0, warned: false };
+      BkkLib._rtFeeds.set(feed, st);
+    }
+    return st;
+  },
   /* Feeds the integration has no realtime data for: not asked again until
      the page reloads. */
   _rtNoFeed: new Set(),
@@ -158,7 +165,8 @@ register({
      ask the same within RT_CACHE_MS. Null when the call failed. */
   async realtimeFetch(hass, feed, trips) {
     if (!BkkLib.hasRealtime(hass) || BkkLib._rtNoFeed.has(feed)) return null;
-    if (Date.now() < BkkLib._rtDownUntil) return null;
+    const st = BkkLib._rtFeed(feed);
+    if (Date.now() < st.downUntil) return null;
     /* The whole request: the same trips with another destination are
        another answer (dest_delay). */
     const sig = feed + '|' + JSON.stringify(trips);
@@ -169,9 +177,9 @@ register({
     const run = (async () => {
       try {
         const res = await BkkLib.callServiceResponse(hass, 'hungarian_transport', 'realtime', { feed, trips });
-        BkkLib._rtWarned = false;
-        BkkLib._rtFails = 0;
-        BkkLib._rtLastFailAt = 0;
+        st.warned = false;
+        st.fails = 0;
+        st.lastFailAt = 0;
         const out = BkkLib.rtTripsFromResult(res);
         if (out && out.noFeed) BkkLib._rtNoFeed.add(feed);
         BkkLib._rtCache.set(sig, { at: Date.now(), out });
@@ -179,14 +187,14 @@ register({
         return out;
       } catch (err) {
         const now = Date.now();
-        if (now - BkkLib._rtLastFailAt >= RT_FAIL_ROUND_MS) {
-          BkkLib._rtFails += 1;
-          BkkLib._rtLastFailAt = now;
+        if (now - st.lastFailAt >= RT_FAIL_ROUND_MS) {
+          st.fails += 1;
+          st.lastFailAt = now;
         }
-        if (BkkLib._rtFails >= RT_FAIL_LIMIT) BkkLib._rtDownUntil = now + RT_RETRY_MS;
-        if (!BkkLib._rtWarned) {
-          BkkLib._rtWarned = true;
-          console.warn('Live delays and positions (hungarian_transport.realtime) unavailable, retrying in a few minutes:', err);
+        if (st.fails >= RT_FAIL_LIMIT) st.downUntil = now + RT_RETRY_MS;
+        if (!st.warned) {
+          st.warned = true;
+          console.warn(`Live delays and positions (hungarian_transport.realtime, feed ${feed}) unavailable, retrying in a few minutes:`, err);
         }
         return null;
       } finally {

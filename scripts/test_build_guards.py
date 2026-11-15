@@ -498,6 +498,137 @@ with tempfile.TemporaryDirectory() as tmp:
           isinstance(err, IndexGuardError) and "szeged missing (had 200 trips)" in str(err), repr(err))
 bci.CITY_FEEDS = real_feeds
 
+# The weekly refresh downloads every city feed afresh: one publisher's
+# outage (runs 41458793021, 42780225844) must not stop the release. With the
+# previous release's index to carry from (CARRY_ENV, .baseline in
+# release.yml), a feed that fails to download keeps its part from there.
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp) / "work"
+    prev_dir = Path(tmp) / "baseline"
+    base.mkdir()
+    prev_dir.mkdir()
+    feeds = {fid: city_feed(route, trips=60) for fid, route in (("a", "1"), ("b", "2"), ("c", "3"), ("d", "4"))}
+    # b draws its lines from shapes.txt: they must come along.
+    feeds["b"]["trips.txt"] = "route_id,service_id,trip_id,shape_id\n" + "".join(
+        f"R1,S1,T{i},SH1\n" for i in range(60))
+    feeds["b"]["shapes.txt"] = ("shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\n"
+                                "SH1,47.5,19.0,1\nSH1,47.55,19.05,2\nSH1,47.6,19.1,3\n")
+    bci.CITY_FEEDS = [{"id": f, "name": f.upper(), "url": f"https://{f}.example/{f}.zip", "file": f"{f}.zip"}
+                      for f in feeds]
+    down: set[str] = set()
+
+    def flaky_download(url: str, dest: Path, **_kw) -> dict:
+        fid = Path(url).stem
+        if fid in down:
+            raise OSError(f"HTTP Error 503 from {url}?apikey=SECRET-KEY")
+        gtfs_zip(dest, feeds[fid])
+        return {"size": dest.stat().st_size}
+
+    bci.download_feed = flaky_download
+    out = base / "city-index.json.gz"
+
+    def release_build(**kw) -> dict:
+        """As the release builds it: every feed downloaded afresh."""
+        for f in feeds:
+            (base / f"{f}.zip").unlink(missing_ok=True)
+        with contextlib.redirect_stderr(io.StringIO()):
+            return bci.build_city_index(base, out, today="20261115", **kw)
+
+    release_build()
+    shutil.copy(out, prev_dir / out.name)
+    for d in base.glob("city-shapes-*"):
+        shutil.copytree(d, prev_dir / d.name)
+    carry = prev_dir / out.name
+    previous_bytes = out.read_bytes()
+    prev_idx = json.loads(gzip.decompress(previous_bytes))
+    b_trips = [t for t in prev_idx["t"] if prev_idx["o"][prev_idx["s"][t[2][0]][3]][0] == "b"]
+    check("the carry fixture: b's trips have a shape", bool(b_trips) and all(t[5] >= 0 for t in b_trips),
+          repr(b_trips[:1]))
+
+    down |= {"b"}
+    err = raises(release_build)
+    check("without a previous index to carry from, a failed city download still refuses the rebuild",
+          isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
+    for failing in ({"b"}, {"b", "c"}, {"a", "d"}):
+        down.clear()
+        down |= failing
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            info = release_build(carry=carry)
+        check(f"{', '.join(sorted(failing))} failed to download: carried from the previous release, in place"
+              " (the rebuild is the previous index byte for byte, shapes included)",
+              set(info["carried"]) == failing and not failing & set(info["skipped"])
+              and out.read_bytes() == previous_bytes
+              and buf.getvalue().count("::warning title=City feed carried over::") == len(failing),
+              repr((info, buf.getvalue())))
+    why = info["carried"]["a"]
+    check("the carried feed's reason names the error, not the keyed URL",
+          "503" in why and "a.example" in why and "SECRET" not in why and "apikey" not in why, why)
+    for label, err_, want, gone in (
+        ("its message, not only its type", ValueError("blocked url host"), "x: ValueError: blocked url host", ""),
+        ("a URL's host only", OSError("fetch https://u:pw@nap.example/k/abc/f.zip?token=t failed"),
+         "x: OSError: fetch https://nap.example/… failed", "pw"),
+        ("no secret-named value", ValueError('apikey=k1 and "token": "t1", Bearer b1'),
+         'x: ValueError: apikey=… and "token": "…", Bearer …', "k1"),
+        ("one line, cut", ValueError("a\nb " + "z" * 2000), None, "\n"),
+    ):
+        msg = gc.feed_error("x", err_)
+        check(f"feed_error: {label}", (msg == want if want else len(msg) < gc.ERR_MAX + 40)
+              and (not gone or gone not in msg), msg)
+
+    down.clear()
+    down |= {"a", "b", "c", "d"}
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        err = raises(lambda: release_build(carry=carry))
+    check(f"every feed failed (more than MAX_CARRIED, {bci.MAX_CARRIED}): none is carried, nothing is built",
+          err is not None and "no city GTFS parts" in str(err)
+          and "::warning title=City feeds not carried over::" in buf.getvalue(), repr((err, buf.getvalue())))
+    real_max, bci.MAX_CARRIED = bci.MAX_CARRIED, 1
+    down.clear()
+    down |= {"b", "c"}
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            err = raises(lambda: release_build(carry=carry))
+    finally:
+        bci.MAX_CARRIED = real_max
+    check("more failed downloads than MAX_CARRIED: none is carried, the guard refuses them by name",
+          isinstance(err, IndexGuardError) and "b missing" in str(err) and "c missing" in str(err)
+          and "City feed carried over" not in buf.getvalue(), repr((err, buf.getvalue())))
+
+    down.clear()
+    down |= {"b"}
+    os.environ[bci.ALLOW_MISSING_ENV] = "b"
+    try:
+        info = release_build(carry=carry)
+    finally:
+        os.environ.pop(bci.ALLOW_MISSING_ENV, None)
+    check("a failed feed that HUNGARIAN_TRANSPORT_ALLOW_MISSING names leaves, it is not carried",
+          info["carried"] == {} and "b" in info["skipped"] and "b" not in operator_trips(out), repr(info))
+    shutil.copy(carry, out)
+
+    # A previous index without b has nothing to carry: the guard decides
+    # against the index in place, as without a carry.
+    no_b = Path(tmp) / "no-b"
+    no_b.mkdir()
+    parts = gc.index_parts(carry, {"a", "c", "d"})
+    write_index(parts or [], no_b / out.name, with_operators=True, today="20261115", guard_total=False)
+    err = raises(lambda: release_build(carry=no_b / out.name))
+    check("a failed feed the previous release lacks is not carried, and the guard refuses it",
+          isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
+    # Nor a previous release whose shapes folder is gone: its lines would go.
+    no_shapes = Path(tmp) / "no-shapes"
+    no_shapes.mkdir()
+    shutil.copy(carry, no_shapes / out.name)
+    check("index_parts refuses an index whose shapes folder is missing",
+          gc.index_parts(no_shapes / out.name, {"b"}) is None and gc.index_parts(no_shapes / out.name, {"a"}) == [
+              p for p in gc.index_parts(carry, {"a"}) or []])
+    err = raises(lambda: release_build(carry=no_shapes / out.name))
+    check("a failed feed whose previous shapes cannot be read is not carried, and the guard refuses it",
+          isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
+bci.CITY_FEEDS = real_feeds
+
 # The Volán index keeps its overall guard: one feed, so the total is the feed.
 with tempfile.TemporaryDirectory() as tmp:
     vout = Path(tmp) / "volan-index.json.gz"

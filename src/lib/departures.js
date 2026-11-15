@@ -579,15 +579,11 @@ register({
     const mode = opts.mode || (opts.mav ? 'mav' : 'bkk');
     const horizon = clampMinutesAfter(opts.minutesAfter);
     if (mode === 'helyi') {
-      let cityRows = await BkkLib.cityDepartures(ix, stopId, dest, opts.originName, opts.city, horizon);
-      /* null: the fill failed, and the board stays as it is. */
-      cityRows = (await BkkLib.fillTransitousIfEmpty(
-        cityRows,
-        /* With the stop's coordinates: by name alone "Kossuth tér" is any town's. */
-        { id: stopId, name: opts.originName || '', lat: opts.originLat, lon: opts.originLon },
-        dest,
-        opts,
-      )) || cityRows;
+      /* An empty city board is filled from Transitous by the departure
+         board (board.js), as every other board is: there a failed fill
+         keeps the fill-ins still due, which this one could not tell from
+         the city's own rows. */
+      const cityRows = await BkkLib.cityDepartures(ix, stopId, dest, opts.originName, opts.city, horizon);
       if (opts.deferGps) return cityRows;
       return BkkLib.attachCoachGps(opts.hass, cityRows);
     }

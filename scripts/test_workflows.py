@@ -82,6 +82,15 @@ check("the MÁV index artifact is kept when a step failed, the second build incl
       "!cancelled()" in upload and "mav-index.again.json.gz" in upload and "mav-index.json.gz" in upload,
       upload)
 
+build_step = step(release, "- name: Build GTFS indexes")
+baseline_step = step(release, "- name: Previous release indexes")
+check("the weekly refresh (only) lets a city feed whose download failed keep the previous release's part",
+      "HUNGARIAN_TRANSPORT_CARRY_INDEX: ${{ needs.resolve.outputs.refresh == 'true'"
+      " && '.baseline/city-index.json.gz' || '' }}" in build_step
+      and 'CARRY_ENV = "HUNGARIAN_TRANSPORT_CARRY_INDEX"' in (ROOT / "scripts" / "build_city_index.py").read_text()
+      and "cp volan-index.json.gz city-index.json.gz .baseline/" in baseline_step
+      and "'city-shapes-*' -d .baseline" in baseline_step, build_step)
+
 lint = step(validate, "- name: Install ShellCheck")
 pins = re.findall(r"(SHELLCHECK|ACTIONLINT)_SHA256: ([0-9a-f]{64})$", lint, re.M)
 urls = re.findall(r"(SHELLCHECK|ACTIONLINT)_URL: (https://github\.com/\S+/releases/download/v[\d.]+/\S+)$", lint, re.M)

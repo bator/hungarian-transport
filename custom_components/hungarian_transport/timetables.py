@@ -239,6 +239,11 @@ class TimetableStatus:
         self._listeners: list[CALLBACK_TYPE] = []
         self._lock = asyncio.Lock()
         self._again = False
+        # Refreshes started by _request; stop() cancels them, so none reads
+        # the record again after the entry is unloaded (or removed: that
+        # would cache an empty record for an entry added again).
+        self._tasks: set[asyncio.Task[None]] = set()
+        self._stopped = False
 
     @property
     def next_run(self) -> datetime | None:
@@ -258,6 +263,8 @@ class TimetableStatus:
     async def async_refresh(self) -> None:
         """Read what changed, then update every sensor. A request during a
         refresh runs one more refresh after it."""
+        if self._stopped:
+            return
         if self._lock.locked():
             self._again = True
             return
@@ -269,6 +276,8 @@ class TimetableStatus:
                     self.record = dict(await storage.async_load(self._hass))
                 except Exception:  # noqa: BLE001 - the next signal or poll tries again
                     _LOGGER.warning("Could not read the timetable indexes", exc_info=True)
+                if self._stopped:
+                    return
                 for update in list(self._listeners):
                     update()
                 if not self._again:
@@ -276,7 +285,11 @@ class TimetableStatus:
 
     @callback
     def _request(self, *_args: Any) -> None:
-        self._hass.async_create_background_task(self.async_refresh(), "hungarian_transport_timetables")
+        if self._stopped:
+            return
+        task = self._hass.async_create_background_task(self.async_refresh(), "hungarian_transport_timetables")
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     @callback
     def start(self) -> CALLBACK_TYPE:
@@ -288,8 +301,11 @@ class TimetableStatus:
 
         @callback
         def stop() -> None:
+            self._stopped = True
             for unsub in unsubs:
                 unsub()
             self._listeners.clear()
+            for task in list(self._tasks):
+                task.cancel()
 
         return stop

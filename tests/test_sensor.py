@@ -15,10 +15,11 @@ from homeassistant.const import ATTR_DEVICE_CLASS, ATTR_FRIENDLY_NAME, STATE_UNA
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
-from custom_components.hungarian_transport import mav, mav_daily, sensor, timetables
+from custom_components.hungarian_transport import mav, mav_daily, sensor, storage, timetables
 from custom_components.hungarian_transport.const import CONF_DAILY_MAV, DOMAIN
 
 from .test_mav import _feed_zip
@@ -212,6 +213,34 @@ async def test_daily_install_refreshes_both_sensors(
     assert hass.states.get(DAILY_ID).attributes["result"] == mav_daily.INSTALLED
 
 
+async def test_the_installed_mav_index_keeps_its_source_after_removal(
+    hass: HomeAssistant, card_assets, aioclient_mock, monkeypatch
+) -> None:
+    """Removing the integration leaves the daily index in www/: added again,
+    the sensor still names what installed it, not a release."""
+    monkeypatch.setattr(mav_daily, "async_update", _real_update)
+    _ship(card_assets, _index(OLD))
+    raw = _index(NEW, fitted=True)
+    _serve(aioclient_mock, raw, _manifest(raw, fitted_share=0.98))
+    entry = await _setup(hass)
+    await _first_round(hass)
+    installed = hass.states.get(MAV_ID).attributes
+    assert installed["source"] == "daily"
+
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    await _setup(hass)
+
+    state = hass.states.get(MAV_ID)
+    assert state.attributes["feed_version"] == NEW
+    assert state.attributes["source"] == "daily"
+    assert state.attributes["installed_at"] == installed["installed_at"]
+    # The rest of the record went with the entry: no daily round yet.
+    state = hass.states.get(DAILY_ID)
+    assert state.state == STATE_UNKNOWN
+    assert "result" not in state.attributes
+
+
 @pytest.mark.parametrize(
     ("served", "manifest_status", "result", "streak"),
     [
@@ -300,6 +329,39 @@ async def test_indexes_are_read_in_the_executor(hass: HomeAssistant, card_assets
     monkeypatch.setattr(timetables, "scan_index", lambda p, **kw: (on_loop(), scan(p, **kw))[1])
     await _setup(hass)
     assert threads == [False, False, False]
+
+
+async def test_a_refresh_still_running_at_unload_reads_nothing_after_it(
+    hass: HomeAssistant, card_assets, monkeypatch
+) -> None:
+    """A signal just before the entry goes (a daily round recorded, then the
+    integration removed) starts a refresh in the background. Once stopped it
+    must not read the record again: removal drops the record's copy in
+    memory, and a refresh after it would cache an empty one for an entry
+    added again (HA 2024.10's block_till_done does not wait for it)."""
+    status = timetables.TimetableStatus(hass, card_assets, daily_enabled=False)
+    reading, release = threading.Event(), threading.Event()
+
+    def slow_read():
+        reading.set()
+        release.wait(5)
+        return {"mav": None, "volan": None, "city": None}
+
+    monkeypatch.setattr(status._reader, "read", slow_read)
+    updates: list[bool] = []
+    status.async_add_listener(lambda: updates.append(True))
+    stop = status.start()
+    async_dispatcher_send(hass, storage.SIGNAL_TIMETABLES)
+    await hass.async_add_executor_job(reading.wait, 5)
+    stop()
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert "update_state" not in hass.data.get(DOMAIN, {})
+    assert updates == []
+    # A signal after the stop starts nothing.
+    async_dispatcher_send(hass, storage.SIGNAL_TIMETABLES)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert "update_state" not in hass.data.get(DOMAIN, {})
 
 
 async def test_local_build_is_source_local(hass: HomeAssistant, card_assets, mav_source) -> None:

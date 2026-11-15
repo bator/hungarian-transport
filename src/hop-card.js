@@ -52,6 +52,8 @@ export class BKKHopCard extends HTMLElement {
     this._keyBackoff = 0;
     this._keyFilling = false;
     this._reloadActive = false;
+    /* FUTÁR or ELVIRA access showed up while a run was in flight. */
+    this._accessArrived = false;
     this._mapOverlay = null;
     this._map = null;
     this._mapMarker = null;
@@ -166,7 +168,35 @@ export class BKKHopCard extends HTMLElement {
      re-parenting a card) must not start a second fetch. */
   _reloadSafe() {
     this._reloadActive = true;
-    Promise.resolve().then(() => this._reload()).catch((err) => this._showErr(err));
+    Promise.resolve()
+      .then(() => {
+        /* A run that starts now sees whatever access is there by now. */
+        this._accessArrived = false;
+        return this._reload();
+      })
+      .catch((err) => this._showErr(err))
+      .then(() => this._reloadForNewAccess());
+  }
+
+  /* FUTÁR access (or ELVIRA) that showed up while a run was in flight came
+     too late for it: the run decided without it ("no API key", no BKK rows).
+     A card that polls would pick it up on the next tick, the planner does
+     not poll, so the run is repeated once it ends, unless a newer one is
+     already on its way (that one sees the access). */
+  _reloadForNewAccess() {
+    if (!this._accessArrived || this._reloadActive || !this.isConnected) return;
+    this._accessArrived = false;
+    this._reloadSafe();
+  }
+
+  /* The integration's futar service or elvira_between just showed up. */
+  _accessShowedUp() {
+    if (!this._painted || !this.isConnected) return;
+    if (this._reloadActive) {
+      this._accessArrived = true;
+      return;
+    }
+    this._reloadSafe();
   }
 
   /* The card's own key, or a key borrowed from a sibling card while the
@@ -189,13 +219,12 @@ export class BKKHopCard extends HTMLElement {
     /* The integration's futar service can register after the first paint
        (key added in the options flow): reload once it shows up. */
     this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
-    if (this._viaIntegration && !viaBefore && this._painted && !this._reloadActive && this.isConnected) this._reloadSafe();
+    if (this._viaIntegration && !viaBefore) this._accessShowedUp();
     /* So can elvira_between, a MÁV card's own source (a key-less one said
        "no API key" without it): reload once that shows up too. */
     const elviraBefore = this._viaElvira;
     this._viaElvira = BkkLib.hasElvira(hass);
-    if (this._viaElvira && !elviraBefore && this._departMode() === 'mav'
-        && this._painted && !this._reloadActive && this.isConnected) this._reloadSafe();
+    if (this._viaElvira && !elviraBefore && this._departMode() === 'mav') this._accessShowedUp();
     if (first && this._rawRows && this._rawRows.length) {
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       const cfg = this._config || {};
@@ -1428,15 +1457,18 @@ ${this._stopPinCss()}
   }
 
   /* A poll moves the vehicle on the open map, and puts it there once GPS
-     shows up for a row that had none when the map opened. */
-  _syncOpenMap() {
+     shows up for a row that had none when the map opened. After a failed
+     poll (noFix) the row's position is the one an earlier poll got, so it
+     counts as gone silent: the timetable places the vehicle until a poll
+     brings a fresh fix. */
+  _syncOpenMap(noFix) {
     const st = this._mapState;
     if (!this._map || !this._openMapKey || !st) return;
     const row = this._findMapRow(this._mapRef, this._rows || []);
     if (row) this._mapRow = row;
     /* The row has left the board (departed): the dashed marker still runs
        on the times it had. */
-    if (!row || !row.hasGps) {
+    if (!row || !row.hasGps || noFix) {
       /* A vehicle that reported a position and went silent, or left the
          board with it: its last fix is not live any more; the timetable
          places it (from the row as last listed), or nothing does. */
@@ -1532,6 +1564,9 @@ ${this._stopPinCss()}
       }
       if (board.phase === 'place' || board.phase === 'settled') this._boardSettled();
       if (board.phase === 'done') this._syncOpenMap();
+      /* A failed poll keeps the rows it had, and with them their last GPS
+         fix: the open map must not go on showing it as live. */
+      if (board.phase === 'failed') this._syncOpenMap(true);
     };
     const run = () => BkkLib.nextBoard({
       ctx: this._ctx,

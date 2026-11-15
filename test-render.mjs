@@ -4898,7 +4898,7 @@ const deferred = () => {
   Lib.volanDepartures = async () => [];
   await v._reload();
   Lib.volanDepartures = keepVolan;
-  check('the hop card leaves a city board’s fill to departures(), and still fills a Volán board itself',
+  check('the hop card fills a city board from Transitous once, and a Volán board as well',
     helyiFills === 1 && fills === 2, JSON.stringify({ helyiFills, fills }));
   if (v._tick) { clearInterval(v._tick); v._tick = null; }
   Lib.fillTransitousIfEmpty = keep.fillTransitousIfEmpty;
@@ -4927,16 +4927,24 @@ const deferred = () => {
   check('an empty fill pauses that pair for ten minutes; another pair, and a fill with rows, ask again',
     paused === 1 && otherPair === 2 && after.length === 1 && plans === 4,
     JSON.stringify({ paused, otherPair, plans, after: after.length }));
-  /* A fill that failed is no empty answer: null, and asked again next poll. */
+  /* A fill that failed is no empty answer: null, and asked again after a
+     short pause, not the ten minutes. */
   Lib._transitousEmptyAt.clear();
+  Lib._transitousFailed.clear();
   plans = 0;
   answer = null;
+  Date.now = () => t0;
   const failedFill = await Lib.fillTransitousIfEmpty([], o, d, opts);
-  answer = [{ label: '7', dep: Math.floor(Date.now() / 1000) + 900 }];
+  answer = [{ label: '7', dep: Math.floor(t0 / 1000) + 900 }];
+  const paused2 = await Lib.fillTransitousIfEmpty([], o, d, opts);
+  const plansPaused = plans;
+  Date.now = () => t0 + 91 * 1000;
   const retried = await Lib.fillTransitousIfEmpty([], o, d, opts);
-  check('a failed Transitous fill returns null and sets no ten-minute pause',
-    failedFill === null && plans === 2 && retried.length === 1,
-    JSON.stringify({ failedFill, plans, retried: retried && retried.length }));
+  Date.now = realNow;
+  Lib._transitousFailed.clear();
+  check('a failed Transitous fill returns null and pauses the pair a minute and a half, not ten minutes',
+    failedFill === null && paused2 === null && plansPaused === 1 && plans === 2 && retried.length === 1,
+    JSON.stringify({ failedFill, paused2, plansPaused, plans, retried: retried && retried.length }));
   Lib.transitousDepartures = keepDeps;
   const keepFetch = Lib.transitousFetch;
   const keepPlace = Lib.transitousPlace;
@@ -4961,14 +4969,23 @@ const deferred = () => {
     if (fail) throw new Error('Transitous timeout');
     return [{ id: 'hu-x', name: 'Y', lat: 47.1, lon: 19.1 }];
   };
-  /* A failed geocode rejects (an outage), it is not "no such stop". */
+  /* A failed geocode rejects (an outage), it is not "no such stop"; it is
+     asked again after a minute and a half, not on the next poll. */
+  Lib._geocodeFailedAt.clear();
+  const geoT0 = realNow();
+  Date.now = () => geoT0;
   const p1 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' }).catch(() => 'rejected');
   fail = false;
+  const p1again = await Lib.transitousPlace({ name: 'Ismeretlen megálló' }).catch(() => 'rejected');
+  Date.now = () => geoT0 + 91 * 1000;
   const p2 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' });
   const p3 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' });
-  check('a geocode answer stays for the page, a failed one is asked again',
-    p1 === 'rejected' && p2 === '47.1,19.1' && p3 === p2 && geo === 2, JSON.stringify({ p1, p2, p3, geo }));
+  Date.now = realNow;
+  check('a geocode answer stays for the page, a failed one is asked again after a minute and a half',
+    p1 === 'rejected' && p1again === 'rejected' && p2 === '47.1,19.1' && p3 === p2 && geo === 2,
+    JSON.stringify({ p1, p1again, p2, p3, geo }));
   Lib._geocodeCache.clear();
+  Lib._geocodeFailedAt.clear();
   Lib._transitousEmptyAt.clear();
   Object.assign(Lib, { cityDepartures: keep.cityDepartures, transitousFetch: keep.transitousFetch });
 }
@@ -9397,6 +9414,257 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   Lib._hass = null;
 }
 
+/* ---- Card review fixes: late FUTÁR access, the editor's mode switch,
+   the time pickers past midnight, the map after a failed poll, and the
+   planner's search errors ---- */
+
+/* The integration's futar service registering while the planner's first
+   board run is in flight: that run decided without BKK, and the planner
+   does not poll, so it runs once more when it ends. */
+{
+  const keep = {
+    nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+    reachableDests: Lib.reachableDests,
+  };
+  const runs = [];
+  const pending = [];
+  Lib.nextBoard = (poll) => {
+    runs.push(Lib.integrationHasKey(poll.ctx.hass()) ? 'futar' : 'none');
+    return new Promise((r) => pending.push(() => {
+      poll.show({ phase: 'settled', rows: [], banner: '', loading: false, filled: false, quiet: false });
+      r();
+    }));
+  };
+  Lib.apiKeyFromDashboard = async () => '';
+  Lib.reachableDests = async () => ({ dests: [], destRoutes: {} });
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+  pc._planner.now = async () => null;
+  const base = { language: 'hu', states: {}, callWS: async () => ({}), callService: async () => ({}) };
+  pc.hass = Object.assign({}, base, { services: { hungarian_transport: { elvira_between: {} } } });
+  document.body.appendChild(pc);
+  await settleTicks();
+  const before = runs.slice();
+  pc.hass = Object.assign({}, base, { services: { hungarian_transport: { elvira_between: {}, futar: {} } } });
+  await settleTicks();
+  pending.splice(0).forEach((f) => f());
+  await settleTicks();
+  pending.splice(0).forEach((f) => f());
+  await settleTicks();
+  check('FUTÁR showing up during the planner\'s board run runs the board once more, with BKK',
+    before.join() === 'none' && runs.join() === 'none,futar' && !pc._reloadActive,
+    JSON.stringify({ before, runs, active: pc._reloadActive }));
+  pc.remove();
+  Object.assign(Lib, keep);
+  Lib._hass = null;
+}
+
+/* The editor: a destination list still loading for BKK when MÁV is
+   switched on (and the same stop picked again) is the old mode's. It must
+   not block MÁV's own load, nor be offered: picking from it saved BKK
+   route ids on a MÁV card. */
+{
+  const keep = {
+    reachableDests: Lib.reachableDests, probeApiKey: Lib.probeApiKey,
+    apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+  };
+  const calls = [];
+  Lib.reachableDests = (ix, key, cache, stop, mode) => new Promise((r) => calls.push({ mode, r }));
+  Lib.probeApiKey = async () => ({ ok: true });
+  Lib.apiKeyFromDashboard = async () => '';
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  let cfg = { type: 'custom:hungarian-transport-card', stopId: '', stopName: '', destKey: '', destName: '', routeIds: [] };
+  ed.addEventListener('config-changed', (e) => { cfg = e.detail.config; ed.setConfig(cfg); });
+  ed.hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {}, elvira_between: {} } }, connection: {} };
+  ed.setConfig(cfg);
+  const stop = { id: 'BKK_F00001', name: 'Kelenföld vasútállomás' };
+  ed._pickStop(stop, 'origin');
+  await settleTicks();
+  ed.querySelector('#mav').checked = true;
+  ed._onModeToggle('mav');
+  await settleTicks();
+  ed._pickStop(stop, 'origin');
+  await settleTicks();
+  const modes = calls.map((c) => c.mode);
+  calls[0].r({ dests: [{ key: 'deli', name: 'Déli (BKK)' }], destRoutes: { deli: ['BKK_0050'] } });
+  await settleTicks();
+  const afterOld = ed._dests.map((d) => d.name);
+  if (calls[1]) calls[1].r({ dests: [{ key: 'szekesfehervar', name: 'Székesfehérvár' }], destRoutes: { szekesfehervar: ['BKK_MAV40'] } });
+  await settleTicks();
+  if (ed._dests[0]) ed._pickStop(ed._dests[0], 'dest');
+  await settleTicks();
+  check('a mode switch drops the destination list still loading for the old mode',
+    modes.length === 2 && modes[1] === 'mav' && afterOld.length === 0
+    && cfg.mav === true && JSON.stringify(cfg.routeIds) === '["BKK_MAV40"]',
+    JSON.stringify({ modes, afterOld, mav: cfg.mav, routeIds: cfg.routeIds }));
+  ed.remove();
+  Object.assign(Lib, keep);
+  Lib._hass = null;
+}
+
+/* The day picker's "ma" and "holnap" past Budapest midnight: the tick
+   paints them for the new day, so "ma" and a time picked under it plan
+   today, not yesterday. The planned time stays picked, now as a date. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 50); /* 23:50 in Budapest (CET) */
+  Date.now = () => now;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    document.body.appendChild(pc);
+    await settleTicks();
+    pc._planner.at = async () => [];
+    pc._planner.now = async () => null;
+    pc._setWhen('depart');
+    await settleTicks();
+    const day = pc.shadowRoot.getElementById('pday');
+    const time = pc.shadowRoot.getElementById('ptime');
+    const label = (ymd) => ([...day.options].find((o) => o.value === ymd) || {}).textContent;
+    const before = label('20261115');
+    now += 20 * 60000; /* 00:10 on the 16th */
+    pc._tickPaint();
+    const today = label('20261116');
+    const kept = day.value;
+    const old = label('20261115');
+    /* The user picks the option that reads "ma". */
+    day.value = ([...day.options].find((o) => o.textContent === i18nT('hu', 'plannerToday')) || {}).value;
+    time.value = String(8 * 60);
+    time.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 350));
+    check('past Budapest midnight the tick paints "ma" for the new day and keeps the planned day picked',
+      before === i18nT('hu', 'plannerToday') && today === i18nT('hu', 'plannerToday')
+      && kept === '20261115' && !!old && old !== i18nT('hu', 'plannerToday'),
+      JSON.stringify({ before, today, kept, old }));
+    check('"ma" 08:00 picked after midnight plans today, not yesterday',
+      new Date(pc._plan.when.at).toISOString() === '2026-11-16T07:00:00.000Z',
+      new Date(pc._plan.when.at).toISOString());
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* A failed poll keeps the rows it had, and with them their last GPS fix:
+   the open map stops calling it live and the timetable places the
+   vehicle until a poll brings a fresh one. */
+{
+  const made = [];
+  const layer = () => ({ addTo() { return this; }, setLatLng(p) { this.pt = p; }, setIcon(i) { this.html = i.html; }, redraw() {} });
+  const fakeMap = { setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {} };
+  const prevL = window.L;
+  window.L = {
+    map: () => fakeMap, tileLayer: () => layer(), divIcon: (o) => o,
+    marker: (pt, o) => { const m = Object.assign(layer(), { pt, html: o.icon.html }); made.push(m); return m; },
+    polyline: () => layer(), latLngBounds: () => ({ extend() {} }),
+  };
+  const prevRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  const keepBoard = Lib.nextBoard;
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c._reloadSafe = () => {};
+  c.setConfig({ language: 'hu', mav: true, stopId: 'BKK_005501024', stopName: 'Kelenföld', destKey: 'szekesfehervar', destName: 'Székesfehérvár' });
+  c._hasFutar = () => true;
+  const nowS = Math.floor(Date.now() / 1000);
+  c._loadRowMapShape = async () => ({ shape: [[47.47, 19.02], [47.30, 18.60], [47.19, 18.41]], board: [47.47, 19.02], alight: [47.19, 18.41] });
+  c._rowTimedStops = async () => [
+    { pt: [47.47, 19.02], arr: nowS - 600, dep: nowS - 600 },
+    { pt: [47.30, 18.60], arr: nowS + 600, dep: nowS + 600 },
+    { pt: [47.19, 18.41], arr: nowS + 1800, dep: nowS + 1800 },
+  ];
+  const liveRaw = { tripId: 'BKK_9051_7', label: 'IC', head: 'Szombathely', rawType: 'RAIL', dep: nowS - 600, sched: nowS - 600, trainNumber: '905', lat: 47.25, lon: 18.55 };
+  const live = Lib.asRow(liveRaw, 'Székesfehérvár', 'hu');
+  c._rawRows = [liveRaw];
+  c._rows = [live];
+  await c._openVehicleMap(live);
+  const foot = () => (document.querySelector('.ht-map-overlay .ht-map-foot') || {}).textContent || '';
+  const footBefore = foot();
+  Lib.nextBoard = async (poll) => {
+    const cur = poll.board();
+    poll.show({ phase: 'failed', rows: cur.rows, banner: 'FUTÁR down', loading: false, filled: false, quiet: false });
+  };
+  try {
+    await c._reload();
+    await settleTicks();
+    const dot = c._mapMarker;
+    check('a failed poll stops showing the open map\'s last fix as live',
+      footBefore.includes('Élő pozíció') && !foot().includes('Élő pozíció') && foot().includes('Becsült pozíció')
+      && !!dot && dot.html.includes('ht-veh-dot-est') && !c._mapState.hasGps,
+      JSON.stringify({ before: footBefore, after: foot(), html: dot && dot.html.slice(0, 60) }));
+  } finally {
+    Lib.nextBoard = keepBoard;
+    c._closeVehicleMap();
+    c.remove();
+    window.L = prevL;
+    globalThis.requestAnimationFrame = prevRaf;
+  }
+}
+
+/* The planner's search errors are its own: a search does not drop the
+   board's banner, and a failed search's banner goes once a search
+   succeeds or after a while, not only on the next pick. */
+{
+  const keep = {
+    nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+    searchPlannerStops: Lib.searchPlannerStops, reachableDests: Lib.reachableDests,
+  };
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async (poll) => {
+      poll.show({ phase: 'failed', rows: [], banner: Object.assign(new Error('x'), { code: 'futar_rate_limited' }), loading: false, filled: false, quiet: false });
+    };
+    Lib.apiKeyFromDashboard = async () => '';
+    Lib.reachableDests = async () => ({ dests: [], destRoutes: {} });
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc.hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } }, connection: {} };
+    pc._planner.now = async () => null;
+    document.body.appendChild(pc);
+    await settleTicks();
+    const banner = () => {
+      const el = pc._elErr;
+      return el && el.style.display !== 'none' ? el.textContent : '';
+    };
+    const boardBanner = banner();
+    Lib.searchPlannerStops = async () => [{ id: 'BKK_F00009', name: 'Deák Ferenc tér' }];
+    await pc._searchOrigin('Deák');
+    pc._paint();
+    const afterSearch = banner();
+    Lib.searchPlannerStops = async () => { throw new Error('search broke'); };
+    await pc._searchOrigin('Deák');
+    const failed = banner();
+    Lib.searchPlannerStops = async () => [{ id: 'BKK_F00009', name: 'Deák Ferenc tér' }];
+    await pc._searchOrigin('Deák');
+    const recovered = banner();
+    Lib.searchPlannerStops = async () => { throw new Error('search broke'); };
+    await pc._searchOrigin('Deák');
+    now += 31 * 1000;
+    pc._tickPaint();
+    const aged = banner();
+    check('a stop search keeps the board\'s error banner up',
+      !!boardBanner && afterSearch === boardBanner, JSON.stringify({ boardBanner, afterSearch }));
+    check('a failed search shows its error beside the board\'s, gone after a search that succeeds or half a minute',
+      failed.includes(boardBanner) && failed.length > boardBanner.length
+      && recovered === boardBanner && aged === boardBanner,
+      JSON.stringify({ failed, recovered, aged }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* The editor: an integration gone for a moment (an entry reload) and back
    probes its key again, not taken as refused with the key field left up. */
 {
@@ -10579,7 +10847,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   });
   Lib._rtCache.clear();
   Lib._rtNoFeed.clear();
-  Lib._rtDownUntil = 0;
+  Lib._rtFeeds.clear();
   const changed = await Lib.attachRealtime(hass, [gtfsRow], { mode: 'volan' });
   const sent = calls[0] && calls[0].service_data;
   check('the card calls hungarian_transport.realtime once with the row’s trip',
@@ -10747,16 +11015,93 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   } finally {
     Date.now = keepNow;
     console.warn = keepWarn;
-    Lib._rtDownUntil = 0;
-    Lib._rtFails = 0;
-    Lib._rtLastFailAt = 0;
-    Lib._rtWarned = false;
+    Lib._rtFeeds.clear();
   }
   check('a failing realtime call is warned about once and paused only after three failed polls in a row',
     callsInRound === 2 && callsAfterOne === 3 && calls.length === 4 && warned === 1,
     JSON.stringify({ callsInRound, callsAfterOne, calls: calls.length, warned }));
   Lib._rtKnown.clear();
   Lib._rtCache.clear();
+}
+
+/* GTFS-Realtime per feed (realtime.js): one feed answering does not end
+   another's failure streak, so the feed that keeps rejecting is paused
+   and warned about once, while the one that answers is still asked. */
+{
+  const keepCall = Lib.callServiceResponse;
+  const keepWarn = console.warn;
+  const keepNow = Date.now;
+  const asked = { a: 0, b: 0 };
+  let warned = 0;
+  const hass = { services: { hungarian_transport: { realtime: {} } } };
+  Lib._rtFeeds.clear();
+  Lib._rtCache.clear();
+  Lib._rtNoFeed.clear();
+  Lib.callServiceResponse = async (_h, _d, _s, data) => {
+    asked[data.feed] += 1;
+    if (data.feed === 'b') throw new Error('feed b rejects');
+    return { response: { trips: {} } };
+  };
+  console.warn = () => { warned += 1; };
+  const t0 = keepNow();
+  try {
+    for (let i = 0; i < 10; i += 1) {
+      Date.now = () => t0 + i * 30000;
+      /* b fails first, then a answers: a's answer used to end b's streak. */
+      await Promise.all([
+        Lib.realtimeFetch(hass, 'b', [{ key: 'k' + i }]),
+        Lib.realtimeFetch(hass, 'a', [{ key: 'k' + i }]),
+      ]);
+    }
+  } finally {
+    Date.now = keepNow;
+    console.warn = keepWarn;
+    Lib.callServiceResponse = keepCall;
+    Lib._rtFeeds.clear();
+    Lib._rtCache.clear();
+  }
+  check('a realtime feed that keeps rejecting is paused after three polls and warned about once, while another feed answers',
+    asked.b === 3 && asked.a === 10 && warned === 1, JSON.stringify({ asked, warned }));
+}
+
+/* Transitous in an outage (transitous.js): an empty card's fill polls it
+   no more than every minute and a half, geocodes included, and asks again
+   once that has passed. */
+{
+  const keepFetch = Lib.transitousFetch;
+  const keepNow = Date.now;
+  const t0 = keepNow();
+  let requests = 0;
+  Lib._geocodeCache.clear();
+  Lib._geocodeEmptyAt.clear();
+  Lib._geocodeFailedAt.clear();
+  Lib._transitousEmptyAt.clear();
+  Lib._transitousFailed.clear();
+  Lib.transitousFetch = async () => { requests += 1; throw new Error('Transitous timeout'); };
+  const o = { id: 'x', name: 'Kossuth tér' };
+  const d = { key: 'piac', name: 'Piac tér' };
+  const results = [];
+  let inPause = 0;
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      Date.now = () => t0 + i * 20000;
+      results.push(await Lib.fillTransitousIfEmpty([], o, d, { mode: 'bkk' }));
+    }
+    inPause = requests;
+    Date.now = () => t0 + 91 * 1000;
+    results.push(await Lib.fillTransitousIfEmpty([], o, d, { mode: 'bkk' }));
+    /* A second failure in a row waits twice as long. */
+    Date.now = () => t0 + (91 + 120) * 1000;
+    results.push(await Lib.fillTransitousIfEmpty([], o, d, { mode: 'bkk' }));
+  } finally {
+    Date.now = keepNow;
+    Lib.transitousFetch = keepFetch;
+    Lib._geocodeCache.clear();
+    Lib._geocodeFailedAt.clear();
+    Lib._transitousFailed.clear();
+  }
+  check('five polls of an empty card in a Transitous outage send its two geocodes once, and ask again after the pause',
+    inPause === 2 && requests === 4 && results.every((r) => r === null), JSON.stringify({ inPause, requests, results }));
 }
 
 process.exit(failed ? 1 : 0);

@@ -856,6 +856,20 @@ def test_longest_run() -> None:
     assert longest_run([GEMENC], GOCSEJ_ARR, TZ) is None
 
 
+@pytest.mark.parametrize(("dep", "arr"), [
+    ("9999-12-31T20:00:00", "9999-12-31T21:00:00"),
+    ("1999-12-31T22:00:00", "1999-12-31T23:00:00"),
+    ("2101-01-01T08:00:00", "2101-01-01T09:00:00"),
+])
+def test_a_run_in_an_impossible_year_is_skipped_not_an_overflow(dep, arr) -> None:
+    """Near 9999, start + MAX_TRAVEL overflows: that run goes, the train's
+    other run stays."""
+    odd = dict(GOCSEJ, start=dep, actualOrEstimatedStart=dep)
+    darr = [*GOCSEJ_ARR, dict(GOCSEJ_ARR[0], arrive=arr)]
+    assert longest_run([odd, GOCSEJ], darr, TZ) == timedelta(minutes=62)
+    assert [(r["trainNumber"], r["travel"]) for r in _rows([odd, GOCSEJ], darr)] == [("966", 62)]
+
+
 def test_a_past_arrival_of_the_same_code_is_no_destination_hit() -> None:
     stale = [{"trainId": "morning-other", "code": "966", "arrive": EVENING.replace(hour=8, minute=10).strftime(FMT)}]
     (row,) = _rows([GOCSEJ], stale, dest_name="Kelenföld")
