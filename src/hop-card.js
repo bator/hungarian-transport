@@ -1457,15 +1457,18 @@ ${this._stopPinCss()}
   }
 
   /* A poll moves the vehicle on the open map, and puts it there once GPS
-     shows up for a row that had none when the map opened. */
-  _syncOpenMap() {
+     shows up for a row that had none when the map opened. After a failed
+     poll (noFix) the row's position is the one an earlier poll got, so it
+     counts as gone silent: the timetable places the vehicle until a poll
+     brings a fresh fix. */
+  _syncOpenMap(noFix) {
     const st = this._mapState;
     if (!this._map || !this._openMapKey || !st) return;
     const row = this._findMapRow(this._mapRef, this._rows || []);
     if (row) this._mapRow = row;
     /* The row has left the board (departed): the dashed marker still runs
        on the times it had. */
-    if (!row || !row.hasGps) {
+    if (!row || !row.hasGps || noFix) {
       /* A vehicle that reported a position and went silent, or left the
          board with it: its last fix is not live any more; the timetable
          places it (from the row as last listed), or nothing does. */
@@ -1561,6 +1564,9 @@ ${this._stopPinCss()}
       }
       if (board.phase === 'place' || board.phase === 'settled') this._boardSettled();
       if (board.phase === 'done') this._syncOpenMap();
+      /* A failed poll keeps the rows it had, and with them their last GPS
+         fix: the open map must not go on showing it as live. */
+      if (board.phase === 'failed') this._syncOpenMap(true);
     };
     const run = () => BkkLib.nextBoard({
       ctx: this._ctx,

@@ -9535,6 +9535,62 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   }
 }
 
+/* A failed poll keeps the rows it had, and with them their last GPS fix:
+   the open map stops calling it live and the timetable places the
+   vehicle until a poll brings a fresh one. */
+{
+  const made = [];
+  const layer = () => ({ addTo() { return this; }, setLatLng(p) { this.pt = p; }, setIcon(i) { this.html = i.html; }, redraw() {} });
+  const fakeMap = { setView() { return this; }, invalidateSize() {}, fitBounds() {}, removeLayer() {}, remove() {}, on() {} };
+  const prevL = window.L;
+  window.L = {
+    map: () => fakeMap, tileLayer: () => layer(), divIcon: (o) => o,
+    marker: (pt, o) => { const m = Object.assign(layer(), { pt, html: o.icon.html }); made.push(m); return m; },
+    polyline: () => layer(), latLngBounds: () => ({ extend() {} }),
+  };
+  const prevRaf = globalThis.requestAnimationFrame;
+  globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
+  const keepBoard = Lib.nextBoard;
+  const c = document.createElement('hungarian-transport-card');
+  document.body.appendChild(c);
+  c._reloadSafe = () => {};
+  c.setConfig({ language: 'hu', mav: true, stopId: 'BKK_005501024', stopName: 'Kelenföld', destKey: 'szekesfehervar', destName: 'Székesfehérvár' });
+  c._hasFutar = () => true;
+  const nowS = Math.floor(Date.now() / 1000);
+  c._loadRowMapShape = async () => ({ shape: [[47.47, 19.02], [47.30, 18.60], [47.19, 18.41]], board: [47.47, 19.02], alight: [47.19, 18.41] });
+  c._rowTimedStops = async () => [
+    { pt: [47.47, 19.02], arr: nowS - 600, dep: nowS - 600 },
+    { pt: [47.30, 18.60], arr: nowS + 600, dep: nowS + 600 },
+    { pt: [47.19, 18.41], arr: nowS + 1800, dep: nowS + 1800 },
+  ];
+  const liveRaw = { tripId: 'BKK_9051_7', label: 'IC', head: 'Szombathely', rawType: 'RAIL', dep: nowS - 600, sched: nowS - 600, trainNumber: '905', lat: 47.25, lon: 18.55 };
+  const live = Lib.asRow(liveRaw, 'Székesfehérvár', 'hu');
+  c._rawRows = [liveRaw];
+  c._rows = [live];
+  await c._openVehicleMap(live);
+  const foot = () => (document.querySelector('.ht-map-overlay .ht-map-foot') || {}).textContent || '';
+  const footBefore = foot();
+  Lib.nextBoard = async (poll) => {
+    const cur = poll.board();
+    poll.show({ phase: 'failed', rows: cur.rows, banner: 'FUTÁR down', loading: false, filled: false, quiet: false });
+  };
+  try {
+    await c._reload();
+    await settleTicks();
+    const dot = c._mapMarker;
+    check('a failed poll stops showing the open map\'s last fix as live',
+      footBefore.includes('Élő pozíció') && !foot().includes('Élő pozíció') && foot().includes('Becsült pozíció')
+      && !!dot && dot.html.includes('ht-veh-dot-est') && !c._mapState.hasGps,
+      JSON.stringify({ before: footBefore, after: foot(), html: dot && dot.html.slice(0, 60) }));
+  } finally {
+    Lib.nextBoard = keepBoard;
+    c._closeVehicleMap();
+    c.remove();
+    window.L = prevL;
+    globalThis.requestAnimationFrame = prevRaf;
+  }
+}
+
 /* The editor: an integration gone for a moment (an entry reload) and back
    probes its key again, not taken as refused with the key field left up. */
 {
