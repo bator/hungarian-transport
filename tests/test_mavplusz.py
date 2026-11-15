@@ -392,6 +392,44 @@ async def test_a_slow_planner_round_falls_back_to_jbb(aioclient_mock, monkeypatc
     assert len(_calls(aioclient_mock, "post")) == 1
 
 
+async def test_a_hung_planner_request_backs_off_like_a_failed_one(aioclient_mock, monkeypatch, caplog) -> None:
+    """The round's deadline cuts a request that never answers before
+    aiohttp's own timeout would: that is an outage too, so the next polls
+    within FAIL_BACKOFF read the jbb feeds without posting again."""
+    monkeypatch.setattr(realtime, "PLANNER_TIMEOUT", 0.05)
+
+    async def hang(method, url, data):
+        await asyncio.sleep(5)
+
+    aioclient_mock.post(mavplusz.URL, side_effect=hang)
+    _jbb(aioclient_mock)
+    hub, session, clock = await _hub(aioclient_mock, _cfg(), wall=JBB_WALL)
+    for _ in range(3):
+        resp = await asyncio.wait_for(hub.query("v", [SZFV_REQ]), 2)
+        assert resp["trips"]["s"]["delay"] == 190
+        clock.now += 1
+    await session.close()
+    assert len(_calls(aioclient_mock, "post")) == 1
+    assert hub._mav_retry_at > clock.now
+    assert caplog.text.count("unavailable") == 1 and "no answer within 0.05 s" in caplog.text
+    assert hub._mav_cut is None
+
+
+async def test_a_round_spent_waiting_for_the_lock_is_no_outage(aioclient_mock, monkeypatch, caplog) -> None:
+    """Only a request of this round that hung backs off: waiting for another
+    card's one past the deadline does not."""
+    monkeypatch.setattr(realtime, "PLANNER_TIMEOUT", 0.05)
+    aioclient_mock.post(mavplusz.URL, side_effect=Planner())
+    _jbb(aioclient_mock)
+    hub, session, _clock = await _hub(aioclient_mock, _cfg(), wall=JBB_WALL)
+    async with hub._mav_lock:
+        resp = await asyncio.wait_for(hub.query("v", [SZFV_REQ]), 2)
+    await session.close()
+    assert resp["trips"]["s"]["delay"] == 190
+    assert hub._mav_retry_at < 0 and "unavailable" not in caplog.text
+    assert not _calls(aioclient_mock, "post")
+
+
 async def test_a_planner_outage_is_logged_once_backs_off_and_recovers_once(aioclient_mock, caplog) -> None:
     aioclient_mock.post(mavplusz.URL, status=503)
     _jbb(aioclient_mock)

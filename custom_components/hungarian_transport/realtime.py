@@ -600,6 +600,9 @@ class RealtimeHub:
         # Per (route, date): (monotonic expiry, its trip ids or None).
         self._mav_route_cache: dict[tuple[str, str], tuple[float, tuple[str, ...] | None]] = {}
         self._mav_retry_at = -1e18
+        # The task whose planner request was cancelled in flight (_mav_post),
+        # until its bounded() reads whether the round's deadline did it.
+        self._mav_cut: asyncio.Task[Any] | None = None
 
     async def _run(self, func: Callable[..., Any], *args: Any) -> Any:
         if self._executor is None:
@@ -788,11 +791,31 @@ class RealtimeHub:
         deadline = loop.time() + PLANNER_TIMEOUT
 
         async def bounded(coro: Coroutine[Any, Any, Any]) -> Any:
-            try:
-                return await asyncio.wait_for(coro, max(0.0, deadline - loop.time()))
-            except asyncio.TimeoutError:
+            left = deadline - loop.time()
+            if left <= 0:
+                # Spent on the route list: no request is begun only to be
+                # cut at once.
+                coro.close()
                 _LOGGER.debug("Realtime source %s: no answer within %s s", mavplusz.URL, PLANNER_TIMEOUT)
                 return None
+            task = asyncio.current_task()
+            try:
+                # In this task (not wait_for's), so _mav_post can say its
+                # request was the one cut.
+                async with asyncio.timeout(left):
+                    return await coro
+            except TimeoutError:
+                if self._mav_cut is task:
+                    # The request itself hung, which aiohttp's own timeout
+                    # (as long as the round) never got to report: back off as
+                    # from any failure, rather than post again every poll.
+                    self._mav_failed(f"no answer within {PLANNER_TIMEOUT} s")
+                else:
+                    _LOGGER.debug("Realtime source %s: no answer within %s s", mavplusz.URL, PLANNER_TIMEOUT)
+                return None
+            finally:
+                if self._mav_cut is task:
+                    self._mav_cut = None
 
         listed = await bounded(self._mav_routes(list(dict.fromkeys(route_keys.values())))) if route_keys else {}
         cands: dict[tuple[int, int], list[mavplusz.TripKey]] = {}
@@ -889,15 +912,25 @@ class RealtimeHub:
             return None
         try:
             result = parse(await mavplusz.fetch(self._session, body))
+        except asyncio.CancelledError:
+            # The round's deadline (bounded) or a caller gone: which one,
+            # only bounded knows.
+            self._mav_cut = asyncio.current_task()
+            raise
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError, TypeError) as err:
-            self._mav_retry_at = self._monotonic() + FAIL_BACKOFF
-            self._outages.failed(
-                MAVPLUSZ_OUTAGE, "Realtime source %s unavailable: %s; reading the GTFS-Realtime feeds",
-                mavplusz.URL, err or type(err).__name__,
-            )
+            self._mav_failed(err or type(err).__name__)
             return None
         self._outages.answered(MAVPLUSZ_OUTAGE, "Realtime source %s answers again", mavplusz.URL)
         return result
+
+    def _mav_failed(self, err: Any) -> None:
+        """A planner request failed: no other for FAIL_BACKOFF, one log line
+        per outage."""
+        self._mav_retry_at = self._monotonic() + FAIL_BACKOFF
+        self._outages.failed(
+            MAVPLUSZ_OUTAGE, "Realtime source %s unavailable: %s; reading the GTFS-Realtime feeds",
+            mavplusz.URL, err,
+        )
 
     async def _mav_routes(
         self, keys: list[mavplusz.RouteKey]
