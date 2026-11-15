@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import aiohttp
@@ -82,27 +82,55 @@ FUTAR_MIN_TIMEOUT_SEC = 1.0
 # then one call asks again, so a 401 given by mistake (an upstream hiccup)
 # does not switch FUTÁR off until Home Assistant restarts.
 REJECTED_RETRY = 15 * 60
-# An answer is read into memory before it is parsed: one larger than this is
-# refused while it is read, as an outage. json.loads then runs on the event
-# loop (an executor would not help: the C decoder holds the GIL), about 10 ms
-# per MB on a laptop, several times that on a Raspberry Pi, so this caps one
-# answer's stall and FUTAR_RATE how often it can come. It is not lower
-# because the largest answer the cards ask for is not small: schedule-for-
-# stop.json of a parent station (departures.js, its child stops) holds the
-# whole day of every child stop, about 200 bytes a stop time and 230 a trip
-# reference, so a hub with 6000-8000 departures a day answers an estimated
-# 2.5-3.5 MB. A cap of 4 MB would leave such a hub too little margin, and a
-# refused answer fails the same way on every try. The other answers are far
-# smaller: route-details and plan-trip tens to a few hundred kB, a stop's
-# board less than that.
+# An answer is read into memory before it is decoded: one larger than this is
+# refused while it is read, as an outage, so this caps one answer's decoding
+# and FUTAR_RATE how often it can come. It is not lower because the largest
+# answer the cards ask for is not small: schedule-for-stop.json of a parent
+# station (departures.js, its child stops) holds the whole day of every child
+# stop, about 200 bytes a stop time and 230 a trip reference, so a hub with
+# 6000-8000 departures a day answers an estimated 2.5-3.5 MB. A cap of 4 MB
+# would leave such a hub too little margin, and a refused answer fails the
+# same way on every try. The other answers are far smaller: route-details and
+# plan-trip tens to a few hundred kB, a stop's board less than that.
 FUTAR_MAX_BYTES = 8 * 1024 * 1024
 FUTAR_READ_CHUNK = 65536
+# An answer this large or larger is decoded in the executor (_decode); a
+# smaller one, nearly every answer, on the event loop, where a few ms of
+# json.loads cost less than the hand-off to a thread. json.loads takes about
+# 10 ms per MB on a laptop, several times that on a Raspberry Pi, and holds
+# the GIL while it runs in C, so the executor alone would not keep the loop
+# going: the hook _decode gives it is called back for every object, and the
+# interpreter switches to the loop in between. On a 7.4 MB body that cut the
+# loop's longest stall from about 107 ms to about 20 ms, for a decoding a
+# fifth to a third longer (elvira._parse_board does the same).
+FUTAR_EXECUTOR_BYTES = 512 * 1024
+# executor(func, *args): func(*args) off the event loop (Home Assistant's
+# hass.async_add_executor_job); the loop's default executor without one.
+Executor = Callable[..., Awaitable[Any]]
 
 
 def futar_timeout(waited: float = 0.0) -> aiohttp.ClientTimeout:
     """The upstream call's timeout after waited seconds of the card's budget."""
     total = CARD_TIMEOUT_SEC - FUTAR_MARGIN_SEC - max(waited, 0.0)
     return aiohttp.ClientTimeout(total=max(total, FUTAR_MIN_TIMEOUT_SEC))
+
+
+def _object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """An object of the answer, the same dict json.loads makes of it. Being
+    Python, the call is where the interpreter can switch to the event loop
+    while a large answer is decoded in the executor (FUTAR_EXECUTOR_BYTES)."""
+    return dict(pairs)
+
+
+def _decode(body: bytes) -> Any:
+    """A large answer, decoded with _object called back for every object."""
+    return json.loads(body, object_pairs_hook=_object)
+
+
+def _in_executor(executor: Executor | None, func: Callable[..., Any], *args: Any) -> Awaitable[Any]:
+    if executor is not None:
+        return executor(func, *args)
+    return asyncio.get_running_loop().run_in_executor(None, func, *args)
 
 
 class FutarError(Exception):
@@ -153,8 +181,11 @@ async def futar_get(
     path: str,
     params: dict[str, Any],
     timeout: aiohttp.ClientTimeout | None = None,
+    *,
+    executor: Executor | None = None,
 ) -> dict:
     """One FUTÁR request, by default with the card's whole budget (futar_timeout).
+    An answer of FUTAR_EXECUTOR_BYTES or more is decoded in `executor`.
     Raises FutarError; the key never appears in errors."""
     query = {str(k): str(v) for k, v in (params or {}).items() if k != "key"}
     query.update({"key": api_key, "version": "4", "appVersion": "apiary-1.0"})
@@ -178,7 +209,11 @@ async def futar_get(
                 if total > FUTAR_MAX_BYTES:
                     raise FutarError(f"answer over {FUTAR_MAX_BYTES} bytes")
                 chunks.append(chunk)
-        data = json.loads(b"".join(chunks))
+        body = b"".join(chunks)
+        if len(body) < FUTAR_EXECUTOR_BYTES:
+            data = json.loads(body)
+        else:
+            data = await _in_executor(executor, _decode, body)
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
         raise FutarError(type(err).__name__) from None
     if not isinstance(data, dict):
@@ -203,7 +238,8 @@ class FutarProxy:
 
     `monotonic` is the clock of the cache, the rate limit and the rejected
     key; `sleep` is the one a call waits for a token with. `burst` is the
-    rate limit's (FUTAR_BURST). `on_accepted` is called when FUTÁR first
+    rate limit's (FUTAR_BURST). `executor` decodes the large answers
+    (futar_get). `on_accepted` is called when FUTÁR first
     accepts the key, and again whenever it accepts it after rejecting it
     (the rejection was a mistake): a reauth started before this proxy (by
     the one a reload replaced) is answered by a key that works as well.
@@ -220,8 +256,10 @@ class FutarProxy:
         sleep: upstream.Sleep = upstream.sleep,
         burst: int = FUTAR_BURST,
         on_accepted: Callable[[], None] | None = None,
+        executor: Executor | None = None,
     ) -> None:
         self._session = session
+        self._executor = executor
         self._on_accepted = on_accepted
         # Whether FUTÁR has accepted the key since this proxy was made.
         self._accepted = False
@@ -263,7 +301,9 @@ class FutarProxy:
         # The summed sleeps, or the clock when a busy event loop took longer.
         waited = max(slept, self._monotonic() - started)
         rejections = self._rejections
-        data = await futar_get(self._session, self._api_key, path, params, futar_timeout(waited))
+        data = await futar_get(
+            self._session, self._api_key, path, params, futar_timeout(waited), executor=self._executor
+        )
         # Only an answer from FUTÁR itself ends an outage: a cache hit for
         # another request proves nothing, and clearing the state on one made
         # the log flap between "unavailable" and "answers again".

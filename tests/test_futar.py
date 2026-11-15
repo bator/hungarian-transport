@@ -7,6 +7,7 @@ from datetime import timedelta
 import re
 from pathlib import Path
 import logging
+import threading
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
@@ -15,6 +16,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
@@ -327,7 +329,7 @@ async def test_only_the_first_answer_of_a_proxy_looks_for_a_reauth(monkeypatch) 
     clock = FakeClock()
     rejected = False
 
-    async def fake_get(session, api_key, path, params, timeout=None):
+    async def fake_get(session, api_key, path, params, timeout=None, *, executor=None):
         if rejected:
             raise futar.FutarAuthError("HTTP 401")
         return {"status": "OK", "data": {}}
@@ -473,7 +475,7 @@ async def test_upstream_timeout_is_what_is_left_of_the_card_budget(monkeypatch, 
     clock = FakeClock(busy=busy)
     seen: list[float] = []
 
-    async def fake_get(session, api_key, path, params, timeout=None):
+    async def fake_get(session, api_key, path, params, timeout=None, *, executor=None):
         seen.append(timeout.total)
         return {"status": "OK", "data": {}}
 
@@ -567,7 +569,7 @@ async def test_answer_to_a_request_sent_before_a_rejection_keeps_it(monkeypatch,
     gate = asyncio.Event()
     calls: list[str] = []
 
-    async def fake_get(session, api_key, path, params, timeout=None):
+    async def fake_get(session, api_key, path, params, timeout=None, *, executor=None):
         calls.append(path)
         if path == "plan-trip.json":
             await gate.wait()
@@ -652,3 +654,65 @@ async def test_an_answer_over_the_byte_cap_is_an_outage_not_read_whole(hass, aio
     resp = await _call(hass, params={"query": "Big"})
     assert resp == {"data": None, "error": "futar_unavailable", "detail": "answer over 100 bytes"}
     assert (await _call(hass, params={"query": "Small"}))["data"]["data"] == {"list": ["x" * 20]}
+
+
+def _schedule_answer(times: int) -> str:
+    """A schedule-for-stop.json-like answer as FUTÁR sends it, with a key
+    given twice (the last one counts) and text that is not ASCII."""
+    entry = '{"stopId": "BKK_F0%04d", "headsign": "Örs vezér tere", "arrivalTime": %d, "stopId": "BKK_%04d"}'
+    rows = ", ".join(entry % (i, 1_800_000_000 + i, i) for i in range(times))
+    return '{"status": "OK", "data": {"entry": {"schedules": [%s]}, "references": {"trips": {}}}}' % rows
+
+
+async def test_a_large_answer_is_decoded_off_the_event_loop_with_the_same_result(hass, aioclient_mock, monkeypatch) -> None:
+    """json.loads used to run on the event loop for every answer, a parent
+    station's day of several MB too. An answer of FUTAR_EXECUTOR_BYTES or
+    more is decoded in the executor, with a Python hook per object (the
+    C decoder alone holds the GIL against the loop); a smaller one stays on
+    the loop. Either way the data is what json.loads makes of it."""
+    loop_thread = threading.get_ident()
+    threads: list[int] = []
+    real_object = futar._object
+
+    def spy(pairs):
+        threads.append(threading.get_ident())
+        return real_object(pairs)
+
+    monkeypatch.setattr(futar, "_object", spy)
+    large, small = _schedule_answer(6000), _schedule_answer(20)
+    assert len(large.encode()) >= futar.FUTAR_EXECUTOR_BYTES > len(small.encode())
+    aioclient_mock.get(SEARCH, params={"query": "Large"}, text=large)
+    aioclient_mock.get(SEARCH, text=small)
+    session = async_get_clientsession(hass)
+
+    assert await futar.futar_get(session, "secret-key", "search.json", {"query": "Large"}) == json.loads(large)
+    assert threads and all(thread != loop_thread for thread in threads)
+
+    threads.clear()
+    assert await futar.futar_get(session, "secret-key", "search.json", {"query": "Small"}) == json.loads(small)
+    assert threads == []
+
+    # The executor given is the one used (Home Assistant's in production).
+    used: list[str] = []
+
+    async def executor(func, *args):
+        used.append(func.__name__)
+        return func(*args)
+
+    proxy = futar.FutarProxy(session, "secret-key", executor=executor)
+    assert await proxy.get("search.json", {"query": "Large"}) == json.loads(large)
+    assert used == ["_decode"]
+
+
+async def test_the_proxy_decodes_in_home_assistants_executor(hass, aioclient_mock, monkeypatch) -> None:
+    made: dict = {}
+    real = integration.FutarProxy
+
+    def proxy(*args, **kwargs):
+        made.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(integration, "FutarProxy", proxy)
+    await _setup(hass)
+    assert made["executor"] == hass.async_add_executor_job
+

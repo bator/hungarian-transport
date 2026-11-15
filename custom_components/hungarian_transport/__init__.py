@@ -519,6 +519,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         ),
         call_later=hass_call_later(hass),
         on_accepted=_key_accepted,
+        # A parent station's schedule-for-stop.json runs to megabytes: it
+        # is decoded in HA's executor, like ELVIRA's boards.
+        executor=hass.async_add_executor_job,
     )
     entry.async_on_unload(proxy.close)
     entry.async_on_unload(close_on_stop(hass, proxy.close))
