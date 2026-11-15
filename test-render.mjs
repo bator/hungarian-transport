@@ -9442,6 +9442,50 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   Lib._hass = null;
 }
 
+/* The editor: a destination list still loading for BKK when MÁV is
+   switched on (and the same stop picked again) is the old mode's. It must
+   not block MÁV's own load, nor be offered: picking from it saved BKK
+   route ids on a MÁV card. */
+{
+  const keep = {
+    reachableDests: Lib.reachableDests, probeApiKey: Lib.probeApiKey,
+    apiKeyFromDashboard: Lib.apiKeyFromDashboard,
+  };
+  const calls = [];
+  Lib.reachableDests = (ix, key, cache, stop, mode) => new Promise((r) => calls.push({ mode, r }));
+  Lib.probeApiKey = async () => ({ ok: true });
+  Lib.apiKeyFromDashboard = async () => '';
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  let cfg = { type: 'custom:hungarian-transport-card', stopId: '', stopName: '', destKey: '', destName: '', routeIds: [] };
+  ed.addEventListener('config-changed', (e) => { cfg = e.detail.config; ed.setConfig(cfg); });
+  ed.hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {}, elvira_between: {} } }, connection: {} };
+  ed.setConfig(cfg);
+  const stop = { id: 'BKK_F00001', name: 'Kelenföld vasútállomás' };
+  ed._pickStop(stop, 'origin');
+  await settleTicks();
+  ed.querySelector('#mav').checked = true;
+  ed._onModeToggle('mav');
+  await settleTicks();
+  ed._pickStop(stop, 'origin');
+  await settleTicks();
+  const modes = calls.map((c) => c.mode);
+  calls[0].r({ dests: [{ key: 'deli', name: 'Déli (BKK)' }], destRoutes: { deli: ['BKK_0050'] } });
+  await settleTicks();
+  const afterOld = ed._dests.map((d) => d.name);
+  if (calls[1]) calls[1].r({ dests: [{ key: 'szekesfehervar', name: 'Székesfehérvár' }], destRoutes: { szekesfehervar: ['BKK_MAV40'] } });
+  await settleTicks();
+  if (ed._dests[0]) ed._pickStop(ed._dests[0], 'dest');
+  await settleTicks();
+  check('a mode switch drops the destination list still loading for the old mode',
+    modes.length === 2 && modes[1] === 'mav' && afterOld.length === 0
+    && cfg.mav === true && JSON.stringify(cfg.routeIds) === '["BKK_MAV40"]',
+    JSON.stringify({ modes, afterOld, mav: cfg.mav, routeIds: cfg.routeIds }));
+  ed.remove();
+  Object.assign(Lib, keep);
+  Lib._hass = null;
+}
+
 /* The editor: an integration gone for a moment (an entry reload) and back
    probes its key again, not taken as refused with the key field left up. */
 {
