@@ -443,7 +443,8 @@ def _parse_board(body: bytes) -> Board:
     """
     try:
         data = json.loads(body, object_pairs_hook=_read_keys)
-    except ValueError as err:
+    except (ValueError, RecursionError) as err:
+        # RecursionError: nested deeper than the decoder goes, no board either.
         raise ElviraError(type(err).__name__) from None
     details = data.get("stationSchedulerDetails") if isinstance(data, dict) else None
     if not isinstance(details, dict):

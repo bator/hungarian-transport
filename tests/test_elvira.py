@@ -896,6 +896,8 @@ async def test_rows_from_a_kept_board_are_the_whole_board_s() -> None:
         (_Response(body={}), "unexpected response"),
         (_Response(body={"stationSchedulerDetails": None}), "unexpected response"),
         (_Response(body={"message": "Hiba"}), "unexpected response"),
+        # Nested deeper than the decoder goes: RecursionError, not a ValueError.
+        (_Response(body=b"[" * 100_000 + b"]" * 100_000), "RecursionError"),
     ],
 )
 async def test_fetch_station_failures_are_elvira_errors(response, detail) -> None:
