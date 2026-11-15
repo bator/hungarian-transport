@@ -14,6 +14,7 @@ import './src/lib/vehicles.js';
 import './src/lib/rows.js';
 import './src/lib/elvira-rows.js';
 import './src/lib/context.js';
+import './src/lib/departures.js';
 import { elviraSource } from './src/lib/board.js';
 
 /* Row helpers compare departures with the real clock (still due?), so the
@@ -239,7 +240,7 @@ test('a MÁV card whose first ELVIRA answer failed shows the Transitous fill und
   assert.deepEqual(card.phases(), ['listed', 'gps', 'filled', 'settled', 'done']);
 });
 
-test('an empty board is filled from Transitous once; a city board (helyi) is not filled again', async () => {
+test('an empty board is filled from Transitous once, a city board (helyi) as well', async () => {
   const motis = bus('motis:7', 9);
   const bkk = sources({ transitous: async (rows) => ((rows && rows.length) ? rows : [Object.assign({}, motis)]) });
   const card = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), { apiKey: 'k' });
@@ -250,7 +251,7 @@ test('an empty board is filled from Transitous once; a city board (helyi) is not
   const city = sources();
   const helyi = screen(Object.assign({ helyi: true }, KELENFOLD));
   await helyi.poll(city.src);
-  assert.equal(city.count('transitous'), 0);
+  assert.equal(city.count('transitous'), 1);
   /* The planner's mode all: one train only ELVIRA confirms is no reason to
      skip the fill that brings the buses beside it. */
   const all = sources({
@@ -342,6 +343,41 @@ test('a Transitous fill that failed keeps the fill-ins still due instead of blan
   const failing = screen(Object.assign({ apiKey: 'k' }, KELENFOLD), { apiKey: 'k' });
   await failing.poll(sources({ timetables: async () => { throw new Error('HTTP 503'); }, transitous: async () => null }).src);
   assert.deepEqual([ids(failing.board.rows), failing.board.banner.message], ['', 'HTTP 503']);
+});
+
+/* Through the production sources (departures() and the real fill): a
+   city board's fill used to happen inside departures(), where a failed
+   one became an empty list and the board went blank. */
+test('a city board whose Transitous fill failed keeps its fill-ins still due, as every other board', async () => {
+  const keep = { cityDepartures: BkkLib.cityDepartures, transitousDepartures: BkkLib.transitousDepartures };
+  let asked = 0;
+  let answer = [bus('motis:hu-x_12', 10), bus('motis:hu-x_13', 25)];
+  BkkLib.cityDepartures = async () => [];
+  BkkLib.transitousDepartures = async () => { asked += 1; return answer && answer.map((r) => Object.assign({}, r)); };
+  BkkLib._transitousEmptyAt.clear();
+  BkkLib._transitousFailed.clear();
+  const cfg = {
+    helyi: true, city: 'szfv', stopId: 'szfv:1', stopName: 'Kossuth tér', destKey: 'piac', destName: 'Piac', routeIds: [],
+  };
+  const card = screen(cfg);
+  const src = Object.assign(BkkLib.boardSources(BkkLib.cardContext({ cfg: () => cfg, indexes: () => NO_INDEXES })), {
+    coachGps: async (_hass, rows) => rows,
+    realtime: async () => null,
+    sensors: () => {},
+  });
+  try {
+    await card.poll(src);
+    const first = [ids(card.board.rows), card.board.filled];
+    answer = null;
+    card.gen.now += 1;
+    await card.poll(src);
+    assert.deepEqual(first, ['motis:hu-x_12,motis:hu-x_13', true]);
+    assert.deepEqual([ids(card.board.rows), card.board.filled, asked], ['motis:hu-x_12,motis:hu-x_13', true, 2]);
+  } finally {
+    Object.assign(BkkLib, keep);
+    BkkLib._transitousEmptyAt.clear();
+    BkkLib._transitousFailed.clear();
+  }
 });
 
 test('a failed poll keeps the FUTÁR rows still due; an empty, departed or filled board is filled under the banner', async () => {

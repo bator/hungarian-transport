@@ -4898,7 +4898,7 @@ const deferred = () => {
   Lib.volanDepartures = async () => [];
   await v._reload();
   Lib.volanDepartures = keepVolan;
-  check('the hop card leaves a city board’s fill to departures(), and still fills a Volán board itself',
+  check('the hop card fills a city board from Transitous once, and a Volán board as well',
     helyiFills === 1 && fills === 2, JSON.stringify({ helyiFills, fills }));
   if (v._tick) { clearInterval(v._tick); v._tick = null; }
   Lib.fillTransitousIfEmpty = keep.fillTransitousIfEmpty;
@@ -4927,16 +4927,24 @@ const deferred = () => {
   check('an empty fill pauses that pair for ten minutes; another pair, and a fill with rows, ask again',
     paused === 1 && otherPair === 2 && after.length === 1 && plans === 4,
     JSON.stringify({ paused, otherPair, plans, after: after.length }));
-  /* A fill that failed is no empty answer: null, and asked again next poll. */
+  /* A fill that failed is no empty answer: null, and asked again after a
+     short pause, not the ten minutes. */
   Lib._transitousEmptyAt.clear();
+  Lib._transitousFailed.clear();
   plans = 0;
   answer = null;
+  Date.now = () => t0;
   const failedFill = await Lib.fillTransitousIfEmpty([], o, d, opts);
-  answer = [{ label: '7', dep: Math.floor(Date.now() / 1000) + 900 }];
+  answer = [{ label: '7', dep: Math.floor(t0 / 1000) + 900 }];
+  const paused2 = await Lib.fillTransitousIfEmpty([], o, d, opts);
+  const plansPaused = plans;
+  Date.now = () => t0 + 91 * 1000;
   const retried = await Lib.fillTransitousIfEmpty([], o, d, opts);
-  check('a failed Transitous fill returns null and sets no ten-minute pause',
-    failedFill === null && plans === 2 && retried.length === 1,
-    JSON.stringify({ failedFill, plans, retried: retried && retried.length }));
+  Date.now = realNow;
+  Lib._transitousFailed.clear();
+  check('a failed Transitous fill returns null and pauses the pair a minute and a half, not ten minutes',
+    failedFill === null && paused2 === null && plansPaused === 1 && plans === 2 && retried.length === 1,
+    JSON.stringify({ failedFill, paused2, plansPaused, plans, retried: retried && retried.length }));
   Lib.transitousDepartures = keepDeps;
   const keepFetch = Lib.transitousFetch;
   const keepPlace = Lib.transitousPlace;
@@ -4961,14 +4969,23 @@ const deferred = () => {
     if (fail) throw new Error('Transitous timeout');
     return [{ id: 'hu-x', name: 'Y', lat: 47.1, lon: 19.1 }];
   };
-  /* A failed geocode rejects (an outage), it is not "no such stop". */
+  /* A failed geocode rejects (an outage), it is not "no such stop"; it is
+     asked again after a minute and a half, not on the next poll. */
+  Lib._geocodeFailedAt.clear();
+  const geoT0 = realNow();
+  Date.now = () => geoT0;
   const p1 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' }).catch(() => 'rejected');
   fail = false;
+  const p1again = await Lib.transitousPlace({ name: 'Ismeretlen megálló' }).catch(() => 'rejected');
+  Date.now = () => geoT0 + 91 * 1000;
   const p2 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' });
   const p3 = await Lib.transitousPlace({ name: 'Ismeretlen megálló' });
-  check('a geocode answer stays for the page, a failed one is asked again',
-    p1 === 'rejected' && p2 === '47.1,19.1' && p3 === p2 && geo === 2, JSON.stringify({ p1, p2, p3, geo }));
+  Date.now = realNow;
+  check('a geocode answer stays for the page, a failed one is asked again after a minute and a half',
+    p1 === 'rejected' && p1again === 'rejected' && p2 === '47.1,19.1' && p3 === p2 && geo === 2,
+    JSON.stringify({ p1, p1again, p2, p3, geo }));
   Lib._geocodeCache.clear();
+  Lib._geocodeFailedAt.clear();
   Lib._transitousEmptyAt.clear();
   Object.assign(Lib, { cityDepartures: keep.cityDepartures, transitousFetch: keep.transitousFetch });
 }
@@ -10579,7 +10596,7 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   });
   Lib._rtCache.clear();
   Lib._rtNoFeed.clear();
-  Lib._rtDownUntil = 0;
+  Lib._rtFeeds.clear();
   const changed = await Lib.attachRealtime(hass, [gtfsRow], { mode: 'volan' });
   const sent = calls[0] && calls[0].service_data;
   check('the card calls hungarian_transport.realtime once with the row’s trip',
@@ -10747,16 +10764,93 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   } finally {
     Date.now = keepNow;
     console.warn = keepWarn;
-    Lib._rtDownUntil = 0;
-    Lib._rtFails = 0;
-    Lib._rtLastFailAt = 0;
-    Lib._rtWarned = false;
+    Lib._rtFeeds.clear();
   }
   check('a failing realtime call is warned about once and paused only after three failed polls in a row',
     callsInRound === 2 && callsAfterOne === 3 && calls.length === 4 && warned === 1,
     JSON.stringify({ callsInRound, callsAfterOne, calls: calls.length, warned }));
   Lib._rtKnown.clear();
   Lib._rtCache.clear();
+}
+
+/* GTFS-Realtime per feed (realtime.js): one feed answering does not end
+   another's failure streak, so the feed that keeps rejecting is paused
+   and warned about once, while the one that answers is still asked. */
+{
+  const keepCall = Lib.callServiceResponse;
+  const keepWarn = console.warn;
+  const keepNow = Date.now;
+  const asked = { a: 0, b: 0 };
+  let warned = 0;
+  const hass = { services: { hungarian_transport: { realtime: {} } } };
+  Lib._rtFeeds.clear();
+  Lib._rtCache.clear();
+  Lib._rtNoFeed.clear();
+  Lib.callServiceResponse = async (_h, _d, _s, data) => {
+    asked[data.feed] += 1;
+    if (data.feed === 'b') throw new Error('feed b rejects');
+    return { response: { trips: {} } };
+  };
+  console.warn = () => { warned += 1; };
+  const t0 = keepNow();
+  try {
+    for (let i = 0; i < 10; i += 1) {
+      Date.now = () => t0 + i * 30000;
+      /* b fails first, then a answers: a's answer used to end b's streak. */
+      await Promise.all([
+        Lib.realtimeFetch(hass, 'b', [{ key: 'k' + i }]),
+        Lib.realtimeFetch(hass, 'a', [{ key: 'k' + i }]),
+      ]);
+    }
+  } finally {
+    Date.now = keepNow;
+    console.warn = keepWarn;
+    Lib.callServiceResponse = keepCall;
+    Lib._rtFeeds.clear();
+    Lib._rtCache.clear();
+  }
+  check('a realtime feed that keeps rejecting is paused after three polls and warned about once, while another feed answers',
+    asked.b === 3 && asked.a === 10 && warned === 1, JSON.stringify({ asked, warned }));
+}
+
+/* Transitous in an outage (transitous.js): an empty card's fill polls it
+   no more than every minute and a half, geocodes included, and asks again
+   once that has passed. */
+{
+  const keepFetch = Lib.transitousFetch;
+  const keepNow = Date.now;
+  const t0 = keepNow();
+  let requests = 0;
+  Lib._geocodeCache.clear();
+  Lib._geocodeEmptyAt.clear();
+  Lib._geocodeFailedAt.clear();
+  Lib._transitousEmptyAt.clear();
+  Lib._transitousFailed.clear();
+  Lib.transitousFetch = async () => { requests += 1; throw new Error('Transitous timeout'); };
+  const o = { id: 'x', name: 'Kossuth tér' };
+  const d = { key: 'piac', name: 'Piac tér' };
+  const results = [];
+  let inPause = 0;
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      Date.now = () => t0 + i * 20000;
+      results.push(await Lib.fillTransitousIfEmpty([], o, d, { mode: 'bkk' }));
+    }
+    inPause = requests;
+    Date.now = () => t0 + 91 * 1000;
+    results.push(await Lib.fillTransitousIfEmpty([], o, d, { mode: 'bkk' }));
+    /* A second failure in a row waits twice as long. */
+    Date.now = () => t0 + (91 + 120) * 1000;
+    results.push(await Lib.fillTransitousIfEmpty([], o, d, { mode: 'bkk' }));
+  } finally {
+    Date.now = keepNow;
+    Lib.transitousFetch = keepFetch;
+    Lib._geocodeCache.clear();
+    Lib._geocodeFailedAt.clear();
+    Lib._transitousFailed.clear();
+  }
+  check('five polls of an empty card in a Transitous outage send its two geocodes once, and ask again after the pause',
+    inPause === 2 && requests === 4 && results.every((r) => r === null), JSON.stringify({ inPause, requests, results }));
 }
 
 process.exit(failed ? 1 : 0);
