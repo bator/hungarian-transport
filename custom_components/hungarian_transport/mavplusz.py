@@ -249,7 +249,12 @@ def _stop_update(st: dict[str, Any], prefix: str) -> realtime.StopUpdate:
 
 
 def _vehicle(trip: dict[str, Any], key: TripKey, route_id: str) -> realtime.Vehicle | None:
-    """The newest position of the pattern's vehicle on this very trip."""
+    """The newest position of the pattern's vehicle on this very trip.
+
+    Matched by trip id alone: OTP's VehiclePosition names its trip but not
+    the trip's service date, so another day's run of the id cannot be told
+    apart here. parse_trip only asks for one when the date's run has
+    realtime calls, so a vehicle is attached only to a run that is live."""
     pattern = trip.get("pattern")
     positions = pattern.get("vehiclePositions") if isinstance(pattern, dict) else None
     best: realtime.Vehicle | None = None
