@@ -10944,6 +10944,39 @@ const review5Planner = async (now) => {
   }
 }
 
+/* The editor: a destination load that failed for BKK does not hold back
+   MÁV's own load on the same stop, switched on right after. */
+{
+  const keep = { reachableDests: Lib.reachableDests, probeApiKey: Lib.probeApiKey, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const modes = [];
+  Lib.reachableDests = async (ix, key, cache, stop, mode) => {
+    modes.push(mode);
+    if (mode !== 'mav') throw new Error('FUTÁR 503');
+    return { dests: [{ key: 'szekesfehervar', name: 'Székesfehérvár' }], destRoutes: { szekesfehervar: ['BKK_MAV40'] } };
+  };
+  Lib.probeApiKey = async () => ({ ok: true });
+  Lib.apiKeyFromDashboard = async () => '';
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  try {
+    ed.addEventListener('config-changed', (e) => ed.setConfig(e.detail.config));
+    ed.hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {}, elvira_between: {} } }, connection: {} };
+    ed.setConfig({ type: 'custom:hungarian-transport-card', stopId: 'BKK_005501024', stopName: 'Kelenföld', destKey: '', destName: '', routeIds: [] });
+    await settleTicks();
+    ed.querySelector('#mav').checked = true;
+    ed._onModeToggle('mav');
+    ed.setConfig(Object.assign({}, ed._config, { stopId: 'BKK_005501024', stopName: 'Kelenföld' }));
+    await settleTicks();
+    check('a failed BKK destination load does not block MÁV\'s load on the same stop',
+      modes.join() === 'bkk,mav' && ed._dests.map((d) => d.name).join() === 'Székesfehérvár',
+      JSON.stringify({ modes, dests: ed._dests.map((d) => d.name) }));
+  } finally {
+    ed.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* elvira_between showing up: the planner asks ELVIRA too and does not
    poll, so it reloads, like a MÁV card. */
 {

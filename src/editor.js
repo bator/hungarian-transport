@@ -152,6 +152,9 @@ export class BKKHopCardEditor extends HTMLElement {
     this._dests = [];
     this._destRoutes = {};
     this._loadedStop = '';
+    /* A load that failed was the old mode's: it must not hold back the new
+       one's for DEST_RETRY_MS on the same stop. */
+    this._failedStop = '';
   }
 
   _apiKey() {
