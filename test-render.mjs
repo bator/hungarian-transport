@@ -9945,6 +9945,42 @@ const R7_IX = Object.freeze({ volan: async () => null, city: async () => null, m
   }
 }
 
+/* A whitespace-only card apiKey is no key (as cardApiKey reads it): the
+   card still borrows a sibling's key, or goes through the integration, and
+   so does its editor. */
+{
+  const keep = { apiKeyFromDashboard: Lib.apiKeyFromDashboard, nextBoard: Lib.nextBoard, probeApiKey: Lib.probeApiKey };
+  const card = document.createElement('hungarian-transport-card');
+  const viaCard = document.createElement('hungarian-transport-card');
+  const ed = document.createElement('hungarian-transport-card-editor');
+  try {
+    Lib.apiKeyFromDashboard = async () => 'sibling-key';
+    Lib.nextBoard = async () => {};
+    Lib.probeApiKey = async () => ({ ok: true });
+    card._reloadSafe = () => {};
+    card.setConfig({ language: 'hu', apiKey: '   ', stopId: 'BKK_F00001', stopName: 'A' });
+    card.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    await settleTicks();
+    viaCard._reloadSafe = () => {};
+    viaCard.setConfig({ language: 'hu', apiKey: ' ', stopId: 'BKK_F00001', stopName: 'A' });
+    viaCard.hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {} } }, connection: {} };
+    ed._probeKey = () => {};
+    ed.setConfig({ language: 'hu', apiKey: '  ', stopId: '', stopName: '' });
+    ed.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    await settleTicks();
+    check('a whitespace-only card apiKey still borrows a sibling key or uses the integration, in the card and its editor',
+      card._borrowedKey === 'sibling-key' && card._apiKey() === 'sibling-key'
+      && viaCard._viaIntegration === true && ed._borrowedKey === 'sibling-key',
+      JSON.stringify({ borrowed: card._borrowedKey, via: viaCard._viaIntegration, ed: ed._borrowedKey }));
+  } finally {
+    card.remove();
+    viaCard.remove();
+    ed.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* A failed poll keeps the rows it had, and with them their last GPS fix:
    the open map stops calling it live and the timetable places the
    vehicle until a poll brings a fresh one. */

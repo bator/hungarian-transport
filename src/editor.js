@@ -119,7 +119,7 @@ export class BKKHopCardEditor extends HTMLElement {
        never written into this card's config: a card-level key is deprecated,
        and keeping it out of dashboards is the point. */
     const viaIntegration = BkkLib.integrationHasKey(hass);
-    if (!this._userEditedKey && !this._config.apiKey && !this._borrowedKey && !this._loadingKey
+    if (!this._userEditedKey && !this._ownApiKey() && !this._borrowedKey && !this._loadingKey
         && !viaIntegration && !this._keyless()) this._fillKey();
     else if (this._hasFutar()) this._probeKey();
     /* The integration's FUTÁR coming up after a keyless ("all") list was
@@ -161,6 +161,12 @@ export class BKKHopCardEditor extends HTMLElement {
 
   _apiKey() {
     return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
+  }
+
+  /* The card's own key, trimmed as cardApiKey reads it: a whitespace-only
+     apiKey does not stop a sibling's key from being borrowed. */
+  _ownApiKey() {
+    return String(this._config.apiKey || '').trim();
   }
 
   _hasFutar() {
@@ -766,7 +772,7 @@ export class BKKHopCardEditor extends HTMLElement {
     this._loadingKey = true;
     try {
       const key = await BkkLib.apiKeyFromDashboard(this._hass);
-      if (key && !this._config.apiKey && !this._userEditedKey) {
+      if (key && !this._ownApiKey() && !this._userEditedKey) {
         /* Kept in memory, like the card's own borrowed key: the card reads
            the sibling's key again at runtime, so nothing needs saving here. */
         this._borrowedKey = key;

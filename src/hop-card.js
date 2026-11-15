@@ -210,6 +210,13 @@ export class BKKHopCard extends HTMLElement {
     return BkkLib.cardApiKey(this._config, this._hass, this._borrowedKey);
   }
 
+  /* The key set on this card itself, as cardApiKey reads it: a blank or
+     whitespace-only apiKey is no key, so the card still borrows one or
+     goes through the integration. */
+  _ownApiKey() {
+    return String((this._config || {}).apiKey || '').trim();
+  }
+
   _hasFutar() {
     return BkkLib.hasFutar(this._apiKey(), this._hass);
   }
@@ -223,7 +230,7 @@ export class BKKHopCard extends HTMLElement {
     if (this._lang() !== langBefore) this._langChanged();
     /* The integration's futar service can register after the first paint
        (key added in the options flow): reload once it shows up. */
-    this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
+    this._viaIntegration = !this._ownApiKey() && BkkLib.integrationHasKey(hass);
     if (this._viaIntegration && !viaBefore) this._accessShowedUp();
     /* So can elvira_between, a MÁV card's own source (a key-less one said
        "no API key" without it): reload once that shows up too. The planner
@@ -256,7 +263,7 @@ export class BKKHopCard extends HTMLElement {
   _maybeFillKey() {
     const mode = BkkLib.mode(this._config || {});
     if (mode === 'volan' || mode === 'helyi') return;
-    if (this._config.apiKey || BkkLib.integrationHasKey(this._hass)) return;
+    if (this._ownApiKey() || BkkLib.integrationHasKey(this._hass)) return;
     if (this._keyFilling || Date.now() < this._keyRetryAt) return;
     this._keyFilling = true;
     this._fillKey().catch(() => { /* dashboard config not readable */ }).then(() => {
@@ -400,7 +407,7 @@ export class BKKHopCard extends HTMLElement {
      up (HA still starting, entry reloading), it wins over a borrowed key. */
   async _fillKey() {
     const key = await BkkLib.apiKeyFromDashboard(this._hass);
-    if (!key || this._config.apiKey) return;
+    if (!key || this._ownApiKey()) return;
     /* The same key found again (setConfig restarts the lookup) changes
        nothing: the reload setConfig started already has it. */
     if (key === this._borrowedKey) return;
