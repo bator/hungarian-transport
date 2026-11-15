@@ -1347,10 +1347,11 @@ ${this._stopPinCss()}
         /* The pickers only show for Indulás / Érkezés. */
         const when = this._plan.when;
         if (!this._plan.timed) return;
-        const ms = this._whenFromParts(day.value, time.value);
+        const ymd = this._pickedDay(day.value);
+        const ms = this._whenFromParts(ymd, time.value);
         if (!ms) return;
         const cur = this._whenParts(when.at);
-        if (cur.ymd === day.value && String(cur.min) === time.value) return;
+        if (cur.ymd === ymd && String(cur.min) === time.value) return;
         this._applyWhen({ mode: when.mode, at: ms });
       }, PICK_DEBOUNCE_MS);
     };
@@ -1440,17 +1441,36 @@ ${this._stopPinCss()}
      Budapest midnight "ma" would be yesterday, and a time picked under it
      would plan yesterday. The tick paints them again for the new day; the
      planned time stays selected (as a dated day once it is no longer
-     today). Not while the user is picking: a pick waiting out its
-     debounce, or a picker with focus, would lose what was chosen. */
+     today). The title's line and the itinerary box say "ma" and "holnap"
+     too, so they are painted again with them.
+     A picker with focus is rolled as well: a native select keeps the focus
+     after a pick, so on a wall tablet it would keep yesterday's "ma" until
+     someone tapped elsewhere. With no pick waiting, the pickers hold the
+     plan's time, and painting them again keeps it. Only a pick still
+     waiting out its debounce is left alone; it reads its day against the
+     day the pickers were painted for (_pickedDay). */
   _rollWhenPickers() {
     if (!this._plan.timed || !this._whenPaintedFor) return;
     if (this._whenParts(Date.now()).ymd === this._whenPaintedFor) return;
+    this._paintHead();
+    this._paintJourney();
     const day = this._planEl('pday');
     const time = this._planEl('ptime');
     if (!day || !time || this._pickTimer) return;
-    const focused = this.shadowRoot && this.shadowRoot.activeElement;
-    if (focused === day || focused === time) return;
     this._paintWhenPickers();
+  }
+
+  /* The day a pick means. Picked before the tick rolled the pickers past
+     midnight, "ma" and "holnap" are read as the user read them, today and
+     tomorrow, not as the day they were painted on and the one after;
+     a dated day is that date. */
+  _pickedDay(ymd) {
+    const painted = this._whenPaintedFor;
+    const today = this._whenParts(Date.now()).ymd;
+    if (!painted || painted === today) return ymd;
+    if (ymd === painted) return today;
+    if (ymd === tzShiftYmd(painted, 1)) return tzShiftYmd(today, 1);
+    return ymd;
   }
 
   _syncWhen() {

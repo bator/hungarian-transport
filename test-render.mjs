@@ -10787,6 +10787,126 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
   check('nameMatcher answers as nameEq for every pair', same8, JSON.stringify(diffs8));
 }
 
+/* ---- Review 5: cards. The time pickers and the title past midnight with
+   a picker in focus, the editor's list after a mode change from the YAML,
+   ELVIRA showing up on the planner, and access showing up while a planner
+   is detached ---- */
+
+/* A planner at 23:50 Budapest with "Indulás" picked, past midnight. */
+const review5Planner = async (now) => {
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+  pc.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+  document.body.appendChild(pc);
+  await settleTicks();
+  pc._planner.now = async () => null;
+  pc._planner.at = async () => [];
+  pc._applyWhen({ mode: 'depart', at: now });
+  await settleTicks();
+  return pc;
+};
+
+/* A native select keeps the focus after a pick: the tick rolls the day
+   picker past midnight all the same, so "ma" is never yesterday. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 50); /* 23:50 in Budapest (CET) */
+  Date.now = () => now;
+  Lib.nextBoard = async () => {};
+  Lib.apiKeyFromDashboard = async () => '';
+  let pc = null;
+  try {
+    pc = await review5Planner(now);
+    const day = pc.shadowRoot.getElementById('pday');
+    const label = (ymd) => ([...day.options].find((o) => o.value === ymd) || {}).textContent;
+    day.focus();
+    const focused = pc.shadowRoot.activeElement === day;
+    now += 20 * 60000; /* 00:10 on the 16th */
+    pc._tickPaint();
+    check('past midnight the tick rolls the day picker even while it has the focus',
+      focused && label('20261116') === i18nT('hu', 'plannerToday') && label('20261115') !== i18nT('hu', 'plannerToday')
+      && day.value === '20261115',
+      JSON.stringify({ focused, today: label('20261116'), yesterday: label('20261115'), value: day.value }));
+  } finally {
+    Date.now = realNow;
+    if (pc) pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* A pick made past midnight before the tick rolled the pickers: "ma" is
+   read as the user read it, today, not as the day it was painted on. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 50);
+  Date.now = () => now;
+  Lib.nextBoard = async () => {};
+  Lib.apiKeyFromDashboard = async () => '';
+  let pc = null;
+  try {
+    pc = await review5Planner(now);
+    const day = pc.shadowRoot.getElementById('pday');
+    const time = pc.shadowRoot.getElementById('ptime');
+    now += 20 * 60000; /* 00:10 on the 16th, no tick yet */
+    day.value = ([...day.options].find((o) => o.textContent === i18nT('hu', 'plannerToday')) || {}).value;
+    time.value = String(8 * 60);
+    time.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 350));
+    check('"ma" 08:00 picked past midnight before the tick plans today, not yesterday',
+      new Date(pc._plan.when.at).toISOString() === '2026-11-16T07:00:00.000Z',
+      new Date(pc._plan.when.at).toISOString());
+  } finally {
+    Date.now = realNow;
+    if (pc) pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* The title's line and the itinerary box name the day too: past midnight
+   the tick paints them for the new day with the pickers. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 50);
+  Date.now = () => now;
+  Lib.nextBoard = async () => {};
+  Lib.apiKeyFromDashboard = async () => '';
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    document.body.appendChild(pc);
+    await settleTicks();
+    const start = Date.UTC(2026, 10, 15, 23, 20); /* 00:20 on the 16th */
+    const ride = { walk: false, label: '7', color: '009EE3', minutes: 30, from: 'A', to: 'B' };
+    pc._planner.now = async () => null;
+    pc._planner.at = async () => [{ durationMin: 30, transfers: 0, walkMin: 0, waitMin: 0, startMs: start, endMs: start + 1800000, legs: [ride] }];
+    pc._applyWhen({ mode: 'depart', at: now });
+    await settleTicks();
+    const meta = () => pc.shadowRoot.querySelector('.rt-meta').textContent;
+    const dayWord = () => ((pc.shadowRoot.querySelector('.pjourney .itin-head small')
+      || pc.shadowRoot.querySelector('.pjourney small')) || {}).textContent;
+    const before = { meta: meta(), day: dayWord() };
+    now += 20 * 60000;
+    pc._tickPaint();
+    const after = { meta: meta(), day: dayWord() };
+    check('past midnight the tick paints the title\'s "ma" and the itinerary\'s "holnap" for the new day',
+      before.meta.includes(`${i18nT('hu', 'plannerToday')} 23:50`) && before.day === i18nT('hu', 'plannerTomorrow')
+      && after.meta.includes('23:50') && !after.meta.includes(`${i18nT('hu', 'plannerToday')} 23:50`)
+      && after.day === i18nT('hu', 'plannerToday'),
+      JSON.stringify({ before, after }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* GTFS-Realtime (realtime.js): which trips the card asks the integration
    about, what it copies onto the rows, and what it leaves alone. */
 {
