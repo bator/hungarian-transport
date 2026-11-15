@@ -848,3 +848,202 @@ test('a city board without stop coordinates fills from its GTFS stop’s coordin
     Object.assign(BkkLib, keep);
   }
 });
+
+/* Loading a GTFS index (gtfs.js _loadGtfsIndex): its stops and lookup
+   maps are built in slices, the page getting the event loop back in
+   between. */
+
+test('an index’s stops are built in slices that hand the event loop back, into the same stops and maps', async () => {
+  const names = ['Kossuth tér', 'Győr, autóbusz-állomás', 'Kossuth tér', 'Széchenyi István tér', 'Pécs vasútállomás', ''];
+  const raw = {
+    v: 1,
+    s: Array.from({ length: 60 }, (_v, i) => [`city:${i % 55}`, names[i % names.length], i % 7 ? String(i % 9) : '', i % 3]),
+    g: Array.from({ length: 120 }, (_v, i) => (i % 11 ? 4700000 + i : 0)),
+    o: [['a', 'A — helyi'], ['b', 'B'], ['c', 'C']],
+    t: [],
+  };
+  const keep = { fetch: BkkLib._fetchIndexBytes, slice: BkkLib._sliceMs, next: BkkLib._nextTask };
+  let yields = 0;
+  BkkLib._fetchIndexBytes = async () => ({ status: 200, bytes: new TextEncoder().encode(JSON.stringify(raw)) });
+  try {
+    BkkLib._sliceMs = Infinity;
+    BkkLib._nextTask = async () => { yields += 1; };
+    const whole = await BkkLib._loadGtfsIndex('http://x/city-index.json?v=20260101', 'errCityHttp', 'errCityGunzip');
+    assert.equal(yields, 0);
+    BkkLib._sliceMs = 0;
+    const sliced = await BkkLib._loadGtfsIndex('http://x/city-index.json?v=20260101', 'errCityHttp', 'errCityGunzip');
+    assert.equal(yields, raw.s.length - 1);
+    assert.deepEqual(sliced.stops, whole.stops);
+    for (const m of ['byNum', 'byKey', 'byId']) {
+      assert.deepEqual([...sliced[m].keys()], [...whole[m].keys()]);
+      assert.deepEqual([...sliced[m].values()].map((st) => st.i), [...whole[m].values()].map((st) => st.i));
+    }
+    /* Each stop as the index always had it: its name's norm() and fold(). */
+    whole.stops.forEach((st, i) => {
+      const g = raw.g[2 * i] || raw.g[2 * i + 1];
+      assert.deepEqual(st, {
+        i, id: raw.s[i][0], name: raw.s[i][1], num: raw.s[i][2], op: raw.s[i][3],
+        key: BkkLib.norm(raw.s[i][1]), fold: BkkLib.fold(raw.s[i][1]),
+        lat: g ? raw.g[2 * i] / 1e5 : null, lon: g ? raw.g[2 * i + 1] / 1e5 : null,
+      });
+    });
+    assert.equal(whole.byId.get('city:3'), whole.stops[3]);
+    assert.equal(whole.s, null);
+    assert.equal(whole.g, null);
+  } finally {
+    Object.assign(BkkLib, { _fetchIndexBytes: keep.fetch, _sliceMs: keep.slice, _nextTask: keep.next });
+  }
+});
+
+test('the event loop is handed back by scheduler.yield, else a message to the page, else a timer', async () => {
+  const keep = { scheduler: globalThis.scheduler, MessageChannel: globalThis.MessageChannel };
+  try {
+    let yielded = 0;
+    globalThis.scheduler = { yield() { yielded += 1; return Promise.resolve(); } };
+    await BkkLib._nextTask();
+    assert.equal(yielded, 1);
+    globalThis.scheduler = undefined;
+    let ports = 0;
+    globalThis.MessageChannel = class extends keep.MessageChannel {
+      constructor() { super(); ports += 1; }
+    };
+    await BkkLib._nextTask();
+    assert.equal(ports, 1);
+    globalThis.MessageChannel = undefined;
+    let timer = false;
+    setTimeout(() => { timer = true; }, 0);
+    await BkkLib._nextTask();
+    assert.ok(timer);
+  } finally {
+    globalThis.scheduler = keep.scheduler;
+    globalThis.MessageChannel = keep.MessageChannel;
+  }
+});
+
+/* A stand-in for the browser's Worker: it runs the script behind the Blob
+   URL it is given, on its own scope, its messages copied as postMessage
+   copies them and delivered each in a task of its own. */
+async function blobText(url) {
+  const { resolveObjectURL } = await import('node:buffer');
+  return resolveObjectURL(url).text();
+}
+function fakeWorkers(over) {
+  const made = [];
+  class FakeWorker {
+    constructor(url) {
+      if (over && over.refuse) throw new Error('SecurityError');
+      this.url = url;
+      this.terminated = false;
+      this.delivered = 0;
+      made.push(this);
+      const worker = this;
+      this.scope = {
+        postMessage(msg) {
+          const copy = structuredClone(msg);
+          setTimeout(() => {
+            if (worker.terminated || !worker.onmessage) return;
+            worker.delivered += 1;
+            worker.onmessage({ data: copy });
+          }, 0);
+        },
+      };
+      this.ready = blobText(url).then((code) => { new Function('self', code)(this.scope); });
+    }
+    postMessage(msg) {
+      if (over && over.silent) return;
+      const copy = structuredClone(msg);
+      this.ready.then(() => this.scope.onmessage({ data: copy }));
+    }
+    terminate() { this.terminated = true; }
+  }
+  return { FakeWorker, made };
+}
+
+test('an index is parsed in a worker when the page can start one, and comes back the same, in slices', async () => {
+  const { gzipSync } = await import('node:zlib');
+  const raw = {
+    v: 1,
+    feed: 'test',
+    s: Array.from({ length: 30 }, (_v, i) => [`city:${i}`, `Megálló ${i % 4}`, String(i), i % 2]),
+    g: Array.from({ length: 60 }, (_v, i) => 4700000 + i),
+    o: [['a', 'A — helyi'], ['b', 'B']],
+    t: Array.from({ length: 25 }, (_v, i) => [i, 'x', [0, 1], [0, 5]]),
+  };
+  const bytes = new Uint8Array(gzipSync(JSON.stringify(raw)));
+  const keep = {
+    fetch: BkkLib._fetchIndexBytes, slice: BkkLib._indexWorkerSlice, Worker: globalThis.Worker,
+    broken: BkkLib._indexWorkerBroken, url: BkkLib._indexWorkerUrl,
+  };
+  BkkLib._fetchIndexBytes = async () => ({ status: 200, bytes });
+  const load = () => BkkLib._loadGtfsIndex('http://x/city-index.json.gz?v=20260101', 'errCityHttp', 'errCityGunzip');
+  try {
+    BkkLib._indexWorkerBroken = false;
+    BkkLib._indexWorkerUrl = '';
+    /* No Worker (node, an older browser): parsed on the page. */
+    globalThis.Worker = undefined;
+    const page = await load();
+    const workers = fakeWorkers();
+    globalThis.Worker = workers.FakeWorker;
+    BkkLib._indexWorkerSlice = 10;
+    const viaWorker = await load();
+    assert.equal(workers.made.length, 1);
+    assert.ok(workers.made[0].terminated);
+    /* head, then 30 stops, 60 coordinates and 25 trips in slices of 10, then done. */
+    assert.equal(workers.made[0].delivered, 1 + 3 + 6 + 3 + 1);
+    assert.deepEqual(Object.keys(viaWorker), Object.keys(page));
+    assert.deepEqual(viaWorker.t, raw.t);
+    assert.deepEqual(viaWorker.stops, page.stops);
+    assert.deepEqual([...viaWorker.byId.keys()], [...page.byId.keys()]);
+    assert.equal(BkkLib._indexWorkerBroken, false);
+  } finally {
+    Object.assign(BkkLib, {
+      _fetchIndexBytes: keep.fetch, _indexWorkerSlice: keep.slice, _indexWorkerBroken: keep.broken, _indexWorkerUrl: keep.url,
+    });
+    globalThis.Worker = keep.Worker;
+  }
+});
+
+test('a file the worker cannot read keeps its error; a worker that cannot start or answer is not asked again', async () => {
+  const keep = {
+    fetch: BkkLib._fetchIndexBytes, Worker: globalThis.Worker, broken: BkkLib._indexWorkerBroken,
+    url: BkkLib._indexWorkerUrl, timeout: BkkLib._indexWorkerTimeoutMs,
+  };
+  let body = '<html>502 Bad Gateway</html>';
+  BkkLib._fetchIndexBytes = async () => ({ status: 200, bytes: new TextEncoder().encode(body) });
+  const load = () => BkkLib._loadGtfsIndex('http://x/city-index.json?v=20260101', 'errCityHttp', 'errCityGunzip');
+  try {
+    BkkLib._indexWorkerBroken = false;
+    BkkLib._indexWorkerUrl = '';
+    /* An HTML page: the worker gives up on it, and the page's own parse
+       names the error as always. */
+    const reading = fakeWorkers();
+    globalThis.Worker = reading.FakeWorker;
+    await assert.rejects(load(), (err) => err.i18nKey === 'errIndexParse');
+    assert.equal(reading.made.length, 1);
+    assert.equal(BkkLib._indexWorkerBroken, false);
+    body = JSON.stringify({ v: 1, s: [['city:1', 'A']], t: [] });
+    /* A policy that refuses the worker: parsed on the page, and no worker
+       is started again. */
+    const refused = fakeWorkers({ refuse: true });
+    globalThis.Worker = refused.FakeWorker;
+    assert.equal((await load()).stops.length, 1);
+    assert.equal(BkkLib._indexWorkerBroken, true);
+    const later = fakeWorkers();
+    globalThis.Worker = later.FakeWorker;
+    assert.equal((await load()).stops.length, 1);
+    assert.equal(later.made.length, 0);
+    /* A worker that never answers is given up on after its time. */
+    BkkLib._indexWorkerBroken = false;
+    BkkLib._indexWorkerTimeoutMs = 20;
+    const silent = fakeWorkers({ silent: true });
+    globalThis.Worker = silent.FakeWorker;
+    assert.equal((await load()).stops.length, 1);
+    assert.ok(silent.made[0].terminated);
+    assert.equal(BkkLib._indexWorkerBroken, true);
+  } finally {
+    Object.assign(BkkLib, {
+      _fetchIndexBytes: keep.fetch, _indexWorkerBroken: keep.broken, _indexWorkerUrl: keep.url, _indexWorkerTimeoutMs: keep.timeout,
+    });
+    globalThis.Worker = keep.Worker;
+  }
+});
