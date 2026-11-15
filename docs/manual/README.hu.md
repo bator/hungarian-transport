@@ -132,7 +132,7 @@ beállításait és a menetrend-értesítéseket nyitja meg.
 - A mező gépelés közben is elrejti a kulcsot.
 - **Napi MÁV útvonal-index a GitHubról** (alapból bekapcsolva): az
   integráció naponta egyszer megnézi a `bator.github.io` oldalon az aznap
-  reggel a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet, és
+  a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet, és
   ha újabb a használtnál, átveszi. Kikapcsolva a heti kiadás indexe marad, és
   a Home Assistant ilyen kérést nem küld. Részletek:
   [The daily index](../timetables.md#the-daily-index-from-github-pages).
@@ -140,7 +140,9 @@ beállításait és a menetrend-értesítéseket nyitja meg.
   ideje (legfeljebb 5 perccel később); a Home Assistant indulása és a
   beállítások mentése után 10–20 perccel egyszer szintén lefut. A sikertelen
   ellenőrzést (a GitHub nem érhető el, épp a saját feeded indexe készül)
-  20 percenként, legfeljebb 6-szor újrapróbálja.
+  20 percenként, legfeljebb 6-szor újrapróbálja. Az aznapi index általában
+  délre kerül fel a GitHubra, ezért amíg az ott lévő még egy korábbi napé,
+  az ellenőrzés 2–3 óránként újra megnézi, legfeljebb 4-szer, éjfélig.
 - **Értesítés a menetrend-frissítésekről** (alapból kikapcsolva): állandó
   értesítés, ha új napi MÁV index települt, ha az integráció frissítése új
   Volán-, városi vagy MÁV-menetrendet hozott, és egyszer, ha a napi index

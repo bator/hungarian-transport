@@ -11,14 +11,25 @@ name: Daily MÁV index
 # (mav-pfaedle-overlay.zip, shapes © OpenStreetMap contributors, ODbL), with
 # ATTRIBUTION.txt.
 #
-# When: MÁV's feed of the day (feed_version YYYYMMDD) is not out at 03:15
-# UTC. Every run of 3-15 November 2026 that started at 03:15 built an older
-# feed, and every one that started at 10:03-11:28 UTC built the day's; on
-# 3 November it was still missing at 13:54. The 03:15 run stays (it
-# refreshes built_at, and would catch a feed published overnight); the
-# 10:30 run is the one meant to build the day's feed. GitHub starts
-# scheduled runs late, by hours at times (the 03:15 one started after 10:00
-# all through November), so neither time is a promise.
+# When: MÁV's feed of the day (feed_version YYYYMMDD) appeared between about
+# 03:17 and 10:03 UTC in November 2026, and on 3 November it was still
+# missing at 13:54. GitHub starts scheduled runs late: the 03:15 cron of 2-15
+# November started at 10:03-11:28 UTC, 7 to 8 hours late, so no time here is
+# a promise. Two crons:
+# - 04:45 UTC, the morning build. On time it may find yesterday's feed;
+#   started as late as the 03:15 one was, it lands around 11:30-13:00 UTC,
+#   when the day's feed is out. Public installations (HACS) have only these
+#   runs.
+# - 14:20 UTC, the catch-up for a feed MÁV publishes in the afternoon (after
+#   13:54); even 8 hours late it starts before midnight in Budapest in
+#   winter.
+# A workflow_dispatch may come on top (the repository owner's own server
+# sends one at 11:30 Budapest time: 10:30 UTC in winter, 09:30 in summer).
+# The concurrency group below holds one running and one pending run, and a
+# third arrival cancels the pending one: so at most one cron may start before
+# 11:30 UTC (a run never starts early, and any of them may start late enough
+# to meet the dispatch). Only the 04:45 one can reach 09:30-11:30; the 14:20
+# one never does.
 #
 # Nothing is deployed, and the site keeps the previous files, when the
 # secrets are missing, the download, pfaedle or the audit fails, the site is
@@ -35,8 +46,8 @@ name: Daily MÁV index
 # deploy job fails with an error saying so, and nothing else changes.
 on:
   schedule:
-    - cron: "15 3 * * *"
-    - cron: "30 10 * * *"
+    - cron: "45 4 * * *"
+    - cron: "20 14 * * *"
   workflow_dispatch:
 
 permissions:
@@ -185,10 +196,11 @@ jobs:
     if: needs.build.outputs.deploy == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Only this job may deploy; it runs no code from the checkout.
+    # Only this job may deploy and attest; it runs no code from the checkout.
     permissions:
       pages: write
       id-token: write
+      attestations: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -217,3 +229,36 @@ jobs:
 
       - uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
         id: deployment
+
+      # A build provenance attestation (Sigstore, signed with this job's OIDC
+      # token) of the files just deployed, taken from the artifact Pages
+      # deployed, not rebuilt. Check a download with
+      #   gh attestation verify mav-index.json.gz --repo bator/hungarian-transport \
+      #     --signer-workflow bator/hungarian-transport/.github/workflows/mav-index-daily.yml
+      # After the deploy: a Sigstore outage turns the run red but never
+      # holds back the day's index; a file without an attestation fails that
+      # check, it never passes it. The integration does not verify it (it
+      # would need a Sigstore client in Home Assistant); it checks the
+      # index against the manifest's sha256 (mav_daily.py).
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: github-pages
+          path: ${{ runner.temp }}/pages
+
+      - name: Unpack the deployed site
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/site"
+          tar -xf "$RUNNER_TEMP/pages/artifact.tar" -C "$RUNNER_TEMP/site"
+          for f in mav-index.json.gz mav-index.json mav-gtfs.zip mav-pfaedle-overlay.zip; do
+            test -f "$RUNNER_TEMP/site/$f" || { echo "::error::$f is not in the deployed site"; exit 1; }
+          done
+          ls -l "$RUNNER_TEMP/site"
+
+      - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
+        with:
+          subject-path: |
+            ${{ runner.temp }}/site/mav-index.json.gz
+            ${{ runner.temp }}/site/mav-index.json
+            ${{ runner.temp }}/site/mav-gtfs.zip
+            ${{ runner.temp }}/site/mav-pfaedle-overlay.zip

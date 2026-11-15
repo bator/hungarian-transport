@@ -165,12 +165,17 @@ as a 3-day artifact without publishing anything.
 
 MÁV publishes a new feed almost every day; releases come once a week. The
 **Daily MÁV index** workflow (`.github/workflows/mav-index-daily.yml`) runs
-the release's pipeline above twice a day, at 03:15 and 10:30 UTC, and
+the release's pipeline above twice a day, at 04:45 and 14:20 UTC, and
 publishes on GitHub Pages, under `https://bator.github.io/hungarian-transport/`.
-MÁV's feed of the day is not out at 03:15 (in November 2026 it appeared
-between about 03:20 and 10:00 UTC, once only in the afternoon), so it is
-usually the 10:30 run that builds it; GitHub may start a scheduled run hours
-late, and a run that finds the content already published deploys nothing.
+In November 2026 MÁV's feed of the day appeared between about 03:20 and
+10:00 UTC, once only in the afternoon, and GitHub started the scheduled runs
+hours late (one set for 03:15 started between 10:00 and 11:30 UTC every
+day). So the 04:45 run usually builds the day's feed, and the 14:20 one
+catches a feed MÁV publishes in the afternoon. A run started by hand
+(`workflow_dispatch`) comes on top; one run goes at a time and one waits, and
+the times are chosen so that at most one scheduled run can meet a dispatch
+sent between 09:30 and 11:30 UTC, so a waiting run is never cancelled by a
+third. A run that finds the content already published deploys nothing.
 The files:
 
 | File | What it is |
@@ -224,6 +229,24 @@ here are examples):
 consumer can fetch the small manifest first and download the zips only when
 `feed_version` or a `sha256` changed.
 
+**Checking a download.** Each deploy attests `mav-index.json.gz`,
+`mav-index.json`, `mav-gtfs.zip` and `mav-pfaedle-overlay.zip` (a build
+provenance attestation, as for the release zips), taken from the very files
+Pages deployed:
+
+```sh
+gh attestation verify mav-gtfs.zip --repo bator/hungarian-transport \
+  --signer-workflow bator/hungarian-transport/.github/workflows/mav-index-daily.yml
+```
+
+The attestation is made after the deploy, so a Sigstore outage never holds
+back the day's index; the run is then red, and the files it deployed have
+none (the check fails, it never passes) until a later run deploys again.
+The integration does not check the attestation: Home Assistant has no
+Sigstore client, and the integration takes no new dependency for one. It
+checks the index against the manifest's size and sha256, which come from the
+same site, so it trusts GitHub Pages and this repository's workflow.
+
 Nothing is published, and the site keeps the previous day's files, when the
 secrets are missing, the download, pfaedle or the audit fails, the site is
 refused (a feed whose `feed_version` does not start with a real date, a site
@@ -260,12 +283,21 @@ these hold:
 
 The index is fetched as `mav-index.json.gz?sha=<the manifest's sha256>`, so
 the Pages cache (`max-age=600`) never pairs a fresh manifest with the
-previous index. It is written next to the card the way a build writes it (a
-temp file, then a rename) and never while a local build runs or waits. A
+previous index. Both come from `https://bator.github.io/hungarian-transport/`
+only, and no redirect is followed: should the site move (GitHub Pages
+redirects every `github.io` URL once a custom domain is set), each round
+fails with a warning naming the redirect until an update of the integration
+reads the new address. The index is written next to the card the way a
+build writes it (a temp file, then a rename) and never while a local build
+runs or waits. A
 failed round, or one that found a build running, is tried again 20 minutes
-later, up to 6 times until the next daily round; a daily round that finds a
-manifest older than 20 hours (the workflow ran late) looks once more one to
-two hours later. A failed round leaves the index as it is and logs one
+later, up to 6 times until the next daily round. The day's feed is on Pages
+around midday or in the afternoon (above), so a round that finds the
+manifest's feed of an earlier day (or the manifest built over 20 hours ago)
+looks again two to three hours later, up to 4 times after the daily (or the
+startup) round and never past midnight: from 06:00, the last look is in the
+afternoon. Each look is one request for the small manifest; the index is
+downloaded only when its feed is newer. A failed round leaves the index as it is and logs one
 warning, not one per round; no Repairs issue. Open dashboards pick the new index up at their next
 reload (the card revalidates it, and Home Assistant answers with a new ETag).
 
@@ -275,8 +307,9 @@ request to GitHub Pages and keeps the weekly release's index (or the one it
 builds from your feed).
 
 **Privacy.** With the option on, Home Assistant contacts `bator.github.io`
-(GitHub Pages) about once a day: a plain HTTPS GET of the manifest and the
-index (never the GTFS zips),
+(GitHub Pages) once a day, and up to 4 more times that day for the manifest
+alone while it is not yet of the day: a plain HTTPS GET of the manifest and
+the index (never the GTFS zips),
 no cookies, nothing beyond what any HTTP request carries (your IP address,
 and Home Assistant's user agent with its version). Nothing about your
 configuration is sent.
