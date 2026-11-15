@@ -1661,17 +1661,42 @@ for raw, want in [
     # characters, still loses its query and credentials.
     ("cache_https://u:pw@h.example/f.zip?k=S20", "cache_https://…@h.example/f.zip?…"),
     ("x" * 40 + "https://h.example/f.zip?k=S21", "x" * 40 + "https://h.example/f.zip?…"),
+    # A query ends at whitespace: it takes a secret's name, never the value
+    # after the space, and that value goes all the same.
+    ("https://h.example/f?client_secret: S22", "https://h.example/f?… …"),
+    (" 1https://?Bearer S23", " 1https://?… …"),
+    ("https://h.example/f?apikey = S24", "https://h.example/f?… = …"),
+    ("https://h.example/f?x=1&password: S25", "https://h.example/f?… …"),
+    ("/f.zip?x=1&token: S26", "/f.zip?… …"),
+    ("https://h.example/f?Authorization: Bearer S27", "https://h.example/f?… Bearer …"),
+    # A name in another match's value is a name all the same.
+    ('Basic key  ="token = S28', 'Basic …  ="… = …'),
+    ("key=token = S29", "key=… = …"),
+    ("Bearer key: S30", "Bearer …: …"),
+    # The userinfo took the "#" that kept the query from its URL: a second
+    # round redacts the query it joined.
+    ("http://a#u:pw@h.example/f?;k=S41", "http://…@h.example/f?…"),
 ]:
     check(f"redact({raw!r})", uvi.redact(raw) == want, repr(uvi.redact(raw)))
+# Every secret form after every context, with and without a space: what came before
+# (a query, an auth scheme, a name) never lets the value through.
+_contexts = ("https://h.example/f?", "/f.zip?x=1&", "Bearer ", "Basic ", "key=", "Authorization: ", "")
+_secrets = ("client_secret: S40", "apikey = S40", "password: 'S40'", "Bearer S40", "x-api-key=S40", "token=S40",
+            '"access_token": "S40"', "https://u:S40@h.example/", "https://h.example/f?k=S40")
+_leaks = [t for t in (f"{c}{sep}{x}" for c in _contexts for sep in ("", " ") for x in _secrets)
+          if "S40" in uvi.redact(t)]
+check("no secret form leaks after any query, auth scheme or name", not _leaks, repr(_leaks[:5]))
 _long = uvi.redact("a." * 8000 + " apikey=S9")
 check("redact() of a long text is capped at REDACT_MAX", len(_long) <= uvi.REDACT_MAX + 2, repr(len(_long)))
 # Runs of name separators once made the secret-name pattern backtrack over
 # every segment from every start (0.4 to 1.3 s for "a_" * 2048), and runs of
 # scheme characters the URL patterns (0.1 s for "a." * 2048). Linear now:
-# about a millisecond; the limit leaves a slow runner a hundred times that,
-# and the best of three runs ignores a pause of the machine.
+# about a millisecond (a chain of names, quadratic, some 15 ms); the limit
+# leaves a slow runner several times that, and the best of three runs
+# ignores a pause of the machine.
 for _label, _text in (("a_", "a_" * 8000), ("a-", "a-" * 8000), ("a.", "a." * 8000), ("a+", "a+" * 8000),
-                      ("key words", "key " * 2000), ("names ending in a secret word", "x_token_" * 1000)):
+                      ("key words", "key " * 2000), ("names ending in a secret word", "x_token_" * 1000),
+                      ("names in each other's values", "key=-" * 1000)):
     _best = float("inf")
     for _ in range(3):
         _t0 = time.perf_counter()

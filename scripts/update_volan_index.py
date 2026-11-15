@@ -70,10 +70,18 @@ REJECT_RECHECK_DAYS = 7
 # one after \b backtracked over every run of scheme characters from every
 # start (50 ms per pattern on "a." * 2048), and one longer than 32 is still
 # found, from its last 32 characters.
-_URL_QUERY = re.compile(r"(?i)([a-z][a-z0-9+.-]{0,31}://[^\s?#'\"<>]*)\?[^\s#'\"<>]*")
-_BARE_QUERY = re.compile(r"\?(?=[A-Za-z0-9_.%-]+=)[^\s#'\"<>]*")
-_URL_USERINFO = re.compile(r"(?i)([a-z][a-z0-9+.-]{0,31}://)[^\s/@'\"<>]+@")
-_AUTH_SCHEME = re.compile(r"(?i)\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+")
+#
+# Every pattern has one group, the part that goes, and every pattern looks at
+# the same text: a round of redact() replaces the union of what they found,
+# and spans that overlap or touch become one "…". Run one after another, as
+# they once were, an earlier pattern swallowed the context a later one needs:
+# a URL query ends at whitespace, so "?client_secret: S" lost
+# "client_secret:" to the query and the secret-name pattern no longer saw a
+# name before "S" ("?Bearer S" the same).
+_URL_QUERY = re.compile(r"(?i)[a-z][a-z0-9+.-]{0,31}://[^\s?#'\"<>]*\?([^\s#'\"<>]*)")
+_BARE_QUERY = re.compile(r"\?((?=[A-Za-z0-9_.%-]+=)[^\s#'\"<>]*)")
+_URL_USERINFO = re.compile(r"(?i)[a-z][a-z0-9+.-]{0,31}://([^\s/@'\"<>]+)@")
+_AUTH_SCHEME = re.compile(r"(?i)\b(?:Bearer|Basic)\s+([A-Za-z0-9._~+/=-]+)")
 _SECRET_WORD = r"(?:api[_-]?key|apikey|key|token|secret|password|passwd|pwd|sig|signature|credentials?|authorization)"
 # The match starts at the secret word itself: the _ or - before it is the
 # non-alphanumeric character that opens a match, and the earlier segments
@@ -82,13 +90,45 @@ _SECRET_WORD = r"(?:api[_-]?key|apikey|key|token|secret|password|passwd|pwd|sig|
 # backtracked over every segment from every start: quadratic, 1.3 s on
 # "a_" * 2048.
 _SECRET_PARAM = re.compile(
-    r"(?i)(^|[^a-z0-9])(" + _SECRET_WORD + r")([\"']?\s*[:=]\s*[\"']?)"
-    # an Authorization scheme word stays (its credentials went with _AUTH_SCHEME)
-    r"(?!(?:Bearer|Basic)\s)[^\s&'\"<>,;]+"
+    r"(?i)(?:^|[^a-z0-9])" + _SECRET_WORD + r"[\"']?\s*[:=]\s*[\"']?"
+    # an Authorization scheme word stays (its credentials go with _AUTH_SCHEME)
+    r"(?!(?:Bearer|Basic)\s)([^\s&'\"<>,;]+)"
 )
+_REDACTED = (_URL_USERINFO, _URL_QUERY, _BARE_QUERY)
+# These two may find a name inside the value of a match of their own ("key
+# ="token = S": the value of key is token, and token's is S), so their search
+# goes on from the character before that value, not after it (the patterns
+# in turn hid this: "Basic key" had gone to the Bearer/Basic one before the
+# secret-name one ran). Quadratic only in a chain of names (some 15 ms on
+# "key=-" * 1000), linear otherwise.
+_REDACTED_NESTED = (_AUTH_SCHEME, _SECRET_PARAM)
 # Redaction runs on this much of a text at most: a webhook or log line has
 # no use for more, and it bounds the time the patterns above take.
 REDACT_MAX = 4096
+REDACT_ROUNDS = 4
+
+
+def _redact_once(text: str) -> str:
+    """text with every span the patterns above found in it replaced by "…"."""
+    spans = [m.span(1) for pattern in _REDACTED for m in pattern.finditer(text)]
+    for pattern in _REDACTED_NESTED:
+        pos = 0
+        while m := pattern.search(text, pos):
+            spans.append(m.span(1))
+            pos = max(m.start(1) - 1, m.start() + 1)
+    spans.sort()
+    merged: list[list[int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    out, done = [], 0
+    for start, end in merged:
+        out += (text[done:start], "…")
+        done = end
+    out.append(text[done:])
+    return "".join(out)
 
 
 def redact(text: str) -> str:
@@ -96,11 +136,14 @@ def redact(text: str) -> str:
     secret-named parameters (see above), cut to REDACT_MAX characters."""
     if len(text) > REDACT_MAX:
         text = text[:REDACT_MAX] + " …"
-    text = _URL_USERINFO.sub(r"\1…@", text)
-    text = _URL_QUERY.sub(r"\1?…", text)
-    text = _BARE_QUERY.sub("?…", text)
-    text = _AUTH_SCHEME.sub(r"\1 …", text)
-    return _SECRET_PARAM.sub(r"\1\2\3…", text)
+    # A removed span can join what was around it into a new match: a userinfo
+    # holding a "#" (http://a#u:pw@h/f?;k=S) kept the query from its URL.
+    # Another round finds those; a round only ever takes more away.
+    for _ in range(REDACT_ROUNDS):
+        before, text = text, _redact_once(text)
+        if text == before:
+            break
+    return text
 
 
 def print_redacted_exc() -> None:
