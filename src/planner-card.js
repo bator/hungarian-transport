@@ -275,9 +275,17 @@ export class BKKPlannerCard extends BKKHopCard {
        the title and the pickers still say yesterday's "ma": roll them now,
        not on the first tick up to 15 s later. */
     this._rollWhenPickers();
+    this._ensureDests();
     if (this._plannerMap) return;
     const host = this._journeyHost && this._journeyHost.querySelector('.journey-plan');
     if (host && host.querySelector('#pjmap')) this._mountPlannerInlineMap(host);
+  }
+
+  /* A destination list held back while the tab was in the background
+     (_ensureDests) loads once it is in front again. */
+  _visibilityChanged() {
+    super._visibilityChanged();
+    if (!this._pageHidden()) this._ensureDests();
   }
 
   _teardownPlannerInlineMap() {
@@ -891,10 +899,15 @@ export class BKKPlannerCard extends BKKHopCard {
   /* An origin from the YAML or the editor needs its reachable destinations
      too, not only one picked in the card. The list only feeds the
      destination picker, and it costs a board and dozens of trip and route
-     lookups: a picked pair, its pickers folded, waits until edit opens them. */
+     lookups: a picked pair, its pickers folded, waits until edit opens them.
+     Only a card on the page loads it: Home Assistant hands hass to cards it
+     keeps out of the page (a visibility condition) as well, and a card in a
+     background tab has nobody to offer it to. connectedCallback and the tab
+     coming back to the front ask again. */
   _ensureDests() {
     const cfg = this._config || {};
     if (!this._pickersMounted || !this._hass || !cfg.stopId) return;
+    if (!this.isConnected || this._pageHidden()) return;
     if (this._routePicked() && !this._editRoute) return;
     if (this._destsFor === cfg.stopId) {
       /* Losing access (the service gone for a moment) keeps the list; a
@@ -1818,20 +1831,27 @@ ${this._stopPinCss()}
   async _loadDests() {
     const cfg = this._config || {};
     if (!cfg.stopId) return;
+    const again = this._destsFor === cfg.stopId;
     this._destsFor = cfg.stopId;
     this._destsAccess = this._futarAccess();
     this._destsFailedAt = 0;
     const seq = this._destLoad.bump();
     /* The last origin's destinations must not be offered while this
-       one's load (an origin changed in the editor). */
-    this._dests = [];
-    this._destRoutes = {};
+       one's load (an origin changed in the editor). The same origin's
+       list loading again (a retry, new FUTÁR access) stays offered. */
+    if (!again) {
+      this._dests = [];
+      this._destRoutes = {};
+    }
     this._destsLoading = true;
     this._paintDestHits('');
     try {
       if (!this._hasFutar()) await this._fillKey();
+      /* A newer load (the integration's service showing up while the
+         dashboard was read) asks for the list itself. */
+      if (this._destLoad.stale(seq)) return;
       /* A key borrowed just now is what this list loads with. */
-      if (!this._destLoad.stale(seq)) this._destsAccess = this._futarAccess();
+      this._destsAccess = this._futarAccess();
       if (BkkLib.isPlaceStop({ id: cfg.stopId, kind: cfg.stopKind })) {
         this._dests = [];
         this._destRoutes = {};
@@ -1847,6 +1867,10 @@ ${this._stopPinCss()}
         if (this._destLoad.stale(seq)) return;
         this._dests = (out && out.dests) || [];
         this._destRoutes = (out && out.destRoutes) || {};
+        /* FUTÁR's part failed (a 429, a timeout): the GTFS destinations
+           are offered meanwhile, and the list loads again DEST_RETRY_MS
+           later, as a failed one does, for the BKK destinations. */
+        if (out && out.partial) this._destsFailedAt = Date.now();
       }
       this._showSearchErr('');
     } catch (err) {
@@ -1930,7 +1954,7 @@ ${this._stopPinCss()}
       this._hint(box, 'plannerPickAll');
       return;
     }
-    if (this._destsLoading) {
+    if (this._destsLoading && !this._dests.length) {
       this._hint(box, 'destLoading');
       return;
     }
