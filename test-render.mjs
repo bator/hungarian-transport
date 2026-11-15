@@ -2940,22 +2940,27 @@ check('mavRouteForRow G43 uses the line code',
     JSON.stringify({ dayLabels, t: ptime.selectedOptions[0] && ptime.selectedOptions[0].textContent }));
   check('day and clock round-trip through Budapest time',
     (() => { const p = pc._whenParts(iso(6, 5)); return pc._whenFromParts(p.ymd, p.min) === iso(6, 5); })());
-  ptime.value = String(17 * 60 + 25);
+  /* The clock and day picked are never the ones already set (the next
+     five-minute mark from now, which may be tomorrow's 00:00 just before
+     midnight): a pick naming the time already set plans nothing. */
+  const setMin = pc._whenParts(pc._plan.when.at).min;
+  const pickMin = (Math.floor(setMin / 5) * 5 + 120) % 1440;
+  ptime.value = String((pickMin + 1435) % 1440);
   ptime.dispatchEvent(new Event('change'));
-  ptime.value = String(17 * 60 + 30);
+  ptime.value = String(pickMin);
   ptime.dispatchEvent(new Event('change'));
   await new Promise((r) => setTimeout(r, 380));
   check('arrow-key steps on the clock plan once, for the last time, on the picked day',
-    asked.length === 2 && pc._whenParts(pc._plan.when.at).min === 17 * 60 + 30
+    asked.length === 2 && pc._whenParts(pc._plan.when.at).min === pickMin
     && pc._whenParts(pc._plan.when.at).ymd === pday.value && asked[1].time === pc._plan.when.at,
     JSON.stringify(asked.map((x) => x.time)));
-  const tomorrowYmd = pday.options[1].value;
-  pday.value = tomorrowYmd;
+  const otherYmd = [...pday.options].map((o) => o.value).find((v) => v !== pday.value);
+  pday.value = otherYmd;
   pday.dispatchEvent(new Event('change'));
   await new Promise((r) => setTimeout(r, 380));
   check('picking another day keeps the clock and plans for that day',
-    asked.length === 3 && pc._whenParts(pc._plan.when.at).ymd === tomorrowYmd
-    && pc._whenParts(pc._plan.when.at).min === 17 * 60 + 30 && asked[2].time === pc._plan.when.at,
+    asked.length === 3 && pc._whenParts(pc._plan.when.at).ymd === otherYmd
+    && pc._whenParts(pc._plan.when.at).min === pickMin && asked[2].time === pc._plan.when.at,
     JSON.stringify(asked.map((x) => x.time)));
   ptime.dispatchEvent(new Event('change'));
   await new Promise((r) => setTimeout(r, 380));
@@ -10789,6 +10794,257 @@ check('a named train does not match a headsign it only begins (Tisza, Tiszaújv�
     same8 = diffs8.length === 0;
   }
   check('nameMatcher answers as nameEq for every pair', same8, JSON.stringify(diffs8));
+}
+
+/* ---- Review 5: cards. The time pickers and the title past midnight with
+   a picker in focus, the editor's list after a mode change from the YAML,
+   ELVIRA showing up on the planner, and access showing up while a planner
+   is detached ---- */
+
+/* A planner at 23:50 Budapest with "Indulás" picked, past midnight. */
+const review5Planner = async (now) => {
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+  pc.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+  document.body.appendChild(pc);
+  await settleTicks();
+  pc._planner.now = async () => null;
+  pc._planner.at = async () => [];
+  pc._applyWhen({ mode: 'depart', at: now });
+  await settleTicks();
+  return pc;
+};
+
+/* A native select keeps the focus after a pick: the tick rolls the day
+   picker past midnight all the same, so "ma" is never yesterday. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 50); /* 23:50 in Budapest (CET) */
+  Date.now = () => now;
+  Lib.nextBoard = async () => {};
+  Lib.apiKeyFromDashboard = async () => '';
+  let pc = null;
+  try {
+    pc = await review5Planner(now);
+    const day = pc.shadowRoot.getElementById('pday');
+    const label = (ymd) => ([...day.options].find((o) => o.value === ymd) || {}).textContent;
+    day.focus();
+    const focused = pc.shadowRoot.activeElement === day;
+    now += 20 * 60000; /* 00:10 on the 16th */
+    pc._tickPaint();
+    check('past midnight the tick rolls the day picker even while it has the focus',
+      focused && label('20261116') === i18nT('hu', 'plannerToday') && label('20261115') !== i18nT('hu', 'plannerToday')
+      && day.value === '20261115',
+      JSON.stringify({ focused, today: label('20261116'), yesterday: label('20261115'), value: day.value }));
+  } finally {
+    Date.now = realNow;
+    if (pc) pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* A pick made past midnight before the tick rolled the pickers: "ma" is
+   read as the user read it, today, not as the day it was painted on. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 50);
+  Date.now = () => now;
+  Lib.nextBoard = async () => {};
+  Lib.apiKeyFromDashboard = async () => '';
+  let pc = null;
+  try {
+    pc = await review5Planner(now);
+    const day = pc.shadowRoot.getElementById('pday');
+    const time = pc.shadowRoot.getElementById('ptime');
+    now += 20 * 60000; /* 00:10 on the 16th, no tick yet */
+    day.value = ([...day.options].find((o) => o.textContent === i18nT('hu', 'plannerToday')) || {}).value;
+    time.value = String(8 * 60);
+    time.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 350));
+    check('"ma" 08:00 picked past midnight before the tick plans today, not yesterday',
+      new Date(pc._plan.when.at).toISOString() === '2026-11-16T07:00:00.000Z',
+      new Date(pc._plan.when.at).toISOString());
+  } finally {
+    Date.now = realNow;
+    if (pc) pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* The title's line and the itinerary box name the day too: past midnight
+   the tick paints them for the new day with the pickers. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 50);
+  Date.now = () => now;
+  Lib.nextBoard = async () => {};
+  Lib.apiKeyFromDashboard = async () => '';
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    document.body.appendChild(pc);
+    await settleTicks();
+    const start = Date.UTC(2026, 10, 15, 23, 20); /* 00:20 on the 16th */
+    const ride = { walk: false, label: '7', color: '009EE3', minutes: 30, from: 'A', to: 'B' };
+    pc._planner.now = async () => null;
+    pc._planner.at = async () => [{ durationMin: 30, transfers: 0, walkMin: 0, waitMin: 0, startMs: start, endMs: start + 1800000, legs: [ride] }];
+    pc._applyWhen({ mode: 'depart', at: now });
+    await settleTicks();
+    const meta = () => pc.shadowRoot.querySelector('.rt-meta').textContent;
+    const dayWord = () => ((pc.shadowRoot.querySelector('.pjourney .itin-head small')
+      || pc.shadowRoot.querySelector('.pjourney small')) || {}).textContent;
+    const before = { meta: meta(), day: dayWord() };
+    now += 20 * 60000;
+    pc._tickPaint();
+    const after = { meta: meta(), day: dayWord() };
+    check('past midnight the tick paints the title\'s "ma" and the itinerary\'s "holnap" for the new day',
+      before.meta.includes(`${i18nT('hu', 'plannerToday')} 23:50`) && before.day === i18nT('hu', 'plannerTomorrow')
+      && after.meta.includes('23:50') && !after.meta.includes(`${i18nT('hu', 'plannerToday')} 23:50`)
+      && after.day === i18nT('hu', 'plannerToday'),
+      JSON.stringify({ before, after }));
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* The editor: MÁV switched on in the YAML (not with the toggle) drops the
+   BKK list, so a failed MÁV load does not offer it and a pick from it does
+   not save BKK route ids on a MÁV card. */
+{
+  const keep = { reachableDests: Lib.reachableDests, probeApiKey: Lib.probeApiKey, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  Lib.probeApiKey = async () => ({ ok: true });
+  Lib.apiKeyFromDashboard = async () => '';
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  try {
+    ed.hass = { states: {}, language: 'en', services: { hungarian_transport: { futar: {} } }, connection: {} };
+    Lib.reachableDests = async () => ({ dests: [{ key: 'gyor', name: 'Győr', id: 'volan_9' }], destRoutes: { gyor: ['volan_R1', 'BKK_9'] } });
+    const base = { type: 'custom:hungarian-transport-card', stopId: 'BKK_005501024', stopName: 'Kelenföld', destKey: '', destName: '', routeIds: [] };
+    ed.setConfig(base);
+    await settleTicks();
+    const loaded = ed._dests.map((d) => d.name);
+    Lib.reachableDests = async () => { throw new Error('FUTÁR 503'); };
+    ed.setConfig(Object.assign({}, base, { mav: true }));
+    await settleTicks();
+    ed._paintDestHits('');
+    const offered = [...ed.querySelectorAll('#destHits .hit')].map((b) => b.textContent);
+    check('a mode switched in the YAML drops the old mode\'s destination list, and a failed load offers nothing',
+      loaded.join() === 'Győr' && offered.length === 0 && ed._dests.length === 0,
+      JSON.stringify({ loaded, offered, dests: ed._dests.length }));
+    /* A list left behind for another mode or city is not painted. */
+    ed._dests = [{ key: 'gyor', name: 'Győr' }];
+    ed._loadedScope = 'bkk|';
+    ed._paintDestHits('');
+    check('the destination hits never paint a list loaded for another mode',
+      !ed.querySelector('#destHits .hit'), ed.querySelector('#destHits').innerHTML);
+  } finally {
+    ed.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* The editor: a destination load that failed for BKK does not hold back
+   MÁV's own load on the same stop, switched on right after. */
+{
+  const keep = { reachableDests: Lib.reachableDests, probeApiKey: Lib.probeApiKey, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const modes = [];
+  Lib.reachableDests = async (ix, key, cache, stop, mode) => {
+    modes.push(mode);
+    if (mode !== 'mav') throw new Error('FUTÁR 503');
+    return { dests: [{ key: 'szekesfehervar', name: 'Székesfehérvár' }], destRoutes: { szekesfehervar: ['BKK_MAV40'] } };
+  };
+  Lib.probeApiKey = async () => ({ ok: true });
+  Lib.apiKeyFromDashboard = async () => '';
+  const ed = document.createElement('hungarian-transport-card-editor');
+  document.body.appendChild(ed);
+  try {
+    ed.addEventListener('config-changed', (e) => ed.setConfig(e.detail.config));
+    ed.hass = { states: {}, language: 'hu', services: { hungarian_transport: { futar: {}, elvira_between: {} } }, connection: {} };
+    ed.setConfig({ type: 'custom:hungarian-transport-card', stopId: 'BKK_005501024', stopName: 'Kelenföld', destKey: '', destName: '', routeIds: [] });
+    await settleTicks();
+    ed.querySelector('#mav').checked = true;
+    ed._onModeToggle('mav');
+    ed.setConfig(Object.assign({}, ed._config, { stopId: 'BKK_005501024', stopName: 'Kelenföld' }));
+    await settleTicks();
+    check('a failed BKK destination load does not block MÁV\'s load on the same stop',
+      modes.join() === 'bkk,mav' && ed._dests.map((d) => d.name).join() === 'Székesfehérvár',
+      JSON.stringify({ modes, dests: ed._dests.map((d) => d.name) }));
+  } finally {
+    ed.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* elvira_between showing up: the planner asks ELVIRA too and does not
+   poll, so it reloads, like a MÁV card. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  Lib.nextBoard = async () => {};
+  Lib.apiKeyFromDashboard = async () => '';
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    pc.setConfig({ language: 'hu', stopId: 'BKK_005501024', stopName: 'Kelenföld', destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269' });
+    pc._planner.now = async () => null;
+    const base = { states: {}, language: 'hu', connection: {} };
+    pc.hass = Object.assign({ services: {} }, base);
+    document.body.appendChild(pc);
+    await settleTicks();
+    let reloads = 0;
+    pc._reloadSafe = () => { reloads += 1; };
+    pc.hass = Object.assign({ services: { hungarian_transport: { elvira_between: {} } } }, base);
+    await settleTicks();
+    check('the planner reloads when elvira_between shows up', reloads === 1, String(reloads));
+  } finally {
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* Home Assistant hands hass to a card hidden by a visibility condition,
+   which hui-card keeps detached: FUTÁR showing up meanwhile is remembered,
+   and the planner reloads when it is shown again, its plan still fresh. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const runs = [];
+  Lib.nextBoard = async (poll) => { runs.push(Lib.integrationHasKey(poll.ctx.hass()) ? 'futar' : 'none'); };
+  Lib.apiKeyFromDashboard = async () => '';
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc._planner.now = async () => null;
+    const base = { states: {}, language: 'hu', connection: {}, callWS: async () => ({}) };
+    pc.hass = Object.assign({ services: {} }, base);
+    document.body.appendChild(pc);
+    await settleTicks();
+    /* Rows on screen: back on the view the plan is not stale. */
+    pc._rows = [{ depTs: Math.floor(Date.now() / 1000) + 600, label: '1', headsign: 'B' }];
+    const fresh = !pc._shouldReloadOnConnect();
+    pc.remove();
+    pc.hass = Object.assign({ services: { hungarian_transport: { futar: {} } } }, base);
+    await settleTicks();
+    const whileAway = runs.slice();
+    document.body.appendChild(pc);
+    await settleTicks();
+    check('FUTÁR showing up while the planner is detached reloads it, with BKK, once it is back',
+      fresh && whileAway.join() === 'none' && runs.join() === 'none,futar' && !pc._accessArrived,
+      JSON.stringify({ fresh, whileAway, runs }));
+  } finally {
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
 }
 
 /* GTFS-Realtime (realtime.js): which trips the card asks the integration

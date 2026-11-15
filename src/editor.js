@@ -66,6 +66,7 @@ export class BKKHopCardEditor extends HTMLElement {
   }
 
   setConfig(config) {
+    const prev = this._config;
     this._config = normalizeCardConfig(config);
     BkkLib.warnCardApiKey(this._config);
     if (!this._cache) this._cache = {};
@@ -81,6 +82,13 @@ export class BKKHopCardEditor extends HTMLElement {
     this._syncApiKey();
     this._syncMode();
     this._probeKey();
+    /* A mode, city or origin changed in the YAML: the list loaded (or still
+       loading) is the old one's, and picking from it saved BKK route ids on
+       a MÁV card. The editor's own toggles and picks drop it themselves and
+       set _config before their config comes back here, so this sees only
+       changes from outside. */
+    if (prev && (String(prev.stopId || '') !== String(this._config.stopId || '')
+        || this._destScope(prev) !== this._destScope())) this._dropDestLoad();
     /* Every keystroke in the name field comes back as a setConfig: a load
        already running for this stop must not be restarted. */
     const stopId = this._config.stopId;
@@ -122,8 +130,9 @@ export class BKKHopCardEditor extends HTMLElement {
   }
 
   /* What a destination list depends on besides the stop. */
-  _destScope() {
-    return `${this._mode()}|${this._config.city || ''}`;
+  _destScope(cfg) {
+    const c = cfg || this._config;
+    return `${this._mode(c)}|${c.city || ''}`;
   }
 
   /* A load in flight for this stop in the current mode and city. */
@@ -143,6 +152,9 @@ export class BKKHopCardEditor extends HTMLElement {
     this._dests = [];
     this._destRoutes = {};
     this._loadedStop = '';
+    /* A load that failed was the old mode's: it must not hold back the new
+       one's for DEST_RETRY_MS on the same stop. */
+    this._failedStop = '';
   }
 
   _apiKey() {
@@ -162,7 +174,8 @@ export class BKKHopCardEditor extends HTMLElement {
 
   _lang() { return resolveLang(this._config.language, this._hass); }
 
-  _mode() { return BkkLib.mode(this._config); }
+  /* The card's mode, or the one a given config would have. */
+  _mode(cfg) { return BkkLib.mode(cfg || this._config); }
 
   /* Volán and city boards come from the GTFS indexes: no FUTÁR key, and
      none copied in from a sibling card (the card itself never asks). */
@@ -878,7 +891,9 @@ export class BKKHopCardEditor extends HTMLElement {
       box.innerHTML = '<span class="hint">' + BkkLib.esc(t(this._lang(), 'destLoading')) + '</span>';
       return;
     }
-    if (!this._dests.length) {
+    /* A list loaded for another mode or city is not this one's, whatever
+       is left of it after a failed load. */
+    if (!this._dests.length || this._loadedScope !== this._destScope()) {
       box.innerHTML = '<span class="hint">' + BkkLib.esc(copy.destNone) + '</span>';
       return;
     }
