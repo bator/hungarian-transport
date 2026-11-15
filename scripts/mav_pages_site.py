@@ -98,7 +98,8 @@ MAX_MANIFEST = 64 * 1024
 # The same content is deployed again once the published manifest is this old,
 # so its built_at says the daily run went through: mav_daily_verdict.py fails
 # a run that published nothing on a built_at STALE_AFTER (2 days) old, and
-# the integration tries late on one older than mav_daily.STALE_MANIFEST (20 h).
+# the integration looks again later on one older than mav_daily.STALE_MANIFEST
+# (20 h), as on one of an earlier day's feed.
 # Under a day, so one of a day's runs (the 04:45 and 14:20 UTC crons, a
 # dispatch) refreshes it every day even when MÁV published nothing new; a
 # run a few hours after another with the same content (a rerun, the

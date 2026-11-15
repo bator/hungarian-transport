@@ -128,7 +128,7 @@ key** checkbox.
 - The field hides the key while you type.
 - **Daily MÁV route index from GitHub** (on by default): once a day the
   integration checks `bator.github.io` for the train route index built that
-  morning from MÁV's newest timetable, and uses it when it is newer than the
+  day from MÁV's newest timetable, and uses it when it is newer than the
   one in use. Untick it to stay on the weekly release's index; Home
   Assistant then makes no such request. See
   [The daily index](../timetables.md#the-daily-index-from-github-pages).
@@ -136,7 +136,9 @@ key** checkbox.
   (up to 5 minutes later); it also runs once 10–20 minutes after Home
   Assistant starts and after you save these options. A check that fails
   (GitHub unreachable, a build of your own feed running) is tried again
-  every 20 minutes, up to 6 times.
+  every 20 minutes, up to 6 times. The day's index is usually on GitHub
+  around midday, so while the one there is still of an earlier day the
+  check looks again every 2–3 hours, up to 4 times, until midnight.
 - **Notify about timetable updates** (off by default): a persistent
   notification when a new daily MÁV index is installed, when an update of
   the integration ships new Volán, city or MÁV timetables, and once when the

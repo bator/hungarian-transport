@@ -291,9 +291,13 @@ reads the new address. The index is written next to the card the way a
 build writes it (a temp file, then a rename) and never while a local build
 runs or waits. A
 failed round, or one that found a build running, is tried again 20 minutes
-later, up to 6 times until the next daily round; a daily round that finds a
-manifest older than 20 hours (the workflow ran late) looks once more one to
-two hours later. A failed round leaves the index as it is and logs one
+later, up to 6 times until the next daily round. The day's feed is on Pages
+around midday or in the afternoon (above), so a round that finds the
+manifest's feed of an earlier day (or the manifest built over 20 hours ago)
+looks again two to three hours later, up to 4 times after the daily (or the
+startup) round and never past midnight: from 06:00, the last look is in the
+afternoon. Each look is one request for the small manifest; the index is
+downloaded only when its feed is newer. A failed round leaves the index as it is and logs one
 warning, not one per round; no Repairs issue. Open dashboards pick the new index up at their next
 reload (the card revalidates it, and Home Assistant answers with a new ETag).
 
@@ -303,8 +307,9 @@ request to GitHub Pages and keeps the weekly release's index (or the one it
 builds from your feed).
 
 **Privacy.** With the option on, Home Assistant contacts `bator.github.io`
-(GitHub Pages) about once a day: a plain HTTPS GET of the manifest and the
-index (never the GTFS zips),
+(GitHub Pages) once a day, and up to 4 more times that day for the manifest
+alone while it is not yet of the day: a plain HTTPS GET of the manifest and
+the index (never the GTFS zips),
 no cookies, nothing beyond what any HTTP request carries (your IP address,
 and Home Assistant's user agent with its version). Nothing about your
 configuration is sent.
