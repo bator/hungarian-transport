@@ -9486,6 +9486,55 @@ check('a named train does not match a headsign it only begins (Tisza, TiszaÃºjvÃ
   Lib._hass = null;
 }
 
+/* The day picker's "ma" and "holnap" past Budapest midnight: the tick
+   paints them for the new day, so "ma" and a time picked under it plan
+   today, not yesterday. The planned time stays picked, now as a date. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const realNow = Date.now;
+  let now = Date.UTC(2026, 10, 15, 22, 50); /* 23:50 in Budapest (CET) */
+  Date.now = () => now;
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    Lib.nextBoard = async () => {};
+    Lib.apiKeyFromDashboard = async () => '';
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc.hass = { states: {}, language: 'hu', services: {}, connection: {} };
+    document.body.appendChild(pc);
+    await settleTicks();
+    pc._planner.at = async () => [];
+    pc._planner.now = async () => null;
+    pc._setWhen('depart');
+    await settleTicks();
+    const day = pc.shadowRoot.getElementById('pday');
+    const time = pc.shadowRoot.getElementById('ptime');
+    const label = (ymd) => ([...day.options].find((o) => o.value === ymd) || {}).textContent;
+    const before = label('20261115');
+    now += 20 * 60000; /* 00:10 on the 16th */
+    pc._tickPaint();
+    const today = label('20261116');
+    const kept = day.value;
+    const old = label('20261115');
+    /* The user picks the option that reads "ma". */
+    day.value = ([...day.options].find((o) => o.textContent === i18nT('hu', 'plannerToday')) || {}).value;
+    time.value = String(8 * 60);
+    time.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 350));
+    check('past Budapest midnight the tick paints "ma" for the new day and keeps the planned day picked',
+      before === i18nT('hu', 'plannerToday') && today === i18nT('hu', 'plannerToday')
+      && kept === '20261115' && !!old && old !== i18nT('hu', 'plannerToday'),
+      JSON.stringify({ before, today, kept, old }));
+    check('"ma" 08:00 picked after midnight plans today, not yesterday',
+      new Date(pc._plan.when.at).toISOString() === '2026-11-16T07:00:00.000Z',
+      new Date(pc._plan.when.at).toISOString());
+  } finally {
+    Date.now = realNow;
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* The editor: an integration gone for a moment (an entry reload) and back
    probes its key again, not taken as refused with the key field left up. */
 {

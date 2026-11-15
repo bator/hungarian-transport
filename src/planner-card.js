@@ -24,6 +24,8 @@ export class BKKPlannerCard extends BKKHopCard {
     this._searchTimer = null;
     this._destTimer = null;
     this._pickTimer = null;
+    /* The Budapest day the time pickers' "ma" and "holnap" were painted on. */
+    this._whenPaintedFor = '';
     /* The origin search, the destination search and the destination list
        load: a newer one (or a pick) makes the one still running stale. */
     this._originSearch = generation();
@@ -105,6 +107,7 @@ export class BKKPlannerCard extends BKKHopCard {
      is as stale as one seen again after a while away. */
   _tickPaint() {
     super._tickPaint();
+    this._rollWhenPickers();
     const cfg = this._config || {};
     if (!cfg.stopId || !cfg.destKey || !this._plan.stale) return;
     if (this._reloadActive || !this.isConnected || this._pageHidden()) return;
@@ -1381,6 +1384,7 @@ ${this._stopPinCss()}
     const lang = this._lang();
     const cur = this._whenParts(at || this._plan.when.at || Date.now());
     const today = this._whenParts(Date.now()).ymd;
+    this._whenPaintedFor = today;
     const fmt = new Intl.DateTimeFormat(lang === 'hu' ? 'hu-HU' : 'en-GB', {
       timeZone: 'Europe/Budapest', weekday: 'short', month: 'short', day: 'numeric',
     });
@@ -1403,6 +1407,23 @@ ${this._stopPinCss()}
     time.value = String(cur.min);
     day.setAttribute('aria-label', t(lang, 'plannerDay'));
     time.setAttribute('aria-label', t(lang, 'plannerTime'));
+  }
+
+  /* "ma" and "holnap" are the days the pickers were painted on: past
+     Budapest midnight "ma" would be yesterday, and a time picked under it
+     would plan yesterday. The tick paints them again for the new day; the
+     planned time stays selected (as a dated day once it is no longer
+     today). Not while the user is picking: a pick waiting out its
+     debounce, or a picker with focus, would lose what was chosen. */
+  _rollWhenPickers() {
+    if (!this._plan.timed || !this._whenPaintedFor) return;
+    if (this._whenParts(Date.now()).ymd === this._whenPaintedFor) return;
+    const day = this._planEl('pday');
+    const time = this._planEl('ptime');
+    if (!day || !time || this._pickTimer) return;
+    const focused = this.shadowRoot && this.shadowRoot.activeElement;
+    if (focused === day || focused === time) return;
+    this._paintWhenPickers();
   }
 
   _syncWhen() {
