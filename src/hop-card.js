@@ -189,10 +189,15 @@ export class BKKHopCard extends HTMLElement {
     this._reloadSafe();
   }
 
-  /* The integration's futar service or elvira_between just showed up. */
+  /* The integration's futar service or elvira_between just showed up.
+     Home Assistant keeps handing hass to a card it has taken out of the
+     page (a card hidden by a visibility condition stays in its hui-card
+     wrapper, detached), so access can show up while the card is away:
+     that is remembered for connectedCallback, which otherwise reloads the
+     planner only once its plan is stale. */
   _accessShowedUp() {
-    if (!this._painted || !this.isConnected) return;
-    if (this._reloadActive) {
+    if (!this._painted) return;
+    if (this._reloadActive || !this.isConnected) {
       this._accessArrived = true;
       return;
     }
@@ -221,10 +226,13 @@ export class BKKHopCard extends HTMLElement {
     this._viaIntegration = !(this._config || {}).apiKey && BkkLib.integrationHasKey(hass);
     if (this._viaIntegration && !viaBefore) this._accessShowedUp();
     /* So can elvira_between, a MÁV card's own source (a key-less one said
-       "no API key" without it): reload once that shows up too. */
+       "no API key" without it): reload once that shows up too. The planner
+       ("all") asks ELVIRA as well and does not poll, so it would otherwise
+       go without MÁV's board until its plan went stale. */
     const elviraBefore = this._viaElvira;
     this._viaElvira = BkkLib.hasElvira(hass);
-    if (this._viaElvira && !elviraBefore && this._departMode() === 'mav') this._accessShowedUp();
+    const mode = this._departMode();
+    if (this._viaElvira && !elviraBefore && (mode === 'mav' || mode === 'all')) this._accessShowedUp();
     if (first && this._rawRows && this._rawRows.length) {
       BkkLib.enrichFromHass(this._hass, this._rawRows);
       const cfg = this._config || {};
@@ -287,7 +295,8 @@ export class BKKHopCard extends HTMLElement {
     if (!this._painted) return;
     this._startTick();
     this._bindMapClicks();
-    if (!this._poll && !this._reloadActive && this._shouldReloadOnConnect()) this._reloadSafe();
+    if (this._poll || this._reloadActive) return;
+    if (this._accessArrived || this._shouldReloadOnConnect()) this._reloadSafe();
   }
 
   _pageHidden() {

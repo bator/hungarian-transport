@@ -10944,6 +10944,67 @@ const review5Planner = async (now) => {
   }
 }
 
+/* elvira_between showing up: the planner asks ELVIRA too and does not
+   poll, so it reloads, like a MÁV card. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  Lib.nextBoard = async () => {};
+  Lib.apiKeyFromDashboard = async () => '';
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    pc.setConfig({ language: 'hu', stopId: 'BKK_005501024', stopName: 'Kelenföld', destKey: 'szekesfehervar', destName: 'Székesfehérvár', destStopId: 'BKK_005503269' });
+    pc._planner.now = async () => null;
+    const base = { states: {}, language: 'hu', connection: {} };
+    pc.hass = Object.assign({ services: {} }, base);
+    document.body.appendChild(pc);
+    await settleTicks();
+    let reloads = 0;
+    pc._reloadSafe = () => { reloads += 1; };
+    pc.hass = Object.assign({ services: { hungarian_transport: { elvira_between: {} } } }, base);
+    await settleTicks();
+    check('the planner reloads when elvira_between shows up', reloads === 1, String(reloads));
+  } finally {
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
+/* Home Assistant hands hass to a card hidden by a visibility condition,
+   which hui-card keeps detached: FUTÁR showing up meanwhile is remembered,
+   and the planner reloads when it is shown again, its plan still fresh. */
+{
+  const keep = { nextBoard: Lib.nextBoard, apiKeyFromDashboard: Lib.apiKeyFromDashboard };
+  const runs = [];
+  Lib.nextBoard = async (poll) => { runs.push(Lib.integrationHasKey(poll.ctx.hass()) ? 'futar' : 'none'); };
+  Lib.apiKeyFromDashboard = async () => '';
+  const pc = document.createElement('hungarian-transit-stop-card-plan');
+  try {
+    pc.setConfig({ language: 'hu', stopId: 'BKK_F00001', stopName: 'A', destKey: 'b', destName: 'B', destStopId: 'BKK_F00002' });
+    pc._planner.now = async () => null;
+    const base = { states: {}, language: 'hu', connection: {}, callWS: async () => ({}) };
+    pc.hass = Object.assign({ services: {} }, base);
+    document.body.appendChild(pc);
+    await settleTicks();
+    /* Rows on screen: back on the view the plan is not stale. */
+    pc._rows = [{ depTs: Math.floor(Date.now() / 1000) + 600, label: '1', headsign: 'B' }];
+    const fresh = !pc._shouldReloadOnConnect();
+    pc.remove();
+    pc.hass = Object.assign({ services: { hungarian_transport: { futar: {} } } }, base);
+    await settleTicks();
+    const whileAway = runs.slice();
+    document.body.appendChild(pc);
+    await settleTicks();
+    check('FUTÁR showing up while the planner is detached reloads it, with BKK, once it is back',
+      fresh && whileAway.join() === 'none' && runs.join() === 'none,futar' && !pc._accessArrived,
+      JSON.stringify({ fresh, whileAway, runs }));
+  } finally {
+    pc.remove();
+    Object.assign(Lib, keep);
+    Lib._hass = null;
+  }
+}
+
 /* GTFS-Realtime (realtime.js): which trips the card asks the integration
    about, what it copies onto the rows, and what it leaves alone. */
 {
