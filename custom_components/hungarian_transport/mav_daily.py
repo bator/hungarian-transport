@@ -1,7 +1,7 @@
 """The daily MÁV route index from GitHub Pages.
 
-MÁV publishes a new GTFS almost every day; releases ship its index once a
-week. The repository's daily workflow (.github/workflows/mav-index-daily.yml)
+MÁV publishes a new GTFS almost every day; a release ships the index of
+its release day. The repository's daily workflow (.github/workflows/mav-index-daily.yml)
 builds the same pfaedle-matched, audited index every day and publishes it on
 GitHub Pages with a manifest (scripts/mav_pages_site.py). This module
 reads the manifest a while after startup and then once a day at the time
@@ -45,7 +45,9 @@ with a debug line, and is no round (nothing recorded, nothing notified, no
 retry used up); the same manifest's index mismatching again is a FAILED
 round. The options flow can turn it off (CONF_DAILY_MAV); then no request
 is made at all. Each round returns a DailyRound, which the updater hands to
-timetable_notify.py and records for the sensors.
+timetable_notify.py and records for the sensors. The same rounds then run
+the weekly Volán and city indexes (weekly_timetables.py), also with the
+daily MÁV index turned off.
 
 The card fetches mav-index.json.gz with a day-stamped URL and "no-cache":
 Home Assistant's static files answer with an ETag of the file's mtime and
@@ -174,8 +176,22 @@ class _Mismatch(DailyIndexError):
     sha256): another generation's, or a broken file."""
 
 
-async def _get(session: aiohttp.ClientSession, url: str, limit: int, timeout: aiohttp.ClientTimeout) -> bytes:
-    """GET url's body, at most limit bytes; DailyIndexError otherwise."""
+class TooLarge(DailyIndexError):
+    """The body is longer than the limit _get was given: for a file whose
+    manifest names its size, another generation's (or a broken one)."""
+
+
+async def _get(
+    session: aiohttp.ClientSession,
+    url: str,
+    limit: int,
+    timeout: aiohttp.ClientTimeout,
+    sink: Callable[[bytes], Awaitable[None]] | None = None,
+) -> bytes:
+    """GET url's body, at most limit bytes (TooLarge past it); DailyIndexError
+    otherwise. With a sink (weekly_timetables.py writes shards to disk) each
+    chunk goes to it as it comes, and b"" is returned: only one chunk is in
+    memory at a time."""
     what = url.split("?", 1)[0].rsplit("/", 1)[-1]
     try:
         # no-cache for a cache between here and Pages; Pages' own ignores
@@ -198,12 +214,17 @@ async def _get(session: aiohttp.ClientSession, url: str, limit: int, timeout: ai
                 raise DailyIndexError(f"{what}: HTTP {res.status}")
             length = (res.headers or {}).get("Content-Length")
             if length is not None and length.isdigit() and int(length) > limit:
-                raise DailyIndexError(f"{what}: {length} bytes, more than {limit}")
+                raise TooLarge(f"{what}: {length} bytes, more than {limit}")
             body = bytearray()
+            size = 0
             async for chunk in res.content.iter_chunked(1 << 16):
-                body.extend(chunk)
-                if len(body) > limit:
-                    raise DailyIndexError(f"{what}: more than {limit} bytes")
+                size += len(chunk)
+                if size > limit:
+                    raise TooLarge(f"{what}: more than {limit} bytes")
+                if sink is None:
+                    body.extend(chunk)
+                else:
+                    await sink(chunk)
             return bytes(body)
     except TimeoutError as err:
         raise DailyIndexError(f"{what}: timed out") from err
@@ -525,7 +546,15 @@ class DailyIndexUpdater:
     time: the daily time replaces a retry or a late look still waiting.
     on_result gets each round's DailyRound (timetable_notify.py); then the
     round is recorded for the sensors (storage.DAILY_ROUND), and next_run
-    says when the next one is due."""
+    says when the next one is due.
+
+    The weekly Volán and city timetables (weekly_timetables.py) share the
+    schedule: timetables, when given, is started after the MÁV part of every
+    first and daily round (not after its retries, late looks or settling
+    looks, which are MÁV's own), in a task of its own, with retries of its
+    own. With mav False (the daily
+    MÁV index turned off) the rounds run the timetables alone and make no
+    MÁV request."""
 
     def __init__(
         self,
@@ -533,11 +562,17 @@ class DailyIndexUpdater:
         www: Path,
         daily_time: time = time(6),
         on_result: Callable[[DailyRound], Awaitable[None]] | None = None,
+        *,
+        mav: bool = True,
+        timetables: Any = None,
     ) -> None:
         self._hass = hass
         self._www = www
         self._time = daily_time
         self._on_result = on_result
+        self._mav = mav
+        # weekly_timetables.PagesTimetables (not imported: it imports this module).
+        self._timetables = timetables
         self._unsub: CALLBACK_TYPE | None = None
         self._pending_at: datetime | None = None
         self._task: asyncio.Task[Any] | None = None
@@ -565,6 +600,8 @@ class DailyIndexUpdater:
             self._pending_at = None
             if self._task is not None and not self._task.done():
                 self._task.cancel()
+            if self._timetables is not None:
+                self._timetables.stop()
 
         return stop
 
@@ -618,7 +655,7 @@ class DailyIndexUpdater:
             # A new cycle: its own retries and late looks.
             self._retries = 0
             self._late = 0
-        self._task = self._hass.async_create_background_task(self._run(), "hungarian_transport_mav_daily")
+        self._task = self._hass.async_create_background_task(self._run(kind), "hungarian_transport_mav_daily")
 
     @callback
     def _after(self, done: DailyRound) -> None:
@@ -644,7 +681,16 @@ class DailyIndexUpdater:
         self._late += 1
         self._schedule(delay, _LATE)
 
-    async def _run(self) -> None:
+    async def _run(self, kind: str = _DAILY) -> None:
+        if self._mav:
+            await self._run_mav()
+        if self._timetables is not None and kind in (_FIRST, _DAILY) and not self._stopped:
+            # After the MÁV part, failed or not: its own round in its own
+            # task, its own retries. This task ends here, so a MÁV retry,
+            # late or settling look is never dropped for a slow download.
+            self._timetables.start_round()
+
+    async def _run_mav(self) -> None:
         try:
             done = await async_update(self._hass, self._www)
         except asyncio.CancelledError:

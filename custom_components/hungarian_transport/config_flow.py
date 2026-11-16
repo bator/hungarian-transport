@@ -30,10 +30,12 @@ from .const import (
     CONF_NOTIFY_DAILY,
     CONF_NOTIFY_SERVICE,
     CONF_NOTIFY_UPDATES,
+    CONF_PAGES_TIMETABLES,
     DEFAULT_DAILY_MAV,
     DEFAULT_DAILY_TIME,
     DEFAULT_NOTIFY_DAILY,
     DEFAULT_NOTIFY_UPDATES,
+    DEFAULT_PAGES_TIMETABLES,
     DOMAIN,
 )
 from .futar import FutarAuthError, FutarError, FutarUpstreamRateLimited, futar_get
@@ -169,8 +171,9 @@ def _service_options(hass: HomeAssistant, current: str) -> list[SelectOptionDict
 
 
 def _options_schema(hass: HomeAssistant, has_key: bool, values: dict[str, Any]) -> vol.Schema:
-    """The key fields, the daily MÁV route index from GitHub (mav_daily.py)
-    and its time, then the update notifications (timetable_notify.py): on or
+    """The key fields, the daily MÁV route index from GitHub (mav_daily.py),
+    the weekly Volán and city timetables from GitHub (weekly_timetables.py)
+    and the time of their daily check, then the update notifications (timetable_notify.py): on or
     off, the service, and whether daily index installs call it.
 
     The service is picked from a list (_service_options) or typed. It is a
@@ -181,6 +184,7 @@ def _options_schema(hass: HomeAssistant, has_key: bool, values: dict[str, Any]) 
     return _key_schema(has_key).extend(
         {
             vol.Optional(CONF_DAILY_MAV, default=values[CONF_DAILY_MAV]): BooleanSelector(),
+            vol.Optional(CONF_PAGES_TIMETABLES, default=values[CONF_PAGES_TIMETABLES]): BooleanSelector(),
             vol.Optional(CONF_DAILY_TIME, default=values[CONF_DAILY_TIME]): TimeSelector(),
             vol.Optional(CONF_NOTIFY_UPDATES, default=values[CONF_NOTIFY_UPDATES]): BooleanSelector(),
             vol.Optional(
@@ -285,8 +289,8 @@ class HungarianTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
-    """Set, change or clear the BKK Open Data key; the daily MÁV index on or
-    off and its time; update notifications."""
+    """Set, change or clear the BKK Open Data key; the daily MÁV index and
+    the weekly timetables on or off, and their time; update notifications."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -298,6 +302,7 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
         current = str(options.get(CONF_API_KEY) or "")
         values: dict[str, Any] = {
             CONF_DAILY_MAV: bool(options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV)),
+            CONF_PAGES_TIMETABLES: bool(options.get(CONF_PAGES_TIMETABLES, DEFAULT_PAGES_TIMETABLES)),
             CONF_DAILY_TIME: str(options.get(CONF_DAILY_TIME) or DEFAULT_DAILY_TIME),
             CONF_NOTIFY_UPDATES: bool(options.get(CONF_NOTIFY_UPDATES, DEFAULT_NOTIFY_UPDATES)),
             CONF_NOTIFY_DAILY: bool(options.get(CONF_NOTIFY_DAILY, DEFAULT_NOTIFY_DAILY)),
@@ -319,6 +324,9 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
                 error = None
             values = {
                 CONF_DAILY_MAV: bool(user_input.get(CONF_DAILY_MAV, values[CONF_DAILY_MAV])),
+                CONF_PAGES_TIMETABLES: bool(
+                    user_input.get(CONF_PAGES_TIMETABLES, values[CONF_PAGES_TIMETABLES])
+                ),
                 CONF_DAILY_TIME: parse_daily_time(user_input.get(CONF_DAILY_TIME)).strftime("%H:%M:%S"),
                 CONF_NOTIFY_UPDATES: bool(user_input.get(CONF_NOTIFY_UPDATES, values[CONF_NOTIFY_UPDATES])),
                 CONF_NOTIFY_DAILY: bool(user_input.get(CONF_NOTIFY_DAILY, values[CONF_NOTIFY_DAILY])),

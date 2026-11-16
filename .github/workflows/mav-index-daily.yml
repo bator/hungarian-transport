@@ -1,15 +1,41 @@
-name: Daily MÁV index
+name: Daily timetables (GitHub Pages)
 
-# MÁV publishes a new GTFS almost every day; releases ship its index weekly.
-# This builds the index the release builds (release_mav_index.sh: MÁV GTFS,
-# pfaedle, build_mav_index.py and its audit) and publishes it on GitHub
-# Pages with a manifest (scripts/mav_pages_site.py). The integration fetches
-# the manifest, and the index when its feed is newer
+# MÁV publishes a new GTFS almost every day; a release ships its index only
+# with new code, so between releases this workflow publishes it every day.
+# The build job builds the index the release builds (release_mav_index.sh:
+# MÁV GTFS, pfaedle, build_mav_index.py and its audit) and its part of the
+# GitHub Pages site with a manifest (scripts/mav_pages_site.py). The
+# integration fetches the manifest, and the index when its feed is newer
 # (custom_components/hungarian_transport/mav_daily.py). The site also
 # carries the build's GTFS for other consumers: MÁV's zip as downloaded
 # (mav-gtfs.zip, CC0) and pfaedle's trips, shapes and stop_times
-# (mav-pfaedle-overlay.zip, shapes © OpenStreetMap contributors, ODbL), with
-# ATTRIBUTION.txt.
+# (mav-pfaedle-overlay.zip, shapes © OpenStreetMap contributors, ODbL).
+#
+# The Volán and city indexes are timetable data too, and releases are for
+# code: the timetables job rebuilds each of them here once a week (when the
+# published one is 6 days 12 hours old or missing; both when the manifest is
+# missing or of another schema, or the dispatch input timetables asks for
+# it) with the release's builders and guards, and the integration installs
+# them from the same site (weekly_timetables.py, by timetables.json). The
+# builders are the latest stable release's (the highest vX.Y.Z that is no
+# prerelease, checked out at the workspace root), never main's: what
+# installs read must come from released code, as the weekly timetable
+# release before this built them with its stable tag's code. Only
+# pages_timetables.py comes from the workflow's commit (.pages-tools), and
+# the index schema it checks is the stable release's. Without a stable
+# release nothing is built. A builder that fails drops only its own index
+# from this run; the published one stays.
+#
+# Every Pages deploy replaces the whole site, so the site job assembles it
+# from this run's new parts and everything else carried over from the live
+# site, each file checked against its published manifest's size and sha256
+# (scripts/pages_timetables.py), and writes timetables.json, ATTRIBUTION.txt
+# and index.html for the whole site. A published Volán or city index that
+# cannot be carried is left out with a warning (installs keep theirs, the
+# next run rebuilds it). A MÁV file that cannot be carried, or a published
+# manifest that is there but does not read, stops the deploy: every
+# install's daily MÁV check reads those files. A manifest that is not there
+# (404) has nothing to carry.
 #
 # When: MÁV's feed of the day (feed_version YYYYMMDD) appeared between about
 # 03:17 and 10:03 UTC in November 2026, and on 3 November it was still
@@ -33,17 +59,23 @@ name: Daily MÁV index
 # while one run is in progress and another waits, it cancels the waiting one,
 # which may be the dispatch. Re-run when no run of this workflow is queued.
 #
-# Nothing is deployed, and the site keeps the previous files, when the
-# secrets are missing, the download, pfaedle or the audit fails, the site is
-# refused (mav_pages_site.py: a bad feed date, over 500 MB), or the index and
-# MÁV's zip are the ones Pages already serves and its manifest was built less
-# than 12 hours ago (older, the same content is deployed again, so built_at
-# stays the last run that went through). pfaedle's overlay is not compared:
+# The MÁV part is not made, and the site keeps the previous MÁV files, when
+# the secrets are missing, the download, pfaedle or the audit fails, the part
+# is refused (mav_pages_site.py: a bad feed date, over 500 MB), or the index
+# and MÁV's zip are the ones Pages already serves and its manifest was built
+# less than 12 hours ago (older, the same content is deployed again, so
+# built_at stays the last run that went through). Nothing is deployed when
+# neither the MÁV part nor a Volán or city index is new. pfaedle's overlay is not compared:
 # its bytes differ on every run, even for the same feed. A run that published
 # nothing because something failed stays green with a ::warning:: only while
 # the published manifest is less than 2 days old; it fails at once when MÁV
 # refused the login (401/403: only new credentials help), and when the
 # published index is 2 days old or older (scripts/mav_daily_verdict.py).
+# The build and timetables jobs run side by side; the run (and so the
+# concurrency below) lasts as long as the longer of them, plus the site and
+# deploy jobs, the timing above unchanged. The site job runs unless the run
+# itself is cancelled: a job that failed or ran out of time only makes no
+# part, and the published files are carried over in its place.
 # GitHub Pages must be enabled with "Source: GitHub Actions"; until then the
 # deploy job fails with an error saying so, and nothing else changes.
 on:
@@ -51,6 +83,11 @@ on:
     - cron: "45 4 * * *"
     - cron: "20 14 * * *"
   workflow_dispatch:
+    inputs:
+      timetables:
+        description: Rebuild the Volán and city indexes now
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -166,18 +203,19 @@ jobs:
           fi
           echo "::warning title=Daily MÁV index not published::The built index did not make a Pages site (see this step's log); GitHub Pages keeps the previous index."
 
-      # Kept 3 days, not the action's 1: the attest job reads this artifact,
-      # and "Re-run failed jobs" after a Sigstore outage finds it over a
-      # weekend (after 1 day the re-run failed with "artifact not found").
-      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      # The site job puts it on Pages. Kept 3 days, as the Pages artifact:
+      # "Re-run failed jobs" after a failed site job finds it.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.site.outputs.deploy == 'true'
         with:
+          name: mav-part
           path: ${{ runner.temp }}/site
+          if-no-files-found: error
           retention-days: 3
 
-      # No site was made (no secrets, a failed build, a refused site): the
-      # previous one stays on Pages, and nothing is deployed. Red at once
-      # for a refused login, and when the published index is 2 days old or
+      # No MÁV part was made (no secrets, a failed build, a refused part):
+      # the site job carries the published MÁV files over. Red at once for
+      # a refused login, and when the published index is 2 days old or
       # older; a warning otherwise.
       - name: Published index age
         if: steps.site.outputs.deploy == ''
@@ -196,10 +234,257 @@ jobs:
           pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
           python3 scripts/mav_daily_verdict.py --failure "$failure" --live-url "$pages_url/mav-index.json"
 
+  # The Volán and city indexes, when due, with the latest stable release's
+  # code. No MÁV secret; the city feeds' secrets only in the build step.
+  timetables:
+    name: Build the Volán and city indexes when due
+    runs-on: ubuntu-latest
+    # Above the sum of its steps' limits (86 minutes): a job that runs out
+    # of time ends with nothing for the site job, which carries the
+    # published indexes over in their place.
+    timeout-minutes: 100
+    outputs:
+      built: ${{ steps.indexes.outputs.built }}
+      schema: ${{ steps.due.outputs.schema }}
+    env:
+      # The builders import the integration's package from the checkout.
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      # As release.yml's latest_stable: the highest vX.Y.Z that is not a
+      # prerelease, by version, not by date. A GitHub API failure fails the
+      # job (nothing is built; the site job still runs).
+      - name: Latest stable release
+        id: stable
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! tags=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | select((.draft or .prerelease) | not) | .tag_name'); then
+            echo "::error::Could not list the releases (GitHub API); no Volán or city index is built."
+            exit 1
+          fi
+          tag=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$tags" | sort -V | tail -n 1 || true)
+          if [ -z "$tag" ]; then
+            echo "::warning title=No Volán or city index built::The repository has no stable release (vX.Y.Z); the Volán and city indexes are built with a stable release's code only."
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      # The stable release's builders, guards and index schema at the root.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.stable.outputs.tag != ''
+        timeout-minutes: 5
+        with:
+          ref: ${{ steps.stable.outputs.tag }}
+          persist-credentials: false
+
+      # pages_timetables.py of the workflow's commit (and what it imports),
+      # after the root checkout, which would clean it away.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.stable.outputs.tag != ''
+        timeout-minutes: 5
+        with:
+          ref: ${{ github.sha }}
+          path: .pages-tools
+          sparse-checkout: |
+            scripts
+            custom_components/hungarian_transport
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: steps.stable.outputs.tag != ''
+        timeout-minutes: 5
+        with:
+          python-version: "3.12"
+
+      # Due, per index: not listed in the published timetables.json, or built
+      # 6 days 12 hours ago or longer. Both: the manifest is missing or does
+      # not read, names another schema than the stable release's, or the
+      # dispatch input asks for it.
+      - name: Timetables due
+        id: due
+        if: steps.stable.outputs.tag != ''
+        timeout-minutes: 3
+        env:
+          FORCE: ${{ inputs.timetables == true }}
+        run: |
+          set -euo pipefail
+          schema=$(sed -n 's/^INDEX_SCHEMA = \([0-9][0-9]*\)$/\1/p' scripts/gtfs_compact.py)
+          if [[ ! "$schema" =~ ^[0-9]+$ ]]; then
+            echo "::error::The stable release's scripts/gtfs_compact.py names no INDEX_SCHEMA."
+            exit 1
+          fi
+          echo "schema=${schema}" >> "$GITHUB_OUTPUT"
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
+          python3 .pages-tools/scripts/pages_timetables.py due --schema "$schema" --live-url "$pages_url" \
+            --force "$FORCE" --github-output "$GITHUB_OUTPUT"
+
+      # The builders compare against the index already in place: a city feed
+      # that vanished, most of a feed's trips gone or a near-empty Volán index
+      # refuses that index, as in the release. The published indexes are the
+      # baseline (checked against timetables.json), else the stable
+      # release's; kept with their shapes in .baseline, which the builders
+      # do not touch.
+      - name: Baseline indexes
+        if: steps.due.outputs.due == 'true'
+        timeout-minutes: 10
+        env:
+          TAG: ${{ steps.stable.outputs.tag }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
+          python3 .pages-tools/scripts/pages_timetables.py baseline --live-url "$pages_url" \
+            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/hungarian-transport-frontend.zip" \
+            --out .baseline
+          for f in volan-index.json.gz city-index.json.gz; do
+            if [ -f ".baseline/$f" ]; then cp ".baseline/$f" .; fi
+          done
+          ls -l .baseline
+
+      # Only the due indexes. Volán and city are independent: a builder that
+      # fails (its guard included) or runs out of its time (exit 124) leaves
+      # its index out of this run's part with a warning, and the site job
+      # carries the published one over. A city feed whose download fails
+      # keeps the baseline's part (build_city_index.py, CARRY_ENV; its shapes
+      # are next to it in .baseline).
+      - name: Build the Volán and city indexes
+        id: indexes
+        if: steps.due.outputs.due == 'true'
+        timeout-minutes: 45
+        env:
+          BAHART_GTFS_URL: ${{ secrets.BAHART_GTFS_URL }}
+          MOBILITY_DATABASE_REFRESH_TOKEN: ${{ secrets.MOBILITY_DATABASE_REFRESH_TOKEN }}
+          TRANSITLAND_API_KEY: ${{ secrets.TRANSITLAND_API_KEY }}
+          ALLOW_MISSING_VAR: ${{ vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}
+          VOLAN_GTFS_URL: ${{ vars.VOLAN_GTFS_URL || '' }}
+          DUE_INDEXES: ${{ steps.due.outputs.indexes }}
+          SCHEMA: ${{ steps.due.outputs.schema }}
+        run: |
+          set -euo pipefail
+          # The value ends up in workflow commands below (::warning::). A
+          # newline in it would start a command of its own, so only feed
+          # ids, "all", commas and spaces get through; anything else stops
+          # the run without echoing the value.
+          if [[ ! "$ALLOW_MISSING_VAR" =~ ^[A-Za-z0-9_.,\ -]*$ ]]; then
+            echo "::error title=Bad allow_missing::ALLOW_MISSING_VAR may only hold feed ids, all, commas and spaces."
+            exit 1
+          fi
+          # The variable relaxes the city guard for every run, so say so on
+          # every run until it is unset again.
+          if [ -n "$ALLOW_MISSING_VAR" ]; then
+            echo "::warning title=City index guard relaxed::Repository variable HUNGARIAN_TRANSPORT_ALLOW_MISSING='${ALLOW_MISSING_VAR}' lets every run drop these city feeds. Unset it once the feed is back."
+          fi
+          export HUNGARIAN_TRANSPORT_ALLOW_MISSING="$ALLOW_MISSING_VAR"
+          if [ -f .baseline/city-index.json.gz ]; then
+            export HUNGARIAN_TRANSPORT_CARRY_INDEX=.baseline/city-index.json.gz
+          fi
+          part="$RUNNER_TEMP/timetables-part"
+          built=""
+          IFS=, read -r -a names <<< "$DUE_INDEXES"
+          for name in "${names[@]}"; do
+            case "$name" in volan|city) ;; *) echo "::error::unexpected index name"; exit 1 ;; esac
+            rc=0
+            timeout --kill-after=1m 20m python3 "scripts/build_${name}_index.py" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+              echo "::warning title=${name} index not built::build_${name}_index.py failed (exit ${rc}, see this step's log); GitHub Pages keeps the published ${name} index."
+              continue
+            fi
+            if python3 .pages-tools/scripts/pages_timetables.py part --schema "$SCHEMA" \
+                --index "${name}-index.json.gz" --out "$part" --baseline ".baseline/${name}-index.json.gz"; then
+              built="${built:+$built,}${name}"
+            fi
+          done
+          echo "built=${built}" >> "$GITHUB_OUTPUT"
+          if [ -d "$part" ]; then ls -l "$part"; fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.indexes.outputs.built != ''
+        timeout-minutes: 10
+        with:
+          name: timetables-part
+          path: ${{ runner.temp }}/timetables-part
+          if-no-files-found: error
+          retention-days: 3
+
+  # The whole site: this run's parts, and everything else carried over from
+  # the live site (checked file by file against its published manifests).
+  # Whatever the build and timetables jobs did (failed, timed out), unless
+  # the run itself is cancelled: a job without its part output gives none,
+  # and the published files are carried over in its place. The build job
+  # fails on a stale MÁV index, and the timetables one may run out of time,
+  # while the other part is new.
+  site:
+    name: Assemble the GitHub Pages site
+    needs: [build, timetables]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      deploy: ${{ steps.assemble.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.build.outputs.deploy == 'true'
+        with:
+          name: mav-part
+          path: ${{ runner.temp }}/mav-part
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: needs.timetables.outputs.built != ''
+        with:
+          name: timetables-part
+          path: ${{ runner.temp }}/timetables-part
+
+      # deploy=true when the MÁV part or a Volán or city index is new. A
+      # published Volán or city index that cannot be carried is left out with
+      # a warning; a MÁV file that cannot be, or a published manifest that
+      # does not read, fails the job (::error::) and nothing is deployed.
+      # SCHEMA (the stable release's) names timetables.json's schema only
+      # for a site without any index.
+      - name: Assemble the site
+        id: assemble
+        env:
+          MAV_NEW: ${{ needs.build.outputs.deploy == 'true' }}
+          TIMETABLES_NEW: ${{ needs.timetables.outputs.built != '' }}
+          SCHEMA: ${{ needs.timetables.outputs.schema }}
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
+          parts=()
+          if [ "$MAV_NEW" = true ]; then parts+=(--mav-part "$RUNNER_TEMP/mav-part"); fi
+          if [ "$TIMETABLES_NEW" = true ]; then parts+=(--timetables-part "$RUNNER_TEMP/timetables-part"); fi
+          if [[ "$SCHEMA" =~ ^[0-9]+$ ]]; then parts+=(--schema "$SCHEMA"); fi
+          python3 scripts/pages_timetables.py assemble --out "$RUNNER_TEMP/site" --commit "$GITHUB_SHA" \
+            --live-url "$pages_url" --github-output "$GITHUB_OUTPUT" "${parts[@]}"
+          if [ -d "$RUNNER_TEMP/site" ]; then ls -l "$RUNNER_TEMP/site"; fi
+
+      # Kept 3 days, not the action's 1: the attest job reads this artifact,
+      # and "Re-run failed jobs" after a Sigstore outage finds it over a
+      # weekend (after 1 day the re-run failed with "artifact not found").
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: steps.assemble.outputs.deploy == 'true'
+        with:
+          path: ${{ runner.temp }}/site
+          retention-days: 3
+
   deploy:
     name: Publish on GitHub Pages
-    needs: build
-    if: needs.build.outputs.deploy == 'true'
+    needs: site
+    # success() would also ask for the build and timetables jobs (it looks
+    # at every job before this one), and the build job fails on a stale
+    # MÁV index while the site may still have a new Volán or city index.
+    if: ${{ !cancelled() && needs.site.result == 'success' && needs.site.outputs.deploy == 'true' }}
     runs-on: ubuntu-latest
     # deploy-pages waits up to 10 minutes for the deployment itself; the
     # job's limit leaves it that and the Pages check.
@@ -239,24 +524,30 @@ jobs:
 
   # A build provenance attestation (Sigstore, signed with this job's OIDC
   # token) of the files just deployed, taken from the artifact Pages
-  # deployed, not rebuilt. Check a download with
+  # deployed, not rebuilt: the MÁV files when the site has them (a fork
+  # without the MÁV secrets has none), timetables.json, the Volán and city
+  # indexes and their shapes shards. Check a download with
   #   gh attestation verify mav-index.json.gz --repo bator/hungarian-transport \
   #     --signer-workflow bator/hungarian-transport/.github/workflows/mav-index-daily.yml \
   #     --source-ref refs/heads/main
-  # (--source-ref: a run dispatched from another branch signs with the same
-  # workflow file, and its files do not pass). After the deploy, in a job of
-  # its own: a Sigstore outage turns the run red but never holds back the
-  # day's index, and "Re-run failed jobs" runs only this job, never the
-  # deploy, which would put this run's artifact back on Pages over a newer
-  # run's index. That re-run works while the artifact is kept (3 days, see
-  # the upload) and joins the concurrency group (see the top: re-run when no
-  # run is queued). A file without an attestation fails that check, it never
-  # passes it. The integration does not verify it (it would need a Sigstore
-  # client in Home Assistant); it checks the index against the manifest's
-  # sha256 (mav_daily.py).
+  # (any other file of the site the same way; --source-ref: a run dispatched
+  # from another branch signs with the same workflow file, and its files do
+  # not pass). A carried file is attested again by the run that deploys it
+  # again. After the deploy, in a job of its own: a Sigstore outage turns
+  # the run red but never holds back the day's index, and "Re-run failed
+  # jobs" runs only this job, never the deploy, which would put this run's
+  # artifact back on Pages over a newer run's index. That re-run works while
+  # the artifact is kept (3 days, see the upload) and
+  # joins the concurrency group (see the top: re-run when no run is queued).
+  # A file without an attestation fails that check, it never passes it. The
+  # integration does not verify it (it would need a Sigstore client in Home
+  # Assistant); it checks each file against its manifest's sha256
+  # (mav_daily.py, weekly_timetables.py).
   attest:
     name: Attest the published files
-    needs: deploy
+    needs: [build, timetables, deploy]
+    # As the deploy job's: success() would also ask for the build job.
+    if: ${{ !cancelled() && needs.deploy.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # The artifact of this run needs no token; the attestation needs these
@@ -270,20 +561,53 @@ jobs:
           name: github-pages
           path: ${{ runner.temp }}/pages
 
+      # The attested files, one per line: only what this run built (the MÁV
+      # part when the build job made one, each Volán or city index the
+      # timetables job built with its shapes folder) and the timetables.json
+      # it wrote. A file carried over from the live site keeps the
+      # attestation of the run that built it: attesting it again here would
+      # vouch for bytes this run took from Pages, not from its own build.
+      # The four MÁV files come together (mav_pages_site.py writes them all).
       - name: Unpack the deployed site
+        id: files
+        env:
+          MAV_NEW: ${{ needs.build.outputs.deploy == 'true' }}
+          BUILT: ${{ needs.timetables.outputs.built }}
         run: |
           set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/site"
-          tar -xf "$RUNNER_TEMP/pages/artifact.tar" -C "$RUNNER_TEMP/site"
-          for f in mav-index.json.gz mav-index.json mav-gtfs.zip mav-pfaedle-overlay.zip; do
-            test -f "$RUNNER_TEMP/site/$f" || { echo "::error::$f is not in the deployed site"; exit 1; }
+          site="$RUNNER_TEMP/site"
+          mkdir -p "$site"
+          tar -xf "$RUNNER_TEMP/pages/artifact.tar" -C "$site"
+          test -f "$site/timetables.json" || { echo "::error::timetables.json is not in the deployed site"; exit 1; }
+          subjects=("$site/timetables.json")
+          if [ "$MAV_NEW" = true ]; then
+            for f in mav-index.json.gz mav-index.json mav-gtfs.zip mav-pfaedle-overlay.zip; do
+              test -f "$site/$f" || { echo "::error::$f is not in the deployed site"; exit 1; }
+              subjects+=("$site/$f")
+            done
+          fi
+          IFS=, read -r -a built <<< "$BUILT"
+          for name in "${built[@]}"; do
+            case "$name" in volan|city) ;; *) echo "::error::unexpected index name"; exit 1 ;; esac
+            test -f "$site/${name}-index.json.gz" || { echo "::error::${name}-index.json.gz is not in the deployed site"; exit 1; }
+            subjects+=("$site/${name}-index.json.gz")
+            dir=$(python3 -c 'import json,sys; e=json.load(open(sys.argv[1]))["indexes"][sys.argv[2]]; print((e.get("shapes") or {}).get("dir") or "")' \
+              "$site/timetables.json" "$name")
+            if [ -n "$dir" ]; then
+              [[ "$dir" =~ ^${name}-shapes-[0-9a-f]+$ ]] || { echo "::error::bad shapes folder name"; exit 1; }
+              shopt -s nullglob
+              for f in "$site/$dir"/*.json.gz; do subjects+=("$f"); done
+              shopt -u nullglob
+            fi
           done
-          ls -l "$RUNNER_TEMP/site"
+          {
+            echo "subjects<<SUBJECTS_EOF"
+            printf '%s\n' "${subjects[@]}"
+            echo "SUBJECTS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "${#subjects[@]} files to attest"
+          ls -l "$site"
 
       - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
-          subject-path: |
-            ${{ runner.temp }}/site/mav-index.json.gz
-            ${{ runner.temp }}/site/mav-index.json
-            ${{ runner.temp }}/site/mav-gtfs.zip
-            ${{ runner.temp }}/site/mav-pfaedle-overlay.zip
+          subject-path: ${{ steps.files.outputs.subjects }}

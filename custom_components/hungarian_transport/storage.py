@@ -10,7 +10,14 @@ it holds:
   that is not this one (another feed or size) came with a release, or from
   the local updater script;
 - DAILY_ROUND: the last round of the daily MÁV index: when, its result,
-  and the manifest's feed and build time.
+  and the manifest's feed and build time;
+- TIMETABLES_INSTALL: per index ("volan", "city"), what the weekly
+  timetables from GitHub Pages (weekly_timetables.py) installed last: its
+  feed, sha256, gzipped size and time. An index www/ serves that is not
+  this one (another feed or size) came with a release, or from the local
+  updater script;
+- PAGES_ROUND: per index, the last round of the weekly timetables that
+  settled it: when, its result and the manifest's feed.
 
 Every writer sends SIGNAL_TIMETABLES afterwards; the sensors read the
 indexes again (only the ones whose file changed) and the record.
@@ -35,11 +42,15 @@ STORAGE_VERSION = 1
 SIGNAL_TIMETABLES = f"{DOMAIN}_timetables_updated"
 MAV_INSTALL = "mav_install"
 DAILY_ROUND = "mav_daily_round"
+TIMETABLES_INSTALL = "timetables_install"
+PAGES_ROUND = "pages_timetables_round"
 # MAV_INSTALL sources; an index without a matching record is a release's
 # (or the local updater's, timetables.py tells).
 SOURCE_DAILY = "daily"
 SOURCE_LOCAL = "local"
 SOURCE_RELEASE = "release"
+# What the Volán and city sensors call an index TIMETABLES_INSTALL describes.
+SOURCE_PAGES = "pages"
 
 
 def store(hass: HomeAssistant) -> Store:
@@ -116,4 +127,42 @@ async def async_record_daily_round(
             "manifest_feed": manifest_feed,
             "manifest_built_at": manifest_built_at.isoformat() if manifest_built_at else None,
         },
+    )
+
+
+async def _async_merge(hass: HomeAssistant, key: str, records: dict[str, dict[str, Any]]) -> None:
+    """Merge records (index name: its record) into the mapping under key and
+    signal; like _async_put, a failure is logged, never raised."""
+    try:
+        state = await async_load(hass)
+        current = state.get(key)
+        state[key] = {**(current if isinstance(current, dict) else {}), **records}
+        await async_save(hass, state)
+    except Exception as err:  # noqa: BLE001 - only the sensors use it
+        _LOGGER.warning("Could not record the timetable status: %s", err)
+    async_signal(hass)
+
+
+async def async_record_timetables_install(
+    hass: HomeAssistant, name: str, feed: str, sha256: str, size: int
+) -> None:
+    """The weekly timetables installed the index name ("volan", "city") of
+    feed, sha256 and gzipped size from GitHub Pages."""
+    await _async_merge(
+        hass,
+        TIMETABLES_INSTALL,
+        {name: {"feed": feed, "sha256": sha256, "size": size, "installed_at": dt_util.utcnow().isoformat()}},
+    )
+
+
+async def async_record_pages_round(hass: HomeAssistant, results: dict[str, tuple[str, str | None]]) -> None:
+    """A round of the weekly timetables settled these indexes: name ->
+    (result, the manifest's feed for it)."""
+    if not results:
+        return
+    at = dt_util.utcnow().isoformat()
+    await _async_merge(
+        hass,
+        PAGES_ROUND,
+        {name: {"at": at, "result": result, "manifest_feed": feed} for name, (result, feed) in results.items()},
     )

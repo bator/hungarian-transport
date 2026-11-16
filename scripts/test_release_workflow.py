@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Steps of release.yml's build job, run as written there (the run: blocks,
 extracted and executed with bash) in a scratch workspace: "MÁV index
-(pfaedle)" with a stub release_mav_index.sh, "Did a timetable change" with a
-stub index_digest.py, and "Stamp release and pack assets". No network."""
+(pfaedle)" with a stub release_mav_index.sh, and "Stamp release and pack
+assets". No network."""
 from __future__ import annotations
 
 import gzip
@@ -60,7 +60,6 @@ def build_job_env() -> dict[str, str]:
 
 JOB_ENV = build_job_env()
 MAV_STEP = step_script("MÁV index (pfaedle)")
-CHANGED_STEP = step_script("Did a timetable change")
 PACK_STEP = step_script("Stamp release and pack assets")
 
 # The release's own script, stubbed: writes mav-index.json.gz as a
@@ -79,11 +78,6 @@ fi
 echo "stub: MÁV download failed" >&2
 exit 1
 """
-# Content digest stand-in: the decompressed JSON, keys sorted.
-DIGEST_STUB = """import gzip, hashlib, json, sys
-data = json.loads(gzip.decompress(open(sys.argv[1], "rb").read()))
-print(hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest(), sys.argv[1])
-"""
 
 
 def write_gz(path: Path, obj: dict) -> None:
@@ -98,7 +92,6 @@ def workspace(root: Path, *, baseline_mav: dict | None, schema: int = 7) -> Path
     tools = ws / ".release-tools" / "scripts"
     tools.mkdir(parents=True)
     (tools / "release_mav_index.sh").write_text(MAV_SCRIPT_STUB)
-    (tools / "index_digest.py").write_text(DIGEST_STUB)
     # The real guard: standard library only, as in .release-tools.
     (tools / "mav_shrink_guard.py").write_text((HERE / "mav_shrink_guard.py").read_text(encoding="utf-8"))
     pkg = ws / "custom_components" / "hungarian_transport"
@@ -138,26 +131,19 @@ OLD = {"v": 7, "feed": "old"}
 with tempfile.TemporaryDirectory() as tmp_name:
     tmp = Path(tmp_name)
 
-    # Without the secrets: the previous release's index ships again (the
-    # weekly run used to drop it, and count that as a timetable change).
+    # Without the secrets: the previous release's index ships again.
     ws = workspace(tmp / "a", baseline_mav=OLD)
     write_gz(ws / "dist" / "mav-index.json.gz", {"v": 7, "feed": "stale"})
     done, out = bash(MAV_STEP, ws, MAV_SECRETS="false")
     check("no secrets: the previous release's MÁV index ships again",
           done.returncode == 0 and dist_mav(ws) == OLD and "built" not in out,
           repr((done.returncode, dist_mav(ws), done.stdout, done.stderr)))
-    done, out = bash(CHANGED_STEP, ws, REFRESH="true")
-    check("no secrets: the weekly refresh sees no timetable change",
-          done.returncode == 0 and out.get("changed") == "false", repr((out, done.stdout, done.stderr)))
 
     ws = workspace(tmp / "b", baseline_mav={"v": 6, "feed": "old"})
     write_gz(ws / "dist" / "mav-index.json.gz", {"v": 7, "feed": "stale"})
     done, _ = bash(MAV_STEP, ws, MAV_SECRETS="false")
     check("no secrets, previous index in a schema this code cannot read: none ships",
           done.returncode == 0 and dist_mav(ws) is None, repr((dist_mav(ws), done.stdout, done.stderr)))
-    done, out = bash(CHANGED_STEP, ws, REFRESH="true")
-    check("an index that went away is no timetable change by itself",
-          out.get("changed") == "false" and "not counted as a change" in done.stdout, repr((out, done.stdout)))
     check("the build job writes no bytecode: the schema check leaves no __pycache__ in the package",
           not (ws / "custom_components" / "hungarian_transport" / "__pycache__").exists())
 
@@ -165,9 +151,6 @@ with tempfile.TemporaryDirectory() as tmp_name:
     done, _ = bash(MAV_STEP, ws, MAV_SECRETS="false")
     check("no secrets, no previous index: none ships", done.returncode == 0 and dist_mav(ws) is None,
           repr((done.stdout, done.stderr)))
-    done, out = bash(CHANGED_STEP, ws, REFRESH="true")
-    check("no index in either release: no change", out.get("changed") == "false" and "neither" in done.stdout,
-          repr((out, done.stdout)))
 
     # With the secrets: a failed build keeps the previous index (as before);
     # a successful one ships and lets the OSM cache be saved.
@@ -182,9 +165,6 @@ with tempfile.TemporaryDirectory() as tmp_name:
     check("secrets, successful build: the new index ships and built=true",
           done.returncode == 0 and dist_mav(ws) == {"v": 7, "feed": "new"} and out.get("built") == "true",
           repr((done.returncode, out, done.stdout, done.stderr)))
-    done, out = bash(CHANGED_STEP, ws, REFRESH="true")
-    check("a new MÁV feed is a timetable change", out.get("changed") == "true"
-          and "mav-index.json.gz changed" in done.stdout, repr((out, done.stdout)))
 
     # A build with under half the previous release's trains and lines (a
     # truncated feed that passed the build's checks) does not ship: the
@@ -213,18 +193,10 @@ with tempfile.TemporaryDirectory() as tmp_name:
           repr((done.returncode, out, done.stdout, done.stderr)))
 
     ws = workspace(tmp / "f", baseline_mav=None)
-    bash(MAV_STEP, ws, MAV_SECRETS="true", STUB_MAV="ok")
-    done, out = bash(CHANGED_STEP, ws, REFRESH="true")
-    check("a MÁV index that appeared is a change", out.get("changed") == "true", repr((out, done.stdout)))
-
-    ws = workspace(tmp / "g", baseline_mav=OLD)
-    bash(MAV_STEP, ws, MAV_SECRETS="false")
-    write_gz(ws / "volan-index.json.gz", {"v": 1, "name": "volan", "new": True})
-    done, out = bash(CHANGED_STEP, ws, REFRESH="true")
-    check("a Volán change still publishes", out.get("changed") == "true"
-          and "volan-index.json.gz changed" in done.stdout, repr((out, done.stdout)))
-    done, out = bash(CHANGED_STEP, ws, REFRESH="false")
-    check("not a refresh: always changed", out.get("changed") == "true", repr(out))
+    done, out = bash(MAV_STEP, ws, MAV_SECRETS="true", STUB_MAV="ok")
+    check("secrets, no previous index: the new index ships",
+          done.returncode == 0 and (dist_mav(ws) or {}).get("feed") == "new" and out.get("built") == "true",
+          repr((done.returncode, out, done.stdout, done.stderr)))
 
     # The pack step: no bytecode in the integration zip, every frontend file
     # (shapes folders, Leaflet, the MÁV index) in the frontend zip.
@@ -247,7 +219,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
     subprocess.run(["git", "init", "-q", str(ws)], check=True)
     subprocess.run(["git", "-C", str(ws), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
                     "commit", "-q", "--allow-empty", "-m", "t"], check=True)
-    done, _ = bash(PACK_STEP, ws, TAG="v1.2.3", GITHUB_SHA="0" * 40, GITHUB_EVENT_NAME="schedule",
+    done, _ = bash(PACK_STEP, ws, TAG="v1.2.3", GITHUB_SHA="0" * 40, GITHUB_EVENT_NAME="workflow_dispatch",
                    GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="1")
     check("the pack step runs", done.returncode == 0, repr((done.stdout[-500:], done.stderr[-800:])))
     if done.returncode == 0:
@@ -280,17 +252,18 @@ with tempfile.TemporaryDirectory() as tmp_name:
                        GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="1")
         check("a -rev prerelease takes no notes file",
               done.returncode == 0 and (ws / "release-notes.md").stat().st_size == 0, repr(done.stderr[-400:]))
-        done, _ = bash(PACK_STEP, ws, TAG="v1.2.3", REFRESH="true", GITHUB_SHA="0" * 40, GITHUB_EVENT_NAME="schedule",
+        # A tag push (a stable cut by pushing its tag) takes its notes too.
+        done, _ = bash(PACK_STEP, ws, TAG="v1.2.3", GITHUB_SHA="0" * 40, GITHUB_EVENT_NAME="push",
                        GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="1")
-        check("a weekly timetable release takes no notes file written for its number",
-              done.returncode == 0 and (ws / "release-notes.md").stat().st_size == 0, repr(done.stderr[-400:]))
+        check("a pushed stable tag packs its release notes",
+              done.returncode == 0 and (ws / "release-notes.md").read_text() == (ws / "docs" / "releases" / "1.2.3.md").read_text(),
+              repr(done.stderr[-400:]))
 
 # The documented check pins the release workflow and the ref the run started
 # from: without --signer-workflow any workflow of the repository passes (the
-# daily MÁV one signs with the same repository), and the refs are the ones
-# the workflow runs from: main for the weekly and the manual runs, which make
-# the releases (a manual run from another branch is refused), the tag on a
-# push. The example uses main: a refs/tags/ one passed no release there is
+# daily Pages one signs with the same repository), and the refs are the ones
+# the workflow runs from: main for the manual runs, which make the releases
+# (a manual run from another branch is refused), the tag on a push. The example uses main: a refs/tags/ one passed no release there is
 # (v1.9.3 has no attestation; v1.9.10 to v1.10.20 started on main).
 _wf_text = WORKFLOW.read_text(encoding="utf-8")
 for _where, _text in {"release.yml": _wf_text,
@@ -305,6 +278,18 @@ for _where, _text in {"release.yml": _wf_text,
     _at = _text.find("gh attestation verify hungarian-transport.zip")
     check(f"{_where}: next to the check, refs/tags/<tag> is named for a release cut by pushing its tag",
           "refs/tags/<tag>" in _text[_at:_at + 900], _text[_at:_at + 900])
+# A code release always publishes: no step decides that the indexes did not
+# change (that was the weekly timetable release's), and nothing in the
+# workflow runs on a schedule or carries a city feed over.
+_publish = _wf_text[_wf_text.index("\n  publish:\n"):]
+_publish_if = re.search(r"^    if: (.*)$", _publish, re.M)
+check("every resolved release is published: the publish job waits on no change check",
+      _publish_if is not None and _publish_if.group(1) == "needs.resolve.outputs.create == 'true'"
+      and "Did a timetable change" not in _wf_text and "outputs.changed" not in _wf_text,
+      repr(_publish_if.group(0) if _publish_if else None))
+check("release.yml has no schedule trigger and no timetable refresh path",
+      "schedule:" not in _wf_text and "refresh" not in _wf_text.replace("REFRESH_TOKEN", "")
+      and "HUNGARIAN_TRANSPORT_CARRY_INDEX" not in _wf_text and "\n  beta:\n" not in _wf_text)
 check("the release runs from a v* tag push or from main",
       re.search(r"^  push:\n    tags:\n      - \"v\*\"$", _wf_text, re.M) is not None
       and '[ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]' in _wf_text)

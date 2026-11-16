@@ -110,6 +110,11 @@ jobs:
       - name: Daily MÁV index workflow tests
         run: python3 scripts/test_mav_daily.py
 
+      # pages_timetables.py: the Volán and city indexes on GitHub Pages and
+      # the site assembled around them; no network.
+      - name: Pages timetables tests
+        run: python3 scripts/test_pages_timetables.py
+
       - name: FUTÁR proxy limit tests
         run: python3 ha/test_futar_limits.py
 

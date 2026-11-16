@@ -6,11 +6,15 @@ overlay's deflate level),
 scripts/mav_daily_verdict.py (when a run that published nothing goes red)
 and mav-index-daily.yml's steps as written there (run: blocks executed with
 bash against stubs: the build's warning and failure kind when it fails, the
-Pages URL, the published index's age check, the "Pages enabled" check
+Pages URL, the published index's age check, the Volán and city indexes'
+due check, baseline and builds (one failing builder drops only its index),
+the site's assembly from the parts this run made, the "Pages enabled" check
 against a stub gh, the unpacking of the deployed site for its attestation),
 plus what the workflow text must hold (triggers and the schedule's bounds,
-permissions per job, pinned actions, deploy only after a site was made, the
-attestation in a job of its own after the deploy). No network."""
+the job graph, permissions per job, where the secrets go, pinned actions,
+deploy only after a site was made, the attestation in a job of its own
+after the deploy). No network; scripts/test_pages_timetables.py tests the
+site script itself."""
 from __future__ import annotations
 
 import contextlib
@@ -745,33 +749,283 @@ with tempfile.TemporaryDirectory() as tmp_name:
         check(f"Pages check, {gh_case}: exit {want_rc} with a clear message",
               done.returncode == want_rc and want_text in done.stdout, repr((done.returncode, done.stdout, done.stderr)))
 
+    # ---- the timetables job's steps ----------------------------------------
+    stub_pt = (
+        "import os, sys\nfrom pathlib import Path\n"
+        "open('pt-args.txt', 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+        "cmd = sys.argv[1]\n"
+        "def arg(n):\n    return sys.argv[sys.argv.index(n) + 1]\n"
+        "if cmd == 'due':\n    open(arg('--github-output'), 'a').write('due=true\\nindexes=volan,city\\n')\n"
+        "if cmd == 'baseline':\n"
+        "    out = Path(arg('--out')); out.mkdir(parents=True, exist_ok=True)\n"
+        "    for n in os.environ.get('STUB_BASELINE', '').split():\n"
+        "        (out / f'{n}-index.json.gz').write_text(n)\n"
+        "if cmd == 'part':\n"
+        "    if os.environ.get('STUB_PART') == 'fail':\n        sys.exit(1)\n"
+        "    out = Path(arg('--out')); out.mkdir(parents=True, exist_ok=True)\n"
+        "    (out / Path(arg('--index')).name).write_text('packed')\n"
+        "if cmd == 'assemble':\n"
+        "    open(arg('--github-output'), 'a').write('deploy=true\\n')\n"
+        "    sys.exit(int(os.environ.get('STUB_RC', '0')))\n")
+    gh_env = {"GITHUB_REPOSITORY": "Bator/hungarian-transport", "GITHUB_REPOSITORY_OWNER": "Bator",
+              "GITHUB_SHA": "b" * 40}
+
+    def tools_ws(label: str, schema: str | None = "28") -> Path:
+        """A workspace as the timetables job has it: the stable release at
+        the root (its gtfs_compact.py naming its schema), the workflow
+        commit's scripts in .pages-tools."""
+        ws_ = tmp / label
+        (ws_ / ".pages-tools" / "scripts").mkdir(parents=True)
+        (ws_ / ".pages-tools" / "scripts" / "pages_timetables.py").write_text(stub_pt)
+        (ws_ / "scripts").mkdir()
+        (ws_ / "scripts" / "gtfs_compact.py").write_text(
+            "UA = 'x'\n" + (f"INDEX_SCHEMA = {schema}\n" if schema is not None else ""))
+        return ws_
+
+    ws = tools_ws("wf-due")
+    due_step = step_script("Timetables due")
+    for force in ("true", "false"):
+        (ws / "pt-args.txt").unlink(missing_ok=True)
+        done, outputs = bash(due_step, ws, FORCE=force, **gh_env)
+        args = (ws / "pt-args.txt").read_text().split() if (ws / "pt-args.txt").exists() else []
+        check(f"the due step runs the workflow commit's script with the stable release's schema, asks the"
+              f" repository's own Pages site, --force {force}, and passes due, indexes and schema on",
+              done.returncode == 0 and outputs.get("due") == "true" and outputs.get("indexes") == "volan,city"
+              and outputs.get("schema") == "28" and args[:1] == ["due"]
+              and args[args.index("--schema") + 1:args.index("--schema") + 2] == ["28"]
+              and args[args.index("--live-url") + 1:args.index("--live-url") + 2]
+              == ["https://bator.github.io/hungarian-transport"]
+              and args[args.index("--force") + 1:args.index("--force") + 2] == [force]
+              if "--live-url" in args and "--force" in args and "--schema" in args else False,
+              repr((done.returncode, done.stderr, args, outputs)))
+    ws = tools_ws("wf-due-noschema", schema=None)
+    done, outputs = bash(due_step, ws, FORCE="false", **gh_env)
+    check("a stable release whose gtfs_compact.py names no schema: an error, nothing due",
+          done.returncode == 1 and "names no INDEX_SCHEMA" in done.stdout and "due" not in outputs,
+          repr((done.returncode, done.stdout, outputs)))
+
+    ws = tools_ws("wf-baseline")
+    base_step = step_script("Baseline indexes")
+    done, _ = bash(base_step, ws, STUB_BASELINE="volan city", TAG="v1.10.21", **gh_env)
+    args = (ws / "pt-args.txt").read_text().split() if (ws / "pt-args.txt").exists() else []
+    check("the baseline step names the Pages site and the stable release's zip, and puts the indexes"
+          " in place for the builders' guards (a copy stays in .baseline)",
+          done.returncode == 0 and (ws / "volan-index.json.gz").read_text() == "volan"
+          and (ws / "city-index.json.gz").read_text() == "city" and (ws / ".baseline" / "city-index.json.gz").is_file()
+          and "https://bator.github.io/hungarian-transport" in args and ".baseline" in args
+          and "https://github.com/Bator/hungarian-transport/releases/download/v1.10.21/hungarian-transport-frontend.zip"
+          in args, repr((done.returncode, done.stderr, args)))
+    ws = tools_ws("wf-baseline-none")
+    done, _ = bash(base_step, ws, STUB_BASELINE="", TAG="v1.10.21", **gh_env)
+    check("no baseline: the builders find no index in place, and the step goes on",
+          done.returncode == 0 and not (ws / "volan-index.json.gz").exists(), repr((done.returncode, done.stderr)))
+
+    build_tt = step_script("Build the Volán and city indexes")
+    stub_builder = ("import os, sys\nname = sys.argv[0].split('build_')[1].split('_index')[0]\n"
+                    "open(f'{name}-env.txt', 'w').write(os.environ.get('HUNGARIAN_TRANSPORT_CARRY_INDEX', '-') + ' '"
+                    " + os.environ.get('HUNGARIAN_TRANSPORT_ALLOW_MISSING', '-'))\n"
+                    "if name in os.environ.get('STUB_FAIL', '').split():\n    sys.exit(3)\n"
+                    "open(f'{name}-index.json.gz', 'w').write('built')\n")
+
+    def tt_ws(label: str, baseline: bool = True) -> Path:
+        ws_ = tools_ws(f"wf-tt-{label}")
+        for n in ("volan", "city"):
+            (ws_ / "scripts" / f"build_{n}_index.py").write_text(stub_builder)
+        if baseline:
+            (ws_ / ".baseline").mkdir()
+            (ws_ / ".baseline" / "city-index.json.gz").write_text("old")
+        return ws_
+
+    ws = tt_ws("ok")
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="", **gh_env)
+    part_dir = ws / "runner-temp" / "timetables-part"
+    check("both builders through: both indexes packed, built=volan,city, the city builder carries from .baseline",
+          done.returncode == 0 and outputs.get("built") == "volan,city"
+          and sorted(p_.name for p_ in part_dir.iterdir()) == ["city-index.json.gz", "volan-index.json.gz"]
+          and (ws / "city-env.txt").read_text() == ".baseline/city-index.json.gz ",
+          repr((done.returncode, done.stdout, done.stderr, outputs)))
+    ws = tt_ws("volan-fails")
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="", STUB_FAIL="volan", **gh_env)
+    check("a failing Volán builder: a warning, only the city index packed, the step goes on",
+          done.returncode == 0 and outputs.get("built") == "city"
+          and "::warning title=volan index not built::build_volan_index.py failed (exit 3" in done.stdout
+          and sorted(p_.name for p_ in (ws / "runner-temp" / "timetables-part").iterdir()) == ["city-index.json.gz"],
+          repr((done.returncode, done.stdout, done.stderr, outputs)))
+    ws = tt_ws("both-fail", baseline=False)
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="", STUB_FAIL="volan city", **gh_env)
+    check("both builders failing: two warnings, built empty (nothing uploaded), green; no carry without a baseline",
+          done.returncode == 0 and outputs.get("built") == "" and done.stdout.count("::warning title=") == 2
+          and (ws / "city-env.txt").read_text() == "- ", repr((done.returncode, done.stdout, outputs)))
+    ok_args = tmp / "wf-tt-ok" / "pt-args.txt"
+    args = ok_args.read_text().split() if ok_args.exists() else []
+    check("the part is checked against the stable release's schema, by the workflow commit's script",
+          args[:1] == ["part"] and "--schema" in args and args[args.index("--schema") + 1] == "28"
+          and '.pages-tools/scripts/pages_timetables.py part --schema "$SCHEMA"' in build_tt, repr(args))
+    ws = tt_ws("city-due")
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="city", SCHEMA="28", ALLOW_MISSING_VAR="", **gh_env)
+    check("only the due index is built: city alone, the Volán builder never runs",
+          done.returncode == 0 and outputs.get("built") == "city" and not (ws / "volan-env.txt").exists()
+          and sorted(p_.name for p_ in (ws / "runner-temp" / "timetables-part").iterdir()) == ["city-index.json.gz"],
+          repr((done.returncode, done.stdout, done.stderr, outputs)))
+    ws = tt_ws("bad-name")
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,../x", SCHEMA="28", ALLOW_MISSING_VAR="", **gh_env)
+    check("an index name that is neither volan nor city stops the step", done.returncode == 1
+          and "unexpected index name" in done.stdout, repr((done.returncode, done.stdout)))
+    step_limits = [int(m) for m in re.findall(r"^        timeout-minutes: (\d+)$", job("timetables"), re.M)]
+    job_limit = int(re.search(r"^    timeout-minutes: (\d+)$", job("timetables"), re.M).group(1))
+    tt_step_count = sum(1 for ln in job("timetables").splitlines() if re.match(r"^      - ", ln))
+    check("every timetables step has its own time limit, the job's comfortably above their sum, and each builder"
+          " one that leaves its step's for the other one",
+          len(step_limits) == tt_step_count and job_limit >= sum(step_limits) + 10
+          and 'timeout --kill-after=1m 20m python3 "scripts/build_${name}_index.py"' in build_tt
+          and int(re.search(r"^        timeout-minutes: (\d+)$", step(job("timetables"), "- name: Build the Volán"),
+                            re.M).group(1)) >= 2 * (20 + 1) + 2,
+          repr((step_limits, tt_step_count, job_limit)))
+    ws = tt_ws("part-fails")
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="", STUB_PART="fail", **gh_env)
+    check("an index the part refuses is not counted as built", done.returncode == 0 and outputs.get("built") == "",
+          repr((done.returncode, done.stdout, outputs)))
+    ws = tt_ws("allow")
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="szeged, pecs", **gh_env)
+    check("HUNGARIAN_TRANSPORT_ALLOW_MISSING reaches the builders, with a warning on every run",
+          done.returncode == 0 and (ws / "city-env.txt").read_text().endswith(" szeged, pecs")
+          and "::warning title=City index guard relaxed::" in done.stdout, repr((done.returncode, done.stdout)))
+    ws = tt_ws("bad-allow")
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="x\n::error::y", **gh_env)
+    check("an allow_missing value with a newline stops the step without echoing it, nothing built",
+          done.returncode == 1 and "::error title=Bad allow_missing::" in done.stdout and "::error::y" not in done.stdout
+          and not (ws / "volan-env.txt").exists(), repr((done.returncode, done.stdout)))
+
+    stable_step = step_script("Latest stable release")
+    gh_bin = tmp / "gh-releases"
+    gh_bin.mkdir()
+    (gh_bin / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "$*" > "$PWD/gh-args.txt"\n'
+        'case "${STUB_GH:-}" in\n'
+        "  fail) echo 'gh: HTTP 502' >&2; exit 1 ;;\n"
+        "  none) printf 'v1.11.0-rev.3\\n' ;;\n"
+        "  *) printf 'v1.9.0\\nv1.10.21\\nv1.10.3\\nv1.10.22x\\n' ;;\n"
+        "esac\n")
+    (gh_bin / "gh").chmod(0o755)
+    ws = tmp / "wf-stable"
+    ws.mkdir()
+    for case, want_rc, want_tag, text in (("ok", 0, "v1.10.21", ""), ("none", 0, "", "::warning title=No Volán or city"),
+                                           ("fail", 1, None, "::error::Could not list the releases")):
+        done, outputs = bash(stable_step, ws, path_prefix=gh_bin, STUB_GH=case, GH_TOKEN="x", **gh_env)
+        gh_args = (ws / "gh-args.txt").read_text() if (ws / "gh-args.txt").exists() else ""
+        check(f"the latest stable release, {case}: "
+              + (f"tag {want_tag or 'empty'}" if want_tag is not None else "an error, the job fails"),
+              done.returncode == want_rc and outputs.get("tag") == want_tag and text in done.stdout
+              and "repos/Bator/hungarian-transport/releases" in gh_args and "--paginate" in gh_args
+              and "select((.draft or .prerelease) | not)" in stable_step,
+              repr((done.returncode, done.stdout, done.stderr, outputs, gh_args)))
+    tt_steps_all = [ln.strip() for ln in job("timetables").splitlines() if re.match(r"^      - ", ln)]
+    root_co = step(job("timetables"), "ref: ${{ steps.stable.outputs.tag }}")
+    tools_co = step(job("timetables"), "path: .pages-tools")
+    check("the stable release is checked out at the root first, then the workflow commit's scripts in"
+          " .pages-tools (the root checkout would clean them away), only with a stable tag",
+          tt_steps_all[:3] == ["- name: Latest stable release", "- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+                               "- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"]
+          and "path:" not in root_co and "ref: ${{ github.sha }}" in tools_co and "scripts\n" in tools_co + "\n"
+          and "custom_components/hungarian_transport" in tools_co
+          and all("if: steps.stable.outputs.tag != ''" in b for b in (root_co, tools_co))
+          and "if: steps.stable.outputs.tag != ''" in step(job("timetables"), "- name: Timetables due"),
+          repr((tt_steps_all[:3], root_co, tools_co)))
+    check("the timetables job runs no script of the stable release but its builders",
+          all("python3 scripts/" not in step_script(n) for n in ("Timetables due", "Baseline indexes"))
+          and re.findall(r"python3 (\S+)", build_tt) == ['"scripts/build_${name}_index.py"',
+                                                         ".pages-tools/scripts/pages_timetables.py"],
+          repr(re.findall(r"python3 (\S+)", build_tt)))
+
+    assemble_step = step_script("Assemble the site")
+    for mav_new, tt_new, want in (("true", "true", ["--mav-part", "--timetables-part"]),
+                                  ("true", "false", ["--mav-part"]), ("false", "true", ["--timetables-part"]),
+                                  ("false", "false", [])):
+        ws = tmp / f"wf-assemble-{mav_new}-{tt_new}"
+        (ws / "scripts").mkdir(parents=True)
+        (ws / "scripts" / "pages_timetables.py").write_text(stub_pt)
+        done, outputs = bash(assemble_step, ws, MAV_NEW=mav_new, TIMETABLES_NEW=tt_new, SCHEMA="", **gh_env)
+        args = (ws / "pt-args.txt").read_text().split() if (ws / "pt-args.txt").exists() else []
+        rt = str(ws / "runner-temp")
+        parts = [a_ for a_ in args if a_ in ("--mav-part", "--timetables-part")]
+        check(f"the assemble step, MÁV part new: {mav_new}, timetables new: {tt_new}: passes {want or 'no part'},"
+              " the Pages site, the commit, and deploy on",
+              done.returncode == 0 and outputs.get("deploy") == "true" and parts == want
+              and all(args[args.index(f_) + 1] == f"{rt}/{f_[2:]}" for f_ in want)
+              and "https://bator.github.io/hungarian-transport" in args and "b" * 40 in args
+              and f"{rt}/site" in args, repr((done.returncode, done.stderr, args)))
+    (ws / "pt-args.txt").unlink(missing_ok=True)
+    done, _ = bash(assemble_step, ws, MAV_NEW="true", TIMETABLES_NEW="false", SCHEMA="28", **gh_env)
+    args = (ws / "pt-args.txt").read_text().split() if (ws / "pt-args.txt").exists() else []
+    check("the assemble step passes the stable release's schema on when the timetables job named one",
+          done.returncode == 0 and args[args.index("--schema") + 1:args.index("--schema") + 2] == ["28"]
+          if "--schema" in args else False, repr(args))
+    done, _ = bash(assemble_step, ws, MAV_NEW="true", TIMETABLES_NEW="false", SCHEMA="", STUB_RC="1", **gh_env)
+    check("a refused site fails the assemble step", done.returncode == 1, repr(done.returncode))
+
     # The attest step's input: the artifact upload-pages-artifact made (a
     # tar of the site's top level, as its action.yml writes it).
     unpack_step = step_script("Unpack the deployed site")
-    site_names = ("mav-index.json.gz", "mav-index.json", "mav-gtfs.zip", "mav-pfaedle-overlay.zip")
-    for label, names in (("the whole site", (*site_names, "ATTRIBUTION.txt", "index.html")),
-                         ("a site without the overlay", site_names[:3])):
-        ws = tmp / f"wf-unpack-{len(names)}"
+    mav_names = ("mav-index.json.gz", "mav-index.json", "mav-gtfs.zip", "mav-pfaedle-overlay.zip")
+    tt_names = ("timetables.json", "volan-index.json.gz", "city-index.json.gz", "volan-shapes-0123456789/00.json.gz",
+                "volan-shapes-0123456789/01.json.gz", "city-shapes-abcdef0123/00.json.gz")
+    man = {"format": 1, "indexes": {"volan": {"shapes": {"dir": "volan-shapes-0123456789"}},
+                                    "city": {"shapes": {"dir": "city-shapes-abcdef0123"}}}}
+    site_all = (*mav_names, *tt_names, "ATTRIBUTION.txt", "index.html")
+    volan_only = ("timetables.json", "volan-index.json.gz", "volan-shapes-0123456789/00.json.gz",
+                  "volan-shapes-0123456789/01.json.gz")
+    # (label, files in the site, MAV_NEW, BUILT, attested, error). Only what
+    # this run built is attested: a file carried from the live site keeps the
+    # attestation of the run that built it.
+    unpack_cases = (
+        ("everything built this run", site_all, "true", "volan,city", (*mav_names, *tt_names), ""),
+        ("nothing new but timetables.json (no part built)", site_all, "false", "", ("timetables.json",), ""),
+        ("only the MÁV part new: the carried indexes are not attested", site_all, "true", "",
+         (*mav_names, "timetables.json"), ""),
+        ("only the Volán index new: MÁV and city carried, not attested", site_all, "false", "volan", volan_only, ""),
+        ("a fork without the MÁV secrets", (*tt_names, "index.html"), "false", "volan,city", tt_names, ""),
+        ("a new MÁV part without the overlay", (*mav_names[:3], *tt_names), "true", "", (),
+         "mav-pfaedle-overlay.zip is not in the deployed site"),
+        ("a built index missing from the site", (*mav_names, "timetables.json"), "false", "city", (),
+         "city-index.json.gz is not in the deployed site"),
+        ("a site without timetables.json", mav_names, "true", "", (), "timetables.json is not in the deployed site"),
+        ("an unexpected index name", site_all, "false", "volan,x", (), "unexpected index name"),
+    )
+    for k, (label, names, mav_new, built, want, error) in enumerate(unpack_cases):
+        ws = tmp / f"wf-unpack-{k}"
         (ws / "built").mkdir(parents=True)
         (ws / "runner" / "pages").mkdir(parents=True)
         for name in names:
-            (ws / "built" / name).write_bytes(name.encode())
+            (ws / "built" / name).parent.mkdir(parents=True, exist_ok=True)
+            body = json.dumps(man).encode() if name == "timetables.json" else name.encode()
+            (ws / "built" / name).write_bytes(body)
         subprocess.run(["tar", "--directory", str(ws / "built"), "-cf", str(ws / "runner" / "pages" / "artifact.tar"),
                         "."], check=True)
-        done, _ = bash(unpack_step, ws, RUNNER_TEMP=str(ws / "runner"))
+        done, outputs = bash(unpack_step, ws, RUNNER_TEMP=str(ws / "runner"), MAV_NEW=mav_new, BUILT=built)
+        out_text = (ws / f"github_output_{0}").read_text() if (ws / "github_output_0").exists() else ""
+        subjects = out_text.split("subjects<<SUBJECTS_EOF\n", 1)[1].split("SUBJECTS_EOF", 1)[0].splitlines() \
+            if "subjects<<SUBJECTS_EOF" in out_text else []
         unpacked = ws / "runner" / "site"
-        whole = len(names) > 3
+        if error:
+            ok = done.returncode == 1 and error in done.stdout
+        else:
+            ok = (done.returncode == 0 and sorted(subjects) == sorted(f"{unpacked}/{n}" for n in want)
+                  and all(Path(x).is_file() for x in subjects))
         check(f"the deployed site unpacked for its attestation, {label}: "
-              + ("every attested file" if whole else "an error naming the missing file"),
-              (done.returncode == 0 and all((unpacked / n).read_bytes() == n.encode() for n in site_names))
-              if whole else (done.returncode == 1 and "mav-pfaedle-overlay.zip is not in the deployed site" in done.stdout),
-              repr((done.returncode, done.stdout, done.stderr)))
+              + (f"an error naming {error.split()[0]}" if error else "this run's files, one per line, nothing else"),
+              ok, repr((done.returncode, done.stdout, done.stderr, subjects)))
 
 # ---- the workflow text ------------------------------------------------------
 on_block = TEXT.split("\non:\n", 1)[1].split("\n\n", 1)[0]
 check("runs daily and by hand, never for pull requests (secrets, deploy)",
       "schedule:" in on_block and "workflow_dispatch:" in on_block
       and "pull_request" not in on_block and "push:" not in on_block, on_block)
+check("the dispatch has one input, a boolean asking for the Volán and city indexes now",
+      re.search(r"^  workflow_dispatch:\n    inputs:\n      timetables:\n        description: .+\n"
+                r"        type: boolean\n        default: false$", on_block, re.M) is not None
+      and on_block.count("type:") == 1, on_block)
+check("named for what it publishes now", TEXT.startswith("name: Daily timetables (GitHub Pages)\n"))
 # The schedule against what November 2026 showed: MÁV's feed of the day out
 # between 03:17 and 10:03 UTC, on 3 November still missing at 13:54; GitHub
 # starting the 03:15 cron 6 h 48 min to 8 h 13 min late; the owner's dispatch
@@ -797,10 +1051,15 @@ check("the workflow token reads contents only",
 check("one run at a time, none cancelled half-way",
       re.search(r"^concurrency:\n  group: mav-index-daily\n  cancel-in-progress: false$", top, re.M) is not None)
 build, deploy, attest_job = job("build"), job("deploy"), job("attest")
+tt_job, site_job = job("timetables"), job("site")
 jobs_block = TEXT.split("\njobs:\n", 1)[1]
-check("three jobs: build, deploy, attest",
-      re.findall(r"^  ([\w-]+):$", jobs_block, re.M) == ["build", "deploy", "attest"],
+check("five jobs: build (MÁV), timetables, site, deploy, attest",
+      re.findall(r"^  ([\w-]+):$", jobs_block, re.M) == ["build", "timetables", "site", "deploy", "attest"],
       repr(re.findall(r"^  ([\w-]+):$", jobs_block, re.M)))
+check("the build and timetables jobs run side by side, the site job after both, whatever they did (failed,"
+      " timed out), unless the run is cancelled",
+      "needs:" not in build and "needs:" not in tt_job and "    needs: [build, timetables]" in site_job
+      and "    if: ${{ !cancelled() }}" in site_job and ".result" not in site_job, site_job[:600])
 
 
 def minutes(block: str) -> int | None:
@@ -811,21 +1070,49 @@ def minutes(block: str) -> int | None:
 # deploy-pages waits for the deployment up to its own timeout input, 600000
 # ms by default: a job limit of 10 minutes cut it short before it gave up.
 check("every job has a time limit, the deploy job's above deploy-pages' own 10 minutes",
-      all(minutes(b) for b in (build, deploy, attest_job)) and minutes(deploy) >= 15
+      all(minutes(b) for b in (build, tt_job, site_job, deploy, attest_job)) and minutes(deploy) >= 15
       and "timeout:" not in step(deploy, "actions/deploy-pages@"),
-      repr((minutes(build), minutes(deploy), minutes(attest_job))))
+      repr([minutes(b) for b in (build, tt_job, site_job, deploy, attest_job)]))
 check("only the deploy job may write Pages, only it and the attest job mint an OIDC token",
-      "pages: write" not in build and "id-token" not in build and "pages: write" not in attest_job
+      all("pages: write" not in b and "id-token" not in b and "permissions:" not in b
+          for b in (build, tt_job, site_job)) and "pages: write" not in attest_job
       and re.search(r"^    permissions:\n      pages: write\n      id-token: write\n    \S", deploy, re.M) is not None,
       deploy)
-check("the deploy job runs after a build that made a site, in the github-pages environment",
-      "    needs: build" in deploy and "    if: needs.build.outputs.deploy == 'true'" in deploy
-      and "      name: github-pages" in deploy
-      and "deploy: ${{ steps.site.outputs.deploy }}" in build, deploy)
+# success() looks at every job before this one, and the build job fails on
+# a stale MÁV index while the site may still carry a new Volán or city index.
+check("the deploy job runs after a site job that made a site, in the github-pages environment, whatever"
+      " the build job did",
+      "    needs: site" in deploy
+      and "    if: ${{ !cancelled() && needs.site.result == 'success' && needs.site.outputs.deploy == 'true' }}"
+      in deploy and "      name: github-pages" in deploy
+      and "deploy: ${{ steps.assemble.outputs.deploy }}" in site_job, deploy)
 check("the deploy job checks out and runs nothing from the repository, and sees no MÁV secret",
       "actions/checkout" not in deploy and "secrets." not in deploy and "scripts/" not in deploy)
-upload = step(build, "actions/upload-pages-artifact@")
-check("only a site that differs is uploaded", "if: steps.site.outputs.deploy == 'true'" in upload, upload)
+upload = step(site_job, "actions/upload-pages-artifact@")
+check("only the site job makes the Pages artifact, and only a site to deploy",
+      "if: steps.assemble.outputs.deploy == 'true'" in upload and "path: ${{ runner.temp }}/site" in upload
+      and TEXT.count("actions/upload-pages-artifact@") == 1, upload)
+mav_up = step(build, "name: mav-part")
+tt_up = step(tt_job, "name: timetables-part")
+check("the build job hands its site to the site job as the mav-part artifact, only when it is to be deployed",
+      "if: steps.site.outputs.deploy == 'true'" in mav_up and "path: ${{ runner.temp }}/site" in mav_up
+      and "deploy: ${{ steps.site.outputs.deploy }}" in build, mav_up)
+check("the timetables job uploads what it built as timetables-part, only when it built an index",
+      "if: steps.indexes.outputs.built != ''" in tt_up and "path: ${{ runner.temp }}/timetables-part" in tt_up
+      and "built: ${{ steps.indexes.outputs.built }}" in tt_job, tt_up)
+for label, up in (("mav-part", mav_up), ("timetables-part", tt_up)):
+    check(f"the {label} artifact is kept 3 days and an upload with no files fails",
+          re.search(r"^ +retention-days: 3$", up, re.M) is not None and "if-no-files-found: error" in up, up)
+mav_dl, tt_dl = step(site_job, "name: mav-part"), step(site_job, "name: timetables-part")
+check("the site job downloads a part only when its job made one",
+      "if: needs.build.outputs.deploy == 'true'" in mav_dl and "if: needs.timetables.outputs.built != ''" in tt_dl
+      and "MAV_NEW: ${{ needs.build.outputs.deploy == 'true' }}" in site_job
+      and "TIMETABLES_NEW: ${{ needs.timetables.outputs.built != '' }}" in site_job, repr((mav_dl, tt_dl)))
+tt_steps = [ln.strip() for ln in tt_job.splitlines() if ln.strip().startswith("- ")]
+check("the timetables job builds only when due, and the dispatch input forces it",
+      all("if: steps.due.outputs.due == 'true'" in step(tt_job, f"- name: {n}")
+          for n in ("Baseline indexes", "Build the Volán and city indexes"))
+      and "FORCE: ${{ inputs.timetables == true }}" in step(tt_job, "- name: Timetables due"), repr(tt_steps))
 # The attest job reads this artifact; a re-run of it after a Sigstore outage
 # failed with "artifact not found" once the action's default of one day was
 # over. A weekend's worth now, and the docs say how long.
@@ -845,12 +1132,28 @@ site_s = step(build, "- name: Pages site")
 check("the site is made only from a build that went through",
       "if: steps.mav.outputs.built == 'true'" in site_s and "secrets." not in site_s, site_s)
 secret_lines = [ln.strip() for ln in TEXT.splitlines() if "secrets." in ln]
-check("the MÁV secrets reach only the build step's env (and the job's yes/no flag)",
+city_secrets = [
+    "BAHART_GTFS_URL: ${{ secrets.BAHART_GTFS_URL }}",
+    "MOBILITY_DATABASE_REFRESH_TOKEN: ${{ secrets.MOBILITY_DATABASE_REFRESH_TOKEN }}",
+    "TRANSITLAND_API_KEY: ${{ secrets.TRANSITLAND_API_KEY }}",
+]
+check("the MÁV secrets reach only the MÁV build step's env (and the job's yes/no flag), the city feeds'"
+      " only the timetables build step's",
       sorted(secret_lines) == sorted([
           "MAV_SECRETS: ${{ secrets.MAV_GTFS_USER != '' && secrets.MAV_GTFS_PASSWORD != '' }}",
           "MAV_GTFS_USER: ${{ secrets.MAV_GTFS_USER }}",
           "MAV_GTFS_PASSWORD: ${{ secrets.MAV_GTFS_PASSWORD }}",
-      ]) and "secrets.MAV_GTFS" in step(build, "- name: MÁV GTFS, pfaedle, build and audit"), repr(secret_lines))
+          *city_secrets,
+      ]) and "secrets.MAV_GTFS" in step(build, "- name: MÁV GTFS, pfaedle, build and audit")
+      and all(ln in step(tt_job, "- name: Build the Volán and city indexes") for ln in city_secrets)
+      and "secrets." not in site_job and "secrets.MAV" not in tt_job, repr(secret_lines))
+release_text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+check("the timetables build reads the release's variables for the Volán URL and the city guard",
+      all(v in step(tt_job, "- name: Build the Volán and city indexes") for v in (
+          "VOLAN_GTFS_URL: ${{ vars.VOLAN_GTFS_URL || '' }}",
+          "ALLOW_MISSING_VAR: ${{ vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}"))
+      and "VOLAN_GTFS_URL: ${{ vars.VOLAN_GTFS_URL || '' }}" in release_text
+      and "vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING" in release_text)
 uses = re.findall(r"uses: (\S+)", TEXT)
 check("every action is pinned to a commit sha",
       bool(uses) and all(re.fullmatch(r"[\w.-]+/[\w.-]+(/[\w.-]+)*@[0-9a-f]{40}", u) for u in uses), repr(uses))
@@ -882,15 +1185,17 @@ check("the deploy job ends with the deploy: no attestation step a re-run would d
       deploy_steps[-1].startswith("- uses: actions/deploy-pages@") and "actions/attest@" not in deploy
       and "download-artifact" not in deploy, repr(deploy_steps))
 check("the attest job runs after the deploy, never deploys, and runs nothing from the repository",
-      "    needs: deploy" in attest_job and "    if:" not in attest_job and "environment:" not in attest_job
+      "    needs: [build, timetables, deploy]" in attest_job
+      and "    if: ${{ !cancelled() && needs.deploy.result == 'success' }}" in attest_job
+      and "environment:" not in attest_job
       and "deploy-pages" not in attest_job and "actions/checkout" not in attest_job
       and "secrets." not in attest_job and "scripts/" not in attest_job, attest_job)
 check("the deployed files are attested from the artifact Pages deployed",
       [s_.split("@")[0] for s_ in attest_steps] == [
           "- uses: actions/download-artifact", "- name: Unpack the deployed site", "- uses: actions/attest"]
       and "name: github-pages" in fetched and "path: ${{ runner.temp }}/pages" in fetched
-      and all(f"${{{{ runner.temp }}}}/site/{n}" in attest
-              for n in ("mav-index.json.gz", "mav-index.json", "mav-gtfs.zip", "mav-pfaedle-overlay.zip")),
+      and "subject-path: ${{ steps.files.outputs.subjects }}" in attest
+      and "id: files" in step(attest_job, "- name: Unpack the deployed site"),
       repr((attest_steps, attest)))
 # The documented check pins the branch: a dispatch from another branch signs
 # with a workflow file of the same path.

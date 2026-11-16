@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """What the workflows must cover, read from their text: every scripts test
 runs in CI and in the release, the MÁV index check runs for a change to any
-file its build imports and keeps its artifacts when it fails, and the shell
+file its build imports, assembles the daily Pages site offline and keeps its
+artifacts when it fails, and the shell
 and workflow linters run pinned and checksummed. No network."""
 from __future__ import annotations
 
@@ -77,6 +78,12 @@ needed |= {"scripts/release_mav_index.sh", "custom_components/hungarian_transpor
 check("mav-index.yml runs for a change to every file the MÁV build imports",
       needed <= listed, repr(sorted(needed - listed)))
 
+pages_step = step(mav, "- name: Pages site (not published)")
+check("mav-index.yml assembles the daily workflow's whole site offline (no live site, nothing published)",
+      "scripts/pages_timetables.py" in listed and "python3 scripts/pages_timetables.py assemble" in pages_step
+      and "--live-dir" in pages_step and "--live-url" not in pages_step and '--mav-part "$RUNNER_TEMP/mav-part"' in pages_step,
+      pages_step)
+
 upload = step(mav, "actions/upload-artifact@")
 check("the MÁV index artifact is kept when a step failed, the second build included",
       "!cancelled()" in upload and "mav-index.again.json.gz" in upload and "mav-index.json.gz" in upload,
@@ -84,12 +91,11 @@ check("the MÁV index artifact is kept when a step failed, the second build incl
 
 build_step = step(release, "- name: Build GTFS indexes")
 baseline_step = step(release, "- name: Previous release indexes")
-check("the weekly refresh (only) lets a city feed whose download failed keep the previous release's part",
-      "HUNGARIAN_TRANSPORT_CARRY_INDEX: ${{ needs.resolve.outputs.refresh == 'true'"
-      " && '.baseline/city-index.json.gz' || '' }}" in build_step
-      and 'CARRY_ENV = "HUNGARIAN_TRANSPORT_CARRY_INDEX"' in (ROOT / "scripts" / "build_city_index.py").read_text()
-      and "cp volan-index.json.gz city-index.json.gz .baseline/" in baseline_step
-      and "'city-shapes-*' -d .baseline" in baseline_step, build_step)
+check("a code release builds every city feed afresh against the previous release's indexes (no carried part)",
+      "HUNGARIAN_TRANSPORT_CARRY_INDEX" not in release
+      and "python3 scripts/build_city_index.py" in build_step
+      and "unzip -o -j baseline/hungarian-transport-frontend.zip volan-index.json.gz city-index.json.gz -d ."
+      in baseline_step, build_step)
 
 lint = step(validate, "- name: Install ShellCheck")
 pins = re.findall(r"(SHELLCHECK|ACTIONLINT)_SHA256: ([0-9a-f]{64})$", lint, re.M)

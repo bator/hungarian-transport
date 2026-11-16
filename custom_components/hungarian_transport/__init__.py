@@ -28,14 +28,25 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
 from homeassistant.util import dt as dt_util
 
-from . import lovelace_resource, mav, mav_daily, realtime, storage, timetable_notify, timetables
+from . import (
+    lovelace_resource,
+    mav,
+    mav_daily,
+    realtime,
+    storage,
+    timetable_notify,
+    timetables,
+    weekly_timetables,
+)
 from .assets import asset_tag
 from .cache import close_on_stop, hass_call_later
 from .config_flow import async_end_reauth
 from .const import (
     CONF_API_KEY,
     CONF_DAILY_MAV,
+    CONF_PAGES_TIMETABLES,
     DEFAULT_DAILY_MAV,
+    DEFAULT_PAGES_TIMETABLES,
     DOMAIN,
     SERVICE_ELVIRA_BETWEEN,
     SERVICE_FUTAR,
@@ -478,19 +489,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await notifier.async_restore()
     except Exception:  # noqa: BLE001 - never a reason not to set up
         _LOGGER.warning("Could not check the shipped timetables for changes", exc_info=True)
+    # Retired shapes folders go also with the weekly timetables off (a
+    # Pages install, or the local updater, left them for the open dashboards).
+    try:
+        await hass.async_add_executor_job(weekly_timetables.prune_all, WWW_PATH)
+    except Exception:  # noqa: BLE001 - never a reason not to set up
+        _LOGGER.warning("Could not prune the old shapes folders", exc_info=True)
     updater: mav_daily.DailyIndexUpdater | None = None
     daily = bool(entry.options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV))
-    if daily:
+    pages = bool(entry.options.get(CONF_PAGES_TIMETABLES, DEFAULT_PAGES_TIMETABLES))
+    if daily or pages:
         # The daily MÁV index from GitHub Pages (mav_daily.py), at the time
-        # the options set; turned off in the options, no request is made.
+        # the options set, and after it in the same rounds the weekly Volán
+        # and city indexes (weekly_timetables.py); each turned off in the
+        # options makes no request.
+        weekly = (
+            weekly_timetables.PagesTimetables(hass, WWW_PATH, notifier.async_pages_result) if pages else None
+        )
         updater = mav_daily.DailyIndexUpdater(
-            hass, WWW_PATH, notifier.daily_time, notifier.async_daily_result
+            hass,
+            WWW_PATH,
+            notifier.daily_time,
+            notifier.async_daily_result,
+            mav=daily,
+            timetables=weekly,
         )
         entry.async_on_unload(updater.start())
     # The timetable sensors (sensor.py): read once now, then on every change
     # the integration makes and every 30 minutes (timetables.py).
     status = timetables.TimetableStatus(
-        hass, WWW_PATH, daily_enabled=daily, next_run=(lambda: updater.next_run) if updater else None
+        hass,
+        WWW_PATH,
+        daily_enabled=daily,
+        pages_enabled=pages,
+        next_run=(lambda: updater.next_run) if updater else None,
     )
     await status.async_refresh()
     entry.async_on_unload(status.start())
@@ -592,11 +624,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     (storage.py), and the copy of it in memory. There is one entry at most
     (its unique_id is the domain), so nothing is shared with another.
 
-    Only what installed the MÁV index stays (storage.MAV_INSTALL): the index
-    stays in www/ and the cards keep drawing from it, so an entry added
-    again would otherwise call it a release's, with the file's time. The
-    sensor matches the record to the served file (feed and size), so a
-    record of an index replaced since says nothing."""
+    Only what installed the indexes stays (storage.MAV_INSTALL,
+    storage.TIMETABLES_INSTALL): the indexes stay in www/ and the cards keep
+    drawing from them, so an entry added again would otherwise call them a
+    release's. The sensors match a record to the served file (feed and
+    size), so a record of an index replaced since says nothing."""
     try:
         await lovelace_resource.async_remove_resource(hass)
     except Exception:  # noqa: BLE001 - removal goes on
@@ -606,6 +638,7 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         timetable_notify.NOTIFICATION_SHIPPED,
         timetable_notify.NOTIFICATION_MAV_DAILY,
         timetable_notify.NOTIFICATION_DAILY_FAILED,
+        timetable_notify.NOTIFICATION_PAGES,
         mav.NOTIFICATION_ID,
     ):
         persistent_notification.async_dismiss(hass, notification_id)
@@ -614,9 +647,13 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     ir.async_delete_issue(hass, DOMAIN, lovelace_resource.ISSUE_CARD_API_KEY)
     try:
         state = await storage.async_load(hass)
-        install = state.get(storage.MAV_INSTALL)
-        if isinstance(install, dict):
-            await storage.async_save(hass, {storage.MAV_INSTALL: install})
+        kept = {
+            key: state[key]
+            for key in (storage.MAV_INSTALL, storage.TIMETABLES_INSTALL)
+            if isinstance(state.get(key), dict)
+        }
+        if kept:
+            await storage.async_save(hass, kept)
         else:
             await storage.store(hass).async_remove()
     except Exception:  # noqa: BLE001 - removal goes on

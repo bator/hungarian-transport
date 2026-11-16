@@ -105,17 +105,20 @@ dashboards that still hold one. Keep it in the integration.
 | --- | --- |
 | Budapest buses, trams, metro, HÉV, suburban trains | [BKK FUTÁR](https://opendata.bkk.hu/), live |
 | MÁV trains | MÁV ELVIRA (departures, platforms, seat reservations); BKK FUTÁR only without the integration |
-| Volán coaches | National Volán GTFS ([opendata.utas.hu](https://opendata.utas.hu/), [KTI](https://gtfs.kti.hu/) as fallback), shipped with each release |
+| Volán coaches | National Volán GTFS ([opendata.utas.hu](https://opendata.utas.hu/), [KTI](https://gtfs.kti.hu/) as fallback), shipped with each release; between releases the index rebuilt weekly, fetched from GitHub Pages when it is newer ([opt out][timetables-pages] in the integration's options) |
 | Live delays and positions outside Budapest (Volán, the Volánbusz towns, Veszprém, Miskolc, Paks, Debrecen, Orosháza, MÁV trains) | The public GTFS-Realtime feeds [Transitous](https://github.com/public-transport/transitous/blob/main/feeds/hu.json) lists, most of them from [jbb.ghsq.de](https://jbb.ghsq.de/gtfs-feeds); fetched by the integration only while a card shows them, at most once a minute. See [Live delays and positions](docs/realtime.md) |
-| City networks | Each operator's GTFS, shipped with each release |
+| City networks | Each operator's GTFS, shipped with each release; between releases the index rebuilt weekly, like Volán's |
 | Stop search, transfers | [Transitous](https://transitous.org/), BKK FUTÁR as fallback |
 | MÁV train routes on the map | [MÁV GTFS][timetables-mav] matched to the OSM rails with pfaedle, shipped with each release built with the MÁV secrets; or add the feed yourself |
-| MÁV train routes, daily | The same index built every morning from MÁV's newest feed, fetched from GitHub Pages (`bator.github.io`) when it is newer; [opt out][timetables-daily] in the integration's options. The same site serves the day's MÁV GTFS and its pfaedle-matched shapes for other uses |
+| MÁV train routes, daily | The same index built every morning from MÁV's newest feed, fetched from GitHub Pages (`bator.github.io`) when it is newer; [opt out][timetables-pages] in the integration's options. The same site serves the day's MÁV GTFS and its pfaedle-matched shapes for other uses |
 
-A weekly job publishes a new patch release when a timetable changed; a
-published release never changes. To refresh the timetables daily on your own
-Home Assistant, add the MÁV feed, or read what an update message means, see
-[Timetables, train routes and updates][timetables].
+A release is made for new code and ships the timetables current at that
+time; a published release never changes. New timetables between releases
+come from GitHub Pages, not as a new version: the integration installs the
+Volán and city indexes rebuilt every week and the MÁV index rebuilt every
+day. To refresh the timetables daily on your own Home Assistant, add the
+MÁV feed, or read what an update message means, see [Timetables, train
+routes and updates][timetables].
 
 ## Development
 
@@ -131,8 +134,8 @@ pip install -r requirements_test.txt && python -m pytest   # Python 3.13
 
 A release is published by the Release workflow (`bump: patch` from main).
 Its notes are `docs/releases/<version>.md` when that file exists on the
-commit being released (write it before running the workflow); a weekly
-timetable release or a `-rev` prerelease gets a one-line description.
+commit being released (write it before running the workflow); a `-rev`
+prerelease gets a one-line description.
 
 ## Credits
 
@@ -166,7 +169,7 @@ MIT, see [LICENSE](LICENSE).
 [manual-config]: https://github.com/bator/hungarian-transport/blob/main/docs/manual/README.md#11-configuration-reference
 [timetables]: https://github.com/bator/hungarian-transport/blob/main/docs/timetables.md
 [timetables-mav]: https://github.com/bator/hungarian-transport/blob/main/docs/timetables.md#máv-train-routes
-[timetables-daily]: https://github.com/bator/hungarian-transport/blob/main/docs/timetables.md#the-daily-index-from-github-pages
+[timetables-pages]: https://github.com/bator/hungarian-transport/blob/main/docs/timetables.md#options-privacy-and-notifications
 [img-card-mav]: https://raw.githubusercontent.com/bator/hungarian-transport/main/docs/manual/images/en/card-mav.webp
 [img-map-bkk]: https://raw.githubusercontent.com/bator/hungarian-transport/main/docs/manual/images/en/map-bkk.webp
 [img-planner]: https://raw.githubusercontent.com/bator/hungarian-transport/main/docs/manual/images/en/planner-transfer.webp

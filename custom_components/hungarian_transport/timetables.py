@@ -3,11 +3,12 @@
 The indexes change through a HACS update (a release ships them), the local
 updater script (scripts/update_volan_index.py, which also keeps a durable
 copy of each in /config/hungarian-transport), the daily MÁV index
-(mav_daily.py) and local MÁV builds and uploads (mav.py). TimetableStatus
-reads them in the executor, again only when a file's (mtime, size)
-changed, on storage.SIGNAL_TIMETABLES (sent after a daily round, a daily
-install and a local build) and every POLL_INTERVAL (the updater script and
-HACS send nothing).
+(mav_daily.py), the weekly Volán and city indexes from GitHub Pages
+(weekly_timetables.py) and local MÁV builds and uploads (mav.py).
+TimetableStatus reads them in the executor, again only when a file's
+(mtime, size) changed, on storage.SIGNAL_TIMETABLES (sent after a daily or
+weekly round, an install and a local build) and every POLL_INTERVAL (the
+updater script and HACS send nothing).
 
 The MÁV index (about 1 MB unpacked) is read whole. The Volán and city
 indexes (tens of MB unpacked) are streamed once: the feed and the stop
@@ -212,7 +213,7 @@ class _Reader:
         return {
             "mav": mav_info and {**mav_info, "durable": self._durable_same(mav.INDEX_NAME, mav_info)},
             "volan": volan and {**volan, "durable": self._durable_same(VOLAN_INDEX, volan)},
-            "city": city,
+            "city": city and {**city, "durable": self._durable_same(CITY_INDEX, city)},
         }
 
 
@@ -220,7 +221,8 @@ class TimetableStatus:
     """The indexes and the daily round as the sensors show them.
 
     next_run gives the daily updater's next round (None when the daily
-    index is turned off)."""
+    index is turned off); pages_enabled says whether the weekly timetables
+    from GitHub Pages are on."""
 
     def __init__(
         self,
@@ -228,11 +230,13 @@ class TimetableStatus:
         www: Path,
         *,
         daily_enabled: bool,
+        pages_enabled: bool = False,
         next_run: Callable[[], datetime | None] | None = None,
     ) -> None:
         self._hass = hass
         self._reader = _Reader(www, mav.source_path(hass).parent)
         self.daily_enabled = daily_enabled
+        self.pages_enabled = pages_enabled
         self._next_run = next_run or (lambda: None)
         self.indexes: dict[str, Any] = {"mav": None, "volan": None, "city": None}
         self.record: dict[str, Any] = {}
