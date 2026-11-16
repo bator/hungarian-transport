@@ -337,32 +337,44 @@ reload (the card revalidates it, and Home Assistant answers with a new ETag).
 
 The Volán and city indexes are rebuilt once a week, not on every run: their
 publishers change a timetable every few days or weeks, and a rebuild
-downloads every city feed again. The `timetables` job of a run rebuilds both
-when the published `timetables.json`
+downloads every city feed again. The `timetables` job of a run rebuilds an
+index when the published `timetables.json` lacks it or names it built 6 days
+12 hours ago or earlier. Each index counts on its own: a city index whose
+guard refuses it for days is tried again on every run, and the Volán index
+next to it is neither rebuilt nor deployed again for it. Both are rebuilt
+when `timetables.json`
 
 - is missing (HTTP 404: the site's first such run, or a fork) or cannot be
   read,
-- lacks one of the two indexes,
-- has an index built 6 days 12 hours ago or earlier, or
-- names another index schema than the one the workflow's commit builds,
+- names another index schema than the latest stable release builds (see
+  below),
 
-and on a run started by hand with the `timetables` input ticked (rebuild
-the Volán and city indexes now). 6 days 12 hours, not 7 days: GitHub starts
+and on a run started by hand with the `timetables` input ticked (rebuild the
+Volán and city indexes now). 6 days 12 hours, not 7 days: GitHub starts
 the scheduled runs hours late, by a different amount every day. With a full
 week, a morning run that started a little earlier than the one a week before
 would find the indexes a few minutes too young and leave them to the
 afternoon run, and the rebuild would drift later week by week. With half a
 day to spare, the same morning run of the next week rebuilds them.
 
-The rebuild runs the release's builders (`scripts/build_volan_index.py`,
-`scripts/build_city_index.py`) on the workflow's commit, with the release's
+The rebuild runs the builders (`scripts/build_volan_index.py`,
+`scripts/build_city_index.py`) of the latest stable release, never main's:
+the highest `vX.Y.Z` that is not a prerelease, checked out for the job, as
+the weekly timetable release before it built them with its stable tag's
+code. What installs read is so always built by released code; a change to
+the builders on main reaches the site with the next release. Only the
+workflow's own script that checks and packs the indexes
+(`scripts/pages_timetables.py`) comes from main, and the index schema it
+checks for is the stable release's. A repository without a stable release
+(a new fork) builds no Volán or city index, with a warning. The builders
+run with the release's
 repository secrets and variables (`BAHART_GTFS_URL`,
 `MOBILITY_DATABASE_REFRESH_TOKEN`, `TRANSITLAND_API_KEY`, `VOLAN_GTFS_URL`,
 `HUNGARIAN_TRANSPORT_ALLOW_MISSING`; no MÁV login) and the release's guards
 ([When an update fails](#when-an-update-fails)). The previous indexes they
 are compared with are the ones on the site (checked against
 `timetables.json`, shapes included), or, when the site has none that check
-out, the latest stable release's. A city feed whose download fails keeps
+out, the stable release's. A city feed whose download fails keeps
 its part of that previous index (*City feed carried over*, see [When an
 update fails](#when-an-update-fails)), so one publisher's outage does not
 hold back the other feeds. Volán and city are independent: a builder that
@@ -374,11 +386,18 @@ together from both parts: the MÁV files of this run, else the ones already
 published (every file `mav-index.json` names); each Volán or city index of
 this run, else the published one with its shapes, checked against the
 published `timetables.json` (the size and sha256 of every file). It deploys
-when the MÁV part or at least one of the two indexes is new. When a file
-the published manifests name cannot be carried over (it does not download,
-or does not match), the run fails and deploys nothing: the new site would
-lack that file. A manifest that is not there at all (404) carries nothing
-and is no failure.
+when the MÁV part or at least one of the two indexes is new. A published
+Volán or city index that cannot be carried over (a file does not download,
+or does not match, also when fetched again half a minute later) is left out
+of the new site with a warning: installs then find it not published and
+keep the one they have, and the next run finds it missing and rebuilds it.
+A MÁV file that cannot be carried over, or a published manifest that is
+there but cannot be read, fails the run instead, and nothing is deployed:
+every install's daily MÁV check reads those files, and the next run tries
+again. A manifest that is not there at all (404) carries nothing and is no
+failure. The `site` job runs whatever the other two jobs did (a job that
+failed or ran out of time only makes no part, and the published files are
+carried over in its place), unless the run itself is cancelled.
 
 `timetables.json` (at most 64 KiB) describes both indexes (sizes, hashes
 and counts here are examples):
@@ -421,11 +440,12 @@ and counts here are examples):
   `built_at` included, so the week counts from its last real build. An
   index that was never built is not listed.
 
-The workflow builds the commit it runs on (main), not the latest release.
-When main changes the index format before a release, the site carries the
-new `schema` from its next rebuild, and installs of the older release skip
+Because the indexes are the stable release's, the site's `schema` changes
+only with a release: the first run after a release that changes the index
+format rebuilds both, and from then on installs of an older version skip
 the Volán and city indexes there (`unsupported`) and keep theirs until they
-update; a release with the new format brings indexes of it.
+update. An index published before that of the old format is not carried
+into a site of the new one.
 
 **Installing them.** The integration checks `timetables.json` in the same
 round as the daily MÁV index, right after it: about 10 to 20 minutes after

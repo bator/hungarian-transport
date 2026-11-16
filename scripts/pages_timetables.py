@@ -22,14 +22,19 @@ site. The integration reads timetables.json
                               the shapes shards each index names in its head
 
 Subcommands (every --live-url is the site's https base URL; --live-dir a
-local folder in its place, for tests and the PR check):
+local folder in its place, for tests and the PR check). --schema is the
+index schema of the code that builds the indexes (the workflow builds them
+with the latest stable release's code, and passes that release's
+gtfs_compact.INDEX_SCHEMA), not this checkout's:
 
-  due      (--live-url URL | --live-dir DIR) [--force true|false] [--now ISO]
-           [--github-output FILE]
-           Prints due=true|false: true when the published timetables.json is
-           missing or does not read, names another format or schema, lacks
-           an index, or one of its indexes was built DUE_AFTER ago or
-           longer (or names no build time), and with --force true.
+  due      (--live-url URL | --live-dir DIR) --schema N [--force true|false]
+           [--now ISO] [--github-output FILE]
+           Prints due=true|false and indexes=NAME,... (the due ones). Both
+           are due when the published timetables.json is missing or does
+           not read, names another format or a schema other than N, and
+           with --force true; else each index on its own, when it is not
+           listed or was built DUE_AFTER ago or longer (or names no build
+           time).
   baseline (--live-url URL | --live-dir DIR) [--release-url URL |
            --release-file ZIP] --out DIR
            Puts each published index and its shapes, verified against the
@@ -37,32 +42,35 @@ local folder in its place, for tests and the PR check):
            does not verify comes from the release's frontend zip instead
            (the latest stable release), when it has one. Never fails for a
            missing baseline: the builders then compare with nothing.
-  part     --index INDEX.json.gz --out DIR [--baseline OLD.json.gz] [--now ISO]
-           Checks an index this run built (this checkout's schema, a feed,
-           every shapes shard), copies it and its shapes folder into DIR and
-           records its manifest entry in DIR/part.json (built_at now). Exit
-           1 for an index that does not hold up. With --baseline, a notice
-           says when the content (index_digest.py) is the baseline's.
+  part     --index INDEX.json.gz --out DIR --schema N [--baseline OLD.json.gz]
+           [--now ISO]
+           Checks an index this run built (schema N, a feed, every shapes
+           shard), copies it and its shapes folder into DIR and records its
+           manifest entry and N in DIR/part.json (built_at now). Exit 1 for
+           an index that does not hold up. With --baseline, a notice says
+           when the content (index_digest.py) is the baseline's.
   assemble --out SITE --commit SHA (--live-url URL | --live-dir DIR)
-           [--mav-part DIR] [--timetables-part DIR] [--max-bytes N]
-           [--now ISO] [--settle SECONDS] [--github-output FILE]
+           [--mav-part DIR] [--timetables-part DIR] [--schema N]
+           [--max-bytes N] [--now ISO] [--settle SECONDS] [--github-output FILE]
            Writes the whole site: the MÁV files from --mav-part (this run's
            mav_pages_site.py output), else every file the published
            mav-index.json names, carried; each index of --timetables-part,
            else the published one, carried with its published manifest entry
-           as it is; timetables.json, and ATTRIBUTION.txt and index.html for
-           the whole site. Prints deploy=true|false: true when the MÁV part
-           or at least one index is new. Exit 1, with nothing written, when
-           a file the published manifests list cannot be carried (deploying
-           would wipe it), a published manifest is there but does not read,
-           or the site is over the size limit. A published manifest that is
-           not there (HTTP 404) has nothing to carry. A carried file whose
-           size or sha256 is not the manifest's (Pages may serve a deploy's
-           files a moment apart) is fetched again once, --settle seconds
-           later.
-
-A carried index of a schema other than this checkout's is left out, with a
-warning: the manifest names one schema for both indexes, this checkout's.
+           as it is; timetables.json (of the part's schema, else the
+           published one's, else --schema), and ATTRIBUTION.txt and
+           index.html for the whole site. Prints deploy=true|false: true
+           when the MÁV part or at least one index is new.
+           A published Volán or city index that cannot be carried (a file
+           missing, or not its size and sha256 also when fetched again
+           --settle seconds later), or is of another schema than the new
+           one, is left out with a warning. Exit 1, with nothing written,
+           when a MÁV file the published mav-index.json lists cannot be
+           carried (every install's daily MÁV check reads it), a published
+           manifest is there but does not read, or the site is over the
+           size limit. A published manifest that is not there (HTTP 404)
+           has nothing to carry. A MÁV file that does not match (Pages may
+           serve a deploy's files a moment apart) is fetched again once,
+           --settle seconds later.
 """
 from __future__ import annotations
 
@@ -87,6 +95,8 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import mav_pages_site as mav_site  # noqa: E402
+# INDEX_SCHEMA: only assemble's last resort for a site without any index
+# (the schema of the code that builds the indexes is passed as --schema).
 from gtfs_compact import INDEX_SCHEMA, UA, shapes_stem  # noqa: E402
 from index_digest import digest  # noqa: E402
 
@@ -271,15 +281,16 @@ def shard_names(n: int) -> list[str]:
     return [f"{k:02d}.json.gz" for k in range(n)]
 
 
-def build_entry(index: Path, built_at: str) -> dict:
+def build_entry(index: Path, built_at: str, schema: int) -> dict:
     """The manifest entry of an index this run built (its shapes folder next
-    to it), refusing one this checkout's card would not read."""
+    to it), refusing one not of schema (the index format of the code that
+    built it, which the release of that code reads)."""
     name = next((k for k, v in INDEXES.items() if v == index.name), None)
     if name is None:
         raise SiteError(f"{index.name} is none of " + ", ".join(INDEXES.values()))
     data = read_index(index)
-    if data.get("v") != INDEX_SCHEMA:
-        raise SiteError(f"{index.name} has schema {data.get('v')!r}, this checkout reads {INDEX_SCHEMA}")
+    if data.get("v") != schema:
+        raise SiteError(f"{index.name} has schema {data.get('v')!r}, not {schema}")
     feed = data.get("feed")
     # The feed goes into the manifest and the log, never a workflow command.
     if not isinstance(feed, str) or not feed or not feed.isprintable():
@@ -367,28 +378,40 @@ def copy_entry(source: Source, entry: dict, out: Path, schema: int) -> None:
 
 # ---- due --------------------------------------------------------------------
 
-def due(live: dict | None, why: str, force: bool, now: datetime) -> tuple[bool, str]:
-    """Whether to build the Volán and city indexes in this run, and why."""
+def due(live: dict | None, why: str, force: bool, now: datetime, schema: int) -> tuple[list[str], str]:
+    """The indexes to build in this run (in INDEXES order), and why. One
+    index that is due does not make the other one due: a city index whose
+    guard refuses it for days must not rebuild and redeploy the Volán index
+    on every run. What concerns the whole manifest (none, another format or
+    schema, the dispatch input) makes both due."""
     if force:
-        return True, "asked for by the workflow_dispatch input timetables"
+        return list(INDEXES), "asked for by the workflow_dispatch input timetables"
     if live is None:
-        return True, f"no published {MANIFEST_NAME} ({why})"
+        return list(INDEXES), f"no published {MANIFEST_NAME} ({why})"
     if live.get("format") != MANIFEST_FORMAT:
-        return True, f"the published {MANIFEST_NAME} has another format"
-    if live.get("schema") != INDEX_SCHEMA:
-        return True, f"the published indexes are not of schema {INDEX_SCHEMA}"
+        return list(INDEXES), f"the published {MANIFEST_NAME} has another format"
+    if live.get("schema") != schema:
+        return list(INDEXES), f"the published indexes are not of schema {schema}"
     indexes = live.get("indexes") if isinstance(live.get("indexes"), dict) else {}
+    names, reasons = [], []
     for name in INDEXES:
         entry = indexes.get(name)
         if not isinstance(entry, dict):
-            return True, f"no published {name} index"
+            names.append(name)
+            reasons.append(f"no published {name} index")
+            continue
         built = parse_time(entry.get("built_at"))
         if built is None:
-            return True, f"the published {name} index names no build time"
+            names.append(name)
+            reasons.append(f"the published {name} index names no build time")
+            continue
         age = now - built
         if age >= DUE_AFTER:
-            return True, f"the published {name} index was built {int(age.total_seconds() // 3600)} h ago"
-    return False, f"both published indexes were built less than {DUE_AFTER} ago"
+            names.append(name)
+            reasons.append(f"the published {name} index was built {int(age.total_seconds() // 3600)} h ago")
+    if not names:
+        return [], f"both published indexes were built less than {DUE_AFTER} ago"
+    return names, "; ".join(reasons)
 
 
 # ---- baseline ---------------------------------------------------------------
@@ -516,7 +539,7 @@ def cmd_baseline(args: argparse.Namespace, source: Source) -> int:
 
 def cmd_part(args: argparse.Namespace, now: datetime) -> int:
     try:
-        entry = build_entry(args.index, utc_text(now))
+        entry = build_entry(args.index, utc_text(now), args.schema)
     except (OSError, SiteError) as err:
         print(f"::warning title=Index not published::{args.index.name}: {err}")
         return 1
@@ -529,8 +552,13 @@ def cmd_part(args: argparse.Namespace, now: datetime) -> int:
         for shard in shard_names(entry["shapes"]["n"]):
             shutil.copyfile(args.index.parent / entry["shapes"]["dir"] / shard, folder / shard)
     part_file = args.out / PART_NAME
-    part = json.loads(part_file.read_text(encoding="utf-8")) if part_file.is_file() else {"indexes": {}}
-    part["indexes"][name] = entry
+    part = json.loads(part_file.read_text(encoding="utf-8")) if part_file.is_file() else {}
+    if part.get("schema", args.schema) != args.schema:
+        print(f"::warning title=Index not published::{args.index.name}: the part holds indexes of schema"
+              f" {part.get('schema')!r}, not {args.schema}")
+        return 1
+    part["schema"] = args.schema
+    part.setdefault("indexes", {})[name] = entry
     part_file.write_text(json.dumps(part, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print(f"{name}: {entry['size']} bytes, sha256 {entry['sha256'][:12]}, {entry['trips']} trips,"
           f" {entry['stops']} stops, shapes {entry['shapes']['dir'] if entry['shapes'] else 'none'}")
@@ -584,7 +612,13 @@ def mav_from_part(part: Path, out: Path) -> dict:
 
 def mav_from_live(source: Source, out: Path) -> dict | None:
     """Every MÁV file the published mav-index.json names, checked against it,
-    and the manifest itself as published; None when there is none."""
+    and the manifest itself as published; None when there is none.
+
+    A file that cannot be carried raises (assemble refuses the site), unlike
+    a Volán or city index: a site without the MÁV files breaks every
+    install's daily MÁV check (mav_daily.py), and the MÁV build itself is
+    tried again on the next run (twice a day), so a refused deploy costs
+    less than one without them."""
     man, body, _state = source.manifest(mav_site.MANIFEST_NAME)
     if man is None:
         return None
@@ -605,9 +639,21 @@ def part_names(part: Path | None) -> list[str]:
     return [n for n in INDEXES if isinstance(indexes, dict) and n in indexes]
 
 
-def timetables_from_part(part: Path, out: Path) -> dict[str, dict]:
+def part_schema(part: Path | None) -> int | None:
+    """The schema a timetables part's indexes are of (part.json), None
+    without a part that names one."""
+    try:
+        data = json.loads((part / PART_NAME).read_text(encoding="utf-8")) if part is not None else None
+    except (OSError, ValueError):
+        return None
+    schema = data.get("schema") if isinstance(data, dict) else None
+    return schema if isinstance(schema, int) and not isinstance(schema, bool) else None
+
+
+def timetables_from_part(part: Path, out: Path, schema: int) -> dict[str, dict]:
     """This run's indexes from the timetables part, each checked against
-    the entry the part recorded for it; name -> entry."""
+    the entry the part recorded for it and its head against schema; name ->
+    entry."""
     part_file = part / PART_NAME
     if not part_file.is_file():
         return {}
@@ -626,35 +672,94 @@ def timetables_from_part(part: Path, out: Path) -> dict[str, dict]:
                 raise SiteError(f"the timetables part's {path_name} is not the file {PART_NAME} names")
             (out / path_name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, out / path_name)
-        check_head(out / entry["url"], entry, INDEX_SCHEMA)
+        check_head(out / entry["url"], entry, schema)
         new[name] = entry
     return new
 
 
-def timetables_from_live(source: Source, out: Path, skip: set[str]) -> dict[str, dict]:
-    """The published indexes not in skip, checked against the published
-    timetables.json, with their entries as published; name -> entry."""
-    if skip >= set(INDEXES):
-        return {}
+def live_timetables(source: Source) -> dict | None:
+    """The published timetables.json; None for a 404. Raises FetchError for
+    one that is there but does not read: assemble then refuses the site.
+    Which indexes such a manifest lists cannot be told, and the cause is
+    most likely the network: dropping both indexes on that would leave
+    every install without a published index (they keep their own, but each
+    next run rebuilds both), while a refusal costs only this run's deploy."""
     live, _body, _state = source.manifest(MANIFEST_NAME)
-    if live is None:
-        return {}
-    indexes = live.get("indexes")
-    if not isinstance(indexes, dict):
+    if live is not None and not isinstance(live.get("indexes"), dict):
         raise SiteError(f"the published {MANIFEST_NAME} lists no indexes")
+    return live
+
+
+def _remove_entry_files(out: Path, entry: object) -> None:
+    """What copy_entry may have left of a carry that failed."""
+    if not isinstance(entry, dict):
+        return
+    if entry.get("url") in INDEXES.values():
+        (out / entry["url"]).unlink(missing_ok=True)
+    shapes = entry.get("shapes")
+    if isinstance(shapes, dict) and _shapes_dir_ok(shapes.get("dir"), str(entry.get("url"))):
+        shutil.rmtree(out / shapes["dir"], ignore_errors=True)
+
+
+def timetables_from_live(source: Source, out: Path, skip: set[str], schema: int | None,
+                         settle: float = SETTLE_S) -> tuple[dict[str, dict], int | None]:
+    """The published indexes not in skip, checked against the published
+    timetables.json, with their entries as published; (name -> entry, the
+    schema they are of). schema None: whatever the published manifest names
+    (no index was built in this run), else an index of another schema is
+    left out with a warning.
+
+    A published index that cannot be carried (a file missing, or not the
+    size and sha256 the manifest names, also when fetched again settle
+    seconds later with the manifest read again) is left out with a warning,
+    not the whole site: the integration then finds it not published and
+    keeps its own, and the next run's due check finds it missing and builds
+    it again. The MÁV files are never left out that way (mav_from_live)."""
+    if skip >= set(INDEXES):
+        return {}, schema
+    live = live_timetables(source)
+    if live is None:
+        return {}, schema
+    if schema is None:
+        published = live.get("schema")
+        schema = published if isinstance(published, int) and not isinstance(published, bool) else None
     carried = {}
+    reread = None
     for name in INDEXES:
-        if name in skip or name not in indexes:
+        if name in skip or name not in live["indexes"]:
             continue
-        if live.get("schema") != INDEX_SCHEMA:
+        if schema is None or live.get("schema") != schema:
             print(f"::warning title={name} index dropped::The published {name} index is of schema"
-                  f" {live.get('schema')!r}, this site's of {INDEX_SCHEMA}, and none was built in this run;"
+                  f" {live.get('schema')!r}, this site's of {schema!r}, and none was built in this run;"
                   " the site goes without it until the next build.")
             continue
-        entry = check_entry(name, indexes[name])
-        copy_entry(source, entry, out, INDEX_SCHEMA)
+        entry = live["indexes"][name]
+        problem = None
+        for attempt in (1, 2):
+            try:
+                entry = check_entry(name, entry)
+                copy_entry(source, entry, out, schema)
+                problem = None
+                break
+            except SiteError as err:
+                problem = err
+                _remove_entry_files(out, entry)
+                if attempt == 2 or not isinstance(err, (MismatchError, FetchError)) or settle < 0:
+                    break
+                print(f"{err}; fetching the {name} index again in {settle:g} s")
+                time.sleep(settle)
+                if reread is None:
+                    reread = live_timetables(source) or {"indexes": {}}
+                entry = reread["indexes"].get(name)
+                if reread.get("schema") != schema or entry is None:
+                    problem = SiteError(f"the published {name} index changed while it was fetched")
+                    break
+        if problem is not None:
+            print(f"::warning title={name} index dropped::The published {name} index could not be carried over"
+                  f" ({str(problem)[:300]}); the site goes without it until the next build.")
+            continue
         carried[name] = entry
-    return carried
+    return carried, schema
 
 
 def city_sources() -> list[str]:
@@ -749,10 +854,20 @@ def assemble(args: argparse.Namespace, source: Source, now: datetime) -> tuple[d
         mav = mav_from_part(args.mav_part, out)
     else:
         mav = mav_from_live(source, out)
-    new = timetables_from_part(args.timetables_part, out) if args.timetables_part is not None else {}
-    carried = timetables_from_live(source, out, set(new))
+    # The schema of the indexes this run built (the stable release's
+    # builders), else the published one's; a site without any index names
+    # --schema, else this checkout's.
+    schema = None
+    if part_names(args.timetables_part):
+        schema = part_schema(args.timetables_part)
+        if schema is None:
+            raise SiteError(f"the timetables part's {PART_NAME} names no schema")
+    new = timetables_from_part(args.timetables_part, out, schema) if schema is not None else {}
+    carried, schema = timetables_from_live(source, out, set(new), schema, args.settle)
+    if schema is None:
+        schema = args.schema if args.schema is not None else INDEX_SCHEMA
     indexes = {name: (new.get(name) or carried[name]) for name in INDEXES if name in new or name in carried}
-    manifest = {"format": MANIFEST_FORMAT, "schema": INDEX_SCHEMA, "built_at": utc_text(now),
+    manifest = {"format": MANIFEST_FORMAT, "schema": schema, "built_at": utc_text(now),
                 "commit": args.commit, "indexes": indexes}
     (out / MANIFEST_NAME).write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     if (out / MANIFEST_NAME).stat().st_size > MAX_MANIFEST:
@@ -842,6 +957,8 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("due", help="whether the Volán and city indexes are due")
     live(p)
     when(p)
+    p.add_argument("--schema", type=int, required=True,
+                   help="the index schema of the code that builds them (its gtfs_compact.INDEX_SCHEMA)")
     p.add_argument("--force", default="false", choices=("true", "false", ""))
     p.add_argument("--github-output", type=Path)
 
@@ -857,6 +974,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--index", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--baseline", type=Path)
+    p.add_argument("--schema", type=int, required=True, help="the index schema of the code that built it")
 
     p = sub.add_parser("assemble", help="the whole Pages site")
     live(p)
@@ -866,6 +984,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--mav-part", type=Path)
     p.add_argument("--timetables-part", type=Path)
     p.add_argument("--max-bytes", type=int, default=mav_site.MAX_SITE_BYTES)
+    p.add_argument("--schema", type=int, help="timetables.json's schema when it lists no index (default:"
+                   " this checkout's)")
     p.add_argument("--settle", type=float, default=SETTLE_S,
                    help="seconds before fetching a mismatched file again (negative: never)")
     p.add_argument("--github-output", type=Path)
@@ -886,12 +1006,13 @@ def main(argv: list[str]) -> int:
             why = "HTTP 404" if state == "missing" else "ok"
         except FetchError as err:
             live_man, why = None, str(err)
-        is_due, reason = due(live_man, why, args.force == "true", now)
-        print(f"{'due' if is_due else 'not due'}: {reason}")
-        print(f"due={'true' if is_due else 'false'}")
+        names, reason = due(live_man, why, args.force == "true", now, args.schema)
+        print(f"{'due: ' + ', '.join(names) if names else 'not due'}: {reason}")
+        lines = f"due={'true' if names else 'false'}\nindexes={','.join(names)}\n"
+        print(lines, end="")
         if args.github_output is not None:
             with args.github_output.open("a", encoding="utf-8") as fh:
-                fh.write(f"due={'true' if is_due else 'false'}\n")
+                fh.write(lines)
         return 0
     if args.cmd == "baseline":
         return cmd_baseline(args, source)

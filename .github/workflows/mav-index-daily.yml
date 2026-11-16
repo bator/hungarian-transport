@@ -12,20 +12,30 @@ name: Daily timetables (GitHub Pages)
 # (mav-pfaedle-overlay.zip, shapes © OpenStreetMap contributors, ODbL).
 #
 # The Volán and city indexes are timetable data too, and releases are for
-# code: the timetables job rebuilds them here once a week (when the
-# published ones are 6 days 12 hours old, missing, of another schema, or
-# the dispatch input timetables asks for it) with the release's builders
-# and guards, and the integration installs them from the same site
-# (weekly_timetables.py, by timetables.json). A builder that fails drops
-# only its own index from this run; the published one stays.
+# code: the timetables job rebuilds each of them here once a week (when the
+# published one is 6 days 12 hours old or missing; both when the manifest is
+# missing or of another schema, or the dispatch input timetables asks for
+# it) with the release's builders and guards, and the integration installs
+# them from the same site (weekly_timetables.py, by timetables.json). The
+# builders are the latest stable release's (the highest vX.Y.Z that is no
+# prerelease, checked out at the workspace root), never main's: what
+# installs read must come from released code, as the weekly timetable
+# release before this built them with its stable tag's code. Only
+# pages_timetables.py comes from the workflow's commit (.pages-tools), and
+# the index schema it checks is the stable release's. Without a stable
+# release nothing is built. A builder that fails drops only its own index
+# from this run; the published one stays.
 #
 # Every Pages deploy replaces the whole site, so the site job assembles it
 # from this run's new parts and everything else carried over from the live
 # site, each file checked against its published manifest's size and sha256
 # (scripts/pages_timetables.py), and writes timetables.json, ATTRIBUTION.txt
-# and index.html for the whole site. A file a published manifest lists that
-# cannot be carried stops the deploy (it would vanish from the site); a
-# manifest that is not there (404) has nothing to carry.
+# and index.html for the whole site. A published Volán or city index that
+# cannot be carried is left out with a warning (installs keep theirs, the
+# next run rebuilds it). A MÁV file that cannot be carried, or a published
+# manifest that is there but does not read, stops the deploy: every
+# install's daily MÁV check reads those files. A manifest that is not there
+# (404) has nothing to carry.
 #
 # When: MÁV's feed of the day (feed_version YYYYMMDD) appeared between about
 # 03:17 and 10:03 UTC in November 2026, and on 3 November it was still
@@ -63,7 +73,9 @@ name: Daily timetables (GitHub Pages)
 # published index is 2 days old or older (scripts/mav_daily_verdict.py).
 # The build and timetables jobs run side by side; the run (and so the
 # concurrency below) lasts as long as the longer of them, plus the site and
-# deploy jobs, the timing above unchanged.
+# deploy jobs, the timing above unchanged. The site job runs unless the run
+# itself is cancelled: a job that failed or ran out of time only makes no
+# part, and the published files are carried over in its place.
 # GitHub Pages must be enabled with "Source: GitHub Actions"; until then the
 # deploy job fails with an error saying so, and nothing else changes.
 on:
@@ -222,79 +234,134 @@ jobs:
           pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
           python3 scripts/mav_daily_verdict.py --failure "$failure" --live-url "$pages_url/mav-index.json"
 
-  # The Volán and city indexes, when due. No MÁV secret; the city feeds'
-  # secrets only in the build step.
+  # The Volán and city indexes, when due, with the latest stable release's
+  # code. No MÁV secret; the city feeds' secrets only in the build step.
   timetables:
     name: Build the Volán and city indexes when due
     runs-on: ubuntu-latest
-    # The release builds both in a few minutes; the city feeds come from
-    # some 25 publishers, any of them slow, so each builder has a limit of
-    # its own below. A job that runs out of time counts as cancelled, and
-    # the site job (the day's MÁV index) does not run after a cancelled job.
-    timeout-minutes: 60
+    # Above the sum of its steps' limits (86 minutes): a job that runs out
+    # of time ends with nothing for the site job, which carries the
+    # published indexes over in their place.
+    timeout-minutes: 100
     outputs:
       built: ${{ steps.indexes.outputs.built }}
+      schema: ${{ steps.due.outputs.schema }}
     env:
       # The builders import the integration's package from the checkout.
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
+      # As release.yml's latest_stable: the highest vX.Y.Z that is not a
+      # prerelease, by version, not by date. A GitHub API failure fails the
+      # job (nothing is built; the site job still runs).
+      - name: Latest stable release
+        id: stable
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! tags=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | select((.draft or .prerelease) | not) | .tag_name'); then
+            echo "::error::Could not list the releases (GitHub API); no Volán or city index is built."
+            exit 1
+          fi
+          tag=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$tags" | sort -V | tail -n 1 || true)
+          if [ -z "$tag" ]; then
+            echo "::warning title=No Volán or city index built::The repository has no stable release (vX.Y.Z); the Volán and city indexes are built with a stable release's code only."
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      # The stable release's builders, guards and index schema at the root.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.stable.outputs.tag != ''
+        timeout-minutes: 5
         with:
+          ref: ${{ steps.stable.outputs.tag }}
+          persist-credentials: false
+
+      # pages_timetables.py of the workflow's commit (and what it imports),
+      # after the root checkout, which would clean it away.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.stable.outputs.tag != ''
+        timeout-minutes: 5
+        with:
+          ref: ${{ github.sha }}
+          path: .pages-tools
+          sparse-checkout: |
+            scripts
+            custom_components/hungarian_transport
           persist-credentials: false
 
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: steps.stable.outputs.tag != ''
+        timeout-minutes: 5
         with:
           python-version: "3.12"
 
-      # Due: the published timetables.json is missing or does not read,
-      # names another schema, lacks an index or has one built 6 days 12
-      # hours ago or longer, or the dispatch input asks for it.
+      # Due, per index: not listed in the published timetables.json, or built
+      # 6 days 12 hours ago or longer. Both: the manifest is missing or does
+      # not read, names another schema than the stable release's, or the
+      # dispatch input asks for it.
       - name: Timetables due
         id: due
+        if: steps.stable.outputs.tag != ''
+        timeout-minutes: 3
         env:
           FORCE: ${{ inputs.timetables == true }}
         run: |
           set -euo pipefail
+          schema=$(sed -n 's/^INDEX_SCHEMA = \([0-9][0-9]*\)$/\1/p' scripts/gtfs_compact.py)
+          if [[ ! "$schema" =~ ^[0-9]+$ ]]; then
+            echo "::error::The stable release's scripts/gtfs_compact.py names no INDEX_SCHEMA."
+            exit 1
+          fi
+          echo "schema=${schema}" >> "$GITHUB_OUTPUT"
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
-          python3 scripts/pages_timetables.py due --live-url "$pages_url" --force "$FORCE" \
-            --github-output "$GITHUB_OUTPUT"
+          python3 .pages-tools/scripts/pages_timetables.py due --schema "$schema" --live-url "$pages_url" \
+            --force "$FORCE" --github-output "$GITHUB_OUTPUT"
 
       # The builders compare against the index already in place: a city feed
       # that vanished, most of a feed's trips gone or a near-empty Volán index
       # refuses that index, as in the release. The published indexes are the
-      # baseline (checked against timetables.json), else the latest stable
+      # baseline (checked against timetables.json), else the stable
       # release's; kept with their shapes in .baseline, which the builders
       # do not touch.
       - name: Baseline indexes
         if: steps.due.outputs.due == 'true'
+        timeout-minutes: 10
+        env:
+          TAG: ${{ steps.stable.outputs.tag }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
-          python3 scripts/pages_timetables.py baseline --live-url "$pages_url" \
-            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/hungarian-transport-frontend.zip" \
+          python3 .pages-tools/scripts/pages_timetables.py baseline --live-url "$pages_url" \
+            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/hungarian-transport-frontend.zip" \
             --out .baseline
           for f in volan-index.json.gz city-index.json.gz; do
             if [ -f ".baseline/$f" ]; then cp ".baseline/$f" .; fi
           done
           ls -l .baseline
 
-      # Volán and city are independent: a builder that fails (its guard
-      # included) or runs out of its time (exit 124) leaves its index out of
-      # this run's part with a warning, and the site job carries the
-      # published one over. A city feed whose
-      # download fails keeps the baseline's part (build_city_index.py,
-      # CARRY_ENV; its shapes are next to it in .baseline).
+      # Only the due indexes. Volán and city are independent: a builder that
+      # fails (its guard included) or runs out of its time (exit 124) leaves
+      # its index out of this run's part with a warning, and the site job
+      # carries the published one over. A city feed whose download fails
+      # keeps the baseline's part (build_city_index.py, CARRY_ENV; its shapes
+      # are next to it in .baseline).
       - name: Build the Volán and city indexes
         id: indexes
         if: steps.due.outputs.due == 'true'
+        timeout-minutes: 45
         env:
           BAHART_GTFS_URL: ${{ secrets.BAHART_GTFS_URL }}
           MOBILITY_DATABASE_REFRESH_TOKEN: ${{ secrets.MOBILITY_DATABASE_REFRESH_TOKEN }}
           TRANSITLAND_API_KEY: ${{ secrets.TRANSITLAND_API_KEY }}
           ALLOW_MISSING_VAR: ${{ vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}
           VOLAN_GTFS_URL: ${{ vars.VOLAN_GTFS_URL || '' }}
+          DUE_INDEXES: ${{ steps.due.outputs.indexes }}
+          SCHEMA: ${{ steps.due.outputs.schema }}
         run: |
           set -euo pipefail
           # The value ends up in workflow commands below (::warning::). A
@@ -316,15 +383,17 @@ jobs:
           fi
           part="$RUNNER_TEMP/timetables-part"
           built=""
-          for name in volan city; do
+          IFS=, read -r -a names <<< "$DUE_INDEXES"
+          for name in "${names[@]}"; do
+            case "$name" in volan|city) ;; *) echo "::error::unexpected index name"; exit 1 ;; esac
             rc=0
-            timeout --kill-after=1m 25m python3 "scripts/build_${name}_index.py" || rc=$?
+            timeout --kill-after=1m 20m python3 "scripts/build_${name}_index.py" || rc=$?
             if [ "$rc" -ne 0 ]; then
               echo "::warning title=${name} index not built::build_${name}_index.py failed (exit ${rc}, see this step's log); GitHub Pages keeps the published ${name} index."
               continue
             fi
-            if python3 scripts/pages_timetables.py part --index "${name}-index.json.gz" --out "$part" \
-                --baseline ".baseline/${name}-index.json.gz"; then
+            if python3 .pages-tools/scripts/pages_timetables.py part --schema "$SCHEMA" \
+                --index "${name}-index.json.gz" --out "$part" --baseline ".baseline/${name}-index.json.gz"; then
               built="${built:+$built,}${name}"
             fi
           done
@@ -333,6 +402,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.indexes.outputs.built != ''
+        timeout-minutes: 10
         with:
           name: timetables-part
           path: ${{ runner.temp }}/timetables-part
@@ -341,13 +411,15 @@ jobs:
 
   # The whole site: this run's parts, and everything else carried over from
   # the live site (checked file by file against its published manifests).
-  # Also after a failed build or timetables job (the build job fails on a
-  # stale MÁV index; the other part may still be new), never after a
-  # cancelled one.
+  # Whatever the build and timetables jobs did (failed, timed out), unless
+  # the run itself is cancelled: a job without its part output gives none,
+  # and the published files are carried over in its place. The build job
+  # fails on a stale MÁV index, and the timetables one may run out of time,
+  # while the other part is new.
   site:
     name: Assemble the GitHub Pages site
     needs: [build, timetables]
-    if: ${{ !cancelled() && needs.build.result != 'cancelled' && needs.timetables.result != 'cancelled' }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -373,14 +445,18 @@ jobs:
           name: timetables-part
           path: ${{ runner.temp }}/timetables-part
 
-      # deploy=true when the MÁV part or a Volán or city index is new. A file
-      # a published manifest lists that cannot be carried fails the job
-      # (::error::) and nothing is deployed.
+      # deploy=true when the MÁV part or a Volán or city index is new. A
+      # published Volán or city index that cannot be carried is left out with
+      # a warning; a MÁV file that cannot be, or a published manifest that
+      # does not read, fails the job (::error::) and nothing is deployed.
+      # SCHEMA (the stable release's) names timetables.json's schema only
+      # for a site without any index.
       - name: Assemble the site
         id: assemble
         env:
           MAV_NEW: ${{ needs.build.outputs.deploy == 'true' }}
           TIMETABLES_NEW: ${{ needs.timetables.outputs.built != '' }}
+          SCHEMA: ${{ needs.timetables.outputs.schema }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
@@ -388,6 +464,7 @@ jobs:
           parts=()
           if [ "$MAV_NEW" = true ]; then parts+=(--mav-part "$RUNNER_TEMP/mav-part"); fi
           if [ "$TIMETABLES_NEW" = true ]; then parts+=(--timetables-part "$RUNNER_TEMP/timetables-part"); fi
+          if [[ "$SCHEMA" =~ ^[0-9]+$ ]]; then parts+=(--schema "$SCHEMA"); fi
           python3 scripts/pages_timetables.py assemble --out "$RUNNER_TEMP/site" --commit "$GITHUB_SHA" \
             --live-url "$pages_url" --github-output "$GITHUB_OUTPUT" "${parts[@]}"
           if [ -d "$RUNNER_TEMP/site" ]; then ls -l "$RUNNER_TEMP/site"; fi
