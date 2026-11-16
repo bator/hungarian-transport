@@ -549,9 +549,10 @@ class DailyIndexUpdater:
     says when the next one is due.
 
     The weekly Volán and city timetables (weekly_timetables.py) share the
-    schedule: timetables, when given, runs after the MÁV part of every first
-    and daily round (not after its retries, late looks or settling looks,
-    which are MÁV's own), with retries of its own. With mav False (the daily
+    schedule: timetables, when given, is started after the MÁV part of every
+    first and daily round (not after its retries, late looks or settling
+    looks, which are MÁV's own), in a task of its own, with retries of its
+    own. With mav False (the daily
     MÁV index turned off) the rounds run the timetables alone and make no
     MÁV request."""
 
@@ -684,8 +685,10 @@ class DailyIndexUpdater:
         if self._mav:
             await self._run_mav()
         if self._timetables is not None and kind in (_FIRST, _DAILY) and not self._stopped:
-            # After the MÁV part, failed or not: its own round, its own retries.
-            await self._timetables.async_run()
+            # After the MÁV part, failed or not: its own round in its own
+            # task, its own retries. This task ends here, so a MÁV retry,
+            # late or settling look is never dropped for a slow download.
+            self._timetables.start_round()
 
     async def _run_mav(self) -> None:
         try:

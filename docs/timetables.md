@@ -459,7 +459,9 @@ then the index, as a temp file renamed over the old one, so the card never
 reads an index whose shapes are missing. The previous shapes folder is
 marked retired and removed 26 hours later: an open dashboard keeps the old
 index until it reloads (at the latest at midnight) and reads its shapes
-until then. The timetable sensors update at once, and the install is
+until then. Retired folders are looked at in every check and at every start
+of the integration, also with *Weekly Volán and city timetables from
+GitHub* off. The timetable sensors update at once, and the install is
 recorded, so a later release that ships the same feeds or older ones does
 not announce them as new timetables.
 
@@ -491,6 +493,8 @@ new one replaces the old) when:
   *Also notify about daily MÁV index installs* on;
 - the Volán or city index from GitHub Pages was installed, naming which
   and their feeds, in the style of the one about shipped timetables below;
+  not when the round only installs again the index it installed last (a
+  HACS update put the release's older one back in the meantime);
 - after an update of the integration, the indexes it ships (Volán, city,
   MÁV) are of other feeds than the ones it saw before, naming which. The
   first run only records them; changes the integration makes itself (the

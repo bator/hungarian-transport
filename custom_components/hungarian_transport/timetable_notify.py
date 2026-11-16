@@ -6,7 +6,9 @@ What notifies, only with the option on:
   almost every day, so this one calls the service only with
   CONF_NOTIFY_DAILY on; otherwise it is the persistent notification alone;
 - the weekly Volán or city index from GitHub Pages was installed
-  (weekly_timetables.py): once per round that installed one or both. The
+  (weekly_timetables.py): once per round that installed one or both, and
+  not for an index that is the last install again (a HACS update put the
+  release's older index back, and the round reinstalled the same one). The
   installed feeds also go into the shipped indexes' record, so the next
   update of the integration, shipping those indexes or older ones, is no
   news;
@@ -318,10 +320,11 @@ class UpdateNotifier:
             if feeds != seen["feeds"]:
                 state["shipped"] = {**seen, "feeds": feeds}
                 await _save(hass, state)
-        if not self.enabled:
+        news = done.news
+        if not self.enabled or not news:
             return
         text = _text(hass)
-        names = ", ".join(text[name] for name in SHIPPED if name in installed)
+        names = ", ".join(text[name] for name in SHIPPED if name in news)
         await self.async_notify(
             NOTIFICATION_PAGES, text["pages_title"], text["pages_message"].format(names=names)
         )
