@@ -489,6 +489,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await notifier.async_restore()
     except Exception:  # noqa: BLE001 - never a reason not to set up
         _LOGGER.warning("Could not check the shipped timetables for changes", exc_info=True)
+    # Retired shapes folders go also with the weekly timetables off (a
+    # Pages install, or the local updater, left them for the open dashboards).
+    try:
+        await hass.async_add_executor_job(weekly_timetables.prune_all, WWW_PATH)
+    except Exception:  # noqa: BLE001 - never a reason not to set up
+        _LOGGER.warning("Could not prune the old shapes folders", exc_info=True)
     updater: mav_daily.DailyIndexUpdater | None = None
     daily = bool(entry.options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV))
     pages = bool(entry.options.get(CONF_PAGES_TIMETABLES, DEFAULT_PAGES_TIMETABLES))

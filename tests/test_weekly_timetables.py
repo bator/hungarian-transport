@@ -262,7 +262,7 @@ async def test_a_newer_volan_feed_installs_with_its_shapes(
     assert (card_assets / folder).stat().st_mode & 0o777 == 0o755
     # The previous folder stays for the dashboards still on the old index.
     assert (card_assets / old_folder / wt.SHAPES_RETIRED).is_file()
-    assert not [p for p in card_assets.iterdir() if ".tmp" in p.name or ".json.gz." in p.name]
+    assert not [p for p in card_assets.iterdir() if p.name.startswith(wt.STAGING) or ".json.gz." in p.name]
     assert f"Installed the weekly volan timetable of feed {VOLAN_NEW}" in caplog.text
     record = (await storage.async_load(hass))[storage.TIMETABLES_INSTALL]["volan"]
     assert record["feed"] == VOLAN_NEW and record["size"] == len(raw)
@@ -403,7 +403,7 @@ async def test_a_bad_shard_leaves_www_untouched(hass: HomeAssistant, aioclient_m
     assert (await _round(hass, card_assets))["volan"] == wt.SETTLING
     assert (await _round(hass, card_assets))["volan"] == wt.FAILED
     assert _snapshot(card_assets) == before
-    assert not [p for p in card_assets.iterdir() if ".tmp" in p.name]
+    assert not [p for p in card_assets.iterdir() if p.name.startswith(wt.STAGING)]
     assert [w for w in _warnings(caplog) if "sha256 does not match" in w]
 
 
@@ -467,19 +467,21 @@ def test_shapes_folders_are_retired_then_removed_after_the_grace(tmp_path) -> No
     temp.mkdir()
     stray = www / (timetables.VOLAN_INDEX + ".abcd1234")
     stray.write_bytes(b"x")
+    staging = www / f"{wt.STAGING}{_folder('volan', 'y')}-abcd1234"
+    staging.mkdir()
     now = 2_000_000_000.0
-    for path in (temp, stray):
+    for path in (temp, stray, staging):
         os.utime(path, (now - 10, now - 10))
 
     wt.prune(www, "volan", keep, now=now)
     assert (old / wt.SHAPES_RETIRED).is_file() and not (www / keep / wt.SHAPES_RETIRED).exists()
     # Another stem, and young temp files (another writer's), are left alone.
-    assert not (city / wt.SHAPES_RETIRED).exists() and temp.is_dir() and stray.is_file()
+    assert not (city / wt.SHAPES_RETIRED).exists() and temp.is_dir() and stray.is_file() and staging.is_dir()
 
     wt.prune(www, "volan", keep, now=now + wt.SHAPES_GRACE - 1)
     assert old.is_dir()
     wt.prune(www, "volan", keep, now=now + wt.SHAPES_GRACE)
-    assert not old.exists() and not temp.exists() and not stray.exists()
+    assert not old.exists() and not temp.exists() and not stray.exists() and not staging.exists()
     assert (www / keep).is_dir() and city.is_dir()
 
 
@@ -549,7 +551,7 @@ async def test_a_broken_folder_of_the_same_name_is_replaced(hass: HomeAssistant,
     site.serve(aioclient_mock)
     assert (await _round(hass, card_assets))["volan"] == wt.INSTALLED
     assert {p.name: p.read_bytes() for p in (card_assets / folder).iterdir()} == shards
-    assert not [p for p in card_assets.iterdir() if ".old" in p.name or ".tmp" in p.name]
+    assert not [p for p in card_assets.iterdir() if p.name.startswith(wt.STAGING)]
 
 
 async def test_shards_download_at_most_concurrency_at_a_time(hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch) -> None:
@@ -816,3 +818,140 @@ def test_the_option_and_the_new_states_are_translated(lang) -> None:
         assert set(attrs["pages_result"]["state"]) == results
         assert attrs["source"]["state"]["pages"]
         assert attrs["pages_checked_at"]["name"]
+
+
+# --- review fixes -------------------------------------------------------------
+
+
+def test_the_staging_folder_is_not_one_the_updater_prunes(tmp_path) -> None:
+    """scripts/gtfs_compact.prune_shapes removes at once every <stem>-shapes-*
+    folder with a dot in its suffix (its own temp folders): the staging
+    folder must not look like one."""
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    entry = wt.check_entry("volan", site.manifest["indexes"]["volan"])
+    tmp = wt._staging(tmp_path, entry["shapes"], "abcd1234")
+    assert tmp.is_dir() and tmp.name.startswith(wt.STAGING)
+    assert not list(tmp_path.glob("volan-shapes-*"))
+
+
+async def test_the_local_updater_pruning_during_a_download_does_not_break_it(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    import sys
+
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    import gtfs_compact
+
+    _, old_folder = _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    raw, folder, shards = site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock)
+    real = wt._download_shard
+    pruned = []
+
+    async def updater_runs(*args):
+        if not pruned:
+            # The local updater rebuilt the index meanwhile and pruned.
+            gtfs_compact.prune_shapes(card_assets / timetables.VOLAN_INDEX, old_folder)
+            pruned.append(True)
+        await real(*args)
+
+    monkeypatch.setattr(wt, "_download_shard", updater_runs)
+    assert (await _round(hass, card_assets))["volan"] == wt.INSTALLED
+    assert {p.name: p.read_bytes() for p in (card_assets / folder).iterdir()} == shards
+    assert "gtfs_compact" in sys.modules
+
+
+async def test_reinstalling_the_last_install_after_a_hacs_update_is_no_news(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, morning, monkeypatch
+) -> None:
+    """HACS puts the release's older index back; the next round installs the
+    site's again, records it, and says nothing: it is not new."""
+    monkeypatch.setattr(wt, "async_update", _real_update)
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    raw, _, _ = site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock)
+    created = []
+    real_create = persistent_notification.async_create
+
+    def create(hass_, message, title=None, notification_id=None):
+        created.append(notification_id)
+        real_create(hass_, message, title=title, notification_id=notification_id)
+
+    monkeypatch.setattr(persistent_notification, "async_create", create)
+    entry = await _setup(hass, {CONF_NOTIFY_UPDATES: True})
+    await _at(hass, freezer, "2026-11-16 03:20:01+00:00")
+    assert created.count(timetable_notify.NOTIFICATION_PAGES) == 1
+
+    # The HACS update: the release's index, and a restart (a reload).
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    first = (await storage.async_load(hass))[storage.TIMETABLES_INSTALL]["volan"]["installed_at"]
+    freezer.tick(60)
+    await _at(hass, freezer, "2026-11-16 03:45:00+00:00")
+    assert (card_assets / timetables.VOLAN_INDEX).read_bytes() == raw
+    record = (await storage.async_load(hass))[storage.TIMETABLES_INSTALL]["volan"]
+    assert record["installed_at"] != first
+    assert created.count(timetable_notify.NOTIFICATION_PAGES) == 1
+    state = await storage.async_load(hass)
+    assert state["shipped"]["feeds"]["volan"] == VOLAN_NEW
+
+
+async def test_a_slow_weekly_round_never_drops_a_mav_retry(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, morning, monkeypatch
+) -> None:
+    """The weekly round runs in its own task: the MÁV updater's retry 20
+    minutes later runs while the weekly download is still going."""
+    import asyncio
+
+    mav_rounds = []
+    release = asyncio.Event()
+    weekly_rounds = []
+
+    async def mav_round(hass, www):
+        mav_rounds.append(dt_util.utcnow())
+        return mav_daily.DailyRound(mav_daily.FAILED, error="boom")
+
+    async def slow_round(hass, www):
+        weekly_rounds.append(dt_util.utcnow())
+        await release.wait()
+        return wt.TimetablesRound({"volan": wt.IndexResult(wt.UP_TO_DATE, VOLAN_NEW)})
+
+    async def settle() -> None:
+        await hass.async_block_till_done()
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr(mav_daily, "async_update", mav_round)
+    monkeypatch.setattr(wt, "async_update", slow_round)
+    await _setup(hass)
+    for when in ("2026-11-16 03:20:01+00:00", "2026-11-16 03:40:02+00:00", "2026-11-16 04:00:03+00:00"):
+        moment = dt_util.parse_datetime(when)
+        freezer.move_to(moment)
+        async_fire_time_changed(hass, moment)
+        await settle()
+    assert len(mav_rounds) == 3 and len(weekly_rounds) == 1
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    rounds = (await storage.async_load(hass))[storage.PAGES_ROUND]
+    assert rounds["volan"]["result"] == wt.UP_TO_DATE
+
+
+async def test_retired_shapes_are_pruned_at_setup_also_with_the_option_off(
+    hass: HomeAssistant, card_assets
+) -> None:
+    _, keep = _install_local(card_assets, "volan", VOLAN_NEW)
+    gone = card_assets / _folder("volan", "gone")
+    gone.mkdir()
+    (gone / wt.SHAPES_RETIRED).touch()
+    os.utime(gone / wt.SHAPES_RETIRED, (1_000_000_000, 1_000_000_000))
+    fresh = card_assets / _folder("volan", "fresh")
+    fresh.mkdir()
+    await _setup(hass, {CONF_PAGES_TIMETABLES: False})
+    assert not gone.exists()
+    assert (fresh / wt.SHAPES_RETIRED).is_file()
+    assert (card_assets / keep).is_dir() and not (card_assets / keep / wt.SHAPES_RETIRED).exists()

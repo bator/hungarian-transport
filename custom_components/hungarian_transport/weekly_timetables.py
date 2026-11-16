@@ -31,14 +31,17 @@ when:
   size and sha256. Nothing in www/ changes before all of it checked out.
 
 The install is atomic for the card: the shapes folder (named by a content
-hash, immutable) is written as www/<dir>.tmp<hex> and renamed into place
-first (kept when it is already there and verifies), then the index replaces
+hash, immutable) is written as www/.ht-staging-<dir>-<hex> and renamed into
+place first (a name outside <stem>-shapes-*, which the local updater's
+prune_shapes removes at once when it has a dot: it would take the folder
+from under a download) (kept when it is already there and verifies), then the index replaces
 the old one by a temp file and a rename (mav_index.write_bytes). The card
 fetches the index with a day-stamped URL and keeps the one it loaded until
 midnight or a reload, asking for that index's shards all day: a shapes
 folder the served index no longer names is marked retired (.retired) and
 removed SHAPES_GRACE later, as scripts/gtfs_compact.prune_shapes does. A
-round prunes both stems every time, the index installed or not.
+round prunes both stems every time, the index installed or not, and so does
+every setup of the entry (prune_all), the option on or off.
 
 Downloads are bounded: the manifest MAX_MANIFEST, an index MAX_INDEX (read
 into memory to check it), a shard MAX_SHARD, written to disk as it comes,
@@ -114,9 +117,13 @@ RETRY_LIMIT = 3
 # left open asks for its index's shards until midnight.
 SHAPES_GRACE = 26 * 3600
 SHAPES_RETIRED = ".retired"
-# A temp folder or file ("." in the name) younger than this may be another
-# writer's (the local updater building right now); an older one is a leftover.
+# A temp folder or file younger than this may be another writer's (the
+# local updater building right now, a round downloading); an older one is
+# a leftover.
 TEMP_MIN_AGE = 3600
+# The folder a round downloads shards into, and moves a broken folder of the
+# same name out to, in www/: www/STAGING<dir>-<hex>.
+STAGING = ".ht-staging-"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 # The head every index of scripts/gtfs_compact.write_index starts with:
 # {"v":N,"sh":{"dir":...,"n":N},"feed":... ("sh" only with shapes).
@@ -144,6 +151,10 @@ class IndexResult:
     result: str
     feed: str | None = None
     error: str | None = None
+    # INSTALLED again what the last install already was (the same sha256,
+    # or feed and size): after a HACS update put the release's older index
+    # back. Installed and recorded, but no news.
+    again: bool = False
 
 
 @dataclass(frozen=True)
@@ -156,6 +167,11 @@ class TimetablesRound:
     @property
     def installed(self) -> list[str]:
         return [name for name, res in self.results.items() if res.result == INSTALLED]
+
+    @property
+    def news(self) -> list[str]:
+        """The installed indexes that are not the last install again."""
+        return [name for name, res in self.results.items() if res.result == INSTALLED and not res.again]
 
     @property
     def settling(self) -> bool:
@@ -385,14 +401,21 @@ def prune(www: Path, name: str, keep: str | None, now: float | None = None) -> N
     served index does not use (scripts/gtfs_compact.prune_shapes): the
     first prune that finds one unused marks it (SHAPES_RETIRED), one past
     SHAPES_GRACE removes it, and a folder in use again loses its mark.
-    Temp folders, and temp indexes of mav_index.write_bytes, go once they
-    are TEMP_MIN_AGE old. Nothing when www/ serves no such index: what it
-    would keep is not known."""
+    Staging folders of this module, the updater's temp folders and temp
+    indexes of mav_index.write_bytes go once they are TEMP_MIN_AGE old.
+    Nothing else when www/ serves no such index: what it would keep is not
+    known."""
+    now = time_mod.time() if now is None else now
+    prefix = INDEXES[name].removesuffix("-index.json.gz") + "-shapes-"
+    for staging in www.glob(STAGING + prefix + "*"):
+        try:
+            if staging.is_dir() and now - staging.stat().st_mtime >= TEMP_MIN_AGE:
+                shutil.rmtree(staging, ignore_errors=True)
+        except OSError:
+            pass
     out = www / INDEXES[name]
     if not out.is_file():
         return
-    now = time_mod.time() if now is None else now
-    prefix = INDEXES[name].removesuffix("-index.json.gz") + "-shapes-"
     for entry in www.glob(prefix + "*"):
         try:
             if not entry.is_dir():
@@ -445,7 +468,7 @@ def _staging(www: Path, shapes: Mapping[str, Any] | None, token: str) -> Path | 
     final = www / shapes["dir"]
     if final.is_dir() and _verify_folder(final, shapes["files"]):
         return None
-    tmp = www / f"{shapes['dir']}.tmp{token}"
+    tmp = www / f"{STAGING}{shapes['dir']}-{token}"
     tmp.mkdir(mode=0o755)
     os.chmod(tmp, 0o755)
     return tmp
@@ -461,7 +484,7 @@ def _commit(www: Path, name: str, raw: bytes, shapes: Mapping[str, Any] | None, 
                 shutil.rmtree(tmp, ignore_errors=True)
             else:
                 # A broken copy of the same name: swapped for the verified one.
-                old = www / f"{shapes['dir']}.old{token}"
+                old = www / f"{STAGING}{shapes['dir']}-{token}-old"
                 os.replace(final, old)
                 os.replace(tmp, final)
                 shutil.rmtree(old, ignore_errors=True)
@@ -473,6 +496,13 @@ def _commit(www: Path, name: str, raw: bytes, shapes: Mapping[str, Any] | None, 
 
 def _prune_served(www: Path, name: str) -> None:
     prune(www, name, shapes_folder(www / INDEXES[name]))
+
+
+def prune_all(www: Path) -> None:
+    """prune for both indexes, keeping the folders the served ones name: at
+    setup, so retired folders go also with the weekly timetables off."""
+    for name in INDEXES:
+        _prune_served(www, name)
 
 
 class _ShardWriter:
@@ -693,14 +723,24 @@ async def _update_index(
         if tmp is not None:
             await hass.async_add_executor_job(partial(shutil.rmtree, tmp, ignore_errors=True))
     _clear_failure(hass, name)
+    installs = (await storage.async_load(hass)).get(storage.TIMETABLES_INSTALL)
+    last = installs.get(name) if isinstance(installs, dict) else None
+    again = isinstance(last, dict) and (
+        last.get("sha256") == entry["sha256"] or (last.get("feed"), last.get("size")) == (feed, entry["size"])
+    )
     await storage.async_record_timetables_install(hass, name, feed, entry["sha256"], entry["size"])
-    _LOGGER.info("Installed the weekly %s timetable of feed %s from GitHub Pages", name, feed[:200])
-    return IndexResult(INSTALLED, feed)
+    _LOGGER.info(
+        "Installed the weekly %s timetable of feed %s from GitHub Pages%s",
+        name, feed[:200], " again" if again else "",
+    )
+    return IndexResult(INSTALLED, feed, again=again)
 
 
 class PagesTimetables:
-    """The rounds of the weekly timetables: run by mav_daily.DailyIndexUpdater
-    in its first and daily rounds (async_run), with retries of its own.
+    """The rounds of the weekly timetables: started by
+    mav_daily.DailyIndexUpdater after the MÁV part of its first and daily
+    rounds (start_round), in a task of their own, so a slow download never
+    holds up the MÁV updater's next round; with retries of their own.
 
     A round with a FAILED index is tried again RETRY_DELAY later, at most
     RETRY_LIMIT times since the last first or daily round; one that is
@@ -734,15 +774,23 @@ class PagesTimetables:
         if self._task is not None and not self._task.done():
             self._task.cancel()
 
-    async def async_run(self) -> None:
-        """A first or daily round: its own retries from now on."""
+    @callback
+    def start_round(self) -> None:
+        """A first or daily round, in the background: its own retries from
+        now on. One still running (a slow download) is this one."""
         if self._stopped:
             return
         if self._unsub is not None:
             self._unsub()
             self._unsub = None
         self._retries = 0
-        await self._round()
+        self._start()
+
+    @callback
+    def _start(self) -> None:
+        if self._running or (self._task is not None and not self._task.done()):
+            return
+        self._task = self._hass.async_create_background_task(self._round(), "hungarian_transport_pages_timetables")
 
     @callback
     def _schedule(self, delay: float) -> None:
@@ -755,9 +803,8 @@ class PagesTimetables:
     @callback
     def _fire(self, _now: Any) -> None:
         self._unsub = None
-        if self._stopped or self._running:
-            return
-        self._task = self._hass.async_create_background_task(self._round(), "hungarian_transport_pages_timetables")
+        if not self._stopped:
+            self._start()
 
     async def _round(self) -> None:
         if self._running:
