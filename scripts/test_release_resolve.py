@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The release workflow's "Resolve tag" step, run as written in release.yml
 against a stub gh (releases from a fixture, filtered by the step's own --jq
-through jq) and a stub git. No network."""
+through jq) and a git that refuses every call (the step needs none). No
+network."""
 from __future__ import annotations
 
 import json
@@ -14,7 +15,6 @@ import tempfile
 from pathlib import Path
 
 WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "release.yml"
-COMMIT = "5c5843a0000000000000000000000000000000aa"
 
 failed = 0
 
@@ -62,8 +62,7 @@ print("unexpected gh " + " ".join(args), file=sys.stderr)
 sys.exit(2)
 """
 
-GIT_STUB = f"""#!/bin/sh
-if [ "$1" = rev-parse ]; then echo {COMMIT}; exit 0; fi
+GIT_STUB = """#!/bin/sh
 echo "unexpected git $*" >&2
 exit 2
 """
@@ -78,7 +77,7 @@ def rel(tag: str, created: str, published: str | None = None) -> dict:
     }
 
 
-def run(releases: list[dict], event: str = "schedule", bump: str = "", ref_type: str = "branch",
+def run(releases: list[dict], event: str = "workflow_dispatch", bump: str = "rev", ref_type: str = "branch",
         ref_name: str = "main", fail: bool = False, bare: str = "", notes: str = "all") -> tuple[int, dict, str]:
     """Run the step; releases are in gh's own order (createdAt, newest first).
     notes: the docs/releases/<version>.md files in the checkout: "all" writes
@@ -123,62 +122,68 @@ if not shutil.which("jq"):
     print("FAIL jq is required to run the release resolve tests")
     sys.exit(1)
 
-# v1.9.15 is a weekly timetable release tagged on v1.9.14's commit: same
-# createdAt, and gh may list the older one first on the tie.
+# v1.9.15 is a (past) weekly timetable release tagged on v1.9.14's commit:
+# same createdAt, and gh may list the older one first on the tie.
 T = "2026-10-21T07:33:17Z"
 tie = [rel("v1.9.14", T, "2026-10-21T07:40:10Z"), rel("v1.9.15", T, "2026-10-26T02:41:00Z"),
        rel("v1.9.13", "2026-10-20T05:39:11Z")]
 code, o, log = run(tie)
-check("weekly: tie on createdAt picks the higher stable", code == 0 and o.get("tag") == "v1.9.16"
-      and o.get("ref") == "refs/tags/v1.9.15" and o.get("baseline") == "v1.9.15"
-      and o.get("target") == COMMIT and o.get("refresh") == "true" and o.get("beta") == "false", f"{code} {o} {log}")
-code, o, log = run(tie, event="workflow_dispatch", bump="rev")
 check("rev dispatch: tie on createdAt numbers from the higher stable",
-      code == 0 and o.get("tag") == "v1.9.17-rev.1" and o.get("baseline") == "v1.9.15", f"{code} {o} {log}")
+      code == 0 and o.get("tag") == "v1.9.17-rev.1" and o.get("baseline") == "v1.9.15"
+      and o.get("ref") == "f" * 40 and o.get("target") == "f" * 40, f"{code} {o} {log}")
+code, o, log = run(tie, bump="patch")
+check("patch dispatch: tie on createdAt picks the higher stable", code == 0 and o.get("tag") == "v1.9.16"
+      and o.get("baseline") == "v1.9.15", f"{code} {o} {log}")
 code, o, log = run(tie, event="push", ref_type="tag", ref_name="v1.9.16")
 check("tag push: baseline is the last published release", code == 0 and o.get("tag") == "v1.9.16"
       and o.get("baseline") == "v1.9.15", f"{code} {o} {log}")
+check("the resolve step emits only tag, create, ref, baseline and target (no timetable-release outputs)",
+      set(o) == {"tag", "create", "ref", "baseline", "target"}, repr(o))
 
 # An older version tagged (and published) after the newest one.
 late = [rel("v1.8.9", "2026-10-21T09:00:00Z"), rel("v1.9.14", T), rel("v1.9.13", "2026-10-20T05:39:11Z")]
 code, o, log = run(late)
-check("weekly: an older tag created later does not win", code == 0 and o.get("tag") == "v1.9.15"
-      and o.get("ref") == "refs/tags/v1.9.14", f"{code} {o} {log}")
-code, o, log = run(late, event="workflow_dispatch", bump="patch")
+check("rev dispatch: an older tag created later does not win, the next patch stays free",
+      code == 0 and o.get("tag") == "v1.9.16-rev.1", f"{code} {o} {log}")
+code, o, log = run(late, bump="patch")
 check("patch dispatch: an older tag created later does not win", code == 0 and o.get("tag") == "v1.9.15", f"{code} {o} {log}")
 
 # A -rev series open two patches above the stable; 1.10.0 vs 1.9.x sorts by version.
 revs = [rel("v1.9.16-rev.3", "2026-10-22T10:00:00Z"), rel("v1.9.16-rev.2", "2026-10-22T09:00:00Z"),
         rel("v1.9.14", T), rel("v1.9.9", "2026-10-19T07:05:11Z")]
 code, o, log = run(revs)
-check("weekly: next patch below the open -rev series, beta run follows", code == 0 and o.get("tag") == "v1.9.15"
-      and o.get("ref") == "refs/tags/v1.9.14" and o.get("beta") == "true", f"{code} {o} {log}")
-code, o, log = run(revs, event="workflow_dispatch", bump="rev")
 check("rev dispatch continues the open series", code == 0 and o.get("tag") == "v1.9.16-rev.4"
       and o.get("baseline") == "v1.9.16-rev.3", f"{code} {o} {log}")
-code, o, log = run(revs, event="workflow_dispatch", bump="patch")
+code, o, log = run(revs, bump="patch")
 check("patch dispatch takes the open series' number", code == 0 and o.get("tag") == "v1.9.16", f"{code} {o} {log}")
+code, o, log = run(revs, bump="minor")
+check("minor dispatch starts the next minor", code == 0 and o.get("tag") == "v1.10.0", f"{code} {o} {log}")
+code, o, log = run(revs, bump="major")
+check("major dispatch starts the next major", code == 0 and o.get("tag") == "v2.0.0", f"{code} {o} {log}")
+# A series on the next patch (left by a refresh that had no room below it)
+# is not continued: rev numbering is unchanged, two patches up.
+code, o, log = run([rel("v1.9.15-rev.2", "2026-10-22T10:00:00Z"), rel("v1.9.14", T)])
+check("rev dispatch: a series on the next patch stays behind, the new one starts two up", code == 0
+      and o.get("tag") == "v1.9.16-rev.1", f"{code} {o} {log}")
 
 # A stable dispatch without docs/releases/<version>.md on the commit stops in
-# the resolve job (a weekly may have taken the number the notes were written
-# for); a rev dispatch and the weekly need none.
-code, o, log = run(revs, event="workflow_dispatch", bump="patch", notes="")
+# the resolve job (an open -rev series may have moved the number the notes
+# were written for); a rev dispatch needs none.
+code, o, log = run(revs, bump="patch", notes="")
 check("patch dispatch without release notes for the resolved version fails early",
       code != 0 and "No release notes" in log and "1.9.16.md" in log and not o.get("tag"), f"{code} {o} {log}")
-code, o, log = run(revs, event="workflow_dispatch", bump="rev", notes="")
+code, o, log = run(revs, bump="rev", notes="")
 check("rev dispatch needs no release notes", code == 0 and o.get("tag") == "v1.9.16-rev.4", f"{code} {o} {log}")
-code, o, log = run(revs, notes="")
-check("the weekly needs no release notes", code == 0 and o.get("tag") == "v1.9.15", f"{code} {o} {log}")
 minor = [rel("v1.9.20", "2026-10-22T10:00:00Z"), rel("v1.10.0", T)]
-code, o, log = run(minor)
+code, o, log = run(minor, bump="patch")
 check("1.10.0 ranks above 1.9.20", code == 0 and o.get("tag") == "v1.10.1", f"{code} {o} {log}")
 
 # Fail closed.
 code, o, log = run(tie, fail=True)
 check("GitHub API failure stops the run", code != 0 and "tag" not in o and "Could not list" in log, f"{code} {o} {log}")
-code, o, log = run(tie, bare="v1.9.16")
-check("a bare tag on the next version stops the weekly run", code != 0 and "tag" not in o
-      and "v1.9.16 already exists" in log, f"{code} {o} {log}")
+code, o, log = run(tie, bare="v1.9.17-rev.1")
+check("a bare tag on the resolved version stops the run", code != 0 and "tag" not in o
+      and "v1.9.17-rev.1 already exists" in log, f"{code} {o} {log}")
 for bad in ("v1.10", "v1.9.16-beta.1", "v1.9.16-rev.", "1.9.16", "v1.9.16\nv2.0.0"):
     code, o, log = run(tie, event="push", ref_type="tag", ref_name=bad)
     check(f"a pushed tag {bad!r} that is not vX.Y.Z(-rev.N) stops the run before any output",
@@ -186,7 +191,7 @@ for bad in ("v1.10", "v1.9.16-beta.1", "v1.9.16-rev.", "1.9.16", "v1.9.16\nv2.0.
 code, o, log = run(tie, event="push", ref_type="tag", ref_name="v1.9.17-rev.2")
 check("a pushed -rev.N tag passes the tag check", code == 0 and o.get("tag") == "v1.9.17-rev.2", f"{code} {o} {log}")
 code, o, log = run([rel("v1.9.16-rev.1", T)])
-check("no stable release: nothing to refresh", code == 0 and o.get("tag") == "" and o.get("create") == "false",
+check("no stable release: nothing to release", code == 0 and o.get("tag") == "" and o.get("create") == "false",
       f"{code} {o} {log}")
 
 if failed:
