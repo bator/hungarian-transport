@@ -5,6 +5,11 @@ What notifies, only with the option on:
 - the daily MÁV route index was installed (mav_daily.py). MÁV publishes
   almost every day, so this one calls the service only with
   CONF_NOTIFY_DAILY on; otherwise it is the persistent notification alone;
+- the weekly Volán or city index from GitHub Pages was installed
+  (weekly_timetables.py): once per round that installed one or both. The
+  installed feeds also go into the shipped indexes' record, so the next
+  update of the integration, shipping those indexes or older ones, is no
+  news;
 - after an update of the integration, the indexes it ships (Volán, city,
   MÁV) are of other feeds than the ones it last saw. The feeds seen are
   recorded at every setup of the entry, notifications on or off, so the
@@ -49,7 +54,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.start import async_at_started
 from homeassistant.util import dt as dt_util
 
-from . import mav, mav_daily, served_index, storage, timetables
+from . import mav, mav_daily, served_index, storage, timetables, weekly_timetables
 from .const import (
     CONF_DAILY_MAV,
     CONF_DAILY_TIME,
@@ -70,6 +75,7 @@ STORAGE_VERSION = storage.STORAGE_VERSION
 NOTIFICATION_MAV_DAILY = f"{DOMAIN}_mav_daily"
 NOTIFICATION_SHIPPED = f"{DOMAIN}_shipped_indexes"
 NOTIFICATION_DAILY_FAILED = f"{DOMAIN}_mav_daily_failed"
+NOTIFICATION_PAGES = f"{DOMAIN}_pages_timetables"
 FAILED_DAYS = 3
 # A manifest built longer ago than this: the daily workflow has stopped.
 STALE_PAGES = timedelta(days=3)
@@ -85,6 +91,8 @@ TEXT = {
                              "{trains} trains, {lines} lines.",
         "shipped_title": "Hungarian transport: timetables updated",
         "shipped_message": "This version of Hungarian transport ships new timetables: {names}.",
+        "pages_title": "Hungarian transport: timetables updated",
+        "pages_message": "New weekly timetables from GitHub Pages are installed: {names}.",
         "failed_title": "Hungarian transport: daily MÁV index not updating",
         "failed_message": "The daily MÁV route index could not be updated on {days} days in a row "
                           "(last error: {error}). The current index stays in use.",
@@ -100,6 +108,8 @@ TEXT = {
                              "{trains} vonat, {lines} vonal.",
         "shipped_title": "Hungarian transport: frissült menetrendek",
         "shipped_message": "A Hungarian transport új verziója friss menetrendeket hozott: {names}.",
+        "pages_title": "Hungarian transport: frissült menetrendek",
+        "pages_message": "Friss heti menetrendek települtek a GitHub Pagesről: {names}.",
         "failed_title": "Hungarian transport: a napi MÁV index nem frissül",
         "failed_message": "A napi MÁV útvonal-index {days} egymást követő napon nem frissült "
                           "(utolsó hiba: {error}). A jelenlegi index marad használatban.",
@@ -292,6 +302,29 @@ class UpdateNotifier:
                 NOTIFICATION_SHIPPED, text["shipped_title"], text["shipped_message"].format(names=names)
             )
         return changed
+
+    async def async_pages_result(self, done: weekly_timetables.TimetablesRound) -> None:
+        """After a round of the weekly timetables (weekly_timetables.py): the
+        installed feeds into the shipped record, and one notification."""
+        installed = {name: done.results[name].feed for name in done.installed}
+        if not installed:
+            return
+        hass = self._hass
+        state = await _load(hass)
+        seen = state.get("shipped")
+        if isinstance(seen, Mapping) and isinstance(seen.get("feeds"), Mapping):
+            # Seen now: an update shipping these feeds, or older ones, is no news.
+            feeds = {**seen["feeds"], **installed}
+            if feeds != seen["feeds"]:
+                state["shipped"] = {**seen, "feeds": feeds}
+                await _save(hass, state)
+        if not self.enabled:
+            return
+        text = _text(hass)
+        names = ", ".join(text[name] for name in SHIPPED if name in installed)
+        await self.async_notify(
+            NOTIFICATION_PAGES, text["pages_title"], text["pages_message"].format(names=names)
+        )
 
     async def async_restore(self) -> None:
         """Setup: the failure notification of a streak still open again

@@ -57,3 +57,18 @@ def no_daily_mav_index(monkeypatch):
     monkeypatch.setattr(
         "custom_components.hungarian_transport.mav_daily.async_update", _no_update
     )
+
+
+@pytest.fixture(autouse=True)
+def no_pages_timetables(monkeypatch):
+    """No test reaches GitHub Pages for the weekly Volán and city indexes
+    unless it asks (tests/test_weekly_timetables.py overrides this fixture)."""
+
+    from custom_components.hungarian_transport import weekly_timetables
+
+    async def _no_update(hass, www):
+        return weekly_timetables.TimetablesRound()
+
+    monkeypatch.setattr(
+        "custom_components.hungarian_transport.weekly_timetables.async_update", _no_update
+    )

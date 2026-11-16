@@ -5,10 +5,14 @@
   or the local updater script), install time, trains, lines, fitted share
   and, when known, the audit's ok ratio.
 - Volán timetable: the Volán index's feed date; feed, trips, stops, build
-  time and source (a release, or the local updater script when its durable
-  copy is this index).
-- City timetables: the city index's build time; operators, trips, and the
-  per-operator feeds when there are only a few.
+  time and source (the weekly timetables from GitHub Pages when they
+  installed this index, else the local updater script when its durable
+  copy is this index, else a release), and the last weekly round's time
+  and result for it (pages_checked_at, pages_result: "disabled" when the
+  weekly timetables are turned off).
+- City timetables: the city index's build time; operators, trips, the
+  per-operator feeds when there are only a few, and source, pages_checked_at
+  and pages_result as the Volán one.
 - Daily MÁV check: when the daily MÁV index last ran (mav_daily.py); its
   result, the manifest's feed and build time, the next round and the
   failure streak in days. Result "disabled" when it is turned off.
@@ -90,6 +94,28 @@ def _mav_attrs(status: TimetableStatus) -> dict[str, Any]:
     )
 
 
+def _timetable_source(status: TimetableStatus, key: str) -> str:
+    """What installed the served Volán or city index: the weekly timetables
+    from GitHub Pages when their record is this file (feed and size), the
+    local updater script when its durable copy is, else a release."""
+    info = status.indexes.get(key) or {}
+    installs = status.record.get(storage.TIMETABLES_INSTALL)
+    record = installs.get(key) if isinstance(installs, dict) else None
+    if isinstance(record, dict) and record.get("feed") == info.get("feed") and record.get("size") == info.get("size"):
+        return storage.SOURCE_PAGES
+    return "local_updater" if info.get("durable") else storage.SOURCE_RELEASE
+
+
+def _pages_attrs(status: TimetableStatus, key: str) -> dict[str, Any]:
+    """The last weekly round's time and result for the index key."""
+    if not status.pages_enabled:
+        return {"pages_result": DISABLED}
+    rounds = status.record.get(storage.PAGES_ROUND)
+    last = rounds.get(key) if isinstance(rounds, dict) else None
+    last = last if isinstance(last, dict) else {}
+    return {"pages_checked_at": last.get("at"), "pages_result": last.get("result")}
+
+
 def _volan_value(status: TimetableStatus) -> date | None:
     return feed_date((status.indexes.get("volan") or {}).get("feed"))
 
@@ -102,7 +128,8 @@ def _volan_attrs(status: TimetableStatus) -> dict[str, Any]:
             "trips": info.get("trips"),
             "stops": info.get("stops"),
             "updated_at": _iso(info.get("updated_at")),
-            "source": "local_updater" if info.get("durable") else storage.SOURCE_RELEASE,
+            "source": _timetable_source(status, "volan"),
+            **_pages_attrs(status, "volan"),
         }
     )
 
@@ -119,6 +146,8 @@ def _city_attrs(status: TimetableStatus) -> dict[str, Any]:
             "operators": info.get("operators") if info.get("operators") is not None else len(feeds),
             "trips": info.get("trips"),
             "feeds": feeds if 0 < len(feeds) <= MAX_LISTED_FEEDS else None,
+            "source": _timetable_source(status, "city") if info else None,
+            **_pages_attrs(status, "city"),
         }
     )
 

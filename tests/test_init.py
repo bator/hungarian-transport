@@ -189,6 +189,7 @@ async def test_removal_dismisses_the_integrations_notifications(hass, monkeypatc
         notify.NOTIFICATION_SHIPPED,
         notify.NOTIFICATION_MAV_DAILY,
         notify.NOTIFICATION_DAILY_FAILED,
+        notify.NOTIFICATION_PAGES,
         mav.NOTIFICATION_ID,
     ])
 
