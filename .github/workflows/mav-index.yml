@@ -20,6 +20,7 @@ on:
       # The daily workflow's Pages site from the same build (not published).
       - scripts/mav_pages_site.py
       - scripts/mav_shrink_guard.py
+      - scripts/pages_timetables.py
 
 permissions:
   contents: read
@@ -82,9 +83,10 @@ jobs:
           path: .osm
           key: osm-hungary-${{ steps.week.outputs.week }}
 
-      # The weekly release publishes only when the index changed. Built again
+      # The daily Pages workflow deploys the MÁV index only when its content
+      # digest changed (or the published one is 12 hours old). Built again
       # from a second pfaedle run under another hash seed, it must give the
-      # same content digest, or every week would count as a change. The same
+      # same content digest, or every run would count as a change. The same
       # zip as the first build: no second login, and a feed MÁV replaced in
       # between cannot pass for a build that is not reproducible.
       - name: Same feed, same index
@@ -111,21 +113,27 @@ jobs:
           PY
           echo "content digest: ${first} / ${again}" | tee -a "$GITHUB_STEP_SUMMARY"
           if [ -z "$first" ] || [ "$first" != "$again" ]; then
-            echo "::error title=MÁV index not reproducible::Two builds of the same feed differ (${first} vs ${again}); the weekly release would publish every week."
+            echo "::error title=MÁV index not reproducible::Two builds of the same feed differ (${first} vs ${again}); the daily Pages workflow would deploy on every run."
             exit 1
           fi
 
       # What mav-index-daily.yml would publish on GitHub Pages from this build
-      # (scripts/mav_pages_site.py), written to the runner only: the files and
-      # their sizes in the summary, and whether the second pfaedle run gave
-      # the same overlay bytes (if not, the daily site deploys every day).
+      # (scripts/mav_pages_site.py, then the site job's
+      # scripts/pages_timetables.py assemble against an empty stand-in for
+      # the live site: no Volán or city index to carry), written to the
+      # runner only: the files and their sizes in the summary, and whether
+      # the second pfaedle run gave the same overlay bytes (if not, the
+      # daily site deploys every day).
       - name: Pages site (not published)
         if: ${{ !cancelled() && steps.mav.outcome == 'success' }}
         run: |
           set -euo pipefail
           python3 scripts/mav_pages_site.py --index mav-index.json.gz --stats mav-build.json \
-            --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/site" \
+            --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/mav-part" \
             --gtfs-zip "$RUNNER_TEMP/mav/gtfs/mav-gtfs.zip" --pfaedle-dir "$RUNNER_TEMP/mav/gtfs-out"
+          mkdir -p "$RUNNER_TEMP/no-live"
+          python3 scripts/pages_timetables.py assemble --out "$RUNNER_TEMP/site" --commit "$GITHUB_SHA" \
+            --live-dir "$RUNNER_TEMP/no-live" --mav-part "$RUNNER_TEMP/mav-part"
           {
             echo
             echo "### Pages site (not published)"

@@ -13,7 +13,9 @@ it is the schema this checkout's card reads, and writes the site folder:
                            shapes.txt and stop_times.txt of the same build,
                            zipped deterministically (the same three files
                            give the same bytes)
-  ATTRIBUTION.txt, index.html  what the files are, their licences
+  ATTRIBUTION.txt, index.html  what the files are, their licences (the
+                           daily workflow's site job writes the whole
+                           site's over them: pages_timetables.py)
 
 The GTFS files go into the manifest's "gtfs" object (name, size, sha256 per
 file, and the official feed's feed_version, which must be the index's
@@ -394,13 +396,17 @@ def same_content(new: dict, live: dict | None) -> bool:
         and _gtfs_identity(live.get("gtfs")) == _gtfs_identity(new.get("gtfs"))
 
 
-def attribution(man: dict) -> str:
+ATTRIBUTION_TITLE = "Hungarian transport: daily MÁV timetable files"
+REPO_URL = "https://github.com/bator/hungarian-transport"
+
+
+def attribution_lines(man: dict) -> list[str]:
+    """ATTRIBUTION.txt's MÁV part, below its title: the files of manifest
+    man and their sources and licences. pages_timetables.py puts it into
+    the site's combined ATTRIBUTION.txt as it is."""
     gtfs = man.get("gtfs")
     lines = [
-        "Hungarian transport: daily MÁV timetable files",
-        "https://github.com/bator/hungarian-transport",
-        "",
-        f"Feed: {man['feed']}, built {man['built_at']} from commit {man['commit']}.",
+        f"Feed: {man.get('feed')}, built {man.get('built_at')} from commit {man.get('commit')}.",
         "",
     ]
     if gtfs:
@@ -425,32 +431,53 @@ def attribution(man: dict) -> str:
         "  derived from OpenStreetMap data: © OpenStreetMap contributors (ODbL 1.0).",
         "",
     ]
-    return "\n".join(lines)
+    return lines
 
 
-def index_html(man: dict) -> str:
-    def row(name: str, what: str) -> str:
-        return f'<li><a href="{name}">{name}</a> — {html.escape(what)}</li>'
+def attribution(man: dict) -> str:
+    return "\n".join([ATTRIBUTION_TITLE, REPO_URL, "", *attribution_lines(man)])
 
-    gtfs = man.get("gtfs")
-    items = [row(MANIFEST_NAME, "manifest: feed, sizes, sha256 digests"),
-             row(INDEX_NAME, f"the integration's train route index ({man['size']} bytes)")]
-    if gtfs:
-        items += [row(GTFS_NAME, f"MÁV's official GTFS as downloaded, CC0 ({gtfs['official']['size']} bytes)"),
-                  row(OVERLAY_NAME, "pfaedle's " + ", ".join(gtfs["overlay"]["files"])
-                      + f" of the same feed ({gtfs['overlay']['size']} bytes)")]
-    items.append(row(ATTRIBUTION_NAME, "sources and licences"))
+
+def html_row(name: str, what: str) -> str:
+    """A list item of index.html: the file's link and what it is."""
+    return f'<li><a href="{name}">{name}</a> — {html.escape(what)}</li>'
+
+
+def html_page(title: str, body: str) -> str:
+    """index.html around body (already escaped HTML)."""
     return (
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-        "<title>Daily MÁV timetable</title>\n</head>\n<body>\n"
-        "<h1>Daily MÁV timetable</h1>\n"
-        f"<p>Feed <code>{html.escape(man['feed'])}</code>, built {html.escape(man['built_at'])} by "
-        "<a href=\"https://github.com/bator/hungarian-transport\">hungarian-transport</a>.</p>\n"
-        "<ul>\n" + "\n".join(items) + "\n</ul>\n"
-        "<p>MÁV GTFS: CC0 1.0. Shapes and routes: © <a href=\"https://www.openstreetmap.org/copyright\">"
-        "OpenStreetMap contributors</a> (ODbL 1.0).</p>\n</body>\n</html>\n"
+        f"<title>{html.escape(title)}</title>\n</head>\n<body>\n{body}</body>\n</html>\n"
     )
+
+
+def html_items(man: dict) -> list[str]:
+    """index.html's list items for the MÁV files of manifest man."""
+    gtfs = man.get("gtfs")
+    items = [html_row(MANIFEST_NAME, "manifest: feed, sizes, sha256 digests"),
+             html_row(INDEX_NAME, f"the integration's train route index ({man.get('size')} bytes)")]
+    if gtfs:
+        items += [html_row(GTFS_NAME, f"MÁV's official GTFS as downloaded, CC0 ({gtfs['official']['size']} bytes)"),
+                  html_row(OVERLAY_NAME, "pfaedle's " + ", ".join(gtfs["overlay"]["files"])
+                           + f" of the same feed ({gtfs['overlay']['size']} bytes)")]
+    return items
+
+
+def html_intro(man: dict) -> str:
+    """index.html's line on the MÁV feed of manifest man."""
+    return (f"<p>Feed <code>{html.escape(str(man.get('feed')))}</code>, built {html.escape(str(man.get('built_at')))} by "
+            f"<a href=\"{REPO_URL}\">hungarian-transport</a>.</p>\n")
+
+
+HTML_LICENCES = ("<p>MÁV GTFS: CC0 1.0. Shapes and routes: © <a href=\"https://www.openstreetmap.org/copyright\">"
+                 "OpenStreetMap contributors</a> (ODbL 1.0).</p>\n")
+
+
+def index_html(man: dict) -> str:
+    items = [*html_items(man), html_row(ATTRIBUTION_NAME, "sources and licences")]
+    return html_page("Daily MÁV timetable", "<h1>Daily MÁV timetable</h1>\n" + html_intro(man)
+                     + "<ul>\n" + "\n".join(items) + "\n</ul>\n" + HTML_LICENCES)
 
 
 def site_files(index: Path, man: dict, gtfs_zip: Path | None = None,

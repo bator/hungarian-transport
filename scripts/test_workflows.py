@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """What the workflows must cover, read from their text: every scripts test
 runs in CI and in the release, the MÁV index check runs for a change to any
-file its build imports and keeps its artifacts when it fails, and the shell
+file its build imports, assembles the daily Pages site offline and keeps its
+artifacts when it fails, and the shell
 and workflow linters run pinned and checksummed. No network."""
 from __future__ import annotations
 
@@ -76,6 +77,12 @@ needed |= {"scripts/release_mav_index.sh", "custom_components/hungarian_transpor
            "custom_components/hungarian_transport/gtfs_feed.py", ".github/workflows/mav-index.yml"}
 check("mav-index.yml runs for a change to every file the MÁV build imports",
       needed <= listed, repr(sorted(needed - listed)))
+
+pages_step = step(mav, "- name: Pages site (not published)")
+check("mav-index.yml assembles the daily workflow's whole site offline (no live site, nothing published)",
+      "scripts/pages_timetables.py" in listed and "python3 scripts/pages_timetables.py assemble" in pages_step
+      and "--live-dir" in pages_step and "--live-url" not in pages_step and '--mav-part "$RUNNER_TEMP/mav-part"' in pages_step,
+      pages_step)
 
 upload = step(mav, "actions/upload-artifact@")
 check("the MÁV index artifact is kept when a step failed, the second build included",
