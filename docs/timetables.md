@@ -709,8 +709,11 @@ cards use and when they changed:
 
 `pages_checked_at` is when the integration last read `timetables.json`
 (UTC), and `pages_result` what that check did for this index: `installed`,
-`up_to_date` (the site's feed is not newer than the one in use, a local
-build included), `failed` (the manifest or the download did not check out;
+`up_to_date` (the site serves the feed in use), `superseded` (the index in
+use has a newer feed than the site's), `local_wins` (the local updater's
+copy in `/config/hungarian-transport` has feeds the site's do not beat; the
+integration leaves it, so the two never take turns), `not_published` (the
+manifest has no entry for this index), `failed` (the manifest or the download did not check out;
 the index stays as it was), `unsupported` (a manifest format or index
 schema this version does not read), or `disabled` with the *Weekly Volán
 and city timetables from GitHub* option off.
