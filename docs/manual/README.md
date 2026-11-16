@@ -41,8 +41,8 @@ Where the data comes from:
 | --- | --- | --- |
 | Budapest buses, trams, trolleybuses, metro, HÉV, suburban trains | BKK FUTÁR | Yes, real-time positions and delays |
 | MÁV trains | MÁV ELVIRA: departures, platforms and seat reservations (BKK FUTÁR only without the integration) | Delays and platforms |
-| Volán coaches | National Volán GTFS (opendata.utas.hu, KTI as fallback), shipped with the card | Delays and positions from the GTFS-Realtime feed, else the timetable |
-| City networks (Szeged, Pécs, Miskolc, …) | Each operator's GTFS, shipped with the card | Timetable (Szombathely real-time with the companion services) |
+| Volán coaches | National Volán GTFS (opendata.utas.hu, KTI as fallback), shipped with the card and updated weekly from GitHub | Delays and positions from the GTFS-Realtime feed, else the timetable |
+| City networks (Szeged, Pécs, Miskolc, …) | Each operator's GTFS, shipped with the card and updated weekly from GitHub | Timetable (Szombathely real-time with the companion services) |
 | Stop search and transfers | [Transitous](https://transitous.org/), BKK FUTÁR as fallback | — |
 
 Volán coaches, the Volánbusz town networks, Veszprém, Miskolc, Paks,
@@ -129,9 +129,17 @@ key** checkbox.
 - **Daily MÁV route index from GitHub** (on by default): once a day the
   integration checks `bator.github.io` for the train route index built that
   day from MÁV's newest timetable, and uses it when it is newer than the
-  one in use. Untick it to stay on the weekly release's index; Home
+  one in use. Untick it to stay on the release's index; Home
   Assistant then makes no such request. See
-  [The daily index](../timetables.md#the-daily-index-from-github-pages).
+  [The daily MÁV index](../timetables.md#the-daily-máv-index).
+- **Weekly Volán and city timetables from GitHub** (on by default): in the
+  same daily check, right after the MÁV index, the integration reads which
+  Volán and city timetables `bator.github.io` has (rebuilt there every
+  week) and installs those that are newer than the ones in use, so new
+  timetables arrive without an update of the integration. A timetable you
+  built yourself from newer feeds stays. Untick it to stay on the
+  release's timetables; Home Assistant then makes no such request. See
+  [The Volán and city indexes](../timetables.md#the-volán-and-city-indexes).
 - **Daily check time** (06:00 by default): the local time of that check
   (up to 5 minutes later); it also runs once 10–20 minutes after Home
   Assistant starts and after you save these options. A check that fails
@@ -140,8 +148,9 @@ key** checkbox.
   around midday, so while the one there is still of an earlier day the
   check looks again every 2–3 hours, up to 4 times, until midnight.
 - **Notify about timetable updates** (off by default): a persistent
-  notification when a new daily MÁV index is installed, when an update of
-  the integration ships new Volán, city or MÁV timetables, and once when the
+  notification when a new daily MÁV index is installed, when new Volán or
+  city timetables are installed from GitHub, when an update of the
+  integration ships new Volán, city or MÁV timetables, and once when the
   daily index fails on 3 consecutive days (an index on GitHub not rebuilt
   for 3 days counts as failing).
 - **Also call this service** (optional): a service such as `script.ertesit`
@@ -558,14 +567,17 @@ The card body stays with your Home Assistant theme, light or dark.
 
 ## 9. Keeping timetables current
 
-The Volán and city timetables ship with each release. A weekly GitHub job
-rebuilds them, and when a timetable changed it publishes a new patch
-release with the same code and the fresh timetables. HACS then offers it as
-an ordinary update; a release, once out, never changes.
+Each release ships the Volán and city timetables current when it was cut;
+a release, once out, never changes, and a new one comes only with new code.
+Between releases the timetables are rebuilt on GitHub every week, and the
+integration installs them when they are newer than the ones in use (the
+**Weekly Volán and city timetables from GitHub** option,
+[3.1](#31-settings)). There is nothing to update in HACS for new
+timetables.
 
-Train routes follow MÁV's timetable daily without any of this: the
-integration fetches the index built every morning (the **Daily MÁV route
-index** option, [3.1](#31-settings)).
+Train routes follow MÁV's timetable daily the same way: the integration
+fetches the index built every morning (the **Daily MÁV route index**
+option, [3.1](#31-settings)).
 
 For daily Volán and city updates on your own Home Assistant, follow
 [Keeping the GTFS indexes current](../timetables.md#keeping-the-gtfs-indexes-current)
@@ -587,9 +599,11 @@ say which timetables the cards use:
 - **MÁV route index**: the date of the MÁV timetable on the maps, with
   its source (`daily`, `local` or `release`), install time, trains and lines.
 - **Volán timetable**: the date of the Volán timetable, with its trips,
-  stops and build time.
+  stops, build time and source (`pages` when it was installed from GitHub,
+  `local_updater` or `release`), and the result of the last GitHub check.
 - **City timetables**: when the city timetables were built, with the
-  number of operators and trips.
+  number of operators and trips, their source and the result of the last
+  GitHub check, as for Volán.
 - **Daily MÁV check**: when the daily MÁV index last ran, its result
   (`installed`, `up_to_date`, `failed`, `disabled` …) and the next run.
 
