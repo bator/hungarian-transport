@@ -37,6 +37,9 @@ from gtfs_feed import encode_polyline  # noqa: E402
 
 os.environ.pop("MAV_ALLOW_SHRINK", None)
 NOW = datetime(2026, 11, 16, 10, 40, tzinfo=timezone.utc)
+# The index schema passed as --schema (the stable release's, in the workflow).
+SCHEMA = gtfs_compact.INDEX_SCHEMA
+S = str(SCHEMA)
 COMMIT = "c" * 40
 
 failed = 0
@@ -92,7 +95,7 @@ def run(*args: str) -> tuple[int, str, str, dict]:
 def make_part(build_dir: Path, part_dir: Path, names: tuple[str, ...] = ("volan", "city"),
               now: datetime = NOW) -> None:
     for name in names:
-        rc, out, err, _ = run("part", "--index", str(build_dir / f"{name}-index.json.gz"), "--out", str(part_dir),
+        rc, out, err, _ = run("part", "--schema", S, "--index", str(build_dir / f"{name}-index.json.gz"), "--out", str(part_dir),
                               "--now", now.isoformat())
         assert rc == 0, (out, err)
 
@@ -173,8 +176,8 @@ with tempfile.TemporaryDirectory() as tmp_name:
 
     # ---- part ---------------------------------------------------------------
     volan, city = build(tmp / "b1")
-    rc, out, err, _ = run("part", "--index", str(volan), "--out", str(tmp / "p1"), "--now", NOW.isoformat())
-    rc2, out2, err2, _ = run("part", "--index", str(city), "--out", str(tmp / "p1"), "--now", NOW.isoformat())
+    rc, out, err, _ = run("part", "--schema", S, "--index", str(volan), "--out", str(tmp / "p1"), "--now", NOW.isoformat())
+    rc2, out2, err2, _ = run("part", "--schema", S, "--index", str(city), "--out", str(tmp / "p1"), "--now", NOW.isoformat())
     part_json = json.loads((tmp / "p1" / "part.json").read_text()) if (tmp / "p1" / "part.json").is_file() else {}
     entries = part_json.get("indexes", {})
     check("part packs both indexes, each with its shapes folder, and records them in part.json",
@@ -201,29 +204,29 @@ with tempfile.TemporaryDirectory() as tmp_name:
               for k in range(sh["n"])}, repr(ce.get("shapes"))[:300])
 
     old_volan, _ = build(tmp / "b-old", schema=gtfs_compact.INDEX_SCHEMA - 1)
-    rc, out, err, _ = run("part", "--index", str(old_volan), "--out", str(tmp / "p-old"))
+    rc, out, err, _ = run("part", "--schema", S, "--index", str(old_volan), "--out", str(tmp / "p-old"))
     check("part refuses an index of another schema: exit 1, a warning, nothing packed",
           rc == 1 and "::warning title=Index not published::" in out and "schema" in out
           and not (tmp / "p-old").exists(), repr((rc, out, err)))
     _, city_gap = build(tmp / "b-gap")
     (city_gap.parent / head(city_gap)["sh"]["dir"] / "07.json.gz").unlink()
-    rc, out, err, _ = run("part", "--index", str(city_gap), "--out", str(tmp / "p-gap"))
+    rc, out, err, _ = run("part", "--schema", S, "--index", str(city_gap), "--out", str(tmp / "p-gap"))
     check("part refuses an index whose shapes folder lacks a shard",
           rc == 1 and "07.json.gz is missing" in out and not (tmp / "p-gap").exists(), repr((rc, out)))
     two = tmp / "b-two" / "volan-index.json.gz"
     two.parent.mkdir()
     two.write_bytes(volan.read_bytes() + gzip.compress(b"", mtime=0))
-    rc, out, err, _ = run("part", "--index", str(two), "--out", str(tmp / "p-two"))
+    rc, out, err, _ = run("part", "--schema", S, "--index", str(two), "--out", str(tmp / "p-two"))
     check("part refuses an index of two gzip members (the integration reads one)",
           rc == 1 and "single gzip member" in out, repr((rc, out)))
     shutil.copytree(tmp / "b1", tmp / "b-same")
-    rc, out, err, _ = run("part", "--index", str(tmp / "b-same" / "city-index.json.gz"), "--out", str(tmp / "p-same"),
+    rc, out, err, _ = run("part", "--schema", S, "--index", str(tmp / "b-same" / "city-index.json.gz"), "--out", str(tmp / "p-same"),
                           "--baseline", str(city))
     check("part says when the rebuilt index has the baseline's content, and packs it all the same",
           rc == 0 and "::notice title=city index unchanged::" in out
           and (tmp / "p-same" / "city-index.json.gz").is_file(), repr((rc, out, err)))
     _, city_new = build(tmp / "b-new", city_bend=0.5)
-    rc, out, err, _ = run("part", "--index", str(city_new), "--out", str(tmp / "p-new"), "--baseline", str(city))
+    rc, out, err, _ = run("part", "--schema", S, "--index", str(city_new), "--out", str(tmp / "p-new"), "--baseline", str(city))
     check("no notice for an index whose content changed", rc == 0 and "unchanged" not in out, out)
 
     # ---- assemble: a first site, nothing published yet ----------------------
@@ -329,9 +332,29 @@ with tempfile.TemporaryDirectory() as tmp_name:
         change(folder)
         return folder
 
-    cases = {
+    # A published Volán index that cannot be carried is left out, not the
+    # whole site.
+    drops = {
         "a missing volan shard": lambda f: (f / ve["shapes"]["dir"] / "03.json.gz").unlink(),
         "another volan index": lambda f: (f / "volan-index.json.gz").write_bytes(b"other"),
+        "a volan entry without its shapes files": lambda f: (f / "timetables.json").write_text(
+            (f / "timetables.json").read_text().replace('"files"', '"nofiles"', 1)),
+    }
+    for label, change in drops.items():
+        folder = broken_live(label.replace(" ", "-"), change)
+        out_dir = tmp / f"site-{label.replace(' ', '-')}"
+        rc, out, err, outputs = run("assemble", "--out", str(out_dir), "--commit", COMMIT, "--live-dir", str(folder),
+                                    "--timetables-part", str(tmp / "p2"), "--settle", "0")
+        man = json.loads((out_dir / "timetables.json").read_text()) if rc == 0 else {}
+        check(f"{label} on the live site: the Volán index left out with a warning, the new city index and the"
+              " MÁV files deployed",
+              rc == 0 and outputs.get("deploy") == "true" and sorted(man.get("indexes", {})) == ["city"]
+              and "::warning title=volan index dropped::" in out
+              and not (out_dir / "volan-index.json.gz").exists() and not (out_dir / ve["shapes"]["dir"]).exists()
+              and all((out_dir / n).is_file() for n in MAV_FILES) and manifest_problems(out_dir) == [],
+              repr((rc, out[-400:], err[-300:])))
+
+    cases = {
         "a missing MÁV overlay": lambda f: (f / "mav-pfaedle-overlay.zip").unlink(),
         "another MÁV zip": lambda f: (f / "mav-gtfs.zip").write_bytes(b"PK other"),
         "an unreadable timetables.json": lambda f: (f / "timetables.json").write_text("{not json"),
@@ -367,6 +390,32 @@ with tempfile.TemporaryDirectory() as tmp_name:
           rc == 0 and outputs.get("deploy") == "true" and sorted(man.get("indexes", {})) == ["city"]
           and "::warning title=volan index dropped::" in out, repr((rc, out, err)))
 
+    # Indexes of another schema than the published ones (a new stable
+    # release changed the format): the new ones make the site's schema.
+    _, city_28 = build(tmp / "b-28", schema=SCHEMA - 1)
+    rc, out, err, _ = run("part", "--schema", str(SCHEMA - 1), "--index", str(city_28), "--out", str(tmp / "p-28"))
+    rc2, out2, err2, outputs = run("assemble", "--out", str(tmp / "site-28"), "--commit", COMMIT,
+                                   "--live-dir", str(live), "--timetables-part", str(tmp / "p-28"))
+    man = json.loads((tmp / "site-28" / "timetables.json").read_text()) if rc2 == 0 else {}
+    check("a part of another schema than the published one: the site takes the part's, the published Volán index"
+          " of the other one is left out with a warning",
+          rc == 0 and rc2 == 0 and man.get("schema") == SCHEMA - 1 and sorted(man.get("indexes", {})) == ["city"]
+          and "::warning title=volan index dropped::" in out2, repr((rc, out, rc2, out2[-400:])))
+    rc, out, err, _ = run("part", "--schema", S, "--index", str(volan), "--out", str(tmp / "p-28"))
+    check("part refuses to add an index of one schema to a part of another",
+          rc == 1 and "the part holds indexes of schema" in out, repr((rc, out)))
+    rc, out, err, outputs = run("assemble", "--out", str(tmp / "site-mav-only"), "--commit", COMMIT, "--live-dir",
+                                str(empty), "--mav-part", str(mav2), "--schema", "31")
+    man = json.loads((tmp / "site-mav-only" / "timetables.json").read_text()) if rc == 0 else {}
+    check("a site without any index names --schema", rc == 0 and man.get("schema") == 31 and man.get("indexes") == {},
+          repr((rc, out)))
+    rc, out, err, outputs = run("assemble", "--out", str(tmp / "site-mav-carry"), "--commit", COMMIT, "--live-dir",
+                                str(live), "--mav-part", str(mav2), "--schema", "31")
+    man = json.loads((tmp / "site-mav-carry" / "timetables.json").read_text()) if rc == 0 else {}
+    check("no index built: the carried indexes keep the published schema, whatever --schema says",
+          rc == 0 and man.get("schema") == SCHEMA and sorted(man.get("indexes", {})) == ["city", "volan"],
+          repr((rc, out)))
+
     rc, out, err, outputs = run("assemble", "--out", str(tmp / "site-big"), "--commit", COMMIT,
                                 "--live-dir", str(live), "--timetables-part", str(tmp / "p2"), "--max-bytes", "1000")
     check("a site over the size limit is refused, naming the limit",
@@ -400,12 +449,28 @@ with tempfile.TemporaryDirectory() as tmp_name:
 
     src = Settling(live)
     ns = argparse.Namespace(out=tmp / "site-settle", commit=COMMIT, mav_part=None, timetables_part=tmp / "p2",
-                            max_bytes=mav_pages_site.MAX_SITE_BYTES, settle=0.0, github_output=None)
+                            max_bytes=mav_pages_site.MAX_SITE_BYTES, settle=0.0, github_output=None, schema=None)
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         rc = pt.cmd_assemble(ns, src, later)
     check("a carried file that does not match at first is fetched again once, and then carried",
           rc == 0 and src.calls.get("volan-index.json.gz") == 2 and manifest_problems(tmp / "site-settle") == []
-          and "fetching again" in buf.getvalue(), repr((rc, src.calls.get("volan-index.json.gz"), buf.getvalue()[-300:])))
+          and "fetching the volan index again" in buf.getvalue(), repr((rc, src.calls.get("volan-index.json.gz"), buf.getvalue()[-300:])))
+
+    class Broken(pt.Source):
+        def fetch(self, name: str, dest: Path, cap: int):
+            got = super().fetch(name, dest, cap)
+            if name.startswith("volan-shapes-"):
+                dest.write_bytes(b"stale")
+                return pt.file_digest(dest)
+            return got
+
+    ns.out = tmp / "site-broken"
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        rc = pt.cmd_assemble(ns, Broken(folder=live), later)
+    man = json.loads((tmp / "site-broken" / "timetables.json").read_text()) if rc == 0 else {}
+    check("a Volán shard that still does not match when fetched again: the index left out, no partial files",
+          rc == 0 and sorted(man.get("indexes", {})) == ["city"] and "::warning title=volan index dropped::" in buf.getvalue()
+          and not any(n.startswith("volan-") for n in tree(tmp / "site-broken")), buf.getvalue()[-400:])
 
     # ---- due ----------------------------------------------------------------
     fresh = json.loads((site1 / "timetables.json").read_text())
@@ -418,37 +483,48 @@ with tempfile.TemporaryDirectory() as tmp_name:
 
     day = timedelta(days=1)
     due_cases = [
-        ("no published manifest", None, False, True),
-        ("both built a day ago", aged(day, day), False, False),
-        ("both a day ago, the dispatch input set", aged(day, day), True, True),
-        ("the city index 6 days 12 hours old", aged(day, timedelta(days=6, hours=12)), False, True),
-        ("the volan index a minute short of it", aged(timedelta(days=6, hours=12) - timedelta(minutes=1), day), False, False),
-        ("no city index", {**aged(day, day), "indexes": {"volan": aged(day, day)["indexes"]["volan"]}}, False, True),
-        ("another schema", {**aged(day, day), "schema": 28}, False, True),
-        ("another format", {**aged(day, day), "format": 2}, False, True),
-        ("a built_at without an offset", {**aged(day, day), "indexes": {
+        ("no published manifest", None, False, ["volan", "city"]),
+        ("both built a day ago", aged(day, day), False, []),
+        ("both a day ago, the dispatch input set", aged(day, day), True, ["volan", "city"]),
+        ("the city index 6 days 12 hours old (the Volán one stays)", aged(day, timedelta(days=6, hours=12)), False,
+         ["city"]),
+        ("both 7 days old", aged(timedelta(days=7), timedelta(days=7)), False, ["volan", "city"]),
+        ("the volan index a minute short of it", aged(timedelta(days=6, hours=12) - timedelta(minutes=1), day), False, []),
+        ("no city index", {**aged(day, day), "indexes": {"volan": aged(day, day)["indexes"]["volan"]}}, False, ["city"]),
+        ("another schema than --schema", {**aged(day, day), "schema": SCHEMA - 1}, False, ["volan", "city"]),
+        ("another format", {**aged(day, day), "format": 2}, False, ["volan", "city"]),
+        ("a city built_at without an offset", {**aged(day, day), "indexes": {
             **aged(day, day)["indexes"], "city": {**fresh["indexes"]["city"], "built_at": "2026-11-15T10:00:00"}}},
-         False, True),
+         False, ["city"]),
     ]
     for label, man_, force, want in due_cases:
-        got, why = pt.due(man_, "HTTP 404", force, NOW)
-        check(f"due, {label}: {want}", got == want and bool(why), why)
+        got, why = pt.due(man_, "HTTP 404", force, NOW, SCHEMA)
+        check(f"due, {label}: {want or 'none'}", got == want and bool(why), why)
+    got, why = pt.due(aged(day, day), "", False, NOW, SCHEMA + 1)
+    check("due compares with the --schema given, not the checkout's", got == ["volan", "city"], why)
 
     due_live = tmp / "due-live"
     due_live.mkdir()
-    rc, out, err, outputs = run("due", "--live-dir", str(due_live), "--now", NOW.isoformat())
-    check("the due CLI: no timetables.json is due", rc == 0 and outputs.get("due") == "true", repr((rc, out, err)))
+    rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(due_live), "--now", NOW.isoformat())
+    check("the due CLI: no timetables.json, both due", rc == 0 and outputs.get("due") == "true"
+          and outputs.get("indexes") == "volan,city", repr((rc, out, err)))
     (due_live / "timetables.json").write_text(json.dumps(aged(day, day)))
-    rc, out, err, outputs = run("due", "--live-dir", str(due_live), "--now", NOW.isoformat(), "--force", "false")
-    check("the due CLI: fresh indexes are not due", rc == 0 and outputs.get("due") == "false", repr((rc, out, err)))
-    rc, out, err, outputs = run("due", "--live-dir", str(due_live), "--now", NOW.isoformat(), "--force", "true")
+    rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(due_live), "--now", NOW.isoformat(), "--force", "false")
+    check("the due CLI: fresh indexes are not due", rc == 0 and outputs.get("due") == "false"
+          and outputs.get("indexes") == "", repr((rc, out, err)))
+    (due_live / "timetables.json").write_text(json.dumps(aged(day, timedelta(days=8))))
+    rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(due_live), "--now", NOW.isoformat())
+    check("the due CLI: an old city index alone is due alone", rc == 0 and outputs.get("due") == "true"
+          and outputs.get("indexes") == "city", repr((rc, out, err)))
+    (due_live / "timetables.json").write_text(json.dumps(aged(day, day)))
+    rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(due_live), "--now", NOW.isoformat(), "--force", "true")
     check("the due CLI: the dispatch input makes them due", rc == 0 and outputs.get("due") == "true", repr((rc, out)))
-    rc, out, err, outputs = run("due", "--live-dir", str(due_live), "--now", NOW.isoformat(), "--force", "")
+    rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(due_live), "--now", NOW.isoformat(), "--force", "")
     check("the due CLI: an empty input (a scheduled run) is not forcing", outputs.get("due") == "false", out)
     (due_live / "timetables.json").write_text("garbage")
-    rc, out, err, outputs = run("due", "--live-dir", str(due_live), "--now", NOW.isoformat())
+    rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(due_live), "--now", NOW.isoformat())
     check("the due CLI: an unreadable timetables.json is due", rc == 0 and outputs.get("due") == "true", out)
-    rc, out, err, outputs = run("due", "--live-url", "http://example.invalid", "--now", NOW.isoformat())
+    rc, out, err, outputs = run("due", "--schema", S, "--live-url", "http://example.invalid", "--now", NOW.isoformat())
     check("the due CLI takes only an https live URL", rc == 2, repr((rc, err)))
 
     # ---- baseline -----------------------------------------------------------
