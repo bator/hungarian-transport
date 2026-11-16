@@ -29,6 +29,7 @@ from custom_components.hungarian_transport.const import (
     CONF_NOTIFY_DAILY,
     CONF_NOTIFY_SERVICE,
     CONF_NOTIFY_UPDATES,
+    CONF_PAGES_TIMETABLES,
     DOMAIN,
 )
 from custom_components.hungarian_transport.futar import BKK_API
@@ -37,6 +38,7 @@ SEARCH = f"{BKK_API}/search.json"
 # What the options form saves besides the key when left as shown.
 DEFAULTS = {
     CONF_DAILY_MAV: True,
+    CONF_PAGES_TIMETABLES: True,
     CONF_DAILY_TIME: "06:00:00",
     CONF_NOTIFY_UPDATES: False,
     CONF_NOTIFY_DAILY: False,
@@ -234,8 +236,8 @@ async def test_no_remove_box_without_a_stored_key(hass) -> None:
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert list(result["data_schema"].schema) == [
-        CONF_API_KEY, CONF_DAILY_MAV, CONF_DAILY_TIME, CONF_NOTIFY_UPDATES, CONF_NOTIFY_SERVICE,
-        CONF_NOTIFY_DAILY,
+        CONF_API_KEY, CONF_DAILY_MAV, CONF_PAGES_TIMETABLES, CONF_DAILY_TIME, CONF_NOTIFY_UPDATES,
+        CONF_NOTIFY_SERVICE, CONF_NOTIFY_DAILY,
     ]
 
 
@@ -572,6 +574,7 @@ async def test_options_save_notifications_and_keep_other_options(hass) -> None:
     assert entry.options == {
         CONF_API_KEY: "kept", CONF_DAILY_MAV: False, "future_option": 7, CONF_NOTIFY_UPDATES: True,
         CONF_NOTIFY_DAILY: False, CONF_NOTIFY_SERVICE: "script.ertesit", CONF_DAILY_TIME: "05:45:00",
+        CONF_PAGES_TIMETABLES: True,
     }
 
     # The form shows what is stored; a cleared service field clears it.
