@@ -41,8 +41,8 @@ Honnan jönnek az adatok:
 | --- | --- | --- |
 | Budapesti busz, villamos, troli, metró, HÉV, elővárosi vonat | BKK FUTÁR | Igen, valós idejű pozíció és késés |
 | MÁV vonatok | MÁV ELVIRA: indulások, vágány és helyjegy (BKK FUTÁR csak az integráció nélkül) | Késés és vágány |
-| Volán buszok | Országos Volán GTFS (opendata.utas.hu, tartalékként KTI), a kártyával együtt települ | Késés és pozíció a GTFS-Realtime adatból, egyébként menetrend |
-| Helyi hálózatok (Szeged, Pécs, Miskolc, …) | Az üzemeltetők saját GTFS-e, a kártyával együtt települ | Menetrend (Szombathely élőben, a kiegészítő szolgáltatásokkal) |
+| Volán buszok | Országos Volán GTFS (opendata.utas.hu, tartalékként KTI), a kártyával együtt települ, és hetente frissül a GitHubról | Késés és pozíció a GTFS-Realtime adatból, egyébként menetrend |
+| Helyi hálózatok (Szeged, Pécs, Miskolc, …) | Az üzemeltetők saját GTFS-e, a kártyával együtt települ, és hetente frissül a GitHubról | Menetrend (Szombathely élőben, a kiegészítő szolgáltatásokkal) |
 | Megállókeresés és átszállás | [Transitous](https://transitous.org/), tartalékként a BKK FUTÁR | — |
 
 A Volán buszok, a Volánbusz városi hálózatai, Veszprém, Miskolc, Paks,
@@ -133,9 +133,18 @@ beállításait és a menetrend-értesítéseket nyitja meg.
 - **Napi MÁV útvonal-index a GitHubról** (alapból bekapcsolva): az
   integráció naponta egyszer megnézi a `bator.github.io` oldalon az aznap
   a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet, és
-  ha újabb a használtnál, átveszi. Kikapcsolva a heti kiadás indexe marad, és
+  ha újabb a használtnál, átveszi. Kikapcsolva a kiadás indexe marad, és
   a Home Assistant ilyen kérést nem küld. Részletek:
-  [The daily index](../timetables.md#the-daily-index-from-github-pages).
+  [The daily MÁV index](../timetables.md#the-daily-máv-index).
+- **Heti Volán- és városi menetrend a GitHubról** (alapból bekapcsolva):
+  ugyanabban a napi ellenőrzésben, közvetlenül a MÁV index után az
+  integráció megnézi, milyen Volán- és városi menetrend van a
+  `bator.github.io` oldalon (ott hetente újraépülnek), és ami újabb a
+  használtnál, azt telepíti. Így az új menetrendekhez nem kell frissíteni
+  az integrációt. A saját, újabb feedekből épített menetrended megmarad.
+  Kikapcsolva a kiadás menetrendjei maradnak, és a Home Assistant ilyen
+  kérést nem küld. Részletek:
+  [The Volán and city indexes](../timetables.md#the-volán-and-city-indexes).
 - **Napi ellenőrzés ideje** (alapból 06:00): ennek az ellenőrzésnek a helyi
   ideje (legfeljebb 5 perccel később); a Home Assistant indulása és a
   beállítások mentése után 10–20 perccel egyszer szintén lefut. A sikertelen
@@ -144,8 +153,9 @@ beállításait és a menetrend-értesítéseket nyitja meg.
   délre kerül fel a GitHubra, ezért amíg az ott lévő még egy korábbi napé,
   az ellenőrzés 2–3 óránként újra megnézi, legfeljebb 4-szer, éjfélig.
 - **Értesítés a menetrend-frissítésekről** (alapból kikapcsolva): állandó
-  értesítés, ha új napi MÁV index települt, ha az integráció frissítése új
-  Volán-, városi vagy MÁV-menetrendet hozott, és egyszer, ha a napi index
+  értesítés, ha új napi MÁV index települt, ha új Volán- vagy városi
+  menetrend települt a GitHubról, ha az integráció frissítése új Volán-,
+  városi vagy MÁV-menetrendet hozott, és egyszer, ha a napi index
   3 egymást követő napon nem frissült (a GitHubon 3 napja nem frissített
   index is hibának számít).
 - **Ezt a szolgáltatást is hívja** (nem kötelező): például `script.ertesit`
@@ -577,13 +587,14 @@ Assistant témádat követi, világosban és sötétben is.
 
 ## 9. A menetrendek frissen tartása
 
-A Volán és a helyi menetrendek minden kiadással együtt érkeznek. Egy heti
-GitHub-folyamat újraépíti őket, és ha valamelyik menetrend változott, új
-patch-kiadást ad ki ugyanazzal a kóddal és a friss menetrendekkel. A HACS
-ezt szokásos frissítésként kínálja fel; egy kiadás, ha egyszer kint van, már
-nem változik.
+Minden kiadás a megjelenésekor érvényes Volán- és helyi menetrendet hozza;
+egy kiadás, ha egyszer kint van, már nem változik, és új kiadás csak új
+kóddal jön. A két kiadás között a menetrendek hetente újraépülnek a
+GitHubon, és az integráció telepíti őket, ha újabbak a használtnál (**Heti
+Volán- és városi menetrend a GitHubról** beállítás, [3.1](#31-beállítások)).
+Az új menetrendekhez a HACS-ban nincs mit frissíteni.
 
-A vonatútvonalak ettől függetlenül naponta követik a MÁV menetrendjét: az
+A vonatútvonalak ugyanígy naponta követik a MÁV menetrendjét: az
 integráció letölti a minden reggel épített indexet (**Napi MÁV
 útvonal-index** beállítás, [3.1](#31-beállítások)).
 
@@ -609,9 +620,12 @@ menetrendet használják a kártyák:
   (`daily`, `local` vagy `release`), a telepítés ideje, a vonatok és a
   vonalak száma.
 - **Volán menetrend**: a Volán menetrend dátuma, a járatok és a megállók
-  száma és az index készítésének ideje.
+  száma, az index készítésének ideje, a forrása (`pages`, ha a GitHubról
+  települt, `local_updater` vagy `release`) és a legutóbbi GitHub-ellenőrzés
+  eredménye.
 - **Városi menetrendek**: mikor készültek a helyi menetrendek, a
-  szolgáltatók és a járatok számával.
+  szolgáltatók és a járatok számával, a forrásukkal és a legutóbbi
+  GitHub-ellenőrzés eredményével, mint a Volánnál.
 - **Napi MÁV ellenőrzés**: mikor futott utoljára a napi MÁV index, az
   eredménye (`installed`, `up_to_date`, `failed`, `disabled` …) és a
   következő futás.

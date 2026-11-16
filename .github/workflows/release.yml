@@ -4,18 +4,17 @@ on:
   push:
     tags:
       - "v*"
-  # Weekly: rebuild the GTFS indexes on the latest stable tag's code and,
-  # when a feed changed, publish them as the next patch release, tagged on
-  # that same commit (no unreleased code). A published release is never
-  # changed afterwards: what HACS installs as a version stays that version.
-  # Each release carries SHA256SUMS, a build provenance attestation and
-  # hungarian-transport-build.json (the tag, and the commit it was built from).
-  schedule:
-    - cron: "30 2 * * 1"
+  # A release is a code release: it ships the GTFS indexes built from the
+  # feeds of the day, and new timetables between releases come from the
+  # GitHub Pages site (mav-index-daily.yml), not from a new version. A
+  # published release is never changed afterwards: what HACS installs as a
+  # version stays that version. Each release carries SHA256SUMS, a build
+  # provenance attestation and hungarian-transport-build.json (the tag, and
+  # the commit it was built from).
   workflow_dispatch:
     inputs:
       bump:
-        description: "rev = a -rev.N prerelease two patches up (1.9.2-rev.1 after stable 1.9.0; the weekly timetable release takes 1.9.1 and stays below it, then starts a rev run itself while a series is open; HACS stable stays). patch = stable release of main, numbered as the open -rev series (else next patch). patch/minor/major: only when asked."
+        description: "rev = a -rev.N prerelease two patches up (1.9.2-rev.1 after stable 1.9.0; 1.9.1 stays free, as when weekly timetable releases took it, so existing beta installs stay ordered; HACS stable stays). patch = stable release of main, numbered as the open -rev series (else next patch). patch/minor/major: only when asked."
         type: choice
         options:
           - rev
@@ -35,13 +34,13 @@ on:
 permissions:
   contents: read
 
-# Two dispatch or weekly runs at once would race on the version number and
-# on the release assets, so they queue in one group. GitHub keeps one running
-# and one pending run per group and cancels the pending one when another
+# Two dispatch runs at once would race on the version number and on the
+# release assets, so they queue in one group. GitHub keeps one running and
+# one pending run per group and cancels the pending one when another
 # arrives; a tag push waiting there would be dropped (a tag without a
 # release). So each tag push has a group of its own and is never replaced.
-# It may run next to a dispatch or weekly run: those never pick a version
-# that is already a tag, and their publish refuses a tag that exists.
+# It may run next to a dispatch run: that never picks a version that is
+# already a tag, and its publish refuses a tag that exists.
 concurrency:
   group: ${{ github.ref_type == 'tag' && format('release-tag-{0}', github.ref_name) || 'release' }}
   cancel-in-progress: false
@@ -56,8 +55,6 @@ jobs:
       ref: ${{ steps.ver.outputs.ref }}
       baseline: ${{ steps.ver.outputs.baseline }}
       target: ${{ steps.ver.outputs.target }}
-      refresh: ${{ steps.ver.outputs.refresh }}
-      beta: ${{ steps.ver.outputs.beta }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -66,7 +63,6 @@ jobs:
           persist-credentials: false
 
       - name: Release from main only
-        if: github.event_name != 'schedule'
         run: |
           set -euo pipefail
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]; then
@@ -88,11 +84,11 @@ jobs:
 
           # Every published release (tag, prerelease flag), last published
           # first, read once. gh lists by createdAt, which is the tagged
-          # commit's date: a weekly timetable release tags the stable's own
-          # commit, so the two tie. A GitHub API failure stops the run: an
-          # empty list would mean "no -rev series" and "no such tag", and a
-          # version picked on that could land above the beta channel or on a
-          # tag that exists.
+          # commit's date: the past weekly timetable releases tagged their
+          # stable's own commit, so the two tie. A GitHub API failure stops
+          # the run: an empty list would mean "no -rev series" and "no such
+          # tag", and a version picked on that could land above the beta
+          # channel or on a tag that exists.
           if ! releases=$(gh release list --exclude-drafts --limit 1000 --json tagName,isPrerelease,publishedAt \
               --jq 'sort_by(.publishedAt) | reverse | .[] | [.tagName, (.isPrerelease | tostring)] | @tsv'); then
             echo "::error::Could not list the releases (GitHub API); no version is picked on a guess."
@@ -101,8 +97,9 @@ jobs:
 
           # The highest stable version (vX.Y.Z, not a prerelease), however
           # many -rev.N came after it (24 after 1.4.2). By version, not by
-          # date: createdAt ties a timetable release with its stable, and an
-          # older version tagged or published later would win on any date.
+          # date: createdAt ties a past timetable release with its stable,
+          # and an older version tagged or published later would win on any
+          # date.
           latest_stable() {
             awk -F'\t' '$2 == "false" && $1 ~ /^v[0-9]+\.[0-9]+\.[0-9]+$/ { print $1 }' <<< "$releases" \
               | sort -V | tail -n 1
@@ -160,11 +157,11 @@ jobs:
           }
 
           # tag to publish, the code to build (ref), the release whose
-          # indexes the new ones replace (baseline), the commit the new tag
-          # points at (target) and whether this is a timetable-only release.
-          # A tag that is not vX.Y.Z or vX.Y.Z-rev.N (a pushed v1.10, or a
-          # computed one gone wrong) stops the run here, before anything is
-          # built; an empty tag is a skip.
+          # indexes the new ones replace (baseline) and the commit the new
+          # tag points at (target). A tag that is not vX.Y.Z or
+          # vX.Y.Z-rev.N (a pushed v1.10, or a computed one gone wrong)
+          # stops the run here, before anything is built; an empty tag is a
+          # skip.
           emit() {
             if [ -n "$1" ] && [[ ! "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rev\.[0-9]+)?$ ]]; then
               echo "::error title=Bad tag::'${1}' is not vX.Y.Z or vX.Y.Z-rev.N; nothing is built or published."
@@ -176,8 +173,6 @@ jobs:
               echo "ref=${3:-$GITHUB_SHA}"
               echo "baseline=${4:-}"
               echo "target=${5:-$GITHUB_SHA}"
-              echo "refresh=${6:-false}"
-              echo "beta=${7:-false}"
             } >> "$GITHUB_OUTPUT"
           }
 
@@ -185,50 +180,6 @@ jobs:
 
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             emit "${GITHUB_REF_NAME}" true "" "$latest"
-            exit 0
-          fi
-
-          if [ "${GITHUB_EVENT_NAME}" = "schedule" ]; then
-            stable=$(latest_stable)
-            if [ -z "$stable" ]; then
-              echo "No stable release to refresh; skip."
-              emit "" false
-              exit 0
-            fi
-            read -r major minor patch <<< "$(parse_semver "$stable")"
-            # The next patch, which rev dispatches leave free (their series
-            # starts two above the stable). It must stay below the newest
-            # -rev series: semver ranks X.Y.P above X.Y.P-rev.N, and beta
-            # users would be offered the old code of this refresh over the
-            # prerelease. Only when that series sits on the next patch (no
-            # rev dispatch since the last refresh) is there no room: the
-            # refresh then goes above it and says so.
-            rev=$(newest_rev "$major" "$minor" "$patch")
-            next=$((patch + 1))
-            # The beta job dispatches a rev run after every timetable release
-            # while a -rev series is open, so that should not happen; when
-            # that run failed, this is the fallback.
-            if [ "$rev" -eq "$next" ]; then
-              next=$((rev + 1))
-              echo "::warning title=Timetable release above the beta::v${major}.${minor}.${rev}-rev.* is on the next patch, so this refresh is v${major}.${minor}.${next} and beta users are offered ${stable}'s code with it until the rev run after it is published."
-            fi
-            # Beta users run the open -rev series: after this release, a rev
-            # run puts main (with these indexes) two patches above it again.
-            beta=false
-            if [ "$rev" -gt 0 ]; then beta=true; fi
-            tag="v${major}.${minor}.${next}"
-            if tag_taken "$tag"; then
-              echo "::error::${tag} already exists; the weekly refresh never changes a release."
-              exit 1
-            fi
-            commit=$(git rev-parse "refs/tags/${stable}^{commit}")
-            # Build and test the released code, not main, so a timetable
-            # release never ships unreleased card code (or an index schema the
-            # released card cannot read). The new tag points at that same
-            # commit, and it is published only when the indexes differ from
-            # the stable release's own (the baseline).
-            echo "Timetable refresh: ${stable} code, new indexes as ${tag} if a feed changed"
-            emit "$tag" true "refs/tags/${stable}" "$stable" "$commit" true "$beta"
             exit 0
           fi
 
@@ -253,9 +204,10 @@ jobs:
             tag="v${major}.${minor}.${p}"
           else
             # Live Lovelace as a prerelease, so HACS stable stays on the last
-            # real release. Two patches up: the next patch is the weekly
-            # timetable release's, which must rank below this (semver puts
-            # X.Y.P above X.Y.P-rev.N). An open series that high continues.
+            # real release. Two patches up, the next patch left free: the
+            # past weekly timetable releases took it, and keeping the gap
+            # keeps existing beta installs ordered (semver puts X.Y.P above
+            # X.Y.P-rev.N). An open series that high continues.
             p=$((patch + 2))
             if [ "$rev" -gt "$p" ]; then p=$rev; fi
             base="${major}.${minor}.${p}"
@@ -268,10 +220,11 @@ jobs:
           fi
           echo "Manual ${bump} from ${stable} -> ${tag}"
           # A stable release carries the notes written for its version
-          # (docs/releases/<version>.md on this commit, see the pack step). A
-          # weekly timetable release may have taken the number the notes were
-          # written for: said here, before anything is built, not silently
-          # published with the one-line notes.
+          # (docs/releases/<version>.md on this commit, see the pack step).
+          # The number resolved here may not be the one the notes were
+          # written for (an open -rev series moves it): said here, before
+          # anything is built, not silently published with the one-line
+          # notes.
           if [ "$bump" != "rev" ] && [ ! -s "docs/releases/${tag#v}.md" ]; then
             echo "::error title=No release notes::docs/releases/${tag#v}.md is not on ${GITHUB_SHA:0:7}. This run resolved ${tag}; add the notes for it (or rename the file you wrote) and dispatch again."
             exit 1
@@ -301,8 +254,7 @@ jobs:
           cache-dependency-path: requirements_test.txt
 
       # What validate.yml checks on main, on the ref being released: the
-      # release packs dist/ (dist/leaflet included). A weekly refresh of an
-      # older tag may predate a check; what that tag does not have is skipped.
+      # release packs dist/ (dist/leaflet included).
       - name: Vendored Leaflet matches its recorded hashes
         run: |
           set -euo pipefail
@@ -332,8 +284,9 @@ jobs:
           for t in scripts/test_gtfs_compact.py scripts/test_update_volan_index.py scripts/test_build_guards.py \
               scripts/test_release_resolve.py scripts/test_release_mav_index.py scripts/test_release_workflow.py \
               scripts/test_mav_variant.py scripts/test_workflows.py scripts/test_mav_daily.py \
+              scripts/test_pages_timetables.py \
               ha/test_futar_limits.py ha/test_assets.py docs/manual/tools/test_server.py; do
-            # A weekly refresh of an older tag may predate a test file.
+            # A listed file this checkout does not have is skipped.
             if [ -f "$t" ]; then python3 "$t"; fi
           done
 
@@ -350,8 +303,6 @@ jobs:
     runs-on: ubuntu-latest
     # About 5 minutes; pfaedle has its own limit (release_mav_index.sh).
     timeout-minutes: 60
-    outputs:
-      changed: ${{ steps.changed.outputs.changed }}
     env:
       # Whether both MÁV secrets are set (true/false); the values themselves
       # are only in the step that downloads the feed.
@@ -369,15 +320,15 @@ jobs:
         with:
           python-version: "3.12"
 
-      # The comparison script and the MÁV pipeline come from the workflow's
-      # own commit (main on the weekly run), not from the tag being rebuilt:
-      # older tags lack them.
+      # The MÁV pipeline and its shrink guard run from the workflow's own
+      # commit (github.sha). Every run builds that same commit (resolve's
+      # ref); the separate checkout keeps the scripts that run here apart
+      # from the tree being built and packed.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           path: .release-tools
           sparse-checkout: |
-            scripts/index_digest.py
             scripts/mav_shrink_guard.py
             scripts/release_mav_index.sh
           sparse-checkout-cone-mode: false
@@ -396,16 +347,10 @@ jobs:
           gh release download "$BASELINE" --repo "$GITHUB_REPOSITORY" \
             --pattern hungarian-transport-frontend.zip --dir baseline
           unzip -o -j baseline/hungarian-transport-frontend.zip volan-index.json.gz city-index.json.gz -d .
-          # Kept aside: the builders rewrite these in place. The shapes
-          # folders go with them, for the timetable comparison below (a
-          # release before shapes has none: unzip exits 11, nothing matched).
+          # The MÁV index, when the release has one (else unzip exits 11,
+          # nothing matched): the shrink guard's comparison, and what ships
+          # again should this run's MÁV build fail.
           mkdir -p .baseline
-          cp volan-index.json.gz city-index.json.gz .baseline/
-          rc=0
-          unzip -q -o baseline/hungarian-transport-frontend.zip 'volan-shapes-*' 'city-shapes-*' -d .baseline || rc=$?
-          if [ "$rc" -ne 0 ] && [ "$rc" -ne 11 ]; then exit "$rc"; fi
-          # The MÁV index, when the release has one: the comparison below,
-          # and what ships again should this run's MÁV build fail.
           rc=0
           unzip -q -o -j baseline/hungarian-transport-frontend.zip mav-index.json.gz -d .baseline || rc=$?
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 11 ]; then exit "$rc"; fi
@@ -420,11 +365,6 @@ jobs:
           ALLOW_MISSING_INPUT: ${{ github.event.inputs.allow_missing || '' }}
           ALLOW_MISSING_VAR: ${{ vars.HUNGARIAN_TRANSPORT_ALLOW_MISSING || '' }}
           VOLAN_GTFS_URL: ${{ vars.VOLAN_GTFS_URL || '' }}
-          # The weekly refresh: a city feed whose download fails keeps the
-          # previous release's part (build_city_index.py, CARRY_ENV; its
-          # shapes are in .baseline too), so one publisher's outage does not
-          # stop the release. A tag older than that ignores it.
-          HUNGARIAN_TRANSPORT_CARRY_INDEX: ${{ needs.resolve.outputs.refresh == 'true' && '.baseline/city-index.json.gz' || '' }}
         run: |
           set -euo pipefail
           # Both values end up in workflow commands below (::warning::,
@@ -439,8 +379,7 @@ jobs:
           done
           # The dispatch input relaxes the city guard for this run only, on
           # top of the repository variable. The variable relaxes it for every
-          # run, the weekly refresh included, so say so on every run until it
-          # is unset again.
+          # run, so say so on every run until it is unset again.
           if [ -n "$ALLOW_MISSING_VAR" ]; then
             echo "::warning title=City index guard relaxed::Repository variable HUNGARIAN_TRANSPORT_ALLOW_MISSING='${ALLOW_MISSING_VAR}' lets every run drop these city feeds. Unset it once the feed is back."
           fi
@@ -481,9 +420,7 @@ jobs:
 
       # Without the secrets, or when the download, pfaedle or the audit
       # fails, the release still goes out: with the previous release's MÁV
-      # index when this code's card reads its schema, else with none. So a
-      # weekly run without the secrets ships the same index and publishes
-      # nothing for it.
+      # index when this code's card reads its schema, else with none.
       - name: MÁV index (pfaedle)
         id: mav
         env:
@@ -545,58 +482,9 @@ jobs:
           path: .osm
           key: osm-hungary-${{ steps.week.outputs.week }}
 
-      # A timetable refresh publishes only new data. The indexes are compared
-      # by content: index_digest.py resolves every trip's stops, service and
-      # shape and ignores row order, which the builders of older tags vary
-      # from run to run (PYTHONHASHSEED), and with it the shapes folder name.
-      # An index it cannot read counts as changed. The MÁV index (what ships,
-      # in dist/) counts as changed when it appeared or differs. One that
-      # went away is no change by itself (only the previous one this code
-      # cannot read is dropped): it never publishes a release on its own.
-      - name: Did a timetable change
-        id: changed
-        env:
-          REFRESH: ${{ needs.resolve.outputs.refresh }}
-        run: |
-          set -euo pipefail
-          if [ "$REFRESH" != "true" ]; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          changed=false
-          for f in volan-index.json.gz city-index.json.gz dist/mav-index.json.gz; do
-            name=$(basename "$f")
-            if [ "$name" = "mav-index.json.gz" ] && [ ! -f "$f" ]; then
-              if [ -f ".baseline/$name" ]; then
-                echo "$name not in this build; not counted as a change"
-              else
-                echo "$name in neither release"
-              fi
-              continue
-            fi
-            new=""
-            if [ -f "$f" ]; then
-              new=$(python3 .release-tools/scripts/index_digest.py "$f" | cut -d' ' -f1) || new=""
-            fi
-            old=""
-            if [ -f ".baseline/$name" ]; then
-              old=$(python3 .release-tools/scripts/index_digest.py ".baseline/$name" | cut -d' ' -f1) || old=""
-            fi
-            if [ -z "$new" ] || [ "$new" != "$old" ]; then
-              echo "$name changed"
-              changed=true
-            else
-              echo "$name unchanged (${new})"
-            fi
-          done
-          echo "changed=${changed}" >> "$GITHUB_OUTPUT"
-          if [ "$changed" = "false" ]; then
-            echo "::notice title=No timetable change::The rebuilt indexes equal the latest release's; nothing is published."
-          fi
-
       # How the city lines will draw: every stop pattern against its shapes.txt
       # route. Informational (the feeds decide), shown on the run summary; it
-      # never fails the release, and a refresh of a tag without it skips it.
+      # never fails the release.
       - name: City route audit
         continue-on-error: true
         run: |
@@ -615,7 +503,6 @@ jobs:
       - name: Stamp release and pack assets
         env:
           TAG: ${{ needs.resolve.outputs.tag }}
-          REFRESH: ${{ needs.resolve.outputs.refresh }}
         run: |
           set -euo pipefail
           tag="$TAG"
@@ -633,7 +520,7 @@ jobs:
           path = pathlib.Path("dist/hungarian-transport.js")
           text = path.read_text(encoding="utf-8")
           # Hand-written bundles used `const ... = '...'`; esbuild emits
-          # `var ... = "..."`. Accept both so tag refreshes of old releases work.
+          # `var ... = "..."`. Accept both.
           text, n = re.subn(
               r"""^(const|var|let) CARD_VERSION = (['"]).*\2;""",
               lambda m: '%s CARD_VERSION = %s%s%s;' % (m.group(1), m.group(2), ver, m.group(2)),
@@ -650,8 +537,7 @@ jobs:
           if [ -f dist/mav-index.json.gz ]; then cp dist/mav-index.json.gz custom_components/hungarian_transport/www/; fi
           # The integration's entry module; releases before it load the bundle directly.
           if [ -f dist/hungarian-transport-loader.js ]; then cp dist/hungarian-transport-loader.js custom_components/hungarian_transport/www/; fi
-          # Releases before the vendored Leaflet load it from unpkg; the weekly
-          # refresh re-packs such a tag, which has no dist/leaflet.
+          # The vendored Leaflet, when the build has it.
           if [ -d dist/leaflet ]; then cp -r dist/leaflet custom_components/hungarian_transport/www/; fi
           for d in dist/*-shapes-*/; do
             if [ -d "$d" ]; then cp -r "$d" custom_components/hungarian_transport/www/; fi
@@ -703,9 +589,9 @@ jobs:
           sha256sum hungarian-transport.zip hungarian-transport-frontend.zip > SHA256SUMS
           cat SHA256SUMS
           # The provenance attestation names the commit of the workflow run
-          # (github.sha: main's head on the weekly run), not the tag commit the
-          # zips were built from; actions/attest has no input for another
-          # source commit. This file says which commit that was.
+          # (github.sha); actions/attest has no input for another source
+          # commit. This file names the commit the zips were built from (the
+          # same one) next to it, and the run.
           python3 - <<'PY'
           import json, os, subprocess
           info = {
@@ -723,13 +609,11 @@ jobs:
           cat hungarian-transport-build.json
           # The release notes written for this version (docs/releases/<version>.md
           # on the commit being built) go to the publish job with the assets.
-          # A -rev prerelease and a weekly timetable release get the publish
-          # step's one-line notes: the refresh builds a stable tag's commit,
-          # which may already carry the next code release's notes.
+          # A -rev prerelease gets the publish step's one-line notes.
           # Always a file (empty: the one-line notes), so the artifact upload
           # never misses one of its paths.
           : > release-notes.md
-          if [[ "$tag" != *-rev.* ]] && [ "${REFRESH:-false}" != "true" ] && [ -s "docs/releases/${ver}.md" ]; then
+          if [[ "$tag" != *-rev.* ]] && [ -s "docs/releases/${ver}.md" ]; then
             cp "docs/releases/${ver}.md" release-notes.md
             echo "release notes: docs/releases/${ver}.md ($(wc -c < release-notes.md) bytes)"
           else
@@ -751,7 +635,7 @@ jobs:
   publish:
     name: Publish GitHub release
     needs: [resolve, test, build]
-    if: needs.resolve.outputs.create == 'true' && needs.build.outputs.changed == 'true'
+    if: needs.resolve.outputs.create == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -769,12 +653,11 @@ jobs:
       # gh attestation verify hungarian-transport.zip --repo <owner>/<repo> \
       #   --signer-workflow <owner>/<repo>/.github/workflows/release.yml \
       #   --source-ref refs/heads/main
-      # (--source-ref: refs/heads/main for the weekly and the manual runs,
-      # which make the releases, refs/tags/<tag> for a tag push; the resolve
-      # job refuses a manual run from another branch.) The attestation's source commit is this run's
-      # github.sha; on the weekly refresh that is main, while the zips are
-      # built from the stable tag's commit: hungarian-transport-build.json
-      # (uploaded with them) names both.
+      # (--source-ref: refs/heads/main for the manual runs, which make the
+      # releases, refs/tags/<tag> for a tag push; the resolve job refuses a
+      # manual run from another branch.) The attestation's source commit is
+      # this run's github.sha, the commit the zips were built from;
+      # hungarian-transport-build.json (uploaded with them) names it too.
       - uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: |
@@ -787,8 +670,6 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.resolve.outputs.tag }}
           TARGET: ${{ needs.resolve.outputs.target }}
-          REFRESH: ${{ needs.resolve.outputs.refresh }}
-          BASELINE: ${{ needs.resolve.outputs.baseline }}
         run: |
           set -euo pipefail
           tag="$TAG"
@@ -801,7 +682,7 @@ jobs:
             exit 1
           fi
           # A tag push runs in a group of its own (see concurrency): a
-          # dispatch or weekly run must not publish over a tag pushed since
+          # dispatch run must not publish over a tag pushed since
           # it resolved its version.
           # Only a 404 means "no such tag" / "no such release"; any other API
           # failure stops the publish rather than guessing.
@@ -820,8 +701,6 @@ jobs:
           if [[ "$tag" == *-rev.* ]]; then
             extra+=(--prerelease)
             notes="${notes} Live Lovelace revision between HACS releases."
-          elif [ "$REFRESH" = "true" ]; then
-            notes="${notes} Timetable update: fresh GTFS indexes (Volán, city, MÁV when built) on the code of ${BASELINE}."
           else
             notes="${notes} Includes fresh GTFS indexes (Volán, city, MÁV when built)."
           fi
@@ -845,31 +724,5 @@ jobs:
           if [ -s release-notes.md ]; then
             noteargs=(--notes-file release-notes.md)
           fi
-          # Tag the commit that was built: main's head for a code release, the
-          # stable tag's commit for a timetable refresh.
+          # Tag the commit that was built (main's head on a dispatch).
           gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS hungarian-transport-build.json --target "$TARGET" --title "$tag" "${noteargs[@]}" "${extra[@]}"
-
-  # After a weekly timetable release, while a -rev series is open (beta users
-  # run it), publish main as the next rev, which starts two patches above
-  # the new stable. Beta users then stay above the timetable release on
-  # main's code (with the same fresh indexes) instead of being offered the
-  # older code of the release that just went out. GITHUB_TOKEN may start a
-  # workflow_dispatch run. That run is a rev, not a refresh, so its own beta
-  # job is skipped: no loop.
-  beta:
-    name: Rev release for the beta channel
-    needs: [resolve, publish]
-    if: needs.resolve.outputs.refresh == 'true' && needs.resolve.outputs.beta == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-    steps:
-      - name: Dispatch a rev release from main
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          TAG: ${{ needs.resolve.outputs.tag }}
-        run: |
-          set -euo pipefail
-          gh workflow run release.yml --ref main -f bump=rev
-          echo "::notice title=Beta channel::${TAG} is out; a rev release from main was dispatched so beta users stay above it."

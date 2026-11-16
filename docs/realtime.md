@@ -123,7 +123,8 @@ its stops likewise). Sources marked `"mavplusz": true` in
   release indexes now carry each trip's `trip_id` as the seventh element of
   its row, so the card sends it and the integration looks it up. An index
   built before this change has no trip ids: those cards keep the timetable
-  until the next timetable release.
+  until they get a newer index (a release, or the weekly one from GitHub
+  Pages).
 - **route + start.** (The same rule on mavplusz.hu, see above.) The
   Veszprém and Miskolc feeds use other trip ids than the GTFS the card
   ships, but their ids carry the start time
@@ -323,10 +324,10 @@ take about 0.3 s on a laptop.
   (MÁV, GYSEV) are matched on the feeds alone.
 
 - Cards with an index from before this change (no trip ids) get live data
-  for Veszprém, Miskolc and MÁV only, until the next timetable release.
-- The weekly release's index can be a few days older than the live feed: a
-  trip the operator renamed since has no live data until the next release
-  (or the local daily timetable update).
+  for Veszprém, Miskolc and MÁV only, until they get a newer index.
+- The weekly index from GitHub Pages (or the release's) can be a few days
+  older than the live feed: a trip the operator renamed since has no live
+  data until the next weekly index (or the local daily timetable update).
 - Debrecen and GYSEV as city operators depend on the static feed added
   elsewhere: mapped by the ids `debrecen` (menetbrand's slug; `dkv`, the
   Transitous name, is an alias) and `gysev`.

@@ -22,8 +22,8 @@ repository that builds them has a MÁV login (see
 [Releases with the MÁV index](#releases-with-the-máv-index)); such an
 install needs nothing more. Between releases the integration fetches the
 same index built every morning from MÁV's newest feed
-([The daily index](#the-daily-index-from-github-pages)), so the routes are at
-most a day behind MÁV, not a week. Without an index a train's map relies on a live
+([The daily MÁV index](#the-daily-máv-index)), so the routes are at most a
+day behind MÁV, however long ago the release was cut. Without an index a train's map relies on a live
 Transitous lookup, which sometimes finds no trip, and on BKK FUTÁR, which
 only knows trains around Budapest. With one, every train in Hungary draws
 its own route.
@@ -121,7 +121,7 @@ curl -X POST -H "Authorization: Bearer $HA_TOKEN" \
 ```
 
 A daily job that downloads (and pfaedle-matches) the feed can end with this
-call. With the [daily index](#the-daily-index-from-github-pages) on (the
+call. With the [daily index](#the-daily-máv-index) on (the
 default) such a job is no longer needed to keep the routes current: it only
 matters for a feed of your own, or with the daily index turned off.
 
@@ -137,10 +137,9 @@ MÁV login as Actions secrets. Settings → Secrets and variables → Actions:
 | `MAV_GTFS_URL` | variable, optional | the zip's address; default `https://www.mavcsoport.hu/gtfs/gtfsMavMenetrend.zip` |
 | `VOLAN_GTFS_URL` | variable, optional | another Volán zip address (see [Feed sources](#feed-sources)) |
 
-With both secrets set, every release run (the weekly timetable release
-included) downloads MÁV's zip over https with HTTP Basic auth (the
-credentials go to a netrc file for that host only, never onto a command
-line or into the log), checks its length and zip directory, matches it to
+With both secrets set, every release run downloads MÁV's zip over https
+with HTTP Basic auth (the credentials go to a netrc file for that host only,
+never onto a command line or into the log), checks its length and zip directory, matches it to
 the [Geofabrik](https://download.geofabrik.de/europe/hungary.html) Hungary
 extract (cached for a week) with a pinned pfaedle image, and builds and
 audits the index with `scripts/build_mav_index.py`. About a minute of
@@ -152,21 +151,22 @@ so wrong credentials cost one login per run; pfaedle gets 30 minutes. When
 the download, pfaedle or the audit fails, and on a run without the secrets,
 the release still goes out with the previous release's MÁV index (when the
 card still reads its format), the failure with a warning. A repository
-whose releases never had one (a fork) ships none. The weekly release counts
-a changed or new MÁV index (compared by content, not bytes) as a timetable
-change, so a new MÁV timetable alone publishes a patch; an index that is
-not in a build never does. The OSM extract is cached only after a build
-that went through. The **MÁV index** workflow runs the same pipeline on a
-pull request that touches it, or by hand, builds the index a second time
+whose releases never had one (a fork) ships none. The OSM extract is cached
+only after a build that went through. The **MÁV index** workflow runs the
+same pipeline on a pull request that touches it, or by hand, builds the index a second time
 from the same downloaded zip to check that it is reproducible, and keeps it
 as a 3-day artifact without publishing anything.
 
-### The daily index from GitHub Pages
+### The timetables on GitHub Pages
 
-MÁV publishes a new feed almost every day; releases come once a week. The
-**Daily MÁV index** workflow (`.github/workflows/mav-index-daily.yml`) runs
-the release's pipeline above twice a day, at 04:45 and 14:20 UTC, and
-publishes on GitHub Pages, under `https://bator.github.io/hungarian-transport/`.
+MÁV publishes a new feed almost every day, and the Volán and city
+publishers every few days or weeks; a release comes only with new code. The
+**Daily timetables (GitHub Pages)** workflow
+(`.github/workflows/mav-index-daily.yml`) publishes all three on GitHub
+Pages, under `https://bator.github.io/hungarian-transport/`, so that new
+timetables never need a new version: the MÁV index on every run, the Volán
+and city indexes once a week ([below](#the-volán-and-city-indexes)). It runs
+twice a day, at 04:45 and 14:20 UTC.
 In November 2026 MÁV's feed of the day appeared between about 03:20 and
 10:00 UTC, once only in the afternoon, and GitHub started the scheduled runs
 hours late (one set for 03:15 started between 10:00 and 11:30 UTC every
@@ -175,16 +175,19 @@ catches a feed MÁV publishes in the afternoon. A run started by hand
 (`workflow_dispatch`) comes on top; one run goes at a time and one waits, and
 the times are chosen so that at most one scheduled run can meet a dispatch
 sent between 09:30 and 11:30 UTC, so a waiting run is never cancelled by a
-third. A run that finds the content already published deploys nothing.
+third. A run that finds nothing new to publish deploys nothing.
 The files:
 
 | File | What it is |
 | --- | --- |
 | `mav-index.json.gz` | the integration's train route index |
-| `mav-index.json` | the manifest (below) |
+| `mav-index.json` | the MÁV manifest (below) |
 | `mav-gtfs.zip` | MÁV's official GTFS, byte for byte as downloaded for this build (CC0) |
 | `mav-pfaedle-overlay.zip` | pfaedle's `shapes.txt`, `stop_times.txt` and `trips.txt` of the same feed |
-| `ATTRIBUTION.txt`, `index.html` | what the files are, sources and licences |
+| `timetables.json` | the Volán and city manifest ([below](#the-volán-and-city-indexes)) |
+| `volan-index.json.gz`, `city-index.json.gz` | the Volán and city indexes, byte for byte as the release's builders write them |
+| `volan-shapes-<hash>/`, `city-shapes-<hash>/` | each index's route shapes: the folder its head names (`"sh"`), 64 files `00.json.gz` to `63.json.gz` |
+| `ATTRIBUTION.txt`, `index.html` | what the files are, sources and licences, for the whole site |
 
 The overlay holds the three tables pfaedle rewrites when it matches every
 train to the OpenStreetMap rails: use them in place of the official feed's
@@ -192,15 +195,19 @@ tables of the same names (for a GTFS consumer such as Dawarich, or anything
 else). It is zipped deterministically (sorted names, fixed timestamps,
 deflate at level 9), so the same three tables give the same bytes; pfaedle
 itself writes slightly different tables on every run, even for the same feed,
-so the overlay's bytes do not decide whether to publish (below). The site
-is about 35 MB; one over 500 MB (half of GitHub Pages' 1 GB limit) is not
-published, and the run's log lists every file's size.
+so the overlay's bytes do not decide whether to publish (below). The MÁV
+files are about 35 MB; a site over 500 MB (half of GitHub Pages' 1 GB limit)
+is not published, and the run's log lists every file's size.
 
 **Attribution.** The MÁV GTFS is published by MÁV-csoport under CC0 1.0;
 `ATTRIBUTION.txt` names MÁV-csoport (<https://www.mavcsoport.hu/gtfs>) as
 its source. The shapes (in the overlay and in the route index) are derived
 from OpenStreetMap data: © OpenStreetMap contributors, Open Database License
 (ODbL) 1.0; credit them when you publish anything built on these files.
+The Volán and city indexes are built from the feeds in [Feed
+sources](#feed-sources), under their publishers' terms; `ATTRIBUTION.txt`
+and `index.html` name those sources and licences as well (CC BY 4.0 for
+Máté Gyöngyösi's feeds: credit them too).
 
 **Where the CC0 statement comes from.** From MÁV-csoport's GTFS page,
 <https://www.mavcsoport.hu/gtfs>, which sits behind the same registered
@@ -209,11 +216,48 @@ one it answers HTTP 401). The site republishes `mav-gtfs.zip` on that
 statement alone, and nothing checks it automatically: the repository owner
 should keep it verified and stop publishing the zip if MÁV's terms change.
 
-The manifest names the manifest `format` (1), the index `schema`, the `feed`
-(`feed_version`), `built_at` (UTC), `size`, `sha256`, the content `digest`
-(`scripts/index_digest.py`), trains and lines, the audit (trains and trips
-that passed), the `commit` it was built from, and a `gtfs` object (sizes
-here are examples):
+**Checking a download.** Each deploy attests the files it deployed (a
+build provenance attestation, as for the release zips), taken from the very
+files Pages deployed: `mav-index.json.gz`, `mav-index.json`, `mav-gtfs.zip`
+and `mav-pfaedle-overlay.zip` when the site has them, `timetables.json`, and
+`volan-index.json.gz` and `city-index.json.gz` when it has them; the
+shapes files are covered by their sizes and sha256 in the attested
+`timetables.json`. A site without the MÁV files (a fork without the MÁV
+secrets) attests the rest. A file carried over from an earlier deploy is
+attested again with the site it goes out with:
+
+```sh
+gh attestation verify mav-gtfs.zip --repo bator/hungarian-transport \
+  --signer-workflow bator/hungarian-transport/.github/workflows/mav-index-daily.yml \
+  --source-ref refs/heads/main
+gh attestation verify volan-index.json.gz --repo bator/hungarian-transport \
+  --signer-workflow bator/hungarian-transport/.github/workflows/mav-index-daily.yml \
+  --source-ref refs/heads/main
+```
+
+`--source-ref` pins the branch: a run started by hand from another branch
+signs with a workflow file of the same name, and its files do not pass.
+
+The attestation is made after the deploy, in a job of its own, so a
+Sigstore outage never holds back the day's files; the run is then red, and
+the files it deployed have none (the check fails, it never passes) until a
+later run deploys again, or "Re-run failed jobs" attests them while the
+run's Pages artifact is kept (three days). That re-run repeats only the
+attestation, never the deploy. It waits in the workflow's concurrency group
+like any run, and made while another run waits there, it cancels that one:
+re-run when no run of the workflow is queued.
+The integration does not check the attestation: Home Assistant has no
+Sigstore client, and the integration takes no new dependency for one. It
+checks each file against its manifest's size and sha256, which come from
+the same site, so it trusts GitHub Pages and this repository's workflow.
+
+#### The daily MÁV index
+
+`mav-index.json`, the MÁV manifest, names the manifest `format` (1), the
+index `schema`, the `feed` (`feed_version`), `built_at` (UTC), `size`,
+`sha256`, the content `digest` (`scripts/index_digest.py`), trains and
+lines, the audit (trains and trips that passed), the `commit` it was built
+from, and a `gtfs` object (sizes here are examples):
 
 ```json
 "gtfs": {
@@ -229,34 +273,8 @@ here are examples):
 consumer can fetch the small manifest first and download the zips only when
 `feed_version` or a `sha256` changed.
 
-**Checking a download.** Each deploy attests `mav-index.json.gz`,
-`mav-index.json`, `mav-gtfs.zip` and `mav-pfaedle-overlay.zip` (a build
-provenance attestation, as for the release zips), taken from the very files
-Pages deployed:
-
-```sh
-gh attestation verify mav-gtfs.zip --repo bator/hungarian-transport \
-  --signer-workflow bator/hungarian-transport/.github/workflows/mav-index-daily.yml \
-  --source-ref refs/heads/main
-```
-
-`--source-ref` pins the branch: a run started by hand from another branch
-signs with a workflow file of the same name, and its files do not pass.
-
-The attestation is made after the deploy, in a job of its own, so a
-Sigstore outage never holds back the day's index; the run is then red, and
-the files it deployed have none (the check fails, it never passes) until a
-later run deploys again, or "Re-run failed jobs" attests them while the
-run's Pages artifact is kept (three days). That re-run repeats only the
-attestation, never the deploy. It waits in the workflow's concurrency group
-like any run, and made while another run waits there, it cancels that one:
-re-run when no run of the workflow is queued.
-The integration does not check the attestation: Home Assistant has no
-Sigstore client, and the integration takes no new dependency for one. It
-checks the index against the manifest's size and sha256, which come from the
-same site, so it trusts GitHub Pages and this repository's workflow.
-
-Nothing is published, and the site keeps the previous day's files, when the
+No new MÁV index is published, and the site keeps the previous day's MÁV
+files (a deploy for new Volán or city indexes carries them over), when the
 secrets are missing, the download, pfaedle or the audit fails, the site is
 refused (a feed whose `feed_version` does not start with a real date, a site
 over 500 MB), or the index and MÁV's zip are the ones already published
@@ -268,7 +286,7 @@ old or older, or names no build time, and at once when MÁV refuses the login
 (HTTP 401/403, which is never retried: only new credentials help). A
 published manifest that cannot be read leaves the run green with a warning.
 
-The integration reads the manifest about 10 to 20 minutes after Home
+The integration reads `mav-index.json` about 10 to 20 minutes after Home
 Assistant starts (and after the options are saved, which reloads the
 integration, so a changed option takes effect the same day), then once a
 day at the **Daily check time** of its options (06:00 local time unless
@@ -302,9 +320,8 @@ redirects every `github.io` URL once a custom domain is set), each round
 fails with a warning naming the redirect until an update of the integration
 reads the new address. The index is written next to the card the way a
 build writes it (a temp file, then a rename) and never while a local build
-runs or waits. A
-failed round, or one that found a build running, is tried again 20 minutes
-later, up to 6 times until the next daily round. The day's feed is on Pages
+runs or waits. A failed round, or one that found a build running, is tried
+again 20 minutes later, up to 6 times until the next daily round. The day's feed is on Pages
 around midday or in the afternoon (above), so a round that finds the
 manifest's feed of an earlier day (or the manifest built over 20 hours ago)
 looks again two to three hours later, up to 4 times after the daily (or the
@@ -314,18 +331,154 @@ downloaded only when its feed is newer. A failed round leaves the index as it is
 warning, not one per round; no Repairs issue. Open dashboards pick the new index up at their next
 reload (the card revalidates it, and Home Assistant answers with a new ETag).
 
-**Opting out.** Settings → Devices & services → Hungarian transport →
-Configure → *Daily MÁV route index from GitHub*. Off, Home Assistant makes no
-request to GitHub Pages and keeps the weekly release's index (or the one it
-builds from your feed).
+#### The Volán and city indexes
 
-**Privacy.** With the option on, Home Assistant contacts `bator.github.io`
-(GitHub Pages) once a day, and up to 4 more times that day for the manifest
-alone while it is not yet of the day: a plain HTTPS GET of the manifest and
-the index (never the GTFS zips),
-no cookies, nothing beyond what any HTTP request carries (your IP address,
-and Home Assistant's user agent with its version). Nothing about your
-configuration is sent.
+The Volán and city indexes are rebuilt once a week, not on every run: their
+publishers change a timetable every few days or weeks, and a rebuild
+downloads every city feed again. The `timetables` job of a run rebuilds both
+when the published `timetables.json`
+
+- is missing (HTTP 404: the site's first such run, or a fork) or cannot be
+  read,
+- lacks one of the two indexes,
+- has an index built 6 days 12 hours ago or earlier, or
+- names another index schema than the one the workflow's commit builds,
+
+and on a run started by hand with the `timetables` input ticked (rebuild
+the Volán and city indexes now). 6 days 12 hours, not 7 days: GitHub starts
+the scheduled runs hours late, by a different amount every day. With a full
+week, a morning run that started a little earlier than the one a week before
+would find the indexes a few minutes too young and leave them to the
+afternoon run, and the rebuild would drift later week by week. With half a
+day to spare, the same morning run of the next week rebuilds them.
+
+The rebuild runs the release's builders (`scripts/build_volan_index.py`,
+`scripts/build_city_index.py`) on the workflow's commit, with the release's
+repository secrets and variables (`BAHART_GTFS_URL`,
+`MOBILITY_DATABASE_REFRESH_TOKEN`, `TRANSITLAND_API_KEY`, `VOLAN_GTFS_URL`,
+`HUNGARIAN_TRANSPORT_ALLOW_MISSING`; no MÁV login) and the release's guards
+([When an update fails](#when-an-update-fails)). The previous indexes they
+are compared with are the ones on the site (checked against
+`timetables.json`, shapes included), or, when the site has none that check
+out, the latest stable release's. A city feed whose download fails keeps
+its part of that previous index (*City feed carried over*, see [When an
+update fails](#when-an-update-fails)), so one publisher's outage does not
+hold back the other feeds. Volán and city are independent: a builder that
+fails, or whose guard refuses its index, leaves only that index as it is on
+the site, with a warning on the run.
+
+Every deploy replaces the whole site, so the run's `site` job puts it
+together from both parts: the MÁV files of this run, else the ones already
+published (every file `mav-index.json` names); each Volán or city index of
+this run, else the published one with its shapes, checked against the
+published `timetables.json` (the size and sha256 of every file). It deploys
+when the MÁV part or at least one of the two indexes is new. When a file
+the published manifests name cannot be carried over (it does not download,
+or does not match), the run fails and deploys nothing: the new site would
+lack that file. A manifest that is not there at all (404) carries nothing
+and is no failure.
+
+`timetables.json` (at most 64 KiB) describes both indexes (sizes, hashes
+and counts here are examples):
+
+```json
+{
+ "format": 1,
+ "schema": 29,
+ "built_at": "2026-11-16T10:40:00Z",
+ "commit": "…",
+ "indexes": {
+  "volan": {
+   "url": "volan-index.json.gz", "size": 3600000, "sha256": "…",
+   "feed": "volan:01716.20261102", "built_at": "2026-11-16T10:40:00Z",
+   "trips": 120000, "stops": 9000,
+   "shapes": {"dir": "volan-shapes-0123456789", "n": 64,
+              "files": {"00.json.gz": {"size": 90000, "sha256": "…"}, "…": {}}}
+  },
+  "city": {
+   "url": "city-index.json.gz", "size": 1400000, "sha256": "…",
+   "feed": "miskolc:1.3;veszprem:20260831-1;…", "built_at": "2026-11-09T10:35:00Z",
+   "trips": 60000, "stops": 7000, "operators": 22,
+   "shapes": {"dir": "city-shapes-…", "n": 64, "files": {"…": {}}}
+  }
+ }
+}
+```
+
+- `format` is the manifest's (1); `schema` the indexes' format (`"v"` in
+  each index, the same for both); `built_at` is when this site was put
+  together, `commit` the commit of the run.
+- Per index: `url`, `size` and `sha256` of the index file; `feed`, exactly
+  the index's own `"feed"` (the Volán feed version, or the city operators'
+  feed versions); `built_at`, when that index was built; `trips`, `stops`,
+  and for the city index `operators`.
+- `shapes` names the folder from the index's head (`dir`), its number of
+  files (`n`, 64) and the size and sha256 of each, `00.json.gz` to
+  `63.json.gz`; it is `null` for an index without shapes.
+- An index carried over from the previous site keeps its entry as it was,
+  `built_at` included, so the week counts from its last real build. An
+  index that was never built is not listed.
+
+The workflow builds the commit it runs on (main), not the latest release.
+When main changes the index format before a release, the site carries the
+new `schema` from its next rebuild, and installs of the older release skip
+the Volán and city indexes there (`unsupported`) and keep theirs until they
+update; a release with the new format brings indexes of it.
+
+**Installing them.** The integration checks `timetables.json` in the same
+round as the daily MÁV index, right after it: about 10 to 20 minutes after
+Home Assistant starts (or the options are saved) and then once a day at the
+*Daily check time*. A failed check is tried again a few times that day. A
+manifest whose `format` or `schema` this version does not read is skipped
+(one line in the log; nothing installed). Otherwise each index is installed
+when it is missing from `www/` or its feed on the site is newer than the
+one in use:
+
+- Volán: the date in its feed version is later.
+- City: compared operator by operator. No operator in both indexes may have
+  an older dated feed on the site, and at least one has a later one, or the
+  set of operators differs. A feed that cannot be dated counts as newer when
+  it differs.
+
+So an index the [local rebuild](#keeping-the-gtfs-indexes-current) made
+from newer feeds stays, and so does a release's index whose feeds are newer
+than the site's. After a HACS update the release's indexes are served until that
+check runs, which installs the site's again when they are newer.
+
+Nothing in `www/` changes until the download checks out: the index's size
+and sha256, a single gzip stream, its head (`"v"` the manifest's `schema`,
+`"feed"` its feed, `"sh"` its shapes), and the size and sha256 of every
+shapes file; at most 48 MiB for an index, 8 MiB for a shapes file and
+160 MiB for an index with its shapes. A file that does not match right after
+a deploy is looked at again later, as for the MÁV index (the Pages cache,
+above). The shapes folder goes in first, written under a temporary name and
+renamed into place (a folder of that name that already checks out is kept),
+then the index, as a temp file renamed over the old one, so the card never
+reads an index whose shapes are missing. The previous shapes folder is
+marked retired and removed 26 hours later: an open dashboard keeps the old
+index until it reloads (at the latest at midnight) and reads its shapes
+until then. The timetable sensors update at once, and the install is
+recorded, so a later release that ships the same feeds or older ones does
+not announce them as new timetables.
+
+#### Options, privacy and notifications
+
+**Opting out.** Settings → Devices & services → Hungarian transport →
+Configure: *Daily MÁV route index from GitHub* for the MÁV index, *Weekly
+Volán and city timetables from GitHub* for the other two; both are on by
+default. Off, Home Assistant makes no request to GitHub Pages for those
+indexes and uses the ones it has: the release's, one installed from Pages
+before (until an update of the integration replaces it), or the ones it
+builds from your feeds.
+
+**Privacy.** With the MÁV option on, Home Assistant contacts
+`bator.github.io` (GitHub Pages) once a day, and up to 4 more times that day
+for the manifest alone while it is not yet of the day; with the timetables
+option on, once a day for `timetables.json`, and for the indexes and their
+shapes only when they are newer (about once a week). Each is a plain HTTPS
+GET (never the GTFS zips), no cookies, nothing beyond what any HTTP request
+carries (your IP address, and Home Assistant's user agent with its
+version). Nothing about your configuration is sent.
 
 **Notifications.** With *Notify about timetable updates* on in the same
 options, the integration creates a persistent notification (one per kind; a
@@ -334,12 +487,16 @@ new one replaces the old) when:
 - the daily MÁV index was installed (the feed's date, trains and lines).
   MÁV publishes almost daily, so this one calls the service below only with
   *Also notify about daily MÁV index installs* on;
+- the Volán or city index from GitHub Pages was installed, naming which
+  and their feeds, in the style of the one about shipped timetables below;
 - after an update of the integration, the indexes it ships (Volán, city,
   MÁV) are of other feeds than the ones it saw before, naming which. The
   first run only records them; changes the integration makes itself (the
-  daily index, a local build) are not news, nor a shipped MÁV index older
-  than the daily one in use;
-- the daily index failed on 3 consecutive days: once, and the notification
+  daily MÁV index, the Volán and city indexes from Pages, a local build)
+  are not news, nor a shipped index whose feeds the integration already
+  installed from Pages, nor a shipped MÁV index older than the daily one in
+  use;
+- the daily MÁV index failed on 3 consecutive days: once, and the notification
   goes away when a round succeeds again. A day with only rounds that found
   a build running (or a manifest this version does not read) neither counts
   nor breaks the streak; a day without any round (Home Assistant off) starts
@@ -397,46 +554,42 @@ chair.
 ## Keeping the GTFS indexes current
 
 HACS installs the indexes that were built when the GitHub release was cut,
-and a published release never changes afterwards. A weekly GitHub Action
-rebuilds the indexes on the latest stable release's code (the highest
-`X.Y.Z` by version, not the newest by date); when a feed
-changed, it publishes them as the next patch release (1.9.12 → 1.9.13),
-tagged on that same commit, so HACS offers the new timetables as an
-ordinary update and no unreleased code goes out with them. When nothing
-changed, nothing is published: the indexes are compared by content (every
-trip with its stops, times, service days and route shape), not by their
-bytes, so a rebuild that only lists the same trips in another order is no
-change.
+and a published release never changes afterwards. A release is made for
+new code only, and ships the indexes current at release time: Volán, city,
+and MÁV when built. Between releases the integration installs the newer
+timetables itself from GitHub Pages: the Volán and city indexes rebuilt
+every week, and the MÁV index every day ([The timetables on GitHub
+Pages](#the-timetables-on-github-pages)). So new timetables need no new
+version, and HACS offers an update only for new code. (Up to the 1.10
+releases, a weekly job published new timetables as a patch release on the
+latest stable code instead.)
 
-Version numbers keep the timetable releases and the live-Lovelace
-prereleases apart. A `rev` run publishes main as `X.Y.(Z+2)-rev.N` after
-stable `X.Y.Z` (1.9.15-rev.1 after 1.9.13), leaving the next patch (1.9.14)
-to the weekly timetable release, which semver ranks below the prerelease:
-beta users stay on main. A later `rev` run continues an open series, or
-starts one two patches above a newer stable. A `patch` run publishes main
-under the open series' number (1.9.15), so what the beta ran ships under
-its own version; without an open series it is the next patch. While a
-series is open, every weekly timetable release is followed by a `rev` run
-from main that the workflow starts itself: main with the fresh indexes,
-two patches above the new stable, so the beta channel stays above it on
-main's code. That run is a prerelease, not a refresh, and starts nothing
-further. Only if it failed does the next weekly release find the open
-series on the very next patch; it then takes the number above the series
-and warns: beta users are offered that release's older code until a `rev`
-run is published. The version is picked from GitHub's list of releases and
-tags; when GitHub does not answer, the run stops instead of guessing. A release run compares the new indexes with
-the latest published ones: a city feed that is gone, a feed that lost more
-than half of its trips, or a Volán index with far too few trips fails the
-run. Trips whose own service has ended (a summer timetable in October) do
-not count as lost: the comparison is on the trips that still run, and when
-those are under a quarter of the old index, the new one has to keep 90% of
-them (under 50 still running: all trips). A failed run makes no release
-(see [When an update fails](#when-an-update-fails)).
+Version numbers: a `rev` run publishes main as the prerelease
+`X.Y.(Z+2)-rev.N` after stable `X.Y.Z` (1.9.15-rev.1 after 1.9.13), leaving
+the next patch (1.9.14) free. The weekly timetable releases used to take
+that number; the gap stays so that existing beta installs stay ordered: a
+beta install on `X.Y.(Z+2)-rev.N` is only offered a higher version, and a
+series that started on the next patch instead would rank below it. A later
+`rev` run continues an open series, or starts one two patches above a newer
+stable. A `patch` run publishes main under the open series' number
+(1.9.15), so what the beta ran ships under its own version; without an open
+series it is the next patch. The version is picked from GitHub's list of
+releases and tags; when GitHub does not answer, the run stops instead of
+guessing. A release run compares the new indexes with the latest published
+ones: a city feed that is gone, a feed that lost more than half of its
+trips, or a Volán index with far too few trips fails the run. Trips whose
+own service has ended (a summer timetable in October) do not count as lost:
+the comparison is on the trips that still run, and when those are under a
+quarter of the old index, the new one has to keep 90% of them (under 50
+still running: all trips). A failed run makes no release (see [When an
+update fails](#when-an-update-fails)); a city feed whose download fails
+fails a release too, where the weekly Pages rebuild carries it over.
 To accept a feed that is gone for good, list its id in the `allow_missing`
-input of a manual run, or in the `HUNGARIAN_TRANSPORT_ALLOW_MISSING`
-repository variable for every run including the weekly one (the input adds
-to the variable), and drop it from `CITY_FEEDS`.
-Between releases, the local rebuild below keeps an install current every day.
+input of a manual release run, or in the `HUNGARIAN_TRANSPORT_ALLOW_MISSING`
+repository variable for every run, the weekly Pages rebuild included (the
+input adds to the variable), and drop it from `CITY_FEEDS`.
+The local rebuild below keeps an install current every day, ahead of the
+weekly indexes on Pages.
 Every release also publishes `SHA256SUMS`, `hungarian-transport-build.json`
 and a build provenance attestation: check a download with
 `sha256sum -c SHA256SUMS`
@@ -452,17 +605,17 @@ gh attestation verify hungarian-transport.zip --repo bator/hungarian-transport \
 `--signer-workflow` pins the release workflow: another workflow of the
 repository signs with the same repository, and its files do not pass.
 `--source-ref` is the ref the run started from: `refs/heads/main` for a
-release the workflow tagged itself, the weekly timetable release and a
-manual run (`"event": "schedule"` or `"workflow_dispatch"` in
-`hungarian-transport-build.json`; a manual run from another branch stops
-before it builds anything), which is how releases are made.
+release the workflow tagged itself, a manual run (`"event":
+"workflow_dispatch"` in `hungarian-transport-build.json`; a manual run from
+another branch stops before it builds anything), which is how releases are
+made, and the weekly timetable releases up to 1.10 (`"event": "schedule"`).
 Only a release cut by pushing its tag (`"event": "push"`) was built from
 `refs/tags/<tag>`, and passes with that instead.
-The attestation names the commit of the workflow run that built the zip. On
-a weekly timetable release that is the head of `main` (where the workflow
-runs), not the tagged commit the zips are built from;
-`hungarian-transport-build.json` gives both, `built_commit` (the tag) and
-`workflow_commit` (the run).
+The attestation names the commit of the workflow run that built the zip;
+`hungarian-transport-build.json` gives `built_commit` (the tag's) and
+`workflow_commit` (the run's), the same commit. On a weekly timetable
+release up to 1.10 they differ: the workflow ran on the head of `main` and
+built the stable tag's commit.
 
 To rebuild them yourself on Home Assistant OS:
 
@@ -548,14 +701,22 @@ cards use and when they changed:
 | Entity | State | Attributes |
 | --- | --- | --- |
 | `sensor.hungarian_transport_mav_route_index` (MÁV route index) | date of the served MÁV index's feed (`20261030.M2ChangeID` → 2026-10-30) | `feed_version`; `source`: `daily` (the daily index installed it), `local` (a build of `/config/hungarian-transport/mav-gtfs.zip`, an upload, or the local updater, whose durable copy is this index) or `release`; `installed_at` (UTC); `trains`, `lines`; `fitted_share` (the share of routes that follow the rails rather than the line through the stations); `audit_ok_ratio` when the build or the manifest gave one |
-| `sensor.hungarian_transport_volan_timetable` (Volán timetable) | date in the Volán index's feed version (`volan:01716.20261102` → 2026-11-02) | `feed_version`, `trips`, `stops`, `updated_at` (the index's build time from its gzip header, else the file's time), `source`: `local_updater` when the updater's copy in `/config/hungarian-transport` is this index, else `release` |
-| `sensor.hungarian_transport_city_timetables` (City timetables) | when the city index was built (timestamp) | `operators`, `trips`, and `feeds` (operator → feed version) when there are at most 10 |
+| `sensor.hungarian_transport_volan_timetable` (Volán timetable) | date in the Volán index's feed version (`volan:01716.20261102` → 2026-11-02) | `feed_version`, `trips`, `stops`, `updated_at` (the index's build time from its gzip header, else the file's time), `source`: `pages` when it is the index the integration installed from [GitHub Pages](#the-volán-and-city-indexes), `local_updater` when the updater's copy in `/config/hungarian-transport` is this index, else `release`; `pages_checked_at`, `pages_result` (below) |
+| `sensor.hungarian_transport_city_timetables` (City timetables) | when the city index was built (timestamp) | `operators`, `trips`, and `feeds` (operator → feed version) when there are at most 10; `source`: `pages`, `local_updater` or `release`, as for Volán; `pages_checked_at`, `pages_result` (below) |
 | `sensor.hungarian_transport_daily_mav_check` (Daily MÁV check) | when the daily MÁV index last ran (timestamp; unknown before its first round) | `result`: `installed`, `up_to_date`, `superseded` (www/ serves a newer feed than the manifest's), `local_wins`, `busy`, `failed`, `unsupported`, or `disabled` with the option off; `manifest_feed`, `manifest_built_at`, `next_run` (UTC), `failure_streak` (days in a row) |
 
+`pages_checked_at` is when the integration last read `timetables.json`
+(UTC), and `pages_result` what that check did for this index: `installed`,
+`up_to_date` (the site's feed is not newer than the one in use, a local
+build included), `failed` (the manifest or the download did not check out;
+the index stays as it was), `unsupported` (a manifest format or index
+schema this version does not read), or `disabled` with the *Weekly Volán
+and city timetables from GitHub* option off.
+
 An index sensor is unavailable while its index is missing from www/. The
-sensors update right after the daily index or a local MÁV build changed
-something, and every 30 minutes otherwise, which catches the local
-updater and HACS. Each index is read again only when its file changed
+sensors update right after the daily index, a Pages install or a local MÁV
+build changed something, and every 30 minutes otherwise, which catches the
+local updater and HACS. Each index is read again only when its file changed
 (size or time), in the background: the Volán and city indexes are
 streamed, not loaded.
 
@@ -572,6 +733,10 @@ entities:
     attribute: source
     name: MÁV index source
   - entity: sensor.hungarian_transport_volan_timetable
+  - type: attribute
+    entity: sensor.hungarian_transport_volan_timetable
+    attribute: source
+    name: Volán timetable source
   - entity: sensor.hungarian_transport_city_timetables
     format: relative
   - entity: sensor.hungarian_transport_daily_mav_check
@@ -609,9 +774,23 @@ itself. `/config/hungarian-transport/update.log` has the details.
 - *… megszakítva* or *… megölve* — Home Assistant restarted during the run,
   the 30-minute limit hit, or the host ran out of memory.
 
-The city index (locally and in a release run) is not replaced when the
-rebuild would lose a feed that the index in place still runs, or more than
-half of a feed's trips. Each feed is judged on its own. A feed whose trips
+The indexes from GitHub Pages fail on two sides:
+
+- On GitHub, a Volán or city build that fails, or that a guard below
+  refuses, leaves the published index on the site, with a warning on the
+  run. That index keeps its old `built_at`, so the next run (twice a day)
+  tries again. A published file that cannot be carried over into the new
+  site fails the run, and nothing is deployed: the site stays as it was.
+- In Home Assistant, a check that fails (GitHub unreachable, a redirect, a
+  file that still does not match its manifest when looked at again) leaves
+  `www/` as it was, logs a warning and shows `failed` in the sensors'
+  `pages_result`; it is tried again later that day and at the next daily
+  check. A manifest this version does not read (`unsupported`) installs
+  nothing until the integration is updated; the indexes in use stay.
+
+The city index (locally, in a release run and in the weekly Pages rebuild)
+is not replaced when the rebuild would lose a feed that the index in place
+still runs, or more than half of a feed's trips. Each feed is judged on its own. A feed whose trips
 in the index have all ended has nothing left to lose; one that still runs is
 compared on the trips that still run (a trip counts while its own service
 has days left), on both sides, as long as they are at least a quarter of its
@@ -624,13 +803,14 @@ single feed, compared the same way: it is refused with fewer than half the
 trips of the one in place. The message names the feed:
 
 - `<id> missing (had N trips)` — the feed did not download or parse.
-  On the weekly timetable release such a feed keeps the previous
-  release's timetable instead, with a *City feed carried over* warning that
-  names the error, as long as no more than three feeds failed at once (more
-  is the network, not one publisher) and the previous release has a running
-  timetable of it; a feed listed in `HUNGARIAN_TRANSPORT_ALLOW_MISSING` is
-  left out as before. This takes effect once a stable release has the
-  builder that does it: the weekly release builds the stable tag's scripts.
+  On the weekly Pages rebuild such a feed keeps its timetable from the
+  previous index (the site's, else the latest release's) instead, with a
+  *City feed carried over* warning that names the error, as long as no more
+  than three feeds failed at once (more is the network, not one publisher)
+  and the previous index has a running timetable of it; a feed listed in
+  `HUNGARIAN_TRANSPORT_ALLOW_MISSING` is left out as before. A release run
+  carries nothing over: such a feed fails it, unless `allow_missing` names
+  it.
 - `<id> calendar ended YYYY-MM-DD (had N trips, the previous index runs until
   YYYY-MM-DD)` — the publisher's new zip ends before the timetable already
   in the index.
@@ -718,7 +898,10 @@ from a GitHub release into `/config/www/hungarian-transport/` and add the
 `/local/hungarian-transport/hungarian-transport.js` resource (`type: module`).
 The zip holds the card bundle, the `leaflet/` folder the maps load, and the
 GTFS indexes with their shapes folders. This does not install the ELVIRA
-backend.
+backend, and nothing installs the newer indexes from GitHub Pages either:
+download them yourself (`timetables.json` names each file and its shapes
+folder, see [The Volán and city indexes](#the-volán-and-city-indexes)) or
+use the local rebuild.
 
 To build the indexes yourself, run the builders from the repository root.
 They write into the current directory, not into `dist/`:
