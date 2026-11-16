@@ -888,24 +888,39 @@ with tempfile.TemporaryDirectory() as tmp_name:
     mav_names = ("mav-index.json.gz", "mav-index.json", "mav-gtfs.zip", "mav-pfaedle-overlay.zip")
     tt_names = ("timetables.json", "volan-index.json.gz", "city-index.json.gz", "volan-shapes-0123456789/00.json.gz",
                 "volan-shapes-0123456789/01.json.gz", "city-shapes-abcdef0123/00.json.gz")
+    man = {"format": 1, "indexes": {"volan": {"shapes": {"dir": "volan-shapes-0123456789"}},
+                                    "city": {"shapes": {"dir": "city-shapes-abcdef0123"}}}}
+    site_all = (*mav_names, *tt_names, "ATTRIBUTION.txt", "index.html")
+    volan_only = ("timetables.json", "volan-index.json.gz", "volan-shapes-0123456789/00.json.gz",
+                  "volan-shapes-0123456789/01.json.gz")
+    # (label, files in the site, MAV_NEW, BUILT, attested, error). Only what
+    # this run built is attested: a file carried from the live site keeps the
+    # attestation of the run that built it.
     unpack_cases = (
-        ("the whole site", (*mav_names, *tt_names, "ATTRIBUTION.txt", "index.html"), (*mav_names, *tt_names), ""),
-        ("a site without the MÁV files (a fork without the MÁV secrets)", (*tt_names, "index.html"), tt_names, ""),
-        ("a site without a Volán index", (*mav_names, "timetables.json", "city-index.json.gz"),
-         (*mav_names, "timetables.json", "city-index.json.gz"), ""),
-        ("a site without the overlay", (*mav_names[:3], *tt_names), (), "mav-pfaedle-overlay.zip is not in the deployed site"),
-        ("a site without timetables.json", mav_names, (), "timetables.json is not in the deployed site"),
+        ("everything built this run", site_all, "true", "volan,city", (*mav_names, *tt_names), ""),
+        ("nothing new but timetables.json (no part built)", site_all, "false", "", ("timetables.json",), ""),
+        ("only the MÁV part new: the carried indexes are not attested", site_all, "true", "",
+         (*mav_names, "timetables.json"), ""),
+        ("only the Volán index new: MÁV and city carried, not attested", site_all, "false", "volan", volan_only, ""),
+        ("a fork without the MÁV secrets", (*tt_names, "index.html"), "false", "volan,city", tt_names, ""),
+        ("a new MÁV part without the overlay", (*mav_names[:3], *tt_names), "true", "", (),
+         "mav-pfaedle-overlay.zip is not in the deployed site"),
+        ("a built index missing from the site", (*mav_names, "timetables.json"), "false", "city", (),
+         "city-index.json.gz is not in the deployed site"),
+        ("a site without timetables.json", mav_names, "true", "", (), "timetables.json is not in the deployed site"),
+        ("an unexpected index name", site_all, "false", "volan,x", (), "unexpected index name"),
     )
-    for k, (label, names, want, error) in enumerate(unpack_cases):
+    for k, (label, names, mav_new, built, want, error) in enumerate(unpack_cases):
         ws = tmp / f"wf-unpack-{k}"
         (ws / "built").mkdir(parents=True)
         (ws / "runner" / "pages").mkdir(parents=True)
         for name in names:
             (ws / "built" / name).parent.mkdir(parents=True, exist_ok=True)
-            (ws / "built" / name).write_bytes(name.encode())
+            body = json.dumps(man).encode() if name == "timetables.json" else name.encode()
+            (ws / "built" / name).write_bytes(body)
         subprocess.run(["tar", "--directory", str(ws / "built"), "-cf", str(ws / "runner" / "pages" / "artifact.tar"),
                         "."], check=True)
-        done, outputs = bash(unpack_step, ws, RUNNER_TEMP=str(ws / "runner"))
+        done, outputs = bash(unpack_step, ws, RUNNER_TEMP=str(ws / "runner"), MAV_NEW=mav_new, BUILT=built)
         out_text = (ws / f"github_output_{0}").read_text() if (ws / "github_output_0").exists() else ""
         subjects = out_text.split("subjects<<SUBJECTS_EOF\n", 1)[1].split("SUBJECTS_EOF", 1)[0].splitlines() \
             if "subjects<<SUBJECTS_EOF" in out_text else []
@@ -914,9 +929,9 @@ with tempfile.TemporaryDirectory() as tmp_name:
             ok = done.returncode == 1 and error in done.stdout
         else:
             ok = (done.returncode == 0 and sorted(subjects) == sorted(f"{unpacked}/{n}" for n in want)
-                  and all(Path(x).read_bytes() == Path(x).relative_to(unpacked).as_posix().encode() for x in subjects))
+                  and all(Path(x).is_file() for x in subjects))
         check(f"the deployed site unpacked for its attestation, {label}: "
-              + (f"an error naming {error.split()[0]}" if error else "every file there, one per line, nothing else"),
+              + (f"an error naming {error.split()[0]}" if error else "this run's files, one per line, nothing else"),
               ok, repr((done.returncode, done.stdout, done.stderr, subjects)))
 
 # ---- the workflow text ------------------------------------------------------
@@ -1089,7 +1104,7 @@ check("the deploy job ends with the deploy: no attestation step a re-run would d
       deploy_steps[-1].startswith("- uses: actions/deploy-pages@") and "actions/attest@" not in deploy
       and "download-artifact" not in deploy, repr(deploy_steps))
 check("the attest job runs after the deploy, never deploys, and runs nothing from the repository",
-      "    needs: deploy" in attest_job
+      "    needs: [build, timetables, deploy]" in attest_job
       and "    if: ${{ !cancelled() && needs.deploy.result == 'success' }}" in attest_job
       and "environment:" not in attest_job
       and "deploy-pages" not in attest_job and "actions/checkout" not in attest_job

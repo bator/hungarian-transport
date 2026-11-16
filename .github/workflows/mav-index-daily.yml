@@ -468,7 +468,7 @@ jobs:
   # (mav_daily.py, weekly_timetables.py).
   attest:
     name: Attest the published files
-    needs: deploy
+    needs: [build, timetables, deploy]
     # As the deploy job's: success() would also ask for the build job.
     if: ${{ !cancelled() && needs.deploy.result == 'success' }}
     runs-on: ubuntu-latest
@@ -484,11 +484,18 @@ jobs:
           name: github-pages
           path: ${{ runner.temp }}/pages
 
-      # The attested files, one per line: the action fails on a path that
-      # matches nothing, and a site may lack the MÁV files or an index. The
-      # four MÁV files come together (mav_pages_site.py writes them all).
+      # The attested files, one per line: only what this run built (the MÁV
+      # part when the build job made one, each Volán or city index the
+      # timetables job built with its shapes folder) and the timetables.json
+      # it wrote. A file carried over from the live site keeps the
+      # attestation of the run that built it: attesting it again here would
+      # vouch for bytes this run took from Pages, not from its own build.
+      # The four MÁV files come together (mav_pages_site.py writes them all).
       - name: Unpack the deployed site
         id: files
+        env:
+          MAV_NEW: ${{ needs.build.outputs.deploy == 'true' }}
+          BUILT: ${{ needs.timetables.outputs.built }}
         run: |
           set -euo pipefail
           site="$RUNNER_TEMP/site"
@@ -496,15 +503,25 @@ jobs:
           tar -xf "$RUNNER_TEMP/pages/artifact.tar" -C "$site"
           test -f "$site/timetables.json" || { echo "::error::timetables.json is not in the deployed site"; exit 1; }
           subjects=("$site/timetables.json")
-          if [ -f "$site/mav-index.json" ]; then
+          if [ "$MAV_NEW" = true ]; then
             for f in mav-index.json.gz mav-index.json mav-gtfs.zip mav-pfaedle-overlay.zip; do
               test -f "$site/$f" || { echo "::error::$f is not in the deployed site"; exit 1; }
               subjects+=("$site/$f")
             done
           fi
-          for f in "$site"/volan-index.json.gz "$site"/city-index.json.gz \
-              "$site"/volan-shapes-*/*.json.gz "$site"/city-shapes-*/*.json.gz; do
-            if [ -f "$f" ]; then subjects+=("$f"); fi
+          IFS=, read -r -a built <<< "$BUILT"
+          for name in "${built[@]}"; do
+            case "$name" in volan|city) ;; *) echo "::error::unexpected index name"; exit 1 ;; esac
+            test -f "$site/${name}-index.json.gz" || { echo "::error::${name}-index.json.gz is not in the deployed site"; exit 1; }
+            subjects+=("$site/${name}-index.json.gz")
+            dir=$(python3 -c 'import json,sys; e=json.load(open(sys.argv[1]))["indexes"][sys.argv[2]]; print((e.get("shapes") or {}).get("dir") or "")' \
+              "$site/timetables.json" "$name")
+            if [ -n "$dir" ]; then
+              [[ "$dir" =~ ^${name}-shapes-[0-9a-f]+$ ]] || { echo "::error::bad shapes folder name"; exit 1; }
+              shopt -s nullglob
+              for f in "$site/$dir"/*.json.gz; do subjects+=("$f"); done
+              shopt -u nullglob
+            fi
           done
           {
             echo "subjects<<SUBJECTS_EOF"

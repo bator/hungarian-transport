@@ -216,15 +216,17 @@ one it answers HTTP 401). The site republishes `mav-gtfs.zip` on that
 statement alone, and nothing checks it automatically: the repository owner
 should keep it verified and stop publishing the zip if MÁV's terms change.
 
-**Checking a download.** Each deploy attests the files it deployed (a
+**Checking a download.** Each deploy attests the files that run built (a
 build provenance attestation, as for the release zips), taken from the very
-files Pages deployed: `mav-index.json.gz`, `mav-index.json`, `mav-gtfs.zip`
-and `mav-pfaedle-overlay.zip` when the site has them, `timetables.json`, and
-`volan-index.json.gz` and `city-index.json.gz` when it has them; the
-shapes files are covered by their sizes and sha256 in the attested
-`timetables.json`. A site without the MÁV files (a fork without the MÁV
-secrets) attests the rest. A file carried over from an earlier deploy is
-attested again with the site it goes out with:
+files Pages deployed: `timetables.json` every time; `mav-index.json.gz`,
+`mav-index.json`, `mav-gtfs.zip` and `mav-pfaedle-overlay.zip` when the run
+built a new MÁV part; `volan-index.json.gz` or `city-index.json.gz` and the
+shards of its shapes folder when the run built that index. A file carried
+over from the live site is not attested again: it keeps the attestation of
+the run that built it. Attesting it again would vouch for bytes the run
+took from Pages rather than from its own build, so a file that reached
+Pages some other way (a run dispatched from another branch, say) could
+never pick up a `refs/heads/main` attestation by being carried:
 
 ```sh
 gh attestation verify mav-gtfs.zip --repo bator/hungarian-transport \
