@@ -755,7 +755,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
         "open('pt-args.txt', 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
         "cmd = sys.argv[1]\n"
         "def arg(n):\n    return sys.argv[sys.argv.index(n) + 1]\n"
-        "if cmd == 'due':\n    open(arg('--github-output'), 'a').write('due=true\\n')\n"
+        "if cmd == 'due':\n    open(arg('--github-output'), 'a').write('due=true\\nindexes=volan,city\\n')\n"
         "if cmd == 'baseline':\n"
         "    out = Path(arg('--out')); out.mkdir(parents=True, exist_ok=True)\n"
         "    for n in os.environ.get('STUB_BASELINE', '').split():\n"
@@ -770,38 +770,53 @@ with tempfile.TemporaryDirectory() as tmp_name:
     gh_env = {"GITHUB_REPOSITORY": "Bator/hungarian-transport", "GITHUB_REPOSITORY_OWNER": "Bator",
               "GITHUB_SHA": "b" * 40}
 
-    ws = tmp / "wf-due"
-    (ws / "scripts").mkdir(parents=True)
-    (ws / "scripts" / "pages_timetables.py").write_text(stub_pt)
+    def tools_ws(label: str, schema: str | None = "28") -> Path:
+        """A workspace as the timetables job has it: the stable release at
+        the root (its gtfs_compact.py naming its schema), the workflow
+        commit's scripts in .pages-tools."""
+        ws_ = tmp / label
+        (ws_ / ".pages-tools" / "scripts").mkdir(parents=True)
+        (ws_ / ".pages-tools" / "scripts" / "pages_timetables.py").write_text(stub_pt)
+        (ws_ / "scripts").mkdir()
+        (ws_ / "scripts" / "gtfs_compact.py").write_text(
+            "UA = 'x'\n" + (f"INDEX_SCHEMA = {schema}\n" if schema is not None else ""))
+        return ws_
+
+    ws = tools_ws("wf-due")
     due_step = step_script("Timetables due")
     for force in ("true", "false"):
         (ws / "pt-args.txt").unlink(missing_ok=True)
         done, outputs = bash(due_step, ws, FORCE=force, **gh_env)
         args = (ws / "pt-args.txt").read_text().split() if (ws / "pt-args.txt").exists() else []
-        check(f"the due step asks the repository's own Pages site, --force {force}, and passes due on",
-              done.returncode == 0 and outputs.get("due") == "true" and args[:1] == ["due"]
+        check(f"the due step runs the workflow commit's script with the stable release's schema, asks the"
+              f" repository's own Pages site, --force {force}, and passes due, indexes and schema on",
+              done.returncode == 0 and outputs.get("due") == "true" and outputs.get("indexes") == "volan,city"
+              and outputs.get("schema") == "28" and args[:1] == ["due"]
+              and args[args.index("--schema") + 1:args.index("--schema") + 2] == ["28"]
               and args[args.index("--live-url") + 1:args.index("--live-url") + 2]
               == ["https://bator.github.io/hungarian-transport"]
               and args[args.index("--force") + 1:args.index("--force") + 2] == [force]
-              if "--live-url" in args and "--force" in args else False, repr((done.returncode, done.stderr, args)))
+              if "--live-url" in args and "--force" in args and "--schema" in args else False,
+              repr((done.returncode, done.stderr, args, outputs)))
+    ws = tools_ws("wf-due-noschema", schema=None)
+    done, outputs = bash(due_step, ws, FORCE="false", **gh_env)
+    check("a stable release whose gtfs_compact.py names no schema: an error, nothing due",
+          done.returncode == 1 and "names no INDEX_SCHEMA" in done.stdout and "due" not in outputs,
+          repr((done.returncode, done.stdout, outputs)))
 
-    ws = tmp / "wf-baseline"
-    (ws / "scripts").mkdir(parents=True)
-    (ws / "scripts" / "pages_timetables.py").write_text(stub_pt)
+    ws = tools_ws("wf-baseline")
     base_step = step_script("Baseline indexes")
-    done, _ = bash(base_step, ws, STUB_BASELINE="volan city", **gh_env)
+    done, _ = bash(base_step, ws, STUB_BASELINE="volan city", TAG="v1.10.21", **gh_env)
     args = (ws / "pt-args.txt").read_text().split() if (ws / "pt-args.txt").exists() else []
-    check("the baseline step names the Pages site and the latest stable release's zip, and puts the indexes"
+    check("the baseline step names the Pages site and the stable release's zip, and puts the indexes"
           " in place for the builders' guards (a copy stays in .baseline)",
           done.returncode == 0 and (ws / "volan-index.json.gz").read_text() == "volan"
           and (ws / "city-index.json.gz").read_text() == "city" and (ws / ".baseline" / "city-index.json.gz").is_file()
           and "https://bator.github.io/hungarian-transport" in args and ".baseline" in args
-          and "https://github.com/Bator/hungarian-transport/releases/latest/download/hungarian-transport-frontend.zip"
+          and "https://github.com/Bator/hungarian-transport/releases/download/v1.10.21/hungarian-transport-frontend.zip"
           in args, repr((done.returncode, done.stderr, args)))
-    ws = tmp / "wf-baseline-none"
-    (ws / "scripts").mkdir(parents=True)
-    (ws / "scripts" / "pages_timetables.py").write_text(stub_pt)
-    done, _ = bash(base_step, ws, STUB_BASELINE="", **gh_env)
+    ws = tools_ws("wf-baseline-none")
+    done, _ = bash(base_step, ws, STUB_BASELINE="", TAG="v1.10.21", **gh_env)
     check("no baseline: the builders find no index in place, and the step goes on",
           done.returncode == 0 and not (ws / "volan-index.json.gz").exists(), repr((done.returncode, done.stderr)))
 
@@ -813,9 +828,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
                     "open(f'{name}-index.json.gz', 'w').write('built')\n")
 
     def tt_ws(label: str, baseline: bool = True) -> Path:
-        ws_ = tmp / f"wf-tt-{label}"
-        (ws_ / "scripts").mkdir(parents=True)
-        (ws_ / "scripts" / "pages_timetables.py").write_text(stub_pt)
+        ws_ = tools_ws(f"wf-tt-{label}")
         for n in ("volan", "city"):
             (ws_ / "scripts" / f"build_{n}_index.py").write_text(stub_builder)
         if baseline:
@@ -824,7 +837,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
         return ws_
 
     ws = tt_ws("ok")
-    done, outputs = bash(build_tt, ws, ALLOW_MISSING_VAR="", **gh_env)
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="", **gh_env)
     part_dir = ws / "runner-temp" / "timetables-part"
     check("both builders through: both indexes packed, built=volan,city, the city builder carries from .baseline",
           done.returncode == 0 and outputs.get("built") == "volan,city"
@@ -832,35 +845,98 @@ with tempfile.TemporaryDirectory() as tmp_name:
           and (ws / "city-env.txt").read_text() == ".baseline/city-index.json.gz ",
           repr((done.returncode, done.stdout, done.stderr, outputs)))
     ws = tt_ws("volan-fails")
-    done, outputs = bash(build_tt, ws, ALLOW_MISSING_VAR="", STUB_FAIL="volan", **gh_env)
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="", STUB_FAIL="volan", **gh_env)
     check("a failing Volán builder: a warning, only the city index packed, the step goes on",
           done.returncode == 0 and outputs.get("built") == "city"
           and "::warning title=volan index not built::build_volan_index.py failed (exit 3" in done.stdout
           and sorted(p_.name for p_ in (ws / "runner-temp" / "timetables-part").iterdir()) == ["city-index.json.gz"],
           repr((done.returncode, done.stdout, done.stderr, outputs)))
     ws = tt_ws("both-fail", baseline=False)
-    done, outputs = bash(build_tt, ws, ALLOW_MISSING_VAR="", STUB_FAIL="volan city", **gh_env)
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="", STUB_FAIL="volan city", **gh_env)
     check("both builders failing: two warnings, built empty (nothing uploaded), green; no carry without a baseline",
           done.returncode == 0 and outputs.get("built") == "" and done.stdout.count("::warning title=") == 2
           and (ws / "city-env.txt").read_text() == "- ", repr((done.returncode, done.stdout, outputs)))
-    check("each builder runs under a time limit that leaves the job's for the other one and the upload",
-          'timeout --kill-after=1m 25m python3 "scripts/build_${name}_index.py"' in build_tt
-          and int(re.search(r"^    timeout-minutes: (\d+)$", job("timetables"), re.M).group(1)) >= 2 * 25 + 2 + 5,
-          build_tt)
+    ok_args = tmp / "wf-tt-ok" / "pt-args.txt"
+    args = ok_args.read_text().split() if ok_args.exists() else []
+    check("the part is checked against the stable release's schema, by the workflow commit's script",
+          args[:1] == ["part"] and "--schema" in args and args[args.index("--schema") + 1] == "28"
+          and '.pages-tools/scripts/pages_timetables.py part --schema "$SCHEMA"' in build_tt, repr(args))
+    ws = tt_ws("city-due")
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="city", SCHEMA="28", ALLOW_MISSING_VAR="", **gh_env)
+    check("only the due index is built: city alone, the Volán builder never runs",
+          done.returncode == 0 and outputs.get("built") == "city" and not (ws / "volan-env.txt").exists()
+          and sorted(p_.name for p_ in (ws / "runner-temp" / "timetables-part").iterdir()) == ["city-index.json.gz"],
+          repr((done.returncode, done.stdout, done.stderr, outputs)))
+    ws = tt_ws("bad-name")
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,../x", SCHEMA="28", ALLOW_MISSING_VAR="", **gh_env)
+    check("an index name that is neither volan nor city stops the step", done.returncode == 1
+          and "unexpected index name" in done.stdout, repr((done.returncode, done.stdout)))
+    step_limits = [int(m) for m in re.findall(r"^        timeout-minutes: (\d+)$", job("timetables"), re.M)]
+    job_limit = int(re.search(r"^    timeout-minutes: (\d+)$", job("timetables"), re.M).group(1))
+    tt_step_count = sum(1 for ln in job("timetables").splitlines() if re.match(r"^      - ", ln))
+    check("every timetables step has its own time limit, the job's comfortably above their sum, and each builder"
+          " one that leaves its step's for the other one",
+          len(step_limits) == tt_step_count and job_limit >= sum(step_limits) + 10
+          and 'timeout --kill-after=1m 20m python3 "scripts/build_${name}_index.py"' in build_tt
+          and int(re.search(r"^        timeout-minutes: (\d+)$", step(job("timetables"), "- name: Build the Volán"),
+                            re.M).group(1)) >= 2 * (20 + 1) + 2,
+          repr((step_limits, tt_step_count, job_limit)))
     ws = tt_ws("part-fails")
-    done, outputs = bash(build_tt, ws, ALLOW_MISSING_VAR="", STUB_PART="fail", **gh_env)
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="", STUB_PART="fail", **gh_env)
     check("an index the part refuses is not counted as built", done.returncode == 0 and outputs.get("built") == "",
           repr((done.returncode, done.stdout, outputs)))
     ws = tt_ws("allow")
-    done, outputs = bash(build_tt, ws, ALLOW_MISSING_VAR="szeged, pecs", **gh_env)
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="szeged, pecs", **gh_env)
     check("HUNGARIAN_TRANSPORT_ALLOW_MISSING reaches the builders, with a warning on every run",
           done.returncode == 0 and (ws / "city-env.txt").read_text().endswith(" szeged, pecs")
           and "::warning title=City index guard relaxed::" in done.stdout, repr((done.returncode, done.stdout)))
     ws = tt_ws("bad-allow")
-    done, outputs = bash(build_tt, ws, ALLOW_MISSING_VAR="x\n::error::y", **gh_env)
+    done, outputs = bash(build_tt, ws, DUE_INDEXES="volan,city", SCHEMA="28", ALLOW_MISSING_VAR="x\n::error::y", **gh_env)
     check("an allow_missing value with a newline stops the step without echoing it, nothing built",
           done.returncode == 1 and "::error title=Bad allow_missing::" in done.stdout and "::error::y" not in done.stdout
           and not (ws / "volan-env.txt").exists(), repr((done.returncode, done.stdout)))
+
+    stable_step = step_script("Latest stable release")
+    gh_bin = tmp / "gh-releases"
+    gh_bin.mkdir()
+    (gh_bin / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "$*" > "$PWD/gh-args.txt"\n'
+        'case "${STUB_GH:-}" in\n'
+        "  fail) echo 'gh: HTTP 502' >&2; exit 1 ;;\n"
+        "  none) printf 'v1.11.0-rev.3\\n' ;;\n"
+        "  *) printf 'v1.9.0\\nv1.10.21\\nv1.10.3\\nv1.10.22x\\n' ;;\n"
+        "esac\n")
+    (gh_bin / "gh").chmod(0o755)
+    ws = tmp / "wf-stable"
+    ws.mkdir()
+    for case, want_rc, want_tag, text in (("ok", 0, "v1.10.21", ""), ("none", 0, "", "::warning title=No Volán or city"),
+                                           ("fail", 1, None, "::error::Could not list the releases")):
+        done, outputs = bash(stable_step, ws, path_prefix=gh_bin, STUB_GH=case, GH_TOKEN="x", **gh_env)
+        gh_args = (ws / "gh-args.txt").read_text() if (ws / "gh-args.txt").exists() else ""
+        check(f"the latest stable release, {case}: "
+              + (f"tag {want_tag or 'empty'}" if want_tag is not None else "an error, the job fails"),
+              done.returncode == want_rc and outputs.get("tag") == want_tag and text in done.stdout
+              and "repos/Bator/hungarian-transport/releases" in gh_args and "--paginate" in gh_args
+              and "select((.draft or .prerelease) | not)" in stable_step,
+              repr((done.returncode, done.stdout, done.stderr, outputs, gh_args)))
+    tt_steps_all = [ln.strip() for ln in job("timetables").splitlines() if re.match(r"^      - ", ln)]
+    root_co = step(job("timetables"), "ref: ${{ steps.stable.outputs.tag }}")
+    tools_co = step(job("timetables"), "path: .pages-tools")
+    check("the stable release is checked out at the root first, then the workflow commit's scripts in"
+          " .pages-tools (the root checkout would clean them away), only with a stable tag",
+          tt_steps_all[:3] == ["- name: Latest stable release", "- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+                               "- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"]
+          and "path:" not in root_co and "ref: ${{ github.sha }}" in tools_co and "scripts\n" in tools_co + "\n"
+          and "custom_components/hungarian_transport" in tools_co
+          and all("if: steps.stable.outputs.tag != ''" in b for b in (root_co, tools_co))
+          and "if: steps.stable.outputs.tag != ''" in step(job("timetables"), "- name: Timetables due"),
+          repr((tt_steps_all[:3], root_co, tools_co)))
+    check("the timetables job runs no script of the stable release but its builders",
+          all("python3 scripts/" not in step_script(n) for n in ("Timetables due", "Baseline indexes"))
+          and re.findall(r"python3 (\S+)", build_tt) == ['"scripts/build_${name}_index.py"',
+                                                         ".pages-tools/scripts/pages_timetables.py"],
+          repr(re.findall(r"python3 (\S+)", build_tt)))
 
     assemble_step = step_script("Assemble the site")
     for mav_new, tt_new, want in (("true", "true", ["--mav-part", "--timetables-part"]),
@@ -869,7 +945,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
         ws = tmp / f"wf-assemble-{mav_new}-{tt_new}"
         (ws / "scripts").mkdir(parents=True)
         (ws / "scripts" / "pages_timetables.py").write_text(stub_pt)
-        done, outputs = bash(assemble_step, ws, MAV_NEW=mav_new, TIMETABLES_NEW=tt_new, **gh_env)
+        done, outputs = bash(assemble_step, ws, MAV_NEW=mav_new, TIMETABLES_NEW=tt_new, SCHEMA="", **gh_env)
         args = (ws / "pt-args.txt").read_text().split() if (ws / "pt-args.txt").exists() else []
         rt = str(ws / "runner-temp")
         parts = [a_ for a_ in args if a_ in ("--mav-part", "--timetables-part")]
@@ -879,7 +955,13 @@ with tempfile.TemporaryDirectory() as tmp_name:
               and all(args[args.index(f_) + 1] == f"{rt}/{f_[2:]}" for f_ in want)
               and "https://bator.github.io/hungarian-transport" in args and "b" * 40 in args
               and f"{rt}/site" in args, repr((done.returncode, done.stderr, args)))
-    done, _ = bash(assemble_step, ws, MAV_NEW="true", TIMETABLES_NEW="false", STUB_RC="1", **gh_env)
+    (ws / "pt-args.txt").unlink(missing_ok=True)
+    done, _ = bash(assemble_step, ws, MAV_NEW="true", TIMETABLES_NEW="false", SCHEMA="28", **gh_env)
+    args = (ws / "pt-args.txt").read_text().split() if (ws / "pt-args.txt").exists() else []
+    check("the assemble step passes the stable release's schema on when the timetables job named one",
+          done.returncode == 0 and args[args.index("--schema") + 1:args.index("--schema") + 2] == ["28"]
+          if "--schema" in args else False, repr(args))
+    done, _ = bash(assemble_step, ws, MAV_NEW="true", TIMETABLES_NEW="false", SCHEMA="", STUB_RC="1", **gh_env)
     check("a refused site fails the assemble step", done.returncode == 1, repr(done.returncode))
 
     # The attest step's input: the artifact upload-pages-artifact made (a
@@ -974,11 +1056,10 @@ jobs_block = TEXT.split("\njobs:\n", 1)[1]
 check("five jobs: build (MÁV), timetables, site, deploy, attest",
       re.findall(r"^  ([\w-]+):$", jobs_block, re.M) == ["build", "timetables", "site", "deploy", "attest"],
       repr(re.findall(r"^  ([\w-]+):$", jobs_block, re.M)))
-check("the build and timetables jobs run side by side, the site job after both, also after a failed one,"
-      " never after a cancelled one",
+check("the build and timetables jobs run side by side, the site job after both, whatever they did (failed,"
+      " timed out), unless the run is cancelled",
       "needs:" not in build and "needs:" not in tt_job and "    needs: [build, timetables]" in site_job
-      and "    if: ${{ !cancelled() && needs.build.result != 'cancelled' && needs.timetables.result != 'cancelled' }}"
-      in site_job, site_job[:600])
+      and "    if: ${{ !cancelled() }}" in site_job and ".result" not in site_job, site_job[:600])
 
 
 def minutes(block: str) -> int | None:
