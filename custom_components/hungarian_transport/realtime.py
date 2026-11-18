@@ -82,9 +82,11 @@ MAX_STRING = 256
 # turn into a stream of requests to a volunteer's server.
 FETCH_RATE = 0.5
 FETCH_BURST = 30
-# The same for mavplusz.hu's planner, in a bucket of its own: a user calling
+# The same for mavplusz.hu's planner, apart from the feeds' (a user calling
 # the service with trips no card asks for must not use up the tokens every
-# card's feed refresh needs (nor a loop over feed ids the planner's).
+# card's feed refresh needs, nor a loop over feed ids the planner's), and
+# shared with the BKK boards' planner requests (mavplusz.PlannerLimiter,
+# whose defaults these are): the server is one, so is its limit.
 MAV_RATE = FETCH_RATE
 MAV_BURST = FETCH_BURST
 # Delays outside this range are a feed glitch (a vehicle logged on to the
@@ -586,6 +588,7 @@ class RealtimeHub:
         monotonic: upstream.Monotonic = upstream.monotonic,
         wall: Callable[[], float] | None = None,
         call_later: CallLater | None = None,
+        planner_limiter: mavplusz.PlannerLimiter | None = None,
     ) -> None:
         self._session = session
         self._executor = executor
@@ -609,17 +612,11 @@ class RealtimeHub:
             ),
             monotonic=monotonic,
         )
-        # The planner's own (MAV_RATE): a refused request reads the feeds.
-        self._mav_rate = upstream.TokenBucket(
-            MAV_RATE,
-            MAV_BURST,
-            refused=RealtimeRateLimited,
-            log_refused=lambda count: _LOGGER.warning(
-                "Realtime planner requests over the integration's rate limit: %d refused since the last such line",
-                count,
-            ),
-            monotonic=monotonic,
-        )
+        # The planner's (MAV_RATE), shared with the BKK boards' requests
+        # (planner_limiter, Home Assistant's one): a refused request, or
+        # one while either found the planner down, reads the feeds.
+        limiter = planner_limiter or mavplusz.PlannerLimiter(rate=MAV_RATE, burst=MAV_BURST, monotonic=monotonic)
+        self._mav_rate = limiter.client(RealtimeRateLimited)
         self._call_later = call_later
         self._cancel_drop: Callable[[], None] | None = None
         self._closed = False
@@ -1063,6 +1060,7 @@ class RealtimeHub:
         """A planner request failed: no other for FAIL_BACKOFF, one log line
         per outage."""
         self._mav_retry_at = self._monotonic() + FAIL_BACKOFF
+        self._mav_rate.failed(FAIL_BACKOFF)
         self._outages.failed(
             MAVPLUSZ_OUTAGE, "Realtime source %s unavailable: %s; reading the GTFS-Realtime feeds",
             mavplusz.URL, err,
