@@ -31,7 +31,7 @@ from pathlib import Path
 import re
 import struct
 import time
-from typing import Any
+from typing import Any, NamedTuple
 import zipfile
 import zlib
 
@@ -117,6 +117,19 @@ MAVPLUSZ_OUTAGE = "mavplusz"
 ROUTE_INTERVAL = 3 * 3600
 # Trip id patterns whose route a source remembers (see _learn_routes).
 MAX_ROUTE_KEYS = 20000
+# Rows of a static feed's calendar.txt and calendar_dates.txt read for
+# TrainMap.runs: MÁV's has 9,987 calendar_dates rows for 338 services
+# (2026-11-18). A feed with more is matched without its calendar.
+MAX_CALENDAR_ROWS = 100000
+# The planner's answer for a trip kept past its expiry, used only for a
+# trip the request cap left out this time (_mavplusz): every card's trips
+# get their turn, one poll in a few, and are answered from the planner in
+# between, at most this many intervals old.
+MAV_STALE_INTERVALS = 2
+# Planner answers kept at most: the ones kept for hours (_mav_ttl) are
+# trips a caller names, so a loop over made-up trip ids must not grow it.
+# A board of 40 trains is about 80.
+MAX_MAV_ANSWERS = 20000
 
 FEED_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 # OTP-exported city feeds (mvkzrt, VBUSZ, debrecen) carry the trip's start
@@ -446,12 +459,98 @@ def decode_feed(data: bytes, prefix: str = "") -> Feed:
     return feed
 
 
-def train_numbers_from_static(data: bytes, prefix: str = "") -> dict[str, list[str]]:
+class TrainMap(dict):
+    """Train number -> trip ids (prefix taken off), and the days each of
+    those trips runs on by the static feed's calendar (runs). A dict, so
+    the matching reads it as a plain map."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        # Trip id -> its service_id; per service_id its calendar.txt rows
+        # (weekday bits, Monday the lowest; first and last day) and its
+        # calendar_dates.txt days added and removed, YYYYMMDD as ints.
+        self.service: dict[str, str] = {}
+        self.weekly: dict[str, list[tuple[int, int, int]]] = {}
+        self.added: dict[str, set[int]] = {}
+        self.removed: dict[str, set[int]] = {}
+        # False: no calendar read (none in the zip, or over the caps).
+        self.calendar = False
+
+    def runs(self, trip_id: str, date: str) -> bool | None:
+        """Whether the trip runs on date (YYYYMMDD) by the calendar; None
+        when that is not known (no calendar, a trip or date it lacks)."""
+        svc = self.service.get(trip_id)
+        if not self.calendar or svc is None or not (len(date) == 8 and date.isdigit()):
+            return None
+        day = int(date)
+        if day in self.removed.get(svc, ()):
+            return False
+        if day in self.added.get(svc, ()):
+            return True
+        try:
+            weekday = datetime.strptime(date, "%Y%m%d").weekday()
+        except ValueError:
+            return None
+        return any(first <= day <= last and bits >> weekday & 1 for bits, first, last in self.weekly.get(svc, ()))
+
+
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+def _day(value: str) -> int | None:
+    return int(value) if len(value) == 8 and value.isdigit() else None
+
+
+def _read_calendar(zf: zipfile.ZipFile, trains: TrainMap) -> None:
+    """calendar.txt and calendar_dates.txt into trains, for the services its
+    trips have. Neither in the zip, one over MAX_STATIC_MEMBER or the two
+    over MAX_CALENDAR_ROWS: no calendar (runs is None), the trains are then
+    asked for every trip of their number as before."""
+    wanted = set(trains.service.values())
+    members = []
+    for name in ("calendar.txt", "calendar_dates.txt"):
+        try:
+            real = gtfs_feed.member(zf, name)
+        except FileNotFoundError:
+            continue
+        if zf.getinfo(real).file_size > MAX_STATIC_MEMBER:
+            return
+        members.append((name, real))
+    if not members:
+        return
+    rows = 0
+    weekly: dict[str, list[tuple[int, int, int]]] = {}
+    added: dict[str, set[int]] = {}
+    removed: dict[str, set[int]] = {}
+    for name, real in members:
+        for row in gtfs_feed.csv_rows(zf, real):
+            rows += 1
+            if rows > MAX_CALENDAR_ROWS:
+                return
+            svc = row.get("service_id") or ""
+            if svc not in wanted:
+                continue
+            if name == "calendar.txt":
+                first, last = _day(row.get("start_date") or ""), _day(row.get("end_date") or "")
+                if first is None or last is None:
+                    continue
+                bits = sum(1 << i for i, wd in enumerate(_WEEKDAYS) if row.get(wd) == "1")
+                weekly.setdefault(svc, []).append((bits, first, last))
+            else:
+                day = _day(row.get("date") or "")
+                kind = row.get("exception_type")
+                if day is not None and kind in ("1", "2"):
+                    (added if kind == "1" else removed).setdefault(svc, set()).add(day)
+    trains.weekly, trains.added, trains.removed = weekly, added, removed
+    trains.calendar = True
+
+
+def train_numbers_from_static(data: bytes, prefix: str = "") -> TrainMap:
     """Train number -> trip ids (prefix taken off) from a GTFS zip's
     trips.txt trip_short_name (SZ 4510, InterCity 181), read as every
-    builder reads a feed (gtfs_feed). A zip without trips.txt raises
-    FileNotFoundError."""
-    out: dict[str, list[str]] = {}
+    builder reads a feed (gtfs_feed), with the days they run on
+    (TrainMap.runs). A zip without trips.txt raises FileNotFoundError."""
+    out = TrainMap()
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as zf:
             real = gtfs_feed.member(zf, "trips.txt")
@@ -464,6 +563,9 @@ def train_numbers_from_static(data: bytes, prefix: str = "") -> dict[str, list[s
                     continue
                 number = found[-1].lstrip("0") or found[-1]
                 out.setdefault(number, []).append(trip_id)
+                if row.get("service_id"):
+                    out.service[trip_id] = row["service_id"]
+            _read_calendar(zf, out)
     # A member that is corrupt, encrypted or packed with a method zipfile
     # lacks, or a CSV line it can't read: an outage like a bad download.
     except (zlib.error, EOFError, RuntimeError, NotImplementedError, csv.Error) as err:
@@ -563,6 +665,19 @@ class _Entry:
     keep: bool = False
 
 
+class _MavAnswer(NamedTuple):
+    """The planner's answer for one (trip, date) in RealtimeHub._mav_cache:
+    monotonic expiry, until when it is kept for a trip the request cap left
+    out (_mavplusz), when it was asked (monotonic), the wall time of the
+    request, and the trip's result (None: one the planner does not know)."""
+
+    expiry: float
+    keep: float
+    asked: float
+    at: float
+    result: mavplusz.TripResult | None
+
+
 class RealtimeHub:
     """On-demand GTFS-Realtime fetches, shared by every card and browser.
 
@@ -628,10 +743,9 @@ class RealtimeHub:
         self._closed = False
         # Per feed URL, and MAVPLUSZ_OUTAGE for mavplusz.hu.
         self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic)
-        # mavplusz.hu answers per (trip, date): (monotonic expiry, wall time
-        # of the request, the trip's result or None for a trip it does not
-        # know). One request at a time, so cards polling together share it.
-        self._mav_cache: dict[tuple[str, str], tuple[float, float, mavplusz.TripResult | None]] = {}
+        # mavplusz.hu answers per (trip, date): _MavAnswer. One request at a
+        # time, so cards polling together share it.
+        self._mav_cache: dict[tuple[str, str], _MavAnswer] = {}
         self._mav_lock = asyncio.Lock()
         # Per (route, date): (monotonic expiry, its trip ids or None).
         self._mav_route_cache: dict[tuple[str, str], tuple[float, tuple[str, ...] | None]] = {}
@@ -792,7 +906,7 @@ class RealtimeHub:
             url, interval, FAIL_BACKOFF, MAX_FEED_BYTES, lambda body: decode_feed(body, prefix), "Realtime feed"
         )
 
-    async def _trains(self, src: Source) -> dict[str, list[str]] | None:
+    async def _trains(self, src: Source) -> TrainMap | None:
         if not src.static:
             return None
         return await self._cached(
@@ -852,21 +966,28 @@ class RealtimeHub:
         # Train number -> the static feed's trip ids, per source: the map the
         # feeds are matched with (cached for hours, kept through a failed
         # refresh), so a cold one is loaded once for both paths.
-        maps: dict[int, dict[str, list[str]] | None] = {}
+        maps: dict[int, TrainMap | None] = {}
         if by_train and any(r.get("train") for r in trips):
             maps = dict(zip(mav_idx, await asyncio.gather(*(self._trains(cfg.sources[i]) for i in mav_idx))))
         # A train without a date is today's run or last night's still on its
-        # way (_find_trip): every trip id of its number on both days.
+        # way (_find_trip): every trip id of its number on both days, but
+        # for the ones the static calendar says do not run that day. The
+        # planner lists a trip's scheduled calls on any day, run or not, so
+        # only the calendar tells a variant of another weekday from a run.
         today, yesterday = _train_days(now)
         train_keys: dict[tuple[int, int], list[mavplusz.TripKey]] = {}
         for i in mav_idx:
-            numbers = maps.get(i) or {}
+            numbers = maps.get(i) or TrainMap()
             prefix = cfg.sources[i].prefix
             for n, r in enumerate(trips):
                 ids = numbers.get(_train_number(r["train"]), ()) if r.get("train") else ()
                 days = (dates[n],) if r.get("date") else (today, yesterday)
-                if ids:
-                    train_keys[i, n] = [mavplusz.TripKey(mavplusz.gtfs_id(t, prefix), d, prefix) for d in days for t in ids]
+                keys = [
+                    mavplusz.TripKey(mavplusz.gtfs_id(t, prefix), d, prefix)
+                    for d in days for t in ids if numbers.runs(t, d) is not False
+                ]
+                if keys:
+                    train_keys[i, n] = keys
         # Route + start -> the planner's candidate trips, per source.
         route_keys: dict[tuple[int, int], mavplusz.RouteKey] = {}
         if by_route:
@@ -921,6 +1042,7 @@ class RealtimeHub:
         by_src: dict[int, list[mavplusz.TripKey]] = {}
         # The trips a request names by trip id or with a date.
         named: set[mavplusz.TripKey] = set()
+        by_id: list[mavplusz.TripKey] = []
         for i in mav_idx:
             prefix = cfg.sources[i].prefix
             keys = [
@@ -929,24 +1051,24 @@ class RealtimeHub:
                 if by_trip and r.get("trip_id")
             ]
             named.update(keys)
+            by_id += keys
             named.update(k for n, r in enumerate(trips) if r.get("date") for k in train_keys.get((i, n), ()))
             keys += [k for n in range(len(trips)) for k in cands.get((i, n), ())]
             keys += [k for n in range(len(trips)) for k in train_keys.get((i, n), ())]
             by_src[i] = list(dict.fromkeys(keys))
         # Last night's runs the train rule added (no request names them):
-        # asked last, and used only while still on their way (gone).
+        # used only while still on their way (gone).
         late = {k for ks in train_keys.values() for k in ks if k.date == yesterday} - named
-        # The resolved trips first: a card's own trip id on a route + start
-        # feed is often not the planner's (Veszprém, Miskolc), and what is
-        # not cached yet is cut at MAX_TRIPS_PER_REQUEST (_mavplusz). Last
-        # night's runs of the trains last: in the day they are over, and a
-        # train whose trips were cut is matched on the feeds.
-        resolved = [k for ks in cands.values() for k in ks]
-        everything = [k for keys in by_src.values() for k in keys]
-        asked = list(
-            dict.fromkeys([*resolved, *(k for k in everything if k not in late), *(k for k in everything if k in late)])
-        )
-        answered = await bounded(self._mavplusz(asked, cfg.interval, deadline)) if asked else {}
+        # What each request needs answered at once, in this order on a tie
+        # (_mavplusz takes the least recently asked first): the resolved
+        # trips (a card's own trip id on a route + start feed is often not
+        # the planner's: Veszprém, Miskolc), the trip ids, every trip of a
+        # train (its variants are told apart by the stops, so one asked
+        # without the others is no answer).
+        groups = [ks for ks in cands.values()]
+        groups += [[k] for k in dict.fromkeys(by_id)]
+        groups += [ks for ks in train_keys.values()]
+        answered = await bounded(self._mavplusz(groups, cfg.interval, deadline)) if groups else {}
 
         def gone(k: mavplusz.TripKey, res: mavplusz.TripResult | None) -> mavplusz.TripResult | None:
             """Last night's run of a train, over for MAX_POSITION_AGE: the
@@ -956,7 +1078,7 @@ class RealtimeHub:
                 return mavplusz.TripResult(None, None, res.ends)
             return res
 
-        planner: dict[int, tuple[Source, Feed, Feed, dict[str, list[str]] | None]] = {}
+        planner: dict[int, tuple[Source, Feed, Feed, TrainMap | None]] = {}
         for i, keys in by_src.items():
             got = [(answered[k][0], gone(k, answered[k][1])) for k in keys if k in answered] if answered is not None else []
             if any(res is not None for _at, res in got):
@@ -980,7 +1102,19 @@ class RealtimeHub:
             # A train: every trip of its number answered (its variants are
             # told apart by the stops, so none may be missing), one known.
             keys = train_keys.get((i, n), ())
-            return bool(keys) and all(k in got for k in keys) and any(got[k][1] is not None for k in keys)
+            if not keys or not any(k in got and got[k][1] is not None for k in keys):
+                return False
+            missing = [k for k in keys if k not in got]
+            if not missing:
+                return True
+            # Or only last night's runs missing while today's calls at the
+            # card's stops live: _find_trip takes a trip's run today over
+            # its run last night, so these could not change the answer.
+            stops = trips[n].get("stops") or []
+            return all(k in late for k in missing) and any(
+                k.date == today and k in got and got[k][1] is not None and _has_stop(got[k][1].trip_update, stops)
+                for k in keys
+            )
 
         def needs_feeds(i: int, n: int) -> bool:
             """trips[n] is matched on source i's feeds: a route + start the
@@ -1105,45 +1239,89 @@ class RealtimeHub:
             return out
 
     async def _mavplusz(
-        self, keys: list[mavplusz.TripKey], interval: int, deadline: float | None = None
+        self, groups: list[list[mavplusz.TripKey]], interval: int, deadline: float | None = None
     ) -> dict[mavplusz.TripKey, tuple[float, mavplusz.TripResult | None]] | None:
-        """Per key: (wall time of the answer, its result), from the cache
-        while within interval of the request, the rest in one request of at
-        most MAX_TRIPS_PER_REQUEST trips (the first ones; a key cut is not
-        in the answer). None when that request is not made (the rate limit,
-        the backoff after a failure) or fails: the caller reads the jbb
-        feeds."""
+        """Per key of groups: (wall time of the answer, its result), from
+        the cache while within its expiry (_mav_ttl), the rest in one
+        request of at most MAX_TRIPS_PER_REQUEST trips. A group (a train's
+        trips) goes in whole or not at all, the least recently asked groups
+        first, so every card's trips get their turn on a board of more; a
+        key left for a later request has its last answer while it is kept
+        (MAV_STALE_INTERVALS), else it is not in the result. None when the
+        request is not made (the rate limit, the backoff after a failure)
+        or fails: the caller reads the jbb feeds."""
         async with self._mav_lock:
             mono = self._monotonic()
-            for k in [k for k, (exp, _at, _res) in self._mav_cache.items() if exp <= mono]:
+            for k in [k for k, a in self._mav_cache.items() if a.keep <= mono]:
                 del self._mav_cache[k]
             out: dict[mavplusz.TripKey, tuple[float, mavplusz.TripResult | None]] = {}
-            todo: list[mavplusz.TripKey] = []
-            for k in keys:
-                hit = self._mav_cache.get((k.gtfs_id, k.date))
-                if hit is not None:
-                    out[k] = (hit[1], hit[2])
-                else:
-                    todo.append(k)
-            todo = todo[: mavplusz.MAX_TRIPS_PER_REQUEST]
-            if not todo:
+            waiting: list[tuple[float, int, list[mavplusz.TripKey]]] = []
+            for order, group in enumerate(groups):
+                due = []
+                for k in dict.fromkeys(group):
+                    hit = self._mav_cache.get((k.gtfs_id, k.date))
+                    if hit is not None and hit.expiry > mono:
+                        out[k] = (hit.at, hit.result)
+                    else:
+                        due.append(k)
+                if due:
+                    # Never asked (or so long ago it is gone) is the oldest.
+                    asked = [self._mav_cache[(k.gtfs_id, k.date)].asked for k in due if (k.gtfs_id, k.date) in self._mav_cache]
+                    waiting.append((min(asked) if len(asked) == len(due) else -1e18, order, due))
+            if not waiting:
                 return out
+            waiting.sort(key=lambda w: (w[0], w[1]))
+            cap = mavplusz.MAX_TRIPS_PER_REQUEST
+            todo: dict[mavplusz.TripKey, None] = {}
+            for _asked, _order, due in waiting:
+                new = [k for k in due if k not in todo]
+                if len(todo) + len(new) <= cap:
+                    todo.update(dict.fromkeys(new))
+                elif not todo:
+                    # One group over the whole cap: its first ones.
+                    todo.update(dict.fromkeys(new[:cap]))
+            keys = list(todo)
             at = self._wall()
             results = await self._mav_post(
-                mavplusz.build_query(todo), lambda doc: mavplusz.parse_response(doc, todo), deadline
+                mavplusz.build_query(keys), lambda doc: mavplusz.parse_response(doc, keys), deadline
             )
             if results is None:
                 return None
             mono = self._monotonic()
-            today = mavplusz.service_date(None, at)
             for k, res in results.items():
-                # A past day's run over for longer than any delay no longer
-                # changes: last night's runs of every train asked by number
-                # are asked once in a while, not every minute all day.
-                settled = k.date < today and res is not None and res.ends is not None and res.ends + MAX_DELAY < at
-                self._mav_cache[(k.gtfs_id, k.date)] = (mono + (ROUTE_INTERVAL if settled else interval), at, res)
+                ttl = self._mav_ttl(k, res, at, interval)
+                stale = interval * MAV_STALE_INTERVALS if ttl == interval else 0
+                self._mav_cache[(k.gtfs_id, k.date)] = _MavAnswer(mono + ttl, mono + ttl + stale, mono, at, res)
                 out[k] = (at, res)
+            if len(self._mav_cache) > MAX_MAV_ANSWERS:
+                # The least recently asked go first, down to three quarters
+                # (not one at a time): a board's are asked every few polls.
+                ranked = sorted(self._mav_cache, key=lambda c: self._mav_cache[c].asked)
+                for c in ranked[: len(ranked) - MAX_MAV_ANSWERS * 3 // 4]:
+                    del self._mav_cache[c]
+            for _asked, _order, due in waiting:
+                for k in due:
+                    hit = self._mav_cache.get((k.gtfs_id, k.date))
+                    if k not in out and hit is not None:
+                        out[k] = (hit.at, hit.result)
             return out
+
+    @staticmethod
+    def _mav_ttl(k: mavplusz.TripKey, res: mavplusz.TripResult | None, at: float, interval: int) -> int:
+        """How long the planner's answer for k is kept: interval, or
+        ROUTE_INTERVAL for one that no longer changes. That is a trip it
+        does not know or that has no call that day, a run without realtime
+        data whose last call is longer ago than any delay, and a past day's
+        run over for MAX_POSITION_AGE (_query_mavplusz's gone: last night's
+        runs of every train asked by number are asked once in a while, not
+        every minute all day)."""
+        if res is None or res.ends is None:
+            return ROUTE_INTERVAL
+        if res.trip_update is None and res.ends + MAX_DELAY < at:
+            return ROUTE_INTERVAL
+        if k.date < mavplusz.service_date(None, at) and res.ends + MAX_POSITION_AGE < at:
+            return ROUTE_INTERVAL
+        return interval
 
     async def _source(self, cfg: FeedConfig, src: Source, now: float):
         tu, vp, trains = await asyncio.gather(
