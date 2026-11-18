@@ -174,6 +174,41 @@ vehicles, ELVIRA's delays, the `bkk_stop` companion's coach positions and
 the EMMA train positions from its sensors. The feed fills in rows that have
 none.
 
+## BKK boards when FUTÁR fails
+
+A Budapest departure board is read from BKK FUTÁR first, then from
+mavplusz.hu, then from Transitous. When the integration holds the FUTÁR key
+and FUTÁR does not answer `arrivals-and-departures-for-stop.json` or
+`trip-details.json` (an outage, a timeout, an HTTP error, FUTÁR's own HTTP
+429, or a rejected key), the `hungarian_transport.futar` action answers from
+the planner's BKK feed instead (`mavplusz_board.py`), in FUTÁR's own shape,
+with `"source": "mavplusz"` at the top of the answer. The planner has
+FUTÁR's ids with `BKK:` for `BKK_` (stop `BKK_F00940` is `BKK:F00940`). When
+the planner cannot answer either, the action returns FUTÁR's error as
+before, and the card fills the board from Transitous.
+
+- **What the rows carry.** Departure time, the prediction for a live trip
+  (none for a scheduled one: no delay shown), headsign, route number,
+  colours and type, the trip's wheelchair and bicycle flags, booking, the
+  pole of a station's departure and its platform code. Not the vehicle's
+  GPS position and plate: the rows show no live marker. HÉV is not in the
+  planner's BKK feed, so a HÉV board fails over to Transitous. A trip's
+  details (where it goes, the ride's length) come from the planner too.
+- **Not asked when.** The integration's own FUTÁR rate limit, an error
+  status FUTÁR gave for the request, and a request never sent are not
+  outages; nor are search, route details, plans and timetables, which the
+  planner does not answer. A rejected key still opens the reauthentication.
+- **No key, no planner.** Without a FUTÁR key the action does not exist and
+  the cards read Budapest from Transitous; the planner alone would not
+  answer the searches and route patterns a card with the action asks for.
+- **Limits.** One planner request per stop per 15 s for every card and
+  horizon together (the widest window, eight hours, is asked and each
+  card's horizon cut from it); the trip details asked within 50 ms go in one
+  request of up to 40 trips, cached 60 s; 0.5 requests a second with a burst
+  of 30, a bucket of its own; 30 s without requests after a failure, logged
+  once. FUTÁR gets 8 s of the card's 20 s on these two endpoints, the planner
+  6 s.
+
 ## Licence and terms
 
 - **The server.** `jbb.ghsq.de` states no licence or terms for its GTFS and
