@@ -330,15 +330,15 @@ register({
         name: row[1],
         num: String(row[2] || ''),
         op: row.length > 3 ? Number(row[3]) : 0,
-        /* The feed's own stop id when the build kept an older id for this
-           stop (build_city_index.keep_stop_ids); realtime matches on it. */
-        fid: row.length > 4 && row[4] ? String(row[4]) : '',
         key,
         /* fold() of the name, from its norm() already at hand. */
         fold: BkkLib.foldNormed(key),
         lat: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i] / 1e5 : null,
         lon: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i + 1] / 1e5 : null,
       };
+      /* The feed's own stop id when the build kept an older id for this
+         stop (build_city_index.keep_stop_ids); realtime matches on it. */
+      if (row.length > 4 && row[4]) st.fid = String(row[4]);
       stops[i] = st;
       const nk = st.op + ':' + st.num;
       const kk = st.op + ':' + st.key;
