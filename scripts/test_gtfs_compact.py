@@ -142,8 +142,9 @@ def main() -> int:
         and not szeged.get("insecure"),
         str(list(gc.feed_urls(szeged))),
     )
-    failed |= not check("Szeged keeps only the SZKT agency (its buses are volan-szeged)",
-                        tuple(szeged.get("agencies") or ()) == ("SZKT",), str(szeged.get("agencies")))
+    failed |= not check("Szeged keeps only the SZKT agency, by id or name (its buses are volan-szeged)",
+                        tuple(szeged.get("agencies") or ()) == ("SZKT", "Szegedi Közlekedési Kft."),
+                        str(szeged.get("agencies")))
     pecs = next(f for f in CITY_FEEDS if f["id"] == "pecs")
     failed |= not check("Pécs is fetched over https", pecs["url"] == "https://mobilitas.biokom.hu/gtfs/"
                         and not pecs.get("insecure"), str(pecs))
@@ -213,6 +214,30 @@ def main() -> int:
             failed |= not check("write_index keeps route_type", tidx["t"][0][4] == 0 and tidx["v"] == 29, str(tidx["t"][0]))
         finally:
             tz.unlink()
+
+        # GTFS lets routes.txt leave agency_id out when agency.txt has one
+        # agency: the route is that agency's, by id and name, not op_name's.
+        seen: list[tuple[str, str]] = []
+        one_files = dict(files)
+        one_files["agency.txt"] = "agency_id,agency_name\nSZKT,Szegedi Közlekedési Kft.\n"
+        one_files["routes.txt"] = "route_id,route_short_name\nR1,2\n"
+        onez = gtfs_zip(one_files)
+        try:
+            load_parts(onez, lambda short, agency, aid: seen.append((agency, aid)) or True, op_id="x", op_name="X")
+        finally:
+            onez.unlink()
+        failed |= not check("a route without agency_id in a one-agency zip is that agency's",
+                            seen == [("Szegedi Közlekedési Kft.", "SZKT")], str(seen))
+        seen.clear()
+        two_files = dict(one_files)
+        two_files["agency.txt"] += "V,Volán\n"
+        twoz = gtfs_zip(two_files)
+        try:
+            load_parts(twoz, lambda short, agency, aid: seen.append((agency, aid)) or True, op_id="x", op_name="X")
+        finally:
+            twoz.unlink()
+        failed |= not check("a route without agency_id in a zip of two agencies is still no agency's",
+                            seen == [("X", "")], str(seen))
 
         # SZKT's trolleybuses use the extended code 800 (the card's
         # gtfsRouteKind reads it as a trolleybus); it must reach the index

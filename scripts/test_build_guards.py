@@ -8,6 +8,7 @@ import gzip
 import io
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -737,39 +738,115 @@ with tempfile.TemporaryDirectory() as tmp:
     vout.write_bytes(gzip.compress(b"\xff\xfe not utf-8"))
     check("a non-UTF-8 previous index is no reference", gc.existing_trips(vout) is None)
 
-# Szeged moved to SZKT's own zip (trams and trolleybuses only) on
-# 2026-11-18: in its "shrink_ok" window the guard takes the smaller feed, as
-# a rebuild does with a new zip next to the old one; a missing feed is still
-# refused, and so is the same shrink outside the window or for another feed.
+# Szeged moved to SZKT's own zip (trams and trolleybuses only) in November
+# 2026. The guard takes the smaller feed while the index in place holds the
+# zip it replaced (no feed_version; Volán buses, route_type 3, and the
+# tram-train, 109, besides the trams and trolleybuses), whatever the date:
+# the release and the Pages build run the new code only once it is the
+# latest stable release. The rebuild must still keep half of the old zip's
+# trams and trolleybuses, and at least MIN_GUARDED_TRIPS trips.
+
+
+def typed_part(op_id: str, types: dict[int, int], feed: str = "", end: str = FAR_END) -> dict:
+    """A part with types[route_type] trips of each route type."""
+    trips = [[0, str(rt), [0, 1], [480, 490], rt, -1] for rt, n in types.items() for _ in range(n)]
+    return {**part(op_id, 0, end), "feed": feed, "t": trips}
+
+
+OLD_SZEGED = {3: 500, 109: 50, 0: 200, 11: 250}  # 1000 trips, 450 of trams and trolleybuses
 with tempfile.TemporaryDirectory() as tmp:
     szeged = next(f for f in bci.CITY_FEEDS if f["id"] == "szeged")
-    check("the Szeged window starts on the day its source changed",
-          szeged.get("shrink_ok") == ("20261118", "20261215"), repr(szeged.get("shrink_ok")))
-    out = Path(tmp) / "city-index.json.gz"
-    write_index([part("szeged", 1000), part("pecs", 1000)], out, with_operators=True, guard_total=False)
-    smaller = [part("szeged", 200), part("pecs", 1000)]
-    stderr = io.StringIO()
-    with contextlib.redirect_stderr(stderr):
-        err = raises(lambda: bci.guard_feeds(out, smaller, set(), today="20261120"))
-    check("in its window a smaller Szeged feed passes the guard, with a warning",
-          err is None and "szeged 200 trips vs 1000; accepted until 2026-12-15" in stderr.getvalue(),
-          repr((err, stderr.getvalue())))
-    err = raises(lambda: bci.guard_feeds(out, smaller, set(), today="20261215"))
-    check("the window's last day still counts", err is None, repr(err))
-    for day in ("20261117", "20261216"):
-        err = raises(lambda day=day: bci.guard_feeds(out, smaller, set(), today=day))
-        check(f"outside the window ({day}) the smaller Szeged feed is refused",
-              isinstance(err, IndexGuardError) and "szeged 200 trips vs 1000" in str(err), repr(err))
-    err = raises(lambda: bci.guard_feeds(out, [part("pecs", 1000)], set(), today="20261120"))
-    check("in its window a missing Szeged feed is still refused",
+    check("Szeged's guard rule is the zip it replaced, not a date window",
+          "shrink_ok" not in szeged and szeged.get("replaces") == {"unversioned": True, "dropped": (3, 109)},
+          repr(szeged))
+    old_out = Path(tmp) / "old.json.gz"
+    write_index([typed_part("szeged", OLD_SZEGED), part("pecs", 1000)], old_out, with_operators=True,
+                guard_total=False)
+    new_out = Path(tmp) / "new.json.gz"
+    write_index([typed_part("szeged", {0: 450, 800: 550}, feed="20261102-20261231"), part("pecs", 1000)],
+                new_out, with_operators=True, guard_total=False)
+    smaller = [typed_part("szeged", {0: 100, 800: 125}, feed="20261102-20261231"), part("pecs", 1000)]
+    for day in ("20261117", "20261120", "20261216", "20270301"):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            err = raises(lambda day=day: bci.guard_feeds(old_out, smaller, set(), today=day))
+        check(f"on {day} a smaller Szeged feed passes against the zip its source replaced, with a warning",
+              err is None and "szeged 225 trips vs 1000: the previous index has the zip its source replaced"
+              in stderr.getvalue() and "450 of those" in stderr.getvalue(), repr((err, stderr.getvalue())))
+    err = raises(lambda: bci.guard_feeds(new_out, [typed_part("szeged", {0: 100, 800: 125}),
+                                                   part("pecs", 1000)], set(), today="20261120"))
+    check("once the index in place holds the new feed, a Szeged rebuild losing most of its trips is refused",
+          isinstance(err, IndexGuardError) and "szeged 225 trips vs 1000" in str(err), repr(err))
+    err = raises(lambda: bci.guard_feeds(old_out, [typed_part("szeged", {0: 1}), part("pecs", 1000)], set(),
+                                         today="20261120"))
+    check("against the replaced zip a new Szeged zip of one trip is still refused",
+          isinstance(err, IndexGuardError) and "szeged 1 trips vs 1000 (450 of them of the route types" in str(err),
+          repr(err))
+    err = raises(lambda: bci.guard_feeds(old_out, [typed_part("szeged", {0: 100, 800: 100}),
+                                                   part("pecs", 1000)], set(), today="20261120"))
+    check("against the replaced zip a Szeged rebuild with under half of its trams and trolleybuses is refused",
+          isinstance(err, IndexGuardError) and "szeged 200 trips vs 1000" in str(err), repr(err))
+    tram_only = Path(tmp) / "tram-only.json.gz"
+    write_index([typed_part("szeged", {0: 1000}), part("pecs", 1000)], tram_only, with_operators=True,
+                guard_total=False)
+    err = raises(lambda: bci.guard_feeds(tram_only, smaller, set(), today="20261120"))
+    check("an index in place without the dropped route types is not the replaced zip: the shrink is refused",
+          isinstance(err, IndexGuardError) and "szeged 225 trips vs 1000" in str(err), repr(err))
+    bus_only = Path(tmp) / "bus-only.json.gz"
+    write_index([typed_part("szeged", {3: 1000}), part("pecs", 1000)], bus_only, with_operators=True,
+                guard_total=False)
+    err = raises(lambda: bci.guard_feeds(bus_only, smaller, set(), today="20261120"))
+    check("an index in place whose Szeged part is buses only is not the replaced zip (it had trams too)",
+          isinstance(err, IndexGuardError) and "szeged 225 trips vs 1000" in str(err), repr(err))
+    versioned_old = Path(tmp) / "versioned-old.json.gz"
+    write_index([typed_part("szeged", OLD_SZEGED, feed="1.0"), part("pecs", 1000)], versioned_old,
+                with_operators=True, guard_total=False)
+    err = raises(lambda: bci.guard_feeds(versioned_old, smaller, set(), today="20261120"))
+    check("an index in place whose Szeged part has a feed_version is not the replaced zip either",
+          isinstance(err, IndexGuardError) and "szeged 225 trips vs 1000" in str(err), repr(err))
+    err = raises(lambda: bci.guard_feeds(old_out, [part("pecs", 1000)], set(), today="20261120"))
+    check("against the replaced zip a missing Szeged feed is still refused",
           isinstance(err, IndexGuardError) and "szeged missing (had 1000 trips)" in str(err), repr(err))
-    err = raises(lambda: bci.guard_feeds(out, [part("szeged", 1000), part("pecs", 200)], set(), today="20261120"))
-    check("the window is Szeged's alone: Pécs losing most of its trips is refused",
-          isinstance(err, IndexGuardError) and "pecs 200 trips vs 1000" in str(err), repr(err))
-    check("a new Szeged zip with fewer trips is not rejected for the old one in the window",
-          bci._feed_problem("szeged", bci._previous(out, "20261120"), [part("szeged", 200)], "20261120") == ""
-          and "200 trips vs 1000" in bci._feed_problem("szeged", bci._previous(out, "20261216"),
-                                                       [part("szeged", 200)], "20261216"))
+    pecs_old = Path(tmp) / "pecs-old.json.gz"
+    write_index([typed_part("szeged", OLD_SZEGED), typed_part("pecs", {3: 900, 0: 100})], pecs_old,
+                with_operators=True, guard_total=False)
+    err = raises(lambda: bci.guard_feeds(pecs_old, [typed_part("szeged", OLD_SZEGED),
+                                                    typed_part("pecs", {0: 100})], set(), today="20261120"))
+    check("the rule is Szeged's alone: Pécs losing its buses is refused",
+          isinstance(err, IndexGuardError) and "pecs 100 trips vs 1000" in str(err), repr(err))
+    for day in ("20261120", "20261216"):
+        check(f"on {day} a new Szeged zip with fewer trips is not rejected for the replaced zip in place",
+              bci._feed_problem("szeged", bci._previous(old_out, day), smaller[:1], day) == "")
+    check("a new Szeged zip with fewer trips is rejected for the new feed in place",
+          "225 trips vs 1000" in bci._feed_problem("szeged", bci._previous(new_out, "20261216"),
+                                                   smaller[:1], "20261216"))
+    prev = bci._previous(old_out, "20261120")
+    check("the previous index's trips per route type and feed versions are read with it",
+          prev.route_types["szeged"] == {3: (500, 500), 109: (50, 50), 0: (200, 200), 11: (250, 250)}
+          and prev.versions.get("szeged", "") == "" and bci._previous(new_out, "20261120").versions["szeged"]
+          == "20261102-20261231", repr(prev))
+
+    # A Szeged part carried over (its download failed) from the replaced zip
+    # leaves out the Volán buses (volan-szeged has them) and the tram-train
+    # (the MÁV index has it), with the stops only they used.
+    mixed = {
+        **part("szeged", 0),
+        "s": [["szeged:1", "Tram A", "1"], ["szeged:2", "Tram B", "2"], ["szeged:3", "Bus only", "3"]],
+        "g": [4625000, 2014000, 4625100, 2014100, 4625200, 2014200],
+        "shapes": ["tram", "bus"],
+        "t": [[0, "2", [0, 1], [480, 490], 0, 0, "T1"], [0, "70", [1, 2], [500, 510], 3, 1, "B1"],
+              [0, "1", [0, 2], [520, 530], 109, -1, "R1"]],
+    }
+    with contextlib.redirect_stderr(io.StringIO()):
+        trimmed = bci._without_replaced(mixed)
+    check("a Szeged part carried from the replaced zip keeps only its trams and trolleybuses, and their stops",
+          trimmed["t"] == [[0, "2", [0, 1], [480, 490], 0, 0, "T1"]]
+          and trimmed["s"] == mixed["s"][:2] and trimmed["g"] == mixed["g"][:4] and trimmed["shapes"] == ["tram"],
+          repr(trimmed))
+    check("a Szeged part of the new feed is carried as it is",
+          bci._without_replaced({**mixed, "feed": "20261102-20261231"})["t"] == mixed["t"])
+    check("another feed's part is carried as it is", bci._without_replaced({**mixed, "op_id": "pecs"}) == {
+        **mixed, "op_id": "pecs"})
 
 # SZKT's zip also has MÁV's Szeged local buses (hkir_V-33367, already the
 # Volán index's volan-szeged); the older szegedimenetrend.hu zip had
@@ -803,6 +880,162 @@ with tempfile.TemporaryDirectory() as tmp:
           lines == [("2", 0), ("9", 11)], repr(lines))
     check("a feed without agencies keeps every agency's routes",
           len(bci._load_feed(base, {"id": "x", "name": "X", "file": "x.zip"}, older)[0]["t"]) == 4)
+
+    # GTFS lets routes.txt leave agency_id out when agency.txt has one
+    # agency: those routes are that agency's, so the filter keeps them
+    # instead of dropping the whole feed as "no trips".
+    def one_agency(path: Path, agency: str, routes_head: str, route: str) -> Path:
+        files = city_feed()
+        files["agency.txt"] = agency
+        files["routes.txt"] = routes_head + route
+        return gtfs_zip(path, files)
+
+    no_route_aid = one_agency(base / "one-id.zip", "agency_id,agency_name\nSZKT,Szegedi Közlekedési Kft.\n",
+                              "route_id,route_short_name,route_type\n", "R1,2,0\n")
+    got = bci._load_feed(base, szeged, no_route_aid)
+    check("a one-agency zip whose routes have no agency_id keeps its routes for the agency filter",
+          [(t[1], t[4]) for p in got for t in p["t"]] == [("2", 0)], repr(got))
+    no_aid = one_agency(base / "no-id.zip", "agency_name\nSzegedi Közlekedési Kft.\n",
+                        "route_id,route_short_name,route_type\n", "R1,2,0\n")
+    got = bci._load_feed(base, szeged, no_aid)
+    check("a one-agency zip with no agency_id at all keeps its routes when the filter names the agency",
+          [(t[1], t[4]) for p in got for t in p["t"]] == [("2", 0)], repr(got))
+    other = one_agency(base / "other.zip", "agency_name\nMÁV Személyszállítási Zrt. - Szeged\n",
+                       "route_id,route_short_name,route_type\n", "R1,70,3\n")
+    check("a one-agency zip of another agency still gives the filtered feed nothing",
+          not any(p["t"] for p in bci._load_feed(base, szeged, other)))
+    two = one_agency(base / "two.zip", "agency_id,agency_name\nSZKT,SZKT\nV,Volán\n",
+                     "route_id,route_short_name,agency_id,route_type\n", "R1,2,,0\n")
+    check("in a zip of two agencies a route without agency_id is no agency's",
+          not any(p["t"] for p in bci._load_feed(base, szeged, two)))
+
+    # SZKT cuts its stop names to 25 characters: the index shows them in
+    # full, and closes a bracket the cut left open.
+    named = city_feed()
+    named["agency.txt"] = "agency_id,agency_name\nSZKT,Szegedi Közlekedési Kft.\n"
+    named["routes.txt"] = "route_id,route_short_name,agency_id,route_type\nR1,2,SZKT,0\n"
+    named["stops.txt"] = ("stop_id,stop_name\n1,Belv. tem. II.\n2,\"Londoni krt. (Bakay N. u.\"\n"
+                          "3,Tabán u.(Felső Tisza-part\n4,Kecskés\n")
+    named["stop_times.txt"] = ("trip_id,arrival_time,departure_time,stop_id,stop_sequence\n"
+                               "T0,08:00:00,08:00:00,1,1\nT0,08:05:00,08:05:00,2,2\n"
+                               "T0,08:10:00,08:10:00,3,3\nT0,08:15:00,08:15:00,4,4\n")
+    got = bci._load_feed(base, szeged, gtfs_zip(base / "named.zip", named))
+    check("SZKT's cut stop names are shown in full, the others as they are",
+          sorted(row[1] for p in got for row in p["s"]) == [
+              "Belvárosi temető II. kapu", "Kecskés", "Londoni körút (Bakay Nándor utca)",
+              "Tabán utca (Felső Tisza-part)"], repr([row[1] for p in got for row in p["s"]]))
+    check("a city stop name cut off inside a bracket gets the bracket closed",
+          bci.stop_name("Kossuth tér (Piac") == "Kossuth tér (Piac)" and bci.stop_name("Fő tér (Posta)")
+          == "Fő tér (Posta)" and bci.stop_name("A (b (c") == "A (b (c))")
+    check("every Szeged name in the table spells its street words out and leaves no bracket open",
+          all(new != old and new.count("(") == new.count(")")
+              and not re.search(r"(?<!\w)(?:u|krt|tem|vá|Gimn|vízt|Belv|Aut|áll)\.|(?<!\w)Szt ", new)
+              for old, new in bci.SZEGED_STOP_NAMES.items()), repr(bci.SZEGED_STOP_NAMES))
+
+# A feed that renumbers its stops (Szeged's new source gave every stop a
+# new id) leaves cards saved with the old id behind. The rebuild maps each
+# old id to the new stop of the same operator and mode within ALIAS_M and
+# writes the table as "al"; the card reads it (gtfs.js volanMatchStop).
+
+
+def stop_part(op_id: str, stops: list[tuple[str, int, int]], trips: list[tuple[int, list[int]]]) -> dict:
+    """A part with stops (id, lat, lon in 1e-5 degrees) and trips
+    (route_type, stop indexes)."""
+    return {
+        **part(op_id, 0),
+        "s": [[sid, sid.upper(), ""] for sid, _lat, _lon in stops],
+        "g": [v for _sid, lat, lon in stops for v in (lat, lon)],
+        "t": [[0, str(rt), ix, [480 + i for i in range(len(ix))], rt, -1] for rt, ix in trips],
+    }
+
+
+LAT, LON = 4625000, 2014000  # Szeged; 1e-5 degrees of latitude is 1.1 m
+with tempfile.TemporaryDirectory() as tmp:
+    old_parts = [
+        stop_part("szeged", [("szeged:a", LAT, LON), ("szeged:t", LAT + 500, LON), ("szeged:z", LAT + 1000, LON),
+                             ("szeged:c", LAT + 1500, LON), ("szeged:k", LAT + 2000, LON)],
+                  [(0, [0, 2]), (11, [1, 4]), (3, [3, 4])]),
+        stop_part("pecs", [("pecs:9", LAT, LON + 5), ("pecs:1", LAT + 9000, LON)], [(0, [0, 1])]),
+    ]
+    new_parts = [
+        stop_part("szeged", [("szeged:SZ_1", LAT + 18, LON), ("szeged:SZ_9", LAT + 4, LON),
+                             ("szeged:SZ_2", LAT + 527, LON), ("szeged:SZ_3", LAT + 1055, LON),
+                             ("szeged:SZ_4", LAT + 1500, LON), ("szeged:k", LAT + 2000, LON)],
+                  [(0, [0, 3]), (800, [1, 2, 4, 5])]),
+        stop_part("pecs", [("pecs:1", LAT + 9000, LON), ("pecs:2", LAT + 9100, LON)], [(0, [0, 1])]),
+    ]
+    old_out = Path(tmp) / "old.json.gz"
+    write_index(old_parts, old_out, with_operators=True, guard_total=False)
+    got = bci.stop_aliases(bci.alias_baseline(gc.read_index(old_out)), new_parts)
+    check("a renumbered tram stop is aliased to the nearest new tram stop of its operator within 50 m,"
+          " not to the trolleybus stop nearer still", got.get("szeged:a") == "szeged:SZ_1", repr(got))
+    check("a trolleybus stop of the old zip (11) is aliased to the new feed's trolleybus stop (800)",
+          got.get("szeged:t") == "szeged:SZ_2", repr(got))
+    check("a stop with no new stop of its mode within 50 m gets no alias", "szeged:z" not in got, repr(got))
+    check("a bus-only stop is not aliased to the tram or trolleybus stop at the same place",
+          "szeged:c" not in got, repr(got))
+    check("an id the rebuild still has gets no alias", "szeged:k" not in got and "pecs:1" not in got, repr(got))
+    check("a stop is not aliased to another operator's stop", "pecs:9" not in got, repr(got))
+    check("no previous index, no aliases", bci.stop_aliases(None, new_parts) == {})
+
+    # The next rebuild has the previous one's aliases in its index in place:
+    # they are carried over, to their stop while it lasts, else to the stop
+    # nearest it, so a card two renumberings old still finds its stop.
+    mid_out = Path(tmp) / "mid.json.gz"
+    write_index(new_parts, mid_out, with_operators=True, guard_total=False, aliases=got)
+    mid = json.loads(gzip.decompress(mid_out.read_bytes()))
+    check("write_index writes the aliases as [old id, stop index]",
+          sorted((old, mid["s"][ix][0]) for old, ix in mid["al"]) == sorted(got.items()), repr(mid.get("al")))
+    again = bci.stop_aliases(bci.alias_baseline(mid), new_parts)
+    check("an unchanged rebuild carries the aliases of the index in place as they are", again == got,
+          repr(again))
+    renumbered = [stop_part("szeged", [("szeged:N_1", LAT + 20, LON), ("szeged:N_2", LAT + 527, LON),
+                                       ("szeged:k", LAT + 2000, LON)], [(0, [0, 2]), (800, [1, 2])]),
+                  new_parts[1]]
+    twice = bci.stop_aliases(bci.alias_baseline(mid), renumbered)
+    check("renumbered twice: the old ids and the previous ones lead to the newest stop",
+          twice.get("szeged:a") == "szeged:N_1" and twice.get("szeged:SZ_1") == "szeged:N_1"
+          and twice.get("szeged:t") == "szeged:N_2" and twice.get("szeged:SZ_2") == "szeged:N_2", repr(twice))
+    check("this rebuild's aliases come before the carried ones",
+          list(twice).index("szeged:SZ_1") < list(twice).index("szeged:a"), repr(list(twice)))
+    real_cap = bci.ALIASES_PER_STOP
+    bci.ALIASES_PER_STOP = 1
+    try:
+        with contextlib.redirect_stderr(io.StringIO()) as err_buf:
+            capped = bci.stop_aliases(bci.alias_baseline(mid), renumbered)
+    finally:
+        bci.ALIASES_PER_STOP = real_cap
+    check("an operator keeps at most ALIASES_PER_STOP aliases per stop, the newest, and says so",
+          list(capped) == ["szeged:SZ_1", "szeged:SZ_2", "szeged:a"] and "left out" in err_buf.getvalue(),
+          repr(capped))
+    stale = Path(tmp) / "stale.json.gz"
+    write_index(new_parts, stale, with_operators=True, guard_total=False,
+                aliases={"szeged:old": "szeged:gone", "szeged:k": "szeged:SZ_1", "szeged:x": "szeged:SZ_1"})
+    check("write_index leaves out an alias whose stop is not in the index, or whose old id is a stop again",
+          [[old, ix] for old, ix in json.loads(gzip.decompress(stale.read_bytes()))["al"]]
+          == [["szeged:x", 0]], repr(json.loads(gzip.decompress(stale.read_bytes())).get("al")))
+    write_index(new_parts, stale, with_operators=True, guard_total=False)
+    check("an index without aliases has no \"al\"", "al" not in json.loads(gzip.decompress(stale.read_bytes())))
+
+    # The whole build: the index in place is the baseline.
+    base = Path(tmp) / "build"
+    base.mkdir()
+    feed = city_feed(trips=60)
+    feed["stops.txt"] = "stop_id,stop_name,stop_lat,stop_lon\n1,Alpha,46.25018,20.14\n2,Beta,46.26,20.14\n"
+    gtfs_zip(base / "x.zip", feed)
+    out = base / "city-index.json.gz"
+    write_index([{**stop_part("x", [("x:o1", LAT, LON), ("x:o2", LAT + 1000, LON)], [(3, [0, 1])] * 60)}],
+                out, with_operators=True, guard_total=False)
+    bci.CITY_FEEDS = [{"id": "x", "name": "X", "url": "https://x.example/x.zip", "file": "x.zip"}]
+    try:
+        with contextlib.redirect_stderr(io.StringIO()):
+            info = bci.build_city_index(base, out, today="20261120")
+    finally:
+        bci.CITY_FEEDS = real_feeds
+    built = json.loads(gzip.decompress(out.read_bytes()))
+    check("a rebuild that renumbered a feed's stops writes their aliases into the index",
+          info["aliases"] == 2 and sorted((old, built["s"][ix][0]) for old, ix in built["al"])
+          == [("x:o1", "x:1"), ("x:o2", "x:2")], repr((info, built.get("al"))))
 
 # A feed whose own host fails is fetched from its mirror, the same zip.
 with tempfile.TemporaryDirectory() as tmp:
