@@ -13,12 +13,12 @@ exactly as before.
 
 ## Sources
 
-For the Volán, Volánbusz local, Paks, Debrecen, Veszprém and Miskolc cards
-the **primary source is mavplusz.hu**, MÁV's own journey planner, asked for
-just the trips the card shows (see
+For the MÁV and GYSEV trains and the Volán, Volánbusz local, Paks,
+Debrecen, Veszprém and Miskolc cards the **primary source is mavplusz.hu**,
+MÁV's own journey planner, asked for just the trips the card shows (see
 [mavplusz.hu first](#mavpluszhu-first-jbbghsqde-as-backup)). The
 GTFS-Realtime feeds below are its **backup** for those operators, and the
-only source for the MÁV trains, GYSEV and Orosháza.
+only source for Orosháza.
 
 The feeds are the ones Transitous lists in
 [`feeds/hu.json`](https://github.com/public-transport/transitous/blob/main/feeds/hu.json).
@@ -49,13 +49,17 @@ on the server, but they were empty when this was written.
 updates of the operators above; the `jbb.ghsq.de` feeds are exported from
 it, so its ids are the feeds' ids with their prefix kept (feed trip
 `hkir_2036_1-3` of the `hkir:` feed is the planner's `hkir:hkir_2036_1-3`,
-its stops likewise). Sources marked `"mavplusz": true` in
-`realtime_feeds.json` (all 64 with the prefixes `hkir:`, `paks:`,
-`debrecen:`, `VBUSZ:` and `mvkzrt:`) are read this way:
+its stops likewise; MÁV trip `1:36166415` of the `1:` feeds is the
+planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
+`1:005510017_9`). Sources marked `"mavplusz": true` in
+`realtime_feeds.json` (all 67 with the prefixes `hkir:`, `paks:`,
+`debrecen:`, `VBUSZ:` and `mvkzrt:`, and MÁV's two and GYSEV's own with
+`1:`) are read this way:
 
 - **What is asked.** Requests with a `trip_id` on a feed matched by
-  trip_id, and requests with a `route` and `start` on a feed matched by
-  route + start (Veszprém, Miskolc, Debrecen). One GraphQL request (`POST
+  trip_id, requests with a `route` and `start` on a feed matched by
+  route + start (Veszprém, Miskolc, Debrecen), and requests with a `train`
+  on a feed matched by train number (`mav`, `gysev`). One GraphQL request (`POST
   https://mavplusz.hu/otp2-backend/otp/routers/default/index/graphql`, no key)
   per action call, for the trips of that call not cached yet: per trip its
   route, its calls on the service date (the card's `date`, else today in
@@ -88,6 +92,29 @@ its stops likewise). Sources marked `"mavplusz": true` in
   trip updates count as ones whose route was learned from a vehicle, as
   the feeds' are, so a Miskolc trip without its vehicle still gets no
   delay; its delay is the vehicle's current one.
+- **Train number.** The planner names a train's trips by the ids the
+  feeds use (`tripShortName` is the train number, "3311 személyvonat"),
+  but cannot be asked by number. So a train request is first resolved with
+  the same static MÁV and GYSEV GTFS the feeds are matched with (see
+  [Train number](#how-trips-are-matched) below): every trip id of the
+  number, per source, is asked for today and for yesterday (Budapest), the
+  two runs a train row without a date can mean; today's trips go first in
+  the request, last night's last. The answer is then matched exactly as on
+  the feeds: today's run, else last night's; a number with several trips
+  that day (741 ran as `1:36777783` and `1:36391307` on 2026-11-18, the
+  same calls) is told apart by the card's stations, else not answered.
+  Both `UPDATED` and `MODIFIED` trips carry the delays. Last night's run is
+  used only until 15 minutes after its last call: the planner keeps a
+  finished run's realtime data for hours (runs that left Budapest-Keleti
+  four hours earlier still had it, checked 2026-11-18), which would
+  otherwise answer for a train whose run today has not started. A train
+  is answered from the planner only when it answered every one of those
+  trips and knew one; a train with a trip cut by the 40-trip limit, or one
+  whose numbers the static feed could not give (its download failing with
+  no copy kept), is matched on the feeds as before, which are then read
+  for its source. A number the static feed lacks reads no feed: the feeds
+  could not match it either. A source the call has no train of (GYSEV's
+  for a MÁV train) is not read at all.
 - **What it answers.** A call without realtime data has no delay (the
   planner's scheduled time is no prediction). Every call CANCELED is a
   canceled trip, one CANCELED call among updated ones a skipped stop. A
@@ -110,10 +137,14 @@ its stops likewise). Sources marked `"mavplusz": true` in
   no realtime data for is no reason to read the feeds either. A route +
   start the planner does not resolve (a route it does not know, no trip at
   that minute, or the route list failing) is matched on the feeds, which
-  are then read too. Trains are always matched on the feeds.
+  are then read too. A train likewise, as above.
 - **Caching.** Each trip's answer, a miss included, is kept per trip and
   service date for the feed's `interval` (60 s), each route's trip list for
-  three hours, shared by every card and browser; one request at a time.
+  three hours, shared by every card and browser; one request at a time. A
+  run of an earlier service day whose last call was over six hours ago (the
+  most a delay is taken to be) no longer changes and is kept three hours
+  too: last night's runs of the trains asked by number are not asked again
+  every minute all day.
 
 ### How trips are matched
 
@@ -159,7 +190,10 @@ its stops likewise). Sources marked `"mavplusz": true` in
   way) is matched. A refresh that fails, or a zip that does
   not read, keeps the train numbers from before: they still match the live
   feeds. It is asked again after 15 minutes, conditionally for the copy
-  kept, not for the zip that did not read.
+  kept, not for the zip that did not read. The planner is asked for the
+  trips of the same train numbers first (see
+  [Train number](#mavpluszhu-first-jbbghsqde-as-backup) above), so the
+  static zips are read whichever source answers.
 
 A stop without its own update takes the nearest earlier stop's delay
 (GTFS-Realtime delays propagate down the trip). Delays more than 20 minutes
@@ -173,6 +207,41 @@ Live data the card already has stays: BKK FUTÁR's own predictions and
 vehicles, ELVIRA's delays, the `bkk_stop` companion's coach positions and
 the EMMA train positions from its sensors. The feed fills in rows that have
 none.
+
+## BKK boards when FUTÁR fails
+
+A Budapest departure board is read from BKK FUTÁR first, then from
+mavplusz.hu, then from Transitous. When the integration holds the FUTÁR key
+and FUTÁR does not answer `arrivals-and-departures-for-stop.json` or
+`trip-details.json` (an outage, a timeout, an HTTP error, FUTÁR's own HTTP
+429, or a rejected key), the `hungarian_transport.futar` action answers from
+the planner's BKK feed instead (`mavplusz_board.py`), in FUTÁR's own shape,
+with `"source": "mavplusz"` at the top of the answer. The planner has
+FUTÁR's ids with `BKK:` for `BKK_` (stop `BKK_F00940` is `BKK:F00940`). When
+the planner cannot answer either, the action returns FUTÁR's error as
+before, and the card fills the board from Transitous.
+
+- **What the rows carry.** Departure time, the prediction for a live trip
+  (none for a scheduled one: no delay shown), headsign, route number,
+  colours and type, the trip's wheelchair and bicycle flags, booking, the
+  pole of a station's departure and its platform code. Not the vehicle's
+  GPS position and plate: the rows show no live marker. HÉV is not in the
+  planner's BKK feed, so a HÉV board fails over to Transitous. A trip's
+  details (where it goes, the ride's length) come from the planner too.
+- **Not asked when.** The integration's own FUTÁR rate limit, an error
+  status FUTÁR gave for the request, and a request never sent are not
+  outages; nor are search, route details, plans and timetables, which the
+  planner does not answer. A rejected key still opens the reauthentication.
+- **No key, no planner.** Without a FUTÁR key the action does not exist and
+  the cards read Budapest from Transitous; the planner alone would not
+  answer the searches and route patterns a card with the action asks for.
+- **Limits.** One planner request per stop per 15 s for every card and
+  horizon together (the widest window, eight hours, is asked and each
+  card's horizon cut from it); the trip details asked within 50 ms go in one
+  request of up to 40 trips, cached 60 s; 0.5 requests a second with a burst
+  of 30, a bucket of its own; 30 s without requests after a failure, logged
+  once. FUTÁR gets 8 s of the card's 20 s on these two endpoints, the planner
+  6 s.
 
 ## Licence and terms
 
@@ -303,7 +372,8 @@ date, nothing else), so mavplusz.hu can tell which timetable rows some
 Home Assistant displays, as it can for anyone using its own site. The
 vehicles' plate numbers in the feeds are not passed on to the cards, and
 are not asked of the planner. `tests/fixtures/realtime/mavplusz_trips.json`
-is a real planner answer of 2026-11-14 for four trips, trimmed. The test fixtures (`tests/fixtures/realtime/`) are real feeds of
+is a real planner answer of 2026-11-14 for four trips, trimmed, and
+`mavplusz_trains.json` one of 2026-11-18 for four train runs. The test fixtures (`tests/fixtures/realtime/`) are real feeds of
 2026-11-02 trimmed to a few trips, with the vehicle descriptors and entity
 ids (plates) removed.
 
@@ -320,8 +390,13 @@ take about 0.3 s on a laptop.
 
 ## Limits
 
-- mavplusz.hu answers trip_id and route + start requests. Train numbers
-  (MÁV, GYSEV) are matched on the feeds alone.
+- mavplusz.hu answers train numbers only through the static MÁV and
+  GYSEV GTFS: while neither a copy of it nor its download is there, trains
+  are matched on the feeds, which cannot match them either. The planner's
+  vehicle names its trip but not the run's day: a daily train with
+  realtime data on both last night's run and today's (a night train on its
+  way while the next one already has predictions) shows the one vehicle on
+  today's run.
 
 - Cards with an index from before this change (no trip ids) get live data
   for Veszprém, Miskolc and MÁV only, until they get a newer index.

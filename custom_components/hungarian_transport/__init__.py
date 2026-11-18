@@ -32,6 +32,7 @@ from . import (
     lovelace_resource,
     mav,
     mav_daily,
+    mavplusz_board,
     realtime,
     storage,
     timetable_notify,
@@ -550,18 +551,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         async_end_reauth(hass, entry.entry_id)
 
     # The card switches to this service when it exists, so it is registered
-    # only while a key is configured.
+    # only while a key is configured. Without one the cards read BKK from
+    # Transitous; the planner below stands in for FUTÁR's departure boards
+    # and trip details only (docs/realtime.md "BKK boards when FUTÁR fails"),
+    # not for the searches, routes and plans a card with the service asks for.
+    def task_factory(coro: Any) -> Any:
+        return hass.async_create_background_task(coro, "hungarian_transport_futar", eager_start=False)
+
+    planner = mavplusz_board.PlannerBoards(
+        async_get_clientsession(hass), task_factory=task_factory, call_later=hass_call_later(hass)
+    )
     proxy = FutarProxy(
         async_get_clientsession(hass),
         api_key,
-        task_factory=lambda coro: hass.async_create_background_task(
-            coro, "hungarian_transport_futar", eager_start=False
-        ),
+        task_factory=task_factory,
         call_later=hass_call_later(hass),
         on_accepted=_key_accepted,
         # A parent station's schedule-for-stop.json runs to megabytes: it
         # is decoded in HA's executor, like ELVIRA's boards.
         executor=hass.async_add_executor_job,
+        # FUTÁR down, refusing the key or the call (HTTP 429): the boards
+        # and trip details come from mavplusz.hu; the proxy closes it.
+        fallback=planner,
     )
     entry.async_on_unload(proxy.close)
     entry.async_on_unload(close_on_stop(hass, proxy.close))
@@ -590,6 +601,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             # ends the reauth (_key_accepted).
             entry.async_start_reauth(hass)
             raise
+        if proxy.key_rejected:
+            # The planner answered for a rejected key: a new one is still due.
+            entry.async_start_reauth(hass)
         return {"data": data}
 
     hass.services.async_register(

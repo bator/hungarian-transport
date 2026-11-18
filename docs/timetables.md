@@ -874,6 +874,27 @@ feed states a licence; KeKo's own address
 (<https://timetable.keko.hu/Kecskemet_GTFS.zip>) answers 401. Orosháza's
 local buses come from the town's own export at gpspositions.net.
 
+Szeged's trams and trolleybuses come from SZKT's own zip,
+<https://gtfs.szkt.hu/zipstore/szkt-szeged-hu.zip> (its
+[developer page](https://szkt.hu/fejlesztoknek-gtfs-adatbazis), NAP profile
+11), and from menetbrand's byte-identical `/download/szeged/` copy when that
+host fails. Only the SZKT agency is read: the same zip has MÁV's Szeged local
+buses (agency `hkir_V-33367`), which the Volán feed already gives as
+`volan-szeged`, and the tram-train to Hódmezővásárhely is in MÁV's own GTFS
+(route `1`). Until November 2026 the index read
+`szegedimenetrend.hu/google_transit.zip`, a December 2025 zip with
+Volánbusz, SZKT and MÁV-START in one operator, whose calendar exceptions end
+on 10 January 2026; it is not used as a fallback. The trolleybuses carry the
+extended `route_type` 800, which the card shows as trolleybuses. Because the
+new Szeged feed is much smaller than the old one, the guard accepts the
+smaller `szeged` until 15 December 2026 (`shrink_ok` in
+`scripts/build_city_index.py`); a missing Szeged feed is still refused.
+Pécs (Tüke Busz) is fetched from <https://mobilitas.biokom.hu/gtfs/> over
+https. Hódmezővásárhely's zip (HVSZ, via menetbrand) runs until 30 November
+2026; when no newer one is published by then, the feed leaves the index with
+a *calendar ended* warning and comes back with the next zip, as Bahart does
+out of season.
+
 The Budavári Sikló, the Zugligeti Libegő, the Dunakeszi–Horány ferry, the
 Pásztor ferry (Szentendre–Szigetmonostor) and the Üröm minibus come from
 [Máté Gyöngyösi's feeds](https://github.com/gy-mate/gtfs-feeds) on
@@ -914,7 +935,7 @@ These feeds still need a form or login:
 - MÁV / GYSEV rail GTFS: <https://www.mavcsoport.hu/gtfs-igenybejelento>.
   See [MÁV train routes](#máv-train-routes); releases build it with the
   repository's MÁV secrets.
-- National Access Point (SZKT official dump and others): <https://napportal.kozut.hu/>
+- National Access Point (BAHART's keyed URL and others): <https://napportal.kozut.hu/>
 
 BKK static GTFS is public, but Budapest already uses live FUTÁR, so that zip
 is not folded into `city-index.json.gz`. The BKK Open Data key is only for

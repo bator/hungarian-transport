@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
 
@@ -61,6 +62,23 @@ MAX_CARRIED = 3
 # as catalog fallback; menetbrand if neither is set.
 # "insecure": the publisher still serves plain http. HTTPS is tried first;
 # only these feeds may fall back to http (download_feed warns when it does).
+# "mirrors": copies of the same zip, tried in order after "url" fails.
+# "agencies": the agency ids or names a feed is read for; the rest of the
+# zip is left out.
+# Szeged: SZKT's own zip (developer page szkt.hu/fejlesztoknek-gtfs-adatbazis,
+# NAP profile 11; menetbrand mirrors it byte for byte). It also carries MÁV's
+# Szeged local buses (agency hkir_V-33367), which the Volán feed already
+# gives as volan-szeged, so only the SZKT trams and trolleybuses are read.
+# The tram-train to Hódmezővásárhely is in MÁV's own GTFS (route "1").
+# szegedimenetrend.hu, the address used until November 2026, still serves
+# the DAKK-era zip of December 2025 (Volánbusz, SZKT and MÁV-START at once),
+# whose calendar_dates stop in January 2026: no fallback to it.
+# "shrink_ok": (first day, last day) in which the guard accepts a smaller
+# feed than the index in place has, because its source changed on purpose:
+# the old Szeged zip had the Volán buses and the tram-train as well. A
+# missing feed or an ended calendar is still refused. By the last day the
+# indexes in place (the Pages site, the latest release, a local rebuild)
+# hold the new feed, and the guard compares as before.
 CITY_FEEDS = [
     {
         "id": "miskolc",
@@ -72,16 +90,17 @@ CITY_FEEDS = [
     {
         "id": "pecs",
         "name": "Pécs — Tüke Busz",
-        "url": "http://mobilitas.biokom.hu/gtfs",
+        "url": "https://mobilitas.biokom.hu/gtfs/",
         "file": "pecs.zip",
-        "insecure": True,
     },
     {
         "id": "szeged",
         "name": "Szeged — SZKT",
-        "url": "http://szegedimenetrend.hu/google_transit.zip",
+        "url": "https://gtfs.szkt.hu/zipstore/szkt-szeged-hu.zip",
+        "mirrors": ["https://gtfs.menetbrand.com/download/szeged/"],
         "file": "szeged.zip",
-        "insecure": True,
+        "agencies": ("SZKT",),
+        "shrink_ok": ("20261118", "20261215"),
     },
     {
         "id": "szombathely",
@@ -230,17 +249,30 @@ def skip_helykozi(agency: str) -> bool:
     return is_helykozi(agency)
 
 
+def include_agencies(keep: Iterable[str]):
+    """include_all for the routes of the agencies keep names, by agency_id
+    or agency_name: SZKT's own zip calls its agency "SZKT" by id, the older
+    szegedimenetrend.hu zip by name."""
+    names = frozenset(keep)
+
+    def include(short: str, agency: str, aid: str) -> bool:
+        return bool(short) and (aid in names or agency in names)
+
+    return include
+
+
 def _load_feed(base: Path, feed: dict, zpath: Path | None = None) -> list[dict]:
     """Parts of one city feed, from zpath when given (a new zip not yet in
     base), else from base. A missing zip is downloaded; when the zip from
     one URL (a keyed override, say) fails to download or parse, the next URL
     is tried, down to the public one."""
     zpath = zpath or base / feed["file"]
+    include = include_agencies(feed["agencies"]) if feed.get("agencies") else include_all
 
     def load() -> list[dict]:
         return load_parts(
             zpath,
-            include_all,
+            include,
             op_id=feed["id"],
             op_name=feed["name"],
             prefix=f"{feed['id']}:",
@@ -527,14 +559,27 @@ def _counts(parts: list[dict], today: str) -> tuple[dict[str, int], dict[str, in
     return _group_trips(running), _group_trips(total)
 
 
+def _shrink_ok(group: str, today: str) -> str:
+    """The last day of the feed's "shrink_ok" window when today is in it,
+    else ""."""
+    feed = next((f for f in CITY_FEEDS if f["id"] == group), None)
+    first, last = (feed or {}).get("shrink_ok") or ("", "")
+    return last if today and first <= today <= last else ""
+
+
 def _group_problem(
     group: str,
     previous: Previous,
     after_running: dict[str, int],
     after_all: dict[str, int],
     expired: dict[str, str],
+    today: str = "",
+    *,
+    warn: bool = False,
 ) -> str:
-    """Why guard_feeds refuses a rebuild for this feed, or ""."""
+    """Why guard_feeds refuses a rebuild for this feed, or "". A feed in its
+    "shrink_ok" window (today, CITY_FEEDS) may have fewer trips; with warn
+    that is said on stderr."""
     prev, before, before_all = previous
     running = before.get(group)
     if not running:
@@ -550,7 +595,12 @@ def _group_problem(
     if not has:
         return f"{group} missing (had {had} trips)"
     if had >= MIN_GUARDED_TRIPS and has < had * keep:
-        return f"{group} {has} trips vs {had}"
+        until = _shrink_ok(group, today)
+        if not until:
+            return f"{group} {has} trips vs {had}"
+        if warn:
+            print(f"warn {group} {has} trips vs {had}; accepted until {ymd(until)}, its source changed",
+                  file=sys.stderr)
     return ""
 
 
@@ -562,7 +612,7 @@ def _feed_problem(fid: str, previous: Previous | None, got: list[dict], today: s
     ended = dict(stale_parts(got, today))
     fresh = [p for p in got if p["op_id"] not in ended]
     expired = {fid: max(ended.values())} if ended and not fresh else {}
-    return _group_problem(fid, previous, *_counts(fresh, today), expired)
+    return _group_problem(fid, previous, *_counts(fresh, today), expired, today)
 
 
 def guard_feeds(
@@ -603,7 +653,7 @@ def guard_feeds(
     for group in sorted(before):
         if group in allow or "all" in allow:
             continue
-        why = _group_problem(group, previous, after_running, after_all, expired)
+        why = _group_problem(group, previous, after_running, after_all, expired, today, warn=True)
         if why:
             problems.append(why)
     if problems:

@@ -9,6 +9,10 @@ fixtures/realtime/mavplusz_routes.json (2026-11-14 07:4x CET) lists the
 trips of Veszprém line 2 and Miskolc lines 32 and 14 that day (14 has two
 trips at 07:10, from both ends) and the realtime of a running trip of
 Veszprém 2 and of Miskolc 32, for the route + start path.
+fixtures/realtime/mavplusz_trains.json (2026-11-18 19:52 CET) has train
+741's two trips that day (UPDATED and MODIFIED, the same calls), train 3311
+(MODIFIED) and 741's first trip on the day before, for the train path; the
+static train numbers those trips are asked by are made up per test (_static).
 """
 from __future__ import annotations
 
@@ -16,8 +20,12 @@ import asyncio
 import copy
 import dataclasses
 import json
+from datetime import datetime
+import io
 import logging
 from pathlib import Path
+import re
+import zipfile
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -128,7 +136,10 @@ def test_a_trip_without_realtime_on_the_date_has_neither_update_nor_vehicle() ->
     res = mavplusz.parse_response(ANSWER, KEYS)
     # Its pattern's vehicle is on this trip id, but today's run of it.
     assert ANSWER["data"]["t2"]["pattern"]["vehiclePositions"][0]["trip"]["gtfsId"] == KEYS[2].gtfs_id
-    assert res[KEYS[2]] == mavplusz.TripResult(None, None)
+    assert res[KEYS[2]][:2] == (None, None)
+    # Its end is still known: its last call's scheduled time that day.
+    last = ANSWER["data"]["t2"]["stoptimesForDate"][-1]
+    assert res[KEYS[2]].ends == last["serviceDay"] + max(last["realtimeArrival"], last["realtimeDeparture"])
 
 
 def test_a_missing_trip_is_none_and_absent_from_the_feed() -> None:
@@ -249,16 +260,20 @@ async def test_an_answer_nested_too_deep_is_a_value_error(aioclient_mock) -> Non
 def test_feed_table_opts_in_the_planners_feeds() -> None:
     table = realtime.load_feed_table()
     flagged = {(fid, s.prefix) for fid, cfg in table.items() for s in cfg.sources if s.mavplusz}
-    assert {p for _f, p in flagged} == {"hkir:", "paks:", "debrecen:", "mvkzrt:", "VBUSZ:"}
+    assert {p for _f, p in flagged} == {"hkir:", "paks:", "debrecen:", "mvkzrt:", "VBUSZ:", "1:"}
     doc = json.loads(realtime.FEEDS_FILE.read_text(encoding="utf-8"))
-    assert sum(1 for f in doc["feeds"].values() for s in f["sources"] if s.get("mavplusz") is True) == 64
+    assert sum(1 for f in doc["feeds"].values() for s in f["sources"] if s.get("mavplusz") is True) == 67
     for fid in ("veszprem", "miskolc"):
         assert "route_start" in table[fid].match and all(s.mavplusz for s in table[fid].sources), fid
-    for fid in ("mav", "gysev", "oroshaza"):
-        assert not any(s.mavplusz for s in table[fid].sources), fid
+    # The trains: MÁV's two sources and GYSEV's own, each with the static
+    # feed its train numbers come from.
+    for fid in ("mav", "gysev"):
+        assert "train" in table[fid].match, fid
+        assert all(s.mavplusz and s.static and s.prefix == "1:" for s in table[fid].sources), fid
+    assert not any(s.mavplusz for s in table["oroshaza"].sources)
     for fid, cfg in table.items():
         if any(s.mavplusz for s in cfg.sources):
-            assert "trip" in cfg.match, fid
+            assert cfg.match & {"trip", "train"}, fid
     # Only a literal true opts in.
     parsed = realtime.parse_feed_table(
         {"feeds": {"a": {"sources": [{"trip_updates": "https://x/tu", "mavplusz": "yes"}], "match": ["trip"]}}}
@@ -658,7 +673,7 @@ async def test_planner_requests_cannot_use_up_the_feed_fetches(aioclient_mock) -
         {"key": "t", "train": "4510"},
         {"key": "none"},
     ],
-    ids=["train", "nothing"],
+    ids=["train-without-a-static-feed", "nothing"],
 )
 async def test_requests_without_a_trip_id_or_route_read_only_jbb(aioclient_mock, req) -> None:
     _jbb(aioclient_mock)
@@ -928,3 +943,327 @@ async def test_a_failing_route_list_reads_jbb(aioclient_mock) -> None:
     # The backoff keeps the trip request from going out too.
     assert len(_calls(aioclient_mock, "post")) == 1 and len(_calls(aioclient_mock, "get")) == 2
     assert "error" not in resp
+
+
+# ---------------------------------------------------------------- trains
+
+
+TRAINS_DOC = json.loads((FIX / "mavplusz_trains.json").read_text(encoding="utf-8"))
+TRAINS = TRAINS_DOC["response"]["data"]
+# The train fixture's request time, 2026-11-18 19:52:45 CET (its vehicle is
+# 36 s older), and that service day's midnight.
+TRAIN_WALL = 1795027965
+TRAIN_DAY = 1794956400
+TODAY, YESTERDAY = "20261118", "20261117"
+TABLE = realtime.load_feed_table()
+MAV_SRC, GYSEV_SRC = TABLE["mav"].sources
+IC741, IC741_MOD, OS3311 = "1:36777783", "1:36391307", "1:36322788"
+# The card's train rows: station codes (Békéscsaba, Kőbánya-Kispest,
+# Budapest-Keleti), the boarding one first.
+REQ_741 = {"key": "741", "train": "741", "stops": ["005518069", "005510017"], "from": 0, "to": 1}
+REQ_3311 = {"key": "3311", "train": "3311", "stops": ["005513748", "005510017"], "from": 0, "to": 1}
+_ALIAS = re.compile(r"(t\d+): trip\(id: \$t\d+\) \{ gtfsId route \{ gtfsId \} stoptimesForDate\(serviceDate: \$(d\d+)\)")
+
+
+def _static(numbers: dict[str, list[str]]) -> bytes:
+    """A static GTFS zip whose trips.txt gives each train number its trip ids."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        rows = "".join(f"{tid},R,S,{num} személyvonat\n" for num, ids in numbers.items() for tid in ids)
+        zf.writestr("trips.txt", "trip_id,route_id,service_id,trip_short_name\n" + rows)
+    return buf.getvalue()
+
+
+def _midnight(date: str) -> int:
+    return int(datetime.strptime(date, "%Y%m%d").replace(tzinfo=mavplusz.BUDAPEST).timestamp())
+
+
+def _scheduled(trip: dict, date: str) -> dict:
+    """The trip's run on another date as the planner gives one without
+    realtime data: its scheduled calls, no vehicle."""
+    out = copy.deepcopy(trip)
+    for st in out["stoptimesForDate"]:
+        st.update(realtime=False, realtimeState="SCHEDULED", arrivalDelay=0, departureDelay=0, serviceDay=_midnight(date))
+    out["pattern"]["vehiclePositions"] = []
+    return out
+
+
+def _later(trip: dict, seconds: int) -> dict:
+    """The run with every call later by seconds (a night train past midnight)."""
+    out = copy.deepcopy(trip)
+    for st in out["stoptimesForDate"]:
+        st["realtimeArrival"] += seconds
+        st["realtimeDeparture"] += seconds
+    return out
+
+
+class TrainPlanner:
+    """A fake mavplusz.hu by (trip id, service date): a run in runs as it
+    is, a known trip on another date without realtime (_scheduled), an
+    unknown one null. asks has the (id, date) pairs of every request."""
+
+    def __init__(self, runs: dict[tuple[str, str], dict] | None = None) -> None:
+        self.runs = {
+            (IC741, TODAY): TRAINS["t0"], (IC741_MOD, TODAY): TRAINS["t1"],
+            (OS3311, TODAY): TRAINS["t2"], (IC741, YESTERDAY): TRAINS["t3"],
+        } if runs is None else runs
+        self.asks: list[list[tuple[str, str]]] = []
+
+    async def __call__(self, method, url, data):
+        body = json.loads(data)
+        variables = body["variables"]
+        pairs = [(variables[alias], variables[d]) for alias, d in _ALIAS.findall(body["query"])]
+        self.asks.append(pairs)
+        answer = {}
+        for (alias, _d), (gid, date) in zip(_ALIAS.findall(body["query"]), pairs):
+            run = self.runs.get((gid, date))
+            if run is None:
+                other = next((t for (g, _day), t in self.runs.items() if g == gid), None)
+                run = None if other is None else _scheduled(other, date)
+            answer[alias] = copy.deepcopy(run)
+        return AiohttpClientMockResponse(method, url, json={"data": answer})
+
+
+# GYSEV's static feed in the MÁV tests: none of their trains.
+GYSEV_OTHER = {"9999": ["39999999"]}
+
+
+def _statics(aioclient_mock, mav: dict | None, gysev: dict | None = GYSEV_OTHER) -> None:
+    """The two static feeds' train numbers; None is a static feed that fails."""
+    for src, numbers in ((MAV_SRC, mav), (GYSEV_SRC, gysev)):
+        if numbers is None:
+            aioclient_mock.get(src.static, status=503)
+        else:
+            aioclient_mock.get(src.static, content=_static(numbers))
+
+
+def _feed_gets(aioclient_mock) -> list[str]:
+    """The GTFS-Realtime feeds read (not the static zips)."""
+    return [str(c[1]) for c in _calls(aioclient_mock, "get") if str(c[1]).endswith(".pb")]
+
+
+async def _train_hub(aioclient_mock, wall: float = TRAIN_WALL, clock: FakeClock | None = None):
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    clock = clock or FakeClock()
+    hub = realtime.RealtimeHub(
+        session, feeds={"mav": TABLE["mav"], "gysev": TABLE["gysev"]}, monotonic=clock.monotonic, wall=lambda: wall
+    )
+    return hub, session, clock
+
+
+@pytest.mark.parametrize(
+    ("numbers", "req", "expect"),
+    [
+        (
+            {"741": ["36777783"]}, REQ_741,
+            ("36777783", 60, TRAIN_DAY + 60900, 480, TRAIN_DAY + 71880, 47.493019),
+        ),
+        (
+            {"3311": ["36322788"]}, REQ_3311,
+            ("36322788", 120, TRAIN_DAY + 65340, 360, TRAIN_DAY + 71460, None),
+        ),
+    ],
+    ids=["updated", "modified"],
+)
+async def test_a_train_is_answered_by_the_planner_and_no_feed_is_read(aioclient_mock, numbers, req, expect) -> None:
+    planner = TrainPlanner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, numbers)
+    hub, session, _clock = await _train_hub(aioclient_mock)
+    resp = await hub.query("mav", [req])
+    await session.close()
+    # Its trip ids by the MÁV static feed, today's run and last night's
+    # (today's first), in one request; GYSEV's static feed has no such
+    # train, so its feeds are not read either.
+    (tid,) = numbers[req["train"]]
+    assert planner.asks == [[("1:" + tid, TODAY), ("1:" + tid, YESTERDAY)]]
+    assert _feed_gets(aioclient_mock) == []
+    assert resp["feed"] == "mav" and resp["updated"] == TRAIN_WALL
+    hit = resp["trips"][req["key"]]
+    # The same shape as from the feeds.
+    assert list(hit) == ["trip_id", "delay", "time", "dest_delay", "dest_time", "approx", "canceled", "skipped", "vehicle"]
+    lat = hit["vehicle"]["lat"] if hit["vehicle"] else None
+    assert (hit["trip_id"], hit["delay"], hit["time"], hit["dest_delay"], hit["dest_time"], lat) == expect
+    assert (hit["approx"], hit["canceled"], hit["skipped"]) == (False, False, False)
+
+
+def _without_call(trip: dict, station: str) -> dict:
+    out = copy.deepcopy(trip)
+    out["stoptimesForDate"] = [st for st in out["stoptimesForDate"] if not st["stop"]["gtfsId"].startswith("1:" + station)]
+    return out
+
+
+@pytest.mark.parametrize(
+    ("stops", "picked"),
+    [(["005518069"], "36777783"), (["005517848"], "36777783"), (["005510017"], None), ([], None)],
+)
+async def test_the_variants_of_a_train_number_are_told_apart_by_the_stops(aioclient_mock, stops, picked) -> None:
+    """741 runs as two trips that day: the one calling at the card's stops
+    is its row's, as on the feeds; both or neither is no answer."""
+    runs = TrainPlanner().runs
+    runs[IC741_MOD, TODAY] = _without_call(_without_call(TRAINS["t1"], "005518069"), "005517848")
+    planner = TrainPlanner(runs)
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"741": ["36777783", "36391307"]})
+    hub, session, _clock = await _train_hub(aioclient_mock)
+    resp = await hub.query("mav", [{"key": "k", "train": "0741", "stops": stops, "from": 0}])
+    await session.close()
+    assert sorted(planner.asks[0]) == sorted((g, d) for g in (IC741, IC741_MOD) for d in (TODAY, YESTERDAY))
+    assert resp["trips"].get("k", {}).get("trip_id") == picked
+    assert _feed_gets(aioclient_mock) == []
+
+
+MAV_JBB_REQ = {"key": "ic", "train": "822", "stops": ["005501024", "005506189"], "from": 0, "to": 1}
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [{"status": 502}, {"exc": asyncio.TimeoutError()}, {"json": {"errors": [{"message": "boom"}]}}, None],
+    ids=["http", "timeout", "graphql-error", "knows-none"],
+)
+async def test_a_train_the_planner_cannot_answer_is_matched_on_the_feeds(aioclient_mock, failure) -> None:
+    """test_realtime's MÁV feeds of 2026-11-02 and the static feed's train
+    822: the answer the feeds gave before the planner came first."""
+    if failure is None:
+        aioclient_mock.post(mavplusz.URL, side_effect=TrainPlanner({}))
+    else:
+        aioclient_mock.post(mavplusz.URL, **failure)
+    aioclient_mock.get(MAV_SRC.static, content=(FIX / "mav-static.zip").read_bytes())
+    aioclient_mock.get(GYSEV_SRC.static, content=_static(GYSEV_OTHER))
+    aioclient_mock.get(J + "1_198/trip-updates.pb", content=_pb("mav-trip-updates"))
+    aioclient_mock.get(J + "1_198/vehicle-positions.pb", content=_pb("mav-vehicle-positions"))
+    hub, session, _clock = await _train_hub(aioclient_mock, wall=JBB_WALL)
+    resp = await hub.query("mav", [MAV_JBB_REQ])
+    await session.close()
+    assert len(_calls(aioclient_mock, "post")) == 1
+    # MÁV's feeds; GYSEV's had nothing to ask the planner for.
+    assert sorted(_feed_gets(aioclient_mock)) == [J + "1_198/trip-updates.pb", J + "1_198/vehicle-positions.pb"]
+    hit = resp["trips"]["ic"]
+    assert (hit["trip_id"], hit["delay"], hit["dest_delay"]) == ("35700507", 0, 600)
+    assert hit["vehicle"]["lat"] == pytest.approx(46.50523, abs=1e-5)
+
+
+async def test_without_the_static_train_numbers_the_feeds_are_read_as_before(aioclient_mock) -> None:
+    """No train number can be resolved to a trip id, for the planner nor
+    for the feeds: the feeds are read as they were, and once the static
+    feed answers (after its backoff) the planner is asked."""
+    planner = TrainPlanner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, None, None)
+    for path in ("1_198/trip-updates.pb", "1_198/vehicle-positions.pb", "1_134/trip-updates.pb", "1_134/vehicle-positions.pb"):
+        aioclient_mock.get(J + path, status=503)
+    hub, session, clock = await _train_hub(aioclient_mock)
+    resp = await hub.query("mav", [REQ_3311])
+    assert not planner.asks and len(_feed_gets(aioclient_mock)) == 4
+    assert resp["trips"] == {}
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3311": ["36322788"]})
+    clock.now += realtime.STATIC_FAIL_BACKOFF + 1
+    resp = await hub.query("mav", [REQ_3311])
+    await session.close()
+    assert len(planner.asks) == 1 and _feed_gets(aioclient_mock) == []
+    assert resp["trips"]["3311"]["dest_delay"] == 360
+
+
+@pytest.mark.parametrize(
+    ("at", "delay"),
+    [(TRAIN_DAY + 86400 + 1800, 120), (TRAIN_DAY + 86400 + 5400, None)],
+    ids=["00:30-on-its-way", "01:30-over"],
+)
+async def test_last_nights_train_is_answered_until_it_is_over(aioclient_mock, at, delay) -> None:
+    """3311 five hours later, arriving at 00:51: past midnight the row
+    (which sends no date) is last night's run until 15 minutes after its
+    last call. The planner keeps a finished run's realtime data, which must
+    not answer for today's run."""
+    planner = TrainPlanner({(OS3311, TODAY): _later(TRAINS["t2"], 5 * 3600)})
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3311": ["36322788"]})
+    hub, session, _clock = await _train_hub(aioclient_mock, wall=at)
+    resp = await hub.query("mav", [REQ_3311])
+    await session.close()
+    assert planner.asks == [[(OS3311, "20261119"), (OS3311, TODAY)]]
+    assert _feed_gets(aioclient_mock) == []
+    assert resp["trips"].get("3311", {}).get("delay") == delay
+    if delay is not None:
+        assert resp["trips"]["3311"]["time"] == TRAIN_DAY + 65340 + 5 * 3600
+
+
+async def test_last_nights_runs_long_over_are_not_asked_every_minute(aioclient_mock) -> None:
+    """Yesterday's run of 3311 ended a day ago: it no longer changes, so it
+    is kept for hours while today's is asked again every interval."""
+    planner = TrainPlanner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3311": ["36322788"]})
+    hub, session, clock = await _train_hub(aioclient_mock)
+    await hub.query("mav", [REQ_3311])
+    clock.now += TABLE["mav"].interval + 1
+    resp = await hub.query("mav", [REQ_3311])
+    clock.now += realtime.ROUTE_INTERVAL
+    await hub.query("mav", [REQ_3311])
+    await session.close()
+    assert planner.asks == [
+        [(OS3311, TODAY), (OS3311, YESTERDAY)], [(OS3311, TODAY)], [(OS3311, TODAY), (OS3311, YESTERDAY)]
+    ]
+    assert resp["trips"]["3311"]["delay"] == 120
+
+
+async def test_gysev_answers_trains_and_trip_ids_from_the_planner(aioclient_mock) -> None:
+    """GYSEV's own feed matches by trip id (its city cards) and by train
+    number: both kinds of row in one planner request. (The fixture's MÁV
+    trips stand in for GYSEV's: one planner feed, prefix 1:, for both.)"""
+    planner = TrainPlanner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    aioclient_mock.get(GYSEV_SRC.static, content=_static({"3311": ["36322788"]}))
+    hub, session, _clock = await _train_hub(aioclient_mock)
+    by_trip = {"key": "t", "trip_id": "36777783", "date": TODAY, "stops": ["005518069_0"], "from": 0}
+    resp = await hub.query("gysev", [REQ_3311, by_trip])
+    await session.close()
+    assert len(planner.asks) == 1
+    assert set(planner.asks[0]) == {(IC741, TODAY), (OS3311, TODAY), (OS3311, YESTERDAY)}
+    assert _feed_gets(aioclient_mock) == []
+    assert resp["trips"]["3311"]["delay"] == 120
+    assert (resp["trips"]["t"]["trip_id"], resp["trips"]["t"]["delay"]) == ("36777783", 60)
+
+
+async def test_train_rows_over_the_trip_cap_are_matched_on_the_feeds_until_asked(aioclient_mock) -> None:
+    """30 trains, one trip id each, are 60 trips with last night's runs: 40
+    go out (today's all first), the trains with a trip cut are matched on
+    the feeds, and the next call asks for the rest."""
+    numbers = {str(1000 + n): [str(36000000 + n)] for n in range(30)}
+    runs = {("1:" + ids[0], TODAY): _as(TRAINS["t2"], "1:" + ids[0]) for ids in numbers.values()}
+    planner = TrainPlanner(runs)
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, numbers)
+    aioclient_mock.get(J + "1_198/trip-updates.pb", content=_pb("mav-trip-updates"))
+    aioclient_mock.get(J + "1_198/vehicle-positions.pb", content=_pb("mav-vehicle-positions"))
+    hub, session, clock = await _train_hub(aioclient_mock)
+    reqs = [{"key": num, "train": num, "stops": ["005513748"], "from": 0} for num in numbers]
+    first = await hub.query("mav", reqs)
+    (asked,) = planner.asks
+    assert len(asked) == mavplusz.MAX_TRIPS_PER_REQUEST
+    assert [d for _g, d in asked] == [TODAY] * 30 + [YESTERDAY] * 10
+    assert set(first["trips"]) == set(list(numbers)[:10])
+    assert sorted(_feed_gets(aioclient_mock)) == [J + "1_198/trip-updates.pb", J + "1_198/vehicle-positions.pb"]
+    clock.now += 30
+    second = await hub.query("mav", reqs)
+    await session.close()
+    assert [d for _g, d in planner.asks[1]] == [YESTERDAY] * 20
+    assert set(second["trips"]) == set(numbers)
+    assert {hit["delay"] for hit in second["trips"].values()} == {120}
+
+
+async def test_the_service_asks_the_planner_for_a_train(hass, aioclient_mock, freezer) -> None:
+    freezer.move_to("2026-11-18T18:52:45+00:00")
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    planner = TrainPlanner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3311": ["36322788"]})
+    resp = await hass.services.async_call(
+        DOMAIN, SERVICE_REALTIME, {"feed": "mav", "trips": [REQ_3311]}, blocking=True, return_response=True
+    )
+    assert (resp["trips"]["3311"]["delay"], resp["trips"]["3311"]["dest_delay"]) == (120, 360)
+    assert len(planner.asks) == 1 and _feed_gets(aioclient_mock) == []
