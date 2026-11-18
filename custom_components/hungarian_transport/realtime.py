@@ -1281,9 +1281,20 @@ class RealtimeHub:
                     # One group over the whole cap: its first ones.
                     todo.update(dict.fromkeys(new[:cap]))
             keys = list(todo)
+            # The routes of the live trips whose last answer had a realtime
+            # pattern: its vehicles are only on the route's scheduled ones
+            # (mavplusz.parse_response). A trip's first answer says so, so
+            # its vehicle comes from the second request on.
+            routes = list(dict.fromkeys(
+                hit.result.route
+                for k in keys
+                if (hit := self._mav_cache.get((k.gtfs_id, k.date))) is not None
+                and hit.result is not None and hit.result.trip_update is not None
+                and hit.result.rt_pattern and hit.result.route
+            ))[: mavplusz.MAX_ROUTES_PER_REQUEST]
             at = self._wall()
             results = await self._mav_post(
-                mavplusz.build_query(keys), lambda doc: mavplusz.parse_response(doc, keys), deadline
+                mavplusz.build_query(keys, routes), lambda doc: mavplusz.parse_response(doc, keys, routes), deadline
             )
             if results is None:
                 return None

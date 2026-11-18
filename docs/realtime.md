@@ -64,11 +64,19 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   per action call, for the trips of that call not cached yet: per trip its
   route, its calls on the service date (the card's `date`, else today in
   Budapest) with realtime delays and times, and the positions of the
-  vehicles on its pattern. Each position names its trip, and is kept for
-  that trip's live run whichever trip of the request it came with: the
-  planner lists a train's vehicle under the alias asking for a day the
-  trip ran without realtime data, not under its live run's (twice on
-  2026-11-18, `tests/fixtures/realtime/mavplusz_trains.json`). The
+  vehicles on its pattern. A trip the realtime data changed (every live
+  MÁV train sampled on 2026-11-18, `MODIFIED`, and some `UPDATED` ones, on
+  any of the planner's sources) has a realtime pattern of its own
+  (`1:V3775_106::rt#2972`) that lists no vehicle: its vehicle is on its
+  route's scheduled patterns. So once a trip's answer names such a
+  pattern, the next requests ask for the vehicles on every pattern of its
+  route too, one alias per route (`route(id:) { patterns {
+  vehiclePositions } }`, at most 40; 250 bytes a vehicle, 1.5 kB for the
+  busy MÁV route 1:V3775_106 at 21:52), and its vehicle shows from its
+  second answer on
+  (`tests/fixtures/realtime/mavplusz_rt_pattern.json`). Each position
+  names its trip, and is kept for that trip's live run whichever alias it
+  came with. The
   ids go in as GraphQL variables; vehicle ids (plate numbers) are not
   asked for. At most 40 trips a request, of the ones not cached yet; the
   rest are cut, not split. What a row needs goes in whole or not at all (a

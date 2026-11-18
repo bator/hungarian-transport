@@ -1,0 +1,1266 @@
+{
+ "_comment": "mavplusz.hu OTP2 GraphQL answer, captured 2026-11-18 21:52:33 CET, unedited, for the query mavplusz.build_query(trips, routes) makes (variables below): three live MÁV trips that day (t0 train 3331 and t1 3341 of route 1:V3775_106, t2 4931 of 1:V3803_106), all MODIFIED, whose own patterns are realtime ones (code ...::rt#...) listing no vehicle, and the vehicles of every pattern of their two routes (r0, r1) and of two Volán routes (r2 hkir_V-R-200-735, the busiest that day by trips, and r3), which carry the trips' vehicles. 1,934 bytes gzipped, 18 kB. Public timetable and vehicle position data only.",
+ "variables": {
+  "d0": "20261118",
+  "t0": "1:36322792",
+  "t1": "1:36322546",
+  "t2": "1:36226466",
+  "r0": "1:V3775_106",
+  "r1": "1:V3803_106",
+  "r2": "hkir:hkir_V-R-200-735",
+  "r3": "hkir:hkir_V-R-200-5610"
+ },
+ "response": {
+  "data": {
+   "t0": {
+    "gtfsId": "1:36322792",
+    "route": {
+     "gtfsId": "1:V3775_106"
+    },
+    "stoptimesForDate": [
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 72480,
+      "realtimeDeparture": 72480,
+      "arrivalDelay": 60,
+      "departureDelay": 60,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005513748_15"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 73140,
+      "realtimeDeparture": 73200,
+      "arrivalDelay": 120,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005542275_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 73560,
+      "realtimeDeparture": 73620,
+      "arrivalDelay": 300,
+      "departureDelay": 300,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511692_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 74100,
+      "realtimeDeparture": 74100,
+      "arrivalDelay": 300,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511684_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 74460,
+      "realtimeDeparture": 74460,
+      "arrivalDelay": 300,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511676_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 74700,
+      "realtimeDeparture": 74700,
+      "arrivalDelay": 240,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511668_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 75000,
+      "realtimeDeparture": 75000,
+      "arrivalDelay": 240,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005542234_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 75420,
+      "realtimeDeparture": 75480,
+      "arrivalDelay": 240,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511643_2"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 75660,
+      "realtimeDeparture": 75720,
+      "arrivalDelay": 180,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511635_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 75960,
+      "realtimeDeparture": 76020,
+      "arrivalDelay": 240,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511627_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 76200,
+      "realtimeDeparture": 76260,
+      "arrivalDelay": 180,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511593_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 76500,
+      "realtimeDeparture": 77040,
+      "arrivalDelay": 360,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511601_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 77280,
+      "realtimeDeparture": 77340,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511536_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 77520,
+      "realtimeDeparture": 77520,
+      "arrivalDelay": 60,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511585_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 77700,
+      "realtimeDeparture": 77760,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511577_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 77880,
+      "realtimeDeparture": 77940,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511569_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78060,
+      "realtimeDeparture": 78360,
+      "arrivalDelay": 0,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511551_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78540,
+      "realtimeDeparture": 78540,
+      "arrivalDelay": 300,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511544_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78660,
+      "realtimeDeparture": 78720,
+      "arrivalDelay": 240,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005541640_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78900,
+      "realtimeDeparture": 78960,
+      "arrivalDelay": 240,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511528_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 79320,
+      "realtimeDeparture": 79320,
+      "arrivalDelay": 240,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005510074_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 79560,
+      "realtimeDeparture": 79620,
+      "arrivalDelay": 180,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005510066_2"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 80040,
+      "realtimeDeparture": 80040,
+      "arrivalDelay": 240,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005510017_7"
+      }
+     }
+    ],
+    "pattern": {
+     "code": "1:V3775_106::rt#2972",
+     "vehiclePositions": []
+    }
+   },
+   "t1": {
+    "gtfsId": "1:36322546",
+    "route": {
+     "gtfsId": "1:V3775_106"
+    },
+    "stoptimesForDate": [
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 76020,
+      "realtimeDeparture": 76020,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005513748_13"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 76740,
+      "realtimeDeparture": 76740,
+      "arrivalDelay": 120,
+      "departureDelay": 120,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005542275_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 77100,
+      "realtimeDeparture": 77100,
+      "arrivalDelay": 240,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511692_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 77640,
+      "realtimeDeparture": 77640,
+      "arrivalDelay": 240,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511684_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78000,
+      "realtimeDeparture": 78000,
+      "arrivalDelay": 240,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511676_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78240,
+      "realtimeDeparture": 78240,
+      "arrivalDelay": 180,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511668_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78540,
+      "realtimeDeparture": 78540,
+      "arrivalDelay": 180,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005542234_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78960,
+      "realtimeDeparture": 79020,
+      "arrivalDelay": 180,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511643_2"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 79260,
+      "realtimeDeparture": 79260,
+      "arrivalDelay": 180,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511635_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 79500,
+      "realtimeDeparture": 79560,
+      "arrivalDelay": 180,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511627_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 79800,
+      "realtimeDeparture": 79800,
+      "arrivalDelay": 180,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511593_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 79920,
+      "realtimeDeparture": 80640,
+      "arrivalDelay": 180,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511601_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 80880,
+      "realtimeDeparture": 80940,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511536_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 81060,
+      "realtimeDeparture": 81120,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511585_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 81300,
+      "realtimeDeparture": 81360,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511577_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 81480,
+      "realtimeDeparture": 81540,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511569_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 81660,
+      "realtimeDeparture": 81720,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511551_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 81840,
+      "realtimeDeparture": 81900,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511544_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 82020,
+      "realtimeDeparture": 82080,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005541640_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 82260,
+      "realtimeDeparture": 82320,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005511528_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 82680,
+      "realtimeDeparture": 82740,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005510074_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 82980,
+      "realtimeDeparture": 83040,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005510066_2"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 83400,
+      "realtimeDeparture": 83400,
+      "arrivalDelay": 0,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005510017_9"
+      }
+     }
+    ],
+    "pattern": {
+     "code": "1:V3775_106::rt#2769",
+     "vehiclePositions": []
+    }
+   },
+   "t2": {
+    "gtfsId": "1:36226466",
+    "route": {
+     "gtfsId": "1:V3803_106"
+    },
+    "stoptimesForDate": [
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 74460,
+      "realtimeDeparture": 74460,
+      "arrivalDelay": 180,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501289_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 74640,
+      "realtimeDeparture": 74640,
+      "arrivalDelay": 240,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501263_2"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 74880,
+      "realtimeDeparture": 74880,
+      "arrivalDelay": 240,
+      "departureDelay": 240,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501255_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 75180,
+      "realtimeDeparture": 75180,
+      "arrivalDelay": 240,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501248_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 75480,
+      "realtimeDeparture": 75540,
+      "arrivalDelay": 180,
+      "departureDelay": 180,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501230_5"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 75840,
+      "realtimeDeparture": 75900,
+      "arrivalDelay": 120,
+      "departureDelay": 120,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501222_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 76080,
+      "realtimeDeparture": 76140,
+      "arrivalDelay": 60,
+      "departureDelay": 120,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501198_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 76320,
+      "realtimeDeparture": 76320,
+      "arrivalDelay": 180,
+      "departureDelay": 120,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501180_2"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 76560,
+      "realtimeDeparture": 76860,
+      "arrivalDelay": 120,
+      "departureDelay": 0,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501172_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 77280,
+      "realtimeDeparture": 77700,
+      "arrivalDelay": 120,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501164_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 77880,
+      "realtimeDeparture": 77940,
+      "arrivalDelay": 480,
+      "departureDelay": 540,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501156_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78060,
+      "realtimeDeparture": 78120,
+      "arrivalDelay": 480,
+      "departureDelay": 540,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501149_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78300,
+      "realtimeDeparture": 78360,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501131_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78540,
+      "realtimeDeparture": 78540,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501123_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 78780,
+      "realtimeDeparture": 78840,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501107_6"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 79020,
+      "realtimeDeparture": 79020,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501099_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 79320,
+      "realtimeDeparture": 79380,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501081_5"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 79500,
+      "realtimeDeparture": 79500,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005540170_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 79740,
+      "realtimeDeparture": 79800,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501065_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 80100,
+      "realtimeDeparture": 80160,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501057_3"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 80400,
+      "realtimeDeparture": 80400,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005540139_1"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 80640,
+      "realtimeDeparture": 80700,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501032_4"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 81120,
+      "realtimeDeparture": 81300,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501024_6"
+      }
+     },
+     {
+      "realtime": true,
+      "realtimeState": "MODIFIED",
+      "realtimeArrival": 81720,
+      "realtimeDeparture": 81720,
+      "arrivalDelay": 480,
+      "departureDelay": 480,
+      "serviceDay": 1794956400,
+      "stop": {
+       "gtfsId": "1:005501016_11"
+      }
+     }
+    ],
+    "pattern": {
+     "code": "1:V3803_106::rt#1105",
+     "vehiclePositions": []
+    }
+   },
+   "r0": {
+    "patterns": [
+     {
+      "vehiclePositions": [
+       {
+        "lat": 47.4342918,
+        "lon": 19.3626995,
+        "heading": 106.0,
+        "speed": 0.0,
+        "lastUpdated": 1795035144,
+        "stopRelationship": {
+         "status": "STOPPED_AT",
+         "stop": {
+          "gtfsId": "1:005511569_2"
+         }
+        },
+        "trip": {
+         "gtfsId": "1:36322567"
+        }
+       }
+      ]
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": [
+       {
+        "lat": 47.4552002,
+        "lon": 19.2984695,
+        "heading": 310.0,
+        "speed": 17.0,
+        "lastUpdated": 1795035140,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "1:005541640_1"
+         }
+        },
+        "trip": {
+         "gtfsId": "1:36322792"
+        }
+       },
+       {
+        "lat": 47.3832016,
+        "lon": 19.7820606,
+        "heading": 312.0,
+        "speed": 16.0,
+        "lastUpdated": 1795035113,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "1:005511643_2"
+         }
+        },
+        "trip": {
+         "gtfsId": "1:36322546"
+        }
+       }
+      ]
+     },
+     {
+      "vehiclePositions": [
+       {
+        "lat": 47.4517593,
+        "lon": 19.5261097,
+        "heading": 84.0,
+        "speed": 0.0,
+        "lastUpdated": 1795035141,
+        "stopRelationship": {
+         "status": "STOPPED_AT",
+         "stop": {
+          "gtfsId": "1:005511601_2"
+         }
+        },
+        "trip": {
+         "gtfsId": "1:35169704"
+        }
+       }
+      ]
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": [
+       {
+        "lat": 47.4173012,
+        "lon": 19.7211895,
+        "heading": 123.0,
+        "speed": 26.0,
+        "lastUpdated": 1795035134,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "1:005511643_3"
+         }
+        },
+        "trip": {
+         "gtfsId": "1:36322498"
+        }
+       },
+       {
+        "lat": 47.5005493,
+        "lon": 19.0934505,
+        "heading": 89.0,
+        "speed": 6.0,
+        "lastUpdated": 1795035123,
+        "stopRelationship": {
+         "status": "STOPPED_AT",
+         "stop": {
+          "gtfsId": "1:005510017_7"
+         }
+        },
+        "trip": {
+         "gtfsId": "1:36322500"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "r1": {
+    "patterns": [
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": [
+       {
+        "lat": 47.7070503,
+        "lon": 17.8831806,
+        "heading": 78.0,
+        "speed": 32.0,
+        "lastUpdated": 1795035105,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "1:005501230_5"
+         }
+        },
+        "trip": {
+         "gtfsId": "1:36226473"
+        }
+       },
+       {
+        "lat": 47.5530396,
+        "lon": 18.4623795,
+        "heading": 124.0,
+        "speed": 22.0,
+        "lastUpdated": 1795035102,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "1:005501107_6"
+         }
+        },
+        "trip": {
+         "gtfsId": "1:36226466"
+        }
+       }
+      ]
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": [
+       {
+        "lat": 47.4830704,
+        "lon": 18.7841301,
+        "heading": 266.0,
+        "speed": 31.0,
+        "lastUpdated": 1795035084,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "1:005501065_3"
+         }
+        },
+        "trip": {
+         "gtfsId": "1:36017872"
+        }
+       }
+      ]
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": [
+       {
+        "lat": 47.7495995,
+        "lon": 18.1124191,
+        "heading": 273.0,
+        "speed": 0.0,
+        "lastUpdated": 1795035145,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "1:005501222_3"
+         }
+        },
+        "trip": {
+         "gtfsId": "1:36017898"
+        }
+       }
+      ]
+     },
+     {
+      "vehiclePositions": []
+     }
+    ]
+   },
+   "r2": {
+    "patterns": [
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": [
+       {
+        "lat": 47.4638252,
+        "lon": 19.0226822,
+        "heading": 280.0,
+        "speed": 0.0,
+        "lastUpdated": 1795034918,
+        "stopRelationship": {
+         "status": "STOPPED_AT",
+         "stop": {
+          "gtfsId": "hkir:hkir_773538_0"
+         }
+        },
+        "trip": {
+         "gtfsId": "hkir:hkir_2735_130-10"
+        }
+       },
+       {
+        "lat": 47.3999481,
+        "lon": 18.9032135,
+        "heading": 310.0,
+        "speed": 11.11111068725586,
+        "lastUpdated": 1795035112,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "hkir:hkir_777652_2"
+         }
+        },
+        "trip": {
+         "gtfsId": "hkir:hkir_2735_132-10"
+        }
+       }
+      ]
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": [
+       {
+        "lat": 47.3798065,
+        "lon": 18.925787,
+        "heading": null,
+        "speed": 0.0,
+        "lastUpdated": 1795035102,
+        "stopRelationship": {
+         "status": "STOPPED_AT",
+         "stop": {
+          "gtfsId": "hkir:hkir_777656_0"
+         }
+        },
+        "trip": {
+         "gtfsId": "hkir:hkir_2735_117-6"
+        }
+       },
+       {
+        "lat": 47.4376106,
+        "lon": 18.9007473,
+        "heading": 215.0,
+        "speed": 17.22222137451172,
+        "lastUpdated": 1795035122,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "hkir:hkir_777719_1"
+         }
+        },
+        "trip": {
+         "gtfsId": "hkir:hkir_2735_119-6"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   "r3": {
+    "patterns": [
+     {
+      "vehiclePositions": [
+       {
+        "lat": 46.1030579,
+        "lon": 18.2648735,
+        "heading": 167.0,
+        "speed": 3.055555582046509,
+        "lastUpdated": 1795035127,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "hkir:hkir_437823_2"
+         }
+        },
+        "trip": {
+         "gtfsId": "hkir:hkir_5610_88-22"
+        }
+       }
+      ]
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": []
+     },
+     {
+      "vehiclePositions": [
+       {
+        "lat": 46.190258,
+        "lon": 18.2644501,
+        "heading": 116.0,
+        "speed": 3.3333332538604736,
+        "lastUpdated": 1795034657,
+        "stopRelationship": {
+         "status": "IN_TRANSIT_TO",
+         "stop": {
+          "gtfsId": "hkir:hkir_437441_20"
+         }
+        },
+        "trip": {
+         "gtfsId": "hkir:hkir_5610_85-22"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  }
+ }
+}

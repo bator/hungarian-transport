@@ -14,6 +14,9 @@ fixtures/realtime/mavplusz_trains.json (2026-11-18 19:52 CET) has train
 (MODIFIED) and 741's first trip on the day before, under which the planner
 listed the vehicle of 741's live run, for the train path; the static train
 numbers those trips are asked by are made up per test (_static).
+fixtures/realtime/mavplusz_rt_pattern.json (2026-11-18 21:52 CET) has three
+live MODIFIED trains whose own patterns are realtime ones without vehicles,
+and the vehicles of their routes' patterns and of two Volán routes.
 """
 from __future__ import annotations
 
@@ -991,6 +994,8 @@ def _scheduled(trip: dict, date: str) -> dict:
     for st in out["stoptimesForDate"]:
         st.update(realtime=False, realtimeState="SCHEDULED", arrivalDelay=0, departureDelay=0, serviceDay=_midnight(date))
     out["pattern"]["vehiclePositions"] = []
+    if "code" in out["pattern"]:
+        out["pattern"]["code"] = out["pattern"]["code"].split("::rt#")[0] + "::01"
     return out
 
 
@@ -1006,14 +1011,17 @@ def _later(trip: dict, seconds: int) -> dict:
 class TrainPlanner:
     """A fake mavplusz.hu by (trip id, service date): a run in runs as it
     is, a known trip on another date without realtime (_scheduled), an
-    unknown one null. asks has the (id, date) pairs of every request."""
+    unknown one null; a route alias from routes, else null. asks has the
+    (id, date) pairs of every request, route_asks its route ids."""
 
-    def __init__(self, runs: dict[tuple[str, str], dict] | None = None) -> None:
+    def __init__(self, runs: dict[tuple[str, str], dict] | None = None, routes: dict[str, dict] | None = None) -> None:
         self.runs = {
             (IC741, TODAY): TRAINS["t0"], (IC741_MOD, TODAY): TRAINS["t1"],
             (OS3311, TODAY): TRAINS["t2"], (IC741, YESTERDAY): TRAINS["t3"],
         } if runs is None else runs
+        self.routes = routes or {}
         self.asks: list[list[tuple[str, str]]] = []
+        self.route_asks: list[list[str]] = []
 
     async def __call__(self, method, url, data):
         body = json.loads(data)
@@ -1027,6 +1035,10 @@ class TrainPlanner:
                 other = next((t for (g, _day), t in self.runs.items() if g == gid), None)
                 run = None if other is None else _scheduled(other, date)
             answer[alias] = copy.deepcopy(run)
+        routes = sorted((k for k in variables if k[0] == "r"), key=lambda k: int(k[1:]))
+        self.route_asks.append([variables[k] for k in routes])
+        for k in routes:
+            answer[k] = copy.deepcopy(self.routes.get(variables[k]))
         return AiohttpClientMockResponse(method, url, json={"data": answer})
 
 
@@ -1423,6 +1435,97 @@ async def test_answers_kept_for_hours_cannot_grow_without_bound(aioclient_mock, 
     assert len(hub._mav_cache) <= 50
     assert ("hkir:hkir_2036_1-3", "20261114") in hub._mav_cache
     assert ("hkir:hkir_x0_0-0", "20261114") not in hub._mav_cache
+
+
+RT_DOC = json.loads((FIX / "mavplusz_rt_pattern.json").read_text(encoding="utf-8"))
+RT = RT_DOC["response"]["data"]
+# The rt fixture's request time, 21:52:33 CET.
+RT_WALL = TRAIN_DAY + 78753
+SZ3331 = "1:36322792"
+# Train 3331: Cegléd (005513748) to Budapest-Keleti.
+REQ_3331 = {"key": "3331", "train": "3331", "stops": ["005513748", "005510017"], "from": 0, "to": 1}
+
+
+def _rt_keys() -> tuple[list[mavplusz.TripKey], list[str]]:
+    v = RT_DOC["variables"]
+    trips = [mavplusz.TripKey(v[f"t{i}"], v["d0"], "1:") for i in range(3)]
+    return trips, [v[f"r{i}"] for i in range(4)]
+
+
+def test_the_route_query_part_asks_for_positions_without_vehicle_ids() -> None:
+    trips, routes = _rt_keys()
+    body = mavplusz.build_query(trips, routes)
+    assert body["variables"] == RT_DOC["variables"]
+    assert "r3: route(id: $r3) { patterns { vehiclePositions {" in body["query"]
+    assert "pattern { code vehiclePositions {" in body["query"]
+    assert "vehicleId" not in body["query"] and "label" not in body["query"]
+    # Without routes, the request is the trips' alone.
+    assert "route(id:" not in mavplusz.build_query(trips)["query"]
+
+
+def test_a_realtime_patterns_trips_get_their_vehicles_from_the_route_aliases() -> None:
+    """The live answer: the three MODIFIED trains' own patterns are
+    realtime ones (::rt#) listing no vehicle; their vehicles are on their
+    routes' scheduled patterns, each naming its trip."""
+    trips, routes = _rt_keys()
+    assert all(not RT[f"t{i}"]["pattern"]["vehiclePositions"] for i in range(3))
+    res = mavplusz.parse_response(RT_DOC["response"], trips, routes)
+    assert [(r.route, r.rt_pattern) for r in res.values()] == [
+        ("1:V3775_106", True), ("1:V3775_106", True), ("1:V3803_106", True)
+    ]
+    own = next(
+        v for p in RT["r0"]["patterns"] for v in p["vehiclePositions"] if v["trip"]["gtfsId"] == SZ3331
+    )
+    v = res[trips[0]].vehicle
+    assert (v.trip_id, v.lat, v.lon, v.timestamp) == ("36322792", own["lat"], own["lon"], own["lastUpdated"])
+    assert all(r.vehicle is not None and r.vehicle.trip_id == k.gtfs_id[2:] for k, r in res.items())
+    # Asked without the routes: no vehicle at all.
+    alone = {k: v for k, v in RT.items() if k[0] == "t"}
+    assert all(r.vehicle is None for r in mavplusz.parse_response({"data": alone}, trips).values())
+    # A route alias missing from the answer is not trusted; a null one is no vehicle.
+    with pytest.raises(ValueError):
+        mavplusz.parse_response({"data": alone}, trips, routes)
+    nulls = dict(alone, **{f"r{i}": None for i in range(4)})
+    assert all(r.vehicle is None for r in mavplusz.parse_response({"data": nulls}, trips, routes).values())
+
+
+async def test_a_modified_trains_vehicle_is_asked_by_its_route_from_the_second_request(aioclient_mock) -> None:
+    """Its first answer says its pattern is a realtime one: from then on
+    the request asks for its route's vehicles too, and the train has its
+    position. A trip on its scheduled pattern asks for no route."""
+    planner = TrainPlanner(
+        {(SZ3331, TODAY): RT["t0"], (IC741, TODAY): TRAINS["t0"], (IC741, YESTERDAY): TRAINS["t3"]},
+        routes={"1:V3775_106": RT["r0"]},
+    )
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3331": ["36322792"], "741": ["36777783"]})
+    hub, session, clock = await _train_hub(aioclient_mock, wall=RT_WALL)
+    reqs = [REQ_3331, REQ_741]
+    first = await hub.query("mav", reqs)
+    clock.now += TABLE["mav"].interval + 1
+    second = await hub.query("mav", reqs)
+    await session.close()
+    assert planner.route_asks == [[], ["1:V3775_106"]]
+    assert planner.asks[1] == [(SZ3331, TODAY), (IC741, TODAY)]
+    assert first["trips"]["3331"]["vehicle"] is None
+    hit = second["trips"]["3331"]
+    assert (hit["trip_id"], hit["delay"], hit["dest_delay"]) == ("36322792", 60, 240)
+    assert hit["vehicle"]["lat"] == pytest.approx(47.4552, abs=1e-4)
+    assert _feed_gets(aioclient_mock) == []
+
+
+def test_a_request_with_routes_fits_under_the_cap() -> None:
+    """40 trips of 50 calls (a MÁV train has up to 40) on realtime patterns
+    and their 40 routes with 30 vehicles each, more than any route had: the
+    vehicles of a realtime pattern's trip come with its route instead, and
+    the answer stays under MAX_RESPONSE_BYTES."""
+    trip = copy.deepcopy(RT["t0"])
+    trip["stoptimesForDate"] = (trip["stoptimesForDate"] * 3)[:50]
+    route = {"patterns": [{"vehiclePositions": [RT["r0"]["patterns"][0]["vehiclePositions"][0]] * 30}]}
+    cap = mavplusz.MAX_TRIPS_PER_REQUEST
+    answer = {"data": {f"t{i}": _as(trip, f"1:{37000000 + i}") for i in range(cap)}}
+    answer["data"].update({f"r{i}": route for i in range(mavplusz.MAX_ROUTES_PER_REQUEST)})
+    assert len(json.dumps(answer).encode()) < 0.8 * mavplusz.MAX_RESPONSE_BYTES
 
 
 BOARD = 40
