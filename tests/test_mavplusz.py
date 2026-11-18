@@ -29,6 +29,7 @@ import io
 import logging
 from pathlib import Path
 import re
+from typing import Any
 import zipfile
 
 import pytest
@@ -1011,8 +1012,11 @@ def _later(trip: dict, seconds: int) -> dict:
 class TrainPlanner:
     """A fake mavplusz.hu by (trip id, service date): a run in runs as it
     is, a known trip on another date without realtime (_scheduled), an
-    unknown one null; a route alias from routes, else null. asks has the
-    (id, date) pairs of every request, route_asks its route ids."""
+    unknown one null; a vehicle request's route alias from routes, else
+    null. asks has the (id, date) pairs of every trip request, route_asks
+    the route ids of every vehicle request. vehicles is the answer of a
+    vehicle request instead, when set: an HTTP status, or a coroutine
+    function's answer (a slow planner)."""
 
     def __init__(self, runs: dict[tuple[str, str], dict] | None = None, routes: dict[str, dict] | None = None) -> None:
         self.runs = {
@@ -1022,10 +1026,21 @@ class TrainPlanner:
         self.routes = routes or {}
         self.asks: list[list[tuple[str, str]]] = []
         self.route_asks: list[list[str]] = []
+        self.vehicles: Any = None
 
     async def __call__(self, method, url, data):
         body = json.loads(data)
         variables = body["variables"]
+        routes = sorted((k for k in variables if k[0] == "r"), key=lambda k: int(k[1:]))
+        if routes:
+            assert "trip(id:" not in body["query"]
+            self.route_asks.append([variables[k] for k in routes])
+            if isinstance(self.vehicles, int):
+                return AiohttpClientMockResponse(method, url, status=self.vehicles)
+            if self.vehicles is not None:
+                return AiohttpClientMockResponse(method, url, json=await self.vehicles(variables))
+            answer = {k: copy.deepcopy(self.routes.get(variables[k])) for k in routes}
+            return AiohttpClientMockResponse(method, url, json={"data": answer})
         pairs = [(variables[alias], variables[d]) for alias, d in _ALIAS.findall(body["query"])]
         self.asks.append(pairs)
         answer = {}
@@ -1035,10 +1050,6 @@ class TrainPlanner:
                 other = next((t for (g, _day), t in self.runs.items() if g == gid), None)
                 run = None if other is None else _scheduled(other, date)
             answer[alias] = copy.deepcopy(run)
-        routes = sorted((k for k in variables if k[0] == "r"), key=lambda k: int(k[1:]))
-        self.route_asks.append([variables[k] for k in routes])
-        for k in routes:
-            answer[k] = copy.deepcopy(self.routes.get(variables[k]))
         return AiohttpClientMockResponse(method, url, json={"data": answer})
 
 
@@ -1452,47 +1463,71 @@ def _rt_keys() -> tuple[list[mavplusz.TripKey], list[str]]:
     return trips, [v[f"r{i}"] for i in range(4)]
 
 
-def test_the_route_query_part_asks_for_positions_without_vehicle_ids() -> None:
+def _rt_parts() -> tuple[dict, dict]:
+    """The rt fixture's one answer as the two requests now made of it: the
+    trips' (tN) and the vehicles' (rN)."""
+    trips = {k: v for k, v in RT.items() if k[0] == "t"}
+    routes = {k: v for k, v in RT.items() if k[0] == "r"}
+    return {"data": trips}, {"data": routes}
+
+
+def _rt_route(route: str) -> dict:
+    """The rt fixture's route alias for a planner route id."""
+    v = RT_DOC["variables"]
+    return RT[next(k for k in v if k[0] == "r" and v[k] == route)]
+
+
+def test_the_vehicle_query_asks_by_route_for_positions_without_vehicle_ids() -> None:
     trips, routes = _rt_keys()
-    body = mavplusz.build_query(trips, routes)
-    assert body["variables"] == RT_DOC["variables"]
+    body = mavplusz.build_vehicle_query(routes)
+    assert body["variables"] == {k: v for k, v in RT_DOC["variables"].items() if k[0] == "r"}
     assert "r3: route(id: $r3) { patterns { vehiclePositions {" in body["query"]
-    assert "pattern { code vehiclePositions {" in body["query"]
     assert "vehicleId" not in body["query"] and "label" not in body["query"]
-    # Without routes, the request is the trips' alone.
-    assert "route(id:" not in mavplusz.build_query(trips)["query"]
+    assert "trip(id:" not in body["query"]
+    # The trips' request asks for no route's vehicles.
+    trip_query = mavplusz.build_query(trips)["query"]
+    assert "route(id:" not in trip_query and "pattern { code vehiclePositions {" in trip_query
 
 
-def test_a_realtime_patterns_trips_get_their_vehicles_from_the_route_aliases() -> None:
+def test_a_realtime_patterns_trips_get_their_vehicles_from_their_routes() -> None:
     """The live answer: the three MODIFIED trains' own patterns are
     realtime ones (::rt#) listing no vehicle; their vehicles are on their
     routes' scheduled patterns, each naming its trip."""
     trips, routes = _rt_keys()
+    trip_doc, route_doc = _rt_parts()
     assert all(not RT[f"t{i}"]["pattern"]["vehiclePositions"] for i in range(3))
-    res = mavplusz.parse_response(RT_DOC["response"], trips, routes)
-    assert [(r.route, r.rt_pattern) for r in res.values()] == [
-        ("1:V3775_106", True), ("1:V3775_106", True), ("1:V3803_106", True)
+    res = mavplusz.parse_response(trip_doc, trips)
+    assert [(r.route, r.rt_pattern, r.vehicle) for r in res.values()] == [
+        ("1:V3775_106", True, None), ("1:V3775_106", True, None), ("1:V3803_106", True, None)
     ]
+    assert all(mavplusz.needs_route_vehicles(r) for r in res.values())
+    found = mavplusz.parse_vehicles(route_doc, routes)
+    out = mavplusz.add_vehicles(res, [vp for ps in found.values() for vp in ps])
     own = next(
         v for p in RT["r0"]["patterns"] for v in p["vehiclePositions"] if v["trip"]["gtfsId"] == SZ3331
     )
-    v = res[trips[0]].vehicle
-    assert (v.trip_id, v.lat, v.lon, v.timestamp) == ("36322792", own["lat"], own["lon"], own["lastUpdated"])
-    assert all(r.vehicle is not None and r.vehicle.trip_id == k.gtfs_id[2:] for k, r in res.items())
-    # Asked without the routes: no vehicle at all.
-    alone = {k: v for k, v in RT.items() if k[0] == "t"}
-    assert all(r.vehicle is None for r in mavplusz.parse_response({"data": alone}, trips).values())
+    v = out[trips[0]].vehicle
+    assert (v.trip_id, v.route_id, v.lat, v.lon, v.timestamp) == (
+        "36322792", "V3775_106", own["lat"], own["lon"], own["lastUpdated"]
+    )
+    assert all(r.vehicle is not None and r.vehicle.trip_id == k.gtfs_id[2:] for k, r in out.items())
+    assert not any(mavplusz.needs_route_vehicles(r) for r in out.values())
+    # The routes' sizes, as RouteSizes learns them: about 250 bytes a vehicle.
+    sizes = mavplusz.answer_sizes(route_doc, routes)
+    assert 200 < sizes["1:V3775_106"] / sum(len(p["vehiclePositions"]) for p in RT["r0"]["patterns"]) < 300
     # A route alias missing from the answer is not trusted; a null one is no vehicle.
     with pytest.raises(ValueError):
-        mavplusz.parse_response({"data": alone}, trips, routes)
-    nulls = dict(alone, **{f"r{i}": None for i in range(4)})
-    assert all(r.vehicle is None for r in mavplusz.parse_response({"data": nulls}, trips, routes).values())
+        mavplusz.parse_vehicles({"data": {}}, routes)
+    nulls = mavplusz.parse_vehicles({"data": {f"r{i}": None for i in range(4)}}, routes)
+    assert nulls == {r: [] for r in routes}
+    assert mavplusz.add_vehicles(res, []) == res
 
 
-async def test_a_modified_trains_vehicle_is_asked_by_its_route_from_the_second_request(aioclient_mock) -> None:
-    """Its first answer says its pattern is a realtime one: from then on
-    the request asks for its route's vehicles too, and the train has its
-    position. A trip on its scheduled pattern asks for no route."""
+async def test_a_modified_trains_vehicle_comes_with_its_first_answer(aioclient_mock) -> None:
+    """The trip request says its pattern is a realtime one; the vehicles of
+    its route are asked right after, in a request of their own, so the
+    train has its position from the first poll on. A trip on its scheduled
+    pattern asks for no route."""
     planner = TrainPlanner(
         {(SZ3331, TODAY): RT["t0"], (IC741, TODAY): TRAINS["t0"], (IC741, YESTERDAY): TRAINS["t3"]},
         routes={"1:V3775_106": RT["r0"]},
@@ -1505,27 +1540,197 @@ async def test_a_modified_trains_vehicle_is_asked_by_its_route_from_the_second_r
     clock.now += TABLE["mav"].interval + 1
     second = await hub.query("mav", reqs)
     await session.close()
-    assert planner.route_asks == [[], ["1:V3775_106"]]
-    assert planner.asks[1] == [(SZ3331, TODAY), (IC741, TODAY)]
-    assert first["trips"]["3331"]["vehicle"] is None
-    hit = second["trips"]["3331"]
-    assert (hit["trip_id"], hit["delay"], hit["dest_delay"]) == ("36322792", 60, 240)
-    assert hit["vehicle"]["lat"] == pytest.approx(47.4552, abs=1e-4)
+    assert planner.route_asks == [["1:V3775_106"], ["1:V3775_106"]]
+    assert len(planner.asks) == 2
+    for answer in (first, second):
+        hit = answer["trips"]["3331"]
+        assert (hit["trip_id"], hit["delay"], hit["dest_delay"]) == ("36322792", 60, 240)
+        assert hit["vehicle"]["lat"] == pytest.approx(47.4552, abs=1e-4)
     assert _feed_gets(aioclient_mock) == []
 
 
-def test_a_request_with_routes_fits_under_the_cap() -> None:
-    """40 trips of 50 calls (a MÁV train has up to 40) on realtime patterns
-    and their 40 routes with 30 vehicles each, more than any route had: the
-    vehicles of a realtime pattern's trip come with its route instead, and
-    the answer stays under MAX_RESPONSE_BYTES."""
-    trip = copy.deepcopy(RT["t0"])
-    trip["stoptimesForDate"] = (trip["stoptimesForDate"] * 3)[:50]
+async def _rt_round(aioclient_mock, planner: TrainPlanner, *, polls: int = 1, step: float | None = None):
+    """Polls train 3331 (MODIFIED, on a realtime pattern) polls times, step
+    seconds apart (an interval by default): the answers, the hub."""
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3331": ["36322792"]})
+    hub, session, clock = await _train_hub(aioclient_mock, wall=RT_WALL)
+    out = []
+    for n in range(polls):
+        if n:
+            clock.now += step if step is not None else TABLE["mav"].interval + 1
+        out.append(await hub.query("mav", [REQ_3331]))
+    await session.close()
+    return out, hub
+
+
+@pytest.mark.parametrize("failure", [503, "slow", "too_large", "error"])
+async def test_a_failing_vehicle_request_keeps_the_delays(aioclient_mock, monkeypatch, caplog, failure) -> None:
+    """Whatever goes wrong with the vehicles' request (an error status, no
+    answer within VEHICLE_TIMEOUT, an answer over VEHICLE_MAX_BYTES, a
+    GraphQL error), the train has its delays from the planner, no vehicle,
+    and nothing reads the feeds or backs the planner off: the next trip
+    request goes out as usual. Logged once, at debug level."""
+    planner = TrainPlanner({(SZ3331, TODAY): RT["t0"]}, routes={"1:V3775_106": RT["r0"]})
+    if failure == 503:
+        planner.vehicles = 503
+    elif failure == "slow":
+        monkeypatch.setattr(realtime, "VEHICLE_TIMEOUT", 0.05)
+        monkeypatch.setattr(realtime, "VEHICLE_MIN_TIMEOUT", 0.01)
+
+        async def slow(_variables):
+            await asyncio.sleep(1)
+            return {"data": {"r0": RT["r0"]}}
+
+        planner.vehicles = slow
+    elif failure == "too_large":
+        monkeypatch.setattr(mavplusz, "VEHICLE_MAX_BYTES", 500)
+
+        async def big(_variables):
+            return {"data": {"r0": RT["r0"]}}
+
+        planner.vehicles = big
+    else:
+        async def broken(_variables):
+            return {"errors": [{"message": "boom"}]}
+
+        planner.vehicles = broken
+    caplog.set_level(logging.DEBUG, logger="custom_components.hungarian_transport")
+    answers, hub = await _rt_round(aioclient_mock, planner, polls=2)
+    for answer in answers:
+        hit = answer["trips"]["3331"]
+        assert (hit["trip_id"], hit["delay"], hit["dest_delay"]) == ("36322792", 60, 240)
+        assert hit["vehicle"] is None
+    assert len(planner.asks) == 2 and _feed_gets(aioclient_mock) == []
+    assert not hub._mav_rate.backing_off() and hub._mav_retry_at < 0
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert sum("gave no vehicles by route" in r.getMessage() for r in caplog.records) == 1
+    if failure == "too_large":
+        # Not backed off, but the route alone is over the cap now: left out.
+        assert planner.route_asks == [["1:V3775_106"]]
+    else:
+        # Backed off (VEHICLE_FAIL_BACKOFF), the vehicles alone.
+        assert planner.route_asks == [["1:V3775_106"]]
+
+
+async def test_vehicles_back_off_alone_and_come_back(aioclient_mock, caplog) -> None:
+    """After a failed vehicle request none for VEHICLE_FAIL_BACKOFF, while
+    the trips are asked every interval; then the vehicles come back, and
+    that is logged once."""
+    planner = TrainPlanner({(SZ3331, TODAY): RT["t0"]}, routes={"1:V3775_106": RT["r0"]})
+    planner.vehicles = 503
+    caplog.set_level(logging.DEBUG, logger="custom_components.hungarian_transport")
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3331": ["36322792"]})
+    hub, session, clock = await _train_hub(aioclient_mock, wall=RT_WALL)
+    await hub.query("mav", [REQ_3331])
+    clock.now += realtime.VEHICLE_FAIL_BACKOFF - 1
+    await hub.query("mav", [REQ_3331])
+    assert len(planner.route_asks) == 1 and len(planner.asks) == 2
+    planner.vehicles = None
+    clock.now += TABLE["mav"].interval + 1
+    hit = (await hub.query("mav", [REQ_3331]))["trips"]["3331"]
+    await session.close()
+    assert len(planner.route_asks) == 2 and len(planner.asks) == 3
+    assert hit["vehicle"]["lat"] == pytest.approx(47.4552, abs=1e-4)
+    assert sum("by route again" in r.getMessage() for r in caplog.records) == 1
+
+
+async def test_a_vehicle_request_never_runs_into_the_rounds_deadline(aioclient_mock) -> None:
+    """With less than VEHICLE_MIN_TIMEOUT of the round left after
+    VEHICLE_MARGIN, the vehicles are not asked: the delays already
+    answered must not be cut with them."""
+    planner = TrainPlanner(routes={"1:V3775_106": RT["r0"]})
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    hub, session, _clock = await _train_hub(aioclient_mock, wall=RT_WALL)
+    trips, _routes = _rt_keys()
+    res = mavplusz.parse_response(_rt_parts()[0], trips)
+    loop = asyncio.get_running_loop()
+    short = loop.time() + realtime.VEHICLE_MARGIN + realtime.VEHICLE_MIN_TIMEOUT / 2
+    assert await hub._mav_vehicles(res, short) == res
+    assert planner.route_asks == []
+    got = await hub._mav_vehicles(res, loop.time() + realtime.PLANNER_TIMEOUT)
+    await session.close()
+    assert planner.route_asks == [["1:V3775_106", "1:V3803_106"]]
+    assert got[trips[0]].vehicle is not None and got[trips[2]].vehicle is None
+
+
+async def test_the_vehicles_have_their_own_share_of_the_planner_limit(aioclient_mock) -> None:
+    """Their share used up, the trips are still asked and answered (with
+    no vehicle) every interval; the share refills."""
+    planner = TrainPlanner({(SZ3331, TODAY): RT["t0"]}, routes={"1:V3775_106": RT["r0"]})
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3331": ["36322792"]})
+    clock = FakeClock()
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    limiter = mavplusz.PlannerLimiter(vehicle_burst=1, vehicle_rate=0.001, monotonic=clock.monotonic)
+    hub = realtime.RealtimeHub(
+        session, feeds={"mav": TABLE["mav"]}, monotonic=clock.monotonic, wall=lambda: RT_WALL, planner_limiter=limiter
+    )
+    first = await hub.query("mav", [REQ_3331])
+    clock.now += TABLE["mav"].interval + 1
+    second = await hub.query("mav", [REQ_3331])
+    await session.close()
+    assert len(planner.asks) == 2 and len(planner.route_asks) == 1
+    assert first["trips"]["3331"]["vehicle"] is not None
+    assert second["trips"]["3331"]["vehicle"] is None and second["trips"]["3331"]["delay"] == 60
+
+
+def test_the_vehicle_share_is_taken_before_the_total() -> None:
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(burst=3, vehicle_burst=1, monotonic=clock.monotonic)
+    delays, vehicles = limiter.client(RuntimeError), limiter.client(KeyError, vehicles=True)
+    vehicles.take()
+    with pytest.raises(KeyError):
+        vehicles.take()
+    # The refused vehicle request spent none of the total.
+    delays.take()
+    delays.take()
+    with pytest.raises(RuntimeError):
+        delays.take()
+
+
+def test_route_sizes_keep_a_vehicle_request_under_its_cap() -> None:
+    """Unseen routes count UNSEEN_ROUTE_BYTES, at most
+    MAX_ROUTES_PER_REQUEST a request; an answer over the cap makes each of
+    its routes its share of the cap, so the next request is smaller, and a
+    route over the cap alone is left out until its size is forgotten. A
+    route's answered size replaces that; the least recently asked first."""
+    clock = FakeClock()
+    sizes = mavplusz.RouteSizes(clock.monotonic)
+    routes = [f"1:R{i}" for i in range(30)]
+    picked = sizes.pick(routes)
+    assert picked == routes[: mavplusz.MAX_ROUTES_PER_REQUEST]
+    assert len(picked) * mavplusz.UNSEEN_ROUTE_BYTES <= mavplusz.VEHICLE_BUDGET_BYTES
+    sizes.asked(picked, too_large=True)
+    # The unseen ten first, then the shrunk ones within the budget.
+    again = sizes.pick(picked)
+    share = mavplusz.VEHICLE_MAX_BYTES // len(picked) + 1
+    assert len(again) == mavplusz.VEHICLE_BUDGET_BYTES // share < len(picked)
+    assert sizes.pick(routes)[:10] == routes[20:]
+    # One route alone over the cap: never asked while its size is known.
+    sizes.asked(["1:R0"], too_large=True)
+    assert sizes.size("1:R0") > mavplusz.HUGE_ROUTE_BYTES and "1:R0" not in sizes.pick(["1:R0", "1:R1"])
+    # An answer that came back gives the routes their real size.
+    sizes.asked(["1:R1", "1:R2"], {"1:R1": 1500, "1:R2": 900})
+    assert (sizes.size("1:R1"), sizes.size("1:R2")) == (1500, 900)
+    clock.now += mavplusz.ROUTE_SIZE_TTL
+    assert sizes.size("1:R0") == mavplusz.UNSEEN_ROUTE_BYTES and "1:R0" in sizes.pick(["1:R0"])
+    # Bounded.
+    many = mavplusz.RouteSizes(clock.monotonic)
+    for i in range(mavplusz.MAX_ROUTE_SIZES + 10):
+        many.asked([f"x{i}"], {f"x{i}": 1})
+    assert len(many._sizes) == mavplusz.MAX_ROUTE_SIZES
+
+
+def test_a_full_vehicle_request_of_busy_routes_fits_its_budget() -> None:
+    """MAX_ROUTES_PER_REQUEST routes of 30 vehicles each (the fixture's
+    positions), more than any route had at night: within the budget, which
+    is under the vehicles' cap, itself far under the trips'."""
     route = {"patterns": [{"vehiclePositions": [RT["r0"]["patterns"][0]["vehiclePositions"][0]] * 30}]}
-    cap = mavplusz.MAX_TRIPS_PER_REQUEST
-    answer = {"data": {f"t{i}": _as(trip, f"1:{37000000 + i}") for i in range(cap)}}
-    answer["data"].update({f"r{i}": route for i in range(mavplusz.MAX_ROUTES_PER_REQUEST)})
-    assert len(json.dumps(answer).encode()) < 0.8 * mavplusz.MAX_RESPONSE_BYTES
+    answer = {"data": {f"r{i}": route for i in range(mavplusz.MAX_ROUTES_PER_REQUEST)}}
+    assert len(json.dumps(answer).encode()) < mavplusz.VEHICLE_BUDGET_BYTES
+    assert mavplusz.VEHICLE_BUDGET_BYTES < mavplusz.VEHICLE_MAX_BYTES < mavplusz.MAX_RESPONSE_BYTES
 
 
 BOARD = 40

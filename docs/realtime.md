@@ -68,12 +68,21 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   MÁV train sampled on 2026-11-18, `MODIFIED`, and some `UPDATED` ones, on
   any of the planner's sources) has a realtime pattern of its own
   (`1:V3775_106::rt#2972`) that lists no vehicle: its vehicle is on its
-  route's scheduled patterns. So once a trip's answer names such a
-  pattern, the next requests ask for the vehicles on every pattern of its
-  route too, one alias per route (`route(id:) { patterns {
-  vehiclePositions } }`, at most 40; 250 bytes a vehicle, 1.5 kB for the
-  busy MÁV route 1:V3775_106 at 21:52), and its vehicle shows from its
-  second answer on
+  route's scheduled patterns. So when a trip's answer names such a
+  pattern, its route's vehicles are asked right after, in a request of
+  their own (`route(id:) { patterns { vehiclePositions } }`, one alias per
+  route, at most 20), and the trip has its vehicle from its first answer
+  on. That request never costs the delays: it has its own cap (256 KiB),
+  timeout (5 s, and never past the card's round), token share (one every
+  10 s, burst 6, within the planner limit) and backoff (3 minutes); when
+  it is not made or fails, the trips simply have no vehicle that round,
+  logged once at debug level, and the planner is not backed off. Each
+  route's answer size is remembered for three hours: a request takes the
+  routes that fit 192 KiB by that reckoning (an unseen route counted as
+  8 KiB), and a route that alone went over the cap is left out until its
+  size is forgotten. Sizes were measured only in the evening (about 250
+  bytes a vehicle: 975 bytes for the MÁV route 1:V3775_106 with 4
+  vehicles at 22:15 on 2026-11-18); the code no longer depends on them
   (`tests/fixtures/realtime/mavplusz_rt_pattern.json`). Each position
   names its trip, and is kept for that trip's live run whichever alias it
   came with. The
@@ -370,7 +379,8 @@ Should either side object, removing the operator from `realtime_feeds.json`
   the feeds' fetches) and as strict: 30 in a burst and one every two
   seconds after that, of which the BKK boards may use 15 and one every
   four seconds (a user asking for stops no card shows does not hold back
-  the delays).
+  the delays) and the vehicle requests of realtime-pattern trips 6 and one
+  every ten seconds.
 - **Outages.** A failing feed is not asked again for a minute (a static zip
   for 15 minutes), is logged once when it starts failing and once when it
   answers again, and the cards keep the timetable meanwhile (a static zip's
@@ -378,7 +388,8 @@ Should either side object, removing the operator from `realtime_feeds.json`
   likewise: a minute's backoff, one warning, one line when it answers
   again, and the feeds meanwhile. The backoff is shared: a failure of the
   BKK boards' requests (30 s) holds back the delays' requests too, and the
-  other way round.
+  other way round. The vehicle requests alone back off on their own
+  (3 minutes) and set no shared backoff.
 
 ## The action
 
