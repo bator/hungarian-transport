@@ -1149,12 +1149,18 @@ def _load_parts(
     route_types: dict[str, int] = {}
     route_agency: dict[str, str] = {}
     keep_routes: set[str] = set()
+    # GTFS lets routes.txt leave agency_id out when agency.txt names one
+    # agency: those routes are that agency's, not op_name's, so a filter
+    # by agency (build_city_index "agencies") still finds them.
+    only_agency = next(iter(agencies)) if len(agencies) == 1 else None
     for row in open_csv(z, "routes.txt"):
         rid = row.get("route_id") or ""
         if not rid:
             continue
         short = (row.get("route_short_name") or "").strip() or (row.get("route_long_name") or "").strip()
         aid = row.get("agency_id") or ""
+        if not aid and only_agency is not None:
+            aid = only_agency
         aname = agencies.get(aid, aid or op_name)
         if skip_agency and skip_agency(aname):
             continue
@@ -1471,14 +1477,24 @@ def _read_index(out: Path) -> dict | None:
     return idx if isinstance(idx, dict) else None
 
 
+def read_index(out: Path) -> dict | None:
+    """An existing index as a dict; None when there is none or it does not
+    read. For a caller that asks several questions of one index (the city
+    guard and its stop aliases), so the file is read once."""
+    return _read_index(out)
+
+
 def operator_stats(out: Path) -> dict[str, tuple[int, str]] | None:
     """(trips, last service day YYYYMMDD or "") per operator id of an
     existing index with operators; None when there is no readable index. A
     trip belongs to the operator of its first stop; the last service day
     follows calendar_end() over the services the operator's trips use."""
     idx = _read_index(out)
-    if idx is None:
-        return None
+    return None if idx is None else operator_stats_of(idx)
+
+
+def operator_stats_of(idx: dict) -> dict[str, tuple[int, str]] | None:
+    """operator_stats() of an index already read; None when it is not one."""
     try:
         ops = idx.get("o") or []
         stops = idx.get("s") or []
@@ -1596,8 +1612,12 @@ def operator_running_trips(out: Path, today: str | None = None) -> dict[str, int
     """Trips per operator id of an existing index whose own service still
     runs (running_trips); None when there is no readable index."""
     idx = _read_index(out)
-    if idx is None:
-        return None
+    return None if idx is None else operator_running_trips_of(idx, today)
+
+
+def operator_running_trips_of(idx: dict, today: str | None = None) -> dict[str, int] | None:
+    """operator_running_trips() of an index already read; None when it is
+    not one."""
     try:
         ops = idx.get("o") or []
         stops = idx.get("s") or []
@@ -1736,8 +1756,14 @@ def write_index(
     schema: int = INDEX_SCHEMA,
     today: str | None = None,
     guard_total: bool = True,
+    aliases: dict[str, str] | None = None,
 ) -> dict:
     """Merge operator parts into one gzipped compact index (and its shapes).
+
+    aliases: old stop id -> the id of the stop that took its place (the city
+    index's renumbered stops, build_city_index.stop_aliases), written as
+    "al", [old id, stop index] rows in that order, so a card saved with the
+    old id finds the stop. One whose stop is not in the index is left out.
 
     Refuses an index built from a feed whose calendar already ended (a stale
     zip the publisher forgot): the card would show a timetable nothing runs
@@ -1829,6 +1855,11 @@ def write_index(
     })
     if with_operators:
         idx["o"] = [[oid, name] for oid, name in ops]
+    if aliases:
+        at = {row[0]: i for i, row in enumerate(all_s)}
+        rows = [[old, at[new]] for old, new in aliases.items() if new in at and old not in at]
+        if rows:
+            idx["al"] = rows
     raw = json.dumps(idx, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     tmp = out.with_name(out.name + ".tmp")
     tmp.write_bytes(gzip.compress(raw, compresslevel=9, mtime=0))
@@ -1841,4 +1872,5 @@ def write_index(
         "ops": len(ops),
         "bytes": out.stat().st_size,
         "shapes": len(all_shapes),
+        "aliases": len(idx.get("al") or []),
     }

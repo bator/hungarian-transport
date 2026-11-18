@@ -5,14 +5,17 @@ from __future__ import annotations
 import os
 import re
 import sys
+from collections import defaultdict
 from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
+from typing import NamedTuple
 
 from build_volan_index import download_volan, is_helykozi
 from gtfs_compact import (
     PLATFORM_SPLIT_M,
     IndexGuardError,
+    _meters,
     calendar_end,
     download_feed,
     feed_error,
@@ -21,8 +24,9 @@ from gtfs_compact import (
     index_parts,
     load_env_files,
     load_parts,
-    operator_running_trips,
-    operator_stats,
+    operator_running_trips_of,
+    operator_stats_of,
+    read_index,
     running_trips,
     stale_parts,
     write_index,
@@ -64,7 +68,19 @@ MAX_CARRIED = 3
 # only these feeds may fall back to http (download_feed warns when it does).
 # "mirrors": copies of the same zip, tried in order after "url" fails.
 # "agencies": the agency ids or names a feed is read for; the rest of the
-# zip is left out.
+# zip is left out. A route without agency_id in a zip of one agency is that
+# agency's (load_parts).
+# "names": stop names as the feed writes them -> as the index shows them.
+# "replaces": the zip this feed's source replaced on purpose, as the guard
+# recognises it in the index in place: no feed_version ("unversioned", it
+# had no feed_info.txt) and trips of the route types the new source leaves
+# out ("dropped"). Against that index the guard compares the rebuild with
+# the old feed's other trips only (_group_problem), and a part carried over
+# from it (CARRY_ENV) leaves the dropped trips out. Once the index in place
+# holds the new feed, the guard compares as for any feed: the rule follows
+# the indexes, not the calendar, so it holds whenever the new code first
+# builds (the weekly Pages build and the release run the latest stable
+# release's builders).
 # Szeged: SZKT's own zip (developer page szkt.hu/fejlesztoknek-gtfs-adatbazis,
 # NAP profile 11; menetbrand mirrors it byte for byte). It also carries MÁV's
 # Szeged local buses (agency hkir_V-33367), which the Volán feed already
@@ -72,13 +88,53 @@ MAX_CARRIED = 3
 # The tram-train to Hódmezővásárhely is in MÁV's own GTFS (route "1").
 # szegedimenetrend.hu, the address used until November 2026, still serves
 # the DAKK-era zip of December 2025 (Volánbusz, SZKT and MÁV-START at once),
-# whose calendar_dates stop in January 2026: no fallback to it.
-# "shrink_ok": (first day, last day) in which the guard accepts a smaller
-# feed than the index in place has, because its source changed on purpose:
-# the old Szeged zip had the Volán buses and the tram-train as well. A
-# missing feed or an ended calendar is still refused. By the last day the
-# indexes in place (the Pages site, the latest release, a local rebuild)
-# hold the new feed, and the guard compares as before.
+# whose calendar_dates stop in January 2026: no fallback to it. That zip had
+# no feed_info, and its buses (route_type 3) and tram-train (109) are what
+# the new one leaves out.
+# SZKT cuts its stop names to 25 characters, abbreviated ("Belv. tem.
+# II.") or cut off mid-bracket ("Londoni krt. (Bakay N. u."). The full
+# names are the ones the zip it replaced gave the same stops (within 40 m),
+# and the Volán feed's for the stops it shares; where neither spells a word
+# out, only "u." is written as "utca". A name SZKT changes no longer
+# matches and is shown as SZKT writes it.
+SZEGED_STOP_NAMES = {
+    "Anna - kút": "Anna-kút",
+    "Aradi v. tere": "Aradi vértanúk tere",
+    "Attila u. (Mars tér)": "Attila utca (Mars tér)",
+    "Bakay N. utca": "Bakay Nándor utca",
+    "Belv. tem. II.": "Belvárosi temető II. kapu",
+    "Belvárosi tem.": "Belvárosi temető",
+    "Bercsényi u.": "Bercsényi utca",
+    "Berlini krt.": "Berlini körút",
+    "Brüsszeli krt.": "Brüsszeli körút",
+    "Budapesti krt.": "Budapesti körút",
+    "Bécsi krt.": "Bécsi körút",
+    "Damjanich u.": "Damjanich utca",
+    "Deák F. Gimn.": "Deák Ferenc Gimnázium",
+    "Fecske u.": "Fecske utca",
+    "Gál u.": "Gál utca",
+    "Glattfelder t.": "Glattfelder Gyula tér",
+    "Kecskeméti u.": "Kecskeméti utca",
+    "Károlyi u.": "Károlyi utca",
+    "Londoni krt.": "Londoni körút",
+    "Londoni krt. (Bakay N. u.": "Londoni körút (Bakay Nándor utca)",
+    "Makkosházi krt.": "Makkosházi körút",
+    "Mars tér (Attila u.)": "Mars tér (Attila utca)",
+    "Mars tér (Aut. áll.)": "Mars tér (autóbusz-állomás)",
+    "Mikszáth K. u.": "Mikszáth K. utca",
+    "Rókusi vízt.": "Rókusi víztorony",
+    "Római krt.": "Római körút",
+    "Sándor u.": "Sándor utca",
+    "Szeged vá.": "Szeged vasútállomás",
+    "Szivárvány kit": "Szivárvány kitérő",
+    "Szt György tér": "Szent György tér",
+    "Szt István tér": "Szent István tér",
+    "Tabán u.(Felső Tisza-part": "Tabán utca (Felső Tisza-part)",
+    "Veresács u.": "Veres ács utca",
+    "Vitéz u.": "Vitéz utca",
+    "Vásárhelyi P. út": "Vásárhelyi Pál út",
+}
+
 CITY_FEEDS = [
     {
         "id": "miskolc",
@@ -99,8 +155,9 @@ CITY_FEEDS = [
         "url": "https://gtfs.szkt.hu/zipstore/szkt-szeged-hu.zip",
         "mirrors": ["https://gtfs.menetbrand.com/download/szeged/"],
         "file": "szeged.zip",
-        "agencies": ("SZKT",),
-        "shrink_ok": ("20261118", "20261215"),
+        "agencies": ("SZKT", "Szegedi Közlekedési Kft."),
+        "names": SZEGED_STOP_NAMES,
+        "replaces": {"unversioned": True, "dropped": (3, 109)},
     },
     {
         "id": "szombathely",
@@ -270,7 +327,7 @@ def _load_feed(base: Path, feed: dict, zpath: Path | None = None) -> list[dict]:
     include = include_agencies(feed["agencies"]) if feed.get("agencies") else include_all
 
     def load() -> list[dict]:
-        return load_parts(
+        parts = load_parts(
             zpath,
             include,
             op_id=feed["id"],
@@ -278,6 +335,11 @@ def _load_feed(base: Path, feed: dict, zpath: Path | None = None) -> list[dict]:
             prefix=f"{feed['id']}:",
             split_platforms_m=PLATFORM_SPLIT_M,
         )
+        names = feed.get("names") or {}
+        for part in parts:
+            for row in part["s"]:
+                row[1] = stop_name(row[1], names)
+        return parts
 
     if zpath.exists():
         return load()
@@ -291,6 +353,14 @@ def _load_feed(base: Path, feed: dict, zpath: Path | None = None) -> list[dict]:
             last = err
             zpath.unlink(missing_ok=True)
     raise last or FileNotFoundError(feed["file"])
+
+
+def stop_name(name: str, names: dict[str, str] | None = None) -> str:
+    """A city feed's stop name as the index shows it: from the feed's
+    "names" table when it lists the name, and with a bracket the feed left
+    open (a name cut off at a length limit) closed."""
+    name = (names or {}).get(name, name)
+    return name + ")" * max(0, name.count("(") - name.count(")"))
 
 
 def ymd(day: str) -> str:
@@ -488,7 +558,7 @@ def _carry(parts: list[dict], failed: list[str], unloaded: dict[str, tuple[str, 
     # From the last place to the first, so the earlier places still hold.
     for fid, (why, at) in reversed(list(todo.items())):
         old = index_parts(carry, {fid})
-        got, _end = _fresh(_with_trips(old or []), fid, today)
+        got, _end = _fresh(_with_trips([_without_replaced(p) for p in old or []]), fid, today)
         if not got:
             print(f"warn {fid}: {carry.name} has no running timetable of it either; nothing to carry over",
                   file=sys.stderr)
@@ -500,6 +570,42 @@ def _carry(parts: list[dict], failed: list[str], unloaded: dict[str, tuple[str, 
         print(f"::warning title=City feed carried over::{why}; the previous release's {fid} timetable"
               f" ({trips} trips) ships again.")
     return carried
+
+
+def _without_replaced(part: dict) -> dict:
+    """A part carried over from the previous index without the trips its
+    feed's new source left out on purpose, when it is the zip that source
+    replaced ("replaces"): the old Szeged zip's Volán buses are volan-szeged
+    already, its tram-train MÁV's. Its stops and shapes no trip uses any
+    more go with them. Any other part as it is."""
+    spec = _replaces(part["op_id"])
+    trips = part.get("t") or []
+    if not _is_replaced(spec, part.get("feed") or "", {t[4] for t in trips if len(t) > 4}):
+        return part
+    dropped = set(spec.get("dropped") or ())
+    keep = [t for t in trips if not (len(t) > 4 and t[4] in dropped)]
+    used = sorted({p for t in keep for p in t[2]})
+    s_map = {old: new for new, old in enumerate(used)}
+    shapes = part.get("shapes") or []
+    used_sh = sorted({t[5] for t in keep if len(t) > 5 and isinstance(t[5], int) and 0 <= t[5] < len(shapes)})
+    sh_map = {old: new for new, old in enumerate(used_sh)}
+    rows = []
+    for t in keep:
+        row = [t[0], t[1], [s_map[p] for p in t[2]], *t[3:]]
+        if len(t) > 5:
+            row[5] = sh_map.get(t[5], -1) if isinstance(t[5], int) else -1
+        rows.append(row)
+    g = part.get("g") or []
+    print(f"warn {part['op_id']}: the carried timetable is the zip its new source replaced;"
+          f" its {len(trips) - len(keep)} trips of route types {', '.join(map(str, sorted(dropped)))} are left out",
+          file=sys.stderr)
+    return {
+        **part,
+        "s": [part["s"][i] for i in used],
+        "g": [v for i in used for v in g[2 * i:2 * i + 2]] if len(g) == 2 * len(part["s"]) else [],
+        "shapes": [shapes[i] for i in used_sh],
+        "t": rows,
+    }
 
 
 def _feed_group(op_id: str) -> str | None:
@@ -533,19 +639,69 @@ def allowed_missing() -> set[str]:
     return {part.strip() for part in raw.split(",") if part.strip()}
 
 
-# What guard_feeds compares a rebuild with: (operator stats, running trips
-# per feed, all trips per feed of the operators still running) of the
-# previous index.
-Previous = tuple[dict[str, tuple[int, str]], dict[str, int], dict[str, int]]
+class Previous(NamedTuple):
+    """What guard_feeds compares a rebuild with, of the previous index."""
+
+    # Operator id -> (trips, last service day), operator_stats().
+    stats: dict[str, tuple[int, str]]
+    # Feed -> its running trips.
+    running: dict[str, int]
+    # Feed -> all trips of its operators still running.
+    total: dict[str, int]
+    # Feed -> route_type -> (running trips, trips as in total) of that type.
+    route_types: dict[str, dict[int, tuple[int, int]]]
+    # Operator id -> its feed_version in the index ("feed"); "" = none.
+    versions: dict[str, str]
 
 
-def _previous(out: Path | None, today: str) -> Previous | None:
-    """The previous index as guard_feeds sees it; None without one."""
-    prev = operator_stats(out) if out is not None else None
+def _feed_versions(idx: dict) -> dict[str, str]:
+    """Operator id -> feed_version of an index's "feed" string."""
+    out: dict[str, str] = {}
+    for item in str(idx.get("feed") or "").split(";"):
+        op, sep, version = item.partition(":")
+        if sep and op:
+            out[op] = version
+    return out
+
+
+def _route_type_trips(idx: dict, today: str, live: set[str]) -> dict[str, dict[int, tuple[int, int]]]:
+    """Previous.route_types of an index already read; {} when it is not one."""
+    try:
+        ops = idx.get("o") or []
+        stops = idx.get("s") or []
+        running = {id(t) for t in running_trips(idx, today)}
+        counts: dict[str, dict[int, list[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+        for t in idx.get("t") or []:
+            op = ops[stops[t[2][0]][3]][0]
+            group = _feed_group(op)
+            if not group or op not in live:
+                continue
+            got = counts[group][t[4] if len(t) > 4 and isinstance(t[4], int) else 3]
+            got[0] += id(t) in running
+            got[1] += 1
+        return {g: {rt: (n[0], n[1]) for rt, n in by.items()} for g, by in counts.items()}
+    except (IndexError, KeyError, TypeError):
+        return {}
+
+
+def _previous(out: Path | None, today: str, idx: dict | None | object = _UNREAD) -> Previous | None:
+    """The previous index as guard_feeds sees it; None without one. idx:
+    that index, read_index(out), when the caller has it already."""
+    if idx is _UNREAD:
+        idx = read_index(out) if out is not None else None
+    if not isinstance(idx, dict):
+        return None
+    prev = operator_stats_of(idx)
     if not prev:
         return None
-    live = {op: n for op, n in (operator_running_trips(out, today) or {}).items() if n}
-    return prev, _group_trips(live), _group_trips({op: n for op, (n, _e) in prev.items() if op in live})
+    live = {op: n for op, n in (operator_running_trips_of(idx, today) or {}).items() if n}
+    return Previous(
+        prev,
+        _group_trips(live),
+        _group_trips({op: n for op, (n, _e) in prev.items() if op in live}),
+        _route_type_trips(idx, today, set(live)),
+        _feed_versions(idx),
+    )
 
 
 def _counts(parts: list[dict], today: str) -> tuple[dict[str, int], dict[str, int]]:
@@ -559,12 +715,37 @@ def _counts(parts: list[dict], today: str) -> tuple[dict[str, int], dict[str, in
     return _group_trips(running), _group_trips(total)
 
 
-def _shrink_ok(group: str, today: str) -> str:
-    """The last day of the feed's "shrink_ok" window when today is in it,
-    else ""."""
+def _replaces(group: str) -> dict:
+    """The feed's "replaces" (CITY_FEEDS), {} when it has none."""
     feed = next((f for f in CITY_FEEDS if f["id"] == group), None)
-    first, last = (feed or {}).get("shrink_ok") or ("", "")
-    return last if today and first <= today <= last else ""
+    return dict((feed or {}).get("replaces") or {})
+
+
+def _is_replaced(spec: dict, version: str, route_types: Iterable[int]) -> bool:
+    """Whether a feed's part (its feed_version, the route types of its
+    trips) is the zip its "replaces" spec describes."""
+    if not spec:
+        return False
+    if spec.get("unversioned") and version:
+        return False
+    return bool(set(spec.get("dropped") or ()) & set(route_types))
+
+
+def _replaced_trips(group: str, previous: Previous, on_running: bool) -> int | None:
+    """The trips of the previous index's feed that its new source still
+    runs (those of the other route types than "dropped"), counted as the
+    guard counts (running or all); None when that index does not hold the
+    zip the feed's source replaced. That zip had both: a part with fewer
+    than MIN_GUARDED_TRIPS of the kept types is not it (a bus-only feed of
+    the same id would otherwise pass on almost nothing)."""
+    spec = _replaces(group)
+    by_type = previous.route_types.get(group) or {}
+    kinds = {rt for rt, (run, total) in by_type.items() if (run if on_running else total)}
+    if not _is_replaced(spec, previous.versions.get(group, ""), kinds):
+        return None
+    dropped = set(spec.get("dropped") or ())
+    kept = sum((run if on_running else total) for rt, (run, total) in by_type.items() if rt not in dropped)
+    return kept if kept >= MIN_GUARDED_TRIPS else None
 
 
 def _group_problem(
@@ -573,14 +754,18 @@ def _group_problem(
     after_running: dict[str, int],
     after_all: dict[str, int],
     expired: dict[str, str],
-    today: str = "",
     *,
     warn: bool = False,
 ) -> str:
-    """Why guard_feeds refuses a rebuild for this feed, or "". A feed in its
-    "shrink_ok" window (today, CITY_FEEDS) may have fewer trips; with warn
-    that is said on stderr."""
-    prev, before, before_all = previous
+    """Why guard_feeds refuses a rebuild for this feed, or "".
+
+    A feed whose source changed on purpose ("replaces", CITY_FEEDS) is,
+    while the previous index still holds the old zip, compared with that
+    zip's trips of the route types the new source keeps: it must keep that
+    share of them, and at least MIN_GUARDED_TRIPS, so a broken new zip of a
+    handful of trips is still refused. With warn the accepted shrink is
+    said on stderr."""
+    prev, before, before_all = previous.stats, previous.running, previous.total
     running = before.get(group)
     if not running:
         return ""
@@ -595,12 +780,16 @@ def _group_problem(
     if not has:
         return f"{group} missing (had {had} trips)"
     if had >= MIN_GUARDED_TRIPS and has < had * keep:
-        until = _shrink_ok(group, today)
-        if not until:
+        kept = _replaced_trips(group, previous, on_running)
+        if kept is None:
             return f"{group} {has} trips vs {had}"
+        floor = max(kept * keep, MIN_GUARDED_TRIPS)
+        if has < floor:
+            return (f"{group} {has} trips vs {had} ({kept} of them of the route types its new source"
+                    " keeps)")
         if warn:
-            print(f"warn {group} {has} trips vs {had}; accepted until {ymd(until)}, its source changed",
-                  file=sys.stderr)
+            print(f"warn {group} {has} trips vs {had}: the previous index has the zip its source replaced;"
+                  f" taken, as {kept} of those are of the route types the new source keeps", file=sys.stderr)
     return ""
 
 
@@ -612,7 +801,7 @@ def _feed_problem(fid: str, previous: Previous | None, got: list[dict], today: s
     ended = dict(stale_parts(got, today))
     fresh = [p for p in got if p["op_id"] not in ended]
     expired = {fid: max(ended.values())} if ended and not fresh else {}
-    return _group_problem(fid, previous, *_counts(fresh, today), expired, today)
+    return _group_problem(fid, previous, *_counts(fresh, today), expired)
 
 
 def guard_feeds(
@@ -643,7 +832,7 @@ def guard_feeds(
         return
     allow = allowed_missing() if allow is None else allow
     expired = expired or {}
-    prev, before, _before_all = previous
+    prev, before = previous.stats, previous.running
     after_running, after_all = _counts(parts, today)
     for group, had in sorted(_group_trips({op: n for op, (n, _e) in prev.items()}).items()):
         if group not in before and not after_all.get(group):
@@ -653,7 +842,7 @@ def guard_feeds(
     for group in sorted(before):
         if group in allow or "all" in allow:
             continue
-        why = _group_problem(group, previous, after_running, after_all, expired, today, warn=True)
+        why = _group_problem(group, previous, after_running, after_all, expired, warn=True)
         if why:
             problems.append(why)
     if problems:
@@ -661,6 +850,149 @@ def guard_feeds(
             f"refusing to replace {out.name}: " + "; ".join(problems)
             + f" (set {ALLOW_MISSING_ENV} to accept)"
         )
+
+
+# A stop the rebuilt index renumbered (a feed that changed its stop ids, as
+# Szeged's did with its new source) is the new stop of the same operator
+# and mode within this distance, so a card saved with the old id still finds
+# it ("al" in the index, gtfs.js volanMatchStop). The poles of one stop are
+# 20-40 m apart; across a street, its other direction usually is too.
+ALIAS_M = 50.0
+# An operator keeps at most this many aliases per stop: the newest first. A
+# feed that renumbers every week would otherwise grow the table by its stop
+# count each time.
+ALIASES_PER_STOP = 4
+
+
+def _mode(route_type: object) -> int:
+    """A GTFS route_type as its basic mode, the extended codes (700 bus, 800
+    trolleybus, 900 tram, 100 rail...) as the basic ones, so SZKT's
+    trolleybuses (800) are the old zip's (11)."""
+    rt = route_type if isinstance(route_type, int) else 3
+    if rt == 800:
+        return 11
+    for low, basic in ((100, 2), (200, 3), (400, 1), (700, 3), (900, 0), (1000, 4), (1300, 6), (1400, 7)):
+        if low <= rt < low + 100:
+            return basic
+    return rt
+
+
+class AliasStop(NamedTuple):
+    id: str
+    op: str
+    lat: float
+    lon: float
+    modes: frozenset[int]
+
+
+class AliasBaseline(NamedTuple):
+    """The previous index as stop_aliases needs it: its stops and its own
+    aliases (old id -> stop index), without keeping the whole index."""
+
+    stops: list[AliasStop]
+    aliases: list[tuple[str, int]]
+
+
+def _stop_modes(n: int, trips: Iterable[list]) -> list[set[int]]:
+    modes: list[set[int]] = [set() for _ in range(n)]
+    for t in trips:
+        mode = _mode(t[4] if len(t) > 4 else 3)
+        for p in t[2]:
+            if isinstance(p, int) and 0 <= p < n:
+                modes[p].add(mode)
+    return modes
+
+
+def _alias_stop(sid: str, op: str, g: list, i: int, modes: set[int]) -> AliasStop:
+    ok = len(g) >= 2 * i + 2 and (g[2 * i] or g[2 * i + 1])
+    return AliasStop(str(sid), op, g[2 * i] / 1e5 if ok else 0.0, g[2 * i + 1] / 1e5 if ok else 0.0,
+                     frozenset(modes))
+
+
+def alias_baseline(idx: dict | None) -> AliasBaseline | None:
+    """AliasBaseline of an index already read; None when it is not one."""
+    if not isinstance(idx, dict):
+        return None
+    try:
+        ops = idx.get("o") or []
+        rows = idx["s"]
+        g = idx.get("g") or []
+        modes = _stop_modes(len(rows), idx.get("t") or [])
+        stops = [_alias_stop(row[0], ops[row[3]][0] if len(row) > 3 else "", g, i, modes[i])
+                 for i, row in enumerate(rows)]
+        aliases = [(str(a[0]), a[1]) for a in idx.get("al") or []
+                   if isinstance(a, list) and len(a) == 2 and isinstance(a[1], int) and 0 <= a[1] < len(stops)]
+        return AliasBaseline(stops, aliases)
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def stop_aliases(previous: AliasBaseline | None, parts: list[dict]) -> dict[str, str]:
+    """Old stop id -> new stop id for the stops of the previous index that
+    the rebuild (parts) no longer has: the nearest stop of the same operator
+    within ALIAS_M that a trip of the same mode serves (any mode for an old
+    stop without trips). The previous index's own aliases are carried over,
+    to their stop when the rebuild still has it, else to the stop nearest to
+    it, so a card saved two renumberings ago still finds its stop. Stops
+    without coordinates get none. In order: this rebuild's first, then the
+    carried ones, at most ALIASES_PER_STOP per stop of an operator."""
+    if previous is None:
+        return {}
+    new_ids: set[str] = set()
+    # Operator -> grid cell -> stops; a cell is about 550 x 380 m.
+    grid: dict[str, dict[tuple[int, int], list[AliasStop]]] = defaultdict(lambda: defaultdict(list))
+    stops_of: dict[str, int] = defaultdict(int)
+    for part in parts:
+        op = part["op_id"]
+        rows = part.get("s") or []
+        modes = _stop_modes(len(rows), part.get("t") or [])
+        for i, row in enumerate(rows):
+            st = _alias_stop(row[0], op, part.get("g") or [], i, modes[i])
+            new_ids.add(st.id)
+            stops_of[op] += 1
+            if st.lat or st.lon:
+                grid[op][(round(st.lat * 200), round(st.lon * 200))].append(st)
+
+    def nearest(old: AliasStop) -> str:
+        if not (old.lat or old.lon) or old.op not in grid:
+            return ""
+        cells = grid[old.op]
+        cy, cx = round(old.lat * 200), round(old.lon * 200)
+        best: tuple[float, str] | None = None
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                for st in cells.get((cy + dy, cx + dx), ()):
+                    if old.modes and st.modes and not old.modes & st.modes:
+                        continue
+                    d = _meters((old.lat, old.lon), (st.lat, st.lon))
+                    if d <= ALIAS_M and (best is None or (d, st.id) < best):
+                        best = (d, st.id)
+        return best[1] if best else ""
+
+    out: dict[str, tuple[str, str]] = {}
+    for st in previous.stops:
+        if st.id not in new_ids and st.id not in out:
+            got = nearest(st)
+            if got:
+                out[st.id] = (got, st.op)
+    for old, ix in previous.aliases:
+        if old in new_ids or old in out:
+            continue
+        target = previous.stops[ix]
+        got = target.id if target.id in new_ids else nearest(target)
+        if got:
+            out[old] = (got, target.op)
+    kept: dict[str, str] = {}
+    per_op: dict[str, int] = defaultdict(int)
+    for old, (new, op) in out.items():
+        if per_op[op] >= ALIASES_PER_STOP * stops_of[op]:
+            continue
+        per_op[op] += 1
+        kept[old] = new
+    if len(kept) < len(out):
+        print(f"warn stop aliases: {len(out) - len(kept)} of the oldest left out"
+              f" (at most {ALIASES_PER_STOP} per stop of an operator)", file=sys.stderr)
+    return kept
 
 
 def build_city_index(
@@ -680,8 +1012,12 @@ def build_city_index(
     release's index, see collect_parts) because their own zip failed (id ->
     why)."""
     today = today or date.today().strftime("%Y%m%d")
-    # Read once for both: about a second on the release index.
-    previous = _previous(out, today)
+    # Read once for the guards and the stop aliases: about a second on the
+    # release index. Only what they need is kept while the feeds load.
+    idx = read_index(out)
+    previous = _previous(out, today, idx)
+    baseline = alias_baseline(idx)
+    del idx
     allow = allowed_missing()
     parts, failed, expired, rejected, refused, carried = collect_parts(
         base, volan_zip, today=today, zips=zips, out=out, previous=previous, allow=allow, carry=carry
@@ -690,7 +1026,8 @@ def build_city_index(
     # guard_feeds is the city index's guard: write_index's overall count
     # would also count trips whose calendar already ended (several feeds end
     # on 31 December) and ignore HUNGARIAN_TRANSPORT_ALLOW_MISSING.
-    info = write_index(parts, out, with_operators=True, today=today, guard_total=False)
+    info = write_index(parts, out, with_operators=True, today=today, guard_total=False,
+                       aliases=stop_aliases(baseline, parts))
     info["skipped"] = failed
     info["expired"] = expired
     info["rejected"] = rejected
