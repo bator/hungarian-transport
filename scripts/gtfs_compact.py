@@ -533,8 +533,9 @@ def catalog_url(query: str) -> str:
 
 
 def feed_urls(feed: dict) -> Iterator[str]:
-    """Env override, then catalog lookup, then the public fallback URL, each
-    once. Lazy, so the catalog is only asked when the override fails."""
+    """Env override, then catalog lookup, then the public fallback URL, then
+    its mirrors (the same zip elsewhere), each once. Lazy, so the catalog is
+    only asked when the override fails."""
     load_env_files()
     seen: set[str] = set()
 
@@ -556,6 +557,10 @@ def feed_urls(feed: dict) -> Iterator[str]:
     url = fresh(feed.get("url"))
     if url:
         yield url
+    for mirror in feed.get("mirrors") or ():
+        url = fresh(mirror)
+        if url:
+            yield url
 
 
 def resolved_url(feed: dict) -> str:
