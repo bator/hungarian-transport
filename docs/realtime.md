@@ -277,14 +277,23 @@ before, and the card fills the board from Transitous.
   further routes from a planner board: their route details would go to
   the FUTÁR that just failed.
 - **Stations.** A GTFS parent station (`BKK_CS056233`, Keleti's metro) is
-  one planner stop whose board holds its child stops' departures. FUTÁR's
-  own combined stations (`BKK_CSF01131`, the Keleti preset) are not in
-  the planner: their board is merged from their child poles' boards, the
-  poles FUTÁR's own answers named since Home Assistant started (a station
-  board's departures, any answer's stop references), at most 24 poles and
-  20 departures a pattern each. A station FUTÁR has named no pole of has
-  no fallback. FUTÁR's ad-hoc trips (ids of ten or more digits) are not in
-  the planner either.
+  one planner stop whose board holds its child stops' departures. So are
+  the 38 of FUTÁR's combined stations (`BKK_CSF…`) that BKK's GTFS has
+  (`BKK_CSF00062`, Batthyány tér): the first board of such a station
+  FUTÁR cannot give asks the planner for the station itself, and whether
+  it knew it is kept for 12 hours. The others are FUTÁR's alone
+  (`BKK_CSF01131`, the Keleti preset, is null in the planner): their board
+  is merged from their child poles' boards, the poles FUTÁR's own answers
+  named (a station board's departures, any answer's stop references), at
+  most 24 poles and 20 departures a pattern each, for at most 512
+  stations. Those are kept in `.storage/hungarian_transport.bkk_stations`
+  (written five minutes after a change, and when Home Assistant stops;
+  removed with the integration), so they have a fallback right after a
+  restart during an outage too. Keleti has a seed until FUTÁR names its
+  own: the 15 BKK surface stops the planner names "Keleti pályaudvar M"
+  (and "… M (Garay utca)"), as on 2026-11-18. A FUTÁR-only station
+  FUTÁR has named no pole of has no fallback. FUTÁR's ad-hoc trips (ids
+  of ten or more digits) are not in the planner either.
 - **Not asked when.** The integration's own FUTÁR rate limit, an error
   status FUTÁR gave for the request, and a request never sent are not
   outages; nor are search, route details, plans and timetables, which the
@@ -303,9 +312,10 @@ before, and the card fills the board from Transitous.
   first takes a token of FUTÁR's own rate limit, as a call to FUTÁR would.
   After a failure the planner is not asked for 30 s, by the realtime hub
   either, logged once. FUTÁR gets 8 s of the card's 20 s only where the
-  planner can answer (a BKK stop, a FUTÁR station whose poles are known, a
-  timetable trip, the planner not backing off), the planner 6 s; elsewhere
-  FUTÁR keeps the whole budget.
+  planner can answer (a BKK stop, a FUTÁR station the planner knows or has
+  not been asked about yet, or whose poles are known, a timetable trip,
+  the planner not backing off), the planner 6 s; elsewhere FUTÁR keeps the
+  whole budget.
 
 ## Licence and terms
 

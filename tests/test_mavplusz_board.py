@@ -553,7 +553,7 @@ async def test_a_key_failing_fast_takes_futars_token_before_the_planner(make_pla
 @pytest.mark.parametrize(
     ("path", "params"),
     [
-        (BOARD, dict(BOARD_PARAMS, stopId="BKK_CSF01131")),
+        (BOARD, dict(BOARD_PARAMS, stopId="BKK_CSF09999")),
         (TRIP, {"tripId": "BKK_1234567890"}),
         (BOARD, dict(BOARD_PARAMS, stopId="volan_1")),
     ],
@@ -563,6 +563,10 @@ async def test_futar_keeps_its_whole_budget_where_the_planner_cannot_answer(
     make_planner, aioclient_mock, monkeypatch, path, params
 ) -> None:
     boards, fake, clock = make_planner()
+    if mb.is_station(params.get("stopId", "")):
+        # A station the planner said it does not know, and FUTÁR named no pole of
+        # (test_an_unknown_futar_station_is_asked_of_the_planner_once).
+        boards._probe_result(params["stopId"], False)
     seen: list = []
     proxy = _proxy(monkeypatch, boards, clock, None, seen)
     await proxy.get(path, params)
@@ -647,6 +651,8 @@ async def test_a_futar_station_is_answered_from_the_poles_futar_named(make_plann
     failing = False
     monkeypatch.setattr(futar, "futar_get", fake_get)
     proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    # The planner said it does not know the station.
+    boards._probe_result(station, False)
     assert not boards.can_answer(BOARD, params)
     await proxy.get(BOARD, params)
     assert boards.can_answer(BOARD, params)
@@ -671,7 +677,8 @@ def test_futars_answers_teach_only_well_formed_station_poles() -> None:
             {"data": {"entry": {"stopTimes": [None, {"stopId": "BKK_CSF2", "tripId": 3, "serviceDate": 10 ** 30}]}}}]
     for doc in junk:
         boards.learn(BOARD, {"stopId": "BKK_CSF1"}, doc)
-    assert not boards.can_answer(BOARD, {"stopId": "BKK_CSF1"})
+    # No pole learnt: the station itself, for the planner to say whether it knows it.
+    assert not boards._stations and boards._board_ids("BKK_CSF1") == ("BKK:CSF1",)
     for i in range(mb.MAX_CHILD_STOPS + 5):
         boards.learn("route-details.json", {}, {"data": {"references": {"stops": {
             "p": {"id": f"BKK_F{i}", "parentStationId": "BKK_CSF1"}}}}})
@@ -679,6 +686,170 @@ def test_futars_answers_teach_only_well_formed_station_poles() -> None:
     for i in range(mb.MAX_STATIONS + 3):
         boards._learn_pole(f"BKK_CSF{i + 10}", "BKK_F1")
     assert len(boards._stations) == mb.MAX_STATIONS
+
+
+async def test_a_futar_station_the_planner_knows_is_its_own_board(make_planner, aioclient_mock, monkeypatch) -> None:
+    """BKK's GTFS has FUTÁR's combined station BKK_CSF00062 (Batthyány
+    tér): one stop() of the planner answers its board, with no pole known
+    from FUTÁR, and the planner's answer is remembered (PROBE_TTL): later
+    boards ask it the same way, poles learnt or not."""
+    boards, _fake, clock = make_planner()
+    station = "BKK_CSF00062"
+    fake = Planner()
+    board = _station_board("BKK:CSF00062")
+
+    async def answer(method, url, data):
+        body = json.loads(data)
+        fake.asked.append(body["variables"])
+        return AiohttpClientMockResponse(method, url, json=board)
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(mavplusz.URL, side_effect=answer)
+    params = dict(BOARD_PARAMS, stopId=station)
+    assert boards.can_answer(BOARD, params)
+    proxy = _proxy(monkeypatch, boards, clock, futar.FutarError("HTTP 503"))
+    doc = await proxy.get(BOARD, params)
+    assert doc["source"] == "mavplusz" and doc["data"]["entry"]["stopId"] == station
+    assert [a["id"] for a in fake.asked] == ["BKK:CSF00062"]
+    assert boards._known(station) is True
+    boards.learn(BOARD, {"stopId": "BKK_X"}, {"data": {"references": {"stops": {
+        "p": {"id": "BKK_F00063", "parentStationId": station}}}}})
+    assert boards._board_ids(station) == ("BKK:CSF00062",)
+    clock.now += mb.PROBE_TTL
+    assert boards._known(station) is None and boards._board_ids(station) == ("BKK:F00063",)
+
+
+async def test_an_unknown_futar_station_is_asked_of_the_planner_once(make_planner, aioclient_mock, monkeypatch) -> None:
+    """A FUTÁR-only station (null in the planner) with no pole known: the
+    first board FUTÁR cannot give asks the planner for it; its null is kept
+    for PROBE_TTL, during which FUTÁR keeps its whole budget there and the
+    planner is not asked again. A failed request says nothing either way."""
+    boards, fake, clock = make_planner()
+    station = "BKK_CSF09999"
+    params = dict(BOARD_PARAMS, stopId=station)
+    fake.down = True
+    failing = _proxy(monkeypatch, boards, clock, futar.FutarError("HTTP 503"))
+    with pytest.raises(futar.FutarError):
+        await failing.get(BOARD, params)
+    assert boards._known(station) is None and boards.can_answer(BOARD, dict(params, minutesAfter="61")) is False
+    clock.now += mb.FAIL_BACKOFF
+    fake.down = False
+    with pytest.raises(futar.FutarError):
+        await failing.get(BOARD, dict(params, minutesAfter="62"))
+    assert [a.get("id") for a in fake.asked] == ["BKK:CSF09999", "BKK:CSF09999"]
+    assert boards._known(station) is False and not boards.can_answer(BOARD, params)
+    clock.now += mb.BOARD_TTL
+    with pytest.raises(futar.FutarError):
+        await failing.get(BOARD, dict(params, minutesAfter="63"))
+    assert len(fake.asked) == 2
+    clock.now += mb.PROBE_TTL
+    assert boards.can_answer(BOARD, params)
+
+
+def test_the_keleti_preset_is_seeded_until_futar_names_its_own_poles() -> None:
+    """The card's Keleti preset (BKK_CSF01131) is FUTÁR's alone: its board
+    is merged from the seeded poles from the first start on, and from the
+    poles FUTÁR names once it has."""
+    seed = mb.SEED_STATIONS["BKK_CSF01131"]
+    assert 0 < len(seed["poles"]) <= mb.MAX_CHILD_STOPS
+    assert all(mb.planner_id(p) and not mb.is_station(p) for p in seed["poles"])
+    assert seed["ref"]["name"] == "Keleti pályaudvar"
+    boards = mb.PlannerBoards(None)
+    assert boards._board_ids("BKK_CSF01131") == tuple(mb.planner_id(p) for p in seed["poles"])
+    assert boards.can_answer(BOARD, {"stopId": "BKK_CSF01131"})
+    boards.learn(BOARD, {"stopId": "BKK_CSF01131"}, {"data": {"entry": {"stopTimes": [{"stopId": "BKK_F01131"}]}}})
+    assert boards._board_ids("BKK_CSF01131") == ("BKK:F01131",)
+
+
+async def test_seeded_poles_are_asked_as_the_stations_board(make_planner, aioclient_mock) -> None:
+    boards, _fake, _clock = make_planner()
+    fake = StationPlanner()
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(mavplusz.URL, side_effect=fake)
+    assert await boards.answer(BOARD, dict(BOARD_PARAMS, stopId="BKK_CSF01131")) is None
+    poles = sorted(v for k, v in fake.asked[0].items() if k[0] == "s" and k[1:].isdigit())
+    assert poles == sorted(mb.planner_id(p) for p in mb.SEED_STATIONS["BKK_CSF01131"]["poles"])
+
+
+def test_learnt_stations_survive_a_restart() -> None:
+    """What learn() gathered goes out as plain JSON (stations_data), once
+    per change (on_stations_changed), and a PlannerBoards made with it
+    answers the same stations at once."""
+    changes = []
+    boards = mb.PlannerBoards(None, on_stations_changed=lambda: changes.append(1))
+    doc = {"data": {
+        "entry": {"stopTimes": [{"stopId": "BKK_F00940", "tripId": "BKK_T1", "serviceDate": "20261118"}]},
+        "references": {"stops": {
+            "BKK_CSF00940": {"id": "BKK_CSF00940", "name": "Báthory utca", "lat": 47.5, "lon": 19.05},
+            "BKK_F00939": {"id": "BKK_F00939", "parentStationId": "BKK_CSF00940"},
+        }},
+    }}
+    boards.learn(BOARD, {"stopId": "BKK_CSF00940"}, doc)
+    assert len(changes) == 1
+    boards.learn(BOARD, {"stopId": "BKK_CSF00940"}, doc)
+    assert len(changes) == 1
+    stored = json.loads(json.dumps(boards.stations_data()))
+    again = mb.PlannerBoards(None, stations=stored)
+    assert again._board_ids("BKK_CSF00940") == ("BKK:F00939", "BKK:F00940")
+    assert again._stations == boards._stations
+    assert again._stations["BKK_CSF00940"]["ref"] == {"id": "BKK_CSF00940", "name": "Báthory utca", "lat": 47.5, "lon": 19.05}
+
+
+@pytest.mark.parametrize(
+    "data", [None, [], "x", {"stations": []}, {"stations": {"BKK_F1": {"poles": ["BKK_F2"]}}},
+             {"stations": {"BKK_CSF1": {"poles": ["BKK_CSF2", 5, "volan_1"]}}},
+             {"stations": {"BKK_CSF1": {"poles": "BKK_F2"}}}, {"stations": {"BKK_CSF1": None}}],
+)
+def test_a_broken_stored_record_restores_nothing(data) -> None:
+    assert mb.restore_stations(data) == {}
+
+
+def test_a_restored_record_keeps_the_limits() -> None:
+    many = {f"BKK_CSF{i}": {"ref": {"name": 7, "lat": 999, "lon": 0}, "poles": [f"BKK_F{j}" for j in range(40)]}
+            for i in range(mb.MAX_STATIONS + 10)}
+    got = mb.restore_stations({"stations": many})
+    assert len(got) == mb.MAX_STATIONS and "BKK_CSF0" not in got and f"BKK_CSF{mb.MAX_STATIONS + 9}" in got
+    assert all(len(st["poles"]) == mb.MAX_CHILD_STOPS for st in got.values())
+    assert got["BKK_CSF10"]["ref"] == {"id": "BKK_CSF10", "name": ""}
+
+
+async def test_home_assistant_keeps_the_learnt_stations_in_its_store(
+    hass, hass_storage, aioclient_mock, monkeypatch, freezer
+) -> None:
+    """Loaded at setup, written a while after learn() changes them (once),
+    removed with the entry."""
+    from datetime import timedelta
+
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    import custom_components.hungarian_transport as integration
+    from custom_components.hungarian_transport import storage
+
+    hass_storage[storage.STATIONS_KEY] = {
+        "version": storage.STATIONS_VERSION, "minor_version": 1, "key": storage.STATIONS_KEY,
+        "data": {"stations": {"BKK_CSF00940": {"ref": None, "poles": ["BKK_F00940"]}}},
+    }
+    made = []
+    real = mb.PlannerBoards
+
+    def boards(*args, **kwargs):
+        made.append(real(*args, **kwargs))
+        return made[-1]
+
+    monkeypatch.setattr(integration.mavplusz_board, "PlannerBoards", boards)
+    _inject(monkeypatch, FakeClock())
+    entry = await _setup(hass)
+    (planner,) = made
+    assert planner._board_ids("BKK_CSF00940") == ("BKK:F00940",)
+    planner.learn(BOARD, {"stopId": "BKK_X"}, {"data": {"references": {"stops": {
+        "p": {"id": "BKK_F00941", "parentStationId": "BKK_CSF00940"}}}}})
+    freezer.tick(timedelta(seconds=storage.STATIONS_SAVE_DELAY + 1))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert hass_storage[storage.STATIONS_KEY]["data"]["stations"]["BKK_CSF00940"]["poles"] == ["BKK_F00940", "BKK_F00941"]
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert storage.STATIONS_KEY not in hass_storage
 
 
 HOSTILE = [10 ** 20, 2 ** 63, -(2 ** 63), 1e20, float("nan"), "1794956400", True, None, [], {}]
