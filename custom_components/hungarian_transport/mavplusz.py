@@ -1,11 +1,12 @@
 """Delays and vehicle positions from mavplusz.hu, MÁV's journey planner.
 
-mavplusz.hu runs OpenTripPlanner 2 with the Volán, Paks and city (Debrecen,
-Miskolc, Veszprém) timetables and their realtime updates; jbb.ghsq.de's
-GTFS-Realtime feeds for those operators are exported from this planner, so
-its ids are theirs with the prefix kept: jbb trip hkir_2036_1-3 of the hkir:
-feed is OTP trip "hkir:hkir_2036_1-3", stop hkir_779365_6 is
-"hkir:hkir_779365_6".
+mavplusz.hu runs OpenTripPlanner 2 with the MÁV and GYSEV trains, the
+Volán, Paks and city (Debrecen, Miskolc, Veszprém) timetables and their
+realtime updates; jbb.ghsq.de's GTFS-Realtime feeds for those operators are
+exported from this planner, so its ids are theirs with the prefix kept: jbb
+trip hkir_2036_1-3 of the hkir: feed is OTP trip "hkir:hkir_2036_1-3", stop
+hkir_779365_6 is "hkir:hkir_779365_6", MÁV trip 36166415 of the 1: feeds is
+"1:36166415" and platform 005510017_9 of Budapest-Keleti "1:005510017_9".
 
 For the sources that opt in (realtime_feeds.json "mavplusz": true) the hub
 asks the planner first, in one GraphQL request for just the trips a card
@@ -79,10 +80,14 @@ class RouteKey(NamedTuple):
 
 class TripResult(NamedTuple):
     """What the planner said of one trip; both None for a trip it runs with
-    no realtime data on that date."""
+    no realtime data on that date. ends is the epoch of the run's last call
+    that date (its realtime time, the scheduled one without realtime), None
+    when it lists no call: the hub tells a past day's run that is over from
+    one still on its way by it (realtime._query_mavplusz)."""
 
     trip_update: realtime.TripUpdate | None
     vehicle: realtime.Vehicle | None
+    ends: int | None = None
 
 
 def gtfs_id(trip_id: str, prefix: str) -> str:
@@ -308,15 +313,27 @@ def parse_trip(trip: Any, key: TripKey) -> TripResult:
     calls = trip.get("stoptimesForDate")
     calls = [c for c in calls if isinstance(c, dict)] if isinstance(calls, list) else []
     calls = calls[: realtime.MAX_STOP_UPDATES]
+    ends = _ends(calls)
     if not any(c.get("realtime") is True or c.get("realtimeState") == "CANCELED" for c in calls):
-        return TripResult(None, None)
+        return TripResult(None, None, ends)
     trip_id = realtime._strip(key.gtfs_id, key.prefix)
     if all(c.get("realtimeState") == "CANCELED" for c in calls):
         tu = realtime.TripUpdate(trip_id, key.date, route_id, 3, None, [])
-        return TripResult(tu, None)
+        return TripResult(tu, None, ends)
     stops = [_stop_update(c, key.prefix) for c in calls]
     tu = realtime.TripUpdate(trip_id, key.date, route_id, 0, None, stops)
-    return TripResult(tu, _vehicle(trip, key, route_id))
+    return TripResult(tu, _vehicle(trip, key, route_id), ends)
+
+
+def _ends(calls: list[dict[str, Any]]) -> int | None:
+    """The latest time of the calls: realtimeArrival and -Departure are the
+    scheduled times on a call without realtime data."""
+    times = [
+        _epoch(_int(c.get("serviceDay")), _int(c.get(f)))
+        for c in calls
+        for f in ("realtimeArrival", "realtimeDeparture")
+    ]
+    return max((t for t in times if t is not None), default=None)
 
 
 def _data(doc: Any) -> dict[str, Any]:
