@@ -6,7 +6,7 @@ import os
 import re
 import sys
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import date
 from pathlib import Path
 from typing import NamedTuple
@@ -854,9 +854,12 @@ def guard_feeds(
 
 # A stop the rebuilt index renumbered (a feed that changed its stop ids, as
 # Szeged's did with its new source) is the new stop of the same operator
-# and mode within this distance, so a card saved with the old id still finds
-# it ("al" in the index, gtfs.js volanMatchStop). The poles of one stop are
-# 20-40 m apart; across a street, its other direction usually is too.
+# and mode within this distance. The rebuild gives that stop its old id back
+# (keep_stop_ids), so a card saved with the old id finds it whatever the
+# card's version; an old id left over (two old stops that became one) is an
+# alias of the stop ("al" in the index, gtfs.js volanMatchStop). The poles
+# of one stop are 20-40 m apart; across a street, its other direction
+# usually is too.
 ALIAS_M = 50.0
 # An operator keeps at most this many aliases per stop: the newest first. A
 # feed that renumbers every week would otherwise grow the table by its stop
@@ -883,6 +886,11 @@ class AliasStop(NamedTuple):
     lat: float
     lon: float
     modes: frozenset[int]
+    # The stop number the card matches a saved id by (the row's third
+    # element), and the feed's own id: the index's id unless the stop kept
+    # an earlier one (keep_stop_ids).
+    num: str = ""
+    fid: str = ""
 
 
 class AliasBaseline(NamedTuple):
@@ -903,10 +911,12 @@ def _stop_modes(n: int, trips: Iterable[list]) -> list[set[int]]:
     return modes
 
 
-def _alias_stop(sid: str, op: str, g: list, i: int, modes: set[int]) -> AliasStop:
+def _alias_stop(row: list, op: str, g: list, i: int, modes: set[int], fid: object = None) -> AliasStop:
     ok = len(g) >= 2 * i + 2 and (g[2 * i] or g[2 * i + 1])
-    return AliasStop(str(sid), op, g[2 * i] / 1e5 if ok else 0.0, g[2 * i + 1] / 1e5 if ok else 0.0,
-                     frozenset(modes))
+    sid = str(row[0])
+    return AliasStop(sid, op, g[2 * i] / 1e5 if ok else 0.0, g[2 * i + 1] / 1e5 if ok else 0.0,
+                     frozenset(modes), str(row[2]) if len(row) > 2 and row[2] is not None else "",
+                     fid if isinstance(fid, str) and fid else sid)
 
 
 def alias_baseline(idx: dict | None) -> AliasBaseline | None:
@@ -918,7 +928,8 @@ def alias_baseline(idx: dict | None) -> AliasBaseline | None:
         rows = idx["s"]
         g = idx.get("g") or []
         modes = _stop_modes(len(rows), idx.get("t") or [])
-        stops = [_alias_stop(row[0], ops[row[3]][0] if len(row) > 3 else "", g, i, modes[i])
+        stops = [_alias_stop(row, ops[row[3]][0] if len(row) > 3 else "", g, i, modes[i],
+                             row[4] if len(row) > 4 else None)
                  for i, row in enumerate(rows)]
         aliases = [(str(a[0]), a[1]) for a in idx.get("al") or []
                    if isinstance(a, list) and len(a) == 2 and isinstance(a[1], int) and 0 <= a[1] < len(stops)]
@@ -927,46 +938,123 @@ def alias_baseline(idx: dict | None) -> AliasBaseline | None:
         return None
 
 
-def stop_aliases(previous: AliasBaseline | None, parts: list[dict]) -> dict[str, str]:
-    """Old stop id -> new stop id for the stops of the previous index that
-    the rebuild (parts) no longer has: the nearest stop of the same operator
-    within ALIAS_M that a trip of the same mode serves (any mode for an old
-    stop without trips). The previous index's own aliases are carried over,
-    to their stop when the rebuild still has it, else to the stop nearest to
-    it, so a card saved two renumberings ago still finds its stop. Stops
-    without coordinates get none. In order: this rebuild's first, then the
-    carried ones, at most ALIASES_PER_STOP per stop of an operator."""
-    if previous is None:
-        return {}
-    new_ids: set[str] = set()
-    # Operator -> grid cell -> stops; a cell is about 550 x 380 m.
-    grid: dict[str, dict[tuple[int, int], list[AliasStop]]] = defaultdict(lambda: defaultdict(list))
-    stops_of: dict[str, int] = defaultdict(int)
+# Operator -> grid cell -> stops; a cell is about 550 x 380 m, so the stops
+# within ALIAS_M of a point are in its cell or the eight around it.
+StopGrid = dict[str, dict[tuple[int, int], list[AliasStop]]]
+
+
+def _grid(stops: Iterable[AliasStop]) -> StopGrid:
+    grid: StopGrid = defaultdict(lambda: defaultdict(list))
+    for st in stops:
+        if st.lat or st.lon:
+            grid[st.op][(round(st.lat * 200), round(st.lon * 200))].append(st)
+    return grid
+
+
+def _near(grid: StopGrid, old: AliasStop) -> Iterator[tuple[float, AliasStop]]:
+    """The stops of old's operator within ALIAS_M of it that a trip of its
+    mode serves (any mode for an old stop without trips), with their
+    distance; none for a stop without coordinates."""
+    if not (old.lat or old.lon) or old.op not in grid:
+        return
+    cells = grid[old.op]
+    cy, cx = round(old.lat * 200), round(old.lon * 200)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            for st in cells.get((cy + dy, cx + dx), ()):
+                if old.modes and st.modes and not old.modes & st.modes:
+                    continue
+                d = _meters((old.lat, old.lon), (st.lat, st.lon))
+                if d <= ALIAS_M:
+                    yield d, st
+
+
+def _part_stops(parts: list[dict]) -> Iterator[tuple[list, AliasStop]]:
     for part in parts:
-        op = part["op_id"]
         rows = part.get("s") or []
         modes = _stop_modes(len(rows), part.get("t") or [])
         for i, row in enumerate(rows):
-            st = _alias_stop(row[0], op, part.get("g") or [], i, modes[i])
-            new_ids.add(st.id)
-            stops_of[op] += 1
-            if st.lat or st.lon:
-                grid[op][(round(st.lat * 200), round(st.lon * 200))].append(st)
+            yield row, _alias_stop(row, part["op_id"], part.get("g") or [], i, modes[i],
+                                   row[3] if len(row) > 3 else None)
+
+
+def keep_stop_ids(previous: AliasBaseline | None, parts: list[dict]) -> dict[str, str]:
+    """Give the rebuild's renumbered stops the ids the previous index had
+    for them, in parts' stop rows: id and stop number become the old stop's
+    (the card matches a saved stop by the number in its id), and the feed's
+    own id goes into the row's fourth element, which write_index writes as
+    the stop's fifth (realtime feeds name the stop by it). So a card of any
+    version finds a stop saved before the feed renumbered it, and a feed
+    that switches source keeps its ids. Returns feed id -> the id it took.
+
+    An old stop is one of the previous index whose id the rebuild lacks; it
+    goes to a stop of the rebuild that the previous index did not name, one
+    to one:
+    - first the feed stop it went to last time (the row's feed id), however
+      far it moved, so the ids do not drift from one rebuild to the next;
+    - then by distance, the nearest pair first (ties by the old id, then
+      the new): the stop of the same operator within ALIAS_M that a trip
+      of the same mode serves, as stop_aliases finds it. An old stop whose
+      candidates all went to nearer ones gets none here; stop_aliases then
+      makes it an alias of its nearest stop (two old stops merged into one
+      new one)."""
+    if previous is None:
+        return {}
+    new_ids = {str(row[0]) for part in parts for row in part.get("s") or []}
+    old_ids = {st.id for st in previous.stops}
+    lost = [st for st in previous.stops if st.id not in new_ids]
+    if not lost:
+        return {}
+    fresh: dict[str, tuple[list, AliasStop]] = {}
+    for row, st in _part_stops(parts):
+        if st.id not in old_ids:
+            fresh.setdefault(st.id, (row, st))
+    pairs: dict[str, AliasStop] = {}
+    for old in lost:
+        hit = fresh.get(old.fid) if old.fid != old.id else None
+        if hit and hit[1].op == old.op and old.fid not in pairs:
+            pairs[old.fid] = old
+    taken = {old.id for old in pairs.values()}
+    grid = _grid(st for nid, (_row, st) in fresh.items() if nid not in pairs)
+    # Distances to the decimetre: two poles the same distance away are a tie
+    # however the floating point falls, and the tie goes by the ids.
+    cands = sorted(
+        ((round(d, 1), old.id, st.id, old) for old in lost if old.id not in taken for d, st in _near(grid, old)),
+        key=lambda c: c[:3],
+    )
+    for _d, oid, nid, old in cands:
+        if oid not in taken and nid not in pairs:
+            pairs[nid] = old
+            taken.add(oid)
+    for nid, old in pairs.items():
+        row = fresh[nid][0]
+        row[:] = [old.id, row[1], old.num, nid]
+    return {nid: old.id for nid, old in sorted(pairs.items())}
+
+
+def stop_aliases(previous: AliasBaseline | None, parts: list[dict]) -> dict[str, str]:
+    """Old stop id -> new stop id for the stops of the previous index that
+    the rebuild (parts, after keep_stop_ids) no longer has: the nearest stop
+    of the same operator within ALIAS_M that a trip of the same mode serves
+    (any mode for an old stop without trips). The previous index's own
+    aliases are carried over, to their stop when the rebuild still has it,
+    else to the stop nearest to it, so a card saved two renumberings ago
+    still finds its stop. Stops without coordinates get none. In order: this
+    rebuild's first, then the carried ones, at most ALIASES_PER_STOP per
+    stop of an operator."""
+    if previous is None:
+        return {}
+    new_ids: set[str] = set()
+    stops_of: dict[str, int] = defaultdict(int)
+    news: list[AliasStop] = []
+    for _row, st in _part_stops(parts):
+        new_ids.add(st.id)
+        stops_of[st.op] += 1
+        news.append(st)
+    grid = _grid(news)
 
     def nearest(old: AliasStop) -> str:
-        if not (old.lat or old.lon) or old.op not in grid:
-            return ""
-        cells = grid[old.op]
-        cy, cx = round(old.lat * 200), round(old.lon * 200)
-        best: tuple[float, str] | None = None
-        for dy in (-1, 0, 1):
-            for dx in (-1, 0, 1):
-                for st in cells.get((cy + dy, cx + dx), ()):
-                    if old.modes and st.modes and not old.modes & st.modes:
-                        continue
-                    d = _meters((old.lat, old.lon), (st.lat, st.lon))
-                    if d <= ALIAS_M and (best is None or (d, st.id) < best):
-                        best = (d, st.id)
+        best = min(((d, st.id) for d, st in _near(grid, old)), default=None)
         return best[1] if best else ""
 
     out: dict[str, tuple[str, str]] = {}
@@ -1026,8 +1114,11 @@ def build_city_index(
     # guard_feeds is the city index's guard: write_index's overall count
     # would also count trips whose calendar already ended (several feeds end
     # on 31 December) and ignore HUNGARIAN_TRANSPORT_ALLOW_MISSING.
+    # The renamed stops first: the old ids left over are aliases of them.
+    kept = keep_stop_ids(baseline, parts)
     info = write_index(parts, out, with_operators=True, today=today, guard_total=False,
                        aliases=stop_aliases(baseline, parts))
+    info["kept_ids"] = len(kept)
     info["skipped"] = failed
     info["expired"] = expired
     info["rejected"] = rejected

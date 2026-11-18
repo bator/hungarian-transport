@@ -1033,9 +1033,134 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         bci.CITY_FEEDS = real_feeds
     built = json.loads(gzip.decompress(out.read_bytes()))
-    check("a rebuild that renumbered a feed's stops writes their aliases into the index",
-          info["aliases"] == 2 and sorted((old, built["s"][ix][0]) for old, ix in built["al"])
-          == [("x:o1", "x:1"), ("x:o2", "x:2")], repr((info, built.get("al"))))
+    check("a rebuild that renumbered a feed's stops gives them their old ids back, the feed's beside them,"
+          " and needs no aliases",
+          info["kept_ids"] == 2 and info["aliases"] == 0 and "al" not in built
+          and sorted((row[0], row[4]) for row in built["s"]) == [("x:o1", "x:1"), ("x:o2", "x:2")],
+          repr((info, built["s"])))
+
+# A renumbered stop takes its old id back in the index itself
+# (keep_stop_ids), so a card older than the "al" table finds it too: the
+# integration installs new indexes weekly without a card update. Only the
+# old ids left over (two old stops that became one) are aliases.
+
+
+def named_part(op_id: str, stops: list[tuple[str, str, int]], trips: list[tuple[int, list[int]]]) -> dict:
+    """A part with stops (id, name, lat in 1e-5 degrees; all on one
+    meridian) and trips (route_type, stop indexes). A stop's number is the
+    digits of its id, as load_parts gives it."""
+    return {
+        **part(op_id, 0),
+        "s": [[sid, name, re.sub(r"\D", "", sid.split(":", 1)[1])] for sid, name, _lat in stops],
+        "g": [v for _sid, _name, lat in stops for v in (lat, LON)],
+        "t": [[0, str(rt), ix, [480 + i for i in range(len(ix))], rt, -1] for rt, ix in trips],
+    }
+
+
+def old_card_stop(idx: dict, op: str, saved_id: str, saved_name: str) -> list | None:
+    """The stop row a card of v1.10.22 (before "al", gtfs.js volanMatchStop
+    at c7baff4) finds for a saved city stop: among the operator's stops the
+    first whose number is the one in the saved id (names.js stopNum), else
+    the first of the saved name (norm: trimmed, lower case, spaces folded)."""
+    op_ix = [o[0] for o in idx["o"]].index(op)
+    m = re.match(r"^(?:volan_|AREA_CS|hkir_)(\d+)", saved_id, re.I) or re.search(r"(\d{5,})", saved_id)
+    num = m.group(1) if m else ""
+    key = " ".join(saved_name.strip().lower().split())
+    own = [row for row in idx["s"] if row[3] == op_ix]
+    return (next((row for row in own if num and str(row[2]) == num), None)
+            or next((row for row in own if " ".join(str(row[1]).strip().lower().split()) == key), None))
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    old_stops = [
+        ("szeged:1000000001", "Anna-kút", LAT), ("szeged:1000000002", "Anna-kút", LAT + 30),
+        ("szeged:1000000003", "Dóm tér", LAT + 1000), ("szeged:1000000004", "Dóm tér", LAT + 1020),
+        ("szeged:1000000005", "Mars tér", LAT + 3000), ("szeged:1000000006", "Kálvária", LAT + 5000),
+        ("szeged:1000000008", "Kálvária tér", LAT + 5030), ("szeged:1000000009", "Rókus", LAT + 7000),
+    ]
+    old_idx_parts = [named_part("szeged", old_stops, [(0, [0, 1, 4, 5, 6, 7]), (11, [2, 3])])]
+    old_out = Path(tmp) / "old.json.gz"
+    write_index(old_idx_parts, old_out, with_operators=True, guard_total=False)
+    old_idx = json.loads(gzip.decompress(old_out.read_bytes()))
+
+    def new_feed(shift: int = 0, prefix: str = "SZ_") -> list[dict]:
+        # SZ_1 and SZ_2 the two Anna-kút poles, SZ_3 Dóm tér's two poles
+        # merged, nothing within 50 m of Mars tér, Kálvária with its old id,
+        # Rókus near two new stops; a trolleybus stop by the first tram pole.
+        return [named_part("szeged", [
+            (f"szeged:{prefix}1", "Anna - kút", LAT + 5 + shift), (f"szeged:{prefix}2", "Anna - kút", LAT + 25),
+            (f"szeged:{prefix}3", "Dóm tér", LAT + 1010), ("szeged:1000000006", "Kálvária", LAT + 5000),
+            (f"szeged:{prefix}5", "Rókus", LAT + 7010), (f"szeged:{prefix}6", "Rókus", LAT + 7040),
+            (f"szeged:{prefix}9", "Anna - kút", LAT + 2),
+        ], [(0, [0, 1, 3, 4, 5]), (800, [2, 6])])]
+
+    def build(baseline_path: Path, parts: list[dict], out: Path) -> tuple[dict, dict]:
+        baseline = bci.alias_baseline(gc.read_index(baseline_path))
+        kept = bci.keep_stop_ids(baseline, parts)
+        write_index(parts, out, with_operators=True, guard_total=False,
+                    aliases=bci.stop_aliases(baseline, parts))
+        return kept, json.loads(gzip.decompress(out.read_bytes()))
+
+    mid_out = Path(tmp) / "mid.json.gz"
+    kept, mid = build(old_out, new_feed(), mid_out)
+    rows = {row[0]: row for row in mid["s"]}
+    check("a renumbered stop takes its old id and stop number back, the feed's own id beside them",
+          rows.get("szeged:1000000001") == ["szeged:1000000001", "Anna - kút", "1000000001", 0, "szeged:SZ_1"],
+          repr(mid["s"]))
+    check("the two poles of a stop take the ids of the two old poles nearest to them, one each",
+          kept.get("szeged:SZ_1") == "szeged:1000000001" and kept.get("szeged:SZ_2") == "szeged:1000000002",
+          repr(kept))
+    check("a trolleybus stop at a tram pole does not take the tram pole's id",
+          "szeged:SZ_9" in rows and len(rows["szeged:SZ_9"]) == 4, repr(rows.get("szeged:SZ_9")))
+    check("two old stops that became one: the first of the pair takes the id, the other is an alias of it",
+          kept.get("szeged:SZ_3") == "szeged:1000000003"
+          and ["szeged:1000000004", mid["s"].index(rows["szeged:1000000003"])] in mid["al"], repr(mid.get("al")))
+    check("an old stop near two new stops takes the nearer; the other keeps its new id",
+          kept.get("szeged:SZ_5") == "szeged:1000000009" and "szeged:SZ_6" in rows, repr(kept))
+    check("a stop the previous index named the same way keeps it: the old stop beside it is its alias",
+          rows["szeged:1000000006"][4:] == []
+          and ["szeged:1000000008", mid["s"].index(rows["szeged:1000000006"])] in mid["al"], repr(mid.get("al")))
+    check("an old stop with no new stop of its mode within 50 m keeps neither id nor alias",
+          "szeged:1000000005" not in rows and all(a[0] != "szeged:1000000005" for a in mid["al"]),
+          repr(mid.get("al")))
+    check("no previous index, no stop changes its id", bci.keep_stop_ids(None, new_feed()) == {})
+
+    # A card of the version before "al" finds a saved stop by the number in
+    # its id: every old id the index kept is the very stop, a leftover alias
+    # its name's first stop.
+    found = {sid: old_card_stop(mid, "szeged", sid, name) for sid, name, _lat in old_stops}
+    check("an old card finds every stop that kept its id as that stop",
+          all(found[sid] is not None and found[sid][0] == sid for sid in rows if sid in found), repr(found))
+    check("an old card finds a leftover alias's stop by its name; one whose name went only the new card"
+          " finds, by the alias",
+          found["szeged:1000000004"][0] == "szeged:1000000003" and found["szeged:1000000005"] is None
+          and found["szeged:1000000008"] is None, repr(found))
+
+    # The next rebuilds keep the ids: the same feed gives the same index,
+    # a stop the feed moved further than 50 m keeps its id by the feed's,
+    # and a feed that renumbers again hands the ids on.
+    again_out = Path(tmp) / "again.json.gz"
+    build(mid_out, new_feed(), again_out)
+    check("the same feed rebuilt on the index with the kept ids gives the same index, byte for byte",
+          again_out.read_bytes() == mid_out.read_bytes())
+    _kept, moved = build(mid_out, new_feed(shift=90), Path(tmp) / "moved.json.gz")
+    check("a stop the feed moved 100 m keeps the id it took, found by the feed's id",
+          any(row[0] == "szeged:1000000001" and row[4:] == ["szeged:SZ_1"] for row in moved["s"]),
+          repr(moved["s"]))
+    _kept, twice = build(mid_out, new_feed(prefix="N_"), Path(tmp) / "twice.json.gz")
+    check("renumbered again: every stop keeps the id it had, with the newest feed id beside it",
+          sorted((row[0], row[4]) for row in twice["s"] if len(row) > 4) == [
+              ("szeged:1000000001", "szeged:N_1"), ("szeged:1000000002", "szeged:N_2"),
+              ("szeged:1000000003", "szeged:N_3"), ("szeged:1000000009", "szeged:N_5"),
+              ("szeged:SZ_6", "szeged:N_6"), ("szeged:SZ_9", "szeged:N_9")], repr(twice["s"]))
+
+    # A feed carried from the previous index (its zip failed) keeps the ids
+    # and the feed ids it had.
+    carried = gc.index_parts(mid_out, ["szeged"])
+    carried_out = Path(tmp) / "carried.json.gz"
+    write_index(carried or [], carried_out, with_operators=True, guard_total=False)
+    check("a carried feed keeps its stops' kept ids and feed ids",
+          json.loads(gzip.decompress(carried_out.read_bytes()))["s"] == mid["s"], repr(carried))
 
 # A feed whose own host fails is fetched from its mirror, the same zip.
 with tempfile.TemporaryDirectory() as tmp:

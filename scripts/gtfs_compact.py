@@ -1595,7 +1595,8 @@ def index_parts(path: Path, op_ids: Iterable[str]) -> list[dict] | None:
                 "op_id": oid,
                 "op_name": name,
                 "feed": versions.get(oid, ""),
-                "s": [list(stops[i][:3]) for i in own],
+                # A stop's feed id (its fifth element) stays with it.
+                "s": [[*stops[i][:3], *stops[i][4:5]] for i in own],
                 "g": [v for i in own for v in coords[2 * i:2 * i + 2]] if len(coords) == 2 * len(stops) else [],
                 "shapes": encoded,
                 "c": [cal[sv] for sv in services],
@@ -1764,6 +1765,9 @@ def write_index(
     index's renumbered stops, build_city_index.stop_aliases), written as
     "al", [old id, stop index] rows in that order, so a card saved with the
     old id finds the stop. One whose stop is not in the index is left out.
+    A part's stop row may carry a fourth element, the feed's own stop id of
+    a stop that kept its previous id (build_city_index.keep_stop_ids): with
+    operators it is written as the stop's fifth element, after the operator.
 
     Refuses an index built from a feed whose calendar already ended (a stale
     zip the publisher forgot): the card would show a timetable nothing runs
@@ -1800,7 +1804,10 @@ def write_index(
         c_off = len(all_c)
         for row in part["s"]:
             if with_operators:
-                all_s.append([row[0], row[1], row[2], op_ix])
+                # A stop that kept its previous id (build_city_index
+                # keep_stop_ids) brings the feed's own id as a fifth element:
+                # realtime feeds name the stop by that one.
+                all_s.append([row[0], row[1], row[2], op_ix, *row[3:4]])
             else:
                 all_s.append([row[0], row[1], row[2]])
         g = part.get("g") or []
