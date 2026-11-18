@@ -11,8 +11,9 @@ trips at 07:10, from both ends) and the realtime of a running trip of
 Veszprém 2 and of Miskolc 32, for the route + start path.
 fixtures/realtime/mavplusz_trains.json (2026-11-18 19:52 CET) has train
 741's two trips that day (UPDATED and MODIFIED, the same calls), train 3311
-(MODIFIED) and 741's first trip on the day before, for the train path; the
-static train numbers those trips are asked by are made up per test (_static).
+(MODIFIED) and 741's first trip on the day before, under which the planner
+listed the vehicle of 741's live run, for the train path; the static train
+numbers those trips are asked by are made up per test (_static).
 """
 from __future__ import annotations
 
@@ -1251,6 +1252,42 @@ async def test_train_rows_over_the_trip_cap_are_matched_on_the_feeds_until_asked
     assert [d for _g, d in planner.asks[1]] == [YESTERDAY] * 20
     assert set(second["trips"]) == set(numbers)
     assert {hit["delay"] for hit in second["trips"].values()} == {120}
+
+
+def test_a_trains_vehicle_listed_under_another_alias_is_its_live_runs() -> None:
+    """The unedited answer: the vehicle of 741's trip came under t3 (that
+    trip on the day before, no realtime), none under t0, today's live run.
+    It goes to the live run, by the trip id it names."""
+    keys = [mavplusz.TripKey(TRAINS_DOC["variables"][f"t{i}"], TRAINS_DOC["variables"][d], "1:") for i, d in enumerate(("d0", "d0", "d0", "d1"))]
+    assert not TRAINS["t0"]["pattern"]["vehiclePositions"] and TRAINS["t3"]["pattern"]["vehiclePositions"]
+    res = mavplusz.parse_response(TRAINS_DOC["response"], keys)
+    v = res[keys[0]].vehicle
+    assert (v.trip_id, v.start_date, v.lat, v.timestamp) == ("36777783", TODAY, 47.4930191, 1795027929)
+    assert v.stop_id == "005510017_5" and v.status == 2
+    # Not to the other trip of the pattern, nor to the run without realtime.
+    assert res[keys[1]].vehicle is None and res[keys[3]][:2] == (None, None)
+    # Alone, today's alias has no vehicle: it is not made up.
+    alone = mavplusz.parse_response({"data": {"t0": TRAINS["t0"]}}, keys[:1])
+    assert alone[keys[0]].trip_update is not None and alone[keys[0]].vehicle is None
+
+
+@pytest.mark.parametrize(("lag", "day"), [(0, TODAY), (-86400, YESTERDAY), (-43200, TODAY)])
+def test_a_vehicle_of_a_trip_live_on_two_days_goes_to_one_run(lag, day) -> None:
+    """741's trip asked for today and the day before, both live (as last
+    night's run still on its way past midnight would be): the vehicle goes
+    to the run its timestamp falls in, else the nearest, today's on a tie."""
+    today, yesterday = mavplusz.TripKey(IC741, TODAY, "1:"), mavplusz.TripKey(IC741, YESTERDAY, "1:")
+    last_night = copy.deepcopy(TRAINS["t0"])
+    for st in last_night["stoptimesForDate"]:
+        st["serviceDay"] -= 86400
+    doc = {"data": {"t0": copy.deepcopy(TRAINS["t0"]), "t1": last_night}}
+    vp = copy.deepcopy(TRAINS["t3"]["pattern"]["vehiclePositions"][0])
+    vp["lastUpdated"] += lag
+    doc["data"]["t0"]["pattern"]["vehiclePositions"] = [vp]
+    res = mavplusz.parse_response(doc, [today, yesterday])
+    with_vehicle = [k.date for k in (today, yesterday) if res[k].vehicle is not None]
+    assert with_vehicle == [day]
+    assert res[today].trip_update is not None and res[yesterday].trip_update is not None
 
 
 async def test_the_service_asks_the_planner_for_a_train(hass, aioclient_mock, freezer) -> None:

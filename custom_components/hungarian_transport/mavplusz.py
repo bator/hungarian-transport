@@ -263,18 +263,24 @@ def _stop_update(st: dict[str, Any], prefix: str) -> realtime.StopUpdate:
     )
 
 
-def _vehicle(trip: dict[str, Any], key: TripKey, route_id: str) -> realtime.Vehicle | None:
-    """The newest position of the pattern's vehicle on this very trip.
+def _positions(trip: Any) -> list[dict[str, Any]]:
+    """The raw vehicle positions on an alias's pattern."""
+    pattern = trip.get("pattern") if isinstance(trip, dict) else None
+    positions = pattern.get("vehiclePositions") if isinstance(pattern, dict) else None
+    return [vp for vp in positions if isinstance(vp, dict)] if isinstance(positions, list) else []
+
+
+def _vehicle(positions: Sequence[dict[str, Any]], key: TripKey, route_id: str) -> realtime.Vehicle | None:
+    """The newest of the positions that name this very trip.
 
     Matched by trip id alone: OTP's VehiclePosition names its trip but not
     the trip's service date, so another day's run of the id cannot be told
     apart here. parse_trip only asks for one when the date's run has
-    realtime calls, so a vehicle is attached only to a run that is live."""
-    pattern = trip.get("pattern")
-    positions = pattern.get("vehiclePositions") if isinstance(pattern, dict) else None
+    realtime calls, so a vehicle is attached only to a run that is live
+    (and parse_response to one run of the id)."""
     best: realtime.Vehicle | None = None
-    for vp in positions if isinstance(positions, list) else ():
-        if not isinstance(vp, dict) or _gid(vp.get("trip")) != key.gtfs_id:
+    for vp in positions:
+        if _gid(vp.get("trip")) != key.gtfs_id:
             continue
         lat, lon = _num(vp.get("lat")), _num(vp.get("lon"))
         if lat is None or lon is None:
@@ -301,12 +307,14 @@ def _vehicle(trip: dict[str, Any], key: TripKey, route_id: str) -> realtime.Vehi
     return best
 
 
-def parse_trip(trip: Any, key: TripKey) -> TripResult:
+def parse_trip(trip: Any, key: TripKey, positions: Sequence[dict[str, Any]] | None = None) -> TripResult:
     """One alias's answer. A trip with no realtime call on the date has no
     update and no vehicle: the pattern's vehicle on this trip id is then
     another day's run of it. Every call CANCELED: the trip is canceled
     (TripDescriptor relationship 3); one CANCELED call among updated ones
-    is that stop skipped (StopTimeUpdate relationship 1)."""
+    is that stop skipped (StopTimeUpdate relationship 1). positions are
+    the vehicles to look for the trip's among, by default its own alias's
+    pattern's (parse_response gives those of every alias)."""
     if not isinstance(trip, dict):
         raise ValueError("trip is not an object")
     route_id = realtime._strip(_gid(trip.get("route")), key.prefix)
@@ -322,7 +330,7 @@ def parse_trip(trip: Any, key: TripKey) -> TripResult:
         return TripResult(tu, None, ends)
     stops = [_stop_update(c, key.prefix) for c in calls]
     tu = realtime.TripUpdate(trip_id, key.date, route_id, 0, None, stops)
-    return TripResult(tu, _vehicle(trip, key, route_id), ends)
+    return TripResult(tu, _vehicle(_positions(trip) if positions is None else positions, key, route_id), ends)
 
 
 def _ends(calls: list[dict[str, Any]]) -> int | None:
@@ -352,16 +360,59 @@ def _data(doc: Any) -> dict[str, Any]:
 def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResult | None]:
     """Per trip of build_query(trips): its TripResult, or None when the
     planner does not know the trip (a null alias). Any GraphQL error or a
-    missing alias is a ValueError: the whole answer is not trusted."""
+    missing alias is a ValueError: the whole answer is not trusted.
+
+    A vehicle is looked for on every alias's pattern, not only its trip's
+    own: the planner lists a pattern's vehicles under one alias of it, on
+    2026-11-18 twice under the alias asking for a day the trip ran without
+    realtime data (yesterday's run of a train) and not under today's, live
+    one (tests/fixtures/realtime/mavplusz_trains.json). Each position names
+    its trip, and goes to one live run of it (_one_run)."""
     data = _data(doc)
-    out: dict[TripKey, TripResult | None] = {}
+    raw: list[tuple[TripKey, Any]] = []
     for i, key in enumerate(trips):
         alias = f"t{i}"
         if alias not in data:
             raise ValueError(f"answer without {alias}")
-        trip = data[alias]
-        out[key] = None if trip is None else parse_trip(trip, key)
+        raw.append((key, data[alias]))
+    positions = [vp for _key, trip in raw for vp in _positions(trip)]
+    out: dict[TripKey, TripResult | None] = {}
+    for key, trip in raw:
+        out[key] = None if trip is None else parse_trip(trip, key, positions)
+    _one_run(out)
     return out
+
+
+def _span(tu: realtime.TripUpdate | None) -> tuple[int, int] | None:
+    times = [t for u in (tu.stops if tu else ()) for t in (u.arr_time, u.dep_time) if t is not None]
+    return (min(times), max(times)) if times else None
+
+
+def _one_run(out: dict[TripKey, TripResult | None]) -> None:
+    """A trip id asked for two days that are both live (last night's run
+    still on its way, today's begun) has its one vehicle on one of them:
+    the run whose calls its timestamp falls among (MAX_POSITION_AGE either
+    side), else the nearest one, the later day on a tie."""
+    by_id: dict[str, list[TripKey]] = {}
+    for key, res in out.items():
+        if res is not None and res.vehicle is not None:
+            by_id.setdefault(key.gtfs_id, []).append(key)
+    for keys in by_id.values():
+        if len(keys) < 2:
+            continue
+
+        def distance(key: TripKey) -> float:
+            res = out[key]
+            ts, span = res.vehicle.timestamp, _span(res.trip_update)
+            if ts is None or span is None:
+                return float("inf")
+            first, last = span[0] - realtime.MAX_POSITION_AGE, span[1] + realtime.MAX_POSITION_AGE
+            return 0.0 if first <= ts <= last else float(min(abs(ts - first), abs(ts - last)))
+
+        best = min(sorted(keys, key=lambda k: k.date, reverse=True), key=distance)
+        for key in keys:
+            if key != best:
+                out[key] = out[key]._replace(vehicle=None)
 
 
 def to_feed(

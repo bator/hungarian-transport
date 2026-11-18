@@ -1,5 +1,5 @@
 {
- "_comment": "mavplusz.hu OTP2 GraphQL answer, captured 2026-11-18 19:52 CET for the query mavplusz.build_query makes (variables below): train 741's two trips that day (t0 UPDATED, t1 MODIFIED, the same calls), train 3311 (t2, MODIFIED) and t0's trip on the day before (t3, no realtime). The pattern's one vehicle (on t0's trip) came under the t3 alias in the real answer and is moved to t0's. Public timetable and vehicle position data only.",
+ "_comment": "mavplusz.hu OTP2 GraphQL answer, captured 2026-11-18 19:52 CET for the query mavplusz.build_query makes (variables below), unedited: train 741's two trips that day (t0 UPDATED, t1 MODIFIED, the same calls), train 3311 (t2, MODIFIED) and t0's trip on the day before (t3, no realtime). The pattern's one vehicle, on t0's trip, is listed under the t3 alias, not t0's: mavplusz.parse_response looks for a trip's vehicle on every alias. Public timetable and vehicle position data only.",
  "variables": {
   "d0": "20261118",
   "d1": "20261117",
@@ -138,24 +138,7 @@
      }
     ],
     "pattern": {
-     "vehiclePositions": [
-      {
-       "lat": 47.4930191,
-       "lon": 19.1430798,
-       "heading": 261.0,
-       "speed": 15.0,
-       "lastUpdated": 1795027929,
-       "stopRelationship": {
-        "status": "IN_TRANSIT_TO",
-        "stop": {
-         "gtfsId": "1:005510017_5"
-        }
-       },
-       "trip": {
-        "gtfsId": "1:36777783"
-       }
-      }
-     ]
+     "vehiclePositions": []
     }
    },
    "t1": {
@@ -608,7 +591,24 @@
      }
     ],
     "pattern": {
-     "vehiclePositions": []
+     "vehiclePositions": [
+      {
+       "lat": 47.4930191,
+       "lon": 19.1430798,
+       "heading": 261.0,
+       "speed": 15.0,
+       "lastUpdated": 1795027929,
+       "stopRelationship": {
+        "status": "IN_TRANSIT_TO",
+        "stop": {
+         "gtfsId": "1:005510017_5"
+        }
+       },
+       "trip": {
+        "gtfsId": "1:36777783"
+       }
+      }
+     ]
     }
    }
   }
