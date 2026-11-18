@@ -570,11 +570,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def task_factory(coro: Any) -> Any:
         return hass.async_create_background_task(coro, "hungarian_transport_futar", eager_start=False)
 
+    # The poles of FUTÁR's combined stations learnt before (storage.py), so
+    # their boards have a fallback right after a restart too.
     planner = mavplusz_board.PlannerBoards(
         async_get_clientsession(hass),
         task_factory=task_factory,
         call_later=hass_call_later(hass),
         limiter=_planner_limiter(hass),
+        stations=await storage.async_load_stations(hass),
+        on_stations_changed=lambda: storage.async_save_stations_later(hass, planner.stations_data),
     )
     proxy = FutarProxy(
         async_get_clientsession(hass),
@@ -649,8 +653,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """The integration is removed: so are its Lovelace resource, its
-    notifications, its Repairs issues and its record in .storage
-    (storage.py), and the copy of it in memory. There is one entry at most
+    notifications, its Repairs issues, its record in .storage (storage.py)
+    and the copy of it in memory, and the BKK stations learnt from FUTÁR. There is one entry at most
     (its unique_id is the domain), so nothing is shared with another.
 
     Only what installed the indexes stays (storage.MAV_INSTALL,
@@ -688,6 +692,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     except Exception:  # noqa: BLE001 - removal goes on
         _LOGGER.warning("Could not remove the timetable update record", exc_info=True)
     hass.data.get(DOMAIN, {}).pop("update_state", None)
+    # The BKK stations learnt from FUTÁR went with the entry's key.
+    try:
+        await storage.stations_store(hass).async_remove()
+    except Exception:  # noqa: BLE001 - removal goes on
+        _LOGGER.warning("Could not remove the learnt BKK stations", exc_info=True)
 
 
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)

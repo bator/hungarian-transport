@@ -22,9 +22,13 @@ tests/test_mavplusz_board.py runs it bare.
 
 Stations: a GTFS parent station (BKK_CS056233, Keleti's metro) is a stop
 to the planner too, whose board holds its child stops' departures (checked
-2026-11-18). FUTÁR's own combined stations (BKK_CSF01131, the Keleti preset
-in src/config.js) are not in the planner at all; their board is the boards
-of their child poles, which only FUTÁR's answers name (learn), merged.
+2026-11-18). So are FUTÁR's combined stations (BKK_CSF…) that BKK's GTFS
+has (38 of them, BKK_CSF00062 Batthyány tér among them): one board request
+asks the planner, and its answer says whether it knows the station, kept
+for PROBE_TTL. Those it does not know (BKK_CSF01131, the Keleti preset in
+src/config.js) have the boards of their child poles merged instead: the
+poles FUTÁR's answers name (learn), kept across restarts (stations_data,
+restore_stations; storage.py writes them), else SEED_STATIONS.
 """
 from __future__ import annotations
 
@@ -99,10 +103,29 @@ MAX_SERVICE_DATES = 4000
 # yesterday's service day and today's (the night buses of the day before
 # run until about 4:30), and the run under way is the answer.
 NIGHT_END_HOUR = 5
-# FUTÁR's combined stations (not in the planner) and their child poles
-# learnt from FUTÁR's answers: so many stations at most, the oldest first out.
+# FUTÁR's combined stations and their child poles learnt from FUTÁR's
+# answers: so many stations at most, the oldest first out.
 STATION_PREFIX = "BKK_CSF"
 MAX_STATIONS = 512
+# Whether the planner knows a FUTÁR station (its own board answered, or a
+# null stop), kept this long: the GTFS changes with the timetable.
+PROBE_TTL = 12 * 3600
+# The poles of the card's preset hubs the planner does not know, until
+# FUTÁR names their own (learn). Keleti (BKK_CSF01131): every BKK stop the
+# planner names "Budapest, Keleti pályaudvar M" (or "... M (Garay utca)",
+# F01131 itself) with a mode, all within some 300 m of each other, by
+# stops(name: "Keleti pályaudvar") on 2026-11-18. The metro's are a GTFS
+# station of their own (BKK_CS056233), as in FUTÁR.
+SEED_STATIONS: dict[str, dict[str, Any]] = {
+    "BKK_CSF01131": {
+        "ref": {"id": "BKK_CSF01131", "name": "Keleti pályaudvar"},
+        "poles": (
+            "BKK_F01131", "BKK_F01154", "BKK_F01159", "BKK_F01160", "BKK_F01311", "BKK_F01314",
+            "BKK_007950", "BKK_009160", "BKK_009161", "BKK_009162", "BKK_009163", "BKK_009321",
+            "BKK_061349", "BKK_061350", "BKK_061351",
+        ),
+    },
+}
 # FUTÁR's ad-hoc trips (a replacement bus, a trip added for the day) have
 # ids of ten or more digits that no timetable, the planner's included, has.
 _AD_HOC_TRIP = re.compile(r"^BKK_\d{10,}$")
@@ -570,7 +593,10 @@ class PlannerBoards:
     shared with the realtime hub; one of its own without it), of which this
     fallback has the smaller share. `monotonic` is the clock of the caches
     (and of the limiter made here), `wall` the epoch clock of the times
-    asked, `sleep` the one the trip details' batch waits with."""
+    asked, `sleep` the one the trip details' batch waits with. `stations`
+    is what stations_data() gave before (Home Assistant's store, read
+    through restore_stations), and `on_stations_changed` is called whenever
+    learn() changes it, for the store to write it later."""
 
     paths = PATHS
 
@@ -584,6 +610,8 @@ class PlannerBoards:
         wall: Wall | None = None,
         sleep: upstream.Sleep = upstream.sleep,
         limiter: mavplusz.PlannerLimiter | None = None,
+        stations: Any = None,
+        on_stations_changed: Callable[[], None] | None = None,
     ) -> None:
         self._session = session
         self._monotonic = monotonic
@@ -597,7 +625,11 @@ class PlannerBoards:
         self._asked: dict[Any, float] = {}
         self._dates: dict[str, str] = {}
         # FUTÁR station id -> its reference and child poles, from FUTÁR (learn).
-        self._stations: dict[str, dict[str, Any]] = {}
+        self._stations: dict[str, dict[str, Any]] = restore_stations(stations)
+        self._on_stations_changed = on_stations_changed
+        # FUTÁR station id -> (whether the planner knows it, monotonic when
+        # its board said so).
+        self._probed: dict[str, tuple[bool, float]] = {}
         # The trip details batch still taking keys (TRIP_BATCH_WAIT), if any.
         self._open: dict[TripKey, asyncio.Future[dict[str, Any] | None]] | None = None
         # The batches' tasks, held until done (the loop keeps only a weak one).
@@ -612,9 +644,10 @@ class PlannerBoards:
         self._trips.close()
 
     def can_answer(self, path: str, params: dict[str, str]) -> bool:
-        """Whether answer() may give FUTÁR's answer for path: a BKK stop or
-        a FUTÁR station whose poles are known, a timetable trip, and the
-        planner not backing off. Not for the rest: FUTÁR then has its whole
+        """Whether answer() may give FUTÁR's answer for path: a BKK stop, a
+        FUTÁR station the planner knows, has not said it does not know, or
+        whose poles are known, a timetable trip, and the planner not
+        backing off. Not for the rest: FUTÁR then has its whole
         budget, since nothing else could answer."""
         if self._rate.backing_off():
             return False
@@ -635,11 +668,19 @@ class PlannerBoards:
         refs = body.get("references")
         stops = refs.get("stops") if isinstance(refs, dict) else None
         stops = stops if isinstance(stops, dict) else {}
+        changed = False
         for ref in stops.values():
             if isinstance(ref, dict):
-                self._learn_pole(ref.get("parentStationId"), ref.get("id"))
-        if path != BOARD_PATH:
-            return
+                changed |= self._learn_pole(ref.get("parentStationId"), ref.get("id"))
+        if path == BOARD_PATH:
+            changed |= self._learn_board(params, body, stops)
+        if changed and self._on_stations_changed is not None:
+            self._on_stations_changed()
+
+    def _learn_board(self, params: dict[str, str], body: dict[str, Any], stops: dict[str, Any]) -> bool:
+        """learn() of a board: its departures' dates and a station's poles
+        and reference. Whether the stations changed."""
+        changed = False
         stop = str(params.get("stopId") or "")
         entry = body.get("entry")
         times = entry.get("stopTimes") if isinstance(entry, dict) else None
@@ -649,28 +690,41 @@ class PlannerBoards:
             tid, date = st.get("tripId"), _futar_date(st.get("serviceDate"))
             if isinstance(tid, str) and date and planner_id(tid) is not None:
                 self._remember_date(tid, date)
-            self._learn_pole(stop, st.get("stopId"))
+            changed |= self._learn_pole(stop, st.get("stopId"))
         own = stops.get(stop)
         station = self._stations.get(stop)
         if station is not None and isinstance(own, dict):
-            ref: dict[str, Any] = {"id": stop, "name": _str(own.get("name"))}
-            lat, lon = mavplusz._num(own.get("lat")), mavplusz._num(own.get("lon"))
-            if lat is not None and lon is not None:
-                ref["lat"], ref["lon"] = lat, lon
-            station["ref"] = ref
+            ref = _station_ref(stop, own)
+            if ref != station["ref"]:
+                station["ref"] = ref
+                changed = True
+        return changed
 
-    def _learn_pole(self, station: Any, pole: Any) -> None:
+    def _learn_pole(self, station: Any, pole: Any) -> bool:
+        """Whether this was news: a station or a pole not known before."""
         if not isinstance(station, str) or not is_station(station) or planner_id(station) is None:
-            return
+            return False
         if not isinstance(pole, str) or is_station(pole) or planner_id(pole) is None:
-            return
+            return False
         known = self._stations.get(station)
         if known is None:
             while len(self._stations) >= MAX_STATIONS:
                 del self._stations[next(iter(self._stations))]
             known = self._stations[station] = {"ref": None, "poles": {}}
-        if len(known["poles"]) < MAX_CHILD_STOPS:
-            known["poles"][pole] = None
+        if pole in known["poles"] or len(known["poles"]) >= MAX_CHILD_STOPS:
+            return False
+        known["poles"][pole] = None
+        return True
+
+    def stations_data(self) -> dict[str, Any]:
+        """The learnt stations as plain JSON, for Home Assistant's store
+        (restore_stations reads it back): station id -> its reference and
+        poles, the oldest first."""
+        return {
+            "stations": {
+                sid: {"ref": st["ref"], "poles": list(st["poles"])} for sid, st in self._stations.items()
+            }
+        }
 
     def _remember_date(self, tid: str, date: str) -> None:
         self._dates.pop(tid, None)
@@ -680,16 +734,41 @@ class PlannerBoards:
 
     def _board_ids(self, stop: str) -> tuple[str, ...] | None:
         """The planner stops a FUTÁR stop's board is asked of: the stop
-        itself (a GTFS station, BKK_CS…, answers for its child stops), a
-        FUTÁR station's poles learnt from FUTÁR, None when there is none."""
+        itself (a GTFS station, BKK_CS… or BKK_CSF…, answers for its child
+        stops), else a FUTÁR station's poles (learnt from FUTÁR, else
+        SEED_STATIONS'), else the station itself while the planner has not
+        said it does not know it (that board request asks it); None when
+        there is none."""
         gid = planner_id(stop)
         if gid is None:
             return None
         if not is_station(stop):
             return (gid,)
-        station = self._stations.get(stop)
+        known = self._known(stop)
+        if known:
+            return (gid,)
+        station = self._stations.get(stop) or SEED_STATIONS.get(stop)
         poles = tuple(p for p in (planner_id(p) for p in station["poles"]) if p) if station else ()
-        return poles or None
+        if poles:
+            return poles
+        return None if known is False else (gid,)
+
+    def _known(self, stop: str) -> bool | None:
+        """Whether the planner knows FUTÁR station stop, as its board said
+        within PROBE_TTL; None when not asked (or so long ago)."""
+        hit = self._probed.get(stop)
+        if hit is None:
+            return None
+        if self._monotonic() - hit[1] >= PROBE_TTL:
+            del self._probed[stop]
+            return None
+        return hit[0]
+
+    def _probe_result(self, stop: str, known: bool) -> None:
+        self._probed.pop(stop, None)
+        self._probed[stop] = (known, self._monotonic())
+        while len(self._probed) > MAX_STATIONS:
+            del self._probed[next(iter(self._probed))]
 
     @staticmethod
     def _trip_id(params: dict[str, str]) -> str | None:
@@ -727,17 +806,21 @@ class PlannerBoards:
             raise PlannerError("asked for this stop within BOARD_TTL")
         self._asked[key] = now
         wall = self._wall()
-        station = is_station(stop)
-        body = build_station_query(ids, int(wall)) if station else build_board_query(ids[0], int(wall))
+        # A FUTÁR station's poles, or one planner stop (a stop, a station).
+        poles = ids != (planner_id(stop),)
+        body = build_station_query(ids, int(wall)) if poles else build_board_query(ids[0], int(wall))
         doc = await self._post(body, BOARD_MAX_BYTES, PLANNER_TIMEOUT)
         try:
-            if station:
-                own = (self._stations.get(stop) or {}).get("ref")
+            if poles:
+                own = (self._stations.get(stop) or SEED_STATIONS.get(stop) or {}).get("ref")
                 board = parse_board(doc, stop, wall, children=len(ids), own=own)
             else:
                 board = parse_board(doc, stop, wall)
         except (ValueError, KeyError, TypeError, OverflowError, OSError) as err:
             raise self._failed(err) from None
+        if is_station(stop) and not poles:
+            # The planner's answer says whether it knows FUTÁR's station.
+            self._probe_result(stop, board is not None)
         if board is not None:
             for st in board.stop_times:
                 if st["serviceDate"]:
@@ -869,6 +952,44 @@ class PlannerBoards:
             detail,
         )
         return PlannerError(detail)
+
+
+def _station_ref(stop: str, own: dict[str, Any]) -> dict[str, Any]:
+    """A FUTÁR station's reference as the merged board gives it, from
+    FUTÁR's own: its id, name and position."""
+    ref: dict[str, Any] = {"id": stop, "name": _str(own.get("name"))}
+    lat, lon = mavplusz._num(own.get("lat")), mavplusz._num(own.get("lon"))
+    if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
+        ref["lat"], ref["lon"] = lat, lon
+    return ref
+
+
+def restore_stations(data: Any) -> dict[str, dict[str, Any]]:
+    """The learnt stations of a stations_data() from before (Home
+    Assistant's store), as PlannerBoards keeps them; anything that is not a
+    FUTÁR station of FUTÁR poles is left out, and the limits hold
+    (MAX_STATIONS, the newest kept; MAX_CHILD_STOPS), so a broken or edited
+    file is no worse than none."""
+    stations = data.get("stations") if isinstance(data, dict) else None
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(stations, dict):
+        return out
+    for sid, st in list(stations.items())[-MAX_STATIONS:]:
+        if not isinstance(sid, str) or not is_station(sid) or planner_id(sid) is None or not isinstance(st, dict):
+            continue
+        raw = st.get("poles")
+        poles = [
+            p for p in (raw if isinstance(raw, list) else ())
+            if isinstance(p, str) and not is_station(p) and planner_id(p) is not None
+        ]
+        if not poles:
+            continue
+        ref = st.get("ref")
+        out[sid] = {
+            "ref": _station_ref(sid, ref) if isinstance(ref, dict) else None,
+            "poles": dict.fromkeys(poles[:MAX_CHILD_STOPS]),
+        }
+    return out
 
 
 def _futar_date(value: Any) -> str:

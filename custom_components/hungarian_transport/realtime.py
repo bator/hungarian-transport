@@ -112,6 +112,15 @@ PLANNER_TIMEOUT = FETCH_TIMEOUT.total
 # would be cut before a healthy planner answers, and a cut request backs
 # off as an outage. Cut after this long, it did hang.
 PLANNER_MIN_SHARE = 0.5
+# The vehicle request of a round (_mav_vehicles, after its trip request):
+# at most this long, and only with at least VEHICLE_MIN_TIMEOUT of the
+# round left after VEHICLE_MARGIN, so it never runs into the round's
+# deadline, which would lose the delays already answered. After a failure
+# no vehicle request for VEHICLE_FAIL_BACKOFF; the delays go on.
+VEHICLE_TIMEOUT = 5.0
+VEHICLE_MIN_TIMEOUT = 1.0
+VEHICLE_MARGIN = 1.0
+VEHICLE_FAIL_BACKOFF = 180
 # The OutageLog key of mavplusz.hu (feed URLs are the others).
 MAVPLUSZ_OUTAGE = "mavplusz"
 # A route's trip list on mavplusz.hu (for route + start) is kept this long:
@@ -735,6 +744,13 @@ class RealtimeHub:
         # one while either found the planner down, reads the feeds.
         limiter = planner_limiter or mavplusz.PlannerLimiter(rate=MAV_RATE, burst=MAV_BURST, monotonic=monotonic)
         self._mav_rate = limiter.client(RealtimeRateLimited)
+        # The vehicle requests' share of it (mavplusz.VEHICLE_RATE), their
+        # own backoff and outage flag (never the delays'), and the routes'
+        # learnt answer sizes.
+        self._mav_vehicle_rate = limiter.client(RealtimeRateLimited, vehicles=True)
+        self._vehicle_retry_at = -1e18
+        self._vehicles_down = False
+        self._route_sizes = mavplusz.RouteSizes(monotonic)
         self._call_later = call_later
         self._cancel_drop: Callable[[], None] | None = None
         self._closed = False
@@ -1279,23 +1295,17 @@ class RealtimeHub:
                     # One group over the whole cap: its first ones.
                     todo.update(dict.fromkeys(new[:cap]))
             keys = list(todo)
-            # The routes of the live trips whose last answer had a realtime
-            # pattern: its vehicles are only on the route's scheduled ones
-            # (mavplusz.parse_response). A trip's first answer says so, so
-            # its vehicle comes from the second request on.
-            routes = list(dict.fromkeys(
-                hit.result.route
-                for k in keys
-                if (hit := self._mav_cache.get((k.gtfs_id, k.date))) is not None
-                and hit.result is not None and hit.result.trip_update is not None
-                and hit.result.rt_pattern and hit.result.route
-            ))[: mavplusz.MAX_ROUTES_PER_REQUEST]
             at = self._wall()
             results = await self._mav_post(
-                mavplusz.build_query(keys, routes), lambda doc: mavplusz.parse_response(doc, keys, routes), deadline
+                mavplusz.build_query(keys), lambda doc: mavplusz.parse_response(doc, keys), deadline
             )
             if results is None:
                 return None
+            # The live trips on a realtime pattern have their vehicles on
+            # their routes' scheduled patterns: asked now, so a trip has its
+            # vehicle from its first answer on, in a request of their own
+            # whose failure leaves only the vehicles out.
+            results = await self._mav_vehicles(results, deadline)
             mono = self._monotonic()
             for k, res in results.items():
                 ttl = self._mav_ttl(k, res, at, interval)
@@ -1314,6 +1324,61 @@ class RealtimeHub:
                     if k not in out and hit is not None:
                         out[k] = (hit.at, hit.result)
             return out
+
+    async def _mav_vehicles(
+        self, results: dict[mavplusz.TripKey, mavplusz.TripResult | None], deadline: float | None
+    ) -> dict[mavplusz.TripKey, mavplusz.TripResult | None]:
+        """results with the vehicles of the trips mavplusz.needs_route_vehicles,
+        from one request for their routes (the caller holds _mav_lock).
+
+        Never at the delays' cost: results come back as they are, with no
+        planner backoff and no outage logged, when the request is not made
+        (no route fits mavplusz.RouteSizes' budget, the vehicles' own
+        backoff or token share, too little of the round left) or fails (an
+        error, an answer over VEHICLE_MAX_BYTES, VEHICLE_TIMEOUT). A failure
+        is logged at debug level once until a request answers again."""
+        routes = self._route_sizes.pick(
+            [res.route for res in results.values() if mavplusz.needs_route_vehicles(res)]
+        )
+        if not routes or self._monotonic() < self._vehicle_retry_at:
+            return results
+        timeout = VEHICLE_TIMEOUT
+        if deadline is not None:
+            timeout = min(timeout, deadline - asyncio.get_running_loop().time() - VEHICLE_MARGIN)
+        if timeout < VEHICLE_MIN_TIMEOUT:
+            return results
+        try:
+            self._mav_vehicle_rate.take()
+        except RealtimeRateLimited:
+            return results
+        try:
+            async with asyncio.timeout(timeout):
+                doc = await mavplusz.fetch(self._session, mavplusz.build_vehicle_query(routes), cap=mavplusz.VEHICLE_MAX_BYTES)
+            found = mavplusz.parse_vehicles(doc, routes)
+            sizes = mavplusz.answer_sizes(doc, routes)
+        except mavplusz.TooLarge as err:
+            # Each route at least its share of the cap next time: the
+            # request shrinks, a route over the cap alone is left out.
+            self._route_sizes.asked(routes, too_large=True)
+            self._vehicles_failed(err, backoff=False)
+            return results
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError, TypeError) as err:
+            self._vehicles_failed(err or type(err).__name__)
+            return results
+        self._route_sizes.asked(routes, sizes)
+        if self._vehicles_down:
+            self._vehicles_down = False
+            _LOGGER.debug("Realtime source %s answers for vehicles by route again", mavplusz.URL)
+        return mavplusz.add_vehicles(results, [vp for positions in found.values() for vp in positions])
+
+    def _vehicles_failed(self, err: Any, *, backoff: bool = True) -> None:
+        if backoff:
+            self._vehicle_retry_at = self._monotonic() + VEHICLE_FAIL_BACKOFF
+        if not self._vehicles_down:
+            self._vehicles_down = True
+            _LOGGER.debug(
+                "Realtime source %s gave no vehicles by route (%s); the delays are unaffected", mavplusz.URL, err
+            )
 
     @staticmethod
     def _mav_ttl(k: mavplusz.TripKey, res: mavplusz.TripResult | None, at: float, interval: int) -> int:

@@ -21,9 +21,18 @@ it holds:
 
 Every writer sends SIGNAL_TIMETABLES afterwards; the sensors read the
 indexes again (only the ones whose file changed) and the record.
+
+A second record (hungarian_transport.bkk_stations) keeps the child poles
+of FUTÁR's combined stations that the BKK boards learnt from FUTÁR
+(mavplusz_board.PlannerBoards.stations_data), so the boards of those
+stations have a fallback from the planner right after a restart during a
+FUTÁR outage. It is written a while after a change (STATIONS_SAVE_DELAY;
+Home Assistant writes what is pending when it stops) and read back through
+mavplusz_board.restore_stations, which keeps it within its limits.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 import logging
 from datetime import datetime
 from typing import Any
@@ -51,6 +60,11 @@ SOURCE_LOCAL = "local"
 SOURCE_RELEASE = "release"
 # What the Volán and city sensors call an index TIMETABLES_INSTALL describes.
 SOURCE_PAGES = "pages"
+STATIONS_KEY = f"{DOMAIN}.bkk_stations"
+STATIONS_VERSION = 1
+# A FUTÁR answer can name a new pole every few seconds while a station is
+# first shown: one write for a few minutes of them.
+STATIONS_SAVE_DELAY = 300
 
 
 def store(hass: HomeAssistant) -> Store:
@@ -71,6 +85,30 @@ async def async_load(hass: HomeAssistant) -> dict[str, Any]:
             stored = None
         data["update_state"] = stored if isinstance(stored, dict) else {}
     return data["update_state"]
+
+
+def stations_store(hass: HomeAssistant) -> Store:
+    data = hass.data.setdefault(DOMAIN, {})
+    if "stations_store" not in data:
+        data["stations_store"] = Store(hass, STATIONS_VERSION, STATIONS_KEY)
+    return data["stations_store"]
+
+
+async def async_load_stations(hass: HomeAssistant) -> Any:
+    """The BKK stations' record as stored (None for none, or a broken file:
+    mavplusz_board.restore_stations checks what it keeps)."""
+    try:
+        return await stations_store(hass).async_load()
+    except Exception as err:  # noqa: BLE001 - a broken file starts over
+        _LOGGER.warning("Could not read the learnt BKK stations: %s", err)
+        return None
+
+
+@callback
+def async_save_stations_later(hass: HomeAssistant, data: Callable[[], dict[str, Any]]) -> None:
+    """Write data() (read at write time) STATIONS_SAVE_DELAY from now, or
+    when Home Assistant stops, once for every change meanwhile."""
+    stations_store(hass).async_delay_save(data, STATIONS_SAVE_DELAY)
 
 
 async def async_save(hass: HomeAssistant, state: dict[str, Any]) -> None:
