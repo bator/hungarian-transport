@@ -896,6 +896,48 @@ test('an index’s stops are built in slices that hand the event loop back, into
   }
 });
 
+/* A feed that renumbered its stops (Szeged's new source, November 2026):
+   the index's "al" maps each old id to the stop that took its place, so a
+   card saved with the old id and the old name still finds its stop. */
+test('a card saved with a renumbered stop’s old id finds the new stop by the index’s aliases, of its own operator only', async () => {
+  const raw = {
+    v: 29,
+    s: [['szeged:SZ_1', 'Anna-kút', '62367', 0], ['szeged:SZ_2', 'Anna-kút', '62368', 0],
+      ['szeged:SZ_3', 'Széchenyi tér', '62400', 0], ['pecs:1', 'Széchenyi tér', '1', 1]],
+    g: [4625000, 2014000, 4625010, 2014000, 4625300, 2014000, 4607000, 1823000],
+    o: [['szeged', 'Szeged — SZKT'], ['pecs', 'Pécs — Tüke Busz']],
+    al: [['szeged:2430584836', 0], ['szeged:SZ_3', 0], ['szeged:999', 9], ['pecs:old', 3]],
+    t: [],
+  };
+  const keep = BkkLib._fetchIndexBytes;
+  BkkLib._fetchIndexBytes = async () => ({ status: 200, bytes: new TextEncoder().encode(JSON.stringify(raw)) });
+  try {
+    const idx = await BkkLib._loadGtfsIndex('http://x/city-index.json?v=20260101', 'errCityHttp', 'errCityGunzip');
+    const saved = { id: 'szeged:2430584836', name: 'Anna-kút (Kossuth Lajos sugárút)' };
+    assert.equal(BkkLib.gtfsStopById(idx, saved.id), idx.stops[0]);
+    assert.equal(BkkLib.cityOpId(idx, saved), 'szeged');
+    assert.equal(BkkLib.volanMatchStop(idx, saved, 0), idx.stops[0]);
+    /* The stop's other poles of the same name come with it, as for a stop
+       picked afresh. */
+    assert.deepEqual(BkkLib.cityStopIndexes(idx, saved, 0), [0, 1]);
+    /* An alias leads to its own operator's stop only. */
+    assert.equal(BkkLib.volanMatchStop(idx, { id: 'pecs:old', name: '' }, 0), null);
+    assert.equal(BkkLib.volanMatchStop(idx, { id: 'pecs:old', name: '' }, 1), idx.stops[3]);
+    /* An id the index still has is that stop, never an alias; one naming
+       no stop is dropped. */
+    assert.equal(BkkLib.gtfsStopById(idx, 'szeged:SZ_3'), idx.stops[2]);
+    assert.equal(BkkLib.gtfsStopById(idx, 'szeged:999'), null);
+    assert.deepEqual([...idx.byAlias.keys()], ['szeged:2430584836', 'pecs:old']);
+    assert.equal(idx.al, null);
+    /* Without the table, the old name of the stop finds nothing: the
+       bracket the old feed had is not part of the new name. */
+    const bare = Object.assign({}, idx, { byAlias: new Map() });
+    assert.equal(BkkLib.volanMatchStop(bare, saved, 0), null);
+  } finally {
+    BkkLib._fetchIndexBytes = keep;
+  }
+});
+
 test('the event loop is handed back by scheduler.yield, else a message to the page, else a timer', async () => {
   const keep = { scheduler: globalThis.scheduler, MessageChannel: globalThis.MessageChannel };
   try {

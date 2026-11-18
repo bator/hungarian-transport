@@ -14,16 +14,29 @@ board from Transitous as it does today.
 The planner is a public service run for MÁV's own site, so it is asked
 sparingly: one board request per stop per BOARD_TTL whatever the cards'
 horizons (the widest window is asked and each card's is cut from it), the
-trip details of many cards in one aliased request, a token bucket of its
-own, and a pause after a failure. No Home Assistant imports:
+trip details of many cards in one aliased request, the integration's one
+planner rate limit and backoff (mavplusz.PlannerLimiter, shared with the
+realtime hub) with a smaller share of it for this fallback, and nothing at
+all for what it cannot answer (can_answer). No Home Assistant imports:
 tests/test_mavplusz_board.py runs it bare.
+
+Stations: a GTFS parent station (BKK_CS056233, Keleti's metro) is a stop
+to the planner too, whose board holds its child stops' departures (checked
+2026-11-18). So are FUTÁR's combined stations (BKK_CSF…) that BKK's GTFS
+has (38 of them, BKK_CSF00062 Batthyány tér among them): one board request
+asks the planner, and its answer says whether it knows the station, kept
+for PROBE_TTL. Those it does not know (BKK_CSF01131, the Keleti preset in
+src/config.js) have the boards of their child poles merged instead: the
+poles FUTÁR's answers name (learn), kept across restarts (stations_data,
+restore_stations; storage.py writes them), else SEED_STATIONS.
 """
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
+import re
 import time
 from typing import Any, NamedTuple
 
@@ -54,28 +67,80 @@ TRIP_TTL = 60
 # The widest window any card asks for (src/config.js MAX_MINUTES_AFTER).
 BOARD_WINDOW_MIN = 480
 DEFAULT_MINUTES_AFTER = 180
-# Departures per pattern (the planner counts them so); the merged board is
-# cut at BOARD_MAX_ROWS, the most rows a card shows (config.js
-# maxDepartureRows), FUTÁR itself stops at about 60.
-DEPARTURES_PER_PATTERN = 20
+# Departures per pattern: OTP's numberOfDepartures counts them per pattern
+# (and per child stop of a station), not per board (checked 2026-11-18). A
+# card shows up to 40 rows (config.js maxDepartureRows) and may keep only
+# the ones to its destination, so a stop of one dense pattern (trams 4 and
+# 6, one every 3-4 minutes) needs some 60 to fill its three hours. The
+# merged board is cut at BOARD_MAX_ROWS; FUTÁR itself stops at about 60.
+DEPARTURES_PER_PATTERN = 60
 BOARD_MAX_ROWS = 80
+# A stop time is about 770 bytes of answer: 20 patterns of 60 are 0.9 MB,
+# and a FUTÁR station's child poles (MAX_CHILD_STOPS, CHILD_DEPARTURES each
+# pattern) up to 1.1 MB, so a board answer may be twice the trip details'
+# cap. It is decoded on the event loop, some 11 ms a MB, once per stop per
+# BOARD_TTL while FUTÁR fails.
+BOARD_MAX_BYTES = 2 * 1024 * 1024
+MAX_CHILD_STOPS = 24
+CHILD_DEPARTURES = 20
 # Trip details asked within this long of each other go in one request.
 TRIP_BATCH_WAIT = 0.05
 MAX_TRIPS_PER_REQUEST = mavplusz.MAX_TRIPS_PER_REQUEST
-# Requests a second and the burst on top, of this module's own (realtime.py
-# has one of its own for the planner too): a destination list on a cold
-# cache is one board and a request or two of trip details.
-PLANNER_RATE = 0.5
-PLANNER_BURST = 30
 # The planner's share of the card's 20 s: FUTÁR gets
 # futar.FUTAR_FALLBACK_TIMEOUT_SEC first, after a token wait of up to
-# futar.FUTAR_TOKEN_WAIT_SEC.
+# futar.FUTAR_TOKEN_WAIT_SEC. A trip's details wait TRIP_BATCH_WAIT for
+# their batch and the request gets the rest: a trip never waits for an
+# earlier batch's request, so this is each trip's whole wait.
 PLANNER_TIMEOUT = aiohttp.ClientTimeout(total=6)
+TRIP_TIMEOUT = aiohttp.ClientTimeout(total=PLANNER_TIMEOUT.total - TRIP_BATCH_WAIT)
 # After a failed request the planner is not asked for this long.
 FAIL_BACKOFF = 30
-# The service dates the boards gave, per FUTÁR trip id, for its trip
-# details (a trip after midnight runs on the day before).
+# The service dates the boards gave (the planner's and FUTÁR's own), per
+# FUTÁR trip id, for its trip details (a trip after midnight runs on the
+# day before).
 MAX_SERVICE_DATES = 4000
+# A trip no board dated, asked before this hour in Budapest, is asked for
+# yesterday's service day and today's (the night buses of the day before
+# run until about 4:30), and the run under way is the answer.
+NIGHT_END_HOUR = 5
+# FUTÁR's combined stations and their child poles learnt from FUTÁR's
+# answers: so many stations at most, the oldest first out.
+STATION_PREFIX = "BKK_CSF"
+MAX_STATIONS = 512
+# Whether the planner knows a FUTÁR station (its own board answered, or a
+# null stop), kept this long: the GTFS changes with the timetable.
+PROBE_TTL = 12 * 3600
+# The poles of the card's preset hubs the planner does not know, until
+# FUTÁR names their own (learn). Keleti (BKK_CSF01131): every BKK stop the
+# planner names "Budapest, Keleti pályaudvar M" (or "... M (Garay utca)",
+# F01131 itself) with a mode, all within some 300 m of each other, by
+# stops(name: "Keleti pályaudvar") on 2026-11-18. The metro's are a GTFS
+# station of their own (BKK_CS056233), as in FUTÁR.
+SEED_STATIONS: dict[str, dict[str, Any]] = {
+    "BKK_CSF01131": {
+        "ref": {"id": "BKK_CSF01131", "name": "Keleti pályaudvar"},
+        "poles": (
+            "BKK_F01131", "BKK_F01154", "BKK_F01159", "BKK_F01160", "BKK_F01311", "BKK_F01314",
+            "BKK_007950", "BKK_009160", "BKK_009161", "BKK_009162", "BKK_009163", "BKK_009321",
+            "BKK_061349", "BKK_061350", "BKK_061351",
+        ),
+    },
+}
+# FUTÁR's ad-hoc trips (a replacement bus, a trip added for the day) have
+# ids of ten or more digits that no timetable, the planner's included, has.
+_AD_HOC_TRIP = re.compile(r"^BKK_\d{10,}$")
+_DATE = re.compile(r"^\d{8}$")
+# A service day the planner can mean (2000-2100) and seconds after it a
+# stop time can have (a day early to two days on): anything else is a
+# broken or hostile answer, not a time to turn into a date.
+_DAY_MIN = 946684800
+_DAY_MAX = 4102444800
+_SECONDS_MIN = -86400
+_SECONDS_MAX = 2 * 86400
+# OTP2's serviceDay is noon less 12 hours, local time: on the day clocks
+# change that is 23:00 or 01:00 of the day before or the day itself, the
+# noon it is reckoned from is always the day.
+_NOON = 12 * 3600
 # The planner names a Budapest stop "Budapest, Orczy tér", FUTÁR "Orczy tér";
 # the card matches destinations by name.
 _CITY_PREFIX = "Budapest, "
@@ -96,13 +161,13 @@ _BOOKING = ("CALL_AGENCY", "COORDINATE_WITH_DRIVER")
 _STOP_FIELDS = "gtfsId name lat lon platformCode parentStation { gtfsId }"
 _ROUTE_FIELDS = "gtfsId shortName longName mode type color textColor"
 _TRIP_REF_FIELDS = f"gtfsId tripHeadsign tripShortName wheelchairAccessible bikesAllowed route {{ {_ROUTE_FIELDS} }}"
-_BOARD_QUERY = (
-    "query($id: String!, $start: Long!, $range: Int!, $n: Int!) { stop(id: $id) { "
+_BOARD_FIELDS = (
     f"{_STOP_FIELDS} routes {{ gtfsId }} "
     "stoptimesWithoutPatterns(startTime: $start, timeRange: $range, numberOfDepartures: $n, omitNonPickups: true) { "
     "realtime realtimeState scheduledArrival realtimeArrival scheduledDeparture realtimeDeparture "
-    f"serviceDay headsign pickupType stop {{ {_STOP_FIELDS} }} trip {{ {_TRIP_REF_FIELDS} }} }} }} }}"
+    f"serviceDay headsign pickupType stop {{ {_STOP_FIELDS} }} trip {{ {_TRIP_REF_FIELDS} }} }}"
 )
+_BOARD_QUERY = f"query($id: String!, $start: Long!, $range: Int!, $n: Int!) {{ stop(id: $id) {{ {_BOARD_FIELDS} }} }}"
 _TRIP_STOPTIMES = (
     "stoptimesForDate(serviceDate: $%s) { realtime realtimeState scheduledArrival realtimeArrival "
     f"scheduledDeparture realtimeDeparture serviceDay headsign stop {{ {_STOP_FIELDS} }} }}"
@@ -129,6 +194,11 @@ class _Board(NamedTuple):
     stops: dict[str, dict[str, Any]]
 
 
+def is_station(stop: str) -> bool:
+    """Whether a FUTÁR stop id is one of FUTÁR's combined stations."""
+    return stop.startswith(STATION_PREFIX)
+
+
 def planner_id(futar_id: Any) -> str | None:
     """The planner's id of a FUTÁR stop or trip id; None for another feed's."""
     text = str(futar_id or "")
@@ -153,6 +223,19 @@ def build_board_query(stop: str, start: int, window_min: int = BOARD_WINDOW_MIN)
         "query": _BOARD_QUERY,
         "variables": {"id": stop, "start": int(start), "range": int(window_min) * 60, "n": DEPARTURES_PER_PATTERN},
     }
+
+
+def build_station_query(stops: Sequence[str], start: int, window_min: int = BOARD_WINDOW_MIN) -> dict[str, Any]:
+    """The aliased request for the boards of several stops (alias sN is
+    stops[N]), CHILD_DEPARTURES a pattern each: a FUTÁR station's poles."""
+    decl = ["$start: Long!", "$range: Int!", "$n: Int!"]
+    parts = []
+    variables: dict[str, Any] = {"start": int(start), "range": int(window_min) * 60, "n": CHILD_DEPARTURES}
+    for i, stop in enumerate(stops):
+        decl.append(f"$s{i}: String!")
+        variables[f"s{i}"] = stop
+        parts.append(f"s{i}: stop(id: $s{i}) {{ {_BOARD_FIELDS} }}")
+    return {"query": f"query({', '.join(decl)}) {{ {' '.join(parts)} }}", "variables": variables}
 
 
 class TripKey(NamedTuple):
@@ -188,6 +271,16 @@ def _int(value: Any) -> int | None:
     return mavplusz._int(value)
 
 
+def _day(value: Any) -> int | None:
+    day = _int(value)
+    return day if day is not None and _DAY_MIN <= day <= _DAY_MAX else None
+
+
+def _seconds(value: Any) -> int | None:
+    seconds = _int(value)
+    return seconds if seconds is not None and _SECONDS_MIN <= seconds <= _SECONDS_MAX else None
+
+
 def _epoch(day: int | None, seconds: int | None) -> int | None:
     return day + seconds if day is not None and seconds is not None else None
 
@@ -198,9 +291,13 @@ def _name(value: Any) -> str:
 
 
 def _date(service_day: int | None) -> str:
-    if service_day is None:
+    """The date (YYYYMMDD) of an OTP2 serviceDay, "" for none."""
+    if service_day is None or not _DAY_MIN <= service_day <= _DAY_MAX:
         return ""
-    return datetime.fromtimestamp(service_day, mavplusz.BUDAPEST).strftime("%Y%m%d")
+    try:
+        return datetime.fromtimestamp(service_day + _NOON, mavplusz.BUDAPEST).strftime("%Y%m%d")
+    except (ValueError, OverflowError, OSError):
+        return ""
 
 
 def _route_type(route: dict[str, Any]) -> str:
@@ -274,7 +371,7 @@ def _times(st: dict[str, Any]) -> dict[str, int]:
     """FUTÁR's time fields of one planner stop time: the timetable's always,
     the predicted ones only for a realtime trip (FUTÁR leaves them off a
     scheduled one, and the card shows a delay only where they are)."""
-    day = _int(st.get("serviceDay"))
+    day = _day(st.get("serviceDay"))
     out: dict[str, int] = {}
     pairs = (
         ("arrivalTime", "scheduledArrival", "predictedArrivalTime", "realtimeArrival"),
@@ -282,10 +379,10 @@ def _times(st: dict[str, Any]) -> dict[str, int]:
     )
     live = st.get("realtime") is True
     for plan_key, plan_field, pred_key, pred_field in pairs:
-        plan = _epoch(day, _int(st.get(plan_field)))
+        plan = _epoch(day, _seconds(st.get(plan_field)))
         if plan is not None:
             out[plan_key] = plan
-        pred = _epoch(day, _int(st.get(pred_field))) if live else None
+        pred = _epoch(day, _seconds(st.get(pred_field))) if live else None
         if pred is not None:
             out[pred_key] = pred
     return out
@@ -295,22 +392,65 @@ def _data(doc: Any) -> dict[str, Any]:
     return mavplusz._data(doc)
 
 
-def parse_board(doc: Any, stop: str, asked: float) -> _Board | None:
-    """The board of build_board_query's answer for FUTÁR stop id `stop`;
-    None when the planner does not know the stop. A GraphQL error or an
-    answer of the wrong shape is a ValueError."""
-    node = _data(doc).get("stop")
-    if node is None:
+def parse_board(
+    doc: Any, stop: str, asked: float, *, children: int | None = None, own: dict[str, Any] | None = None
+) -> _Board | None:
+    """The board of build_board_query's answer for FUTÁR stop id `stop`,
+    or with `children` of build_station_query's for that many child poles
+    of FUTÁR station `stop` (own: its reference as FUTÁR gave it), merged;
+    None when the planner knows none of them. A GraphQL error or an answer
+    of the wrong shape is a ValueError."""
+    data = _data(doc)
+    if children is None:
+        nodes = [data.get("stop")]
+    else:
+        nodes = []
+        for i in range(children):
+            alias = f"s{i}"
+            if alias not in data:
+                raise ValueError(f"answer without {alias}")
+            nodes.append(data[alias])
+    if all(node is None for node in nodes):
         return None
-    if not isinstance(node, dict):
-        raise ValueError("stop is not an object")
     routes: dict[str, dict[str, Any]] = {}
     trips: dict[str, dict[str, Any]] = {}
     stops: dict[str, dict[str, Any]] = {}
-    own = _stop_ref(node)
     if own is not None:
-        stops[stop] = dict(own[1], id=stop)
+        stops[stop] = dict(own, id=stop)
+    route_ids: list[str] = []
     rows: list[dict[str, Any]] = []
+    for node in nodes:
+        if node is None:
+            continue
+        if not isinstance(node, dict):
+            raise ValueError("stop is not an object")
+        ref = _stop_ref(node)
+        if children is None:
+            if ref is not None:
+                stops[stop] = dict(ref[1], id=stop)
+        elif ref is not None:
+            stops.setdefault(stop, {"id": stop, "name": ref[1]["name"]})
+            # The card tells a station's poles by FUTÁR's station id.
+            stops.setdefault(ref[0], dict(ref[1], parentStationId=stop))
+        _board_rows(node, stop, children is not None, rows, routes, trips, stops)
+        served = node.get("routes")
+        if isinstance(served, list):
+            route_ids += [futar_id(r.get("gtfsId")) for r in served if isinstance(r, dict)]
+    rows.sort(key=lambda r: r.get("predictedDepartureTime") or r["departureTime"])
+    route_ids = [r for r in route_ids if r] or list(routes)
+    return _Board(stop, asked, tuple(dict.fromkeys(route_ids)), tuple(rows[:BOARD_MAX_ROWS]), routes, trips, stops)
+
+
+def _board_rows(
+    node: dict[str, Any],
+    stop: str,
+    pole_of_station: bool,
+    rows: list[dict[str, Any]],
+    routes: dict[str, dict[str, Any]],
+    trips: dict[str, dict[str, Any]],
+    stops: dict[str, dict[str, Any]],
+) -> None:
+    """One planner stop's departures into rows and the references."""
     calls = node.get("stoptimesWithoutPatterns")
     for st in calls if isinstance(calls, list) else ():
         if not isinstance(st, dict) or st.get("realtimeState") == "CANCELED":
@@ -331,22 +471,17 @@ def parse_board(doc: Any, stop: str, asked: float) -> _Board | None:
         sid = stop
         if pole is not None:
             sid = pole[0]
-            stops.setdefault(sid, pole[1])
+            stops.setdefault(sid, dict(pole[1], parentStationId=stop) if pole_of_station else pole[1])
         row: dict[str, Any] = {
             "stopId": sid,
             "tripId": tid,
-            "serviceDate": _date(_int(st.get("serviceDay"))),
+            "serviceDate": _date(_day(st.get("serviceDay"))),
             "stopHeadsign": _str(st.get("headsign")),
             "wheelchairAccessible": trips[tid]["wheelchairAccessible"],
             "mayRequireBooking": st.get("pickupType") in _BOOKING,
         }
         row.update(times)
         rows.append(row)
-    rows.sort(key=lambda r: r.get("predictedDepartureTime") or r["departureTime"])
-    served = node.get("routes")
-    route_ids = [futar_id(r.get("gtfsId")) for r in served if isinstance(r, dict)] if isinstance(served, list) else []
-    route_ids = [r for r in route_ids if r] or list(routes)
-    return _Board(stop, asked, tuple(dict.fromkeys(route_ids)), tuple(rows[:BOARD_MAX_ROWS]), routes, trips, stops)
 
 
 def _minutes(value: Any) -> int:
@@ -417,9 +552,13 @@ def parse_trip(trip: Any, tid: str, date: str, now: float) -> dict[str, Any] | N
         pole = _stop_ref(st.get("stop"))
         if pole is None:
             continue
+        clock = _times(st)
+        if not clock:
+            # No time the card could read (a broken or hostile answer).
+            continue
         stops.setdefault(pole[0], pole[1])
         row: dict[str, Any] = {"stopId": pole[0], "stopSequence": seq, "stopHeadsign": _str(st.get("headsign"))}
-        row.update(_times(st))
+        row.update(clock)
         times.append(row)
     if not times:
         return None
@@ -428,15 +567,36 @@ def parse_trip(trip: Any, tid: str, date: str, now: float) -> dict[str, Any] | N
     return _envelope(entry, refs, now)
 
 
+def _span_distance(doc: dict[str, Any], now: float) -> float:
+    """How far now is from a trip-details answer's run (0 within it)."""
+    entry = doc["data"]["entry"]
+    times = [
+        t for st in entry["stopTimes"] for t in (st.get("departureTime"), st.get("arrivalTime")) if t is not None
+    ]
+    if not times:
+        return float("inf")
+    first, last = min(times), max(times)
+    return 0.0 if first <= now <= last else min(abs(now - first), abs(now - last))
+
+
 class PlannerBoards:
     """The fallback futar.FutarProxy asks when FUTÁR fails (its `fallback`).
 
     answer(path, params) is FUTÁR's answer for a board or a trip's details
     from the planner, or None when the planner cannot give one (not a BKK
     id, not known, not asked: rate limit or backoff, or it failed). It never
-    raises but for cancellation. `monotonic` is the clock of the caches, the
-    rate limit and the backoff, `wall` the epoch clock of the times asked,
-    `sleep` the one the trip details' batch waits with."""
+    raises but for cancellation. can_answer(path, params) says beforehand
+    whether answer() may: FUTÁR is cut short only then. learn(path, params,
+    data) reads FUTÁR's own good answers for what the planner lacks.
+
+    `limiter` is the integration's one planner limit (mavplusz.PlannerLimiter,
+    shared with the realtime hub; one of its own without it), of which this
+    fallback has the smaller share. `monotonic` is the clock of the caches
+    (and of the limiter made here), `wall` the epoch clock of the times
+    asked, `sleep` the one the trip details' batch waits with. `stations`
+    is what stations_data() gave before (Home Assistant's store, read
+    through restore_stations), and `on_stations_changed` is called whenever
+    learn() changes it, for the store to write it later."""
 
     paths = PATHS
 
@@ -449,7 +609,9 @@ class PlannerBoards:
         monotonic: upstream.Monotonic = upstream.monotonic,
         wall: Wall | None = None,
         sleep: upstream.Sleep = upstream.sleep,
-        burst: int = PLANNER_BURST,
+        limiter: mavplusz.PlannerLimiter | None = None,
+        stations: Any = None,
+        on_stations_changed: Callable[[], None] | None = None,
     ) -> None:
         self._session = session
         self._monotonic = monotonic
@@ -458,29 +620,161 @@ class PlannerBoards:
         self._task_factory: TaskFactory = task_factory or asyncio.ensure_future
         self._boards = SharedTTLCache(BOARD_TTL, 256, task_factory, call_later, monotonic)
         self._trips = SharedTTLCache(TRIP_TTL, 1024, task_factory, call_later, monotonic)
-        # When each stop's board was last asked for, answered or not: one
-        # request per stop per BOARD_TTL, also while the requests fail.
-        self._asked: dict[str, float] = {}
+        # When each board was last asked for, answered or not: one request
+        # per stop per BOARD_TTL, also while the requests fail.
+        self._asked: dict[Any, float] = {}
         self._dates: dict[str, str] = {}
-        self._pending: dict[TripKey, asyncio.Future[dict[str, Any] | None]] = {}
-        self._flusher: asyncio.Future[Any] | None = None
-        self._retry_at = -1e18
-        self._rate = upstream.TokenBucket(
-            PLANNER_RATE,
-            burst,
-            refused=lambda: PlannerError("rate limited"),
-            log_refused=lambda count: _LOGGER.warning(
-                "mavplusz.hu requests for BKK boards over the integration's rate limit: "
-                "%d refused since the last such line",
-                count,
-            ),
-            monotonic=monotonic,
+        # FUTÁR station id -> its reference and child poles, from FUTÁR (learn).
+        self._stations: dict[str, dict[str, Any]] = restore_stations(stations)
+        self._on_stations_changed = on_stations_changed
+        # FUTÁR station id -> (whether the planner knows it, monotonic when
+        # its board said so).
+        self._probed: dict[str, tuple[bool, float]] = {}
+        # The trip details batch still taking keys (TRIP_BATCH_WAIT), if any.
+        self._open: dict[TripKey, asyncio.Future[dict[str, Any] | None]] | None = None
+        # The batches' tasks, held until done (the loop keeps only a weak one).
+        self._sending: set[asyncio.Future[Any]] = set()
+        self._rate = (limiter or mavplusz.PlannerLimiter(monotonic=monotonic)).client(
+            lambda: PlannerError("rate limited"), fallback=True
         )
         self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic)
 
     def close(self) -> None:
         self._boards.close()
         self._trips.close()
+
+    def can_answer(self, path: str, params: dict[str, str]) -> bool:
+        """Whether answer() may give FUTÁR's answer for path: a BKK stop, a
+        FUTÁR station the planner knows, has not said it does not know, or
+        whose poles are known, a timetable trip, and the planner not
+        backing off. Not for the rest: FUTÁR then has its whole
+        budget, since nothing else could answer."""
+        if self._rate.backing_off():
+            return False
+        if path == BOARD_PATH:
+            return self._board_ids(str(params.get("stopId") or "")) is not None
+        if path == TRIP_PATH:
+            return self._trip_id(params) is not None
+        return False
+
+    def learn(self, path: str, params: dict[str, str], data: Any) -> None:
+        """What FUTÁR's own answer tells that the planner cannot: the poles
+        of FUTÁR's stations (any answer's stop references naming one as
+        their parent, and a station board's departures) and the service
+        date of each departure on a board, for the trip's details later."""
+        body = data.get("data") if isinstance(data, dict) else None
+        if not isinstance(body, dict):
+            return
+        refs = body.get("references")
+        stops = refs.get("stops") if isinstance(refs, dict) else None
+        stops = stops if isinstance(stops, dict) else {}
+        changed = False
+        for ref in stops.values():
+            if isinstance(ref, dict):
+                changed |= self._learn_pole(ref.get("parentStationId"), ref.get("id"))
+        if path == BOARD_PATH:
+            changed |= self._learn_board(params, body, stops)
+        if changed and self._on_stations_changed is not None:
+            self._on_stations_changed()
+
+    def _learn_board(self, params: dict[str, str], body: dict[str, Any], stops: dict[str, Any]) -> bool:
+        """learn() of a board: its departures' dates and a station's poles
+        and reference. Whether the stations changed."""
+        changed = False
+        stop = str(params.get("stopId") or "")
+        entry = body.get("entry")
+        times = entry.get("stopTimes") if isinstance(entry, dict) else None
+        for st in times if isinstance(times, list) else ():
+            if not isinstance(st, dict):
+                continue
+            tid, date = st.get("tripId"), _futar_date(st.get("serviceDate"))
+            if isinstance(tid, str) and date and planner_id(tid) is not None:
+                self._remember_date(tid, date)
+            changed |= self._learn_pole(stop, st.get("stopId"))
+        own = stops.get(stop)
+        station = self._stations.get(stop)
+        if station is not None and isinstance(own, dict):
+            ref = _station_ref(stop, own)
+            if ref != station["ref"]:
+                station["ref"] = ref
+                changed = True
+        return changed
+
+    def _learn_pole(self, station: Any, pole: Any) -> bool:
+        """Whether this was news: a station or a pole not known before."""
+        if not isinstance(station, str) or not is_station(station) or planner_id(station) is None:
+            return False
+        if not isinstance(pole, str) or is_station(pole) or planner_id(pole) is None:
+            return False
+        known = self._stations.get(station)
+        if known is None:
+            while len(self._stations) >= MAX_STATIONS:
+                del self._stations[next(iter(self._stations))]
+            known = self._stations[station] = {"ref": None, "poles": {}}
+        if pole in known["poles"] or len(known["poles"]) >= MAX_CHILD_STOPS:
+            return False
+        known["poles"][pole] = None
+        return True
+
+    def stations_data(self) -> dict[str, Any]:
+        """The learnt stations as plain JSON, for Home Assistant's store
+        (restore_stations reads it back): station id -> its reference and
+        poles, the oldest first."""
+        return {
+            "stations": {
+                sid: {"ref": st["ref"], "poles": list(st["poles"])} for sid, st in self._stations.items()
+            }
+        }
+
+    def _remember_date(self, tid: str, date: str) -> None:
+        self._dates.pop(tid, None)
+        self._dates[tid] = date
+        while len(self._dates) > MAX_SERVICE_DATES:
+            del self._dates[next(iter(self._dates))]
+
+    def _board_ids(self, stop: str) -> tuple[str, ...] | None:
+        """The planner stops a FUTÁR stop's board is asked of: the stop
+        itself (a GTFS station, BKK_CS… or BKK_CSF…, answers for its child
+        stops), else a FUTÁR station's poles (learnt from FUTÁR, else
+        SEED_STATIONS'), else the station itself while the planner has not
+        said it does not know it (that board request asks it); None when
+        there is none."""
+        gid = planner_id(stop)
+        if gid is None:
+            return None
+        if not is_station(stop):
+            return (gid,)
+        known = self._known(stop)
+        if known:
+            return (gid,)
+        station = self._stations.get(stop) or SEED_STATIONS.get(stop)
+        poles = tuple(p for p in (planner_id(p) for p in station["poles"]) if p) if station else ()
+        if poles:
+            return poles
+        return None if known is False else (gid,)
+
+    def _known(self, stop: str) -> bool | None:
+        """Whether the planner knows FUTÁR station stop, as its board said
+        within PROBE_TTL; None when not asked (or so long ago)."""
+        hit = self._probed.get(stop)
+        if hit is None:
+            return None
+        if self._monotonic() - hit[1] >= PROBE_TTL:
+            del self._probed[stop]
+            return None
+        return hit[0]
+
+    def _probe_result(self, stop: str, known: bool) -> None:
+        self._probed.pop(stop, None)
+        self._probed[stop] = (known, self._monotonic())
+        while len(self._probed) > MAX_STATIONS:
+            del self._probed[next(iter(self._probed))]
+
+    @staticmethod
+    def _trip_id(params: dict[str, str]) -> str | None:
+        tid = str(params.get("tripId") or "")
+        gid = planner_id(tid)
+        return gid if gid is not None and not _AD_HOC_TRIP.match(tid) else None
 
     async def answer(self, path: str, params: dict[str, str]) -> dict[str, Any] | None:
         try:
@@ -494,109 +788,163 @@ class PlannerBoards:
 
     async def _board(self, params: dict[str, str]) -> dict[str, Any] | None:
         stop = str(params.get("stopId") or "")
-        gid = planner_id(stop)
-        if gid is None:
+        ids = self._board_ids(stop)
+        if ids is None:
             return None
-        board = await self._boards.get(gid, lambda: self._fetch_board(stop, gid))
+        key = (stop, ids)
+        board = await self._boards.get(key, lambda: self._fetch_board(stop, ids))
         if board is None:
             return None
         return render_board(board, params.get("minutesAfter"), self._wall())
 
-    async def _fetch_board(self, stop: str, gid: str) -> _Board | None:
+    async def _fetch_board(self, stop: str, ids: tuple[str, ...]) -> _Board | None:
         now = self._monotonic()
         for old in [k for k, at in self._asked.items() if now - at >= BOARD_TTL]:
             del self._asked[old]
-        if gid in self._asked:
+        key = (stop, ids)
+        if key in self._asked:
             raise PlannerError("asked for this stop within BOARD_TTL")
-        self._asked[gid] = now
+        self._asked[key] = now
         wall = self._wall()
-        doc = await self._post(build_board_query(gid, int(wall)))
+        # A FUTÁR station's poles, or one planner stop (a stop, a station).
+        poles = ids != (planner_id(stop),)
+        body = build_station_query(ids, int(wall)) if poles else build_board_query(ids[0], int(wall))
+        doc = await self._post(body, BOARD_MAX_BYTES, PLANNER_TIMEOUT)
         try:
-            board = parse_board(doc, stop, wall)
-        except (ValueError, KeyError, TypeError) as err:
+            if poles:
+                own = (self._stations.get(stop) or SEED_STATIONS.get(stop) or {}).get("ref")
+                board = parse_board(doc, stop, wall, children=len(ids), own=own)
+            else:
+                board = parse_board(doc, stop, wall)
+        except (ValueError, KeyError, TypeError, OverflowError, OSError) as err:
             raise self._failed(err) from None
+        if is_station(stop) and not poles:
+            # The planner's answer says whether it knows FUTÁR's station.
+            self._probe_result(stop, board is not None)
         if board is not None:
             for st in board.stop_times:
                 if st["serviceDate"]:
-                    self._dates.pop(st["tripId"], None)
-                    self._dates[st["tripId"]] = st["serviceDate"]
-            while len(self._dates) > MAX_SERVICE_DATES:
-                del self._dates[next(iter(self._dates))]
+                    self._remember_date(st["tripId"], st["serviceDate"])
         return board
+
+    def _dates_to_try(self) -> list[str]:
+        """The service dates of a trip no board dated: today in Budapest,
+        and before NIGHT_END_HOUR yesterday too."""
+        local = datetime.fromtimestamp(self._wall(), mavplusz.BUDAPEST)
+        today = local.strftime("%Y%m%d")
+        if local.hour >= NIGHT_END_HOUR:
+            return [today]
+        return [(local.date() - timedelta(days=1)).strftime("%Y%m%d"), today]
 
     async def _trip(self, params: dict[str, str]) -> dict[str, Any] | None:
         tid = str(params.get("tripId") or "")
-        gid = planner_id(tid)
+        gid = self._trip_id(params)
         if gid is None:
             return None
-        date = self._dates.get(tid) or mavplusz.service_date(None, self._wall())
-        key = TripKey(gid, date)
-        return await self._trips.get(key, lambda: self._batched(key))
+        known = self._dates.get(tid)
+        dates = [known] if known else self._dates_to_try()
+        keys = [TripKey(gid, d) for d in dates]
+        results = await asyncio.gather(
+            *(self._trips.get(k, lambda k=k: self._batched(k)) for k in keys), return_exceptions=True
+        )
+        failed: PlannerError | None = None
+        answers: list[tuple[str, dict[str, Any]]] = []
+        for date, res in zip(dates, results):
+            if isinstance(res, PlannerError):
+                failed = failed or res
+            elif isinstance(res, BaseException):
+                raise res
+            elif res is not None:
+                answers.append((date, res))
+        if not answers:
+            if failed is not None:
+                raise failed
+            return None
+        if len(answers) == 1:
+            return answers[0][1]
+        # Both days run the trip: the run under way (or nearest) is the one.
+        now = self._wall()
+        date, best = min(answers, key=lambda a: _span_distance(a[1], now))
+        self._remember_date(tid, date)
+        return best
 
     async def _batched(self, key: TripKey) -> dict[str, Any] | None:
-        fut = self._pending.get(key)
+        """key's details, in the batch still taking keys or a new one: never
+        behind a request already under way (each has its own deadline)."""
+        batch = self._open
+        if batch is None:
+            batch = self._open = {}
+            task = self._task_factory(self._send(batch))
+            self._sending.add(task)
+            task.add_done_callback(self._sending.discard)
+        fut = batch.get(key)
         if fut is None:
-            fut = asyncio.get_running_loop().create_future()
-            self._pending[key] = fut
-        if self._flusher is None:
-            self._flusher = self._task_factory(self._flush())
+            fut = batch[key] = asyncio.get_running_loop().create_future()
         return await asyncio.shield(fut)
 
-    async def _flush(self) -> None:
-        """Sends the waiting trips, MAX_TRIPS_PER_REQUEST a request, until
-        none is left; the ones asked while a request runs go in the next."""
+    async def _send(self, batch: dict[TripKey, asyncio.Future[dict[str, Any] | None]]) -> None:
+        """Sends one batch after TRIP_BATCH_WAIT: MAX_TRIPS_PER_REQUEST a
+        request, the requests side by side."""
         try:
-            await self._sleep(TRIP_BATCH_WAIT)
-            while self._pending:
-                keys = list(self._pending)[:MAX_TRIPS_PER_REQUEST]
-                futures = [self._pending.pop(k) for k in keys]
-                try:
-                    doc = await self._post(build_trip_query(keys))
-                    data = _data(doc)
-                    now = self._wall()
-                    results = []
-                    for i, key in enumerate(keys):
-                        alias = f"t{i}"
-                        if alias not in data:
-                            raise ValueError(f"answer without {alias}")
-                        results.append(parse_trip(data[alias], futar_id(key.gtfs_id), key.date, now))
-                except PlannerError as err:
-                    for fut in futures:
-                        if not fut.done():
-                            fut.set_exception(err)
-                    continue
-                except (ValueError, KeyError, TypeError) as err:
-                    failed = self._failed(err)
-                    for fut in futures:
-                        if not fut.done():
-                            fut.set_exception(failed)
-                    continue
-                for fut, result in zip(futures, results):
-                    if not fut.done():
-                        fut.set_result(result)
+            try:
+                await self._sleep(TRIP_BATCH_WAIT)
+            finally:
+                if self._open is batch:
+                    self._open = None
+            keys = list(batch)
+            chunks = [keys[i : i + MAX_TRIPS_PER_REQUEST] for i in range(0, len(keys), MAX_TRIPS_PER_REQUEST)]
+            await asyncio.gather(*(self._send_chunk(chunk, batch) for chunk in chunks))
         finally:
-            self._flusher = None
             # Cancelled (Home Assistant stopping): nobody answers the rest.
-            for fut in self._pending.values():
+            for fut in batch.values():
                 if not fut.done():
                     fut.set_exception(PlannerError("not asked"))
-            self._pending.clear()
 
-    async def _post(self, body: dict[str, Any]) -> Any:
+    async def _send_chunk(
+        self, keys: list[TripKey], batch: dict[TripKey, asyncio.Future[dict[str, Any] | None]]
+    ) -> None:
+        futures = [batch[k] for k in keys]
+        try:
+            doc = await self._post(build_trip_query(keys), mavplusz.MAX_RESPONSE_BYTES, TRIP_TIMEOUT)
+            data = _data(doc)
+            now = self._wall()
+            results = []
+            for i, key in enumerate(keys):
+                alias = f"t{i}"
+                if alias not in data:
+                    raise ValueError(f"answer without {alias}")
+                results.append(parse_trip(data[alias], futar_id(key.gtfs_id), key.date, now))
+        except PlannerError as err:
+            for fut in futures:
+                if not fut.done():
+                    fut.set_exception(err)
+            return
+        except (ValueError, KeyError, TypeError, OverflowError, OSError) as err:
+            failed = self._failed(err)
+            for fut in futures:
+                if not fut.done():
+                    fut.set_exception(failed)
+            return
+        for fut, result in zip(futures, results):
+            if not fut.done():
+                fut.set_result(result)
+
+    async def _post(self, body: dict[str, Any], cap: int, timeout: aiohttp.ClientTimeout) -> Any:
         """One planner request: its decoded answer, or PlannerError when it
         is not made (backoff, rate limit) or fails, logged once per outage."""
-        if self._monotonic() < self._retry_at:
+        if self._rate.backing_off():
             raise PlannerError("backing off after a failure")
         self._rate.take()
         try:
-            doc = await mavplusz.fetch(self._session, body, user_agent=USER_AGENT, timeout=PLANNER_TIMEOUT)
+            doc = await mavplusz.fetch(self._session, body, user_agent=USER_AGENT, timeout=timeout, cap=cap)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError) as err:
             raise self._failed(err) from None
         self._outages.answered(None, "mavplusz.hu answers for BKK boards again")
         return doc
 
     def _failed(self, err: BaseException) -> PlannerError:
-        self._retry_at = self._monotonic() + FAIL_BACKOFF
+        # The integration's one backoff: the realtime hub does not ask either.
+        self._rate.failed(FAIL_BACKOFF)
         detail = str(err) or type(err).__name__
         self._outages.failed(
             None,
@@ -604,3 +952,50 @@ class PlannerBoards:
             detail,
         )
         return PlannerError(detail)
+
+
+def _station_ref(stop: str, own: dict[str, Any]) -> dict[str, Any]:
+    """A FUTÁR station's reference as the merged board gives it, from
+    FUTÁR's own: its id, name and position."""
+    ref: dict[str, Any] = {"id": stop, "name": _str(own.get("name"))}
+    lat, lon = mavplusz._num(own.get("lat")), mavplusz._num(own.get("lon"))
+    if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
+        ref["lat"], ref["lon"] = lat, lon
+    return ref
+
+
+def restore_stations(data: Any) -> dict[str, dict[str, Any]]:
+    """The learnt stations of a stations_data() from before (Home
+    Assistant's store), as PlannerBoards keeps them; anything that is not a
+    FUTÁR station of FUTÁR poles is left out, and the limits hold
+    (MAX_STATIONS, the newest kept; MAX_CHILD_STOPS), so a broken or edited
+    file is no worse than none."""
+    stations = data.get("stations") if isinstance(data, dict) else None
+    out: dict[str, dict[str, Any]] = {}
+    if not isinstance(stations, dict):
+        return out
+    for sid, st in list(stations.items())[-MAX_STATIONS:]:
+        if not isinstance(sid, str) or not is_station(sid) or planner_id(sid) is None or not isinstance(st, dict):
+            continue
+        raw = st.get("poles")
+        poles = [
+            p for p in (raw if isinstance(raw, list) else ())
+            if isinstance(p, str) and not is_station(p) and planner_id(p) is not None
+        ]
+        if not poles:
+            continue
+        ref = st.get("ref")
+        out[sid] = {
+            "ref": _station_ref(sid, ref) if isinstance(ref, dict) else None,
+            "poles": dict.fromkeys(poles[:MAX_CHILD_STOPS]),
+        }
+    return out
+
+
+def _futar_date(value: Any) -> str:
+    """A FUTÁR stop time's serviceDate as YYYYMMDD ("" for none): FUTÁR
+    gives the date, an epoch in milliseconds is read as one too."""
+    if isinstance(value, str):
+        return value if _DATE.match(value) else ""
+    ms = _int(value)
+    return _date(ms // 1000) if ms is not None else ""

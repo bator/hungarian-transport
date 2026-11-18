@@ -144,6 +144,59 @@ def test_train_numbers_read_as_every_builder_does() -> None:
     assert realtime.train_numbers_from_static(buf.getvalue(), "1:") == {"4510": ["7"]}
 
 
+def _calendar_zip(calendar: str | None, dates: str | None, trips: str = "1:7,S1,SZ 4510\n1:8,S2,SZ 4510\n1:9,S3,SZ 4511\n") -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("trips.txt", "trip_id,service_id,trip_short_name\n" + trips)
+        if calendar is not None:
+            head = "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+            zf.writestr("calendar.txt", head + calendar)
+        if dates is not None:
+            zf.writestr("calendar_dates.txt", "service_id,date,exception_type\n" + dates)
+    return buf.getvalue()
+
+
+def test_train_numbers_know_the_days_their_trips_run() -> None:
+    """S1 runs on weekdays in November but not on Wednesday the 18th, S2 on
+    Sundays and the 18th: calendar.txt and calendar_dates.txt as GTFS has
+    them. S3 is in neither: it does not run."""
+    data = _calendar_zip(
+        "S1,1,1,1,1,1,0,0,20261101,20261130\nS2,0,0,0,0,0,0,1,20261101,20261130\n",
+        "S1,20261118,2\nS2,20261118,1\n",
+    )
+    trains = realtime.train_numbers_from_static(data, "1:")
+    assert trains == {"4510": ["7", "8"], "4511": ["9"]}
+    days = {d: (trains.runs("7", d), trains.runs("8", d), trains.runs("9", d)) for d in ("20261117", "20261118", "20261122", "20261201")}
+    assert days == {
+        "20261117": (True, False, False),
+        "20261118": (False, True, False),
+        "20261122": (False, True, False),
+        "20261201": (False, False, False),
+    }
+    # A trip or a date it does not know: not known, so not left out.
+    assert trains.runs("nope", "20261118") is None and trains.runs("7", "2026-11-18") is None
+
+
+@pytest.mark.parametrize(
+    ("calendar", "dates"), [(None, None), ("S1,1,1,1,1,1,1,1,20261101,20261130\n", None), (None, "S1,20261118,1\n")],
+    ids=["none", "weekly-only", "dates-only"],
+)
+def test_a_static_feed_without_a_whole_calendar_reads_what_it_has(calendar, dates) -> None:
+    trains = realtime.train_numbers_from_static(_calendar_zip(calendar, dates), "1:")
+    expect = None if calendar is None and dates is None else True
+    assert trains.runs("7", "20261118") is expect
+    assert realtime.train_numbers_from_static((FIX / "mav-static.zip").read_bytes(), "1:").runs("35700507", "20261102") is None
+
+
+def test_a_calendar_over_the_caps_is_not_read(monkeypatch) -> None:
+    """Over MAX_CALENDAR_ROWS (or a member over MAX_STATIC_MEMBER): the
+    trains are asked by every trip of their number, as without one."""
+    data = _calendar_zip(None, "".join(f"S1,202611{d:02},1\n" for d in range(1, 21)))
+    monkeypatch.setattr(realtime, "MAX_CALENDAR_ROWS", 10)
+    trains = realtime.train_numbers_from_static(data, "1:")
+    assert trains == {"4510": ["7", "8"], "4511": ["9"]} and trains.runs("7", "20261101") is None
+
+
 # ---------------------------------------------------------------- feed table
 
 

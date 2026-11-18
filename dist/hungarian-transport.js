@@ -4731,6 +4731,7 @@ register({
         lat: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i] / 1e5 : null,
         lon: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i + 1] / 1e5 : null
       };
+      if (row.length > 4 && row[4]) st.fid = String(row[4]);
       stops[i] = st;
       const nk = st.op + ":" + st.num;
       const kk = st.op + ":" + st.key;
@@ -4739,8 +4740,15 @@ register({
       if (st.id && !idx.byId.has(st.id)) idx.byId.set(st.id, st);
     });
     idx.stops = stops;
+    idx.byAlias = /* @__PURE__ */ new Map();
+    (Array.isArray(idx.al) ? idx.al : []).forEach((row) => {
+      const st = Array.isArray(row) ? stops[row[1]] : null;
+      const old = st && row[0] != null ? String(row[0]) : "";
+      if (old && !idx.byId.has(old) && !idx.byAlias.has(old)) idx.byAlias.set(old, st);
+    });
     idx.g = null;
     idx.s = null;
+    idx.al = null;
     return idx;
   },
   /* The index file's JSON, read on the page: null when a worker that ran
@@ -4935,7 +4943,7 @@ register({
   gtfsStopById(idx, id) {
     if (!idx || !id) return null;
     const key = String(id);
-    if (idx.byId) return idx.byId.get(key) || null;
+    if (idx.byId) return idx.byId.get(key) || idx.byAlias && idx.byAlias.get(key) || null;
     return (idx.stops || []).find((s) => s.id === key) || null;
   },
   /* The town of a city feed's operator ("Székesfehérvár — helyi" →
@@ -5055,6 +5063,8 @@ register({
     if (!idx || !stop) return null;
     const op = opIx == null ? 0 : opIx;
     const pool = opIx == null ? idx.stops : BkkLib.cityStops(idx, op);
+    const moved = idx.byAlias && stop.id ? idx.byAlias.get(String(stop.id)) : null;
+    if (moved && (opIx == null || moved.op === op)) return moved;
     const num = BkkLib.stopNum(stop.id);
     if (num && idx.byNum.has(op + ":" + num)) {
       const hit = idx.byNum.get(op + ":" + num);
@@ -6396,7 +6406,7 @@ register({
             spanMin: Math.max(best.spanMin, cur.spanMin)
           };
         }, { count: 0, spanMin: 0 });
-        const discover = usedParentOnly && !!payloads[0];
+        const discover = usedParentOnly && !!payloads[0] && payloads[0].source !== "mavplusz";
         const capped = discover && span.count >= BOARD_CAP_ROWS && span.spanMin + 2 < horizon;
         if (discover) {
           const discovered = [];
@@ -7090,7 +7100,7 @@ register({
     const repeat = [];
     for (let i = lo; i <= hi && stops.length < RT_MAX_STOPS; i++) {
       const st = idx.stops[ps[i]];
-      const id = String(st && st.id || "");
+      const id = String(st && (st.fid || st.id) || "");
       if (calls.get(ps[i]) > 1) repeat.push(stops.length);
       stops.push(id.indexOf(pre) === 0 ? id.slice(pre.length) : id);
     }

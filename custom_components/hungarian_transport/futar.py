@@ -107,11 +107,14 @@ FUTAR_EXECUTOR_BYTES = 512 * 1024
 # executor(func, *args): func(*args) off the event loop (Home Assistant's
 # hass.async_add_executor_job); the loop's default executor without one.
 Executor = Callable[..., Awaitable[Any]]
-# FUTÁR's share of the card's budget for a path a fallback serves
-# (FutarProxy's `fallback`): a departure board answers within a second or
-# two, so one that has not answered by then is an outage, and the rest of
-# the card's 20 s is the fallback's (mavplusz_board.PLANNER_TIMEOUT): the
-# token wait, this and the fallback still answer before the card gives up.
+# FUTÁR's share of the card's budget for a request a fallback can answer
+# (FutarProxy's `fallback`, its can_answer): a departure board answers
+# within a second or two, so one that has not answered by then is an
+# outage, and the rest of the card's 20 s is the fallback's
+# (mavplusz_board.PLANNER_TIMEOUT): the token wait, this and the fallback
+# still answer before the card gives up. A request nothing else could
+# answer (a stop the fallback does not know, the fallback backing off)
+# keeps FUTÁR's whole budget: a slow answer is still an answer.
 FUTAR_FALLBACK_TIMEOUT_SEC = 8.0
 
 
@@ -119,11 +122,18 @@ class FutarFallback(Protocol):
     """Another source for some of FUTÁR's answers (mavplusz_board.PlannerBoards).
 
     answer(path, params) is FUTÁR's answer for path in FUTÁR's own shape, or
-    None when it has none; it never raises but for cancellation."""
+    None when it has none; it never raises but for cancellation.
+    can_answer(path, params) says beforehand whether answer() may give one.
+    learn(path, params, data) is handed every answer FUTÁR gives (it reads
+    what the fallback needs later, and never raises)."""
 
     paths: frozenset[str]
 
     async def answer(self, path: str, params: dict[str, str]) -> dict[str, Any] | None: ...
+
+    def can_answer(self, path: str, params: dict[str, str]) -> bool: ...
+
+    def learn(self, path: str, params: dict[str, str], data: Any) -> None: ...
 
 
 def futar_timeout(waited: float = 0.0) -> aiohttp.ClientTimeout:
@@ -163,6 +173,11 @@ class FutarError(Exception):
 
 class FutarAuthError(FutarError):
     """FUTÁR rejected the API key."""
+
+
+class FutarKeyRejected(FutarAuthError):
+    """The key FUTÁR rejected, said without asking FUTÁR (within
+    REJECTED_RETRY of the rejection): this call took no token."""
 
 
 class FutarRateLimited(FutarError):
@@ -277,8 +292,10 @@ class FutarProxy:
     key; `sleep` is the one a call waits for a token with. `burst` is the
     rate limit's (FUTAR_BURST). `executor` decodes the large answers
     (futar_get). `fallback` answers a path it serves when FUTÁR cannot
-    (falls_back), FUTÁR then having FUTAR_FALLBACK_TIMEOUT_SEC at most;
-    when it has no answer either, FUTÁR's error stands. `on_accepted` is
+    (falls_back) and the fallback can (its can_answer), FUTÁR then having
+    FUTAR_FALLBACK_TIMEOUT_SEC at most; when it has no answer either,
+    FUTÁR's error stands. A call failing fast on a rejected key takes a
+    token before the fallback is asked. `on_accepted` is
     called when FUTÁR first accepts the key, and again whenever it accepts it after rejecting it
     (the rejection was a mistake): a reauth started before this proxy (by
     the one a reload replaced) is answered by a key that works as well.
@@ -343,9 +360,11 @@ class FutarProxy:
         waited = max(slept, self._monotonic() - started)
         rejections = self._rejections
         timeout = futar_timeout(waited)
-        if self._fallback is not None and path in self._fallback.paths:
+        if self._can_fall_back(path, params):
             timeout = aiohttp.ClientTimeout(total=min(timeout.total, FUTAR_FALLBACK_TIMEOUT_SEC))
         data = await futar_get(self._session, self._api_key, path, params, timeout, executor=self._executor)
+        if self._fallback is not None:
+            self._fallback.learn(path, params, data)
         # Only an answer from FUTÁR itself ends an outage: a cache hit for
         # another request proves nothing, and clearing the state on one made
         # the log flap between "unavailable" and "answers again".
@@ -363,6 +382,10 @@ class FutarProxy:
             if accepted and self._on_accepted is not None:
                 self._on_accepted()
         return data
+
+    def _can_fall_back(self, path: str, params: dict[str, str]) -> bool:
+        fallback = self._fallback
+        return fallback is not None and path in fallback.paths and fallback.can_answer(path, params)
 
     @property
     def key_rejected(self) -> bool:
@@ -385,8 +408,16 @@ class FutarProxy:
         try:
             return await self._get(path, params)
         except FutarError as err:
-            if self._fallback is None or path not in self._fallback.paths or not falls_back(err):
+            if self._fallback is None or not falls_back(err) or not self._can_fall_back(path, params):
                 raise
+            if isinstance(err, FutarKeyRejected):
+                # Not asked of FUTÁR, so no token taken: the fallback takes
+                # FUTÁR's, or a rejected key would make it the BKK source
+                # with no limit but its own.
+                try:
+                    await self._rate.acquire()
+                except FutarRateLimited:
+                    raise err from None
             data = await self._fallback.answer(path, params)
             if data is None:
                 raise
@@ -396,7 +427,7 @@ class FutarProxy:
         probe = False
         if self._rejected is not None:
             if self._probing or self._monotonic() - self._rejected_at < REJECTED_RETRY:
-                raise FutarAuthError(self._rejected)
+                raise FutarKeyRejected(self._rejected)
             # This call asks again; the others keep failing fast meanwhile.
             # Only another rejection starts a new REJECTED_RETRY: after a
             # timeout or our own rate limit, the next call asks again.

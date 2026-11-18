@@ -688,8 +688,12 @@ register({
          sends no discovery, or every outage or rate limit set off its extra
          route and board requests. A board under the row cap, or reaching
          the horizon's end, is complete: its last departure is just the last
-         one before the horizon, and its child poles' rows are on it. */
-      const discover = usedParentOnly && !!payloads[0];
+         one before the horizon, and its child poles' rows are on it. A
+         board the integration answered from mavplusz.hu (FUTÁR failing,
+         "source": "mavplusz") sends none either: its route-details would
+         go to the FUTÁR that just failed, each with the whole timeout,
+         on every poll. */
+      const discover = usedParentOnly && !!payloads[0] && payloads[0].source !== 'mavplusz';
       const capped = discover && span.count >= BOARD_CAP_ROWS && span.spanMin + 2 < horizon;
       if (discover) {
         const discovered = [];

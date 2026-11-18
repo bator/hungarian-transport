@@ -3984,6 +3984,41 @@ globalThis.requestAnimationFrame = (cb) => setTimeout(cb, 0);
     JSON.stringify({ tramHu: (tramHu.match(/<span class="plat[^<]*<\/span>/) || [''])[0], trainHu: (trainHu.match(/<span class="plat[^<]*<\/span>/) || [''])[0] }));
 }
 {
+  /* FUTÁR failing, the integration answers the board from mavplusz.hu
+     ("source": "mavplusz"): the card reads its rows, but discovers no
+     routes from it, whose route-details would go to the dead FUTÁR, each
+     with the whole timeout, on every poll. FUTÁR's own board still does. */
+  const now = Math.floor(Date.now() / 1000);
+  const board = (source) => Object.assign({ data: {
+    entry: { stopId: 'BKK_F00940', routeIds: ['BKK_0090', 'BKK_4720'], stopTimes: [
+      { tripId: 'T9', stopId: 'BKK_F00940', departureTime: now + 120 },
+      { tripId: 'T72', stopId: 'BKK_F00940', departureTime: now + 300 },
+    ] },
+    references: {
+      trips: { T9: { routeId: 'BKK_0090', tripHeadsign: 'Óbuda' }, T72: { routeId: 'BKK_4720', tripHeadsign: 'Óbuda' } },
+      routes: { BKK_0090: { shortName: '9', type: 'BUS' }, BKK_4720: { shortName: '72', type: 'TROLLEYBUS' } },
+      stops: { BKK_F00940: { name: 'Báthory utca' } },
+    },
+  } }, source ? { source } : {});
+  const keep = { departureBoard: Lib.departureBoard, tripGoesTo: Lib.tripGoesTo, originPoles: Lib.originPoles };
+  const discovered = [];
+  Lib.originPoles = async (_k, _c, _o, routes) => { discovered.push(routes.slice()); return []; };
+  Lib.tripGoesTo = async () => true;
+  const dest = { key: 'óbuda', name: 'Óbuda' };
+  const load = async (source) => {
+    Lib.departureBoard = async () => board(source);
+    discovered.length = 0;
+    const rows = await Lib.departures(IX, 'test-key', 'BKK_F00940', [], dest, { mode: 'bkk', minutesAfter: 60, cache: {} });
+    return { rows: rows.map((r) => r.tripId), asked: discovered.length };
+  };
+  const planner = await load('mavplusz');
+  const futarOwn = await load('');
+  Object.assign(Lib, keep);
+  check('a board from mavplusz.hu discovers no routes on the failing FUTÁR, FUTÁR\'s own board still does',
+    planner.asked === 0 && planner.rows.join() === 'T9,T72' && futarOwn.asked === 1 && futarOwn.rows.join() === 'T9,T72',
+    JSON.stringify({ planner, futarOwn }));
+}
+{
   /* The MÁV hop card end to end: its rows are ELVIRA's departures, FUTÁR is
      not asked, and a train FUTÁR lacks (IC 849 TÓPART) is on the board. */
   const keep = { departures: Lib.departures, elviraBoard: Lib.elviraBoard };
@@ -11618,6 +11653,15 @@ const review5Planner = async (now) => {
       JSON.stringify({ d, req: ask.req }));
     const plain = Lib.rtGtfsDescriptor('paks', idx, [0, '1', [0, 1, 2, 3], [480, 482, 484, 486], 3, -1, 'T8'], 1, 3, '20261102');
     check('a trip without repeated stops sends no repeat', plain.repeat === undefined, JSON.stringify(plain));
+  }
+
+  /* A stop the build renamed to an older id (keep_stop_ids) is sent to the
+     integration by the feed's own id, which the realtime feed names. */
+  {
+    const idx = { stops: [{ id: 'paks:A' }, { id: 'paks:OLD', fid: 'paks:NEW' }, { id: 'paks:C' }] };
+    const d = Lib.rtGtfsDescriptor('paks', idx, [0, '1', [0, 1, 2], [480, 482, 484], 3, -1, 'T7'], 0, 2, '20261102');
+    check('a renamed stop is matched on the feed by its own id',
+      JSON.stringify(d.stops) === '["A","NEW","C"]', JSON.stringify(d));
   }
 
   /* The request keeps within the service schema: a field at its limit is

@@ -336,6 +336,9 @@ register({
         lat: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i] / 1e5 : null,
         lon: g && (g[2 * i] || g[2 * i + 1]) ? g[2 * i + 1] / 1e5 : null,
       };
+      /* The feed's own stop id when the build kept an older id for this
+         stop (build_city_index.keep_stop_ids); realtime matches on it. */
+      if (row.length > 4 && row[4]) st.fid = String(row[4]);
       stops[i] = st;
       const nk = st.op + ':' + st.num;
       const kk = st.op + ':' + st.key;
@@ -344,10 +347,25 @@ register({
       if (st.id && !idx.byId.has(st.id)) idx.byId.set(st.id, st);
     });
     idx.stops = stops;
+    /* "al": [old stop id, stop index] for the stops a rebuilt feed
+       renumbered (Szeged's new source, November 2026). The build gives the
+       new stop of the same operator and mode within 50 m the old id itself
+       (the feed's own id is the row's fifth element), so cards older than
+       this table find it too; "al" holds the old ids left over, such as two
+       old stops that became one. A card saved with such an id finds its
+       stop by it (gtfsStopById, volanMatchStop); an id the index still has
+       is never an alias. */
+    idx.byAlias = new Map();
+    (Array.isArray(idx.al) ? idx.al : []).forEach((row) => {
+      const st = Array.isArray(row) ? stops[row[1]] : null;
+      const old = st && row[0] != null ? String(row[0]) : '';
+      if (old && !idx.byId.has(old) && !idx.byAlias.has(old)) idx.byAlias.set(old, st);
+    });
     /* The raw rows are in idx.stops now; a wall tablet keeps the index for
        the page, so the copy goes. */
     idx.g = null;
     idx.s = null;
+    idx.al = null;
     return idx;
   },
   /* The index file's JSON, read on the page: null when a worker that ran
@@ -545,7 +563,7 @@ register({
   gtfsStopById(idx, id) {
     if (!idx || !id) return null;
     const key = String(id);
-    if (idx.byId) return idx.byId.get(key) || null;
+    if (idx.byId) return idx.byId.get(key) || (idx.byAlias && idx.byAlias.get(key)) || null;
     return (idx.stops || []).find((s) => s.id === key) || null;
   },
   /* The town of a city feed's operator ("Székesfehérvár — helyi" →
@@ -661,6 +679,10 @@ register({
     if (!idx || !stop) return null;
     const op = (opIx == null) ? 0 : opIx;
     const pool = opIx == null ? idx.stops : BkkLib.cityStops(idx, op);
+    /* A stop the feed renumbered, by its old id ("al"): before the number,
+       which a renumbered feed may have given another stop. */
+    const moved = idx.byAlias && stop.id ? idx.byAlias.get(String(stop.id)) : null;
+    if (moved && (opIx == null || moved.op === op)) return moved;
     const num = BkkLib.stopNum(stop.id);
     if (num && idx.byNum.has(op + ':' + num)) {
       const hit = idx.byNum.get(op + ':' + num);

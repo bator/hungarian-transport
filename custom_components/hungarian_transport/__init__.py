@@ -32,6 +32,7 @@ from . import (
     lovelace_resource,
     mav,
     mav_daily,
+    mavplusz,
     mavplusz_board,
     realtime,
     storage,
@@ -377,6 +378,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # also when no card asks at all; the timer stops with HA.
     hub = realtime.RealtimeHub(
         session,
+        planner_limiter=_planner_limiter(hass),
         executor=hass.async_add_executor_job,
         task_factory=lambda coro: hass.async_create_background_task(
             coro, "hungarian_transport_realtime", eager_start=False
@@ -460,6 +462,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     async_at_started(hass, _sync_resource)
     return True
+
+
+def _planner_limiter(hass: HomeAssistant) -> mavplusz.PlannerLimiter:
+    """Home Assistant's one rate limit and backoff for mavplusz.hu, shared by
+    the realtime hub and every entry's BKK boards: one server, one limit."""
+    data = hass.data.setdefault(DOMAIN, {})
+    limiter = data.get("planner_limiter")
+    if limiter is None:
+        limiter = data["planner_limiter"] = mavplusz.PlannerLimiter()
+    return limiter
 
 
 def _entry_api_key(entry: ConfigEntry) -> str:
@@ -558,8 +570,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def task_factory(coro: Any) -> Any:
         return hass.async_create_background_task(coro, "hungarian_transport_futar", eager_start=False)
 
+    # The poles of FUTÁR's combined stations learnt before (storage.py), so
+    # their boards have a fallback right after a restart too.
     planner = mavplusz_board.PlannerBoards(
-        async_get_clientsession(hass), task_factory=task_factory, call_later=hass_call_later(hass)
+        async_get_clientsession(hass),
+        task_factory=task_factory,
+        call_later=hass_call_later(hass),
+        limiter=_planner_limiter(hass),
+        stations=await storage.async_load_stations(hass),
+        on_stations_changed=lambda: storage.async_save_stations_later(hass, planner.stations_data),
     )
     proxy = FutarProxy(
         async_get_clientsession(hass),
@@ -634,8 +653,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """The integration is removed: so are its Lovelace resource, its
-    notifications, its Repairs issues and its record in .storage
-    (storage.py), and the copy of it in memory. There is one entry at most
+    notifications, its Repairs issues, its record in .storage (storage.py)
+    and the copy of it in memory, and the BKK stations learnt from FUTÁR. There is one entry at most
     (its unique_id is the domain), so nothing is shared with another.
 
     Only what installed the indexes stays (storage.MAV_INSTALL,
@@ -673,6 +692,11 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     except Exception:  # noqa: BLE001 - removal goes on
         _LOGGER.warning("Could not remove the timetable update record", exc_info=True)
     hass.data.get(DOMAIN, {}).pop("update_state", None)
+    # The BKK stations learnt from FUTÁR went with the entry's key.
+    try:
+        await storage.stations_store(hass).async_remove()
+    except Exception:  # noqa: BLE001 - removal goes on
+        _LOGGER.warning("Could not remove the learnt BKK stations", exc_info=True)
 
 
 CONFIG_SCHEMA = cv.empty_config_schema(DOMAIN)
