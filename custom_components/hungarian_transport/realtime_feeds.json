@@ -4,7 +4,7 @@
   "Generated from public-transport/transitous feeds/hu.json and the Volan agency ids; see docs/realtime.md.",
   "match: trip = the card's static trip_id (index trip element 6) is the feed's trip_id without prefix;",
   "route_start = route_id (without prefix) and the HHMMSS start in the trip_id; train = the train number from the source's static GTFS (trip_short_name).",
-  "mavplusz: true = ask mavplusz.hu (M\u00c1V's OpenTripPlanner) first for the trips a card names by trip_id or by route + start, these feeds only when it fails; remove the key to read only these feeds (docs/realtime.md)."
+  "mavplusz: true = ask mavplusz.hu (M\u00c1V's OpenTripPlanner) first for the trips a card names by trip_id, by route + start or by train number (resolved to trip ids by the static GTFS), these feeds only when it fails; remove the key to read only these feeds (docs/realtime.md)."
  ],
  "aliases": {
   "dkv": "debrecen",
@@ -866,13 +866,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/1_198/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/1_198/vehicle-positions.pb",
      "prefix": "1:",
-     "static": "https://jbb.ghsq.de/gtfs/hu-m%C3%A1v_szem%C3%A9lysz%C3%A1ll%C3%ADt%C3%A1si_zrt..gtfs.zip"
+     "static": "https://jbb.ghsq.de/gtfs/hu-m%C3%A1v_szem%C3%A9lysz%C3%A1ll%C3%ADt%C3%A1si_zrt..gtfs.zip",
+     "mavplusz": true
     },
     {
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/1_134/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/1_134/vehicle-positions.pb",
      "prefix": "1:",
-     "static": "https://jbb.ghsq.de/gtfs/hu-gysev_zrt..gtfs.zip"
+     "static": "https://jbb.ghsq.de/gtfs/hu-gysev_zrt..gtfs.zip",
+     "mavplusz": true
     }
    ],
    "match": [
@@ -885,7 +887,8 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/1_134/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/1_134/vehicle-positions.pb",
      "prefix": "1:",
-     "static": "https://jbb.ghsq.de/gtfs/hu-gysev_zrt..gtfs.zip"
+     "static": "https://jbb.ghsq.de/gtfs/hu-gysev_zrt..gtfs.zip",
+     "mavplusz": true
     }
    ],
    "match": [
