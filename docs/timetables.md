@@ -844,6 +844,10 @@ trips of the one in place. The message names the feed:
   YYYY-MM-DD)` — the publisher's new zip ends before the timetable already
   in the index.
 - `<id> N trips vs M` — most of the feed's trips are gone.
+- `<id> N trips vs M (K of them of the route types its new source keeps)` —
+  a feed whose source changed on purpose (Szeged, see [Feed
+  sources](#feed-sources)) kept less than half of the old zip's trips of
+  the modes it still runs, or under 50.
 
 A feed whose calendar has ended is left out of the index with a warning.
 That is not a failure once the timetable the index had for it has ended as
@@ -884,11 +888,45 @@ buses (agency `hkir_V-33367`), which the Volán feed already gives as
 (route `1`). Until November 2026 the index read
 `szegedimenetrend.hu/google_transit.zip`, a December 2025 zip with
 Volánbusz, SZKT and MÁV-START in one operator, whose calendar exceptions end
-on 10 January 2026; it is not used as a fallback. The trolleybuses carry the
-extended `route_type` 800, which the card shows as trolleybuses. Because the
-new Szeged feed is much smaller than the old one, the guard accepts the
-smaller `szeged` until 15 December 2026 (`shrink_ok` in
-`scripts/build_city_index.py`); a missing Szeged feed is still refused.
+on 10 January 2026; the builders no longer download it. The trolleybuses
+carry the extended `route_type` 800, which the card shows as trolleybuses.
+SZKT cuts its stop names to 25 characters ("Belv. tem. II.", "Londoni krt.
+(Bakay N. u."); the index shows them in full, as the old zip named the same
+stops (`SZEGED_STOP_NAMES` in `scripts/build_city_index.py`), and closes a
+bracket a cut left open in any city feed.
+
+The new Szeged feed is much smaller than the old one. While the index in
+place (the Pages site, the latest release, a local rebuild) still holds the
+old zip, which it recognises by its missing `feed_version` and its buses
+(`route_type` 3) and tram-train (109), the guard compares the rebuild with
+the old zip's trams and trolleybuses only: it must keep half of them, and at
+least 50 trips, so a broken zip is still refused (`replaces` in
+`scripts/build_city_index.py`). This holds whenever the new builders first
+run, as the weekly Pages build and the release use the latest stable
+release's. Once the index holds the new feed (`szeged:<feed_version>` in
+its `feed`), Szeged is guarded as any feed. A missing Szeged feed is refused
+as before, except on the weekly Pages rebuild, which carries a failed
+download over from the previous index (see [When an update
+fails](#when-an-update-fails)): while that index still holds the old zip,
+the carried part leaves its buses and tram-train out (they are in
+`volan-szeged` and the MÁV index) and keeps the old trams and trolleybuses.
+
+Every Szeged stop has a new id (`szeged:SZ_…`). The rebuild maps each stop
+id the index in place had and the new one lacks to the new stop of the same
+operator and mode within 50 m, in any city feed, and writes the table into
+the index (`"al"`, old id and stop index); the card finds a stop saved with
+its old id through it, and later rebuilds carry the table on. A saved tram
+or trolleybus stop keeps working that way (174 of the 179 old tram and
+trolleybus stop ids; the other five moved more than 50 m and are found by
+name, if at all). What Szeged users have to change themselves:
+
+- A local-bus card (`helyi: true`, `city: szeged`) has no departures any
+  more: Szeged's buses are only in `volan-szeged`. Set `city: volan-szeged`
+  and pick the stop again.
+- The tram-train to Hódmezővásárhely (old lines 1 and 1A) left the city
+  board: use a MÁV card (`mav: true`) with its station.
+- A stop that is not found (one of the five above) is picked again.
+
 Pécs (Tüke Busz) is fetched from <https://mobilitas.biokom.hu/gtfs/> over
 https. Hódmezővásárhely's zip (HVSZ, via menetbrand) runs until 30 November
 2026; when no newer one is published by then, the feed leaves the index with
