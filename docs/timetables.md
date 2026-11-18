@@ -911,14 +911,25 @@ fails](#when-an-update-fails)): while that index still holds the old zip,
 the carried part leaves its buses and tram-train out (they are in
 `volan-szeged` and the MÁV index) and keeps the old trams and trolleybuses.
 
-Every Szeged stop has a new id (`szeged:SZ_…`). The rebuild maps each stop
-id the index in place had and the new one lacks to the new stop of the same
-operator and mode within 50 m, in any city feed, and writes the table into
-the index (`"al"`, old id and stop index); the card finds a stop saved with
-its old id through it, and later rebuilds carry the table on. A saved tram
-or trolleybus stop keeps working that way (174 of the 179 old tram and
-trolleybus stop ids; the other five moved more than 50 m and are found by
-name, if at all). What Szeged users have to change themselves:
+Every Szeged stop has a new id (`szeged:SZ_…`). The rebuild gives the
+index's stops their old ids back: each stop id the index in place had and
+the new feed lacks goes to the new stop of the same operator and mode within
+50 m that the index in place did not name, one to one, the nearest pair
+first. The stop takes the old id and stop number (a card matches a saved
+stop by the number in its id) and keeps the feed's own id, the one realtime
+feeds name the stop by, as the fifth element of its stop row (`[id, name,
+number, operator, feed id]`). So a card of any version finds a saved stop
+under its old id, which matters as the integration installs new indexes
+every week without a card update. An old id left over, where two old stops
+became one new one, goes into the alias table (`"al"`, old id and stop
+index), which the cards released with it read; later rebuilds carry the
+table on. The next rebuild gives the same feed stop the same old id (by the
+feed id in its row, however far the stop moved), so the ids do not drift
+from week to week. Of the 179 old tram and trolleybus stop ids, 170 are the
+stops' own ids again, four are aliases (an older card finds two of them by
+name), and five moved more than 50 m and are found by name, if at all.
+
+What Szeged users have to change themselves:
 
 - A local-bus card (`helyi: true`, `city: szeged`) has no departures any
   more: Szeged's buses are only in `volan-szeged`. Set `city: volan-szeged`
