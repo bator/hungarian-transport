@@ -134,6 +134,26 @@ def main() -> int:
             os.environ["BAHART_GTFS_URL"] = prev
     failed |= not check("bahart falls back without env", resolved_url(bahart) == bahart["url"])
 
+    szeged = next(f for f in CITY_FEEDS if f["id"] == "szeged")
+    failed |= not check(
+        "Szeged reads SZKT's own zip over https, then menetbrand's copy of it",
+        list(gc.feed_urls(szeged)) == ["https://gtfs.szkt.hu/zipstore/szkt-szeged-hu.zip",
+                                       "https://gtfs.menetbrand.com/download/szeged/"]
+        and not szeged.get("insecure"),
+        str(list(gc.feed_urls(szeged))),
+    )
+    failed |= not check("Szeged keeps only the SZKT agency (its buses are volan-szeged)",
+                        tuple(szeged.get("agencies") or ()) == ("SZKT",), str(szeged.get("agencies")))
+    pecs = next(f for f in CITY_FEEDS if f["id"] == "pecs")
+    failed |= not check("Pécs is fetched over https", pecs["url"] == "https://mobilitas.biokom.hu/gtfs/"
+                        and not pecs.get("insecure"), str(pecs))
+    failed |= not check(
+        "feed_urls: mirrors come after the URL, each address once",
+        list(gc.feed_urls({"url": "https://a.example/f.zip",
+                           "mirrors": ["https://b.example/f/", "https://a.example/f.zip", ""]}))
+        == ["https://a.example/f.zip", "https://b.example/f/"],
+    )
+
     files = {
         "agency.txt": "agency_id,agency_name\nA,Szeged - Local\n",
         "stops.txt": "stop_id,stop_name\n1,Alpha\n2,Beta\n",
@@ -193,6 +213,22 @@ def main() -> int:
             failed |= not check("write_index keeps route_type", tidx["t"][0][4] == 0 and tidx["v"] == 29, str(tidx["t"][0]))
         finally:
             tz.unlink()
+
+        # SZKT's trolleybuses use the extended code 800 (the card's
+        # gtfsRouteKind reads it as a trolleybus); it must reach the index
+        # as it is, not fall back to a bus.
+        trolley_files = dict(files)
+        trolley_files["routes.txt"] = "route_id,route_short_name,agency_id,route_type\nR1,9,A,800\n"
+        trz = gtfs_zip(trolley_files)
+        try:
+            trparts = load_parts(trz, lambda short, *_: bool(short), op_id="szeged", op_name="Szeged — SZKT")
+            trout = Path(tempfile.mkdtemp()) / "trolley.json.gz"
+            write_index(trparts, trout, with_operators=True)
+            tridx = json.loads(gzip.decompress(trout.read_bytes()))
+            failed |= not check("route_type 800 (trolleybus) reaches the index unchanged",
+                                trparts[0]["t"][0][4] == 800 and tridx["t"][0][4] == 800, str(tridx["t"][0]))
+        finally:
+            trz.unlink()
 
         # Distinct stations named like jk_stop_8 must not collapse to one parent.
         rail_files = dict(files)

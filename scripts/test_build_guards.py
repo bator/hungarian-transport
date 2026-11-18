@@ -737,6 +737,99 @@ with tempfile.TemporaryDirectory() as tmp:
     vout.write_bytes(gzip.compress(b"\xff\xfe not utf-8"))
     check("a non-UTF-8 previous index is no reference", gc.existing_trips(vout) is None)
 
+# Szeged moved to SZKT's own zip (trams and trolleybuses only) on
+# 2026-11-18: in its "shrink_ok" window the guard takes the smaller feed, as
+# a rebuild does with a new zip next to the old one; a missing feed is still
+# refused, and so is the same shrink outside the window or for another feed.
+with tempfile.TemporaryDirectory() as tmp:
+    szeged = next(f for f in bci.CITY_FEEDS if f["id"] == "szeged")
+    check("the Szeged window starts on the day its source changed",
+          szeged.get("shrink_ok") == ("20261118", "20261215"), repr(szeged.get("shrink_ok")))
+    out = Path(tmp) / "city-index.json.gz"
+    write_index([part("szeged", 1000), part("pecs", 1000)], out, with_operators=True, guard_total=False)
+    smaller = [part("szeged", 200), part("pecs", 1000)]
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        err = raises(lambda: bci.guard_feeds(out, smaller, set(), today="20261120"))
+    check("in its window a smaller Szeged feed passes the guard, with a warning",
+          err is None and "szeged 200 trips vs 1000; accepted until 2026-12-15" in stderr.getvalue(),
+          repr((err, stderr.getvalue())))
+    err = raises(lambda: bci.guard_feeds(out, smaller, set(), today="20261215"))
+    check("the window's last day still counts", err is None, repr(err))
+    for day in ("20261117", "20261216"):
+        err = raises(lambda day=day: bci.guard_feeds(out, smaller, set(), today=day))
+        check(f"outside the window ({day}) the smaller Szeged feed is refused",
+              isinstance(err, IndexGuardError) and "szeged 200 trips vs 1000" in str(err), repr(err))
+    err = raises(lambda: bci.guard_feeds(out, [part("pecs", 1000)], set(), today="20261120"))
+    check("in its window a missing Szeged feed is still refused",
+          isinstance(err, IndexGuardError) and "szeged missing (had 1000 trips)" in str(err), repr(err))
+    err = raises(lambda: bci.guard_feeds(out, [part("szeged", 1000), part("pecs", 200)], set(), today="20261120"))
+    check("the window is Szeged's alone: Pécs losing most of its trips is refused",
+          isinstance(err, IndexGuardError) and "pecs 200 trips vs 1000" in str(err), repr(err))
+    check("a new Szeged zip with fewer trips is not rejected for the old one in the window",
+          bci._feed_problem("szeged", bci._previous(out, "20261120"), [part("szeged", 200)], "20261120") == ""
+          and "200 trips vs 1000" in bci._feed_problem("szeged", bci._previous(out, "20261216"),
+                                                       [part("szeged", 200)], "20261216"))
+
+# SZKT's zip also has MÁV's Szeged local buses (hkir_V-33367, already the
+# Volán index's volan-szeged); the older szegedimenetrend.hu zip had
+# Volánbusz and the MÁV-START tram-train as well. Only SZKT's routes are
+# read, from either zip, and the trolleybuses keep route_type 800.
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp)
+    szeged = next(f for f in bci.CITY_FEEDS if f["id"] == "szeged")
+
+    def szeged_zip(path: Path, agencies: str, routes: str) -> Path:
+        files = city_feed()
+        files["agency.txt"] = "agency_id,agency_name\n" + agencies
+        files["routes.txt"] = "route_id,route_short_name,agency_id,route_type\n" + routes
+        rids = [line.split(",")[0] for line in routes.strip().splitlines()]
+        files["trips.txt"] = "route_id,service_id,trip_id\n" + "".join(f"{r},S1,T{r}\n" for r in rids)
+        files["stop_times.txt"] = "trip_id,arrival_time,departure_time,stop_id,stop_sequence\n" + "".join(
+            f"T{r},08:00:00,08:00:00,1,1\nT{r},08:10:00,08:10:00,2,2\n" for r in rids)
+        return gtfs_zip(path, files)
+
+    official = szeged_zip(base / "szkt.zip",
+                          "SZKT,Szegedi Közlekedési Kft.\nhkir_V-33367,MÁV Személyszállítási Zrt. - Szeged\n",
+                          "TRAM2,2,SZKT,0\nTROLLEY9,9,SZKT,800\nBUS70,70,hkir_V-33367,3\n")
+    got = bci._load_feed(base, szeged, official)
+    lines = sorted((t[1], t[4]) for p in got for t in p["t"])
+    check("SZKT's zip gives its trams and trolleybuses (route_type 800), not MÁV's Szeged buses",
+          [p["op_id"] for p in got] == ["szeged"] and lines == [("2", 0), ("9", 800)], repr(lines))
+    older = szeged_zip(base / "old.zip", "1,Volánbusz Zrt.\n2,SZKT\n3,MÁV-START\n",
+                       "1,70,1,3\n2,2,2,0\n3,9,2,11\n4,1,3,109\n")
+    lines = sorted((t[1], t[4]) for p in bci._load_feed(base, szeged, older) for t in p["t"])
+    check("the older zip's SZKT agency is matched by name, its buses and tram-train left out",
+          lines == [("2", 0), ("9", 11)], repr(lines))
+    check("a feed without agencies keeps every agency's routes",
+          len(bci._load_feed(base, {"id": "x", "name": "X", "file": "x.zip"}, older)[0]["t"]) == 4)
+
+# A feed whose own host fails is fetched from its mirror, the same zip.
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp)
+    gtfs_zip(base / "fixture.zip", city_feed())
+    tried: list[str] = []
+
+    def mirror_download(url: str, dest: Path, **_kw) -> dict:
+        tried.append(url)
+        if "down.example" in url:
+            raise OSError("connection refused")
+        shutil.copy(base / "fixture.zip", dest)
+        return {"size": dest.stat().st_size}
+
+    real_download = bci.download_feed
+    bci.download_feed = mirror_download
+    try:
+        feed = {"id": "m", "name": "M", "url": "https://down.example/m.zip",
+                "mirrors": ["https://mirror.example/m/"], "file": "m.zip"}
+        with contextlib.redirect_stdout(io.StringIO()):
+            got = bci._load_feed(base, feed)
+        check("a feed whose host fails is downloaded from its mirror",
+              tried == ["https://down.example/m.zip", "https://mirror.example/m/"] and bool(got and got[0]["t"]),
+              repr(tried))
+    finally:
+        bci.download_feed = real_download
+
 # ---- 1. Volán index: too few trips is a broken feed -----------------------
 
 with tempfile.TemporaryDirectory() as tmp:
