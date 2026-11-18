@@ -345,10 +345,13 @@ register({
     });
     idx.stops = stops;
     /* "al": [old stop id, stop index] for the stops a rebuilt feed
-       renumbered (Szeged's new source, November 2026): the build maps each
-       old id to the stop of the same operator and mode within 50 m. A card
-       saved with the old id finds its stop by it (gtfsStopById,
-       volanMatchStop); an id the index still has is never an alias. */
+       renumbered (Szeged's new source, November 2026). The build gives the
+       new stop of the same operator and mode within 50 m the old id itself
+       (the feed's own id is the row's fifth element), so cards older than
+       this table find it too; "al" holds the old ids left over, such as two
+       old stops that became one. A card saved with such an id finds its
+       stop by it (gtfsStopById, volanMatchStop); an id the index still has
+       is never an alias. */
     idx.byAlias = new Map();
     (Array.isArray(idx.al) ? idx.al : []).forEach((row) => {
       const st = Array.isArray(row) ? stops[row[1]] : null;
