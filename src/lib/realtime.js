@@ -110,7 +110,8 @@ register({
     const repeat = [];
     for (let i = lo; i <= hi && stops.length < RT_MAX_STOPS; i++) {
       const st = idx.stops[ps[i]];
-      const id = String((st && st.id) || '');
+      /* A stop renamed to an older id still matches the feed by its own id. */
+      const id = String((st && (st.fid || st.id)) || '');
       if (calls.get(ps[i]) > 1) repeat.push(stops.length);
       stops.push(id.indexOf(pre) === 0 ? id.slice(pre.length) : id);
     }

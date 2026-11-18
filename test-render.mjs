@@ -11655,6 +11655,15 @@ const review5Planner = async (now) => {
     check('a trip without repeated stops sends no repeat', plain.repeat === undefined, JSON.stringify(plain));
   }
 
+  /* A stop the build renamed to an older id (keep_stop_ids) is sent to the
+     integration by the feed's own id, which the realtime feed names. */
+  {
+    const idx = { stops: [{ id: 'paks:A' }, { id: 'paks:OLD', fid: 'paks:NEW' }, { id: 'paks:C' }] };
+    const d = Lib.rtGtfsDescriptor('paks', idx, [0, '1', [0, 1, 2], [480, 482, 484], 3, -1, 'T7'], 0, 2, '20261102');
+    check('a renamed stop is matched on the feed by its own id',
+      JSON.stringify(d.stops) === '["A","NEW","C"]', JSON.stringify(d));
+  }
+
   /* The request keeps within the service schema: a field at its limit is
      sent, one past it is trimmed or left out, so the call is not refused. */
   {

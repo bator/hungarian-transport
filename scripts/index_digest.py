@@ -69,6 +69,10 @@ def canonical(index: Path) -> dict:
         stop = list(row[:3])
         if len(row) > 3:
             stop.append(ops[row[3]][0])
+        if len(row) > 4:
+            # The feed's own id of a stop that kept an older id: realtime
+            # matches on it, so a change is a change to ship.
+            stop.append(row[4])
         stop.extend(coords[2 * i: 2 * i + 2])
         stops.append(stop)
     cal, added, removed = idx.get("c") or [], idx.get("a") or [], idx.get("r") or []
@@ -97,6 +101,12 @@ def canonical(index: Path) -> dict:
         "o": sorted(ops),
         "s": sorted(json.dumps(s, ensure_ascii=False, separators=(",", ":")) for s in stops),
         "t": sorted(trips),
+        # Old stop ids saved cards still name: a change is one to ship.
+        "al": sorted(
+            json.dumps([a[0], stops[a[1]][0]], ensure_ascii=False)
+            for a in idx.get("al") or []
+            if isinstance(a, list) and len(a) == 2 and isinstance(a[1], int) and 0 <= a[1] < len(stops)
+        ),
     }
 
 

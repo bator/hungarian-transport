@@ -1362,6 +1362,24 @@ def digest_checks() -> bool:
             [r[6] for r in rows] == [f"T{n}" for n in range(6)] and index_digest.digest(n1) != index_digest.digest(n2),
             str(rows[:2]),
         )
+        # A stop's feed id (row element 5, kept by keep_stop_ids) and the
+        # old-id aliases ("al") are what saved cards and realtime match on:
+        # changing either is a change to ship.
+        kept = [Path(tmp) / d for d in ("k1", "k2", "k3")]
+        for k, d in enumerate(kept):
+            d.mkdir()
+            part = _digest_part("x")
+            part["s"] = [[*row[:3], f"x:F{n}" if k != 1 or n else "x:moved"] for n, row in enumerate(part["s"])]
+            write_index([part], d / "city-index.json.gz", with_operators=True,
+                        aliases={"x:old": part["s"][0][0]} if k == 2 else None)
+        k1, k2, k3 = (d / "city-index.json.gz" for d in kept)
+        srows = json.loads(gzip.decompress(k1.read_bytes()))["s"]
+        failed |= not check(
+            "index digest: a stop's feed id and the stop aliases count as changes",
+            srows[0][4] == "x:F0" and index_digest.digest(k1) != index_digest.digest(k2)
+            and index_digest.digest(k1) != index_digest.digest(k3),
+            str(srows[:2]),
+        )
         shutil.rmtree(dirs[1] / index_shapes(b))
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             status = index_digest.main([str(b)])
