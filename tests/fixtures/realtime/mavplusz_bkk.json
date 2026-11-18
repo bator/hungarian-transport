@@ -1,0 +1,878 @@
+{
+ "board": {
+  "wall": 1795028069,
+  "variables": {
+   "id": "BKK:F00940",
+   "start": 1795028069,
+   "range": 3600,
+   "n": 3
+  },
+  "response": {
+   "data": {
+    "stop": {
+     "gtfsId": "BKK:F00940",
+     "name": "Budapest, Báthory utca / Bajcsy-Zsilinszky út",
+     "lat": 47.507189,
+     "lon": 19.05573,
+     "platformCode": null,
+     "parentStation": null,
+     "routes": [
+      {
+       "gtfsId": "BKK:0090"
+      },
+      {
+       "gtfsId": "BKK:4720"
+      },
+      {
+       "gtfsId": "BKK:9090"
+      },
+      {
+       "gtfsId": "BKK:9140"
+      },
+      {
+       "gtfsId": "BKK:9141"
+      },
+      {
+       "gtfsId": "BKK:9230"
+      },
+      {
+       "gtfsId": "BKK:9310"
+      },
+      {
+       "gtfsId": "BKK:9430"
+      },
+      {
+       "gtfsId": "BKK:9500"
+      },
+      {
+       "gtfsId": "BKK:9840"
+      },
+      {
+       "gtfsId": "BKK:9850"
+      }
+     ],
+     "stoptimesWithoutPatterns": [
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 71880,
+       "realtimeArrival": 72136,
+       "scheduledDeparture": 71880,
+       "realtimeDeparture": 72136,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "pickupType": "SCHEDULED",
+       "stop": {
+        "gtfsId": "BKK:F00940",
+        "name": "Budapest, Báthory utca / Bajcsy-Zsilinszky út",
+        "lat": 47.507189,
+        "lon": 19.05573,
+        "platformCode": null,
+        "parentStation": null
+       },
+       "trip": {
+        "gtfsId": "BKK:D25280605",
+        "tripHeadsign": "Óbuda, Bogdáni út",
+        "tripShortName": null,
+        "wheelchairAccessible": "POSSIBLE",
+        "bikesAllowed": "NOT_ALLOWED",
+        "route": {
+         "gtfsId": "BKK:0090",
+         "shortName": "9",
+         "longName": null,
+         "mode": "BUS",
+         "type": 3,
+         "color": "009EE3",
+         "textColor": "FFFFFF"
+        }
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72180,
+       "realtimeArrival": 72280,
+       "scheduledDeparture": 72240,
+       "realtimeDeparture": 72310,
+       "serviceDay": 1794956400,
+       "headsign": "Zugló vasútállomás",
+       "pickupType": "SCHEDULED",
+       "stop": {
+        "gtfsId": "BKK:F00940",
+        "name": "Budapest, Báthory utca / Bajcsy-Zsilinszky út",
+        "lat": 47.507189,
+        "lon": 19.05573,
+        "platformCode": null,
+        "parentStation": null
+       },
+       "trip": {
+        "gtfsId": "BKK:C96610581",
+        "tripHeadsign": "Zugló vasútállomás",
+        "tripShortName": null,
+        "wheelchairAccessible": "POSSIBLE",
+        "bikesAllowed": "NOT_ALLOWED",
+        "route": {
+         "gtfsId": "BKK:4720",
+         "shortName": "72",
+         "longName": null,
+         "mode": "TROLLEYBUS",
+         "type": 11,
+         "color": "E41F18",
+         "textColor": "FFFFFF"
+        }
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72480,
+       "realtimeArrival": 72563,
+       "scheduledDeparture": 72480,
+       "realtimeDeparture": 72563,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "pickupType": "SCHEDULED",
+       "stop": {
+        "gtfsId": "BKK:F00940",
+        "name": "Budapest, Báthory utca / Bajcsy-Zsilinszky út",
+        "lat": 47.507189,
+        "lon": 19.05573,
+        "platformCode": null,
+        "parentStation": null
+       },
+       "trip": {
+        "gtfsId": "BKK:D25280611",
+        "tripHeadsign": "Óbuda, Bogdáni út",
+        "tripShortName": null,
+        "wheelchairAccessible": "POSSIBLE",
+        "bikesAllowed": "NOT_ALLOWED",
+        "route": {
+         "gtfsId": "BKK:0090",
+         "shortName": "9",
+         "longName": null,
+         "mode": "BUS",
+         "type": 3,
+         "color": "009EE3",
+         "textColor": "FFFFFF"
+        }
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72780,
+       "realtimeArrival": 72780,
+       "scheduledDeparture": 72840,
+       "realtimeDeparture": 72840,
+       "serviceDay": 1794956400,
+       "headsign": "Zugló vasútállomás",
+       "pickupType": "SCHEDULED",
+       "stop": {
+        "gtfsId": "BKK:F00940",
+        "name": "Budapest, Báthory utca / Bajcsy-Zsilinszky út",
+        "lat": 47.507189,
+        "lon": 19.05573,
+        "platformCode": null,
+        "parentStation": null
+       },
+       "trip": {
+        "gtfsId": "BKK:C96610586",
+        "tripHeadsign": "Zugló vasútállomás",
+        "tripShortName": null,
+        "wheelchairAccessible": "POSSIBLE",
+        "bikesAllowed": "NOT_ALLOWED",
+        "route": {
+         "gtfsId": "BKK:4720",
+         "shortName": "72",
+         "longName": null,
+         "mode": "TROLLEYBUS",
+         "type": 11,
+         "color": "E41F18",
+         "textColor": "FFFFFF"
+        }
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 73020,
+       "realtimeArrival": 73020,
+       "scheduledDeparture": 73020,
+       "realtimeDeparture": 73020,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "pickupType": "SCHEDULED",
+       "stop": {
+        "gtfsId": "BKK:F00940",
+        "name": "Budapest, Báthory utca / Bajcsy-Zsilinszky út",
+        "lat": 47.507189,
+        "lon": 19.05573,
+        "platformCode": null,
+        "parentStation": null
+       },
+       "trip": {
+        "gtfsId": "BKK:D25280617",
+        "tripHeadsign": "Óbuda, Bogdáni út",
+        "tripShortName": null,
+        "wheelchairAccessible": "POSSIBLE",
+        "bikesAllowed": "NOT_ALLOWED",
+        "route": {
+         "gtfsId": "BKK:0090",
+         "shortName": "9",
+         "longName": null,
+         "mode": "BUS",
+         "type": 3,
+         "color": "009EE3",
+         "textColor": "FFFFFF"
+        }
+       }
+      },
+      {
+       "realtime": false,
+       "realtimeState": "SCHEDULED",
+       "scheduledArrival": 73260,
+       "realtimeArrival": 73260,
+       "scheduledDeparture": 73320,
+       "realtimeDeparture": 73320,
+       "serviceDay": 1794956400,
+       "headsign": "Zugló vasútállomás",
+       "pickupType": "SCHEDULED",
+       "stop": {
+        "gtfsId": "BKK:F00940",
+        "name": "Budapest, Báthory utca / Bajcsy-Zsilinszky út",
+        "lat": 47.507189,
+        "lon": 19.05573,
+        "platformCode": null,
+        "parentStation": null
+       },
+       "trip": {
+        "gtfsId": "BKK:C96610692",
+        "tripHeadsign": "Zugló vasútállomás",
+        "tripShortName": null,
+        "wheelchairAccessible": "POSSIBLE",
+        "bikesAllowed": "NOT_ALLOWED",
+        "route": {
+         "gtfsId": "BKK:4720",
+         "shortName": "72",
+         "longName": null,
+         "mode": "TROLLEYBUS",
+         "type": 11,
+         "color": "E41F18",
+         "textColor": "FFFFFF"
+        }
+       }
+      }
+     ]
+    }
+   }
+  }
+ },
+ "trips": {
+  "variables": {
+   "d0": "20261118",
+   "t0": "BKK:D25280605",
+   "t1": "BKK:NOSUCHTRIP"
+  },
+  "response": {
+   "data": {
+    "t0": {
+     "gtfsId": "BKK:D25280605",
+     "tripHeadsign": "Óbuda, Bogdáni út",
+     "tripShortName": null,
+     "wheelchairAccessible": "POSSIBLE",
+     "bikesAllowed": "NOT_ALLOWED",
+     "route": {
+      "gtfsId": "BKK:0090",
+      "shortName": "9",
+      "longName": null,
+      "mode": "BUS",
+      "type": 3,
+      "color": "009EE3",
+      "textColor": "FFFFFF"
+     },
+     "stoptimesForDate": [
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 70080,
+       "realtimeArrival": 69730,
+       "scheduledDeparture": 70080,
+       "realtimeDeparture": 70065,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01636",
+        "name": "Budapest, Kőbánya alsó vasútállomás",
+        "lat": 47.483652,
+        "lon": 19.127839,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 70140,
+       "realtimeArrival": 70195,
+       "scheduledDeparture": 70140,
+       "realtimeDeparture": 70213,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01653",
+        "name": "Budapest, Szent László tér",
+        "lat": 47.485925,
+        "lon": 19.131093,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 70260,
+       "realtimeArrival": 70326,
+       "scheduledDeparture": 70260,
+       "realtimeDeparture": 70343,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01641",
+        "name": "Budapest, Liget tér",
+        "lat": 47.482795,
+        "lon": 19.130358,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 70380,
+       "realtimeArrival": 70449,
+       "scheduledDeparture": 70380,
+       "realtimeDeparture": 70460,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01571",
+        "name": "Budapest, Kőbánya alsó vasútállomás (Mázsa tér)",
+        "lat": 47.482879,
+        "lon": 19.125715,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 70440,
+       "realtimeArrival": 70624,
+       "scheduledDeparture": 70440,
+       "realtimeDeparture": 70625,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01563",
+        "name": "Budapest, Kismartoni út",
+        "lat": 47.484126,
+        "lon": 19.116668,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 70500,
+       "realtimeArrival": 70673,
+       "scheduledDeparture": 70500,
+       "realtimeDeparture": 70673,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01733",
+        "name": "Budapest, Eiffel Műhelyház",
+        "lat": 47.485136,
+        "lon": 19.112914,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 70560,
+       "realtimeArrival": 70737,
+       "scheduledDeparture": 70560,
+       "realtimeDeparture": 70750,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01267",
+        "name": "Budapest, Kőbányai út / Könyves Kálmán körút",
+        "lat": 47.48674,
+        "lon": 19.106971,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 70620,
+       "realtimeArrival": 70787,
+       "scheduledDeparture": 70620,
+       "realtimeDeparture": 70787,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:008036",
+        "name": "Budapest, Kőbányai út 31.",
+        "lat": 47.487461,
+        "lon": 19.104252,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 70800,
+       "realtimeArrival": 70940,
+       "scheduledDeparture": 70860,
+       "realtimeDeparture": 70956,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01187",
+        "name": "Budapest, Orczy tér",
+        "lat": 47.48947,
+        "lon": 19.090495,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 70920,
+       "realtimeArrival": 71070,
+       "scheduledDeparture": 70920,
+       "realtimeDeparture": 71088,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01223",
+        "name": "Budapest, Kálvária tér",
+        "lat": 47.48889,
+        "lon": 19.085146,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 70980,
+       "realtimeArrival": 71214,
+       "scheduledDeparture": 70980,
+       "realtimeDeparture": 71229,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01176",
+        "name": "Budapest, Muzsikus cigányok parkja",
+        "lat": 47.489278,
+        "lon": 19.079639,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 71040,
+       "realtimeArrival": 71287,
+       "scheduledDeparture": 71040,
+       "realtimeDeparture": 71291,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01207",
+        "name": "Budapest, Horváth Mihály tér",
+        "lat": 47.489594,
+        "lon": 19.076707,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 71160,
+       "realtimeArrival": 71382,
+       "scheduledDeparture": 71160,
+       "realtimeDeparture": 71405,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01204",
+        "name": "Budapest, Harminckettesek tere",
+        "lat": 47.489514,
+        "lon": 19.071306,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 71280,
+       "realtimeArrival": 71473,
+       "scheduledDeparture": 71280,
+       "realtimeDeparture": 71487,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01175",
+        "name": "Budapest, Szentkirályi utca",
+        "lat": 47.489191,
+        "lon": 19.066807,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 71400,
+       "realtimeArrival": 71629,
+       "scheduledDeparture": 71400,
+       "realtimeDeparture": 71662,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01010",
+        "name": "Budapest, Kálvin tér M",
+        "lat": 47.49001,
+        "lon": 19.061978,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 71520,
+       "realtimeArrival": 71782,
+       "scheduledDeparture": 71520,
+       "realtimeDeparture": 71782,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01013",
+        "name": "Budapest, Astoria M",
+        "lat": 47.494145,
+        "lon": 19.060146,
+        "platformCode": null,
+        "parentStation": {
+         "gtfsId": "BKK:MERGED_F01013"
+        }
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 71640,
+       "realtimeArrival": 71902,
+       "scheduledDeparture": 71640,
+       "realtimeDeparture": 71902,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:009309",
+        "name": "Budapest, Deák Ferenc tér M",
+        "lat": 47.497449,
+        "lon": 19.055715,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 71700,
+       "realtimeArrival": 71962,
+       "scheduledDeparture": 71700,
+       "realtimeDeparture": 71962,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:048506",
+        "name": "Budapest, Szent István Bazilika",
+        "lat": 47.500273,
+        "lon": 19.055025,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 71820,
+       "realtimeArrival": 72082,
+       "scheduledDeparture": 71820,
+       "realtimeDeparture": 72082,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00942",
+        "name": "Budapest, Arany János utca M",
+        "lat": 47.503304,
+        "lon": 19.055105,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 71880,
+       "realtimeArrival": 72142,
+       "scheduledDeparture": 71880,
+       "realtimeDeparture": 72142,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00940",
+        "name": "Budapest, Báthory utca / Bajcsy-Zsilinszky út",
+        "lat": 47.507189,
+        "lon": 19.05573,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72000,
+       "realtimeArrival": 72262,
+       "scheduledDeparture": 72060,
+       "realtimeDeparture": 72292,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F01029",
+        "name": "Budapest, Nyugati pályaudvar M",
+        "lat": 47.509806,
+        "lon": 19.057151,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72180,
+       "realtimeArrival": 72412,
+       "scheduledDeparture": 72180,
+       "realtimeDeparture": 72412,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00929",
+        "name": "Budapest, Jászai Mari tér",
+        "lat": 47.512558,
+        "lon": 19.050126,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72360,
+       "realtimeArrival": 72592,
+       "scheduledDeparture": 72360,
+       "realtimeDeparture": 72592,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00237",
+        "name": "Budapest, Margit híd, budai hídfő H",
+        "lat": 47.515518,
+        "lon": 19.038339,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72480,
+       "realtimeArrival": 72712,
+       "scheduledDeparture": 72480,
+       "realtimeDeparture": 72712,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00247",
+        "name": "Budapest, Császár-Komjádi uszoda",
+        "lat": 47.521409,
+        "lon": 19.038272,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72540,
+       "realtimeArrival": 72772,
+       "scheduledDeparture": 72540,
+       "realtimeDeparture": 72772,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00245",
+        "name": "Budapest, Zsigmond tér",
+        "lat": 47.524991,
+        "lon": 19.037951,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72660,
+       "realtimeArrival": 72892,
+       "scheduledDeparture": 72660,
+       "realtimeDeparture": 72892,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00137",
+        "name": "Budapest, Kolosy tér",
+        "lat": 47.528586,
+        "lon": 19.039001,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72720,
+       "realtimeArrival": 72952,
+       "scheduledDeparture": 72720,
+       "realtimeDeparture": 72952,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00603",
+        "name": "Budapest, Nagyszombat utca",
+        "lat": 47.531833,
+        "lon": 19.040023,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72780,
+       "realtimeArrival": 73012,
+       "scheduledDeparture": 72780,
+       "realtimeDeparture": 73012,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00604",
+        "name": "Budapest, Tímár utca",
+        "lat": 47.535152,
+        "lon": 19.039969,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72840,
+       "realtimeArrival": 73072,
+       "scheduledDeparture": 72840,
+       "realtimeDeparture": 73072,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00606",
+        "name": "Budapest, Kiscelli utca",
+        "lat": 47.538723,
+        "lon": 19.0405,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 72960,
+       "realtimeArrival": 73192,
+       "scheduledDeparture": 72960,
+       "realtimeDeparture": 73192,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00611",
+        "name": "Budapest, Flórián tér",
+        "lat": 47.542896,
+        "lon": 19.042252,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 73020,
+       "realtimeArrival": 73252,
+       "scheduledDeparture": 73020,
+       "realtimeDeparture": 73252,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00580",
+        "name": "Budapest, Raktár utca",
+        "lat": 47.545288,
+        "lon": 19.042837,
+        "platformCode": null,
+        "parentStation": null
+       }
+      },
+      {
+       "realtime": true,
+       "realtimeState": "UPDATED",
+       "scheduledArrival": 73140,
+       "realtimeArrival": 73372,
+       "scheduledDeparture": 73140,
+       "realtimeDeparture": 73372,
+       "serviceDay": 1794956400,
+       "headsign": "Óbuda, Bogdáni út",
+       "stop": {
+        "gtfsId": "BKK:F00573",
+        "name": "Budapest, Óbuda, Bogdáni út",
+        "lat": 47.550712,
+        "lon": 19.041826,
+        "platformCode": null,
+        "parentStation": null
+       }
+      }
+     ]
+    },
+    "t1": null
+   }
+  }
+ }
+}
