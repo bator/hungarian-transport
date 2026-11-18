@@ -260,7 +260,22 @@ before, and the card fills the board from Transitous.
   pole of a station's departure and its platform code. Not the vehicle's
   GPS position and plate: the rows show no live marker. HÉV is not in the
   planner's BKK feed, so a HÉV board fails over to Transitous. A trip's
-  details (where it goes, the ride's length) come from the planner too.
+  details (where it goes, the ride's length) come from the planner too, on
+  the service date the trip's board gave (FUTÁR's own board or the
+  planner's); a trip no board dated is asked for today in Budapest, and
+  before 05:00 for yesterday's service day as well, the run under way
+  being the answer (a night bus after midnight). The card discovers no
+  further routes from a planner board: their route details would go to
+  the FUTÁR that just failed.
+- **Stations.** A GTFS parent station (`BKK_CS056233`, Keleti's metro) is
+  one planner stop whose board holds its child stops' departures. FUTÁR's
+  own combined stations (`BKK_CSF01131`, the Keleti preset) are not in
+  the planner: their board is merged from their child poles' boards, the
+  poles FUTÁR's own answers named since Home Assistant started (a station
+  board's departures, any answer's stop references), at most 24 poles and
+  20 departures a pattern each. A station FUTÁR has named no pole of has
+  no fallback. FUTÁR's ad-hoc trips (ids of ten or more digits) are not in
+  the planner either.
 - **Not asked when.** The integration's own FUTÁR rate limit, an error
   status FUTÁR gave for the request, and a request never sent are not
   outages; nor are search, route details, plans and timetables, which the
@@ -269,12 +284,19 @@ before, and the card fills the board from Transitous.
   the cards read Budapest from Transitous; the planner alone would not
   answer the searches and route patterns a card with the action asks for.
 - **Limits.** One planner request per stop per 15 s for every card and
-  horizon together (the widest window, eight hours, is asked and each
-  card's horizon cut from it); the trip details asked within 50 ms go in one
-  request of up to 40 trips, cached 60 s; 0.5 requests a second with a burst
-  of 30, a bucket of its own; 30 s without requests after a failure, logged
-  once. FUTÁR gets 8 s of the card's 20 s on these two endpoints, the planner
-  6 s.
+  horizon together, while FUTÁR fails (the widest window, eight hours, is
+  asked, 60 departures a pattern, and each card's horizon cut from it; an
+  answer of up to 2 MB); the trip details asked within 50 ms go in one
+  request of up to 40 trips, cached 60 s, a trip never waiting for an
+  earlier request. These requests have a share of the integration's one
+  planner limit (see [Polling](#polling)): 0.25 a second with a burst of
+  15, within the total's 0.5 and 30. A call failing fast on a rejected key
+  first takes a token of FUTÁR's own rate limit, as a call to FUTÁR would.
+  After a failure the planner is not asked for 30 s, by the realtime hub
+  either, logged once. FUTÁR gets 8 s of the card's 20 s only where the
+  planner can answer (a BKK stop, a FUTÁR station whose poles are known, a
+  timetable trip, the planner not backing off), the planner 6 s; elsewhere
+  FUTÁR keeps the whole budget.
 
 ## Licence and terms
 
@@ -297,11 +319,17 @@ before, and the card fills the board from Transitous.
   which covers mav.hu and its subdomains and mavplusz.hu, requires MÁV's
   prior written permission for downloading or reusing its content. The
   planner's GraphQL endpoint states no terms of its own and asks for no
-  key. The integration asks it only for the trips a card shows, while the
-  card is shown, at most once a minute per trip; it keeps nothing beyond
-  that minute's in-memory cache and republishes nothing. Removing the
-  `"mavplusz": true` keys from `realtime_feeds.json` turns this source off:
-  the cards then read only the feeds, as before 1.10.19.
+  key. The integration asks it, while a card is shown, for the delays of
+  the trips the card shows, at most once a minute per trip, and, only
+  while BKK FUTÁR fails, for the departure boards of the Budapest stops
+  the cards show (once per stop per 15 s) and their trips' details (once
+  a minute per trip). All of it counts against one limit of one request
+  every two seconds with a burst of 30 per Home Assistant, the BKK boards
+  at most half of that. It keeps the answers in memory only, for those
+  intervals, and republishes nothing. Removing the `"mavplusz": true` keys
+  from `realtime_feeds.json` turns the delays off (the cards then read
+  only the feeds, as before 1.10.19); without a FUTÁR key no BKK board is
+  asked of the planner.
 - **Not redistributed.** The integration does not republish any feed or
   planner answer: each Home Assistant fetches it for its own cards, keeps
   it in memory only, and shows the derived delay and position.
@@ -332,16 +360,25 @@ Should either side object, removing the operator from `realtime_feeds.json`
   one every two seconds after that, whatever the cards ask.
 - **The planner.** One request per action call at most for the trips not
   cached (each kept for the feed's interval), plus one for the route lists
-  of route + start requests not cached (each kept three hours), counted
-  against a rate limit of its own as strict as the feeds' one (asking the
-  planner for many trips does not hold back the feeds' fetches); JSON in, gzip, the same User-Agent, no
-  redirects, a 20-second timeout, 1 MB per answer at most.
+  of route + start requests not cached (each kept three hours); JSON in,
+  gzip, the same User-Agent, no redirects, a 20-second timeout, 1 MB per
+  answer at most. While BKK FUTÁR fails, also the BKK boards (per stop per
+  15 s) and trip details (see [BKK boards when FUTÁR
+  fails](#bkk-boards-when-futár-fails)), with a User-Agent of their own.
+  All planner requests of one Home Assistant share one rate limit, apart
+  from the feeds' (asking the planner for many trips does not hold back
+  the feeds' fetches) and as strict: 30 in a burst and one every two
+  seconds after that, of which the BKK boards may use 15 and one every
+  four seconds (a user asking for stops no card shows does not hold back
+  the delays).
 - **Outages.** A failing feed is not asked again for a minute (a static zip
   for 15 minutes), is logged once when it starts failing and once when it
   answers again, and the cards keep the timetable meanwhile (a static zip's
   train numbers from before stay in use, see above). A failing planner
   likewise: a minute's backoff, one warning, one line when it answers
-  again, and the feeds meanwhile.
+  again, and the feeds meanwhile. The backoff is shared: a failure of the
+  BKK boards' requests (30 s) holds back the delays' requests too, and the
+  other way round.
 
 ## The action
 

@@ -17,17 +17,20 @@ both alike. No Home Assistant imports: tests/test_mavplusz.py runs it bare.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 import dataclasses
 from datetime import datetime
 import json
+import logging
 import re
 from typing import Any, NamedTuple
 from zoneinfo import ZoneInfo
 
 import aiohttp
 
-from . import jsonsafe, realtime
+from . import jsonsafe, realtime, upstream
+
+_LOGGER = logging.getLogger(__name__)
 
 URL = "https://mavplusz.hu/otp2-backend/otp/routers/default/index/graphql"
 # Trips in one request, of the ones not cached yet; the rest are cut, never
@@ -51,6 +54,18 @@ MAX_ROUTES_PER_REQUEST = 40
 MAX_RESPONSE_BYTES = 1024 * 1024
 BUDAPEST = ZoneInfo("Europe/Budapest")
 _DATE = re.compile(r"^\d{8}$")
+# Every request one Home Assistant sends the planner, the realtime hub's
+# and the BKK boards' together (PlannerLimiter): one every two seconds with
+# a burst of 30, as docs/realtime.md "Polling" says, however many cards,
+# browsers and users ask.
+PLANNER_RATE = 0.5
+PLANNER_BURST = 30
+# Of those, the BKK boards' and trip details' while FUTÁR fails
+# (mavplusz_board.py): half of either. Any logged-in user can have FUTÁR's
+# failures asked of the planner for stops no card shows; that uses up this
+# share, never the delays every other card's refresh needs.
+FALLBACK_RATE = 0.25
+FALLBACK_BURST = 15
 # stopRelationship.status -> VehiclePosition.VehicleStopStatus.
 _STATUS = {"INCOMING_AT": 0, "STOPPED_AT": 1, "IN_TRANSIT_TO": 2}
 # A vehicle's position, naming its trip. No vehicle ids: they are plate
@@ -72,6 +87,109 @@ _TRIP_FIELDS = (
 _ROUTE_FIELDS = "patterns { " + _POSITION_FIELDS + " }"
 # A realtime pattern's code: the scheduled one's route plus "::rt#".
 _RT_PATTERN = "::rt#"
+
+
+class _Refused(Exception):
+    """A token bucket of PlannerLimiter was empty (never leaves it)."""
+
+
+class PlannerLimiter:
+    """The one rate limit and the one backoff of every request to the planner.
+
+    The realtime hub and the BKK boards (mavplusz_board.PlannerBoards) ask
+    the same server; with a bucket and a backoff each, they asked it twice
+    as often as documented, and one kept asking while the other had found
+    it down. Home Assistant makes one of these (__init__._planner_limiter)
+    and hands it to both; each takes its tokens through a client().
+
+    A request takes a token of the total; one of the BKK fallback also one
+    of its share (FALLBACK_RATE), first, so a refused fallback request
+    never spends a token the delays need. After a failure nobody asks for
+    the seconds the failing requester gives (the longer one wins).
+    """
+
+    def __init__(
+        self,
+        *,
+        rate: float = PLANNER_RATE,
+        burst: int = PLANNER_BURST,
+        fallback_rate: float = FALLBACK_RATE,
+        fallback_burst: int = FALLBACK_BURST,
+        monotonic: upstream.Monotonic = upstream.monotonic,
+    ) -> None:
+        self._monotonic = monotonic
+        self._retry_at = -1e18
+        self._total = upstream.TokenBucket(
+            rate,
+            burst,
+            refused=_Refused,
+            log_refused=lambda count: _LOGGER.warning(
+                "mavplusz.hu requests over the integration's rate limit (%.2f/s, burst %d): "
+                "%d refused since the last such line",
+                rate,
+                burst,
+                count,
+            ),
+            monotonic=monotonic,
+        )
+        self._fallback = upstream.TokenBucket(
+            fallback_rate,
+            fallback_burst,
+            refused=_Refused,
+            log_refused=lambda count: _LOGGER.warning(
+                "mavplusz.hu requests for BKK boards while FUTÁR fails over the integration's rate limit "
+                "(%.2f/s, burst %d): %d refused since the last such line",
+                fallback_rate,
+                fallback_burst,
+                count,
+            ),
+            monotonic=monotonic,
+        )
+
+    def backing_off(self) -> bool:
+        """A request failed within the backoff it set: nobody asks now."""
+        return self._monotonic() < self._retry_at
+
+    def failed(self, seconds: float) -> None:
+        """A request failed: no request for seconds (or the backoff already set, if longer)."""
+        self._retry_at = max(self._retry_at, self._monotonic() + seconds)
+
+    def take(self, *, fallback: bool = False) -> bool:
+        """Whether a request may go now; it then has its token(s). False
+        while backing off (not counted as refused) or over a limit (logged)."""
+        if self.backing_off():
+            return False
+        try:
+            if fallback:
+                self._fallback.take()
+            self._total.take()
+        except _Refused:
+            return False
+        return True
+
+    def client(self, refused: Callable[[], BaseException], *, fallback: bool = False) -> PlannerClient:
+        """The limiter as one requester sees it: take() raises refused()."""
+        return PlannerClient(self, refused, fallback)
+
+
+class PlannerClient:
+    """One requester's handle on the shared PlannerLimiter (its client())."""
+
+    def __init__(self, limiter: PlannerLimiter, refused: Callable[[], BaseException], fallback: bool) -> None:
+        self.limiter = limiter
+        self._refused = refused
+        self._fallback = fallback
+
+    def take(self) -> None:
+        """A token for one request now, or refused() at once."""
+        if not self.limiter.take(fallback=self._fallback):
+            raise self._refused()
+
+    def backing_off(self) -> bool:
+        return self.limiter.backing_off()
+
+    def failed(self, seconds: float) -> None:
+        self.limiter.failed(seconds)
 
 
 class TripKey(NamedTuple):

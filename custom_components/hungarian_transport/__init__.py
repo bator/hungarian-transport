@@ -32,6 +32,7 @@ from . import (
     lovelace_resource,
     mav,
     mav_daily,
+    mavplusz,
     mavplusz_board,
     realtime,
     storage,
@@ -377,6 +378,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # also when no card asks at all; the timer stops with HA.
     hub = realtime.RealtimeHub(
         session,
+        planner_limiter=_planner_limiter(hass),
         executor=hass.async_add_executor_job,
         task_factory=lambda coro: hass.async_create_background_task(
             coro, "hungarian_transport_realtime", eager_start=False
@@ -460,6 +462,16 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     async_at_started(hass, _sync_resource)
     return True
+
+
+def _planner_limiter(hass: HomeAssistant) -> mavplusz.PlannerLimiter:
+    """Home Assistant's one rate limit and backoff for mavplusz.hu, shared by
+    the realtime hub and every entry's BKK boards: one server, one limit."""
+    data = hass.data.setdefault(DOMAIN, {})
+    limiter = data.get("planner_limiter")
+    if limiter is None:
+        limiter = data["planner_limiter"] = mavplusz.PlannerLimiter()
+    return limiter
 
 
 def _entry_api_key(entry: ConfigEntry) -> str:
@@ -559,7 +571,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         return hass.async_create_background_task(coro, "hungarian_transport_futar", eager_start=False)
 
     planner = mavplusz_board.PlannerBoards(
-        async_get_clientsession(hass), task_factory=task_factory, call_later=hass_call_later(hass)
+        async_get_clientsession(hass),
+        task_factory=task_factory,
+        call_later=hass_call_later(hass),
+        limiter=_planner_limiter(hass),
     )
     proxy = FutarProxy(
         async_get_clientsession(hass),
