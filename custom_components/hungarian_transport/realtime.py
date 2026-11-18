@@ -93,6 +93,9 @@ MIN_DELAY = -20 * 60
 MAX_DELAY = 6 * 3600
 # A position older than this is not where the vehicle is.
 MAX_POSITION_AGE = 15 * 60
+# Two trips whose predictions at a card's stops are no further apart than
+# this (seconds) are one train listed twice (_pick).
+SAME_PREDICTION = 30
 # A feed whose header is older than this is a stalled publisher still
 # serving its last file, not live data.
 MAX_FEED_AGE = 15 * 60
@@ -1262,14 +1265,48 @@ def _has_stop(tu: TripUpdate | None, stops: list[str]) -> bool:
     return any(_stop_hit(u.stop_id, s) for u in tu.stops for s in stops)
 
 
-def _pick(cands: list[tuple[str, TripUpdate | None, Vehicle | None]], stops: list[str], strict: bool = False):
+def _same_answer(a: TripUpdate, b: TripUpdate, req: dict[str, Any]) -> bool:
+    """Two trips give the card the same answer: at its boarding and its
+    destination stop (from, to) the same relationship, and delays and
+    times SAME_PREDICTION apart at most (a value one of them lacks is a
+    difference). False for a request with neither."""
+    stops = req.get("stops") or []
+    repeat = frozenset(int(i) for i in req.get("repeat") or ())
+    points = [(int(req[k]), k == "to") for k in ("from", "to") if req.get(k) is not None]
+    if not points or a.relationship != b.relationship:
+        return False
+    for index, arriving in points:
+        x, y = _at_stop(a, stops, index, arriving, repeat), _at_stop(b, stops, index, arriving, repeat)
+        if x[2] != y[2]:
+            return False
+        for va, vb in zip(x[:2], y[:2]):
+            if (va is None) != (vb is None) or (va is not None and abs(va - vb) > SAME_PREDICTION):
+                return False
+    return True
+
+
+def _pick(
+    cands: list[tuple[str, TripUpdate | None, Vehicle | None]],
+    stops: list[str],
+    strict: bool = False,
+    req: dict[str, Any] | None = None,
+):
     """The one candidate, or the one of several calling at the card's
     stops. strict: a trip not among cands may be the card's (the planner
-    listed two at that minute), so even a single one must call there."""
+    listed two at that minute), so even a single one must call there.
+
+    Several calling there that give req the same answer are one train
+    listed twice (741 on 2026-11-18: an UPDATED and a MODIFIED trip of the
+    same calls and delays): the one with a vehicle, else the first by trip
+    id. Ones that differ are no answer."""
     if len(cands) > 1 or strict:
         with_stop = [c for c in cands if _has_stop(c[1], stops)]
         if with_stop or strict:
             cands = with_stop
+        if req is not None and len(with_stop) > 1 and all(
+            _same_answer(a[1], b[1], req) for n, a in enumerate(with_stop) for b in with_stop[n + 1:]
+        ):
+            cands = [min(with_stop, key=lambda c: (c[2] is None, c[0]))]
     return cands[0] if len(cands) == 1 else None
 
 
@@ -1299,7 +1336,7 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], now: float, strict:
                 sm = _start_minutes(tid)
                 if rid == route and sm is not None and sm % 1440 == start:
                     cands.append((tid, t, v))
-        hit = _pick(sorted(cands, key=lambda c: c[0]), stops, strict)
+        hit = _pick(sorted(cands, key=lambda c: c[0]), stops, strict, req)
         if hit:
             return hit
     if "train" in cfg.match and req.get("train"):
@@ -1318,7 +1355,7 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], now: float, strict:
                     if t or v:
                         cands.append((tid, t, v))
                         break
-        hit = _pick(sorted(cands, key=lambda c: c[0]), stops)
+        hit = _pick(sorted(cands, key=lambda c: c[0]), stops, req=req)
         if hit:
             return hit
     return None

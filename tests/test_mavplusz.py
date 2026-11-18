@@ -1100,7 +1100,9 @@ def _without_call(trip: dict, station: str) -> dict:
 )
 async def test_the_variants_of_a_train_number_are_told_apart_by_the_stops(aioclient_mock, stops, picked) -> None:
     """741 runs as two trips that day: the one calling at the card's stops
-    is its row's, as on the feeds; both or neither is no answer."""
+    is its row's, as on the feeds; neither is no answer, nor both when they
+    differ there (at Budapest-Keleti, the terminus, one departs at 19:50
+    and the other on its 19:58 arrival)."""
     runs = TrainPlanner().runs
     runs[IC741_MOD, TODAY] = _without_call(_without_call(TRAINS["t1"], "005518069"), "005517848")
     planner = TrainPlanner(runs)
@@ -1288,6 +1290,37 @@ def test_a_vehicle_of_a_trip_live_on_two_days_goes_to_one_run(lag, day) -> None:
     with_vehicle = [k.date for k in (today, yesterday) if res[k].vehicle is not None]
     assert with_vehicle == [day]
     assert res[today].trip_update is not None and res[yesterday].trip_update is not None
+
+
+@pytest.mark.parametrize(
+    ("change", "picked"),
+    [(None, "36777783"), ("no-vehicle", "36391307"), ("later", None)],
+    ids=["twins", "twins-without-vehicle", "differ"],
+)
+async def test_one_train_listed_as_two_trips_is_answered(aioclient_mock, change, picked) -> None:
+    """741's UPDATED and MODIFIED trips call at Békéscsaba and Kőbánya-
+    Kispest with the same delays: one train, answered by the one with the
+    vehicle, else the first by trip id. 5 minutes apart they are two."""
+    runs = TrainPlanner().runs
+    if change == "no-vehicle":
+        runs[IC741, YESTERDAY] = _scheduled(TRAINS["t3"], YESTERDAY)
+    elif change == "later":
+        runs[IC741_MOD, TODAY] = _later(TRAINS["t1"], 300)
+        for st in runs[IC741_MOD, TODAY]["stoptimesForDate"]:
+            st["arrivalDelay"] += 300
+            st["departureDelay"] += 300
+    planner = TrainPlanner(runs)
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"741": ["36777783", "36391307"]})
+    hub, session, _clock = await _train_hub(aioclient_mock)
+    req = {"key": "741", "train": "741", "stops": ["005518069", "005517848"], "from": 0, "to": 1}
+    resp = await hub.query("mav", [req])
+    await session.close()
+    assert resp["trips"].get("741", {}).get("trip_id") == picked
+    if picked:
+        hit = resp["trips"]["741"]
+        assert (hit["delay"], hit["time"]) == (60, TRAIN_DAY + 60900)
+        assert (hit["vehicle"] is not None) == (change is None)
 
 
 async def test_the_service_asks_the_planner_for_a_train(hass, aioclient_mock, freezer) -> None:
