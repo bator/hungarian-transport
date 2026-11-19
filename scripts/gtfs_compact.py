@@ -1860,13 +1860,15 @@ def write_index(
         "r": all_r,
         "t": all_t,
     })
-    if with_operators:
-        idx["o"] = [[oid, name] for oid, name in ops]
     if aliases:
         at = {row[0]: i for i, row in enumerate(all_s)}
         rows = [[old, at[new]] for old, new in aliases.items() if new in at and old not in at]
         if rows:
             idx["al"] = rows
+    # "o" last: the integration's sensor (timetables.scan_index) streams the
+    # index and reads the operators from its tail.
+    if with_operators:
+        idx["o"] = [[oid, name] for oid, name in ops]
     raw = json.dumps(idx, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     tmp = out.with_name(out.name + ".tmp")
     tmp.write_bytes(gzip.compress(raw, compresslevel=9, mtime=0))

@@ -747,7 +747,9 @@ sensors update right after the daily index, a Pages install or a local MÁV
 build changed something, and every 30 minutes otherwise, which catches the
 local updater and HACS. Each index is read again only when its file changed
 (size or time), in the background: the Volán and city indexes are
-streamed, not loaded.
+streamed, not loaded. The city index's operator list (`"o"`) is its last
+key, after the stop aliases (`"al"`); the sensor finds it wherever it is,
+so an index built with the aliases after it still counts its operators.
 
 An entities card for a dashboard:
 

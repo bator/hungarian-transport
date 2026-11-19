@@ -412,6 +412,28 @@ def test_scan_matches_a_full_read(tmp_path: Path, monkeypatch, chunk) -> None:
             assert info["operators"] == len(full["o"])
 
 
+@pytest.mark.parametrize("chunk", [7, timetables.CHUNK])
+@pytest.mark.parametrize("al_first", [False, True])
+def test_scan_finds_the_operators_before_or_after_a_large_alias_table(
+    tmp_path: Path, monkeypatch, chunk, al_first
+) -> None:
+    """The first builders with stop aliases wrote "al" after "o": 8000
+    aliases (4 per stop) put the operators far beyond the last 256 KiB."""
+    monkeypatch.setattr(timetables, "CHUNK", chunk)
+    index = json.loads(gzip.decompress(_city()))
+    ops = index.pop("o")
+    al = [[f"miskolc:old-renumbered-stop-{j:06d}", j % 2] for j in range(8000)]
+    index.update({"al": al, "o": ops} if al_first else {"o": ops, "al": al})
+    raw = json.dumps(index, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert al_first or len(raw) - raw.find(b',"o":[') > timetables.MAX_TAIL
+    path = tmp_path / "city.json.gz"
+    path.write_bytes(gzip.compress(raw, mtime=0))
+    info = timetables.scan_index(path, operators=True)
+    assert info["operators"] == len(ops) == 2
+    assert info["stops"] == len(index["s"])
+    assert info["trips"] == len(index["t"])
+
+
 def test_scan_of_a_broken_file(tmp_path: Path) -> None:
     path = tmp_path / "broken.json.gz"
     path.write_bytes(_volan()[:200])
