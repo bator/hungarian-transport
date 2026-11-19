@@ -821,3 +821,20 @@ async def test_reauth_answered_while_the_stored_key_works_again(
     assert result["reason"] == reason
     assert entry.options[CONF_API_KEY] == saved
     assert hass.config_entries.flow.async_progress_by_handler(DOMAIN) == []
+
+
+def test_the_mavplusz_option_says_what_it_asks_for_and_when() -> None:
+    """The Volán buses the planner answers for are the intercity ones (the
+    local ones are Volánbusz's), and the Budapest ids go to it only while
+    FUTÁR does not answer, in both languages."""
+    folder = Path(integration.__file__).parent / "translations"
+    text = {
+        lang: json.loads((folder / f"{lang}.json").read_text(encoding="utf-8"))["options"]["step"]["init"][
+            "data_description"
+        ]["mavplusz"]
+        for lang in ("en", "hu")
+    }
+    assert "a Volán helyközi és a Volánbusz helyi járatai" in text["hu"]
+    assert "amíg a BKK FUTÁR nem válaszol" in text["hu"] and "hibás" not in text["hu"]
+    assert "Volán intercity and Volánbusz local" in text["en"]
+    assert "while BKK FUTÁR does not answer" in text["en"]
