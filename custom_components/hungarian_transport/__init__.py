@@ -152,12 +152,16 @@ REALTIME_TRIP_ID_MAX = 128
 REALTIME_ROUTE_MAX = 32
 REALTIME_START_MAX = 2880
 REALTIME_STOP_ID_MAX = 64
+
+
 REALTIME_TRIP_SCHEMA = vol.Schema(
     {
         vol.Required("key"): vol.All(cv.string, vol.Length(min=1, max=REALTIME_KEY_MAX)),
         vol.Optional("trip_id"): vol.All(cv.string, vol.Length(min=1, max=REALTIME_TRIP_ID_MAX)),
         vol.Optional("route"): vol.All(cv.string, vol.Length(min=1, max=REALTIME_ROUTE_MAX)),
         vol.Optional("start"): vol.All(_finite_int, vol.Range(min=0, max=REALTIME_START_MAX)),
+        # Eight digits; one that is no calendar day (20261131) is that row's
+        # business alone: the hub never asks the planner for it.
         vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{8}$")),
         vol.Optional("train"): vol.All(cv.string, vol.Match(r"^\d{1,6}$")),
         vol.Optional("stops", default=list): vol.All(
@@ -572,14 +576,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # The poles of FUTÁR's combined stations learnt before (storage.py), so
     # their boards have a fallback right after a restart too.
+    learnt = False
+
+    @callback
+    def _stations_changed() -> None:
+        nonlocal learnt
+        learnt = True
+        storage.async_save_stations_later(hass, planner.stations_data)
+
     planner = mavplusz_board.PlannerBoards(
         async_get_clientsession(hass),
         task_factory=task_factory,
         call_later=hass_call_later(hass),
         limiter=_planner_limiter(hass),
         stations=await storage.async_load_stations(hass),
-        on_stations_changed=lambda: storage.async_save_stations_later(hass, planner.stations_data),
+        on_stations_changed=_stations_changed,
     )
+
+    async def _save_planner() -> None:
+        # Unloaded (a reload, the entry removed): what the planner learnt is
+        # written now. The delayed write left pending would be replaced by
+        # the next planner's (a reload: up to STATIONS_SAVE_DELAY of poles
+        # lost), or write the store again after the entry's removal deleted
+        # it. Registered first, so it runs after proxy.close, which closes
+        # the planner (its one owner): it learns nothing more by then (a
+        # FUTÁR request still under way lands later).
+        if learnt:
+            await storage.async_save_stations(hass, planner.stations_data())
+
+    entry.async_on_unload(_save_planner)
     proxy = FutarProxy(
         async_get_clientsession(hass),
         api_key,

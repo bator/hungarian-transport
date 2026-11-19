@@ -13,7 +13,7 @@ updater script and HACS send nothing).
 The MÁV index (about 1 MB unpacked) is read whole. The Volán and city
 indexes (tens of MB unpacked) are streamed once: the feed and the stop
 table come from the head, the trips are counted on the way, the city
-operators come from the tail; nothing else is kept in memory.
+operators from the "o" list wherever it is; nothing else is kept in memory.
 """
 from __future__ import annotations
 
@@ -49,7 +49,9 @@ TRIP_OVERLAP = 16
 STOPS_KEY = b'"s":['
 CALENDARS_KEY = b',"c":['
 MAX_HEAD = 32 * 1024 * 1024
-# The city index's operator list "o" comes last.
+# The city index's operator list "o": written last, but the first builders
+# with stop aliases wrote "al" after it, so it is looked for anywhere; at
+# most this much of the stream from its key on is kept.
 OPERATORS_KEY = b',"o":['
 MAX_TAIL = 256 * 1024
 CHUNK = 256 * 1024
@@ -103,7 +105,10 @@ def scan_index(path: Path, *, operators: bool = False) -> dict[str, Any] | None:
     unzip = zlib.decompressobj(16 + zlib.MAX_WBITS)
     head = bytearray()
     head_done = False
-    tail = b""
+    # The stream from OPERATORS_KEY on, once seen; before that the last
+    # bytes, for a key split across two chunks.
+    ops = bytearray()
+    ops_carry = b""
     carry = b""
     trips = 0
     try:
@@ -115,8 +120,16 @@ def scan_index(path: Path, *, operators: bool = False) -> dict[str, Any] | None:
                 if not head_done:
                     head += data
                     head_done = CALENDARS_KEY in head or len(head) > MAX_HEAD
-                if operators:
-                    tail = (tail + data)[-MAX_TAIL:]
+                if operators and len(ops) < MAX_TAIL:
+                    if ops:
+                        ops += data
+                    else:
+                        look = ops_carry + data
+                        at = look.find(OPERATORS_KEY)
+                        if at >= 0:
+                            ops += look[at:]
+                        else:
+                            ops_carry = look[-(len(OPERATORS_KEY) - 1):]
                 buf = carry + data
                 limit = len(buf) - TRIP_OVERLAP
                 for match in TRIP_RE.finditer(buf):
@@ -140,7 +153,7 @@ def scan_index(path: Path, *, operators: bool = False) -> dict[str, Any] | None:
         "updated_at": _utc(built),
     }
     if operators:
-        info["operators"] = _operators(tail)
+        info["operators"] = _operators(bytes(ops[:MAX_TAIL]))
     return info
 
 
@@ -155,12 +168,12 @@ def _stops(head: bytes) -> int | None:
     return len(table) if isinstance(table, list) else None
 
 
-def _operators(tail: bytes) -> int | None:
-    start = tail.rfind(OPERATORS_KEY)
-    if start < 0:
+def _operators(data: bytes) -> int | None:
+    """The length of the "o" list data starts with (at OPERATORS_KEY)."""
+    if not data.startswith(OPERATORS_KEY):
         return None
     try:
-        ops, _ = json.JSONDecoder().raw_decode(tail[start + len(OPERATORS_KEY) - 1:].decode("utf-8"))
+        ops, _ = json.JSONDecoder().raw_decode(data[len(OPERATORS_KEY) - 1:].decode("utf-8", "ignore"))
     except (UnicodeDecodeError, ValueError):
         return None
     return len(ops) if isinstance(ops, list) else None

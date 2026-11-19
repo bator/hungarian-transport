@@ -747,7 +747,9 @@ sensors update right after the daily index, a Pages install or a local MÁV
 build changed something, and every 30 minutes otherwise, which catches the
 local updater and HACS. Each index is read again only when its file changed
 (size or time), in the background: the Volán and city indexes are
-streamed, not loaded.
+streamed, not loaded. The city index's operator list (`"o"`) is its last
+key, after the stop aliases (`"al"`); the sensor finds it wherever it is,
+so an index built with the aliases after it still counts its operators.
 
 An entities card for a dashboard:
 
@@ -911,32 +913,81 @@ fails](#when-an-update-fails)): while that index still holds the old zip,
 the carried part leaves its buses and tram-train out (they are in
 `volan-szeged` and the MÁV index) and keeps the old trams and trolleybuses.
 
-Every Szeged stop has a new id (`szeged:SZ_…`). The rebuild gives the
-index's stops their old ids back: each stop id the index in place had and
-the new feed lacks goes to the new stop of the same operator and mode within
-50 m that the index in place did not name, one to one, the nearest pair
-first. The stop takes the old id and stop number (a card matches a saved
-stop by the number in its id) and keeps the feed's own id, the one realtime
-feeds name the stop by, as the fifth element of its stop row (`[id, name,
-number, operator, feed id]`). So a card of any version finds a saved stop
-under its old id, which matters as the integration installs new indexes
-every week without a card update. An old id left over, where two old stops
-became one new one, goes into the alias table (`"al"`, old id and stop
-index), which the cards released with it read; later rebuilds carry the
-table on. The next rebuild gives the same feed stop the same old id (by the
-feed id in its row, however far the stop moved), so the ids do not drift
-from week to week. Of the 179 old tram and trolleybus stop ids, 170 are the
-stops' own ids again, four are aliases (an older card finds two of them by
-name), and five moved more than 50 m and are found by name, if at all.
+Every Szeged stop has a new id (`szeged:SZ_…`). The index gives the trams'
+and trolleybuses' stops their old ids back, from a static table in
+`scripts/build_city_index.py` (`SZEGED_STOP_IDS`, SZKT stop id -> old id,
+the old stop's latitude and longitude and its basic modes), applied when the feed loads: the stop takes the old id and stop number (a
+card matches a saved stop by the number in its id) and keeps the feed's own
+id, the one realtime feeds name the stop by, as the fifth element of its
+stop row (`[id, name, number, operator, feed id]`). So a card of any version
+finds a saved stop under its old id, which matters as the integration
+installs new indexes every week without a card update. An old id left over,
+where two old stops became one new one, is in `SZEGED_STOP_ALIASES` (old id -> SZKT stop
+id and the old stop's latitude and longitude) and goes
+into the index's alias table (`"al"`, old id and stop index), which the
+cards released with it read. Of the 179 old tram and trolleybus stop ids,
+170 are the stops' own ids again, six are aliases (two of them by name:
+Dózsa utca's trolleybus stop, which moved 57 m, and Vásárhelyi Pál utca's
+tram stop, now Vásárhelyi Pál út, 140 m away), and three are not found and
+are picked again (the two trolleybus stops of Budapesti körút (József
+Attila sugárút), whose SZKT stops are tram stops only, and Agyagos utca,
+234 m away). A feed stop more than 60 m from its old stop's place, or
+served by none of its modes (the opposite pole of another mode within
+60 m), keeps the feed's id (the feed gave the id to another stop), and the
+build warns, once per build; an alias to such a stop, to a stop more than
+160 m from the alias's old stop, or to a stop the feed lacks, is left out
+of `"al"` for that build, and the warnings and the build info
+(`dropped_aliases`) count it.
+
+The tables do not depend on the index in place, so every build (the
+release, the weekly Pages build, Home Assistant's local updater, which
+copies `scripts/*.py`) gives the same stops the same ids, a build that left
+Szeged out for a week (`HUNGARIAN_TRANSPORT_ALLOW_MISSING`, or a calendar
+that ran out before SZKT's next block) loses nothing, and the alias table
+neither grows nor needs to expire. No other feed's ids are touched: a feed
+keeps its stop ids unless `CITY_FEEDS` names tables for it (`stop_ids`,
+`stop_aliases`). `scripts/stop_id_map.py` generated them from the city
+index of v1.10.22 (the last with the old zip; in the release's
+`hungarian-transport.zip`) and SZKT's zip: an old stop whose id the feed
+lacks goes to a stop of the same mode within 50 m, one to one, a stop of
+the same name first (case, accents, spaces and punctuation ignored), then
+the nearest; a renamed stop ("Centrum Áruház", now "Mikszáth K. utca")
+still pairs with the stop at its place. An old stop left over is an alias
+of the stop it would have paired with; one with no stop of its mode within
+50 m is an alias of the nearest stop of its name and mode within 150 m (a
+name here also without its bracketed part and with "utca" and "út" alike,
+a stop of the very same name first); at
+most four aliases per stop. When SZKT renumbers stops again, the build
+counts every table stop the feed has under neither its new nor its old id
+(the old zip still in place is no renumbering), as a `Stop id table stale`
+annotation on GitHub Actions and a `warn` line elsewhere; the build info
+has `kept_ids`, `listed_ids` and `table_ids`, and the build prints a
+`stop ids:` summary line. Run the script again against the same v1.10.22
+index and the new zip:
+
+```bash
+gh release download v1.10.22 -R bator/hungarian-transport -p hungarian-transport.zip
+python3 scripts/stop_id_map.py hungarian-transport.zip szeged.zip --write
+```
+
+Each feed's tables sit in a generated block of their own in
+`scripts/build_city_index.py` (`# --- szeged stop id tables: … ---`);
+`--write` replaces only that feed's block, and refuses a feed whose
+`CITY_FEEDS` entry does not name its own `<FEED>_STOP_IDS` and
+`<FEED>_STOP_ALIASES`. A new feed needs its empty block and the two
+references added by hand first.
 
 What Szeged users have to change themselves:
 
-- A local-bus card (`helyi: true`, `city: szeged`) has no departures any
-  more: Szeged's buses are only in `volan-szeged`. Set `city: volan-szeged`
-  and pick the stop again.
+- A local-bus card (`helyi: true`, `city: szeged`) no longer shows buses:
+  Szeged's buses are only in `volan-szeged`. Its stop is not found, and the
+  card has no departures, unless a tram or trolleybus stop has exactly its
+  name: then it shows that stop's trams and trolleybuses (32 of the 410 old
+  stop ids the index dropped, six of them 200–540 m away, such as Kereskedő
+  köz). Either way, set `city: volan-szeged` and pick the stop again.
 - The tram-train to Hódmezővásárhely (old lines 1 and 1A) left the city
   board: use a MÁV card (`mav: true`) with its station.
-- A stop that is not found (one of the five above) is picked again.
+- A stop that is not found (one of the three above) is picked again.
 
 Pécs (Tüke Busz) is fetched from <https://mobilitas.biokom.hu/gtfs/> over
 https. Hódmezővásárhely's zip (HVSZ, via menetbrand) runs until 30 November

@@ -1380,6 +1380,22 @@ def digest_checks() -> bool:
             and index_digest.digest(k1) != index_digest.digest(k3),
             str(srows[:2]),
         )
+        # The integration's sensor (timetables.scan_index) streams the city
+        # index and reads the operators "o" from its last 256 KiB: a large
+        # alias table must not come after them.
+        big = Path(tmp) / "big" / "city-index.json.gz"
+        big.parent.mkdir()
+        part = _digest_part("x")
+        write_index([part], big, with_operators=True,
+                    aliases={f"x:old-renumbered-stop-{j:06d}": part["s"][j % 2][0] for j in range(8000)})
+        braw = gzip.decompress(big.read_bytes())
+        bidx = json.loads(braw)
+        failed |= not check(
+            'the operators "o" are the index\'s last key, after a large "al"',
+            list(bidx)[-1] == "o" and len(bidx.get("al") or []) == 8000
+            and len(braw) - braw.rfind(b',"o":[') < 1024,
+            repr(list(bidx)),
+        )
         shutil.rmtree(dirs[1] / index_shapes(b))
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             status = index_digest.main([str(b)])

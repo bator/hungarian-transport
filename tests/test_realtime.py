@@ -171,10 +171,26 @@ def test_train_numbers_know_the_days_their_trips_run() -> None:
         "20261117": (True, False, False),
         "20261118": (False, True, False),
         "20261122": (False, True, False),
-        "20261201": (False, False, False),
+        # After the calendar's last day: it says nothing of it.
+        "20261201": (None, None, None),
     }
     # A trip or a date it does not know: not known, so not left out.
     assert trains.runs("nope", "20261118") is None and trains.runs("7", "2026-11-18") is None
+
+
+def test_a_date_outside_the_calendar_is_not_known() -> None:
+    """A copy kept from an older download (its last day past) or a calendar
+    that starts later says nothing of today: runs is None, so the train is
+    asked and matched as without a calendar. Every service's rows span the
+    calendar, the ones of no trip asked included."""
+    stale = realtime.train_numbers_from_static(_calendar_zip("S1,1,1,1,1,1,1,1,20261001,20261031\n", "S2,20261103,1\n"), "1:")
+    assert [stale.runs("7", d) for d in ("20260930", "20261015", "20261102", "20261103", "20261118")] == [
+        None, True, False, False, None
+    ]
+    assert stale.runs("8", "20261103") is True and stale.runs("9", "20261103") is False
+    later = realtime.train_numbers_from_static(_calendar_zip(None, "S9,20261201,1\nS1,20261125,1\n"), "1:")
+    assert later.runs("7", "20261118") is None and later.runs("7", "20261125") is True
+    assert later.runs("7", "20261130") is False
 
 
 @pytest.mark.parametrize(

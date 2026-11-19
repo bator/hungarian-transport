@@ -64,28 +64,42 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   per action call, for the trips of that call not cached yet: per trip its
   route, its calls on the service date (the card's `date`, else today in
   Budapest) with realtime delays and times, and the positions of the
-  vehicles on its pattern. A trip the realtime data changed (every live
-  MÁV train sampled on 2026-11-18, `MODIFIED`, and some `UPDATED` ones, on
-  any of the planner's sources) has a realtime pattern of its own
-  (`1:V3775_106::rt#2972`) that lists no vehicle: its vehicle is on its
-  route's scheduled patterns. So when a trip's answer names such a
-  pattern, its route's vehicles are asked right after, in a request of
-  their own (`route(id:) { patterns { vehiclePositions } }`, one alias per
-  route, at most 20), and the trip has its vehicle from its first answer
-  on. That request never costs the delays: it has its own cap (256 KiB),
-  timeout (5 s, and never past the card's round), token share (one every
-  10 s, burst 6, within the planner limit) and backoff (3 minutes); when
-  it is not made or fails, the trips simply have no vehicle that round,
-  logged once at debug level, and the planner is not backed off. Each
-  route's answer size is remembered for three hours: a request takes the
-  routes that fit 192 KiB by that reckoning (an unseen route counted as
-  8 KiB), and a route that alone went over the cap is left out until its
-  size is forgotten. Sizes were measured only in the evening (about 250
-  bytes a vehicle: 975 bytes for the MÁV route 1:V3775_106 with 4
-  vehicles at 22:15 on 2026-11-18); the code no longer depends on them
-  (`tests/fixtures/realtime/mavplusz_rt_pattern.json`). Each position
-  names its trip, and is kept for that trip's live run whichever alias it
-  came with. The
+  vehicles on its pattern. Almost every MÁV trip of the day sits on a
+  realtime pattern of its own (`1:V3775_106::rt#2972`), not only the ones
+  the realtime data changed (`MODIFIED`, `UPDATED`, with delay 0 too,
+  checked on 2026-11-18 and 2026-11-19; other planner sources have some),
+  and such a pattern lists no vehicle: its vehicle is on its route's
+  scheduled patterns. So when a live trip's answer names such a pattern
+  and its first call is at most 5 minutes ahead (the trains not yet
+  departed had no vehicle on any pattern) and its last call at most 15
+  minutes past (a finished run's id would take the next run's vehicle),
+  its route's vehicles are asked right after, in a request of their own (`route(id:) { patterns {
+  vehiclePositions } }`, one alias per route, at most 20), and the trip
+  has its vehicle from its first answer on. That request never costs the
+  delays: it is made after the trip request has let other cards' trip
+  requests go, and has its own cap (256 KiB), timeout (5 s, and
+  never past the card's round), token share (one every 10 s, burst 6,
+  within the planner limit) and backoff (3 minutes; not after a timeout
+  the round's deadline cut below the 5 s, which is no sign of an outage;
+  a round cancelled before its request ran gives the token back); when it
+  is not made or fails, the trips simply have no vehicle that round, logged once at
+  debug level, and the planner is not backed off. Each route's answer
+  size is remembered for three hours: a request takes the routes that fit
+  192 KiB by that reckoning (an unseen route counted as 8 KiB), and a
+  route that alone went over the cap is left out until its size is
+  forgotten (an alias the planner answered with an error teaches no
+  size). One request per route: a round does not ask a route another
+  round is asking, it waits for that answer (within its own round), and
+  a route's answer gives its vehicles to every trip of the round on that
+  route, those answered from the cache too. Only trips the round fetched
+  start a vehicle request; a round of cached trips only waits. The same
+  gates hold for every trip given a vehicle, also from another trip's
+  route answer. Measured in the daytime on 2026-11-19: 207–326 bytes a
+  vehicle, 1.75 kB a route at most, 12.5 kB for 17 MÁV routes together;
+  the code does not depend on those sizes
+  (`tests/fixtures/realtime/mavplusz_rt_pattern.json` is an evening
+  answer). Each position names its trip, and is kept for that trip's live
+  run whichever alias it came with. The
   ids go in as GraphQL variables; vehicle ids (plate numbers) are not
   asked for. At most 40 trips a request, of the ones not cached yet; the
   rest are cut, not split. What a row needs goes in whole or not at all (a
@@ -105,7 +119,7 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   request is first resolved to the planner's trips: one more request lists
   the trip ids of every asked route on the service date (`route(id:) {
   patterns { tripsForDate(serviceDate:) { gtfsId } } }`, at most 40 routes;
-  8 routes are about 16 kB), kept for three hours per route and date. The
+  about 40 bytes a trip, 8 routes about 16 kB), kept for three hours per route and date. The
   trips whose id starts at the card's minute (modulo a day, as on the
   feeds) are then asked for with the trip ids. Two trips of a line at the
   same minute (both ends of Miskolc line 14 at 07:10) are both asked for
@@ -126,7 +140,8 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   day. The planner lists a trip's scheduled calls on any day, run or not
   (`1:36777783` on 2030-01-05: 10 calls), so only the calendar tells a
   variant of another weekday from a run; a zip without one asks for every
-  trip. A train's trips go in one request together (a number has 2 trips
+  trip, and so does a day outside the first and last day its calendar
+  names (a copy kept from an older download says nothing of today). A train's trips go in one request together (a number has 2 trips
   in the median, 12 at most). The answer is then matched exactly as on
   the feeds: today's run, else last night's; a number with several trips
   that day is told apart by the card's stations. Several calling there
@@ -146,8 +161,10 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   last night's anyway); a train it has no answer for, or one whose
   numbers the static feed could not give (its download failing with no
   copy kept), is matched on the feeds as before, which are then read for
-  its source. A number the static feed lacks, or whose trips run on
-  neither day, reads no feed: the feeds could not match it either. A
+  its source. A number the static feed lacks reads no feed: the feeds
+  could not match it either. One whose trips the calendar runs on neither
+  day is not asked of the planner, but matched on the feeds, which never
+  read the calendar (it may be wrong, or the train an added one). A
   source the call has no train of (GYSEV's for a MÁV train) is not read
   at all.
 - **What it answers.** A call without realtime data has no delay (the
@@ -157,13 +174,21 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   pattern's vehicle is then another day's run of it). The answer has the
   same shape as from the feeds; `updated` is the time of the planner's
   answer, or the newest feed header when a feed was read too.
-- **When the feeds are read instead.** For a source whose planner request
-  fails (an HTTP error, a timeout, an answer that is not JSON, any GraphQL
-  error), is refused by the integration's rate limit, or falls in the
-  minute's backoff after a failure; when the call's planner requests,
-  waiting for other cards' ones included, take over 20 s (a request is
-  begun only with at least 10 s of that left, so waiting alone is no
-  outage); and when the planner knows **none** of
+- **When the feeds are read instead.** For the trips of a source whose
+  planner request fails (an HTTP error, 429 included, a timeout, an answer
+  that is not JSON, a GraphQL error not tied to one trip), is refused by
+  the integration's rate limit, or falls in the minute's backoff after a
+  failure, but for the trips answered within their interval or still kept
+  (see Caching): those stay the planner's. When the call's planner round,
+  waiting for other cards' requests and, after a restart, the static train
+  numbers' download included, takes over 20 s (a request is begun only
+  with at least 10 s of that left, so waiting alone is no outage; numbers
+  not loaded by then leave the trains to the feeds, which wait for the
+  same download). A GraphQL error the planner ties to one trip (its `path`
+  begins with that trip's alias: a trip id or date it cannot serve) is no
+  answer for that trip alone, matched on the feeds, and backs nothing
+  off; so is a trip id the request cap left out, with no answer kept. And
+  when the planner knows **none** of
   the requested trips (a null answer for every one: ids the card's
   timetable does not share with the planner). A trip the planner does not
   know among ones it does is simply not answered: reading the 1.9 MB feeds
@@ -175,7 +200,8 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   are then read too. A train likewise, as above.
 - **Caching.** Each trip's answer is kept per trip and service date for
   the feed's `interval` (60 s), each route's trip list for three hours,
-  shared by every card and browser; one request at a time. An answer that
+  shared by every card and browser; one trip or route-list request at a
+  time (the vehicle requests go beside them). An answer that
   no longer changes is kept three hours too: a trip the planner does not
   know or lists without a call that day, a run without realtime data whose
   last call was over six hours ago (the most a delay is taken to be), and
@@ -273,27 +299,59 @@ before, and the card fills the board from Transitous.
   the service date the trip's board gave (FUTÁR's own board or the
   planner's); a trip no board dated is asked for today in Budapest, and
   before 05:00 for yesterday's service day as well, the run under way
-  being the answer (a night bus after midnight). The card discovers no
-  further routes from a planner board: their route details would go to
-  the FUTÁR that just failed.
+  being the answer (a night bus after midnight). They carry the trip's
+  shape as FUTÁR's do (`entry.polyline.points`, OTP2's `tripGeometry`, the
+  same Google encoding of 1e5; checked on 2026-11-19), so the ride map
+  draws the trip's own line. The card discovers no further routes from a
+  planner board: their route details would go to the FUTÁR that just
+  failed.
+- **How much of a board.** The planner gives 60 departures a pattern over
+  eight hours. A board is not cut to its earliest rows across every
+  pattern (a hub's metro lines filled 80 rows within 22 minutes at
+  Keleti, 42 at Deák tér, on 2026-11-19): each route and headsign keeps
+  its earliest 80 rows (the card's widest page of one destination), and
+  a card's answer, cut to its horizon, holds 400 rows at most (some
+  160 kB), the patterns with the most rows giving way first past that.
+  So a three-hour card, or one filtered to a sparse line's destination,
+  still gets its rows.
+- **Stops the planner lacks.** A stop (or station) the planner answers
+  null for is remembered for 12 hours: FUTÁR keeps its whole budget there
+  and the planner is not asked again meanwhile (HÉV stops; the MÁV
+  stations on FUTÁR's boards, `BKK_005510017` and `BKK_005501024` at
+  Kelenföld, which the planner has only as MÁV's `1:005510017`: a MÁV
+  board in FUTÁR's shape would carry MÁV trip and route ids the card's
+  BKK follow-ups cannot use, so they are not mapped).
 - **Stations.** A GTFS parent station (`BKK_CS056233`, Keleti's metro) is
   one planner stop whose board holds its child stops' departures. So are
   the 38 of FUTÁR's combined stations (`BKK_CSF…`) that BKK's GTFS has
   (`BKK_CSF00062`, Batthyány tér): the first board of such a station
   FUTÁR cannot give asks the planner for the station itself, and whether
   it knew it is kept for 12 hours. The others are FUTÁR's alone
-  (`BKK_CSF01131`, the Keleti preset, is null in the planner): their board
-  is merged from their child poles' boards, the poles FUTÁR's own answers
-  named (a station board's departures, any answer's stop references), at
-  most 24 poles and 20 departures a pattern each, for at most 512
-  stations. Those are kept in `.storage/hungarian_transport.bkk_stations`
-  (written five minutes after a change, and when Home Assistant stops;
-  removed with the integration), so they have a fallback right after a
-  restart during an outage too. Keleti has a seed until FUTÁR names its
-  own: the 15 BKK surface stops the planner names "Keleti pályaudvar M"
-  (and "… M (Garay utca)"), as on 2026-11-18. A FUTÁR-only station
-  FUTÁR has named no pole of has no fallback. FUTÁR's ad-hoc trips (ids
-  of ten or more digits) are not in the planner either.
+  (`BKK_CSF01131`, the Keleti preset, and the parent station
+  `BKK_CS007896`, the Kelenföld one, are null in the planner): their
+  board is merged from their child poles' boards, the poles FUTÁR's own
+  answers named (a station board's departures and references; for a
+  combined station any answer's stop references too, not for a parent
+  station, which nearly every stop has), at most 24 poles and 20
+  departures a pattern each, for at most 512 stations. A combined station
+  is asked by its poles first; a
+  parent station (`BKK_CS…`) by itself first, by its poles once the
+  planner said it does not know it. Those are kept in
+  `.storage/hungarian_transport.bkk_stations` (written five minutes after
+  a change, at once when the entry unloads or reloads, and when Home
+  Assistant stops; removed with the integration, and never written again
+  by a FUTÁR answer landing after that), so they have a fallback right
+  after a restart during an outage too. Each pole and station carries
+  when FUTÁR last named it (a station FUTÁR keeps naming is news for the
+  store once a day, so its stored time is never more than a day old; a
+  stored time in the future counts as the restore's): one not named for
+  30 days goes, and at the
+  limits the least recently named goes first (a record of before this,
+  poles alone, counts as named at the update). Keleti has a seed until
+  FUTÁR names its own: the 15 BKK surface stops the planner names
+  "Keleti pályaudvar M" (and "… M (Garay utca)"), as on 2026-11-18. A
+  FUTÁR-only station FUTÁR has named no pole of has no fallback. FUTÁR's
+  ad-hoc trips (ids of ten or more digits) are not in the planner either.
 - **Not asked when.** The integration's own FUTÁR rate limit, an error
   status FUTÁR gave for the request, and a request never sent are not
   outages; nor are search, route details, plans and timetables, which the
@@ -302,7 +360,9 @@ before, and the card fills the board from Transitous.
   the cards read Budapest from Transitous; the planner alone would not
   answer the searches and route patterns a card with the action asks for.
 - **Limits.** One planner request per stop per 15 s for every card and
-  horizon together, while FUTÁR fails (the widest window, eight hours, is
+  horizon together (a request the limit or a backoff kept from being sent
+  does not count; one sent that failed leaves FUTÁR its whole budget for
+  that stop for those 15 s), while FUTÁR fails (the widest window, eight hours, is
   asked, 60 departures a pattern, and each card's horizon cut from it; an
   answer of up to 2 MB); the trip details asked within 50 ms go in one
   request of up to 40 trips, cached 60 s, a trip never waiting for an
@@ -310,12 +370,46 @@ before, and the card fills the board from Transitous.
   planner limit (see [Polling](#polling)): 0.25 a second with a burst of
   15, within the total's 0.5 and 30. A call failing fast on a rejected key
   first takes a token of FUTÁR's own rate limit, as a call to FUTÁR would.
-  After a failure the planner is not asked for 30 s, by the realtime hub
-  either, logged once. FUTÁR gets 8 s of the card's 20 s only where the
-  planner can answer (a BKK stop, a FUTÁR station the planner knows or has
-  not been asked about yet, or whose poles are known, a timetable trip,
-  the planner not backing off), the planner 6 s; elsewhere FUTÁR keeps the
-  whole budget.
+- **Failures.** The planner failing (no answer, a timeout, HTTP 5xx, 429
+  or 403, a page that is not JSON: a maintenance or Cloudflare page) is
+  not asked for 30 s, by the realtime hub either, logged once. A
+  request failing for its own sake (an answer over its cap, a GraphQL
+  error, an answer of the wrong shape, another HTTP 4xx) is
+  that stop's or those trips' alone: they are not asked for 10 minutes,
+  nobody backs off, and it is logged at debug level only. A GraphQL error
+  that names one trip of a batch (OTP's `DataFetchingException` of a bad
+  id or date has the alias as its path) makes that trip no answer and
+  leaves the others'.
+- **The card's 20 s.** FUTÁR gets 8 s of the card's 20 s only while its
+  outage stands (it failed and has not answered since; while it answers,
+  no token is reserved and FUTÁR keeps its whole budget, and a request
+  failing fast still falls back with a token taken then; the first
+  request hanging for FUTÁR's whole budget gets no planner answer and
+  starts the outage), only when the wait for FUTÁR's own token leaves
+  room for both (wait + 8 s + 6 s within 18.5 s, else FUTÁR gets 18 s
+  less the wait, at least 1 s), only where the planner can answer (a BKK stop it has not said it lacks, a FUTÁR station
+  the planner knows or has not been asked about yet, or whose poles are
+  known, a timetable trip, none of them failed lately, the planner not
+  backing off) and a token of the boards' share is reserved for its
+  answer before FUTÁR is asked: a dashboard's boards at once (40 poles)
+  cut FUTÁR short for as many as the share holds, and the rest keep
+  FUTÁR's whole budget, so a slow FUTÁR still answers them. The trip
+  details reserved within 50 ms of each other share one token (up to one
+  request's 40 trips; 20 at night, when a trip no board dated is asked for
+  two days), as their one batched request spends one: a card's 40 trip
+  details are all cut short on one token, and the rest of the share is
+  left for the other cards' boards; a trip that lands in a later batch
+  than the one that spent it takes a token when its request goes, if one
+  is left. The token goes back when FUTÁR answers (a shared one once FUTÁR
+  answered every trip on it), when every card that saw that request fail
+  is done without spending it (a card asking the same again later does
+  not hold it), and when every card that asked has left before FUTÁR
+  failed. Unloading the entry ends the trip-detail requests under way at
+  once (their callers get no answer), and a fallback under way then asks
+  the planner nothing. The planner then has 6 s. Elsewhere FUTÁR keeps
+  the whole budget, and after it failed the planner is asked only if its
+  answer still reaches the card (each card timed from its own ask, also
+  one that joined a request under way), with half a second of slack.
 
 ## Licence and terms
 
@@ -379,7 +473,9 @@ Should either side object, removing the operator from `realtime_feeds.json`
   one every two seconds after that, whatever the cards ask.
 - **The planner.** One request per action call at most for the trips not
   cached (each kept for the feed's interval), plus one for the route lists
-  of route + start requests not cached (each kept three hours); JSON in,
+  of route + start requests not cached (each kept three hours, at most
+  2000 route lists, the least recently asked going first) and one for
+  the vehicles of the live realtime-pattern trips' routes; JSON in,
   gzip, the same User-Agent, no redirects, a 20-second timeout, 1 MB per
   answer at most. While BKK FUTÁR fails, also the BKK boards (per stop per
   15 s) and trip details (see [BKK boards when FUTÁR
@@ -390,16 +486,18 @@ Should either side object, removing the operator from `realtime_feeds.json`
   seconds after that, of which the BKK boards may use 15 and one every
   four seconds (a user asking for stops no card shows does not hold back
   the delays) and the vehicle requests of realtime-pattern trips 6 and one
-  every ten seconds.
+  every ten seconds. A request one of these refuses spends no token of the
+  others (every one is checked before any is taken from).
 - **Outages.** A failing feed is not asked again for a minute (a static zip
   for 15 minutes), is logged once when it starts failing and once when it
   answers again, and the cards keep the timetable meanwhile (a static zip's
   train numbers from before stay in use, see above). A failing planner
   likewise: a minute's backoff, one warning, one line when it answers
-  again, and the feeds meanwhile. The backoff is shared: a failure of the
-  BKK boards' requests (30 s) holds back the delays' requests too, and the
-  other way round. The vehicle requests alone back off on their own
-  (3 minutes) and set no shared backoff.
+  again, and the feeds meanwhile. The backoff is shared: the planner
+  failing the BKK boards' requests (30 s; not a board's own failure, see
+  [BKK boards when FUTÁR fails](#bkk-boards-when-futár-fails)) holds back
+  the delays' requests too, and the other way round. The vehicle requests
+  alone back off on their own (3 minutes) and set no shared backoff.
 
 ## The action
 
@@ -448,7 +546,12 @@ header timestamp is more than 15 minutes old is a stalled publisher, not live
 data: it answers as unavailable.
 
 A trip may also be asked by `route` and `start` (minutes after the service
-day's midnight, up to 2880) or by `train` (digits). Up to 40 trips of up to
+day's midnight, up to 2880) or by `train` (digits). A `date` is eight
+digits (YYYYMMDD); a row whose date is no calendar day (20261131) fails
+no call and is never asked of the planner, not even for today: the feeds
+match it as they can (a `train` row reads the feeds, a `trip_id` or
+`route` + `start` row reads none). A `trip_id` or `route` that is only the
+feed's prefix (`1:`) is never asked of the planner. Up to 40 trips of up to
 120 stops per call; anything longer is refused before a feed is touched.
 When nothing can be looked up the answer has no trips and an `error`:
 `rt_no_feed` (no feed for that operator) or `rt_unavailable` (the feed cannot
@@ -458,15 +561,36 @@ be reached now).
 
 The requests carry no personal data: the User-Agent names the project, not
 the installation. A feed is asked for as a whole, not for the trips a card
-shows; the planner is asked for the trips a card shows (trip ids and a
-date, nothing else), so mavplusz.hu can tell which timetable rows some
-Home Assistant displays, as it can for anyone using its own site. The
-vehicles' plate numbers in the feeds are not passed on to the cards, and
-are not asked of the planner. `tests/fixtures/realtime/mavplusz_trips.json`
-is a real planner answer of 2026-11-14 for four trips, trimmed, and
-`mavplusz_trains.json` one of 2026-11-18 for four train runs. The test fixtures (`tests/fixtures/realtime/`) are real feeds of
+shows. The planner is asked for what the cards show, and nothing else:
+trip ids with their service dates (a row's own trip, the resolved trips of
+a route + start row, and every trip of a train's number for today and
+yesterday, so last night's runs too), route ids with a date for the route
+lists of route + start rows, and route ids for the vehicles of live
+realtime-pattern trips (and while BKK FUTÁR fails, the BKK ids below).
+So mavplusz.hu can tell
+which timetable rows some Home Assistant displays, as it can for anyone
+using its own site. The vehicles' plate numbers in the feeds are not
+passed on to the cards, and are not asked of the planner.
+
+The planner fixtures are real answers to the module's own queries:
+`tests/fixtures/realtime/mavplusz_trips.json` (2026-11-14, four Volán
+trips, calls trimmed), `mavplusz_routes.json` (2026-11-14, the route
+lists of Veszprém 2 and Miskolc 32 and 14 and two running trips),
+`mavplusz_trains.json` (2026-11-18, four train runs, unedited),
+`mavplusz_rt_pattern.json` (2026-11-18, three MODIFIED trains and their
+routes' vehicles, unedited: one request of both kinds as the code asked
+then, split in two by the tests) and `mavplusz_bkk.json` (2026-11-18, a
+BKK board and trip details). Tests edit copies of them in memory only.
+The other fixtures (`tests/fixtures/realtime/`) are real feeds of
 2026-11-02 trimmed to a few trips, with the vehicle descriptors and entity
 ids (plates) removed.
+
+- **BKK boards while FUTÁR fails.** The planner is asked for the BKK stop,
+  station and pole ids a card shows (and the poles FUTÁR named for a
+  station) and the BKK trip ids of its rows with their service date,
+  nothing else: mavplusz.hu can tell which Budapest stops and trips some
+  Home Assistant displays while FUTÁR fails, as it can for anyone using
+  its own site. Nothing is asked of it while FUTÁR answers.
 
 ## Decoding
 

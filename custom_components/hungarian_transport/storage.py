@@ -27,8 +27,10 @@ of FUTÁR's combined stations that the BKK boards learnt from FUTÁR
 (mavplusz_board.PlannerBoards.stations_data), so the boards of those
 stations have a fallback from the planner right after a restart during a
 FUTÁR outage. It is written a while after a change (STATIONS_SAVE_DELAY;
-Home Assistant writes what is pending when it stops) and read back through
-mavplusz_board.restore_stations, which keeps it within its limits.
+Home Assistant writes what is pending when it stops) and at once when the
+entry unloads (a reload, a removal: nothing pending outlives the planner
+that learnt it), and read back through mavplusz_board.restore_stations,
+which keeps it within its limits.
 """
 from __future__ import annotations
 
@@ -109,6 +111,15 @@ def async_save_stations_later(hass: HomeAssistant, data: Callable[[], dict[str, 
     """Write data() (read at write time) STATIONS_SAVE_DELAY from now, or
     when Home Assistant stops, once for every change meanwhile."""
     stations_store(hass).async_delay_save(data, STATIONS_SAVE_DELAY)
+
+
+async def async_save_stations(hass: HomeAssistant, data: dict[str, Any]) -> None:
+    """Write data now, in place of a delayed write still pending (the entry
+    unloading); a failure is logged, never raised (the unload goes on)."""
+    try:
+        await stations_store(hass).async_save(data)
+    except Exception as err:  # noqa: BLE001 - only the fallback's head start
+        _LOGGER.warning("Could not write the learnt BKK stations: %s", err)
 
 
 async def async_save(hass: HomeAssistant, state: dict[str, Any]) -> None:

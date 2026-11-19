@@ -938,6 +938,40 @@ test('a card saved with a renumbered stop’s old id finds the new stop by the i
   }
 });
 
+/* Szeged's buses left the city feed (November 2026): a local-bus card
+   saved with a stop the index no longer has finds no stop rather than one
+   whose name merely contains the saved name. */
+test('a saved city stop the index dropped matches its own name only, not a stop whose name contains it', async () => {
+  const raw = {
+    v: 29,
+    s: [['szeged:2429618700', 'Körtöltés utca', '2429618700', 0], ['szeged:2429618701', 'Rókusi templom', '2429618701', 0],
+      ['szeged:2429618702', 'Anna-kút', '2429618702', 0], ['pecs:1', 'Töltés utca', '1', 1]],
+    g: [4626000, 2013000, 4625700, 2013900, 4625000, 2014000, 4607000, 1823000],
+    o: [['szeged', 'Szeged — SZKT'], ['pecs', 'Pécs — Tüke Busz']],
+    t: [],
+  };
+  const keep = BkkLib._fetchIndexBytes;
+  BkkLib._fetchIndexBytes = async () => ({ status: 200, bytes: new TextEncoder().encode(JSON.stringify(raw)) });
+  try {
+    const idx = await BkkLib._loadGtfsIndex('http://x/city-index.json?v=20260102', 'errCityHttp', 'errCityGunzip');
+    const gone = { id: 'szeged:2429103599', name: 'Töltés utca' };
+    assert.equal(BkkLib.gtfsStopById(idx, gone.id), null);
+    assert.equal(BkkLib.volanMatchStop(idx, gone, 0), null);
+    assert.deepEqual(BkkLib.cityStopIndexes(idx, gone, 0), []);
+    assert.equal(BkkLib.volanMatchStop(idx, { id: 'szeged:2429103600', name: 'Rókus vasútállomás' }, 0), null);
+    /* Its own name, exactly, is still that stop. */
+    assert.equal(BkkLib.volanMatchStop(idx, { id: 'szeged:2429103601', name: 'Anna-kút' }, 0), idx.stops[2]);
+    /* A stop saved by name alone still matches part of a name, and an id
+       of another operator is not this one's. */
+    assert.equal(BkkLib.volanMatchStop(idx, { id: '', name: 'Töltés utca' }, 0), idx.stops[0]);
+    assert.equal(BkkLib.volanMatchStop(idx, { id: 'pecs:9', name: 'Töltés utca' }, 0), idx.stops[0]);
+    /* The Volán index (no operator) keeps matching a name in part. */
+    assert.equal(BkkLib.volanMatchStop(idx, { id: gone.id, name: 'Körtöltés' }, null), idx.stops[0]);
+  } finally {
+    BkkLib._fetchIndexBytes = keep;
+  }
+});
+
 test('the event loop is handed back by scheduler.yield, else a message to the page, else a timer', async () => {
   const keep = { scheduler: globalThis.scheduler, MessageChannel: globalThis.MessageChannel };
   try {

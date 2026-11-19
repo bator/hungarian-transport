@@ -694,6 +694,13 @@ register({
     if (!f || f.length < 4) return null;
     const exact = pool.find((s) => s.fold === f);
     if (exact) return exact;
+    /* A stop picked from this city's own index (its id carries the
+       operator's prefix) that the index no longer has: only its own name
+       is that stop. A name it is part of is another stop ("Töltés utca" in
+       "Körtöltés utca", 4 km off, when Szeged's buses left the city feed),
+       so the card finds none and the stop is picked again. A stop saved by
+       name alone still matches part of a name. */
+    if (BkkLib._goneOwnStop(idx, stop.id, opIx)) return null;
     const hits = pool.filter((s) => s.fold.indexOf(f) >= 0);
     if (!hits.length) return null;
     hits.sort((a, b) => {
@@ -703,6 +710,16 @@ register({
       return a.fold.length - b.fold.length;
     });
     return hits[0];
+  },
+  /* Whether `id` is a city stop id of operator `opIx` ("szeged:…" for
+     Szeged's) that the index has neither as a stop nor as an alias. */
+  _goneOwnStop(idx, id, opIx) {
+    if (opIx == null || !id) return false;
+    const op = (idx.ops || [])[opIx];
+    const s = String(id);
+    const colon = s.indexOf(':');
+    if (!op || colon <= 0 || s.slice(0, colon) !== op.id) return false;
+    return !BkkLib.gtfsStopById(idx, s);
   },
   /* A coach station (or a "pályaudvar") by its folded name: fold() turns
      "autóbusz-állomás" into "autobusz allomas"; some feeds write it closed. */

@@ -5745,21 +5745,25 @@ const shapeLen = (pts) => pts.reduce((m, p, i) => (i ? m + Lib.haversineMeters(p
   const placing = [];
   Lib.transitousPlace = async (stop) => { placing.push(stop.name); await gate; return '47.5,19.0'; };
   Lib.transitousFetch = async () => ({ itineraries: [] });
+  /* Both ends are asked while the gate still holds the first: wait (bounded)
+     for two, not a fixed number of ticks, which a loaded machine can miss. */
+  const bothPlaced = async (list) => {
+    for (let i = 0; i < 200 && list.length < 2; i++) await settleTicks(1);
+    return [...list].sort().join(',');
+  };
   const board = Lib.transitousDepartures({ name: 'A' }, { name: 'B', key: 'b' }, {});
-  await settleTicks(2);
-  const boardBoth = placing.length;
+  const boardBoth = await bothPlaced(placing);
   Lib.transitousJourney = async () => null;
   Lib.cityRailJourney = async () => null;
   Lib.fetch = async () => ({ data: { entry: { plan: { itineraries: [] } } } });
   const planning = [];
   Lib.planPlace = async (_k, stop) => { planning.push(stop.name); await gate; return stop.name + '::47.5,19.0'; };
   const plan = Lib.planJourney(IX, 'k', { id: 'BKK_A', name: 'A' }, { id: 'BKK_B', name: 'B' }, null, {});
-  await settleTicks(2);
-  const planBoth = planning.length;
+  const planBoth = await bothPlaced(planning);
   release();
   await Promise.all([board, plan]);
   check('both ends of a board lookup and of a FUTÁR plan are placed at the same time',
-    boardBoth === 2 && planBoth === 2, JSON.stringify({ boardBoth, planBoth }));
+    boardBoth === 'A,B' && planBoth === 'A,B', JSON.stringify({ boardBoth, planBoth }));
   Object.assign(Lib, keep);
   check('the helpers nothing calls are gone',
     ['allowFutarHopShape', 'pickMotisHopRow', 'clipShapeToHop', 'clipShapeFromBoardToward', 'clipShapeFromBoard',
