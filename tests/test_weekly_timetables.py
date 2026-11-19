@@ -1108,6 +1108,14 @@ def test_the_shipped_public_key_is_a_raw_ed25519_key() -> None:
     assert _SHIPPED_KEY == "iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8="
 
 
+def test_the_site_signs_with_the_key_this_version_checks() -> None:
+    """scripts/sign_manifest.py signs the deployed manifest; it refuses a
+    key that is not this public key's pair, so the two must be one key."""
+    signer = Path(__file__).resolve().parents[1] / "scripts" / "sign_manifest.py"
+    found = re.findall(r'^PAGES_SIGNING_PUBLIC_KEY = "([^"]+)"$', signer.read_text(encoding="utf-8"), re.M)
+    assert found == [_SHIPPED_KEY]
+
+
 def test_verify_manifest_takes_only_the_key_s_signature_of_these_bytes() -> None:
     body = Site().body()
     wt.verify_manifest(body, _sign(body).encode())
