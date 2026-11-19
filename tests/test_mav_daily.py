@@ -8,7 +8,7 @@ import io
 import json
 import logging
 import zipfile
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -20,7 +20,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
-from custom_components.hungarian_transport import gtfs_feed, mav, mav_daily, mav_index
+from custom_components.hungarian_transport import gtfs_feed, mav, mav_daily, mav_index, storage
 from custom_components.hungarian_transport import weekly_timetables as wt
 from custom_components.hungarian_transport.const import (
     CONF_DAILY_MAV,
@@ -1151,9 +1151,10 @@ async def test_a_signed_manifest_installs(hass: HomeAssistant, aioclient_mock, c
         (base64.b64encode(b"x" * 10).decode(), mav_daily.FAILED, mav_daily.REASON_BAD_SIGNATURE),
         ({"text": "A" * (mav_daily.MAX_SIGNATURE + 4)}, mav_daily.FAILED, mav_daily.REASON_BAD_SIGNATURE),
         # Well-formed, by no key this version knows: a newer key of the
-        # site's (or another generation's, which the settle looks past).
-        ("other key", mav_daily.UNSUPPORTED, mav_daily.UNKNOWN_KEY),
-        ("other bytes", mav_daily.UNSUPPORTED, mav_daily.UNKNOWN_KEY),
+        # site's, another deploy's signature, or not the site's. A failure
+        # like any other on its first days (review round 8).
+        ("other key", mav_daily.FAILED, mav_daily.UNKNOWN_KEY),
+        ("other bytes", mav_daily.FAILED, mav_daily.UNKNOWN_KEY),
     ],
 )
 async def test_an_unsigned_manifest_settles_once_then_installs_nothing(
@@ -1179,12 +1180,14 @@ async def test_an_unsigned_manifest_settles_once_then_installs_nothing(
     assert out.read_bytes() == before
     assert mav_daily.INDEX_URL not in {str(c[1]) for c in aioclient_mock.mock_calls}
     said = [r for r in caplog.records if r.name == mav_daily.__name__ and r.levelno >= logging.INFO]
-    # Once, at info for a key this version does not know (update it), else
-    # a warning.
+    # Once, a warning.
     assert len(said) == 1, [r.getMessage() for r in said]
-    assert said[0].levelno == (logging.INFO if result == mav_daily.UNSUPPORTED else logging.WARNING)
-    if result == mav_daily.UNSUPPORTED:
-        assert "newer key" in said[0].getMessage() and "Update Hungarian transport" in said[0].getMessage()
+    assert said[0].levelno == logging.WARNING
+    if reason == mav_daily.UNKNOWN_KEY:
+        assert (
+            "signed by a key this version does not know (mav-index.json.sig): a newer key, another deploy's"
+            " signature, or not the site's" in said[0].getMessage()
+        )
 
 
 async def test_a_signature_settles_on_its_own_scope(
@@ -1228,30 +1231,63 @@ async def test_a_manifest_signed_by_a_key_of_the_list_installs(
     assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
 
 
-async def test_an_unknown_key_is_not_retried_and_says_why_on_the_sensor(
-    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, real_signature
+async def test_an_unknown_key_fails_for_days_then_is_unsupported(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, max_jitter, real_signature
 ) -> None:
-    """The site signs with a key this version does not know: UNSUPPORTED,
-    neither a failure (no retries, no failure streak) nor news; the sensor
-    says why."""
+    """A signature of a key this version does not know cannot be told from
+    another deploy's or from one that is not the site's (review round 8): a
+    failure with the normal retries, a day of the failure streak, on
+    UNKNOWN_KEY_DAYS consecutive days; then UNSUPPORTED, neither retried nor
+    a failure (the streak stays as it was), said at info; the sensor says
+    why all along."""
     await budapest
     raw = _index(NEW)
     body = json.dumps(_manifest(raw)).encode()
     _serve_signed(aioclient_mock, raw, sig=_sign(body, Ed25519PrivateKey.generate()))
     await _setup(hass, {})
-    await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
-    # SETTLING, then looked at again once.
-    _later(hass, mav_daily.PAGES_SETTLE_DELAY + 1)
-    await hass.async_block_till_done(wait_background_tasks=True)
-    calls = aioclient_mock.call_count
-    for _ in range(3):
-        _later(hass, mav_daily.RETRY_DELAY + 1)
+
+    async def day(first: str) -> tuple[str, int]:
+        await _at(hass, freezer, first)
+        # SETTLING, then looked at again once.
+        _later(hass, mav_daily.PAGES_SETTLE_DELAY + 1)
         await hass.async_block_till_done(wait_background_tasks=True)
-    assert aioclient_mock.call_count == calls
-    state = hass.states.get("sensor.hungarian_transport_daily_mav_check")
-    assert state.attributes["result"] == mav_daily.UNSUPPORTED
-    assert state.attributes["reason"] == mav_daily.UNKNOWN_KEY
-    assert state.attributes["failure_streak"] == 0
+        state = hass.states.get("sensor.hungarian_transport_daily_mav_check")
+        assert state.attributes["reason"] == mav_daily.UNKNOWN_KEY
+        calls = aioclient_mock.call_count
+        _later(hass, mav_daily.PAGES_SETTLE_DELAY + mav_daily.RETRY_DELAY + 2)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        retried = aioclient_mock.call_count - calls
+        return state.attributes["result"], state.attributes["failure_streak"], retried
+
+    assert await day("2026-11-01 03:20:01+01:00") == (mav_daily.FAILED, 1, 2)
+    await _at(hass, freezer, "2026-11-02 06:00:00+01:00")
+    assert await day("2026-11-02 06:05:01+01:00") == (mav_daily.FAILED, 2, 2)
+    await _at(hass, freezer, "2026-11-03 06:00:00+01:00")
+    assert await day("2026-11-03 06:05:01+01:00") == (mav_daily.FAILED, 3, 2)
+    await _at(hass, freezer, "2026-11-04 06:00:00+01:00")
+    assert await day("2026-11-04 06:05:01+01:00") == (mav_daily.UNSUPPORTED, 3, 0)
+    state = await storage.async_load(hass)
+    assert state[storage.UNKNOWN_KEY_SEEN]["mav-index.json"] == {"days": 4, "last": "2026-11-04"}
+    # The site's key again: the days end.
+    aioclient_mock.clear_requests()
+    _serve_signed(aioclient_mock, raw)
+    await _at(hass, freezer, "2026-11-05 06:00:00+01:00")
+    await _at(hass, freezer, "2026-11-05 06:05:01+01:00")
+    assert hass.states.get("sensor.hungarian_transport_daily_mav_check").attributes["result"] == mav_daily.INSTALLED
+    assert storage.UNKNOWN_KEY_SEEN not in await storage.async_load(hass)
+
+
+async def test_unknown_key_days_are_consecutive(hass: HomeAssistant) -> None:
+    """A day without an unknown key starts the count over; the same day
+    counts once; each manifest counts its own days."""
+    days = [
+        await storage.async_unknown_key_day(hass, "mav-index.json", date(2026, 11, d)) for d in (1, 1, 2, 3, 5, 6)
+    ]
+    assert days == [1, 1, 2, 3, 1, 2]
+    assert await storage.async_unknown_key_day(hass, "timetables.json", date(2026, 11, 6)) == 1
+    await storage.async_clear_unknown_key(hass, "mav-index.json")
+    assert await storage.async_unknown_key_day(hass, "mav-index.json", date(2026, 11, 7)) == 1
+    assert (await storage.async_load(hass))[storage.UNKNOWN_KEY_SEEN]["timetables.json"]["days"] == 1
 
 
 async def test_a_failed_round_records_its_reason(

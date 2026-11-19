@@ -16,10 +16,13 @@ when:
   signed the same way). A missing or bad signature installs nothing: the
   manifest names the sha256 of everything else, so the signature is what
   ties the whole download to the repository rather than to whoever answers
-  for bator.github.io. A well-formed signature none of the keys verifies,
-  also when looked at again (SETTLING), is UNSUPPORTED, reason "unknown_key"
-  (the site signs with a newer key: an update of the integration reads it),
-  said once at info, with no retries;
+  for bator.github.io. A well-formed signature none of the keys verifies
+  (reason "unknown_key": signed by a key this version does not know: a
+  newer key, another deploy's signature, or not the site's), also when
+  looked at again (SETTLING), is FAILED, with the normal retries, until it
+  has been so on more than mav_daily.UNKNOWN_KEY_DAYS consecutive days:
+  then UNSUPPORTED (an update of the integration may read it), said once at
+  info, with no retries;
 - the manifest's format is the one this code reads and its schema is
   INDEX_SCHEMA, the one the cards read (else it says so once and installs
   nothing: an older or newer integration publishes for other cards);
@@ -952,12 +955,14 @@ async def _signed(hass: HomeAssistant, session: aiohttp.ClientSession, raw: byte
     """None when timetables.json.sig verifies raw; else the round
     (mav_daily.check_signature): SETTLING the first time (right after a
     deploy the cache can pair the new manifest with the old signature, or
-    still answer 404 for it); after that UNSUPPORTED for a well-formed
-    signature no key verifies (UNKNOWN_KEY: the site signs with a newer key),
-    said once at info and not retried, else FAILED. Nothing is installed
-    without a signature."""
+    still answer 404 for it); after that FAILED, also for a well-formed
+    signature no key verifies (UNKNOWN_KEY: signed by a key this version
+    does not know: a newer key, another deploy's signature, or not the
+    site's), until that has been so on more than mav_daily.UNKNOWN_KEY_DAYS
+    consecutive days: then UNSUPPORTED, said once at info and not retried.
+    Nothing is installed without a signature."""
     check = await mav_daily.check_signature(
-        session, SIGNATURE_URL, raw, "timetables.json", partial(_may_settle, hass, _SIGNATURE)
+        hass, session, SIGNATURE_URL, raw, "timetables.json", partial(_may_settle, hass, _SIGNATURE)
     )
     if check is None:
         _matched(hass, _SIGNATURE)
@@ -969,9 +974,9 @@ async def _signed(hass: HomeAssistant, session: aiohttp.ClientSession, raw: byte
             " generation, looking again in %d s", err, mav_daily.PAGES_SETTLE_DELAY,
         )
     elif check.result == UNSUPPORTED:
-        _log_failure(hass, "manifest", f"{err}: the site signs with a newer key", unsupported=True)
+        _log_failure(hass, "manifest", mav_daily.signature_message(check), unsupported=True)
     else:
-        _log_failure(hass, "manifest", str(err))
+        _log_failure(hass, "manifest", mav_daily.signature_message(check))
     return _every(check.result, str(err), check.reason)
 
 

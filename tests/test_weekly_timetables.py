@@ -1311,8 +1311,8 @@ def test_verify_manifest_takes_only_the_key_s_signature_of_these_bytes() -> None
     body = Site().body()
     wt.verify_manifest(body, _sign(body).encode())
     for sig, message in (
-        (_sign(body + b" "), "does not match"),
-        (_sign(body, Ed25519PrivateKey.generate()), "does not match"),
+        (_sign(body + b" "), "a key this version does not know"),
+        (_sign(body, Ed25519PrivateKey.generate()), "a key this version does not know"),
         ("%%%", "not base64"),
         (_sign(body).strip() + "\n" + _sign(body), "not base64"),
         (base64.b64encode(b"x" * 10).decode(), "10 bytes"),
@@ -1350,14 +1350,15 @@ async def test_a_manifest_without_a_good_signature_installs_nothing(
     site.serve(aioclient_mock, sig)
     caplog.set_level(logging.INFO)
     # Right after a deploy the cache may pair the manifest with the previous
-    # signature: once quiet, then FAILED; a well-formed signature no key
-    # verifies is UNSUPPORTED (a key newer than this version: update it).
+    # signature: once quiet, then FAILED; also a well-formed signature no
+    # key verifies (a newer key, another deploy's signature, or not the
+    # site's), on its first days (review round 8).
     pt = wt.PagesTimetables(hass, card_assets)
     results = []
     for _ in range(3):
         await pt._round()
         results.append((await storage.async_load(hass)).get(storage.PAGES_ROUND, {}).get("volan"))
-    later = wt.UNSUPPORTED if well_formed else wt.FAILED
+    later = wt.FAILED
     reason = wt.UNKNOWN_KEY if well_formed else mav_daily.REASON_BAD_SIGNATURE
     # The settling round leaves no settled record, but says why it settles.
     assert results[0] == {"settling": reason, "settling_at": results[0]["settling_at"]}
@@ -1366,9 +1367,60 @@ async def test_a_manifest_without_a_good_signature_installs_nothing(
     assert set(_requested(aioclient_mock)) == {wt.MANIFEST_URL, wt.SIGNATURE_URL}
     said = [r for r in caplog.records if r.name == wt.__name__ and r.levelno >= logging.INFO]
     assert len(said) == 1, [r.getMessage() for r in said]
-    assert said[0].levelno == (logging.INFO if well_formed else logging.WARNING)
-    # An unknown key is no failure: no retry waits for it.
-    assert (pt._retries == 0) == well_formed
+    assert said[0].levelno == logging.WARNING
+    if well_formed:
+        assert "signed by a key this version does not know" in said[0].getMessage()
+    # Retried as any failure.
+    assert pt._retries == 2
+    pt.stop()
+
+
+async def test_an_unknown_key_fails_for_days_then_is_unsupported_and_not_retried(
+    hass: HomeAssistant, aioclient_mock, card_assets, caplog, freezer
+) -> None:
+    """The reviewers' repro (round 8): right after a deploy the cache pairs
+    the new manifest with the previous deploy's .sig, which reads as a key
+    this version does not know. A failure with retries on
+    UNKNOWN_KEY_DAYS consecutive days (a day without one starts over), then
+    UNSUPPORTED (update the integration), said once at info, not retried;
+    the site's signature again installs and ends the days."""
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    raw, _, _ = site.publish("volan", VOLAN_NEW)
+    body = site.body()
+    site.serve(aioclient_mock, _sign(body + b"the previous deploy"))
+    caplog.set_level(logging.INFO)
+    pt = wt.PagesTimetables(hass, card_assets)
+
+    async def cycle(day: str) -> tuple[str, int]:
+        freezer.move_to(f"{day} 06:00:00+00:00")
+        wt.new_cycle(hass)
+        pt._retries = 0
+        await pt._round()
+        assert pt._unsub is not None  # the settling look
+        pt._unsub()
+        pt._unsub = None
+        await pt._round()
+        record = (await storage.async_load(hass))[storage.PAGES_ROUND]["volan"]
+        assert record["reason"] == wt.UNKNOWN_KEY
+        retry = pt._unsub is not None
+        if retry:
+            pt._unsub()
+            pt._unsub = None
+        return record["result"], retry
+
+    days = ["2026-11-16", "2026-11-17", "2026-11-18", "2026-11-19"]
+    assert [await cycle(d) for d in days] == [(wt.FAILED, True)] * 3 + [(wt.UNSUPPORTED, False)]
+    info = [r.getMessage() for r in caplog.records if r.name == wt.__name__ and r.levelno == logging.INFO]
+    assert len(info) == 1 and "on more than 3 days in a row. Update Hungarian transport" in info[0]
+    # A day without one: the count starts over.
+    assert await cycle("2026-11-21") == (wt.FAILED, True)
+    aioclient_mock.clear_requests()
+    site.serve(aioclient_mock)
+    wt.new_cycle(hass)
+    await pt._round()
+    assert (card_assets / timetables.VOLAN_INDEX).read_bytes() == raw
+    assert storage.UNKNOWN_KEY_SEEN not in await storage.async_load(hass)
     pt.stop()
 
 
