@@ -18,10 +18,18 @@ from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from custom_components.hungarian_transport import gtfs_feed, mav, mav_daily, mav_index
-from custom_components.hungarian_transport.const import CONF_DAILY_MAV, CONF_DAILY_TIME, DOMAIN
+from custom_components.hungarian_transport import weekly_timetables as wt
+from custom_components.hungarian_transport.const import (
+    CONF_DAILY_MAV,
+    CONF_DAILY_TIME,
+    CONF_PAGES_TIMETABLES,
+    DOMAIN,
+)
 
 NEW = "20261101.M2ChangeID"
 OLD = "20261025.M2ChangeID"
+# The real weekly round, before conftest's no_pages_timetables replaces it.
+_real_weekly_update = wt.async_update
 
 
 @pytest.fixture
@@ -637,16 +645,23 @@ async def test_a_new_time_in_the_options_reschedules(
     assert aioclient_mock.call_count == count + 1
 
 
+@pytest.mark.parametrize("pages", [False, True])
 async def test_turned_off_makes_no_request(
-    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, monkeypatch, pages
 ) -> None:
+    """The daily MÁV index off: no MÁV request at all. The weekly timetables
+    run for real here (not conftest's stub): off too, nothing is asked;
+    on, only their own manifest (and its signature)."""
     await budapest
+    monkeypatch.setattr(wt, "async_update", _real_weekly_update)
     _serve(aioclient_mock, _index(NEW))
-    await _setup(hass, {CONF_DAILY_MAV: False})
+    aioclient_mock.get(wt.MANIFEST_URL, status=503)
+    await _setup(hass, {CONF_DAILY_MAV: False, CONF_PAGES_TIMETABLES: pages})
     for when in ("2026-11-01 03:30:00+01:00", "2026-11-01 06:00:00+01:00", "2026-11-01 06:10:00+01:00",
                  "2026-11-02 06:10:00+01:00"):
         await _at(hass, freezer, when)
-    assert aioclient_mock.call_count == 0
+    asked = {str(call[1]) for call in aioclient_mock.mock_calls}
+    assert asked == ({wt.MANIFEST_URL} if pages else set())
     assert not (card_assets / mav.INDEX_NAME).exists()
 
 
@@ -675,6 +690,87 @@ async def test_an_unexpected_error_is_logged_once_and_retried(
     await _at(hass, freezer, "2026-11-01 06:05:01+01:00")
     assert len(calls) == 2 + mav_daily.RETRY_LIMIT
     assert len(_warnings(caplog)) == 1
+    # A bug, not a download that failed: with its traceback.
+    (said,) = [r for r in caplog.records if r.name == mav_daily.__name__ and r.levelno >= logging.WARNING]
+    assert said.exc_info
+
+
+async def test_an_expected_error_of_a_round_is_one_short_line(hass: HomeAssistant, card_assets, caplog) -> None:
+    done = mav_daily._crashed(hass, OSError("disk"))
+    assert done.result == mav_daily.FAILED
+    (said,) = [r for r in caplog.records if r.name == mav_daily.__name__ and r.levelno >= logging.WARNING]
+    assert not said.exc_info
+
+
+def test_an_impossible_built_at_is_none() -> None:
+    assert mav_daily.built_at({"built_at": "2026-02-30T10:00:00Z"}) is None
+    assert mav_daily.built_at({"built_at": "2026-02-28T10:00:00Z"}) is not None
+
+
+async def test_two_manifests_taking_turns_settle_once_then_fail(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    """The cache serving two generations in turn, neither index matching
+    its manifest: one settle, then FAILED rounds (with their retries)."""
+    from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
+
+    raw = _index(NEW)
+    manifests = [_manifest(raw, sha256="a" * 64), _manifest(raw, sha256="b" * 64)]
+    turn = {"n": 0}
+
+    async def manifest(method, url, data):
+        turn["n"] += 1
+        return AiohttpClientMockResponse(method, url, json=manifests[turn["n"] % 2])
+
+    aioclient_mock.get(mav_daily.MANIFEST_URL, side_effect=manifest)
+    aioclient_mock.get(mav_daily.INDEX_URL, content=raw)
+    results = [(await mav_daily.async_update(hass, card_assets)).result for _ in range(5)]
+    assert results == [mav_daily.SETTLING] + [mav_daily.FAILED] * 4
+
+
+async def test_the_daily_time_during_a_retry_still_starts_the_weekly_round(
+    hass: HomeAssistant, card_assets, monkeypatch
+) -> None:
+    """The daily time comes while a MÁV retry (a slow download) runs: that
+    round is the day's, with fresh retries, and the weekly round starts when
+    it ends."""
+    gate = asyncio.Event()
+    rounds = []
+
+    async def slow_update(hass_, www):
+        rounds.append(True)
+        await gate.wait()
+        return mav_daily.DailyRound(mav_daily.FAILED, error="x")
+
+    monkeypatch.setattr(mav_daily, "async_update", slow_update)
+
+    class Weekly:
+        started = 0
+
+        def start_round(self):
+            Weekly.started += 1
+
+        def stop(self):
+            pass
+
+    up = mav_daily.DailyIndexUpdater(hass, card_assets, timetables=Weekly())
+    up._retries = mav_daily.RETRY_LIMIT
+    up._schedule(1, mav_daily._RETRY)
+    _later(hass, 2)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert rounds and not up._task.done()
+    up._schedule(1, mav_daily._DAILY)
+    _later(hass, 4)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert len(rounds) == 1
+    gate.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert Weekly.started == 1
+    # The day's retries: the failed round is tried again.
+    assert up._retries == 1 and up._next == mav_daily._RETRY and up._unsub is not None
+    up._unsub()
 
 
 def test_check_index_rejects_dangling_references() -> None:

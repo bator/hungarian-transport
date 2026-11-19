@@ -42,9 +42,11 @@ no-cache, so for up to PAGES_MAX_AGE after a deploy the manifest and the
 index can be of two generations: the first download that does not match its
 manifest (by size or sha256) is looked at again PAGES_SETTLE_DELAY later,
 with a debug line, and is no round (nothing recorded, nothing notified, no
-retry used up); the same manifest's index mismatching again is a FAILED
-round. The options flow can turn it off (CONF_DAILY_MAV); then no request
-is made at all. Each round returns a DailyRound, which the updater hands to
+retry used up); a download mismatching again before one matched (or before
+the next first or daily round) is a FAILED round, whichever manifest it is
+of: two generations taking turns would otherwise settle for ever. The
+options flow can turn it off (CONF_DAILY_MAV); then no request is made at
+all. Each round returns a DailyRound, which the updater hands to
 timetable_notify.py and records for the sensors. The same rounds then run
 the weekly Volán and city indexes (weekly_timetables.py), also with the
 daily MÁV index turned off.
@@ -181,6 +183,20 @@ class TooLarge(DailyIndexError):
     manifest names its size, another generation's (or a broken one)."""
 
 
+class NotFound(DailyIndexError):
+    """HTTP 404. For a file a manifest names (weekly_timetables.py: an
+    index, a shapes folder), right after a deploy that is a cached manifest
+    of the previous generation naming what the new site no longer has."""
+
+
+# What a round may raise in the normal course of things: a download or a
+# check that failed, a file that could not be written, the network. Anything
+# else is a bug, logged with its traceback (once, like every failure).
+EXPECTED_ERRORS: tuple[type[BaseException], ...] = (
+    DailyIndexError, OSError, aiohttp.ClientError, asyncio.TimeoutError,
+)
+
+
 async def _get(
     session: aiohttp.ClientSession,
     url: str,
@@ -210,6 +226,8 @@ async def _get(
                     f"followed (only {PAGES_BASE} is read; a custom GitHub Pages domain needs an update "
                     "of Hungarian transport)"
                 )
+            if res.status == 404:
+                raise NotFound(f"{what}: HTTP 404")
             if res.status != 200:
                 raise DailyIndexError(f"{what}: HTTP {res.status}")
             length = (res.headers or {}).get("Content-Length")
@@ -316,9 +334,14 @@ def manifest_rank(man: dict[str, Any]) -> mav_index.IndexRank:
 
 
 def built_at(man: dict[str, Any]) -> datetime | None:
-    """When the manifest's index was built (its built_at, UTC), or None."""
+    """When the manifest's index was built (its built_at, UTC), or None: also
+    for one that looks like a time but is none ("2026-02-30T10:00:00Z", which
+    parse_datetime raises on)."""
     value = man.get("built_at")
-    parsed = dt_util.parse_datetime(value) if isinstance(value, str) else None
+    try:
+        parsed = dt_util.parse_datetime(value) if isinstance(value, str) else None
+    except ValueError:
+        return None
     if parsed is None or parsed.tzinfo is None:
         return None
     return parsed
@@ -364,21 +387,32 @@ def decide(
 
 # The failure last logged as a warning, kept across rounds: only this module reads it.
 _LOGGED = "mav_daily_logged"
-# The sha256 of the last manifest whose download did not match it.
-_MISMATCHED = "mav_daily_mismatched"
+# Set once a download did not match its manifest and the round settled;
+# cleared by a download that matched (or a round that needed none) and by a
+# first or daily round. While it is set, a mismatch is a FAILED round: two
+# generations taking turns (A, B, A, B) would otherwise settle for ever.
+_SETTLED = "mav_daily_settled"
 
 
-def _first_mismatch(hass: HomeAssistant, sha: str) -> bool:
-    """Whether this manifest's download did not match it for the first time."""
+def _may_settle(hass: HomeAssistant) -> bool:
+    """Whether a download that did not match its manifest may settle: the
+    first one since a download matched, or since the cycle began."""
     data = hass.data.setdefault(DOMAIN, {})
-    if data.get(_MISMATCHED) == sha:
+    if data.get(_SETTLED):
         return False
-    data[_MISMATCHED] = sha
+    data[_SETTLED] = True
     return True
 
 
-def _log_failure(hass: HomeAssistant, message: str, unsupported: bool = False) -> None:
-    """Once per kind of failure; the same one again goes to debug."""
+def _matched(hass: HomeAssistant) -> None:
+    hass.data.setdefault(DOMAIN, {}).pop(_SETTLED, None)
+
+
+def _log_failure(
+    hass: HomeAssistant, message: str, unsupported: bool = False, exc_info: BaseException | None = None
+) -> None:
+    """Once per kind of failure; the same one again goes to debug. exc_info:
+    a crash (no EXPECTED_ERRORS), logged with its traceback the first time."""
     data = hass.data.setdefault(DOMAIN, {})
     if data.get(_LOGGED) == message:
         _LOGGER.debug("Daily MÁV route index: %s", message)
@@ -388,7 +422,8 @@ def _log_failure(hass: HomeAssistant, message: str, unsupported: bool = False) -
         _LOGGER.info("Daily MÁV route index skipped: %s. Update Hungarian transport to use it", message)
     else:
         _LOGGER.warning(
-            "Daily MÁV route index not updated: %s. The current index stays; trying again later", message
+            "Daily MÁV route index not updated: %s. The current index stays; trying again later", message,
+            exc_info=exc_info,
         )
 
 
@@ -397,10 +432,13 @@ def _clear_failure(hass: HomeAssistant) -> None:
 
 
 def _crashed(hass: HomeAssistant, err: Exception, feed: str | None = None, built: datetime | None = None) -> DailyRound:
-    """A round that raised: FAILED, logged once like any failure."""
+    """A round that raised: FAILED, logged once like any failure; one that
+    is not of EXPECTED_ERRORS with its traceback (a bug to report)."""
     message = f"{type(err).__name__}: {err}"
-    _log_failure(hass, message)
-    _LOGGER.debug("Daily MÁV route index round failed", exc_info=err)
+    expected = isinstance(err, EXPECTED_ERRORS)
+    _log_failure(hass, message, exc_info=None if expected else err)
+    if expected:
+        _LOGGER.debug("Daily MÁV route index round failed", exc_info=err)
     return DailyRound(FAILED, feed, built, error=message)
 
 
@@ -449,6 +487,7 @@ async def _install(
     )
     if decision != _INSTALL:
         _clear_failure(hass)
+        _matched(hass)
         _LOGGER.debug("Daily MÁV route index of feed %s: %s", feed, decision)
         return done(decision)
     if mav.build_pending(hass):
@@ -458,7 +497,7 @@ async def _install(
         raw = await _get(session, INDEX_URL, MAX_INDEX, INDEX_TIMEOUT)
         count, rank = await hass.async_add_executor_job(check_index, raw, man, mav.MIN_TRAINS)
     except _Mismatch as err:
-        if not _first_mismatch(hass, man["sha256"]):
+        if not _may_settle(hass):
             _log_failure(hass, str(err))
             return done(FAILED, str(err))
         # Right after a deploy the Pages cache can still hold the other
@@ -471,6 +510,7 @@ async def _install(
     except DailyIndexError as err:
         _log_failure(hass, str(err))
         return done(FAILED, str(err))
+    _matched(hass)
     # Checked again with nothing awaited before the lock is taken: a build
     # (an upload) that started during the download goes first.
     if mav.build_pending(hass):
@@ -552,9 +592,11 @@ class DailyIndexUpdater:
     schedule: timetables, when given, is started after the MÁV part of every
     first and daily round (not after its retries, late looks or settling
     looks, which are MÁV's own), in a task of its own, with retries of its
-    own. With mav False (the daily
-    MÁV index turned off) the rounds run the timetables alone and make no
-    MÁV request."""
+    own. A first or daily time that comes while a retry or a late look still
+    runs (a slow download) is that round: its retries and late looks start
+    over at once, and the timetables round starts when it ends. With mav
+    False (the daily MÁV index turned off) the rounds run the timetables
+    alone and make no MÁV request."""
 
     def __init__(
         self,
@@ -580,6 +622,9 @@ class DailyIndexUpdater:
         self._next = _FIRST
         self._retries = 0
         self._late = 0
+        # A first or daily time came while the round of a retry or a late
+        # look ran: that round starts the timetables round when it ends.
+        self._cycle_pending = False
         self._job = HassJob(self._fire, "hungarian_transport_mav_daily", cancel_on_shutdown=True)
 
     @callback
@@ -647,14 +692,19 @@ class DailyIndexUpdater:
     def _fire(self, _now: Any) -> None:
         self._unsub = None
         self._pending_at = None
-        if self._task is not None and not self._task.done():
-            # The previous round still runs (a slow download): it is this one.
-            return
         kind = self._next
         if kind in (_FIRST, _DAILY):
-            # A new cycle: its own retries and late looks.
+            # A new cycle: its own retries, late looks and settling.
             self._retries = 0
             self._late = 0
+            _matched(self._hass)
+        if self._task is not None and not self._task.done():
+            # The previous round still runs (a slow download): it is this
+            # one. When it was a retry or a late look, the day's timetables
+            # round would be lost with it: it starts when that one ends.
+            if kind in (_FIRST, _DAILY):
+                self._cycle_pending = True
+            return
         self._task = self._hass.async_create_background_task(self._run(kind), "hungarian_transport_mav_daily")
 
     @callback
@@ -684,7 +734,9 @@ class DailyIndexUpdater:
     async def _run(self, kind: str = _DAILY) -> None:
         if self._mav:
             await self._run_mav()
-        if self._timetables is not None and kind in (_FIRST, _DAILY) and not self._stopped:
+        cycle = kind in (_FIRST, _DAILY) or self._cycle_pending
+        self._cycle_pending = False
+        if self._timetables is not None and cycle and not self._stopped:
             # After the MÁV part, failed or not: its own round in its own
             # task, its own retries. This task ends here, so a MÁV retry,
             # late or settling look is never dropped for a slow download.
