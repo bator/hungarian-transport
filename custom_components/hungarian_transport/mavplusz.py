@@ -562,10 +562,17 @@ async def fetch(
     user_agent: str | None = None,
     timeout: aiohttp.ClientTimeout | None = None,
     cap: int = MAX_RESPONSE_BYTES,
+    decode: Callable[[bytearray], Any] | None = None,
 ) -> Any:
     """POST body to the planner; the decoded JSON answer. ValueError on an
     HTTP error or a non-JSON answer, TooLarge (one) on an oversized one. user_agent and timeout
-    default to realtime's (read per call: realtime imports this module)."""
+    default to realtime's (read per call: realtime imports this module).
+
+    decode, when given, is awaited with the answer's bytes in place of
+    decoding them here, and what it gives is the answer: the caller decodes
+    (and may parse) a large one off the event loop (mavplusz_board's boards
+    and trip details). What it raises is its caller's to handle; a
+    RecursionError (nested too deep) is a ValueError here as well."""
     timeout = timeout or realtime.FETCH_TIMEOUT
     headers = {
         "User-Agent": user_agent or realtime.USER_AGENT,
@@ -580,15 +587,16 @@ async def fetch(
         length = getattr(resp, "content_length", None)
         if length is not None and length > cap:
             raise TooLarge(f"{length} bytes, over {cap}")
-        chunks = []
-        total = 0
+        # One buffer, not chunks joined into a second copy of the body.
+        data = bytearray()
         async for chunk in resp.content.iter_chunked(65536):
-            total += len(chunk)
-            if total > cap:
+            if len(data) + len(chunk) > cap:
                 raise TooLarge(f"over {cap} bytes")
-            chunks.append(chunk)
+            data += chunk
     try:
-        return jsonsafe.loads(b"".join(chunks))
+        if decode is not None:
+            return await decode(data)
+        return jsonsafe.loads(data)
     except RecursionError:
         # Nested deeper than the decoder goes: not an answer, and the
         # caller's failure path is the one for ValueError.

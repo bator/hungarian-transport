@@ -15,6 +15,7 @@ import logging
 import re
 from pathlib import Path
 
+import aiohttp
 import pytest
 from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
 
@@ -93,10 +94,34 @@ def _proxy(monkeypatch, boards, clock: FakeClock, failure: Exception | None = No
     return futar.FutarProxy(None, "secret-key", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
 
 
+async def _decoded(doc, decode):
+    """A fake mavplusz.fetch's answer doc as the real one gives it: through
+    the caller's decode hook (as JSON text), when it hands one."""
+    return doc if decode is None else await decode(bytearray(json.dumps(doc).encode()))
+
+
 def _futar_down(proxy: futar.FutarProxy) -> None:
-    """FUTÁR's outage stands, as after a failed call: FUTÁR is cut short
-    for the fallback from now until it answers."""
+    """FUTÁR's outage stands, as after a failed call, and its probe is due
+    (FUTAR_OUTAGE_PROBE_SEC since it was last asked): the next request asks
+    FUTÁR first, cut short for the fallback; the ones after it within
+    FUTAR_OUTAGE_PROBE_SEC ask the fallback first, until FUTÁR answers."""
     proxy._outages.failed(None, "BKK FUTÁR unavailable (%s); not logged again until it answers", "test")
+    _probe_due(proxy)
+
+
+def _futar_first(proxy: futar.FutarProxy) -> None:
+    """Every request asks FUTÁR first in its outage too, cut short for the
+    fallback (the order before FUTAR_OUTAGE_PROBE_SEC): the reserved
+    tokens' and tickets' lifetimes, which the probe and the callers joining
+    its request rely on, tested on many requests at once."""
+    proxy._in_outage = lambda path: False
+
+
+def _probe_due(proxy: futar.FutarProxy) -> None:
+    """FUTÁR was last asked FUTAR_OUTAGE_PROBE_SEC ago or more: the next
+    request in its outage is the probe (without moving the clock, which
+    would refill the buckets)."""
+    proxy._futar_asked_at = -1e18
 
 
 def test_ids_map_between_futar_and_the_planner() -> None:
@@ -289,9 +314,9 @@ async def test_planner_down_too_raises_futars_own_error(make_planner, aioclient_
     assert len(fake.asked) == 1
     warnings = [r for r in caplog.records if r.name.endswith("mavplusz_board") and r.levelno == logging.WARNING]
     assert len(warnings) == 1 and "HTTP 502" in warnings[0].getMessage()
-    # It answers again after the backoff.
+    # It answers again after the backoff (and the stop's failed ask, BOARD_TTL).
     fake.down = False
-    clock.now += mb.FAIL_BACKOFF
+    clock.now += max(mb.FAIL_BACKOFF, mb.BOARD_TTL)
     data = await proxy.get(BOARD, BOARD_PARAMS)
     assert data["source"] == "mavplusz"
     assert any("answers for BKK boards again" in r.getMessage() for r in caplog.records)
@@ -316,7 +341,7 @@ async def test_one_planner_request_per_stop_for_every_card_and_horizon(make_plan
     ))
     assert len(fake.asked) == 1
     assert [len(a["data"]["entry"]["stopTimes"]) for a in answers] == [3, 6, 6, 6]
-    # Cached for BOARD_TTL (FUTÁR's own), then asked again.
+    # Cached for BOARD_TTL, then asked again.
     clock.now += mb.BOARD_TTL - 1
     await proxy.get(BOARD, BOARD_PARAMS)
     assert len(fake.asked) == 1
@@ -339,8 +364,8 @@ async def test_a_stop_is_not_asked_twice_within_the_ttl_even_unanswered(make_pla
     aioclient_mock.post(mavplusz.URL, side_effect=broken)
     with pytest.raises(futar.FutarError):
         await proxy.get(BOARD, BOARD_PARAMS)
-    clock.now += mb.FAIL_BACKOFF - 1
-    assert mb.FAIL_BACKOFF > mb.BOARD_TTL
+    clock.now += max(mb.FAIL_BACKOFF, mb.BOARD_TTL) + 1
+    assert clock.now - 1000 < mb.REQUEST_FAIL_TTL
     with pytest.raises(futar.FutarError):
         await proxy.get(BOARD, BOARD_PARAMS)
     assert len(fake.asked) == 1
@@ -734,8 +759,9 @@ async def test_a_futar_station_the_planner_knows_is_its_own_board(make_planner, 
 async def test_an_unknown_futar_station_is_asked_of_the_planner_once(make_planner, aioclient_mock, monkeypatch) -> None:
     """A FUTÁR-only station (null in the planner) with no pole known: the
     first board FUTÁR cannot give asks the planner for it; its null is kept
-    for PROBE_TTL, during which FUTÁR keeps its whole budget there and the
-    planner is not asked again. A failed request says nothing either way."""
+    for UNKNOWN_TTL (PROBE_TTL once repeated), during which FUTÁR keeps its
+    whole budget there and the planner is not asked again. A failed request
+    says nothing either way."""
     boards, fake, clock = make_planner()
     station = "BKK_CSF09999"
     params = dict(BOARD_PARAMS, stopId=station)
@@ -744,7 +770,7 @@ async def test_an_unknown_futar_station_is_asked_of_the_planner_once(make_planne
     with pytest.raises(futar.FutarError):
         await failing.get(BOARD, params)
     assert boards._known(station) is None and boards.can_answer(BOARD, dict(params, minutesAfter="61")) is False
-    clock.now += mb.FAIL_BACKOFF
+    clock.now += max(mb.FAIL_BACKOFF, mb.BOARD_TTL)
     fake.down = False
     with pytest.raises(futar.FutarError):
         await failing.get(BOARD, dict(params, minutesAfter="62"))
@@ -864,7 +890,16 @@ async def test_home_assistant_keeps_the_learnt_stations_in_its_store(
     assert storage.STATIONS_KEY not in hass_storage
 
 
-HOSTILE = [10 ** 20, 2 ** 63, -(2 ** 63), 1e20, float("nan"), "1794956400", True, None, [], {}]
+HOSTILE = [10 ** 20, 2 ** 64, 2 ** 63, -(2 ** 63), 10 ** 400, 1e20, float("nan"), "1794956400", True, None, [], {}]
+
+
+def _ha_json(answer) -> None:
+    """answer (or None) through Home Assistant's own JSON (orjson), as the
+    service response goes to the card: an int past 64 bits broke it."""
+    from homeassistant.helpers.json import json_bytes
+
+    if answer is not None:
+        json_bytes(answer)
 
 
 @pytest.mark.parametrize("value", HOSTILE, ids=[repr(v)[:12] for v in HOSTILE])
@@ -878,27 +913,37 @@ async def test_hostile_times_never_escape_the_fallback(make_planner, aioclient_m
     for st in board["data"]["stop"]["stoptimesWithoutPatterns"] + trip["stoptimesForDate"]:
         st["serviceDay"] = value
         st["realtimeDeparture"] = value
+        st["stop"]["lat"] = value
     calls = board["data"]["stop"]["stoptimesWithoutPatterns"]
     calls[0]["serviceDay"] = 1794956400
     calls[0]["scheduledDeparture"] = value
+    # The shape's length too: one trip of the fixture's times, any length.
+    good = copy.deepcopy(TRIPS_DOC["data"]["t0"])
+    good["tripGeometry"] = {"points": "}gz`HaoosBPADdBJfH?P@", "length": value}
 
-    async def fetch(session, body, **_kwargs):
-        # Past the HTTP layer: JSON numbers no int64 holds, NaN as Python's json reads it.
+    async def fetch(session, body, *, decode=None, **_kwargs):
+        # JSON numbers no int64 holds, NaN as Python's json reads it.
         if "stop(id:" in body["query"]:
-            return copy.deepcopy(board)
-        return {"data": {k: copy.deepcopy(trip) for k in body["variables"] if k[0] == "t"}}
+            return await _decoded(board, decode)
+        aliases = [k for k in body["variables"] if k[0] == "t"]
+        return await _decoded({"data": {
+            k: good if body["variables"][k] == "BKK:GOOD" else trip for k in aliases}}, decode)
 
     monkeypatch.setattr(mavplusz, "fetch", fetch)
     out = await boards.answer(BOARD, BOARD_PARAMS)
     assert out is None or all(isinstance(st["departureTime"], int) for st in out["data"]["entry"]["stopTimes"])
+    _ha_json(out)
     assert await boards.answer(TRIP, {"tripId": FIRST_TRIP}) is None
+    shaped = await boards.answer(TRIP, {"tripId": "BKK_GOOD"})
+    assert shaped["data"]["entry"]["polyline"]["points"]
+    _ha_json(shaped)
 
 
 async def test_answers_of_the_wrong_shape_never_escape_the_fallback(make_planner, aioclient_mock, monkeypatch) -> None:
     import random
 
     rng = random.Random(20261118)
-    junk = [None, 0, -1, 10 ** 25, 1.5, "", "x" * 300, True, [], {}, [None], {"gtfsId": 7}]
+    junk = [None, 0, -1, 10 ** 25, 2 ** 64, 1.5, "", "x" * 300, True, [], {}, [None], {"gtfsId": 7}]
 
     def mangle(node):
         if isinstance(node, dict):
@@ -915,18 +960,18 @@ async def test_answers_of_the_wrong_shape_never_escape_the_fallback(make_planner
     boards, _fake, clock = make_planner()
     docs = []
 
-    async def fetch(session, body, **_kwargs):
+    async def fetch(session, body, *, decode=None, **_kwargs):
         source = BOARD_DOC if "stop(id:" in body["query"] else {"data": {
             k: copy.deepcopy(TRIPS_DOC["data"]["t0"]) for k in body["variables"] if k[0] == "t"}}
         doc = mangle(copy.deepcopy(source))
         docs.append(doc)
-        return doc
+        return await _decoded(doc, decode)
 
     monkeypatch.setattr(mavplusz, "fetch", fetch)
     for i in range(60):
         clock.now += mb.FAIL_BACKOFF + mb.TRIP_TTL
-        await boards.answer(BOARD, dict(BOARD_PARAMS, stopId=f"BKK_F{i}"))
-        await boards.answer(TRIP, {"tripId": f"BKK_T{i}"})
+        _ha_json(await boards.answer(BOARD, dict(BOARD_PARAMS, stopId=f"BKK_F{i}")))
+        _ha_json(await boards.answer(TRIP, {"tripId": f"BKK_T{i}"}))
     # Asked on, never raised: a broken answer fails its own request, never a backoff.
     assert len(docs) > 60
 
@@ -957,9 +1002,9 @@ async def test_a_board_answer_may_be_larger_than_the_trip_details(make_planner, 
     boards, _fake, _clock = make_planner()
     caps = []
 
-    async def fetch(session, body, *, user_agent=None, timeout=None, cap=mavplusz.MAX_RESPONSE_BYTES):
+    async def fetch(session, body, *, user_agent=None, timeout=None, cap=mavplusz.MAX_RESPONSE_BYTES, decode=None):
         caps.append((cap, timeout.total))
-        return copy.deepcopy(BOARD_DOC) if "stop(id:" in body["query"] else {"data": {"t0": None}}
+        return await _decoded(BOARD_DOC if "stop(id:" in body["query"] else {"data": {"t0": None}}, decode)
 
     monkeypatch.setattr(mavplusz, "fetch", fetch)
     await boards.answer(BOARD, BOARD_PARAMS)
@@ -1274,8 +1319,9 @@ async def test_a_trip_a_graphql_error_names_is_no_answer_and_the_others_are(make
 
 async def test_a_stop_the_planner_does_not_know_is_not_asked_again(make_planner, aioclient_mock, monkeypatch) -> None:
     """A plain BKK stop the planner has no board of (a HÉV stop, Kelenföld's
-    MÁV station BKK_005510017): its null is kept for PROBE_TTL, during which
-    FUTÁR keeps its whole budget there and the planner is not asked."""
+    MÁV station BKK_005510017): its null is kept for UNKNOWN_TTL, and once
+    it was null twice in a row for PROBE_TTL, during which FUTÁR keeps its
+    whole budget there and the planner is not asked."""
     boards, fake, clock = make_planner()
     params = dict(BOARD_PARAMS, stopId="BKK_005510017")
     seen: list = []
@@ -1287,7 +1333,18 @@ async def test_a_stop_the_planner_does_not_know_is_not_asked_again(make_planner,
     assert [a["id"] for a in fake.asked] == ["BKK:005510017"]
     assert not boards.can_answer(BOARD, params)
     assert [t for _p, t in seen[1:]] == [futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC] * 3
-    clock.now += mb.PROBE_TTL
+    # Null again after UNKNOWN_TTL: two in a row, kept for PROBE_TTL.
+    clock.now += mb.UNKNOWN_TTL
+    assert boards.can_answer(BOARD, params)
+    with pytest.raises(futar.FutarError):
+        await proxy.get(BOARD, params)
+    assert len(fake.asked) == 2
+    clock.now += mb.PROBE_TTL - 1
+    assert not boards.can_answer(BOARD, params)
+    with pytest.raises(futar.FutarError):
+        await proxy.get(BOARD, params)
+    assert len(fake.asked) == 2
+    clock.now += 1
     assert boards.can_answer(BOARD, params)
 
 
@@ -1356,8 +1413,14 @@ async def test_futar_failing_after_its_whole_budget_does_not_ask_the_planner(mak
         await proxy.get(BOARD, BOARD_PARAMS)
     assert hang.timeouts == [futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC] and fake.asked == []
     assert clock.now - started == futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
+    # FUTÁR's outage stands: the planner is asked first, FUTÁR not waited for.
     started = clock.now
     doc = await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="61"))
+    assert doc["source"] == "mavplusz" and len(hang.timeouts) == 1 and clock.now == started
+    # FUTÁR's probe is cut short with the planner's token instead, and answers in time.
+    clock.now += futar.FUTAR_OUTAGE_PROBE_SEC
+    started = clock.now
+    doc = await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="62"))
     assert doc["source"] == "mavplusz" and hang.timeouts[-1] == futar.FUTAR_FALLBACK_TIMEOUT_SEC
     assert clock.now - started + mb.PLANNER_TIMEOUT.total <= futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
 
@@ -1404,6 +1467,13 @@ async def test_a_futar_answer_landing_after_the_entry_is_removed_writes_no_store
     _inject(monkeypatch, FakeClock())
     entry = await _setup(hass)
     (planner,) = made
+    # A station learnt and written first: the removal is what deletes it.
+    planner.learn(BOARD, {"stopId": "BKK_X"}, {"data": {"references": {"stops": {
+        "p": {"id": "BKK_F00940", "parentStationId": "BKK_CSF00940"}}}}})
+    freezer.tick(timedelta(seconds=storage.STATIONS_SAVE_DELAY + 1))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert "BKK_CSF00940" in hass_storage[storage.STATIONS_KEY]["data"]["stations"]
     await hass.config_entries.async_remove(entry.entry_id)
     await hass.async_block_till_done()
     assert storage.STATIONS_KEY not in hass_storage
@@ -1638,9 +1708,9 @@ async def test_a_board_asked_and_unanswered_is_not_offered_within_the_ttl(make_p
 
 
 async def test_the_token_of_a_request_whose_callers_all_left_goes_back(make_planner, aioclient_mock, monkeypatch) -> None:
-    """FUTÁR in its outage: five boards cut short, each with a planner token
+    """FUTÁR in its outage: its probe cut short, with a planner token
     reserved, and every card detached before FUTÁR failed. Nobody falls
-    back, and the tokens go back (before, they were kept for good)."""
+    back, and the token goes back (before, it was kept for good)."""
     clock = FakeClock(stopped=True)
     limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
     boards, fake, clock = make_planner(clock, limiter=limiter)
@@ -1653,20 +1723,24 @@ async def test_the_token_of_a_request_whose_callers_all_left_goes_back(make_plan
     monkeypatch.setattr(futar, "futar_get", failing)
     proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
     _futar_down(proxy)
-    calls = [asyncio.ensure_future(proxy.get(BOARD, dict(BOARD_PARAMS, stopId=f"BKK_F0{i}"))) for i in range(5)]
+    call = asyncio.ensure_future(proxy.get(BOARD, dict(BOARD_PARAMS, stopId="BKK_F01")))
     for _ in range(3):
         await asyncio.sleep(0)
-    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 5
-    for call in calls:
-        call.cancel()
-    await asyncio.gather(*calls, return_exceptions=True)
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+    call.cancel()
+    await asyncio.gather(call, return_exceptions=True)
     gate.set()
     for _ in range(5):
         await asyncio.sleep(0)
     assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST and fake.asked == []
-    # Two cards sharing one request, one of them gone: the other falls back
-    # on the token, spent once and not given back on top.
+    # Two cards sharing the probe's request (the second found no token of
+    # the share left to ask the planner first), one of them gone: the other
+    # falls back on the probe's token, spent once and not given back on top.
     gate.clear()
+    _futar_down(proxy)
+    other = limiter.client(RuntimeError, fallback=True)
+    for _ in range(mavplusz.FALLBACK_BURST - 1):
+        other.take()
     first = asyncio.ensure_future(proxy.get(BOARD, BOARD_PARAMS))
     second = asyncio.ensure_future(proxy.get(BOARD, BOARD_PARAMS))
     for _ in range(3):
@@ -1674,7 +1748,7 @@ async def test_the_token_of_a_request_whose_callers_all_left_goes_back(make_plan
     first.cancel()
     gate.set()
     assert (await second)["source"] == "mavplusz" and len(fake.asked) == 1
-    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+    assert limiter._fallback._tokens == 0
 
 
 async def test_futar_keeps_its_whole_budget_when_the_token_wait_leaves_no_room(make_planner, aioclient_mock, monkeypatch) -> None:
@@ -1704,7 +1778,8 @@ async def test_futar_keeps_its_whole_budget_when_the_token_wait_leaves_no_room(m
         await proxy.get(BOARD, BOARD_PARAMS)
     assert hang.timeouts == [pytest.approx(futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC - room - 0.3)]
     assert fake.asked == [] and limiter._fallback._tokens == mavplusz.FALLBACK_BURST
-    # Within the room, FUTÁR is cut short and the planner answers in time.
+    # Within the room, FUTÁR's probe is cut short and the planner answers in time.
+    _probe_due(proxy)
     doc = await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="61"))
     assert doc["source"] == "mavplusz" and hang.timeouts[-1] == futar.FUTAR_FALLBACK_TIMEOUT_SEC
 
@@ -1712,8 +1787,9 @@ async def test_futar_keeps_its_whole_budget_when_the_token_wait_leaves_no_room(m
 async def test_futar_is_cut_short_only_while_its_outage_stands(make_planner, aioclient_mock, monkeypatch) -> None:
     """While FUTÁR answers, no planner token is reserved and FUTÁR has its
     whole budget; a request failing fast is still answered by the planner
-    (its own token), and starts the outage: from then on FUTÁR is cut short
-    with a token reserved, until it answers again."""
+    (its own token), and starts the outage: from then on FUTÁR's probe is
+    cut short with a token reserved (the other requests ask the planner
+    first), until it answers again."""
     clock = FakeClock(stopped=True)
     limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
     boards, _fake, clock = make_planner(clock, limiter=limiter)
@@ -1735,19 +1811,25 @@ async def test_futar_is_cut_short_only_while_its_outage_stands(make_planner, aio
     assert (await proxy.get(BOARD, BOARD_PARAMS))["from"] == "futar"
     failing[0] = True
     assert (await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="61")))["source"] == "mavplusz"
+    _probe_due(proxy)
     assert (await proxy.get(BOARD, dict(BOARD_PARAMS, stopId="BKK_F00941")))["source"] == "mavplusz"
+    # Not the probe: the planner first, FUTÁR not asked.
+    assert (await proxy.get(BOARD, dict(BOARD_PARAMS, stopId="BKK_F00944")))["source"] == "mavplusz"
+    assert len(seen) == 3
     failing[0] = False
+    _probe_due(proxy)
     assert (await proxy.get(BOARD, dict(BOARD_PARAMS, stopId="BKK_F00942")))["from"] == "futar"
     assert (await proxy.get(BOARD, dict(BOARD_PARAMS, stopId="BKK_F00943")))["from"] == "futar"
     assert seen == [whole, whole, futar.FUTAR_FALLBACK_TIMEOUT_SEC, futar.FUTAR_FALLBACK_TIMEOUT_SEC, whole]
-    # The planner was asked for the two boards FUTÁR failed, nothing reserved is left.
-    assert len(fake.asked) == 2 and limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 2
+    # The planner was asked for the three boards FUTÁR did not give, nothing reserved is left.
+    assert len(fake.asked) == 3 and limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 3
 
 
 async def test_a_page_that_is_not_json_backs_the_planner_off(make_planner, aioclient_mock, caplog) -> None:
     """An HTTP 200 that is no JSON (a maintenance or Cloudflare page) is the
     planner failing, not one stop's request: the shared backoff, a warning,
-    and the stop is asked again after it, not after REQUEST_FAIL_TTL."""
+    and the stop is asked again after it (and BOARD_TTL after its failed
+    ask), not after REQUEST_FAIL_TTL."""
     clock = FakeClock()
     limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
     boards, fake, clock = make_planner(clock, limiter=limiter)
@@ -1759,7 +1841,7 @@ async def test_a_page_that_is_not_json_backs_the_planner_off(make_planner, aiocl
     assert await boards.answer(BOARD, BOARD_PARAMS) is None
     assert limiter.backing_off()
     assert any("not JSON" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
-    clock.now += mb.FAIL_BACKOFF
+    clock.now += max(mb.FAIL_BACKOFF, mb.BOARD_TTL)
     assert boards.can_answer(BOARD, BOARD_PARAMS)
     _use(aioclient_mock, fake)
     assert (await boards.answer(BOARD, BOARD_PARAMS))["source"] == "mavplusz"
@@ -1777,14 +1859,18 @@ def test_the_documented_numbers_are_the_constants() -> None:
     # The card's 20 s, FUTÁR's 8 s of it, the planner's 6 s, half a second of slack.
     assert (futar.CARD_TIMEOUT_SEC, futar.FUTAR_FALLBACK_TIMEOUT_SEC, mb.PLANNER_TIMEOUT.total) == (20, 8, 6)
     assert futar.FUTAR_FALLBACK_SLACK_SEC == 0.5
-    # Per stop per 15 s, eight hours, 60 departures a pattern, 80 rows a pattern, 400 a card, 2 MB.
-    assert (mb.BOARD_TTL, mb.BOARD_WINDOW_MIN, mb.DEPARTURES_PER_PATTERN) == (15, 480, 60)
+    # In FUTÁR's outage, one probe every 30 s; a reserved token goes back within a second of its take.
+    assert (futar.FUTAR_OUTAGE_PROBE_SEC, mb.REFUND_WITHIN_SEC) == (30, 1.0)
+    # Per stop per 35 s, eight hours, 60 departures a pattern, 80 rows a pattern, 400 a card, 2 MB.
+    assert (mb.BOARD_TTL, mb.BOARD_WINDOW_MIN, mb.DEPARTURES_PER_PATTERN) == (35, 480, 60)
     assert (mb.ROWS_PER_PATTERN, mb.RENDER_MAX_ROWS, mb.BOARD_MAX_BYTES) == (80, 400, 2 * 1024 * 1024)
     # Trip details: 50 ms a batch, 40 trips a request, cached 60 s.
     assert (mb.TRIP_BATCH_WAIT, mb.MAX_TRIPS_PER_REQUEST, mb.TRIP_TTL) == (0.05, 40, 60)
     # Stations: 24 poles, 20 departures a pattern each, 512 stations, 30 days, 12 hours known, 10 minutes failing.
     assert (mb.MAX_CHILD_STOPS, mb.CHILD_DEPARTURES, mb.MAX_STATIONS) == (24, 20, 512)
     assert (mb.STATION_MAX_AGE, mb.PROBE_TTL, mb.REQUEST_FAIL_TTL) == (30 * 86400, 12 * 3600, 600)
+    # A null 10 minutes, 12 hours once it was two in a row.
+    assert (mb.UNKNOWN_TTL, mb.UNKNOWN_REPEATS) == (600, 2)
     assert mb.NIGHT_END_HOUR == 5 and len(mb.SEED_STATIONS["BKK_CSF01131"]["poles"]) == 15
 
 
@@ -1877,6 +1963,7 @@ async def test_a_dashboards_trip_details_share_one_planner_token(make_planner, a
     monkeypatch.setattr(futar, "futar_get", hang)
     proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
     _futar_down(proxy)
+    _futar_first(proxy)
     calls = [asyncio.ensure_future(proxy.get(TRIP, _trip_params(i))) for i in range(40)]
     for _ in range(5):
         await asyncio.sleep(0)
@@ -1903,6 +1990,7 @@ async def test_trip_details_leave_the_share_for_another_cards_board(make_planner
     monkeypatch.setattr(futar, "futar_get", hang)
     proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
     _futar_down(proxy)
+    _futar_first(proxy)
     calls = [asyncio.ensure_future(proxy.get(TRIP, _trip_params(i))) for i in range(40)]
     for _ in range(5):
         await asyncio.sleep(0)
@@ -2046,6 +2134,7 @@ async def test_a_later_batch_on_a_spent_shared_token_takes_one_of_its_own(make_p
     monkeypatch.setattr(futar, "futar_get", failing)
     proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
     _futar_down(proxy)
+    _futar_first(proxy)
     calls = [asyncio.ensure_future(proxy.get(TRIP, _trip_params(i))) for i in range(2)]
     for _ in range(5):
         await asyncio.sleep(0)
@@ -2113,6 +2202,7 @@ async def test_a_ticket_is_released_by_the_last_caller_that_saw_it(make_planner,
     monkeypatch.setattr(boards._rate, "take", lambda: taken.append(1) or real_take())
     monkeypatch.setattr(boards._rate, "refund", lambda: refunded.append(1) or real_refund())
     _futar_down(proxy)
+    _futar_first(proxy)
     first = asyncio.ensure_future(proxy.get(BOARD, BOARD_PARAMS))
     for _ in range(3):
         await asyncio.sleep(0)
@@ -2175,6 +2265,7 @@ async def test_a_later_request_of_the_same_key_holds_no_earlier_ticket(make_plan
     monkeypatch.setattr(futar, "futar_get", futar_get)
     proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
     _futar_down(proxy)
+    _futar_first(proxy)
     later = dict(BOARD_PARAMS, minutesAfter="61")
 
     async def step(params):
@@ -2306,3 +2397,493 @@ async def test_unloading_closes_the_planner_once_and_writes_its_stations_once(
     assert closes == [1]
     assert [(closed, data["stations"]["BKK_CSF00940"]["poles"]) for closed, data in writes] == [(True, ["BKK_F00941"])]
     assert hass_storage[storage.STATIONS_KEY]["data"]["stations"]["BKK_CSF00940"]["poles"] == ["BKK_F00941"]
+
+
+# --- The review of 2026-11-19 (round 6): decoding off the loop, FUTÁR's
+# --- outage probed instead of waited for, the board's TTL, one null, one
+# --- bad alias, bounded shapes, refunds after a hold, and the gaps.
+
+
+def _padded(doc: dict, size: int) -> str:
+    """doc as JSON text of at least size bytes (a field nothing reads)."""
+    return json.dumps(dict(doc, extensions={"pad": "x" * size}))
+
+
+async def test_a_large_answer_is_decoded_and_parsed_off_the_event_loop(make_planner, aioclient_mock) -> None:
+    """A board answer runs to 2 MB, and decoding it with its rows took some
+    56 ms on a laptop: one of EXECUTOR_BYTES or more is decoded and parsed
+    in the executor in one go; a smaller one, nearly every answer, on the
+    loop. Trip details alike."""
+    ran: list = []
+
+    async def executor(func, *args):
+        ran.append(func)
+        return func(*args)
+
+    boards, _fake, clock = make_planner(executor=executor)
+    sizes = {"board": 0, "trip": 0}
+
+    async def answer(method, url, data):
+        body = json.loads(data)
+        if "stop(id:" in body["query"]:
+            doc = {"data": {"stop": copy.deepcopy(BOARD_DOC["data"]["stop"])}}
+            return AiohttpClientMockResponse(method, url, text=_padded(doc, sizes["board"]))
+        doc = {"data": {k: copy.deepcopy(TRIPS_DOC["data"]["t0"]) for k in body["variables"] if k[0] == "t"}}
+        return AiohttpClientMockResponse(method, url, text=_padded(doc, sizes["trip"]))
+
+    _use(aioclient_mock, answer)
+    small = await boards.answer(BOARD, BOARD_PARAMS)
+    assert len(small["data"]["entry"]["stopTimes"]) == 6 and ran == []
+    sizes["board"] = mb.EXECUTOR_BYTES
+    clock.now += mb.BOARD_TTL
+    big = await boards.answer(BOARD, BOARD_PARAMS)
+    assert big == small and ran == [mb._decode_parse]
+    assert (await boards.answer(TRIP, {"tripId": FIRST_TRIP}))["data"]["entry"]["tripId"] == FIRST_TRIP
+    assert ran == [mb._decode_parse]
+    sizes["trip"] = mb.EXECUTOR_BYTES
+    trip = await boards.answer(TRIP, {"tripId": "BKK_D25280606"})
+    assert trip["data"]["entry"]["tripId"] == "BKK_D25280606" and ran == [mb._decode_parse] * 2
+
+
+async def test_a_large_answer_of_the_wrong_shape_fails_its_request_alone(make_planner, aioclient_mock) -> None:
+    """Parsed in the executor, an answer of the wrong shape is still that
+    stop's failure (REQUEST_FAIL_TTL), not the planner's (no backoff)."""
+    ran: list = []
+
+    async def executor(func, *args):
+        ran.append(func)
+        return func(*args)
+
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter, executor=executor)
+
+    async def wrong(method, url, data):
+        return AiohttpClientMockResponse(method, url, text=_padded({"data": {"stop": [1, 2]}}, mb.EXECUTOR_BYTES))
+
+    _use(aioclient_mock, wrong)
+    assert await boards.answer(BOARD, BOARD_PARAMS) is None
+    assert ran and not limiter.backing_off() and boards._is_failing(("board", STOP))
+
+
+def _counting_futar(monkeypatch, clock: FakeClock, results: list) -> list:
+    """FUTÁR failing (results: "fail", "hang" taking its whole timeout, or
+    "ok"; the last one repeats): the timeouts of the calls it got."""
+    calls: list = []
+
+    async def futar_get(session, api_key, path, params, timeout=None, *, executor=None):
+        calls.append((path, timeout.total))
+        mode = results.pop(0) if len(results) > 1 else results[0]
+        if mode == "ok":
+            return {"status": "OK", "data": {"entry": {"stopTimes": []}, "references": {}}, "from": "futar"}
+        if mode == "hang":
+            clock.now += timeout.total
+            raise futar.FutarError("TimeoutError")
+        raise futar.FutarError("HTTP 503")
+
+    monkeypatch.setattr(futar, "futar_get", futar_get)
+    return calls
+
+
+async def test_in_futars_outage_the_planner_answers_first(make_planner, aioclient_mock, monkeypatch) -> None:
+    """FUTÁR down (hanging its whole timeout): once its outage stands, the
+    boards and trip details a card polls are answered by the planner at
+    once, FUTÁR not asked; before, each waited 8 s for FUTÁR first (18 s
+    once the planner's share was used up). The paths the planner does not
+    serve still ask FUTÁR."""
+    boards, _fake, clock = make_planner()
+    fake = AnyTripPlanner()
+    _use(aioclient_mock, fake)
+    calls = _counting_futar(monkeypatch, clock, ["hang"])
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    with pytest.raises(futar.FutarError):
+        await proxy.get(BOARD, BOARD_PARAMS)  # FUTÁR's whole budget: the outage starts
+    assert len(calls) == 1
+    started = clock.now
+    for i in range(5):
+        clock.now += 5
+        doc = await proxy.get(BOARD, dict(BOARD_PARAMS, stopId=f"BKK_F1{i:04d}"))
+        assert doc["source"] == "mavplusz"
+        assert (await proxy.get(TRIP, _trip_params(i)))["source"] == "mavplusz"
+    # No FUTÁR wait: the 5 s steps, and the trip details' batch window.
+    assert len(calls) == 1 and clock.now - started == pytest.approx(25 + 5 * mb.TRIP_BATCH_WAIT)
+    # Search is FUTÁR's alone: asked as before.
+    with pytest.raises(futar.FutarError):
+        await proxy.get("search.json", {"query": "Keleti"})
+    assert calls[-1] == ("search.json", futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC)
+
+
+async def test_futars_outage_is_probed_once_every_thirty_seconds(make_planner, aioclient_mock, monkeypatch) -> None:
+    """One request at a time asks FUTÁR in its outage, FUTAR_OUTAGE_PROBE_SEC
+    after it was last asked, first as before (cut short, the planner after
+    it); the requests meanwhile, the ones beside the probe too, are the
+    planner's. FUTÁR answering the probe ends the outage: FUTÁR first again."""
+    boards, _fake, clock = make_planner()
+    fake = AnyStopPlanner()
+    _use(aioclient_mock, fake)
+    gate = asyncio.Event()
+    calls: list = []
+    answering = [False]
+
+    async def futar_get(session, api_key, path, params, timeout=None, *, executor=None):
+        calls.append(timeout.total)
+        await gate.wait()
+        if answering[0]:
+            return {"status": "OK", "data": {"entry": {"stopTimes": []}, "references": {}}, "from": "futar"}
+        raise futar.FutarError("HTTP 503")
+
+    monkeypatch.setattr(futar, "futar_get", futar_get)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    gate.set()
+    assert (await proxy.get(BOARD, BOARD_PARAMS))["source"] == "mavplusz"  # the outage starts
+    stops = iter(f"BKK_F2{i:04d}" for i in range(100))
+    clock.now += futar.FUTAR_OUTAGE_PROBE_SEC - 1
+    assert (await proxy.get(BOARD, dict(BOARD_PARAMS, stopId=next(stops))))["source"] == "mavplusz"
+    assert len(calls) == 1
+    # The probe is due: one request asks FUTÁR (cut short), the others beside it do not.
+    clock.now += 1
+    gate.clear()
+    probe = asyncio.ensure_future(proxy.get(BOARD, dict(BOARD_PARAMS, stopId=next(stops))))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    beside = await asyncio.gather(*(proxy.get(BOARD, dict(BOARD_PARAMS, stopId=next(stops))) for _ in range(3)))
+    assert [b["source"] for b in beside] == ["mavplusz"] * 3
+    assert calls == [futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC, futar.FUTAR_FALLBACK_TIMEOUT_SEC]
+    gate.set()
+    assert (await probe)["source"] == "mavplusz"
+    # The next probe FUTAR_OUTAGE_PROBE_SEC after the failed one; FUTÁR answers it.
+    clock.now += futar.FUTAR_OUTAGE_PROBE_SEC - 1
+    await proxy.get(BOARD, dict(BOARD_PARAMS, stopId=next(stops)))
+    assert len(calls) == 2
+    clock.now += 1
+    answering[0] = True
+    assert (await proxy.get(BOARD, dict(BOARD_PARAMS, stopId=next(stops))))["from"] == "futar"
+    # The outage is over: every request asks FUTÁR first, with its whole budget.
+    asked = len(fake.asked)
+    for _ in range(3):
+        assert (await proxy.get(BOARD, dict(BOARD_PARAMS, stopId=next(stops))))["from"] == "futar"
+    assert calls[-3:] == [futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC] * 3 and len(fake.asked) == asked
+
+
+async def test_in_futars_outage_what_the_planner_cannot_answer_asks_futar(make_planner, aioclient_mock, monkeypatch) -> None:
+    """A stop the planner does not know (its null) has nothing but FUTÁR:
+    asked as before, with the card's whole budget; the planner is not
+    asked again after FUTÁR failed. One the planner was asked first for
+    and had no answer asks FUTÁR with what is left of the budget, no
+    fallback after it."""
+    boards, fake, clock = make_planner()
+    calls = _counting_futar(monkeypatch, clock, ["fail"])
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    unknown = dict(BOARD_PARAMS, stopId="BKK_005510017")
+    with pytest.raises(futar.FutarError):
+        await proxy.get(BOARD, unknown)  # the outage starts; the planner's null
+    assert len(fake.asked) == 1 and not boards.can_answer(BOARD, unknown)
+    with pytest.raises(futar.FutarError, match="HTTP 503"):
+        await proxy.get(BOARD, dict(unknown, minutesAfter="61"))
+    whole = futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
+    assert calls == [(BOARD, whole), (BOARD, whole)] and len(fake.asked) == 1
+    # Asked first, the planner has no answer (a trip it does not know): FUTÁR then, once.
+    with pytest.raises(futar.FutarError, match="HTTP 503"):
+        await proxy.get(TRIP, {"tripId": "BKK_D99999999"})
+    assert calls[-1] == (TRIP, pytest.approx(whole - mb.TRIP_BATCH_WAIT)) and len(fake.asked) == 2
+
+
+async def test_the_planner_asked_first_takes_futars_token_too(make_planner, aioclient_mock, monkeypatch) -> None:
+    """Not asked of FUTÁR, the request still takes a token of FUTÁR's own
+    limit (as a rejected key's does): the planner is no way around it."""
+    clock = FakeClock(stopped=True)
+    boards, fake, clock = make_planner(clock)
+    _counting_futar(monkeypatch, clock, ["fail"])
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards, burst=2)
+    assert (await proxy.get(BOARD, BOARD_PARAMS))["source"] == "mavplusz"  # FUTÁR's token, the outage starts
+    assert (await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="61")))["source"] == "mavplusz"
+    with pytest.raises(futar.FutarRateLimited):
+        await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="62"))
+    assert len(fake.asked) == 1
+
+
+async def test_a_board_is_cached_across_a_cards_polls(make_planner, aioclient_mock, monkeypatch) -> None:
+    """BOARD_TTL was 15 s against the cards' 20 s at the earliest: every
+    poll asked the planner again. The cards' polls (src/config.js) are
+    read, not assumed."""
+    config = (Path(__file__).parents[1] / "src" / "config.js").read_text(encoding="utf-8")
+    least = int(re.search(r"MIN_REFRESH_S = (\d+);", config).group(1))
+    assert least < mb.BOARD_TTL <= 2 * least
+    boards, fake, clock = make_planner()
+    proxy = _proxy(monkeypatch, boards, clock, futar.FutarError("HTTP 503"))
+    await proxy.get(BOARD, BOARD_PARAMS)
+    clock.now += least
+    assert (await proxy.get(BOARD, BOARD_PARAMS))["source"] == "mavplusz"
+    assert len(fake.asked) == 1
+
+
+async def test_one_null_keeps_a_stop_out_for_minutes_not_hours(make_planner, aioclient_mock, monkeypatch) -> None:
+    """A planner reloading its graph answers every stop null for a while:
+    one null kept the stop out of the fallback for PROBE_TTL (12 h). It is
+    kept for UNKNOWN_TTL now; FUTÁR's outage then has its fallback again.
+    A station's poles alike."""
+    boards, fake, clock = make_planner()
+    nulls = [True]
+
+    async def flaky(method, url, data):
+        body = json.loads(data)
+        if nulls[0]:
+            fake.asked.append(body["variables"])
+            if "stop(id: $id)" in body["query"]:
+                return AiohttpClientMockResponse(method, url, json={"data": {"stop": None}})
+            return AiohttpClientMockResponse(
+                method, url, json={"data": {k: None for k in body["variables"] if k.startswith("s") and k[1:].isdigit()}})
+        return await fake(method, url, data)
+
+    _use(aioclient_mock, flaky)
+    # The Keleti preset: its seeded poles, then (they null) the station itself.
+    station = dict(BOARD_PARAMS, stopId="BKK_CSF01131")
+    assert await boards.answer(BOARD, BOARD_PARAMS) is None
+    assert await boards.answer(BOARD, station) is None
+    clock.now += mb.BOARD_TTL
+    assert await boards.answer(BOARD, station) is None
+    assert len(fake.asked) == 3
+    nulls[0] = False
+    clock.now += mb.UNKNOWN_TTL - 1 - mb.BOARD_TTL
+    assert not boards.can_answer(BOARD, BOARD_PARAMS) and not boards.can_answer(BOARD, station)
+    clock.now += 1
+    # The stop's null and the poles' are past UNKNOWN_TTL: asked again.
+    assert boards.can_answer(BOARD, BOARD_PARAMS)
+    assert boards._board_ids("BKK_CSF01131") == boards._poles("BKK_CSF01131")
+    proxy = _proxy(monkeypatch, boards, clock, futar.FutarError("HTTP 503"))
+    assert (await proxy.get(BOARD, BOARD_PARAMS))["source"] == "mavplusz"
+    assert len(fake.asked) == 4
+
+
+async def test_one_bad_alias_fails_its_trip_alone(make_planner, aioclient_mock) -> None:
+    """A trip of the wrong shape in a batch (`"t1": []`) failed the batch's
+    every trip (up to 40) for REQUEST_FAIL_TTL; it fails alone now, as a
+    trip a GraphQL error names does, and nobody backs off."""
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, fake, clock = make_planner(clock, limiter=limiter)
+
+    async def answer(method, url, data):
+        body = json.loads(data)
+        fake.asked.append(body["variables"])
+        aliases = [k for k in body["variables"] if k[0] == "t"]
+        out = {a: (copy.deepcopy(TRIPS_DOC["data"]["t0"]) if body["variables"][a] == "BKK:D25280605" else [])
+               for a in aliases}
+        return AiohttpClientMockResponse(method, url, json={"data": out})
+
+    _use(aioclient_mock, answer)
+    good, bad = await asyncio.gather(boards.answer(TRIP, {"tripId": FIRST_TRIP}),
+                                     boards.answer(TRIP, {"tripId": "BKK_X9"}))
+    assert len(fake.asked) == 1 and good["data"]["entry"]["tripId"] == FIRST_TRIP and bad is None
+    assert not limiter.backing_off()
+    assert boards.can_answer(TRIP, {"tripId": FIRST_TRIP}) and not boards.can_answer(TRIP, {"tripId": "BKK_X9"})
+    clock.now += mb.REQUEST_FAIL_TTL
+    assert boards.can_answer(TRIP, {"tripId": "BKK_X9"})
+
+
+@pytest.mark.parametrize("length", [2 ** 64, -1, 22], ids=["past-64-bits", "negative", "past-the-points"])
+def test_a_shapes_length_is_bounded(length) -> None:
+    """tripGeometry.length is the number of points, each at least two
+    characters: 2 ** 64 broke Home Assistant's JSON of the whole response."""
+    from homeassistant.helpers.json import json_bytes
+
+    trip = copy.deepcopy(TRIPS_DOC["data"]["t0"])
+    points = "}gz`HaoosBPADdBJfH?P@"
+    trip["tripGeometry"] = {"points": points, "length": length}
+    doc = mb.parse_trip(trip, FIRST_TRIP, "20261118", WALL)
+    assert doc["data"]["entry"]["polyline"] == {"points": points}
+    json_bytes(doc)
+    trip["tripGeometry"]["length"] = len(points)
+    assert mb.parse_trip(trip, FIRST_TRIP, "20261118", WALL)["data"]["entry"]["polyline"]["length"] == len(points)
+
+
+def test_a_token_held_past_a_second_does_not_overshoot_the_burst() -> None:
+    """The share's 15 tokens reserved, held through FUTÁR's 8 s and the
+    planner's 6 s, then all given back: with the bucket refilled meanwhile,
+    18 fallback requests could go at one moment (burst 15), 37 of the
+    total's 30. A token held past REFUND_WITHIN_SEC counts as spent; one
+    given back sooner still goes back."""
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    fb = limiter.client(lambda: RuntimeError("refused"), fallback=True)
+    tickets = []
+    for _ in range(mavplusz.FALLBACK_BURST):
+        assert fb.reserve()
+        tickets.append(mb._Ticket(mb._Token(fb, clock.monotonic)))
+    clock.now += futar.FUTAR_FALLBACK_TIMEOUT_SEC + mb.PLANNER_TIMEOUT.total
+    sent = 0
+    while fb.available():
+        fb.take()
+        sent += 1
+    for ticket in tickets:  # FUTÁR answered after all: every ticket released unspent
+        ticket.release()
+    while fb.available():
+        fb.take()
+        sent += 1
+    assert sent <= mavplusz.FALLBACK_BURST
+    assert limiter._total._tokens <= mavplusz.PLANNER_BURST
+    # Given back within the second: the token is there again.
+    clock.now += 3600
+    assert fb.reserve()
+    ticket = mb._Ticket(mb._Token(fb, clock.monotonic))
+    clock.now += mb.REFUND_WITHIN_SEC
+    ticket.release()
+    assert limiter._fallback._tokens == pytest.approx(mavplusz.FALLBACK_BURST)
+
+
+@pytest.mark.parametrize("failure", ["http-502", "timeout"])
+async def test_a_trip_batch_the_planner_fails_answers_no_trip(make_planner, aioclient_mock, monkeypatch, failure) -> None:
+    """The whole trip-details request failing (HTTP 5xx, a timeout): every
+    trip waiting for it has PlannerError, answer() None, FUTÁR's error
+    stands, and the planner backs off (no trip is marked failing: it is
+    asked again after the backoff)."""
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, fake, clock = make_planner(clock, limiter=limiter)
+    aioclient_mock.clear_requests()
+    if failure == "timeout":
+        aioclient_mock.post(mavplusz.URL, exc=asyncio.TimeoutError())
+    else:
+        aioclient_mock.post(mavplusz.URL, status=502)
+    trips = [{"tripId": FIRST_TRIP}, {"tripId": "BKK_D25280606"}]
+    results = await asyncio.gather(*(boards._trip(t, None) for t in trips), return_exceptions=True)
+    assert all(type(r) is mb.PlannerError for r in results)
+    assert limiter.backing_off() and not any(boards._is_failing(("trip", mb.planner_id(t["tripId"]))) for t in trips)
+    proxy = _proxy(monkeypatch, boards, clock, futar.FutarError("HTTP 503"))
+    with pytest.raises(futar.FutarError, match="HTTP 503"):
+        await proxy.get(TRIP, trips[0])
+    clock.now += mb.FAIL_BACKOFF
+    _use(aioclient_mock, fake)
+    assert (await boards.answer(TRIP, trips[0]))["data"]["entry"]["tripId"] == FIRST_TRIP
+
+
+async def test_a_trip_batch_failing_for_its_own_sake_is_not_asked_again(make_planner, aioclient_mock) -> None:
+    """The whole trip-details answer unusable (over its cap): every trip of
+    it is failing (_RequestFailed), not asked again within REQUEST_FAIL_TTL,
+    and nobody backs off."""
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter)
+    asked: list = []
+
+    async def oversize(method, url, data):
+        asked.append(1)
+        return AiohttpClientMockResponse(method, url, text=" " * (mavplusz.MAX_RESPONSE_BYTES + 10))
+
+    _use(aioclient_mock, oversize)
+    trips = [{"tripId": FIRST_TRIP}, {"tripId": "BKK_D25280606"}]
+    results = await asyncio.gather(*(boards._trip(t, None) for t in trips), return_exceptions=True)
+    assert all(isinstance(r, mb._RequestFailed) for r in results) and len(asked) == 1
+    assert not limiter.backing_off()
+    clock.now += mb.REQUEST_FAIL_TTL - 1
+    assert [await boards.answer(TRIP, t) for t in trips] == [None, None] and len(asked) == 1
+    assert not any(boards.can_answer(TRIP, t) for t in trips)
+    clock.now += 1
+    assert all(boards.can_answer(TRIP, t) for t in trips)
+
+
+@pytest.mark.parametrize("exc", [aiohttp.ClientConnectionError("refused"), asyncio.TimeoutError()],
+                         ids=["connection", "timeout"])
+async def test_a_board_the_planner_does_not_answer_backs_everyone_off(make_planner, aioclient_mock, caplog, exc) -> None:
+    """No connection or a timeout is the planner failing: the shared backoff
+    (the realtime hub's requests too), one warning for the outage, and one
+    line when it answers again."""
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, fake, clock = make_planner(clock, limiter=limiter)
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(mavplusz.URL, exc=exc)
+    assert await boards.answer(BOARD, BOARD_PARAMS) is None
+    assert limiter.backing_off() and not limiter.client(RuntimeError).available()
+    clock.now += mb.FAIL_BACKOFF
+    assert await boards.answer(BOARD, dict(BOARD_PARAMS, stopId="BKK_F00941")) is None
+    warnings = [r for r in caplog.records if r.name.endswith("mavplusz_board") and r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "unavailable" in warnings[0].getMessage()
+    assert not boards._is_failing(("board", STOP))
+    clock.now += max(mb.FAIL_BACKOFF, mb.BOARD_TTL)
+    _use(aioclient_mock, fake)
+    assert (await boards.answer(BOARD, BOARD_PARAMS))["source"] == "mavplusz"
+    assert any("answers for BKK boards again" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_futar_request_cancelled_with_a_reserved_token_gives_it_back(make_planner, aioclient_mock, monkeypatch) -> None:
+    """FUTÁR's request itself cancelled (Home Assistant stopping cancels its
+    task) while it holds the fallback's reserved token: the token goes back,
+    and the share has it again."""
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(fallback_burst=1, monotonic=clock.monotonic)
+    boards, fake, clock = make_planner(clock, limiter=limiter)
+    gate = asyncio.Event()
+
+    async def hanging(session, api_key, path, params, timeout=None, *, executor=None):
+        await gate.wait()
+        return {"status": "OK"}
+
+    monkeypatch.setattr(futar, "futar_get", hanging)
+    tasks: list = []
+
+    def task_factory(coro):
+        tasks.append(asyncio.ensure_future(coro))
+        return tasks[-1]
+
+    proxy = futar.FutarProxy(None, "k", task_factory, monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    _futar_down(proxy)
+    call = asyncio.ensure_future(proxy.get(BOARD, BOARD_PARAMS))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert not limiter.available(fallback=True)
+    tasks[0].cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert limiter.available(fallback=True) and fake.asked == []
+
+
+async def test_a_rejected_key_spends_no_token_where_the_planner_cannot_answer(make_planner, aioclient_mock, monkeypatch) -> None:
+    """A call failing fast on a rejected key takes FUTÁR's token for the
+    planner, but not for a stop the planner does not know: nothing is
+    asked of anyone then."""
+    boards, fake, clock = make_planner()
+    proxy = _proxy(monkeypatch, boards, clock, futar.FutarAuthError("HTTP 401"))
+    unknown = dict(BOARD_PARAMS, stopId="BKK_005510017")
+    with pytest.raises(futar.FutarAuthError):
+        await proxy.get(BOARD, unknown)  # FUTÁR's token; the planner's null
+    tokens = proxy._rate._tokens
+    with pytest.raises(futar.FutarKeyRejected):
+        await proxy.get(BOARD, dict(unknown, minutesAfter="61"))
+    assert proxy._rate._tokens == tokens and len(fake.asked) == 1
+    # One the planner can answer: FUTÁR's token, as a call to FUTÁR would take.
+    assert (await proxy.get(BOARD, BOARD_PARAMS))["source"] == "mavplusz"
+    assert proxy._rate._tokens == tokens - 1
+
+
+async def test_fetch_with_a_decode_hook_keeps_its_errors(aioclient_mock) -> None:
+    """mavplusz.fetch's decode hook (the boards' executor decoding) changes
+    nothing else: an HTTP error is ValueError("HTTP NNN"), an oversized
+    answer TooLarge, one nested too deep ValueError("answer nested too
+    deep"), one that is no JSON the decoder's own error; the hook gets the
+    body as a bytearray and its result is the answer."""
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    got: list = []
+
+    async def decode(data):
+        got.append(type(data))
+        return mb._decode_parse(lambda doc: ("parsed", doc), data)
+
+    try:
+        for status, body, error, match in [
+            (502, "", ValueError, "^HTTP 502$"),
+            (200, " " * 64, mavplusz.TooLarge, None),
+            (200, "[" * 600 + "]" * 600, ValueError, "^answer nested too deep$"),
+            (200, "<html>", json.JSONDecodeError, None),
+        ]:
+            aioclient_mock.clear_requests()
+            aioclient_mock.post(mavplusz.URL, status=status, text=body)
+            with pytest.raises(error, match=match):
+                await mavplusz.fetch(session, {}, cap=32 if len(body) == 64 else mavplusz.MAX_RESPONSE_BYTES,
+                                     decode=decode)
+        aioclient_mock.clear_requests()
+        aioclient_mock.post(mavplusz.URL, text='{"data": 1}')
+        assert await mavplusz.fetch(session, {}, decode=decode) == ("parsed", {"data": 1})
+        assert set(got) == {bytearray}
+    finally:
+        await session.close()

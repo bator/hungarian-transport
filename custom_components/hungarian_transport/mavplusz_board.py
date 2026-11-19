@@ -49,9 +49,8 @@ from typing import Any, NamedTuple
 
 import aiohttp
 
-from . import mavplusz, realtime, upstream
+from . import futar, jsonsafe, mavplusz, realtime, upstream
 from .cache import CallLater, SharedTTLCache, TaskFactory
-from .futar import FUTAR_CACHE_TTL
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,9 +64,14 @@ USER_AGENT = (
     "+https://github.com/bator/hungarian-transport)"
 )
 # A stop's board is asked at most this often, for every card and horizon
-# together: the cards poll every 20 s at the earliest, FUTÁR's own answers
-# are cached as long.
-BOARD_TTL = FUTAR_CACHE_TTL
+# together. A card polls every 45 s by default, every 20 s at the earliest
+# (src/config.js DEFAULT_REFRESH_S, MIN_REFRESH_S): a TTL shorter than that
+# only shared the answer among the viewers asking at the same moment, and
+# every card's next poll asked again. The board holds eight hours and each
+# answer is cut from it at the time it is given (render_board drops what
+# has left), so a cached one stays right for its timetable; its delays are
+# at most this old, against FUTÁR's 15 s, while FUTÁR fails.
+BOARD_TTL = 35
 # A trip's details hold its timetable and the delays: the card reads them for
 # where a trip goes and how long the ride is, and keeps them for the session.
 TRIP_TTL = 60
@@ -97,9 +101,15 @@ RENDER_MAX_ROWS = 400
 # A stop time is about 770 bytes of answer: 20 patterns of 60 are 0.9 MB,
 # and a FUTÁR station's child poles (MAX_CHILD_STOPS, CHILD_DEPARTURES each
 # pattern) up to 1.1 MB, so a board answer may be twice the trip details'
-# cap. It is decoded on the event loop, some 11 ms a MB, once per stop per
-# BOARD_TTL while FUTÁR fails.
+# cap. Decoding it and making its rows (parse_board) took some 56 ms at the
+# cap on a laptop, two to four times that on a Raspberry Pi: json.loads
+# alone is some 11 ms a MB, the rows the rest. An answer of
+# EXECUTOR_BYTES or more (a board, trip details) is decoded and parsed in
+# one go in the executor (PlannerBoards' `executor`), with futar._decode's
+# hook letting the event loop run in between; a smaller one, nearly every
+# answer, on the loop, where it costs less than the hand-off to a thread.
 BOARD_MAX_BYTES = 2 * 1024 * 1024
+EXECUTOR_BYTES = futar.FUTAR_EXECUTOR_BYTES
 BOARD_MAX_ROWS = BOARD_MAX_BYTES // STOP_TIME_BYTES
 MAX_CHILD_STOPS = 24
 CHILD_DEPARTURES = 20
@@ -113,6 +123,15 @@ MAX_TRIPS_PER_REQUEST = mavplusz.MAX_TRIPS_PER_REQUEST
 # earlier batch's request, so this is each trip's whole wait.
 PLANNER_TIMEOUT = aiohttp.ClientTimeout(total=6)
 TRIP_TIMEOUT = aiohttp.ClientTimeout(total=PLANNER_TIMEOUT.total - TRIP_BATCH_WAIT)
+# A reserved token goes back to the limiter when its answer was not needed
+# (FUTÁR answered, every caller left) within this long of being taken, and
+# is spent after that. A bucket refills while the token is held: 15 tokens
+# held through FUTÁR's 8 s and given back all at once let 18 fallback
+# requests (and 37 of the total's 30) go at one moment, past both bursts.
+# Within a second the total (0.5 a second, the faster of the two) refills
+# half a token, so a token given back can put a bucket at most that much
+# above what it would have held had the token never been taken.
+REFUND_WITHIN_SEC = 1.0
 # After the planner failed (no answer, a timeout, HTTP 5xx, 429 or 403, an
 # HTTP 200 that is not JSON: a maintenance or Cloudflare page in front of it)
 # nobody asks it for this long, the realtime hub neither (the shared backoff).
@@ -142,11 +161,20 @@ MAX_STATIONS = 512
 STATION_MAX_AGE = 30 * 86400
 SEEN_RESOLUTION = 86400
 # Whether the planner knows a stop or station (its board answered, or a
-# null stop), kept this long: the GTFS changes with the timetable.
+# null stop), kept this long: the GTFS changes with the timetable. A null
+# is kept that long only once the planner gave UNKNOWN_REPEATS in a row:
+# the first is kept for UNKNOWN_TTL, as one null can be the planner's
+# (a graph being reloaded answers every stop null for a while), and a stop
+# it does know would have no fallback for half a day.
 PROBE_TTL = 12 * 3600
+UNKNOWN_TTL = 10 * 60
+UNKNOWN_REPEATS = 2
 MAX_PROBED = 4096
 # A trip's shape (OTP2's tripGeometry, a Google encoded polyline of 1e5,
 # FUTÁR's own format; checked 2026-11-19): a long bus line's is some 3 kB.
+# Its length is the number of points, each at least two characters: one
+# longer than the text is no length (and one past 64 bits would break Home
+# Assistant's JSON of the whole service response).
 MAX_POLYLINE_CHARS = 100_000
 # The poles of the card's preset hubs the planner does not know, until
 # FUTÁR names their own (learn). Keleti (BKK_CSF01131): every BKK stop the
@@ -229,24 +257,33 @@ class _NotSent(PlannerError):
     asked of the planner, so the stop does not count as asked (BOARD_TTL)."""
 
 
+class _Unparsed(Exception):
+    """An answer decoded but not made into a board or trip details (its
+    shape is wrong): this request's failure (_RequestFailed), whatever the
+    error was. Raised where the answer is parsed (_decode_parse), possibly
+    in the executor; never leaves this module."""
+
+
 class _Token:
     """A planner token reserved ahead (PlannerBoards.reserve), held by one
     _Ticket, or by the tickets of the trip details reserved together
     (their one request spends it): weight is the trip keys they may ask,
-    opened when the first was reserved."""
+    opened when it was taken (the first was reserved), on monotonic."""
 
-    def __init__(self, rate: mavplusz.PlannerClient, opened: float = 0.0) -> None:
+    def __init__(self, rate: mavplusz.PlannerClient, monotonic: upstream.Monotonic) -> None:
         self.rate = rate
         self.held = True
         self.holders = 0
         self.weight = 0
-        self.opened = opened
+        self.monotonic = monotonic
+        self.opened = monotonic()
 
 
 class _Ticket:
     """One fallback answer's hold on a reserved planner token (_Token): the
     request it is handed to spends the token (spend), else the token goes
-    back to the limiter when the last ticket holding it is release()d."""
+    back to the limiter when the last ticket holding it is release()d,
+    within REFUND_WITHIN_SEC of its take (it counts as spent after that)."""
 
     def __init__(self, token: _Token) -> None:
         self._token = token
@@ -267,7 +304,8 @@ class _Ticket:
         token.holders -= 1
         if not token.holders and token.held:
             token.held = False
-            token.rate.refund()
+            if token.monotonic() - token.opened <= REFUND_WITHIN_SEC:
+                token.rate.refund()
 
 
 class _Board(NamedTuple):
@@ -379,6 +417,14 @@ def _seconds(value: Any) -> int | None:
     return seconds if seconds is not None and _SECONDS_MIN <= seconds <= _SECONDS_MAX else None
 
 
+def _num(value: Any) -> float | None:
+    """mavplusz._num, None also for an int no float holds (10 ** 400)."""
+    try:
+        return mavplusz._num(value)
+    except OverflowError:
+        return None
+
+
 def _epoch(day: int | None, seconds: int | None) -> int | None:
     return day + seconds if day is not None and seconds is not None else None
 
@@ -452,8 +498,8 @@ def _stop_ref(stop: Any) -> tuple[str, dict[str, Any]] | None:
     if not sid:
         return None
     ref: dict[str, Any] = {"id": sid, "name": _name(stop.get("name"))}
-    lat, lon = mavplusz._num(stop.get("lat")), mavplusz._num(stop.get("lon"))
-    if lat is not None and lon is not None:
+    lat, lon = _num(stop.get("lat")), _num(stop.get("lon"))
+    if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
         ref["lat"], ref["lon"] = lat, lon
     platform = _str(stop.get("platformCode"))
     if platform:
@@ -573,7 +619,7 @@ def _polyline(geometry: Any) -> dict[str, Any] | None:
         return None
     out: dict[str, Any] = {"points": points}
     length = _int(geometry.get("length"))
-    if length is not None and length >= 0:
+    if length is not None and 0 <= length <= len(points):
         out["length"] = length
     return out
 
@@ -781,6 +827,39 @@ class _Batch:
         self.tickets: list[_Ticket] = []
 
 
+def _decode_parse(parse: Callable[[Any], Any], body: bytearray) -> Any:
+    """parse of the decoded answer body: decoding errors as they are (an
+    answer that is no JSON, nested too deep), parse's own as _Unparsed. A
+    body of EXECUTOR_BYTES or more is decoded as futar._decode does, which
+    lets the event loop run in between while this runs in the executor."""
+    doc = futar._decode(body) if len(body) >= EXECUTOR_BYTES else jsonsafe.loads(body)
+    try:
+        return parse(doc)
+    except (ValueError, KeyError, TypeError, OverflowError, OSError) as err:
+        raise _Unparsed(str(err)[:200] or type(err).__name__) from None
+
+
+def parse_trips(doc: Any, keys: Sequence[TripKey], now: float) -> list[dict[str, Any] | None | str]:
+    """The answers of build_trip_query(keys)'s answer, one per key: its
+    FUTÁR trip-details.json answer, None for a trip the planner does not
+    know or that does not run on its date, or why there is none for one a
+    GraphQL error names or of the wrong shape (a str), the others' still
+    answered. An answer of the wrong shape as a whole (_aliased) is a
+    ValueError."""
+    data, failed = _aliased(doc, [f"t{i}" for i in range(len(keys))])
+    out: list[dict[str, Any] | None | str] = []
+    for i, key in enumerate(keys):
+        alias = f"t{i}"
+        if alias in failed:
+            out.append(f"{alias}: GraphQL error")
+            continue
+        try:
+            out.append(parse_trip(data[alias], futar_id(key.gtfs_id), key.date, now))
+        except (ValueError, KeyError, TypeError, OverflowError, OSError) as err:
+            out.append(f"{alias}: {str(err)[:200] or type(err).__name__}")
+    return out
+
+
 def _settle(batch: _Batch, reason: str) -> None:
     """Every key of batch not answered yet fails with PlannerError(reason)."""
     for fut in batch.futures.values():
@@ -802,7 +881,9 @@ class PlannerBoards:
 
     `limiter` is the integration's one planner limit (mavplusz.PlannerLimiter,
     shared with the realtime hub; one of its own without it), of which this
-    fallback has the smaller share. `monotonic` is the clock of the caches
+    fallback has the smaller share. `executor` decodes and parses the large
+    answers (EXECUTOR_BYTES; Home Assistant's hass.async_add_executor_job,
+    the loop's default executor without one). `monotonic` is the clock of the caches
     (and of the limiter made here), `wall` the epoch clock of the times
     asked and of when a station was last seen, `sleep` the one the trip
     details' batch waits with. `stations` is what stations_data() gave
@@ -830,8 +911,10 @@ class PlannerBoards:
         limiter: mavplusz.PlannerLimiter | None = None,
         stations: Any = None,
         on_stations_changed: Callable[[], None] | None = None,
+        executor: futar.Executor | None = None,
     ) -> None:
         self._session = session
+        self._executor = executor
         self._monotonic = monotonic
         self._wall = wall or (lambda: time.time())
         self._sleep = sleep
@@ -860,8 +943,8 @@ class PlannerBoards:
         self._on_stations_changed = on_stations_changed
         self._closed = False
         # A stop id, or (station, its poles), -> (whether the planner knows
-        # it, monotonic when its board said so).
-        self._probed: dict[Any, tuple[bool, float]] = {}
+        # it, monotonic when its board said so, the nulls in a row).
+        self._probed: dict[Any, tuple[bool, float, int]] = {}
         # ("board", stop) or ("trip", planner trip id) -> monotonic when its
         # request failed for its own sake (REQUEST_FAIL_TTL).
         self._failing: dict[tuple[str, str], float] = {}
@@ -923,7 +1006,7 @@ class PlannerBoards:
             return self._reserve_trip(params)
         if not self.can_answer(path, params) or not self._rate.reserve():
             return None
-        return _Ticket(_Token(self._rate))
+        return _Ticket(_Token(self._rate, self._monotonic))
 
     def _reserve_trip(self, params: dict[str, str]) -> _Ticket | None:
         """A trip's ticket: a share of the token reserved for the trip
@@ -950,7 +1033,7 @@ class PlannerBoards:
         ):
             if not self._rate.reserve():
                 return None
-            token = self._trip_token = _Token(self._rate, now)
+            token = self._trip_token = _Token(self._rate, self._monotonic)
         token.weight += weight
         return _Ticket(token)
 
@@ -1109,18 +1192,31 @@ class PlannerBoards:
 
     def _known(self, key: Any) -> bool | None:
         """Whether the planner knows stop (or the poles of (station, poles)),
-        as its board said within PROBE_TTL; None when not asked (or so long ago)."""
+        as its board said within PROBE_TTL (a null within UNKNOWN_TTL,
+        until it was UNKNOWN_REPEATS in a row); None when not asked (or so
+        long ago). A null past UNKNOWN_TTL is kept up to PROBE_TTL, for the
+        count of nulls in a row only."""
         hit = self._probed.get(key)
         if hit is None:
             return None
-        if self._monotonic() - hit[1] >= PROBE_TTL:
+        known, at, nulls = hit
+        age = self._monotonic() - at
+        if age >= PROBE_TTL:
             del self._probed[key]
             return None
-        return hit[0]
+        if not known and nulls < UNKNOWN_REPEATS and age >= UNKNOWN_TTL:
+            return None
+        return known
 
     def _probe_result(self, key: Any, known: bool) -> None:
-        self._probed.pop(key, None)
-        self._probed[key] = (known, self._monotonic())
+        """key's board said whether the planner knows it; a null counts
+        the nulls in a row (since the last answer, within PROBE_TTL)."""
+        old = self._probed.pop(key, None)
+        nulls = 0
+        if not known:
+            fresh = old is not None and self._monotonic() - old[1] < PROBE_TTL
+            nulls = old[2] + 1 if fresh and not old[0] else 1
+        self._probed[key] = (known, self._monotonic(), nulls)
         while len(self._probed) > MAX_PROBED:
             del self._probed[next(iter(self._probed))]
 
@@ -1194,13 +1290,19 @@ class PlannerBoards:
         # A FUTÁR station's poles, or one planner stop (a stop, a station).
         poles = ids != (planner_id(stop),)
         body = build_station_query(ids, int(wall)) if poles else build_board_query(ids[0], int(wall))
+        if poles:
+            own = (self._stations.get(stop) or SEED_STATIONS.get(stop) or {}).get("ref")
+            children: int | None = len(ids)
+        else:
+            own = children = None
+
+        def parse(doc: Any) -> _Board | None:
+            # Possibly in the executor: nothing of self, and own is only
+            # read (learn replaces a station's reference, never changes it).
+            return parse_board(doc, stop, wall, children=children, own=own)
+
         try:
-            doc = await self._post(body, BOARD_MAX_BYTES, PLANNER_TIMEOUT, (ticket,) if ticket else ())
-            if poles:
-                own = (self._stations.get(stop) or SEED_STATIONS.get(stop) or {}).get("ref")
-                board = parse_board(doc, stop, wall, children=len(ids), own=own)
-            else:
-                board = parse_board(doc, stop, wall)
+            board = await self._post(body, BOARD_MAX_BYTES, PLANNER_TIMEOUT, (ticket,) if ticket else (), parse)
         except _NotSent:
             del self._asked[key]
             raise
@@ -1208,10 +1310,6 @@ class PlannerBoards:
             self._unanswered.add(key)
             self._fail(("board", stop))
             raise
-        except (ValueError, KeyError, TypeError, OverflowError, OSError) as err:
-            self._unanswered.add(key)
-            self._fail(("board", stop))
-            raise self._request_failed(err) from None
         except BaseException:
             # The planner failing, or the request cancelled: asked, no board.
             self._unanswered.add(key)
@@ -1302,20 +1400,18 @@ class PlannerBoards:
 
     async def _send_chunk(self, keys: list[TripKey], batch: _Batch) -> None:
         futures = [batch.futures[k] for k in keys]
+        now = self._wall()
         try:
-            doc = await self._post(build_trip_query(keys), mavplusz.MAX_RESPONSE_BYTES, TRIP_TIMEOUT, batch.tickets)
-            data, failed = _aliased(doc, [f"t{i}" for i in range(len(keys))])
-            now = self._wall()
-            results = []
-            for i, key in enumerate(keys):
-                alias = f"t{i}"
-                # A trip a GraphQL error names (a bad id or date) is no
-                # answer, the others are.
-                results.append(None if alias in failed else parse_trip(data[alias], futar_id(key.gtfs_id), key.date, now))
-            for i, key in enumerate(keys):
-                if f"t{i}" in failed:
-                    self._fail(("trip", key.gtfs_id))
+            results = await self._post(
+                build_trip_query(keys),
+                mavplusz.MAX_RESPONSE_BYTES,
+                TRIP_TIMEOUT,
+                batch.tickets,
+                lambda doc: parse_trips(doc, keys, now),
+            )
         except PlannerError as err:
+            # The whole request: the planner failing (the shared backoff),
+            # or the answer (over the cap, of the wrong shape as a whole).
             if isinstance(err, _RequestFailed):
                 for key in keys:
                     self._fail(("trip", key.gtfs_id))
@@ -1323,36 +1419,52 @@ class PlannerBoards:
                 if not fut.done():
                     fut.set_exception(err)
             return
-        except (ValueError, KeyError, TypeError, OverflowError, OSError) as err:
-            failed_err = self._request_failed(err)
-            for key in keys:
+        # A trip a GraphQL error names (a bad id or date) is no answer, and
+        # one of the wrong shape fails: either is that trip's alone, not
+        # asked for REQUEST_FAIL_TTL, and the others are answered.
+        for fut, key, result in zip(futures, keys, results):
+            if isinstance(result, str):
                 self._fail(("trip", key.gtfs_id))
-            for fut in futures:
                 if not fut.done():
-                    fut.set_exception(failed_err)
-            return
-        for fut, result in zip(futures, results):
-            if not fut.done():
+                    fut.set_exception(self._request_failed(ValueError(result)))
+            elif not fut.done():
                 fut.set_result(result)
 
     async def _post(
-        self, body: dict[str, Any], cap: int, timeout: aiohttp.ClientTimeout, tickets: Sequence[_Ticket] = ()
+        self,
+        body: dict[str, Any],
+        cap: int,
+        timeout: aiohttp.ClientTimeout,
+        tickets: Sequence[_Ticket],
+        parse: Callable[[Any], Any],
     ) -> Any:
-        """One planner request: its decoded answer, or PlannerError when it
-        is not made (backoff, rate limit: _NotSent, raised before anything
-        is awaited) or fails. It spends a token reserved for it (tickets) if
-        one is still held, else takes one. The planner failing (no answer, a
-        timeout, HTTP 5xx, 429 or 403, an HTTP 200 that is not JSON: a
-        maintenance or Cloudflare page) backs every planner request off and
-        is logged once per outage; a failure of this request alone
+        """One planner request: parse of its decoded answer, or PlannerError
+        when it is not made (backoff, rate limit: _NotSent, raised before
+        anything is awaited) or fails. It spends a token reserved for it
+        (tickets) if one is still held, else takes one. The planner failing
+        (no answer, a timeout, HTTP 5xx, 429 or 403, an HTTP 200 that is not
+        JSON: a maintenance or Cloudflare page) backs every planner request
+        off and is logged once per outage; a failure of this request alone
         (_RequestFailed: an answer over cap, nested too deep, another HTTP
-        status) is neither."""
+        status, one parse cannot read) is neither. An answer of
+        EXECUTOR_BYTES or more is decoded and parsed in the executor
+        (_decode_parse): parse must not touch this object's state."""
         if self._rate.backing_off():
             raise _NotSent("backing off after a failure")
         if not any(t.spend() for t in tickets):
             self._rate.take()
+
+        async def decode(data: bytearray) -> Any:
+            if len(data) < EXECUTOR_BYTES:
+                return _decode_parse(parse, data)
+            return await futar._in_executor(self._executor, _decode_parse, parse, data)
+
         try:
-            doc = await mavplusz.fetch(self._session, body, user_agent=USER_AGENT, timeout=timeout, cap=cap)
+            doc = await mavplusz.fetch(
+                self._session, body, user_agent=USER_AGENT, timeout=timeout, cap=cap, decode=decode
+            )
+        except _Unparsed as err:
+            raise self._request_failed(err) from None
         except mavplusz.TooLarge as err:
             raise self._request_failed(err) from None
         except (json.JSONDecodeError, UnicodeDecodeError) as err:
@@ -1415,7 +1527,7 @@ def _station_ref(stop: str, own: dict[str, Any]) -> dict[str, Any]:
     """A FUTÁR station's reference as the merged board gives it, from
     FUTÁR's own: its id, name and position."""
     ref: dict[str, Any] = {"id": stop, "name": _str(own.get("name"))}
-    lat, lon = mavplusz._num(own.get("lat")), mavplusz._num(own.get("lon"))
+    lat, lon = _num(own.get("lat")), _num(own.get("lon"))
     if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
         ref["lat"], ref["lon"] = lat, lon
     return ref
