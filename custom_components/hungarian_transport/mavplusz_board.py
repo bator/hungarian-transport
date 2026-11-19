@@ -259,8 +259,10 @@ class _NotSent(PlannerError):
 
 class _Unparsed(Exception):
     """An answer decoded but not made into a board or trip details (its
-    shape is wrong): this request's failure (_RequestFailed), whatever the
-    error was. Raised where the answer is parsed (_decode_parse), possibly
+    shape is wrong: a ValueError or OSError of parse): this request's
+    failure (_RequestFailed). A bug of parse's own code
+    (mavplusz.PARSE_BUGS) is not one: it goes up as it is, for _post to
+    warn about. Raised where the answer is parsed (_decode_parse), possibly
     in the executor; never leaves this module."""
 
 
