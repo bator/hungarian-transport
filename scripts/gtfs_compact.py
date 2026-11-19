@@ -800,14 +800,16 @@ def basic_auth(auth: tuple[str, str]) -> str:
     return "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
 
 
-# The weekly GitHub Pages build (mav-index-daily.yml) sets this to 1: no
-# plain http at all there, not even for a feed entry marked "insecure". Its
-# indexes reach every install without anyone looking at them; a release's
-# are built from the same feeds and looked at before it is published, so
-# release.yml leaves it unset and a feed that serves only http still comes
-# over http there, with the warning. In the Pages build such a feed fails to
-# download like any other failed feed, and build_city_index.py keeps its
-# part of the index in place (HUNGARIAN_TRANSPORT_CARRY_INDEX).
+# Set to 1: no plain http at all, not even for a feed entry marked
+# "insecure"; such a feed then fails to download like any other failed
+# feed, and build_city_index.py keeps its part of the index in place
+# (HUNGARIAN_TRANSPORT_CARRY_INDEX). Neither workflow sets it: the weekly
+# GitHub Pages build (mav-index-daily.yml) leaves it unset on purpose, as
+# release.yml does, so a feed that serves only http (Miskolc, whose https
+# certificate names another host) still comes over http there, with the
+# warning. Forbidding it would keep Miskolc's part from ever updating and,
+# once its calendar ran out, make the city guard refuse the whole city
+# index. The manifest's signature covers what such a build makes.
 HTTPS_ONLY_ENV = "HUNGARIAN_TRANSPORT_HTTPS_ONLY"
 
 

@@ -12,6 +12,7 @@ writer; the live site is a local folder or a stubbed urlopen. No network."""
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import gzip
 import hashlib
@@ -24,6 +25,7 @@ import sys
 import tempfile
 import urllib.error
 import zipfile
+import zlib
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -658,10 +660,13 @@ class Res(io.BytesIO):
         return False
 
 
-def ranged(blob: bytes, *, ranges: bool = True, redirect: str | None = None, log: list | None = None):
+def ranged(blob: bytes, *, ranges: bool = True, redirect: str | None = None, log: list | None = None,
+           cap: int | None = None):
     """A stub _urlopen serving blob at any https URL, with Range when ranges
     (206 and Content-Range), the whole file otherwise; redirect: the URL
-    the first request ends on (as GitHub's release download does)."""
+    the first request ends on (as GitHub's release download does); cap: at
+    most this many bytes in answer to a range (a shorter range, named in
+    the Content-Range, as a storage that caps its answers sends)."""
     def opener(req, timeout=None):
         url = req.full_url
         rng = req.get_header("Range")
@@ -670,7 +675,7 @@ def ranged(blob: bytes, *, ranges: bool = True, redirect: str | None = None, log
         final = redirect or url
         if rng and ranges:
             a, b = (int(x) for x in rng.split("=", 1)[1].split("-"))
-            b = min(b, len(blob) - 1)
+            b = min(b, len(blob) - 1, a + cap - 1 if cap else b)
             return Res(blob[a:b + 1], final, 206, {"Content-Range": f"bytes {a}-{b}/{len(blob)}"})
         return Res(blob, final)
     return opener
@@ -747,6 +752,102 @@ with tempfile.TemporaryDirectory() as tmp_name:
     check("a release without a Volán index names only the city one",
           pt.release_feeds(path=only_city) == {"city": want["city"]})
 
+    # A server may answer a range with a shorter one (its Content-Range says
+    # so): that is a short read, never a ValueError out of readinto.
+    # The indexes first and 3 MB after them: their heads are read from far
+    # before the end of the zip, so a read asks for a whole RANGE_CHUNK.
+    front = tmp / "front.zip"
+    shutil.copyfile(release_zip(tmp / "front-indexes.zip", volan, city), front)
+    with zipfile.ZipFile(front, "a") as z:
+        z.writestr("zz-filler.bin", os.urandom(3 * 1024 * 1024), compress_type=zipfile.ZIP_STORED)
+    real = pt._urlopen
+    try:
+        log.clear()
+        pt._urlopen = ranged(front.read_bytes(), cap=64 * 1024, log=log)
+        try:
+            got = pt.release_feeds("https://example.invalid/frontend.zip")
+        except Exception as err_:  # noqa: BLE001 - the failure this checks for
+            got = err_
+        check("a range answered with a shorter one (64 KiB at most): the rest is asked for, the feeds read",
+              got == want and len(log) <= pt.MAX_RANGE_REQUESTS, repr((got, len(log))))
+        pt._urlopen = ranged(rel.read_bytes(), cap=64 * 1024)
+        raw = pt._RangeFile("https://example.invalid/frontend.zip")
+        buf = bytearray(200 * 1024)
+        n = raw.readinto(buf)
+        check("_RangeFile.readinto returns the bytes of a short answer, and moves on by them",
+              n == 64 * 1024 and bytes(buf[:n]) == rel.read_bytes()[:n] and raw.tell() == n, repr((n, raw.tell())))
+    finally:
+        pt._urlopen = real
+
+    # Whatever reading the release zip raises (zipfile and zlib have their
+    # own exceptions), the due step warns and goes by age only.
+    def method_99(src: Path, dest: Path) -> Path:
+        """src's zip with every member's compression method 99 (none
+        zipfile knows): NotImplementedError when a member is opened."""
+        with zipfile.ZipFile(src) as z_in, zipfile.ZipFile(dest, "w", zipfile.ZIP_STORED) as z_out:
+            for info in z_in.infolist():
+                z_out.writestr(info.filename, z_in.read(info), compress_type=zipfile.ZIP_STORED)
+        blob = bytearray(dest.read_bytes())
+        for sig, off in ((b"PK\x03\x04", 8), (b"PK\x01\x02", 10)):
+            k = blob.find(sig)
+            while k >= 0:
+                blob[k + off:k + off + 2] = (99).to_bytes(2, "little")
+                k = blob.find(sig, k + 4)
+        dest.write_bytes(bytes(blob))
+        return dest
+
+    def broken_deflate(dest: Path) -> Path:
+        """A deflated zip whose volan-index.json.gz member's deflate data is
+        garbage: zlib.error while it is read."""
+        release_zip(dest, volan, None)
+        blob = bytearray(dest.read_bytes())
+        with zipfile.ZipFile(dest) as z:
+            info = z.getinfo("volan-index.json.gz")
+        start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+        blob[start:start + 16] = b"\xff" * 16
+        dest.write_bytes(bytes(blob))
+        return dest
+
+    due_live = tmp / "due-exc-live"
+    due_live.mkdir()
+    entries = {n: {"url": pt.INDEXES[n], "feed": want[n], "built_at": pt.utc_text(NOW - timedelta(days=1)),
+                   "size": 1, "sha256": "0" * 64, "shapes": None, "release_feed": "older"} for n in pt.INDEXES}
+    (due_live / "timetables.json").write_text(json.dumps({"format": 1, "schema": SCHEMA, "indexes": entries}))
+    for label, zpath in (("NotImplementedError (a compression method zipfile lacks)",
+                          method_99(rel, tmp / "method99.zip")),
+                         ("zlib.error (a broken deflate stream)", broken_deflate(tmp / "deflate.zip"))):
+        rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(due_live), "--now", NOW.isoformat(),
+                                    "--release-file", str(zpath), "--release-out", str(tmp / "rf-exc.json"))
+        check(f"due with a release zip that raises {label}: a warning, due by age only, the step does not fail",
+              rc == 0 and outputs.get("due") == "false" and "::warning title=Release index not read::" in out
+              and "Traceback" not in err and json.loads((tmp / "rf-exc.json").read_text()) == {"indexes": {}},
+              repr((rc, out[-600:], err[-600:], outputs)))
+    real_rf = pt.release_feeds
+    try:
+        for exc in (RuntimeError("encrypted\n::error::x"), ValueError("bad"), OSError("disk"),
+                    zlib.error("Error -3"), NotImplementedError("method")):
+            def raising(*_a, _exc=exc, **_k):
+                raise _exc
+
+            pt.release_feeds = raising
+            buf = io.StringIO()
+            gh_out = tmp / "gh-exc.txt"
+            gh_out.write_text("")
+            try:
+                with contextlib.redirect_stdout(buf):
+                    rc = pt.main(["due", "--schema", S, "--live-dir", str(due_live), "--now", NOW.isoformat(),
+                                  "--release-url", "https://example.invalid/z.zip", "--github-output", str(gh_out)])
+            except Exception as err_:  # noqa: BLE001 - the failure this checks for
+                rc = err_
+            text = buf.getvalue()
+            warn = [ln for ln in text.splitlines() if ln.startswith("::warning title=Release index not read::")]
+            check(f"due when reading the release raises {type(exc).__name__}: one warning line (no workflow"
+                  " command out of the text), due by age only",
+                  rc == 0 and len(warn) == 1 and type(exc).__name__ in warn[0] and "\n::error::x" not in text
+                  and "due=false" in gh_out.read_text(), repr((rc, text[-500:])))
+    finally:
+        pt.release_feeds = real_rf
+
     # due against the release
     def man_with(volan_rf, city_rf, age: timedelta = timedelta(days=1)) -> dict:
         entries = {}
@@ -781,15 +882,27 @@ with tempfile.TemporaryDirectory() as tmp_name:
           " feeds are written for part",
           rc == 0 and outputs.get("due") == "true" and outputs.get("indexes") == "city"
           and json.loads(feeds_out.read_text()) == {"indexes": want}, repr((rc, out, err, outputs)))
+    rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(live), "--now", NOW.isoformat(),
+                                "--release-file", str(rel), "--release-out", str(feeds_out),
+                                "--release-tag", "v1.10.24")
+    check("the due CLI with --release-tag: the release's tag is written for part next to its feeds",
+          rc == 0 and json.loads(feeds_out.read_text()) == {"indexes": want, "release": "v1.10.24"},
+          repr((rc, out, err, outputs)))
+    for bad_tag in ("v1.10.24-rev1", "1.10.24", "v1.10.24\n::error::x"):
+        rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(live), "--now", NOW.isoformat(),
+                                    "--release-file", str(rel), "--release-tag", bad_tag)
+        check(f"the due CLI refuses --release-tag {bad_tag!r}: only a stable tag",
+              rc == 2 and "vX.Y.Z" in err, repr((rc, err)))
     (tmp / "junk.zip").write_bytes(b"not a zip")
     rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(live), "--now", NOW.isoformat(),
-                                "--release-file", str(tmp / "junk.zip"), "--release-out", str(feeds_out))
+                                "--release-file", str(tmp / "junk.zip"), "--release-out", str(feeds_out),
+                                "--release-tag", "v1.10.24")
     check("a release zip that does not read: a warning, due by age only, no feeds for part",
           rc == 0 and outputs.get("due") == "false" and "::warning title=Release index not read::" in out
           and json.loads(feeds_out.read_text()) == {"indexes": {}}, repr((rc, out, err, outputs)))
 
-    # part records release_feed, assemble publishes it
-    feeds_out.write_text(json.dumps({"indexes": want}))
+    # part records release_feed and release_version, assemble publishes them
+    feeds_out.write_text(json.dumps({"indexes": want, "release": "v1.10.24"}))
     for name, index in (("volan", volan), ("city", city)):
         rc, out, err, _ = run("part", "--schema", S, "--index", str(index), "--out", str(tmp / "p-rf"),
                               "--now", NOW.isoformat(), "--release-feeds", str(feeds_out))
@@ -798,31 +911,48 @@ with tempfile.TemporaryDirectory() as tmp_name:
     check("part records each index's release_feed: the release's feed of that index",
           entries["volan"].get("release_feed") == want["volan"] and entries["city"].get("release_feed") == want["city"],
           repr({k: v.get("release_feed") for k, v in entries.items()}))
-    feeds_out.write_text(json.dumps({"indexes": {"city": want["city"]}}))
+    check("part records each index's release_version: the stable release's tag whose index release_feed is",
+          entries["volan"].get("release_version") == "v1.10.24" and entries["city"].get("release_version") == "v1.10.24",
+          repr({k: v.get("release_version") for k, v in entries.items()}))
+    feeds_out.write_text(json.dumps({"indexes": {"city": want["city"]}, "release": "v1.10.24"}))
     rc, out, err, _ = run("part", "--schema", S, "--index", str(volan), "--out", str(tmp / "p-rf2"),
                           "--now", NOW.isoformat(), "--release-feeds", str(feeds_out))
     rc2, out2, err2, _ = run("part", "--schema", S, "--index", str(city), "--out", str(tmp / "p-rf2"),
                              "--now", NOW.isoformat(), "--release-feeds", str(tmp / "nowhere.json"))
     entries2 = json.loads((tmp / "p-rf2" / "part.json").read_text())["indexes"]
-    check("no release_feed when the release has no index of that name, or there is no feeds file",
-          rc == 0 and rc2 == 0 and "release_feed" not in entries2["volan"] and "release_feed" not in entries2["city"],
+    check("no release_feed (nor release_version) when the release has no index of that name, or there is no"
+          " feeds file",
+          rc == 0 and rc2 == 0 and "release_feed" not in entries2["volan"] and "release_feed" not in entries2["city"]
+          and "release_version" not in entries2["volan"] and "release_version" not in entries2["city"],
           repr(entries2))
+    for label, tag in (("no release tag", None), ("a tag that is no stable one", "v1.10.24-rev2")):
+        feeds_out.write_text(json.dumps({"indexes": want, **({"release": tag} if tag else {})}))
+        out_dir = tmp / f"p-rv-{len(label)}"
+        rc, out, err, _ = run("part", "--schema", S, "--index", str(volan), "--out", str(out_dir),
+                              "--now", NOW.isoformat(), "--release-feeds", str(feeds_out))
+        entry_rv = json.loads((out_dir / "part.json").read_text())["indexes"]["volan"] if rc == 0 else {}
+        check(f"part with {label} in the feeds file: release_feed, no release_version",
+              entry_rv.get("release_feed") == want["volan"] and "release_version" not in entry_rv, repr(entry_rv))
     empty = tmp / "empty"
     empty.mkdir()
     rc, out, err, outputs = run("assemble", "--out", str(tmp / "site-rf"), "--commit", COMMIT, "--live-dir",
                                 str(empty), "--timetables-part", str(tmp / "p-rf"), "--now", NOW.isoformat())
     man_rf = json.loads((tmp / "site-rf" / "timetables.json").read_text())
-    check("timetables.json publishes each entry's release_feed",
+    check("timetables.json publishes each entry's release_feed and release_version",
           rc == 0 and man_rf["indexes"]["volan"].get("release_feed") == want["volan"]
-          and man_rf["indexes"]["city"].get("release_feed") == want["city"] and manifest_problems(tmp / "site-rf") == [],
-          repr((rc, out, err)))
+          and man_rf["indexes"]["city"].get("release_feed") == want["city"]
+          and all(man_rf["indexes"][n].get("release_version") == "v1.10.24" for n in ("volan", "city"))
+          and manifest_problems(tmp / "site-rf") == [], repr((rc, out, err)))
+    print("an entry as published:", json.dumps({k: v for k, v in man_rf["indexes"]["volan"].items()
+                                                 if k != "shapes"}))
     # Carried as published: a MÁV-only run keeps it.
     rc, out, err, outputs = run("assemble", "--out", str(tmp / "site-rf2"), "--commit", COMMIT, "--live-dir",
                                 str(tmp / "site-rf"), "--mav-part", str(mav_part(tmp / "mav-rf")),
                                 "--now", (NOW + timedelta(hours=1)).isoformat())
     man_rf2 = json.loads((tmp / "site-rf2" / "timetables.json").read_text())
-    check("a carried index keeps its release_feed", rc == 0 and man_rf2["indexes"] == man_rf["indexes"],
-          repr((rc, out, err)))
+    check("a carried index keeps its release_feed and release_version",
+          rc == 0 and man_rf2["indexes"] == man_rf["indexes"]
+          and man_rf2["indexes"]["city"].get("release_version") == "v1.10.24", repr((rc, out, err)))
 
     # ---- a published manifest without a signature that verifies ----------
     # Every deploy signs its manifest anew: one whose signature does not
@@ -842,25 +972,48 @@ with tempfile.TemporaryDirectory() as tmp_name:
         how(folder)
         variants[label] = folder
     for label, folder in variants.items():
+        # No .sig at all is the first run after signing came in (a warning);
+        # one that is there but does not verify turns the run red (below).
+        bad = not label.startswith("no ")
+        word = "bad signature" if bad else "unsigned"
         rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(folder), "--now", NOW.isoformat(),
                                     signed=False)
         check(f"due, the published manifest with {label}: untrusted, both due",
-              rc == 0 and outputs.get("indexes") == "volan,city" and "unsigned" in out, repr((rc, out, err)))
+              rc == 0 and outputs.get("indexes") == "volan,city" and word in out, repr((rc, out, err)))
         rc, out, err, _ = run("baseline", "--live-dir", str(folder), "--release-file", str(rel),
                               "--out", str(folder.parent / (folder.name + "-base")), signed=False)
         got = tree(folder.parent / (folder.name + "-base"))
         check(f"baseline, the published manifest with {label}: the release's indexes, none of the site's",
               rc == 0 and got.get("volan-index.json.gz") == volan.read_bytes()
-              and got.get("city-index.json.gz") == city.read_bytes() and "unsigned" in out, repr((rc, out)))
+              and got.get("city-index.json.gz") == city.read_bytes() and word in out, repr((rc, out)))
         rc, out, err, outputs = run("assemble", "--out", str(folder.parent / (folder.name + "-site")), "--commit",
                                     COMMIT, "--live-dir", str(folder), "--mav-part", str(tmp / "mav-rf" / "site"),
                                     "--settle", "0", "--now", NOW.isoformat(), signed=False)
         man_u = json.loads((folder.parent / (folder.name + "-site") / "timetables.json").read_text()) if rc == 0 else {}
-        check(f"assemble, the published manifest with {label}: nothing carried from it, a warning, the MÁV part"
-              " deployed", rc == 0 and outputs.get("deploy") == "true" and man_u.get("indexes") == {}
-              and "::warning title=Published timetables.json not trusted::" in out
+        check(f"assemble, the published manifest with {label}: nothing carried from it, "
+              + ("an error, named in untrusted (the run goes red after the deploy)" if bad else "a warning")
+              + ", the MÁV part deployed", rc == 0 and outputs.get("deploy") == "true" and man_u.get("indexes") == {}
+              and f"::{'error' if bad else 'warning'} title=Published timetables.json not trusted::" in out
+              and outputs.get("untrusted") == ("timetables.json" if bad else "")
               and not any(n.startswith(("volan-", "city-")) for n in tree(folder.parent / (folder.name + "-site"))),
-              repr((rc, out[-600:], err)))
+              repr((rc, out[-600:], err, outputs)))
+        if bad:
+            # Both indexes new: nothing to carry, the manifest's signature is
+            # checked all the same.
+            both = tmp / f"both-{folder.name}"
+            make_part(tmp / "rel", both)
+            rc, out, err, outputs = run("assemble", "--out", str(folder.parent / (folder.name + "-site2")),
+                                        "--commit", COMMIT, "--live-dir", str(folder), "--timetables-part",
+                                        str(both), "--settle", "0", "--now", NOW.isoformat(), signed=False)
+            check(f"assemble with both indexes new, the published manifest with {label}: deployed, untrusted"
+                  " names it all the same", rc == 0 and outputs.get("deploy") == "true"
+                  and outputs.get("untrusted") == "timetables.json", repr((rc, out[-400:], outputs)))
+            rc, out, err, outputs = run("assemble", "--out", str(folder.parent / (folder.name + "-site3")),
+                                        "--commit", COMMIT, "--live-dir", str(folder), "--settle", "0",
+                                        "--now", NOW.isoformat(), signed=False)
+            check(f"assemble with nothing new, the published manifest with {label}: nothing deployed, untrusted"
+                  " names it", rc == 0 and outputs.get("deploy") == "false"
+                  and outputs.get("untrusted") == "timetables.json", repr((rc, out[-400:], outputs)))
     rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(trusted), "--now", NOW.isoformat())
     check("due, the same manifest with a good signature: trusted, nothing due", rc == 0 and outputs.get("due") == "false",
           repr((rc, out)))
@@ -889,8 +1042,87 @@ with tempfile.TemporaryDirectory() as tmp_name:
           repr((state, late.sigs)))
     late = LateSig(trusted)
     live_man, state = late.timetables()
-    check("without settle it is not read again: untrusted", live_man is None and state.startswith("unsigned")
+    check("without settle it is not read again: untrusted", live_man is None and pt.bad_signature(state)
           and late.sigs == 1, repr((state, late.sigs)))
+
+    # ---- mav-index.json: signed the same way, carried only when it verifies
+    # site-rf2: the MÁV files and timetables.json, as a deploy leaves them.
+    mav_live = tmp / "site-rf2"
+    sign_live(mav_live)
+    check("the tests' signing (the sign job's) signs mav-index.json too when the site has it",
+          sm.verify(mav_live / "mav-index.json", sm.read_sig(mav_live / "mav-index.json.sig"), TEST_PUB),
+          repr(sorted(tree(mav_live))))
+    rc, out, err, outputs = run("assemble", "--out", str(tmp / "mav-carry"), "--commit", COMMIT, "--live-dir",
+                                str(mav_live), "--timetables-part", str(tmp / "p-rf"), "--settle", "0",
+                                "--now", (NOW + timedelta(hours=2)).isoformat())
+    check("a published mav-index.json whose .sig verifies: its files carried",
+          rc == 0 and outputs.get("deploy") == "true" and outputs.get("untrusted") == ""
+          and all(tree(tmp / "mav-carry").get(n) == (mav_live / n).read_bytes() for n in MAV_FILES),
+          repr((rc, out[-400:], err)))
+    mav_variants = {}
+    for label, how in (("no mav-index.json.sig (the first run after signing came in)",
+                        lambda f: (f / "mav-index.json.sig").unlink()),
+                       ("a mav-index.json.sig by another key",
+                        lambda f: (f / "mav-index.json.sig").write_text(base64.b64encode(
+                            sm.sign(f / "mav-index.json", os.urandom(32))).decode() + "\n")),
+                       ("a mav-index.json changed after signing", lambda f: (f / "mav-index.json").write_text(
+                           (f / "mav-index.json").read_text().replace('"trains": 60', '"trains": 61', 1)))):
+        folder = tmp / f"mav-untrusted-{len(mav_variants)}"
+        shutil.copytree(mav_live, folder)
+        how(folder)
+        mav_variants[label] = folder
+    for label, folder in mav_variants.items():
+        bad = not label.startswith("no ")
+        site_dir = folder.parent / (folder.name + "-site")
+        rc, out, err, outputs = run("assemble", "--out", str(site_dir), "--commit", COMMIT, "--live-dir",
+                                    str(folder), "--timetables-part", str(tmp / "p-rf"), "--settle", "0",
+                                    "--now", (NOW + timedelta(hours=2)).isoformat(), signed=False)
+        if bad:
+            check(f"{label}, no MÁV part in this run: refused (an error, exit 1), nothing written or deployed,"
+                  " untrusted names it", rc == 1 and outputs.get("deploy") == "false" and not site_dir.exists()
+                  and "::error title=GitHub Pages site not assembled::" in out and "not trusted" in out
+                  and outputs.get("untrusted") == "mav-index.json", repr((rc, out[-600:], err, outputs)))
+        else:
+            check(f"{label}, no MÁV part in this run: nothing carried, nothing deployed, a warning (exit 0)",
+                  rc == 0 and outputs.get("deploy") == "false" and not site_dir.exists()
+                  and "::warning title=GitHub Pages site not assembled::" in out and "unsigned" in out
+                  and outputs.get("untrusted") == "", repr((rc, out[-600:], err, outputs)))
+        site_dir = folder.parent / (folder.name + "-part-site")
+        rc, out, err, outputs = run("assemble", "--out", str(site_dir), "--commit", COMMIT, "--live-dir",
+                                    str(folder), "--mav-part", str(mav_part(tmp / f"mav-new-{folder.name}",
+                                                                            feed="20261102.M2ChangeID")),
+                                    "--settle", "0", "--now", (NOW + timedelta(hours=2)).isoformat(), signed=False)
+        new_man = json.loads((site_dir / "mav-index.json").read_text()) if rc == 0 else {}
+        check(f"{label}, this run's MÁV part: published in its place"
+              + (", untrusted names the published one (the run goes red after the deploy)" if bad else ""),
+              rc == 0 and outputs.get("deploy") == "true" and new_man.get("feed") == "20261102.M2ChangeID"
+              and outputs.get("untrusted") == ("mav-index.json" if bad else ""), repr((rc, out[-600:], outputs)))
+
+    class LateMavSig(pt.Source):
+        """Pages serving the previous deploy's mav-index.json.sig for a
+        moment."""
+
+        def __init__(self, folder: Path) -> None:
+            super().__init__(folder=folder)
+            self.sigs = 0
+
+        def fetch(self, name: str, dest: Path, cap: int):
+            got = super().fetch(name, dest, cap)
+            if name == "mav-index.json.sig":
+                self.sigs += 1
+                if self.sigs == 1:
+                    dest.write_bytes((mav_variants["a mav-index.json.sig by another key"] / name).read_bytes())
+                    return pt.file_digest(dest)
+            return got
+
+    late_mav = LateMavSig(mav_live)
+    with contextlib.redirect_stdout(io.StringIO()):
+        (tmp / "late-mav").mkdir()
+        got_man = pt.mav_from_live(late_mav, tmp / "late-mav", settle=0)
+    check("a mav-index.json.sig that does not verify at first is read again once (settle), then carried",
+          got_man is not None and late_mav.sigs == 2 and late_mav.states.get("mav-index.json") == "ok"
+          and (tmp / "late-mav" / "mav-index.json").read_bytes() == (mav_live / "mav-index.json").read_bytes(),
+          repr((late_mav.sigs, late_mav.states)))
 
     attribution = (tmp / "site-rf" / "ATTRIBUTION.txt").read_text()
     check("ATTRIBUTION.txt names timetables.json.sig", "timetables.json.sig" in attribution, attribution[-400:])
@@ -1019,7 +1251,6 @@ with tempfile.TemporaryDirectory() as tmp_name:
 
 
 # ---- timetables.json.sig ---------------------------------------------------
-import base64  # noqa: E402
 
 with tempfile.TemporaryDirectory() as tmp_name:
     tmp = Path(tmp_name)
@@ -1095,6 +1326,98 @@ with tempfile.TemporaryDirectory() as tmp_name:
     check("verify refuses a signature by another key than the pinned one", done.returncode == 1, done.stdout)
     check("the .sig as written reads back and verifies with the test key's public key",
           sm.verify(site / "timetables.json", sm.read_sig(stale), pub))
+
+    # mav-index.json is signed the same way when the site has it.
+    (site / "mav-index.json").write_bytes(b'{"format": 1, "feed": "20261101"}\n')
+    sm.sign_site(site, seed, pub)
+    mav_sig = sm.read_sig(site / "mav-index.json.sig")
+    check("sign_site writes mav-index.json.sig too: one line, base64 of 64 bytes, a signature over its bytes",
+          (site / "mav-index.json.sig").read_text().count("\n") == 1 and len(mav_sig) == 64
+          and sm.verify(site / "mav-index.json", mav_sig, pub)
+          and not sm.verify(site / "timetables.json", mav_sig, pub)
+          and sm.verify(site / "timetables.json", sm.read_sig(stale), pub))
+    real_sign = sm.sign
+
+    def fail_mav(data: Path, key: bytes) -> bytes:
+        if data.name == "mav-index.json":
+            raise sm.SignError("openssl did not sign: test")
+        return real_sign(data, key)
+
+    sm.sign = fail_mav
+    try:
+        sm.sign_site(site, seed, pub)
+        raised = ""
+    except sm.SignError as err_:
+        raised = str(err_)
+    finally:
+        sm.sign = real_sign
+    check("a mav-index.json that cannot be signed: SignError, and no .sig of either manifest left",
+          "test" in raised and not (site / "timetables.json.sig").exists()
+          and not (site / "mav-index.json.sig").exists(), raised)
+
+    # The CLI as the sign job runs it, the tests' key pinned, through an
+    # openssl that writes down its environment: the key reaches it on stdin
+    # only, never in its environment.
+    bin_dir = tmp / "openssl-bin"
+    bin_dir.mkdir()
+    env_log = tmp / "openssl-env.log"
+    fake = bin_dir / "openssl"
+    fake.write_text(f"#!/bin/sh\nenv >> \"$OPENSSL_ENV_LOG\"\necho --- >> \"$OPENSSL_ENV_LOG\"\n"
+                    f"exec {shutil.which('openssl')} \"$@\"\n")
+    fake.chmod(0o755)
+    sign_wrap = ("import os, sys; sys.path.insert(0, sys.argv.pop(1)); import sign_manifest;"
+                 " sign_manifest.PUBLIC_KEY = bytes.fromhex(os.environ['TEST_PAGES_PUBLIC_KEY']);"
+                 " raise SystemExit(sign_manifest.main(sys.argv[1:]))")
+    key_text = base64.b64encode(TEST_SEED).decode()
+
+    def pinned_cli(*args: str, key: str | None = key_text) -> tuple[int, str]:
+        env = {k: v for k, v in os.environ.items() if k != sm.KEY_ENV}
+        env.update({"PATH": f"{bin_dir}:{env.get('PATH', '')}", "OPENSSL_ENV_LOG": str(env_log),
+                    "TEST_PAGES_PUBLIC_KEY": TEST_PUB.hex()})
+        if key is not None:
+            env[sm.KEY_ENV] = key
+        done = subprocess.run([sys.executable, "-c", sign_wrap, str(HERE), *args], capture_output=True, text=True,
+                              timeout=60, env=env)
+        return done.returncode, done.stdout + done.stderr
+
+    rc, text = pinned_cli("sign", "--site", str(site))
+    logged = env_log.read_text() if env_log.is_file() else ""
+    check("sign with the pinned key: both manifests signed, each .sig verifying; openssl ran without"
+          " PAGES_SIGNING_KEY in its environment, and the key is not printed",
+          rc == 0 and "timetables.json.sig: signed" in text and "mav-index.json.sig: signed" in text
+          and sm.verify(site / "timetables.json", sm.read_sig(site / "timetables.json.sig"), TEST_PUB)
+          and sm.verify(site / "mav-index.json", sm.read_sig(site / "mav-index.json.sig"), TEST_PUB)
+          and logged.count("---") >= 5 and "OPENSSL_ENV_LOG=" in logged and sm.KEY_ENV not in logged
+          and key_text not in logged and key_text not in text, repr((rc, text, logged.count("---"))))
+    rc, text = pinned_cli("verify", "--site", str(site), key=None)
+    check("verify with the pinned key: both signatures good", rc == 0 and text.count("good signature") == 2, text)
+    (site / "mav-index.json").write_bytes(b'{"format": 1, "feed": "20261102"}\n')
+    rc, text = pinned_cli("verify", "--site", str(site), key=None)
+    check("verify fails when mav-index.json's signature does not verify", rc == 1
+          and "mav-index.json.sig: no good signature" in text, text)
+    (site / "mav-index.json").unlink()
+    (site / "mav-index.json.sig").unlink()
+    rc, text = pinned_cli("verify", "--site", str(site), key=None)
+    check("verify of a site without mav-index.json checks timetables.json only", rc == 0
+          and text.count("good signature") == 1, text)
+
+    # _openssl itself: KEY_ENV is in this process's environment, not in the
+    # child's.
+    env_log.unlink()
+    saved = {k: os.environ.get(k) for k in (sm.KEY_ENV, "PATH", "OPENSSL_ENV_LOG")}
+    os.environ.update({sm.KEY_ENV: "c2VjcmV0", "PATH": f"{bin_dir}:{saved['PATH']}", "OPENSSL_ENV_LOG": str(env_log)})
+    try:
+        done = sm._openssl(["version"])
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    logged = env_log.read_text() if env_log.is_file() else ""
+    check("_openssl passes its environment without PAGES_SIGNING_KEY",
+          done.returncode == 0 and "OPENSSL_ENV_LOG=" in logged and sm.KEY_ENV not in logged
+          and "c2VjcmV0" not in logged, logged[:300])
 
 if failed:
     print(f"{failed} failed")

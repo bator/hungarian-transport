@@ -25,8 +25,11 @@ always did.
 Whether to deploy: not when the published manifest names the same content
 digest (index_digest.py), manifest format and schema, and the same "gtfs"
 object apart from the overlay's bytes (same_content: MÁV's zip by size and
-sha256, the overlay by name and tables), and was built less than
-REFRESH_AFTER ago. pfaedle does not write the same tables twice for the
+sha256, the overlay by name and tables), was built less than REFRESH_AFTER
+ago, and its signature (mav-index.json.sig next to it, the URL with .sig;
+with --live-file, the file next to it) verifies against the pinned public
+key (sign_manifest.py): one without that is deployed again from this
+build, signed, as the site job carries no unsigned MÁV manifest. pfaedle does not write the same tables twice for the
 same feed and OSM extract, so the overlay's size and sha256 differ on every
 run and would deploy each one; a new overlay ships with the next deploy
 that a changed index, MÁV zip or refresh makes. Older, the same content is deployed again for its new built_at: the
@@ -81,6 +84,7 @@ sys.path.insert(1, str(HERE.parent / "custom_components" / "hungarian_transport"
 import gtfs_feed  # noqa: E402
 import mav_index  # noqa: E402
 import mav_shrink_guard  # noqa: E402
+import sign_manifest  # noqa: E402
 from index_digest import digest  # noqa: E402
 
 # Bump when the manifest changes in a way an older integration must not read.
@@ -98,6 +102,7 @@ ZIP_LEVEL = 9
 # Half of GitHub Pages' 1 GB site limit; the site is about 35 MB.
 MAX_SITE_BYTES = 500 * 1024 * 1024
 MAX_MANIFEST = 64 * 1024
+MAX_SIG = 1024
 # The same content is deployed again once the published manifest is this old,
 # so its built_at says the daily run went through: mav_daily_verdict.py fails
 # a run that published nothing on a built_at STALE_AFTER (2 days) old, and
@@ -262,23 +267,42 @@ def manifest(index: Path, stats: dict, commit: str, built_at: datetime | None = 
     }
 
 
-def fetch_live(url: str) -> tuple[dict | None, str]:
-    """The published manifest, or None and why not."""
+def fetch_bytes(url: str, cap: int = MAX_MANIFEST) -> tuple[bytes | None, str]:
+    """The file at url, at most cap bytes, or None and why not."""
     if not url.startswith("https://"):
         return None, f"not an https URL: {url}"
     try:
         req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
         with urllib.request.urlopen(req, timeout=LIVE_TIMEOUT) as res:  # noqa: S310 - https only
-            body = res.read(MAX_MANIFEST + 1)
+            body = res.read(cap + 1)
     except urllib.error.HTTPError as err:
         return None, f"HTTP {err.code}"
     # http.client.HTTPException: a body cut short (IncompleteRead) or a
     # garbled answer (BadStatusLine) is a network error like any other.
     except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
         return None, f"{type(err).__name__}: {err}"
-    if len(body) > MAX_MANIFEST:
+    if len(body) > cap:
         return None, "larger than a manifest"
-    return parse_live(body)
+    return body, "ok"
+
+
+def fetch_live(url: str) -> tuple[dict | None, str]:
+    """The published manifest, or None and why not."""
+    body, why = fetch_bytes(url)
+    return parse_live(body) if body is not None else (None, why)
+
+
+def signature_state(body: bytes | None, sig: bytes | None, sig_why: str = "") -> str:
+    """"ok" when sig (the published mav-index.json.sig's bytes) is the
+    pinned key's signature over body (mav-index.json's exact bytes), else
+    why not."""
+    if body is None:
+        return "no manifest"
+    if sig is None:
+        return f"no {MANIFEST_NAME}.sig ({sig_why or 'none'})"
+    if not sign_manifest.verify_bytes(body, sign_manifest.decode_sig(sig)):
+        return f"{MANIFEST_NAME}.sig does not verify against the pinned public key"
+    return "ok"
 
 
 def parse_live(body: bytes) -> tuple[dict | None, str]:
@@ -571,12 +595,24 @@ def main(argv: list[str]) -> int:
 
 
 def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
+    # The published manifest and its signature (mav-index.json.sig next to
+    # it, sign_manifest.py): the same content counts as already published
+    # only when that signature verifies. One that does not (none yet: the
+    # first run after signing came in; another key; an edit) is deployed
+    # again from this build, signed, since the site job never carries an
+    # unsigned MÁV manifest (pages_timetables.py mav_from_live). The shrink
+    # guard compares with it all the same: it only holds an index back.
+    body, sig, why, sig_why = None, None, "not asked", ""
     if args.live_file is not None:
-        live, why = (parse_live(args.live_file.read_bytes()) if args.live_file.is_file() else (None, "no file"))
+        body, why = (args.live_file.read_bytes(), "ok") if args.live_file.is_file() else (None, "no file")
+        sig_file = args.live_file.with_name(args.live_file.name + ".sig")
+        sig, sig_why = (sig_file.read_bytes(), "ok") if sig_file.is_file() else (None, "no file")
     elif args.live_url:
-        live, why = fetch_live(args.live_url)
-    else:
-        live, why = None, "not asked"
+        body, why = fetch_bytes(args.live_url)
+        if body is not None:
+            sig, sig_why = fetch_bytes(args.live_url + ".sig", MAX_SIG)
+    live, why = parse_live(body) if body is not None else (None, why)
+    trust = signature_state(body, sig, sig_why) if live is not None else "no manifest"
     baseline = None
     if live is None and (args.baseline_url or args.baseline_file is not None):
         if args.baseline_file is not None:
@@ -591,7 +627,7 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
     except SiteError as err:
         print(f"no site: {err}", file=sys.stderr)
         return 1
-    same = same_content(man, live)
+    same = same_content(man, live) and trust == "ok"
     refresh = same and refresh_due(man, live)
     deploy = not same or refresh
     write_site(args.index, man, args.out, args.gtfs_zip, overlay)
@@ -604,6 +640,8 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
               f"{gtfs['overlay']['size']} bytes, sha256 {gtfs['overlay']['sha256'][:12]}")
     if live is None:
         print(f"published manifest: none ({why}); deploying")
+    elif trust != "ok" and same_content(man, live):
+        print(f"published manifest: the same content, but not trusted ({trust}); deploying it again, signed")
     elif not same:
         print(f"published manifest: feed {live.get('feed')!r}, digest {str(live.get('digest'))[:12]}"
               f"{'' if live.get('digest') != man['digest'] else ', other GTFS files'}; deploying")

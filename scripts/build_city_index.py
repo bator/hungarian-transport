@@ -31,8 +31,15 @@ from gtfs_compact import (
     write_index,
     _meters,
 )
-# Importable once gtfs_compact put the integration's package on sys.path.
-from served_index import feed_date
+# The integration's own reading of a feed's date, from its package folder
+# (where gtfs_compact finds gtfs_feed). The folder goes on sys.path here
+# too, not only in gtfs_compact: that does it once, when it is first
+# imported, and a process that imported it before and put sys.path back
+# since (a test with monkeypatch.syspath_prepend) has it no more.
+_PKG = Path(__file__).resolve().parent.parent / "custom_components" / "hungarian_transport"
+if str(_PKG) not in sys.path:
+    sys.path.insert(0, str(_PKG))
+from served_index import feed_date  # noqa: E402
 
 OUT = Path("city-index.json.gz")
 # A feed that the previous index had must not vanish or shrink below this
