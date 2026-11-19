@@ -154,21 +154,15 @@ REALTIME_START_MAX = 2880
 REALTIME_STOP_ID_MAX = 64
 
 
-def _realtime_day(value: str) -> str:
-    """A row's date: a real day as YYYYMMDD (20261340 is not, and the
-    planner answers one with an error)."""
-    if not mavplusz.valid_date(value):
-        raise vol.Invalid("not a calendar day")
-    return value
-
-
 REALTIME_TRIP_SCHEMA = vol.Schema(
     {
         vol.Required("key"): vol.All(cv.string, vol.Length(min=1, max=REALTIME_KEY_MAX)),
         vol.Optional("trip_id"): vol.All(cv.string, vol.Length(min=1, max=REALTIME_TRIP_ID_MAX)),
         vol.Optional("route"): vol.All(cv.string, vol.Length(min=1, max=REALTIME_ROUTE_MAX)),
         vol.Optional("start"): vol.All(_finite_int, vol.Range(min=0, max=REALTIME_START_MAX)),
-        vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{8}$"), _realtime_day),
+        # Eight digits; one that is no calendar day (20261131) is that row's
+        # business alone: the hub never asks the planner for it.
+        vol.Optional("date"): vol.All(cv.string, vol.Match(r"^\d{8}$")),
         vol.Optional("train"): vol.All(cv.string, vol.Match(r"^\d{1,6}$")),
         vol.Optional("stops", default=list): vol.All(
             cv.ensure_list,
