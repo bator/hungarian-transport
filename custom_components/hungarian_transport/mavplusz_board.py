@@ -847,7 +847,11 @@ def parse_trips(doc: Any, keys: Sequence[TripKey], now: float) -> list[dict[str,
     know or that does not run on its date, or why there is none for one a
     GraphQL error names or of the wrong shape (a str), the others' still
     answered. An answer of the wrong shape as a whole (_aliased) is a
-    ValueError."""
+    ValueError. A bug of the code reading one (mavplusz.PARSE_BUGS: a
+    KeyError, a TypeError and the like) goes up as it is, for _post to say
+    so: read as that trip's wrong shape, it was a quiet failure per trip,
+    and its request counted as one read, which ended the boards' warning
+    of the same bug."""
     data, failed = _aliased(doc, [f"t{i}" for i in range(len(keys))])
     out: list[dict[str, Any] | None | str] = []
     for i, key in enumerate(keys):
@@ -857,7 +861,7 @@ def parse_trips(doc: Any, keys: Sequence[TripKey], now: float) -> list[dict[str,
             continue
         try:
             out.append(parse_trip(data[alias], futar_id(key.gtfs_id), key.date, now))
-        except (ValueError, KeyError, TypeError, OverflowError, OSError) as err:
+        except (ValueError, OSError) as err:
             out.append(f"{alias}: {str(err)[:200] or type(err).__name__}")
     return out
 
@@ -961,6 +965,8 @@ class PlannerBoards:
             lambda: _NotSent("rate limited"), fallback=True
         )
         self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic)
+        # The bugs of the code reading the planner's answers (_post).
+        self._parse_bugs = mavplusz.ParseBugLog(_LOGGER, monotonic=monotonic)
 
     def close(self) -> None:
         """The caches' timers go, the trip details' batches still under way
@@ -983,8 +989,9 @@ class PlannerBoards:
         the planner neither backing off nor out of this fallback's tokens.
         Not for the rest, nor for a board whose request failed within
         BOARD_TTL (it is not asked again before then): FUTÁR then has its
-        whole budget, since nothing else could answer."""
-        if not self._rate.available():
+        whole budget, since nothing else could answer. Nothing after
+        close() (as reserve and answer)."""
+        if self._closed or not self._rate.available():
             return False
         if path == BOARD_PATH:
             stop = str(params.get("stopId") or "")
@@ -1304,7 +1311,7 @@ class PlannerBoards:
             return parse_board(doc, stop, wall, children=children, own=own)
 
         try:
-            board = await self._post(body, BOARD_MAX_BYTES, PLANNER_TIMEOUT, (ticket,) if ticket else (), parse)
+            board = await self._post(body, BOARD_MAX_BYTES, PLANNER_TIMEOUT, (ticket,) if ticket else (), parse, "board")
         except _NotSent:
             del self._asked[key]
             raise
@@ -1410,6 +1417,7 @@ class PlannerBoards:
                 TRIP_TIMEOUT,
                 batch.tickets,
                 lambda doc: parse_trips(doc, keys, now),
+                "trip details",
             )
         except PlannerError as err:
             # The whole request: the planner failing (the shared backoff),
@@ -1439,6 +1447,7 @@ class PlannerBoards:
         timeout: aiohttp.ClientTimeout,
         tickets: Sequence[_Ticket],
         parse: Callable[[Any], Any],
+        scope: str = "board",
     ) -> Any:
         """One planner request: parse of its decoded answer, or PlannerError
         when it is not made (backoff, rate limit: _NotSent, raised before
@@ -1448,10 +1457,17 @@ class PlannerBoards:
         JSON: a maintenance or Cloudflare page) backs every planner request
         off and is logged once per outage; a failure of this request alone
         (_RequestFailed: an answer over cap, nested too deep, another HTTP
-        status, one parse cannot read, one not decoded within timeout:
-        mavplusz.DecodeTimeout) is neither. A bug of parse's code
+        status, one parse cannot read) is neither. One not decoded within
+        timeout (mavplusz.DecodeTimeout: a busy executor, the answer late)
+        is no fault of the answer's: a PlannerError of no backoff, so the
+        stop is not asked for BOARD_TTL only (as when the planner times
+        out a moment later), not REQUEST_FAIL_TTL. A bug of parse's code
         (mavplusz.parse_bug) is that request's failure too, and a warning
-        with its traceback once until an answer is read again. An answer of
+        with its traceback once an hour per `scope` ("board", "trip
+        details") and place in the code (mavplusz.ParseBugLog), however
+        many answers are read meanwhile: one "parse" warning every read
+        ended, the trip details' requests among them, warned of a bug one
+        stop's data met with every board request of it. An answer of
         EXECUTOR_BYTES or more is decoded and parsed in the executor
         (_decode_parse): parse must not touch this object's state."""
         if self._rate.backing_off():
@@ -1473,14 +1489,16 @@ class PlannerBoards:
         except mavplusz.PARSE_BUGS as err:
             # Not the answer's fault but this code's: said, never silently
             # read off Transitous for good.
-            self._outages.failed(
-                "parse",
-                "mavplusz.hu answer for a BKK board not read (%s), a bug of this integration; "
-                "not logged again until one is read",
-                str(err)[:200] or type(err).__name__,
-                exc_info=err,
+            self._parse_bugs.warn(
+                scope, err,
+                "mavplusz.hu answer for a BKK %s not read (%s), a bug of this integration; "
+                "not logged again for an hour",
+                scope, str(err)[:200] or type(err).__name__,
             )
             raise self._request_failed(err) from None
+        except mavplusz.DecodeTimeout as err:
+            _LOGGER.debug("mavplusz.hu answer for a BKK %s not decoded in time (%s)", scope, err)
+            raise PlannerError(str(err)) from None
         except mavplusz.TooLarge as err:
             raise self._request_failed(err) from None
         except (json.JSONDecodeError, UnicodeDecodeError) as err:
@@ -1494,7 +1512,6 @@ class PlannerBoards:
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
             raise self._failed(err) from None
         self._outages.answered(None, "mavplusz.hu answers for BKK boards again")
-        self._outages.answered("parse", "mavplusz.hu answers for BKK boards are read again")
         return doc
 
     def _failed(self, err: BaseException) -> PlannerError:

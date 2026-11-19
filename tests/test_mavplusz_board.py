@@ -1878,7 +1878,9 @@ def test_a_closed_planner_reserves_nothing() -> None:
     boards = mb.PlannerBoards(None, wall=lambda: WALL)
     assert boards.reserve(BOARD, BOARD_PARAMS) is not None
     boards.close()
-    assert boards.can_answer(BOARD, BOARD_PARAMS) and boards.reserve(BOARD, BOARD_PARAMS) is None
+    # Nor does it say it could answer (FUTÁR keeps its whole budget).
+    assert not boards.can_answer(BOARD, BOARD_PARAMS) and boards.reserve(BOARD, BOARD_PARAMS) is None
+    assert not boards.can_answer(TRIP, _trip_params(0))
 
 
 def test_a_stored_time_in_the_future_counts_as_now() -> None:
@@ -2397,6 +2399,127 @@ async def test_unloading_closes_the_planner_once_and_writes_its_stations_once(
     assert closes == [1]
     assert [(closed, data["stations"]["BKK_CSF00940"]["poles"]) for closed, data in writes] == [(True, ["BKK_F00941"])]
     assert hass_storage[storage.STATIONS_KEY]["data"]["stations"]["BKK_CSF00940"]["poles"] == ["BKK_F00941"]
+
+
+# --- The eighth review: the bugs of the reading code said, once an hour per
+# --- scope and place; a decode run late is no fault of the stop's.
+
+
+def _bug_in(monkeypatch, name: str) -> None:
+    """mb.<name> raising a KeyError, as a bug of the reading code would."""
+
+    def broken(*_args, **_kwargs):
+        raise KeyError("scheduledDeparture")
+
+    monkeypatch.setattr(mb, name, broken)
+
+
+def _bugs(caplog, scope: str) -> list:
+    return [
+        r for r in caplog.records
+        if "a bug of this integration" in r.getMessage() and f"BKK {scope} not read" in r.getMessage()
+    ]
+
+
+def test_parse_trips_lets_a_bug_of_the_reading_code_go_up(monkeypatch) -> None:
+    """parse_trips read a KeyError, a TypeError or an OverflowError of
+    parse_trip as that trip's wrong shape: a bug of the reading code was a
+    quiet failure per trip, never the warning mavplusz.PARSE_BUGS promise.
+    It goes up now; a ValueError is still that trip's alone."""
+    keys = [mb.TripKey("BKK:A", "20261114"), mb.TripKey("BKK:B", "20261114")]
+    doc = {"data": {"t0": {"route": {}}, "t1": {"route": {}}}}
+    for exc in mavplusz.PARSE_BUGS:
+        monkeypatch.setattr(mb, "parse_trip", lambda *_a, exc=exc: (_ for _ in ()).throw(exc("x")))
+        with pytest.raises(exc):
+            mb.parse_trips(doc, keys, WALL)
+
+    def wrong_shape(_trip, tid, *_args):
+        if tid.endswith("A"):
+            raise ValueError("stoptimes is not a list")
+        return {"tripId": tid}
+
+    monkeypatch.setattr(mb, "parse_trip", wrong_shape)
+    assert mb.parse_trips(doc, keys, WALL) == ["t0: stoptimes is not a list", {"tripId": "BKK_B"}]
+
+
+async def test_a_bug_reading_the_trip_details_is_a_warning(make_planner, aioclient_mock, monkeypatch, caplog) -> None:
+    """A bug in a helper the boards and the trip details share (mb._times)
+    was silent for the trip details (parse_trips read it as each trip's
+    wrong shape), and each trip was held for REQUEST_FAIL_TTL as its own
+    answer's fault. It is a warning with the traceback now, once."""
+    boards, _f, clock = make_planner()
+    _use(aioclient_mock, AnyTripPlanner())
+    _bug_in(monkeypatch, "_times")
+    caplog.set_level(logging.DEBUG, logger="custom_components.hungarian_transport.mavplusz_board")
+    for i in range(5):
+        assert await boards.answer(TRIP, _trip_params(i)) is None
+        clock.now += 1
+    bugs = _bugs(caplog, "trip details")
+    assert len(bugs) == 1 and bugs[0].levelno == logging.WARNING and bugs[0].exc_info
+    assert not boards._rate.backing_off()
+
+
+@pytest.mark.parametrize("where", ["parse_board", "_times"])
+async def test_a_bug_reading_the_boards_is_not_warned_again_after_each_trip(
+    make_planner, aioclient_mock, monkeypatch, caplog, where
+) -> None:
+    """One "parse" warning of the boards, ended by any answer read, the trip
+    details' among them: a bug of the boards' reading warned again with
+    every board after a trip's details were read. Each scope has its
+    warning now, once an hour, whatever is read in between."""
+    boards, _f, clock = make_planner()
+    _use(aioclient_mock, AnyTripPlanner())
+    _bug_in(monkeypatch, where)
+    caplog.set_level(logging.WARNING)
+    trips = []
+    for i in range(6):
+        assert await boards.answer(BOARD, dict(BOARD_PARAMS, stopId=f"BKK_F4{i:04d}")) is None
+        trips.append(await boards.answer(TRIP, _trip_params(i)))
+        clock.now += 5
+    assert len(_bugs(caplog, "board")) == 1
+    if where == "parse_board":
+        assert all(t is not None for t in trips) and not _bugs(caplog, "trip details")
+    else:
+        assert trips == [None] * 6 and len(_bugs(caplog, "trip details")) == 1
+    clock.now += mavplusz.PARSE_BUG_TTL
+    await boards.answer(BOARD, dict(BOARD_PARAMS, stopId="BKK_F49999"))
+    assert len(_bugs(caplog, "board")) == 2
+
+
+@pytest.mark.parametrize("where", ["decode", "network"])
+async def test_a_board_decoded_too_late_is_asked_again_after_the_boards_ttl(
+    make_planner, aioclient_mock, monkeypatch, where
+) -> None:
+    """A large board answer the executor did not decode within the
+    request's timeout (a busy executor, an answer late) is no fault of the
+    stop's: it was held for REQUEST_FAIL_TTL (ten minutes) as one of the
+    wrong shape, while the planner timing out a moment later is asked
+    again after its 30 s backoff. It is asked again after BOARD_TTL now,
+    and nothing backs off."""
+    monkeypatch.setattr(mb, "PLANNER_TIMEOUT", aiohttp.ClientTimeout(total=0.3))
+
+    async def executor(func, *args):
+        await asyncio.sleep(1)  # past the request's timeout, its floor included
+        return func(*args)
+
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter, executor=executor)
+
+    async def answer(method, url, data):
+        if where == "network":
+            raise asyncio.TimeoutError()
+        doc = {"data": {"stop": copy.deepcopy(BOARD_DOC["data"]["stop"])}}
+        return AiohttpClientMockResponse(method, url, text=_padded(doc, mb.EXECUTOR_BYTES))
+
+    _use(aioclient_mock, answer)
+    assert await boards.answer(BOARD, BOARD_PARAMS) is None
+    assert not boards._is_failing(("board", STOP))
+    clock.now += 1
+    assert not boards.can_answer(BOARD, BOARD_PARAMS)
+    assert limiter.backing_off() == (where == "network")
+    clock.now += max(mb.BOARD_TTL, mb.FAIL_BACKOFF)
+    assert boards.can_answer(BOARD, BOARD_PARAMS)
 
 
 # --- The review of 2026-11-19 (round 6): decoding off the loop, FUTÁR's

@@ -190,15 +190,25 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   for a minute, matched on the feeds meanwhile; one of several holds none
   back: for the next 15 minutes each of its trips goes in a request of
   half as many trips at most, down to the one that fails it alone, which
-  alone is held (a trip that had no answer lately goes after the others,
-  so it never takes every round from them); another card's trips are
-  asked as before. A trip of the wrong shape in an answer is that trip's
-  failure alone (held for the minute), the others are answered. A bug of
-  the integration's own reading of an answer (a `TypeError`, `KeyError`
-  and the like, which no answer causes) holds its trips back as well and
-  is logged as a warning with its traceback, once until an answer is read
-  again, rather than moving all MÁV realtime to the feeds without a word.
-  When the call's planner round,
+  alone is held, and asked alone from then on for as long as it fails
+  (each failure renews that for 15 minutes, so it never rejoins a full
+  request to fail it again); a trip that had no answer lately goes after
+  the ones never asked, so it never takes every round from them; another
+  card's trips are asked as before. Six requests in a row failing so, for
+  six trips or route lists at least, no answer in between, are no bad
+  trip's but the planner refusing every request (a schema change it
+  answers with a GraphQL error without a path, an HTTP 400 for any body):
+  that is an outage from then on, one warning and the shared minute's
+  backoff, until a request is answered. A trip of the wrong shape in an
+  answer is that trip's failure alone (held for the minute), the others
+  are answered. A bug of the integration's own reading of an answer (a
+  `TypeError`, `KeyError` and the like, which no answer causes) fails its
+  request as one failing for its own sake, so only the trip whose data
+  meets the bug ends up held, and is logged as a warning with its
+  traceback once an hour per kind of request (trips, route lists,
+  vehicles) and place in the code, rather than moving all MÁV realtime to
+  the feeds without a word, or warning again after every other answer
+  read. When the call's planner round,
   waiting for other cards' requests and, after a restart, the static train
   numbers' download included, takes over 20 s (a request is begun only
   with at least 10 s of that left, so waiting alone is no outage; numbers
@@ -216,7 +226,8 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   no realtime data for is no reason to read the feeds either. A route +
   start the planner does not resolve (a route it does not know, no trip at
   that minute, or the route list failing) is matched on the feeds, which
-  are then read too. A train likewise, as above.
+  are then read too; the route lists cached already still answer when the
+  request for the others fails. A train likewise, as above.
 - **Caching.** Each trip's answer is kept per trip and service date for
   the feed's `interval` (60 s), each route's trip list for three hours,
   shared by every card and browser; one trip or route-list request at a
@@ -418,10 +429,14 @@ before, and the card fills the board from Transitous.
   id or date has the alias as its path), or one trip of the wrong shape,
   makes that trip no answer (not asked for 10 minutes) and leaves the
   others'. An answer decoded in the executor gets what is left of the
-  request's timeout and no more: past it the request fails for its own
-  sake. A bug of the integration's reading of an answer is that
-  request's failure too, and a warning with its traceback once until an
-  answer is read again.
+  request's timeout, and a second at least (the answer is waited for a
+  second less than the timeout, so the whole stays within it): past it
+  the stop is asked again after the board's 35 s, as when the planner
+  times out, not held for 10 minutes, and nobody backs off. A bug of the
+  integration's reading of an answer, a trip's details included, is that
+  request's failure too, and a warning with its traceback once an hour
+  per kind (boards, trip details) and place in the code, however many
+  answers are read meanwhile.
 - **FUTÁR's outage.** Once FUTÁR failed (and until it answers again), a
   board or trip details the planner can answer is asked of the planner
   first, at once, and FUTÁR is not waited for: before, every poll waited
