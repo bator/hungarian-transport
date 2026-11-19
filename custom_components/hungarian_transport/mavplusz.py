@@ -132,7 +132,10 @@ class PlannerLimiter:
     A request takes a token of the total; one of the BKK fallback also one
     of its share (FALLBACK_RATE), first, and the hub's vehicle requests one
     of theirs (VEHICLE_RATE), so a refused fallback or vehicle request
-    never spends a token the delays need. After a failure nobody asks for
+    never spends a token the delays need; every bucket is checked before
+    any is taken from, so a request the total refuses spends no token of
+    its share either. A token may be reserved ahead (PlannerClient.reserve)
+    and refunded when its request never goes. After a failure nobody asks for
     the seconds the failing requester gives (the longer one wins); the
     vehicle requests never set one (realtime's _mav_vehicles).
     """
@@ -198,20 +201,38 @@ class PlannerLimiter:
         """A request failed: no request for seconds (or the backoff already set, if longer)."""
         self._retry_at = max(self._retry_at, self._monotonic() + seconds)
 
-    def take(self, *, fallback: bool = False, vehicles: bool = False) -> bool:
+    def _buckets(self, fallback: bool, vehicles: bool) -> list[upstream.TokenBucket]:
+        return [b for b, on in ((self._fallback, fallback), (self._vehicles, vehicles), (self._total, True)) if on]
+
+    def available(self, *, fallback: bool = False, vehicles: bool = False) -> bool:
+        """Whether take() would let a request go now; takes nothing."""
+        return not self.backing_off() and all(b.available() for b in self._buckets(fallback, vehicles))
+
+    def take(self, *, fallback: bool = False, vehicles: bool = False, quiet: bool = False) -> bool:
         """Whether a request may go now; it then has its token(s). False
-        while backing off (not counted as refused) or over a limit (logged)."""
+        while backing off (not counted as refused) or over a limit (logged,
+        unless quiet: a token asked for ahead, PlannerClient.reserve). Every
+        bucket is checked before any is taken from: a request one of them
+        refuses spends no token of the others."""
         if self.backing_off():
             return False
-        try:
-            if fallback:
-                self._fallback.take()
-            if vehicles:
-                self._vehicles.take()
-            self._total.take()
-        except _Refused:
-            return False
+        buckets = self._buckets(fallback, vehicles)
+        for bucket in buckets:
+            if not bucket.available():
+                if not quiet:
+                    try:
+                        bucket.take()  # refused: counted and logged
+                    except _Refused:
+                        pass
+                return False
+        for bucket in buckets:
+            bucket.take()
         return True
+
+    def refund(self, *, fallback: bool = False, vehicles: bool = False) -> None:
+        """The token(s) of a take() whose request was not sent go back."""
+        for bucket in self._buckets(fallback, vehicles):
+            bucket.refund()
 
     def client(
         self, refused: Callable[[], BaseException], *, fallback: bool = False, vehicles: bool = False
@@ -235,6 +256,20 @@ class PlannerClient:
         """A token for one request now, or refused() at once."""
         if not self.limiter.take(fallback=self._fallback, vehicles=self._vehicles):
             raise self._refused()
+
+    def available(self) -> bool:
+        """Whether take() would get a token now (not backing off, every
+        bucket of this requester's with one); takes none."""
+        return self.limiter.available(fallback=self._fallback, vehicles=self._vehicles)
+
+    def reserve(self) -> bool:
+        """take() for a request that may follow (FUTÁR's fallback, asked
+        for before FUTÁR is cut short): a refusal is no error and not
+        logged. refund() gives the token(s) back if the request never goes."""
+        return self.limiter.take(fallback=self._fallback, vehicles=self._vehicles, quiet=True)
+
+    def refund(self) -> None:
+        self.limiter.refund(fallback=self._fallback, vehicles=self._vehicles)
 
     def backing_off(self) -> bool:
         return self.limiter.backing_off()
