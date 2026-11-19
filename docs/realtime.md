@@ -340,7 +340,10 @@ before, and the card fills the board from Transitous.
   Assistant stops; removed with the integration, and never written again
   by a FUTÁR answer landing after that), so they have a fallback right
   after a restart during an outage too. Each pole and station carries
-  when FUTÁR last named it: one not named for 30 days goes, and at the
+  when FUTÁR last named it (a station FUTÁR keeps naming is news for the
+  store once a day, so its stored time is never more than a day old; a
+  stored time in the future counts as the restore's): one not named for
+  30 days goes, and at the
   limits the least recently named goes first (a record of before this,
   poles alone, counts as named at the update). Keleti has a seed until
   FUTÁR names its own: the 15 BKK surface stops the planner names
@@ -355,7 +358,9 @@ before, and the card fills the board from Transitous.
   the cards read Budapest from Transitous; the planner alone would not
   answer the searches and route patterns a card with the action asks for.
 - **Limits.** One planner request per stop per 15 s for every card and
-  horizon together, while FUTÁR fails (the widest window, eight hours, is
+  horizon together (a request the limit or a backoff kept from being sent
+  does not count; one sent that failed leaves FUTÁR its whole budget for
+  that stop for those 15 s), while FUTÁR fails (the widest window, eight hours, is
   asked, 60 departures a pattern, and each card's horizon cut from it; an
   answer of up to 2 MB); the trip details asked within 50 ms go in one
   request of up to 40 trips, cached 60 s, a trip never waiting for an
@@ -363,24 +368,33 @@ before, and the card fills the board from Transitous.
   planner limit (see [Polling](#polling)): 0.25 a second with a burst of
   15, within the total's 0.5 and 30. A call failing fast on a rejected key
   first takes a token of FUTÁR's own rate limit, as a call to FUTÁR would.
-- **Failures.** The planner failing (no answer, a timeout, HTTP 5xx or
-  429) is not asked for 30 s, by the realtime hub either, logged once. A
+- **Failures.** The planner failing (no answer, a timeout, HTTP 5xx, 429
+  or 403, a page that is not JSON: a maintenance or Cloudflare page) is
+  not asked for 30 s, by the realtime hub either, logged once. A
   request failing for its own sake (an answer over its cap, a GraphQL
-  error, an answer of the wrong shape or not JSON, another HTTP 4xx) is
+  error, an answer of the wrong shape, another HTTP 4xx) is
   that stop's or those trips' alone: they are not asked for 10 minutes,
   nobody backs off, and it is logged at debug level only. A GraphQL error
   that names one trip of a batch (OTP's `DataFetchingException` of a bad
   id or date has the alias as its path) makes that trip no answer and
   leaves the others'.
-- **The card's 20 s.** FUTÁR gets 8 s of the card's 20 s only where the
-  planner can answer (a BKK stop it has not said it lacks, a FUTÁR station
+- **The card's 20 s.** FUTÁR gets 8 s of the card's 20 s only while its
+  outage stands (it failed and has not answered since; while it answers,
+  no token is reserved and FUTÁR keeps its whole budget, and a request
+  failing fast still falls back with a token taken then; the first
+  request hanging for FUTÁR's whole budget gets no planner answer and
+  starts the outage), only when the wait for FUTÁR's own token leaves
+  room for both (wait + 8 s + 6 s within 18.5 s, else FUTÁR gets 18 s
+  less the wait, at least 1 s), only where the planner can answer (a BKK stop it has not said it lacks, a FUTÁR station
   the planner knows or has not been asked about yet, or whose poles are
   known, a timetable trip, none of them failed lately, the planner not
   backing off) and a token of the boards' share is reserved for its
   answer before FUTÁR is asked: a dashboard's boards at once (40 poles)
   cut FUTÁR short for as many as the share holds, and the rest keep
   FUTÁR's whole budget, so a slow FUTÁR still answers them. The token goes
-  back when FUTÁR answers. The planner then has 6 s. Elsewhere FUTÁR keeps
+  back when FUTÁR answers, and when every card that asked has left before
+  FUTÁR failed. Unloading the entry ends the trip-detail requests under
+  way at once; their callers get no answer. The planner then has 6 s. Elsewhere FUTÁR keeps
   the whole budget, and after it failed the planner is asked only if its
   answer still reaches the card (each card timed from its own ask, also
   one that joined a request under way), with half a second of slack.
