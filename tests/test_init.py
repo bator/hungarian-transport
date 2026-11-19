@@ -308,6 +308,23 @@ async def test_mavplusz_off_reads_a_trains_delay_from_the_feeds_only(hass, aiocl
     assert len(planner_calls) == (1 if on else 0)
 
 
+async def test_the_planner_limiter_reads_the_mavplusz_option_per_request(hass: HomeAssistant) -> None:
+    """The limiter every planner request takes its token from (the hub's
+    and the BKK boards') reads "Ask mavplusz.hu" itself: once the option
+    is saved off it hands out no token, so a request already on its way
+    (a round queued for the hub's lock) is not sent; on again, it does."""
+    entry = await _setup(hass)
+    limiter = hass.data[DOMAIN]["planner_limiter"]
+    assert limiter.available() and limiter.take()
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MAVPLUSZ: False})
+    await hass.async_block_till_done()
+    assert hass.data[DOMAIN]["planner_limiter"] is limiter
+    assert not limiter.available() and not limiter.take() and not limiter.take(fallback=True)
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MAVPLUSZ: True})
+    await hass.async_block_till_done()
+    assert limiter.available() and limiter.take(fallback=True)
+
+
 @pytest.mark.parametrize("on", [True, False], ids=["default-on", "turned-off"])
 async def test_mavplusz_off_leaves_a_failing_futar_board_to_transitous(
     hass, aioclient_mock, monkeypatch, on

@@ -316,6 +316,26 @@ def test_stale_position_is_not_live() -> None:
     assert hit["delay"] == 775 and hit["approx"] is True
 
 
+@pytest.mark.parametrize("when", [0, 1, NOW - realtime.MAX_TIME_SKEW - 1], ids=["epoch-0", "epoch-1", "past-the-skew"])
+def test_a_predicted_time_long_past_is_no_prediction(when: int) -> None:
+    """MAX_TIME_SKEW either way: a predicted time days before now (epoch 0,
+    a feed's unset field) is no time of a run on its way, as one days ahead
+    is not; the delay of the update stays."""
+    src = realtime.Source("tu", "vp", "", "")
+    feed = realtime.Feed(timestamp=NOW)
+    feed.add_trip_update(
+        realtime.TripUpdate("T1", "20261102", "R", 0, None, [realtime.StopUpdate("S1", None, 60, when, 60, when)])
+    )
+    hit = _answer(_cfg("trip"), [(src, feed, None, None)], trip_id="T1", stops=["S1"], **{"from": 0, "to": 0})
+    assert (hit["delay"], hit["time"], hit["dest_delay"], hit["dest_time"]) == (60, None, 60, None)
+    # Within the skew it is the answer's time.
+    feed.add_trip_update(
+        realtime.TripUpdate("T2", "20261102", "R", 0, None, [realtime.StopUpdate("S1", None, 60, NOW + 60, 60, NOW + 60)])
+    )
+    hit = _answer(_cfg("trip"), [(src, feed, None, None)], trip_id="T2", stops=["S1"], **{"from": 0, "to": 0})
+    assert (hit["time"], hit["dest_time"]) == (NOW + 60, NOW + 60)
+
+
 def test_route_and_start_match_for_feeds_with_other_trip_ids() -> None:
     loaded = _loaded("veszprem", "VBUSZ:")
     cfg = _cfg("trip", "route_start")

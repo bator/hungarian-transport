@@ -148,8 +148,11 @@ class OutageLog:
                 del self.down[stale]
         return now
 
-    def failed(self, key: Hashable, message: str, *args: object) -> None:
-        """key failed: message % args as a warning, unless its outage was said."""
+    def failed(
+        self, key: Hashable, message: str, *args: object, exc_info: BaseException | None = None
+    ) -> None:
+        """key failed: message % args as a warning, unless its outage was
+        said; with exc_info, that error's traceback too (a bug's)."""
         now = self._purge()
         if key in self.down:
             return
@@ -157,7 +160,7 @@ class OutageLog:
             while self.down and len(self.down) >= self._max:
                 del self.down[min(self.down, key=self.down.__getitem__)]
         self.down[key] = now
-        self._logger.warning(message, *args)
+        self._logger.warning(message, *args, exc_info=exc_info)
 
     def is_down(self, key: Hashable) -> bool:
         """Whether key's outage was said and it has not answered since

@@ -383,7 +383,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # call_later: decoded feeds no card asks for leave memory on a timer,
     # also when no card asks at all; the timer stops with HA.
     # use_planner: the entry's mavplusz.hu option, read per call (the hub
-    # outlives the entry's reloads).
+    # outlives the entry's reloads); the planner limiter checks it again
+    # when a request would go (_planner_limiter).
     hub = realtime.RealtimeHub(
         session,
         planner_limiter=_planner_limiter(hass),
@@ -475,11 +476,15 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 def _planner_limiter(hass: HomeAssistant) -> mavplusz.PlannerLimiter:
     """Home Assistant's one rate limit and backoff for mavplusz.hu, shared by
-    the realtime hub and every entry's BKK boards: one server, one limit."""
+    the realtime hub and every entry's BKK boards: one server, one limit.
+    Also the one place the "Ask mavplusz.hu" option is checked at the
+    moment a request would go (_mavplusz_enabled, read per token): a hub
+    round or a board's request begun before the option was turned off
+    sends nothing after it."""
     data = hass.data.setdefault(DOMAIN, {})
     limiter = data.get("planner_limiter")
     if limiter is None:
-        limiter = data["planner_limiter"] = mavplusz.PlannerLimiter()
+        limiter = data["planner_limiter"] = mavplusz.PlannerLimiter(enabled=partial(_mavplusz_enabled, hass))
     return limiter
 
 
