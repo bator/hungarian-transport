@@ -672,6 +672,7 @@ async def _async_planner_boards(
         task_factory=task_factory,
         call_later=hass_call_later(hass),
         limiter=_planner_limiter(hass),
+        executor=hass.async_add_executor_job,
         stations=await storage.async_load_stations(hass),
         on_stations_changed=_stations_changed,
     )

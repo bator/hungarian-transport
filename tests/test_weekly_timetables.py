@@ -1105,7 +1105,7 @@ def test_the_shipped_public_key_is_a_raw_ed25519_key() -> None:
     raw = base64.b64decode(_SHIPPED_KEY, validate=True)
     assert len(raw) == 32
     Ed25519PublicKey.from_public_bytes(raw)
-    assert _SHIPPED_KEY == "QCs8j2ex1KxTRA7pHfsZ6f2SMu5jidCwy1LyvIVOd+M="
+    assert _SHIPPED_KEY == "iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8="
 
 
 def test_verify_manifest_takes_only_the_key_s_signature_of_these_bytes() -> None:

@@ -130,7 +130,7 @@ MAX_SIGNATURE = 1024
 # interception the system trusts) could serve a manifest naming its own
 # files with their own sha256: the signature ties the manifest, and through
 # its sha256 every file, to the key. A new key needs a new version.
-PAGES_PUBLIC_KEY = "QCs8j2ex1KxTRA7pHfsZ6f2SMu5jidCwy1LyvIVOd+M="
+PAGES_PUBLIC_KEY = "iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8="
 # The manifest format scripts/pages_timetables.py writes. Fields it gained
 # later (release_feed) are optional: older versions read it as before.
 MANIFEST_FORMAT = 1

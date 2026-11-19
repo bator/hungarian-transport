@@ -221,10 +221,13 @@ async def test_a_broken_stations_record_does_not_stop_the_setup(hass, hass_stora
     storage = integration.storage
     hass_storage[storage.STATIONS_KEY] = stored
     made = []
+    executors = []
     real = mavplusz_board.PlannerBoards
 
     def boards(*args, **kwargs):
         made.append(kwargs["stations"])
+        # A large planner board is decoded in HA's executor, not the loop.
+        executors.append(kwargs.get("executor"))
         return real(*args, **kwargs)
 
     with pytest.MonkeyPatch.context() as mp:
@@ -237,6 +240,7 @@ async def test_a_broken_stations_record_does_not_stop_the_setup(hass, hass_stora
     assert entry.state is integration.ConfigEntryState.LOADED
     assert hass.services.has_service(DOMAIN, integration.SERVICE_FUTAR)
     assert made == [None]
+    assert executors == [hass.async_add_executor_job]
     assert "Could not read the learnt BKK stations" in caplog.text
 
 
