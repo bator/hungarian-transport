@@ -462,8 +462,8 @@ Should either side object, removing the operator from `realtime_feeds.json`
   again, and the feeds meanwhile. The backoff is shared: the planner
   failing the BKK boards' requests (30 s; not a board's own failure, see
   [BKK boards when FUTÁR fails](#bkk-boards-when-futár-fails)) holds back
-  the delays' requests too, and the other way round. The vehicle requests alone back off on their own
-  (3 minutes) and set no shared backoff.
+  the delays' requests too, and the other way round. The vehicle requests
+  alone back off on their own (3 minutes) and set no shared backoff.
 
 ## The action
 
@@ -529,9 +529,8 @@ trip ids with their service dates (a row's own trip, the resolved trips of
 a route + start row, and every trip of a train's number for today and
 yesterday, so last night's runs too), route ids with a date for the route
 lists of route + start rows, and route ids for the vehicles of live
-realtime-pattern trips; while BKK FUTÁR fails, also BKK stop, station and
-pole ids for the boards and BKK trip ids for trip details (see [BKK boards
-when FUTÁR fails](#bkk-boards-when-futár-fails)). So mavplusz.hu can tell
+realtime-pattern trips (and while BKK FUTÁR fails, the BKK ids below).
+So mavplusz.hu can tell
 which timetable rows some Home Assistant displays, as it can for anyone
 using its own site. The vehicles' plate numbers in the feeds are not
 passed on to the cards, and are not asked of the planner.
