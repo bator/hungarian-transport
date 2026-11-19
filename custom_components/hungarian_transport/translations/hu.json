@@ -113,6 +113,7 @@
         "data": {
           "api_key": "BKK API kulcs",
           "remove_key": "Tárolt kulcs törlése",
+          "mavplusz": "mavplusz.hu (a MÁV útvonaltervezője) használata",
           "daily_mav_index": "Napi MÁV útvonal-index a GitHubról",
           "pages_timetables": "Heti Volán- és városi menetrend a GitHubról",
           "daily_time": "Napi ellenőrzés ideje",
@@ -121,6 +122,7 @@
           "notify_daily_installs": "Napi MÁV index telepítéséről is értesítsen"
         },
         "data_description": {
+          "mavplusz": "Amíg egy kártya látszik, a rajta lévő járatokat a MÁV útvonaltervezőjétől (mavplusz.hu) kérdezi le az élő késésekhez és járműpozíciókhoz: MÁV- és GYSEV-vonatok, a Volán és a Volánbusz helyi járatai, Paks, Debrecen, Veszprém és Miskolc buszai. Amit elküld: járat- és vonalazonosítók, üzemnapok, személyes adat és kulcs nélkül. BKK kulccsal, és csak amíg a BKK FUTÁR hibás, a kártyák budapesti megállóinak és járatainak azonosítóit is. Kikapcsolva semmi nem megy a mavplusz.hu-ra: a vonatok és buszok csak a jbb.ghsq.de GTFS-Realtime feedjeit olvassák, a FUTÁR által meg nem válaszolt budapesti táblát pedig a Transitous tölti ki.",
           "daily_mav_index": "Naponta letölti a projekt által a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet (a bator.github.io-ról), ha újabb a használtnál. Egy újabb helyi MÁV feed továbbra is elsőbbséget kap. Kikapcsolva a telepített kiadással érkezett (vagy helyben épített) index marad, és ilyen kérés nem megy ki.",
           "pages_timetables": "A napi ellenőrzéskor, a MÁV index után letölti a projekt által hetente újraépített Volán és városi menetrend-indexeket (a bator.github.io-ról), ha a feedjeik újabbak a használtaknál. A helyi frissítő script újabb indexei megmaradnak. Kikapcsolva a kiadás indexei maradnak, és ilyen kérés nem megy ki.",
           "daily_time": "Helyi idő, amikor naponta megnézi, van-e új MÁV útvonal-index (legfeljebb 5 perccel később, a kérések szétszórására). Home Assistant indulása vagy a beállítások mentése után 10–20 perccel egyszer szintén lefut; egy sikertelen ellenőrzést 20 percenként, legfeljebb 6-szor újrapróbál. Ugyanekkor nézi meg a heti Volán és városi menetrendeket is.",

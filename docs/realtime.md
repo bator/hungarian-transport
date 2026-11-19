@@ -439,10 +439,16 @@ before, and the card fills the board from Transitous.
   a minute per trip). All of it counts against one limit of one request
   every two seconds with a burst of 30 per Home Assistant, the BKK boards
   at most half of that. It keeps the answers in memory only, for those
-  intervals, and republishes nothing. Removing the `"mavplusz": true` keys
-  from `realtime_feeds.json` turns the delays off (the cards then read
-  only the feeds, as before 1.10.19); without a FUTÁR key no BKK board is
-  asked of the planner.
+  intervals, and republishes nothing. **Opting out:** Settings → Devices &
+  services → Hungarian transport → Configure → *Ask mavplusz.hu (MÁV's
+  journey planner)*, on by default. Off, Home Assistant sends nothing to
+  mavplusz.hu: no delays, no vehicles, no BKK boards. The trains and buses
+  then read only the `jbb.ghsq.de` feeds (as before 1.10.19), and a
+  Budapest board or trip FUTÁR cannot answer gets FUTÁR's error, so the
+  card fills it from Transitous. Saving the option reloads the entry; the
+  next card poll follows it. Removing the `"mavplusz": true` keys from
+  `realtime_feeds.json` turns only the delays off; without a FUTÁR key no
+  BKK board is asked of the planner either way.
 - **Not redistributed.** The integration does not republish any feed or
   planner answer: each Home Assistant fetches it for its own cards, keeps
   it in memory only, and shows the derived delay and position.
