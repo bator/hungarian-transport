@@ -185,16 +185,62 @@ def parse_bug(err: BaseException) -> bool:
     reading of the answer (PARSE_BUGS), not the planner's nor the answer's.
     Neither an outage (planner_down) nor quiet: the request is backed off
     as one failing on its own, and a warning with the traceback is logged
-    once until an answer is read again (realtime's _mav_bug,
-    mavplusz_board's _post), so a release that reads every answer wrongly
-    does not move all MÁV realtime to the feeds without a word."""
+    once an hour for each place of the code it is raised at (ParseBugLog:
+    realtime's _mav_bug, mavplusz_board's _post), so a release that reads
+    every answer wrongly does not move all MÁV realtime to the feeds
+    without a word."""
     return isinstance(err, PARSE_BUGS)
+
+
+# A bug of the reading code (parse_bug) is warned about once this long for
+# each place it is raised at (ParseBugLog), at most MAX_PARSE_BUGS places.
+PARSE_BUG_TTL = 3600
+MAX_PARSE_BUGS = 64
+
+
+class ParseBugLog:
+    """The warnings of the bugs of this integration's reading of the
+    planner's answers (parse_bug), the realtime hub's and the BKK boards'
+    alike: warn(scope, err, message, *args) logs message % args as a
+    warning with err's traceback once per (scope, err's type, the file and
+    line it was raised at) per PARSE_BUG_TTL.
+
+    Not ended by an answer read: most such bugs are a shape of one trip's
+    or one stop's data only (a field the planner leaves out for that one),
+    and every other answer of the scope is read meanwhile, so a warning
+    "once until an answer is read again" came again with every request of
+    that trip, 60 tracebacks an hour. Another bug, or the same raised
+    elsewhere, is warned about at once all the same."""
+
+    def __init__(self, logger: logging.Logger, *, monotonic: upstream.Monotonic = upstream.monotonic) -> None:
+        self._log = upstream.OutageLog(logger, monotonic=monotonic, ttl=PARSE_BUG_TTL, max_entries=MAX_PARSE_BUGS)
+
+    @staticmethod
+    def where(err: BaseException) -> tuple[str, int]:
+        """The file and line err was raised at (its traceback's last
+        frame); ("", 0) for one never raised."""
+        tb = err.__traceback__
+        if tb is None:
+            return "", 0
+        while tb.tb_next is not None:
+            tb = tb.tb_next
+        return tb.tb_frame.f_code.co_filename, tb.tb_lineno
+
+    def warn(self, scope: str, err: BaseException, message: str, *args: object) -> None:
+        self._log.failed((scope, type(err), *self.where(err)), message, *args, exc_info=err)
+
+
+# The least time fetch() gives a decode, whatever is left of the request's
+# timeout (its answer is waited for this much less: see there).
+DECODE_MIN = 1.0
 
 
 class DecodeTimeout(ValueError):
     """The planner answered, but decoding the answer (fetch()'s decode,
-    in the executor) took the rest of the request's timeout: that
-    request's failure, not the planner's (planner_down)."""
+    in the executor) took the rest of the request's timeout (DECODE_MIN
+    at least): that request's failure, not the planner's (planner_down),
+    and not its answer's fault either (mavplusz_board holds the stop back
+    for BOARD_TTL only)."""
 
 
 class _Refused(Exception):
@@ -678,18 +724,29 @@ async def fetch(
     after aiohttp's timeout is over (the answer is in), so it gets what is
     left of timeout.total and no more: past it DecodeTimeout, the
     request's own failure (the planner did answer), and the caller's round
-    goes on without it. An executor job it awaits runs to its end all the
-    same; the request no longer waits for it."""
+    goes on without it. Its answer is waited for DECODE_MIN less than
+    timeout.total (half of one under twice that), and the decode has that
+    at least whenever the answer came: one whose last bytes came just
+    before the timeout had next to nothing left for its decode, a
+    DecodeTimeout for a slow network. The whole takes timeout.total at
+    most all the same (the BKK boards' answer() is timed by it). Only a
+    timeout's total is read. An executor job it awaits runs to its end
+    all the same; the request no longer waits for it."""
     timeout = timeout or realtime.FETCH_TIMEOUT
     loop = asyncio.get_running_loop()
     began = loop.time()
+    floor = 0.0
+    wait = timeout
+    if decode is not None and timeout.total is not None:
+        floor = min(DECODE_MIN, timeout.total / 2)
+        wait = aiohttp.ClientTimeout(total=timeout.total - floor)
     headers = {
         "User-Agent": user_agent or realtime.USER_AGENT,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     async with session.post(
-        URL, data=json.dumps(body).encode(), headers=headers, timeout=timeout, allow_redirects=False
+        URL, data=json.dumps(body).encode(), headers=headers, timeout=wait, allow_redirects=False
     ) as resp:
         if resp.status != 200:
             raise ValueError(f"HTTP {resp.status}")
@@ -704,7 +761,7 @@ async def fetch(
             data += chunk
     try:
         if decode is not None:
-            left = None if timeout.total is None else timeout.total - (loop.time() - began)
+            left = None if timeout.total is None else max(timeout.total - (loop.time() - began), floor)
             cut = asyncio.timeout(left)
             try:
                 async with cut:
