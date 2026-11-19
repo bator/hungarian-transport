@@ -217,7 +217,8 @@ class PlannerLimiter:
         while backing off (not counted as refused) or over a limit (logged,
         unless quiet: a token asked for ahead, PlannerClient.reserve). Every
         bucket is checked before any is taken from: a request one of them
-        refuses spends no token of the others."""
+        refuses spends no token of the others, nor of that one (refilled
+        since it was checked, it would hand one out to a request refused)."""
         if self.backing_off():
             return False
         buckets = self._buckets(fallback, vehicles)
@@ -225,7 +226,7 @@ class PlannerLimiter:
             if not bucket.available():
                 if not quiet:
                     try:
-                        bucket.take()  # refused: counted and logged
+                        bucket._refuse()  # counted and logged, no token taken
                     except _Refused:
                         pass
                 return False
@@ -390,33 +391,43 @@ def parse_vehicles(doc: Any, routes: Sequence[str]) -> dict[str, list[dict[str, 
 
 def answer_sizes(doc: Any, routes: Sequence[str]) -> dict[str, int]:
     """Per route of a parse_vehicles answer: the bytes of its alias, as
-    compact JSON (what RouteSizes learns); none for an alias it lacks."""
-    data = doc["data"]
+    compact JSON (what RouteSizes learns); none for an alias it lacks or
+    one an error names (its null says nothing of the route's size)."""
+    aliases = [f"r{i}" for i in range(len(routes))]
+    data, failed = _alias_data(doc, aliases)
     return {
-        r: len(json.dumps(data[f"r{i}"], separators=(",", ":"))) for i, r in enumerate(routes) if f"r{i}" in data
+        r: len(json.dumps(data[a], separators=(",", ":")))
+        for a, r in zip(aliases, routes)
+        if a in data and a not in failed
     }
 
 
 def needs_route_vehicles(res: TripResult | None, now: float | None = None) -> bool:
     """A live trip on a realtime pattern without its vehicle: its vehicle is
     on its route's scheduled patterns (build_vehicle_query). With now (an
-    epoch), not one whose first call is over VEHICLE_LEAD ahead: no
-    vehicle runs it yet."""
-    if now is not None and res is not None and res.starts is not None and res.starts > now + VEHICLE_LEAD:
-        return False
+    epoch), not one whose first call is over VEHICLE_LEAD ahead (no
+    vehicle runs it yet), nor one whose last call is over
+    realtime.MAX_POSITION_AGE ago (last night's run, finished: a vehicle
+    naming its trip id is today's run's, _vehicle)."""
+    if now is not None and res is not None:
+        if res.starts is not None and res.starts > now + VEHICLE_LEAD:
+            return False
+        if res.ends is not None and res.ends + realtime.MAX_POSITION_AGE < now:
+            return False
     return bool(
         res is not None and res.trip_update is not None and res.vehicle is None and res.rt_pattern and res.route
     )
 
 
 def add_vehicles(
-    results: dict[TripKey, TripResult | None], positions: Sequence[dict[str, Any]]
+    results: dict[TripKey, TripResult | None], positions: Sequence[dict[str, Any]], now: float
 ) -> dict[TripKey, TripResult | None]:
     """results with a vehicle from positions (a route request's) for each
-    trip needs_route_vehicles; one live run per vehicle, as parse_response."""
+    trip needs_route_vehicles at now (the round's epoch); one live run per
+    vehicle, as parse_response."""
     out = dict(results)
     for key, res in results.items():
-        if needs_route_vehicles(res):
+        if needs_route_vehicles(res, now):
             vehicle = _vehicle(positions, key, realtime._strip(res.route, key.prefix))
             if vehicle is not None:
                 out[key] = res._replace(vehicle=vehicle)
