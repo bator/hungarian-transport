@@ -10,14 +10,21 @@ it holds:
   that is not this one (another feed or size) came with a release, or from
   the local updater script;
 - DAILY_ROUND: the last round of the daily MÁV index: when, its result,
-  and the manifest's feed and build time;
+  the manifest's feed and build time, and why it did not install (reason,
+  mav_daily.reason_of) when it failed or was unsupported;
 - TIMETABLES_INSTALL: per index ("volan", "city"), what the weekly
   timetables from GitHub Pages (weekly_timetables.py) installed last: its
   feed, sha256, gzipped size and time. An index www/ serves that is not
   this one (another feed or size) came with a release, or from the local
   updater script;
 - PAGES_ROUND: per index, the last round of the weekly timetables that
-  settled it: when, its result and the manifest's feed.
+  settled it: when, its result, the manifest's feed and, for a result that
+  is not an install, why (reason: "release_newer", "served_newer",
+  "bad_signature", "unknown_key", "not_found", "mismatch" or the error's
+  text, at most mav_daily.MAX_REASON long). A round that is still settling
+  (a download did not match its manifest for the first time) leaves the
+  settled record as it is and adds settling, its reason, until the next
+  round that settles replaces the record.
 
 Every writer sends SIGNAL_TIMETABLES afterwards; the sensors read the
 indexes again (only the ones whose file changed) and the record.
@@ -164,19 +171,23 @@ async def async_record_mav_install(
 
 
 async def async_record_daily_round(
-    hass: HomeAssistant, result: str, manifest_feed: str | None, manifest_built_at: datetime | None
+    hass: HomeAssistant,
+    result: str,
+    manifest_feed: str | None,
+    manifest_built_at: datetime | None,
+    reason: str | None = None,
 ) -> None:
-    """A round of the daily MÁV index ended with result."""
-    await _async_put(
-        hass,
-        DAILY_ROUND,
-        {
-            "at": dt_util.utcnow().isoformat(),
-            "result": result,
-            "manifest_feed": manifest_feed,
-            "manifest_built_at": manifest_built_at.isoformat() if manifest_built_at else None,
-        },
-    )
+    """A round of the daily MÁV index ended with result (for reason, when it
+    did not go through)."""
+    record: dict[str, Any] = {
+        "at": dt_util.utcnow().isoformat(),
+        "result": result,
+        "manifest_feed": manifest_feed,
+        "manifest_built_at": manifest_built_at.isoformat() if manifest_built_at else None,
+    }
+    if reason:
+        record["reason"] = reason
+    await _async_put(hass, DAILY_ROUND, record)
 
 
 async def _async_merge(hass: HomeAssistant, key: str, records: dict[str, dict[str, Any]]) -> None:
@@ -204,14 +215,29 @@ async def async_record_timetables_install(
     )
 
 
-async def async_record_pages_round(hass: HomeAssistant, results: dict[str, tuple[str, str | None]]) -> None:
+async def async_record_pages_round(
+    hass: HomeAssistant,
+    results: dict[str, tuple[str, str | None] | tuple[str, str | None, str | None]],
+    settling: dict[str, str] | None = None,
+) -> None:
     """A round of the weekly timetables settled these indexes: name ->
-    (result, the manifest's feed for it)."""
-    if not results:
+    (result, the manifest's feed for it[, why: the reason, None for none]).
+    settling: the indexes it left settling, name -> reason; their settled
+    records stay, with settling added (a record that later settles drops
+    it)."""
+    if not results and not settling:
         return
     at = dt_util.utcnow().isoformat()
-    await _async_merge(
-        hass,
-        PAGES_ROUND,
-        {name: {"at": at, "result": result, "manifest_feed": feed} for name, (result, feed) in results.items()},
-    )
+    records: dict[str, dict[str, Any]] = {}
+    for name, (result, feed, *why) in results.items():
+        record: dict[str, Any] = {"at": at, "result": result, "manifest_feed": feed}
+        if why and why[0]:
+            record["reason"] = why[0]
+        records[name] = record
+    if settling:
+        current = (await async_load(hass)).get(PAGES_ROUND)
+        current = current if isinstance(current, dict) else {}
+        for name, reason in settling.items():
+            last = current.get(name)
+            records[name] = {**(last if isinstance(last, dict) else {}), "settling": reason, "settling_at": at}
+    await _async_merge(hass, PAGES_ROUND, records)

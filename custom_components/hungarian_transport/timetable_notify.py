@@ -98,7 +98,7 @@ TEXT = {
         "pages_title": "Hungarian transport: timetables updated",
         "pages_message": "New weekly timetables from GitHub Pages are installed: {names}.",
         "pages_volan": "Volán buses ({date} timetable)",
-        "pages_city": "city lines (newest feed of {date})",
+        "pages_city": "city lines (newest feed: {date})",
         "failed_title": "Hungarian transport: daily MÁV index not updating",
         "failed_message": "The daily MÁV route index could not be updated on {days} days in a row "
                           "(last error: {error}). The current index stays in use.",
@@ -117,7 +117,7 @@ TEXT = {
         "pages_title": "Hungarian transport: frissült menetrendek",
         "pages_message": "Friss heti menetrendek települtek a GitHub Pagesről: {names}.",
         "pages_volan": "Volán buszok ({date} menetrend)",
-        "pages_city": "városi járatok (a legfrissebb {date})",
+        "pages_city": "városi járatok (legfrissebb feed: {date})",
         "failed_title": "Hungarian transport: a napi MÁV index nem frissül",
         "failed_message": "A napi MÁV útvonal-index {days} egymást követő napon nem frissült "
                           "(utolsó hiba: {error}). A jelenlegi index marad használatban.",

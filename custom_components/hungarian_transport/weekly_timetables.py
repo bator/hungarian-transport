@@ -11,11 +11,15 @@ CONF_DAILY_TIME), after its MÁV part, and installs an index into www/ only
 when:
 
 - the manifest is signed by the workflow's key (verify_manifest: ed25519,
-  PAGES_PUBLIC_KEY, over the exact bytes; the private key is a secret of
-  the repository's Pages workflow only). A missing or bad signature installs
-  nothing: the manifest names the sha256 of everything else, so the
-  signature is what ties the whole download to the repository rather than
-  to whoever answers for bator.github.io;
+  one of mav_daily.PAGES_PUBLIC_KEYS, over the exact bytes; the private key
+  is a secret of the repository's Pages workflow only; mav-index.json is
+  signed the same way). A missing or bad signature installs nothing: the
+  manifest names the sha256 of everything else, so the signature is what
+  ties the whole download to the repository rather than to whoever answers
+  for bator.github.io. A well-formed signature none of the keys verifies,
+  also when looked at again (SETTLING), is UNSUPPORTED, reason "unknown_key"
+  (the site signs with a newer key: an update of the integration reads it),
+  said once at info, with no retries;
 - the manifest's format is the one this code reads and its schema is
   INDEX_SCHEMA, the one the cards read (else it says so once and installs
   nothing: an older or newer integration publishes for other cards);
@@ -26,14 +30,21 @@ when:
   on both sides, or the operator set differs (city_newer). An index missing
   from www/ is always installed. A date more than MAX_FEED_AHEAD ahead is
   no date: Pages' entry is refused, and a served one counts as older;
-- when www/ serves a release's index (neither one this module installed nor
-  the local updater's copy) and the entry names release_feed (the feed of
-  the latest stable release's index when the Pages index was built), that
-  release is not newer than the Pages build: release_feed is the served
-  feed, or newer than it by the updater's rule (release_older). Otherwise
-  the Pages index was built before this release came out, and the operator
-  rule above cannot tell (an operator the release added, an undated feed it
-  updated): SUPERSEDED until the site rebuilds with the release's feeds;
+- when www/ serves a release's city index (neither one this module
+  installed nor the local updater's copy), the entry names release_version
+  (the stable release whose index the Pages build started from, "v1.10.24")
+  and this version is newer than that release (a later stable one the site
+  has not rebuilt against yet, or a -rev beta two patches up:
+  release_newer): this version's index may hold what the Pages build knew
+  nothing of (an operator it added, an undated feed it updated, which the
+  operator rule above takes for news). Then only a Pages index newer by the
+  updater's strict rule (updater_newer: every operator still there, none
+  older, an undated one unchanged, one later) replaces it; else SUPERSEDED,
+  reason "release_newer", until the site rebuilds against this release. A
+  version not newer than release_version (one that has not updated to it
+  yet, or that release itself), or an entry without one, goes by the
+  operator rule: the build knew this version's index or a newer one. The
+  Volán index is one dated feed: newer is newer;
 - and, when the local updater script (scripts/update_volan_index.py) keeps
   a durable copy of the index in /config/hungarian-transport, the Pages
   index is newer than that copy by the script's own rule
@@ -77,8 +88,10 @@ whichever manifest, is FAILED (two generations taking turns would settle
 for ever). A failed round keeps www/ as it is, logs once per kind of
 failure (with a traceback when it is a crash) and is tried again
 RETRY_DELAY later, at most RETRY_LIMIT times until the next first or daily
-round. The options flow can turn it off (CONF_PAGES_TIMETABLES); then no
-request is made at all.
+round. A round records for each index its result and, for one that did not
+install, its reason (mav_daily.reason_of; storage.PAGES_ROUND, the sensors'
+pages_reason). The options flow can turn it off (CONF_PAGES_TIMETABLES); then
+no request is made at all.
 
 Nothing else in the integration writes these files; the rounds take
 write_lock all the same, so a retry and a daily round never write at once.
@@ -86,8 +99,6 @@ write_lock all the same, so a retry and a daily round never write at once.
 from __future__ import annotations
 
 import asyncio
-import base64
-import binascii
 import gzip
 import hashlib
 import logging
@@ -105,12 +116,13 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from awesomeversion import AwesomeVersion
+from awesomeversion.exceptions import AwesomeVersionException
 
 from homeassistant.core import CALLBACK_TYPE, HassJob, HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_call_later
+from homeassistant.loader import IntegrationNotFound, async_get_integration
 from homeassistant.util import dt as dt_util
 
 from . import jsonsafe, mav, mav_daily, mav_index, served_index, storage, timetables
@@ -122,17 +134,14 @@ MANIFEST_URL = f"{mav_daily.PAGES_BASE}/timetables.json"
 # One line: the base64 of the ed25519 signature (64 bytes) over the exact
 # bytes of timetables.json, made by the Pages workflow.
 SIGNATURE_URL = f"{MANIFEST_URL}.sig"
-MAX_SIGNATURE = 1024
-# The public half (raw 32 bytes, base64) of the key the Pages workflow signs
-# timetables.json with; the private half is a secret of that workflow only.
-# GitHub Pages serves whatever the repository's workflow deploys, and
-# anything that answers for bator.github.io (a hijacked DNS, a TLS
-# interception the system trusts) could serve a manifest naming its own
-# files with their own sha256: the signature ties the manifest, and through
-# its sha256 every file, to the key. A new key needs a new version.
-PAGES_PUBLIC_KEY = "iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8="
+MAX_SIGNATURE = mav_daily.MAX_SIGNATURE
+# The keys the manifests are signed with (mav_daily.PAGES_PUBLIC_KEYS, the
+# current one first, read there at every check).
+PAGES_PUBLIC_KEYS = mav_daily.PAGES_PUBLIC_KEYS
+PAGES_PUBLIC_KEY = PAGES_PUBLIC_KEYS[0]
 # The manifest format scripts/pages_timetables.py writes. Fields it gained
-# later (release_feed) are optional: older versions read it as before.
+# later (release_feed, release_version) are optional: older versions read it
+# as before.
 MANIFEST_FORMAT = 1
 # The indexes the manifest may name, and the file each is in www/.
 INDEXES = {"volan": timetables.VOLAN_INDEX, "city": timetables.CITY_INDEX}
@@ -178,6 +187,9 @@ TEMP_MIN_AGE = 3600
 # same name out to, in www/: www/STAGING<dir>-<hex>.
 STAGING = ".ht-staging-"
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
+# An entry's release_version: a release tag (scripts/pages_timetables.py
+# takes it from the stable release its baseline came from).
+RELEASE_VERSION_RE = re.compile(r"v?\d{1,6}\.\d{1,6}\.\d{1,6}(?:-[0-9A-Za-z.]{1,32})?")
 # The head every index of scripts/gtfs_compact.write_index starts with:
 # {"v":N,"sh":{"dir":...,"n":N},"feed":... ("sh" only with shapes).
 HEAD_RE = re.compile(rb'\{"v":(\d{1,6}),(?:"sh":(\{"dir":"[^"\\]{1,128}","n":\d{1,4}\}),)?"feed":')
@@ -195,6 +207,15 @@ NOT_PUBLISHED = "not_published"
 # download did not match its manifest for the first time (PAGES_MAX_AGE).
 SETTLING = mav_daily.SETTLING
 _INSTALL = "install"
+# Why an index was not installed (IndexResult.reason): mav_daily's words.
+RELEASE_NEWER = mav_daily.REASON_RELEASE_NEWER
+SERVED_NEWER = mav_daily.REASON_SERVED_NEWER
+UNKNOWN_KEY = mav_daily.UNKNOWN_KEY
+
+# The filesystem calls that move and remove folders in www/, here so the
+# tests can watch them without patching the os and shutil modules.
+_replace = os.replace
+_rmtree = shutil.rmtree
 
 
 @dataclass(frozen=True)
@@ -208,6 +229,9 @@ class IndexResult:
     # or feed and size): after a HACS update put the release's older index
     # back. Installed and recorded, but no news.
     again: bool = False
+    # Why it was not installed (SUPERSEDED, FAILED, UNSUPPORTED, SETTLING):
+    # mav_daily.reason_of, RELEASE_NEWER or SERVED_NEWER.
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -239,12 +263,12 @@ class _Unsupported(mav_daily.DailyIndexError):
     """A manifest format or index schema this version does not read."""
 
 
-class _Mismatch(mav_daily.DailyIndexError):
+class _Mismatch(mav_daily._Mismatch):
     """A download is not the file its manifest entry describes."""
 
 
-class _BadSignature(mav_daily.DailyIndexError):
-    """timetables.json.sig is missing, malformed or does not verify."""
+# timetables.json.sig is missing, malformed or does not verify.
+_BadSignature = mav_daily.BadSignature
 
 
 # What a download of the other generation looks like right after a deploy
@@ -254,21 +278,13 @@ class _BadSignature(mav_daily.DailyIndexError):
 _MISMATCHES = (_Mismatch, mav_daily.TooLarge, mav_daily.NotFound)
 
 
-def verify_manifest(raw: bytes, signature: bytes, key: str | None = None) -> None:
+def verify_manifest(raw: bytes, signature: bytes, key: str | tuple[str, ...] | None = None) -> None:
     """Raise _BadSignature unless signature (timetables.json.sig: one line,
     base64 of 64 bytes) is the ed25519 signature of raw by key (base64 of
-    the raw 32-byte public key; PAGES_PUBLIC_KEY by default)."""
-    try:
-        sig = base64.b64decode(signature.decode("ascii").strip(), validate=True)
-    except (UnicodeDecodeError, binascii.Error) as err:
-        raise _BadSignature(f"timetables.json.sig is not base64: {err}") from err
-    if len(sig) != 64:
-        raise _BadSignature(f"timetables.json.sig is {len(sig)} bytes, not an ed25519 signature")
-    public = Ed25519PublicKey.from_public_bytes(base64.b64decode(PAGES_PUBLIC_KEY if key is None else key))
-    try:
-        public.verify(sig, raw)
-    except InvalidSignature as err:
-        raise _BadSignature("timetables.json does not match its signature (timetables.json.sig)") from err
+    the raw 32-byte public key, or several; mav_daily.PAGES_PUBLIC_KEYS by
+    default); mav_daily.UnknownKey, one, when it is well-formed but no key
+    verifies it."""
+    mav_daily.verify_signature(raw, signature, "timetables.json", key)
 
 
 def _today() -> date:
@@ -314,8 +330,8 @@ def check_manifest(raw: bytes) -> dict[str, Any]:
 def check_entry(name: str, entry: Any, today: date | None = None) -> dict[str, Any]:
     """One index's manifest entry, checked and reduced to what is used:
     feed, size, sha256, shapes (None, or dir, n and files name ->
-    (size, sha256)), release_feed (None when absent) and built_at (a POSIX
-    time, None when absent or not a time)."""
+    (size, sha256)), release_feed and release_version (None when absent)
+    and built_at (a POSIX time, None when absent or not a time)."""
     today = today or _today()
     if not isinstance(entry, dict):
         raise mav_daily.DailyIndexError(f"{name}: manifest entry is not an object")
@@ -340,6 +356,13 @@ def check_entry(name: str, entry: Any, today: date | None = None) -> dict[str, A
         not isinstance(release_feed, str) or not release_feed or len(release_feed) > MAX_FEED
     ):
         raise mav_daily.DailyIndexError(f"{name}: manifest release_feed {str(release_feed)[:80]!r} is no feed")
+    release_version = entry.get("release_version")
+    if release_version is not None and (
+        not isinstance(release_version, str) or not RELEASE_VERSION_RE.fullmatch(release_version)
+    ):
+        raise mav_daily.DailyIndexError(
+            f"{name}: manifest release_version {str(release_version)[:80]!r} is no release tag"
+        )
     built = mav_daily.built_at({"built_at": entry.get("built_at")})
     if not _sized(size, MAX_INDEX):
         raise mav_daily.DailyIndexError(f"{name}: manifest size {size!r} out of range")
@@ -371,7 +394,7 @@ def check_entry(name: str, entry: Any, today: date | None = None) -> dict[str, A
         checked = {"dir": folder, "n": count, "files": shards}
     return {
         "feed": feed, "size": size, "sha256": sha, "shapes": checked, "release_feed": release_feed,
-        "built_at": built.timestamp() if built is not None else None,
+        "release_version": release_version, "built_at": built.timestamp() if built is not None else None,
     }
 
 
@@ -456,11 +479,14 @@ def city_newer(pages: str, installed: str | None, today: date | None = None) -> 
     return changed
 
 
-def updater_newer(pages: str, durable: str | None) -> bool:
+def updater_newer(pages: str, durable: str | None, today: date | None = None) -> bool:
     """Whether pages beats the local updater's durable copy of feed durable
     by the updater's own rule (scripts/update_volan_index.served_feeds_newer):
     every operator of the copy is in pages, of those dated on both sides
-    none is older and one later, and an undated one is the same feed."""
+    none is older and one later, and an undated one is the same feed. With
+    today (decide's strict rule for a served index), a date of durable more
+    than MAX_FEED_AHEAD ahead is older than any (_day), as the operator rule
+    takes it."""
     old, new = timetables.city_feeds(durable), timetables.city_feeds(pages)
     if not old:
         return False
@@ -469,7 +495,10 @@ def updater_newer(pages: str, durable: str | None) -> bool:
         other = new.get(op)
         if other is None:
             return False
-        day, other_day = served_index.feed_date(version), served_index.feed_date(other)
+        if today is None:
+            day, other_day = served_index.feed_date(version), served_index.feed_date(other)
+        else:
+            day, other_day = _day(version, today), _day(other, today)
         if day is None or other_day is None:
             if other != version:
                 return False
@@ -488,62 +517,54 @@ def volan_newer(pages: str, installed: str | None, today: date | None = None) ->
     return day is not None and (other is None or day > other)
 
 
-def release_older(release_feed: str, installed: str, today: date | None = None) -> bool:
-    """Whether installed, the feed of a release's index www/ serves, is older
-    than release_feed, the latest stable release's when the Pages index was
-    built (the user has not updated to it yet): by the updater's rule
-    (updater_newer), every operator of installed is in release_feed, none
-    dated older there, an undated one unchanged, and one later. When it is
-    not, the release may be newer than the Pages build, which then knew
-    nothing of it. An installed date more than MAX_FEED_AHEAD ahead is older
-    than any (_day)."""
-    today = today or _today()
-    old, new = timetables.city_feeds(installed), timetables.city_feeds(release_feed)
-    if not old:
+def release_newer(running: Any, release_version: str | None) -> bool:
+    """Whether running, the version of this integration (an AwesomeVersion,
+    "1.10.26-rev.1"), is newer than release_version, the tag of the stable
+    release a Pages build started from ("v1.10.24"). A -rev beta orders
+    before its own stable version and after the one before (semver; the
+    release workflow numbers a -rev series two patches up). False when
+    either is unknown or they do not compare: the operator rule decides."""
+    if running is None or not release_version:
         return False
-    later = False
-    for op, version in old.items():
-        other = new.get(op)
-        if other is None:
-            return False
-        if other == version:
-            continue
-        day, other_day = _day(version, today), _day(other, today)
-        if day is None or other_day is None or other_day < day:
-            return False
-        later |= other_day > day
-    return later
+    try:
+        return AwesomeVersion(str(running)) > AwesomeVersion(release_version.removeprefix("v"))
+    except AwesomeVersionException:
+        return False
 
 
 def _same_file(record: Any, feed: str | None, size: int) -> bool:
     return isinstance(record, Mapping) and record.get("feed") == feed and record.get("size") == size
 
 
-def decide(
+def decide_why(
     name: str,
     feed: str,
     www: Path,
     durable: Path,
     *,
-    release_feed: str | None = None,
+    release_version: str | None = None,
+    running: Any = None,
     pages_install: Mapping[str, Any] | None = None,
     today: date | None = None,
-) -> str:
+) -> tuple[str, str | None]:
     """Whether the Pages index name of feed replaces what www/ serves:
     _INSTALL, else UP_TO_DATE (the same feed), LOCAL_WINS (the local
     updater's durable copy in durable/ is not older by its own rule) or
-    SUPERSEDED (www/ serves another index Pages' does not beat, or a
-    release's index the Pages build predates: release_feed, the entry's,
-    is neither its feed nor newer by release_older). pages_install is what
-    this module last installed (storage.TIMETABLES_INSTALL): the served index
-    is that install when its feed and size are the record's."""
+    SUPERSEDED; with why it was not installed when that is SUPERSEDED:
+    SERVED_NEWER (www/ serves an index Pages' does not beat by the operator
+    rule), RELEASE_NEWER (www/ serves the city index of a release newer
+    than the one the Pages build started from, release_version, and Pages'
+    is not newer by the strict rule). running is this integration's
+    version; pages_install what this module last installed
+    (storage.TIMETABLES_INSTALL): the served index is that install when its
+    feed and size are the record's."""
     today = today or _today()
     out = www / INDEXES[name]
     if not out.is_file():
-        return _INSTALL
+        return _INSTALL, None
     current = served_index.read_feed(out)
     if current == feed:
-        return UP_TO_DATE
+        return UP_TO_DATE, None
     copy = durable / INDEXES[name]
     kept = None
     # A served index that does not read is replaced: the updater would put
@@ -551,20 +572,27 @@ def decide(
     if current is not None and copy.is_file():
         kept = served_index.read_feed(copy)
         if kept is not None and kept != feed and not updater_newer(feed, kept):
-            return LOCAL_WINS
-    if current is not None and release_feed is not None and release_feed != current:
+            return LOCAL_WINS, None
+    if name == "city" and current is not None and release_newer(running, release_version):
         size = out.stat().st_size
         local = kept == current and copy.stat().st_size == size
-        if not local and not _same_file(pages_install, current, size) and not release_older(
-            release_feed, current, today
-        ):
-            # A release's index the Pages build did not know: built before
-            # this release came out, from older feeds than it may have (an
-            # operator it added, an undated feed it updated, which the
-            # operator rule takes for news). The site rebuilds within hours.
-            return SUPERSEDED
+        if not local and not _same_file(pages_install, current, size):
+            # This version's own index (or a later release's) is served, and
+            # the Pages build started from an older release: it may lack an
+            # operator this one added or an undated feed it updated, which
+            # the operator rule takes for news. Only a strictly newer one
+            # replaces it; the site rebuilds against this release within
+            # days of its release, a beta's index is never its baseline.
+            if updater_newer(feed, current, today):
+                return _INSTALL, None
+            return SUPERSEDED, RELEASE_NEWER
     newer = city_newer(feed, current, today) if name == "city" else volan_newer(feed, current, today)
-    return _INSTALL if newer else SUPERSEDED
+    return (_INSTALL, None) if newer else (SUPERSEDED, SERVED_NEWER)
+
+
+def decide(name: str, feed: str, www: Path, durable: Path, **kwargs: Any) -> str:
+    """decide_why without the why."""
+    return decide_why(name, feed, www, durable, **kwargs)[0]
 
 
 def shapes_folder(path: Path) -> str | None:
@@ -595,7 +623,7 @@ def prune(www: Path, name: str, keep: str | None, now: float | None = None) -> N
     for staging in www.glob(STAGING + prefix + "*"):
         try:
             if staging.is_dir() and now - staging.stat().st_mtime >= TEMP_MIN_AGE:
-                shutil.rmtree(staging, ignore_errors=True)
+                _rmtree(staging, ignore_errors=True)
         except OSError:
             pass
     out = www / INDEXES[name]
@@ -607,7 +635,7 @@ def prune(www: Path, name: str, keep: str | None, now: float | None = None) -> N
                 continue
             if "." in entry.name[len(prefix):]:
                 if now - entry.stat().st_mtime >= TEMP_MIN_AGE:
-                    shutil.rmtree(entry, ignore_errors=True)
+                    _rmtree(entry, ignore_errors=True)
                 continue
             marker = entry / SHAPES_RETIRED
             if entry.name == keep:
@@ -620,7 +648,7 @@ def prune(www: Path, name: str, keep: str | None, now: float | None = None) -> N
                 os.utime(marker, (now, now))
                 continue
             if now - retired >= SHAPES_GRACE:
-                shutil.rmtree(entry, ignore_errors=True)
+                _rmtree(entry, ignore_errors=True)
         except OSError as err:
             _LOGGER.debug("Could not prune %s: %s", entry, err)
     for temp in www.glob(INDEXES[name] + ".*"):
@@ -683,20 +711,20 @@ def _commit(www: Path, name: str, raw: bytes, shapes: Mapping[str, Any] | None, 
         try:
             if final.is_dir():
                 if _verify_folder(final, shapes["files"]):
-                    shutil.rmtree(tmp, ignore_errors=True)
+                    _rmtree(tmp, ignore_errors=True)
                 else:
                     # A broken copy of the same name: swapped for the verified one.
                     old = www / f"{STAGING}{shapes['dir']}-{token}-old"
-                    os.replace(final, old)
+                    _replace(final, old)
                     try:
-                        os.replace(tmp, final)
+                        _replace(tmp, final)
                     except OSError:
                         # The served index names it: a broken copy beats none.
-                        os.replace(old, final)
+                        _replace(old, final)
                         raise
-                    shutil.rmtree(old, ignore_errors=True)
+                    _rmtree(old, ignore_errors=True)
             else:
-                os.replace(tmp, final)
+                _replace(tmp, final)
         except OSError as err:
             raise mav_daily.DailyIndexError(f"could not put the shapes folder {shapes['dir']} in place: {err}") from err
     out = www / INDEXES[name]
@@ -884,32 +912,35 @@ def new_cycle(hass: HomeAssistant) -> None:
     hass.data.setdefault(DOMAIN, {}).pop(_SETTLED, None)
 
 
-def _every(result: str, error: str) -> TimetablesRound:
-    return TimetablesRound({name: IndexResult(result, error=error) for name in INDEXES})
+def _every(result: str, error: str, reason: str | None = None) -> TimetablesRound:
+    return TimetablesRound({name: IndexResult(result, error=error, reason=reason) for name in INDEXES})
 
 
 async def _signed(hass: HomeAssistant, session: aiohttp.ClientSession, raw: bytes) -> TimetablesRound | None:
-    """None when timetables.json.sig verifies raw; else the round: SETTLING
-    the first time (right after a deploy the cache can pair the new manifest
-    with the old signature, or still answer 404 for it), FAILED after that
-    and for any other failure. Nothing is installed without a signature."""
-    try:
-        sig = await mav_daily._get(session, SIGNATURE_URL, MAX_SIGNATURE, MANIFEST_TIMEOUT)
-        verify_manifest(raw, sig)
-    except (_BadSignature, mav_daily.TooLarge, mav_daily.NotFound) as err:
-        if _may_settle(hass, _SIGNATURE):
-            _LOGGER.debug(
-                "Weekly timetables from GitHub Pages: %s; the GitHub Pages cache may still hold another"
-                " generation, looking again in %d s", err, mav_daily.PAGES_SETTLE_DELAY,
-            )
-            return _every(SETTLING, str(err))
+    """None when timetables.json.sig verifies raw; else the round
+    (mav_daily.check_signature): SETTLING the first time (right after a
+    deploy the cache can pair the new manifest with the old signature, or
+    still answer 404 for it); after that UNSUPPORTED for a well-formed
+    signature no key verifies (UNKNOWN_KEY: the site signs with a newer key),
+    said once at info and not retried, else FAILED. Nothing is installed
+    without a signature."""
+    check = await mav_daily.check_signature(
+        session, SIGNATURE_URL, raw, "timetables.json", partial(_may_settle, hass, _SIGNATURE)
+    )
+    if check is None:
+        _matched(hass, _SIGNATURE)
+        return None
+    err = check.error
+    if check.result == SETTLING:
+        _LOGGER.debug(
+            "Weekly timetables from GitHub Pages: %s; the GitHub Pages cache may still hold another"
+            " generation, looking again in %d s", err, mav_daily.PAGES_SETTLE_DELAY,
+        )
+    elif check.result == UNSUPPORTED:
+        _log_failure(hass, "manifest", f"{err}: the site signs with a newer key", unsupported=True)
+    else:
         _log_failure(hass, "manifest", str(err))
-        return _every(FAILED, str(err))
-    except mav_daily.DailyIndexError as err:
-        _log_failure(hass, "manifest", str(err))
-        return _every(FAILED, str(err))
-    _matched(hass, _SIGNATURE)
-    return None
+    return _every(check.result, str(err), check.reason)
 
 
 async def async_update(hass: HomeAssistant, www: Path) -> TimetablesRound:
@@ -920,7 +951,7 @@ async def async_update(hass: HomeAssistant, www: Path) -> TimetablesRound:
         raw = await mav_daily._get(session, MANIFEST_URL, MAX_MANIFEST, MANIFEST_TIMEOUT)
     except mav_daily.DailyIndexError as err:
         _log_failure(hass, "manifest", str(err))
-        return _every(FAILED, str(err))
+        return _every(FAILED, str(err), mav_daily.reason_of(err))
     unsigned = await _signed(hass, session, raw)
     if unsigned is not None:
         return unsigned
@@ -928,14 +959,15 @@ async def async_update(hass: HomeAssistant, www: Path) -> TimetablesRound:
         man = check_manifest(raw)
     except _Unsupported as err:
         _log_failure(hass, "manifest", str(err), unsupported=True)
-        return _every(UNSUPPORTED, str(err))
+        return _every(UNSUPPORTED, str(err), mav_daily.reason_of(err))
     except mav_daily.DailyIndexError as err:
         _log_failure(hass, "manifest", str(err))
-        return _every(FAILED, str(err))
+        return _every(FAILED, str(err), mav_daily.reason_of(err))
     _clear_failure(hass, "manifest")
     # Before anything is installed: a round that installs reports it.
     built = mav_daily.built_at(man)
     durable = mav.source_path(hass).parent
+    running = await _running_version(hass)
     results: dict[str, IndexResult] = {}
     async with write_lock(hass):
         for name in INDEXES:
@@ -945,13 +977,38 @@ async def async_update(hass: HomeAssistant, www: Path) -> TimetablesRound:
                     await hass.async_add_executor_job(_prune_served, www, name)
                     results[name] = IndexResult(NOT_PUBLISHED)
                     continue
-                results[name] = await _update_index(hass, session, name, entry, www, durable)
+                results[name] = await _update_index(hass, session, name, entry, www, durable, running)
             except asyncio.CancelledError:
                 raise
             except Exception as err:  # noqa: BLE001 - a crashed index is a failed one
                 message = _crash(hass, name, err)
-                results[name] = IndexResult(FAILED, entry.get("feed") if isinstance(entry, dict) else None, message)
+                results[name] = IndexResult(
+                    FAILED, entry.get("feed") if isinstance(entry, dict) else None, message,
+                    reason=message[:mav_daily.MAX_REASON],
+                )
     return TimetablesRound(results, built)
+
+
+async def _running_version(hass: HomeAssistant) -> Any:
+    """This integration's version (its manifest.json, which the release
+    workflow sets to the tag), an AwesomeVersion; None when unknown."""
+    try:
+        return (await async_get_integration(hass, DOMAIN)).version
+    except IntegrationNotFound:
+        return None
+
+
+async def _wait_out(task: asyncio.Future[Any]) -> None:
+    """Until task is done, through every cancel of the caller meanwhile (a
+    stop, then another): the caller's cleanup never runs beside it. Its
+    exception is taken, so it is not logged as never retrieved."""
+    while not task.done():
+        try:
+            await asyncio.wait([task])
+        except asyncio.CancelledError:
+            continue
+    if not task.cancelled():
+        task.exception()
 
 
 async def _update_index(
@@ -961,29 +1018,33 @@ async def _update_index(
     raw_entry: Any,
     www: Path,
     durable: Path,
+    running: Any = None,
 ) -> IndexResult:
     try:
         entry = check_entry(name, raw_entry)
     except mav_daily.DailyIndexError as err:
         _log_failure(hass, name, str(err))
-        return IndexResult(FAILED, error=str(err))
+        return IndexResult(FAILED, error=str(err), reason=mav_daily.reason_of(err))
     feed = entry["feed"]
 
     def failed(err: Exception) -> IndexResult:
         _log_failure(hass, name, str(err))
-        return IndexResult(FAILED, feed, str(err))
+        return IndexResult(FAILED, feed, str(err), reason=mav_daily.reason_of(err))
 
     installs = (await storage.async_load(hass)).get(storage.TIMETABLES_INSTALL)
     last = installs.get(name) if isinstance(installs, dict) else None
     last = last if isinstance(last, dict) else None
-    decide_now = partial(decide, name, feed, www, durable, release_feed=entry["release_feed"], pages_install=last)
-    decision = await hass.async_add_executor_job(decide_now)
+    decide_now = partial(
+        decide_why, name, feed, www, durable,
+        release_version=entry["release_version"], running=running, pages_install=last,
+    )
+    decision, why = await hass.async_add_executor_job(decide_now)
     if decision != _INSTALL:
         await hass.async_add_executor_job(_prune_served, www, name)
         _clear_failure(hass, name)
         _matched(hass, name)
-        _LOGGER.debug("Weekly %s timetable of feed %s: %s", name, feed[:80], decision)
-        return IndexResult(decision, feed)
+        _LOGGER.debug("Weekly %s timetable of feed %s: %s (%s)", name, feed[:80], decision, why)
+        return IndexResult(decision, feed, reason=why)
     token = secrets.token_hex(4)
     tmp: Path | None = None
     # A download that failed keeps the shards it verified for the next try.
@@ -1007,39 +1068,47 @@ async def _update_index(
                 "Weekly %s timetable of feed %s: %s; the GitHub Pages cache may still hold another"
                 " generation, looking again in %d s", name, feed[:80], err, mav_daily.PAGES_SETTLE_DELAY,
             )
-            return IndexResult(SETTLING, feed, str(err))
+            return IndexResult(SETTLING, feed, str(err), reason=mav_daily.reason_of(err))
         except mav_daily.DailyIndexError as err:
             keep = True
             return failed(err)
         _matched(hass, name)
         # www/ may have changed during the download (the local updater).
-        decision = await hass.async_add_executor_job(decide_now)
+        decision, why = await hass.async_add_executor_job(decide_now)
         if decision != _INSTALL:
             _clear_failure(hass, name)
-            return IndexResult(decision, feed)
-        commit = hass.async_add_executor_job(
-            _commit, www, name, raw, entry["shapes"], tmp, token, entry["built_at"]
-        )
+            return IndexResult(decision, feed, reason=why)
+
+        async def install(staged: Path | None) -> None:
+            await hass.async_add_executor_job(
+                _commit, www, name, raw, entry["shapes"], staged, token, entry["built_at"]
+            )
+            # With the commit, never without it: an index of this module's
+            # without its record reads as a release's (decide's release
+            # rule would keep it from every later build).
+            await storage.async_record_timetables_install(hass, name, feed, entry["sha256"], entry["size"])
+
+        # A task of Home Assistant's own (tracked: its stop waits for it),
+        # not of this round, which a stop (unload, Home Assistant stopping)
+        # cancels: the round waits for the commit and its record, also
+        # through a second cancel, so the cleanup below never runs beside
+        # the commit and a committed index is always recorded.
+        work = hass.async_create_task(install(tmp), f"hungarian_transport_pages_{name}_install")
         try:
-            # A stop (unload, Home Assistant stopping) waits for the commit
-            # in the executor: the cleanup below never runs beside it.
-            await asyncio.shield(commit)
+            await asyncio.shield(work)
         except asyncio.CancelledError:
-            await asyncio.wait([commit])
-            if not commit.cancelled():
-                commit.exception()
+            await _wait_out(work)
             raise
         except mav_daily.DailyIndexError as err:
             return failed(err)
         tmp = None
     finally:
         if tmp is not None and not keep:
-            await hass.async_add_executor_job(partial(shutil.rmtree, tmp, ignore_errors=True))
+            await hass.async_add_executor_job(partial(_rmtree, tmp, ignore_errors=True))
     _clear_failure(hass, name)
     again = isinstance(last, dict) and (
         last.get("sha256") == entry["sha256"] or (last.get("feed"), last.get("size")) == (feed, entry["size"])
     )
-    await storage.async_record_timetables_install(hass, name, feed, entry["sha256"], entry["size"])
     _LOGGER.info(
         "Installed the weekly %s timetable of feed %s from GitHub Pages%s",
         name, feed[:200], " again" if again else "",
@@ -1060,8 +1129,10 @@ class PagesTimetables:
     daily round replaces a retry still waiting, and starts no second task
     beside one still running. on_result gets each round
     (timetable_notify.py); then the indexes it settled are recorded for the
-    sensors (storage.PAGES_ROUND). stop() cancels a round: one cancelled
-    during its commit waits for it, and records and reports nothing."""
+    sensors (storage.PAGES_ROUND, with each one's reason; an index still
+    settling is marked so on its last settled record). stop() cancels a
+    round: one cancelled during its commit waits for the commit and its
+    install record (storage.TIMETABLES_INSTALL), and reports nothing else."""
 
     def __init__(
         self,
@@ -1153,5 +1224,10 @@ class PagesTimetables:
                 _LOGGER.warning("Timetable update notification failed", exc_info=True)
         await storage.async_record_pages_round(
             self._hass,
-            {name: (res.result, res.feed) for name, res in done.results.items() if res.result != SETTLING},
+            {
+                name: (res.result, res.feed, res.reason)
+                for name, res in done.results.items()
+                if res.result != SETTLING
+            },
+            {name: res.reason or SETTLING for name, res in done.results.items() if res.result == SETTLING},
         )

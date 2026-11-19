@@ -251,12 +251,10 @@ like any run, and made while another run waits there, it cancels that one:
 re-run when no run of the workflow is queued.
 The integration does not check the attestation: Home Assistant has no
 Sigstore client, and the integration takes no new dependency for one. It
-checks each file against its manifest's size and sha256. For the MÁV index
-those come from the same site, so it trusts GitHub Pages and this
-repository's workflow. The Volán and city manifest is signed as well
-(`timetables.json.sig`, [below](#the-volán-and-city-indexes)), so for those
-indexes the integration trusts the workflow's signing key, not whoever
-answers for `bator.github.io`.
+checks each file against its manifest's size and sha256, and each manifest
+against its signature (`mav-index.json.sig`, `timetables.json.sig`,
+[below](#the-volán-and-city-indexes)), so it trusts the workflow's signing
+key, not whoever answers for `bator.github.io`.
 
 #### The daily MÁV index
 
@@ -300,6 +298,13 @@ day at the **Daily check time** of its options (06:00 local time unless
 changed, plus up to 5 minutes), and installs the index only when all of
 these hold:
 
+- `mav-index.json.sig` (one line, the base64 of the 64-byte ed25519
+  signature over the exact bytes of `mav-index.json`, by the same key as
+  `timetables.json.sig`, [below](#the-volán-and-city-indexes)) verifies the
+  manifest: a missing, malformed or wrong signature installs nothing (the
+  first one is looked at again 11 minutes later, as for a download that
+  does not match, below; a failed round after that). Only the Pages
+  manifest needs one: an upload or a build of your own feed is yours;
 - the manifest's format and the index schema are the ones this version reads
   (a newer one is skipped, with one line in the log);
 - its feed is the one of the index in use and the [same-feed
@@ -446,6 +451,9 @@ and counts here are examples):
 - `release_feed` (optional; manifests from before it lack it, and versions
   that do not know it ignore it): the `feed` of the latest stable release's
   index of the same kind when this index was built, or `null`.
+- `release_version` (optional, likewise): the tag of that stable release,
+  for example `"v1.10.24"`. The integration compares it with its own
+  version (below).
 - An index carried over from the previous site keeps its entry as it was,
   `built_at` included, so the week counts from its last real build. An
   index that was never built is not listed.
@@ -465,8 +473,16 @@ after it was signed. A manifest whose signature is missing, malformed or
 does not verify installs nothing: right after a deploy the cache can pair
 the new manifest with the previous signature (or still answer 404 for it),
 so the first such check is looked at again 11 minutes later, quietly, and
-one failing again is a failed round with one warning. A new signing key
-needs a new version of the integration.
+one failing again is a failed round with one warning. The integration
+ships a list of public keys (`PAGES_PUBLIC_KEYS` in `mav_daily.py`, the
+current one first) and takes a signature by any of them, so the key can
+change without breaking installs: a new key goes into the list a release
+before the site signs with it, the old one leaves a release later. A
+well-formed signature that none of the listed keys verifies, also when
+looked at again, is `unsupported` with reason `unknown_key` (the site signs
+with a key newer than this version: update the integration), said once in
+the log at info level, not retried, and no failure of the daily MÁV check
+(no failure streak).
 
 Because the indexes are the stable release's, the site's `schema` changes
 only with a release: the first run after a release that changes the index
@@ -571,17 +587,23 @@ one in use:
   taken for the version): such an entry on the site is refused, and an index
   in use that names one counts as older, so it never holds back the real
   builds that follow.
-- When the index in use is a release's (neither one the integration
-  installed from the site nor the local updater's copy) and the entry names
-  a `release_feed`, that release must be one the site's build knew: its
-  `feed` is the `release_feed`, or older by the local updater's rule (every
-  operator still there, none dated older, an undated one unchanged, one
-  later: an install that has not updated to that release yet). Otherwise
-  the site's index was built before this release came out, and the operator
-  rule cannot tell which is newer (the release may add an operator, or
-  update a feed that has no date, which the rule takes for news): it stays
-  (`superseded`) until the site rebuilds with the release's feeds, within
-  about half a day.
+- When the city index in use is a release's (neither one the integration
+  installed from the site nor the local updater's copy), the entry names a
+  `release_version`, and the integration's own version is newer than that
+  release (a later stable release the site has not rebuilt against yet, or
+  a `-rev` beta, numbered two patches up), the operator rule cannot tell
+  which is newer: this version's index may add an operator, or update a
+  feed that has no date, which the rule takes for news. Then only an index
+  newer by the local updater's strict rule replaces it (every operator
+  still there, none dated older, an undated one unchanged, one later);
+  otherwise it stays (`superseded`, reason `release_newer`) until the site
+  rebuilds against this release. A version not newer than
+  `release_version` (one that has not updated to that release yet, or that
+  release itself) goes by the operator rule, since the site's build knew
+  its index or a newer one; so does an entry without `release_version`.
+  Versions compare as semver (`1.10.26-rev.1` is newer than `1.10.24`,
+  `1.10.24-rev.3` older). The Volán index is one dated feed, so newer is
+  newer there.
 
 So an index the [local rebuild](#keeping-the-gtfs-indexes-current) made
 from newer feeds stays, and so does a release's index whose feeds are newer
@@ -856,21 +878,29 @@ cards use and when they changed:
 | Entity | State | Attributes |
 | --- | --- | --- |
 | `sensor.hungarian_transport_mav_route_index` (MÁV route index) | date of the served MÁV index's feed (`20261030.M2ChangeID` → 2026-10-30) | `feed_version`; `source`: `daily` (the daily index installed it), `local` (a build of `/config/hungarian-transport/mav-gtfs.zip`, an upload, or the local updater, whose durable copy is this index) or `release`; `installed_at` (UTC); `trains`, `lines`; `fitted_share` (the share of routes that follow the rails rather than the line through the stations); `audit_ok_ratio` when the build or the manifest gave one |
-| `sensor.hungarian_transport_volan_timetable` (Volán timetable) | date in the Volán index's feed version (`volan:01716.20261102` → 2026-11-02) | `feed_version`, `trips`, `stops`, `updated_at` (the index's build time from its gzip header, else the file's time, which an install from Pages sets to the entry's `built_at`), `source`: `pages` when it is the index the integration installed from [GitHub Pages](#the-volán-and-city-indexes), `local_updater` when the updater's copy in `/config/hungarian-transport` is this index, else `release`; `pages_checked_at`, `pages_result` (below) |
-| `sensor.hungarian_transport_city_timetables` (City timetables) | when the city index was built (timestamp) | `operators`, `trips`, and `feeds` (operator → feed version) when there are at most 10; `source`: `pages`, `local_updater` or `release`, as for Volán; `pages_checked_at`, `pages_result` (below) |
-| `sensor.hungarian_transport_daily_mav_check` (Daily MÁV check) | when the daily MÁV index last ran (timestamp; unknown before its first round) | `result`: `installed`, `up_to_date`, `superseded` (www/ serves a newer feed than the manifest's), `local_wins`, `busy`, `failed`, `unsupported`, or `disabled` with the option off; `manifest_feed`, `manifest_built_at`, `next_run` (UTC), `failure_streak` (days in a row) |
+| `sensor.hungarian_transport_volan_timetable` (Volán timetable) | date in the Volán index's feed version (`volan:01716.20261102` → 2026-11-02) | `feed_version`, `trips`, `stops`, `updated_at` (the index's build time from its gzip header, else the file's time, which an install from Pages sets to the entry's `built_at`), `source`: `pages` when it is the index the integration installed from [GitHub Pages](#the-volán-and-city-indexes), `local_updater` when the updater's copy in `/config/hungarian-transport` is this index, else `release`; `pages_checked_at`, `pages_result`, `pages_reason`, `pages_settling` (below) |
+| `sensor.hungarian_transport_city_timetables` (City timetables) | when the city index was built (timestamp) | `operators`, `trips`, and `feeds` (operator → feed version) when there are at most 10; `source`: `pages`, `local_updater` or `release`, as for Volán; `pages_checked_at`, `pages_result`, `pages_reason`, `pages_settling` (below) |
+| `sensor.hungarian_transport_daily_mav_check` (Daily MÁV check) | when the daily MÁV index last ran (timestamp; unknown before its first round) | `result`: `installed`, `up_to_date`, `superseded` (www/ serves a newer feed than the manifest's), `local_wins`, `busy`, `failed`, `unsupported`, or `disabled` with the option off; `reason` when it failed or was unsupported (as `pages_reason` below); `manifest_feed`, `manifest_built_at`, `next_run` (UTC), `failure_streak` (days in a row) |
 
 `pages_checked_at` is when the integration last read `timetables.json`
 (UTC), and `pages_result` what that check did for this index: `installed`,
 `up_to_date` (the site serves the feed in use), `superseded` (the index in
-use has a newer feed than the site's, or is a release's that the site's
-build predates), `local_wins` (the local updater's
+use has a newer feed than the site's, or is a release's newer than the one
+the site's build started from), `local_wins` (the local updater's
 copy in `/config/hungarian-transport` has feeds the site's do not beat; the
 integration leaves it, so the two never take turns), `not_published` (the
 manifest has no entry for this index), `failed` (the manifest, its signature or the download did not check out;
 the index stays as it was), `unsupported` (a manifest format or index
-schema this version does not read), or `disabled` with the *Weekly Volán
-and city timetables from GitHub* option off.
+schema this version does not read, or a signature by a key it does not
+know), or `disabled` with the *Weekly Volán and city timetables from GitHub*
+option off. `pages_reason` says why an index was not installed:
+`served_newer` or `release_newer` (`superseded`, above), `bad_signature`
+(the signature is missing, malformed or does not verify), `unknown_key`,
+`not_found` (a file the manifest names is not on the site), `mismatch` (a
+download is not the file the manifest describes), else the error's text
+(at most 120 characters). `pages_settling` is the reason of a check still
+looking again (a download that did not match right after a deploy); the
+check 11 minutes later replaces it with its result.
 
 An index sensor is unavailable while its index is missing from www/. The
 sensors update right after the daily index, a Pages install or a local MÁV
