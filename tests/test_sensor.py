@@ -24,6 +24,8 @@ from custom_components.hungarian_transport.const import CONF_DAILY_MAV, DOMAIN
 
 from .test_mav import _feed_zip
 from .test_mav_daily import NEW, OLD, _index, _manifest, _serve
+# Autouse: mav-index.json taken as signed (its signature has its own tests there).
+from .test_mav_daily import signed_manifest  # noqa: F401
 
 # The real round, before conftest's no_daily_mav_index replaces it.
 _real_update = mav_daily.async_update

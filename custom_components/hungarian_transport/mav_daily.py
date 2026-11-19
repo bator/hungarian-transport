@@ -9,6 +9,18 @@ the options set (CONF_DAILY_TIME, 06:00 local time by default, plus up to
 DAILY_JITTER), looks again later that day while the manifest's feed is not
 the day's, and installs the index only when:
 
+- the manifest is signed by the workflow's key: mav-index.json.sig next to
+  it, one line of base64 of the ed25519 signature over the manifest's exact
+  bytes, by one of PAGES_PUBLIC_KEYS (verify_signature, shared with
+  weekly_timetables.py's timetables.json.sig). The manifest names the
+  index's sha256, so the signature ties the index to the repository rather
+  than to whoever answers for bator.github.io. A missing or bad signature
+  installs nothing (check_signature: looked at again once, PAGES_SETTLE_DELAY
+  later, like a mismatching download; FAILED after that). A well-formed one
+  that none of the keys verifies, again after that look, is UNSUPPORTED
+  ("unknown_key": the site signs with a key newer than this version), said
+  once at info. Only this manifest is signed: a local upload or build
+  (mav.py) is the user's own;
 - the manifest's format is the one this code reads and its index schema is
   mav_index.SCHEMA (else it says so once and installs nothing);
 - its feed is the one of the index www/ serves and the same-feed rule
@@ -58,6 +70,8 @@ size, so a replaced index is downloaded on the next load of the dashboard.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from dataclasses import dataclass
 import hashlib
 import logging
@@ -65,13 +79,15 @@ import random
 import re
 import secrets
 import zlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from datetime import date, datetime, time, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import aiohttp
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from homeassistant.core import CALLBACK_TYPE, HassJob, HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -88,6 +104,23 @@ _LOGGER = logging.getLogger(__name__)
 PAGES_BASE = "https://bator.github.io/hungarian-transport"
 MANIFEST_URL = f"{PAGES_BASE}/mav-index.json"
 INDEX_URL = f"{PAGES_BASE}/mav-index.json.gz"
+# One line: the base64 of the ed25519 signature (64 bytes) over the exact
+# bytes of the manifest, made by the Pages workflow (scripts/sign_manifest.py),
+# as timetables.json.sig is for weekly_timetables.py's manifest.
+SIGNATURE_URL = f"{MANIFEST_URL}.sig"
+MAX_SIGNATURE = 1024
+SIGNATURE_BYTES = 64
+# The public halves (raw 32 bytes, base64) of the keys the Pages workflow
+# signs its manifests with (mav-index.json, timetables.json), the current
+# one first; the private half is a secret of that workflow only. GitHub
+# Pages serves whatever the repository's workflow deploys, and anything that
+# answers for bator.github.io (a hijacked DNS, a TLS interception the
+# system trusts) could serve a manifest naming its own files with their own
+# sha256: the signature ties the manifest, and through its sha256 every
+# file, to a key. A new key goes into this list a release before the site
+# signs with it, and the old one leaves a release after; a version that
+# does not know the site's key says so (UNKNOWN_KEY) and installs nothing.
+PAGES_PUBLIC_KEYS: tuple[str, ...] = ("iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8=",)  # gitleaks:allow (public keys)
 # The manifest format scripts/mav_pages_site.py writes (MANIFEST_FORMAT).
 MANIFEST_FORMAT = 1
 MAX_MANIFEST = 64 * 1024
@@ -147,6 +180,16 @@ SUPERSEDED = "superseded"
 # after a deploy is the Pages cache (PAGES_MAX_AGE).
 SETTLING = "settling"
 _INSTALL = "install"
+# Why a round did not install (DailyRound.reason, storage's records, the
+# sensors' reason attributes): short words, else the error's text cut to
+# MAX_REASON. Never a secret: the errors name URLs, files and feeds.
+REASON_RELEASE_NEWER = "release_newer"
+REASON_SERVED_NEWER = "served_newer"
+REASON_BAD_SIGNATURE = "bad_signature"
+UNKNOWN_KEY = "unknown_key"
+REASON_NOT_FOUND = "not_found"
+REASON_MISMATCH = "mismatch"
+MAX_REASON = 120
 
 
 @dataclass(frozen=True)
@@ -163,6 +206,8 @@ class DailyRound:
     # INSTALLED: the installed index's trains and lines.
     trains: int | None = None
     lines: int | None = None
+    # Why it FAILED, was UNSUPPORTED or SETTLING (reason_of).
+    reason: str | None = None
 
 
 class DailyIndexError(Exception):
@@ -187,6 +232,104 @@ class NotFound(DailyIndexError):
     """HTTP 404. For a file a manifest names (weekly_timetables.py: an
     index, a shapes folder), right after a deploy that is a cached manifest
     of the previous generation naming what the new site no longer has."""
+
+
+class BadSignature(DailyIndexError):
+    """A manifest's .sig is missing, malformed or does not verify."""
+
+
+class UnknownKey(BadSignature):
+    """A well-formed signature that none of PAGES_PUBLIC_KEYS verifies over
+    the manifest: the other generation's right after a deploy (the cache
+    pairs a new manifest with the old .sig), else a key this version does
+    not know (the site signs with a newer one) or no key of the site's."""
+
+
+def verify_signature(
+    raw: bytes, signature: bytes, name: str, keys: str | Iterable[str] | None = None
+) -> None:
+    """Raise BadSignature unless signature (name.sig: one line, base64 of 64
+    bytes) is the ed25519 signature of raw, the manifest name, by one of
+    keys (base64 of a raw 32-byte public key, or several; by default
+    PAGES_PUBLIC_KEYS); UnknownKey when it is well-formed but none of them
+    verifies it."""
+    what = f"{name}.sig"
+    try:
+        sig = base64.b64decode(signature.decode("ascii").strip(), validate=True)
+    except (UnicodeDecodeError, binascii.Error) as err:
+        raise BadSignature(f"{what} is not base64: {err}") from err
+    if len(sig) != SIGNATURE_BYTES:
+        raise BadSignature(f"{what} is {len(sig)} bytes, not an ed25519 signature")
+    if keys is None:
+        keys = PAGES_PUBLIC_KEYS
+    for key in (keys,) if isinstance(keys, str) else keys:
+        try:
+            Ed25519PublicKey.from_public_bytes(base64.b64decode(key)).verify(sig, raw)
+        except InvalidSignature:
+            continue
+        return
+    raise UnknownKey(f"{name} does not match its signature ({what}) by any key this version knows")
+
+
+def reason_of(err: BaseException) -> str:
+    """The reason a round records for err: a short word for the kinds the
+    sensors tell apart, else the error's text, at most MAX_REASON long."""
+    if isinstance(err, UnknownKey):
+        return UNKNOWN_KEY
+    if isinstance(err, BadSignature):
+        return REASON_BAD_SIGNATURE
+    if isinstance(err, NotFound):
+        return REASON_NOT_FOUND
+    if isinstance(err, (_Mismatch, TooLarge)):
+        return REASON_MISMATCH
+    text = str(err) if isinstance(err, DailyIndexError) else f"{type(err).__name__}: {err}"
+    return text[:MAX_REASON]
+
+
+@dataclass(frozen=True)
+class SignatureCheck:
+    """Why a manifest's signature did not let it in: result is SETTLING (the
+    first time: right after a deploy the cache can pair a new manifest with
+    the old signature, or still answer 404 for it), UNSUPPORTED (a
+    well-formed signature no key verifies, after that: UNKNOWN_KEY) or
+    FAILED (anything else)."""
+
+    result: str
+    error: DailyIndexError
+
+    @property
+    def reason(self) -> str:
+        """UNKNOWN_KEY, REASON_BAD_SIGNATURE for a signature that is missing
+        or no signature, else the error's (HTTP 500, a timeout)."""
+        if isinstance(self.error, UnknownKey):
+            return UNKNOWN_KEY
+        if isinstance(self.error, (BadSignature, TooLarge, NotFound)):
+            return REASON_BAD_SIGNATURE
+        return reason_of(self.error)
+
+
+async def check_signature(
+    session: aiohttp.ClientSession,
+    url: str,
+    raw: bytes,
+    name: str,
+    may_settle: Callable[[], bool],
+) -> SignatureCheck | None:
+    """None when the signature at url verifies raw, the manifest name; else
+    why not. may_settle says whether a signature that does not match may
+    settle (once per cycle and scope, as a download that does not match)."""
+    try:
+        sig = await _get(session, url, MAX_SIGNATURE, MANIFEST_TIMEOUT)
+        verify_signature(raw, sig, name)
+    except (BadSignature, TooLarge, NotFound) as err:
+        if may_settle():
+            return SignatureCheck(SETTLING, err)
+        if isinstance(err, UnknownKey):
+            return SignatureCheck(UNSUPPORTED, err)
+        return SignatureCheck(FAILED, err)
+    except DailyIndexError as err:
+        return SignatureCheck(FAILED, err)
+    return None
 
 
 # What a round may raise in the normal course of things: a download or a
@@ -387,25 +530,34 @@ def decide(
 
 # The failure last logged as a warning, kept across rounds: only this module reads it.
 _LOGGED = "mav_daily_logged"
-# Set once a download did not match its manifest and the round settled;
-# cleared by a download that matched (or a round that needed none) and by a
-# first or daily round. While it is set, a mismatch is a FAILED round: two
+# The scopes (the index, the manifest's signature) that did not match their
+# manifest once and settled; a scope leaves it when its download matched (or
+# a round needed none), every scope at a first or daily round. While a
+# scope is in it, a mismatch of that scope is a FAILED round: two
 # generations taking turns (A, B, A, B) would otherwise settle for ever.
 _SETTLED = "mav_daily_settled"
+_INDEX = "index"
+_SIGNATURE = "signature"
 
 
-def _may_settle(hass: HomeAssistant) -> bool:
-    """Whether a download that did not match its manifest may settle: the
-    first one since a download matched, or since the cycle began."""
-    data = hass.data.setdefault(DOMAIN, {})
-    if data.get(_SETTLED):
+def _may_settle(hass: HomeAssistant, scope: str = _INDEX) -> bool:
+    """Whether a download of scope that did not match its manifest may
+    settle: the first one since that scope matched, or since the cycle
+    began."""
+    settled = hass.data.setdefault(DOMAIN, {}).setdefault(_SETTLED, set())
+    if scope in settled:
         return False
-    data[_SETTLED] = True
+    settled.add(scope)
     return True
 
 
-def _matched(hass: HomeAssistant) -> None:
-    hass.data.setdefault(DOMAIN, {}).pop(_SETTLED, None)
+def _matched(hass: HomeAssistant, scope: str | None = None) -> None:
+    """scope matched (None: a new cycle, every scope)."""
+    data = hass.data.setdefault(DOMAIN, {})
+    if scope is None:
+        data.pop(_SETTLED, None)
+    else:
+        data.setdefault(_SETTLED, set()).discard(scope)
 
 
 def _log_failure(
@@ -439,7 +591,7 @@ def _crashed(hass: HomeAssistant, err: Exception, feed: str | None = None, built
     _log_failure(hass, message, exc_info=None if expected else err)
     if expected:
         _LOGGER.debug("Daily MÁV route index round failed", exc_info=err)
-    return DailyRound(FAILED, feed, built, error=message)
+    return DailyRound(FAILED, feed, built, error=message, reason=message[:MAX_REASON])
 
 
 async def async_update(hass: HomeAssistant, www: Path) -> DailyRound:
@@ -449,13 +601,21 @@ async def async_update(hass: HomeAssistant, www: Path) -> DailyRound:
     src = mav.source_path(hass)
     state_file = mav.state_path(hass)
     try:
-        man = check_manifest(await _get(session, MANIFEST_URL, MAX_MANIFEST, MANIFEST_TIMEOUT))
-    except _Unsupported as err:
-        _log_failure(hass, str(err), unsupported=True)
-        return DailyRound(UNSUPPORTED, error=str(err))
+        raw = await _get(session, MANIFEST_URL, MAX_MANIFEST, MANIFEST_TIMEOUT)
     except DailyIndexError as err:
         _log_failure(hass, str(err))
-        return DailyRound(FAILED, error=str(err))
+        return DailyRound(FAILED, error=str(err), reason=reason_of(err))
+    unsigned = await _signed(hass, session, raw)
+    if unsigned is not None:
+        return unsigned
+    try:
+        man = check_manifest(raw)
+    except _Unsupported as err:
+        _log_failure(hass, str(err), unsupported=True)
+        return DailyRound(UNSUPPORTED, error=str(err), reason=reason_of(err))
+    except DailyIndexError as err:
+        _log_failure(hass, str(err))
+        return DailyRound(FAILED, error=str(err), reason=reason_of(err))
     # When this round's manifest was built (timetable_notify.py tells a
     # stale site; DailyIndexUpdater looks again later).
     built = built_at(man)
@@ -465,6 +625,28 @@ async def async_update(hass: HomeAssistant, www: Path) -> DailyRound:
         raise
     except Exception as err:  # noqa: BLE001 - a round that crashed is a failed one
         return _crashed(hass, err, man["feed"], built)
+
+
+async def _signed(hass: HomeAssistant, session: aiohttp.ClientSession, raw: bytes) -> DailyRound | None:
+    """None when mav-index.json.sig verifies raw; else the round, nothing
+    installed (check_signature): SETTLING the first time, with a debug line;
+    then UNSUPPORTED for a key this version does not know, said once at
+    info, or FAILED."""
+    check = await check_signature(session, SIGNATURE_URL, raw, "mav-index.json", partial(_may_settle, hass, _SIGNATURE))
+    if check is None:
+        _matched(hass, _SIGNATURE)
+        return None
+    err = check.error
+    if check.result == SETTLING:
+        _LOGGER.debug(
+            "Daily MÁV route index: %s; the GitHub Pages cache may still hold another generation, looking again"
+            " in %d s", err, PAGES_SETTLE_DELAY,
+        )
+    elif check.result == UNSUPPORTED:
+        _log_failure(hass, f"{err}: the site signs with a newer key", unsupported=True)
+    else:
+        _log_failure(hass, str(err))
+    return DailyRound(check.result, error=str(err), reason=check.reason)
 
 
 async def _install(
@@ -479,15 +661,15 @@ async def _install(
     """The rest of a round, once the manifest checked out."""
     feed = man["feed"]
 
-    def done(result: str, error: str | None = None, **installed: int) -> DailyRound:
-        return DailyRound(result, feed, built, error, **installed)
+    def done(result: str, error: str | None = None, reason: str | None = None, **installed: int) -> DailyRound:
+        return DailyRound(result, feed, built, error, reason=reason, **installed)
 
     decision = await hass.async_add_executor_job(
         partial(decide, feed, out, src, _today(), state_file=state_file, rank=manifest_rank(man))
     )
     if decision != _INSTALL:
         _clear_failure(hass)
-        _matched(hass)
+        _matched(hass, _INDEX)
         _LOGGER.debug("Daily MÁV route index of feed %s: %s", feed, decision)
         return done(decision)
     if mav.build_pending(hass):
@@ -499,18 +681,18 @@ async def _install(
     except _Mismatch as err:
         if not _may_settle(hass):
             _log_failure(hass, str(err))
-            return done(FAILED, str(err))
+            return done(FAILED, str(err), reason_of(err))
         # Right after a deploy the Pages cache can still hold the other
         # generation of one of the two files (PAGES_MAX_AGE).
         _LOGGER.debug(
             "Daily MÁV route index of feed %s: %s; the GitHub Pages cache may still hold another"
             " generation, looking again in %d s", feed, err, PAGES_SETTLE_DELAY,
         )
-        return done(SETTLING, str(err))
+        return done(SETTLING, str(err), reason_of(err))
     except DailyIndexError as err:
         _log_failure(hass, str(err))
-        return done(FAILED, str(err))
-    _matched(hass)
+        return done(FAILED, str(err), reason_of(err))
+    _matched(hass, _INDEX)
     # Checked again with nothing awaited before the lock is taken: a build
     # (an upload) that started during the download goes first.
     if mav.build_pending(hass):
@@ -530,7 +712,7 @@ async def _install(
         except OSError as err:
             message = f"could not write {out}: {err}"
             _log_failure(hass, message)
-            return done(FAILED, message)
+            return done(FAILED, message, message[:MAX_REASON])
     _clear_failure(hass)
     audit = man.get("audit") if isinstance(man.get("audit"), dict) else {}
     await storage.async_record_mav_install(hass, storage.SOURCE_DAILY, feed, len(raw), audit.get("ok_ratio"))
@@ -771,4 +953,4 @@ class DailyIndexUpdater:
             served = await self._hass.async_add_executor_job(served_index.read_feed, self._www / mav.INDEX_NAME)
             if served and served != feed:
                 result = SUPERSEDED
-        await storage.async_record_daily_round(self._hass, result, feed, done.built_at)
+        await storage.async_record_daily_round(self._hass, result, feed, done.built_at, done.reason)
