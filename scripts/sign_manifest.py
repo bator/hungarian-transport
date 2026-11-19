@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sign timetables.json on GitHub Pages (mav-index-daily.yml's site job).
+"""Sign timetables.json on GitHub Pages (mav-index-daily.yml's sign job).
 
 The integration installs the Volán and city indexes the GitHub Pages
 manifest timetables.json names, each file checked against the manifest's
@@ -9,9 +9,9 @@ base64 of the 64-byte ed25519 signature over timetables.json's exact bytes
 as deployed, and the integration checks it against the public key it pins
 (PUBLIC_KEY here) before it reads the manifest. Whoever could put files on
 the Pages site, or answer for it, cannot make installs take an index
-without the private key, which only the site job's signing step sees (the
-repository secret PAGES_SIGNING_KEY: base64 of the raw 32-byte ed25519
-private key, its seed).
+without the private key, which only the sign job's signing step sees (the
+secret PAGES_SIGNING_KEY of the github-pages environment, which only main's
+runs reach: base64 of the raw 32-byte ed25519 private key, its seed).
 
   sign   --site DIR
          Writes DIR/timetables.json.sig. The key comes from the environment
@@ -25,6 +25,10 @@ private key, its seed).
   verify --site DIR
          Exit 0 when DIR/timetables.json.sig is a signature over
          DIR/timetables.json by PUBLIC_KEY's key, 1 otherwise.
+
+pages_timetables.py verifies the published timetables.json with it before
+it carries anything over from it (verify_bytes): a site job never signs
+again what it did not sign itself.
 
 The ed25519 work is openssl's (3.0 or later, for pkeyutl -rawin; GitHub's
 Ubuntu runners have it): nothing is installed into the job that holds the
@@ -48,7 +52,8 @@ SIG_NAME = MANIFEST_NAME + ".sig"
 KEY_ENV = "PAGES_SIGNING_KEY"
 # The public key of PAGES_SIGNING_KEY: base64 of the raw 32 bytes. The
 # integration pins the same key; a new key pair changes both.
-PUBLIC_KEY = base64.b64decode("QCs8j2ex1KxTRA7pHfsZ6f2SMu5jidCwy1LyvIVOd+M=")
+PAGES_SIGNING_PUBLIC_KEY = "iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8="
+PUBLIC_KEY = base64.b64decode(PAGES_SIGNING_PUBLIC_KEY)
 # The DER around a raw ed25519 key (RFC 8410): a PKCS#8 private key of a
 # 32-byte seed, a SubjectPublicKeyInfo of a 32-byte public key.
 _PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
@@ -105,8 +110,10 @@ def sign(data: Path, seed: bytes) -> bytes:
     return done.stdout
 
 
-def verify(data: Path, signature: bytes, public: bytes = PUBLIC_KEY) -> bool:
-    """Whether signature is public's key's ed25519 signature over data."""
+def verify(data: Path, signature: bytes, public: bytes | None = None) -> bool:
+    """Whether signature is public's key's (default PUBLIC_KEY's) ed25519
+    signature over data."""
+    public = PUBLIC_KEY if public is None else public
     if len(signature) != SIG_BYTES or len(public) != 32:
         return False
     with tempfile.TemporaryDirectory() as tmp:
@@ -122,14 +129,32 @@ def read_sig(path: Path) -> bytes:
     """The signature in a .sig file (one line of base64); b"" when it does
     not read."""
     try:
-        return base64.b64decode(path.read_text(encoding="ascii").strip(), validate=True)
-    except (OSError, UnicodeDecodeError, binascii.Error, ValueError):
+        return decode_sig(path.read_bytes())
+    except OSError:
         return b""
 
 
-def sign_site(site: Path, seed: bytes, public: bytes = PUBLIC_KEY) -> Path:
+def verify_bytes(data: bytes, signature: bytes, public: bytes | None = None) -> bool:
+    """verify, over bytes in memory (a manifest as fetched)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / MANIFEST_NAME
+        path.write_bytes(data)
+        return verify(path, signature, public)
+
+
+def decode_sig(raw: bytes) -> bytes:
+    """The signature in a .sig file's bytes; b"" when they are none."""
+    try:
+        return base64.b64decode(raw.decode("ascii").strip(), validate=True)
+    except (UnicodeDecodeError, binascii.Error, ValueError):
+        return b""
+
+
+def sign_site(site: Path, seed: bytes, public: bytes | None = None) -> Path:
     """Write site's timetables.json.sig with seed, checked against public
-    first; its path. Raises SignError, with no .sig left in site."""
+    (default PUBLIC_KEY) first; its path. Raises SignError, with no .sig
+    left in site."""
+    public = PUBLIC_KEY if public is None else public
     manifest, out = site / MANIFEST_NAME, site / SIG_NAME
     out.unlink(missing_ok=True)
     if not manifest.is_file():

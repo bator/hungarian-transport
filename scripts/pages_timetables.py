@@ -26,6 +26,12 @@ site. The integration reads timetables.json
   volan-shapes-<hash>/NN.json.gz, city-shapes-<hash>/NN.json.gz
                               the shapes shards each index names in its head
 
+The published timetables.json is used (its entries carried, its indexes
+taken as a baseline or as built) only when its timetables.json.sig verifies
+over its exact bytes against the pinned public key (Source.timetables,
+sign_manifest.py); one that does not is taken as no manifest at all, so a
+site job never signs again entries this workflow did not sign.
+
 Subcommands (every --live-url is the site's https base URL; --live-dir a
 local folder in its place, for tests and the PR check). --schema is the
 index schema of the code that builds the indexes (the workflow builds them
@@ -109,6 +115,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import mav_pages_site as mav_site  # noqa: E402
+import sign_manifest  # noqa: E402
 # INDEX_SCHEMA: only assemble's last resort for a site without any index
 # (the schema of the code that builds the indexes is passed as --schema).
 from gtfs_compact import INDEX_SCHEMA, UA, shapes_stem  # noqa: E402
@@ -119,6 +126,8 @@ from served_index import HEAD_BYTES, feed_date, head_feed  # noqa: E402
 
 MANIFEST_FORMAT = 1
 MANIFEST_NAME = "timetables.json"
+SIG_NAME = sign_manifest.SIG_NAME
+MAX_SIG = 1024
 PART_NAME = "part.json"
 # Index name -> its file, in the manifest's order.
 INDEXES = {"volan": "volan-index.json.gz", "city": "city-index.json.gz"}
@@ -293,6 +302,39 @@ class Source:
         if not isinstance(data, dict):
             raise FetchError(f"{name} is not a JSON object")
         return data, body, "ok"
+
+    def timetables(self, settle: float = -1) -> tuple[dict | None, str]:
+        """The published timetables.json, trusted only when its
+        timetables.json.sig verifies over its exact bytes against the
+        pinned public key (sign_manifest.PUBLIC_KEY): (it, "ok"); (None,
+        "missing") for a 404; (None, "unsigned: ...") for one without a
+        signature that verifies (the first run after signing came in has
+        none yet). Every run signs the manifest it deploys anew, with its
+        entries as they are: an unsigned one, whoever put it there, is so
+        treated as no manifest at all, and nothing of it is carried, used
+        as a baseline or taken as built. A signature that is there but
+        does not verify is read again once, with the manifest, settle
+        seconds later (Pages may serve a deploy's files a moment apart);
+        settle < 0: never. FetchError for a manifest or signature that is
+        there but does not read."""
+        why = ""
+        for attempt in (1, 2):
+            data, body, state = self.manifest(MANIFEST_NAME)
+            if data is None:
+                return None, state
+            with tempfile.TemporaryDirectory() as tmp:
+                got = self.fetch(SIG_NAME, Path(tmp) / "sig", MAX_SIG)
+                raw = (Path(tmp) / "sig").read_bytes() if got is not None else None
+            if raw is None:
+                return None, f"unsigned: no {SIG_NAME}"
+            if sign_manifest.verify_bytes(body, sign_manifest.decode_sig(raw)):
+                return data, "ok"
+            why = f"unsigned: {SIG_NAME} does not verify against the pinned public key"
+            if attempt == 2 or settle < 0:
+                break
+            print(f"{why}; reading both again in {settle:g} s")
+            time.sleep(settle)
+        return None, why
 
 
 def fetch_verified(source: Source, name: str, dest: Path, size: object, sha256: object, cap: int) -> None:
@@ -511,12 +553,12 @@ def baseline_from_live(source: Source, out: Path) -> set[str]:
     """The published indexes that verify, copied with their shapes into
     out; their names."""
     try:
-        live, _body, _state = source.manifest(MANIFEST_NAME)
+        live, state = source.timetables()
     except FetchError as err:
         print(f"published {MANIFEST_NAME}: {err}")
         return set()
     if live is None:
-        print(f"published {MANIFEST_NAME}: none")
+        print(f"published {MANIFEST_NAME}: none ({state})")
         return set()
     schema = live.get("schema")
     indexes = live.get("indexes") if isinstance(live.get("indexes"), dict) else {}
@@ -936,14 +978,20 @@ def timetables_from_part(part: Path, out: Path, schema: int) -> dict[str, dict]:
     return new
 
 
-def live_timetables(source: Source) -> dict | None:
-    """The published timetables.json; None for a 404. Raises FetchError for
-    one that is there but does not read: assemble then refuses the site.
-    Which indexes such a manifest lists cannot be told, and the cause is
-    most likely the network: dropping both indexes on that would leave
+def live_timetables(source: Source, settle: float = -1) -> dict | None:
+    """The published timetables.json; None for a 404, and for one whose
+    signature does not verify (Source.timetables, settle), with a warning:
+    nothing is carried from it, so this site's manifest, signed again,
+    never vouches for entries this workflow did not sign. Raises FetchError
+    for one that is there but does not read: assemble then refuses the
+    site. Which indexes such a manifest lists cannot be told, and the cause
+    is most likely the network: dropping both indexes on that would leave
     every install without a published index (they keep their own, but each
     next run rebuilds both), while a refusal costs only this run's deploy."""
-    live, _body, _state = source.manifest(MANIFEST_NAME)
+    live, state = source.timetables(settle)
+    if state.startswith("unsigned"):
+        print(f"::warning title=Published timetables.json not trusted::{state}; no Volán or city index is carried"
+              " over from it (the indexes built in this run are published, the next run rebuilds the others).")
     if live is not None and not isinstance(live.get("indexes"), dict):
         raise SiteError(f"the published {MANIFEST_NAME} lists no indexes")
     return live
@@ -976,7 +1024,7 @@ def timetables_from_live(source: Source, out: Path, skip: set[str], schema: int 
     it again. The MÁV files are never left out that way (mav_from_live)."""
     if skip >= set(INDEXES):
         return {}, schema
-    live = live_timetables(source)
+    live = live_timetables(source, settle)
     if live is None:
         return {}, schema
     if schema is None:
@@ -1008,7 +1056,7 @@ def timetables_from_live(source: Source, out: Path, skip: set[str], schema: int 
                 print(f"{err}; fetching the {name} index again in {settle:g} s")
                 time.sleep(settle)
                 if reread is None:
-                    reread = live_timetables(source) or {"indexes": {}}
+                    reread = live_timetables(source, settle) or {"indexes": {}}
                 entry = reread["indexes"].get(name)
                 if reread.get("schema") != schema or entry is None:
                     problem = SiteError(f"the published {name} index changed while it was fetched")
@@ -1267,8 +1315,8 @@ def main(argv: list[str]) -> int:
         ap.error(str(err))
     if args.cmd == "due":
         try:
-            live_man, _body, state = source.manifest(MANIFEST_NAME)
-            why = "HTTP 404" if state == "missing" else "ok"
+            live_man, state = source.timetables()
+            why = "HTTP 404" if state == "missing" else state
         except FetchError as err:
             live_man, why = None, str(err)
         release = None

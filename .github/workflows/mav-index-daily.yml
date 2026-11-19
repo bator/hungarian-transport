@@ -33,10 +33,13 @@ name: Daily timetables (GitHub Pages)
 # from this run's new parts and everything else carried over from the live
 # site, each file checked against its published manifest's size and sha256
 # (scripts/pages_timetables.py), and writes timetables.json, ATTRIBUTION.txt
-# and index.html for the whole site, then signs timetables.json (ed25519,
-# scripts/sign_manifest.py, the PAGES_SIGNING_KEY secret in that step only):
-# no deploy without a signature that verifies against the public key the
-# integration pins. A published Volán or city index that
+# and index.html for the whole site; the sign job then signs
+# timetables.json (ed25519, scripts/sign_manifest.py, the github-pages
+# environment's PAGES_SIGNING_KEY secret, main only): no deploy without a
+# signature that verifies against the public key the integration pins. A
+# published timetables.json whose own signature does not verify is taken
+# as none: nothing is carried from it, and both indexes are rebuilt. A
+# published Volán or city index that
 # cannot be carried is left out with a warning (installs keep theirs, the
 # next run rebuilds it). A MÁV file that cannot be carried, or a published
 # manifest that is there but does not read, stops the deploy: every
@@ -488,20 +491,56 @@ jobs:
             --live-url "$pages_url" --github-output "$GITHUB_OUTPUT" "${parts[@]}"
           if [ -d "$RUNNER_TEMP/site" ]; then ls -l "$RUNNER_TEMP/site"; fi
 
-      # timetables.json.sig: one line, base64 of the ed25519 signature over
-      # timetables.json's bytes as deployed (every deploy writes a new
-      # timetables.json, so every deploy signs it here). The integration
-      # checks it against the public key it pins before it reads the
-      # manifest. The private key (repository secret PAGES_SIGNING_KEY,
-      # base64 of the 32-byte seed) is in this step's env only; the script
-      # takes it from there, hands it to openssl on stdin and checks the
-      # signature against the pinned public key before anything is
-      # uploaded. No secret, another key, or a signature that does not
-      # verify fails the job: nothing is deployed, never an unsigned
-      # manifest. A fork without the secret deploys nothing.
-      - name: Sign the manifest
-        id: sign
+      # The sign job signs it and makes the Pages artifact. Kept 3 days, as
+      # the Pages artifact: "Re-run failed jobs" after a failed sign job
+      # finds it.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.assemble.outputs.deploy == 'true'
+        with:
+          name: pages-site
+          path: ${{ runner.temp }}/site
+          if-no-files-found: error
+          retention-days: 3
+
+  # timetables.json.sig: one line, base64 of the ed25519 signature over
+  # timetables.json's bytes as deployed (every deploy writes a new
+  # timetables.json, so every deploy signs it here). The integration checks
+  # it against the public key it pins before it reads the manifest, and the
+  # next run's site job before it carries anything over from it. The
+  # private key (PAGES_SIGNING_KEY, base64 of the 32-byte seed) is a secret
+  # of the github-pages environment, whose deployment branch policy admits
+  # only main, and this job runs only on main as well: a dispatch from
+  # another branch, or a workflow changed on one, never reaches it. In the
+  # job, only the signing step's env has it; the script hands it to openssl
+  # on stdin and checks the signature against the pinned public key. No
+  # secret, another key, or a signature that does not verify fails the job:
+  # no Pages artifact, nothing deployed, never an unsigned manifest. A fork
+  # without the secret deploys nothing. The token reads contents only, for
+  # the one script it checks out.
+  sign:
+    name: Sign the manifest
+    needs: site
+    if: ${{ !cancelled() && needs.site.result == 'success' && needs.site.outputs.deploy == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    environment:
+      name: github-pages
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/sign_manifest.py
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pages-site
+          path: ${{ runner.temp }}/site
+
+      - name: Sign the manifest
         env:
           PAGES_SIGNING_KEY: ${{ secrets.PAGES_SIGNING_KEY }}
         run: python3 scripts/sign_manifest.py sign --site "$RUNNER_TEMP/site"
@@ -510,18 +549,17 @@ jobs:
       # and "Re-run failed jobs" after a Sigstore outage finds it over a
       # weekend (after 1 day the re-run failed with "artifact not found").
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        if: steps.assemble.outputs.deploy == 'true' && steps.sign.outcome == 'success'
         with:
           path: ${{ runner.temp }}/site
           retention-days: 3
 
   deploy:
     name: Publish on GitHub Pages
-    needs: site
+    needs: sign
     # success() would also ask for the build and timetables jobs (it looks
     # at every job before this one), and the build job fails on a stale
     # MÁV index while the site may still have a new Volán or city index.
-    if: ${{ !cancelled() && needs.site.result == 'success' && needs.site.outputs.deploy == 'true' }}
+    if: ${{ !cancelled() && needs.sign.result == 'success' }}
     runs-on: ubuntu-latest
     # deploy-pages waits up to 10 minutes for the deployment itself; the
     # job's limit leaves it that and the Pages check.

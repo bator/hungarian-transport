@@ -1075,10 +1075,10 @@ check("the workflow token reads contents only",
 check("one run at a time, none cancelled half-way",
       re.search(r"^concurrency:\n  group: mav-index-daily\n  cancel-in-progress: false$", top, re.M) is not None)
 build, deploy, attest_job = job("build"), job("deploy"), job("attest")
-tt_job, site_job = job("timetables"), job("site")
+tt_job, site_job, sign_job = job("timetables"), job("site"), job("sign")
 jobs_block = TEXT.split("\njobs:\n", 1)[1]
-check("five jobs: build (MÁV), timetables, site, deploy, attest",
-      re.findall(r"^  ([\w-]+):$", jobs_block, re.M) == ["build", "timetables", "site", "deploy", "attest"],
+check("six jobs: build (MÁV), timetables, site, sign, deploy, attest",
+      re.findall(r"^  ([\w-]+):$", jobs_block, re.M) == ["build", "timetables", "site", "sign", "deploy", "attest"],
       repr(re.findall(r"^  ([\w-]+):$", jobs_block, re.M)))
 check("the build and timetables jobs run side by side, the site job after both, whatever they did (failed,"
       " timed out), unless the run is cancelled",
@@ -1094,28 +1094,35 @@ def minutes(block: str) -> int | None:
 # deploy-pages waits for the deployment up to its own timeout input, 600000
 # ms by default: a job limit of 10 minutes cut it short before it gave up.
 check("every job has a time limit, the deploy job's above deploy-pages' own 10 minutes",
-      all(minutes(b) for b in (build, tt_job, site_job, deploy, attest_job)) and minutes(deploy) >= 15
+      all(minutes(b) for b in (build, tt_job, site_job, sign_job, deploy, attest_job)) and minutes(deploy) >= 15
       and "timeout:" not in step(deploy, "actions/deploy-pages@"),
-      repr([minutes(b) for b in (build, tt_job, site_job, deploy, attest_job)]))
+      repr([minutes(b) for b in (build, tt_job, site_job, sign_job, deploy, attest_job)]))
 check("only the deploy job may write Pages, only it and the attest job mint an OIDC token",
       all("pages: write" not in b and "id-token" not in b and "permissions:" not in b
           for b in (build, tt_job, site_job)) and "pages: write" not in attest_job
+      and re.search(r"^    permissions:\n      contents: read\n    \S", sign_job, re.M) is not None
       and re.search(r"^    permissions:\n      pages: write\n      id-token: write\n    \S", deploy, re.M) is not None,
       deploy)
 # success() looks at every job before this one, and the build job fails on
 # a stale MÁV index while the site may still carry a new Volán or city index.
-check("the deploy job runs after a site job that made a site, in the github-pages environment, whatever"
-      " the build job did",
-      "    needs: site" in deploy
-      and "    if: ${{ !cancelled() && needs.site.result == 'success' && needs.site.outputs.deploy == 'true' }}"
-      in deploy and "      name: github-pages" in deploy
+check("the deploy job runs after a sign job that signed a site, in the github-pages environment, whatever"
+      " the build job did; the sign job after a site job that made one, on main only",
+      "    needs: sign" in deploy and "    if: ${{ !cancelled() && needs.sign.result == 'success' }}" in deploy
+      and "      name: github-pages" in deploy and "    needs: site" in sign_job
+      and "    if: ${{ !cancelled() && needs.site.result == 'success' && needs.site.outputs.deploy == 'true'"
+      " && github.ref == 'refs/heads/main' }}" in sign_job
       and "deploy: ${{ steps.assemble.outputs.deploy }}" in site_job, deploy)
 check("the deploy job checks out and runs nothing from the repository, and sees no MÁV secret",
       "actions/checkout" not in deploy and "secrets." not in deploy and "scripts/" not in deploy)
-upload = step(site_job, "actions/upload-pages-artifact@")
-check("only the site job makes the Pages artifact, and only a site to deploy",
-      "if: steps.assemble.outputs.deploy == 'true'" in upload and "path: ${{ runner.temp }}/site" in upload
-      and TEXT.count("actions/upload-pages-artifact@") == 1, upload)
+upload = step(sign_job, "actions/upload-pages-artifact@")
+site_up = step(site_job, "name: pages-site")
+site_dl = step(sign_job, "name: pages-site")
+check("only the sign job makes the Pages artifact, from the site the site job assembled (pages-site, only a"
+      " site to deploy, kept 3 days), after signing it",
+      "if: steps.assemble.outputs.deploy == 'true'" in site_up and "path: ${{ runner.temp }}/site" in site_up
+      and "if-no-files-found: error" in site_up and re.search(r"^ +retention-days: 3$", site_up, re.M) is not None
+      and "path: ${{ runner.temp }}/site" in site_dl and "path: ${{ runner.temp }}/site" in upload
+      and TEXT.count("actions/upload-pages-artifact@") == 1 and "upload-pages-artifact" not in site_job, upload)
 mav_up = step(build, "name: mav-part")
 tt_up = step(tt_job, "name: timetables-part")
 check("the build job hands its site to the site job as the mav-part artifact, only when it is to be deployed",
@@ -1161,9 +1168,9 @@ city_secrets = [
     "MOBILITY_DATABASE_REFRESH_TOKEN: ${{ secrets.MOBILITY_DATABASE_REFRESH_TOKEN }}",
     "TRANSITLAND_API_KEY: ${{ secrets.TRANSITLAND_API_KEY }}",
 ]
-sign_step = step(site_job, "- name: Sign the manifest")
+sign_step = step(sign_job, "- name: Sign the manifest")
 check("the MÁV secrets reach only the MÁV build step's env (and the job's yes/no flag), the city feeds'"
-      " only the timetables build step's, the signing key only the site job's signing step",
+      " only the timetables build step's, the signing key only the sign job's signing step",
       sorted(secret_lines) == sorted([
           "MAV_SECRETS: ${{ secrets.MAV_GTFS_USER != '' && secrets.MAV_GTFS_PASSWORD != '' }}",
           "MAV_GTFS_USER: ${{ secrets.MAV_GTFS_USER }}",
@@ -1172,18 +1179,25 @@ check("the MÁV secrets reach only the MÁV build step's env (and the job's yes/
           "PAGES_SIGNING_KEY: ${{ secrets.PAGES_SIGNING_KEY }}",
       ]) and "secrets.MAV_GTFS" in step(build, "- name: MÁV GTFS, pfaedle, build and audit")
       and all(ln in step(tt_job, "- name: Build the Volán and city indexes") for ln in city_secrets)
-      and "secrets." not in site_job.replace(sign_step, "") and "secrets.MAV" not in tt_job
+      and "secrets." not in site_job and "secrets." not in sign_job.replace(sign_step, "")
+      and "secrets.MAV" not in tt_job
       and re.search(r"^        env:\n          PAGES_SIGNING_KEY: \$\{\{ secrets\.PAGES_SIGNING_KEY \}\}\n        run:",
                     sign_step, re.M) is not None, repr(secret_lines))
-site_steps = [ln.strip() for ln in site_job.splitlines() if re.match(r"^      - ", ln)]
-check("every deploy signs timetables.json: the signing step runs on every site to deploy, after the assembly"
-      " and before the upload, which waits for its success; it runs the checked-out sign_manifest.py on the site",
-      "if: steps.assemble.outputs.deploy == 'true'" in sign_step
+sign_steps = [ln.strip() for ln in sign_job.splitlines() if re.match(r"^      - ", ln)]
+sign_co = step(sign_job, "actions/checkout@")
+check("every deploy signs timetables.json: the sign job, bound to the github-pages environment (whose secret"
+      " the key is, main only), checks out only sign_manifest.py without credentials, signs the downloaded site"
+      " and only then makes the Pages artifact; a failure stops the deploy",
+      re.search(r"^    environment:\n      name: github-pages\n", sign_job, re.M) is not None
+      and sign_steps == ["- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+                         "- uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2",
+                         "- name: Sign the manifest",
+                         "- uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0"]
+      and "persist-credentials: false" in sign_co and "scripts/sign_manifest.py" in sign_co
+      and "sparse-checkout-cone-mode: false" in sign_co
       and 'run: python3 scripts/sign_manifest.py sign --site "$RUNNER_TEMP/site"' in sign_step
-      and "if: steps.assemble.outputs.deploy == 'true' && steps.sign.outcome == 'success'" in upload
-      and site_steps.index("- name: Assemble the site") < site_steps.index("- name: Sign the manifest")
-      < next(i for i, ln in enumerate(site_steps) if "upload-pages-artifact" in ln)
-      and "id: sign" in sign_step and "continue-on-error" not in site_job, repr(site_steps))
+      and "if:" not in sign_step and "if:" not in upload
+      and "continue-on-error" not in sign_job, repr(sign_steps))
 release_text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 check("the timetables build reads the release's variables for the Volán URL and the city guard",
       all(v in step(tt_job, "- name: Build the Volán and city indexes") for v in (

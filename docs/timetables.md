@@ -476,17 +476,36 @@ into a site of the new one.
   signs it too): the file is one line, the base64 of the 64-byte ed25519
   signature over the exact bytes of `timetables.json` as deployed. The
   public key, which the integration pins, is
-  `QCs8j2ex1KxTRA7pHfsZ6f2SMu5jidCwy1LyvIVOd+M=` (base64 of the raw 32
-  bytes). `scripts/sign_manifest.py` signs with openssl in the `site` job,
-  from the repository secret `PAGES_SIGNING_KEY` (base64 of the raw 32-byte
-  private key), which only that one step sees, in its environment; the key
-  reaches openssl on stdin and is never printed. It checks the key against
-  the pinned public key and the signature against it before the site is
-  uploaded. Without the secret, with another key, or with a signature that
-  does not verify, the job fails and nothing is deployed: an unsigned
-  manifest is never published (so a fork without the secret deploys
-  nothing). Check a download with
+  `iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8=` (base64 of the raw 32
+  bytes; `PAGES_SIGNING_PUBLIC_KEY` in `scripts/sign_manifest.py`). The
+  workflow's `sign` job signs the site the `site` job assembled, with
+  openssl, and only then makes the Pages artifact. The private key
+  (`PAGES_SIGNING_KEY`, base64 of the raw 32-byte key) is a secret of the
+  `github-pages` environment, whose deployment branch policy admits only
+  main, and the job runs only on main: a run dispatched from another
+  branch, or a workflow changed on one, never sees it. Within the job only
+  the signing step has it, in its environment; it reaches openssl on stdin
+  and is never printed. The job's token reads contents only (it checks out
+  that one script, without credentials). The script checks the key against
+  the pinned public key and the signature against it; without the secret,
+  with another key, or with a signature that does not verify, the job fails
+  and nothing is deployed: an unsigned manifest is never published (so a
+  fork without the secret deploys nothing). Check a download with
   `python3 scripts/sign_manifest.py verify --site <folder>`.
+- **An unsigned published manifest is no manifest.** Since every deploy
+  signs its manifest anew, the workflow never trusts the published
+  `timetables.json` without its signature: the `due`, `baseline` and
+  `assemble` steps (`pages_timetables.py`) fetch `timetables.json.sig` and
+  verify it over the exact bytes fetched before they use anything of the
+  manifest. One without a signature that verifies (none yet, the first run
+  after signing came in; another key; entries changed after signing) counts
+  as no published manifest, with a warning: both indexes are due, their
+  baseline is the stable release's, and nothing is carried over from the
+  site; a run that rebuilds only one of them, or only the MÁV index,
+  publishes the site without the other, which the next run rebuilds. A
+  signature that does not verify is read again once, half a minute later,
+  as Pages may serve a deploy's files a moment apart. The MÁV files are
+  carried by `mav-index.json` as before (that manifest is not signed).
 - **No plain http.** The weekly build sets
   `HUNGARIAN_TRANSPORT_HTTPS_ONLY=1` (`scripts/gtfs_compact.py`): no feed
   comes over plain http there, not even one whose entry allows it (Miskolc,

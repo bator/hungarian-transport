@@ -33,6 +33,7 @@ sys.path.insert(0, str(HERE))
 import gtfs_compact  # noqa: E402
 import mav_pages_site  # noqa: E402
 import pages_timetables as pt  # noqa: E402
+import sign_manifest as sm  # noqa: E402
 from gtfs_feed import encode_polyline  # noqa: E402
 
 os.environ.pop("MAV_ALLOW_SHRINK", None)
@@ -41,6 +42,18 @@ NOW = datetime(2026, 11, 16, 10, 40, tzinfo=timezone.utc)
 SCHEMA = gtfs_compact.INDEX_SCHEMA
 S = str(SCHEMA)
 COMMIT = "c" * 40
+# The published manifest is trusted only with a signature by the pinned key
+# (pages_timetables Source.timetables). The tests' live sites are signed
+# with a key made here, which this process and every pages_timetables.py
+# run of the tests (run(), through TRUST_WRAP) take as the pinned one; the
+# script itself never takes another key than its constant.
+REAL_PUBLIC_KEY = sm.PUBLIC_KEY
+TEST_SEED = os.urandom(32)
+TEST_PUB = sm.public_key(TEST_SEED)
+sm.PUBLIC_KEY = TEST_PUB
+TRUST_WRAP = ("import os, sys; sys.path.insert(0, sys.argv.pop(1)); import sign_manifest;"
+              " sign_manifest.PUBLIC_KEY = bytes.fromhex(os.environ['TEST_PAGES_PUBLIC_KEY']);"
+              " import pages_timetables; raise SystemExit(pages_timetables.main(sys.argv[1:]))")
 
 failed = 0
 
@@ -82,11 +95,23 @@ def head(path: Path) -> dict:
     return json.loads(gzip.decompress(path.read_bytes()))
 
 
-def run(*args: str) -> tuple[int, str, str, dict]:
+def sign_live(folder: Path) -> None:
+    """Sign a live site's timetables.json with the tests' key, as the
+    workflow's sign job signs the one it deploys."""
+    if (folder / "timetables.json").is_file():
+        sm.sign_site(folder, TEST_SEED, TEST_PUB)
+
+
+def run(*args: str, signed: bool = True) -> tuple[int, str, str, dict]:
+    """pages_timetables.py with args, the tests' key pinned; a --live-dir
+    site is signed first (signed=False: as it is)."""
+    if signed and "--live-dir" in args:
+        sign_live(Path(args[args.index("--live-dir") + 1]))
     out_file = Path(tempfile.mkstemp(prefix="gh-out-")[1])
-    done = subprocess.run([sys.executable, str(HERE / "pages_timetables.py"), *args,
+    done = subprocess.run([sys.executable, "-c", TRUST_WRAP, str(HERE), *args,
                            *(["--github-output", str(out_file)] if args[0] in ("due", "assemble") else [])],
-                          capture_output=True, text=True, timeout=120)
+                          capture_output=True, text=True, timeout=120,
+                          env={**os.environ, "TEST_PAGES_PUBLIC_KEY": TEST_PUB.hex()})
     outputs = dict(ln.split("=", 1) for ln in out_file.read_text().splitlines() if "=" in ln)
     out_file.unlink()
     return done.returncode, done.stdout, done.stderr, outputs
@@ -447,6 +472,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
                 return pt.file_digest(dest)
             return got
 
+    sign_live(live)
     src = Settling(live)
     ns = argparse.Namespace(out=tmp / "site-settle", commit=COMMIT, mav_part=None, timetables_part=tmp / "p2",
                             max_bytes=mav_pages_site.MAX_SITE_BYTES, settle=0.0, github_output=None, schema=None)
@@ -797,6 +823,75 @@ with tempfile.TemporaryDirectory() as tmp_name:
     man_rf2 = json.loads((tmp / "site-rf2" / "timetables.json").read_text())
     check("a carried index keeps its release_feed", rc == 0 and man_rf2["indexes"] == man_rf["indexes"],
           repr((rc, out, err)))
+
+    # ---- a published manifest without a signature that verifies ----------
+    # Every deploy signs its manifest anew: one whose signature does not
+    # verify (none yet, another key, entries changed after signing) is no
+    # manifest at all, so nothing of it is signed again.
+    trusted = tmp / "site-rf"
+    sign_live(trusted)
+    variants = {}
+    for label, how in (("no timetables.json.sig (the first run after signing came in)",
+                        lambda f: (f / "timetables.json.sig").unlink()),
+                       ("a signature by another key", lambda f: sm.sign_site(f, (k := os.urandom(32)), sm.public_key(k))),
+                       ("an entry changed after signing", lambda f: (f / "timetables.json").write_text(
+                           (f / "timetables.json").read_text().replace('"trips": 6', '"trips": 7', 1))),
+                       ("a signature that is not base64", lambda f: (f / "timetables.json.sig").write_text("!!\n"))):
+        folder = tmp / f"untrusted-{len(variants)}"
+        shutil.copytree(trusted, folder)
+        how(folder)
+        variants[label] = folder
+    for label, folder in variants.items():
+        rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(folder), "--now", NOW.isoformat(),
+                                    signed=False)
+        check(f"due, the published manifest with {label}: untrusted, both due",
+              rc == 0 and outputs.get("indexes") == "volan,city" and "unsigned" in out, repr((rc, out, err)))
+        rc, out, err, _ = run("baseline", "--live-dir", str(folder), "--release-file", str(rel),
+                              "--out", str(folder.parent / (folder.name + "-base")), signed=False)
+        got = tree(folder.parent / (folder.name + "-base"))
+        check(f"baseline, the published manifest with {label}: the release's indexes, none of the site's",
+              rc == 0 and got.get("volan-index.json.gz") == volan.read_bytes()
+              and got.get("city-index.json.gz") == city.read_bytes() and "unsigned" in out, repr((rc, out)))
+        rc, out, err, outputs = run("assemble", "--out", str(folder.parent / (folder.name + "-site")), "--commit",
+                                    COMMIT, "--live-dir", str(folder), "--mav-part", str(tmp / "mav-rf" / "site"),
+                                    "--settle", "0", "--now", NOW.isoformat(), signed=False)
+        man_u = json.loads((folder.parent / (folder.name + "-site") / "timetables.json").read_text()) if rc == 0 else {}
+        check(f"assemble, the published manifest with {label}: nothing carried from it, a warning, the MÁV part"
+              " deployed", rc == 0 and outputs.get("deploy") == "true" and man_u.get("indexes") == {}
+              and "::warning title=Published timetables.json not trusted::" in out
+              and not any(n.startswith(("volan-", "city-")) for n in tree(folder.parent / (folder.name + "-site"))),
+              repr((rc, out[-600:], err)))
+    rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(trusted), "--now", NOW.isoformat())
+    check("due, the same manifest with a good signature: trusted, nothing due", rc == 0 and outputs.get("due") == "false",
+          repr((rc, out)))
+
+    class LateSig(pt.Source):
+        """Pages serving the previous deploy's .sig for a moment."""
+
+        def __init__(self, folder: Path) -> None:
+            super().__init__(folder=folder)
+            self.sigs = 0
+
+        def fetch(self, name: str, dest: Path, cap: int):
+            got = super().fetch(name, dest, cap)
+            if name == "timetables.json.sig":
+                self.sigs += 1
+                if self.sigs == 1:
+                    dest.write_bytes((variants["a signature by another key"] / name).read_bytes())
+                    return pt.file_digest(dest)
+            return got
+
+    late = LateSig(trusted)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        live_man, state = late.timetables(settle=0)
+    check("a signature that does not verify at first is read again once (settle), then trusted",
+          state == "ok" and live_man is not None and late.sigs == 2 and "reading both again" in buf.getvalue(),
+          repr((state, late.sigs)))
+    late = LateSig(trusted)
+    live_man, state = late.timetables()
+    check("without settle it is not read again: untrusted", live_man is None and state.startswith("unsigned")
+          and late.sigs == 1, repr((state, late.sigs)))
+
     attribution = (tmp / "site-rf" / "ATTRIBUTION.txt").read_text()
     check("ATTRIBUTION.txt names timetables.json.sig", "timetables.json.sig" in attribution, attribution[-400:])
 
@@ -926,8 +1021,6 @@ with tempfile.TemporaryDirectory() as tmp_name:
 # ---- timetables.json.sig ---------------------------------------------------
 import base64  # noqa: E402
 
-import sign_manifest as sm  # noqa: E402
-
 with tempfile.TemporaryDirectory() as tmp_name:
     tmp = Path(tmp_name)
     # RFC 8032, 7.1, TEST 2: the key, its public key and its signature over
@@ -942,7 +1035,8 @@ with tempfile.TemporaryDirectory() as tmp_name:
           sm.public_key(rfc_seed) == rfc_pub and sm.sign(msg, rfc_seed) == rfc_sig and sm.verify(msg, rfc_sig, rfc_pub)
           and not sm.verify(msg, rfc_sig[:-1] + b"\x01", rfc_pub))
     check("the pinned public key is the repository's (32 bytes)",
-          base64.b64encode(sm.PUBLIC_KEY).decode() == "QCs8j2ex1KxTRA7pHfsZ6f2SMu5jidCwy1LyvIVOd+M=")
+          base64.b64encode(REAL_PUBLIC_KEY).decode() == sm.PAGES_SIGNING_PUBLIC_KEY
+          == "iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8=" and len(REAL_PUBLIC_KEY) == 32)
 
     site = tmp / "site"
     site.mkdir()
@@ -954,7 +1048,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
     sig = base64.b64decode(text.strip(), validate=True)
     check("sign_site writes timetables.json.sig: one line, base64 of 64 bytes, a signature over the file's bytes",
           out == site / "timetables.json.sig" and text.endswith("\n") and text.count("\n") == 1 and len(sig) == 64
-          and sm.verify(site / "timetables.json", sig, pub) and not sm.verify(site / "timetables.json", sig))
+          and sm.verify(site / "timetables.json", sig, pub) and not sm.verify(site / "timetables.json", sig, REAL_PUBLIC_KEY))
     try:
         from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
     except ImportError:
