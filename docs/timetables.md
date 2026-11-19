@@ -420,11 +420,13 @@ this run, else the published one with its shapes, checked against the
 published `timetables.json` (the size and sha256 of every file). It deploys
 when the MÁV part or at least one of the two indexes is new. A published
 Volán or city index that cannot be carried over (a file does not download,
-or does not match, also when fetched again half a minute later) is left out
-of the new site with a warning: installs then find it not published and
+or does not match, also when fetched again once, 11 minutes after the job's
+first read of the site: Pages' CDN may serve the previous deploy's file next
+to the new manifest for up to 10 minutes, as with a signature below) is left
+out of the new site with a warning: installs then find it not published and
 keep the one they have, and the next run finds it missing and rebuilds it.
-A MÁV file that cannot be carried over, or a published manifest that is
-there but cannot be read, fails the run instead, and nothing is deployed:
+A MÁV file that cannot be carried over (fetched again the same way), or a
+published manifest that is there but cannot be read, fails the run instead, and nothing is deployed:
 every install's daily MÁV check reads those files, and the next run tries
 again. A manifest that is not there at all (404) carries nothing and is no
 failure. The `site` job runs whatever the other two jobs did (a job that
@@ -597,7 +599,11 @@ into a site of the new one.
   string or a request's `no-cache` does not get past it), so right after a
   deploy it may serve one deploy's manifest next to the other's `.sig`. One
   wait covers every manifest of the step, so the `due` step and the `site`
-  job take at most 11 minutes longer (their time limits allow for it). The same holds for
+  job take at most 11 minutes longer (their time limits allow for it; the
+  wait for a file that does not match its manifest is the same one). The
+  build job's `mav_pages_site.py` reads a `mav-index.json.sig` that does not
+  verify again the same way before it deploys the same content again for
+  it, and so does the verdict. The same holds for
   `mav-index.json`: its files are carried only when `mav-index.json.sig`
   verifies. The build job takes an unsigned one for none and publishes
   the day's index from its own build (signed) even when the content is the

@@ -54,9 +54,12 @@ os.environ.pop(mav_shrink_guard.ALLOW_ENV, None)
 # through TRUST_WRAP) takes as the pinned one.
 TEST_SEED = os.urandom(32)
 TEST_PUB = sign_manifest.public_key(TEST_SEED)
+# A .sig that does not verify is read again SIG_SETTLE_S (11 minutes) later
+# in the workflow (Pages' cache); in the tests' runs at once.
 TRUST_WRAP = ("import os, sys; sys.path.insert(0, sys.argv.pop(1)); import sign_manifest;"
               " sign_manifest.PUBLIC_KEY = bytes.fromhex(os.environ['TEST_PAGES_PUBLIC_KEY']);"
-              " import mav_pages_site; raise SystemExit(mav_pages_site.main(sys.argv[1:]))")
+              " import mav_pages_site; mav_pages_site.SIG_SETTLE_S = 0.0;"
+              " raise SystemExit(mav_pages_site.main(sys.argv[1:]))")
 
 
 def sign_file(path: Path, seed: bytes = TEST_SEED) -> Path:
@@ -257,7 +260,46 @@ with tempfile.TemporaryDirectory() as tmp_name:
         rc, out, err, outputs = run_site(tmp / f"b-unsigned-{n}", "--live-file", str(live))
         check(f"the same content as a manifest published 2 h ago, but {label}: deployed again, signed",
               rc == 0 and outputs.get("deploy") == "true" and "not trusted" in out
-              and "deploying it again, signed" in out, repr((rc, out, err, outputs)))
+              and "deploying it again, signed" in out
+              and ("reading it and its signature again" in out) == ("another key" in label or "changed" in label
+                                                                     or "base64" in label),
+              repr((rc, out, err, outputs)))
+    live.write_bytes(signed_live)
+    sign_file(live)
+    # Pages' CDN serving the previous deploy's .sig next to this manifest
+    # (each path cached on its own, up to PAGES_MAX_AGE): read again
+    # SIG_SETTLE_S later, then the same content as published, no deploy.
+    good_live_sig = live.with_name(live.name + ".sig").read_bytes()
+    site_waits: list[float] = []
+
+    def site_settled(seconds: float) -> None:
+        site_waits.append(seconds)
+        live.with_name(live.name + ".sig").write_bytes(good_live_sig)
+
+    for settle_args, want_deploy, want_waits in (((), "false", [site.SIG_SETTLE_S]),
+                                                 (("--sig-settle", "-1"), "true", [])):
+        sign_file(live, os.urandom(32))
+        site_waits.clear()
+        gh = tmp / "gh-cdn-site.txt"
+        gh.write_text("")
+        real_sleep, real_key = site.time.sleep, sign_manifest.PUBLIC_KEY
+        site.time.sleep, sign_manifest.PUBLIC_KEY = site_settled, TEST_PUB
+        out_buf = io.StringIO()
+        (tmp / "b-cdn" / "site").mkdir(parents=True, exist_ok=True)
+        try:
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(out_buf):
+                rc = site.main(["--index", str(tmp / "b" / "mav-index.json.gz"), "--stats",
+                                str(tmp / "b" / "mav-build.json"), "--commit", "a" * 40, "--out",
+                                str(tmp / "b-cdn" / "site"), "--live-file", str(live), "--github-output", str(gh),
+                                *settle_args])
+        finally:
+            site.time.sleep, sign_manifest.PUBLIC_KEY = real_sleep, real_key
+        got_deploy = dict(ln.split("=", 1) for ln in gh.read_text().splitlines() if "=" in ln).get("deploy")
+        check("the published manifest with the previous deploy's .sig at first"
+              + (": read again SIG_SETTLE_S later, the same content, no deploy" if want_waits else
+                 ", --sig-settle -1: not read again, deployed again"),
+              rc == 0 and got_deploy == want_deploy and site_waits == want_waits,
+              repr((rc, got_deploy, site_waits, out_buf.getvalue()[-500:])))
     live.write_bytes(signed_live)
     sign_file(live)
     # --live-url: the signature is the URL with .sig.

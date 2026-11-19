@@ -108,15 +108,18 @@ gtfs_compact.INDEX_SCHEMA), not this checkout's:
            (HTTP 404), exit 1 when its .sig does not verify.
            A published Volán or city index that cannot be carried (a file
            missing, or not its size and sha256 also when fetched again
-           --settle seconds later), or is of another schema than the new
+           once, as below), or is of another schema than the new
            one, is left out with a warning. Exit 1, with nothing written,
            when a MÁV file the published mav-index.json lists cannot be
            carried (every install's daily MÁV check reads it), a published
            manifest is there but does not read, or the site is over the
            size limit. A published manifest that is not there (HTTP 404)
-           has nothing to carry. A MÁV file that does not match (Pages may
-           serve a deploy's files a moment apart) is fetched again once,
-           --settle seconds later.
+           has nothing to carry. A MÁV file that does not match (Pages'
+           CDN may serve one deploy's file next to the other's manifest,
+           as with a .sig) is fetched again once, --sig-settle seconds
+           after the run's first read of the site (one wait per run, shared
+           with the signatures; --settle seconds when --sig-settle is
+           negative; never when --settle is negative).
 """
 from __future__ import annotations
 
@@ -189,7 +192,9 @@ MAX_RANGE_REQUESTS = 64
 MAX_FEED_AHEAD = mav_site.MAX_FEED_AHEAD
 FETCH_TIMEOUT = 120
 # A Volán, city or MÁV file that does not match its manifest is fetched
-# again this much later (a deploy that Pages serves only partly yet).
+# again once (assemble's --settle: negative never): SIG_SETTLE_S after the
+# first read of the site, as a signature (Source.mismatch_wait), or this
+# long with --sig-settle negative.
 SETTLE_S = 30.0
 # A manifest whose .sig does not verify is read again, with its .sig, once
 # this long after the first read of the site (Source.settle_wait): Pages'
@@ -364,6 +369,15 @@ class Source:
         once."""
         start = self.first_read if self.first_read is not None else time.monotonic()
         return max(0.0, settle - (time.monotonic() - start))
+
+    def mismatch_wait(self, settle: float, sig_settle: float) -> float:
+        """How long to wait before fetching again a file that does not match
+        its manifest (MismatchError, FetchError): the same CDN effect as a
+        signature of another deploy (a cache serving the previous deploy's
+        mav-index.json.gz next to the new mav-index.json, or the reverse),
+        so until sig_settle after the first read (settle_wait: one wait per
+        run, shared with the signatures); settle when sig_settle < 0."""
+        return settle if sig_settle < 0 else self.settle_wait(sig_settle)
 
     def signed(self, name: str, settle: float = -1) -> tuple[dict | None, bytes | None, str]:
         """The site's JSON manifest name (timetables.json, mav-index.json),
@@ -1173,10 +1187,10 @@ def timetables_from_live(source: Source, out: Path, skip: set[str], schema: int 
     left out with a warning.
 
     A published index that cannot be carried (a file missing, or not the
-    size and sha256 the manifest names, also when fetched again settle
-    seconds later with the manifest read again; its signature waits
-    sig_settle, Source.signed) is left out with a warning, not the whole
-    site: the integration then finds it not published and
+    size and sha256 the manifest names, also when fetched again with the
+    manifest read again, sig_settle after the first read of the site
+    (Source.mismatch_wait; settle < 0: never); its signature waits the same,
+    Source.signed) is left out with a warning, not the whole site: the integration then finds it not published and
     keeps its own, and the next run's due check finds it missing and builds
     it again. The MÁV files are never left out that way (mav_from_live)."""
     if skip >= set(INDEXES):
@@ -1210,8 +1224,10 @@ def timetables_from_live(source: Source, out: Path, skip: set[str], schema: int 
                 _remove_entry_files(out, entry)
                 if attempt == 2 or not isinstance(err, (MismatchError, FetchError)) or settle < 0:
                     break
-                print(f"{err}; fetching the {name} index again in {settle:g} s")
-                time.sleep(settle)
+                wait = source.mismatch_wait(settle, sig_settle)
+                print(f"{err}; fetching the {name} index again in {wait:.0f} s (GitHub Pages may still serve the"
+                      f" previous deploy's copy: it caches each file for up to {PAGES_MAX_AGE} s)")
+                time.sleep(wait)
                 if reread is None:
                     reread = live_timetables(source, sig_settle) or {"indexes": {}}
                 entry = reread["indexes"].get(name)
@@ -1370,8 +1386,10 @@ def cmd_assemble(args: argparse.Namespace, source: Source, now: datetime) -> int
         except MismatchError as err:
             if attempt == 2 or args.settle < 0:
                 return _refuse(args, err, source)
-            print(f"{err}; fetching again in {args.settle:g} s")
-            time.sleep(args.settle)
+            wait = source.mismatch_wait(args.settle, args.sig_settle)
+            print(f"{err}; fetching again in {wait:.0f} s (GitHub Pages may still serve the previous deploy's"
+                  f" copy: it caches each file for up to {PAGES_MAX_AGE} s)")
+            time.sleep(wait)
         except UnsignedMav as err:
             shutil.rmtree(args.out, ignore_errors=True)
             print(f"::warning title=GitHub Pages site not assembled::{str(err)[:300]}; nothing is deployed, the"
@@ -1511,7 +1529,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--schema", type=int, help="timetables.json's schema when it lists no index (default:"
                    " this checkout's)")
     p.add_argument("--settle", type=float, default=SETTLE_S,
-                   help="seconds before fetching a mismatched file again (negative: never)")
+                   help="seconds before fetching a mismatched file again when --sig-settle is negative"
+                   " (negative: never fetched again)")
     sig_settle(p)
     p.add_argument("--github-output", type=Path)
 
