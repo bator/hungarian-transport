@@ -148,7 +148,8 @@ class FutarFallback(Protocol):
     shape, or None when it has none; it never raises but for cancellation,
     and its request spends ticket's token when there is one. can_answer(path,
     params) says beforehand whether answer() may give one; reserve(path,
-    params) is that and the token for it, or None. timeout is the seconds
+    params) is that and the token for it (answers sent in one request may
+    share one), or None. timeout is the seconds
     answer() takes at most. learn(path, params, data) is handed every answer
     FUTÁR gives (it reads what the fallback needs later, and never raises)."""
 
@@ -310,6 +311,16 @@ async def futar_get(
     return data
 
 
+class _Callers:
+    """The callers of one request key in FutarProxy.get since its last
+    failed request, and the fallback's tokens reserved for the requests
+    they saw fail, released when the last of them is done."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.tickets: list[FallbackTicket] = []
+
+
 class FutarProxy:
     """Short-lived cache and request sharing in front of futar_get.
 
@@ -382,10 +393,10 @@ class FutarProxy:
         )
         # FUTÁR has one "unavailable / answers again" state (key None).
         self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic)
-        # Request key -> its callers still in get(), and the fallback's
-        # tokens of its failed requests that they may still spend.
-        self._waiting: dict[Hashable, int] = {}
-        self._tickets: dict[Hashable, list[FallbackTicket]] = {}
+        # Request key -> its callers in get() since its last failed request
+        # (_Callers): the callers of a failed request hold the fallback's
+        # token reserved for it until the last of them is done.
+        self._callers: dict[Hashable, _Callers] = {}
 
     async def _upstream(self, path: str, params: dict[str, str], key: Hashable) -> dict:
         started = self._monotonic()
@@ -405,12 +416,15 @@ class FutarProxy:
         try:
             data = await futar_get(self._session, self._api_key, path, params, timeout, executor=self._executor)
         except FutarError as err:
+            # The callers that saw this failure: those after it are another
+            # request's, and do not hold its token.
+            callers = self._callers.pop(key, None)
             if ticket is not None:
-                if self._waiting.get(key):
+                if callers is not None and callers.count:
                     # For get()'s fallback (every caller sharing this request
                     # sees it); the last of them to finish releases it.
                     err.fallback_ticket = ticket  # type: ignore[attr-defined]
-                    self._tickets.setdefault(key, []).append(ticket)
+                    callers.tickets.append(ticket)
                 else:
                     # Every caller has gone (cancelled): nobody falls back.
                     ticket.release()
@@ -476,8 +490,12 @@ class FutarProxy:
         key = (path, tuple(sorted(params.items())))
         # The callers of key until each is done (its fallback included): the
         # fallback's token reserved for a request goes back when the last of
-        # them is, or at once when none is left when FUTÁR fails (_upstream).
-        self._waiting[key] = self._waiting.get(key, 0) + 1
+        # the callers that saw it fail is, or at once when none is left when
+        # FUTÁR fails (_upstream).
+        callers = self._callers.get(key)
+        if callers is None:
+            callers = self._callers[key] = _Callers()
+        callers.count += 1
         try:
             try:
                 return await self._get(path, params, key)
@@ -488,11 +506,11 @@ class FutarProxy:
                     raise
                 return data
         finally:
-            left = self._waiting.pop(key) - 1
-            if left:
-                self._waiting[key] = left
-            else:
-                for ticket in self._tickets.pop(key, ()):
+            callers.count -= 1
+            if not callers.count:
+                if self._callers.get(key) is callers:
+                    del self._callers[key]
+                for ticket in callers.tickets:
                     ticket.release()
 
     async def _fall_back(
