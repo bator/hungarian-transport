@@ -2958,3 +2958,146 @@ async def test_fetch_with_a_decode_hook_keeps_its_errors(aioclient_mock) -> None
         assert set(got) == {bytearray}
     finally:
         await session.close()
+
+
+# --- The eighth review: FUTÁR failing and answering by turns.
+
+
+@pytest.mark.parametrize(("seed", "reject"), [(0, False), (1, False), (2, True)])
+async def test_a_flapping_futar_keeps_every_limit_and_logs_a_pair_per_settle(
+    make_planner, aioclient_mock, monkeypatch, caplog, seed, reject
+) -> None:
+    """FUTÁR down and up by turns every 2-8 s for ten minutes while cards
+    poll boards and trip details of 40 stops (with reject, FUTÁR rejects
+    the key while down for a minute of it, its retry shortened, and a token
+    wait moves the clock): every get() takes one FUTÁR token at most, FUTÁR
+    is sent no more requests than tokens were taken, the planner keeps its
+    promises (0.5/s with a burst of 30 in all, 0.25/s with a burst of 15 for
+    the BKK boards) over every window, no planner token is left held, no
+    caller or probe is left, the outage ends with FUTÁR answering, only
+    FutarError reaches a caller, and the log says the outage a pair of lines
+    per FUTAR_OUTAGE_LOG_SETTLE_SEC at most: 58 warnings and 58 info lines
+    in ten minutes before (review round 8)."""
+    import contextvars
+    import random
+
+    rnd = random.Random(seed)
+    call_id: contextvars.ContextVar[int | None] = contextvars.ContextVar("call_id", default=None)
+    caplog.set_level(logging.INFO, logger=futar.__name__)
+    if reject:
+        monkeypatch.setattr(futar, "REJECTED_RETRY", 120)
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter)
+    planner_times: list[float] = []
+
+    class Recording(AnyTripPlanner):
+        async def __call__(self, method, url, data):
+            planner_times.append(clock.now)
+            return await super().__call__(method, url, data)
+
+    _use(aioclient_mock, Recording())
+    t0 = clock.now
+    up = [True]
+    sends: list[int | None] = []
+
+    async def flapping(session, api_key, path, params, timeout=None, *, executor=None):
+        sends.append(call_id.get())
+        for _ in range(rnd.randint(0, 3)):
+            await asyncio.sleep(0)
+        if up[0]:
+            return {"status": "OK", "data": {"entry": {"stopTimes": []}, "references": {}}, "from": "futar"}
+        if reject and 100 <= clock.now - t0 <= 160:
+            raise futar.FutarAuthError("HTTP 401")
+        raise futar.FutarError("HTTP 503")
+
+    monkeypatch.setattr(futar, "futar_get", flapping)
+
+    async def moving_sleep(seconds: float) -> None:
+        await asyncio.sleep(0)
+        clock.now += seconds
+
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=moving_sleep if reject else clock.sleep,
+                             fallback=boards, burst=40)
+    # FUTÁR tokens taken, by the get() that took them.
+    spent: dict[int | None, int] = {}
+    take = proxy._rate._try
+
+    def counting_take() -> bool:
+        taken = take()
+        if taken:
+            spent[call_id.get()] = spent.get(call_id.get(), 0) + 1
+        return taken
+
+    proxy._rate._try = counting_take
+    tokens: list[mb._Token] = []
+    token_init = mb._Token.__init__
+
+    def recording_init(self, *args, **kwargs):
+        token_init(self, *args, **kwargs)
+        tokens.append(self)
+
+    monkeypatch.setattr(mb._Token, "__init__", recording_init)
+    errors: list[str] = []
+    calls = [0]
+
+    async def one(path: str, params: dict) -> None:
+        calls[0] += 1
+        call_id.set(calls[0])
+        try:
+            await proxy.get(path, params)
+        except futar.FutarError:
+            pass
+        except BaseException as err:  # noqa: BLE001 - any other error is the failure
+            errors.append(repr(err))
+
+    pending = []
+    flip_at = t0 + rnd.uniform(2, 8)
+    while clock.now - t0 < 600:
+        if clock.now >= flip_at:
+            up[0] = not up[0]
+            flip_at = clock.now + rnd.uniform(2, 8)
+        for _ in range(rnd.randint(0, 6)):
+            i = rnd.randrange(40)
+            if rnd.random() < 0.5:
+                request = (BOARD, dict(BOARD_PARAMS, stopId=f"BKK_F3{i:04d}", minutesAfter=rnd.choice(["30", "60"])))
+            else:
+                request = (TRIP, _trip_params(i))
+            pending.append(asyncio.ensure_future(one(*request)))
+        for _ in range(8):
+            await asyncio.sleep(0)
+        clock.now += 0.5
+    # FUTÁR up for good, the cards still polling.
+    up[0] = True
+    for _ in range(200):
+        pending.append(asyncio.ensure_future(one(BOARD, dict(BOARD_PARAMS, stopId=f"BKK_F3{rnd.randrange(40):04d}"))))
+        for _ in range(8):
+            await asyncio.sleep(0)
+        clock.now += 0.5
+    await asyncio.gather(*pending)
+    span = clock.now - t0
+
+    assert errors == []
+    assert len(sends) > 500 and planner_times
+    assert not {c: n for c, n in spent.items() if n > 1}
+    sent: dict[int | None, int] = {}
+    for c in sends:
+        sent[c] = sent.get(c, 0) + 1
+    assert not {c: n for c, n in sent.items() if n > spent.get(c, 0)}
+
+    def worst_excess(times: list[float], rate: float, burst: int) -> float:
+        times = sorted(times)
+        return max(j - i + 1 - burst - rate * (times[j] - times[i])
+                   for i in range(len(times)) for j in range(i, len(times)))
+
+    assert worst_excess(planner_times, mavplusz.PLANNER_RATE, mavplusz.PLANNER_BURST) <= 1e-9
+    assert worst_excess(planner_times, mavplusz.FALLBACK_RATE, mavplusz.FALLBACK_BURST) <= 1e-9
+    assert not [t for t in tokens if t.held]
+    assert proxy._callers == {} and not proxy._outage_probing and not proxy._probing
+    assert not proxy._outages.is_down(None) and proxy._rejected is None
+    assert (proxy._rejections > 0) is reject
+    lines = [(r.levelno, r.getMessage()) for r in caplog.records if r.name == futar.__name__
+             and ("unavailable" in r.getMessage() or "answers again" in r.getMessage())]
+    warnings = [m for level, m in lines if level == logging.WARNING]
+    assert 1 <= len(warnings) <= 1 + span // futar.FUTAR_OUTAGE_LOG_SETTLE_SEC
+    assert [level for level, _m in lines] == [logging.WARNING, logging.INFO] * len(warnings)
