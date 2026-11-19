@@ -147,186 +147,188 @@ SZEGED_STOP_NAMES = {
 # szeged: hungarian-transport.zip (sha256 530c2b0f520a4f38) and
 # szeged.zip (sha256 0cec3569bac00359, feed 20261102-20261231).
 # Feed stop id -> (the old id the index gives it, also as its stop number,
-# and the old stop's latitude, longitude).
+# and the old stop's latitude, longitude and basic modes).
 SZEGED_STOP_IDS = {
-    "SZ_1038": ("2429618792", 46.26354, 20.16418),
-    "SZ_1039": ("2429618795", 46.26435, 20.16521),
-    "SZ_1145": ("2429618808", 46.26328, 20.15115),
-    "SZ_1171": ("2429618860", 46.25922, 20.14401),
-    "SZ_1172": ("2429618856", 46.25923, 20.14457),
-    "SZ_1482": ("2429618847", 46.25651, 20.13433),
-    "SZ_1483": ("2429618844", 46.25637, 20.13496),
-    "SZ_1630": ("2431596048", 46.26666, 20.17076),
-    "SZ_1631": ("2429618937", 46.26701, 20.17082),
-    "SZ_1642": ("2429618951", 46.27228, 20.15014),
-    "SZ_1865": ("2429618986", 46.25782, 20.13087),
-    "SZ_1866": ("2429618993", 46.25784, 20.13102),
-    "SZ_1867": ("2429619001", 46.25268, 20.15159),
-    "SZ_1942": ("2429103536", 46.24492, 20.15976),
-    "SZ_1943": ("2429103537", 46.24554, 20.15923),
-    "SZ_2102": ("1103186269", 46.25917, 20.14192),
-    "SZ_2103": ("929138473", 46.25938, 20.14160),
-    "SZ_2183": ("2429619139", 46.26159, 20.15677),
-    "SZ_2289": ("2429619149", 46.25858, 20.16834),
-    "SZ_2290": ("2429619146", 46.25853, 20.16662),
-    "SZ_2678": ("2429618684", 46.26141, 20.14960),
-    "SZ_2679": ("2429618688", 46.26145, 20.15208),
-    "SZ_2682": ("1403707798", 46.26263, 20.13551),
-    "SZ_2683": ("1111400588", 46.26983, 20.15786),
-    "SZ_2684": ("904956869", 46.26958, 20.15771),
-    "SZ_2705": ("2429619035", 46.27067, 20.13971),
-    "SZ_2706": ("2429619038", 46.27080, 20.13943),
-    "SZ_2714": ("2429619158", 46.27103, 20.16448),
-    "SZ_273": ("2429618681", 46.25455, 20.14393),
-    "SZ_282": ("1403707769", 46.25598, 20.10624),
-    "SZ_283": ("2430584853", 46.25624, 20.10624),
-    "SZ_320": ("1111400526", 46.27289, 20.15931),
-    "SZ_330": ("2429618713", 46.26423, 20.16925),
-    "SZ_331": ("2429618709", 46.26360, 20.16965),
-    "SZ_405": ("1704188810", 46.26739, 20.16723),
-    "SZ_406": ("2429618730", 46.26711, 20.16711),
-    "SZ_419": ("2429619064", 46.24744, 20.14549),
-    "SZ_437": ("2429619152", 46.27020, 20.16408),
-    "SZ_560": ("1418196707", 46.25389, 20.11950),
-    "SZ_561": ("1111400613", 46.25403, 20.11694),
-    "SZ_578": ("1886954398", 46.27221, 20.14345),
-    "SZ_579": ("1886954386", 46.27221, 20.14318),
-    "SZ_62196": ("1103186211", 46.26077, 20.13892),
-    "SZ_62197": ("1103186226", 46.26061, 20.13930),
-    "SZ_62241": ("1103186207", 46.25281, 20.14944),
-    "SZ_62242": ("1103186251", 46.25265, 20.14923),
-    "SZ_62243": ("1403707874", 46.25054, 20.14774),
-    "SZ_62244": ("1403707871", 46.25035, 20.14767),
-    "SZ_62245": ("1103186283", 46.24794, 20.14703),
-    "SZ_62246": ("1103186254", 46.24772, 20.14692),
-    "SZ_62248": ("1103186260", 46.24361, 20.14391),
-    "SZ_62249": ("1103186215", 46.24336, 20.14367),
-    "SZ_62250": ("1403708073", 46.24009, 20.14116),
-    "SZ_62251": ("1099501784", 46.23993, 20.14270),
-    "SZ_62253": ("1099501779", 46.24167, 20.14242),
-    "SZ_62254": ("2429618759", 46.24986, 20.14478),
-    "SZ_62256": ("1403707920", 46.27554, 20.16430),
-    "SZ_62259": ("1111400577", 46.27241, 20.15894),
-    "SZ_62262": ("1403707911", 46.27551, 20.16471),
-    "SZ_62265": ("1111400607", 46.26397, 20.15746),
-    "SZ_62266": ("1111400548", 46.26462, 20.15749),
-    "SZ_62267": ("1111400514", 46.26186, 20.15757),
-    "SZ_62268": ("1111400578", 46.26162, 20.15752),
-    "SZ_62269": ("1403707906", 46.25908, 20.15679),
-    "SZ_62270": ("1403707903", 46.25891, 20.15677),
-    "SZ_62277": ("1403707945", 46.24854, 20.14132),
-    "SZ_62278": ("1403707935", 46.24841, 20.14108),
-    "SZ_62279": ("1403707909", 46.24621, 20.13699),
-    "SZ_62280": ("938209381", 46.24603, 20.13665),
-    "SZ_62281": ("2431596050", 46.24337, 20.13134),
-    "SZ_62282": ("1119053202", 46.24327, 20.13099),
-    "SZ_62283": ("1403707882", 46.24246, 20.12713),
-    "SZ_62284": ("1403707878", 46.24238, 20.12689),
-    "SZ_62285": ("1409624814", 46.24095, 20.12230),
-    "SZ_62286": ("1409624818", 46.24115, 20.12295),
-    "SZ_62287": ("1403707830", 46.23981, 20.11865),
-    "SZ_62288": ("1403707829", 46.23950, 20.11769),
-    "SZ_62289": ("2401194680", 46.27421, 20.14143),
-    "SZ_62290": ("1700400484", 46.26861, 20.15110),
-    "SZ_62291": ("1700400133", 46.26910, 20.15111),
-    "SZ_62296": ("2429103555", 46.24341, 20.16124),
-    "SZ_62298": ("2429618674", 46.26063, 20.12355),
-    "SZ_62299": ("2429618678", 46.26086, 20.12314),
-    "SZ_62305": ("2429619168", 46.26305, 20.15090),
-    "SZ_62306": ("2429619120", 46.25825, 20.15073),
-    "SZ_62307": ("2429619123", 46.25841, 20.15105),
-    "SZ_62309": ("2429618827", 46.24884, 20.14490),
-    "SZ_62310": ("2429618892", 46.24571, 20.14730),
-    "SZ_62311": ("2295508437", 46.27648, 20.14699),
-    "SZ_62312": ("2295509593", 46.27516, 20.15084),
-    "SZ_62313": ("2430584917", 46.27527, 20.15122),
-    "SZ_62314": ("2429619007", 46.27354, 20.15146),
-    "SZ_62315": ("2429619004", 46.27311, 20.15166),
-    "SZ_62316": ("2429618767", 46.25527, 20.15354),
-    "SZ_62320": ("2429618853", 46.25726, 20.16293),
-    "SZ_62321": ("2429618850", 46.25696, 20.16155),
-    "SZ_62326": ("1403707926", 46.25268, 20.13413),
-    "SZ_62327": ("1403707931", 46.25276, 20.13374),
-    "SZ_62328": ("904899621", 46.25335, 20.12952),
-    "SZ_62329": ("1403707852", 46.25329, 20.12980),
-    "SZ_62330": ("904899636", 46.25354, 20.12606),
-    "SZ_62331": ("1111400551", 46.25356, 20.12574),
-    "SZ_62332": ("1111400508", 46.25402, 20.11800),
-    "SZ_62338": ("1403707775", 46.25887, 20.10679),
-    "SZ_62339": ("1403707791", 46.25916, 20.10696),
-    "SZ_62340": ("1403707847", 46.26171, 20.10841),
-    "SZ_62341": ("1403707843", 46.26146, 20.10826),
-    "SZ_62342": ("1403707820", 46.26496, 20.11025),
-    "SZ_62347": ("2429618917", 46.26979, 20.13463),
-    "SZ_62348": ("2429618914", 46.26960, 20.13502),
-    "SZ_62355": ("2429103596", 46.24765, 20.15815),
-    "SZ_62356": ("2196056160", 46.24894, 20.15857),
-    "SZ_62361": ("1907917121", 46.26662, 20.13250),
-    "SZ_62362": ("1886954384", 46.26735, 20.13329),
-    "SZ_62363": ("2429619048", 46.26072, 20.16054),
-    "SZ_62364": ("2429619051", 46.26122, 20.16233),
-    "SZ_62365": ("2429618805", 46.26096, 20.15884),
-    "SZ_62366": ("2429619187", 46.26377, 20.13236),
-    "SZ_62367": ("1103186265", 46.25604, 20.14779),
-    "SZ_62368": ("1103186236", 46.25630, 20.14737),
-    "SZ_62370": ("1403707856", 46.25192, 20.13837),
-    "SZ_62371": ("1111400513", 46.25199, 20.13797),
-    "SZ_62372": ("1111400621", 46.25106, 20.14381),
-    "SZ_62373": ("410221061", 46.25609, 20.14892),
-    "SZ_62374": ("1111400623", 46.25597, 20.14842),
-    "SZ_62375": ("2429618760", 46.25142, 20.14461),
-    "SZ_62376": ("1111400632", 46.25045, 20.14453),
-    "SZ_62377": ("2429618964", 46.25686, 20.14133),
-    "SZ_62378": ("2429618966", 46.25694, 20.14178),
-    "SZ_62380": ("2429618970", 46.25614, 20.14071),
-    "SZ_62381": ("2429618928", 46.25501, 20.13852),
-    "SZ_62383": ("2429618667", 46.25896, 20.12779),
-    "SZ_62384": ("2429618670", 46.25991, 20.12572),
-    "SZ_62385": ("2429619044", 46.26921, 20.13639),
-    "SZ_62386": ("2429618658", 46.25637, 20.14916),
-    "SZ_62387": ("30766172", 46.25181, 20.14490),
-    "SZ_62388": ("2429618732", 46.26675, 20.16844),
-    "SZ_62389": ("1704188829", 46.26682, 20.16802),
-    "SZ_62394": ("2429619191", 46.27205, 20.14456),
-    "SZ_62396": ("2429619054", 46.26590, 20.15118),
-    "SZ_62397": ("2429619060", 46.26689, 20.15150),
-    "SZ_62398": ("1111400538", 46.26665, 20.15738),
-    "SZ_62399": ("904956866", 46.26639, 20.15744),
-    "SZ_62400": ("2429618946", 46.27243, 20.14717),
-    "SZ_62401": ("2429618940", 46.27152, 20.14896),
-    "SZ_62405": ("2429619129", 46.25258, 20.14870),
-    "SZ_62406": ("2429619126", 46.25241, 20.14945),
-    "SZ_62408": ("2429618663", 46.24711, 20.14707),
-    "SZ_62411": ("902426436", 46.25675, 20.15615),
-    "SZ_62412": ("1403707868", 46.25653, 20.15600),
-    "SZ_62413": ("1403707796", 46.25488, 20.14683),
-    "SZ_62414": ("1403707793", 46.25447, 20.14643),
-    "SZ_62416": ("2429618706", 46.25460, 20.14565),
-    "SZ_62418": ("1403709765", 46.26493, 20.13124),
-    "SZ_62419": ("1886954382", 46.26929, 20.13624),
-    "SZ_62420": ("1886954381", 46.26914, 20.13585),
-    "SZ_62428": ("2431596045", 46.25558, 20.14136),
-    "SZ_62438": ("2630284945", 46.26077, 20.15069),
-    "SZ_62442": ("1886954376", 46.27360, 20.14708),
-    "SZ_62443": ("1907916566", 46.27090, 20.13956),
-    "SZ_62444": ("1907916563", 46.27075, 20.13912),
-    "SZ_62445": ("2429619194", 46.27210, 20.14307),
-    "SZ_62446": ("1403707816", 46.26386, 20.10963),
-    "SZ_73799": ("2429618870", 46.25584, 20.15623),
-    "SZ_73800": ("2429618874", 46.25597, 20.15630),
-    "SZ_878": ("1103186257", 46.26281, 20.13505),
-    "SZ_989": ("2429618779", 46.26133, 20.17158),
-    "SZ_990": ("2429618776", 46.26082, 20.17132),
-    "SZ_993": ("2429618789", 46.25898, 20.17139),
-    "SZ_994": ("2429618786", 46.25855, 20.17052),
+    "SZ_1038": ("2429618792", 46.26354, 20.16418, (3, 11)),
+    "SZ_1039": ("2429618795", 46.26435, 20.16521, (3, 11)),
+    "SZ_1145": ("2429618808", 46.26328, 20.15115, (3, 11)),
+    "SZ_1171": ("2429618860", 46.25922, 20.14401, (3, 11)),
+    "SZ_1172": ("2429618856", 46.25923, 20.14457, (3, 11)),
+    "SZ_1482": ("2429618847", 46.25651, 20.13433, (11,)),
+    "SZ_1483": ("2429618844", 46.25637, 20.13496, (11,)),
+    "SZ_1630": ("2431596048", 46.26666, 20.17076, (3, 11)),
+    "SZ_1631": ("2429618937", 46.26701, 20.17082, (3, 11)),
+    "SZ_1642": ("2429618951", 46.27228, 20.15014, (3, 11)),
+    "SZ_1865": ("2429618986", 46.25782, 20.13087, (11,)),
+    "SZ_1866": ("2429618993", 46.25784, 20.13102, (11,)),
+    "SZ_1867": ("2429619001", 46.25268, 20.15159, (3, 11)),
+    "SZ_1942": ("2429103536", 46.24492, 20.15976, (3, 11)),
+    "SZ_1943": ("2429103537", 46.24554, 20.15923, (3, 11)),
+    "SZ_2102": ("1103186269", 46.25917, 20.14192, (0, 2)),
+    "SZ_2103": ("929138473", 46.25938, 20.14160, (0, 2, 3)),
+    "SZ_2183": ("2429619139", 46.26159, 20.15677, (3, 11)),
+    "SZ_2289": ("2429619149", 46.25858, 20.16834, (3, 11)),
+    "SZ_2290": ("2429619146", 46.25853, 20.16662, (3, 11)),
+    "SZ_2678": ("2429618684", 46.26141, 20.14960, (3, 11)),
+    "SZ_2679": ("2429618688", 46.26145, 20.15208, (3, 11)),
+    "SZ_2682": ("1403707798", 46.26263, 20.13551, (0, 2, 3)),
+    "SZ_2683": ("1111400588", 46.26983, 20.15786, (0,)),
+    "SZ_2684": ("904956869", 46.26958, 20.15771, (0,)),
+    "SZ_2705": ("2429619035", 46.27067, 20.13971, (3, 11)),
+    "SZ_2706": ("2429619038", 46.27080, 20.13943, (3, 11)),
+    "SZ_2714": ("2429619158", 46.27103, 20.16448, (3, 11)),
+    "SZ_273": ("2429618681", 46.25455, 20.14393, (3, 11)),
+    "SZ_282": ("1403707769", 46.25598, 20.10624, (0,)),
+    "SZ_283": ("2430584853", 46.25624, 20.10624, (0,)),
+    "SZ_320": ("1111400526", 46.27289, 20.15931, (0,)),
+    "SZ_330": ("2429618713", 46.26423, 20.16925, (3, 11)),
+    "SZ_331": ("2429618709", 46.26360, 20.16965, (3, 11)),
+    "SZ_405": ("1704188810", 46.26739, 20.16723, (3, 11)),
+    "SZ_406": ("2429618730", 46.26711, 20.16711, (3, 11)),
+    "SZ_419": ("2429619064", 46.24744, 20.14549, (3, 11)),
+    "SZ_437": ("2429619152", 46.27020, 20.16408, (11,)),
+    "SZ_560": ("1418196707", 46.25389, 20.11950, (0,)),
+    "SZ_561": ("1111400613", 46.25403, 20.11694, (0,)),
+    "SZ_578": ("1886954398", 46.27221, 20.14345, (0,)),
+    "SZ_579": ("1886954386", 46.27221, 20.14318, (0,)),
+    "SZ_62196": ("1103186211", 46.26077, 20.13892, (0, 2, 3)),
+    "SZ_62197": ("1103186226", 46.26061, 20.13930, (0, 2, 3)),
+    "SZ_62241": ("1103186207", 46.25281, 20.14944, (0, 2)),
+    "SZ_62242": ("1103186251", 46.25265, 20.14923, (0, 2)),
+    "SZ_62243": ("1403707874", 46.25054, 20.14774, (0, 2)),
+    "SZ_62244": ("1403707871", 46.25035, 20.14767, (0, 2)),
+    "SZ_62245": ("1103186283", 46.24794, 20.14703, (0, 2)),
+    "SZ_62246": ("1103186254", 46.24772, 20.14692, (0, 2)),
+    "SZ_62248": ("1103186260", 46.24361, 20.14391, (0, 2)),
+    "SZ_62249": ("1103186215", 46.24336, 20.14367, (0, 2)),
+    "SZ_62250": ("1403708073", 46.24009, 20.14116, (0, 2)),
+    "SZ_62251": ("1099501784", 46.23993, 20.14270, (0, 2)),
+    "SZ_62253": ("1099501779", 46.24167, 20.14242, (0, 2)),
+    "SZ_62254": ("2429618759", 46.24986, 20.14478, (3, 11)),
+    "SZ_62256": ("1403707920", 46.27554, 20.16430, (0,)),
+    "SZ_62259": ("1111400577", 46.27241, 20.15894, (0,)),
+    "SZ_62262": ("1403707911", 46.27551, 20.16471, (0,)),
+    "SZ_62265": ("1111400607", 46.26397, 20.15746, (0,)),
+    "SZ_62266": ("1111400548", 46.26462, 20.15749, (0,)),
+    "SZ_62267": ("1111400514", 46.26186, 20.15757, (0,)),
+    "SZ_62268": ("1111400578", 46.26162, 20.15752, (0,)),
+    "SZ_62269": ("1403707906", 46.25908, 20.15679, (0,)),
+    "SZ_62270": ("1403707903", 46.25891, 20.15677, (0,)),
+    "SZ_62277": ("1403707945", 46.24854, 20.14132, (0,)),
+    "SZ_62278": ("1403707935", 46.24841, 20.14108, (0,)),
+    "SZ_62279": ("1403707909", 46.24621, 20.13699, (0,)),
+    "SZ_62280": ("938209381", 46.24603, 20.13665, (0,)),
+    "SZ_62281": ("2431596050", 46.24337, 20.13134, (0,)),
+    "SZ_62282": ("1119053202", 46.24327, 20.13099, (0,)),
+    "SZ_62283": ("1403707882", 46.24246, 20.12713, (0,)),
+    "SZ_62284": ("1403707878", 46.24238, 20.12689, (0,)),
+    "SZ_62285": ("1409624814", 46.24095, 20.12230, (0,)),
+    "SZ_62286": ("1409624818", 46.24115, 20.12295, (0,)),
+    "SZ_62287": ("1403707830", 46.23981, 20.11865, (0,)),
+    "SZ_62288": ("1403707829", 46.23950, 20.11769, (0,)),
+    "SZ_62289": ("2401194680", 46.27421, 20.14143, (11,)),
+    "SZ_62290": ("1700400484", 46.26861, 20.15110, (11,)),
+    "SZ_62291": ("1700400133", 46.26910, 20.15111, (11,)),
+    "SZ_62296": ("2429103555", 46.24341, 20.16124, (11,)),
+    "SZ_62298": ("2429618674", 46.26063, 20.12355, (11,)),
+    "SZ_62299": ("2429618678", 46.26086, 20.12314, (11,)),
+    "SZ_62305": ("2429619168", 46.26305, 20.15090, (11,)),
+    "SZ_62306": ("2429619120", 46.25825, 20.15073, (11,)),
+    "SZ_62307": ("2429619123", 46.25841, 20.15105, (11,)),
+    "SZ_62309": ("2429618827", 46.24884, 20.14490, (3, 11)),
+    "SZ_62310": ("2429618892", 46.24571, 20.14730, (11,)),
+    "SZ_62311": ("2295508437", 46.27648, 20.14699, (11,)),
+    "SZ_62312": ("2295509593", 46.27516, 20.15084, (11,)),
+    "SZ_62313": ("2430584917", 46.27527, 20.15122, (11,)),
+    "SZ_62314": ("2429619007", 46.27354, 20.15146, (11,)),
+    "SZ_62315": ("2429619004", 46.27311, 20.15166, (11,)),
+    "SZ_62316": ("2429618767", 46.25527, 20.15354, (3, 11)),
+    "SZ_62320": ("2429618853", 46.25726, 20.16293, (11,)),
+    "SZ_62321": ("2429618850", 46.25696, 20.16155, (11,)),
+    "SZ_62326": ("1403707926", 46.25268, 20.13413, (0,)),
+    "SZ_62327": ("1403707931", 46.25276, 20.13374, (0,)),
+    "SZ_62328": ("904899621", 46.25335, 20.12952, (0,)),
+    "SZ_62329": ("1403707852", 46.25329, 20.12980, (0,)),
+    "SZ_62330": ("904899636", 46.25354, 20.12606, (0,)),
+    "SZ_62331": ("1111400551", 46.25356, 20.12574, (0,)),
+    "SZ_62332": ("1111400508", 46.25402, 20.11800, (0,)),
+    "SZ_62338": ("1403707775", 46.25887, 20.10679, (0,)),
+    "SZ_62339": ("1403707791", 46.25916, 20.10696, (0,)),
+    "SZ_62340": ("1403707847", 46.26171, 20.10841, (0,)),
+    "SZ_62341": ("1403707843", 46.26146, 20.10826, (0,)),
+    "SZ_62342": ("1403707820", 46.26496, 20.11025, (0,)),
+    "SZ_62347": ("2429618917", 46.26979, 20.13463, (11,)),
+    "SZ_62348": ("2429618914", 46.26960, 20.13502, (11,)),
+    "SZ_62355": ("2429103596", 46.24765, 20.15815, (3, 11)),
+    "SZ_62356": ("2196056160", 46.24894, 20.15857, (3, 11)),
+    "SZ_62361": ("1907917121", 46.26662, 20.13250, (0,)),
+    "SZ_62362": ("1886954384", 46.26735, 20.13329, (0,)),
+    "SZ_62363": ("2429619048", 46.26072, 20.16054, (3, 11)),
+    "SZ_62364": ("2429619051", 46.26122, 20.16233, (3, 11)),
+    "SZ_62365": ("2429618805", 46.26096, 20.15884, (3, 11)),
+    "SZ_62366": ("2429619187", 46.26377, 20.13236, (0, 2, 3)),
+    "SZ_62367": ("1103186265", 46.25604, 20.14779, (0, 2)),
+    "SZ_62368": ("1103186236", 46.25630, 20.14737, (0, 2)),
+    "SZ_62370": ("1403707856", 46.25192, 20.13837, (0,)),
+    "SZ_62371": ("1111400513", 46.25199, 20.13797, (0,)),
+    "SZ_62372": ("1111400621", 46.25106, 20.14381, (0,)),
+    "SZ_62373": ("410221061", 46.25609, 20.14892, (0, 3, 11)),
+    "SZ_62374": ("1111400623", 46.25597, 20.14842, (0, 3)),
+    "SZ_62375": ("2429618760", 46.25142, 20.14461, (3, 11)),
+    "SZ_62376": ("1111400632", 46.25045, 20.14453, (0,)),
+    "SZ_62377": ("2429618964", 46.25686, 20.14133, (3, 11)),
+    "SZ_62378": ("2429618966", 46.25694, 20.14178, (3, 11)),
+    "SZ_62380": ("2429618970", 46.25614, 20.14071, (11,)),
+    "SZ_62381": ("2429618928", 46.25501, 20.13852, (11,)),
+    "SZ_62383": ("2429618667", 46.25896, 20.12779, (11,)),
+    "SZ_62384": ("2429618670", 46.25991, 20.12572, (11,)),
+    "SZ_62385": ("2429619044", 46.26921, 20.13639, (3, 11)),
+    "SZ_62386": ("2429618658", 46.25637, 20.14916, (11,)),
+    "SZ_62387": ("30766172", 46.25181, 20.14490, (0, 3, 11)),
+    "SZ_62388": ("2429618732", 46.26675, 20.16844, (3, 11)),
+    "SZ_62389": ("1704188829", 46.26682, 20.16802, (3, 11)),
+    "SZ_62394": ("2429619191", 46.27205, 20.14456, (3, 11)),
+    "SZ_62396": ("2429619054", 46.26590, 20.15118, (3, 11)),
+    "SZ_62397": ("2429619060", 46.26689, 20.15150, (11,)),
+    "SZ_62398": ("1111400538", 46.26665, 20.15738, (0,)),
+    "SZ_62399": ("904956866", 46.26639, 20.15744, (0,)),
+    "SZ_62400": ("2429618946", 46.27243, 20.14717, (3, 11)),
+    "SZ_62401": ("2429618940", 46.27152, 20.14896, (11,)),
+    "SZ_62405": ("2429619129", 46.25258, 20.14870, (3, 11)),
+    "SZ_62406": ("2429619126", 46.25241, 20.14945, (11,)),
+    "SZ_62408": ("2429618663", 46.24711, 20.14707, (11,)),
+    "SZ_62411": ("902426436", 46.25675, 20.15615, (0, 3)),
+    "SZ_62412": ("1403707868", 46.25653, 20.15600, (0, 3)),
+    "SZ_62413": ("1403707796", 46.25488, 20.14683, (0, 11)),
+    "SZ_62414": ("1403707793", 46.25447, 20.14643, (0, 11)),
+    "SZ_62416": ("2429618706", 46.25460, 20.14565, (3, 11)),
+    "SZ_62418": ("1403709765", 46.26493, 20.13124, (0,)),
+    "SZ_62419": ("1886954382", 46.26929, 20.13624, (0,)),
+    "SZ_62420": ("1886954381", 46.26914, 20.13585, (0,)),
+    "SZ_62428": ("2431596045", 46.25558, 20.14136, (11,)),
+    "SZ_62438": ("2630284945", 46.26077, 20.15069, (11,)),
+    "SZ_62442": ("1886954376", 46.27360, 20.14708, (0,)),
+    "SZ_62443": ("1907916566", 46.27090, 20.13956, (0,)),
+    "SZ_62444": ("1907916563", 46.27075, 20.13912, (0,)),
+    "SZ_62445": ("2429619194", 46.27210, 20.14307, (3, 11)),
+    "SZ_62446": ("1403707816", 46.26386, 20.10963, (0,)),
+    "SZ_73799": ("2429618870", 46.25584, 20.15623, (11,)),
+    "SZ_73800": ("2429618874", 46.25597, 20.15630, (11,)),
+    "SZ_878": ("1103186257", 46.26281, 20.13505, (0, 2, 3)),
+    "SZ_989": ("2429618779", 46.26133, 20.17158, (3, 11)),
+    "SZ_990": ("2429618776", 46.26082, 20.17132, (3, 11)),
+    "SZ_993": ("2429618789", 46.25898, 20.17139, (3, 11)),
+    "SZ_994": ("2429618786", 46.25855, 20.17052, (3, 11)),
 }
-# Old id left over -> the feed stop it is an alias of.
+# Old id left over -> (the feed stop it is an alias of, and the old stop's
+# latitude, longitude).
 SZEGED_STOP_ALIASES = {
-    "1704188813": "SZ_2714",
-    "2429618764": "SZ_62317",
-    "2429618924": "SZ_62381",
-    "2429619154": "SZ_437",
-    "9817227564": "SZ_1867",
+    "1403707953": ("SZ_62366", 46.26359, 20.13032),
+    "1704188813": ("SZ_2714", 46.27069, 20.16461),
+    "2429618764": ("SZ_62317", 46.25478, 20.15299),
+    "2429618924": ("SZ_62381", 46.25482, 20.13882),
+    "2429619154": ("SZ_437", 46.27073, 20.16375),
+    "9817227564": ("SZ_1867", 46.25245, 20.15118),
 }
 # --- end of the szeged stop id tables ---
 
@@ -1054,91 +1056,157 @@ def guard_feeds(
 # id) would leave the cards saved with the old ids behind. Such a feed names
 # a static table in CITY_FEEDS, generated once from the last index before
 # the renumbering (scripts/stop_id_map.py): "stop_ids", feed stop id -> (the
-# old id, the old stop's latitude, longitude), ids without the feed's
-# prefix (a bare old id has no place to check). keep_stop_ids gives those
-# stops the old id and stop number back when the feed loads, unless the
-# feed's stop is more than KEEP_ID_M from the old stop's place (an id the
+# old id, the old stop's latitude, longitude, its basic modes), ids without
+# the feed's prefix (a bare old id has no place to check, one without modes
+# no mode). keep_stop_ids gives those stops the old id and stop number back
+# when the feed loads, unless the feed's stop is more than KEEP_ID_M from
+# the old stop's place or serves none of its modes (_other_stop: an id the
 # feed reused for another stop must not take over the cards saved with the
 # old one), and warns about the ones it refused and about table stops the
 # feed no longer has (a card of any version
 # matches a saved stop by the number in its id) and keeps the feed's own
 # id, which realtime feeds name the stop by, as the stop row's fourth
 # element (write_index writes it as the fifth, after the operator).
-# "stop_aliases", old id -> feed stop id, are the old ids left over (two old
-# stops that became one), written as the index's "al" (stop_aliases, read
-# by gtfs.js volanMatchStop). Neither depends on the index in place: every
+# "stop_aliases", old id -> (feed stop id, the old stop's latitude,
+# longitude), are the old ids left over (two old stops that became one),
+# written as the index's "al" (stop_aliases, read by gtfs.js
+# volanMatchStop) unless the feed's stop is more than ALIAS_KEEP_M from the
+# old stop's place. Neither depends on the index in place: every
 # build (release, weekly Pages, the local updater) gives the same stops the
 # same ids, a build without the feed loses nothing, and the tables do not
 # grow. Feeds without a table keep the feed's ids.
 # stop_id_map pairs within 50 m; a feed moving a pole a little keeps it.
+# The opposite pole of a stop is 20-40 m away: within KEEP_ID_M, so a kept
+# id must also be on a stop of a mode of the old stop's (a name check
+# would refuse the renamed stops, a fifth of the table).
 KEEP_ID_M = 60.0
+# stop_id_map makes an alias of a stop up to 150 m away (NAME_ALIAS_M, a
+# stop of the old stop's name). The build cannot tell those from the ones
+# within 50 m, so every alias gets the wider bound: what it catches is an
+# id the feed reused for a stop elsewhere, and an alias to a stop of the
+# table is also left out when that stop is refused (KEEP_ID_M, its mode).
+ALIAS_KEEP_M = 160.0
+
+
+def basic_mode(route_type: object) -> int:
+    """A GTFS route_type as its basic mode, the extended codes (700 bus, 800
+    trolleybus, 900 tram, 100 rail...) as the basic ones, so SZKT's
+    trolleybuses (800) are the old zip's (11)."""
+    rt = route_type if isinstance(route_type, int) else 3
+    if rt == 800:
+        return 11
+    for low, basic in ((100, 2), (200, 3), (400, 1), (700, 3), (900, 0), (1000, 4), (1300, 6), (1400, 7)):
+        if low <= rt < low + 100:
+            return basic
+    return rt
+
+
+def stop_modes(n: int, trips: Iterable[list]) -> list[set[int]]:
+    """The basic modes of the trips serving each of a part's n stops."""
+    out: list[set[int]] = [set() for _ in range(n)]
+    for t in trips:
+        m = basic_mode(t[4] if len(t) > 4 else 3)
+        for p in t[2]:
+            if isinstance(p, int) and 0 <= p < n:
+                out[p].add(m)
+    return out
 
 
 def _old_id(entry: str | tuple) -> str:
-    """The old id of a "stop_ids" entry: (old id, lat, lon) or a bare id."""
+    """The id of a "stop_ids" or "stop_aliases" entry: (id, lat, lon[,
+    modes]) or a bare id."""
     return entry if isinstance(entry, str) else str(entry[0])
+
+
+# The stop id table warnings printed in this build (build_city_index sets
+# it): a feed loaded twice (a new zip refused, the one in base taken) warns
+# once. None outside a build: every call warns.
+_warned: set[str] | None = None
 
 
 def _table_warning(fid: str, text: str) -> None:
     """A stop id table problem: an annotation on GitHub Actions (the
-    release and the weekly Pages build), a warn line elsewhere."""
+    release and the weekly Pages build), a warn line elsewhere; once per
+    build."""
+    if _warned is not None:
+        if f"{fid}: {text}" in _warned:
+            return
+        _warned.add(f"{fid}: {text}")
     if os.environ.get("GITHUB_ACTIONS") == "true":
         print(f"::warning title=Stop id table stale::{fid}: {text}")
     else:
         print(f"warn {fid}: {text}", file=sys.stderr)
 
 
-def _far(entry: str | tuple, g: list, i: int) -> bool:
-    """Whether stop i of a part (coordinates g) is more than KEEP_ID_M from
-    the old stop's place in its "stop_ids" entry (a bare id has none)."""
+def _too_far(entry: str | tuple, g: list, i: int, limit: float) -> bool:
+    """Whether stop i of a part (coordinates g) is more than limit from the
+    old stop's place in its table entry (a bare id has none)."""
     return (not isinstance(entry, str) and len(g) >= 2 * i + 2 and bool(g[2 * i] or g[2 * i + 1])
-            and _meters((entry[1], entry[2]), (g[2 * i] / 1e5, g[2 * i + 1] / 1e5)) > KEEP_ID_M)
+            and _meters((entry[1], entry[2]), (g[2 * i] / 1e5, g[2 * i + 1] / 1e5)) > limit)
 
 
-def _feed_aliases(parts: list[dict], feed: dict) -> tuple[dict[str, str], int, int]:
+def _other_stop(entry: str | tuple, g: list, i: int, modes: set[int]) -> bool:
+    """Whether stop i of a part (coordinates g, served by trips of modes) is
+    not the old stop of its "stop_ids" entry: more than KEEP_ID_M from its
+    place, or serving none of its modes (an entry without modes, or a stop
+    without trips, has none to compare)."""
+    old_modes = entry[3] if not isinstance(entry, str) and len(entry) > 3 else ()
+    return _too_far(entry, g, i, KEEP_ID_M) or bool(old_modes and modes and not modes & set(old_modes))
+
+
+def _feed_aliases(parts: list[dict], feed: dict) -> tuple[dict[str, str], int, int, list[str]]:
     """The feed's "stop_aliases" against parts: (old id -> the id in parts of
     the stop it is an alias of, how many are left out because their stop is
-    missing, how many because their stop is more than KEEP_ID_M from its
-    old stop's place). The stop is found by the feed's id (a row's fourth
-    element once it kept an old id), so a part carried from an earlier
-    index resolves too. One whose old id the parts have (a zip from before
-    the renumbering) is not missing: write_index leaves it out anyway."""
-    table: dict[str, str] = feed.get("stop_aliases") or {}
+    missing, how many because it is a stop of the "stop_ids" table refused
+    there (_other_stop), and the old ids left out because their stop is
+    more than ALIAS_KEEP_M from the old stop's place in the alias's
+    entry: the feed reused the id for a stop elsewhere). The stop is found
+    by the feed's id (a row's fourth element once it kept an old id), so a
+    part carried from an earlier index resolves too. One whose old id the
+    parts have (a zip from before the renumbering) is not missing:
+    write_index leaves it out anyway."""
+    table: dict[str, str | tuple] = feed.get("stop_aliases") or {}
     ids: dict[str, str | tuple] = feed.get("stop_ids") or {}
     prefix = f"{feed['id']}:"
-    at: dict[str, str] = {}
+    at: dict[str, tuple[str, list, int]] = {}
     far: set[str] = set()
     every: set[str] = set()
     for part in parts:
         if part["op_id"] != feed["id"]:
             continue
         g = part.get("g") or []
+        modes = stop_modes(len(part["s"]), part.get("t") or [])
         for i, row in enumerate(part["s"]):
             sid = str(row[3]) if len(row) > 3 and row[3] else str(row[0])
             every.update((sid, str(row[0])))
             entry = ids.get(sid.removeprefix(prefix)) if sid.startswith(prefix) else None
-            if entry is not None and _far(entry, g, i):
+            if entry is not None and _other_stop(entry, g, i, modes[i]):
                 far.add(sid)
                 continue
-            at.setdefault(sid, str(row[0]))
+            at.setdefault(sid, (str(row[0]), g, i))
     out: dict[str, str] = {}
     missing = refused = 0
-    for old, fid in table.items():
-        if prefix + fid in at:
-            out[prefix + old] = at[prefix + fid]
-        elif prefix + fid in far:
+    moved: list[str] = []
+    for old, entry in table.items():
+        fid = prefix + _old_id(entry)
+        if fid in at and _too_far(entry, at[fid][1], at[fid][2], ALIAS_KEEP_M):
+            moved.append(old)
+        elif fid in at:
+            out[prefix + old] = at[fid][0]
+        elif fid in far:
             refused += 1
         elif prefix + old not in every:
             missing += 1
-    return out, missing, refused
+    return out, missing, refused, moved
 
 
 def keep_stop_ids(parts: list[dict], feed: dict) -> int:
     """Apply feed's "stop_ids" table to its parts' stop rows, in place: a
     listed stop takes the old id and stop number and keeps the feed's id
-    as the row's fourth element, unless it is more than KEEP_ID_M from the
-    old stop's place. A stop whose old id the feed has given another stop
-    itself keeps its own. Returns how many took an old id. Warns, with
+    as the row's fourth element, unless it is not the old stop: more than
+    KEEP_ID_M from its place or of none of its modes (_other_stop). A stop
+    whose old id the feed has given another stop itself keeps its own.
+    Returns how many took an old id. Warns, with
     their count, about the refused ones and about table stops the feed has
     neither under the table's id nor under the old id (a zip from before
     the renumbering has the old ids): it renumbered again, regenerate the
@@ -1154,6 +1222,7 @@ def keep_stop_ids(parts: list[dict], feed: dict) -> int:
     kept = 0
     for part in parts:
         g = part.get("g") or []
+        modes = stop_modes(len(part["s"]), part.get("t") or [])
         for i, row in enumerate(part["s"]):
             sid = str(row[0])
             key = sid.removeprefix(prefix)
@@ -1162,14 +1231,14 @@ def keep_stop_ids(parts: list[dict], feed: dict) -> int:
                 continue
             listed.add(key)
             old = _old_id(entry)
-            if _far(entry, g, i):
+            if _other_stop(entry, g, i, modes[i]):
                 far.append(key)
                 continue
             if prefix + old not in own:
                 row[:] = [prefix + old, row[1], old, sid]
                 kept += 1
     missing = sum(1 for key, entry in table.items() if key not in listed and prefix + _old_id(entry) not in own)
-    _aliases, gone, refused = _feed_aliases(parts, feed)
+    _aliases, gone, refused, moved = _feed_aliases(parts, feed)
     n_aliases = len(feed.get("stop_aliases") or {})
     if missing or gone:
         also = f" and the stops of {gone} of its {n_aliases} stop aliases (left out)" if gone else ""
@@ -1178,8 +1247,13 @@ def keep_stop_ids(parts: list[dict], feed: dict) -> int:
     if far:
         also = f"; {refused} of its {n_aliases} stop aliases to them are left out" if refused else ""
         _table_warning(feed["id"], f"{len(far)} of the {len(table)} stops of its stop id table are more than"
-                       f" {KEEP_ID_M:.0f} m from the old stop ({', '.join(sorted(far)[:5])}) and keep the feed's"
-                       f" ids{also}; regenerate the table (scripts/stop_id_map.py)")
+                       f" {KEEP_ID_M:.0f} m from the old stop or serve none of its modes"
+                       f" ({', '.join(sorted(far)[:5])}) and keep the feed's ids{also}; regenerate the table"
+                       " (scripts/stop_id_map.py)")
+    if moved:
+        _table_warning(feed["id"], f"{len(moved)} of its {n_aliases} stop aliases are to a stop more than"
+                       f" {ALIAS_KEEP_M:.0f} m from the old stop ({', '.join(sorted(moved)[:5])}) and are left"
+                       " out; regenerate the table (scripts/stop_id_map.py)")
     return kept
 
 
@@ -1193,8 +1267,8 @@ def stop_id_counts(parts: list[dict]) -> dict[str, int]:
     kept = listed = size = dropped = 0
     for feed in CITY_FEEDS:
         if feed.get("stop_aliases") and any(part["op_id"] == feed["id"] for part in parts):
-            _aliases, gone, refused = _feed_aliases(parts, feed)
-            dropped += gone + refused
+            _aliases, gone, refused, moved = _feed_aliases(parts, feed)
+            dropped += gone + refused + len(moved)
         table: dict[str, str | tuple] = feed.get("stop_ids") or {}
         if not table:
             continue
@@ -1225,9 +1299,9 @@ def stop_aliases(parts: list[dict]) -> dict[str, str]:
     "stop_aliases" tables of CITY_FEEDS, for write_index's "al". The stop is
     found by the feed's id (a row's fourth element once it kept an old id),
     so a part carried from an earlier index (CARRY_ENV) resolves too; an
-    alias whose stop the parts lack, or whose stop is more than KEEP_ID_M
-    from its old stop's place (keep_stop_ids refused it: the feed reused
-    its id for another stop), is left out (_feed_aliases)."""
+    alias whose stop the parts lack, or whose stop is not the old one (too
+    far from its old stop's place, or keep_stop_ids refused it: the feed
+    reused its id for another stop), is left out (_feed_aliases)."""
     out: dict[str, str] = {}
     for feed in CITY_FEEDS:
         if feed.get("stop_aliases"):
@@ -1252,6 +1326,17 @@ def build_city_index(
     release's index, see collect_parts) because their own zip failed (id ->
     why); kept_ids, listed_ids, table_ids and dropped_aliases are
     stop_id_counts'."""
+    global _warned
+    # A feed loaded twice (a new zip refused) warns once.
+    outer, _warned = _warned, set()
+    try:
+        return _build_city_index(base, out, volan_zip, today=today, zips=zips, carry=carry)
+    finally:
+        _warned = outer
+
+
+def _build_city_index(base: Path, out: Path, volan_zip: Path | None, *, today: str | None,
+                      zips: dict[str, Path] | None, carry: Path | None) -> dict:
     today = today or date.today().strftime("%Y%m%d")
     # Read once for the guards: about a second on the release index. Only
     # what they need is kept while the feeds load.

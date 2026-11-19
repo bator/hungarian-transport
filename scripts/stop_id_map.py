@@ -33,8 +33,12 @@ An old stop left over (two old stops became one) is an alias of the stop
 it would have paired with, at most ALIASES_PER_STOP per stop. One with no
 stop of its mode within ALIAS_M (it moved further) is an alias of the
 nearest stop of its name and mode within NAME_ALIAS_M, while that stop has
-room. The stop id table gives each old id with the old stop's place, which
-the build checks the feed's stop against (build_city_index.KEEP_ID_M).
+room; a name here is also the same without its bracketed part and with
+"utca" and "út" alike (loose: "Vásárhelyi Pál utca" is SZKT's "Vásárhelyi
+Pál út"), a stop of the very name first. The stop id table gives each old
+id with the old stop's place and modes, which the build checks the feed's
+stop against (build_city_index.KEEP_ID_M, _other_stop); the alias table
+each alias with the old stop's place (build_city_index.ALIAS_KEEP_M).
 """
 from __future__ import annotations
 
@@ -43,6 +47,7 @@ import gzip
 import hashlib
 import io
 import json
+import re
 import sys
 import unicodedata
 import zipfile
@@ -95,31 +100,17 @@ def fold(name: str) -> str:
     return "".join(c for c in text if c.isalnum() and not unicodedata.combining(c))
 
 
-def mode(route_type: object) -> int:
-    """A GTFS route_type as its basic mode, the extended codes (700 bus, 800
-    trolleybus, 900 tram, 100 rail...) as the basic ones, so SZKT's
-    trolleybuses (800) are the old zip's (11)."""
-    rt = route_type if isinstance(route_type, int) else 3
-    if rt == 800:
-        return 11
-    for low, basic in ((100, 2), (200, 3), (400, 1), (700, 3), (900, 0), (1000, 4), (1300, 6), (1400, 7)):
-        if low <= rt < low + 100:
-            return basic
-    return rt
-
-
-def _modes(n: int, trips: Iterable[list]) -> list[set[int]]:
-    out: list[set[int]] = [set() for _ in range(n)]
-    for t in trips:
-        m = mode(t[4] if len(t) > 4 else 3)
-        for p in t[2]:
-            if isinstance(p, int) and 0 <= p < n:
-                out[p].add(m)
-    return out
+def loose(name: str) -> str:
+    """A stop name as the alias by name compares it: folded, without its
+    bracketed parts, "utca" and "út" alike (the old zip's "Vásárhelyi Pál
+    utca" is SZKT's "Vásárhelyi Pál út", its "Budapesti körút (József
+    Attila sugárút)" SZKT's "Budapesti körút")."""
+    bare = re.sub(r"\([^()]*\)", " ", name)
+    return fold(re.sub(r"(?<!\w)(?:utca|út)(?!\w)", "út", bare, flags=re.IGNORECASE))
 
 
 def _stops(rows: list, g: list, trips: list, keep: Iterable[int], prefix: str) -> list[Stop]:
-    modes = _modes(len(rows), trips)
+    modes = bci.stop_modes(len(rows), trips)
     out = []
     for i in keep:
         row = rows[i]
@@ -205,12 +196,14 @@ def pair_stops(old: list[Stop], new: list[Stop]) -> tuple[dict[str, str], dict[s
     for nid, got in to.items():
         for _name, _d, oid, _nid in sorted(got)[:ALIASES_PER_STOP]:
             aliases[oid] = nid
-    # Left over still: the nearest stop of the same name, served by a trip
-    # of a mode of the old stop's (an old stop without trips has none).
+    # Left over still: the nearest stop of the same name (loose; of the very
+    # name first), served by a trip of a mode of the old stop's (an old stop
+    # without trips has none).
     room = Counter(aliases.values())
-    named = sorted((round(d, 1), o.id, n.id) for o in lost if o.id not in taken and o.id not in aliases
-                   for d, n in _near(every, o, NAME_ALIAS_M) if o.modes & n.modes and fold(o.name) == fold(n.name))
-    for _d, oid, nid in named:
+    named = sorted((fold(o.name) != fold(n.name), round(d, 1), o.id, n.id)
+                   for o in lost if o.id not in taken and o.id not in aliases
+                   for d, n in _near(every, o, NAME_ALIAS_M) if o.modes & n.modes and loose(o.name) == loose(n.name))
+    for _exact, _d, oid, nid in named:
         if oid not in aliases and room[nid] < ALIASES_PER_STOP:
             aliases[oid] = nid
             room[nid] += 1
@@ -228,8 +221,9 @@ def read_old_index(path: Path) -> dict:
 
 def tables(old_index: Path, feed_zip: Path, feed_id: str = "szeged") -> tuple[dict, dict, str]:
     """The feed's stop id table (feed stop id -> (old id, the old stop's
-    latitude, longitude)), its alias table and the comment naming their
-    sources."""
+    latitude, longitude, its basic modes)), its alias table (old id ->
+    (feed stop id, the old stop's latitude, longitude)) and the comment
+    naming their sources."""
     if not feed_zip.is_file():
         # _load_feed would download it: the tables come from the zip named.
         raise SystemExit(f"{feed_zip}: no such zip")
@@ -244,8 +238,9 @@ def tables(old_index: Path, feed_zip: Path, feed_id: str = "szeged") -> tuple[di
     if odd:
         # keep_stop_ids gives a stop the old id as its number too.
         raise SystemExit(f"old stops whose number is not their id: {odd[:5]}")
-    at = {st.id: (st.lat, st.lon) for st in old}
-    placed = {nid: (oid, *at[oid]) for nid, oid in kept.items()}
+    at = {st.id: st for st in old}
+    placed = {nid: (oid, at[oid].lat, at[oid].lon, tuple(sorted(at[oid].modes))) for nid, oid in kept.items()}
+    placed_aliases = {oid: (nid, at[oid].lat, at[oid].lon) for oid, nid in aliases.items()}
     versions = ",".join(sorted({p.get("feed") or "?" for p in parts}))
 
     def sha(p: Path) -> str:
@@ -253,14 +248,16 @@ def tables(old_index: Path, feed_zip: Path, feed_id: str = "szeged") -> tuple[di
 
     source = (f"# {feed_id}: {old_index.name} (sha256 {sha(old_index)[:16]}) and\n"
               f"# {feed_zip.name} (sha256 {sha(feed_zip)[:16]}, feed {versions}).")
-    return placed, aliases, source
+    return placed, placed_aliases, source
 
 
 def _value(v: str | tuple) -> str:
-    """A table value as Python: an id, or (old id, latitude, longitude)."""
+    """A table value as Python: an id, or (id, latitude, longitude[, the
+    modes as a tuple])."""
     if isinstance(v, str):
         return json.dumps(v)
-    return f"({json.dumps(v[0])}, {v[1]:.5f}, {v[2]:.5f})"
+    modes = f", {tuple(v[3])!r}" if len(v) > 3 else ""
+    return f"({json.dumps(v[0])}, {v[1]:.5f}, {v[2]:.5f}{modes})"
 
 
 def render(feed_id: str, kept: dict, aliases: dict, source: str) -> str:
@@ -273,8 +270,9 @@ def render(feed_id: str, kept: dict, aliases: dict, source: str) -> str:
     name = table_name(feed_id)
     return (f"{begin}\n{source}\n"
             + table(f"{name}_STOP_IDS", kept, "Feed stop id -> (the old id the index gives it, also as its stop"
-                    " number,\n# and the old stop's latitude, longitude).")
-            + table(f"{name}_STOP_ALIASES", aliases, "Old id left over -> the feed stop it is an alias of.")
+                    " number,\n# and the old stop's latitude, longitude and basic modes).")
+            + table(f"{name}_STOP_ALIASES", aliases, "Old id left over -> (the feed stop it is an alias of, and the"
+                    " old stop's\n# latitude, longitude).")
             + f"{end}\n")
 
 
