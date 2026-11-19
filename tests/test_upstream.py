@@ -222,3 +222,92 @@ def test_ttl_and_max_entries_bound_the_outages(caplog) -> None:
     clock.now = 250
     log.answered("x", "x up")
     assert log.down == {}
+
+
+# --- OutageLog with settle: an upstream failing and answering by turns ---
+
+
+def test_settle_keeps_a_single_outage_as_without_it(caplog) -> None:
+    """One outage: its warning at once, its end at once, as without settle;
+    a failure settle seconds after the last line is warned about at once."""
+    caplog.set_level(logging.DEBUG, logger=_LOGGER.name)
+    clock = FakeClock(0.0)
+    log = upstream.OutageLog(_LOGGER, monotonic=clock.monotonic, settle=300)
+    log.failed(None, "down (%s)", 1)
+    log.failed(None, "down (%s)", 2)
+    assert log.is_down(None)
+    clock.now = 10
+    log.answered(None, "up")
+    assert not log.is_down(None)
+    clock.now = 310
+    log.failed(None, "down (%s)", 3)
+    assert [(lv, m) for lv, m in _lines(caplog) if lv > logging.DEBUG] == [
+        (logging.WARNING, "down (1)"),
+        (logging.INFO, "up"),
+        (logging.WARNING, "down (3)"),
+    ]
+
+
+def test_settle_says_an_outage_within_it_once_settle_has_passed(caplog) -> None:
+    """A failure within settle of the last line is down at once (is_down,
+    which the FUTÁR breaker reads) but said only when settle has passed and
+    it still stands, on the next call; its end is said then too."""
+    caplog.set_level(logging.INFO, logger=_LOGGER.name)
+    clock = FakeClock(0.0)
+    log = upstream.OutageLog(_LOGGER, monotonic=clock.monotonic, settle=300)
+    log.failed(None, "down (%s)", "first")
+    clock.now = 5
+    log.answered(None, "up")
+    clock.now = 20
+    log.failed(None, "down (%s)", "second")
+    assert log.is_down(None)
+    assert _lines(caplog) == [(logging.WARNING, "down (first)"), (logging.INFO, "up")]
+    clock.now = 304
+    assert log.is_down(None) and len(_lines(caplog)) == 2
+    clock.now = 305
+    assert log.is_down(None)
+    assert _lines(caplog)[2:] == [(logging.WARNING, "down (second)")]
+    clock.now = 306
+    log.answered(None, "up")
+    assert _lines(caplog)[3:] == [(logging.INFO, "up")] and not log.is_down(None)
+
+
+def test_settle_an_outage_within_it_that_ended_is_never_said(caplog) -> None:
+    caplog.set_level(logging.INFO, logger=_LOGGER.name)
+    clock = FakeClock(0.0)
+    log = upstream.OutageLog(_LOGGER, monotonic=clock.monotonic, settle=300)
+    log.failed("a", "a down")
+    log.answered("a", "a up")
+    clock.now = 100
+    log.failed("a", "a down")
+    clock.now = 101
+    log.answered("a", "a up")
+    clock.now = 1000
+    assert not log.is_down("a")
+    log.failed("b", "b down")
+    assert _lines(caplog) == [(logging.WARNING, "a down"), (logging.INFO, "a up"), (logging.WARNING, "b down")]
+
+
+def test_settle_flapping_logs_a_pair_per_settle_at_most(caplog) -> None:
+    """FUTÁR failing and answering every few seconds for ten minutes logged
+    58 warnings and 58 info lines (review round 8): with settle, a pair per
+    settle at most, alternating, the last one an end; is_down follows every
+    failure and answer meanwhile."""
+    caplog.set_level(logging.INFO, logger=_LOGGER.name)
+    clock = FakeClock(0.0)
+    log = upstream.OutageLog(_LOGGER, monotonic=clock.monotonic, settle=300)
+    up = True
+    for step in range(200):
+        clock.now = step * 3.0
+        up = not up
+        for _ in range(3):
+            if up:
+                log.answered(None, "up")
+            else:
+                log.failed(None, "down")
+        assert log.is_down(None) is (not up)
+    clock.now = 1000
+    log.answered(None, "up")
+    levels = [lv for lv, _m in _lines(caplog)]
+    assert levels.count(logging.WARNING) <= 1 + 600 // 300 + 1
+    assert levels == [logging.WARNING, logging.INFO] * (len(levels) // 2) and levels

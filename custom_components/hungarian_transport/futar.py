@@ -142,8 +142,19 @@ FUTAR_FALLBACK_SLACK_SEC = 0.5
 # answer it could not give) asks FUTÁR as before, with what is left of the
 # card's budget: nothing else could answer it. Any request sent to FUTÁR
 # meanwhile (search, route details: paths the fallback does not serve) puts
-# the next probe off as well: it asks FUTÁR all the same.
+# the next probe off as well: it asks FUTÁR all the same. So once the
+# planner's share is used up, every board and trip detail of every card goes
+# to FUTÁR with its whole budget, no probe then. They are not capped beyond
+# FUTÁR's rate limit and the card's own gate (4 to 24 calls under way per
+# dashboard): the proxy cannot tell a slow FUTÁR from a hanging one before
+# the budget runs out, and a slow one still answers them, which a cap on the
+# requests under way would refuse.
 FUTAR_OUTAGE_PROBE_SEC = 30
+# FUTÁR failing again within this long of its last "unavailable" or
+# "answers again" line is not said at once, only if it still fails after
+# that (upstream.OutageLog's settle): a FUTÁR failing every few seconds and
+# answering in between logged a pair of lines every few seconds.
+FUTAR_OUTAGE_LOG_SETTLE_SEC = 300
 # The latest a fallback's answer may come, in seconds after the card asked.
 _FALLBACK_DEADLINE_SEC = CARD_TIMEOUT_SEC - FUTAR_MARGIN_SEC + FUTAR_FALLBACK_SLACK_SEC
 
@@ -410,7 +421,7 @@ class FutarProxy:
             sleep=sleep,
         )
         # FUTÁR has one "unavailable / answers again" state (key None).
-        self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic)
+        self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic, settle=FUTAR_OUTAGE_LOG_SETTLE_SEC)
         # When a request was last sent to FUTÁR, or failed, and whether a
         # probe of its outage is under way (_fallback_first).
         self._futar_asked_at = -1e18

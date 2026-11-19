@@ -432,7 +432,26 @@ before, and the card fills the board from Transitous.
   first, cut short, the planner after it. Its answer ends the outage, and
   every request asks FUTÁR first again. What the planner cannot answer (a
   stop it lacks, its share used up, no answer from it) asks FUTÁR as
-  before, with what is left of the card's 20 s.
+  before, with what is left of the card's 20 s. So once the planner's BKK
+  share is used up, every board and trip detail of every card goes to
+  FUTÁR directly with its whole budget, as a search or route details does,
+  and no probe is needed then (each of them is one). They are not capped
+  beyond FUTÁR's own rate limit (5 a second, a burst of 400, a token waited
+  for 4 s at most) and the card's own gate (4 to 24 calls under way per
+  dashboard): until its budget runs out the integration cannot tell a slow
+  FUTÁR from a hanging one, and a slow one (10 s a board) still answers
+  them, which a cap on the calls under way would refuse.
+- **Logged once, also when it flaps.** FUTÁR's outage is one warning when
+  it starts failing and one info line when it answers again. FUTÁR failing
+  again within 5 minutes of either line is not warned about at once: a
+  FUTÁR down and up every few seconds logged a pair of lines every few
+  seconds (58 of each in ten minutes). Such a failure is warned about once
+  the 5 minutes have passed and it still stands (on the next request), and
+  its end is said only then; one that ended before is the outage said
+  before, still under way. The lines still alternate, a flapping FUTÁR logs
+  a pair every 5 minutes at most, and an outage lasting that long is said
+  5 minutes late at most. None of this waits for the log: the planner is
+  asked first from the failure on, said or not, until FUTÁR answers.
 - **The card's 20 s.** FUTÁR gets 8 s of the card's 20 s only while its
   outage stands (it failed and has not answered since; while it answers,
   no token is reserved and FUTÁR keeps its whole budget, and a request
