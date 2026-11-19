@@ -100,9 +100,16 @@ check("a code release builds every city feed afresh against the previous release
 integration = validate.split("\n  integration:\n", 1)[1].split("\n  integration-oldest:\n", 1)[0] \
     if "\n  integration:\n" in validate else ""
 shuffled = step(integration, "- name: pytest in a random order")
-check("the integration tests run a second time in a shuffled order (pytest-randomly pinned, installed only"
-      " for that step, after the ordered run; the seed in the log), on the current Home Assistant only",
-      re.search(r"pip install pytest-randomly==\d+\.\d+\.\d+$", shuffled, re.M) is not None
+random_req = (ROOT / "requirements_test_random.txt").read_text(encoding="utf-8") \
+    if (ROOT / "requirements_test_random.txt").is_file() else ""
+random_pins = [ln for ln in random_req.replace("\\\n", " ").splitlines() if ln.strip() and not ln.startswith("#")]
+check("the integration tests run a second time in a shuffled order (pytest-randomly pinned by version and"
+      " sha256, installed only for that step with --require-hashes, after the ordered run; the seed in the log),"
+      " on the current Home Assistant only",
+      re.search(r"^\s+pip install --require-hashes --no-deps -r requirements_test_random\.txt$", shuffled, re.M)
+      is not None and "pip install pytest-randomly" not in validate
+      and len(random_pins) == 1
+      and re.fullmatch(r"pytest-randomly==\d+\.\d+\.\d+(\s+--hash=sha256:[0-9a-f]{64})+\s*", random_pins[0]) is not None
       and "--randomly-seed=\"$SEED\"" in shuffled and "-p randomly" in shuffled and "echo \"pytest-randomly seed:" in shuffled
       and "SEED: ${{ github.run_id }}" in shuffled
       and integration.index("- name: pytest\n") < integration.index("- name: pytest in a random order")

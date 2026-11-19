@@ -14,8 +14,9 @@ name: Daily timetables (GitHub Pages)
 # The Volán and city indexes are timetable data too, and releases are for
 # code: the timetables job rebuilds each of them here once a week (when the
 # published one is 6 days 12 hours old or missing, or was built against
-# another release's index than the latest stable release's, its
-# release_feed; both when the manifest is missing or of another schema, or
+# another release than the latest stable one: another release_feed (the
+# release's index feed) or release_version (its tag, by which installs
+# decide); both when the manifest is missing or of another schema, or
 # the dispatch input timetables asks for it, as release.yml's does after a
 # stable release) with the release's builders and guards, and the
 # integration installs them from the same site (weekly_timetables.py, by
@@ -42,8 +43,11 @@ name: Daily timetables (GitHub Pages)
 # both indexes are rebuilt, for mav-index.json the build job publishes the
 # day's index from its own build (and without one nothing is deployed: the
 # site cannot go without the MÁV files). A .sig that is there but does not
-# verify, also read again half a minute later, turns the run red (the
-# signatures job, after the deploy that replaces it); one that is not there
+# verify, also read again with its manifest 11 minutes after the step's
+# first read of the site (Pages' CDN caches each file on its own for up to
+# 10 minutes, so right after a deploy it may pair one deploy's manifest
+# with the other's .sig: pages_timetables.py SIG_SETTLE_S), turns the run
+# red (the signatures job, after the deploy that replaces it); one that is not there
 # (404: the first run after signing came in) is a warning. A
 # published Volán or city index that
 # cannot be carried is left out with a warning (installs keep theirs, the
@@ -198,7 +202,8 @@ jobs:
       # left in its work dir for this build. An index with under half the
       # trains and lines of the published one is refused
       # (mav_shrink_guard.py); when the published manifest does not read,
-      # it is compared with the latest stable release's MÁV index instead
+      # or its signature does not verify (its counts are then anyone's), it
+      # is compared with the latest stable release's MÁV index instead
       # (fetched only then). The repository variable MAV_ALLOW_SHRINK=1
       # accepts an intended reduction.
       - name: Pages site
@@ -232,8 +237,10 @@ jobs:
 
       # No MÁV part was made (no secrets, a failed build, a refused part):
       # the site job carries the published MÁV files over. Red at once for
-      # a refused login, and when the published index is 2 days old or
-      # older; a warning otherwise.
+      # a refused login, when the published index is 2 days old or older,
+      # and when its mav-index.json.sig is not there or does not verify
+      # (read again 11 minutes later, past Pages' cache: its built_at is
+      # then anyone's); a warning otherwise.
       - name: Published index age
         if: steps.site.outputs.deploy == ''
         env:
@@ -256,10 +263,10 @@ jobs:
   timetables:
     name: Build the Volán and city indexes when due
     runs-on: ubuntu-latest
-    # Above the sum of its steps' limits (86 minutes): a job that runs out
+    # Above the sum of its steps' limits (98 minutes): a job that runs out
     # of time ends with nothing for the site job, which carries the
     # published indexes over in their place.
-    timeout-minutes: 100
+    timeout-minutes: 110
     outputs:
       built: ${{ steps.indexes.outputs.built }}
       schema: ${{ steps.due.outputs.schema }}
@@ -319,15 +326,17 @@ jobs:
       # 6 days 12 hours ago or longer, or built against another index than
       # the stable release's (its release_feed is not the feed in the head
       # of the release zip's index, read by Range requests: only the zip's
-      # directory and the heads). Both: the manifest is missing or does not
-      # read, names another schema than the stable release's, or the
-      # dispatch input asks for it. The release's feeds and its tag go to
+      # directory and the heads; or its release_version is not TAG). Both:
+      # the manifest is missing or does not read, names another schema than
+      # the stable release's, or the dispatch input asks for it. The release's feeds and its tag go to
       # the build step's part (release_feed, release_version) in
       # release-feeds.json.
       - name: Timetables due
         id: due
         if: steps.stable.outputs.tag != ''
-        timeout-minutes: 3
+        # A few seconds; up to 11 minutes more when the published
+        # timetables.json.sig does not verify (read again past Pages' cache).
+        timeout-minutes: 15
         env:
           FORCE: ${{ inputs.timetables == true }}
           TAG: ${{ steps.stable.outputs.tag }}
@@ -454,7 +463,9 @@ jobs:
     needs: [build, timetables]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # A few minutes; up to 11 more when a published manifest's .sig does not
+    # verify (read again past Pages' cache, once per run).
+    timeout-minutes: 35
     outputs:
       deploy: ${{ steps.assemble.outputs.deploy }}
       untrusted: ${{ steps.assemble.outputs.untrusted }}
@@ -616,8 +627,10 @@ jobs:
         id: deployment
 
   # Red when the site job found a published manifest whose .sig is there but
-  # does not verify against the pinned key, also read again half a minute
-  # later (edited after signing, another key, or a site that is not this
+  # does not verify against the pinned key, also read again 11 minutes
+  # after the first read (past Pages' 10-minute cache: not a manifest and a
+  # .sig of two deploys, but edited after signing, another key, or a site
+  # that is not this
   # workflow's). Nothing of it was carried, and the deploy, when there was
   # one, replaced it with a signed one; the run still fails, so that someone
   # looks. Not the site or sign job: failing there would hold back the

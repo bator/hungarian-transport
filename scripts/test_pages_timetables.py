@@ -53,9 +53,15 @@ REAL_PUBLIC_KEY = sm.PUBLIC_KEY
 TEST_SEED = os.urandom(32)
 TEST_PUB = sm.public_key(TEST_SEED)
 sm.PUBLIC_KEY = TEST_PUB
+# A signature that does not verify is read again SIG_SETTLE_S (11 minutes)
+# after the first read in the workflow (Pages' cache); in the tests' runs at
+# once (TEST_SIG_SETTLE, 0), unless a test asks otherwise.
 TRUST_WRAP = ("import os, sys; sys.path.insert(0, sys.argv.pop(1)); import sign_manifest;"
               " sign_manifest.PUBLIC_KEY = bytes.fromhex(os.environ['TEST_PAGES_PUBLIC_KEY']);"
-              " import pages_timetables; raise SystemExit(pages_timetables.main(sys.argv[1:]))")
+              " import pages_timetables; pages_timetables.SIG_SETTLE_S = float(os.environ['TEST_SIG_SETTLE']);"
+              " raise SystemExit(pages_timetables.main(sys.argv[1:]))")
+REAL_SIG_SETTLE = pt.SIG_SETTLE_S
+pt.SIG_SETTLE_S = 0.0
 
 failed = 0
 
@@ -113,7 +119,7 @@ def run(*args: str, signed: bool = True) -> tuple[int, str, str, dict]:
     done = subprocess.run([sys.executable, "-c", TRUST_WRAP, str(HERE), *args,
                            *(["--github-output", str(out_file)] if args[0] in ("due", "assemble") else [])],
                           capture_output=True, text=True, timeout=120,
-                          env={**os.environ, "TEST_PAGES_PUBLIC_KEY": TEST_PUB.hex()})
+                          env={**os.environ, "TEST_PAGES_PUBLIC_KEY": TEST_PUB.hex(), "TEST_SIG_SETTLE": "0"})
     outputs = dict(ln.split("=", 1) for ln in out_file.read_text().splitlines() if "=" in ln)
     out_file.unlink()
     return done.returncode, done.stdout, done.stderr, outputs
@@ -477,7 +483,8 @@ with tempfile.TemporaryDirectory() as tmp_name:
     sign_live(live)
     src = Settling(live)
     ns = argparse.Namespace(out=tmp / "site-settle", commit=COMMIT, mav_part=None, timetables_part=tmp / "p2",
-                            max_bytes=mav_pages_site.MAX_SITE_BYTES, settle=0.0, github_output=None, schema=None)
+                            max_bytes=mav_pages_site.MAX_SITE_BYTES, settle=0.0, sig_settle=0.0, github_output=None,
+                            schema=None)
     with contextlib.redirect_stdout(io.StringIO()) as buf:
         rc = pt.cmd_assemble(ns, src, later)
     check("a carried file that does not match at first is fetched again once, and then carried",
@@ -849,13 +856,15 @@ with tempfile.TemporaryDirectory() as tmp_name:
         pt.release_feeds = real_rf
 
     # due against the release
-    def man_with(volan_rf, city_rf, age: timedelta = timedelta(days=1)) -> dict:
+    def man_with(volan_rf, city_rf, age: timedelta = timedelta(days=1), version: str | None = None) -> dict:
         entries = {}
         for name, rf in (("volan", volan_rf), ("city", city_rf)):
             entry = {"url": pt.INDEXES[name], "feed": want[name], "built_at": pt.utc_text(NOW - age),
                      "size": 1, "sha256": "0" * 64, "shapes": None}
             if rf is not None:
                 entry["release_feed"] = rf
+                if version is not None:
+                    entry["release_version"] = version
             entries[name] = entry
         return {"format": 1, "schema": SCHEMA, "indexes": entries}
 
@@ -871,6 +880,26 @@ with tempfile.TemporaryDirectory() as tmp_name:
     ):
         got, why = pt.due(man_, "", False, NOW, SCHEMA, release)
         check(f"due against the release, {label}: {names or 'none'}", got == names and bool(why), why)
+
+    # The integration goes by release_version (weekly_timetables
+    # release_newer): a new release whose indexes have the feeds of the one
+    # before still makes both due, so that the site names it.
+    for label, man_, release, tag, names in (
+        ("the release's feeds and its tag", man_with(want["volan"], want["city"], version="v1.10.24"), want,
+         "v1.10.24", []),
+        ("the release's feeds, an older release's tag", man_with(want["volan"], want["city"], version="v1.10.23"),
+         want, "v1.10.24", ["volan", "city"]),
+        ("the release's feeds, no release_version", man_with(want["volan"], want["city"]), want, "v1.10.24",
+         ["volan", "city"]),
+        ("an older tag, but the release could not be read", man_with(want["volan"], want["city"], version="v1.10.23"),
+         None, "v1.10.24", []),
+        ("an older tag, no --release-tag", man_with(want["volan"], want["city"], version="v1.10.23"), want, None, []),
+        ("an older tag, a release without a city index",
+         man_with(want["volan"], None, version="v1.10.23"), {"volan": want["volan"]}, "v1.10.24", ["volan"]),
+    ):
+        got, why = pt.due(man_, "", False, NOW, SCHEMA, release, tag)
+        check(f"due against the release's tag, {label}: {names or 'none'}",
+              got == names and bool(why) and ("release_version, not v1.10.24" in why) == bool(names), why)
 
     live = tmp / "due-live"
     live.mkdir()
@@ -888,6 +917,15 @@ with tempfile.TemporaryDirectory() as tmp_name:
     check("the due CLI with --release-tag: the release's tag is written for part next to its feeds",
           rc == 0 and json.loads(feeds_out.read_text()) == {"indexes": want, "release": "v1.10.24"},
           repr((rc, out, err, outputs)))
+    for version, want_due in (("v1.10.23", "volan,city"), ("v1.10.24", "")):
+        tag_live = tmp / f"due-tag-live-{version}"
+        tag_live.mkdir()
+        (tag_live / "timetables.json").write_text(json.dumps(man_with(want["volan"], want["city"], version=version)))
+        rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(tag_live), "--now", NOW.isoformat(),
+                                    "--release-file", str(rel), "--release-tag", "v1.10.24")
+        check(f"the due CLI, entries of the release's feeds and release_version {version}, --release-tag v1.10.24:"
+              f" {want_due or 'nothing'} due", rc == 0 and outputs.get("indexes") == want_due
+              and outputs.get("due") == ("true" if want_due else "false"), repr((rc, out, err, outputs)))
     for bad_tag in ("v1.10.24-rev1", "1.10.24", "v1.10.24\n::error::x"):
         rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(live), "--now", NOW.isoformat(),
                                     "--release-file", str(rel), "--release-tag", bad_tag)
@@ -1006,14 +1044,17 @@ with tempfile.TemporaryDirectory() as tmp_name:
                                         "--commit", COMMIT, "--live-dir", str(folder), "--timetables-part",
                                         str(both), "--settle", "0", "--now", NOW.isoformat(), signed=False)
             check(f"assemble with both indexes new, the published manifest with {label}: deployed, untrusted"
-                  " names it all the same", rc == 0 and outputs.get("deploy") == "true"
-                  and outputs.get("untrusted") == "timetables.json", repr((rc, out[-400:], outputs)))
+                  " names it all the same, the error says the deploy replaces it",
+                  rc == 0 and outputs.get("deploy") == "true"
+                  and outputs.get("untrusted") == "timetables.json"
+                  and "and the deploy replaces it with a signed one." in out, repr((rc, out[-400:], outputs)))
             rc, out, err, outputs = run("assemble", "--out", str(folder.parent / (folder.name + "-site3")),
                                         "--commit", COMMIT, "--live-dir", str(folder), "--settle", "0",
                                         "--now", NOW.isoformat(), signed=False)
             check(f"assemble with nothing new, the published manifest with {label}: nothing deployed, untrusted"
-                  " names it", rc == 0 and outputs.get("deploy") == "false"
-                  and outputs.get("untrusted") == "timetables.json", repr((rc, out[-400:], outputs)))
+                  " names it, the error says nothing replaces it in this run", rc == 0 and outputs.get("deploy") == "false"
+                  and outputs.get("untrusted") == "timetables.json" and "this run deploys nothing" in out
+                  and "the deploy replaces it" not in out, repr((rc, out[-400:], outputs)))
     rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(trusted), "--now", NOW.isoformat())
     check("due, the same manifest with a good signature: trusted, nothing due", rc == 0 and outputs.get("due") == "false",
           repr((rc, out)))
@@ -1123,6 +1164,130 @@ with tempfile.TemporaryDirectory() as tmp_name:
           got_man is not None and late_mav.sigs == 2 and late_mav.states.get("mav-index.json") == "ok"
           and (tmp / "late-mav" / "mav-index.json").read_bytes() == (mav_live / "mav-index.json").read_bytes(),
           repr((late_mav.sigs, late_mav.states)))
+
+    # ---- Pages' CDN: one deploy's manifest next to the other's .sig ----
+    # Fastly caches each path on its own for up to PAGES_MAX_AGE (600 s),
+    # keyed on the path alone: after a deploy, a cache that took the .sig
+    # files before it serves them for up to ten minutes next to the new
+    # manifests. gen1: the site before the deploy (mav_live); gen2: the
+    # deploy (a new MÁV index, the indexes carried), signed.
+    gen2 = tmp / "cdn-gen2"
+    rc, out, err, _ = run("assemble", "--out", str(gen2), "--commit", COMMIT, "--live-dir", str(mav_live),
+                          "--mav-part", str(mav_part(tmp / "mav-gen2", feed="20261102.M2ChangeID")),
+                          "--settle", "0", "--now", (NOW + timedelta(hours=3)).isoformat())
+    sign_live(gen2)
+    check("the CDN fixture: two signed generations whose manifests and signatures all differ",
+          rc == 0 and all((gen2 / n).read_bytes() != (mav_live / n).read_bytes()
+                          for n in ("mav-index.json", "mav-index.json.sig", "timetables.json", "timetables.json.sig")),
+          repr((rc, out[-400:], err)))
+
+    class Clock:
+        """time.monotonic and time.sleep of pages_timetables, a sleep moving
+        the clock on at once."""
+
+        def __init__(self) -> None:
+            self.now = 1000.0
+            self.sleeps: list[float] = []
+
+        def monotonic(self) -> float:
+            return self.now
+
+        def sleep(self, seconds: float) -> None:
+            self.sleeps.append(seconds)
+            self.now += seconds
+
+    class Cdn(pt.Source):
+        """gen2 as Pages serves it right after its deploy: the paths in
+        stale come from gen1 (cached before the deploy) until the clock
+        reaches expires; every other path is gen2's. Each read takes a
+        second."""
+
+        def __init__(self, clock: Clock, stale: set[str], expires: float) -> None:
+            super().__init__(folder=gen2)
+            self.clock, self.stale, self.expires = clock, stale, expires
+
+        def fetch(self, name: str, dest: Path, cap: int):
+            got = super().fetch(name, dest, cap)
+            if name in self.stale and self.clock.now < self.expires:
+                shutil.copyfile(mav_live / name, dest)
+                got = pt.file_digest(dest)
+            self.clock.now += 1
+            return got
+
+    def cdn_main(argv: list[str], stale: set[str], sig_settle: float | None = None) -> tuple[int, str, dict, Clock]:
+        """pages_timetables.main against Cdn: the first read at 1000 s, the
+        stale copies expiring at 1595 s (cached 5 s before the deploy, which
+        was over before the first read)."""
+        clock = Clock()
+        cdn = Cdn(clock, stale, clock.now + pt.PAGES_MAX_AGE - 5)
+        gh_out = tmp / "gh-cdn.txt"
+        gh_out.write_text("")
+        real = (pt.time.monotonic, pt.time.sleep, pt._source, pt.SIG_SETTLE_S)
+        pt.time.monotonic, pt.time.sleep, pt._source, pt.SIG_SETTLE_S = clock.monotonic, clock.sleep, \
+            (lambda _args: cdn), REAL_SIG_SETTLE
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc_ = pt.main([*argv, "--github-output", str(gh_out),
+                               *([] if sig_settle is None else ["--sig-settle", str(sig_settle)])])
+        finally:
+            pt.time.monotonic, pt.time.sleep, pt._source, pt.SIG_SETTLE_S = real
+        outputs_ = dict(ln.split("=", 1) for ln in gh_out.read_text().splitlines() if "=" in ln)
+        return rc_, buf.getvalue(), outputs_, clock
+
+    sigs = {"mav-index.json.sig", "timetables.json.sig"}
+    check("SIG_SETTLE_S is Pages' cache age and a minute", REAL_SIG_SETTLE == pt.PAGES_MAX_AGE + 60 == 660,
+          repr(REAL_SIG_SETTLE))
+    cdn_site = tmp / "cdn-site"
+    asm = ["assemble", "--out", str(cdn_site), "--commit", COMMIT, "--live-dir", str(gen2), "--timetables-part",
+           str(tmp / "p-rf"), "--settle", "0", "--now", (NOW + timedelta(hours=4)).isoformat()]
+    for stale, what in ((sigs, "the previous deploy's .sig files next to the new manifests"),
+                        ({"mav-index.json", "timetables.json"}, "the previous deploy's manifests next to the new .sig"
+                                                                 " files")):
+        rc, out, outputs, clock = cdn_main(asm, stale)
+        check(f"assemble right after a deploy, Pages serving {what}: read again once, SIG_SETTLE_S after the first"
+              " read (past the cache), then trusted: the new MÁV files carried, deployed, nothing untrusted",
+              rc == 0 and outputs.get("deploy") == "true" and outputs.get("untrusted") == ""
+              and len(clock.sleeps) == 1 and abs(sum(clock.sleeps) + 3 - REAL_SIG_SETTLE) <= 3
+              and (cdn_site / "mav-index.json").read_bytes() == (gen2 / "mav-index.json").read_bytes(),
+              repr((rc, outputs, clock.sleeps, out[-600:])))
+    rc, out, outputs, clock = cdn_main(asm, sigs, sig_settle=30)
+    check("the same with the half minute signed() waited before: still the previous .sig, refused (exit 1),"
+          " untrusted names mav-index.json", rc == 1 and outputs.get("untrusted") == "mav-index.json"
+          and len(clock.sleeps) == 1 and 25 <= clock.sleeps[0] <= 30, repr((rc, outputs, clock.sleeps)))
+    rc, out, outputs, clock = cdn_main(["assemble", "--out", str(tmp / "cdn-none"), "--commit", COMMIT,
+                                        "--live-dir", str(gen2), "--settle", "0"], sigs)
+    check("assemble with nothing new right after a deploy: one wait covers both manifests (the second one, read"
+          " after it, verifies at once), nothing untrusted",
+          rc == 0 and outputs.get("deploy") == "false" and outputs.get("untrusted") == ""
+          and len(clock.sleeps) == 1 and out.count("reading both again") == 1, repr((rc, outputs, clock.sleeps)))
+    # A manifest whose .sig does not verify after the one wait (a stale copy
+    # put in by hand here: a cache could not have one by then) is read
+    # again without waiting again.
+    clock = Clock()
+    cdn = Cdn(clock, sigs, clock.now + pt.PAGES_MAX_AGE - 5)
+    real = (pt.time.monotonic, pt.time.sleep)
+    pt.time.monotonic, pt.time.sleep = clock.monotonic, clock.sleep
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            first = cdn.signed("mav-index.json", REAL_SIG_SETTLE)[2]
+            cdn.stale.add("timetables.json.sig")
+            cdn.expires = clock.now + 30
+            second = cdn.signed("timetables.json", REAL_SIG_SETTLE)[2]
+    finally:
+        pt.time.monotonic, pt.time.sleep = real
+    check("a second manifest that does not verify after the wait is read again at once, no second wait (no"
+          " cached copy of before the deploy is left by then: its .sig is bad)",
+          first == "ok" and pt.bad_signature(second) and len(clock.sleeps) == 2 and clock.sleeps[1] == 0.0,
+          repr((first, second, clock.sleeps)))
+    due_args = ["due", "--schema", S, "--live-dir", str(gen2), "--now", (NOW + timedelta(hours=4)).isoformat()]
+    rc, out, outputs, clock = cdn_main(due_args, sigs)
+    rc_ok, out_ok, outputs_ok, _ = cdn_main(due_args, set())
+    check("due right after a deploy, Pages serving the previous timetables.json.sig: read again past the cache,"
+          " due as with both of one deploy (not both for an untrusted manifest)",
+          rc == 0 and outputs == outputs_ok and "bad signature" not in out.splitlines()[-3]
+          and len(clock.sleeps) == 1 and outputs.get("indexes") != "volan,city",
+          repr((rc, outputs, outputs_ok, clock.sleeps, out[-400:])))
 
     attribution = (tmp / "site-rf" / "ATTRIBUTION.txt").read_text()
     check("ATTRIBUTION.txt names timetables.json.sig", "timetables.json.sig" in attribution, attribution[-400:])

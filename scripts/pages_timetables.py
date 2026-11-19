@@ -34,7 +34,12 @@ taken as a baseline or as built) only when its timetables.json.sig verifies
 over its exact bytes against the pinned public key (Source.signed,
 sign_manifest.py); one that does not is taken as no manifest at all, so a
 site job never signs again entries this workflow did not sign. The same
-holds for mav-index.json and its mav-index.json.sig (mav_from_live).
+holds for mav-index.json and its mav-index.json.sig (mav_from_live). A
+.sig that does not verify is first read again with its manifest, once,
+--sig-settle seconds (SIG_SETTLE_S, 660) after the run's first read of the
+site: GitHub Pages' CDN caches each file on its own for up to ten minutes,
+so right after a deploy it may serve one deploy's manifest next to the
+other's .sig (PAGES_MAX_AGE).
 
 Subcommands (every --live-url is the site's https base URL; --live-dir a
 local folder in its place, for tests and the PR check). --schema is the
@@ -44,7 +49,8 @@ gtfs_compact.INDEX_SCHEMA), not this checkout's:
 
   due      (--live-url URL | --live-dir DIR) --schema N [--force true|false]
            [--release-url URL | --release-file ZIP] [--release-out FILE]
-           [--release-tag vX.Y.Z] [--now ISO] [--github-output FILE]
+           [--release-tag vX.Y.Z] [--sig-settle SECONDS] [--now ISO]
+           [--github-output FILE]
            Prints due=true|false and indexes=NAME,... (the due ones). Both
            are due when the published timetables.json is missing or does
            not read, names another format or a schema other than N, and
@@ -54,7 +60,12 @@ gtfs_compact.INDEX_SCHEMA), not this checkout's:
            release's index of its name (the latest stable release's
            frontend zip, of which only the zip's directory and the heads
            of its indexes are read; a release that cannot be read leaves
-           this rule out with a warning, whatever it raised). --release-out:
+           this rule out with a warning, whatever it raised), or another
+           release_version than --release-tag (that release's tag: the
+           integration compares its own version with release_version,
+           weekly_timetables.release_newer, so an index built against an
+           older release with the same feeds still holds a release's
+           installs back). --release-out:
            those feeds as JSON, {"indexes": {name: feed}}, for part, with
            "release": --release-tag when the feeds were read.
   baseline (--live-url URL | --live-dir DIR) [--release-url URL |
@@ -76,7 +87,8 @@ gtfs_compact.INDEX_SCHEMA), not this checkout's:
            when the content (index_digest.py) is the baseline's.
   assemble --out SITE --commit SHA (--live-url URL | --live-dir DIR)
            [--mav-part DIR] [--timetables-part DIR] [--schema N]
-           [--max-bytes N] [--now ISO] [--settle SECONDS] [--github-output FILE]
+           [--max-bytes N] [--now ISO] [--settle SECONDS]
+           [--sig-settle SECONDS] [--github-output FILE]
            Writes the whole site: the MÁV files from --mav-part (this run's
            mav_pages_site.py output), else every file the published
            mav-index.json names, carried; each index of --timetables-part,
@@ -87,7 +99,8 @@ gtfs_compact.INDEX_SCHEMA), not this checkout's:
            when the MÁV part or at least one index is new; and
            untrusted=NAME,...: the published manifests (timetables.json,
            mav-index.json) whose .sig is there but does not verify, also
-           read again --settle seconds later, whether this run needed them
+           read again --sig-settle seconds after the run's first read of the
+           site, whether this run needed them
            or not (the workflow's signatures job fails the run on them,
            after the deploy). Nothing is carried from a manifest without a
            .sig that verifies; with no --mav-part, an untrusted
@@ -175,7 +188,17 @@ MAX_RANGE_REQUESTS = 64
 # the same limit.
 MAX_FEED_AHEAD = mav_site.MAX_FEED_AHEAD
 FETCH_TIMEOUT = 120
+# A Volán, city or MÁV file that does not match its manifest is fetched
+# again this much later (a deploy that Pages serves only partly yet).
 SETTLE_S = 30.0
+# A manifest whose .sig does not verify is read again, with its .sig, once
+# this long after the first read of the site (Source.settle_wait): Pages'
+# CDN caches each path on its own for up to PAGES_MAX_AGE, so the previous
+# deploy's .sig may be served next to the new manifest, or the reverse
+# (mav_pages_site.SIG_SETTLE_S says more). due and assemble take it as
+# their --sig-settle default; the tests set it to 0.
+PAGES_MAX_AGE = mav_site.PAGES_MAX_AGE
+SIG_SETTLE_S = float(mav_site.SIG_SETTLE_S)
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
 # A stable release's tag, as GitHub names it (release.yml's latest_stable).
 RELEASE_TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
@@ -266,6 +289,8 @@ class Source:
         self.folder = folder
         # Manifest name -> the last state signed() found for it.
         self.states: dict[str, str] = {}
+        # time.monotonic() of the first fetch from the site (settle_wait).
+        self.first_read: float | None = None
 
     def describe(self, name: str) -> str:
         return f"{self.url}{name}" if self.url is not None else str(self.folder / name)
@@ -274,6 +299,8 @@ class Source:
         """Copy the site's file name to dest, at most cap bytes; its (size,
         sha256), or None when the site has no such file (HTTP 404). Raises
         FetchError for anything else."""
+        if self.first_read is None:
+            self.first_read = time.monotonic()
         dest.parent.mkdir(parents=True, exist_ok=True)
         if self.folder is not None:
             src = self.folder / name
@@ -325,6 +352,19 @@ class Source:
             raise FetchError(f"{name} is not a JSON object")
         return data, body, "ok"
 
+    def settle_wait(self, settle: float) -> float:
+        """How long to wait before reading a manifest and its .sig again
+        (signed): until settle seconds after this source's first read. A
+        copy of the previous deploy that a cache serves was cached before
+        that deploy, which was over before this run's first read (the
+        workflow's concurrency group runs one run at a time, and this run
+        deploys only after it assembled), so it has expired PAGES_MAX_AGE
+        after that read at the latest. One wait so covers every manifest a
+        run reads: a second one that does not verify is read again at
+        once."""
+        start = self.first_read if self.first_read is not None else time.monotonic()
+        return max(0.0, settle - (time.monotonic() - start))
+
     def signed(self, name: str, settle: float = -1) -> tuple[dict | None, bytes | None, str]:
         """The site's JSON manifest name (timetables.json, mav-index.json),
         trusted only when name.sig verifies over its exact bytes against
@@ -333,13 +373,17 @@ class Source:
         ...") for one without a .sig (HTTP 404: the first run after signing
         came in has none yet); (None, None, "bad signature: ...") for one
         whose .sig is there but does not verify, also when both are read
-        again once, settle seconds later (Pages may serve a deploy's files
-        a moment apart; settle < 0: never). Every run signs the manifests
-        it deploys anew: an unsigned one, whoever put it there, is so
-        treated as no manifest at all, and nothing of it is carried, used
-        as a baseline or taken as built. FetchError for a manifest or
-        signature that is there but does not read. The state is kept in
-        self.states[name] (assemble reports the bad signatures)."""
+        again once, settle seconds after the source's first read
+        (settle_wait; settle < 0: never). Pages' CDN caches each path on
+        its own for up to PAGES_MAX_AGE, so for that long after a deploy
+        the previous deploy's .sig may be served next to the new manifest,
+        or the reverse (SIG_SETTLE_S, the CLI's default, waits that out).
+        Every run signs the manifests it deploys anew: an unsigned one,
+        whoever put it there, is so treated as no manifest at all, and
+        nothing of it is carried, used as a baseline or taken as built.
+        FetchError for a manifest or signature that is there but does not
+        read. The state is kept in self.states[name] (assemble reports the
+        bad signatures)."""
         sig_name = name + ".sig"
         why = ""
         for attempt in (1, 2):
@@ -359,8 +403,10 @@ class Source:
             why = f"bad signature: {sig_name} does not verify against the pinned public key"
             if attempt == 2 or settle < 0:
                 break
-            print(f"{why}; reading both again in {settle:g} s")
-            time.sleep(settle)
+            wait = self.settle_wait(settle)
+            print(f"{why}; reading both again in {wait:.0f} s (GitHub Pages may still serve the previous"
+                  f" deploy's {name} or {sig_name}: it caches each file for up to {PAGES_MAX_AGE} s)")
+            time.sleep(wait)
         self.states[name] = why
         return None, None, why
 
@@ -538,7 +584,7 @@ def copy_entry(source: Source, entry: dict, out: Path, schema: int) -> None:
 # ---- due --------------------------------------------------------------------
 
 def due(live: dict | None, why: str, force: bool, now: datetime, schema: int,
-        release: dict[str, str] | None = None) -> tuple[list[str], str]:
+        release: dict[str, str] | None = None, release_tag: str | None = None) -> tuple[list[str], str]:
     """The indexes to build in this run (in INDEXES order), and why. One
     index that is due does not make the other one due: a city index whose
     guard refuses it for days must not rebuild and redeploy the Volán index
@@ -548,9 +594,18 @@ def due(live: dict | None, why: str, force: bool, now: datetime, schema: int,
     release: name -> the feed of the latest stable release's index of that
     name (release_feeds), None when it could not be read. An index is due
     when its entry's release_feed is not that feed (or it has none): it was
-    built against another release's index, and installs of that release
-    refuse it (weekly_timetables.py). Its builders and guards are the new
-    release's too. An index the release lacks has nothing to compare."""
+    built against another release's index, with another release's builders
+    and guards, from another baseline. An index the release lacks has
+    nothing to compare.
+
+    release_tag: that release's tag (--release-tag), with release read. An
+    index whose entry names another release_version (or none) is due as
+    well, even when its release_feed is the release's feed (a release that
+    shipped the indexes of the one before): the integration decides by
+    release_version, not by release_feed (weekly_timetables.release_newer:
+    an install newer than an entry's release_version holds its own city
+    index against the Pages one until the site is rebuilt against its
+    release), and part records release_version only with release_feed."""
     if force:
         return list(INDEXES), "asked for by the workflow_dispatch input timetables"
     if live is None:
@@ -582,9 +637,18 @@ def due(live: dict | None, why: str, force: bool, now: datetime, schema: int,
             reasons.append(f"the published {name} index was built against "
                            + ("another release's" if entry.get("release_feed") else "no release's")
                            + f" {name} index, not the latest stable release's")
+            continue
+        if release is not None and name in release and release_tag is not None \
+                and entry.get("release_version") != release_tag:
+            names.append(name)
+            # The tag only, never the published value: it goes into the log.
+            reasons.append(f"the published {name} index names "
+                           + ("another release" if entry.get("release_version") else "no release")
+                           + f" as its release_version, not {release_tag}")
     if not names:
         return [], (f"both published indexes were built less than {DUE_AFTER} ago"
-                    + ("" if release is None else ", against the latest stable release's"))
+                    + ("" if release is None else ", against the latest stable release's"
+                       + ("" if release_tag is None else f" ({release_tag})")))
     return names, "; ".join(reasons)
 
 
@@ -988,7 +1052,7 @@ def mav_from_live(source: Source, out: Path, settle: float = -1) -> dict | None:
     (Source.signed): every deploy signs the MÁV manifest it publishes, so
     the sign job must never sign one again that this workflow did not
     sign. One without a .sig raises UnsignedMav, one whose .sig does not
-    verify (read again settle seconds later) SiteError: the site is not
+    verify (read again, Source.signed with settle) SiteError: the site is not
     deployed either way, as it cannot go without the MÁV files (below).
     The build job takes an unsigned published manifest for none
     (mav_pages_site.py), so a run whose MÁV build goes through publishes
@@ -1100,7 +1164,8 @@ def _remove_entry_files(out: Path, entry: object) -> None:
 
 
 def timetables_from_live(source: Source, out: Path, skip: set[str], schema: int | None,
-                         settle: float = SETTLE_S) -> tuple[dict[str, dict], int | None]:
+                         settle: float = SETTLE_S, sig_settle: float = SIG_SETTLE_S
+                         ) -> tuple[dict[str, dict], int | None]:
     """The published indexes not in skip, checked against the published
     timetables.json, with their entries as published; (name -> entry, the
     schema they are of). schema None: whatever the published manifest names
@@ -1109,13 +1174,14 @@ def timetables_from_live(source: Source, out: Path, skip: set[str], schema: int 
 
     A published index that cannot be carried (a file missing, or not the
     size and sha256 the manifest names, also when fetched again settle
-    seconds later with the manifest read again) is left out with a warning,
-    not the whole site: the integration then finds it not published and
+    seconds later with the manifest read again; its signature waits
+    sig_settle, Source.signed) is left out with a warning, not the whole
+    site: the integration then finds it not published and
     keeps its own, and the next run's due check finds it missing and builds
     it again. The MÁV files are never left out that way (mav_from_live)."""
     if skip >= set(INDEXES):
         return {}, schema
-    live = live_timetables(source, settle)
+    live = live_timetables(source, sig_settle)
     if live is None:
         return {}, schema
     if schema is None:
@@ -1147,7 +1213,7 @@ def timetables_from_live(source: Source, out: Path, skip: set[str], schema: int 
                 print(f"{err}; fetching the {name} index again in {settle:g} s")
                 time.sleep(settle)
                 if reread is None:
-                    reread = live_timetables(source, settle) or {"indexes": {}}
+                    reread = live_timetables(source, sig_settle) or {"indexes": {}}
                 entry = reread["indexes"].get(name)
                 if reread.get("schema") != schema or entry is None:
                     problem = SiteError(f"the published {name} index changed while it was fetched")
@@ -1255,7 +1321,7 @@ def assemble(args: argparse.Namespace, source: Source, now: datetime) -> tuple[d
     if args.mav_part is not None:
         mav = mav_from_part(args.mav_part, out)
     else:
-        mav = mav_from_live(source, out, args.settle)
+        mav = mav_from_live(source, out, args.sig_settle)
     # The schema of the indexes this run built (the stable release's
     # builders), else the published one's; a site without any index names
     # --schema, else this checkout's.
@@ -1265,7 +1331,7 @@ def assemble(args: argparse.Namespace, source: Source, now: datetime) -> tuple[d
         if schema is None:
             raise SiteError(f"the timetables part's {PART_NAME} names no schema")
     new = timetables_from_part(args.timetables_part, out, schema) if schema is not None else {}
-    carried, schema = timetables_from_live(source, out, set(new), schema, args.settle)
+    carried, schema = timetables_from_live(source, out, set(new), schema, args.settle, args.sig_settle)
     if schema is None:
         schema = args.schema if args.schema is not None else INDEX_SCHEMA
     indexes = {name: (new.get(name) or carried[name]) for name in INDEXES if name in new or name in carried}
@@ -1291,7 +1357,7 @@ def cmd_assemble(args: argparse.Namespace, source: Source, now: datetime) -> int
     if args.mav_part is None and not part_names(args.timetables_part):
         print("::notice title=Nothing to publish::Neither a new MÁV index nor a new Volán or city index in this"
               " run; GitHub Pages keeps the site it has.")
-        check_signatures(source, args.settle)
+        check_signatures(source, args.sig_settle, deploying=False)
         _output(args, False, source)
         return 0
     for attempt in (1, 2):
@@ -1310,7 +1376,7 @@ def cmd_assemble(args: argparse.Namespace, source: Source, now: datetime) -> int
             shutil.rmtree(args.out, ignore_errors=True)
             print(f"::warning title=GitHub Pages site not assembled::{str(err)[:300]}; nothing is deployed, the"
                   " site keeps its files (the next run that builds the MÁV index publishes it signed).")
-            check_signatures(source, args.settle)
+            check_signatures(source, args.sig_settle, deploying=False)
             _output(args, False, source)
             return 0
         # KeyError, TypeError: a published manifest without a field the
@@ -1326,17 +1392,18 @@ def cmd_assemble(args: argparse.Namespace, source: Source, now: datetime) -> int
     if not new.keys() | carried.keys():
         print("::warning title=No Volán or city index on GitHub Pages::Neither index was built in this run, and"
               " GitHub Pages has none to carry over.")
-    check_signatures(source, args.settle)
+    check_signatures(source, args.sig_settle, deploying=True)
     _output(args, True, source)
     return 0
 
 
-def check_signatures(source: Source, settle: float) -> None:
+def check_signatures(source: Source, settle: float, deploying: bool) -> None:
     """Read the signature of each published manifest this run did not need
     (one whose files all come from this run's parts), so that assemble's
     untrusted output names every .sig on the site that does not verify,
     whatever was carried. A manifest or signature that does not read here
-    only says so: nothing of it is used."""
+    only says so: nothing of it is used. deploying: whether this run deploys
+    a site (which signs both manifests anew), for the annotation."""
     for name in sign_manifest.MANIFESTS:
         if name in source.states:
             continue
@@ -1346,8 +1413,10 @@ def check_signatures(source: Source, settle: float) -> None:
             print(f"published {name}: {err}; its signature not checked")
             continue
         if bad_signature(state):
-            print(f"::error title=Published {name} not trusted::{state}; this run takes nothing from it, and the"
-                  " deploy replaces it with a signed one.")
+            then = ("the deploy replaces it with a signed one" if deploying else
+                    "this run deploys nothing: GitHub Pages serves it until a run that deploys replaces it with a"
+                    " signed one")
+            print(f"::error title=Published {name} not trusted::{state}; this run takes nothing from it, and {then}.")
 
 
 def untrusted(source: Source) -> list[str]:
@@ -1395,6 +1464,12 @@ def main(argv: list[str]) -> int:
     def when(p: argparse.ArgumentParser) -> None:
         p.add_argument("--now", help="the time to take as now (ISO, with an offset); tests")
 
+    def sig_settle(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--sig-settle", type=float, default=SIG_SETTLE_S,
+                       help="seconds after the first read of the site before a manifest whose signature does not"
+                       f" verify is read again with it (default {SIG_SETTLE_S:g}: Pages' cache age and a minute;"
+                       " negative: never)")
+
     p = sub.add_parser("due", help="whether the Volán and city indexes are due")
     live(p)
     when(p)
@@ -1407,6 +1482,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--release-out", type=Path, help="write the release's index feeds here (JSON), for part")
     p.add_argument("--release-tag", help="the release's tag (vX.Y.Z), written to --release-out with its feeds"
                    " (release_version)")
+    sig_settle(p)
     p.add_argument("--github-output", type=Path)
 
     p = sub.add_parser("baseline", help="the published (or released) indexes for the builders' guards")
@@ -1436,6 +1512,7 @@ def main(argv: list[str]) -> int:
                    " this checkout's)")
     p.add_argument("--settle", type=float, default=SETTLE_S,
                    help="seconds before fetching a mismatched file again (negative: never)")
+    sig_settle(p)
     p.add_argument("--github-output", type=Path)
 
     args = ap.parse_args(argv)
@@ -1452,7 +1529,7 @@ def main(argv: list[str]) -> int:
         ap.error("--release-tag needs a stable release's tag (vX.Y.Z)")
     if args.cmd == "due":
         try:
-            live_man, state = source.timetables()
+            live_man, state = source.timetables(args.sig_settle)
             why = "HTTP 404" if state == "missing" else state
         except FetchError as err:
             live_man, why = None, str(err)
@@ -1481,7 +1558,8 @@ def main(argv: list[str]) -> int:
             if release and args.release_tag:
                 out["release"] = args.release_tag
             args.release_out.write_text(json.dumps(out, ensure_ascii=False) + "\n", encoding="utf-8")
-        names, reason = due(live_man, why, args.force == "true", now, args.schema, release)
+        names, reason = due(live_man, why, args.force == "true", now, args.schema, release,
+                            args.release_tag if release else None)
         print(f"{'due: ' + ', '.join(names) if names else 'not due'}: {reason}")
         lines = f"due={'true' if names else 'false'}\nindexes={','.join(names)}\n"
         print(lines, end="")

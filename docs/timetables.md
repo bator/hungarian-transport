@@ -292,8 +292,23 @@ is missing or does not verify (the site carries no unsigned MÁV manifest,
 below). A failure is a warning while the published manifest's
 `built_at` is less than 2 days old; the run fails (red) when it is 2 days
 old or older, or names no build time, and at once when MÁV refuses the login
-(HTTP 401/403, which is never retried: only new credentials help). A
-published manifest that cannot be read leaves the run green with a warning.
+(HTTP 401/403, which is never retried: only new credentials help). The
+`built_at` counts only when `mav-index.json.sig` verifies (read again once,
+11 minutes later, when it does not: Pages' cache, below); a published
+manifest without a signature that verifies fails the run too, as installs
+take nothing from it and its `built_at` is anyone's
+(`scripts/mav_daily_verdict.py`). A published manifest, or its signature,
+that cannot be read leaves the run green with a warning.
+
+An index with fewer than half the trains and lines of the published one is
+refused (`scripts/mav_shrink_guard.py`; the repository variable
+`MAV_ALLOW_SHRINK=1` accepts an intended reduction). The published counts
+are compared only when the manifest's signature verifies: one who can put
+files on Pages could otherwise name a million trains and so stop every
+build. Without such a manifest (none, it does not read, or its signature
+does not verify) the latest stable release's MÁV index is compared instead,
+and without that either the index is published with a warning that nothing
+was compared.
 
 The integration reads `mav-index.json` about 10 to 20 minutes after Home
 Assistant starts (and after the options are saved, which reloads the
@@ -516,21 +531,28 @@ into a site of the new one.
   few hundred kilobytes, not the whole zip; the whole zip only when the
   server answers no ranges). An index is also rebuilt when its
   `release_feed` is not that feed, or it has none: it was built against
-  another release (an install of the new release refuses it, and the new
-  release's builders and guards have not seen it yet). An index the release
-  zip lacks has nothing to compare, and a release zip that cannot be read
-  leaves this rule out for the run, with a warning (the age rule still
-  holds). The entry also names that release's tag, `release_version`
-  (the `timetables` job passes the tag it checked out to `due`, which
-  writes it with the feeds for `part`). An entry carried over keeps its
-  `release_feed` and `release_version`. A stable release
-  (not a `-rev` prerelease) also starts the daily workflow on main with
-  the `timetables` input ticked, from its own `pages` job (`actions: write`
-  only), so both indexes are rebuilt minutes after the release rather than
-  at the next scheduled run, within about 12 hours (plus GitHub's late
-  starts). That run may replace one waiting in the workflow's concurrency
-  group, which would have done the same; when it cannot be started, the
-  release run warns and the next scheduled run catches up.
+  another release, from another baseline, and the new release's builders
+  and guards have not seen it yet. The entry also names that release's
+  tag, `release_version` (the `timetables` job passes the tag it checked
+  out to `due`, which writes it with the feeds for `part`), and an index
+  whose `release_version` is not that tag (or that has none) is rebuilt as
+  well, even when the feeds are the same: installs decide by
+  `release_version` (a version newer than it keeps its own city index
+  against the Pages one until the site is rebuilt against its release,
+  `weekly_timetables.py` `release_newer`, below). An index the release
+  zip lacks has nothing to compare, and a release zip that cannot be read leaves both rules out for
+  the run, with a warning (the age rule still holds). An entry carried over
+  keeps its `release_feed` and `release_version`. A stable release (not a
+  `-rev` prerelease) that is the highest stable one, by version, also
+  starts the daily workflow on main with the `timetables` input ticked,
+  from its own `pages` job (`actions: write`, and `contents: read` to list
+  the releases), so both indexes are rebuilt minutes after the release
+  rather than at the next scheduled run, within about 12 hours (plus
+  GitHub's late starts). A stable tag of an older line (a backport) starts
+  nothing: the site is built against the highest one. That run may replace
+  one waiting in the workflow's concurrency group, which would have done
+  the same; when the releases cannot be listed or the run cannot be
+  started, the release run warns and the next scheduled run catches up.
 - **`timetables.json.sig`, `mav-index.json.sig`.** Every deploy signs
   `timetables.json` (it is written anew on every deploy, so a run that only
   brings a new MÁV index signs it too), and `mav-index.json` whenever the
@@ -568,8 +590,14 @@ into a site of the new one.
   baseline is the stable release's, and nothing is carried over from the
   site; a run that rebuilds only one of them, or only the MÁV index,
   publishes the site without the other, which the next run rebuilds. A
-  signature that does not verify is read again once, half a minute later,
-  as Pages may serve a deploy's files a moment apart. The same holds for
+  signature that does not verify is read again once, with its manifest,
+  11 minutes after the step's first read of the site
+  (`pages_timetables.py` `SIG_SETTLE_S`): GitHub Pages' CDN caches each
+  file on its own for up to 10 minutes, keyed on the path alone (a query
+  string or a request's `no-cache` does not get past it), so right after a
+  deploy it may serve one deploy's manifest next to the other's `.sig`. One
+  wait covers every manifest of the step, so the `due` step and the `site`
+  job take at most 11 minutes longer (their time limits allow for it). The same holds for
   `mav-index.json`: its files are carried only when `mav-index.json.sig`
   verifies. The build job takes an unsigned one for none and publishes
   the day's index from its own build (signed) even when the content is the

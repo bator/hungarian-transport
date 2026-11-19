@@ -729,18 +729,26 @@ jobs:
 
   # The daily Pages workflow builds the Volán and city indexes with the
   # latest stable release's builders, and each published index names the
-  # release index it was built against (timetables.json's release_feed),
-  # which installs of that release require of a Pages index. A new stable
-  # release makes both indexes due (pages_timetables.py due); the next cron
-  # (twice a day) would rebuild them within about 12 hours, plus GitHub's
-  # late starts. This starts a run of mav-index-daily.yml on main at once,
-  # with the input that rebuilds both. A workflow_dispatch made with the job
-  # token does start a run (the one event, with repository_dispatch, that
-  # it may start). It joins that workflow's concurrency group: it may
-  # replace a run waiting there (a cron, the owner's dispatch), which would
-  # have done the same work. Only this job may start a workflow (actions:
-  # write), and it runs nothing from the repository. When it cannot start
-  # the run, a warning: the release is out and the cron catches up.
+  # release it was built against: that release's index feed (timetables.json's
+  # release_feed) and its tag (release_version). Installs decide by
+  # release_version (weekly_timetables.py release_newer): one newer than it
+  # holds its own city index against the Pages one until the site is rebuilt
+  # against its release. A new highest stable release makes both indexes due
+  # (pages_timetables.py due: another release_feed or release_version); the
+  # next cron (twice a day) would rebuild them within about 12 hours, plus
+  # GitHub's late starts. This starts a run of mav-index-daily.yml on main at
+  # once, with the input that rebuilds both, but only for the highest stable
+  # release (by version, as the daily workflow picks it): a stable tag pushed
+  # for an older line (a backport, v1.9.5 after v1.10.24) changes nothing
+  # there, and a forced rebuild would only redo the week's indexes. A
+  # workflow_dispatch made with the job token does start a run (the one
+  # event, with repository_dispatch, that it may start). It joins that
+  # workflow's concurrency group: it may replace a run waiting there (a
+  # cron, the owner's dispatch), which would have done the same work. Only
+  # this job may start a workflow (actions: write; contents: read lists the
+  # releases), and it runs nothing from the repository. When it cannot list
+  # the releases or start the run, a warning: the release is out and the
+  # cron catches up.
   pages:
     name: Rebuild the Pages timetables
     needs: [resolve, publish]
@@ -749,6 +757,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       actions: write
+      contents: read
     steps:
       - name: Start mav-index-daily.yml
         env:
@@ -757,6 +766,18 @@ jobs:
           TAG: ${{ needs.resolve.outputs.tag }}
         run: |
           set -uo pipefail
+          # As the daily workflow's "Latest stable release": the highest
+          # vX.Y.Z that is no draft or prerelease, by version.
+          if ! tags=$(gh api --paginate "repos/${GH_REPO}/releases?per_page=100" \
+              --jq '.[] | select((.draft or .prerelease) | not) | .tag_name'); then
+            echo "::warning title=Pages timetables not started::Could not list the releases (GitHub API); the next scheduled run of mav-index-daily.yml rebuilds the Volán and city indexes against the highest stable release."
+            exit 0
+          fi
+          highest=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$tags" | sort -V | tail -n 1 || true)
+          if [ "$highest" != "$TAG" ]; then
+            echo "${TAG} is not the highest stable release (${highest:-none}); the Pages timetables are built against that one, nothing to rebuild."
+            exit 0
+          fi
           if gh workflow run mav-index-daily.yml --ref main -f timetables=true; then
             echo "mav-index-daily.yml started on main (timetables=true) for ${TAG}"
           else

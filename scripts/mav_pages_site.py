@@ -53,7 +53,9 @@ integration's served_index.feed_date reads it) or with one more than
 MAX_FEED_AHEAD after the build, a site over the size limit,
 or an index with fewer than half the trains and lines of the published one
 (mav_shrink_guard.py; --allow-shrink or MAV_ALLOW_SHRINK=1 accepts it).
-When the published manifest does not read, the shrink guard compares with
+When the published manifest does not read, or its signature does not
+verify (its counts are then its author's, not this workflow's), the
+shrink guard compares with
 the MÁV index of --baseline-url (the latest stable release's frontend zip,
 fetched only then) or --baseline-file (such a zip, or a mav-index.json.gz);
 without one either, it warns and compares with nothing.
@@ -120,6 +122,19 @@ REFRESH_AFTER = timedelta(hours=12)
 # are held to it too (pages_timetables.py part, build_city_index.py).
 MAX_FEED_AHEAD = timedelta(days=400)
 LIVE_TIMEOUT = 20
+# GitHub Pages serves every file through its CDN (Fastly, Cache-Control:
+# max-age=600) and caches each path on its own, keyed on the path alone:
+# neither a query string nor a request's no-cache reaches past it (checked
+# 2026-11-19: a never-seen ?query answered X-Cache: HIT with the cached
+# ETag; the integration found the same, mav_daily.PAGES_MAX_AGE). For up to
+# PAGES_MAX_AGE after a deploy a manifest and its .sig can so be of two
+# deploys, either way round, and the signature does not verify. A reader
+# that finds one so reads both again once, SIG_SETTLE_S after its first
+# read of the site, when every copy cached before the deploy has expired
+# (the minute on top: a cache that took its copy a moment late, the
+# clocks): pages_timetables.py (Source.signed) and mav_daily_verdict.py.
+PAGES_MAX_AGE = 600
+SIG_SETTLE_S = PAGES_MAX_AGE + 60
 # The shrink guard's fallback: a release's frontend zip (about 15 MB) and
 # the MÁV index in it (about 0.25 MB).
 BASELINE_TIMEOUT = 120
@@ -386,18 +401,27 @@ def check_shrink(man: dict, live: dict | None, allow: bool = False,
     consistent in itself and names a newer feed would replace it. allow
     (--allow-shrink, MAV_ALLOW_SHRINK) accepts an intended reduction.
 
-    Without a published manifest that reads (Pages down, a network error,
-    no site yet), the index is compared with baseline, (trains, lines) of
-    the latest stable release's MÁV index: an outage must not let a
+    live is the published manifest only when its signature verifies (the
+    caller passes None for one that does not): its trains and lines are
+    whatever its author wrote, and one who can put files on Pages could
+    otherwise name a million of each and so refuse every build, freezing
+    the site on what they put there. Without a published manifest that
+    reads and verifies (Pages down, a network error, no site yet, no or a
+    bad signature), the index is compared with baseline, (trains, lines)
+    of the latest stable release's MÁV index: an outage must not let a
     truncated feed through. Without that either, a warning says that
-    nothing was compared."""
+    nothing was compared, and the index is published: refusing it instead
+    would let anyone who can break the published signature (or an outage
+    of both the site and the release download) stop every daily build,
+    while the guard is there for a truncated feed of MÁV's, which the next
+    run with a reference still catches."""
     if live is not None:
         prev, what = (live.get("trains"), live.get("lines")), "the published index"
     elif baseline is not None:
         prev, what = baseline, "the latest release's index"
     else:
-        print("::warning title=MÁV shrink guard skipped::Neither the published manifest nor a release's MÁV"
-              " index could be read; the index was not compared with a previous one.")
+        print("::warning title=MÁV shrink guard skipped::Neither a published manifest whose signature verifies"
+              " nor a release's MÁV index could be read; the index was not compared with a previous one.")
         return
     why = mav_shrink_guard.shrink_problem(man["trains"], man["lines"], *prev)
     if not why:
@@ -601,7 +625,8 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
     # first run after signing came in; another key; an edit) is deployed
     # again from this build, signed, since the site job never carries an
     # unsigned MÁV manifest (pages_timetables.py mav_from_live). The shrink
-    # guard compares with it all the same: it only holds an index back.
+    # guard compares with it only when its signature verifies (its counts
+    # are its author's), else with the latest stable release's MÁV index.
     body, sig, why, sig_why = None, None, "not asked", ""
     if args.live_file is not None:
         body, why = (args.live_file.read_bytes(), "ok") if args.live_file.is_file() else (None, "no file")
@@ -613,17 +638,19 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
             sig, sig_why = fetch_bytes(args.live_url + ".sig", MAX_SIG)
     live, why = parse_live(body) if body is not None else (None, why)
     trust = signature_state(body, sig, sig_why) if live is not None else "no manifest"
+    trusted = live if trust == "ok" else None
     baseline = None
-    if live is None and (args.baseline_url or args.baseline_file is not None):
+    if trusted is None and (args.baseline_url or args.baseline_file is not None):
         if args.baseline_file is not None:
             baseline = baseline_counts(args.baseline_file)
             got = "ok" if baseline is not None else f"no readable {INDEX_NAME}"
         else:
             baseline, got = fetch_baseline(args.baseline_url)
-        print(f"published manifest: none ({why}); release index for the shrink guard: "
+        print(("published manifest: none" if live is None else "published manifest: not trusted")
+              + f" ({why if live is None else trust}); release index for the shrink guard: "
               + (f"{baseline[0]} trains and {baseline[1]} lines" if baseline is not None else f"none ({got})"))
     try:
-        check_shrink(man, live, args.allow_shrink, baseline)
+        check_shrink(man, trusted, args.allow_shrink, baseline)
     except SiteError as err:
         print(f"no site: {err}", file=sys.stderr)
         return 1
