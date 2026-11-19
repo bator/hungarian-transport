@@ -170,6 +170,19 @@ def test_keys_have_their_own_outages(caplog) -> None:
         (logging.INFO, "b up"),
     ]
     assert list(log.down) == ["a"]
+    assert log.is_down("a") and not log.is_down("b") and not log.is_down(None)
+
+
+def test_an_outage_is_down_until_it_answers_or_its_ttl_ends() -> None:
+    clock = FakeClock(0.0)
+    log = upstream.OutageLog(_LOGGER, monotonic=clock.monotonic, ttl=100)
+    log.failed(None, "down")
+    assert log.is_down(None)
+    log.answered(None, "up")
+    assert not log.is_down(None)
+    log.failed(None, "down")
+    clock.now = 100
+    assert not log.is_down(None) and log.down == {}
 
 
 def test_ttl_and_max_entries_bound_the_outages(caplog) -> None:
