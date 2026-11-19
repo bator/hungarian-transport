@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -65,9 +66,16 @@ def no_pages_timetables():
     yield
 
 
+@pytest.fixture
+def pages_key():
+    return _KEY
+
+
 @pytest.fixture(autouse=True)
-def test_key(monkeypatch):
-    monkeypatch.setattr(mav_daily, "PAGES_PUBLIC_KEYS", (_PUBLIC,))
+def test_key(real_signature):
+    """The Site signs its manifests with _KEY (pages_key), and the
+    integration fetches and checks the signature for real
+    (conftest's real_signature)."""
 
 
 def _sign(body: bytes, key: Ed25519PrivateKey = _KEY) -> str:  # gitleaks:allow (a test signing helper, no secret)
@@ -1091,6 +1099,48 @@ def test_a_release_newer_than_the_baseline_takes_a_strictly_newer_index(tmp_path
                      today=TODAY) == wt._INSTALL
 
 
+# The Pages build weeks later, still of the old baseline (a -rev beta waits
+# for the next stable release): its newest feed 2026-12-07, 22 days after
+# ADDED's newest (szeged 2026-11-15), 28 after the others'.
+LATER = "miskolc:1.3;debrecen:20261204-1;volan-szeged:01736.20261207"
+
+
+@pytest.mark.parametrize("running", [NEWER, REV], ids=["newer", "rev"])
+@pytest.mark.parametrize("installed", [ADDED, UNDATED, DROPPED], ids=["added", "undated", "dropped"])
+def test_a_newer_release_s_index_gone_stale_goes_by_the_operator_rule(tmp_path, installed, running) -> None:
+    """The escape hatch (review round 8): the served index's newest dated
+    feed more than RELEASE_STALE older than the Pages index's newest; then
+    the operator rule decides, as for a release that is not newer."""
+    today = date(2026, 12, 8)
+    www, durable = _www(tmp_path, installed)
+    assert not wt.updater_newer(LATER, installed, today)
+    assert wt.release_stale(LATER, installed, today)
+    assert wt.decide_why("city", LATER, www, durable, release_version=BASELINE, running=running,
+                         today=today) == (wt._INSTALL, None)
+    # Not past RELEASE_STALE: the strict rule still.
+    edge = LATER.replace("20261207", "20261206")
+    assert not wt.release_stale(edge, ADDED, today)
+    if installed == ADDED:
+        assert wt.decide_why("city", edge, www, durable, release_version=BASELINE, running=running,
+                             today=today) == (wt.SUPERSEDED, wt.RELEASE_NEWER)
+    # Stale, but the operator rule finds an operator older on Pages: kept.
+    older = LATER + ";szeged:20261101"
+    if installed == ADDED:
+        assert wt.decide_why("city", older, www, durable, release_version=BASELINE, running=running,
+                             today=today) == (wt.SUPERSEDED, wt.SERVED_NEWER)
+
+
+def test_release_stale_needs_a_date_on_both_sides() -> None:
+    today = date(2026, 12, 8)
+    assert not wt.release_stale("miskolc:1.3", "miskolc:1.2", today)
+    assert not wt.release_stale(LATER, "miskolc:1.2", today)
+    assert not wt.release_stale("miskolc:1.3", LATER, today)
+    # A served date past MAX_FEED_AHEAD is older than any (_day), as the
+    # operator rule takes it.
+    assert wt.release_stale(LATER, "miskolc:1.3;debrecen:29991231", today)
+    assert not wt.release_stale(LATER, "debrecen:29991231;szeged:20261201", today)
+
+
 @pytest.mark.parametrize("running", [OLDER, NEWER, REV])
 def test_a_strictly_newer_volan_index_installs_whatever_the_baseline(tmp_path, running) -> None:
     """The Volán index is one dated feed: newer is newer (the release_feed
@@ -1151,6 +1201,32 @@ async def test_the_running_version_is_the_manifest_s(hass: HomeAssistant) -> Non
     manifest = json.loads((ROOT / "custom_components" / DOMAIN / "manifest.json").read_text(encoding="utf-8"))
     version = await wt._running_version(hass)
     assert version == AwesomeVersion(manifest["version"])
+
+
+async def test_the_running_version_is_read_from_disk_after_a_hacs_update(
+    hass: HomeAssistant, tmp_path, monkeypatch
+) -> None:
+    """A HACS update replaces custom_components/ and www/ before the restart
+    (review round 8): the rule takes the version on disk, the new release's,
+    not the one Home Assistant loaded; read again only when the file
+    changed; the loaded one when it does not read."""
+    loaded = (await wt.async_get_integration(hass, DOMAIN)).version
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"domain": DOMAIN, "version": "1.10.30"}), encoding="utf-8")
+    monkeypatch.setattr(wt, "_MANIFEST_FILE", manifest)
+    assert await wt._running_version(hass) == AwesomeVersion("1.10.30") != loaded
+    # The same mtime and size: not read again.
+    stat = manifest.stat()
+    manifest.write_text(json.dumps({"domain": DOMAIN, "version": "1.10.39"}), encoding="utf-8")
+    os.utime(manifest, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert await wt._running_version(hass) == AwesomeVersion("1.10.30")
+    os.utime(manifest, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    assert await wt._running_version(hass) == AwesomeVersion("1.10.39")
+    for broken in ("{", json.dumps({"version": 7}), json.dumps([1])):
+        manifest.write_text(broken, encoding="utf-8")
+        assert await wt._running_version(hass) == loaded
+    manifest.unlink()
+    assert await wt._running_version(hass) == loaded
 
 
 async def test_a_pages_build_of_an_older_baseline_is_superseded_on_the_sensor(
@@ -1243,8 +1319,8 @@ def test_verify_manifest_takes_only_the_key_s_signature_of_these_bytes() -> None
     body = Site().body()
     wt.verify_manifest(body, _sign(body).encode())
     for sig, message in (
-        (_sign(body + b" "), "does not match"),
-        (_sign(body, Ed25519PrivateKey.generate()), "does not match"),
+        (_sign(body + b" "), "a key this version does not know"),
+        (_sign(body, Ed25519PrivateKey.generate()), "a key this version does not know"),
         ("%%%", "not base64"),
         (_sign(body).strip() + "\n" + _sign(body), "not base64"),
         (base64.b64encode(b"x" * 10).decode(), "10 bytes"),
@@ -1282,14 +1358,15 @@ async def test_a_manifest_without_a_good_signature_installs_nothing(
     site.serve(aioclient_mock, sig)
     caplog.set_level(logging.INFO)
     # Right after a deploy the cache may pair the manifest with the previous
-    # signature: once quiet, then FAILED; a well-formed signature no key
-    # verifies is UNSUPPORTED (a key newer than this version: update it).
+    # signature: once quiet, then FAILED; also a well-formed signature no
+    # key verifies (a newer key, another deploy's signature, or not the
+    # site's), on its first days (review round 8).
     pt = wt.PagesTimetables(hass, card_assets)
     results = []
     for _ in range(3):
         await pt._round()
         results.append((await storage.async_load(hass)).get(storage.PAGES_ROUND, {}).get("volan"))
-    later = wt.UNSUPPORTED if well_formed else wt.FAILED
+    later = wt.FAILED
     reason = wt.UNKNOWN_KEY if well_formed else mav_daily.REASON_BAD_SIGNATURE
     # The settling round leaves no settled record, but says why it settles.
     assert results[0] == {"settling": reason, "settling_at": results[0]["settling_at"]}
@@ -1298,9 +1375,60 @@ async def test_a_manifest_without_a_good_signature_installs_nothing(
     assert set(_requested(aioclient_mock)) == {wt.MANIFEST_URL, wt.SIGNATURE_URL}
     said = [r for r in caplog.records if r.name == wt.__name__ and r.levelno >= logging.INFO]
     assert len(said) == 1, [r.getMessage() for r in said]
-    assert said[0].levelno == (logging.INFO if well_formed else logging.WARNING)
-    # An unknown key is no failure: no retry waits for it.
-    assert (pt._retries == 0) == well_formed
+    assert said[0].levelno == logging.WARNING
+    if well_formed:
+        assert "signed by a key this version does not know" in said[0].getMessage()
+    # Retried as any failure.
+    assert pt._retries == 2
+    pt.stop()
+
+
+async def test_an_unknown_key_fails_for_days_then_is_unsupported_and_not_retried(
+    hass: HomeAssistant, aioclient_mock, card_assets, caplog, freezer
+) -> None:
+    """The reviewers' repro (round 8): right after a deploy the cache pairs
+    the new manifest with the previous deploy's .sig, which reads as a key
+    this version does not know. A failure with retries on
+    UNKNOWN_KEY_DAYS consecutive days (a day without one starts over), then
+    UNSUPPORTED (update the integration), said once at info, not retried;
+    the site's signature again installs and ends the days."""
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    raw, _, _ = site.publish("volan", VOLAN_NEW)
+    body = site.body()
+    site.serve(aioclient_mock, _sign(body + b"the previous deploy"))
+    caplog.set_level(logging.INFO)
+    pt = wt.PagesTimetables(hass, card_assets)
+
+    async def cycle(day: str) -> tuple[str, int]:
+        freezer.move_to(f"{day} 06:00:00+00:00")
+        wt.new_cycle(hass)
+        pt._retries = 0
+        await pt._round()
+        assert pt._unsub is not None  # the settling look
+        pt._unsub()
+        pt._unsub = None
+        await pt._round()
+        record = (await storage.async_load(hass))[storage.PAGES_ROUND]["volan"]
+        assert record["reason"] == wt.UNKNOWN_KEY
+        retry = pt._unsub is not None
+        if retry:
+            pt._unsub()
+            pt._unsub = None
+        return record["result"], retry
+
+    days = ["2026-11-16", "2026-11-17", "2026-11-18", "2026-11-19"]
+    assert [await cycle(d) for d in days] == [(wt.FAILED, True)] * 3 + [(wt.UNSUPPORTED, False)]
+    info = [r.getMessage() for r in caplog.records if r.name == wt.__name__ and r.levelno == logging.INFO]
+    assert len(info) == 1 and "on more than 3 days in a row. Update Hungarian transport" in info[0]
+    # A day without one: the count starts over.
+    assert await cycle("2026-11-21") == (wt.FAILED, True)
+    aioclient_mock.clear_requests()
+    site.serve(aioclient_mock)
+    wt.new_cycle(hass)
+    await pt._round()
+    assert (card_assets / timetables.VOLAN_INDEX).read_bytes() == raw
+    assert storage.UNKNOWN_KEY_SEEN not in await storage.async_load(hass)
     pt.stop()
 
 
@@ -1365,6 +1493,23 @@ async def test_a_crashed_round_is_logged_with_its_traceback_and_retried(
     crashes = [r for r in caplog.records if r.name == wt.__name__ and r.levelno == logging.WARNING]
     # The first crash, and the one after a round that went through.
     assert len(crashes) == 2 and all(r.exc_info for r in crashes)
+
+
+async def test_a_crashed_round_records_why(hass: HomeAssistant, card_assets, monkeypatch) -> None:
+    """As a crashed index does (review round 8): the error's text, cut to
+    MAX_REASON, is the sensors' reason."""
+
+    async def update(hass_, www):
+        raise RuntimeError("boom in round " + "x" * 300)
+
+    monkeypatch.setattr(wt, "async_update", update)
+    pt = wt.PagesTimetables(hass, card_assets)
+    await pt._round()
+    pt.stop()
+    record = (await storage.async_load(hass))[storage.PAGES_ROUND]
+    for name in wt.INDEXES:
+        assert record[name]["result"] == wt.FAILED
+        assert record[name]["reason"] == ("RuntimeError: boom in round " + "x" * 300)[:mav_daily.MAX_REASON]
 
 
 @pytest.mark.parametrize(("error", "traceback"), [(KeyError("boom"), True), (OSError("disk"), False)])
@@ -1559,6 +1704,64 @@ async def test_a_second_stop_during_the_commit_still_waits_for_it(
     assert (await storage.async_load(hass))[storage.TIMETABLES_INSTALL]["volan"]["feed"] == VOLAN_NEW
 
 
+async def test_home_assistant_stopping_during_the_commit_waits_for_it(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """Home Assistant's own stop (hass.async_stop) during the commit (review
+    round 8): it cancels the round (a background task) and every executor
+    job a background task started, waits only for the tasks not being
+    cancelled, and cancels the rest at its last stage. The stop waits for
+    the commit; the cleanup never runs beside it; the record is kept."""
+    import threading
+
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock)
+    started, release = threading.Event(), threading.Event()
+    events: list[str] = []
+    real_commit, real_rmtree = wt._commit, wt._rmtree
+
+    def slow_commit(*args):
+        started.set()
+        release.wait(20)
+        events.append("commit starts")
+        real_commit(*args)
+        events.append("commit")
+
+    def rmtree(path, *args, **kw):
+        if Path(path).name.startswith(wt.STAGING):
+            events.append("rmtree")
+        return real_rmtree(path, *args, **kw)
+
+    monkeypatch.setattr(wt, "_commit", slow_commit)
+    monkeypatch.setattr(wt, "_rmtree", rmtree)
+    seen = []
+
+    async def on_result(done):
+        seen.append(done)
+
+    pt = wt.PagesTimetables(hass, card_assets, on_result)
+    pt.start_round()
+    await hass.async_add_executor_job(started.wait, 10)
+    task = pt._task
+    stopping = asyncio.ensure_future(hass.async_stop())
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+    # Stopping, and waiting for the round: the commit is still blocked.
+    assert not stopping.done() and not task.done() and events == []
+    release.set()
+    await asyncio.wait_for(stopping, 30)
+    assert task.cancelled()
+    assert events[:2] == ["commit starts", "commit"]
+    assert not _staged(card_assets)
+    assert served_index.read_feed(card_assets / timetables.VOLAN_INDEX) == VOLAN_NEW
+    state = await storage.async_load(hass)
+    assert state[storage.TIMETABLES_INSTALL]["volan"]["feed"] == VOLAN_NEW
+    assert storage.PAGES_ROUND not in state
+    assert seen == []
+
+
 async def test_the_local_updater_writing_during_a_download_wins(
     hass: HomeAssistant, aioclient_mock, card_assets, mav_source, monkeypatch
 ) -> None:
@@ -1629,6 +1832,37 @@ async def test_two_manifests_taking_turns_settle_once_then_fail(
     # A first or daily round may settle again.
     wt.new_cycle(hass)
     assert (await _round(hass, card_assets))["volan"] == wt.SETTLING
+
+
+async def test_an_index_then_the_signature_settle_each_on_their_own_scope(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    """The other way round from a stale signature first (review round 8):
+    the index of another generation settles, then, in the same cycle, the
+    previous deploy's signature settles too (its own scope), not FAILED;
+    then the deploy installs."""
+    site = Site()
+    raw, _, _ = site.publish("volan", VOLAN_NEW)
+    body = site.body()
+    sigs = iter([_sign(body), _sign(body + b"the previous deploy"), _sign(body)])
+    indexes = iter([_flipped(raw), raw])
+
+    async def signature(method, url, data):
+        return AiohttpClientMockResponse(method, url, text=next(sigs))
+
+    async def index(method, url, data):
+        return AiohttpClientMockResponse(method, url, response=next(indexes))
+
+    aioclient_mock.get(wt.MANIFEST_URL, content=body)
+    aioclient_mock.get(wt.SIGNATURE_URL, side_effect=signature)
+    aioclient_mock.get(f"{mav_daily.PAGES_BASE}/volan-index.json.gz", side_effect=index)
+    for path, content in site.files.items():
+        if path != "volan-index.json.gz":
+            aioclient_mock.get(f"{mav_daily.PAGES_BASE}/{path}", content=content)
+    wt.new_cycle(hass)
+    results = [(await _round(hass, card_assets))["volan"] for _ in range(3)]
+    assert results == [wt.SETTLING, wt.SETTLING, wt.INSTALLED]
+    assert (card_assets / timetables.VOLAN_INDEX).read_bytes() == raw
 
 
 async def test_an_index_the_site_no_longer_has_settles_then_fails(
@@ -1898,6 +2132,18 @@ def _openssl_signs(tmp_path: Path) -> bool:
     return done.returncode == 0 and len(done.stdout) == 64
 
 
+def _need_openssl(tmp_path: Path) -> None:
+    """Skip without an openssl that signs raw ed25519; on GitHub Actions
+    (GITHUB_ACTIONS set: its runners have openssl 3, and the Pages workflow
+    signs with it) fail instead: a skip there would hide that the
+    interoperability is no longer checked."""
+    if _openssl_signs(tmp_path):
+        return
+    if os.environ.get("GITHUB_ACTIONS"):
+        pytest.fail("no openssl 3 on this GitHub Actions runner (pkeyutl -rawin): the signer's format is unchecked")
+    pytest.skip("no openssl 3 here (pkeyutl -rawin)")
+
+
 def _seed_and_public() -> tuple[bytes, str]:
     from cryptography.hazmat.primitives.serialization import NoEncryption, PrivateFormat
 
@@ -1907,12 +2153,21 @@ def _seed_and_public() -> tuple[bytes, str]:
     return seed, public
 
 
+def test_without_openssl_the_interop_tests_fail_on_github_actions(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "_openssl_signs", lambda path: False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    with pytest.raises(pytest.fail.Exception, match="no openssl 3"):
+        _need_openssl(tmp_path)
+    monkeypatch.delenv("GITHUB_ACTIONS")
+    with pytest.raises(pytest.skip.Exception):
+        _need_openssl(tmp_path)
+
+
 def test_a_manifest_signed_by_the_site_s_signer_verifies_here(tmp_path) -> None:
     import subprocess
     import sys
 
-    if not _openssl_signs(tmp_path):
-        pytest.skip("no openssl 3 here (pkeyutl -rawin)")
+    _need_openssl(tmp_path)
     seed, public = _seed_and_public()
     site = tmp_path / "site"
     site.mkdir()
@@ -1940,8 +2195,7 @@ def test_a_mav_manifest_signed_by_the_site_s_signer_verifies_here(tmp_path) -> N
     sign over any file's bytes)."""
     import importlib.util
 
-    if not _openssl_signs(tmp_path):
-        pytest.skip("no openssl 3 here (pkeyutl -rawin)")
+    _need_openssl(tmp_path)
     spec = importlib.util.spec_from_file_location("_sign_manifest_under_test", ROOT / "scripts" / "sign_manifest.py")
     sm = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sm)

@@ -26,7 +26,10 @@ What notifies, only with the option on:
   newer than the one seen (or a new operator), not one that went;
 - the daily MÁV index failed on FAILED_DAYS consecutive days: once per
   streak, dismissed when a round goes through again. A day with only BUSY
-  or UNSUPPORTED rounds neither counts nor breaks the streak; a day without
+  or UNSUPPORTED rounds neither counts nor breaks the streak (a manifest
+  signed by a key this version does not know is FAILED, and counts, on its
+  first mav_daily.UNKNOWN_KEY_DAYS days: it looks the same as another
+  deploy's signature or one that is not the site's); a day without
   any round (Home Assistant off) breaks it. A round that went through while
   the site's manifest was built more than STALE_PAGES ago counts as a
   failure: a daily workflow that stopped would otherwise stay quiet. The
@@ -85,7 +88,9 @@ FAILED_DAYS = 3
 STALE_PAGES = timedelta(days=3)
 # The indexes a release ships in www/, in the order a message names them.
 SHIPPED = {"volan": "volan-index.json.gz", "city": "city-index.json.gz", "mav": mav.INDEX_NAME}
-# A round that says nothing about failing or not (mav_daily).
+# A round that says nothing about failing or not (mav_daily). An unknown
+# signing key is UNSUPPORTED only once it has been so for more than
+# mav_daily.UNKNOWN_KEY_DAYS days; before, it is FAILED and counts.
 _NEUTRAL = (mav_daily.BUSY, mav_daily.UNSUPPORTED)
 
 TEXT = {

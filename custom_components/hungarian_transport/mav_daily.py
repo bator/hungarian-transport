@@ -17,10 +17,12 @@ the day's, and installs the index only when:
   than to whoever answers for bator.github.io. A missing or bad signature
   installs nothing (check_signature: looked at again once, PAGES_SETTLE_DELAY
   later, like a mismatching download; FAILED after that). A well-formed one
-  that none of the keys verifies, again after that look, is UNSUPPORTED
-  ("unknown_key": the site signs with a key newer than this version), said
-  once at info. Only this manifest is signed: a local upload or build
-  (mav.py) is the user's own;
+  that none of the keys verifies ("unknown_key": signed by a key this
+  version does not know: a newer key, another deploy's signature, or not
+  the site's) is FAILED like any other, with the normal retries, until it
+  has been so on more than UNKNOWN_KEY_DAYS consecutive days: then
+  UNSUPPORTED, said once at info (update the integration). Only this
+  manifest is signed: a local upload or build (mav.py) is the user's own;
 - the manifest's format is the one this code reads and its index schema is
   mav_index.SCHEMA (else it says so once and installs nothing);
 - its feed is the one of the index www/ serves and the same-feed rule
@@ -120,7 +122,14 @@ SIGNATURE_BYTES = 64
 # file, to a key. A new key goes into this list a release before the site
 # signs with it, and the old one leaves a release after; a version that
 # does not know the site's key says so (UNKNOWN_KEY) and installs nothing.
+# A key this version does not know looks the same as another deploy's
+# signature the cache paired with the manifest, or as a signature that is
+# not the site's at all: such a signature is FAILED (retried as any
+# failure, a day of the MÁV failure streak) on UNKNOWN_KEY_DAYS
+# consecutive days, and only after that UNSUPPORTED (update the
+# integration), neither retried nor a failure.
 PAGES_PUBLIC_KEYS: tuple[str, ...] = ("iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8=",)  # gitleaks:allow (public keys)
+UNKNOWN_KEY_DAYS = 3
 # The manifest format scripts/mav_pages_site.py writes (MANIFEST_FORMAT).
 MANIFEST_FORMAT = 1
 MAX_MANIFEST = 64 * 1024
@@ -240,9 +249,9 @@ class BadSignature(DailyIndexError):
 
 class UnknownKey(BadSignature):
     """A well-formed signature that none of PAGES_PUBLIC_KEYS verifies over
-    the manifest: the other generation's right after a deploy (the cache
-    pairs a new manifest with the old .sig), else a key this version does
-    not know (the site signs with a newer one) or no key of the site's."""
+    the manifest: signed by a key this version does not know: a newer key,
+    another deploy's signature (the cache pairs a new manifest with the
+    old .sig), or not the site's. They cannot be told apart."""
 
 
 def verify_signature(
@@ -268,7 +277,10 @@ def verify_signature(
         except InvalidSignature:
             continue
         return
-    raise UnknownKey(f"{name} does not match its signature ({what}) by any key this version knows")
+    raise UnknownKey(
+        f"{name} is signed by a key this version does not know ({what}): a newer key, another deploy's"
+        " signature, or not the site's"
+    )
 
 
 def reason_of(err: BaseException) -> str:
@@ -291,8 +303,9 @@ class SignatureCheck:
     """Why a manifest's signature did not let it in: result is SETTLING (the
     first time: right after a deploy the cache can pair a new manifest with
     the old signature, or still answer 404 for it), UNSUPPORTED (a
-    well-formed signature no key verifies, after that: UNKNOWN_KEY) or
-    FAILED (anything else)."""
+    well-formed signature no key verifies, UNKNOWN_KEY, on more than
+    UNKNOWN_KEY_DAYS consecutive days) or FAILED (anything else, an unknown
+    key before that)."""
 
     result: str
     error: DailyIndexError
@@ -309,6 +322,7 @@ class SignatureCheck:
 
 
 async def check_signature(
+    hass: HomeAssistant,
     session: aiohttp.ClientSession,
     url: str,
     raw: bytes,
@@ -317,7 +331,11 @@ async def check_signature(
 ) -> SignatureCheck | None:
     """None when the signature at url verifies raw, the manifest name; else
     why not. may_settle says whether a signature that does not match may
-    settle (once per cycle and scope, as a download that does not match)."""
+    settle (once per cycle and scope, as a download that does not match).
+    A signature of a key this version does not know that does not settle
+    counts its day (storage.async_unknown_key_day): FAILED on the first
+    UNKNOWN_KEY_DAYS consecutive days, UNSUPPORTED after them. One that
+    verifies ends those days."""
     try:
         sig = await _get(session, url, MAX_SIGNATURE, MANIFEST_TIMEOUT)
         verify_signature(raw, sig, name)
@@ -325,11 +343,21 @@ async def check_signature(
         if may_settle():
             return SignatureCheck(SETTLING, err)
         if isinstance(err, UnknownKey):
-            return SignatureCheck(UNSUPPORTED, err)
+            days = await storage.async_unknown_key_day(hass, name, _today())
+            return SignatureCheck(UNSUPPORTED if days > UNKNOWN_KEY_DAYS else FAILED, err)
         return SignatureCheck(FAILED, err)
     except DailyIndexError as err:
         return SignatureCheck(FAILED, err)
+    await storage.async_clear_unknown_key(hass, name)
     return None
+
+
+def signature_message(check: SignatureCheck) -> str:
+    """What the log says of check: for an unknown key that is UNSUPPORTED,
+    since when."""
+    if check.result == UNSUPPORTED and isinstance(check.error, UnknownKey):
+        return f"{check.error}; so on more than {UNKNOWN_KEY_DAYS} days in a row"
+    return str(check.error)
 
 
 # What a round may raise in the normal course of things: a download or a
@@ -630,9 +658,13 @@ async def async_update(hass: HomeAssistant, www: Path) -> DailyRound:
 async def _signed(hass: HomeAssistant, session: aiohttp.ClientSession, raw: bytes) -> DailyRound | None:
     """None when mav-index.json.sig verifies raw; else the round, nothing
     installed (check_signature): SETTLING the first time, with a debug line;
-    then UNSUPPORTED for a key this version does not know, said once at
-    info, or FAILED."""
-    check = await check_signature(session, SIGNATURE_URL, raw, "mav-index.json", partial(_may_settle, hass, _SIGNATURE))
+    then FAILED, a warning once (also for a key this version does not know:
+    a newer key, another deploy's signature, or not the site's, on its
+    first UNKNOWN_KEY_DAYS days), or UNSUPPORTED for one known for longer,
+    said once at info."""
+    check = await check_signature(
+        hass, session, SIGNATURE_URL, raw, "mav-index.json", partial(_may_settle, hass, _SIGNATURE)
+    )
     if check is None:
         _matched(hass, _SIGNATURE)
         return None
@@ -643,9 +675,9 @@ async def _signed(hass: HomeAssistant, session: aiohttp.ClientSession, raw: byte
             " in %d s", err, PAGES_SETTLE_DELAY,
         )
     elif check.result == UNSUPPORTED:
-        _log_failure(hass, f"{err}: the site signs with a newer key", unsupported=True)
+        _log_failure(hass, signature_message(check), unsupported=True)
     else:
-        _log_failure(hass, str(err))
+        _log_failure(hass, signature_message(check))
     return DailyRound(check.result, error=str(err), reason=check.reason)
 
 

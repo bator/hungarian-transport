@@ -16,10 +16,13 @@ when:
   signed the same way). A missing or bad signature installs nothing: the
   manifest names the sha256 of everything else, so the signature is what
   ties the whole download to the repository rather than to whoever answers
-  for bator.github.io. A well-formed signature none of the keys verifies,
-  also when looked at again (SETTLING), is UNSUPPORTED, reason "unknown_key"
-  (the site signs with a newer key: an update of the integration reads it),
-  said once at info, with no retries;
+  for bator.github.io. A well-formed signature none of the keys verifies
+  (reason "unknown_key": signed by a key this version does not know: a
+  newer key, another deploy's signature, or not the site's), also when
+  looked at again (SETTLING), is FAILED, with the normal retries, until it
+  has been so on more than mav_daily.UNKNOWN_KEY_DAYS consecutive days:
+  then UNSUPPORTED (an update of the integration may read it), said once at
+  info, with no retries;
 - the manifest's format is the one this code reads and its schema is
   INDEX_SCHEMA, the one the cards read (else it says so once and installs
   nothing: an older or newer integration publishes for other cards);
@@ -40,7 +43,11 @@ when:
   operator rule above takes for news). Then only a Pages index newer by the
   updater's strict rule (updater_newer: every operator still there, none
   older, an undated one unchanged, one later) replaces it; else SUPERSEDED,
-  reason "release_newer", until the site rebuilds against this release. A
+  reason "release_newer", until the site rebuilds against this release, or
+  until the served index's newest dated feed is more than RELEASE_STALE
+  older than the Pages index's (release_stale: a -rev beta is never a
+  baseline, and would wait for the next stable release): then the operator
+  rule decides. A
   version not newer than release_version (one that has not updated to it
   yet, or that release itself), or an entry without one, goes by the
   operator rule: the build knew this version's index or a newer one. The
@@ -164,6 +171,14 @@ MAX_FEED = 4096
 # the version ("bkk:20271231", "...29991231"), and taken at its word it
 # would freeze the index: no real build is newer until that day.
 MAX_FEED_AHEAD = timedelta(days=400)
+# decide's release rule keeps a newer release's city index from a Pages
+# build of an older baseline until the site rebuilds against this release.
+# A -rev beta's index is never a baseline (only a stable release starts
+# one), so on a beta that wait lasts until the next stable release, while
+# the served feeds age: once the newest dated feed of the served index is
+# more than this older than the newest of Pages', the operator rule
+# decides again. Pages rebuilds the city index weekly.
+RELEASE_STALE = timedelta(days=21)
 MANIFEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 INDEX_TIMEOUT = aiohttp.ClientTimeout(total=300)
 SHARD_TIMEOUT = aiohttp.ClientTimeout(total=120)
@@ -517,6 +532,21 @@ def volan_newer(pages: str, installed: str | None, today: date | None = None) ->
     return day is not None and (other is None or day > other)
 
 
+def _newest_day(feed: str | None, today: date) -> date | None:
+    """The latest date among a city feed's operators (_day), or None."""
+    days = [day for version in timetables.city_feeds(feed).values() if (day := _day(version, today)) is not None]
+    return max(days) if days else None
+
+
+def release_stale(pages: str, served: str | None, today: date | None = None) -> bool:
+    """Whether the served city index (a release's) is behind the Pages one
+    of feed pages by more than RELEASE_STALE: the newest dated operator
+    feed of each. False when either has none."""
+    today = today or _today()
+    new, old = _newest_day(pages, today), _newest_day(served, today)
+    return new is not None and old is not None and new - old > RELEASE_STALE
+
+
 def release_newer(running: Any, release_version: str | None) -> bool:
     """Whether running, the version of this integration (an AwesomeVersion,
     "1.10.26-rev.1"), is newer than release_version, the tag of the stable
@@ -554,7 +584,8 @@ def decide_why(
     SERVED_NEWER (www/ serves an index Pages' does not beat by the operator
     rule), RELEASE_NEWER (www/ serves the city index of a release newer
     than the one the Pages build started from, release_version, and Pages'
-    is not newer by the strict rule). running is this integration's
+    is not newer by the strict rule, and the served one is not
+    release_stale). running is this integration's
     version; pages_install what this module last installed
     (storage.TIMETABLES_INSTALL): the served index is that install when its
     feed and size are the record's."""
@@ -582,10 +613,14 @@ def decide_why(
             # operator this one added or an undated feed it updated, which
             # the operator rule takes for news. Only a strictly newer one
             # replaces it; the site rebuilds against this release within
-            # days of its release, a beta's index is never its baseline.
+            # days of its release, a beta's index is never its baseline:
+            # once the served feeds are RELEASE_STALE behind Pages', the
+            # operator rule decides (a beta would otherwise wait for the
+            # next stable release while its feeds run out).
             if updater_newer(feed, current, today):
                 return _INSTALL, None
-            return SUPERSEDED, RELEASE_NEWER
+            if not release_stale(feed, current, today):
+                return SUPERSEDED, RELEASE_NEWER
     newer = city_newer(feed, current, today) if name == "city" else volan_newer(feed, current, today)
     return (_INSTALL, None) if newer else (SUPERSEDED, SERVED_NEWER)
 
@@ -920,12 +955,14 @@ async def _signed(hass: HomeAssistant, session: aiohttp.ClientSession, raw: byte
     """None when timetables.json.sig verifies raw; else the round
     (mav_daily.check_signature): SETTLING the first time (right after a
     deploy the cache can pair the new manifest with the old signature, or
-    still answer 404 for it); after that UNSUPPORTED for a well-formed
-    signature no key verifies (UNKNOWN_KEY: the site signs with a newer key),
-    said once at info and not retried, else FAILED. Nothing is installed
-    without a signature."""
+    still answer 404 for it); after that FAILED, also for a well-formed
+    signature no key verifies (UNKNOWN_KEY: signed by a key this version
+    does not know: a newer key, another deploy's signature, or not the
+    site's), until that has been so on more than mav_daily.UNKNOWN_KEY_DAYS
+    consecutive days: then UNSUPPORTED, said once at info and not retried.
+    Nothing is installed without a signature."""
     check = await mav_daily.check_signature(
-        session, SIGNATURE_URL, raw, "timetables.json", partial(_may_settle, hass, _SIGNATURE)
+        hass, session, SIGNATURE_URL, raw, "timetables.json", partial(_may_settle, hass, _SIGNATURE)
     )
     if check is None:
         _matched(hass, _SIGNATURE)
@@ -937,9 +974,9 @@ async def _signed(hass: HomeAssistant, session: aiohttp.ClientSession, raw: byte
             " generation, looking again in %d s", err, mav_daily.PAGES_SETTLE_DELAY,
         )
     elif check.result == UNSUPPORTED:
-        _log_failure(hass, "manifest", f"{err}: the site signs with a newer key", unsupported=True)
+        _log_failure(hass, "manifest", mav_daily.signature_message(check), unsupported=True)
     else:
-        _log_failure(hass, "manifest", str(err))
+        _log_failure(hass, "manifest", mav_daily.signature_message(check))
     return _every(check.result, str(err), check.reason)
 
 
@@ -989,26 +1026,74 @@ async def async_update(hass: HomeAssistant, www: Path) -> TimetablesRound:
     return TimetablesRound(results, built)
 
 
+# This integration's manifest.json on disk, and what _version_on_disk read
+# of it: (mtime_ns, size, version).
+_MANIFEST_FILE = Path(__file__).with_name("manifest.json")
+_version_cache: dict[Path, tuple[int, int, Any]] = {}
+
+
+def _version_on_disk(path: Path) -> Any:
+    """The version manifest.json at path names, an AwesomeVersion; None
+    when it cannot be read or names none. Read again only when its mtime or
+    size changed."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    cached = _version_cache.get(path)
+    if cached is not None and cached[:2] == (st.st_mtime_ns, st.st_size):
+        return cached[2]
+    version: Any = None
+    try:
+        if st.st_size <= MAX_MANIFEST:
+            data = jsonsafe.loads(path.read_bytes())
+            value = data.get("version") if isinstance(data, dict) else None
+            if isinstance(value, str) and value:
+                version = AwesomeVersion(value)
+    except (OSError, ValueError, RecursionError) as err:
+        _LOGGER.debug("Could not read the version of %s: %s", path, err)
+    _version_cache[path] = (st.st_mtime_ns, st.st_size, version)
+    return version
+
+
 async def _running_version(hass: HomeAssistant) -> Any:
-    """This integration's version (its manifest.json, which the release
-    workflow sets to the tag), an AwesomeVersion; None when unknown."""
+    """This integration's version, an AwesomeVersion (its manifest.json,
+    which the release workflow sets to the tag); None when unknown. Read
+    from the file on disk, not the integration Home Assistant loaded: a
+    HACS update replaces custom_components/ and www/ at once, before the
+    restart that loads the new code, and decide's release rule is about the
+    city index www/ serves, which is already the new release's. The loaded
+    version when the file does not read."""
+    version = await hass.async_add_executor_job(_version_on_disk, _MANIFEST_FILE)
+    if version is not None:
+        return version
     try:
         return (await async_get_integration(hass, DOMAIN)).version
     except IntegrationNotFound:
         return None
 
 
-async def _wait_out(task: asyncio.Future[Any]) -> None:
-    """Until task is done, through every cancel of the caller meanwhile (a
-    stop, then another): the caller's cleanup never runs beside it. Its
-    exception is taken, so it is not logged as never retrieved."""
-    while not task.done():
+async def _wait_out(fut: asyncio.Future[Any]) -> bool:
+    """Until fut is done, through every cancel of the calling task meanwhile
+    (a stop, then another); whether there was one. Each cancel is taken back
+    at once (Task.uncancel): Home Assistant's own stop cancels the
+    background tasks first and then waits (async_block_till_done) only for
+    the tasks that are not being cancelled, so a round that still counted
+    as cancelled would not be waited for. The caller raises CancelledError
+    when it is done. fut's exception is taken, so it is not logged as never
+    retrieved."""
+    cancelled = False
+    while not fut.done():
         try:
-            await asyncio.wait([task])
+            await asyncio.wait([fut])
         except asyncio.CancelledError:
-            continue
-    if not task.cancelled():
-        task.exception()
+            cancelled = True
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+    if not fut.cancelled():
+        fut.exception()
+    return cancelled
 
 
 async def _update_index(
@@ -1079,29 +1164,38 @@ async def _update_index(
             _clear_failure(hass, name)
             return IndexResult(decision, feed, reason=why)
 
-        async def install(staged: Path | None) -> None:
-            await hass.async_add_executor_job(
-                _commit, www, name, raw, entry["shapes"], staged, token, entry["built_at"]
-            )
+        # The commit runs in the executor as a plain future
+        # (loop.run_in_executor), neither a task nor an executor job of
+        # Home Assistant's: those a stop cancels (Home Assistant's own stop
+        # cancels every executor job a background task started, and at its
+        # last stage every task it still tracks), and a cancelled one is
+        # done while its thread goes on, so the cleanup below would run
+        # beside the commit and the record would be lost. Nothing cancels
+        # this future: the round waits for it through every cancel
+        # meanwhile (_wait_out, which takes each cancel back, so that Home
+        # Assistant's stop waits for the round), then for the record the
+        # same way, and only then cleans up and raises the cancel.
+        commit = hass.loop.run_in_executor(
+            None, partial(_commit, www, name, raw, entry["shapes"], tmp, token, entry["built_at"])
+        )
+        cancelled = await _wait_out(commit)
+        error = commit.exception()
+        if error is None:
+            tmp = None
             # With the commit, never without it: an index of this module's
             # without its record reads as a release's (decide's release
             # rule would keep it from every later build).
-            await storage.async_record_timetables_install(hass, name, feed, entry["sha256"], entry["size"])
-
-        # A task of Home Assistant's own (tracked: its stop waits for it),
-        # not of this round, which a stop (unload, Home Assistant stopping)
-        # cancels: the round waits for the commit and its record, also
-        # through a second cancel, so the cleanup below never runs beside
-        # the commit and a committed index is always recorded.
-        work = hass.async_create_task(install(tmp), f"hungarian_transport_pages_{name}_install")
-        try:
-            await asyncio.shield(work)
-        except asyncio.CancelledError:
-            await _wait_out(work)
-            raise
-        except mav_daily.DailyIndexError as err:
-            return failed(err)
-        tmp = None
+            record = hass.loop.create_task(
+                storage.async_record_timetables_install(hass, name, feed, entry["sha256"], entry["size"]),
+                name=f"hungarian_transport_pages_{name}_record",
+            )
+            cancelled = await _wait_out(record) or cancelled
+        if cancelled:
+            raise asyncio.CancelledError
+        if isinstance(error, mav_daily.DailyIndexError):
+            return failed(error)
+        if error is not None:
+            raise error
     finally:
         if tmp is not None and not keep:
             await hass.async_add_executor_job(partial(_rmtree, tmp, ignore_errors=True))
@@ -1131,8 +1225,10 @@ class PagesTimetables:
     (timetable_notify.py); then the indexes it settled are recorded for the
     sensors (storage.PAGES_ROUND, with each one's reason; an index still
     settling is marked so on its last settled record). stop() cancels a
-    round: one cancelled during its commit waits for the commit and its
-    install record (storage.TIMETABLES_INSTALL), and reports nothing else."""
+    round: one cancelled during its commit (by stop(), or by Home
+    Assistant's own stop, which then waits for it) waits for the commit and
+    its install record (storage.TIMETABLES_INSTALL), and reports nothing
+    else."""
 
     def __init__(
         self,
@@ -1202,7 +1298,8 @@ class PagesTimetables:
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001 - logged once, the next round tries again
-            done = _every(FAILED, _crash(self._hass, "round", err))
+            message = _crash(self._hass, "round", err)
+            done = _every(FAILED, message, message[:mav_daily.MAX_REASON])
         else:
             # The next crash is news again.
             _clear_failure(self._hass, "round")

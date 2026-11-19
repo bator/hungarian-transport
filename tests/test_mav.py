@@ -921,8 +921,14 @@ async def test_stopping_cancels_a_running_build(
     assert "building" not in state and "failed" not in state and "interrupted" not in state
     assert mav._needs_build(mav_source, card_assets / mav.INDEX_NAME, mav.state_path(hass))
     assert ir.async_get(hass).async_get_issue(DOMAIN, mav.ISSUE_BUILD_FAILED) is None
+    # The next start builds again, with the real builder (the slow runner
+    # would only sleep out its 120 s and be taken for an interruption).
+    monkeypatch.setattr(mav, "BUILD_RUNNER", Path(mav_index.__file__))
     await mav.async_build_if_needed(hass, card_assets)
-    assert "interrupted" not in mav._read_state(mav.state_path(hass))
+    state = mav._read_state(mav.state_path(hass))
+    assert "interrupted" not in state and "failed" not in state
+    assert (card_assets / mav.INDEX_NAME).is_file()
+    assert len(procs) == 2
 
 
 async def test_stopping_cancels_a_queued_build(

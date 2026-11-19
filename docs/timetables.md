@@ -486,11 +486,17 @@ ships a list of public keys (`PAGES_PUBLIC_KEYS` in `mav_daily.py`, the
 current one first) and takes a signature by any of them, so the key can
 change without breaking installs: a new key goes into the list a release
 before the site signs with it, the old one leaves a release later. A
-well-formed signature that none of the listed keys verifies, also when
-looked at again, is `unsupported` with reason `unknown_key` (the site signs
-with a key newer than this version: update the integration), said once in
-the log at info level, not retried, and no failure of the daily MÁV check
-(no failure streak).
+well-formed signature that none of the listed keys verifies has reason
+`unknown_key`: it is signed by a key this version does not know: a newer
+key, another deploy's signature, or not the site's, and the integration
+cannot tell which. Looked at again and still so, it is a failed round like
+any other, with the usual retries (and a day of the daily MÁV check's
+failure streak), on 3 consecutive days (`UNKNOWN_KEY_DAYS`; a day without
+it starts the count over, a signature that verifies ends it). From the
+fourth day on it is `unsupported` (the site most likely signs with a key
+newer than this version: update the integration), said once in the log at
+info level, not retried, and neither a failure nor a success of the daily
+MÁV check (a failure streak it left open stays open).
 
 Because the indexes are the stable release's, the site's `schema` changes
 only with a release: the first run after a release that changes the index
@@ -626,7 +632,15 @@ one in use:
   newer by the local updater's strict rule replaces it (every operator
   still there, none dated older, an undated one unchanged, one later);
   otherwise it stays (`superseded`, reason `release_newer`) until the site
-  rebuilds against this release. A version not newer than
+  rebuilds against this release. A `-rev` beta is never a baseline (only a
+  stable release starts a rebuild), so on a beta that could last until the
+  next stable release while the index's feeds age: once the newest dated
+  feed of the index in use is more than 21 days older than the newest of
+  the site's index (`RELEASE_STALE`), the operator rule decides again. The
+  integration's own version is the one in
+  `custom_components/hungarian_transport/manifest.json` on disk, not the
+  one Home Assistant loaded: a HACS update replaces the release's files and
+  its indexes before the restart. A version not newer than
   `release_version` (one that has not updated to that release yet, or that
   release itself) goes by the operator rule, since the site's build knew
   its index or a newer one; so does an entry without `release_version`.
@@ -921,10 +935,12 @@ integration leaves it, so the two never take turns), `not_published` (the
 manifest has no entry for this index), `failed` (the manifest, its signature or the download did not check out;
 the index stays as it was), `unsupported` (a manifest format or index
 schema this version does not read, or a signature by a key it does not
-know), or `disabled` with the *Weekly Volán and city timetables from GitHub*
+know on more than 3 days in a row), or `disabled` with the *Weekly Volán and city timetables from GitHub*
 option off. `pages_reason` says why an index was not installed:
 `served_newer` or `release_newer` (`superseded`, above), `bad_signature`
-(the signature is missing, malformed or does not verify), `unknown_key`,
+(the signature is missing, malformed or does not verify), `unknown_key`
+(signed by a key this version does not know: a newer key, another deploy's
+signature, or not the site's; `failed` on its first 3 days),
 `not_found` (a file the manifest names is not on the site), `mismatch` (a
 download is not the file the manifest describes), else the error's text
 (at most 120 characters). `pages_settling` is the reason of a check still
