@@ -393,7 +393,9 @@ before, and the card fills the board from Transitous.
   planner limit (see [Polling](#polling)): 0.25 a second with a burst of
   15, within the total's 0.5 and 30. A call failing fast on a rejected key,
   or answered by the planner first in FUTÁR's outage, first takes a token
-  of FUTÁR's own rate limit, as a call to FUTÁR would.
+  of FUTÁR's own rate limit, as a call to FUTÁR would; one the planner
+  cannot take after all (its share used up, or no answer) asks FUTÁR with
+  that same token: one request, one token.
 - **Failures.** The planner failing (no answer, a timeout, HTTP 5xx, 429
   or 403, a page that is not JSON: a maintenance or Cloudflare page) is
   not asked for 30 s, by the realtime hub either, logged once. A

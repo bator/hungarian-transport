@@ -2485,6 +2485,24 @@ def _counting_futar(monkeypatch, clock: FakeClock, results: list) -> list:
     return calls
 
 
+class _FutarTokens:
+    """The tokens of a proxy's FUTÁR limit its requests took since the last
+    taken(): the bucket's tokens before and after, what it refilled
+    meanwhile (the clock moved, after the request took its token) added
+    back. Exact as long as the bucket was not full again by then: read it
+    (taken()) after the clock is moved, before the requests counted."""
+
+    def __init__(self, proxy: futar.FutarProxy, clock: FakeClock) -> None:
+        self._proxy, self._clock = proxy, clock
+        self._tokens, self._at = proxy.tokens, clock.now
+
+    def taken(self) -> float:
+        tokens, at = self._proxy.tokens, self._clock.now
+        taken = self._tokens + futar.FUTAR_RATE * (at - self._at) - tokens
+        self._tokens, self._at = tokens, at
+        return round(taken, 9)
+
+
 async def test_in_futars_outage_the_planner_answers_first(make_planner, aioclient_mock, monkeypatch) -> None:
     """FUTÁR down (hanging its whole timeout): once its outage stands, the
     boards and trip details a card polls are answered by the planner at
@@ -2502,9 +2520,13 @@ async def test_in_futars_outage_the_planner_answers_first(make_planner, aioclien
     started = clock.now
     for i in range(5):
         clock.now += 5
+        tokens = _FutarTokens(proxy, clock)
         doc = await proxy.get(BOARD, dict(BOARD_PARAMS, stopId=f"BKK_F1{i:04d}"))
         assert doc["source"] == "mavplusz"
+        # Each the one token of FUTÁR's limit a request takes, not asked of FUTÁR.
+        assert tokens.taken() == 1
         assert (await proxy.get(TRIP, _trip_params(i)))["source"] == "mavplusz"
+        assert tokens.taken() == 1
     # No FUTÁR wait: the 5 s steps, and the trip details' batch window.
     assert len(calls) == 1 and clock.now - started == pytest.approx(25 + 5 * mb.TRIP_BATCH_WAIT)
     # Search is FUTÁR's alone: asked as before.
@@ -2543,6 +2565,7 @@ async def test_futars_outage_is_probed_once_every_thirty_seconds(make_planner, a
     # The probe is due: one request asks FUTÁR (cut short), the others beside it do not.
     clock.now += 1
     gate.clear()
+    tokens = _FutarTokens(proxy, clock)
     probe = asyncio.ensure_future(proxy.get(BOARD, dict(BOARD_PARAMS, stopId=next(stops))))
     for _ in range(5):
         await asyncio.sleep(0)
@@ -2551,6 +2574,9 @@ async def test_futars_outage_is_probed_once_every_thirty_seconds(make_planner, a
     assert calls == [futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC, futar.FUTAR_FALLBACK_TIMEOUT_SEC]
     gate.set()
     assert (await probe)["source"] == "mavplusz"
+    # One token each: the probe's for FUTÁR (the planner after it takes
+    # none), the three beside it for the planner asked first.
+    assert tokens.taken() == 4
     # The next probe FUTAR_OUTAGE_PROBE_SEC after the failed one; FUTÁR answers it.
     clock.now += futar.FUTAR_OUTAGE_PROBE_SEC - 1
     await proxy.get(BOARD, dict(BOARD_PARAMS, stopId=next(stops)))
@@ -2560,8 +2586,10 @@ async def test_futars_outage_is_probed_once_every_thirty_seconds(make_planner, a
     assert (await proxy.get(BOARD, dict(BOARD_PARAMS, stopId=next(stops))))["from"] == "futar"
     # The outage is over: every request asks FUTÁR first, with its whole budget.
     asked = len(fake.asked)
+    tokens = _FutarTokens(proxy, clock)
     for _ in range(3):
         assert (await proxy.get(BOARD, dict(BOARD_PARAMS, stopId=next(stops))))["from"] == "futar"
+    assert tokens.taken() == 3
     assert calls[-3:] == [futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC] * 3 and len(fake.asked) == asked
 
 
@@ -2570,22 +2598,63 @@ async def test_in_futars_outage_what_the_planner_cannot_answer_asks_futar(make_p
     asked as before, with the card's whole budget; the planner is not
     asked again after FUTÁR failed. One the planner was asked first for
     and had no answer asks FUTÁR with what is left of the budget, no
-    fallback after it."""
+    fallback after it, and with the token it took for the planner: it took
+    two, so in FUTÁR's outage every such request spent FUTÁR's limit twice
+    as fast."""
     boards, fake, clock = make_planner()
     calls = _counting_futar(monkeypatch, clock, ["fail"])
     proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    tokens = _FutarTokens(proxy, clock)
     unknown = dict(BOARD_PARAMS, stopId="BKK_005510017")
     with pytest.raises(futar.FutarError):
         await proxy.get(BOARD, unknown)  # the outage starts; the planner's null
     assert len(fake.asked) == 1 and not boards.can_answer(BOARD, unknown)
+    assert tokens.taken() == 1  # FUTÁR's; the planner after it takes none
     with pytest.raises(futar.FutarError, match="HTTP 503"):
         await proxy.get(BOARD, dict(unknown, minutesAfter="61"))
     whole = futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
     assert calls == [(BOARD, whole), (BOARD, whole)] and len(fake.asked) == 1
+    assert tokens.taken() == 1
     # Asked first, the planner has no answer (a trip it does not know): FUTÁR then, once.
     with pytest.raises(futar.FutarError, match="HTTP 503"):
         await proxy.get(TRIP, {"tripId": "BKK_D99999999"})
     assert calls[-1] == (TRIP, pytest.approx(whole - mb.TRIP_BATCH_WAIT)) and len(fake.asked) == 2
+    assert tokens.taken() == 1
+    assert proxy.tokens == pytest.approx(futar.FUTAR_BURST - 3 + futar.FUTAR_RATE * mb.TRIP_BATCH_WAIT)
+
+
+async def test_in_futars_outage_a_planner_out_of_its_share_asks_futar_with_one_token(
+    make_planner, aioclient_mock, monkeypatch
+) -> None:
+    """The planner can answer, but its share is gone by the time its token
+    is reserved (another request took it while this one took FUTÁR's):
+    FUTÁR is asked as before, with the token taken for the planner, not a
+    second one; the planner has none for after it either, and FUTÁR's
+    error stands."""
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(fallback_burst=2, monotonic=clock.monotonic)
+    boards, fake, clock = make_planner(clock, limiter=limiter)
+    calls = _counting_futar(monkeypatch, clock, ["fail"])
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards, burst=10)
+    assert (await proxy.get(BOARD, BOARD_PARAMS))["source"] == "mavplusz"  # the outage starts
+    assert proxy.tokens == 9 and len(fake.asked) == 1
+    real_reserve = boards.reserve
+
+    def reserve(path, params):
+        while limiter.take(fallback=True, quiet=True):
+            pass  # the share goes to the other requests of the dashboard
+        return real_reserve(path, params)
+
+    monkeypatch.setattr(boards, "reserve", reserve)
+    other = dict(BOARD_PARAMS, stopId="BKK_F00941")
+    assert boards.can_answer(BOARD, other)
+    with pytest.raises(futar.FutarError, match="HTTP 503"):
+        await proxy.get(BOARD, other)
+    whole = futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
+    assert calls == [(BOARD, whole), (BOARD, whole)] and len(fake.asked) == 1
+    # One token for the one request (it took two: FUTÁR's limit ran out
+    # twice as fast, and its requests waited, then were refused, sooner).
+    assert proxy.tokens == 8
 
 
 async def test_the_planner_asked_first_takes_futars_token_too(make_planner, aioclient_mock, monkeypatch) -> None:
@@ -2596,10 +2665,12 @@ async def test_the_planner_asked_first_takes_futars_token_too(make_planner, aioc
     _counting_futar(monkeypatch, clock, ["fail"])
     proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards, burst=2)
     assert (await proxy.get(BOARD, BOARD_PARAMS))["source"] == "mavplusz"  # FUTÁR's token, the outage starts
+    assert proxy.tokens == 1
     assert (await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="61")))["source"] == "mavplusz"
+    assert proxy.tokens == 0
     with pytest.raises(futar.FutarRateLimited):
         await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="62"))
-    assert len(fake.asked) == 1
+    assert len(fake.asked) == 1 and proxy.tokens == 0
 
 
 async def test_a_board_is_cached_across_a_cards_polls(make_planner, aioclient_mock, monkeypatch) -> None:
