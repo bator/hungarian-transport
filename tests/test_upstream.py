@@ -157,6 +157,22 @@ def test_an_outage_is_said_once_and_its_end_once(caplog) -> None:
     ]
 
 
+def test_an_outage_may_carry_its_traceback_once(caplog) -> None:
+    """exc_info (a bug's error, realtime's _mav_bug): its traceback with the
+    one warning, nothing when the outage was said already."""
+    caplog.set_level(logging.INFO, logger=_LOGGER.name)
+    log = upstream.OutageLog(_LOGGER)
+    try:
+        {}["stopTimes"]
+    except KeyError as err:
+        bug = err
+    log.failed("parse", "not read (%s)", "x", exc_info=bug)
+    log.failed("parse", "not read (%s)", "x", exc_info=bug)
+    (record,) = [r for r in caplog.records if r.name == _LOGGER.name]
+    assert record.levelno == logging.WARNING and record.exc_info[1] is bug
+    assert "stopTimes" in caplog.text and "Traceback" in caplog.text
+
+
 def test_keys_have_their_own_outages(caplog) -> None:
     caplog.set_level(logging.INFO, logger=_LOGGER.name)
     log = upstream.OutageLog(_LOGGER)

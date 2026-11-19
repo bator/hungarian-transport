@@ -126,6 +126,19 @@ key** checkbox.
 - Leave the field empty and save to keep the stored key (it is never shown).
   Tick **Remove the stored key** and save to remove it.
 - The field hides the key while you type.
+- **Ask mavplusz.hu (MÁV's journey planner)** (on by default): while a
+  card is shown, the integration asks MÁV's journey planner at
+  `mavplusz.hu` for the live delays and vehicle positions of the trips it
+  shows: MÁV and GYSEV trains, Volán intercity and Volánbusz local buses,
+  Paks, Debrecen, Veszprém and Miskolc. It sends trip ids, route ids and
+  service dates, no personal data and no key; with a BKK key, and only
+  while BKK FUTÁR does not answer, also the ids of the Budapest stops and
+  trips the cards show, so their boards still come with live times.
+  Untick it and Home Assistant sends nothing to `mavplusz.hu`: trains and
+  buses read only the GTFS-Realtime feeds on `jbb.ghsq.de`, and a
+  Budapest board FUTÁR cannot answer is filled from Transitous. A request
+  already on its way when you save stops there too. See
+  [Live delays and positions](../realtime.md).
 - **Daily MÁV route index from GitHub** (on by default): once a day the
   integration checks `bator.github.io` for the train route index built that
   day from MÁV's newest timetable, and uses it when it is newer than the

@@ -130,6 +130,20 @@ beállításait és a menetrend-értesítéseket nyitja meg.
 - Hagyd üresen a mezőt, és ments: a tárolt kulcs megmarad (nem jelenik meg).
   A **Tárolt kulcs törlése** jelölőnégyzettel és mentéssel törölheted.
 - A mező gépelés közben is elrejti a kulcsot.
+- **mavplusz.hu (a MÁV útvonaltervezője) használata** (alapból
+  bekapcsolva): amíg egy kártya látszik, az integráció a rajta lévő
+  járatok élő késését és járműpozícióját a MÁV útvonaltervezőjétől
+  (`mavplusz.hu`) kérdezi le: MÁV- és GYSEV-vonatok, a Volán helyközi és
+  a Volánbusz helyi járatai, Paks, Debrecen, Veszprém és Miskolc buszai.
+  Járat- és vonalazonosítókat meg üzemnapokat küld, személyes adatot és
+  kulcsot nem. BKK kulccsal, és csak amíg a BKK FUTÁR nem válaszol, a
+  kártyákon lévő budapesti megállók és járatok azonosítóit is, hogy a
+  tábláikon akkor is élő idők legyenek. Kikapcsolva a Home Assistant
+  semmit nem küld a `mavplusz.hu`-ra: a vonatok és a buszok csak a
+  `jbb.ghsq.de` GTFS-Realtime feedjeit olvassák, a FUTÁR által meg nem
+  válaszolt budapesti táblát pedig a Transitous tölti ki. A mentéskor
+  már úton lévő kérés sem megy el. Részletek:
+  [Live delays and positions](../realtime.md).
 - **Napi MÁV útvonal-index a GitHubról** (alapból bekapcsolva): az
   integráció naponta egyszer megnézi a `bator.github.io` oldalon az aznap
   a MÁV legfrissebb menetrendjéből épített vonatútvonal-indexet, és

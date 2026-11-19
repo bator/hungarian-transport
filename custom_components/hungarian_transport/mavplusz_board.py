@@ -417,12 +417,8 @@ def _seconds(value: Any) -> int | None:
     return seconds if seconds is not None and _SECONDS_MIN <= seconds <= _SECONDS_MAX else None
 
 
-def _num(value: Any) -> float | None:
-    """mavplusz._num, None also for an int no float holds (10 ** 400)."""
-    try:
-        return mavplusz._num(value)
-    except OverflowError:
-        return None
+# mavplusz's: None also for an int no float holds (10 ** 400).
+_num = mavplusz._num
 
 
 def _epoch(day: int | None, seconds: int | None) -> int | None:
@@ -829,13 +825,17 @@ class _Batch:
 
 def _decode_parse(parse: Callable[[Any], Any], body: bytearray) -> Any:
     """parse of the decoded answer body: decoding errors as they are (an
-    answer that is no JSON, nested too deep), parse's own as _Unparsed. A
-    body of EXECUTOR_BYTES or more is decoded as futar._decode does, which
-    lets the event loop run in between while this runs in the executor."""
+    answer that is no JSON, nested too deep), parse's own as _Unparsed, but
+    for a bug of parse's code (mavplusz.parse_bug: a TypeError, KeyError
+    and the like), which goes up as it is for _post to say so. A body of
+    EXECUTOR_BYTES or more is decoded as futar._decode does, which lets
+    the event loop run in between while this runs in the executor."""
     doc = futar._decode(body) if len(body) >= EXECUTOR_BYTES else jsonsafe.loads(body)
     try:
         return parse(doc)
-    except (ValueError, KeyError, TypeError, OverflowError, OSError) as err:
+    except mavplusz.PARSE_BUGS:
+        raise
+    except (ValueError, OSError) as err:
         raise _Unparsed(str(err)[:200] or type(err).__name__) from None
 
 
@@ -1446,7 +1446,10 @@ class PlannerBoards:
         JSON: a maintenance or Cloudflare page) backs every planner request
         off and is logged once per outage; a failure of this request alone
         (_RequestFailed: an answer over cap, nested too deep, another HTTP
-        status, one parse cannot read) is neither. An answer of
+        status, one parse cannot read, one not decoded within timeout:
+        mavplusz.DecodeTimeout) is neither. A bug of parse's code
+        (mavplusz.parse_bug) is that request's failure too, and a warning
+        with its traceback once until an answer is read again. An answer of
         EXECUTOR_BYTES or more is decoded and parsed in the executor
         (_decode_parse): parse must not touch this object's state."""
         if self._rate.backing_off():
@@ -1465,6 +1468,17 @@ class PlannerBoards:
             )
         except _Unparsed as err:
             raise self._request_failed(err) from None
+        except mavplusz.PARSE_BUGS as err:
+            # Not the answer's fault but this code's: said, never silently
+            # read off Transitous for good.
+            self._outages.failed(
+                "parse",
+                "mavplusz.hu answer for a BKK board not read (%s), a bug of this integration; "
+                "not logged again until one is read",
+                str(err)[:200] or type(err).__name__,
+                exc_info=err,
+            )
+            raise self._request_failed(err) from None
         except mavplusz.TooLarge as err:
             raise self._request_failed(err) from None
         except (json.JSONDecodeError, UnicodeDecodeError) as err:
@@ -1478,6 +1492,7 @@ class PlannerBoards:
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
             raise self._failed(err) from None
         self._outages.answered(None, "mavplusz.hu answers for BKK boards again")
+        self._outages.answered("parse", "mavplusz.hu answers for BKK boards are read again")
         return doc
 
     def _failed(self, err: BaseException) -> PlannerError:

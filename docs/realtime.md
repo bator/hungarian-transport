@@ -183,11 +183,22 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   the planner's. The planner failing (no answer, a timeout, HTTP 5xx, 429
   or 403, an answer that is not JSON) backs every planner request off for
   a minute, the BKK boards' too (see Outages). A request failing for its
-  own sake (an answer over its cap or of the wrong shape, a GraphQL error
-  not tied to one trip, another HTTP 4xx) backs nothing off: only its
-  trips (or route lists) are not asked of the planner for that minute,
-  and are matched on the feeds meanwhile; another card's trips are asked
-  as before, and it is logged at debug level only. When the call's planner round,
+  own sake (an answer over its cap, a GraphQL error not tied to one trip,
+  another HTTP 4xx, an answer its decoding in the executor did not finish
+  within the request's timeout) backs nothing off and is logged at debug
+  level only. A request of one trip (or route list) holds that one back
+  for a minute, matched on the feeds meanwhile; one of several holds none
+  back: for the next 15 minutes each of its trips goes in a request of
+  half as many trips at most, down to the one that fails it alone, which
+  alone is held (a trip that had no answer lately goes after the others,
+  so it never takes every round from them); another card's trips are
+  asked as before. A trip of the wrong shape in an answer is that trip's
+  failure alone (held for the minute), the others are answered. A bug of
+  the integration's own reading of an answer (a `TypeError`, `KeyError`
+  and the like, which no answer causes) holds its trips back as well and
+  is logged as a warning with its traceback, once until an answer is read
+  again, rather than moving all MÁV realtime to the feeds without a word.
+  When the call's planner round,
   waiting for other cards' requests and, after a restart, the static train
   numbers' download included, takes over 20 s (a request is begun only
   with at least 10 s of that left, so waiting alone is no outage; numbers
@@ -406,7 +417,11 @@ before, and the card fills the board from Transitous.
   that names one trip of a batch (OTP's `DataFetchingException` of a bad
   id or date has the alias as its path), or one trip of the wrong shape,
   makes that trip no answer (not asked for 10 minutes) and leaves the
-  others'.
+  others'. An answer decoded in the executor gets what is left of the
+  request's timeout and no more: past it the request fails for its own
+  sake. A bug of the integration's reading of an answer is that
+  request's failure too, and a warning with its traceback once until an
+  answer is read again.
 - **FUTÁR's outage.** Once FUTÁR failed (and until it answers again), a
   board or trip details the planner can answer is asked of the planner
   first, at once, and FUTÁR is not waited for: before, every poll waited
@@ -486,7 +501,9 @@ before, and the card fills the board from Transitous.
   then read only the `jbb.ghsq.de` feeds (as before 1.10.19), and a
   Budapest board or trip FUTÁR cannot answer gets FUTÁR's error, so the
   card fills it from Transitous. Saving the option reloads the entry; the
-  next card poll follows it. Removing the `"mavplusz": true` keys from
+  next card poll follows it, and the one rate limit every planner request
+  takes its token from reads the option too, so a request already on its
+  way (a poll queued behind another card's) is not sent after it either. Removing the `"mavplusz": true` keys from
   `realtime_feeds.json` turns only the delays off; without a FUTÁR key no
   BKK board is asked of the planner either way.
 - **Not redistributed.** The integration does not republish any feed or
