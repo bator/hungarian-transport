@@ -185,7 +185,7 @@ The files:
 | `mav-gtfs.zip` | MÁV's official GTFS, byte for byte as downloaded for this build (CC0) |
 | `mav-pfaedle-overlay.zip` | pfaedle's `shapes.txt`, `stop_times.txt` and `trips.txt` of the same feed |
 | `timetables.json` | the Volán and city manifest ([below](#the-volán-and-city-indexes)) |
-| `timetables.json.sig` | the manifest's ed25519 signature ([below](#the-volán-and-city-indexes)) |
+| `timetables.json.sig` | the manifest's ed25519 signature ([below](#release-feed-signature-and-feed-checks)) |
 | `volan-index.json.gz`, `city-index.json.gz` | the Volán and city indexes, byte for byte as the release's builders write them |
 | `volan-shapes-<hash>/`, `city-shapes-<hash>/` | each index's route shapes: the folder its head names (`"sh"`), 64 files `00.json.gz` to `63.json.gz` |
 | `ATTRIBUTION.txt`, `index.html` | what the files are, sources and licences, for the whole site |
@@ -474,6 +474,84 @@ format rebuilds both, and from then on installs of an older version skip
 the Volán and city indexes there (`unsupported`) and keep theirs until they
 update. An index published before that of the old format is not carried
 into a site of the new one.
+
+##### Release feed, signature and feed checks
+
+- **`release_feed`.** Each entry also names `release_feed`: the `feed` of
+  the latest stable release's index of the same name (in its
+  `hungarian-transport-frontend.zip`) when that index was built, for
+  example `"release_feed": "volan:01716.20261026"` next to
+  `"feed": "volan:01716.20261102"`. The `timetables` job reads it from the
+  zip's directory and the heads of its indexes, by HTTP Range requests (a
+  few hundred kilobytes, not the whole zip; the whole zip only when the
+  server answers no ranges). An index is also rebuilt when its
+  `release_feed` is not that feed, or it has none: it was built against
+  another release (an install of the new release refuses it, and the new
+  release's builders and guards have not seen it yet). An index the release
+  zip lacks has nothing to compare, and a release zip that cannot be read
+  leaves this rule out for the run, with a warning (the age rule still
+  holds). An entry carried over keeps its `release_feed`. A stable release
+  (not a `-rev` prerelease) also starts the daily workflow on main with
+  the `timetables` input ticked, from its own `pages` job (`actions: write`
+  only), so both indexes are rebuilt minutes after the release rather than
+  at the next scheduled run, within about 12 hours (plus GitHub's late
+  starts). That run may replace one waiting in the workflow's concurrency
+  group, which would have done the same; when it cannot be started, the
+  release run warns and the next scheduled run catches up.
+- **`timetables.json.sig`.** Every deploy signs `timetables.json` (it is
+  written anew on every deploy, so a run that only brings a new MÁV index
+  signs it too): the file is one line, the base64 of the 64-byte ed25519
+  signature over the exact bytes of `timetables.json` as deployed. The
+  public key, which the integration pins, is
+  `iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8=` (base64 of the raw 32
+  bytes; `PAGES_SIGNING_PUBLIC_KEY` in `scripts/sign_manifest.py`). The
+  workflow's `sign` job signs the site the `site` job assembled, with
+  openssl, and only then makes the Pages artifact. The private key
+  (`PAGES_SIGNING_KEY`, base64 of the raw 32-byte key) is a secret of the
+  `github-pages` environment, whose deployment branch policy admits only
+  main, and the job runs only on main: a run dispatched from another
+  branch, or a workflow changed on one, never sees it. Within the job only
+  the signing step has it, in its environment; it reaches openssl on stdin
+  and is never printed. The job's token reads contents only (it checks out
+  that one script, without credentials). The script checks the key against
+  the pinned public key and the signature against it; without the secret,
+  with another key, or with a signature that does not verify, the job fails
+  and nothing is deployed: an unsigned manifest is never published (so a
+  fork without the secret deploys nothing). Check a download with
+  `python3 scripts/sign_manifest.py verify --site <folder>`.
+- **An unsigned published manifest is no manifest.** Since every deploy
+  signs its manifest anew, the workflow never trusts the published
+  `timetables.json` without its signature: the `due`, `baseline` and
+  `assemble` steps (`pages_timetables.py`) fetch `timetables.json.sig` and
+  verify it over the exact bytes fetched before they use anything of the
+  manifest. One without a signature that verifies (none yet, the first run
+  after signing came in; another key; entries changed after signing) counts
+  as no published manifest, with a warning: both indexes are due, their
+  baseline is the stable release's, and nothing is carried over from the
+  site; a run that rebuilds only one of them, or only the MÁV index,
+  publishes the site without the other, which the next run rebuilds. A
+  signature that does not verify is read again once, half a minute later,
+  as Pages may serve a deploy's files a moment apart. The MÁV files are
+  carried by `mav-index.json` as before (that manifest is not signed).
+- **Plain http.** Only a feed whose entry says `"insecure": true` comes
+  over plain http, after https failed, with a warning: today Miskolc, whose
+  https certificate names another host. The weekly build takes it that way
+  too, as a release does; otherwise Miskolc would never update there and,
+  once its calendar ran out, the city guard would refuse the whole city
+  index. `HUNGARIAN_TRANSPORT_HTTPS_ONLY=1` (`scripts/gtfs_compact.py`)
+  forbids plain http for every feed; neither workflow sets it.
+- **Feed dates far ahead.** An index whose feed (for the city index, any
+  operator's) names a date more than 400 days after the build is not
+  published, and the one on the site stays (`pages_timetables.py part`):
+  installs order feeds by that date, so a `feed_end_date` written as the
+  version would beat every correct index after it. The city builder refuses
+  such a zip on its own (`build_city_index.py`, `MAX_FEED_AHEAD_DAYS`), so
+  that feed keeps its part of the previous index and the other feeds still
+  update; the daily MÁV index is held to the same limit
+  (`mav_pages_site.py`). The city builder's date limit runs with the
+  stable release's code, so it takes effect with the first stable release
+  that has it; the
+  `part` check and the signature come from main and hold at once.
 
 **Installing them.** The integration checks `timetables.json` in the same
 round as the daily MÁV index, right after it: about 10 to 20 minutes after

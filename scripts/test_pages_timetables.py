@@ -33,6 +33,7 @@ sys.path.insert(0, str(HERE))
 import gtfs_compact  # noqa: E402
 import mav_pages_site  # noqa: E402
 import pages_timetables as pt  # noqa: E402
+import sign_manifest as sm  # noqa: E402
 from gtfs_feed import encode_polyline  # noqa: E402
 
 os.environ.pop("MAV_ALLOW_SHRINK", None)
@@ -41,6 +42,18 @@ NOW = datetime(2026, 11, 16, 10, 40, tzinfo=timezone.utc)
 SCHEMA = gtfs_compact.INDEX_SCHEMA
 S = str(SCHEMA)
 COMMIT = "c" * 40
+# The published manifest is trusted only with a signature by the pinned key
+# (pages_timetables Source.timetables). The tests' live sites are signed
+# with a key made here, which this process and every pages_timetables.py
+# run of the tests (run(), through TRUST_WRAP) take as the pinned one; the
+# script itself never takes another key than its constant.
+REAL_PUBLIC_KEY = sm.PUBLIC_KEY
+TEST_SEED = os.urandom(32)
+TEST_PUB = sm.public_key(TEST_SEED)
+sm.PUBLIC_KEY = TEST_PUB
+TRUST_WRAP = ("import os, sys; sys.path.insert(0, sys.argv.pop(1)); import sign_manifest;"
+              " sign_manifest.PUBLIC_KEY = bytes.fromhex(os.environ['TEST_PAGES_PUBLIC_KEY']);"
+              " import pages_timetables; raise SystemExit(pages_timetables.main(sys.argv[1:]))")
 
 failed = 0
 
@@ -82,11 +95,23 @@ def head(path: Path) -> dict:
     return json.loads(gzip.decompress(path.read_bytes()))
 
 
-def run(*args: str) -> tuple[int, str, str, dict]:
+def sign_live(folder: Path) -> None:
+    """Sign a live site's timetables.json with the tests' key, as the
+    workflow's sign job signs the one it deploys."""
+    if (folder / "timetables.json").is_file():
+        sm.sign_site(folder, TEST_SEED, TEST_PUB)
+
+
+def run(*args: str, signed: bool = True) -> tuple[int, str, str, dict]:
+    """pages_timetables.py with args, the tests' key pinned; a --live-dir
+    site is signed first (signed=False: as it is)."""
+    if signed and "--live-dir" in args:
+        sign_live(Path(args[args.index("--live-dir") + 1]))
     out_file = Path(tempfile.mkstemp(prefix="gh-out-")[1])
-    done = subprocess.run([sys.executable, str(HERE / "pages_timetables.py"), *args,
+    done = subprocess.run([sys.executable, "-c", TRUST_WRAP, str(HERE), *args,
                            *(["--github-output", str(out_file)] if args[0] in ("due", "assemble") else [])],
-                          capture_output=True, text=True, timeout=120)
+                          capture_output=True, text=True, timeout=120,
+                          env={**os.environ, "TEST_PAGES_PUBLIC_KEY": TEST_PUB.hex()})
     outputs = dict(ln.split("=", 1) for ln in out_file.read_text().splitlines() if "=" in ln)
     out_file.unlink()
     return done.returncode, done.stdout, done.stderr, outputs
@@ -447,6 +472,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
                 return pt.file_digest(dest)
             return got
 
+    sign_live(live)
     src = Settling(live)
     ns = argparse.Namespace(out=tmp / "site-settle", commit=COMMIT, mav_part=None, timetables_part=tmp / "p2",
                             max_bytes=mav_pages_site.MAX_SITE_BYTES, settle=0.0, github_output=None, schema=None)
@@ -581,8 +607,8 @@ with tempfile.TemporaryDirectory() as tmp_name:
             return Res(b"x" * 100, req.full_url)
         return Res(b'{"format": 1}', req.full_url)
 
-    real = pt.urllib.request.urlopen
-    pt.urllib.request.urlopen = fake_urlopen
+    real = pt._urlopen
+    pt._urlopen = fake_urlopen
     try:
         https = pt.Source(url="https://bator.github.io/hungarian-transport")
         man_, _body, state = https.manifest("timetables.json")
@@ -604,13 +630,471 @@ with tempfile.TemporaryDirectory() as tmp_name:
             raised = str(err_)
         check("a file over its cap is refused", "larger than 99 bytes" in raised, raised)
     finally:
-        pt.urllib.request.urlopen = real
+        pt._urlopen = real
     try:
         pt.Source(url="http://bator.github.io/hungarian-transport")
         ok = False
     except ValueError:
         ok = True
     check("the live site is only an https URL", ok)
+
+
+
+# ---- the release's index feeds, release_feed, far-future feeds -------------
+class Res(io.BytesIO):
+    """An answer as urlopen gives one: a body, its URL, a status, headers."""
+
+    def __init__(self, body: bytes, url: str, status: int = 200, headers: dict | None = None) -> None:
+        super().__init__(body)
+        self._url, self.status, self.headers = url, status, headers or {}
+
+    def geturl(self) -> str:
+        return self._url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def ranged(blob: bytes, *, ranges: bool = True, redirect: str | None = None, log: list | None = None):
+    """A stub _urlopen serving blob at any https URL, with Range when ranges
+    (206 and Content-Range), the whole file otherwise; redirect: the URL
+    the first request ends on (as GitHub's release download does)."""
+    def opener(req, timeout=None):
+        url = req.full_url
+        rng = req.get_header("Range")
+        if log is not None:
+            log.append((url, rng))
+        final = redirect or url
+        if rng and ranges:
+            a, b = (int(x) for x in rng.split("=", 1)[1].split("-"))
+            b = min(b, len(blob) - 1)
+            return Res(blob[a:b + 1], final, 206, {"Content-Range": f"bytes {a}-{b}/{len(blob)}"})
+        return Res(blob, final)
+    return opener
+
+
+def release_zip(path: Path, volan: Path | None, city: Path | None, filler: int = 0) -> Path:
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("hungarian-transport.js", "//")
+        if filler:
+            # Incompressible: a large zip, of which only a little is read.
+            z.writestr("mav-index.json.gz", os.urandom(filler), compress_type=zipfile.ZIP_STORED)
+        for index in (volan, city):
+            if index is not None:
+                z.write(index, index.name)
+                for f in sorted((index.parent / head(index)["sh"]["dir"]).iterdir()):
+                    z.write(f, f"{head(index)['sh']['dir']}/{f.name}")
+    return path
+
+
+with tempfile.TemporaryDirectory() as tmp_name:
+    tmp = Path(tmp_name)
+    volan, city = build(tmp / "rel", volan_feed="01716.20261109")
+    rel = release_zip(tmp / "frontend.zip", volan, city, filler=3 * 1024 * 1024)
+    want = {"volan": head(volan)["feed"], "city": head(city)["feed"]}
+
+    check("release_feeds of a local zip: each index's feed from its head",
+          pt.release_feeds(path=rel) == want, repr(pt.release_feeds(path=rel)))
+    log: list = []
+    real = pt._urlopen
+    try:
+        pt._urlopen = ranged(rel.read_bytes(), log=log,
+                             redirect="https://release-assets.example/signed?sig=1")
+        got = pt.release_feeds("https://github.com/o/r/releases/download/v1.2.3/hungarian-transport-frontend.zip")
+        fetched = sum(int(r.split("=")[1].split("-")[1]) - int(r.split("=")[1].split("-")[0]) + 1
+                      for _u, r in log)
+        check("release_feeds over https reads the zip's directory and the heads by Range requests, a small"
+              " part of the zip, the redirect's target asked directly after the first answer",
+              got == want and all(r for _u, r in log) and len(log) <= 12
+              and fetched < rel.stat().st_size // 4 and log[0][0].startswith("https://github.com/")
+              and all(u == "https://release-assets.example/signed?sig=1" for u, _r in log[1:]),
+              repr((got, len(log), fetched, rel.stat().st_size, log[:3])))
+        log.clear()
+        pt._urlopen = ranged(rel.read_bytes(), ranges=False, log=log)
+        got = pt.release_feeds("https://example.invalid/frontend.zip")
+        check("a server that answers a Range request with the whole file: the whole zip is downloaded instead",
+              got == want and log[-1][1] is None, repr((got, log)))
+        pt._urlopen = ranged(rel.read_bytes()[:-30])
+        try:
+            pt.release_feeds("https://example.invalid/frontend.zip")
+            raised = ""
+        except pt.SiteError as err_:
+            raised = str(err_)
+        check("a cut zip raises SiteError", raised.startswith("release zip:"), raised)
+
+        def gone(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+        pt._urlopen = gone
+        try:
+            pt.release_feeds("https://example.invalid/frontend.zip")
+            raised = ""
+        except pt.SiteError as err_:
+            raised = str(err_)
+        check("a release zip that is not there raises SiteError naming the status", "HTTP 404" in raised, raised)
+    finally:
+        pt._urlopen = real
+    try:
+        pt.release_feeds("http://example.invalid/frontend.zip")
+        raised = ""
+    except pt.SiteError as err_:
+        raised = str(err_)
+    check("release_feeds takes only an https URL", "not an https URL" in raised, raised)
+    only_city = release_zip(tmp / "only-city.zip", None, city)
+    check("a release without a Volán index names only the city one",
+          pt.release_feeds(path=only_city) == {"city": want["city"]})
+
+    # due against the release
+    def man_with(volan_rf, city_rf, age: timedelta = timedelta(days=1)) -> dict:
+        entries = {}
+        for name, rf in (("volan", volan_rf), ("city", city_rf)):
+            entry = {"url": pt.INDEXES[name], "feed": want[name], "built_at": pt.utc_text(NOW - age),
+                     "size": 1, "sha256": "0" * 64, "shapes": None}
+            if rf is not None:
+                entry["release_feed"] = rf
+            entries[name] = entry
+        return {"format": 1, "schema": SCHEMA, "indexes": entries}
+
+    for label, man_, release, names in (
+        ("both built against the release's indexes", man_with(want["volan"], want["city"]), want, []),
+        ("the city one against an older release's", man_with(want["volan"], "szeged:old"), want, ["city"]),
+        ("no release_feed (built before the field)", man_with(None, None), want, ["volan", "city"]),
+        ("the release could not be read: by age only", man_with(None, None), None, []),
+        ("a release without a city index: the city one has nothing to compare",
+         man_with(want["volan"], None), {"volan": want["volan"]}, []),
+        ("both old and of another release: listed once each", man_with("x", "y", timedelta(days=7)), want,
+         ["volan", "city"]),
+    ):
+        got, why = pt.due(man_, "", False, NOW, SCHEMA, release)
+        check(f"due against the release, {label}: {names or 'none'}", got == names and bool(why), why)
+
+    live = tmp / "due-live"
+    live.mkdir()
+    (live / "timetables.json").write_text(json.dumps(man_with(want["volan"], "szeged:old")))
+    feeds_out = tmp / "release-feeds.json"
+    rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(live), "--now", NOW.isoformat(),
+                                "--release-file", str(rel), "--release-out", str(feeds_out))
+    check("the due CLI with --release-file: the index built against another release is due, the release's"
+          " feeds are written for part",
+          rc == 0 and outputs.get("due") == "true" and outputs.get("indexes") == "city"
+          and json.loads(feeds_out.read_text()) == {"indexes": want}, repr((rc, out, err, outputs)))
+    (tmp / "junk.zip").write_bytes(b"not a zip")
+    rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(live), "--now", NOW.isoformat(),
+                                "--release-file", str(tmp / "junk.zip"), "--release-out", str(feeds_out))
+    check("a release zip that does not read: a warning, due by age only, no feeds for part",
+          rc == 0 and outputs.get("due") == "false" and "::warning title=Release index not read::" in out
+          and json.loads(feeds_out.read_text()) == {"indexes": {}}, repr((rc, out, err, outputs)))
+
+    # part records release_feed, assemble publishes it
+    feeds_out.write_text(json.dumps({"indexes": want}))
+    for name, index in (("volan", volan), ("city", city)):
+        rc, out, err, _ = run("part", "--schema", S, "--index", str(index), "--out", str(tmp / "p-rf"),
+                              "--now", NOW.isoformat(), "--release-feeds", str(feeds_out))
+        check(f"part of the {name} index with --release-feeds", rc == 0, repr((rc, out, err)))
+    entries = json.loads((tmp / "p-rf" / "part.json").read_text())["indexes"]
+    check("part records each index's release_feed: the release's feed of that index",
+          entries["volan"].get("release_feed") == want["volan"] and entries["city"].get("release_feed") == want["city"],
+          repr({k: v.get("release_feed") for k, v in entries.items()}))
+    feeds_out.write_text(json.dumps({"indexes": {"city": want["city"]}}))
+    rc, out, err, _ = run("part", "--schema", S, "--index", str(volan), "--out", str(tmp / "p-rf2"),
+                          "--now", NOW.isoformat(), "--release-feeds", str(feeds_out))
+    rc2, out2, err2, _ = run("part", "--schema", S, "--index", str(city), "--out", str(tmp / "p-rf2"),
+                             "--now", NOW.isoformat(), "--release-feeds", str(tmp / "nowhere.json"))
+    entries2 = json.loads((tmp / "p-rf2" / "part.json").read_text())["indexes"]
+    check("no release_feed when the release has no index of that name, or there is no feeds file",
+          rc == 0 and rc2 == 0 and "release_feed" not in entries2["volan"] and "release_feed" not in entries2["city"],
+          repr(entries2))
+    empty = tmp / "empty"
+    empty.mkdir()
+    rc, out, err, outputs = run("assemble", "--out", str(tmp / "site-rf"), "--commit", COMMIT, "--live-dir",
+                                str(empty), "--timetables-part", str(tmp / "p-rf"), "--now", NOW.isoformat())
+    man_rf = json.loads((tmp / "site-rf" / "timetables.json").read_text())
+    check("timetables.json publishes each entry's release_feed",
+          rc == 0 and man_rf["indexes"]["volan"].get("release_feed") == want["volan"]
+          and man_rf["indexes"]["city"].get("release_feed") == want["city"] and manifest_problems(tmp / "site-rf") == [],
+          repr((rc, out, err)))
+    # Carried as published: a MÁV-only run keeps it.
+    rc, out, err, outputs = run("assemble", "--out", str(tmp / "site-rf2"), "--commit", COMMIT, "--live-dir",
+                                str(tmp / "site-rf"), "--mav-part", str(mav_part(tmp / "mav-rf")),
+                                "--now", (NOW + timedelta(hours=1)).isoformat())
+    man_rf2 = json.loads((tmp / "site-rf2" / "timetables.json").read_text())
+    check("a carried index keeps its release_feed", rc == 0 and man_rf2["indexes"] == man_rf["indexes"],
+          repr((rc, out, err)))
+
+    # ---- a published manifest without a signature that verifies ----------
+    # Every deploy signs its manifest anew: one whose signature does not
+    # verify (none yet, another key, entries changed after signing) is no
+    # manifest at all, so nothing of it is signed again.
+    trusted = tmp / "site-rf"
+    sign_live(trusted)
+    variants = {}
+    for label, how in (("no timetables.json.sig (the first run after signing came in)",
+                        lambda f: (f / "timetables.json.sig").unlink()),
+                       ("a signature by another key", lambda f: sm.sign_site(f, (k := os.urandom(32)), sm.public_key(k))),
+                       ("an entry changed after signing", lambda f: (f / "timetables.json").write_text(
+                           (f / "timetables.json").read_text().replace('"trips": 6', '"trips": 7', 1))),
+                       ("a signature that is not base64", lambda f: (f / "timetables.json.sig").write_text("!!\n"))):
+        folder = tmp / f"untrusted-{len(variants)}"
+        shutil.copytree(trusted, folder)
+        how(folder)
+        variants[label] = folder
+    for label, folder in variants.items():
+        rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(folder), "--now", NOW.isoformat(),
+                                    signed=False)
+        check(f"due, the published manifest with {label}: untrusted, both due",
+              rc == 0 and outputs.get("indexes") == "volan,city" and "unsigned" in out, repr((rc, out, err)))
+        rc, out, err, _ = run("baseline", "--live-dir", str(folder), "--release-file", str(rel),
+                              "--out", str(folder.parent / (folder.name + "-base")), signed=False)
+        got = tree(folder.parent / (folder.name + "-base"))
+        check(f"baseline, the published manifest with {label}: the release's indexes, none of the site's",
+              rc == 0 and got.get("volan-index.json.gz") == volan.read_bytes()
+              and got.get("city-index.json.gz") == city.read_bytes() and "unsigned" in out, repr((rc, out)))
+        rc, out, err, outputs = run("assemble", "--out", str(folder.parent / (folder.name + "-site")), "--commit",
+                                    COMMIT, "--live-dir", str(folder), "--mav-part", str(tmp / "mav-rf" / "site"),
+                                    "--settle", "0", "--now", NOW.isoformat(), signed=False)
+        man_u = json.loads((folder.parent / (folder.name + "-site") / "timetables.json").read_text()) if rc == 0 else {}
+        check(f"assemble, the published manifest with {label}: nothing carried from it, a warning, the MÁV part"
+              " deployed", rc == 0 and outputs.get("deploy") == "true" and man_u.get("indexes") == {}
+              and "::warning title=Published timetables.json not trusted::" in out
+              and not any(n.startswith(("volan-", "city-")) for n in tree(folder.parent / (folder.name + "-site"))),
+              repr((rc, out[-600:], err)))
+    rc, out, err, outputs = run("due", "--schema", S, "--live-dir", str(trusted), "--now", NOW.isoformat())
+    check("due, the same manifest with a good signature: trusted, nothing due", rc == 0 and outputs.get("due") == "false",
+          repr((rc, out)))
+
+    class LateSig(pt.Source):
+        """Pages serving the previous deploy's .sig for a moment."""
+
+        def __init__(self, folder: Path) -> None:
+            super().__init__(folder=folder)
+            self.sigs = 0
+
+        def fetch(self, name: str, dest: Path, cap: int):
+            got = super().fetch(name, dest, cap)
+            if name == "timetables.json.sig":
+                self.sigs += 1
+                if self.sigs == 1:
+                    dest.write_bytes((variants["a signature by another key"] / name).read_bytes())
+                    return pt.file_digest(dest)
+            return got
+
+    late = LateSig(trusted)
+    with contextlib.redirect_stdout(io.StringIO()) as buf:
+        live_man, state = late.timetables(settle=0)
+    check("a signature that does not verify at first is read again once (settle), then trusted",
+          state == "ok" and live_man is not None and late.sigs == 2 and "reading both again" in buf.getvalue(),
+          repr((state, late.sigs)))
+    late = LateSig(trusted)
+    live_man, state = late.timetables()
+    check("without settle it is not read again: untrusted", live_man is None and state.startswith("unsigned")
+          and late.sigs == 1, repr((state, late.sigs)))
+
+    attribution = (tmp / "site-rf" / "ATTRIBUTION.txt").read_text()
+    check("ATTRIBUTION.txt names timetables.json.sig", "timetables.json.sig" in attribution, attribution[-400:])
+
+    # far-future feeds
+    limit = (NOW + pt.MAX_FEED_AHEAD).strftime("%Y%m%d")
+    beyond = (NOW + pt.MAX_FEED_AHEAD + timedelta(days=1)).strftime("%Y%m%d")
+    far_volan, _ = build(tmp / "far-v", volan_feed=f"01716.{beyond}")
+    edge_volan, _ = build(tmp / "edge-v", volan_feed=f"01716.{limit}")
+    far_city = tmp / "far-c" / "city-index.json.gz"
+    far_city.parent.mkdir()
+    gtfs_compact.write_index([part("szeged", "abc"), part("pecs", beyond)], far_city, with_operators=True,
+                             schema=SCHEMA, today="20261116")
+    for label, index, want_rc in ((f"a Volán feed dated {beyond}", far_volan, 1),
+                                  (f"a city operator's feed dated {beyond}", far_city, 1),
+                                  (f"a Volán feed dated {limit}, MAX_FEED_AHEAD ahead", edge_volan, 0)):
+        out_dir = tmp / f"p-far-{len(label)}"
+        rc, out, err, _ = run("part", "--schema", S, "--index", str(index), "--out", str(out_dir), "--now", NOW.isoformat())
+        check(f"part, {label}: " + ("refused, nothing packed, the published one stays" if want_rc else "packed"),
+              rc == want_rc and (("::warning title=Index not published::" in out and "more than 400 days ahead" in out
+                                  and not out_dir.exists()) if want_rc else (out_dir / index.name).is_file()),
+              repr((rc, out, err)))
+    check("far_feed reads the date as the integration does (the first 8-digit run of each operator's feed)",
+          pt.far_feed("city", f"a:x;b:1.{beyond}.2", NOW) and not pt.far_feed("city", f"a:{limit}", NOW)
+          and not pt.far_feed("volan", "volan:123456789", NOW) and pt.far_feed("volan", f"volan:01716.{beyond}", NOW))
+
+    # ---- fetch_release ------------------------------------------------------
+    real, real_max = pt._urlopen, pt.MAX_RELEASE_ZIP
+    dest = tmp / "dl" / "frontend.zip"
+    dest.parent.mkdir()
+    cases = (
+        ("an http URL is not asked", "http://example.invalid/z.zip", None, "not an https URL: http://example.invalid/z.zip"),
+        ("a download", "https://example.invalid/z.zip", lambda req, timeout=None: Res(b"PK" * 10, req.full_url), "ok"),
+        ("an answer that ended on http", "https://example.invalid/z.zip",
+         lambda req, timeout=None: Res(b"PK", "http://example.invalid/z.zip"), "redirected away from https"),
+        ("a redirect refused on the way", "https://example.invalid/z.zip",
+         lambda req, timeout=None: (_ for _ in ()).throw(pt._NotHttps("redirected away from https")),
+         "redirected away from https"),
+        ("larger than MAX_RELEASE_ZIP", "https://example.invalid/z.zip",
+         lambda req, timeout=None: Res(b"x" * 2048, req.full_url), "larger than a release zip"),
+        ("an HTTP error", "https://example.invalid/z.zip",
+         lambda req, timeout=None: (_ for _ in ()).throw(urllib.error.HTTPError(req.full_url, 502, "Bad", {}, None)),
+         "HTTP 502"),
+        ("no network", "https://example.invalid/z.zip",
+         lambda req, timeout=None: (_ for _ in ()).throw(urllib.error.URLError("name resolution")),
+         "URLError: <urlopen error name resolution>"),
+    )
+    try:
+        for label, url, opener, want_why in cases:
+            asked: list = []
+
+            def stub(req, timeout=None, _o=opener, _asked=asked):
+                _asked.append(req.full_url)
+                return _o(req, timeout)
+
+            pt._urlopen = stub
+            pt.MAX_RELEASE_ZIP = 1024
+            dest.unlink(missing_ok=True)
+            why = pt.fetch_release(url, dest)
+            check(f"fetch_release, {label}: {want_why}",
+                  why == want_why and (dest.read_bytes() == b"PK" * 10 if want_why == "ok" else not dest.exists())
+                  and (asked == [] if url.startswith("http:") else asked == [url]), repr((why, asked)))
+    finally:
+        pt._urlopen, pt.MAX_RELEASE_ZIP = real, real_max
+
+    # The redirect handling itself: urllib's machinery with stand-ins for
+    # the network (an https and an http handler that answer from a table).
+    import email.message
+    import urllib.response
+
+    hits: list[str] = []
+
+    def answer(req, routes):
+        hits.append(req.full_url)
+        code, location, body = routes.get(req.full_url, (404, None, b""))
+        msg = email.message.Message()
+        if location:
+            msg["Location"] = location
+        res = urllib.response.addinfourl(io.BytesIO(body), msg, req.full_url, code)
+        res.msg = "answer"
+        return res
+
+    def stand_ins(routes):
+        class Https(urllib.request.HTTPSHandler):
+            def https_open(self, req):
+                return answer(req, routes)
+
+        class Http(urllib.request.HTTPHandler):
+            def http_open(self, req):
+                return answer(req, routes)
+
+        return Https(), Http()
+
+    real_build = pt.urllib.request.build_opener
+    for label, routes, want_why, want_hits in (
+        ("a redirect to another https host is followed",
+         {"https://a.example/z.zip": (302, "https://b.example/z.zip", b""), "https://b.example/z.zip": (200, None, b"PK")},
+         "ok", ["https://a.example/z.zip", "https://b.example/z.zip"]),
+        ("a redirect to http is refused before http is asked, even one that would come back to https",
+         {"https://a.example/z.zip": (302, "http://b.example/z.zip", b""),
+          "http://b.example/z.zip": (302, "https://evil.example/z.zip", b""),
+          "https://evil.example/z.zip": (200, None, b"PK")},
+         "redirected away from https", ["https://a.example/z.zip"]),
+    ):
+        hits.clear()
+        pt.urllib.request.build_opener = lambda *h, _r=routes: real_build(*h, *stand_ins(_r))
+        try:
+            dest.unlink(missing_ok=True)
+            why = pt.fetch_release("https://a.example/z.zip", dest)
+        finally:
+            pt.urllib.request.build_opener = real_build
+        check(f"fetch_release, {label}", why == want_why and hits == want_hits, repr((why, hits)))
+    hits.clear()
+    pt.urllib.request.build_opener = lambda *h: real_build(*h, *stand_ins(
+        {"https://site.example/timetables.json": (301, "http://site.example/timetables.json", b"")}))
+    try:
+        pt.Source(url="https://site.example").fetch("timetables.json", tmp / "m.json", 1024)
+        raised = ""
+    except pt.FetchError as err_:
+        raised = str(err_)
+    finally:
+        pt.urllib.request.build_opener = real_build
+    check("the live site's files are not followed to http either",
+          raised == "timetables.json: redirected away from https" and hits == ["https://site.example/timetables.json"],
+          repr((raised, hits)))
+
+
+# ---- timetables.json.sig ---------------------------------------------------
+import base64  # noqa: E402
+
+with tempfile.TemporaryDirectory() as tmp_name:
+    tmp = Path(tmp_name)
+    # RFC 8032, 7.1, TEST 2: the key, its public key and its signature over
+    # the one byte 0x72.
+    rfc_seed = bytes.fromhex("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")
+    rfc_pub = bytes.fromhex("3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
+    rfc_sig = bytes.fromhex("92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
+                            "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00")
+    msg = tmp / "msg"
+    msg.write_bytes(b"\x72")
+    check("ed25519 by openssl: RFC 8032's test 2 key, public key and signature",
+          sm.public_key(rfc_seed) == rfc_pub and sm.sign(msg, rfc_seed) == rfc_sig and sm.verify(msg, rfc_sig, rfc_pub)
+          and not sm.verify(msg, rfc_sig[:-1] + b"\x01", rfc_pub))
+    check("the pinned public key is the repository's (32 bytes)",
+          base64.b64encode(REAL_PUBLIC_KEY).decode() == sm.PAGES_SIGNING_PUBLIC_KEY
+          == "iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8=" and len(REAL_PUBLIC_KEY) == 32)
+
+    site = tmp / "site"
+    site.mkdir()
+    (site / "timetables.json").write_bytes(b'{"format": 1, "indexes": {}}\n')
+    seed = os.urandom(32)
+    pub = sm.public_key(seed)
+    out = sm.sign_site(site, seed, pub)
+    text = out.read_text(encoding="ascii")
+    sig = base64.b64decode(text.strip(), validate=True)
+    check("sign_site writes timetables.json.sig: one line, base64 of 64 bytes, a signature over the file's bytes",
+          out == site / "timetables.json.sig" and text.endswith("\n") and text.count("\n") == 1 and len(sig) == 64
+          and sm.verify(site / "timetables.json", sig, pub) and not sm.verify(site / "timetables.json", sig, REAL_PUBLIC_KEY))
+    try:
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    except ImportError:
+        print("skip the cross-check with cryptography (not installed)")
+    else:
+        try:
+            Ed25519PublicKey.from_public_bytes(pub).verify(sig, (site / "timetables.json").read_bytes())
+            crossed = True
+        except Exception:  # noqa: BLE001
+            crossed = False
+        check("the signature verifies with the cryptography package too", crossed)
+    (site / "timetables.json").write_bytes(b'{"format": 1, "indexes": {"x": 1}}\n')
+    check("a changed manifest does not verify", not sm.verify(site / "timetables.json", sig, pub))
+
+    def sign_cli(env_key: str | None, folder: Path = site) -> tuple[int, str]:
+        env = {k: v for k, v in os.environ.items() if k != sm.KEY_ENV}
+        if env_key is not None:
+            env[sm.KEY_ENV] = env_key
+        done = subprocess.run([sys.executable, str(HERE / "sign_manifest.py"), "sign", "--site", str(folder)],
+                              capture_output=True, text=True, timeout=60, env=env)
+        return done.returncode, done.stdout + done.stderr
+
+    stale = site / "timetables.json.sig"
+    for label, key, want_text in (
+        ("no PAGES_SIGNING_KEY", None, "PAGES_SIGNING_KEY is not set"),
+        ("an empty one", "", "PAGES_SIGNING_KEY is not set"),
+        ("one that is not base64", "not*base64!", "is not base64"),
+        ("one of 31 bytes", base64.b64encode(os.urandom(31)).decode(), "decodes to 31 bytes"),
+        ("a key that is not the pinned public key's", base64.b64encode(seed).decode(),
+         "is not the key of the pinned public key"),
+    ):
+        stale.write_text("stale\n")
+        rc, text = sign_cli(key)
+        check(f"sign refuses {label}: exit 1, an error, no .sig left (a stale one removed), the key not echoed",
+              rc == 1 and "::error title=timetables.json not signed::" in text and want_text in text
+              and not stale.exists() and (not key or key not in text), repr((rc, text)))
+    rc, text = sign_cli(base64.b64encode(seed).decode(), tmp / "no-site")
+    check("sign refuses a folder without timetables.json", rc == 1 and "is not there" in text, text)
+    # The CLI with the pinned key cannot run here (only the secret has it);
+    # sign_site with its public key is the same path, and verify reads it.
+    sm.sign_site(site, seed, pub)
+    done = subprocess.run([sys.executable, str(HERE / "sign_manifest.py"), "verify", "--site", str(site)],
+                          capture_output=True, text=True, timeout=60)
+    check("verify refuses a signature by another key than the pinned one", done.returncode == 1, done.stdout)
+    check("the .sig as written reads back and verifies with the test key's public key",
+          sm.verify(site / "timetables.json", sm.read_sig(stale), pub))
 
 if failed:
     print(f"{failed} failed")

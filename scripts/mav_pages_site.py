@@ -46,7 +46,8 @@ Usage: mav_pages_site.py --index mav-index.json.gz --stats mav-build.json
 Prints deploy=true|false (and appends it to --github-output). Exit 1, with
 nothing written, for an index or statistics that do not hold up, a feed
 whose feed_version does not start with a real date (YYYYMMDD, as the
-integration's served_index.feed_date reads it), a site over the size limit,
+integration's served_index.feed_date reads it) or with one more than
+MAX_FEED_AHEAD after the build, a site over the size limit,
 or an index with fewer than half the trains and lines of the published one
 (mav_shrink_guard.py; --allow-shrink or MAV_ALLOW_SHRINK=1 accepts it).
 When the published manifest does not read, the shrink guard compares with
@@ -107,6 +108,12 @@ MAX_MANIFEST = 64 * 1024
 # run a few hours after another with the same content (a rerun, the
 # afternoon catch-up, a dispatch after the morning build) deploys nothing.
 REFRESH_AFTER = timedelta(hours=12)
+# A feed date further ahead than this is a publisher's mistake, not a
+# timetable (a feed_end_date written as the version, a typo in the year):
+# installs order feeds by that date, so the index would beat every correct
+# one after it until the date is reached. The weekly Volán and city indexes
+# are held to it too (pages_timetables.py part, build_city_index.py).
+MAX_FEED_AHEAD = timedelta(days=400)
 LIVE_TIMEOUT = 20
 # The shrink guard's fallback: a release's frontend zip (about 15 MB) and
 # the MÁV index in it (about 0.25 MB).
@@ -215,6 +222,11 @@ def manifest(index: Path, stats: dict, commit: str, built_at: datetime | None = 
     feed = data.get("feed")
     if not dated_feed(feed):
         raise SiteError(f"{index} names no dated feed: {feed!r}")
+    when = (built_at or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+    day = datetime.strptime(feed[:8], "%Y%m%d").date()
+    if day > when.date() + MAX_FEED_AHEAD:
+        raise SiteError(f"{index} is of feed {feed!r}, dated more than {MAX_FEED_AHEAD.days} days after"
+                        f" {when.date().isoformat()}")
     if stats.get("feed_version") != feed:
         raise SiteError(f"statistics are of feed {stats.get('feed_version')!r}, the index of {feed!r}")
     audit = stats.get("audit")
@@ -227,7 +239,6 @@ def manifest(index: Path, stats: dict, commit: str, built_at: datetime | None = 
         raise SiteError(f"only {trains} trains and {lines} lines")
     if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
         raise SiteError(f"not a commit sha: {commit!r}")
-    when = (built_at or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
     return {
         "format": MANIFEST_FORMAT,
         "schema": mav_index.SCHEMA,

@@ -290,6 +290,41 @@ check("every resolved release is published: the publish job waits on no change c
 check("release.yml has no schedule trigger and no timetable refresh path",
       "schedule:" not in _wf_text and "refresh" not in _wf_text.replace("REFRESH_TOKEN", "")
       and "HUNGARIAN_TRANSPORT_CARRY_INDEX" not in _wf_text and "\n  beta:\n" not in _wf_text)
+# A stable release starts the daily Pages workflow, which rebuilds the Volán
+# and city indexes with the new release's builders and against its indexes
+# (timetables.json's release_feed): only after the release is published,
+# not for a -rev prerelease, from a job that may start workflows and
+# nothing else, and a failure to start it is a warning (the cron catches up).
+_pages = _wf_text[_wf_text.index("\n  pages:\n"):] if "\n  pages:\n" in _wf_text else ""
+check("after a stable release the Pages timetables are rebuilt at once: mav-index-daily.yml on main with"
+      " timetables=true, by a job of its own that may only start workflows",
+      "    needs: [resolve, publish]" in _pages
+      and "    if: needs.resolve.outputs.create == 'true' && !contains(needs.resolve.outputs.tag, '-rev.')" in _pages
+      and re.search(r"^    permissions:\n      actions: write\n    steps:", _pages, re.M) is not None
+      and "gh workflow run mav-index-daily.yml --ref main -f timetables=true" in _pages
+      and "::warning title=Pages timetables not started::" in _pages
+      and "actions/checkout" not in _pages and "secrets." not in _pages
+      and re.findall(r"^  ([\w-]+):$", _wf_text.split("\njobs:\n", 1)[1], re.M)[-1] == "pages",
+      _pages[:800])
+with tempfile.TemporaryDirectory() as _tmp:
+    _ws = Path(_tmp)
+    (_ws / "bin").mkdir()
+    (_ws / "bin" / "gh").write_text('#!/usr/bin/env bash\necho "$*" > "$PWD/gh-args.txt"\n'
+                                    '[ "${STUB_GH:-}" != fail ] || { echo "HTTP 403" >&2; exit 1; }\n')
+    (_ws / "bin" / "gh").chmod(0o755)
+    try:
+        _start = step_script("Start mav-index-daily.yml")
+    except StopIteration:
+        _start = "exit 1\n"
+    for _case, _want in (("ok", "mav-index-daily.yml started on main (timetables=true) for v1.2.3"),
+                         ("fail", "::warning title=Pages timetables not started::")):
+        _done, _ = bash(_start, _ws, PATH=f"{_ws / 'bin'}:{os.environ['PATH']}", STUB_GH=_case, TAG="v1.2.3",
+                        GH_TOKEN="x", GH_REPO="o/r")
+        check(f"the Pages start step, gh {_case}: exit 0, " + ("started" if _case == "ok" else "a warning"),
+              _done.returncode == 0 and _want in _done.stdout
+              and (_ws / "gh-args.txt").read_text().split() == ["workflow", "run", "mav-index-daily.yml", "--ref",
+                                                                "main", "-f", "timetables=true"],
+              repr((_done.returncode, _done.stdout, _done.stderr)))
 check("the release runs from a v* tag push or from main",
       re.search(r"^  push:\n    tags:\n      - \"v\*\"$", _wf_text, re.M) is not None
       and '[ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]' in _wf_text)
