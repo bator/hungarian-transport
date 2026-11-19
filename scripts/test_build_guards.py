@@ -1018,6 +1018,29 @@ check("one stop is the alias target of at most ALIASES_PER_STOP old ids, the nea
       kept == {"SZ_20": "20"} and aliases == {str(20 + k): "SZ_20" for k in range(1, 1 + sim.ALIASES_PER_STOP)},
       repr((kept, aliases)))
 
+# An old stop with no stop of its mode within ALIAS_M (Szeged's Dózsa utca
+# trolleybus stop, 57 m) is an alias of the nearest stop of its name and
+# mode within NAME_ALIAS_M, while that stop has room: not one of another
+# name or mode nearer, nor one beyond NAME_ALIAS_M.
+kept, aliases = paired(
+    [stop_part("szeged", [("szeged:40", LAT, LON, "Dózsa utca"), ("szeged:41", LAT + 5000, LON, "Agyagos utca"),
+                          ("szeged:42", LAT + 9000, LON, "Tram tér"), ("szeged:43", LAT + 12000, LON, "Messze"),
+                          ("szeged:44", LAT + 15000, LON, "Kiss utca")], [(11, [0, 1]), (0, [2, 3, 4])])],
+    [stop_part("szeged", [("szeged:SZ_40", LAT + 90, LON, "Dózsa utca"), ("szeged:SZ_41", LAT + 52, LON, "Más"),
+                          ("szeged:SZ_42", LAT + 5080, LON, "Budapesti körút"),
+                          ("szeged:SZ_43", LAT + 9070, LON, "Tram tér"), ("szeged:SZ_44", LAT + 12180, LON, "Messze"),
+                          ("szeged:SZ_45", LAT + 15100, LON, "Kiss utca")],
+               [(800, [0, 1, 2]), (3, [3]), (0, [4, 5])])])
+check("an old stop moved beyond ALIAS_M is an alias of the nearest stop of its name and mode within"
+      " NAME_ALIAS_M", aliases.get("40") == "SZ_40" and aliases.get("44") == "SZ_45" and not kept, repr(aliases))
+check("not of another name, another mode or beyond NAME_ALIAS_M",
+      not {"41", "42", "43"} & set(aliases), repr(aliases))
+full = [(f"szeged:{50 + k}", LAT + 4 * k, LON, "Tele") for k in range(sim.ALIASES_PER_STOP + 1)]
+kept, aliases = paired([stop_part("szeged", [*full, ("szeged:59", LAT + 100, LON, "Tele")], [(0, list(range(6)))])],
+                       [stop_part("szeged", [("szeged:SZ_50", LAT, LON, "Tele")], [(0, [0])])])
+check("a stop that is the alias target of ALIASES_PER_STOP old ids takes no more by name",
+      kept == {"SZ_50": "50"} and len(aliases) == sim.ALIASES_PER_STOP and "59" not in aliases, repr(aliases))
+
 # The generator: from an old index (or a release zip holding it) and the
 # feed's zip to the tables in build_city_index.py, between their markers.
 with tempfile.TemporaryDirectory() as tmp:
@@ -1037,19 +1060,62 @@ with tempfile.TemporaryDirectory() as tmp:
         got = [sim.tables(src, feed_zip, "x")[:2] for src in (old_out, release)]
     finally:
         bci.CITY_FEEDS = real_feeds
-    check("the generator pairs the feed's stops with the old index's, from the index or a release zip",
-          got[0] == got[1] == ({"1": "1001", "2": "1002"}, {"1003": "2"}), repr(got))
-    text = sim.render("X", *got[0], "# x: test")
+    check("the generator pairs the feed's stops with the old index's, from the index or a release zip,"
+          " each kept id with the old stop's place",
+          got[0] == got[1] == ({"1": ("1001", 46.25, 20.14), "2": ("1002", 46.26, 20.14)}, {"1003": "2"}),
+          repr(got))
+    text = sim.render("x", *got[0], "# x: test")
     target = Path(tmp) / "build.py"
-    target.write_text(f"A = 1\n{sim.BEGIN}\nX_STOP_IDS = {{}}\n{sim.END}\nB = 2\n", encoding="utf-8")
-    sim.write_tables(text, target)
-    sim.write_tables(text, target)
+    x_begin, x_end = sim.markers("x")
+    y_begin, y_end = sim.markers("y")
+    target.write_text(f"A = 1\n{x_begin}\nX_STOP_IDS = {{}}\n{x_end}\n{y_begin}\nY_STOP_IDS = {{'7': '1007'}}\n"
+                      f"Y_STOP_ALIASES = {{}}\n{y_end}\nB = 2\n", encoding="utf-8")
+    sim.write_tables(text, target, "x")
+    sim.write_tables(text, target, "x")
     ns: dict = {}
     exec(target.read_text(encoding="utf-8"), ns)  # noqa: S102 - the file the test just wrote
-    check("--write replaces the tables between their markers, again and again",
-          ns["X_STOP_IDS"] == {"1": "1001", "2": "1002"} and ns["X_STOP_ALIASES"] == {"1003": "2"}
-          and ns["A"] == 1 and ns["B"] == 2 and target.read_text(encoding="utf-8").count(sim.BEGIN) == 1,
+    check("--write replaces the feed's own tables between its markers, again and again, and no other feed's",
+          ns["X_STOP_IDS"] == {"1": ("1001", 46.25, 20.14), "2": ("1002", 46.26, 20.14)}
+          and ns["X_STOP_ALIASES"] == {"1003": "2"} and ns["Y_STOP_IDS"] == {"7": "1007"}
+          and ns["A"] == 1 and ns["B"] == 2 and target.read_text(encoding="utf-8").count(x_begin) == 1,
           target.read_text(encoding="utf-8"))
+    legacy = f"A = 1\n{sim.LEGACY_BEGIN}\nX_STOP_IDS = {{}}\nX_STOP_ALIASES = {{}}\n{sim.LEGACY_END}\nB = 2\n"
+    target.write_text(legacy, encoding="utf-8")
+    err = raises(lambda: sim.write_tables(text.replace("X_STOP", "Y_STOP"), target, "y"), SystemExit)
+    check("the one block of the earlier scripts is not replaced with another feed's tables",
+          err is not None and target.read_text(encoding="utf-8") == legacy, repr(err))
+    sim.write_tables(text, target, "x")
+    ns = {}
+    exec(target.read_text(encoding="utf-8"), ns)  # noqa: S102 - the file the test just wrote
+    check("the one block of the earlier scripts becomes the feed's own",
+          ns["X_STOP_ALIASES"] == {"1003": "2"} and sim.LEGACY_BEGIN not in target.read_text(encoding="utf-8")
+          and target.read_text(encoding="utf-8").count(x_begin) == 1 and ns["B"] == 2,
+          target.read_text(encoding="utf-8"))
+
+    # --write for a feed whose CITY_FEEDS entry names no tables of its own
+    # (Pécs) is refused: its tables replacing Szeged's left CITY_FEEDS naming
+    # SZEGED_STOP_IDS, and build_city_index, which every builder (Home
+    # Assistant's local updater too) imports, no longer imported.
+    pecs_old = Path(tmp) / "pecs-old.json.gz"
+    write_index([stop_part("pecs", [("pecs:1001", 4607000, 1823000, "Alpha")], [(3, [0, 0])])],
+                pecs_old, with_operators=True, guard_total=False)
+    pecs_zip = gtfs_zip(Path(tmp) / "pecs.zip", city_feed(trips=3))
+    copy = Path(tmp) / "build_city_index.py"
+    shutil.copy(bci.__file__, copy)
+    before = copy.read_bytes()
+    real_file = bci.__file__
+    bci.__file__ = str(copy)
+    try:
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            err = raises(lambda: sim.main([str(pecs_old), str(pecs_zip), "--feed", "pecs", "--write"]),
+                         SystemExit)
+    finally:
+        bci.__file__ = real_file
+    ns = {"__name__": "build_city_index_copy"}
+    imported = raises(lambda: exec(compile(copy.read_bytes(), str(copy), "exec"), ns))  # noqa: S102
+    check("--write is refused for a feed whose CITY_FEEDS entry does not name its tables, and"
+          " build_city_index still imports", err is not None and "PECS_STOP_IDS" in str(err)
+          and copy.read_bytes() == before and imported is None, repr((err, imported)))
 
 # The committed Szeged tables: only Szeged has any, one to one, an alias
 # neither a kept id nor more than ALIASES_PER_STOP for one stop.
@@ -1057,13 +1123,16 @@ szeged = next(f for f in real_feeds if f["id"] == "szeged")
 ids, als = szeged.get("stop_ids") or {}, szeged.get("stop_aliases") or {}
 check("only Szeged keeps old stop ids or has stop aliases",
       [f["id"] for f in real_feeds if f.get("stop_ids") or f.get("stop_aliases")] == ["szeged"])
-check("Szeged's table gives 170 SZKT stops (SZ_…) their old numeric ids, one each; 4 aliases",
-      len(ids) == 170 and len(set(ids.values())) == 170 and len(als) == 4
-      and all(k.startswith("SZ_") and v.isdigit() for k, v in ids.items())
+check("Szeged's table gives 170 SZKT stops (SZ_…) their old numeric ids, one each, with the old stop's place"
+      " in Szeged; 5 aliases", len(ids) == 170 and len({v[0] for v in ids.values()}) == 170 and len(als) == 5
+      and all(k.startswith("SZ_") and len(v) == 3 and v[0].isdigit() and 46.2 < v[1] < 46.35
+              and 20.0 < v[2] < 20.25 for k, v in ids.items())
       and all(k.isdigit() and v.startswith("SZ_") for k, v in als.items()), repr((len(ids), len(als))))
 check("no Szeged alias is a kept id or exceeds ALIASES_PER_STOP for its stop",
-      not set(als) & set(ids.values())
+      not set(als) & {v[0] for v in ids.values()}
       and max((list(als.values()).count(v) for v in als.values()), default=0) <= sim.ALIASES_PER_STOP, repr(als))
+check("the Dózsa utca trolleybus stop, 57 m from SZKT's, is an alias of it by name",
+      als.get("2429618764") == "SZ_62317", repr(als))
 
 
 def old_card_stop(idx: dict, op: str, saved_id: str, saved_name: str) -> list | None:
@@ -1140,6 +1209,11 @@ with tempfile.TemporaryDirectory() as tmp:
     check('the alias table becomes "al", to the stop by its feed id; one whose stop the feed lacks is left out',
           built.get("al") == [["x:1000000004", x2]] and info["aliases"] == 1 and info["kept_ids"] == 2,
           repr((built.get("al"), info)))
+    check("the build's info has the table stops in the feeds and the table's size next to kept_ids, and its"
+          " summary line the kept ids and aliases",
+          (info.get("listed_ids"), info.get("table_ids"), info.get("dropped_aliases")) == (2, 3, 1)
+          and bci.stop_id_summary(info) == "stop ids: 2 kept from the stop id tables (2 of their 3 stops in the"
+          " feeds), 1 aliases (1 left out)", repr(info))
     first = out.read_bytes()
     build("kept")
     check("a rebuild on its own output is byte for byte the same", out.read_bytes() == first)
@@ -1170,6 +1244,53 @@ with tempfile.TemporaryDirectory() as tmp:
           [row[0] for row in carried[0]["s"]] == ["x:1000000001", "x:1000000002", "x:3"]
           and [row[3] for row in carried[0]["s"][:2]] == ["x:1", "x:2"]
           and carried_aliases == {"x:1000000004": "x:1000000002"}, repr((carried, carried_aliases)))
+    # kept_ids counts the stops whose id their table gives them: not those
+    # of a part carried from an index built with an older table.
+    carry_index = Path(tmp) / "carry" / out.name
+    carry_index.parent.mkdir()
+    carry_index.write_bytes(first)
+    good_zip = (base / "x.zip").read_bytes()
+    (base / "x.zip").write_bytes(b"not a zip")
+    bci.CITY_FEEDS = [{**feeds[0], "stop_ids": {"3": "1000000003"}}, feeds[1]]
+    try:
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            info = bci.build_city_index(base, out, today="20261120", carry=carry_index)
+    finally:
+        bci.CITY_FEEDS = real_feeds
+        (base / "x.zip").write_bytes(good_zip)
+    check("kept_ids counts only the stops whose id their stop id table gives them, in a carried part too",
+          info.get("carried", {}).keys() == {"x"} and info["kept_ids"] == 0 and info.get("listed_ids") == 1,
+          repr(info))
+
+    # A stop whose pairing keep_stop_ids refused (the feed's stop 2 is 4 km
+    # from the old stop's place: the feed reused its id) takes no alias
+    # either: "al" would send the cards saved with the alias to the stop
+    # that now has the id.
+    far_table = {"stop_ids": {"1": ("1000000001", 46.25018, 20.14), "2": ("1000000002", 46.3, 20.14)},
+                 "stop_aliases": {"1000000004": "2", "1000000006": "1"}}
+    out.unlink()
+    bci.CITY_FEEDS = [{**feeds[0], **far_table}, feeds[1]]
+    try:
+        with contextlib.redirect_stderr(io.StringIO()) as err_buf, contextlib.redirect_stdout(io.StringIO()):
+            env = os.environ.pop("GITHUB_ACTIONS", None)
+            try:
+                info = bci.build_city_index(base, out, today="20261120")
+            finally:
+                if env is not None:
+                    os.environ["GITHUB_ACTIONS"] = env
+            far_aliases = bci.stop_aliases(gc.index_parts(out, ["x"]) or [])
+    finally:
+        bci.CITY_FEEDS = real_feeds
+    far_built = json.loads(gzip.decompress(out.read_bytes()))
+    far_rows = {row[0]: i for i, row in enumerate(far_built["s"])}
+    check("an alias to a stop refused for its distance is left out of \"al\", counted in info, the warning and"
+          " the summary, in a carried part too",
+          far_built.get("al") == [["x:1000000006", far_rows.get("x:1000000001")]] and "x:2" in far_rows
+          and info["kept_ids"] == 1 and info["aliases"] == 1 and info.get("dropped_aliases") == 1
+          and "1 of its 2 stop aliases to them are left out" in err_buf.getvalue()
+          and bci.stop_id_summary(info).endswith("1 aliases (1 left out)")
+          and far_aliases == {"x:1000000006": "x:1000000001"},
+          repr((far_built.get("al"), info, err_buf.getvalue(), far_aliases)))
 
     # A card of the version before "al" finds a saved stop by the number in
     # its id: every old id the index kept is the very stop.
@@ -1180,16 +1301,63 @@ with tempfile.TemporaryDirectory() as tmp:
 # keep_stop_ids on its own: a stop whose old id the feed has given another
 # stop keeps its own (no two stops with one id); a table mostly gone from
 # the feed (it renumbered again) is reported.
+def keep_ids(parts: list[dict], feed: dict, *, gha: bool = False) -> tuple[int, str, str]:
+    """keep_stop_ids with GITHUB_ACTIONS "true" or unset: (kept, stdout, stderr)."""
+    env = os.environ.pop("GITHUB_ACTIONS", None)
+    if gha:
+        os.environ["GITHUB_ACTIONS"] = "true"
+    try:
+        with contextlib.redirect_stdout(io.StringIO()) as out_buf, contextlib.redirect_stderr(io.StringIO()) as err_buf:
+            n = bci.keep_stop_ids(parts, feed)
+    finally:
+        os.environ.pop("GITHUB_ACTIONS", None)
+        if env is not None:
+            os.environ["GITHUB_ACTIONS"] = env
+    return n, out_buf.getvalue(), err_buf.getvalue()
+
+
 rows_part = stop_part("x", [("x:1", LAT, LON), ("x:2", LAT, LON), ("x:777", LAT, LON)], [])
-with contextlib.redirect_stderr(io.StringIO()) as err_buf:
-    n = bci.keep_stop_ids([rows_part], {"id": "x", "stop_ids": {"1": "777", "2": "1002"}})
+n, out_text, err_text = keep_ids([rows_part], {"id": "x", "stop_ids": {"1": "777", "2": "1002"}})
 check("a stop whose old id the feed gave another stop keeps its own",
-      n == 1 and [r[0] for r in rows_part["s"]] == ["x:1", "x:1002", "x:777"] and err_buf.getvalue() == "",
+      n == 1 and [r[0] for r in rows_part["s"]] == ["x:1", "x:1002", "x:777"] and out_text == err_text == "",
       repr(rows_part["s"]))
-with contextlib.redirect_stderr(io.StringIO()) as err_buf:
-    bci.keep_stop_ids([stop_part("x", [("x:1", LAT, LON)], [])],
-                      {"id": "x", "stop_ids": {"1": "1001", "5": "1005", "6": "1006"}})
-check("a table mostly no longer in the feed is reported", "regenerate" in err_buf.getvalue(), err_buf.getvalue())
+_n, out_text, err_text = keep_ids([stop_part("x", [("x:1", LAT, LON)], [])],
+                                  {"id": "x", "stop_ids": {"1": "1001", "5": "1005", "6": "1006"}})
+check("a table mostly no longer in the feed is reported", "2 of the 3" in err_text and "regenerate" in err_text
+      and out_text == "", err_text)
+# A zip from before the renumbering (the old szegedimenetrend.hu zip in
+# base) has the table's old ids already: nothing is stale.
+old_feed = stop_part("x", [("x:1001", LAT, LON), ("x:1002", LAT + 500, LON), ("x:1003", LAT + 900, LON)], [])
+n, out_text, err_text = keep_ids([old_feed], {"id": "x", "stop_ids": {
+    "SZ_1": ("1001", LAT / 1e5, LON / 1e5), "SZ_2": ("1002", (LAT + 500) / 1e5, LON / 1e5), "SZ_3": "1003"}})
+check("a feed that still has the table's old ids is not reported as renumbered",
+      n == 0 and out_text == err_text == "" and [r[0] for r in old_feed["s"]] == ["x:1001", "x:1002", "x:1003"],
+      repr((out_text, err_text)))
+# One table stop missing of four: reported with its count, and on GitHub
+# Actions as an annotation.
+partial = [stop_part("x", [("x:1", LAT, LON), ("x:2", LAT, LON), ("x:3", LAT, LON)], [])]
+table4 = {"id": "x", "stop_ids": {"1": "1001", "2": "1002", "3": "1003", "4": "1004"}}
+_n, out_text, err_text = keep_ids([dict(p, s=[list(r) for r in p["s"]]) for p in partial], table4)
+check("a table stop the feed lost is reported with the count, though most of the table is there",
+      err_text.startswith("warn x: 1 of the 4 stops of its stop id table are not in the feed") and out_text == "",
+      err_text)
+_n, out_text, err_text = keep_ids([dict(p, s=[list(r) for r in p["s"]]) for p in partial], table4, gha=True)
+check("on GitHub Actions the stale table is an annotation",
+      out_text.startswith("::warning title=Stop id table stale::x: 1 of the 4 stops") and err_text == "",
+      repr((out_text, err_text)))
+# A feed stop more than KEEP_ID_M from the old stop's place (an id the feed
+# reused for another stop) does not take the old id.
+moved = stop_part("x", [("x:SZ_1", LAT + 10, LON), ("x:SZ_2", LAT + 2000, LON)], [])
+n, out_text, err_text = keep_ids([moved], {"id": "x", "stop_ids": {
+    "SZ_1": ("1001", LAT / 1e5, LON / 1e5), "SZ_2": ("1002", LAT / 1e5, LON / 1e5)}})
+check("a feed stop far from the old stop's place keeps the feed's id, and is reported",
+      n == 1 and [r[0] for r in moved["s"]] == ["x:1001", "x:SZ_2"] and "1 of the 2" in err_text
+      and "SZ_2" in err_text and f"{bci.KEEP_ID_M:.0f} m" in err_text, repr((moved["s"], err_text)))
+_n, out_text, err_text = keep_ids([stop_part("x", [("x:SZ_1", LAT, LON)], [])], {
+    "id": "x", "stop_ids": {"SZ_1": "1001"}, "stop_aliases": {"1005": "SZ_1", "1006": "SZ_7", "1001": "SZ_8"}})
+check("an alias whose stop the feed lacks is reported with the stale table, unless its old id is in the feed",
+      err_text.startswith("warn x: 0 of the 1 stops of its stop id table and the stops of 1 of its 3 stop aliases"
+                          " (left out) are not in the feed"), err_text)
 check("a feed without a table is left as it is",
       bci.keep_stop_ids([stop_part("x", [("x:1", LAT, LON)], [])], {"id": "x"}) == 0)
 
