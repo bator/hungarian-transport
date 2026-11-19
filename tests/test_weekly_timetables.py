@@ -67,7 +67,7 @@ def test_key(monkeypatch):
     monkeypatch.setattr(wt, "PAGES_PUBLIC_KEY", _PUBLIC)
 
 
-def _sign(body: bytes, key: Ed25519PrivateKey = _KEY) -> str:
+def _sign(body: bytes, key: Ed25519PrivateKey = _KEY) -> str:  # gitleaks:allow (a test signing helper, no secret)
     """timetables.json.sig as the workflow writes it: one line of base64."""
     return base64.b64encode(key.sign(body)).decode() + "\n"
 
@@ -1105,7 +1105,7 @@ def test_the_shipped_public_key_is_a_raw_ed25519_key() -> None:
     raw = base64.b64decode(_SHIPPED_KEY, validate=True)
     assert len(raw) == 32
     Ed25519PublicKey.from_public_bytes(raw)
-    assert _SHIPPED_KEY == "iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8="
+    assert _SHIPPED_KEY == "iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8="  # gitleaks:allow (the public key)
 
 
 def test_the_site_signs_with_the_key_this_version_checks() -> None:
