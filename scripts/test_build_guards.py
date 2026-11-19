@@ -1969,6 +1969,23 @@ _order = subprocess.run([sys.executable, "-c", (
     capture_output=True, text=True, timeout=60)
 check("build_city_index and pages_timetables import after gtfs_compact's sys.path entry was taken back",
       _order.returncode == 0 and _order.stdout.strip() == "True", _order.stderr[-600:])
+# pages_timetables on its own, with gtfs_compact and mav_pages_site (which
+# adds the package folder too) imported before and sys.path put back: only
+# its own entry finds served_index (a test importing it alone after the
+# MÁV site tests, say).
+_alone = subprocess.run([sys.executable, "-c", (
+    "import sys\n"
+    f"sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
+    "saved = list(sys.path)\n"
+    "import gtfs_compact, mav_pages_site\n"
+    "sys.path[:] = saved\n"
+    "for name in ('served_index', 'pages_timetables'):\n"
+    "    sys.modules.pop(name, None)\n"
+    "import pages_timetables\n"
+    "print(pages_timetables.head_feed.__module__, pages_timetables.HEAD_BYTES > 0)\n")],
+    capture_output=True, text=True, timeout=60)
+check("pages_timetables imports alone after gtfs_compact's and mav_pages_site's sys.path entries were taken back",
+      _alone.returncode == 0 and _alone.stdout.strip() == "served_index True", _alone.stderr[-600:])
 
 if failed:
     sys.exit(1)

@@ -346,6 +346,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
         ("no counts", {"trains": None, "lines": None}, True),
     )):
         live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64, **prev}))
+        sign_file(live)
         rc, out, err, outputs = run_site(tmp / f"shrink-{n}", "--live-file", str(live))
         if ok:
             check(f"a published index of {label}: deployed", rc == 0 and outputs.get("deploy") == "true",
@@ -356,6 +357,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
                   and not (tmp / f"shrink-{n}" / "site").exists() and "deploy" not in outputs,
                   repr((rc, out, err, outputs)))
     live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64, "trains": 121}))
+    sign_file(live)
     rc, out, err, outputs = run_site(tmp / "shrink-flag", "--live-file", str(live), "--allow-shrink")
     check("--allow-shrink publishes it, with a warning",
           rc == 0 and outputs.get("deploy") == "true" and "::warning title=MÁV index shrank::" in out,
@@ -444,10 +446,39 @@ with tempfile.TemporaryDirectory() as tmp_name:
         site.urllib.request.urlopen = real_urlopen
     live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64,
                                 "trains": 60, "lines": 0}))
+    sign_file(live)
     rc, out, err, outputs = run_site(tmp / "shrink-base-live", "--live-file", str(live),
                                      "--baseline-file", str(release_zip))
-    check("a readable published manifest is compared, not the release index",
+    check("a readable published manifest whose signature verifies is compared, not the release index",
           rc == 0 and outputs.get("deploy") == "true" and "release index" not in out, repr((rc, out, err)))
+
+    # The counts of a published manifest whose signature does not verify are
+    # its author's: one who can put files on Pages must not freeze the site
+    # by naming a million trains and lines. The guard compares with the
+    # release's index instead, and with nothing (a warning) without one.
+    with zipfile.ZipFile(tmp / "release" / "inflated-ok.zip", "w") as z:
+        z.writestr("mav-index.json.gz", index_bytes(trains=60))
+    for label, how in (("no mav-index.json.sig", lambda: live.with_name(live.name + ".sig").unlink()),
+                       ("a mav-index.json.sig by another key", lambda: sign_file(live, os.urandom(32)))):
+        live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64,
+                                    "trains": 10**6, "lines": 10**6}))
+        sign_file(live)
+        how()
+        n = len(label)
+        rc, out, err, outputs = run_site(tmp / f"shrink-untrusted-{n}", "--live-file", str(live))
+        check(f"a published manifest with {label} naming a million trains: not compared (a warning), deployed",
+              rc == 0 and outputs.get("deploy") == "true" and "::warning title=MÁV shrink guard skipped::" in out
+              and "refusing" not in err, repr((rc, out, err)))
+        rc, out, err, outputs = run_site(tmp / f"shrink-untrusted-rel-{n}", "--live-file", str(live),
+                                         "--baseline-file", str(tmp / "release" / "inflated-ok.zip"))
+        check(f"a published manifest with {label} naming a million trains: the release index is compared,"
+              " deployed", rc == 0 and outputs.get("deploy") == "true" and "published manifest: not trusted" in out
+              and "release index for the shrink guard: 60 trains" in out, repr((rc, out, err)))
+        rc, out, err, outputs = run_site(tmp / f"shrink-untrusted-big-{n}", "--live-file", str(live),
+                                         "--baseline-file", str(release_zip))
+        check(f"a published manifest with {label}: a release index of 121 trains still refuses 60",
+              rc == 1 and "the latest release's index" in err and "60 trains and 0 lines vs 121 and 0" in err,
+              repr((rc, out, err)))
 
     # The script release.yml runs on the previous release's index.
     def mav_gz(path: Path, trains: int, lines: int = 0) -> Path:
@@ -777,19 +808,78 @@ with tempfile.TemporaryDirectory() as tmp_name:
         check(f"a published manifest without a usable built_at fails the run: {bad.get('built_at')!r}",
               fail and "no valid built_at" in line, line)
 
+    # A built_at counts only when the manifest's signature verifies.
+    for label, trust_ in (("no mav-index.json.sig", f"{verdict_mod.UNTRUSTED}no mav-index.json.sig (HTTP 404)"),
+                          ("a .sig that does not verify",
+                           f"{verdict_mod.UNTRUSTED}mav-index.json.sig does not verify against the pinned public key")):
+        fail, line = v("build", live_at(timedelta(hours=1)), "ok", now, trust_)
+        check(f"a fresh published manifest with {label}: not trusted, the run fails, nothing of it named",
+              fail and line.startswith("::error title=Daily MÁV index: published manifest not trusted::")
+              and "20261101.M2ChangeID" not in line and "1 h ago" not in line, line)
+    fail, line = v("build", live_at(timedelta(days=9)), "ok", now, f"{verdict_mod.UNKNOWN}mav-index.json.sig: HTTP 503")
+    check("a published manifest whose .sig could not be read: age unknown, a warning, green",
+          not fail and line.startswith("::warning") and "HTTP 503" in line and "216 h" not in line, line)
+
+    # The CLI pins the tests' key (as run_site does), and its own wait for a
+    # .sig that does not verify is 0 unless a test passes --sig-settle.
+    verdict_wrap = ("import os, sys; sys.path.insert(0, sys.argv.pop(1)); import sign_manifest;"
+                    " sign_manifest.PUBLIC_KEY = bytes.fromhex(os.environ['TEST_PAGES_PUBLIC_KEY']);"
+                    " import mav_daily_verdict; raise SystemExit(mav_daily_verdict.main(sys.argv[1:]))")
+
     def run_verdict(*args_: str) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, str(HERE / "mav_daily_verdict.py"), *args_],
-                              capture_output=True, text=True, timeout=60)
+        if "--sig-settle" not in args_ and "--failure" in args_:
+            args_ = (*args_, "--sig-settle", "0")
+        return subprocess.run([sys.executable, "-c", verdict_wrap, str(HERE), *args_],
+                              capture_output=True, text=True, timeout=60,
+                              env={**os.environ, "TEST_PAGES_PUBLIC_KEY": TEST_PUB.hex()})
 
     live.write_text(json.dumps(live_at(timedelta(days=3))))
+    sign_file(live)
     done = run_verdict("--failure", "build", "--live-file", str(live), "--now", now.isoformat())
     check("the verdict CLI exits 1 on a stale published index",
           done.returncode == 1 and "::error title=Daily MÁV index is stale::" in done.stdout,
           repr((done.returncode, done.stdout, done.stderr)))
     live.write_text(json.dumps(live_at(timedelta(hours=5))))
+    sign_file(live)
     done = run_verdict("--failure", "site", "--live-file", str(live), "--now", now.isoformat())
     check("the verdict CLI exits 0 on a fresh published index", done.returncode == 0 and "5 h ago" in done.stdout,
           repr((done.returncode, done.stdout, done.stderr)))
+    good_sig = live.with_name(live.name + ".sig").read_bytes()
+    sign_file(live, os.urandom(32))
+    done = run_verdict("--failure", "site", "--live-file", str(live), "--now", now.isoformat())
+    check("the verdict CLI exits 1 on a fresh published index whose .sig does not verify, also read again",
+          done.returncode == 1 and "published manifest not trusted" in done.stdout
+          and "reading both again in 0 s" in done.stdout and "5 h ago" not in done.stdout,
+          repr((done.returncode, done.stdout, done.stderr)))
+    live.with_name(live.name + ".sig").unlink()
+    done = run_verdict("--failure", "site", "--live-file", str(live), "--now", now.isoformat())
+    check("the verdict CLI exits 1 on a fresh published index without a .sig (HTTP 404)",
+          done.returncode == 1 and "no mav-index.json.sig (HTTP 404)" in done.stdout,
+          repr((done.returncode, done.stdout, done.stderr)))
+
+    # Pages' CDN serving the previous deploy's .sig next to the new manifest
+    # (each path cached on its own, up to PAGES_MAX_AGE): the verdict reads
+    # both again SIG_SETTLE_S later, by default, and then trusts them.
+    live.with_name(live.name + ".sig").write_text(
+        base64.b64encode(sign_manifest.sign(live, os.urandom(32))).decode() + "\n")
+    waits: list[float] = []
+
+    def settled(seconds: float) -> None:
+        waits.append(seconds)
+        live.with_name(live.name + ".sig").write_bytes(good_sig)
+
+    real_sleep, real_key = verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY
+    verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = settled, TEST_PUB
+    out_buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out_buf):
+            rc = verdict_mod.main(["--failure", "site", "--live-file", str(live), "--now", now.isoformat()])
+    finally:
+        verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = real_sleep, real_key
+    check("a .sig of the previous deploy at first: read again once, SIG_SETTLE_S (11 minutes, past Pages' cache)"
+          " later, then trusted: green", rc == 0 and waits == [site.SIG_SETTLE_S] and site.SIG_SETTLE_S >= 660
+          and "5 h ago" in out_buf.getvalue(), repr((rc, waits, out_buf.getvalue())))
+    sign_file(live)
     done = run_verdict("--failure", "auth", "--live-file", str(live), "--now", now.isoformat())
     check("the verdict CLI exits 1 on a refused login, a fresh index notwithstanding",
           done.returncode == 1 and "login refused" in done.stdout, repr((done.returncode, done.stdout)))
