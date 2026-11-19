@@ -979,9 +979,12 @@ references added by hand first.
 
 What Szeged users have to change themselves:
 
-- A local-bus card (`helyi: true`, `city: szeged`) has no departures any
-  more: Szeged's buses are only in `volan-szeged`. Set `city: volan-szeged`
-  and pick the stop again.
+- A local-bus card (`helyi: true`, `city: szeged`) no longer shows buses:
+  Szeged's buses are only in `volan-szeged`. Its stop is not found, and the
+  card has no departures, unless a tram or trolleybus stop has exactly its
+  name: then it shows that stop's trams and trolleybuses (32 of the 410 old
+  stop ids the index dropped, six of them 200–540 m away, such as Kereskedő
+  köz). Either way, set `city: volan-szeged` and pick the stop again.
 - The tram-train to Hódmezővásárhely (old lines 1 and 1A) left the city
   board: use a MÁV card (`mav: true`) with its station.
 - A stop that is not found (one of the three above) is picked again.

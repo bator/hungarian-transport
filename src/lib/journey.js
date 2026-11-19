@@ -487,9 +487,11 @@ register({
     if (!idx || !idx.stops) return null;
     let originStop = BkkLib.gtfsStopById(idx, origin.id);
     if (!originStop) {
-      /* A rebuilt index renumbered the stop: its name in that city. */
+      /* A rebuilt index renumbered the stop: its number or its name in
+         that city, as the card's departures find it (a stop the city feed
+         dropped is none, not a stop whose name it is part of). */
       const opIx = BkkLib.opIx(idx, String(origin.id).split(':')[0]);
-      if (opIx >= 0) originStop = BkkLib.volanMatchStop(idx, { id: '', name: origin.name || '' }, opIx);
+      if (opIx >= 0) originStop = BkkLib.volanMatchStop(idx, { id: origin.id, name: origin.name || '' }, opIx);
     }
     if (!originStop || originStop.op == null) return null;
     const paths = BkkLib.cityHubPaths(idx, originStop, 6, atMs).filter((p) => p.edges.length);
