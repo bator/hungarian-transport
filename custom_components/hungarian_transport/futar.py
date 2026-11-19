@@ -354,7 +354,9 @@ class FutarProxy:
     first, and FUTÁR by one probe every FUTAR_OUTAGE_PROBE_SEC
     (_fallback_first). When it has no answer either, FUTÁR's error stands.
     A call failing fast on a rejected key, or answered by the fallback
-    first, takes a token of FUTÁR's limit before the fallback is asked. `on_accepted` is
+    first, takes a token of FUTÁR's limit before the fallback is asked; one
+    that asks FUTÁR after the fallback first (no answer) asks it with that
+    token, so every request takes one at most. `on_accepted` is
     called when FUTÁR first accepts the key, and again whenever it accepts it after rejecting it
     (the rejection was a mistake): a reauth started before this proxy (by
     the one a reload replaced) is answered by a key that works as well.
@@ -419,15 +421,27 @@ class FutarProxy:
         self._callers: dict[Hashable, _Callers] = {}
 
     async def _upstream(
-        self, path: str, params: dict[str, str], key: Hashable, spent: float = 0.0, fallback: bool = True
+        self,
+        path: str,
+        params: dict[str, str],
+        key: Hashable,
+        spent: float = 0.0,
+        fallback: bool = True,
+        token: bool = False,
     ) -> dict:
         """FUTÁR's answer, after spent seconds of the card's budget went
         elsewhere (the fallback asked first); with fallback False, nothing
-        is reserved for one (it was asked already)."""
+        is reserved for one (it was asked already). With token, the request
+        holds FUTÁR's token already (_fallback_first took it), and takes
+        none here."""
         started = self._monotonic()
         # Refused here, once per refused request (and counted once): every
-        # caller sharing it gets the same error.
-        slept = await self._rate.acquire()
+        # caller sharing it gets the same error. Not for a request that took
+        # its token before the fallback was asked first: one request, one
+        # token; taking a second one here spent FUTÁR's limit twice as fast
+        # in its outage (every card request the planner could not take, its
+        # share used up), so its requests waited, then were refused, sooner.
+        slept = 0.0 if token else await self._rate.acquire()
         # The summed sleeps, or the clock when a busy event loop took longer.
         waited = max(slept, self._monotonic() - started) + spent
         rejections = self._rejections
@@ -496,6 +510,14 @@ class FutarProxy:
         return fallback.reserve(path, params)
 
     @property
+    def tokens(self) -> float:
+        """The tokens of FUTÁR's rate limit there are now (it refills with
+        the clock, and takes none): what a request spent of it is the
+        difference across it, which the tests count."""
+        self._rate.available()
+        return self._rate._tokens
+
+    @property
     def key_rejected(self) -> bool:
         """FUTÁR rejected the key and has not accepted it since (the
         handler asks for a new key also when a fallback answered)."""
@@ -532,14 +554,14 @@ class FutarProxy:
                 probe = self._outage_probing = True
             else:
                 first = True
-        tried = False
+        tried = token = False
         try:
             try:
                 if first:
-                    data, tried = await self._fallback_first(path, params)
+                    data, tried, token = await self._fallback_first(path, params)
                     if data is not None:
                         return data
-                return await self._get(path, params, key, self._monotonic() - started, not tried)
+                return await self._get(path, params, key, self._monotonic() - started, not tried, token)
             except FutarError as err:
                 if tried:
                     # The fallback was asked first and had no answer.
@@ -571,22 +593,26 @@ class FutarProxy:
             and self._outages.is_down(None)
         )
 
-    async def _fallback_first(self, path: str, params: dict[str, str]) -> tuple[dict[str, Any] | None, bool]:
-        """The fallback's answer, asked before FUTÁR during its outage, and
-        whether it was asked: not where it cannot answer (can_answer, then
-        its token: reserve), which then asks FUTÁR as before. FUTÁR is not
-        asked, so FUTÁR's token is taken first (FutarRateLimited when there
-        is none), as for a rejected key: the fallback is no way around
-        FUTÁR's limit."""
+    async def _fallback_first(
+        self, path: str, params: dict[str, str]
+    ) -> tuple[dict[str, Any] | None, bool, bool]:
+        """The fallback's answer, asked before FUTÁR during its outage,
+        whether it was asked, and whether FUTÁR's token was taken for it:
+        not where it cannot answer (can_answer, then its token: reserve),
+        which then asks FUTÁR as before. FUTÁR is not asked, so FUTÁR's
+        token is taken first (FutarRateLimited when there is none), as for
+        a rejected key: the fallback is no way around FUTÁR's limit. Where
+        FUTÁR is asked after all (no reserve, no answer), it is with that
+        token (_upstream's token), not another one."""
         fallback = self._fallback
         if fallback is None or not fallback.can_answer(path, params):
-            return None, False
+            return None, False, False
         await self._rate.acquire()
         ticket = fallback.reserve(path, params)
         if ticket is None:
-            return None, False
+            return None, False, True
         try:
-            return await fallback.answer(path, params, ticket), True
+            return await fallback.answer(path, params, ticket), True, True
         finally:
             ticket.release()
 
@@ -619,10 +645,16 @@ class FutarProxy:
         return await fallback.answer(path, params, ticket)
 
     async def _get(
-        self, path: str, params: dict[str, str], key: Hashable, spent: float = 0.0, fallback: bool = True
+        self,
+        path: str,
+        params: dict[str, str],
+        key: Hashable,
+        spent: float = 0.0,
+        fallback: bool = True,
+        token: bool = False,
     ) -> dict:
         """FUTÁR's answer (cached, shared), spent seconds after the caller
-        asked; fallback as _upstream's."""
+        asked; fallback and token as _upstream's."""
         probe = False
         if self._rejected is not None:
             if self._probing or self._monotonic() - self._rejected_at < REJECTED_RETRY:
@@ -632,7 +664,7 @@ class FutarProxy:
             # timeout or our own rate limit, the next call asks again.
             probe = self._probing = True
         try:
-            data = await self._cache.get(key, lambda: self._upstream(path, params, key, spent, fallback))
+            data = await self._cache.get(key, lambda: self._upstream(path, params, key, spent, fallback, token))
         except FutarUpstreamRateLimited as err:
             # FUTÁR answers, but not this key for a while: not an outage
             # either. Said once, until FUTÁR answers a call again.
