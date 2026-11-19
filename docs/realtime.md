@@ -79,8 +79,10 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   delays: it is made after the trip request has let other cards' trip
   requests go, and has its own cap (256 KiB), timeout (5 s, and
   never past the card's round), token share (one every 10 s, burst 6,
-  within the planner limit) and backoff (3 minutes); when it is not made
-  or fails, the trips simply have no vehicle that round, logged once at
+  within the planner limit) and backoff (3 minutes; not after a timeout
+  the round's deadline cut below the 5 s, which is no sign of an outage;
+  a round cancelled before its request ran gives the token back); when it
+  is not made or fails, the trips simply have no vehicle that round, logged once at
   debug level, and the planner is not backed off. Each route's answer
   size is remembered for three hours: a request takes the routes that fit
   192 KiB by that reckoning (an unseen route counted as 8 KiB), and a
