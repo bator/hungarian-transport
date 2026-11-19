@@ -1,15 +1,22 @@
 """The weekly Volán and city indexes from GitHub Pages (weekly_timetables.py)."""
 
+import asyncio
+import base64
 import gzip
 import hashlib
 import json
 import logging
 import os
 import re
+import time
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
+from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant
@@ -18,6 +25,7 @@ from homeassistant.util import dt as dt_util
 
 from custom_components.hungarian_transport import (
     mav_daily,
+    served_index,
     storage,
     timetable_notify,
     timetables,
@@ -40,12 +48,38 @@ SHARDS = 4
 
 # The real round, before conftest's no_pages_timetables replaces it.
 _real_update = wt.async_update
+# The key the integration ships, before test_key replaces it.
+_SHIPPED_KEY = wt.PAGES_PUBLIC_KEY
+# The tests' signing key: the Site signs its manifest with it, and the
+# integration checks with its public half (test_key).
+_KEY = Ed25519PrivateKey.generate()
+_PUBLIC = base64.b64encode(_KEY.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
 
 
 @pytest.fixture
 def no_pages_timetables():
     """Overrides the conftest fixture: these tests run the real rounds."""
     yield
+
+
+@pytest.fixture(autouse=True)
+def test_key(monkeypatch):
+    monkeypatch.setattr(wt, "PAGES_PUBLIC_KEY", _PUBLIC)
+
+
+def _sign(body: bytes, key: Ed25519PrivateKey = _KEY) -> str:
+    """timetables.json.sig as the workflow writes it: one line of base64."""
+    return base64.b64encode(key.sign(body)).decode() + "\n"
+
+
+def _serve_manifest(aioclient_mock, body: bytes, sig: str | dict | None = None) -> None:
+    """timetables.json with body and its signature: by default a good one,
+    else the text sig, or the response sig (a dict) describes."""
+    aioclient_mock.get(wt.MANIFEST_URL, content=body)
+    if isinstance(sig, dict):
+        aioclient_mock.get(wt.SIGNATURE_URL, **sig)
+    else:
+        aioclient_mock.get(wt.SIGNATURE_URL, text=_sign(body) if sig is None else sig)
 
 
 def _shards(tag: str) -> dict[str, bytes]:
@@ -106,8 +140,11 @@ class Site:
         self.manifest["indexes"][name] = entry
         return raw, folder, shards
 
-    def serve(self, aioclient_mock) -> None:
-        aioclient_mock.get(wt.MANIFEST_URL, json=self.manifest)
+    def body(self) -> bytes:
+        return json.dumps(self.manifest, separators=(",", ":")).encode()
+
+    def serve(self, aioclient_mock, sig: str | None = None) -> None:
+        _serve_manifest(aioclient_mock, self.body(), sig)
         for path, body in self.files.items():
             aioclient_mock.get(f"{mav_daily.PAGES_BASE}/{path}", content=body)
 
@@ -131,7 +168,15 @@ def _flipped(raw: bytes) -> bytes:
 
 
 def _snapshot(www: Path) -> dict[str, bytes]:
-    return {str(p.relative_to(www)): p.read_bytes() for p in sorted(www.rglob("*")) if p.is_file()}
+    """What www/ serves: every file but the staging folders'."""
+    return {
+        str(p.relative_to(www)): p.read_bytes() for p in sorted(www.rglob("*"))
+        if p.is_file() and not p.relative_to(www).parts[0].startswith(wt.STAGING)
+    }
+
+
+def _staged(www: Path) -> list[Path]:
+    return [p for p in www.iterdir() if p.name.startswith(wt.STAGING)]
 
 
 def _requested(aioclient_mock) -> list[str]:
@@ -140,6 +185,15 @@ def _requested(aioclient_mock) -> list[str]:
 
 def _warnings(caplog) -> list[str]:
     return [r.getMessage() for r in caplog.records if r.name == wt.__name__ and r.levelno >= logging.WARNING]
+
+
+async def _until(condition, ticks: int = 1000) -> None:
+    """Let the loop run until condition() holds (at most ticks passes)."""
+    for _ in range(ticks):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("condition never held")
 
 
 async def _round(hass: HomeAssistant, www: Path) -> dict[str, str]:
@@ -177,7 +231,7 @@ async def test_another_format_or_schema_is_unsupported_and_installs_nothing(
     before = _snapshot(card_assets)
     for _ in range(2):
         assert await _round(hass, card_assets) == {"volan": wt.UNSUPPORTED, "city": wt.UNSUPPORTED}
-    assert _requested(aioclient_mock) == [wt.MANIFEST_URL, wt.MANIFEST_URL]
+    assert _requested(aioclient_mock) == [wt.MANIFEST_URL, wt.SIGNATURE_URL] * 2
     assert _snapshot(card_assets) == before
     # Said once, as information: an update of the integration reads it.
     assert caplog.text.count("Weekly timetables from GitHub Pages skipped") == 1
@@ -185,7 +239,7 @@ async def test_another_format_or_schema_is_unsupported_and_installs_nothing(
 
 
 async def test_a_broken_manifest_fails_and_is_logged_once(hass: HomeAssistant, aioclient_mock, card_assets, caplog) -> None:
-    aioclient_mock.get(wt.MANIFEST_URL, text="{not json")
+    _serve_manifest(aioclient_mock, b"{not json")
     for _ in range(2):
         assert await _round(hass, card_assets) == {"volan": wt.FAILED, "city": wt.FAILED}
     assert len(_warnings(caplog)) == 1
@@ -292,7 +346,7 @@ async def test_the_same_or_an_older_volan_feed_is_not_downloaded(
     site.publish("volan", VOLAN_NEW)
     site.serve(aioclient_mock)
     assert (await _round(hass, card_assets))["volan"] == result
-    assert _requested(aioclient_mock) == [wt.MANIFEST_URL]
+    assert _requested(aioclient_mock) == [wt.MANIFEST_URL, wt.SIGNATURE_URL]
     assert _snapshot(card_assets) == before
 
 
@@ -341,7 +395,7 @@ async def test_a_local_rebuild_with_newer_feeds_is_not_overwritten(
     assert (await _round(hass, card_assets))["volan"] == result
     if result == wt.LOCAL_WINS:
         assert _snapshot(card_assets) == before
-        assert _requested(aioclient_mock) == [wt.MANIFEST_URL]
+        assert _requested(aioclient_mock) == [wt.MANIFEST_URL, wt.SIGNATURE_URL]
 
 
 async def test_a_city_copy_the_updater_would_restore_wins(
@@ -403,7 +457,10 @@ async def test_a_bad_shard_leaves_www_untouched(hass: HomeAssistant, aioclient_m
     assert (await _round(hass, card_assets))["volan"] == wt.SETTLING
     assert (await _round(hass, card_assets))["volan"] == wt.FAILED
     assert _snapshot(card_assets) == before
-    assert not [p for p in card_assets.iterdir() if p.name.startswith(wt.STAGING)]
+    # The staging folder keeps only the shards that checked out (a retry
+    # downloads the rest), never the bad one.
+    for staging in _staged(card_assets):
+        assert "02.json.gz" not in {p.name for p in staging.iterdir()}
     assert [w for w in _warnings(caplog) if "sha256 does not match" in w]
 
 
@@ -417,6 +474,9 @@ async def test_a_missing_shard_fails_and_leaves_www_untouched(
     body = site.files.pop(f"{folder}/01.json.gz")
     site.serve(aioclient_mock)
     aioclient_mock.get(f"{mav_daily.PAGES_BASE}/{folder}/01.json.gz", status=404, content=body)
+    # A 404 of a file the manifest names may be a cached manifest of the
+    # previous deploy: looked at again, then FAILED when it stays so.
+    assert (await _round(hass, card_assets))["volan"] == wt.SETTLING
     assert (await _round(hass, card_assets))["volan"] == wt.FAILED
     assert _snapshot(card_assets) == before
     assert not [p for p in card_assets.iterdir() if "." in p.name.split("-shapes-")[-1] and p.is_dir()]
@@ -555,8 +615,6 @@ async def test_a_broken_folder_of_the_same_name_is_replaced(hass: HomeAssistant,
 
 
 async def test_shards_download_at_most_concurrency_at_a_time(hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch) -> None:
-    import asyncio
-
     running = peak = 0
     real = wt._download_shard
 
@@ -740,7 +798,8 @@ async def test_an_install_notifies_once_and_counts_as_seen_for_the_next_release(
     assert pages == [(
         timetable_notify.NOTIFICATION_PAGES,
         "Hungarian transport: timetables updated",
-        "New weekly timetables from GitHub Pages are installed: Volán buses, city lines.",
+        "New weekly timetables from GitHub Pages are installed: Volán buses (2026-11-02 timetable),"
+        " city lines (newest feed of 2026-11-10).",
     )]
     await hass.async_block_till_done(wait_background_tasks=True)
     assert [c["message"] for c in calls] == [pages[0][2]]
@@ -830,8 +889,8 @@ def test_the_staging_folder_is_not_one_the_updater_prunes(tmp_path) -> None:
     site = Site()
     site.publish("volan", VOLAN_NEW)
     entry = wt.check_entry("volan", site.manifest["indexes"]["volan"])
-    tmp = wt._staging(tmp_path, entry["shapes"], "abcd1234")
-    assert tmp.is_dir() and tmp.name.startswith(wt.STAGING)
+    tmp, missing = wt._staging(tmp_path, entry["shapes"], wt.staging_key(entry))
+    assert tmp.is_dir() and tmp.name.startswith(wt.STAGING) and len(missing) == SHARDS
     assert not list(tmp_path.glob("volan-shapes-*"))
 
 
@@ -906,8 +965,6 @@ async def test_a_slow_weekly_round_never_drops_a_mav_retry(
 ) -> None:
     """The weekly round runs in its own task: the MÁV updater's retry 20
     minutes later runs while the weekly download is still going."""
-    import asyncio
-
     mav_rounds = []
     release = asyncio.Event()
     weekly_rounds = []
@@ -921,19 +978,18 @@ async def test_a_slow_weekly_round_never_drops_a_mav_retry(
         await release.wait()
         return wt.TimetablesRound({"volan": wt.IndexResult(wt.UP_TO_DATE, VOLAN_NEW)})
 
-    async def settle() -> None:
+    async def settle(rounds: int) -> None:
         await hass.async_block_till_done()
-        for _ in range(5):
-            await asyncio.sleep(0)
+        await _until(lambda: len(mav_rounds) == rounds)
 
     monkeypatch.setattr(mav_daily, "async_update", mav_round)
     monkeypatch.setattr(wt, "async_update", slow_round)
     await _setup(hass)
-    for when in ("2026-11-16 03:20:01+00:00", "2026-11-16 03:40:02+00:00", "2026-11-16 04:00:03+00:00"):
+    for n, when in enumerate(("2026-11-16 03:20:01+00:00", "2026-11-16 03:40:02+00:00", "2026-11-16 04:00:03+00:00")):
         moment = dt_util.parse_datetime(when)
         freezer.move_to(moment)
         async_fire_time_changed(hass, moment)
-        await settle()
+        await settle(n + 1)
     assert len(mav_rounds) == 3 and len(weekly_rounds) == 1
     release.set()
     await hass.async_block_till_done(wait_background_tasks=True)
@@ -955,3 +1011,533 @@ async def test_retired_shapes_are_pruned_at_setup_also_with_the_option_off(
     assert not gone.exists()
     assert (fresh / wt.SHAPES_RETIRED).is_file()
     assert (card_assets / keep).is_dir() and not (card_assets / keep / wt.SHAPES_RETIRED).exists()
+
+
+# --- review round 6 -------------------------------------------------------------
+
+# A city feed as the live site's (shortened), and what the last two stable
+# releases shipped before it was built.
+LIVE = "miskolc:1.3;debrecen:20261113-1;volan-szeged:01736.20261116"
+RELEASE_21 = "miskolc:1.3;debrecen:20261030-1;volan-szeged:01736.20261102"
+RELEASE_22 = "miskolc:1.3;debrecen:20261106-1;volan-szeged:01736.20261109"
+TODAY = date(2026, 11, 19)
+
+
+def _www(tmp_path: Path, feed: str) -> tuple[Path, Path]:
+    www, durable = tmp_path / "served", tmp_path / "durable"
+    www.mkdir()
+    durable.mkdir()
+    (www / timetables.CITY_INDEX).write_bytes(_index("city", feed, None))
+    return www, durable
+
+
+@pytest.mark.parametrize(
+    ("installed", "release_feed", "result"),
+    [
+        # The reviewers' repro: 1.10.23 added an operator (SZKT's Szeged)
+        # after the Pages index was built; the operator rule takes a set that
+        # differs for news and would put the older timetables back.
+        (LIVE + ";szeged:20261115", RELEASE_22, wt.SUPERSEDED),
+        # ... or it updated an undated feed (miskolc 1.3 -> 1.4).
+        (LIVE.replace("miskolc:1.3", "miskolc:1.4"), RELEASE_22, wt.SUPERSEDED),
+        # A manifest from before release_feed: the rule as it was.
+        (LIVE + ";szeged:20261115", None, wt._INSTALL),
+        (LIVE.replace("miskolc:1.3", "miskolc:1.4"), None, wt._INSTALL),
+        # The Pages build knew this release: the operator rule decides.
+        (RELEASE_22, RELEASE_22, wt._INSTALL),
+        # A release older than the one the Pages build knew (not updated
+        # yet): the operator rule decides.
+        (RELEASE_21, RELEASE_22, wt._INSTALL),
+    ],
+)
+def test_a_release_newer_than_the_pages_build_is_not_replaced(tmp_path, installed, release_feed, result) -> None:
+    www, durable = _www(tmp_path, installed)
+    assert wt.decide("city", LIVE, www, durable, release_feed=release_feed, today=TODAY) == result
+
+
+def test_release_feed_applies_only_to_a_release_s_index(tmp_path) -> None:
+    """An index this module installed, or the local updater's copy, is not a
+    release's: the operator rule decides as before."""
+    served = "miskolc:1.3;debrecen:20261110-1;volan-szeged:01736.20261109"
+    www, durable = _www(tmp_path, served)
+    size = (www / timetables.CITY_INDEX).stat().st_size
+    assert wt.decide("city", LIVE, www, durable, release_feed=RELEASE_22, today=TODAY) == wt.SUPERSEDED
+    record = {"feed": served, "size": size, "sha256": "0" * 64}
+    assert wt.decide("city", LIVE, www, durable, release_feed=RELEASE_22, pages_install=record,
+                     today=TODAY) == wt._INSTALL
+    # Another file of that feed (a release's) is not that install.
+    other = {**record, "size": size + 1}
+    assert wt.decide("city", LIVE, www, durable, release_feed=RELEASE_22, pages_install=other,
+                     today=TODAY) == wt.SUPERSEDED
+    (durable / timetables.CITY_INDEX).write_bytes((www / timetables.CITY_INDEX).read_bytes())
+    assert wt.decide("city", LIVE, www, durable, release_feed=RELEASE_22, today=TODAY) == wt._INSTALL
+
+
+async def test_a_pages_build_older_than_the_release_is_superseded_on_the_sensor(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, morning, monkeypatch
+) -> None:
+    monkeypatch.setattr(wt, "async_update", _real_update)
+    raw, _ = _install_local(card_assets, "city", LIVE + ";szeged:20261115")
+    site = Site()
+    site.publish("city", LIVE, release_feed=RELEASE_22)
+    site.serve(aioclient_mock)
+    await _setup(hass)
+    await _at(hass, freezer, "2026-11-16 03:20:01+00:00")
+    city = hass.states.get("sensor.hungarian_transport_city_timetables")
+    assert city.attributes["pages_result"] == wt.SUPERSEDED
+    assert (card_assets / timetables.CITY_INDEX).read_bytes() == raw
+    assert not [u for u in _requested(aioclient_mock) if "city-" in u]
+
+
+def test_a_bad_release_feed_is_refused() -> None:
+    site = Site()
+    site.publish("city", LIVE, release_feed=7)
+    with pytest.raises(mav_daily.DailyIndexError, match="release_feed"):
+        wt.check_entry("city", site.manifest["indexes"]["city"])
+    site.publish("city", LIVE, release_feed=None)
+    assert wt.check_entry("city", site.manifest["indexes"]["city"])["release_feed"] is None
+
+
+# The signature.
+
+
+def test_the_shipped_public_key_is_a_raw_ed25519_key() -> None:
+    raw = base64.b64decode(_SHIPPED_KEY, validate=True)
+    assert len(raw) == 32
+    Ed25519PublicKey.from_public_bytes(raw)
+    assert _SHIPPED_KEY == "QCs8j2ex1KxTRA7pHfsZ6f2SMu5jidCwy1LyvIVOd+M="
+
+
+def test_verify_manifest_takes_only_the_key_s_signature_of_these_bytes() -> None:
+    body = Site().body()
+    wt.verify_manifest(body, _sign(body).encode())
+    for sig, message in (
+        (_sign(body + b" "), "does not match"),
+        (_sign(body, Ed25519PrivateKey.generate()), "does not match"),
+        ("%%%", "not base64"),
+        (_sign(body).strip() + "\n" + _sign(body), "not base64"),
+        (base64.b64encode(b"x" * 10).decode(), "10 bytes"),
+        ("", "0 bytes"),
+    ):
+        with pytest.raises(wt._BadSignature, match=message):
+            wt.verify_manifest(body, sig.encode())
+
+
+@pytest.mark.parametrize(
+    "sig",
+    [
+        {"status": 404},
+        "other key",
+        "tampered",
+        "garbage",
+        "A" * (wt.MAX_SIGNATURE + 1),
+    ],
+)
+async def test_a_manifest_without_a_good_signature_installs_nothing(
+    hass: HomeAssistant, aioclient_mock, card_assets, caplog, sig
+) -> None:
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    before = _snapshot(card_assets)
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    body = site.body()
+    if sig == "other key":
+        sig = _sign(body, Ed25519PrivateKey.generate())
+    elif sig == "tampered":
+        sig = _sign(body.replace(b"20261102", b"20261103"))
+    elif sig == "garbage":
+        sig = "not a signature"
+    site.serve(aioclient_mock, sig)
+    # Right after a deploy the cache may pair the manifest with the previous
+    # signature: once quiet, then FAILED.
+    results = [(await _round(hass, card_assets))["volan"] for _ in range(3)]
+    assert results == [wt.SETTLING, wt.FAILED, wt.FAILED]
+    assert _snapshot(card_assets) == before
+    assert set(_requested(aioclient_mock)) == {wt.MANIFEST_URL, wt.SIGNATURE_URL}
+    assert len(_warnings(caplog)) == 1
+
+
+async def test_a_signature_that_cannot_be_fetched_fails_at_once(hass: HomeAssistant, aioclient_mock, card_assets) -> None:
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock, {"status": 500})
+    assert await _round(hass, card_assets) == {"volan": wt.FAILED, "city": wt.FAILED}
+    assert not (card_assets / timetables.VOLAN_INDEX).exists()
+
+
+async def test_the_previous_signature_settles_then_the_deploy_s_installs(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    old, new = Site(), Site()
+    old.publish("volan", VOLAN_OLD)
+    raw, _, _ = new.publish("volan", VOLAN_NEW)
+    new.serve(aioclient_mock, _sign(old.body()))
+    assert (await _round(hass, card_assets))["volan"] == wt.SETTLING
+    aioclient_mock.clear_requests()
+    new.serve(aioclient_mock)
+    assert (await _round(hass, card_assets))["volan"] == wt.INSTALLED
+    assert (card_assets / timetables.VOLAN_INDEX).read_bytes() == raw
+
+
+# A built_at that is no time, and crashes.
+
+
+async def test_an_impossible_built_at_is_no_time_and_the_round_goes_through(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    raw, _, _ = site.publish("volan", VOLAN_NEW, built_at="2026-02-30T10:00:00Z")
+    site.manifest["built_at"] = "2026-02-30T10:00:00Z"
+    site.serve(aioclient_mock)
+    done = await wt.async_update(hass, card_assets)
+    assert done.results["volan"].result == wt.INSTALLED and done.built_at is None
+    assert (card_assets / timetables.VOLAN_INDEX).read_bytes() == raw
+    assert mav_daily.built_at({"built_at": "2026-02-30T10:00:00Z"}) is None
+
+
+async def test_a_crashed_round_is_logged_with_its_traceback_and_retried(
+    hass: HomeAssistant, card_assets, monkeypatch, caplog
+) -> None:
+    calls = []
+
+    async def update(hass_, www):
+        calls.append(True)
+        if len(calls) in (1, 2, 4):
+            raise KeyError("boom")
+        return wt.TimetablesRound({"volan": wt.IndexResult(wt.UP_TO_DATE, VOLAN_NEW)})
+
+    monkeypatch.setattr(wt, "async_update", update)
+    pt = wt.PagesTimetables(hass, card_assets)
+    await pt._round()
+    assert pt._retries == 1 and pt._unsub is not None
+    assert (await storage.async_load(hass))[storage.PAGES_ROUND]["volan"]["result"] == wt.FAILED
+    for _ in range(3):
+        await pt._round()
+    pt.stop()
+    crashes = [r for r in caplog.records if r.name == wt.__name__ and r.levelno == logging.WARNING]
+    # The first crash, and the one after a round that went through.
+    assert len(crashes) == 2 and all(r.exc_info for r in crashes)
+
+
+@pytest.mark.parametrize(("error", "traceback"), [(KeyError("boom"), True), (OSError("disk"), False)])
+async def test_one_index_crashing_leaves_the_other_and_a_bug_has_its_traceback(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch, caplog, error, traceback
+) -> None:
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    site.publish("city", CITY_NEW)
+    site.serve(aioclient_mock)
+    real = wt._update_index
+
+    async def crash(hass_, session, name, *args):
+        if name == "volan":
+            raise error
+        return await real(hass_, session, name, *args)
+
+    monkeypatch.setattr(wt, "_update_index", crash)
+    assert await _round(hass, card_assets) == {"volan": wt.FAILED, "city": wt.INSTALLED}
+    assert await _round(hass, card_assets) == {"volan": wt.FAILED, "city": wt.UP_TO_DATE}
+    said = [r for r in caplog.records if r.name == wt.__name__ and r.levelno == logging.WARNING]
+    assert len(said) == 1 and bool(said[0].exc_info) is traceback
+
+
+async def test_a_failing_notification_still_records_the_round(hass: HomeAssistant, card_assets, monkeypatch, caplog) -> None:
+    async def update(hass_, www):
+        return wt.TimetablesRound({"volan": wt.IndexResult(wt.UP_TO_DATE, VOLAN_NEW)})
+
+    async def notify(done):
+        raise RuntimeError("notify")
+
+    monkeypatch.setattr(wt, "async_update", update)
+    pt = wt.PagesTimetables(hass, card_assets, notify)
+    await pt._round()
+    pt.stop()
+    assert (await storage.async_load(hass))[storage.PAGES_ROUND]["volan"]["result"] == wt.UP_TO_DATE
+    assert "Timetable update notification failed" in caplog.text
+
+
+# The commit.
+
+
+async def test_a_failed_swap_of_a_broken_folder_puts_it_back(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch, caplog
+) -> None:
+    _, folder = _install_local(card_assets, "volan", VOLAN_OLD, tag="same")
+    (card_assets / folder / "01.json.gz").write_bytes(b"broken")
+    before = _snapshot(card_assets)
+    site = Site()
+    site.publish("volan", VOLAN_NEW, tag="same")
+    site.serve(aioclient_mock)
+    real = os.replace
+    calls = []
+
+    def flaky(src, dst):
+        calls.append(Path(dst).name)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        return real(src, dst)
+
+    monkeypatch.setattr(wt.os, "replace", flaky)
+    assert (await _round(hass, card_assets))["volan"] == wt.FAILED
+    # The served index still has the folder it names (broken as it was).
+    assert calls[1:] == [folder, folder]
+    assert _snapshot(card_assets) == before
+    assert not _staged(card_assets)
+    assert [w for w in _warnings(caplog) if f"shapes folder {folder}" in w and "No space left" in w]
+
+
+async def test_a_full_disk_fails_keeps_the_index_and_is_retried(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    raw, _ = _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock)
+
+    def full(data, out, suffix=None):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(wt.mav_index, "write_bytes", full)
+    pt = wt.PagesTimetables(hass, card_assets)
+    await pt._round()
+    assert (card_assets / timetables.VOLAN_INDEX).read_bytes() == raw
+    assert not _staged(card_assets)
+    assert pt._retries == 1 and pt._unsub is not None
+    state = await storage.async_load(hass)
+    assert state[storage.PAGES_ROUND]["volan"]["result"] == wt.FAILED
+    assert storage.TIMETABLES_INSTALL not in state
+    pt.stop()
+
+
+async def test_a_stop_during_the_commit_waits_for_it_and_reports_nothing(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    import threading
+
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock)
+    started, release = threading.Event(), threading.Event()
+    events: list[str] = []
+    real_commit, real_rmtree = wt._commit, wt.shutil.rmtree
+
+    def slow_commit(*args):
+        started.set()
+        release.wait(10)
+        real_commit(*args)
+        events.append("commit")
+
+    def rmtree(path, *args, **kw):
+        if Path(path).name.startswith(wt.STAGING):
+            events.append("rmtree")
+        return real_rmtree(path, *args, **kw)
+
+    monkeypatch.setattr(wt, "_commit", slow_commit)
+    monkeypatch.setattr(wt.shutil, "rmtree", rmtree)
+    seen = []
+
+    async def on_result(done):
+        seen.append(done)
+
+    pt = wt.PagesTimetables(hass, card_assets, on_result)
+    pt.start_round()
+    await hass.async_add_executor_job(started.wait, 10)
+    task = pt._task
+    pt.stop()
+    for _ in range(5):
+        await asyncio.sleep(0)
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert task.cancelled()
+    # The cleanup ran after the commit, never beside it.
+    assert events[0] == "commit"
+    assert not _staged(card_assets)
+    assert seen == []
+    assert storage.PAGES_ROUND not in await storage.async_load(hass)
+    assert pt._unsub is None
+
+
+async def test_the_local_updater_writing_during_a_download_wins(
+    hass: HomeAssistant, aioclient_mock, card_assets, mav_source, monkeypatch
+) -> None:
+    base = mav_source.parent
+    base.mkdir(parents=True)
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock)
+    real = wt._download_shard
+    wrote: list[bytes] = []
+
+    async def updater_runs(*args):
+        if not wrote:
+            raw, _ = _install_local(card_assets, "volan", "volan:01716.20261109")
+            (base / timetables.VOLAN_INDEX).write_bytes(raw)
+            wrote.append(raw)
+        await real(*args)
+
+    monkeypatch.setattr(wt, "_download_shard", updater_runs)
+    assert (await _round(hass, card_assets))["volan"] == wt.LOCAL_WINS
+    assert (card_assets / timetables.VOLAN_INDEX).read_bytes() == wrote[0]
+    assert not _staged(card_assets)
+    assert storage.TIMETABLES_INSTALL not in await storage.async_load(hass)
+
+
+async def test_an_installed_index_tells_its_build_time(hass: HomeAssistant, aioclient_mock, card_assets) -> None:
+    """The Volán and city indexes have no time in their gzip header: the
+    sensors' build time is the file's, set to the entry's built_at."""
+    site = Site()
+    site.publish("city", CITY_NEW)
+    site.publish("volan", VOLAN_NEW, built_at="2999-01-01T00:00:00Z")
+    site.serve(aioclient_mock)
+    assert await _round(hass, card_assets) == {"volan": wt.INSTALLED, "city": wt.INSTALLED}
+    built = dt_util.parse_datetime("2026-11-16T10:40:00Z").timestamp()
+    assert served_index.built_at(card_assets / timetables.CITY_INDEX) == built
+    assert timetables.scan_index(card_assets / timetables.CITY_INDEX)["updated_at"].timestamp() == built
+    # A build time in the future is none: the install's.
+    assert served_index.built_at(card_assets / timetables.VOLAN_INDEX) <= time.time()
+
+
+# Settling.
+
+
+async def test_two_manifests_taking_turns_settle_once_then_fail(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    """Two generations the cache serves in turn (A, B, A, B), neither's index
+    matching: one settle, then FAILED (with its retries), not for ever."""
+    a, b = Site(), Site()
+    raw_a, _, _ = a.publish("volan", VOLAN_NEW, tag="a")
+    b.publish("volan", "volan:01716.20261109", tag="b")
+    bodies = [a.body(), b.body()]
+    turn = {"n": 0}
+
+    async def manifest(method, url, data):
+        turn["n"] += 1
+        return AiohttpClientMockResponse(method, url, response=bodies[turn["n"] % 2])
+
+    async def signature(method, url, data):
+        return AiohttpClientMockResponse(method, url, text=_sign(bodies[turn["n"] % 2]))
+
+    aioclient_mock.get(wt.MANIFEST_URL, side_effect=manifest)
+    aioclient_mock.get(wt.SIGNATURE_URL, side_effect=signature)
+    aioclient_mock.get(f"{mav_daily.PAGES_BASE}/volan-index.json.gz", content=_flipped(raw_a))
+    results = [(await _round(hass, card_assets))["volan"] for _ in range(6)]
+    assert results == [wt.SETTLING] + [wt.FAILED] * 5
+    # A first or daily round may settle again.
+    wt.new_cycle(hass)
+    assert (await _round(hass, card_assets))["volan"] == wt.SETTLING
+
+
+async def test_an_index_the_site_no_longer_has_settles_then_fails(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    body = site.files.pop("volan-index.json.gz")
+    site.serve(aioclient_mock)
+    aioclient_mock.get(f"{mav_daily.PAGES_BASE}/volan-index.json.gz", status=404, content=body)
+    assert (await _round(hass, card_assets))["volan"] == wt.SETTLING
+    assert (await _round(hass, card_assets))["volan"] == wt.FAILED
+
+
+async def test_a_retry_downloads_only_the_shards_still_missing(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    monkeypatch.setattr(wt, "CONCURRENCY", 1)
+    site = Site()
+    _, folder, shards = site.publish("volan", VOLAN_NEW)
+    good = site.files[f"{folder}/03.json.gz"]
+    site.files[f"{folder}/03.json.gz"] = b"x" * len(good)
+    site.serve(aioclient_mock)
+    assert (await _round(hass, card_assets))["volan"] == wt.SETTLING
+    (staging,) = _staged(card_assets)
+    assert sorted(p.name for p in staging.iterdir()) == ["00.json.gz", "01.json.gz", "02.json.gz"]
+    aioclient_mock.clear_requests()
+    site.files[f"{folder}/03.json.gz"] = good
+    site.serve(aioclient_mock)
+    assert (await _round(hass, card_assets))["volan"] == wt.INSTALLED
+    assert [u for u in _requested(aioclient_mock) if "-shapes-" in u] == [f"{mav_daily.PAGES_BASE}/{folder}/03.json.gz"]
+    assert {p.name: p.read_bytes() for p in (card_assets / folder).iterdir()} == shards
+    assert not _staged(card_assets)
+
+
+# Feeds dated far ahead.
+
+
+def test_a_feed_dated_far_ahead_is_refused_and_never_freezes_the_index(tmp_path) -> None:
+    site = Site()
+    site.publish("volan", "volan:01716.29991231")
+    site.publish("city", "bkk:20271231;miskolc:1.3")
+    for name in ("volan", "city"):
+        with pytest.raises(mav_daily.DailyIndexError, match="days ahead"):
+            wt.check_entry(name, site.manifest["indexes"][name], TODAY)
+    # Within MAX_FEED_AHEAD: a date.
+    site.publish("city", "bkk:20271201;miskolc:1.3")
+    assert wt.check_entry("city", site.manifest["indexes"]["city"], TODAY)
+    # Served, such a date does not hold back every later build.
+    installed = "bkk:20271231;miskolc:1.3;szeged:20261020"
+    assert wt.city_newer("bkk:20261124;miskolc:1.4;szeged:20261124", installed, TODAY)
+    assert not wt.city_newer("bkk:20261124;miskolc:1.3;szeged:20261013", installed, TODAY)
+    www = tmp_path / "served"
+    www.mkdir()
+    (www / timetables.VOLAN_INDEX).write_bytes(_index("volan", "volan:01716.29991231", None))
+    assert wt.decide("volan", "volan:01716.20261124", www, tmp_path, today=TODAY) == wt._INSTALL
+
+
+# The rounds.
+
+
+async def test_a_daily_round_replaces_a_waiting_retry_and_never_runs_beside_a_slow_one(
+    hass: HomeAssistant, card_assets, monkeypatch
+) -> None:
+    calls = []
+    gate = asyncio.Event()
+
+    async def update(hass_, www):
+        calls.append(True)
+        if len(calls) == 1:
+            return wt.TimetablesRound({"volan": wt.IndexResult(wt.FAILED, error="x")})
+        await gate.wait()
+        return wt.TimetablesRound({"volan": wt.IndexResult(wt.UP_TO_DATE, VOLAN_NEW)})
+
+    monkeypatch.setattr(wt, "async_update", update)
+    pt = wt.PagesTimetables(hass, card_assets)
+    pt.start_round()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    retry = pt._unsub
+    assert retry is not None and pt._retries == 1
+    # The daily round comes while the retry waits: it is the round now.
+    pt.start_round()
+    assert pt._retries == 0
+    await _until(lambda: len(calls) == 2)
+    task = pt._task
+    # ... and another while that one still downloads: no second task.
+    pt.start_round()
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=wt.RETRY_DELAY + 1))
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert len(calls) == 2 and pt._task is task
+    gate.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert len(calls) == 2 and pt._unsub is None
+    pt.stop()
+
+
+def test_check_index_refuses_what_does_not_unpack_or_unpacks_to_too_much(monkeypatch) -> None:
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    entry = wt.check_entry("volan", site.manifest["indexes"]["volan"])
+
+    def entry_for(body: bytes) -> dict:
+        return {**entry, "size": len(body), "sha256": hashlib.sha256(body).hexdigest()}
+
+    broken = gzip.compress(b"x")[:10] + b"\xff" * 64
+    with pytest.raises(mav_daily.DailyIndexError, match="does not unpack"):
+        wt.check_index(broken, entry_for(broken))
+    monkeypatch.setattr(wt, "MAX_INDEX_JSON", 1000)
+    bomb = gzip.compress(b'{"v":29,' + b" " * 10_000 + b"}")
+    with pytest.raises(mav_daily.DailyIndexError, match="unpacks to more than 1000"):
+        wt.check_index(bomb, entry_for(bomb))
