@@ -1341,15 +1341,35 @@ async def test_a_train_is_asked_only_for_the_trips_that_run_that_day(aioclient_m
     assert _feed_gets(aioclient_mock) == []
 
 
-async def test_a_train_that_runs_on_neither_day_is_not_asked_nor_read(aioclient_mock) -> None:
-    planner = TrainPlanner()
-    aioclient_mock.post(mavplusz.URL, side_effect=planner)
-    _statics(aioclient_mock, {"741": ["36777783"]}, runs_on={"36777783": ["20261121"]})
-    hub, session, _clock = await _train_hub(aioclient_mock)
-    resp = await hub.query("mav", [REQ_741])
+@pytest.mark.parametrize(
+    ("runs_on", "asked"),
+    [
+        (["20261102"], True),
+        (["20261030", "20261105"], False),
+        (["20261110"], True),
+    ],
+    ids=["runs-today", "runs-neither-day", "calendar-without-today"],
+)
+async def test_a_train_the_calendar_does_not_run_is_matched_on_the_feeds(aioclient_mock, runs_on, asked) -> None:
+    """Train 822 is on the jbb MÁV feeds of 2026-11-02. A calendar whose
+    days span today but run the trip on neither day: not asked of the
+    planner, but matched on the feeds as before (they never read the
+    calendar, and have the run: a calendar wrong, or a train added). One
+    whose days do not reach today (a copy kept from an older download)
+    says nothing of today: asked (the planner fails here), then the feeds."""
+    aioclient_mock.post(mavplusz.URL, status=503)
+    aioclient_mock.get(MAV_SRC.static, content=_static({"822": ["35700507"]}, {"35700507": runs_on}))
+    aioclient_mock.get(GYSEV_SRC.static, content=_static(GYSEV_OTHER))
+    aioclient_mock.get(MAV_SRC.trip_updates, content=_pb("mav-trip-updates"))
+    aioclient_mock.get(MAV_SRC.vehicle_positions, content=_pb("mav-vehicle-positions"))
+    hub, session, _clock = await _train_hub(aioclient_mock, wall=JBB_WALL)
+    resp = await hub.query("mav", [MAV_JBB_REQ])
     await session.close()
-    assert not planner.asks and _feed_gets(aioclient_mock) == []
-    assert resp["trips"] == {} and "error" not in resp
+    assert len(_calls(aioclient_mock, "post")) == (1 if asked else 0)
+    assert _feed_gets(aioclient_mock) == [MAV_SRC.trip_updates, MAV_SRC.vehicle_positions]
+    hit = resp["trips"]["ic"]
+    assert (hit["trip_id"], hit["dest_delay"]) == ("35700507", 600)
+    assert hit["vehicle"]["lat"] == 46.50523
 
 
 @pytest.mark.parametrize(
@@ -1605,12 +1625,15 @@ async def test_a_failing_vehicle_request_keeps_the_delays(aioclient_mock, monkey
     assert not hub._mav_rate.backing_off() and hub._mav_retry_at < 0
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert sum("gave no vehicles by route" in r.getMessage() for r in caplog.records) == 1
+    # Either way the second poll asks no vehicles, for its own reason.
+    assert planner.route_asks == [["1:V3775_106"]]
     if failure == "too_large":
         # Not backed off, but the route alone is over the cap now: left out.
-        assert planner.route_asks == [["1:V3775_106"]]
+        assert hub._vehicle_retry_at < 0
+        assert hub._route_sizes.size("1:V3775_106") > mavplusz.HUGE_ROUTE_BYTES
     else:
         # Backed off (VEHICLE_FAIL_BACKOFF), the vehicles alone.
-        assert planner.route_asks == [["1:V3775_106"]]
+        assert hub._monotonic() < hub._vehicle_retry_at
 
 
 async def test_vehicles_back_off_alone_and_come_back(aioclient_mock, caplog) -> None:
@@ -1837,3 +1860,271 @@ async def test_the_service_asks_the_planner_for_a_train(hass, aioclient_mock, fr
     )
     assert (resp["trips"]["3311"]["delay"], resp["trips"]["3311"]["dest_delay"]) == (120, 360)
     assert len(planner.asks) == 1 and _feed_gets(aioclient_mock) == []
+
+
+# ---------------------------------------------------------------- review 2
+
+B_REQ = {"key": "b", "trip_id": "hkir:hkir_2511_15-6"}
+
+
+def _limited_hub(aioclient_mock, feeds: dict, wall: float, clock: FakeClock, **limits):
+    session = aioclient_mock.create_session(asyncio.get_running_loop())
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic, **limits)
+    hub = realtime.RealtimeHub(
+        session, feeds=feeds, monotonic=clock.monotonic, wall=lambda: wall, planner_limiter=limiter
+    )
+    return hub, session
+
+
+async def test_a_refused_request_keeps_the_trains_already_answered(aioclient_mock) -> None:
+    """3311 answered a few seconds ago, 741 due: the request for 741 is
+    refused by the rate limit. 3311 is still the planner's (cached), only
+    741 is matched on the feeds, and the call is no outage."""
+    for src in TABLE["mav"].sources:
+        aioclient_mock.get(src.trip_updates, status=503)
+        aioclient_mock.get(src.vehicle_positions, status=503)
+    planner = TrainPlanner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"741": ["36777783"], "3311": ["36322788"]})
+    clock = FakeClock()
+    hub, session = _limited_hub(aioclient_mock, {"mav": TABLE["mav"]}, TRAIN_WALL, clock, burst=1, rate=0.0001)
+    await hub.query("mav", [REQ_3311])
+    clock.now += 5
+    resp = await hub.query("mav", [REQ_3311, REQ_741])
+    await session.close()
+    assert len(planner.asks) == 1
+    assert "error" not in resp and set(resp["trips"]) == {"3311"}
+    assert (resp["trips"]["3311"]["delay"], resp["trips"]["3311"]["dest_delay"]) == (120, 360)
+    assert _feed_gets(aioclient_mock) == [MAV_SRC.trip_updates, MAV_SRC.vehicle_positions]
+
+
+async def test_a_trip_id_not_asked_this_time_reads_the_feeds(aioclient_mock) -> None:
+    """The same on a trip_id feed: the row the refused request was for is
+    matched on the feeds (a trip id the planner was not asked about is no
+    trip it lacks), the cached one stays the planner's."""
+    planner = Planner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _jbb(aioclient_mock)
+    cfg = _cfg()
+    clock = FakeClock()
+    hub, session = _limited_hub(aioclient_mock, {"v": cfg}, WALL, clock, burst=1, rate=0.0001)
+    await hub.query("v", [T0_REQ])
+    clock.now += 5
+    resp = await hub.query("v", [T0_REQ, B_REQ])
+    await session.close()
+    assert len(planner.asked) == 1
+    assert "error" not in resp and resp["trips"]["a"]["delay"] == 103
+    assert len(_calls(aioclient_mock, "get")) == 2
+
+
+async def test_concurrent_cards_do_not_wait_for_each_others_vehicles(aioclient_mock, monkeypatch) -> None:
+    """Three cards poll at once, each for a MODIFIED train whose vehicle is
+    asked by its route, and the vehicle request is slow. It is made outside
+    the trip requests' lock, so every card's trip request begins in time
+    (with half of the round left: PLANNER_MIN_SHARE) and none falls back to
+    the feeds; each train has its vehicle. Timing scaled down: a 2 s round."""
+    monkeypatch.setattr(realtime, "PLANNER_TIMEOUT", 2.0)
+    monkeypatch.setattr(realtime, "VEHICLE_TIMEOUT", 0.9)
+    monkeypatch.setattr(realtime, "VEHICLE_MARGIN", 0.05)
+    monkeypatch.setattr(realtime, "VEHICLE_MIN_TIMEOUT", 0.05)
+    for src in TABLE["mav"].sources:
+        aioclient_mock.get(src.trip_updates, status=503)
+        aioclient_mock.get(src.vehicle_positions, status=503)
+    ids = {"3331": SZ3331, "3332": "1:36322546", "3333": "1:36226466"}
+    planner = TrainPlanner({(ids[n], TODAY): RT[f"t{i}"] for i, n in enumerate(ids)})
+
+    async def vehicles(variables):
+        await asyncio.sleep(0.6)
+        return {"data": {k: _rt_route(v) for k, v in variables.items()}}
+
+    planner.vehicles = vehicles
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {n: [g[2:]] for n, g in ids.items()})
+    hub, session, _clock = await _train_hub(aioclient_mock, wall=RT_WALL)
+    await hub._trains(MAV_SRC)
+    await hub._trains(GYSEV_SRC)
+    reqs = [{**REQ_3331, "key": n, "train": n} for n in ids]
+    answers = await asyncio.gather(*(hub.query("mav", [r]) for r in reqs))
+    await session.close()
+    assert len(planner.asks) == 3 and len(planner.route_asks) == 3
+    assert _feed_gets(aioclient_mock) == []
+    for n, answer in zip(ids, answers):
+        hit = answer["trips"][n]
+        assert hit["trip_id"] == ids[n][2:] and hit["vehicle"] is not None
+
+
+async def test_a_card_answered_from_the_cache_waits_for_the_vehicle_being_asked(aioclient_mock) -> None:
+    """Two cards of the same train at once: one trip request, one vehicle
+    request, and the card whose answer came from the cache while the
+    vehicles were being asked gets the vehicle too, as does the cache."""
+    planner = TrainPlanner({(SZ3331, TODAY): RT["t0"]}, routes={"1:V3775_106": RT["r0"]})
+
+    async def vehicles(variables):
+        await asyncio.sleep(0.2)
+        return {"data": {k: _rt_route(v) for k, v in variables.items()}}
+
+    planner.vehicles = vehicles
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3331": ["36322792"]})
+    hub, session, _clock = await _train_hub(aioclient_mock, wall=RT_WALL)
+    answers = await asyncio.gather(hub.query("mav", [REQ_3331]), hub.query("mav", [{**REQ_3331, "key": "x"}]))
+    later = await hub.query("mav", [REQ_3331])
+    await session.close()
+    assert len(planner.asks) == 1 and len(planner.route_asks) == 1
+    for hit in (answers[0]["trips"]["3331"], answers[1]["trips"]["x"], later["trips"]["3331"]):
+        assert hit["delay"] == 60 and hit["vehicle"]["lat"] == pytest.approx(47.4552, abs=1e-4)
+    assert not hub._mav_vehicle_waits
+
+
+@pytest.mark.parametrize("status", [["IN_TRANSIT_TO"], {"a": 1}, 2, None])
+def test_a_malformed_vehicle_status_is_no_status(status) -> None:
+    """A list or an object as stopRelationship.status (unhashable) is no
+    status, not a failed answer that would back the planner off."""
+    v = TRAINS_DOC["variables"]
+    keys = [mavplusz.TripKey(v[f"t{i}"], v[d], "1:") for i, d in enumerate(("d0", "d0", "d0", "d1"))]
+    doc = copy.deepcopy(TRAINS_DOC["response"])
+    doc["data"]["t3"]["pattern"]["vehiclePositions"][0]["stopRelationship"]["status"] = status
+    res = mavplusz.parse_response(doc, keys)
+    vehicles = [r.vehicle for r in res.values() if r is not None and r.vehicle is not None]
+    assert vehicles and all(veh.status is None for veh in vehicles)
+
+
+def test_only_a_real_day_is_a_service_date() -> None:
+    from custom_components.hungarian_transport import REALTIME_TRIP_SCHEMA
+    import voluptuous as vol
+
+    assert mavplusz.service_date("20261340", WALL) == mavplusz.service_date(None, WALL) == "20261114"
+    assert mavplusz.service_date("20260229", WALL) == "20261114" and mavplusz.service_date("20280229", WALL) == "20280229"
+    assert REALTIME_TRIP_SCHEMA({"key": "k", "date": "20261118"})["date"] == "20261118"
+    for bad in ("20261340", "20261131", "00000101"):
+        with pytest.raises(vol.Invalid):
+            REALTIME_TRIP_SCHEMA({"key": "k", "date": bad})
+
+
+async def test_a_trip_id_that_is_only_the_prefix_is_not_asked(aioclient_mock) -> None:
+    """Nor with a date that is no day (past the action's schema): today's
+    run is asked, so the planner gives no error for the whole answer."""
+    planner = Planner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    hub, session, _clock = await _hub(aioclient_mock, _cfg())
+    resp = await hub.query("v", [T0_REQ, {"key": "p", "trip_id": "hkir:"}, {"key": "d", "trip_id": "hkir:hkir_2511_15-6", "date": "20261340"}])
+    await session.close()
+    assert planner.asked == [{"d0": "20261114", "t0": "hkir:hkir_2036_1-3", "t1": "hkir:hkir_2511_15-6"}]
+    assert "a" in resp["trips"] and "p" not in resp["trips"] and _calls(aioclient_mock, "get") == []
+
+
+def _alias_error(alias: str) -> dict:
+    return {"message": "Exception while fetching data", "path": [alias], "extensions": {"classification": "DataFetchingException"}}
+
+
+def test_an_error_of_one_alias_is_no_answer_for_that_trip_alone() -> None:
+    doc = copy.deepcopy(ANSWER)
+    doc["data"]["t1"] = None
+    doc["errors"] = [_alias_error("t1"), {**_alias_error("t2"), "path": ["t2", "stoptimesForDate", 0]}]
+    res = mavplusz.parse_response(doc, KEYS)
+    assert set(res) == {KEYS[0], KEYS[3]}
+    assert res[KEYS[0]].trip_update is not None and res[KEYS[3]] is None
+    # Not tied to an alias of the request: the whole answer is not trusted.
+    for err in ({"message": "x"}, _alias_error("t9"), {"message": "x", "path": [0]}, "boom"):
+        with pytest.raises(ValueError):
+            mavplusz.parse_response({**doc, "errors": [_alias_error("t1"), err]}, KEYS)
+    # The route lists and the vehicles by route likewise.
+    rkeys = [mavplusz.RouteKey("VBUSZ:2", "20261114", "VBUSZ:"), mavplusz.RouteKey("VBUSZ:3", "20261114", "VBUSZ:")]
+    routes = mavplusz.parse_routes({"data": {"r0": None, "r1": None}, "errors": [_alias_error("r0")]}, rkeys)
+    assert routes == {rkeys[1]: None}
+    found = mavplusz.parse_vehicles({"data": {"r0": None, "r1": RT["r0"]}, "errors": [_alias_error("r0")]}, ["a", "1:V3775_106"])
+    assert found["a"] == [] and found["1:V3775_106"]
+    assert mavplusz.answer_sizes({"data": {"r1": RT["r0"]}}, ["a", "1:V3775_106"]).keys() == {"1:V3775_106"}
+
+
+async def test_an_error_for_one_trip_does_not_back_the_planner_off(aioclient_mock, caplog) -> None:
+    """The planner answers one alias with an error (a DataFetchingException):
+    the other trips are its answers, that row is matched on the feeds, and
+    the planner is not backed off: the next poll asks again."""
+    planner = Planner()
+
+    async def answer(method, url, data):
+        resp = await planner(method, url, data)
+        doc = json.loads(resp._response)
+        doc["data"]["t1"] = None
+        doc["errors"] = [_alias_error("t1")]
+        return AiohttpClientMockResponse(method, url, json=doc)
+
+    aioclient_mock.post(mavplusz.URL, side_effect=answer)
+    _jbb(aioclient_mock)
+    hub, session, clock = await _hub(aioclient_mock, _cfg())
+    first = await hub.query("v", [T0_REQ, B_REQ])
+    clock.now += 61
+    await hub.query("v", [T0_REQ, B_REQ])
+    await session.close()
+    assert len(planner.asked) == 2 and hub._mav_retry_at < 0 and not hub._mav_rate.backing_off()
+    assert first["trips"]["a"]["delay"] == 103 and "error" not in first
+    assert len(_calls(aioclient_mock, "get")) == 2
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "mavplusz" in r.getMessage()]
+
+
+async def test_a_trip_not_departed_yet_has_no_vehicle_request(aioclient_mock) -> None:
+    """A MODIFIED train on a realtime pattern whose first call is more than
+    VEHICLE_LEAD ahead has no vehicle to ask its route for; within it, it is
+    asked as before."""
+    trips, _routes = _rt_keys()
+    res = mavplusz.parse_response(_rt_parts()[0], trips)[trips[0]]
+    assert res.starts == RT_WALL - 6273 and res.ends == RT_WALL + 1287
+    assert mavplusz.needs_route_vehicles(res) and mavplusz.needs_route_vehicles(res, res.starts - 299)
+    assert not mavplusz.needs_route_vehicles(res, res.starts - mavplusz.VEHICLE_LEAD - 1)
+    for lead, asked in ((mavplusz.VEHICLE_LEAD + 1, 0), (mavplusz.VEHICLE_LEAD - 1, 1)):
+        aioclient_mock.clear_requests()
+        planner = TrainPlanner({(SZ3331, TODAY): RT["t0"]}, routes={"1:V3775_106": RT["r0"]})
+        aioclient_mock.post(mavplusz.URL, side_effect=planner)
+        _statics(aioclient_mock, {"3331": ["36322792"]})
+        hub, session, _clock = await _train_hub(aioclient_mock, wall=res.starts - lead)
+        hit = (await hub.query("mav", [REQ_3331]))["trips"]["3331"]
+        await session.close()
+        assert len(planner.route_asks) == asked and hit["delay"] == 60
+
+
+@pytest.mark.parametrize("case", ["planner-hangs", "planner-answers", "static-slower-than-the-round"])
+async def test_a_cold_static_feed_counts_in_the_planner_round(aioclient_mock, monkeypatch, case) -> None:
+    """After a restart the static train numbers are downloaded first. That
+    download is part of the planner round (PLANNER_TIMEOUT), so a slow one
+    and a hung planner take one round, not one after the other; a planner
+    that answers in the rest of the round answers as before, and a static
+    feed slower than the round leaves the trains to the feeds, which wait
+    for that same download. Timing scaled down: a 1 s round."""
+    monkeypatch.setattr(realtime, "PLANNER_TIMEOUT", 1.0)
+    slow = 1.2 if case == "static-slower-than-the-round" else 0.4
+
+    async def static(method, url, data):
+        await asyncio.sleep(slow)
+        return AiohttpClientMockResponse(method, url, response=_static({"822": ["35700507"]}))
+
+    async def hung(method, url, data):
+        await asyncio.sleep(5)
+        return AiohttpClientMockResponse(method, url, status=503)
+
+    if case == "planner-answers":
+        aioclient_mock.post(mavplusz.URL, side_effect=TrainPlanner({("1:35700507", "20261102"): TRAINS["t0"]}))
+    else:
+        aioclient_mock.post(mavplusz.URL, side_effect=hung)
+    aioclient_mock.get(MAV_SRC.static, side_effect=static)
+    aioclient_mock.get(GYSEV_SRC.static, content=_static(GYSEV_OTHER))
+    aioclient_mock.get(MAV_SRC.trip_updates, content=_pb("mav-trip-updates"))
+    aioclient_mock.get(MAV_SRC.vehicle_positions, content=_pb("mav-vehicle-positions"))
+    hub, session, _clock = await _train_hub(aioclient_mock, wall=JBB_WALL)
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    resp = await hub.query("mav", [MAV_JBB_REQ])
+    took = loop.time() - began
+    await session.close()
+    posts = len(_calls(aioclient_mock, "post"))
+    hit = resp["trips"].get("ic")
+    if case == "planner-hangs":
+        # One round (1 s) for the download and the planner together.
+        assert took < 1.25 and posts == 1 and _feed_gets(aioclient_mock)
+        assert hit["trip_id"] == "35700507" and hit["dest_delay"] == 600
+    elif case == "planner-answers":
+        assert took < 0.8 and posts == 1 and _feed_gets(aioclient_mock) == []
+        assert hit["trip_id"] == "35700507" and hit["delay"] == TRAINS["t0"]["stoptimesForDate"][0]["departureDelay"]
+    else:
+        assert 1.15 < took < 1.45 and posts == 0
+        assert hit["trip_id"] == "35700507" and hit["dest_delay"] == 600
