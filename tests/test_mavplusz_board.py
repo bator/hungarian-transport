@@ -1956,6 +1956,111 @@ def test_trip_tickets_share_a_token_per_batch_window_and_request() -> None:
     assert all(night) and left() == mavplusz.FALLBACK_BURST - 3
 
 
+def _trip_reserver() -> tuple[mb.PlannerBoards, mavplusz.PlannerLimiter, FakeClock]:
+    """PlannerBoards for reserve(TRIP_PATH, …) alone, both clocks stopped:
+    nothing refills, and a backoff lasts until the test ends."""
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(monotonic=FakeClock(stopped=True).monotonic)
+    boards = mb.PlannerBoards(None, monotonic=clock.monotonic, wall=lambda: WALL, limiter=limiter)
+    return boards, limiter, clock
+
+
+def test_a_trip_that_failed_lately_reserves_no_token() -> None:
+    """A trip whose planner request failed for its own sake within
+    REQUEST_FAIL_TTL is not asked again: it reserves nothing, neither a
+    token of its own nor a share of the one open for the others (FUTÁR
+    keeps its whole budget for it). After REQUEST_FAIL_TTL it does again."""
+    boards, limiter, clock = _trip_reserver()
+    failed = _trip_params(1)
+    boards._fail(("trip", boards._trip_id(failed)))
+    assert boards.reserve(TRIP, failed) is None
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST
+    other = boards.reserve(TRIP, _trip_params(0))
+    assert other is not None and limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+    assert boards.reserve(TRIP, failed) is None
+    assert other._token.holders == 1 and other._token.weight == 1
+    clock.now += mb.REQUEST_FAIL_TTL
+    assert boards.reserve(TRIP, failed) is not None
+
+
+def test_no_trip_joins_the_shared_token_while_the_planner_backs_off() -> None:
+    """The planner failed after a trip reserved the shared token: a trip
+    reserved in the same window during the backoff gets no share of it
+    (its request would not go, so FUTÁR keeps its whole budget for it)."""
+    boards, limiter, _clock = _trip_reserver()
+    first = boards.reserve(TRIP, _trip_params(0))
+    assert first is not None and first._token.held
+    limiter.failed(mb.FAIL_BACKOFF)
+    assert boards._rate.backing_off()
+    assert boards.reserve(TRIP, _trip_params(1)) is None
+    assert first._token.holders == 1 and first._token.weight == 1
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+    first.release()
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST
+
+
+def test_a_trip_reserved_after_the_shared_token_was_spent_has_a_token_of_its_own() -> None:
+    """The shared token spent by a request within TRIP_BATCH_WAIT of its
+    opening: the next trip reserved does not join it (its request could
+    not spend it), it opens a token of its own and spends that."""
+    boards, limiter, _clock = _trip_reserver()
+    first = boards.reserve(TRIP, _trip_params(0))
+    assert first.spend()
+    later = boards.reserve(TRIP, _trip_params(1))
+    assert later is not None and later._token is not first._token
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 2
+    assert later.spend()
+
+
+def test_a_trip_reserved_after_the_shared_token_went_back_has_a_token_of_its_own() -> None:
+    """The shared token refunded (its one ticket released unspent) within
+    TRIP_BATCH_WAIT of its opening: the next trip reserved does not join
+    it, it opens and holds a token of its own."""
+    boards, limiter, _clock = _trip_reserver()
+    first = boards.reserve(TRIP, _trip_params(0))
+    first.release()
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST
+    later = boards.reserve(TRIP, _trip_params(1))
+    assert later is not None and later._token is not first._token
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+    later.release()
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST
+
+
+async def test_a_later_batch_on_a_spent_shared_token_takes_one_of_its_own(make_planner, aioclient_mock, monkeypatch) -> None:
+    """Two trips share a token, but FUTÁR fails them apart: the first
+    trip's batch spends the shared token; the second's batch, holding only
+    a ticket on that spent token, takes a token when its request goes and
+    still answers. Two requests, two tokens, both cards answered."""
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(monotonic=FakeClock(stopped=True).monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter)
+    fake = AnyTripPlanner()
+    _use(aioclient_mock, fake)
+    gates = {0: asyncio.Event(), 1: asyncio.Event()}
+
+    async def failing(session, api_key, path, params, timeout=None, *, executor=None):
+        await gates[int(params["tripId"][-4:])].wait()
+        raise futar.FutarError("TimeoutError")
+
+    monkeypatch.setattr(futar, "futar_get", failing)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    _futar_down(proxy)
+    calls = [asyncio.ensure_future(proxy.get(TRIP, _trip_params(i))) for i in range(2)]
+    for _ in range(5):
+        await asyncio.sleep(0)
+    # One token for both, reserved before FUTÁR was asked.
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+    gates[0].set()
+    assert (await calls[0])["source"] == "mavplusz"
+    assert len(fake.asked) == 1 and limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+    assert not calls[1].done()
+    gates[1].set()
+    assert (await calls[1])["source"] == "mavplusz"
+    assert len(fake.asked) == 2 and limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 2
+    assert [len([k for k in asked if k[0] == "t"]) for asked in fake.asked] == [1, 1]
+
+
 async def test_closing_the_planner_before_a_batch_runs_answers_its_trips() -> None:
     """Closed right after a trip's details made their batch, before its task
     first ran: the task is cancelled without running, so its own cleanup
@@ -2037,10 +2142,21 @@ async def test_a_later_request_of_the_same_key_holds_no_earlier_ticket(make_plan
     """A card's FUTÁR request failed, its fallback still under way (the
     planner's board asked for another card), when the next card asks the
     same board of FUTÁR again. The first token goes back when the first
-    card is done, not only once nobody asks for that board any more."""
+    card is done, not only once nobody asks for that board any more; and
+    the first card finishing leaves the next request's callers alone: its
+    fallback still gets the token reserved for it (FUTÁR was cut short
+    for it), not none."""
     clock = FakeClock(stopped=True)
     limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
     boards, fake, clock = make_planner(clock, limiter=limiter)
+    handed: list = []
+    real_answer = boards.answer
+
+    async def answer(path, params, ticket=None):
+        handed.append((params.get("minutesAfter"), ticket))
+        return await real_answer(path, params, ticket)
+
+    monkeypatch.setattr(boards, "answer", answer)
     planner_gate = asyncio.Event()
 
     async def slow(method, url, data):
@@ -2078,6 +2194,10 @@ async def test_a_later_request_of_the_same_key_holds_no_earlier_ticket(make_plan
     hang.set()
     assert (await second)["source"] == "mavplusz" and len(fake.asked) == 1
     assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+    # Each card's fallback had the token reserved for its own request.
+    assert [after for after, _ in handed] == ["60", "61", "61"]
+    assert all(ticket is not None for _, ticket in handed)
+    assert len({id(ticket) for _, ticket in handed}) == 3
 
 
 def _pole_refs(station: str, poles) -> dict:

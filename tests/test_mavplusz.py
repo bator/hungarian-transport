@@ -2588,17 +2588,25 @@ async def test_overlapping_and_cancelled_rounds_never_ask_one_route_twice_at_onc
     await hub._trains(MAV_SRC)
     await hub._trains(GYSEV_SRC)
     tasks = []
+    cancels: list[asyncio.TimerHandle] = []
+    before = asyncio.all_tasks()
     for i in range(200):
         req = [REQ_3331] if i % 3 else [{**REQ_3331, "key": "b", "train": "3332"}, REQ_3331]
         task = asyncio.ensure_future(hub.query("mav", req))
         tasks.append(task)
         if rnd.random() < 0.2:
-            asyncio.get_running_loop().call_later(rnd.uniform(0, 0.05), task.cancel)
+            cancels.append(asyncio.get_running_loop().call_later(rnd.uniform(0, 0.05), task.cancel))
         await asyncio.sleep(rnd.uniform(0, 0.015))
         if rnd.random() < 0.1:
             clock.now += TABLE["mav"].interval * 10
     results = await asyncio.gather(*tasks, return_exceptions=True)
+    # A round over before its cancel fired leaves that timer pending, and
+    # Home Assistant's test teardown fails on a lingering timer.
+    for handle in cancels:
+        handle.cancel()
     await session.close()
+    # Nothing a round started is left running once they are all over.
+    assert not asyncio.all_tasks() - before
     errors = [r for r in results if isinstance(r, BaseException) and not isinstance(r, asyncio.CancelledError)]
     assert not overlaps and not errors and not hub._mav_vehicle_waits
     assert planner.route_asks
