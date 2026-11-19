@@ -582,14 +582,35 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # The poles of FUTÁR's combined stations learnt before (storage.py), so
     # their boards have a fallback right after a restart too.
+    learnt = False
+
+    @callback
+    def _stations_changed() -> None:
+        nonlocal learnt
+        learnt = True
+        storage.async_save_stations_later(hass, planner.stations_data)
+
     planner = mavplusz_board.PlannerBoards(
         async_get_clientsession(hass),
         task_factory=task_factory,
         call_later=hass_call_later(hass),
         limiter=_planner_limiter(hass),
         stations=await storage.async_load_stations(hass),
-        on_stations_changed=lambda: storage.async_save_stations_later(hass, planner.stations_data),
+        on_stations_changed=_stations_changed,
     )
+
+    async def _close_planner() -> None:
+        # Unloaded (a reload, the entry removed): the planner learns nothing
+        # more (a FUTÁR request still under way lands later), and what it
+        # learnt is written now. The delayed write left pending would be
+        # replaced by the next planner's (a reload: up to STATIONS_SAVE_DELAY
+        # of poles lost), or write the store again after the entry's removal
+        # deleted it. Registered first, so it runs after proxy.close.
+        planner.close()
+        if learnt:
+            await storage.async_save_stations(hass, planner.stations_data())
+
+    entry.async_on_unload(_close_planner)
     proxy = FutarProxy(
         async_get_clientsession(hass),
         api_key,

@@ -323,7 +323,8 @@ async def test_one_planner_request_per_stop_for_every_card_and_horizon(make_plan
 async def test_a_stop_is_not_asked_twice_within_the_ttl_even_unanswered(make_planner, aioclient_mock, monkeypatch) -> None:
     boards, fake, clock = make_planner()
     proxy = _proxy(monkeypatch, boards, clock, futar.FutarError("HTTP 503"))
-    # A malformed answer is no board (and backs off), but the stop counts as asked.
+    # A malformed answer is no board (that stop's request failed: not asked
+    # for REQUEST_FAIL_TTL, and no backoff), and the stop counts as asked.
     async def broken(method, url, data):
         fake.asked.append(json.loads(data)["variables"])
         return AiohttpClientMockResponse(method, url, json={"data": {"stop": []}})
@@ -400,6 +401,9 @@ async def test_closing_the_proxy_closes_the_planner(make_planner, aioclient_mock
 def test_futar_then_the_planner_answer_before_the_card_gives_up() -> None:
     worst = futar.FUTAR_TOKEN_WAIT_SEC + futar.FUTAR_FALLBACK_TIMEOUT_SEC + mb.PLANNER_TIMEOUT.total
     assert worst <= futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
+    # The proxy times the fallback by its own word, and a late event loop eats less than the margin.
+    assert mb.PlannerBoards.timeout == mb.PLANNER_TIMEOUT.total
+    assert futar.FUTAR_FALLBACK_SLACK_SEC < futar.FUTAR_MARGIN_SEC
 
 
 async def test_the_service_answers_a_board_from_the_planner_when_futar_is_down(
@@ -915,7 +919,7 @@ async def test_answers_of_the_wrong_shape_never_escape_the_fallback(make_planner
         clock.now += mb.FAIL_BACKOFF + mb.TRIP_TTL
         await boards.answer(BOARD, dict(BOARD_PARAMS, stopId=f"BKK_F{i}"))
         await boards.answer(TRIP, {"tripId": f"BKK_T{i}"})
-    # Asked on, never raised: only a just-failed board backed some trips off.
+    # Asked on, never raised: a broken answer fails its own request, never a backoff.
     assert len(docs) > 60
 
 
@@ -1047,3 +1051,481 @@ def test_every_trip_answers_before_the_card_gives_up() -> None:
     wait = mb.TRIP_BATCH_WAIT + mb.TRIP_TIMEOUT.total
     assert wait <= mb.PLANNER_TIMEOUT.total
     assert futar.FUTAR_TOKEN_WAIT_SEC + futar.FUTAR_FALLBACK_TIMEOUT_SEC + wait <= futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
+
+
+# --- The review of 2026-11-19: tokens before the cut, per-request failures,
+# --- stops the planner lacks, the card's budget, the lifecycle, fair boards,
+# --- trip shapes, and the learnt stations' ageing.
+
+
+class AnyStopPlanner(Planner):
+    """The fake planner answering the fixture's board for every stop asked."""
+
+    async def __call__(self, method, url, data):
+        body = json.loads(data)
+        if "stop(id: $id)" not in body["query"]:
+            return await super().__call__(method, url, data)
+        self.asked.append(body["variables"])
+        if self.down:
+            return AiohttpClientMockResponse(method, url, status=502)
+        stop = copy.deepcopy(BOARD_DOC["data"]["stop"])
+        stop["gtfsId"] = body["variables"]["id"]
+        return AiohttpClientMockResponse(method, url, json={"data": {"stop": stop}})
+
+
+def _use(aioclient_mock, fake) -> None:
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(mavplusz.URL, side_effect=fake)
+
+
+async def test_a_dashboards_slow_futar_boards_are_all_answered(make_planner, aioclient_mock, monkeypatch) -> None:
+    """FUTÁR slow but answering (10 s a board, within its whole budget): a
+    dashboard's 40 poles at once. FUTÁR is cut short only for the boards
+    whose planner token is reserved first (the fallback's burst), which the
+    planner answers; the rest keep FUTÁR's whole budget, and FUTÁR's answer.
+    Before, every board was cut, and the boards past the burst failed."""
+    boards, _fake, clock = make_planner()
+    fake = AnyStopPlanner()
+    _use(aioclient_mock, fake)
+
+    async def slow(session, api_key, path, params, timeout=None, *, executor=None):
+        await asyncio.sleep(0)
+        if timeout.total < 10:
+            raise futar.FutarError("TimeoutError")
+        return {"status": "OK", "data": {"entry": {"stopTimes": []}, "references": {}}, "from": "futar"}
+
+    monkeypatch.setattr(futar, "futar_get", slow)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    got = await asyncio.gather(
+        *(proxy.get(BOARD, dict(BOARD_PARAMS, stopId=f"BKK_F{i:05d}")) for i in range(40)), return_exceptions=True
+    )
+    assert not [g for g in got if isinstance(g, BaseException)]
+    planner = [g for g in got if g.get("source") == "mavplusz"]
+    assert len(planner) == len(fake.asked) == mavplusz.FALLBACK_BURST
+    assert len([g for g in got if g.get("from") == "futar"]) == 40 - mavplusz.FALLBACK_BURST
+
+
+async def test_futar_is_cut_short_only_with_the_fallbacks_token_in_hand(make_planner, aioclient_mock, monkeypatch) -> None:
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(fallback_burst=1, monotonic=clock.monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter)
+    seen: list = []
+    proxy = _proxy(monkeypatch, boards, clock, None, seen)
+    # FUTÁR answering: the token reserved for the fallback goes back.
+    await proxy.get(BOARD, BOARD_PARAMS)
+    await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="61"))
+    assert [t for _p, t in seen] == [futar.FUTAR_FALLBACK_TIMEOUT_SEC] * 2
+    # The share spent elsewhere: nothing could answer, FUTÁR keeps its whole budget.
+    limiter.client(RuntimeError, fallback=True).take()
+    assert not boards.can_answer(BOARD, BOARD_PARAMS)
+    await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="62"))
+    assert seen[-1][1] == futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
+
+
+def test_a_request_one_bucket_refuses_spends_no_token_of_the_others() -> None:
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(burst=2, fallback_burst=5, vehicle_burst=5, monotonic=clock.monotonic)
+    hub = limiter.client(RuntimeError)
+    boards = limiter.client(KeyError, fallback=True)
+    vehicles = limiter.client(ValueError, vehicles=True)
+    hub.take()
+    hub.take()
+    # The hub has the total: the boards' and the vehicles' calls are refused ...
+    for _ in range(5):
+        with pytest.raises(KeyError):
+            boards.take()
+        with pytest.raises(ValueError):
+            vehicles.take()
+    # ... and spent nothing of their shares: the total's next token is theirs.
+    clock.now += 2
+    boards.take()
+    clock.now += 2
+    vehicles.take()
+    # A reserved token goes back unspent; a quiet refusal is no refusal logged.
+    clock.now += 2
+    assert boards.reserve()
+    assert not limiter.available(fallback=True)
+    boards.refund()
+    assert limiter.available(fallback=True)
+
+
+def _oversize(method, url, data):
+    return AiohttpClientMockResponse(method, url, text='{"data":{"stop":' + " " * (mb.BOARD_MAX_BYTES + 10) + "null}}")
+
+
+def _graphql_error(method, url, data):
+    return AiohttpClientMockResponse(method, url, json={"errors": [{"message": "Validation error"}], "data": None})
+
+
+def _wrong_shape(method, url, data):
+    return AiohttpClientMockResponse(method, url, json={"data": {"stop": [1, 2]}})
+
+
+def _not_json(method, url, data):
+    return AiohttpClientMockResponse(method, url, text="<html>maintenance</html>")
+
+
+def _bad_request(method, url, data):
+    return AiohttpClientMockResponse(method, url, status=400)
+
+
+@pytest.mark.parametrize(
+    "broken", [_oversize, _graphql_error, _wrong_shape, _not_json, _bad_request],
+    ids=["over-cap", "graphql-error", "wrong-shape", "not-json", "http-400"],
+)
+async def test_a_board_failing_for_its_own_sake_backs_nobody_off(make_planner, aioclient_mock, monkeypatch, caplog, broken) -> None:
+    """A property of that stop's answer, not an outage: the realtime hub and
+    the other stops keep asking, nothing is warned of, and that stop is not
+    asked again for REQUEST_FAIL_TTL (FUTÁR keeps its whole budget there)."""
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter)
+    fake = AnyStopPlanner()
+    asked = []
+
+    async def answer(method, url, data):
+        body = json.loads(data)
+        if body["variables"].get("id") == "BKK:F_BIG":
+            asked.append(body["variables"])
+            return broken(method, url, data)
+        return await fake(method, url, data)
+
+    _use(aioclient_mock, answer)
+    big = dict(BOARD_PARAMS, stopId="BKK_F_BIG")
+    assert await boards.answer(BOARD, big) is None
+    assert not limiter.backing_off()
+    limiter.client(RuntimeError).take()  # the hub's delays
+    assert (await boards.answer(BOARD, BOARD_PARAMS))["source"] == "mavplusz"
+    assert not [r for r in caplog.records if r.name.endswith("mavplusz_board") and r.levelno >= logging.WARNING]
+    assert not boards.can_answer(BOARD, big)
+    clock.now += mb.REQUEST_FAIL_TTL - 1
+    assert await boards.answer(BOARD, big) is None and len(asked) == 1
+    clock.now += 1
+    assert boards.can_answer(BOARD, big)
+    await boards.answer(BOARD, big)
+    assert len(asked) == 2
+
+
+@pytest.mark.parametrize("status", [500, 503, 429])
+async def test_the_planner_failing_backs_every_planner_request_off(make_planner, aioclient_mock, caplog, status) -> None:
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter)
+    async def down(method, url, data):
+        return AiohttpClientMockResponse(method, url, status=status)
+
+    _use(aioclient_mock, down)
+    assert await boards.answer(BOARD, BOARD_PARAMS) is None
+    assert limiter.backing_off()
+    assert any(f"HTTP {status}" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+
+
+async def test_a_trip_a_graphql_error_names_is_no_answer_and_the_others_are(make_planner, aioclient_mock) -> None:
+    """OTP answers a bad id or date with a DataFetchingException whose path
+    starts with its alias (live, 2026-11-19): that trip is no answer (and
+    not asked again for a while), the batch's others are, and nobody backs
+    off. An error naming no alias fails the batch alone."""
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter)
+    asked = []
+
+    async def answer(method, url, data):
+        body = json.loads(data)
+        asked.append(body["variables"])
+        aliases = [k for k in body["variables"] if k[0] == "t"]
+        bad = [a for a in aliases if body["variables"][a] != "BKK:D25280605"]
+        out = {a: (None if a in bad else copy.deepcopy(TRIPS_DOC["data"]["t0"])) for a in aliases}
+        errors = [{"message": "Internal server error: x", "path": [a, "stoptimesForDate"],
+                   "extensions": {"classification": "DataFetchingException"}} for a in bad]
+        return AiohttpClientMockResponse(method, url, json={"errors": errors, "data": out})
+
+    _use(aioclient_mock, answer)
+    good, bad = await asyncio.gather(boards.answer(TRIP, {"tripId": FIRST_TRIP}), boards.answer(TRIP, {"tripId": "BKK_X9"}))
+    assert len(asked) == 1
+    assert good["data"]["entry"]["tripId"] == FIRST_TRIP and bad is None
+    assert not limiter.backing_off()
+    assert not boards.can_answer(TRIP, {"tripId": "BKK_X9"}) and boards.can_answer(TRIP, {"tripId": FIRST_TRIP})
+    async def error(method, url, data):
+        return _graphql_error(method, url, data)
+
+    _use(aioclient_mock, error)
+    clock.now += mb.TRIP_TTL
+    assert await boards.answer(TRIP, {"tripId": FIRST_TRIP}) is None
+    assert not limiter.backing_off() and not boards.can_answer(TRIP, {"tripId": FIRST_TRIP})
+
+
+async def test_a_stop_the_planner_does_not_know_is_not_asked_again(make_planner, aioclient_mock, monkeypatch) -> None:
+    """A plain BKK stop the planner has no board of (a HÉV stop, Kelenföld's
+    MÁV station BKK_005510017): its null is kept for PROBE_TTL, during which
+    FUTÁR keeps its whole budget there and the planner is not asked."""
+    boards, fake, clock = make_planner()
+    params = dict(BOARD_PARAMS, stopId="BKK_005510017")
+    seen: list = []
+    proxy = _proxy(monkeypatch, boards, clock, futar.FutarError("HTTP 503"), seen)
+    for i in range(4):
+        with pytest.raises(futar.FutarError):
+            await proxy.get(BOARD, dict(params, minutesAfter=str(60 + i)))
+        clock.now += mb.BOARD_TTL
+    assert [a["id"] for a in fake.asked] == ["BKK:005510017"]
+    assert not boards.can_answer(BOARD, params)
+    assert [t for _p, t in seen[1:]] == [futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC] * 3
+    clock.now += mb.PROBE_TTL
+    assert boards.can_answer(BOARD, params)
+
+
+async def test_a_gtfs_station_the_planner_lacks_is_answered_from_its_poles(make_planner, aioclient_mock, monkeypatch) -> None:
+    """The Kelenföld preset (BKK_CS007896) is null in the planner: FUTÁR
+    names its poles (their parent station), and once the planner said it
+    does not know the station itself, its board is merged from theirs."""
+    boards, _fake, clock = make_planner()
+    fake = StationPlanner()
+    _use(aioclient_mock, fake)
+    station = "BKK_CS007896"
+    params = dict(BOARD_PARAMS, stopId=station)
+    refs = {"data": {"references": {"stops": {
+        "p": {"id": "BKK_F00940", "parentStationId": station}, "q": {"id": "BKK_005510017", "parentStationId": station}}}}}
+    # Another answer naming the station's poles teaches nothing (a route's
+    # details name hundreds of parent stations); the station's own board does.
+    boards.learn("route-details.json", {}, refs)
+    boards.learn(BOARD, {"stopId": "BKK_F00940"}, refs)
+    assert station not in boards._stations
+    boards.learn(BOARD, {"stopId": station}, refs)
+    proxy = _proxy(monkeypatch, boards, clock, futar.FutarError("HTTP 503"))
+    with pytest.raises(futar.FutarError):
+        await proxy.get(BOARD, params)
+    assert fake.asked[0]["id"] == "BKK:CS007896"
+    clock.now += mb.BOARD_TTL
+    doc = await proxy.get(BOARD, params)
+    assert doc["source"] == "mavplusz" and doc["data"]["entry"]["stopId"] == station
+    assert sorted(v for k, v in fake.asked[1].items() if k[0] == "s" and k[1:].isdigit()) == ["BKK:005510017", "BKK:F00940"]
+    assert doc["data"]["references"]["stops"]["BKK_F00940"]["parentStationId"] == station
+    # The store keeps it as it keeps FUTÁR's combined stations.
+    assert mb.restore_stations(json.loads(json.dumps(boards.stations_data())))[station]["poles"]
+
+
+class _Hanging:
+    """A FUTÁR that answers nothing until released, then fails having taken
+    its whole timeout (a hang), on the proxy's clock."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
+        self.release = asyncio.Event()
+        self.timeouts: list[float] = []
+
+    async def __call__(self, session, api_key, path, params, timeout=None, *, executor=None):
+        self.timeouts.append(timeout.total)
+        asked = self.clock.now
+        await self.release.wait()
+        self.clock.now = asked + timeout.total
+        raise futar.FutarError("TimeoutError")
+
+
+async def test_futar_failing_after_its_whole_budget_does_not_ask_the_planner(make_planner, aioclient_mock, monkeypatch) -> None:
+    """The planner backing off when the board was asked: FUTÁR has its
+    whole 18 s. It times out then, the backoff long over, but the planner's
+    6 s would answer past the card's 20 s: FUTÁR's error, the planner not
+    asked. Cut short with the planner's token instead, it answers in time."""
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, fake, clock = make_planner(clock, limiter=limiter)
+    hang = _Hanging(clock)
+    monkeypatch.setattr(futar, "futar_get", hang)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    limiter.failed(10)
+    hang.release.set()
+    started = clock.now
+    with pytest.raises(futar.FutarError, match="TimeoutError"):
+        await proxy.get(BOARD, BOARD_PARAMS)
+    assert hang.timeouts == [futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC] and fake.asked == []
+    assert clock.now - started == futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
+    started = clock.now
+    doc = await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="61"))
+    assert doc["source"] == "mavplusz" and hang.timeouts[-1] == futar.FUTAR_FALLBACK_TIMEOUT_SEC
+    assert clock.now - started + mb.PLANNER_TIMEOUT.total <= futar.CARD_TIMEOUT_SEC - futar.FUTAR_MARGIN_SEC
+
+
+async def test_a_caller_joining_a_request_under_way_is_timed_from_its_own_ask(make_planner, aioclient_mock, monkeypatch) -> None:
+    """Two cards, one FUTÁR request: the first asked 15 s before the second.
+    When FUTÁR fails at 18 s the first card has given up (no planner for
+    it), the second has time left, and the planner answers it."""
+    clock = FakeClock()
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, fake, clock = make_planner(clock, limiter=limiter)
+    hang = _Hanging(clock)
+    monkeypatch.setattr(futar, "futar_get", hang)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    limiter.failed(10)
+    first = asyncio.ensure_future(proxy.get(BOARD, BOARD_PARAMS))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    clock.now += 15
+    second = asyncio.ensure_future(proxy.get(BOARD, BOARD_PARAMS))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    hang.release.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+    assert len(hang.timeouts) == 1
+    assert isinstance(results[0], futar.FutarError)
+    assert results[1]["source"] == "mavplusz" and len(fake.asked) == 1
+
+
+async def test_a_futar_answer_landing_after_the_entry_is_removed_writes_no_store(
+    hass, hass_storage, aioclient_mock, monkeypatch, freezer
+) -> None:
+    from datetime import timedelta
+
+    from pytest_homeassistant_custom_component.common import async_fire_time_changed
+
+    import custom_components.hungarian_transport as integration
+    from custom_components.hungarian_transport import storage
+
+    made = []
+    real = mb.PlannerBoards
+    monkeypatch.setattr(integration.mavplusz_board, "PlannerBoards",
+                        lambda *a, **k: made.append(real(*a, **k)) or made[-1])
+    _inject(monkeypatch, FakeClock())
+    entry = await _setup(hass)
+    (planner,) = made
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert storage.STATIONS_KEY not in hass_storage
+    # A card's FUTÁR request under way at the removal answers now.
+    planner.learn(BOARD, {"stopId": "BKK_X"}, {"data": {"references": {"stops": {
+        "p": {"id": "BKK_F00941", "parentStationId": "BKK_CSF00940"}}}}})
+    freezer.tick(timedelta(seconds=storage.STATIONS_SAVE_DELAY + 1))
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+    assert storage.STATIONS_KEY not in hass_storage
+
+
+async def test_a_reload_keeps_the_poles_learnt_just_before(hass, hass_storage, aioclient_mock, monkeypatch) -> None:
+    """Learnt within STATIONS_SAVE_DELAY of a reload: written at the unload,
+    so the next planner starts with them (the pending write the next one
+    replaced lost them before)."""
+    import custom_components.hungarian_transport as integration
+    from custom_components.hungarian_transport import storage
+
+    made = []
+    real = mb.PlannerBoards
+    monkeypatch.setattr(integration.mavplusz_board, "PlannerBoards",
+                        lambda *a, **k: made.append(real(*a, **k)) or made[-1])
+    _inject(monkeypatch, FakeClock())
+    entry = await _setup(hass)
+    made[0].learn(BOARD, {"stopId": "BKK_X"}, {"data": {"references": {"stops": {
+        "p": {"id": "BKK_F00941", "parentStationId": "BKK_CSF00940"}}}}})
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass_storage[storage.STATIONS_KEY]["data"]["stations"]["BKK_CSF00940"]["poles"] == ["BKK_F00941"]
+    assert len(made) == 2 and made[1]._board_ids("BKK_CSF00940") == ("BKK:F00941",)
+    # The old planner learns nothing more.
+    made[0].learn(BOARD, {"stopId": "BKK_X"}, {"data": {"references": {"stops": {
+        "p": {"id": "BKK_F00942", "parentStationId": "BKK_CSF00940"}}}}})
+    assert "BKK_F00942" not in made[0].stations_data()["stations"]["BKK_CSF00940"]["poles"]
+
+
+def _hub_board() -> dict:
+    """A hub's board: one dense pattern every minute for eight hours, and a
+    sparse one every 30 minutes, both from the fixture's stop times."""
+    node = copy.deepcopy(BOARD_DOC["data"]["stop"])
+    dense, sparse = node["stoptimesWithoutPatterns"][0], node["stoptimesWithoutPatterns"][1]
+    day, start = dense["serviceDay"], WALL - dense["serviceDay"]
+    rows = []
+    for i in range(480):
+        st = copy.deepcopy(dense)
+        st.update(realtime=False, scheduledDeparture=start + 60 * i, scheduledArrival=start + 60 * i)
+        st["trip"]["gtfsId"] = f"BKK:DENSE{i}"
+        rows.append(st)
+    for i in range(16):
+        st = copy.deepcopy(sparse)
+        st.update(realtime=False, scheduledDeparture=start + 1800 * i + 30, scheduledArrival=start + 1800 * i + 30)
+        st["trip"]["gtfsId"] = f"BKK:SPARSE{i}"
+        rows.append(st)
+    for st in rows:
+        st["serviceDay"] = day
+    node["stoptimesWithoutPatterns"] = rows
+    return {"data": {"stop": node}}
+
+
+def test_each_route_and_headsign_keeps_its_share_of_a_hub_board() -> None:
+    """Cut to its 80 earliest rows the hub board above held 80 minutes of
+    the dense pattern and three rows of the sparse one: a three-hour card,
+    or one for the sparse line's destination, had none past that."""
+    board = mb.parse_board(_hub_board(), STOP, WALL)
+    doc = mb.render_board(board, "180", WALL)
+    times = doc["data"]["entry"]["stopTimes"]
+    sparse = [st for st in times if st["tripId"].startswith("BKK_SPARSE")]
+    dense = [st for st in times if st["tripId"].startswith("BKK_DENSE")]
+    assert len(sparse) == 6 and max(st["departureTime"] for st in sparse) > WALL + 150 * 60
+    assert len(dense) == mb.ROWS_PER_PATTERN
+    assert [st["departureTime"] for st in times] == sorted(st["departureTime"] for st in times)
+    # Only the references of the rows given.
+    assert set(doc["data"]["references"]["trips"]) == {st["tripId"] for st in times}
+    # Past the cap every pattern keeps the same number, the earliest.
+    rows = [{"tripId": f"T{g}-{i}", "stopHeadsign": "x", "departureTime": i} for i in range(50) for g in range(10)]
+    trips = {r["tripId"]: {"routeId": r["tripId"].split("-")[0], "tripHeadsign": "x"} for r in rows}
+    cut = mb._fair_cut(rows, trips, 205)
+    assert len(cut) == 205
+    counts = {g: sum(1 for r in cut if r["tripId"].startswith(f"T{g}-")) for g in range(10)}
+    assert sorted(counts.values()) == [20] * 5 + [21] * 5
+
+
+def test_a_cards_board_answer_stays_small() -> None:
+    """RENDER_MAX_ROWS rows with their references, at the fixture's real
+    sizes, are some 160 kB: the card's answer, not the planner's."""
+    rendered = mb.render_board(mb.parse_board(BOARD_DOC, STOP, WALL), "480", WALL)
+    times = rendered["data"]["entry"]["stopTimes"]
+    per_row = len(json.dumps(rendered).encode()) / len(times)
+    assert mb.RENDER_MAX_ROWS * per_row < 256 * 1024
+    assert mb.BOARD_MAX_ROWS * mb.STOP_TIME_BYTES <= mb.BOARD_MAX_BYTES
+
+
+def test_trip_details_carry_the_trips_shape() -> None:
+    """OTP2's tripGeometry is FUTÁR's polyline (a Google encoding of 1e5,
+    live on 2026-11-19): the card draws the ride from the planner's trip
+    details too, which it keeps for the page."""
+    query = mb.build_trip_query([mb.TripKey("BKK:A", "20261118")])["query"]
+    assert "tripGeometry { points length }" in query
+    trip = copy.deepcopy(TRIPS_DOC["data"]["t0"])
+    trip["tripGeometry"] = {"points": "}gz`HaoosBPADdBJfH?P@", "length": 7}
+    doc = mb.parse_trip(trip, FIRST_TRIP, "20261118", WALL)
+    assert doc["data"]["entry"]["polyline"] == {"points": "}gz`HaoosBPADdBJfH?P@", "length": 7}
+    for bad in (None, "x", {"points": 5}, {"points": ""}, {"points": "ab\x00c"}, {"points": "a" * (mb.MAX_POLYLINE_CHARS + 1)}):
+        trip["tripGeometry"] = bad
+        assert "polyline" not in mb.parse_trip(trip, FIRST_TRIP, "20261118", WALL)["data"]["entry"]
+
+
+def test_learnt_stations_keep_the_most_recently_seen_and_age_out() -> None:
+    wall = [float(WALL)]
+    boards = mb.PlannerBoards(None, wall=lambda: wall[0])
+    for i in range(mb.MAX_CHILD_STOPS):
+        boards._learn_pole("BKK_CSF1", f"BKK_F{i}")
+    # Seen again, the first pole is the most recent: a new one replaces the second.
+    boards._learn_pole("BKK_CSF1", "BKK_F0")
+    boards._learn_pole("BKK_CSF1", "BKK_FNEW")
+    poles = list(boards._stations["BKK_CSF1"]["poles"])
+    assert len(poles) == mb.MAX_CHILD_STOPS and "BKK_F0" in poles and "BKK_F1" not in poles
+    for i in range(mb.MAX_STATIONS - 1):
+        boards._learn_pole(f"BKK_CSF{i + 10}", "BKK_F1")
+    boards._learn_pole("BKK_CSF1", "BKK_F0")
+    boards._learn_pole("BKK_CSF99999", "BKK_F1")
+    assert "BKK_CSF1" in boards._stations and "BKK_CSF10" not in boards._stations
+    # A pole not seen for STATION_MAX_AGE goes, and a station with none.
+    wall[0] += mb.STATION_MAX_AGE - 10
+    boards._learn_pole("BKK_CSF1", "BKK_F0")
+    wall[0] += 11
+    data = json.loads(json.dumps(boards.stations_data()))
+    assert list(data["stations"]) == ["BKK_CSF1"] and data["stations"]["BKK_CSF1"]["poles"] == ["BKK_F0"]
+    again = mb.restore_stations(data, wall[0])
+    assert again == boards._stations
+    assert mb.restore_stations(data, wall[0] + mb.STATION_MAX_AGE + 1) == {}
+
+
+def test_a_record_of_before_the_seen_times_still_restores() -> None:
+    old = {"stations": {"BKK_CSF2": {"ref": None, "poles": ["BKK_F5"]},
+                        "BKK_CSF1": {"ref": {"id": "BKK_CSF1", "name": "A"}, "poles": ["BKK_F1", "BKK_F2"]}}}
+    got = mb.restore_stations(old, WALL)
+    assert list(got) == ["BKK_CSF2", "BKK_CSF1"]
+    assert got["BKK_CSF1"] == {"ref": {"id": "BKK_CSF1", "name": "A"}, "poles": {"BKK_F1": WALL, "BKK_F2": WALL}, "seen": WALL}
+    boards = mb.PlannerBoards(None, stations=old, wall=lambda: WALL)
+    assert boards._board_ids("BKK_CSF1") == ("BKK:F1", "BKK:F2")

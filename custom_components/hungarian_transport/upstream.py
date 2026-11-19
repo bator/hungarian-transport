@@ -92,6 +92,17 @@ class TokenBucket:
         if not self._try():
             self._refuse()
 
+    def available(self) -> bool:
+        """Whether take() would get a token now; takes none, counts nothing."""
+        now = self._monotonic()
+        self._tokens = min(float(self._burst), self._tokens + max(0.0, now - self._at) * self._rate)
+        self._at = now
+        return self._tokens >= 1.0
+
+    def refund(self) -> None:
+        """A token taken for a request that was not sent goes back."""
+        self._tokens = min(float(self._burst), self._tokens + 1.0)
+
     async def acquire(self) -> float:
         """One token, waiting up to max_wait seconds (the summed sleeps, not
         the clock) for it; the seconds slept. refused() after that."""
