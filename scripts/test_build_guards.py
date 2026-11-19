@@ -1211,9 +1211,9 @@ with tempfile.TemporaryDirectory() as tmp:
           repr((built.get("al"), info)))
     check("the build's info has the table stops in the feeds and the table's size next to kept_ids, and its"
           " summary line the kept ids and aliases",
-          (info.get("listed_ids"), info.get("table_ids")) == (2, 3)
+          (info.get("listed_ids"), info.get("table_ids"), info.get("dropped_aliases")) == (2, 3, 1)
           and bci.stop_id_summary(info) == "stop ids: 2 kept from the stop id tables (2 of their 3 stops in the"
-          " feeds), 1 aliases", repr(info))
+          " feeds), 1 aliases (1 left out)", repr(info))
     first = out.read_bytes()
     build("kept")
     check("a rebuild on its own output is byte for byte the same", out.read_bytes() == first)
@@ -1261,6 +1261,36 @@ with tempfile.TemporaryDirectory() as tmp:
     check("kept_ids counts only the stops whose id their stop id table gives them, in a carried part too",
           info.get("carried", {}).keys() == {"x"} and info["kept_ids"] == 0 and info.get("listed_ids") == 1,
           repr(info))
+
+    # A stop whose pairing keep_stop_ids refused (the feed's stop 2 is 4 km
+    # from the old stop's place: the feed reused its id) takes no alias
+    # either: "al" would send the cards saved with the alias to the stop
+    # that now has the id.
+    far_table = {"stop_ids": {"1": ("1000000001", 46.25018, 20.14), "2": ("1000000002", 46.3, 20.14)},
+                 "stop_aliases": {"1000000004": "2", "1000000006": "1"}}
+    out.unlink()
+    bci.CITY_FEEDS = [{**feeds[0], **far_table}, feeds[1]]
+    try:
+        with contextlib.redirect_stderr(io.StringIO()) as err_buf, contextlib.redirect_stdout(io.StringIO()):
+            env = os.environ.pop("GITHUB_ACTIONS", None)
+            try:
+                info = bci.build_city_index(base, out, today="20261120")
+            finally:
+                if env is not None:
+                    os.environ["GITHUB_ACTIONS"] = env
+            far_aliases = bci.stop_aliases(gc.index_parts(out, ["x"]) or [])
+    finally:
+        bci.CITY_FEEDS = real_feeds
+    far_built = json.loads(gzip.decompress(out.read_bytes()))
+    far_rows = {row[0]: i for i, row in enumerate(far_built["s"])}
+    check("an alias to a stop refused for its distance is left out of \"al\", counted in info, the warning and"
+          " the summary, in a carried part too",
+          far_built.get("al") == [["x:1000000006", far_rows.get("x:1000000001")]] and "x:2" in far_rows
+          and info["kept_ids"] == 1 and info["aliases"] == 1 and info.get("dropped_aliases") == 1
+          and "1 of its 2 stop aliases to them are left out" in err_buf.getvalue()
+          and bci.stop_id_summary(info).endswith("1 aliases (1 left out)")
+          and far_aliases == {"x:1000000006": "x:1000000001"},
+          repr((far_built.get("al"), info, err_buf.getvalue(), far_aliases)))
 
     # A card of the version before "al" finds a saved stop by the number in
     # its id: every old id the index kept is the very stop.
@@ -1323,6 +1353,11 @@ n, out_text, err_text = keep_ids([moved], {"id": "x", "stop_ids": {
 check("a feed stop far from the old stop's place keeps the feed's id, and is reported",
       n == 1 and [r[0] for r in moved["s"]] == ["x:1001", "x:SZ_2"] and "1 of the 2" in err_text
       and "SZ_2" in err_text and f"{bci.KEEP_ID_M:.0f} m" in err_text, repr((moved["s"], err_text)))
+_n, out_text, err_text = keep_ids([stop_part("x", [("x:SZ_1", LAT, LON)], [])], {
+    "id": "x", "stop_ids": {"SZ_1": "1001"}, "stop_aliases": {"1005": "SZ_1", "1006": "SZ_7", "1001": "SZ_8"}})
+check("an alias whose stop the feed lacks is reported with the stale table, unless its old id is in the feed",
+      err_text.startswith("warn x: 0 of the 1 stops of its stop id table and the stops of 1 of its 3 stop aliases"
+                          " (left out) are not in the feed"), err_text)
 check("a feed without a table is left as it is",
       bci.keep_stop_ids([stop_part("x", [("x:1", LAT, LON)], [])], {"id": "x"}) == 0)
 

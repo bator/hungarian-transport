@@ -1088,6 +1088,51 @@ def _table_warning(fid: str, text: str) -> None:
         print(f"warn {fid}: {text}", file=sys.stderr)
 
 
+def _far(entry: str | tuple, g: list, i: int) -> bool:
+    """Whether stop i of a part (coordinates g) is more than KEEP_ID_M from
+    the old stop's place in its "stop_ids" entry (a bare id has none)."""
+    return (not isinstance(entry, str) and len(g) >= 2 * i + 2 and bool(g[2 * i] or g[2 * i + 1])
+            and _meters((entry[1], entry[2]), (g[2 * i] / 1e5, g[2 * i + 1] / 1e5)) > KEEP_ID_M)
+
+
+def _feed_aliases(parts: list[dict], feed: dict) -> tuple[dict[str, str], int, int]:
+    """The feed's "stop_aliases" against parts: (old id -> the id in parts of
+    the stop it is an alias of, how many are left out because their stop is
+    missing, how many because their stop is more than KEEP_ID_M from its
+    old stop's place). The stop is found by the feed's id (a row's fourth
+    element once it kept an old id), so a part carried from an earlier
+    index resolves too. One whose old id the parts have (a zip from before
+    the renumbering) is not missing: write_index leaves it out anyway."""
+    table: dict[str, str] = feed.get("stop_aliases") or {}
+    ids: dict[str, str | tuple] = feed.get("stop_ids") or {}
+    prefix = f"{feed['id']}:"
+    at: dict[str, str] = {}
+    far: set[str] = set()
+    every: set[str] = set()
+    for part in parts:
+        if part["op_id"] != feed["id"]:
+            continue
+        g = part.get("g") or []
+        for i, row in enumerate(part["s"]):
+            sid = str(row[3]) if len(row) > 3 and row[3] else str(row[0])
+            every.update((sid, str(row[0])))
+            entry = ids.get(sid.removeprefix(prefix)) if sid.startswith(prefix) else None
+            if entry is not None and _far(entry, g, i):
+                far.add(sid)
+                continue
+            at.setdefault(sid, str(row[0]))
+    out: dict[str, str] = {}
+    missing = refused = 0
+    for old, fid in table.items():
+        if prefix + fid in at:
+            out[prefix + old] = at[prefix + fid]
+        elif prefix + fid in far:
+            refused += 1
+        elif prefix + old not in every:
+            missing += 1
+    return out, missing, refused
+
+
 def keep_stop_ids(parts: list[dict], feed: dict) -> int:
     """Apply feed's "stop_ids" table to its parts' stop rows, in place: a
     listed stop takes the old id and stop number and keeps the feed's id
@@ -1097,9 +1142,10 @@ def keep_stop_ids(parts: list[dict], feed: dict) -> int:
     their count, about the refused ones and about table stops the feed has
     neither under the table's id nor under the old id (a zip from before
     the renumbering has the old ids): it renumbered again, regenerate the
-    table."""
+    table. The "stop_aliases" left out of the index for the same reasons
+    (_feed_aliases) are counted in the same warnings."""
     table: dict[str, str | tuple] = feed.get("stop_ids") or {}
-    if not table:
+    if not table and not feed.get("stop_aliases"):
         return 0
     prefix = f"{feed['id']}:"
     own = {str(row[0]) for part in parts for row in part["s"]}
@@ -1116,21 +1162,24 @@ def keep_stop_ids(parts: list[dict], feed: dict) -> int:
                 continue
             listed.add(key)
             old = _old_id(entry)
-            if (not isinstance(entry, str) and len(g) >= 2 * i + 2 and (g[2 * i] or g[2 * i + 1])
-                    and _meters((entry[1], entry[2]), (g[2 * i] / 1e5, g[2 * i + 1] / 1e5)) > KEEP_ID_M):
+            if _far(entry, g, i):
                 far.append(key)
                 continue
             if prefix + old not in own:
                 row[:] = [prefix + old, row[1], old, sid]
                 kept += 1
     missing = sum(1 for key, entry in table.items() if key not in listed and prefix + _old_id(entry) not in own)
-    if missing:
-        _table_warning(feed["id"], f"{missing} of the {len(table)} stops of its stop id table are not in the"
-                       " feed; regenerate it (scripts/stop_id_map.py)")
+    _aliases, gone, refused = _feed_aliases(parts, feed)
+    n_aliases = len(feed.get("stop_aliases") or {})
+    if missing or gone:
+        also = f" and the stops of {gone} of its {n_aliases} stop aliases (left out)" if gone else ""
+        _table_warning(feed["id"], f"{missing} of the {len(table)} stops of its stop id table{also} are not in"
+                       " the feed; regenerate it (scripts/stop_id_map.py)")
     if far:
+        also = f"; {refused} of its {n_aliases} stop aliases to them are left out" if refused else ""
         _table_warning(feed["id"], f"{len(far)} of the {len(table)} stops of its stop id table are more than"
                        f" {KEEP_ID_M:.0f} m from the old stop ({', '.join(sorted(far)[:5])}) and keep the feed's"
-                       " ids; regenerate the table (scripts/stop_id_map.py)")
+                       f" ids{also}; regenerate the table (scripts/stop_id_map.py)")
     return kept
 
 
@@ -1138,10 +1187,14 @@ def stop_id_counts(parts: list[dict]) -> dict[str, int]:
     """The "stop_ids" tables of CITY_FEEDS against parts: kept_ids, the stops
     whose id is the old one their table gives them (in a part carried from
     an earlier index too, while the table still gives it), listed_ids, the
-    table stops the parts have (by the feed's id), and table_ids, the
-    tables' size."""
-    kept = listed = size = 0
+    table stops the parts have (by the feed's id), table_ids, the tables'
+    size, and dropped_aliases, the "stop_aliases" of the feeds in parts left
+    out of "al" (their stop missing or too far, _feed_aliases)."""
+    kept = listed = size = dropped = 0
     for feed in CITY_FEEDS:
+        if feed.get("stop_aliases") and any(part["op_id"] == feed["id"] for part in parts):
+            _aliases, gone, refused = _feed_aliases(parts, feed)
+            dropped += gone + refused
         table: dict[str, str | tuple] = feed.get("stop_ids") or {}
         if not table:
             continue
@@ -1157,13 +1210,14 @@ def stop_id_counts(parts: list[dict]) -> dict[str, int]:
                     continue
                 listed += 1
                 kept += len(row) > 3 and str(row[0]) == prefix + _old_id(entry)
-    return {"kept_ids": kept, "listed_ids": listed, "table_ids": size}
+    return {"kept_ids": kept, "listed_ids": listed, "table_ids": size, "dropped_aliases": dropped}
 
 
 def stop_id_summary(info: dict) -> str:
     """The build summary's line on the stop id tables and aliases."""
     return (f"stop ids: {info.get('kept_ids', 0)} kept from the stop id tables ({info.get('listed_ids', 0)}"
-            f" of their {info.get('table_ids', 0)} stops in the feeds), {info.get('aliases', 0)} aliases")
+            f" of their {info.get('table_ids', 0)} stops in the feeds), {info.get('aliases', 0)} aliases"
+            + (f" ({info['dropped_aliases']} left out)" if info.get("dropped_aliases") else ""))
 
 
 def stop_aliases(parts: list[dict]) -> dict[str, str]:
@@ -1171,21 +1225,13 @@ def stop_aliases(parts: list[dict]) -> dict[str, str]:
     "stop_aliases" tables of CITY_FEEDS, for write_index's "al". The stop is
     found by the feed's id (a row's fourth element once it kept an old id),
     so a part carried from an earlier index (CARRY_ENV) resolves too; an
-    alias whose stop the parts lack is left out."""
+    alias whose stop the parts lack, or whose stop is more than KEEP_ID_M
+    from its old stop's place (keep_stop_ids refused it: the feed reused
+    its id for another stop), is left out (_feed_aliases)."""
     out: dict[str, str] = {}
     for feed in CITY_FEEDS:
-        table: dict[str, str] = feed.get("stop_aliases") or {}
-        if not table:
-            continue
-        prefix = f"{feed['id']}:"
-        at: dict[str, str] = {}
-        for part in parts:
-            if part["op_id"] == feed["id"]:
-                for row in part["s"]:
-                    at.setdefault(str(row[3]) if len(row) > 3 and row[3] else str(row[0]), str(row[0]))
-        for old, fid in table.items():
-            if prefix + fid in at:
-                out[prefix + old] = at[prefix + fid]
+        if feed.get("stop_aliases"):
+            out.update(_feed_aliases(parts, feed)[0])
     return out
 
 
@@ -1204,7 +1250,8 @@ def build_city_index(
     info["refused"] those of them rejected for their content (id -> why,
     until) and info["carried"] the feeds taken from carry (the previous
     release's index, see collect_parts) because their own zip failed (id ->
-    why); kept_ids, listed_ids and table_ids are stop_id_counts'."""
+    why); kept_ids, listed_ids, table_ids and dropped_aliases are
+    stop_id_counts'."""
     today = today or date.today().strftime("%Y%m%d")
     # Read once for the guards: about a second on the release index. Only
     # what they need is kept while the feeds load.
