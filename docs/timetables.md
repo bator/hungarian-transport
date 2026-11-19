@@ -182,6 +182,7 @@ The files:
 | --- | --- |
 | `mav-index.json.gz` | the integration's train route index |
 | `mav-index.json` | the MÁV manifest (below) |
+| `mav-index.json.sig` | its ed25519 signature, as `timetables.json.sig` ([below](#release-feed-signature-and-feed-checks)) |
 | `mav-gtfs.zip` | MÁV's official GTFS, byte for byte as downloaded for this build (CC0) |
 | `mav-pfaedle-overlay.zip` | pfaedle's `shapes.txt`, `stop_times.txt` and `trips.txt` of the same feed |
 | `timetables.json` | the Volán and city manifest ([below](#the-volán-and-city-indexes)) |
@@ -251,11 +252,10 @@ like any run, and made while another run waits there, it cancels that one:
 re-run when no run of the workflow is queued.
 The integration does not check the attestation: Home Assistant has no
 Sigstore client, and the integration takes no new dependency for one. It
-checks each file against its manifest's size and sha256. For the MÁV index
-those come from the same site, so it trusts GitHub Pages and this
-repository's workflow. The Volán and city manifest is signed as well
-(`timetables.json.sig`, [below](#the-volán-and-city-indexes)), so for those
-indexes the integration trusts the workflow's signing key, not whoever
+checks each file against its manifest's size and sha256, and both
+manifests are signed: `mav-index.json.sig` and `timetables.json.sig`
+([below](#release-feed-signature-and-feed-checks)), one ed25519 key for
+both. So the integration trusts the workflow's signing key, not whoever
 answers for `bator.github.io`.
 
 #### The daily MÁV index
@@ -285,9 +285,11 @@ files (a deploy for new Volán or city indexes carries them over), when the
 secrets are missing, the download, pfaedle or the audit fails, the site is
 refused (a feed whose `feed_version` does not start with a real date, a site
 over 500 MB), or the index and MÁV's zip are the ones already published
-(the overlay's bytes are not compared) and the published manifest is under
-12 hours old; older, the same content is published again for its new
-`built_at`. A failure is a warning while the published manifest's
+(the overlay's bytes are not compared), the published manifest is under
+12 hours old and its `mav-index.json.sig` verifies; older, the same content
+is published again for its new `built_at`, and so it is when that signature
+is missing or does not verify (the site carries no unsigned MÁV manifest,
+below). A failure is a warning while the published manifest's
 `built_at` is less than 2 days old; the run fails (red) when it is 2 days
 old or older, or names no build time, and at once when MÁV refuses the login
 (HTTP 401/403, which is never retried: only new credentials help). A
@@ -390,7 +392,8 @@ the site, with a warning on the run.
 
 Every deploy replaces the whole site, so the run's `site` job puts it
 together from both parts: the MÁV files of this run, else the ones already
-published (every file `mav-index.json` names); each Volán or city index of
+published (every file `mav-index.json` names, when its signature verifies);
+each Volán or city index of
 this run, else the published one with its shapes, checked against the
 published `timetables.json` (the size and sha256 of every file). It deploys
 when the MÁV part or at least one of the two indexes is new. A published
@@ -420,6 +423,7 @@ and counts here are examples):
    "url": "volan-index.json.gz", "size": 3600000, "sha256": "…",
    "feed": "volan:01716.20261102", "built_at": "2026-11-16T10:40:00Z",
    "trips": 120000, "stops": 9000,
+   "release_feed": "volan:01716.20261026", "release_version": "v1.10.24",
    "shapes": {"dir": "volan-shapes-0123456789", "n": 64,
               "files": {"00.json.gz": {"size": 90000, "sha256": "…"}, "…": {}}}
   },
@@ -446,6 +450,10 @@ and counts here are examples):
 - `release_feed` (optional; manifests from before it lack it, and versions
   that do not know it ignore it): the `feed` of the latest stable release's
   index of the same kind when this index was built, or `null`.
+- `release_version` (optional, only next to a `release_feed`; older
+  manifests lack it): that stable release's tag as GitHub names it, for
+  example `"v1.10.24"`: the release whose index `release_feed` is, and
+  whose builders built this one.
 - An index carried over from the previous site keeps its entry as it was,
   `built_at` included, so the week counts from its last real build. An
   index that was never built is not listed.
@@ -490,7 +498,10 @@ into a site of the new one.
   release's builders and guards have not seen it yet). An index the release
   zip lacks has nothing to compare, and a release zip that cannot be read
   leaves this rule out for the run, with a warning (the age rule still
-  holds). An entry carried over keeps its `release_feed`. A stable release
+  holds). The entry also names that release's tag, `release_version`
+  (the `timetables` job passes the tag it checked out to `due`, which
+  writes it with the feeds for `part`). An entry carried over keeps its
+  `release_feed` and `release_version`. A stable release
   (not a `-rev` prerelease) also starts the daily workflow on main with
   the `timetables` input ticked, from its own `pages` job (`actions: write`
   only), so both indexes are rebuilt minutes after the release rather than
@@ -498,10 +509,13 @@ into a site of the new one.
   starts). That run may replace one waiting in the workflow's concurrency
   group, which would have done the same; when it cannot be started, the
   release run warns and the next scheduled run catches up.
-- **`timetables.json.sig`.** Every deploy signs `timetables.json` (it is
-  written anew on every deploy, so a run that only brings a new MÁV index
-  signs it too): the file is one line, the base64 of the 64-byte ed25519
-  signature over the exact bytes of `timetables.json` as deployed. The
+- **`timetables.json.sig`, `mav-index.json.sig`.** Every deploy signs
+  `timetables.json` (it is written anew on every deploy, so a run that only
+  brings a new MÁV index signs it too), and `mav-index.json` whenever the
+  site has it (a new one, or a carried one whose signature verified, so the
+  same bytes and the same signature again): each file is one line, the
+  base64 of the 64-byte ed25519 signature over the exact bytes of its
+  manifest as deployed. The
   public key, which the integration pins, is
   `iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8=` (base64 of the raw 32
   bytes; `PAGES_SIGNING_PUBLIC_KEY` in `scripts/sign_manifest.py`). The
@@ -512,13 +526,15 @@ into a site of the new one.
   main, and the job runs only on main: a run dispatched from another
   branch, or a workflow changed on one, never sees it. Within the job only
   the signing step has it, in its environment; it reaches openssl on stdin
-  and is never printed. The job's token reads contents only (it checks out
-  that one script, without credentials). The script checks the key against
+  (openssl runs without it in its environment) and is never printed. The
+  job's token reads contents only (it checks out that one script, without
+  credentials). The script checks the key against
   the pinned public key and the signature against it; without the secret,
   with another key, or with a signature that does not verify, the job fails
   and nothing is deployed: an unsigned manifest is never published (so a
   fork without the secret deploys nothing). Check a download with
-  `python3 scripts/sign_manifest.py verify --site <folder>`.
+  `python3 scripts/sign_manifest.py verify --site <folder>` (both
+  manifests, when the folder has `mav-index.json`).
 - **An unsigned published manifest is no manifest.** Since every deploy
   signs its manifest anew, the workflow never trusts the published
   `timetables.json` without its signature: the `due`, `baseline` and
@@ -531,8 +547,21 @@ into a site of the new one.
   site; a run that rebuilds only one of them, or only the MÁV index,
   publishes the site without the other, which the next run rebuilds. A
   signature that does not verify is read again once, half a minute later,
-  as Pages may serve a deploy's files a moment apart. The MÁV files are
-  carried by `mav-index.json` as before (that manifest is not signed).
+  as Pages may serve a deploy's files a moment apart. The same holds for
+  `mav-index.json`: its files are carried only when `mav-index.json.sig`
+  verifies. The build job takes an unsigned one for none and publishes
+  the day's index from its own build (signed) even when the content is the
+  same; a run without a MÁV build of its own (MÁV down, no secrets) then
+  deploys nothing, as a site without the MÁV files would break every
+  install's daily MÁV check, and the files on Pages stay until a run builds
+  the MÁV index again. A missing signature (HTTP 404, the first run after
+  this came in) is a warning. A signature that is there but does not
+  verify, also on the second read, turns the run red: the `signatures` job
+  fails after the deploy, which takes nothing from that manifest and
+  replaces it with a signed one (a red site or sign job would hold that
+  deploy back, with a new key pair for good). When it is `mav-index.json`
+  and the run has no MÁV build of its own, the `site` job fails at once
+  and nothing is deployed.
 - **Plain http.** Only a feed whose entry says `"insecure": true` comes
   over plain http, after https failed, with a warning: today Miskolc, whose
   https certificate names another host. The weekly build takes it that way

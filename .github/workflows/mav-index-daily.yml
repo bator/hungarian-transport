@@ -34,11 +34,17 @@ name: Daily timetables (GitHub Pages)
 # site, each file checked against its published manifest's size and sha256
 # (scripts/pages_timetables.py), and writes timetables.json, ATTRIBUTION.txt
 # and index.html for the whole site; the sign job then signs
-# timetables.json (ed25519, scripts/sign_manifest.py, the github-pages
-# environment's PAGES_SIGNING_KEY secret, main only): no deploy without a
-# signature that verifies against the public key the integration pins. A
-# published timetables.json whose own signature does not verify is taken
-# as none: nothing is carried from it, and both indexes are rebuilt. A
+# timetables.json and mav-index.json (ed25519, scripts/sign_manifest.py,
+# the github-pages environment's PAGES_SIGNING_KEY secret, main only): no
+# deploy without signatures that verify against the public key the
+# integration pins. A published manifest whose own signature does not
+# verify is taken as none: nothing is carried from it; for timetables.json
+# both indexes are rebuilt, for mav-index.json the build job publishes the
+# day's index from its own build (and without one nothing is deployed: the
+# site cannot go without the MÁV files). A .sig that is there but does not
+# verify, also read again half a minute later, turns the run red (the
+# signatures job, after the deploy that replaces it); one that is not there
+# (404: the first run after signing came in) is a warning. A
 # published Volán or city index that
 # cannot be carried is left out with a warning (installs keep theirs, the
 # next run rebuilds it). A MÁV file that cannot be carried, or a published
@@ -185,7 +191,9 @@ jobs:
       # The manifest, and whether the content differs from what Pages serves
       # (the live manifest's content digest and the MÁV zip's size and
       # sha256; not the overlay's, which pfaedle never writes the same
-      # twice) or the live manifest is old enough to refresh (REFRESH_AFTER).
+      # twice), the live manifest is old enough to refresh (REFRESH_AFTER),
+      # or its signature (mav-index.json.sig) does not verify: the site job
+      # carries no unsigned MÁV manifest, so this build's goes up, signed.
       # The MÁV zip and pfaedle's output are the ones release_mav_index.sh
       # left in its work dir for this build. An index with under half the
       # trains and lines of the published one is refused
@@ -313,8 +321,9 @@ jobs:
       # of the release zip's index, read by Range requests: only the zip's
       # directory and the heads). Both: the manifest is missing or does not
       # read, names another schema than the stable release's, or the
-      # dispatch input asks for it. The release's feeds go to the build
-      # step's part (release_feed) in release-feeds.json.
+      # dispatch input asks for it. The release's feeds and its tag go to
+      # the build step's part (release_feed, release_version) in
+      # release-feeds.json.
       - name: Timetables due
         id: due
         if: steps.stable.outputs.tag != ''
@@ -335,7 +344,7 @@ jobs:
           python3 .pages-tools/scripts/pages_timetables.py due --schema "$schema" --live-url "$pages_url" \
             --force "$FORCE" --github-output "$GITHUB_OUTPUT" \
             --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/hungarian-transport-frontend.zip" \
-            --release-out "$RUNNER_TEMP/release-feeds.json"
+            --release-out "$RUNNER_TEMP/release-feeds.json" --release-tag "$TAG"
 
       # The builders compare against the index already in place: a city feed
       # that vanished, most of a feed's trips gone or a near-empty Volán index
@@ -371,7 +380,8 @@ jobs:
       # (gtfs_compact.py) is left unset here, since Miskolc would never
       # update and, once its calendar ran out, the city guard would refuse
       # the whole city index. The manifest's signature covers what is built.
-      # Each part records the release's feed of its index (release_feed).
+      # Each part records the release's feed of its index (release_feed) and
+      # the release's tag (release_version).
       - name: Build the Volán and city indexes
         id: indexes
         if: steps.due.outputs.due == 'true'
@@ -447,6 +457,7 @@ jobs:
     timeout-minutes: 20
     outputs:
       deploy: ${{ steps.assemble.outputs.deploy }}
+      untrusted: ${{ steps.assemble.outputs.untrusted }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -471,7 +482,11 @@ jobs:
       # deploy=true when the MÁV part or a Volán or city index is new. A
       # published Volán or city index that cannot be carried is left out with
       # a warning; a MÁV file that cannot be, or a published manifest that
-      # does not read, fails the job (::error::) and nothing is deployed.
+      # does not read, fails the job (::error::) and nothing is deployed, as
+      # does a published mav-index.json whose .sig does not verify when this
+      # run has no MÁV part (with no .sig at all: a warning, nothing
+      # deployed). untrusted: the published manifests whose .sig is there
+      # but does not verify (the signatures job).
       # SCHEMA (the stable release's) names timetables.json's schema only
       # for a site without any index.
       - name: Assemble the site
@@ -505,9 +520,11 @@ jobs:
 
   # timetables.json.sig: one line, base64 of the ed25519 signature over
   # timetables.json's bytes as deployed (every deploy writes a new
-  # timetables.json, so every deploy signs it here). The integration checks
-  # it against the public key it pins before it reads the manifest, and the
-  # next run's site job before it carries anything over from it. The
+  # timetables.json, so every deploy signs it here), and mav-index.json.sig
+  # the same way over mav-index.json when the site has it (a carried one
+  # verified first, so the same bytes and signature again). The integration
+  # checks them against the public key it pins before it reads a manifest,
+  # and the next run's site job before it carries anything over from one. The
   # private key (PAGES_SIGNING_KEY, base64 of the 32-byte seed) is a secret
   # of the github-pages environment, whose deployment branch policy admits
   # only main, and this job runs only on main as well: a dispatch from
@@ -597,6 +614,33 @@ jobs:
 
       - uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
         id: deployment
+
+  # Red when the site job found a published manifest whose .sig is there but
+  # does not verify against the pinned key, also read again half a minute
+  # later (edited after signing, another key, or a site that is not this
+  # workflow's). Nothing of it was carried, and the deploy, when there was
+  # one, replaced it with a signed one; the run still fails, so that someone
+  # looks. Not the site or sign job: failing there would hold back the
+  # deploy that replaces it (with a new key pair, every deploy after it). A
+  # .sig that is not there (HTTP 404, the first run after signing came in)
+  # is a warning only.
+  signatures:
+    name: Published manifest signatures
+    needs: [site, deploy]
+    if: ${{ !cancelled() && needs.site.outputs.untrusted != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: A published signature does not verify
+        env:
+          UNTRUSTED: ${{ needs.site.outputs.untrusted }}
+        run: |
+          set -euo pipefail
+          # Names from pages_timetables.py; nothing else gets into the annotation.
+          if [[ ! "$UNTRUSTED" =~ ^[a-z.,-]+$ ]]; then UNTRUSTED="(unexpected names)"; fi
+          echo "::error title=Published manifest signature does not verify::${UNTRUSTED}: its .sig on GitHub Pages does not verify against the pinned public key. Nothing was carried over from it; see the site job's log."
+          exit 1
 
   # A build provenance attestation (Sigstore, signed with this job's OIDC
   # token) of the files just deployed, taken from the artifact Pages

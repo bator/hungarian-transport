@@ -17,6 +17,7 @@ after the deploy). No network; scripts/test_pages_timetables.py tests the
 site script itself."""
 from __future__ import annotations
 
+import base64
 import contextlib
 import gzip
 import hashlib
@@ -43,9 +44,27 @@ import index_digest  # noqa: E402
 import mav_daily_verdict as verdict_mod  # noqa: E402
 import mav_pages_site as site  # noqa: E402
 import mav_shrink_guard  # noqa: E402
+import sign_manifest  # noqa: E402
 
 # The shrink guard's override, should the developer's shell have it.
 os.environ.pop(mav_shrink_guard.ALLOW_ENV, None)
+# The published mav-index.json counts as published only with a signature
+# by the pinned key (mav_pages_site._finish): the tests sign theirs with a
+# key made here, which every mav_pages_site.py run of the tests (run_site,
+# through TRUST_WRAP) takes as the pinned one.
+TEST_SEED = os.urandom(32)
+TEST_PUB = sign_manifest.public_key(TEST_SEED)
+TRUST_WRAP = ("import os, sys; sys.path.insert(0, sys.argv.pop(1)); import sign_manifest;"
+              " sign_manifest.PUBLIC_KEY = bytes.fromhex(os.environ['TEST_PAGES_PUBLIC_KEY']);"
+              " import mav_pages_site; raise SystemExit(mav_pages_site.main(sys.argv[1:]))")
+
+
+def sign_file(path: Path, seed: bytes = TEST_SEED) -> Path:
+    """path's .sig next to it, as the sign job writes it."""
+    sig = path.with_name(path.name + ".sig")
+    sig.write_text(base64.b64encode(sign_manifest.sign(path, seed)).decode("ascii") + "\n", encoding="ascii")
+    return path
+
 
 failed = 0
 
@@ -165,10 +184,10 @@ def run_site(ws: Path, *extra: str, index: bytes | None = None, st: dict | None 
     out_file = ws / "github_output"
     out_file.write_text("")
     done = subprocess.run(
-        [sys.executable, str(HERE / "mav_pages_site.py"), "--index", str(ws / "mav-index.json.gz"),
+        [sys.executable, "-c", TRUST_WRAP, str(HERE), "--index", str(ws / "mav-index.json.gz"),
          "--stats", str(ws / "mav-build.json"), "--commit", commit, "--out", str(ws / "site"),
          "--github-output", str(out_file), *extra],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, timeout=60, env={**os.environ, "TEST_PAGES_PUBLIC_KEY": TEST_PUB.hex()})
     outputs = dict(ln.split("=", 1) for ln in out_file.read_text().splitlines() if "=" in ln)
     return done.returncode, done.stdout, done.stderr, outputs
 
@@ -215,10 +234,74 @@ with tempfile.TemporaryDirectory() as tmp_name:
 
     live = tmp / "live.json"
     live.write_text(json.dumps({**man, "sha256": "f" * 64, "built_at": built_ago(timedelta(hours=2))}))
+    sign_file(live)
     rc, out, err, outputs = run_site(tmp / "b", "--live-file", str(live))
     check("the same content digest as a manifest published 2 h ago: no deploy, with a notice",
           rc == 0 and outputs.get("deploy") == "false" and "::notice title=Daily MÁV index unchanged::" in out,
           repr((rc, out, err, outputs)))
+    # The same content counts as published only with a signature that
+    # verifies: the site job carries no unsigned MÁV manifest, so this
+    # build's index goes up in its place, signed.
+    signed_live = live.read_bytes()
+    for n, (label, how) in enumerate((
+        ("no mav-index.json.sig (the first run after signing came in)",
+         lambda: live.with_name(live.name + ".sig").unlink()),
+        ("a mav-index.json.sig by another key", lambda: sign_file(live, os.urandom(32))),
+        ("a mav-index.json changed after signing",
+         lambda: live.write_bytes(signed_live.replace(b'"commit"', b'"commit" ', 1))),
+        ("a mav-index.json.sig that is not base64", lambda: live.with_name(live.name + ".sig").write_text("!!\n")),
+    )):
+        live.write_bytes(signed_live)
+        sign_file(live)
+        how()
+        rc, out, err, outputs = run_site(tmp / f"b-unsigned-{n}", "--live-file", str(live))
+        check(f"the same content as a manifest published 2 h ago, but {label}: deployed again, signed",
+              rc == 0 and outputs.get("deploy") == "true" and "not trusted" in out
+              and "deploying it again, signed" in out, repr((rc, out, err, outputs)))
+    live.write_bytes(signed_live)
+    sign_file(live)
+    # --live-url: the signature is the URL with .sig.
+    served = {"https://pages.example/r/mav-index.json": signed_live,
+              "https://pages.example/r/mav-index.json.sig": live.with_name(live.name + ".sig").read_bytes()}
+    asked_urls: list[str] = []
+
+    class Served(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def serve(req, timeout=None):
+        asked_urls.append(req.full_url)
+        if req.full_url not in served:
+            raise site.urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+        return Served(served[req.full_url])
+
+    ws_url = tmp / "b-url"
+    ws_url.mkdir()
+    (ws_url / "mav-index.json.gz").write_bytes(index_bytes())
+    (ws_url / "mav-build.json").write_text(json.dumps(stats()))
+    real_urlopen, real_pub = site.urllib.request.urlopen, sign_manifest.PUBLIC_KEY
+    site.urllib.request.urlopen, sign_manifest.PUBLIC_KEY = serve, TEST_PUB
+    try:
+        results = []
+        for drop_sig in (False, True):
+            if drop_sig:
+                served.pop("https://pages.example/r/mav-index.json.sig")
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+                rc = site.main(["--index", str(ws_url / "mav-index.json.gz"), "--stats", str(ws_url / "mav-build.json"),
+                                "--commit", "a" * 40, "--out", str(ws_url / f"site-{drop_sig}"),
+                                "--live-url", "https://pages.example/r/mav-index.json"])
+            results.append((rc, buf.getvalue()))
+    finally:
+        site.urllib.request.urlopen, sign_manifest.PUBLIC_KEY = real_urlopen, real_pub
+    check("--live-url: the published manifest's signature is read from the URL with .sig; with it, the same"
+          " content is not deployed, without it (HTTP 404) it is, signed",
+          results[0][0] == 0 and "deploy=false" in results[0][1] and results[1][0] == 0
+          and "deploy=true" in results[1][1] and "no mav-index.json.sig (HTTP 404)" in results[1][1]
+          and "https://pages.example/r/mav-index.json.sig" in asked_urls, repr((results, asked_urls)))
     # Unchanged content is deployed again once the published built_at is a
     # day's run old: the verdict and the integration read built_at as the
     # last build, so a feed MÁV leaves alone must not look like a stale index.
@@ -226,6 +309,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
                                        ("REFRESH_AFTER ago", built_ago(site.REFRESH_AFTER)),
                                        ("no valid time", "yesterday"))):
         live.write_text(json.dumps({**man, "sha256": "f" * 64, "built_at": when}))
+        sign_file(live)
         rc, out, err, outputs = run_site(tmp / f"b-old-{n}", "--live-file", str(live))
         rman = tmp / f"b-old-{n}" / "site" / "mav-index.json"
         check(f"the same content, published manifest built {label}: deployed again with a new built_at",
@@ -542,6 +626,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
           not any(str(tmp) in t for t in (attribution, page, json.dumps(gman))))
 
     live.write_text(json.dumps({**gman, "built_at": built_ago(timedelta(hours=3))}))
+    sign_file(live)
     rc, out, err, outputs = run_site(tmp / "g-same", *gtfs_args, "--live-file", str(live))
     check("the same index and GTFS files as published: no deploy",
           rc == 0 and outputs.get("deploy") == "false", repr((rc, out, err, outputs)))
@@ -558,6 +643,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
     # only in its size and sha256 is no new content, or every run deploys.
     live.write_text(json.dumps({**gman, "built_at": built_ago(timedelta(hours=3)),
                                 "gtfs": {**g, "overlay": {**g["overlay"], "size": 1, "sha256": "e" * 64}}}))
+    sign_file(live)
     rc, out, err, outputs = run_site(tmp / "g-overlay-bytes", *gtfs_args, "--live-file", str(live))
     check("only the overlay's bytes changed, published 3 h ago: no deploy",
           rc == 0 and outputs.get("deploy") == "false" and "::notice title=Daily MÁV index unchanged::" in out,
@@ -811,7 +897,8 @@ with tempfile.TemporaryDirectory() as tmp_name:
               and after("--force") == [force]
               and after("--release-url") == ["https://github.com/Bator/hungarian-transport/releases/download/v1.10.21/"
                                              "hungarian-transport-frontend.zip"]
-              and after("--release-out") == [f"{ws / 'runner-temp'}/release-feeds.json"],
+              and after("--release-out") == [f"{ws / 'runner-temp'}/release-feeds.json"]
+              and after("--release-tag") == ["v1.10.21"],
               repr((done.returncode, done.stderr, args, outputs)))
     check("the due step takes the stable release's tag from the stable step",
           "TAG: ${{ steps.stable.outputs.tag }}" in step(job("timetables"), "- name: Timetables due"))
@@ -1076,9 +1163,27 @@ check("one run at a time, none cancelled half-way",
 build, deploy, attest_job = job("build"), job("deploy"), job("attest")
 tt_job, site_job, sign_job = job("timetables"), job("site"), job("sign")
 jobs_block = TEXT.split("\njobs:\n", 1)[1]
-check("six jobs: build (MÁV), timetables, site, sign, deploy, attest",
-      re.findall(r"^  ([\w-]+):$", jobs_block, re.M) == ["build", "timetables", "site", "sign", "deploy", "attest"],
+check("seven jobs: build (MÁV), timetables, site, sign, deploy, signatures, attest",
+      re.findall(r"^  ([\w-]+):$", jobs_block, re.M)
+      == ["build", "timetables", "site", "sign", "deploy", "signatures", "attest"],
       repr(re.findall(r"^  ([\w-]+):$", jobs_block, re.M)))
+sig_job = job("signatures")
+check("the signatures job runs after the deploy (whatever it did) when the site job names an untrusted"
+      " published manifest, with no permissions, no checkout and no secret",
+      "    needs: [site, deploy]" in sig_job
+      and "    if: ${{ !cancelled() && needs.site.outputs.untrusted != '' }}" in sig_job
+      and re.search(r"^    permissions: \{\}$", sig_job, re.M) is not None and "actions/checkout" not in sig_job
+      and "secrets." not in sig_job and "untrusted: ${{ steps.assemble.outputs.untrusted }}" in job("site"),
+      sig_job)
+with tempfile.TemporaryDirectory() as _sig_tmp:
+    for value, shown in (("timetables.json", "timetables.json"), ("timetables.json,mav-index.json",
+                                                                  "timetables.json,mav-index.json"),
+                         ("x\n::warning::y", "(unexpected names)")):
+        done, _ = bash(step_script("A published signature does not verify"), Path(_sig_tmp), UNTRUSTED=value)
+        check(f"the signatures step with {value!r}: exit 1, one error annotation naming {shown}",
+              done.returncode == 1 and done.stdout.count("::error title=Published manifest signature does not"
+                                                         " verify::") == 1
+              and f"verify::{shown}:" in done.stdout and "::warning::" not in done.stdout, repr(done.stdout))
 check("the build and timetables jobs run side by side, the site job after both, whatever they did (failed,"
       " timed out), unless the run is cancelled",
       "needs:" not in build and "needs:" not in tt_job and "    needs: [build, timetables]" in site_job
