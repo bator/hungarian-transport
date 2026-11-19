@@ -1480,7 +1480,7 @@ def _read_index(out: Path) -> dict | None:
 def read_index(out: Path) -> dict | None:
     """An existing index as a dict; None when there is none or it does not
     read. For a caller that asks several questions of one index (the city
-    guard and its stop aliases), so the file is read once."""
+    guards), so the file is read once."""
     return _read_index(out)
 
 
@@ -1766,7 +1766,7 @@ def write_index(
     "al", [old id, stop index] rows in that order, so a card saved with the
     old id finds the stop. One whose stop is not in the index is left out.
     A part's stop row may carry a fourth element, the feed's own stop id of
-    a stop that kept its previous id (build_city_index.keep_stop_ids): with
+    a stop that kept an old id (build_city_index.keep_stop_ids): with
     operators it is written as the stop's fifth element, after the operator.
 
     Refuses an index built from a feed whose calendar already ended (a stale
@@ -1804,7 +1804,7 @@ def write_index(
         c_off = len(all_c)
         for row in part["s"]:
             if with_operators:
-                # A stop that kept its previous id (build_city_index
+                # A stop that kept an old id (build_city_index
                 # keep_stop_ids) brings the feed's own id as a fifth element:
                 # realtime feeds name the stop by that one.
                 all_s.append([row[0], row[1], row[2], op_ix, *row[3:4]])

@@ -913,23 +913,45 @@ fails](#when-an-update-fails)): while that index still holds the old zip,
 the carried part leaves its buses and tram-train out (they are in
 `volan-szeged` and the MÁV index) and keeps the old trams and trolleybuses.
 
-Every Szeged stop has a new id (`szeged:SZ_…`). The rebuild gives the
-index's stops their old ids back: each stop id the index in place had and
-the new feed lacks goes to the new stop of the same operator and mode within
-50 m that the index in place did not name, one to one, the nearest pair
-first. The stop takes the old id and stop number (a card matches a saved
-stop by the number in its id) and keeps the feed's own id, the one realtime
-feeds name the stop by, as the fifth element of its stop row (`[id, name,
-number, operator, feed id]`). So a card of any version finds a saved stop
-under its old id, which matters as the integration installs new indexes
-every week without a card update. An old id left over, where two old stops
-became one new one, goes into the alias table (`"al"`, old id and stop
-index), which the cards released with it read; later rebuilds carry the
-table on. The next rebuild gives the same feed stop the same old id (by the
-feed id in its row, however far the stop moved), so the ids do not drift
-from week to week. Of the 179 old tram and trolleybus stop ids, 170 are the
-stops' own ids again, four are aliases (an older card finds two of them by
-name), and five moved more than 50 m and are found by name, if at all.
+Every Szeged stop has a new id (`szeged:SZ_…`). The index gives the trams'
+and trolleybuses' stops their old ids back, from a static table in
+`scripts/build_city_index.py` (`SZEGED_STOP_IDS`, SZKT stop id -> old id),
+applied when the feed loads: the stop takes the old id and stop number (a
+card matches a saved stop by the number in its id) and keeps the feed's own
+id, the one realtime feeds name the stop by, as the fifth element of its
+stop row (`[id, name, number, operator, feed id]`). So a card of any version
+finds a saved stop under its old id, which matters as the integration
+installs new indexes every week without a card update. An old id left over,
+where two old stops became one new one, is in `SZEGED_STOP_ALIASES` and goes
+into the index's alias table (`"al"`, old id and stop index), which the
+cards released with it read. Of the 179 old tram and trolleybus stop ids,
+170 are the stops' own ids again, four are aliases (an older card finds two
+of them by name), and five moved more than 50 m and are found by name, if
+at all.
+
+The tables do not depend on the index in place, so every build (the
+release, the weekly Pages build, Home Assistant's local updater, which
+copies `scripts/*.py`) gives the same stops the same ids, a build that left
+Szeged out for a week (`HUNGARIAN_TRANSPORT_ALLOW_MISSING`, or a calendar
+that ran out before SZKT's next block) loses nothing, and the alias table
+neither grows nor needs to expire. No other feed's ids are touched: a feed
+keeps its stop ids unless `CITY_FEEDS` names tables for it (`stop_ids`,
+`stop_aliases`). `scripts/stop_id_map.py` generated them from the city
+index of v1.10.22 (the last with the old zip; in the release's
+`hungarian-transport.zip`) and SZKT's zip: an old stop whose id the feed
+lacks goes to a stop of the same mode within 50 m, one to one, a stop of
+the same name first (case, accents, spaces and punctuation ignored), then
+the nearest; a renamed stop ("Centrum Áruház", now "Mikszáth K. utca")
+still pairs with the stop at its place. An old stop left over is an alias
+of the stop it would have paired with, at most four per stop. When SZKT
+renumbers its stops again, the build warns that most of the table is no
+longer in the feed; run the script again against the same v1.10.22 index
+and the new zip:
+
+```bash
+gh release download v1.10.22 -R bator/hungarian-transport -p hungarian-transport.zip
+python3 scripts/stop_id_map.py hungarian-transport.zip szeged.zip --write
+```
 
 What Szeged users have to change themselves:
 
