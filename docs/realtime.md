@@ -393,10 +393,20 @@ before, and the card fills the board from Transitous.
   backing off) and a token of the boards' share is reserved for its
   answer before FUTÁR is asked: a dashboard's boards at once (40 poles)
   cut FUTÁR short for as many as the share holds, and the rest keep
-  FUTÁR's whole budget, so a slow FUTÁR still answers them. The token goes
-  back when FUTÁR answers, and when every card that asked has left before
-  FUTÁR failed. Unloading the entry ends the trip-detail requests under
-  way at once; their callers get no answer. The planner then has 6 s. Elsewhere FUTÁR keeps
+  FUTÁR's whole budget, so a slow FUTÁR still answers them. The trip
+  details reserved within 50 ms of each other share one token (up to one
+  request's 40 trips; 20 at night, when a trip no board dated is asked for
+  two days), as their one batched request spends one: a card's 40 trip
+  details are all cut short on one token, and the rest of the share is
+  left for the other cards' boards; a trip that lands in a later batch
+  than the one that spent it takes a token when its request goes, if one
+  is left. The token goes back when FUTÁR answers (a shared one once FUTÁR
+  answered every trip on it), when every card that saw that request fail
+  is done without spending it (a card asking the same again later does
+  not hold it), and when every card that asked has left before FUTÁR
+  failed. Unloading the entry ends the trip-detail requests under way at
+  once (their callers get no answer), and a fallback under way then asks
+  the planner nothing. The planner then has 6 s. Elsewhere FUTÁR keeps
   the whole budget, and after it failed the planner is asked only if its
   answer still reaches the card (each card timed from its own ask, also
   one that joined a request under way), with half a second of slack.
