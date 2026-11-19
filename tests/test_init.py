@@ -323,12 +323,18 @@ async def test_mavplusz_off_leaves_a_failing_futar_board_to_transitous(
 
     made = []
     real = mb.PlannerBoards
-    monkeypatch.setattr(integration.mavplusz_board, "PlannerBoards", lambda *a, **k: made.append(1) or real(*a, **k))
+
+    def boards(*a, **k):
+        # The fixture's wall time, through the planner's own clock: the
+        # global time.time stays Home Assistant's own during the test.
+        made.append(1)
+        return real(*a, **dict(k, wall=lambda: WALL))
+
+    monkeypatch.setattr(integration.mavplusz_board, "PlannerBoards", boards)
     _inject(monkeypatch, FakeClock())
     aioclient_mock.get(f"{futar.BKK_API}/{BOARD}", status=503)
     aioclient_mock.get(f"{futar.BKK_API}/{TRIP}", status=503)
     aioclient_mock.post(mavplusz.URL, side_effect=Planner())
-    monkeypatch.setattr(mb.time, "time", lambda: WALL)
     assert await async_setup_component(hass, "http", {})
     options = {CONF_API_KEY: "secret-key"} if on else {CONF_API_KEY: "secret-key", CONF_MAVPLUSZ: False}
     entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options=options)
@@ -342,6 +348,8 @@ async def test_mavplusz_off_leaves_a_failing_futar_board_to_transitous(
     if on:
         assert made == [1]
         assert board["data"]["source"] == "mavplusz"
+        # Its departures, due at the fixture's wall time (none at today's).
+        assert board["data"]["data"]["entry"]["stopTimes"]
         assert planner_calls
     else:
         assert made == []
