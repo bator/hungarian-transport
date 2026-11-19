@@ -3191,7 +3191,7 @@ register({
     let originStop = BkkLib.gtfsStopById(idx, origin.id);
     if (!originStop) {
       const opIx = BkkLib.opIx(idx, String(origin.id).split(":")[0]);
-      if (opIx >= 0) originStop = BkkLib.volanMatchStop(idx, { id: "", name: origin.name || "" }, opIx);
+      if (opIx >= 0) originStop = BkkLib.volanMatchStop(idx, { id: origin.id, name: origin.name || "" }, opIx);
     }
     if (!originStop || originStop.op == null) return null;
     const paths = BkkLib.cityHubPaths(idx, originStop, 6, atMs).filter((p) => p.edges.length);
@@ -5076,6 +5076,7 @@ register({
     if (!f || f.length < 4) return null;
     const exact = pool.find((s) => s.fold === f);
     if (exact) return exact;
+    if (BkkLib._goneOwnStop(idx, stop.id, opIx)) return null;
     const hits = pool.filter((s) => s.fold.indexOf(f) >= 0);
     if (!hits.length) return null;
     hits.sort((a, b) => {
@@ -5085,6 +5086,16 @@ register({
       return a.fold.length - b.fold.length;
     });
     return hits[0];
+  },
+  /* Whether `id` is a city stop id of operator `opIx` ("szeged:…" for
+     Szeged's) that the index has neither as a stop nor as an alias. */
+  _goneOwnStop(idx, id, opIx) {
+    if (opIx == null || !id) return false;
+    const op = (idx.ops || [])[opIx];
+    const s = String(id);
+    const colon = s.indexOf(":");
+    if (!op || colon <= 0 || s.slice(0, colon) !== op.id) return false;
+    return !BkkLib.gtfsStopById(idx, s);
   },
   /* A coach station (or a "pályaudvar") by its folded name: fold() turns
      "autóbusz-állomás" into "autobusz allomas"; some feeds write it closed. */
