@@ -736,8 +736,12 @@ class RealtimeHub:
         wall: Callable[[], float] | None = None,
         call_later: CallLater | None = None,
         planner_limiter: mavplusz.PlannerLimiter | None = None,
+        use_planner: Callable[[], bool] = lambda: True,
     ) -> None:
         self._session = session
+        # Whether mavplusz.hu may be asked at all (the integration's option,
+        # read per call): off, every source reads its feeds only.
+        self._use_planner = use_planner
         self._executor = executor
         self._task_factory: TaskFactory = task_factory or asyncio.ensure_future
         self._feeds = feeds
@@ -968,7 +972,7 @@ class RealtimeHub:
         if cfg is None:
             return error_answer({"feed": feed_id, "trips": {}}, RT_NO_FEED)
         now = self._wall()
-        if any(s.mavplusz for s in cfg.sources) and any(_planner_request(cfg, r) for r in trips):
+        if self._use_planner() and any(s.mavplusz for s in cfg.sources) and any(_planner_request(cfg, r) for r in trips):
             return await self._query_mavplusz(feed_id, cfg, trips, now)
         # Every source at once: MÁV has two, each up to FETCH_TIMEOUT cold.
         loaded = await asyncio.gather(*(self._source(cfg, src, now) for src in cfg.sources))

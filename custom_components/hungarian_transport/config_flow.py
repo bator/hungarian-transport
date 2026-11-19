@@ -27,12 +27,14 @@ from .const import (
     CONF_API_KEY,
     CONF_DAILY_MAV,
     CONF_DAILY_TIME,
+    CONF_MAVPLUSZ,
     CONF_NOTIFY_DAILY,
     CONF_NOTIFY_SERVICE,
     CONF_NOTIFY_UPDATES,
     CONF_PAGES_TIMETABLES,
     DEFAULT_DAILY_MAV,
     DEFAULT_DAILY_TIME,
+    DEFAULT_MAVPLUSZ,
     DEFAULT_NOTIFY_DAILY,
     DEFAULT_NOTIFY_UPDATES,
     DEFAULT_PAGES_TIMETABLES,
@@ -171,7 +173,9 @@ def _service_options(hass: HomeAssistant, current: str) -> list[SelectOptionDict
 
 
 def _options_schema(hass: HomeAssistant, has_key: bool, values: dict[str, Any]) -> vol.Schema:
-    """The key fields, the daily MÁV route index from GitHub (mav_daily.py),
+    """The key fields, whether mavplusz.hu is asked at all (the realtime
+    delays' first source and the BKK boards' fallback), the daily MÁV route
+    index from GitHub (mav_daily.py),
     the weekly Volán and city timetables from GitHub (weekly_timetables.py)
     and the time of their daily check, then the update notifications (timetable_notify.py): on or
     off, the service, and whether daily index installs call it.
@@ -183,6 +187,7 @@ def _options_schema(hass: HomeAssistant, has_key: bool, values: dict[str, Any]) 
     service = values[CONF_NOTIFY_SERVICE]
     return _key_schema(has_key).extend(
         {
+            vol.Optional(CONF_MAVPLUSZ, default=values[CONF_MAVPLUSZ]): BooleanSelector(),
             vol.Optional(CONF_DAILY_MAV, default=values[CONF_DAILY_MAV]): BooleanSelector(),
             vol.Optional(CONF_PAGES_TIMETABLES, default=values[CONF_PAGES_TIMETABLES]): BooleanSelector(),
             vol.Optional(CONF_DAILY_TIME, default=values[CONF_DAILY_TIME]): TimeSelector(),
@@ -289,8 +294,9 @@ class HungarianTransportConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
 
 class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
-    """Set, change or clear the BKK Open Data key; the daily MÁV index and
-    the weekly timetables on or off, and their time; update notifications."""
+    """Set, change or clear the BKK Open Data key; mavplusz.hu, the daily
+    MÁV index and the weekly timetables on or off, and their time; update
+    notifications."""
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -301,6 +307,7 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
         options = dict(entry.options) if entry else {}
         current = str(options.get(CONF_API_KEY) or "")
         values: dict[str, Any] = {
+            CONF_MAVPLUSZ: bool(options.get(CONF_MAVPLUSZ, DEFAULT_MAVPLUSZ)),
             CONF_DAILY_MAV: bool(options.get(CONF_DAILY_MAV, DEFAULT_DAILY_MAV)),
             CONF_PAGES_TIMETABLES: bool(options.get(CONF_PAGES_TIMETABLES, DEFAULT_PAGES_TIMETABLES)),
             CONF_DAILY_TIME: str(options.get(CONF_DAILY_TIME) or DEFAULT_DAILY_TIME),
@@ -323,6 +330,7 @@ class HungarianTransportOptionsFlow(config_entries.OptionsFlow):
                 # it is, so the other options can still be saved.
                 error = None
             values = {
+                CONF_MAVPLUSZ: bool(user_input.get(CONF_MAVPLUSZ, values[CONF_MAVPLUSZ])),
                 CONF_DAILY_MAV: bool(user_input.get(CONF_DAILY_MAV, values[CONF_DAILY_MAV])),
                 CONF_PAGES_TIMETABLES: bool(
                     user_input.get(CONF_PAGES_TIMETABLES, values[CONF_PAGES_TIMETABLES])
