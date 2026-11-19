@@ -1367,6 +1367,23 @@ async def test_a_crashed_round_is_logged_with_its_traceback_and_retried(
     assert len(crashes) == 2 and all(r.exc_info for r in crashes)
 
 
+async def test_a_crashed_round_records_why(hass: HomeAssistant, card_assets, monkeypatch) -> None:
+    """As a crashed index does (review round 8): the error's text, cut to
+    MAX_REASON, is the sensors' reason."""
+
+    async def update(hass_, www):
+        raise RuntimeError("boom in round " + "x" * 300)
+
+    monkeypatch.setattr(wt, "async_update", update)
+    pt = wt.PagesTimetables(hass, card_assets)
+    await pt._round()
+    pt.stop()
+    record = (await storage.async_load(hass))[storage.PAGES_ROUND]
+    for name in wt.INDEXES:
+        assert record[name]["result"] == wt.FAILED
+        assert record[name]["reason"] == ("RuntimeError: boom in round " + "x" * 300)[:mav_daily.MAX_REASON]
+
+
 @pytest.mark.parametrize(("error", "traceback"), [(KeyError("boom"), True), (OSError("disk"), False)])
 async def test_one_index_crashing_leaves_the_other_and_a_bug_has_its_traceback(
     hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch, caplog, error, traceback

@@ -1223,7 +1223,8 @@ class PagesTimetables:
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001 - logged once, the next round tries again
-            done = _every(FAILED, _crash(self._hass, "round", err))
+            message = _crash(self._hass, "round", err)
+            done = _every(FAILED, message, message[:mav_daily.MAX_REASON])
         else:
             # The next crash is news again.
             _clear_failure(self._hass, "round")
