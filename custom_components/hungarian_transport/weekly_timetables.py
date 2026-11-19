@@ -998,17 +998,27 @@ async def _running_version(hass: HomeAssistant) -> Any:
         return None
 
 
-async def _wait_out(task: asyncio.Future[Any]) -> None:
-    """Until task is done, through every cancel of the caller meanwhile (a
-    stop, then another): the caller's cleanup never runs beside it. Its
-    exception is taken, so it is not logged as never retrieved."""
-    while not task.done():
+async def _wait_out(fut: asyncio.Future[Any]) -> bool:
+    """Until fut is done, through every cancel of the calling task meanwhile
+    (a stop, then another); whether there was one. Each cancel is taken back
+    at once (Task.uncancel): Home Assistant's own stop cancels the
+    background tasks first and then waits (async_block_till_done) only for
+    the tasks that are not being cancelled, so a round that still counted
+    as cancelled would not be waited for. The caller raises CancelledError
+    when it is done. fut's exception is taken, so it is not logged as never
+    retrieved."""
+    cancelled = False
+    while not fut.done():
         try:
-            await asyncio.wait([task])
+            await asyncio.wait([fut])
         except asyncio.CancelledError:
-            continue
-    if not task.cancelled():
-        task.exception()
+            cancelled = True
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+    if not fut.cancelled():
+        fut.exception()
+    return cancelled
 
 
 async def _update_index(
@@ -1079,29 +1089,38 @@ async def _update_index(
             _clear_failure(hass, name)
             return IndexResult(decision, feed, reason=why)
 
-        async def install(staged: Path | None) -> None:
-            await hass.async_add_executor_job(
-                _commit, www, name, raw, entry["shapes"], staged, token, entry["built_at"]
-            )
+        # The commit runs in the executor as a plain future
+        # (loop.run_in_executor), neither a task nor an executor job of
+        # Home Assistant's: those a stop cancels (Home Assistant's own stop
+        # cancels every executor job a background task started, and at its
+        # last stage every task it still tracks), and a cancelled one is
+        # done while its thread goes on, so the cleanup below would run
+        # beside the commit and the record would be lost. Nothing cancels
+        # this future: the round waits for it through every cancel
+        # meanwhile (_wait_out, which takes each cancel back, so that Home
+        # Assistant's stop waits for the round), then for the record the
+        # same way, and only then cleans up and raises the cancel.
+        commit = hass.loop.run_in_executor(
+            None, partial(_commit, www, name, raw, entry["shapes"], tmp, token, entry["built_at"])
+        )
+        cancelled = await _wait_out(commit)
+        error = commit.exception()
+        if error is None:
+            tmp = None
             # With the commit, never without it: an index of this module's
             # without its record reads as a release's (decide's release
             # rule would keep it from every later build).
-            await storage.async_record_timetables_install(hass, name, feed, entry["sha256"], entry["size"])
-
-        # A task of Home Assistant's own (tracked: its stop waits for it),
-        # not of this round, which a stop (unload, Home Assistant stopping)
-        # cancels: the round waits for the commit and its record, also
-        # through a second cancel, so the cleanup below never runs beside
-        # the commit and a committed index is always recorded.
-        work = hass.async_create_task(install(tmp), f"hungarian_transport_pages_{name}_install")
-        try:
-            await asyncio.shield(work)
-        except asyncio.CancelledError:
-            await _wait_out(work)
-            raise
-        except mav_daily.DailyIndexError as err:
-            return failed(err)
-        tmp = None
+            record = hass.loop.create_task(
+                storage.async_record_timetables_install(hass, name, feed, entry["sha256"], entry["size"]),
+                name=f"hungarian_transport_pages_{name}_record",
+            )
+            cancelled = await _wait_out(record) or cancelled
+        if cancelled:
+            raise asyncio.CancelledError
+        if isinstance(error, mav_daily.DailyIndexError):
+            return failed(error)
+        if error is not None:
+            raise error
     finally:
         if tmp is not None and not keep:
             await hass.async_add_executor_job(partial(_rmtree, tmp, ignore_errors=True))
@@ -1131,8 +1150,10 @@ class PagesTimetables:
     (timetable_notify.py); then the indexes it settled are recorded for the
     sensors (storage.PAGES_ROUND, with each one's reason; an index still
     settling is marked so on its last settled record). stop() cancels a
-    round: one cancelled during its commit waits for the commit and its
-    install record (storage.TIMETABLES_INSTALL), and reports nothing else."""
+    round: one cancelled during its commit (by stop(), or by Home
+    Assistant's own stop, which then waits for it) waits for the commit and
+    its install record (storage.TIMETABLES_INSTALL), and reports nothing
+    else."""
 
     def __init__(
         self,

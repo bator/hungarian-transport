@@ -1559,6 +1559,64 @@ async def test_a_second_stop_during_the_commit_still_waits_for_it(
     assert (await storage.async_load(hass))[storage.TIMETABLES_INSTALL]["volan"]["feed"] == VOLAN_NEW
 
 
+async def test_home_assistant_stopping_during_the_commit_waits_for_it(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """Home Assistant's own stop (hass.async_stop) during the commit (review
+    round 8): it cancels the round (a background task) and every executor
+    job a background task started, waits only for the tasks not being
+    cancelled, and cancels the rest at its last stage. The stop waits for
+    the commit; the cleanup never runs beside it; the record is kept."""
+    import threading
+
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock)
+    started, release = threading.Event(), threading.Event()
+    events: list[str] = []
+    real_commit, real_rmtree = wt._commit, wt._rmtree
+
+    def slow_commit(*args):
+        started.set()
+        release.wait(20)
+        events.append("commit starts")
+        real_commit(*args)
+        events.append("commit")
+
+    def rmtree(path, *args, **kw):
+        if Path(path).name.startswith(wt.STAGING):
+            events.append("rmtree")
+        return real_rmtree(path, *args, **kw)
+
+    monkeypatch.setattr(wt, "_commit", slow_commit)
+    monkeypatch.setattr(wt, "_rmtree", rmtree)
+    seen = []
+
+    async def on_result(done):
+        seen.append(done)
+
+    pt = wt.PagesTimetables(hass, card_assets, on_result)
+    pt.start_round()
+    await hass.async_add_executor_job(started.wait, 10)
+    task = pt._task
+    stopping = asyncio.ensure_future(hass.async_stop())
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+    # Stopping, and waiting for the round: the commit is still blocked.
+    assert not stopping.done() and not task.done() and events == []
+    release.set()
+    await asyncio.wait_for(stopping, 30)
+    assert task.cancelled()
+    assert events[:2] == ["commit starts", "commit"]
+    assert not _staged(card_assets)
+    assert served_index.read_feed(card_assets / timetables.VOLAN_INDEX) == VOLAN_NEW
+    state = await storage.async_load(hass)
+    assert state[storage.TIMETABLES_INSTALL]["volan"]["feed"] == VOLAN_NEW
+    assert storage.PAGES_ROUND not in state
+    assert seen == []
+
+
 async def test_the_local_updater_writing_during_a_download_wins(
     hass: HomeAssistant, aioclient_mock, card_assets, mav_source, monkeypatch
 ) -> None:
