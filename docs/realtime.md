@@ -71,13 +71,13 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   and such a pattern lists no vehicle: its vehicle is on its route's
   scheduled patterns. So when a live trip's answer names such a pattern
   and its first call is at most 5 minutes ahead (the trains not yet
-  departed had no vehicle on any pattern), its route's vehicles are asked
-  right after, in a request of their own (`route(id:) { patterns {
+  departed had no vehicle on any pattern) and its last call at most 15
+  minutes past (a finished run's id would take the next run's vehicle),
+  its route's vehicles are asked right after, in a request of their own (`route(id:) { patterns {
   vehiclePositions } }`, one alias per route, at most 20), and the trip
   has its vehicle from its first answer on. That request never costs the
   delays: it is made after the trip request has let other cards' trip
-  requests go (a card answered from the cache meanwhile waits for it,
-  within its own round), and has its own cap (256 KiB), timeout (5 s, and
+  requests go, and has its own cap (256 KiB), timeout (5 s, and
   never past the card's round), token share (one every 10 s, burst 6,
   within the planner limit) and backoff (3 minutes); when it is not made
   or fails, the trips simply have no vehicle that round, logged once at
@@ -85,7 +85,14 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   size is remembered for three hours: a request takes the routes that fit
   192 KiB by that reckoning (an unseen route counted as 8 KiB), and a
   route that alone went over the cap is left out until its size is
-  forgotten. Measured in the daytime on 2026-11-19: 207–326 bytes a
+  forgotten (an alias the planner answered with an error teaches no
+  size). One request per route: a round does not ask a route another
+  round is asking, it waits for that answer (within its own round), and
+  a route's answer gives its vehicles to every trip of the round on that
+  route, those answered from the cache too. Only trips the round fetched
+  start a vehicle request; a round of cached trips only waits. The same
+  gates hold for every trip given a vehicle, also from another trip's
+  route answer. Measured in the daytime on 2026-11-19: 207–326 bytes a
   vehicle, 1.75 kB a route at most, 12.5 kB for 17 MÁV routes together;
   the code does not depend on those sizes
   (`tests/fixtures/realtime/mavplusz_rt_pattern.json` is an evening
@@ -440,7 +447,8 @@ Should either side object, removing the operator from `realtime_feeds.json`
   one every two seconds after that, whatever the cards ask.
 - **The planner.** One request per action call at most for the trips not
   cached (each kept for the feed's interval), plus one for the route lists
-  of route + start requests not cached (each kept three hours) and one for
+  of route + start requests not cached (each kept three hours, at most
+  2000 route lists, the least recently asked going first) and one for
   the vehicles of the live realtime-pattern trips' routes; JSON in,
   gzip, the same User-Agent, no redirects, a 20-second timeout, 1 MB per
   answer at most. While BKK FUTÁR fails, also the BKK boards (per stop per
@@ -512,8 +520,11 @@ header timestamp is more than 15 minutes old is a stalled publisher, not live
 data: it answers as unavailable.
 
 A trip may also be asked by `route` and `start` (minutes after the service
-day's midnight, up to 2880) or by `train` (digits). A `date` is a real day
-(YYYYMMDD: 20261340 is refused). A `trip_id` or `route` that is only the
+day's midnight, up to 2880) or by `train` (digits). A `date` is eight
+digits (YYYYMMDD); a row whose date is no calendar day (20261131) fails
+no call and is never asked of the planner, not even for today: the feeds
+match it as they can (a `train` row reads the feeds, a `trip_id` or
+`route` + `start` row reads none). A `trip_id` or `route` that is only the
 feed's prefix (`1:`) is never asked of the planner. Up to 40 trips of up to
 120 stops per call; anything longer is refused before a feed is touched.
 When nothing can be looked up the answer has no trips and an `error`:
