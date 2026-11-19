@@ -159,6 +159,12 @@ class OutageLog:
         self.down[key] = now
         self._logger.warning(message, *args)
 
+    def is_down(self, key: Hashable) -> bool:
+        """Whether key's outage was said and it has not answered since
+        (within ttl, when there is one)."""
+        self._purge()
+        return key in self.down
+
     def answered(self, key: Hashable, message: str, *args: object) -> None:
         """key answered: message % args as info, if it was down."""
         self._purge()

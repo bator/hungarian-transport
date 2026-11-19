@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
+import json
 import logging
 import re
 import time
@@ -112,8 +113,9 @@ MAX_TRIPS_PER_REQUEST = mavplusz.MAX_TRIPS_PER_REQUEST
 # earlier batch's request, so this is each trip's whole wait.
 PLANNER_TIMEOUT = aiohttp.ClientTimeout(total=6)
 TRIP_TIMEOUT = aiohttp.ClientTimeout(total=PLANNER_TIMEOUT.total - TRIP_BATCH_WAIT)
-# After the planner failed (no answer, a timeout, HTTP 5xx or 429) nobody
-# asks it for this long, the realtime hub neither (the shared backoff).
+# After the planner failed (no answer, a timeout, HTTP 5xx, 429 or 403, an
+# HTTP 200 that is not JSON: a maintenance or Cloudflare page in front of it)
+# nobody asks it for this long, the realtime hub neither (the shared backoff).
 FAIL_BACKOFF = 30
 # A request that failed for its own sake (an answer over its cap, a GraphQL
 # error, one of the wrong shape, another HTTP 4xx) is the same request's
@@ -220,6 +222,11 @@ class PlannerError(Exception):
 
 class _RequestFailed(PlannerError):
     """This request failed for its own sake, not the planner (REQUEST_FAIL_TTL)."""
+
+
+class _NotSent(PlannerError):
+    """The request was not sent (the backoff, the rate limit): nothing was
+    asked of the planner, so the stop does not count as asked (BOARD_TTL)."""
 
 
 class _Ticket:
@@ -753,6 +760,13 @@ class _Batch:
         self.tickets: list[_Ticket] = []
 
 
+def _settle(batch: _Batch, reason: str) -> None:
+    """Every key of batch not answered yet fails with PlannerError(reason)."""
+    for fut in batch.futures.values():
+        if not fut.done():
+            fut.set_exception(PlannerError(reason))
+
+
 class PlannerBoards:
     """The fallback futar.FutarProxy asks when FUTÁR fails (its `fallback`).
 
@@ -774,7 +788,8 @@ class PlannerBoards:
     before (Home Assistant's store, read through restore_stations), and
     `on_stations_changed` is called whenever learn() changes it, for the
     store to write it later. After close() nothing is learnt any more (a
-    FUTÁR answer landing after the entry was unloaded or removed)."""
+    FUTÁR answer landing after the entry was unloaded or removed), and the
+    trip details still batched or under way have no answer."""
 
     paths = PATHS
     # The seconds answer() takes at most (futar.FutarProxy times its fallback by it).
@@ -800,13 +815,24 @@ class PlannerBoards:
         self._task_factory: TaskFactory = task_factory or asyncio.ensure_future
         self._boards = SharedTTLCache(BOARD_TTL, 256, task_factory, call_later, monotonic)
         self._trips = SharedTTLCache(TRIP_TTL, 1024, task_factory, call_later, monotonic)
-        # When each board was last asked for, answered or not: one request
-        # per stop per BOARD_TTL, also while the requests fail.
+        # When each board was last asked for (a request sent), answered or
+        # not: one request per stop per BOARD_TTL, also while the requests
+        # fail. Of those, the ones whose request failed (not one still under
+        # way): no board for them until BOARD_TTL after the ask (can_answer
+        # says so).
         self._asked: dict[Any, float] = {}
+        self._unanswered: set[Any] = set()
         self._dates: dict[str, str] = {}
         # FUTÁR station id -> its reference, child poles (pole -> epoch last
         # seen) and when it was last seen, least recently seen first (learn).
         self._stations: dict[str, dict[str, Any]] = restore_stations(stations, self._wall())
+        # FUTÁR station id -> the epochs last reported for the store (through
+        # on_stations_changed) of the station ("") and of each pole: a
+        # sighting is news once a SEEN_RESOLUTION after the last report, so
+        # a station seen every hour is still written once a day.
+        self._reported: dict[str, dict[str, int]] = {
+            sid: {"": st["seen"], **st["poles"]} for sid, st in self._stations.items()
+        }
         self._pruned_at = self._monotonic()
         self._on_stations_changed = on_stations_changed
         self._closed = False
@@ -818,18 +844,26 @@ class PlannerBoards:
         self._failing: dict[tuple[str, str], float] = {}
         # The trip details batch still taking keys (TRIP_BATCH_WAIT), if any.
         self._open: _Batch | None = None
-        # The batches' tasks, held until done (the loop keeps only a weak one).
-        self._sending: set[asyncio.Future[Any]] = set()
+        # The batches' tasks and their batches, held until done (the loop
+        # keeps only a weak reference to a task).
+        self._sending: dict[asyncio.Future[Any], _Batch] = {}
         self._rate = (limiter or mavplusz.PlannerLimiter(monotonic=monotonic)).client(
-            lambda: PlannerError("rate limited"), fallback=True
+            lambda: _NotSent("rate limited"), fallback=True
         )
         self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic)
 
     def close(self) -> None:
-        """The caches' timers go, and learn() is a no-op from now on."""
+        """The caches' timers go, the trip details' batches still under way
+        are cancelled (their callers have no answer at once), no batch is
+        started, and learn() is a no-op from now on."""
         self._closed = True
         self._boards.close()
         self._trips.close()
+        self._open = None
+        for task, batch in list(self._sending.items()):
+            task.cancel()
+            # A task cancelled before it ran never reaches _send's own cleanup.
+            _settle(batch, "closed")
 
     def can_answer(self, path: str, params: dict[str, str]) -> bool:
         """Whether answer() may give FUTÁR's answer for path: a BKK stop the
@@ -837,12 +871,15 @@ class PlannerBoards:
         not said it does not know, or whose poles are known, a timetable
         trip, none of whose requests failed for its own sake lately, and
         the planner neither backing off nor out of this fallback's tokens.
-        Not for the rest: FUTÁR then has its whole budget, since nothing
-        else could answer."""
+        Not for the rest, nor for a board whose request failed within
+        BOARD_TTL (it is not asked again before then): FUTÁR then has its
+        whole budget, since nothing else could answer."""
         if not self._rate.available():
             return False
         if path == BOARD_PATH:
-            return self._board_ids(str(params.get("stopId") or "")) is not None
+            stop = str(params.get("stopId") or "")
+            ids = self._board_ids(stop)
+            return ids is not None and not self._unanswered_within_ttl((stop, ids))
         if path == TRIP_PATH:
             gid = self._trip_id(params)
             return gid is not None and not self._is_failing(("trip", gid))
@@ -919,18 +956,20 @@ class PlannerBoards:
         """A sighting of pole of station: both move to the most recently
         seen end (at the limits the least recently seen goes). Whether this
         is news for the store: a station or a pole not known before, or one
-        not seen for SEEN_RESOLUTION."""
+        whose last report (_reported) is SEEN_RESOLUTION old or older,
+        however often it was seen since."""
         if not isinstance(station, str) or not is_station(station) or planner_id(station) is None:
             return False
         if not isinstance(pole, str) or is_station(pole) or planner_id(pole) is None:
             return False
         now = int(self._wall()) if now is None else now
         known = self._stations.pop(station, None)
-        changed = known is None or now - known["seen"] >= SEEN_RESOLUTION
         if known is None:
             while len(self._stations) >= MAX_STATIONS:
                 del self._stations[next(iter(self._stations))]
             known = {"ref": None, "poles": {}, "seen": now}
+            # Whatever was reported of a station dropped before is no more.
+            self._reported.pop(station, None)
         known["seen"] = max(known["seen"], now)
         self._stations[station] = known
         poles = known["poles"]
@@ -938,11 +977,31 @@ class PlannerBoards:
         if seen is None:
             while len(poles) >= MAX_CHILD_STOPS:
                 del poles[next(iter(poles))]
-            changed = True
-        elif now - seen >= SEEN_RESOLUTION:
-            changed = True
         poles[pole] = max(seen or now, now)
+        reported = self._reported.setdefault(station, {})
+        if seen is None:
+            # A pole not known (any more): news, whatever was reported of it before.
+            reported.pop(pole, None)
+        changed = False
+        for name in ("", pole):
+            if name not in reported or now - reported[name] >= SEEN_RESOLUTION:
+                reported[name] = now
+                changed = True
+        if changed:
+            self._trim_reported(station)
         return changed
+
+    def _trim_reported(self, station: str) -> None:
+        """Keeps _reported to about the stations and poles still known (a
+        dropped one is new again when FUTÁR names it)."""
+        if len(self._reported) > MAX_STATIONS:
+            for sid in [s for s in self._reported if s not in self._stations]:
+                del self._reported[sid]
+        reported = self._reported[station]
+        if len(reported) > MAX_CHILD_STOPS + 1:
+            poles = self._stations[station]["poles"]
+            for name in [n for n in reported if n and n not in poles]:
+                del reported[name]
 
     def stations_data(self) -> dict[str, Any]:
         """The learnt stations as plain JSON, for Home Assistant's store
@@ -1051,13 +1110,22 @@ class PlannerBoards:
             return None
         return render_board(board, params.get("minutesAfter"), self._wall())
 
+    def _unanswered_within_ttl(self, key: Any) -> bool:
+        """Whether key's board request failed within BOARD_TTL of now (no
+        board cached, and not asked again before then)."""
+        at = self._asked.get(key)
+        return at is not None and key in self._unanswered and self._monotonic() - at < BOARD_TTL
+
     async def _fetch_board(self, stop: str, ids: tuple[str, ...], ticket: _Ticket | None) -> _Board | None:
         now = self._monotonic()
         for old in [k for k, at in self._asked.items() if now - at >= BOARD_TTL]:
             del self._asked[old]
+            self._unanswered.discard(old)
         key = (stop, ids)
         if key in self._asked:
             raise PlannerError("asked for this stop within BOARD_TTL")
+        # Asked from here on, unless _post says it sent nothing (_NotSent),
+        # which it does before it awaits anything.
         self._asked[key] = now
         wall = self._wall()
         # A FUTÁR station's poles, or one planner stop (a stop, a station).
@@ -1070,12 +1138,21 @@ class PlannerBoards:
                 board = parse_board(doc, stop, wall, children=len(ids), own=own)
             else:
                 board = parse_board(doc, stop, wall)
+        except _NotSent:
+            del self._asked[key]
+            raise
         except _RequestFailed:
+            self._unanswered.add(key)
             self._fail(("board", stop))
             raise
         except (ValueError, KeyError, TypeError, OverflowError, OSError) as err:
+            self._unanswered.add(key)
             self._fail(("board", stop))
             raise self._request_failed(err) from None
+        except BaseException:
+            # The planner failing, or the request cancelled: asked, no board.
+            self._unanswered.add(key)
+            raise
         # The planner's null says it does not know the stop (or any of the
         # station's poles): FUTÁR keeps its whole budget there for a while.
         self._probe_result((stop, ids) if poles else stop, board is not None)
@@ -1129,12 +1206,14 @@ class PlannerBoards:
     async def _batched(self, key: TripKey, ticket: _Ticket | None) -> dict[str, Any] | None:
         """key's details, in the batch still taking keys or a new one: never
         behind a request already under way (each has its own deadline)."""
+        if self._closed:
+            raise PlannerError("closed")
         batch = self._open
         if batch is None:
             batch = self._open = _Batch()
             task = self._task_factory(self._send(batch))
-            self._sending.add(task)
-            task.add_done_callback(self._sending.discard)
+            self._sending[task] = batch
+            task.add_done_callback(lambda done: self._sending.pop(done, None))
         if ticket is not None and ticket not in batch.tickets:
             batch.tickets.append(ticket)
         fut = batch.futures.get(key)
@@ -1155,10 +1234,8 @@ class PlannerBoards:
             chunks = [keys[i : i + MAX_TRIPS_PER_REQUEST] for i in range(0, len(keys), MAX_TRIPS_PER_REQUEST)]
             await asyncio.gather(*(self._send_chunk(chunk, batch) for chunk in chunks))
         finally:
-            # Cancelled (Home Assistant stopping): nobody answers the rest.
-            for fut in batch.futures.values():
-                if not fut.done():
-                    fut.set_exception(PlannerError("not asked"))
+            # Cancelled (Home Assistant stopping, close()): nobody answers the rest.
+            _settle(batch, "not asked")
 
     async def _send_chunk(self, keys: list[TripKey], batch: _Batch) -> None:
         futures = [batch.futures[k] for k in keys]
@@ -1199,23 +1276,28 @@ class PlannerBoards:
         self, body: dict[str, Any], cap: int, timeout: aiohttp.ClientTimeout, tickets: Sequence[_Ticket] = ()
     ) -> Any:
         """One planner request: its decoded answer, or PlannerError when it
-        is not made (backoff, rate limit) or fails. It spends a token
-        reserved for it (tickets) if one is still held, else takes one. The
-        planner failing (no answer, a timeout, HTTP 5xx or 429) backs every
-        planner request off and is logged once per outage; a failure of
-        this request alone (_RequestFailed: an answer over cap, another HTTP
-        status, no JSON) is neither."""
+        is not made (backoff, rate limit: _NotSent, raised before anything
+        is awaited) or fails. It spends a token reserved for it (tickets) if
+        one is still held, else takes one. The planner failing (no answer, a
+        timeout, HTTP 5xx, 429 or 403, an HTTP 200 that is not JSON: a
+        maintenance or Cloudflare page) backs every planner request off and
+        is logged once per outage; a failure of this request alone
+        (_RequestFailed: an answer over cap, nested too deep, another HTTP
+        status) is neither."""
         if self._rate.backing_off():
-            raise PlannerError("backing off after a failure")
+            raise _NotSent("backing off after a failure")
         if not any(t.spend() for t in tickets):
             self._rate.take()
         try:
             doc = await mavplusz.fetch(self._session, body, user_agent=USER_AGENT, timeout=timeout, cap=cap)
         except mavplusz.TooLarge as err:
             raise self._request_failed(err) from None
+        except (json.JSONDecodeError, UnicodeDecodeError) as err:
+            # Not this request's answer: whatever the server put in front of the planner.
+            raise self._failed(ValueError(f"an answer that is not JSON ({err})")) from None
         except ValueError as err:
             status = _http_status(err)
-            if status is not None and (status >= 500 or status == 429):
+            if status is not None and (status >= 500 or status in (429, 403)):
                 raise self._failed(err) from None
             raise self._request_failed(err) from None
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as err:
@@ -1283,7 +1365,9 @@ def restore_stations(data: Any, now: float | None = None) -> dict[str, dict[str,
     poles is left out, and the limits hold (MAX_STATIONS and
     MAX_CHILD_STOPS, the most recently seen kept; STATION_MAX_AGE), so a
     broken or edited file is no worse than none. A record of before the
-    seen times (poles alone) counts as seen now: it ages from the update on."""
+    seen times (poles alone) counts as seen now: it ages from the update on;
+    a time after now (a clock set back, an edited file) counts as now, so it
+    ages out too."""
     stamp = int(time.time() if now is None else now)
     stations = data.get("stations") if isinstance(data, dict) else None
     out: dict[str, dict[str, Any]] = {}
@@ -1298,13 +1382,13 @@ def restore_stations(data: Any, now: float | None = None) -> dict[str, dict[str,
         poles: dict[str, int] = {}
         for p in raw if isinstance(raw, list) else ():
             if isinstance(p, str) and not is_station(p) and planner_id(p) is not None and p not in poles:
-                poles[p] = _seen(seen.get(p), stamp)
+                poles[p] = _seen(seen.get(p), stamp, stamp)
         if not poles:
             continue
         # The least recently seen first (stable: the file's order for a tie).
         ordered = sorted(poles.items(), key=lambda item: item[1])[-MAX_CHILD_STOPS:]
         ref = st.get("ref")
-        at = _seen(st.get("at"), max(at for _p, at in ordered))
+        at = _seen(st.get("at"), max(at for _p, at in ordered), stamp)
         rows.append((at, order, sid, {
             "ref": _station_ref(sid, ref) if isinstance(ref, dict) else None,
             "poles": dict(ordered),
@@ -1317,13 +1401,13 @@ def restore_stations(data: Any, now: float | None = None) -> dict[str, dict[str,
     return out
 
 
-def _seen(value: Any, default: int) -> int:
-    """A stored last-seen epoch, or default for none (an older record) or a
-    broken one."""
+def _seen(value: Any, default: int, now: int) -> int:
+    """A stored last-seen epoch, at most now, or default for none (an older
+    record) or a broken one."""
     seen = _int(value)
     if seen is None or not _DAY_MIN <= seen <= _DAY_MAX:
         return default
-    return seen
+    return min(seen, now)
 
 
 def _futar_date(value: Any) -> str:
