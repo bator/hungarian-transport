@@ -64,28 +64,33 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   per action call, for the trips of that call not cached yet: per trip its
   route, its calls on the service date (the card's `date`, else today in
   Budapest) with realtime delays and times, and the positions of the
-  vehicles on its pattern. A trip the realtime data changed (every live
-  MÁV train sampled on 2026-11-18, `MODIFIED`, and some `UPDATED` ones, on
-  any of the planner's sources) has a realtime pattern of its own
-  (`1:V3775_106::rt#2972`) that lists no vehicle: its vehicle is on its
-  route's scheduled patterns. So when a trip's answer names such a
-  pattern, its route's vehicles are asked right after, in a request of
-  their own (`route(id:) { patterns { vehiclePositions } }`, one alias per
-  route, at most 20), and the trip has its vehicle from its first answer
-  on. That request never costs the delays: it has its own cap (256 KiB),
-  timeout (5 s, and never past the card's round), token share (one every
-  10 s, burst 6, within the planner limit) and backoff (3 minutes); when
-  it is not made or fails, the trips simply have no vehicle that round,
-  logged once at debug level, and the planner is not backed off. Each
-  route's answer size is remembered for three hours: a request takes the
-  routes that fit 192 KiB by that reckoning (an unseen route counted as
-  8 KiB), and a route that alone went over the cap is left out until its
-  size is forgotten. Sizes were measured only in the evening (about 250
-  bytes a vehicle: 975 bytes for the MÁV route 1:V3775_106 with 4
-  vehicles at 22:15 on 2026-11-18); the code no longer depends on them
-  (`tests/fixtures/realtime/mavplusz_rt_pattern.json`). Each position
-  names its trip, and is kept for that trip's live run whichever alias it
-  came with. The
+  vehicles on its pattern. Almost every MÁV trip of the day sits on a
+  realtime pattern of its own (`1:V3775_106::rt#2972`), not only the ones
+  the realtime data changed (`MODIFIED`, `UPDATED`, with delay 0 too,
+  checked on 2026-11-18 and 2026-11-19; other planner sources have some),
+  and such a pattern lists no vehicle: its vehicle is on its route's
+  scheduled patterns. So when a live trip's answer names such a pattern
+  and its first call is at most 5 minutes ahead (the trains not yet
+  departed had no vehicle on any pattern), its route's vehicles are asked
+  right after, in a request of their own (`route(id:) { patterns {
+  vehiclePositions } }`, one alias per route, at most 20), and the trip
+  has its vehicle from its first answer on. That request never costs the
+  delays: it is made after the trip request has let other cards' trip
+  requests go (a card answered from the cache meanwhile waits for it,
+  within its own round), and has its own cap (256 KiB), timeout (5 s, and
+  never past the card's round), token share (one every 10 s, burst 6,
+  within the planner limit) and backoff (3 minutes); when it is not made
+  or fails, the trips simply have no vehicle that round, logged once at
+  debug level, and the planner is not backed off. Each route's answer
+  size is remembered for three hours: a request takes the routes that fit
+  192 KiB by that reckoning (an unseen route counted as 8 KiB), and a
+  route that alone went over the cap is left out until its size is
+  forgotten. Measured in the daytime on 2026-11-19: 207–326 bytes a
+  vehicle, 1.75 kB a route at most, 12.5 kB for 17 MÁV routes together;
+  the code does not depend on those sizes
+  (`tests/fixtures/realtime/mavplusz_rt_pattern.json` is an evening
+  answer). Each position names its trip, and is kept for that trip's live
+  run whichever alias it came with. The
   ids go in as GraphQL variables; vehicle ids (plate numbers) are not
   asked for. At most 40 trips a request, of the ones not cached yet; the
   rest are cut, not split. What a row needs goes in whole or not at all (a
@@ -105,7 +110,7 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   request is first resolved to the planner's trips: one more request lists
   the trip ids of every asked route on the service date (`route(id:) {
   patterns { tripsForDate(serviceDate:) { gtfsId } } }`, at most 40 routes;
-  8 routes are about 16 kB), kept for three hours per route and date. The
+  about 40 bytes a trip, 8 routes about 16 kB), kept for three hours per route and date. The
   trips whose id starts at the card's minute (modulo a day, as on the
   feeds) are then asked for with the trip ids. Two trips of a line at the
   same minute (both ends of Miskolc line 14 at 07:10) are both asked for
@@ -126,7 +131,8 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   day. The planner lists a trip's scheduled calls on any day, run or not
   (`1:36777783` on 2030-01-05: 10 calls), so only the calendar tells a
   variant of another weekday from a run; a zip without one asks for every
-  trip. A train's trips go in one request together (a number has 2 trips
+  trip, and so does a day outside the first and last day its calendar
+  names (a copy kept from an older download says nothing of today). A train's trips go in one request together (a number has 2 trips
   in the median, 12 at most). The answer is then matched exactly as on
   the feeds: today's run, else last night's; a number with several trips
   that day is told apart by the card's stations. Several calling there
@@ -146,8 +152,10 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   last night's anyway); a train it has no answer for, or one whose
   numbers the static feed could not give (its download failing with no
   copy kept), is matched on the feeds as before, which are then read for
-  its source. A number the static feed lacks, or whose trips run on
-  neither day, reads no feed: the feeds could not match it either. A
+  its source. A number the static feed lacks reads no feed: the feeds
+  could not match it either. One whose trips the calendar runs on neither
+  day is not asked of the planner, but matched on the feeds, which never
+  read the calendar (it may be wrong, or the train an added one). A
   source the call has no train of (GYSEV's for a MÁV train) is not read
   at all.
 - **What it answers.** A call without realtime data has no delay (the
@@ -157,13 +165,21 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   pattern's vehicle is then another day's run of it). The answer has the
   same shape as from the feeds; `updated` is the time of the planner's
   answer, or the newest feed header when a feed was read too.
-- **When the feeds are read instead.** For a source whose planner request
-  fails (an HTTP error, a timeout, an answer that is not JSON, any GraphQL
-  error), is refused by the integration's rate limit, or falls in the
-  minute's backoff after a failure; when the call's planner requests,
-  waiting for other cards' ones included, take over 20 s (a request is
-  begun only with at least 10 s of that left, so waiting alone is no
-  outage); and when the planner knows **none** of
+- **When the feeds are read instead.** For the trips of a source whose
+  planner request fails (an HTTP error, 429 included, a timeout, an answer
+  that is not JSON, a GraphQL error not tied to one trip), is refused by
+  the integration's rate limit, or falls in the minute's backoff after a
+  failure, but for the trips answered within their interval or still kept
+  (see Caching): those stay the planner's. When the call's planner round,
+  waiting for other cards' requests and, after a restart, the static train
+  numbers' download included, takes over 20 s (a request is begun only
+  with at least 10 s of that left, so waiting alone is no outage; numbers
+  not loaded by then leave the trains to the feeds, which wait for the
+  same download). A GraphQL error the planner ties to one trip (its `path`
+  begins with that trip's alias: a trip id or date it cannot serve) is no
+  answer for that trip alone, matched on the feeds, and backs nothing
+  off; so is a trip id the request cap left out, with no answer kept. And
+  when the planner knows **none** of
   the requested trips (a null answer for every one: ids the card's
   timetable does not share with the planner). A trip the planner does not
   know among ones it does is simply not answered: reading the 1.9 MB feeds
@@ -175,7 +191,8 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   are then read too. A train likewise, as above.
 - **Caching.** Each trip's answer is kept per trip and service date for
   the feed's `interval` (60 s), each route's trip list for three hours,
-  shared by every card and browser; one request at a time. An answer that
+  shared by every card and browser; one trip or route-list request at a
+  time (the vehicle requests go beside them). An answer that
   no longer changes is kept three hours too: a trip the planner does not
   know or lists without a call that day, a run without realtime data whose
   last call was over six hours ago (the most a delay is taken to be), and
@@ -379,7 +396,8 @@ Should either side object, removing the operator from `realtime_feeds.json`
   one every two seconds after that, whatever the cards ask.
 - **The planner.** One request per action call at most for the trips not
   cached (each kept for the feed's interval), plus one for the route lists
-  of route + start requests not cached (each kept three hours); JSON in,
+  of route + start requests not cached (each kept three hours) and one for
+  the vehicles of the live realtime-pattern trips' routes; JSON in,
   gzip, the same User-Agent, no redirects, a 20-second timeout, 1 MB per
   answer at most. While BKK FUTÁR fails, also the BKK boards (per stop per
   15 s) and trip details (see [BKK boards when FUTÁR
@@ -448,7 +466,9 @@ header timestamp is more than 15 minutes old is a stalled publisher, not live
 data: it answers as unavailable.
 
 A trip may also be asked by `route` and `start` (minutes after the service
-day's midnight, up to 2880) or by `train` (digits). Up to 40 trips of up to
+day's midnight, up to 2880) or by `train` (digits). A `date` is a real day
+(YYYYMMDD: 20261340 is refused). A `trip_id` or `route` that is only the
+feed's prefix (`1:`) is never asked of the planner. Up to 40 trips of up to
 120 stops per call; anything longer is refused before a feed is touched.
 When nothing can be looked up the answer has no trips and an `error`:
 `rt_no_feed` (no feed for that operator) or `rt_unavailable` (the feed cannot
@@ -458,13 +478,28 @@ be reached now).
 
 The requests carry no personal data: the User-Agent names the project, not
 the installation. A feed is asked for as a whole, not for the trips a card
-shows; the planner is asked for the trips a card shows (trip ids and a
-date, nothing else), so mavplusz.hu can tell which timetable rows some
-Home Assistant displays, as it can for anyone using its own site. The
-vehicles' plate numbers in the feeds are not passed on to the cards, and
-are not asked of the planner. `tests/fixtures/realtime/mavplusz_trips.json`
-is a real planner answer of 2026-11-14 for four trips, trimmed, and
-`mavplusz_trains.json` one of 2026-11-18 for four train runs. The test fixtures (`tests/fixtures/realtime/`) are real feeds of
+shows. The planner is asked for what the cards show, and nothing else:
+trip ids with their service dates (a row's own trip, the resolved trips of
+a route + start row, and every trip of a train's number for today and
+yesterday, so last night's runs too), route ids with a date for the route
+lists of route + start rows, and route ids for the vehicles of live
+realtime-pattern trips; while BKK FUTÁR fails, also BKK stop, station and
+pole ids for the boards and BKK trip ids for trip details (see [BKK boards
+when FUTÁR fails](#bkk-boards-when-futár-fails)). So mavplusz.hu can tell
+which timetable rows some Home Assistant displays, as it can for anyone
+using its own site. The vehicles' plate numbers in the feeds are not
+passed on to the cards, and are not asked of the planner.
+
+The planner fixtures are real answers to the module's own queries:
+`tests/fixtures/realtime/mavplusz_trips.json` (2026-11-14, four Volán
+trips, calls trimmed), `mavplusz_routes.json` (2026-11-14, the route
+lists of Veszprém 2 and Miskolc 32 and 14 and two running trips),
+`mavplusz_trains.json` (2026-11-18, four train runs, unedited),
+`mavplusz_rt_pattern.json` (2026-11-18, three MODIFIED trains and their
+routes' vehicles, unedited: one request of both kinds as the code asked
+then, split in two by the tests) and `mavplusz_bkk.json` (2026-11-18, a
+BKK board and trip details). Tests edit copies of them in memory only.
+The other fixtures (`tests/fixtures/realtime/`) are real feeds of
 2026-11-02 trimmed to a few trips, with the vehicle descriptors and entity
 ids (plates) removed.
 

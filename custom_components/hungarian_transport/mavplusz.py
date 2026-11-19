@@ -39,15 +39,15 @@ URL = "https://mavplusz.hu/otp2-backend/otp/routers/default/index/graphql"
 # trip id. The hub asks the resolved ones first (realtime._query_mavplusz),
 # and the ones cut go out on a later poll, while the others are cached.
 MAX_TRIPS_PER_REQUEST = 40
-# The vehicles of the trips on a realtime pattern (_RT_PATTERN), asked by
-# their routes in a request of their own after the trips' (realtime's
-# _mav_vehicles): every vehicle on every pattern of each route, about 250
-# bytes a vehicle (975 bytes for the MÁV route 1:V3775_106 with 4 vehicles,
-# 1.3 kB for 1:V3803_106 with 5, on 2026-11-18 at 22:15). Those sizes were
-# measured at night only, so nothing here relies on them: the request has
-# its own cap, far under the trips', and a route's size is learnt from its
-# answers (RouteSizes). An answer over it, or any failure, only leaves the
-# vehicles out that round; the delays never wait on it.
+# The vehicles of the trips on a realtime pattern (_RT_PATTERN: almost every
+# MÁV trip of the day, not only the changed ones), asked by their routes in
+# a request of their own after the trips' (realtime's _mav_vehicles): every
+# vehicle on every pattern of each route, 207-326 bytes a vehicle, at most
+# 1.75 kB a route and 12.5 kB for 17 MÁV routes (daytime, 2026-11-19).
+# Nothing here relies on those sizes: the request has its own cap, far
+# under the trips', and a route's size is learnt from its answers
+# (RouteSizes). An answer over it, or any failure, only leaves the vehicles
+# out that round; the delays never wait on it.
 MAX_ROUTES_PER_REQUEST = 20
 VEHICLE_MAX_BYTES = 256 * 1024
 # What the routes of one request may add up to by RouteSizes' reckoning
@@ -88,6 +88,10 @@ FALLBACK_BURST = 15
 # the trips have no vehicle that round, nothing else.
 VEHICLE_RATE = 0.1
 VEHICLE_BURST = 6
+# A trip whose first call is further ahead than this (seconds) has no
+# vehicle to ask its route for: the MÁV trains on a realtime pattern not
+# yet departed had none on any pattern (2026-11-19).
+VEHICLE_LEAD = 5 * 60
 # stopRelationship.status -> VehiclePosition.VehicleStopStatus.
 _STATUS = {"INCOMING_AT": 0, "STOPPED_AT": 1, "IN_TRANSIT_TO": 2}
 # A vehicle's position, naming its trip. No vehicle ids: they are plate
@@ -97,10 +101,10 @@ _POSITION_FIELDS = (
 )
 # Per trip: its route, its calls on the service date with their realtime
 # times (seconds after serviceDay, an epoch), and its pattern's code and
-# vehicles. A trip the realtime data changed (MODIFIED, some UPDATED) has
-# a realtime pattern ("1:V3775_106::rt#2975") that lists no vehicle: they
-# are on its route's scheduled patterns, asked by the route in a request of
-# their own (build_vehicle_query).
+# vehicles. Almost every MÁV trip of the day (MODIFIED, UPDATED, even
+# with delay 0) has a realtime pattern ("1:V3775_106::rt#2975") that
+# lists no vehicle: they are on its route's scheduled patterns, asked by
+# the route in a request of their own (build_vehicle_query).
 _TRIP_FIELDS = (
     "gtfsId route { gtfsId } "
     "stoptimesForDate(serviceDate: $%s) { realtime realtimeState realtimeArrival realtimeDeparture "
@@ -276,6 +280,8 @@ class TripResult(NamedTuple):
     # route (build_vehicle_query).
     route: str = ""
     rt_pattern: bool = False
+    # The epoch of the run's first call that date, as ends the last one's.
+    starts: int | None = None
 
 
 def gtfs_id(trip_id: str, prefix: str) -> str:
@@ -283,9 +289,21 @@ def gtfs_id(trip_id: str, prefix: str) -> str:
     return prefix + realtime._strip(trip_id, prefix)
 
 
+def valid_date(value: Any) -> bool:
+    """value is a calendar day as YYYYMMDD (20261340 is not: the planner
+    answers such a date with an error)."""
+    if not (isinstance(value, str) and _DATE.match(value)):
+        return False
+    try:
+        datetime.strptime(value, "%Y%m%d")
+    except ValueError:
+        return False
+    return True
+
+
 def service_date(wanted: Any, now: float) -> str:
-    """The card's date when it is YYYYMMDD, else today in Budapest."""
-    if isinstance(wanted, str) and _DATE.match(wanted):
+    """The card's date when it is a real YYYYMMDD day, else today in Budapest."""
+    if valid_date(wanted):
         return wanted
     return datetime.fromtimestamp(now, BUDAPEST).strftime("%Y%m%d")
 
@@ -320,12 +338,15 @@ def build_vehicle_query(routes: Sequence[str]) -> dict[str, Any]:
 
 def parse_vehicles(doc: Any, routes: Sequence[str]) -> dict[str, list[dict[str, Any]]]:
     """Per route of build_vehicle_query(routes): the raw positions on its
-    patterns (none for a route the planner does not know). Errors and
-    missing aliases as in parse_response."""
-    data = _data(doc)
+    patterns (none for a route the planner does not know, nor for one an
+    error names). Errors and missing aliases as in parse_response."""
+    aliases = [f"r{i}" for i in range(len(routes))]
+    data, failed = _alias_data(doc, aliases)
     out: dict[str, list[dict[str, Any]]] = {}
-    for i, route in enumerate(routes):
-        alias = f"r{i}"
+    for alias, route in zip(aliases, routes):
+        if alias in failed:
+            out[route] = []
+            continue
         if alias not in data:
             raise ValueError(f"answer without {alias}")
         out[route] = _route_positions(data[alias])
@@ -334,14 +355,20 @@ def parse_vehicles(doc: Any, routes: Sequence[str]) -> dict[str, list[dict[str, 
 
 def answer_sizes(doc: Any, routes: Sequence[str]) -> dict[str, int]:
     """Per route of a parse_vehicles answer: the bytes of its alias, as
-    compact JSON (what RouteSizes learns)."""
+    compact JSON (what RouteSizes learns); none for an alias it lacks."""
     data = doc["data"]
-    return {r: len(json.dumps(data[f"r{i}"], separators=(",", ":"))) for i, r in enumerate(routes)}
+    return {
+        r: len(json.dumps(data[f"r{i}"], separators=(",", ":"))) for i, r in enumerate(routes) if f"r{i}" in data
+    }
 
 
-def needs_route_vehicles(res: TripResult | None) -> bool:
+def needs_route_vehicles(res: TripResult | None, now: float | None = None) -> bool:
     """A live trip on a realtime pattern without its vehicle: its vehicle is
-    on its route's scheduled patterns (build_vehicle_query)."""
+    on its route's scheduled patterns (build_vehicle_query). With now (an
+    epoch), not one whose first call is over VEHICLE_LEAD ahead: no
+    vehicle runs it yet."""
+    if now is not None and res is not None and res.starts is not None and res.starts > now + VEHICLE_LEAD:
+        return False
     return bool(
         res is not None and res.trip_update is not None and res.vehicle is None and res.rt_pattern and res.route
     )
@@ -442,12 +469,15 @@ def build_route_query(routes: Sequence[RouteKey]) -> dict[str, Any]:
 
 def parse_routes(doc: Any, routes: Sequence[RouteKey]) -> dict[RouteKey, tuple[str, ...] | None]:
     """Per route of build_route_query(routes): its trip ids that day (the
-    planner's, prefix kept), or None for a route the planner does not know.
-    Errors and missing aliases as in parse_response."""
-    data = _data(doc)
+    planner's, prefix kept), or None for a route the planner does not know;
+    a route an error names is not in the result. Errors and missing aliases
+    as in parse_response."""
+    data, failed = _alias_data(doc, [f"r{i}" for i in range(len(routes))])
     out: dict[RouteKey, tuple[str, ...] | None] = {}
     for i, key in enumerate(routes):
         alias = f"r{i}"
+        if alias in failed:
+            continue
         if alias not in data:
             raise ValueError(f"answer without {alias}")
         route = data[alias]
@@ -611,7 +641,7 @@ def _vehicle(positions: Sequence[dict[str, Any]], key: TripKey, route_id: str) -
             _num(vp.get("speed")),
             ts,
             realtime._strip(_gid(rel.get("stop")), key.prefix),
-            _STATUS.get(rel.get("status")),
+            _STATUS.get(_str(rel.get("status"))),
         )
     return best
 
@@ -632,7 +662,8 @@ def parse_trip(trip: Any, key: TripKey, positions: Sequence[dict[str, Any]] | No
     calls = trip.get("stoptimesForDate")
     calls = [c for c in calls if isinstance(c, dict)] if isinstance(calls, list) else []
     calls = calls[: realtime.MAX_STOP_UPDATES]
-    ends = _ends(calls)
+    ends, starts = _ends(calls), _starts(calls)
+    more["starts"] = starts
     if not any(c.get("realtime") is True or c.get("realtimeState") == "CANCELED" for c in calls):
         return TripResult(None, None, ends, **more)
     trip_id = realtime._strip(key.gtfs_id, key.prefix)
@@ -644,34 +675,66 @@ def parse_trip(trip: Any, key: TripKey, positions: Sequence[dict[str, Any]] | No
     return TripResult(tu, _vehicle(_positions(trip) if positions is None else positions, key, route_id), ends, **more)
 
 
-def _ends(calls: list[dict[str, Any]]) -> int | None:
-    """The latest time of the calls: realtimeArrival and -Departure are the
-    scheduled times on a call without realtime data."""
+def _times(calls: list[dict[str, Any]]) -> list[int]:
+    """The calls' times: realtimeArrival and -Departure are the scheduled
+    times on a call without realtime data."""
     times = [
         _epoch(_int(c.get("serviceDay")), _int(c.get(f)))
         for c in calls
         for f in ("realtimeArrival", "realtimeDeparture")
     ]
-    return max((t for t in times if t is not None), default=None)
+    return [t for t in times if t is not None]
+
+
+def _ends(calls: list[dict[str, Any]]) -> int | None:
+    """The latest time of the calls."""
+    return max(_times(calls), default=None)
+
+
+def _starts(calls: list[dict[str, Any]]) -> int | None:
+    """The earliest time of the calls."""
+    return min(_times(calls), default=None)
 
 
 def _data(doc: Any) -> dict[str, Any]:
+    """An answer's data; any GraphQL error is a ValueError."""
+    return _alias_data(doc, ())[0]
+
+
+def _alias_data(doc: Any, aliases: Sequence[str]) -> tuple[dict[str, Any], set[str]]:
+    """An aliased answer's data, and the aliases its GraphQL errors name.
+
+    OTP answers an error in one alias (a DataFetchingException for a trip
+    or date it cannot serve) with that alias null and the error's path
+    beginning with it: only that alias has no answer. An error whose path
+    names none of aliases (a validation error has no path) leaves the
+    whole answer untrusted: ValueError."""
     if not isinstance(doc, dict):
         raise ValueError("answer is not an object")
-    if doc.get("errors"):
-        first = doc["errors"][0] if isinstance(doc["errors"], list) and doc["errors"] else doc["errors"]
-        msg = first.get("message") if isinstance(first, dict) else first
-        raise ValueError(f"GraphQL error: {str(msg)[:200]}")
+    failed: set[str] = set()
+    errors = doc.get("errors")
+    if errors:
+        known = set(aliases)
+        for err in errors if isinstance(errors, list) else [errors]:
+            path = err.get("path") if isinstance(err, dict) else None
+            head = path[0] if isinstance(path, list) and path else None
+            if isinstance(head, str) and head in known:
+                failed.add(head)
+                continue
+            msg = err.get("message") if isinstance(err, dict) else err
+            raise ValueError(f"GraphQL error: {str(msg)[:200]}")
     data = doc.get("data")
     if not isinstance(data, dict):
         raise ValueError("answer without data")
-    return data
+    return data, failed
 
 
 def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResult | None]:
     """Per trip of build_query(trips): its TripResult, or None when the
-    planner does not know the trip (a null alias). Any GraphQL error or a
-    missing alias is a ValueError: the whole answer is not trusted.
+    planner does not know the trip (a null alias); a trip a GraphQL error
+    names by its alias is not in the result (no answer, _alias_data). Any
+    other GraphQL error or a missing alias is a ValueError: the whole
+    answer is not trusted.
 
     A vehicle is looked for on every alias's pattern, not only on its
     trip's own: a trip the realtime data changed has a realtime pattern
@@ -681,10 +744,12 @@ def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResu
     its trip, and goes to one live run of it (_one_run). A trip still
     without one there is on its route's scheduled patterns
     (mavplusz_rt_pattern.json): needs_route_vehicles, add_vehicles."""
-    data = _data(doc)
+    data, failed = _alias_data(doc, [f"t{i}" for i in range(len(trips))])
     raw: list[tuple[TripKey, Any]] = []
     for i, key in enumerate(trips):
         alias = f"t{i}"
+        if alias in failed:
+            continue
         if alias not in data:
             raise ValueError(f"answer without {alias}")
         raw.append((key, data[alias]))

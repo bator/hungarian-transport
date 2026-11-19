@@ -486,14 +486,22 @@ class TrainMap(dict):
         self.removed: dict[str, set[int]] = {}
         # False: no calendar read (none in the zip, or over the caps).
         self.calendar = False
+        # The first and the last day any row of the calendar names (every
+        # service's): a date outside is one it says nothing of.
+        self.first: int | None = None
+        self.last: int | None = None
 
     def runs(self, trip_id: str, date: str) -> bool | None:
         """Whether the trip runs on date (YYYYMMDD) by the calendar; None
-        when that is not known (no calendar, a trip or date it lacks)."""
+        when that is not known (no calendar, a trip it lacks, a date outside
+        the calendar's first..last day: a copy kept from an older download
+        knows nothing of today)."""
         svc = self.service.get(trip_id)
         if not self.calendar or svc is None or not (len(date) == 8 and date.isdigit()):
             return None
         day = int(date)
+        if self.first is None or self.last is None or not self.first <= day <= self.last:
+            return None
         if day in self.removed.get(svc, ()):
             return False
         if day in self.added.get(svc, ()):
@@ -533,26 +541,32 @@ def _read_calendar(zf: zipfile.ZipFile, trains: TrainMap) -> None:
     weekly: dict[str, list[tuple[int, int, int]]] = {}
     added: dict[str, set[int]] = {}
     removed: dict[str, set[int]] = {}
+    days: list[int] = []
     for name, real in members:
         for row in gtfs_feed.csv_rows(zf, real):
             rows += 1
             if rows > MAX_CALENDAR_ROWS:
                 return
             svc = row.get("service_id") or ""
-            if svc not in wanted:
-                continue
             if name == "calendar.txt":
                 first, last = _day(row.get("start_date") or ""), _day(row.get("end_date") or "")
                 if first is None or last is None:
+                    continue
+                days += (first, last)
+                if svc not in wanted:
                     continue
                 bits = sum(1 << i for i, wd in enumerate(_WEEKDAYS) if row.get(wd) == "1")
                 weekly.setdefault(svc, []).append((bits, first, last))
             else:
                 day = _day(row.get("date") or "")
                 kind = row.get("exception_type")
-                if day is not None and kind in ("1", "2"):
+                if day is None or kind not in ("1", "2"):
+                    continue
+                days.append(day)
+                if svc in wanted:
                     (added if kind == "1" else removed).setdefault(svc, set()).add(day)
     trains.weekly, trains.added, trains.removed = weekly, added, removed
+    trains.first, trains.last = (min(days), max(days)) if days else (None, None)
     trains.calendar = True
 
 
@@ -760,6 +774,10 @@ class RealtimeHub:
         # time, so cards polling together share it.
         self._mav_cache: dict[tuple[str, str], _MavAnswer] = {}
         self._mav_lock = asyncio.Lock()
+        # Per (trip, date) whose vehicle a round is asking its route for,
+        # outside _mav_lock (_mavplusz): done when that request is. Another
+        # card's round answered from the cache meanwhile waits for it.
+        self._mav_vehicle_waits: dict[tuple[str, str], asyncio.Future[None]] = {}
         # Per (route, date): (monotonic expiry, its trip ids or None).
         self._mav_route_cache: dict[tuple[str, str], tuple[float, tuple[str, ...] | None]] = {}
         self._mav_retry_at = -1e18
@@ -965,23 +983,43 @@ class RealtimeHub:
         train numbers to the static feed's (_trains, the map the feeds are
         matched with), then the planner's answer for those and the requested
         trip ids. Its jbb feeds are read only when the planner failed (an
-        error, the rate limit, its backoff), knew none of the trips, left a
-        route + start request unresolved, did not answer every trip of a
-        train (cut, or none known), the source's train numbers are not
-        loaded, or a request has neither a trip id, a route + start nor a
-        train on a feed matching some other way. Other sources as in
-        query()."""
+        error, the rate limit, its backoff) with no answer cached or kept,
+        knew none of the trips, gave no answer for a trip id this time,
+        left a route + start request unresolved, did not answer every trip
+        of a train (cut, or none known), the source's train numbers are
+        not loaded or run none of a train's trips that day, or a request
+        has neither a trip id, a route + start nor a train on a feed
+        matching some other way. Other sources as in query()."""
         by_trip = "trip" in cfg.match
         by_route = "route_start" in cfg.match
         by_train = "train" in cfg.match
         mav_idx = [i for i, src in enumerate(cfg.sources) if src.mavplusz]
         dates = [mavplusz.service_date(r.get("date"), now) for r in trips]
+        # The whole planner round, the wait for _mav_lock and a cold static
+        # feed's download (the train numbers) included: past it the jbb
+        # feeds answer. A request is begun only with half of it left or
+        # more (_mav_post, PLANNER_MIN_SHARE), so one cut by it did hang.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + PLANNER_TIMEOUT
         # Train number -> the static feed's trip ids, per source: the map the
         # feeds are matched with (cached for hours, kept through a failed
-        # refresh), so a cold one is loaded once for both paths.
+        # refresh), so a cold one is loaded once for both paths. Not loaded
+        # within the round (a slow download after a restart): the trains are
+        # matched on the feeds, which wait for the same download (_cached),
+        # rather than the round starting only after it.
         maps: dict[int, TrainMap | None] = {}
         if by_train and any(r.get("train") for r in trips):
-            maps = dict(zip(mav_idx, await asyncio.gather(*(self._trains(cfg.sources[i]) for i in mav_idx))))
+            loads = {i: asyncio.ensure_future(self._trains(cfg.sources[i])) for i in mav_idx}
+            try:
+                _done, late_maps = await asyncio.wait(loads.values(), timeout=max(0.0, deadline - loop.time()))
+            finally:
+                for task in loads.values():
+                    # Only this wait: the download goes on (_cached shields it).
+                    if not task.done():
+                        task.cancel()
+            if late_maps:
+                _LOGGER.debug("Realtime static feeds of %s not loaded within %s s", feed_id, PLANNER_TIMEOUT)
+            maps = {i: task.result() for i, task in loads.items() if task not in late_maps}
         # A train without a date is today's run or last night's still on its
         # way (_find_trip): every trip id of its number on both days, but
         # for the ones the static calendar says do not run that day. The
@@ -1001,19 +1039,24 @@ class RealtimeHub:
                 ]
                 if keys:
                     train_keys[i, n] = keys
-        # Route + start -> the planner's candidate trips, per source.
+        # Route + start -> the planner's candidate trips, per source (not a
+        # route that is only the prefix: no such route, asked or not).
         route_keys: dict[tuple[int, int], mavplusz.RouteKey] = {}
         if by_route:
             for i in mav_idx:
                 prefix = cfg.sources[i].prefix
                 for n, r in enumerate(trips):
-                    if r.get("route") and r.get("start") is not None:
-                        route_keys[i, n] = mavplusz.RouteKey(prefix + _strip(str(r["route"]), prefix), dates[n], prefix)
-        # The whole planner round, the wait for _mav_lock included: past it
-        # the jbb feeds answer. A request is begun only with half of it left or more
-        # (_mav_post, PLANNER_MIN_SHARE), so one cut by it did hang.
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + PLANNER_TIMEOUT
+                    route = _strip(str(r.get("route") or ""), prefix)
+                    if route and r.get("start") is not None:
+                        route_keys[i, n] = mavplusz.RouteKey(prefix + route, dates[n], prefix)
+
+        def trip_key(i: int, n: int) -> mavplusz.TripKey | None:
+            """trips[n]'s trip id for source i, None without one (or one
+            that is only the prefix, "1:": no trip, asked or not)."""
+            r, prefix = trips[n], cfg.sources[i].prefix
+            if not (by_trip and r.get("trip_id") and _strip(r["trip_id"], prefix)):
+                return None
+            return mavplusz.TripKey(mavplusz.gtfs_id(r["trip_id"], prefix), dates[n], prefix)
 
         async def bounded(coro: Coroutine[Any, Any, Any]) -> Any:
             left = deadline - loop.time()
@@ -1057,12 +1100,7 @@ class RealtimeHub:
         named: set[mavplusz.TripKey] = set()
         by_id: list[mavplusz.TripKey] = []
         for i in mav_idx:
-            prefix = cfg.sources[i].prefix
-            keys = [
-                mavplusz.TripKey(mavplusz.gtfs_id(r["trip_id"], prefix), dates[n], prefix)
-                for n, r in enumerate(trips)
-                if by_trip and r.get("trip_id")
-            ]
+            keys = [k for k in (trip_key(i, n) for n in range(len(trips))) if k is not None]
             named.update(keys)
             by_id += keys
             named.update(k for n, r in enumerate(trips) if r.get("date") for k in train_keys.get((i, n), ()))
@@ -1130,10 +1168,13 @@ class RealtimeHub:
             )
 
         def needs_feeds(i: int, n: int) -> bool:
-            """trips[n] is matched on source i's feeds: a route + start the
-            planner did not resolve, a train whose trips it did not all
-            answer or whose numbers are not loaded (the feeds then match
-            it as before, the static map being the same), or a request with
+            """trips[n] is matched on source i's feeds: a trip id with no
+            answer this round (cut, refused, or an error the planner gave
+            for it alone) and none kept, a route + start the planner did
+            not resolve, a train whose trips it did not all answer, whose
+            numbers are not loaded or whose trips the static calendar runs
+            on neither day (the feeds then match it as before, the static
+            map being the same, its calendar unread), or a request with
             neither a trip id nor a route + start nor a train on a feed
             matching some other way. A trip id the planner lacks among ones
             it knows is not, nor a train number the static feed lacks (the
@@ -1141,10 +1182,14 @@ class RealtimeHub:
             r = trips[n]
             if covered(i, n):
                 return False
+            k = trip_key(i, n)
+            if k is not None and answered is not None and k not in answered:
+                return True
             if (i, n) in route_keys or (i, n) in train_keys:
                 return True
             if by_train and r.get("train"):
-                return not maps.get(i)
+                numbers = maps.get(i)
+                return not numbers or bool(numbers.get(_train_number(r["train"])))
             return not (by_trip and r.get("trip_id")) and bool(cfg.match - {"trip", "route_start"})
 
         # A source the planner had nothing to ask of (no train of the call
@@ -1260,10 +1305,19 @@ class RealtimeHub:
         request of at most MAX_TRIPS_PER_REQUEST trips. A group (a train's
         trips) goes in whole or not at all, the least recently asked groups
         first, so every card's trips get their turn on a board of more; a
-        key left for a later request has its last answer while it is kept
-        (MAV_STALE_INTERVALS), else it is not in the result. None when the
-        request is not made (the rate limit, the backoff after a failure)
-        or fails: the caller reads the jbb feeds."""
+        key left for a later request, or with no answer this time (the
+        request not made, failed, or an error for that trip alone), has its
+        last answer while it is kept (MAV_STALE_INTERVALS), else it is not
+        in the result. None when there is nothing to give at all: the
+        caller reads the jbb feeds (for the keys missing, too).
+
+        The vehicles of the trips answered are asked after _mav_lock is
+        released (_mav_vehicles), so other cards' trip requests do not wait
+        for them; a card whose answers came from the cache meanwhile waits
+        for that request (_mav_vehicle_waits), within its round."""
+        fetched: dict[mavplusz.TripKey, _MavAnswer] = {}
+        results: dict[mavplusz.TripKey, mavplusz.TripResult | None] | None = None
+        mine: asyncio.Future[None] | None = None
         async with self._mav_lock:
             mono = self._monotonic()
             for k in [k for k, a in self._mav_cache.items() if a.keep <= mono]:
@@ -1282,54 +1336,113 @@ class RealtimeHub:
                     # Never asked (or so long ago it is gone) is the oldest.
                     asked = [self._mav_cache[(k.gtfs_id, k.date)].asked for k in due if (k.gtfs_id, k.date) in self._mav_cache]
                     waiting.append((min(asked) if len(asked) == len(due) else -1e18, order, due))
-            if not waiting:
-                return out
-            waiting.sort(key=lambda w: (w[0], w[1]))
-            cap = mavplusz.MAX_TRIPS_PER_REQUEST
-            todo: dict[mavplusz.TripKey, None] = {}
-            for _asked, _order, due in waiting:
-                new = [k for k in due if k not in todo]
-                if len(todo) + len(new) <= cap:
-                    todo.update(dict.fromkeys(new))
-                elif not todo:
-                    # One group over the whole cap: its first ones.
-                    todo.update(dict.fromkeys(new[:cap]))
-            keys = list(todo)
-            at = self._wall()
-            results = await self._mav_post(
-                mavplusz.build_query(keys), lambda doc: mavplusz.parse_response(doc, keys), deadline
-            )
-            if results is None:
-                return None
-            # The live trips on a realtime pattern have their vehicles on
-            # their routes' scheduled patterns: asked now, so a trip has its
-            # vehicle from its first answer on, in a request of their own
-            # whose failure leaves only the vehicles out.
-            results = await self._mav_vehicles(results, deadline)
-            mono = self._monotonic()
-            for k, res in results.items():
-                ttl = self._mav_ttl(k, res, at, interval)
-                stale = interval * MAV_STALE_INTERVALS if ttl == interval else 0
-                self._mav_cache[(k.gtfs_id, k.date)] = _MavAnswer(mono + ttl, mono + ttl + stale, mono, at, res)
-                out[k] = (at, res)
-            if len(self._mav_cache) > MAX_MAV_ANSWERS:
-                # The least recently asked go first, down to three quarters
-                # (not one at a time): a board's are asked every few polls.
-                ranked = sorted(self._mav_cache, key=lambda c: self._mav_cache[c].asked)
-                for c in ranked[: len(ranked) - MAX_MAV_ANSWERS * 3 // 4]:
-                    del self._mav_cache[c]
-            for _asked, _order, due in waiting:
-                for k in due:
-                    hit = self._mav_cache.get((k.gtfs_id, k.date))
-                    if k not in out and hit is not None:
-                        out[k] = (hit.at, hit.result)
-            return out
+            if waiting:
+                waiting.sort(key=lambda w: (w[0], w[1]))
+                cap = mavplusz.MAX_TRIPS_PER_REQUEST
+                todo: dict[mavplusz.TripKey, None] = {}
+                for _asked, _order, due in waiting:
+                    new = [k for k in due if k not in todo]
+                    if len(todo) + len(new) <= cap:
+                        todo.update(dict.fromkeys(new))
+                    elif not todo:
+                        # One group over the whole cap: its first ones.
+                        todo.update(dict.fromkeys(new[:cap]))
+                keys = list(todo)
+                at = self._wall()
+                results = await self._mav_post(
+                    mavplusz.build_query(keys), lambda doc: mavplusz.parse_response(doc, keys), deadline
+                )
+                if results is not None:
+                    mono = self._monotonic()
+                    for k, res in results.items():
+                        ttl = self._mav_ttl(k, res, at, interval)
+                        stale = interval * MAV_STALE_INTERVALS if ttl == interval else 0
+                        entry = _MavAnswer(mono + ttl, mono + ttl + stale, mono, at, res)
+                        self._mav_cache[(k.gtfs_id, k.date)] = fetched[k] = entry
+                        out[k] = (at, res)
+                    if len(self._mav_cache) > MAX_MAV_ANSWERS:
+                        # The least recently asked go first, down to three
+                        # quarters (not one at a time): a board's are asked
+                        # every few polls.
+                        ranked = sorted(self._mav_cache, key=lambda c: self._mav_cache[c].asked)
+                        for c in ranked[: len(ranked) - MAX_MAV_ANSWERS * 3 // 4]:
+                            del self._mav_cache[c]
+                    needy = [k for k, res in results.items() if mavplusz.needs_route_vehicles(res, at)]
+                    if needy:
+                        mine = asyncio.get_running_loop().create_future()
+                        for k in needy:
+                            self._mav_vehicle_waits[(k.gtfs_id, k.date)] = mine
+                for _asked, _order, due in waiting:
+                    for k in due:
+                        hit = self._mav_cache.get((k.gtfs_id, k.date))
+                        if k not in out and hit is not None:
+                            out[k] = (hit.at, hit.result)
+                if results is None and not out:
+                    return None
+        if mine is not None and results is not None:
+            await self._mav_vehicles_after(results, fetched, out, mine, deadline)
+        else:
+            await self._mav_vehicles_wait(out, deadline)
+        return out
+
+    async def _mav_vehicles_after(
+        self,
+        results: dict[mavplusz.TripKey, mavplusz.TripResult | None],
+        fetched: dict[mavplusz.TripKey, _MavAnswer],
+        out: dict[mavplusz.TripKey, tuple[float, mavplusz.TripResult | None]],
+        mine: asyncio.Future[None],
+        deadline: float | None,
+    ) -> None:
+        """The vehicles of this round's answers (_mav_vehicles), into out
+        and into their cache entries, unless a newer answer replaced one
+        meanwhile; then the cards waiting for them are woken."""
+        try:
+            got = await self._mav_vehicles(results, deadline)
+            for k, res in got.items():
+                if res is results.get(k) or k not in fetched:
+                    continue
+                entry = fetched[k]
+                ck = (k.gtfs_id, k.date)
+                if self._mav_cache.get(ck) is entry:
+                    self._mav_cache[ck] = entry._replace(result=res)
+                out[k] = (entry.at, res)
+        finally:
+            for ck in [ck for ck, fut in self._mav_vehicle_waits.items() if fut is mine]:
+                del self._mav_vehicle_waits[ck]
+            if not mine.done():
+                mine.set_result(None)
+
+    async def _mav_vehicles_wait(
+        self, out: dict[mavplusz.TripKey, tuple[float, mavplusz.TripResult | None]], deadline: float | None
+    ) -> None:
+        """Answers of out from the cache whose vehicle another round is
+        asking for right now: wait for that request (VEHICLE_TIMEOUT at
+        most, never past the round's deadline after VEHICLE_MARGIN), then
+        take their cache entries again."""
+        waits = {
+            k: self._mav_vehicle_waits[(k.gtfs_id, k.date)]
+            for k, (_at, res) in out.items()
+            if (k.gtfs_id, k.date) in self._mav_vehicle_waits and res is not None and res.vehicle is None
+        }
+        if not waits:
+            return
+        timeout = VEHICLE_TIMEOUT
+        if deadline is not None:
+            timeout = min(timeout, deadline - asyncio.get_running_loop().time() - VEHICLE_MARGIN)
+        if timeout <= 0:
+            return
+        await asyncio.wait(set(waits.values()), timeout=timeout)
+        for k in waits:
+            hit = self._mav_cache.get((k.gtfs_id, k.date))
+            if hit is not None:
+                out[k] = (hit.at, hit.result)
 
     async def _mav_vehicles(
         self, results: dict[mavplusz.TripKey, mavplusz.TripResult | None], deadline: float | None
     ) -> dict[mavplusz.TripKey, mavplusz.TripResult | None]:
         """results with the vehicles of the trips mavplusz.needs_route_vehicles,
-        from one request for their routes (the caller holds _mav_lock).
+        from one request for their routes (outside _mav_lock: other cards'
+        trip requests do not wait for it).
 
         Never at the delays' cost: results come back as they are, with no
         planner backoff and no outage logged, when the request is not made
@@ -1337,8 +1450,9 @@ class RealtimeHub:
         backoff or token share, too little of the round left) or fails (an
         error, an answer over VEHICLE_MAX_BYTES, VEHICLE_TIMEOUT). A failure
         is logged at debug level once until a request answers again."""
+        wall = self._wall()
         routes = self._route_sizes.pick(
-            [res.route for res in results.values() if mavplusz.needs_route_vehicles(res)]
+            [res.route for res in results.values() if mavplusz.needs_route_vehicles(res, wall)]
         )
         if not routes or self._monotonic() < self._vehicle_retry_at:
             return results
