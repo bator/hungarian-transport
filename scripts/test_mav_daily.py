@@ -393,6 +393,12 @@ with tempfile.TemporaryDirectory() as tmp_name:
     check("mav_shrink_guard.py with MAV_ALLOW_SHRINK=true takes the smaller index",
           done.returncode == 0 and "accepted" in done.stdout, repr((done.returncode, done.stdout, done.stderr)))
 
+    _far = (datetime.now(timezone.utc) + site.MAX_FEED_AHEAD + timedelta(days=2)).strftime("%Y%m%d")
+    _near = (datetime.now(timezone.utc) + site.MAX_FEED_AHEAD - timedelta(days=2)).strftime("%Y%m%d")
+    rc, out, err, outputs = run_site(tmp / "near-ahead", index=index_bytes(feed=_near + ".M2ChangeID"),
+                                     st=stats(_near + ".M2ChangeID"))
+    check("a feed dated a little under MAX_FEED_AHEAD ahead makes a site", rc == 0 and outputs.get("deploy") == "true",
+          repr((rc, out, err)))
     refusals = {
         "another schema": {"index": index_bytes(schema=site.mav_index.SCHEMA + 1)},
         "statistics of another feed": {"st": stats("20261031.M2ChangeID")},
@@ -409,6 +415,10 @@ with tempfile.TemporaryDirectory() as tmp_name:
                                                       "st": stats("20261101\n::x")},
         "not a commit": {"commit": "main"},
         "not gzip": {"index": b"<html>"},
+        # A feed_end_date as the version would outrank every correct feed
+        # after it in installs.
+        "a feed dated more than MAX_FEED_AHEAD ahead": {"index": index_bytes(feed=_far + ".M2ChangeID"),
+                                                        "st": stats(_far + ".M2ChangeID")},
     }
     for label, kw in refusals.items():
         ws = tmp / f"refuse-{len(label)}-{label[:6].replace(' ', '_')}"
@@ -786,20 +796,27 @@ with tempfile.TemporaryDirectory() as tmp_name:
     due_step = step_script("Timetables due")
     for force in ("true", "false"):
         (ws / "pt-args.txt").unlink(missing_ok=True)
-        done, outputs = bash(due_step, ws, FORCE=force, **gh_env)
+        done, outputs = bash(due_step, ws, FORCE=force, TAG="v1.10.21", **gh_env)
         args = (ws / "pt-args.txt").read_text().split() if (ws / "pt-args.txt").exists() else []
+
+        def after(flag: str, _args: list[str] = args) -> list[str]:
+            return _args[_args.index(flag) + 1:_args.index(flag) + 2] if flag in _args else []
+
         check(f"the due step runs the workflow commit's script with the stable release's schema, asks the"
-              f" repository's own Pages site, --force {force}, and passes due, indexes and schema on",
+              f" repository's own Pages site, --force {force}, compares with the stable release's zip, writes"
+              " its feeds for the parts, and passes due, indexes and schema on",
               done.returncode == 0 and outputs.get("due") == "true" and outputs.get("indexes") == "volan,city"
-              and outputs.get("schema") == "28" and args[:1] == ["due"]
-              and args[args.index("--schema") + 1:args.index("--schema") + 2] == ["28"]
-              and args[args.index("--live-url") + 1:args.index("--live-url") + 2]
-              == ["https://bator.github.io/hungarian-transport"]
-              and args[args.index("--force") + 1:args.index("--force") + 2] == [force]
-              if "--live-url" in args and "--force" in args and "--schema" in args else False,
+              and outputs.get("schema") == "28" and args[:1] == ["due"] and after("--schema") == ["28"]
+              and after("--live-url") == ["https://bator.github.io/hungarian-transport"]
+              and after("--force") == [force]
+              and after("--release-url") == ["https://github.com/Bator/hungarian-transport/releases/download/v1.10.21/"
+                                             "hungarian-transport-frontend.zip"]
+              and after("--release-out") == [f"{ws / 'runner-temp'}/release-feeds.json"],
               repr((done.returncode, done.stderr, args, outputs)))
+    check("the due step takes the stable release's tag from the stable step",
+          "TAG: ${{ steps.stable.outputs.tag }}" in step(job("timetables"), "- name: Timetables due"))
     ws = tools_ws("wf-due-noschema", schema=None)
-    done, outputs = bash(due_step, ws, FORCE="false", **gh_env)
+    done, outputs = bash(due_step, ws, FORCE="false", TAG="v1.10.21", **gh_env)
     check("a stable release whose gtfs_compact.py names no schema: an error, nothing due",
           done.returncode == 1 and "names no INDEX_SCHEMA" in done.stdout and "due" not in outputs,
           repr((done.returncode, done.stdout, outputs)))
@@ -858,9 +875,16 @@ with tempfile.TemporaryDirectory() as tmp_name:
           and (ws / "city-env.txt").read_text() == "- ", repr((done.returncode, done.stdout, outputs)))
     ok_args = tmp / "wf-tt-ok" / "pt-args.txt"
     args = ok_args.read_text().split() if ok_args.exists() else []
-    check("the part is checked against the stable release's schema, by the workflow commit's script",
+    check("the part is checked against the stable release's schema, by the workflow commit's script, and"
+          " records the release's feeds the due step wrote",
           args[:1] == ["part"] and "--schema" in args and args[args.index("--schema") + 1] == "28"
-          and '.pages-tools/scripts/pages_timetables.py part --schema "$SCHEMA"' in build_tt, repr(args))
+          and '.pages-tools/scripts/pages_timetables.py part --schema "$SCHEMA"' in build_tt
+          and args[args.index("--release-feeds") + 1:args.index("--release-feeds") + 2]
+          == [f"{tmp / 'wf-tt-ok' / 'runner-temp'}/release-feeds.json"] if "--release-feeds" in args else False,
+          repr(args))
+    check("the Pages build takes no feed over plain http (HUNGARIAN_TRANSPORT_HTTPS_ONLY in the build step only)",
+          'HUNGARIAN_TRANSPORT_HTTPS_ONLY: "1"' in step(job("timetables"), "- name: Build the Volán and city indexes")
+          and TEXT.count("HUNGARIAN_TRANSPORT_HTTPS_ONLY: ") == 1)
     ws = tt_ws("city-due")
     done, outputs = bash(build_tt, ws, DUE_INDEXES="city", SCHEMA="28", ALLOW_MISSING_VAR="", **gh_env)
     check("only the due index is built: city alone, the Volán builder never runs",
@@ -1137,16 +1161,29 @@ city_secrets = [
     "MOBILITY_DATABASE_REFRESH_TOKEN: ${{ secrets.MOBILITY_DATABASE_REFRESH_TOKEN }}",
     "TRANSITLAND_API_KEY: ${{ secrets.TRANSITLAND_API_KEY }}",
 ]
+sign_step = step(site_job, "- name: Sign the manifest")
 check("the MÁV secrets reach only the MÁV build step's env (and the job's yes/no flag), the city feeds'"
-      " only the timetables build step's",
+      " only the timetables build step's, the signing key only the site job's signing step",
       sorted(secret_lines) == sorted([
           "MAV_SECRETS: ${{ secrets.MAV_GTFS_USER != '' && secrets.MAV_GTFS_PASSWORD != '' }}",
           "MAV_GTFS_USER: ${{ secrets.MAV_GTFS_USER }}",
           "MAV_GTFS_PASSWORD: ${{ secrets.MAV_GTFS_PASSWORD }}",
           *city_secrets,
+          "PAGES_SIGNING_KEY: ${{ secrets.PAGES_SIGNING_KEY }}",
       ]) and "secrets.MAV_GTFS" in step(build, "- name: MÁV GTFS, pfaedle, build and audit")
       and all(ln in step(tt_job, "- name: Build the Volán and city indexes") for ln in city_secrets)
-      and "secrets." not in site_job and "secrets.MAV" not in tt_job, repr(secret_lines))
+      and "secrets." not in site_job.replace(sign_step, "") and "secrets.MAV" not in tt_job
+      and re.search(r"^        env:\n          PAGES_SIGNING_KEY: \$\{\{ secrets\.PAGES_SIGNING_KEY \}\}\n        run:",
+                    sign_step, re.M) is not None, repr(secret_lines))
+site_steps = [ln.strip() for ln in site_job.splitlines() if re.match(r"^      - ", ln)]
+check("every deploy signs timetables.json: the signing step runs on every site to deploy, after the assembly"
+      " and before the upload, which waits for its success; it runs the checked-out sign_manifest.py on the site",
+      "if: steps.assemble.outputs.deploy == 'true'" in sign_step
+      and 'run: python3 scripts/sign_manifest.py sign --site "$RUNNER_TEMP/site"' in sign_step
+      and "if: steps.assemble.outputs.deploy == 'true' && steps.sign.outcome == 'success'" in upload
+      and site_steps.index("- name: Assemble the site") < site_steps.index("- name: Sign the manifest")
+      < next(i for i, ln in enumerate(site_steps) if "upload-pages-artifact" in ln)
+      and "id: sign" in sign_step and "continue-on-error" not in site_job, repr(site_steps))
 release_text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 check("the timetables build reads the release's variables for the Volán URL and the city guard",
       all(v in step(tt_job, "- name: Build the Volán and city indexes") for v in (

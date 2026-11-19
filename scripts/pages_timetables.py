@@ -11,9 +11,14 @@ site. The integration reads timetables.json
 
   timetables.json             format, schema, built_at, commit, and per
                               index (volan, city) its url, size, sha256,
-                              feed, built_at, trips, stops (city: operators)
-                              and shapes (dir, n, files: size and sha256 of
-                              every shard), or null without shapes
+                              feed, built_at, trips, stops (city: operators),
+                              release_feed (the feed of the latest stable
+                              release's index of that name when it was
+                              built, when known) and shapes (dir, n, files:
+                              size and sha256 of every shard), or null
+                              without shapes
+  timetables.json.sig         ed25519 signature of timetables.json
+                              (scripts/sign_manifest.py, the site job)
   volan-index.json.gz, city-index.json.gz
                               the indexes byte for byte as
                               build_volan_index.py / build_city_index.py
@@ -28,13 +33,19 @@ with the latest stable release's code, and passes that release's
 gtfs_compact.INDEX_SCHEMA), not this checkout's:
 
   due      (--live-url URL | --live-dir DIR) --schema N [--force true|false]
+           [--release-url URL | --release-file ZIP] [--release-out FILE]
            [--now ISO] [--github-output FILE]
            Prints due=true|false and indexes=NAME,... (the due ones). Both
            are due when the published timetables.json is missing or does
            not read, names another format or a schema other than N, and
            with --force true; else each index on its own, when it is not
-           listed or was built DUE_AFTER ago or longer (or names no build
-           time).
+           listed, was built DUE_AFTER ago or longer (or names no build
+           time), or names another release_feed than the feed of the
+           release's index of its name (the latest stable release's
+           frontend zip, of which only the zip's directory and the heads
+           of its indexes are read; a release that cannot be read leaves
+           this rule out with a warning). --release-out: those feeds as
+           JSON, {"indexes": {name: feed}}, for part.
   baseline (--live-url URL | --live-dir DIR) [--release-url URL |
            --release-file ZIP] --out DIR
            Puts each published index and its shapes, verified against the
@@ -43,10 +54,12 @@ gtfs_compact.INDEX_SCHEMA), not this checkout's:
            (the latest stable release), when it has one. Never fails for a
            missing baseline: the builders then compare with nothing.
   part     --index INDEX.json.gz --out DIR --schema N [--baseline OLD.json.gz]
-           [--now ISO]
-           Checks an index this run built (schema N, a feed, every shapes
-           shard), copies it and its shapes folder into DIR and records its
-           manifest entry and N in DIR/part.json (built_at now). Exit 1 for
+           [--release-feeds FILE] [--now ISO]
+           Checks an index this run built (schema N, a feed, no feed dated
+           more than MAX_FEED_AHEAD after now, every shapes shard), copies
+           it and its shapes folder into DIR and records its manifest entry
+           and N in DIR/part.json (built_at now; release_feed the feed
+           --release-feeds, due's --release-out, names for it). Exit 1 for
            an index that does not hold up. With --baseline, a notice says
            when the content (index_digest.py) is the baseline's.
   assemble --out SITE --commit SHA (--live-url URL | --live-dir DIR)
@@ -77,6 +90,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import http.client
+import io
 import json
 import re
 import shutil
@@ -99,6 +113,9 @@ import mav_pages_site as mav_site  # noqa: E402
 # (the schema of the code that builds the indexes is passed as --schema).
 from gtfs_compact import INDEX_SCHEMA, UA, shapes_stem  # noqa: E402
 from index_digest import digest  # noqa: E402
+# The integration's own reading of an index head and a feed's date (on
+# sys.path since gtfs_compact put the package there).
+from served_index import HEAD_BYTES, feed_date, head_feed  # noqa: E402
 
 MANIFEST_FORMAT = 1
 MANIFEST_NAME = "timetables.json"
@@ -121,6 +138,15 @@ MAX_SHARDS = 256
 # 35 MB, mav_pages_site.MAX_SITE_BYTES the whole of it).
 MAX_MAV_FILE = 300 * 1024 * 1024
 MAX_RELEASE_ZIP = 200 * 1024 * 1024
+# The release zip's directory and its indexes' heads are read by Range
+# requests of this size (release_feeds), at most this many of them: a few
+# requests of a few hundred kilobytes, not the whole zip, twice a day.
+RANGE_CHUNK = 256 * 1024
+MAX_RANGE_REQUESTS = 64
+# An index whose feed (a city index: any operator's) names a date further
+# ahead is not published (part); mav_pages_site.py holds the MÁV index to
+# the same limit.
+MAX_FEED_AHEAD = mav_site.MAX_FEED_AHEAD
 FETCH_TIMEOUT = 120
 SETTLE_S = 30.0
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
@@ -139,6 +165,35 @@ class FetchError(SiteError):
 class MismatchError(SiteError):
     """A fetched file is not the size or sha256 its manifest names: maybe
     a deploy that Pages serves only partly yet, so worth one more try."""
+
+
+class NoRanges(FetchError):
+    """The server answered a Range request with something else than the
+    range: the whole file, say."""
+
+
+class _NotHttps(urllib.error.URLError):
+    """A redirect to another scheme than https."""
+
+
+class _HttpsRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to another https URL. urllib's own handler
+    follows one to plain http as well, and the URL of the last answer
+    (geturl) does not tell whether a hop on the way was http: an
+    unauthenticated answer there could send the request on to any https
+    host."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlparse(newurl).scheme != "https":
+            fp.close()
+            raise _NotHttps("redirected away from https")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _urlopen(req: urllib.request.Request, timeout: float = FETCH_TIMEOUT):
+    """urlopen for the live site and the release: https only, every redirect
+    included."""
+    return urllib.request.build_opener(_HttpsRedirect()).open(req, timeout=timeout)
 
 
 def utc_text(when: datetime) -> str:
@@ -200,7 +255,7 @@ class Source:
         url = self.url + urllib.parse.quote(name)
         req = urllib.request.Request(url, headers={"Cache-Control": "no-cache", "User-Agent": UA})
         try:
-            with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as res:  # noqa: S310 - https only
+            with _urlopen(req) as res:
                 if not res.geturl().startswith("https://"):
                     raise FetchError(f"{name}: redirected away from https")
                 h = hashlib.sha256()
@@ -216,6 +271,8 @@ class Source:
             if err.code == 404:
                 return None
             raise FetchError(f"{name}: HTTP {err.code}") from None
+        except _NotHttps:
+            raise FetchError(f"{name}: redirected away from https") from None
         # http.client.HTTPException: a body cut short or a garbled answer.
         except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
             raise FetchError(f"{name}: {type(err).__name__}: {err}") from None
@@ -281,10 +338,26 @@ def shard_names(n: int) -> list[str]:
     return [f"{k:02d}.json.gz" for k in range(n)]
 
 
-def build_entry(index: Path, built_at: str, schema: int) -> dict:
+def far_feed(name: str, feed: str, now: datetime) -> str:
+    """Why an index's feed names a date more than MAX_FEED_AHEAD after now
+    (a city index: any operator's feed, "op:version;op:version"), as the
+    integration reads the date (served_index.feed_date); "" when none does."""
+    versions = [v for _op, sep, v in (p.partition(":") for p in feed.split(";")) if sep] if name == "city" \
+        else [feed]
+    limit = now.astimezone(timezone.utc).date() + MAX_FEED_AHEAD
+    for version in versions:
+        day = feed_date(version)
+        if day is not None and day > limit:
+            return (f"feed {version[:40]!r} is dated {day.isoformat()}, more than {MAX_FEED_AHEAD.days} days"
+                    " ahead")
+    return ""
+
+
+def build_entry(index: Path, built_at: str, schema: int, now: datetime | None = None) -> dict:
     """The manifest entry of an index this run built (its shapes folder next
     to it), refusing one not of schema (the index format of the code that
-    built it, which the release of that code reads)."""
+    built it, which the release of that code reads) and one whose feed is
+    dated more than MAX_FEED_AHEAD after now (far_feed; default built_at)."""
     name = next((k for k, v in INDEXES.items() if v == index.name), None)
     if name is None:
         raise SiteError(f"{index.name} is none of " + ", ".join(INDEXES.values()))
@@ -295,6 +368,9 @@ def build_entry(index: Path, built_at: str, schema: int) -> dict:
     # The feed goes into the manifest and the log, never a workflow command.
     if not isinstance(feed, str) or not feed or not feed.isprintable():
         raise SiteError(f"{index.name} names no feed")
+    far = far_feed(name, feed, now or parse_time(built_at) or datetime.now(timezone.utc))
+    if far:
+        raise SiteError(f"{index.name}: {far}; the published one stays")
     trips, stops = data.get("t"), data.get("s")
     if not isinstance(trips, list) or not trips or not isinstance(stops, list):
         raise SiteError(f"{index.name} has no trips")
@@ -378,12 +454,20 @@ def copy_entry(source: Source, entry: dict, out: Path, schema: int) -> None:
 
 # ---- due --------------------------------------------------------------------
 
-def due(live: dict | None, why: str, force: bool, now: datetime, schema: int) -> tuple[list[str], str]:
+def due(live: dict | None, why: str, force: bool, now: datetime, schema: int,
+        release: dict[str, str] | None = None) -> tuple[list[str], str]:
     """The indexes to build in this run (in INDEXES order), and why. One
     index that is due does not make the other one due: a city index whose
     guard refuses it for days must not rebuild and redeploy the Volán index
     on every run. What concerns the whole manifest (none, another format or
-    schema, the dispatch input) makes both due."""
+    schema, the dispatch input) makes both due.
+
+    release: name -> the feed of the latest stable release's index of that
+    name (release_feeds), None when it could not be read. An index is due
+    when its entry's release_feed is not that feed (or it has none): it was
+    built against another release's index, and installs of that release
+    refuse it (weekly_timetables.py). Its builders and guards are the new
+    release's too. An index the release lacks has nothing to compare."""
     if force:
         return list(INDEXES), "asked for by the workflow_dispatch input timetables"
     if live is None:
@@ -409,8 +493,15 @@ def due(live: dict | None, why: str, force: bool, now: datetime, schema: int) ->
         if age >= DUE_AFTER:
             names.append(name)
             reasons.append(f"the published {name} index was built {int(age.total_seconds() // 3600)} h ago")
+            continue
+        if release is not None and name in release and entry.get("release_feed") != release[name]:
+            names.append(name)
+            reasons.append(f"the published {name} index was built against "
+                           + ("another release's" if entry.get("release_feed") else "no release's")
+                           + f" {name} index, not the latest stable release's")
     if not names:
-        return [], f"both published indexes were built less than {DUE_AFTER} ago"
+        return [], (f"both published indexes were built less than {DUE_AFTER} ago"
+                    + ("" if release is None else ", against the latest stable release's"))
     return names, "; ".join(reasons)
 
 
@@ -450,27 +541,178 @@ def baseline_from_live(source: Source, out: Path) -> set[str]:
 
 
 def fetch_release(url: str, dest: Path) -> str:
-    """Download the release's frontend zip at url (https, redirects
-    allowed) to dest; "ok", or why not."""
+    """Download the release's frontend zip at url (https, redirects to https
+    only) to dest, at most MAX_RELEASE_ZIP bytes; "ok", or why not (dest
+    then removed)."""
     if not url.startswith("https://"):
         return f"not an https URL: {url}"
     req = urllib.request.Request(url, headers={"User-Agent": UA})
+    why = "ok"
     try:
-        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as res:  # noqa: S310 - https only
+        with _urlopen(req) as res:
             if not res.geturl().startswith("https://"):
-                return "redirected away from https"
-            got = 0
-            with dest.open("wb") as fh:
-                for chunk in iter(lambda: res.read(1 << 20), b""):
-                    got += len(chunk)
-                    if got > MAX_RELEASE_ZIP:
-                        return "larger than a release zip"
-                    fh.write(chunk)
+                why = "redirected away from https"
+            else:
+                got = 0
+                with dest.open("wb") as fh:
+                    for chunk in iter(lambda: res.read(1 << 20), b""):
+                        got += len(chunk)
+                        if got > MAX_RELEASE_ZIP:
+                            why = "larger than a release zip"
+                            break
+                        fh.write(chunk)
     except urllib.error.HTTPError as err:
-        return f"HTTP {err.code}"
+        why = f"HTTP {err.code}"
+    except _NotHttps:
+        why = "redirected away from https"
     except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
-        return f"{type(err).__name__}: {err}"
-    return "ok"
+        why = f"{type(err).__name__}: {err}"
+    if why != "ok":
+        dest.unlink(missing_ok=True)
+    return why
+
+
+# ---- the latest stable release's indexes ------------------------------------
+
+class _RangeFile(io.RawIOBase):
+    """The file at an https URL, read by Range requests (at most
+    MAX_RANGE_REQUESTS), for zipfile to read the release zip's directory
+    and the heads of its indexes without the rest. GitHub sends a release
+    download on to a signed URL of its storage: after the first answer,
+    that URL is asked directly. NoRanges when the server does not answer
+    with the range asked for."""
+
+    def __init__(self, url: str) -> None:
+        super().__init__()
+        self.url = url
+        self.pos = 0
+        self.requests = 0
+        self.size = 1
+        _, self.size = self._get(0, 0)
+        if self.size > MAX_RELEASE_ZIP:
+            raise FetchError(f"the release zip is {self.size} bytes, larger than a release zip")
+
+    def _get(self, start: int, end: int) -> tuple[bytes, int]:
+        """Bytes start..end (inclusive) and the file's size."""
+        self.requests += 1
+        if self.requests > MAX_RANGE_REQUESTS:
+            raise FetchError(f"more than {MAX_RANGE_REQUESTS} range requests")
+        req = urllib.request.Request(self.url, headers={"Range": f"bytes={start}-{end}", "User-Agent": UA,
+                                                        "Accept-Encoding": "identity"})
+        try:
+            with _urlopen(req) as res:
+                if not res.geturl().startswith("https://"):
+                    raise FetchError("redirected away from https")
+                if res.status != 206:
+                    raise NoRanges(f"HTTP {res.status} to a Range request")
+                got = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", res.headers.get("Content-Range") or "")
+                if got is None or int(got.group(1)) != start or not start <= int(got.group(2)) <= end:
+                    raise NoRanges(f"Content-Range {str(res.headers.get('Content-Range'))[:60]!r} for bytes"
+                                   f" {start}-{end}")
+                want = int(got.group(2)) - start + 1
+                body = res.read(want + 1)
+                self.url = res.geturl()
+        except urllib.error.HTTPError as err:
+            raise FetchError(f"HTTP {err.code}") from None
+        except _NotHttps:
+            raise FetchError("redirected away from https") from None
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
+            raise FetchError(f"{type(err).__name__}: {err}") from None
+        if len(body) != want:
+            raise FetchError(f"{len(body)} bytes in answer to a range of {want}")
+        return body, int(got.group(3))
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self.pos
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        base = {io.SEEK_SET: 0, io.SEEK_CUR: self.pos, io.SEEK_END: self.size}[whence]
+        if base + offset < 0:
+            raise OSError("seek before the start")
+        self.pos = base + offset
+        return self.pos
+
+    def readinto(self, buf) -> int:
+        n = min(len(buf), self.size - self.pos)
+        if n <= 0:
+            return 0
+        body, _size = self._get(self.pos, self.pos + n - 1)
+        buf[:n] = body
+        self.pos += n
+        return n
+
+
+def _member_feed(z: zipfile.ZipFile, info: zipfile.ZipInfo) -> str | None:
+    """The feed in the head of the index info names in z: its gzip unpacked
+    only up to the integration's HEAD_BYTES (served_index.read_feed)."""
+    unzip = zlib.decompressobj(wbits=31)
+    head = b""
+    pending = b""
+    with z.open(info) as fh:
+        while len(head) < HEAD_BYTES and not unzip.eof and head_feed(head) is None:
+            if not pending:
+                pending = fh.read(1 << 15)
+                if not pending:
+                    break
+            try:
+                head += unzip.decompress(pending, HEAD_BYTES - len(head))
+            except zlib.error:
+                return None
+            pending = unzip.unconsumed_tail
+    feed = head_feed(head)
+    return feed if isinstance(feed, str) and feed and feed.isprintable() else None
+
+
+def zip_feeds(z: zipfile.ZipFile) -> dict[str, str]:
+    """Name -> the feed of each index the release zip z has."""
+    members = {i.filename: i for i in z.infolist()}
+    feeds = {}
+    for name, file in INDEXES.items():
+        info = members.get(file)
+        if info is None or info.file_size > MAX_INDEX:
+            continue
+        feed = _member_feed(z, info)
+        if feed is not None:
+            feeds[name] = feed
+    return feeds
+
+
+def release_feeds(url: str | None = None, path: Path | None = None) -> dict[str, str]:
+    """Name -> feed of each index in the latest stable release's frontend
+    zip: the local zip at path, else the one at url, read by Range requests
+    (only its directory and the indexes' heads), the whole zip only when
+    the server does not answer ranges. Raises SiteError when the zip cannot
+    be read."""
+    if path is not None:
+        try:
+            with zipfile.ZipFile(path) as z:
+                return zip_feeds(z)
+        except (OSError, EOFError, zipfile.BadZipFile) as err:
+            raise SiteError(f"release zip: {err}") from None
+    if not url or not url.startswith("https://"):
+        raise SiteError(f"release zip: not an https URL: {url}")
+    try:
+        raw = _RangeFile(url)
+        with zipfile.ZipFile(io.BufferedReader(raw, RANGE_CHUNK)) as z:
+            feeds = zip_feeds(z)
+        print(f"release zip: its directory and index heads read in {raw.requests} range requests")
+        return feeds
+    except NoRanges as err:
+        print(f"release zip: {err}; downloading the whole zip")
+    except (FetchError, OSError, EOFError, zipfile.BadZipFile) as err:
+        raise SiteError(f"release zip: {err}") from None
+    with tempfile.TemporaryDirectory() as tmp:
+        zpath = Path(tmp) / "frontend.zip"
+        why = fetch_release(url, zpath)
+        if why != "ok":
+            raise SiteError(f"release zip: {why}")
+        return release_feeds(path=zpath)
 
 
 def baseline_from_release(zpath: Path, names: list[str], out: Path) -> set[str]:
@@ -537,13 +779,29 @@ def cmd_baseline(args: argparse.Namespace, source: Source) -> int:
 
 # ---- part -------------------------------------------------------------------
 
+def read_release_feeds(path: Path | None) -> dict[str, str]:
+    """due's --release-out file: name -> feed; {} without one that reads."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path is not None and path.is_file() else {}
+    except (OSError, ValueError):
+        return {}
+    indexes = data.get("indexes") if isinstance(data, dict) else None
+    if not isinstance(indexes, dict):
+        return {}
+    return {n: f for n, f in indexes.items()
+            if n in INDEXES and isinstance(f, str) and f and f.isprintable() and len(f) <= 4096}
+
+
 def cmd_part(args: argparse.Namespace, now: datetime) -> int:
     try:
-        entry = build_entry(args.index, utc_text(now), args.schema)
+        entry = build_entry(args.index, utc_text(now), args.schema, now)
     except (OSError, SiteError) as err:
         print(f"::warning title=Index not published::{args.index.name}: {err}")
         return 1
     name = next(k for k, v in INDEXES.items() if v == args.index.name)
+    release = read_release_feeds(args.release_feeds).get(name)
+    if release is not None:
+        entry["release_feed"] = release
     args.out.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(args.index, args.out / entry["url"])
     if entry["shapes"]:
@@ -561,7 +819,8 @@ def cmd_part(args: argparse.Namespace, now: datetime) -> int:
     part.setdefault("indexes", {})[name] = entry
     part_file.write_text(json.dumps(part, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print(f"{name}: {entry['size']} bytes, sha256 {entry['sha256'][:12]}, {entry['trips']} trips,"
-          f" {entry['stops']} stops, shapes {entry['shapes']['dir'] if entry['shapes'] else 'none'}")
+          f" {entry['stops']} stops, shapes {entry['shapes']['dir'] if entry['shapes'] else 'none'},"
+          f" release_feed {'unknown' if release is None else release[:80]}")
     if args.baseline is not None and args.baseline.is_file():
         try:
             same = digest(args.index) == digest(args.baseline)
@@ -803,8 +1062,9 @@ def timetables_attribution(indexes: dict[str, dict]) -> list[str]:
         ]
     if indexes:
         lines += [
-            f"{MANIFEST_NAME}",
-            "  The manifest of these indexes: per index its feed, size, sha256 and shapes shards.",
+            f"{MANIFEST_NAME}, {MANIFEST_NAME}.sig",
+            "  The manifest of these indexes: per index its feed, size, sha256 and shapes shards;",
+            "  and its ed25519 signature (base64), which the integration checks before it reads it.",
             "",
         ]
     return lines
@@ -960,6 +1220,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--schema", type=int, required=True,
                    help="the index schema of the code that builds them (its gtfs_compact.INDEX_SCHEMA)")
     p.add_argument("--force", default="false", choices=("true", "false", ""))
+    rel = p.add_mutually_exclusive_group()
+    rel.add_argument("--release-url", help="the latest stable release's frontend zip (https)")
+    rel.add_argument("--release-file", type=Path, help="as --release-url, a local zip")
+    p.add_argument("--release-out", type=Path, help="write the release's index feeds here (JSON), for part")
     p.add_argument("--github-output", type=Path)
 
     p = sub.add_parser("baseline", help="the published (or released) indexes for the builders' guards")
@@ -975,6 +1239,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--baseline", type=Path)
     p.add_argument("--schema", type=int, required=True, help="the index schema of the code that built it")
+    p.add_argument("--release-feeds", type=Path, help="due's --release-out: the release_feed to record")
 
     p = sub.add_parser("assemble", help="the whole Pages site")
     live(p)
@@ -1006,7 +1271,21 @@ def main(argv: list[str]) -> int:
             why = "HTTP 404" if state == "missing" else "ok"
         except FetchError as err:
             live_man, why = None, str(err)
-        names, reason = due(live_man, why, args.force == "true", now, args.schema)
+        release = None
+        if args.release_url or args.release_file is not None:
+            try:
+                release = release_feeds(args.release_url, args.release_file)
+            except SiteError as err:
+                print(f"::warning title=Release index not read::{str(err)[:300]}; the indexes are due by"
+                      " their age only in this run.")
+            else:
+                for name in INDEXES:
+                    print(f"latest stable release, {name} index: "
+                          + (f"feed {release[name][:120]}" if name in release else "none"))
+        if args.release_out is not None:
+            args.release_out.write_text(json.dumps({"indexes": release or {}}, ensure_ascii=False) + "\n",
+                                        encoding="utf-8")
+        names, reason = due(live_man, why, args.force == "true", now, args.schema, release)
         print(f"{'due: ' + ', '.join(names) if names else 'not due'}: {reason}")
         lines = f"due={'true' if names else 'false'}\nindexes={','.join(names)}\n"
         print(lines, end="")

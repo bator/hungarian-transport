@@ -13,10 +13,13 @@ name: Daily timetables (GitHub Pages)
 #
 # The Volán and city indexes are timetable data too, and releases are for
 # code: the timetables job rebuilds each of them here once a week (when the
-# published one is 6 days 12 hours old or missing; both when the manifest is
-# missing or of another schema, or the dispatch input timetables asks for
-# it) with the release's builders and guards, and the integration installs
-# them from the same site (weekly_timetables.py, by timetables.json). The
+# published one is 6 days 12 hours old or missing, or was built against
+# another release's index than the latest stable release's, its
+# release_feed; both when the manifest is missing or of another schema, or
+# the dispatch input timetables asks for it, as release.yml's does after a
+# stable release) with the release's builders and guards, and the
+# integration installs them from the same site (weekly_timetables.py, by
+# timetables.json and its signature timetables.json.sig). The
 # builders are the latest stable release's (the highest vX.Y.Z that is no
 # prerelease, checked out at the workspace root), never main's: what
 # installs read must come from released code, as the weekly timetable
@@ -30,7 +33,10 @@ name: Daily timetables (GitHub Pages)
 # from this run's new parts and everything else carried over from the live
 # site, each file checked against its published manifest's size and sha256
 # (scripts/pages_timetables.py), and writes timetables.json, ATTRIBUTION.txt
-# and index.html for the whole site. A published Volán or city index that
+# and index.html for the whole site, then signs timetables.json (ed25519,
+# scripts/sign_manifest.py, the PAGES_SIGNING_KEY secret in that step only):
+# no deploy without a signature that verifies against the public key the
+# integration pins. A published Volán or city index that
 # cannot be carried is left out with a warning (installs keep theirs, the
 # next run rebuilds it). A MÁV file that cannot be carried, or a published
 # manifest that is there but does not read, stops the deploy: every
@@ -298,16 +304,21 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Due, per index: not listed in the published timetables.json, or built
-      # 6 days 12 hours ago or longer. Both: the manifest is missing or does
-      # not read, names another schema than the stable release's, or the
-      # dispatch input asks for it.
+      # Due, per index: not listed in the published timetables.json, built
+      # 6 days 12 hours ago or longer, or built against another index than
+      # the stable release's (its release_feed is not the feed in the head
+      # of the release zip's index, read by Range requests: only the zip's
+      # directory and the heads). Both: the manifest is missing or does not
+      # read, names another schema than the stable release's, or the
+      # dispatch input asks for it. The release's feeds go to the build
+      # step's part (release_feed) in release-feeds.json.
       - name: Timetables due
         id: due
         if: steps.stable.outputs.tag != ''
         timeout-minutes: 3
         env:
           FORCE: ${{ inputs.timetables == true }}
+          TAG: ${{ steps.stable.outputs.tag }}
         run: |
           set -euo pipefail
           schema=$(sed -n 's/^INDEX_SCHEMA = \([0-9][0-9]*\)$/\1/p' scripts/gtfs_compact.py)
@@ -319,7 +330,9 @@ jobs:
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
           python3 .pages-tools/scripts/pages_timetables.py due --schema "$schema" --live-url "$pages_url" \
-            --force "$FORCE" --github-output "$GITHUB_OUTPUT"
+            --force "$FORCE" --github-output "$GITHUB_OUTPUT" \
+            --release-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/hungarian-transport-frontend.zip" \
+            --release-out "$RUNNER_TEMP/release-feeds.json"
 
       # The builders compare against the index already in place: a city feed
       # that vanished, most of a feed's trips gone or a near-empty Volán index
@@ -349,7 +362,11 @@ jobs:
       # its index out of this run's part with a warning, and the site job
       # carries the published one over. A city feed whose download fails
       # keeps the baseline's part (build_city_index.py, CARRY_ENV; its shapes
-      # are next to it in .baseline).
+      # are next to it in .baseline). No plain http here
+      # (HUNGARIAN_TRANSPORT_HTTPS_ONLY, gtfs_compact.py): a feed that serves
+      # only http (Miskolc) fails as a download and keeps its part the same
+      # way; a release, which a person looks at, still takes it over http.
+      # Each part records the release's feed of its index (release_feed).
       - name: Build the Volán and city indexes
         id: indexes
         if: steps.due.outputs.due == 'true'
@@ -362,6 +379,7 @@ jobs:
           VOLAN_GTFS_URL: ${{ vars.VOLAN_GTFS_URL || '' }}
           DUE_INDEXES: ${{ steps.due.outputs.indexes }}
           SCHEMA: ${{ steps.due.outputs.schema }}
+          HUNGARIAN_TRANSPORT_HTTPS_ONLY: "1"
         run: |
           set -euo pipefail
           # The value ends up in workflow commands below (::warning::). A
@@ -393,7 +411,8 @@ jobs:
               continue
             fi
             if python3 .pages-tools/scripts/pages_timetables.py part --schema "$SCHEMA" \
-                --index "${name}-index.json.gz" --out "$part" --baseline ".baseline/${name}-index.json.gz"; then
+                --index "${name}-index.json.gz" --out "$part" --baseline ".baseline/${name}-index.json.gz" \
+                --release-feeds "$RUNNER_TEMP/release-feeds.json"; then
               built="${built:+$built,}${name}"
             fi
           done
@@ -469,11 +488,29 @@ jobs:
             --live-url "$pages_url" --github-output "$GITHUB_OUTPUT" "${parts[@]}"
           if [ -d "$RUNNER_TEMP/site" ]; then ls -l "$RUNNER_TEMP/site"; fi
 
+      # timetables.json.sig: one line, base64 of the ed25519 signature over
+      # timetables.json's bytes as deployed (every deploy writes a new
+      # timetables.json, so every deploy signs it here). The integration
+      # checks it against the public key it pins before it reads the
+      # manifest. The private key (repository secret PAGES_SIGNING_KEY,
+      # base64 of the 32-byte seed) is in this step's env only; the script
+      # takes it from there, hands it to openssl on stdin and checks the
+      # signature against the pinned public key before anything is
+      # uploaded. No secret, another key, or a signature that does not
+      # verify fails the job: nothing is deployed, never an unsigned
+      # manifest. A fork without the secret deploys nothing.
+      - name: Sign the manifest
+        id: sign
+        if: steps.assemble.outputs.deploy == 'true'
+        env:
+          PAGES_SIGNING_KEY: ${{ secrets.PAGES_SIGNING_KEY }}
+        run: python3 scripts/sign_manifest.py sign --site "$RUNNER_TEMP/site"
+
       # Kept 3 days, not the action's 1: the attest job reads this artifact,
       # and "Re-run failed jobs" after a Sigstore outage finds it over a
       # weekend (after 1 day the re-run failed with "artifact not found").
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        if: steps.assemble.outputs.deploy == 'true'
+        if: steps.assemble.outputs.deploy == 'true' && steps.sign.outcome == 'success'
         with:
           path: ${{ runner.temp }}/site
           retention-days: 3

@@ -726,3 +726,39 @@ jobs:
           fi
           # Tag the commit that was built (main's head on a dispatch).
           gh release create "$tag" hungarian-transport.zip hungarian-transport-frontend.zip SHA256SUMS hungarian-transport-build.json --target "$TARGET" --title "$tag" "${noteargs[@]}" "${extra[@]}"
+
+  # The daily Pages workflow builds the Volán and city indexes with the
+  # latest stable release's builders, and each published index names the
+  # release index it was built against (timetables.json's release_feed),
+  # which installs of that release require of a Pages index. A new stable
+  # release makes both indexes due (pages_timetables.py due); the next cron
+  # (twice a day) would rebuild them within about 12 hours, plus GitHub's
+  # late starts. This starts a run of mav-index-daily.yml on main at once,
+  # with the input that rebuilds both. A workflow_dispatch made with the job
+  # token does start a run (the one event, with repository_dispatch, that
+  # it may start). It joins that workflow's concurrency group: it may
+  # replace a run waiting there (a cron, the owner's dispatch), which would
+  # have done the same work. Only this job may start a workflow (actions:
+  # write), and it runs nothing from the repository. When it cannot start
+  # the run, a warning: the release is out and the cron catches up.
+  pages:
+    name: Rebuild the Pages timetables
+    needs: [resolve, publish]
+    if: needs.resolve.outputs.create == 'true' && !contains(needs.resolve.outputs.tag, '-rev.')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Start mav-index-daily.yml
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.resolve.outputs.tag }}
+        run: |
+          set -uo pipefail
+          if gh workflow run mav-index-daily.yml --ref main -f timetables=true; then
+            echo "mav-index-daily.yml started on main (timetables=true) for ${TAG}"
+          else
+            echo "::warning title=Pages timetables not started::Could not start mav-index-daily.yml; its next scheduled run rebuilds the Volán and city indexes against ${TAG}."
+          fi

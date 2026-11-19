@@ -185,6 +185,7 @@ The files:
 | `mav-gtfs.zip` | MÁV's official GTFS, byte for byte as downloaded for this build (CC0) |
 | `mav-pfaedle-overlay.zip` | pfaedle's `shapes.txt`, `stop_times.txt` and `trips.txt` of the same feed |
 | `timetables.json` | the Volán and city manifest ([below](#the-volán-and-city-indexes)) |
+| `timetables.json.sig` | the manifest's ed25519 signature ([below](#release-feed-signature-and-feed-checks)) |
 | `volan-index.json.gz`, `city-index.json.gz` | the Volán and city indexes, byte for byte as the release's builders write them |
 | `volan-shapes-<hash>/`, `city-shapes-<hash>/` | each index's route shapes: the folder its head names (`"sh"`), 64 files `00.json.gz` to `63.json.gz` |
 | `ATTRIBUTION.txt`, `index.html` | what the files are, sources and licences, for the whole site |
@@ -446,6 +447,66 @@ format rebuilds both, and from then on installs of an older version skip
 the Volán and city indexes there (`unsupported`) and keep theirs until they
 update. An index published before that of the old format is not carried
 into a site of the new one.
+
+##### Release feed, signature and feed checks
+
+- **`release_feed`.** Each entry also names `release_feed`: the `feed` of
+  the latest stable release's index of the same name (in its
+  `hungarian-transport-frontend.zip`) when that index was built, for
+  example `"release_feed": "volan:01716.20261026"` next to
+  `"feed": "volan:01716.20261102"`. The `timetables` job reads it from the
+  zip's directory and the heads of its indexes, by HTTP Range requests (a
+  few hundred kilobytes, not the whole zip; the whole zip only when the
+  server answers no ranges). An index is also rebuilt when its
+  `release_feed` is not that feed, or it has none: it was built against
+  another release (an install of the new release refuses it, and the new
+  release's builders and guards have not seen it yet). An index the release
+  zip lacks has nothing to compare, and a release zip that cannot be read
+  leaves this rule out for the run, with a warning (the age rule still
+  holds). An entry carried over keeps its `release_feed`. A stable release
+  (not a `-rev` prerelease) also starts the daily workflow on main with
+  the `timetables` input ticked, from its own `pages` job (`actions: write`
+  only), so both indexes are rebuilt minutes after the release rather than
+  at the next scheduled run, within about 12 hours (plus GitHub's late
+  starts). That run may replace one waiting in the workflow's concurrency
+  group, which would have done the same; when it cannot be started, the
+  release run warns and the next scheduled run catches up.
+- **`timetables.json.sig`.** Every deploy signs `timetables.json` (it is
+  written anew on every deploy, so a run that only brings a new MÁV index
+  signs it too): the file is one line, the base64 of the 64-byte ed25519
+  signature over the exact bytes of `timetables.json` as deployed. The
+  public key, which the integration pins, is
+  `QCs8j2ex1KxTRA7pHfsZ6f2SMu5jidCwy1LyvIVOd+M=` (base64 of the raw 32
+  bytes). `scripts/sign_manifest.py` signs with openssl in the `site` job,
+  from the repository secret `PAGES_SIGNING_KEY` (base64 of the raw 32-byte
+  private key), which only that one step sees, in its environment; the key
+  reaches openssl on stdin and is never printed. It checks the key against
+  the pinned public key and the signature against it before the site is
+  uploaded. Without the secret, with another key, or with a signature that
+  does not verify, the job fails and nothing is deployed: an unsigned
+  manifest is never published (so a fork without the secret deploys
+  nothing). Check a download with
+  `python3 scripts/sign_manifest.py verify --site <folder>`.
+- **No plain http.** The weekly build sets
+  `HUNGARIAN_TRANSPORT_HTTPS_ONLY=1` (`scripts/gtfs_compact.py`): no feed
+  comes over plain http there, not even one whose entry allows it (Miskolc,
+  whose https certificate names another host). Such a feed fails to
+  download, as any failed feed, and keeps its part of the previous index
+  (*City feed carried over*). A release leaves the variable unset and
+  still takes it over http, with a warning: its indexes are looked at
+  before it is published.
+- **Feed dates far ahead.** An index whose feed (for the city index, any
+  operator's) names a date more than 400 days after the build is not
+  published, and the one on the site stays (`pages_timetables.py part`):
+  installs order feeds by that date, so a `feed_end_date` written as the
+  version would beat every correct index after it. The city builder refuses
+  such a zip on its own (`build_city_index.py`, `MAX_FEED_AHEAD_DAYS`), so
+  that feed keeps its part of the previous index and the other feeds still
+  update; the daily MÁV index is held to the same limit
+  (`mav_pages_site.py`). The builders' checks (`HUNGARIAN_TRANSPORT_HTTPS_ONLY`
+  and the city builder's date limit) run with the stable release's code,
+  so they take effect with the first stable release that has them; the
+  `part` check and the signature come from main and hold at once.
 
 **Installing them.** The integration checks `timetables.json` in the same
 round as the daily MÁV index, right after it: about 10 to 20 minutes after
