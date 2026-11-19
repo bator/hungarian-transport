@@ -7,7 +7,7 @@ import re
 import sys
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import NamedTuple
 
@@ -31,6 +31,8 @@ from gtfs_compact import (
     write_index,
     _meters,
 )
+# Importable once gtfs_compact put the integration's package on sys.path.
+from served_index import feed_date
 
 OUT = Path("city-index.json.gz")
 # A feed that the previous index had must not vanish or shrink below this
@@ -49,6 +51,16 @@ CARRY_ENV = "HUNGARIAN_TRANSPORT_CARRY_INDEX"
 # More feeds failing at once is the network or the runner, not a publisher:
 # none is carried, and the guard decides as without CARRY_ENV.
 MAX_CARRIED = 3
+# A feed_version naming a date more than this many days after the build is
+# a publisher's mistake (feed_end_date written as the version, a typo in the
+# year), not a timetable: the integration orders an operator's feeds by that
+# date (served_index.feed_date), so an index of it would beat every correct
+# one after it for as long as the date lies ahead. Such a zip is refused as
+# one that does not load: the next URL is tried, then the zip already in
+# base, and in the weekly Pages build the feed's part in place is kept
+# (CARRY_ENV). The Pages build refuses such an index as a whole too
+# (scripts/pages_timetables.py part), the Volán one included.
+MAX_FEED_AHEAD_DAYS = 400
 
 # Weekendbus (Csömör/Pécel) still hosts a zip, but its calendar ended
 # 2025-12-31. GYSEV trains are in MÁV's feed (the MÁV index); the GYSEV zip
@@ -517,11 +529,23 @@ def include_agencies(keep: Iterable[str]):
     return include
 
 
-def _load_feed(base: Path, feed: dict, zpath: Path | None = None) -> list[dict]:
+def feed_too_far(version: str, today: str | None = None) -> str:
+    """Why a feed_version names a date more than MAX_FEED_AHEAD_DAYS after
+    today (YYYYMMDD, default: the date today); "" when it does not (or
+    names no date)."""
+    day = feed_date(version)
+    now = datetime.strptime(today, "%Y%m%d").date() if today else date.today()
+    if day is None or day <= now + timedelta(days=MAX_FEED_AHEAD_DAYS):
+        return ""
+    return f"feed_version {version[:40]!r} names {day.isoformat()}, more than {MAX_FEED_AHEAD_DAYS} days after {now.isoformat()}"
+
+
+def _load_feed(base: Path, feed: dict, zpath: Path | None = None, *, today: str | None = None) -> list[dict]:
     """Parts of one city feed, from zpath when given (a new zip not yet in
     base), else from base. A missing zip is downloaded; when the zip from
     one URL (a keyed override, say) fails to download or parse, the next URL
-    is tried, down to the public one."""
+    is tried, down to the public one. A zip whose feed_version names a date
+    too far ahead (feed_too_far, against today) does not load."""
     zpath = zpath or base / feed["file"]
     include = include_agencies(feed["agencies"]) if feed.get("agencies") else include_all
 
@@ -534,6 +558,10 @@ def _load_feed(base: Path, feed: dict, zpath: Path | None = None) -> list[dict]:
             prefix=f"{feed['id']}:",
             split_platforms_m=PLATFORM_SPLIT_M,
         )
+        for part in parts:
+            far = feed_too_far(part.get("feed") or "", today)
+            if far:
+                raise ValueError(far)
         names = feed.get("names") or {}
         for part in parts:
             for row in part["s"]:
@@ -658,7 +686,7 @@ def collect_parts(
         if new_zip is not None:
             new: list[dict] | None
             try:
-                new = _with_trips(_load_feed(base, feed, new_zip))
+                new = _with_trips(_load_feed(base, feed, new_zip, today=today))
                 problem = "no trips"
             except Exception as err:
                 new, problem = None, feed_error(fid, err)
@@ -680,7 +708,7 @@ def collect_parts(
                     why = ""
                 if why and in_base:
                     try:
-                        old = _with_trips(_load_feed(base, feed))
+                        old = _with_trips(_load_feed(base, feed, today=today))
                     except Exception:
                         old = []
                     # Only for a zip in base that passes: when both fail,
@@ -692,7 +720,7 @@ def collect_parts(
                         got = old
         if got is None:
             try:
-                got = _with_trips(_load_feed(base, feed))
+                got = _with_trips(_load_feed(base, feed, today=today))
             except Exception as err:
                 failed.append(fid)
                 why = feed_error(fid, err)

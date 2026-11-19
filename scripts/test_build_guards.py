@@ -637,6 +637,75 @@ with tempfile.TemporaryDirectory() as tmp:
     err = raises(lambda: release_build(carry=no_shapes / out.name))
     check("a failed feed whose previous shapes cannot be read is not carried, and the guard refuses it",
           isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
+
+    # The weekly Pages build sets HUNGARIAN_TRANSPORT_HTTPS_ONLY=1: a feed
+    # that only works over plain http (Miskolc: its https certificate names
+    # another host) fails there as any failed download, and keeps its part
+    # in place; a release (unset) still takes it over http.
+    down.clear()
+    bci.CITY_FEEDS = [dict(f, url="http://b.example/b.zip", insecure=True) if f["id"] == "b" else f
+                      for f in bci.CITY_FEEDS]
+    asked: list[str] = []
+    real_zip = gc.download_zip
+
+    def tls_broken(url: str, dest: Path, **_kw) -> dict:
+        asked.append(url)
+        if url.startswith("https://b."):
+            raise OSError("certificate names another host")
+        gtfs_zip(dest, feeds[Path(url).stem])
+        return {"size": dest.stat().st_size}
+
+    gc.download_zip = tls_broken
+    bci.download_feed = gc.download_feed
+    try:
+        info = release_build(carry=carry)
+        check("without HUNGARIAN_TRANSPORT_HTTPS_ONLY an http-only feed comes over http (release builds)",
+              info["carried"] == {} and "http://b.example/b.zip" in asked and "b" in operator_trips(out), repr(info))
+        asked.clear()
+        os.environ[gc.HTTPS_ONLY_ENV] = "1"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            info = release_build(carry=carry)
+        check("with HUNGARIAN_TRANSPORT_HTTPS_ONLY=1 an http-only feed is never asked over http: it keeps its"
+              " part of the index in place, as any failed feed, with the reason",
+              set(info["carried"]) == {"b"} and gc.HTTPS_ONLY_ENV in info["carried"]["b"]
+              and "http://b.example/b.zip" not in asked and "https://b.example/b.zip" in asked
+              and out.read_bytes() == previous_bytes and "::warning title=City feed carried over::" in buf.getvalue(),
+              repr((info, asked)))
+        err = raises(release_build)
+        check("with HUNGARIAN_TRANSPORT_HTTPS_ONLY=1 and nothing to carry, the guard refuses the lost feed",
+              isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
+    finally:
+        os.environ.pop(gc.HTTPS_ONLY_ENV, None)
+        gc.download_zip = real_zip
+        bci.download_feed = flaky_download
+    bci.CITY_FEEDS = [dict(f, url="https://b.example/b.zip", insecure=False) if f["id"] == "b" else f
+                      for f in bci.CITY_FEEDS]
+
+    # A feed_version dated more than MAX_FEED_AHEAD_DAYS after the build (a
+    # publisher writing feed_end_date as the version) would outrank every
+    # correct feed after it in installs: the zip does not load, and the
+    # feed keeps its part in place.
+    real_c = feeds["c"]
+    for version, carried_want in (("20281231", {"c"}), ("20271220", set())):
+        feeds["c"] = {**real_c, "feed_info.txt": f"feed_publisher_name,feed_version\nC,{version}\n"}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            info = release_build(carry=carry)
+        why = info["carried"].get("c", "")
+        check(f"a feed_version {version} against a build on 2026-11-15 (limit {bci.MAX_FEED_AHEAD_DAYS} days): "
+              + ("refused, the part in place kept, the reason named" if carried_want else "taken"),
+              set(info["carried"]) == carried_want
+              and (("more than 400 days after 2026-11-15" in why and out.read_bytes() == previous_bytes)
+                   if carried_want else "c" in operator_trips(out)), repr((info, buf.getvalue()[-300:])))
+    feeds["c"] = {**real_c, "feed_info.txt": "feed_publisher_name,feed_version\nC,20281231\n"}
+    err = raises(release_build)
+    check("a far-future feed with nothing to carry: the guard refuses the lost feed",
+          isinstance(err, IndexGuardError) and "c missing" in str(err), repr(err))
+    feeds["c"] = real_c
+    check("feed_too_far reads the date as the integration does, and only a date",
+          bci.feed_too_far("01716.20281231", "20261115") and not bci.feed_too_far("1.3", "20261115")
+          and not bci.feed_too_far("20271220", "20261115") and not bci.feed_too_far("", "20261115"))
 bci.CITY_FEEDS = real_feeds
 
 # The Volán index keeps its overall guard: one feed, so the total is the feed.
