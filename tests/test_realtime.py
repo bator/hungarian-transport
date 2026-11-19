@@ -465,14 +465,43 @@ def test_no_data_at_the_boarding_stop_is_no_estimate_either() -> None:
         assert hit is None or (hit["delay"], hit["approx"]) == (None, False)
 
 
+def test_feed_numbers_no_json_holds_never_reach_the_answer() -> None:
+    """A varint is read up to 70 bits: a feed header's or a vehicle's
+    timestamp past 64 bits failed Home Assistant's JSON of the whole
+    service response (orjson), a position stamped years ahead never grew
+    old, and a predicted time years away is no prediction. None of them is
+    answered; the rest of the trip is."""
+    from homeassistant.helpers.json import json_bytes
+
+    (src, tu, _vp, trains), = _one_trip(
+        _stu(b"A", 1, 60, when=NOW + 10 * 365 * 86400), _stu(b"B", 2, 90, when=NOW + 600), timestamp=2 ** 65
+    )
+    assert tu.timestamp == 2 ** 65
+    for stamp in (2 ** 65, NOW + 10 * 365 * 86400, NOW + realtime.MAX_POSITION_AHEAD + 1):
+        vp = realtime.Feed(timestamp=NOW)
+        vp.add_vehicle(realtime.Vehicle("T1", "", "", 47.5, 19.0, None, None, stamp, "A", 2))
+        loaded = [(src, tu, vp, trains)]
+        hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B"], **{"from": 0, "to": 1})
+        assert (hit["delay"], hit["time"], hit["dest_delay"], hit["dest_time"], hit["vehicle"]) == (
+            60, None, 90, NOW + 600, None
+        )
+        assert realtime._updated(loaded, NOW) == NOW
+        json_bytes({"updated": realtime._updated(loaded, NOW), "trips": {"k": hit}})
+    # A clock a minute fast is still a position.
+    vp = realtime.Feed(timestamp=NOW)
+    vp.add_vehicle(realtime.Vehicle("T1", "", "", 47.5, 19.0, None, None, NOW + 60, "A", 2))
+    hit = _answer(_cfg("trip"), [(src, tu, vp, trains)], trip_id="T1", stops=["A", "B"], **{"from": 0})
+    assert hit["vehicle"]["timestamp"] == NOW + 60
+
+
 def test_a_loop_trip_takes_each_stops_own_call() -> None:
     # A ... B ... A: the second A is the alighting stop, 7 minutes late.
-    loaded = _one_trip(_stu(b"A", 1, 0, when=1000), _stu(b"B", 2, 60), _stu(b"A", 3, 120, when=2000))
+    loaded = _one_trip(_stu(b"A", 1, 0, when=NOW + 1000), _stu(b"B", 2, 60), _stu(b"A", 3, 120, when=NOW + 2000))
     hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], repeat=[0, 2], **{"from": 1, "to": 2})
-    assert (hit["delay"], hit["dest_delay"], hit["dest_time"]) == (60, 120, 2000)
+    assert (hit["delay"], hit["dest_delay"], hit["dest_time"]) == (60, 120, NOW + 2000)
     # Boarding at the loop's last call.
     hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], repeat=[0, 2], **{"from": 2})
-    assert (hit["delay"], hit["time"]) == (120, 2000)
+    assert (hit["delay"], hit["time"]) == (120, NOW + 2000)
     # A feed that dropped the calls already served still finds B.
     loaded = _one_trip(_stu(b"B", 2, 60), _stu(b"A", 3, 120))
     hit = _answer(_cfg("trip"), loaded, trip_id="T1", stops=["A", "B", "A"], repeat=[0, 2], **{"from": 1, "to": 2})

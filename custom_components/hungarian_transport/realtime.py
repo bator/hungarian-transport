@@ -94,8 +94,19 @@ MAV_BURST = FETCH_BURST
 # wrong trip), not a prediction worth showing.
 MIN_DELAY = -20 * 60
 MAX_DELAY = 6 * 3600
-# A position older than this is not where the vehicle is.
+# A position older than this is not where the vehicle is; one stamped
+# further ahead of now than MAX_POSITION_AHEAD (a clock off by more than a
+# few minutes, or a hostile number) is no position at all: it would never
+# grow old and always be the newest.
 MAX_POSITION_AGE = 15 * 60
+MAX_POSITION_AHEAD = 5 * 60
+# A predicted time (an epoch) further from now than this either way is no
+# prediction of a run on its way (a run is today's or last night's, its
+# calls within two days of its service day), and a feed's timestamp further
+# ahead no time it was made: neither is answered. It also keeps every
+# number of the answer within 64 bits, which Home Assistant's JSON of the
+# whole service response (orjson) fails on otherwise.
+MAX_TIME_SKEW = 2 * 86400
 # Two trips whose predictions at a card's stops are no further apart than
 # this (seconds) are one train listed twice (_pick).
 SAME_PREDICTION = 30
@@ -789,6 +800,10 @@ class RealtimeHub:
         # least recently asked first (MAX_MAV_ROUTES).
         self._mav_route_cache: dict[tuple[str, str], tuple[float, tuple[str, ...] | None]] = {}
         self._mav_retry_at = -1e18
+        # ("trip" | "route", planner id, date) -> monotonic time until which
+        # it is not asked: the keys of a request that failed for a reason of
+        # its own (_mav_request_failed), not the planner's.
+        self._mav_held: dict[tuple[str, str, str], float] = {}
         # The task whose planner request was cancelled in flight (_mav_post),
         # until its bounded() reads whether the round's deadline did it.
         self._mav_cut: asyncio.Task[Any] | None = None
@@ -974,13 +989,12 @@ class RealtimeHub:
         loaded = await asyncio.gather(*(self._source(cfg, src, now) for src in cfg.sources))
         if all(tu is None and vp is None for _src, tu, vp, _tr in loaded):
             return error_answer({"feed": feed_id, "trips": {}}, RT_UNAVAILABLE)
-        stamps = [f.timestamp for _s, tu, vp, _t in loaded for f in (tu, vp) if f is not None and f.timestamp]
         out: dict[str, Any] = {}
         for req in trips:
             hit = _answer(cfg, loaded, req, now)
             if hit is not None:
                 out[req["key"]] = hit
-        return {"feed": feed_id, "updated": max(stamps) if stamps else None, "trips": out}
+        return {"feed": feed_id, "updated": _updated(loaded, now), "trips": out}
 
     async def _query_mavplusz(
         self, feed_id: str, cfg: FeedConfig, trips: list[dict[str, Any]], now: float
@@ -1216,7 +1230,6 @@ class RealtimeHub:
         if not planner and jbb and all(tu is None and vp is None for _src, tu, vp, _tr in jbb.values()):
             return error_answer({"feed": feed_id, "trips": {}}, RT_UNAVAILABLE)
         used = [*planner.values(), *jbb.values()]
-        stamps = [f.timestamp for _s, tu, vp, _t in used for f in (tu, vp) if f is not None and f.timestamp]
         out: dict[str, Any] = {}
         for n, req in enumerate(trips):
             loaded = []
@@ -1232,15 +1245,25 @@ class RealtimeHub:
             hit = _answer(cfg, loaded, req, now, strict=strict)
             if hit is not None:
                 out[req["key"]] = hit
-        return {"feed": feed_id, "updated": max(stamps) if stamps else None, "trips": out}
+        return {"feed": feed_id, "updated": _updated(used, now), "trips": out}
 
     async def _mav_post(
-        self, body: dict[str, Any], parse: Callable[[Any], Any], deadline: float | None = None
+        self,
+        body: dict[str, Any],
+        parse: Callable[[Any], Any],
+        deadline: float | None = None,
+        held: Collection[tuple[str, str, str]] = (),
     ) -> Any:
         """One planner request (the caller holds _mav_lock): parse(answer),
         or None when it is not made (the rate limit, the backoff after a
         failure, under PLANNER_MIN_SHARE of the round left before the
-        event loop's `deadline`) or fails, logged once per outage."""
+        event loop's `deadline`) or fails. The planner failing
+        (mavplusz.planner_down) backs every planner request off, the BKK
+        boards' too, and is logged once per outage (_mav_failed); a failure
+        of this request alone (an answer over the cap or of the wrong
+        shape, a GraphQL error without a path, an HTTP 400) holds back only
+        its keys, `held` (_mav_request_failed): one bad trip neither keeps
+        the other cards' trips from the planner nor the BKK fallback off."""
         if self._monotonic() < self._mav_retry_at:
             return None
         if deadline is not None:
@@ -1262,7 +1285,10 @@ class RealtimeHub:
             self._mav_cut = asyncio.current_task()
             raise
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError, TypeError) as err:
-            self._mav_failed(err or type(err).__name__)
+            if mavplusz.planner_down(err):
+                self._mav_failed(err or type(err).__name__)
+            else:
+                self._mav_request_failed(err, held)
             return None
         self._outages.answered(MAVPLUSZ_OUTAGE, "Realtime source %s answers again", mavplusz.URL)
         return result
@@ -1276,6 +1302,31 @@ class RealtimeHub:
             MAVPLUSZ_OUTAGE, "Realtime source %s unavailable: %s; reading the GTFS-Realtime feeds",
             mavplusz.URL, err,
         )
+
+    def _mav_request_failed(self, err: Any, held: Collection[tuple[str, str, str]]) -> None:
+        """A planner request failed for a reason of its own: its keys are
+        not asked again for FAIL_BACKOFF (the feeds answer for them, or
+        their kept answers), every other request goes on, nothing is backed
+        off for the BKK boards. Logged at debug level: the planner is up."""
+        now = self._monotonic()
+        for k in [k for k, until in self._mav_held.items() if until <= now]:
+            del self._mav_held[k]
+        for k in held:
+            self._mav_held[k] = now + FAIL_BACKOFF
+        _LOGGER.debug(
+            "Realtime source %s: a request failed (%s); its %d trips or routes are not asked for %s s",
+            mavplusz.URL, str(err)[:200] or type(err).__name__, len(held), FAIL_BACKOFF,
+        )
+
+    def _mav_is_held(self, kind: str, gtfs_id: str, date: str) -> bool:
+        """A key of a request that failed on its own, within FAIL_BACKOFF."""
+        until = self._mav_held.get((kind, gtfs_id, date))
+        if until is None:
+            return False
+        if until <= self._monotonic():
+            del self._mav_held[(kind, gtfs_id, date)]
+            return False
+        return True
 
     async def _mav_routes(
         self, keys: list[mavplusz.RouteKey], deadline: float | None = None
@@ -1298,11 +1349,16 @@ class RealtimeHub:
                     out[k] = hit[1]
                 else:
                     todo.append(k)
+            # Not a route of a request that failed on its own (_mav_held).
+            todo = [k for k in todo if not self._mav_is_held("route", k.gtfs_id, k.date)]
             todo = todo[: mavplusz.MAX_TRIPS_PER_REQUEST]
             if not todo:
                 return out
             results = await self._mav_post(
-                mavplusz.build_route_query(todo), lambda doc: mavplusz.parse_routes(doc, todo), deadline
+                mavplusz.build_route_query(todo),
+                lambda doc: mavplusz.parse_routes(doc, todo),
+                deadline,
+                [("route", k.gtfs_id, k.date) for k in todo],
             )
             if results is None:
                 return None
@@ -1350,6 +1406,9 @@ class RealtimeHub:
                 del self._mav_cache[k]
             out: dict[mavplusz.TripKey, tuple[float, mavplusz.TripResult | None]] = {}
             waiting: list[tuple[float, int, list[mavplusz.TripKey]]] = []
+            # Groups with a key of a request that failed on its own
+            # (_mav_held): not asked, their kept answers only.
+            held: list[list[mavplusz.TripKey]] = []
             for order, group in enumerate(groups):
                 due = []
                 for k in dict.fromkeys(group):
@@ -1359,7 +1418,9 @@ class RealtimeHub:
                         entries[k] = hit
                     else:
                         due.append(k)
-                if due:
+                if due and any(self._mav_is_held("trip", k.gtfs_id, k.date) for k in due):
+                    held.append(due)
+                elif due:
                     # Never asked (or so long ago it is gone) is the oldest.
                     asked = [self._mav_cache[(k.gtfs_id, k.date)].asked for k in due if (k.gtfs_id, k.date) in self._mav_cache]
                     waiting.append((min(asked) if len(asked) == len(due) else -1e18, order, due))
@@ -1377,7 +1438,10 @@ class RealtimeHub:
                 keys = list(todo)
                 at = self._wall()
                 results = await self._mav_post(
-                    mavplusz.build_query(keys), lambda doc: mavplusz.parse_response(doc, keys), deadline
+                    mavplusz.build_query(keys),
+                    lambda doc: mavplusz.parse_response(doc, keys, at),
+                    deadline,
+                    [("trip", k.gtfs_id, k.date) for k in keys],
                 )
                 if results is not None:
                     mono = self._monotonic()
@@ -1394,14 +1458,14 @@ class RealtimeHub:
                         ranked = sorted(self._mav_cache, key=lambda c: self._mav_cache[c].asked)
                         for c in ranked[: len(ranked) - MAX_MAV_ANSWERS * 3 // 4]:
                             del self._mav_cache[c]
-                for _asked, _order, due in waiting:
-                    for k in due:
-                        hit = self._mav_cache.get((k.gtfs_id, k.date))
-                        if k not in out and hit is not None:
-                            out[k] = (hit.at, hit.result)
-                            entries[k] = hit
-                if results is None and not out:
-                    return None
+            for due in [*(w[2] for w in waiting), *held]:
+                for k in due:
+                    hit = self._mav_cache.get((k.gtfs_id, k.date))
+                    if k not in out and hit is not None:
+                        out[k] = (hit.at, hit.result)
+                        entries[k] = hit
+            if results is None and not out:
+                return None
         got = await self._mav_vehicles({k: res for k, (_at, res) in out.items()}, deadline, ask=fetched.keys())
         for k, res in got.items():
             if res is out[k][1]:
@@ -1798,6 +1862,23 @@ def _plausible(delay: int | None) -> int | None:
     return int(delay)
 
 
+def _near(when: int | None, now: float) -> int | None:
+    """A predicted epoch within MAX_TIME_SKEW of now, else None."""
+    if when is None or not -MAX_TIME_SKEW <= when - now <= MAX_TIME_SKEW:
+        return None
+    return int(when)
+
+
+def _updated(loaded, now: float) -> int | None:
+    """The newest timestamp of the feeds answering, but for one further
+    ahead of now than MAX_TIME_SKEW (_fresh only drops the old ones)."""
+    stamps = [
+        f.timestamp for _s, tu, vp, _t in loaded for f in (tu, vp)
+        if f is not None and f.timestamp and f.timestamp - now <= MAX_TIME_SKEW
+    ]
+    return max(stamps) if stamps else None
+
+
 def _match_stops(
     tu: TripUpdate, stops: list[str], upto: int, repeat: frozenset[int] = frozenset()
 ) -> list[StopUpdate | None]:
@@ -1886,7 +1967,9 @@ def _current_delay(tu: TripUpdate, vehicle: Vehicle | None) -> int | None:
 def _vehicle_json(v: Vehicle | None, now: float) -> dict[str, Any] | None:
     if v is None:
         return None
-    if v.timestamp and now - v.timestamp > MAX_POSITION_AGE:
+    if v.timestamp and not -MAX_POSITION_AHEAD <= now - v.timestamp <= MAX_POSITION_AGE:
+        # Too old to be where it is, or stamped ahead of now (a far
+        # future one would never grow old).
         return None
     return {
         "lat": round(v.lat, 6),
@@ -1920,6 +2003,7 @@ def _answer(
             delay, when, board_rel = _at_stop(tu, stops, int(src), False, repeat)
         if dst is not None:
             dest_delay, dest_when, dest_rel = _at_stop(tu, stops, int(dst), True, repeat)
+        when, dest_when = _near(when, now), _near(dest_when, now)
         # A trip matched on a learned route has no vehicle naming it here
         # (the positions feed is down, stale, or without it). Its updates
         # then say nothing of where it is: mvkzrt keeps the stops already

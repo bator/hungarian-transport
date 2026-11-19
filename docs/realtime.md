@@ -84,7 +84,9 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   a round cancelled before its request ran gives the token back); when it
   is not made or fails, the trips simply have no vehicle that round, logged once at
   debug level, and the planner is not backed off. Each route's answer
-  size is remembered for three hours: a request takes the routes that fit
+  size is remembered for three hours, reckoned from its patterns and
+  vehicles (250 bytes a vehicle; the answer is not encoded again to weigh
+  it): a request takes the routes that fit
   192 KiB by that reckoning (an unseen route counted as 8 KiB), and a
   route that alone went over the cap is left out until its size is
   forgotten (an alias the planner answered with an error teaches no
@@ -175,11 +177,17 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   same shape as from the feeds; `updated` is the time of the planner's
   answer, or the newest feed header when a feed was read too.
 - **When the feeds are read instead.** For the trips of a source whose
-  planner request fails (an HTTP error, 429 included, a timeout, an answer
-  that is not JSON, a GraphQL error not tied to one trip), is refused by
-  the integration's rate limit, or falls in the minute's backoff after a
-  failure, but for the trips answered within their interval or still kept
-  (see Caching): those stay the planner's. When the call's planner round,
+  planner request fails, is refused by the integration's rate limit, or
+  falls in the minute's backoff after a failure, but for the trips
+  answered within their interval or still kept (see Caching): those stay
+  the planner's. The planner failing (no answer, a timeout, HTTP 5xx, 429
+  or 403, an answer that is not JSON) backs every planner request off for
+  a minute, the BKK boards' too (see Outages). A request failing for its
+  own sake (an answer over its cap or of the wrong shape, a GraphQL error
+  not tied to one trip, another HTTP 4xx) backs nothing off: only its
+  trips (or route lists) are not asked of the planner for that minute,
+  and are matched on the feeds meanwhile; another card's trips are asked
+  as before, and it is logged at debug level only. When the call's planner round,
   waiting for other cards' requests and, after a restart, the static train
   numbers' download included, takes over 20 s (a request is begun only
   with at least 10 s of that left, so waiting alone is no outage; numbers
@@ -267,7 +275,14 @@ A stop without its own update takes the nearest earlier stop's delay
 (GTFS-Realtime delays propagate down the trip). Delays more than 20 minutes
 early or six hours late are dropped as feed glitches (a vehicle logged on to
 the wrong trip reports -85 minutes on every stop), and a position older than
-15 minutes is not shown.
+15 minutes, or stamped more than 5 minutes ahead of now (it would never
+grow old), is not shown. A predicted time more than two days from now is
+no prediction, and a feed header's timestamp that far ahead is no
+`updated`; from the planner, a service day outside 2000-2100, a time more
+than a day before or two days after it, a delay over two days either way
+and a vehicle timestamp outside those years are no number at all. So no
+answer has a number Home Assistant's JSON cannot hold (past 64 bits),
+which failed the whole action's response.
 
 ### Precedence
 
@@ -496,7 +511,8 @@ Should either side object, removing the operator from `realtime_feeds.json`
   again, and the feeds meanwhile. The backoff is shared: the planner
   failing the BKK boards' requests (30 s; not a board's own failure, see
   [BKK boards when FUTÁR fails](#bkk-boards-when-futár-fails)) holds back
-  the delays' requests too, and the other way round. The vehicle requests
+  the delays' requests too, and the other way round (not a delay
+  request's own failure either: that holds back its own trips only). The vehicle requests
   alone back off on their own (3 minutes) and set no shared backoff.
 
 ## The action

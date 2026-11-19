@@ -17,6 +17,7 @@ both alike. No Home Assistant imports: tests/test_mavplusz.py runs it bare.
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Sequence
 import dataclasses
 from datetime import datetime
@@ -57,6 +58,20 @@ VEHICLE_MAX_BYTES = 256 * 1024
 VEHICLE_BUDGET_BYTES = VEHICLE_MAX_BYTES * 3 // 4
 UNSEEN_ROUTE_BYTES = 8 * 1024
 HUGE_ROUTE_BYTES = 64 * 1024
+# What a route's alias weighs, reckoned from its answer without encoding
+# it again on the event loop (answer_sizes): ROUTE_BYTES for the alias
+# ({"patterns":[]} and its comma), PATTERN_BYTES a pattern
+# ({"vehiclePositions":[]} and its comma) and POSITION_BYTES a position.
+# A position was 195-229 bytes of compact JSON in mavplusz_rt_pattern.json
+# (MÁV 195-200, Volán's longer ids 209-229), so 250 with its comma and some
+# room: the reckoning came out 9-23% over the real size of each of that
+# answer's routes (tests/test_mavplusz.py), never under. The heaviest live
+# vehicle measured (326 bytes, docs/realtime.md) is 1.3 times that, so a
+# request reckoned at VEHICLE_BUDGET_BYTES of those is still under the
+# cap; and an answer over it teaches RouteSizes all the same (too_large).
+ROUTE_BYTES = 16
+PATTERN_BYTES = 25
+POSITION_BYTES = 250
 # A route's learnt size is kept this long (the day's traffic changes it),
 # for so many routes at most.
 ROUTE_SIZE_TTL = 3 * 3600
@@ -114,10 +129,45 @@ _TRIP_FIELDS = (
 _ROUTE_FIELDS = "patterns { " + _POSITION_FIELDS + " }"
 # A realtime pattern's code: the scheduled one's route plus "::rt#".
 _RT_PATTERN = "::rt#"
+# A serviceDay the planner can mean (2000-2100), the seconds after it a
+# call can have (a day early to two days on) and a delay (two days either
+# way), as mavplusz_board reads its answers; a vehicle's lastUpdated is an
+# epoch of those years too. Anything else is a broken or hostile answer,
+# no time: an int past 64 bits in the hub's answer fails Home Assistant's
+# JSON of the whole realtime service response (orjson), every trip of it,
+# every poll while the answer is cached.
+DAY_MIN = 946684800
+DAY_MAX = 4102444800
+SECONDS_MIN = -86400
+SECONDS_MAX = 2 * 86400
 
 
 class TooLarge(ValueError):
     """An answer over the cap fetch() was given (read no further)."""
+
+
+_HTTP_STATUS = re.compile(r"^HTTP (\d{3})$")
+
+
+def planner_down(err: BaseException) -> bool:
+    """Whether a planner request's error says the planner is failing, so
+    that nobody should ask it for a while (PlannerLimiter.failed): no
+    answer, a timeout, HTTP 5xx, 429 or 403, an HTTP 200 that is not JSON
+    (a maintenance or Cloudflare page). Not so an error of that request
+    alone, which the next request with other trips does not share: an
+    answer over its cap (TooLarge) or nested too deep, another HTTP status,
+    an answer of the wrong shape or a GraphQL error without a path
+    (parse_response's ValueError, a KeyError or TypeError).
+    mavplusz_board's _post reads fetch()'s errors the same way."""
+    if isinstance(err, (json.JSONDecodeError, UnicodeDecodeError)):
+        return True
+    if isinstance(err, (aiohttp.ClientError, asyncio.TimeoutError, OSError)):
+        return True
+    match = _HTTP_STATUS.match(str(err)) if isinstance(err, ValueError) and not isinstance(err, TooLarge) else None
+    if match is None:
+        return False
+    status = int(match.group(1))
+    return status >= 500 or status in (403, 429)
 
 
 class _Refused(Exception):
@@ -391,15 +441,22 @@ def parse_vehicles(doc: Any, routes: Sequence[str]) -> dict[str, list[dict[str, 
 
 def answer_sizes(doc: Any, routes: Sequence[str]) -> dict[str, int]:
     """Per route of a parse_vehicles answer: the bytes of its alias, as
-    compact JSON (what RouteSizes learns); none for an alias it lacks or
-    one an error names (its null says nothing of the route's size)."""
+    compact JSON (what RouteSizes learns), reckoned from its patterns and
+    positions (PATTERN_BYTES, POSITION_BYTES): the answer, up to
+    VEHICLE_MAX_BYTES, is not encoded again on the event loop to weigh
+    it. No size for an alias it lacks or one an error names (its null says
+    nothing of the route's size)."""
     aliases = [f"r{i}" for i in range(len(routes))]
     data, failed = _alias_data(doc, aliases)
-    return {
-        r: len(json.dumps(data[a], separators=(",", ":")))
-        for a, r in zip(aliases, routes)
-        if a in data and a not in failed
-    }
+    out: dict[str, int] = {}
+    for alias, route in zip(aliases, routes):
+        if alias not in data or alias in failed:
+            continue
+        patterns = data[alias].get("patterns") if isinstance(data[alias], dict) else None
+        patterns = patterns if isinstance(patterns, list) else []
+        positions = len(_route_positions(data[alias]))
+        out[route] = ROUTE_BYTES + len(patterns) * PATTERN_BYTES + positions * POSITION_BYTES
+    return out
 
 
 def needs_route_vehicles(res: TripResult | None, now: float | None = None) -> bool:
@@ -428,7 +485,7 @@ def add_vehicles(
     out = dict(results)
     for key, res in results.items():
         if needs_route_vehicles(res, now):
-            vehicle = _vehicle(positions, key, realtime._strip(res.route, key.prefix))
+            vehicle = _vehicle(positions, key, realtime._strip(res.route, key.prefix), now)
             if vehicle is not None:
                 out[key] = res._replace(vehicle=vehicle)
     _one_run(out)
@@ -614,6 +671,24 @@ def _gid(obj: Any) -> str:
     return _str(obj.get("gtfsId")) if isinstance(obj, dict) else ""
 
 
+def _day(value: Any) -> int | None:
+    """A serviceDay (DAY_MIN-DAY_MAX), else None; an epoch alike."""
+    day = _int(value)
+    return day if day is not None and DAY_MIN <= day <= DAY_MAX else None
+
+
+def _seconds(value: Any) -> int | None:
+    """Seconds after a serviceDay (SECONDS_MIN-SECONDS_MAX), else None."""
+    seconds = _int(value)
+    return seconds if seconds is not None and SECONDS_MIN <= seconds <= SECONDS_MAX else None
+
+
+def _delay(value: Any) -> int | None:
+    """A delay in seconds, two days either way at most, else None."""
+    delay = _int(value)
+    return delay if delay is not None and -SECONDS_MAX <= delay <= SECONDS_MAX else None
+
+
 def _epoch(day: int | None, seconds: int | None) -> int | None:
     return day + seconds if day is not None and seconds is not None else None
 
@@ -625,14 +700,14 @@ def _stop_update(st: dict[str, Any], prefix: str) -> realtime.StopUpdate:
         return realtime.StopUpdate(stop_id, None, None, None, None, None, 0)
     if st.get("realtimeState") == "CANCELED":
         return realtime.StopUpdate(stop_id, None, None, None, None, None, 1)
-    day = _int(st.get("serviceDay"))
+    day = _day(st.get("serviceDay"))
     return realtime.StopUpdate(
         stop_id,
         None,
-        _int(st.get("arrivalDelay")),
-        _epoch(day, _int(st.get("realtimeArrival"))),
-        _int(st.get("departureDelay")),
-        _epoch(day, _int(st.get("realtimeDeparture"))),
+        _delay(st.get("arrivalDelay")),
+        _epoch(day, _seconds(st.get("realtimeArrival"))),
+        _delay(st.get("departureDelay")),
+        _epoch(day, _seconds(st.get("realtimeDeparture"))),
         0,
     )
 
@@ -655,14 +730,21 @@ def _rt_pattern(trip: dict[str, Any]) -> bool:
     return isinstance(pattern, dict) and _RT_PATTERN in _str(pattern.get("code"))
 
 
-def _vehicle(positions: Sequence[dict[str, Any]], key: TripKey, route_id: str) -> realtime.Vehicle | None:
+def _vehicle(
+    positions: Sequence[dict[str, Any]], key: TripKey, route_id: str, now: float | None = None
+) -> realtime.Vehicle | None:
     """The newest of the positions that name this very trip.
 
     Matched by trip id alone: OTP's VehiclePosition names its trip but not
     the trip's service date, so another day's run of the id cannot be told
     apart here. parse_trip only asks for one when the date's run has
     realtime calls, so a vehicle is attached only to a run that is live
-    (and parse_response to one run of the id)."""
+    (and parse_response to one run of the id).
+
+    A lastUpdated that is no epoch of DAY_MIN-DAY_MAX is no timestamp; with
+    now (the request's epoch), a position stamped more than
+    realtime.MAX_POSITION_AHEAD after it is none at all: it would never
+    grow old (realtime._vehicle_json) and always be the newest here."""
     best: realtime.Vehicle | None = None
     for vp in positions:
         if _gid(vp.get("trip")) != key.gtfs_id:
@@ -674,7 +756,9 @@ def _vehicle(positions: Sequence[dict[str, Any]], key: TripKey, route_id: str) -
             continue
         rel = vp.get("stopRelationship")
         rel = rel if isinstance(rel, dict) else {}
-        ts = _int(vp.get("lastUpdated"))
+        ts = _day(vp.get("lastUpdated"))
+        if ts is not None and now is not None and ts > now + realtime.MAX_POSITION_AHEAD:
+            continue
         if best is not None and (ts is None or (best.timestamp is not None and ts <= best.timestamp)):
             continue
         best = realtime.Vehicle(
@@ -692,14 +776,17 @@ def _vehicle(positions: Sequence[dict[str, Any]], key: TripKey, route_id: str) -
     return best
 
 
-def parse_trip(trip: Any, key: TripKey, positions: Sequence[dict[str, Any]] | None = None) -> TripResult:
+def parse_trip(
+    trip: Any, key: TripKey, positions: Sequence[dict[str, Any]] | None = None, now: float | None = None
+) -> TripResult:
     """One alias's answer. A trip with no realtime call on the date has no
     update and no vehicle: the pattern's vehicle on this trip id is then
     another day's run of it. Every call CANCELED: the trip is canceled
     (TripDescriptor relationship 3); one CANCELED call among updated ones
     is that stop skipped (StopTimeUpdate relationship 1). positions are
     the vehicles to look for the trip's among, by default its own alias's
-    pattern's (parse_response gives those of every alias)."""
+    pattern's (parse_response gives those of every alias); now as for
+    _vehicle."""
     if not isinstance(trip, dict):
         raise ValueError("trip is not an object")
     route_gid = _gid(trip.get("route"))
@@ -718,14 +805,15 @@ def parse_trip(trip: Any, key: TripKey, positions: Sequence[dict[str, Any]] | No
         return TripResult(tu, None, ends, **more)
     stops = [_stop_update(c, key.prefix) for c in calls]
     tu = realtime.TripUpdate(trip_id, key.date, route_id, 0, None, stops)
-    return TripResult(tu, _vehicle(_positions(trip) if positions is None else positions, key, route_id), ends, **more)
+    found = _vehicle(_positions(trip) if positions is None else positions, key, route_id, now)
+    return TripResult(tu, found, ends, **more)
 
 
 def _times(calls: list[dict[str, Any]]) -> list[int]:
     """The calls' times: realtimeArrival and -Departure are the scheduled
     times on a call without realtime data."""
     times = [
-        _epoch(_int(c.get("serviceDay")), _int(c.get(f)))
+        _epoch(_day(c.get("serviceDay")), _seconds(c.get(f)))
         for c in calls
         for f in ("realtimeArrival", "realtimeDeparture")
     ]
@@ -775,7 +863,9 @@ def _alias_data(doc: Any, aliases: Sequence[str]) -> tuple[dict[str, Any], set[s
     return data, failed
 
 
-def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResult | None]:
+def parse_response(
+    doc: Any, trips: Sequence[TripKey], now: float | None = None
+) -> dict[TripKey, TripResult | None]:
     """Per trip of build_query(trips): its TripResult, or None when the
     planner does not know the trip (a null alias); a trip a GraphQL error
     names by its alias is not in the result (no answer, _alias_data). Any
@@ -789,7 +879,8 @@ def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResu
     the alias of its scheduled run the day before). Each position names
     its trip, and goes to one live run of it (_one_run). A trip still
     without one there is on its route's scheduled patterns
-    (mavplusz_rt_pattern.json): needs_route_vehicles, add_vehicles."""
+    (mavplusz_rt_pattern.json): needs_route_vehicles, add_vehicles. now
+    (the request's epoch) as for _vehicle."""
     data, failed = _alias_data(doc, [f"t{i}" for i in range(len(trips))])
     raw: list[tuple[TripKey, Any]] = []
     for i, key in enumerate(trips):
@@ -802,7 +893,7 @@ def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResu
     positions = [vp for _key, trip in raw for vp in _positions(trip)]
     out: dict[TripKey, TripResult | None] = {}
     for key, trip in raw:
-        out[key] = None if trip is None else parse_trip(trip, key, positions)
+        out[key] = None if trip is None else parse_trip(trip, key, positions, now)
     _one_run(out)
     return out
 
