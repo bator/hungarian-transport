@@ -292,15 +292,17 @@ check("release.yml has no schedule trigger and no timetable refresh path",
       and "HUNGARIAN_TRANSPORT_CARRY_INDEX" not in _wf_text and "\n  beta:\n" not in _wf_text)
 # A stable release starts the daily Pages workflow, which rebuilds the Volán
 # and city indexes with the new release's builders and against its indexes
-# (timetables.json's release_feed): only after the release is published,
-# not for a -rev prerelease, from a job that may start workflows and
-# nothing else, and a failure to start it is a warning (the cron catches up).
+# (timetables.json's release_feed and release_version): only after the
+# release is published, not for a -rev prerelease, only for the highest
+# stable release (not a backport tag of an older line), from a job that may
+# start workflows and list releases and nothing else, and a failure to list
+# the releases or to start it is a warning (the cron catches up).
 _pages = _wf_text[_wf_text.index("\n  pages:\n"):] if "\n  pages:\n" in _wf_text else ""
 check("after a stable release the Pages timetables are rebuilt at once: mav-index-daily.yml on main with"
-      " timetables=true, by a job of its own that may only start workflows",
+      " timetables=true, by a job of its own that may only start workflows and read the releases",
       "    needs: [resolve, publish]" in _pages
       and "    if: needs.resolve.outputs.create == 'true' && !contains(needs.resolve.outputs.tag, '-rev.')" in _pages
-      and re.search(r"^    permissions:\n      actions: write\n    steps:", _pages, re.M) is not None
+      and re.search(r"^    permissions:\n      actions: write\n      contents: read\n    steps:", _pages, re.M) is not None
       and "gh workflow run mav-index-daily.yml --ref main -f timetables=true" in _pages
       and "::warning title=Pages timetables not started::" in _pages
       and "actions/checkout" not in _pages and "secrets." not in _pages
@@ -309,22 +311,41 @@ check("after a stable release the Pages timetables are rebuilt at once: mav-inde
 with tempfile.TemporaryDirectory() as _tmp:
     _ws = Path(_tmp)
     (_ws / "bin").mkdir()
-    (_ws / "bin" / "gh").write_text('#!/usr/bin/env bash\necho "$*" > "$PWD/gh-args.txt"\n'
-                                    '[ "${STUB_GH:-}" != fail ] || { echo "HTTP 403" >&2; exit 1; }\n')
+    # gh api: the stable tags (STUB_TAGS, as the --jq filter leaves them),
+    # or an API failure; gh workflow run: its arguments written down.
+    (_ws / "bin" / "gh").write_text(
+        '#!/usr/bin/env bash\n'
+        'if [ "$1" = api ]; then\n'
+        '  [ "${STUB_API:-}" != fail ] || { echo "HTTP 502" >&2; exit 1; }\n'
+        '  printf "%s\\n" $STUB_TAGS; exit 0\n'
+        'fi\n'
+        'echo "$*" > "$PWD/gh-args.txt"\n'
+        '[ "${STUB_GH:-}" != fail ] || { echo "HTTP 403" >&2; exit 1; }\n')
     (_ws / "bin" / "gh").chmod(0o755)
     try:
         _start = step_script("Start mav-index-daily.yml")
     except StopIteration:
         _start = "exit 1\n"
-    for _case, _want in (("ok", "mav-index-daily.yml started on main (timetables=true) for v1.2.3"),
-                         ("fail", "::warning title=Pages timetables not started::")):
-        _done, _ = bash(_start, _ws, PATH=f"{_ws / 'bin'}:{os.environ['PATH']}", STUB_GH=_case, TAG="v1.2.3",
-                        GH_TOKEN="x", GH_REPO="o/r")
-        check(f"the Pages start step, gh {_case}: exit 0, " + ("started" if _case == "ok" else "a warning"),
-              _done.returncode == 0 and _want in _done.stdout
-              and (_ws / "gh-args.txt").read_text().split() == ["workflow", "run", "mav-index-daily.yml", "--ref",
-                                                                "main", "-f", "timetables=true"],
-              repr((_done.returncode, _done.stdout, _done.stderr)))
+    _run_args = ["workflow", "run", "mav-index-daily.yml", "--ref", "main", "-f", "timetables=true"]
+    for _case, _tag, _tags, _env, _want, _started in (
+        ("the highest stable", "v1.2.3", "v1.1.9 v1.2.3 v1.2.2", {},
+         "mav-index-daily.yml started on main (timetables=true) for v1.2.3", True),
+        ("the highest by version, not by text (v1.10.0 above v1.9.5)", "v1.10.0", "v1.9.5 v1.10.0", {},
+         "started on main", True),
+        ("a backport tag below the highest stable", "v1.1.10", "v1.1.10 v1.2.3 v1.1.9", {},
+         "v1.1.10 is not the highest stable release (v1.2.3)", False),
+        ("the highest stable, gh workflow run fails", "v1.2.3", "v1.2.3", {"STUB_GH": "fail"},
+         "::warning title=Pages timetables not started::Could not start", True),
+        ("the releases cannot be listed", "v1.2.3", "v1.2.3", {"STUB_API": "fail"},
+         "::warning title=Pages timetables not started::Could not list the releases", False),
+    ):
+        (_ws / "gh-args.txt").unlink(missing_ok=True)
+        _done, _ = bash(_start, _ws, PATH=f"{_ws / 'bin'}:{os.environ['PATH']}", TAG=_tag, STUB_TAGS=_tags,
+                        GH_TOKEN="x", GH_REPO="o/r", **_env)
+        _ran = (_ws / "gh-args.txt").read_text().split() if (_ws / "gh-args.txt").exists() else None
+        check(f"the Pages start step, {_case}: exit 0, " + ("started" if _started else "not started"),
+              _done.returncode == 0 and _want in _done.stdout and _ran == (_run_args if _started else None),
+              repr((_done.returncode, _done.stdout, _done.stderr, _ran)))
 check("the release runs from a v* tag push or from main",
       re.search(r"^  push:\n    tags:\n      - \"v\*\"$", _wf_text, re.M) is not None
       and '[ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]' in _wf_text)
