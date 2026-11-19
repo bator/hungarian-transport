@@ -22,8 +22,6 @@ from custom_components.hungarian_transport.const import (
 )
 
 from .test_mav_daily import NEW, OLD, _at, _index, _manifest, _serve
-# Autouse: mav-index.json taken as signed (its signature has its own tests there).
-from .test_mav_daily import signed_manifest  # noqa: F401
 
 # The real round, before the fixtures below replace it.
 _real_update = mav_daily.async_update

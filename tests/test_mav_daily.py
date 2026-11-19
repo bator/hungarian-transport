@@ -46,30 +46,16 @@ def small_feeds(monkeypatch):
     monkeypatch.setattr(mav, "MIN_TRAINS", 1)
 
 
-# The tests' signing key: the signature tests below sign mav-index.json with
-# it, and the integration checks with its public half (real_signature).
+# The tests' signing key (conftest's pages_key here): the signature tests
+# below sign mav-index.json with it, and the integration checks with its
+# public half; the other tests' signature is conftest's signed_manifest.
 _KEY = Ed25519PrivateKey.generate()
 _PUBLIC = base64.b64encode(_KEY.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
 
 
 @pytest.fixture
-def real_signature(monkeypatch):
-    """The manifest's signature checked for real, against the tests' key."""
-    monkeypatch.setattr(mav_daily, "PAGES_PUBLIC_KEYS", (_PUBLIC,))
-
-
-@pytest.fixture(autouse=True)
-def signed_manifest(request, monkeypatch):
-    """Most tests are about the index: mav-index.json is taken as signed,
-    with no request for its signature, unless the test asks for
-    real_signature (the signature's own tests)."""
-    if "real_signature" in request.fixturenames:
-        return
-
-    async def signed(hass, session, raw):
-        return None
-
-    monkeypatch.setattr(mav_daily, "_signed", signed)
+def pages_key():
+    return _KEY
 
 
 def _sign(body: bytes, key: Ed25519PrivateKey = _KEY) -> str:  # gitleaks:allow (a test signing helper, no secret)
@@ -1132,6 +1118,26 @@ async def test_startup_keeps_an_index_of_the_same_feed_when_the_zip_is_copied_ag
 # --- the manifest's signature (review round 7) ---------------------------------
 
 
+async def test_without_real_signature_only_the_signature_s_answer_is_stubbed(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """conftest's signed_manifest answers the .sig with a good signature of
+    the manifest's bytes; the check itself runs: by a key the integration
+    does not list, the round installs nothing."""
+    raw = _index(NEW)
+    _serve(aioclient_mock, raw)
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
+    assert mav_daily.SIGNATURE_URL not in {str(c[1]) for c in aioclient_mock.mock_calls}
+    other = base64.b64encode(
+        Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ).decode()
+    monkeypatch.setattr(mav_daily, "PAGES_PUBLIC_KEYS", (other,))
+    (card_assets / mav.INDEX_NAME).unlink()
+    done = await mav_daily.async_update(hass, card_assets)
+    assert (done.result, done.reason) == (mav_daily.SETTLING, mav_daily.UNKNOWN_KEY)
+    assert not (card_assets / mav.INDEX_NAME).exists()
+
+
 async def test_a_signed_manifest_installs(hass: HomeAssistant, aioclient_mock, card_assets, real_signature) -> None:
     raw = _index(NEW)
     _serve_signed(aioclient_mock, raw)
@@ -1211,6 +1217,33 @@ async def test_a_signature_settles_on_its_own_scope(
     aioclient_mock.get(mav_daily.MANIFEST_URL, content=body)
     aioclient_mock.get(mav_daily.SIGNATURE_URL, side_effect=sig)
     aioclient_mock.get(mav_daily.INDEX_URL, side_effect=index)
+    results = [(await mav_daily.async_update(hass, card_assets)).result for _ in range(3)]
+    assert results == [mav_daily.SETTLING, mav_daily.SETTLING, mav_daily.INSTALLED]
+
+
+async def test_an_index_then_the_signature_settle_each_on_their_own_scope(
+    hass: HomeAssistant, aioclient_mock, card_assets, real_signature
+) -> None:
+    """The other way round (review round 8): the index of another
+    generation settles first, then the previous deploy's signature in the
+    same cycle settles too, not FAILED; then the deploy installs."""
+    from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
+
+    raw = _index(NEW)
+    body = json.dumps(_manifest(raw)).encode()
+    sigs = iter([_sign(body), _sign(body + b"old"), _sign(body)])
+    indexes = iter([_index(OLD), raw])
+
+    async def sig(method, url, data):
+        return AiohttpClientMockResponse(method, url, text=next(sigs))
+
+    async def index(method, url, data):
+        return AiohttpClientMockResponse(method, url, response=next(indexes))
+
+    aioclient_mock.get(mav_daily.MANIFEST_URL, content=body)
+    aioclient_mock.get(mav_daily.SIGNATURE_URL, side_effect=sig)
+    aioclient_mock.get(mav_daily.INDEX_URL, side_effect=index)
+    mav_daily._matched(hass)
     results = [(await mav_daily.async_update(hass, card_assets)).result for _ in range(3)]
     assert results == [mav_daily.SETTLING, mav_daily.SETTLING, mav_daily.INSTALLED]
 

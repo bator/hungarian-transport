@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import sys
 import time
 from datetime import date, timedelta
 from pathlib import Path
@@ -65,9 +66,16 @@ def no_pages_timetables():
     yield
 
 
+@pytest.fixture
+def pages_key():
+    return _KEY
+
+
 @pytest.fixture(autouse=True)
-def test_key(monkeypatch):
-    monkeypatch.setattr(mav_daily, "PAGES_PUBLIC_KEYS", (_PUBLIC,))
+def test_key(real_signature):
+    """The Site signs its manifests with _KEY (pages_key), and the
+    integration fetches and checks the signature for real
+    (conftest's real_signature)."""
 
 
 def _sign(body: bytes, key: Ed25519PrivateKey = _KEY) -> str:  # gitleaks:allow (a test signing helper, no secret)
@@ -1826,6 +1834,37 @@ async def test_two_manifests_taking_turns_settle_once_then_fail(
     assert (await _round(hass, card_assets))["volan"] == wt.SETTLING
 
 
+async def test_an_index_then_the_signature_settle_each_on_their_own_scope(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    """The other way round from a stale signature first (review round 8):
+    the index of another generation settles, then, in the same cycle, the
+    previous deploy's signature settles too (its own scope), not FAILED;
+    then the deploy installs."""
+    site = Site()
+    raw, _, _ = site.publish("volan", VOLAN_NEW)
+    body = site.body()
+    sigs = iter([_sign(body), _sign(body + b"the previous deploy"), _sign(body)])
+    indexes = iter([_flipped(raw), raw])
+
+    async def signature(method, url, data):
+        return AiohttpClientMockResponse(method, url, text=next(sigs))
+
+    async def index(method, url, data):
+        return AiohttpClientMockResponse(method, url, response=next(indexes))
+
+    aioclient_mock.get(wt.MANIFEST_URL, content=body)
+    aioclient_mock.get(wt.SIGNATURE_URL, side_effect=signature)
+    aioclient_mock.get(f"{mav_daily.PAGES_BASE}/volan-index.json.gz", side_effect=index)
+    for path, content in site.files.items():
+        if path != "volan-index.json.gz":
+            aioclient_mock.get(f"{mav_daily.PAGES_BASE}/{path}", content=content)
+    wt.new_cycle(hass)
+    results = [(await _round(hass, card_assets))["volan"] for _ in range(3)]
+    assert results == [wt.SETTLING, wt.SETTLING, wt.INSTALLED]
+    assert (card_assets / timetables.VOLAN_INDEX).read_bytes() == raw
+
+
 async def test_an_index_the_site_no_longer_has_settles_then_fails(
     hass: HomeAssistant, aioclient_mock, card_assets
 ) -> None:
@@ -2093,6 +2132,18 @@ def _openssl_signs(tmp_path: Path) -> bool:
     return done.returncode == 0 and len(done.stdout) == 64
 
 
+def _need_openssl(tmp_path: Path) -> None:
+    """Skip without an openssl that signs raw ed25519; on GitHub Actions
+    (GITHUB_ACTIONS set: its runners have openssl 3, and the Pages workflow
+    signs with it) fail instead: a skip there would hide that the
+    interoperability is no longer checked."""
+    if _openssl_signs(tmp_path):
+        return
+    if os.environ.get("GITHUB_ACTIONS"):
+        pytest.fail("no openssl 3 on this GitHub Actions runner (pkeyutl -rawin): the signer's format is unchecked")
+    pytest.skip("no openssl 3 here (pkeyutl -rawin)")
+
+
 def _seed_and_public() -> tuple[bytes, str]:
     from cryptography.hazmat.primitives.serialization import NoEncryption, PrivateFormat
 
@@ -2102,12 +2153,21 @@ def _seed_and_public() -> tuple[bytes, str]:
     return seed, public
 
 
+def test_without_openssl_the_interop_tests_fail_on_github_actions(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "_openssl_signs", lambda path: False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    with pytest.raises(pytest.fail.Exception, match="no openssl 3"):
+        _need_openssl(tmp_path)
+    monkeypatch.delenv("GITHUB_ACTIONS")
+    with pytest.raises(pytest.skip.Exception):
+        _need_openssl(tmp_path)
+
+
 def test_a_manifest_signed_by_the_site_s_signer_verifies_here(tmp_path) -> None:
     import subprocess
     import sys
 
-    if not _openssl_signs(tmp_path):
-        pytest.skip("no openssl 3 here (pkeyutl -rawin)")
+    _need_openssl(tmp_path)
     seed, public = _seed_and_public()
     site = tmp_path / "site"
     site.mkdir()
@@ -2135,8 +2195,7 @@ def test_a_mav_manifest_signed_by_the_site_s_signer_verifies_here(tmp_path) -> N
     sign over any file's bytes)."""
     import importlib.util
 
-    if not _openssl_signs(tmp_path):
-        pytest.skip("no openssl 3 here (pkeyutl -rawin)")
+    _need_openssl(tmp_path)
     spec = importlib.util.spec_from_file_location("_sign_manifest_under_test", ROOT / "scripts" / "sign_manifest.py")
     sm = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(sm)
