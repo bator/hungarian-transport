@@ -1035,6 +1035,32 @@ check("an old stop moved beyond ALIAS_M is an alias of the nearest stop of its n
       " NAME_ALIAS_M", aliases.get("40") == "SZ_40" and aliases.get("44") == "SZ_45" and not kept, repr(aliases))
 check("not of another name, another mode or beyond NAME_ALIAS_M",
       not {"41", "42", "43"} & set(aliases), repr(aliases))
+# By name also without the bracketed part and with "utca" and "út" alike
+# (Szeged's Vásárhelyi Pál utca tram stop, 140 m from SZKT's Vásárhelyi
+# Pál út), a stop of the very name first; still of its mode (the
+# trolleybus stops of Budapesti körút (József Attila sugárút) are 103-136 m
+# from SZKT's tram stops of Budapesti körút) and within NAME_ALIAS_M (Agyagos
+# utca, 234 m).
+kept, aliases = paired(
+    [stop_part("szeged", [("szeged:60", LAT, LON, "Vásárhelyi Pál utca"),
+                          ("szeged:61", LAT + 5000, LON, "Budapesti körút (József Attila sugárút)"),
+                          ("szeged:62", LAT + 10000, LON, "Budapesti körút (József Attila sugárút)"),
+                          ("szeged:63", LAT + 15000, LON, "Agyagos utca"), ("szeged:64", LAT + 20000, LON, "Kiss utca")],
+               [(0, [0, 3, 4]), (11, [1, 2])])],
+    [stop_part("szeged", [("szeged:SZ_60", LAT + 127, LON, "Vásárhelyi Pál út"),
+                          ("szeged:SZ_61", LAT + 5100, LON, "Budapesti körút"),
+                          ("szeged:SZ_62", LAT + 10095, LON, "Budapesti körút"),
+                          ("szeged:SZ_63", LAT + 15213, LON, "Agyagos út"), ("szeged:SZ_64", LAT + 20055, LON, "Kiss út"),
+                          ("szeged:SZ_65", LAT + 20110, LON, "Kiss utca")],
+               [(0, [0, 2, 3, 4, 5]), (800, [1])])])
+check("an alias by name also matches a name without its bracketed part, and utca as út",
+      aliases.get("60") == "SZ_60" and aliases.get("61") == "SZ_61" and not kept, repr((kept, aliases)))
+check("an alias by name is still of the old stop's mode and within NAME_ALIAS_M, a stop of the very name first",
+      "62" not in aliases and "63" not in aliases and aliases.get("64") == "SZ_65", repr(aliases))
+check("names compare loosely only for the alias by name",
+      sim.loose("Budapesti körút (József Attila sugárút)") == sim.loose("Budapesti körút")
+      and sim.loose("Vásárhelyi Pál utca") == sim.loose("Vásárhelyi Pál út") != sim.loose("Vásárhelyi Pál")
+      and sim.loose("Vértó") != sim.loose("Vértói út") and sim.fold("Rózsa utca") != sim.fold("Rózsa út"))
 full = [(f"szeged:{50 + k}", LAT + 4 * k, LON, "Tele") for k in range(sim.ALIASES_PER_STOP + 1)]
 kept, aliases = paired([stop_part("szeged", [*full, ("szeged:59", LAT + 100, LON, "Tele")], [(0, list(range(6)))])],
                        [stop_part("szeged", [("szeged:SZ_50", LAT, LON, "Tele")], [(0, [0])])])
@@ -1061,8 +1087,9 @@ with tempfile.TemporaryDirectory() as tmp:
     finally:
         bci.CITY_FEEDS = real_feeds
     check("the generator pairs the feed's stops with the old index's, from the index or a release zip,"
-          " each kept id with the old stop's place",
-          got[0] == got[1] == ({"1": ("1001", 46.25, 20.14), "2": ("1002", 46.26, 20.14)}, {"1003": "2"}),
+          " each kept id with the old stop's place and modes, each alias with the old stop's place",
+          got[0] == got[1] == ({"1": ("1001", 46.25, 20.14, (3,)), "2": ("1002", 46.26, 20.14, (3,))},
+                               {"1003": ("2", 46.2602, 20.14)}),
           repr(got))
     text = sim.render("x", *got[0], "# x: test")
     target = Path(tmp) / "build.py"
@@ -1075,8 +1102,8 @@ with tempfile.TemporaryDirectory() as tmp:
     ns: dict = {}
     exec(target.read_text(encoding="utf-8"), ns)  # noqa: S102 - the file the test just wrote
     check("--write replaces the feed's own tables between its markers, again and again, and no other feed's",
-          ns["X_STOP_IDS"] == {"1": ("1001", 46.25, 20.14), "2": ("1002", 46.26, 20.14)}
-          and ns["X_STOP_ALIASES"] == {"1003": "2"} and ns["Y_STOP_IDS"] == {"7": "1007"}
+          ns["X_STOP_IDS"] == {"1": ("1001", 46.25, 20.14, (3,)), "2": ("1002", 46.26, 20.14, (3,))}
+          and ns["X_STOP_ALIASES"] == {"1003": ("2", 46.2602, 20.14)} and ns["Y_STOP_IDS"] == {"7": "1007"}
           and ns["A"] == 1 and ns["B"] == 2 and target.read_text(encoding="utf-8").count(x_begin) == 1,
           target.read_text(encoding="utf-8"))
     legacy = f"A = 1\n{sim.LEGACY_BEGIN}\nX_STOP_IDS = {{}}\nX_STOP_ALIASES = {{}}\n{sim.LEGACY_END}\nB = 2\n"
@@ -1088,7 +1115,7 @@ with tempfile.TemporaryDirectory() as tmp:
     ns = {}
     exec(target.read_text(encoding="utf-8"), ns)  # noqa: S102 - the file the test just wrote
     check("the one block of the earlier scripts becomes the feed's own",
-          ns["X_STOP_ALIASES"] == {"1003": "2"} and sim.LEGACY_BEGIN not in target.read_text(encoding="utf-8")
+          ns["X_STOP_ALIASES"] == {"1003": ("2", 46.2602, 20.14)} and sim.LEGACY_BEGIN not in target.read_text(encoding="utf-8")
           and target.read_text(encoding="utf-8").count(x_begin) == 1 and ns["B"] == 2,
           target.read_text(encoding="utf-8"))
 
@@ -1124,15 +1151,20 @@ ids, als = szeged.get("stop_ids") or {}, szeged.get("stop_aliases") or {}
 check("only Szeged keeps old stop ids or has stop aliases",
       [f["id"] for f in real_feeds if f.get("stop_ids") or f.get("stop_aliases")] == ["szeged"])
 check("Szeged's table gives 170 SZKT stops (SZ_…) their old numeric ids, one each, with the old stop's place"
-      " in Szeged; 5 aliases", len(ids) == 170 and len({v[0] for v in ids.values()}) == 170 and len(als) == 5
-      and all(k.startswith("SZ_") and len(v) == 3 and v[0].isdigit() and 46.2 < v[1] < 46.35
-              and 20.0 < v[2] < 20.25 for k, v in ids.items())
-      and all(k.isdigit() and v.startswith("SZ_") for k, v in als.items()), repr((len(ids), len(als))))
+      " in Szeged and its modes (trams, trolleybuses); 6 aliases, each with the old stop's place",
+      len(ids) == 170 and len({v[0] for v in ids.values()}) == 170 and len(als) == 6
+      and all(k.startswith("SZ_") and len(v) == 4 and v[0].isdigit() and 46.2 < v[1] < 46.35
+              and 20.0 < v[2] < 20.25 and set(v[3]) & {0, 11} for k, v in ids.items())
+      and all(k.isdigit() and len(v) == 3 and v[0].startswith("SZ_") and 46.2 < v[1] < 46.35
+              and 20.0 < v[2] < 20.25 for k, v in als.items()), repr((len(ids), len(als))))
+targets = [v[0] for v in als.values()]
 check("no Szeged alias is a kept id or exceeds ALIASES_PER_STOP for its stop",
       not set(als) & {v[0] for v in ids.values()}
-      and max((list(als.values()).count(v) for v in als.values()), default=0) <= sim.ALIASES_PER_STOP, repr(als))
+      and max((targets.count(v) for v in targets), default=0) <= sim.ALIASES_PER_STOP, repr(als))
 check("the Dózsa utca trolleybus stop, 57 m from SZKT's, is an alias of it by name",
-      als.get("2429618764") == "SZ_62317", repr(als))
+      als.get("2429618764", ("",))[0] == "SZ_62317", repr(als))
+check("the Vásárhelyi Pál utca tram stop, 140 m from SZKT's Vásárhelyi Pál út, is an alias of it by name",
+      als.get("1403707953", ("",))[0] == "SZ_62366", repr(als))
 
 
 def old_card_stop(idx: dict, op: str, saved_id: str, saved_name: str) -> list | None:
@@ -1360,6 +1392,98 @@ check("an alias whose stop the feed lacks is reported with the stale table, unle
                           " (left out) are not in the feed"), err_text)
 check("a feed without a table is left as it is",
       bci.keep_stop_ids([stop_part("x", [("x:1", LAT, LON)], [])], {"id": "x"}) == 0)
+
+
+def table_aliases(parts: list[dict], feed: dict) -> tuple[dict | BaseException, dict | BaseException]:
+    """stop_aliases and stop_id_counts of parts with feed as the one city
+    feed (the exception, if one is raised)."""
+    bci.CITY_FEEDS = [feed]
+    try:
+        got = []
+        for fn in (bci.stop_aliases, bci.stop_id_counts):
+            try:
+                got.append(fn(parts))
+            except Exception as err:  # noqa: BLE001 - shown in the check
+                got.append(err)
+        return got[0], got[1]
+    finally:
+        bci.CITY_FEEDS = real_feeds
+
+
+# An alias to a stop outside the stop id table (Szeged's Dózsa utca, to
+# SZ_62317) has the old stop's place too: if the feed gives the id to a stop
+# elsewhere (3 km off), the old cards do not follow it; one within
+# ALIAS_KEEP_M (a name alias up to 150 m) and one in the plain form resolve.
+moved_alias = stop_part("x", [("x:SZ_1", LAT, LON), ("x:SZ_7", LAT + 27000, LON), ("x:SZ_8", LAT + 127, LON)],
+                        [(0, [0, 1, 2])])
+alias_feed = {"id": "x", "stop_ids": {}, "stop_aliases": {
+    "1005": ("SZ_7", LAT / 1e5, LON / 1e5), "1006": ("SZ_8", LAT / 1e5, LON / 1e5), "1007": "SZ_1"}}
+n_err = raises(lambda: keep_ids([moved_alias], alias_feed))
+_n, out_text, err_text = keep_ids([moved_alias], alias_feed) if n_err is None else (0, "", repr(n_err))
+got_aliases, counts = table_aliases([moved_alias], alias_feed)
+check("an alias to a stop outside the stop id table that the feed moved beyond ALIAS_KEEP_M is left out of"
+      " \"al\", counted and reported; one within it and one without a place resolve",
+      got_aliases == {"x:1006": "x:SZ_8", "x:1007": "x:SZ_1"} and isinstance(counts, dict)
+      and counts.get("dropped_aliases") == 1 and "1 of its 3 stop aliases are to a stop more than" in err_text
+      and f"{bci.ALIAS_KEEP_M:.0f} m" in err_text and "1005" in err_text and out_text == "",
+      repr((got_aliases, counts, err_text)))
+
+# KEEP_ID_M does not tell the old stop from another one 20-40 m away (the
+# opposite pole): a kept id also has to be on a stop of a mode of the old
+# stop's. A feed that swapped a tram stop's id with the trolleybus pole
+# across the street keeps the feed's id there, and an alias to it is left
+# out; a stop of the old stop's mode, an entry without modes and a stop
+# without trips keep the old id.
+swapped = stop_part("x", [("x:SZ_1", LAT + 27, LON), ("x:SZ_2", LAT + 5027, LON), ("x:SZ_3", LAT + 10027, LON),
+                          ("x:SZ_4", LAT + 15027, LON)], [(800, [0]), (900, [1]), (800, [2])])
+swap_feed = {"id": "x", "stop_ids": {
+    "SZ_1": ("1001", LAT / 1e5, LON / 1e5, (0,)), "SZ_2": ("1002", (LAT + 5000) / 1e5, LON / 1e5, (0, 3)),
+    "SZ_3": ("1003", (LAT + 10000) / 1e5, LON / 1e5), "SZ_4": ("1004", (LAT + 15000) / 1e5, LON / 1e5, (0,))},
+    "stop_aliases": {"1009": "SZ_1"}}
+n, out_text, err_text = keep_ids([swapped], swap_feed)
+swap_aliases, swap_counts = table_aliases([swapped], swap_feed)
+check("a kept id on a stop of none of the old stop's modes (a swapped-direction id within KEEP_ID_M) keeps the"
+      " feed's id, is reported, and its alias is left out",
+      n == 3 and [r[0] for r in swapped["s"]] == ["x:SZ_1", "x:1002", "x:1003", "x:1004"]
+      and "1 of the 4 stops of its stop id table" in err_text and "SZ_1" in err_text
+      and "1 of its 1 stop aliases to them are left out" in err_text and swap_aliases == {}
+      and isinstance(swap_counts, dict) and swap_counts.get("dropped_aliases") == 1,
+      repr((swapped["s"], err_text, swap_aliases, swap_counts)))
+
+# A new zip refused for its content loads, and so does the zip in base that
+# is taken instead: each table warning is printed once per build (and once
+# again in the next build).
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp)
+    gtfs_zip(base / "x.zip", city_feed(trips=60))
+    staged = gtfs_zip(base / "x.zip.tmp", city_feed(trips=10))
+    stale_feed = {"id": "x", "name": "X", "url": "https://x.example/x.zip", "file": "x.zip",
+                  "stop_ids": {"9": "1009"}}
+    out = base / "city-index.json.gz"
+    bci.CITY_FEEDS = [stale_feed]
+    env = os.environ.pop("GITHUB_ACTIONS", None)
+    try:
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            bci.build_city_index(base, out, today="20261120")
+        texts = []
+        for gha in (False, True, True):
+            if gha:
+                os.environ["GITHUB_ACTIONS"] = "true"
+            with contextlib.redirect_stderr(io.StringIO()) as err_buf, \
+                    contextlib.redirect_stdout(io.StringIO()) as out_buf:
+                info = bci.build_city_index(base, out, today="20261120", zips={"x": staged})
+            texts.append((out_buf.getvalue(), err_buf.getvalue(), info.get("rejected")))
+    finally:
+        bci.CITY_FEEDS = real_feeds
+        os.environ.pop("GITHUB_ACTIONS", None)
+        if env is not None:
+            os.environ["GITHUB_ACTIONS"] = env
+    stale = "1 of the 1 stops of its stop id table are not in the feed"
+    check("a build that loads a feed twice (a new zip refused) prints each stop id table warning once, the"
+          " annotation too, and the next build again",
+          [t[2] for t in texts] == [["x"]] * 3 and texts[0][1].count(stale) == 1
+          and all(t[0].count("::warning title=Stop id table stale::") == 1 and t[0].count(stale) == 1
+                  for t in texts[1:]), repr(texts))
 
 # A feed whose own host fails is fetched from its mirror, the same zip.
 with tempfile.TemporaryDirectory() as tmp:
