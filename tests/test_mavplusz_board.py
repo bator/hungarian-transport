@@ -1822,7 +1822,9 @@ async def test_closing_the_planner_answers_the_trip_details_under_way() -> None:
         for _ in range(ready * 3 + 1):
             await asyncio.sleep(0)
         if not ready:
-            # The batch's task made but not run yet.
+            # Closed before the trip's _batched ran: it refuses at once, and
+            # no batch is made (a batch's task made but not run yet is
+            # test_closing_the_planner_before_a_batch_runs_answers_its_trips).
             boards.close()
             assert await asyncio.wait_for(call, 1) is None
             boards = mb.PlannerBoards(None, sleep=sleep, wall=lambda: WALL)
@@ -1833,3 +1835,354 @@ async def test_closing_the_planner_answers_the_trip_details_under_way() -> None:
     await asyncio.sleep(0)
     assert not boards._sending
     assert await boards.answer(TRIP, {"tripId": FIRST_TRIP}) is None and not boards._sending
+
+
+# --- The fourth review: one token for a batch of trip details, the batch
+# --- closed before it ran, the tickets' owners, the store's reports, the
+# --- planner closed under a fallback and closed once.
+
+
+class AnyTripPlanner(AnyStopPlanner):
+    """The fake planner answering the fixture's board for every stop and
+    the fixture's trip for every trip asked."""
+
+    async def __call__(self, method, url, data):
+        body = json.loads(data)
+        if "stop(id: $id)" in body["query"]:
+            return await super().__call__(method, url, data)
+        self.asked.append(body["variables"])
+        answer = {}
+        for alias in (k for k in body["variables"] if k[0] == "t"):
+            trip = copy.deepcopy(TRIPS_DOC["data"]["t0"])
+            trip["gtfsId"] = body["variables"][alias]
+            answer[alias] = trip
+        return AiohttpClientMockResponse(method, url, json={"data": answer})
+
+
+def _trip_params(i: int) -> dict:
+    return {"tripId": f"BKK_D2528{i:04d}"}
+
+
+async def test_a_dashboards_trip_details_share_one_planner_token(make_planner, aioclient_mock, monkeypatch) -> None:
+    """FUTÁR hanging in its outage, a card's 40 trip details at once: every
+    one is cut short and answered by one planner request on one token.
+    Before, each reserved a token of its own: 15 (the share) were cut short
+    and answered, and 25 kept FUTÁR's whole budget and timed out."""
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter)
+    fake = AnyTripPlanner()
+    _use(aioclient_mock, fake)
+    hang = _Hanging(clock)
+    monkeypatch.setattr(futar, "futar_get", hang)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    _futar_down(proxy)
+    calls = [asyncio.ensure_future(proxy.get(TRIP, _trip_params(i))) for i in range(40)]
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert hang.timeouts == [futar.FUTAR_FALLBACK_TIMEOUT_SEC] * 40
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+    hang.release.set()
+    got = await asyncio.gather(*calls)
+    assert [g["source"] for g in got] == ["mavplusz"] * 40
+    assert len(fake.asked) == 1 and len([k for k in fake.asked[0] if k[0] == "t"]) == 40
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+
+
+async def test_trip_details_leave_the_share_for_another_cards_board(make_planner, aioclient_mock, monkeypatch) -> None:
+    """While a card's 40 trip details wait for FUTÁR, another card's board
+    still has a token: FUTÁR is cut short for it and the planner answers.
+    Before, the trips held the whole share: FUTÁR had its 18 s for the
+    board, and the planner could not answer it (can_answer False)."""
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter)
+    fake = AnyTripPlanner()
+    _use(aioclient_mock, fake)
+    hang = _Hanging(clock)
+    monkeypatch.setattr(futar, "futar_get", hang)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    _futar_down(proxy)
+    calls = [asyncio.ensure_future(proxy.get(TRIP, _trip_params(i))) for i in range(40)]
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert boards.can_answer(BOARD, BOARD_PARAMS)
+    board = asyncio.ensure_future(proxy.get(BOARD, BOARD_PARAMS))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert hang.timeouts[-1] == futar.FUTAR_FALLBACK_TIMEOUT_SEC
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 2
+    hang.release.set()
+    got = await asyncio.gather(*calls, board)
+    assert [g["source"] for g in got] == ["mavplusz"] * 41
+    assert len(fake.asked) == 2 and limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 2
+
+
+def test_trip_tickets_share_a_token_per_batch_window_and_request() -> None:
+    """The trip details reserved within TRIP_BATCH_WAIT share one token, for
+    one request's 40 trip keys at most (two a trip at night); a later one,
+    or one past the 40, has one of its own. The token goes back once every
+    ticket on it is released unspent, and is spent once."""
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(monotonic=FakeClock(stopped=True).monotonic)
+    wall = [float(WALL)]
+    boards = mb.PlannerBoards(None, monotonic=clock.monotonic, wall=lambda: wall[0], limiter=limiter)
+
+    def left() -> float:
+        return limiter._fallback._tokens
+
+    tickets = [boards.reserve(TRIP, _trip_params(i)) for i in range(41)]
+    assert all(tickets) and left() == mavplusz.FALLBACK_BURST - 2
+    clock.now += mb.TRIP_BATCH_WAIT * 2
+    later = boards.reserve(TRIP, _trip_params(41))
+    assert left() == mavplusz.FALLBACK_BURST - 3
+    # Released unspent: each token goes back with its last ticket.
+    for ticket in tickets[:39]:
+        ticket.release()
+        ticket.release()
+    assert left() == mavplusz.FALLBACK_BURST - 3
+    tickets[39].release()
+    assert left() == mavplusz.FALLBACK_BURST - 2
+    # Spent once by the request of any ticket on it: given back by none.
+    assert later.spend() and not later.spend()
+    later.release()
+    tickets[40].release()
+    assert left() == mavplusz.FALLBACK_BURST - 1
+    # At night a trip no board dated is asked for two days: 20 fill a request.
+    wall[0] = WALL - 17 * 3600
+    assert len(boards._dates_to_try()) == 2
+    clock.now += mb.TRIP_BATCH_WAIT * 2
+    night = [boards.reserve(TRIP, _trip_params(i)) for i in range(21)]
+    assert all(night) and left() == mavplusz.FALLBACK_BURST - 3
+
+
+async def test_closing_the_planner_before_a_batch_runs_answers_its_trips() -> None:
+    """Closed right after a trip's details made their batch, before its task
+    first ran: the task is cancelled without running, so its own cleanup
+    never settles the batch. close() does, and the caller has no answer
+    instead of waiting for good."""
+    gate = asyncio.Event()
+    ran: list = []
+
+    async def sleep(seconds: float) -> None:
+        ran.append(seconds)
+        await gate.wait()
+
+    boards = mb.PlannerBoards(None, sleep=sleep, wall=lambda: WALL)
+    key = mb.TripKey("BKK:X0", "20261118")
+    call = asyncio.ensure_future(boards._batched(key, None))
+    await asyncio.sleep(0)
+    # _batched made the batch and its task, which has not run.
+    assert boards._sending and ran == []
+    boards.close()
+    with pytest.raises(mb.PlannerError, match="closed"):
+        await asyncio.wait_for(call, 1)
+    assert ran == [] and not boards._sending
+
+
+async def test_a_ticket_is_released_by_the_last_caller_that_saw_it(make_planner, aioclient_mock, monkeypatch) -> None:
+    """Two cards share a failed FUTÁR request and its planner token. The
+    first has no fallback (asked 13 s before FUTÁR failed: too late for
+    the card) and leaves first; the second's planner request spends the
+    token reserved, takes no other and gives none back. Then a board the
+    planner has cached answers both cards: the unspent token comes back."""
+    clock = FakeClock(stopped=True)
+    # The limiter's clock stands still: its shares do not refill meanwhile.
+    limiter = mavplusz.PlannerLimiter(monotonic=FakeClock(stopped=True).monotonic)
+    boards, fake, clock = make_planner(clock, limiter=limiter)
+    gate = asyncio.Event()
+
+    took = [13]
+
+    async def failing(session, api_key, path, params, timeout=None, *, executor=None):
+        asked = clock.now
+        await gate.wait()
+        clock.now = asked + took[0]
+        raise futar.FutarError("TimeoutError")
+
+    monkeypatch.setattr(futar, "futar_get", failing)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    taken: list = []
+    refunded: list = []
+    real_take, real_refund = boards._rate.take, boards._rate.refund
+    monkeypatch.setattr(boards._rate, "take", lambda: taken.append(1) or real_take())
+    monkeypatch.setattr(boards._rate, "refund", lambda: refunded.append(1) or real_refund())
+    _futar_down(proxy)
+    first = asyncio.ensure_future(proxy.get(BOARD, BOARD_PARAMS))
+    for _ in range(3):
+        await asyncio.sleep(0)
+    clock.now += 7
+    second = asyncio.ensure_future(proxy.get(BOARD, BOARD_PARAMS))
+    for _ in range(3):
+        await asyncio.sleep(0)
+    gate.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+    assert isinstance(results[0], futar.FutarError) and results[1]["source"] == "mavplusz"
+    assert len(fake.asked) == 1 and taken == [] and refunded == []
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+    # The planner's board cached: both cards answered from it, nothing spent.
+    gate.clear()
+    took[0] = 0
+    calls = [asyncio.ensure_future(proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="61"))) for _ in range(2)]
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 2
+    gate.set()
+    assert [g["source"] for g in await asyncio.gather(*calls)] == ["mavplusz"] * 2
+    assert len(fake.asked) == 1 and refunded == [1]
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+
+
+async def test_a_later_request_of_the_same_key_holds_no_earlier_ticket(make_planner, aioclient_mock, monkeypatch) -> None:
+    """A card's FUTÁR request failed, its fallback still under way (the
+    planner's board asked for another card), when the next card asks the
+    same board of FUTÁR again. The first token goes back when the first
+    card is done, not only once nobody asks for that board any more."""
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, fake, clock = make_planner(clock, limiter=limiter)
+    planner_gate = asyncio.Event()
+
+    async def slow(method, url, data):
+        await planner_gate.wait()
+        return await fake(method, url, data)
+
+    _use(aioclient_mock, slow)
+    hang = asyncio.Event()
+    modes = ["fail", "fail", "hang"]
+
+    async def futar_get(session, api_key, path, params, timeout=None, *, executor=None):
+        if modes.pop(0) == "hang":
+            await hang.wait()
+        raise futar.FutarError("ClientConnectorError")
+
+    monkeypatch.setattr(futar, "futar_get", futar_get)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    _futar_down(proxy)
+    later = dict(BOARD_PARAMS, minutesAfter="61")
+
+    async def step(params):
+        call = asyncio.ensure_future(proxy.get(BOARD, params))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        return call
+
+    other = await step(BOARD_PARAMS)
+    first = await step(later)
+    second = await step(later)
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 3 and not first.done()
+    planner_gate.set()
+    assert [g["source"] for g in await asyncio.gather(other, first)] == ["mavplusz"] * 2
+    # The first card's token is back; the second card's is held for it.
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 2
+    hang.set()
+    assert (await second)["source"] == "mavplusz" and len(fake.asked) == 1
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+
+
+def _pole_refs(station: str, poles) -> dict:
+    return {"data": {"references": {"stops": {p: {"id": p, "parentStationId": station} for p in poles}}}}
+
+
+def test_the_reports_for_the_store_stay_bounded() -> None:
+    """The stations and poles dropped at the limits are forgotten in the
+    reports too: they stay about as many as the stations and poles kept."""
+    boards = mb.PlannerBoards(None, wall=lambda: WALL)
+    for i in range(mb.MAX_STATIONS + 50):
+        boards.learn("route-details.json", {}, _pole_refs(f"BKK_CSF{i:05d}", [f"BKK_F{i:05d}"]))
+    assert len(boards._stations) == mb.MAX_STATIONS
+    assert len(boards._reported) <= mb.MAX_STATIONS
+    poles = [f"BKK_F9{i:04d}" for i in range(mb.MAX_CHILD_STOPS + 10)]
+    for pole in poles:
+        boards.learn("route-details.json", {}, _pole_refs("BKK_CSF99999", [pole]))
+    assert len(boards._stations["BKK_CSF99999"]["poles"]) == mb.MAX_CHILD_STOPS
+    assert len(boards._reported["BKK_CSF99999"]) <= mb.MAX_CHILD_STOPS + 1
+
+
+def test_a_station_or_pole_dropped_and_seen_again_is_news_for_the_store() -> None:
+    """A station or a pole dropped at the limits and named again within a
+    day is news (the store has lost it), however recently it was reported
+    before it was dropped; its next sighting within a day is not."""
+    wall = [float(WALL)]
+    saved: list = []
+    boards = mb.PlannerBoards(None, wall=lambda: wall[0], on_stations_changed=lambda: saved.append(1))
+
+    def seen(station: str, pole: str) -> bool:
+        before = len(saved)
+        boards.learn("route-details.json", {}, _pole_refs(station, [pole]))
+        return len(saved) > before
+
+    assert seen("BKK_CSF00001", "BKK_F00001")
+    wall[0] += 3600
+    for i in range(2, mb.MAX_STATIONS + 2):
+        seen(f"BKK_CSF{i:05d}", f"BKK_F{i:05d}")
+    assert "BKK_CSF00001" not in boards._stations
+    wall[0] += 3600
+    assert seen("BKK_CSF00001", "BKK_F00001")
+    assert "BKK_CSF00001" in boards.stations_data()["stations"]
+    wall[0] += mb.SEEN_RESOLUTION - 3600
+    assert not seen("BKK_CSF00001", "BKK_F00001")
+    # A pole pushed out by MAX_CHILD_STOPS newer ones, the station reported just now.
+    assert seen("BKK_CSF00002", "BKK_F20000")
+    for i in range(1, mb.MAX_CHILD_STOPS + 1):
+        assert seen("BKK_CSF00002", f"BKK_F2{i:04d}")
+    assert "BKK_F20000" not in boards._stations["BKK_CSF00002"]["poles"]
+    wall[0] += 3600
+    assert seen("BKK_CSF00002", "BKK_F20000")
+    assert "BKK_F20000" in boards.stations_data()["stations"]["BKK_CSF00002"]["poles"]
+    wall[0] += 3600
+    assert not seen("BKK_CSF00002", "BKK_F20000")
+
+
+async def test_a_closed_planner_asks_nothing_for_a_fallback_under_way(make_planner, aioclient_mock, monkeypatch) -> None:
+    """FUTÁR failing just after the entry was unloaded: the fallback under
+    way sends no board request (before, it did), and FUTÁR's error stands."""
+    clock = FakeClock(stopped=True)
+    boards, fake, clock = make_planner(clock)
+    hang = _Hanging(clock)
+    monkeypatch.setattr(futar, "futar_get", hang)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    _futar_down(proxy)
+    call = asyncio.ensure_future(proxy.get(BOARD, BOARD_PARAMS))
+    for _ in range(3):
+        await asyncio.sleep(0)
+    proxy.close()
+    hang.release.set()
+    with pytest.raises(futar.FutarError, match="TimeoutError"):
+        await call
+    assert fake.asked == []
+    assert await boards.answer(BOARD, BOARD_PARAMS) is None and fake.asked == []
+
+
+async def test_unloading_closes_the_planner_once_and_writes_its_stations_once(
+    hass, hass_storage, aioclient_mock, monkeypatch
+) -> None:
+    """The proxy closes the planner it was handed (its one owner); the
+    unload then writes what it learnt, once, closed by then."""
+    import custom_components.hungarian_transport as integration
+    from custom_components.hungarian_transport import storage
+
+    made = []
+    real = mb.PlannerBoards
+    monkeypatch.setattr(integration.mavplusz_board, "PlannerBoards",
+                        lambda *a, **k: made.append(real(*a, **k)) or made[-1])
+    writes = []
+    real_save = storage.async_save_stations
+
+    async def save(hass_, data):
+        writes.append((made[0]._closed, data))
+        await real_save(hass_, data)
+
+    monkeypatch.setattr(storage, "async_save_stations", save)
+    _inject(monkeypatch, FakeClock())
+    entry = await _setup(hass)
+    (planner,) = made
+    closes = []
+    real_close = planner.close
+    monkeypatch.setattr(planner, "close", lambda: closes.append(1) or real_close())
+    planner.learn(BOARD, {"stopId": "BKK_X"}, _pole_refs("BKK_CSF00940", ["BKK_F00941"]))
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert closes == [1]
+    assert [(closed, data["stations"]["BKK_CSF00940"]["poles"]) for closed, data in writes] == [(True, ["BKK_F00941"])]
+    assert hass_storage[storage.STATIONS_KEY]["data"]["stations"]["BKK_CSF00940"]["poles"] == ["BKK_F00941"]

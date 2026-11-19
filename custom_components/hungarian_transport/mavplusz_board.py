@@ -229,24 +229,45 @@ class _NotSent(PlannerError):
     asked of the planner, so the stop does not count as asked (BOARD_TTL)."""
 
 
-class _Ticket:
-    """A planner token reserved for one fallback answer (PlannerBoards.reserve):
-    the request it is handed to spends it (spend), else release() gives it
-    back to the limiter."""
+class _Token:
+    """A planner token reserved ahead (PlannerBoards.reserve), held by one
+    _Ticket, or by the tickets of the trip details reserved together
+    (their one request spends it): weight is the trip keys they may ask,
+    opened when the first was reserved."""
 
-    def __init__(self, rate: mavplusz.PlannerClient) -> None:
-        self._rate = rate
-        self._held = True
+    def __init__(self, rate: mavplusz.PlannerClient, opened: float = 0.0) -> None:
+        self.rate = rate
+        self.held = True
+        self.holders = 0
+        self.weight = 0
+        self.opened = opened
+
+
+class _Ticket:
+    """One fallback answer's hold on a reserved planner token (_Token): the
+    request it is handed to spends the token (spend), else the token goes
+    back to the limiter when the last ticket holding it is release()d."""
+
+    def __init__(self, token: _Token) -> None:
+        self._token = token
+        self._released = False
+        token.holders += 1
 
     def spend(self) -> bool:
         """Whether the token was still held (now spent by the caller's request)."""
-        held, self._held = self._held, False
+        token = self._token
+        held, token.held = token.held, False
         return held
 
     def release(self) -> None:
-        if self._held:
-            self._held = False
-            self._rate.refund()
+        if self._released:
+            return
+        self._released = True
+        token = self._token
+        token.holders -= 1
+        if not token.holders and token.held:
+            token.held = False
+            token.rate.refund()
 
 
 class _Board(NamedTuple):
@@ -788,8 +809,10 @@ class PlannerBoards:
     before (Home Assistant's store, read through restore_stations), and
     `on_stations_changed` is called whenever learn() changes it, for the
     store to write it later. After close() nothing is learnt any more (a
-    FUTÁR answer landing after the entry was unloaded or removed), and the
-    trip details still batched or under way have no answer."""
+    FUTÁR answer landing after the entry was unloaded or removed), nothing
+    is asked (a fallback FUTÁR failed for just before), and the trip
+    details still batched or under way have no answer. Its one owner is
+    the proxy it is handed to (FutarProxy.close)."""
 
     paths = PATHS
     # The seconds answer() takes at most (futar.FutarProxy times its fallback by it).
@@ -844,6 +867,8 @@ class PlannerBoards:
         self._failing: dict[tuple[str, str], float] = {}
         # The trip details batch still taking keys (TRIP_BATCH_WAIT), if any.
         self._open: _Batch | None = None
+        # The token the trip details reserved lately share (reserve), if any.
+        self._trip_token: _Token | None = None
         # The batches' tasks and their batches, held until done (the loop
         # keeps only a weak reference to a task).
         self._sending: dict[asyncio.Future[Any], _Batch] = {}
@@ -855,7 +880,7 @@ class PlannerBoards:
     def close(self) -> None:
         """The caches' timers go, the trip details' batches still under way
         are cancelled (their callers have no answer at once), no batch is
-        started, and learn() is a no-op from now on."""
+        started, and learn() and answer() are no-ops from now on."""
         self._closed = True
         self._boards.close()
         self._trips.close()
@@ -890,10 +915,44 @@ class PlannerBoards:
         now (FUTÁR is cut short only with it: the requests of a whole
         dashboard cannot have spent it meanwhile); None when either is not
         there. The caller release()s it whatever happens; a request that
-        spent it makes that a no-op."""
-        if self._closed or not self.can_answer(path, params) or not self._rate.reserve():
+        spent it makes that a no-op. The trip details reserved within
+        TRIP_BATCH_WAIT of each other share one token (_reserve_trip)."""
+        if self._closed:
             return None
-        return _Ticket(self._rate)
+        if path == TRIP_PATH:
+            return self._reserve_trip(params)
+        if not self.can_answer(path, params) or not self._rate.reserve():
+            return None
+        return _Ticket(_Token(self._rate))
+
+    def _reserve_trip(self, params: dict[str, str]) -> _Ticket | None:
+        """A trip's ticket: a share of the token reserved for the trip
+        details within TRIP_BATCH_WAIT before, of up to one request's
+        MAX_TRIPS_PER_REQUEST keys, else a token of its own. FUTÁR fails
+        them at about the same time (its cut is the same for all), so they
+        go in one batch, whose one request spends one token: a dashboard's
+        40 trip details took 40 tokens before, the boards' whole share,
+        and the rest kept FUTÁR's whole budget and timed out. A trip that
+        lands in a later batch than the one that spent the shared token
+        takes a token when its request goes (_post), if one is left."""
+        tid = str(params.get("tripId") or "")
+        gid = self._trip_id(params)
+        if gid is None or self._is_failing(("trip", gid)) or self._rate.backing_off():
+            return None
+        weight = 1 if self._dates.get(tid) else len(self._dates_to_try())
+        now = self._monotonic()
+        token = self._trip_token
+        if (
+            token is None
+            or not token.held
+            or now - token.opened > TRIP_BATCH_WAIT
+            or token.weight + weight > MAX_TRIPS_PER_REQUEST
+        ):
+            if not self._rate.reserve():
+                return None
+            token = self._trip_token = _Token(self._rate, now)
+        token.weight += weight
+        return _Ticket(token)
 
     def learn(self, path: str, params: dict[str, str], data: Any) -> None:
         """What FUTÁR's own answer tells that the planner cannot: the poles
@@ -1090,6 +1149,10 @@ class PlannerBoards:
     async def answer(
         self, path: str, params: dict[str, str], ticket: _Ticket | None = None
     ) -> dict[str, Any] | None:
+        if self._closed:
+            # A fallback under way at the unload (FUTÁR failed just before)
+            # sends nothing more.
+            return None
         try:
             if path == BOARD_PATH:
                 return await self._board(params, ticket)

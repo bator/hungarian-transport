@@ -593,18 +593,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         on_stations_changed=_stations_changed,
     )
 
-    async def _close_planner() -> None:
-        # Unloaded (a reload, the entry removed): the planner learns nothing
-        # more (a FUTÁR request still under way lands later), and what it
-        # learnt is written now. The delayed write left pending would be
-        # replaced by the next planner's (a reload: up to STATIONS_SAVE_DELAY
-        # of poles lost), or write the store again after the entry's removal
-        # deleted it. Registered first, so it runs after proxy.close.
-        planner.close()
+    async def _save_planner() -> None:
+        # Unloaded (a reload, the entry removed): what the planner learnt is
+        # written now. The delayed write left pending would be replaced by
+        # the next planner's (a reload: up to STATIONS_SAVE_DELAY of poles
+        # lost), or write the store again after the entry's removal deleted
+        # it. Registered first, so it runs after proxy.close, which closes
+        # the planner (its one owner): it learns nothing more by then (a
+        # FUTÁR request still under way lands later).
         if learnt:
             await storage.async_save_stations(hass, planner.stations_data())
 
-    entry.async_on_unload(_close_planner)
+    entry.async_on_unload(_save_planner)
     proxy = FutarProxy(
         async_get_clientsession(hass),
         api_key,
