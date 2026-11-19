@@ -40,7 +40,11 @@ when:
   operator rule above takes for news). Then only a Pages index newer by the
   updater's strict rule (updater_newer: every operator still there, none
   older, an undated one unchanged, one later) replaces it; else SUPERSEDED,
-  reason "release_newer", until the site rebuilds against this release. A
+  reason "release_newer", until the site rebuilds against this release, or
+  until the served index's newest dated feed is more than RELEASE_STALE
+  older than the Pages index's (release_stale: a -rev beta is never a
+  baseline, and would wait for the next stable release): then the operator
+  rule decides. A
   version not newer than release_version (one that has not updated to it
   yet, or that release itself), or an entry without one, goes by the
   operator rule: the build knew this version's index or a newer one. The
@@ -164,6 +168,14 @@ MAX_FEED = 4096
 # the version ("bkk:20271231", "...29991231"), and taken at its word it
 # would freeze the index: no real build is newer until that day.
 MAX_FEED_AHEAD = timedelta(days=400)
+# decide's release rule keeps a newer release's city index from a Pages
+# build of an older baseline until the site rebuilds against this release.
+# A -rev beta's index is never a baseline (only a stable release starts
+# one), so on a beta that wait lasts until the next stable release, while
+# the served feeds age: once the newest dated feed of the served index is
+# more than this older than the newest of Pages', the operator rule
+# decides again. Pages rebuilds the city index weekly.
+RELEASE_STALE = timedelta(days=21)
 MANIFEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 INDEX_TIMEOUT = aiohttp.ClientTimeout(total=300)
 SHARD_TIMEOUT = aiohttp.ClientTimeout(total=120)
@@ -517,6 +529,21 @@ def volan_newer(pages: str, installed: str | None, today: date | None = None) ->
     return day is not None and (other is None or day > other)
 
 
+def _newest_day(feed: str | None, today: date) -> date | None:
+    """The latest date among a city feed's operators (_day), or None."""
+    days = [day for version in timetables.city_feeds(feed).values() if (day := _day(version, today)) is not None]
+    return max(days) if days else None
+
+
+def release_stale(pages: str, served: str | None, today: date | None = None) -> bool:
+    """Whether the served city index (a release's) is behind the Pages one
+    of feed pages by more than RELEASE_STALE: the newest dated operator
+    feed of each. False when either has none."""
+    today = today or _today()
+    new, old = _newest_day(pages, today), _newest_day(served, today)
+    return new is not None and old is not None and new - old > RELEASE_STALE
+
+
 def release_newer(running: Any, release_version: str | None) -> bool:
     """Whether running, the version of this integration (an AwesomeVersion,
     "1.10.26-rev.1"), is newer than release_version, the tag of the stable
@@ -554,7 +581,8 @@ def decide_why(
     SERVED_NEWER (www/ serves an index Pages' does not beat by the operator
     rule), RELEASE_NEWER (www/ serves the city index of a release newer
     than the one the Pages build started from, release_version, and Pages'
-    is not newer by the strict rule). running is this integration's
+    is not newer by the strict rule, and the served one is not
+    release_stale). running is this integration's
     version; pages_install what this module last installed
     (storage.TIMETABLES_INSTALL): the served index is that install when its
     feed and size are the record's."""
@@ -582,10 +610,14 @@ def decide_why(
             # operator this one added or an undated feed it updated, which
             # the operator rule takes for news. Only a strictly newer one
             # replaces it; the site rebuilds against this release within
-            # days of its release, a beta's index is never its baseline.
+            # days of its release, a beta's index is never its baseline:
+            # once the served feeds are RELEASE_STALE behind Pages', the
+            # operator rule decides (a beta would otherwise wait for the
+            # next stable release while its feeds run out).
             if updater_newer(feed, current, today):
                 return _INSTALL, None
-            return SUPERSEDED, RELEASE_NEWER
+            if not release_stale(feed, current, today):
+                return SUPERSEDED, RELEASE_NEWER
     newer = city_newer(feed, current, today) if name == "city" else volan_newer(feed, current, today)
     return (_INSTALL, None) if newer else (SUPERSEDED, SERVED_NEWER)
 

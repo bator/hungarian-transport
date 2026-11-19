@@ -626,7 +626,15 @@ one in use:
   newer by the local updater's strict rule replaces it (every operator
   still there, none dated older, an undated one unchanged, one later);
   otherwise it stays (`superseded`, reason `release_newer`) until the site
-  rebuilds against this release. A version not newer than
+  rebuilds against this release. A `-rev` beta is never a baseline (only a
+  stable release starts a rebuild), so on a beta that could last until the
+  next stable release while the index's feeds age: once the newest dated
+  feed of the index in use is more than 21 days older than the newest of
+  the site's index (`RELEASE_STALE`), the operator rule decides again. The
+  integration's own version is the one in
+  `custom_components/hungarian_transport/manifest.json` on disk, not the
+  one Home Assistant loaded: a HACS update replaces the release's files and
+  its indexes before the restart. A version not newer than
   `release_version` (one that has not updated to that release yet, or that
   release itself) goes by the operator rule, since the site's build knew
   its index or a newer one; so does an entry without `release_version`.

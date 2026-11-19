@@ -1091,6 +1091,48 @@ def test_a_release_newer_than_the_baseline_takes_a_strictly_newer_index(tmp_path
                      today=TODAY) == wt._INSTALL
 
 
+# The Pages build weeks later, still of the old baseline (a -rev beta waits
+# for the next stable release): its newest feed 2026-12-07, 22 days after
+# ADDED's newest (szeged 2026-11-15), 28 after the others'.
+LATER = "miskolc:1.3;debrecen:20261204-1;volan-szeged:01736.20261207"
+
+
+@pytest.mark.parametrize("running", [NEWER, REV], ids=["newer", "rev"])
+@pytest.mark.parametrize("installed", [ADDED, UNDATED, DROPPED], ids=["added", "undated", "dropped"])
+def test_a_newer_release_s_index_gone_stale_goes_by_the_operator_rule(tmp_path, installed, running) -> None:
+    """The escape hatch (review round 8): the served index's newest dated
+    feed more than RELEASE_STALE older than the Pages index's newest; then
+    the operator rule decides, as for a release that is not newer."""
+    today = date(2026, 12, 8)
+    www, durable = _www(tmp_path, installed)
+    assert not wt.updater_newer(LATER, installed, today)
+    assert wt.release_stale(LATER, installed, today)
+    assert wt.decide_why("city", LATER, www, durable, release_version=BASELINE, running=running,
+                         today=today) == (wt._INSTALL, None)
+    # Not past RELEASE_STALE: the strict rule still.
+    edge = LATER.replace("20261207", "20261206")
+    assert not wt.release_stale(edge, ADDED, today)
+    if installed == ADDED:
+        assert wt.decide_why("city", edge, www, durable, release_version=BASELINE, running=running,
+                             today=today) == (wt.SUPERSEDED, wt.RELEASE_NEWER)
+    # Stale, but the operator rule finds an operator older on Pages: kept.
+    older = LATER + ";szeged:20261101"
+    if installed == ADDED:
+        assert wt.decide_why("city", older, www, durable, release_version=BASELINE, running=running,
+                             today=today) == (wt.SUPERSEDED, wt.SERVED_NEWER)
+
+
+def test_release_stale_needs_a_date_on_both_sides() -> None:
+    today = date(2026, 12, 8)
+    assert not wt.release_stale("miskolc:1.3", "miskolc:1.2", today)
+    assert not wt.release_stale(LATER, "miskolc:1.2", today)
+    assert not wt.release_stale("miskolc:1.3", LATER, today)
+    # A served date past MAX_FEED_AHEAD is older than any (_day), as the
+    # operator rule takes it.
+    assert wt.release_stale(LATER, "miskolc:1.3;debrecen:29991231", today)
+    assert not wt.release_stale(LATER, "debrecen:29991231;szeged:20261201", today)
+
+
 @pytest.mark.parametrize("running", [OLDER, NEWER, REV])
 def test_a_strictly_newer_volan_index_installs_whatever_the_baseline(tmp_path, running) -> None:
     """The Volán index is one dated feed: newer is newer (the release_feed
