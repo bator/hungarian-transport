@@ -1209,7 +1209,12 @@ with tempfile.TemporaryDirectory() as tmp_name:
         def fetch(self, name: str, dest: Path, cap: int):
             got = super().fetch(name, dest, cap)
             if name in self.stale and self.clock.now < self.expires:
-                shutil.copyfile(mav_live / name, dest)
+                if (mav_live / name).read_bytes() != (gen2 / name).read_bytes():
+                    shutil.copyfile(mav_live / name, dest)
+                else:
+                    # The same file in both deploys: another deploy's copy
+                    # stands in (a cache of one before them).
+                    dest.write_bytes(b"older " + (gen2 / name).read_bytes())
                 got = pt.file_digest(dest)
             self.clock.now += 1
             return got
@@ -1280,6 +1285,32 @@ with tempfile.TemporaryDirectory() as tmp_name:
           " cached copy of before the deploy is left by then: its .sig is bad)",
           first == "ok" and pt.bad_signature(second) and len(clock.sleeps) == 2 and clock.sleeps[1] == 0.0,
           repr((first, second, clock.sleeps)))
+    # A MÁV or Volán file of the previous deploy next to the new manifest is
+    # the same cache effect: fetched again past the cache (the same one wait
+    # as the signatures), not half a minute later.
+    for stale, what in (({"mav-index.json.gz"}, "the previous deploy's mav-index.json.gz"),
+                        ({"mav-index.json.gz"} | sigs, "the previous deploy's mav-index.json.gz and .sig files"),
+                        ({"volan-index.json.gz"}, "an older volan-index.json.gz")):
+        site_dir = tmp / f"cdn-file-{len(what)}"
+        argv = ["assemble", "--out", str(site_dir), "--commit", COMMIT, "--live-dir", str(gen2), "--now",
+                (NOW + timedelta(hours=4)).isoformat(),
+                *(["--timetables-part", str(tmp / "p-rf")] if "mav" in what else
+                  ["--mav-part", str(mav_part(tmp / "mav-gen3", feed="20261103.M2ChangeID"))])]
+        rc, out, outputs, clock = cdn_main(argv, stale)
+        carried = "mav-index.json.gz" if "mav" in what else "volan-index.json.gz"
+        check(f"assemble right after a deploy, Pages serving {what}: fetched again once, SIG_SETTLE_S after the"
+              " first read, then carried and deployed",
+              rc == 0 and outputs.get("deploy") == "true" and outputs.get("untrusted") == ""
+              and len(clock.sleeps) == 1 and abs(sum(clock.sleeps) + 3 - REAL_SIG_SETTLE) <= 6
+              and (site_dir / carried).read_bytes() == (gen2 / carried).read_bytes(),
+              repr((rc, outputs, clock.sleeps, out[-600:])))
+    rc, out, outputs, clock = cdn_main(["assemble", "--out", str(tmp / "cdn-file-old"), "--commit", COMMIT,
+                                        "--live-dir", str(gen2), "--timetables-part", str(tmp / "p-rf"),
+                                        "--settle", "30", "--now", (NOW + timedelta(hours=4)).isoformat()],
+                                       {"mav-index.json.gz"}, sig_settle=-1)
+    check("the same with the half minute assemble waited before (--sig-settle -1, --settle 30): still the"
+          " previous file, refused (exit 1), nothing deployed",
+          rc == 1 and outputs.get("deploy") == "false" and clock.sleeps == [30.0], repr((rc, outputs, clock.sleeps)))
     due_args = ["due", "--schema", S, "--live-dir", str(gen2), "--now", (NOW + timedelta(hours=4)).isoformat()]
     rc, out, outputs, clock = cdn_main(due_args, sigs)
     rc_ok, out_ok, outputs_ok, _ = cdn_main(due_args, set())

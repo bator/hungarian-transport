@@ -45,7 +45,9 @@ Usage: mav_pages_site.py --index mav-index.json.gz --stats mav-build.json
          --commit SHA --out SITE_DIR [--gtfs-zip ZIP --pfaedle-dir DIR]
          [--live-url URL | --live-file PATH] [--github-output FILE]
          [--max-bytes N] [--allow-shrink]
-         [--baseline-url URL | --baseline-file PATH]
+         [--baseline-url URL | --baseline-file PATH] [--sig-settle SECONDS]
+A published mav-index.json.sig that does not verify is read again with
+its manifest once, --sig-settle seconds later (SIG_SETTLE_S: Pages' cache).
 Prints deploy=true|false (and appends it to --github-output). Exit 1, with
 nothing written, for an index or statistics that do not hold up, a feed
 whose feed_version does not start with a real date (YYYYMMDD, as the
@@ -73,6 +75,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -132,7 +135,8 @@ LIVE_TIMEOUT = 20
 # that finds one so reads both again once, SIG_SETTLE_S after its first
 # read of the site, when every copy cached before the deploy has expired
 # (the minute on top: a cache that took its copy a moment late, the
-# clocks): pages_timetables.py (Source.signed) and mav_daily_verdict.py.
+# clocks): pages_timetables.py (Source.signed, and a file that does not
+# match its manifest), mav_daily_verdict.py and this script (_finish).
 PAGES_MAX_AGE = 600
 SIG_SETTLE_S = PAGES_MAX_AGE + 60
 # The shrink guard's fallback: a release's frontend zip (about 15 MB) and
@@ -595,6 +599,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--allow-shrink", action="store_true", default=mav_shrink_guard.allowed(),
                     help="publish an index with under half the trains and lines of the published one"
                          f" (default: {mav_shrink_guard.ALLOW_ENV} set)")
+    ap.add_argument("--sig-settle", type=float, default=SIG_SETTLE_S,
+                    help="seconds before a published manifest whose signature does not verify is read again with"
+                         f" it (default {SIG_SETTLE_S:g}: Pages' cache age and a minute; negative: never)")
     args = ap.parse_args(argv)
     if (args.gtfs_zip is None) != (args.pfaedle_dir is None):
         ap.error("--gtfs-zip and --pfaedle-dir go together")
@@ -618,15 +625,9 @@ def main(argv: list[str]) -> int:
         return _finish(args, man, overlay)
 
 
-def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
-    # The published manifest and its signature (mav-index.json.sig next to
-    # it, sign_manifest.py): the same content counts as already published
-    # only when that signature verifies. One that does not (none yet: the
-    # first run after signing came in; another key; an edit) is deployed
-    # again from this build, signed, since the site job never carries an
-    # unsigned MÁV manifest (pages_timetables.py mav_from_live). The shrink
-    # guard compares with it only when its signature verifies (its counts
-    # are its author's), else with the latest stable release's MÁV index.
+def _read_live(args: argparse.Namespace) -> tuple[bytes | None, bytes | None, str, str]:
+    """The published manifest's bytes and its .sig's (--live-file: the file
+    next to it), with why each is not there."""
     body, sig, why, sig_why = None, None, "not asked", ""
     if args.live_file is not None:
         body, why = (args.live_file.read_bytes(), "ok") if args.live_file.is_file() else (None, "no file")
@@ -636,8 +637,31 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
         body, why = fetch_bytes(args.live_url)
         if body is not None:
             sig, sig_why = fetch_bytes(args.live_url + ".sig", MAX_SIG)
-    live, why = parse_live(body) if body is not None else (None, why)
-    trust = signature_state(body, sig, sig_why) if live is not None else "no manifest"
+    return body, sig, why, sig_why
+
+
+def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
+    # The published manifest and its signature (mav-index.json.sig next to
+    # it, sign_manifest.py): the same content counts as already published
+    # only when that signature verifies. One that does not (none yet: the
+    # first run after signing came in; another key; an edit) is deployed
+    # again from this build, signed, since the site job never carries an
+    # unsigned MÁV manifest (pages_timetables.py mav_from_live). The shrink
+    # guard compares with it only when its signature verifies (its counts
+    # are its author's), else with the latest stable release's MÁV index.
+    # A .sig that is there but does not verify is read again with its
+    # manifest once, --sig-settle (SIG_SETTLE_S) later: right after a deploy
+    # Pages' CDN may pair one deploy's manifest with the other's .sig, and
+    # deciding on that would deploy the same content again for nothing.
+    for attempt in (1, 2):
+        body, sig, why, sig_why = _read_live(args)
+        live, why = parse_live(body) if body is not None else (None, why)
+        trust = signature_state(body, sig, sig_why) if live is not None else "no manifest"
+        if live is None or sig is None or trust == "ok" or attempt == 2 or args.sig_settle < 0:
+            break
+        print(f"published manifest: {trust}; reading it and its signature again in {args.sig_settle:g} s"
+              f" (GitHub Pages caches each file for up to {PAGES_MAX_AGE} s)")
+        time.sleep(args.sig_settle)
     trusted = live if trust == "ok" else None
     baseline = None
     if trusted is None and (args.baseline_url or args.baseline_file is not None):

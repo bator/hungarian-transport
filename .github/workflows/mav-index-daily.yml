@@ -120,8 +120,11 @@ jobs:
   build:
     name: Build the MÁV index with pfaedle
     runs-on: ubuntu-latest
-    # About 5 minutes; pfaedle has its own limit (release_mav_index.sh).
-    timeout-minutes: 40
+    # About 5 minutes; pfaedle has its own limit (release_mav_index.sh). Up
+    # to 11 minutes more in each of the Pages site and Published index age
+    # steps when the published mav-index.json.sig does not verify (read
+    # again past Pages' cache).
+    timeout-minutes: 55
     outputs:
       deploy: ${{ steps.site.outputs.deploy }}
     env:
@@ -205,7 +208,9 @@ jobs:
       # or its signature does not verify (its counts are then anyone's), it
       # is compared with the latest stable release's MÁV index instead
       # (fetched only then). The repository variable MAV_ALLOW_SHRINK=1
-      # accepts an intended reduction.
+      # accepts an intended reduction. A .sig that does not verify is read
+      # again with its manifest 11 minutes later (Pages' cache may pair two
+      # deploys' files) before it counts as untrusted.
       - name: Pages site
         id: site
         if: steps.mav.outputs.built == 'true'
