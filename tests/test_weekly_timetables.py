@@ -1153,6 +1153,32 @@ async def test_the_running_version_is_the_manifest_s(hass: HomeAssistant) -> Non
     assert version == AwesomeVersion(manifest["version"])
 
 
+async def test_the_running_version_is_read_from_disk_after_a_hacs_update(
+    hass: HomeAssistant, tmp_path, monkeypatch
+) -> None:
+    """A HACS update replaces custom_components/ and www/ before the restart
+    (review round 8): the rule takes the version on disk, the new release's,
+    not the one Home Assistant loaded; read again only when the file
+    changed; the loaded one when it does not read."""
+    loaded = (await wt.async_get_integration(hass, DOMAIN)).version
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"domain": DOMAIN, "version": "1.10.30"}), encoding="utf-8")
+    monkeypatch.setattr(wt, "_MANIFEST_FILE", manifest)
+    assert await wt._running_version(hass) == AwesomeVersion("1.10.30") != loaded
+    # The same mtime and size: not read again.
+    stat = manifest.stat()
+    manifest.write_text(json.dumps({"domain": DOMAIN, "version": "1.10.39"}), encoding="utf-8")
+    os.utime(manifest, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert await wt._running_version(hass) == AwesomeVersion("1.10.30")
+    os.utime(manifest, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    assert await wt._running_version(hass) == AwesomeVersion("1.10.39")
+    for broken in ("{", json.dumps({"version": 7}), json.dumps([1])):
+        manifest.write_text(broken, encoding="utf-8")
+        assert await wt._running_version(hass) == loaded
+    manifest.unlink()
+    assert await wt._running_version(hass) == loaded
+
+
 async def test_a_pages_build_of_an_older_baseline_is_superseded_on_the_sensor(
     hass: HomeAssistant, aioclient_mock, card_assets, freezer, morning, monkeypatch
 ) -> None:

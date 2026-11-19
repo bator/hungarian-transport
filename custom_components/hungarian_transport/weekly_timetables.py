@@ -989,9 +989,47 @@ async def async_update(hass: HomeAssistant, www: Path) -> TimetablesRound:
     return TimetablesRound(results, built)
 
 
+# This integration's manifest.json on disk, and what _version_on_disk read
+# of it: (mtime_ns, size, version).
+_MANIFEST_FILE = Path(__file__).with_name("manifest.json")
+_version_cache: dict[Path, tuple[int, int, Any]] = {}
+
+
+def _version_on_disk(path: Path) -> Any:
+    """The version manifest.json at path names, an AwesomeVersion; None
+    when it cannot be read or names none. Read again only when its mtime or
+    size changed."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    cached = _version_cache.get(path)
+    if cached is not None and cached[:2] == (st.st_mtime_ns, st.st_size):
+        return cached[2]
+    version: Any = None
+    try:
+        if st.st_size <= MAX_MANIFEST:
+            data = jsonsafe.loads(path.read_bytes())
+            value = data.get("version") if isinstance(data, dict) else None
+            if isinstance(value, str) and value:
+                version = AwesomeVersion(value)
+    except (OSError, ValueError, RecursionError) as err:
+        _LOGGER.debug("Could not read the version of %s: %s", path, err)
+    _version_cache[path] = (st.st_mtime_ns, st.st_size, version)
+    return version
+
+
 async def _running_version(hass: HomeAssistant) -> Any:
-    """This integration's version (its manifest.json, which the release
-    workflow sets to the tag), an AwesomeVersion; None when unknown."""
+    """This integration's version, an AwesomeVersion (its manifest.json,
+    which the release workflow sets to the tag); None when unknown. Read
+    from the file on disk, not the integration Home Assistant loaded: a
+    HACS update replaces custom_components/ and www/ at once, before the
+    restart that loads the new code, and decide's release rule is about the
+    city index www/ serves, which is already the new release's. The loaded
+    version when the file does not read."""
+    version = await hass.async_add_executor_job(_version_on_disk, _MANIFEST_FILE)
+    if version is not None:
+        return version
     try:
         return (await async_get_integration(hass, DOMAIN)).version
     except IntegrationNotFound:
