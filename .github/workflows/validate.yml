@@ -185,6 +185,22 @@ jobs:
       - name: pytest
         run: python -m pytest -q
 
+      # The same tests again in a shuffled order (pytest-randomly, installed
+      # only here, after the run above, which keeps the file order): a test
+      # that passes only after another one (sys.path, sys.modules or a
+      # module global left behind) fails here. The seed is this run's id, so
+      # "Re-run jobs" shuffles the same way; repeat locally with
+      #   python -m pytest -q -p randomly -p no:cacheprovider --randomly-seed=SEED
+      # (pytest-randomly installed). Only on the current Home Assistant.
+      - name: pytest in a random order
+        env:
+          SEED: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          pip install pytest-randomly==5.0.0
+          echo "pytest-randomly seed: ${SEED}"
+          python -m pytest -q -p randomly --randomly-seed="$SEED"
+
   integration-oldest:
     # hacs.json lets HACS install on Home Assistant 2024.10.0; the job above
     # runs the current release only.
