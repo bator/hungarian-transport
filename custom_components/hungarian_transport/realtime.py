@@ -117,7 +117,8 @@ PLANNER_MIN_SHARE = 0.5
 # at most this long, and only with at least VEHICLE_MIN_TIMEOUT of the
 # round left after VEHICLE_MARGIN, so it never runs into the round's
 # deadline, which would lose the delays already answered. After a failure
-# no vehicle request for VEHICLE_FAIL_BACKOFF; the delays go on.
+# no vehicle request for VEHICLE_FAIL_BACKOFF (not after one cut short by
+# the round's deadline running out of time); the delays go on.
 VEHICLE_TIMEOUT = 5.0
 VEHICLE_MIN_TIMEOUT = 1.0
 VEHICLE_MARGIN = 1.0
@@ -1004,7 +1005,8 @@ class RealtimeHub:
         dates = [mavplusz.service_date(r.get("date"), now) for r in trips]
         # A row whose date is no calendar day (20261131: the service takes
         # any eight digits) is never asked of the planner, which would
-        # answer for some other day; the feeds match it as they can.
+        # answer for some other day. A train row of it is matched on the
+        # feeds; a trip id or route + start row reads none (no answer).
         undated = {n for n, r in enumerate(trips) if r.get("date") and not mavplusz.valid_date(r["date"])}
         # The whole planner round, the wait for _mav_lock and a cold static
         # feed's download (the train numbers) included: past it the jbb
@@ -1460,8 +1462,10 @@ class RealtimeHub:
             for part in await asyncio.gather(*jobs):
                 found.update(part)
         finally:
-            if mine is not None:
-                # Cut (the round's deadline) before its request ran.
+            if mine is not None and not mine[1].done():
+                # Cancelled before its request ran (the request sets the
+                # future when it is over): its token was never used.
+                self._mav_vehicle_rate.refund()
                 self._mav_vehicles_done(mine[1], {})
         positions = [vp for route in wanted for vp in found.get(route, ())]
         if not positions:
@@ -1473,8 +1477,9 @@ class RealtimeHub:
     ) -> tuple[list[str], asyncio.Future[dict[str, list[dict[str, Any]]]]] | None:
         """The routes of a vehicle request this round makes, and the future
         other rounds wait for it by (in _mav_vehicle_waits from now on, so
-        set before the caller awaits anything); its token taken. None when
-        it is not made (see _mav_vehicles)."""
+        set before the caller awaits anything); its token taken (given back
+        if the round is cancelled before the request runs). None when it is
+        not made (see _mav_vehicles)."""
         routes = self._route_sizes.pick(routes)
         if not routes or self._monotonic() < self._vehicle_retry_at or timeout < VEHICLE_MIN_TIMEOUT:
             return None
@@ -1493,8 +1498,9 @@ class RealtimeHub:
         """The positions per route of one vehicle request ({} when it
         fails), handed to the rounds waiting by fut as soon as it is in."""
         found: dict[str, list[dict[str, Any]]] = {}
+        cut = asyncio.timeout(timeout)
         try:
-            async with asyncio.timeout(timeout):
+            async with cut:
                 doc = await mavplusz.fetch(
                     self._session, mavplusz.build_vehicle_query(routes), cap=mavplusz.VEHICLE_MAX_BYTES
                 )
@@ -1508,7 +1514,10 @@ class RealtimeHub:
             self._vehicles_failed(err, backoff=False)
             return found
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, KeyError, TypeError) as err:
-            self._vehicles_failed(err or type(err).__name__)
+            # Timed out on a timeout the round's deadline cut short (less
+            # than VEHICLE_TIMEOUT left): no sign of an outage, no backoff.
+            short = cut.expired() and timeout < VEHICLE_TIMEOUT
+            self._vehicles_failed(err or type(err).__name__, backoff=not short)
             return found
         finally:
             self._mav_vehicles_done(fut, found)

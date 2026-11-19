@@ -28,6 +28,7 @@ from datetime import datetime
 import io
 import logging
 from pathlib import Path
+import random
 import re
 from typing import Any
 import zipfile
@@ -2391,3 +2392,213 @@ def test_a_refusal_takes_no_token_a_refill_just_brought(caplog) -> None:
     assert sum("over the integration's rate limit" in r.getMessage() for r in caplog.records) == 1
     assert limiter.take()
     assert not limiter.take()
+
+
+def _cancel_after_the_vehicle_ask(hub: realtime.RealtimeHub, req: dict) -> asyncio.Task:
+    """A round of req cancelled right after _mav_vehicle_ask took its token
+    and listed its routes: at the gather, before its vehicle request starts."""
+    ask = hub._mav_vehicle_ask
+
+    def cancelling(routes, timeout):
+        got = ask(routes, timeout)
+        if got is not None:
+            asyncio.get_running_loop().call_soon(task.cancel)
+            del hub._mav_vehicle_ask
+        return got
+
+    hub._mav_vehicle_ask = cancelling
+    task = asyncio.ensure_future(hub.query("mav", [req]))
+    return task
+
+
+async def test_a_round_cancelled_before_its_vehicle_request_runs_leaves_no_route_waiting(aioclient_mock) -> None:
+    """A round cancelled at the gather, before its vehicle request starts:
+    the request never runs (nor its own cleanup), so the round's own
+    cleanup frees its routes. Otherwise every later round would wait
+    VEHICLE_TIMEOUT for a request never made, and ask none of its own."""
+    planner = TrainPlanner({(SZ3331, TODAY): RT["t0"]}, routes={"1:V3775_106": RT["r0"]})
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3331": [SZ3331[2:]]})
+    hub, session, clock = await _train_hub(aioclient_mock, wall=RT_WALL)
+    with pytest.raises(asyncio.CancelledError):
+        await _cancel_after_the_vehicle_ask(hub, REQ_3331)
+    assert planner.route_asks == [] and not hub._mav_vehicle_waits
+    clock.now += TABLE["mav"].interval + 1
+    hit = (await hub.query("mav", [REQ_3331]))["trips"]["3331"]
+    await session.close()
+    assert planner.route_asks == [["1:V3775_106"]]
+    assert hit["vehicle"]["lat"] == pytest.approx(47.4552, abs=1e-4)
+
+
+async def test_a_vehicle_request_that_never_ran_gives_its_token_back(aioclient_mock) -> None:
+    """The same cancelled round with the vehicles' share at one token: the
+    token its request never used goes back, so the next round's vehicle
+    request is not refused for it."""
+    planner = TrainPlanner({(SZ3331, TODAY): RT["t0"]}, routes={"1:V3775_106": RT["r0"]})
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3331": [SZ3331[2:]]})
+    clock = FakeClock()
+    hub, session = _limited_hub(
+        aioclient_mock, {"mav": TABLE["mav"]}, RT_WALL, clock, vehicle_burst=1, vehicle_rate=0.0001
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await _cancel_after_the_vehicle_ask(hub, REQ_3331)
+    assert planner.route_asks == [] and hub._mav_vehicle_rate.available()
+    clock.now += TABLE["mav"].interval + 1
+    hit = (await hub.query("mav", [REQ_3331]))["trips"]["3331"]
+    await session.close()
+    assert planner.route_asks == [["1:V3775_106"]]
+    assert hit["vehicle"] is not None
+
+
+async def test_a_round_answered_from_the_cache_alone_asks_no_route(aioclient_mock) -> None:
+    """3331's vehicle request was refused (the vehicles' share used up), so
+    its cached answer has no vehicle. The next poll, within the interval, is
+    answered from the cache alone, the share refilled by then: it asks no
+    route (only the trips a round's own trip request answered do; cached
+    ones wait for a route another round is asking), and has no vehicle."""
+    planner = TrainPlanner({(SZ3331, TODAY): RT["t0"]}, routes={"1:V3775_106": RT["r0"]})
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3331": [SZ3331[2:]]})
+    clock = FakeClock()
+    hub, session = _limited_hub(
+        aioclient_mock, {"mav": TABLE["mav"]}, RT_WALL, clock, vehicle_burst=1, vehicle_rate=1.0
+    )
+    assert hub._mav_vehicle_rate.limiter.take(vehicles=True)
+    first = await hub.query("mav", [REQ_3331])
+    clock.now += 2
+    assert hub._mav_vehicle_rate.available()
+    second = await hub.query("mav", [REQ_3331])
+    await session.close()
+    assert len(planner.asks) == 1 and planner.route_asks == []
+    for answer in (first, second):
+        assert answer["trips"]["3331"]["delay"] == 60 and answer["trips"]["3331"]["vehicle"] is None
+
+
+async def test_a_cache_hit_waiting_for_a_route_keeps_a_newer_cache_entry(aioclient_mock) -> None:
+    """Card B's 3331 comes from the cache, without a vehicle, and waits for
+    the route card A asks for 3332. Meanwhile 3331's cache entry is
+    replaced (a newer answer). B's trip gets the vehicle; the newer entry
+    is not overwritten with the older one's result."""
+    planner = TrainPlanner({(SZ3331, TODAY): RT["t0"], (SZ3332, TODAY): RT["t1"]})
+
+    async def vehicles(variables):
+        await asyncio.sleep(0.2)
+        return {"data": {k: _rt_route(v) for k, v in variables.items()}}
+
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3331": [SZ3331[2:]], "3332": [SZ3332[2:]]})
+    clock = FakeClock()
+    hub, session = _limited_hub(
+        aioclient_mock, {"mav": TABLE["mav"]}, RT_WALL, clock, vehicle_burst=1, vehicle_rate=1.0
+    )
+    assert hub._mav_vehicle_rate.limiter.take(vehicles=True)
+    await hub.query("mav", [REQ_3331])
+    ck = (SZ3331, TODAY)
+    old = hub._mav_cache[ck]
+    assert old.result.vehicle is None and planner.route_asks == []
+    clock.now += 2
+    planner.vehicles = vehicles
+    waiting = asyncio.Event()
+    wait = hub._mav_vehicle_wait
+
+    async def waits(futs, timeout):
+        waiting.set()
+        return await wait(futs, timeout)
+
+    hub._mav_vehicle_wait = waits
+    a = asyncio.ensure_future(hub.query("mav", [{**REQ_3331, "key": "a", "train": "3332"}]))
+    b = asyncio.ensure_future(hub.query("mav", [{**REQ_3331, "key": "b"}]))
+    await waiting.wait()
+    newer = old._replace(asked=old.asked + 1, at=old.at + 1)
+    hub._mav_cache[ck] = newer
+    rb, ra = await b, await a
+    await session.close()
+    assert planner.route_asks == [["1:V3775_106"]] and len(planner.asks) == 2
+    assert rb["trips"]["b"]["vehicle"] is not None and ra["trips"]["a"]["vehicle"] is not None
+    assert hub._mav_cache[ck] is newer
+
+
+@pytest.mark.parametrize(
+    ("failure", "cut", "backoff"),
+    [("slow", True, False), ("slow", False, True), (503, True, True)],
+    ids=["cut_short_times_out", "full_timeout_times_out", "cut_short_fails"],
+)
+async def test_a_vehicle_request_cut_short_by_the_round_that_times_out_is_no_outage(
+    aioclient_mock, monkeypatch, failure, cut, backoff
+) -> None:
+    """A vehicle request given less than VEHICLE_TIMEOUT (the round's
+    deadline near) that times out says nothing of the planner: no
+    VEHICLE_FAIL_BACKOFF. One that had its full VEHICLE_TIMEOUT, or that
+    failed otherwise (an error status), backs the vehicles off."""
+    monkeypatch.setattr(realtime, "VEHICLE_TIMEOUT", 0.3)
+    monkeypatch.setattr(realtime, "VEHICLE_MIN_TIMEOUT", 0.05)
+    planner = TrainPlanner()
+    if failure == 503:
+        planner.vehicles = 503
+    else:
+        async def slow(_variables):
+            await asyncio.sleep(1)
+            return {"data": {"r0": RT["r0"]}}
+
+        planner.vehicles = slow
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    hub, session, _clock = await _train_hub(aioclient_mock, wall=RT_WALL)
+    trips, _routes = _rt_keys()
+    res = mavplusz.parse_response(_rt_parts()[0], trips)
+    left = 0.1 if cut else 1.0
+    deadline = asyncio.get_running_loop().time() + realtime.VEHICLE_MARGIN + left
+    assert await hub._mav_vehicles(res, deadline) == res
+    await session.close()
+    assert planner.route_asks == [["1:V3775_106", "1:V3803_106"]]
+    assert (hub._monotonic() < hub._vehicle_retry_at) is backoff
+
+
+async def test_overlapping_and_cancelled_rounds_never_ask_one_route_twice_at_once(aioclient_mock) -> None:
+    """200 rounds of two trains on one route, overlapping, a fifth of them
+    cancelled at random points, the cache expiring now and then (seeded):
+    no route is in two vehicle requests at once, no round fails, and no
+    route is left waiting once they are over."""
+    rnd = random.Random(7)
+    planner = TrainPlanner({(SZ3331, TODAY): RT["t0"], (SZ3332, TODAY): RT["t1"]})
+    inflight: dict[str, int] = {}
+    overlaps = []
+
+    async def vehicles(variables):
+        routes = list(variables.values())
+        for r in routes:
+            inflight[r] = inflight.get(r, 0) + 1
+            if inflight[r] > 1:
+                overlaps.append(r)
+        try:
+            await asyncio.sleep(rnd.uniform(0.0, 0.1))
+        finally:
+            for r in routes:
+                inflight[r] -= 1
+        return {"data": {k: _rt_route(v) for k, v in variables.items()}}
+
+    planner.vehicles = vehicles
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _statics(aioclient_mock, {"3331": [SZ3331[2:]], "3332": [SZ3332[2:]]})
+    clock = FakeClock()
+    hub, session = _limited_hub(
+        aioclient_mock, {"mav": TABLE["mav"]}, RT_WALL, clock,
+        rate=1000, burst=1000, vehicle_rate=1000, vehicle_burst=1000,
+    )
+    await hub._trains(MAV_SRC)
+    await hub._trains(GYSEV_SRC)
+    tasks = []
+    for i in range(200):
+        req = [REQ_3331] if i % 3 else [{**REQ_3331, "key": "b", "train": "3332"}, REQ_3331]
+        task = asyncio.ensure_future(hub.query("mav", req))
+        tasks.append(task)
+        if rnd.random() < 0.2:
+            asyncio.get_running_loop().call_later(rnd.uniform(0, 0.05), task.cancel)
+        await asyncio.sleep(rnd.uniform(0, 0.015))
+        if rnd.random() < 0.1:
+            clock.now += TABLE["mav"].interval * 10
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    await session.close()
+    errors = [r for r in results if isinstance(r, BaseException) and not isinstance(r, asyncio.CancelledError)]
+    assert not overlaps and not errors and not hub._mav_vehicle_waits
+    assert planner.route_asks
