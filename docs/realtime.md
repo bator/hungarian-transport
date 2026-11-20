@@ -417,7 +417,16 @@ before, and the card fills the board from Transitous.
   or answered by the planner first in FUTÁR's outage, first takes a token
   of FUTÁR's own rate limit, as a call to FUTÁR would; one the planner
   cannot take after all (its share used up, or no answer) asks FUTÁR with
-  that same token: one request, one token.
+  that same token: one request, one token. The cards asking one board or
+  trip at once in FUTÁR's outage share the planner asked first, one token
+  of FUTÁR's and one of the planner's for them all, as they share one
+  FUTÁR request outside it; a token taken for a request that was not sent
+  after all (it joined one under way, or the key was rejected meanwhile)
+  goes back. A board or trip details the planner holds (its 35 s and
+  60 s caches, or a request under way) are answered from there without a
+  planner token, also once the share is used up: a second card, horizon
+  or browser asking a board the planner just gave does not wait for FUTÁR
+  then.
 - **Failures.** The planner failing (no answer, a timeout, HTTP 5xx, 429
   or 403, a page that is not JSON: a maintenance or Cloudflare page) is
   not asked for 30 s, by the realtime hub either, logged once. A
@@ -445,7 +454,10 @@ before, and the card fills the board from Transitous.
   request at most every 30 s (the probe; any other request sent to FUTÁR
   meanwhile, a search or route details, counts as one), as below: FUTÁR
   first, cut short, the planner after it. Its answer ends the outage, and
-  every request asks FUTÁR first again. What the planner cannot answer (a
+  every request asks FUTÁR first again. A board FUTÁR's own cache holds
+  (answered within 15 s), or whose FUTÁR request is under way (the probe),
+  is answered from it or joins it, as outside the outage, for no token.
+  What the planner cannot answer (a
   stop it lacks, its share used up, no answer from it) asks FUTÁR as
   before, with what is left of the card's 20 s. So once the planner's BKK
   share is used up, every board and trip detail of every card goes to
@@ -478,7 +490,8 @@ before, and the card fills the board from Transitous.
   the planner knows or has not been asked about yet, or whose poles are
   known, a timetable trip, none of them failed lately, the planner not
   backing off) and a token of the boards' share is reserved for its
-  answer before FUTÁR is asked: a dashboard's boards at once (40 poles)
+  answer before FUTÁR is asked (none for an answer the planner's caches
+  hold: it asks the planner nothing): a dashboard's boards at once (40 poles)
   cut FUTÁR short for as many as the share holds, and the rest keep
   FUTÁR's whole budget, so a slow FUTÁR still answers them. The trip
   details reserved within 50 ms of each other share one token (up to one
