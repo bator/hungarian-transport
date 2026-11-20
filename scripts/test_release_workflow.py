@@ -334,6 +334,14 @@ with tempfile.TemporaryDirectory() as _tmp:
          "started on main", True),
         ("a backport tag below the highest stable", "v1.1.10", "v1.1.10 v1.2.3 v1.1.9", {},
          "v1.1.10 is not the highest stable release (v1.2.3)", False),
+        # The listing, made right after the publish job created the
+        # release, may not show it yet: TAG counts as a candidate itself.
+        ("the new highest stable, not listed yet", "v1.2.4", "v1.1.9 v1.2.3", {},
+         "mav-index-daily.yml started on main (timetables=true) for v1.2.4", True),
+        ("a backport tag below the highest stable, not listed yet", "v1.1.10", "v1.2.3 v1.1.9", {},
+         "v1.1.10 is not the highest stable release (v1.2.3)", False),
+        ("no stable release listed at all yet", "v1.0.0", "", {},
+         "started on main", True),
         ("the highest stable, gh workflow run fails", "v1.2.3", "v1.2.3", {"STUB_GH": "fail"},
          "::warning title=Pages timetables not started::Could not start", True),
         ("the releases cannot be listed", "v1.2.3", "v1.2.3", {"STUB_API": "fail"},

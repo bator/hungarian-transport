@@ -294,11 +294,14 @@ below). A failure is a warning while the published manifest's
 old or older, or names no build time, and at once when MÁV refuses the login
 (HTTP 401/403, which is never retried: only new credentials help). The
 `built_at` counts only when `mav-index.json.sig` verifies (read again once,
-11 minutes later, when it does not: Pages' cache, below); a published
-manifest without a signature that verifies fails the run too, as installs
-take nothing from it and its `built_at` is anyone's
-(`scripts/mav_daily_verdict.py`). A published manifest, or its signature,
-that cannot be read leaves the run green with a warning.
+11 minutes later, when it does not or is not there: Pages' cache, below); a
+published manifest without a signature that verifies fails the run too, as
+installs take nothing from it and its `built_at` is anyone's
+(`scripts/mav_daily_verdict.py`), and so does one whose `.sig` is no
+signature (over 1 KiB) or that the site refuses with another client error
+(HTTP 4xx): whoever can put files on Pages could make one so. A published
+manifest, or its signature, that cannot be read for a network error, a
+timeout or a server error (HTTP 5xx) leaves the run green with a warning.
 
 An index with fewer than half the trains and lines of the published one is
 refused (`scripts/mav_shrink_guard.py`; the repository variable
@@ -551,7 +554,9 @@ into a site of the new one.
   the releases), so both indexes are rebuilt minutes after the release
   rather than at the next scheduled run, within about 12 hours (plus
   GitHub's late starts). A stable tag of an older line (a backport) starts
-  nothing: the site is built against the highest one. That run may replace
+  nothing: the site is built against the highest one. The release's own
+  tag counts among the listed ones, since a listing made right after the
+  release was created may not show it yet. That run may replace
   one waiting in the workflow's concurrency group, which would have done
   the same; when the releases cannot be listed or the run cannot be
   started, the release run warns and the next scheduled run catches up.
@@ -578,7 +583,14 @@ into a site of the new one.
   the pinned public key and the signature against it; without the secret,
   with another key, or with a signature that does not verify, the job fails
   and nothing is deployed: an unsigned manifest is never published (so a
-  fork without the secret deploys nothing). Check a download with
+  fork without the secret deploys nothing). Before the key is read, the
+  job refuses a site older than the one GitHub Pages serves
+  (`sign_manifest.py live-check`: the published `timetables.json`, its
+  signature verifying, names a later `built_at`): "Re-run failed jobs"
+  after a failed sign job signs and deploys that run's site as it was
+  made (its artifact is kept three days), which is only worth it while no
+  later run has deployed; a published manifest that cannot be read or is
+  not trusted holds nothing back. Check a download with
   `python3 scripts/sign_manifest.py verify --site <folder>` (both
   manifests, when the folder has `mav-index.json`).
 - **An unsigned published manifest is no manifest.** Since every deploy
@@ -597,13 +609,25 @@ into a site of the new one.
   (`pages_timetables.py` `SIG_SETTLE_S`): GitHub Pages' CDN caches each
   file on its own for up to 10 minutes, keyed on the path alone (a query
   string or a request's `no-cache` does not get past it), so right after a
-  deploy it may serve one deploy's manifest next to the other's `.sig`. One
-  wait covers every manifest of the step, so the `due` step and the `site`
-  job take at most 11 minutes longer (their time limits allow for it; the
-  wait for a file that does not match its manifest is the same one). The
+  deploy it may serve one deploy's manifest next to the other's `.sig`, and
+  right after the first deploy with a signature still the 404 it took for
+  the `.sig` before (a run queued right behind that deploy), so a `.sig`
+  that is not there next to a manifest that is gets the same second read.
+  One wait covers every manifest of the step, so the `due` step and the
+  `site` job take at most 11 minutes longer (their time limits allow for
+  it; the wait for a file that does not match its manifest, or does not
+  read, a timeout on the 30 MB MÁV zip say, is the same one, and such a
+  file is fetched once more). The
   build job's `mav_pages_site.py` reads a `mav-index.json.sig` that does not
-  verify again the same way before it deploys the same content again for
-  it, and so does the verdict. The same holds for
+  verify, or is not there, again the same way before it deploys the same
+  content again for it, and so does the verdict. A cache's copy of the
+  previous deploy can also be consistent, its manifest with its own `.sig`:
+  it verifies. The `due` step and the build job's `mav_pages_site.py` name
+  the `built_at` of the published manifest they read (signature verified),
+  and the `site` job's `assemble` takes them (`--timetables-built-at`,
+  `--mav-built-at`): a published manifest older than that is read again
+  once past the cache, and when it is still older nothing is deployed, so
+  `built_at` never goes backwards from one deploy to the next. The same holds for
   `mav-index.json`: its files are carried only when `mav-index.json.sig`
   verifies. The build job takes an unsigned one for none and publishes
   the day's index from its own build (signed) even when the content is the

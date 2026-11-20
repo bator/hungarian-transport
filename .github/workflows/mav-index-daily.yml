@@ -122,11 +122,15 @@ jobs:
     runs-on: ubuntu-latest
     # About 5 minutes; pfaedle has its own limit (release_mav_index.sh). Up
     # to 11 minutes more in each of the Pages site and Published index age
-    # steps when the published mav-index.json.sig does not verify (read
-    # again past Pages' cache).
+    # steps when the published mav-index.json.sig does not verify or is not
+    # there (read again past Pages' cache).
     timeout-minutes: 55
     outputs:
       deploy: ${{ steps.site.outputs.deploy }}
+      # The published mav-index.json's built_at, its signature verified
+      # (mav_pages_site.py), "" without one: the site job never carries an
+      # older one.
+      live_built: ${{ steps.site.outputs.live_built }}
     env:
       # Only whether both are set; the values stay in the step that uses them.
       MAV_SECRETS: ${{ secrets.MAV_GTFS_USER != '' && secrets.MAV_GTFS_PASSWORD != '' }}
@@ -208,9 +212,11 @@ jobs:
       # or its signature does not verify (its counts are then anyone's), it
       # is compared with the latest stable release's MÁV index instead
       # (fetched only then). The repository variable MAV_ALLOW_SHRINK=1
-      # accepts an intended reduction. A .sig that does not verify is read
-      # again with its manifest 11 minutes later (Pages' cache may pair two
-      # deploys' files) before it counts as untrusted.
+      # accepts an intended reduction. A .sig that does not verify, or is
+      # not there (HTTP 404), is read again with its manifest 11 minutes
+      # later (Pages' cache may pair two deploys' files, or keep the 404 of
+      # the .sig from before the first signed deploy) before it counts as
+      # untrusted.
       - name: Pages site
         id: site
         if: steps.mav.outputs.built == 'true'
@@ -245,7 +251,8 @@ jobs:
       # a refused login, when the published index is 2 days old or older,
       # and when its mav-index.json.sig is not there or does not verify
       # (read again 11 minutes later, past Pages' cache: its built_at is
-      # then anyone's); a warning otherwise.
+      # then anyone's), is no signature or is refused (HTTP 4xx); a warning
+      # otherwise (a network error, a timeout, HTTP 5xx: its age unknown).
       - name: Published index age
         if: steps.site.outputs.deploy == ''
         env:
@@ -275,6 +282,10 @@ jobs:
     outputs:
       built: ${{ steps.indexes.outputs.built }}
       schema: ${{ steps.due.outputs.schema }}
+      # The published timetables.json's built_at, its signature verified
+      # (pages_timetables.py due), "" without one: the site job never
+      # carries an older one.
+      live_built: ${{ steps.due.outputs.live_built }}
     env:
       # The builders import the integration's package from the checkout.
       PYTHONDONTWRITEBYTECODE: "1"
@@ -504,13 +515,21 @@ jobs:
       # deployed). untrusted: the published manifests whose .sig is there
       # but does not verify (the signatures job).
       # SCHEMA (the stable release's) names timetables.json's schema only
-      # for a site without any index.
+      # for a site without any index. MAV_BUILT and TIMETABLES_BUILT: the
+      # built_at the build and timetables jobs read for the published
+      # manifests (signatures verified). A published manifest older than
+      # that is a cache's copy of an older deploy (Pages caches each file
+      # for 10 minutes; a run queued right behind a deploy may meet one,
+      # consistent with its own .sig): read again once past the cache, it
+      # stops the deploy when still older, never carried over the newer one.
       - name: Assemble the site
         id: assemble
         env:
           MAV_NEW: ${{ needs.build.outputs.deploy == 'true' }}
           TIMETABLES_NEW: ${{ needs.timetables.outputs.built != '' }}
           SCHEMA: ${{ needs.timetables.outputs.schema }}
+          MAV_BUILT: ${{ needs.build.outputs.live_built }}
+          TIMETABLES_BUILT: ${{ needs.timetables.outputs.live_built }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
@@ -519,13 +538,18 @@ jobs:
           if [ "$MAV_NEW" = true ]; then parts+=(--mav-part "$RUNNER_TEMP/mav-part"); fi
           if [ "$TIMETABLES_NEW" = true ]; then parts+=(--timetables-part "$RUNNER_TEMP/timetables-part"); fi
           if [[ "$SCHEMA" =~ ^[0-9]+$ ]]; then parts+=(--schema "$SCHEMA"); fi
+          if [ -n "${MAV_BUILT:-}" ]; then parts+=(--mav-built-at "$MAV_BUILT"); fi
+          if [ -n "${TIMETABLES_BUILT:-}" ]; then parts+=(--timetables-built-at "$TIMETABLES_BUILT"); fi
           python3 scripts/pages_timetables.py assemble --out "$RUNNER_TEMP/site" --commit "$GITHUB_SHA" \
             --live-url "$pages_url" --github-output "$GITHUB_OUTPUT" "${parts[@]}"
           if [ -d "$RUNNER_TEMP/site" ]; then ls -l "$RUNNER_TEMP/site"; fi
 
       # The sign job signs it and makes the Pages artifact. Kept 3 days, as
-      # the Pages artifact: "Re-run failed jobs" after a failed sign job
-      # finds it.
+      # the Pages artifact. "Re-run failed jobs" after a failed sign job
+      # (no key, openssl) signs and deploys this artifact as it was made,
+      # however old: worth it only while no later run has deployed (the
+      # sign job refuses it once GitHub Pages serves a newer site), and
+      # only when no run of this workflow is queued (see the top).
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.assemble.outputs.deploy == 'true'
         with:
@@ -550,7 +574,11 @@ jobs:
   # secret, another key, or a signature that does not verify fails the job:
   # no Pages artifact, nothing deployed, never an unsigned manifest. A fork
   # without the secret deploys nothing. The token reads contents only, for
-  # the one script it checks out.
+  # the one script it checks out. Before the key is read, a site older than
+  # the one GitHub Pages serves is refused (sign_manifest.py live-check: the
+  # published timetables.json, its signature verifying, names a later
+  # built_at): a re-run of this job after a later run deployed would put
+  # this run's older indexes back on Pages.
   sign:
     name: Sign the manifest
     needs: site
@@ -573,6 +601,15 @@ jobs:
         with:
           name: pages-site
           path: ${{ runner.temp }}/site
+
+      # A published timetables.json that cannot be read or is not trusted
+      # holds nothing back (its built_at is then anyone's).
+      - name: No newer site on GitHub Pages
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
+          python3 scripts/sign_manifest.py live-check --site "$RUNNER_TEMP/site" --live-url "$pages_url"
 
       - name: Sign the manifest
         env:

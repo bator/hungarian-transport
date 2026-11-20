@@ -88,7 +88,8 @@ gtfs_compact.INDEX_SCHEMA), not this checkout's:
   assemble --out SITE --commit SHA (--live-url URL | --live-dir DIR)
            [--mav-part DIR] [--timetables-part DIR] [--schema N]
            [--max-bytes N] [--now ISO] [--settle SECONDS]
-           [--sig-settle SECONDS] [--github-output FILE]
+           [--sig-settle SECONDS] [--mav-built-at ISO]
+           [--timetables-built-at ISO] [--github-output FILE]
            Writes the whole site: the MÁV files from --mav-part (this run's
            mav_pages_site.py output), else every file the published
            mav-index.json names, carried; each index of --timetables-part,
@@ -116,10 +117,19 @@ gtfs_compact.INDEX_SCHEMA), not this checkout's:
            size limit. A published manifest that is not there (HTTP 404)
            has nothing to carry. A MÁV file that does not match (Pages'
            CDN may serve one deploy's file next to the other's manifest,
-           as with a .sig) is fetched again once, --sig-settle seconds
-           after the run's first read of the site (one wait per run, shared
-           with the signatures; --settle seconds when --sig-settle is
-           negative; never when --settle is negative).
+           as with a .sig), or does not read (a timeout), is fetched again
+           once, --sig-settle seconds after the run's first read of the
+           site (one wait per run, shared with the signatures; --settle
+           seconds when --sig-settle is negative; never when --settle is
+           negative). --mav-built-at and --timetables-built-at: the
+           built_at an earlier job of the run read for the published
+           mav-index.json (mav_pages_site.py's live_built output) and
+           timetables.json (due's live_built), signatures verified; a
+           published one that is older is a cache's copy of an older
+           deploy, read again the same way, and when still older the site
+           is refused (exit 1): built_at never goes backwards.
+           due prints live_built=: the published timetables.json's
+           built_at when its signature verifies, else empty.
 """
 from __future__ import annotations
 
@@ -379,25 +389,39 @@ class Source:
         run, shared with the signatures); settle when sig_settle < 0."""
         return settle if sig_settle < 0 else self.settle_wait(sig_settle)
 
-    def signed(self, name: str, settle: float = -1) -> tuple[dict | None, bytes | None, str]:
+    def signed(self, name: str, settle: float = -1,
+               not_before: datetime | None = None) -> tuple[dict | None, bytes | None, str]:
         """The site's JSON manifest name (timetables.json, mav-index.json),
         trusted only when name.sig verifies over its exact bytes against
         the pinned public key (sign_manifest.PUBLIC_KEY): (it, its bytes,
         "ok"); (None, None, "missing") for a 404; (None, None, "unsigned:
         ...") for one without a .sig (HTTP 404: the first run after signing
         came in has none yet); (None, None, "bad signature: ...") for one
-        whose .sig is there but does not verify, also when both are read
-        again once, settle seconds after the source's first read
-        (settle_wait; settle < 0: never). Pages' CDN caches each path on
-        its own for up to PAGES_MAX_AGE, so for that long after a deploy
-        the previous deploy's .sig may be served next to the new manifest,
-        or the reverse (SIG_SETTLE_S, the CLI's default, waits that out).
+        whose .sig is there but does not verify. Both, the 404 and the .sig
+        that does not verify, only when both are read again once, settle
+        seconds after the source's first read (settle_wait; settle < 0:
+        never). Pages' CDN caches each path on its own for up to
+        PAGES_MAX_AGE, so for that long after a deploy the previous
+        deploy's .sig may be served next to the new manifest, or the
+        reverse, and after the first signed deploy the 404 a cache took for
+        the .sig before it (a run queued right behind that deploy: a manual
+        dispatch, then release.yml's); SIG_SETTLE_S, the CLI's default,
+        waits that out.
         Every run signs the manifests it deploys anew: an unsigned one,
         whoever put it there, is so treated as no manifest at all, and
         nothing of it is carried, used as a baseline or taken as built.
         FetchError for a manifest or signature that is there but does not
         read. The state is kept in self.states[name] (assemble reports the
-        bad signatures)."""
+        bad signatures).
+
+        not_before: the built_at of this manifest as an earlier job of the
+        run read it (verified; assemble's --mav-built-at,
+        --timetables-built-at). One that verifies but names an earlier
+        built_at (or none) is a cache's copy of an older deploy, consistent
+        with its own .sig: it is read again once as above, and raises
+        MismatchError when it is still older. Carried, it would put that
+        deploy's files back over the newer one's: built_at never goes
+        backwards from one deploy to the next."""
         sig_name = name + ".sig"
         why = ""
         for attempt in (1, 2):
@@ -408,26 +432,35 @@ class Source:
             with tempfile.TemporaryDirectory() as tmp:
                 got = self.fetch(sig_name, Path(tmp) / "sig", MAX_SIG)
                 raw = (Path(tmp) / "sig").read_bytes() if got is not None else None
+            built = parse_time(data.get("built_at"))
             if raw is None:
                 why = f"unsigned: no {sig_name}"
-                break
-            if sign_manifest.verify_bytes(body, sign_manifest.decode_sig(raw)):
+            elif not sign_manifest.verify_bytes(body, sign_manifest.decode_sig(raw)):
+                why = f"bad signature: {sig_name} does not verify against the pinned public key"
+            elif not_before is not None and (built is None or built < not_before):
+                # Times only: the manifest is trusted, but they are what
+                # tells the two deploys apart.
+                why = (f"stale: the published {name} was built {utc_text(built) if built else 'at no valid time'},"
+                       f" before the one this run read earlier ({utc_text(not_before)})")
+            else:
                 self.states[name] = "ok"
                 return data, body, "ok"
-            why = f"bad signature: {sig_name} does not verify against the pinned public key"
             if attempt == 2 or settle < 0:
                 break
             wait = self.settle_wait(settle)
             print(f"{why}; reading both again in {wait:.0f} s (GitHub Pages may still serve the previous"
-                  f" deploy's {name} or {sig_name}: it caches each file for up to {PAGES_MAX_AGE} s)")
+                  f" deploy's {name} or {sig_name}, or a 404 it cached for it: it caches each file for up to"
+                  f" {PAGES_MAX_AGE} s)")
             time.sleep(wait)
+        if why.startswith("stale"):
+            raise MismatchError(f"{why}: GitHub Pages still serves an older deploy's copy")
         self.states[name] = why
         return None, None, why
 
-    def timetables(self, settle: float = -1) -> tuple[dict | None, str]:
+    def timetables(self, settle: float = -1, not_before: datetime | None = None) -> tuple[dict | None, str]:
         """The published timetables.json as signed() reads it: (it, "ok"),
         else (None, why)."""
-        data, _body, state = self.signed(MANIFEST_NAME, settle)
+        data, _body, state = self.signed(MANIFEST_NAME, settle, not_before)
         return data, state
 
 
@@ -1058,7 +1091,8 @@ class UnsignedMav(SiteError):
     of this run nothing is deployed (a warning, not a failure)."""
 
 
-def mav_from_live(source: Source, out: Path, settle: float = -1) -> dict | None:
+def mav_from_live(source: Source, out: Path, settle: float = -1,
+                  not_before: datetime | None = None) -> dict | None:
     """Every MÁV file the published mav-index.json names, checked against it,
     and the manifest itself as published; None when there is none.
 
@@ -1077,8 +1111,11 @@ def mav_from_live(source: Source, out: Path, settle: float = -1) -> dict | None:
     a Volán or city index: a site without the MÁV files breaks every
     install's daily MÁV check (mav_daily.py), and the MÁV build itself is
     tried again on the next run (twice a day), so a refused deploy costs
-    less than one without them."""
-    man, body, state = source.signed(mav_site.MANIFEST_NAME, settle)
+    less than one without them. A file that does not match, or does not
+    read (FetchError: a timeout on the ~30 MB MÁV zip, say), is fetched
+    again once by cmd_assemble. not_before (Source.signed): the built_at
+    the build job read for the published manifest; an older one raises."""
+    man, body, state = source.signed(mav_site.MANIFEST_NAME, settle, not_before)
     if state == "missing":
         return None
     if man is None:
@@ -1142,7 +1179,7 @@ def timetables_from_part(part: Path, out: Path, schema: int) -> dict[str, dict]:
     return new
 
 
-def live_timetables(source: Source, settle: float = -1) -> dict | None:
+def live_timetables(source: Source, settle: float = -1, not_before: datetime | None = None) -> dict | None:
     """The published timetables.json; None for a 404, and for one whose
     signature does not verify (Source.timetables, settle), with a warning
     (no .sig) or an error annotation (a .sig that does not verify):
@@ -1152,8 +1189,11 @@ def live_timetables(source: Source, settle: float = -1) -> dict | None:
     site. Which indexes such a manifest lists cannot be told, and the cause
     is most likely the network: dropping both indexes on that would leave
     every install without a published index (they keep their own, but each
-    next run rebuilds both), while a refusal costs only this run's deploy."""
-    live, state = source.timetables(settle)
+    next run rebuilds both), while a refusal costs only this run's deploy.
+    not_before (Source.signed): the built_at the timetables job's due step
+    read for it; an older one raises MismatchError (assemble refuses the
+    site after one more try), never carried."""
+    live, state = source.timetables(settle, not_before)
     if state.startswith("unsigned") or bad_signature(state):
         # A .sig that is there but does not verify is an error (the run goes
         # red after the deploy, which replaces it with a signed manifest);
@@ -1178,8 +1218,8 @@ def _remove_entry_files(out: Path, entry: object) -> None:
 
 
 def timetables_from_live(source: Source, out: Path, skip: set[str], schema: int | None,
-                         settle: float = SETTLE_S, sig_settle: float = SIG_SETTLE_S
-                         ) -> tuple[dict[str, dict], int | None]:
+                         settle: float = SETTLE_S, sig_settle: float = SIG_SETTLE_S,
+                         not_before: datetime | None = None) -> tuple[dict[str, dict], int | None]:
     """The published indexes not in skip, checked against the published
     timetables.json, with their entries as published; (name -> entry, the
     schema they are of). schema None: whatever the published manifest names
@@ -1192,10 +1232,11 @@ def timetables_from_live(source: Source, out: Path, skip: set[str], schema: int 
     (Source.mismatch_wait; settle < 0: never); its signature waits the same,
     Source.signed) is left out with a warning, not the whole site: the integration then finds it not published and
     keeps its own, and the next run's due check finds it missing and builds
-    it again. The MÁV files are never left out that way (mav_from_live)."""
+    it again. The MÁV files are never left out that way (mav_from_live).
+    not_before: live_timetables."""
     if skip >= set(INDEXES):
         return {}, schema
-    live = live_timetables(source, sig_settle)
+    live = live_timetables(source, sig_settle, not_before)
     if live is None:
         return {}, schema
     if schema is None:
@@ -1229,7 +1270,7 @@ def timetables_from_live(source: Source, out: Path, skip: set[str], schema: int 
                       f" previous deploy's copy: it caches each file for up to {PAGES_MAX_AGE} s)")
                 time.sleep(wait)
                 if reread is None:
-                    reread = live_timetables(source, sig_settle) or {"indexes": {}}
+                    reread = live_timetables(source, sig_settle, not_before) or {"indexes": {}}
                 entry = reread["indexes"].get(name)
                 if reread.get("schema") != schema or entry is None:
                     problem = SiteError(f"the published {name} index changed while it was fetched")
@@ -1337,7 +1378,7 @@ def assemble(args: argparse.Namespace, source: Source, now: datetime) -> tuple[d
     if args.mav_part is not None:
         mav = mav_from_part(args.mav_part, out)
     else:
-        mav = mav_from_live(source, out, args.sig_settle)
+        mav = mav_from_live(source, out, args.sig_settle, getattr(args, "mav_built_at", None))
     # The schema of the indexes this run built (the stable release's
     # builders), else the published one's; a site without any index names
     # --schema, else this checkout's.
@@ -1347,7 +1388,8 @@ def assemble(args: argparse.Namespace, source: Source, now: datetime) -> tuple[d
         if schema is None:
             raise SiteError(f"the timetables part's {PART_NAME} names no schema")
     new = timetables_from_part(args.timetables_part, out, schema) if schema is not None else {}
-    carried, schema = timetables_from_live(source, out, set(new), schema, args.settle, args.sig_settle)
+    carried, schema = timetables_from_live(source, out, set(new), schema, args.settle, args.sig_settle,
+                                           getattr(args, "timetables_built_at", None))
     if schema is None:
         schema = args.schema if args.schema is not None else INDEX_SCHEMA
     indexes = {name: (new.get(name) or carried[name]) for name in INDEXES if name in new or name in carried}
@@ -1383,7 +1425,11 @@ def cmd_assemble(args: argparse.Namespace, source: Source, now: datetime) -> int
         try:
             mav, new, carried = assemble(args, source, now)
             break
-        except MismatchError as err:
+        # A MÁV file that does not match (or a published manifest older
+        # than the one an earlier job read), or that does not read: a
+        # timeout on the ~30 MB MÁV zip is as likely to pass on a second
+        # try as a cache's copy of the previous deploy is to expire.
+        except (MismatchError, FetchError) as err:
             if attempt == 2 or args.settle < 0:
                 return _refuse(args, err, source)
             wait = source.mismatch_wait(args.settle, args.sig_settle)
@@ -1466,6 +1512,17 @@ def _output(args: argparse.Namespace, deploy: bool, source: Source | None = None
 
 # ---- command line -----------------------------------------------------------
 
+def _built_arg(value: str) -> datetime | None:
+    """--mav-built-at, --timetables-built-at: an ISO time with an offset;
+    "" (the workflow's empty output) for none."""
+    if value == "":
+        return None
+    when = parse_time(value)
+    if when is None:
+        raise argparse.ArgumentTypeError("not an ISO time with an offset")
+    return when
+
+
 def _source(args: argparse.Namespace) -> Source:
     return Source(url=args.live_url) if args.live_url else Source(folder=args.live_dir)
 
@@ -1532,6 +1589,10 @@ def main(argv: list[str]) -> int:
                    help="seconds before fetching a mismatched file again when --sig-settle is negative"
                    " (negative: never fetched again)")
     sig_settle(p)
+    for flag, name, job in (("--mav-built-at", mav_site.MANIFEST_NAME, "the build job's Pages site step"),
+                            ("--timetables-built-at", MANIFEST_NAME, "the timetables job's due step")):
+        p.add_argument(flag, type=_built_arg, help=f"the built_at {job} read for the published {name} (its"
+                       " signature verified): an older one is an older deploy's copy, not carried")
     p.add_argument("--github-output", type=Path)
 
     args = ap.parse_args(argv)
@@ -1580,7 +1641,12 @@ def main(argv: list[str]) -> int:
         names, reason = due(live_man, why, args.force == "true", now, args.schema, release,
                             args.release_tag if release else None)
         print(f"{'due: ' + ', '.join(names) if names else 'not due'}: {reason}")
-        lines = f"due={'true' if names else 'false'}\nindexes={','.join(names)}\n"
+        # live_built: the built_at of the published timetables.json, its
+        # signature verified, for the site job's assemble
+        # (--timetables-built-at): it never carries an older one.
+        built = parse_time(live_man.get("built_at")) if live_man is not None else None
+        lines = (f"due={'true' if names else 'false'}\nindexes={','.join(names)}\n"
+                 f"live_built={utc_text(built) if built is not None else ''}\n")
         print(lines, end="")
         if args.github_output is not None:
             with args.github_output.open("a", encoding="utf-8") as fh:

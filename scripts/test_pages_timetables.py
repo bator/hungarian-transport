@@ -1219,12 +1219,13 @@ with tempfile.TemporaryDirectory() as tmp_name:
             self.clock.now += 1
             return got
 
-    def cdn_main(argv: list[str], stale: set[str], sig_settle: float | None = None) -> tuple[int, str, dict, Clock]:
+    def cdn_main(argv: list[str], stale: set[str], sig_settle: float | None = None,
+                 cls: type | None = None) -> tuple[int, str, dict, Clock]:
         """pages_timetables.main against Cdn: the first read at 1000 s, the
         stale copies expiring at 1595 s (cached 5 s before the deploy, which
         was over before the first read)."""
         clock = Clock()
-        cdn = Cdn(clock, stale, clock.now + pt.PAGES_MAX_AGE - 5)
+        cdn = (cls or Cdn)(clock, stale, clock.now + pt.PAGES_MAX_AGE - 5)
         gh_out = tmp / "gh-cdn.txt"
         gh_out.write_text("")
         real = (pt.time.monotonic, pt.time.sleep, pt._source, pt.SIG_SETTLE_S)
@@ -1319,6 +1320,136 @@ with tempfile.TemporaryDirectory() as tmp_name:
           rc == 0 and outputs == outputs_ok and "bad signature" not in out.splitlines()[-3]
           and len(clock.sleeps) == 1 and outputs.get("indexes") != "volan,city",
           repr((rc, outputs, outputs_ok, clock.sleeps, out[-400:])))
+
+    gen2_built = json.loads((gen2 / "timetables.json").read_text())["built_at"]
+    check("due names the published timetables.json's built_at (its signature verified) as live_built, for the"
+          " site job's --timetables-built-at; also when it was read again past the cache",
+          outputs_ok.get("live_built") == gen2_built and outputs.get("live_built") == gen2_built,
+          repr((outputs_ok, outputs)))
+    rc, out, outputs, clock = cdn_main(due_args, {"timetables.json.sig"} | {"timetables.json"})
+    check("due on the previous deploy's timetables.json and .sig (a cache's consistent copy): its built_at",
+          rc == 0 and outputs.get("live_built") == json.loads((mav_live / "timetables.json").read_text())["built_at"],
+          repr((rc, outputs)))
+
+    class Cdn404(Cdn):
+        """As Cdn, but the stale paths answer the 404 a cache took for them
+        before the first signed deploy."""
+
+        def fetch(self, name: str, dest: Path, cap: int):
+            if name in self.stale and self.clock.now < self.expires:
+                self.clock.now += 1
+                return None
+            return super().fetch(name, dest, cap)
+
+    for label, stale in (("both .sig files", sigs), ("timetables.json.sig", {"timetables.json.sig"})):
+        rc, out, outputs, clock = cdn_main(asm, stale, cls=Cdn404)
+        check(f"assemble right behind the first signed deploy, Pages still answering 404 for {label}: read again"
+              " once, SIG_SETTLE_S after the first read, then trusted: carried, deployed, nothing untrusted",
+              rc == 0 and outputs.get("deploy") == "true" and outputs.get("untrusted") == ""
+              and len(clock.sleeps) == 1 and abs(sum(clock.sleeps) + 3 - REAL_SIG_SETTLE) <= 10
+              and (cdn_site / "mav-index.json").read_bytes() == (gen2 / "mav-index.json").read_bytes()
+              and "unsigned" in out, repr((rc, outputs, clock.sleeps, out[-600:])))
+    clock = Clock()
+    cdn = Cdn404(clock, {"timetables.json.sig"}, clock.now + pt.PAGES_MAX_AGE - 5)
+    real = (pt.time.monotonic, pt.time.sleep)
+    pt.time.monotonic, pt.time.sleep = clock.monotonic, clock.sleep
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            got_tt, state = cdn.timetables(-1)
+    finally:
+        pt.time.monotonic, pt.time.sleep = real
+    check("a 404 .sig without settle (-1): not read again, unsigned", got_tt is None and state.startswith("unsigned")
+          and clock.sleeps == [], repr((state, clock.sleeps)))
+
+    # A cache's copy of the previous deploy is consistent with its own .sig:
+    # it verifies. --mav-built-at / --timetables-built-at (what the build
+    # and timetables jobs read earlier in the run) say it is older: read
+    # again past the cache, never carried over the newer deploy.
+    gen2_mav_built = json.loads((gen2 / "mav-index.json").read_text())["built_at"]
+    old_pairs = {"mav-index.json", "mav-index.json.sig", "timetables.json", "timetables.json.sig"}
+    floors = ["--mav-built-at", gen2_mav_built, "--timetables-built-at", gen2_built]
+    asm_nm = ["assemble", "--out", str(cdn_site), "--commit", COMMIT, "--live-dir", str(gen2),
+              "--mav-part", str(mav_part(tmp / "mav-gen3b", feed="20261103.M2ChangeID")), "--settle", "0",
+              "--now", (NOW + timedelta(hours=4)).isoformat()]
+    rc, out, outputs, clock = cdn_main([*asm_nm, "--timetables-built-at", gen2_built], {"timetables.json",
+                                                                                         "timetables.json.sig"})
+    check("assemble, Pages serving the previous deploy's timetables.json with its own .sig, older than the one"
+          " the due step read: read again once past the cache, then the newer one carried",
+          rc == 0 and outputs.get("deploy") == "true" and len(clock.sleeps) == 1
+          and abs(sum(clock.sleeps) + 3 - REAL_SIG_SETTLE) <= 3 and "stale: the published timetables.json" in out,
+          repr((rc, outputs, clock.sleeps, out[-600:])))
+    rc, out, outputs, clock = cdn_main(asm_nm, {"timetables.json", "timetables.json.sig"})
+    check("the same without --timetables-built-at: the older copy verifies and is taken at once (no wait)",
+          rc == 0 and outputs.get("deploy") == "true" and clock.sleeps == [], repr((rc, outputs, clock.sleeps)))
+    asm_mav = ["assemble", "--out", str(cdn_site), "--commit", COMMIT, "--live-dir", str(gen2), "--timetables-part",
+               str(tmp / "p-rf"), "--settle", "0", "--now", (NOW + timedelta(hours=4)).isoformat()]
+    rc, out, outputs, clock = cdn_main([*asm_mav, *floors], old_pairs)
+    check("assemble, Pages serving the previous deploy's mav-index.json with its own .sig, older than the one the"
+          " build job read: read again once past the cache, then the newer MÁV files carried",
+          rc == 0 and outputs.get("deploy") == "true" and len(clock.sleeps) == 1
+          and (cdn_site / "mav-index.json").read_bytes() == (gen2 / "mav-index.json").read_bytes()
+          and "stale: the published mav-index.json" in out, repr((rc, outputs, clock.sleeps, out[-600:])))
+    clock = Clock()
+    cdn = Cdn(clock, old_pairs, clock.now + 10 * pt.PAGES_MAX_AGE)
+    gh_out = tmp / "gh-cdn-stuck.txt"
+    gh_out.write_text("")
+    real = (pt.time.monotonic, pt.time.sleep, pt._source, pt.SIG_SETTLE_S)
+    pt.time.monotonic, pt.time.sleep, pt._source, pt.SIG_SETTLE_S = clock.monotonic, clock.sleep, \
+        (lambda _args: cdn), REAL_SIG_SETTLE
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = pt.main([*asm_mav, *floors, "--github-output", str(gh_out)])
+    finally:
+        pt.time.monotonic, pt.time.sleep, pt._source, pt.SIG_SETTLE_S = real
+    stuck = dict(ln.split("=", 1) for ln in gh_out.read_text().splitlines() if "=" in ln)
+    check("a published mav-index.json still older than the build job's after the wait: refused (exit 1), nothing"
+          " deployed (built_at never goes backwards)",
+          rc == 1 and stuck.get("deploy") == "false" and not cdn_site.exists()
+          and "::error title=GitHub Pages site not assembled::stale: the published mav-index.json" in buf.getvalue(),
+          repr((rc, stuck, buf.getvalue()[-600:])))
+    rc, out, err, outputs = run(*asm_mav[:-2], "--mav-built-at", "yesterday")
+    check("--mav-built-at needs an ISO time with an offset", rc == 2 and "--mav-built-at" in err, repr((rc, err)))
+    rc, out, err, outputs = run(*asm_mav, "--mav-built-at", "", "--timetables-built-at", "")
+    check("an empty --mav-built-at / --timetables-built-at (the workflow's output without one) is none", rc == 0
+          and outputs.get("deploy") == "true", repr((rc, out[-300:], err)))
+
+    # A MÁV file that does not read (a timeout on the ~30 MB zip) is fetched
+    # again once, as one that does not match.
+    class SlowMav(pt.Source):
+        def __init__(self, folder: Path, fails: int) -> None:
+            super().__init__(folder=folder)
+            self.fails, self.tries = fails, 0
+
+        def fetch(self, name: str, dest: Path, cap: int):
+            if name == "mav-gtfs.zip":
+                self.tries += 1
+                if self.tries <= self.fails:
+                    raise pt.FetchError(f"{name}: TimeoutError: The read operation timed out")
+            return super().fetch(name, dest, cap)
+
+    for fails, want_rc in ((1, 0), (2, 1)):
+        slow = SlowMav(gen2, fails)
+        gh_out = tmp / f"gh-slow-{fails}.txt"
+        gh_out.write_text("")
+        waits: list[float] = []
+        real = (pt._source, pt.time.sleep)
+        pt._source, pt.time.sleep = (lambda _args, _s=slow: _s), waits.append
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = pt.main(["assemble", "--out", str(tmp / f"slow-{fails}"), "--commit", COMMIT, "--live-dir",
+                              str(gen2), "--timetables-part", str(tmp / "p-rf"), "--settle", "0",
+                              "--now", (NOW + timedelta(hours=4)).isoformat(), "--github-output", str(gh_out)])
+        finally:
+            pt._source, pt.time.sleep = real
+        got = dict(ln.split("=", 1) for ln in gh_out.read_text().splitlines() if "=" in ln)
+        check(f"a MÁV file that times out {fails}x: " + ("fetched again once, then carried and deployed" if not want_rc
+                                                          else "refused after the one more try (exit 1)"),
+              rc == want_rc and slow.tries == 2 and len(waits) == 1
+              and got.get("deploy") == ("true" if not want_rc else "false")
+              and (want_rc or (tmp / "slow-1" / "mav-gtfs.zip").read_bytes() == (gen2 / "mav-gtfs.zip").read_bytes()),
+              repr((rc, slow.tries, waits, got, buf.getvalue()[-400:])))
 
     attribution = (tmp / "site-rf" / "ATTRIBUTION.txt").read_text()
     check("ATTRIBUTION.txt names timetables.json.sig", "timetables.json.sig" in attribution, attribution[-400:])
@@ -1596,6 +1727,78 @@ with tempfile.TemporaryDirectory() as tmp_name:
     rc, text = pinned_cli("verify", "--site", str(site), key=None)
     check("verify of a site without mav-index.json checks timetables.json only", rc == 0
           and text.count("good signature") == 1, text)
+
+    # live-check (the sign job, before the key): a re-run of an older run's
+    # sign job must not deploy its site over a newer run's. Only a published
+    # timetables.json whose signature verifies counts.
+    lc_site = tmp / "lc-site"
+    lc_site.mkdir()
+    (lc_site / "timetables.json").write_text(json.dumps({"format": 1, "built_at": "2026-11-17T04:50:00Z"}))
+    lc_live = tmp / "lc-live"
+    lc_live.mkdir()
+
+    def published(built: object, key: bytes = TEST_SEED) -> dict[str, bytes]:
+        (lc_live / "timetables.json").write_text(json.dumps({"format": 1, "built_at": built}))
+        sm.sign_site(lc_live, key, sm.public_key(key))
+        return {"https://pages.example/r/timetables.json": (lc_live / "timetables.json").read_bytes(),
+                "https://pages.example/r/timetables.json.sig": (lc_live / "timetables.json.sig").read_bytes()}
+
+    def getter(files: dict[str, bytes] | None, why: str = "HTTP 404"):
+        return lambda url, cap: (files[url], "ok") if files and url in files else (None, why)
+
+    for label, files, why, want in (
+        ("a newer run's site, signed", published("2026-11-17T14:30:00Z"), "", True),
+        ("the same site (this run deployed already)", published("2026-11-17T04:50:00Z"), "", False),
+        ("an older site", published("2026-11-16T14:30:00Z"), "", False),
+        ("a newer one by another key (anyone's built_at)", published("2026-11-30T00:00:00Z", os.urandom(32)), "",
+         False),
+        ("a newer one without a .sig", {k: v for k, v in published("2026-11-30T00:00:00Z").items()
+                                        if not k.endswith(".sig")}, "HTTP 404", False),
+        ("none (no site yet)", None, "HTTP 404", False),
+        ("none read (a network error)", None, "URLError: down", False),
+        ("one without a built_at", published(None), "", False),
+    ):
+        newer, found = sm.live_newer(lc_site, "https://pages.example/r", getter(files, why))
+        check(f"live-check, the published timetables.json is {label}: "
+              + ("refused" if want else "signed and deployed"), newer is want and found, repr((newer, found)))
+    (lc_site / "timetables.json").write_text(json.dumps({"format": 1}))
+    try:
+        sm.live_newer(lc_site, "https://pages.example/r", getter(None))
+        raised = ""
+    except sm.SignError as err_:
+        raised = str(err_)
+    check("live-check refuses a site whose own timetables.json names no built_at", "no built_at" in raised, raised)
+    (lc_site / "timetables.json").write_text(json.dumps({"format": 1, "built_at": "2026-11-17T04:50:00Z"}))
+    newer_files = published("2026-11-17T14:30:00Z")
+    real_urlopen = sm.urllib.request.urlopen
+
+    class LcRes(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def lc_open(req, timeout=None):
+        if req.full_url not in newer_files:
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+        return LcRes(newer_files[req.full_url])
+
+    for label, served_files, want_rc, want_text in (
+        ("a newer published site", newer_files, 1, "::error title=An older site is not deployed::"),
+        ("no published site", {}, 0, "signing and deploying this site"),
+    ):
+        newer_files = served_files
+        sm.urllib.request.urlopen = lc_open
+        buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(buf):
+                rc = sm.main(["live-check", "--site", str(lc_site), "--live-url", "https://pages.example/r"])
+        finally:
+            sm.urllib.request.urlopen = real_urlopen
+        check(f"the live-check CLI with {label}: exit {want_rc}", rc == want_rc and want_text in buf.getvalue(),
+              repr((rc, buf.getvalue())))
+    check("live-check reads only https", sm.fetch("http://pages.example/r/timetables.json", 10)[0] is None)
 
     # _openssl itself: KEY_ENV is in this process's environment, not in the
     # child's.
