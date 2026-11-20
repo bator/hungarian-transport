@@ -767,13 +767,17 @@ jobs:
         run: |
           set -uo pipefail
           # As the daily workflow's "Latest stable release": the highest
-          # vX.Y.Z that is no draft or prerelease, by version.
+          # vX.Y.Z that is no draft or prerelease, by version. TAG itself is
+          # one of the candidates: the publish job has just created it, and
+          # a listing made right after may not show it yet (it would then
+          # name the previous release as the highest, and nothing would
+          # start until the next cron, about 12 hours later).
           if ! tags=$(gh api --paginate "repos/${GH_REPO}/releases?per_page=100" \
               --jq '.[] | select((.draft or .prerelease) | not) | .tag_name'); then
             echo "::warning title=Pages timetables not started::Could not list the releases (GitHub API); the next scheduled run of mav-index-daily.yml rebuilds the Volán and city indexes against the highest stable release."
             exit 0
           fi
-          highest=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$tags" | sort -V | tail -n 1 || true)
+          highest=$(printf '%s\n%s\n' "$tags" "$TAG" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)
           if [ "$highest" != "$TAG" ]; then
             echo "${TAG} is not the highest stable release (${highest:-none}); the Pages timetables are built against that one, nothing to rebuild."
             exit 0

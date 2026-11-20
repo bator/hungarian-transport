@@ -46,8 +46,9 @@ Usage: mav_pages_site.py --index mav-index.json.gz --stats mav-build.json
          [--live-url URL | --live-file PATH] [--github-output FILE]
          [--max-bytes N] [--allow-shrink]
          [--baseline-url URL | --baseline-file PATH] [--sig-settle SECONDS]
-A published mav-index.json.sig that does not verify is read again with
-its manifest once, --sig-settle seconds later (SIG_SETTLE_S: Pages' cache).
+A published mav-index.json.sig that does not verify, or is not there (HTTP
+404) next to a manifest that is, is read again with its manifest once,
+--sig-settle seconds later (SIG_SETTLE_S: Pages' cache).
 Prints deploy=true|false (and appends it to --github-output). Exit 1, with
 nothing written, for an index or statistics that do not hold up, a feed
 whose feed_version does not start with a real date (YYYYMMDD, as the
@@ -131,9 +132,12 @@ LIVE_TIMEOUT = 20
 # 2026-11-19: a never-seen ?query answered X-Cache: HIT with the cached
 # ETag; the integration found the same, mav_daily.PAGES_MAX_AGE). For up to
 # PAGES_MAX_AGE after a deploy a manifest and its .sig can so be of two
-# deploys, either way round, and the signature does not verify. A reader
-# that finds one so reads both again once, SIG_SETTLE_S after its first
-# read of the site, when every copy cached before the deploy has expired
+# deploys, either way round, and the signature does not verify; after the
+# first deploy with a .sig, a cache may still answer the 404 it took for
+# the .sig before. A reader that finds one so (a .sig that does not verify,
+# or a 404 for it next to a manifest that is there) reads both again once,
+# SIG_SETTLE_S after its first read of the site, when every copy cached
+# before the deploy has expired
 # (the minute on top: a cache that took its copy a moment late, the
 # clocks): pages_timetables.py (Source.signed, and a file that does not
 # match its manifest), mav_daily_verdict.py and this script (_finish).
@@ -301,7 +305,7 @@ def fetch_bytes(url: str, cap: int = MAX_MANIFEST) -> tuple[bytes | None, str]:
     except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
         return None, f"{type(err).__name__}: {err}"
     if len(body) > cap:
-        return None, "larger than a manifest"
+        return None, f"larger than {cap} bytes"
     return body, "ok"
 
 
@@ -600,8 +604,8 @@ def main(argv: list[str]) -> int:
                     help="publish an index with under half the trains and lines of the published one"
                          f" (default: {mav_shrink_guard.ALLOW_ENV} set)")
     ap.add_argument("--sig-settle", type=float, default=SIG_SETTLE_S,
-                    help="seconds before a published manifest whose signature does not verify is read again with"
-                         f" it (default {SIG_SETTLE_S:g}: Pages' cache age and a minute; negative: never)")
+                    help="seconds before a published manifest whose signature does not verify, or is not there,"
+                         f" is read again with it (default {SIG_SETTLE_S:g}: Pages' cache age and a minute; negative: never)")
     args = ap.parse_args(argv)
     if (args.gtfs_zip is None) != (args.pfaedle_dir is None):
         ap.error("--gtfs-zip and --pfaedle-dir go together")
@@ -632,7 +636,8 @@ def _read_live(args: argparse.Namespace) -> tuple[bytes | None, bytes | None, st
     if args.live_file is not None:
         body, why = (args.live_file.read_bytes(), "ok") if args.live_file.is_file() else (None, "no file")
         sig_file = args.live_file.with_name(args.live_file.name + ".sig")
-        sig, sig_why = (sig_file.read_bytes(), "ok") if sig_file.is_file() else (None, "no file")
+        # A file that is not there stands for the site's 404.
+        sig, sig_why = (sig_file.read_bytes(), "ok") if sig_file.is_file() else (None, "HTTP 404")
     elif args.live_url:
         body, why = fetch_bytes(args.live_url)
         if body is not None:
@@ -649,15 +654,18 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
     # unsigned MÁV manifest (pages_timetables.py mav_from_live). The shrink
     # guard compares with it only when its signature verifies (its counts
     # are its author's), else with the latest stable release's MÁV index.
-    # A .sig that is there but does not verify is read again with its
-    # manifest once, --sig-settle (SIG_SETTLE_S) later: right after a deploy
-    # Pages' CDN may pair one deploy's manifest with the other's .sig, and
+    # A .sig that is there but does not verify, or that is not there (HTTP
+    # 404) next to a manifest that is, is read again with its manifest once,
+    # --sig-settle (SIG_SETTLE_S) later: right after a deploy Pages' CDN may
+    # pair one deploy's manifest with the other's .sig, or still answer the
+    # 404 it cached for the .sig before the first signed deploy, and
     # deciding on that would deploy the same content again for nothing.
     for attempt in (1, 2):
         body, sig, why, sig_why = _read_live(args)
         live, why = parse_live(body) if body is not None else (None, why)
         trust = signature_state(body, sig, sig_why) if live is not None else "no manifest"
-        if live is None or sig is None or trust == "ok" or attempt == 2 or args.sig_settle < 0:
+        if live is None or (sig is None and sig_why != "HTTP 404") or trust == "ok" or attempt == 2 \
+                or args.sig_settle < 0:
             break
         print(f"published manifest: {trust}; reading it and its signature again in {args.sig_settle:g} s"
               f" (GitHub Pages caches each file for up to {PAGES_MAX_AGE} s)")
@@ -707,9 +715,15 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
         print(f"::notice title=Daily MÁV index unchanged::Feed {man['feed']} has the content GitHub Pages "
               "already serves; nothing is deployed.")
     print(f"deploy={'true' if deploy else 'false'}")
+    # live_built: the published manifest's built_at, its signature verified,
+    # for the site job's assemble (pages_timetables.py --mav-built-at): it
+    # never carries an older mav-index.json over the one read here.
+    built = built_time(live) if trusted is not None else None
+    live_built = built.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z") \
+        if built is not None else ""
     if args.github_output is not None:
         with args.github_output.open("a", encoding="utf-8") as fh:
-            fh.write(f"deploy={'true' if deploy else 'false'}\nfeed={man['feed']}\n")
+            fh.write(f"deploy={'true' if deploy else 'false'}\nfeed={man['feed']}\nlive_built={live_built}\n")
     return 0
 
 

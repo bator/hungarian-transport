@@ -14,15 +14,19 @@ a day; it must not go on unnoticed. The run fails (exit 1, ::error::):
   trusted: its mav-index.json.sig is not there (HTTP 404) or does not
   verify against the pinned public key (sign_manifest.py), also when both
   are read again once, --sig-settle seconds later (Pages' CDN may serve one
-  deploy's manifest next to the other's .sig for up to PAGES_MAX_AGE:
-  mav_pages_site.SIG_SETTLE_S). Its built_at is then anyone's: one who can
-  put files on Pages could keep a failing build green for good with a
-  fresh one, and installs take nothing from it anyway (mav_daily.py).
+  deploy's manifest next to the other's .sig, or a 404 it cached for the
+  .sig before the first signed deploy, for up to PAGES_MAX_AGE:
+  mav_pages_site.SIG_SETTLE_S); and when the .sig is there but is no
+  signature (larger than MAX_SIG) or the site answers it with another
+  client error (HTTP 4xx). Its built_at is then anyone's: one who can put
+  files on Pages could keep a failing build green for good with a fresh
+  one, and installs take nothing from it anyway (mav_daily.py).
 
 Otherwise it stays green with a ::warning:: naming the published feed's age,
-also when the published manifest or its signature cannot be read (its age
-is unknown; a network error must not turn the run red). Nothing here
-deploys or removes anything: the workflow deploys only a site that was made.
+also when the published manifest or its signature cannot be read for a
+network error, a timeout or a server error (HTTP 5xx: its age is unknown,
+and an outage must not turn the run red). Nothing here deploys or removes
+anything: the workflow deploys only a site that was made.
 
 Usage: mav_daily_verdict.py --failure auth|build|site|secrets
          (--live-url URL | --live-file PATH) [--now ISO8601]
@@ -32,6 +36,7 @@ Usage: mav_daily_verdict.py --failure auth|build|site|secrets
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -54,8 +59,9 @@ FAILURES = {
 }
 
 
-# live_state's trust: the signature verifies; it is not there or does not
-# verify; it could not be read (a network error).
+# live_state's trust: the signature verifies; it is not there, does not
+# verify or is no signature; it could not be read (a network error, a
+# timeout, HTTP 5xx).
 TRUSTED, UNTRUSTED, UNKNOWN = "ok", "untrusted: ", "unknown: "
 
 
@@ -104,32 +110,63 @@ def _read(args: argparse.Namespace) -> tuple[bytes | None, str, bytes | None, st
     if args.live_file is not None:
         body, why = (args.live_file.read_bytes(), "ok") if args.live_file.is_file() else (None, "no file")
         sig_file = args.live_file.with_name(args.live_file.name + ".sig")
-        # A file that is not there stands for the site's 404.
-        sig, sig_why = (sig_file.read_bytes(), "ok") if sig_file.is_file() else (None, "HTTP 404")
+        # A file that is not there stands for the site's 404, one over
+        # MAX_SIG for what fetch_bytes says of such a .sig.
+        if not sig_file.is_file():
+            sig, sig_why = None, "HTTP 404"
+        elif sig_file.stat().st_size > MAX_SIG:
+            sig, sig_why = None, f"larger than {MAX_SIG} bytes"
+        else:
+            sig, sig_why = sig_file.read_bytes(), "ok"
         return body, why, sig, sig_why
     body, why = fetch_bytes(args.live_url)
     sig, sig_why = fetch_bytes(args.live_url + ".sig", MAX_SIG) if body is not None else (None, "not read")
     return body, why, sig, sig_why
 
 
+_HTTP_RE = re.compile(r"HTTP (\d{3})")
+
+
+def sig_unreadable(sig_why: str) -> str:
+    """For a .sig that did not read (fetch_bytes' why, never "HTTP 404"):
+    UNKNOWN when nothing can be told of it (a network error, a timeout, a
+    server error, HTTP 5xx), else UNTRUSTED. A .sig that is there but is no
+    signature (over MAX_SIG) or that the site refuses with another status
+    (HTTP 403, 410, a redirect it did not follow) is what one who can put
+    files on Pages can make it: counted as unknown, it would keep a failing
+    build green whatever the manifest's age, so it counts as no signature
+    (pages_timetables.py refuses the same .sig)."""
+    status = _HTTP_RE.fullmatch(sig_why)
+    if status is not None:
+        return (UNKNOWN if status.group(1).startswith("5") else UNTRUSTED) + f"{MANIFEST_NAME}.sig: {sig_why}"
+    if sig_why.startswith("larger than"):
+        return f"{UNTRUSTED}{MANIFEST_NAME}.sig is no signature ({sig_why})"
+    return f"{UNKNOWN}{MANIFEST_NAME}.sig: {sig_why}"
+
+
 def live_state(args: argparse.Namespace, settle: float) -> tuple[dict | None, str, str]:
     """(the published manifest or None, why not, trust): trust TRUSTED when
     its .sig verifies over its exact bytes, UNTRUSTED... when the .sig is
     not there (HTTP 404) or does not verify, also when both are read again
-    once settle seconds later (negative: never), UNKNOWN... when the .sig
-    could not be read."""
+    once settle seconds later (negative: never), and when it is no
+    signature or the site refuses it (sig_unreadable), UNKNOWN... when the
+    .sig could not be read (a network error, a timeout, HTTP 5xx). A 404
+    next to a manifest that is there is read again as well: Pages' CDN may
+    still answer the 404 it cached for the .sig before the first signed
+    deploy (PAGES_MAX_AGE)."""
     for attempt in (1, 2):
         body, why, sig, sig_why = _read(args)
         live, why = parse_live(body) if body is not None else (None, why)
         if live is None:
             return None, why, UNKNOWN + "no manifest"
+        if sig is None and sig_why != "HTTP 404":
+            return live, why, sig_unreadable(sig_why)
         if sig is None:
-            if sig_why == "HTTP 404":
-                return live, why, f"{UNTRUSTED}no {MANIFEST_NAME}.sig (HTTP 404)"
-            return live, why, f"{UNKNOWN}{MANIFEST_NAME}.sig: {sig_why}"
-        if sign_manifest.verify_bytes(body, sign_manifest.decode_sig(sig)):
+            state = f"{UNTRUSTED}no {MANIFEST_NAME}.sig (HTTP 404)"
+        elif sign_manifest.verify_bytes(body, sign_manifest.decode_sig(sig)):
             return live, why, TRUSTED
-        state = f"{UNTRUSTED}{MANIFEST_NAME}.sig does not verify against the pinned public key"
+        else:
+            state = f"{UNTRUSTED}{MANIFEST_NAME}.sig does not verify against the pinned public key"
         if attempt == 2 or settle < 0:
             return live, why, state
         print(f"{state.removeprefix(UNTRUSTED)}; reading both again in {settle:g} s (GitHub Pages may still serve"
@@ -146,7 +183,8 @@ def main(argv: list[str]) -> int:
     src.add_argument("--live-file", type=Path)
     ap.add_argument("--now", help="the time to measure the age at (ISO 8601 with offset); default now")
     ap.add_argument("--sig-settle", type=float, default=SIG_SETTLE_S,
-                    help="seconds before a manifest whose signature does not verify is read again with it"
+                    help="seconds before a manifest whose signature does not verify, or is not there, is read"
+                    " again with it"
                     f" (default {SIG_SETTLE_S:g}: Pages' cache age and a minute; negative: never)")
     args = ap.parse_args(argv)
     now = datetime.now(timezone.utc)

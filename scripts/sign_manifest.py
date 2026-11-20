@@ -31,6 +31,18 @@ runs reach: base64 of the raw 32-byte ed25519 private key, its seed).
          DIR/timetables.json by PUBLIC_KEY's key, and so is
          DIR/mav-index.json.sig over DIR/mav-index.json when DIR has one;
          1 otherwise.
+  live-check --site DIR --live-url URL
+         Exit 1 (::error::) when the published timetables.json (URL is the
+         site's https base URL), its timetables.json.sig verifying against
+         PUBLIC_KEY, names a later built_at than DIR/timetables.json: DIR is
+         then an older run's site (a "Re-run failed jobs" of the sign job,
+         whose artifact is kept 3 days), and deploying it would put older
+         indexes back over a newer run's. Every deploy writes a new
+         timetables.json, so its built_at orders the deploys. Exit 0
+         otherwise, also when the published one cannot be read or is not
+         trusted (its built_at is then anyone's: it must not hold a deploy
+         back), and exit 1 for a DIR/timetables.json without a built_at.
+         Run before the signing step, without the key.
 
 pages_timetables.py verifies the published manifests with it before it
 carries anything over from them (verify_bytes), and mav_pages_site.py the
@@ -48,11 +60,16 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import http.client
+import json
 import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import Mapping
+import urllib.error
+import urllib.request
+from collections.abc import Callable, Mapping
+from datetime import datetime
 from pathlib import Path
 
 MANIFEST_NAME = "timetables.json"
@@ -74,6 +91,10 @@ _PKCS8_PREFIX = bytes.fromhex("302e020100300506032b657004220420")
 _SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 SIG_BYTES = 64
 OPENSSL_TIMEOUT = 60
+# live-check's reads of the published manifest (mav_pages_site.py's limits).
+LIVE_TIMEOUT = 20
+MAX_MANIFEST = 64 * 1024
+MAX_SIG = 1024
 
 
 class SignError(Exception):
@@ -207,13 +228,77 @@ def sign_site(site: Path, seed: bytes, public: bytes | None = None) -> Path:
     return out
 
 
+def fetch(url: str, cap: int) -> tuple[bytes | None, str]:
+    """The file at url (https only), at most cap bytes, or None and why not."""
+    if not url.startswith("https://"):
+        return None, "not an https URL"
+    try:
+        req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+        with urllib.request.urlopen(req, timeout=LIVE_TIMEOUT) as res:  # noqa: S310 - https only
+            body = res.read(cap + 1)
+    except urllib.error.HTTPError as err:
+        return None, f"HTTP {err.code}"
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
+        return None, f"{type(err).__name__}: {err}"
+    if len(body) > cap:
+        return None, f"larger than {cap} bytes"
+    return body, "ok"
+
+
+def built_at(raw: bytes) -> datetime | None:
+    """A timetables.json's built_at (ISO, with an offset), else None."""
+    try:
+        value = json.loads(raw).get("built_at")
+        when = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else None
+    except (ValueError, AttributeError):
+        return None
+    return when if when is not None and when.tzinfo is not None else None
+
+
+def live_newer(site: Path, live_url: str,
+               get: Callable[[str, int], tuple[bytes | None, str]] = fetch) -> tuple[bool, str]:
+    """(whether the published timetables.json at live_url, its .sig
+    verifying, was built later than site's, what was found): live-check."""
+    own = built_at((site / MANIFEST_NAME).read_bytes())
+    if own is None:
+        raise SignError(f"{site / MANIFEST_NAME} names no built_at")
+    base = live_url.rstrip("/") + "/"
+    body, why = get(base + MANIFEST_NAME, MAX_MANIFEST)
+    if body is None:
+        return False, f"the published {MANIFEST_NAME} was not read ({why})"
+    sig, why = get(base + SIG_NAME, MAX_SIG)
+    if sig is None or not verify_bytes(body, decode_sig(sig)):
+        return False, f"the published {MANIFEST_NAME} is not trusted ({why if sig is None else 'no good signature'})"
+    live = built_at(body)
+    if live is None:
+        return False, f"the published {MANIFEST_NAME} names no built_at"
+    # Times only: the published values are not echoed.
+    found = f"the published {MANIFEST_NAME} was built {live.isoformat()}, this site {own.isoformat()}"
+    return live > own, found
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("sign", "verify"):
+    for name in ("sign", "verify", "live-check"):
         p = sub.add_parser(name)
         p.add_argument("--site", type=Path, required=True, help=f"the folder holding {MANIFEST_NAME}")
+        if name == "live-check":
+            p.add_argument("--live-url", required=True, help="the Pages site's https base URL")
     args = ap.parse_args(argv)
+    if args.cmd == "live-check":
+        try:
+            newer, found = live_newer(args.site, args.live_url)
+        except (OSError, SignError) as err:
+            print(f"::error title={MANIFEST_NAME} not signed::{err}; nothing is deployed.")
+            return 1
+        if newer:
+            print(f"::error title=An older site is not deployed::{found}: GitHub Pages already serves a newer run's"
+                  " site (this is a re-run of an older run), so this one is not signed or deployed; nothing to"
+                  " re-run.")
+            return 1
+        print(f"{found}; signing and deploying this site")
+        return 0
     names = [n for n in MANIFESTS if n == MANIFEST_NAME or (args.site / n).is_file()]
     if args.cmd == "verify":
         bad = 0
