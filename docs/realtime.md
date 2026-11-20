@@ -187,19 +187,27 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   another HTTP 4xx, an answer its decoding in the executor did not finish
   within the request's timeout) backs nothing off and is logged at debug
   level only. A request of one trip (or route list) holds that one back
-  for a minute, matched on the feeds meanwhile; one of several holds none
+  for a minute, matched on the feeds meanwhile, and for twice as long
+  every time it fails alone again, up to 15 minutes (an answer for it
+  starts that again at a minute); one of several holds none
   back: for the next 15 minutes each of its trips goes in a request of
   half as many trips at most, down to the one that fails it alone, which
   alone is held, and asked alone from then on for as long as it fails
-  (each failure renews that for 15 minutes, so it never rejoins a full
-  request to fail it again); a trip that had no answer lately goes after
-  the ones never asked, so it never takes every round from them; another
-  card's trips are asked as before. Six requests in a row failing so, for
-  six trips or route lists at least, no answer in between, are no bad
-  trip's but the planner refusing every request (a schema change it
-  answers with a GraphQL error without a path, an HTTP 400 for any body):
-  that is an outage from then on, one warning and the shared minute's
-  backoff, until a request is answered. A trip of the wrong shape in an
+  (each failure renews that for 15 minutes past its hold, so it never
+  rejoins a full request to fail it again); a trip that had no answer
+  lately goes after the ones never asked, so it never takes every round
+  from them; another card's trips are asked as before. Six requests of a
+  kind (trips, route lists: the route lists answering do not hide that
+  every trip request fails) in a row failing so, for six trips or route
+  lists at least, no answer of that kind in between, are no bad trip's
+  but the planner refusing every request (a schema change it answers
+  with a GraphQL error without a path, an HTTP 400 for any body): that is
+  an outage from then on, one warning and the shared minute's backoff,
+  until a request of that kind is answered. What those six split and held
+  is undone then, and the outage's probes ask as many trips as ever, so
+  the first request after the planner is back answers every trip (before,
+  every trip was left at one a request for 15 minutes, a trip a poll
+  answered). A trip of the wrong shape in an
   answer is that trip's failure alone (held for the minute), the others
   are answered. A bug of the integration's own reading of an answer (a
   `TypeError`, `KeyError` and the like, which no answer causes) fails its
@@ -208,7 +216,9 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   traceback once an hour per kind of request (trips, route lists,
   vehicles) and place in the code, rather than moving all MÁV realtime to
   the feeds without a word, or warning again after every other answer
-  read. When the call's planner round,
+  read. It is never part of the six (the planner answered): a release
+  whose reading code fails on every answer is that warning, not "Realtime
+  source unavailable" and a backoff of the BKK boards too. When the call's planner round,
   waiting for other cards' requests and, after a restart, the static train
   numbers' download included, takes over 20 s (a request is begun only
   with at least 10 s of that left, so waiting alone is no outage; numbers
