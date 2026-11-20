@@ -452,10 +452,11 @@ before, and the card fills the board from Transitous.
   second less than the timeout, so the whole stays within it): past it
   the stop is asked again after the board's 35 s, as when the planner
   times out, not held for 10 minutes, and nobody backs off. A bug of the
-  integration's reading of an answer, a trip's details included, is that
-  request's failure too, and a warning with its traceback once an hour
-  per kind (boards, trip details) and place in the code, however many
-  answers are read meanwhile.
+  integration's reading of a board's answer is that request's failure; a
+  bug met by one trip of a batch of trip details fails that trip alone
+  (not asked for 10 minutes), the others are answered. Either is a warning
+  with its traceback once an hour per kind (boards, trip details) and
+  place in the code, however many answers are read meanwhile.
 - **FUTÁR's outage.** Once FUTÁR failed (and until it answers again), a
   board or trip details the planner can answer is asked of the planner
   first, at once, and FUTÁR is not waited for: before, every poll waited
