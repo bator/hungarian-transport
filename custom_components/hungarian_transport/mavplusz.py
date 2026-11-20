@@ -184,11 +184,13 @@ def parse_bug(err: BaseException) -> bool:
     """Whether a planner request's error is a bug of this integration's
     reading of the answer (PARSE_BUGS), not the planner's nor the answer's.
     Neither an outage (planner_down) nor quiet: the request is backed off
-    as one failing on its own, and a warning with the traceback is logged
-    once an hour for each place of the code it is raised at (ParseBugLog:
-    realtime's _mav_bug, mavplusz_board's _post), so a release that reads
-    every answer wrongly does not move all MÁV realtime to the feeds
-    without a word."""
+    as one failing on its own (never counted as one of the hub's requests
+    failing in a row that make an outage: the planner answered), and a
+    warning with the traceback is logged once an hour for each place of
+    the code it is raised at (ParseBugLog: realtime's _mav_bug,
+    mavplusz_board's _post and, for one trip of a batch of trip details,
+    _send_chunk), so a release that reads every answer wrongly does not
+    move all MÁV realtime to the feeds without a word."""
     return isinstance(err, PARSE_BUGS)
 
 

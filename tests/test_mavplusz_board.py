@@ -2430,17 +2430,26 @@ def _bugs(caplog, scope: str) -> list:
     ]
 
 
-def test_parse_trips_lets_a_bug_of_the_reading_code_go_up(monkeypatch) -> None:
+def test_parse_trips_keeps_a_bug_of_the_reading_code_to_its_trip(monkeypatch) -> None:
     """parse_trips read a KeyError, a TypeError or an OverflowError of
     parse_trip as that trip's wrong shape: a bug of the reading code was a
     quiet failure per trip, never the warning mavplusz.PARSE_BUGS promise.
-    It goes up now; a ValueError is still that trip's alone."""
+    Then it went up, and failed every trip of the request. It is that
+    trip's result now, the error itself (for _send_chunk to warn about),
+    the others answered; a ValueError is still that trip's alone."""
     keys = [mb.TripKey("BKK:A", "20261114"), mb.TripKey("BKK:B", "20261114")]
     doc = {"data": {"t0": {"route": {}}, "t1": {"route": {}}}}
+
     for exc in mavplusz.PARSE_BUGS:
-        monkeypatch.setattr(mb, "parse_trip", lambda *_a, exc=exc: (_ for _ in ()).throw(exc("x")))
-        with pytest.raises(exc):
-            mb.parse_trips(doc, keys, WALL)
+
+        def buggy(_trip, tid, *_args, exc=exc):
+            if tid.endswith("A"):
+                raise exc("x")
+            return {"tripId": tid}
+
+        monkeypatch.setattr(mb, "parse_trip", buggy)
+        bug, ok = mb.parse_trips(doc, keys, WALL)
+        assert type(bug) is exc and bug.__traceback__ is not None and ok == {"tripId": "BKK_B"}
 
     def wrong_shape(_trip, tid, *_args):
         if tid.endswith("A"):
@@ -2449,6 +2458,41 @@ def test_parse_trips_lets_a_bug_of_the_reading_code_go_up(monkeypatch) -> None:
 
     monkeypatch.setattr(mb, "parse_trip", wrong_shape)
     assert mb.parse_trips(doc, keys, WALL) == ["t0: stoptimes is not a list", {"tripId": "BKK_B"}]
+
+
+async def test_a_bug_one_trips_details_meet_fails_that_trip_alone(
+    make_planner, aioclient_mock, monkeypatch, caplog
+) -> None:
+    """A bug of the reading code one trip's data met (parse_trip raising
+    for it alone) went up out of parse_trips, failed the whole request and
+    held every trip of the batch for REQUEST_FAIL_TTL: four good trips'
+    details lost for ten minutes for one. Now that trip alone has no
+    answer and is held, the others are answered from the same request,
+    and the bug is a warning with its traceback, once."""
+    boards, _f, clock = make_planner()
+    fake = AnyTripPlanner()
+    _use(aioclient_mock, fake)
+    real = mb.parse_trip
+
+    def buggy(trip, tid, date, now):
+        if tid.endswith("0001"):
+            raise KeyError("scheduledDeparture")
+        return real(trip, tid, date, now)
+
+    monkeypatch.setattr(mb, "parse_trip", buggy)
+    caplog.set_level(logging.WARNING)
+    got = await asyncio.gather(*(boards.answer(TRIP, _trip_params(i)) for i in range(5)))
+    assert len(fake.asked) == 1
+    assert got[1] is None and all(got[i] is not None for i in (0, 2, 3, 4))
+    assert list(boards._failing) == [("trip", "BKK:D25280001")]
+    bugs = _bugs(caplog, "trip details")
+    assert len(bugs) == 1 and bugs[0].exc_info and "'scheduledDeparture'" in bugs[0].getMessage()
+    assert not boards._rate.backing_off()
+    # The bad one is not asked again while held; the next batch is answered.
+    clock.now += 60
+    again = await asyncio.gather(*(boards.answer(TRIP, _trip_params(i)) for i in (0, 1, 2)))
+    assert again[1] is None and again[0] is not None and again[2] is not None
+    assert len(_bugs(caplog, "trip details")) == 1
 
 
 async def test_a_bug_reading_the_trip_details_is_a_warning(make_planner, aioclient_mock, monkeypatch, caplog) -> None:

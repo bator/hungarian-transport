@@ -841,19 +841,20 @@ def _decode_parse(parse: Callable[[Any], Any], body: bytearray) -> Any:
         raise _Unparsed(str(err)[:200] or type(err).__name__) from None
 
 
-def parse_trips(doc: Any, keys: Sequence[TripKey], now: float) -> list[dict[str, Any] | None | str]:
+def parse_trips(doc: Any, keys: Sequence[TripKey], now: float) -> list[dict[str, Any] | None | str | Exception]:
     """The answers of build_trip_query(keys)'s answer, one per key: its
     FUTÁR trip-details.json answer, None for a trip the planner does not
     know or that does not run on its date, or why there is none for one a
     GraphQL error names or of the wrong shape (a str), the others' still
     answered. An answer of the wrong shape as a whole (_aliased) is a
-    ValueError. A bug of the code reading one (mavplusz.PARSE_BUGS: a
-    KeyError, a TypeError and the like) goes up as it is, for _post to say
-    so: read as that trip's wrong shape, it was a quiet failure per trip,
-    and its request counted as one read, which ended the boards' warning
-    of the same bug."""
+    ValueError. A bug of the code reading one trip (mavplusz.PARSE_BUGS: a
+    KeyError, a TypeError and the like) is that trip's result, the error
+    itself, for _send_chunk to warn about (read as that trip's wrong shape,
+    it was a quiet failure per trip; let up, it failed the whole request,
+    every trip of it held for REQUEST_FAIL_TTL for one trip's data the bug
+    met). Possibly in the executor: it only reads."""
     data, failed = _aliased(doc, [f"t{i}" for i in range(len(keys))])
-    out: list[dict[str, Any] | None | str] = []
+    out: list[dict[str, Any] | None | str | Exception] = []
     for i, key in enumerate(keys):
         alias = f"t{i}"
         if alias in failed:
@@ -861,6 +862,8 @@ def parse_trips(doc: Any, keys: Sequence[TripKey], now: float) -> list[dict[str,
             continue
         try:
             out.append(parse_trip(data[alias], futar_id(key.gtfs_id), key.date, now))
+        except mavplusz.PARSE_BUGS as err:
+            out.append(err)
         except (ValueError, OSError) as err:
             out.append(f"{alias}: {str(err)[:200] or type(err).__name__}")
     return out
@@ -1478,13 +1481,23 @@ class PlannerBoards:
                     fut.set_exception(err)
             return
         # A trip a GraphQL error names (a bad id or date) is no answer, and
-        # one of the wrong shape fails: either is that trip's alone, not
-        # asked for REQUEST_FAIL_TTL, and the others are answered.
+        # one of the wrong shape or that a bug of the reading code met
+        # fails: each is that trip's alone, not asked for REQUEST_FAIL_TTL,
+        # and the others are answered. The bug is warned about as _post
+        # does (once an hour per scope and place in the code: ParseBugLog).
         for fut, key, result in zip(futures, keys, results):
-            if isinstance(result, str):
+            if isinstance(result, Exception):
+                self._parse_bugs.warn(
+                    "trip details", result,
+                    "mavplusz.hu answer for a BKK %s not read (%s), a bug of this integration; "
+                    "not logged again for an hour",
+                    "trip details", str(result)[:200] or type(result).__name__,
+                )
+            if isinstance(result, (str, Exception)):
                 self._fail(("trip", key.gtfs_id))
                 if not fut.done():
-                    fut.set_exception(self._request_failed(ValueError(result)))
+                    err = result if isinstance(result, Exception) else ValueError(result)
+                    fut.set_exception(self._request_failed(err))
             elif not fut.done():
                 fut.set_result(result)
 
