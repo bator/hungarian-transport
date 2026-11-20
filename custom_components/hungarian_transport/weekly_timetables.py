@@ -44,10 +44,10 @@ when:
   updater's strict rule (updater_newer: every operator still there, none
   older, an undated one unchanged, one later) replaces it; else SUPERSEDED,
   reason "release_newer", until the site rebuilds against this release, or
-  until the served index's newest dated feed is more than RELEASE_STALE
-  older than the Pages index's (release_stale: a -rev beta is never a
-  baseline, and would wait for the next stable release): then the operator
-  rule decides. A
+  until an operator both have is dated more than RELEASE_STALE older in
+  the served index than in the Pages one (release_stale: a -rev beta is
+  never a baseline, and would wait for the next stable release): then the
+  operator rule decides. A
   version not newer than release_version (one that has not updated to it
   yet, or that release itself), or an entry without one, goes by the
   operator rule: the build knew this version's index or a newer one. The
@@ -72,8 +72,10 @@ from under a download) (kept when it is already there and verifies), then
 the index replaces the old one by a temp file and a rename
 (mav_index.write_bytes), its mtime set to the entry's built_at (the sensors'
 build time: the index's gzip header has none). <key> is of the entry's feed
-and sha256: a round that failed keeps the shards it verified there, and the
-next try of the same entry downloads only the rest. The card fetches the
+and sha256: a round that failed keeps the shards it verified there, and so
+does one a stop cancelled during the download (an unload, a reload, Home
+Assistant stopping), and the next try of the same entry downloads only the
+rest. The card fetches the
 index with a day-stamped URL and keeps the one it loaded until midnight or
 a reload, asking for that index's shards all day: a shapes folder the
 served index no longer names is marked retired (.retired) and removed
@@ -175,9 +177,9 @@ MAX_FEED_AHEAD = timedelta(days=400)
 # build of an older baseline until the site rebuilds against this release.
 # A -rev beta's index is never a baseline (only a stable release starts
 # one), so on a beta that wait lasts until the next stable release, while
-# the served feeds age: once the newest dated feed of the served index is
-# more than this older than the newest of Pages', the operator rule
-# decides again. Pages rebuilds the city index weekly.
+# the served feeds age: once an operator both indexes have is dated more
+# than this older in the served one than on Pages (release_stale), the
+# operator rule decides again. Pages rebuilds the city index weekly.
 RELEASE_STALE = timedelta(days=21)
 MANIFEST_TIMEOUT = aiohttp.ClientTimeout(total=30)
 INDEX_TIMEOUT = aiohttp.ClientTimeout(total=300)
@@ -287,10 +289,12 @@ _BadSignature = mav_daily.BadSignature
 
 
 # What a download of the other generation looks like right after a deploy
-# (mav_daily.PAGES_MAX_AGE): not the file the manifest describes, longer than
-# it says, or gone (a cached manifest naming a shapes folder or an index of
-# the previous site).
-_MISMATCHES = (_Mismatch, mav_daily.TooLarge, mav_daily.NotFound)
+# (mav_daily.PAGES_MAX_AGE): not the file the manifest describes (also longer
+# than it says: the index and the shards turn mav_daily.TooLarge into
+# _Mismatch), or gone (a cached manifest naming a shapes folder or an index
+# of the previous site). A manifest past MAX_MANIFEST is no mismatch: it
+# names no size, and is FAILED (reason mav_daily.REASON_TOO_LARGE).
+_MISMATCHES = (_Mismatch, mav_daily.NotFound)
 
 
 def verify_manifest(raw: bytes, signature: bytes, key: str | tuple[str, ...] | None = None) -> None:
@@ -532,19 +536,22 @@ def volan_newer(pages: str, installed: str | None, today: date | None = None) ->
     return day is not None and (other is None or day > other)
 
 
-def _newest_day(feed: str | None, today: date) -> date | None:
-    """The latest date among a city feed's operators (_day), or None."""
-    days = [day for version in timetables.city_feeds(feed).values() if (day := _day(version, today)) is not None]
-    return max(days) if days else None
-
-
 def release_stale(pages: str, served: str | None, today: date | None = None) -> bool:
     """Whether the served city index (a release's) is behind the Pages one
-    of feed pages by more than RELEASE_STALE: the newest dated operator
-    feed of each. False when either has none."""
+    of feed pages by more than RELEASE_STALE: an operator in both, dated on
+    both sides (_day), has a Pages feed more than that later. Only the
+    operators both have count: one only the served index has (a beta added
+    it, fresh) says nothing of how old the others are, nor one only Pages
+    has; and an operator dated ahead (a timetable published early, the same
+    on both sides) holds back no other. False when no operator is dated on
+    both sides."""
     today = today or _today()
-    new, old = _newest_day(pages, today), _newest_day(served, today)
-    return new is not None and old is not None and new - old > RELEASE_STALE
+    new, old = timetables.city_feeds(pages), timetables.city_feeds(served)
+    for op in new.keys() & old.keys():
+        day, old_day = _day(new[op], today), _day(old[op], today)
+        if day is not None and old_day is not None and day - old_day > RELEASE_STALE:
+            return True
+    return False
 
 
 def release_newer(running: Any, release_version: str | None) -> bool:
@@ -1132,17 +1139,29 @@ async def _update_index(
         return IndexResult(decision, feed, reason=why)
     token = secrets.token_hex(4)
     tmp: Path | None = None
-    # A download that failed keeps the shards it verified for the next try.
+    # A download that failed keeps the shards it verified for the next try;
+    # so does one a stop cancelled (an unload, a reload, Home Assistant
+    # stopping): it is a try that did not finish, and the next round of the
+    # same entry finds them. prune removes the folder once it is
+    # TEMP_MIN_AGE old, at the latest at the next setup or round after that.
     keep = False
     try:
         try:
-            raw = await mav_daily._get(
-                session, f"{mav_daily.PAGES_BASE}/{INDEXES[name]}", entry["size"], INDEX_TIMEOUT
-            )
+            try:
+                raw = await mav_daily._get(
+                    session, f"{mav_daily.PAGES_BASE}/{INDEXES[name]}", entry["size"], INDEX_TIMEOUT
+                )
+            except mav_daily.TooLarge as err:
+                # Longer than the manifest says: another generation's file
+                # (or a broken one), as a shard is (_download_shard).
+                raise _Mismatch(str(err)) from err
             await hass.async_add_executor_job(check_index, raw, entry)
             tmp, missing = await hass.async_add_executor_job(_staging, www, entry["shapes"], staging_key(entry))
             if missing:
                 await _download_shards(hass, session, entry["shapes"], tmp, missing)
+        except asyncio.CancelledError:
+            keep = True
+            raise
         except _MISMATCHES as err:
             keep = True
             if not _may_settle(hass, name):
