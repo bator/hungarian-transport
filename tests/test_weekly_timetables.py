@@ -1100,25 +1100,29 @@ def test_a_release_newer_than_the_baseline_takes_a_strictly_newer_index(tmp_path
 
 
 # The Pages build weeks later, still of the old baseline (a -rev beta waits
-# for the next stable release): its newest feed 2026-12-07, 22 days after
-# ADDED's newest (szeged 2026-11-15), 28 after the others'.
+# for the next stable release): volan-szeged 2026-12-07, 28 days after
+# ADDED's and the releases' (2026-11-09); debrecen 2026-12-04, 21 days after
+# ADDED's, 28 after RELEASE_22's. szeged, which only ADDED has, does not
+# count (release_stale: review round 9).
 LATER = "miskolc:1.3;debrecen:20261204-1;volan-szeged:01736.20261207"
 
 
 @pytest.mark.parametrize("running", [NEWER, REV], ids=["newer", "rev"])
 @pytest.mark.parametrize("installed", [ADDED, UNDATED, DROPPED], ids=["added", "undated", "dropped"])
 def test_a_newer_release_s_index_gone_stale_goes_by_the_operator_rule(tmp_path, installed, running) -> None:
-    """The escape hatch (review round 8): the served index's newest dated
-    feed more than RELEASE_STALE older than the Pages index's newest; then
-    the operator rule decides, as for a release that is not newer."""
+    """The escape hatch (review round 8): an operator both have dated more
+    than RELEASE_STALE older in the served index than in the Pages one
+    (review round 9: per operator both have); then the operator rule
+    decides, as for a release that is not newer."""
     today = date(2026, 12, 8)
     www, durable = _www(tmp_path, installed)
     assert not wt.updater_newer(LATER, installed, today)
     assert wt.release_stale(LATER, installed, today)
     assert wt.decide_why("city", LATER, www, durable, release_version=BASELINE, running=running,
                          today=today) == (wt._INSTALL, None)
-    # Not past RELEASE_STALE: the strict rule still.
-    edge = LATER.replace("20261207", "20261206")
+    # Not past RELEASE_STALE on any operator ADDED has (debrecen and
+    # volan-szeged 21 days each): the strict rule still.
+    edge = LATER.replace("20261207", "20261130")
     assert not wt.release_stale(edge, ADDED, today)
     if installed == ADDED:
         assert wt.decide_why("city", edge, www, durable, release_version=BASELINE, running=running,
@@ -1136,9 +1140,10 @@ def test_release_stale_needs_a_date_on_both_sides() -> None:
     assert not wt.release_stale(LATER, "miskolc:1.2", today)
     assert not wt.release_stale("miskolc:1.3", LATER, today)
     # A served date past MAX_FEED_AHEAD is older than any (_day), as the
-    # operator rule takes it.
+    # operator rule takes it; an operator only the served index has
+    # (szeged, fresh) does not hold that back (review round 9).
     assert wt.release_stale(LATER, "miskolc:1.3;debrecen:29991231", today)
-    assert not wt.release_stale(LATER, "debrecen:29991231;szeged:20261201", today)
+    assert wt.release_stale(LATER, "debrecen:29991231;szeged:20261201", today)
 
 
 @pytest.mark.parametrize("running", [OLDER, NEWER, REV])
@@ -2207,3 +2212,204 @@ def test_a_mav_manifest_signed_by_the_site_s_signer_verifies_here(tmp_path) -> N
     mav_daily.verify_signature(manifest.read_bytes(), sig, "mav-index.json", public)
     # And the other way: a signature made here verifies by the signer's check.
     assert sm.verify(manifest, sm.decode_sig(sig), base64.b64decode(public))
+
+
+# --- review round 9 ----------------------------------------------------------
+
+
+def _shard_requests(aioclient_mock, folder: str) -> list[str]:
+    return sorted(url.rsplit("/", 1)[-1] for url in _requested(aioclient_mock) if f"/{folder}/" in url)
+
+
+async def test_a_stop_during_the_shard_download_keeps_the_verified_shards(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """A stop during the download (an unload, a reload, Home Assistant
+    stopping) is a try that did not finish: the shards that verified stay
+    in the staging folder, and the next round of the same entry downloads
+    only the rest."""
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    _, folder, shards = site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock)
+    real = wt._download_shard
+    first = asyncio.Event()
+
+    async def shard(hass_, session, url, path, size, sha):
+        if path.name != "00.json.gz":
+            # Never comes: the stop finds the other three waiting.
+            await asyncio.Event().wait()
+        await real(hass_, session, url, path, size, sha)
+        first.set()
+
+    monkeypatch.setattr(wt, "_download_shard", shard)
+    seen = []
+
+    async def on_result(done):
+        seen.append(done)
+
+    pt = wt.PagesTimetables(hass, card_assets, on_result)
+    pt.start_round()
+    await asyncio.wait_for(first.wait(), 10)
+    task = pt._task
+    pt.stop()
+    await asyncio.wait([task], timeout=10)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert task.cancelled() and seen == []
+    staged = _staged(card_assets)
+    assert len(staged) == 1
+    assert {p.name for p in staged[0].iterdir()} == {"00.json.gz"}
+    assert (staged[0] / "00.json.gz").read_bytes() == shards["00.json.gz"]
+    assert served_index.read_feed(card_assets / timetables.VOLAN_INDEX) == VOLAN_OLD
+    # The setup of the entry after the stop prunes: a staging folder that
+    # young may be a round's, and stays.
+    await hass.async_add_executor_job(wt.prune_all, card_assets)
+    assert _staged(card_assets) == staged
+    monkeypatch.setattr(wt, "_download_shard", real)
+    aioclient_mock.clear_requests()
+    site.serve(aioclient_mock)
+    assert (await _round(hass, card_assets))["volan"] == wt.INSTALLED
+    assert _shard_requests(aioclient_mock, folder) == ["01.json.gz", "02.json.gz", "03.json.gz"]
+    assert served_index.read_feed(card_assets / timetables.VOLAN_INDEX) == VOLAN_NEW
+    assert {p.name: p.read_bytes() for p in (card_assets / folder).iterdir()} == shards
+    assert _staged(card_assets) == []
+
+
+async def test_a_manifest_past_its_cap_fails_as_too_large_not_a_mismatch(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    """timetables.json past MAX_MANIFEST: FAILED (retried), reason
+    "too_large"; "mismatch" would say the Pages cache, which settles."""
+    aioclient_mock.get(wt.MANIFEST_URL, content=b" " * (wt.MAX_MANIFEST + 1))
+    for _ in range(2):
+        done = await _real_update(hass, card_assets)
+        assert not done.settling
+        assert {name: (res.result, res.reason) for name, res in done.results.items()} == {
+            "volan": (wt.FAILED, mav_daily.REASON_TOO_LARGE), "city": (wt.FAILED, mav_daily.REASON_TOO_LARGE),
+        }
+
+
+async def test_an_index_longer_than_its_manifest_says_is_a_mismatch(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    """A file longer than its manifest entry says is another generation's:
+    a mismatch that settles, as a shard's (not "too_large")."""
+    site = Site()
+    raw, _, _ = site.publish("volan", VOLAN_NEW)
+    site.files["volan-index.json.gz"] = raw + b"\0" * 100
+    site.serve(aioclient_mock)
+    res = (await _real_update(hass, card_assets)).results["volan"]
+    assert (res.result, res.reason) == (wt.SETTLING, mav_daily.REASON_MISMATCH)
+    res = (await _real_update(hass, card_assets)).results["volan"]
+    assert (res.result, res.reason) == (wt.FAILED, mav_daily.REASON_MISMATCH)
+
+
+def test_release_stale_counts_only_the_operators_both_indexes_have(tmp_path) -> None:
+    """Review round 9: an operator only one side has, or one dated ahead the
+    same on both sides, never decides how far behind the served index is."""
+    today = date(2026, 12, 8)
+    # An operator dated ahead on both sides (a timetable published early)
+    # held the newest date of each at 2027-03-01: never stale.
+    served = "bkk:20261001;volan-szeged:01736.20270301"
+    pages = "bkk:20261207;volan-szeged:01736.20270301"
+    assert wt.release_stale(pages, served, today)
+    www, durable = _www(tmp_path, served)
+    assert wt.decide_why("city", pages, www, durable, release_version=BASELINE, running=REV,
+                         today=today) == (wt._INSTALL, None)
+    # A fresh operator only the served index has (a beta added it) moved the
+    # window: bkk is 36 days behind all the same.
+    assert wt.release_stale("bkk:20261207", "bkk:20261101;szeged:20261205", today)
+    # Nor does one only Pages has make the served index stale.
+    assert not wt.release_stale("bkk:20261205;pecs:20261230", "bkk:20261201", today)
+    # Exactly RELEASE_STALE behind is not more.
+    assert not wt.release_stale("bkk:20261122", "bkk:20261101", today)
+    assert wt.release_stale("bkk:20261123", "bkk:20261101", today)
+
+
+async def test_a_reload_during_the_commit_leaves_the_new_shapes_unretired(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """A reload while a round commits: the unload stops the round (which
+    waits for its commit), and the setup's prune_all runs beside the
+    commit. With the new shapes folder in place and the old index still
+    served, prune_all retires the new folder; the commit's own prune, once
+    the new index is in place, takes that mark back. The old folder is the
+    retired one; the index and its record are the new ones."""
+    import threading
+
+    entry = await _setup(hass, {CONF_PAGES_TIMETABLES: False, CONF_DAILY_MAV: False})
+    _, old_folder = _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    _, folder, _ = site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock)
+    started, release = threading.Event(), threading.Event()
+    real_write = wt.mav_index.write_bytes
+
+    def slow_write(*args):
+        # The shapes folder is in place; the old index is still served.
+        started.set()
+        release.wait(20)
+        real_write(*args)
+
+    monkeypatch.setattr(wt.mav_index, "write_bytes", slow_write)
+    pt = wt.PagesTimetables(hass, card_assets)
+    pt.start_round()
+    await hass.async_add_executor_job(started.wait, 10)
+    task = pt._task
+    assert (card_assets / folder).is_dir()
+    pt.stop()
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    # The setup's prune_all saw the old index naming the old folder.
+    assert (card_assets / folder / wt.SHAPES_RETIRED).is_file()
+    assert not (card_assets / old_folder / wt.SHAPES_RETIRED).exists()
+    assert not task.done()
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert task.cancelled()
+    assert served_index.read_feed(card_assets / timetables.VOLAN_INDEX) == VOLAN_NEW
+    assert not (card_assets / folder / wt.SHAPES_RETIRED).exists()
+    assert (card_assets / old_folder / wt.SHAPES_RETIRED).is_file()
+    assert (await storage.async_load(hass))[storage.TIMETABLES_INSTALL]["volan"]["feed"] == VOLAN_NEW
+    assert _staged(card_assets) == []
+
+
+async def test_home_assistant_stopping_during_the_record_waits_for_it(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """Home Assistant's own stop after the commit, while the install is
+    recorded: the stop waits for the round, the round for its record."""
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock)
+    entered, release = asyncio.Event(), asyncio.Event()
+    real = storage.async_record_timetables_install
+
+    async def slow(*args):
+        entered.set()
+        await release.wait()
+        await real(*args)
+
+    monkeypatch.setattr(storage, "async_record_timetables_install", slow)
+    seen = []
+
+    async def on_result(done):
+        seen.append(done)
+
+    pt = wt.PagesTimetables(hass, card_assets, on_result)
+    pt.start_round()
+    await asyncio.wait_for(entered.wait(), 10)
+    task = pt._task
+    stopping = asyncio.ensure_future(hass.async_stop())
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+    assert not stopping.done() and not task.done()
+    release.set()
+    await asyncio.wait_for(stopping, 30)
+    assert task.cancelled()
+    assert served_index.read_feed(card_assets / timetables.VOLAN_INDEX) == VOLAN_NEW
+    state = await storage.async_load(hass)
+    assert state[storage.TIMETABLES_INSTALL]["volan"]["feed"] == VOLAN_NEW
+    assert storage.PAGES_ROUND not in state
+    assert seen == []
+    assert _staged(card_assets) == []

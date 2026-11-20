@@ -1338,9 +1338,27 @@ async def test_a_failed_round_records_its_reason(
 def test_reason_of_is_short_and_names_the_kind() -> None:
     assert mav_daily.reason_of(mav_daily.NotFound("x: HTTP 404")) == mav_daily.REASON_NOT_FOUND
     assert mav_daily.reason_of(mav_daily._Mismatch("size")) == mav_daily.REASON_MISMATCH
-    assert mav_daily.reason_of(mav_daily.TooLarge("big")) == mav_daily.REASON_MISMATCH
+    # Past a cap (a manifest, the MÁV index past MAX_INDEX): no mismatch
+    # that settles (review round 9).
+    assert mav_daily.reason_of(mav_daily.TooLarge("big")) == mav_daily.REASON_TOO_LARGE == "too_large"
     assert mav_daily.reason_of(wt._Mismatch("shard")) == mav_daily.REASON_MISMATCH
     assert mav_daily.reason_of(mav_daily.BadSignature("bad")) == mav_daily.REASON_BAD_SIGNATURE
     assert mav_daily.reason_of(mav_daily.UnknownKey("k")) == mav_daily.UNKNOWN_KEY
     assert mav_daily.reason_of(mav_daily.DailyIndexError("x" * 500)) == "x" * mav_daily.MAX_REASON
     assert mav_daily.reason_of(OSError("disk")) == "OSError: disk"
+
+
+async def test_a_manifest_or_index_past_its_cap_is_too_large_not_a_mismatch(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    """Review round 9: a body past a cap the code sets (the manifest past
+    MAX_MANIFEST, the index past MAX_INDEX) is FAILED with reason
+    "too_large", never "mismatch" (which says the Pages cache, settling)."""
+    aioclient_mock.get(mav_daily.MANIFEST_URL, content=b" " * (mav_daily.MAX_MANIFEST + 1))
+    done = await mav_daily.async_update(hass, card_assets)
+    assert (done.result, done.reason) == (mav_daily.FAILED, mav_daily.REASON_TOO_LARGE)
+    aioclient_mock.clear_requests()
+    raw = _index(NEW)
+    _serve(aioclient_mock, raw, headers={"Content-Length": str(mav_daily.MAX_INDEX + 1)})
+    done = await mav_daily.async_update(hass, card_assets)
+    assert (done.result, done.reason) == (mav_daily.FAILED, mav_daily.REASON_TOO_LARGE)

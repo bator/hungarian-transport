@@ -20,8 +20,8 @@ it holds:
 - PAGES_ROUND: per index, the last round of the weekly timetables that
   settled it: when, its result, the manifest's feed and, for a result that
   is not an install, why (reason: "release_newer", "served_newer",
-  "bad_signature", "unknown_key", "not_found", "mismatch" or the error's
-  text, at most mav_daily.MAX_REASON long). A round that is still settling
+  "bad_signature", "unknown_key", "not_found", "mismatch", "too_large" or
+  the error's text, at most mav_daily.MAX_REASON long). A round that is still settling
   (a download did not match its manifest for the first time) leaves the
   settled record as it is and adds settling, its reason, until the next
   round that settles replaces the record.

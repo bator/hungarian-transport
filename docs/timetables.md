@@ -668,9 +668,11 @@ one in use:
   otherwise it stays (`superseded`, reason `release_newer`) until the site
   rebuilds against this release. A `-rev` beta is never a baseline (only a
   stable release starts a rebuild), so on a beta that could last until the
-  next stable release while the index's feeds age: once the newest dated
-  feed of the index in use is more than 21 days older than the newest of
-  the site's index (`RELEASE_STALE`), the operator rule decides again. The
+  next stable release while the index's feeds age: once an operator both
+  indexes have is dated more than 21 days older in the index in use than
+  on the site (`RELEASE_STALE`), the operator rule decides again. Only the
+  operators both have count: one the beta added, or one dated months
+  ahead in both, holds back no other. The
   integration's own version is the one in
   `custom_components/hungarian_transport/manifest.json` on disk, not the
   one Home Assistant loaded: a HACS update replaces the release's files and
@@ -701,7 +703,8 @@ swapped, and put back should the swap fail), then the index, as a temp file
 renamed over the old one, so the card never reads an index whose shapes are
 missing. The index file gets the entry's `built_at` as its time, which the
 sensors show as its build time. Shapes files that checked out stay in the
-temporary folder when a download fails, so the next try of the same entry
+temporary folder when a download fails or is stopped (a restart of Home
+Assistant, a reload of the integration), so the next try of the same entry
 fetches only the rest; a temporary folder left for an hour is removed. The previous shapes folder is
 marked retired and removed 26 hours later: an open dashboard keeps the old
 index until it reloads (at the latest at midnight) and reads its shapes
@@ -976,8 +979,10 @@ option off. `pages_reason` says why an index was not installed:
 (signed by a key this version does not know: a newer key, another deploy's
 signature, or not the site's; `failed` on its first 3 days),
 `not_found` (a file the manifest names is not on the site), `mismatch` (a
-download is not the file the manifest describes), else the error's text
-(at most 120 characters). `pages_settling` is the reason of a check still
+download is not the file the manifest describes), `too_large` (the
+manifest, or the MÁV index, is larger than this version takes: no cache
+mismatch, so it is retried as a failure, not looked at again sooner), else
+the error's text (at most 120 characters). `pages_settling` is the reason of a check still
 looking again (a download that did not match right after a deploy); the
 check 11 minutes later replaces it with its result.
 

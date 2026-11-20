@@ -198,6 +198,12 @@ REASON_BAD_SIGNATURE = "bad_signature"
 UNKNOWN_KEY = "unknown_key"
 REASON_NOT_FOUND = "not_found"
 REASON_MISMATCH = "mismatch"
+# A body past the limit _get was given where that limit is a cap, not the
+# size a manifest names (a manifest, the MÁV index past MAX_INDEX): no
+# mismatch that settles, FAILED with the normal retries. A file longer than
+# its manifest says is a mismatch (weekly_timetables.py turns TooLarge into
+# one there).
+REASON_TOO_LARGE = "too_large"
 MAX_REASON = 120
 
 
@@ -234,7 +240,8 @@ class _Mismatch(DailyIndexError):
 
 class TooLarge(DailyIndexError):
     """The body is longer than the limit _get was given: for a file whose
-    manifest names its size, another generation's (or a broken one)."""
+    manifest names its size, another generation's (or a broken one; the
+    caller says so with a _Mismatch); else past a cap (REASON_TOO_LARGE)."""
 
 
 class NotFound(DailyIndexError):
@@ -292,8 +299,10 @@ def reason_of(err: BaseException) -> str:
         return REASON_BAD_SIGNATURE
     if isinstance(err, NotFound):
         return REASON_NOT_FOUND
-    if isinstance(err, (_Mismatch, TooLarge)):
+    if isinstance(err, _Mismatch):
         return REASON_MISMATCH
+    if isinstance(err, TooLarge):
+        return REASON_TOO_LARGE
     text = str(err) if isinstance(err, DailyIndexError) else f"{type(err).__name__}: {err}"
     return text[:MAX_REASON]
 
