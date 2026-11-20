@@ -94,12 +94,17 @@ class TokenBucket:
         if not self._try():
             self._refuse()
 
-    def available(self) -> bool:
-        """Whether take() would get a token now; takes none, counts nothing."""
+    def tokens(self) -> float:
+        """The tokens there are now (refilled with the clock); takes none,
+        counts nothing."""
         now = self._monotonic()
         self._tokens = min(float(self._burst), self._tokens + max(0.0, now - self._at) * self._rate)
         self._at = now
-        return self._tokens >= 1.0
+        return self._tokens
+
+    def available(self) -> bool:
+        """Whether take() would get a token now; takes none, counts nothing."""
+        return self.tokens() >= 1.0
 
     def refund(self) -> None:
         """A token taken for a request that was not sent goes back."""

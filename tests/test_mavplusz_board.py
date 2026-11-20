@@ -2181,7 +2181,8 @@ async def test_a_ticket_is_released_by_the_last_caller_that_saw_it(make_planner,
     first has no fallback (asked 13 s before FUTÁR failed: too late for
     the card) and leaves first; the second's planner request spends the
     token reserved, takes no other and gives none back. Then a board the
-    planner has cached answers both cards: the unspent token comes back."""
+    planner has cached answers both cards: no token is reserved for it (it
+    took one, given back unspent), FUTÁR is cut short all the same."""
     clock = FakeClock(stopped=True)
     # The limiter's clock stands still: its shares do not refill meanwhile.
     limiter = mavplusz.PlannerLimiter(monotonic=FakeClock(stopped=True).monotonic)
@@ -2217,16 +2218,20 @@ async def test_a_ticket_is_released_by_the_last_caller_that_saw_it(make_planner,
     assert isinstance(results[0], futar.FutarError) and results[1]["source"] == "mavplusz"
     assert len(fake.asked) == 1 and taken == [] and refunded == []
     assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
-    # The planner's board cached: both cards answered from it, nothing spent.
+    # The planner's board cached: both cards answered from it, nothing
+    # reserved or spent, FUTÁR cut short for it.
     gate.clear()
     took[0] = 0
+    seen: list = []
+    monkeypatch.setattr(futar, "futar_get", lambda *a, **kw: seen.append(a[4].total) or failing(*a, **kw))
     calls = [asyncio.ensure_future(proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="61"))) for _ in range(2)]
     for _ in range(3):
         await asyncio.sleep(0)
-    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 2
+    assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
+    assert seen == [futar.FUTAR_FALLBACK_TIMEOUT_SEC]
     gate.set()
     assert [g["source"] for g in await asyncio.gather(*calls)] == ["mavplusz"] * 2
-    assert len(fake.asked) == 1 and refunded == [1]
+    assert len(fake.asked) == 1 and taken == [] and refunded == []
     assert limiter._fallback._tokens == mavplusz.FALLBACK_BURST - 1
 
 
@@ -2249,6 +2254,10 @@ async def test_a_later_request_of_the_same_key_holds_no_earlier_ticket(make_plan
         return await real_answer(path, params, ticket)
 
     monkeypatch.setattr(boards, "answer", answer)
+    # The board under way for the other card would answer the later ones
+    # for no token (_cached): left out here, so that each card reserves a
+    # token of its own, as for boards whose requests go one by one.
+    monkeypatch.setattr(boards, "_cached", lambda path, params: False)
     planner_gate = asyncio.Event()
 
     async def slow(method, url, data):
@@ -2794,6 +2803,169 @@ async def test_the_planner_asked_first_takes_futars_token_too(make_planner, aioc
     with pytest.raises(futar.FutarRateLimited):
         await proxy.get(BOARD, dict(BOARD_PARAMS, minutesAfter="62"))
     assert len(fake.asked) == 1 and proxy.tokens == 0
+
+
+def _outage_no_probe(proxy: futar.FutarProxy, clock: FakeClock) -> None:
+    """FUTÁR's outage stands and FUTÁR was just asked: no probe is due, so
+    the boards and trip details the planner can answer ask it first."""
+    proxy._outages.failed(None, "BKK FUTÁR unavailable (%s); not logged again until it answers", "test")
+    proxy._futar_asked_at = clock.now
+
+
+async def test_in_futars_outage_a_cached_answer_is_served_with_the_share_used_up(
+    make_planner, aioclient_mock, monkeypatch
+) -> None:
+    """The boards' share used up by a dashboard's other stops: a board or a
+    trip's details the planner holds in its caches still answers another
+    card's horizon, another browser, at once, for no planner token (FUTÁR's
+    own token as before). Before, can_answer looked at the share first, and
+    such a request waited FUTÁR's whole 18 s, then ended on Transitous."""
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, _fake, clock = make_planner(clock, limiter=limiter)
+    fake = AnyTripPlanner()
+    _use(aioclient_mock, fake)
+    calls = _counting_futar(monkeypatch, clock, ["hang"])
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    _outage_no_probe(proxy, clock)
+    trip = {"tripId": FIRST_TRIP}
+    assert (await proxy.get(BOARD, BOARD_PARAMS))["source"] == "mavplusz"
+    assert (await proxy.get(TRIP, trip))["source"] == "mavplusz"
+    asked = len(fake.asked)
+    while limiter.take(fallback=True, quiet=True):
+        pass  # the share goes to the other stops of the dashboard
+    assert not boards.can_answer(BOARD, dict(BOARD_PARAMS, stopId="BKK_F00941"))
+    assert not boards.can_answer(TRIP, {"tripId": "BKK_D99999999"})
+    tokens = _FutarTokens(proxy, clock)
+    for params in (dict(BOARD_PARAMS, minutesAfter="30"), BOARD_PARAMS):
+        assert boards.can_answer(BOARD, params)
+        assert (await proxy.get(BOARD, dict(params)))["source"] == "mavplusz"
+    assert boards.can_answer(TRIP, trip)
+    assert (await proxy.get(TRIP, trip))["source"] == "mavplusz"
+    assert calls == [] and len(fake.asked) == asked
+    assert tokens.taken() == 3
+
+
+@pytest.mark.parametrize("planner", ["answers", "null"])
+async def test_in_futars_outage_callers_of_one_board_at_once_spend_one_futar_token(
+    make_planner, aioclient_mock, monkeypatch, planner
+) -> None:
+    """Five cards ask one board at once in FUTÁR's outage: they share the
+    planner asked first, one token of FUTÁR's limit and one of the boards'
+    share for them all, as one FUTÁR request outside the outage; where the
+    planner has no answer (its null), FUTÁR is asked once, with that same
+    token. Before, every caller took a token of FUTÁR's and reserved one of
+    the planner's: five where one request was sent."""
+    clock = FakeClock(stopped=True)
+    limiter = mavplusz.PlannerLimiter(monotonic=clock.monotonic)
+    boards, fake, clock = make_planner(clock, limiter=limiter)
+    gate = asyncio.Event()
+    calls: list = []
+
+    async def futar_get(session, api_key, path, params, timeout=None, *, executor=None):
+        calls.append(path)
+        await gate.wait()
+        return {"status": "OK", "data": {"entry": {"stopTimes": []}, "references": {}}, "from": "futar"}
+
+    monkeypatch.setattr(futar, "futar_get", futar_get)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    _outage_no_probe(proxy, clock)
+    params = BOARD_PARAMS if planner == "answers" else dict(BOARD_PARAMS, stopId="BKK_F00941")
+    reserved: list = []
+    real_reserve = boards.reserve
+    monkeypatch.setattr(boards, "reserve", lambda path, p: reserved.append(1) or real_reserve(path, p))
+    tokens = _FutarTokens(proxy, clock)
+    share = limiter._fallback.tokens()
+    tasks = [asyncio.ensure_future(proxy.get(BOARD, dict(params))) for _ in range(5)]
+    for _ in range(20):
+        await asyncio.sleep(0)
+    gate.set()
+    docs = await asyncio.gather(*tasks)
+    assert tokens.taken() == 1
+    assert len(fake.asked) == 1 and reserved == [1]
+    assert limiter._fallback.tokens() == share - 1
+    if planner == "answers":
+        assert [d["source"] for d in docs] == ["mavplusz"] * 5 and calls == []
+    else:
+        assert [d["from"] for d in docs] == ["futar"] * 5 and calls == [BOARD]
+
+
+async def test_in_futars_outage_futars_own_cache_and_request_under_way_are_shared(
+    make_planner, aioclient_mock, monkeypatch
+) -> None:
+    """In FUTÁR's outage a board FUTÁR's cache holds (answered within 15 s)
+    is answered from it, and one whose FUTÁR request is under way (the
+    probe) is joined, as outside the outage: no token of FUTÁR's limit,
+    the planner not asked. Before, each such caller asked the planner
+    first, on a token of FUTÁR's and one of the planner's."""
+    clock = FakeClock(stopped=True)
+    boards, fake, clock = make_planner(clock)
+    gate = asyncio.Event()
+    gate.set()
+    failing = [False]
+    calls: list = []
+
+    async def futar_get(session, api_key, path, params, timeout=None, *, executor=None):
+        calls.append((path, timeout.total))
+        await gate.wait()
+        if failing[0]:
+            raise futar.FutarError("HTTP 503")
+        return {"status": "OK", "data": {"entry": {"stopTimes": []}, "references": {}}, "from": "futar"}
+
+    monkeypatch.setattr(futar, "futar_get", futar_get)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    assert (await proxy.get(BOARD, BOARD_PARAMS))["from"] == "futar"
+    failing[0] = True
+    with pytest.raises(futar.FutarError):
+        await proxy.get("search.json", {"query": "Keleti"})  # the outage starts, FUTÁR just asked
+    tokens = _FutarTokens(proxy, clock)
+    assert (await proxy.get(BOARD, dict(BOARD_PARAMS)))["from"] == "futar"
+    assert tokens.taken() == 0 and fake.asked == [] and len(calls) == 2
+    # The probe asks FUTÁR (cut short); the cards asking that board meanwhile join it.
+    failing[0] = False
+    gate.clear()
+    _probe_due(proxy)
+    later = dict(BOARD_PARAMS, minutesAfter="61")
+    tasks = [asyncio.ensure_future(proxy.get(BOARD, dict(later))) for _ in range(4)]
+    for _ in range(20):
+        await asyncio.sleep(0)
+    assert calls[2:] == [(BOARD, futar.FUTAR_FALLBACK_TIMEOUT_SEC)] and fake.asked == []
+    gate.set()
+    assert [d["from"] for d in await asyncio.gather(*tasks)] == ["futar"] * 4
+    assert tokens.taken() == 1 and fake.asked == []
+
+
+async def test_in_futars_outage_a_token_taken_for_no_request_goes_back(make_planner, aioclient_mock, monkeypatch) -> None:
+    """The planner asked first has no answer, and FUTÁR rejected the key
+    meanwhile: the request fails fast, sending nothing, and FUTÁR's token
+    taken for the planner goes back. Before, it was lost."""
+    clock = FakeClock(stopped=True)
+    boards, fake, clock = make_planner(clock)
+    planner_gate = asyncio.Event()
+
+    async def slow(method, url, data):
+        await planner_gate.wait()
+        return await fake(method, url, data)
+
+    _use(aioclient_mock, slow)
+
+    async def futar_get(session, api_key, path, params, timeout=None, *, executor=None):
+        raise futar.FutarAuthError("HTTP 401")
+
+    monkeypatch.setattr(futar, "futar_get", futar_get)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=boards)
+    _outage_no_probe(proxy, clock)
+    tokens = _FutarTokens(proxy, clock)
+    unknown = asyncio.ensure_future(proxy.get(BOARD, dict(BOARD_PARAMS, stopId="BKK_F00941")))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    with pytest.raises(futar.FutarAuthError):
+        await proxy.get("search.json", {"query": "Keleti"})
+    planner_gate.set()
+    with pytest.raises(futar.FutarKeyRejected):
+        await unknown
+    assert len(fake.asked) == 1
+    assert tokens.taken() == 1  # the search's
 
 
 async def test_a_board_is_cached_across_a_cards_polls(make_planner, aioclient_mock, monkeypatch) -> None:

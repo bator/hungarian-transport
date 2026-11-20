@@ -65,6 +65,23 @@ def test_take_refuses_at_once_and_the_clock_refills() -> None:
         bucket.take()
 
 
+def test_tokens_are_read_refilled_and_none_taken() -> None:
+    """tokens() is the bucket as take() would see it now (FutarProxy.tokens
+    reads it): refilled with the clock, nothing taken or counted."""
+    clock = FakeClock()
+    refusals: list[int] = []
+    bucket = _bucket(clock, refusals)
+    bucket.take()
+    bucket.take()
+    assert bucket.tokens() == 1.0
+    clock.now += 0.25
+    assert bucket.tokens() == 1.5 and bucket.tokens() == 1.5
+    bucket.take()
+    assert bucket.tokens() == 0.5 and not bucket.available() and refusals == []
+    clock.now += 10
+    assert bucket.tokens() == 3.0
+
+
 def test_refill_stops_at_the_burst() -> None:
     clock = FakeClock()
     bucket = _bucket(clock, [])

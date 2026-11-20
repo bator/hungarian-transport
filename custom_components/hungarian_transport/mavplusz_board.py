@@ -982,7 +982,8 @@ class PlannerBoards:
             _settle(batch, "closed")
 
     def can_answer(self, path: str, params: dict[str, str]) -> bool:
-        """Whether answer() may give FUTÁR's answer for path: a BKK stop the
+        """Whether answer() may give FUTÁR's answer for path: one the caches
+        hold (_cached), whatever the planner's tokens; else a BKK stop the
         planner has not said it does not know, a FUTÁR station it knows, has
         not said it does not know, or whose poles are known, a timetable
         trip, none of whose requests failed for its own sake lately, and
@@ -991,7 +992,11 @@ class PlannerBoards:
         BOARD_TTL (it is not asked again before then): FUTÁR then has its
         whole budget, since nothing else could answer. Nothing after
         close() (as reserve and answer)."""
-        if self._closed or not self._rate.available():
+        if self._closed:
+            return False
+        if self._cached(path, params):
+            return True
+        if not self._rate.available():
             return False
         if path == BOARD_PATH:
             stop = str(params.get("stopId") or "")
@@ -1008,14 +1013,57 @@ class PlannerBoards:
         dashboard cannot have spent it meanwhile); None when either is not
         there. The caller release()s it whatever happens; a request that
         spent it makes that a no-op. The trip details reserved within
-        TRIP_BATCH_WAIT of each other share one token (_reserve_trip)."""
+        TRIP_BATCH_WAIT of each other share one token (_reserve_trip). An
+        answer the caches hold (_cached) gets a ticket holding no token: it
+        asks the planner nothing (a request it ends up sending after all,
+        the entry gone meanwhile, takes a token then, as _post does)."""
         if self._closed:
             return None
+        if self._cached(path, params):
+            token = _Token(self._rate, self._monotonic)
+            token.held = False
+            return _Ticket(token)
         if path == TRIP_PATH:
             return self._reserve_trip(params)
         if not self.can_answer(path, params) or not self._rate.reserve():
             return None
         return _Ticket(_Token(self._rate, self._monotonic))
+
+    def _cached(self, path: str, params: dict[str, str]) -> bool:
+        """Whether answer() would answer from the caches now, asking the
+        planner nothing: a board fresh in _boards (not the planner's null)
+        or one under way; a trip's details for each date it is asked of
+        fresh in _trips or under way, not every one of them null. A
+        dashboard's other stops can use up the boards' share within the
+        board's 35 s: a second card, horizon or browser asking for a board
+        the planner gave then had no answer but FUTÁR's whole budget in
+        FUTÁR's outage, though answer() would spend no token on it."""
+        if path == BOARD_PATH:
+            stop = str(params.get("stopId") or "")
+            ids = self._board_ids(stop)
+            if ids is None:
+                return False
+            if self._boards.pending((stop, ids)):
+                return True
+            hit, board = self._boards.fresh((stop, ids))
+            return hit and board is not None
+        if path == TRIP_PATH:
+            gid = self._trip_id(params)
+            if gid is None or self._is_failing(("trip", gid)):
+                return False
+            known = self._dates.get(str(params.get("tripId") or ""))
+            answered = False
+            for date in [known] if known else self._dates_to_try():
+                key = TripKey(gid, date)
+                if self._trips.pending(key):
+                    answered = True
+                    continue
+                hit, trip = self._trips.fresh(key)
+                if not hit:
+                    return False
+                answered = answered or trip is not None
+            return answered
+        return False
 
     def _reserve_trip(self, params: dict[str, str]) -> _Ticket | None:
         """A trip's ticket: a share of the token reserved for the trip
