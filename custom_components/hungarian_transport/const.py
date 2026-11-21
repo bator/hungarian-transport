@@ -21,6 +21,11 @@ DEFAULT_NOTIFY_DAILY = False
 # The weekly Volán and city indexes from GitHub Pages (weekly_timetables.py).
 CONF_PAGES_TIMETABLES = "pages_timetables"
 DEFAULT_PAGES_TIMETABLES = True
+# MÁV's journey planner, mavplusz.hu (mavplusz.py, mavplusz_board.py): the
+# realtime hub's first source for the feeds marked "mavplusz" and the BKK
+# boards' fallback while FUTÁR fails. Off: no request goes to it at all.
+CONF_MAVPLUSZ = "mavplusz"
+DEFAULT_MAVPLUSZ = True
 # The Volán and city index schema this version's cards read: src/tags.js
 # INDEX_SCHEMA and scripts/gtfs_compact.py INDEX_SCHEMA (kept equal by a test).
 INDEX_SCHEMA = 29

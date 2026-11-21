@@ -46,8 +46,10 @@ from .config_flow import async_end_reauth
 from .const import (
     CONF_API_KEY,
     CONF_DAILY_MAV,
+    CONF_MAVPLUSZ,
     CONF_PAGES_TIMETABLES,
     DEFAULT_DAILY_MAV,
+    DEFAULT_MAVPLUSZ,
     DEFAULT_PAGES_TIMETABLES,
     DOMAIN,
     SERVICE_ELVIRA_BETWEEN,
@@ -380,9 +382,13 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     # timetables the cards read anyway.
     # call_later: decoded feeds no card asks for leave memory on a timer,
     # also when no card asks at all; the timer stops with HA.
+    # use_planner: the entry's mavplusz.hu option, read per call (the hub
+    # outlives the entry's reloads); the planner limiter checks it again
+    # when a request would go (_planner_limiter).
     hub = realtime.RealtimeHub(
         session,
         planner_limiter=_planner_limiter(hass),
+        use_planner=partial(_mavplusz_enabled, hass),
         executor=hass.async_add_executor_job,
         task_factory=lambda coro: hass.async_create_background_task(
             coro, "hungarian_transport_realtime", eager_start=False
@@ -470,12 +476,25 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 def _planner_limiter(hass: HomeAssistant) -> mavplusz.PlannerLimiter:
     """Home Assistant's one rate limit and backoff for mavplusz.hu, shared by
-    the realtime hub and every entry's BKK boards: one server, one limit."""
+    the realtime hub and every entry's BKK boards: one server, one limit.
+    Also the one place the "Ask mavplusz.hu" option is checked at the
+    moment a request would go (_mavplusz_enabled, read per token): a hub
+    round or a board's request begun before the option was turned off
+    sends nothing after it."""
     data = hass.data.setdefault(DOMAIN, {})
     limiter = data.get("planner_limiter")
     if limiter is None:
-        limiter = data["planner_limiter"] = mavplusz.PlannerLimiter()
+        limiter = data["planner_limiter"] = mavplusz.PlannerLimiter(enabled=partial(_mavplusz_enabled, hass))
     return limiter
+
+
+def _mavplusz_enabled(hass: HomeAssistant) -> bool:
+    """Whether mavplusz.hu may be asked (CONF_MAVPLUSZ): not once the
+    entry's option is off. Without an entry the services refuse anyway."""
+    return all(
+        bool(entry.options.get(CONF_MAVPLUSZ, DEFAULT_MAVPLUSZ))
+        for entry in hass.config_entries.async_entries(DOMAIN)
+    )
 
 
 def _entry_api_key(entry: ConfigEntry) -> str:
@@ -574,37 +593,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     def task_factory(coro: Any) -> Any:
         return hass.async_create_background_task(coro, "hungarian_transport_futar", eager_start=False)
 
-    # The poles of FUTÁR's combined stations learnt before (storage.py), so
-    # their boards have a fallback right after a restart too.
-    learnt = False
-
-    @callback
-    def _stations_changed() -> None:
-        nonlocal learnt
-        learnt = True
-        storage.async_save_stations_later(hass, planner.stations_data)
-
-    planner = mavplusz_board.PlannerBoards(
-        async_get_clientsession(hass),
-        task_factory=task_factory,
-        call_later=hass_call_later(hass),
-        limiter=_planner_limiter(hass),
-        stations=await storage.async_load_stations(hass),
-        on_stations_changed=_stations_changed,
+    # mavplusz.hu turned off in the options: no planner, so FUTÁR's errors
+    # stay the action's answer and the cards read the board from Transitous.
+    planner = (
+        await _async_planner_boards(hass, entry, task_factory)
+        if bool(entry.options.get(CONF_MAVPLUSZ, DEFAULT_MAVPLUSZ))
+        else None
     )
-
-    async def _save_planner() -> None:
-        # Unloaded (a reload, the entry removed): what the planner learnt is
-        # written now. The delayed write left pending would be replaced by
-        # the next planner's (a reload: up to STATIONS_SAVE_DELAY of poles
-        # lost), or write the store again after the entry's removal deleted
-        # it. Registered first, so it runs after proxy.close, which closes
-        # the planner (its one owner): it learns nothing more by then (a
-        # FUTÁR request still under way lands later).
-        if learnt:
-            await storage.async_save_stations(hass, planner.stations_data())
-
-    entry.async_on_unload(_save_planner)
     proxy = FutarProxy(
         async_get_clientsession(hass),
         api_key,
@@ -615,7 +610,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # is decoded in HA's executor, like ELVIRA's boards.
         executor=hass.async_add_executor_job,
         # FUTÁR down, refusing the key or the call (HTTP 429): the boards
-        # and trip details come from mavplusz.hu; the proxy closes it.
+        # and trip details come from mavplusz.hu (when the option lets
+        # them); the proxy closes it.
         fallback=planner,
     )
     entry.async_on_unload(proxy.close)
@@ -659,6 +655,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
     entry.async_on_unload(lambda: hass.services.async_remove(DOMAIN, SERVICE_FUTAR))
     return True
+
+
+async def _async_planner_boards(
+    hass: HomeAssistant, entry: ConfigEntry, task_factory: Callable[[Any], Any]
+) -> mavplusz_board.PlannerBoards:
+    """The BKK boards from mavplusz.hu (mavplusz_board.py) the entry's
+    FUTÁR proxy falls back to, with the stations they learn kept in .storage."""
+    # The poles of FUTÁR's combined stations learnt before (storage.py), so
+    # their boards have a fallback right after a restart too.
+    learnt = False
+
+    @callback
+    def _stations_changed() -> None:
+        nonlocal learnt
+        learnt = True
+        storage.async_save_stations_later(hass, planner.stations_data)
+
+    planner = mavplusz_board.PlannerBoards(
+        async_get_clientsession(hass),
+        task_factory=task_factory,
+        call_later=hass_call_later(hass),
+        limiter=_planner_limiter(hass),
+        executor=hass.async_add_executor_job,
+        stations=await storage.async_load_stations(hass),
+        on_stations_changed=_stations_changed,
+    )
+
+    async def _save_planner() -> None:
+        # Unloaded (a reload, the entry removed): what the planner learnt is
+        # written now. The delayed write left pending would be replaced by
+        # the next planner's (a reload: up to STATIONS_SAVE_DELAY of poles
+        # lost), or write the store again after the entry's removal deleted
+        # it. Registered first, so it runs after proxy.close, which closes
+        # the planner (its one owner): it learns nothing more by then (a
+        # FUTÁR request still under way lands later).
+        if learnt:
+            await storage.async_save_stations(hass, planner.stations_data())
+
+    entry.async_on_unload(_save_planner)
+    return planner
 
 
 async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:

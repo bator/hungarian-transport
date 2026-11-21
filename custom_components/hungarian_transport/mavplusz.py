@@ -17,6 +17,7 @@ both alike. No Home Assistant imports: tests/test_mavplusz.py runs it bare.
 """
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Sequence
 import dataclasses
 from datetime import datetime
@@ -57,6 +58,20 @@ VEHICLE_MAX_BYTES = 256 * 1024
 VEHICLE_BUDGET_BYTES = VEHICLE_MAX_BYTES * 3 // 4
 UNSEEN_ROUTE_BYTES = 8 * 1024
 HUGE_ROUTE_BYTES = 64 * 1024
+# What a route's alias weighs, reckoned from its answer without encoding
+# it again on the event loop (answer_sizes): ROUTE_BYTES for the alias
+# ({"patterns":[]} and its comma), PATTERN_BYTES a pattern
+# ({"vehiclePositions":[]} and its comma) and POSITION_BYTES a position.
+# A position was 195-229 bytes of compact JSON in mavplusz_rt_pattern.json
+# (MÁV 195-200, Volán's longer ids 209-229), so 250 with its comma and some
+# room: the reckoning came out 9-23% over the real size of each of that
+# answer's routes (tests/test_mavplusz.py), never under. The heaviest live
+# vehicle measured (326 bytes, docs/realtime.md) is 1.3 times that, so a
+# request reckoned at VEHICLE_BUDGET_BYTES of those is still under the
+# cap; and an answer over it teaches RouteSizes all the same (too_large).
+ROUTE_BYTES = 16
+PATTERN_BYTES = 25
+POSITION_BYTES = 250
 # A route's learnt size is kept this long (the day's traffic changes it),
 # for so many routes at most.
 ROUTE_SIZE_TTL = 3 * 3600
@@ -114,10 +129,120 @@ _TRIP_FIELDS = (
 _ROUTE_FIELDS = "patterns { " + _POSITION_FIELDS + " }"
 # A realtime pattern's code: the scheduled one's route plus "::rt#".
 _RT_PATTERN = "::rt#"
+# A serviceDay the planner can mean (2000-2100), the seconds after it a
+# call can have (a day early to two days on) and a delay (two days either
+# way), as mavplusz_board reads its answers; a vehicle's lastUpdated is an
+# epoch of those years too. Anything else is a broken or hostile answer,
+# no time: an int past 64 bits in the hub's answer fails Home Assistant's
+# JSON of the whole realtime service response (orjson), every trip of it,
+# every poll while the answer is cached.
+DAY_MIN = 946684800
+DAY_MAX = 4102444800
+SECONDS_MIN = -86400
+SECONDS_MAX = 2 * 86400
 
 
 class TooLarge(ValueError):
     """An answer over the cap fetch() was given (read no further)."""
+
+
+_HTTP_STATUS = re.compile(r"^HTTP (\d{3})$")
+
+
+def planner_down(err: BaseException) -> bool:
+    """Whether a planner request's error says the planner is failing, so
+    that nobody should ask it for a while (PlannerLimiter.failed): no
+    answer, a timeout, HTTP 5xx, 429 or 403, an HTTP 200 that is not JSON
+    (a maintenance or Cloudflare page). Not so an error of that request
+    alone, which the next request with other trips does not share: an
+    answer over its cap (TooLarge) or nested too deep, one not decoded
+    within the request's timeout (DecodeTimeout), another HTTP status, an
+    answer of the wrong shape or a GraphQL error without a path
+    (parse_response's ValueError), nor a bug of the code reading it
+    (parse_bug: a TypeError, KeyError and the like).
+    mavplusz_board's _post reads fetch()'s errors the same way."""
+    if isinstance(err, (json.JSONDecodeError, UnicodeDecodeError)):
+        return True
+    if isinstance(err, (aiohttp.ClientError, asyncio.TimeoutError, OSError)):
+        return True
+    match = _HTTP_STATUS.match(str(err)) if isinstance(err, ValueError) and not isinstance(err, TooLarge) else None
+    if match is None:
+        return False
+    status = int(match.group(1))
+    return status >= 500 or status in (403, 429)
+
+
+# What reading an answer raises only when the code reading it is wrong:
+# every answer of the wrong shape is a ValueError of parse_response,
+# parse_routes and parse_vehicles (and of mavplusz_board's parsers), and
+# _num, _int and the bounds (_day, _seconds, _delay) read every number,
+# however big, without raising. parse_bug.
+PARSE_BUGS: tuple[type[BaseException], ...] = (TypeError, KeyError, AttributeError, IndexError, OverflowError)
+
+
+def parse_bug(err: BaseException) -> bool:
+    """Whether a planner request's error is a bug of this integration's
+    reading of the answer (PARSE_BUGS), not the planner's nor the answer's.
+    Neither an outage (planner_down) nor quiet: the request is backed off
+    as one failing on its own (never counted as one of the hub's requests
+    failing in a row that make an outage: the planner answered), and a
+    warning with the traceback is logged once an hour for each place of
+    the code it is raised at (ParseBugLog: realtime's _mav_bug,
+    mavplusz_board's _post and, for one trip of a batch of trip details,
+    _send_chunk), so a release that reads every answer wrongly does not
+    move all MÁV realtime to the feeds without a word."""
+    return isinstance(err, PARSE_BUGS)
+
+
+# A bug of the reading code (parse_bug) is warned about once this long for
+# each place it is raised at (ParseBugLog), at most MAX_PARSE_BUGS places.
+PARSE_BUG_TTL = 3600
+MAX_PARSE_BUGS = 64
+
+
+class ParseBugLog:
+    """The warnings of the bugs of this integration's reading of the
+    planner's answers (parse_bug), the realtime hub's and the BKK boards'
+    alike: warn(scope, err, message, *args) logs message % args as a
+    warning with err's traceback once per (scope, err's type, the file and
+    line it was raised at) per PARSE_BUG_TTL.
+
+    Not ended by an answer read: most such bugs are a shape of one trip's
+    or one stop's data only (a field the planner leaves out for that one),
+    and every other answer of the scope is read meanwhile, so a warning
+    "once until an answer is read again" came again with every request of
+    that trip, 60 tracebacks an hour. Another bug, or the same raised
+    elsewhere, is warned about at once all the same."""
+
+    def __init__(self, logger: logging.Logger, *, monotonic: upstream.Monotonic = upstream.monotonic) -> None:
+        self._log = upstream.OutageLog(logger, monotonic=monotonic, ttl=PARSE_BUG_TTL, max_entries=MAX_PARSE_BUGS)
+
+    @staticmethod
+    def where(err: BaseException) -> tuple[str, int]:
+        """The file and line err was raised at (its traceback's last
+        frame); ("", 0) for one never raised."""
+        tb = err.__traceback__
+        if tb is None:
+            return "", 0
+        while tb.tb_next is not None:
+            tb = tb.tb_next
+        return tb.tb_frame.f_code.co_filename, tb.tb_lineno
+
+    def warn(self, scope: str, err: BaseException, message: str, *args: object) -> None:
+        self._log.failed((scope, type(err), *self.where(err)), message, *args, exc_info=err)
+
+
+# The least time fetch() gives a decode, whatever is left of the request's
+# timeout (its answer is waited for this much less: see there).
+DECODE_MIN = 1.0
+
+
+class DecodeTimeout(ValueError):
+    """The planner answered, but decoding the answer (fetch()'s decode,
+    in the executor) took the rest of the request's timeout (DECODE_MIN
+    at least): that request's failure, not the planner's (planner_down),
+    and not its answer's fault either (mavplusz_board holds the stop back
+    for BOARD_TTL only)."""
 
 
 class _Refused(Exception):
@@ -142,6 +267,12 @@ class PlannerLimiter:
     and refunded when its request never goes. After a failure nobody asks for
     the seconds the failing requester gives (the longer one wins); the
     vehicle requests never set one (realtime's _mav_vehicles).
+
+    enabled says whether the planner may be asked at all (the integration's
+    "Ask mavplusz.hu" option, __init__._planner_limiter), read at every
+    take(): turned off, nobody gets a token, so a request already on its
+    way to one (a hub round queued for its lock, a board's trip details
+    waiting for their batch) is not sent either, whoever made it.
     """
 
     def __init__(
@@ -154,8 +285,10 @@ class PlannerLimiter:
         vehicle_rate: float = VEHICLE_RATE,
         vehicle_burst: int = VEHICLE_BURST,
         monotonic: upstream.Monotonic = upstream.monotonic,
+        enabled: Callable[[], bool] = lambda: True,
     ) -> None:
         self._monotonic = monotonic
+        self._enabled = enabled
         self._retry_at = -1e18
         self._total = upstream.TokenBucket(
             rate,
@@ -198,8 +331,9 @@ class PlannerLimiter:
         )
 
     def backing_off(self) -> bool:
-        """A request failed within the backoff it set: nobody asks now."""
-        return self._monotonic() < self._retry_at
+        """Nobody asks now: a request failed within the backoff it set, or
+        the planner may not be asked at all (enabled)."""
+        return not self._enabled() or self._monotonic() < self._retry_at
 
     def failed(self, seconds: float) -> None:
         """A request failed: no request for seconds (or the backoff already set, if longer)."""
@@ -214,7 +348,8 @@ class PlannerLimiter:
 
     def take(self, *, fallback: bool = False, vehicles: bool = False, quiet: bool = False) -> bool:
         """Whether a request may go now; it then has its token(s). False
-        while backing off (not counted as refused) or over a limit (logged,
+        while backing off or turned off (not counted as refused) or over a
+        limit (logged,
         unless quiet: a token asked for ahead, PlannerClient.reserve). Every
         bucket is checked before any is taken from: a request one of them
         refuses spends no token of the others, nor of that one (refilled
@@ -391,15 +526,22 @@ def parse_vehicles(doc: Any, routes: Sequence[str]) -> dict[str, list[dict[str, 
 
 def answer_sizes(doc: Any, routes: Sequence[str]) -> dict[str, int]:
     """Per route of a parse_vehicles answer: the bytes of its alias, as
-    compact JSON (what RouteSizes learns); none for an alias it lacks or
-    one an error names (its null says nothing of the route's size)."""
+    compact JSON (what RouteSizes learns), reckoned from its patterns and
+    positions (PATTERN_BYTES, POSITION_BYTES): the answer, up to
+    VEHICLE_MAX_BYTES, is not encoded again on the event loop to weigh
+    it. No size for an alias it lacks or one an error names (its null says
+    nothing of the route's size)."""
     aliases = [f"r{i}" for i in range(len(routes))]
     data, failed = _alias_data(doc, aliases)
-    return {
-        r: len(json.dumps(data[a], separators=(",", ":")))
-        for a, r in zip(aliases, routes)
-        if a in data and a not in failed
-    }
+    out: dict[str, int] = {}
+    for alias, route in zip(aliases, routes):
+        if alias not in data or alias in failed:
+            continue
+        patterns = data[alias].get("patterns") if isinstance(data[alias], dict) else None
+        patterns = patterns if isinstance(patterns, list) else []
+        positions = len(_route_positions(data[alias]))
+        out[route] = ROUTE_BYTES + len(patterns) * PATTERN_BYTES + positions * POSITION_BYTES
+    return out
 
 
 def needs_route_vehicles(res: TripResult | None, now: float | None = None) -> bool:
@@ -428,7 +570,7 @@ def add_vehicles(
     out = dict(results)
     for key, res in results.items():
         if needs_route_vehicles(res, now):
-            vehicle = _vehicle(positions, key, realtime._strip(res.route, key.prefix))
+            vehicle = _vehicle(positions, key, realtime._strip(res.route, key.prefix), now)
             if vehicle is not None:
                 out[key] = res._replace(vehicle=vehicle)
     _one_run(out)
@@ -513,16 +655,21 @@ def build_route_query(routes: Sequence[RouteKey]) -> dict[str, Any]:
     return {"query": f"query({', '.join(decl)}) {{ {' '.join(parts)} }}", "variables": variables}
 
 
-def parse_routes(doc: Any, routes: Sequence[RouteKey]) -> dict[RouteKey, tuple[str, ...] | None]:
+def parse_routes(
+    doc: Any, routes: Sequence[RouteKey], failed: set[RouteKey] | None = None
+) -> dict[RouteKey, tuple[str, ...] | None]:
     """Per route of build_route_query(routes): its trip ids that day (the
     planner's, prefix kept), or None for a route the planner does not know;
-    a route an error names is not in the result. Errors and missing aliases
-    as in parse_response."""
-    data, failed = _alias_data(doc, [f"r{i}" for i in range(len(routes))])
+    a route an error names or whose alias is of the wrong shape is not in
+    the result, and goes into failed. Errors and missing aliases as in
+    parse_response."""
+    data, errors = _alias_data(doc, [f"r{i}" for i in range(len(routes))])
     out: dict[RouteKey, tuple[str, ...] | None] = {}
     for i, key in enumerate(routes):
         alias = f"r{i}"
-        if alias in failed:
+        if alias in errors:
+            if failed is not None:
+                failed.add(key)
             continue
         if alias not in data:
             raise ValueError(f"answer without {alias}")
@@ -531,7 +678,10 @@ def parse_routes(doc: Any, routes: Sequence[RouteKey]) -> dict[RouteKey, tuple[s
             out[key] = None
             continue
         if not isinstance(route, dict):
-            raise ValueError("route is not an object")
+            # This route's answer alone: the others are still answers.
+            if failed is not None:
+                failed.add(key)
+            continue
         ids: list[str] = []
         patterns = route.get("patterns")
         for pattern in patterns if isinstance(patterns, list) else ():
@@ -562,33 +712,67 @@ async def fetch(
     user_agent: str | None = None,
     timeout: aiohttp.ClientTimeout | None = None,
     cap: int = MAX_RESPONSE_BYTES,
+    decode: Callable[[bytearray], Any] | None = None,
 ) -> Any:
     """POST body to the planner; the decoded JSON answer. ValueError on an
     HTTP error or a non-JSON answer, TooLarge (one) on an oversized one. user_agent and timeout
-    default to realtime's (read per call: realtime imports this module)."""
+    default to realtime's (read per call: realtime imports this module).
+
+    decode, when given, is awaited with the answer's bytes in place of
+    decoding them here, and what it gives is the answer: the caller decodes
+    (and may parse) a large one off the event loop (mavplusz_board's boards
+    and trip details). What it raises is its caller's to handle; a
+    RecursionError (nested too deep) is a ValueError here as well. It runs
+    after aiohttp's timeout is over (the answer is in), so it gets what is
+    left of timeout.total and no more: past it DecodeTimeout, the
+    request's own failure (the planner did answer), and the caller's round
+    goes on without it. Its answer is waited for DECODE_MIN less than
+    timeout.total (half of one under twice that), and the decode has that
+    at least whenever the answer came: one whose last bytes came just
+    before the timeout had next to nothing left for its decode, a
+    DecodeTimeout for a slow network. The whole takes timeout.total at
+    most all the same (the BKK boards' answer() is timed by it). Only a
+    timeout's total is read. An executor job it awaits runs to its end
+    all the same; the request no longer waits for it."""
     timeout = timeout or realtime.FETCH_TIMEOUT
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    floor = 0.0
+    wait = timeout
+    if decode is not None and timeout.total is not None:
+        floor = min(DECODE_MIN, timeout.total / 2)
+        wait = aiohttp.ClientTimeout(total=timeout.total - floor)
     headers = {
         "User-Agent": user_agent or realtime.USER_AGENT,
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
     async with session.post(
-        URL, data=json.dumps(body).encode(), headers=headers, timeout=timeout, allow_redirects=False
+        URL, data=json.dumps(body).encode(), headers=headers, timeout=wait, allow_redirects=False
     ) as resp:
         if resp.status != 200:
             raise ValueError(f"HTTP {resp.status}")
         length = getattr(resp, "content_length", None)
         if length is not None and length > cap:
             raise TooLarge(f"{length} bytes, over {cap}")
-        chunks = []
-        total = 0
+        # One buffer, not chunks joined into a second copy of the body.
+        data = bytearray()
         async for chunk in resp.content.iter_chunked(65536):
-            total += len(chunk)
-            if total > cap:
+            if len(data) + len(chunk) > cap:
                 raise TooLarge(f"over {cap} bytes")
-            chunks.append(chunk)
+            data += chunk
     try:
-        return jsonsafe.loads(b"".join(chunks))
+        if decode is not None:
+            left = None if timeout.total is None else max(timeout.total - (loop.time() - began), floor)
+            cut = asyncio.timeout(left)
+            try:
+                async with cut:
+                    return await decode(data)
+            except TimeoutError:
+                if not cut.expired():
+                    raise
+                raise DecodeTimeout(f"answer not decoded within {timeout.total} s") from None
+        return jsonsafe.loads(data)
     except RecursionError:
         # Nested deeper than the decoder goes: not an answer, and the
         # caller's failure path is the one for ValueError.
@@ -604,14 +788,40 @@ def _int(value: Any) -> int | None:
 
 
 def _num(value: Any) -> float | None:
+    """A JSON number as a finite float, else None: not a bool, NaN or an
+    infinity, nor an int no float holds. JSON allows any digits, and
+    float(10 ** 400) raises OverflowError, which failed the hub's whole
+    realtime service call every poll while such a vehicle was on a route
+    (mavplusz_board reads its numbers by this one too)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    out = float(value)
+    try:
+        out = float(value)
+    except (OverflowError, ValueError):
+        return None
     return out if out == out and abs(out) != float("inf") else None
 
 
 def _gid(obj: Any) -> str:
     return _str(obj.get("gtfsId")) if isinstance(obj, dict) else ""
+
+
+def _day(value: Any) -> int | None:
+    """A serviceDay (DAY_MIN-DAY_MAX), else None; an epoch alike."""
+    day = _int(value)
+    return day if day is not None and DAY_MIN <= day <= DAY_MAX else None
+
+
+def _seconds(value: Any) -> int | None:
+    """Seconds after a serviceDay (SECONDS_MIN-SECONDS_MAX), else None."""
+    seconds = _int(value)
+    return seconds if seconds is not None and SECONDS_MIN <= seconds <= SECONDS_MAX else None
+
+
+def _delay(value: Any) -> int | None:
+    """A delay in seconds, two days either way at most, else None."""
+    delay = _int(value)
+    return delay if delay is not None and -SECONDS_MAX <= delay <= SECONDS_MAX else None
 
 
 def _epoch(day: int | None, seconds: int | None) -> int | None:
@@ -625,14 +835,14 @@ def _stop_update(st: dict[str, Any], prefix: str) -> realtime.StopUpdate:
         return realtime.StopUpdate(stop_id, None, None, None, None, None, 0)
     if st.get("realtimeState") == "CANCELED":
         return realtime.StopUpdate(stop_id, None, None, None, None, None, 1)
-    day = _int(st.get("serviceDay"))
+    day = _day(st.get("serviceDay"))
     return realtime.StopUpdate(
         stop_id,
         None,
-        _int(st.get("arrivalDelay")),
-        _epoch(day, _int(st.get("realtimeArrival"))),
-        _int(st.get("departureDelay")),
-        _epoch(day, _int(st.get("realtimeDeparture"))),
+        _delay(st.get("arrivalDelay")),
+        _epoch(day, _seconds(st.get("realtimeArrival"))),
+        _delay(st.get("departureDelay")),
+        _epoch(day, _seconds(st.get("realtimeDeparture"))),
         0,
     )
 
@@ -655,14 +865,21 @@ def _rt_pattern(trip: dict[str, Any]) -> bool:
     return isinstance(pattern, dict) and _RT_PATTERN in _str(pattern.get("code"))
 
 
-def _vehicle(positions: Sequence[dict[str, Any]], key: TripKey, route_id: str) -> realtime.Vehicle | None:
+def _vehicle(
+    positions: Sequence[dict[str, Any]], key: TripKey, route_id: str, now: float | None = None
+) -> realtime.Vehicle | None:
     """The newest of the positions that name this very trip.
 
     Matched by trip id alone: OTP's VehiclePosition names its trip but not
     the trip's service date, so another day's run of the id cannot be told
     apart here. parse_trip only asks for one when the date's run has
     realtime calls, so a vehicle is attached only to a run that is live
-    (and parse_response to one run of the id)."""
+    (and parse_response to one run of the id).
+
+    A lastUpdated that is no epoch of DAY_MIN-DAY_MAX is no timestamp; with
+    now (the request's epoch), a position stamped more than
+    realtime.MAX_POSITION_AHEAD after it is none at all: it would never
+    grow old (realtime._vehicle_json) and always be the newest here."""
     best: realtime.Vehicle | None = None
     for vp in positions:
         if _gid(vp.get("trip")) != key.gtfs_id:
@@ -674,7 +891,9 @@ def _vehicle(positions: Sequence[dict[str, Any]], key: TripKey, route_id: str) -
             continue
         rel = vp.get("stopRelationship")
         rel = rel if isinstance(rel, dict) else {}
-        ts = _int(vp.get("lastUpdated"))
+        ts = _day(vp.get("lastUpdated"))
+        if ts is not None and now is not None and ts > now + realtime.MAX_POSITION_AHEAD:
+            continue
         if best is not None and (ts is None or (best.timestamp is not None and ts <= best.timestamp)):
             continue
         best = realtime.Vehicle(
@@ -692,14 +911,17 @@ def _vehicle(positions: Sequence[dict[str, Any]], key: TripKey, route_id: str) -
     return best
 
 
-def parse_trip(trip: Any, key: TripKey, positions: Sequence[dict[str, Any]] | None = None) -> TripResult:
+def parse_trip(
+    trip: Any, key: TripKey, positions: Sequence[dict[str, Any]] | None = None, now: float | None = None
+) -> TripResult:
     """One alias's answer. A trip with no realtime call on the date has no
     update and no vehicle: the pattern's vehicle on this trip id is then
     another day's run of it. Every call CANCELED: the trip is canceled
     (TripDescriptor relationship 3); one CANCELED call among updated ones
     is that stop skipped (StopTimeUpdate relationship 1). positions are
     the vehicles to look for the trip's among, by default its own alias's
-    pattern's (parse_response gives those of every alias)."""
+    pattern's (parse_response gives those of every alias); now as for
+    _vehicle."""
     if not isinstance(trip, dict):
         raise ValueError("trip is not an object")
     route_gid = _gid(trip.get("route"))
@@ -718,14 +940,15 @@ def parse_trip(trip: Any, key: TripKey, positions: Sequence[dict[str, Any]] | No
         return TripResult(tu, None, ends, **more)
     stops = [_stop_update(c, key.prefix) for c in calls]
     tu = realtime.TripUpdate(trip_id, key.date, route_id, 0, None, stops)
-    return TripResult(tu, _vehicle(_positions(trip) if positions is None else positions, key, route_id), ends, **more)
+    found = _vehicle(_positions(trip) if positions is None else positions, key, route_id, now)
+    return TripResult(tu, found, ends, **more)
 
 
 def _times(calls: list[dict[str, Any]]) -> list[int]:
     """The calls' times: realtimeArrival and -Departure are the scheduled
     times on a call without realtime data."""
     times = [
-        _epoch(_int(c.get("serviceDay")), _int(c.get(f)))
+        _epoch(_day(c.get("serviceDay")), _seconds(c.get(f)))
         for c in calls
         for f in ("realtimeArrival", "realtimeDeparture")
     ]
@@ -775,12 +998,18 @@ def _alias_data(doc: Any, aliases: Sequence[str]) -> tuple[dict[str, Any], set[s
     return data, failed
 
 
-def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResult | None]:
+def parse_response(
+    doc: Any, trips: Sequence[TripKey], now: float | None = None, failed: set[TripKey] | None = None
+) -> dict[TripKey, TripResult | None]:
     """Per trip of build_query(trips): its TripResult, or None when the
     planner does not know the trip (a null alias); a trip a GraphQL error
-    names by its alias is not in the result (no answer, _alias_data). Any
-    other GraphQL error or a missing alias is a ValueError: the whole
-    answer is not trusted.
+    names by its alias (_alias_data) or whose alias is of the wrong shape
+    (parse_trip's ValueError) is not in the result, and goes into failed:
+    that trip has no answer, the others are answered, as mavplusz_board's
+    parse_trips does (one trip of the wrong shape failed the whole answer,
+    and with it every trip asked along with it, again after every
+    backoff). Any other GraphQL error or a missing alias is a ValueError:
+    the whole answer is not trusted.
 
     A vehicle is looked for on every alias's pattern, not only on its
     trip's own: a trip the realtime data changed has a realtime pattern
@@ -789,12 +1018,15 @@ def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResu
     the alias of its scheduled run the day before). Each position names
     its trip, and goes to one live run of it (_one_run). A trip still
     without one there is on its route's scheduled patterns
-    (mavplusz_rt_pattern.json): needs_route_vehicles, add_vehicles."""
-    data, failed = _alias_data(doc, [f"t{i}" for i in range(len(trips))])
+    (mavplusz_rt_pattern.json): needs_route_vehicles, add_vehicles. now
+    (the request's epoch) as for _vehicle."""
+    data, errors = _alias_data(doc, [f"t{i}" for i in range(len(trips))])
     raw: list[tuple[TripKey, Any]] = []
     for i, key in enumerate(trips):
         alias = f"t{i}"
-        if alias in failed:
+        if alias in errors:
+            if failed is not None:
+                failed.add(key)
             continue
         if alias not in data:
             raise ValueError(f"answer without {alias}")
@@ -802,7 +1034,13 @@ def parse_response(doc: Any, trips: Sequence[TripKey]) -> dict[TripKey, TripResu
     positions = [vp for _key, trip in raw for vp in _positions(trip)]
     out: dict[TripKey, TripResult | None] = {}
     for key, trip in raw:
-        out[key] = None if trip is None else parse_trip(trip, key, positions)
+        try:
+            out[key] = None if trip is None else parse_trip(trip, key, positions, now)
+        except ValueError:
+            # Of the wrong shape: this trip's answer alone. Not a
+            # PARSE_BUGS error, which is this code's and goes up.
+            if failed is not None:
+                failed.add(key)
     _one_run(out)
     return out
 

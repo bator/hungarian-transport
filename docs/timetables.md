@@ -182,9 +182,11 @@ The files:
 | --- | --- |
 | `mav-index.json.gz` | the integration's train route index |
 | `mav-index.json` | the MÁV manifest (below) |
+| `mav-index.json.sig` | its ed25519 signature, as `timetables.json.sig` ([below](#release-feed-signature-and-feed-checks)) |
 | `mav-gtfs.zip` | MÁV's official GTFS, byte for byte as downloaded for this build (CC0) |
 | `mav-pfaedle-overlay.zip` | pfaedle's `shapes.txt`, `stop_times.txt` and `trips.txt` of the same feed |
 | `timetables.json` | the Volán and city manifest ([below](#the-volán-and-city-indexes)) |
+| `timetables.json.sig` | the manifest's ed25519 signature ([below](#release-feed-signature-and-feed-checks)) |
 | `volan-index.json.gz`, `city-index.json.gz` | the Volán and city indexes, byte for byte as the release's builders write them |
 | `volan-shapes-<hash>/`, `city-shapes-<hash>/` | each index's route shapes: the folder its head names (`"sh"`), 64 files `00.json.gz` to `63.json.gz` |
 | `ATTRIBUTION.txt`, `index.html` | what the files are, sources and licences, for the whole site |
@@ -250,8 +252,11 @@ like any run, and made while another run waits there, it cancels that one:
 re-run when no run of the workflow is queued.
 The integration does not check the attestation: Home Assistant has no
 Sigstore client, and the integration takes no new dependency for one. It
-checks each file against its manifest's size and sha256, which come from
-the same site, so it trusts GitHub Pages and this repository's workflow.
+checks each file against its manifest's size and sha256, and both
+manifests are signed: `mav-index.json.sig` and `timetables.json.sig`
+([below](#release-feed-signature-and-feed-checks)), one ed25519 key for
+both. So the integration trusts the workflow's signing key, not whoever
+answers for `bator.github.io`.
 
 #### The daily MÁV index
 
@@ -280,13 +285,33 @@ files (a deploy for new Volán or city indexes carries them over), when the
 secrets are missing, the download, pfaedle or the audit fails, the site is
 refused (a feed whose `feed_version` does not start with a real date, a site
 over 500 MB), or the index and MÁV's zip are the ones already published
-(the overlay's bytes are not compared) and the published manifest is under
-12 hours old; older, the same content is published again for its new
-`built_at`. A failure is a warning while the published manifest's
+(the overlay's bytes are not compared), the published manifest is under
+12 hours old and its `mav-index.json.sig` verifies; older, the same content
+is published again for its new `built_at`, and so it is when that signature
+is missing or does not verify (the site carries no unsigned MÁV manifest,
+below). A failure is a warning while the published manifest's
 `built_at` is less than 2 days old; the run fails (red) when it is 2 days
 old or older, or names no build time, and at once when MÁV refuses the login
-(HTTP 401/403, which is never retried: only new credentials help). A
-published manifest that cannot be read leaves the run green with a warning.
+(HTTP 401/403, which is never retried: only new credentials help). The
+`built_at` counts only when `mav-index.json.sig` verifies (read again once,
+11 minutes later, when it does not or is not there: Pages' cache, below); a
+published manifest without a signature that verifies fails the run too, as
+installs take nothing from it and its `built_at` is anyone's
+(`scripts/mav_daily_verdict.py`), and so does one whose `.sig` is no
+signature (over 1 KiB) or that the site refuses with another client error
+(HTTP 4xx): whoever can put files on Pages could make one so. A published
+manifest, or its signature, that cannot be read for a network error, a
+timeout or a server error (HTTP 5xx) leaves the run green with a warning.
+
+An index with fewer than half the trains and lines of the published one is
+refused (`scripts/mav_shrink_guard.py`; the repository variable
+`MAV_ALLOW_SHRINK=1` accepts an intended reduction). The published counts
+are compared only when the manifest's signature verifies: one who can put
+files on Pages could otherwise name a million trains and so stop every
+build. Without such a manifest (none, it does not read, or its signature
+does not verify) the latest stable release's MÁV index is compared instead,
+and without that either the index is published with a warning that nothing
+was compared.
 
 The integration reads `mav-index.json` about 10 to 20 minutes after Home
 Assistant starts (and after the options are saved, which reloads the
@@ -295,6 +320,13 @@ day at the **Daily check time** of its options (06:00 local time unless
 changed, plus up to 5 minutes), and installs the index only when all of
 these hold:
 
+- `mav-index.json.sig` (one line, the base64 of the 64-byte ed25519
+  signature over the exact bytes of `mav-index.json`, by the same key as
+  `timetables.json.sig`, [below](#the-volán-and-city-indexes)) verifies the
+  manifest: a missing, malformed or wrong signature installs nothing (the
+  first one is looked at again 11 minutes later, as for a download that
+  does not match, below; a failed round after that). Only the Pages
+  manifest needs one: an upload or a build of your own feed is yours;
 - the manifest's format and the index schema are the ones this version reads
   (a newer one is skipped, with one line in the log);
 - its feed is the one of the index in use and the [same-feed
@@ -315,8 +347,10 @@ query string and `Cache-Control: no-cache`, so for up to ten minutes after a
 deploy it can hand out the new manifest with the previous index, or the
 other way round. A download that does not match its manifest (size or
 sha256) is therefore looked at again 11 minutes later with only a debug
-line, and is not a round; only the same manifest's index failing to match
-again is a failed round. Both files come from `https://bator.github.io/hungarian-transport/`
+line, and is not a round; a download failing to match again before one
+matched (or before the next startup or daily round) is a failed round,
+whichever manifest it is of, so two generations the cache hands out in turn
+never keep the check settling. Both files come from `https://bator.github.io/hungarian-transport/`
 only, and no redirect is followed: should the site move (GitHub Pages
 redirects every `github.io` URL once a custom domain is set), each round
 fails with a warning naming the redirect until an update of the integration
@@ -383,16 +417,19 @@ the site, with a warning on the run.
 
 Every deploy replaces the whole site, so the run's `site` job puts it
 together from both parts: the MÁV files of this run, else the ones already
-published (every file `mav-index.json` names); each Volán or city index of
+published (every file `mav-index.json` names, when its signature verifies);
+each Volán or city index of
 this run, else the published one with its shapes, checked against the
 published `timetables.json` (the size and sha256 of every file). It deploys
 when the MÁV part or at least one of the two indexes is new. A published
 Volán or city index that cannot be carried over (a file does not download,
-or does not match, also when fetched again half a minute later) is left out
-of the new site with a warning: installs then find it not published and
+or does not match, also when fetched again once, 11 minutes after the job's
+first read of the site: Pages' CDN may serve the previous deploy's file next
+to the new manifest for up to 10 minutes, as with a signature below) is left
+out of the new site with a warning: installs then find it not published and
 keep the one they have, and the next run finds it missing and rebuilds it.
-A MÁV file that cannot be carried over, or a published manifest that is
-there but cannot be read, fails the run instead, and nothing is deployed:
+A MÁV file that cannot be carried over (fetched again the same way), or a
+published manifest that is there but cannot be read, fails the run instead, and nothing is deployed:
 every install's daily MÁV check reads those files, and the next run tries
 again. A manifest that is not there at all (404) carries nothing and is no
 failure. The `site` job runs whatever the other two jobs did (a job that
@@ -413,6 +450,7 @@ and counts here are examples):
    "url": "volan-index.json.gz", "size": 3600000, "sha256": "…",
    "feed": "volan:01716.20261102", "built_at": "2026-11-16T10:40:00Z",
    "trips": 120000, "stops": 9000,
+   "release_feed": "volan:01716.20261026", "release_version": "v1.10.24",
    "shapes": {"dir": "volan-shapes-0123456789", "n": 64,
               "files": {"00.json.gz": {"size": 90000, "sha256": "…"}, "…": {}}}
   },
@@ -436,9 +474,49 @@ and counts here are examples):
 - `shapes` names the folder from the index's head (`dir`), its number of
   files (`n`, 64) and the size and sha256 of each, `00.json.gz` to
   `63.json.gz`; it is `null` for an index without shapes.
+- `release_feed` (optional; manifests from before it lack it, and versions
+  that do not know it ignore it): the `feed` of the latest stable release's
+  index of the same kind when this index was built, or `null`.
+- `release_version` (optional, only next to a `release_feed`; older
+  manifests lack it): that stable release's tag as GitHub names it, for
+  example `"v1.10.24"`: the release whose index `release_feed` is, and
+  whose builders built this one. The integration compares it with its own
+  version (below).
 - An index carried over from the previous site keeps its entry as it was,
   `built_at` included, so the week counts from its last real build. An
   index that was never built is not listed.
+
+**The signature.** Next to the manifest the site publishes
+`timetables.json.sig`: one line, the base64 of the 64-byte ed25519
+signature over the exact bytes of `timetables.json`. The workflow signs with
+a private key that is a secret of this repository's Pages workflow; the
+integration ships the public half (`PAGES_PUBLIC_KEY` in
+`weekly_timetables.py`, raw 32 bytes in base64) and checks it with the
+`cryptography` package Home Assistant itself depends on. The manifest names
+the size and sha256 of every other file, so the signature vouches for the
+whole download: a site that answers for `bator.github.io` but is not the
+workflow's (a hijacked DNS name, an interception the system trusts) cannot
+make the integration install anything, and neither can a manifest edited
+after it was signed. A manifest whose signature is missing, malformed or
+does not verify installs nothing: right after a deploy the cache can pair
+the new manifest with the previous signature (or still answer 404 for it),
+so the first such check is looked at again 11 minutes later, quietly, and
+one failing again is a failed round with one warning. The integration
+ships a list of public keys (`PAGES_PUBLIC_KEYS` in `mav_daily.py`, the
+current one first) and takes a signature by any of them, so the key can
+change without breaking installs: a new key goes into the list a release
+before the site signs with it, the old one leaves a release later. A
+well-formed signature that none of the listed keys verifies has reason
+`unknown_key`: it is signed by a key this version does not know: a newer
+key, another deploy's signature, or not the site's, and the integration
+cannot tell which. Looked at again and still so, it is a failed round like
+any other, with the usual retries (and a day of the daily MÁV check's
+failure streak), on 3 consecutive days (`UNKNOWN_KEY_DAYS`; a day without
+it starts the count over, a signature that verifies ends it). From the
+fourth day on it is `unsupported` (the site most likely signs with a key
+newer than this version: update the integration), said once in the log at
+info level, not retried, and neither a failure nor a success of the daily
+MÁV check (a failure streak it left open stays open).
 
 Because the indexes are the stable release's, the site's `schema` changes
 only with a release: the first run after a release that changes the index
@@ -446,6 +524,143 @@ format rebuilds both, and from then on installs of an older version skip
 the Volán and city indexes there (`unsupported`) and keep theirs until they
 update. An index published before that of the old format is not carried
 into a site of the new one.
+
+##### Release feed, signature and feed checks
+
+- **`release_feed`.** Each entry also names `release_feed`: the `feed` of
+  the latest stable release's index of the same name (in its
+  `hungarian-transport-frontend.zip`) when that index was built, for
+  example `"release_feed": "volan:01716.20261026"` next to
+  `"feed": "volan:01716.20261102"`. The `timetables` job reads it from the
+  zip's directory and the heads of its indexes, by HTTP Range requests (a
+  few hundred kilobytes, not the whole zip; the whole zip only when the
+  server answers no ranges). An index is also rebuilt when its
+  `release_feed` is not that feed, or it has none: it was built against
+  another release, from another baseline, and the new release's builders
+  and guards have not seen it yet. The entry also names that release's
+  tag, `release_version` (the `timetables` job passes the tag it checked
+  out to `due`, which writes it with the feeds for `part`), and an index
+  whose `release_version` is not that tag (or that has none) is rebuilt as
+  well, even when the feeds are the same: installs decide by
+  `release_version` (a version newer than it keeps its own city index
+  against the Pages one until the site is rebuilt against its release,
+  `weekly_timetables.py` `release_newer`, below). An index the release
+  zip lacks has nothing to compare, and a release zip that cannot be read leaves both rules out for
+  the run, with a warning (the age rule still holds). An entry carried over
+  keeps its `release_feed` and `release_version`. A stable release (not a
+  `-rev` prerelease) that is the highest stable one, by version, also
+  starts the daily workflow on main with the `timetables` input ticked,
+  from its own `pages` job (`actions: write`, and `contents: read` to list
+  the releases), so both indexes are rebuilt minutes after the release
+  rather than at the next scheduled run, within about 12 hours (plus
+  GitHub's late starts). A stable tag of an older line (a backport) starts
+  nothing: the site is built against the highest one. The release's own
+  tag counts among the listed ones, since a listing made right after the
+  release was created may not show it yet. That run may replace
+  one waiting in the workflow's concurrency group, which would have done
+  the same; when the releases cannot be listed or the run cannot be
+  started, the release run warns and the next scheduled run catches up.
+- **`timetables.json.sig`, `mav-index.json.sig`.** Every deploy signs
+  `timetables.json` (it is written anew on every deploy, so a run that only
+  brings a new MÁV index signs it too), and `mav-index.json` whenever the
+  site has it (a new one, or a carried one whose signature verified, so the
+  same bytes and the same signature again): each file is one line, the
+  base64 of the 64-byte ed25519 signature over the exact bytes of its
+  manifest as deployed. The
+  public key, which the integration pins, is
+  `iUfHMDrTTf+3dV7JUu8ktyihkUfpkeTQRQxym955kq8=` (base64 of the raw 32
+  bytes; `PAGES_SIGNING_PUBLIC_KEY` in `scripts/sign_manifest.py`). The
+  workflow's `sign` job signs the site the `site` job assembled, with
+  openssl, and only then makes the Pages artifact. The private key
+  (`PAGES_SIGNING_KEY`, base64 of the raw 32-byte key) is a secret of the
+  `github-pages` environment, whose deployment branch policy admits only
+  main, and the job runs only on main: a run dispatched from another
+  branch, or a workflow changed on one, never sees it. Within the job only
+  the signing step has it, in its environment; it reaches openssl on stdin
+  (openssl runs without it in its environment) and is never printed. The
+  job's token reads contents only (it checks out that one script, without
+  credentials). The script checks the key against
+  the pinned public key and the signature against it; without the secret,
+  with another key, or with a signature that does not verify, the job fails
+  and nothing is deployed: an unsigned manifest is never published (so a
+  fork without the secret deploys nothing). Before the key is read, the
+  job refuses a site older than the one GitHub Pages serves
+  (`sign_manifest.py live-check`: the published `timetables.json`, its
+  signature verifying, names a later `built_at`): "Re-run failed jobs"
+  after a failed sign job signs and deploys that run's site as it was
+  made (its artifact is kept three days), which is only worth it while no
+  later run has deployed; a published manifest that cannot be read or is
+  not trusted holds nothing back. Check a download with
+  `python3 scripts/sign_manifest.py verify --site <folder>` (both
+  manifests, when the folder has `mav-index.json`).
+- **An unsigned published manifest is no manifest.** Since every deploy
+  signs its manifest anew, the workflow never trusts the published
+  `timetables.json` without its signature: the `due`, `baseline` and
+  `assemble` steps (`pages_timetables.py`) fetch `timetables.json.sig` and
+  verify it over the exact bytes fetched before they use anything of the
+  manifest. One without a signature that verifies (none yet, the first run
+  after signing came in; another key; entries changed after signing) counts
+  as no published manifest, with a warning: both indexes are due, their
+  baseline is the stable release's, and nothing is carried over from the
+  site; a run that rebuilds only one of them, or only the MÁV index,
+  publishes the site without the other, which the next run rebuilds. A
+  signature that does not verify is read again once, with its manifest,
+  11 minutes after the step's first read of the site
+  (`pages_timetables.py` `SIG_SETTLE_S`): GitHub Pages' CDN caches each
+  file on its own for up to 10 minutes, keyed on the path alone (a query
+  string or a request's `no-cache` does not get past it), so right after a
+  deploy it may serve one deploy's manifest next to the other's `.sig`, and
+  right after the first deploy with a signature still the 404 it took for
+  the `.sig` before (a run queued right behind that deploy), so a `.sig`
+  that is not there next to a manifest that is gets the same second read.
+  One wait covers every manifest of the step, so the `due` step and the
+  `site` job take at most 11 minutes longer (their time limits allow for
+  it; the wait for a file that does not match its manifest, or does not
+  read, a timeout on the 30 MB MÁV zip say, is the same one, and such a
+  file is fetched once more). The
+  build job's `mav_pages_site.py` reads a `mav-index.json.sig` that does not
+  verify, or is not there, again the same way before it deploys the same
+  content again for it, and so does the verdict. A cache's copy of the
+  previous deploy can also be consistent, its manifest with its own `.sig`:
+  it verifies. The `due` step and the build job's `mav_pages_site.py` name
+  the `built_at` of the published manifest they read (signature verified),
+  and the `site` job's `assemble` takes them (`--timetables-built-at`,
+  `--mav-built-at`): a published manifest older than that is read again
+  once past the cache, and when it is still older nothing is deployed, so
+  `built_at` never goes backwards from one deploy to the next. The same holds for
+  `mav-index.json`: its files are carried only when `mav-index.json.sig`
+  verifies. The build job takes an unsigned one for none and publishes
+  the day's index from its own build (signed) even when the content is the
+  same; a run without a MÁV build of its own (MÁV down, no secrets) then
+  deploys nothing, as a site without the MÁV files would break every
+  install's daily MÁV check, and the files on Pages stay until a run builds
+  the MÁV index again. A missing signature (HTTP 404, the first run after
+  this came in) is a warning. A signature that is there but does not
+  verify, also on the second read, turns the run red: the `signatures` job
+  fails after the deploy, which takes nothing from that manifest and
+  replaces it with a signed one (a red site or sign job would hold that
+  deploy back, with a new key pair for good). When it is `mav-index.json`
+  and the run has no MÁV build of its own, the `site` job fails at once
+  and nothing is deployed.
+- **Plain http.** Only a feed whose entry says `"insecure": true` comes
+  over plain http, after https failed, with a warning: today Miskolc, whose
+  https certificate names another host. The weekly build takes it that way
+  too, as a release does; otherwise Miskolc would never update there and,
+  once its calendar ran out, the city guard would refuse the whole city
+  index. `HUNGARIAN_TRANSPORT_HTTPS_ONLY=1` (`scripts/gtfs_compact.py`)
+  forbids plain http for every feed; neither workflow sets it.
+- **Feed dates far ahead.** An index whose feed (for the city index, any
+  operator's) names a date more than 400 days after the build is not
+  published, and the one on the site stays (`pages_timetables.py part`):
+  installs order feeds by that date, so a `feed_end_date` written as the
+  version would beat every correct index after it. The city builder refuses
+  such a zip on its own (`build_city_index.py`, `MAX_FEED_AHEAD_DAYS`), so
+  that feed keeps its part of the previous index and the other feeds still
+  update; the daily MÁV index is held to the same limit
+  (`mav_pages_site.py`). The city builder's date limit runs with the
+  stable release's code, so it takes effect with the first stable release
+  that has it; the
+  `part` check and the signature come from main and hold at once.
 
 **Installing them.** The integration checks `timetables.json` in the same
 round as the daily MÁV index, right after it: about 10 to 20 minutes after
@@ -461,6 +676,37 @@ one in use:
   an older dated feed on the site, and at least one has a later one, or the
   set of operators differs. A feed that cannot be dated counts as newer when
   it differs.
+- A date more than 400 days after today is no date (a typo, or an end date
+  taken for the version): such an entry on the site is refused, and an index
+  in use that names one counts as older, so it never holds back the real
+  builds that follow.
+- When the city index in use is a release's (neither one the integration
+  installed from the site nor the local updater's copy), the entry names a
+  `release_version`, and the integration's own version is newer than that
+  release (a later stable release the site has not rebuilt against yet, or
+  a `-rev` beta, numbered two patches up), the operator rule cannot tell
+  which is newer: this version's index may add an operator, or update a
+  feed that has no date, which the rule takes for news. Then only an index
+  newer by the local updater's strict rule replaces it (every operator
+  still there, none dated older, an undated one unchanged, one later);
+  otherwise it stays (`superseded`, reason `release_newer`) until the site
+  rebuilds against this release. A `-rev` beta is never a baseline (only a
+  stable release starts a rebuild), so on a beta that could last until the
+  next stable release while the index's feeds age: once an operator both
+  indexes have is dated more than 21 days older in the index in use than
+  on the site (`RELEASE_STALE`), the operator rule decides again. Only the
+  operators both have count: one the beta added, or one dated months
+  ahead in both, holds back no other. The
+  integration's own version is the one in
+  `custom_components/hungarian_transport/manifest.json` on disk, not the
+  one Home Assistant loaded: a HACS update replaces the release's files and
+  its indexes before the restart. A version not newer than
+  `release_version` (one that has not updated to that release yet, or that
+  release itself) goes by the operator rule, since the site's build knew
+  its index or a newer one; so does an entry without `release_version`.
+  Versions compare as semver (`1.10.26-rev.1` is newer than `1.10.24`,
+  `1.10.24-rev.3` older). The Volán index is one dated feed, so newer is
+  newer there.
 
 So an index the [local rebuild](#keeping-the-gtfs-indexes-current) made
 from newer feeds stays, and so does a release's index whose feeds are newer
@@ -472,11 +718,18 @@ and sha256, a single gzip stream, its head (`"v"` the manifest's `schema`,
 `"feed"` its feed, `"sh"` its shapes), and the size and sha256 of every
 shapes file; at most 48 MiB for an index, 8 MiB for a shapes file and
 160 MiB for an index with its shapes. A file that does not match right after
-a deploy is looked at again later, as for the MÁV index (the Pages cache,
-above). The shapes folder goes in first, written under a temporary name and
-renamed into place (a folder of that name that already checks out is kept),
-then the index, as a temp file renamed over the old one, so the card never
-reads an index whose shapes are missing. The previous shapes folder is
+a deploy, or one the manifest names that the site answers 404 for (a cached
+manifest of the previous deploy naming its shapes folder), is looked at
+again later, as for the MÁV index (the Pages cache, above). The shapes
+folder goes in first, written under a temporary name and renamed into place
+(a folder of that name that already checks out is kept; one that does not is
+swapped, and put back should the swap fail), then the index, as a temp file
+renamed over the old one, so the card never reads an index whose shapes are
+missing. The index file gets the entry's `built_at` as its time, which the
+sensors show as its build time. Shapes files that checked out stay in the
+temporary folder when a download fails or is stopped (a restart of Home
+Assistant, a reload of the integration), so the next try of the same entry
+fetches only the rest; a temporary folder left for an hour is removed. The previous shapes folder is
 marked retired and removed 26 hours later: an open dashboard keeps the old
 index until it reloads (at the latest at midnight) and reads its shapes
 until then. Retired folders are looked at in every check and at every start
@@ -512,7 +765,9 @@ new one replaces the old) when:
   MÁV publishes almost daily, so this one calls the service below only with
   *Also notify about daily MÁV index installs* on;
 - the Volán or city index from GitHub Pages was installed, naming which
-  and their feeds, in the style of the one about shipped timetables below;
+  and the day of their feeds (the Volán feed's date; for the city index,
+  the newest of its operators' feed dates), in the style of the one about
+  shipped timetables below;
   not when the round only installs again the index it installed last (a
   HACS update put the release's older one back in the meantime);
 - after an update of the integration, the indexes it ships (Volán, city,
@@ -727,20 +982,33 @@ cards use and when they changed:
 | Entity | State | Attributes |
 | --- | --- | --- |
 | `sensor.hungarian_transport_mav_route_index` (MÁV route index) | date of the served MÁV index's feed (`20261030.M2ChangeID` → 2026-10-30) | `feed_version`; `source`: `daily` (the daily index installed it), `local` (a build of `/config/hungarian-transport/mav-gtfs.zip`, an upload, or the local updater, whose durable copy is this index) or `release`; `installed_at` (UTC); `trains`, `lines`; `fitted_share` (the share of routes that follow the rails rather than the line through the stations); `audit_ok_ratio` when the build or the manifest gave one |
-| `sensor.hungarian_transport_volan_timetable` (Volán timetable) | date in the Volán index's feed version (`volan:01716.20261102` → 2026-11-02) | `feed_version`, `trips`, `stops`, `updated_at` (the index's build time from its gzip header, else the file's time), `source`: `pages` when it is the index the integration installed from [GitHub Pages](#the-volán-and-city-indexes), `local_updater` when the updater's copy in `/config/hungarian-transport` is this index, else `release`; `pages_checked_at`, `pages_result` (below) |
-| `sensor.hungarian_transport_city_timetables` (City timetables) | when the city index was built (timestamp) | `operators`, `trips`, and `feeds` (operator → feed version) when there are at most 10; `source`: `pages`, `local_updater` or `release`, as for Volán; `pages_checked_at`, `pages_result` (below) |
-| `sensor.hungarian_transport_daily_mav_check` (Daily MÁV check) | when the daily MÁV index last ran (timestamp; unknown before its first round) | `result`: `installed`, `up_to_date`, `superseded` (www/ serves a newer feed than the manifest's), `local_wins`, `busy`, `failed`, `unsupported`, or `disabled` with the option off; `manifest_feed`, `manifest_built_at`, `next_run` (UTC), `failure_streak` (days in a row) |
+| `sensor.hungarian_transport_volan_timetable` (Volán timetable) | date in the Volán index's feed version (`volan:01716.20261102` → 2026-11-02) | `feed_version`, `trips`, `stops`, `updated_at` (the index's build time from its gzip header, else the file's time, which an install from Pages sets to the entry's `built_at`), `source`: `pages` when it is the index the integration installed from [GitHub Pages](#the-volán-and-city-indexes), `local_updater` when the updater's copy in `/config/hungarian-transport` is this index, else `release`; `pages_checked_at`, `pages_result`, `pages_reason`, `pages_settling` (below) |
+| `sensor.hungarian_transport_city_timetables` (City timetables) | when the city index was built (timestamp) | `operators`, `trips`, and `feeds` (operator → feed version) when there are at most 10; `source`: `pages`, `local_updater` or `release`, as for Volán; `pages_checked_at`, `pages_result`, `pages_reason`, `pages_settling` (below) |
+| `sensor.hungarian_transport_daily_mav_check` (Daily MÁV check) | when the daily MÁV index last ran (timestamp; unknown before its first round) | `result`: `installed`, `up_to_date`, `superseded` (www/ serves a newer feed than the manifest's), `local_wins`, `busy`, `failed`, `unsupported`, or `disabled` with the option off; `reason` when it failed or was unsupported (as `pages_reason` below); `manifest_feed`, `manifest_built_at`, `next_run` (UTC), `failure_streak` (days in a row) |
 
 `pages_checked_at` is when the integration last read `timetables.json`
 (UTC), and `pages_result` what that check did for this index: `installed`,
 `up_to_date` (the site serves the feed in use), `superseded` (the index in
-use has a newer feed than the site's), `local_wins` (the local updater's
+use has a newer feed than the site's, or is a release's newer than the one
+the site's build started from), `local_wins` (the local updater's
 copy in `/config/hungarian-transport` has feeds the site's do not beat; the
 integration leaves it, so the two never take turns), `not_published` (the
-manifest has no entry for this index), `failed` (the manifest or the download did not check out;
+manifest has no entry for this index), `failed` (the manifest, its signature or the download did not check out;
 the index stays as it was), `unsupported` (a manifest format or index
-schema this version does not read), or `disabled` with the *Weekly Volán
-and city timetables from GitHub* option off.
+schema this version does not read, or a signature by a key it does not
+know on more than 3 days in a row), or `disabled` with the *Weekly Volán and city timetables from GitHub*
+option off. `pages_reason` says why an index was not installed:
+`served_newer` or `release_newer` (`superseded`, above), `bad_signature`
+(the signature is missing, malformed or does not verify), `unknown_key`
+(signed by a key this version does not know: a newer key, another deploy's
+signature, or not the site's; `failed` on its first 3 days),
+`not_found` (a file the manifest names is not on the site), `mismatch` (a
+download is not the file the manifest describes), `too_large` (the
+manifest, or the MÁV index, is larger than this version takes: no cache
+mismatch, so it is retried as a failure, not looked at again sooner), else
+the error's text (at most 120 characters). `pages_settling` is the reason of a check still
+looking again (a download that did not match right after a deploy); the
+check 11 minutes later replaces it with its result.
 
 An index sensor is unavailable while its index is missing from www/. The
 sensors update right after the daily index, a Pages install or a local MÁV

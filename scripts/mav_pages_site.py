@@ -25,8 +25,11 @@ always did.
 Whether to deploy: not when the published manifest names the same content
 digest (index_digest.py), manifest format and schema, and the same "gtfs"
 object apart from the overlay's bytes (same_content: MÁV's zip by size and
-sha256, the overlay by name and tables), and was built less than
-REFRESH_AFTER ago. pfaedle does not write the same tables twice for the
+sha256, the overlay by name and tables), was built less than REFRESH_AFTER
+ago, and its signature (mav-index.json.sig next to it, the URL with .sig;
+with --live-file, the file next to it) verifies against the pinned public
+key (sign_manifest.py): one without that is deployed again from this
+build, signed, as the site job carries no unsigned MÁV manifest. pfaedle does not write the same tables twice for the
 same feed and OSM extract, so the overlay's size and sha256 differ on every
 run and would deploy each one; a new overlay ships with the next deploy
 that a changed index, MÁV zip or refresh makes. Older, the same content is deployed again for its new built_at: the
@@ -42,14 +45,20 @@ Usage: mav_pages_site.py --index mav-index.json.gz --stats mav-build.json
          --commit SHA --out SITE_DIR [--gtfs-zip ZIP --pfaedle-dir DIR]
          [--live-url URL | --live-file PATH] [--github-output FILE]
          [--max-bytes N] [--allow-shrink]
-         [--baseline-url URL | --baseline-file PATH]
+         [--baseline-url URL | --baseline-file PATH] [--sig-settle SECONDS]
+A published mav-index.json.sig that does not verify, or is not there (HTTP
+404) next to a manifest that is, is read again with its manifest once,
+--sig-settle seconds later (SIG_SETTLE_S: Pages' cache).
 Prints deploy=true|false (and appends it to --github-output). Exit 1, with
 nothing written, for an index or statistics that do not hold up, a feed
 whose feed_version does not start with a real date (YYYYMMDD, as the
-integration's served_index.feed_date reads it), a site over the size limit,
+integration's served_index.feed_date reads it) or with one more than
+MAX_FEED_AHEAD after the build, a site over the size limit,
 or an index with fewer than half the trains and lines of the published one
 (mav_shrink_guard.py; --allow-shrink or MAV_ALLOW_SHRINK=1 accepts it).
-When the published manifest does not read, the shrink guard compares with
+When the published manifest does not read, or its signature does not
+verify (its counts are then its author's, not this workflow's), the
+shrink guard compares with
 the MÁV index of --baseline-url (the latest stable release's frontend zip,
 fetched only then) or --baseline-file (such a zip, or a mav-index.json.gz);
 without one either, it warns and compares with nothing.
@@ -67,6 +76,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -80,6 +90,7 @@ sys.path.insert(1, str(HERE.parent / "custom_components" / "hungarian_transport"
 import gtfs_feed  # noqa: E402
 import mav_index  # noqa: E402
 import mav_shrink_guard  # noqa: E402
+import sign_manifest  # noqa: E402
 from index_digest import digest  # noqa: E402
 
 # Bump when the manifest changes in a way an older integration must not read.
@@ -97,6 +108,7 @@ ZIP_LEVEL = 9
 # Half of GitHub Pages' 1 GB site limit; the site is about 35 MB.
 MAX_SITE_BYTES = 500 * 1024 * 1024
 MAX_MANIFEST = 64 * 1024
+MAX_SIG = 1024
 # The same content is deployed again once the published manifest is this old,
 # so its built_at says the daily run went through: mav_daily_verdict.py fails
 # a run that published nothing on a built_at STALE_AFTER (2 days) old, and
@@ -107,7 +119,30 @@ MAX_MANIFEST = 64 * 1024
 # run a few hours after another with the same content (a rerun, the
 # afternoon catch-up, a dispatch after the morning build) deploys nothing.
 REFRESH_AFTER = timedelta(hours=12)
+# A feed date further ahead than this is a publisher's mistake, not a
+# timetable (a feed_end_date written as the version, a typo in the year):
+# installs order feeds by that date, so the index would beat every correct
+# one after it until the date is reached. The weekly Volán and city indexes
+# are held to it too (pages_timetables.py part, build_city_index.py).
+MAX_FEED_AHEAD = timedelta(days=400)
 LIVE_TIMEOUT = 20
+# GitHub Pages serves every file through its CDN (Fastly, Cache-Control:
+# max-age=600) and caches each path on its own, keyed on the path alone:
+# neither a query string nor a request's no-cache reaches past it (checked
+# 2026-11-19: a never-seen ?query answered X-Cache: HIT with the cached
+# ETag; the integration found the same, mav_daily.PAGES_MAX_AGE). For up to
+# PAGES_MAX_AGE after a deploy a manifest and its .sig can so be of two
+# deploys, either way round, and the signature does not verify; after the
+# first deploy with a .sig, a cache may still answer the 404 it took for
+# the .sig before. A reader that finds one so (a .sig that does not verify,
+# or a 404 for it next to a manifest that is there) reads both again once,
+# SIG_SETTLE_S after its first read of the site, when every copy cached
+# before the deploy has expired
+# (the minute on top: a cache that took its copy a moment late, the
+# clocks): pages_timetables.py (Source.signed, and a file that does not
+# match its manifest), mav_daily_verdict.py and this script (_finish).
+PAGES_MAX_AGE = 600
+SIG_SETTLE_S = PAGES_MAX_AGE + 60
 # The shrink guard's fallback: a release's frontend zip (about 15 MB) and
 # the MÁV index in it (about 0.25 MB).
 BASELINE_TIMEOUT = 120
@@ -215,6 +250,11 @@ def manifest(index: Path, stats: dict, commit: str, built_at: datetime | None = 
     feed = data.get("feed")
     if not dated_feed(feed):
         raise SiteError(f"{index} names no dated feed: {feed!r}")
+    when = (built_at or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
+    day = datetime.strptime(feed[:8], "%Y%m%d").date()
+    if day > when.date() + MAX_FEED_AHEAD:
+        raise SiteError(f"{index} is of feed {feed!r}, dated more than {MAX_FEED_AHEAD.days} days after"
+                        f" {when.date().isoformat()}")
     if stats.get("feed_version") != feed:
         raise SiteError(f"statistics are of feed {stats.get('feed_version')!r}, the index of {feed!r}")
     audit = stats.get("audit")
@@ -227,7 +267,6 @@ def manifest(index: Path, stats: dict, commit: str, built_at: datetime | None = 
         raise SiteError(f"only {trains} trains and {lines} lines")
     if not re.fullmatch(r"[0-9a-f]{40}", commit or ""):
         raise SiteError(f"not a commit sha: {commit!r}")
-    when = (built_at or datetime.now(timezone.utc)).astimezone(timezone.utc).replace(microsecond=0)
     return {
         "format": MANIFEST_FORMAT,
         "schema": mav_index.SCHEMA,
@@ -251,23 +290,42 @@ def manifest(index: Path, stats: dict, commit: str, built_at: datetime | None = 
     }
 
 
-def fetch_live(url: str) -> tuple[dict | None, str]:
-    """The published manifest, or None and why not."""
+def fetch_bytes(url: str, cap: int = MAX_MANIFEST) -> tuple[bytes | None, str]:
+    """The file at url, at most cap bytes, or None and why not."""
     if not url.startswith("https://"):
         return None, f"not an https URL: {url}"
     try:
         req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
         with urllib.request.urlopen(req, timeout=LIVE_TIMEOUT) as res:  # noqa: S310 - https only
-            body = res.read(MAX_MANIFEST + 1)
+            body = res.read(cap + 1)
     except urllib.error.HTTPError as err:
         return None, f"HTTP {err.code}"
     # http.client.HTTPException: a body cut short (IncompleteRead) or a
     # garbled answer (BadStatusLine) is a network error like any other.
     except (urllib.error.URLError, OSError, http.client.HTTPException) as err:
         return None, f"{type(err).__name__}: {err}"
-    if len(body) > MAX_MANIFEST:
-        return None, "larger than a manifest"
-    return parse_live(body)
+    if len(body) > cap:
+        return None, f"larger than {cap} bytes"
+    return body, "ok"
+
+
+def fetch_live(url: str) -> tuple[dict | None, str]:
+    """The published manifest, or None and why not."""
+    body, why = fetch_bytes(url)
+    return parse_live(body) if body is not None else (None, why)
+
+
+def signature_state(body: bytes | None, sig: bytes | None, sig_why: str = "") -> str:
+    """"ok" when sig (the published mav-index.json.sig's bytes) is the
+    pinned key's signature over body (mav-index.json's exact bytes), else
+    why not."""
+    if body is None:
+        return "no manifest"
+    if sig is None:
+        return f"no {MANIFEST_NAME}.sig ({sig_why or 'none'})"
+    if not sign_manifest.verify_bytes(body, sign_manifest.decode_sig(sig)):
+        return f"{MANIFEST_NAME}.sig does not verify against the pinned public key"
+    return "ok"
 
 
 def parse_live(body: bytes) -> tuple[dict | None, str]:
@@ -351,18 +409,27 @@ def check_shrink(man: dict, live: dict | None, allow: bool = False,
     consistent in itself and names a newer feed would replace it. allow
     (--allow-shrink, MAV_ALLOW_SHRINK) accepts an intended reduction.
 
-    Without a published manifest that reads (Pages down, a network error,
-    no site yet), the index is compared with baseline, (trains, lines) of
-    the latest stable release's MÁV index: an outage must not let a
+    live is the published manifest only when its signature verifies (the
+    caller passes None for one that does not): its trains and lines are
+    whatever its author wrote, and one who can put files on Pages could
+    otherwise name a million of each and so refuse every build, freezing
+    the site on what they put there. Without a published manifest that
+    reads and verifies (Pages down, a network error, no site yet, no or a
+    bad signature), the index is compared with baseline, (trains, lines)
+    of the latest stable release's MÁV index: an outage must not let a
     truncated feed through. Without that either, a warning says that
-    nothing was compared."""
+    nothing was compared, and the index is published: refusing it instead
+    would let anyone who can break the published signature (or an outage
+    of both the site and the release download) stop every daily build,
+    while the guard is there for a truncated feed of MÁV's, which the next
+    run with a reference still catches."""
     if live is not None:
         prev, what = (live.get("trains"), live.get("lines")), "the published index"
     elif baseline is not None:
         prev, what = baseline, "the latest release's index"
     else:
-        print("::warning title=MÁV shrink guard skipped::Neither the published manifest nor a release's MÁV"
-              " index could be read; the index was not compared with a previous one.")
+        print("::warning title=MÁV shrink guard skipped::Neither a published manifest whose signature verifies"
+              " nor a release's MÁV index could be read; the index was not compared with a previous one.")
         return
     why = mav_shrink_guard.shrink_problem(man["trains"], man["lines"], *prev)
     if not why:
@@ -536,6 +603,9 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--allow-shrink", action="store_true", default=mav_shrink_guard.allowed(),
                     help="publish an index with under half the trains and lines of the published one"
                          f" (default: {mav_shrink_guard.ALLOW_ENV} set)")
+    ap.add_argument("--sig-settle", type=float, default=SIG_SETTLE_S,
+                    help="seconds before a published manifest whose signature does not verify, or is not there,"
+                         f" is read again with it (default {SIG_SETTLE_S:g}: Pages' cache age and a minute; negative: never)")
     args = ap.parse_args(argv)
     if (args.gtfs_zip is None) != (args.pfaedle_dir is None):
         ap.error("--gtfs-zip and --pfaedle-dir go together")
@@ -559,28 +629,64 @@ def main(argv: list[str]) -> int:
         return _finish(args, man, overlay)
 
 
-def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
+def _read_live(args: argparse.Namespace) -> tuple[bytes | None, bytes | None, str, str]:
+    """The published manifest's bytes and its .sig's (--live-file: the file
+    next to it), with why each is not there."""
+    body, sig, why, sig_why = None, None, "not asked", ""
     if args.live_file is not None:
-        live, why = (parse_live(args.live_file.read_bytes()) if args.live_file.is_file() else (None, "no file"))
+        body, why = (args.live_file.read_bytes(), "ok") if args.live_file.is_file() else (None, "no file")
+        sig_file = args.live_file.with_name(args.live_file.name + ".sig")
+        # A file that is not there stands for the site's 404.
+        sig, sig_why = (sig_file.read_bytes(), "ok") if sig_file.is_file() else (None, "HTTP 404")
     elif args.live_url:
-        live, why = fetch_live(args.live_url)
-    else:
-        live, why = None, "not asked"
+        body, why = fetch_bytes(args.live_url)
+        if body is not None:
+            sig, sig_why = fetch_bytes(args.live_url + ".sig", MAX_SIG)
+    return body, sig, why, sig_why
+
+
+def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
+    # The published manifest and its signature (mav-index.json.sig next to
+    # it, sign_manifest.py): the same content counts as already published
+    # only when that signature verifies. One that does not (none yet: the
+    # first run after signing came in; another key; an edit) is deployed
+    # again from this build, signed, since the site job never carries an
+    # unsigned MÁV manifest (pages_timetables.py mav_from_live). The shrink
+    # guard compares with it only when its signature verifies (its counts
+    # are its author's), else with the latest stable release's MÁV index.
+    # A .sig that is there but does not verify, or that is not there (HTTP
+    # 404) next to a manifest that is, is read again with its manifest once,
+    # --sig-settle (SIG_SETTLE_S) later: right after a deploy Pages' CDN may
+    # pair one deploy's manifest with the other's .sig, or still answer the
+    # 404 it cached for the .sig before the first signed deploy, and
+    # deciding on that would deploy the same content again for nothing.
+    for attempt in (1, 2):
+        body, sig, why, sig_why = _read_live(args)
+        live, why = parse_live(body) if body is not None else (None, why)
+        trust = signature_state(body, sig, sig_why) if live is not None else "no manifest"
+        if live is None or (sig is None and sig_why != "HTTP 404") or trust == "ok" or attempt == 2 \
+                or args.sig_settle < 0:
+            break
+        print(f"published manifest: {trust}; reading it and its signature again in {args.sig_settle:g} s"
+              f" (GitHub Pages caches each file for up to {PAGES_MAX_AGE} s)")
+        time.sleep(args.sig_settle)
+    trusted = live if trust == "ok" else None
     baseline = None
-    if live is None and (args.baseline_url or args.baseline_file is not None):
+    if trusted is None and (args.baseline_url or args.baseline_file is not None):
         if args.baseline_file is not None:
             baseline = baseline_counts(args.baseline_file)
             got = "ok" if baseline is not None else f"no readable {INDEX_NAME}"
         else:
             baseline, got = fetch_baseline(args.baseline_url)
-        print(f"published manifest: none ({why}); release index for the shrink guard: "
+        print(("published manifest: none" if live is None else "published manifest: not trusted")
+              + f" ({why if live is None else trust}); release index for the shrink guard: "
               + (f"{baseline[0]} trains and {baseline[1]} lines" if baseline is not None else f"none ({got})"))
     try:
-        check_shrink(man, live, args.allow_shrink, baseline)
+        check_shrink(man, trusted, args.allow_shrink, baseline)
     except SiteError as err:
         print(f"no site: {err}", file=sys.stderr)
         return 1
-    same = same_content(man, live)
+    same = same_content(man, live) and trust == "ok"
     refresh = same and refresh_due(man, live)
     deploy = not same or refresh
     write_site(args.index, man, args.out, args.gtfs_zip, overlay)
@@ -593,6 +699,8 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
               f"{gtfs['overlay']['size']} bytes, sha256 {gtfs['overlay']['sha256'][:12]}")
     if live is None:
         print(f"published manifest: none ({why}); deploying")
+    elif trust != "ok" and same_content(man, live):
+        print(f"published manifest: the same content, but not trusted ({trust}); deploying it again, signed")
     elif not same:
         print(f"published manifest: feed {live.get('feed')!r}, digest {str(live.get('digest'))[:12]}"
               f"{'' if live.get('digest') != man['digest'] else ', other GTFS files'}; deploying")
@@ -607,9 +715,15 @@ def _finish(args: argparse.Namespace, man: dict, overlay: Path | None) -> int:
         print(f"::notice title=Daily MÁV index unchanged::Feed {man['feed']} has the content GitHub Pages "
               "already serves; nothing is deployed.")
     print(f"deploy={'true' if deploy else 'false'}")
+    # live_built: the published manifest's built_at, its signature verified,
+    # for the site job's assemble (pages_timetables.py --mav-built-at): it
+    # never carries an older mav-index.json over the one read here.
+    built = built_time(live) if trusted is not None else None
+    live_built = built.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z") \
+        if built is not None else ""
     if args.github_output is not None:
         with args.github_output.open("a", encoding="utf-8") as fh:
-            fh.write(f"deploy={'true' if deploy else 'false'}\nfeed={man['feed']}\n")
+            fh.write(f"deploy={'true' if deploy else 'false'}\nfeed={man['feed']}\nlive_built={live_built}\n")
     return 0
 
 

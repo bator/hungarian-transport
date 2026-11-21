@@ -17,6 +17,7 @@ after the deploy). No network; scripts/test_pages_timetables.py tests the
 site script itself."""
 from __future__ import annotations
 
+import base64
 import contextlib
 import gzip
 import hashlib
@@ -43,9 +44,30 @@ import index_digest  # noqa: E402
 import mav_daily_verdict as verdict_mod  # noqa: E402
 import mav_pages_site as site  # noqa: E402
 import mav_shrink_guard  # noqa: E402
+import sign_manifest  # noqa: E402
 
 # The shrink guard's override, should the developer's shell have it.
 os.environ.pop(mav_shrink_guard.ALLOW_ENV, None)
+# The published mav-index.json counts as published only with a signature
+# by the pinned key (mav_pages_site._finish): the tests sign theirs with a
+# key made here, which every mav_pages_site.py run of the tests (run_site,
+# through TRUST_WRAP) takes as the pinned one.
+TEST_SEED = os.urandom(32)
+TEST_PUB = sign_manifest.public_key(TEST_SEED)
+# A .sig that does not verify is read again SIG_SETTLE_S (11 minutes) later
+# in the workflow (Pages' cache); in the tests' runs at once.
+TRUST_WRAP = ("import os, sys; sys.path.insert(0, sys.argv.pop(1)); import sign_manifest;"
+              " sign_manifest.PUBLIC_KEY = bytes.fromhex(os.environ['TEST_PAGES_PUBLIC_KEY']);"
+              " import mav_pages_site; mav_pages_site.SIG_SETTLE_S = 0.0;"
+              " raise SystemExit(mav_pages_site.main(sys.argv[1:]))")
+
+
+def sign_file(path: Path, seed: bytes = TEST_SEED) -> Path:
+    """path's .sig next to it, as the sign job writes it."""
+    sig = path.with_name(path.name + ".sig")
+    sig.write_text(base64.b64encode(sign_manifest.sign(path, seed)).decode("ascii") + "\n", encoding="ascii")
+    return path
+
 
 failed = 0
 
@@ -165,10 +187,10 @@ def run_site(ws: Path, *extra: str, index: bytes | None = None, st: dict | None 
     out_file = ws / "github_output"
     out_file.write_text("")
     done = subprocess.run(
-        [sys.executable, str(HERE / "mav_pages_site.py"), "--index", str(ws / "mav-index.json.gz"),
+        [sys.executable, "-c", TRUST_WRAP, str(HERE), "--index", str(ws / "mav-index.json.gz"),
          "--stats", str(ws / "mav-build.json"), "--commit", commit, "--out", str(ws / "site"),
          "--github-output", str(out_file), *extra],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, timeout=60, env={**os.environ, "TEST_PAGES_PUBLIC_KEY": TEST_PUB.hex()})
     outputs = dict(ln.split("=", 1) for ln in out_file.read_text().splitlines() if "=" in ln)
     return done.returncode, done.stdout, done.stderr, outputs
 
@@ -215,10 +237,142 @@ with tempfile.TemporaryDirectory() as tmp_name:
 
     live = tmp / "live.json"
     live.write_text(json.dumps({**man, "sha256": "f" * 64, "built_at": built_ago(timedelta(hours=2))}))
+    sign_file(live)
     rc, out, err, outputs = run_site(tmp / "b", "--live-file", str(live))
     check("the same content digest as a manifest published 2 h ago: no deploy, with a notice",
           rc == 0 and outputs.get("deploy") == "false" and "::notice title=Daily MÁV index unchanged::" in out,
           repr((rc, out, err, outputs)))
+    published_at = site.built_time(json.loads(live.read_text()))
+    check("live_built names the published manifest's built_at (its signature verified), for the site job's"
+          " --mav-built-at", outputs.get("live_built") == published_at.astimezone(timezone.utc).replace(
+              microsecond=0).isoformat().replace("+00:00", "Z"), repr(outputs))
+    rc, out, err, outputs = run_site(tmp / "b-nolive")
+    check("live_built is empty without a published manifest", rc == 0 and outputs.get("live_built") == "",
+          repr(outputs))
+    # The same content counts as published only with a signature that
+    # verifies: the site job carries no unsigned MÁV manifest, so this
+    # build's index goes up in its place, signed.
+    signed_live = live.read_bytes()
+    for n, (label, how) in enumerate((
+        ("no mav-index.json.sig (the first run after signing came in)",
+         lambda: live.with_name(live.name + ".sig").unlink()),
+        ("a mav-index.json.sig by another key", lambda: sign_file(live, os.urandom(32))),
+        ("a mav-index.json changed after signing",
+         lambda: live.write_bytes(signed_live.replace(b'"commit"', b'"commit" ', 1))),
+        ("a mav-index.json.sig that is not base64", lambda: live.with_name(live.name + ".sig").write_text("!!\n")),
+    )):
+        live.write_bytes(signed_live)
+        sign_file(live)
+        how()
+        rc, out, err, outputs = run_site(tmp / f"b-unsigned-{n}", "--live-file", str(live))
+        check(f"the same content as a manifest published 2 h ago, but {label}: deployed again, signed",
+              rc == 0 and outputs.get("deploy") == "true" and "not trusted" in out
+              and "deploying it again, signed" in out
+              # Every one of them read again once (a 404 too: Pages' cache
+              # may keep the one from before the first signed deploy).
+              and "reading it and its signature again" in out,
+              repr((rc, out, err, outputs)))
+    live.write_bytes(signed_live)
+    sign_file(live)
+    # Pages' CDN serving the previous deploy's .sig next to this manifest
+    # (each path cached on its own, up to PAGES_MAX_AGE): read again
+    # SIG_SETTLE_S later, then the same content as published, no deploy.
+    good_live_sig = live.with_name(live.name + ".sig").read_bytes()
+    site_waits: list[float] = []
+
+    def site_settled(seconds: float) -> None:
+        site_waits.append(seconds)
+        live.with_name(live.name + ".sig").write_bytes(good_live_sig)
+
+    for settle_args, want_deploy, want_waits in (((), "false", [site.SIG_SETTLE_S]),
+                                                 (("--sig-settle", "-1"), "true", [])):
+        sign_file(live, os.urandom(32))
+        site_waits.clear()
+        gh = tmp / "gh-cdn-site.txt"
+        gh.write_text("")
+        real_sleep, real_key = site.time.sleep, sign_manifest.PUBLIC_KEY
+        site.time.sleep, sign_manifest.PUBLIC_KEY = site_settled, TEST_PUB
+        out_buf = io.StringIO()
+        (tmp / "b-cdn" / "site").mkdir(parents=True, exist_ok=True)
+        try:
+            with contextlib.redirect_stdout(out_buf), contextlib.redirect_stderr(out_buf):
+                rc = site.main(["--index", str(tmp / "b" / "mav-index.json.gz"), "--stats",
+                                str(tmp / "b" / "mav-build.json"), "--commit", "a" * 40, "--out",
+                                str(tmp / "b-cdn" / "site"), "--live-file", str(live), "--github-output", str(gh),
+                                *settle_args])
+        finally:
+            site.time.sleep, sign_manifest.PUBLIC_KEY = real_sleep, real_key
+        got_deploy = dict(ln.split("=", 1) for ln in gh.read_text().splitlines() if "=" in ln).get("deploy")
+        check("the published manifest with the previous deploy's .sig at first"
+              + (": read again SIG_SETTLE_S later, the same content, no deploy" if want_waits else
+                 ", --sig-settle -1: not read again, deployed again"),
+              rc == 0 and got_deploy == want_deploy and site_waits == want_waits,
+              repr((rc, got_deploy, site_waits, out_buf.getvalue()[-500:])))
+    live.write_bytes(signed_live)
+    sign_file(live)
+    # --live-url: the signature is the URL with .sig.
+    served = {"https://pages.example/r/mav-index.json": signed_live,
+              "https://pages.example/r/mav-index.json.sig": live.with_name(live.name + ".sig").read_bytes()}
+    asked_urls: list[str] = []
+
+    class Served(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def serve(req, timeout=None):
+        asked_urls.append(req.full_url)
+        if req.full_url not in served:
+            raise site.urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+        return Served(served[req.full_url])
+
+    ws_url = tmp / "b-url"
+    ws_url.mkdir()
+    (ws_url / "mav-index.json.gz").write_bytes(index_bytes())
+    (ws_url / "mav-build.json").write_text(json.dumps(stats()))
+    sig_url = "https://pages.example/r/mav-index.json.sig"
+    good_url_sig = served[sig_url]
+    url_waits: list[float] = []
+    # Pages' CDN may still answer the 404 it cached for the .sig before the
+    # first signed deploy (cached404): the second read, SIG_SETTLE_S later,
+    # finds the real one.
+    late_sig = {"on": False}
+
+    def url_settled(seconds: float) -> None:
+        url_waits.append(seconds)
+        if late_sig["on"]:
+            served[sig_url] = good_url_sig
+
+    real_urlopen, real_pub, real_sleep = site.urllib.request.urlopen, sign_manifest.PUBLIC_KEY, site.time.sleep
+    site.urllib.request.urlopen, sign_manifest.PUBLIC_KEY, site.time.sleep = serve, TEST_PUB, url_settled
+    try:
+        results = []
+        for case in ("signed", "no sig", "cached 404"):
+            served.pop(sig_url, None)
+            if case == "signed":
+                served[sig_url] = good_url_sig
+            late_sig["on"] = case == "cached 404"
+            url_waits.clear()
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+                rc = site.main(["--index", str(ws_url / "mav-index.json.gz"), "--stats", str(ws_url / "mav-build.json"),
+                                "--commit", "a" * 40, "--out", str(ws_url / f"site-{case}"),
+                                "--live-url", "https://pages.example/r/mav-index.json"])
+            results.append((rc, buf.getvalue(), list(url_waits)))
+    finally:
+        site.urllib.request.urlopen, sign_manifest.PUBLIC_KEY, site.time.sleep = real_urlopen, real_pub, real_sleep
+    check("--live-url: the published manifest's signature is read from the URL with .sig; with it, the same"
+          " content is not deployed, without it (HTTP 404, also read again SIG_SETTLE_S later) it is, signed",
+          results[0][0] == 0 and "deploy=false" in results[0][1] and results[0][2] == [] and results[1][0] == 0
+          and "deploy=true" in results[1][1] and "no mav-index.json.sig (HTTP 404)" in results[1][1]
+          and results[1][2] == [site.SIG_SETTLE_S]
+          and "https://pages.example/r/mav-index.json.sig" in asked_urls, repr((results, asked_urls)))
+    check("--live-url: a .sig that Pages' cache still answers 404 for (before the first signed deploy) is read"
+          " again once, SIG_SETTLE_S later: the real one then, the same content, no deploy",
+          results[2][0] == 0 and "deploy=false" in results[2][1] and results[2][2] == [site.SIG_SETTLE_S],
+          repr(results[2]))
     # Unchanged content is deployed again once the published built_at is a
     # day's run old: the verdict and the integration read built_at as the
     # last build, so a feed MÁV leaves alone must not look like a stale index.
@@ -226,6 +380,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
                                        ("REFRESH_AFTER ago", built_ago(site.REFRESH_AFTER)),
                                        ("no valid time", "yesterday"))):
         live.write_text(json.dumps({**man, "sha256": "f" * 64, "built_at": when}))
+        sign_file(live)
         rc, out, err, outputs = run_site(tmp / f"b-old-{n}", "--live-file", str(live))
         rman = tmp / f"b-old-{n}" / "site" / "mav-index.json"
         check(f"the same content, published manifest built {label}: deployed again with a new built_at",
@@ -262,6 +417,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
         ("no counts", {"trains": None, "lines": None}, True),
     )):
         live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64, **prev}))
+        sign_file(live)
         rc, out, err, outputs = run_site(tmp / f"shrink-{n}", "--live-file", str(live))
         if ok:
             check(f"a published index of {label}: deployed", rc == 0 and outputs.get("deploy") == "true",
@@ -272,6 +428,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
                   and not (tmp / f"shrink-{n}" / "site").exists() and "deploy" not in outputs,
                   repr((rc, out, err, outputs)))
     live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64, "trains": 121}))
+    sign_file(live)
     rc, out, err, outputs = run_site(tmp / "shrink-flag", "--live-file", str(live), "--allow-shrink")
     check("--allow-shrink publishes it, with a warning",
           rc == 0 and outputs.get("deploy") == "true" and "::warning title=MÁV index shrank::" in out,
@@ -360,10 +517,39 @@ with tempfile.TemporaryDirectory() as tmp_name:
         site.urllib.request.urlopen = real_urlopen
     live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64,
                                 "trains": 60, "lines": 0}))
+    sign_file(live)
     rc, out, err, outputs = run_site(tmp / "shrink-base-live", "--live-file", str(live),
                                      "--baseline-file", str(release_zip))
-    check("a readable published manifest is compared, not the release index",
+    check("a readable published manifest whose signature verifies is compared, not the release index",
           rc == 0 and outputs.get("deploy") == "true" and "release index" not in out, repr((rc, out, err)))
+
+    # The counts of a published manifest whose signature does not verify are
+    # its author's: one who can put files on Pages must not freeze the site
+    # by naming a million trains and lines. The guard compares with the
+    # release's index instead, and with nothing (a warning) without one.
+    with zipfile.ZipFile(tmp / "release" / "inflated-ok.zip", "w") as z:
+        z.writestr("mav-index.json.gz", index_bytes(trains=60))
+    for label, how in (("no mav-index.json.sig", lambda: live.with_name(live.name + ".sig").unlink()),
+                       ("a mav-index.json.sig by another key", lambda: sign_file(live, os.urandom(32)))):
+        live.write_text(json.dumps({**man, "feed": "20261031.M2ChangeID", "digest": "0" * 64,
+                                    "trains": 10**6, "lines": 10**6}))
+        sign_file(live)
+        how()
+        n = len(label)
+        rc, out, err, outputs = run_site(tmp / f"shrink-untrusted-{n}", "--live-file", str(live))
+        check(f"a published manifest with {label} naming a million trains: not compared (a warning), deployed",
+              rc == 0 and outputs.get("deploy") == "true" and "::warning title=MÁV shrink guard skipped::" in out
+              and "refusing" not in err, repr((rc, out, err)))
+        rc, out, err, outputs = run_site(tmp / f"shrink-untrusted-rel-{n}", "--live-file", str(live),
+                                         "--baseline-file", str(tmp / "release" / "inflated-ok.zip"))
+        check(f"a published manifest with {label} naming a million trains: the release index is compared,"
+              " deployed", rc == 0 and outputs.get("deploy") == "true" and "published manifest: not trusted" in out
+              and "release index for the shrink guard: 60 trains" in out, repr((rc, out, err)))
+        rc, out, err, outputs = run_site(tmp / f"shrink-untrusted-big-{n}", "--live-file", str(live),
+                                         "--baseline-file", str(release_zip))
+        check(f"a published manifest with {label}: a release index of 121 trains still refuses 60",
+              rc == 1 and "the latest release's index" in err and "60 trains and 0 lines vs 121 and 0" in err,
+              repr((rc, out, err)))
 
     # The script release.yml runs on the previous release's index.
     def mav_gz(path: Path, trains: int, lines: int = 0) -> Path:
@@ -393,6 +579,12 @@ with tempfile.TemporaryDirectory() as tmp_name:
     check("mav_shrink_guard.py with MAV_ALLOW_SHRINK=true takes the smaller index",
           done.returncode == 0 and "accepted" in done.stdout, repr((done.returncode, done.stdout, done.stderr)))
 
+    _far = (datetime.now(timezone.utc) + site.MAX_FEED_AHEAD + timedelta(days=2)).strftime("%Y%m%d")
+    _near = (datetime.now(timezone.utc) + site.MAX_FEED_AHEAD - timedelta(days=2)).strftime("%Y%m%d")
+    rc, out, err, outputs = run_site(tmp / "near-ahead", index=index_bytes(feed=_near + ".M2ChangeID"),
+                                     st=stats(_near + ".M2ChangeID"))
+    check("a feed dated a little under MAX_FEED_AHEAD ahead makes a site", rc == 0 and outputs.get("deploy") == "true",
+          repr((rc, out, err)))
     refusals = {
         "another schema": {"index": index_bytes(schema=site.mav_index.SCHEMA + 1)},
         "statistics of another feed": {"st": stats("20261031.M2ChangeID")},
@@ -409,6 +601,10 @@ with tempfile.TemporaryDirectory() as tmp_name:
                                                       "st": stats("20261101\n::x")},
         "not a commit": {"commit": "main"},
         "not gzip": {"index": b"<html>"},
+        # A feed_end_date as the version would outrank every correct feed
+        # after it in installs.
+        "a feed dated more than MAX_FEED_AHEAD ahead": {"index": index_bytes(feed=_far + ".M2ChangeID"),
+                                                        "st": stats(_far + ".M2ChangeID")},
     }
     for label, kw in refusals.items():
         ws = tmp / f"refuse-{len(label)}-{label[:6].replace(' ', '_')}"
@@ -532,6 +728,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
           not any(str(tmp) in t for t in (attribution, page, json.dumps(gman))))
 
     live.write_text(json.dumps({**gman, "built_at": built_ago(timedelta(hours=3))}))
+    sign_file(live)
     rc, out, err, outputs = run_site(tmp / "g-same", *gtfs_args, "--live-file", str(live))
     check("the same index and GTFS files as published: no deploy",
           rc == 0 and outputs.get("deploy") == "false", repr((rc, out, err, outputs)))
@@ -548,6 +745,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
     # only in its size and sha256 is no new content, or every run deploys.
     live.write_text(json.dumps({**gman, "built_at": built_ago(timedelta(hours=3)),
                                 "gtfs": {**g, "overlay": {**g["overlay"], "size": 1, "sha256": "e" * 64}}}))
+    sign_file(live)
     rc, out, err, outputs = run_site(tmp / "g-overlay-bytes", *gtfs_args, "--live-file", str(live))
     check("only the overlay's bytes changed, published 3 h ago: no deploy",
           rc == 0 and outputs.get("deploy") == "false" and "::notice title=Daily MÁV index unchanged::" in out,
@@ -681,19 +879,157 @@ with tempfile.TemporaryDirectory() as tmp_name:
         check(f"a published manifest without a usable built_at fails the run: {bad.get('built_at')!r}",
               fail and "no valid built_at" in line, line)
 
+    # A built_at counts only when the manifest's signature verifies.
+    for label, trust_ in (("no mav-index.json.sig", f"{verdict_mod.UNTRUSTED}no mav-index.json.sig (HTTP 404)"),
+                          ("a .sig that does not verify",
+                           f"{verdict_mod.UNTRUSTED}mav-index.json.sig does not verify against the pinned public key")):
+        fail, line = v("build", live_at(timedelta(hours=1)), "ok", now, trust_)
+        check(f"a fresh published manifest with {label}: not trusted, the run fails, nothing of it named",
+              fail and line.startswith("::error title=Daily MÁV index: published manifest not trusted::")
+              and "20261101.M2ChangeID" not in line and "1 h ago" not in line, line)
+    fail, line = v("build", live_at(timedelta(days=9)), "ok", now, f"{verdict_mod.UNKNOWN}mav-index.json.sig: HTTP 503")
+    check("a published manifest whose .sig could not be read: age unknown, a warning, green",
+          not fail and line.startswith("::warning") and "HTTP 503" in line and "216 h" not in line, line)
+
+    # The CLI pins the tests' key (as run_site does), and its own wait for a
+    # .sig that does not verify is 0 unless a test passes --sig-settle.
+    verdict_wrap = ("import os, sys; sys.path.insert(0, sys.argv.pop(1)); import sign_manifest;"
+                    " sign_manifest.PUBLIC_KEY = bytes.fromhex(os.environ['TEST_PAGES_PUBLIC_KEY']);"
+                    " import mav_daily_verdict; raise SystemExit(mav_daily_verdict.main(sys.argv[1:]))")
+
     def run_verdict(*args_: str) -> subprocess.CompletedProcess:
-        return subprocess.run([sys.executable, str(HERE / "mav_daily_verdict.py"), *args_],
-                              capture_output=True, text=True, timeout=60)
+        if "--sig-settle" not in args_ and "--failure" in args_:
+            args_ = (*args_, "--sig-settle", "0")
+        return subprocess.run([sys.executable, "-c", verdict_wrap, str(HERE), *args_],
+                              capture_output=True, text=True, timeout=60,
+                              env={**os.environ, "TEST_PAGES_PUBLIC_KEY": TEST_PUB.hex()})
 
     live.write_text(json.dumps(live_at(timedelta(days=3))))
+    sign_file(live)
     done = run_verdict("--failure", "build", "--live-file", str(live), "--now", now.isoformat())
     check("the verdict CLI exits 1 on a stale published index",
           done.returncode == 1 and "::error title=Daily MÁV index is stale::" in done.stdout,
           repr((done.returncode, done.stdout, done.stderr)))
     live.write_text(json.dumps(live_at(timedelta(hours=5))))
+    sign_file(live)
     done = run_verdict("--failure", "site", "--live-file", str(live), "--now", now.isoformat())
     check("the verdict CLI exits 0 on a fresh published index", done.returncode == 0 and "5 h ago" in done.stdout,
           repr((done.returncode, done.stdout, done.stderr)))
+    good_sig = live.with_name(live.name + ".sig").read_bytes()
+    sign_file(live, os.urandom(32))
+    done = run_verdict("--failure", "site", "--live-file", str(live), "--now", now.isoformat())
+    check("the verdict CLI exits 1 on a fresh published index whose .sig does not verify, also read again",
+          done.returncode == 1 and "published manifest not trusted" in done.stdout
+          and "reading both again in 0 s" in done.stdout and "5 h ago" not in done.stdout,
+          repr((done.returncode, done.stdout, done.stderr)))
+    live.with_name(live.name + ".sig").unlink()
+    done = run_verdict("--failure", "site", "--live-file", str(live), "--now", now.isoformat())
+    check("the verdict CLI exits 1 on a fresh published index without a .sig (HTTP 404)",
+          done.returncode == 1 and "no mav-index.json.sig (HTTP 404)" in done.stdout,
+          repr((done.returncode, done.stdout, done.stderr)))
+
+    # Pages' CDN serving the previous deploy's .sig next to the new manifest
+    # (each path cached on its own, up to PAGES_MAX_AGE): the verdict reads
+    # both again SIG_SETTLE_S later, by default, and then trusts them.
+    live.with_name(live.name + ".sig").write_text(
+        base64.b64encode(sign_manifest.sign(live, os.urandom(32))).decode() + "\n")
+    waits: list[float] = []
+
+    def settled(seconds: float) -> None:
+        waits.append(seconds)
+        live.with_name(live.name + ".sig").write_bytes(good_sig)
+
+    real_sleep, real_key = verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY
+    verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = settled, TEST_PUB
+    out_buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out_buf):
+            rc = verdict_mod.main(["--failure", "site", "--live-file", str(live), "--now", now.isoformat()])
+    finally:
+        verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = real_sleep, real_key
+    check("a .sig of the previous deploy at first: read again once, SIG_SETTLE_S (11 minutes, past Pages' cache)"
+          " later, then trusted: green", rc == 0 and waits == [site.SIG_SETTLE_S] and site.SIG_SETTLE_S >= 660
+          and "5 h ago" in out_buf.getvalue(), repr((rc, waits, out_buf.getvalue())))
+    # --live-url: what the site answers for the .sig decides. One who can
+    # put files on Pages can make it oversized or refused (HTTP 4xx): that
+    # is no signature, the run red whatever built_at says; only a network
+    # error, a timeout or a server error (HTTP 5xx) leaves the age unknown
+    # (green, a warning). A 404 is read again once, SIG_SETTLE_S later
+    # (Pages' cache may keep the 404 from before the first signed deploy).
+    fresh_body = live.read_bytes()
+    fresh_sig = live.with_name(live.name + ".sig").read_bytes()
+    man_url, sig_url = "https://pages.example/v/mav-index.json", "https://pages.example/v/mav-index.json.sig"
+
+    class Body(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def http_error(code: int):
+        def raise_(url):
+            raise site.urllib.error.HTTPError(url, code, "x", {}, None)
+        return raise_
+
+    def raise_timeout(url):
+        raise TimeoutError("timed out")
+
+    for label, sig_answer, later, want_rc, want_text, want_waits in (
+        ("an oversized .sig", b"A" * (site.MAX_SIG + 1), None, 1, "is no signature", []),
+        ("a .sig the site refuses (HTTP 403)", http_error(403), None, 1, "HTTP 403", []),
+        ("a .sig gone for good (HTTP 410)", http_error(410), None, 1, "HTTP 410", []),
+        ("a .sig the server fails on (HTTP 503)", http_error(503), None, 0, "HTTP 503", []),
+        ("a .sig that times out", raise_timeout, None, 0, "TimeoutError", []),
+        ("a .sig not there (HTTP 404), also read again", http_error(404), None, 1, "(HTTP 404)",
+         [site.SIG_SETTLE_S]),
+        ("a .sig Pages' cache answers 404 for at first", http_error(404), fresh_sig, 0, "5 h ago",
+         [site.SIG_SETTLE_S]),
+    ):
+        answers = {man_url: fresh_body, sig_url: sig_answer}
+        url_waits: list[float] = []
+
+        def url_open(req, timeout=None, _answers=answers):
+            got = _answers.get(req.full_url)
+            if got is None:
+                raise site.urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+            if callable(got):
+                got(req.full_url)
+            return Body(got)
+
+        def url_sleep(seconds: float, _answers=answers, _later=later, _waits=url_waits) -> None:
+            _waits.append(seconds)
+            if _later is not None:
+                _answers[sig_url] = _later
+
+        real = (site.urllib.request.urlopen, verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY)
+        site.urllib.request.urlopen, verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = url_open, url_sleep, TEST_PUB
+        out_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out_buf):
+                rc = verdict_mod.main(["--failure", "build", "--live-url", man_url, "--now", now.isoformat()])
+        finally:
+            site.urllib.request.urlopen, verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = real
+        text = out_buf.getvalue()
+        check(f"the verdict, --live-url, a fresh published index with {label}: "
+              + ("red, not trusted" if want_rc else "green"),
+              rc == want_rc and want_text in text and url_waits == want_waits
+              and (("published manifest not trusted" in text and "5 h ago" not in text) if want_rc
+                   else "::warning title=Daily MÁV index not published::" in text),
+              repr((rc, url_waits, text)))
+    check("the verdict's .sig classes: HTTP 5xx and network errors unknown, any other status and an oversized"
+          " .sig untrusted",
+          verdict_mod.sig_unreadable("HTTP 500").startswith(verdict_mod.UNKNOWN)
+          and verdict_mod.sig_unreadable("URLError: <urlopen error x>").startswith(verdict_mod.UNKNOWN)
+          and verdict_mod.sig_unreadable("HTTP 451").startswith(verdict_mod.UNTRUSTED)
+          and verdict_mod.sig_unreadable("HTTP 301").startswith(verdict_mod.UNTRUSTED)
+          and verdict_mod.sig_unreadable(f"larger than {site.MAX_SIG} bytes").startswith(verdict_mod.UNTRUSTED))
+    big = live.with_name(live.name + ".sig")
+    big.write_bytes(b"A" * (site.MAX_SIG + 1))
+    done = run_verdict("--failure", "site", "--live-file", str(live), "--now", now.isoformat())
+    check("the verdict CLI, --live-file: an oversized .sig is no signature, the run red",
+          done.returncode == 1 and "is no signature" in done.stdout, repr((done.returncode, done.stdout)))
+    sign_file(live)
     done = run_verdict("--failure", "auth", "--live-file", str(live), "--now", now.isoformat())
     check("the verdict CLI exits 1 on a refused login, a fresh index notwithstanding",
           done.returncode == 1 and "login refused" in done.stdout, repr((done.returncode, done.stdout)))
@@ -786,20 +1122,28 @@ with tempfile.TemporaryDirectory() as tmp_name:
     due_step = step_script("Timetables due")
     for force in ("true", "false"):
         (ws / "pt-args.txt").unlink(missing_ok=True)
-        done, outputs = bash(due_step, ws, FORCE=force, **gh_env)
+        done, outputs = bash(due_step, ws, FORCE=force, TAG="v1.10.21", **gh_env)
         args = (ws / "pt-args.txt").read_text().split() if (ws / "pt-args.txt").exists() else []
+
+        def after(flag: str, _args: list[str] = args) -> list[str]:
+            return _args[_args.index(flag) + 1:_args.index(flag) + 2] if flag in _args else []
+
         check(f"the due step runs the workflow commit's script with the stable release's schema, asks the"
-              f" repository's own Pages site, --force {force}, and passes due, indexes and schema on",
+              f" repository's own Pages site, --force {force}, compares with the stable release's zip, writes"
+              " its feeds for the parts, and passes due, indexes and schema on",
               done.returncode == 0 and outputs.get("due") == "true" and outputs.get("indexes") == "volan,city"
-              and outputs.get("schema") == "28" and args[:1] == ["due"]
-              and args[args.index("--schema") + 1:args.index("--schema") + 2] == ["28"]
-              and args[args.index("--live-url") + 1:args.index("--live-url") + 2]
-              == ["https://bator.github.io/hungarian-transport"]
-              and args[args.index("--force") + 1:args.index("--force") + 2] == [force]
-              if "--live-url" in args and "--force" in args and "--schema" in args else False,
+              and outputs.get("schema") == "28" and args[:1] == ["due"] and after("--schema") == ["28"]
+              and after("--live-url") == ["https://bator.github.io/hungarian-transport"]
+              and after("--force") == [force]
+              and after("--release-url") == ["https://github.com/Bator/hungarian-transport/releases/download/v1.10.21/"
+                                             "hungarian-transport-frontend.zip"]
+              and after("--release-out") == [f"{ws / 'runner-temp'}/release-feeds.json"]
+              and after("--release-tag") == ["v1.10.21"],
               repr((done.returncode, done.stderr, args, outputs)))
+    check("the due step takes the stable release's tag from the stable step",
+          "TAG: ${{ steps.stable.outputs.tag }}" in step(job("timetables"), "- name: Timetables due"))
     ws = tools_ws("wf-due-noschema", schema=None)
-    done, outputs = bash(due_step, ws, FORCE="false", **gh_env)
+    done, outputs = bash(due_step, ws, FORCE="false", TAG="v1.10.21", **gh_env)
     check("a stable release whose gtfs_compact.py names no schema: an error, nothing due",
           done.returncode == 1 and "names no INDEX_SCHEMA" in done.stdout and "due" not in outputs,
           repr((done.returncode, done.stdout, outputs)))
@@ -858,9 +1202,15 @@ with tempfile.TemporaryDirectory() as tmp_name:
           and (ws / "city-env.txt").read_text() == "- ", repr((done.returncode, done.stdout, outputs)))
     ok_args = tmp / "wf-tt-ok" / "pt-args.txt"
     args = ok_args.read_text().split() if ok_args.exists() else []
-    check("the part is checked against the stable release's schema, by the workflow commit's script",
+    check("the part is checked against the stable release's schema, by the workflow commit's script, and"
+          " records the release's feeds the due step wrote",
           args[:1] == ["part"] and "--schema" in args and args[args.index("--schema") + 1] == "28"
-          and '.pages-tools/scripts/pages_timetables.py part --schema "$SCHEMA"' in build_tt, repr(args))
+          and '.pages-tools/scripts/pages_timetables.py part --schema "$SCHEMA"' in build_tt
+          and args[args.index("--release-feeds") + 1:args.index("--release-feeds") + 2]
+          == [f"{tmp / 'wf-tt-ok' / 'runner-temp'}/release-feeds.json"] if "--release-feeds" in args else False,
+          repr(args))
+    check("the Pages build takes an insecure feed (Miskolc) over http as a release does: no HUNGARIAN_TRANSPORT_HTTPS_ONLY set",
+          "HUNGARIAN_TRANSPORT_HTTPS_ONLY: " not in TEXT)
     ws = tt_ws("city-due")
     done, outputs = bash(build_tt, ws, DUE_INDEXES="city", SCHEMA="28", ALLOW_MISSING_VAR="", **gh_env)
     check("only the due index is built: city alone, the Volán builder never runs",
@@ -1051,11 +1401,29 @@ check("the workflow token reads contents only",
 check("one run at a time, none cancelled half-way",
       re.search(r"^concurrency:\n  group: mav-index-daily\n  cancel-in-progress: false$", top, re.M) is not None)
 build, deploy, attest_job = job("build"), job("deploy"), job("attest")
-tt_job, site_job = job("timetables"), job("site")
+tt_job, site_job, sign_job = job("timetables"), job("site"), job("sign")
 jobs_block = TEXT.split("\njobs:\n", 1)[1]
-check("five jobs: build (MÁV), timetables, site, deploy, attest",
-      re.findall(r"^  ([\w-]+):$", jobs_block, re.M) == ["build", "timetables", "site", "deploy", "attest"],
+check("seven jobs: build (MÁV), timetables, site, sign, deploy, signatures, attest",
+      re.findall(r"^  ([\w-]+):$", jobs_block, re.M)
+      == ["build", "timetables", "site", "sign", "deploy", "signatures", "attest"],
       repr(re.findall(r"^  ([\w-]+):$", jobs_block, re.M)))
+sig_job = job("signatures")
+check("the signatures job runs after the deploy (whatever it did) when the site job names an untrusted"
+      " published manifest, with no permissions, no checkout and no secret",
+      "    needs: [site, deploy]" in sig_job
+      and "    if: ${{ !cancelled() && needs.site.outputs.untrusted != '' }}" in sig_job
+      and re.search(r"^    permissions: \{\}$", sig_job, re.M) is not None and "actions/checkout" not in sig_job
+      and "secrets." not in sig_job and "untrusted: ${{ steps.assemble.outputs.untrusted }}" in job("site"),
+      sig_job)
+with tempfile.TemporaryDirectory() as _sig_tmp:
+    for value, shown in (("timetables.json", "timetables.json"), ("timetables.json,mav-index.json",
+                                                                  "timetables.json,mav-index.json"),
+                         ("x\n::warning::y", "(unexpected names)")):
+        done, _ = bash(step_script("A published signature does not verify"), Path(_sig_tmp), UNTRUSTED=value)
+        check(f"the signatures step with {value!r}: exit 1, one error annotation naming {shown}",
+              done.returncode == 1 and done.stdout.count("::error title=Published manifest signature does not"
+                                                         " verify::") == 1
+              and f"verify::{shown}:" in done.stdout and "::warning::" not in done.stdout, repr(done.stdout))
 check("the build and timetables jobs run side by side, the site job after both, whatever they did (failed,"
       " timed out), unless the run is cancelled",
       "needs:" not in build and "needs:" not in tt_job and "    needs: [build, timetables]" in site_job
@@ -1070,28 +1438,35 @@ def minutes(block: str) -> int | None:
 # deploy-pages waits for the deployment up to its own timeout input, 600000
 # ms by default: a job limit of 10 minutes cut it short before it gave up.
 check("every job has a time limit, the deploy job's above deploy-pages' own 10 minutes",
-      all(minutes(b) for b in (build, tt_job, site_job, deploy, attest_job)) and minutes(deploy) >= 15
+      all(minutes(b) for b in (build, tt_job, site_job, sign_job, deploy, attest_job)) and minutes(deploy) >= 15
       and "timeout:" not in step(deploy, "actions/deploy-pages@"),
-      repr([minutes(b) for b in (build, tt_job, site_job, deploy, attest_job)]))
+      repr([minutes(b) for b in (build, tt_job, site_job, sign_job, deploy, attest_job)]))
 check("only the deploy job may write Pages, only it and the attest job mint an OIDC token",
       all("pages: write" not in b and "id-token" not in b and "permissions:" not in b
           for b in (build, tt_job, site_job)) and "pages: write" not in attest_job
+      and re.search(r"^    permissions:\n      contents: read\n    \S", sign_job, re.M) is not None
       and re.search(r"^    permissions:\n      pages: write\n      id-token: write\n    \S", deploy, re.M) is not None,
       deploy)
 # success() looks at every job before this one, and the build job fails on
 # a stale MÁV index while the site may still carry a new Volán or city index.
-check("the deploy job runs after a site job that made a site, in the github-pages environment, whatever"
-      " the build job did",
-      "    needs: site" in deploy
-      and "    if: ${{ !cancelled() && needs.site.result == 'success' && needs.site.outputs.deploy == 'true' }}"
-      in deploy and "      name: github-pages" in deploy
+check("the deploy job runs after a sign job that signed a site, in the github-pages environment, whatever"
+      " the build job did; the sign job after a site job that made one, on main only",
+      "    needs: sign" in deploy and "    if: ${{ !cancelled() && needs.sign.result == 'success' }}" in deploy
+      and "      name: github-pages" in deploy and "    needs: site" in sign_job
+      and "    if: ${{ !cancelled() && needs.site.result == 'success' && needs.site.outputs.deploy == 'true'"
+      " && github.ref == 'refs/heads/main' }}" in sign_job
       and "deploy: ${{ steps.assemble.outputs.deploy }}" in site_job, deploy)
 check("the deploy job checks out and runs nothing from the repository, and sees no MÁV secret",
       "actions/checkout" not in deploy and "secrets." not in deploy and "scripts/" not in deploy)
-upload = step(site_job, "actions/upload-pages-artifact@")
-check("only the site job makes the Pages artifact, and only a site to deploy",
-      "if: steps.assemble.outputs.deploy == 'true'" in upload and "path: ${{ runner.temp }}/site" in upload
-      and TEXT.count("actions/upload-pages-artifact@") == 1, upload)
+upload = step(sign_job, "actions/upload-pages-artifact@")
+site_up = step(site_job, "name: pages-site")
+site_dl = step(sign_job, "name: pages-site")
+check("only the sign job makes the Pages artifact, from the site the site job assembled (pages-site, only a"
+      " site to deploy, kept 3 days), after signing it",
+      "if: steps.assemble.outputs.deploy == 'true'" in site_up and "path: ${{ runner.temp }}/site" in site_up
+      and "if-no-files-found: error" in site_up and re.search(r"^ +retention-days: 3$", site_up, re.M) is not None
+      and "path: ${{ runner.temp }}/site" in site_dl and "path: ${{ runner.temp }}/site" in upload
+      and TEXT.count("actions/upload-pages-artifact@") == 1 and "upload-pages-artifact" not in site_job, upload)
 mav_up = step(build, "name: mav-part")
 tt_up = step(tt_job, "name: timetables-part")
 check("the build job hands its site to the site job as the mav-part artifact, only when it is to be deployed",
@@ -1137,16 +1512,58 @@ city_secrets = [
     "MOBILITY_DATABASE_REFRESH_TOKEN: ${{ secrets.MOBILITY_DATABASE_REFRESH_TOKEN }}",
     "TRANSITLAND_API_KEY: ${{ secrets.TRANSITLAND_API_KEY }}",
 ]
+sign_step = step(sign_job, "- name: Sign the manifest")
 check("the MÁV secrets reach only the MÁV build step's env (and the job's yes/no flag), the city feeds'"
-      " only the timetables build step's",
+      " only the timetables build step's, the signing key only the sign job's signing step",
       sorted(secret_lines) == sorted([
           "MAV_SECRETS: ${{ secrets.MAV_GTFS_USER != '' && secrets.MAV_GTFS_PASSWORD != '' }}",
           "MAV_GTFS_USER: ${{ secrets.MAV_GTFS_USER }}",
           "MAV_GTFS_PASSWORD: ${{ secrets.MAV_GTFS_PASSWORD }}",
           *city_secrets,
+          "PAGES_SIGNING_KEY: ${{ secrets.PAGES_SIGNING_KEY }}",
       ]) and "secrets.MAV_GTFS" in step(build, "- name: MÁV GTFS, pfaedle, build and audit")
       and all(ln in step(tt_job, "- name: Build the Volán and city indexes") for ln in city_secrets)
-      and "secrets." not in site_job and "secrets.MAV" not in tt_job, repr(secret_lines))
+      and "secrets." not in site_job and "secrets." not in sign_job.replace(sign_step, "")
+      and "secrets.MAV" not in tt_job
+      and re.search(r"^        env:\n          PAGES_SIGNING_KEY: \$\{\{ secrets\.PAGES_SIGNING_KEY \}\}\n        run:",
+                    sign_step, re.M) is not None, repr(secret_lines))
+sign_steps = [ln.strip() for ln in sign_job.splitlines() if re.match(r"^      - ", ln)]
+sign_co = step(sign_job, "actions/checkout@")
+check("every deploy signs timetables.json: the sign job, bound to the github-pages environment (whose secret"
+      " the key is, main only), checks out only sign_manifest.py without credentials, signs the downloaded site"
+      " and only then makes the Pages artifact; a failure stops the deploy",
+      re.search(r"^    environment:\n      name: github-pages\n", sign_job, re.M) is not None
+      and sign_steps == ["- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1",
+                         "- uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2",
+                         "- name: No newer site on GitHub Pages",
+                         "- name: Sign the manifest",
+                         "- uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0"]
+      and "persist-credentials: false" in sign_co and "scripts/sign_manifest.py" in sign_co
+      and "sparse-checkout-cone-mode: false" in sign_co
+      and 'run: python3 scripts/sign_manifest.py sign --site "$RUNNER_TEMP/site"' in sign_step
+      and "if:" not in sign_step and "if:" not in upload
+      and "continue-on-error" not in sign_job, repr(sign_steps))
+# "Re-run failed jobs" after a failed sign job signs this run's artifact
+# (kept 3 days) and deploys it: never over a newer run's site.
+live_check = step(sign_job, "- name: No newer site on GitHub Pages")
+check("the sign job refuses a site older than the one GitHub Pages serves (sign_manifest.py live-check), before"
+      " the key is read, and the workflow no longer invites a re-run of a failed sign job without saying so",
+      'python3 scripts/sign_manifest.py live-check --site "$RUNNER_TEMP/site" --live-url "$pages_url"' in live_check
+      and 'pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"' in live_check
+      and "secrets." not in live_check and "if:" not in live_check and "continue-on-error" not in live_check
+      and sign_job.index("- name: No newer site on GitHub Pages") < sign_job.index("- name: Sign the manifest")
+      and "\"Re-run failed jobs\" after a failed sign job\n      # finds it." not in site_job
+      and "sign job refuses it once GitHub Pages serves a newer site" in site_job, live_check)
+asm_step = step(site_job, "- name: Assemble the site")
+check("the site job never carries a published manifest older than the build and timetables jobs read:"
+      " their live_built outputs reach assemble as --mav-built-at and --timetables-built-at, only when set",
+      "live_built: ${{ steps.site.outputs.live_built }}" in build
+      and "live_built: ${{ steps.due.outputs.live_built }}" in tt_job
+      and "MAV_BUILT: ${{ needs.build.outputs.live_built }}" in asm_step
+      and "TIMETABLES_BUILT: ${{ needs.timetables.outputs.live_built }}" in asm_step
+      and 'if [ -n "${MAV_BUILT:-}" ]; then parts+=(--mav-built-at "$MAV_BUILT"); fi' in asm_step
+      and 'if [ -n "${TIMETABLES_BUILT:-}" ]; then parts+=(--timetables-built-at "$TIMETABLES_BUILT"); fi'
+      in asm_step, asm_step)
 release_text = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 check("the timetables build reads the release's variables for the Volán URL and the city guard",
       all(v in step(tt_job, "- name: Build the Volán and city indexes") for v in (

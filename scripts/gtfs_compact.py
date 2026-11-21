@@ -800,6 +800,24 @@ def basic_auth(auth: tuple[str, str]) -> str:
     return "Basic " + base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
 
 
+# Set to 1: no plain http at all, not even for a feed entry marked
+# "insecure"; such a feed then fails to download like any other failed
+# feed, and build_city_index.py keeps its part of the index in place
+# (HUNGARIAN_TRANSPORT_CARRY_INDEX). Neither workflow sets it: the weekly
+# GitHub Pages build (mav-index-daily.yml) leaves it unset on purpose, as
+# release.yml does, so a feed that serves only http (Miskolc, whose https
+# certificate names another host) still comes over http there, with the
+# warning. Forbidding it would keep Miskolc's part from ever updating and,
+# once its calendar ran out, make the city guard refuse the whole city
+# index. The manifest's signature covers what such a build makes.
+HTTPS_ONLY_ENV = "HUNGARIAN_TRANSPORT_HTTPS_ONLY"
+
+
+def https_only() -> bool:
+    """Whether HTTPS_ONLY_ENV forbids plain http for every download."""
+    return (os.environ.get(HTTPS_ONLY_ENV) or "").strip().lower() in ("1", "true", "yes")
+
+
 def download_zip(
     url: str, dest: Path, *, allow_insecure: bool = False, auth: tuple[str, str] | None = None
 ) -> dict:
@@ -815,9 +833,11 @@ def download_zip(
     auth, HTTP Basic (user, password), goes over https only and only to the
     URL's own host: it is an unredirected header, which urllib drops on any
     redirect (a feed that redirects elsewhere gets no credentials and fails
-    with 401 there). It never appears in a URL, an error or a log line."""
+    with 401 there). It never appears in a URL, an error or a log line.
+
+    With HTTPS_ONLY_ENV set, never plain http, whatever allow_insecure says."""
     assert_public_http_url(url)
-    if auth is not None:
+    if auth is not None or https_only():
         allow_insecure = False
     assert_https(url, allow_insecure=allow_insecure)
     authorization = basic_auth(auth) if auth is not None else ""
@@ -872,9 +892,11 @@ def download_feed(
     for a feed whose entry says ``"insecure": True``: after HTTPS failed, or
     when its HTTPS URL redirects to http, each time with a warning on stderr.
     Otherwise the HTTPS failure is raised, and a redirect to http is one.
-    With auth (HTTP Basic, see download_zip) never plain http.
+    With auth (HTTP Basic, see download_zip) or HTTPS_ONLY_ENV set never
+    plain http.
     """
-    if auth is not None:
+    forbidden = https_only() and allow_insecure and auth is None
+    if auth is not None or forbidden:
         allow_insecure = False
     parsed = urllib.parse.urlparse((url or "").strip())
     # urlparse lower-cases the scheme, so "HTTP://" is plain http as well.
@@ -901,7 +923,8 @@ def download_feed(
     if insecure and not allow_insecure:
         raise RuntimeError(
             f"{dest.name}: https download failed ({type(last).__name__}); "
-            "plain http is not allowed for this feed"
+            + (f"plain http is not allowed in this build ({HTTPS_ONLY_ENV})" if forbidden
+               else "plain http is not allowed for this feed")
         ) from last
     raise last or RuntimeError(f"download failed: {dest.name}")
 

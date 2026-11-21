@@ -27,6 +27,10 @@ import custom_components.hungarian_transport as integration
 from custom_components.hungarian_transport import ISSUE_MISSING_ASSETS, elvira, mav, responses
 from custom_components.hungarian_transport.assets import asset_tag
 from custom_components.hungarian_transport.const import (
+    CONF_API_KEY,
+    CONF_DAILY_MAV,
+    CONF_MAVPLUSZ,
+    CONF_PAGES_TIMETABLES,
     DOMAIN,
     SERVICE_ELVIRA_BETWEEN,
     SERVICE_REALTIME,
@@ -176,6 +180,199 @@ async def test_removal_keeps_what_installed_the_mav_index(hass, hass_storage) ->
     assert hass_storage[storage.STORAGE_KEY]["data"] == {storage.MAV_INSTALL: install}
     assert "update_state" not in hass.data[DOMAIN]
     assert await storage.async_load(hass) == {storage.MAV_INSTALL: install}
+
+
+async def test_removal_keeps_both_install_records_and_drops_the_learnt_stations(hass, hass_storage) -> None:
+    """The weekly Volán and city indexes stay in www/ as well: their record
+    stays beside the MÁV one. The BKK stations learnt from FUTÁR go, also
+    from an entry without a key (no planner this run wrote them)."""
+    storage = integration.storage
+    hass_storage[storage.STATIONS_KEY] = {
+        "version": storage.STATIONS_VERSION, "minor_version": 1, "key": storage.STATIONS_KEY,
+        "data": {"stations": {"BKK_CSF00940": {"ref": None, "poles": ["BKK_F00940"]}}},
+    }
+    entry = await _setup(hass)
+    await storage.async_record_mav_install(hass, storage.SOURCE_DAILY, "20261101.M2ChangeID", 1234)
+    await storage.async_record_timetables_install(hass, "volan", "20261110.volan", "ab" * 32, 5678)
+    await storage.async_record_pages_round(hass, {"volan": ("installed", "20261110.volan")})
+    state = await storage.async_load(hass)
+    kept = {key: state[key] for key in (storage.MAV_INSTALL, storage.TIMETABLES_INSTALL)}
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done()
+    assert hass_storage[storage.STORAGE_KEY]["data"] == kept
+    assert kept[storage.TIMETABLES_INSTALL]["volan"]["feed"] == "20261110.volan"
+    assert storage.STATIONS_KEY not in hass_storage
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        {"key": "hungarian_transport.bkk_stations"},
+        {"version": 99, "minor_version": 1, "key": "hungarian_transport.bkk_stations", "data": {"stations": {}}},
+    ],
+    ids=["unreadable", "newer-version"],
+)
+async def test_a_broken_stations_record_does_not_stop_the_setup(hass, hass_storage, caplog, stored) -> None:
+    """storage.async_load_stations: a record Home Assistant cannot read
+    (a broken file, one a newer version wrote) is a warning, and the BKK
+    boards start with no stations learnt."""
+    from custom_components.hungarian_transport import mavplusz_board
+
+    storage = integration.storage
+    hass_storage[storage.STATIONS_KEY] = stored
+    made = []
+    executors = []
+    real = mavplusz_board.PlannerBoards
+
+    def boards(*args, **kwargs):
+        made.append(kwargs["stations"])
+        # A large planner board is decoded in HA's executor, not the loop.
+        executors.append(kwargs.get("executor"))
+        return real(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(integration.mavplusz_board, "PlannerBoards", boards)
+        assert await async_setup_component(hass, "http", {})
+        entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: "secret-key"})
+        entry.add_to_hass(hass)
+        assert await hass.config_entries.async_setup(entry.entry_id)
+        await hass.async_block_till_done()
+    assert entry.state is integration.ConfigEntryState.LOADED
+    assert hass.services.has_service(DOMAIN, integration.SERVICE_FUTAR)
+    assert made == [None]
+    assert executors == [hass.async_add_executor_job]
+    assert "Could not read the learnt BKK stations" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("daily", "pages", "made"),
+    [(False, False, False), (True, False, True), (False, True, True)],
+)
+async def test_no_daily_updater_with_the_daily_index_and_the_weekly_timetables_off(
+    hass, monkeypatch, daily, pages, made
+) -> None:
+    """Either one on runs the daily rounds; both off, nothing is scheduled
+    and no request goes to GitHub Pages."""
+    created = []
+    real = integration.mav_daily.DailyIndexUpdater
+
+    def updater(*args, **kwargs):
+        created.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(integration.mav_daily, "DailyIndexUpdater", updater)
+    assert await async_setup_component(hass, "http", {})
+    entry = MockConfigEntry(
+        domain=DOMAIN, unique_id=DOMAIN, options={CONF_DAILY_MAV: daily, CONF_PAGES_TIMETABLES: pages}
+    )
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert bool(created) is made
+    if made:
+        (kwargs,) = created
+        assert kwargs["mav"] is daily and (kwargs["timetables"] is not None) is pages
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["default-on", "turned-off"])
+async def test_mavplusz_off_reads_a_trains_delay_from_the_feeds_only(hass, aioclient_mock, freezer, on) -> None:
+    """CONF_MAVPLUSZ off (saved in the options: the entry reloads, the hub
+    stays): a train's delay round reads the jbb.ghsq.de feeds and sends
+    nothing to mavplusz.hu. On (the default) the planner is asked first."""
+    from custom_components.hungarian_transport import mavplusz
+
+    from .test_mavplusz import TrainPlanner
+    from .test_realtime import FIX, FROZEN, GYSEV_STATIC, J, MAV_STATIC, _pb
+
+    freezer.move_to(FROZEN)
+    entry = await _setup(hass)
+    if not on:
+        hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MAVPLUSZ: False})
+        await hass.async_block_till_done()
+        assert entry.state is integration.ConfigEntryState.LOADED
+    # A planner that knows none of the trips: the feeds answer either way.
+    aioclient_mock.post(mavplusz.URL, side_effect=TrainPlanner({}))
+    aioclient_mock.get(J + "1_198/trip-updates.pb", content=_pb("mav-trip-updates"))
+    aioclient_mock.get(J + "1_198/vehicle-positions.pb", content=_pb("mav-vehicle-positions"))
+    aioclient_mock.get(MAV_STATIC, content=(FIX / "mav-static.zip").read_bytes())
+    aioclient_mock.get(J + "1_134/trip-updates.pb", status=503)
+    aioclient_mock.get(J + "1_134/vehicle-positions.pb", status=503)
+    aioclient_mock.get(GYSEV_STATIC, status=503)
+    req = {"key": "ic", "train": "822", "stops": ["005501024", "005506189"], "from": 0, "to": 1}
+    resp = await hass.services.async_call(
+        DOMAIN, SERVICE_REALTIME, {"feed": "mav", "trips": [req]}, blocking=True, return_response=True
+    )
+    hit = resp["trips"]["ic"]
+    assert (hit["trip_id"], hit["delay"], hit["dest_delay"]) == ("35700507", 0, 600)
+    planner_calls = [c for c in aioclient_mock.mock_calls if "mavplusz" in str(c[1])]
+    assert len(planner_calls) == (1 if on else 0)
+
+
+async def test_the_planner_limiter_reads_the_mavplusz_option_per_request(hass: HomeAssistant) -> None:
+    """The limiter every planner request takes its token from (the hub's
+    and the BKK boards') reads "Ask mavplusz.hu" itself: once the option
+    is saved off it hands out no token, so a request already on its way
+    (a round queued for the hub's lock) is not sent; on again, it does."""
+    entry = await _setup(hass)
+    limiter = hass.data[DOMAIN]["planner_limiter"]
+    assert limiter.available() and limiter.take()
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MAVPLUSZ: False})
+    await hass.async_block_till_done()
+    assert hass.data[DOMAIN]["planner_limiter"] is limiter
+    assert not limiter.available() and not limiter.take() and not limiter.take(fallback=True)
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_MAVPLUSZ: True})
+    await hass.async_block_till_done()
+    assert limiter.available() and limiter.take(fallback=True)
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["default-on", "turned-off"])
+async def test_mavplusz_off_leaves_a_failing_futar_board_to_transitous(
+    hass, aioclient_mock, monkeypatch, on
+) -> None:
+    """CONF_MAVPLUSZ off: no planner behind the FUTÁR proxy, so a board and
+    a trip's details FUTÁR fails for answer FUTÁR's error (the card reads
+    Transitous then) and no BKK id goes to mavplusz.hu."""
+    from custom_components.hungarian_transport import futar, mavplusz, mavplusz_board as mb
+
+    from .test_futar import _call, _inject
+    from .test_mavplusz_board import BOARD, BOARD_PARAMS, FIRST_TRIP, TRIP, WALL, Planner
+    from .test_upstream import FakeClock
+
+    made = []
+    real = mb.PlannerBoards
+
+    def boards(*a, **k):
+        # The fixture's wall time, through the planner's own clock: the
+        # global time.time stays Home Assistant's own during the test.
+        made.append(1)
+        return real(*a, **dict(k, wall=lambda: WALL))
+
+    monkeypatch.setattr(integration.mavplusz_board, "PlannerBoards", boards)
+    _inject(monkeypatch, FakeClock())
+    aioclient_mock.get(f"{futar.BKK_API}/{BOARD}", status=503)
+    aioclient_mock.get(f"{futar.BKK_API}/{TRIP}", status=503)
+    aioclient_mock.post(mavplusz.URL, side_effect=Planner())
+    assert await async_setup_component(hass, "http", {})
+    options = {CONF_API_KEY: "secret-key"} if on else {CONF_API_KEY: "secret-key", CONF_MAVPLUSZ: False}
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options=options)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    board = await _call(hass, path=BOARD, params=BOARD_PARAMS)
+    trip = await _call(hass, path=TRIP, params={"tripId": FIRST_TRIP})
+    planner_calls = [c for c in aioclient_mock.mock_calls if "mavplusz" in str(c[1])]
+    if on:
+        assert made == [1]
+        assert board["data"]["source"] == "mavplusz"
+        # Its departures, due at the fixture's wall time (none at today's).
+        assert board["data"]["data"]["entry"]["stopTimes"]
+        assert planner_calls
+    else:
+        assert made == []
+        assert board["error"] == trip["error"] == responses.FUTAR_UNAVAILABLE
+        assert board["data"] is None and trip["data"] is None
+        assert planner_calls == []
 
 
 async def test_removal_dismisses_the_integrations_notifications(hass, monkeypatch) -> None:

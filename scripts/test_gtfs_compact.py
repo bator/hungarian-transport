@@ -552,6 +552,23 @@ def main() -> int:
             final_url["u"] = ""
             failed |= not check("download_zip over https", zip_err("https://gtfs.kti.hu/a.zip") is None
                                 and opened[-1] == ("https://gtfs.kti.hu/a.zip", False), repr(opened))
+            # The weekly Pages build: no plain http, whatever the feed allows.
+            os.environ[gc.HTTPS_ONLY_ENV] = "1"
+            try:
+                opened.clear()
+                err = zip_err("http://gtfs.kti.hu/a.zip", allow_insecure=True)
+                failed |= not check(f"with {gc.HTTPS_ONLY_ENV}=1 download_zip refuses plain http even when allowed,"
+                                    " before asking", isinstance(err, ValueError) and not opened, f"{err!r} {opened}")
+                final_url["u"] = "http://gtfs.kti.hu/moved.zip"
+                (zdir / "z.zip").unlink(missing_ok=True)
+                err = zip_err("https://gtfs.kti.hu/a.zip", allow_insecure=True)
+                failed |= not check(f"with {gc.HTTPS_ONLY_ENV}=1 an https download that ended on http is refused,"
+                                    " for an insecure feed too, and the redirect handler is strict",
+                                    isinstance(err, ValueError) and not (zdir / "z.zip").exists()
+                                    and opened[-1] == ("https://gtfs.kti.hu/a.zip", False), f"{err!r} {opened}")
+                final_url["u"] = ""
+            finally:
+                os.environ.pop(gc.HTTPS_ONLY_ENV, None)
         finally:
             gc._urlopen = real_urlopen
 
@@ -607,6 +624,25 @@ def main() -> int:
                 failed |= not check("https feed never downgrades", False)
             except OSError:
                 failed |= not check("https feed never downgrades", zips == ["https://feed.example/f.zip"], str(zips))
+            zips.clear()
+            dest.unlink(missing_ok=True)
+            os.environ[gc.HTTPS_ONLY_ENV] = "1"
+            err = None
+            try:
+                with contextlib.redirect_stderr(io.StringIO()):
+                    gc.download_feed("http://feed.example/f.zip", dest, allow_insecure=True)
+            except Exception as e:  # noqa: BLE001
+                err = e
+            finally:
+                os.environ.pop(gc.HTTPS_ONLY_ENV, None)
+            failed |= not check(
+                f"with {gc.HTTPS_ONLY_ENV}=1 an insecure feed whose https fails is not fetched over http, and the"
+                " error says why",
+                isinstance(err, RuntimeError) and zips == ["https://feed.example/f.zip"] and not dest.exists()
+                and gc.HTTPS_ONLY_ENV in str(err), f"{err!r} {zips}",
+            )
+            failed |= not check(f"{gc.HTTPS_ONLY_ENV} is off unless set to 1/true/yes",
+                                not gc.https_only() and gc.HTTPS_ONLY_ENV == "HUNGARIAN_TRANSPORT_HTTPS_ONLY")
         finally:
             gc.download_zip = real_zip
             dest.unlink(missing_ok=True)

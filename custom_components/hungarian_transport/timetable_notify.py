@@ -6,7 +6,9 @@ What notifies, only with the option on:
   almost every day, so this one calls the service only with
   CONF_NOTIFY_DAILY on; otherwise it is the persistent notification alone;
 - the weekly Volán or city index from GitHub Pages was installed
-  (weekly_timetables.py): once per round that installed one or both, and
+  (weekly_timetables.py), naming each with the day of its feed (the city
+  index: its newest operator feed's): once per round that installed one or
+  both, and
   not for an index that is the last install again (a HACS update put the
   release's older index back, and the round reinstalled the same one). The
   installed feeds also go into the shipped indexes' record, so the next
@@ -24,7 +26,10 @@ What notifies, only with the option on:
   newer than the one seen (or a new operator), not one that went;
 - the daily MÁV index failed on FAILED_DAYS consecutive days: once per
   streak, dismissed when a round goes through again. A day with only BUSY
-  or UNSUPPORTED rounds neither counts nor breaks the streak; a day without
+  or UNSUPPORTED rounds neither counts nor breaks the streak (a manifest
+  signed by a key this version does not know is FAILED, and counts, on its
+  first mav_daily.UNKNOWN_KEY_DAYS days: it looks the same as another
+  deploy's signature or one that is not the site's); a day without
   any round (Home Assistant off) breaks it. A round that went through while
   the site's manifest was built more than STALE_PAGES ago counts as a
   failure: a daily workflow that stopped would otherwise stay quiet. The
@@ -83,7 +88,9 @@ FAILED_DAYS = 3
 STALE_PAGES = timedelta(days=3)
 # The indexes a release ships in www/, in the order a message names them.
 SHIPPED = {"volan": "volan-index.json.gz", "city": "city-index.json.gz", "mav": mav.INDEX_NAME}
-# A round that says nothing about failing or not (mav_daily).
+# A round that says nothing about failing or not (mav_daily). An unknown
+# signing key is UNSUPPORTED only once it has been so for more than
+# mav_daily.UNKNOWN_KEY_DAYS days; before, it is FAILED and counts.
 _NEUTRAL = (mav_daily.BUSY, mav_daily.UNSUPPORTED)
 
 TEXT = {
@@ -95,6 +102,8 @@ TEXT = {
         "shipped_message": "This version of Hungarian transport ships new timetables: {names}.",
         "pages_title": "Hungarian transport: timetables updated",
         "pages_message": "New weekly timetables from GitHub Pages are installed: {names}.",
+        "pages_volan": "Volán buses ({date} timetable)",
+        "pages_city": "city lines (newest feed: {date})",
         "failed_title": "Hungarian transport: daily MÁV index not updating",
         "failed_message": "The daily MÁV route index could not be updated on {days} days in a row "
                           "(last error: {error}). The current index stays in use.",
@@ -112,6 +121,8 @@ TEXT = {
         "shipped_message": "A Hungarian transport új verziója friss menetrendeket hozott: {names}.",
         "pages_title": "Hungarian transport: frissült menetrendek",
         "pages_message": "Friss heti menetrendek települtek a GitHub Pagesről: {names}.",
+        "pages_volan": "Volán buszok ({date} menetrend)",
+        "pages_city": "városi járatok (legfrissebb feed: {date})",
         "failed_title": "Hungarian transport: a napi MÁV index nem frissül",
         "failed_message": "A napi MÁV útvonal-index {days} egymást követő napon nem frissült "
                           "(utolsó hiba: {error}). A jelenlegi index marad használatban.",
@@ -152,6 +163,17 @@ def _text(hass: HomeAssistant) -> dict[str, str]:
 def _feed_day(feed: str | None, text: dict[str, str]) -> str:
     day = served_index.feed_date(feed)
     return day.isoformat() if day is not None else (feed or text["unknown"])
+
+
+def _pages_name(name: str, feed: str | None, text: dict[str, str]) -> str:
+    """An index the weekly timetables installed, with its feed's day: the
+    Volán feed's date; for the city index, which joins one feed per operator,
+    the newest date among them (an undated one names none)."""
+    if name == "city":
+        days = [d for v in timetables.city_feeds(feed).values() if (d := served_index.feed_date(v)) is not None]
+        day = max(days).isoformat() if days else text["unknown"]
+        return text["pages_city"].format(date=day)
+    return text["pages_volan"].format(date=_feed_day(feed, text))
 
 
 def shipped_feeds(www: Path) -> dict[str, str | None]:
@@ -324,7 +346,7 @@ class UpdateNotifier:
         if not self.enabled or not news:
             return
         text = _text(hass)
-        names = ", ".join(text[name] for name in SHIPPED if name in news)
+        names = ", ".join(_pages_name(name, done.results[name].feed, text) for name in SHIPPED if name in news)
         await self.async_notify(
             NOTIFICATION_PAGES, text["pages_title"], text["pages_message"].format(names=names)
         )

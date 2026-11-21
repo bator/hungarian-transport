@@ -1,27 +1,38 @@
 """The daily MÁV route index from GitHub Pages (mav_daily.py)."""
 
 import asyncio
+import base64
 import gzip
 import hashlib
 import io
 import json
 import logging
 import zipfile
-from datetime import timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
-from custom_components.hungarian_transport import gtfs_feed, mav, mav_daily, mav_index
-from custom_components.hungarian_transport.const import CONF_DAILY_MAV, CONF_DAILY_TIME, DOMAIN
+from custom_components.hungarian_transport import gtfs_feed, mav, mav_daily, mav_index, storage
+from custom_components.hungarian_transport import weekly_timetables as wt
+from custom_components.hungarian_transport.const import (
+    CONF_DAILY_MAV,
+    CONF_DAILY_TIME,
+    CONF_PAGES_TIMETABLES,
+    DOMAIN,
+)
 
 NEW = "20261101.M2ChangeID"
 OLD = "20261025.M2ChangeID"
+# The real weekly round, before conftest's no_pages_timetables replaces it.
+_real_weekly_update = wt.async_update
 
 
 @pytest.fixture
@@ -33,6 +44,38 @@ def no_daily_mav_index():
 @pytest.fixture(autouse=True)
 def small_feeds(monkeypatch):
     monkeypatch.setattr(mav, "MIN_TRAINS", 1)
+
+
+# The tests' signing key (conftest's pages_key here): the signature tests
+# below sign mav-index.json with it, and the integration checks with its
+# public half; the other tests' signature is conftest's signed_manifest.
+_KEY = Ed25519PrivateKey.generate()
+_PUBLIC = base64.b64encode(_KEY.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
+
+
+@pytest.fixture
+def pages_key():
+    return _KEY
+
+
+def _sign(body: bytes, key: Ed25519PrivateKey = _KEY) -> str:  # gitleaks:allow (a test signing helper, no secret)
+    """mav-index.json.sig as the workflow writes it: one line of base64."""
+    return base64.b64encode(key.sign(body)).decode() + "\n"
+
+
+def _serve_signed(aioclient_mock, raw: bytes | None, man: dict | None = None, sig: str | dict | None = None) -> bytes:
+    """mav-index.json as bytes, its signature (by default a good one, else
+    the text sig or the response a dict describes) and the index; the
+    manifest's bytes."""
+    body = json.dumps(man if man is not None else _manifest(raw)).encode()
+    aioclient_mock.get(mav_daily.MANIFEST_URL, content=body)
+    if isinstance(sig, dict):
+        aioclient_mock.get(mav_daily.SIGNATURE_URL, **sig)
+    else:
+        aioclient_mock.get(mav_daily.SIGNATURE_URL, text=_sign(body) if sig is None else sig)
+    if raw is not None:
+        aioclient_mock.get(mav_daily.INDEX_URL, content=raw)
+    return body
 
 
 # The line through the two stations (a stop-sequence variant), and a route
@@ -637,16 +680,23 @@ async def test_a_new_time_in_the_options_reschedules(
     assert aioclient_mock.call_count == count + 1
 
 
+@pytest.mark.parametrize("pages", [False, True])
 async def test_turned_off_makes_no_request(
-    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, monkeypatch, pages
 ) -> None:
+    """The daily MÁV index off: no MÁV request at all. The weekly timetables
+    run for real here (not conftest's stub): off too, nothing is asked;
+    on, only their own manifest (and its signature)."""
     await budapest
+    monkeypatch.setattr(wt, "async_update", _real_weekly_update)
     _serve(aioclient_mock, _index(NEW))
-    await _setup(hass, {CONF_DAILY_MAV: False})
+    aioclient_mock.get(wt.MANIFEST_URL, status=503)
+    await _setup(hass, {CONF_DAILY_MAV: False, CONF_PAGES_TIMETABLES: pages})
     for when in ("2026-11-01 03:30:00+01:00", "2026-11-01 06:00:00+01:00", "2026-11-01 06:10:00+01:00",
                  "2026-11-02 06:10:00+01:00"):
         await _at(hass, freezer, when)
-    assert aioclient_mock.call_count == 0
+    asked = {str(call[1]) for call in aioclient_mock.mock_calls}
+    assert asked == ({wt.MANIFEST_URL} if pages else set())
     assert not (card_assets / mav.INDEX_NAME).exists()
 
 
@@ -675,6 +725,87 @@ async def test_an_unexpected_error_is_logged_once_and_retried(
     await _at(hass, freezer, "2026-11-01 06:05:01+01:00")
     assert len(calls) == 2 + mav_daily.RETRY_LIMIT
     assert len(_warnings(caplog)) == 1
+    # A bug, not a download that failed: with its traceback.
+    (said,) = [r for r in caplog.records if r.name == mav_daily.__name__ and r.levelno >= logging.WARNING]
+    assert said.exc_info
+
+
+async def test_an_expected_error_of_a_round_is_one_short_line(hass: HomeAssistant, card_assets, caplog) -> None:
+    done = mav_daily._crashed(hass, OSError("disk"))
+    assert done.result == mav_daily.FAILED
+    (said,) = [r for r in caplog.records if r.name == mav_daily.__name__ and r.levelno >= logging.WARNING]
+    assert not said.exc_info
+
+
+def test_an_impossible_built_at_is_none() -> None:
+    assert mav_daily.built_at({"built_at": "2026-02-30T10:00:00Z"}) is None
+    assert mav_daily.built_at({"built_at": "2026-02-28T10:00:00Z"}) is not None
+
+
+async def test_two_manifests_taking_turns_settle_once_then_fail(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    """The cache serving two generations in turn, neither index matching
+    its manifest: one settle, then FAILED rounds (with their retries)."""
+    from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
+
+    raw = _index(NEW)
+    manifests = [_manifest(raw, sha256="a" * 64), _manifest(raw, sha256="b" * 64)]
+    turn = {"n": 0}
+
+    async def manifest(method, url, data):
+        turn["n"] += 1
+        return AiohttpClientMockResponse(method, url, json=manifests[turn["n"] % 2])
+
+    aioclient_mock.get(mav_daily.MANIFEST_URL, side_effect=manifest)
+    aioclient_mock.get(mav_daily.INDEX_URL, content=raw)
+    results = [(await mav_daily.async_update(hass, card_assets)).result for _ in range(5)]
+    assert results == [mav_daily.SETTLING] + [mav_daily.FAILED] * 4
+
+
+async def test_the_daily_time_during_a_retry_still_starts_the_weekly_round(
+    hass: HomeAssistant, card_assets, monkeypatch
+) -> None:
+    """The daily time comes while a MÁV retry (a slow download) runs: that
+    round is the day's, with fresh retries, and the weekly round starts when
+    it ends."""
+    gate = asyncio.Event()
+    rounds = []
+
+    async def slow_update(hass_, www):
+        rounds.append(True)
+        await gate.wait()
+        return mav_daily.DailyRound(mav_daily.FAILED, error="x")
+
+    monkeypatch.setattr(mav_daily, "async_update", slow_update)
+
+    class Weekly:
+        started = 0
+
+        def start_round(self):
+            Weekly.started += 1
+
+        def stop(self):
+            pass
+
+    up = mav_daily.DailyIndexUpdater(hass, card_assets, timetables=Weekly())
+    up._retries = mav_daily.RETRY_LIMIT
+    up._schedule(1, mav_daily._RETRY)
+    _later(hass, 2)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert rounds and not up._task.done()
+    up._schedule(1, mav_daily._DAILY)
+    _later(hass, 4)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert len(rounds) == 1
+    gate.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert Weekly.started == 1
+    # The day's retries: the failed round is tried again.
+    assert up._retries == 1 and up._next == mav_daily._RETRY and up._unsub is not None
+    up._unsub()
 
 
 def test_check_index_rejects_dangling_references() -> None:
@@ -826,9 +957,9 @@ def _recorded(monkeypatch) -> list[str]:
     results: list[str] = []
     real = mav_daily.storage.async_record_daily_round
 
-    async def record(hass, result, feed, built):
+    async def record(hass, result, feed, built, *args):
         results.append(result)
-        await real(hass, result, feed, built)
+        await real(hass, result, feed, built, *args)
 
     monkeypatch.setattr(mav_daily.storage, "async_record_daily_round", record)
     return results
@@ -982,3 +1113,252 @@ async def test_startup_keeps_an_index_of_the_same_feed_when_the_zip_is_copied_ag
     # Another feed_version is built as before.
     _local_feed(mav_source, "20261102.M2ChangeID")
     assert mav._startup_decision(mav_source, out, state, dt_util.now().date()) == mav.BUILD
+
+
+# --- the manifest's signature (review round 7) ---------------------------------
+
+
+async def test_without_real_signature_only_the_signature_s_answer_is_stubbed(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """conftest's signed_manifest answers the .sig with a good signature of
+    the manifest's bytes; the check itself runs: by a key the integration
+    does not list, the round installs nothing."""
+    raw = _index(NEW)
+    _serve(aioclient_mock, raw)
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
+    assert mav_daily.SIGNATURE_URL not in {str(c[1]) for c in aioclient_mock.mock_calls}
+    other = base64.b64encode(
+        Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
+    ).decode()
+    monkeypatch.setattr(mav_daily, "PAGES_PUBLIC_KEYS", (other,))
+    (card_assets / mav.INDEX_NAME).unlink()
+    done = await mav_daily.async_update(hass, card_assets)
+    assert (done.result, done.reason) == (mav_daily.SETTLING, mav_daily.UNKNOWN_KEY)
+    assert not (card_assets / mav.INDEX_NAME).exists()
+
+
+async def test_a_signed_manifest_installs(hass: HomeAssistant, aioclient_mock, card_assets, real_signature) -> None:
+    raw = _index(NEW)
+    _serve_signed(aioclient_mock, raw)
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
+    assert (card_assets / mav.INDEX_NAME).read_bytes() == raw
+    # The signature before anything the manifest names.
+    assert [str(c[1]) for c in aioclient_mock.mock_calls] == [
+        mav_daily.MANIFEST_URL, mav_daily.SIGNATURE_URL, mav_daily.INDEX_URL,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("sig", "result", "reason"),
+    [
+        ({"status": 404}, mav_daily.FAILED, mav_daily.REASON_BAD_SIGNATURE),
+        ("%%%", mav_daily.FAILED, mav_daily.REASON_BAD_SIGNATURE),
+        (base64.b64encode(b"x" * 10).decode(), mav_daily.FAILED, mav_daily.REASON_BAD_SIGNATURE),
+        ({"text": "A" * (mav_daily.MAX_SIGNATURE + 4)}, mav_daily.FAILED, mav_daily.REASON_BAD_SIGNATURE),
+        # Well-formed, by no key this version knows: a newer key of the
+        # site's, another deploy's signature, or not the site's. A failure
+        # like any other on its first days (review round 8).
+        ("other key", mav_daily.FAILED, mav_daily.UNKNOWN_KEY),
+        ("other bytes", mav_daily.FAILED, mav_daily.UNKNOWN_KEY),
+    ],
+)
+async def test_an_unsigned_manifest_settles_once_then_installs_nothing(
+    hass: HomeAssistant, aioclient_mock, card_assets, caplog, real_signature, sig, result, reason
+) -> None:
+    out = card_assets / mav.INDEX_NAME
+    before = _index(OLD)
+    out.write_bytes(before)
+    raw = _index(NEW)
+    man = _manifest(raw)
+    body = json.dumps(man).encode()
+    if sig == "other key":
+        sig = _sign(body, Ed25519PrivateKey.generate())
+    elif sig == "other bytes":
+        sig = _sign(body + b" ")
+    _serve_signed(aioclient_mock, raw, man, sig)
+    caplog.set_level(logging.DEBUG)
+    first = await mav_daily.async_update(hass, card_assets)
+    assert first.result == mav_daily.SETTLING
+    assert first.reason == reason
+    rounds = [await mav_daily.async_update(hass, card_assets) for _ in range(3)]
+    assert {(r.result, r.reason) for r in rounds} == {(result, reason)}
+    assert out.read_bytes() == before
+    assert mav_daily.INDEX_URL not in {str(c[1]) for c in aioclient_mock.mock_calls}
+    said = [r for r in caplog.records if r.name == mav_daily.__name__ and r.levelno >= logging.INFO]
+    # Once, a warning.
+    assert len(said) == 1, [r.getMessage() for r in said]
+    assert said[0].levelno == logging.WARNING
+    if reason == mav_daily.UNKNOWN_KEY:
+        assert (
+            "signed by a key this version does not know (mav-index.json.sig): a newer key, another deploy's"
+            " signature, or not the site's" in said[0].getMessage()
+        )
+
+
+async def test_a_signature_settles_on_its_own_scope(
+    hass: HomeAssistant, aioclient_mock, card_assets, real_signature
+) -> None:
+    """Right after a deploy both the signature and then the index can be the
+    other generation's: each settles once."""
+    from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
+
+    raw = _index(NEW)
+    body = json.dumps(_manifest(raw)).encode()
+    sigs = iter([_sign(body + b"old"), _sign(body), _sign(body)])
+    indexes = iter([_index(OLD), raw])
+
+    async def sig(method, url, data):
+        return AiohttpClientMockResponse(method, url, text=next(sigs))
+
+    async def index(method, url, data):
+        return AiohttpClientMockResponse(method, url, response=next(indexes))
+
+    aioclient_mock.get(mav_daily.MANIFEST_URL, content=body)
+    aioclient_mock.get(mav_daily.SIGNATURE_URL, side_effect=sig)
+    aioclient_mock.get(mav_daily.INDEX_URL, side_effect=index)
+    results = [(await mav_daily.async_update(hass, card_assets)).result for _ in range(3)]
+    assert results == [mav_daily.SETTLING, mav_daily.SETTLING, mav_daily.INSTALLED]
+
+
+async def test_an_index_then_the_signature_settle_each_on_their_own_scope(
+    hass: HomeAssistant, aioclient_mock, card_assets, real_signature
+) -> None:
+    """The other way round (review round 8): the index of another
+    generation settles first, then the previous deploy's signature in the
+    same cycle settles too, not FAILED; then the deploy installs."""
+    from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
+
+    raw = _index(NEW)
+    body = json.dumps(_manifest(raw)).encode()
+    sigs = iter([_sign(body), _sign(body + b"old"), _sign(body)])
+    indexes = iter([_index(OLD), raw])
+
+    async def sig(method, url, data):
+        return AiohttpClientMockResponse(method, url, text=next(sigs))
+
+    async def index(method, url, data):
+        return AiohttpClientMockResponse(method, url, response=next(indexes))
+
+    aioclient_mock.get(mav_daily.MANIFEST_URL, content=body)
+    aioclient_mock.get(mav_daily.SIGNATURE_URL, side_effect=sig)
+    aioclient_mock.get(mav_daily.INDEX_URL, side_effect=index)
+    mav_daily._matched(hass)
+    results = [(await mav_daily.async_update(hass, card_assets)).result for _ in range(3)]
+    assert results == [mav_daily.SETTLING, mav_daily.SETTLING, mav_daily.INSTALLED]
+
+
+async def test_a_manifest_signed_by_a_key_of_the_list_installs(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch, real_signature
+) -> None:
+    """Key rotation: the site signs with the new key a release after this
+    version listed it; until then, and for a while after, with the old."""
+    new = Ed25519PrivateKey.generate()
+    new_public = base64.b64encode(new.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
+    monkeypatch.setattr(mav_daily, "PAGES_PUBLIC_KEYS", (new_public, _PUBLIC))
+    raw = _index(NEW)
+    body = json.dumps(_manifest(raw)).encode()
+    for key in (_KEY, new):
+        mav_daily.verify_signature(body, _sign(body, key).encode(), "mav-index.json")
+    _serve_signed(aioclient_mock, raw, sig=_sign(body, new))
+    assert (await mav_daily.async_update(hass, card_assets)).result == mav_daily.INSTALLED
+
+
+async def test_an_unknown_key_fails_for_days_then_is_unsupported(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, max_jitter, real_signature
+) -> None:
+    """A signature of a key this version does not know cannot be told from
+    another deploy's or from one that is not the site's (review round 8): a
+    failure with the normal retries, a day of the failure streak, on
+    UNKNOWN_KEY_DAYS consecutive days; then UNSUPPORTED, neither retried nor
+    a failure (the streak stays as it was), said at info; the sensor says
+    why all along."""
+    await budapest
+    raw = _index(NEW)
+    body = json.dumps(_manifest(raw)).encode()
+    _serve_signed(aioclient_mock, raw, sig=_sign(body, Ed25519PrivateKey.generate()))
+    await _setup(hass, {})
+
+    async def day(first: str) -> tuple[str, int]:
+        await _at(hass, freezer, first)
+        # SETTLING, then looked at again once.
+        _later(hass, mav_daily.PAGES_SETTLE_DELAY + 1)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        state = hass.states.get("sensor.hungarian_transport_daily_mav_check")
+        assert state.attributes["reason"] == mav_daily.UNKNOWN_KEY
+        calls = aioclient_mock.call_count
+        _later(hass, mav_daily.PAGES_SETTLE_DELAY + mav_daily.RETRY_DELAY + 2)
+        await hass.async_block_till_done(wait_background_tasks=True)
+        retried = aioclient_mock.call_count - calls
+        return state.attributes["result"], state.attributes["failure_streak"], retried
+
+    assert await day("2026-11-01 03:20:01+01:00") == (mav_daily.FAILED, 1, 2)
+    await _at(hass, freezer, "2026-11-02 06:00:00+01:00")
+    assert await day("2026-11-02 06:05:01+01:00") == (mav_daily.FAILED, 2, 2)
+    await _at(hass, freezer, "2026-11-03 06:00:00+01:00")
+    assert await day("2026-11-03 06:05:01+01:00") == (mav_daily.FAILED, 3, 2)
+    await _at(hass, freezer, "2026-11-04 06:00:00+01:00")
+    assert await day("2026-11-04 06:05:01+01:00") == (mav_daily.UNSUPPORTED, 3, 0)
+    state = await storage.async_load(hass)
+    assert state[storage.UNKNOWN_KEY_SEEN]["mav-index.json"] == {"days": 4, "last": "2026-11-04"}
+    # The site's key again: the days end.
+    aioclient_mock.clear_requests()
+    _serve_signed(aioclient_mock, raw)
+    await _at(hass, freezer, "2026-11-05 06:00:00+01:00")
+    await _at(hass, freezer, "2026-11-05 06:05:01+01:00")
+    assert hass.states.get("sensor.hungarian_transport_daily_mav_check").attributes["result"] == mav_daily.INSTALLED
+    assert storage.UNKNOWN_KEY_SEEN not in await storage.async_load(hass)
+
+
+async def test_unknown_key_days_are_consecutive(hass: HomeAssistant) -> None:
+    """A day without an unknown key starts the count over; the same day
+    counts once; each manifest counts its own days."""
+    days = [
+        await storage.async_unknown_key_day(hass, "mav-index.json", date(2026, 11, d)) for d in (1, 1, 2, 3, 5, 6)
+    ]
+    assert days == [1, 1, 2, 3, 1, 2]
+    assert await storage.async_unknown_key_day(hass, "timetables.json", date(2026, 11, 6)) == 1
+    await storage.async_clear_unknown_key(hass, "mav-index.json")
+    assert await storage.async_unknown_key_day(hass, "mav-index.json", date(2026, 11, 7)) == 1
+    assert (await storage.async_load(hass))[storage.UNKNOWN_KEY_SEEN]["timetables.json"]["days"] == 1
+
+
+async def test_a_failed_round_records_its_reason(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest
+) -> None:
+    await budapest
+    aioclient_mock.get(mav_daily.MANIFEST_URL, status=500)
+    await _setup(hass, {})
+    await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
+    state = hass.states.get("sensor.hungarian_transport_daily_mav_check")
+    assert state.attributes["result"] == mav_daily.FAILED
+    assert state.attributes["reason"] == "mav-index.json: HTTP 500"
+
+
+def test_reason_of_is_short_and_names_the_kind() -> None:
+    assert mav_daily.reason_of(mav_daily.NotFound("x: HTTP 404")) == mav_daily.REASON_NOT_FOUND
+    assert mav_daily.reason_of(mav_daily._Mismatch("size")) == mav_daily.REASON_MISMATCH
+    # Past a cap (a manifest, the MÁV index past MAX_INDEX): no mismatch
+    # that settles (review round 9).
+    assert mav_daily.reason_of(mav_daily.TooLarge("big")) == mav_daily.REASON_TOO_LARGE == "too_large"
+    assert mav_daily.reason_of(wt._Mismatch("shard")) == mav_daily.REASON_MISMATCH
+    assert mav_daily.reason_of(mav_daily.BadSignature("bad")) == mav_daily.REASON_BAD_SIGNATURE
+    assert mav_daily.reason_of(mav_daily.UnknownKey("k")) == mav_daily.UNKNOWN_KEY
+    assert mav_daily.reason_of(mav_daily.DailyIndexError("x" * 500)) == "x" * mav_daily.MAX_REASON
+    assert mav_daily.reason_of(OSError("disk")) == "OSError: disk"
+
+
+async def test_a_manifest_or_index_past_its_cap_is_too_large_not_a_mismatch(
+    hass: HomeAssistant, aioclient_mock, card_assets
+) -> None:
+    """Review round 9: a body past a cap the code sets (the manifest past
+    MAX_MANIFEST, the index past MAX_INDEX) is FAILED with reason
+    "too_large", never "mismatch" (which says the Pages cache, settling)."""
+    aioclient_mock.get(mav_daily.MANIFEST_URL, content=b" " * (mav_daily.MAX_MANIFEST + 1))
+    done = await mav_daily.async_update(hass, card_assets)
+    assert (done.result, done.reason) == (mav_daily.FAILED, mav_daily.REASON_TOO_LARGE)
+    aioclient_mock.clear_requests()
+    raw = _index(NEW)
+    _serve(aioclient_mock, raw, headers={"Content-Length": str(mav_daily.MAX_INDEX + 1)})
+    done = await mav_daily.async_update(hass, card_assets)
+    assert (done.result, done.reason) == (mav_daily.FAILED, mav_daily.REASON_TOO_LARGE)

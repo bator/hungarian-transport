@@ -623,3 +623,12 @@ async def test_a_waiting_service_call_is_dropped_when_the_entry_unloads(
     hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
     await hass.async_block_till_done(wait_background_tasks=True)
     assert script_calls == []
+
+
+def test_the_city_index_is_named_by_its_newest_feed_in_both_languages() -> None:
+    feed = "bkk:20261110;miskolc:1.3;szeged:20261020"
+    for lang, want in (
+        ("en", "city lines (newest feed: 2026-11-10)"),
+        ("hu", "városi járatok (legfrissebb feed: 2026-11-10)"),
+    ):
+        assert timetable_notify._pages_name("city", feed, timetable_notify.TEXT[lang]) == want

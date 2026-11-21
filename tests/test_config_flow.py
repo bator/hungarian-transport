@@ -26,6 +26,7 @@ from custom_components.hungarian_transport.const import (
     CONF_API_KEY,
     CONF_DAILY_MAV,
     CONF_DAILY_TIME,
+    CONF_MAVPLUSZ,
     CONF_NOTIFY_DAILY,
     CONF_NOTIFY_SERVICE,
     CONF_NOTIFY_UPDATES,
@@ -37,6 +38,7 @@ from custom_components.hungarian_transport.futar import BKK_API
 SEARCH = f"{BKK_API}/search.json"
 # What the options form saves besides the key when left as shown.
 DEFAULTS = {
+    CONF_MAVPLUSZ: True,
     CONF_DAILY_MAV: True,
     CONF_PAGES_TIMETABLES: True,
     CONF_DAILY_TIME: "06:00:00",
@@ -236,7 +238,7 @@ async def test_no_remove_box_without_a_stored_key(hass) -> None:
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert list(result["data_schema"].schema) == [
-        CONF_API_KEY, CONF_DAILY_MAV, CONF_PAGES_TIMETABLES, CONF_DAILY_TIME, CONF_NOTIFY_UPDATES,
+        CONF_API_KEY, CONF_MAVPLUSZ, CONF_DAILY_MAV, CONF_PAGES_TIMETABLES, CONF_DAILY_TIME, CONF_NOTIFY_UPDATES,
         CONF_NOTIFY_SERVICE, CONF_NOTIFY_DAILY,
     ]
 
@@ -444,6 +446,40 @@ async def test_reauth_keeps_the_daily_mav_choice(hass, aioclient_mock) -> None:
     assert entry.options == {CONF_API_KEY: "new", CONF_DAILY_MAV: False}
 
 
+@pytest.mark.parametrize("option", [CONF_MAVPLUSZ, CONF_PAGES_TIMETABLES])
+async def test_options_turn_a_source_off_and_a_reauth_keeps_it(hass, aioclient_mock, option) -> None:
+    """mavplusz.hu and the weekly timetables are on by default; turned off
+    in the form they are saved off, the form shows them off, and a reauth's
+    new key leaves them off."""
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    entry = MockConfigEntry(domain=DOMAIN, unique_id=DOMAIN, options={CONF_API_KEY: "old"})
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert _field(result, option).default() is True
+    assert isinstance(result["data_schema"].schema[_field(result, option)], BooleanSelector)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {option: False})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options == {**DEFAULTS, CONF_API_KEY: "old", option: False}
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert _field(result, option).default() is False
+    hass.config_entries.options.async_abort(result["flow_id"])
+
+    result = await entry.start_reauth_flow(hass)
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_API_KEY: "new"})
+    assert result["reason"] == "reauth_successful"
+    assert entry.options == {**DEFAULTS, CONF_API_KEY: "new", option: False}
+
+
+@pytest.mark.parametrize("lang", ["en", "hu"])
+def test_mavplusz_option_says_what_goes_where(lang) -> None:
+    folder = Path(integration.__file__).parent / "translations"
+    init = json.loads((folder / f"{lang}.json").read_text(encoding="utf-8"))["options"]["step"]["init"]
+    assert "mavplusz.hu" in init["data"][CONF_MAVPLUSZ]
+    text = init["data_description"][CONF_MAVPLUSZ]
+    for name in ("mavplusz.hu", "jbb.ghsq.de", "Transitous", "FUTÁR"):
+        assert name in text
+
+
 @pytest.mark.parametrize("lang", ["en", "hu"])
 def test_daily_mav_option_is_translated(lang) -> None:
     folder = Path(integration.__file__).parent / "translations"
@@ -574,7 +610,7 @@ async def test_options_save_notifications_and_keep_other_options(hass) -> None:
     assert entry.options == {
         CONF_API_KEY: "kept", CONF_DAILY_MAV: False, "future_option": 7, CONF_NOTIFY_UPDATES: True,
         CONF_NOTIFY_DAILY: False, CONF_NOTIFY_SERVICE: "script.ertesit", CONF_DAILY_TIME: "05:45:00",
-        CONF_PAGES_TIMETABLES: True,
+        CONF_PAGES_TIMETABLES: True, CONF_MAVPLUSZ: True,
     }
 
     # The form shows what is stored; a cleared service field clears it.
@@ -785,3 +821,20 @@ async def test_reauth_answered_while_the_stored_key_works_again(
     assert result["reason"] == reason
     assert entry.options[CONF_API_KEY] == saved
     assert hass.config_entries.flow.async_progress_by_handler(DOMAIN) == []
+
+
+def test_the_mavplusz_option_says_what_it_asks_for_and_when() -> None:
+    """The Volán buses the planner answers for are the intercity ones (the
+    local ones are Volánbusz's), and the Budapest ids go to it only while
+    FUTÁR does not answer, in both languages."""
+    folder = Path(integration.__file__).parent / "translations"
+    text = {
+        lang: json.loads((folder / f"{lang}.json").read_text(encoding="utf-8"))["options"]["step"]["init"][
+            "data_description"
+        ]["mavplusz"]
+        for lang in ("en", "hu")
+    }
+    assert "a Volán helyközi és a Volánbusz helyi járatai" in text["hu"]
+    assert "amíg a BKK FUTÁR nem válaszol" in text["hu"] and "hibás" not in text["hu"]
+    assert "Volán intercity and Volánbusz local" in text["en"]
+    assert "while BKK FUTÁR does not answer" in text["en"]

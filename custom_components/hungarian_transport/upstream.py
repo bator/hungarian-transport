@@ -10,7 +10,9 @@ upstream module configures these two instead of writing its own:
   copy it has (take, catching the refusal).
 - OutageLog says an outage once: one warning when an upstream (or one key
   of it: a station, a feed URL) starts failing, one info line when it
-  answers again, not one line per card poll.
+  answers again, not one line per card poll; with settle, an upstream
+  failing and answering by turns is not a pair of lines every few seconds
+  either.
 
 Both run on the clock their owner was given at construction (monotonic,
 and sleep where a caller waits). Nothing here needs Home Assistant.
@@ -92,12 +94,17 @@ class TokenBucket:
         if not self._try():
             self._refuse()
 
-    def available(self) -> bool:
-        """Whether take() would get a token now; takes none, counts nothing."""
+    def tokens(self) -> float:
+        """The tokens there are now (refilled with the clock); takes none,
+        counts nothing."""
         now = self._monotonic()
         self._tokens = min(float(self._burst), self._tokens + max(0.0, now - self._at) * self._rate)
         self._at = now
-        return self._tokens >= 1.0
+        return self._tokens
+
+    def available(self) -> bool:
+        """Whether take() would get a token now; takes none, counts nothing."""
+        return self.tokens() >= 1.0
 
     def refund(self) -> None:
         """A token taken for a request that was not sent goes back."""
@@ -124,6 +131,21 @@ class OutageLog:
     With ttl, a key is kept that long at most (then a still failing one is
     warned about again, and one nobody asks for any more does not stay for
     good); with max_entries, at most that many keys, the oldest dropped first.
+
+    With settle, a key that fails again within settle seconds of its last
+    line (the warning or the info line) is not warned about at once: FUTÁR
+    failing and answering every few seconds logged a warning and an info
+    line every few seconds, 58 pairs in ten minutes. Such a failure is said
+    once settle seconds have passed since that line and it still stands (on
+    the next failed, is_down or answered call of any key, so a log nobody
+    asks has nothing to say either), and its end only if it was said: an
+    outage that began within settle of the last line and ended before it was
+    over is the one said before, still under way. So the lines still
+    alternate, every outage lasting settle is warned about (settle late at
+    most), every one warned about is said to end (at once, as without
+    settle), and a key failing by turns logs a pair every settle seconds at
+    most. is_down does not wait for any of it: a key is down from the
+    failure that made it so until it answers, said or not.
     """
 
     def __init__(
@@ -133,40 +155,84 @@ class OutageLog:
         monotonic: Monotonic = monotonic,
         ttl: float | None = None,
         max_entries: int | None = None,
+        settle: float | None = None,
     ) -> None:
         self._logger = logger
         self._monotonic = monotonic
         self._ttl = ttl
         self._max = max_entries
+        self._settle = settle
         # Key -> when its outage began.
         self.down: dict[Hashable, float] = {}
+        # With settle: key -> when its last line was logged, kept for settle
+        # seconds; and the keys down but not said yet -> their warning
+        # (message, args, exc_info), every one of them in down.
+        self._said_at: dict[Hashable, float] = {}
+        self._unsaid: dict[Hashable, tuple[str, tuple[object, ...], BaseException | None]] = {}
 
     def _purge(self) -> float:
         now = self._monotonic()
         if self._ttl is not None:
             for stale in [k for k, since in self.down.items() if now - since >= self._ttl]:
                 del self.down[stale]
+                self._unsaid.pop(stale, None)
+        if self._settle is not None:
+            # An outage not said yet that still stands settle seconds after
+            # the key's last line is said now; then the lines older than
+            # settle are forgotten (they hold nothing back any more).
+            for key in [k for k in self._unsaid if now - self._said_at.get(k, -1e18) >= self._settle]:
+                message, args, exc_info = self._unsaid.pop(key)
+                self._said_at[key] = now
+                self._logger.warning(message, *args, exc_info=exc_info)
+            for old in [k for k, at in self._said_at.items() if now - at >= self._settle]:
+                del self._said_at[old]
         return now
 
-    def failed(self, key: Hashable, message: str, *args: object) -> None:
-        """key failed: message % args as a warning, unless its outage was said."""
+    def failed(
+        self, key: Hashable, message: str, *args: object, exc_info: BaseException | None = None
+    ) -> None:
+        """key failed: message % args as a warning, unless its outage was
+        said (or, with settle, its last line is under settle seconds old:
+        then said once settle has passed, if it still stands); with
+        exc_info, that error's traceback too (a bug's)."""
         now = self._purge()
         if key in self.down:
             return
         if self._max is not None:
             while self.down and len(self.down) >= self._max:
-                del self.down[min(self.down, key=self.down.__getitem__)]
+                oldest = min(self.down, key=self.down.__getitem__)
+                del self.down[oldest]
+                self._unsaid.pop(oldest, None)
+            # A key dropped here only has its outage said sooner (_purge).
+            while self._said_at and key not in self._said_at and len(self._said_at) >= self._max:
+                del self._said_at[min(self._said_at, key=self._said_at.__getitem__)]
         self.down[key] = now
-        self._logger.warning(message, *args)
+        if key in self._said_at:
+            # Within settle of its last line (_purge forgot the older ones).
+            self._unsaid[key] = (message, args, exc_info)
+            self._logger.debug(message, *args)
+            return
+        if self._settle is not None:
+            self._said_at[key] = now
+        self._logger.warning(message, *args, exc_info=exc_info)
 
     def is_down(self, key: Hashable) -> bool:
-        """Whether key's outage was said and it has not answered since
-        (within ttl, when there is one)."""
+        """Whether key failed and has not answered since (within ttl, when
+        there is one), its outage said or not (settle)."""
         self._purge()
         return key in self.down
 
     def answered(self, key: Hashable, message: str, *args: object) -> None:
-        """key answered: message % args as info, if it was down."""
-        self._purge()
-        if self.down.pop(key, None) is not None:
-            self._logger.info(message, *args)
+        """key answered: message % args as info, if it was down and that was
+        said (settle)."""
+        now = self._purge()
+        if self.down.pop(key, None) is None:
+            return
+        if self._unsaid.pop(key, None) is not None:
+            # Its failure was never said: the outage said before goes on
+            # answering, and so does the log.
+            self._logger.debug(message, *args)
+            return
+        if self._settle is not None:
+            self._said_at[key] = now
+        self._logger.info(message, *args)

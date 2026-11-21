@@ -84,7 +84,9 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   a round cancelled before its request ran gives the token back); when it
   is not made or fails, the trips simply have no vehicle that round, logged once at
   debug level, and the planner is not backed off. Each route's answer
-  size is remembered for three hours: a request takes the routes that fit
+  size is remembered for three hours, reckoned from its patterns and
+  vehicles (250 bytes a vehicle; the answer is not encoded again to weigh
+  it): a request takes the routes that fit
   192 KiB by that reckoning (an unseen route counted as 8 KiB), and a
   route that alone went over the cap is left out until its size is
   forgotten (an alias the planner answered with an error teaches no
@@ -175,11 +177,48 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   same shape as from the feeds; `updated` is the time of the planner's
   answer, or the newest feed header when a feed was read too.
 - **When the feeds are read instead.** For the trips of a source whose
-  planner request fails (an HTTP error, 429 included, a timeout, an answer
-  that is not JSON, a GraphQL error not tied to one trip), is refused by
-  the integration's rate limit, or falls in the minute's backoff after a
-  failure, but for the trips answered within their interval or still kept
-  (see Caching): those stay the planner's. When the call's planner round,
+  planner request fails, is refused by the integration's rate limit, or
+  falls in the minute's backoff after a failure, but for the trips
+  answered within their interval or still kept (see Caching): those stay
+  the planner's. The planner failing (no answer, a timeout, HTTP 5xx, 429
+  or 403, an answer that is not JSON) backs every planner request off for
+  a minute, the BKK boards' too (see Outages). A request failing for its
+  own sake (an answer over its cap, a GraphQL error not tied to one trip,
+  another HTTP 4xx, an answer its decoding in the executor did not finish
+  within the request's timeout) backs nothing off and is logged at debug
+  level only. A request of one trip (or route list) holds that one back
+  for a minute, matched on the feeds meanwhile, and for twice as long
+  every time it fails alone again, up to 15 minutes (an answer for it
+  starts that again at a minute); one of several holds none
+  back: for the next 15 minutes each of its trips goes in a request of
+  half as many trips at most, down to the one that fails it alone, which
+  alone is held, and asked alone from then on for as long as it fails
+  (each failure renews that for 15 minutes past its hold, so it never
+  rejoins a full request to fail it again); a trip that had no answer
+  lately goes after the ones never asked, so it never takes every round
+  from them; another card's trips are asked as before. Six requests of a
+  kind (trips, route lists: the route lists answering do not hide that
+  every trip request fails) in a row failing so, for six trips or route
+  lists at least, no answer of that kind in between, are no bad trip's
+  but the planner refusing every request (a schema change it answers
+  with a GraphQL error without a path, an HTTP 400 for any body): that is
+  an outage from then on, one warning and the shared minute's backoff,
+  until a request of that kind is answered. What those six split and held
+  is undone then, and the outage's probes ask as many trips as ever, so
+  the first request after the planner is back answers every trip (before,
+  every trip was left at one a request for 15 minutes, a trip a poll
+  answered). A trip of the wrong shape in an
+  answer is that trip's failure alone (held for the minute), the others
+  are answered. A bug of the integration's own reading of an answer (a
+  `TypeError`, `KeyError` and the like, which no answer causes) fails its
+  request as one failing for its own sake, so only the trip whose data
+  meets the bug ends up held, and is logged as a warning with its
+  traceback once an hour per kind of request (trips, route lists,
+  vehicles) and place in the code, rather than moving all MÁV realtime to
+  the feeds without a word, or warning again after every other answer
+  read. It is never part of the six (the planner answered): a release
+  whose reading code fails on every answer is that warning, not "Realtime
+  source unavailable" and a backoff of the BKK boards too. When the call's planner round,
   waiting for other cards' requests and, after a restart, the static train
   numbers' download included, takes over 20 s (a request is begun only
   with at least 10 s of that left, so waiting alone is no outage; numbers
@@ -197,7 +236,8 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   no realtime data for is no reason to read the feeds either. A route +
   start the planner does not resolve (a route it does not know, no trip at
   that minute, or the route list failing) is matched on the feeds, which
-  are then read too. A train likewise, as above.
+  are then read too; the route lists cached already still answer when the
+  request for the others fails. A train likewise, as above.
 - **Caching.** Each trip's answer is kept per trip and service date for
   the feed's `interval` (60 s), each route's trip list for three hours,
   shared by every card and browser; one trip or route-list request at a
@@ -267,7 +307,14 @@ A stop without its own update takes the nearest earlier stop's delay
 (GTFS-Realtime delays propagate down the trip). Delays more than 20 minutes
 early or six hours late are dropped as feed glitches (a vehicle logged on to
 the wrong trip reports -85 minutes on every stop), and a position older than
-15 minutes is not shown.
+15 minutes, or stamped more than 5 minutes ahead of now (it would never
+grow old), is not shown. A predicted time more than two days from now is
+no prediction, and a feed header's timestamp that far ahead is no
+`updated`; from the planner, a service day outside 2000-2100, a time more
+than a day before or two days after it, a delay over two days either way
+and a vehicle timestamp outside those years are no number at all. So no
+answer has a number Home Assistant's JSON cannot hold (past 64 bits),
+which failed the whole action's response.
 
 ### Precedence
 
@@ -314,9 +361,11 @@ before, and the card fills the board from Transitous.
   160 kB), the patterns with the most rows giving way first past that.
   So a three-hour card, or one filtered to a sparse line's destination,
   still gets its rows.
-- **Stops the planner lacks.** A stop (or station) the planner answers
-  null for is remembered for 12 hours: FUTÁR keeps its whole budget there
-  and the planner is not asked again meanwhile (HÉV stops; the MÁV
+- **Stops the planner lacks.** A stop (or station, or a station's poles)
+  the planner answers null for is remembered for 10 minutes, and once it
+  answered null twice in a row for 12 hours (one null can be the planner's
+  own, a graph being reloaded): FUTÁR keeps its whole budget there and the
+  planner is not asked again meanwhile (HÉV stops; the MÁV
   stations on FUTÁR's boards, `BKK_005510017` and `BKK_005501024` at
   Kelenföld, which the planner has only as MÁV's `1:005510017`: a MÁV
   board in FUTÁR's shape would carry MÁV trip and route ids the card's
@@ -326,7 +375,8 @@ before, and the card fills the board from Transitous.
   the 38 of FUTÁR's combined stations (`BKK_CSF…`) that BKK's GTFS has
   (`BKK_CSF00062`, Batthyány tér): the first board of such a station
   FUTÁR cannot give asks the planner for the station itself, and whether
-  it knew it is kept for 12 hours. The others are FUTÁR's alone
+  it knew it is kept as for a stop (12 hours, a null 10 minutes until it
+  was two in a row). The others are FUTÁR's alone
   (`BKK_CSF01131`, the Keleti preset, and the parent station
   `BKK_CS007896`, the Kelenföld one, are null in the planner): their
   board is merged from their child poles' boards, the poles FUTÁR's own
@@ -359,17 +409,34 @@ before, and the card fills the board from Transitous.
 - **No key, no planner.** Without a FUTÁR key the action does not exist and
   the cards read Budapest from Transitous; the planner alone would not
   answer the searches and route patterns a card with the action asks for.
-- **Limits.** One planner request per stop per 15 s for every card and
+- **Limits.** One planner request per stop per 35 s for every card and
   horizon together (a request the limit or a backoff kept from being sent
   does not count; one sent that failed leaves FUTÁR its whole budget for
-  that stop for those 15 s), while FUTÁR fails (the widest window, eight hours, is
-  asked, 60 departures a pattern, and each card's horizon cut from it; an
-  answer of up to 2 MB); the trip details asked within 50 ms go in one
+  that stop for those 35 s), while FUTÁR fails (the widest window, eight hours, is
+  asked, 60 departures a pattern, and each card's horizon cut from it at
+  the time it is given, so a cached board stays right for its timetable
+  and its delays are at most 35 s old; the cards poll every 20 s at the
+  earliest, 45 s by default, so a shorter time only shared one poll among
+  the viewers asking at once; an answer of up to 2 MB, one of 512 kB or
+  more decoded and made into rows in Home Assistant's executor, not on its
+  event loop); the trip details asked within 50 ms go in one
   request of up to 40 trips, cached 60 s, a trip never waiting for an
   earlier request. These requests have a share of the integration's one
   planner limit (see [Polling](#polling)): 0.25 a second with a burst of
-  15, within the total's 0.5 and 30. A call failing fast on a rejected key
-  first takes a token of FUTÁR's own rate limit, as a call to FUTÁR would.
+  15, within the total's 0.5 and 30. A call failing fast on a rejected key,
+  or answered by the planner first in FUTÁR's outage, first takes a token
+  of FUTÁR's own rate limit, as a call to FUTÁR would; one the planner
+  cannot take after all (its share used up, or no answer) asks FUTÁR with
+  that same token: one request, one token. The cards asking one board or
+  trip at once in FUTÁR's outage share the planner asked first, one token
+  of FUTÁR's and one of the planner's for them all, as they share one
+  FUTÁR request outside it; a token taken for a request that was not sent
+  after all (it joined one under way, or the key was rejected meanwhile)
+  goes back. A board or trip details the planner holds (its 35 s and
+  60 s caches, or a request under way) are answered from there without a
+  planner token, also once the share is used up: a second card, horizon
+  or browser asking a board the planner just gave does not wait for FUTÁR
+  then.
 - **Failures.** The planner failing (no answer, a timeout, HTTP 5xx, 429
   or 403, a page that is not JSON: a maintenance or Cloudflare page) is
   not asked for 30 s, by the realtime hub either, logged once. A
@@ -378,8 +445,51 @@ before, and the card fills the board from Transitous.
   that stop's or those trips' alone: they are not asked for 10 minutes,
   nobody backs off, and it is logged at debug level only. A GraphQL error
   that names one trip of a batch (OTP's `DataFetchingException` of a bad
-  id or date has the alias as its path) makes that trip no answer and
-  leaves the others'.
+  id or date has the alias as its path), or one trip of the wrong shape,
+  makes that trip no answer (not asked for 10 minutes) and leaves the
+  others'. An answer decoded in the executor gets what is left of the
+  request's timeout, and a second at least (the answer is waited for a
+  second less than the timeout, so the whole stays within it): past it
+  the stop is asked again after the board's 35 s, as when the planner
+  times out, not held for 10 minutes, and nobody backs off. A bug of the
+  integration's reading of a board's answer is that request's failure; a
+  bug met by one trip of a batch of trip details fails that trip alone
+  (not asked for 10 minutes), the others are answered. Either is a warning
+  with its traceback once an hour per kind (boards, trip details) and
+  place in the code, however many answers are read meanwhile.
+- **FUTÁR's outage.** Once FUTÁR failed (and until it answers again), a
+  board or trip details the planner can answer is asked of the planner
+  first, at once, and FUTÁR is not waited for: before, every poll waited
+  8 s for a FUTÁR that was down (18 s once the planner's share was used
+  up), holding a planner token meanwhile. FUTÁR itself is asked by one
+  request at most every 30 s (the probe; any other request sent to FUTÁR
+  meanwhile, a search or route details, counts as one), as below: FUTÁR
+  first, cut short, the planner after it. Its answer ends the outage, and
+  every request asks FUTÁR first again. A board FUTÁR's own cache holds
+  (answered within 15 s), or whose FUTÁR request is under way (the probe),
+  is answered from it or joins it, as outside the outage, for no token.
+  What the planner cannot answer (a
+  stop it lacks, its share used up, no answer from it) asks FUTÁR as
+  before, with what is left of the card's 20 s. So once the planner's BKK
+  share is used up, every board and trip detail of every card goes to
+  FUTÁR directly with its whole budget, as a search or route details does,
+  and no probe is needed then (each of them is one). They are not capped
+  beyond FUTÁR's own rate limit (5 a second, a burst of 400, a token waited
+  for 4 s at most) and the card's own gate (4 to 24 calls under way per
+  dashboard): until its budget runs out the integration cannot tell a slow
+  FUTÁR from a hanging one, and a slow one (10 s a board) still answers
+  them, which a cap on the calls under way would refuse.
+- **Logged once, also when it flaps.** FUTÁR's outage is one warning when
+  it starts failing and one info line when it answers again. FUTÁR failing
+  again within 5 minutes of either line is not warned about at once: a
+  FUTÁR down and up every few seconds logged a pair of lines every few
+  seconds (58 of each in ten minutes). Such a failure is warned about once
+  the 5 minutes have passed and it still stands (on the next request), and
+  its end is said only then; one that ended before is the outage said
+  before, still under way. The lines still alternate, a flapping FUTÁR logs
+  a pair every 5 minutes at most, and an outage lasting that long is said
+  5 minutes late at most. None of this waits for the log: the planner is
+  asked first from the failure on, said or not, until FUTÁR answers.
 - **The card's 20 s.** FUTÁR gets 8 s of the card's 20 s only while its
   outage stands (it failed and has not answered since; while it answers,
   no token is reserved and FUTÁR keeps its whole budget, and a request
@@ -391,7 +501,8 @@ before, and the card fills the board from Transitous.
   the planner knows or has not been asked about yet, or whose poles are
   known, a timetable trip, none of them failed lately, the planner not
   backing off) and a token of the boards' share is reserved for its
-  answer before FUTÁR is asked: a dashboard's boards at once (40 poles)
+  answer before FUTÁR is asked (none for an answer the planner's caches
+  hold: it asks the planner nothing): a dashboard's boards at once (40 poles)
   cut FUTÁR short for as many as the share holds, and the rest keep
   FUTÁR's whole budget, so a slow FUTÁR still answers them. The trip
   details reserved within 50 ms of each other share one token (up to one
@@ -404,7 +515,9 @@ before, and the card fills the board from Transitous.
   answered every trip on it), when every card that saw that request fail
   is done without spending it (a card asking the same again later does
   not hold it), and when every card that asked has left before FUTÁR
-  failed. Unloading the entry ends the trip-detail requests under way at
+  failed, if that is within a second of its reservation; held longer, it
+  counts as spent (the share refills meanwhile: 15 tokens given back after
+  FUTÁR's 8 s let 18 requests go at once, past the burst of 15). Unloading the entry ends the trip-detail requests under way at
   once (their callers get no answer), and a fallback under way then asks
   the planner nothing. The planner then has 6 s. Elsewhere FUTÁR keeps
   the whole budget, and after it failed the planner is asked only if its
@@ -435,14 +548,22 @@ before, and the card fills the board from Transitous.
   key. The integration asks it, while a card is shown, for the delays of
   the trips the card shows, at most once a minute per trip, and, only
   while BKK FUTÁR fails, for the departure boards of the Budapest stops
-  the cards show (once per stop per 15 s) and their trips' details (once
+  the cards show (once per stop per 35 s) and their trips' details (once
   a minute per trip). All of it counts against one limit of one request
   every two seconds with a burst of 30 per Home Assistant, the BKK boards
   at most half of that. It keeps the answers in memory only, for those
-  intervals, and republishes nothing. Removing the `"mavplusz": true` keys
-  from `realtime_feeds.json` turns the delays off (the cards then read
-  only the feeds, as before 1.10.19); without a FUTÁR key no BKK board is
-  asked of the planner.
+  intervals, and republishes nothing. **Opting out:** Settings → Devices &
+  services → Hungarian transport → Configure → *Ask mavplusz.hu (MÁV's
+  journey planner)*, on by default. Off, Home Assistant sends nothing to
+  mavplusz.hu: no delays, no vehicles, no BKK boards. The trains and buses
+  then read only the `jbb.ghsq.de` feeds (as before 1.10.19), and a
+  Budapest board or trip FUTÁR cannot answer gets FUTÁR's error, so the
+  card fills it from Transitous. Saving the option reloads the entry; the
+  next card poll follows it, and the one rate limit every planner request
+  takes its token from reads the option too, so a request already on its
+  way (a poll queued behind another card's) is not sent after it either. Removing the `"mavplusz": true` keys from
+  `realtime_feeds.json` turns only the delays off; without a FUTÁR key no
+  BKK board is asked of the planner either way.
 - **Not redistributed.** The integration does not republish any feed or
   planner answer: each Home Assistant fetches it for its own cards, keeps
   it in memory only, and shows the derived delay and position.
@@ -478,7 +599,7 @@ Should either side object, removing the operator from `realtime_feeds.json`
   the vehicles of the live realtime-pattern trips' routes; JSON in,
   gzip, the same User-Agent, no redirects, a 20-second timeout, 1 MB per
   answer at most. While BKK FUTÁR fails, also the BKK boards (per stop per
-  15 s) and trip details (see [BKK boards when FUTÁR
+  35 s) and trip details (see [BKK boards when FUTÁR
   fails](#bkk-boards-when-futár-fails)), with a User-Agent of their own.
   All planner requests of one Home Assistant share one rate limit, apart
   from the feeds' (asking the planner for many trips does not hold back
@@ -496,7 +617,8 @@ Should either side object, removing the operator from `realtime_feeds.json`
   again, and the feeds meanwhile. The backoff is shared: the planner
   failing the BKK boards' requests (30 s; not a board's own failure, see
   [BKK boards when FUTÁR fails](#bkk-boards-when-futár-fails)) holds back
-  the delays' requests too, and the other way round. The vehicle requests
+  the delays' requests too, and the other way round (not a delay
+  request's own failure either: that holds back its own trips only). The vehicle requests
   alone back off on their own (3 minutes) and set no shared backoff.
 
 ## The action

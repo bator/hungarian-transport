@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -637,6 +638,77 @@ with tempfile.TemporaryDirectory() as tmp:
     err = raises(lambda: release_build(carry=no_shapes / out.name))
     check("a failed feed whose previous shapes cannot be read is not carried, and the guard refuses it",
           isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
+
+    # HUNGARIAN_TRANSPORT_HTTPS_ONLY=1 (which neither workflow sets: the
+    # weekly Pages build leaves it unset on purpose, as a release does, so
+    # that Miskolc, whose https certificate names another host, keeps coming
+    # over plain http): a feed that only works over http then fails as any
+    # failed download, and keeps its part in place; unset, it comes over
+    # http.
+    down.clear()
+    bci.CITY_FEEDS = [dict(f, url="http://b.example/b.zip", insecure=True) if f["id"] == "b" else f
+                      for f in bci.CITY_FEEDS]
+    asked: list[str] = []
+    real_zip = gc.download_zip
+
+    def tls_broken(url: str, dest: Path, **_kw) -> dict:
+        asked.append(url)
+        if url.startswith("https://b."):
+            raise OSError("certificate names another host")
+        gtfs_zip(dest, feeds[Path(url).stem])
+        return {"size": dest.stat().st_size}
+
+    gc.download_zip = tls_broken
+    bci.download_feed = gc.download_feed
+    try:
+        info = release_build(carry=carry)
+        check("without HUNGARIAN_TRANSPORT_HTTPS_ONLY an http-only feed comes over http (release builds)",
+              info["carried"] == {} and "http://b.example/b.zip" in asked and "b" in operator_trips(out), repr(info))
+        asked.clear()
+        os.environ[gc.HTTPS_ONLY_ENV] = "1"
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            info = release_build(carry=carry)
+        check("with HUNGARIAN_TRANSPORT_HTTPS_ONLY=1 an http-only feed is never asked over http: it keeps its"
+              " part of the index in place, as any failed feed, with the reason",
+              set(info["carried"]) == {"b"} and gc.HTTPS_ONLY_ENV in info["carried"]["b"]
+              and "http://b.example/b.zip" not in asked and "https://b.example/b.zip" in asked
+              and out.read_bytes() == previous_bytes and "::warning title=City feed carried over::" in buf.getvalue(),
+              repr((info, asked)))
+        err = raises(release_build)
+        check("with HUNGARIAN_TRANSPORT_HTTPS_ONLY=1 and nothing to carry, the guard refuses the lost feed",
+              isinstance(err, IndexGuardError) and "b missing" in str(err), repr(err))
+    finally:
+        os.environ.pop(gc.HTTPS_ONLY_ENV, None)
+        gc.download_zip = real_zip
+        bci.download_feed = flaky_download
+    bci.CITY_FEEDS = [dict(f, url="https://b.example/b.zip", insecure=False) if f["id"] == "b" else f
+                      for f in bci.CITY_FEEDS]
+
+    # A feed_version dated more than MAX_FEED_AHEAD_DAYS after the build (a
+    # publisher writing feed_end_date as the version) would outrank every
+    # correct feed after it in installs: the zip does not load, and the
+    # feed keeps its part in place.
+    real_c = feeds["c"]
+    for version, carried_want in (("20281231", {"c"}), ("20271220", set())):
+        feeds["c"] = {**real_c, "feed_info.txt": f"feed_publisher_name,feed_version\nC,{version}\n"}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            info = release_build(carry=carry)
+        why = info["carried"].get("c", "")
+        check(f"a feed_version {version} against a build on 2026-11-15 (limit {bci.MAX_FEED_AHEAD_DAYS} days): "
+              + ("refused, the part in place kept, the reason named" if carried_want else "taken"),
+              set(info["carried"]) == carried_want
+              and (("more than 400 days after 2026-11-15" in why and out.read_bytes() == previous_bytes)
+                   if carried_want else "c" in operator_trips(out)), repr((info, buf.getvalue()[-300:])))
+    feeds["c"] = {**real_c, "feed_info.txt": "feed_publisher_name,feed_version\nC,20281231\n"}
+    err = raises(release_build)
+    check("a far-future feed with nothing to carry: the guard refuses the lost feed",
+          isinstance(err, IndexGuardError) and "c missing" in str(err), repr(err))
+    feeds["c"] = real_c
+    check("feed_too_far reads the date as the integration does, and only a date",
+          bci.feed_too_far("01716.20281231", "20261115") and not bci.feed_too_far("1.3", "20261115")
+          and not bci.feed_too_far("20271220", "20261115") and not bci.feed_too_far("", "20261115"))
 bci.CITY_FEEDS = real_feeds
 
 # The Volán index keeps its overall guard: one feed, so the total is the feed.
@@ -1138,7 +1210,9 @@ with tempfile.TemporaryDirectory() as tmp:
                          SystemExit)
     finally:
         bci.__file__ = real_file
-    ns = {"__name__": "build_city_index_copy"}
+    # As an import gives it: a __name__ and a __file__ (the module puts its
+    # package folder on sys.path by it).
+    ns = {"__name__": "build_city_index_copy", "__file__": real_file}
     imported = raises(lambda: exec(compile(copy.read_bytes(), str(copy), "exec"), ns))  # noqa: S102
     check("--write is refused for a feed whose CITY_FEEDS entry does not name its tables, and"
           " build_city_index still imports", err is not None and "PECS_STOP_IDS" in str(err)
@@ -1876,6 +1950,42 @@ with tempfile.TemporaryDirectory() as tmp:
     check("the 318 trip and its Erdőkertes stop are in the Volán index",
           routes == ["318"] and erd >= 0 and erd in built["t"][0][2], repr((routes, names)))
     check("the town line's stops are not", "Balatonfűzfő, Fövenyfürdő" not in names, repr(names))
+
+# build_city_index and pages_timetables import served_index from the
+# integration's package folder themselves: in a process that imported
+# gtfs_compact before and put sys.path back since (pytest's
+# monkeypatch.syspath_prepend, tests/test_weekly_timetables.py), the
+# folder gtfs_compact added is gone again.
+_order = subprocess.run([sys.executable, "-c", (
+    "import sys\n"
+    f"sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
+    "saved = list(sys.path)\n"
+    "import gtfs_compact\n"
+    "sys.path[:] = saved\n"
+    "for name in ('served_index', 'gtfs_feed', 'build_city_index', 'pages_timetables'):\n"
+    "    sys.modules.pop(name, None)\n"
+    "import build_city_index, pages_timetables\n"
+    "print(build_city_index.feed_date is pages_timetables.feed_date)\n")],
+    capture_output=True, text=True, timeout=60)
+check("build_city_index and pages_timetables import after gtfs_compact's sys.path entry was taken back",
+      _order.returncode == 0 and _order.stdout.strip() == "True", _order.stderr[-600:])
+# pages_timetables on its own, with gtfs_compact and mav_pages_site (which
+# adds the package folder too) imported before and sys.path put back: only
+# its own entry finds served_index (a test importing it alone after the
+# MÁV site tests, say).
+_alone = subprocess.run([sys.executable, "-c", (
+    "import sys\n"
+    f"sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
+    "saved = list(sys.path)\n"
+    "import gtfs_compact, mav_pages_site\n"
+    "sys.path[:] = saved\n"
+    "for name in ('served_index', 'pages_timetables'):\n"
+    "    sys.modules.pop(name, None)\n"
+    "import pages_timetables\n"
+    "print(pages_timetables.head_feed.__module__, pages_timetables.HEAD_BYTES > 0)\n")],
+    capture_output=True, text=True, timeout=60)
+check("pages_timetables imports alone after gtfs_compact's and mav_pages_site's sys.path entries were taken back",
+      _alone.returncode == 0 and _alone.stdout.strip() == "served_index True", _alone.stderr[-600:])
 
 if failed:
     sys.exit(1)

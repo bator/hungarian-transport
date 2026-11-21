@@ -9,13 +9,15 @@
   installed this index, else the local updater script when its durable
   copy is this index, else a release), and the last weekly round's time
   and result for it (pages_checked_at, pages_result: "disabled" when the
-  weekly timetables are turned off).
+  weekly timetables are turned off), why it did not install (pages_reason)
+  and, while a round is still settling, its reason (pages_settling).
 - City timetables: the city index's build time; operators, trips, the
-  per-operator feeds when there are only a few, and source, pages_checked_at
-  and pages_result as the Volán one.
+  per-operator feeds when there are only a few, and source, pages_checked_at,
+  pages_result, pages_reason and pages_settling as the Volán one.
 - Daily MÁV check: when the daily MÁV index last ran (mav_daily.py); its
-  result, the manifest's feed and build time, the next round and the
-  failure streak in days. Result "disabled" when it is turned off.
+  result and why it did not go through (reason), the manifest's feed and
+  build time, the next round and the failure streak in days. Result
+  "disabled" when it is turned off.
 
 Data: timetables.TimetableStatus (entry.runtime_data).
 """
@@ -107,13 +109,19 @@ def _timetable_source(status: TimetableStatus, key: str) -> str:
 
 
 def _pages_attrs(status: TimetableStatus, key: str) -> dict[str, Any]:
-    """The last weekly round's time and result for the index key."""
+    """The last weekly round's time, result and reason for the index key,
+    and the reason of a round still settling."""
     if not status.pages_enabled:
         return {"pages_result": DISABLED}
     rounds = status.record.get(storage.PAGES_ROUND)
     last = rounds.get(key) if isinstance(rounds, dict) else None
     last = last if isinstance(last, dict) else {}
-    return {"pages_checked_at": last.get("at"), "pages_result": last.get("result")}
+    return {
+        "pages_checked_at": last.get("at"),
+        "pages_result": last.get("result"),
+        "pages_reason": last.get("reason"),
+        "pages_settling": last.get("settling"),
+    }
 
 
 def _volan_value(status: TimetableStatus) -> date | None:
@@ -173,6 +181,7 @@ def _daily_attrs(status: TimetableStatus) -> dict[str, Any]:
     return _compact(
         {
             "result": last.get("result"),
+            "reason": last.get("reason"),
             "manifest_feed": last.get("manifest_feed"),
             "manifest_built_at": last.get("manifest_built_at"),
             "next_run": _iso(status.next_run),

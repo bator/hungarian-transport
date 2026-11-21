@@ -7983,6 +7983,72 @@ const settle = async (el) => {
   Object.assign(Lib, keep);
 }
 
+/* The city index's stop row carries the feed's own id as its fifth element
+   when the build kept an older id for the stop (keep_stop_ids, Szeged's
+   new source): the loader keeps it as fid, and the realtime request names
+   the stop by it, as the feed does. */
+{
+  const keepFetch = Lib._fetchIndexBytes;
+  const raw = {
+    v: 29,
+    o: [['szeged', 'Szeged — SZKT']],
+    s: [['szeged:A', 'Anna-kút', '1', 0], ['szeged:OLD', 'Név', '1', 0, 'szeged:NEW'], ['szeged:C', 'Mars tér', '3', 0, '']],
+    c: [['1111111', '20000101', '20991231']],
+    t: [[0, '1', [0, 1, 2], [480, 482, 484], 3, -1, 'T1']],
+  };
+  Lib._fetchIndexBytes = async () => ({ status: 200, bytes: new TextEncoder().encode(JSON.stringify(raw)) });
+  let idx;
+  try {
+    idx = await Lib._loadGtfsIndex('http://x/city-index.json?v=20261119', 'errCityHttp', 'errCityGunzip');
+  } finally {
+    Lib._fetchIndexBytes = keepFetch;
+  }
+  const d = Lib.rtGtfsDescriptor('szeged', idx, idx.t[0], 0, 2, '20261119');
+  const ask = Lib.rtRequest({ tripId: 'gtfs:1:20261119:480:0', rt: d }, {});
+  check('a loaded stop row’s fifth element is the stop’s feed id, sent in the realtime request',
+    idx.stops[1].id === 'szeged:OLD' && idx.stops[1].fid === 'szeged:NEW'
+      && !('fid' in idx.stops[0]) && !('fid' in idx.stops[2])
+      && JSON.stringify(ask.req.stops) === '["A","NEW","C"]' && Lib.gtfsStopById(idx, 'szeged:OLD') === idx.stops[1],
+    JSON.stringify({ stops: idx.stops.map((st) => [st.id, st.fid]), req: ask && ask.req }));
+}
+
+/* A city→rail plan from a saved stop Szeged's feed dropped (November 2026)
+   finds no origin: not "Körtöltés utca", whose name contains the saved
+   "Töltés utca" and which does reach the station. */
+{
+  const IX = indexes();
+  const keep = { railAfterCity: Lib.railAfterCity };
+  const realNow = Date.now;
+  const names = ['Körtöltés utca', 'Szeged vasútállomás'];
+  const stops = names.map((n, i) => ({
+    i, id: 'szeged:' + i, name: n, num: '', op: 0, key: Lib.norm(n), fold: Lib.fold(n), lat: 46.24 + i * 0.01, lon: 20.14,
+  }));
+  const t = [];
+  for (let m = 0; m < 24 * 60; m += 10) t.push([0, 'S', [0, 1], [m, m + 12], 3]);
+  const idx = {
+    stops, t, c: [['1111111', '20200101', '20991231']], a: [], r: [],
+    ops: [{ i: 0, id: 'szeged', name: 'Szeged — SZKT' }],
+    byId: new Map(stops.map((st) => [st.id, st])), byNum: new Map(), byKey: new Map(stops.map((st) => ['0:' + st.key, st])),
+    byAlias: new Map(),
+  };
+  IX.city = async () => idx;
+  Lib.railAfterCity = async () => null;
+  Date.now = () => Date.UTC(2026, 10, 19, 8, 3);
+  let own;
+  let gone;
+  try {
+    own = await Lib.cityRailJourney(IX, '', null, { id: 'szeged:0', name: 'Körtöltés utca' }, { id: 'BKK_005517228', name: 'Szeged' });
+    gone = await Lib.cityRailJourney(IX, '', null, { id: 'szeged:2429103599', name: 'Töltés utca' }, { id: 'BKK_005517228', name: 'Szeged' });
+  } finally {
+    Date.now = realNow;
+    Object.assign(Lib, keep);
+  }
+  check('Körtöltés utca itself reaches the station', !!own && own.legs.some((l) => l.to === 'Szeged vasútállomás'),
+    JSON.stringify(own && own.legs.map((l) => [l.label || 'walk', l.to])));
+  check('a gone stop named “Töltés utca” plans nothing, not from Körtöltés utca', gone == null,
+    JSON.stringify(gone && gone.legs.map((l) => [l.label || 'walk', l.from, l.to])));
+}
+
 /* The origin's other pole is a start of its own: no 3 minute walk to it
    duplicates its paths and eats the station's budget, and a walk that is
    taken first is part of the path it costs. */

@@ -10,14 +10,26 @@ it holds:
   that is not this one (another feed or size) came with a release, or from
   the local updater script;
 - DAILY_ROUND: the last round of the daily MÁV index: when, its result,
-  and the manifest's feed and build time;
+  the manifest's feed and build time, and why it did not install (reason,
+  mav_daily.reason_of) when it failed or was unsupported;
 - TIMETABLES_INSTALL: per index ("volan", "city"), what the weekly
   timetables from GitHub Pages (weekly_timetables.py) installed last: its
   feed, sha256, gzipped size and time. An index www/ serves that is not
   this one (another feed or size) came with a release, or from the local
   updater script;
 - PAGES_ROUND: per index, the last round of the weekly timetables that
-  settled it: when, its result and the manifest's feed.
+  settled it: when, its result, the manifest's feed and, for a result that
+  is not an install, why (reason: "release_newer", "served_newer",
+  "bad_signature", "unknown_key", "not_found", "mismatch", "too_large" or
+  the error's text, at most mav_daily.MAX_REASON long). A round that is still settling
+  (a download did not match its manifest for the first time) leaves the
+  settled record as it is and adds settling, its reason, until the next
+  round that settles replaces the record.
+
+- UNKNOWN_KEY_SEEN: per signed manifest ("mav-index.json",
+  "timetables.json"), on how many consecutive days a round found it signed
+  by a key this version does not know (mav_daily.check_signature): days,
+  and the last such day. A signature that verifies removes it.
 
 Every writer sends SIGNAL_TIMETABLES afterwards; the sensors read the
 indexes again (only the ones whose file changed) and the record.
@@ -36,7 +48,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from homeassistant.core import HomeAssistant, callback
@@ -55,6 +67,7 @@ MAV_INSTALL = "mav_install"
 DAILY_ROUND = "mav_daily_round"
 TIMETABLES_INSTALL = "timetables_install"
 PAGES_ROUND = "pages_timetables_round"
+UNKNOWN_KEY_SEEN = "unknown_key_seen"
 # MAV_INSTALL sources; an index without a matching record is a release's
 # (or the local updater's, timetables.py tells).
 SOURCE_DAILY = "daily"
@@ -164,19 +177,23 @@ async def async_record_mav_install(
 
 
 async def async_record_daily_round(
-    hass: HomeAssistant, result: str, manifest_feed: str | None, manifest_built_at: datetime | None
+    hass: HomeAssistant,
+    result: str,
+    manifest_feed: str | None,
+    manifest_built_at: datetime | None,
+    reason: str | None = None,
 ) -> None:
-    """A round of the daily MÁV index ended with result."""
-    await _async_put(
-        hass,
-        DAILY_ROUND,
-        {
-            "at": dt_util.utcnow().isoformat(),
-            "result": result,
-            "manifest_feed": manifest_feed,
-            "manifest_built_at": manifest_built_at.isoformat() if manifest_built_at else None,
-        },
-    )
+    """A round of the daily MÁV index ended with result (for reason, when it
+    did not go through)."""
+    record: dict[str, Any] = {
+        "at": dt_util.utcnow().isoformat(),
+        "result": result,
+        "manifest_feed": manifest_feed,
+        "manifest_built_at": manifest_built_at.isoformat() if manifest_built_at else None,
+    }
+    if reason:
+        record["reason"] = reason
+    await _async_put(hass, DAILY_ROUND, record)
 
 
 async def _async_merge(hass: HomeAssistant, key: str, records: dict[str, dict[str, Any]]) -> None:
@@ -204,14 +221,72 @@ async def async_record_timetables_install(
     )
 
 
-async def async_record_pages_round(hass: HomeAssistant, results: dict[str, tuple[str, str | None]]) -> None:
+async def async_record_pages_round(
+    hass: HomeAssistant,
+    results: dict[str, tuple[str, str | None] | tuple[str, str | None, str | None]],
+    settling: dict[str, str] | None = None,
+) -> None:
     """A round of the weekly timetables settled these indexes: name ->
-    (result, the manifest's feed for it)."""
-    if not results:
+    (result, the manifest's feed for it[, why: the reason, None for none]).
+    settling: the indexes it left settling, name -> reason; their settled
+    records stay, with settling added (a record that later settles drops
+    it)."""
+    if not results and not settling:
         return
     at = dt_util.utcnow().isoformat()
-    await _async_merge(
-        hass,
-        PAGES_ROUND,
-        {name: {"at": at, "result": result, "manifest_feed": feed} for name, (result, feed) in results.items()},
-    )
+    records: dict[str, dict[str, Any]] = {}
+    for name, (result, feed, *why) in results.items():
+        record: dict[str, Any] = {"at": at, "result": result, "manifest_feed": feed}
+        if why and why[0]:
+            record["reason"] = why[0]
+        records[name] = record
+    if settling:
+        current = (await async_load(hass)).get(PAGES_ROUND)
+        current = current if isinstance(current, dict) else {}
+        for name, reason in settling.items():
+            last = current.get(name)
+            records[name] = {**(last if isinstance(last, dict) else {}), "settling": reason, "settling_at": at}
+    await _async_merge(hass, PAGES_ROUND, records)
+
+
+async def async_unknown_key_day(hass: HomeAssistant, manifest: str, today: date) -> int:
+    """A round found manifest signed by a key this version does not know,
+    today: on how many consecutive days that has been so, today included
+    (a day without it starts over). Written once a day; a failure is
+    logged, never raised (then 1)."""
+    try:
+        state = await async_load(hass)
+        seen = state.get(UNKNOWN_KEY_SEEN)
+        seen = dict(seen) if isinstance(seen, dict) else {}
+        record = seen.get(manifest)
+        record = record if isinstance(record, dict) else {}
+        days, last = record.get("days"), record.get("last")
+        days = days if isinstance(days, int) and not isinstance(days, bool) and days > 0 else 0
+        if last == today.isoformat() and days:
+            return days
+        days = days + 1 if last == (today - timedelta(days=1)).isoformat() else 1
+        seen[manifest] = {"days": days, "last": today.isoformat()}
+        state[UNKNOWN_KEY_SEEN] = seen
+        await async_save(hass, state)
+    except Exception as err:  # noqa: BLE001 - only how long it has been so
+        _LOGGER.warning("Could not record the timetable status: %s", err)
+        return 1
+    return days
+
+
+async def async_clear_unknown_key(hass: HomeAssistant, manifest: str) -> None:
+    """manifest's signature verified: its unknown-key days end. Written
+    only when there were any; a failure is logged, never raised."""
+    try:
+        state = await async_load(hass)
+        seen = state.get(UNKNOWN_KEY_SEEN)
+        if not isinstance(seen, dict) or manifest not in seen:
+            return
+        seen = {name: record for name, record in seen.items() if name != manifest}
+        if seen:
+            state[UNKNOWN_KEY_SEEN] = seen
+        else:
+            state.pop(UNKNOWN_KEY_SEEN, None)
+        await async_save(hass, state)
+    except Exception as err:  # noqa: BLE001 - only how long it has been so
+        _LOGGER.warning("Could not record the timetable status: %s", err)

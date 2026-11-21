@@ -747,3 +747,121 @@ async def test_an_answer_nested_too_deep_is_an_outage_not_a_failed_call(hass, ai
     aioclient_mock.get(SEARCH, text="[" * size)
     await _setup(hass)
     assert await _call(hass) == {"data": None, "error": "futar_unavailable", "detail": "RecursionError"}
+
+
+class _Ticket:
+    def release(self) -> None:
+        pass
+
+
+class _BoardFallback:
+    """A fallback answering every departure board at once (FutarFallback)."""
+
+    paths = frozenset({"arrivals-and-departures-for-stop.json"})
+    timeout = 6.0
+
+    def __init__(self) -> None:
+        self.asked = 0
+
+    async def answer(self, path, params, ticket=None):
+        self.asked += 1
+        return {"status": "OK", "from": "fallback"}
+
+    def can_answer(self, path, params) -> bool:
+        return True
+
+    def reserve(self, path, params):
+        return _Ticket()
+
+    def learn(self, path, params, data) -> None:
+        pass
+
+
+async def test_a_failure_within_the_settle_is_unsaid_but_an_outage_at_once(monkeypatch, caplog) -> None:
+    """FUTÁR failing again within FUTAR_OUTAGE_LOG_SETTLE_SEC of its "answers
+    again" line is not warned about at once (it flapped: a pair of lines
+    every few seconds), but its outage stands at once all the same: the
+    next board asks the fallback first, FUTÁR not at all. The warning comes
+    once the settle has passed and FUTÁR still fails, and its end after it."""
+    caplog.set_level(logging.INFO, logger=futar.__name__)
+    clock = FakeClock(stopped=True)
+    up = [False]
+    asked: list[str] = []
+
+    async def fake_get(session, api_key, path, params, timeout=None, *, executor=None):
+        asked.append(params.get("stopId", params.get("query")))
+        if not up[0]:
+            raise futar.FutarError("HTTP 503")
+        return {"status": "OK", "data": {}, "from": "futar"}
+
+    monkeypatch.setattr(futar, "futar_get", fake_get)
+    fallback = _BoardFallback()
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep, fallback=fallback)
+    board = "arrivals-and-departures-for-stop.json"
+
+    def lines() -> list[tuple[int, str]]:
+        return [(r.levelno, r.getMessage()) for r in caplog.records if r.name == futar.__name__]
+
+    with pytest.raises(futar.FutarError):
+        await proxy.get("search.json", {"query": "A"})
+    up[0] = True
+    await proxy.get("search.json", {"query": "B"})
+    assert [level for level, _m in lines()] == [logging.WARNING, logging.INFO]
+    clock.now += 10
+    up[0] = False
+    with pytest.raises(futar.FutarError):
+        await proxy.get("search.json", {"query": "C"})
+    assert len(lines()) == 2
+    # Down for the breaker though nothing was said: the fallback first.
+    assert (await proxy.get(board, {"stopId": "BKK_F00001"}))["from"] == "fallback"
+    assert asked == ["A", "B", "C"] and fallback.asked == 1
+    # The settle over, FUTÁR still failing: said now, on the next request.
+    clock.now += futar.FUTAR_OUTAGE_LOG_SETTLE_SEC
+    assert (await proxy.get(board, {"stopId": "BKK_F00002"}))["from"] == "fallback"
+    assert lines()[2:] == [(logging.WARNING, "BKK FUTÁR unavailable (HTTP 503); not logged again until it answers")]
+    up[0] = True
+    await proxy.get("search.json", {"query": "D"})
+    assert lines()[3:] == [(logging.INFO, "BKK FUTÁR answers again")]
+
+
+async def test_without_a_fallback_a_failure_within_the_settle_is_said_on_a_later_failure(monkeypatch, caplog) -> None:
+    """With mavplusz off (no fallback) nothing asks whether FUTÁR is down,
+    so the settle's held-back warning is said by the next failure or answer
+    itself: once the settle has passed and FUTÁR still fails, the warning
+    comes on the next failing request, and its end after it."""
+    caplog.set_level(logging.INFO, logger=futar.__name__)
+    clock = FakeClock(stopped=True)
+    up = [False]
+
+    async def fake_get(session, api_key, path, params, timeout=None, *, executor=None):
+        if not up[0]:
+            raise futar.FutarError("HTTP 503")
+        return {"status": "OK", "data": {}, "from": "futar"}
+
+    monkeypatch.setattr(futar, "futar_get", fake_get)
+    proxy = futar.FutarProxy(None, "k", monotonic=clock.monotonic, sleep=clock.sleep)
+    board = "arrivals-and-departures-for-stop.json"
+
+    def lines() -> list[tuple[int, str]]:
+        return [(r.levelno, r.getMessage()) for r in caplog.records if r.name == futar.__name__]
+
+    with pytest.raises(futar.FutarError):
+        await proxy.get(board, {"stopId": "BKK_F00001"})
+    up[0] = True
+    await proxy.get(board, {"stopId": "BKK_F00002"})
+    clock.now += 10
+    up[0] = False
+    with pytest.raises(futar.FutarError):
+        await proxy.get(board, {"stopId": "BKK_F00003"})
+    assert [level for level, _m in lines()] == [logging.WARNING, logging.INFO]
+    clock.now += futar.FUTAR_OUTAGE_LOG_SETTLE_SEC - 20
+    with pytest.raises(futar.FutarError):
+        await proxy.get(board, {"stopId": "BKK_F00004"})
+    assert len(lines()) == 2  # FUTÁR's last line is not settle seconds old yet
+    clock.now += 10
+    with pytest.raises(futar.FutarError):
+        await proxy.get(board, {"stopId": "BKK_F00005"})
+    assert lines()[2:] == [(logging.WARNING, "BKK FUTÁR unavailable (HTTP 503); not logged again until it answers")]
+    up[0] = True
+    await proxy.get(board, {"stopId": "BKK_F00006"})
+    assert lines()[3:] == [(logging.INFO, "BKK FUTÁR answers again")]
