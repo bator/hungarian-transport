@@ -589,7 +589,8 @@ before, and the card fills the board from Transitous.
   services → Hungarian transport → Configure → *Ask mavplusz.hu (MÁV's
   journey planner)*, on by default. Off, Home Assistant sends nothing to
   mavplusz.hu: no delays, no vehicles, no BKK boards. The trains and buses
-  then read only the `jbb.ghsq.de` feeds (as before 1.10.19), and a
+  then read only the GTFS-Realtime feeds (`jbb.ghsq.de`; Orosháza:
+  `gtfs.gpspositions.net`), as before 1.10.19, and a
   Budapest board or trip FUTÁR cannot answer gets FUTÁR's error, so the
   card fills it from Transitous. Saving the option reloads the entry; the
   next card poll follows it, and the one rate limit every planner request
