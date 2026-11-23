@@ -114,7 +114,8 @@ Executor = Callable[..., Awaitable[Any]]
 # on, and the rest of the card's 20 s is the fallback's (its `timeout`,
 # mavplusz_board's PLANNER_TIMEOUT): the token wait, this and the fallback
 # still answer before the card gives up. FUTÁR is cut short only while its
-# outage stands (it failed, and has not answered since), and only when the
+# outage stands (it failed, or answered HTTP 429, and has not answered
+# since), and only when the
 # token wait left room for this and the fallback both; otherwise nothing is
 # reserved and FUTÁR keeps its whole budget (a slow answer is still an
 # answer), as it does where nothing else could answer (a stop the fallback
@@ -594,7 +595,8 @@ class FutarProxy:
 
     def _reserve(self, path: str, params: dict[str, str], waited: float) -> FallbackTicket | None:
         """The fallback's token for a request FUTÁR is cut short for: only
-        while FUTÁR's outage stands (it failed and has not answered since),
+        while FUTÁR's outage stands (it failed, or answered HTTP 429, and has
+        not answered since),
         and only when FUTÁR's share and the fallback's still answer before
         the card gives up after waited seconds of token wait; else None, and
         FUTÁR keeps its whole budget."""

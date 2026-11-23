@@ -495,8 +495,9 @@ before, and the card fills the board from Transitous.
   Before, that card waited 8 s for a FUTÁR most likely still down, and
   the planner's board could expire meanwhile. Its answer ends the outage, and
   every request asks FUTÁR first again. A board FUTÁR's own cache holds
-  (answered within 15 s), or whose FUTÁR request is under way (the probe),
-  is answered from it or joins it, as outside the outage, for no token.
+  (answered within 15 s), or whose FUTÁR request is under way (the
+  cut-short probe; not the one asked behind a planner answer), is answered
+  from it or joins it, as outside the outage, for no token.
   What the planner cannot answer (a
   stop it lacks, its share used up, no answer from it) asks FUTÁR as
   before, with what is left of the card's 20 s. So once the planner's BKK
@@ -522,7 +523,8 @@ before, and the card fills the board from Transitous.
   5 minutes late at most. None of this waits for the log: the planner is
   asked first from the failure on, said or not, until FUTÁR answers.
 - **The card's 20 s.** FUTÁR gets 8 s of the card's 20 s only while its
-  outage stands (it failed and has not answered since; while it answers,
+  outage stands (it failed, or refused the key's calls as too many with
+  HTTP 429, and has not answered since; while it answers,
   no token is reserved and FUTÁR keeps its whole budget, and a request
   failing fast still falls back with a token taken then; the first
   request hanging for FUTÁR's whole budget gets no planner answer and

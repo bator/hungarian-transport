@@ -478,8 +478,11 @@ def test_mavplusz_option_says_what_goes_where(lang) -> None:
     init = json.loads((folder / f"{lang}.json").read_text(encoding="utf-8"))["options"]["step"]["init"]
     assert "mavplusz.hu" in init["data"][CONF_MAVPLUSZ]
     text = init["data_description"][CONF_MAVPLUSZ]
-    for name in ("mavplusz.hu", "jbb.ghsq.de", "Transitous", "FUTÁR"):
+    for name in ("mavplusz.hu", "GTFS-Realtime", "jbb.ghsq.de", "gpspositions.net", "Transitous", "FUTÁR"):
         assert name in text
+    # PlannerLimiter gates only new tokens: a request already sent when the
+    # option is saved off still gets its answer, and the dialog says so.
+    assert ("a request already sent gets its answer", "a már elküldött megkapja a válaszát")[lang == "hu"] in text
 
 
 def _doc(*parts: str) -> str:
