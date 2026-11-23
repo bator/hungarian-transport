@@ -299,7 +299,13 @@ published manifest without a signature that verifies fails the run too, as
 installs take nothing from it and its `built_at` is anyone's
 (`scripts/mav_daily_verdict.py`), and so does one whose `.sig` is no
 signature (over 1 KiB) or that the site refuses with another client error
-(HTTP 4xx): whoever can put files on Pages could make one so. A published
+(HTTP 4xx): whoever can put files on Pages could make one so. The same
+holds for `mav-index.json` itself: one that is not there (HTTP 404, read
+again once 11 minutes later, as a 404 Pages' cache kept), that the site
+refuses with another client error, that is over 64 KiB or that is not a
+JSON object fails the run too, as every install's daily MÁV check fails
+on it; only a repository without the MÁV secrets, which publishes no MÁV
+files, gets a warning for the 404, read once without the wait. A published
 manifest, or its signature, that cannot be read for a network error, a
 timeout or a server error (HTTP 5xx) leaves the run green with a warning.
 
@@ -309,9 +315,12 @@ refused (`scripts/mav_shrink_guard.py`; the repository variable
 are compared only when the manifest's signature verifies: one who can put
 files on Pages could otherwise name a million trains and so stop every
 build. Without such a manifest (none, it does not read, or its signature
-does not verify) the latest stable release's MÁV index is compared instead,
-and without that either the index is published with a warning that nothing
-was compared.
+does not verify) the latest stable release's MÁV index is compared instead
+(the highest `vX.Y.Z` that is no draft or prerelease, by version, as the
+`timetables` job picks it, not GitHub's "latest" release, which a backport
+released after it would be; GitHub's "latest" only when the releases
+cannot be listed), and without that either the index is published with a
+warning that nothing was compared.
 
 The integration reads `mav-index.json` about 10 to 20 minutes after Home
 Assistant starts (and after the options are saved, which reloads the
@@ -560,7 +569,12 @@ into a site of the new one.
   GitHub's late starts). A stable tag of an older line (a backport) starts
   nothing: the site is built against the highest one. The release's own
   tag counts among the listed ones, since a listing made right after the
-  release was created may not show it yet. That run may replace
+  release was created may not show it yet, and the dispatch names it (the
+  workflow's `release` input): the daily run lists the releases again a
+  minute later, and counts that tag too once GitHub, asked for the release
+  by its tag, says it is published and no draft or prerelease (a value
+  that is not `vX.Y.Z`, or one GitHub does not confirm, is left out with a
+  warning, and the listing decides). That run may replace
   one waiting in the workflow's concurrency group, which would have done
   the same; when the releases cannot be listed or the run cannot be
   started, the release run warns and the next scheduled run catches up.
@@ -589,11 +603,17 @@ into a site of the new one.
   and nothing is deployed: an unsigned manifest is never published (so a
   fork without the secret deploys nothing). Before the key is read, the
   job refuses a site older than the one GitHub Pages serves
-  (`sign_manifest.py live-check`: the published `timetables.json`, its
-  signature verifying, names a later `built_at`): "Re-run failed jobs"
-  after a failed sign job signs and deploys that run's site as it was
-  made (its artifact is kept three days), which is only worth it while no
-  later run has deployed; a published manifest that cannot be read or is
+  (`sign_manifest.py live-check`, each published manifest by its own
+  signature verifying: `timetables.json` names a later `built_at`, an index
+  it lists names a later `built_at` than the site's entry of that name, or
+  `mav-index.json` names a later `built_at` than the site's, or the site
+  has none): "Re-run failed jobs" after a failed sign job signs and
+  deploys that run's site as it was made (its artifact is kept three
+  days), and after a failed site job assembles the site again around that
+  run's MÁV and timetables parts (kept as long) with a `timetables.json`
+  of the re-run's time, which is only worth it while no later run has
+  deployed. A file carried over from the live site has the `built_at` it
+  has there and passes; a published manifest that cannot be read or is
   not trusted holds nothing back. Check a download with
   `python3 scripts/sign_manifest.py verify --site <folder>` (both
   manifests, when the folder has `mav-index.json`).
@@ -631,7 +651,14 @@ into a site of the new one.
   and the `site` job's `assemble` takes them (`--timetables-built-at`,
   `--mav-built-at`): a published manifest older than that is read again
   once past the cache, and when it is still older nothing is deployed, so
-  `built_at` never goes backwards from one deploy to the next. The same holds for
+  `built_at` never goes backwards from one deploy to the next. A manifest
+  such a job read that is then not there (HTTP 404) is read again the same
+  way, and nothing is deployed when it is still not there: the site would
+  go up without its files. When the run made no MÁV part (the build
+  failed, was refused, or there are no secrets), the build job's verdict
+  step (`mav_daily_verdict.py`) names the published `mav-index.json`'s
+  verified `built_at` instead, so the MÁV files the site job carries have
+  the same floor. The same holds for
   `mav-index.json`: its files are carried only when `mav-index.json.sig`
   verifies. The build job takes an unsigned one for none and publishes
   the day's index from its own build (signed) even when the content is the

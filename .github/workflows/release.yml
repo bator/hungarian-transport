@@ -145,6 +145,13 @@ jobs:
             exit 1
           }
 
+          # Whether the first line of the notes file $1 names version $2
+          # (X.Y.Z, optionally with a v), as a whole: not 1.10.2 in 1.10.24.
+          notes_name_version() {
+            local re="${2//./\\.}"
+            head -n 1 "$1" | grep -Eq "(^|[^0-9A-Za-z.])v?${re}(\$|[^0-9A-Za-z.-]|\.(\$|[^0-9A-Za-z]))"
+          }
+
           parse_semver() {
             local ver="${1#v}"
             ver="${ver%%-*}"
@@ -226,7 +233,15 @@ jobs:
           # anything is built, not silently published with the one-line
           # notes.
           if [ "$bump" != "rev" ] && [ ! -s "docs/releases/${tag#v}.md" ]; then
-            echo "::error title=No release notes::docs/releases/${tag#v}.md is not on ${GITHUB_SHA:0:7}. This run resolved ${tag}; add the notes for it (or rename the file you wrote) and dispatch again."
+            echo "::error title=No release notes::docs/releases/${tag#v}.md is not on ${GITHUB_SHA:0:7}. This run resolved ${tag}; add the notes for it (or rename the file you wrote, and the version in its first line) and dispatch again."
+            exit 1
+          fi
+          # A file renamed to the resolved number keeps the version it was
+          # written for in its first line ("Hungarian transport 1.10.X."),
+          # and the published notes would name another release: its first
+          # line must name this version (the pack step checks it again).
+          if [ "$bump" != "rev" ] && ! notes_name_version "docs/releases/${tag#v}.md" "${tag#v}"; then
+            echo "::error title=Release notes of another version::The first line of docs/releases/${tag#v}.md does not name ${tag#v}. This run resolved ${tag}; fix the notes and dispatch again."
             exit 1
           fi
           emit "$tag" true "" "$latest"
@@ -294,6 +309,54 @@ jobs:
         run: |
           set -euo pipefail
           pip install -r requirements_test.txt
+          python -m pytest -q
+
+      # As validate.yml's: the same tests again in a shuffled order
+      # (pytest-randomly, pinned by version and sha256), the seed this
+      # run's id. A tag pushed for a commit validate.yml never ran on (or a
+      # dispatch right after a merge) is checked here before it ships.
+      - name: Integration tests in a random order
+        env:
+          SEED: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if [ ! -f requirements_test_random.txt ]; then
+            echo "No requirements_test_random.txt on this ref; skipped."
+            exit 0
+          fi
+          pip install --require-hashes --no-deps -r requirements_test_random.txt
+          echo "pytest-randomly seed: ${SEED}"
+          python -m pytest -q -p randomly --randomly-seed="$SEED"
+
+  # hacs.json lets HACS install on Home Assistant 2024.10.0: as
+  # validate.yml's integration-oldest job, on the ref being released.
+  test-oldest:
+    name: Integration tests (oldest HA)
+    needs: resolve
+    if: needs.resolve.outputs.create == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          # The Python Home Assistant 2024.10 was released for.
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements_test*.txt
+
+      - name: Integration tests on Home Assistant 2024.10
+        run: |
+          set -euo pipefail
+          if [ ! -f requirements_test_oldest.txt ]; then
+            echo "No requirements_test_oldest.txt on this ref; skipped."
+            exit 0
+          fi
+          pip install -r requirements_test_oldest.txt
+          python -c "from homeassistant.const import __version__; assert __version__ == '2024.10.0', __version__"
           python -m pytest -q
 
   build:
@@ -614,6 +677,13 @@ jobs:
           # never misses one of its paths.
           : > release-notes.md
           if [[ "$tag" != *-rev.* ]] && [ -s "docs/releases/${ver}.md" ]; then
+            # Notes renamed from another version keep its number in their
+            # first line: published, they would name another release.
+            re="${ver//./\\.}"
+            if ! head -n 1 "docs/releases/${ver}.md" | grep -Eq "(^|[^0-9A-Za-z.])v?${re}(\$|[^0-9A-Za-z.-]|\.(\$|[^0-9A-Za-z]))"; then
+              echo "::error title=Release notes of another version::The first line of docs/releases/${ver}.md does not name ${ver}; nothing is published."
+              exit 1
+            fi
             cp "docs/releases/${ver}.md" release-notes.md
             echo "release notes: docs/releases/${ver}.md ($(wc -c < release-notes.md) bytes)"
           else
@@ -634,7 +704,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    needs: [resolve, test, build]
+    needs: [resolve, test, test-oldest, build]
     if: needs.resolve.outputs.create == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -737,7 +807,9 @@ jobs:
   # (pages_timetables.py due: another release_feed or release_version); the
   # next cron (twice a day) would rebuild them within about 12 hours, plus
   # GitHub's late starts. This starts a run of mav-index-daily.yml on main at
-  # once, with the input that rebuilds both, but only for the highest stable
+  # once, with the input that rebuilds both and the new tag (input release:
+  # its own listing of the releases may not show it yet either; it checks
+  # the tag with GitHub before it counts it), but only for the highest stable
   # release (by version, as the daily workflow picks it): a stable tag pushed
   # for an older line (a backport, v1.9.5 after v1.10.24) changes nothing
   # there, and a forced rebuild would only redo the week's indexes. A
@@ -782,7 +854,10 @@ jobs:
             echo "${TAG} is not the highest stable release (${highest:-none}); the Pages timetables are built against that one, nothing to rebuild."
             exit 0
           fi
-          if gh workflow run mav-index-daily.yml --ref main -f timetables=true; then
+          # The tag goes with it (input release): that run lists the releases
+          # again, maybe still without TAG, and would build against the
+          # previous one.
+          if gh workflow run mav-index-daily.yml --ref main -f timetables=true -f release="$TAG"; then
             echo "mav-index-daily.yml started on main (timetables=true) for ${TAG}"
           else
             echo "::warning title=Pages timetables not started::Could not start mav-index-daily.yml; its next scheduled run rebuilds the Volán and city indexes against ${TAG}."
