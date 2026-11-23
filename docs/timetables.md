@@ -783,13 +783,20 @@ before (until an update of the integration replaces it), or the ones it
 builds from your feeds.
 
 **Privacy.** With the MÁV option on, Home Assistant contacts
-`bator.github.io` (GitHub Pages) once a day, and up to 4 more times that day
-for the manifest alone while it is not yet of the day; with the timetables
-option on, once a day for `timetables.json`, and for the indexes and their
-shapes only when they are newer (about once a week). Each is a plain HTTPS
-GET (never the GTFS zips), no cookies, nothing beyond what any HTTP request
-carries (your IP address, and Home Assistant's user agent with its
-version). Nothing about your configuration is sent.
+`bator.github.io` (GitHub Pages) once a day for `mav-index.json` and its
+one-line signature `mav-index.json.sig`, and up to 4 more times that day
+for these two alone while the manifest is not yet of the day; the index
+itself only when it is newer. With the timetables option on, once a day
+for `timetables.json` and `timetables.json.sig`, and for the indexes and
+their shapes only when they are newer (about once a week). A restart and
+an options save start a check too. A check right after a deploy may find a
+download that does not match its manifest or signature (the Pages cache,
+above): it reads them once more 11 minutes later. A check that failed is
+tried again, the MÁV one up to 6 times 20 minutes apart, the timetables
+one up to 3 times 30 minutes apart. Each is a plain HTTPS GET (never the
+GTFS zips), no cookies, nothing beyond what any HTTP request carries (your
+IP address, and Home Assistant's user agent with its version). Nothing
+about your configuration is sent.
 
 **Notifications.** With *Notify about timetable updates* on in the same
 options, the integration creates a persistent notification (one per kind; a

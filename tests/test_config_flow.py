@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import re
 from unittest.mock import patch
 
 import pytest
@@ -33,6 +34,7 @@ from custom_components.hungarian_transport.const import (
     CONF_PAGES_TIMETABLES,
     DOMAIN,
 )
+from custom_components.hungarian_transport import mav_daily, weekly_timetables
 from custom_components.hungarian_transport.futar import BKK_API
 
 SEARCH = f"{BKK_API}/search.json"
@@ -478,6 +480,84 @@ def test_mavplusz_option_says_what_goes_where(lang) -> None:
     text = init["data_description"][CONF_MAVPLUSZ]
     for name in ("mavplusz.hu", "jbb.ghsq.de", "Transitous", "FUTÁR"):
         assert name in text
+
+
+def _doc(*parts: str) -> str:
+    """A doc of the repository, its wrapping undone."""
+    text = Path(__file__).parents[1].joinpath(*parts).read_text(encoding="utf-8")
+    return " ".join(text.split())
+
+
+def test_readme_names_mavplusz_and_links_its_opt_out() -> None:
+    """The README's Data table names mavplusz.hu where the code asks it
+    first (the live delays, the BKK boards while FUTÁR fails) and links the
+    option that turns it off, as it links the Pages opt-outs."""
+    readme = (Path(__file__).parents[1] / "README.md").read_text(encoding="utf-8")
+    rows = {row.split(" | ")[0]: row for row in readme.splitlines() if row.startswith("| ")}
+    live = next(row for name, row in rows.items() if "Live delays and positions outside Budapest" in name)
+    bkk = next(row for name, row in rows.items() if name.startswith("| Budapest buses"))
+    for row in (live, bkk):
+        assert "mavplusz.hu" in row and "[opt out][manual-settings]" in row
+    assert "gpspositions.net" in live
+    link = re.search(r"^\[manual-settings\]: (\S+)$", readme, re.M)[1]
+    assert link.endswith("docs/manual/README.md#31-settings")
+    assert "### 3.1 Settings" in _doc("docs", "manual", "README.md")
+
+
+@pytest.mark.parametrize(
+    ("lang", "sent"),
+    [("README.md", "one already sent gets its answer"), ("README.hu.md", "a már elküldött megkapja a válaszát")],
+)
+def test_manual_says_what_the_mavplusz_option_stops(lang, sent) -> None:
+    """Saving the option off stops a request still waiting for its token,
+    not one already sent (PlannerLimiter gates only new tokens), and the
+    feeds read then are not all on jbb.ghsq.de (Orosháza's is not)."""
+    manual = _doc("docs", "manual", lang)
+    assert sent in manual
+    assert "on its way when you save stops" not in manual
+    assert "már úton lévő kérés sem megy el" not in manual
+    assert "jbb.ghsq.de" not in manual
+
+
+def test_timetables_privacy_names_every_request() -> None:
+    """The privacy paragraph lists the signatures fetched with each
+    manifest, the settle re-read and the retries."""
+    doc = _doc("docs", "timetables.md")
+    privacy = doc[doc.index("**Privacy.**") : doc.index("**Notifications.**")]
+    for url in (mav_daily.SIGNATURE_URL, weekly_timetables.SIGNATURE_URL):
+        assert f"`{url.rsplit('/', 1)[1]}`" in privacy
+    assert f"{mav_daily.PAGES_SETTLE_DELAY // 60} minutes later" in privacy
+    assert f"up to {mav_daily.RETRY_LIMIT} times {mav_daily.RETRY_DELAY // 60} minutes apart" in privacy
+    assert f"up to {weekly_timetables.RETRY_LIMIT} times {weekly_timetables.RETRY_DELAY // 60} minutes apart" in privacy
+
+
+def _reason_words(module) -> dict[str, str]:
+    """A module's reason words (DailyRound.reason, IndexResult.reason, the
+    sensors' reason and pages_reason): its REASON_* constants, and
+    UNKNOWN_KEY, the one not named so."""
+    return {
+        name: value
+        for name, value in vars(module).items()
+        if (name.startswith("REASON_") or name == "UNKNOWN_KEY") and isinstance(value, str)
+    }
+
+
+def test_timetables_doc_lists_every_reason_word() -> None:
+    """docs/timetables.md "Timetable sensors" names each reason word a
+    sensor can show, and only those: a new one in mav_daily.py or
+    weekly_timetables.py fails here until the doc says what it means, and
+    one the code dropped fails until the doc drops it."""
+    words = _reason_words(mav_daily) | _reason_words(weekly_timetables)
+    assert {"REASON_BAD_SIGNATURE", "UNKNOWN_KEY"} <= words.keys()
+    # The paragraph's wrapping is free: compare its words, not its lines.
+    text = _doc("docs", "timetables.md")
+    start = text.index("`pages_reason` says why an index was not installed:")
+    end = text.index("else the error's text", start)
+    # The results the paragraph names along the way are not reasons.
+    results = {mav_daily.SUPERSEDED, mav_daily.FAILED, "pages_reason"}
+    listed = set(re.findall(r"`([a-z_]+)`", text[start:end])) - results
+    assert listed == set(words.values()), (listed, words)
+    assert f"at most {mav_daily.MAX_REASON} characters" in text[end:end + 80]
 
 
 @pytest.mark.parametrize("lang", ["en", "hu"])
