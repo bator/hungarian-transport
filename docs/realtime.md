@@ -450,7 +450,9 @@ before, and the card fills the board from Transitous.
   of FUTÁR's and one of the planner's for them all, as they share one
   FUTÁR request outside it; a token taken for a request that was not sent
   after all (it joined one under way, or the key was rejected meanwhile)
-  goes back. A board or trip details the planner holds (its 35 s and
+  goes back; one whose planner request was sent stays spent, also when
+  the card that asked left (a websocket closed, a page reloaded) while
+  that request was under way. A board or trip details the planner holds (its 35 s and
   60 s caches, or a request under way) are answered from there without a
   planner token, also once the share is used up: a second card, horizon
   or browser asking a board the planner just gave does not wait for FUTÁR
@@ -475,14 +477,23 @@ before, and the card fills the board from Transitous.
   (not asked for 10 minutes), the others are answered. Either is a warning
   with its traceback once an hour per kind (boards, trip details) and
   place in the code, however many answers are read meanwhile.
-- **FUTÁR's outage.** Once FUTÁR failed (and until it answers again), a
+- **FUTÁR's outage.** Once FUTÁR failed, or refused the key's calls as
+  too many (its HTTP 429: asking it less is the point then), and until it
+  answers again, a
   board or trip details the planner can answer is asked of the planner
   first, at once, and FUTÁR is not waited for: before, every poll waited
   8 s for a FUTÁR that was down (18 s once the planner's share was used
   up), holding a planner token meanwhile. FUTÁR itself is asked by one
   request at most every 30 s (the probe; any other request sent to FUTÁR
   meanwhile, a search or route details, counts as one), as below: FUTÁR
-  first, cut short, the planner after it. Its answer ends the outage, and
+  first, cut short, the planner after it. A probe for a board or trip
+  details the planner holds (its caches, or its request under way) is
+  answered from the planner at once instead, and FUTÁR is asked behind
+  it with its whole budget and a token of FUTÁR's limit of its own,
+  nobody waiting for it (a card asking the same meanwhile asks the
+  planner first, not join it); its answer goes in FUTÁR's 15 s cache.
+  Before, that card waited 8 s for a FUTÁR most likely still down, and
+  the planner's board could expire meanwhile. Its answer ends the outage, and
   every request asks FUTÁR first again. A board FUTÁR's own cache holds
   (answered within 15 s), or whose FUTÁR request is under way (the probe),
   is answered from it or joins it, as outside the outage, for no token.
@@ -498,7 +509,9 @@ before, and the card fills the board from Transitous.
   FUTÁR from a hanging one, and a slow one (10 s a board) still answers
   them, which a cap on the calls under way would refuse.
 - **Logged once, also when it flaps.** FUTÁR's outage is one warning when
-  it starts failing and one info line when it answers again. FUTÁR failing
+  it starts failing and one info line when it answers again. Its HTTP 429
+  is a warning and an info line of its own ("takes the configured key's
+  calls again"), so FUTÁR failing after a 429 is still warned about. FUTÁR failing
   again within 5 minutes of either line is not warned about at once: a
   FUTÁR down and up every few seconds logged a pair of lines every few
   seconds (58 of each in ten minutes). Such a failure is warned about once
@@ -520,7 +533,9 @@ before, and the card fills the board from Transitous.
   known, a timetable trip, none of them failed lately, the planner not
   backing off) and a token of the boards' share is reserved for its
   answer before FUTÁR is asked (none for an answer the planner's caches
-  hold: it asks the planner nothing): a dashboard's boards at once (40 poles)
+  hold for FUTÁR's 8 s and the planner's 6 s more: it asks the planner
+  nothing; one expiring sooner reserves a token as any other, since the
+  planner would be asked again once FUTÁR failed): a dashboard's boards at once (40 poles)
   cut FUTÁR short for as many as the share holds, and the rest keep
   FUTÁR's whole budget, so a slow FUTÁR still answers them. The trip
   details reserved within 50 ms of each other share one token (up to one
