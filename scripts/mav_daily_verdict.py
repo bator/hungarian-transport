@@ -20,7 +20,15 @@ a day; it must not go on unnoticed. The run fails (exit 1, ::error::):
   signature (larger than MAX_SIG) or the site answers it with another
   client error (HTTP 4xx). Its built_at is then anyone's: one who can put
   files on Pages could keep a failing build green for good with a fresh
-  one, and installs take nothing from it anyway (mav_daily.py).
+  one, and installs take nothing from it anyway (mav_daily.py);
+- when nothing was built or published and the published manifest itself
+  is not there (HTTP 404, also read again once, --sig-settle seconds
+  later: a 404 Pages' CDN cached before the first deploy with the MÁV
+  files), the site answers it with another client error (HTTP 4xx), or it
+  is larger than mav_pages_site.MAX_MANIFEST or not a JSON object: the
+  same reasoning, and every install's daily MÁV check fails on it. Not a
+  404 when the repository has no MÁV secrets (failure secrets): such a
+  repository publishes no MÁV files at all.
 
 Otherwise it stays green with a ::warning:: naming the published feed's age,
 also when the published manifest or its signature cannot be read for a
@@ -28,9 +36,15 @@ network error, a timeout or a server error (HTTP 5xx: its age is unknown,
 and an outage must not turn the run red). Nothing here deploys or removes
 anything: the workflow deploys only a site that was made.
 
+--github-output FILE appends live_built=: the published manifest's
+built_at when its signature verifies, else empty (also for a refused
+login, read then without a second read). The site job's assemble takes it
+as --mav-built-at, as it takes mav_pages_site.py's on a run that built:
+it never carries an older mav-index.json over the one read here.
+
 Usage: mav_daily_verdict.py --failure auth|build|site|secrets
          (--live-url URL | --live-file PATH) [--now ISO8601]
-         [--sig-settle SECONDS]
+         [--sig-settle SECONDS] [--github-output FILE]
 --live-file reads the signature from the file next to it (PATH.sig).
 """
 from __future__ import annotations
@@ -46,7 +60,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 import sign_manifest  # noqa: E402
-from mav_pages_site import MANIFEST_NAME, MAX_SIG, SIG_SETTLE_S, built_time, fetch_bytes, parse_live  # noqa: E402
+from mav_pages_site import MANIFEST_NAME, MAX_MANIFEST, MAX_SIG, SIG_SETTLE_S, built_time, fetch_bytes, parse_live  # noqa: E402
 
 # release_mav_index.sh's exit status for a refused login (401/403).
 AUTH_EXIT = 77
@@ -59,10 +73,13 @@ FAILURES = {
 }
 
 
-# live_state's trust: the signature verifies; it is not there, does not
-# verify or is no signature; it could not be read (a network error, a
-# timeout, HTTP 5xx).
+# live_state's trust: the signature verifies; it (or the manifest) is not
+# there, does not verify or is no signature; it (or the manifest) could not
+# be read (a network error, a timeout, HTTP 5xx).
 TRUSTED, UNTRUSTED, UNKNOWN = "ok", "untrusted: ", "unknown: "
+# The manifest itself answered with HTTP 404 (UNTRUSTED, but a warning for
+# a repository without the MÁV secrets).
+NO_MANIFEST = f"{UNTRUSTED}no {MANIFEST_NAME} (HTTP 404)"
 
 
 def verdict(failure: str, live: dict | None, why: str, now: datetime,
@@ -70,7 +87,9 @@ def verdict(failure: str, live: dict | None, why: str, now: datetime,
     """(fail the run, the annotation to print) for a run that published nothing
     because of failure (a FAILURES key), with the published manifest live (None
     when it could not be read, why says why) at now. trust (live_state): its
-    built_at counts only when its signature verified."""
+    built_at counts only when its signature verified; with live None, how
+    the manifest itself failed (manifest_unreadable: only UNKNOWN, and
+    NO_MANIFEST for failure secrets, stay green)."""
     if failure not in FAILURES:
         raise ValueError(f"unknown failure {failure!r}")
     cause = FAILURES[failure]
@@ -78,8 +97,17 @@ def verdict(failure: str, live: dict | None, why: str, now: datetime,
         return True, (f"::error title=Daily MÁV index: login refused::{cause[0].upper()}{cause[1:]}. "
                       "Not retried (an account lockout); GitHub Pages keeps the previous index.")
     if live is None:
-        return False, (f"::warning title=Daily MÁV index not published::Nothing published: {cause}. The published "
-                       f"manifest could not be read ({why}), so its age is unknown; GitHub Pages keeps what it has.")
+        # trust as live_state classes the manifest's own failure; by why
+        # for a caller that did not.
+        trust = manifest_unreadable(why) if trust == TRUSTED else trust
+        if trust.startswith(UNKNOWN) or (trust == NO_MANIFEST and failure == "secrets"):
+            return False, (f"::warning title=Daily MÁV index not published::Nothing published: {cause}. The "
+                           f"published manifest could not be read ({why}), so its age is unknown; GitHub Pages "
+                           "keeps what it has.")
+        # This script's own text (why is fetch_bytes' or parse_live's).
+        return True, (f"::error title=Daily MÁV index: published manifest unreadable::Nothing published: {cause}, "
+                      f"and the published {MANIFEST_NAME} is not there or not a manifest ({why}): every install's "
+                      "daily MÁV check fails on it.")
     # The reason is this script's own text: nothing of an untrusted manifest
     # goes into the annotation.
     if trust.startswith(UNKNOWN):
@@ -108,10 +136,15 @@ def verdict(failure: str, live: dict | None, why: str, now: datetime,
 def _read(args: argparse.Namespace) -> tuple[bytes | None, str, bytes | None, str]:
     """The published manifest's bytes and its .sig's, each with why not."""
     if args.live_file is not None:
-        body, why = (args.live_file.read_bytes(), "ok") if args.live_file.is_file() else (None, "no file")
-        sig_file = args.live_file.with_name(args.live_file.name + ".sig")
         # A file that is not there stands for the site's 404, one over
-        # MAX_SIG for what fetch_bytes says of such a .sig.
+        # MAX_MANIFEST or MAX_SIG for what fetch_bytes says of it.
+        if not args.live_file.is_file():
+            body, why = None, "HTTP 404"
+        elif args.live_file.stat().st_size > MAX_MANIFEST:
+            body, why = None, f"larger than {MAX_MANIFEST} bytes"
+        else:
+            body, why = args.live_file.read_bytes(), "ok"
+        sig_file = args.live_file.with_name(args.live_file.name + ".sig")
         if not sig_file.is_file():
             sig, sig_why = None, "HTTP 404"
         elif sig_file.stat().st_size > MAX_SIG:
@@ -144,6 +177,21 @@ def sig_unreadable(sig_why: str) -> str:
     return f"{UNKNOWN}{MANIFEST_NAME}.sig: {sig_why}"
 
 
+def manifest_unreadable(why: str) -> str:
+    """For a manifest that did not read (fetch_bytes' why) or is no manifest
+    (parse_live's): as sig_unreadable, UNKNOWN only for a network error, a
+    timeout or HTTP 5xx; NO_MANIFEST for HTTP 404; UNTRUSTED for another
+    status, one larger than MAX_MANIFEST, and one that is not a JSON object."""
+    status = _HTTP_RE.fullmatch(why)
+    if status is not None:
+        if status.group(1) == "404":
+            return NO_MANIFEST
+        return (UNKNOWN if status.group(1).startswith("5") else UNTRUSTED) + f"{MANIFEST_NAME}: {why}"
+    if why.startswith(("larger than", "not JSON", "not a JSON object")):
+        return f"{UNTRUSTED}{MANIFEST_NAME} is no manifest ({why})"
+    return f"{UNKNOWN}{MANIFEST_NAME}: {why}"
+
+
 def live_state(args: argparse.Namespace, settle: float) -> tuple[dict | None, str, str]:
     """(the published manifest or None, why not, trust): trust TRUSTED when
     its .sig verifies over its exact bytes, UNTRUSTED... when the .sig is
@@ -153,15 +201,19 @@ def live_state(args: argparse.Namespace, settle: float) -> tuple[dict | None, st
     .sig could not be read (a network error, a timeout, HTTP 5xx). A 404
     next to a manifest that is there is read again as well: Pages' CDN may
     still answer the 404 it cached for the .sig before the first signed
-    deploy (PAGES_MAX_AGE)."""
+    deploy (PAGES_MAX_AGE). The manifest itself the same way
+    (manifest_unreadable, None with it): a 404 read again once, UNKNOWN
+    only when it could not be read."""
     for attempt in (1, 2):
         body, why, sig, sig_why = _read(args)
         live, why = parse_live(body) if body is not None else (None, why)
         if live is None:
-            return None, why, UNKNOWN + "no manifest"
-        if sig is None and sig_why != "HTTP 404":
+            state = manifest_unreadable(why)
+            if state != NO_MANIFEST:
+                return None, why, state
+        elif sig is None and sig_why != "HTTP 404":
             return live, why, sig_unreadable(sig_why)
-        if sig is None:
+        elif sig is None:
             state = f"{UNTRUSTED}no {MANIFEST_NAME}.sig (HTTP 404)"
         elif sign_manifest.verify_bytes(body, sign_manifest.decode_sig(sig)):
             return live, why, TRUSTED
@@ -175,6 +227,14 @@ def live_state(args: argparse.Namespace, settle: float) -> tuple[dict | None, st
     raise AssertionError("unreachable")
 
 
+def live_built(live: dict | None, trust: str) -> str:
+    """live_built= for --github-output: the published manifest's built_at
+    (UTC, ISO), only when its signature verified; "" otherwise."""
+    built = built_time(live) if live is not None and trust == TRUSTED else None
+    return built.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z") \
+        if built is not None else ""
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--failure", required=True, choices=sorted(FAILURES))
@@ -186,6 +246,7 @@ def main(argv: list[str]) -> int:
                     help="seconds before a manifest whose signature does not verify, or is not there, is read"
                     " again with it"
                     f" (default {SIG_SETTLE_S:g}: Pages' cache age and a minute; negative: never)")
+    ap.add_argument("--github-output", type=Path, help="append live_built= (the verified published built_at) here")
     args = ap.parse_args(argv)
     now = datetime.now(timezone.utc)
     if args.now:
@@ -193,11 +254,16 @@ def main(argv: list[str]) -> int:
         if now.tzinfo is None:
             ap.error("--now needs a UTC offset")
     if args.failure == "auth":
-        live, why, trust = None, "not read", UNKNOWN + "not read"
+        # Red whatever is published; read only for live_built, once.
+        live, why, trust = live_state(args, -1) if args.github_output is not None else (None, "not read", "")
+        fail, line = verdict(args.failure, None, "not read", now, UNKNOWN + "not read")
     else:
         live, why, trust = live_state(args, args.sig_settle)
-    fail, line = verdict(args.failure, live, why, now, trust)
+        fail, line = verdict(args.failure, live, why, now, trust)
     print(line)
+    if args.github_output is not None:
+        with args.github_output.open("a", encoding="utf-8") as fh:
+            fh.write(f"live_built={live_built(live, trust)}\n")
     return 1 if fail else 0
 
 

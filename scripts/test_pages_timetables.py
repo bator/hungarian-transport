@@ -62,6 +62,21 @@ TRUST_WRAP = ("import os, sys; sys.path.insert(0, sys.argv.pop(1)); import sign_
               " raise SystemExit(pages_timetables.main(sys.argv[1:]))")
 REAL_SIG_SETTLE = pt.SIG_SETTLE_S
 pt.SIG_SETTLE_S = 0.0
+REAL_SLEEP = pt.time.sleep
+
+
+def pages_sleep(record):
+    """A time.sleep stand-in that records only pages_timetables' own waits.
+    The tests swap the time module's sleep, which subprocess uses as well
+    (Popen.wait polls with a growing sleep while openssl, run for a
+    signature, is still exiting on a busy machine): those calls sleep for
+    real and are not recorded."""
+    def sleep(seconds: float) -> None:
+        if sys._getframe(1).f_globals.get("__name__") != pt.__name__:
+            REAL_SLEEP(seconds)
+            return
+        record(seconds)
+    return sleep
 
 failed = 0
 
@@ -1193,6 +1208,10 @@ with tempfile.TemporaryDirectory() as tmp_name:
             return self.now
 
         def sleep(self, seconds: float) -> None:
+            # pages_timetables' own waits only (pages_sleep).
+            if sys._getframe(1).f_globals.get("__name__") != pt.__name__:
+                REAL_SLEEP(seconds)
+                return
             self.sleeps.append(seconds)
             self.now += seconds
 
@@ -1408,6 +1427,47 @@ with tempfile.TemporaryDirectory() as tmp_name:
           rc == 1 and stuck.get("deploy") == "false" and not cdn_site.exists()
           and "::error title=GitHub Pages site not assembled::stale: the published mav-index.json" in buf.getvalue(),
           repr((rc, stuck, buf.getvalue()[-600:])))
+    # A manifest an earlier job of the run read, signed, that is now not
+    # there (HTTP 404): a 404 a cache kept, or a site that lost it. Never
+    # "missing" (the site would go up without its files): read again once
+    # past the cache, and when still not there the site is refused.
+    class Gone(Cdn404):
+        """As Cdn404, the stale paths never coming back."""
+
+        def __init__(self, clock: Clock, stale: set[str], expires: float) -> None:
+            super().__init__(clock, stale, expires + 100 * pt.PAGES_MAX_AGE)
+
+        def fetch(self, name: str, dest: Path, cap: int):
+            # The first read of the site, as Source.fetch notes it, also
+            # when it is one of the 404s.
+            if self.first_read is None:
+                self.first_read = pt.time.monotonic()
+            return super().fetch(name, dest, cap)
+
+    rc, out, outputs, clock = cdn_main([*asm_mav, *floors], {"mav-index.json"}, cls=Cdn404)
+    check("assemble, Pages answering 404 at first for the mav-index.json the build job read signed: read again"
+          " once past the cache, then the MÁV files carried",
+          rc == 0 and outputs.get("deploy") == "true" and len(clock.sleeps) == 1
+          and (cdn_site / "mav-index.json").read_bytes() == (gen2 / "mav-index.json").read_bytes()
+          and "stale: the published mav-index.json is not there (HTTP 404)" in out,
+          repr((rc, outputs, clock.sleeps, out[-600:])))
+    for label, argv_, stale_, what in (
+        ("mav-index.json the build job read", [*asm_mav, *floors], {"mav-index.json"}, "mav-index.json"),
+        ("timetables.json the due step read", [*asm_nm, "--timetables-built-at", gen2_built], {"timetables.json"},
+         "timetables.json"),
+    ):
+        rc, out, outputs, clock = cdn_main(argv_, stale_, cls=Gone)
+        check(f"assemble, the {label} signed now not there for good (HTTP 404): refused after the one wait (exit"
+              " 1), nothing deployed",
+              rc == 1 and outputs.get("deploy") == "false" and not cdn_site.exists()
+              and len([w for w in clock.sleeps if w > 0]) == 1 and sum(clock.sleeps) <= REAL_SIG_SETTLE
+              and f"::error title=GitHub Pages site not assembled::stale: the published {what} is not there" in out,
+              repr((rc, outputs, clock.sleeps, out[-600:])))
+    rc, out, outputs, clock = cdn_main(asm_mav, {"mav-index.json"}, cls=Gone)
+    check("without --mav-built-at a published mav-index.json that is not there is none, as before: the site goes"
+          " up without the MÁV files, at once",
+          rc == 0 and outputs.get("deploy") == "true" and not (cdn_site / "mav-index.json").exists()
+          and clock.sleeps == [] and "MÁV: none" in out, repr((rc, outputs, clock.sleeps, out[-400:])))
     rc, out, err, outputs = run(*asm_mav[:-2], "--mav-built-at", "yesterday")
     check("--mav-built-at needs an ISO time with an offset", rc == 2 and "--mav-built-at" in err, repr((rc, err)))
     rc, out, err, outputs = run(*asm_mav, "--mav-built-at", "", "--timetables-built-at", "")
@@ -1434,7 +1494,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
         gh_out.write_text("")
         waits: list[float] = []
         real = (pt._source, pt.time.sleep)
-        pt._source, pt.time.sleep = (lambda _args, _s=slow: _s), waits.append
+        pt._source, pt.time.sleep = (lambda _args, _s=slow: _s), pages_sleep(waits.append)
         buf = io.StringIO()
         try:
             with contextlib.redirect_stdout(buf):
@@ -1761,6 +1821,92 @@ with tempfile.TemporaryDirectory() as tmp_name:
         newer, found = sm.live_newer(lc_site, "https://pages.example/r", getter(files, why))
         check(f"live-check, the published timetables.json is {label}: "
               + ("refused" if want else "signed and deployed"), newer is want and found, repr((newer, found)))
+    # A "Re-run failed jobs" of an older run's site job writes a
+    # timetables.json of the re-run's time around that run's older parts:
+    # the published mav-index.json and each published index, each by its
+    # own signature, are compared with the site's by their own built_at. A
+    # carried file has the published one's built_at and passes.
+    def lc_write(folder: Path, built: str, indexes: dict[str, str], mav: str | None) -> None:
+        folder.mkdir(exist_ok=True)
+        (folder / "timetables.json").write_text(json.dumps(
+            {"format": 1, "built_at": built,
+             "indexes": {n: {"feed": f"{n}:1", "built_at": b} for n, b in indexes.items()}}))
+        (folder / "mav-index.json").unlink(missing_ok=True)
+        if mav is not None:
+            (folder / "mav-index.json").write_text(json.dumps({"feed": "20261124", "built_at": mav}))
+
+    def lc_published(built: str, indexes: dict[str, str], mav: str | None, key: bytes = TEST_SEED,
+                     mav_key: bytes | None = None) -> dict[str, bytes]:
+        lc_write(lc_live, built, indexes, mav)
+        sm.sign_site(lc_live, key, sm.public_key(key))
+        if mav is not None and mav_key is not None:
+            (lc_live / "mav-index.json.sig").write_text(
+                base64.b64encode(sm.sign(lc_live / "mav-index.json", mav_key)).decode() + "\n")
+        return {f"https://pages.example/r/{f.name}": f.read_bytes() for f in lc_live.iterdir()}
+
+    rerun = tmp / "lc-rerun"
+    b_tt, b_city, b_volan, b_mav = ("2026-11-24T05:10:00Z", "2026-11-24T05:05:00Z", "2026-11-17T05:05:00Z",
+                                    "2026-11-24T05:00:00Z")
+    a_city, a_mav = "2026-11-23T05:05:00Z", "2026-11-23T05:00:00Z"
+    now_tt = "2026-11-24T09:00:00Z"
+    for label, site_, live_, want in (
+        ("an older run's MÁV part (a site job re-run after a newer deploy)",
+         (now_tt, {"volan": b_volan, "city": b_city}, a_mav), lc_published(b_tt, {"volan": b_volan, "city": b_city},
+                                                                            b_mav), True),
+        ("an older run's city index (the same re-run)",
+         (now_tt, {"volan": b_volan, "city": a_city}, b_mav), lc_published(b_tt, {"volan": b_volan, "city": b_city},
+                                                                            b_mav), True),
+        ("no MÁV files while a signed mav-index.json is published",
+         (now_tt, {"volan": b_volan, "city": b_city}, None), lc_published(b_tt, {"volan": b_volan, "city": b_city},
+                                                                           b_mav), True),
+        ("everything carried (the same built_at), only timetables.json new",
+         (now_tt, {"volan": b_volan, "city": b_city}, b_mav), lc_published(b_tt, {"volan": b_volan, "city": b_city},
+                                                                            b_mav), False),
+        ("newer parts than the published ones (a normal run)",
+         (now_tt, {"volan": now_tt, "city": now_tt}, now_tt), lc_published(b_tt, {"volan": b_volan, "city": b_city},
+                                                                            b_mav), False),
+        ("an index the site dropped (a carry that failed): nothing to compare it with",
+         (now_tt, {"volan": b_volan}, b_mav), lc_published(b_tt, {"volan": b_volan, "city": b_city}, b_mav), False),
+        ("an older MÁV part, the published mav-index.json signed by another key (anyone's built_at)",
+         (now_tt, {"volan": b_volan, "city": b_city}, a_mav),
+         lc_published(b_tt, {"volan": b_volan, "city": b_city}, b_mav, mav_key=os.urandom(32)), False),
+        ("an older city index, the published timetables.json signed by another key",
+         (now_tt, {"volan": b_volan, "city": a_city}, b_mav),
+         lc_published(b_tt, {"volan": b_volan, "city": b_city}, b_mav, key=os.urandom(32), mav_key=TEST_SEED),
+         False),
+    ):
+        lc_write(rerun, *site_)
+        newer, found = sm.live_newer(rerun, "https://pages.example/r", getter(live_))
+        check(f"live-check, a site with {label}: " + ("refused" if want else "signed and deployed"),
+              newer is want and found and "20261124" not in found, repr((newer, found)))
+    lc_write(rerun, now_tt, {"volan": b_volan, "city": b_city}, a_mav)
+    newer_files = lc_published(b_tt, {"volan": b_volan, "city": b_city}, b_mav)
+    real_urlopen = sm.urllib.request.urlopen
+
+    class RerunRes(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def rerun_open(req, timeout=None):
+        if req.full_url not in newer_files:
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+        return RerunRes(newer_files[req.full_url])
+
+    sm.urllib.request.urlopen = rerun_open
+    buf = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(buf):
+            rc = sm.main(["live-check", "--site", str(rerun), "--live-url", "https://pages.example/r"])
+    finally:
+        sm.urllib.request.urlopen = real_urlopen
+    check("the live-check CLI on a site job re-run with an older MÁV part: exit 1, naming the MÁV build times",
+          rc == 1 and "::error title=An older site is not deployed::" in buf.getvalue()
+          and f"the published mav-index.json was built {b_mav.replace('Z', '+00:00')}" in buf.getvalue(),
+          repr((rc, buf.getvalue())))
+
     (lc_site / "timetables.json").write_text(json.dumps({"format": 1}))
     try:
         sm.live_newer(lc_site, "https://pages.example/r", getter(None))

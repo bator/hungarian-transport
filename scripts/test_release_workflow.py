@@ -258,6 +258,63 @@ with tempfile.TemporaryDirectory() as tmp_name:
         check("a pushed stable tag packs its release notes",
               done.returncode == 0 and (ws / "release-notes.md").read_text() == (ws / "docs" / "releases" / "1.2.3.md").read_text(),
               repr(done.stderr[-400:]))
+        # Notes renamed to this version from another keep that one's number
+        # in their first line: the pack step refuses them (the resolve job
+        # does the same for a dispatch, test_release_resolve.py), also for a
+        # tag push, which has no resolve check. A version is named as a
+        # whole: 1.2.3 is not in 1.2.30, 11.2.3 or 1.2.3-rev.1.
+        for first, ok in (("Hungarian transport 1.2.3. Includes fresh indexes.", True),
+                          ("Hungarian transport v1.2.3", True), ("1.2.3: fixes", True),
+                          ("Hungarian transport 1.2.2.", False), ("Hungarian transport 1.2.30.", False),
+                          ("Hungarian transport 11.2.3.", False), ("Hungarian transport 1.2.3-rev.1.", False),
+                          ("Hungarian transport 1.2.3.1.", False), ("Hungarian transport 1x2x3.", False),
+                          ("", False)):
+            (ws / "docs" / "releases" / "1.2.3.md").write_text(f"{first}\n\n## Fixes\n\n- one\n")
+            (ws / "release-notes.md").unlink(missing_ok=True)
+            for event in ("workflow_dispatch", "push"):
+                done, _ = bash(PACK_STEP, ws, TAG="v1.2.3", GITHUB_SHA="0" * 40, GITHUB_EVENT_NAME=event,
+                               GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="1")
+                notes_ = (ws / "release-notes.md").read_text() if (ws / "release-notes.md").exists() else None
+                check(f"release notes whose first line is {first!r} ({event}): "
+                      + ("packed" if ok else "refused, nothing packed"),
+                      (done.returncode == 0 and notes_ is not None and notes_.startswith(first)) if ok else
+                      (done.returncode == 1 and "::error title=Release notes of another version::" in done.stdout
+                       and not notes_), repr((done.returncode, done.stdout[-300:], notes_)))
+
+    # The integration zip carries every file of the integration as the
+    # repository has it (translations, brand, icons, services, the realtime
+    # feed list, every module) and the frontend it serves from www/: the
+    # card, its loader and the vendored Leaflet, from the repository's dist/.
+    root = HERE.parent
+    real = tmp / "pack-real"
+    tracked = subprocess.run(["git", "-C", str(root), "ls-files", "custom_components/hungarian_transport", "dist"],
+                             capture_output=True, text=True, check=True).stdout.split()
+    for rel_ in tracked:
+        (real / rel_).parent.mkdir(parents=True, exist_ok=True)
+        (real / rel_).write_bytes((root / rel_).read_bytes())
+    write_gz(real / "dist" / "mav-index.json.gz", {"v": 1})
+    subprocess.run(["git", "init", "-q", str(real)], check=True)
+    subprocess.run(["git", "-C", str(real), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                    "commit", "-q", "--allow-empty", "-m", "t"], check=True)
+    done, _ = bash(PACK_STEP, real, TAG="v1.2.3", GITHUB_SHA="0" * 40, GITHUB_EVENT_NAME="workflow_dispatch",
+                   GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="o/r", GITHUB_RUN_ID="1")
+    names = set()
+    if done.returncode == 0:
+        with zipfile.ZipFile(real / "hungarian-transport.zip") as z:
+            names = set(z.namelist())
+    pkg_files = {r.removeprefix("custom_components/hungarian_transport/") for r in tracked
+                 if r.startswith("custom_components/hungarian_transport/")}
+    www = {"www/" + r.removeprefix("dist/") for r in tracked if r.startswith("dist/")}
+    runtime = {"translations/en.json", "translations/hu.json", "brand/icon.png", "manifest.json",
+               "www/hungarian-transport-loader.js", "www/hungarian-transport.js", "www/leaflet/leaflet.js",
+               "www/leaflet/leaflet.css", "www/leaflet/LICENSE", "www/mav-index.json.gz"}
+    check("the integration zip packed from the repository's own files carries every file of the integration"
+          " (translations, brand, icons, services, every module) and the card, its loader, Leaflet and the"
+          " indexes in www/",
+          done.returncode == 0 and runtime <= names and pkg_files <= names and www <= names
+          and runtime <= pkg_files | www | {"www/mav-index.json.gz"},
+          repr((done.returncode, done.stderr[-400:], sorted(runtime - names), sorted(pkg_files - names),
+                sorted(www - names))))
 
 # The documented check pins the release workflow and the ref the run started
 # from: without --signer-workflow any workflow of the repository passes (the
@@ -303,7 +360,7 @@ check("after a stable release the Pages timetables are rebuilt at once: mav-inde
       "    needs: [resolve, publish]" in _pages
       and "    if: needs.resolve.outputs.create == 'true' && !contains(needs.resolve.outputs.tag, '-rev.')" in _pages
       and re.search(r"^    permissions:\n      actions: write\n      contents: read\n    steps:", _pages, re.M) is not None
-      and "gh workflow run mav-index-daily.yml --ref main -f timetables=true" in _pages
+      and 'gh workflow run mav-index-daily.yml --ref main -f timetables=true -f release="$TAG"' in _pages
       and "::warning title=Pages timetables not started::" in _pages
       and "actions/checkout" not in _pages and "secrets." not in _pages
       and re.findall(r"^  ([\w-]+):$", _wf_text.split("\njobs:\n", 1)[1], re.M)[-1] == "pages",
@@ -326,7 +383,9 @@ with tempfile.TemporaryDirectory() as _tmp:
         _start = step_script("Start mav-index-daily.yml")
     except StopIteration:
         _start = "exit 1\n"
-    _run_args = ["workflow", "run", "mav-index-daily.yml", "--ref", "main", "-f", "timetables=true"]
+    # The tag goes with the dispatch (input release): that run lists the
+    # releases again, and may not see it yet either.
+    _run_args = ["workflow", "run", "mav-index-daily.yml", "--ref", "main", "-f", "timetables=true", "-f"]
     for _case, _tag, _tags, _env, _want, _started in (
         ("the highest stable", "v1.2.3", "v1.1.9 v1.2.3 v1.2.2", {},
          "mav-index-daily.yml started on main (timetables=true) for v1.2.3", True),
@@ -351,9 +410,111 @@ with tempfile.TemporaryDirectory() as _tmp:
         _done, _ = bash(_start, _ws, PATH=f"{_ws / 'bin'}:{os.environ['PATH']}", TAG=_tag, STUB_TAGS=_tags,
                         GH_TOKEN="x", GH_REPO="o/r", **_env)
         _ran = (_ws / "gh-args.txt").read_text().split() if (_ws / "gh-args.txt").exists() else None
-        check(f"the Pages start step, {_case}: exit 0, " + ("started" if _started else "not started"),
-              _done.returncode == 0 and _want in _done.stdout and _ran == (_run_args if _started else None),
+        check(f"the Pages start step, {_case}: exit 0, " + ("started" if _started else "not started")
+              + (f", naming {_tag}" if _started else ""),
+              _done.returncode == 0 and _want in _done.stdout
+              and _ran == ([*_run_args, f"release={_tag}"] if _started else None),
               repr((_done.returncode, _done.stdout, _done.stderr, _ran)))
+
+# The release-to-Pages handoff across both workflows, against one listing
+# that lags (it does not show the release the publish job has just made):
+# release.yml's pages job dispatches mav-index-daily.yml with the tag, and
+# that run's "Latest stable release" step, its input release set from the
+# dispatch's -f, picks the new tag once GitHub confirms by its tag that it
+# is a stable release. Without the input it would pick the previous one,
+# and the forced rebuild would build against it.
+_DAILY = HERE.parent / ".github" / "workflows" / "mav-index-daily.yml"
+
+
+def daily_step(name: str) -> str:
+    """The run: block of mav-index-daily.yml's step with this name."""
+    lines = _DAILY.read_text(encoding="utf-8").splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln.strip() == f"- name: {name}")
+    run = next(i for i in range(start, len(lines)) if lines[i].strip() == "run: |")
+    indent = len(lines[run]) - len(lines[run].lstrip()) + 2
+    body = []
+    for ln in lines[run + 1:]:
+        if ln.strip() and len(ln) - len(ln.lstrip()) < indent:
+            break
+        body.append(ln[indent:])
+    return "\n".join(body) + "\n"
+
+
+_daily_text = _DAILY.read_text(encoding="utf-8")
+_inputs = _daily_text[_daily_text.index("  workflow_dispatch:\n"):_daily_text.index("\npermissions:")]
+check("mav-index-daily.yml takes the dispatch input release (a string, empty by default) and hands it to the"
+      " Latest stable release step only",
+      "      release:\n" in _inputs and "        type: string\n" in _inputs.split("      release:\n", 1)[1]
+      and '        default: ""' in _inputs.split("      release:\n", 1)[1]
+      and _daily_text.count("inputs.release") == 1
+      and "RELEASE: ${{ inputs.release || '' }}" in _daily_text, _inputs)
+with tempfile.TemporaryDirectory() as _tmp:
+    _ws = Path(_tmp)
+    (_ws / "bin").mkdir()
+    # One GitHub for both jobs: the listing lags behind STUB_NEW (it shows
+    # only STUB_LISTED), while asking for a release by its tag finds it
+    # (STUB_BY_TAG: tag=draft,prerelease); gh workflow run writes its args.
+    (_ws / "bin" / "gh").write_text(
+        '#!/usr/bin/env bash\n'
+        'echo "$*" >> "$PWD/gh-log.txt"\n'
+        'if [ "$1" = api ]; then\n'
+        '  case "$2" in\n'
+        '    *"/releases/tags/"*)\n'
+        '      t="${2##*/}"\n'
+        '      for e in $STUB_BY_TAG; do\n'
+        '        if [ "${e%%=*}" = "$t" ]; then\n'
+        '          f="${e#*=}"\n'
+        '          [ "$f" = "false,false" ] && echo true || echo false; exit 0\n'
+        '        fi\n'
+        '      done\n'
+        '      echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;\n'
+        '    *) printf "%s\\n" $STUB_LISTED; exit 0 ;;\n'
+        '  esac\n'
+        'fi\n'
+        'echo "$*" > "$PWD/gh-run.txt"\n')
+    (_ws / "bin" / "gh").chmod(0o755)
+    _start, _stable = step_script("Start mav-index-daily.yml"), daily_step("Latest stable release")
+    _gh_path = f"{_ws / 'bin'}:{os.environ['PATH']}"
+    for _case, _listed, _by_tag, _want_tag, _want_text in (
+        ("the new release not listed yet, confirmed by its tag", "v1.10.23 v1.10.22", "v1.10.24=false,false",
+         "v1.10.24", ""),
+        ("the new release listed by then", "v1.10.24 v1.10.23", "v1.10.24=false,false", "v1.10.24", ""),
+        ("the tag not found by GitHub either: the listing decides", "v1.10.23 v1.10.22", "",
+         "v1.10.23", "::warning title=Release input ignored::v1.10.24 is not a published stable release"),
+        ("the tag a prerelease by GitHub's answer: the listing decides", "v1.10.23", "v1.10.24=false,true",
+         "v1.10.23", "::warning title=Release input ignored::"),
+        ("the tag a draft by GitHub's answer: the listing decides", "v1.10.23", "v1.10.24=true,false",
+         "v1.10.23", "::warning title=Release input ignored::"),
+    ):
+        for _f in ("gh-run.txt", "gh-log.txt"):
+            (_ws / _f).unlink(missing_ok=True)
+        _done, _ = bash(_start, _ws, PATH=_gh_path, TAG="v1.10.24", STUB_LISTED=_listed, STUB_BY_TAG=_by_tag,
+                        GH_TOKEN="x", GH_REPO="o/r")
+        _ran = (_ws / "gh-run.txt").read_text().split() if (_ws / "gh-run.txt").exists() else []
+        _inputs_ = dict(a.split("=", 1) for a in _ran[_ran.index("-f") + 1::2]) if "-f" in _ran else {}
+        _done2, _out2 = bash(_stable, _ws, PATH=_gh_path, STUB_LISTED=_listed, STUB_BY_TAG=_by_tag, GH_TOKEN="x",
+                             GITHUB_REPOSITORY="o/r", RELEASE=_inputs_.get("release", ""))
+        check(f"release to Pages under a lagging listing, {_case}: the dispatch names v1.10.24, the daily run"
+              f" builds against {_want_tag}",
+              _done.returncode == 0 and _inputs_ == {"timetables": "true", "release": "v1.10.24"}
+              and _done2.returncode == 0 and _out2.get("tag") == _want_tag and _want_text in _done2.stdout,
+              repr((_done.stdout, _ran, _done2.returncode, _done2.stdout, _done2.stderr, _out2)))
+    # Without the input (a cron, an owner's dispatch) the listing alone
+    # decides, and GitHub is not asked about any tag; a value that is not
+    # vX.Y.Z is never put into an API path.
+    for _case, _rel, _want_tag, _want_text in (
+        ("no input", "", "v1.10.23", ""),
+        ("an input that is not vX.Y.Z", "v1.10.24/../../x", "v1.10.23",
+         "::warning title=Release input ignored::The input release is not vX.Y.Z"),
+        ("a prerelease-looking input", "v1.10.24-rev.1", "v1.10.23", "::warning title=Release input ignored::"),
+    ):
+        (_ws / "gh-log.txt").unlink(missing_ok=True)
+        _done2, _out2 = bash(_stable, _ws, PATH=_gh_path, STUB_LISTED="v1.10.23", STUB_BY_TAG="v1.10.24=false,false",
+                             GH_TOKEN="x", GITHUB_REPOSITORY="o/r", RELEASE=_rel)
+        _log = (_ws / "gh-log.txt").read_text()
+        check(f"the daily Latest stable release step with {_case}: the listing decides, no tag asked for",
+              _done2.returncode == 0 and _out2.get("tag") == _want_tag and _want_text in _done2.stdout
+              and "/releases/tags/" not in _log, repr((_done2.stdout, _done2.stderr, _out2, _log)))
 check("the release runs from a v* tag push or from main",
       re.search(r"^  push:\n    tags:\n      - \"v\*\"$", _wf_text, re.M) is not None
       and '[ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ] && [ "${GITHUB_REF}" != "refs/heads/main" ]' in _wf_text)

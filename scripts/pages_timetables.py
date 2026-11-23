@@ -127,7 +127,11 @@ gtfs_compact.INDEX_SCHEMA), not this checkout's:
            timetables.json (due's live_built), signatures verified; a
            published one that is older is a cache's copy of an older
            deploy, read again the same way, and when still older the site
-           is refused (exit 1): built_at never goes backwards.
+           is refused (exit 1): built_at never goes backwards. So is a
+           published manifest that such an earlier job read and that is
+           now not there (HTTP 404). --mav-built-at also comes from the
+           build job's verdict step (mav_daily_verdict.py) when the run
+           made no MÁV part.
            due prints live_built=: the published timetables.json's
            built_at when its signature verifies, else empty.
 """
@@ -215,8 +219,12 @@ SETTLE_S = 30.0
 PAGES_MAX_AGE = mav_site.PAGES_MAX_AGE
 SIG_SETTLE_S = float(mav_site.SIG_SETTLE_S)
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
-# A stable release's tag, as GitHub names it (release.yml's latest_stable).
-RELEASE_TAG_RE = re.compile(r"v\d+\.\d+\.\d+")
+# A stable release's tag, as GitHub names it (release.yml's latest_stable),
+# and as installs read it back (release_version): no part longer than the
+# integration's weekly_timetables.RELEASE_VERSION_RE allows, or every
+# install would refuse the whole index for it
+# (tests/test_pages_roundtrip.py holds the two together).
+RELEASE_TAG_RE = re.compile(r"v\d{1,6}\.\d{1,6}\.\d{1,6}")
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 SHARD_RE = re.compile(r"\d{2,3}\.json\.gz")
 
@@ -421,14 +429,27 @@ class Source:
         with its own .sig: it is read again once as above, and raises
         MismatchError when it is still older. Carried, it would put that
         deploy's files back over the newer one's: built_at never goes
-        backwards from one deploy to the next."""
+        backwards from one deploy to the next. A 404 with not_before is
+        the same (a 404 a cache kept, or a site that lost the manifest the
+        earlier job read signed), never "missing": the site would go up
+        without that manifest's files."""
         sig_name = name + ".sig"
         why = ""
         for attempt in (1, 2):
             data, body, state = self.manifest(name)
-            if data is None:
+            if data is None and not_before is None:
                 self.states[name] = state
                 return None, None, state
+            if data is None:
+                why = (f"stale: the published {name} is not there (HTTP 404), though this run read one built"
+                       f" {utc_text(not_before)} earlier")
+                if attempt == 2 or settle < 0:
+                    break
+                wait = self.settle_wait(settle)
+                print(f"{why}; reading it again in {wait:.0f} s (GitHub Pages may still serve a 404 it cached for"
+                      f" it: it caches each file for up to {PAGES_MAX_AGE} s)")
+                time.sleep(wait)
+                continue
             with tempfile.TemporaryDirectory() as tmp:
                 got = self.fetch(sig_name, Path(tmp) / "sig", MAX_SIG)
                 raw = (Path(tmp) / "sig").read_bytes() if got is not None else None
@@ -453,7 +474,8 @@ class Source:
                   f" {PAGES_MAX_AGE} s)")
             time.sleep(wait)
         if why.startswith("stale"):
-            raise MismatchError(f"{why}: GitHub Pages still serves an older deploy's copy")
+            raise MismatchError(f"{why}: GitHub Pages still serves an older deploy's copy"
+                                + (" or a 404 for it" if data is None else ""))
         self.states[name] = why
         return None, None, why
 
@@ -1185,14 +1207,16 @@ def live_timetables(source: Source, settle: float = -1, not_before: datetime | N
     (no .sig) or an error annotation (a .sig that does not verify):
     nothing is carried from it, so this site's manifest, signed again,
     never vouches for entries this workflow did not sign. Raises FetchError
-    for one that is there but does not read: assemble then refuses the
-    site. Which indexes such a manifest lists cannot be told, and the cause
-    is most likely the network: dropping both indexes on that would leave
-    every install without a published index (they keep their own, but each
-    next run rebuilds both), while a refusal costs only this run's deploy.
-    not_before (Source.signed): the built_at the timetables job's due step
-    read for it; an older one raises MismatchError (assemble refuses the
-    site after one more try), never carried."""
+    for one that is there but does not read: cmd_assemble then reads the
+    site again once, --sig-settle after its first read (Pages' cache,
+    Source.mismatch_wait), and refuses the site only when it still does
+    not read. Which indexes such a manifest lists cannot be told, and the
+    cause is most likely the network: dropping both indexes on that would
+    leave every install without a published index (they keep their own,
+    but each next run rebuilds both), while a refusal costs only this run's
+    deploy. not_before (Source.signed): the built_at the timetables job's
+    due step read for it; an older one, or a 404, raises MismatchError
+    (assemble refuses the site after one more try), never carried."""
     live, state = source.timetables(settle, not_before)
     if state.startswith("unsigned") or bad_signature(state):
         # A .sig that is there but does not verify is an error (the run goes

@@ -52,9 +52,12 @@ name: Daily timetables (GitHub Pages)
 # published Volán or city index that
 # cannot be carried is left out with a warning (installs keep theirs, the
 # next run rebuilds it). A MÁV file that cannot be carried, or a published
-# manifest that is there but does not read, stops the deploy: every
-# install's daily MÁV check reads those files. A manifest that is not there
-# (404) has nothing to carry.
+# manifest that is there but does not read, also when fetched again once
+# 11 minutes after the first read of the site (Pages' cache, as above),
+# stops the deploy: every install's daily MÁV check reads those files. A
+# manifest that is not there (404) has nothing to carry, unless an earlier
+# job of the run read it, signed (then it is a cache's 404, read again
+# once the same way, and the deploy stops when it is still not there).
 #
 # When: MÁV's feed of the day (feed_version YYYYMMDD) appeared between about
 # 03:17 and 10:03 UTC in November 2026, and on 3 November it was still
@@ -107,6 +110,12 @@ on:
         description: Rebuild the Volán and city indexes now
         type: boolean
         default: false
+      # release.yml's pages job names the stable release it has just
+      # published: a listing made right after may not show it yet.
+      release:
+        description: "A stable release (vX.Y.Z) to count as published even if the release list does not show it yet. Normally empty."
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -128,9 +137,10 @@ jobs:
     outputs:
       deploy: ${{ steps.site.outputs.deploy }}
       # The published mav-index.json's built_at, its signature verified
-      # (mav_pages_site.py), "" without one: the site job never carries an
-      # older one.
-      live_built: ${{ steps.site.outputs.live_built }}
+      # (mav_pages_site.py, or mav_daily_verdict.py when this run made no
+      # MÁV part: the site job then carries the published MÁV files), ""
+      # without one: the site job never carries an older one.
+      live_built: ${{ steps.site.outputs.live_built || steps.age.outputs.live_built }}
     env:
       # Only whether both are set; the values stay in the step that uses them.
       MAV_SECRETS: ${{ secrets.MAV_GTFS_USER != '' && secrets.MAV_GTFS_PASSWORD != '' }}
@@ -211,8 +221,12 @@ jobs:
       # (mav_shrink_guard.py); when the published manifest does not read,
       # or its signature does not verify (its counts are then anyone's), it
       # is compared with the latest stable release's MÁV index instead
-      # (fetched only then). The repository variable MAV_ALLOW_SHRINK=1
-      # accepts an intended reduction. A .sig that does not verify, or is
+      # (fetched only then): the highest vX.Y.Z that is no draft or
+      # prerelease, by version, as the timetables job picks it, not
+      # GitHub's "latest" (a backport released after it would be that);
+      # GitHub's "latest" only when the releases cannot be listed. The
+      # repository variable MAV_ALLOW_SHRINK=1 accepts an intended
+      # reduction. A .sig that does not verify, or is
       # not there (HTTP 404), is read again with its manifest 11 minutes
       # later (Pages' cache may pair two deploys' files, or keep the 404 of
       # the .sig from before the first signed deploy) before it counts as
@@ -222,22 +236,35 @@ jobs:
         if: steps.mav.outputs.built == 'true'
         env:
           MAV_ALLOW_SHRINK: ${{ vars.MAV_ALLOW_SHRINK || '' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
+          baseline="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/hungarian-transport-frontend.zip"
+          if tags=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              --jq '.[] | select((.draft or .prerelease) | not) | .tag_name'); then
+            stable=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$tags" | sort -V | tail -n 1 || true)
+            if [ -n "$stable" ]; then
+              baseline="https://github.com/${GITHUB_REPOSITORY}/releases/download/${stable}/hungarian-transport-frontend.zip"
+            fi
+          else
+            echo "Could not list the releases (GitHub API); the shrink guard's fallback is GitHub's latest release."
+          fi
           if python3 scripts/mav_pages_site.py --index mav-index.json.gz --stats mav-build.json \
               --commit "$GITHUB_SHA" --out "$RUNNER_TEMP/site" --live-url "$pages_url/mav-index.json" \
               --gtfs-zip "$RUNNER_TEMP/mav/gtfs/mav-gtfs.zip" --pfaedle-dir "$RUNNER_TEMP/mav/gtfs-out" \
-              --baseline-url "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/hungarian-transport-frontend.zip" \
-              --github-output "$GITHUB_OUTPUT"; then
+              --baseline-url "$baseline" --github-output "$GITHUB_OUTPUT"; then
             ls -l "$RUNNER_TEMP/site"
             exit 0
           fi
           echo "::warning title=Daily MÁV index not published::The built index did not make a Pages site (see this step's log); GitHub Pages keeps the previous index."
 
       # The site job puts it on Pages. Kept 3 days, as the Pages artifact:
-      # "Re-run failed jobs" after a failed site job finds it.
+      # "Re-run failed jobs" after a failed site job finds it. Worth it only
+      # while no later run has deployed: the sign job refuses the site once
+      # GitHub Pages serves a newer MÁV index or Volán or city index than
+      # the re-run's parts (sign_manifest.py live-check).
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.site.outputs.deploy == 'true'
         with:
@@ -253,7 +280,13 @@ jobs:
       # (read again 11 minutes later, past Pages' cache: its built_at is
       # then anyone's), is no signature or is refused (HTTP 4xx); a warning
       # otherwise (a network error, a timeout, HTTP 5xx: its age unknown).
+      # Red as well when the published mav-index.json itself is not there
+      # (HTTP 404, read again 11 minutes later; a warning without the MÁV
+      # secrets), refused (HTTP 4xx), oversized or not a manifest. Its
+      # live_built (the published built_at, its signature verified) is the
+      # site job's floor for the MÁV files it carries.
       - name: Published index age
+        id: age
         if: steps.site.outputs.deploy == ''
         env:
           BUILD_FAILURE: ${{ steps.mav.outputs.failure }}
@@ -268,7 +301,8 @@ jobs:
           fi
           owner="${GITHUB_REPOSITORY_OWNER,,}"
           pages_url="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}"
-          python3 scripts/mav_daily_verdict.py --failure "$failure" --live-url "$pages_url/mav-index.json"
+          python3 scripts/mav_daily_verdict.py --failure "$failure" --live-url "$pages_url/mav-index.json" \
+            --github-output "$GITHUB_OUTPUT"
 
   # The Volán and city indexes, when due, with the latest stable release's
   # code. No MÁV secret; the city feeds' secrets only in the build step.
@@ -292,18 +326,37 @@ jobs:
     steps:
       # As release.yml's latest_stable: the highest vX.Y.Z that is not a
       # prerelease, by version, not by date. A GitHub API failure fails the
-      # job (nothing is built; the site job still runs).
+      # job (nothing is built; the site job still runs). The dispatch input
+      # release (release.yml's pages job: the release it has just
+      # published, which a listing made right after may not show yet) is a
+      # candidate too, once GitHub says it is a published release that is
+      # no draft or prerelease (asked by its tag); a value that is not
+      # vX.Y.Z, or a release that cannot be confirmed so, is left out with
+      # a warning.
       - name: Latest stable release
         id: stable
         timeout-minutes: 3
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release || '' }}
         run: |
           set -euo pipefail
           if ! tags=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
               --jq '.[] | select((.draft or .prerelease) | not) | .tag_name'); then
             echo "::error::Could not list the releases (GitHub API); no Volán or city index is built."
             exit 1
+          fi
+          if [ -n "${RELEASE:-}" ]; then
+            # The value goes into the API path and the annotations below:
+            # nothing but vX.Y.Z gets that far.
+            if [[ ! "$RELEASE" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::warning title=Release input ignored::The input release is not vX.Y.Z; the release list decides."
+            elif stable=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE}" \
+                --jq '(.draft or .prerelease) | not') && [ "$stable" = true ]; then
+              tags=$(printf '%s\n%s\n' "$tags" "$RELEASE")
+            else
+              echo "::warning title=Release input ignored::${RELEASE} is not a published stable release (GitHub API); the release list decides."
+            fi
           fi
           tag=$(grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' <<< "$tags" | sort -V | tail -n 1 || true)
           if [ -z "$tag" ]; then
@@ -548,8 +601,9 @@ jobs:
       # the Pages artifact. "Re-run failed jobs" after a failed sign job
       # (no key, openssl) signs and deploys this artifact as it was made,
       # however old: worth it only while no later run has deployed (the
-      # sign job refuses it once GitHub Pages serves a newer site), and
-      # only when no run of this workflow is queued (see the top).
+      # sign job refuses it once GitHub Pages serves a newer timetables.json,
+      # Volán or city index or mav-index.json), and only when no run of
+      # this workflow is queued (see the top).
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: steps.assemble.outputs.deploy == 'true'
         with:
@@ -576,9 +630,11 @@ jobs:
   # without the secret deploys nothing. The token reads contents only, for
   # the one script it checks out. Before the key is read, a site older than
   # the one GitHub Pages serves is refused (sign_manifest.py live-check: the
-  # published timetables.json, its signature verifying, names a later
-  # built_at): a re-run of this job after a later run deployed would put
-  # this run's older indexes back on Pages.
+  # published timetables.json, one of the indexes it lists, or
+  # mav-index.json, each by its own signature verifying, names a later
+  # built_at than the site's): a re-run of this job, or of the site job
+  # (which assembles again around its run's older parts), after a later run
+  # deployed would put this run's older indexes back on Pages.
   sign:
     name: Sign the manifest
     needs: site
