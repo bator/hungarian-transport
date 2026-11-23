@@ -73,16 +73,19 @@ the index replaces the old one by a temp file and a rename
 (mav_index.write_bytes), its mtime set to the entry's built_at (the sensors'
 build time: the index's gzip header has none). <key> is of the entry's feed
 and sha256: a round that failed keeps the shards it verified there, and so
-does one a stop cancelled during the download (an unload, a reload, Home
-Assistant stopping), and the next try of the same entry downloads only the
-rest. The card fetches the
+does one a stop cancelled during the download or after it, before the
+commit (an unload, a reload, Home Assistant stopping), and the next try of
+the same entry downloads only the rest. The card fetches the
 index with a day-stamped URL and keeps the one it loaded until midnight or
 a reload, asking for that index's shards all day: a shapes folder the
 served index no longer names is marked retired (.retired) and removed
 SHAPES_GRACE later, as scripts/gtfs_compact.prune_shapes does. A round
-prunes both stems every time, the index installed or not, and so does every
-setup of the entry (prune_all), the option on or off; a staging folder goes
-once it is TEMP_MIN_AGE old.
+that reads a signed manifest of this format prunes the stem of each index
+it decides about, installed or not (also one the manifest leaves out); one
+that stops before (the manifest or its signature failed, or is
+UNSUPPORTED) or whose download fails prunes nothing, and the next such
+round, or the next setup of the entry (prune_all, the option on or off),
+does; a staging folder goes once it is TEMP_MIN_AGE old.
 
 Downloads are bounded: the manifest MAX_MANIFEST, its signature
 MAX_SIGNATURE, an index MAX_INDEX (read into memory to check it), a shard
@@ -865,7 +868,16 @@ async def _download_shards(
 ) -> None:
     """The shards names (by default every one) into tmp, CONCURRENCY at a
     time; the first failure stops the others and is raised. A shard that did
-    not check out is not left in tmp; one that did stays for a retry."""
+    not check out is not left in tmp; one that did stays for a retry.
+
+    The downloads run in a task of their own, which the caller waits for: a
+    stop (a cancel of the round) is raised here whatever the shards do. In
+    the round's own task a TaskGroup can swallow it: a cancel that comes
+    while a failed shard's TaskGroup aborts the others is, on Python 3.12
+    (Home Assistant 2024.10), taken for the TaskGroup's own, and the round
+    went on to the next index after an unload or a reload. On a cancel the
+    downloads are cancelled and waited for (the shards that verified stay),
+    then the cancel is raised."""
     gate = asyncio.Semaphore(CONCURRENCY)
     wanted = shapes["files"] if names is None else {shard: shapes["files"][shard] for shard in names}
 
@@ -874,14 +886,30 @@ async def _download_shards(
             url = f"{mav_daily.PAGES_BASE}/{shapes['dir']}/{shard}"
             await _download_shard(hass, session, url, tmp / shard, size, sha)
 
+    async def every() -> None:
+        try:
+            async with asyncio.TaskGroup() as group:
+                for shard, (size, sha) in wanted.items():
+                    group.create_task(one(shard, size, sha))
+        except BaseExceptionGroup as errors:
+            # Mismatches first: the round settles rather than fails.
+            found = [e for e in errors.exceptions if isinstance(e, _MISMATCHES)] or list(errors.exceptions)
+            raise found[0] from None
+
+    work = hass.loop.create_task(every(), name="hungarian_transport_pages_shards")
     try:
-        async with asyncio.TaskGroup() as group:
-            for shard, (size, sha) in wanted.items():
-                group.create_task(one(shard, size, sha))
-    except BaseExceptionGroup as errors:
-        # Mismatches first: the round settles rather than fails.
-        found = [e for e in errors.exceptions if isinstance(e, _MISMATCHES)] or list(errors.exceptions)
-        raise found[0] from None
+        await asyncio.wait([work])
+    except asyncio.CancelledError:
+        while not work.done():
+            work.cancel()
+            try:
+                await asyncio.wait([work])
+            except asyncio.CancelledError:
+                continue
+        if not work.cancelled():
+            work.exception()
+        raise
+    work.result()
 
 
 # hass.data[DOMAIN] keys, only this module reads them.
@@ -897,11 +925,16 @@ def write_lock(hass: HomeAssistant) -> asyncio.Lock:
     return hass.data.setdefault(DOMAIN, {}).setdefault(_LOCK, asyncio.Lock())
 
 
+# The _log_failure scopes that are no index: what failed, for the warning.
+_ROUND_SCOPES = {"manifest": "their manifest, timetables.json", "round": "the round crashed"}
+
+
 def _log_failure(
     hass: HomeAssistant, scope: str, message: str, unsupported: bool = False, exc_info: BaseException | None = None
 ) -> None:
-    """Once per kind of failure of scope (the manifest, an index); the same
-    one again goes to debug. exc_info: a crash (not of
+    """Once per kind of failure of scope (an index, "manifest": the manifest
+    or its signature, "round": a round that crashed); the same one again
+    goes to debug. exc_info: a crash (not of
     mav_daily.EXPECTED_ERRORS), logged with its traceback the first time."""
     logged = hass.data.setdefault(DOMAIN, {}).setdefault(_LOGGED, {})
     if logged.get(scope) == message:
@@ -911,6 +944,11 @@ def _log_failure(
     if unsupported:
         _LOGGER.info("Weekly timetables from GitHub Pages skipped: %s. Update Hungarian transport to use them",
                      message)
+    elif scope in _ROUND_SCOPES:
+        _LOGGER.warning(
+            "Weekly timetables from GitHub Pages not installed (%s): %s. The current indexes stay; trying again"
+            " later", _ROUND_SCOPES[scope], message, exc_info=exc_info,
+        )
     else:
         _LOGGER.warning(
             "Weekly %s timetable from GitHub Pages not installed: %s. The current index stays; trying again later",
@@ -929,7 +967,12 @@ def _crash(hass: HomeAssistant, scope: str, err: Exception) -> str:
     expected = isinstance(err, mav_daily.EXPECTED_ERRORS)
     _log_failure(hass, scope, message, exc_info=None if expected else err)
     if expected:
-        _LOGGER.debug("Weekly %s timetable round failed", scope, exc_info=err)
+        # The traceback of an expected error, for debugging, in the wording
+        # of its scope (as _log_failure's).
+        if scope == "round":
+            _LOGGER.debug("Weekly timetables round failed", exc_info=err)
+        else:
+            _LOGGER.debug("Weekly %s timetable failed", scope, exc_info=err)
     return message
 
 
@@ -1080,27 +1123,8 @@ async def _running_version(hass: HomeAssistant) -> Any:
         return None
 
 
-async def _wait_out(fut: asyncio.Future[Any]) -> bool:
-    """Until fut is done, through every cancel of the calling task meanwhile
-    (a stop, then another); whether there was one. Each cancel is taken back
-    at once (Task.uncancel): Home Assistant's own stop cancels the
-    background tasks first and then waits (async_block_till_done) only for
-    the tasks that are not being cancelled, so a round that still counted
-    as cancelled would not be waited for. The caller raises CancelledError
-    when it is done. fut's exception is taken, so it is not logged as never
-    retrieved."""
-    cancelled = False
-    while not fut.done():
-        try:
-            await asyncio.wait([fut])
-        except asyncio.CancelledError:
-            cancelled = True
-            task = asyncio.current_task()
-            if task is not None:
-                task.uncancel()
-    if not fut.cancelled():
-        fut.exception()
-    return cancelled
+# Shared with the daily MÁV install (mav_daily.wait_out).
+_wait_out = mav_daily.wait_out
 
 
 async def _update_index(
@@ -1141,8 +1165,9 @@ async def _update_index(
     tmp: Path | None = None
     # A download that failed keeps the shards it verified for the next try;
     # so does one a stop cancelled (an unload, a reload, Home Assistant
-    # stopping): it is a try that did not finish, and the next round of the
-    # same entry finds them. prune removes the folder once it is
+    # stopping), during the download or after it, before the commit: it is a
+    # try that did not finish, and the next round of the same entry finds
+    # them. prune removes the folder once it is
     # TEMP_MIN_AGE old, at the latest at the next setup or round after that.
     keep = False
     try:
@@ -1178,8 +1203,15 @@ async def _update_index(
             return failed(err)
         _matched(hass, name)
         # www/ may have changed during the download (the local updater).
-        decision, why = await hass.async_add_executor_job(decide_now)
+        try:
+            decision, why = await hass.async_add_executor_job(decide_now)
+        except asyncio.CancelledError:
+            # Stopped after the download: the shards checked out, the next
+            # try of the same entry needs none of them again.
+            keep = True
+            raise
         if decision != _INSTALL:
+            await hass.async_add_executor_job(_prune_served, www, name)
             _clear_failure(hass, name)
             return IndexResult(decision, feed, reason=why)
 

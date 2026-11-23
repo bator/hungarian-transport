@@ -451,3 +451,66 @@ def test_every_sensor_has_a_name_and_an_icon(lang) -> None:
     assert set(strings["entity"]["sensor"]) == keys
     assert set(icons["entity"]["sensor"]) == keys
     assert all(strings["entity"]["sensor"][k]["name"] for k in keys)
+
+
+# --- review round 10 ----------------------------------------------------------
+
+
+def _every_attribute(monkeypatch) -> dict[str, set[str]]:
+    """Every attribute key each sensor's attrs_fn can return (translation
+    key -> keys): with nothing known (_compact keeps the unknown ones here),
+    and with each option turned off."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(sensor, "_compact", dict)
+    keys: dict[str, set[str]] = {}
+    for enabled in (True, False):
+        status = SimpleNamespace(
+            indexes={"mav": {}, "volan": {}, "city": {"feed": CITY}},
+            record={},
+            pages_enabled=enabled,
+            daily_enabled=enabled,
+            next_run=None,
+        )
+        for description in sensor.SENSORS:
+            keys.setdefault(description.translation_key, set()).update(description.attrs_fn(status))
+    return keys
+
+
+@pytest.mark.parametrize("lang", ["en", "hu"])
+def test_every_attribute_of_every_sensor_is_translated(lang, monkeypatch) -> None:
+    """Review round 10: pages_reason, pages_settling (Volán, city) and
+    reason (daily MÁV check) had no name, and showed as raw keys and raw
+    reason words in the attribute panel."""
+    pkg = Path(sensor.__file__).parent
+    strings = json.loads((pkg / "translations" / f"{lang}.json").read_text(encoding="utf-8"))["entity"]["sensor"]
+    for key, attrs in _every_attribute(monkeypatch).items():
+        translated = strings[key]["state_attributes"]
+        assert attrs <= set(translated), (key, attrs - set(translated))
+        assert all(translated[attr]["name"] for attr in attrs)
+    # The reason words a round records have their own text; any other
+    # reason is an error's text, shown as it is.
+    words = {
+        mav_daily.REASON_BAD_SIGNATURE, mav_daily.UNKNOWN_KEY, mav_daily.REASON_NOT_FOUND,
+        mav_daily.REASON_MISMATCH, mav_daily.REASON_TOO_LARGE,
+    }
+    settling = (words - {mav_daily.REASON_TOO_LARGE}) | {mav_daily.SETTLING}
+    pages = words | {mav_daily.REASON_RELEASE_NEWER, mav_daily.REASON_SERVED_NEWER}
+    for key in ("volan_timetable", "city_timetables"):
+        attrs = strings[key]["state_attributes"]
+        assert set(attrs["pages_reason"]["state"]) == pages
+        assert set(attrs["pages_settling"]["state"]) == settling
+    attrs = strings["daily_mav_check"]["state_attributes"]
+    assert set(attrs["reason"]["state"]) == words
+    assert set(attrs["pages_settling"]["state"]) == settling
+    assert all(v for a in strings.values() for attr in a["state_attributes"].values()
+               for v in attr.get("state", {}).values())
+
+
+@pytest.mark.parametrize("lang", ["en", "hu"])
+def test_the_weekly_option_says_it_installs_only_signed_and_keeps_a_newer_release(lang) -> None:
+    pkg = Path(sensor.__file__).parent
+    strings = json.loads((pkg / "translations" / f"{lang}.json").read_text(encoding="utf-8"))
+    text = strings["options"]["step"]["init"]["data_description"]["pages_timetables"]
+    signed, release = {"en": ("signed manifest", "newer release"), "hu": ("aláírt manifest", "újabb kiadás")}[lang]
+    assert signed in text and release in text

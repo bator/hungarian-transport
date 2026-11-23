@@ -338,7 +338,8 @@ these hold:
   own index, but only while that index is the one in use (built from the
   feed as it is now, or of its `feed_version`). A local feed whose build
   failed, was interrupted or refused by the audit keeps nothing;
-- the download has the manifest's size and sha256, has no data after its
+- the download has the manifest's size (it is read no further: a longer
+  one is another generation's, below) and sha256, has no data after its
   gzip stream, unpacks to that schema and feed, and has at least 50 trains
   whose routes and stations all resolve.
 
@@ -356,7 +357,10 @@ redirects every `github.io` URL once a custom domain is set), each round
 fails with a warning naming the redirect until an update of the integration
 reads the new address. The index is written next to the card the way a
 build writes it (a temp file, then a rename) and never while a local build
-runs or waits. A failed round, or one that found a build running, is tried
+runs or waits. A restart of Home Assistant or a reload of the integration
+during the write waits for it and for its record (the MÁV route index
+sensor's `source: daily`), then ends the check: that check is neither
+recorded nor notified, and the next one finds the index up to date. A failed round, or one that found a build running, is tried
 again 20 minutes later, up to 6 times until the next daily round. The day's feed is on Pages
 around midday or in the afternoon (above), so a round that finds the
 manifest's feed of an earlier day (or the manifest built over 20 hours ago)
@@ -728,11 +732,14 @@ renamed over the old one, so the card never reads an index whose shapes are
 missing. The index file gets the entry's `built_at` as its time, which the
 sensors show as its build time. Shapes files that checked out stay in the
 temporary folder when a download fails or is stopped (a restart of Home
-Assistant, a reload of the integration), so the next try of the same entry
-fetches only the rest; a temporary folder left for an hour is removed. The previous shapes folder is
+Assistant, a reload of the integration), also once it is done and before
+the install, so the next try of the same entry fetches only the rest; a temporary folder left for an hour is removed. The previous shapes folder is
 marked retired and removed 26 hours later: an open dashboard keeps the old
 index until it reloads (at the latest at midnight) and reads its shapes
-until then. Retired folders are looked at in every check and at every start
+until then. Retired folders are looked at in every check that gets as far as
+an index and decides about it (not one whose manifest or signature failed or
+is of a format this version does not read, nor an index that fails its
+checks, fails to download or is looked at again later) and at every start
 of the integration, also with *Weekly Volán and city timetables from
 GitHub* off. The timetable sensors update at once, and the install is
 recorded, so a later release that ships the same feeds or older ones does
@@ -984,7 +991,7 @@ cards use and when they changed:
 | `sensor.hungarian_transport_mav_route_index` (MÁV route index) | date of the served MÁV index's feed (`20261030.M2ChangeID` → 2026-10-30) | `feed_version`; `source`: `daily` (the daily index installed it), `local` (a build of `/config/hungarian-transport/mav-gtfs.zip`, an upload, or the local updater, whose durable copy is this index) or `release`; `installed_at` (UTC); `trains`, `lines`; `fitted_share` (the share of routes that follow the rails rather than the line through the stations); `audit_ok_ratio` when the build or the manifest gave one |
 | `sensor.hungarian_transport_volan_timetable` (Volán timetable) | date in the Volán index's feed version (`volan:01716.20261102` → 2026-11-02) | `feed_version`, `trips`, `stops`, `updated_at` (the index's build time from its gzip header, else the file's time, which an install from Pages sets to the entry's `built_at`), `source`: `pages` when it is the index the integration installed from [GitHub Pages](#the-volán-and-city-indexes), `local_updater` when the updater's copy in `/config/hungarian-transport` is this index, else `release`; `pages_checked_at`, `pages_result`, `pages_reason`, `pages_settling` (below) |
 | `sensor.hungarian_transport_city_timetables` (City timetables) | when the city index was built (timestamp) | `operators`, `trips`, and `feeds` (operator → feed version) when there are at most 10; `source`: `pages`, `local_updater` or `release`, as for Volán; `pages_checked_at`, `pages_result`, `pages_reason`, `pages_settling` (below) |
-| `sensor.hungarian_transport_daily_mav_check` (Daily MÁV check) | when the daily MÁV index last ran (timestamp; unknown before its first round) | `result`: `installed`, `up_to_date`, `superseded` (www/ serves a newer feed than the manifest's), `local_wins`, `busy`, `failed`, `unsupported`, or `disabled` with the option off; `reason` when it failed or was unsupported (as `pages_reason` below); `manifest_feed`, `manifest_built_at`, `next_run` (UTC), `failure_streak` (days in a row) |
+| `sensor.hungarian_transport_daily_mav_check` (Daily MÁV check) | when the daily MÁV index last ran (timestamp; unknown before its first round) | `result`: `installed`, `up_to_date`, `superseded` (www/ serves a newer feed than the manifest's), `local_wins`, `busy`, `failed`, `unsupported`, or `disabled` with the option off; `reason` when it failed or was unsupported (as `pages_reason` below); `manifest_feed`, `manifest_built_at`; `pages_settling` while a check looks again (as below; the other attributes stay the last check's); `next_run` (UTC), `failure_streak` (days in a row) |
 
 `pages_checked_at` is when the integration last read `timetables.json`
 (UTC), and `pages_result` what that check did for this index: `installed`,
@@ -1004,11 +1011,13 @@ option off. `pages_reason` says why an index was not installed:
 signature, or not the site's; `failed` on its first 3 days),
 `not_found` (a file the manifest names is not on the site), `mismatch` (a
 download is not the file the manifest describes), `too_large` (the
-manifest, or the MÁV index, is larger than this version takes: no cache
-mismatch, so it is retried as a failure, not looked at again sooner), else
+manifest, or the MÁV index by its Content-Length, is larger than this
+version takes: no cache mismatch, so it is retried as a failure, not looked
+at again sooner; an index longer than its manifest says is a `mismatch`), else
 the error's text (at most 120 characters). `pages_settling` is the reason of a check still
-looking again (a download that did not match right after a deploy); the
-check 11 minutes later replaces it with its result.
+looking again (a download that did not match right after a deploy), on the
+Daily MÁV check sensor too; the check 11 minutes later replaces it with its
+result. The MÁV check never says `release_newer` or `served_newer`.
 
 An index sensor is unavailable while its index is missing from www/. The
 sensors update right after the daily index, a Pages install or a local MÁV
