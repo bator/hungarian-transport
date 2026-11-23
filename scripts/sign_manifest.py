@@ -32,17 +32,29 @@ runs reach: base64 of the raw 32-byte ed25519 private key, its seed).
          DIR/mav-index.json.sig over DIR/mav-index.json when DIR has one;
          1 otherwise.
   live-check --site DIR --live-url URL
-         Exit 1 (::error::) when the published timetables.json (URL is the
-         site's https base URL), its timetables.json.sig verifying against
-         PUBLIC_KEY, names a later built_at than DIR/timetables.json: DIR is
-         then an older run's site (a "Re-run failed jobs" of the sign job,
-         whose artifact is kept 3 days), and deploying it would put older
-         indexes back over a newer run's. Every deploy writes a new
-         timetables.json, so its built_at orders the deploys. Exit 0
-         otherwise, also when the published one cannot be read or is not
-         trusted (its built_at is then anyone's: it must not hold a deploy
-         back), and exit 1 for a DIR/timetables.json without a built_at.
-         Run before the signing step, without the key.
+         Exit 1 (::error::) when GitHub Pages (URL is the site's https
+         base URL) already serves files built later than DIR's: DIR is then
+         an older run's site (a "Re-run failed jobs" of the sign job, whose
+         artifact is kept 3 days, or of the site job, which assembles again
+         from its run's MÁV and timetables parts, kept as long), and
+         deploying it would put older indexes back over a newer run's.
+         Each published manifest counts only when its .sig verifies
+         against PUBLIC_KEY, and it is newer when
+         - timetables.json names a later built_at than DIR/timetables.json
+           (every deploy writes a new one, so it orders the deploys of the
+           sign job's re-runs);
+         - an index timetables.json lists (volan, city) names a later
+           built_at than DIR/timetables.json's entry of that name: a site
+           job re-run writes a timetables.json of the re-run's time around
+           its run's older parts;
+         - mav-index.json names a later built_at than DIR/mav-index.json,
+           or DIR has none (the same re-run's MÁV part).
+         A file carried over from the live site has the built_at it has
+         there, and passes. Exit 0 otherwise, also when a published
+         manifest cannot be read or is not trusted (its built_at is then
+         anyone's: it must not hold a deploy back), and exit 1 for a
+         DIR/timetables.json without a built_at. Run before the signing
+         step, without the key.
 
 pages_timetables.py verifies the published manifests with it before it
 carries anything over from them (verify_bytes), and mav_pages_site.py the
@@ -245,36 +257,109 @@ def fetch(url: str, cap: int) -> tuple[bytes | None, str]:
     return body, "ok"
 
 
-def built_at(raw: bytes) -> datetime | None:
-    """A timetables.json's built_at (ISO, with an offset), else None."""
+def _when(value: object) -> datetime | None:
+    """An ISO time with an offset (a manifest's built_at), else None."""
     try:
-        value = json.loads(raw).get("built_at")
         when = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else None
-    except (ValueError, AttributeError):
+    except ValueError:
         return None
     return when if when is not None and when.tzinfo is not None else None
 
 
+def built_at(raw: bytes) -> datetime | None:
+    """A timetables.json's built_at (ISO, with an offset), else None."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return _when(data.get("built_at")) if isinstance(data, dict) else None
+
+
+def _live_signed(base: str, name: str, get: Callable[[str, int], tuple[bytes | None, str]]) -> tuple[dict | None, str]:
+    """The published manifest name (a JSON object), its .sig verifying
+    against PUBLIC_KEY: (it, "ok"), else (None, why not)."""
+    body, why = get(base + name, MAX_MANIFEST)
+    if body is None:
+        return None, f"the published {name} was not read ({why})"
+    sig, why = get(base + name + ".sig", MAX_SIG)
+    if sig is None or not verify_bytes(body, decode_sig(sig)):
+        return None, f"the published {name} is not trusted ({why if sig is None else 'no good signature'})"
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None, f"the published {name} is not JSON"
+    if not isinstance(data, dict):
+        return None, f"the published {name} is not a JSON object"
+    return data, "ok"
+
+
+def _read_json(path: Path) -> dict:
+    """A JSON object file of the site; {} for one that is not there or is
+    no object."""
+    try:
+        data = json.loads(path.read_bytes())
+    except FileNotFoundError:
+        return {}
+    except ValueError:
+        raise SignError(f"{path} is not JSON") from None
+    return data if isinstance(data, dict) else {}
+
+
+def _text(when: datetime | None) -> str:
+    return when.isoformat() if when is not None else "at no valid time"
+
+
 def live_newer(site: Path, live_url: str,
                get: Callable[[str, int], tuple[bytes | None, str]] = fetch) -> tuple[bool, str]:
-    """(whether the published timetables.json at live_url, its .sig
-    verifying, was built later than site's, what was found): live-check."""
-    own = built_at((site / MANIFEST_NAME).read_bytes())
+    """(whether GitHub Pages at live_url serves files built later than
+    site's, what was found): live-check. Each published manifest counts
+    only when its .sig verifies; one that does not read or is not trusted
+    holds nothing back. Times only in what was found: the published
+    values are not echoed."""
+    own_man = _read_json(site / MANIFEST_NAME)
+    own = _when(own_man.get("built_at"))
     if own is None:
         raise SignError(f"{site / MANIFEST_NAME} names no built_at")
     base = live_url.rstrip("/") + "/"
-    body, why = get(base + MANIFEST_NAME, MAX_MANIFEST)
-    if body is None:
-        return False, f"the published {MANIFEST_NAME} was not read ({why})"
-    sig, why = get(base + SIG_NAME, MAX_SIG)
-    if sig is None or not verify_bytes(body, decode_sig(sig)):
-        return False, f"the published {MANIFEST_NAME} is not trusted ({why if sig is None else 'no good signature'})"
-    live = built_at(body)
+    newer, found = False, []
+    live, why = _live_signed(base, MANIFEST_NAME, get)
     if live is None:
-        return False, f"the published {MANIFEST_NAME} names no built_at"
-    # Times only: the published values are not echoed.
-    found = f"the published {MANIFEST_NAME} was built {live.isoformat()}, this site {own.isoformat()}"
-    return live > own, found
+        found.append(why)
+    else:
+        when = _when(live.get("built_at"))
+        if when is None:
+            found.append(f"the published {MANIFEST_NAME} names no built_at")
+        else:
+            newer |= when > own
+            found.append(f"the published {MANIFEST_NAME} was built {when.isoformat()}, this site {own.isoformat()}")
+        # A site job re-run of an older run writes a timetables.json of
+        # its own time around that run's parts: each index by its own
+        # built_at (a carried one has the published one's).
+        own_indexes = own_man.get("indexes") if isinstance(own_man.get("indexes"), dict) else {}
+        live_indexes = live.get("indexes") if isinstance(live.get("indexes"), dict) else {}
+        for name in sorted(live_indexes):
+            entry, mine = live_indexes[name], own_indexes.get(name)
+            when = _when(entry.get("built_at")) if isinstance(entry, dict) else None
+            if when is None or not isinstance(mine, dict):
+                continue
+            mine_at = _when(mine.get("built_at"))
+            if mine_at is None or when > mine_at:
+                newer = True
+                found.append(f"its {name} index was built {when.isoformat()}, this site's {_text(mine_at)}")
+    # The MÁV files: the same re-run takes its run's MÁV part as it is.
+    live_mav, why = _live_signed(base, MAV_MANIFEST_NAME, get)
+    own_mav = _read_json(site / MAV_MANIFEST_NAME)
+    if live_mav is not None:
+        when = _when(live_mav.get("built_at"))
+        if when is not None:
+            mine_at = _when(own_mav.get("built_at")) if own_mav else None
+            if not own_mav or mine_at is None or when > mine_at:
+                newer = True
+            found.append(f"the published {MAV_MANIFEST_NAME} was built {when.isoformat()}, this site's "
+                         + (_text(mine_at) if own_mav else "is not there"))
+    elif own_mav:
+        found.append(why)
+    return newer, "; ".join(found)
 
 
 def main(argv: list[str]) -> int:
@@ -293,9 +378,9 @@ def main(argv: list[str]) -> int:
             print(f"::error title={MANIFEST_NAME} not signed::{err}; nothing is deployed.")
             return 1
         if newer:
-            print(f"::error title=An older site is not deployed::{found}: GitHub Pages already serves a newer run's"
-                  " site (this is a re-run of an older run), so this one is not signed or deployed; nothing to"
-                  " re-run.")
+            print(f"::error title=An older site is not deployed::{found}: GitHub Pages already serves files of a"
+                  " newer run (this is a re-run of an older run), so this site is not signed or deployed; nothing"
+                  " to re-run.")
             return 1
         print(f"{found}; signing and deploying this site")
         return 0

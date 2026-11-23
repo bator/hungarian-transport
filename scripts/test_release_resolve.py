@@ -81,15 +81,20 @@ def run(releases: list[dict], event: str = "workflow_dispatch", bump: str = "rev
         ref_name: str = "main", fail: bool = False, bare: str = "", notes: str = "all") -> tuple[int, dict, str]:
     """Run the step; releases are in gh's own order (createdAt, newest first).
     notes: the docs/releases/<version>.md files in the checkout: "all" writes
-    one for every version a stable dispatch could resolve to, "" none."""
+    one for every version a stable dispatch could resolve to, its first
+    line naming that version as the real ones do, "" none, "renamed" each
+    with the first line of the version one patch below (a file renamed to
+    the number the run resolved)."""
     with tempfile.TemporaryDirectory() as tmp:
         tmpdir = Path(tmp)
-        if notes == "all":
+        if notes in ("all", "renamed"):
             (tmpdir / "docs" / "releases").mkdir(parents=True)
             for major in range(1, 3):
                 for minor in range(0, 12):
                     for patch in range(0, 30):
-                        (tmpdir / "docs" / "releases" / f"{major}.{minor}.{patch}.md").write_text("notes\n")
+                        named = f"{major}.{minor}.{patch if notes == 'all' else patch - 1}"
+                        (tmpdir / "docs" / "releases" / f"{major}.{minor}.{patch}.md").write_text(
+                            f"Hungarian transport {named}. Includes fresh Volán and city GTFS indexes.\n\nnotes\n")
         bindir = tmpdir / "bin"
         bindir.mkdir()
         for name, body in (("gh", GH_STUB), ("git", GIT_STUB)):
@@ -174,6 +179,16 @@ check("patch dispatch without release notes for the resolved version fails early
       code != 0 and "No release notes" in log and "1.9.16.md" in log and not o.get("tag"), f"{code} {o} {log}")
 code, o, log = run(revs, bump="rev", notes="")
 check("rev dispatch needs no release notes", code == 0 and o.get("tag") == "v1.9.16-rev.4", f"{code} {o} {log}")
+# Notes renamed to the resolved number still name the version they were
+# written for in their first line: published, they would name another
+# release (the pack step checks the same, scripts/test_release_workflow.py).
+code, o, log = run(revs, bump="patch", notes="renamed")
+check("patch dispatch whose release notes name another version in their first line fails early",
+      code != 0 and "Release notes of another version" in log and "1.9.16.md does not name 1.9.16" in log
+      and not o.get("tag"), f"{code} {o} {log}")
+code, o, log = run(revs, bump="rev", notes="renamed")
+check("rev dispatch reads no release notes, renamed or not", code == 0 and o.get("tag") == "v1.9.16-rev.4",
+      f"{code} {o} {log}")
 minor = [rel("v1.9.20", "2026-10-22T10:00:00Z"), rel("v1.10.0", T)]
 code, o, log = run(minor, bump="patch")
 check("1.10.0 ranks above 1.9.20", code == 0 and o.get("tag") == "v1.10.1", f"{code} {o} {log}")

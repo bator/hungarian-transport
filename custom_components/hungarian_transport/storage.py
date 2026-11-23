@@ -11,7 +11,9 @@ it holds:
   the local updater script;
 - DAILY_ROUND: the last round of the daily MÁV index: when, its result,
   the manifest's feed and build time, and why it did not install (reason,
-  mav_daily.reason_of) when it failed or was unsupported;
+  mav_daily.reason_of) when it failed or was unsupported. A look that is
+  still settling (no round) leaves it as it is and adds settling, its
+  reason, and settling_at, until the next round replaces the record;
 - TIMETABLES_INSTALL: per index ("volan", "city"), what the weekly
   timetables from GitHub Pages (weekly_timetables.py) installed last: its
   feed, sha256, gzipped size and time. An index www/ serves that is not
@@ -193,6 +195,16 @@ async def async_record_daily_round(
     }
     if reason:
         record["reason"] = reason
+    await _async_put(hass, DAILY_ROUND, record)
+
+
+async def async_record_daily_settling(hass: HomeAssistant, reason: str) -> None:
+    """A look of the daily MÁV index is settling (for reason): the last
+    round's record stays, with settling added; the next round's record
+    replaces it."""
+    current = (await async_load(hass)).get(DAILY_ROUND)
+    record = dict(current) if isinstance(current, dict) else {}
+    record.update(settling=reason, settling_at=dt_util.utcnow().isoformat())
     await _async_put(hass, DAILY_ROUND, record)
 
 

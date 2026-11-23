@@ -106,11 +106,12 @@ class SharedTTLCache:
         # the other callers are waiting for.
         return await asyncio.shield(task)
 
-    def fresh(self, key: Hashable) -> tuple[bool, Any]:
-        """(True, the value) when get(key) would answer from the cache now,
-        else (False, None); fetches nothing, drops nothing."""
+    def fresh(self, key: Hashable, lasting: float = 0.0) -> tuple[bool, Any]:
+        """(True, the value) when get(key) would answer from the cache now
+        and still `lasting` seconds from now, else (False, None); fetches
+        nothing, drops nothing."""
         hit = self._data.get(key)
-        if hit is not None and self._monotonic() - hit[0] < self._ttl:
+        if hit is not None and self._monotonic() + max(lasting, 0.0) - hit[0] < self._ttl:
             return True, hit[1]
         return False, None
 

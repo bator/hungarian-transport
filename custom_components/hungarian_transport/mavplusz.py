@@ -999,7 +999,11 @@ def _alias_data(doc: Any, aliases: Sequence[str]) -> tuple[dict[str, Any], set[s
 
 
 def parse_response(
-    doc: Any, trips: Sequence[TripKey], now: float | None = None, failed: set[TripKey] | None = None
+    doc: Any,
+    trips: Sequence[TripKey],
+    now: float | None = None,
+    failed: set[TripKey] | None = None,
+    bugs: list[BaseException] | None = None,
 ) -> dict[TripKey, TripResult | None]:
     """Per trip of build_query(trips): its TripResult, or None when the
     planner does not know the trip (a null alias); a trip a GraphQL error
@@ -1009,7 +1013,14 @@ def parse_response(
     parse_trips does (one trip of the wrong shape failed the whole answer,
     and with it every trip asked along with it, again after every
     backoff). Any other GraphQL error or a missing alias is a ValueError:
-    the whole answer is not trusted.
+    the whole answer is not trusted. With bugs, a bug of the code reading
+    one trip (PARSE_BUGS: a KeyError, a TypeError and the like, met by the
+    shape of that trip's data alone) is that trip's failure too, the error
+    added to bugs for the caller to warn about, as mavplusz_board's
+    parse_trips does: let up, it failed the whole request, every trip asked
+    with it, and only halving the request found the trip again, every time
+    its split ran out (none at all while the hub took a run of failures for
+    an outage). Without bugs it goes up as it is.
 
     A vehicle is looked for on every alias's pattern, not only on its
     trip's own: a trip the realtime data changed has a realtime pattern
@@ -1037,8 +1048,14 @@ def parse_response(
         try:
             out[key] = None if trip is None else parse_trip(trip, key, positions, now)
         except ValueError:
-            # Of the wrong shape: this trip's answer alone. Not a
-            # PARSE_BUGS error, which is this code's and goes up.
+            # Of the wrong shape: this trip's answer alone.
+            if failed is not None:
+                failed.add(key)
+        except PARSE_BUGS as err:
+            # This code's, met by this trip's data: for the caller to say.
+            if bugs is None:
+                raise
+            bugs.append(err)
             if failed is not None:
                 failed.add(key)
     _one_run(out)

@@ -114,7 +114,8 @@ Executor = Callable[..., Awaitable[Any]]
 # on, and the rest of the card's 20 s is the fallback's (its `timeout`,
 # mavplusz_board's PLANNER_TIMEOUT): the token wait, this and the fallback
 # still answer before the card gives up. FUTÁR is cut short only while its
-# outage stands (it failed, and has not answered since), and only when the
+# outage stands (it failed, or answered HTTP 429, and has not answered
+# since), and only when the
 # token wait left room for this and the fallback both; otherwise nothing is
 # reserved and FUTÁR keeps its whole budget (a slow answer is still an
 # answer), as it does where nothing else could answer (a stop the fallback
@@ -137,7 +138,17 @@ FUTAR_FALLBACK_SLACK_SEC = 0.5
 # 18 s once they were used up. FUTÁR is asked by one request at most every
 # FUTAR_OUTAGE_PROBE_SEC (the probe, as REJECTED_RETRY's after a rejected
 # key), FUTÁR first as before (cut short, the fallback after it); its answer
-# ends the outage, and every request asks FUTÁR first again. A request the
+# ends the outage, and every request asks FUTÁR first again. A probe for an
+# answer the fallback holds in its caches (its cached) is answered from
+# there at once, and asks FUTÁR behind it with its whole budget, nobody
+# waiting for it (FutarProxy._probe_behind): cut short, FUTÁR had kept that
+# card waiting 8 s for a FUTÁR most likely still down, and the cached answer
+# could expire meanwhile, its request then refused for the share the
+# dashboard used up. FUTÁR refusing the key's calls as too many (HTTP 429)
+# starts the outage as well: the fallback first keeps the load off a FUTÁR
+# that refuses it, and the probe asks again. It is logged apart from an
+# outage (its own line, _RATE_LIMITED), so FUTÁR failing after it is still
+# warned about. A request the
 # fallback has no answer for (a stop it does not know, its share used up, an
 # answer it could not give) asks FUTÁR as before, with what is left of the
 # card's budget: nothing else could answer it. Any request sent to FUTÁR
@@ -157,6 +168,11 @@ FUTAR_OUTAGE_PROBE_SEC = 30
 FUTAR_OUTAGE_LOG_SETTLE_SEC = 300
 # The latest a fallback's answer may come, in seconds after the card asked.
 _FALLBACK_DEADLINE_SEC = CARD_TIMEOUT_SEC - FUTAR_MARGIN_SEC + FUTAR_FALLBACK_SLACK_SEC
+# FUTÁR's outage log keys: None its failing (no answer, an HTTP error), this
+# its refusing the key's calls as too many (HTTP 429). Either starts the
+# outage (the fallback first, the probe); each is warned about, and said to
+# end, on its own.
+_RATE_LIMITED = "rate limited"
 
 
 class FallbackTicket(Protocol):
@@ -175,7 +191,11 @@ class FutarFallback(Protocol):
     params) says beforehand whether answer() may give one; reserve(path,
     params) is that and the token for it (answers sent in one request may
     share one), or None. timeout is the seconds
-    answer() takes at most. learn(path, params, data) is handed every answer
+    answer() takes at most. reserve's `lasting` is the seconds from now
+    before answer() is asked at the latest: an answer the fallback's caches
+    hold needs no token only if it is still there by then. cached(path,
+    params) says whether answer() would answer now from the fallback's
+    caches, asking nothing. learn(path, params, data) is handed every answer
     FUTÁR gives (it reads what the fallback needs later, and never raises)."""
 
     paths: frozenset[str]
@@ -187,7 +207,9 @@ class FutarFallback(Protocol):
 
     def can_answer(self, path: str, params: dict[str, str]) -> bool: ...
 
-    def reserve(self, path: str, params: dict[str, str]) -> FallbackTicket | None: ...
+    def cached(self, path: str, params: dict[str, str]) -> bool: ...
+
+    def reserve(self, path: str, params: dict[str, str], lasting: float = 0.0) -> FallbackTicket | None: ...
 
     def learn(self, path: str, params: dict[str, str], data: Any) -> None: ...
 
@@ -245,7 +267,8 @@ class FutarRateLimited(FutarError):
 class FutarUpstreamRateLimited(FutarRateLimited):
     """FUTÁR itself refused the call as one too many (HTTP 429) for the key.
     The card answers it like the integration's own limit (an older board for
-    a while), not as an outage."""
+    a while), not as an outage. The proxy asks its fallback first after one,
+    as in an outage (FUTAR_OUTAGE_PROBE_SEC), and logs it on its own."""
 
 
 class FutarStatusError(FutarError):
@@ -338,23 +361,21 @@ async def futar_get(
 
 class _Callers:
     """The callers of one request key in FutarProxy.get since its last
-    failed request, the fallback's tokens reserved for the requests they
-    saw fail, released when the last of them is done, and the tokens of
-    FUTÁR's limit taken for them in its outage (_fallback_first), given back
-    then unless a request spent them."""
+    failed request, and the fallback's tokens reserved for the requests
+    they saw fail, released when the last of them is done."""
 
     def __init__(self) -> None:
         self.count = 0
         self.tickets: list[FallbackTicket] = []
-        self.tokens: list[_FutarToken] = []
 
 
 class _FutarToken:
     """A token of FUTÁR's limit taken ahead in its outage, for the fallback
     asked first (FutarProxy._fallback_first): the fallback's answer spends
     it, else the FUTÁR request it is then handed to (use), else it goes
-    back (give_back) once its callers are done: no request was sent for it
-    (they joined one under way, or the key was rejected meanwhile)."""
+    back (give_back) once its callers are done (_First): no request was
+    sent for it (they joined one under way, or the key was rejected
+    meanwhile)."""
 
     def __init__(self, rate: upstream.TokenBucket) -> None:
         self._rate = rate
@@ -369,6 +390,30 @@ class _FutarToken:
         if self.held:
             self.held = False
             self._rate.refund()
+
+
+class _First:
+    """The fallback asked first for one request key in FUTÁR's outage
+    (FutarProxy._fallback_first), shared by the callers asking at once: its
+    task, the callers awaiting or using its answer (waiters: each until it
+    is done, its FUTÁR request after it included), and the token of FUTÁR's
+    limit taken for it. The token is the task's while it runs: its fallback
+    request is sent on it, whoever is left to read the answer (before, the
+    caller that started it gave it back on leaving meanwhile, and the
+    fallback was asked on no token of FUTÁR's). Then the answer spends it, else the FUTÁR request a waiter
+    hands it to (_upstream), else it goes back once the task and every
+    waiter are done: no request was sent for it."""
+
+    def __init__(self) -> None:
+        self.task: asyncio.Future[Any] | None = None
+        self.waiters = 0
+        self.token: _FutarToken | None = None
+
+    def leave(self) -> None:
+        """A waiter is done."""
+        self.waiters -= 1
+        if not self.waiters and self.task is not None and self.task.done() and self.token is not None:
+            self.token.give_back()
 
 
 class FutarProxy:
@@ -388,7 +433,8 @@ class FutarProxy:
     fallback reserved a token for its answer beforehand, which it does only
     while FUTÁR's outage stands (_reserve); meanwhile the fallback is asked
     first, and FUTÁR by one probe every FUTAR_OUTAGE_PROBE_SEC
-    (_fallback_first). When it has no answer either, FUTÁR's error stands.
+    (_fallback_first), behind the fallback's answer where its caches hold
+    one (_probe_behind). When it has no answer either, FUTÁR's error stands.
     A call failing fast on a rejected key, or answered by the fallback
     first, takes a token of FUTÁR's limit before the fallback is asked; one
     that asks FUTÁR after the fallback first (no answer) asks it with that
@@ -450,20 +496,25 @@ class FutarProxy:
             monotonic=monotonic,
             sleep=sleep,
         )
-        # FUTÁR has one "unavailable / answers again" state (key None).
+        # FUTÁR's "unavailable / answers again" state (key None), and its
+        # refusing the key's calls (_RATE_LIMITED): either is its outage.
         self._outages = upstream.OutageLog(_LOGGER, monotonic=monotonic, settle=FUTAR_OUTAGE_LOG_SETTLE_SEC)
         # When a request was last sent to FUTÁR, or failed, and whether a
         # probe of its outage is under way (_fallback_first).
         self._futar_asked_at = -1e18
         self._outage_probing = False
+        # The probe asking FUTÁR behind the fallback's cached answer, and its
+        # request key, while it runs (_probe_behind).
+        self._probe_task: asyncio.Future[Any] | None = None
+        self._probe_key: Hashable | None = None
         # Request key -> its callers in get() since its last failed request
         # (_Callers): the callers of a failed request hold the fallback's
         # token reserved for it until the last of them is done.
         self._callers: dict[Hashable, _Callers] = {}
         # Request key -> the fallback asked first for it in FUTÁR's outage
-        # (_fallback_first), shared by the callers asking at once, as one
-        # FUTÁR request is outside the outage.
-        self._firsts: dict[Hashable, asyncio.Future[Any]] = {}
+        # (_fallback_first, _First), shared by the callers asking at once,
+        # as one FUTÁR request is outside the outage.
+        self._firsts: dict[Hashable, _First] = {}
 
     async def _upstream(
         self,
@@ -527,6 +578,7 @@ class FutarProxy:
         # another request proves nothing, and clearing the state on one made
         # the log flap between "unavailable" and "answers again".
         self._outages.answered(None, "BKK FUTÁR answers again")
+        self._outages.answered(_RATE_LIMITED, "BKK FUTÁR takes the configured key's calls again")
         # Only a request sent after the latest rejection proves the key works
         # (again): one sent before it (a slow plan-trip.json) cleared it, so
         # the log flapped and the next call spent a 401 instead of failing fast.
@@ -543,16 +595,24 @@ class FutarProxy:
 
     def _reserve(self, path: str, params: dict[str, str], waited: float) -> FallbackTicket | None:
         """The fallback's token for a request FUTÁR is cut short for: only
-        while FUTÁR's outage stands (it failed and has not answered since),
+        while FUTÁR's outage stands (it failed, or answered HTTP 429, and has
+        not answered since),
         and only when FUTÁR's share and the fallback's still answer before
         the card gives up after waited seconds of token wait; else None, and
         FUTÁR keeps its whole budget."""
         fallback = self._fallback
-        if fallback is None or path not in fallback.paths or not self._outages.is_down(None):
+        if fallback is None or path not in fallback.paths or not self._down():
             return None
         if waited + FUTAR_FALLBACK_TIMEOUT_SEC + fallback.timeout > _FALLBACK_DEADLINE_SEC:
             return None
-        return fallback.reserve(path, params)
+        # A cached answer is the fallback's for no token only if it is still
+        # there once FUTÁR has failed: FUTÁR's cut, then the fallback's time.
+        return fallback.reserve(path, params, FUTAR_FALLBACK_TIMEOUT_SEC + fallback.timeout)
+
+    def _down(self) -> bool:
+        """Whether FUTÁR's outage stands: it failed, or refused the key's
+        calls as too many, and has not answered since."""
+        return self._outages.is_down(None) or self._outages.is_down(_RATE_LIMITED)
 
     @property
     def tokens(self) -> float:
@@ -595,18 +655,30 @@ class FutarProxy:
         # FUTÁR's cache answers, or whose FUTÁR request is under way: those
         # are shared as outside the outage, for no token (the fallback
         # first took one for each caller, and one each of the fallback's).
+        # The probe's request behind the fallback's answer is not one to
+        # join: nobody waits for its whole budget.
         probe = first = False
-        if self._in_outage(path) and not self._cache.pending(key) and not self._cache.fresh(key)[0]:
+        if (
+            self._in_outage(path)
+            and not (self._cache.pending(key) and key != self._probe_key)
+            and not self._cache.fresh(key)[0]
+        ):
             if not self._outage_probing and self._monotonic() - self._futar_asked_at >= FUTAR_OUTAGE_PROBE_SEC:
-                probe = self._outage_probing = True
+                if self._fallback is not None and self._fallback.cached(path, params):
+                    self._probe_behind(path, params, key)
+                    first = True
+                else:
+                    probe = self._outage_probing = True
             else:
                 first = True
         tried = False
         token: _FutarToken | None = None
+        joined: _First | None = None
         try:
             try:
                 if first:
-                    data, tried, token = await self._first(path, params, key, callers)
+                    joined = self._join_first(path, params, key)
+                    data, tried, token = await asyncio.shield(joined.task)  # type: ignore[arg-type]
                     if data is not None:
                         return data
                 return await self._get(path, params, key, self._monotonic() - started, not tried, token)
@@ -622,15 +694,15 @@ class FutarProxy:
         finally:
             if probe:
                 self._outage_probing = False
+            if joined is not None:
+                # FUTÁR's token taken for it goes back if no request spent it.
+                joined.leave()
             callers.count -= 1
             if not callers.count:
                 if self._callers.get(key) is callers:
                     del self._callers[key]
                 for ticket in callers.tickets:
                     ticket.release()
-                # FUTÁR's tokens taken for them that no request spent.
-                for held in callers.tokens:
-                    held.give_back()
 
     def _in_outage(self, path: str) -> bool:
         """Whether FUTÁR's outage stands (it failed, and has not answered
@@ -641,29 +713,60 @@ class FutarProxy:
             fallback is not None
             and path in fallback.paths
             and self._rejected is None
-            and self._outages.is_down(None)
+            and self._down()
         )
 
-    async def _first(
-        self, path: str, params: dict[str, str], key: Hashable, callers: _Callers
-    ) -> tuple[dict[str, Any] | None, bool, _FutarToken | None]:
+    def _join_first(self, path: str, params: dict[str, str], key: Hashable) -> _First:
         """_fallback_first for key, shared by the callers asking at once:
         one token of FUTÁR's limit and one of the fallback's for them all,
-        as one FUTÁR request outside the outage. A caller giving up does not
-        cancel it for the others."""
-        task = self._firsts.get(key)
-        if task is None:
-            task = self._firsts[key] = self._task_factory(self._fallback_first(path, params, callers))
+        as one FUTÁR request outside the outage. The caller is one of its
+        waiters until it leave()s (get's finally); awaiting its task under
+        asyncio.shield, a caller giving up does not cancel it for the
+        others. A task that is done already (its entry goes on the loop's
+        next turn) is not joined: its answer was the callers' before."""
+        first = self._firsts.get(key)
+        if first is None or first.task is None or first.task.done():
+            first = self._firsts[key] = _First()
+            task = first.task = self._task_factory(self._fallback_first(path, params, first))
 
-            def done(task: asyncio.Future[Any]) -> None:
-                if self._firsts.get(key) is task:
+            def done(_task: asyncio.Future[Any], first: _First = first) -> None:
+                if self._firsts.get(key) is first:
                     del self._firsts[key]
 
             task.add_done_callback(done)
-        return await asyncio.shield(task)
+        first.waiters += 1
+        return first
+
+    def _probe_behind(self, path: str, params: dict[str, str], key: Hashable) -> None:
+        """The probe of FUTÁR's outage for a request the fallback answers
+        from its caches: the caller is answered from there (the fallback
+        first), and FUTÁR is asked behind it, with its whole budget and a
+        token of FUTÁR's limit of its own, as any request sent to it; its
+        answer goes in FUTÁR's cache and ends the outage, its failure is
+        logged as any. Nobody waits for it: the callers of key meanwhile
+        ask the fallback first, not join it (get). One at a time, as the
+        probe (_outage_probing)."""
+        self._outage_probing = True
+        self._probe_key = key
+
+        async def probe() -> None:
+            try:
+                await self._get(path, params, key, 0.0, False)
+            except FutarError:
+                pass  # said by _get (the outage, a rejected key), as for any request
+
+        task = self._probe_task = self._task_factory(probe())
+
+        def done(_task: asyncio.Future[Any]) -> None:
+            if self._probe_task is task:
+                self._probe_task = None
+                self._probe_key = None
+                self._outage_probing = False
+
+        task.add_done_callback(done)
 
     async def _fallback_first(
-        self, path: str, params: dict[str, str], callers: _Callers
+        self, path: str, params: dict[str, str], first: _First
     ) -> tuple[dict[str, Any] | None, bool, _FutarToken | None]:
         """The fallback's answer, asked before FUTÁR during its outage,
         whether it was asked, and FUTÁR's token taken for it, if one was:
@@ -674,25 +777,28 @@ class FutarProxy:
         FUTÁR is asked after all (no reserve, no answer), it is with that
         token (_upstream's token), not another one; where no request is
         sent for it after all (the callers joined one under way, or the key
-        was rejected meanwhile), it goes back once callers are done."""
+        was rejected meanwhile), it goes back once first's waiters are done.
+        It is this task's while it runs: a caller leaving while the
+        fallback's request is under way does not give it back."""
         fallback = self._fallback
         if fallback is None or not fallback.can_answer(path, params):
             return None, False, None
         await self._rate.acquire()
-        token = _FutarToken(self._rate)
-        callers.tokens.append(token)
-        ticket = fallback.reserve(path, params)
-        if ticket is None:
-            data, tried = None, False
-        else:
-            try:
-                data, tried = await fallback.answer(path, params, ticket), True
-            finally:
-                ticket.release()
-        if data is not None:
-            token.use()  # the fallback's answer spent it
-        elif not callers.count:
-            token.give_back()  # every caller gave up meanwhile
+        token = first.token = _FutarToken(self._rate)
+        data: dict[str, Any] | None = None
+        tried = False
+        try:
+            ticket = fallback.reserve(path, params)
+            if ticket is not None:
+                try:
+                    data, tried = await fallback.answer(path, params, ticket), True
+                finally:
+                    ticket.release()
+        finally:
+            if data is not None:
+                token.use()  # the fallback's answer spent it
+            elif not first.waiters:
+                token.give_back()  # every caller gave up meanwhile
         return data, tried, token
 
     async def _fall_back(
@@ -745,10 +851,12 @@ class FutarProxy:
         try:
             data = await self._cache.get(key, lambda: self._upstream(path, params, key, spent, fallback, token))
         except FutarUpstreamRateLimited as err:
-            # FUTÁR answers, but not this key for a while: not an outage
-            # either. Said once, until FUTÁR answers a call again.
+            # FUTÁR answers, but not this key for a while: not FUTÁR failing,
+            # logged on its own (FUTÁR failing after it is warned about too),
+            # said once until FUTÁR answers a call again. The fallback is
+            # asked first meanwhile, as in an outage (_down).
             self._outages.failed(
-                None,
+                _RATE_LIMITED,
                 "BKK FUTÁR refuses calls as too many for the configured key (%s); "
                 "not logged again until it answers",
                 err,

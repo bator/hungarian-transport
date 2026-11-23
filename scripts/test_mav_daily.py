@@ -70,6 +70,20 @@ def sign_file(path: Path, seed: bytes = TEST_SEED) -> Path:
 
 
 failed = 0
+REAL_SLEEP = site.time.sleep
+
+
+def own_sleep(stand_in):
+    """time.sleep for the tests, standing in only for the scripts' own waits
+    (mav_pages_site, mav_daily_verdict): subprocess sleeps through the same
+    time module while openssl, run for a signature, is still exiting on a
+    busy machine, and those waits are real and not the scripts'."""
+    def sleep(seconds: float) -> None:
+        if sys._getframe(1).f_globals.get("__name__") not in (site.__name__, verdict_mod.__name__):
+            REAL_SLEEP(seconds)
+            return
+        stand_in(seconds)
+    return sleep
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -291,7 +305,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
         gh = tmp / "gh-cdn-site.txt"
         gh.write_text("")
         real_sleep, real_key = site.time.sleep, sign_manifest.PUBLIC_KEY
-        site.time.sleep, sign_manifest.PUBLIC_KEY = site_settled, TEST_PUB
+        site.time.sleep, sign_manifest.PUBLIC_KEY = own_sleep(site_settled), TEST_PUB
         out_buf = io.StringIO()
         (tmp / "b-cdn" / "site").mkdir(parents=True, exist_ok=True)
         try:
@@ -346,7 +360,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
             served[sig_url] = good_url_sig
 
     real_urlopen, real_pub, real_sleep = site.urllib.request.urlopen, sign_manifest.PUBLIC_KEY, site.time.sleep
-    site.urllib.request.urlopen, sign_manifest.PUBLIC_KEY, site.time.sleep = serve, TEST_PUB, url_settled
+    site.urllib.request.urlopen, sign_manifest.PUBLIC_KEY, site.time.sleep = serve, TEST_PUB, own_sleep(url_settled)
     try:
         results = []
         for case in ("signed", "no sig", "cached 404"):
@@ -826,8 +840,22 @@ with tempfile.TemporaryDirectory() as tmp_name:
         "if os.environ.get('STUB_SITE') != 'ok':\n    sys.exit(1)\n"
         "os.makedirs(sys.argv[sys.argv.index('--out') + 1], exist_ok=True)\n"
         "out = sys.argv[sys.argv.index('--github-output') + 1]\nopen(out, 'a').write('deploy=true\\n')\n")
-    done, outputs = bash(site_step, ws, STUB_SITE="ok", GITHUB_REPOSITORY="Bator/hungarian-transport",
-                         GITHUB_REPOSITORY_OWNER="Bator", GITHUB_SHA="b" * 40)
+    # gh api: the stable tags as the step's --jq leaves them (a listing
+    # GitHub orders by date, here with a backport released last), or an
+    # API failure.
+    site_gh = tmp / "gh-site"
+    site_gh.mkdir()
+    (site_gh / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "$*" >> "$PWD/gh-site-args.txt"\n'
+        'case "${STUB_GH:-}" in\n'
+        "  fail) echo 'gh: HTTP 502' >&2; exit 1 ;;\n"
+        "  none) printf 'v1.11.0-rev.3\\n' ;;\n"
+        "  *) printf 'v1.9.5\\nv1.10.24\\nv1.10.3\\nv1.10.25x\\n' ;;\n"
+        "esac\n")
+    (site_gh / "gh").chmod(0o755)
+    done, outputs = bash(site_step, ws, path_prefix=site_gh, STUB_SITE="ok", GITHUB_REPOSITORY="Bator/hungarian-transport",
+                         GITHUB_REPOSITORY_OWNER="Bator", GITHUB_SHA="b" * 40, GH_TOKEN="x")
     args = (ws / "args.txt").read_text().splitlines() if (ws / "args.txt").exists() else []
     check("the Pages site step asks the repository's own Pages URL (owner lowercased) and passes deploy on",
           done.returncode == 0 and outputs.get("deploy") == "true"
@@ -838,12 +866,31 @@ with tempfile.TemporaryDirectory() as tmp_name:
           args[args.index("--gtfs-zip") + 1:args.index("--gtfs-zip") + 2] == [f"{rt}/mav/gtfs/mav-gtfs.zip"]
           and args[args.index("--pfaedle-dir") + 1:args.index("--pfaedle-dir") + 2] == [f"{rt}/mav/gtfs-out"]
           if "--gtfs-zip" in args and "--pfaedle-dir" in args else False, repr(args))
-    check("the Pages site step names the latest stable release's frontend zip as the shrink guard's fallback",
+    check("the Pages site step names the highest stable release's frontend zip (by version, not GitHub's"
+          " latest, which a backport would be) as the shrink guard's fallback",
           args[args.index("--baseline-url") + 1:args.index("--baseline-url") + 2]
-          == ["https://github.com/Bator/hungarian-transport/releases/latest/download/hungarian-transport-frontend.zip"]
+          == ["https://github.com/Bator/hungarian-transport/releases/download/v1.10.24/hungarian-transport-frontend.zip"]
           if "--baseline-url" in args else False, repr(args))
-    done, outputs = bash(site_step, ws, STUB_SITE="fail", GITHUB_REPOSITORY="bator/hungarian-transport",
-                         GITHUB_REPOSITORY_OWNER="bator", GITHUB_SHA="b" * 40)
+    gh_site_args = (ws / "gh-site-args.txt").read_text() if (ws / "gh-site-args.txt").exists() else ""
+    check("the Pages site step lists the releases as the timetables job does (paginated, no drafts or"
+          " prereleases) and has a token only for that",
+          "api --paginate repos/Bator/hungarian-transport/releases?per_page=100" in gh_site_args
+          and "select((.draft or .prerelease) | not)" in site_step
+          and "GH_TOKEN: ${{ github.token }}" in step(job("build"), "- name: Pages site"), gh_site_args)
+    for stub, label in (("fail", "the releases cannot be listed"), ("none", "no stable release")):
+        (ws / "args.txt").unlink(missing_ok=True)
+        done, outputs = bash(site_step, ws, path_prefix=site_gh, STUB_SITE="ok", STUB_GH=stub,
+                             GITHUB_REPOSITORY="Bator/hungarian-transport", GITHUB_REPOSITORY_OWNER="Bator",
+                             GITHUB_SHA="b" * 40, GH_TOKEN="x")
+        args = (ws / "args.txt").read_text().splitlines() if (ws / "args.txt").exists() else []
+        check(f"the Pages site step when {label}: GitHub's latest release as the shrink guard's fallback, the"
+              " site made as before",
+              done.returncode == 0 and outputs.get("deploy") == "true"
+              and args[args.index("--baseline-url") + 1:args.index("--baseline-url") + 2]
+              == ["https://github.com/Bator/hungarian-transport/releases/latest/download/hungarian-transport-frontend.zip"]
+              if "--baseline-url" in args else False, repr((done.returncode, done.stdout, args)))
+    done, outputs = bash(site_step, ws, path_prefix=site_gh, STUB_SITE="fail", GITHUB_REPOSITORY="bator/hungarian-transport",
+                         GITHUB_REPOSITORY_OWNER="bator", GITHUB_SHA="b" * 40, GH_TOKEN="x")
     check("a refused site: warning, no deploy, the run stays green",
           done.returncode == 0 and "deploy" not in outputs
           and "::warning title=Daily MÁV index not published::" in done.stdout, repr((done.returncode, done.stdout)))
@@ -940,7 +987,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
         live.with_name(live.name + ".sig").write_bytes(good_sig)
 
     real_sleep, real_key = verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY
-    verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = settled, TEST_PUB
+    verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = own_sleep(settled), TEST_PUB
     out_buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(out_buf):
@@ -1003,7 +1050,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
                 _answers[sig_url] = _later
 
         real = (site.urllib.request.urlopen, verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY)
-        site.urllib.request.urlopen, verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = url_open, url_sleep, TEST_PUB
+        site.urllib.request.urlopen, verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = url_open, own_sleep(url_sleep), TEST_PUB
         out_buf = io.StringIO()
         try:
             with contextlib.redirect_stdout(out_buf):
@@ -1036,11 +1083,133 @@ with tempfile.TemporaryDirectory() as tmp_name:
     done = run_verdict("--failure", "other", "--live-file", str(live))
     check("the verdict CLI refuses an unknown failure kind", done.returncode == 2, repr(done.returncode))
 
+    # The published manifest itself, not its .sig: only a network error, a
+    # timeout or a server error (HTTP 5xx) leaves its age unknown (green, a
+    # warning). Not there (HTTP 404, read again once SIG_SETTLE_S later),
+    # refused (HTTP 4xx), oversized or no JSON object is what one who can
+    # put files on Pages can make it, and every install's daily MÁV check
+    # fails on it: red. A repository without the MÁV secrets publishes no
+    # MÁV files, so a 404 there stays a warning, read once.
+    for label, man_answer, failure, later, want_rc, want_text, want_waits in (
+        ("not there (HTTP 404), also read again", http_error(404), "build", None, 1,
+         f"no mav-index.json (HTTP 404); reading it again in {site.SIG_SETTLE_S:g} s (GitHub Pages may still"
+         " serve a 404 it cached", [site.SIG_SETTLE_S]),
+        ("a 404 Pages' cache keeps at first, then there", http_error(404), "build", fresh_body, 0, "5 h ago",
+         [site.SIG_SETTLE_S]),
+        # Not read again: green whatever a second read finds, and the wait
+        # would hold every run of such a repository up by SIG_SETTLE_S.
+        ("not there (HTTP 404) in a repository without the MÁV secrets", http_error(404), "secrets", None, 0,
+         "HTTP 404", []),
+        ("a 404 Pages' cache keeps at first, then there, without the MÁV secrets", http_error(404), "secrets",
+         fresh_body, 0, "HTTP 404", []),
+        ("refused (HTTP 403)", http_error(403), "build", None, 1, "HTTP 403", []),
+        ("gone (HTTP 410)", http_error(410), "site", None, 1, "HTTP 410", []),
+        ("refused (HTTP 403) without the MÁV secrets", http_error(403), "secrets", None, 1, "HTTP 403", []),
+        ("oversized", b"{" + b" " * site.MAX_MANIFEST + b"}", "build", None, 1, f"larger than {site.MAX_MANIFEST}",
+         []),
+        ("not JSON (an HTML page)", b"<html>not here</html>", "build", None, 1, "not JSON", []),
+        ("JSON but no object", b"[1, 2]", "build", None, 1, "not a JSON object", []),
+        ("a server error (HTTP 502)", http_error(502), "build", None, 0, "HTTP 502", []),
+        ("a timeout", raise_timeout, "build", None, 0, "TimeoutError", []),
+    ):
+        answers = {man_url: man_answer, sig_url: fresh_sig}
+        url_waits = []
+
+        def url_open(req, timeout=None, _answers=answers):
+            got = _answers.get(req.full_url)
+            if got is None:
+                raise site.urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+            if callable(got):
+                got(req.full_url)
+            return Body(got)
+
+        def url_sleep(seconds: float, _answers=answers, _later=later, _waits=url_waits) -> None:
+            _waits.append(seconds)
+            if _later is not None:
+                _answers[man_url] = _later
+
+        real = (site.urllib.request.urlopen, verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY)
+        site.urllib.request.urlopen, verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = url_open, own_sleep(url_sleep), TEST_PUB
+        out_buf = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(out_buf):
+                rc = verdict_mod.main(["--failure", failure, "--live-url", man_url, "--now", now.isoformat()])
+        finally:
+            site.urllib.request.urlopen, verdict_mod.time.sleep, sign_manifest.PUBLIC_KEY = real
+        text = out_buf.getvalue()
+        check(f"the verdict, --live-url, the published manifest {label}: " + ("red" if want_rc else "green"),
+              rc == want_rc and want_text in text and url_waits == want_waits
+              and (text.splitlines()[-1].startswith("::error title=Daily MÁV index: published manifest unreadable::")
+                   if want_rc else "::warning title=Daily MÁV index not published::" in text)
+              and "not here" not in text, repr((rc, url_waits, text)))
+    check("the verdict's manifest classes: HTTP 5xx and network errors unknown, a 404 its own, any other status,"
+          " an oversized body and no JSON object untrusted",
+          verdict_mod.manifest_unreadable("HTTP 503").startswith(verdict_mod.UNKNOWN)
+          and verdict_mod.manifest_unreadable("URLError: <urlopen error x>").startswith(verdict_mod.UNKNOWN)
+          and verdict_mod.manifest_unreadable("HTTP 404") == verdict_mod.NO_MANIFEST
+          and verdict_mod.manifest_unreadable("HTTP 451").startswith(verdict_mod.UNTRUSTED)
+          and verdict_mod.manifest_unreadable(f"larger than {site.MAX_MANIFEST} bytes").startswith(verdict_mod.UNTRUSTED)
+          and verdict_mod.manifest_unreadable("not JSON: x").startswith(verdict_mod.UNTRUSTED)
+          and verdict_mod.manifest_unreadable("not a JSON object").startswith(verdict_mod.UNTRUSTED))
+    # --live-file: a file that is not there stands for the 404, as for the
+    # .sig; an oversized or non-JSON one the same as on the site.
+    gone = tmp / "verdict-gone" / "mav-index.json"
+    gone.parent.mkdir()
+    for label, body_, failure, want_rc in (("not there", None, "build", 1), ("not there", None, "secrets", 0),
+                                           ("not JSON", b"<html>", "site", 1),
+                                           ("oversized", b"{" + b" " * site.MAX_MANIFEST + b"}", "site", 1)):
+        gone.unlink(missing_ok=True)
+        if body_ is not None:
+            gone.write_bytes(body_)
+        done = run_verdict("--failure", failure, "--live-file", str(gone), "--now", now.isoformat())
+        check(f"the verdict CLI, --live-file, a published manifest {label} ({failure}): exit {want_rc}",
+              done.returncode == want_rc, repr((done.returncode, done.stdout)))
+
+    # live_built: the published built_at, its signature verified, for the
+    # site job's --mav-built-at when the run made no MÁV part; empty for
+    # one that is not trusted or not read. A refused login reads it too
+    # (once, no wait), the run red all the same.
+    sign_file(live)
+    want_built = json.loads(live.read_text())["built_at"]
+    for label, failure, prep, want_rc, want_built_ in (
+        ("a fresh trusted manifest", "build", None, 0, want_built),
+        ("a stale trusted manifest", "site", "stale", 1, None),
+        ("a refused login", "auth", None, 1, want_built),
+        ("a manifest whose .sig does not verify", "build", "badsig", 1, ""),
+        ("a manifest not there", "build", "gone", 1, ""),
+    ):
+        target = live
+        if prep == "stale":
+            stale_live = tmp / "verdict-stale" / "mav-index.json"
+            stale_live.parent.mkdir(exist_ok=True)
+            stale_live.write_text(json.dumps(live_at(timedelta(days=3))))
+            sign_file(stale_live)
+            target, want_built_ = stale_live, json.loads(stale_live.read_text())["built_at"]
+        elif prep == "badsig":
+            target = tmp / "verdict-badsig" / "mav-index.json"
+            target.parent.mkdir(exist_ok=True)
+            target.write_bytes(live.read_bytes())
+            sign_file(target, os.urandom(32))
+        elif prep == "gone":
+            target = gone
+            gone.unlink(missing_ok=True)
+        gh_out = tmp / f"verdict-out-{failure}-{prep}.txt"
+        done = run_verdict("--failure", failure, "--live-file", str(target), "--now", now.isoformat(),
+                           "--github-output", str(gh_out))
+        got = dict(ln.split("=", 1) for ln in gh_out.read_text().splitlines() if "=" in ln) if gh_out.exists() else {}
+        check(f"the verdict CLI writes live_built for {label}: "
+              + (f"its built_at {want_built_}" if want_built_ else "empty") + f", exit {want_rc}",
+              done.returncode == want_rc and got == {"live_built": want_built_}
+              and "reading both again" not in (done.stdout if failure == "auth" else ""),
+              repr((done.returncode, done.stdout, got)))
+
     age_step = step_script("Published index age")
     ws = tmp / "wf-age"
     (ws / "scripts").mkdir(parents=True)
     (ws / "scripts" / "mav_daily_verdict.py").write_text(
         "import os, sys\nopen('args.txt', 'w').write('\\n'.join(sys.argv[1:]))\n"
+        "out = sys.argv[sys.argv.index('--github-output') + 1] if '--github-output' in sys.argv else None\n"
+        "if out:\n    open(out, 'a').write('live_built=2026-11-03T01:00:00Z\\n')\n"
         "sys.exit(int(os.environ.get('STUB_RC', '0')))\n")
     age_cases = (
         ("no secrets", {"MAV_SECRETS": "false"}, "secrets"),
@@ -1051,13 +1220,19 @@ with tempfile.TemporaryDirectory() as tmp_name:
     for label, env_, want in age_cases:
         for stub_rc in ("0", "1"):
             (ws / "args.txt").unlink(missing_ok=True)
-            done, _ = bash(age_step, ws, STUB_RC=stub_rc, GITHUB_REPOSITORY="Bator/hungarian-transport",
-                           GITHUB_REPOSITORY_OWNER="Bator", **env_)
+            done, age_out = bash(age_step, ws, STUB_RC=stub_rc, GITHUB_REPOSITORY="Bator/hungarian-transport",
+                                 GITHUB_REPOSITORY_OWNER="Bator", **env_)
             args = (ws / "args.txt").read_text().splitlines() if (ws / "args.txt").exists() else []
-            check(f"the age step after {label}: --failure {want}, the Pages manifest, exit {stub_rc} passed on",
+            check(f"the age step after {label}: --failure {want}, the Pages manifest, exit {stub_rc} passed on,"
+                  " and the verdict's live_built in the step's outputs (also when it fails the run)",
                   done.returncode == int(stub_rc) and args[:2] == ["--failure", want]
-                  and "https://bator.github.io/hungarian-transport/mav-index.json" in args,
-                  repr((done.returncode, done.stderr, args)))
+                  and "https://bator.github.io/hungarian-transport/mav-index.json" in args
+                  and age_out.get("live_built") == "2026-11-03T01:00:00Z",
+                  repr((done.returncode, done.stderr, args, age_out)))
+    check("the age step has the id the build job's live_built output reads, and runs only when this run made no"
+          " MÁV part",
+          re.search(r"- name: Published index age\n        id: age\n        if: steps\.site\.outputs\.deploy == ''\n",
+                    job("build")) is not None, step(job("build"), "- name: Published index age"))
 
     pages_step = step_script("GitHub Pages enabled")
     stub_bin = tmp / "bin"
@@ -1371,10 +1546,12 @@ on_block = TEXT.split("\non:\n", 1)[1].split("\n\n", 1)[0]
 check("runs daily and by hand, never for pull requests (secrets, deploy)",
       "schedule:" in on_block and "workflow_dispatch:" in on_block
       and "pull_request" not in on_block and "push:" not in on_block, on_block)
-check("the dispatch has one input, a boolean asking for the Volán and city indexes now",
+check("the dispatch has two inputs: a boolean asking for the Volán and city indexes now, and the stable release"
+      " release.yml has just published (a string, empty by default)",
       re.search(r"^  workflow_dispatch:\n    inputs:\n      timetables:\n        description: .+\n"
-                r"        type: boolean\n        default: false$", on_block, re.M) is not None
-      and on_block.count("type:") == 1, on_block)
+                r"        type: boolean\n        default: false\n(      #.*\n)*      release:\n        description: .+\n"
+                r"        type: string\n        default: \"\"$", on_block, re.M) is not None
+      and on_block.count("type:") == 2, on_block)
 check("named for what it publishes now", TEXT.startswith("name: Daily timetables (GitHub Pages)\n"))
 # The schedule against what November 2026 showed: MÁV's feed of the day out
 # between 03:17 and 10:03 UTC, on 3 November still missing at 13:54; GitHub
@@ -1553,11 +1730,12 @@ check("the sign job refuses a site older than the one GitHub Pages serves (sign_
       and "secrets." not in live_check and "if:" not in live_check and "continue-on-error" not in live_check
       and sign_job.index("- name: No newer site on GitHub Pages") < sign_job.index("- name: Sign the manifest")
       and "\"Re-run failed jobs\" after a failed sign job\n      # finds it." not in site_job
-      and "sign job refuses it once GitHub Pages serves a newer site" in site_job, live_check)
+      and "sign job refuses it once GitHub Pages serves a newer timetables.json" in site_job
+      and "the sign job refuses the site once\n      # GitHub Pages serves a newer MÁV index" in build, live_check)
 asm_step = step(site_job, "- name: Assemble the site")
 check("the site job never carries a published manifest older than the build and timetables jobs read:"
       " their live_built outputs reach assemble as --mav-built-at and --timetables-built-at, only when set",
-      "live_built: ${{ steps.site.outputs.live_built }}" in build
+      "live_built: ${{ steps.site.outputs.live_built || steps.age.outputs.live_built }}" in build
       and "live_built: ${{ steps.due.outputs.live_built }}" in tt_job
       and "MAV_BUILT: ${{ needs.build.outputs.live_built }}" in asm_step
       and "TIMETABLES_BUILT: ${{ needs.timetables.outputs.live_built }}" in asm_step

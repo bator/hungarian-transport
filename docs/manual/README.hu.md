@@ -139,10 +139,11 @@ beállításait és a menetrend-értesítéseket nyitja meg.
   kulcsot nem. BKK kulccsal, és csak amíg a BKK FUTÁR nem válaszol, a
   kártyákon lévő budapesti megállók és járatok azonosítóit is, hogy a
   tábláikon akkor is élő idők legyenek. Kikapcsolva a Home Assistant
-  semmit nem küld a `mavplusz.hu`-ra: a vonatok és a buszok csak a
-  `jbb.ghsq.de` GTFS-Realtime feedjeit olvassák, a FUTÁR által meg nem
-  válaszolt budapesti táblát pedig a Transitous tölti ki. A mentéskor
-  már úton lévő kérés sem megy el. Részletek:
+  többé semmit nem küld a `mavplusz.hu`-ra: a vonatok és a buszok csak a
+  GTFS-Realtime feedeket olvassák, a FUTÁR által meg nem válaszolt
+  budapesti táblát pedig a Transitous tölti ki. A mentéskor még
+  indulásra váró kérés (egy másik kártyáé mögött sorban álló) sem megy
+  el; a már elküldött megkapja a válaszát. Részletek:
   [Live delays and positions](../realtime.md).
 - **Napi MÁV útvonal-index a GitHubról** (alapból bekapcsolva): az
   integráció naponta egyszer megnézi a `bator.github.io` oldalon az aznap

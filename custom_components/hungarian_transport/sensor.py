@@ -16,7 +16,8 @@
   pages_result, pages_reason and pages_settling as the Volán one.
 - Daily MÁV check: when the daily MÁV index last ran (mav_daily.py); its
   result and why it did not go through (reason), the manifest's feed and
-  build time, the next round and the failure streak in days. Result
+  build time, while a look waits for GitHub Pages' cache its reason
+  (pages_settling), the next round and the failure streak in days. Result
   "disabled" when it is turned off.
 
 Data: timetables.TimetableStatus (entry.runtime_data).
@@ -184,6 +185,7 @@ def _daily_attrs(status: TimetableStatus) -> dict[str, Any]:
             "reason": last.get("reason"),
             "manifest_feed": last.get("manifest_feed"),
             "manifest_built_at": last.get("manifest_built_at"),
+            "pages_settling": last.get("settling"),
             "next_run": _iso(status.next_run),
             "failure_streak": days if isinstance(days, int) and not isinstance(days, bool) else 0,
         }

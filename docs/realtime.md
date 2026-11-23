@@ -202,17 +202,33 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   lists at least, no answer of that kind in between, are no bad trip's
   but the planner refusing every request (a schema change it answers
   with a GraphQL error without a path, an HTTP 400 for any body): that is
-  an outage from then on, one warning and the shared minute's backoff,
-  until a request of that kind is answered. What those six split and held
-  is undone then, and the outage's probes ask as many trips as ever, so
-  the first request after the planner is back answers every trip (before,
-  every trip was left at one a request for 15 minutes, a trip a poll
-  answered). A trip of the wrong shape in an
-  answer is that trip's failure alone (held for the minute), the others
-  are answered. A bug of the integration's own reading of an answer (a
-  `TypeError`, `KeyError` and the like, which no answer causes) fails its
-  request as one failing for its own sake, so only the trip whose data
-  meets the bug ends up held, and is logged as a warning with its
+  an outage from then on, one warning naming the kind ("trips: 6 requests
+  or more in a row failed ..."), until a request of that kind is answered.
+  The trips' outage is the planner's, the shared minute's backoff, the
+  BKK boards' too; the route lists' is theirs alone: route lists asked
+  once a minute, the trips every interval as ever, nothing shared backed
+  off, and "answers route lists again" when one is answered (before, it
+  backed every planner request off, and each route list probe failing
+  before the round's trips set it again: no trip asked at all). What
+  those six split and held is undone then, and the outage's probes ask
+  as many trips as ever, so the first request after the planner is back
+  answers every trip (before, every trip was left at one a request for
+  15 minutes, a trip a poll answered). An answer the planner gives that
+  still fails (over the cap, not decoded in time, a bug of the reading
+  code) is no part of the six and ends such an outage: its request is
+  asked in halves as ever (before, an outage's probe of every trip too
+  large together, or meeting a bug, kept it for good). Six failing are
+  forgotten 15 minutes after the last of them, so an outage of a kind
+  nobody asks any more (the route + start cards closed) does not keep
+  "answers again", and the warning of a later outage, back for good. A
+  trip of the wrong shape in an answer is that trip's failure alone
+  (held for the minute, twice as long every time again, as one failing
+  alone), the others are answered. A bug of the integration's own
+  reading of an answer (a `TypeError`, `KeyError` and the like, which no
+  answer causes) met by one trip's data is that trip's failure alone the
+  same way (before, it failed the whole request, which only halving split
+  again), met by the answer as a whole it fails its request as one
+  failing for its own sake; either is logged as a warning with its
   traceback once an hour per kind of request (trips, route lists,
   vehicles) and place in the code, rather than moving all MÁV realtime to
   the feeds without a word, or warning again after every other answer
@@ -226,7 +242,9 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   same download). A GraphQL error the planner ties to one trip (its `path`
   begins with that trip's alias: a trip id or date it cannot serve) is no
   answer for that trip alone, matched on the feeds, and backs nothing
-  off; so is a trip id the request cap left out, with no answer kept. And
+  off (the trip is held for a minute, twice as long every time again up
+  to 15 minutes; before, a minute every time, a request a minute for
+  nothing); so is a trip id the request cap left out, with no answer kept. And
   when the planner knows **none** of
   the requested trips (a null answer for every one: ids the card's
   timetable does not share with the planner). A trip the planner does not
@@ -432,7 +450,9 @@ before, and the card fills the board from Transitous.
   of FUTÁR's and one of the planner's for them all, as they share one
   FUTÁR request outside it; a token taken for a request that was not sent
   after all (it joined one under way, or the key was rejected meanwhile)
-  goes back. A board or trip details the planner holds (its 35 s and
+  goes back; one whose planner request was sent stays spent, also when
+  the card that asked left (a websocket closed, a page reloaded) while
+  that request was under way. A board or trip details the planner holds (its 35 s and
   60 s caches, or a request under way) are answered from there without a
   planner token, also once the share is used up: a second card, horizon
   or browser asking a board the planner just gave does not wait for FUTÁR
@@ -457,17 +477,27 @@ before, and the card fills the board from Transitous.
   (not asked for 10 minutes), the others are answered. Either is a warning
   with its traceback once an hour per kind (boards, trip details) and
   place in the code, however many answers are read meanwhile.
-- **FUTÁR's outage.** Once FUTÁR failed (and until it answers again), a
+- **FUTÁR's outage.** Once FUTÁR failed, or refused the key's calls as
+  too many (its HTTP 429: asking it less is the point then), and until it
+  answers again, a
   board or trip details the planner can answer is asked of the planner
   first, at once, and FUTÁR is not waited for: before, every poll waited
   8 s for a FUTÁR that was down (18 s once the planner's share was used
   up), holding a planner token meanwhile. FUTÁR itself is asked by one
   request at most every 30 s (the probe; any other request sent to FUTÁR
   meanwhile, a search or route details, counts as one), as below: FUTÁR
-  first, cut short, the planner after it. Its answer ends the outage, and
+  first, cut short, the planner after it. A probe for a board or trip
+  details the planner holds (its caches, or its request under way) is
+  answered from the planner at once instead, and FUTÁR is asked behind
+  it with its whole budget and a token of FUTÁR's limit of its own,
+  nobody waiting for it (a card asking the same meanwhile asks the
+  planner first, not join it); its answer goes in FUTÁR's 15 s cache.
+  Before, that card waited 8 s for a FUTÁR most likely still down, and
+  the planner's board could expire meanwhile. Its answer ends the outage, and
   every request asks FUTÁR first again. A board FUTÁR's own cache holds
-  (answered within 15 s), or whose FUTÁR request is under way (the probe),
-  is answered from it or joins it, as outside the outage, for no token.
+  (answered within 15 s), or whose FUTÁR request is under way (the
+  cut-short probe; not the one asked behind a planner answer), is answered
+  from it or joins it, as outside the outage, for no token.
   What the planner cannot answer (a
   stop it lacks, its share used up, no answer from it) asks FUTÁR as
   before, with what is left of the card's 20 s. So once the planner's BKK
@@ -480,7 +510,9 @@ before, and the card fills the board from Transitous.
   FUTÁR from a hanging one, and a slow one (10 s a board) still answers
   them, which a cap on the calls under way would refuse.
 - **Logged once, also when it flaps.** FUTÁR's outage is one warning when
-  it starts failing and one info line when it answers again. FUTÁR failing
+  it starts failing and one info line when it answers again. Its HTTP 429
+  is a warning and an info line of its own ("takes the configured key's
+  calls again"), so FUTÁR failing after a 429 is still warned about. FUTÁR failing
   again within 5 minutes of either line is not warned about at once: a
   FUTÁR down and up every few seconds logged a pair of lines every few
   seconds (58 of each in ten minutes). Such a failure is warned about once
@@ -491,7 +523,8 @@ before, and the card fills the board from Transitous.
   5 minutes late at most. None of this waits for the log: the planner is
   asked first from the failure on, said or not, until FUTÁR answers.
 - **The card's 20 s.** FUTÁR gets 8 s of the card's 20 s only while its
-  outage stands (it failed and has not answered since; while it answers,
+  outage stands (it failed, or refused the key's calls as too many with
+  HTTP 429, and has not answered since; while it answers,
   no token is reserved and FUTÁR keeps its whole budget, and a request
   failing fast still falls back with a token taken then; the first
   request hanging for FUTÁR's whole budget gets no planner answer and
@@ -502,7 +535,9 @@ before, and the card fills the board from Transitous.
   known, a timetable trip, none of them failed lately, the planner not
   backing off) and a token of the boards' share is reserved for its
   answer before FUTÁR is asked (none for an answer the planner's caches
-  hold: it asks the planner nothing): a dashboard's boards at once (40 poles)
+  hold for FUTÁR's 8 s and the planner's 6 s more: it asks the planner
+  nothing; one expiring sooner reserves a token as any other, since the
+  planner would be asked again once FUTÁR failed): a dashboard's boards at once (40 poles)
   cut FUTÁR short for as many as the share holds, and the rest keep
   FUTÁR's whole budget, so a slow FUTÁR still answers them. The trip
   details reserved within 50 ms of each other share one token (up to one
@@ -556,7 +591,8 @@ before, and the card fills the board from Transitous.
   services → Hungarian transport → Configure → *Ask mavplusz.hu (MÁV's
   journey planner)*, on by default. Off, Home Assistant sends nothing to
   mavplusz.hu: no delays, no vehicles, no BKK boards. The trains and buses
-  then read only the `jbb.ghsq.de` feeds (as before 1.10.19), and a
+  then read only the GTFS-Realtime feeds (`jbb.ghsq.de`; Orosháza:
+  `gtfs.gpspositions.net`), as before 1.10.19, and a
   Budapest board or trip FUTÁR cannot answer gets FUTÁR's error, so the
   card fills it from Transitous. Saving the option reloads the entry; the
   next card poll follows it, and the one rate limit every planner request

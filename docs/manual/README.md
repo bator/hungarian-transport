@@ -134,10 +134,11 @@ key** checkbox.
   service dates, no personal data and no key; with a BKK key, and only
   while BKK FUTÁR does not answer, also the ids of the Budapest stops and
   trips the cards show, so their boards still come with live times.
-  Untick it and Home Assistant sends nothing to `mavplusz.hu`: trains and
-  buses read only the GTFS-Realtime feeds on `jbb.ghsq.de`, and a
-  Budapest board FUTÁR cannot answer is filled from Transitous. A request
-  already on its way when you save stops there too. See
+  Untick it and Home Assistant sends nothing more to `mavplusz.hu`:
+  trains and buses read only the GTFS-Realtime feeds, and a Budapest
+  board FUTÁR cannot answer is filled from Transitous. A request still
+  waiting to go when you save (one queued behind another card's) is not
+  sent either; one already sent gets its answer. See
   [Live delays and positions](../realtime.md).
 - **Daily MÁV route index from GitHub** (on by default): once a day the
   integration checks `bator.github.io` for the train route index built that
