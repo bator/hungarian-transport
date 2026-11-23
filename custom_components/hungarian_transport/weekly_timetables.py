@@ -967,7 +967,12 @@ def _crash(hass: HomeAssistant, scope: str, err: Exception) -> str:
     expected = isinstance(err, mav_daily.EXPECTED_ERRORS)
     _log_failure(hass, scope, message, exc_info=None if expected else err)
     if expected:
-        _LOGGER.debug("Weekly %s timetable round failed", scope, exc_info=err)
+        # The traceback of an expected error, for debugging, in the wording
+        # of its scope (as _log_failure's).
+        if scope == "round":
+            _LOGGER.debug("Weekly timetables round failed", exc_info=err)
+        else:
+            _LOGGER.debug("Weekly %s timetable failed", scope, exc_info=err)
     return message
 
 

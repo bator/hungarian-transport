@@ -2550,6 +2550,17 @@ async def test_a_manifest_or_round_failure_says_what_failed(hass: HomeAssistant,
     )
 
 
+async def test_an_expected_crash_has_its_scope_s_wording_at_debug(hass: HomeAssistant, caplog) -> None:
+    """Review round 10: an expected error's traceback, at debug, read
+    "Weekly round timetable round failed" for a crashed round; a round and
+    an index each get their own wording."""
+    caplog.set_level(logging.DEBUG, logger=wt.__name__)
+    wt._crash(hass, "round", OSError("disk"))
+    wt._crash(hass, "city", OSError("disk"))
+    said = [r for r in caplog.records if r.name == wt.__name__ and r.levelno == logging.DEBUG and r.exc_info]
+    assert [r.getMessage() for r in said] == ["Weekly timetables round failed", "Weekly city timetable failed"]
+
+
 # A .storage/hungarian_transport.updates as v1.10.23 wrote it (git show
 # 1e4dca8:custom_components/hungarian_transport/storage.py): a daily round
 # and Pages rounds without reason or settling, no unknown-key days, a city

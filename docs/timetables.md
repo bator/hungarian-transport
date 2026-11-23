@@ -737,7 +737,9 @@ the install, so the next try of the same entry fetches only the rest; a temporar
 marked retired and removed 26 hours later: an open dashboard keeps the old
 index until it reloads (at the latest at midnight) and reads its shapes
 until then. Retired folders are looked at in every check that gets as far as
-the indexes (not one whose manifest or signature failed) and at every start
+an index and decides about it (not one whose manifest or signature failed or
+is of a format this version does not read, nor an index that fails its
+checks, fails to download or is looked at again later) and at every start
 of the integration, also with *Weekly Volán and city timetables from
 GitHub* off. The timetable sensors update at once, and the install is
 recorded, so a later release that ships the same feeds or older ones does

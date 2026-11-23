@@ -1392,15 +1392,24 @@ async def test_a_stop_during_the_daily_write_waits_for_it_and_its_record(
     the install's record, so the sensor said "release" for the daily index
     and the next round, of the same feed, never put it back. The round now
     waits for the write and the record, through a second cancel too, and
-    then ends cancelled: it notifies and records no round."""
+    then ends cancelled: the install is recorded, but no round (the sensor's
+    last check) and nothing goes to on_result (no notification)."""
     out = card_assets / mav.INDEX_NAME
     out.write_bytes(_index(OLD))
     raw = _index(NEW)
     _serve(aioclient_mock, raw)
     started, release = _slow_write(monkeypatch)
     rounds = _recorded(monkeypatch)
-    task = hass.async_create_task(mav_daily.async_update(hass, card_assets))
+    seen = []
+
+    async def on_result(done):
+        seen.append(done)
+
+    up = mav_daily.DailyIndexUpdater(hass, card_assets, on_result=on_result)
+    up._schedule(1, mav_daily._FIRST)
+    _later(hass, 2)
     await hass.async_add_executor_job(started.wait, 10)
+    task = up._task
     for _ in range(stops):
         task.cancel()
         for _ in range(5):
@@ -1410,9 +1419,10 @@ async def test_a_stop_during_the_daily_write_waits_for_it_and_its_record(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert out.read_bytes() == raw
-    install = (await storage.async_load(hass))[storage.MAV_INSTALL]
+    state = await storage.async_load(hass)
+    install = state[storage.MAV_INSTALL]
     assert (install["source"], install["feed"], install["size"]) == (storage.SOURCE_DAILY, NEW, len(raw))
-    assert rounds == []
+    assert storage.DAILY_ROUND not in state and rounds == [] and seen == []
 
 
 async def test_home_assistant_stopping_during_the_daily_record_waits_for_it(
