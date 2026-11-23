@@ -28,7 +28,8 @@ a day; it must not go on unnoticed. The run fails (exit 1, ::error::):
   is larger than mav_pages_site.MAX_MANIFEST or not a JSON object: the
   same reasoning, and every install's daily MÁV check fails on it. Not a
   404 when the repository has no MÁV secrets (failure secrets): such a
-  repository publishes no MÁV files at all.
+  repository publishes no MÁV files at all (its 404 is not read again
+  either: it is a warning whatever a second read finds).
 
 Otherwise it stays green with a ::warning:: naming the published feed's age,
 also when the published manifest or its signature cannot be read for a
@@ -192,7 +193,7 @@ def manifest_unreadable(why: str) -> str:
     return f"{UNKNOWN}{MANIFEST_NAME}: {why}"
 
 
-def live_state(args: argparse.Namespace, settle: float) -> tuple[dict | None, str, str]:
+def live_state(args: argparse.Namespace, settle: float, failure: str = "") -> tuple[dict | None, str, str]:
     """(the published manifest or None, why not, trust): trust TRUSTED when
     its .sig verifies over its exact bytes, UNTRUSTED... when the .sig is
     not there (HTTP 404) or does not verify, also when both are read again
@@ -203,13 +204,16 @@ def live_state(args: argparse.Namespace, settle: float) -> tuple[dict | None, st
     still answer the 404 it cached for the .sig before the first signed
     deploy (PAGES_MAX_AGE). The manifest itself the same way
     (manifest_unreadable, None with it): a 404 read again once, UNKNOWN
-    only when it could not be read."""
+    only when it could not be read. Not read again for failure secrets: a
+    repository without the MÁV secrets publishes no MÁV files, its 404 is
+    what it should be, and verdict keeps it green whatever a second read
+    finds (waiting it out would only hold the run up)."""
     for attempt in (1, 2):
         body, why, sig, sig_why = _read(args)
         live, why = parse_live(body) if body is not None else (None, why)
         if live is None:
             state = manifest_unreadable(why)
-            if state != NO_MANIFEST:
+            if state != NO_MANIFEST or failure == "secrets":
                 return None, why, state
         elif sig is None and sig_why != "HTTP 404":
             return live, why, sig_unreadable(sig_why)
@@ -221,8 +225,12 @@ def live_state(args: argparse.Namespace, settle: float) -> tuple[dict | None, st
             state = f"{UNTRUSTED}{MANIFEST_NAME}.sig does not verify against the pinned public key"
         if attempt == 2 or settle < 0:
             return live, why, state
-        print(f"{state.removeprefix(UNTRUSTED)}; reading both again in {settle:g} s (GitHub Pages may still serve"
-              " the previous deploy's manifest or signature)")
+        if state == NO_MANIFEST:
+            print(f"{state.removeprefix(UNTRUSTED)}; reading it again in {settle:g} s (GitHub Pages may still"
+                  " serve a 404 it cached before the first deploy with the MÁV files)")
+        else:
+            print(f"{state.removeprefix(UNTRUSTED)}; reading both again in {settle:g} s (GitHub Pages may still"
+                  " serve the previous deploy's manifest or signature)")
         time.sleep(settle)
     raise AssertionError("unreachable")
 
@@ -258,7 +266,7 @@ def main(argv: list[str]) -> int:
         live, why, trust = live_state(args, -1) if args.github_output is not None else (None, "not read", "")
         fail, line = verdict(args.failure, None, "not read", now, UNKNOWN + "not read")
     else:
-        live, why, trust = live_state(args, args.sig_settle)
+        live, why, trust = live_state(args, args.sig_settle, args.failure)
         fail, line = verdict(args.failure, live, why, now, trust)
     print(line)
     if args.github_output is not None:

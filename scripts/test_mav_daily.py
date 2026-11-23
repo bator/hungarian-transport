@@ -1089,14 +1089,19 @@ with tempfile.TemporaryDirectory() as tmp_name:
     # refused (HTTP 4xx), oversized or no JSON object is what one who can
     # put files on Pages can make it, and every install's daily MÁV check
     # fails on it: red. A repository without the MÁV secrets publishes no
-    # MÁV files, so a 404 there stays a warning.
+    # MÁV files, so a 404 there stays a warning, read once.
     for label, man_answer, failure, later, want_rc, want_text, want_waits in (
-        ("not there (HTTP 404), also read again", http_error(404), "build", None, 1, "(HTTP 404)",
-         [site.SIG_SETTLE_S]),
+        ("not there (HTTP 404), also read again", http_error(404), "build", None, 1,
+         f"no mav-index.json (HTTP 404); reading it again in {site.SIG_SETTLE_S:g} s (GitHub Pages may still"
+         " serve a 404 it cached", [site.SIG_SETTLE_S]),
         ("a 404 Pages' cache keeps at first, then there", http_error(404), "build", fresh_body, 0, "5 h ago",
          [site.SIG_SETTLE_S]),
+        # Not read again: green whatever a second read finds, and the wait
+        # would hold every run of such a repository up by SIG_SETTLE_S.
         ("not there (HTTP 404) in a repository without the MÁV secrets", http_error(404), "secrets", None, 0,
-         "HTTP 404", [site.SIG_SETTLE_S]),
+         "HTTP 404", []),
+        ("a 404 Pages' cache keeps at first, then there, without the MÁV secrets", http_error(404), "secrets",
+         fresh_body, 0, "HTTP 404", []),
         ("refused (HTTP 403)", http_error(403), "build", None, 1, "HTTP 403", []),
         ("gone (HTTP 410)", http_error(410), "site", None, 1, "HTTP 410", []),
         ("refused (HTTP 403) without the MÁV secrets", http_error(403), "secrets", None, 1, "HTTP 403", []),

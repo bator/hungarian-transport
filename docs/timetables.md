@@ -305,7 +305,7 @@ again once 11 minutes later, as a 404 Pages' cache kept), that the site
 refuses with another client error, that is over 64 KiB or that is not a
 JSON object fails the run too, as every install's daily MÁV check fails
 on it; only a repository without the MÁV secrets, which publishes no MÁV
-files, gets a warning for the 404. A published
+files, gets a warning for the 404, read once without the wait. A published
 manifest, or its signature, that cannot be read for a network error, a
 timeout or a server error (HTTP 5xx) leaves the run green with a warning.
 

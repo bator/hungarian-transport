@@ -281,8 +281,8 @@ jobs:
       # then anyone's), is no signature or is refused (HTTP 4xx); a warning
       # otherwise (a network error, a timeout, HTTP 5xx: its age unknown).
       # Red as well when the published mav-index.json itself is not there
-      # (HTTP 404, read again 11 minutes later; a warning without the MÁV
-      # secrets), refused (HTTP 4xx), oversized or not a manifest. Its
+      # (HTTP 404, read again 11 minutes later; a warning, read once,
+      # without the MÁV secrets), refused (HTTP 4xx), oversized or not a manifest. Its
       # live_built (the published built_at, its signature verified) is the
       # site job's floor for the MÁV files it carries.
       - name: Published index age
