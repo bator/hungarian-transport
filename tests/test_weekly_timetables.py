@@ -50,6 +50,8 @@ SHARDS = 4
 
 # The real round, before conftest's no_pages_timetables replaces it.
 _real_update = wt.async_update
+# The real daily MÁV round, before conftest's no_daily_mav_index replaces it.
+_real_mav_update = mav_daily.async_update
 # The keys the integration ships (the current one first), before test_key
 # replaces them.
 _SHIPPED_KEYS = mav_daily.PAGES_PUBLIC_KEYS
@@ -2413,3 +2415,237 @@ async def test_home_assistant_stopping_during_the_record_waits_for_it(
     assert storage.PAGES_ROUND not in state
     assert seen == []
     assert _staged(card_assets) == []
+
+
+# --- review round 10 ----------------------------------------------------------
+
+
+async def test_a_stop_after_the_download_before_the_commit_keeps_the_verified_shards(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """Review round 10: a stop while the round looks at www/ again after the
+    download (the second decide, before the commit) removed the staging
+    folder, and the next round downloaded every shard again. It keeps them,
+    as a stop during the download does."""
+    import threading
+
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    site = Site()
+    _, folder, shards = site.publish("volan", VOLAN_NEW)
+    site.serve(aioclient_mock)
+    real = wt.decide_why
+    calls = {"n": 0}
+    started, release = threading.Event(), threading.Event()
+
+    def decide(*args, **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            started.set()
+            release.wait(10)
+        return real(*args, **kw)
+
+    monkeypatch.setattr(wt, "decide_why", decide)
+    seen = []
+
+    async def on_result(done):
+        seen.append(done)
+
+    pt = wt.PagesTimetables(hass, card_assets, on_result)
+    pt.start_round()
+    await hass.async_add_executor_job(started.wait, 10)
+    task = pt._task
+    pt.stop()
+    await asyncio.wait([task], timeout=10)
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert task.cancelled() and seen == []
+    staged = _staged(card_assets)
+    assert len(staged) == 1
+    assert {p.name: p.read_bytes() for p in staged[0].iterdir()} == shards
+    assert served_index.read_feed(card_assets / timetables.VOLAN_INDEX) == VOLAN_OLD
+    monkeypatch.setattr(wt, "decide_why", real)
+    aioclient_mock.clear_requests()
+    site.serve(aioclient_mock)
+    assert (await _round(hass, card_assets))["volan"] == wt.INSTALLED
+    assert _shard_requests(aioclient_mock, folder) == []
+    assert served_index.read_feed(card_assets / timetables.VOLAN_INDEX) == VOLAN_NEW
+    assert _staged(card_assets) == []
+
+
+async def test_a_stop_while_a_failed_shard_aborts_the_others_ends_the_round(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """A stop that comes while a shard's 404 has the TaskGroup abort the
+    other downloads (review round 10): on Python 3.12 (Home Assistant
+    2024.10) the TaskGroup took the stop for its own abort, and the round
+    went on to the city index after an unload. The round ends cancelled:
+    no city request, nothing recorded or notified, the shards that
+    verified kept."""
+    _install_local(card_assets, "volan", VOLAN_OLD)
+    _install_local(card_assets, "city", CITY_OLD)
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    site.publish("city", CITY_NEW)
+    site.serve(aioclient_mock)
+    real = wt._download_shard
+    aborting, release, started01 = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def shard(hass_, session, url, path, size, sha):
+        if "volan-shapes" not in url:
+            return await real(hass_, session, url, path, size, sha)
+        if path.name == "01.json.gz":
+            started01.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Aborted by the TaskGroup; the stop comes meanwhile.
+                aborting.set()
+                await release.wait()
+                raise
+        if path.name == "00.json.gz":
+            await started01.wait()
+            raise mav_daily.NotFound("00.json.gz: HTTP 404")
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(wt, "_download_shard", shard)
+    seen = []
+
+    async def on_result(done):
+        seen.append(done)
+
+    pt = wt.PagesTimetables(hass, card_assets, on_result)
+    pt.start_round()
+    await asyncio.wait_for(aborting.wait(), 10)
+    task = pt._task
+    pt.stop()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    release.set()
+    await asyncio.wait([task], timeout=10)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert task.cancelled() and seen == []
+    assert not [u for u in _requested(aioclient_mock) if "city-" in u]
+    assert served_index.read_feed(card_assets / timetables.CITY_INDEX) == CITY_OLD
+    assert storage.PAGES_ROUND not in await storage.async_load(hass)
+    assert len(_staged(card_assets)) == 1
+
+
+async def test_a_manifest_or_round_failure_says_what_failed(hass: HomeAssistant, aioclient_mock, card_assets, caplog) -> None:
+    """Review round 10: the manifest's and a crashed round's warnings read
+    "Weekly manifest timetable …" and "Weekly round timetable …"; they say
+    what failed instead."""
+    aioclient_mock.get(wt.MANIFEST_URL, status=500)
+    await _round(hass, card_assets)
+    wt._crash(hass, "round", KeyError("boom"))
+    said = _warnings(caplog)
+    assert said == [
+        "Weekly timetables from GitHub Pages not installed (their manifest, timetables.json): timetables.json:"
+        " HTTP 500. The current indexes stay; trying again later",
+        "Weekly timetables from GitHub Pages not installed (the round crashed): KeyError: 'boom'. The current"
+        " indexes stay; trying again later",
+    ]
+    wt._log_failure(hass, "volan", "x")
+    assert _warnings(caplog)[-1] == (
+        "Weekly volan timetable from GitHub Pages not installed: x. The current index stays; trying again later"
+    )
+
+
+# A .storage/hungarian_transport.updates as v1.10.23 wrote it (git show
+# 1e4dca8:custom_components/hungarian_transport/storage.py): a daily round
+# and Pages rounds without reason or settling, no unknown-key days, a city
+# install of an earlier Pages index that a HACS update has since replaced
+# with the release's.
+MAV_OLD = "20261110.M2ChangeID"
+MAV_NEW = "20261116.M2ChangeID"
+
+
+def _v1_10_23_record(mav_size: int) -> dict:
+    return {
+        "shipped": {
+            "version": "1.10.23",
+            "feeds": {"volan": VOLAN_NEW, "city": ADDED, "mav": MAV_OLD},
+            "mav_install": None,
+        },
+        storage.MAV_INSTALL: {
+            "source": storage.SOURCE_DAILY, "feed": MAV_OLD, "size": mav_size,
+            "installed_at": "2026-11-10T05:01:00+00:00", "audit_ok_ratio": 1.0,
+        },
+        storage.DAILY_ROUND: {
+            "at": "2026-11-15T05:03:00+00:00", "result": mav_daily.UP_TO_DATE,
+            "manifest_feed": MAV_OLD, "manifest_built_at": "2026-11-10T04:52:10+00:00",
+        },
+        storage.TIMETABLES_INSTALL: {
+            "city": {"feed": RELEASE_21, "sha256": "0" * 64, "size": 1234, "installed_at": "2026-11-09T05:04:00+00:00"},
+        },
+        storage.PAGES_ROUND: {
+            "volan": {"at": "2026-11-15T05:04:00+00:00", "result": wt.UP_TO_DATE, "manifest_feed": VOLAN_NEW},
+            "city": {"at": "2026-11-09T05:04:00+00:00", "result": wt.INSTALLED, "manifest_feed": RELEASE_21},
+        },
+    }
+
+
+async def test_an_upgrade_from_v1_10_23_reads_its_record_and_runs_the_next_round(
+    hass: HomeAssistant, hass_storage, aioclient_mock, card_assets, freezer, morning, monkeypatch, pages_key
+) -> None:
+    """Review round 10: the first setup of this version over the record
+    v1.10.23 left. The sensors read it (no reason, no settling, the city
+    index the release's again), and the first round records the new
+    fields: the MÁV install, and the city index of the newer release kept
+    against the site's build of v1.10.23 (release_newer)."""
+    from .test_mav_daily import _index as mav_index_of, _manifest as mav_manifest
+
+    monkeypatch.setattr(mav_daily, "async_update", _real_mav_update)
+    monkeypatch.setattr(wt, "async_update", _real_update)
+    monkeypatch.setattr(mav_daily.mav, "MIN_TRAINS", 1)
+
+    async def running(_hass):
+        return AwesomeVersion("1.10.24")
+
+    monkeypatch.setattr(wt, "_running_version", running)
+    mav_old, mav_new = mav_index_of(MAV_OLD), mav_index_of(MAV_NEW)
+    (card_assets / "mav-index.json.gz").write_bytes(mav_old)
+    _install_local(card_assets, "volan", VOLAN_NEW)
+    # The release's city index: an operator the site's build of v1.10.23
+    # knew nothing of.
+    city_raw, _ = _install_local(card_assets, "city", ADDED)
+    hass_storage[storage.STORAGE_KEY] = {
+        "version": storage.STORAGE_VERSION, "minor_version": 1, "key": storage.STORAGE_KEY,
+        "data": _v1_10_23_record(len(mav_old)),
+    }
+    man = json.dumps(mav_manifest(mav_new, feed=MAV_NEW, built_at="2026-11-16T02:10:00Z")).encode()
+    aioclient_mock.get(mav_daily.MANIFEST_URL, content=man)
+    aioclient_mock.get(mav_daily.SIGNATURE_URL, text=_sign(man))
+    aioclient_mock.get(mav_daily.INDEX_URL, content=mav_new)
+    site = Site()
+    site.publish("volan", VOLAN_NEW)
+    site.publish("city", LIVE, release_feed=RELEASE_21, release_version="v1.10.23")
+    site.serve(aioclient_mock)
+    await _setup(hass)
+
+    daily = hass.states.get("sensor.hungarian_transport_daily_mav_check")
+    assert daily.attributes["result"] == mav_daily.UP_TO_DATE
+    assert daily.attributes["manifest_feed"] == MAV_OLD
+    assert not {"reason", "pages_settling"} & set(daily.attributes)
+    volan = hass.states.get("sensor.hungarian_transport_volan_timetable")
+    assert volan.attributes["pages_result"] == wt.UP_TO_DATE
+    assert not {"pages_reason", "pages_settling"} & set(volan.attributes)
+    city = hass.states.get("sensor.hungarian_transport_city_timetables")
+    assert (city.attributes["source"], city.attributes["pages_result"]) == (storage.SOURCE_RELEASE, wt.INSTALLED)
+    assert hass.states.get("sensor.hungarian_transport_mav_route_index").attributes["source"] == storage.SOURCE_DAILY
+
+    await _at(hass, freezer, "2026-11-16 03:20:01+00:00")
+    assert (card_assets / "mav-index.json.gz").read_bytes() == mav_new
+    assert (card_assets / timetables.CITY_INDEX).read_bytes() == city_raw
+    daily = hass.states.get("sensor.hungarian_transport_daily_mav_check")
+    assert (daily.attributes["result"], daily.attributes["manifest_feed"]) == (mav_daily.INSTALLED, MAV_NEW)
+    assert "reason" not in daily.attributes
+    mav_sensor = hass.states.get("sensor.hungarian_transport_mav_route_index")
+    assert (mav_sensor.attributes["source"], mav_sensor.attributes["feed_version"]) == (storage.SOURCE_DAILY, MAV_NEW)
+    city = hass.states.get("sensor.hungarian_transport_city_timetables")
+    assert (city.attributes["pages_result"], city.attributes["pages_reason"]) == (wt.SUPERSEDED, wt.RELEASE_NEWER)
+    volan = hass.states.get("sensor.hungarian_transport_volan_timetable")
+    assert volan.attributes["pages_result"] == wt.UP_TO_DATE and "pages_reason" not in volan.attributes
+    state = await storage.async_load(hass)
+    assert state[storage.PAGES_ROUND]["city"]["reason"] == wt.RELEASE_NEWER
+    assert state[storage.TIMETABLES_INSTALL]["city"]["feed"] == RELEASE_21
+    assert state[storage.MAV_INSTALL]["feed"] == MAV_NEW

@@ -1362,3 +1362,296 @@ async def test_a_manifest_or_index_past_its_cap_is_too_large_not_a_mismatch(
     _serve(aioclient_mock, raw, headers={"Content-Length": str(mav_daily.MAX_INDEX + 1)})
     done = await mav_daily.async_update(hass, card_assets)
     assert (done.result, done.reason) == (mav_daily.FAILED, mav_daily.REASON_TOO_LARGE)
+
+
+# --- review round 10 ----------------------------------------------------------
+
+
+def _slow_write(monkeypatch):
+    """mav_index.write_bytes blocked until release is set; started when it runs."""
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+    real = mav_index.write_bytes
+
+    def slow(data, path, suffix=None):
+        started.set()
+        release.wait(10)
+        return real(data, path, suffix)
+
+    monkeypatch.setattr(mav_index, "write_bytes", slow)
+    return started, release
+
+
+@pytest.mark.parametrize("stops", [1, 2])
+async def test_a_stop_during_the_daily_write_waits_for_it_and_its_record(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch, stops
+) -> None:
+    """Review round 10: a stop (an unload, a reload: a cancel of the round)
+    while the index is written let the write finish in its thread but lost
+    the install's record, so the sensor said "release" for the daily index
+    and the next round, of the same feed, never put it back. The round now
+    waits for the write and the record, through a second cancel too, and
+    then ends cancelled: it notifies and records no round."""
+    out = card_assets / mav.INDEX_NAME
+    out.write_bytes(_index(OLD))
+    raw = _index(NEW)
+    _serve(aioclient_mock, raw)
+    started, release = _slow_write(monkeypatch)
+    rounds = _recorded(monkeypatch)
+    task = hass.async_create_task(mav_daily.async_update(hass, card_assets))
+    await hass.async_add_executor_job(started.wait, 10)
+    for _ in range(stops):
+        task.cancel()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert out.read_bytes() == raw
+    install = (await storage.async_load(hass))[storage.MAV_INSTALL]
+    assert (install["source"], install["feed"], install["size"]) == (storage.SOURCE_DAILY, NEW, len(raw))
+    assert rounds == []
+
+
+async def test_home_assistant_stopping_during_the_daily_record_waits_for_it(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """Home Assistant's own stop cancels the round (a background task) and
+    waits only for the tasks it is not cancelling: the round takes each
+    cancel back while it waits for the install's record, so the stop waits
+    for it, and the record is written."""
+    out = card_assets / mav.INDEX_NAME
+    out.write_bytes(_index(OLD))
+    raw = _index(NEW)
+    _serve(aioclient_mock, raw)
+    entered, release = asyncio.Event(), asyncio.Event()
+    real = storage.async_record_mav_install
+
+    async def slow(*args):
+        entered.set()
+        await release.wait()
+        await real(*args)
+
+    monkeypatch.setattr(storage, "async_record_mav_install", slow)
+    seen = []
+
+    async def on_result(done):
+        seen.append(done)
+
+    up = mav_daily.DailyIndexUpdater(hass, card_assets, on_result=on_result)
+    up._schedule(1, mav_daily._FIRST)
+    _later(hass, 2)
+    await asyncio.wait_for(entered.wait(), 10)
+    task = up._task
+    stopping = asyncio.ensure_future(hass.async_stop())
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+    assert not stopping.done() and not task.done()
+    release.set()
+    await asyncio.wait_for(stopping, 30)
+    assert task.cancelled()
+    assert out.read_bytes() == raw
+    state = await storage.async_load(hass)
+    assert state[storage.MAV_INSTALL]["feed"] == NEW
+    assert storage.DAILY_ROUND not in state and seen == []
+
+
+async def test_a_failed_daily_write_after_a_stop_still_ends_the_round(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """The write fails (a full disk) after the round was stopped: nothing
+    recorded, the round ends cancelled, the index stays."""
+    import threading
+
+    out = card_assets / mav.INDEX_NAME
+    before = _index(OLD)
+    out.write_bytes(before)
+    _serve(aioclient_mock, _index(NEW))
+    started, release = threading.Event(), threading.Event()
+
+    def full(data, path, suffix=None):
+        started.set()
+        release.wait(10)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(mav_index, "write_bytes", full)
+    task = hass.async_create_task(mav_daily.async_update(hass, card_assets))
+    await hass.async_add_executor_job(started.wait, 10)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert out.read_bytes() == before
+    assert storage.MAV_INSTALL not in await storage.async_load(hass)
+
+
+def _limits(monkeypatch) -> dict[str, int]:
+    """The limit each URL was last downloaded with."""
+    limits: dict[str, int] = {}
+    real = mav_daily._get
+
+    async def get(session, url, limit, timeout, sink=None):
+        limits[url] = limit
+        return await real(session, url, limit, timeout, sink)
+
+    monkeypatch.setattr(mav_daily, "_get", get)
+    return limits
+
+
+@pytest.mark.parametrize("declared", [False, True], ids=["streamed", "content-length"])
+async def test_the_index_is_read_no_further_than_its_manifest_s_size(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch, declared
+) -> None:
+    """Review round 10: the index is downloaded with the manifest's size as
+    its limit, as weekly_timetables.py downloads its indexes: a longer body
+    (another generation's) is a mismatch that settles, not read to
+    MAX_INDEX. A Content-Length past MAX_INDEX stays too_large (above)."""
+    raw = _index(NEW)
+    longer = raw + b"\0" * 70_000
+    man = _manifest(raw)
+    headers = {"Content-Length": str(len(longer))} if declared else {}
+    _serve(aioclient_mock, longer, man, headers=headers)
+    limits = _limits(monkeypatch)
+    done = await mav_daily.async_update(hass, card_assets)
+    assert limits[mav_daily.INDEX_URL] == len(raw)
+    assert (done.result, done.reason) == (mav_daily.SETTLING, mav_daily.REASON_MISMATCH)
+    assert f"more than {len(raw)}" in done.error
+    done = await mav_daily.async_update(hass, card_assets)
+    assert (done.result, done.reason) == (mav_daily.FAILED, mav_daily.REASON_MISMATCH)
+    assert not (card_assets / mav.INDEX_NAME).exists()
+
+
+async def test_a_settling_look_shows_on_the_sensor_and_keeps_the_last_round(
+    hass: HomeAssistant, aioclient_mock, card_assets, freezer, budapest, max_jitter, monkeypatch
+) -> None:
+    """Review round 10: while a look waits for the Pages cache (SETTLING,
+    no round) the Daily MÁV check sensor keeps the last round's attributes
+    and adds pages_settling, its reason; the round that settles replaces
+    it."""
+    await budapest
+    out = card_assets / mav.INDEX_NAME
+    out.write_bytes(_index(OLD))
+    built = dt_util.parse_datetime("2026-10-31T04:52:10Z")
+    await storage.async_record_daily_round(hass, mav_daily.UP_TO_DATE, OLD, built)
+    last = dict((await storage.async_load(hass))[storage.DAILY_ROUND])
+    _deploy([(OLD_GEN, _manifest(NEW_GEN)), (NEW_GEN, _manifest(NEW_GEN))], aioclient_mock)
+    await _setup(hass, {})
+    await _at(hass, freezer, "2026-11-01 03:20:01+01:00")
+    record = (await storage.async_load(hass))[storage.DAILY_ROUND]
+    assert {k: record[k] for k in last} == last
+    assert record["settling"] == mav_daily.REASON_MISMATCH
+    state = hass.states.get("sensor.hungarian_transport_daily_mav_check")
+    assert state.attributes["result"] == mav_daily.UP_TO_DATE
+    assert state.attributes["manifest_feed"] == OLD
+    assert state.attributes["pages_settling"] == mav_daily.REASON_MISMATCH
+    assert dt_util.parse_datetime(state.state) == dt_util.parse_datetime(last["at"])
+    await _at(hass, freezer, "2026-11-01 03:31:02+01:00")
+    assert out.read_bytes() == NEW_GEN
+    state = hass.states.get("sensor.hungarian_transport_daily_mav_check")
+    assert state.attributes["result"] == mav_daily.INSTALLED
+    assert "pages_settling" not in state.attributes
+    assert "settling" not in (await storage.async_load(hass))[storage.DAILY_ROUND]
+
+
+async def test_a_daily_time_during_a_settling_look_settles_once_more_and_starts_one_weekly_round(
+    hass: HomeAssistant, aioclient_mock, card_assets, monkeypatch
+) -> None:
+    """A first or daily time that comes while a look (here a settle look)
+    still runs starts a new cycle at once (_matched): that look may settle
+    once more, then the next mismatch is FAILED; the cycle's weekly round
+    starts once, when the running look ends (_cycle_pending)."""
+    _deploy([(OLD_GEN, _manifest(NEW_GEN))], aioclient_mock)
+    real = mav_daily.async_update
+    gate = asyncio.Event()
+    calls = {"n": 0}
+    results: list[str] = []
+
+    async def update(hass_, www):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            await gate.wait()
+        done = await real(hass_, www)
+        results.append(done.result)
+        return done
+
+    monkeypatch.setattr(mav_daily, "async_update", update)
+
+    class Weekly:
+        started = 0
+
+        def start_round(self):
+            Weekly.started += 1
+
+        def stop(self):
+            pass
+
+    up = mav_daily.DailyIndexUpdater(hass, card_assets, timetables=Weekly())
+    up._schedule(1, mav_daily._FIRST)
+    _later(hass, 2)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert results == [mav_daily.SETTLING] and Weekly.started == 1
+    # The settle look, slow; the daily time comes meanwhile.
+    _later(hass, mav_daily.PAGES_SETTLE_DELAY + 3)
+    await _until_called(calls, 2)
+    up._schedule(1, mav_daily._DAILY)
+    _later(hass, mav_daily.PAGES_SETTLE_DELAY + 5)
+    for _ in range(10):
+        await asyncio.sleep(0)
+    assert calls["n"] == 2 and Weekly.started == 1
+    gate.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    # The new cycle let the running look settle once more.
+    assert results == [mav_daily.SETTLING, mav_daily.SETTLING] and Weekly.started == 2
+    assert up._next == mav_daily._RETRY and up._unsub is not None
+    _later(hass, 2 * mav_daily.PAGES_SETTLE_DELAY + 10)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert results == [mav_daily.SETTLING, mav_daily.SETTLING, mav_daily.FAILED]
+    # A FAILED settle look is a retry of the cycle, not a new weekly round.
+    assert Weekly.started == 2 and up._retries == 1
+    up._unsub()
+
+
+async def _until_called(calls: dict[str, int], n: int) -> None:
+    for _ in range(1000):
+        if calls["n"] >= n:
+            return
+        await asyncio.sleep(0)
+    raise AssertionError("never called")
+
+
+async def test_a_late_look_after_a_cycle_used_up_its_signature_settle_fails_at_once(
+    hass: HomeAssistant, aioclient_mock, card_assets, real_signature
+) -> None:
+    """The morning cycle's signature settled once and never matched after
+    (each look after it hit an HTTP 500): an afternoon late look of the
+    same cycle that finds another deploy's signature is FAILED at once,
+    and a well-formed one counts its unknown-key day (no settle is left
+    until the next first or daily round, as for any scope). The next cycle
+    settles again."""
+    from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMockResponse
+
+    raw = _index(NEW)
+    body = json.dumps(_manifest(raw)).encode()
+    other = _sign(body, Ed25519PrivateKey.generate())
+    answers = iter([{"text": other}, {"status": 500}, {"status": 500}, {"text": other}, {"text": other}])
+
+    async def sig(method, url, data):
+        return AiohttpClientMockResponse(method, url, **next(answers))
+
+    aioclient_mock.get(mav_daily.MANIFEST_URL, content=body)
+    aioclient_mock.get(mav_daily.SIGNATURE_URL, side_effect=sig)
+    aioclient_mock.get(mav_daily.INDEX_URL, content=raw)
+    seen = [await mav_daily.async_update(hass, card_assets) for _ in range(4)]
+    assert [(d.result, d.reason) for d in seen] == [
+        (mav_daily.SETTLING, mav_daily.UNKNOWN_KEY),
+        (mav_daily.FAILED, "mav-index.json.sig: HTTP 500"),
+        (mav_daily.FAILED, "mav-index.json.sig: HTTP 500"),
+        (mav_daily.FAILED, mav_daily.UNKNOWN_KEY),
+    ]
+    assert (await storage.async_load(hass))[storage.UNKNOWN_KEY_SEEN]["mav-index.json"]["days"] == 1
+    mav_daily._matched(hass)
+    done = await mav_daily.async_update(hass, card_assets)
+    assert (done.result, done.reason) == (mav_daily.SETTLING, mav_daily.UNKNOWN_KEY)
+    assert not (card_assets / mav.INDEX_NAME).exists()

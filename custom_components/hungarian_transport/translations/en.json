@@ -124,7 +124,7 @@
         "data_description": {
           "mavplusz": "While a card is shown, the trips it shows are asked of MÁV's journey planner at mavplusz.hu, for live delays and vehicle positions: MÁV and GYSEV trains, Volán intercity and Volánbusz local buses, Paks, Debrecen, Veszprém and Miskolc buses. Sent: trip ids, route ids and service dates, no personal data and no key. With a BKK key, and only while BKK FUTÁR does not answer, also the Budapest stop and trip ids of the boards the cards show. Off: nothing is sent to mavplusz.hu; trains and buses read only the GTFS-Realtime feeds on jbb.ghsq.de, and a Budapest board FUTÁR cannot answer falls back to Transitous.",
           "daily_mav_index": "Once a day, fetch the train route index the project builds from MÁV's newest timetable (from bator.github.io) when it is newer than the one in use. A newer local MÁV feed still wins. Turn it off to keep the index the installed release shipped (or a local build) and make no such request.",
-          "pages_timetables": "At the daily check, after the MÁV index, fetch the Volán and city timetable indexes the project rebuilds every week (from bator.github.io) when their feeds are newer than the ones in use. Indexes the local updater script keeps newer stay. Turn it off to keep the release's indexes and make no such request.",
+          "pages_timetables": "At the daily check, after the MÁV index, fetch the Volán and city timetable indexes the project rebuilds every week (from bator.github.io) when their feeds are newer than the ones in use; it installs only from a signed manifest, and keeps the city index of a newer release until the site has rebuilt against it. Indexes the local updater script keeps newer stay. Turn it off to keep the release's indexes and make no such request.",
           "daily_time": "Local time of the daily check for a new MÁV route index (up to 5 minutes later, to spread the requests). It also runs once 10–20 minutes after Home Assistant starts or these options are saved; a failed check is tried again every 20 minutes, up to 6 times. The weekly Volán and city timetables are checked at the same time.",
           "notify_updates": "A persistent notification when a new daily MÁV route index is installed, when an update of the integration ships new Volán, city or MÁV timetables, and once when the daily MÁV index fails on 3 consecutive days (a site not rebuilt for 3 days counts as failing). Also when new weekly Volán or city timetables from GitHub are installed.",
           "notify_service": "Optional. Pick a script or notify service from the list, or type another one as domain.service (for example script.ertesit or notify.mobile_app_iphone). Called with title and message along with each persistent notification. “— none —” or an empty field: persistent notifications only. A stored service that no longer exists is marked (missing) and kept until you pick another.",
@@ -233,6 +233,28 @@
               "unsupported": "Unsupported",
               "disabled": "Disabled"
             }
+          },
+          "pages_reason": {
+            "name": "Weekly check reason",
+            "state": {
+              "release_newer": "Newer release's index",
+              "served_newer": "Index in use is newer",
+              "bad_signature": "Bad signature",
+              "unknown_key": "Unknown signing key",
+              "not_found": "File not found",
+              "mismatch": "Does not match the manifest",
+              "too_large": "Too large"
+            }
+          },
+          "pages_settling": {
+            "name": "Weekly check looking again",
+            "state": {
+              "bad_signature": "Bad signature",
+              "unknown_key": "Unknown signing key",
+              "not_found": "File not found",
+              "mismatch": "Does not match the manifest",
+              "settling": "Looking again"
+            }
           }
         }
       },
@@ -271,6 +293,28 @@
               "unsupported": "Unsupported",
               "disabled": "Disabled"
             }
+          },
+          "pages_reason": {
+            "name": "Weekly check reason",
+            "state": {
+              "release_newer": "Newer release's index",
+              "served_newer": "Index in use is newer",
+              "bad_signature": "Bad signature",
+              "unknown_key": "Unknown signing key",
+              "not_found": "File not found",
+              "mismatch": "Does not match the manifest",
+              "too_large": "Too large"
+            }
+          },
+          "pages_settling": {
+            "name": "Weekly check looking again",
+            "state": {
+              "bad_signature": "Bad signature",
+              "unknown_key": "Unknown signing key",
+              "not_found": "File not found",
+              "mismatch": "Does not match the manifest",
+              "settling": "Looking again"
+            }
           }
         }
       },
@@ -290,11 +334,31 @@
               "disabled": "Disabled"
             }
           },
+          "reason": {
+            "name": "Reason",
+            "state": {
+              "bad_signature": "Bad signature",
+              "unknown_key": "Unknown signing key",
+              "not_found": "File not found",
+              "mismatch": "Does not match the manifest",
+              "too_large": "Too large"
+            }
+          },
           "manifest_feed": {
             "name": "Manifest feed"
           },
           "manifest_built_at": {
             "name": "Manifest built"
+          },
+          "pages_settling": {
+            "name": "Looking again",
+            "state": {
+              "bad_signature": "Bad signature",
+              "unknown_key": "Unknown signing key",
+              "not_found": "File not found",
+              "mismatch": "Does not match the manifest",
+              "settling": "Looking again"
+            }
           },
           "next_run": {
             "name": "Next run"

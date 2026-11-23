@@ -37,12 +37,16 @@ the day's, and installs the index only when:
   its index, but only while that index is the one served (by the build
   state's fingerprints, or its feed_version): a local feed whose build
   failed, was interrupted or refused by the audit keeps nothing;
-- the download has the manifest's size and sha256, unpacks to the schema and
+- the download has the manifest's size (it is read no further: a longer
+  one is a mismatch, unless it declares a Content-Length past MAX_INDEX)
+  and sha256, unpacks to the schema and
   feed the manifest names, and has at least MIN_TRAINS trains and lines whose
   references all resolve.
 
 It is written with mav_index.write_bytes (temp file and rename) under the
-build lock, never while a local build runs or is queued. A failed round
+build lock, never while a local build runs or is queued; a stop (an
+unload, a reload, Home Assistant stopping) during the write waits for it
+and for its record (storage.MAV_INSTALL), then ends the round. A failed round
 keeps the index on disk and logs once per kind of failure (a warning), not
 at every round, and opens no Repairs issue. After a round that failed or
 found a build running, the round is tried again RETRY_DELAY later, up to
@@ -199,10 +203,12 @@ UNKNOWN_KEY = "unknown_key"
 REASON_NOT_FOUND = "not_found"
 REASON_MISMATCH = "mismatch"
 # A body past the limit _get was given where that limit is a cap, not the
-# size a manifest names (a manifest, the MÁV index past MAX_INDEX): no
-# mismatch that settles, FAILED with the normal retries. A file longer than
-# its manifest says is a mismatch (weekly_timetables.py turns TooLarge into
-# one there).
+# size a manifest names (a manifest past MAX_MANIFEST, a signature past
+# MAX_SIGNATURE, the MÁV index declaring a Content-Length past MAX_INDEX):
+# no mismatch that settles, FAILED with the normal retries. A file longer
+# than its manifest says is a mismatch (the index is downloaded with the
+# manifest's size as its limit, here and in weekly_timetables.py, which
+# turn TooLarge into one).
 REASON_TOO_LARGE = "too_large"
 MAX_REASON = 120
 
@@ -241,7 +247,13 @@ class _Mismatch(DailyIndexError):
 class TooLarge(DailyIndexError):
     """The body is longer than the limit _get was given: for a file whose
     manifest names its size, another generation's (or a broken one; the
-    caller says so with a _Mismatch); else past a cap (REASON_TOO_LARGE)."""
+    caller says so with a _Mismatch); else past a cap (REASON_TOO_LARGE).
+    length: the Content-Length the answer declared, when that is what was
+    refused (None when the body ran past the limit)."""
+
+    def __init__(self, message: str, length: int | None = None) -> None:
+        super().__init__(message)
+        self.length = length
 
 
 class NotFound(DailyIndexError):
@@ -377,6 +389,30 @@ EXPECTED_ERRORS: tuple[type[BaseException], ...] = (
 )
 
 
+async def wait_out(fut: asyncio.Future[Any]) -> bool:
+    """Until fut is done, through every cancel of the calling task meanwhile
+    (a stop, then another); whether there was one. Each cancel is taken back
+    at once (Task.uncancel): Home Assistant's own stop cancels the
+    background tasks first and then waits (async_block_till_done) only for
+    the tasks that are not being cancelled, so a round that still counted
+    as cancelled would not be waited for. The caller raises CancelledError
+    when it is done. fut's exception is taken, so it is not logged as never
+    retrieved. Used for what a stop must not cut in two: an install and its
+    record (here, and weekly_timetables.py's commit)."""
+    cancelled = False
+    while not fut.done():
+        try:
+            await asyncio.wait([fut])
+        except asyncio.CancelledError:
+            cancelled = True
+            task = asyncio.current_task()
+            if task is not None:
+                task.uncancel()
+    if not fut.cancelled():
+        fut.exception()
+    return cancelled
+
+
 async def _get(
     session: aiohttp.ClientSession,
     url: str,
@@ -412,7 +448,7 @@ async def _get(
                 raise DailyIndexError(f"{what}: HTTP {res.status}")
             length = (res.headers or {}).get("Content-Length")
             if length is not None and length.isdigit() and int(length) > limit:
-                raise TooLarge(f"{what}: {length} bytes, more than {limit}")
+                raise TooLarge(f"{what}: {length} bytes, more than {limit}", int(length))
             body = bytearray()
             size = 0
             async for chunk in res.content.iter_chunked(1 << 16):
@@ -717,7 +753,16 @@ async def _install(
         _LOGGER.debug("Daily MÁV route index of feed %s: a local build runs; trying again later", feed)
         return done(BUSY)
     try:
-        raw = await _get(session, INDEX_URL, MAX_INDEX, INDEX_TIMEOUT)
+        try:
+            # At most the size the manifest names: a longer body is not its
+            # index (another generation's, or a broken file), and is not
+            # read to the end. One whose Content-Length is past MAX_INDEX is
+            # too large for any manifest (REASON_TOO_LARGE).
+            raw = await _get(session, INDEX_URL, man["size"], INDEX_TIMEOUT)
+        except TooLarge as err:
+            if err.length is not None and err.length > MAX_INDEX:
+                raise
+            raise _Mismatch(str(err)) from err
         count, rank = await hass.async_add_executor_job(check_index, raw, man, mav.MIN_TRAINS)
     except _Mismatch as err:
         if not _may_settle(hass):
@@ -739,6 +784,7 @@ async def _install(
     if mav.build_pending(hass):
         _LOGGER.debug("Daily MÁV route index of feed %s: a local build runs; trying again later", feed)
         return done(BUSY)
+    audit = man.get("audit") if isinstance(man.get("audit"), dict) else {}
     async with mav.build_lock(hass):
         # The index or the local feed may have changed during the download;
         # the rank is the downloaded index's own now.
@@ -748,15 +794,34 @@ async def _install(
         if decision != _INSTALL:
             _clear_failure(hass)
             return done(decision)
-        try:
-            await hass.async_add_executor_job(mav_index.write_bytes, raw, out, secrets.token_hex(4))
-        except OSError as err:
-            message = f"could not write {out}: {err}"
-            _log_failure(hass, message)
-            return done(FAILED, message, message[:MAX_REASON])
+        # The write runs in the executor as a plain future
+        # (loop.run_in_executor), as weekly_timetables.py's commit: an
+        # executor job of Home Assistant's is cancelled by a stop (an
+        # unload, a reload, Home Assistant stopping) while its thread goes
+        # on, so the index would be replaced without its record (the
+        # sensor's source "daily", and async_check_shipped's news). The
+        # round waits for the write and then the record through every cancel
+        # meanwhile (wait_out), and only then raises the cancel: a stopped
+        # round neither notifies nor records the round.
+        write = hass.loop.run_in_executor(None, mav_index.write_bytes, raw, out, secrets.token_hex(4))
+        cancelled = await wait_out(write)
+    error = write.exception()
+    if error is not None:
+        if cancelled:
+            raise asyncio.CancelledError
+        if not isinstance(error, OSError):
+            raise error
+        message = f"could not write {out}: {error}"
+        _log_failure(hass, message)
+        return done(FAILED, message, message[:MAX_REASON])
+    record = hass.loop.create_task(
+        storage.async_record_mav_install(hass, storage.SOURCE_DAILY, feed, len(raw), audit.get("ok_ratio")),
+        name="hungarian_transport_mav_daily_record",
+    )
+    cancelled = await wait_out(record) or cancelled
+    if cancelled:
+        raise asyncio.CancelledError
     _clear_failure(hass)
-    audit = man.get("audit") if isinstance(man.get("audit"), dict) else {}
-    await storage.async_record_mav_install(hass, storage.SOURCE_DAILY, feed, len(raw), audit.get("ok_ratio"))
     _LOGGER.info(
         "Installed the daily MÁV route index of feed %s (%s trains and lines, built %s, audit %s/%s trains)",
         feed, count, man.get("built_at"), audit.get("trains_ok"), audit.get("trains"),
@@ -805,8 +870,10 @@ class DailyIndexUpdater:
     LATE_LIMIT times since the last first or daily round, only the same
     local day and before the next daily time. A SETTLING one is no round:
     it is looked at again PAGES_SETTLE_DELAY later, using up no retry, and
-    neither handed to on_result nor recorded. One round is pending at a
-    time: the daily time replaces a retry or a late look still waiting.
+    neither handed to on_result nor recorded as a round: its reason is
+    added to the last round's record as settling
+    (storage.async_record_daily_settling). One round is pending at a time:
+    the daily time replaces a retry or a late look still waiting.
     on_result gets each round's DailyRound (timetable_notify.py); then the
     round is recorded for the sensors (storage.DAILY_ROUND), and next_run
     says when the next one is due.
@@ -976,6 +1043,10 @@ class DailyIndexUpdater:
         if done.result == SETTLING:
             if not self._stopped and self._unsub is None:
                 self._schedule(PAGES_SETTLE_DELAY, _RETRY)
+            # No round: the last one's record stays, with this look's reason
+            # added (the sensor's pages_settling) until the next round
+            # replaces it.
+            await storage.async_record_daily_settling(self._hass, done.reason or SETTLING)
             return
         self._after(done)
         if self._on_result is not None:
