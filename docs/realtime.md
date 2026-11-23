@@ -202,17 +202,33 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   lists at least, no answer of that kind in between, are no bad trip's
   but the planner refusing every request (a schema change it answers
   with a GraphQL error without a path, an HTTP 400 for any body): that is
-  an outage from then on, one warning and the shared minute's backoff,
-  until a request of that kind is answered. What those six split and held
-  is undone then, and the outage's probes ask as many trips as ever, so
-  the first request after the planner is back answers every trip (before,
-  every trip was left at one a request for 15 minutes, a trip a poll
-  answered). A trip of the wrong shape in an
-  answer is that trip's failure alone (held for the minute), the others
-  are answered. A bug of the integration's own reading of an answer (a
-  `TypeError`, `KeyError` and the like, which no answer causes) fails its
-  request as one failing for its own sake, so only the trip whose data
-  meets the bug ends up held, and is logged as a warning with its
+  an outage from then on, one warning naming the kind ("trips: 6 requests
+  or more in a row failed ..."), until a request of that kind is answered.
+  The trips' outage is the planner's, the shared minute's backoff, the
+  BKK boards' too; the route lists' is theirs alone: route lists asked
+  once a minute, the trips every interval as ever, nothing shared backed
+  off, and "answers route lists again" when one is answered (before, it
+  backed every planner request off, and each route list probe failing
+  before the round's trips set it again: no trip asked at all). What
+  those six split and held is undone then, and the outage's probes ask
+  as many trips as ever, so the first request after the planner is back
+  answers every trip (before, every trip was left at one a request for
+  15 minutes, a trip a poll answered). An answer the planner gives that
+  still fails (over the cap, not decoded in time, a bug of the reading
+  code) is no part of the six and ends such an outage: its request is
+  asked in halves as ever (before, an outage's probe of every trip too
+  large together, or meeting a bug, kept it for good). Six failing are
+  forgotten 15 minutes after the last of them, so an outage of a kind
+  nobody asks any more (the route + start cards closed) does not keep
+  "answers again", and the warning of a later outage, back for good. A
+  trip of the wrong shape in an answer is that trip's failure alone
+  (held for the minute, twice as long every time again, as one failing
+  alone), the others are answered. A bug of the integration's own
+  reading of an answer (a `TypeError`, `KeyError` and the like, which no
+  answer causes) met by one trip's data is that trip's failure alone the
+  same way (before, it failed the whole request, which only halving split
+  again), met by the answer as a whole it fails its request as one
+  failing for its own sake; either is logged as a warning with its
   traceback once an hour per kind of request (trips, route lists,
   vehicles) and place in the code, rather than moving all MÁV realtime to
   the feeds without a word, or warning again after every other answer
@@ -226,7 +242,9 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   same download). A GraphQL error the planner ties to one trip (its `path`
   begins with that trip's alias: a trip id or date it cannot serve) is no
   answer for that trip alone, matched on the feeds, and backs nothing
-  off; so is a trip id the request cap left out, with no answer kept. And
+  off (the trip is held for a minute, twice as long every time again up
+  to 15 minutes; before, a minute every time, a request a minute for
+  nothing); so is a trip id the request cap left out, with no answer kept. And
   when the planner knows **none** of
   the requested trips (a null answer for every one: ids the card's
   timetable does not share with the planner). A trip the planner does not

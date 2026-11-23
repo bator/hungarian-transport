@@ -134,8 +134,11 @@ VEHICLE_TIMEOUT = 5.0
 VEHICLE_MIN_TIMEOUT = 1.0
 VEHICLE_MARGIN = 1.0
 VEHICLE_FAIL_BACKOFF = 180
-# The OutageLog key of mavplusz.hu (feed URLs are the others).
+# The OutageLog key of mavplusz.hu (feed URLs are the others), and the one
+# of its route lists alone (a run of route list requests failing, the trip
+# requests answered: _mav_route_failed).
 MAVPLUSZ_OUTAGE = "mavplusz"
+MAVPLUSZ_ROUTE_OUTAGE = "mavplusz route lists"
 # A route's trip list on mavplusz.hu (for route + start) is kept this long:
 # it is the day's timetable, not live data.
 ROUTE_INTERVAL = 3 * 3600
@@ -171,10 +174,18 @@ MAV_SPLIT_TTL = 15 * 60
 # between, for at least this many trips or routes between them, are no bad
 # trip's: the planner refuses every request (a schema change it answers
 # with a GraphQL error without a path, an HTTP 400 for every body), and
-# asking in halves only doubled the requests. Backed off as an outage
-# (_mav_failed) from then on, until an answer is read again, what the run
-# split and held undone (PlannerKeys). A bug of the reading code is never
-# one of them (the planner answered).
+# asking in halves only doubled the requests. Backed off as an outage from
+# then on, until an answer of the scope is read again (or a bug of the
+# reading code met, which is the planner answering too), what the run split
+# and held undone (PlannerKeys): the trips' run is the planner's outage
+# (_mav_failed: every planner request, the BKK boards' too), the route
+# lists' only theirs (_mav_route_failed: the route lists asked once a
+# FAIL_BACKOFF, the trips as ever; it backed every trip request off for
+# good, as each route list probe failed again before the round's trips).
+# A bug of the reading code is never one of them (the planner answered).
+# A run (and its outage) is forgotten MAV_SPLIT_TTL after its last failure:
+# one of a scope nobody asks any more (the route + start cards closed)
+# held the planner's "answers again" back for good.
 MAV_FAILED_IN_A_ROW = 6
 
 FEED_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -699,6 +710,18 @@ def parse_feed_table(doc: dict[str, Any]) -> dict[str, FeedConfig]:
     return out
 
 
+def _planner_answered(err: BaseException) -> bool:
+    """Whether a planner request's own failure is an answer the planner
+    gave, too large for the cap (mavplusz.TooLarge) or not decoded in time
+    (mavplusz.DecodeTimeout): as a bug of the reading code, no part of a
+    run of failures taken for an outage and the end of one (PlannerKeys,
+    counts=False), its keys split in halves as ever. Counted, a probe
+    after the planner was back whose trips' answer together was over the
+    cap asked as many again every FAIL_BACKOFF, the outage standing for
+    good. (Not a module constant: mavplusz imports this module first.)"""
+    return isinstance(err, (mavplusz.TooLarge, mavplusz.DecodeTimeout))
+
+
 def load_feed_table(path: Path = FEEDS_FILE) -> dict[str, FeedConfig]:
     with path.open(encoding="utf-8") as fh:
         return parse_feed_table(json.load(fh))
@@ -746,11 +769,14 @@ class _FailedRun:
     """One scope's run of requests failing each for a reason of its own,
     none answered in between (PlannerKeys): how many, what the tables held
     for each key of it before the run wrote over it (held, split, tried;
-    None for nothing), and whether it was taken for an outage (storm)."""
+    None for nothing), whether it was taken for an outage (storm), and
+    until when it is kept."""
 
     in_a_row: int = 0
     saved: dict[PlannerKey, tuple[Any, Any, Any]] = field(default_factory=dict)
     storm: bool = False
+    # Monotonic: MAV_SPLIT_TTL after its last failure counted, gone then.
+    until: float = 0.0
 
 
 class PlannerKeys:
@@ -780,15 +806,19 @@ class PlannerKeys:
       that fails alone never takes every round from the others;
     - the requests failing in a row per scope (the kind of their keys: the
       route lists answering never hid that every trip request failed),
-      until one of the scope is answered (answered): failing() once
-      MAV_FAILED_IN_A_ROW of them did, for that many keys at least. That
-      is the planner refusing every request, not a bad key: what the run
-      split and held is undone then (its probes went on in halves down to
-      one key each, every key at a cap of one for MAV_SPLIT_TTL after the
-      planner was back, a key a round answered), and a failure while it
-      lasts is only counted, its probes asking as many keys as ever. A
-      failure counts=False (a bug of the reading code: the planner is up)
-      splits and holds, but is no part of a run.
+      until one of the scope is answered (answered), or MAV_SPLIT_TTL
+      after the last of them (a scope nobody asks any more): failing()
+      once MAV_FAILED_IN_A_ROW of them did, for that many keys at least.
+      That is the planner refusing every request, not a bad key: what the
+      run split and held is undone then (its probes went on in halves down
+      to one key each, every key at a cap of one for MAV_SPLIT_TTL after
+      the planner was back, a key a round answered), and a failure while
+      it lasts is only counted, its probes asking as many keys as ever. A
+      failure counts=False (a bug of the reading code: the planner
+      answered) ends its scope's run, an outage too, as an answer does,
+      and splits and holds as ever: while it left the outage standing, the
+      full request of a probe met the same bug every round, nothing split
+      or held, no key of it answered for good.
 
     A run's saved keys are bounded: it adds keys only while not failing(),
     so at most MAV_FAILED_IN_A_ROW requests' worth of them."""
@@ -861,24 +891,37 @@ class PlannerKeys:
         hit = self._get(self.held, key)
         return hit[1][1] if hit is not None and hit[1][0] > self._monotonic() else 0
 
+    def _run(self, kind: str) -> _FailedRun | None:
+        """kind's run of failures, if one is kept (_FailedRun.until)."""
+        run = self._runs.get(kind)
+        if run is not None and run.until <= self._monotonic():
+            del self._runs[kind]
+            return None
+        return run
+
     def failed(self, keys: Collection[PlannerKey], counts: bool = True) -> int:
         """A request of keys failed for a reason of its own: each of them is
         asked in a request of half as many keys at most (one alone is held,
         and asked alone); the cap they have now. Unless counts is False,
         it is one more of its scope's run (failing): while that is an
-        outage, nothing else."""
+        outage, nothing else. counts False (the planner answered) ends the
+        scope's run."""
         keys = list(dict.fromkeys(keys))
         if not keys:
             return mavplusz.MAX_TRIPS_PER_REQUEST
-        run = self._runs.get(keys[0][0])
-        if run is not None and run.storm:
+        kind = keys[0][0]
+        run = self._run(kind)
+        if not counts:
+            self._runs.pop(kind, None)
+        elif run is not None and run.storm:
             # The planner refuses every request: no key's fault.
-            if counts:
-                run.in_a_row += 1
+            run.in_a_row += 1
+            run.until = self._monotonic() + MAV_SPLIT_TTL
             return mavplusz.MAX_TRIPS_PER_REQUEST
         if counts:
-            run = self._runs.setdefault(keys[0][0], _FailedRun())
+            run = self._runs.setdefault(kind, _FailedRun())
             run.in_a_row += 1
+            run.until = self._monotonic() + MAV_SPLIT_TTL
             for k in keys:
                 if k not in run.saved:
                     run.saved[k] = (self.held.get(k), self.split.get(k), self.tried.get(k))
@@ -912,13 +955,19 @@ class PlannerKeys:
     def failing(self, kind: str | None = None) -> bool:
         """Whether MAV_FAILED_IN_A_ROW requests of kind's scope (any, for
         None) in a row failed, for that many keys at least, none of it
-        answered since."""
-        return any(run.storm for k, run in self._runs.items() if kind is None or k == kind)
+        answered since (nor MAV_SPLIT_TTL past the last of them)."""
+        return any(
+            run is not None and run.storm
+            for run in (self._run(k) for k in list(self._runs) if kind is None or k == kind)
+        )
 
-    def answered(self, keys: Iterable[PlannerKey]) -> None:
-        """A request of keys was answered (the ones an error named are
-        held after this): the run of failures of their scope is over (of
-        every scope for no keys), and keys had an answer."""
+    def answered(self, keys: Iterable[PlannerKey], named: Collection[PlannerKey] = ()) -> None:
+        """A request of keys was answered: the run of failures of their
+        scope is over (of every scope for no keys), and keys had an answer,
+        but for the ones in named (an error named them, or they were of the
+        wrong shape: held after this), whose holds go on doubling (hold:
+        their history dropped here, every hold of a key the planner cannot
+        serve was FAIL_BACKOFF, a request a minute for nothing)."""
         keys = list(keys)
         kinds = {k[0] for k in keys}
         for kind in [kind for kind in self._runs if not keys or kind in kinds]:
@@ -927,8 +976,9 @@ class PlannerKeys:
         for k in [k for k, (until, _v) in self.tried.items() if until <= now]:
             del self.tried[k]
         for k in keys:
-            self.tried.pop(k, None)
-            self.held.pop(k, None)
+            if k not in named:
+                self.tried.pop(k, None)
+                self.held.pop(k, None)
 
 
 class RealtimeHub:
@@ -1017,6 +1067,9 @@ class RealtimeHub:
         # least recently asked first (MAX_MAV_ROUTES).
         self._mav_route_cache: dict[tuple[str, str], tuple[float, tuple[str, ...] | None]] = {}
         self._mav_retry_at = -1e18
+        # The route lists' own backoff, while their run is an outage
+        # (_mav_route_failed).
+        self._mav_route_retry_at = -1e18
         # The keys held back, asked in halves and lately unanswered after
         # requests that failed on their own (_mav_request_failed), not the
         # planner's failures.
@@ -1471,6 +1524,7 @@ class RealtimeHub:
         deadline: float | None = None,
         held: Collection[tuple[str, str, str]] = (),
         scope: str = "trips",
+        bad: Collection[mavplusz.TripKey | mavplusz.RouteKey] = (),
     ) -> Any:
         """One planner request (the caller holds _mav_lock): parse(answer),
         or None when it is not made (the rate limit, the backoff after a
@@ -1489,8 +1543,18 @@ class RealtimeHub:
         an hour per `scope` (what the request asks for) and place in the
         code (_mav_bug), but no part of a run of failures taken for an
         outage: the planner is up, and a release reading every answer
-        wrongly logged it "unavailable" and backed the BKK boards off."""
+        wrongly logged it "unavailable" and backed the BKK boards off.
+
+        `bad` is what parse fills with the keys of `held` the answer had
+        none for (an error named them, or they were of the wrong shape):
+        those are no answered keys, so their holds go on doubling
+        (PlannerKeys.hold; each answer started it again at FAIL_BACKOFF,
+        a request a minute for a trip the planner cannot serve). The route
+        lists' own outage backs only them off (_mav_route_failed)."""
+        kind = next(iter(held))[0] if held else "trip"
         if self._monotonic() < self._mav_retry_at:
+            return None
+        if kind == "route" and self._monotonic() < self._mav_route_retry_at:
             return None
         if deadline is not None:
             left = deadline - asyncio.get_running_loop().time()
@@ -1513,19 +1577,30 @@ class RealtimeHub:
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError, ValueError, *mavplusz.PARSE_BUGS) as err:
             if mavplusz.planner_down(err):
                 self._mav_failed(err or type(err).__name__)
-            elif mavplusz.parse_bug(err):
-                self._mav_bug(scope, err)
-                self._mav_request_failed(err, held, bug=True)
+            elif mavplusz.parse_bug(err) or _planner_answered(err):
+                if mavplusz.parse_bug(err):
+                    self._mav_bug(scope, err)
+                self._mav_request_failed(err, held, answered=True)
+                # The planner answered: the scope's outage is over.
+                self._mav_answered(kind)
             else:
                 self._mav_request_failed(err, held)
             return None
-        self._mav_keys.answered(held)
-        if not self._mav_keys.failing():
-            # Not while another scope's requests all fail (PlannerKeys):
-            # the route lists answering said "answers again", and the next
-            # trip request "unavailable", every FAIL_BACKOFF.
-            self._outages.answered(MAVPLUSZ_OUTAGE, "Realtime source %s answers again", mavplusz.URL)
+        self._mav_keys.answered(held, {(kind, k.gtfs_id, k.date) for k in bad})
+        self._mav_answered(kind)
         return result
+
+    def _mav_answered(self, kind: str) -> None:
+        """The planner answered a request of kind's scope: "answers again"
+        once per outage, not while the trips' run is one (PlannerKeys): the
+        route lists answering said it, and the next trip request
+        "unavailable", every FAIL_BACKOFF. The route lists' own outage ends
+        with a route list answered only."""
+        if kind == "route":
+            self._mav_route_retry_at = -1e18
+            self._outages.answered(MAVPLUSZ_ROUTE_OUTAGE, "Realtime source %s answers route lists again", mavplusz.URL)
+        if not self._mav_keys.failing("trip"):
+            self._outages.answered(MAVPLUSZ_OUTAGE, "Realtime source %s answers again", mavplusz.URL)
 
     def _mav_failed(self, err: Any) -> None:
         """A planner request failed: no other for FAIL_BACKOFF, one log line
@@ -1534,6 +1609,21 @@ class RealtimeHub:
         self._mav_rate.failed(FAIL_BACKOFF)
         self._outages.failed(
             MAVPLUSZ_OUTAGE, "Realtime source %s unavailable: %s; reading the GTFS-Realtime feeds",
+            mavplusz.URL, err,
+        )
+
+    def _mav_route_failed(self, err: Any) -> None:
+        """Every route list request failing on its own (PlannerKeys,
+        MAV_FAILED_IN_A_ROW), the trips' answered: no route list request
+        for FAIL_BACKOFF, one log line per outage of theirs. Nothing else
+        backs off: as the planner's outage (_mav_failed), each route list
+        probe failing again before the round's trip request backed that
+        off too, every trip on the feeds and the BKK fallback off for as
+        long as the route lists failed."""
+        self._mav_route_retry_at = self._monotonic() + FAIL_BACKOFF
+        self._outages.failed(
+            MAVPLUSZ_ROUTE_OUTAGE,
+            "Realtime source %s unavailable: %s; route + start rows read the GTFS-Realtime feeds",
             mavplusz.URL, err,
         )
 
@@ -1547,7 +1637,7 @@ class RealtimeHub:
         answer of scope was read again, a bug one trip's data meets warned
         again with every request of that trip. Nothing shared backs off
         (the planner is up), however many requests in a row it fails:
-        _mav_request_failed(bug=True) does not count it towards
+        _mav_request_failed(answered=True) does not count it towards
         MAV_FAILED_IN_A_ROW."""
         self._parse_bugs.warn(
             scope, err,
@@ -1556,7 +1646,7 @@ class RealtimeHub:
             mavplusz.URL, scope, str(err)[:200] or type(err).__name__,
         )
 
-    def _mav_request_failed(self, err: Any, held: Collection[PlannerKey], bug: bool = False) -> None:
+    def _mav_request_failed(self, err: Any, held: Collection[PlannerKey], answered: bool = False) -> None:
         """A planner request failed for a reason of its own: every other
         request goes on, nothing is backed off for the BKK boards. Its keys
         are asked in requests of half as many keys at most from the next
@@ -1566,14 +1656,22 @@ class RealtimeHub:
         every trip asked with it, again after every backoff, for good).
         Logged at debug level: the planner is up. But for
         MAV_FAILED_IN_A_ROW requests of a scope in a row failing so: an
-        outage (_mav_failed), as the planner refuses every request then,
-        and its keys are not split any more (PlannerKeys). A bug of the
-        reading code (bug: the planner answered) is never part of one."""
+        outage, as the planner refuses every request then, and its keys
+        are not split any more (PlannerKeys): the planner's for the trips
+        (_mav_failed), the route lists' own for theirs (_mav_route_failed),
+        the scope named in its warning. A failure of an answer the planner
+        gave (answered: a bug of the reading code, _planner_answered) is
+        never part of one, and ends it."""
         detail = str(err)[:200] or type(err).__name__
         keys = list(dict.fromkeys(held))
-        cap = self._mav_keys.failed(keys, counts=not bug)
-        if not bug and keys and self._mav_keys.failing(keys[0][0]):
-            self._mav_failed(f"{MAV_FAILED_IN_A_ROW} requests or more in a row failed, the last: {detail}")
+        cap = self._mav_keys.failed(keys, counts=not answered)
+        if not answered and keys and self._mav_keys.failing(keys[0][0]):
+            what = "route lists" if keys[0][0] == "route" else "trips"
+            why = f"{what}: {MAV_FAILED_IN_A_ROW} requests or more in a row failed, the last: {detail}"
+            if keys[0][0] == "route":
+                self._mav_route_failed(why)
+            else:
+                self._mav_failed(why)
             return
         hold = self._mav_keys.held_for(keys[0]) if len(keys) == 1 else 0
         _LOGGER.debug(
@@ -1646,6 +1744,7 @@ class RealtimeHub:
                 deadline,
                 [("route", k.gtfs_id, k.date) for k in todo],
                 "route lists",
+                bad,
             )
             if results is None:
                 # Not the route lists cached already: they answer all the same.
@@ -1730,15 +1829,20 @@ class RealtimeHub:
                 keys = list(todo)
                 at = self._wall()
                 bad: set[mavplusz.TripKey] = set()
+                bugs: list[BaseException] = []
                 results = await self._mav_post(
                     mavplusz.build_query(keys),
-                    lambda doc: mavplusz.parse_response(doc, keys, at, bad),
+                    lambda doc: mavplusz.parse_response(doc, keys, at, bad, bugs),
                     deadline,
                     [("trip", k.gtfs_id, k.date) for k in keys],
                     "trips",
+                    bad,
                 )
-                # A trip an error named or of the wrong shape: that one
-                # alone, the others answered.
+                # A trip an error named, of the wrong shape or whose data
+                # met a bug of the reading code (warned about as a
+                # request's, _mav_bug): that one alone, the others answered.
+                for err in bugs if results is not None else ():
+                    self._mav_bug("trips", err)
                 self._mav_hold([("trip", k.gtfs_id, k.date) for k in bad])
                 if results is not None:
                     mono = self._monotonic()
