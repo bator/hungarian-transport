@@ -141,7 +141,9 @@ With both secrets set, every release run downloads MÁV's zip over https
 with HTTP Basic auth (the credentials go to a netrc file for that host only,
 never onto a command line or into the log), checks its length and zip directory, matches it to
 the [Geofabrik](https://download.geofabrik.de/europe/hungary.html) Hungary
-extract (cached for a week) with a pinned pfaedle image, and builds and
+extract (cached for a week; when Geofabrik's latest extract cannot be
+downloaded or fails its md5, its dated extract of one of the 3 days before)
+with a pinned pfaedle image, and builds and
 audits the index with `scripts/build_mav_index.py`. About a minute of
 pfaedle; the run summary shows the trains, lines and audit. The index ships
 only when it passes the audit (99% of the trains) and at least 90% of its

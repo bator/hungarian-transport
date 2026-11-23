@@ -11,6 +11,7 @@ Needs bash, curl, openssl and timeout (coreutils); skips without them.
 from __future__ import annotations
 
 import base64
+import hashlib
 import http.server
 import io
 import os
@@ -29,6 +30,7 @@ HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "release_mav_index.sh"
 MAV_PATH = "/gtfs/gtfsMavMenetrend.zip"
 OSM_PATH = "/europe/hungary-latest.osm.pbf"
+OSM_DATED = "/europe/hungary/hungary-{}.osm.pbf"
 
 failed: list[str] = []
 
@@ -148,6 +150,7 @@ with tempfile.TemporaryDirectory() as tmp_name:
             **env: str) -> subprocess.CompletedProcess:
         e = {k: v for k, v in os.environ.items()
              if k not in ("MAV_GTFS_USER", "MAV_GTFS_PASSWORD", "MAV_GTFS_URL", "MAV_GTFS_ZIP", "OSM_PBF",
+                          "OSM_FALLBACK_DAYS", "OSM_TODAY",
                           "GITHUB_STEP_SUMMARY", "PFAEDLE_TIMEOUT", "MAV_INDEX_OUT")
              # a proxy in the developer's shell would take curl past connect-to
              and not k.lower().endswith("_proxy")}
@@ -205,6 +208,60 @@ with tempfile.TemporaryDirectory() as tmp_name:
           not osm.exists() and not Path(str(osm) + ".part").exists() and not Path(str(osm) + ".md5").exists(),
           repr(sorted(p.name for p in osm.parent.iterdir())))
     check("the GTFS download sent the login once", requests_to(MAV_PATH) == ["test-user:pw"], repr(Handler.seen))
+
+    # 3b. Geofabrik's latest failing (its -latest redirected to a day's file
+    # not yet served, 2026-11-23): the dated extracts of the days before
+    # OSM_TODAY are tried, newest first; one whose md5 does not match is
+    # skipped like a missing one, and the first good one is used.
+    def osm_body(day: str) -> tuple[bytes, bytes]:
+        body = f"pbf of {day}".encode()
+        return body, f"{hashlib.md5(body).hexdigest()}  hungary-{day}.osm.pbf\n".encode()
+
+    good, good_md5 = osm_body("261120")
+    Handler.seen.clear()
+    Handler.routes = {
+        MAV_PATH: (200, gtfs_zip()),
+        OSM_DATED.format("261122"): (404, b""),
+        OSM_DATED.format("261121"): (200, b"truncated"),
+        OSM_DATED.format("261121") + ".md5": (200, osm_body("261121")[1]),
+        OSM_DATED.format("261120"): (200, good),
+        OSM_DATED.format("261120") + ".md5": (200, good_md5),
+        OSM_DATED.format("261119"): (200, b"never asked"),
+    }
+    osm = tmp / "osmfallback" / "hungary-latest.osm.pbf"
+    docker_log.unlink(missing_ok=True)
+    done = run(str(tmp / "wfallback"), OSM_PBF=str(osm), OSM_TODAY="2026-11-23")
+    asked = [p for p, _ in Handler.seen if p != MAV_PATH]
+    check("Geofabrik's latest failing: the day before's dated extract is used, newest first",
+          osm.exists() and osm.read_bytes() == good and "OSM extract from https://download.geofabrik.de"
+          + OSM_DATED.format("261120") in done.stdout,
+          repr((done.returncode, osm.exists(), done.stdout[-400:], done.stderr[-600:])))
+    check("the fallback asks the latest, then 261122, 261121 (md5 mismatch), 261120, and stops",
+          asked[0] == OSM_PATH and OSM_DATED.format("261122") in asked and OSM_DATED.format("261121") in asked
+          and OSM_DATED.format("261119") not in asked
+          and asked.index(OSM_DATED.format("261122")) < asked.index(OSM_DATED.format("261121"))
+          < asked.index(OSM_DATED.format("261120")), repr(asked))
+    check("the md5 mismatch of a dated extract is said", "OSM extract md5 mismatch: https://download.geofabrik.de"
+          + OSM_DATED.format("261121") in done.stderr, done.stderr[-600:])
+    check("with the fallback extract the script goes on to pfaedle",
+          docker_log.exists() and any(line.startswith("run ") for line in docker_log.read_text().splitlines()),
+          repr(done.stderr[-300:]))
+    check("the fallback leaves no .part or .md5", not Path(str(osm) + ".part").exists()
+          and not Path(str(osm) + ".md5").exists(), repr(sorted(p.name for p in osm.parent.iterdir())))
+
+    Handler.seen.clear()
+    Handler.routes = {MAV_PATH: (200, gtfs_zip()), OSM_DATED.format("261122"): (200, good),
+                      OSM_DATED.format("261122") + ".md5": (200, good_md5.replace(b"261120", b"261122"))}
+    osm = tmp / "osmnofallback" / "hungary-latest.osm.pbf"
+    done = run(str(tmp / "wnofallback"), OSM_PBF=str(osm), OSM_TODAY="2026-11-23", OSM_FALLBACK_DAYS="0")
+    check("OSM_FALLBACK_DAYS=0: no dated extract is asked and the script fails",
+          done.returncode == 1 and not osm.exists() and all(p in (MAV_PATH, OSM_PATH, OSM_PATH + ".md5")
+                                                            for p, _ in Handler.seen),
+          repr((done.returncode, Handler.seen, done.stderr[-300:])))
+    for name, value in (("OSM_FALLBACK_DAYS", "x"), ("OSM_TODAY", "23/11/2026")):
+        done = run(str(tmp / "wbadosm"), **{name: value})
+        check(f"a malformed {name} is refused", done.returncode == 2 and name in done.stderr,
+              repr((done.returncode, done.stderr[-300:])))
 
     # 4. MAV_GTFS_ZIP: a zip downloaded before is used as is, without
     # credentials and without curl. 5. A relative WORK_DIR without OSM_PBF

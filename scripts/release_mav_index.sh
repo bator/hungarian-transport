@@ -24,7 +24,13 @@
 #   MAV_GTFS_ZIP      optional: a MÁV zip downloaded before (another run's
 #                     WORK_DIR/gtfs/mav-gtfs.zip); used instead of a download
 #                     (no login), checked the same way
-#   OSM_PBF           the Hungary extract; downloaded (md5-checked) if missing
+#   OSM_PBF           the Hungary extract; downloaded (md5-checked) if missing:
+#                     Geofabrik's latest, else its dated extract of one of
+#                     the OSM_FALLBACK_DAYS days before
+#   OSM_FALLBACK_DAYS dated extracts tried when the latest fails, default 3
+#                     (0: none)
+#   OSM_TODAY         the day those count back from (YYYY-MM-DD), default
+#                     today in UTC; for the tests
 #   MAV_INDEX_OUT     optional, default mav-index.json.gz
 #   MAV_MIN_FITTED    share of variants that must follow their shape (pfaedle
 #                     output does; MÁV's own coarse shapes fit about 3%)
@@ -38,6 +44,12 @@ out="${MAV_INDEX_OUT:-mav-index.json.gz}"
 url="${MAV_GTFS_URL:-https://www.mavcsoport.hu/gtfs/gtfsMavMenetrend.zip}"
 gtfs_zip="${MAV_GTFS_ZIP:-}"
 osm_url="https://download.geofabrik.de/europe/hungary-latest.osm.pbf"
+# Geofabrik's dated extracts (YYMMDD). Its -latest has redirected to a day's
+# file before that file was served (a 404 for hours, 2026-11-23); an extract
+# a few days old matches the trains just as well.
+osm_dated="https://download.geofabrik.de/europe/hungary/hungary-%s.osm.pbf"
+osm_back="${OSM_FALLBACK_DAYS:-3}"
+osm_today="${OSM_TODAY:-}"
 min_fitted="${MAV_MIN_FITTED:-0.9}"
 pfaedle_timeout="${PFAEDLE_TIMEOUT:-30m}"
 retry_delay="${DOWNLOAD_RETRY_DELAY:-15}"
@@ -54,6 +66,10 @@ if [ -n "$gtfs_zip" ] && [ ! -s "$gtfs_zip" ]; then
 fi
 if [[ ! "$pfaedle_timeout" =~ ^[0-9]+[smhd]?$ ]] || [[ ! "$retry_delay" =~ ^[0-9]+$ ]]; then
   echo "PFAEDLE_TIMEOUT must look like 30m, DOWNLOAD_RETRY_DELAY like 15" >&2
+  exit 2
+fi
+if [[ ! "$osm_back" =~ ^[0-9]{1,2}$ ]] || { [ -n "$osm_today" ] && [[ ! "$osm_today" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; }; then
+  echo "OSM_FALLBACK_DAYS must look like 3, OSM_TODAY like 2026-11-23" >&2
   exit 2
 fi
 if [ ! -f scripts/build_mav_index.py ] || [ ! -f custom_components/hungarian_transport/mav_index.py ]; then
@@ -212,24 +228,52 @@ PY
 rm -f "$work/mav-headers.txt" "$work/mav-curl.txt"
 
 t1=$SECONDS
-if [ ! -s "$osm" ]; then
-  echo "downloading $osm_url"
-  mkdir -p "$(dirname "$osm")"
+# One extract and its .md5 into $osm.part, $tries retries each; 0 when the
+# md5 matches. A failure leaves neither file behind.
+fetch_osm() {
+  local from="$1" tries="$2" want got
+  rm -f "$osm.part" "$osm.md5"
+  # shellcheck disable=SC2015 # meant: either download failing ends it
   curl --fail --silent --show-error --location --proto =https --proto-redir =https \
-    --retry 5 --retry-delay "$retry_delay" --retry-all-errors --connect-timeout 30 --max-time 1200 \
-    -o "$osm.part" "$osm_url"
-  curl --fail --silent --show-error --location --proto =https --proto-redir =https \
-    --retry 5 --retry-delay "$retry_delay" --retry-all-errors --connect-timeout 30 --max-time 120 \
-    -o "$osm.md5" "$osm_url.md5"
+    --retry "$tries" --retry-delay "$retry_delay" --retry-all-errors --connect-timeout 30 --max-time 1200 \
+    -o "$osm.part" "$from" &&
+    curl --fail --silent --show-error --location --proto =https --proto-redir =https \
+      --retry "$tries" --retry-delay "$retry_delay" --retry-all-errors --connect-timeout 30 --max-time 120 \
+      -o "$osm.md5" "$from.md5" ||
+    { rm -f "$osm.part" "$osm.md5"; return 1; }
   want="$(cut -d' ' -f1 "$osm.md5")"
   got="$(md5sum "$osm.part" | cut -d' ' -f1)"
   if [ -z "$want" ] || [ "$want" != "$got" ]; then
-    echo "OSM extract md5 mismatch" >&2
+    echo "OSM extract md5 mismatch: $from" >&2
     rm -f "$osm.part" "$osm.md5"
-    exit 1
+    return 1
+  fi
+}
+
+if [ ! -s "$osm" ]; then
+  echo "downloading $osm_url"
+  mkdir -p "$(dirname "$osm")"
+  osm_from="$osm_url"
+  if ! fetch_osm "$osm_url" 5; then
+    osm_from=""
+    for ((back = 1; back <= osm_back; back++)); do
+      day="$(date -u -d "${osm_today:-today} -$back day" +%y%m%d)"
+      # shellcheck disable=SC2059 # the format is ours: one %s for the day
+      dated="$(printf "$osm_dated" "$day")"
+      echo "Geofabrik's latest extract failed; trying $dated" >&2
+      if fetch_osm "$dated" 2; then
+        osm_from="$dated"
+        break
+      fi
+    done
+    if [ -z "$osm_from" ]; then
+      echo "OSM extract: download failed (the latest and the dated extracts of the $osm_back days before)" >&2
+      exit 1
+    fi
   fi
   mv "$osm.part" "$osm"
   rm -f "$osm.md5"
+  echo "OSM extract from $osm_from"
 fi
 echo "OSM extract: $(du -h "$osm" | cut -f1)"
 t_osm=$((SECONDS - t1))
