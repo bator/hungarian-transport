@@ -69,6 +69,27 @@ async def test_an_expired_entry_is_dropped_when_read() -> None:
     assert len(cache) == 0
 
 
+async def test_fresh_says_whether_an_entry_lasts_that_long_more() -> None:
+    """fresh(key, lasting): the entry answers now and still lasting seconds
+    from now (FUTÁR's cut short on a fallback answer held for no token:
+    one expiring meanwhile had the share used up by then)."""
+    clock = [1000.0]
+    cache = SharedTTLCache(ttl=35, max_entries=100, monotonic=lambda: clock[0])
+
+    async def value(v):
+        return v
+
+    await cache.get("board", lambda: value("rows"))
+    clock[0] += 20
+    assert cache.fresh("board") == (True, "rows")
+    assert cache.fresh("board", 14) == (True, "rows")
+    assert cache.fresh("board", 15) == (False, None)
+    assert cache.fresh("board", -5) == cache.fresh("board", 0)
+    clock[0] += 15
+    assert cache.fresh("board") == (False, None) and cache.fresh("other", 0) == (False, None)
+    assert len(cache) == 1  # fresh drops nothing
+
+
 async def test_expired_entries_go_without_another_call() -> None:
     """Nobody polls once the dashboards close: the last boards are dropped
     when their TTL ends, not at some later store."""

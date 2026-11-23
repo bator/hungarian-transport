@@ -885,8 +885,11 @@ class PlannerBoards:
     request spends ticket's token when it has one. It never raises but for
     cancellation. can_answer(path, params) says beforehand whether answer()
     may, and reserve(path, params) also takes the token for it (a _Ticket,
-    or None): FUTÁR is cut short only with one. learn(path, params, data)
-    reads FUTÁR's own good answers for what the planner lacks.
+    or None): FUTÁR is cut short only with one. cached(path, params) says
+    whether answer() would answer from its caches now, asking the planner
+    nothing (FUTÁR's probe then asks FUTÁR behind that answer).
+    learn(path, params, data) reads FUTÁR's own good answers for what the
+    planner lacks.
 
     `limiter` is the integration's one planner limit (mavplusz.PlannerLimiter,
     shared with the realtime hub; one of its own without it), of which this
@@ -1010,19 +1013,30 @@ class PlannerBoards:
             return gid is not None and not self._is_failing(("trip", gid))
         return False
 
-    def reserve(self, path: str, params: dict[str, str]) -> _Ticket | None:
+    def cached(self, path: str, params: dict[str, str]) -> bool:
+        """Whether answer() would answer from the caches now, asking the
+        planner nothing (_cached); nothing after close()."""
+        return not self._closed and self._cached(path, params)
+
+    def reserve(self, path: str, params: dict[str, str], lasting: float = 0.0) -> _Ticket | None:
         """can_answer() and the token answer()'s request will spend, taken
         now (FUTÁR is cut short only with it: the requests of a whole
         dashboard cannot have spent it meanwhile); None when either is not
         there. The caller release()s it whatever happens; a request that
         spent it makes that a no-op. The trip details reserved within
         TRIP_BATCH_WAIT of each other share one token (_reserve_trip). An
-        answer the caches hold (_cached) gets a ticket holding no token: it
-        asks the planner nothing (a request it ends up sending after all,
-        the entry gone meanwhile, takes a token then, as _post does)."""
+        answer the caches hold (_cached) for `lasting` seconds more, the
+        time before answer() is asked at the latest (FUTÁR's cut and the
+        fallback's own), gets a ticket holding no token: it asks the planner
+        nothing. One that would expire before then reserves a token as any
+        other: FUTÁR was cut short on a ticket with none, the board expired
+        meanwhile, and the request answer() then sent found the share used
+        up by the dashboard's other stops (a request sent after all for
+        some other reason, the entry dropped meanwhile, takes a token then,
+        as _post does)."""
         if self._closed:
             return None
-        if self._cached(path, params):
+        if self._cached(path, params, lasting):
             token = _Token(self._rate, self._monotonic)
             token.held = False
             return _Ticket(token)
@@ -1032,11 +1046,12 @@ class PlannerBoards:
             return None
         return _Ticket(_Token(self._rate, self._monotonic))
 
-    def _cached(self, path: str, params: dict[str, str]) -> bool:
-        """Whether answer() would answer from the caches now, asking the
-        planner nothing: a board fresh in _boards (not the planner's null)
-        or one under way; a trip's details for each date it is asked of
-        fresh in _trips or under way, not every one of them null. A
+    def _cached(self, path: str, params: dict[str, str], lasting: float = 0.0) -> bool:
+        """Whether answer() would answer from the caches now (and still
+        `lasting` seconds from now), asking the planner nothing: a board
+        fresh in _boards (not the planner's null) or one under way; a trip's
+        details for each date it is asked of fresh in _trips or under way,
+        not every one of them null. A
         dashboard's other stops can use up the boards' share within the
         board's 35 s: a second card, horizon or browser asking for a board
         the planner gave then had no answer but FUTÁR's whole budget in
@@ -1048,7 +1063,7 @@ class PlannerBoards:
                 return False
             if self._boards.pending((stop, ids)):
                 return True
-            hit, board = self._boards.fresh((stop, ids))
+            hit, board = self._boards.fresh((stop, ids), lasting)
             return hit and board is not None
         if path == TRIP_PATH:
             gid = self._trip_id(params)
@@ -1061,7 +1076,7 @@ class PlannerBoards:
                 if self._trips.pending(key):
                     answered = True
                     continue
-                hit, trip = self._trips.fresh(key)
+                hit, trip = self._trips.fresh(key, lasting)
                 if not hit:
                     return False
                 answered = answered or trip is not None

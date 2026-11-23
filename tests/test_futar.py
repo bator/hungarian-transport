@@ -536,7 +536,30 @@ async def test_upstream_429_is_a_rate_limit_not_an_outage(hass, aioclient_mock, 
     caplog.clear()
     assert (await _call(hass, params={"query": "C"}))["data"]["status"] == "OK"
     assert [r.getMessage() for r in caplog.records if r.name.endswith(".futar")] == [
-        "BKK FUTÁR answers again"
+        "BKK FUTÁR takes the configured key's calls again"
+    ]
+
+
+async def test_futar_failing_after_a_429_is_warned_about(hass, aioclient_mock, caplog) -> None:
+    """FUTÁR refusing the key's calls (HTTP 429), then failing outright: the
+    outage is a warning of its own. Before, the 429 held FUTÁR's one outage
+    state, and an outage that followed it was never said."""
+    aioclient_mock.get(SEARCH, status=429)
+    await _setup(hass)
+    await _call(hass, params={"query": "A"})
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, status=503)
+    caplog.clear()
+    assert (await _call(hass, params={"query": "B"}))["error"] == "futar_unavailable"
+    assert [r.getMessage() for r in caplog.records if r.name.endswith(".futar")] == [
+        "BKK FUTÁR unavailable (HTTP 503); not logged again until it answers"
+    ]
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(SEARCH, json={"status": "OK", "data": {}})
+    caplog.clear()
+    assert (await _call(hass, params={"query": "C"}))["data"]["status"] == "OK"
+    assert sorted(r.getMessage() for r in caplog.records if r.name.endswith(".futar")) == [
+        "BKK FUTÁR answers again", "BKK FUTÁR takes the configured key's calls again"
     ]
 
 
@@ -770,7 +793,10 @@ class _BoardFallback:
     def can_answer(self, path, params) -> bool:
         return True
 
-    def reserve(self, path, params):
+    def cached(self, path, params) -> bool:
+        return False
+
+    def reserve(self, path, params, lasting=0.0):
         return _Ticket()
 
     def learn(self, path, params, data) -> None:
