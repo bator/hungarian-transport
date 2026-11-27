@@ -4,7 +4,8 @@
   "Generated from public-transport/transitous feeds/hu.json and the Volan agency ids; see docs/realtime.md.",
   "match: trip = the card's static trip_id (index trip element 6) is the feed's trip_id without prefix;",
   "route_start = route_id (without prefix) and the HHMMSS start in the trip_id; train = the train number from the source's static GTFS (trip_short_name).",
-  "mavplusz: true = ask mavplusz.hu (M\u00c1V's OpenTripPlanner) first for the trips a card names by trip_id, by route + start or by train number (resolved to trip ids by the static GTFS), these feeds only when it fails; remove the key to read only these feeds (docs/realtime.md)."
+  "mavplusz: true = ask mavplusz.hu (M\u00c1V's OpenTripPlanner) first for the trips a card names by trip_id, by route + start or by train number (resolved to trip ids by the static GTFS), these feeds only when it fails; remove the key to read only these feeds (docs/realtime.md).",
+  "route_name = a request without a trip_id (an index built without the feed's trip ids) is found on mavplusz.hu by its route's short name among the source's \"agencies\" (planner agency ids) and the trip's first scheduled departure; the planner alone answers it (docs/realtime.md)."
  ],
  "aliases": {
   "dkv": "debrecen",
@@ -17,11 +18,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ],
    "interval": 60,
    "trip_updates_interval": 120
@@ -32,11 +37,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06673/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06673/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-06673"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-baja": {
@@ -45,11 +54,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-03522/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-03522/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-03522"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-balassagyarmat": {
@@ -58,11 +71,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-13657/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-13657/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-13657"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-balatonfured": {
@@ -71,11 +88,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-21175/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-21175/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-21175"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-balatonfuzfo": {
@@ -84,11 +105,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-02219/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-02219/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-02219"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-balmazujvaros": {
@@ -97,11 +122,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-02918/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-02918/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-02918"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-bataszek": {
@@ -110,11 +139,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-08864/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-08864/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-08864"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-batonyterenye": {
@@ -123,11 +156,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-33534/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-33534/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-33534"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-bekescsaba": {
@@ -136,11 +173,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-15200/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-15200/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-15200"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-bonyhad": {
@@ -149,11 +190,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06497/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06497/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-06497"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-csongrad": {
@@ -162,11 +207,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05111/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05111/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-05111"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-csurgo": {
@@ -175,11 +224,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-21315/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-21315/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-21315"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-dunaujvaros": {
@@ -188,11 +241,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-03115/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-03115/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-03115"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-eger": {
@@ -201,11 +258,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-20491/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-20491/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-20491"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-ercsi": {
@@ -214,11 +275,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-23603/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-23603/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-23603"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-erd": {
@@ -227,11 +292,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30988/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30988/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-30988"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-esztergom": {
@@ -240,11 +309,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25131/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25131/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-25131"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-fonyod": {
@@ -253,11 +326,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14632/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14632/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-14632"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-godollo": {
@@ -266,11 +343,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-32559/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-32559/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-32559"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-gyongyos": {
@@ -279,11 +360,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05236/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05236/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-05236"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-gyor": {
@@ -292,11 +377,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25584/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25584/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-25584"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-gyula": {
@@ -305,11 +394,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05032/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05032/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-05032"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-hajduszoboszlo": {
@@ -318,11 +411,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05175/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05175/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-05175"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-jaszbereny": {
@@ -331,11 +428,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-18209/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-18209/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-18209"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-karcag": {
@@ -344,11 +445,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04923/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04923/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-04923"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-kazincbarcika": {
@@ -357,11 +462,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06691/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-06691/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-06691"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-keszthely": {
@@ -370,11 +479,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-18421/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-18421/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-18421"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-komarom": {
@@ -383,11 +496,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05449/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05449/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-05449"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-komlo": {
@@ -396,11 +513,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-26408/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-26408/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-26408"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-kormend": {
@@ -409,11 +530,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-13532/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-13532/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-13532"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-lenti": {
@@ -422,11 +547,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-12575/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-12575/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-12575"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-mako": {
@@ -435,11 +564,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-07357/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-07357/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-07357"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-mezokovesd": {
@@ -448,11 +581,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-19433/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-19433/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-19433"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-mezotur": {
@@ -461,11 +598,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04260/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04260/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-04260"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-mohacs": {
@@ -474,11 +615,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-23959/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-23959/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-23959"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-morahalom": {
@@ -487,11 +632,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04349/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04349/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-04349"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-mosonmagyarovar": {
@@ -500,11 +649,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04783/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-04783/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-04783"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-nagyatad": {
@@ -513,11 +666,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17941/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17941/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-17941"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-nagykanizsa": {
@@ -526,11 +683,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30933/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30933/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-30933"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-nyiregyhaza": {
@@ -539,11 +700,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17206/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17206/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-17206"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-oroszlany": {
@@ -552,11 +717,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30766/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-30766/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-30766"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-ozd": {
@@ -565,11 +734,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14492/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14492/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-14492"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-papa": {
@@ -578,11 +751,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-31945/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-31945/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-31945"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-salgotarjan": {
@@ -591,11 +768,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25788/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-25788/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-25788"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-siklos": {
@@ -604,11 +785,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05519/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-05519/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-05519"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-siofok": {
@@ -617,11 +802,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17631/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-17631/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-17631"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-sopron": {
@@ -630,11 +819,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-08518/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-08518/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-08518"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-szeged": {
@@ -643,11 +836,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-33367/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-33367/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-33367"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-szekesfehervar": {
@@ -656,11 +853,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14827/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14827/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-14827"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-szekszard": {
@@ -669,11 +870,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-22761/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-22761/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-22761"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-szentes": {
@@ -682,11 +887,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14456/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-14456/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-14456"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-szigetvar": {
@@ -695,11 +904,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-26578/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-26578/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-26578"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-szolnok": {
@@ -708,11 +921,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-27854/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-27854/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-27854"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-tata": {
@@ -721,11 +938,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-20127/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-20127/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-20127"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-tiszafured": {
@@ -734,11 +955,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-29726/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-29726/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-29726"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-tiszaujvaros": {
@@ -747,11 +972,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-28352/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-28352/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-28352"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-ujszasz": {
@@ -760,11 +989,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-15291/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-15291/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-15291"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-vac": {
@@ -773,11 +1006,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-24934/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-24934/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-24934"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "volan-zalaegerszeg": {
@@ -786,11 +1023,15 @@
      "trip_updates": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-32054/trip-updates.pb",
      "vehicle_positions": "https://jbb.ghsq.de/gtfs/hu/hkir_hkir_V-32054/vehicle-positions.pb",
      "prefix": "hkir:",
-     "mavplusz": true
+     "mavplusz": true,
+     "agencies": [
+      "hkir:hkir_V-32054"
+     ]
     }
    ],
    "match": [
-    "trip"
+    "trip",
+    "route_name"
    ]
   },
   "paks": {

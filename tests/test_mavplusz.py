@@ -390,19 +390,31 @@ class Planner:
     asked route from routes (null for the others), and records the
     variables of every request (routes ones in route_asks too)."""
 
-    def __init__(self, trips: dict[str, dict] | None = None, routes: dict[str, dict] | None = None) -> None:
+    def __init__(
+        self,
+        trips: dict[str, dict] | None = None,
+        routes: dict[str, dict] | None = None,
+        agencies: dict[str, dict] | None = None,
+    ) -> None:
         self.trips = {"hkir:hkir_2036_1-3": _trip("t0"), "hkir:hkir_2511_15-6": _trip("t1")}
         self.trips.update({t["gtfsId"]: copy.deepcopy(t) for t in CITY_TRIPS.values()})
         self.trips.update(trips or {})
         self.routes = {v: copy.deepcopy(ROUTES[k]) for k, v in ROUTES_DOC["routes"]["variables"].items() if k[0] == "r"}
         self.routes.update(routes or {})
+        self.agencies = agencies or {}
         self.asked: list[dict[str, str]] = []
         self.route_asks: list[dict[str, str]] = []
+        self.agency_asks: list[dict[str, str]] = []
+        self.queries: list[str] = []
 
     async def __call__(self, method, url, data):
         body = json.loads(data)
         self.asked.append(body["variables"])
-        if "route(id:" in body["query"]:
+        self.queries.append(body["query"])
+        if "agency(id:" in body["query"]:
+            self.agency_asks.append(body["variables"])
+            table, kind = self.agencies, "a"
+        elif "route(id:" in body["query"]:
             self.route_asks.append(body["variables"])
             table, kind = self.routes, "r"
         else:
@@ -1013,6 +1025,250 @@ async def test_route_lists_are_cached_for_hours_and_trips_for_the_interval(aiocl
     await session.close()
     assert (len(planner.route_asks), len(planner.asked)) == (2, 5)
     assert not _calls(aioclient_mock, "get")
+
+
+# ------------------------------------------------- route_name (no trip id)
+#
+# A Volán card whose index has no trip ids (one built from a GTFS of the
+# user's own without them) sends only the route's short name and the
+# trip's first departure: t0 (hkir_2036_1-3, its first call scheduled at
+# 06:20, 22800 s) is found by its route's name among the agency's routes,
+# then among the route's trips by that start.
+
+VOLAN_AGENCY = "hkir:hkir_V"
+T0_ROUTE = "hkir:hkir_V-R-200-2036"
+NAME_REQ = {"key": "n", "route": "2036", "start": 380, "date": "20261114", "stops": T0_STOPS, "from": 1, "to": 3}
+
+
+def _name_cfg(agencies: tuple[str, ...] = (VOLAN_AGENCY,)) -> realtime.FeedConfig:
+    src = realtime.Source(SZFV + "trip-updates.pb", SZFV + "vehicle-positions.pb", "hkir:", "", True, agencies)
+    return realtime.FeedConfig("v", (src,), frozenset({"trip", "route_name"}), 60, 60)
+
+
+def _started(gid: str, seconds: int | None) -> dict:
+    return {"gtfsId": gid, "departureStoptime": None if seconds is None else {"scheduledDeparture": seconds}}
+
+
+def _name_planner(trips: dict[str, dict] | None = None, listed: list[dict] | None = None) -> Planner:
+    """t0's route 2036 in the intercity agency (beside 20360, which a name
+    search would find too), its trips that day with their starts: t0 at
+    06:20, another at 06:30, one without a first departure."""
+    agencies = {
+        VOLAN_AGENCY: {"routes": [
+            {"gtfsId": T0_ROUTE, "shortName": "2036"},
+            {"gtfsId": "hkir:hkir_V-R-200-20360", "shortName": "20360"},
+            {"gtfsId": "hkir:hkir_V-R-200-x", "shortName": None},
+        ]},
+    }
+    routes = {T0_ROUTE: {"patterns": [{"tripsForDate": listed or [
+        _started("hkir:hkir_2036_1-3", 22800),
+        _started("hkir:hkir_2036_2-3", 23400),
+        _started("hkir:hkir_2036_3-3", None),
+    ]}]}}
+    return Planner(trips, routes, agencies)
+
+
+def test_agency_query_asks_by_variables() -> None:
+    keys = [mavplusz.RouteKey(VOLAN_AGENCY, "", "hkir:"), mavplusz.RouteKey("hkir:hkir_V-25584", "", "hkir:")]
+    body = mavplusz.build_agency_query(keys)
+    assert body["variables"] == {"a0": VOLAN_AGENCY, "a1": "hkir:hkir_V-25584"}
+    assert body["query"] == (
+        "query($a0: String!, $a1: String!) { "
+        "a0: agency(id: $a0) { routes { gtfsId shortName } } "
+        "a1: agency(id: $a1) { routes { gtfsId shortName } } }"
+    )
+
+
+def test_agency_routes_by_short_name() -> None:
+    keys = [mavplusz.RouteKey(a, "", "hkir:") for a in ("A", "B", "C", "D")]
+    doc = {
+        "data": {
+            "a0": {"routes": [
+                {"gtfsId": "hkir:r715a", "shortName": "715"},
+                {"gtfsId": "hkir:r715b", "shortName": " 715 "},
+                {"gtfsId": "hkir:r2", "shortName": "2"},
+                {"gtfsId": "", "shortName": "3"},
+                {"gtfsId": "hkir:r4", "shortName": ""},
+                "junk",
+            ]},
+            "a1": None,
+            "a2": {"routes": "junk"},
+            "a3": None,
+        },
+        "errors": [{"message": "no", "path": ["a3"]}],
+    }
+    failed: set = set()
+    out = mavplusz.parse_agencies(doc, keys, failed)
+    # Two routes may share a name (715 of the intercity coaches).
+    assert out == {keys[0]: {"715": ("hkir:r715a", "hkir:r715b"), "2": ("hkir:r2",)}, keys[1]: None}
+    assert failed == {keys[2], keys[3]}
+    with pytest.raises(ValueError):
+        mavplusz.parse_agencies({"data": {}}, keys[:1])
+
+
+def test_a_starts_route_list_asks_and_reads_each_trips_first_departure() -> None:
+    keys = [mavplusz.RouteKey(T0_ROUTE, "20261114", "hkir:", True), mavplusz.RouteKey("VBUSZ:2", "20261114", "VBUSZ:")]
+    body = mavplusz.build_route_query(keys)
+    assert body["query"] == (
+        "query($d0: String, $r0: String!, $r1: String!) { "
+        "r0: route(id: $r0) { patterns { tripsForDate(serviceDate: $d0) "
+        "{ gtfsId departureStoptime(serviceDate: $d0) { scheduledDeparture } } } } "
+        "r1: route(id: $r1) { patterns { tripsForDate(serviceDate: $d0) { gtfsId } } } }"
+    )
+    doc = {"data": {"r0": {"patterns": [
+        {"tripsForDate": [_started("hkir:a", 22800), _started("hkir:b", None), _started("hkir:c", 90000)]},
+        {"tripsForDate": [_started("hkir:a", 22800), {"gtfsId": "hkir:d", "departureStoptime": {"scheduledDeparture": "x"}}]},
+    ]}, "r1": {"patterns": [{"tripsForDate": [{"gtfsId": "VBUSZ:1131_2084_073400_SZ"}]}]}}}
+    listed = mavplusz.parse_routes(doc, keys)
+    assert listed[keys[0]] == (mavplusz.Started("hkir:a", 380), mavplusz.Started("hkir:c", 1500))
+    assert listed[keys[1]] == ("VBUSZ:1131_2084_073400_SZ",)
+    # A Started's own start, modulo a day; an id's HHMMSS as ever.
+    assert mavplusz.trips_starting(listed[keys[0]], "hkir:", 380) == ["hkir:a"]
+    assert mavplusz.trips_starting(listed[keys[0]], "hkir:", 60) == ["hkir:c"]
+    assert mavplusz.trips_starting(listed[keys[0]], "hkir:", 60 + 1440) == ["hkir:c"]
+    assert mavplusz.trips_starting(listed[keys[1]], "VBUSZ:", 454) == ["VBUSZ:1131_2084_073400_SZ"]
+
+
+def test_feed_table_finds_the_volan_rows_without_trip_ids_by_route_name() -> None:
+    """Every hkir: feed (the intercity coaches and the 59 Volánbusz town
+    networks) looks a request without a trip id up by its route's name,
+    among its own agency's routes: the intercity one, else the town's,
+    whose id is the KSH code of its jbb feed."""
+    table = realtime.load_feed_table()
+    hkir = {fid: cfg for fid, cfg in table.items() if any(s.prefix == "hkir:" for s in cfg.sources)}
+    assert len({id(c) for c in hkir.values()}) == 60
+    for fid, cfg in hkir.items():
+        assert {"trip", "route_name"} <= cfg.match, fid
+        (src,) = cfg.sources
+        assert src.mavplusz, fid
+        code = src.trip_updates.split("/gtfs/hu/")[1].split("/")[0]
+        assert src.agencies == (("hkir:hkir_V",) if code == "hkir" else ("hkir:" + code.removeprefix("hkir_"),)), fid
+    assert not any(s.agencies for fid, cfg in table.items() if fid not in hkir for s in cfg.sources)
+    parsed = realtime.parse_feed_table({"feeds": {"a": {
+        "sources": [{"trip_updates": "https://x/tu", "mavplusz": True, "agencies": ["A", "", 3, "A", "B"]}],
+        "match": ["route_name"],
+    }}})
+    assert parsed["a"].sources[0].agencies == ("A", "B") and parsed["a"].match == {"route_name"}
+
+
+async def test_a_volan_row_without_a_trip_id_is_found_by_route_name_and_start(aioclient_mock) -> None:
+    planner = _name_planner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    hub, session, _clock = await _hub(aioclient_mock, _name_cfg())
+    resp = await hub.query("v", [NAME_REQ, T0_REQ])
+    await session.close()
+    # The agency's routes, the route's trips with their starts, then the
+    # trip that starts at the card's minute (and T0_REQ's own trip id).
+    assert planner.agency_asks == [{"a0": VOLAN_AGENCY}]
+    assert planner.route_asks == [{"d0": "20261114", "r0": T0_ROUTE}]
+    assert "departureStoptime" in planner.queries[1]
+    assert planner.asked[2] == {"d0": "20261114", "t0": "hkir:hkir_2036_1-3"}
+    assert not _calls(aioclient_mock, "get")
+    hit = resp["trips"]["n"]
+    assert (hit["trip_id"], hit["delay"], hit["dest_delay"]) == ("hkir_2036_1-3", 103, 92)
+    # The same answer as the card with the trip id gets.
+    assert hit == resp["trips"]["a"]
+
+
+async def test_route_name_lists_are_cached_for_hours_and_trips_for_the_interval(aioclient_mock) -> None:
+    planner = _name_planner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    hub, session, clock = await _hub(aioclient_mock, _name_cfg())
+    await hub.query("v", [NAME_REQ])
+    clock.now += 61
+    resp = await hub.query("v", [NAME_REQ])
+    assert resp["trips"]["n"]["trip_id"] == "hkir_2036_1-3"
+    assert (len(planner.agency_asks), len(planner.route_asks), len(planner.asked)) == (1, 1, 4)
+    clock.now += realtime.ROUTE_INTERVAL
+    await hub.query("v", [NAME_REQ])
+    await session.close()
+    assert (len(planner.agency_asks), len(planner.route_asks), len(planner.asked)) == (2, 2, 7)
+    assert not _calls(aioclient_mock, "get")
+
+
+async def test_the_other_way_at_the_same_minute_is_no_answer(aioclient_mock) -> None:
+    """Both ends of a line start at the card's minute, the card's way
+    without realtime data: the other one calls at the card's destination
+    (another platform of it) but not at its boarding stop before that, so
+    it is not the card's trip (Székesfehérvár 44 at 11:45, 2026-11-27)."""
+    other = _as(copy.deepcopy(_trip("t0")), "hkir:hkir_2036_9-3")
+    calls = other["stoptimesForDate"]
+    for st, stop in zip(calls, ["hkir_1_1", "hkir_2_1", "hkir_3_1", "hkir_779367_2", "hkir_5_1"]):
+        st["stop"]["gtfsId"] = "hkir:" + stop
+    quiet = _as(copy.deepcopy(_trip("t0")), "hkir:hkir_2036_1-3")
+    for st in quiet["stoptimesForDate"]:
+        st["realtime"] = False
+    listed = [_started("hkir:hkir_2036_1-3", 22800), _started("hkir:hkir_2036_9-3", 22800)]
+    planner = _name_planner({"hkir:hkir_2036_1-3": quiet, "hkir:hkir_2036_9-3": other}, listed)
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    hub, session, _clock = await _hub(aioclient_mock, _name_cfg())
+    resp = await hub.query("v", [NAME_REQ])
+    # The other way's own card: its boarding stop, then the destination.
+    mine = {**NAME_REQ, "key": "o", "stops": ["hkir_2", "hkir_3", "hkir_779367"], "from": 0, "to": 2}
+    resp_other = await hub.query("v", [mine])
+    await session.close()
+    assert sorted(v for k, v in planner.asked[2].items() if k[0] == "t") == ["hkir:hkir_2036_1-3", "hkir:hkir_2036_9-3"]
+    assert resp["trips"] == {}
+    assert resp_other["trips"]["o"]["trip_id"] == "hkir_2036_9-3"
+    assert not _calls(aioclient_mock, "get")
+
+
+@pytest.mark.parametrize(
+    ("route", "start"), [("9999", 380), ("2036", 381)], ids=["unknown-route", "no-trip-at-that-start"]
+)
+async def test_an_unresolved_route_name_reads_no_feed(aioclient_mock, route, start) -> None:
+    """The jbb feeds know the trips by trip_id only: a row without one is
+    the planner's or none, and its feeds (1.9 MB for the intercity
+    coaches) are not read for nothing."""
+    planner = _name_planner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    hub, session, _clock = await _hub(aioclient_mock, _name_cfg())
+    resp = await hub.query("v", [{**NAME_REQ, "route": route, "start": start}])
+    await session.close()
+    assert resp["trips"] == {} and "error" not in resp
+    assert not any("trip(id:" in q for q in planner.queries)
+    assert not _calls(aioclient_mock, "get")
+
+
+async def test_a_failing_planner_leaves_route_name_rows_unavailable_without_the_feeds(aioclient_mock) -> None:
+    aioclient_mock.post(mavplusz.URL, status=503)
+    hub, session, _clock = await _hub(aioclient_mock, _name_cfg())
+    resp = await hub.query("v", [NAME_REQ])
+    await session.close()
+    assert resp["trips"] == {} and resp["error"] == realtime.RT_UNAVAILABLE
+    assert not _calls(aioclient_mock, "get")
+
+
+async def test_route_name_rows_beside_trip_ids_read_the_feeds_for_those_only(aioclient_mock) -> None:
+    """The planner failing: the trip id row is matched on the jbb feeds as
+    ever, the route_name row has no answer."""
+    aioclient_mock.post(mavplusz.URL, status=503)
+    _jbb(aioclient_mock)
+    hub, session, _clock = await _hub(aioclient_mock, _name_cfg(), wall=JBB_WALL)
+    resp = await hub.query("v", [SZFV_REQ, {**NAME_REQ, "date": "20261102"}])
+    await session.close()
+    assert set(resp["trips"]) == {"s"}
+    assert len(_calls(aioclient_mock, "get")) == 2
+
+
+async def test_a_trip_id_row_on_a_route_name_feed_asks_no_route_list(aioclient_mock) -> None:
+    planner = _name_planner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    hub, session, _clock = await _hub(aioclient_mock, _name_cfg())
+    resp = await hub.query("v", [{**T0_REQ, "route": "2036", "start": 380}])
+    await session.close()
+    assert planner.agency_asks == [] and planner.route_asks == []
+    assert resp["trips"]["a"]["trip_id"] == "hkir_2036_1-3"
+
+
+async def test_a_source_without_agencies_does_not_look_route_names_up(aioclient_mock) -> None:
+    planner = _name_planner()
+    aioclient_mock.post(mavplusz.URL, side_effect=planner)
+    _jbb(aioclient_mock)
+    hub, session, _clock = await _hub(aioclient_mock, _name_cfg(()), wall=JBB_WALL)
+    resp = await hub.query("v", [NAME_REQ])
+    await session.close()
+    assert planner.asked == [] and resp["trips"] == {}
 
 
 @pytest.mark.parametrize("route", ["nope", "2"], ids=["unknown-route", "no-trip-at-that-start"])

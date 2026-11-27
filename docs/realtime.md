@@ -169,6 +169,40 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   read the calendar (it may be wrong, or the train an added one). A
   source the call has no train of (GYSEV's for a MÁV train) is not read
   at all.
+- **Route name (Volán rows without a trip id).** A Volán or Volánbusz town card whose index has no trip ids (one built
+  before they were kept, or from a GTFS of your own without them) sends
+  the line number and the trip's first time only. The planner's route ids
+  are not the line number (`hkir:hkir_V-R-200-3870` is line 3870, Győr's
+  line 1 is `hkir:hkir_V-25584-H-3-1`), nor do its trip ids carry the
+  start (`hkir_3870_545-4`). So the `hkir:` sources (`"match"` has
+  `route_name`) name the planner's agencies their routes are looked up
+  among: `hkir:hkir_V` for the intercity coaches (about 2,800 routes,
+  160 kB), and for each town network its own (`hkir:hkir_V-<KSH code>`,
+  the code of its jbb feed: 3 kB for Győr), so line 1 of Győr is never
+  line 1 of Szeged. Three requests resolve a row: the agency's routes by
+  short name (`agency(id:) { routes { gtfsId shortName } }`, kept for
+  three hours per agency; two routes of one name are both used), those
+  routes' trips on the service date with each trip's first scheduled
+  departure (`tripsForDate { gtfsId departureStoptime(serviceDate:) {
+  scheduledDeparture } }`, kept for three hours per route and date, as
+  route + start's lists), and the trips that start at the card's minute
+  (modulo a day) as trip ids, as above. Once the lists are kept, a poll is
+  the trip request alone. The agency and route lists are asked, held and
+  backed off as route + start's route lists. A trip found so is used only
+  when it calls at the card's boarding stop and, when the card names its
+  destination, there after it: both ends of Székesfehérvár line 44 start
+  at 11:45 and call at Csapó utca (each at a platform of its own), and on
+  2026-11-27 the card's way had no realtime data and the other one,
+  calling at Csapó utca too, would have taken its place. Several calling
+  so are told apart as two trips at a shared start above. The jbb feeds
+  know these trips by their trip id only, so they are not read for such a
+  row: the planner answers it or the card keeps its timetable (a planner
+  that does not answer is `rt_unavailable` when nothing else was asked).
+  Measured on 2026-11-27 11:50–12:10 CET with the trip ids taken out of
+  the release index: 17 and 24 of 40 intercity trips about to leave or
+  running (two samples), and 19, 21 and 16 of 40 of Győr, Nyíregyháza and
+  Székesfehérvár got their delay, each the trip the index named; with the
+  trip ids, about as many. A row with a trip id is asked by it as ever, and asks no list.
 - **What it answers.** A call without realtime data has no delay (the
   planner's scheduled time is no prediction). Every call CANCELED is a
   canceled trip, one CANCELED call among updated ones a skipped stop. A
@@ -278,9 +312,13 @@ planner's `1:36166415`, Budapest-Keleti `1:005510017` with its platforms
   (`hkir_1010_10-5`, stop `hkir_109755_2` of station `hkir_109755`). The
   release indexes now carry each trip's `trip_id` as the seventh element of
   its row, so the card sends it and the integration looks it up. An index
-  built before this change has no trip ids: those cards keep the timetable
-  until they get a newer index (a release, or the weekly one from GitHub
-  Pages).
+  without trip ids (built before this change, or from a GTFS of your own
+  without them) is looked up on mavplusz.hu by its line number and start
+  instead, for the Volán coaches and the Volánbusz town networks (see
+  Route name in [mavplusz.hu first](#mavpluszhu-first-jbbghsqde-as-backup)
+  above); the
+  other operators' cards keep the timetable until they get a newer index
+  (a release, or the weekly one from GitHub Pages).
 - **route + start.** (The same rule on mavplusz.hu, see above.) The
   Veszprém and Miskolc feeds use other trip ids than the GTFS the card
   ships, but their ids carry the start time
@@ -723,7 +761,8 @@ shows. The planner is asked for what the cards show, and nothing else:
 trip ids with their service dates (a row's own trip, the resolved trips of
 a route + start row, and every trip of a train's number for today and
 yesterday, so last night's runs too), route ids with a date for the route
-lists of route + start rows, and route ids for the vehicles of live
+lists of route + start rows, agency ids and route ids with a date for
+the rows of an index without trip ids (route name), and route ids for the vehicles of live
 realtime-pattern trips (and while BKK FUTÁR fails, the BKK ids below).
 So mavplusz.hu can tell
 which timetable rows some Home Assistant displays, as it can for anyone

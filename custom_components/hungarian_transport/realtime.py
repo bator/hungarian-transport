@@ -139,6 +139,9 @@ VEHICLE_FAIL_BACKOFF = 180
 # requests answered: _mav_route_failed).
 MAVPLUSZ_OUTAGE = "mavplusz"
 MAVPLUSZ_ROUTE_OUTAGE = "mavplusz route lists"
+# The key _query_mavplusz gives a route_name request the planner trips its
+# route + start resolved to, for _find_trip (never a service field).
+RESOLVED = "_resolved"
 # A route's trip list on mavplusz.hu (for route + start) is kept this long:
 # it is the day's timetable, not live data.
 ROUTE_INTERVAL = 3 * 3600
@@ -146,6 +149,8 @@ ROUTE_INTERVAL = 3 * 3600
 # over made-up routes (each kept as None for ROUTE_INTERVAL) must not grow
 # it. The OTP city feeds have a few hundred routes between them.
 MAX_MAV_ROUTES = 2000
+# Agency route lists kept at most (route_name feeds: one agency each).
+MAX_MAV_AGENCIES = 100
 # Trip id patterns whose route a source remembers (see _learn_routes).
 MAX_ROUTE_KEYS = 20000
 # Rows of a static feed's calendar.txt and calendar_dates.txt read for
@@ -658,6 +663,10 @@ class Source:
     # start or train number, these feeds only when it fails (mavplusz.py,
     # docs/realtime.md).
     mavplusz: bool = False
+    # The planner's agencies whose routes a route_name request's route is
+    # looked up among by its short name (hkir:hkir_V, the intercity
+    # coaches; hkir:hkir_V-25584, Győr's town network).
+    agencies: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -694,9 +703,14 @@ def parse_feed_table(doc: dict[str, Any]) -> dict[str, FeedConfig]:
                         str(src.get("prefix") or ""),
                         _https(src.get("static")),
                         src.get("mavplusz") is True,
+                        tuple(
+                            dict.fromkeys(
+                                str(a) for a in src.get("agencies") or () if isinstance(a, str) and a.strip()
+                            )
+                        ),
                     )
                 )
-            match = frozenset(str(m) for m in raw.get("match") or ()) & {"trip", "route_start", "train"}
+            match = frozenset(str(m) for m in raw.get("match") or ()) & {"trip", "route_start", "route_name", "train"}
             if not sources or not match:
                 raise ValueError("no sources or match")
             interval = max(MIN_INTERVAL, int(raw.get("interval") or DEFAULT_INTERVAL))
@@ -1065,7 +1079,10 @@ class RealtimeHub:
         self._mav_vehicle_waits: dict[str, asyncio.Future[dict[str, list[dict[str, Any]]]]] = {}
         # Per (route, date): (monotonic expiry, its trip ids or None), the
         # least recently asked first (MAX_MAV_ROUTES).
-        self._mav_route_cache: dict[tuple[str, str], tuple[float, tuple[str, ...] | None]] = {}
+        self._mav_route_cache: dict[tuple[str, str], tuple[float, tuple[str | mavplusz.Started, ...] | None]] = {}
+        # Per planner agency (route_name feeds): (monotonic expiry, its
+        # routes' ids by short name, or None for an agency it lacks).
+        self._mav_agency_cache: dict[str, tuple[float, dict[str, tuple[str, ...]] | None]] = {}
         self._mav_retry_at = -1e18
         # The route lists' own backoff, while their run is an outage
         # (_mav_route_failed).
@@ -1382,9 +1399,36 @@ class RealtimeHub:
                 if self._mav_cut is task:
                     self._mav_cut = None
 
-        listed = (
-            await bounded(self._mav_routes(list(dict.fromkeys(route_keys.values())), deadline)) if route_keys else {}
+        # Route + start without a trip id on a route_name feed (an index
+        # without the feed's trip ids, Volán): the route's planner ids by its
+        # short name among the source's agencies (_mav_agencies), then their
+        # trips that day with their first departures (_mav_routes, starts),
+        # the ones starting at the card's minute asked as trip ids. The jbb
+        # feeds cannot match these: the planner alone answers them.
+        name_rows: dict[tuple[int, int], str] = {}
+        for i in mav_idx:
+            if not cfg.sources[i].agencies:
+                continue
+            for n, r in enumerate(trips):
+                if n not in undated and _by_name(cfg, r):
+                    name_rows[i, n] = _strip(str(r["route"]), cfg.sources[i].prefix).strip()
+        names: dict[str, dict[str, tuple[str, ...]] | None] | None = {}
+        if name_rows:
+            agency_keys = [
+                mavplusz.RouteKey(a, "", cfg.sources[i].prefix)
+                for i in dict.fromkeys(i for i, _n in name_rows) for a in cfg.sources[i].agencies
+            ]
+            names = await bounded(self._mav_agencies(agency_keys, deadline))
+        name_routes: dict[tuple[int, int], list[mavplusz.RouteKey]] = {}
+        for (i, n), name in name_rows.items():
+            src = cfg.sources[i]
+            gids = [g for a in src.agencies for g in ((names or {}).get(a) or {}).get(name, ())]
+            if gids:
+                name_routes[i, n] = [mavplusz.RouteKey(g, dates[n], src.prefix, True) for g in dict.fromkeys(gids)]
+        asked_routes = list(
+            dict.fromkeys([*route_keys.values(), *(k for ks in name_routes.values() for k in ks)])
         )
+        listed = await bounded(self._mav_routes(asked_routes, deadline)) if asked_routes else {}
         cands: dict[tuple[int, int], list[mavplusz.TripKey]] = {}
         for (i, n), rk in route_keys.items():
             ids = (listed or {}).get(rk)
@@ -1392,6 +1436,16 @@ class RealtimeHub:
                 found = mavplusz.trips_starting(ids, rk.prefix, int(trips[n]["start"]))
                 if found:
                     cands[i, n] = [mavplusz.TripKey(g, rk.date, rk.prefix) for g in found]
+        for (i, n), rks in name_routes.items():
+            found = [
+                g for rk in rks
+                for g in mavplusz.trips_starting((listed or {}).get(rk) or (), rk.prefix, int(trips[n]["start"]))
+            ]
+            if found:
+                cands[i, n] = [mavplusz.TripKey(g, dates[n], cfg.sources[i].prefix) for g in dict.fromkeys(found)]
+        # The planner keys only a route_name request needs: no reason to
+        # read a source's jbb feeds, which cannot match it.
+        name_only = {k for (i, n), ks in cands.items() if (i, n) in name_rows for k in ks}
         by_src: dict[int, list[mavplusz.TripKey]] = {}
         # The trips a request names by trip id or with a date.
         named: set[mavplusz.TripKey] = set()
@@ -1477,7 +1531,7 @@ class RealtimeHub:
             it knows is not, nor a train number the static feed lacks (the
             feeds could not match it either)."""
             r = trips[n]
-            if covered(i, n):
+            if covered(i, n) or (i, n) in name_rows:
                 return False
             k = trip_key(i, n)
             if k is not None and answered is not None and k not in answered:
@@ -1487,15 +1541,20 @@ class RealtimeHub:
             if by_train and r.get("train"):
                 numbers = maps.get(i)
                 return not numbers or bool(numbers.get(_train_number(r["train"])))
-            return not (by_trip and r.get("trip_id")) and bool(cfg.match - {"trip", "route_start"})
+            return not (by_trip and r.get("trip_id")) and bool(cfg.match - {"trip", "route_start", "route_name"})
 
         # A source the planner had nothing to ask of (no train of the call
-        # in its static feed: GYSEV's for a MÁV train) is not read either.
+        # in its static feed: GYSEV's for a MÁV train) is not read either,
+        # nor one asked only for route_name requests.
         jbb_idx = [
             i for i in range(len(cfg.sources))
-            if (i not in planner and (i not in by_src or by_src[i]))
+            if (i not in planner and (i not in by_src or any(k not in name_only for k in by_src[i])))
             or any(needs_feeds(i, n) for n in range(len(trips)))
         ]
+        if not jbb_idx and name_rows and not planner and (names is None or listed is None or answered is None):
+            # Only route_name requests, and the planner did not answer
+            # them: nothing else can (the card keeps its timetable).
+            return error_answer({"feed": feed_id, "trips": {}}, RT_UNAVAILABLE)
         jbb = dict(zip(jbb_idx, await asyncio.gather(*(self._source(cfg, cfg.sources[i], now) for i in jbb_idx))))
         if not planner and jbb and all(tu is None and vp is None for _src, tu, vp, _tr in jbb.values()):
             return error_answer({"feed": feed_id, "trips": {}}, RT_UNAVAILABLE)
@@ -1512,6 +1571,8 @@ class RealtimeHub:
             # Two trips of the line at that minute: the one in the feeds must
             # call at the card's stops, the other may be the card's.
             strict = any(len(cands.get((i, n), ())) > 1 for i in mav_idx)
+            if any((i, n) in name_rows for i in mav_idx):
+                req = {**req, RESOLVED: [k.gtfs_id for i in mav_idx for k in cands.get((i, n), ())]}
             hit = _answer(cfg, loaded, req, now, strict=strict)
             if hit is not None:
                 out[req["key"]] = hit
@@ -1701,9 +1762,58 @@ class RealtimeHub:
         is asked in halves (PlannerKeys.cap)."""
         return self._mav_keys.cap((kind, k.gtfs_id, k.date) for k in keys)
 
+    async def _mav_agencies(
+        self, keys: list[mavplusz.RouteKey], deadline: float | None = None
+    ) -> dict[str, dict[str, tuple[str, ...]] | None] | None:
+        """Per agency id of keys (route_name feeds): its routes' planner ids
+        by short name (None: no such agency), cached for ROUTE_INTERVAL,
+        the rest in one request of at most MAX_TRIPS_PER_REQUEST agencies.
+        Asked, held and backed off as route lists (_mav_routes): a "route"
+        key of the agency and no date. When that request is not made or
+        fails, the cached ones only (None for none)."""
+        async with self._mav_lock:
+            mono = self._monotonic()
+            for a in [a for a, hit in self._mav_agency_cache.items() if hit[0] <= mono]:
+                del self._mav_agency_cache[a]
+            out: dict[str, dict[str, tuple[str, ...]] | None] = {}
+            todo = []
+            for k in dict.fromkeys(keys):
+                hit = self._mav_agency_cache.get(k.gtfs_id)
+                if hit is not None:
+                    out[k.gtfs_id] = hit[1]
+                else:
+                    todo.append(k)
+            fit: list[mavplusz.RouteKey] = []
+            for k in sorted(todo, key=lambda k: self._mav_order("route", k)):
+                if not self._mav_is_held("route", k.gtfs_id, k.date) and len(fit) < self._mav_cap("route", [*fit, k]):
+                    fit.append(k)
+            todo = fit
+            if not todo:
+                return out
+            bad: set[mavplusz.RouteKey] = set()
+            results = await self._mav_post(
+                mavplusz.build_agency_query(todo),
+                lambda doc: mavplusz.parse_agencies(doc, todo, bad),
+                deadline,
+                [("route", k.gtfs_id, k.date) for k in todo],
+                "route lists",
+                bad,
+            )
+            if results is None:
+                return out or None
+            self._mav_hold([("route", k.gtfs_id, k.date) for k in bad])
+            expiry = self._monotonic() + ROUTE_INTERVAL
+            for k, names in results.items():
+                self._mav_agency_cache[k.gtfs_id] = (expiry, names)
+                out[k.gtfs_id] = names
+            # The feed table names some 60 agencies; a bound all the same.
+            while len(self._mav_agency_cache) > MAX_MAV_AGENCIES:
+                del self._mav_agency_cache[next(iter(self._mav_agency_cache))]
+            return out
+
     async def _mav_routes(
         self, keys: list[mavplusz.RouteKey], deadline: float | None = None
-    ) -> dict[mavplusz.RouteKey, tuple[str, ...] | None] | None:
+    ) -> dict[mavplusz.RouteKey, tuple[str | mavplusz.Started, ...] | None] | None:
         """Per route key: the planner's trip ids that day (None: no such
         route), cached for ROUTE_INTERVAL (MAX_MAV_ROUTES at most), the rest
         in one request of at most MAX_TRIPS_PER_REQUEST routes. When that
@@ -1715,7 +1825,7 @@ class RealtimeHub:
             mono = self._monotonic()
             for k in [k for k, (exp, _ids) in self._mav_route_cache.items() if exp <= mono]:
                 del self._mav_route_cache[k]
-            out: dict[mavplusz.RouteKey, tuple[str, ...] | None] = {}
+            out: dict[mavplusz.RouteKey, tuple[str | mavplusz.Started, ...] | None] = {}
             todo = []
             for k in keys:
                 hit = self._mav_route_cache.pop((k.gtfs_id, k.date), None)
@@ -2070,11 +2180,28 @@ async def _none() -> None:
 
 def _planner_request(cfg: FeedConfig, req: dict[str, Any]) -> bool:
     """A request mavplusz.hu can answer: a trip id, a route + start or a
-    train number, on a feed matching that way."""
+    train number, on a feed matching that way; or a route + start without
+    a trip id on a route_name feed (an index without the feed's trip ids)."""
     return bool(
         ("trip" in cfg.match and req.get("trip_id"))
         or ("route_start" in cfg.match and req.get("route") and req.get("start") is not None)
         or ("train" in cfg.match and req.get("train"))
+        or _by_name(cfg, req)
+    )
+
+
+def _by_name(cfg: FeedConfig, req: dict[str, Any]) -> bool:
+    """A route + start request without a trip id on a route_name feed with
+    a planner source that names its agencies: its trip is found on
+    mavplusz.hu by the route's short name and the trip's first departure
+    (_query_mavplusz). The jbb feeds cannot match it (their trips are
+    known by trip_id only), so only the planner answers it."""
+    return bool(
+        "route_name" in cfg.match
+        and not req.get("trip_id")
+        and req.get("route")
+        and req.get("start") is not None
+        and any(src.mavplusz and src.agencies for src in cfg.sources)
     )
 
 
@@ -2170,6 +2297,31 @@ def _has_stop(tu: TripUpdate | None, stops: list[str]) -> bool:
     return any(_stop_hit(u.stop_id, s) for u in tu.stops for s in stops)
 
 
+def _runs_card_stops(tu: TripUpdate | None, req: dict[str, Any]) -> bool:
+    """A route_name candidate runs the card's way: it calls at the card's
+    boarding stop (stops[from]) and, when the card names its destination
+    (stops[to]), there after it. Both ends of Székesfehérvár line 44 start
+    at 11:45 and call at Csapó utca, each at a platform of its own
+    (hkir_665988_1, _2): the trip of the card's way had no realtime data
+    on 2026-11-27, and the other one, calling there too, took its delay.
+    A trip with no calls to tell is none."""
+    stops = req.get("stops") or []
+    if tu is None or not stops:
+        return False
+    frm = int(req.get("from") or 0)
+    if not 0 <= frm < len(stops):
+        frm = 0
+    ups = tu.stops
+    board = [k for k, u in enumerate(ups) if _stop_hit(u.stop_id, stops[frm])]
+    if not board:
+        return False
+    to = req.get("to")
+    if to is None or not frm < int(to) < len(stops):
+        return True
+    dest = stops[int(to)]
+    return any(_stop_hit(u.stop_id, dest) for u in ups[board[0] + 1:])
+
+
 def _same_answer(a: TripUpdate, b: TripUpdate, req: dict[str, Any]) -> bool:
     """Two trips give the card the same answer: at its boarding and its
     destination stop (from, to) the same relationship, and delays and
@@ -2220,6 +2372,24 @@ def _find_trip(cfg: FeedConfig, loaded, req: dict[str, Any], now: float, strict:
     strict as in _pick, for a route + start."""
     wanted_date = req.get("date") or ""
     stops = req.get("stops") or []
+    resolved = req.get(RESOLVED) or ()
+    if resolved:
+        # A route_name request: the planner's trips of its route starting
+        # at its minute (_query_mavplusz), each one calling at the card's
+        # stops in the card's order (_runs_card_stops), told apart by them.
+        cands = []
+        for src, tu, vp, _tr in loaded:
+            for gid in resolved:
+                for tid in dict.fromkeys((gid, _strip(gid, src.prefix))):
+                    t = tu.trip_update(tid, wanted_date) if tu else None
+                    v = vp.vehicle(tid, wanted_date) if vp else None
+                    if t or v:
+                        if not stops or _runs_card_stops(t, req):
+                            cands.append((tid, t, v))
+                        break
+        hit = _pick(sorted(cands, key=lambda c: c[0]), stops, strict, req)
+        if hit:
+            return hit
     if "trip" in cfg.match and req.get("trip_id"):
         raw = req["trip_id"]
         for src, tu, vp, _tr in loaded:

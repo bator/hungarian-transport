@@ -429,11 +429,25 @@ class TripKey(NamedTuple):
 
 class RouteKey(NamedTuple):
     """One route's trips to list: the planner's route id (prefix + the
-    card's route), the service date, the feed prefix."""
+    card's route), the service date, the feed prefix. starts: list each
+    trip's first scheduled departure too (Started), for a feed whose trip
+    ids do not carry their start (route_name: Volán, the route found by
+    its name, build_agency_query). An agency's route list (build_agency_query)
+    is keyed alike: the agency's id, no date."""
 
     gtfs_id: str
     date: str
     prefix: str
+    starts: bool = False
+
+
+class Started(NamedTuple):
+    """A trip of a starts route list (RouteKey.starts): its planner id and
+    its first scheduled departure, in minutes after the service day's
+    midnight (past 1440 for one after midnight, as GTFS times)."""
+
+    gtfs_id: str
+    start: int
 
 
 class TripResult(NamedTuple):
@@ -651,15 +665,74 @@ def build_route_query(routes: Sequence[RouteKey]) -> dict[str, Any]:
     for i, r in enumerate(routes):
         decl.append(f"$r{i}: String!")
         variables[f"r{i}"] = r.gtfs_id
-        parts.append(f"r{i}: route(id: $r{i}) {{ patterns {{ tripsForDate(serviceDate: ${dates[r.date]}) {{ gtfsId }} }} }}")
+        d = dates[r.date]
+        # A starts route's trips with their first departure: the Volán
+        # trip ids (hkir_3870_545-4) carry no start.
+        trip = f"gtfsId departureStoptime(serviceDate: ${d}) {{ scheduledDeparture }}" if r.starts else "gtfsId"
+        parts.append(f"r{i}: route(id: $r{i}) {{ patterns {{ tripsForDate(serviceDate: ${d}) {{ {trip} }} }} }}")
     return {"query": f"query({', '.join(decl)}) {{ {' '.join(parts)} }}", "variables": variables}
+
+
+def build_agency_query(agencies: Sequence[RouteKey]) -> dict[str, Any]:
+    """The aliased request listing each agency's routes (alias aN is
+    agencies[N], its gtfs_id the planner's agency id): a route_name feed's
+    card names a route by its short name only ("3870"), whose planner id
+    (hkir:hkir_V-R-200-3870) is not the prefix plus the name. One agency
+    per Volánbusz town network (hkir:hkir_V-25584, Győr) and one for the
+    intercity coaches (hkir:hkir_V, about 2,800 routes, 160 kB), kept for
+    hours: the routes change with the timetable only."""
+    decl: list[str] = []
+    parts: list[str] = []
+    variables: dict[str, str] = {}
+    for i, a in enumerate(agencies):
+        decl.append(f"$a{i}: String!")
+        variables[f"a{i}"] = a.gtfs_id
+        parts.append(f"a{i}: agency(id: $a{i}) {{ routes {{ gtfsId shortName }} }}")
+    return {"query": f"query({', '.join(decl)}) {{ {' '.join(parts)} }}", "variables": variables}
+
+
+def parse_agencies(
+    doc: Any, agencies: Sequence[RouteKey], failed: set[RouteKey] | None = None
+) -> dict[RouteKey, dict[str, tuple[str, ...]] | None]:
+    """Per agency of build_agency_query(agencies): its routes' planner ids
+    by short name (two routes may share one: 715 of the intercity coaches),
+    or None for an agency the planner does not know; errors and the wrong
+    shape as in parse_routes."""
+    data, errors = _alias_data(doc, [f"a{i}" for i in range(len(agencies))])
+    out: dict[RouteKey, dict[str, tuple[str, ...]] | None] = {}
+    for i, key in enumerate(agencies):
+        alias = f"a{i}"
+        if alias in errors:
+            if failed is not None:
+                failed.add(key)
+            continue
+        if alias not in data:
+            raise ValueError(f"answer without {alias}")
+        agency = data[alias]
+        if agency is None:
+            out[key] = None
+            continue
+        routes = agency.get("routes") if isinstance(agency, dict) else None
+        if not isinstance(routes, list):
+            if failed is not None:
+                failed.add(key)
+            continue
+        names: dict[str, list[str]] = {}
+        for route in routes:
+            gid = _gid(route)
+            name = _str(route.get("shortName")).strip() if isinstance(route, dict) else ""
+            if gid and name:
+                names.setdefault(name, []).append(gid)
+        out[key] = {name: tuple(dict.fromkeys(ids)) for name, ids in names.items()}
+    return out
 
 
 def parse_routes(
     doc: Any, routes: Sequence[RouteKey], failed: set[RouteKey] | None = None
-) -> dict[RouteKey, tuple[str, ...] | None]:
+) -> dict[RouteKey, tuple[str | Started, ...] | None]:
     """Per route of build_route_query(routes): its trip ids that day (the
-    planner's, prefix kept), or None for a route the planner does not know;
+    planner's, prefix kept; a starts route's as Started, a trip without
+    its first departure left out), or None for a route the planner does not know;
     a route an error names or whose alias is of the wrong shape is not in
     the result, and goes into failed. Errors and missing aliases as in
     parse_response."""
@@ -682,27 +755,38 @@ def parse_routes(
             if failed is not None:
                 failed.add(key)
             continue
-        ids: list[str] = []
+        ids: list[str | Started] = []
         patterns = route.get("patterns")
         for pattern in patterns if isinstance(patterns, list) else ():
             trips = pattern.get("tripsForDate") if isinstance(pattern, dict) else None
             for trip in trips if isinstance(trips, list) else ():
                 gid = _gid(trip)
-                if gid:
+                if not gid:
+                    continue
+                if not key.starts:
                     ids.append(gid)
+                    continue
+                first = trip.get("departureStoptime")
+                seconds = _seconds(first.get("scheduledDeparture")) if isinstance(first, dict) else None
+                if seconds is not None and seconds >= 0:
+                    ids.append(Started(gid, seconds // 60))
         out[key] = tuple(dict.fromkeys(ids))
     return out
 
 
-def trips_starting(trip_ids: Sequence[str], prefix: str, start: int) -> list[str]:
-    """The trip ids whose start (HHMMSS in the id, realtime._start_minutes)
-    is start minutes after midnight, modulo a day as on the jbb feeds."""
+def trips_starting(trip_ids: Sequence[str | Started], prefix: str, start: int) -> list[str]:
+    """The trip ids whose start is start minutes after midnight, modulo a
+    day as on the jbb feeds: a Started's own, else HHMMSS in the id
+    (realtime._start_minutes)."""
     out = []
-    for gid in trip_ids:
-        minutes = realtime._start_minutes(realtime._strip(gid, prefix))
+    for item in trip_ids:
+        if isinstance(item, Started):
+            gid, minutes = item.gtfs_id, item.start
+        else:
+            gid, minutes = item, realtime._start_minutes(realtime._strip(item, prefix))
         if minutes is not None and minutes % 1440 == start % 1440:
             out.append(gid)
-    return out
+    return list(dict.fromkeys(out))
 
 
 async def fetch(
