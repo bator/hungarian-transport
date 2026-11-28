@@ -16,6 +16,7 @@ from gtfs_compact import (
     PLATFORM_SPLIT_M,
     IndexGuardError,
     calendar_end,
+    calendar_start,
     download_feed,
     feed_error,
     feed_urls,
@@ -55,6 +56,14 @@ ALLOW_MISSING_ENV = "HUNGARIAN_TRANSPORT_ALLOW_MISSING"
 # that index's part instead, with a ::warning::. A feed the previous index
 # lacks has nothing to keep and is left out as before.
 CARRY_ENV = "HUNGARIAN_TRANSPORT_CARRY_INDEX"
+# A publisher may put up its next timetable before it starts: V-Busz
+# published Veszprém's December zip on 26 November, valid from 1 December,
+# and the 27 November release shipped it alone, so Veszprém's cards had no
+# departures for the rest of November. A part whose first service day is
+# after today keeps the previous index's trips of the same operator for the
+# days before it begins (bridge_parts). That index is the one given here
+# (its shapes folder next to it), else CARRY_ENV's, else the one in place.
+BRIDGE_ENV = "HUNGARIAN_TRANSPORT_BRIDGE_INDEX"
 # More feeds failing at once is the network or the runner, not a publisher:
 # none is carried, and the guard decides as without CARRY_ENV.
 MAX_CARRIED = 3
@@ -819,6 +828,15 @@ def _without_replaced(part: dict) -> dict:
         return part
     dropped = set(spec.get("dropped") or ())
     keep = [t for t in trips if not (len(t) > 4 and t[4] in dropped)]
+    print(f"warn {part['op_id']}: the carried timetable is the zip its new source replaced;"
+          f" its {len(trips) - len(keep)} trips of route types {', '.join(map(str, sorted(dropped)))} are left out",
+          file=sys.stderr)
+    return _with_only(part, keep)
+
+
+def _with_only(part: dict, keep: list[list]) -> dict:
+    """A part with only the trips keep (rows of its "t"), and only the
+    stops and shapes those use; its services stay as they are."""
     used = sorted({p for t in keep for p in t[2]})
     s_map = {old: new for new, old in enumerate(used)}
     shapes = part.get("shapes") or []
@@ -831,9 +849,6 @@ def _without_replaced(part: dict) -> dict:
             row[5] = sh_map.get(t[5], -1) if isinstance(t[5], int) else -1
         rows.append(row)
     g = part.get("g") or []
-    print(f"warn {part['op_id']}: the carried timetable is the zip its new source replaced;"
-          f" its {len(trips) - len(keep)} trips of route types {', '.join(map(str, sorted(dropped)))} are left out",
-          file=sys.stderr)
     return {
         **part,
         "s": [part["s"][i] for i in used],
@@ -841,6 +856,117 @@ def _without_replaced(part: dict) -> dict:
         "shapes": [shapes[i] for i in used_sh],
         "t": rows,
     }
+
+
+_YMD = re.compile(r"\d{8}")
+
+
+def _day_before(day: str) -> str:
+    return (datetime.strptime(day, "%Y%m%d").date() - timedelta(days=1)).strftime("%Y%m%d")
+
+
+def _until(part: dict, start: str, today: str) -> dict:
+    """A part of the previous index cut to the days before start (YYYYMMDD):
+    each service ends the day before, its added and removed dates after it
+    go, a service left with no day from today on goes with its trips (and
+    the stops and shapes only those used)."""
+    last = _day_before(start)
+    cal, added, removed = part.get("c") or [], part.get("a") or [], part.get("r") or []
+    c_map: dict[int, int] = {}
+    c, a, r = [], [], []
+    for sv, row in enumerate(cal):
+        days, first, end = (list(row) + ["", "", ""])[:3]
+        end = min(str(end), last) if _YMD.fullmatch(str(end)) else end
+        if _YMD.fullmatch(str(first)) and _YMD.fullmatch(str(end)) and first > end:
+            days = "0" * 7
+        plus = [d for d in (added[sv] if sv < len(added) else []) or [] if str(d) < start]
+        minus = [d for d in (removed[sv] if sv < len(removed) else []) or [] if str(d) < start]
+        new_row = [days, first, end, *list(row)[3:]]
+        if calendar_end({"c": [new_row], "a": [plus]}) < today:
+            continue
+        c_map[sv] = len(c)
+        c.append(new_row)
+        a.append(plus)
+        r.append(minus)
+    keep = [[c_map[t[0]], *t[1:]] for t in part.get("t") or [] if t[0] in c_map]
+    return _with_only({**part, "c": c, "a": a, "r": r}, keep)
+
+
+
+def _merged(new: dict, old: dict) -> dict:
+    """new with old's services, trips, stops and shapes added: a stop both
+    have is new's (old's trips use it), the others of old follow new's."""
+    at = {row[0]: i for i, row in enumerate(new["s"])}
+    s = list(new["s"])
+    g_new, g_old = new.get("g") or [], old.get("g") or []
+    coords = len(g_new) == 2 * len(new["s"])
+    g = list(g_new) if coords else []
+    s_map = []
+    for i, row in enumerate(old["s"]):
+        if row[0] not in at:
+            at[row[0]] = len(s)
+            s.append(row)
+            if coords:
+                g.extend(g_old[2 * i:2 * i + 2] if len(g_old) == 2 * len(old["s"]) else [0, 0])
+        s_map.append(at[row[0]])
+    c_off, sh_off = len(new["c"]), len(new.get("shapes") or [])
+    trips = list(new["t"])
+    for t in old["t"]:
+        row = [t[0] + c_off, t[1], [s_map[p] for p in t[2]], *t[3:]]
+        if len(t) > 5:
+            row[5] = t[5] + sh_off if isinstance(t[5], int) and t[5] >= 0 else -1
+        trips.append(row)
+    n_c, n_o = len(new["c"]), len(old["c"])
+
+    def column(key: str) -> list:
+        mine, theirs = new.get(key) or [], old.get(key) or []
+        return ([*mine, *[[]] * (n_c - len(mine))][:n_c] + [*theirs, *[[]] * (n_o - len(theirs))][:n_o])
+
+    return {
+        **new,
+        "s": s,
+        "g": g,
+        "c": [*new["c"], *old["c"]],
+        "a": column("a"),
+        "r": column("r"),
+        "shapes": [*(new.get("shapes") or []), *(old.get("shapes") or [])],
+        "t": trips,
+    }
+
+
+def bridge_parts(parts: list[dict], source: Path | None, today: str) -> dict[str, dict[str, str | int]]:
+    """Give each part whose first service day (calendar_start) is after
+    today the previous index's (source's) trips of the same operator for
+    the days before it, in place (BRIDGE_ENV). Operator id -> {"from": the
+    new part's first day, "until": the last day bridged, "trips": the
+    previous index's trips added}, with a ::warning:: for each. An operator
+    the previous index lacks, or runs on none of those days (a seasonal
+    feed between seasons), is left as it is."""
+    starts = {p["op_id"]: calendar_start(p) for p in parts}
+    late = {op: day for op, day in starts.items() if day and day > today}
+    if not late or source is None or not source.exists():
+        return {}
+    old = index_parts(source, set(late))
+    if old is None:
+        print(f"::warning title=City timetable not bridged::{', '.join(sorted(late))}: the new timetable"
+              f" starts after {ymd(today)}, and {source.name} (or its shapes folder) does not read;"
+              " the days before it have no departures.")
+        return {}
+    out: dict[str, dict[str, str | int]] = {}
+    by_op = {p["op_id"]: p for p in old}
+    for i, part in enumerate(parts):
+        op = part["op_id"]
+        if op not in late or op not in by_op:
+            continue
+        cut = _until(by_op[op], late[op], today)
+        if not cut["t"]:
+            continue
+        parts[i] = _merged(part, cut)
+        until = calendar_end(cut) or _day_before(late[op])
+        out[op] = {"from": late[op], "until": until, "trips": len(cut["t"])}
+        print(f"::warning title=City timetable bridged::{op}: its new timetable starts {ymd(late[op])};"
+              f" {len(cut['t'])} trips of the previous index run until {ymd(until)}.")
+    return out
 
 
 def _feed_group(op_id: str) -> str | None:
@@ -1352,6 +1478,7 @@ def build_city_index(
     today: str | None = None,
     zips: dict[str, Path] | None = None,
     carry: Path | None = None,
+    bridge: Path | None = None,
 ) -> dict:
     """Build and write the city index; info["skipped"] lists the feeds left
     out, info["expired"] those of them whose calendar ended (id -> last day),
@@ -1359,19 +1486,21 @@ def build_city_index(
     info["refused"] those of them rejected for their content (id -> why,
     until) and info["carried"] the feeds taken from carry (the previous
     release's index, see collect_parts) because their own zip failed (id ->
-    why); kept_ids, listed_ids, table_ids and dropped_aliases are
-    stop_id_counts'."""
+    why); info["bridged"] the operators whose new timetable starts after
+    today and that keep the previous index's trips until then (bridge_parts:
+    from bridge, else carry, else the index in place at out); kept_ids,
+    listed_ids, table_ids and dropped_aliases are stop_id_counts'."""
     global _warned
     # A feed loaded twice (a new zip refused) warns once.
     outer, _warned = _warned, set()
     try:
-        return _build_city_index(base, out, volan_zip, today=today, zips=zips, carry=carry)
+        return _build_city_index(base, out, volan_zip, today=today, zips=zips, carry=carry, bridge=bridge)
     finally:
         _warned = outer
 
 
 def _build_city_index(base: Path, out: Path, volan_zip: Path | None, *, today: str | None,
-                      zips: dict[str, Path] | None, carry: Path | None) -> dict:
+                      zips: dict[str, Path] | None, carry: Path | None, bridge: Path | None) -> dict:
     today = today or date.today().strftime("%Y%m%d")
     # Read once for the guards: about a second on the release index. Only
     # what they need is kept while the feeds load.
@@ -1380,6 +1509,9 @@ def _build_city_index(base: Path, out: Path, volan_zip: Path | None, *, today: s
     parts, failed, expired, rejected, refused, carried = collect_parts(
         base, volan_zip, today=today, zips=zips, out=out, previous=previous, allow=allow, carry=carry
     )
+    # Before the guard: it compares what ships. out is still the previous
+    # index here.
+    bridged = bridge_parts(parts, bridge or carry or out, today)
     guard_feeds(out, parts, allow, expired=expired, today=today, previous=previous)
     # guard_feeds is the city index's guard: write_index's overall count
     # would also count trips whose calendar already ended (several feeds end
@@ -1394,6 +1526,7 @@ def _build_city_index(base: Path, out: Path, volan_zip: Path | None, *, today: s
     info["rejected"] = rejected
     info["refused"] = refused
     info["carried"] = carried
+    info["bridged"] = bridged
     return info
 
 
@@ -1403,7 +1536,9 @@ def main() -> None:
     if not volan.exists():
         download_volan(volan)
     carry = (os.environ.get(CARRY_ENV) or "").strip()
-    info = build_city_index(base, OUT, volan, carry=Path(carry) if carry else None)
+    bridge = (os.environ.get(BRIDGE_ENV) or "").strip()
+    info = build_city_index(base, OUT, volan, carry=Path(carry) if carry else None,
+                            bridge=Path(bridge) if bridge else None)
     print("wrote", OUT, info)
     print(stop_id_summary(info))
 

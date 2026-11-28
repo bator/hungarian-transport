@@ -417,6 +417,11 @@ jobs:
           rc=0
           unzip -q -o -j baseline/hungarian-transport-frontend.zip mav-index.json.gz -d .baseline || rc=$?
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 11 ]; then exit "$rc"; fi
+          # The city index once more with its shapes folder, apart from the
+          # one in place: a feed whose new timetable starts after today keeps
+          # this one's trips until then (build_city_index.py, BRIDGE_ENV).
+          mkdir -p .baseline/city
+          unzip -q -o baseline/hungarian-transport-frontend.zip city-index.json.gz 'city-shapes-*' -d .baseline/city
           rm -rf baseline
           ls -l volan-index.json.gz city-index.json.gz .baseline/mav-index.json.gz 2>/dev/null || true
 
@@ -452,6 +457,9 @@ jobs:
           allow="$ALLOW_MISSING_VAR"
           if [ -n "$ALLOW_MISSING_INPUT" ]; then allow="${allow:+$allow,}$ALLOW_MISSING_INPUT"; fi
           export HUNGARIAN_TRANSPORT_ALLOW_MISSING="$allow"
+          if [ -f .baseline/city/city-index.json.gz ]; then
+            export HUNGARIAN_TRANSPORT_BRIDGE_INDEX=.baseline/city/city-index.json.gz
+          fi
           python3 scripts/build_volan_index.py
           python3 scripts/build_city_index.py
           mkdir -p dist
