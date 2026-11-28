@@ -129,6 +129,23 @@ with tempfile.TemporaryDirectory() as tmp:
           raises(lambda: bci.guard_feeds(out, good + [part("debrecen", 5000), part("budapest-siklo", 250)],
                                          set())) is None)
 
+# A retired feed (RETIRED_FEEDS: Székesfehérvár's menetbrand zip, whose
+# network the Volán feed gives) leaves the index without the guard refusing
+# it; any other missing feed is still refused.
+with tempfile.TemporaryDirectory() as tmp:
+    out = Path(tmp) / "city-index.json.gz"
+    write_index([part("miskolc", 100), part("szekesfehervar", 80), part("volan-szekesfehervar", 70)],
+                out, with_operators=True)
+    check("menetbrand Székesfehérvár is retired",
+          bci.RETIRED_FEEDS.get("szekesfehervar") == "volan-szekesfehervar"
+          and "szekesfehervar" not in {f["id"] for f in bci.CITY_FEEDS}, repr(bci.RETIRED_FEEDS))
+    check("a retired feed may leave the index",
+          raises(lambda: bci.guard_feeds(out, [part("miskolc", 100), part("volan-szekesfehervar", 70)],
+                                         set())) is None)
+    err = raises(lambda: bci.guard_feeds(out, [part("szekesfehervar", 80), part("volan-szekesfehervar", 70)], set()))
+    check("a missing feed beside a retired one is still refused",
+          isinstance(err, IndexGuardError) and "miskolc missing" in str(err), repr(err))
+
 with tempfile.TemporaryDirectory() as tmp:
     base = Path(tmp)
     fixtures = base / "fixtures"

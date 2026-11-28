@@ -1186,8 +1186,8 @@ reflects the official GTFS, so it will not invent a connection.
 
 Where the publisher has no fixed zip URL, or one behind a login, the city
 index uses the public menetbrand `/download/<slug>` proxy (Debrecen DKV,
-Kecskemét KeKo, Kaposvár, Hódmezővásárhely, Kiskunhalas, Székesfehérvár,
-Tatabánya, Várpalota). The [menetbrand catalog](https://gtfs.menetbrand.com/letoltes/)
+Kecskemét KeKo, Kaposvár, Hódmezővásárhely, Kiskunhalas, Tatabánya,
+Várpalota). The [menetbrand catalog](https://gtfs.menetbrand.com/letoltes/)
 lists DKV as *Nem publikus* and KeKo as *Igénylés* (on request), and neither
 feed states a licence; KeKo's own address
 (<https://timetable.keko.hu/Kecskemet_GTFS.zip>) answers 401. Orosháza's
@@ -1326,9 +1326,19 @@ Not wired:
   Hungarian station is Szentgotthárd) and rail replacement buses.
 
 Same-town networks stay apart: a city feed and Volánbusz's local lines of
-the same town (Székesfehérvár, Szeged) are separate operators in the picker,
-with their own stop ids, and a card reads one operator, so no departure is
-listed twice. Debrecen, Kecskemét and Orosháza have no Volánbusz local
+the same town (Szeged: SZKT's trams and trolleybuses beside the Volán buses)
+are separate operators in the picker, with their own stop ids, and a card
+reads one operator, so no departure is listed twice. Székesfehérvár had its
+local buses twice until 1.10.26, from menetbrand's zip (`szekesfehervar`,
+"Székesfehérvár — helyi") and from the Volán feed (`volan-szekesfehervar`),
+the same 34 lines and trips: only the Volán one has the trip ids the
+realtime feeds know, so the menetbrand zip left the index
+(`build_city_index.RETIRED_FEEDS`). A card saved with it takes
+`volan-szekesfehervar` and the stops that took its own (the table in
+`src/retired-cities.js`, made by `scripts/retired_city_map.py` from the
+1.10.25 index; same name within 150 m, else the nearest stop within
+100 m) when it loads; the saved YAML changes only when the card is edited
+and saved. Debrecen, Kecskemét and Orosháza have no Volánbusz local
 lines in the Volán feed. Bahart prefers the
 official keyed NAP URL from `BAHART_GTFS_URL` in a gitignored `.env`
 (`/config/hungarian-transport/.env` on Home Assistant). Transitland v2 and

@@ -1,4 +1,6 @@
 
+import { RETIRED_CITIES } from './retired-cities.js';
+
 export const CARD_VERSION = '1.4.7-rev.3';
 
 export const BKK_PLANNER_TAG = 'hungarian-transit-stop-card-plan';
@@ -66,6 +68,64 @@ export function destRouteIds(ids, mode) {
   return out;
 }
 
+/* A stop name without its town ("Székesfehérvár, Vasútállomás" →
+   "vasútállomás"), lowercase, for a saved destination key. */
+function retiredNameKey(name) {
+  const t = String(name || '').normalize('NFC').trim().toLowerCase().replace(/\s+/g, ' ');
+  const at = t.indexOf(', ');
+  return (at >= 0 ? t.slice(at + 2) : t).replace(/\s*\/\s*/g, '/').replace(/\.$/, '');
+}
+
+/* A card saved with a city feed the index no longer carries
+   (retired-cities.js: Székesfehérvár's menetbrand zip, whose network the
+   Volán feed gives as volan-szekesfehervar) takes the feed that took its
+   place, and its boarding and alighting stops the stops that took theirs:
+   id, name and place, and the destination key the editor saves for that
+   stop. A destination saved without its stop id is found by its name. A
+   stop the table does not know keeps what it has. */
+export function migrateRetiredCity(cfg) {
+  const city = String((cfg && cfg.city) || '');
+  if (!city || !Object.prototype.hasOwnProperty.call(RETIRED_CITIES, city)) return cfg;
+  const ret = RETIRED_CITIES[city];
+  const oldPre = city + ':';
+  const newPre = ret.into + ':';
+  const stopOf = (id) => {
+    const s = String(id || '');
+    if (s.indexOf(oldPre) !== 0) return null;
+    const key = s.slice(oldPre.length);
+    const n = Object.prototype.hasOwnProperty.call(ret.from, key) ? ret.from[key] : null;
+    return Number.isInteger(n) && ret.to[n] ? ret.to[n] : null;
+  };
+  cfg.city = ret.into;
+  const from = stopOf(cfg.stopId);
+  if (from) {
+    cfg.stopId = newPre + from[0];
+    cfg.stopName = from[1];
+    if ('stopLat' in cfg || 'stopLon' in cfg) {
+      cfg.stopLat = from[2];
+      cfg.stopLon = from[3];
+    }
+  }
+  let to = stopOf(cfg.destStopId);
+  if (!to && !cfg.destStopId && (cfg.destKey || cfg.destName)) {
+    const want = retiredNameKey(cfg.destName || cfg.destKey);
+    const hits = ret.to.filter((s) => retiredNameKey(s[1]) === want);
+    /* Two poles of one name are one destination (gtfs.js volanDestHit
+       matches by name): either gives it. */
+    if (hits.length) to = hits[0];
+  }
+  if (to) {
+    if (cfg.destStopId) cfg.destStopId = newPre + to[0];
+    cfg.destName = to[1];
+    cfg.destKey = String(to[1]).normalize('NFC').toLowerCase();
+    if ('destLat' in cfg || 'destLon' in cfg) {
+      cfg.destLat = to[2];
+      cfg.destLon = to[3];
+    }
+  }
+  return cfg;
+}
+
 export function normalizeCardConfig(config) {
   const cfg = Object.assign({}, config || {});
   cfg.routeIds = normalizeRouteIds(cfg.routeIds);
@@ -73,6 +133,7 @@ export function normalizeCardConfig(config) {
     if (!(k in cfg) || typeof cfg[k] === 'string') return;
     cfg[k] = cfg[k] == null ? '' : String(cfg[k]);
   });
+  migrateRetiredCity(cfg);
   if (cfg.minutesAfter != null && cfg.minutesAfter !== '') cfg.minutesAfter = clampMinutesAfter(cfg.minutesAfter);
   /* YAML may carry "true"/"false" as text. */
   if ('headerBadges' in cfg) cfg.headerBadges = cfg.headerBadges === true || cfg.headerBadges === 'true';

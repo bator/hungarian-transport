@@ -440,12 +440,6 @@ CITY_FEEDS = [
         "file": "kiskunhalas.zip",
     },
     {
-        "id": "szekesfehervar",
-        "name": "Székesfehérvár — helyi",
-        "url": "https://gtfs.menetbrand.com/download/szekesfehervar/",
-        "file": "szekesfehervar.zip",
-    },
-    {
         "id": "tatabanya",
         "name": "Tatabánya — T-Busz",
         "url": "https://gtfs.menetbrand.com/download/tatabanya/",
@@ -868,6 +862,17 @@ def _group_end(prev: dict[str, tuple[int, str]], group: str) -> str:
     return "" if not ends or "" in ends else max(ends)
 
 
+# Feeds that left CITY_FEEDS for good, each for the feed that gives the
+# same network: feed id -> that feed's operator id. guard_feeds does not
+# refuse a rebuild without them. Székesfehérvár's menetbrand zip
+# ("szekesfehervar", September 2026) is the Volánbusz town network the
+# Volán feed gives as volan-szekesfehervar (November 2026), the same lines
+# and trips, and only the latter has the trip ids the realtime feeds know.
+# The cards saved with it move over by src/retired-cities.js
+# (scripts/retired_city_map.py).
+RETIRED_FEEDS = {"szekesfehervar": "volan-szekesfehervar"}
+
+
 def allowed_missing() -> set[str]:
     load_env_files()
     raw = os.environ.get(ALLOW_MISSING_ENV) or ""
@@ -1076,6 +1081,10 @@ def guard_feeds(
     problems = []
     for group in sorted(before):
         if group in allow or "all" in allow:
+            continue
+        if group in RETIRED_FEEDS and not after_all.get(group):
+            print(f"warn {group}: retired, {RETIRED_FEEDS[group]} gives its network;"
+                  f" its {before[group]} running trips leave the index", file=sys.stderr)
             continue
         why = _group_problem(group, previous, after_running, after_all, expired, warn=True)
         if why:
