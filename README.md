@@ -143,7 +143,7 @@ Timetables and live data: [BKK Open Data](https://opendata.bkk.hu/),
 [KTI](https://gtfs.kti.hu/), [MÁV-csoport](https://www.mavcsoport.hu/gtfs-igenybejelento)
 (CC0), [Transitous](https://transitous.org/), and the city operators MVK,
 Tüke Busz, SZKT, Blaguss, V-Busz, Paksbusz, PTKE, Kecskeméti Kisvasút, HOMM,
-Bahart, HVSZ, KKZRT, Halasbusz, Székesfehérvár helyi, T-Busz, THURY-BUSZ,
+Bahart, HVSZ, KKZRT, Halasbusz, T-Busz, THURY-BUSZ,
 DKV (Debrecen), KeKo (Kecskemét) and Orosháza Önkormányzat (its
 gpspositions.net export). The timetables of the Budavári Sikló, the
 Zugligeti Libegő, the Dunakeszi–Horány and Pásztor (Szentendre–Szigetmonostor)

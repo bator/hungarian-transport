@@ -39,6 +39,10 @@ const CITY_THEMES = {
   miskolc: 'mvk', szeged: 'szkt', pecs: 'tuke', veszprem: 'vbusz',
   szombathely: 'blaguss', bahart: 'bahart', 'kecskemet-kisvasut': 'kisvasut',
   varpalota: 'thury', budaors: 'homm', paks: 'paksbusz',
+  /* Székesfehérvár's buses are not the Volán coach yellow: the town keeps
+     the look its cards had with the menetbrand feed it replaced
+     (retired-cities.js), Home Assistant's own. */
+  'volan-szekesfehervar': '',
 };
 
 export function operatorTheme(mode, city) {
@@ -47,8 +51,8 @@ export function operatorTheme(mode, city) {
   if (mode === 'volan') return 'volan';
   if (mode !== 'helyi') return '';
   const key = String(city || '');
-  if (key.startsWith('volan-')) return 'volan';
-  return Object.prototype.hasOwnProperty.call(CITY_THEMES, key) ? CITY_THEMES[key] : '';
+  if (Object.prototype.hasOwnProperty.call(CITY_THEMES, key)) return CITY_THEMES[key];
+  return key.startsWith('volan-') ? 'volan' : '';
 }
 
 /* YAML may spell an id in any case (`BKK`); only the table's own keys

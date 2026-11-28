@@ -11,12 +11,17 @@ import './src/lib/geo.js';
 import './src/lib/gtfs.js';
 import './src/lib/services.js';
 import './src/lib/vehicles.js';
+import './src/lib/realtime.js';
 import './src/lib/rows.js';
 import './src/lib/elvira-rows.js';
 import './src/lib/context.js';
 import './src/lib/departures.js';
 import './src/lib/dashboard-key.js';
 import { elviraSource } from './src/lib/board.js';
+import { migrateRetiredCity, normalizeCardConfig } from './src/config.js';
+import { RETIRED_CITIES } from './src/retired-cities.js';
+import { operatorTheme } from './src/themes.js';
+import { gzipSync } from 'node:zlib';
 
 /* Row helpers compare departures with the real clock (still due?), so the
    fake one stands still at the moment the file started. */
@@ -1403,4 +1408,115 @@ test('an apiKey of only spaces is no key and does not hide a sibling card’s re
   };
   assert.deepEqual(BkkLib.findApiKey(dash), ['real-key']);
   assert.deepEqual(BkkLib.findApiKey({ type: 'hungarian-transport-card', apiKey: '\t\n' }), []);
+});
+
+/* Székesfehérvár's menetbrand feed (`szekesfehervar`) left the city index:
+   the Volán feed gives the same network as volan-szekesfehervar, with the
+   trip ids the realtime feeds know. A card saved with the old feed moves
+   over (config.js migrateRetiredCity, retired-cities.js). */
+const OLD_SZFV_RAIL = {
+  type: 'custom:hungarian-transport-card', name: 'Vasútállomás → Autóbusz-állomás',
+  stopId: 'szekesfehervar:B283', stopName: 'Vasútállomás', routeIds: ['13G', '34', '44'],
+  destKey: 'autóbusz-állomás', destName: 'Autóbusz-állomás', helyi: true, city: 'szekesfehervar',
+  stopLat: 47.1837, stopLon: 18.4233, destStopId: 'szekesfehervar:B268d', destLat: 47.18824, destLon: 18.4101,
+};
+const OLD_SZFV_BUS = {
+  type: 'custom:hungarian-transport-card', name: 'Autóbusz-állomás → Vasútállomás',
+  stopId: 'szekesfehervar:B268a', stopName: 'Autóbusz-állomás', routeIds: ['44'],
+  destKey: 'vasútállomás', destName: 'Vasútállomás', helyi: true, city: 'szekesfehervar',
+  stopLat: 47.18883, stopLon: 18.40885, destStopId: 'szekesfehervar:B284', destLat: 47.1838, destLon: 18.42453,
+};
+
+test('a card saved with the retired Székesfehérvár feed takes volan-szekesfehervar and its stops', () => {
+  const rail = normalizeCardConfig(OLD_SZFV_RAIL);
+  assert.equal(rail.city, 'volan-szekesfehervar');
+  assert.equal(rail.stopId, 'volan-szekesfehervar:hkir_666084_11');
+  assert.equal(rail.stopName, 'Székesfehérvár, vasútállomás');
+  assert.deepEqual([rail.stopLat, rail.stopLon], [47.18366, 18.42317]);
+  assert.equal(rail.destStopId, 'volan-szekesfehervar:hkir_665908');
+  assert.equal(rail.destName, 'Székesfehérvár, autóbusz-állomás');
+  assert.equal(rail.destKey, 'székesfehérvár, autóbusz-állomás');
+  assert.deepEqual([rail.destLat, rail.destLon], [47.18854, 18.40948]);
+  /* The title and everything else the user set stay. */
+  assert.equal(rail.name, OLD_SZFV_RAIL.name);
+  assert.deepEqual(rail.routeIds, OLD_SZFV_RAIL.routeIds);
+  const bus = normalizeCardConfig(OLD_SZFV_BUS);
+  assert.equal(bus.stopId, 'volan-szekesfehervar:hkir_665908');
+  assert.equal(bus.destStopId, 'volan-szekesfehervar:hkir_666084');
+  assert.equal(bus.destKey, 'székesfehérvár, vasútállomás');
+  /* The saved config itself is not touched. */
+  assert.equal(OLD_SZFV_RAIL.city, 'szekesfehervar');
+});
+
+test('a retired-feed destination saved without its stop id is found by its name', () => {
+  const cfg = normalizeCardConfig(Object.assign({}, OLD_SZFV_RAIL, { destStopId: undefined }));
+  assert.equal(cfg.destStopId, '');
+  assert.equal(cfg.destName, 'Székesfehérvár, autóbusz-állomás');
+  assert.equal(cfg.destKey, 'székesfehérvár, autóbusz-állomás');
+  const slash = normalizeCardConfig({ city: 'szekesfehervar', destKey: 'kassai utca / nagyszombati utca' });
+  assert.equal(slash.destName, 'Székesfehérvár, Kassai utca/Nagyszombati utca');
+});
+
+test('a stop the retired-feed table does not know keeps its id; other cities are untouched', () => {
+  const odd = normalizeCardConfig({ city: 'szekesfehervar', stopId: 'szekesfehervar:NOPE', stopName: 'Sehol' });
+  assert.equal(odd.city, 'volan-szekesfehervar');
+  assert.equal(odd.stopId, 'szekesfehervar:NOPE');
+  assert.equal(odd.stopName, 'Sehol');
+  const miskolc = { city: 'miskolc', stopId: 'miskolc:1', stopName: 'Aba utca', destKey: 'x' };
+  assert.deepEqual(normalizeCardConfig(miskolc), Object.assign({ routeIds: [] }, miskolc));
+  assert.deepEqual(migrateRetiredCity({ city: 'constructor' }), { city: 'constructor' });
+  /* Every stop the table names is one of the new feed's. */
+  Object.values(RETIRED_CITIES).forEach((ret) => {
+    assert.ok(ret.to.length > 100);
+    Object.values(ret.from).forEach((n) => assert.ok(Array.isArray(ret.to[n]) && /^hkir_/.test(ret.to[n][0])));
+  });
+});
+
+test('Székesfehérvár keeps its look after the move: blue lines, no Volán yellow theme', () => {
+  assert.equal(operatorTheme('helyi', 'volan-szekesfehervar'), '');
+  assert.equal(operatorTheme('helyi', 'szekesfehervar'), '');
+  /* The other Volánbusz town networks keep the Volán theme. */
+  assert.equal(operatorTheme('helyi', 'volan-gyor'), 'volan');
+  assert.equal(operatorTheme('helyi', 'miskolc'), 'mvk');
+});
+
+test('a migrated Székesfehérvár card lists the Volán town trips, asked by their trip id', async () => {
+  const day = BkkLib.volanDay(0);
+  /* A departure 20 minutes from now, today; not across midnight. */
+  const dep = Math.min(day.mins + 20, 1400);
+  const idx = {
+    v: 29, feed: 'test', sh: {},
+    o: [['volan-szekesfehervar', 'Székesfehérvár']],
+    s: [
+      ['volan-szekesfehervar:hkir_666084_11', 'Székesfehérvár, vasútállomás', '666084', 0],
+      ['volan-szekesfehervar:hkir_666225', 'Székesfehérvár, Halász utca', '666225', 0],
+      ['volan-szekesfehervar:hkir_665908', 'Székesfehérvár, autóbusz-állomás', '665908', 0],
+    ],
+    g: [4718366, 1842317, 4718700, 1841500, 4718854, 1840948],
+    c: [['1111111', '20200101', '20991231']], a: [[]], r: [[]],
+    t: [[0, '44', [0, 1, 2], [dep, dep + 3, dep + 6], 3, -1, 'hkir_44_1-3']],
+  };
+  const body = gzipSync(Buffer.from(JSON.stringify(idx)));
+  const keepFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(body, { status: 200 });
+  BkkLib._idx.clear();
+  try {
+    const cfg = normalizeCardConfig(OLD_SZFV_RAIL);
+    const ix = BkkLib.indexResolver({ cityIndex: 'https://own.invalid/szfv-city.json.gz' });
+    const rows = await BkkLib.cityDepartures(ix, cfg.stopId, { key: cfg.destKey, name: cfg.destName },
+      cfg.stopName, cfg.city, 120);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].label, '44');
+    assert.equal(rows[0].color, '#0F6FC6');
+    assert.equal(rows[0].text, '#ffffff');
+    assert.equal(rows[0].rt.feed, 'volan-szekesfehervar');
+    assert.equal(rows[0].rt.trip, 'hkir_44_1-3');
+    /* The old card, as saved, finds nothing in the Volán town feed. */
+    const old = await BkkLib.cityDepartures(ix, OLD_SZFV_RAIL.stopId,
+      { key: OLD_SZFV_RAIL.destKey, name: OLD_SZFV_RAIL.destName }, OLD_SZFV_RAIL.stopName, 'volan-szekesfehervar', 120);
+    assert.equal(old.length, 0);
+  } finally {
+    globalThis.fetch = keepFetch;
+    BkkLib._idx.clear();
+  }
 });

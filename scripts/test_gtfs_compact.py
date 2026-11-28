@@ -87,7 +87,6 @@ def main() -> int:
         "hodmezovasarhely",
         "kaposvar",
         "kiskunhalas",
-        "szekesfehervar",
         "tatabanya",
         "varpalota",
         "debrecen",
