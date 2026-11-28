@@ -1761,6 +1761,17 @@ def calendar_end(part: dict) -> str:
     return end
 
 
+def calendar_start(part: dict) -> str:
+    """First service day (YYYYMMDD) a part can run on: the earliest
+    calendar.txt start_date of a service with any weekday set, or the
+    earliest added calendar_dates.txt date. "" when the feed carries no
+    calendar at all."""
+    days = [str(row[1]) for row in part.get("c") or []
+            if len(row) >= 3 and set(str(row[0])) != {"0"} and _YMD.fullmatch(str(row[1]))]
+    days += [str(d) for dates in part.get("a") or [] for d in dates or [] if _YMD.fullmatch(str(d))]
+    return min(days) if days else ""
+
+
 def stale_parts(parts: list[dict], today: str | None = None) -> list[tuple[str, str]]:
     """(op_id, last service day) of the parts whose calendar ended before today."""
     today = today or date.today().strftime("%Y%m%d")

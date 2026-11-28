@@ -1951,6 +1951,127 @@ with tempfile.TemporaryDirectory() as tmp:
           routes == ["318"] and erd >= 0 and erd in built["t"][0][2], repr((routes, names)))
     check("the town line's stops are not", "Balatonfűzfő, Fövenyfürdő" not in names, repr(names))
 
+# A publisher that puts up its next timetable before it starts: V-Busz's
+# December zip (1-30 December), published 26 November, went into the 27
+# November release alone, and Veszprém had no departures until 1 December.
+# The days before the new zip begins keep the previous index's trips.
+
+
+def runs_on(idx: dict, op: str, day: str) -> int:
+    """Trips of operator op in an index that run on day (YYYYMMDD)."""
+    wd = date(int(day[:4]), int(day[4:6]), int(day[6:])).weekday()
+    n = 0
+    for t in idx["t"]:
+        if idx["o"][idx["s"][t[2][0]][3]][0] != op:
+            continue
+        c = idx["c"][t[0]]
+        added = idx["a"][t[0]] if t[0] < len(idx["a"]) else []
+        removed = idx["r"][t[0]] if t[0] < len(idx["r"]) else []
+        n += (c[1] <= day <= c[2] and c[0][wd] == "1" and day not in removed) or day in added
+    return n
+
+
+def dated_feed(first: str, last: str, trips: int = 60, extra: str = "") -> dict[str, str]:
+    """city_feed running every day first..last (YYYYMMDD), with shapes;
+    extra: calendar_dates.txt rows of S1 added on those days."""
+    files = city_feed("5", trips=trips)
+    files["calendar.txt"] = ("service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\n"
+                             f"S1,1,1,1,1,1,1,1,{first},{last}\n")
+    files["trips.txt"] = "route_id,service_id,trip_id,shape_id\n" + "".join(f"R1,S1,T{i},SH1\n" for i in range(trips))
+    files["shapes.txt"] = ("shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\n"
+                           "SH1,47.09,17.9,1\nSH1,47.1,17.91,2\n")
+    if extra:
+        files["calendar_dates.txt"] = "service_id,date,exception_type\n" + "".join(
+            f"S1,{d},1\n" for d in extra.split(","))
+    return files
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    base = Path(tmp) / "work"
+    prev_dir = Path(tmp) / "baseline"
+    base.mkdir()
+    prev_dir.mkdir()
+    bci.CITY_FEEDS = [{"id": f, "name": f.upper(), "url": f"https://{f}.example/{f}.zip", "file": f"{f}.zip"}
+                      for f in ("v", "w")]
+    out = base / "city-index.json.gz"
+    gtfs_zip(base / "w.zip", city_feed("7", trips=60))
+
+    def build(today: str = "20261127", **kw) -> tuple[dict, dict]:
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()) as buf:
+            info = bci.build_city_index(base, out, today=today, **kw)
+        info["stdout"] = buf.getvalue()
+        return info, json.loads(gzip.decompress(out.read_bytes()))
+
+    try:
+        # November's zip (1 November - 13 December), then December's
+        # (1-30 December) a few days before it starts.
+        gtfs_zip(base / "v.zip", dated_feed("20261101", "20261213"))
+        _info, before = build()
+        shutil.copy(out, prev_dir / out.name)
+        for d in base.glob("city-shapes-*"):
+            shutil.copytree(d, prev_dir / d.name)
+        previous_bytes = out.read_bytes()
+        gtfs_zip(base / "v.zip", dated_feed("20261201", "20261230", trips=90))
+        info, idx = build(bridge=prev_dir / out.name)
+        check("a new zip that starts after today keeps the previous index's trips until it begins",
+              info.get("bridged") == {"v": {"from": "20261201", "until": "20261130", "trips": 60}}
+              and [runs_on(idx, "v", d) for d in ("20261127", "20261130", "20261201", "20261213", "20261230")]
+              == [60, 60, 90, 90, 90]
+              and "::warning title=City timetable bridged::v: its new timetable starts 2026-12-01" in info["stdout"],
+              repr((info.get("bridged"), [runs_on(idx, "v", d) for d in ("20261127", "20261130", "20261201")])))
+        check("the bridged feed has its stops once and the old trips their shapes",
+              len([r for r in idx["s"] if r[0].startswith("v:")]) == 2
+              and all(t[5] >= 0 for t in idx["t"] if idx["o"][idx["s"][t[2][0]][3]][0] == "v"),
+              repr((idx["s"], idx["feed"])))
+        check("the other feed is as it was", runs_on(idx, "w", "20261128") == runs_on(before, "w", "20261128") == 60)
+        bridged_bytes = out.read_bytes()
+        # The next rebuild has the bridged index as its previous one: the
+        # same November days again, byte for byte.
+        shutil.copy(out, prev_dir / out.name)
+        for d in base.glob("city-shapes-*"):
+            if not (prev_dir / d.name).exists():
+                shutil.copytree(d, prev_dir / d.name)
+        info, _idx = build(bridge=prev_dir / out.name)
+        check("a rebuild on the bridged index bridges the same days, byte for byte",
+              out.read_bytes() == bridged_bytes and info["bridged"]["v"]["trips"] == 60, repr(info.get("bridged")))
+        # Without a bridge given, the index in place (its shapes next to it).
+        out.write_bytes(previous_bytes)
+        info, idx = build()
+        check("without BRIDGE_ENV the index in place bridges", runs_on(idx, "v", "20261129") == 60
+              and set(info.get("bridged") or {}) == {"v"}, repr(info.get("bridged")))
+        # Once December has come, nothing is bridged.
+        out.write_bytes(previous_bytes)
+        info, idx = build(today="20261201", bridge=prev_dir / out.name)
+        check("on the new zip's first day nothing is bridged", info["bridged"] == {}
+              and runs_on(idx, "v", "20261130") == 0, repr(info["bridged"]))
+        # A seasonal feed between seasons (Kecskemét's narrow gauge from
+        # April): the previous index starts in the future as well.
+        gtfs_zip(base / "v.zip", dated_feed("20270410", "20271031", extra="20270411"))
+        out.unlink()
+        build()
+        shutil.copy(out, prev_dir / out.name)
+        for d in base.glob("city-shapes-*"):
+            if not (prev_dir / d.name).exists():
+                shutil.copytree(d, prev_dir / d.name)
+        info, idx = build(bridge=prev_dir / out.name)
+        check("a seasonal feed whose previous index starts in the future too is left as it is",
+              info["bridged"] == {} and runs_on(idx, "v", "20270411") == 60, repr(info["bridged"]))
+        # A previous index whose shapes folder is missing: a ::warning::,
+        # and the build goes on without the bridge.
+        gtfs_zip(base / "v.zip", dated_feed("20261101", "20261213"))
+        out.unlink()
+        build()
+        lone = Path(tmp) / "lone"
+        lone.mkdir()
+        shutil.copy(out, lone / out.name)
+        gtfs_zip(base / "v.zip", dated_feed("20261201", "20261230", trips=90))
+        info, idx = build(bridge=lone / out.name)
+        check("a previous index without its shapes folder: warned, not bridged",
+              info["bridged"] == {} and "::warning title=City timetable not bridged::v:" in info["stdout"],
+              repr((info["bridged"], info["stdout"])))
+    finally:
+        bci.CITY_FEEDS = real_feeds
+
 # build_city_index and pages_timetables import served_index from the
 # integration's package folder themselves: in a process that imported
 # gtfs_compact before and put sys.path back since (pytest's
